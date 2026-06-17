@@ -835,6 +835,19 @@ void AudioEngine::rebuildThreadLoop()
             // 5. Fade In
             newDSP->ramps().fadeInSamplesLeft = DSPCore::FADE_IN_SAMPLES;
 
+            // Log convolver pipeline status before commit
+            {
+                const auto& buildInput = task.runtimeBuildSnapshot.buildInput;
+                juce::Logger::writeToLog("[CONV_STATUS] rebuildThreadLoop: generation="
+                    + juce::String(task.generation)
+                    + " irLoaded=" + juce::String(static_cast<int>(newDSP->convolverRt().isIRLoaded()))
+                    + " irLen=" + juce::String(newDSP->convolverRt().getIRLength())
+                    + " convBypass=" + juce::String(static_cast<int>(buildInput.convBypassed))
+                    + " sr=" + juce::String(buildInput.sampleRate, 1)
+                    + " osFactor=" + juce::String(buildInput.oversamplingFactor)
+                    + " processingRate=" + juce::String(newDSP->sampleRate * static_cast<double>(newDSP->oversamplingFactor), 1));
+            }
+
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;

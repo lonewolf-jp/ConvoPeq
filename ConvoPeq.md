@@ -59,6 +59,8 @@
         ├── MainWindow.h
         ├── MixedPhaseOptimizationComponent.cpp
         ├── MixedPhaseOptimizationComponent.h
+        ├── MixedPhasePersistentCache.cpp
+        ├── MixedPhasePersistentCache.h
         ├── MklFftEvaluator.h
         ├── NoiseShaperLearner.cpp
         ├── NoiseShaperLearner.h
@@ -535,6 +537,25 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     endif()
 
+    # icx: テストターゲットに /EHsc を追加（例外処理を有効化）
+    # icx(clang-cl) の Release デフォルトでは例外が無効化されるため、
+    # AlignedAllocation.h の throw/try-catch 使用箇所がコンパイルエラーになる
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
+        target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+        target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+        target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
+        target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
+        target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
+        target_compile_options(ShadowCompareContractTests PRIVATE /EHsc)
+        target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /EHsc)
+        target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /EHsc)
+        target_compile_options(PartialPublicationRejectTests PRIVATE /EHsc)
+        target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
+        target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
+    endif()
+
     # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
     # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
     #  リンク指示を .obj に埋め込む。ConvoPeq 本体は CMakeLists.txt 上部で既に設定済み）
@@ -727,6 +748,7 @@ target_sources(ConvoPeq PRIVATE
     src/MixedPhaseOptimizationComponent.cpp
     src/IRConverter.cpp
     src/ProgressiveUpgradeThread.cpp
+    src/MixedPhasePersistentCache.cpp
     src/CacheManager.cpp
     src/ConvolverSettingsComponent.cpp
     src/IRDSP.cpp
@@ -1658,12 +1680,27 @@ inline ScopedAlignedPtr<double> makeAlignedCopy(const double* src, int numSample
 #include <cstring>
 #include <thread>
 #include <chrono>
+#include <random>
 
 namespace convo {
 
 namespace {
 
-constexpr uint64_t kDefaultDeterministicCmaesSeed = 0x434f4e564f4251ull;
+// デフォルトシードは実行時ランダム（std::random_device が利用不可の場合は時刻ベース）
+inline uint64_t generateRandomSeed() noexcept
+{
+    try {
+        std::random_device rd;
+        // random_device のエントロピーと時刻を混合
+        const auto now = static_cast<uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        return static_cast<uint64_t>(rd()) ^ (now << 11) ^ (now >> 17);
+    } catch (...) {
+        // random_device が例外を投げる環境では時刻のみ
+        return static_cast<uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    }
+}
 
 std::vector<double> buildFrequencyCandidates(double sampleRate)
 {
@@ -1903,7 +1940,7 @@ DesignResult AllpassDesigner::designWithCMAES(
     const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
     CmaEsOptimizerDynamic optimizer(D);
     optimizer.setParams(config.cmaesParams);
-    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : kDefaultDeterministicCmaesSeed);
+    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : generateRandomSeed());
     if (config.cmaesInitialSigma > 0.0) {
         CmaEsOptimizerDynamic::Params p = config.cmaesParams;
         p.sigmaMin = std::min(p.sigmaMin, config.cmaesInitialSigma);
@@ -6490,6 +6527,27 @@ private:
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
 public: // Added for AudioEngine access
+    // Thread-safe IR state transfer from source convolver (copies the AudioBuffer)
+    // Must be called before rebuildAllIRsSynchronous() on this instance.
+    void transferIRStateFrom(const ConvolverProcessor& source) noexcept
+    {
+        const IRState* srcState = source.acquireIRState();
+        if (srcState && srcState->ir && srcState->ir->getNumSamples() > 0 && srcState->sampleRate > 0.0)
+        {
+            const int channels = srcState->ir->getNumChannels();
+            const int length   = srcState->ir->getNumSamples();
+            updateIRState(*srcState->ir, srcState->sampleRate);
+            juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: IR transferred ch="
+                + juce::String(channels) + " len=" + juce::String(length)
+                + " sr=" + juce::String(srcState->sampleRate, 1));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: no IR data to transfer");
+        }
+        source.releaseIRState(srcState);
+    }
+
     [[nodiscard]] double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
@@ -13527,19 +13585,23 @@ inline void accumulateSplitComplex(const double* srcAReal,
     const int vEnd = (complexSize / 4) * 4;
     for (; k < vEnd; k += 4)
     {
-        __m256d ar = _mm256_load_pd(srcAReal + k);
-        __m256d ai = _mm256_load_pd(srcAImag + k);
-        __m256d br = _mm256_load_pd(srcBReal + k);
-        __m256d bi = _mm256_load_pd(srcBImag + k);
+        // ★ icx アライメント対策: complexSize が奇数の場合、SoA バッファの行オフセットが
+        //    32バイト境界に乗らないケースがある。全ポインタを unaligned load で安全に読む。
+        //    dstReal/dstImag (accumReal/accumImag) は 64バイトアラインかつ k が 4 の倍数の
+        //    ため常に 32バイトアラインだが、store も unaligned に統一して安全側に倒す。
+        __m256d ar = _mm256_loadu_pd(srcAReal + k);
+        __m256d ai = _mm256_loadu_pd(srcAImag + k);
+        __m256d br = _mm256_loadu_pd(srcBReal + k);
+        __m256d bi = _mm256_loadu_pd(srcBImag + k);
 
-        __m256d dr = _mm256_load_pd(dstReal + k);
-        __m256d di = _mm256_load_pd(dstImag + k);
+        __m256d dr = _mm256_loadu_pd(dstReal + k);
+        __m256d di = _mm256_loadu_pd(dstImag + k);
 
         dr = _mm256_add_pd(dr, _mm256_sub_pd(_mm256_mul_pd(ar, br), _mm256_mul_pd(ai, bi)));
         di = _mm256_add_pd(di, _mm256_add_pd(_mm256_mul_pd(ar, bi), _mm256_mul_pd(ai, br)));
 
-        _mm256_store_pd(dstReal + k, dr);
-        _mm256_store_pd(dstImag + k, di);
+        _mm256_storeu_pd(dstReal + k, dr);
+        _mm256_storeu_pd(dstImag + k, di);
     }
 
     for (; k < complexSize; ++k)
@@ -17318,6 +17380,462 @@ public:
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixedPhaseOptimizationWindow)
+};
+
+} // namespace convo
+
+```
+
+### 📄 `src\MixedPhasePersistentCache.cpp`
+
+```
+#include "MixedPhasePersistentCache.h"
+
+#include <JuceHeader.h>
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
+namespace convo {
+
+// ═══════════════════════════════════════════════════════════════
+//  内部ヘルパー
+// ═══════════════════════════════════════════════════════════════
+
+static uint64_t hashCombine(uint64_t seed, uint64_t value)
+{
+    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+}
+
+uint64_t MixedPhasePersistentCache::computeKeyHash(uint64_t fileHash,
+                                                    double sampleRate,
+                                                    int phaseMode,
+                                                    float freqStartHz, float freqEndHz, float tau,
+                                                    int targetLength)
+{
+    uint64_t h = fileHash;
+    uint64_t srBits = 0;
+    std::memcpy(&srBits, &sampleRate, sizeof(double));
+    h = hashCombine(h, srBits);
+    h = hashCombine(h, static_cast<uint64_t>(phaseMode));
+
+    uint32_t f1Bits = 0;
+    uint32_t f2Bits = 0;
+    uint32_t tauBits = 0;
+    std::memcpy(&f1Bits, &freqStartHz, sizeof(float));
+    std::memcpy(&f2Bits, &freqEndHz, sizeof(float));
+    std::memcpy(&tauBits, &tau, sizeof(float));
+    h = hashCombine(h, static_cast<uint64_t>(f1Bits));
+    h = hashCombine(h, static_cast<uint64_t>(f2Bits));
+    h = hashCombine(h, static_cast<uint64_t>(tauBits));
+    h = hashCombine(h, static_cast<uint64_t>(targetLength));
+    return h;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  パス解決
+// ═══════════════════════════════════════════════════════════════
+
+juce::File MixedPhasePersistentCache::getCacheDirectory()
+{
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                   .getChildFile("ConvoPeq")
+                   .getChildFile("MixedPhaseCache");
+    if (!dir.exists())
+        dir.createDirectory();
+    return dir;
+}
+
+juce::File MixedPhasePersistentCache::getCacheFile(uint64_t fileHash,
+                                                    double sampleRate,
+                                                    int phaseMode,
+                                                    float freqStartHz, float freqEndHz, float tau,
+                                                    int targetLength)
+{
+    const auto hash = computeKeyHash(fileHash, sampleRate, phaseMode,
+                                     freqStartHz, freqEndHz, tau, targetLength);
+    const auto filename = juce::String::toHexString(static_cast<int64_t>(hash)) + ".mph";
+    return getCacheDirectory().getChildFile(filename);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  読み込み
+// ═══════════════════════════════════════════════════════════════
+
+bool MixedPhasePersistentCache::load(uint64_t fileHash,
+                                     double sampleRate,
+                                     int phaseMode,
+                                     float freqStartHz, float freqEndHz, float tau,
+                                     int targetLength,
+                                     juce::AudioBuffer<double>& outIr,
+                                     std::vector<double>& outRho,
+                                     std::vector<double>& outTheta)
+{
+    const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
+                                   freqStartHz, freqEndHz, tau, targetLength);
+    if (!file.existsAsFile())
+        return false;
+
+    juce::FileInputStream stream(file);
+    if (!stream.openedOk())
+        return false;
+
+    // ヘッダ読み込み
+    DiskHeader header;
+    if (stream.read(&header, sizeof(DiskHeader)) != static_cast<int64>(sizeof(DiskHeader)))
+        return false;
+
+    // ヘッダ検証
+    if (header.magic != kMagic || header.version != kVersion)
+        return false;
+    if (header.fileHash != fileHash
+        || std::abs(header.sampleRate - sampleRate) > 1.0e-6
+        || header.phaseMode != static_cast<int32_t>(phaseMode)
+        || std::abs(header.freqStartHz - freqStartHz) > 1.0e-6f
+        || std::abs(header.freqEndHz - freqEndHz) > 1.0e-6f
+        || std::abs(header.tau - tau) > 1.0e-6f
+        || header.targetLength != static_cast<int32_t>(targetLength))
+        return false;
+
+    // 波形データ読み込み
+    const int numChannels = static_cast<int>(header.numChannels);
+    const int numSamples = static_cast<int>(header.numSamples);
+    if (numChannels <= 0 || numSamples <= 0)
+        return false;
+
+    outIr.setSize(numChannels, numSamples);
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        double* data = outIr.getWritePointer(ch);
+        const auto bytesToRead = static_cast<int64>(static_cast<size_t>(numSamples) * sizeof(double));
+        const auto bytesRead = stream.read(data, static_cast<size_t>(numSamples) * sizeof(double));
+        if (bytesRead != bytesToRead)
+            return false;
+    }
+
+    // Allpass セクション読み込み
+    const int numSec = static_cast<int>(header.numAllpassSections);
+    outRho.resize(static_cast<size_t>(numSec));
+    outTheta.resize(static_cast<size_t>(numSec));
+
+    if (numSec > 0)
+    {
+        const auto secBytes = static_cast<int64>(static_cast<size_t>(numSec) * sizeof(double));
+        if (stream.read(outRho.data(), static_cast<size_t>(numSec) * sizeof(double)) != secBytes)
+            return false;
+        if (stream.read(outTheta.data(), static_cast<size_t>(numSec) * sizeof(double)) != secBytes)
+            return false;
+    }
+
+    // LRU用にタイムスタンプ更新（touch相当）
+    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, tau, targetLength);
+
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  保存
+// ═══════════════════════════════════════════════════════════════
+
+bool MixedPhasePersistentCache::save(uint64_t fileHash,
+                                     double sampleRate,
+                                     int phaseMode,
+                                     float freqStartHz, float freqEndHz, float tau,
+                                     int targetLength,
+                                     const juce::AudioBuffer<double>& ir,
+                                     const std::vector<double>& rho,
+                                     const std::vector<double>& theta)
+{
+    const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
+                                   freqStartHz, freqEndHz, tau, targetLength);
+    const auto dir = file.getParentDirectory();
+    if (!dir.exists())
+        dir.createDirectory();
+
+    juce::TemporaryFile tempFile(file);
+    {
+        juce::FileOutputStream stream(tempFile.getFile());
+        if (!stream.openedOk())
+            return false;
+
+        const int numChannels = ir.getNumChannels();
+        const int numSamples = ir.getNumSamples();
+        const int numSec = static_cast<int>(rho.size());
+
+        // ヘッダ書き込み
+        DiskHeader header;
+        std::memset(&header, 0, sizeof(header));
+        header.magic = kMagic;
+        header.version = kVersion;
+        header.fileHash = fileHash;
+        header.sampleRate = sampleRate;
+        header.phaseMode = static_cast<int32_t>(phaseMode);
+        header.freqStartHz = freqStartHz;
+        header.freqEndHz = freqEndHz;
+        header.tau = tau;
+        header.targetLength = static_cast<int32_t>(targetLength);
+        header.lastUsedTime = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
+        header.numChannels = static_cast<int32_t>(numChannels);
+        header.numSamples = static_cast<int32_t>(numSamples);
+        header.numAllpassSections = static_cast<int32_t>(numSec);
+
+        if (stream.write(&header, sizeof(DiskHeader)) != true)
+            return false;
+
+        // 波形データ書き込み
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const double* data = ir.getReadPointer(ch);
+            if (stream.write(data, static_cast<size_t>(numSamples) * sizeof(double)) != true)
+                return false;
+        }
+
+        // Allpass セクション書き込み
+        if (numSec > 0)
+        {
+            if (stream.write(rho.data(), static_cast<size_t>(numSec) * sizeof(double)) != true)
+                return false;
+            if (stream.write(theta.data(), static_cast<size_t>(numSec) * sizeof(double)) != true)
+                return false;
+        }
+
+        // ファイルサイズをヘッダに書き戻し
+        header.totalFileSize = stream.getPosition();
+        stream.setPosition(0);
+        if (stream.write(&header, sizeof(DiskHeader)) != true)
+            return false;
+
+        stream.flush();
+    }
+
+    return tempFile.overwriteTargetFileWithTemporary();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  LRU 管理
+// ═══════════════════════════════════════════════════════════════
+
+void MixedPhasePersistentCache::touch(uint64_t fileHash,
+                                      double sampleRate,
+                                      int phaseMode,
+                                      float freqStartHz, float freqEndHz, float tau,
+                                      int targetLength)
+{
+    const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
+                                   freqStartHz, freqEndHz, tau, targetLength);
+    if (!file.existsAsFile())
+        return;
+
+    // read-modify-write: ファイル全体を読み込み、ヘッダのタイムスタンプのみ更新して書き戻す
+    // (FileOutputStream で開くとファイルが切り詰められるため、read-modify-write で行う)
+    std::vector<uint8_t> buffer;
+    {
+        juce::FileInputStream inStream(file);
+        if (!inStream.openedOk())
+            return;
+
+        const auto fileSize = file.getSize();
+        if (fileSize <= 0)
+            return;
+
+        buffer.resize(static_cast<size_t>(fileSize));
+        if (inStream.read(buffer.data(), static_cast<int>(buffer.size())) != static_cast<int64>(buffer.size()))
+            return;
+    } // inStream はここで破棄され、ファイルも閉じられる
+
+    // DiskHeader 内 lastUsedTime のバイトオフセット: 52
+    static constexpr int kLastUsedTimeOffset = 52;
+    if (static_cast<size_t>(kLastUsedTimeOffset) + sizeof(uint64_t) > buffer.size())
+        return;
+
+    const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
+    std::memcpy(&buffer[static_cast<size_t>(kLastUsedTimeOffset)], &now, sizeof(now));
+
+    juce::FileOutputStream outStream(file);
+    if (!outStream.openedOk())
+        return;
+    outStream.write(buffer.data(), buffer.size());
+}
+
+void MixedPhasePersistentCache::evictLRU(size_t maxCount)
+{
+    if (maxCount == 0)
+    {
+        clear();
+        return;
+    }
+
+    auto dir = getCacheDirectory();
+    juce::Array<juce::File> files;
+    dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
+
+    if (static_cast<size_t>(files.size()) <= maxCount)
+        return;
+
+    // 各ファイルのヘッダから lastUsedTime を読み、古い順にソート
+    // (OSのファイルアクセス時刻は無効化されている可能性があるためヘッダの値を使用する)
+    std::vector<std::pair<uint64_t, juce::File>> timedFiles;
+    timedFiles.reserve(static_cast<size_t>(files.size()));
+
+    for (const auto& f : files)
+    {
+        juce::FileInputStream stream(f);
+        if (!stream.openedOk())
+            continue;
+
+        DiskHeader header;
+        if (stream.read(&header, sizeof(DiskHeader)) != static_cast<int64>(sizeof(DiskHeader)))
+            continue;
+        if (header.magic != kMagic)
+            continue;
+
+        timedFiles.emplace_back(header.lastUsedTime, f);
+    }
+
+    std::sort(timedFiles.begin(), timedFiles.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    const int toRemove = static_cast<int>(timedFiles.size()) - static_cast<int>(maxCount);
+    for (int i = 0; i < toRemove; ++i)
+        timedFiles[static_cast<size_t>(i)].second.deleteFile();
+}
+
+void MixedPhasePersistentCache::remove(uint64_t fileHash,
+                                       double sampleRate,
+                                       int phaseMode,
+                                       float freqStartHz, float freqEndHz, float tau,
+                                       int targetLength)
+{
+    const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
+                                   freqStartHz, freqEndHz, tau, targetLength);
+    if (file.existsAsFile())
+        file.deleteFile();
+}
+
+void MixedPhasePersistentCache::clear()
+{
+    auto dir = getCacheDirectory();
+    if (!dir.exists())
+        return;
+
+    juce::Array<juce::File> files;
+    dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
+    for (auto& f : files)
+        f.deleteFile();
+}
+
+size_t MixedPhasePersistentCache::getEntryCount()
+{
+    auto dir = getCacheDirectory();
+    if (!dir.exists())
+        return 0;
+
+    juce::Array<juce::File> files;
+    dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
+    return static_cast<size_t>(files.size());
+}
+
+} // namespace convo
+
+```
+
+### 📄 `src\MixedPhasePersistentCache.h`
+
+```
+#pragma once
+
+#include <JuceHeader.h>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace convo {
+
+struct SecondOrderAllpass;
+
+/**
+    MixedPhasePersistentCache: 最適化済み MixedPhase IR のディスク永続化キャッシュ。
+    CMA-ES/GreedyAdaGrad による位相最適化結果を %APPDATA%/ConvoPeq/MixedPhaseCache/ に保存し、
+    次回起動時の再最適化をスキップする。
+*/
+class MixedPhasePersistentCache
+{
+public:
+    static juce::File getCacheDirectory();
+
+    static juce::File getCacheFile(uint64_t fileHash,
+                                   double sampleRate,
+                                   int phaseMode,
+                                   float freqStartHz, float freqEndHz, float tau,
+                                   int targetLength);
+
+    static bool load(uint64_t fileHash,
+                     double sampleRate,
+                     int phaseMode,
+                     float freqStartHz, float freqEndHz, float tau,
+                     int targetLength,
+                     juce::AudioBuffer<double>& outIr,
+                     std::vector<double>& outRho,
+                     std::vector<double>& outTheta);
+
+    static bool save(uint64_t fileHash,
+                     double sampleRate,
+                     int phaseMode,
+                     float freqStartHz, float freqEndHz, float tau,
+                     int targetLength,
+                     const juce::AudioBuffer<double>& ir,
+                     const std::vector<double>& rho,
+                     const std::vector<double>& theta);
+
+    static void touch(uint64_t fileHash,
+                      double sampleRate,
+                      int phaseMode,
+                      float freqStartHz, float freqEndHz, float tau,
+                      int targetLength);
+
+    static void evictLRU(size_t maxCount);
+
+    static void remove(uint64_t fileHash,
+                       double sampleRate,
+                       int phaseMode,
+                       float freqStartHz, float freqEndHz, float tau,
+                       int targetLength);
+
+    static void clear();
+
+    static size_t getEntryCount();
+
+private:
+    static constexpr uint64_t kMagic = 0x4D69786564506800ULL;
+    static constexpr uint32_t kVersion = 1;
+
+#pragma pack(push, 1)
+    struct DiskHeader {
+        uint64_t magic;
+        uint32_t version;
+        uint32_t headerReserved;
+        uint64_t fileHash;
+        double sampleRate;
+        int32_t phaseMode;
+        float freqStartHz;
+        float freqEndHz;
+        float tau;
+        int32_t targetLength;
+        uint64_t lastUsedTime;
+        int32_t numChannels;
+        int32_t numSamples;
+        int32_t numAllpassSections;
+        int64_t totalFileSize;
+    };
+#pragma pack(pop)
+
+    static_assert(sizeof(DiskHeader) <= 128, "DiskHeader is too large");
+
+    static uint64_t computeKeyHash(uint64_t fileHash,
+                                   double sampleRate,
+                                   int phaseMode,
+                                   float freqStartHz, float freqEndHz, float tau,
+                                   int targetLength);
 };
 
 } // namespace convo
@@ -25339,6 +25857,34 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
     runtimePublicationBridge_.setRetireBacklogCount(retireRuntime_.pendingIntentCount());
     emitEvidenceTickNonRt(false);
+
+    // ★★★ PR1: Quarantineスロット再評価 — 前回Case Cで隔離されたスロットの解放条件を再確認
+    {
+        const auto maxObservedGeneration = convo::consumeAtomic(
+            youngestObservedGeneration_, std::memory_order_acquire);
+        const auto callbackActiveCount = convo::consumeAtomic(
+            rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire);
+
+        for (uint32_t qslot = 0; qslot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++qslot) {
+            if (!dspQuarantineManager_.isActive(qslot))
+                continue;
+            if (retireRuntimeEx_.laneOf(qslot) != convo::isr::RetireLane::Quarantine)
+                continue;
+
+            // 条件: Grace完了（このworldより新しい世代が観測されている、またはコールバック停止）
+            const bool graceCompleted = retireRuntimeEx_.isGracePeriodCompleted(
+                static_cast<uint64_t>(world->generation),
+                maxObservedGeneration,
+                callbackActiveCount);
+            if (!graceCompleted)
+                continue;
+
+            // 3系統解放（quarantineSlot の逆順）
+            retireRuntimeEx_.reclaim(qslot);                          // 系統③: レーン解放
+            dspHandleRuntime_.destroyQuarantineSlot(qslot, 0);         // 系統①: Reclaimedに遷移
+            dspQuarantineManager_.reclaimSlot(qslot, 0);              // 系統②: フラグ解放
+        }
+    }
 }
 
 void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
@@ -30474,7 +31020,6 @@ void AudioEngine::releaseResources()
         {
             diagLog("[DIAG] releaseResources: EmergencyDrain — forcing crossfade recovery");
             crossfadeRuntime_.reset();
-            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
         }
 
         const auto emergencyElapsedMs = juce::Time::getMillisecondCounterHiRes() - emergencyStartMs;
@@ -30495,6 +31040,36 @@ void AudioEngine::releaseResources()
         }
     }
 
+    // ★★★ PR2: Quarantine 全スロット強制解放（シャットダウン専用）
+    //    この時点で GracefulDrain が activeReaderCount==0 を確認済み
+    {
+        const auto residentBefore = dspQuarantineManager_.residentCount();
+        if (residentBefore > 0) {
+            diagLog("[DIAG] releaseResources: quarantinedSlots="
+                    + juce::String(static_cast<int>(residentBefore))
+                    + " — performing shutdown cleanup");
+
+            for (uint32_t slot = 0; slot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++slot) {
+                // 系統②: フラグ確認＋解放（非アクティブなら false → スキップ）
+                if (dspQuarantineManager_.destroyForShutdown(slot)) {
+                    // 系統①: DSPHandleRegistry の Quarantined→Reclaimed 遷移
+                    //   destroyForShutdown が quarantine フラグ確認を済ませているため安全
+                    dspHandleRuntime_.destroyQuarantineSlot(slot, 0);
+                    // 系統③: レーン解放 + quarantineResidentCount--
+                    retireRuntimeEx_.reclaim(slot);
+                }
+            }
+
+            // バッチ compaction（ループ内個別 compaction より効率的）
+            dspQuarantineManager_.compactAuditLog();
+
+            const auto residentAfter = dspQuarantineManager_.residentCount();
+            diagLog("[DIAG] releaseResources: quarantine cleanup done "
+                    + juce::String(static_cast<int>(residentBefore))
+                    + " -> " + juce::String(static_cast<int>(residentAfter)));
+        }
+    }
+
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
     diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");
@@ -30511,7 +31086,6 @@ void AudioEngine::releaseResources()
         dspHandleRuntime_.retire(fadingHandle);
         dspHandleRuntime_.reclaim(fadingHandle);
     }
-    convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
 
     diagLog("[DIAG] releaseResources: before ui processor release");
     diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
@@ -30605,7 +31179,7 @@ void AudioEngine::releaseResources()
         return m_retireRouter->pendingRetireCount();
     }();
 
-    const auto activeCrossfadeCount = consumeAtomic(activeCrossfadeId_, std::memory_order_acquire) != static_cast<convo::isr::CrossfadeId>(0u) ? 1u : 0u;
+    const auto activeCrossfadeCount = crossfadeRuntime_.isPending() ? 1u : 0u;
     shutdownRuntime_.setBoundedTeardownCounters(
         convo::consumeAtomic(rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire),
         activeCrossfadeCount,
@@ -31601,6 +32175,19 @@ void AudioEngine::rebuildThreadLoop()
 
             // 5. Fade In
             newDSP->ramps().fadeInSamplesLeft = DSPCore::FADE_IN_SAMPLES;
+
+            // Log convolver pipeline status before commit
+            {
+                const auto& buildInput = task.runtimeBuildSnapshot.buildInput;
+                juce::Logger::writeToLog("[CONV_STATUS] rebuildThreadLoop: generation="
+                    + juce::String(task.generation)
+                    + " irLoaded=" + juce::String(static_cast<int>(newDSP->convolverRt().isIRLoaded()))
+                    + " irLen=" + juce::String(newDSP->convolverRt().getIRLength())
+                    + " convBypass=" + juce::String(static_cast<int>(buildInput.convBypassed))
+                    + " sr=" + juce::String(buildInput.sampleRate, 1)
+                    + " osFactor=" + juce::String(buildInput.oversamplingFactor)
+                    + " processingRate=" + juce::String(newDSP->sampleRate * static_cast<double>(newDSP->oversamplingFactor), 1));
+            }
 
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
@@ -32888,21 +33475,20 @@ void AudioEngine::timerCallback()
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
     {
-        // ★ P1-C: 完了した crossfade の ID を SPSC 経由で消費
-        //   notifyFadeComplete は AudioThread 側（advanceFade 内）で呼ばれる想定。
-        //   現状は Timer 主導の tryCompleteFade のため、ここで SPSC に投入し即消費する。
-        const auto completedId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
-        if (completedId != 0u)
+        // ★ PR2/PR4: Authority の Registry から active crossfade を取得
+        auto records = crossfadeAuthorityRuntime_.getActiveCrossfades();
+        if (!records.empty())
         {
-            crossfadeRuntime_.notifyFadeComplete(completedId);
+            // 単一 Crossfade 前提を表明
+            jassert(records.size() == 1);
+            const auto xfadeId = records.front().id;
+            crossfadeRuntime_.notifyFadeComplete(xfadeId);
             convo::isr::CompletedFadeEvent ev;
-            if (crossfadeRuntime_.consumeCompletedFade(ev))
+            while (crossfadeRuntime_.consumeCompletedFade(ev))
             {
-                // ★ SPSC を経由することで将来的な AudioThread 主導への移行が容易
                 dspHandleRuntime_.endCrossfade(ev.id);
                 crossfadeAuthorityRuntime_.unregisterCrossfade(ev.id);
             }
-            convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
 
         auto* const doneRaw1 = exchangeFadingRuntimeDSP(nullptr);
@@ -33122,13 +33708,16 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
             lifetime.retire(doneRaw);
         }
 
-        // 2. アクティブな crossfade ID を取得して unregister
-        const auto activeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
-        if (activeId != 0u)
-        {
-            crossfadeAuthorityRuntime_.unregisterCrossfade(activeId);
-            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
+        // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得
+        auto records = crossfadeAuthorityRuntime_.getActiveCrossfades();
+        jassert(records.size() <= 1);
+        if (records.size() > 1) {
+            diagLog("[DIAG] Crossfade: multiple active crossfades detected (count="
+                + juce::String(static_cast<int>(records.size()))
+                + "), clearing all via timeout recovery");
         }
+        for (const auto& record : records)
+            crossfadeAuthorityRuntime_.unregisterCrossfade(record.id);
 
         // 3. CrossfadeRuntime を complete 状態に戻す（pending=false）
         crossfadeRuntime_.complete();
@@ -37107,8 +37696,6 @@ public:
         convo::isr::CrossfadeAuthorityRuntime crossfadeAuthorityRuntime_;
         std::mutex runtimeDSPHandleMapMutex_;
         std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
-        std::atomic<convo::isr::CrossfadeId> activeCrossfadeId_{ 0u };
-
         // ==================================================================
 
 };
@@ -37707,10 +38294,10 @@ public:
         engine_.setActiveRuntimeDSP(dsp);
     }
 
-    // Authority: CrossfadeAuthorityRuntime
-    convo::isr::CrossfadeId beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to) noexcept
+    // Authority: CrossfadeAuthorityRuntime（id は Authority から注入）
+    void beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to, convo::isr::CrossfadeId id) noexcept
     {
-        return engine_.dspHandleRuntime_.beginCrossfade(from, to);
+        engine_.dspHandleRuntime_.beginCrossfade(from, to, id);
     }
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
@@ -37839,12 +38426,10 @@ public:
             auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
 
             if (!oldHandle.isNull() && !newHandle.isNull()) {
-                // CrossfadeAuthority に registration を委譲
+                // CrossfadeAuthorityRuntime が CrossfadeId を発行（唯一権威）
                 const auto xfadeId = engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
-                (void)xfadeId;  // CrossfadeId は将来 AudioThread 完了検出時の通知に使用
-                engine_.publishAtomic(engine_.activeCrossfadeId_,
-                                     static_cast<convo::isr::CrossfadeId>(0u),
-                                     std::memory_order_release);
+                // DSPHandleRuntime: Authority 発行の ID で状態遷移
+                engine_.dspHandleRuntime_.beginCrossfade(oldHandle, newHandle, xfadeId);
             }
 
             // exchangeFadingRuntimeDSP + retire
@@ -38311,16 +38896,14 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
     return { reg.instance, true, false };
 }
 
-CrossfadeId DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to)
+void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id)
 {
     assert(!from.isNull() && !to.isNull());
     convo::publishAtomic(registry_[from.slot].state, DSPState::CrossfadingOut, std::memory_order_release);
     convo::publishAtomic(registry_[to.slot].state, DSPState::CrossfadingIn, std::memory_order_release);
 
-    const auto id = convo::fetchAddAtomic(nextCrossfadeId_, 1u, std::memory_order_acq_rel);
     crossfadeRecords_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     convo::publishAtomic(fadingRuntimeDSPHandle_, from, std::memory_order_release);
-    return id;
 }
 
 void DSPHandleRuntime::activate(DSPHandle handle)
@@ -38640,7 +39223,8 @@ public:
     ResolvedDSP resolve(DSPHandle handle) const noexcept;
 
     // NonRT: crossfade 開始（from と to の state を更新）
-    CrossfadeId beginCrossfade(DSPHandle from, DSPHandle to);
+    // id は CrossfadeAuthorityRuntime::registerCrossfade() から注入
+    void beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id);
 
     // NonRT: crossfade を使わず handle を Active に昇格
     void activate(DSPHandle handle);
@@ -38681,7 +39265,6 @@ private:
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 
     std::vector<CrossfadeRecord> crossfadeRecords_;
-    std::atomic<CrossfadeId> nextCrossfadeId_{1};
 
     DSPState getSlotState(uint32_t slot) const noexcept;
     void setSlotState(uint32_t slot, DSPState newState) noexcept;
@@ -38771,10 +39354,12 @@ void DSPQuarantineManager::reclaimSlot(uint32_t slot, uint64_t generation)
         return;
 
     // ★ generation 一致確認: 異なる場合は削除しない
+    // ★ PR1: generation==0 の場合は generation チェックをスキップ
+    //   （再評価ループでは正確な generation を保持していないため）
     bool found = false;
     for (auto& entry : auditLog_) {
         if (entry.slot == slot && !entry.resolved) {
-            if (entry.generation != generation) {
+            if (generation != 0 && entry.generation != generation) {
                 // generation が異なる → 新しい隔離情報を誤って消さない
                 return;
             }
@@ -38877,6 +39462,14 @@ void DSPQuarantineManager::compactAuditLog() noexcept
         auditLog_.erase(auditLog_.begin(), it);
 }
 
+// ★ PR1: quarantineActiveFlags_[] の確認（residentCount と同パターン）
+bool DSPQuarantineManager::isActive(uint32_t slot) const noexcept
+{
+    if (slot >= kMaxSlots)
+        return false;
+    return convo::consumeAtomic(quarantineActiveFlags_[slot], std::memory_order_acquire);
+}
+
 } // namespace convo::isr
 
 ```
@@ -38939,9 +39532,16 @@ public:
     // A-1.4: shutdown専用解放
     bool destroyForShutdown(uint32_t slot);
 
-private:
+    // ★ PR1: quarantineActiveFlags_[] の確認
+    bool isActive(uint32_t slot) const noexcept;
+
+    // ★ PR1/PR2: バッチcompaction用（public）
+    void compactAuditLog() noexcept;
+
+    // ★ PR1: 外部からループ範囲として使用
     static constexpr size_t kMaxSlots = 256;
 
+private:
     // RT側: 隔離中フラグ bitset（atomic read only）
     std::array<std::atomic<bool>, kMaxSlots> quarantineActiveFlags_{};
 
@@ -38954,9 +39554,6 @@ private:
         bool resolved;  // true=隔離解除済み
     };
     std::vector<Entry> auditLog_;
-
-    // compaction helper
-    void compactAuditLog() noexcept;
 };
 
 } // namespace convo::isr
@@ -44861,6 +45458,8 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
         runtime = convo::aligned_make_unique<AudioEngine::DSPCore>();
         runtime->convolverRt().setVisualizationEnabled(false);
         runtime->convolverRt().applyBuildSnapshot(convolverBuildSnapshot);
+        // Transfer actual IR data (applyBuildSnapshot only copies metadata, not the AudioBuffer)
+        runtime->convolverRt().transferIRStateFrom(engine.getConvolverProcessor());
         runtime->prepare(in.sampleRate,
                          in.blockSize,
                          in.ditherBitDepth,
@@ -51506,6 +52105,7 @@ private:
 #include <mkl.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "MixedPhasePersistentCache.h"
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE)
 
@@ -51610,6 +52210,46 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
     }
 
+    // ── Persistent disk cache check (次回起動時の再最適化をスキップ) ──
+    if (owner && fileHash != 0)
+    {
+        ConvolverProcessor::IRCacheKey key;
+        key.fileHash = fileHash;
+        key.sampleRate = sampleRate;
+        key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
+        key.f1 = static_cast<float>(transitionLoHz);
+        key.f2 = static_cast<float>(transitionHiHz);
+        key.tau = static_cast<float>(tau);
+        key.targetLength = linearIR.getNumSamples();
+
+        juce::AudioBuffer<double> cachedIr;
+        std::vector<double> cachedRho, cachedTheta;
+        if (convo::MixedPhasePersistentCache::load(
+                key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
+                key.f1, key.f2, key.tau, key.targetLength,
+                cachedIr, cachedRho, cachedTheta))
+        {
+            juce::Logger::writeToLog("convertToMixedPhaseAllpass: Persistent cache HIT! Loading optimized IR from disk.");
+
+            // ディスクキャッシュから復元したデータをメモリキャッシュにも格納
+            {
+                const juce::ScopedLock sl(owner->cacheMutex);
+                ConvolverProcessor::CacheEntry entry;
+                entry.ir = std::make_unique<juce::AudioBuffer<double>>(cachedIr);
+                entry.lastUsedTime = juce::Time::getMillisecondCounter();
+                for (size_t i = 0; i < cachedRho.size(); ++i)
+                    entry.allpassSections.push_back({ cachedRho[i], cachedTheta[i] });
+                owner->irCache[key] = std::move(entry);
+                owner->evictOldestCacheEntry();
+            }
+
+            setMixedPhaseState(2);
+            juce::Logger::writeToLog("[MixedPhase] State -> Completed (persistent cache)");
+            if (progressCallback) progressCallback(1.0f);
+            return cachedIr;
+        }
+    }
+
 #if defined(__AVX2__)
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -51696,6 +52336,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
     try
     {
+        std::vector<convo::SecondOrderAllpass> lastAllpassSections;
+        bool optimizedByCmaes = false;
         for (int ch = 0; ch < numChannels; ++ch)
         {
             if (reuseMixedDesignAcrossChannels && ch > 0)
@@ -51908,7 +52550,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                          + " samples");
             }
 
-            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire); // acquire: prepareToPlay/releaseResources の publishAtomic release と HB
+            const bool hasPreviousIR = (owner != nullptr) && convo::consumeAtomic(owner->currentIRState, std::memory_order_acquire) != nullptr;
+            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire) && hasPreviousIR; // acquire: prepareToPlay/releaseResources の publishAtomic release と HB
             const bool highRateLive = liveReconfigure && sampleRate >= 96000.0;
 
             const int optimFreqPoints = liveReconfigure ? (highRateLive ? 12 : 64) : 256;
@@ -51943,9 +52586,6 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             designer_config.cmaesInitialSigma = 1.0;
             designer_config.cmaesParams.sigmaMin = 0.002;
             designer_config.cmaesParams.sigmaMax = 2.0;
-#if defined(JUCE_DEBUG)
-            designer_config.cmaesSeed = 0xDEADBEEFCAFEBABEULL;
-#endif
             designer_config.progressCallback = progressCallback;
 
             const bool preferGreedyForLive = liveReconfigure && highRateLive;
@@ -51984,6 +52624,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(static_cast<int>(designResult)));
 
                 designSuccess = (designResult == convo::DesignResult::Success);
+                optimizedByCmaes = designSuccess;
 
                 if (!designSuccess && !(shouldExit && shouldExit()))
                 {
@@ -52022,6 +52663,9 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 linearSpec.get()[k].real = h_mixed.real();
                 linearSpec.get()[k].imag = h_mixed.imag();
             }
+
+            // Allpass sections をキャプチャ（ディスクキャッシュ保存用）
+            lastAllpassSections = allpass_sections;
 
             if (DftiComputeBackward(dfti.handle, linearSpec.get()) != DFTI_NO_ERROR)
                 return {};
@@ -52130,12 +52774,35 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             key.tau = static_cast<float>(tau);
             key.targetLength = linearIR.getNumSamples();
 
-            const juce::ScopedLock sl(owner->cacheMutex);
-            ConvolverProcessor::CacheEntry entry;
-            entry.ir = std::make_unique<juce::AudioBuffer<double>>(mixedIR);
-            entry.lastUsedTime = juce::Time::getMillisecondCounter();
-            owner->irCache[key] = std::move(entry);
-            owner->evictOldestCacheEntry();
+            // メモリキャッシュに保存
+            {
+                const juce::ScopedLock sl(owner->cacheMutex);
+                ConvolverProcessor::CacheEntry entry;
+                entry.ir = std::make_unique<juce::AudioBuffer<double>>(mixedIR);
+                entry.lastUsedTime = juce::Time::getMillisecondCounter();
+                for (const auto& sec : lastAllpassSections)
+                    entry.allpassSections.push_back({ sec.rho, sec.theta });
+                owner->irCache[key] = std::move(entry);
+                owner->evictOldestCacheEntry();
+            }
+
+            // ディスクキャッシュに保存（CMA-ES最適化成功時のみ。GreedyAdaGradの簡易結果は保存しない）
+            if (optimizedByCmaes)
+            {
+                std::vector<double> rho, theta;
+                for (const auto& sec : lastAllpassSections)
+                {
+                    rho.push_back(sec.rho);
+                    theta.push_back(sec.theta);
+                }
+                convo::MixedPhasePersistentCache::save(
+                    key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
+                    key.f1, key.f2, key.tau, key.targetLength,
+                    mixedIR, rho, theta);
+
+                // ディスクキャッシュのLRUエビクション
+                convo::MixedPhasePersistentCache::evictLRU(owner->getMaxCacheEntries());
+            }
         }
 
         if (progressCallback) progressCallback(1.0f);
@@ -52400,6 +53067,11 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
         };
 
         runRebuildPath();
+
+        juce::Logger::writeToLog("[CONV_REBUILD] rebuildAllIRsSynchronous: engine rebuilt"
+            " len=" + juce::String(state->ir->getNumSamples())
+            + " ch=" + juce::String(state->ir->getNumChannels())
+            + " srcSR=" + juce::String(state->sampleRate, 1));
     }
 
     if (rebuildJob)

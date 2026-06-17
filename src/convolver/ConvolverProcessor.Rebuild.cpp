@@ -93,6 +93,11 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
         };
 
         runRebuildPath();
+
+        juce::Logger::writeToLog("[CONV_REBUILD] rebuildAllIRsSynchronous: engine rebuilt"
+            " len=" + juce::String(state->ir->getNumSamples())
+            + " ch=" + juce::String(state->ir->getNumChannels())
+            + " srcSR=" + juce::String(state->sampleRate, 1));
     }
 
     if (rebuildJob)

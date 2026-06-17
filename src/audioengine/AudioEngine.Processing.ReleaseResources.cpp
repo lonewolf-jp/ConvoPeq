@@ -244,7 +244,6 @@ void AudioEngine::releaseResources()
         {
             diagLog("[DIAG] releaseResources: EmergencyDrain — forcing crossfade recovery");
             crossfadeRuntime_.reset();
-            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
         }
 
         const auto emergencyElapsedMs = juce::Time::getMillisecondCounterHiRes() - emergencyStartMs;
@@ -265,6 +264,36 @@ void AudioEngine::releaseResources()
         }
     }
 
+    // ★★★ PR2: Quarantine 全スロット強制解放（シャットダウン専用）
+    //    この時点で GracefulDrain が activeReaderCount==0 を確認済み
+    {
+        const auto residentBefore = dspQuarantineManager_.residentCount();
+        if (residentBefore > 0) {
+            diagLog("[DIAG] releaseResources: quarantinedSlots="
+                    + juce::String(static_cast<int>(residentBefore))
+                    + " — performing shutdown cleanup");
+
+            for (uint32_t slot = 0; slot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++slot) {
+                // 系統②: フラグ確認＋解放（非アクティブなら false → スキップ）
+                if (dspQuarantineManager_.destroyForShutdown(slot)) {
+                    // 系統①: DSPHandleRegistry の Quarantined→Reclaimed 遷移
+                    //   destroyForShutdown が quarantine フラグ確認を済ませているため安全
+                    dspHandleRuntime_.destroyQuarantineSlot(slot, 0);
+                    // 系統③: レーン解放 + quarantineResidentCount--
+                    retireRuntimeEx_.reclaim(slot);
+                }
+            }
+
+            // バッチ compaction（ループ内個別 compaction より効率的）
+            dspQuarantineManager_.compactAuditLog();
+
+            const auto residentAfter = dspQuarantineManager_.residentCount();
+            diagLog("[DIAG] releaseResources: quarantine cleanup done "
+                    + juce::String(static_cast<int>(residentBefore))
+                    + " -> " + juce::String(static_cast<int>(residentAfter)));
+        }
+    }
+
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
     diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");
@@ -281,7 +310,6 @@ void AudioEngine::releaseResources()
         dspHandleRuntime_.retire(fadingHandle);
         dspHandleRuntime_.reclaim(fadingHandle);
     }
-    convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
 
     diagLog("[DIAG] releaseResources: before ui processor release");
     diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
@@ -375,7 +403,7 @@ void AudioEngine::releaseResources()
         return m_retireRouter->pendingRetireCount();
     }();
 
-    const auto activeCrossfadeCount = consumeAtomic(activeCrossfadeId_, std::memory_order_acquire) != static_cast<convo::isr::CrossfadeId>(0u) ? 1u : 0u;
+    const auto activeCrossfadeCount = crossfadeRuntime_.isPending() ? 1u : 0u;
     shutdownRuntime_.setBoundedTeardownCounters(
         convo::consumeAtomic(rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire),
         activeCrossfadeCount,

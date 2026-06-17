@@ -23,11 +23,11 @@ $initText = Get-Content -LiteralPath $initPath -Raw -Encoding UTF8
 $violations = New-Object System.Collections.Generic.List[string]
 
 foreach ($required in @(
-    'bool dspCrossfadeArmed_RT = false;',
-    'int dspCrossfadeStartDelayBlocks_RT = 0;',
-    'dspCrossfadeArmed_RT = true;',
-    'dspCrossfadeArmed_RT = false;'
-)) {
+        'bool dspCrossfadeArmed_RT = false;',
+        'int dspCrossfadeStartDelayBlocks_RT = 0;',
+        'dspCrossfadeArmed_RT = true;',
+        'dspCrossfadeArmed_RT = false;'
+    )) {
     if ($headerText -notmatch [regex]::Escape($required) -and $initText -notmatch [regex]::Escape($required)) {
         $violations.Add("Missing crossfade observable state token: $required")
     }
@@ -43,19 +43,22 @@ if ($headerText -notmatch '&& !dspCrossfadeArmed_RT\)') {
 
 $hasLegacyInitRtReset = $initText -match 'dspCrossfadeArmed_RT\s*=\s*false;'
 $hasSnapshotBackedInitReset = ($initText -match 'publishAtomic\(dspCrossfadePending,\s*false,\s*std::memory_order_release\)') -and
-                             ($initText -match 'publishAtomic\(dspCrossfadeStartDelayBlocks,\s*0,\s*std::memory_order_release\)') -and
-                             ($initText -match 'refreshCrossfadePreparedSnapshotFromAtomics\(\)')
+($initText -match 'publishAtomic\(dspCrossfadeStartDelayBlocks,\s*0,\s*std::memory_order_release\)') -and
+($initText -match 'refreshCrossfadePreparedSnapshotFromAtomics\(\)')
+# ★ PR2/PR4: CrossfadeRuntime::reset() が全 atomic 状態（pending/startDelayBlocks/dryHoldSamples 等）を内部でクリア
+$hasCrossfadeRuntimeReset = ($initText -match 'crossfadeRuntime_\.reset\(\)') -and
+($initText -match 'refreshCrossfadePreparedSnapshotFromAtomics\(\)')
 
-if (-not $hasLegacyInitRtReset -and -not $hasSnapshotBackedInitReset) {
-    $violations.Add('AudioEngine.initialize() must reset crossfade observable state (legacy RT fields or snapshot-backed atomics)')
+if (-not $hasLegacyInitRtReset -and -not $hasSnapshotBackedInitReset -and -not $hasCrossfadeRuntimeReset) {
+    $violations.Add('AudioEngine.initialize() must reset crossfade observable state (legacy RT fields, snapshot-backed atomics, or crossfadeRuntime_.reset())')
 }
 
 $report = [ordered]@{
-    schema = 'crossfade_observable_state_report_v1'
+    schema      = 'crossfade_observable_state_report_v1'
     generatedAt = (Get-Date -Format 'o')
-    headerPath = $headerPath
-    initPath = $initPath
-    violations = $violations
+    headerPath  = $headerPath
+    initPath    = $initPath
+    violations  = $violations
 }
 
 Set-Content -LiteralPath $reportPath -Value ($report | ConvertTo-Json -Depth 6) -Encoding UTF8

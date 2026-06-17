@@ -1024,6 +1024,27 @@ private:
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
 public: // Added for AudioEngine access
+    // Thread-safe IR state transfer from source convolver (copies the AudioBuffer)
+    // Must be called before rebuildAllIRsSynchronous() on this instance.
+    void transferIRStateFrom(const ConvolverProcessor& source) noexcept
+    {
+        const IRState* srcState = source.acquireIRState();
+        if (srcState && srcState->ir && srcState->ir->getNumSamples() > 0 && srcState->sampleRate > 0.0)
+        {
+            const int channels = srcState->ir->getNumChannels();
+            const int length   = srcState->ir->getNumSamples();
+            updateIRState(*srcState->ir, srcState->sampleRate);
+            juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: IR transferred ch="
+                + juce::String(channels) + " len=" + juce::String(length)
+                + " sr=" + juce::String(srcState->sampleRate, 1));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: no IR data to transfer");
+        }
+        source.releaseIRState(srcState);
+    }
+
     [[nodiscard]] double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)

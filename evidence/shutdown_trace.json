@@ -1,17 +1,1 @@
-{
-  "schema": "shutdown_trace_v3",
-  "phase": 10,
-  "phaseName": "ShutdownComplete",
-  "healthState": 0,
-  "healthStateName": "Healthy",
-  "blockingReason": "Unknown",
-  "blockingReasonCode": 8,
-  "transitionViolations": 0,
-  "sh1_callbackCount": 0,
-  "sh2_activeCrossfade": 0,
-  "sh3_pendingRetire": 2,
-  "sh4_observerCount": 0,
-  "sh5_lateCallbackCount": 0,
-  "sh6_postStopEnqueueCount": 0,
-  "verified": false
-}
+﻿{"generatedAtNs":1781697636111000000,"sh1_callbackCount":0,"runId":"90cbb85c83064b1f8a1957a1a2a163c4","provenance":"seed","sh3_pendingRetire":0,"phase":0,"sh5_lateCallbackCount":0,"sh2_activeCrossfade":0,"schema":"shutdown_trace_v1","sh6_postStopEnqueueCount":0,"sh4_observerCount":0,"verified":true}

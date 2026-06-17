@@ -53,9 +53,16 @@ public:
     // A-1.4: shutdown専用解放
     bool destroyForShutdown(uint32_t slot);
 
-private:
+    // ★ PR1: quarantineActiveFlags_[] の確認
+    bool isActive(uint32_t slot) const noexcept;
+
+    // ★ PR1/PR2: バッチcompaction用（public）
+    void compactAuditLog() noexcept;
+
+    // ★ PR1: 外部からループ範囲として使用
     static constexpr size_t kMaxSlots = 256;
 
+private:
     // RT側: 隔離中フラグ bitset（atomic read only）
     std::array<std::atomic<bool>, kMaxSlots> quarantineActiveFlags_{};
 
@@ -68,9 +75,6 @@ private:
         bool resolved;  // true=隔離解除済み
     };
     std::vector<Entry> auditLog_;
-
-    // compaction helper
-    void compactAuditLog() noexcept;
 };
 
 } // namespace convo::isr

@@ -6,12 +6,27 @@
 #include <cstring>
 #include <thread>
 #include <chrono>
+#include <random>
 
 namespace convo {
 
 namespace {
 
-constexpr uint64_t kDefaultDeterministicCmaesSeed = 0x434f4e564f4251ull;
+// デフォルトシードは実行時ランダム（std::random_device が利用不可の場合は時刻ベース）
+inline uint64_t generateRandomSeed() noexcept
+{
+    try {
+        std::random_device rd;
+        // random_device のエントロピーと時刻を混合
+        const auto now = static_cast<uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        return static_cast<uint64_t>(rd()) ^ (now << 11) ^ (now >> 17);
+    } catch (...) {
+        // random_device が例外を投げる環境では時刻のみ
+        return static_cast<uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    }
+}
 
 std::vector<double> buildFrequencyCandidates(double sampleRate)
 {
@@ -251,7 +266,7 @@ DesignResult AllpassDesigner::designWithCMAES(
     const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
     CmaEsOptimizerDynamic optimizer(D);
     optimizer.setParams(config.cmaesParams);
-    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : kDefaultDeterministicCmaesSeed);
+    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : generateRandomSeed());
     if (config.cmaesInitialSigma > 0.0) {
         CmaEsOptimizerDynamic::Params p = config.cmaesParams;
         p.sigmaMin = std::min(p.sigmaMin, config.cmaesInitialSigma);

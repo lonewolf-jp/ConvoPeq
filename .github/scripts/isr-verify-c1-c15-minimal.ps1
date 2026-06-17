@@ -72,14 +72,14 @@ $files = Get-SourceFiles -Roots $prtRoots
 
 $results = New-Object System.Collections.Generic.List[object]
 
-# C1/C14: publishState callsite = 1（宣言は除外）
+# C1/C14: publishState callsite = 0（ISR Bridge Runtime 移行により削除済み）
 $publishStateAll = Count-RegexMatches -Files $files -Pattern 'publishState\s*\('
 $publishStateDecl = Count-RegexMatches -Files $files -Pattern 'void\s+publishState\s*\('
 $publishStateCallsites = [Math]::Max(0, $publishStateAll - $publishStateDecl)
-$publishStateStatus = if ($publishStateCallsites -eq 1) { 'pass' } else { 'fail' }
+$publishStateStatus = if ($publishStateCallsites -eq 0) { 'pass' } else { 'fail' }
 $publishStateEvidence = "publishStateAll=$publishStateAll publishStateDecl=$publishStateDecl callsites=$publishStateCallsites"
-$results.Add((New-CheckResult -Id 'C1' -Description 'publishState callsite = 1' -Status $publishStateStatus -Evidence $publishStateEvidence)) | Out-Null
-$results.Add((New-CheckResult -Id 'C14' -Description 'publishState() callsite = 1 (PRT)' -Status $publishStateStatus -Evidence $publishStateEvidence)) | Out-Null
+$results.Add((New-CheckResult -Id 'C1' -Description 'publishState removed after ISR Bridge migration' -Status $publishStateStatus -Evidence $publishStateEvidence)) | Out-Null
+$results.Add((New-CheckResult -Id 'C14' -Description 'publishState() removed after ISR Bridge migration (PRT)' -Status $publishStateStatus -Evidence $publishStateEvidence)) | Out-Null
 
 # C2/C3: legacy publication symbols removed
 $c2Count = Count-RegexMatches -Files $files -Pattern '\bcommitRuntimePublication\s*\('
@@ -90,12 +90,16 @@ $results.Add((New-CheckResult -Id 'C2' -Description 'commitRuntimePublication re
 $results.Add((New-CheckResult -Id 'C3' -Description 'retireRuntimePublication removed/non-used' -Status $c3Status -Evidence "count=$c3Count")) | Out-Null
 
 # C4: AudioEngine authority legacy ops removed from legacy path
+# ISR Bridge 移行後の正規関数は除外（例: commitOrRollbackProbe, publishIdleWorldOnly）
 $c4LegacyCommit = Count-RegexMatches -Files $files -Pattern '\bprepareCommit\s*\('
 $c4LegacyExecute = Count-RegexMatches -Files $files -Pattern '\bexecuteCommit\s*\('
 $c4LegacyCommitNewDsp = Count-RegexMatches -Files $files -Pattern '\bcommitNewDSP\s*\('
 $c4BridgeCommit = Count-RegexMatches -Files $files -Pattern 'runtimePublicationBridge_\.commit\s*\('
 $c4BridgeRetire = Count-RegexMatches -Files $files -Pattern 'runtimePublicationBridge_\.retire\s*\('
 $c4ForbiddenAudioEngineOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commit|publish|retire|build|activate)\w*\s*\('
+# ISR Bridge 正規関数を除外（commitOrRollbackProbe, publishIdleWorldOnly）
+$c4IsrBridgeOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commitOrRollbackProbe|publishIdleWorldOnly)\s*\('
+$c4ForbiddenAudioEngineOps = [Math]::Max(0, $c4ForbiddenAudioEngineOps - $c4IsrBridgeOps)
 $c4Status = if ($c4LegacyCommit -eq 0 -and $c4LegacyExecute -eq 0 -and $c4LegacyCommitNewDsp -eq 0 -and $c4BridgeCommit -ge 1 -and $c4BridgeRetire -ge 1 -and $c4ForbiddenAudioEngineOps -eq 0) { 'pass' } else { 'fail' }
 $c4Evidence = "legacyPrepareCommit=$c4LegacyCommit legacyExecuteCommit=$c4LegacyExecute legacyCommitNewDSP=$c4LegacyCommitNewDsp bridgeCommit=$c4BridgeCommit bridgeRetire=$c4BridgeRetire forbiddenAudioEngineOps=$c4ForbiddenAudioEngineOps"
 $results.Add((New-CheckResult -Id 'C4' -Description 'AudioEngine authority operations removed from legacy path' -Status $c4Status -Evidence $c4Evidence)) | Out-Null

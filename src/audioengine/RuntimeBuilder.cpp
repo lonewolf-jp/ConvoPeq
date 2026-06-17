@@ -450,6 +450,8 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
         runtime = convo::aligned_make_unique<AudioEngine::DSPCore>();
         runtime->convolverRt().setVisualizationEnabled(false);
         runtime->convolverRt().applyBuildSnapshot(convolverBuildSnapshot);
+        // Transfer actual IR data (applyBuildSnapshot only copies metadata, not the AudioBuffer)
+        runtime->convolverRt().transferIRStateFrom(engine.getConvolverProcessor());
         runtime->prepare(in.sampleRate,
                          in.blockSize,
                          in.ditherBitDepth,

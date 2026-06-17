@@ -3605,8 +3605,6 @@ public:
         convo::isr::CrossfadeAuthorityRuntime crossfadeAuthorityRuntime_;
         std::mutex runtimeDSPHandleMapMutex_;
         std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
-        std::atomic<convo::isr::CrossfadeId> activeCrossfadeId_{ 0u };
-
         // ==================================================================
 
 };

@@ -23,10 +23,10 @@ public:
         engine_.setActiveRuntimeDSP(dsp);
     }
 
-    // Authority: CrossfadeAuthorityRuntime
-    convo::isr::CrossfadeId beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to) noexcept
+    // Authority: CrossfadeAuthorityRuntime（id は Authority から注入）
+    void beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to, convo::isr::CrossfadeId id) noexcept
     {
-        return engine_.dspHandleRuntime_.beginCrossfade(from, to);
+        engine_.dspHandleRuntime_.beginCrossfade(from, to, id);
     }
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)

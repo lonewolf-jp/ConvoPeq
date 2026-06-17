@@ -117,7 +117,8 @@ public:
     ResolvedDSP resolve(DSPHandle handle) const noexcept;
 
     // NonRT: crossfade 開始（from と to の state を更新）
-    CrossfadeId beginCrossfade(DSPHandle from, DSPHandle to);
+    // id は CrossfadeAuthorityRuntime::registerCrossfade() から注入
+    void beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id);
 
     // NonRT: crossfade を使わず handle を Active に昇格
     void activate(DSPHandle handle);
@@ -158,7 +159,6 @@ private:
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 
     std::vector<CrossfadeRecord> crossfadeRecords_;
-    std::atomic<CrossfadeId> nextCrossfadeId_{1};
 
     DSPState getSlotState(uint32_t slot) const noexcept;
     void setSlotState(uint32_t slot, DSPState newState) noexcept;

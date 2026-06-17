@@ -278,6 +278,25 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     endif()
 
+    # icx: テストターゲットに /EHsc を追加（例外処理を有効化）
+    # icx(clang-cl) の Release デフォルトでは例外が無効化されるため、
+    # AlignedAllocation.h の throw/try-catch 使用箇所がコンパイルエラーになる
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
+        target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+        target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+        target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
+        target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
+        target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
+        target_compile_options(ShadowCompareContractTests PRIVATE /EHsc)
+        target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /EHsc)
+        target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /EHsc)
+        target_compile_options(PartialPublicationRejectTests PRIVATE /EHsc)
+        target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
+        target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
+    endif()
+
     # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
     # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
     #  リンク指示を .obj に埋め込む。ConvoPeq 本体は CMakeLists.txt 上部で既に設定済み）
@@ -470,6 +489,7 @@ target_sources(ConvoPeq PRIVATE
     src/MixedPhaseOptimizationComponent.cpp
     src/IRConverter.cpp
     src/ProgressiveUpgradeThread.cpp
+    src/MixedPhasePersistentCache.cpp
     src/CacheManager.cpp
     src/ConvolverSettingsComponent.cpp
     src/IRDSP.cpp

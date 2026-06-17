@@ -582,6 +582,34 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
     runtimePublicationBridge_.setRetireBacklogCount(retireRuntime_.pendingIntentCount());
     emitEvidenceTickNonRt(false);
+
+    // ★★★ PR1: Quarantineスロット再評価 — 前回Case Cで隔離されたスロットの解放条件を再確認
+    {
+        const auto maxObservedGeneration = convo::consumeAtomic(
+            youngestObservedGeneration_, std::memory_order_acquire);
+        const auto callbackActiveCount = convo::consumeAtomic(
+            rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire);
+
+        for (uint32_t qslot = 0; qslot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++qslot) {
+            if (!dspQuarantineManager_.isActive(qslot))
+                continue;
+            if (retireRuntimeEx_.laneOf(qslot) != convo::isr::RetireLane::Quarantine)
+                continue;
+
+            // 条件: Grace完了（このworldより新しい世代が観測されている、またはコールバック停止）
+            const bool graceCompleted = retireRuntimeEx_.isGracePeriodCompleted(
+                static_cast<uint64_t>(world->generation),
+                maxObservedGeneration,
+                callbackActiveCount);
+            if (!graceCompleted)
+                continue;
+
+            // 3系統解放（quarantineSlot の逆順）
+            retireRuntimeEx_.reclaim(qslot);                          // 系統③: レーン解放
+            dspHandleRuntime_.destroyQuarantineSlot(qslot, 0);         // 系統①: Reclaimedに遷移
+            dspQuarantineManager_.reclaimSlot(qslot, 0);              // 系統②: フラグ解放
+        }
+    }
 }
 
 void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept

@@ -214,19 +214,23 @@ inline void accumulateSplitComplex(const double* srcAReal,
     const int vEnd = (complexSize / 4) * 4;
     for (; k < vEnd; k += 4)
     {
-        __m256d ar = _mm256_load_pd(srcAReal + k);
-        __m256d ai = _mm256_load_pd(srcAImag + k);
-        __m256d br = _mm256_load_pd(srcBReal + k);
-        __m256d bi = _mm256_load_pd(srcBImag + k);
+        // ★ icx アライメント対策: complexSize が奇数の場合、SoA バッファの行オフセットが
+        //    32バイト境界に乗らないケースがある。全ポインタを unaligned load で安全に読む。
+        //    dstReal/dstImag (accumReal/accumImag) は 64バイトアラインかつ k が 4 の倍数の
+        //    ため常に 32バイトアラインだが、store も unaligned に統一して安全側に倒す。
+        __m256d ar = _mm256_loadu_pd(srcAReal + k);
+        __m256d ai = _mm256_loadu_pd(srcAImag + k);
+        __m256d br = _mm256_loadu_pd(srcBReal + k);
+        __m256d bi = _mm256_loadu_pd(srcBImag + k);
 
-        __m256d dr = _mm256_load_pd(dstReal + k);
-        __m256d di = _mm256_load_pd(dstImag + k);
+        __m256d dr = _mm256_loadu_pd(dstReal + k);
+        __m256d di = _mm256_loadu_pd(dstImag + k);
 
         dr = _mm256_add_pd(dr, _mm256_sub_pd(_mm256_mul_pd(ar, br), _mm256_mul_pd(ai, bi)));
         di = _mm256_add_pd(di, _mm256_add_pd(_mm256_mul_pd(ar, bi), _mm256_mul_pd(ai, br)));
 
-        _mm256_store_pd(dstReal + k, dr);
-        _mm256_store_pd(dstImag + k, di);
+        _mm256_storeu_pd(dstReal + k, dr);
+        _mm256_storeu_pd(dstImag + k, di);
     }
 
     for (; k < complexSize; ++k)

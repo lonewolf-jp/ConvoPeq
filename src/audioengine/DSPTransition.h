@@ -76,12 +76,10 @@ public:
             auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
 
             if (!oldHandle.isNull() && !newHandle.isNull()) {
-                // CrossfadeAuthority に registration を委譲
+                // CrossfadeAuthorityRuntime が CrossfadeId を発行（唯一権威）
                 const auto xfadeId = engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
-                (void)xfadeId;  // CrossfadeId は将来 AudioThread 完了検出時の通知に使用
-                engine_.publishAtomic(engine_.activeCrossfadeId_,
-                                     static_cast<convo::isr::CrossfadeId>(0u),
-                                     std::memory_order_release);
+                // DSPHandleRuntime: Authority 発行の ID で状態遷移
+                engine_.dspHandleRuntime_.beginCrossfade(oldHandle, newHandle, xfadeId);
             }
 
             // exchangeFadingRuntimeDSP + retire

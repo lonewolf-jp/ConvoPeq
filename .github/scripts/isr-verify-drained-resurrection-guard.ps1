@@ -52,9 +52,19 @@ Assert-Contains -Text $releaseText -Pattern 'cancelPendingUpdate\(\);' -Message 
 # Current implementation uses bounded wait + full-drain fallback.
 Assert-Contains -Text $releaseText -Pattern 'const bool drainedWithinBudget = waitForDrain\(2000,\s*2\);' -Message 'Missing bounded waitForDrain gate'
 Assert-Contains -Text $releaseText -Pattern 'if \(!drainedWithinBudget \|\| !isFullyDrained\(\)\)' -Message 'Missing strict drained conjunction gate (drainedWithinBudget/isFullyDrained)'
-Assert-Contains -Text $releaseText -Pattern 'drainPublicationLogForShutdown\(\);' -Message 'Missing publication drain in release path'
-Assert-Contains -Text $releaseText -Pattern 'drainDeferredRetireQueues\(true\);' -Message 'Missing deferred retire drain in release path'
-Assert-Contains -Text $releaseText -Pattern 'm_epochDomain\.drainAll\(\);' -Message 'Missing epochDomain.drainAll in strict drain fallback path'
+# [P1 Phase1-B] PublicationLog 削除により drainPublicationLogForShutdown は廃止。
+# 代替: deferred retire queue drain + epoch-based tryReclaim + Coordinator finalizeShutdown
+# 以下のいずれかのパターンを許容:
+$hasDeferredRetireDrain = [regex]::IsMatch($releaseText, 'drainDeferredRetireQueues\(true\);', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$hasCoordinatorFinalize = [regex]::IsMatch($releaseText, 'm_coordinator\.finalizeShutdown\(', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$hasEpochReclaim = [regex]::IsMatch($releaseText, 'm_epochDomain\.tryReclaim\(\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+if (-not $hasDeferredRetireDrain) {
+    throw 'Missing deferred retire drain in release path'
+}
+if (-not $hasCoordinatorFinalize -and -not $hasEpochReclaim) {
+    throw 'Missing publication drain in release path (expect finalizeShutdown or epoch reclaim)'
+}
 Assert-Contains -Text $releaseText -Pattern 'shutdownRuntime_\.transitionTo\(convo::isr::ShutdownPhase::ShutdownComplete\);' -Message 'Missing shutdown complete transition'
 
 # Resurrection guard ordering: clear + cancel must happen before worker stop.

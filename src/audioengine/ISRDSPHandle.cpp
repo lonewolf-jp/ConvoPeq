@@ -55,16 +55,14 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
     return { reg.instance, true, false };
 }
 
-CrossfadeId DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to)
+void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id)
 {
     assert(!from.isNull() && !to.isNull());
     convo::publishAtomic(registry_[from.slot].state, DSPState::CrossfadingOut, std::memory_order_release);
     convo::publishAtomic(registry_[to.slot].state, DSPState::CrossfadingIn, std::memory_order_release);
 
-    const auto id = convo::fetchAddAtomic(nextCrossfadeId_, 1u, std::memory_order_acq_rel);
     crossfadeRecords_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     convo::publishAtomic(fadingRuntimeDSPHandle_, from, std::memory_order_release);
-    return id;
 }
 
 void DSPHandleRuntime::activate(DSPHandle handle)

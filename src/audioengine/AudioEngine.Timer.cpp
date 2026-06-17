@@ -380,21 +380,20 @@ void AudioEngine::timerCallback()
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
     {
-        // ★ P1-C: 完了した crossfade の ID を SPSC 経由で消費
-        //   notifyFadeComplete は AudioThread 側（advanceFade 内）で呼ばれる想定。
-        //   現状は Timer 主導の tryCompleteFade のため、ここで SPSC に投入し即消費する。
-        const auto completedId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
-        if (completedId != 0u)
+        // ★ PR2/PR4: Authority の Registry から active crossfade を取得
+        auto records = crossfadeAuthorityRuntime_.getActiveCrossfades();
+        if (!records.empty())
         {
-            crossfadeRuntime_.notifyFadeComplete(completedId);
+            // 単一 Crossfade 前提を表明
+            jassert(records.size() == 1);
+            const auto xfadeId = records.front().id;
+            crossfadeRuntime_.notifyFadeComplete(xfadeId);
             convo::isr::CompletedFadeEvent ev;
-            if (crossfadeRuntime_.consumeCompletedFade(ev))
+            while (crossfadeRuntime_.consumeCompletedFade(ev))
             {
-                // ★ SPSC を経由することで将来的な AudioThread 主導への移行が容易
                 dspHandleRuntime_.endCrossfade(ev.id);
                 crossfadeAuthorityRuntime_.unregisterCrossfade(ev.id);
             }
-            convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
 
         auto* const doneRaw1 = exchangeFadingRuntimeDSP(nullptr);
@@ -614,13 +613,16 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
             lifetime.retire(doneRaw);
         }
 
-        // 2. アクティブな crossfade ID を取得して unregister
-        const auto activeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
-        if (activeId != 0u)
-        {
-            crossfadeAuthorityRuntime_.unregisterCrossfade(activeId);
-            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
+        // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得
+        auto records = crossfadeAuthorityRuntime_.getActiveCrossfades();
+        jassert(records.size() <= 1);
+        if (records.size() > 1) {
+            diagLog("[DIAG] Crossfade: multiple active crossfades detected (count="
+                + juce::String(static_cast<int>(records.size()))
+                + "), clearing all via timeout recovery");
         }
+        for (const auto& record : records)
+            crossfadeAuthorityRuntime_.unregisterCrossfade(record.id);
 
         // 3. CrossfadeRuntime を complete 状態に戻す（pending=false）
         crossfadeRuntime_.complete();

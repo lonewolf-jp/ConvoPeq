@@ -4,6 +4,7 @@
 #include <mkl.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "MixedPhasePersistentCache.h"
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE)
 
@@ -108,6 +109,46 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
     }
 
+    // ── Persistent disk cache check (次回起動時の再最適化をスキップ) ──
+    if (owner && fileHash != 0)
+    {
+        ConvolverProcessor::IRCacheKey key;
+        key.fileHash = fileHash;
+        key.sampleRate = sampleRate;
+        key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
+        key.f1 = static_cast<float>(transitionLoHz);
+        key.f2 = static_cast<float>(transitionHiHz);
+        key.tau = static_cast<float>(tau);
+        key.targetLength = linearIR.getNumSamples();
+
+        juce::AudioBuffer<double> cachedIr;
+        std::vector<double> cachedRho, cachedTheta;
+        if (convo::MixedPhasePersistentCache::load(
+                key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
+                key.f1, key.f2, key.tau, key.targetLength,
+                cachedIr, cachedRho, cachedTheta))
+        {
+            juce::Logger::writeToLog("convertToMixedPhaseAllpass: Persistent cache HIT! Loading optimized IR from disk.");
+
+            // ディスクキャッシュから復元したデータをメモリキャッシュにも格納
+            {
+                const juce::ScopedLock sl(owner->cacheMutex);
+                ConvolverProcessor::CacheEntry entry;
+                entry.ir = std::make_unique<juce::AudioBuffer<double>>(cachedIr);
+                entry.lastUsedTime = juce::Time::getMillisecondCounter();
+                for (size_t i = 0; i < cachedRho.size(); ++i)
+                    entry.allpassSections.push_back({ cachedRho[i], cachedTheta[i] });
+                owner->irCache[key] = std::move(entry);
+                owner->evictOldestCacheEntry();
+            }
+
+            setMixedPhaseState(2);
+            juce::Logger::writeToLog("[MixedPhase] State -> Completed (persistent cache)");
+            if (progressCallback) progressCallback(1.0f);
+            return cachedIr;
+        }
+    }
+
 #if defined(__AVX2__)
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -194,6 +235,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
     try
     {
+        std::vector<convo::SecondOrderAllpass> lastAllpassSections;
+        bool optimizedByCmaes = false;
         for (int ch = 0; ch < numChannels; ++ch)
         {
             if (reuseMixedDesignAcrossChannels && ch > 0)
@@ -406,7 +449,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                          + " samples");
             }
 
-            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire); // acquire: prepareToPlay/releaseResources の publishAtomic release と HB
+            const bool hasPreviousIR = (owner != nullptr) && convo::consumeAtomic(owner->currentIRState, std::memory_order_acquire) != nullptr;
+            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire) && hasPreviousIR; // acquire: prepareToPlay/releaseResources の publishAtomic release と HB
             const bool highRateLive = liveReconfigure && sampleRate >= 96000.0;
 
             const int optimFreqPoints = liveReconfigure ? (highRateLive ? 12 : 64) : 256;
@@ -441,9 +485,6 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             designer_config.cmaesInitialSigma = 1.0;
             designer_config.cmaesParams.sigmaMin = 0.002;
             designer_config.cmaesParams.sigmaMax = 2.0;
-#if defined(JUCE_DEBUG)
-            designer_config.cmaesSeed = 0xDEADBEEFCAFEBABEULL;
-#endif
             designer_config.progressCallback = progressCallback;
 
             const bool preferGreedyForLive = liveReconfigure && highRateLive;
@@ -482,6 +523,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(static_cast<int>(designResult)));
 
                 designSuccess = (designResult == convo::DesignResult::Success);
+                optimizedByCmaes = designSuccess;
 
                 if (!designSuccess && !(shouldExit && shouldExit()))
                 {
@@ -520,6 +562,9 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 linearSpec.get()[k].real = h_mixed.real();
                 linearSpec.get()[k].imag = h_mixed.imag();
             }
+
+            // Allpass sections をキャプチャ（ディスクキャッシュ保存用）
+            lastAllpassSections = allpass_sections;
 
             if (DftiComputeBackward(dfti.handle, linearSpec.get()) != DFTI_NO_ERROR)
                 return {};
@@ -628,12 +673,35 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             key.tau = static_cast<float>(tau);
             key.targetLength = linearIR.getNumSamples();
 
-            const juce::ScopedLock sl(owner->cacheMutex);
-            ConvolverProcessor::CacheEntry entry;
-            entry.ir = std::make_unique<juce::AudioBuffer<double>>(mixedIR);
-            entry.lastUsedTime = juce::Time::getMillisecondCounter();
-            owner->irCache[key] = std::move(entry);
-            owner->evictOldestCacheEntry();
+            // メモリキャッシュに保存
+            {
+                const juce::ScopedLock sl(owner->cacheMutex);
+                ConvolverProcessor::CacheEntry entry;
+                entry.ir = std::make_unique<juce::AudioBuffer<double>>(mixedIR);
+                entry.lastUsedTime = juce::Time::getMillisecondCounter();
+                for (const auto& sec : lastAllpassSections)
+                    entry.allpassSections.push_back({ sec.rho, sec.theta });
+                owner->irCache[key] = std::move(entry);
+                owner->evictOldestCacheEntry();
+            }
+
+            // ディスクキャッシュに保存（CMA-ES最適化成功時のみ。GreedyAdaGradの簡易結果は保存しない）
+            if (optimizedByCmaes)
+            {
+                std::vector<double> rho, theta;
+                for (const auto& sec : lastAllpassSections)
+                {
+                    rho.push_back(sec.rho);
+                    theta.push_back(sec.theta);
+                }
+                convo::MixedPhasePersistentCache::save(
+                    key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
+                    key.f1, key.f2, key.tau, key.targetLength,
+                    mixedIR, rho, theta);
+
+                // ディスクキャッシュのLRUエビクション
+                convo::MixedPhasePersistentCache::evictLRU(owner->getMaxCacheEntries());
+            }
         }
 
         if (progressCallback) progressCallback(1.0f);

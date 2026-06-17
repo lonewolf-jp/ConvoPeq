@@ -48,10 +48,12 @@ void DSPQuarantineManager::reclaimSlot(uint32_t slot, uint64_t generation)
         return;
 
     // ★ generation 一致確認: 異なる場合は削除しない
+    // ★ PR1: generation==0 の場合は generation チェックをスキップ
+    //   （再評価ループでは正確な generation を保持していないため）
     bool found = false;
     for (auto& entry : auditLog_) {
         if (entry.slot == slot && !entry.resolved) {
-            if (entry.generation != generation) {
+            if (generation != 0 && entry.generation != generation) {
                 // generation が異なる → 新しい隔離情報を誤って消さない
                 return;
             }
@@ -152,6 +154,14 @@ void DSPQuarantineManager::compactAuditLog() noexcept
     }
     if (it != auditLog_.begin())
         auditLog_.erase(auditLog_.begin(), it);
+}
+
+// ★ PR1: quarantineActiveFlags_[] の確認（residentCount と同パターン）
+bool DSPQuarantineManager::isActive(uint32_t slot) const noexcept
+{
+    if (slot >= kMaxSlots)
+        return false;
+    return convo::consumeAtomic(quarantineActiveFlags_[slot], std::memory_order_acquire);
 }
 
 } // namespace convo::isr
