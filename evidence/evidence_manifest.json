@@ -1,19 +1,12 @@
-﻿{
-    "generatedAtNs":  1781697636111000000,
-    "runId":  "90cbb85c83064b1f8a1957a1a2a163c4",
-    "schema":  "evidence_manifest_v1",
-    "artifacts":  [
-                      "closure_graph.json",
-                      "hb_graph_trace.json",
-                      "hb_violation_report.json",
-                      "mutation_fault_trace.json",
-                      "payload_tier_report.json",
-                      "retire_latency_report.json",
-                      "retire_timeline.json",
-                      "runtime_budget_report.json",
-                      "shadow_compare_cadence.json",
-                      "shutdown_trace.json"
-                  ],
-    "generator":  "isr-seed-evidence.ps1",
-    "generationMode":  "seed"
+{
+  "schema": "evidence_manifest_v1",
+  "generationMode": "runtime",
+  "runtimeRunId": "runtime-local",
+  "runId": "runtime-local",
+  "buildMode": "Release",
+  "proofLevel": "off",
+  "generatedAtNs": 65135393136000,
+  "artifacts": [
+  ],
+  "minimalEvidence": true
 }

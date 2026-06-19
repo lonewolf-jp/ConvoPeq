@@ -161,6 +161,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
+        // ★ ISR準拠: RuntimeWorld 経由でサンプルレートを取得。
+        //   RuntimeBuilder は worldOwner->timing.sampleRateHz を
+        //   buildRuntimePublishWorld() 時に DSPCore の sampleRate から設定するため、
+        //   dsp->sampleRate と runtimeWorld->timing.sampleRateHz は常に一致する。
         const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         if (engineSampleRate <= 0.0
             || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)

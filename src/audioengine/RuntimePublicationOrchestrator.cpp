@@ -95,11 +95,45 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Built, nowUs);
 
-    // Step 2b: Crossfade decision using RuntimeWorld projection values
-    // (DSPCore 直読は行わない)
+    // Step 2b: Crossfade decision using RuntimeWorld projection values + Policy
+    // (DSPCore 直読は行わない。evaluate は engine に依存しない純粋関数)
     const auto* oldWorld = engine_.observePublishedWorld();
-    CrossfadeAuthority crossfade;
-    auto cfDecision = crossfade.evaluate(engine_, *oldWorld, *worldOwner);
+    if (oldWorld == nullptr)
+    {
+        // ★ Release-only crash fix: runtimeStore が null の場合の安全ガード。
+        //   bootstrap world が公開されていない初回起動時に rebuild thread から
+        //   trySubmit() が呼ばれた場合に発生しうる。
+        //   この場合はクロスフェード不要として続行する。
+        DBG("[DIAG] trySubmit: oldWorld is null - skipping crossfade evaluation, proceeding directly");
+    }
+
+    convo::isr::CrossfadeAuthority::Decision cfDecision {};
+    if (oldWorld != nullptr)
+    {
+        auto policy = engine_.makeCrossfadePolicy();
+        CrossfadeAuthority crossfade;
+        cfDecision = crossfade.evaluate(*oldWorld, *worldOwner, policy);
+    }
+    else
+    {
+        cfDecision.needsCrossfade = false;
+        cfDecision.fadeTimeSec = 0.0;
+        cfDecision.oldHasIR = false;
+        cfDecision.newHasIR = worldOwner->dspProjection.irLoaded;
+    }
+
+    // ★ Phase-2: HealthState Critical 時は crossfade を強制抑制
+    //   evaluate の結果を上書きする形で、Orchestrator レベルでの抑制を行う。
+    {
+        auto ref = engine_.getHealthStateRef();
+        if (ref) {
+            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+            if (health == convo::ISRHealthState::Critical) {
+                cfDecision.needsCrossfade = false;
+                cfDecision.fadeTimeSec = 0.0;
+            }
+        }
+    }
 
     // Step 2c: Update world with crossfade decision if needed
     // ★ oldDSP が nullptr の場合はクロスフェード不能 — 判定を無効化する
@@ -120,6 +154,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
 
     auto result = executor_.publish(engine_, std::move(worldOwner));
     if (result != PublishResult::Success) {
+        juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
+            + juce::String(req.generation)
+            + " result=" + juce::String(static_cast<int>(result)));
         // publish 失敗: activate/crossfade/retire は一切行わない
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
@@ -134,6 +171,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         return PublicationAdmission::Decision::RejectedShutdown;
     }
 
+    juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish SUCCEEDED gen="
+        + juce::String(req.generation));
     // ★ v19: StateOwner + TelemetryRecorder: Published 記録
     stateOwner_.onPublished(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,

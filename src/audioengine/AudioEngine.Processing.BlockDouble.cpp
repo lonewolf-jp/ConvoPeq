@@ -132,6 +132,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
+    // ★ ISR準拠: RuntimeWorld 経由でサンプルレートを取得。
+    //   RuntimeBuilder は worldOwner->timing.sampleRateHz を
+    //   buildRuntimePublishWorld() 時に DSPCore の sampleRate から設定するため、
+    //   dsp->sampleRate と runtimeWorld->timing.sampleRateHz は常に一致する。
     const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
     if (engineSampleRate <= 0.0
         || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)

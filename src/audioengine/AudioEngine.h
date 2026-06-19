@@ -298,6 +298,7 @@ static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
 namespace convo::isr {
     class PublicationExecutor;
     class DSPTransition;
+    struct CrossfadePolicy;  // ★ 前方宣言（完全型は CrossfadeAuthority.h）
 }
 
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
@@ -803,6 +804,18 @@ public:
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
     [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
         return m_healthMonitor.getHealthStateRef();
+    }
+
+    // ★ Phase-2: NonRT(MessageThread) → Policy 生成時に acquire で読み取り
+    //   書き込み元: prepareToPlay() (MessageThread) :: release
+    //   実装は AudioEngine.Orchestrator.cpp (CrossfadeAuthority.h 完全型が必要)
+    [[nodiscard]] convo::isr::CrossfadePolicy makeCrossfadePolicy() const noexcept;
+
+    // ★ Phase-2.5: DSPTransition 等から HealthEvent を非同期投入
+    //   DSPTransition は Non-RT スレッドで動作するため、onHealthEvent を直接呼び出しても安全。
+    //   Timer 経由の async 化（SPSC queue → Timer tick → onHealthEvent）は将来の最適化対象。
+    void enqueueHealthEvent(const convo::HealthEvent& event) noexcept {
+        onHealthEvent(event);
     }
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
@@ -2733,6 +2746,10 @@ public:
             // Delegation to independent validator (#21 Sprint-4)
             const auto result = validator_->validatePublication(world);
             if (!result.isValid) {
+                // ★ P0-3: Validator 失敗理由を HealthMonitor 経由で非同期通知
+                //   （runPublicationPrecheckNonRt の重複 Validator を削除したため、
+                //    ここで emitValidationEvent を行う）
+                engine_->m_healthMonitor.emitValidationEvent(result.failureReason);
                 return false;
             }
             // Additional engine-specific checks (if any) can be added here
@@ -2812,12 +2829,11 @@ private:
             RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
     }
 
-
-    inline void publishWorld(convo::aligned_unique_ptr<RuntimePublishWorld> worldOwner) noexcept
-    {
-        auto coordinator = makeRuntimePublicationCoordinator();
-        coordinator.publishWorld(std::move(worldOwner));
-    }
+    // ★ P0-1: publishWorld() ラッパーを削除（案A）。
+    //   Coordinator の publishWorld() が PublishStageResult を返すようになったため、
+    //   ラッパー経由では戻り値が失われる。Authority 経路一本化のため、全呼び出し元は
+    //   makeRuntimePublicationCoordinator() + coordinator.publishWorld() を直接使用する。
+    //   ref: ISR Runtime — Authority経路を一本化する方針
 
 public:
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
@@ -3060,7 +3076,11 @@ public:
                                       bool& useDryAsOld,
                                       const CrossfadePreparedSnapshot& prepared) noexcept
     {
-        const bool hasPendingCrossfade = prepared.pending;
+        // ★ Phase-2.5: 無限再Arm防止 — Emergency Override で crossfadeRuntime_.complete() が
+        //   呼ばれても、古いWorldスナップショットが pending=true を返すため毎回再Armされる。
+        //   crossfadeRuntime_.isPending() のAND条件により「Worldは要求しているがRuntimeは既に完了」
+        //   を検出し、Armを抑制する。
+        const bool hasPendingCrossfade = prepared.pending && crossfadeRuntime_.isPending();
 
         if (!hasPendingCrossfade)
         {

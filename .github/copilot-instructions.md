@@ -123,33 +123,41 @@
 - プロジェクト規約を自動検出し遵守すること。
 - 不要な巻き込み変更は行わないこと。
 
-<!-- rtk-instructions v2 -->
-# RTK — Token-Optimized CLI
+<!-- headroom-instructions -->
+# headroom — Context Compression Layer
 
-**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
+**headroom** (v0.26.0) は AI エージェント向けコンテキスト圧縮レイヤーです。
+全てのシェルコマンド出力は **headroom Proxy モード** を通して圧縮されます。
 
-## Rule
+## 使用方法
 
-Always prefix shell commands with `rtk`:
-
-```bash
-# Instead of:              Use:
-git status                 rtk git status
-git log -10                rtk git log -10
-cargo test                 rtk cargo test
-docker ps                  rtk docker ps
-kubectl get pods           rtk kubectl pods
+Proxy モード（推奨）:
+```powershell
+headroom proxy --port 8787           # プロキシ起動（コード変更不要）
+headroom wrap claude                  # Claude Code ラップ
+headroom wrap copilot                # Copilot CLI ラップ
 ```
 
-## Meta commands (use directly)
-
+バンドルCLIツール:
 ```bash
-rtk gain              # Token savings dashboard
-rtk gain --history    # Per-command savings history
-rtk discover          # Find missed rtk opportunities
-rtk proxy <cmd>       # Run raw (no filtering) but track usage
+headroom loc .                       # コード行数カウント (scc)
+headroom diff file1 file2            # 構造的差分 (difftastic)
+headroom sg -p "pattern"             # AST検索/置換 (ast-grep)
+headroom memory list                 # メモリ一覧
 ```
-<!-- /rtk-instructions -->
+
+ライブラリモード (Python):
+```python
+from headroom import SmartCrusher, SmartCrusherConfig
+sc = SmartCrusher(SmartCrusherConfig())
+result = sc.crush(json_data)         # JSON~52%圧縮
+```
+
+環境変数:
+```powershell
+$env:HEADROOM_OUTPUT_SHAPER = "1"    # 出力トークン削減
+```
+<!-- /headroom-instructions -->
 
 ## graphify
 

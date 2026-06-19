@@ -79,7 +79,15 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
         diagLog("[DIAG] prepareToPlay: rebuild thread started");
     }
-    diagLog("[DIAG] prepareToPlay: rebuild thread check done");
+
+    // ★ Release-only crash fix #2: rebuildRequestGeneration をリセットして、新規 rebuild の
+    //   publish が世代不一致で拒否されるのを防ぐ。
+    //   closeAudioDevice() 経由の releaseResources() が rebuildRequestGeneration を
+    //   インクリメントするため、prepareToPlay 後に submit される最初の rebuild intent が
+    //   古い世代番号を持ち、admission の staleness check で常に RejectedStaleGeneration と
+    //   なってしまう問題を修正する。
+    convo::publishAtomic(rebuildRequestGeneration, 0, std::memory_order_release);
+    diagLog("[DIAG] prepareToPlay: rebuild request generation reset to 0");
 
     // ★ P1-6: 出版停滞監視のタイムスタンプを再初期化
     if (runtimeOrchestrator_) {

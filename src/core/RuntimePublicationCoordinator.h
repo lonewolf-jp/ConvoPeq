@@ -94,10 +94,14 @@ public:
         shutdownClearRequested_ = true;
     }
 
-    void publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
+    // ★ P0-1: publishWorld が PublishStageResult を返すよう変更
+    //   Validation 拒否時: Rejected
+    //   Null/異常時:      Failed
+    //   成功時:           Success
+    [[nodiscard]] PublishStageResult publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
     {
         if (!worldOwner)
-            return;
+            return PublishStageResult::Failed;
 
         // [PR-5] Immutable 化: publish 前に sealRecursively() で全フィールドを frozen にする
         worldOwner->sealRecursively();
@@ -108,13 +112,18 @@ public:
             {
                 auto* rejectedWorld = worldOwner.release();
                 bridge_.retireRuntimePublishWorldNonRt(rejectedWorld, false);
-                return;
+                return PublishStageResult::Rejected;
             }
         }
 
         auto* newWorld = worldOwner.release();
         std::atomic_thread_fence(std::memory_order_release);
         auto* oldWorld = writeAccess_.publishAndSwap(newWorld);
+
+        if (oldWorld == nullptr && newWorld == nullptr) {
+            // publishAndSwap が nullptr→nullptr の場合は異常
+            return PublishStageResult::Failed;
+        }
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.didPublishRuntimeNonRt(world); })
         {
@@ -127,6 +136,8 @@ public:
         }
 
         bridge_.retireRuntimePublishWorldNonRt(oldWorld, false);
+
+        return PublishStageResult::Success;
     }
 
 private:

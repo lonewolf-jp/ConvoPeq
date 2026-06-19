@@ -6,7 +6,8 @@
 
 namespace convo::isr {
 
-inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 8u;
+// ★ v9: Phase-2.5 Emergency Override 公式化 + Phase-4 Validator 網羅率拡充
+inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 9u;
 
 enum class SemanticCategory : std::uint8_t
 {

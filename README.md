@@ -3,13 +3,13 @@
 
 ---
 
-## New in v0.6.7
+## New in v0.6.8
 
-- **work37 — Runtime Observability subsystem:** Added `RuntimeHealthMonitor`, `RuntimePolicyEngine`, `TelemetryRecorder`, and `WorldLifecycleAudit` for comprehensive ISR health monitoring, policy-based admission control, and structured telemetry.
-- **work38/39 — Recovery System & Shutdown Hardening:** Major enhancements to `ISRShutdown`, `ISRRetireRouter`, and `RuntimeHealthMonitor` for graceful shutdown and recovery; new `AudioEngine.Processing.ReleaseResources.cpp` and `AudioEngine.Transition.cpp`; recovery system plans and verification docs.
-- **work40 — Build System & Stability:** Removed ~40 per-file split-compile CMake flags (merged into monolithic TU); Intel IPP made optional for CI builds; PDB symbols enabled for Release builds; stability fixes across the board.
-- **DSP & Core Infrastructure:** New `DspNumericPolicy.h`, `IEpochProvider.h`, `CrossfadeRuntime.h`, `RuntimePublicationState.h`; major enhancements to `EpochDomain`, `AudioEngine.Timer`, `SnapshotCoordinator`, and `DSPLifetimeManager`.
-- **Bug fixes across components:** Fixed issues in `EQProcessor`, `NoiseShaperLearner`, `MKLNonUniformConvolver`, `CustomInputOversampler`, `UltraHighRateDCBlocker`, `MklFftEvaluator`, and `DeferredDeletionQueue` — covering stale-state guards, reader-epoch alignment, and memory-safety hardening.
+- **Silent Success elimination:** `RuntimePublicationCoordinator::publishWorld()` now returns `[[nodiscard]] PublishStageResult` instead of `void`; `PublicationExecutor` propagates it to `PublishResult`, enabling the `trySubmit()` failure path in the orchestrator.
+- **Validator fixes:** `RuntimePublicationValidator` now accepts ditherBitDepth=32 and NoiseShaperType::Fixed15Tap(3); `validateTopology` switched from generation-based runtimeUuid rejection to authoritative invariant checks (Option A), allowing Bootstrap/Shutdown worlds with `runtimeUuid==0`.
+- **Double validation removed:** The static `RuntimePublicationValidator` instance was deleted from `runPublicationPrecheckNonRt()`; Bridge-layer `emitValidationEvent` replaces it. The `AudioEngine::publishWorld()` wrapper (which returned `void`) was also deleted — all callers now use `coordinator.publishWorld()` directly.
+- **Non-authoritative observe fixed:** `AudioBlock.cpp` and `BlockDouble.cpp` replaced `consumeAtomic(currentSampleRate)` with `getRuntimeSampleRateHzFromWorld()`, bringing audio-thread observation into ISR compliance.
+- **Supporting changes:** Audio thread safety guard enhanced (`Publication.cpp`), `DSPCoreLifecycle` null-world gap closed, `RuntimeHealthMonitor` validation event emission added, `CrossfadeAuthority` signatures updated, `ISRBarrierOptimizer` removed, `ISRShutdown` lifecycle improved, test suite expanded (445 lines), and version bumped to **v0.6.8**.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 

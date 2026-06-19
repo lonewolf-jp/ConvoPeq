@@ -246,7 +246,42 @@ powershell -File ".github/scripts/check-src-atomic-dotcall.ps1"
 
 ---
 
-## 全体実装スケジュール
+## 実装状況（2026-06-18 追記）
+
+> **全 Phase 完了確認済み ✅**
+
+### 検証結果
+
+| Phase | 内容 | ステータス | 検証方法 |
+|-------|------|-----------|---------|
+| Phase 1 | Tail/Phase 制御 | ✅ **完了** | `rg "tailProcessingMode\|tailRolloffStartHz\|tailRolloffStrength\|partitionTailStrength" src/ --type cpp` → 0件。全フィールドが `PendingOverrideStore` に格納済み |
+| Phase 2 | IR Length/Mixed Transition | ✅ **完了** | 全6フィールド（`targetIRLengthSec`, `autoDetectedIRLengthSec`, `irLengthManualOverride`, `mixedTransitionStartHz`, `mixedTransitionEndHz`, `mixedPreRingTau`）が `PendingOverrideStore` に格納済み |
+| Phase 3 | UI Settings | ✅ **完了** | 全4フィールド（`rebuildDebounceMs`, `targetUpgradeFFTSize`, `enableProgressiveUpgrade`, `maxCacheEntries`）が `PendingOverrideStore` に格納済み |
+
+### 完了確認詳細
+
+各セッターの書き込み先 (`ConvolverProcessor.Runtime.cpp`):
+
+| セッター | 行 | 書き込み先 |
+|---------|----|-----------|
+| `setTailMode()` | 959 | `pendingOverride.tailMode` ✅ |
+| `setTailStartSec()` | 987 | `pendingOverride.tailStartSec` ✅ |
+| `setTailStrength()` | 1006 | `pendingOverride.tailStrength` ✅ |
+| `setTailL1L2Multiplier()` | 1025 | `pendingOverride.tailL1L2Multiplier` ✅ |
+| `setMixedTransitionStartHz()` | 838 | `pendingOverride.mixedTransitionStartHz` ✅ |
+| `setMixedTransitionEndHz()` | 873 | `pendingOverride.mixedTransitionEndHz` ✅ |
+| `setMixedPreRingTau()` | 904 | `pendingOverride.mixedPreRingTau` ✅ |
+| `setTargetIRLength()` | 735 | `pendingOverride.targetIRLengthSec` ✅ |
+| `applyAutoDetectedIRLength()` | 753 | `pendingOverride.autoDetectedIRLengthSec` ✅ |
+| `setMix()` | 689 | `pendingOverride.mix` ✅ |
+| `setBypass()` | 715 | `pendingOverride.bypassed` ✅ |
+
+全 getter は `captureBuildSnapshot()` → `copyPendingToSnapshotUnlocked()` 経由で読み取るため、**pendingOverride が唯一の Source of Truth** であることが確認済み。
+
+### 注意点
+
+`BuildSnapshot` 構造体と `PendingOverrideStore` 構造体がほぼ同一フィールドを持つ二重管理状態にある。
+統合する設計判断は将来のリファクタリング課題。
 
 ### Phase 1: 最優先グループ（グループ 1）
 

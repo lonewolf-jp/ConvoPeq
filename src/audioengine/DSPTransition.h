@@ -51,7 +51,7 @@ public:
                             const CrossfadeAuthority::Decision& decision,
                             DSPLifetimeManager& lifetime) noexcept
     {
-        // ★ S-2: HealthState Critical チェック — Critical 時は crossfade をスキップし即 retire
+        // ★ P2.5-1: Emergency Override — TOCTOU 対策（Admission 通過後 Critical 検知の最終安全網）
         {
             auto ref = engine_.getHealthStateRef();
             if (ref) {
@@ -61,8 +61,14 @@ public:
                     if (oldDSP != nullptr) {
                         engine_.crossfadeRuntime_.complete();
                         lifetime.retire(oldDSP);
+                        // ★ enqueueHealthEvent で非同期投入（層の逆流＋同期実行防止）
+                        const uint64_t abortCount = engine_.crossfadeRuntime_.incrementEmergencyAbortCount();
+                        engine_.enqueueHealthEvent(convo::HealthEvent{convo::getCurrentTimeUs(),
+                            convo::HealthEvent::Severity::Warning,
+                            EVENT_CROSSFADE_ABORTED_EMERGENCY,
+                            abortCount, 0});
                     }
-                    return;
+                    return;  // 通常のクロスフェード処理をスキップ
                 }
             }
         }

@@ -428,6 +428,8 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
         juce::String typeName = "Psychoacoustic";
         if (type == NoiseShaperType::Fixed4Tap)
             typeName = "Fixed4Tap";
+        else if (type == NoiseShaperType::Fixed15Tap)
+            typeName = "Fixed15Tap";
         else if (type == NoiseShaperType::Adaptive9thOrder)
             typeName = "Adaptive9thOrder";
 

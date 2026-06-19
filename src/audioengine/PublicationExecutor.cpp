@@ -11,22 +11,23 @@ PublishResult PublicationExecutor::publish(
     if (!worldOwner)
         return PublishResult::PublishFailed;
 
-    // Phase 1: Validate (via bridge)
+    // Phase 1+2: Delegate to coordinator's publishWorld (validate + publishAndSwap)
+    // ★ P0-2: publishWorld が PublishStageResult を返すようになったため、
+    //   その結果を PublishResult にマッピングする。
     auto coordinator = engine.makeRuntimePublicationCoordinator();
-    // Access the bridge validation through the publish path
-    // Validate using the bridge directly
-    {
-        // Use existing bridge through coordinator's publishWorld logic
-        // We extract validation by attempting publish and catching failure
-        // For PR-1, we use the existing publishWorld path
+    const auto outcome = coordinator.publishWorld(std::move(worldOwner));
+
+    switch (outcome) {
+        case PublishStageResult::Success:
+            return PublishResult::Success;
+        case PublishStageResult::Rejected:
+            return PublishResult::ValidationFailed;
+        case PublishStageResult::Failed:
+            return PublishResult::PublishFailed;
     }
 
-    // Phase 2: PublishAndSwap (use existing coordinator)
-    coordinator.publishWorld(std::move(worldOwner));
-
-    // NOTE: For PR-1, we delegate to the existing coordinator.publishWorld().
-    // In PR-3, this will be replaced with direct store/bridge access.
-    return PublishResult::Success;
+    // fallback (全ての enum 値に対応済みだが、コンパイラ警告対策)
+    return PublishResult::PublishFailed;
 }
 
 } // namespace convo::isr

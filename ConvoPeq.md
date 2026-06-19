@@ -257,17 +257,6 @@
 ### 📄 `CMakeLists.txt`
 
 ```
-# AddressSanitizer (ASan) オプション
-option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
-if(ENABLE_ASAN)
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
-        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
-        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
-    endif()
-endif()
 #============================================================================
 # CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
@@ -1076,6 +1065,20 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
+endif()
+
+#------------------------------------------------------------
+# AddressSanitizer (ASan) オプション（ターゲット定義後でなければならない）
+#------------------------------------------------------------
+option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
+if(ENABLE_ASAN)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
+    endif()
 endif()
 
 #------------------------------------------------------------
@@ -7590,7 +7593,9 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     stage.centerCoeff = rawCoeffs[stage.centerTap];
     stage.centerDelayInput = (stage.centerTap - stage.centerParity) / 2;
     stage.historyUpKeep = juce::jmax(stage.convCount - 1, stage.centerDelayInput);
-    stage.historyDownKeep = juce::jmax(stage.centerTap, stage.convParity + ((stage.convCount - 1) << 1));
+    // loadStride2 が ptr[-6] までアクセスするため、historyDownKeep に +6 マージンを追加
+    // ref: doc/work46/bug.md (Bug #1)
+    stage.historyDownKeep = juce::jmax(stage.centerTap, stage.convParity + ((stage.convCount - 1) << 1) + 6);
 
     stage.upHistorySize = stage.historyUpKeep + stage.maxInputSamples + 16;
     stage.downHistorySize = stage.historyDownKeep + stage.maxOutputSamples + 16;
@@ -7812,6 +7817,10 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     const bool centerTapOk = (keep >= stage.centerTap) && (baseMax < capacity);
 
     // convタップ範囲: 最小convIndex = n=0,r=convCount-1; 最大convIndex = n=outSamples-1,r=0
+    // 注: globalMinConvIdx は loadStride2 の ptr[-6] を考慮しないスカラー最低位置。
+    //     AVX2 パスの実最低アクセスは index 0 となる（prepareStage の +6 マージン保証）。
+    //     globalMinConvIdx >= 0 はスカラー経路の安全条件として十分であり、
+    //     +6 マージンは prepareStage 側で historyDownKeep に組み込まれている。
     const int globalMinConvIdx = keep - stage.convParity - ((stage.convCount - 1) << 1);
     const int globalMaxConvIdx = baseMax - stage.convParity;
     const bool convTapOk = (globalMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
@@ -25275,7 +25284,6 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "RuntimePublicationValidator.h"
 #include "RuntimePublicationOrchestrator.h"
 
 #include <filesystem>
@@ -25406,18 +25414,11 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
-    // Delegate pure validation to RuntimePublicationValidator (Sprint-4 P3-A)
-    static const iso::audio_engine::RuntimePublicationValidator validator;
-
-    const auto validationResult = validator.validatePublication(world);
-    if (!validationResult.isValid) {
-        diagLog(juce::String("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\"")
-            + juce::String(validationResult.errorMessage)
-            + " generation=" + juce::String(static_cast<juce::int64>(world.generation))
-            + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
-            + " runtimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
-        return false;
-    }
+    // ★ P2-2: Validator の重複呼び出しを削除。
+    //   Validator の検証は Bridge 層 (validatePublicationNonRt) で既に実行済み。
+    //   Precheck は Semantic Transaction State / Authority Contract / Shutdown 等の
+    //   エンジン固有チェックに専念する。
+    //   ref: Validator=Authoritative Semantic, Precheck=Projection Integrity の責務分離
 
     forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Building);
 
@@ -27675,6 +27676,8 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
         juce::String typeName = "Psychoacoustic";
         if (type == NoiseShaperType::Fixed4Tap)
             typeName = "Fixed4Tap";
+        else if (type == NoiseShaperType::Fixed15Tap)
+            typeName = "Fixed15Tap";
         else if (type == NoiseShaperType::Adaptive9thOrder)
             typeName = "Adaptive9thOrder";
 
@@ -28138,6 +28141,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
+        // ★ ISR準拠: RuntimeWorld 経由でサンプルレートを取得。
+        //   RuntimeBuilder は worldOwner->timing.sampleRateHz を
+        //   buildRuntimePublishWorld() 時に DSPCore の sampleRate から設定するため、
+        //   dsp->sampleRate と runtimeWorld->timing.sampleRateHz は常に一致する。
         const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         if (engineSampleRate <= 0.0
             || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
@@ -28407,6 +28414,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
+    // ★ ISR準拠: RuntimeWorld 経由でサンプルレートを取得。
+    //   RuntimeBuilder は worldOwner->timing.sampleRateHz を
+    //   buildRuntimePublishWorld() 時に DSPCore の sampleRate から設定するため、
+    //   dsp->sampleRate と runtimeWorld->timing.sampleRateHz は常に一致する。
     const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
     if (engineSampleRate <= 0.0
         || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
@@ -30568,7 +30579,15 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
         diagLog("[DIAG] prepareToPlay: rebuild thread started");
     }
-    diagLog("[DIAG] prepareToPlay: rebuild thread check done");
+
+    // ★ Release-only crash fix #2: rebuildRequestGeneration をリセットして、新規 rebuild の
+    //   publish が世代不一致で拒否されるのを防ぐ。
+    //   closeAudioDevice() 経由の releaseResources() が rebuildRequestGeneration を
+    //   インクリメントするため、prepareToPlay 後に submit される最初の rebuild intent が
+    //   古い世代番号を持ち、admission の staleness check で常に RejectedStaleGeneration と
+    //   なってしまう問題を修正する。
+    convo::publishAtomic(rebuildRequestGeneration, 0, std::memory_order_release);
+    diagLog("[DIAG] prepareToPlay: rebuild request generation reset to 0");
 
     // ★ P1-6: 出版停滞監視のタイムスタンプを再初期化
     if (runtimeOrchestrator_) {
@@ -30967,7 +30986,7 @@ void AudioEngine::releaseResources()
                 + juce::String(kGracefulDrainMaxMs)
                 + "ms, pendingRetireCount="
                 + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
-                + " — forcing drain");
+                + " -- forcing drain");
         }
     }
 
@@ -30987,7 +31006,7 @@ void AudioEngine::releaseResources()
     drainDeferredRetireQueues(true);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
-    // ★ C-2: EmergencyDrain — Optional 最終手段（デフォルトはスキップ）
+    // ★ C-2: EmergencyDrain -- Optional 最終手段（デフォルトはスキップ）
     //   常に EmergencyDrain フェーズを経由（ReclaimComplete+1=EmergencyDrain のため単一遷移）
     //   [work37 Phase 8.2] コンパイル時マクロから実行時判定に変更。
     //   PolicyEngine が requestEmergencyDrain() を設定した場合のみ有効な処理を実行。
@@ -31003,14 +31022,14 @@ void AudioEngine::releaseResources()
         // Deferred publish クリア
         if (runtimeOrchestrator_)
             runtimeOrchestrator_->clearDeferredForShutdown();
-        diagLog("[DIAG] releaseResources: EmergencyDrain — cleared deferred publish");
+        diagLog("[DIAG] releaseResources: EmergencyDrain -- cleared deferred publish");
 
         // 安全な tryReclaim（drainAll 禁止）
         {
             const auto preReclaimPending = m_retireRouter->pendingRetireCount();
             m_epochDomain.tryReclaim();
             const auto postReclaimPending = m_retireRouter->pendingRetireCount();
-            diagLog("[DIAG] releaseResources: EmergencyDrain — tryReclaim done (pending "
+            diagLog("[DIAG] releaseResources: EmergencyDrain -- tryReclaim done (pending "
                 + juce::String(static_cast<int>(preReclaimPending)) + " → "
                 + juce::String(static_cast<int>(postReclaimPending)) + ")");
         }
@@ -31018,7 +31037,7 @@ void AudioEngine::releaseResources()
         // Crossfade timeout recovery の強制実行
         if (crossfadeRuntime_.isPending())
         {
-            diagLog("[DIAG] releaseResources: EmergencyDrain — forcing crossfade recovery");
+            diagLog("[DIAG] releaseResources: EmergencyDrain -- forcing crossfade recovery");
             crossfadeRuntime_.reset();
         }
 
@@ -31033,7 +31052,7 @@ void AudioEngine::releaseResources()
         const auto audit = collectDrainAudit();
         if (!audit.isAllZero() || audit.stuckReaderCount > 0)
         {
-            diagLog("[DIAG] releaseResources: EmergencyDrain (diagnostic only) — "
+            diagLog("[DIAG] releaseResources: EmergencyDrain (diagnostic only) -- "
                 "pendingPub=" + juce::String(static_cast<int64>(audit.pendingPublication)) +
                 " pendingRetire=" + juce::String(static_cast<int64>(audit.pendingRetire)) +
                 " stuckReaders=" + juce::String(static_cast<int64>(audit.stuckReaderCount)));
@@ -31047,7 +31066,7 @@ void AudioEngine::releaseResources()
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="
                     + juce::String(static_cast<int>(residentBefore))
-                    + " — performing shutdown cleanup");
+                    + " -- performing shutdown cleanup");
 
             for (uint32_t slot = 0; slot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++slot) {
                 // 系統②: フラグ確認＋解放（非アクティブなら false → スキップ）
@@ -31072,7 +31091,7 @@ void AudioEngine::releaseResources()
 
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
-    diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");
+    diagLog("[DIAG] releaseResources: VerifyDrained -- collecting drain audit");
 
     const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
     const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
@@ -31277,6 +31296,7 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "CrossfadeAuthority.h"  // ★ CrossfadePolicy 完全型（makeCrossfadePolicy）
 
 //==============================================================================
 // [P0-15] Publication PR: Epoch publication operations
@@ -31302,6 +31322,21 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 uint64_t AudioEngine::advanceRetireEpoch() noexcept
 {
     return m_retireRouter->publishEpoch();
+}
+
+// ★ Phase-2: NonRT → Policy 生成（7個の atomic を acquire で一括読み取り）
+[[nodiscard]] convo::isr::CrossfadePolicy AudioEngine::makeCrossfadePolicy() const noexcept
+{
+    convo::isr::CrossfadePolicy p;
+    p.irFadeTimeSec       = convo::consumeAtomic(m_irFadeTimeSec,       std::memory_order_acquire);
+    p.phaseFadeTimeSec    = convo::consumeAtomic(m_phaseFadeTimeSec,    std::memory_order_acquire);
+    p.tailFadeTimeSec     = convo::consumeAtomic(m_tailFadeTimeSec,     std::memory_order_acquire);
+    p.osFadeTimeSec       = convo::consumeAtomic(m_osFadeTimeSec,       std::memory_order_acquire);
+    p.irLengthFadeTimeSec = convo::consumeAtomic(m_irLengthFadeTimeSec, std::memory_order_acquire);
+    p.directHeadFadeTimeSec = convo::consumeAtomic(m_directHeadFadeTimeSec, std::memory_order_acquire);
+    p.nucFilterFadeTimeSec  = convo::consumeAtomic(m_nucFilterFadeTimeSec,  std::memory_order_acquire);
+    // ★ HealthState は Policy に入れない — Orchestrator または DSPTransition が判断する
+    return p;
 }
 
 ```
@@ -33187,6 +33222,16 @@ void AudioEngine::timerCallback()
                 + " transition(" + juce::String(static_cast<juce::int64>(transitionCurrentUuid))
                 + "->" + juce::String(static_cast<juce::int64>(transitionNextUuid)) + ")");
         }
+        else
+        {
+            // ★ Log world pointer every 10th tick to detect stale cache
+            static int tickCounter = 0;
+            if (++tickCounter % 10 == 0 && runtimeWorld != nullptr)
+            {
+                diagLog("[VERIFY] worldPtr=0x" + juce::String::toHexString(static_cast<juce::int64>(reinterpret_cast<uintptr_t>(runtimeWorld)))
+                    + " rev=" + juce::String(static_cast<juce::int64>(revision)));
+            }
+        }
     }
 
     {
@@ -34389,6 +34434,7 @@ static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
 namespace convo::isr {
     class PublicationExecutor;
     class DSPTransition;
+    struct CrossfadePolicy;  // ★ 前方宣言（完全型は CrossfadeAuthority.h）
 }
 
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
@@ -34894,6 +34940,18 @@ public:
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
     [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
         return m_healthMonitor.getHealthStateRef();
+    }
+
+    // ★ Phase-2: NonRT(MessageThread) → Policy 生成時に acquire で読み取り
+    //   書き込み元: prepareToPlay() (MessageThread) :: release
+    //   実装は AudioEngine.Orchestrator.cpp (CrossfadeAuthority.h 完全型が必要)
+    [[nodiscard]] convo::isr::CrossfadePolicy makeCrossfadePolicy() const noexcept;
+
+    // ★ Phase-2.5: DSPTransition 等から HealthEvent を非同期投入
+    //   DSPTransition は Non-RT スレッドで動作するため、onHealthEvent を直接呼び出しても安全。
+    //   Timer 経由の async 化（SPSC queue → Timer tick → onHealthEvent）は将来の最適化対象。
+    void enqueueHealthEvent(const convo::HealthEvent& event) noexcept {
+        onHealthEvent(event);
     }
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
@@ -36824,6 +36882,10 @@ public:
             // Delegation to independent validator (#21 Sprint-4)
             const auto result = validator_->validatePublication(world);
             if (!result.isValid) {
+                // ★ P0-3: Validator 失敗理由を HealthMonitor 経由で非同期通知
+                //   （runPublicationPrecheckNonRt の重複 Validator を削除したため、
+                //    ここで emitValidationEvent を行う）
+                engine_->m_healthMonitor.emitValidationEvent(result.failureReason);
                 return false;
             }
             // Additional engine-specific checks (if any) can be added here
@@ -36903,12 +36965,11 @@ private:
             RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
     }
 
-
-    inline void publishWorld(convo::aligned_unique_ptr<RuntimePublishWorld> worldOwner) noexcept
-    {
-        auto coordinator = makeRuntimePublicationCoordinator();
-        coordinator.publishWorld(std::move(worldOwner));
-    }
+    // ★ P0-1: publishWorld() ラッパーを削除（案A）。
+    //   Coordinator の publishWorld() が PublishStageResult を返すようになったため、
+    //   ラッパー経由では戻り値が失われる。Authority 経路一本化のため、全呼び出し元は
+    //   makeRuntimePublicationCoordinator() + coordinator.publishWorld() を直接使用する。
+    //   ref: ISR Runtime — Authority経路を一本化する方針
 
 public:
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
@@ -37151,7 +37212,11 @@ public:
                                       bool& useDryAsOld,
                                       const CrossfadePreparedSnapshot& prepared) noexcept
     {
-        const bool hasPendingCrossfade = prepared.pending;
+        // ★ Phase-2.5: 無限再Arm防止 — Emergency Override で crossfadeRuntime_.complete() が
+        //   呼ばれても、古いWorldスナップショットが pending=true を返すため毎回再Armされる。
+        //   crossfadeRuntime_.isPending() のAND条件により「Worldは要求しているがRuntimeは既に完了」
+        //   を検出し、Armを抑制する。
+        const bool hasPendingCrossfade = prepared.pending && crossfadeRuntime_.isPending();
 
         if (!hasPendingCrossfade)
         {
@@ -37967,76 +38032,51 @@ private:
 
 ```
 #include "CrossfadeAuthority.h"
-#include "AudioEngine.h"
 #include "AtomicAccess.h"
+#include <algorithm>
+#include <cstdint>
 
 namespace convo::isr {
 
 CrossfadeAuthority::Decision CrossfadeAuthority::evaluate(
-    const AudioEngine& engine,
     const RuntimePublishWorld& oldWorld,
-    const RuntimePublishWorld& newWorld) noexcept
+    const RuntimePublishWorld& newWorld,
+    const CrossfadePolicy& policy) noexcept
 {
     Decision ctx;
+    // ★ evaluate は純粋に dspProjection 投影値 + Policy 静的設定のみで判断
+    //   Critical 時の crossfade 抑制は Orchestrator（makeCrossfadePolicy 後 evaluate 前）または
+    //   DSPTransition Emergency Override が担当する。evaluate 自身は HealthState を知らない。
 
-    // ★ S-2: HealthState Critical チェック — Critical 時は crossfade 不要として即返却
-    {
-        auto ref = engine.getHealthStateRef();
-        if (ref) {
-            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
-            if (health == convo::ISRHealthState::Critical) {
-                return ctx;  // needsCrossfade = false のまま
-            }
-        }
-    }
-
-    // Use dspProjection values from RuntimeWorld (DSPCore 直読は行わない)
     ctx.oldHasIR = oldWorld.dspProjection.irLoaded;
     ctx.newHasIR = newWorld.dspProjection.irLoaded;
-    const bool hasAudibleConvolverTransition = ctx.oldHasIR || ctx.newHasIR;
-    const bool irPresenceChanged = (ctx.oldHasIR != ctx.newHasIR);
+    const bool hasTransition = ctx.oldHasIR || ctx.newHasIR;
+    const bool irChanged = (ctx.oldHasIR != ctx.newHasIR);
 
-    // Oversampling change detection
-    if (hasAudibleConvolverTransition
-        && newWorld.dspProjection.oversamplingFactor != oldWorld.dspProjection.oversamplingFactor)
-    {
+    if (hasTransition && newWorld.dspProjection.oversamplingFactor != oldWorld.dspProjection.oversamplingFactor) {
         ctx.needsCrossfade = true;
-        ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-            convo::consumeAtomic(engine.m_osFadeTimeSec, std::memory_order_acquire));
+        ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.osFadeTimeSec);
     }
-
-    // IR structural change detection
-    if (hasAudibleConvolverTransition)
-    {
-        const uint64_t oldHash = oldWorld.dspProjection.structuralHash;
-        const uint64_t newHash = newWorld.dspProjection.structuralHash;
-        if (oldHash != newHash)
-        {
+    if (hasTransition) {
+        const uint64_t oh = oldWorld.dspProjection.structuralHash;
+        const uint64_t nh = newWorld.dspProjection.structuralHash;
+        if (oh != nh) {
             ctx.needsCrossfade = true;
-            const double baseIrFade = convo::consumeAtomic(
-                engine.m_irFadeTimeSec, std::memory_order_acquire);
-            if (irPresenceChanged)
-            {
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    std::clamp(baseIrFade, 0.001, 0.010));
-            }
-            else
-            {
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, baseIrFade);
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_irLengthFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_phaseFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_directHeadFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_nucFilterFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_tailFadeTimeSec, std::memory_order_acquire));
+            if (irChanged) {
+                double clamped = policy.irFadeTimeSec;
+                if (clamped < 0.001) clamped = 0.001;
+                if (clamped > 0.010) clamped = 0.010;
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, clamped);
+            } else {
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.irFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.irLengthFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.phaseFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.directHeadFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.nucFilterFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.tailFadeTimeSec);
             }
         }
     }
-
     return ctx;
 }
 
@@ -38053,6 +38093,19 @@ CrossfadeAuthority::Decision CrossfadeAuthority::evaluate(
 
 namespace convo::isr {
 
+// ★ CrossfadePolicy: immutable POD。メソッドや状態を持たない。
+//   静的設定（フェード時間・閾値）のみを保持し、実行時状態（HealthState）は含めない。
+//   将来 CrossfadeSettings 一括atomic化との統合を考慮し zero-init 必須。
+struct CrossfadePolicy {
+    double osFadeTimeSec{};
+    double irFadeTimeSec{};
+    double irLengthFadeTimeSec{};
+    double phaseFadeTimeSec{};
+    double directHeadFadeTimeSec{};
+    double nucFilterFadeTimeSec{};
+    double tailFadeTimeSec{};
+};
+
 // CrossfadeAuthority: crossfade 判定のみを行う Authority。
 // DSPCore を直接参照せず、RuntimeWorld.dspProjection の投影値のみで判断する。
 // Registration (registerCrossfade) は DSPTransition が担当。
@@ -38067,12 +38120,13 @@ public:
 
     explicit CrossfadeAuthority() noexcept = default;
 
-    // evaluate: RuntimeWorld の dspProjection 投影値のみで crossfade 要否を判断。
-    // DSPCore 直読は行わない。engine は atomic フェード時間設定の読み取りにのみ使用。
+    // evaluate: RuntimeWorld の dspProjection 投影値と CrossfadePolicy 静的設定のみで
+    // crossfade 要否を判断。AudioEngine には依存しない。
+    // ★ HealthState Critical の抑制は Orchestrator または DSPTransition Emergency Override が担当。
     [[nodiscard]] Decision evaluate(
-        const AudioEngine& engine,
         const RuntimePublishWorld& oldWorld,
-        const RuntimePublishWorld& newWorld) noexcept;
+        const RuntimePublishWorld& newWorld,
+        const CrossfadePolicy& policy) noexcept;
 
     // [0-6] Coverage Contract: evaluate() が参照する dspProjection 全フィールド名
     static constexpr std::array<const char*, 3> kEvaluateRelevantFieldNames {{
@@ -38230,10 +38284,6 @@ public:
     [[nodiscard]] const convo::LinearRamp& getDryScaleGain() const noexcept { return dryScaleGain_; }
 
     // === NonRT publish setters ===
-    void setUseDryAsOld(bool v) noexcept
-        { convo::publishAtomic(useDryAsOld_, v, std::memory_order_release); }
-    void setFirstIrDryPending(bool v) noexcept
-        { convo::publishAtomic(firstIrDryPending_, v, std::memory_order_release); }
     void setFirstIrDryDone(bool v) noexcept
         { convo::publishAtomic(firstIrDryDone_, v, std::memory_order_release); }
     void setStartDelayBlocks(int v) noexcept
@@ -38242,6 +38292,13 @@ public:
         { convo::publishAtomic(dryHoldSamples_, v, std::memory_order_release); }
     void setDryScaleTarget(double v) noexcept
         { convo::publishAtomic(dryScaleTarget_, v, std::memory_order_release); }
+
+    // ★ Phase-2.5: Emergency Override — 単調増加カウンター
+    [[nodiscard]] uint64_t emergencyAbortCount() const noexcept
+        { return convo::consumeAtomic(m_emergencyAbortCount_, std::memory_order_acquire); }
+    // ★ increment + fetch を原子的に実行（DSPTransition から呼ばれる）
+    uint64_t incrementEmergencyAbortCount() noexcept
+        { return convo::fetchAddAtomic(m_emergencyAbortCount_, 1u, std::memory_order_acq_rel) + 1; }
 
 private:
     std::atomic<bool> pending_{ false };
@@ -38258,6 +38315,8 @@ private:
     SPSCRingBuffer<CompletedFadeEvent, 32> completedFadeQueue_;
     std::atomic<uint64_t> crossfadeEventDropCount_{0};
     std::atomic<uint64_t> fadeStartTimestampUs_{0};
+    // ★ Phase-2.5: Emergency Override カウンター
+    std::atomic<uint64_t> m_emergencyAbortCount_{0};
     // activeCrossfadeId_ は CrossfadeRuntime に持たせない
     // CrossfadeAuthorityRuntime が唯一権威
 };
@@ -38401,7 +38460,7 @@ public:
                             const CrossfadeAuthority::Decision& decision,
                             DSPLifetimeManager& lifetime) noexcept
     {
-        // ★ S-2: HealthState Critical チェック — Critical 時は crossfade をスキップし即 retire
+        // ★ P2.5-1: Emergency Override — TOCTOU 対策（Admission 通過後 Critical 検知の最終安全網）
         {
             auto ref = engine_.getHealthStateRef();
             if (ref) {
@@ -38411,8 +38470,14 @@ public:
                     if (oldDSP != nullptr) {
                         engine_.crossfadeRuntime_.complete();
                         lifetime.retire(oldDSP);
+                        // ★ enqueueHealthEvent で非同期投入（層の逆流＋同期実行防止）
+                        const uint64_t abortCount = engine_.crossfadeRuntime_.incrementEmergencyAbortCount();
+                        engine_.enqueueHealthEvent(convo::HealthEvent{convo::getCurrentTimeUs(),
+                            convo::HealthEvent::Severity::Warning,
+                            EVENT_CROSSFADE_ABORTED_EMERGENCY,
+                            abortCount, 0});
                     }
-                    return;
+                    return;  // 通常のクロスフェード処理をスキップ
                 }
             }
         }
@@ -43377,7 +43442,8 @@ private:
 
 namespace convo::isr {
 
-inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 8u;
+// ★ v9: Phase-2.5 Emergency Override 公式化 + Phase-4 Validator 網羅率拡充
+inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 9u;
 
 enum class SemanticCategory : std::uint8_t
 {
@@ -44850,22 +44916,23 @@ PublishResult PublicationExecutor::publish(
     if (!worldOwner)
         return PublishResult::PublishFailed;
 
-    // Phase 1: Validate (via bridge)
+    // Phase 1+2: Delegate to coordinator's publishWorld (validate + publishAndSwap)
+    // ★ P0-2: publishWorld が PublishStageResult を返すようになったため、
+    //   その結果を PublishResult にマッピングする。
     auto coordinator = engine.makeRuntimePublicationCoordinator();
-    // Access the bridge validation through the publish path
-    // Validate using the bridge directly
-    {
-        // Use existing bridge through coordinator's publishWorld logic
-        // We extract validation by attempting publish and catching failure
-        // For PR-1, we use the existing publishWorld path
+    const auto outcome = coordinator.publishWorld(std::move(worldOwner));
+
+    switch (outcome) {
+        case PublishStageResult::Success:
+            return PublishResult::Success;
+        case PublishStageResult::Rejected:
+            return PublishResult::ValidationFailed;
+        case PublishStageResult::Failed:
+            return PublishResult::PublishFailed;
     }
 
-    // Phase 2: PublishAndSwap (use existing coordinator)
-    coordinator.publishWorld(std::move(worldOwner));
-
-    // NOTE: For PR-1, we delegate to the existing coordinator.publishWorld().
-    // In PR-3, this will be replaced with direct store/bridge access.
-    return PublishResult::Success;
+    // fallback (全ての enum 値に対応済みだが、コンパイラ警告対策)
+    return PublishResult::PublishFailed;
 }
 
 } // namespace convo::isr
@@ -45293,7 +45360,7 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
         worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
 
-        worldOwner->overlap.useDryAsOld = active;
+        worldOwner->overlap.useDryAsOld = (policy == convo::TransitionPolicy::DryAsOld);
         worldOwner->overlap.fadeTimeSec = fadeTimeSec;
         worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
         worldOwner->overlap.dryScaleTarget = dryScaleTarget;
@@ -45774,6 +45841,7 @@ struct RuntimeGraph
 
 ```
 #include "RuntimeHealthMonitor.h"
+#include "RuntimePublicationValidator.h"  // ★ Phase-1.5: ValidationFailureReason 完全型
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/RuntimePublicationOrchestrator.h"
 #include "audioengine/CrossfadeRuntime.h"  // ★ P1-C: 完全型必要（isPending/getFadeAgeUs）
@@ -46982,6 +47050,41 @@ void RuntimeHealthMonitor::reset() noexcept
     m_backpressureWindow_.reset();
     // [work39 Phase 7] Critical 出口状態リセット
     m_criticalExitStableStartUs_ = 0;
+
+    // ★ Phase-1.5: Validator Telemetry レート制限タイムスタンプリセット
+    for (auto& t : m_lastValidationEventUs_)
+        convo::publishAtomic(t, uint64_t{0}, std::memory_order_release);
+}
+
+// ★ Phase-1.5: Validator Telemetry — ValidationFailure を HealthEvent として発行
+void RuntimeHealthMonitor::emitValidationEvent(
+    iso::audio_engine::ValidationFailureReason reason) noexcept
+{
+    uint32_t eventCode = 0;
+    size_t idx = 0;
+    switch (reason) {
+        using enum iso::audio_engine::ValidationFailureReason;
+        case SemanticInconsistency:
+            eventCode = EVENT_VALIDATION_SEMANTIC_FAILURE; idx = 0; break;
+        case InvalidTopology:
+            eventCode = EVENT_VALIDATION_TOPOLOGY_FAILURE; idx = 1; break;
+        case InvalidResources:
+            eventCode = EVENT_VALIDATION_RESOURCE_FAILURE; idx = 2; break;
+        case InvalidTransition:
+            eventCode = EVENT_VALIDATION_TRANSITION_FAILURE; idx = 3; break;
+        default: return;
+    }
+    // ★ Validation failure は publish thread 単一からのみ発生。
+    //   CAS は過剰設計。単純な load + store で十分。
+    const uint64_t last = convo::consumeAtomic(
+        m_lastValidationEventUs_[idx], std::memory_order_acquire);
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    if (nowUs - last >= kValidationEventMinIntervalUs) {
+        convo::publishAtomic(m_lastValidationEventUs_[idx], nowUs, std::memory_order_release);
+        if (m_callback)
+            m_callback(convo::HealthEvent{nowUs, convo::HealthEvent::Severity::Warning,
+                                         eventCode, 0, 0});
+    }
 }
 
 } // namespace convo
@@ -46992,6 +47095,7 @@ void RuntimeHealthMonitor::reset() noexcept
 
 ```
 #pragma once
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -46999,6 +47103,10 @@ void RuntimeHealthMonitor::reset() noexcept
 #include "RuntimePolicyEngine.h"  // ★ work37 Phase 4: PolicyEngine 連携
 
 class AudioSegmentBuffer;  // ★ Work39: Learner FIFO 監視用（global scope）
+
+namespace iso::audio_engine {
+    enum class ValidationFailureReason : uint8_t;
+}
 
 namespace convo {
 
@@ -47037,6 +47145,7 @@ static constexpr uint32_t EVENT_READER_STUCK         = 3001;
 static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
 static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
 static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+static constexpr uint32_t EVENT_CROSSFADE_ABORTED_EMERGENCY = 4003;  // ★ Phase-2.5: Emergency Override
 // ★ Work39: Learner FIFO Backpressure
 static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_WARNING = 5001;  // FIFO 85%+
 static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95%+
@@ -47044,6 +47153,11 @@ static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95
 static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
 static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
+// ★ Phase-1.5: Validator Telemetry
+static constexpr uint32_t EVENT_VALIDATION_SEMANTIC_FAILURE     = 6000;
+static constexpr uint32_t EVENT_VALIDATION_TOPOLOGY_FAILURE   = 6001;
+static constexpr uint32_t EVENT_VALIDATION_RESOURCE_FAILURE   = 6002;
+static constexpr uint32_t EVENT_VALIDATION_TRANSITION_FAILURE = 6003;
 
 // ★ P1-C: Crossfade Timeout（固定30秒）
 static constexpr uint64_t kCrossfadeTimeoutUs = 30'000'000;
@@ -47218,6 +47332,9 @@ public:
     // ★ 8.6: ReaderStuck 定期Evidence 出力用定数
     static constexpr uint64_t kStuckEvidenceIntervalUs = 10'000'000; // 10秒間隔
 
+    // ★ Phase-1.5: Validator Telemetry — ValidationFailure を HealthEvent として発行
+    void emitValidationEvent(iso::audio_engine::ValidationFailureReason reason) noexcept;
+
     // ★ P1-B: HealthState 公開 — Admission が参照する
     [[nodiscard]] ISRHealthState getHealthState() const noexcept {
         return convo::consumeAtomic(m_healthState_, std::memory_order_acquire);
@@ -47284,6 +47401,11 @@ private:
     const std::atomic<double>* m_maxRetireAgeDoubleRef{nullptr};
     const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
     const std::atomic<uint64_t>* m_overflowCountRef = nullptr;   // ★ Practical-3
+    // ★ Phase-1.5: Validator Telemetry — レート制限用タイムスタンプ配列
+    static constexpr size_t kValidationReasonCount = 4;  // Semantic, Topology, Resource, Transition
+    std::array<std::atomic<uint64_t>, kValidationReasonCount> m_lastValidationEventUs_{};
+    static constexpr uint64_t kValidationEventMinIntervalUs = 1'000'000;
+
     // ★ P1-C drop: 差分検出用ローカル状態
     uint64_t m_lastObservedDropCount = 0;
 
@@ -48193,11 +48315,45 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Built, nowUs);
 
-    // Step 2b: Crossfade decision using RuntimeWorld projection values
-    // (DSPCore 直読は行わない)
+    // Step 2b: Crossfade decision using RuntimeWorld projection values + Policy
+    // (DSPCore 直読は行わない。evaluate は engine に依存しない純粋関数)
     const auto* oldWorld = engine_.observePublishedWorld();
-    CrossfadeAuthority crossfade;
-    auto cfDecision = crossfade.evaluate(engine_, *oldWorld, *worldOwner);
+    if (oldWorld == nullptr)
+    {
+        // ★ Release-only crash fix: runtimeStore が null の場合の安全ガード。
+        //   bootstrap world が公開されていない初回起動時に rebuild thread から
+        //   trySubmit() が呼ばれた場合に発生しうる。
+        //   この場合はクロスフェード不要として続行する。
+        DBG("[DIAG] trySubmit: oldWorld is null - skipping crossfade evaluation, proceeding directly");
+    }
+
+    convo::isr::CrossfadeAuthority::Decision cfDecision {};
+    if (oldWorld != nullptr)
+    {
+        auto policy = engine_.makeCrossfadePolicy();
+        CrossfadeAuthority crossfade;
+        cfDecision = crossfade.evaluate(*oldWorld, *worldOwner, policy);
+    }
+    else
+    {
+        cfDecision.needsCrossfade = false;
+        cfDecision.fadeTimeSec = 0.0;
+        cfDecision.oldHasIR = false;
+        cfDecision.newHasIR = worldOwner->dspProjection.irLoaded;
+    }
+
+    // ★ Phase-2: HealthState Critical 時は crossfade を強制抑制
+    //   evaluate の結果を上書きする形で、Orchestrator レベルでの抑制を行う。
+    {
+        auto ref = engine_.getHealthStateRef();
+        if (ref) {
+            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+            if (health == convo::ISRHealthState::Critical) {
+                cfDecision.needsCrossfade = false;
+                cfDecision.fadeTimeSec = 0.0;
+            }
+        }
+    }
 
     // Step 2c: Update world with crossfade decision if needed
     // ★ oldDSP が nullptr の場合はクロスフェード不能 — 判定を無効化する
@@ -48218,6 +48374,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
 
     auto result = executor_.publish(engine_, std::move(worldOwner));
     if (result != PublishResult::Success) {
+        juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
+            + juce::String(req.generation)
+            + " result=" + juce::String(static_cast<int>(result)));
         // publish 失敗: activate/crossfade/retire は一切行わない
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
@@ -48232,6 +48391,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         return PublicationAdmission::Decision::RejectedShutdown;
     }
 
+    juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish SUCCEEDED gen="
+        + juce::String(req.generation));
     // ★ v19: StateOwner + TelemetryRecorder: Published 記録
     stateOwner_.onPublished(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
@@ -48870,6 +49031,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!validateSemanticConsistency(world)) {
         result.isValid = false;
         result.errorMessage = "Semantic consistency check failed";
+        result.failureReason = ValidationFailureReason::SemanticInconsistency;
         return result;
     }
 
@@ -48877,6 +49039,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!validateTopology(world)) {
         result.isValid = false;
         result.errorMessage = "Topology validation failed";
+        result.failureReason = ValidationFailureReason::InvalidTopology;
         return result;
     }
 
@@ -48884,6 +49047,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!validateResources(world)) {
         result.isValid = false;
         result.errorMessage = "Resource availability check failed";
+        result.failureReason = ValidationFailureReason::InvalidResources;
         return result;
     }
 
@@ -48891,6 +49055,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!checkNoConflictingTransitions(world)) {
         result.isValid = false;
         result.errorMessage = "Conflicting transitions detected";
+        result.failureReason = ValidationFailureReason::InvalidTransition;
         return result;
     }
 
@@ -48914,39 +49079,77 @@ bool RuntimePublicationValidator::validateSemanticConsistency(
         return false;
     }
 
+    // ★ P4-1: Publication sequence — generation > 0 なら sequenceId が 0 でないこと
+    //   Bootstrap world (generation=0) でも sequenceId は通常 1 以上だが、
+    //   generation を Bootstrap 判別の唯一の基準とする
+    if (world.generation > 0 && world.publication.sequenceId == 0)
+        return false;
+
     return true;
 }
 
 bool RuntimePublicationValidator::validateTopology(
     const RuntimePublishWorld& world) const
 {
-    // Validate routing topology
-    // - No circular dependencies
-    // - All sources have valid destinations
-    // - Buffer sizes are within acceptable ranges
+    const auto& topology = world.topology;
 
-    [[maybe_unused]] const auto& routing = world.routing;
+    // ★ P2-1: runtimeUuid==0 を Bootstrap/Shutdown として許容（選択肢A）
+    //   ただし、runtimeUuid==0 時の不変条件に違反する場合は拒否:
+    //   - transitionActive==true との矛盾
+    //   - hasFadingRuntime==true との矛盾
+    //   - fadingRuntimeUuid!=0 との矛盾
+    if (topology.runtimeUuid == 0) {
+        // Authoritative 不変条件:
+        if (world.execution.transitionActive) return false;
+        if (topology.hasFadingRuntime) return false;
+        if (topology.fadingRuntimeUuid != 0) return false;
+    }
 
-    // Basic topology checks (implementation details depend on RoutingSemantic structure)
-    // This is a placeholder for actual topology validation logic
+    // hasFadingRuntime と fadingRuntimeUuid の整合性
+    if (topology.hasFadingRuntime != (topology.fadingRuntimeUuid != 0))
+        return false;
 
-    return true; // Placeholder
+    // hasFadingRuntime と transitionActive の自己整合性（RuntimeWorld Semantic の不変条件）
+    if (topology.hasFadingRuntime != world.execution.transitionActive)
+        return false;
+
+    // ★ P4-1: RoutingSemantic — processingOrder は 0 または 1 のみ許容
+    if (world.routing.processingOrder < 0 || world.routing.processingOrder > 1)
+        return false;
+
+    // ★ Cycle detection: 現在のルーティングモデル（processingOrder 0/1 のみ）では
+    //   サイクルは発生不可能（単一方向の線形パスのみ）。将来グラフベースルーティング
+    //   拡張時は、ここで topological sort / DFS による cycle detection を追加すること。
+    //   ref: doc/work47/resolution_report.md §2.1
+
+    // ★ P4-1: GenerationSemantic — generation > 0 なら runtimeGeneration > 0
+    if (world.generation > 0 && world.generationSemantic.runtimeGeneration == 0)
+        return false;
+
+    return true;
 }
 
 bool RuntimePublicationValidator::validateResources(
     const RuntimePublishWorld& world) const
 {
-    // Validate resource availability
-    // - Memory requirements
-    // - DSP cycle estimates
-    // - Buffer allocations
+    const auto& resource = world.resource;
 
-    [[maybe_unused]] const auto& resource = world.resource;
+    // Oversampling: 2のべき乗かつ1〜16
+    const int os = resource.oversamplingFactor;
+    if (os < 1 || os > 16 || (os & (os - 1)) != 0)
+        return false;
 
-    // Basic resource checks (implementation details depend on ResourceSemantic structure)
-    // This is a placeholder for actual resource validation logic
+    // Dither: 0, 16, 24, 32 のみ許容（kAdaptiveBitDepthValues との整合性）
+    const int dd = resource.ditherBitDepth;
+    if (dd != 0 && dd != 16 && dd != 24 && dd != 32)
+        return false;
 
-    return true; // Placeholder
+    // NoiseShaper: 0, 1, 2, 3 のみ許容（Fixed15Tap の追加）
+    const int ns = resource.noiseShaperType;
+    if (ns < 0 || ns > 3)
+        return false;
+
+    return true;
 }
 
 bool RuntimePublicationValidator::checkExecutionSemanticValidity(
@@ -48985,17 +49188,43 @@ bool RuntimePublicationValidator::checkActivationEpochConsistency(
 bool RuntimePublicationValidator::checkNoConflictingTransitions(
     const RuntimePublishWorld& world) const
 {
-    // Check that there are no conflicting transition states
-    // - Only one active transition at a time
-    // - Crossfade parameters are consistent
+    const auto& exec = world.execution;
+    const auto& overlap = world.overlap;
 
-    [[maybe_unused]] const auto& exec = world.execution;
-    [[maybe_unused]] const auto& overlap = world.overlap;
+    const bool active = exec.transitionActive;
+    const double fade = overlap.fadeTimeSec;
 
-    // Basic conflict detection (implementation details depend on OverlapSemantic structure)
-    // This is a placeholder for actual conflict detection logic
+    if (!active) {
+        // ★ transitionActive=false でも fadeTimeSec が残るケースを許容
+        //   フェード完了直後の Idle World publish 時など、fadeTimeSec が保持されたまま
+        //   遷移する将来実装が入り得る。そのため fade > 0.0 は reject しない。
+        //   ただし負の fade は常に異常値として reject。
+        if (fade < 0.0) return false;
+        // useDryAsOld=true かつ !active は意味論的に矛盾
+        if (overlap.useDryAsOld) return false;
+        return true;
+    }
 
-    return true; // Placeholder
+    const auto policy = static_cast<convo::TransitionPolicy>(exec.transitionPolicy);
+
+    switch (policy) {
+        case convo::TransitionPolicy::SmoothOnly:
+            if (fade < 0.0) return false;  // 負値のみ拒否（0.0はフォールバック機構に委ねる）
+            break;
+        case convo::TransitionPolicy::DryAsOld:
+            if (fade < 0.0) return false;
+            if (!overlap.useDryAsOld) return false;
+            break;
+        case convo::TransitionPolicy::HardReset:
+            if (fade < 0.0) return false;  // 負値も拒否
+            if (fade > 0.0) return false;  // 正値も拒否（HardReset は fade=0.0 のみ許容）
+            if (overlap.useDryAsOld) return false;
+            break;
+        default:
+            return false;  // 未知の policy 値は拒否
+    }
+
+    return true;
 }
 
 } // namespace iso::audio_engine
@@ -49016,24 +49245,46 @@ struct RuntimeState;
 namespace iso::audio_engine {
 using RuntimePublishWorld = ::RuntimeState;
 
+// ★ Validator の公開APIとして ValidationFailureReason を定義
+enum class ValidationFailureReason : uint8_t {
+    None,
+    InvalidTopology,
+    InvalidResources,
+    InvalidTransition,
+    SemanticInconsistency
+};
+
 struct RuntimeValidationResult {
     bool isValid = true;
     std::string errorMessage;
+    ValidationFailureReason failureReason{ValidationFailureReason::None};
 };
 
 /**
  * RuntimePublicationValidator
- * 
+ *
  * 責務: Runtime publication の事前検証 (precheck) を実行する。
- * 
+ *
  * Design Principle:
  * - Pure validation logic only (no side effects)
  * - No dependency on AudioEngine
  * - Stateless (can be shared across threads)
- * 
+ *
  * This class extracts the pure validation logic from
  * AudioEngine::runPublicationPrecheckNonRt() to achieve
  * separation of concerns.
+ *
+ * ★ Phase-4: Builder/Validator 責務定義
+ *   | レイヤ         | 責務                                   | 根拠                                           |
+ *   |----------------|----------------------------------------|------------------------------------------------|
+ *   | RuntimeBuilder | semantic 値の正しい設定                | Builder は各フィールドに適切な値を設定することが責務 |
+ *   | Validator      | 不変条件の最終確認                      | Builder の設定漏れ・バグを検出する安全網           |
+ *   | Orchestrator   | 運用ポリシーの適用                      | HealthState 等の実行時状態に基づく上書き判断       |
+ *
+ *   原則: Builder の通過が Validator 通過を保証するわけではない。
+ *   Validator は Builder とは独立した Permissionless Check として動作する。
+ *   両者が一致していることは望ましいが、Validator は Builder の実装詳細を知らず、
+ *   純粋に世界の状態だけを検証する。
  */
 class RuntimePublicationValidator {
 public:
@@ -49042,7 +49293,7 @@ public:
 
     /**
      * Validate publication before execution.
-     * 
+     *
      * @param world The RuntimePublishWorld to validate
      * @return RuntimeValidationResult with success/failure and error message
      */
@@ -49051,7 +49302,7 @@ public:
 
     /**
      * Validate semantic consistency.
-     * 
+     *
      * @param world The RuntimePublishWorld to validate
      * @return true if semantics are consistent
      */
@@ -49060,7 +49311,7 @@ public:
 
     /**
      * Validate topology constraints.
-     * 
+     *
      * @param world The RuntimePublishWorld to validate
      * @return true if topology is valid
      */
@@ -49068,7 +49319,7 @@ public:
 
     /**
      * Validate resource availability.
-     * 
+     *
      * @param world The RuntimePublishWorld to validate
      * @return true if resources are available
      */
@@ -49078,11 +49329,11 @@ private:
     // Helper methods
     bool checkExecutionSemanticValidity(
         const convo::isr::ExecutionSemantic& exec) const;
-    
+
     bool checkActivationEpochConsistency(
         const convo::isr::GenerationSemantic& gen,
         const convo::isr::TimingSemantic& timing) const;
-    
+
     bool checkNoConflictingTransitions(
         const RuntimePublishWorld& world) const;
 };
@@ -57537,10 +57788,14 @@ public:
         shutdownClearRequested_ = true;
     }
 
-    void publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
+    // ★ P0-1: publishWorld が PublishStageResult を返すよう変更
+    //   Validation 拒否時: Rejected
+    //   Null/異常時:      Failed
+    //   成功時:           Success
+    [[nodiscard]] PublishStageResult publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
     {
         if (!worldOwner)
-            return;
+            return PublishStageResult::Failed;
 
         // [PR-5] Immutable 化: publish 前に sealRecursively() で全フィールドを frozen にする
         worldOwner->sealRecursively();
@@ -57551,13 +57806,18 @@ public:
             {
                 auto* rejectedWorld = worldOwner.release();
                 bridge_.retireRuntimePublishWorldNonRt(rejectedWorld, false);
-                return;
+                return PublishStageResult::Rejected;
             }
         }
 
         auto* newWorld = worldOwner.release();
         std::atomic_thread_fence(std::memory_order_release);
         auto* oldWorld = writeAccess_.publishAndSwap(newWorld);
+
+        if (oldWorld == nullptr && newWorld == nullptr) {
+            // publishAndSwap が nullptr→nullptr の場合は異常
+            return PublishStageResult::Failed;
+        }
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.didPublishRuntimeNonRt(world); })
         {
@@ -57570,6 +57830,8 @@ public:
         }
 
         bridge_.retireRuntimePublishWorldNonRt(oldWorld, false);
+
+        return PublishStageResult::Success;
     }
 
 private:
@@ -64449,9 +64711,9 @@ namespace iso::audio_engine {
 
 /**
  * PublicationValidatorIsolationTests
- * 
+ *
  * 検証対象：RuntimePublicationValidator の分離と純粋性
- * 
+ *
  * Design Contract:
  * - Validator は AudioEngine に依存しない (pure validation logic)
  * - Validator は stateless (shared across threads)
@@ -64467,17 +64729,20 @@ TEST_F(PublicationValidatorIsolationTests, ValidatePublication_SemanticConsisten
     // Arrange: 有効な semantic を持つ world を構築
     // Note: 実際のテストでは RuntimeBuilder を使用して world を生成するべき
     // ここでは簡略化のため、直接フィールドを設定
-    
+
     RuntimePublishWorld world{};
     world.generation = 1;
+    world.topology.runtimeUuid = 100;
     world.generationSemantic.activationEpoch = 100;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
     world.execution.transitionActive = false;
     world.execution.crossfadeStartDelayBlocks = 0;
     world.execution.crossfadeDryHoldSamples = 0;
-    
+
     // Act
     const auto result = validator_.validatePublication(world);
-    
+
     // Assert
     EXPECT_TRUE(result.isValid);
     EXPECT_TRUE(result.errorMessage.empty());
@@ -64487,14 +64752,17 @@ TEST_F(PublicationValidatorIsolationTests, ValidatePublication_InvalidExecutionS
     // Arrange: 無効な execution semantic (negative delay)
     RuntimePublishWorld world{};
     world.generation = 1;
+    world.topology.runtimeUuid = 100;
     world.generationSemantic.activationEpoch = 100;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
     world.execution.transitionActive = false;
     world.execution.crossfadeStartDelayBlocks = -1; // invalid
     world.execution.crossfadeDryHoldSamples = 0;
-    
+
     // Act
     const auto result = validator_.validatePublication(world);
-    
+
     // Assert
     EXPECT_FALSE(result.isValid);
     EXPECT_EQ(result.errorMessage, "Semantic consistency check failed");
@@ -64504,14 +64772,17 @@ TEST_F(PublicationValidatorIsolationTests, ValidatePublication_NegativeDryHoldSa
     // Arrange: 無効な execution semantic (negative dry hold samples)
     RuntimePublishWorld world{};
     world.generation = 1;
+    world.topology.runtimeUuid = 100;
     world.generationSemantic.activationEpoch = 100;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
     world.execution.transitionActive = false;
     world.execution.crossfadeStartDelayBlocks = 0;
     world.execution.crossfadeDryHoldSamples = -100; // invalid
-    
+
     // Act
     const auto result = validator_.validatePublication(world);
-    
+
     // Assert
     EXPECT_FALSE(result.isValid);
     EXPECT_EQ(result.errorMessage, "Semantic consistency check failed");
@@ -64523,38 +64794,37 @@ TEST_F(PublicationValidatorIsolationTests, ValidateSemanticConsistency_Activatio
     RuntimePublishWorld world{};
     world.generation = 1;
     world.generationSemantic.activationEpoch = 200;
+    world.publication.sequenceId = 1;
     world.execution.transitionActive = false;
-    
+
     // Act
     const bool isConsistent = validator_.validateSemanticConsistency(world);
-    
+
     // Assert
     EXPECT_TRUE(isConsistent);
 }
 
 TEST_F(PublicationValidatorIsolationTests, ValidateTopology_BasicTopology_Success) {
-    // Arrange: 基本的な topology
+    // Arrange: 基本的な topology（Placeholder 検証のため最小フィールドのみ）
     RuntimePublishWorld world{};
     world.generation = 1;
-    world.routing.numSources = 2;
-    world.routing.numDestinations = 2;
-    
+    world.topology.runtimeUuid = 100;
+
     // Act
     const bool isValid = validator_.validateTopology(world);
-    
+
     // Assert
     EXPECT_TRUE(isValid);
 }
 
 TEST_F(PublicationValidatorIsolationTests, ValidateResources_BasicResources_Success) {
-    // Arrange: 基本的な resource
+    // Arrange: 基本的な resource（Placeholder 検証のため最小フィールドのみ）
     RuntimePublishWorld world{};
     world.generation = 1;
-    world.resource.memoryBudgetBytes = 1024 * 1024; // 1MB
-    
+
     // Act
     const bool isValid = validator_.validateResources(world);
-    
+
     // Assert
     EXPECT_TRUE(isValid);
 }
@@ -64562,15 +64832,406 @@ TEST_F(PublicationValidatorIsolationTests, ValidateResources_BasicResources_Succ
 TEST_F(PublicationValidatorIsolationTests, CheckNoConflictingTransitions_NoTransition_Success) {
     // Arrange: transition なし
     RuntimePublishWorld world{};
-    world.generation = 1;
     world.execution.transitionActive = false;
     world.overlap.fadeTimeSec = 0.0;
-    
+
     // Act
     const bool hasNoConflict = validator_.checkNoConflictingTransitions(world);
-    
+
     // Assert
     EXPECT_TRUE(hasNoConflict);
+}
+
+// ============================================================================
+// ★ Phase-3: Validator Reject Tests
+// ============================================================================
+
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoRuntimeUuid_Accept) {
+    // ★ P2-1: runtimeUuid=0 は Bootstrap/Shutdown として許容（選択肢A）
+    //   generation>0 でも runtimeUuid=0 は有効。
+    //   代わりに transitionActive/hasFadingRuntime との矛盾をチェックする。
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 0;
+    EXPECT_TRUE(validator_.validateTopology(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_HasFadingMismatch_Reject) {
+    // hasFadingRuntime=true だが fadingRuntimeUuid=0 は矛盾
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 100;
+    world.topology.hasFadingRuntime = true;
+    world.topology.fadingRuntimeUuid = 0;
+    EXPECT_FALSE(validator_.validateTopology(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_FadingTransitionMismatch_Reject) {
+    // hasFadingRuntime と transitionActive の不整合
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 100;
+    world.topology.hasFadingRuntime = true;
+    world.topology.fadingRuntimeUuid = 200;
+    world.execution.transitionActive = false;  // ★ hasFadingRuntime=true と矛盾
+    EXPECT_FALSE(validator_.validateTopology(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_OversamplingNotPowerOfTwo_Reject) {
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 3;  // 2のべき乗ではない
+    EXPECT_FALSE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_OversamplingOutOfRange_Reject) {
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 32;  // 16超
+    EXPECT_FALSE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_DitherInvalid_Reject) {
+    RuntimePublishWorld world{};
+    world.resource.ditherBitDepth = 8;  // 0,16,24,32 以外
+    EXPECT_FALSE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_Dither32_Accept) {
+    // ★ P1-1: dither=32 は kAdaptiveBitDepthValues の正規値
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 4;
+    world.resource.ditherBitDepth = 32;
+    world.resource.noiseShaperType = 0;
+    EXPECT_TRUE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_Dither16_Accept) {
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 4;
+    world.resource.ditherBitDepth = 16;
+    world.resource.noiseShaperType = 0;
+    EXPECT_TRUE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_Dither24_Accept) {
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 4;
+    world.resource.ditherBitDepth = 24;
+    world.resource.noiseShaperType = 0;
+    EXPECT_TRUE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_NoiseShaperOutOfRange_Reject) {
+    RuntimePublishWorld world{};
+    world.resource.noiseShaperType = 99;  // 0-3 以外
+    EXPECT_FALSE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_NoiseShaperFixed15Tap_Accept) {
+    // ★ P1-2: NoiseShaperType::Fixed15Tap(3) は正規ノイズシェーパータイプ
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 4;
+    world.resource.ditherBitDepth = 0;
+    world.resource.noiseShaperType = 3;
+    EXPECT_TRUE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_NoiseShaperAdaptive_Accept) {
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 4;
+    world.resource.ditherBitDepth = 0;
+    world.resource.noiseShaperType = 2;
+    EXPECT_TRUE(validator_.validateResources(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_HardResetWithFade_Reject) {
+    // HardReset + fadeTimeSec > 0 は reject
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::HardReset);
+    world.overlap.fadeTimeSec = 0.5;
+    EXPECT_FALSE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_SmoothOnlyNegativeFade_Reject) {
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
+    world.overlap.fadeTimeSec = -0.1;
+    EXPECT_FALSE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_DryAsOldWithoutFlag_Reject) {
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::DryAsOld);
+    world.overlap.useDryAsOld = false;  // DryAsOld なのに useDryAsOld=false は矛盾
+    world.overlap.fadeTimeSec = 0.005;
+    EXPECT_FALSE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_InactiveWithUseDryAsOld_Reject) {
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = false;
+    world.overlap.useDryAsOld = true;  // !active で useDryAsOld=true は矛盾
+    EXPECT_FALSE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_UnknownPolicy_Reject) {
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = 99;  // 未知の policy
+    EXPECT_FALSE(validator_.checkNoConflictingTransitions(world));
+}
+
+// ============================================================================
+// ★ Phase-3: Validator Accept Tests
+// ============================================================================
+
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_Bootstrap_Accept) {
+    // Bootstrap world (generation=1 が実際の値) は runtimeUuid=0 でも accept
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 0;
+    EXPECT_TRUE(validator_.validateTopology(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoUuidWithTransition_Reject) {
+    // runtimeUuid=0 で transitionActive=true は矛盾 → reject
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 0;
+    world.execution.transitionActive = true;
+    EXPECT_FALSE(validator_.validateTopology(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoUuidWithHasFading_Reject) {
+    // runtimeUuid=0 で hasFadingRuntime=true は矛盾 → reject
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 0;
+    world.topology.hasFadingRuntime = true;
+    world.topology.fadingRuntimeUuid = 200;
+    EXPECT_FALSE(validator_.validateTopology(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_HardResetNoFade_Accept) {
+    // HardReset + transitionActive=true + fadeTimeSec=0.0 は accept
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::HardReset);
+    world.overlap.fadeTimeSec = 0.0;
+    world.overlap.useDryAsOld = false;
+    EXPECT_TRUE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_DryAsOldValid_Accept) {
+    // DryAsOld + useDryAsOld=true + fadeTimeSec>0 は accept
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::DryAsOld);
+    world.overlap.useDryAsOld = true;
+    world.overlap.fadeTimeSec = 0.005;
+    EXPECT_TRUE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, CheckTransition_IdleWithFadeRemnant_Accept) {
+    // Idle world (transitionActive=false, fadeTimeSec>0) — フェード完了直後の残余値として許容
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.execution.transitionActive = false;
+    world.overlap.fadeTimeSec = 0.1;
+    world.overlap.useDryAsOld = false;
+    EXPECT_TRUE(validator_.checkNoConflictingTransitions(world));
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidateResources_ValidOversampling_Accept) {
+    RuntimePublishWorld world{};
+    world.resource.oversamplingFactor = 4;
+    world.resource.ditherBitDepth = 24;
+    world.resource.noiseShaperType = 1;
+    EXPECT_TRUE(validator_.validateResources(world));
+}
+
+// ============================================================================
+// ★ Phase-3: ValidatePublication 統合テスト
+// ============================================================================
+
+TEST_F(PublicationValidatorIsolationTests, ValidatePublication_RejectFromTopology) {
+    // hasFadingRuntime=true だが fadingRuntimeUuid=0 は矛盾 → topology reject
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 100;
+    world.topology.hasFadingRuntime = true;
+    world.topology.fadingRuntimeUuid = 0;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
+    const auto result = validator_.validatePublication(world);
+    EXPECT_FALSE(result.isValid);
+    EXPECT_EQ(result.failureReason, iso::audio_engine::ValidationFailureReason::InvalidTopology);
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidatePublication_RejectFromTopology_NoUuidWithTransition) {
+    // runtimeUuid=0 で transitionActive=true は矛盾 → topology reject
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 0;
+    world.execution.transitionActive = true;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
+    const auto result = validator_.validatePublication(world);
+    EXPECT_FALSE(result.isValid);
+    EXPECT_EQ(result.failureReason, iso::audio_engine::ValidationFailureReason::InvalidTopology);
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidatePublication_RejectFromResources) {
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 100;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
+    world.resource.oversamplingFactor = 7;  // 2のべき乗ではない → reject
+    const auto result = validator_.validatePublication(world);
+    EXPECT_FALSE(result.isValid);
+    EXPECT_EQ(result.failureReason, iso::audio_engine::ValidationFailureReason::InvalidResources);
+}
+
+TEST_F(PublicationValidatorIsolationTests, ValidatePublication_RejectFromTransition) {
+    RuntimePublishWorld world{};
+    world.generation = 1;
+    world.topology.runtimeUuid = 100;
+    world.generationSemantic.runtimeGeneration = 1;
+    world.publication.sequenceId = 1;
+    world.execution.transitionActive = true;
+    world.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::HardReset);
+    world.overlap.fadeTimeSec = 0.5;  // HardReset なのに fade>0 → reject
+    const auto result = validator_.validatePublication(world);
+    EXPECT_FALSE(result.isValid);
+    EXPECT_EQ(result.failureReason, iso::audio_engine::ValidationFailureReason::InvalidTransition);
+}
+
+// ============================================================================
+// ★ Phase-3: CrossfadeAuthority Regression Tests
+// ============================================================================
+
+namespace {
+
+// テスト用ヘルパー — 標準的な World と Policy を生成
+[[nodiscard]] RuntimePublishWorld makeStandardOldWorld() noexcept {
+    RuntimePublishWorld w{};
+    w.generation = 1;
+    w.topology.runtimeUuid = 100;
+    w.dspProjection.irLoaded = true;
+    w.dspProjection.structuralHash = 0xABCD;
+    w.dspProjection.oversamplingFactor = 4;
+    return w;
+}
+
+[[nodiscard]] RuntimePublishWorld makeStandardNewWorld() noexcept {
+    RuntimePublishWorld w{};
+    w.generation = 2;
+    w.topology.runtimeUuid = 200;
+    w.dspProjection.irLoaded = true;
+    w.dspProjection.structuralHash = 0xABCD;  // 同じ IR
+    w.dspProjection.oversamplingFactor = 4;
+    return w;
+}
+
+[[nodiscard]] RuntimePublishWorld makeWorldWithIR() noexcept {
+    RuntimePublishWorld w{};
+    w.generation = 1;
+    w.topology.runtimeUuid = 100;
+    w.dspProjection.irLoaded = true;
+    w.dspProjection.structuralHash = 0x1111;
+    w.dspProjection.oversamplingFactor = 4;
+    return w;
+}
+
+[[nodiscard]] RuntimePublishWorld makeWorldWithDifferentIR() noexcept {
+    RuntimePublishWorld w{};
+    w.generation = 2;
+    w.topology.runtimeUuid = 200;
+    w.dspProjection.irLoaded = true;
+    w.dspProjection.structuralHash = 0x2222;  // 異なる IR
+    w.dspProjection.oversamplingFactor = 4;
+    return w;
+}
+
+[[nodiscard]] convo::isr::CrossfadePolicy makeFastFadePolicy() noexcept {
+    convo::isr::CrossfadePolicy p;
+    p.irFadeTimeSec = 0.002;
+    p.phaseFadeTimeSec = 0.002;
+    p.tailFadeTimeSec = 0.002;
+    p.osFadeTimeSec = 0.002;
+    p.irLengthFadeTimeSec = 0.002;
+    p.directHeadFadeTimeSec = 0.002;
+    p.nucFilterFadeTimeSec = 0.002;
+    return p;
+}
+
+[[nodiscard]] convo::isr::CrossfadePolicy makeSlowFadePolicy() noexcept {
+    convo::isr::CrossfadePolicy p;
+    p.irFadeTimeSec = 0.080;
+    p.phaseFadeTimeSec = 0.060;
+    p.tailFadeTimeSec = 0.030;
+    p.osFadeTimeSec = 0.030;
+    p.irLengthFadeTimeSec = 0.050;
+    p.directHeadFadeTimeSec = 0.010;
+    p.nucFilterFadeTimeSec = 0.030;
+    return p;
+}
+
+} // namespace
+
+TEST(CrossfadeAuthorityRegressionTest, DeterministicDecision) {
+    auto oldW = makeStandardOldWorld();
+    auto newW = makeStandardNewWorld();
+    auto policy = makeFastFadePolicy();
+    convo::isr::CrossfadeAuthority auth;
+    auto d1 = auth.evaluate(oldW, newW, policy);
+    auto d2 = auth.evaluate(oldW, newW, policy);
+    EXPECT_EQ(d1.needsCrossfade, d2.needsCrossfade);
+    EXPECT_DOUBLE_EQ(d1.fadeTimeSec, d2.fadeTimeSec);
+}
+
+TEST(CrossfadeAuthorityRegressionTest, PolicyChangeChangesDecision) {
+    auto oldW = makeWorldWithIR();
+    auto newW = makeWorldWithDifferentIR();
+    auto fast = makeFastFadePolicy();
+    auto slow = makeSlowFadePolicy();
+    convo::isr::CrossfadeAuthority auth;
+    auto dFast = auth.evaluate(oldW, newW, fast);
+    auto dSlow = auth.evaluate(oldW, newW, slow);
+    EXPECT_TRUE(dFast.needsCrossfade);
+    EXPECT_TRUE(dSlow.needsCrossfade);
+    EXPECT_LT(dFast.fadeTimeSec, dSlow.fadeTimeSec);
+}
+
+TEST(CrossfadeAuthorityRegressionTest, SameStructuralHashNoCrossfade) {
+    auto oldW = makeStandardOldWorld();
+    auto newW = makeStandardNewWorld();  // 同じ structuralHash
+    auto policy = makeSlowFadePolicy();
+    convo::isr::CrossfadeAuthority auth;
+    auto d = auth.evaluate(oldW, newW, policy);
+    EXPECT_FALSE(d.needsCrossfade);  // IR が同じなので crossfade 不要
+    EXPECT_DOUBLE_EQ(d.fadeTimeSec, 0.0);
+}
+
+TEST(CrossfadeAuthorityRegressionTest, OversamplingChangeTriggersCrossfade) {
+    auto oldW = makeWorldWithIR();
+    auto newW = makeWorldWithIR();
+    newW.dspProjection.oversamplingFactor = 2;  // Oversampling 変更
+    auto policy = makeFastFadePolicy();
+    convo::isr::CrossfadeAuthority auth;
+    auto d = auth.evaluate(oldW, newW, policy);
+    EXPECT_TRUE(d.needsCrossfade);
+    EXPECT_GT(d.fadeTimeSec, 0.0);
 }
 
 } // namespace iso::audio_engine

@@ -1,6 +1,5 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "RuntimePublicationValidator.h"
 #include "RuntimePublicationOrchestrator.h"
 
 #include <filesystem>
@@ -131,18 +130,11 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
-    // Delegate pure validation to RuntimePublicationValidator (Sprint-4 P3-A)
-    static const iso::audio_engine::RuntimePublicationValidator validator;
-
-    const auto validationResult = validator.validatePublication(world);
-    if (!validationResult.isValid) {
-        diagLog(juce::String("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\"")
-            + juce::String(validationResult.errorMessage)
-            + " generation=" + juce::String(static_cast<juce::int64>(world.generation))
-            + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
-            + " runtimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
-        return false;
-    }
+    // ★ P2-2: Validator の重複呼び出しを削除。
+    //   Validator の検証は Bridge 層 (validatePublicationNonRt) で既に実行済み。
+    //   Precheck は Semantic Transaction State / Authority Contract / Shutdown 等の
+    //   エンジン固有チェックに専念する。
+    //   ref: Validator=Authoritative Semantic, Precheck=Projection Integrity の責務分離
 
     forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Building);
 

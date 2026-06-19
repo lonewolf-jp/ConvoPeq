@@ -1,74 +1,49 @@
 #include "CrossfadeAuthority.h"
-#include "AudioEngine.h"
 #include "AtomicAccess.h"
+#include <algorithm>
+#include <cstdint>
 
 namespace convo::isr {
 
 CrossfadeAuthority::Decision CrossfadeAuthority::evaluate(
-    const AudioEngine& engine,
     const RuntimePublishWorld& oldWorld,
-    const RuntimePublishWorld& newWorld) noexcept
+    const RuntimePublishWorld& newWorld,
+    const CrossfadePolicy& policy) noexcept
 {
     Decision ctx;
+    // ★ evaluate は純粋に dspProjection 投影値 + Policy 静的設定のみで判断
+    //   Critical 時の crossfade 抑制は Orchestrator（makeCrossfadePolicy 後 evaluate 前）または
+    //   DSPTransition Emergency Override が担当する。evaluate 自身は HealthState を知らない。
 
-    // ★ S-2: HealthState Critical チェック — Critical 時は crossfade 不要として即返却
-    {
-        auto ref = engine.getHealthStateRef();
-        if (ref) {
-            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
-            if (health == convo::ISRHealthState::Critical) {
-                return ctx;  // needsCrossfade = false のまま
-            }
-        }
-    }
-
-    // Use dspProjection values from RuntimeWorld (DSPCore 直読は行わない)
     ctx.oldHasIR = oldWorld.dspProjection.irLoaded;
     ctx.newHasIR = newWorld.dspProjection.irLoaded;
-    const bool hasAudibleConvolverTransition = ctx.oldHasIR || ctx.newHasIR;
-    const bool irPresenceChanged = (ctx.oldHasIR != ctx.newHasIR);
+    const bool hasTransition = ctx.oldHasIR || ctx.newHasIR;
+    const bool irChanged = (ctx.oldHasIR != ctx.newHasIR);
 
-    // Oversampling change detection
-    if (hasAudibleConvolverTransition
-        && newWorld.dspProjection.oversamplingFactor != oldWorld.dspProjection.oversamplingFactor)
-    {
+    if (hasTransition && newWorld.dspProjection.oversamplingFactor != oldWorld.dspProjection.oversamplingFactor) {
         ctx.needsCrossfade = true;
-        ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-            convo::consumeAtomic(engine.m_osFadeTimeSec, std::memory_order_acquire));
+        ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.osFadeTimeSec);
     }
-
-    // IR structural change detection
-    if (hasAudibleConvolverTransition)
-    {
-        const uint64_t oldHash = oldWorld.dspProjection.structuralHash;
-        const uint64_t newHash = newWorld.dspProjection.structuralHash;
-        if (oldHash != newHash)
-        {
+    if (hasTransition) {
+        const uint64_t oh = oldWorld.dspProjection.structuralHash;
+        const uint64_t nh = newWorld.dspProjection.structuralHash;
+        if (oh != nh) {
             ctx.needsCrossfade = true;
-            const double baseIrFade = convo::consumeAtomic(
-                engine.m_irFadeTimeSec, std::memory_order_acquire);
-            if (irPresenceChanged)
-            {
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    std::clamp(baseIrFade, 0.001, 0.010));
-            }
-            else
-            {
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, baseIrFade);
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_irLengthFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_phaseFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_directHeadFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_nucFilterFadeTimeSec, std::memory_order_acquire));
-                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec,
-                    convo::consumeAtomic(engine.m_tailFadeTimeSec, std::memory_order_acquire));
+            if (irChanged) {
+                double clamped = policy.irFadeTimeSec;
+                if (clamped < 0.001) clamped = 0.001;
+                if (clamped > 0.010) clamped = 0.010;
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, clamped);
+            } else {
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.irFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.irLengthFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.phaseFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.directHeadFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.nucFilterFadeTimeSec);
+                ctx.fadeTimeSec = std::max(ctx.fadeTimeSec, policy.tailFadeTimeSec);
             }
         }
     }
-
     return ctx;
 }
 

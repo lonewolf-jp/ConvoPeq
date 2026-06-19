@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -6,6 +7,10 @@
 #include "RuntimePolicyEngine.h"  // ★ work37 Phase 4: PolicyEngine 連携
 
 class AudioSegmentBuffer;  // ★ Work39: Learner FIFO 監視用（global scope）
+
+namespace iso::audio_engine {
+    enum class ValidationFailureReason : uint8_t;
+}
 
 namespace convo {
 
@@ -44,6 +49,7 @@ static constexpr uint32_t EVENT_READER_STUCK         = 3001;
 static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
 static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
 static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+static constexpr uint32_t EVENT_CROSSFADE_ABORTED_EMERGENCY = 4003;  // ★ Phase-2.5: Emergency Override
 // ★ Work39: Learner FIFO Backpressure
 static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_WARNING = 5001;  // FIFO 85%+
 static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95%+
@@ -51,6 +57,11 @@ static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95
 static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
 static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
+// ★ Phase-1.5: Validator Telemetry
+static constexpr uint32_t EVENT_VALIDATION_SEMANTIC_FAILURE     = 6000;
+static constexpr uint32_t EVENT_VALIDATION_TOPOLOGY_FAILURE   = 6001;
+static constexpr uint32_t EVENT_VALIDATION_RESOURCE_FAILURE   = 6002;
+static constexpr uint32_t EVENT_VALIDATION_TRANSITION_FAILURE = 6003;
 
 // ★ P1-C: Crossfade Timeout（固定30秒）
 static constexpr uint64_t kCrossfadeTimeoutUs = 30'000'000;
@@ -225,6 +236,9 @@ public:
     // ★ 8.6: ReaderStuck 定期Evidence 出力用定数
     static constexpr uint64_t kStuckEvidenceIntervalUs = 10'000'000; // 10秒間隔
 
+    // ★ Phase-1.5: Validator Telemetry — ValidationFailure を HealthEvent として発行
+    void emitValidationEvent(iso::audio_engine::ValidationFailureReason reason) noexcept;
+
     // ★ P1-B: HealthState 公開 — Admission が参照する
     [[nodiscard]] ISRHealthState getHealthState() const noexcept {
         return convo::consumeAtomic(m_healthState_, std::memory_order_acquire);
@@ -291,6 +305,11 @@ private:
     const std::atomic<double>* m_maxRetireAgeDoubleRef{nullptr};
     const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
     const std::atomic<uint64_t>* m_overflowCountRef = nullptr;   // ★ Practical-3
+    // ★ Phase-1.5: Validator Telemetry — レート制限用タイムスタンプ配列
+    static constexpr size_t kValidationReasonCount = 4;  // Semantic, Topology, Resource, Transition
+    std::array<std::atomic<uint64_t>, kValidationReasonCount> m_lastValidationEventUs_{};
+    static constexpr uint64_t kValidationEventMinIntervalUs = 1'000'000;
+
     // ★ P1-C drop: 差分検出用ローカル状態
     uint64_t m_lastObservedDropCount = 0;
 

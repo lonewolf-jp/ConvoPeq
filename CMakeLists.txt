@@ -1,14 +1,3 @@
-# AddressSanitizer (ASan) オプション
-option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
-if(ENABLE_ASAN)
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
-        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
-        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
-    endif()
-endif()
 #============================================================================
 # CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
@@ -817,6 +806,20 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
+endif()
+
+#------------------------------------------------------------
+# AddressSanitizer (ASan) オプション（ターゲット定義後でなければならない）
+#------------------------------------------------------------
+option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
+if(ENABLE_ASAN)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
+    endif()
 endif()
 
 #------------------------------------------------------------

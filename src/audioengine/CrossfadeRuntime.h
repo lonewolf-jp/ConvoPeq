@@ -139,10 +139,6 @@ public:
     [[nodiscard]] const convo::LinearRamp& getDryScaleGain() const noexcept { return dryScaleGain_; }
 
     // === NonRT publish setters ===
-    void setUseDryAsOld(bool v) noexcept
-        { convo::publishAtomic(useDryAsOld_, v, std::memory_order_release); }
-    void setFirstIrDryPending(bool v) noexcept
-        { convo::publishAtomic(firstIrDryPending_, v, std::memory_order_release); }
     void setFirstIrDryDone(bool v) noexcept
         { convo::publishAtomic(firstIrDryDone_, v, std::memory_order_release); }
     void setStartDelayBlocks(int v) noexcept
@@ -151,6 +147,13 @@ public:
         { convo::publishAtomic(dryHoldSamples_, v, std::memory_order_release); }
     void setDryScaleTarget(double v) noexcept
         { convo::publishAtomic(dryScaleTarget_, v, std::memory_order_release); }
+
+    // ★ Phase-2.5: Emergency Override — 単調増加カウンター
+    [[nodiscard]] uint64_t emergencyAbortCount() const noexcept
+        { return convo::consumeAtomic(m_emergencyAbortCount_, std::memory_order_acquire); }
+    // ★ increment + fetch を原子的に実行（DSPTransition から呼ばれる）
+    uint64_t incrementEmergencyAbortCount() noexcept
+        { return convo::fetchAddAtomic(m_emergencyAbortCount_, 1u, std::memory_order_acq_rel) + 1; }
 
 private:
     std::atomic<bool> pending_{ false };
@@ -167,6 +170,8 @@ private:
     SPSCRingBuffer<CompletedFadeEvent, 32> completedFadeQueue_;
     std::atomic<uint64_t> crossfadeEventDropCount_{0};
     std::atomic<uint64_t> fadeStartTimestampUs_{0};
+    // ★ Phase-2.5: Emergency Override カウンター
+    std::atomic<uint64_t> m_emergencyAbortCount_{0};
     // activeCrossfadeId_ は CrossfadeRuntime に持たせない
     // CrossfadeAuthorityRuntime が唯一権威
 };

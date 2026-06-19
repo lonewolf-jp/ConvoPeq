@@ -358,7 +358,9 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     stage.centerCoeff = rawCoeffs[stage.centerTap];
     stage.centerDelayInput = (stage.centerTap - stage.centerParity) / 2;
     stage.historyUpKeep = juce::jmax(stage.convCount - 1, stage.centerDelayInput);
-    stage.historyDownKeep = juce::jmax(stage.centerTap, stage.convParity + ((stage.convCount - 1) << 1));
+    // loadStride2 が ptr[-6] までアクセスするため、historyDownKeep に +6 マージンを追加
+    // ref: doc/work46/bug.md (Bug #1)
+    stage.historyDownKeep = juce::jmax(stage.centerTap, stage.convParity + ((stage.convCount - 1) << 1) + 6);
 
     stage.upHistorySize = stage.historyUpKeep + stage.maxInputSamples + 16;
     stage.downHistorySize = stage.historyDownKeep + stage.maxOutputSamples + 16;
@@ -580,6 +582,10 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     const bool centerTapOk = (keep >= stage.centerTap) && (baseMax < capacity);
 
     // convタップ範囲: 最小convIndex = n=0,r=convCount-1; 最大convIndex = n=outSamples-1,r=0
+    // 注: globalMinConvIdx は loadStride2 の ptr[-6] を考慮しないスカラー最低位置。
+    //     AVX2 パスの実最低アクセスは index 0 となる（prepareStage の +6 マージン保証）。
+    //     globalMinConvIdx >= 0 はスカラー経路の安全条件として十分であり、
+    //     +6 マージンは prepareStage 側で historyDownKeep に組み込まれている。
     const int globalMinConvIdx = keep - stage.convParity - ((stage.convCount - 1) << 1);
     const int globalMaxConvIdx = baseMax - stage.convParity;
     const bool convTapOk = (globalMinConvIdx >= 0) && (globalMaxConvIdx < capacity);

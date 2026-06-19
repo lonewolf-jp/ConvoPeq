@@ -74,3 +74,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 ```
+# CocoIndex Code (ccc)
+/.cocoindex_code/

@@ -1,4 +1,5 @@
 #include "RuntimeHealthMonitor.h"
+#include "RuntimePublicationValidator.h"  // ★ Phase-1.5: ValidationFailureReason 完全型
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/RuntimePublicationOrchestrator.h"
 #include "audioengine/CrossfadeRuntime.h"  // ★ P1-C: 完全型必要（isPending/getFadeAgeUs）
@@ -1207,6 +1208,41 @@ void RuntimeHealthMonitor::reset() noexcept
     m_backpressureWindow_.reset();
     // [work39 Phase 7] Critical 出口状態リセット
     m_criticalExitStableStartUs_ = 0;
+
+    // ★ Phase-1.5: Validator Telemetry レート制限タイムスタンプリセット
+    for (auto& t : m_lastValidationEventUs_)
+        convo::publishAtomic(t, uint64_t{0}, std::memory_order_release);
+}
+
+// ★ Phase-1.5: Validator Telemetry — ValidationFailure を HealthEvent として発行
+void RuntimeHealthMonitor::emitValidationEvent(
+    iso::audio_engine::ValidationFailureReason reason) noexcept
+{
+    uint32_t eventCode = 0;
+    size_t idx = 0;
+    switch (reason) {
+        using enum iso::audio_engine::ValidationFailureReason;
+        case SemanticInconsistency:
+            eventCode = EVENT_VALIDATION_SEMANTIC_FAILURE; idx = 0; break;
+        case InvalidTopology:
+            eventCode = EVENT_VALIDATION_TOPOLOGY_FAILURE; idx = 1; break;
+        case InvalidResources:
+            eventCode = EVENT_VALIDATION_RESOURCE_FAILURE; idx = 2; break;
+        case InvalidTransition:
+            eventCode = EVENT_VALIDATION_TRANSITION_FAILURE; idx = 3; break;
+        default: return;
+    }
+    // ★ Validation failure は publish thread 単一からのみ発生。
+    //   CAS は過剰設計。単純な load + store で十分。
+    const uint64_t last = convo::consumeAtomic(
+        m_lastValidationEventUs_[idx], std::memory_order_acquire);
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    if (nowUs - last >= kValidationEventMinIntervalUs) {
+        convo::publishAtomic(m_lastValidationEventUs_[idx], nowUs, std::memory_order_release);
+        if (m_callback)
+            m_callback(convo::HealthEvent{nowUs, convo::HealthEvent::Severity::Warning,
+                                         eventCode, 0, 0});
+    }
 }
 
 } // namespace convo

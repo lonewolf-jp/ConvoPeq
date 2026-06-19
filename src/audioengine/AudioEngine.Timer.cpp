@@ -92,6 +92,16 @@ void AudioEngine::timerCallback()
                 + " transition(" + juce::String(static_cast<juce::int64>(transitionCurrentUuid))
                 + "->" + juce::String(static_cast<juce::int64>(transitionNextUuid)) + ")");
         }
+        else
+        {
+            // ★ Log world pointer every 10th tick to detect stale cache
+            static int tickCounter = 0;
+            if (++tickCounter % 10 == 0 && runtimeWorld != nullptr)
+            {
+                diagLog("[VERIFY] worldPtr=0x" + juce::String::toHexString(static_cast<juce::int64>(reinterpret_cast<uintptr_t>(runtimeWorld)))
+                    + " rev=" + juce::String(static_cast<juce::int64>(revision)));
+            }
+        }
     }
 
     {

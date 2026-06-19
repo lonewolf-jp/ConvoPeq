@@ -14,6 +14,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!validateSemanticConsistency(world)) {
         result.isValid = false;
         result.errorMessage = "Semantic consistency check failed";
+        result.failureReason = ValidationFailureReason::SemanticInconsistency;
         return result;
     }
 
@@ -21,6 +22,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!validateTopology(world)) {
         result.isValid = false;
         result.errorMessage = "Topology validation failed";
+        result.failureReason = ValidationFailureReason::InvalidTopology;
         return result;
     }
 
@@ -28,6 +30,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!validateResources(world)) {
         result.isValid = false;
         result.errorMessage = "Resource availability check failed";
+        result.failureReason = ValidationFailureReason::InvalidResources;
         return result;
     }
 
@@ -35,6 +38,7 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     if (!checkNoConflictingTransitions(world)) {
         result.isValid = false;
         result.errorMessage = "Conflicting transitions detected";
+        result.failureReason = ValidationFailureReason::InvalidTransition;
         return result;
     }
 
@@ -58,39 +62,77 @@ bool RuntimePublicationValidator::validateSemanticConsistency(
         return false;
     }
 
+    // ★ P4-1: Publication sequence — generation > 0 なら sequenceId が 0 でないこと
+    //   Bootstrap world (generation=0) でも sequenceId は通常 1 以上だが、
+    //   generation を Bootstrap 判別の唯一の基準とする
+    if (world.generation > 0 && world.publication.sequenceId == 0)
+        return false;
+
     return true;
 }
 
 bool RuntimePublicationValidator::validateTopology(
     const RuntimePublishWorld& world) const
 {
-    // Validate routing topology
-    // - No circular dependencies
-    // - All sources have valid destinations
-    // - Buffer sizes are within acceptable ranges
+    const auto& topology = world.topology;
 
-    [[maybe_unused]] const auto& routing = world.routing;
+    // ★ P2-1: runtimeUuid==0 を Bootstrap/Shutdown として許容（選択肢A）
+    //   ただし、runtimeUuid==0 時の不変条件に違反する場合は拒否:
+    //   - transitionActive==true との矛盾
+    //   - hasFadingRuntime==true との矛盾
+    //   - fadingRuntimeUuid!=0 との矛盾
+    if (topology.runtimeUuid == 0) {
+        // Authoritative 不変条件:
+        if (world.execution.transitionActive) return false;
+        if (topology.hasFadingRuntime) return false;
+        if (topology.fadingRuntimeUuid != 0) return false;
+    }
 
-    // Basic topology checks (implementation details depend on RoutingSemantic structure)
-    // This is a placeholder for actual topology validation logic
+    // hasFadingRuntime と fadingRuntimeUuid の整合性
+    if (topology.hasFadingRuntime != (topology.fadingRuntimeUuid != 0))
+        return false;
 
-    return true; // Placeholder
+    // hasFadingRuntime と transitionActive の自己整合性（RuntimeWorld Semantic の不変条件）
+    if (topology.hasFadingRuntime != world.execution.transitionActive)
+        return false;
+
+    // ★ P4-1: RoutingSemantic — processingOrder は 0 または 1 のみ許容
+    if (world.routing.processingOrder < 0 || world.routing.processingOrder > 1)
+        return false;
+
+    // ★ Cycle detection: 現在のルーティングモデル（processingOrder 0/1 のみ）では
+    //   サイクルは発生不可能（単一方向の線形パスのみ）。将来グラフベースルーティング
+    //   拡張時は、ここで topological sort / DFS による cycle detection を追加すること。
+    //   ref: doc/work47/resolution_report.md §2.1
+
+    // ★ P4-1: GenerationSemantic — generation > 0 なら runtimeGeneration > 0
+    if (world.generation > 0 && world.generationSemantic.runtimeGeneration == 0)
+        return false;
+
+    return true;
 }
 
 bool RuntimePublicationValidator::validateResources(
     const RuntimePublishWorld& world) const
 {
-    // Validate resource availability
-    // - Memory requirements
-    // - DSP cycle estimates
-    // - Buffer allocations
+    const auto& resource = world.resource;
 
-    [[maybe_unused]] const auto& resource = world.resource;
+    // Oversampling: 2のべき乗かつ1〜16
+    const int os = resource.oversamplingFactor;
+    if (os < 1 || os > 16 || (os & (os - 1)) != 0)
+        return false;
 
-    // Basic resource checks (implementation details depend on ResourceSemantic structure)
-    // This is a placeholder for actual resource validation logic
+    // Dither: 0, 16, 24, 32 のみ許容（kAdaptiveBitDepthValues との整合性）
+    const int dd = resource.ditherBitDepth;
+    if (dd != 0 && dd != 16 && dd != 24 && dd != 32)
+        return false;
 
-    return true; // Placeholder
+    // NoiseShaper: 0, 1, 2, 3 のみ許容（Fixed15Tap の追加）
+    const int ns = resource.noiseShaperType;
+    if (ns < 0 || ns > 3)
+        return false;
+
+    return true;
 }
 
 bool RuntimePublicationValidator::checkExecutionSemanticValidity(
@@ -129,17 +171,43 @@ bool RuntimePublicationValidator::checkActivationEpochConsistency(
 bool RuntimePublicationValidator::checkNoConflictingTransitions(
     const RuntimePublishWorld& world) const
 {
-    // Check that there are no conflicting transition states
-    // - Only one active transition at a time
-    // - Crossfade parameters are consistent
+    const auto& exec = world.execution;
+    const auto& overlap = world.overlap;
 
-    [[maybe_unused]] const auto& exec = world.execution;
-    [[maybe_unused]] const auto& overlap = world.overlap;
+    const bool active = exec.transitionActive;
+    const double fade = overlap.fadeTimeSec;
 
-    // Basic conflict detection (implementation details depend on OverlapSemantic structure)
-    // This is a placeholder for actual conflict detection logic
+    if (!active) {
+        // ★ transitionActive=false でも fadeTimeSec が残るケースを許容
+        //   フェード完了直後の Idle World publish 時など、fadeTimeSec が保持されたまま
+        //   遷移する将来実装が入り得る。そのため fade > 0.0 は reject しない。
+        //   ただし負の fade は常に異常値として reject。
+        if (fade < 0.0) return false;
+        // useDryAsOld=true かつ !active は意味論的に矛盾
+        if (overlap.useDryAsOld) return false;
+        return true;
+    }
 
-    return true; // Placeholder
+    const auto policy = static_cast<convo::TransitionPolicy>(exec.transitionPolicy);
+
+    switch (policy) {
+        case convo::TransitionPolicy::SmoothOnly:
+            if (fade < 0.0) return false;  // 負値のみ拒否（0.0はフォールバック機構に委ねる）
+            break;
+        case convo::TransitionPolicy::DryAsOld:
+            if (fade < 0.0) return false;
+            if (!overlap.useDryAsOld) return false;
+            break;
+        case convo::TransitionPolicy::HardReset:
+            if (fade < 0.0) return false;  // 負値も拒否
+            if (fade > 0.0) return false;  // 正値も拒否（HardReset は fade=0.0 のみ許容）
+            if (overlap.useDryAsOld) return false;
+            break;
+        default:
+            return false;  // 未知の policy 値は拒否
+    }
+
+    return true;
 }
 
 } // namespace iso::audio_engine

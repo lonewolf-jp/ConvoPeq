@@ -285,7 +285,7 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
         worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
 
-        worldOwner->overlap.useDryAsOld = active;
+        worldOwner->overlap.useDryAsOld = (policy == convo::TransitionPolicy::DryAsOld);
         worldOwner->overlap.fadeTimeSec = fadeTimeSec;
         worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
         worldOwner->overlap.dryScaleTarget = dryScaleTarget;

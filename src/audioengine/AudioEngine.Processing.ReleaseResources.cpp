@@ -191,7 +191,7 @@ void AudioEngine::releaseResources()
                 + juce::String(kGracefulDrainMaxMs)
                 + "ms, pendingRetireCount="
                 + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
-                + " — forcing drain");
+                + " -- forcing drain");
         }
     }
 
@@ -211,7 +211,7 @@ void AudioEngine::releaseResources()
     drainDeferredRetireQueues(true);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
-    // ★ C-2: EmergencyDrain — Optional 最終手段（デフォルトはスキップ）
+    // ★ C-2: EmergencyDrain -- Optional 最終手段（デフォルトはスキップ）
     //   常に EmergencyDrain フェーズを経由（ReclaimComplete+1=EmergencyDrain のため単一遷移）
     //   [work37 Phase 8.2] コンパイル時マクロから実行時判定に変更。
     //   PolicyEngine が requestEmergencyDrain() を設定した場合のみ有効な処理を実行。
@@ -227,14 +227,14 @@ void AudioEngine::releaseResources()
         // Deferred publish クリア
         if (runtimeOrchestrator_)
             runtimeOrchestrator_->clearDeferredForShutdown();
-        diagLog("[DIAG] releaseResources: EmergencyDrain — cleared deferred publish");
+        diagLog("[DIAG] releaseResources: EmergencyDrain -- cleared deferred publish");
 
         // 安全な tryReclaim（drainAll 禁止）
         {
             const auto preReclaimPending = m_retireRouter->pendingRetireCount();
             m_epochDomain.tryReclaim();
             const auto postReclaimPending = m_retireRouter->pendingRetireCount();
-            diagLog("[DIAG] releaseResources: EmergencyDrain — tryReclaim done (pending "
+            diagLog("[DIAG] releaseResources: EmergencyDrain -- tryReclaim done (pending "
                 + juce::String(static_cast<int>(preReclaimPending)) + " → "
                 + juce::String(static_cast<int>(postReclaimPending)) + ")");
         }
@@ -242,7 +242,7 @@ void AudioEngine::releaseResources()
         // Crossfade timeout recovery の強制実行
         if (crossfadeRuntime_.isPending())
         {
-            diagLog("[DIAG] releaseResources: EmergencyDrain — forcing crossfade recovery");
+            diagLog("[DIAG] releaseResources: EmergencyDrain -- forcing crossfade recovery");
             crossfadeRuntime_.reset();
         }
 
@@ -257,7 +257,7 @@ void AudioEngine::releaseResources()
         const auto audit = collectDrainAudit();
         if (!audit.isAllZero() || audit.stuckReaderCount > 0)
         {
-            diagLog("[DIAG] releaseResources: EmergencyDrain (diagnostic only) — "
+            diagLog("[DIAG] releaseResources: EmergencyDrain (diagnostic only) -- "
                 "pendingPub=" + juce::String(static_cast<int64>(audit.pendingPublication)) +
                 " pendingRetire=" + juce::String(static_cast<int64>(audit.pendingRetire)) +
                 " stuckReaders=" + juce::String(static_cast<int64>(audit.stuckReaderCount)));
@@ -271,7 +271,7 @@ void AudioEngine::releaseResources()
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="
                     + juce::String(static_cast<int>(residentBefore))
-                    + " — performing shutdown cleanup");
+                    + " -- performing shutdown cleanup");
 
             for (uint32_t slot = 0; slot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++slot) {
                 // 系統②: フラグ確認＋解放（非アクティブなら false → スキップ）
@@ -296,7 +296,7 @@ void AudioEngine::releaseResources()
 
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
-    diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");
+    diagLog("[DIAG] releaseResources: VerifyDrained -- collecting drain audit");
 
     const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
     const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
