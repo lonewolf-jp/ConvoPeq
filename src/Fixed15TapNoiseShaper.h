@@ -316,15 +316,16 @@ private:
         const double minV = -1.0;
         const double maxV = 1.0 - (1.0 / invScale);
 
-        // TPDF dither
-        const double u1 = uniform(rng);
-        const double u2 = uniform(rng);
-        v += (u1 + u2 - 1.0) * scale;
-
+        // ★ 修正: クランプを先に実行し、その後ディザを加算（Lipshitz/Wannamaker 正規順序）
         if (v < minV)
             v = minV;
         else if (v > maxV)
             v = maxV;
+
+        // TPDF dither
+        const double u1 = uniform(rng);
+        const double u2 = uniform(rng);
+        v += (u1 + u2 - 1.0) * scale;
 
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);

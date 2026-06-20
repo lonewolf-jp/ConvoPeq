@@ -149,6 +149,9 @@ public:
                     scanned = 0;
                 }
             } else {
+                // ★ 最適化: 先頭エントリが削除不可の場合、後続も削除不可（FIFO順序）のため即座に脱出
+                if (!canDelete)
+                    break;
                 if (scanPos - deqPos > static_cast<uint32_t>(kMaxScan)) {
                     scanPos = deqPos;
                 } else {

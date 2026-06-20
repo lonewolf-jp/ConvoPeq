@@ -1923,11 +1923,13 @@ inline double unconstrainedToRho(double x) {
     return 0.98 * stableSigmoid01(x);
 }
 
+// θの最大値（Nyquist極配置回避）
+constexpr double kThetaMax = 0.99 * juce::MathConstants<double>::pi;
+
 inline double unconstrainedToTheta(double x) {
-    // 単調増加写像 R → (0, 0.99π)。x=0 で θ=0.495π。
+    // 単調増加写像 R → (0, kThetaMax)。x=0 で θ=0.495π。
     // 群遅延式は cos(ω-θ)+cos(ω+θ) の対称性から θ ∈ (0,π) で充足。
     // Nyquist 極配置を避けるため上限を π 未満に固定する。
-    constexpr double kThetaMax = 0.99 * juce::MathConstants<double>::pi;
     return kThetaMax * stableSigmoid01(x);
 }
 }
@@ -1968,11 +1970,11 @@ DesignResult AllpassDesigner::designWithCMAES(
         for (int i = 0; i < config.numSections; ++i) {
             initialMean[2*i] = 0.0;  // unconstrainedToRho(0) = 0.49
 
-            // θ = π * sigmoid(x) なので x = logit(θ/π)
+            // θ = kThetaMax * sigmoid(x) なので x = logit(θ/kThetaMax)
             const double freqHz  = std::exp(logMin + (logMax - logMin) *
                                             (i + 0.5) / config.numSections);
             const double theta   = 2.0 * juce::MathConstants<double>::pi * freqHz / sampleRate;
-            const double tNorm   = std::clamp(theta / juce::MathConstants<double>::pi, 1e-6, 1.0 - 1e-6);
+            const double tNorm   = std::clamp(theta / kThetaMax, 1e-6, 1.0 - 1e-6);
             initialMean[2*i+1]   = std::log(tNorm / (1.0 - tNorm));  // logit
         }
     }
@@ -6613,9 +6615,9 @@ public: // Added for AudioEngine access
             if (fileHash != other.fileHash) return fileHash < other.fileHash;
             if (sampleRate != other.sampleRate) return sampleRate < other.sampleRate;
             if (phaseMode != other.phaseMode) return phaseMode < other.phaseMode;
-            if (std::abs(f1 - other.f1) > 1.0e-6f) return f1 < other.f1;
-            if (std::abs(f2 - other.f2) > 1.0e-6f) return f2 < other.f2;
-            if (std::abs(tau - other.tau) > 1.0e-6f) return tau < other.tau;
+            if (f1 != other.f1) return f1 < other.f1;
+            if (f2 != other.f2) return f2 < other.f2;
+            if (tau != other.tau) return tau < other.tau;
             return targetLength < other.targetLength;
         }
     };
@@ -8362,6 +8364,9 @@ public:
                     scanned = 0;
                 }
             } else {
+                // ★ 最適化: 先頭エントリが削除不可の場合、後続も削除不可（FIFO順序）のため即座に脱出
+                if (!canDelete)
+                    break;
                 if (scanPos - deqPos > static_cast<uint32_t>(kMaxScan)) {
                     scanPos = deqPos;
                 } else {
@@ -11634,15 +11639,16 @@ private:
         const double minV = -1.0;
         const double maxV = 1.0 - (1.0 / invScale);
 
-        // TPDF dither
-        const double u1 = uniform(rng);
-        const double u2 = uniform(rng);
-        v += (u1 + u2 - 1.0) * scale;
-
+        // ★ 修正: クランプを先に実行し、その後ディザを加算（Lipshitz/Wannamaker 正規順序）
         if (v < minV)
             v = minV;
         else if (v > maxV)
             v = maxV;
+
+        // TPDF dither
+        const double u1 = uniform(rng);
+        const double u2 = uniform(rng);
+        v += (u1 + u2 - 1.0) * scale;
 
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -12087,15 +12093,16 @@ private:
         const double minV = -1.0;
         const double maxV = 1.0 - (1.0 / invScale);
 
-        // TPDF dither
-        const double u1 = uniform(rng);
-        const double u2 = uniform(rng);
-        v += (u1 + u2 - 1.0) * scale;
-
+        // ★ 修正: クランプを先に実行し、その後ディザを加算（Lipshitz/Wannamaker 正規順序）
         if (v < minV)
             v = minV;
         else if (v > maxV)
             v = maxV;
+
+        // TPDF dither
+        const double u1 = uniform(rng);
+        const double u2 = uniform(rng);
+        v += (u1 + u2 - 1.0) * scale;
 
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -13017,15 +13024,16 @@ private:
         const double minValue = -1.0;
         const double maxValue = 1.0 - (1.0 / invScale);
 
-        // 【修正】TPDF dither を復活
-        const double u1 = uniform(rng);
-        const double u2 = uniform(rng);
-        value += (u1 + u2 - 1.0) * scale;
-
+        // ★ 修正: クランプを先に実行し、その後ディザを加算（Lipshitz/Wannamaker 正規順序）
         if (value < minValue)
             value = minValue;
         else if (value > maxValue)
             value = maxValue;
+
+        // TPDF dither
+        const double u1 = uniform(rng);
+        const double u2 = uniform(rng);
+        value += (u1 + u2 - 1.0) * scale;
 
         __m128d rounded = _mm_set_sd(value * invScale);
         rounded = _mm_round_sd(rounded, rounded, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);

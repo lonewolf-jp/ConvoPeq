@@ -240,11 +240,13 @@ inline double unconstrainedToRho(double x) {
     return 0.98 * stableSigmoid01(x);
 }
 
+// θの最大値（Nyquist極配置回避）
+constexpr double kThetaMax = 0.99 * juce::MathConstants<double>::pi;
+
 inline double unconstrainedToTheta(double x) {
-    // 単調増加写像 R → (0, 0.99π)。x=0 で θ=0.495π。
+    // 単調増加写像 R → (0, kThetaMax)。x=0 で θ=0.495π。
     // 群遅延式は cos(ω-θ)+cos(ω+θ) の対称性から θ ∈ (0,π) で充足。
     // Nyquist 極配置を避けるため上限を π 未満に固定する。
-    constexpr double kThetaMax = 0.99 * juce::MathConstants<double>::pi;
     return kThetaMax * stableSigmoid01(x);
 }
 }
@@ -285,11 +287,11 @@ DesignResult AllpassDesigner::designWithCMAES(
         for (int i = 0; i < config.numSections; ++i) {
             initialMean[2*i] = 0.0;  // unconstrainedToRho(0) = 0.49
 
-            // θ = π * sigmoid(x) なので x = logit(θ/π)
+            // θ = kThetaMax * sigmoid(x) なので x = logit(θ/kThetaMax)
             const double freqHz  = std::exp(logMin + (logMax - logMin) *
                                             (i + 0.5) / config.numSections);
             const double theta   = 2.0 * juce::MathConstants<double>::pi * freqHz / sampleRate;
-            const double tNorm   = std::clamp(theta / juce::MathConstants<double>::pi, 1e-6, 1.0 - 1e-6);
+            const double tNorm   = std::clamp(theta / kThetaMax, 1e-6, 1.0 - 1e-6);
             initialMean[2*i+1]   = std::log(tNorm / (1.0 - tNorm));  // logit
         }
     }

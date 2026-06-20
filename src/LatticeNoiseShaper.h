@@ -199,15 +199,16 @@ private:
         const double minValue = -1.0;
         const double maxValue = 1.0 - (1.0 / invScale);
 
-        // 【修正】TPDF dither を復活
-        const double u1 = uniform(rng);
-        const double u2 = uniform(rng);
-        value += (u1 + u2 - 1.0) * scale;
-
+        // ★ 修正: クランプを先に実行し、その後ディザを加算（Lipshitz/Wannamaker 正規順序）
         if (value < minValue)
             value = minValue;
         else if (value > maxValue)
             value = maxValue;
+
+        // TPDF dither
+        const double u1 = uniform(rng);
+        const double u2 = uniform(rng);
+        value += (u1 + u2 - 1.0) * scale;
 
         __m128d rounded = _mm_set_sd(value * invScale);
         rounded = _mm_round_sd(rounded, rounded, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
