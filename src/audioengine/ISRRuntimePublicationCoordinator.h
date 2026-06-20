@@ -2,6 +2,7 @@
 #include <atomic>
 #include <memory>
 #include <cstdint>
+#include <type_traits>
 #include "ISRClosure.h"
 #include "ISRPayloadTier.h"
 #include "ISRSealedObject.h"
@@ -84,9 +85,44 @@ private:
         InvalidPayloadTier
     };
 
-    std::atomic<PublicationSequenceId> publicationSequenceId_;
-    std::atomic<PublicationEpoch> publicationEpoch_;
-    std::atomic<std::uint64_t> mappedRuntimeGeneration_;
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 方式C（採用）: PersistentStateBlock (plain struct)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 全アクセスが MessageThread 閉域であるため、atomic ではなく plain struct で十分。
+    struct PersistentStateBlock {
+        std::uint64_t publicationSequenceId = 0;
+        std::uint64_t publicationEpoch      = 0;
+        std::uint64_t mappedRuntimeGeneration = 0;
+
+        [[nodiscard]] static bool isMonotonic(
+            const PersistentStateBlock& prev,
+            std::uint64_t nextSeqId,
+            std::uint64_t nextEpoch,
+            std::uint64_t nextGen) noexcept
+        {
+            const bool hasPrevious = prev.publicationSequenceId != 0
+                || prev.publicationEpoch != 0
+                || prev.mappedRuntimeGeneration != 0;
+            if (!hasPrevious)
+                return true;
+            return nextSeqId > prev.publicationSequenceId
+                && nextEpoch > prev.publicationEpoch
+                && nextGen > prev.mappedRuntimeGeneration;
+        }
+    };
+
+    static_assert(std::is_standard_layout_v<PersistentStateBlock>,
+        "PersistentStateBlock must be standard-layout");
+    static_assert(std::is_trivially_copyable_v<PersistentStateBlock>,
+        "PersistentStateBlock must remain trivially copyable");
+    static_assert(sizeof(PersistentStateBlock) == sizeof(std::uint64_t) * 3,
+        "PersistentStateBlock must be exactly 3 uint64_t without padding");
+
+    // ★ 3個別 atomic に代わり、plain struct で3フィールドを論理一貫管理
+    // IMPORTANT: persistentState_ is MessageThread-only.
+    //   Any cross-thread access requires conversion to std::atomic<PersistentStateBlock>.
+    PersistentStateBlock persistentState_{};
+
     std::atomic<const void*> currentWorld_;
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;

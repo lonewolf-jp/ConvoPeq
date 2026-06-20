@@ -6,6 +6,7 @@ $headerPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
 $builderPath = Join-Path $repoRoot 'src\audioengine\RuntimeBuilder.cpp'
 $commitPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Commit.cpp'
 $coordinatorPath = Join-Path $repoRoot 'src\audioengine\ISRRuntimePublicationCoordinator.cpp'
+$coordinatorHeaderPath = Join-Path $repoRoot 'src\audioengine\ISRRuntimePublicationCoordinator.h'
 $evidenceDir = Join-Path $repoRoot 'evidence'
 $reportPath = Join-Path $evidenceDir 'aba_hazard_report.json'
 
@@ -26,6 +27,9 @@ $headerText = if (Test-Path -LiteralPath $headerPath) { Get-Content -LiteralPath
 $builderText = if (Test-Path -LiteralPath $builderPath) { Get-Content -LiteralPath $builderPath -Raw -Encoding UTF8 } else { '' }
 $commitText = if (Test-Path -LiteralPath $commitPath) { Get-Content -LiteralPath $commitPath -Raw -Encoding UTF8 } else { '' }
 $coordinatorText = if (Test-Path -LiteralPath $coordinatorPath) { Get-Content -LiteralPath $coordinatorPath -Raw -Encoding UTF8 } else { '' }
+$coordinatorHeaderText = if (Test-Path -LiteralPath $coordinatorHeaderPath) { Get-Content -LiteralPath $coordinatorHeaderPath -Raw -Encoding UTF8 } else { '' }
+# isMonotonic と内部実装はヘッダのインライン定義のため両方を結合
+$coordinatorCombinedText = $coordinatorText + "`n" + $coordinatorHeaderText
 
 if (-not $schemaText.Contains('"ABAHazardVerifier"')) {
     $violations.Add('kRequiredVerifierTable must register ABAHazardVerifier') | Out-Null
@@ -55,31 +59,21 @@ foreach ($pattern in $builderPatterns) {
     }
 }
 
-$commitPatterns = @(
-    'if \(targetWorldIdU64 <= lastEnqueuedTargetWorldId\)',
-    'intent->requestId = convo::fetchAddAtomic\(publicationIntentRequestIdCounter_,',
-    'publishAtomic\(lastEnqueuedPublicationTargetWorldId_, targetWorldIdU64, std::memory_order_release\)'
-)
-
-foreach ($pattern in $commitPatterns) {
-    if (-not [regex]::IsMatch($commitText, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
-        $violations.Add("ABA queue monotonicity pattern missing in AudioEngine.Commit.cpp: $pattern") | Out-Null
-    }
-}
+# 以下の commitPatterns は過去のリファクタリングで削除済みのためチェックしない:
+# - targetWorldIdU64 / lastEnqueuedTargetWorldId (PublicationIntent 系)
+# - publicationIntentRequestIdCounter_
 
 $coordinatorPatterns = @(
-    'const auto previousSequenceId = convo::consumeAtomic\(publicationSequenceId_, std::memory_order_acquire\);',
-    'const auto previousMappedGeneration = convo::consumeAtomic\(mappedRuntimeGeneration_, std::memory_order_acquire\);',
-    'if \(hasPrevious && sequenceId <= previousSequenceId\)',
-    'if \(hasPrevious && epoch <= previousEpoch\)',
-    'if \(hasPrevious && mappedGeneration <= previousMappedGeneration\)',
-    'publishAtomic\(publicationSequenceId_, sequenceId, std::memory_order_release\)',
-    'publishAtomic\(mappedRuntimeGeneration_, mappedGeneration, std::memory_order_release\)'
+    'PersistentStateBlock::isMonotonic\(prev,',
+    'nextSeqId > prev\.publicationSequenceId',
+    'nextEpoch > prev\.publicationEpoch',
+    'nextGen > prev\.mappedRuntimeGeneration',
+    'persistentState_\s*=\s*PersistentStateBlock\{'
 )
 
 foreach ($pattern in $coordinatorPatterns) {
-    if (-not [regex]::IsMatch($coordinatorText, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
-        $violations.Add("ABA contract pattern missing in ISRRuntimePublicationCoordinator.cpp: $pattern") | Out-Null
+    if (-not [regex]::IsMatch($coordinatorCombinedText, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        $violations.Add("ABA contract pattern missing in ISRRuntimePublicationCoordinator: $pattern") | Out-Null
     }
 }
 

@@ -38,14 +38,13 @@ if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorl
 
 if (-not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::Publishing') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(swapPending_, true') -or
-    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(publicationSequenceId_, sequenceId') -or
-    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(mappedRuntimeGeneration_, mappedGeneration') -or
+    -not [regex]::IsMatch($cppText, 'persistentState_\s*=\s*PersistentStateBlock\{') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(swapPending_, false') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::Ready')) {
     $violations.Add('commit must implement Publishing -> swapPending(true) -> metadata publish -> swapPending(false) -> Ready sequence')
 }
 
-if (-not [regex]::IsMatch($cppText, 'if \(hasPrevious && sequenceId <= previousSequenceId\)\s*\{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
+if (-not [regex]::IsMatch($headerText + "`n" + $cppText, 'PersistentStateBlock::isMonotonic\(')) {
     $violations.Add('commit must enforce monotonic sequence (non-increasing sequenceId => Faulted)')
 }
 

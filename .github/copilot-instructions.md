@@ -124,39 +124,72 @@
 - 不要な巻き込み変更は行わないこと。
 
 <!-- headroom-instructions -->
-# headroom — Context Compression Layer
+# headroom — Context Compression Layer（常時使用: 絶対条件）
 
-**headroom** (v0.26.0) は AI エージェント向けコンテキスト圧縮レイヤーです。
-全てのシェルコマンド出力は **headroom Proxy モード** を通して圧縮されます。
+**headroom v0.26.0** は AI エージェント向けコンテキスト圧縮レイヤーです。
+このプロジェクトでは **全ての操作で headroom Proxy モードを常時使用** すること。
 
-## 使用方法
+## 🔥 トークン削減最大化の3層戦略
 
-Proxy モード（推奨）:
+| 層 | 機構 | 削減率 | 説明 |
+|---|------|--------|------|
+| 第1層 | RTK（CLI出力フィルタリング） | **~98.8%** | 常時有効。CLI出力を事前に間引き。Lifetime 25M tokens削減済 |
+| 第2層 | Proxy圧縮（SmartCrusher） | **~51%** | tool出力のJSON配列を統計的圧縮。CCRで可逆性確保。 |
+| 第3層 | 出力トークン削減（SHAPER） | **~31.7%** | LLMの出力トークンを削減（HEADROOM_OUTPUT_SHAPER=1） |
+
+## セッション開始時（毎回必ず実行）
+
 ```powershell
-headroom proxy --port 8787           # プロキシ起動（コード変更不要）
-headroom wrap claude                  # Claude Code ラップ
-headroom wrap copilot                # Copilot CLI ラップ
+# Step 1: 環境変数設定（proxy 起動前に設定すること）
+$env:HEADROOM_OUTPUT_SHAPER = "1"       # 出力トークン削減（約31.7%）
+$env:HEADROOM_TELEMETRY = "off"         # テレメトリ無効化
+
+# Step 2: Proxy 起動（バックグラウンド）
+Start-Job -Name HeadroomProxy -ScriptBlock {
+    headroom proxy --port 8787 --no-telemetry --memory
+}
+Start-Sleep -Seconds 2
+
+# Step 3: 動作確認
+Invoke-RestMethod http://localhost:8787/health | ConvertTo-Json
+Invoke-RestMethod http://localhost:8787/stats | ConvertTo-Json -Depth 2
 ```
 
-バンドルCLIツール:
-```bash
-headroom loc .                       # コード行数カウント (scc)
-headroom diff file1 file2            # 構造的差分 (difftastic)
-headroom sg -p "pattern"             # AST検索/置換 (ast-grep)
-headroom memory list                 # メモリ一覧
-```
+## セッション終了時
 
-ライブラリモード (Python):
-```python
-from headroom import SmartCrusher, SmartCrusherConfig
-sc = SmartCrusher(SmartCrusherConfig())
-result = sc.crush(json_data)         # JSON~52%圧縮
-```
-
-環境変数:
 ```powershell
-$env:HEADROOM_OUTPUT_SHAPER = "1"    # 出力トークン削減
+# プロキシ停止
+Stop-Job -Name HeadroomProxy -ErrorAction SilentlyContinue
+Remove-Job -Name HeadroomProxy -ErrorAction SilentlyContinue
+
+# 学習と分析（任意）
+# headroom learn --apply
+# headroom perf
 ```
+
+## 使用可能な全機能
+
+| カテゴリ | コマンド | 説明 |
+|----------|---------|------|
+| **Proxy** | `headroom proxy --port 8787` | 推薦モード。コード変更不要のHTTPプロキシ |
+| **Wrap** | `headroom wrap claude/codex/copilot` | エージェントを自動ラップしてプロキシ経由に |
+| **学習** | `headroom learn` / `headroom learn --apply` | 失敗パターン分析・CLAUDE.md/AGENTS.mdへ出力 |
+| **MCP** | `headroom mcp install` / `headroom mcp serve` | MCPサーバー管理（headroom_compress/retrieve/stats） |
+| **メモリ** | `headroom memory list/stats/prune` | 永続メモリ管理（SQLite+HNSW+FTS5） |
+| **分析** | `headroom perf` / `agent-savings` | パフォーマンス分析・保存量確認 |
+| **CLIツール** | `headroom loc .` / `diff` / `sg` | scc/difftastic/ast-grep の統合ラッパー |
+| **初期化** | `headroom init claude/codex/copilot` | 永続フックインストール |
+| **認証** | `headroom copilot-auth login/status` | Copilot OAuth管理 |
+
+## 動作確認済み機能（Windows + headroom v0.26.0）
+- ✅ Proxy: 起動/health/livez/readyz/stats/metrics/stats-history/dashboard
+- ✅ SmartCrusher: JSON 100件→**51.3%削減**（3,329→1,622 tokens, CCR hash生成済）
+- ✅ RTK統合: 常時有効、lifetime 98.8%削減
+- ✅ loc (scc), diff (difftastic), sg (ast-grep): 全ツール動作確認
+- ✅ memory: list/stats 正常動作
+- ✅ MCP SDK: インストール済み
+- ❌ Python library: CLIのみ（`import headroom` は未インストール）
+- ❌ MCP endpoint at proxy: 別プロセス `headroom mcp serve` が必要
 <!-- /headroom-instructions -->
 
 ## graphify

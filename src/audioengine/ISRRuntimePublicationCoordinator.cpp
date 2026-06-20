@@ -4,10 +4,7 @@
 namespace convo::isr {
 
 RuntimePublicationCoordinator::RuntimePublicationCoordinator()
-    : publicationSequenceId_(0)
-    , publicationEpoch_(0)
-    , mappedRuntimeGeneration_(0)
-    , currentWorld_(nullptr)
+    : currentWorld_(nullptr)
     , lastRejectCode_(RejectCode::None)
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
@@ -21,6 +18,7 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     , state_(CoordinatorState::Bootstrapping)
     , retireAuthorityCount_(0)
 {
+    // ★ persistentState_{} は zero-initialize（メンバ初期化子 =0 により保証）
 }
 
 bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
@@ -69,7 +67,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
 void RuntimePublicationCoordinator::commit(PublishAuthority,
                                            RuntimeBoundary boundary,
                                            const void* newWorld,
-                                           std::uint64_t version,
+                                           std::uint64_t /*version*/,
                                            PublicationSequenceId sequenceId,
                                            PublicationEpoch epoch,
                                            std::uint64_t mappedGeneration) {
@@ -78,34 +76,27 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
         return;
     }
 
-    const auto previousSequenceId = convo::consumeAtomic(publicationSequenceId_, std::memory_order_acquire);
-    const auto previousEpoch = convo::consumeAtomic(publicationEpoch_, std::memory_order_acquire);
-    const auto previousMappedGeneration = convo::consumeAtomic(mappedRuntimeGeneration_, std::memory_order_acquire);
-    const bool hasPrevious = previousSequenceId != 0
-        || previousEpoch != 0
-        || previousMappedGeneration != 0;
+    // ★ 方式C: 単一 struct 読取 → 3フィールド論理一貫
+    const auto prev = persistentState_;
 
-    if (hasPrevious && sequenceId <= previousSequenceId) {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-        return;
-    }
-
-    if (hasPrevious && epoch <= previousEpoch) {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-        return;
-    }
-
-    if (hasPrevious && mappedGeneration <= previousMappedGeneration) {
+    if (!PersistentStateBlock::isMonotonic(prev,
+            static_cast<std::uint64_t>(sequenceId),
+            static_cast<std::uint64_t>(epoch),
+            mappedGeneration)) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
     convo::publishAtomic(state_, CoordinatorState::Publishing, std::memory_order_release);
     convo::publishAtomic(swapPending_, true, std::memory_order_release);
-    (void) version;
-    convo::publishAtomic(publicationSequenceId_, sequenceId, std::memory_order_release);
-    convo::publishAtomic(publicationEpoch_, epoch, std::memory_order_release);
-    convo::publishAtomic(mappedRuntimeGeneration_, mappedGeneration, std::memory_order_release);
+
+    // ★ plain struct: 単一代入（atomic store 不要）
+    persistentState_ = PersistentStateBlock{
+        static_cast<std::uint64_t>(sequenceId),
+        static_cast<std::uint64_t>(epoch),
+        mappedGeneration
+    };
+
     convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(swapPending_, false, std::memory_order_release);
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
@@ -166,7 +157,8 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 }
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
-    return convo::consumeAtomic(mappedRuntimeGeneration_, std::memory_order_acquire);
+    // ★ 方式C: persistentState_ から直接導出（plain struct、atomic 不要）
+    return persistentState_.mappedRuntimeGeneration;
 }
 
 void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
