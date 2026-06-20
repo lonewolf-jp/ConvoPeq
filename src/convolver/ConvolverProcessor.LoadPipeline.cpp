@@ -483,21 +483,15 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
         updateIRState(*(prepared->timeDomainIR), prepared->sampleRate);
 
-    // 3. RCU 状態の更新
+    // 3. RCU 状態の更新（★ 軽量化: partitionData/numPartitions/partitionSizeBytes はデッドコードのため除去）
 
-    auto newState = std::make_unique<convo::ConvolverState>(prepared->partitionData,
-                                                          prepared->partitionSizeBytes,
-                                                          prepared->numPartitions,
-                                                          prepared->fftSize,
+    auto newState = std::make_unique<convo::ConvolverState>(prepared->fftSize,
                                                           prepared->generationId,
                                                           prepared->sampleRate);
-
-    prepared->partitionData = nullptr;
 
     convo::publishAtomic(activeCacheKey, prepared->cacheKey, std::memory_order_release); // release: cache 判定側 acquire と HB
     convo::publishAtomic(activeCacheFFTSize, newState->fftSize, std::memory_order_release); // release: cache 判定側 acquire と HB
 
-    runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
 
     // 4. FINAL COMMIT: 確定フラグを立ててからレイテンシを1回だけ反映する。

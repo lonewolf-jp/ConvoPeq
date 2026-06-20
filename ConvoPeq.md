@@ -20,7 +20,6 @@
         ├── ConvolverControlPanel.cpp
         ├── ConvolverControlPanel.h
         ├── ConvolverProcessor.h
-        ├── ConvolverRuntime.h
         ├── ConvolverRuntimeCompatAliases.h
         ├── ConvolverSettingsComponent.cpp
         ├── ConvolverSettingsComponent.h
@@ -5561,7 +5560,6 @@ private:
 #include "DeferredFreeThread.h"
 #include "core/ConvolverRuntimeCompatTypes.h"
 #include "DeferredDeletionQueue.h"
-#include "ConvolverRuntime.h"
 #include "core/EpochDomain.h"
 #include "DspNumericPolicy.h"
 #include "DftiHandle.h"
@@ -6671,7 +6669,6 @@ public: // Added for AudioEngine access
     convo::aligned_unique_ptr<IRConverter> irConverter;
     convo::aligned_unique_ptr<CacheManager> cacheManager;
     std::unique_ptr<ProgressiveUpgradeThread> upgradeThread;
-    ConvolverRuntime runtime;
     std::atomic<bool> writerActive { false };
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
@@ -6705,78 +6702,6 @@ public: // Added for AudioEngine access
 
 };
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
-
-```
-
-### 📄 `src\ConvolverRuntime.h`
-
-```
-#pragma once
-
-#include <cstddef>
-
-#include <JuceHeader.h>
-
-#include "AlignedAllocation.h"
-
-struct ConvolverRuntime
-{
-    convo::ScopedAlignedPtr<double> overlapBuffer;
-    convo::ScopedAlignedPtr<double> inputBuffer;
-    convo::ScopedAlignedPtr<double> outputBuffer;
-
-    int currentFFTSize = 0;
-    int currentNumPartitions = 0;
-
-    ~ConvolverRuntime() { clear(); }
-
-    void clear() noexcept
-    {
-        overlapBuffer.reset();
-        inputBuffer.reset();
-        outputBuffer.reset();
-        currentFFTSize = 0;
-        currentNumPartitions = 0;
-    }
-
-    void reset() noexcept
-    {
-        if (overlapBuffer && currentFFTSize > 0)
-            std::memset(overlapBuffer.get(), 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
-        if (inputBuffer && currentFFTSize > 0)
-            std::memset(inputBuffer.get(), 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
-        if (outputBuffer && currentFFTSize > 0)
-            std::memset(outputBuffer.get(), 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
-    }
-
-    void reallocate(int fftSize, int numPartitions)
-    {
-        JUCE_ASSERT_MESSAGE_THREAD;
-
-        if (fftSize <= 0 || numPartitions <= 0)
-            return;
-
-        if (fftSize != currentFFTSize || numPartitions != currentNumPartitions)
-        {
-            clear();
-
-            overlapBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
-            inputBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
-            outputBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
-
-            jassert(overlapBuffer.get() != nullptr && inputBuffer.get() != nullptr && outputBuffer.get() != nullptr);
-
-            currentFFTSize = fftSize;
-            currentNumPartitions = numPartitions;
-        }
-
-        reset();
-    }
-
-    ConvolverRuntime() = default;
-    ConvolverRuntime(const ConvolverRuntime&) = delete;
-    ConvolverRuntime& operator=(const ConvolverRuntime&) = delete;
-};
 
 ```
 
@@ -7011,64 +6936,33 @@ uint64_t ConvolverState::generateNewStateId() noexcept
 
 ```
 // src/ConvolverState.h
-// Phase 0: MKL リソース（FFT Descriptor, 作業バッファ）を RAII で管理するコンテナ
-//
-// 設計思想:
-//   - MKL メモリ（mkl_malloc/mkl_free）と DFTI ハンドルを一括管理し、
-//     例外安全・冪等なクリーンアップを保証する。
-//   - cleanup() は何度呼んでも安全（atomic フラグで二重解放を防止）。
-//   - Audio Thread は ConvolverState を読み取るだけで、生成・解放は行わない。
-//
-// メモリ規約:
-//   - 全バッファは mkl_malloc(size, 64) で 64 byte アライン確保。
-//   - new / std::vector は使用しない（コーディング規約準拠）。
-//
-// スレッド安全性:
-//   - cleanup() 自体は Message Thread / Deferred Free Thread から呼ぶ想定。
-//   - Audio Thread は cleanup() を呼ばない。
+// ★ [Architecture Debt] 軽量化版 — MKL/DFTI/作業バッファ管理を削除
+// stateId / generationId / sampleRate のみを保持する軽量メタデータ構造。
+// Epoch-based RCU の「保護対象オブジェクト」として SafeStateSwapper に渡す。
 #pragma once
 
 #include <JuceHeader.h>
 #include <atomic>
-#include <cstring>      // memset
-#include <stdexcept>
-#include <cstddef>      // size_t
 #include <cstdint>      // uint64_t
-
-#include <mkl.h>
-#include <mkl_dfti.h>
-
-#include "AlignedAllocation.h"  // convo::aligned_malloc / aligned_free
-#include "DftiHandle.h"
 
 #include "audioengine/AtomicAccess.h"
 
 namespace convo {
 
 // ---------------------------------------------------------------------------
-// ConvolverState
-// 畳み込みエンジン 1 インスタンス分の MKL リソースをすべて保持する。
-// Epoch-based RCU の「保護対象オブジェクト」として SafeStateSwapper に渡す。
+// ConvolverState（軽量化版）
 // ---------------------------------------------------------------------------
-#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
-#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(push)
+#pragma warning(disable : 4324)
 struct ConvolverState
 {
-    // --- FFT 作業バッファ（mkl_malloc 64-byte アライン）---
-    // Audio Thread 側は helper 経由で取得して読み書きする。
-    double* partitionData = nullptr;                // IR 周波数領域パーティション
-    std::atomic<double*> overlapBuffer {nullptr};   // OLA オーバーラップ
-    std::atomic<double*> inputBuffer   {nullptr};   // FFT 入力作業領域
-    std::atomic<double*> outputBuffer  {nullptr};   // FFT 出力作業領域
-
+    // ★ [Architecture Debt] partitionData/overlapBuffer/inputBuffer/outputBuffer/fftHandle removed
+    // (all were dead code — never read by Audio Thread)
     size_t   partitionSizeBytes = 0;
     int      numPartitions      = 0;
     int      fftSize            = 0;
     uint64_t generationId       = 0;
     double   sampleRate         = 0.0;
-
-    // DFTI ハンドル（RAII 管理）
-    ScopedDftiDescriptor fftHandle;
 
     // 冪等クリーンアップ用フラグ
     std::atomic<bool> cleanedUp {false};
@@ -7090,113 +6984,43 @@ private:
     ConvolverState() = default;
 
     // -----------------------------------------------------------------------
-    // 完全初期化コンストラクタ
-    //
-    // @param data      IR パーティションデータ（mkl_malloc 済み、所有権を移譲）
-    // @param dataSize  data のバイト数
-    // @param nParts    パーティション数
-    // @param fSize     FFT サイズ
-    // @param genId     この状態が属する世代番号
-    // @param sr        サンプルレート
-    //
-    // 例外安全: コンストラクタが throw した場合、確保済みリソースは cleanup() で解放。
+    // 軽量コンストラクタ — バッファ確保なし（すべてデッドコードのため除去）
     // -----------------------------------------------------------------------
-    ConvolverState(double*  data,
-                   size_t   dataSize,
-                   int      nParts,
-                   int      fSize,
-                   uint64_t genId,
-                   double   sr)
-        : partitionSizeBytes(dataSize),
-          numPartitions(nParts),
-          fftSize(fSize),
+    ConvolverState(int fSize, uint64_t genId, double sr)
+        : fftSize(fSize),
           generationId(genId),
           sampleRate(sr)
     {
-        jassert(data != nullptr);
-        jassert(((uintptr_t)data % 64) == 0 && "ConvolverState: MKL Memory Alignment Failed!");
-
-        partitionData = data;
-
-        // 作業バッファ確保ヘルパー（失敗時は std::bad_alloc を throw）
-        auto safeMalloc = [](size_t bytes) -> double*
-        {
-            auto* ptr = convo::makeAlignedArray<double>(bytes / sizeof(double)).release();
-            if (!ptr) throw std::bad_alloc();
-            return ptr;
-        };
-
-        // DFTI ハンドル生成
-        if (DftiCreateDescriptor(fftHandle.put(), DFTI_DOUBLE, DFTI_REAL, 1,
-                                 static_cast<MKL_LONG>(fftSize)) != DFTI_NO_ERROR)
-        {
-            throw std::runtime_error("ConvolverState: DftiCreateDescriptor failed");
-        }
-
-        // 各作業バッファを確保してゼロクリア
-        {
-            auto* ov = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            convo::publishAtomic(overlapBuffer, ov, std::memory_order_release); // release: getActiveCoeffSet の acquire と HB (初期化完了後の初回観測を保証)
-            memset(ov, 0, static_cast<size_t>(fftSize) * sizeof(double));
-        }
-        {
-            auto* ib = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            convo::publishAtomic(inputBuffer, ib, std::memory_order_release); // release: getActiveCoeffSet の acquire と HB (初期化完了後の初回観測を保証)
-            memset(ib, 0, static_cast<size_t>(fftSize) * sizeof(double));
-        }
-        {
-            auto* ob = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            convo::publishAtomic(outputBuffer, ob, std::memory_order_release); // release: getActiveCoeffSet の acquire と HB (初期化完了後の初回観測を保証)
-            memset(ob, 0, static_cast<size_t>(fftSize) * sizeof(double));
-        }
     }
 
     // -----------------------------------------------------------------------
-    // デストラクタ
+    // デストラクタ（cleanup のみ）
     // -----------------------------------------------------------------------
     ~ConvolverState() { cleanup(); }
 
     // -----------------------------------------------------------------------
     // 冪等クリーンアップ（二重解放防止）
-    // Message Thread / DeferredFreeThread から呼ぶ。Audio Thread からは呼ばない。
+    // ★ [Architecture Debt] 以前の partitionData/overlapBuffer/inputBuffer/outputBuffer/fftHandle 解放は削除
     // -----------------------------------------------------------------------
     void cleanup() noexcept
     {
-        // exchange が false を返した（＝まだ解放していない）場合のみ実行
-        if (convo::exchangeAtomic(cleanedUp, true, std::memory_order_acq_rel)) return; // acq_rel: 冪等チェック — acquire で先行 cleanup の acq_rel と HB; release で 2 回目呼び出し元の acquire と HB
-
-        // 各 atomic ポインタを nullptr に swap して古いポインタを解放
-        if (auto* p = partitionData) { partitionData = nullptr; convo::aligned_free(p); }
-        if (auto* p = convo::exchangeAtomic(overlapBuffer, nullptr, std::memory_order_acq_rel))  convo::aligned_free(p); // acq_rel: acquire で publishAtomic release と HB しポインタ取得; release で nullptr 観測者との HB
-        if (auto* p = convo::exchangeAtomic(inputBuffer, nullptr, std::memory_order_acq_rel))    convo::aligned_free(p); // acq_rel: 同上
-        if (auto* p = convo::exchangeAtomic(outputBuffer, nullptr, std::memory_order_acq_rel))   convo::aligned_free(p); // acq_rel: 同上
-
-        // fftHandle は ScopedDftiDescriptor のデストラクタで自動解放される
-        fftHandle.reset();
+        if (convo::exchangeAtomic(cleanedUp, true, std::memory_order_acq_rel)) return;
     }
 
     // -----------------------------------------------------------------------
-    // ムーブコンストラクタ（所有権の移譲）
+    // ムーブコンストラクタ
     // -----------------------------------------------------------------------
     ConvolverState(ConvolverState&& o) noexcept
     {
-        partitionData = o.partitionData;
-        o.partitionData = nullptr;
-            convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release); // exchange acq_rel: ムーブ元の publishAtomic release と HB; publish release: 新 owner の getActiveCoeffSet acquire と HB
-            convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);     // 同上
-            convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);   // 同上
-
         partitionSizeBytes = o.partitionSizeBytes;
         numPartitions      = o.numPartitions;
         fftSize            = o.fftSize;
         generationId       = o.generationId;
         sampleRate         = o.sampleRate;
         stateId            = o.stateId;
-        fftHandle          = std::move(o.fftHandle);
 
-        // ムーブ元は cleanedUp = true にして二重解放を防ぐ
-            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);  // release: ムーブ元の cleanup() の exchangeAtomic acquire と HB し二重解放防止
-            convo::publishAtomic(cleanedUp, false, std::memory_order_release);   // release: 新 owner の cleanup() の exchangeAtomic acquire と HB (未解放を表明)
+        convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);
+        convo::publishAtomic(cleanedUp, false, std::memory_order_release);
     }
 
     // -----------------------------------------------------------------------
@@ -7208,31 +7032,24 @@ private:
         {
             cleanup();
 
-            partitionData = o.partitionData;
-            o.partitionData = nullptr;
-            convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release); // exchange acq_rel: ムーブ元の publishAtomic release と HB; publish release: 新 owner の getActiveCoeffSet acquire と HB
-            convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);     // 同上
-            convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);   // 同上
-
             partitionSizeBytes = o.partitionSizeBytes;
             numPartitions      = o.numPartitions;
             fftSize            = o.fftSize;
             generationId       = o.generationId;
             sampleRate         = o.sampleRate;
             stateId            = o.stateId;
-            fftHandle          = std::move(o.fftHandle);
 
-            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);  // release: ムーブ元の cleanup() の exchangeAtomic acquire と HB し二重解放防止
-            convo::publishAtomic(cleanedUp, false, std::memory_order_release);   // release: 新 owner の cleanup() の exchangeAtomic acquire と HB (未解放を表明)
+            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);
+            convo::publishAtomic(cleanedUp, false, std::memory_order_release);
         }
         return *this;
     }
 
-    // コピー禁止（MKL リソースの二重解放を防ぐ）
+    // コピー禁止
     ConvolverState(const ConvolverState&)            = delete;
     ConvolverState& operator=(const ConvolverState&) = delete;
 };
-#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(pop) // C4324 suppression scope end
 
 } // namespace convo
 
@@ -50793,8 +50610,6 @@ void ConvolverProcessor::releaseResources()
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
         std::unique_ptr<convo::ConvolverState>{ptr}; // RAII delete
 
-    runtime.clear();
-
     convo::publishAtomic(isPrepared, false, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
 }
 
@@ -51316,21 +51131,15 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
         updateIRState(*(prepared->timeDomainIR), prepared->sampleRate);
 
-    // 3. RCU 状態の更新
+    // 3. RCU 状態の更新（★ 軽量化: partitionData/numPartitions/partitionSizeBytes はデッドコードのため除去）
 
-    auto newState = std::make_unique<convo::ConvolverState>(prepared->partitionData,
-                                                          prepared->partitionSizeBytes,
-                                                          prepared->numPartitions,
-                                                          prepared->fftSize,
+    auto newState = std::make_unique<convo::ConvolverState>(prepared->fftSize,
                                                           prepared->generationId,
                                                           prepared->sampleRate);
-
-    prepared->partitionData = nullptr;
 
     convo::publishAtomic(activeCacheKey, prepared->cacheKey, std::memory_order_release); // release: cache 判定側 acquire と HB
     convo::publishAtomic(activeCacheFFTSize, newState->fftSize, std::memory_order_release); // release: cache 判定側 acquire と HB
 
-    runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
 
     // 4. FINAL COMMIT: 確定フラグを立ててからレイテンシを1回だけ反映する。

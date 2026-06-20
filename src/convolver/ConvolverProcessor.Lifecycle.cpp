@@ -417,8 +417,6 @@ void ConvolverProcessor::releaseResources()
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
         std::unique_ptr<convo::ConvolverState>{ptr}; // RAII delete
 
-    runtime.clear();
-
     convo::publishAtomic(isPrepared, false, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
 }
 

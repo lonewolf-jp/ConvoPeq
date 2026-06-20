@@ -47,7 +47,6 @@
 #include "DeferredFreeThread.h"
 #include "core/ConvolverRuntimeCompatTypes.h"
 #include "DeferredDeletionQueue.h"
-#include "ConvolverRuntime.h"
 #include "core/EpochDomain.h"
 #include "DspNumericPolicy.h"
 #include "DftiHandle.h"
@@ -1157,7 +1156,6 @@ public: // Added for AudioEngine access
     convo::aligned_unique_ptr<IRConverter> irConverter;
     convo::aligned_unique_ptr<CacheManager> cacheManager;
     std::unique_ptr<ProgressiveUpgradeThread> upgradeThread;
-    ConvolverRuntime runtime;
     std::atomic<bool> writerActive { false };
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
