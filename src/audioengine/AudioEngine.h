@@ -854,7 +854,7 @@ public:
     [[nodiscard]] float getEQNonlinearSaturation() const noexcept { return uiEqEditor.getNonlinearSaturation(); }
     [[nodiscard]] EQProcessor::FilterStructure getEQFilterStructure() const noexcept { return uiEqEditor.getFilterStructure(); }
     [[nodiscard]] const void* getEQStateSnapshot() const { return uiEqEditor.getEQStateSnapshot(); }
-    void resetEQToDefaults() { uiEqEditor.reset(); }
+    void resetEQToDefaults() { uiEqEditor.resetToDefaults(); }
 
     // acquire: prepareToPlay/releaseResources の release と HB し、有効なサンプルレートを取得。
     [[nodiscard]] double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_acquire); }

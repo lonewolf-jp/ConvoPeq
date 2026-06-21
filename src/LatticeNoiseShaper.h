@@ -243,7 +243,6 @@ private:
                              const double* activeCoeffs) const noexcept
     {
         double forward = error;
-        double prev_backward = error;
         double* state = channelState.data();
 
         // State clamping limit to prevent explosion
@@ -255,11 +254,13 @@ private:
             const double nextForward = forward + activeCoeffs[i] * backward;
             const double nextBackward = activeCoeffs[i] * forward + backward;
 
-            // Clamp state to prevent numerical instability
-            state[i] = std::clamp(prev_backward, -kLatticeStateLimit, kLatticeStateLimit);
+            // [P7] 修正: 前段の prev_backward ではなく、自段の nextBackward を保存
+            // 旧コード: state[i] = std::clamp(prev_backward, ...);
+            // 格子フィルタの正しい再帰式では、各段で計算した後方反射波 g_{i+1}(n)
+            // を次サンプル用に保存する必要がある。
+            state[i] = std::clamp(nextBackward, -kLatticeStateLimit, kLatticeStateLimit);
 
             forward = nextForward;
-            prev_backward = nextBackward;
         }
     }
 

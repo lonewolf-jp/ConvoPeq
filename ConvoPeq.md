@@ -12885,7 +12885,6 @@ private:
                              const double* activeCoeffs) const noexcept
     {
         double forward = error;
-        double prev_backward = error;
         double* state = channelState.data();
 
         // State clamping limit to prevent explosion
@@ -12897,11 +12896,13 @@ private:
             const double nextForward = forward + activeCoeffs[i] * backward;
             const double nextBackward = activeCoeffs[i] * forward + backward;
 
-            // Clamp state to prevent numerical instability
-            state[i] = std::clamp(prev_backward, -kLatticeStateLimit, kLatticeStateLimit);
+            // [P7] 修正: 前段の prev_backward ではなく、自段の nextBackward を保存
+            // 旧コード: state[i] = std::clamp(prev_backward, ...);
+            // 格子フィルタの正しい再帰式では、各段で計算した後方反射波 g_{i+1}(n)
+            // を次サンプル用に保存する必要がある。
+            state[i] = std::clamp(nextBackward, -kLatticeStateLimit, kLatticeStateLimit);
 
             forward = nextForward;
-            prev_backward = nextBackward;
         }
     }
 
@@ -28381,6 +28382,97 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 #include <immintrin.h>
 #include "AudioEngine.h"
 
+// [DIAG] Convolver出力キャプチャ（work52 調査用）
+#include <cstdio>
+#include <cstdint>
+#include <atomic>
+namespace {
+    // ── キャプチャヘッダ ──
+    struct CaptureHeader {
+        uint32_t magic = 0xCAD0DE52;        // work52 magic
+        uint32_t version = 1;
+        uint32_t captureInput   : 1;        // CONVOPEQ_CAPTURE_INPUT
+        uint32_t tailBypass     : 1;        // CONVOPEQ_TAIL_BYPASS
+        uint32_t directHeadOff  : 1;        // CONVOPEQ_DIRECT_HEAD=0
+        uint32_t injectTone     : 1;        // テストトーン注入
+        uint32_t reserved       : 28;
+        uint32_t sampleRate;
+        uint32_t numSamples;                // 生サンプル数（ヘッダ以降）
+        int64_t  buildGeneration;           // 未使用時0
+        int64_t  captureTimestamp;          // Windows FILETIME
+        double   toneFreq;                  // テストトーン周波数
+        double   toneAmp;                   // テストトーン振幅
+        double   toneBeatFreq;              // ビート周波数
+    };
+    static_assert(sizeof(CaptureHeader) == 64, "CaptureHeader must be 64 bytes");
+
+    // ── キャプチャ ──
+    static FILE* g_diagCaptureFile = nullptr;
+    static int g_diagCaptureRemaining = 0;
+    static constexpr int kDiagCaptureMaxSamples = 48000 * 10; // 10秒 @ 48kHz
+
+    // ── テストトーン注入（前方宣言、機能は削除済み） ──
+    void diagEnableToneInjection();
+    void diagFillTestTone(double*, double*, int, double);
+
+    void diagStartCapture() {
+        if (g_diagCaptureFile) return;
+        fopen_s(&g_diagCaptureFile, "C:\\TEMP\\conv_output_l.raw", "wb");
+        if (!g_diagCaptureFile) return;
+        g_diagCaptureRemaining = kDiagCaptureMaxSamples;
+
+        // ヘッダ書き込み
+        CaptureHeader hdr = {};
+        hdr.magic      = 0xCAD0DE52;
+        hdr.version    = 1;
+        hdr.captureInput  = 0;  // 削除済み
+        hdr.tailBypass    = 0;
+        hdr.directHeadOff = 0;
+        hdr.injectTone    = 0;  // 削除済み
+        // tailBypass
+        {
+            const char* env = std::getenv("CONVOPEQ_TAIL_BYPASS");
+            if (env && env[0] == '1') hdr.tailBypass = 1;
+        }
+        // directHeadOff
+        {
+            const char* env = std::getenv("CONVOPEQ_DIRECT_HEAD");
+            if (env && env[0] == '0') hdr.directHeadOff = 1;
+        }
+        hdr.sampleRate = 48000;
+        hdr.numSamples = kDiagCaptureMaxSamples;
+        hdr.toneFreq    = 40.0;
+        hdr.toneAmp     = 0.5;
+        hdr.toneBeatFreq = 2.5;
+        // timestamp
+        FILETIME ft;
+        GetSystemTimePreciseAsFileTime(&ft);
+        hdr.captureTimestamp = (static_cast<int64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+
+        fwrite(&hdr, sizeof(hdr), 1, g_diagCaptureFile);
+
+        diagEnableToneInjection(); // テストトーン注入を自動開始
+    }
+
+    void diagWriteCapture(const double* dataL, int numSamples) {
+        if (!g_diagCaptureFile || g_diagCaptureRemaining <= 0) return;
+        const int n = std::min(numSamples, g_diagCaptureRemaining);
+        fwrite(dataL, sizeof(double), n, g_diagCaptureFile);
+        g_diagCaptureRemaining -= n;
+        if (g_diagCaptureRemaining <= 0) {
+            fclose(g_diagCaptureFile);
+            g_diagCaptureFile = nullptr;
+        }
+    }
+
+    // ── テストトーン注入（機能は削除済み） ──
+    void diagEnableToneInjection() {
+    }
+
+    void diagFillTestTone(double* /*dataL*/, double* /*dataR*/, int /*numSamples*/, double /*sampleRate*/) {
+    }
+}
+
 namespace
 {
 namespace TanhApprox
@@ -28722,6 +28814,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         juce::FloatVectorOperations::copy(dryBypassBufferDoubleR.get(), alignedR.get(), numSamples);
     }
 
+    // [DIAG] テストトーン注入は削除（work52調査終了）
+
     if (oversamplingFactor > 1)
     {
         processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
@@ -28752,7 +28846,14 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     if (state.order == ProcessingOrder::ConvolverThenEQ)
     {
         if (!state.convBypassed)
+        {
             convolverRt().process(processBlock);
+            // [DIAG] Convolver出力をRAWファイルにキャプチャ（work52）
+            // g_diagCaptureInput=true 時は上記の早期captureで代用
+            diagStartCapture();
+            diagWriteCapture(processBlock.getChannelPointer(0),
+                             static_cast<int>(processBlock.getNumSamples()));
+        }
         if (!state.eqBypassed)
         {
             if (eqParamsToUse != nullptr)
@@ -28797,6 +28898,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                 }
             }
             convolverRt().process(processBlock);
+            // [DIAG] Convolver出力をRAWファイルにキャプチャ（work52）
+            // CONVOPEQ_CAPTURE_INPUT=1 時は上記の早期captureが使われる
+            diagStartCapture();
+            diagWriteCapture(processBlock.getChannelPointer(0),
+                             static_cast<int>(processBlock.getNumSamples()));
         }
     }
 
@@ -60988,31 +61094,9 @@ namespace
         return _mm_movemask_pd(validMask) == 0x3;
     }
 
-    inline double fastTanhScalar(double x) noexcept
-    {
-        if (x >= 3.0) return 1.0;
-        if (x <= -3.0) return -1.0;
-        const double x2 = x * x;
-        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
-    }
-
-    inline __m128d fastTanhV128(__m128d x) noexcept
-    {
-        const __m128d vThree = _mm_set1_pd(3.0);
-        const __m128d vNegThree = _mm_set1_pd(-3.0);
-        const __m128d vNine = _mm_set1_pd(9.0);
-        const __m128d vTwentySeven = _mm_set1_pd(27.0);
-
-        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vNegThree), vThree);
-        const __m128d x2 = _mm_mul_pd(xClamped, xClamped);
-        const __m128d num = _mm_mul_pd(xClamped, _mm_add_pd(vTwentySeven, x2));
-        const __m128d den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
-        return _mm_div_pd(num, den);
-    }
-
     // fastTanh（出力用）— クリップ閾値を 4.5 に引き上げ
     // SVF出力信号（特に Low Shelf +12dB ブースト時）は容易に ±3.0 を超えるため、
-    // 状態変数用の fastTanhScalar（閾値3.0）では通常のオーディオ信号が頻繁にクリップする。
+    // 状態変数用の fastTanh（閾値3.0）では通常のオーディオ信号が頻繁にクリップする。
     // SoftClip用 TanhApprox（閾値4.5）に合わせることで、自然な飽和特性を維持する。
     inline double fastTanhScalarOutput(double x) noexcept
     {
