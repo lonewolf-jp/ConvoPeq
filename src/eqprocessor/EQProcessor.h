@@ -163,7 +163,7 @@ public:
     static constexpr float DEFAULT_Q = 0.707f;
 
     // ── AGC定数 ──
-    static constexpr double AGC_ATTACK_TIME_SEC   = 0.1; // エンベロープ追従アタック時定数 (0.1s) - 速いアタックでトランジェントに即応
+    static constexpr double AGC_ATTACK_TIME_SEC   = 0.2; // エンベロープ追従アタック時定数 (0.2s) - 200msに延長（ブロックRMSリップル抑制のため）
     static constexpr double AGC_RELEASE_TIME_SEC  = 2.0; // エンベロープ追従リリース時定数 (2.0s) - 緩やかなリリースでポンピング抑制
     static constexpr double AGC_SMOOTH_TIME_SEC   = 0.2; // ゲイン変化スムーシング時定数 (0.2s)
     static constexpr float AGC_MIN_GAIN    = 0.06f; // 最小ゲイン制限 (~ -24dB)

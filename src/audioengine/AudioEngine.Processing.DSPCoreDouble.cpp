@@ -140,23 +140,11 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     {
             __m256d x    = _mm256_loadu_pd(data + i);
 
-        {
-            const __m128d xLow       = _mm256_castpd256_pd128(x);
-            const __m128d xHigh      = _mm256_extractf128_pd(x, 1);
-            const __m128d prevLow128 = _mm_unpacklo_pd(_mm_set_sd(prevScalar), xLow);
-            const __m128d prevHigh128= _mm_shuffle_pd(xLow, xHigh, 0x1);
-            const __m256d prevVec    = _mm256_set_m128d(prevHigh128, prevLow128);
-
-            const __m256d midVec     = _mm256_mul_pd(_mm256_add_pd(prevVec, x), vHalf);
-            const __m256d absMidVec  = _mm256_andnot_pd(vSignMask, midVec);
-
-            const __m256d vTiny      = _mm256_set1_pd(1e-15);
-            const __m256d needMidClip= _mm256_cmp_pd(absMidVec, vThreshold, _CMP_GT_OQ);
-            const __m256d safeAbsMid = _mm256_max_pd(absMidVec, vTiny);
-            const __m256d midGainRaw = _mm256_div_pd(vThreshold, safeAbsMid);
-            const __m256d midGain    = _mm256_blendv_pd(vOne, midGainRaw, needMidClip);
-            x = _mm256_mul_pd(x, midGain);
-        }
+        // [P3] midVec事前平均化ブロックを完全削除
+        // このブロックは threshold レベルでのハードリミッティングを引き起こし、
+        // SoftClip本来の滑らかなKnee特性を損なっていた。
+        // x はそのまま後続のSoftClip（fastTanh近似）へ流れる。
+        // 削除によりAVX2パスとスカラーフォールバックパスの動作が一致する。
 
         __m256d absX = _mm256_andnot_pd(vSignMask, x);
 
@@ -207,9 +195,10 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
 
     for (; i < numSamples; ++i)
     {
-        const double mid    = (prevScalar + data[i]) * 0.5;
+        const double inputVal = data[i]; // 元の入力を退避
+        const double mid    = (prevScalar + inputVal) * 0.5;
         const double absMid = absNoLibm(mid);
-        double x = data[i];
+        double x = inputVal;
         if (absMid > threshold)
             x *= threshold / absMid;
 
@@ -217,7 +206,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
             x = musicalSoftClipScalar(x, threshold, knee, asymmetry);
 
         data[i] = x;
-        prevScalar = x;
+        prevScalar = inputVal; // 修正: 処理前の生入力値を保存
     }
 
     prevSampleInOut = prevScalar;

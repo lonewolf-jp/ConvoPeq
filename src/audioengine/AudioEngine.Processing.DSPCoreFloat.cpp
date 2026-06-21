@@ -119,9 +119,10 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         if (!isFiniteAndAbsBelowNoLibm(x, 1.0e300))
             x = 0.0;
 
-        x = 0.5 * (x + prevSample);
-        prevSample = x;
-        data[i] = musicalSoftClipScalar(x, threshold, knee, asymmetry);
+        // 注意: 平均化はmidVec相当のロジック。P3と合わせて判断
+        const double avg = 0.5 * (x + prevSample);
+        prevSample = x; // 修正: 処理前の生入力値を保存
+        data[i] = musicalSoftClipScalar(avg, threshold, knee, asymmetry);
     }
 }
 }

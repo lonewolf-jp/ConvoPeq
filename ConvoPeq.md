@@ -28519,23 +28519,11 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     {
             __m256d x    = _mm256_loadu_pd(data + i);
 
-        {
-            const __m128d xLow       = _mm256_castpd256_pd128(x);
-            const __m128d xHigh      = _mm256_extractf128_pd(x, 1);
-            const __m128d prevLow128 = _mm_unpacklo_pd(_mm_set_sd(prevScalar), xLow);
-            const __m128d prevHigh128= _mm_shuffle_pd(xLow, xHigh, 0x1);
-            const __m256d prevVec    = _mm256_set_m128d(prevHigh128, prevLow128);
-
-            const __m256d midVec     = _mm256_mul_pd(_mm256_add_pd(prevVec, x), vHalf);
-            const __m256d absMidVec  = _mm256_andnot_pd(vSignMask, midVec);
-
-            const __m256d vTiny      = _mm256_set1_pd(1e-15);
-            const __m256d needMidClip= _mm256_cmp_pd(absMidVec, vThreshold, _CMP_GT_OQ);
-            const __m256d safeAbsMid = _mm256_max_pd(absMidVec, vTiny);
-            const __m256d midGainRaw = _mm256_div_pd(vThreshold, safeAbsMid);
-            const __m256d midGain    = _mm256_blendv_pd(vOne, midGainRaw, needMidClip);
-            x = _mm256_mul_pd(x, midGain);
-        }
+        // [P3] midVec事前平均化ブロックを完全削除
+        // このブロックは threshold レベルでのハードリミッティングを引き起こし、
+        // SoftClip本来の滑らかなKnee特性を損なっていた。
+        // x はそのまま後続のSoftClip（fastTanh近似）へ流れる。
+        // 削除によりAVX2パスとスカラーフォールバックパスの動作が一致する。
 
         __m256d absX = _mm256_andnot_pd(vSignMask, x);
 
@@ -28586,9 +28574,10 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
 
     for (; i < numSamples; ++i)
     {
-        const double mid    = (prevScalar + data[i]) * 0.5;
+        const double inputVal = data[i]; // 元の入力を退避
+        const double mid    = (prevScalar + inputVal) * 0.5;
         const double absMid = absNoLibm(mid);
-        double x = data[i];
+        double x = inputVal;
         if (absMid > threshold)
             x *= threshold / absMid;
 
@@ -28596,7 +28585,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
             x = musicalSoftClipScalar(x, threshold, knee, asymmetry);
 
         data[i] = x;
-        prevScalar = x;
+        prevScalar = inputVal; // 修正: 処理前の生入力値を保存
     }
 
     prevSampleInOut = prevScalar;
@@ -29207,9 +29196,10 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         if (!isFiniteAndAbsBelowNoLibm(x, 1.0e300))
             x = 0.0;
 
-        x = 0.5 * (x + prevSample);
-        prevSample = x;
-        data[i] = musicalSoftClipScalar(x, threshold, knee, asymmetry);
+        // 注意: 平均化はmidVec相当のロジック。P3と合わせて判断
+        const double avg = 0.5 * (x + prevSample);
+        prevSample = x; // 修正: 処理前の生入力値を保存
+        data[i] = musicalSoftClipScalar(avg, threshold, knee, asymmetry);
     }
 }
 }
@@ -61020,6 +61010,34 @@ namespace
         return _mm_div_pd(num, den);
     }
 
+    // fastTanh（出力用）— クリップ閾値を 4.5 に引き上げ
+    // SVF出力信号（特に Low Shelf +12dB ブースト時）は容易に ±3.0 を超えるため、
+    // 状態変数用の fastTanhScalar（閾値3.0）では通常のオーディオ信号が頻繁にクリップする。
+    // SoftClip用 TanhApprox（閾値4.5）に合わせることで、自然な飽和特性を維持する。
+    inline double fastTanhScalarOutput(double x) noexcept
+    {
+        constexpr double kClipThreshold = 4.5;
+        if (x >= kClipThreshold) return 1.0;
+        if (x <= -kClipThreshold) return -1.0;
+        const double x2 = x * x;
+        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+    }
+
+    inline __m128d fastTanhV128Output(__m128d x) noexcept
+    {
+        constexpr double kClipThreshold = 4.5;
+        const __m128d vClipHigh = _mm_set1_pd(kClipThreshold);
+        const __m128d vClipLow  = _mm_set1_pd(-kClipThreshold);
+        const __m128d vNine = _mm_set1_pd(9.0);
+        const __m128d vTwentySeven = _mm_set1_pd(27.0);
+
+        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vClipLow), vClipHigh);
+        const __m128d x2 = _mm_mul_pd(xClamped, xClamped);
+        const __m128d num = _mm_mul_pd(xClamped, _mm_add_pd(vTwentySeven, x2));
+        const __m128d den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
+        return _mm_div_pd(num, den);
+    }
+
     inline double equalPowerSin(double x) noexcept
     {
         const double t = x * (juce::MathConstants<double>::pi * 0.5);
@@ -61059,14 +61077,13 @@ namespace
             ic1eq = 2.0 * v1 - ic1eq;
             ic2eq = 2.0 * v2 - ic2eq;
 
+            double output = m0 * v0 + m1 * v1 + m2 * v2;
+
             if (saturation > 0.0)
             {
                 const double oneMinusSat = 1.0 - saturation;
-                ic1eq = ic1eq * oneMinusSat + fastTanhScalar(ic1eq) * saturation;
-                ic2eq = ic2eq * oneMinusSat + fastTanhScalar(ic2eq) * saturation;
+                output = output * oneMinusSat + fastTanhScalarOutput(output) * saturation;
             }
-
-            double output = m0 * v0 + m1 * v1 + m2 * v2;
 
             // NaN/Infチェックとクランプを追加 (processBandStereoと一貫性を保つ)
             if (!isFiniteAndAbsInRangeMask(output, 0.0, 1.0e15))
@@ -61143,19 +61160,18 @@ namespace
             ic1eq = _mm_fmsub_pd(two, v1, ic1eq);  // 2*v1 - ic1eq
             ic2eq = _mm_fmsub_pd(two, v2, ic2eq);  // 2*v2 - ic2eq
 
-            if (saturation > 0.0)
-            {
-                const __m128d vSat = _mm_set1_pd(saturation);
-                const __m128d vOneMinusSat = _mm_set1_pd(1.0 - saturation);
-                ic1eq = _mm_add_pd(_mm_mul_pd(ic1eq, vOneMinusSat),
-                                   _mm_mul_pd(fastTanhV128(ic1eq), vSat));
-                ic2eq = _mm_add_pd(_mm_mul_pd(ic2eq, vOneMinusSat),
-                                   _mm_mul_pd(fastTanhV128(ic2eq), vSat));
-            }
             // FMA: m0*v0 + m1*v1 + m2*v2
             __m128d output = _mm_fmadd_pd(m0, v0,
                               _mm_fmadd_pd(m1, v1,
                                _mm_mul_pd(m2, v2)));
+
+            if (saturation > 0.0)
+            {
+                const __m128d vSat = _mm_set1_pd(saturation);
+                const __m128d vOneMinusSat = _mm_set1_pd(1.0 - saturation);
+                output = _mm_add_pd(_mm_mul_pd(output, vOneMinusSat),
+                                    _mm_mul_pd(fastTanhV128Output(output), vSat));
+            }
 
             // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
             const __m128d diff = _mm_sub_pd(output, output);
@@ -62332,7 +62348,7 @@ public:
     static constexpr float DEFAULT_Q = 0.707f;
 
     // ── AGC定数 ──
-    static constexpr double AGC_ATTACK_TIME_SEC   = 0.1; // エンベロープ追従アタック時定数 (0.1s) - 速いアタックでトランジェントに即応
+    static constexpr double AGC_ATTACK_TIME_SEC   = 0.2; // エンベロープ追従アタック時定数 (0.2s) - 200msに延長（ブロックRMSリップル抑制のため）
     static constexpr double AGC_RELEASE_TIME_SEC  = 2.0; // エンベロープ追従リリース時定数 (2.0s) - 緩やかなリリースでポンピング抑制
     static constexpr double AGC_SMOOTH_TIME_SEC   = 0.2; // ゲイン変化スムーシング時定数 (0.2s)
     static constexpr float AGC_MIN_GAIN    = 0.06f; // 最小ゲイン制限 (~ -24dB)

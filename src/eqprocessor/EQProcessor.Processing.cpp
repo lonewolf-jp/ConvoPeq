@@ -83,22 +83,28 @@ namespace
         return _mm_movemask_pd(validMask) == 0x3;
     }
 
-    inline double fastTanhScalar(double x) noexcept
+    // fastTanh（出力用）— クリップ閾値を 4.5 に引き上げ
+    // SVF出力信号（特に Low Shelf +12dB ブースト時）は容易に ±3.0 を超えるため、
+    // 状態変数用の fastTanh（閾値3.0）では通常のオーディオ信号が頻繁にクリップする。
+    // SoftClip用 TanhApprox（閾値4.5）に合わせることで、自然な飽和特性を維持する。
+    inline double fastTanhScalarOutput(double x) noexcept
     {
-        if (x >= 3.0) return 1.0;
-        if (x <= -3.0) return -1.0;
+        constexpr double kClipThreshold = 4.5;
+        if (x >= kClipThreshold) return 1.0;
+        if (x <= -kClipThreshold) return -1.0;
         const double x2 = x * x;
         return x * (27.0 + x2) / (27.0 + 9.0 * x2);
     }
 
-    inline __m128d fastTanhV128(__m128d x) noexcept
+    inline __m128d fastTanhV128Output(__m128d x) noexcept
     {
-        const __m128d vThree = _mm_set1_pd(3.0);
-        const __m128d vNegThree = _mm_set1_pd(-3.0);
+        constexpr double kClipThreshold = 4.5;
+        const __m128d vClipHigh = _mm_set1_pd(kClipThreshold);
+        const __m128d vClipLow  = _mm_set1_pd(-kClipThreshold);
         const __m128d vNine = _mm_set1_pd(9.0);
         const __m128d vTwentySeven = _mm_set1_pd(27.0);
 
-        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vNegThree), vThree);
+        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vClipLow), vClipHigh);
         const __m128d x2 = _mm_mul_pd(xClamped, xClamped);
         const __m128d num = _mm_mul_pd(xClamped, _mm_add_pd(vTwentySeven, x2));
         const __m128d den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
@@ -144,14 +150,13 @@ namespace
             ic1eq = 2.0 * v1 - ic1eq;
             ic2eq = 2.0 * v2 - ic2eq;
 
+            double output = m0 * v0 + m1 * v1 + m2 * v2;
+
             if (saturation > 0.0)
             {
                 const double oneMinusSat = 1.0 - saturation;
-                ic1eq = ic1eq * oneMinusSat + fastTanhScalar(ic1eq) * saturation;
-                ic2eq = ic2eq * oneMinusSat + fastTanhScalar(ic2eq) * saturation;
+                output = output * oneMinusSat + fastTanhScalarOutput(output) * saturation;
             }
-
-            double output = m0 * v0 + m1 * v1 + m2 * v2;
 
             // NaN/Infチェックとクランプを追加 (processBandStereoと一貫性を保つ)
             if (!isFiniteAndAbsInRangeMask(output, 0.0, 1.0e15))
@@ -228,19 +233,18 @@ namespace
             ic1eq = _mm_fmsub_pd(two, v1, ic1eq);  // 2*v1 - ic1eq
             ic2eq = _mm_fmsub_pd(two, v2, ic2eq);  // 2*v2 - ic2eq
 
-            if (saturation > 0.0)
-            {
-                const __m128d vSat = _mm_set1_pd(saturation);
-                const __m128d vOneMinusSat = _mm_set1_pd(1.0 - saturation);
-                ic1eq = _mm_add_pd(_mm_mul_pd(ic1eq, vOneMinusSat),
-                                   _mm_mul_pd(fastTanhV128(ic1eq), vSat));
-                ic2eq = _mm_add_pd(_mm_mul_pd(ic2eq, vOneMinusSat),
-                                   _mm_mul_pd(fastTanhV128(ic2eq), vSat));
-            }
             // FMA: m0*v0 + m1*v1 + m2*v2
             __m128d output = _mm_fmadd_pd(m0, v0,
                               _mm_fmadd_pd(m1, v1,
                                _mm_mul_pd(m2, v2)));
+
+            if (saturation > 0.0)
+            {
+                const __m128d vSat = _mm_set1_pd(saturation);
+                const __m128d vOneMinusSat = _mm_set1_pd(1.0 - saturation);
+                output = _mm_add_pd(_mm_mul_pd(output, vOneMinusSat),
+                                    _mm_mul_pd(fastTanhV128Output(output), vSat));
+            }
 
             // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
             const __m128d diff = _mm_sub_pd(output, output);
