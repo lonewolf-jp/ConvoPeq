@@ -65,10 +65,14 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     for (auto& band : individualBandCurvesL) band.fill(MIN_DB);
     for (auto& band : individualBandCurvesR) band.fill(MIN_DB);
+    for (auto& band : individualBandCurvesMid) band.fill(MIN_DB);
+    for (auto& band : individualBandCurvesSide) band.fill(MIN_DB);
     // displayFrequencies and zCache are std::array, so no resize needed.
 
     individualCurvePathsL.resize(EQProcessor::NUM_BANDS);
     individualCurvePathsR.resize(EQProcessor::NUM_BANDS);
+    individualCurvePathsMid.resize(EQProcessor::NUM_BANDS);
+    individualCurvePathsSide.resize(EQProcessor::NUM_BANDS);
 
     // 表示用の周波数ポイントを事前に計算
     logMinFreq = std::log10(MIN_FREQ_HZ);
@@ -871,6 +875,8 @@ void SpectrumAnalyzerComponent::updateEQData()
                 float db = juce::Decibels::gainToDecibels(mag);
                 if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)  individualBandCurvesL[b][i] = db; else individualBandCurvesL[b][i] = 0.0f;
                 if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) individualBandCurvesR[b][i] = db; else individualBandCurvesR[b][i] = 0.0f;
+                if (mode == EQChannelMode::Mid)  individualBandCurvesMid[b][i] = db; else individualBandCurvesMid[b][i] = 0.0f;
+                if (mode == EQChannelMode::Side) individualBandCurvesSide[b][i] = db; else individualBandCurvesSide[b][i] = 0.0f;
             }
         }
 
@@ -928,6 +934,8 @@ void SpectrumAnalyzerComponent::updateEQPaths()
     {
         createPath(individualCurvePathsL[b], individualBandCurvesL[b]);
         createPath(individualCurvePathsR[b], individualBandCurvesR[b]);
+        createPath(individualCurvePathsMid[b], individualBandCurvesMid[b]);
+        createPath(individualCurvePathsSide[b], individualBandCurvesSide[b]);
     }
 }
 
@@ -966,6 +974,18 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
         {
             g.setColour(juce::Colours::red.withAlpha(0.15f));
             g.strokePath(individualCurvePathsR[b], juce::PathStrokeType(1.0f));
+        }
+
+        if (mode == EQChannelMode::Mid)
+        {
+            g.setColour(juce::Colours::cyan.withAlpha(0.15f));
+            g.strokePath(individualCurvePathsMid[b], juce::PathStrokeType(1.0f));
+        }
+
+        if (mode == EQChannelMode::Side)
+        {
+            g.setColour(juce::Colours::magenta.withAlpha(0.15f));
+            g.strokePath(individualCurvePathsSide[b], juce::PathStrokeType(1.0f));
         }
     }
 
@@ -1006,6 +1026,12 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
             if (mode == EQChannelMode::Right) {
                 db = eqResponseBufferR[barIdx];
                 dotColor = juce::Colours::red;
+            } else if (mode == EQChannelMode::Mid) {
+                db = eqResponseBufferL[barIdx]; // Midの総合応答曲線はLチャンネル
+                dotColor = juce::Colours::cyan;
+            } else if (mode == EQChannelMode::Side) {
+                db = eqResponseBufferR[barIdx]; // Sideの総合応答曲線はRチャンネル
+                dotColor = juce::Colours::magenta;
             } else {
                 db = eqResponseBufferL[barIdx]; // Stereo or Left
             }

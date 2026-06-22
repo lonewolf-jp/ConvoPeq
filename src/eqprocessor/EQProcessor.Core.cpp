@@ -708,6 +708,17 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         juce::Logger::writeToLog("[EQ_PREPARE] xfade buffers allocated");
     }
 
+    // M/S処理用スクラッチバッファ
+    const int requiredMS = newMaxInternalBlockSize * 4;
+    if (requiredMS > msWorkCapacity || !msWorkBuffer)
+    {
+        msWorkBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(requiredMS));
+        msWorkCapacity = requiredMS;
+        if (msWorkBuffer)
+            juce::FloatVectorOperations::clear(msWorkBuffer.get(), requiredMS);
+        juce::Logger::writeToLog("[EQ_PREPARE] msWorkBuffer allocated: " + juce::String(requiredMS));
+    }
+
     if (newMaxInternalBlockSize > 0 && agcCoeffTableCapacity < (newMaxInternalBlockSize + 1))
     {
         agcAttackCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));

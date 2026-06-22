@@ -436,6 +436,8 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp
     src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp
     src/CustomInputOversampler.cpp
+    src/TruePeakDetector.cpp
+    src/LoudnessMeter.cpp
     src/NoiseShaperLearnerTypes.h
     src/audioengine/RuntimeBuildTypes.h
     src/audioengine/RuntimeBuilder.h

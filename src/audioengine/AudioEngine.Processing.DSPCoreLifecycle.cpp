@@ -163,6 +163,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     oversampling.prepare(inputMaxBlock, static_cast<int>(oversamplingFactor), osPreset);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] oversampling.prepare done");
 
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling softClipOS.prepareSingleStage");
+    softClipOS.prepareSingleStage(31, 90.0, internalMaxBlock);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] softClipOS.prepareSingleStage done");
+
     const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] processingRate=" + juce::String(processingRate) + " processingBlockSize=" + juce::String(processingBlockSize));
@@ -212,6 +216,14 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling outputFilter.prepare");
     outputFilter.prepare(processingRate);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] outputFilter.prepare done");
+
+    // TruePeakDetector / LoudnessMeter 準備（ベースレート）
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling truePeakDetector.prepare");
+    truePeakDetector.prepare(newSampleRate, maxInternalBlockSize);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] truePeakDetector.prepare done");
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling loudnessMeter.prepare");
+    loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] loudnessMeter.prepare done");
 
     // 初期状態は固定レイテンシなし
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");

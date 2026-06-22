@@ -126,7 +126,7 @@
 <!-- headroom-instructions -->
 # headroom — Context Compression Layer（常時使用: 絶対条件）
 
-**headroom v0.26.0** は AI エージェント向けコンテキスト圧縮レイヤーです。
+**headroom v0.27.0**（uv tool管理）は AI エージェント向けコンテキスト圧縮レイヤーです。
 このプロジェクトでは **全ての操作で headroom Proxy モードを常時使用** すること。
 
 ## 🔥 トークン削減最大化の3層戦略
@@ -164,29 +164,45 @@ Remove-Job -Name HeadroomProxy -ErrorAction SilentlyContinue
 
 # 学習と分析（任意）
 # headroom learn --apply
-# headroom perf
+# headroom output-savings
 ```
 
-## 使用可能な全機能
+## 使用可能な全機能（v0.27.0）
 
 | カテゴリ | コマンド | 説明 |
 |----------|---------|------|
-| **Proxy** | `headroom proxy --port 8787` | 推薦モード。コード変更不要のHTTPプロキシ |
+| **Proxy** | `headroom proxy` | 推薦モード。コード変更不要のHTTPプロキシ（--memory推奨） |
 | **Wrap** | `headroom wrap claude/codex/copilot` | エージェントを自動ラップしてプロキシ経由に |
-| **学習** | `headroom learn` / `headroom learn --apply` | 失敗パターン分析・CLAUDE.md/AGENTS.mdへ出力 |
-| **MCP** | `headroom mcp install` / `headroom mcp serve` | MCPサーバー管理（headroom_compress/retrieve/stats） |
-| **メモリ** | `headroom memory list/stats/prune` | 永続メモリ管理（SQLite+HNSW+FTS5） |
-| **分析** | `headroom perf` / `agent-savings` | パフォーマンス分析・保存量確認 |
+| **学習** | `headroom learn [--apply] [--verbosity]` | 失敗パターン分析・出力詳細度学習・AGENTS.mdへ出力 |
+| **MCP** | `headroom mcp install/serve/status/uninstall` | MCPサーバー管理（headroom_compress/retrieve/stats） |
+| **メモリ** | `headroom memory list/show/stats/edit/delete/prune/purge/export/import` | 永続メモリ管理（SQLite+HNSW+FTS5、--scope USERフィルタ対応） |
+| **分析** | `headroom perf` / `agent-savings` / `output-savings` | パフォーマンス・トークン削減分析 |
+| **健全性** | `headroom doctor` | **新規** Proxy・クライアントルーティングの一斉診断 |
+| **Read監査** | `headroom audit-reads` | **新規** Readツールトラフィック圧縮機会の監査 |
+| **更新** | `headroom update` | **新規** Headroom自身を最新版に更新 |
 | **CLIツール** | `headroom loc .` / `diff` / `sg` | scc/difftastic/ast-grep の統合ラッパー |
-| **初期化** | `headroom init claude/codex/copilot` | 永続フックインストール |
+| **初期化** | `headroom init claude/codex/copilot/openclaw` | 永続フックインストール（copilotサブコマンド新規） |
 | **認証** | `headroom copilot-auth login/status` | Copilot OAuth管理 |
 
-## 動作確認済み機能（Windows + headroom v0.26.0）
-- ✅ Proxy: 起動/health/livez/readyz/stats/metrics/stats-history/dashboard
-- ✅ SmartCrusher: JSON 100件→**51.3%削減**（3,329→1,622 tokens, CCR hash生成済）
+## v0.26.0 → v0.27.0 変更点
+- **新規コマンド**: `update`, `doctor`, `audit-reads`, `output-savings`
+- **新規サブコマンド**: `init copilot`, `init openclaw`
+- **Proxy新機能**: `--code-graph`, `--learn`, `--mode [token|cache]`, `--anthropic-pre-upstream-concurrency`, `--budget`, `--budget-period`, `--code-aware`
+- **Learn強化**: `--verbosity`（出力詳細度学習）, `--llm-judge`（LLMによる上書き）
+- **Memory強化**: `--scope USER`フィルタ, `--since`時間フィルタ, `export/import`（JSON入出力）, `purge`（条件一括削除）
+- **Proxyデフォルト変更**: `--memory-storage=project`（プロジェクト分離、旧globalからの移行）
+- **ast-grep**: PyPI版に変更（pypi v0.44.0）
+- **更新方法**: `uv tool upgrade headroom-ai`（または `headroom update`）
+
+## 動作確認済み機能（Windows + headroom v0.27.0）
+- ✅ Proxy: 起動/health/livez/readyz/stats/metrics/stats-history（version 0.27.0, Rust core loaded）
+- ✅ SmartCrusher: JSON圧縮継続対応
 - ✅ RTK統合: 常時有効、lifetime 98.8%削減
-- ✅ loc (scc), diff (difftastic), sg (ast-grep): 全ツール動作確認
-- ✅ memory: list/stats 正常動作
+- ✅ loc (scc), diff (difftastic), sg (ast-grep): 全ツール動作確認（ast-grepはPyPI版）
+- ✅ memory: list/show/stats 正常動作
+- ✅ doctor: proxy未起動時の警告表示、ルーティング診断
+- ✅ output-savings: データ収集前の適切な案内表示
+- ✅ audit-reads: Codex/Claudeトランスクリプト監査対応
 - ✅ MCP SDK: インストール済み
 - ❌ Python library: CLIのみ（`import headroom` は未インストール）
 - ❌ MCP endpoint at proxy: 別プロセス `headroom mcp serve` が必要

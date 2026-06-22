@@ -37,6 +37,9 @@ public:
                      juce::dsp::AudioBlock<double>& outputBlock,
                      int numChannels) noexcept;
 
+    // 単一stageの軽量オーバーサンプラを構築（SoftClip専用）
+    bool prepareSingleStage(int taps, double attenDb, int stageInputMax) noexcept;
+
     // 異常フラグを取得してリセットする (Audio Thread 安全)
     bool consumeCorruptionFlag() noexcept
     {

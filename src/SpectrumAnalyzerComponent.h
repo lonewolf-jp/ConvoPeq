@@ -96,6 +96,8 @@ private:
 
     std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesL;
     std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesR;
+    std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesMid{};
+    std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesSide{};
     // 表示バーの中心周波数と、EQカーブ計算用の周波数ポイントを兼ねる
     std::array<float, NUM_DISPLAY_BARS> displayFrequencies;
 
@@ -107,6 +109,8 @@ private:
     juce::Path totalCurvePathL, totalCurvePathR;
     std::vector<juce::Path> individualCurvePathsL;
     std::vector<juce::Path> individualCurvePathsR;
+    std::vector<juce::Path> individualCurvePathsMid;
+    std::vector<juce::Path> individualCurvePathsSide;
 
     // ── スムーシング係数 ──
     static constexpr float SMOOTHING_ALPHA = 0.85f; // 60fpsに合わせて調整 (0.75 -> 0.85)

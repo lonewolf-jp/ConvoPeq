@@ -101,6 +101,13 @@ namespace
             dsp->activeOversamplingType,
             convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)))));
 
+    // SoftClip局所OSのレイテンシ（31tap Halfband: 理論値15 base rate samples）
+    // 理論式: (taps-1)/2 per pass × 2 passes = taps-1 = 30 @2x → 15 @base rate
+    // 【注意】要実測確認: processUp→processDownの合成遅延を単位インパルスで測定し補正
+    constexpr int kSoftClipLatencyBaseRateSamples = 15;
+    breakdown.softClipLatencyBaseRateSamples = (safeOsFactor == 1)
+        ? kSoftClipLatencyBaseRateSamples : 0;
+
     if (!convo::consumeAtomic(convBypassActive, std::memory_order_acquire))
     {
         auto convBreakdown = dsp->convolverRt().getLatencyBreakdown();
@@ -119,7 +126,8 @@ namespace
 
     breakdown.totalLatencyBaseRateSamples = juce::jmax(0,
         breakdown.oversamplingLatencyBaseRateSamples
-      + breakdown.convolverTotalLatencyBaseRateSamples);
+      + breakdown.convolverTotalLatencyBaseRateSamples
+      + breakdown.softClipLatencyBaseRateSamples);
 
     return breakdown;
 }

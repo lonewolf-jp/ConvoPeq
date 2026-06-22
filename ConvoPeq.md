@@ -48,6 +48,8 @@
         ├── LatticeNoiseShaper.h
         ├── LockFreeAudioRingBuffer.h
         ├── LockFreeRingBuffer.h
+        ├── LoudnessMeter.cpp
+        ├── LoudnessMeter.h
         ├── MKLNonUniformConvolver.cpp
         ├── MKLNonUniformConvolver.h
         ├── MKLRealTimeSetup.cpp
@@ -78,6 +80,8 @@
         ├── SpectrumAnalyzerComponent.cpp
         ├── SpectrumAnalyzerComponent.h
         ├── StateKey.h
+        ├── TruePeakDetector.cpp
+        ├── TruePeakDetector.h
         ├── UltraHighRateDCBlocker.h
         ├── audioengine/
         │   ├── AtomicAccess.h
@@ -694,6 +698,8 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp
     src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp
     src/CustomInputOversampler.cpp
+    src/TruePeakDetector.cpp
+    src/LoudnessMeter.cpp
     src/NoiseShaperLearnerTypes.h
     src/audioengine/RuntimeBuildTypes.h
     src/audioengine/RuntimeBuilder.h
@@ -7434,6 +7440,25 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     }
 }
 
+bool CustomInputOversampler::prepareSingleStage(int taps, double attenDb, int stageInputMax) noexcept
+{
+    release();
+    upsampleRatio = 2;
+    numStages = 1;
+    maxInputBlockSize = stageInputMax;
+    maxUpsampledBlockSize = stageInputMax * 2;
+    prepareStage(stages[0], taps, attenDb, stageInputMax);
+    workCapacity = maxUpsampledBlockSize;
+    for (int ch = 0; ch < kMaxChannels; ++ch) {
+        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
+        if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
+        blockChannels[ch] = workA[ch].get();
+    }
+    return true;
+}
+
 void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset preset)
 {
     release();
@@ -7922,6 +7947,9 @@ public:
     void processDown(const juce::dsp::AudioBlock<double>& upsampledBlock,
                      juce::dsp::AudioBlock<double>& outputBlock,
                      int numChannels) noexcept;
+
+    // 単一stageの軽量オーバーサンプラを構築（SoftClip専用）
+    bool prepareSingleStage(int taps, double attenDb, int stageInputMax) noexcept;
 
     // 異常フラグを取得してリセットする (Audio Thread 安全)
     bool consumeCorruptionFlag() noexcept
@@ -10289,6 +10317,8 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
         channelBoxes[i].addItem("Stereo", 1);
         channelBoxes[i].addItem("Left",   2);
         channelBoxes[i].addItem("Right",  3);
+        channelBoxes[i].addItem("Mid",    4);
+        channelBoxes[i].addItem("Side",   5);
         channelBoxes[i].setJustificationType(juce::Justification::centred);
         channelBoxes[i].setTooltip("Select Channel Mode");
         channelBoxes[i].addListener(this);
@@ -13204,6 +13234,252 @@ public:
 #ifdef _MSC_VER
 #  pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
+
+```
+
+### 📄 `src\LoudnessMeter.cpp`
+
+```
+//============================================================================
+#include <JuceHeader.h>
+#include <immintrin.h>
+
+#include "LoudnessMeter.h"
+
+//============================================================================
+void LoudnessMeter::prepare(double sr, int maxBlockSize)
+{
+    sampleRate = sr;
+    blockCounter = 0;
+    preparedBlockSize = maxBlockSize;
+    const int required = maxBlockSize * 2;
+    if (required > filterWorkCapacity || !filterWorkBuffer)
+    {
+        filterWorkBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(required));
+        filterWorkCapacity = required;
+    }
+    // RingBufferStorageを動的確保（これによりDSPCoreのサイズが98KB肥大化するのを防ぐ）
+    if (!ringBufferStorage)
+    {
+        auto* mem = convo::aligned_malloc(sizeof(RingBufferStorage), 64);
+        if (mem)
+            ringBufferStorage = convo::ScopedAlignedPtr<RingBufferStorage>(
+                new (mem) RingBufferStorage());
+    }
+    reset();
+}
+
+void LoudnessMeter::reset() noexcept
+{
+    for (int ch = 0; ch < kMaxChannels; ++ch)
+    {
+        std::memset(&preFilterState[ch], 0, sizeof(KWeightingState));
+        std::memset(&rlbFilterState[ch], 0, sizeof(KWeightingState));
+    }
+    blockCounter = 0;
+    if (ringBufferStorage) ringBufferStorage->ringBuffer.clear();
+}
+
+void LoudnessMeter::processBlock(const double* dataL, const double* dataR, int numSamples) noexcept
+{
+    if (numSamples <= 0 || !filterWorkBuffer) return;
+
+    double* fl = filterWorkBuffer.get();
+    double* fr = fl + numSamples;
+    if (!fl) return;
+
+    // Stage 1: Pre-filter per channel
+    for (int n = 0; n < numSamples; ++n)
+    {
+        fl[n] = processKWeightingStage(kPreBiquad, preFilterState[0], dataL[n]);
+        fr[n] = (dataR != nullptr)
+            ? processKWeightingStage(kPreBiquad, preFilterState[1], dataR[n])
+            : processKWeightingStage(kPreBiquad, preFilterState[1], dataL[n]);
+    }
+
+    // Stage 2: RLB filter per channel
+    for (int n = 0; n < numSamples; ++n)
+    {
+        fl[n] = processKWeightingStage(kRlbBiquad, rlbFilterState[0], fl[n]);
+        fr[n] = processKWeightingStage(kRlbBiquad, rlbFilterState[1], fr[n]);
+    }
+
+    // Compute mean square + peak (processed signal)
+    double sumSqL = 0.0, sumSqR = 0.0;
+    double peakL = 0.0, peakR = 0.0;
+    int i = 0;
+#if defined(__AVX2__)
+    const int vEnd = numSamples / 4 * 4;
+    __m256d vSumL = _mm256_setzero_pd();
+    __m256d vSumR = _mm256_setzero_pd();
+    __m256d vPeakL = _mm256_setzero_pd();
+    __m256d vPeakR = _mm256_setzero_pd();
+    const __m256d vSignMask = _mm256_set1_pd(-0.0);
+    for (; i < vEnd; i += 4)
+    {
+        __m256d vL = _mm256_loadu_pd(fl + i);
+        __m256d vR = _mm256_loadu_pd(fr + i);
+        vSumL = _mm256_fmadd_pd(vL, vL, vSumL);
+        vSumR = _mm256_fmadd_pd(vR, vR, vSumR);
+        vPeakL = _mm256_max_pd(vPeakL, _mm256_andnot_pd(vSignMask, vL));
+        vPeakR = _mm256_max_pd(vPeakR, _mm256_andnot_pd(vSignMask, vR));
+    }
+    // Reduce
+    __m128d loL = _mm256_castpd256_pd128(vSumL);
+    __m128d hiL = _mm256_extractf128_pd(vSumL, 1);
+    __m128d sumL128 = _mm_add_pd(loL, hiL);
+    sumL128 = _mm_hadd_pd(sumL128, sumL128);
+    _mm_store_sd(&sumSqL, sumL128);
+
+    __m128d loR = _mm256_castpd256_pd128(vSumR);
+    __m128d hiR = _mm256_extractf128_pd(vSumR, 1);
+    __m128d sumR128 = _mm_add_pd(loR, hiR);
+    sumR128 = _mm_hadd_pd(sumR128, sumR128);
+    _mm_store_sd(&sumSqR, sumR128);
+
+    loL = _mm256_castpd256_pd128(vPeakL);
+    hiL = _mm256_extractf128_pd(vPeakL, 1);
+    __m128d pL128 = _mm_max_pd(loL, hiL);
+    pL128 = _mm_max_sd(pL128, _mm_unpackhi_pd(pL128, pL128));
+    _mm_store_sd(&peakL, pL128);
+
+    loR = _mm256_castpd256_pd128(vPeakR);
+    hiR = _mm256_extractf128_pd(vPeakR, 1);
+    __m128d pR128 = _mm_max_pd(loR, hiR);
+    pR128 = _mm_max_sd(pR128, _mm_unpackhi_pd(pR128, pR128));
+    _mm_store_sd(&peakR, pR128);
+#endif
+    for (; i < numSamples; ++i)
+    {
+        const double l = fl[i], r = fr[i];
+        sumSqL += l * l;
+        sumSqR += r * r;
+        const double al = std::abs(l), ar = std::abs(r);
+        if (al > peakL) peakL = al;
+        if (ar > peakR) peakR = ar;
+    }
+
+    // チャンネル重み (L=1.0, R=1.0) 適用
+    const double meanSquare = (sumSqL * kChannelWeightStereo[0] + sumSqR * kChannelWeightStereo[1])
+                            / static_cast<double>(numSamples);
+    const double peakLinear = std::max(peakL, peakR);
+
+    // RingBuffer publish
+    BlockPower bp;
+    bp.meanSquare = meanSquare;
+    bp.peakLinear = peakLinear;
+    bp.blockIndex = blockCounter++;
+    if (ringBufferStorage) ringBufferStorage->ringBuffer.push(bp);
+}
+
+```
+
+### 📄 `src\LoudnessMeter.h`
+
+```
+//============================================================================
+#pragma once
+
+#include <JuceHeader.h>
+#include <atomic>
+#include <cstdint>
+
+#include "AlignedAllocation.h"
+#include "audioengine/AtomicAccess.h"
+#include "LockFreeRingBuffer.h"
+
+//============================================================================
+/**
+    LoudnessMeter ── ITU-R BS.1770-4/5 + EBU R128 準拠ラウドネスメーター
+
+    K-weighting フィルタ処理 → ブロック平均電力 → RingBuffer publish
+    集計（Momentary/Short-term/Integrated）は専用ワーカースレッド。
+
+    Audio Thread: processBlock() のみ呼び出し（lock-free, 非メモリ確保）
+*/
+class LoudnessMeter
+{
+public:
+    static constexpr int kMaxChannels = 2;
+    static constexpr double kChannelWeightStereo[2] = { 1.0, 1.0 };
+
+    LoudnessMeter() = default;
+    ~LoudnessMeter() = default;
+
+    LoudnessMeter(const LoudnessMeter&) = delete;
+    LoudnessMeter& operator=(const LoudnessMeter&) = delete;
+
+    /** prepare: (Message Thread) */
+    void prepare(double sampleRate, int maxBlockSize);
+
+    /** Audio Thread: ブロックの平均電力を計算しRingBufferにpublish */
+    void processBlock(const double* dataL, const double* dataR, int numSamples) noexcept;
+
+    void reset() noexcept;
+
+    //--- RingBuffer (Audio Thread publish, Worker Thread consume) ---
+    struct BlockPower {
+        double meanSquare = 0.0; // チャンネル重み適用済み M/S
+        double peakLinear = 0.0;
+        uint64_t blockIndex = 0;
+    };
+
+    LockFreeRingBuffer<BlockPower, 4096>& getRingBuffer() noexcept { return ringBufferStorage->ringBuffer; }
+
+private:
+    // K-weighting filter (2-stage biquad, BS.1770-4 Table 1)
+    // Stage 1: Pre-filter (High-shelf)
+    // Stage 2: RLB filter (High-pass)
+    struct KWeightingState {
+        double x1[2] = {}; // 入力遅延
+        double x2[2] = {};
+        double y1[2] = {};
+        double y2[2] = {};
+    };
+
+    KWeightingState preFilterState[2];  // [channel]
+    KWeightingState rlbFilterState[2];
+
+    double sampleRate = 0.0;
+    uint64_t blockCounter = 0;
+    int preparedBlockSize = 0;
+
+    // Audio Thread安全のため事前確保されたワークバッファ
+    convo::ScopedAlignedPtr<double> filterWorkBuffer;
+    int filterWorkCapacity = 0;
+
+    // リングバッファはDSPCoreサイズ削減のため動的確保（ScopedAlignedPtr内にRingBufferStorageを配置）
+    struct RingBufferStorage {
+        alignas(64) LockFreeRingBuffer<BlockPower, 4096> ringBuffer;
+    };
+    convo::ScopedAlignedPtr<RingBufferStorage> ringBufferStorage;
+
+    inline double processKWeightingStage(const double coeffs[5], KWeightingState& state, double x) noexcept
+    {
+        // Direct Form I: a0=1 normalized
+        // coeffs = {b0, b1, b2, a1, a2}
+        const double y = coeffs[0] * x + coeffs[1] * state.x1[0] + coeffs[2] * state.x2[0]
+                       - coeffs[3] * state.y1[0] - coeffs[4] * state.y2[0];
+        state.x2[0] = state.x1[0];
+        state.x1[0] = x;
+        state.y2[0] = state.y1[0];
+        state.y1[0] = y;
+        return y;
+    }
+};
+
+//--- K-weighting coefficients (48kHz, ITU-R BS.1770-4 Table 1) ---
+// Stage 1: Pre-filter (High-shelf)
+static constexpr double kPreBiquad[5] = {
+    1.535124859586970, -2.691696189406380, 1.198392810852850,
+    -1.690659293182410, 0.732480774215850
+};
+
+// Stage 2: RLB filter (High-pass)
+static constexpr double kRlbBiquad[5] = {
+    1.0, -2.0, 1.0,
+    -1.990047454833980, 0.990072250366210
+};
 
 ```
 
@@ -23107,10 +23383,14 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     for (auto& band : individualBandCurvesL) band.fill(MIN_DB);
     for (auto& band : individualBandCurvesR) band.fill(MIN_DB);
+    for (auto& band : individualBandCurvesMid) band.fill(MIN_DB);
+    for (auto& band : individualBandCurvesSide) band.fill(MIN_DB);
     // displayFrequencies and zCache are std::array, so no resize needed.
 
     individualCurvePathsL.resize(EQProcessor::NUM_BANDS);
     individualCurvePathsR.resize(EQProcessor::NUM_BANDS);
+    individualCurvePathsMid.resize(EQProcessor::NUM_BANDS);
+    individualCurvePathsSide.resize(EQProcessor::NUM_BANDS);
 
     // 表示用の周波数ポイントを事前に計算
     logMinFreq = std::log10(MIN_FREQ_HZ);
@@ -23913,6 +24193,8 @@ void SpectrumAnalyzerComponent::updateEQData()
                 float db = juce::Decibels::gainToDecibels(mag);
                 if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)  individualBandCurvesL[b][i] = db; else individualBandCurvesL[b][i] = 0.0f;
                 if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) individualBandCurvesR[b][i] = db; else individualBandCurvesR[b][i] = 0.0f;
+                if (mode == EQChannelMode::Mid)  individualBandCurvesMid[b][i] = db; else individualBandCurvesMid[b][i] = 0.0f;
+                if (mode == EQChannelMode::Side) individualBandCurvesSide[b][i] = db; else individualBandCurvesSide[b][i] = 0.0f;
             }
         }
 
@@ -23970,6 +24252,8 @@ void SpectrumAnalyzerComponent::updateEQPaths()
     {
         createPath(individualCurvePathsL[b], individualBandCurvesL[b]);
         createPath(individualCurvePathsR[b], individualBandCurvesR[b]);
+        createPath(individualCurvePathsMid[b], individualBandCurvesMid[b]);
+        createPath(individualCurvePathsSide[b], individualBandCurvesSide[b]);
     }
 }
 
@@ -24008,6 +24292,18 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
         {
             g.setColour(juce::Colours::red.withAlpha(0.15f));
             g.strokePath(individualCurvePathsR[b], juce::PathStrokeType(1.0f));
+        }
+
+        if (mode == EQChannelMode::Mid)
+        {
+            g.setColour(juce::Colours::cyan.withAlpha(0.15f));
+            g.strokePath(individualCurvePathsMid[b], juce::PathStrokeType(1.0f));
+        }
+
+        if (mode == EQChannelMode::Side)
+        {
+            g.setColour(juce::Colours::magenta.withAlpha(0.15f));
+            g.strokePath(individualCurvePathsSide[b], juce::PathStrokeType(1.0f));
         }
     }
 
@@ -24048,6 +24344,12 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
             if (mode == EQChannelMode::Right) {
                 db = eqResponseBufferR[barIdx];
                 dotColor = juce::Colours::red;
+            } else if (mode == EQChannelMode::Mid) {
+                db = eqResponseBufferL[barIdx]; // Midの総合応答曲線はLチャンネル
+                dotColor = juce::Colours::cyan;
+            } else if (mode == EQChannelMode::Side) {
+                db = eqResponseBufferR[barIdx]; // Sideの総合応答曲線はRチャンネル
+                dotColor = juce::Colours::magenta;
             } else {
                 db = eqResponseBufferL[barIdx]; // Stereo or Left
             }
@@ -24384,6 +24686,8 @@ private:
 
     std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesL;
     std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesR;
+    std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesMid{};
+    std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesSide{};
     // 表示バーの中心周波数と、EQカーブ計算用の周波数ポイントを兼ねる
     std::array<float, NUM_DISPLAY_BARS> displayFrequencies;
 
@@ -24395,6 +24699,8 @@ private:
     juce::Path totalCurvePathL, totalCurvePathR;
     std::vector<juce::Path> individualCurvePathsL;
     std::vector<juce::Path> individualCurvePathsR;
+    std::vector<juce::Path> individualCurvePathsMid;
+    std::vector<juce::Path> individualCurvePathsSide;
 
     // ── スムーシング係数 ──
     static constexpr float SMOOTHING_ALPHA = 0.85f; // 60fpsに合わせて調整 (0.75 -> 0.85)
@@ -24538,6 +24844,373 @@ namespace std {
         }
     };
 }
+
+```
+
+### 📄 `src\TruePeakDetector.cpp`
+
+```
+//============================================================================
+#include <JuceHeader.h>
+#include <cmath>
+#include <cstring>
+#include <immintrin.h>
+
+#include "TruePeakDetector.h"
+
+//============================================================================
+TruePeakDetector::~TruePeakDetector()
+{
+    for (auto& stage : stages)
+    {
+        stage.convCoeffs.reset();
+        stage.convCoeffsReversed.reset();
+        for (int ch = 0; ch < kMaxChannels; ++ch)
+            stage.upHistory[ch].reset();
+    }
+    upsampleBuffer.reset();
+}
+
+void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
+{
+    currentSampleRate.store(sampleRate, std::memory_order_release);
+
+    const int upBufferSize = maxBlockSize * kOversamplingRatio;
+    if (upBufferSize > bufferCapacity || !upsampleBuffer)
+    {
+        upsampleBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(upBufferSize));
+        bufferCapacity = upBufferSize;
+    }
+
+    // 2段の2倍OSで4倍を構成
+    int stageInputMax = maxBlockSize;
+    for (int i = 0; i < 2; ++i)
+    {
+        // stage 0 は taps そのまま、stage 1 は taps/2 程度で十分
+        const int stageTaps = (i == 0) ? taps : std::max(15, taps / 2);
+        prepareStage(stages[i], stageTaps, kDefaultAttenuationDb, stageInputMax);
+        stageInputMax *= 2;
+    }
+    upsampledCapacity = maxBlockSize * kOversamplingRatio;
+    reset();
+}
+
+void TruePeakDetector::reset() noexcept
+{
+    peakHold = 0.0;
+    for (auto& stage : stages)
+    {
+        for (int ch = 0; ch < kMaxChannels; ++ch)
+        {
+            if (stage.upHistory[ch])
+                juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+        }
+    }
+}
+
+double TruePeakDetector::processBlock(const double* dataL, const double* dataR, int numSamples) noexcept
+{
+    if (numSamples <= 0 || !upsampleBuffer)
+        return 0.0;
+
+    // 2段アップサンプル: ベースレート → 2x → 4x
+    // Stage 0: 1x → 2x (L)
+    double* work = upsampleBuffer.get();
+    interpolateStage(stages[0], dataL, numSamples, work, 0);
+    const int up1Samples = numSamples * 2;
+
+    // Stage 0: 1x → 2x (R)
+    if (dataR != nullptr)
+        interpolateStage(stages[0], dataR, numSamples, work + up1Samples, 1);
+    else
+        interpolateStage(stages[0], dataL, numSamples, work + up1Samples, 1);
+
+    // Stage 1: 2x → 4x (L/Rはworkにインターリーブ)
+    interpolateStage(stages[1], work, up1Samples, work + up1Samples * 2, 0);
+    const int up2Samples = up1Samples * 2;
+
+    // 4x領域での最大絶対値検出
+    double peak = 0.0;
+    const int vEnd = up2Samples / 4 * 4;
+    for (int i = 0; i < vEnd; i += 4)
+    {
+        __m256d v = _mm256_loadu_pd(work + up1Samples * 2 + i);
+        __m256d absV = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
+        __m128d lo = _mm256_castpd256_pd128(absV);
+        __m128d hi = _mm256_extractf128_pd(absV, 1);
+        __m128d max01 = _mm_max_pd(lo, hi);
+        __m128d max0 = _mm_max_sd(max01, _mm_unpackhi_pd(max01, max01));
+        double m;
+        _mm_store_sd(&m, max0);
+        if (m > peak) peak = m;
+    }
+    for (int i = vEnd; i < up2Samples; ++i)
+    {
+        const double v = std::abs(work[up1Samples * 2 + i]);
+        if (v > peak) peak = v;
+    }
+
+    // ピークホールド（指数平滑）
+    if (peak > peakHold)
+        peakHold = peak;
+    else
+        peakHold *= 0.999; // 減衰時定数: 約1000サンプル
+
+    return peakHold;
+}
+
+//==============================================================================
+// 内部実装: Kaiser窓 FIR halfband フィルタ
+//==============================================================================
+double TruePeakDetector::besselI0(double x) noexcept
+{
+    double sum = 1.0;
+    double term = 1.0;
+    const double xx = x * x;
+    for (int n = 1; n < 100; ++n)
+    {
+        term *= xx / (4.0 * static_cast<double>(n) * static_cast<double>(n));
+        sum += term;
+        if (term < sum * 1.0e-18)
+            break;
+    }
+    return sum;
+}
+
+double TruePeakDetector::dotProductAvx2(const double* __restrict x,
+                                        const double* __restrict coeffs,
+                                        int n) noexcept
+{
+    __m256d acc0 = _mm256_setzero_pd();
+    __m256d acc1 = _mm256_setzero_pd();
+    __m256d acc2 = _mm256_setzero_pd();
+    __m256d acc3 = _mm256_setzero_pd();
+    int i = 0;
+    for (; i <= n - 16; i += 16)
+    {
+        _mm_prefetch(reinterpret_cast<const char*>(x + i + 64), _MM_HINT_T0);
+        _mm_prefetch(reinterpret_cast<const char*>(coeffs + i + 64), _MM_HINT_T0);
+        acc0 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i),      _mm256_load_pd(coeffs + i),      acc0);
+        acc1 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 4),  _mm256_load_pd(coeffs + i + 4),  acc1);
+        acc2 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 8),  _mm256_load_pd(coeffs + i + 8),  acc2);
+        acc3 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 12), _mm256_load_pd(coeffs + i + 12), acc3);
+    }
+    for (; i <= n - 4; i += 4)
+        acc0 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i), _mm256_load_pd(coeffs + i), acc0);
+    acc0 = _mm256_add_pd(acc0, acc1);
+    acc2 = _mm256_add_pd(acc2, acc3);
+    acc0 = _mm256_add_pd(acc0, acc2);
+    __m128d vLo = _mm256_castpd256_pd128(acc0);
+    __m128d vHi = _mm256_extractf128_pd(acc0, 1);
+    __m128d vSum = _mm_add_pd(vLo, vHi);
+    vSum = _mm_hadd_pd(vSum, vSum);
+    double sum = _mm_cvtsd_f64(vSum);
+    for (; i < n; ++i)
+        sum += x[i] * coeffs[i];
+    return sum;
+}
+
+void TruePeakDetector::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
+{
+    stage.convCoeffs.reset();
+    stage.convCoeffsReversed.reset();
+    for (int ch = 0; ch < kMaxChannels; ++ch)
+        stage.upHistory[ch].reset();
+
+    stage.taps = juce::jmax(3, taps | 1);
+    stage.centerTap = (stage.taps - 1) / 2;
+    stage.centerParity = stage.centerTap & 1;
+    stage.convParity = 1 - stage.centerParity;
+    stage.maxInputSamples = stageInputMax;
+    stage.maxOutputSamples = stageInputMax * 2;
+
+    auto rawCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.taps));
+    if (!rawCoeffs) return;
+
+    const double beta = (attenuationDb > 50.0)
+        ? (0.1102 * (attenuationDb - 8.7))
+        : ((attenuationDb >= 21.0)
+            ? (0.5842 * std::pow(attenuationDb - 21.0, 0.4) + 0.07886 * (attenuationDb - 21.0))
+            : 0.0);
+    const double i0Beta = besselI0(beta);
+    const int M = stage.centerTap;
+
+    for (int n = 0; n < stage.taps; ++n)
+    {
+        const double t = static_cast<double>(n - M);
+        const double sinc = (n == M)
+            ? 0.5
+            : (std::sin(juce::MathConstants<double>::pi * 0.5 * t) / (juce::MathConstants<double>::pi * t));
+        const double frac = static_cast<double>(n - M) / static_cast<double>(M);
+        const double window = besselI0(beta * std::sqrt(juce::jmax(0.0, 1.0 - frac * frac))) / i0Beta;
+        rawCoeffs[n] = sinc * window;
+    }
+
+    for (int n = 0; n < stage.taps; ++n)
+    {
+        if (n != stage.centerTap && ((n & 1) == stage.centerParity))
+            rawCoeffs[n] = 0.0;
+    }
+
+    double sum = 0.0;
+    for (int i = 0; i < stage.taps; ++i)
+        sum += rawCoeffs[i];
+    if (std::abs(sum) > 1.0e-20)
+    {
+        const double inv = 1.0 / sum;
+        for (int i = 0; i < stage.taps; ++i)
+            rawCoeffs[i] *= inv;
+    }
+
+    rawCoeffs[stage.centerTap] = 0.5;
+    double nonCenterSum = 0.0;
+    for (int i = 0; i < stage.taps; ++i)
+        if (i != stage.centerTap) nonCenterSum += rawCoeffs[i];
+    if (std::abs(nonCenterSum) > 1.0e-20)
+    {
+        const double scale = 0.5 / nonCenterSum;
+        for (int i = 0; i < stage.taps; ++i)
+        {
+            if (i != stage.centerTap)
+                rawCoeffs[i] *= scale;
+        }
+    }
+    rawCoeffs[stage.centerTap] = 0.5;
+
+    stage.convCount = (stage.taps - stage.convParity + 1) / 2;
+    stage.convCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
+    stage.convCoeffsReversed = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
+    if (!stage.convCoeffs || !stage.convCoeffsReversed) return;
+
+    for (int r = 0; r < stage.convCount; ++r)
+    {
+        const int k = stage.convParity + (r << 1);
+        stage.convCoeffs[r] = (k < stage.taps) ? rawCoeffs[k] : 0.0;
+        stage.convCoeffsReversed[stage.convCount - 1 - r] = stage.convCoeffs[r];
+    }
+
+    stage.centerCoeff = rawCoeffs[stage.centerTap];
+    stage.centerDelayInput = (stage.centerTap - stage.centerParity) / 2;
+    stage.historyUpKeep = juce::jmax(stage.convCount - 1, stage.centerDelayInput);
+    stage.upHistorySize = stage.historyUpKeep + stage.maxInputSamples + 16;
+
+    for (int ch = 0; ch < kMaxChannels; ++ch)
+    {
+        stage.upHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.upHistorySize));
+        if (stage.upHistory[ch])
+            juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+    }
+}
+
+void TruePeakDetector::interpolateStage(const Stage& stage,
+                                        const double* input, int inputSamples,
+                                        double* output, int channel) noexcept
+{
+    auto* history = stage.upHistory[channel].get();
+    if (!history || !stage.convCoeffs) return;
+
+    const int histLen = stage.historyUpKeep;
+    const int convCnt = stage.convCount;
+    const int centerDelay = stage.centerDelayInput;
+    const double cCoeff = stage.centerCoeff;
+    const int convParity = stage.convParity;
+
+    // 履歴シフト
+    std::memmove(history, history + inputSamples, static_cast<size_t>(histLen) * sizeof(double));
+    std::memcpy(history + histLen, input, static_cast<size_t>(inputSamples) * sizeof(double));
+
+    for (int n = 0; n < inputSamples; ++n)
+    {
+        const double* base = history + histLen + n - centerDelay;
+        const double even = base[0] * cCoeff + dotProductAvx2(base - convParity, stage.convCoeffsReversed.get(), convCnt);
+        const double odd  = base[1] * cCoeff + dotProductAvx2(base - 1 + convParity, stage.convCoeffsReversed.get(), convCnt);
+        output[n * 2]     = even;
+        output[n * 2 + 1] = odd;
+    }
+}
+
+```
+
+### 📄 `src\TruePeakDetector.h`
+
+```
+//============================================================================
+#pragma once
+
+#include <JuceHeader.h>
+#include <atomic>
+#include <cstdint>
+
+#include "AlignedAllocation.h"
+#include "audioengine/AtomicAccess.h"
+
+//============================================================================
+/**
+    TruePeakDetector ── ITU-R BS.1770-4/5 準拠 True Peak 検出器
+
+    4倍オーバーサンプリングによるインターサンプルピーク検出。
+    計測専用（ゲイン演算なし）。Audio Thread 安全。
+*/
+class TruePeakDetector
+{
+public:
+    static constexpr bool isLinearPhaseFIR = true;
+    static constexpr int kOversamplingRatio = 4;
+    static constexpr int kMaxChannels = 2;
+    // 確定tap数: 63 （ITU-R BS.1770-3 Example 48tapを上回る。Hansen 2012文献確定）
+    static constexpr int kDefaultTaps = 63;
+    static constexpr double kDefaultAttenuationDb = 100.0;
+
+    TruePeakDetector() = default;
+    ~TruePeakDetector();
+
+    TruePeakDetector(const TruePeakDetector&) = delete;
+    TruePeakDetector& operator=(const TruePeakDetector&) = delete;
+
+    /** 4倍オーバーサンプラを準備 (Message Thread) */
+    void prepare(double sampleRate, int maxBlockSize, int taps = kDefaultTaps);
+
+    /** Audio Thread: ブロックのTruePeakを検出 */
+    double processBlock(const double* dataL, const double* dataR, int numSamples) noexcept;
+
+    void reset() noexcept;
+
+private:
+    convo::ScopedAlignedPtr<double> upsampleBuffer;
+    int bufferCapacity = 0;
+    int upsampledCapacity = 0;
+    double peakHold = 0.0;
+    std::atomic<double> currentSampleRate{ 0.0 };
+
+    // 内部4倍オーバーサンプラ
+    struct Stage {
+        int taps = 0;
+        int centerTap = 0;
+        int centerParity = 0;
+        int convParity = 0;
+        int convCount = 0;
+        int centerDelayInput = 0;
+        int historyUpKeep = 0;
+        int historyDownKeep = 0;
+        int maxInputSamples = 0;
+        int maxOutputSamples = 0;
+        double centerCoeff = 0.5;
+        convo::ScopedAlignedPtr<double> convCoeffs;
+        convo::ScopedAlignedPtr<double> convCoeffsReversed;
+        convo::ScopedAlignedPtr<double> upHistory[2];
+        int upHistorySize = 0;
+    };
+
+    Stage stages[2]; // 4x = 2 stages (2x + 2x)
+
+    void prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax);
+    static double besselI0(double x) noexcept;
+    static double dotProductAvx2(const double* x, const double* coeffs, int n) noexcept;
+
+    void interpolateStage(const Stage& stage,
+                          const double* input, int inputSamples,
+                          double* output, int channel) noexcept;
+};
 
 ```
 
@@ -26223,7 +26896,9 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         calcMagnitudesForBand(band.coeffs, zArray, bandMagSq, numPoints);
 
         i = 0;
-        if (band.mode == EQChannelMode::Stereo)
+        if (band.mode == EQChannelMode::Stereo ||
+            band.mode == EQChannelMode::Mid ||
+            band.mode == EQChannelMode::Side)
         {
             for (; i < vEnd; i += 8)
             {
@@ -26257,9 +26932,11 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         {
             float magSq = bandMagSq[i];
             if (!std::isfinite(magSq)) magSq = 1.0f;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left)
+            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left
+                || band.mode == EQChannelMode::Mid || band.mode == EQChannelMode::Side)
                 totalMagSqL[i] *= magSq;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right)
+            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right
+                || band.mode == EQChannelMode::Mid || band.mode == EQChannelMode::Side)
                 totalMagSqR[i] *= magSq;
         }
     }
@@ -28667,12 +29344,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     for (; i < numSamples; ++i)
     {
         const double inputVal = data[i]; // 元の入力を退避
-        const double mid    = (prevScalar + inputVal) * 0.5;
-        const double absMid = absNoLibm(mid);
         double x = inputVal;
-        if (absMid > threshold)
-            x *= threshold / absMid;
-
         if (absNoLibm(x) > clip_start)
             x = musicalSoftClipScalar(x, threshold, knee, asymmetry);
 
@@ -28932,11 +29604,29 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const double clipKnee      = 0.05 + 0.35 * sat;
         const double clipAsymmetry = 0.10 * sat;
 
-        for (int ch = 0; ch < numProcChannels; ++ch)
+        if (oversamplingFactor > 1)
         {
-            double* data = processBlock.getChannelPointer(ch);
-            softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
-                               history.softClipPrevSample[ch < 2 ? ch : 1]);
+            // 既存: アップサンプル領域でSoftClip（エイリアシング保護済み）
+            for (int ch = 0; ch < numProcChannels; ++ch)
+            {
+                double* data = processBlock.getChannelPointer(ch);
+                softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                   history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+        }
+        else
+        {
+            // 局所2倍OS: processUp → SoftClip → processDown
+            const int nChOS = static_cast<int>(originalBlock.getNumChannels());
+            auto osBlock = softClipOS.processUp(originalBlock, nChOS);
+            const int osSamples = static_cast<int>(osBlock.getNumSamples());
+            for (int ch = 0; ch < nChOS; ++ch)
+            {
+                double* osData = osBlock.getChannelPointer(ch);
+                softClipBlockAVX2(osData, osSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                   history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+            softClipOS.processDown(osBlock, originalBlock, nChOS);
         }
     }
 
@@ -29077,6 +29767,12 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                               state.adaptiveCaptureBitDepth,
                               state.adaptiveCoeffBankIndex,
                               state.captureSessionId);
+
+    // TruePeak検出（BS.1770-4/5準拠）
+    truePeakDetector.processBlock(dataL, dataR, numSamples);
+
+    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
+    loudnessMeter.processBlock(dataL, dataR, numSamples);
 
     if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
         && state.adaptiveCoeffSet != nullptr
@@ -29302,10 +29998,8 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         if (!isFiniteAndAbsBelowNoLibm(x, 1.0e300))
             x = 0.0;
 
-        // 注意: 平均化はmidVec相当のロジック。P3と合わせて判断
-        const double avg = 0.5 * (x + prevSample);
-        prevSample = x; // 修正: 処理前の生入力値を保存
-        data[i] = musicalSoftClipScalar(avg, threshold, knee, asymmetry);
+        prevSample = x; // 状態更新のみ（ADAA用にフィールド残す）
+        data[i] = musicalSoftClipScalar(x, threshold, knee, asymmetry);
     }
 }
 }
@@ -29443,11 +30137,27 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const double clipKnee = 0.05 + 0.35 * sat;
         const double clipAsymmetry = 0.10 * sat;
 
-        for (int ch = 0; ch < numProcChannels; ++ch)
+        if (oversamplingFactor > 1)
         {
-            double* data = processBlock.getChannelPointer(ch);
-            softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
-                              history.softClipPrevSample[ch < 2 ? ch : 1]);
+            for (int ch = 0; ch < numProcChannels; ++ch)
+            {
+                double* data = processBlock.getChannelPointer(ch);
+                softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                  history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+        }
+        else
+        {
+            const int nChOS = static_cast<int>(originalBlock.getNumChannels());
+            auto osBlock = softClipOS.processUp(originalBlock, nChOS);
+            const int osSamples = static_cast<int>(osBlock.getNumSamples());
+            for (int ch = 0; ch < nChOS; ++ch)
+            {
+                double* osData = osBlock.getChannelPointer(ch);
+                softClipBlockAVX2(osData, osSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                  history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+            softClipOS.processDown(osBlock, originalBlock, nChOS);
         }
     }
 
@@ -30156,6 +30866,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     oversampling.prepare(inputMaxBlock, static_cast<int>(oversamplingFactor), osPreset);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] oversampling.prepare done");
 
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling softClipOS.prepareSingleStage");
+    softClipOS.prepareSingleStage(31, 90.0, internalMaxBlock);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] softClipOS.prepareSingleStage done");
+
     const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] processingRate=" + juce::String(processingRate) + " processingBlockSize=" + juce::String(processingBlockSize));
@@ -30205,6 +30919,14 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling outputFilter.prepare");
     outputFilter.prepare(processingRate);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] outputFilter.prepare done");
+
+    // TruePeakDetector / LoudnessMeter 準備（ベースレート）
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling truePeakDetector.prepare");
+    truePeakDetector.prepare(newSampleRate, maxInternalBlockSize);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] truePeakDetector.prepare done");
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling loudnessMeter.prepare");
+    loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] loudnessMeter.prepare done");
 
     // 初期状態は固定レイテンシなし
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
@@ -30390,6 +31112,13 @@ namespace
             dsp->activeOversamplingType,
             convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)))));
 
+    // SoftClip局所OSのレイテンシ（31tap Halfband: 理論値15 base rate samples）
+    // 理論式: (taps-1)/2 per pass × 2 passes = taps-1 = 30 @2x → 15 @base rate
+    // 【注意】要実測確認: processUp→processDownの合成遅延を単位インパルスで測定し補正
+    constexpr int kSoftClipLatencyBaseRateSamples = 15;
+    breakdown.softClipLatencyBaseRateSamples = (safeOsFactor == 1)
+        ? kSoftClipLatencyBaseRateSamples : 0;
+
     if (!convo::consumeAtomic(convBypassActive, std::memory_order_acquire))
     {
         auto convBreakdown = dsp->convolverRt().getLatencyBreakdown();
@@ -30408,7 +31137,8 @@ namespace
 
     breakdown.totalLatencyBaseRateSamples = juce::jmax(0,
         breakdown.oversamplingLatencyBaseRateSamples
-      + breakdown.convolverTotalLatencyBaseRateSamples);
+      + breakdown.convolverTotalLatencyBaseRateSamples
+      + breakdown.softClipLatencyBaseRateSamples);
 
     return breakdown;
 }
@@ -33965,6 +34695,9 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                 srForRebuild = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         }
 
+        // convolver 状態変更を MainWindow に通知 (IR読み込み後のGUI更新)
+        sendChangeMessage();
+
         // 同一構造ハッシュで再通知が来ても、重い Structural rebuild を再発火させない。
         // これにより IR 読み込み後の rebuild 連鎖（CPU スパイク）を抑止する。
         if (needsStructuralRebuild && uiStructuralHash != 0)
@@ -34141,6 +34874,8 @@ struct CoeffSet {
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
 #include "core/RebuildTypes.h"
+#include "TruePeakDetector.h"
+#include "LoudnessMeter.h"
 #include "ISRLifecycle.h"
 #include "ISRRTExecution.h"
 #include "ISRDSPHandle.h"
@@ -34748,6 +35483,7 @@ public:
         convo::OutputFilter outputFilter;
 
         CustomInputOversampler oversampling;
+        CustomInputOversampler softClipOS; // 局所2倍OS（SoftClip用、prepareSingleStageで構築）
         size_t oversamplingFactor = 1;
         OversamplingType activeOversamplingType = OversamplingType::IIR;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
@@ -34757,6 +35493,11 @@ public:
         uint64_t currentCaptureSessionId = 0;
         std::uint64_t runtimeUuid = 0;
         double sampleRate = 0.0;
+
+        // TruePeak検出器（BS.1770-4/5準拠）
+        ::TruePeakDetector truePeakDetector;
+        // LUFSラウドネスメーター（BS.1770-4/5 + EBU R128）
+        ::LoudnessMeter loudnessMeter;
 
     // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
         convo::ScopedAlignedPtr<double> alignedL;
@@ -34917,7 +35658,7 @@ public:
     [[nodiscard]] float getEQNonlinearSaturation() const noexcept { return uiEqEditor.getNonlinearSaturation(); }
     [[nodiscard]] EQProcessor::FilterStructure getEQFilterStructure() const noexcept { return uiEqEditor.getFilterStructure(); }
     [[nodiscard]] const void* getEQStateSnapshot() const { return uiEqEditor.getEQStateSnapshot(); }
-    void resetEQToDefaults() { uiEqEditor.reset(); }
+    void resetEQToDefaults() { uiEqEditor.resetToDefaults(); }
 
     // acquire: prepareToPlay/releaseResources の release と HB し、有効なサンプルレートを取得。
     [[nodiscard]] double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_acquire); }
@@ -34928,6 +35669,7 @@ public:
         int convolverAlgorithmLatencyBaseRateSamples = 0;
         int convolverIRPeakLatencyBaseRateSamples = 0;
         int convolverTotalLatencyBaseRateSamples = 0;
+        int softClipLatencyBaseRateSamples = 0; // 局所2倍OS (SoftClip用)
         int totalLatencyBaseRateSamples = 0;
     };
 
@@ -60594,6 +61336,17 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         juce::Logger::writeToLog("[EQ_PREPARE] xfade buffers allocated");
     }
 
+    // M/S処理用スクラッチバッファ
+    const int requiredMS = newMaxInternalBlockSize * 4;
+    if (requiredMS > msWorkCapacity || !msWorkBuffer)
+    {
+        msWorkBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(requiredMS));
+        msWorkCapacity = requiredMS;
+        if (msWorkBuffer)
+            juce::FloatVectorOperations::clear(msWorkBuffer.get(), requiredMS);
+        juce::Logger::writeToLog("[EQ_PREPARE] msWorkBuffer allocated: " + juce::String(requiredMS));
+    }
+
     if (newMaxInternalBlockSize > 0 && agcCoeffTableCapacity < (newMaxInternalBlockSize + 1))
     {
         agcAttackCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
@@ -61614,7 +62367,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             for (int i = 0; i < NUM_BANDS; ++i)
             {
                 if (mask & (1u << i))
-                    for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                    for (int ch = 0; ch < kFilterChannels; ++ch)
                         std::memset(activeFilterState[ch][i].data(), 0, sizeof(double) * 2);
             }
         }
@@ -61664,10 +62417,13 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     using FilterStateStorage = decltype(activeFilterState);
 
+    double* msWork = msWorkBuffer.get();
+
     const auto processSerial = [&](double* dataL,
                                    double* dataR,
                                    FilterStateStorage& states)
     {
+        const bool canProcessMonoMidSide = (msWork != nullptr);
         for (int i = 0; i < numActiveBands; ++i)
         {
             const auto& band = activeBands[i];
@@ -61680,6 +62436,57 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                                   states[0][band.index].data(),
                                   states[1][band.index].data(),
                                   saturation);
+            }
+            else if (mode == EQChannelMode::Mid)
+            {
+                if (!canProcessMonoMidSide) continue;
+                if (numChannels < 2)
+                {
+                    // Mono→Mid: dataLそのまま処理、R=M
+                    processBand(dataL, numSamples, band.node->coeffs,
+                                states[2][band.index].data(), saturation);
+                    juce::FloatVectorOperations::copy(dataR, dataL, numSamples);
+                    continue;
+                }
+                // MとSをエンコード
+                juce::FloatVectorOperations::copy(msWork, dataL, numSamples);
+                juce::FloatVectorOperations::add(msWork, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork, 0.5, numSamples);
+                juce::FloatVectorOperations::copy(msWork + numSamples, dataL, numSamples);
+                juce::FloatVectorOperations::subtract(msWork + numSamples, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork + numSamples, 0.5, numSamples);
+                // Mid成分のみ処理
+                processBand(msWork, numSamples, band.node->coeffs,
+                            states[2][band.index].data(), saturation);
+                // デコード: L=M+S, R=M-S
+                for (int n = 0; n < numSamples; ++n) {
+                    dataL[n] = msWork[n] + msWork[numSamples + n];
+                    dataR[n] = msWork[n] - msWork[numSamples + n];
+                }
+            }
+            else if (mode == EQChannelMode::Side)
+            {
+                if (numChannels < 2)
+                {
+                    // Mono→Side: Side=0出力
+                    juce::FloatVectorOperations::clear(dataL, numSamples);
+                    continue;
+                }
+                // MとSをエンコード
+                juce::FloatVectorOperations::copy(msWork, dataL, numSamples);
+                juce::FloatVectorOperations::add(msWork, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork, 0.5, numSamples);
+                juce::FloatVectorOperations::copy(msWork + numSamples, dataL, numSamples);
+                juce::FloatVectorOperations::subtract(msWork + numSamples, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork + numSamples, 0.5, numSamples);
+                // Side成分のみ処理
+                processBand(msWork + numSamples, numSamples, band.node->coeffs,
+                            states[3][band.index].data(), saturation);
+                // デコード: L=M+S, R=M-S
+                for (int n = 0; n < numSamples; ++n) {
+                    dataL[n] = msWork[n] + msWork[numSamples + n];
+                    dataR[n] = msWork[n] - msWork[numSamples + n];
+                }
             }
             else
             {
@@ -61731,6 +62538,52 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
                 juce::FloatVectorOperations::add(accumR, workR, numSamples);
                 juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+            }
+            else if (mode == EQChannelMode::Mid || mode == EQChannelMode::Side)
+            {
+                if (numChannels < 2)
+                {
+                    if (mode == EQChannelMode::Mid)
+                    {
+                        // Mono→Mid: srcLそのまま、accum加算
+                        juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                        processBand(workL, numSamples, band.node->coeffs,
+                                    states[2][band.index].data(), saturation);
+                        juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                        juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                    }
+                    // Mono→Side: 何もしない（Side=0）
+                    continue;
+                }
+                // ① MとSをエンコード → workM, workS (msWork[0..n]=M, [n..2n]=S)
+                juce::FloatVectorOperations::copy(msWork, srcL, numSamples);
+                juce::FloatVectorOperations::add(msWork, srcR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork, 0.5, numSamples);
+                juce::FloatVectorOperations::copy(msWork + numSamples, srcL, numSamples);
+                juce::FloatVectorOperations::subtract(msWork + numSamples, srcR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork + numSamples, 0.5, numSamples);
+
+                // ② 処理: Mid→msWork[0..n], Side→msWork[n..2n]
+                auto* targetState = (mode == EQChannelMode::Mid)
+                    ? states[2][band.index].data()
+                    : states[3][band.index].data();
+                auto* targetBuf = (mode == EQChannelMode::Mid)
+                    ? msWork
+                    : (msWork + numSamples);
+                processBand(targetBuf, numSamples, band.node->coeffs, targetState, saturation);
+
+                // ③ デコード → workL, workRへ
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    workL[n] = msWork[n] + msWork[numSamples + n];
+                    workR[n] = msWork[n] - msWork[numSamples + n];
+                }
+                // ④ 差分加算
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    accumL[n] += workL[n] - srcL[n];
+                    accumR[n] += workR[n] - srcR[n];
+                }
             }
             else
             {
@@ -61930,6 +62783,16 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         return;
     }
 
+    // Mid/Sideモード検出時は基本process()へフォールバック（M/S処理は基本パスのみ対応）
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        if (coeffCache->bandActive[i] && coeffCache->channelModes[i] >= 3)
+        {
+            process(block);
+            return;
+        }
+    }
+
     juce::ScopedNoDenormals noDenormals;
 
     const int numSamples = static_cast<int>(block.getNumSamples());
@@ -61987,7 +62850,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                 {
                     if (mask & (1u << i))
                     {
-                        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                        for (int ch = 0; ch < kFilterChannels; ++ch)
                             std::memset(activeFilterState[ch][i].data(), 0, sizeof(double) * 2);
                     }
                 }
@@ -62325,7 +63188,9 @@ enum class EQChannelMode
 {
     Stereo, // ステレオ（両方）
     Left,   // 左チャンネルのみ
-    Right   // 右チャンネルのみ
+    Right,  // 右チャンネルのみ
+    Mid,    // Mid成分のみ（M/S処理時）
+    Side    // Side成分のみ（M/S処理時）
 };
 
 //--------------------------------------------------------------
@@ -62421,6 +63286,7 @@ public:
 
     static constexpr int NUM_BANDS        = 20;  // 20バンドパラメトリックEQ
     static constexpr int MAX_CHANNELS     = 2;   // ステレオ対応
+    static constexpr int kFilterChannels  = 4;   // L=0, R=1, Mid=2, Side=3
 
     // ── デフォルト値 ──
     static constexpr float DEFAULT_FREQS[NUM_BANDS] = {
@@ -62860,7 +63726,7 @@ private:
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
-    std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
+    std::array<std::array<std::array<double, 2>, NUM_BANDS>, kFilterChannels> filterState{};
     std::atomic<bool> bypassRequested { false };
     std::atomic<bool> bypassed { false }; // 実効バイパス状態（フェード完了後に更新）
     bool m_rtBypassShadow = false;       // RT-local bypass shadow（非atomic、RT スレッドのみ書き込み）
@@ -62875,6 +63741,10 @@ private:
     // 内部最大サイズ (Audio Thread安全ガード用)
     // ==================================================================
     int maxInternalBlockSize = 0;
+
+    // ── M/S処理用スクラッチバッファ ──
+    convo::ScopedAlignedPtr<double> msWorkBuffer;
+    int msWorkCapacity = 0;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock <double > & block);

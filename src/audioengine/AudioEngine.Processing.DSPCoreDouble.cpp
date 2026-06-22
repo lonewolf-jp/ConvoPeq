@@ -287,12 +287,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     for (; i < numSamples; ++i)
     {
         const double inputVal = data[i]; // 元の入力を退避
-        const double mid    = (prevScalar + inputVal) * 0.5;
-        const double absMid = absNoLibm(mid);
         double x = inputVal;
-        if (absMid > threshold)
-            x *= threshold / absMid;
-
         if (absNoLibm(x) > clip_start)
             x = musicalSoftClipScalar(x, threshold, knee, asymmetry);
 
@@ -552,11 +547,29 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const double clipKnee      = 0.05 + 0.35 * sat;
         const double clipAsymmetry = 0.10 * sat;
 
-        for (int ch = 0; ch < numProcChannels; ++ch)
+        if (oversamplingFactor > 1)
         {
-            double* data = processBlock.getChannelPointer(ch);
-            softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
-                               history.softClipPrevSample[ch < 2 ? ch : 1]);
+            // 既存: アップサンプル領域でSoftClip（エイリアシング保護済み）
+            for (int ch = 0; ch < numProcChannels; ++ch)
+            {
+                double* data = processBlock.getChannelPointer(ch);
+                softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                   history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+        }
+        else
+        {
+            // 局所2倍OS: processUp → SoftClip → processDown
+            const int nChOS = static_cast<int>(originalBlock.getNumChannels());
+            auto osBlock = softClipOS.processUp(originalBlock, nChOS);
+            const int osSamples = static_cast<int>(osBlock.getNumSamples());
+            for (int ch = 0; ch < nChOS; ++ch)
+            {
+                double* osData = osBlock.getChannelPointer(ch);
+                softClipBlockAVX2(osData, osSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                   history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+            softClipOS.processDown(osBlock, originalBlock, nChOS);
         }
     }
 
@@ -697,6 +710,12 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                               state.adaptiveCaptureBitDepth,
                               state.adaptiveCoeffBankIndex,
                               state.captureSessionId);
+
+    // TruePeak検出（BS.1770-4/5準拠）
+    truePeakDetector.processBlock(dataL, dataR, numSamples);
+
+    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
+    loudnessMeter.processBlock(dataL, dataR, numSamples);
 
     if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
         && state.adaptiveCoeffSet != nullptr

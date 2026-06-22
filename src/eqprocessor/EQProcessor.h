@@ -56,7 +56,9 @@ enum class EQChannelMode
 {
     Stereo, // ステレオ（両方）
     Left,   // 左チャンネルのみ
-    Right   // 右チャンネルのみ
+    Right,  // 右チャンネルのみ
+    Mid,    // Mid成分のみ（M/S処理時）
+    Side    // Side成分のみ（M/S処理時）
 };
 
 //--------------------------------------------------------------
@@ -152,6 +154,7 @@ public:
 
     static constexpr int NUM_BANDS        = 20;  // 20バンドパラメトリックEQ
     static constexpr int MAX_CHANNELS     = 2;   // ステレオ対応
+    static constexpr int kFilterChannels  = 4;   // L=0, R=1, Mid=2, Side=3
 
     // ── デフォルト値 ──
     static constexpr float DEFAULT_FREQS[NUM_BANDS] = {
@@ -591,7 +594,7 @@ private:
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
-    std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
+    std::array<std::array<std::array<double, 2>, NUM_BANDS>, kFilterChannels> filterState{};
     std::atomic<bool> bypassRequested { false };
     std::atomic<bool> bypassed { false }; // 実効バイパス状態（フェード完了後に更新）
     bool m_rtBypassShadow = false;       // RT-local bypass shadow（非atomic、RT スレッドのみ書き込み）
@@ -606,6 +609,10 @@ private:
     // 内部最大サイズ (Audio Thread安全ガード用)
     // ==================================================================
     int maxInternalBlockSize = 0;
+
+    // ── M/S処理用スクラッチバッファ ──
+    convo::ScopedAlignedPtr<double> msWorkBuffer;
+    int msWorkCapacity = 0;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock <double > & block);

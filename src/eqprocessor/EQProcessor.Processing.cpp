@@ -603,7 +603,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             for (int i = 0; i < NUM_BANDS; ++i)
             {
                 if (mask & (1u << i))
-                    for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                    for (int ch = 0; ch < kFilterChannels; ++ch)
                         std::memset(activeFilterState[ch][i].data(), 0, sizeof(double) * 2);
             }
         }
@@ -653,10 +653,13 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     using FilterStateStorage = decltype(activeFilterState);
 
+    double* msWork = msWorkBuffer.get();
+
     const auto processSerial = [&](double* dataL,
                                    double* dataR,
                                    FilterStateStorage& states)
     {
+        const bool canProcessMonoMidSide = (msWork != nullptr);
         for (int i = 0; i < numActiveBands; ++i)
         {
             const auto& band = activeBands[i];
@@ -669,6 +672,57 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                                   states[0][band.index].data(),
                                   states[1][band.index].data(),
                                   saturation);
+            }
+            else if (mode == EQChannelMode::Mid)
+            {
+                if (!canProcessMonoMidSide) continue;
+                if (numChannels < 2)
+                {
+                    // Mono→Mid: dataLそのまま処理、R=M
+                    processBand(dataL, numSamples, band.node->coeffs,
+                                states[2][band.index].data(), saturation);
+                    juce::FloatVectorOperations::copy(dataR, dataL, numSamples);
+                    continue;
+                }
+                // MとSをエンコード
+                juce::FloatVectorOperations::copy(msWork, dataL, numSamples);
+                juce::FloatVectorOperations::add(msWork, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork, 0.5, numSamples);
+                juce::FloatVectorOperations::copy(msWork + numSamples, dataL, numSamples);
+                juce::FloatVectorOperations::subtract(msWork + numSamples, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork + numSamples, 0.5, numSamples);
+                // Mid成分のみ処理
+                processBand(msWork, numSamples, band.node->coeffs,
+                            states[2][band.index].data(), saturation);
+                // デコード: L=M+S, R=M-S
+                for (int n = 0; n < numSamples; ++n) {
+                    dataL[n] = msWork[n] + msWork[numSamples + n];
+                    dataR[n] = msWork[n] - msWork[numSamples + n];
+                }
+            }
+            else if (mode == EQChannelMode::Side)
+            {
+                if (numChannels < 2)
+                {
+                    // Mono→Side: Side=0出力
+                    juce::FloatVectorOperations::clear(dataL, numSamples);
+                    continue;
+                }
+                // MとSをエンコード
+                juce::FloatVectorOperations::copy(msWork, dataL, numSamples);
+                juce::FloatVectorOperations::add(msWork, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork, 0.5, numSamples);
+                juce::FloatVectorOperations::copy(msWork + numSamples, dataL, numSamples);
+                juce::FloatVectorOperations::subtract(msWork + numSamples, dataR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork + numSamples, 0.5, numSamples);
+                // Side成分のみ処理
+                processBand(msWork + numSamples, numSamples, band.node->coeffs,
+                            states[3][band.index].data(), saturation);
+                // デコード: L=M+S, R=M-S
+                for (int n = 0; n < numSamples; ++n) {
+                    dataL[n] = msWork[n] + msWork[numSamples + n];
+                    dataR[n] = msWork[n] - msWork[numSamples + n];
+                }
             }
             else
             {
@@ -720,6 +774,52 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
                 juce::FloatVectorOperations::add(accumR, workR, numSamples);
                 juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+            }
+            else if (mode == EQChannelMode::Mid || mode == EQChannelMode::Side)
+            {
+                if (numChannels < 2)
+                {
+                    if (mode == EQChannelMode::Mid)
+                    {
+                        // Mono→Mid: srcLそのまま、accum加算
+                        juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                        processBand(workL, numSamples, band.node->coeffs,
+                                    states[2][band.index].data(), saturation);
+                        juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                        juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                    }
+                    // Mono→Side: 何もしない（Side=0）
+                    continue;
+                }
+                // ① MとSをエンコード → workM, workS (msWork[0..n]=M, [n..2n]=S)
+                juce::FloatVectorOperations::copy(msWork, srcL, numSamples);
+                juce::FloatVectorOperations::add(msWork, srcR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork, 0.5, numSamples);
+                juce::FloatVectorOperations::copy(msWork + numSamples, srcL, numSamples);
+                juce::FloatVectorOperations::subtract(msWork + numSamples, srcR, numSamples);
+                juce::FloatVectorOperations::multiply(msWork + numSamples, 0.5, numSamples);
+
+                // ② 処理: Mid→msWork[0..n], Side→msWork[n..2n]
+                auto* targetState = (mode == EQChannelMode::Mid)
+                    ? states[2][band.index].data()
+                    : states[3][band.index].data();
+                auto* targetBuf = (mode == EQChannelMode::Mid)
+                    ? msWork
+                    : (msWork + numSamples);
+                processBand(targetBuf, numSamples, band.node->coeffs, targetState, saturation);
+
+                // ③ デコード → workL, workRへ
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    workL[n] = msWork[n] + msWork[numSamples + n];
+                    workR[n] = msWork[n] - msWork[numSamples + n];
+                }
+                // ④ 差分加算
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    accumL[n] += workL[n] - srcL[n];
+                    accumR[n] += workR[n] - srcR[n];
+                }
             }
             else
             {
@@ -919,6 +1019,16 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         return;
     }
 
+    // Mid/Sideモード検出時は基本process()へフォールバック（M/S処理は基本パスのみ対応）
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        if (coeffCache->bandActive[i] && coeffCache->channelModes[i] >= 3)
+        {
+            process(block);
+            return;
+        }
+    }
+
     juce::ScopedNoDenormals noDenormals;
 
     const int numSamples = static_cast<int>(block.getNumSamples());
@@ -976,7 +1086,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                 {
                     if (mask & (1u << i))
                     {
-                        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                        for (int ch = 0; ch < kFilterChannels; ++ch)
                             std::memset(activeFilterState[ch][i].data(), 0, sizeof(double) * 2);
                     }
                 }

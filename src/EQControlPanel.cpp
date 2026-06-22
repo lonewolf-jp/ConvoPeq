@@ -109,6 +109,8 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
         channelBoxes[i].addItem("Stereo", 1);
         channelBoxes[i].addItem("Left",   2);
         channelBoxes[i].addItem("Right",  3);
+        channelBoxes[i].addItem("Mid",    4);
+        channelBoxes[i].addItem("Side",   5);
         channelBoxes[i].setJustificationType(juce::Justification::centred);
         channelBoxes[i].setTooltip("Select Channel Mode");
         channelBoxes[i].addListener(this);

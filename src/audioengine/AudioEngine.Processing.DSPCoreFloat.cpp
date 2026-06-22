@@ -119,10 +119,8 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         if (!isFiniteAndAbsBelowNoLibm(x, 1.0e300))
             x = 0.0;
 
-        // 注意: 平均化はmidVec相当のロジック。P3と合わせて判断
-        const double avg = 0.5 * (x + prevSample);
-        prevSample = x; // 修正: 処理前の生入力値を保存
-        data[i] = musicalSoftClipScalar(avg, threshold, knee, asymmetry);
+        prevSample = x; // 状態更新のみ（ADAA用にフィールド残す）
+        data[i] = musicalSoftClipScalar(x, threshold, knee, asymmetry);
     }
 }
 }
@@ -260,11 +258,27 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const double clipKnee = 0.05 + 0.35 * sat;
         const double clipAsymmetry = 0.10 * sat;
 
-        for (int ch = 0; ch < numProcChannels; ++ch)
+        if (oversamplingFactor > 1)
         {
-            double* data = processBlock.getChannelPointer(ch);
-            softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
-                              history.softClipPrevSample[ch < 2 ? ch : 1]);
+            for (int ch = 0; ch < numProcChannels; ++ch)
+            {
+                double* data = processBlock.getChannelPointer(ch);
+                softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                  history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+        }
+        else
+        {
+            const int nChOS = static_cast<int>(originalBlock.getNumChannels());
+            auto osBlock = softClipOS.processUp(originalBlock, nChOS);
+            const int osSamples = static_cast<int>(osBlock.getNumSamples());
+            for (int ch = 0; ch < nChOS; ++ch)
+            {
+                double* osData = osBlock.getChannelPointer(ch);
+                softClipBlockAVX2(osData, osSamples, clipThreshold, clipKnee, clipAsymmetry,
+                                  history.softClipPrevSample[ch < 2 ? ch : 1]);
+            }
+            softClipOS.processDown(osBlock, originalBlock, nChOS);
         }
     }
 

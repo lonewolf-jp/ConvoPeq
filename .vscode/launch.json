@@ -28,7 +28,11 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
-            "args": ["--cli-run", "--cli-exit-ms", "15000"],
+            "args": [
+                "--cli-run",
+                "--cli-exit-ms",
+                "15000"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug",
             "environment": [
@@ -57,6 +61,53 @@
             ],
             "console": "internalConsole",
             "preLaunchTask": "Release"
+        },
+        {
+            "name": "ConvoPeq Release (Ninja Build)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\Release\\ConvoPeq.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "C:\\Program Files (x86)\\Intel\\oneAPI\\mkl\\latest\\redist\\intel64;${env:PATH}"
+                }
+            ],
+            "console": "internalConsole",
+            "preLaunchTask": "Release",
+            "symbolSearchPath": "${workspaceFolder}\\build\\Release",
+            "logging": {
+                "moduleLoad": false,
+                "programOutput": true,
+                "exceptions": true
+            }
+        },
+        {
+            "name": "ConvoPeq Crash調査 (例外停止)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\Release\\ConvoPeq.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "C:\\Program Files (x86)\\Intel\\oneAPI\\mkl\\latest\\redist\\intel64;${env:PATH}"
+                }
+            ],
+            "console": "internalConsole",
+            "preLaunchTask": "Release",
+            "symbolSearchPath": "${workspaceFolder}\\build\\Release",
+            "logging": {
+                "moduleLoad": false,
+                "programOutput": true,
+                "exceptions": true
+            },
+            "breakOnProcessEntry": "async"
         }
     ]
 }

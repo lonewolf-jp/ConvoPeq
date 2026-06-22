@@ -78,6 +78,8 @@ struct CoeffSet {
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
 #include "core/RebuildTypes.h"
+#include "TruePeakDetector.h"
+#include "LoudnessMeter.h"
 #include "ISRLifecycle.h"
 #include "ISRRTExecution.h"
 #include "ISRDSPHandle.h"
@@ -685,6 +687,7 @@ public:
         convo::OutputFilter outputFilter;
 
         CustomInputOversampler oversampling;
+        CustomInputOversampler softClipOS; // 局所2倍OS（SoftClip用、prepareSingleStageで構築）
         size_t oversamplingFactor = 1;
         OversamplingType activeOversamplingType = OversamplingType::IIR;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
@@ -694,6 +697,11 @@ public:
         uint64_t currentCaptureSessionId = 0;
         std::uint64_t runtimeUuid = 0;
         double sampleRate = 0.0;
+
+        // TruePeak検出器（BS.1770-4/5準拠）
+        ::TruePeakDetector truePeakDetector;
+        // LUFSラウドネスメーター（BS.1770-4/5 + EBU R128）
+        ::LoudnessMeter loudnessMeter;
 
     // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
         convo::ScopedAlignedPtr<double> alignedL;
@@ -865,6 +873,7 @@ public:
         int convolverAlgorithmLatencyBaseRateSamples = 0;
         int convolverIRPeakLatencyBaseRateSamples = 0;
         int convolverTotalLatencyBaseRateSamples = 0;
+        int softClipLatencyBaseRateSamples = 0; // 局所2倍OS (SoftClip用)
         int totalLatencyBaseRateSamples = 0;
     };
 

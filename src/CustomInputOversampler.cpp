@@ -374,6 +374,25 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     }
 }
 
+bool CustomInputOversampler::prepareSingleStage(int taps, double attenDb, int stageInputMax) noexcept
+{
+    release();
+    upsampleRatio = 2;
+    numStages = 1;
+    maxInputBlockSize = stageInputMax;
+    maxUpsampledBlockSize = stageInputMax * 2;
+    prepareStage(stages[0], taps, attenDb, stageInputMax);
+    workCapacity = maxUpsampledBlockSize;
+    for (int ch = 0; ch < kMaxChannels; ++ch) {
+        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
+        if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
+        blockChannels[ch] = workA[ch].get();
+    }
+    return true;
+}
+
 void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset preset)
 {
     release();

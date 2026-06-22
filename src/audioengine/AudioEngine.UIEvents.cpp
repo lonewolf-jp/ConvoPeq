@@ -100,6 +100,9 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                 srForRebuild = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         }
 
+        // convolver 状態変更を MainWindow に通知 (IR読み込み後のGUI更新)
+        sendChangeMessage();
+
         // 同一構造ハッシュで再通知が来ても、重い Structural rebuild を再発火させない。
         // これにより IR 読み込み後の rebuild 連鎖（CPU スパイク）を抑止する。
         if (needsStructuralRebuild && uiStructuralHash != 0)

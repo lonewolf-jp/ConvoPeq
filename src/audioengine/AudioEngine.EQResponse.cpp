@@ -172,7 +172,9 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         calcMagnitudesForBand(band.coeffs, zArray, bandMagSq, numPoints);
 
         i = 0;
-        if (band.mode == EQChannelMode::Stereo)
+        if (band.mode == EQChannelMode::Stereo ||
+            band.mode == EQChannelMode::Mid ||
+            band.mode == EQChannelMode::Side)
         {
             for (; i < vEnd; i += 8)
             {
@@ -206,9 +208,11 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         {
             float magSq = bandMagSq[i];
             if (!std::isfinite(magSq)) magSq = 1.0f;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left)
+            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left
+                || band.mode == EQChannelMode::Mid || band.mode == EQChannelMode::Side)
                 totalMagSqL[i] *= magSq;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right)
+            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right
+                || band.mode == EQChannelMode::Mid || band.mode == EQChannelMode::Side)
                 totalMagSqR[i] *= magSq;
         }
     }
