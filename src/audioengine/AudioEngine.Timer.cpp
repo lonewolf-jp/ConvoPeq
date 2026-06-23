@@ -175,6 +175,47 @@ void AudioEngine::timerCallback()
         }
     }
 
+    // AdaptiveCoeff authority divergence: worldGen vs live bankGen
+    {
+        const int worldGen = (runtimeWorld != nullptr)
+            ? static_cast<int>(runtimeWorld->coefficient.adaptiveCoeffGeneration)
+            : -1;
+        const int liveBankIdx = convo::consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        const auto& bank = getAdaptiveCoeffBankForIndex(liveBankIdx);
+        const int liveBankGen = static_cast<int>(convo::consumeAtomic(bank.generation, std::memory_order_acquire));
+
+        if (worldGen != rtAuxMutable_.debugLastReportedWorldGen
+            || liveBankGen != rtAuxMutable_.debugLastReportedBankGen
+            || liveBankIdx != rtAuxMutable_.debugLastReportedCoeffBankIdx)
+        {
+            rtAuxMutable_.debugLastReportedWorldGen = worldGen;
+            rtAuxMutable_.debugLastReportedBankGen = liveBankGen;
+            rtAuxMutable_.debugLastReportedCoeffBankIdx = liveBankIdx;
+
+            diagLog("[COEFF_AUTH] worldGen=" + juce::String(worldGen)
+                + " bankGen=" + juce::String(liveBankGen)
+                + " bankIdx=" + juce::String(liveBankIdx)
+                + " divergence=" + juce::String(liveBankGen - worldGen));
+        }
+    }
+
+    // Adaptive bank switch count (ISR-safe atomic counter from DSPCore, read on Message Thread)
+    // ★ 2026-06-23: DSP instance UUID を出力し、OLD DSP と NEW DSP の切り替えを区別可能に。
+    //   runtimeUuid は DSPCore 構築時に一度設定され不変のため Timer スレッドから安全に読取可。
+    {
+        auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        if (dsp != nullptr)
+        {
+            const uint64_t count = dsp->adaptiveBankSwitchCount.load(std::memory_order_relaxed);
+            if (count != rtAuxMutable_.debugLastReportedBankSwitchCount)
+            {
+                rtAuxMutable_.debugLastReportedBankSwitchCount = count;
+                diagLog("[ADAPTIVE_SWITCH] dspUuid=" + juce::String(static_cast<juce::int64>(dsp->runtimeUuid))
+                    + " count=" + juce::String(static_cast<juce::int64>(count)));
+            }
+        }
+    }
+
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     auto* currentDspForRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
@@ -766,3 +807,4 @@ void AudioEngine::commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter
         ++m_probeState_.failureCount;
     }
 }
+
