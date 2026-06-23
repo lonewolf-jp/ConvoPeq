@@ -166,6 +166,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         return {};
 
     setMixedPhaseState(1);
+    const double mixedPhaseStartMs = juce::Time::getMillisecondCounterHiRes();
     juce::Logger::writeToLog("[MixedPhase] State -> Optimizing");
 
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
@@ -706,7 +707,10 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         if (progressCallback) progressCallback(1.0f);
         setMixedPhaseState(2);
-        juce::Logger::writeToLog("[MixedPhase] State -> Completed");
+        {
+            const double mpElapsed = juce::Time::getMillisecondCounterHiRes() - mixedPhaseStartMs;
+            juce::Logger::writeToLog("[MixedPhase] State -> Completed (" + juce::String(mpElapsed, 1) + "ms)");
+        }
         return mixedIR;
     }
     catch (...)

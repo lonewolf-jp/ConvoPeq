@@ -1473,10 +1473,16 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     {
         if (auto* self = weakSelf.get())
         {
-            self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
-                                             AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
-                                             AudioEngine::RebuildTelemetryClass::Snapshot,
-                                             AudioEngine::RebuildTelemetryPolicy::Replaceable);
+            // ★ 2026-06-24 [Phase C'] submitRebuildIntent 無効化（実験ブランチ用）。
+            //   RuntimeWorld非依存確定済み（setAdaptiveNoiseShaperState/requestAdaptiveAutosave
+            //   は bank 直接書込 + ファイル保存 callback のみ。world 介在なし）。
+            //   storeLearnedCoeffs → bank.generation++ により RT パスの generation tracking が
+            //   係数反映を検出する。rebuild (~530ms) があっても rebuild なしでも係数は反映される。
+            //   検証項目: rebuild=0回, adaptive switch継続, autosave正常, 30〜60分音飛びゼロ。
+            // self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
+            //                                  AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
+            //                                  AudioEngine::RebuildTelemetryClass::Snapshot,
+            //                                  AudioEngine::RebuildTelemetryPolicy::Replaceable);
             self->engine.storeLearnedCoeffs(mappedCoeffs.data());
             self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
             self->engine.requestAdaptiveAutosave();

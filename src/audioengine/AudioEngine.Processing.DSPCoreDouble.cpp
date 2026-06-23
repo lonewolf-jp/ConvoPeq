@@ -722,9 +722,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
-        juce::Logger::writeToLog("[AudioEngine] DSPCoreDouble::processDoubleToBuffer: adaptiveCoeffSet switch bank="
-                                + juce::String(state.adaptiveCoeffBankIndex)
-                                + " gen=" + juce::String(state.adaptiveCoeffGeneration));
+        adaptiveBankSwitchCount.fetch_add(1, std::memory_order_relaxed);
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;

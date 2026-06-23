@@ -779,8 +779,10 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
+            const double buildStartMs = juce::Time::getMillisecondCounterHiRes();
             convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
                                                                   task.convolverBuildSnapshot);
+            const double buildElapsedMs = juce::Time::getMillisecondCounterHiRes() - buildStartMs;
 
             if (buildResult.runtime == nullptr)
             {
@@ -798,12 +800,18 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 2. Rebuild IR if needed (Heavy operation)
+            double rebuildIrElapsedMs = 0.0;
             if (newDSP->convolverRt().getIRLength() > 0)
             {
                 if (isObsolete())
                     continue;
+                const double rebuildIrStartMs = juce::Time::getMillisecondCounterHiRes();
                 newDSP->convolverRt().rebuildAllIRsSynchronous(isObsolete);
+                rebuildIrElapsedMs = juce::Time::getMillisecondCounterHiRes() - rebuildIrStartMs;
             }
+            diagLog("[DIAG] rebuildThreadLoop: generation=" + juce::String(task.generation)
+                + " build=" + juce::String(buildElapsedMs, 1) + "ms"
+                + " rebuildIR=" + juce::String(rebuildIrElapsedMs, 1) + "ms");
 
             const auto warmupError = runtimeBuilder.validateWarmup(*newDSP);
             if (warmupError != convo::BuildError::None)

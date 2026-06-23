@@ -694,6 +694,8 @@ public:
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         uint32_t activeAdaptiveCoeffGeneration = 0;
         int activeAdaptiveCoeffBankIndex = -1;
+        // ISR-safe switch counter (atom, RT-path). Read by Message Thread for diagnostics.
+        std::atomic<uint64_t> adaptiveBankSwitchCount { 0 };
         uint64_t currentCaptureSessionId = 0;
         std::uint64_t runtimeUuid = 0;
         double sampleRate = 0.0;
@@ -1278,6 +1280,12 @@ public:
         std::atomic<double> cliTelemetryMaxUs { 0.0 };
         std::atomic<double> cliTelemetryLastUs { 0.0 };
         std::atomic<int> cliTelemetryLastBlockSamples { 0 };
+        // Adaptive coeff authority divergence tracking (worldGen vs bankGen)
+        int debugLastReportedWorldGen { -1 };
+        int debugLastReportedBankGen { -1 };
+        int debugLastReportedCoeffBankIdx { -1 };
+        // Adaptive bank switch count tracker (read from DSPCore atomic on Message Thread)
+        uint64_t debugLastReportedBankSwitchCount { std::numeric_limits<uint64_t>::max() };
     };
 
     void setCliProcessingTelemetryEnabled(bool enabled) noexcept
@@ -2968,8 +2976,11 @@ public:
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
         snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-        snapshot.adaptiveCoeffGeneration = 0u;
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+        // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+        //   activeIndex flip + generation increment を検出できるようにする。
+        //   これにより rebuild なしで係数反映が可能となり、学習中の音飛びを防止する。
+        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         if (snap != nullptr)
@@ -2999,8 +3010,11 @@ public:
             snapshot.outputMakeupGain = world->automation.outputMakeupGain;
             snapshot.convolverInputTrimGain = world->automation.convolverInputTrimGain;
             snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;
-            snapshot.adaptiveCoeffGeneration = world->coefficient.adaptiveCoeffGeneration;
             const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+            // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+            //   activeIndex flip + generation increment を検出できるようにする。
+            //   world->coefficient.adaptiveCoeffGeneration は常に0のため代用不可。
+            snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
             snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
             snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;
         }
@@ -3022,8 +3036,11 @@ public:
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
         snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-        snapshot.adaptiveCoeffGeneration = 0u;
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+        // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+        //   activeIndex flip + generation increment を検出できるようにする。
+        //   これにより rebuild なしで係数反映が可能となり、学習中の音飛びを防止する。
+        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         return snapshot;
