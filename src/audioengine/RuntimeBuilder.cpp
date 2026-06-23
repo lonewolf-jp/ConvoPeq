@@ -342,8 +342,26 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
     // Note: SchedulingSemantic can be removed after all consumers migrate to execution.*
 
-    worldOwner->coefficient.adaptiveCoeffBankIndex = 0;
-    worldOwner->coefficient.adaptiveCoeffGeneration = 0;
+    // Coefficient fields: Publish開始時点の live 値を投影
+    // ★ ISR Runtime 契約: RuntimeWorld.coefficientGeneration = Publish開始時点の bank.generation
+    //   Learner は独立 Authority のため、Publish中に generation が進んでも RuntimeWorld は
+    //   Publish開始時点の値を保持する。これは正常動作でありバグではない。
+    //
+    //   NOTE: bankIndex と generation は lock-free snapshot で取得（個別 atomic load）。
+    //   完全な transactional snapshot は保証しない。RuntimeWorld.coefficient は診断・投影用途。
+    //   実際の係数適用は Audio Thread の generation tracking が行う。
+    const int bankIndex = convo::consumeAtomic(
+        engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+    worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
+
+    // ★ ISR Runtime 契約: RuntimeWorld 構築は accessor の副作用に依存しない。
+    //   明示的な範囲チェックにより純粋な Projection を保証する。
+    if (bankIndex >= 0 && bankIndex < static_cast<int>(kNumAdaptiveCoeffBanks))
+    {
+        const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIndex);
+        worldOwner->coefficient.adaptiveCoeffGeneration = convo::consumeAtomic(
+            bank.generation, std::memory_order_acquire);
+    }
     worldOwner->coefficient.eqCoeffHash = 0;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;

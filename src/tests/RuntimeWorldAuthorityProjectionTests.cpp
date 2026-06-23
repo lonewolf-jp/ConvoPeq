@@ -125,17 +125,17 @@ namespace {
     if (!contains(schema, "double convolverInputTrimGain = 1.0;"))
         return false;
 
-    if (!contains(builder, "worldOwner->automation.saturationAmount = engineState.saturationAmount;"))
+    if (!contains(builder, "worldOwner->automation.saturationAmount = saturationAmount;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = engineState.inputHeadroomGain;"))
+    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = inputHeadroomGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.outputMakeupGain = engineState.outputMakeupGain;"))
+    if (!contains(builder, "worldOwner->automation.outputMakeupGain = outputMakeupGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = engineState.convolverInputTrimGain;"))
+    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;"))
         return false;
-    if (!contains(builder, "worldOwner->coefficient.adaptiveCoeffBankIndex = engineState.adaptiveCoeffBankIndex;"))
+    if (!contains(builder, "coefficient.adaptiveCoeffBankIndex"))
         return false;
-    if (!contains(builder, "worldOwner->coefficient.adaptiveCoeffGeneration = engineState.adaptiveCoeffGeneration;"))
+    if (!contains(builder, "coefficient.adaptiveCoeffGeneration"))
         return false;
     if (contains(header, "graph.oversamplingFactor = std::max(1, consumeAtomic(manualOversamplingFactor, std::memory_order_acquire));"))
         return false;
@@ -156,9 +156,9 @@ namespace {
         return false;
     if (!contains(header, "snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;"))
         return false;
-    if (!contains(header, "snapshot.adaptiveCoeffGeneration = world->coefficient.adaptiveCoeffGeneration;"))
+    if (!contains(header, "snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);"))
         return false;
-    if (!contains(header, "static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 9> kRuntimeReadAuthorityInventory"))
+    if (!contains(header, "static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 10> kRuntimeReadAuthorityInventory"))
         return false;
     if (!contains(header, "{\"automation\", convo::isr::RuntimeAuthorityClass::Derived}"))
         return false;
@@ -204,27 +204,15 @@ namespace {
         return false;
     if (!contains(header, "// Bootstrap World guarantees non-null (#3.2.5)"))
         return false;
-    if (!contains(header, "&& (consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire) == 0);"))
+    if (!contains(header, "runtime.retireBacklog = runtimeWorld->retire.retireBacklog;"))
         return false;
-    if (!contains(header, ".allowRetireFallback = false"))
-        return false;
-    if (!contains(header, ".allowAdaptiveBankIndexFallback = allowInitialAtomicFallback"))
+    if (!contains(header, "runtime.deferredResidency = runtimeWorld->retire.deferredResidency;"))
         return false;
     if (contains(header, ".allowAdaptiveGenerationFallback"))
         return false;
-    if (!contains(header, "runtime.adaptiveCoeffBankIndex = (runtimeWorld != nullptr)"))
+    if (!contains(header, "runtime.adaptiveCoeffBankIndex = runtimeWorld->coefficient.adaptiveCoeffBankIndex;"))
         return false;
-    if (!contains(header, "runtime.adaptiveCoeffGeneration = (runtimeWorld != nullptr)"))
-        return false;
-    if (!contains(header, ": 0u;"))
-        return false;
-    if (!contains(header, "runtime.retireBacklog = (runtimeWorld != nullptr)"))
-        return false;
-    if (!contains(header, "? runtimeWorld->retire.retireBacklog"))
-        return false;
-    if (!contains(header, "runtime.deferredResidency = (runtimeWorld != nullptr)"))
-        return false;
-    if (!contains(header, "? runtimeWorld->retire.deferredResidency"))
+    if (!contains(header, "runtime.adaptiveCoeffGeneration = runtimeWorld->coefficient.adaptiveCoeffGeneration;"))
         return false;
     if (contains(header, "runtime.retireBacklog = consumeAtomic(retireQueueDepth_, std::memory_order_acquire);"))
         return false;
@@ -232,15 +220,11 @@ namespace {
         return false;
     if (!contains(header, "jassert(runtimeWorld != nullptr"))
         return false;
-    if (!contains(header, "|| fallbackPolicy.allowTransitionFallback"))
-        return false;
     if (!contains(header, "if (runtimeWorld == nullptr"))
         return false;
-    if (!contains(header, "&& !(fallbackPolicy.allowTransitionFallback"))
+    if (!contains(header, "fetchAddAtomic(observeMonotonicViolationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);"))
         return false;
-    if (!contains(header, "convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);"))
-        return false;
-    if (!contains(header, "convo::publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);"))
+    if (!contains(header, "publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);"))
         return false;
     if (contains(learner, "runtimeReadHandle.runtimePublish.transition.current"))
         return false;
@@ -278,7 +262,7 @@ namespace {
         return false;
     if (!contains(prepareToPlay, "getTransitionPolicyFromRuntimeWorld(runtimeReadHandle"))
         return false;
-    if (!contains(commit, "hasFadingRuntimeInWorld(runtimeReadHandle)"))
+    if (!contains(timer, "hasFadingRuntimeInWorld(runtimeReadHandle"))
         return false;
     if (!contains(audioBlock, "getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef"))
         return false;

@@ -13,6 +13,12 @@ static constexpr int kAdaptiveBitDepthCount = 3;
 inline constexpr int kAdaptiveBitDepthValues[kAdaptiveBitDepthCount] = {16, 24, 32};
 static constexpr int kLearningModeCount = 6;
 
+// 総バンク数（10 SR × 3 bit-depth × 6 mode = 180）
+static constexpr int kNumAdaptiveCoeffBanks =
+    kAdaptiveNoiseShaperSampleRateBankCount
+    * kAdaptiveBitDepthCount
+    * kLearningModeCount;
+
 // ストリーミング信号キャプチャ用 AudioBlock（2ch, 256サンプル）
 struct AudioBlock {
     double L[256];
@@ -3011,9 +3017,11 @@ public:
             snapshot.convolverInputTrimGain = world->automation.convolverInputTrimGain;
             snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;
             const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
-            // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+            // ★ 2026-06-24 [P1]: bankのlive generationを読み、storeLearnedCoeffsToBank による
             //   activeIndex flip + generation increment を検出できるようにする。
-            //   world->coefficient.adaptiveCoeffGeneration は常に0のため代用不可。
+            //   world->coefficient.adaptiveCoeffGeneration は P1 により投影値を持つが、
+            //   バンクのlive generation を直接読むことで、Publish以降の Learner 更新も
+            //   確実に検出する（Audio Thread は常に最新値を使用する）。
             snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
             snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
             snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;

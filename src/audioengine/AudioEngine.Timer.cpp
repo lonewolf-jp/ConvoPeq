@@ -195,7 +195,7 @@ void AudioEngine::timerCallback()
             diagLog("[COEFF_AUTH] worldGen=" + juce::String(worldGen)
                 + " bankGen=" + juce::String(liveBankGen)
                 + " bankIdx=" + juce::String(liveBankIdx)
-                + " divergence=" + juce::String(liveBankGen - worldGen));
+                + " lag=" + juce::String(liveBankGen - worldGen));
         }
     }
 

@@ -455,7 +455,11 @@ if (adaptiveCoeffBankIndex >= 0)
 - `coefficientHash` は P1 修正後、Publish開始時点の係数状態を正しく反映するようになる。
 - 現在の設計は Adaptive Authority の独立性と整合しており、追加改修不要。
 
-**結論**: 監査のみ。コード変更不要。
+**結論**: P2 監査を実施した結果、重大問題なし。追加改修不要と判断。
+
+- `payloadHash` 不変は設計として正しい（係数変更 = Structural 変更ではない）
+- `coefficientHash` は P1 修正後、Publish開始時点の係数状態を正しく反映
+- 監視者は `coefficientHash` または直接 `bank.generation` を確認すればよい
 
 #### P3: AdaptiveCoeffBank Authority モデル（明文化）
 
