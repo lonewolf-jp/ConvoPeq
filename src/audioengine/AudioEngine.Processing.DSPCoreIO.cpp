@@ -422,6 +422,9 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
+        juce::Logger::writeToLog("[AudioEngine] DSPCoreIO::processInput: adaptiveCoeffSet switch bank="
+                                + juce::String(state.adaptiveCoeffBankIndex)
+                                + " gen=" + juce::String(state.adaptiveCoeffGeneration));
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;

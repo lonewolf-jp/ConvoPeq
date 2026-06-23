@@ -21,7 +21,7 @@ TruePeakDetector::~TruePeakDetector()
 
 void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
 {
-    currentSampleRate.store(sampleRate, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
 
     const int upBufferSize = maxBlockSize * kOversamplingRatio;
     if (upBufferSize > bufferCapacity || !upsampleBuffer)

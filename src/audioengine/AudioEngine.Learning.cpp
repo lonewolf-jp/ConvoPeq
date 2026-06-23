@@ -283,11 +283,12 @@ namespace
         192000.0, 352800.0, 384000.0, 705600.0, 768000.0
     };
 
+    // ★ 2026-06-23: P7(Ne10型/現行)向けに再最適化 (DSPCoreLifecycle.cppと同期)
     static constexpr std::array<double, kAdaptiveNoiseShaperOrder> kDefaultAdaptiveNoiseShaperCoeffs_helpers
     {
-        0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
+        -0.003796, -0.006752, 0.008418, -0.010546, 0.004716, -0.007624, -0.020750, -0.002049, -0.003632
     };
-
+}
     inline int clampAdaptiveBankIndex_helpers(int bankIndex) noexcept
     {
         if (bankIndex < 0)
@@ -296,7 +297,6 @@ namespace
             return kAdaptiveNoiseShaperSampleRateBankCount - 1;
         return bankIndex;
     }
-}
 
 void AudioEngine::setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode)
 {

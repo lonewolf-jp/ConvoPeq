@@ -532,24 +532,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     endif()
 
-    # icx: テストターゲットに /EHsc を追加（例外処理を有効化）
-    # icx(clang-cl) の Release デフォルトでは例外が無効化されるため、
-    # AlignedAllocation.h の throw/try-catch 使用箇所がコンパイルエラーになる
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
-        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
-        target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
-        target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
-        target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
-        target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
-        target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
-        target_compile_options(ShadowCompareContractTests PRIVATE /EHsc)
-        target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /EHsc)
-        target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /EHsc)
-        target_compile_options(PartialPublicationRejectTests PRIVATE /EHsc)
-        target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
-        target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
-    endif()
+    # テストターゲットに /EHsc を追加（例外処理を有効化）
+    # AlignedAllocation.h の throw/try-catch 使用箇所、および MSVC <chrono> の
+    # 例外パスで C4530 (アンワインド未有効) が発生するため全コンパイラに適用
+    target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
+    target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
+    target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+    target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+    target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
+    target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
+    target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
+    target_compile_options(ShadowCompareContractTests PRIVATE /EHsc)
+    target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /EHsc)
+    target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /EHsc)
+    target_compile_options(PartialPublicationRejectTests PRIVATE /EHsc)
+    target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
+    target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
 
     # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
     # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
@@ -24873,7 +24871,7 @@ TruePeakDetector::~TruePeakDetector()
 
 void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
 {
-    currentSampleRate.store(sampleRate, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
 
     const int upBufferSize = maxBlockSize * kOversamplingRatio;
     if (upBufferSize > bufferCapacity || !upsampleBuffer)
@@ -27407,11 +27405,12 @@ namespace
         192000.0, 352800.0, 384000.0, 705600.0, 768000.0
     };
 
+    // ★ 2026-06-23: P7(Ne10型/現行)向けに再最適化 (DSPCoreLifecycle.cppと同期)
     static constexpr std::array<double, kAdaptiveNoiseShaperOrder> kDefaultAdaptiveNoiseShaperCoeffs_helpers
     {
-        0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
+        -0.003796, -0.006752, 0.008418, -0.010546, 0.004716, -0.007624, -0.020750, -0.002049, -0.003632
     };
-
+}
     inline int clampAdaptiveBankIndex_helpers(int bankIndex) noexcept
     {
         if (bankIndex < 0)
@@ -27420,7 +27419,6 @@ namespace
             return kAdaptiveNoiseShaperSampleRateBankCount - 1;
         return bankIndex;
     }
-}
 
 void AudioEngine::setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode)
 {
@@ -29779,6 +29777,9 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
+        juce::Logger::writeToLog("[AudioEngine] DSPCoreDouble::processDoubleToBuffer: adaptiveCoeffSet switch bank="
+                                + juce::String(state.adaptiveCoeffBankIndex)
+                                + " gen=" + juce::String(state.adaptiveCoeffGeneration));
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
@@ -30623,6 +30624,9 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
+        juce::Logger::writeToLog("[AudioEngine] DSPCoreIO::processInput: adaptiveCoeffSet switch bank="
+                                + juce::String(state.adaptiveCoeffBankIndex)
+                                + " gen=" + juce::String(state.adaptiveCoeffGeneration));
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
@@ -30716,9 +30720,13 @@ namespace
         2.033, -2.165, 1.959, -1.590, 1.221, -0.886, 0.604, -0.389, 0.235, -0.132, 0.068, -0.031, 0.012, -0.004, 0.001, 0.0
     };
 
+    // ★ 2026-06-23: P7(Ne10型/現行)向けに再最適化
+    // 元値: 0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07 (Pattern A向け)
+    // 新値: CMA-ES学習済み係数(192kHz/32bit mode4/5)の平均
+    // 検証: 全ビット深度(16/24/32)でDC driftなし、NTF一致確認済み
     static constexpr std::array<double, kAdaptiveNoiseShaperOrder> kDefaultAdaptiveNoiseShaperCoeffs
     {
-        0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
+        -0.003796, -0.006752, 0.008418, -0.010546, 0.004716, -0.007624, -0.020750, -0.002049, -0.003632
     };
 }
 
