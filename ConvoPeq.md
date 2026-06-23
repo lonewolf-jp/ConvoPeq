@@ -1,5 +1,7 @@
 # Project Extract & Source Code: ConvoPeq
 
+> Generated: 2026-06-24 00:39:27
+
 ## 📁 Directory Tree (Selected Targets Only)
 
 ```text
@@ -20270,10 +20272,16 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     {
         if (auto* self = weakSelf.get())
         {
-            self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
-                                             AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
-                                             AudioEngine::RebuildTelemetryClass::Snapshot,
-                                             AudioEngine::RebuildTelemetryPolicy::Replaceable);
+            // ★ 2026-06-24 [Phase C'] submitRebuildIntent 無効化（実験ブランチ用）。
+            //   RuntimeWorld非依存確定済み（setAdaptiveNoiseShaperState/requestAdaptiveAutosave
+            //   は bank 直接書込 + ファイル保存 callback のみ。world 介在なし）。
+            //   storeLearnedCoeffs → bank.generation++ により RT パスの generation tracking が
+            //   係数反映を検出する。rebuild (~530ms) があっても rebuild なしでも係数は反映される。
+            //   検証項目: rebuild=0回, adaptive switch継続, autosave正常, 30〜60分音飛びゼロ。
+            // self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
+            //                                  AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
+            //                                  AudioEngine::RebuildTelemetryClass::Snapshot,
+            //                                  AudioEngine::RebuildTelemetryPolicy::Replaceable);
             self->engine.storeLearnedCoeffs(mappedCoeffs.data());
             self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
             self->engine.requestAdaptiveAutosave();
@@ -29777,9 +29785,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
-        juce::Logger::writeToLog("[AudioEngine] DSPCoreDouble::processDoubleToBuffer: adaptiveCoeffSet switch bank="
-                                + juce::String(state.adaptiveCoeffBankIndex)
-                                + " gen=" + juce::String(state.adaptiveCoeffGeneration));
+        adaptiveBankSwitchCount.fetch_add(1, std::memory_order_relaxed);
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
@@ -30624,9 +30630,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
-        juce::Logger::writeToLog("[AudioEngine] DSPCoreIO::processInput: adaptiveCoeffSet switch bank="
-                                + juce::String(state.adaptiveCoeffBankIndex)
-                                + " gen=" + juce::String(state.adaptiveCoeffGeneration));
+        adaptiveBankSwitchCount.fetch_add(1, std::memory_order_relaxed);
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
@@ -32820,8 +32824,10 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
+            const double buildStartMs = juce::Time::getMillisecondCounterHiRes();
             convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
                                                                   task.convolverBuildSnapshot);
+            const double buildElapsedMs = juce::Time::getMillisecondCounterHiRes() - buildStartMs;
 
             if (buildResult.runtime == nullptr)
             {
@@ -32839,12 +32845,18 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 2. Rebuild IR if needed (Heavy operation)
+            double rebuildIrElapsedMs = 0.0;
             if (newDSP->convolverRt().getIRLength() > 0)
             {
                 if (isObsolete())
                     continue;
+                const double rebuildIrStartMs = juce::Time::getMillisecondCounterHiRes();
                 newDSP->convolverRt().rebuildAllIRsSynchronous(isObsolete);
+                rebuildIrElapsedMs = juce::Time::getMillisecondCounterHiRes() - rebuildIrStartMs;
             }
+            diagLog("[DIAG] rebuildThreadLoop: generation=" + juce::String(task.generation)
+                + " build=" + juce::String(buildElapsedMs, 1) + "ms"
+                + " rebuildIR=" + juce::String(rebuildIrElapsedMs, 1) + "ms");
 
             const auto warmupError = runtimeBuilder.validateWarmup(*newDSP);
             if (warmupError != convo::BuildError::None)
@@ -33970,6 +33982,47 @@ void AudioEngine::timerCallback()
         }
     }
 
+    // AdaptiveCoeff authority divergence: worldGen vs live bankGen
+    {
+        const int worldGen = (runtimeWorld != nullptr)
+            ? static_cast<int>(runtimeWorld->coefficient.adaptiveCoeffGeneration)
+            : -1;
+        const int liveBankIdx = convo::consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        const auto& bank = getAdaptiveCoeffBankForIndex(liveBankIdx);
+        const int liveBankGen = static_cast<int>(convo::consumeAtomic(bank.generation, std::memory_order_acquire));
+
+        if (worldGen != rtAuxMutable_.debugLastReportedWorldGen
+            || liveBankGen != rtAuxMutable_.debugLastReportedBankGen
+            || liveBankIdx != rtAuxMutable_.debugLastReportedCoeffBankIdx)
+        {
+            rtAuxMutable_.debugLastReportedWorldGen = worldGen;
+            rtAuxMutable_.debugLastReportedBankGen = liveBankGen;
+            rtAuxMutable_.debugLastReportedCoeffBankIdx = liveBankIdx;
+
+            diagLog("[COEFF_AUTH] worldGen=" + juce::String(worldGen)
+                + " bankGen=" + juce::String(liveBankGen)
+                + " bankIdx=" + juce::String(liveBankIdx)
+                + " divergence=" + juce::String(liveBankGen - worldGen));
+        }
+    }
+
+    // Adaptive bank switch count (ISR-safe atomic counter from DSPCore, read on Message Thread)
+    // ★ 2026-06-23: DSP instance UUID を出力し、OLD DSP と NEW DSP の切り替えを区別可能に。
+    //   runtimeUuid は DSPCore 構築時に一度設定され不変のため Timer スレッドから安全に読取可。
+    {
+        auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        if (dsp != nullptr)
+        {
+            const uint64_t count = dsp->adaptiveBankSwitchCount.load(std::memory_order_relaxed);
+            if (count != rtAuxMutable_.debugLastReportedBankSwitchCount)
+            {
+                rtAuxMutable_.debugLastReportedBankSwitchCount = count;
+                diagLog("[ADAPTIVE_SWITCH] dspUuid=" + juce::String(static_cast<juce::int64>(dsp->runtimeUuid))
+                    + " count=" + juce::String(static_cast<juce::int64>(count)));
+            }
+        }
+    }
+
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     auto* currentDspForRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
@@ -34561,6 +34614,7 @@ void AudioEngine::commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter
         ++m_probeState_.failureCount;
     }
 }
+
 
 ```
 
@@ -35498,6 +35552,8 @@ public:
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         uint32_t activeAdaptiveCoeffGeneration = 0;
         int activeAdaptiveCoeffBankIndex = -1;
+        // ISR-safe switch counter (atom, RT-path). Read by Message Thread for diagnostics.
+        std::atomic<uint64_t> adaptiveBankSwitchCount { 0 };
         uint64_t currentCaptureSessionId = 0;
         std::uint64_t runtimeUuid = 0;
         double sampleRate = 0.0;
@@ -36082,6 +36138,12 @@ public:
         std::atomic<double> cliTelemetryMaxUs { 0.0 };
         std::atomic<double> cliTelemetryLastUs { 0.0 };
         std::atomic<int> cliTelemetryLastBlockSamples { 0 };
+        // Adaptive coeff authority divergence tracking (worldGen vs bankGen)
+        int debugLastReportedWorldGen { -1 };
+        int debugLastReportedBankGen { -1 };
+        int debugLastReportedCoeffBankIdx { -1 };
+        // Adaptive bank switch count tracker (read from DSPCore atomic on Message Thread)
+        uint64_t debugLastReportedBankSwitchCount { std::numeric_limits<uint64_t>::max() };
     };
 
     void setCliProcessingTelemetryEnabled(bool enabled) noexcept
@@ -37772,8 +37834,11 @@ public:
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
         snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-        snapshot.adaptiveCoeffGeneration = 0u;
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+        // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+        //   activeIndex flip + generation increment を検出できるようにする。
+        //   これにより rebuild なしで係数反映が可能となり、学習中の音飛びを防止する。
+        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         if (snap != nullptr)
@@ -37803,8 +37868,11 @@ public:
             snapshot.outputMakeupGain = world->automation.outputMakeupGain;
             snapshot.convolverInputTrimGain = world->automation.convolverInputTrimGain;
             snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;
-            snapshot.adaptiveCoeffGeneration = world->coefficient.adaptiveCoeffGeneration;
             const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+            // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+            //   activeIndex flip + generation increment を検出できるようにする。
+            //   world->coefficient.adaptiveCoeffGeneration は常に0のため代用不可。
+            snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
             snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
             snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;
         }
@@ -37826,8 +37894,11 @@ public:
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
         snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-        snapshot.adaptiveCoeffGeneration = 0u;
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+        // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+        //   activeIndex flip + generation increment を検出できるようにする。
+        //   これにより rebuild なしで係数反映が可能となり、学習中の音飛びを防止する。
+        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         return snapshot;
@@ -53215,6 +53286,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         return {};
 
     setMixedPhaseState(1);
+    const double mixedPhaseStartMs = juce::Time::getMillisecondCounterHiRes();
     juce::Logger::writeToLog("[MixedPhase] State -> Optimizing");
 
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
@@ -53755,7 +53827,10 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         if (progressCallback) progressCallback(1.0f);
         setMixedPhaseState(2);
-        juce::Logger::writeToLog("[MixedPhase] State -> Completed");
+        {
+            const double mpElapsed = juce::Time::getMillisecondCounterHiRes() - mixedPhaseStartMs;
+            juce::Logger::writeToLog("[MixedPhase] State -> Completed (" + juce::String(mpElapsed, 1) + "ms)");
+        }
         return mixedIR;
     }
     catch (...)
