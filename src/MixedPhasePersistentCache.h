@@ -22,13 +22,13 @@ public:
     static juce::File getCacheFile(uint64_t fileHash,
                                    double sampleRate,
                                    int phaseMode,
-                                   float freqStartHz, float freqEndHz, float tau,
+                                   float freqStartHz, float freqEndHz,
                                    int targetLength);
 
     static bool load(uint64_t fileHash,
                      double sampleRate,
                      int phaseMode,
-                     float freqStartHz, float freqEndHz, float tau,
+                     float freqStartHz, float freqEndHz,
                      int targetLength,
                      juce::AudioBuffer<double>& outIr,
                      std::vector<double>& outRho,
@@ -37,7 +37,7 @@ public:
     static bool save(uint64_t fileHash,
                      double sampleRate,
                      int phaseMode,
-                     float freqStartHz, float freqEndHz, float tau,
+                     float freqStartHz, float freqEndHz,
                      int targetLength,
                      const juce::AudioBuffer<double>& ir,
                      const std::vector<double>& rho,
@@ -46,7 +46,7 @@ public:
     static void touch(uint64_t fileHash,
                       double sampleRate,
                       int phaseMode,
-                      float freqStartHz, float freqEndHz, float tau,
+                      float freqStartHz, float freqEndHz,
                       int targetLength);
 
     static void evictLRU(size_t maxCount);
@@ -54,7 +54,7 @@ public:
     static void remove(uint64_t fileHash,
                        double sampleRate,
                        int phaseMode,
-                       float freqStartHz, float freqEndHz, float tau,
+                       float freqStartHz, float freqEndHz,
                        int targetLength);
 
     static void clear();
@@ -63,7 +63,7 @@ public:
 
 private:
     static constexpr uint64_t kMagic = 0x4D69786564506800ULL;
-    static constexpr uint32_t kVersion = 1;
+    static constexpr uint32_t kVersion = 2;
 
 #pragma pack(push, 1)
     struct DiskHeader {
@@ -75,7 +75,6 @@ private:
         int32_t phaseMode;
         float freqStartHz;
         float freqEndHz;
-        float tau;
         int32_t targetLength;
         uint64_t lastUsedTime;
         int32_t numChannels;
@@ -90,7 +89,7 @@ private:
     static uint64_t computeKeyHash(uint64_t fileHash,
                                    double sampleRate,
                                    int phaseMode,
-                                   float freqStartHz, float freqEndHz, float tau,
+                                   float freqStartHz, float freqEndHz,
                                    int targetLength);
 };
 

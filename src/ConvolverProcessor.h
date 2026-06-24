@@ -77,7 +77,6 @@ public:
         bool irLengthManualOverride = false;
         float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
         float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
-        float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
         int tailMode = static_cast<int>(TailMode::LayerTailContouring);
@@ -169,9 +168,6 @@ public:
     static constexpr float MIXED_F2_MIN_HZ = 700.0f;
     static constexpr float MIXED_F2_MAX_HZ = 1300.0f;
     static constexpr float MIXED_F2_DEFAULT_HZ = 1000.0f;
-    static constexpr float MIXED_TAU_MIN = 4.0f;
-    static constexpr float MIXED_TAU_MAX = 256.0f;
-    static constexpr float MIXED_TAU_DEFAULT = 32.0f;
     static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
     static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
@@ -319,14 +315,12 @@ public:
     // setMixRT / setSmoothingTimeRT: H3 修正により廃止 (shadow atomic 除去)
 
     //----------------------------------------------------------
-    // Mixed Phase Parameters (f1/f2/tau)
+    // Mixed Phase Parameters (f1/f2)
     //----------------------------------------------------------
     void setMixedTransitionStartHz(float hz);
     [[nodiscard]] float getMixedTransitionStartHz() const;
     void setMixedTransitionEndHz(float hz);
     [[nodiscard]] float getMixedTransitionEndHz() const;
-    void setMixedPreRingTau(float tau);
-    [[nodiscard]] float getMixedPreRingTau() const;
 
     //----------------------------------------------------------
     // Rebuild Debounce Time (Message/Worker burst control)
@@ -494,9 +488,7 @@ public:
                                           int length,
                                           double sr,
                                           int peakDelay,
-                                          int maxFFTSize,
                                           int knownBlockSize,
-                                          int firstPartition,
                                           int preferredCallSize,
                                           bool isRebuild,
                                           const juce::File& irFile,
@@ -645,9 +637,7 @@ private:
 
         // Clone用に初期化パラメータを保存
         double storedSampleRate = 0.0;
-        int storedMaxFFTSize = 0;
         int storedKnownBlockSize = 0;
-        int storedFirstPartition = 0;
         double storedScale = 1.0;
         bool storedDirectHeadEnabled = false;
 
@@ -698,7 +688,7 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0,
+        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int knownBlockSize, int preferredCallSize, double scale = 1.0,
               bool enableDirectHead = false,
               const convo::FilterSpec* filterSpec = nullptr,
               ConvolverProcessor* ownerProcessor = nullptr)
@@ -714,9 +704,7 @@ private:
             this->irLatency = peakDelay;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             storedSampleRate = sr;
-            storedMaxFFTSize = maxFFTSize;
             storedKnownBlockSize = knownBlockSize;
-            storedFirstPartition = firstPartition;
             storedScale = scale;
             storedDirectHeadEnabled = enableDirectHead;
 
@@ -773,7 +761,7 @@ private:
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
-                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale, storedDirectHeadEnabled))
+                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedKnownBlockSize, callQuantumSamples, storedScale, storedDirectHeadEnabled))
                         return nullptr;
                 }
                 return newConv.release();
@@ -881,7 +869,6 @@ private:
         bool irLengthManualOverride = false;
         float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
         float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
-        float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
         int tailMode = static_cast<int>(TailMode::LayerTailContouring);
@@ -1093,7 +1080,7 @@ public: // Added for AudioEngine access
         uint64_t fileHash;
         double sampleRate;
         PhaseMode phaseMode;
-        float f1, f2, tau;
+        float f1, f2;
         int targetLength;
 
         bool operator<(const IRCacheKey& other) const {
@@ -1102,7 +1089,6 @@ public: // Added for AudioEngine access
             if (phaseMode != other.phaseMode) return phaseMode < other.phaseMode;
             if (f1 != other.f1) return f1 < other.f1;
             if (f2 != other.f2) return f2 < other.f2;
-            if (tau != other.tau) return tau < other.tau;
             return targetLength < other.targetLength;
         }
     };

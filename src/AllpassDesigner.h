@@ -111,16 +111,6 @@ public:
                                  const std::function<bool()>& shouldExit = nullptr,
                                  std::function<void(float)> progressCallback = nullptr);
 
-    // 設計済みセクションを IR に適用する関数
-    static juce::AudioBuffer<double> applyAllpassToIR(
-        const juce::AudioBuffer<double>& linearIR,
-        const std::vector<SecondOrderAllpass>& sections,
-        double sampleRate,
-        const std::vector<double>& freq_hz,
-        int fftSize,
-        const std::function<bool()>& shouldExit = nullptr,
-        std::function<void(float)> progressCallback = nullptr);
-
     // ユーティリティ：IR ファイルのハッシュ計算（キャッシュキー用）
     static uint64_t computeIRHash(const juce::File& irFile, bool useMD5 = false);
 

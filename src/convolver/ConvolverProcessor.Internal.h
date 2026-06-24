@@ -105,33 +105,4 @@ namespace ConvolverProcessorInternal
         return x + 1;
     }
 
-    // ────────────────────────────────────────────────────────────────
-    // コンボリューション サイジング計算
-    // ────────────────────────────────────────────────────────────────
-    struct ConvolverSizing
-    {
-        int firstPartition;
-        int maxFFTSize;
-    };
-
-    inline ConvolverSizing computeMasteringSizing(int internalBlockSize, int irLength)
-    {
-        ConvolverSizing s{};
-        int fp = nextPow2(internalBlockSize * 4);
-        fp = std::clamp(fp, 4096, 16384);
-        s.firstPartition = fp;
-
-        int mfsBase = irLength / 4;
-        constexpr int kMFSUpper = 131072;
-        mfsBase = std::clamp(mfsBase, s.firstPartition, kMFSUpper);
-        s.maxFFTSize = nextPow2(mfsBase);
-
-        if (s.maxFFTSize < s.firstPartition)
-            s.maxFFTSize = s.firstPartition;
-        if (s.maxFFTSize < internalBlockSize)
-            s.maxFFTSize = nextPow2(internalBlockSize);
-
-        return s;
-    }
-
 } // namespace ConvolverProcessorInternal

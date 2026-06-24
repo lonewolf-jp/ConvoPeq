@@ -53,7 +53,6 @@ void diagLog(const juce::String& message)
     if (!hasFiniteDouble("autoDetectedIRLength", ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC)) return false;
     if (!hasFiniteDouble("mixedF1Hz", ConvolverProcessor::MIXED_F1_MIN_HZ, ConvolverProcessor::MIXED_F1_MAX_HZ)) return false;
     if (!hasFiniteDouble("mixedF2Hz", ConvolverProcessor::MIXED_F2_MIN_HZ, ConvolverProcessor::MIXED_F2_MAX_HZ)) return false;
-    if (!hasFiniteDouble("mixedTau", ConvolverProcessor::MIXED_TAU_MIN, ConvolverProcessor::MIXED_TAU_MAX)) return false;
     if (!hasIntRange("rebuildDebounceMs", ConvolverProcessor::REBUILD_DEBOUNCE_MIN_MS, ConvolverProcessor::REBUILD_DEBOUNCE_MAX_MS)) return false;
     if (!hasIntRange("tailMode", static_cast<int>(ConvolverProcessor::TailMode::AirAbsorption), static_cast<int>(ConvolverProcessor::TailMode::Bypass))) return false;
     if (!hasFiniteDouble("tailStartSec", ConvolverProcessor::TAIL_START_MIN_SEC, ConvolverProcessor::TAIL_START_MAX_SEC)) return false;
@@ -571,11 +570,6 @@ void AudioEngine::setConvolverMixedTransitionStartHz(float hz) noexcept
 void AudioEngine::setConvolverMixedTransitionEndHz(float hz) noexcept
 {
     uiConvolverProcessor.setMixedTransitionEndHz(hz);
-}
-
-void AudioEngine::setConvolverMixedPreRingTau(float tau) noexcept
-{
-    uiConvolverProcessor.setMixedPreRingTau(tau);
 }
 
 void AudioEngine::setConvolverRebuildDebounceMs(int ms) noexcept

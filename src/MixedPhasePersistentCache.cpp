@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -19,7 +20,7 @@ static uint64_t hashCombine(uint64_t seed, uint64_t value)
 uint64_t MixedPhasePersistentCache::computeKeyHash(uint64_t fileHash,
                                                     double sampleRate,
                                                     int phaseMode,
-                                                    float freqStartHz, float freqEndHz, float tau,
+                                                    float freqStartHz, float freqEndHz,
                                                     int targetLength)
 {
     uint64_t h = fileHash;
@@ -30,13 +31,10 @@ uint64_t MixedPhasePersistentCache::computeKeyHash(uint64_t fileHash,
 
     uint32_t f1Bits = 0;
     uint32_t f2Bits = 0;
-    uint32_t tauBits = 0;
     std::memcpy(&f1Bits, &freqStartHz, sizeof(float));
     std::memcpy(&f2Bits, &freqEndHz, sizeof(float));
-    std::memcpy(&tauBits, &tau, sizeof(float));
     h = hashCombine(h, static_cast<uint64_t>(f1Bits));
     h = hashCombine(h, static_cast<uint64_t>(f2Bits));
-    h = hashCombine(h, static_cast<uint64_t>(tauBits));
     h = hashCombine(h, static_cast<uint64_t>(targetLength));
     return h;
 }
@@ -58,11 +56,11 @@ juce::File MixedPhasePersistentCache::getCacheDirectory()
 juce::File MixedPhasePersistentCache::getCacheFile(uint64_t fileHash,
                                                     double sampleRate,
                                                     int phaseMode,
-                                                    float freqStartHz, float freqEndHz, float tau,
+                                                    float freqStartHz, float freqEndHz,
                                                     int targetLength)
 {
     const auto hash = computeKeyHash(fileHash, sampleRate, phaseMode,
-                                     freqStartHz, freqEndHz, tau, targetLength);
+                                     freqStartHz, freqEndHz, targetLength);
     const auto filename = juce::String::toHexString(static_cast<int64_t>(hash)) + ".mph";
     return getCacheDirectory().getChildFile(filename);
 }
@@ -74,14 +72,14 @@ juce::File MixedPhasePersistentCache::getCacheFile(uint64_t fileHash,
 bool MixedPhasePersistentCache::load(uint64_t fileHash,
                                      double sampleRate,
                                      int phaseMode,
-                                     float freqStartHz, float freqEndHz, float tau,
+                                     float freqStartHz, float freqEndHz,
                                      int targetLength,
                                      juce::AudioBuffer<double>& outIr,
                                      std::vector<double>& outRho,
                                      std::vector<double>& outTheta)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     if (!file.existsAsFile())
         return false;
 
@@ -102,7 +100,6 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
         || header.phaseMode != static_cast<int32_t>(phaseMode)
         || std::abs(header.freqStartHz - freqStartHz) > 1.0e-6f
         || std::abs(header.freqEndHz - freqEndHz) > 1.0e-6f
-        || std::abs(header.tau - tau) > 1.0e-6f
         || header.targetLength != static_cast<int32_t>(targetLength))
         return false;
 
@@ -137,7 +134,7 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
     }
 
     // LRU用にタイムスタンプ更新（touch相当）
-    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, tau, targetLength);
+    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, targetLength);
 
     return true;
 }
@@ -149,14 +146,14 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
 bool MixedPhasePersistentCache::save(uint64_t fileHash,
                                      double sampleRate,
                                      int phaseMode,
-                                     float freqStartHz, float freqEndHz, float tau,
+                                     float freqStartHz, float freqEndHz,
                                      int targetLength,
                                      const juce::AudioBuffer<double>& ir,
                                      const std::vector<double>& rho,
                                      const std::vector<double>& theta)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     const auto dir = file.getParentDirectory();
     if (!dir.exists())
         dir.createDirectory();
@@ -181,7 +178,6 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
         header.phaseMode = static_cast<int32_t>(phaseMode);
         header.freqStartHz = freqStartHz;
         header.freqEndHz = freqEndHz;
-        header.tau = tau;
         header.targetLength = static_cast<int32_t>(targetLength);
         header.lastUsedTime = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
         header.numChannels = static_cast<int32_t>(numChannels);
@@ -227,11 +223,11 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
 void MixedPhasePersistentCache::touch(uint64_t fileHash,
                                       double sampleRate,
                                       int phaseMode,
-                                      float freqStartHz, float freqEndHz, float tau,
+                                      float freqStartHz, float freqEndHz,
                                       int targetLength)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     if (!file.existsAsFile())
         return;
 
@@ -252,13 +248,13 @@ void MixedPhasePersistentCache::touch(uint64_t fileHash,
             return;
     } // inStream はここで破棄され、ファイルも閉じられる
 
-    // DiskHeader 内 lastUsedTime のバイトオフセット: 52
-    static constexpr int kLastUsedTimeOffset = 52;
-    if (static_cast<size_t>(kLastUsedTimeOffset) + sizeof(uint64_t) > buffer.size())
+    // DiskHeader 内 lastUsedTime のオフセットをコンパイル時に計算
+    const size_t lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
+    if (lastUsedTimeOffset + sizeof(uint64_t) > buffer.size())
         return;
 
     const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
-    std::memcpy(&buffer[static_cast<size_t>(kLastUsedTimeOffset)], &now, sizeof(now));
+    std::memcpy(&buffer[lastUsedTimeOffset], &now, sizeof(now));
 
     juce::FileOutputStream outStream(file);
     if (!outStream.openedOk())
@@ -312,11 +308,11 @@ void MixedPhasePersistentCache::evictLRU(size_t maxCount)
 void MixedPhasePersistentCache::remove(uint64_t fileHash,
                                        double sampleRate,
                                        int phaseMode,
-                                       float freqStartHz, float freqEndHz, float tau,
+                                       float freqStartHz, float freqEndHz,
                                        int targetLength)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     if (file.existsAsFile())
         file.deleteFile();
 }

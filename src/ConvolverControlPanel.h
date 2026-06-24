@@ -74,9 +74,6 @@ private:
     juce::Slider mixedF2Slider;
     juce::Label mixedF2Label;
 
-    juce::Slider mixedTauSlider;
-    juce::Label mixedTauLabel;
-
     juce::Label irInfoLabel;
 
     // 出力周波数フィルター UI (① コンボルバー最終段の場合に使用)
@@ -136,8 +133,6 @@ private:
     double pendingMixedF1Hz = 0.0;
     bool pendingMixedF2Dirty = false;
     double pendingMixedF2Hz = 0.0;
-    bool pendingMixedTauDirty = false;
-    double pendingMixedTau = 0.0;
 
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;

@@ -77,7 +77,6 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
 
         activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, snapshotPhaseMode,
                                                       buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
-                                                      buildSnapshot.mixedPreRingTau,
                                                       convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState/snapshot restore 側 publishAtomic release と HB
                                                       buildSnapshot);
         releaseIRState(state);
@@ -86,7 +85,6 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     {
         activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, snapshotPhaseMode,
                                                       buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
-                                                      buildSnapshot.mixedPreRingTau,
                                                       buildSnapshot);
         convo::publishAtomic(currentIrOptimized, optimizeForRealTime, std::memory_order_release); // release: UI/loader 側 acquire と HB
     }
@@ -557,9 +555,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           int length,
                                                           double sr,
                                                           int peakDelay,
-                                                          int maxFFTSize,
                                                           int knownBlockSize,
-                                                          int firstPartition,
                                                           int preferredCallSize,
                                                           bool isRebuild,
                                                           const juce::File& irFile,
@@ -589,7 +585,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         }
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
+                  knownBlockSize, preferredCallSize, scaleFactor,
                   getExperimentalDirectHeadEnabled(),
                   &spec, this))
         {

@@ -1,460 +1,502 @@
-# コンボルバーバグ改修計画書
+# コンボルバー改修計画書 v6.1
 
-**バージョン**: 2.0（全未確定事項確定済み）
-**作成日**: 2026-06-23
-**最終確定日**: 2026-06-23
-**対象レポート**: `doc/work55/bug.md`, `doc/work55/ConvoPeq_Convolver_Validation_Report.md`, `doc/work55/review_verification_report.md`
-
----
+**バージョン**: 6.1
+**作成日**: 2026-06-24
+**最終確定日**: 2026-06-24
 
 ## 目次
 
-1. [改修対象一覧](#1-改修対象一覧)
-2. [F1: Mixed Phase クロスオーバー方向修正](#2-f1-mixed-phase-クロスオーバー方向修正)
-3. [F2: mixedPreRingTau パラメータの有効化または削除](#3-f2-mixedpreringtau-パラメータの有効化または削除)
-4. [F3: r8brain IRテイル切り捨て修正](#4-f3-r8brain-irテイル切り捨て修正)
-5. [F4: computeMasteringSizing 孤立計算の解消](#5-f4-computemasteringsizing-孤立計算の解消)
-6. [F5: applyAllpassToIR 重複実装の解消](#6-f5-applyallpasstoir-重複実装の解消)
-7. [F6: レイヤースケジューリング最適化（調査・将来課題）](#7-f6-レイヤースケジューリング最適化調査将来課題)
-8. [検証計画](#8-検証計画)
-9. [依存関係と実施順序](#9-依存関係と実施順序)
+1. [総合評価](#1-総合評価)
+2. [F3: r8brain IRテイル切り捨て修正](#2-f3-r8brain-irテイル切り捨て修正)
+3. [F5: applyAllpassToIR 削除](#3-f5-applyallpasstoir-削除)
+4. [F2: mixedPreRingTau パラメータ削除](#4-f2-mixedpreringtau-パラメータ削除)
+5. [F4: computeMasteringSizing 削除（追加調査後）](#5-f4-computemasteringsizing-削除追加調査後)
+6. [F1: Mixed Phase クロスオーバー方向修正（DSP仕様変更・別リリース）](#6-f1-mixed-phase-クロスオーバー方向修正dsp仕様変更別リリース)
+7. [F6: レイヤースケジューリング最適化（将来課題）](#7-f6-レイヤースケジューリング最適化将来課題)
+8. [実施順序](#8-実施順序)
 
 ---
 
-## 1. 改修対象一覧
+## 1. 総合評価
 
-| ID   | 項目                                        | 優先度   | 工数見積             | リスク   | 依存                     |
-| --- | --- | --- | --- | --- | --- |
-| F1  | Mixed Phase クロスオーバー方向修正          | **高**   | 小（変数2行）         | 中（音響的影響大） | なし                     |
-| F2  | `mixedPreRingTau` パラメータ有効化          | 中       | 中（設計＋実装）       | 低       | F1（同じファイル）        |
-| F3A | `IRDSP::resampleIR()` バッファマージン修正   | **高**   | 小（数行）             | 低       | なし                     |
-| F3B | メインローダーパスの健全性確認              | 低       | 小（追跡確認のみ）     | なし     | なし                     |
-| F4A | `computeMasteringSizing` からNUCへの配線復活 | 低       | 中（シグネチャ変更波及）| 低       | なし                     |
-| F4B | または関数削除＋コード整理                  | 低       | 小                     | 低       | なし                     |
-| F5  | `applyAllpassToIR` 削除または統合            | 低       | 小                     | 低       | なし                     |
-| F6  | レイヤースケジューリング最適化              | 情報     | 大（研究＋実装）       | 中       | なし                     |
+| ID | 項目 | 評価 | 優先度 | フェーズ |
+| --- | --- | --- | --- | --- |
+| F3 | r8brain出力長修正 | ★★★★★ 即実施推奨 | **高** | Phase 1 |
+| F5 | 未使用コード削除 | ★★★★★ 即実施推奨 | 低 | Phase 2 |
+| F2 | ダミーパラメータ削除 | ★★★★☆ 採用推奨 | 低 | Phase 3 |
+| F1 | Mixed Phase方向修正 | ★★★☆☆ DSP仕様変更（設計者判断） | 低 | Phase 4（別リリース推奨） |
+| F4 | 孤立計算削除 | ★★★☆☆ 保留案件 | 低 | Phase 5（最終） |
+| F6 | レイヤースケジューリング | 妥当（将来課題） | 情報 | — |
 
 ---
 
-## 2. F1: Mixed Phase クロスオーバー方向修正
+## 2. F3: r8brain IRテイル切り捨て修正
 
 ### 2.1 現状
 
-`ConvolverProcessor.MixedPhase.cpp` の `convertToMixedPhaseAllpass()`（L303-311）および `convertToMixedPhaseFallback()`（L810-820）において、以下の重み付けが実装されている：
-
-```
-freq < transitionLoHz (default 200Hz):  wLinear=1.0, wMinimum=0.0 → Linear Phase のみ
-freq > transitionHiHz (default 1000Hz): wLinear=0.0, wMinimum=1.0 → Minimum Phase のみ
-```
-
-これは **低域が Linear Phase、高域が Minimum Phase** という構成。
-
-### 2.2 問題
-
-ルームコレクション／室内音響補正分野の確立された慣行（Dirac Research、HomeAudioFidelity等）は、**低域=Minimum Phase（長時間プリリンギング回避）、高域=Linear Phase（プリリンギングが短時間で無害）** である。デフォルトクロスオーバー帯域（200/1000Hz）が業界標準と一致することから、実装意図と重みが入れ替わっている可能性が高い。
-
-### 2.3 修正方針
-
-**方針**: 重み関数 `wLinear`/`wMinimum` の相互に `1-w` 関係を反転する。
-
-#### 修正箇所
-
-**ファイル**: `src/convolver/ConvolverProcessor.MixedPhase.cpp`
-
-**修正A: `convertToMixedPhaseAllpass()` 内（Allpass版）**
-
-現行コード（L300-311）:
-
-```cpp
-double wLinear = 1.0;
-if (freq >= transitionHiHz)
-    wLinear = 0.0;
-else if (freq > transitionLoHz)
-{
-    const double x = (freq - transitionLoHz) * invSpan;
-    wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
-}
-const double wMinimum = 1.0 - wLinear;
-```
-
-修正後:
-
-```cpp
-double wMinimum = 1.0;
-if (freq >= transitionHiHz)
-    wMinimum = 0.0;
-else if (freq > transitionLoHz)
-{
-    const double x = (freq - transitionLoHz) * invSpan;
-    wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
-}
-const double wLinear = 1.0 - wMinimum;
-```
-
-**修正B: `convertToMixedPhaseFallback()` 内（Fallback版）**
-
-現行コード（L810-818）:
-
-```cpp
-double wLinear = 1.0;
-if (freq >= transitionHiHz)
-    wLinear = 0.0;
-else if (freq > transitionLoHz)
-{
-    const double x = (freq - transitionLoHz) * invSpan;
-    wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
-}
-const double wMinimum = 1.0 - wLinear;
-```
-
-修正後:
-
-```cpp
-double wMinimum = 1.0;
-if (freq >= transitionHiHz)
-    wMinimum = 0.0;
-else if (freq > transitionLoHz)
-{
-    const double x = (freq - transitionLoHz) * invSpan;
-    wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
-}
-const double wLinear = 1.0 - wMinimum;
-```
-
-### 2.4 影響範囲
-
-| 項目       | 影響                                                                         |
-| ---------- | ---------------------------------------------------------------------------- |
-| 音響的挙動 | **大**。IRの位相特性が反転。低域にMinimum Phase（プリリンギング抑制）、高域にLinear Phaseが適用される |
-| UIパラメータ | 変更なし（`MIXED_F1_DEFAULT_HZ` / `MIXED_F2_DEFAULT_HZ` はそのまま）         |
-| キャッシュ | 影響なし（修正後も同一キーで保存されるが、内容が変わるため既存キャッシュは無効化される。キャッシュの自動無効化は期待動作） |
-| テスト     | 既存の Mixed Phase テストデータがある場合、期待値の再生成が必要               |
-
-### 2.5 調査確定事項
-
-以下の事項を追加調査で確定した：
-
-| 確定項目 | 調査結果 |
-| --- | --- |
-| `convertToMixedPhase()` ラッパー関数への影響 | **影響なし**。ラッパーは `convertToMixedPhaseAllpass()` → `convertToMixedPhaseFallback()` の順に呼び出すのみで、クロスオーバー方向の知識を持たない |
-| Fallback版の方向 | **Allpass版と同一**。両方とも低域=Linear / 高域=Minimum。両方の修正が必要 |
-| コンパイルガード | `CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1`（`CMakeLists.txt` L536）で常時有効 |
-| 呼び出し元 | `LoaderThread.cpp` L682 の1箇所のみ |
-| 修正の対称性 | `wLinear` ↔ `wMinimum` の変数名交換と初期値反転のみ。コサインクロスフェードの数式構造は変更不要 |
-| キャッシュキーへの影響 | `IRCacheKey` に方向情報が含まれていないため、修正後に既存キャッシュが誤った方向のIRを返すことはない（キャッシュミス→再計算） |
-| 最小位相変換(`convertToMinimumPhase`) | Mixed Phase 方向とは無関係。修正不要 |
-
-### 2.6 リスクと緩和策
-
-| リスク                             | 確率 | 影響 | 緩和策                                                   |
-| ---------------------------------- | ---- | ---- | -------------------------------------------------------- |
-| 修正方向が音響的に望ましくない     | 低   | 中   | 実機IR測定（周波数応答・群遅延確認）の実施を推奨        |
-| 既存ユーザーが期待する挙動と異なる | 中   | 低   | 修正が「意図通りの挙動」への変更であり、ドキュメントで周知 |
-| 既存キャッシュが無効化され再設計が発生 | 高   | 低   | 初回ロード時のCPU負荷増加のみ。許容範囲                 |
-
----
-
-## 3. F2: `mixedPreRingTau` パラメータの有効化または削除
-
-### 3.1 現状
-
-`mixedPreRingTau`（UI上は `MIXED_TAU_MIN=4.0`〜`MIXED_TAU_MAX=256.0`、既定 `MIXED_TAU_DEFAULT=32.0`）は：
-
-- `convertToMixedPhaseAllpass()` 内で **キャッシュキーにのみ使用**される
-- `AllpassDesignerConfig` 構造体に `tau` フィールドは存在しない
-- `convertToMixedPhaseFallback()` では `(void)tau;` で明示的に無視
-- `AllpassDesigner::design()` や `designWithCMAES()` のターゲット群遅延生成（`targetGroupDelay`）にも影響なし
-
-つまり、ユーザーがUIでこの値を変更しても、出力される Mixed Phase IR は全く変わらない。
-
-### 3.2 選択肢
-
-#### 選択肢A: パラメータを実際の設計ロジックに結合する（推奨）
-
-`AllpassDesignerConfig` に `tau`（プリリンギング制御）フィールドを追加し、CMA-ES/GreedyAdaGrad 最適化の目的関数にプリリンギングペナルティ項として組み込む。
-
-**実装手順**:
-
-1. `AllpassDesigner.h`: `AllpassDesignerConfig` に `double preRingPenalty = 0.0;` を追加
-2. `AllpassDesigner.cpp` の `costFunction()` 内で、推定されたプリリンギング振幅に比例するペナルティを追加
-3. `ConvolverProcessor.MixedPhase.cpp` の `designer_config` 設定箇所で `designer_config.preRingPenalty = tau;` を設定
-4. `convertToMixedPhaseFallback()` の `(void)tau;` を削除し、`tau` を群遅延ターゲット生成に反映
-
-**コスト関数変更イメージ**:
-
-```
-J_total = J_gd + lambda * J_preRing
-```
-
-ここで `J_gd` は既存の群遅延誤差、`lambda = tau / tau_default`、`J_preRing` は推定プリリンギング振幅の2乗和。
-
-**注意**: これは CMA-ES の最適化次元を変更せず、評価関数にペナルティ項を追加するだけなので、収束性や計算時間への影響は軽微。
-
-#### 選択肢B: UIパラメータと内部パラメータを削除（ミニマム）
-
-- `ConvolverProcessor.h` から `MIXED_TAU_MIN/MAX/DEFAULT`・`mixedPreRingTau` 関連の全宣言を削除
-- `ConvolverControlPanel.cpp` から `mixedTauSlider` 関連UIを削除
-- `BuildSnapshot` から `mixedPreRingTau` を削除
-- `IRCacheKey` から `tau` を削除
-
-### 3.3 推奨
-
-**選択肢A（有効化）を推奨**。このパラメータは「プリリンギング制御」という音響的に意味のある目的を持ってUIに公開されており、削除するとユーザーの期待を裏切る。有効化により、実際にプリリンギング量を調整可能な付加価値機能となる。
-
-### 3.4 調査確定事項
-
-以下の事項を追加調査で確定した：
-
-| 確定項目 | 調査結果 |
-| --- | --- |
-| CMA-ES cost関数の構造 | `AllpassDesigner.cpp` L323-370: `weightedSquaredError = sum(weight[i] * (tau_sum - target_gd)^2)`, 戻り値 `sqrt(weightedSquaredError)`. 最適化次元 `D = 2 * numSections`（ρ, θペア） |
-| ペナルティ項の追加方法 | cost関数内で `weightedSquaredError` 計算後にプリリンギング推定値を加算。`return sqrt(weightedSquaredError) + lambda * preRingEstimate;` |
-| GreedyAdaGrad cost関数 | セクション逐次近似。`gridSearch2D()` + `adaptiveGradientDescent()` で各セクションを独立にフィッティング。グローバルなプリリンギングペナルティの追加には不向き |
-| `AllpassDesignerConfig` に `preRingPenalty` がない理由 | 設計上の未実装。`tau` フィールド自体が `AllpassDesignerConfig` に存在しない |
-| `tau` の全使用箇所 | `IRCacheKey::tau`（キャッシュキーのみ）、`convertToMixedPhaseFallback()` で `(void)tau`、`AllpassDesigner::Config` には未定義 |
-| 選択肢Aの実装ファイル | `AllpassDesigner.h`（Config構造体）, `AllpassDesigner.cpp`（cost関数）, `ConvolverProcessor.MixedPhase.cpp`（config設定部） |
-| 選択肢Bの削除対象ファイル | `ConvolverProcessor.h`（定数・メンバ）, `ConvolverControlPanel.cpp`（UIスライダー）, `convolver/ConvolverProcessor.StateAndUI.cpp`（状態管理）, `convolver/ConvolverProcessor.Runtime.cpp`（setter/getter）, `convolver/ConvolverProcessor.LoaderThreadInline.h`（BuildSnapshot） |
-| 既存ドキュメント | `doc/work/bug4_observation_register.md` で P3-2 として `mixedPreRingTau` の無効性が2026-05-24から監視中 |
-| プリリンギング推定方法 | オールパスカスケードのインパルス応答を短区間（例: 256 samples）計算し、ピーク位置より前のエネルギー積分値を推定値とする。コスト: O(N*256) で軽微 |
-
-### 3.5 コスト関数変更の詳細設計（選択肢A）
-
-現行の cost 関数:
-```
-J = sqrt(sum(weight[i] * (tau_sum[i] - target_gd[i])^2))
-```
-
-修正後:
-```
-J = sqrt(sum(weight[i] * (tau_sum[i] - target_gd[i])^2))
-    + lambda * preRingPenalty(rho_list, theta_list, sampleRate)
-```
-
-ここで:
-- `lambda = tau / MIXED_TAU_DEFAULT`（tau=32(default)で1.0、tau=256(max)で8.0、tau=4(min)で0.125）
-- `preRingPenalty()`: 全セクションの (ρ,θ) から短いIRを生成し、ピーク前のエネルギー積分値を計算
-
-**注意**: `convertToMixedPhaseFallback()` ではコスト関数の概念がなくセクション逐次近似のため、`tau` パラメータの効果的な組み込みは困難。Fallback時は `tau` を無視し続ける（現状維持）のが合理的。
-
----
-
-## 4. F3: r8brain IRテイル切り捨て修正
-
-### 4.1 現状
-
-`IRDSP::resampleIR()`（`src/IRDSP.cpp`）が出力バッファ長を以下の式で計算している：
+`src/IRDSP.cpp` の `IRDSP::resampleIR()` が出力バッファ長を以下の式で計算している：
 
 ```cpp
 const double expectedLen = static_cast<double>(inLength) * ratio + 2.0;
 const int maxOutLen = static_cast<int>(expectedLen);
 ```
 
-r8brain の `CDSPResampler::getLatency()` は常に `0` を返す（内部レイテンシ自動除去設計）。その代償として、入力終端後のフラッシュ処理（`process(nullptr, 0, ...)`）で内部フィルタの残留サンプルを排出する必要がある。Harrisの近似式 `N ≈ Atten_dB / (22·Δf)` により、140dB/2%設定では概算 **318タップ**のフィルタ長となり、フラッシュ出力は数十〜数百サンプルに達しうる。
+### 2.2 問題
 
-現在の `+2.0` マージンではフラッシュ出力がバッファに収まらず、IR末尾が切り捨てられる。
+r8brain の `CDSPResampler::getLatency()` は常に `0` を返す（内部レイテンシ自動除去設計）。その代償として、入力終端後のフラッシュ処理で内部フィルタの残留サンプルを排出する必要がある。140dB/2% 設定では Harris の近似式 `N ≈ 140/(22·0.02) ≈ 318タップ` のフィルタ長となる。
 
-### 4.2 解決策
+現在の `+2.0` マージンでは：
 
-#### 修正A: `IRDSP::resampleIR()` のバッファサイズ計算（必須）
+1. バッファサイズが不足しフラッシュ出力を収容できない
+2. 出力ループが `while (done < maxOutLen)` で打ち切られる
+3. IR末尾（リバーブテイル等）が静かに消失する
+
+### 2.3 修正方針
 
 **ファイル**: `src/IRDSP.cpp`
 
-**現行コード**:
+**修正箇所A: バッファサイズ計算**
 
 ```cpp
-const double ratio = targetSR / inputSR;
-const int inLength = inputIR.getNumSamples();
+// 変更前: +2.0 固定マージン
 const double expectedLen = static_cast<double>(inLength) * ratio + 2.0;
-```
 
-**修正後**:
-
-```cpp
-const double ratio = targetSR / inputSR;
-const int inLength = inputIR.getNumSamples();
-
-// r8brain の内部フィルタレイテンシを考慮したバッファサイズ
-// r8brain CDSPResampler::getLatency() は常に0を返す設計のため、
-// getMaxOutLen() を使用して最大出力長を取得する
+// 変更後: getMaxOutLen() で適切な上限を取得
 r8b::CDSPResampler tempResampler(inputSR, targetSR, inLength,
                                   cfg.transBand, cfg.stopBandAtten, cfg.phase);
-const int safeMaxOut = tempResampler.getMaxOutLen(inLength);
-// 安全マージン: フィルタテイル用にさらに 25%
-const int maxOutLen = static_cast<int>(static_cast<double>(safeMaxOut) * 1.25) + 64;
+const int maxOutLen = tempResampler.getMaxOutLen(inLength);
+if (maxOutLen <= 0)
+    return {};  // 不正な出力長の場合は空バッファを返す
 ```
 
-#### 修正B: フラッシュループの改善（任意）
+**修正箇所B: チャンネル完了追跡とトリム**
 
-現行のフラッシュループは `done < maxOutLen` で停止するが、この条件を外して可変長で処理する：
-
-- フラッシュループから `done < maxOutLen` 条件を削除
-- フラッシュ完了後に `resampled.setSize(numCh, done, true, true, true)` でトリム
-- ただし、事前に十分なバッファを確保していれば安全
-
-### 4.3 調査確定事項
-
-以下の事項を追加調査で確定した：
-
-| 確定項目 | 調査結果 |
-| --- | --- |
-| `ConvolverProcessorInternal::resampleIR()` の安全性 | **安全**。`getMaxOutLen(inLen)` でバッファサイズを取得し、`oneshot()` を使用（`CDSPResampler.h` L593-652）。`oneshot()` は入力終端後に内部でゼロパディング＋フラッシュを自動実行する |
-| `IRDSP::resampleIR()` の問題性 | **不安全**。`+2.0` マージンでバッファ確保し、手動フラッシュループを `done < maxOutLen` で打ち切る。r8brain の内部フィルタ遅延（140dB/2%設定で推定300タップ）がフラッシュサンプルとして現れた場合、確実に切り捨てられる |
-| `IRConverter.cpp` での使用コンテキスト | `convertFile()`（L170）で `IRDSP::resampleIR(ir, sourceRate, config.targetSampleRate, shouldCancel)` を呼び出す。戻り値のサンプル数が `<= 0` の場合はエラー扱い。テイルが切り捨てられてもエラーにならない（静かに品質劣化） |
-| r8brain oneshot の挙動 | `CDSPResampler.h` L593-652: 入力を `MaxInLen` チャンクで `process()` に渡し、入力終了後はゼロパディングでフラッシュ。最後に `clear()` で内部状態リセット。出力は引数 `oplen` で上限される |
-| oneshot と chunked process の違い | `oneshot` はフラッシュを自動処理するが、`process` の手動ループでは呼び出し側がフラッシュを管理する必要がある。`IRDSP::resampleIR()` は後者のパターンでバッファマージン不足 |
-| 修正後の期待動作 | バッファサイズを `getMaxOutLen()` * 1.25 + 64 とすることで、フラッシュサンプルを十分に収容可能。最終的なIR長はフラッシュ完了後の `done` 値でトリムする |
-
-### 4.4 影響範囲
-
-| 項目         | 影響                                                                   |
-| ------------ | ---------------------------------------------------------------------- |
-| 影響パス     | **`IRConverter.cpp`（`IRDSP::resampleIR()`）のみ**                      |
-| メインローダーパス | 影響なし。`ConvolverProcessorInternal::resampleIR()` は `getMaxOutLen()` 使用で安全 |
-| 性能         | 無視可能（`getMaxOutLen()` は O(1) の定数時間）                         |
-
-### 4.4 検証
-
-修正後、以下のテストを実施：
-
-1. サンプルレート変換（例: 44.1kHz → 48kHz, 96kHz → 44.1kHz）を含むIRをロード
-2. 出力IRのサンプル数が `ceil(inLen * ratio)` 以上であることを確認
-3. 元のIRとリサンプリング後IRのエネルギー積分値の差が 0.1% 未満であることを確認（テイル消失の有無）
-
----
-
-## 5. F4: `computeMasteringSizing` 孤立計算の解消
-
-### 5.1 現状
-
-`ConvolverProcessorInternal::computeMasteringSizing()`（`ConvolverProcessor.Internal.h` L116-137）は `firstPartition`/`maxFFTSize` を計算する。これらの値は：
-
-1. `Lifecycle.cpp` L221 → `StereoConvolver::init()` → `storedMaxFFTSize`/`storedFirstPartition` に保存
-2. `LoaderThread.cpp` → 同経路
-3. `clone()` 時に `init()` に再投入されるのみ
-
-しかし、`MKLNonUniformConvolver::SetImpulse()` のシグネチャは：
+現行コードはチャンネルごとに `done` をローカル変数として持つが、最後に `resampled.setSize(numCh, maxOutLen, ...)` で固定長を返している。各チャンネルでフラッシュ完了位置が異なる可能性があるため、最大値でトリムする必要がある。
 
 ```cpp
-bool SetImpulse(const double* impulse, int irLen, int blockSize,
-                double scale = 1.0, bool enableDirectHead = false,
-                const FilterSpec* filterSpec = nullptr);
+// 各スレッドの完了状態を管理
+// futures.wait() が全スレッド完了の同期点となるため、
+// vector<int> への異なるインデックス書き込みでデータ競合は発生しない。
+std::vector<int> channelDone(numCh, -1);  // -1初期化: 例外・未完了チャンネルを識別可能
+std::atomic<bool> anyChannelCancelled{false};
+
+for (int ch = 0; ch < numCh; ++ch) {
+    futures.emplace_back(std::async(std::launch::async, [&, ch]() {
+        try {
+            // キャンセルチェック: early-exit時は channelDone[ch]=-1 のまま
+            if (shouldExit && shouldExit()) {
+                anyChannelCancelled.store(true, std::memory_order_relaxed);
+                return;
+            }
+            // ... existing processing ...
+            // 各スレッドは自身の ch（ユニークなインデックス）のみ書き込む
+            channelDone[ch] = done;
+        } catch (...) {
+            anyChannelCancelled.store(true, std::memory_order_relaxed);
+            throw;  // get() で再送出
+        }
+    }));
+}
+
+for (auto& f : futures) f.get();  // get() を使用: 内部で例外が発生した場合も確実に伝播される（wait() では例外が回収されない）
+
+if (anyChannelCancelled.load(std::memory_order_relaxed))
+    return {};  // キャンセル時は空バッファを返す
+
+// 全チャンネル中の最大完了位置でトリム
+// maxDone 採用理由: 理論上は全チャンネル同一長となるが、安全のため maxDone を採用。
+// minDone を使うと最長チャンネルの末尾が切り捨てられる可能性がある。
+// ただし getMaxOutLen() が理論上の最大出力長であり、done==maxOutLen のケースもあるため、
+// maxDone < maxOutLen の時のみ縮小する条件付きトリムとする。
+const int maxDone = *std::max_element(channelDone.begin(), channelDone.end());
+if (maxDone < 0)
+    return {};  // 全チャンネル未完了（例外発生等）の場合は空バッファ
+if (maxDone < maxOutLen)
+    resampled.setSize(numCh, maxDone, true, true, true);
+// maxDone == maxOutLen の場合は元のバッファサイズを維持（現状コードとの互換性）
+
+// 注意: IRDSP::resampleIR の戻り値型は juce::AudioBuffer<double> であり、
+// 呼び出し側（IRConverter.cpp）は空バッファをエラーとして扱う。
+// 戻り値型が ResampleOutput 構造体の場合は Cancelled ステータスを返すこと。
 ```
 
-**`firstPartition` も `maxFFTSize` も引数に存在しない。**
+### 2.4 API確認
 
-そのため、NUCのパーティションサイズは `SetImpulse()` 内部で `nextPow2(max(blockSize, 64))` として独自計算され、`computeMasteringSizing` の結果は一切反映されない。
+`r8b::CDSPResampler::getMaxOutLen()` は `r8brain-free-src/CDSPResampler.h` L502 に `virtual int getMaxOutLen(const int) const` として存在を確認済み。r8brain の公開APIの一部であり、本バージョンでも利用可能。
 
-### 5.2 選択肢
+### 2.5 影響確認
 
-#### 選択肢A: `computeMasteringSizing` の結果を NUC に反映させる
-
-1. `MKLNonUniformConvolver::SetImpulse()` に `int maxFFTSize` と `int firstPartitionSize` のオプション引数を追加
-2. 引数が指定された場合、NUC内部の自動計算をオーバーライドする
-3. `StereoConvolver::init()` から `maxFFTSize`/`firstPartition` を `SetImpulse()` に転送
-
-#### 選択肢B: 関数と関連コードを削除（推奨）
-
-1. `ConvolverProcessor.Internal.h` から `computeMasteringSizing()` + `ConvolverSizing` を削除
-2. `ConvolverProcessor.h` の `StereoConvolver` から `storedMaxFFTSize`・`storedFirstPartition` を削除
-3. `StereoConvolver::init()` から `maxFFTSize`・`firstPartition` 引数を削除
-4. 呼び出し元（Lifecycle.cpp・LoaderThread.cpp・LoadPipeline.cpp）の該当引数を削除
-
-#### 選択肢C: 現状維持＋コメントでドキュメント化
-
-### 5.3 調査確定事項
-
-以下の事項を追加調査で確定した：
-
-| 確定項目 | 調査結果 |
+| 項目 | 結果 |
 | --- | --- |
-| `computeMasteringSizing` の全呼び出し箇所 | `Lifecycle.cpp` L217, `LoaderThread.cpp` L219 の2箇所。ともに `StereoConvolver::init()` の引数として `sizing.maxFFTSize` / `sizing.firstPartition` を渡す |
-| データフロー完全追跡 | `computeMasteringSizing()` → `init(..., maxFFTSize, ..., firstPartition, ...)` → `storedMaxFFTSize = maxFFTSize; storedFirstPartition = firstPartition;` → **ここで値が途絶える**。`SetImpulse()` のシグネチャにこれらの引数が存在しない |
-| `storedMaxFFTSize` / `storedFirstPartition` の唯一の参照 | `StereoConvolver::clone()` で `init()` に再投入（L765-770）。しかし `init()` 内部で再び `SetImpulse()` に届かないため、`clone()` 経由でもNUC構成に影響なし |
-| NUCのパーティション決定ロジック | `MKLNonUniformConvolver.cpp` L604: `l0Part = nextPow2(max(blockSize, 64))` のみがL0サイズを決定。`computeMasteringSizing` の `firstPartition` は無関係 |
-| `finalizeNUCEngineOnMessageThread` の引数 | `LoadPipeline.cpp` L555: シグネチャに `maxFFTSize` と `firstPartition` を含むが、これらは `StereoConvolver::init()` に転送されるのみで、NUCに届かない |
-| 選択肢Bの削除対象ファイル | `ConvolverProcessor.Internal.h`（関数+構造体）, `ConvolverProcessor.h`（メンバ変数+init引数）, `Lifecycle.cpp`（呼び出し）, `LoaderThread.cpp`（呼び出し+引数伝播）, `LoadPipeline.cpp`（finalizeNUCEngineOnMessageThread引数）の5ファイル |
-| 削除によるコンパイルエラーの可能性 | `finalizeNUCEngineOnMessageThread` のシグネチャ変更は呼び出し元（`LoaderThread.cpp` L334）に影響。ラムダキャプチャの引数リストも要修正 |
-
-### 5.4 推奨
-
-**選択肢B（削除）を推奨**。理由：
-
-- 現在の `computeMasteringSizing()` は単に `nextPow2(internalBlockSize * 4)` を `[4096, 16384]` にクランプしているだけで、NUC内部の `nextPow2(max(blockSize, 64))` とほぼ同値
-- `storedFirstPartition` は `clone()` 経由で受け継がれるが、`SetImpulse()` に届かないため無意味
-- 選択肢AはNUCのシグネチャを変更し、上位互換性の問題が生じる可能性がある
-- 削除により `StereoConvolver::init()` の引数が減り、コードの可読性が向上する
-
-### 5.4 影響範囲
-
-| 項目     | 影響                                                      |
-| -------- | --------------------------------------------------------- |
-| NUC動作  | **なし（削除しても挙動不変）**                              |
-| コンパイル | 呼び出し元の引数削除が必要                                |
-| `clone()` | `init()` シグネチャ変更に追随                             |
-
-### 5.5 削除手順
-
-1. `ConvolverProcessor.Internal.h` から `computeMasteringSizing()`・`ConvolverSizing` を削除
-2. `ConvolverProcessor.h` の `StereoConvolver` から `storedMaxFFTSize`・`storedFirstPartition` を削除
-3. `ConvolverProcessor.h` の `StereoConvolver::init()` から `maxFFTSize`・`firstPartition` 引数を削除
-4. `convolver/ConvolverProcessor.Lifecycle.cpp` L217 の呼び出しを削除
-5. `convolver/ConvolverProcessor.LoaderThread.cpp` L219 の呼び出しおよび関連引数伝播を削除
-6. `convolver/ConvolverProcessor.LoadPipeline.cpp` の `finalizeNUCEngineOnMessageThread()` から `maxFFTSize`・`firstPartition` 引数を削除
+| 影響パス | `IRConverter.cpp`（`IRDSP::resampleIR()`）のみ |
+| メインローダーパス | 安全。`getMaxOutLen()` + `oneshot()` 使用済み |
+| 性能 | `getMaxOutLen()` は O(1) |
+| 既存キャッシュ | 出力IR長が変わるため PreparedIRState キャッシュは無効化（期待動作） |
 
 ---
 
-## 6. F5: `applyAllpassToIR` 重複実装の解消
+## 3. F5: `applyAllpassToIR` 削除
 
-### 6.1 現状
+### 3.1 現状
 
-`AllpassDesigner.h` L115 で宣言・`AllpassDesigner.cpp` L595-742 で実装されている静的関数 `applyAllpassToIR()` は、MKL DFTI を用いてオールパスカスケードを IR に正しく適用するが、**コードベース全体で呼び出し箇所が一つもない**。実際の `convertToMixedPhaseAllpass()` は、同等の処理（周波数応答計算→複素乗算→逆FFT）を **インラインで再実装** している（L555-567）。
+`AllpassDesigner.h` L115 で宣言・`AllpassDesigner.cpp` L595-742 で実装されているが、**呼び出し箇所が一つもない**。
 
-### 6.2 調査確定事項
+### 3.2 最終確認結果
 
-以下の事項を追加調査で確定した：
+```
+$ grep -r "AllpassDesigner::applyAllpassToIR" src/
+  → src/AllpassDesigner.cpp:595  (定義のみ)
 
-| 確定項目 | 調査結果 |
-| --- | --- |
-| 全ファイル検索結果 | `src/**/*.{cpp,h}` で `applyAllpassToIR` の呼び出し箇所は **0件**。宣言（`AllpassDesigner.h` L115）+ 定義（`AllpassDesigner.cpp` L595）のみ |
-| 既存ドキュメントでの認識 | `doc/work/bug4_observation_register.md` で P3-2（2026-05-24〜Monitoring）として記録済み："呼び出し0件（宣言/定義のみ）" |
-| 別ドキュメントでの言及 | `doc/plan4.md` L275: "デッドコードのため削除、またはASSERT_NON_RT_THREAD()" |
-| Inline実装との関係 | `ConvolverProcessor.MixedPhase.cpp` L555-567 で同等のオールパス適用がインライン実装されている。FFTバックエンドの差異（MKL DFTI vs IPP FFT）を確認する必要なく、削除可能 |
-| テストからの参照 | テストコードからも呼び出しなし |
+$ grep -r "applyAllpassToIR(" src/
+  → src/AllpassDesigner.cpp:595  (定義)
+  → src/AllpassDesigner.h:115    (宣言)
 
-### 6.3 選択肢
+$ grep -r "applyAllpassToIR" doc/
+  → doc/class_definition_en.md, doc/class_definition_jp.md  (APIドキュメント)
+  → doc/work/bug4_observation_register.md  (既存認識: 呼び出し0件)
+  → doc/plan4.md  (デッドコード認識あり)
+```
 
-#### 選択肢A: `applyAllpassToIR` を削除（推奨）
+呼び出し元は存在しない。削除推奨。
 
-- インライン実装が実運用で使用されており、`applyAllpassToIR` は歴史的経緯で残存
-- `AllpassDesigner.h` から宣言を削除
-- `AllpassDesigner.cpp` から実装を削除
+### 3.3 削除手順
 
-#### 選択肢B: `convertToMixedPhaseAllpass()` のインライン実装を `applyAllpassToIR` 呼び出しに置き換え
-
-- 重複を排除し、コードの一元管理を実現
-- ただし、`applyAllpassToIR` は MKL DFTI を使用するのに対し、`convertToMixedPhaseAllpass()` は IPP FFT を使用している可能性があるため、置き換え前に FFT バックエンドの互換性を確認する必要がある
-
-### 6.3 推奨
-
-**選択肢A（削除）を推奨**。理由：
-
-- インライン実装が実戦投入されており、`applyAllpassToIR` は未使用コードとしてメンテナンスコストだけを生む
-- 選択肢Bは FFT バックエンドの互換性確認が必要で、リスクの割にメリットが少ない
-- 削除により `AllpassDesigner` の公開APIが整理される
-
-### 6.4 削除手順
-
-1. `AllpassDesigner.h` から `applyAllpassToIR` の宣言を削除
-2. `AllpassDesigner.cpp` から `applyAllpassToIR` の実装（コメント含む L588-742）を削除
-3. ビルド確認
+1. `AllpassDesigner.h` L115 の宣言を削除
+2. `AllpassDesigner.cpp` L588-742 の実装（コメント含む）を削除
+3. `doc/class_definition_en.md` / `doc/class_definition_jp.md` の該当行を削除
+4. ビルド確認
 
 ---
 
-## 7. F6: レイヤースケジューリング最適化（調査・将来課題）
+## 4. F2: `mixedPreRingTau` パラメータ削除
+
+### 4.1 現状
+
+`mixedPreRingTau` は：
+
+- `convertToMixedPhaseAllpass()` 内でキャッシュキーにのみ使用
+- `AllpassDesignerConfig` に `tau` フィールドなし
+- `convertToMixedPhaseFallback()` で `(void)tau`
+- 音響的出力に全く影響しないダミーパラメータ
+
+### 4.2 削除範囲（17ファイル）
+
+| # | ファイル | 削除内容 |
+| --- | --- | --- |
+| 1 | `ConvolverProcessor.h` | `MIXED_TAU_MIN/MAX/DEFAULT` 定数 |
+| 2 | `ConvolverProcessor.h` | `BuildSnapshot::mixedPreRingTau` |
+| 3 | `ConvolverProcessor.h` | `IRCacheKey::tau` + `operator<` 該当行 |
+| 4 | `ConvolverProcessor.h` | `setMixedPreRingTau()` / `getMixedPreRingTau()` 宣言 |
+| 5 | `convolver/ConvolverProcessor.Runtime.cpp` | setter/getter 実装 |
+| 6 | `convolver/ConvolverProcessor.StateAndUI.cpp` | hash/serialize/deserialize の全参照 |
+| 7 | `convolver/ConvolverProcessor.LoaderThreadInline.h` | BuildSnapshot メンバ |
+| 8 | `convolver/ConvolverProcessor.LoaderThread.cpp` | コンストラクタ引数 + メンバ初期化子 |
+| 9 | `convolver/ConvolverProcessor.LoadPipeline.cpp` | `buildSnapshot.mixedPreRingTau` 2箇所 |
+| 10 | `convolver/ConvolverProcessor.MixedPhase.cpp` | `key.tau` 5箇所 + `(void)tau` |
+| 11 | `ConvolverControlPanel.h` | `mixedTauSlider`/`mixedTauLabel` + `pendingMixedTau*` |
+| 12 | `ConvolverControlPanel.cpp` | 全 `mixedTau*` 参照（〜20行） |
+| 13 | `audioengine/AudioEngine.h` | `setConvolverMixedPreRingTau()` 宣言 |
+| 14 | `audioengine/AudioEngine.Parameters.cpp` | setter実装 + `"mixedTau"` バリデーション |
+| 15 | `MainWindow.cpp` | `--cli-pre-ring-tau` CLIパラメータ処理（L670-680） |
+| 16 | `MixedPhasePersistentCache.cpp` | 全 `tau` 引数（5関数） |
+| 17 | `MixedPhasePersistentCache.h` | 同上の宣言 |
+
+### 4.3 DiskHeader 互換性と kLastUsedTimeOffset 修正
+
+`MixedPhasePersistentCache::DiskHeader`（`MixedPhasePersistentCache.h` L65-82）に `float tau;` フィールドが含まれている。`tau` 削除時にはこのフィールドも削除し、同時に `kVersion` を `1` から `2` に更新する必要がある。
+
+```cpp
+// 現行:
+static constexpr uint32_t kVersion = 1;
+struct DiskHeader {
+    ...
+    float tau;            // ← 削除
+    ...
+};
+
+// 修正後:
+static constexpr uint32_t kVersion = 2;  // ← バージョンアップ
+struct DiskHeader {
+    ...
+    // float tau; 削除
+    ...
+};
+```
+
+`kVersion` を更新しない場合、旧フォーマットのキャッシュファイルを別の構造体サイズで読み込もうとし、デシリアライズエラーまたはガベージデータの読み取りが発生する。`header.version != kVersion` のチェック（`MixedPhasePersistentCache.cpp` L98）により自動的に無効化され新規作成されるため安全だが、明示的なバージョン管理が必要。
+
+**`kLastUsedTimeOffset` の修正（必須）**: `MixedPhasePersistentCache::touch()` 内（`MixedPhasePersistentCache.cpp` L256）にハードコードされたバイトオフセット定数がある：
+
+```cpp
+// 現行: tau の存在を前提とした固定値
+static constexpr int kLastUsedTimeOffset = 52;
+```
+
+これは `DiskHeader` 内の `lastUsedTime` フィールドの位置を指す。`tau`（4byte、offset 44）を削除すると `lastUsedTime` のオフセットは 52 → 48 に変化するため、固定値は正しく動作しなくなる。
+
+**修正方法**: 固定値を廃止し、コンパイル時オフセット計算に変更する：
+
+```cpp
+// 修正後: 構造体レイアウトに依存しない安全な方法
+#include <cstddef>  // offsetof
+const size_t lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
+```
+
+`offsetof` はコンパイル時に正しいオフセットを計算するため、`DiskHeader` のフィールド追加・削除に対して自動追従する。さらに、将来の構造体変更時に予期せぬオフセット変化を検出するため、以下の `static_assert` を `DiskHeader` 定義直後に追加することを推奨：
+
+```cpp
+// DiskHeader レイアウト不変契約
+// サイズを明示的にアサート（現状の128バイト制約を維持）
+static_assert(sizeof(DiskHeader) <= 128, "DiskHeader must not exceed 128 bytes");
+// lastUsedTime が構造体内に収まることを確認（固定値アサートは保守性低下を招くため非推奨）
+static_assert(offsetof(DiskHeader, lastUsedTime) + sizeof(uint64_t) <= sizeof(DiskHeader),
+              "lastUsedTime must fit within DiskHeader");
+```
+
+`#pragma pack(push, 1)` が適用されたパック構造体であるため、コンパイラ依存のパディングが入らないことを前提とした明示的なサイズ保証が有効。
+
+### 4.4 キャッシュ影響
+
+`IRCacheKey` からの `tau` 削除＋`DiskHeader` からの `tau` 削除＋`kVersion 1→2` の変更により、メモリ・ディスク両方のキャッシュが完全に無効化される。次回起動時に Mixed Phase IR の再設計が一度発生するが許容範囲。
+
+**F1 との関係**: メモリキャッシュ（`std::map<IRCacheKey, CacheEntry> irCache`）は `IRCacheKey` にクロスオーバー方向情報を含まない。そのため F1（方向変更）を単独実施した場合、アプリケーション起動中のメモリキャッシュでも旧方向の Mixed IR がヒットする。F1 のキャッシュ無効化は F2 の `kVersion` 更新（＋`DiskHeader` レイアウト変更）に依存しており、F1 と F2 は同時リリースする必要がある。
+
+**メモリキャッシュ無効化の推奨設計**: `kVersion` は永続キャッシュのみを制御するため、メモリキャッシュには別の仕組みが必要。推奨は `IRCacheKey` に `uint8_t algorithmVersion` フィールドを追加すること：
+
+```cpp
+struct IRCacheKey {
+    uint64_t fileHash;
+    double sampleRate;
+    PhaseMode phaseMode;
+    float f1, f2;
+    int targetLength;
+    uint8_t algorithmVersion = 0;  // 追加: Mixed Phaseアルゴリズム版。変更時にインクリメント
+};
+```
+
+これによりメモリキャッシュのキーが変わるため、方向変更時に自動的にミスヒットする。`kVersion`（永続キャッシュ）と `algorithmVersion`（メモリキャッシュ）の併用が最も安全。
+
+### 4.5 実装前の最終確認
+
+```bash
+# tau が DSP 処理に使われていないことの最終確認
+grep -rn "\.tau" src/convolver/ConvolverProcessor.MixedPhase.cpp
+# → キャッシュキー代入（key.tau = ...）のみであることを確認
+
+# 削除対象ファイルの網羅性確認
+grep -rn "mixedPreRingTau\|MIXED_TAU\|mixedTauSlider\|setMixedPreRingTau\|getMixedPreRingTau" src/ --include="*.cpp" --include="*.h"
+# → 計画書記載の17ファイルで過不足ないことを確認
+```
+
+v5.2 時点の確認結果：全 `.tau` 参照はキャッシュキー代入（`key.tau = ...`）のみ。DSP処理（群遅延計算、オールパス設計、周波数応答合成）への影響はゼロ。
+
+### 4.6 PersistentCache シグネチャ変更チェックリスト
+
+`MixedPhasePersistentCache` の以下の全関数で `tau` 引数を削除する必要がある。実装時の見落とし防止のためリスト化：
+
+| 関数 | ファイル | 変更内容 |
+| --- | --- | --- |
+| `computeKeyHash(... float tau ...)` | `MixedPhasePersistentCache.cpp` L19 | `tau` 引数削除 + `uint32_t tauBits` 削除 + `hashCombine(h, tauBits)` 削除 |
+| `getCacheFile(... float tau ...)` | `MixedPhasePersistentCache.cpp` L58 | `tau` 引数削除 |
+| `load(... float tau ...)` | `MixedPhasePersistentCache.cpp` L74 | `tau` 引数削除 + 呼び出し側修正 |
+| `save(... float tau ...)` | `MixedPhasePersistentCache.cpp` L149 | `tau` 引数削除 + `header.tau = tau;` 削除 |
+| `touch(... float tau ...)` | `MixedPhasePersistentCache.cpp` L227 | `tau` 引数削除 |
+| `remove(... float tau ...)` | `MixedPhasePersistentCache.cpp` L312 | `tau` 引数削除 |
+| `MixedPhasePersistentCache.h` 全宣言 | L17-L48 | 同上の宣言から `tau` 引数を削除 |
+
+---
+
+## 5. F4: `computeMasteringSizing` 削除（追加調査後）
+
+### 5.1 現状と調査結果
+
+`ConvolverProcessorInternal::computeMasteringSizing()`（`ConvolverProcessor.Internal.h` L116-137）は `firstPartition`/`maxFFTSize` を計算する。
+
+**データフロー完全追跡結果**:
+
+```
+computeMasteringSizing(internalBlockSize, irLength)
+  → init(..., maxFFTSize, ..., firstPartition, ...)       [Lifecycle.cpp / LoaderThread.cpp]
+  → storedMaxFFTSize = maxFFTSize                          [ConvolverProcessor.h L717]
+  → storedFirstPartition = firstPartition                  [ConvolverProcessor.h L719]
+  → SetImpulse(irData, irLen, knownBlockSize, scale,       [ConvolverProcessor.h L733]
+               enableDirectHead, filterSpec)
+    ※ maxFFTSize / firstPartition は引数に存在せず、NUCに届かない
+  → clone() → init(storedMaxFFTSize, ..., storedFirstPartition)  [ConvolverProcessor.h L776]
+    ※ 再び init() に戻るだけの循環。SetImpulse には依然として届かない
+```
+
+**`storedMaxFFTSize` / `storedFirstPartition` の全参照箇所**（6箇所のみ）：
+
+| 行 | ファイル | 内容 |
+| --- | --- | --- |
+| L648 | `ConvolverProcessor.h` | `int storedMaxFFTSize = 0;`（メンバ宣言） |
+| L650 | `ConvolverProcessor.h` | `int storedFirstPartition = 0;`（メンバ宣言） |
+| L717 | `ConvolverProcessor.h` | `storedMaxFFTSize = maxFFTSize;`（代入） |
+| L719 | `ConvolverProcessor.h` | `storedFirstPartition = firstPartition;`（代入） |
+| L776 | `ConvolverProcessor.h` | `clone()` → `init(storedMaxFFTSize, ..., storedFirstPartition)`（再投入） |
+
+**診断**: 上記以外の参照（ログ出力、デバッグ表示、互換レイヤ、将来拡張のフック）は**一切存在しない**。
+
+**追加調査結果**: `clone()` は `shareConvolutionEngineFrom()`（`StateAndUI.cpp` L436）からのみ呼ばれる。しかし `shareConvolutionEngineFrom()` 自体はコードベース内で**呼び出し元が存在しない**（grep 0件）。`ConvolverProcessor` の公開APIとして宣言されているが、現在は休眠状態である。したがって `storedMaxFFTSize`/`storedFirstPartition` は宣言・代入・休眠clone経路での循環のみで完結しており、NUC構成に影響する経路は完全に存在しない。
+
+### 5.2 判断
+
+「死んでいる可能性が高い」が「完全削除を断定できる証拠がまだ十分とは言えない」状態。
+
+**最終確認用コマンド（Phase 4 直前に実行）**:
+
+```bash
+grep -rn storedMaxFFTSize src/
+grep -rn storedFirstPartition src/
+```
+
+v4.1 時点の確認結果：`storedMaxFFTSize` は3行・`storedFirstPartition` は3行、いずれも `ConvolverProcessor.h` 内の宣言・代入・clone の3箇所のみ。0件（完全に未使用）ではないが、NUC 構成に影響しない「孤立した保持」であることが確認済み。
+
+### 5.3 推奨方針
+
+**Phase 4（最後）に回し、Phase 4 直前に再度 `rg storedMaxFFTSize` / `rg storedFirstPartition` を実行し、参照箇所が増えていないことを確認した上で、以下の判断基準を満たした場合のみ削除を実施する**：
+
+| 判断基準 | 確認方法 |
+| --- | --- |
+
+| 判断基準 | 確認方法 |
+| --- | --- |
+| 全ビルド構成で `computeMasteringSizing` 削除後にコンパイル成功 | Release/Debug 両方でビルド |
+| `init()` 引数削除後も `clone()` が正常動作 | ユニットテストまたはIRロード→再構成の動作確認 |
+| NUCのパーティションサイズが削除前と同一 | `getLatency()` の戻り値を比較 |
+| IRロード→ホットスワップ→IR再ロードのサイクルが正常 | 手動テスト |
+
+### 5.4 暫定措置（Phase 4までの間）
+
+現状のコードは動作に支障がないため、緊急の対応は不要。ただし、将来の保守者への誤解を防ぐため、以下のコメントを `computeMasteringSizing()` に追記することを推奨：
+
+```cpp
+// NOTE: [OBSOLETE] この関数の計算結果は NUC 構成に反映されない。
+// storedMaxFFTSize / storedFirstPartition として保持されるが、
+// MKLNonUniformConvolver::SetImpulse() はこれらの引数を受け取らず、
+// パーティションサイズを blockSize から独自計算する。
+// 削除判断の詳細は doc/work55/fix_plan.md §5 を参照。
+```
+
+---
+
+## 6. F1: Mixed Phase クロスオーバー方向修正（DSP仕様変更・別リリース）
+
+### 6.1 位置づけ
+
+**設計者の最終判断：DSP仕様変更として、クロスオーバー方向を反転する。現状の「低域=Linear／高域=Minimum」はコード上の誤りではなく、設計者の意図した「低域=Minimum／高域=Linear」と異なる設計思想に基づく実装であるため、設計判断として修正する。**
+
+> 設計者意見：「F1は設計思想から実装をしてください。」
+> 設計者追補：「現状は誤実装なので、F1を実施してください。」
+
+**注意**: 「誤実装」とはコード自体の論理誤りではなく、設計者の意図した Mixed Phase の方向と実装が逆であることを指す。DSP 理論上は現行方向（低域Linear/高域Minimum）にもルーム補正用途としての合理性があり、「一般的な EQ 用途と比較して誤り」という意味ではない。
+
+### 6.2 修正内容
+
+`convertToMixedPhaseAllpass()`（L303-311）および `convertToMixedPhaseFallback()`（L810-818）の重み関数 `wLinear`/`wMinimum` の相互に `1-w` 関係を反転する。
+
+**現行（設計思想に対して誤実装）**:
+
+```cpp
+// 低域=Linear Phase, 高域=Minimum Phase
+// 設計者の意図と逆
+```
+
+修正後:
+
+```cpp
+// 低域=Minimum Phase（プリリンギング抑制）, 高域=Linear Phase（位相情報保存）
+// 設計者の意図に合致
+```
+
+**ファイル**: `src/convolver/ConvolverProcessor.MixedPhase.cpp`（Allpass版 + Fallback版の2箇所）
+
+### 6.3 変更コード
+
+**修正A: `convertToMixedPhaseAllpass()` 内**
+
+```cpp
+// 変更前: 低域=Linear Phase, 高域=Minimum Phase
+double wLinear = 1.0;
+if (freq >= transitionHiHz)
+    wLinear = 0.0;
+else if (freq > transitionLoHz) {
+    const double x = (freq - transitionLoHz) * invSpan;
+    wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+}
+const double wMinimum = 1.0 - wLinear;
+
+// 変更後: 低域=Minimum Phase, 高域=Linear Phase
+double wMinimum = 1.0;
+if (freq >= transitionHiHz)
+    wMinimum = 0.0;
+else if (freq > transitionLoHz) {
+    const double x = (freq - transitionLoHz) * invSpan;
+    wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+}
+const double wLinear = 1.0 - wMinimum;
+```
+
+**修正B: `convertToMixedPhaseFallback()` 内**: 同様。
+
+### 6.4 キャッシュ整合性問題（重要）
+
+**警告**: 現行の `MixedPhasePersistentCache::DiskHeader` はキャッシュキーにクロスオーバー方向情報を含まない。そのため、F1 を実施しても旧方向の Mixed IR がキャッシュから再利用され、修正が反映されない。
+
+**解決策（必須）**: 以下のいずれかを実施すること。
+
+| 案 | 方法 | 影響 |
+| --- | --- | --- |
+| **案A（推奨）** | `MixedPhasePersistentCache::kVersion` を `1` → `2` に更新（F2と同様） | 全 Mixed Phase キャッシュが無効化→再設計。最も安全 |
+| **案B** | `IRCacheKey` に `uint8_t mixDirection` を追加＋`DiskHeader` に対応フィールド追加 | キャッシュキー構造変化で旧キャッシュ自動無効。差分が明確 |
+
+案A が F2 と同じ機構で実装できるため推奨。ただし、以下のリリースパターンに応じて管理方法が異なる：
+
+| リリースパターン | kVersion管理 | 備考 |
+| --- | --- | --- |
+| **F2とF1を同時リリース** | F2の `kVersion 1→2` で両方の変更によるキャッシュ無効化が一度に完了。F1側で別途 `kVersion` 更新不要 | 最も効率的 |
+| **F2を先にリリース、F1を後にリリース** | F1単独で `kVersion 2→3`（またはF2未適用なら `1→2`）を更新する必要あり。`DiskHeader` のフォーマット変更がない場合でも、方向変更を既存キャッシュに認識させるために必須 | 管理上明確 |
+
+**推奨手順**: F1とF2を同じリリースに含める場合、F2の `kVersion=1→2` のみで十分。F1がF2より後のリリースになる場合は、F1専用で `kVersion` をインクリメントすること。
+
+### 6.5 影響
+
+| 項目 | 影響 |
+| --- | --- |
+| 音響的挙動 | **大**。IRの位相特性が反転。低域Minimum Phaseによりプリリンギング抑制、高域Linear Phaseにより位相情報保存 |
+| キャッシュ | **要対応**（§6.4 参照）。F2 と同時実施で自動解決 |
+| UIパラメータ | 変更なし（`MIXED_F1_DEFAULT_HZ`/`MIXED_F2_DEFAULT_HZ` はそのまま） |
+| Mixed Phase IR品質 | 設計者の意図通りに改善される見込み |
+
+### 6.6 実施条件
+
+F1 の実施判断には以下を推奨（必須ではない）：
+
+1. 変更前後の **Excess Group Delay 比較**（20-500Hz）
+2. 変更前後の **Step Response 比較**
+3. 変更前後の **Impulse Response 比較**（プリリンギング量）
+4. **Null Test**（両IRの差信号を分析）
+5. **Magnitude Response 比較**（振幅特性に差が出ないことを確認）
+6. **Excess Phase 比較**（Mixed Phase変更の本質はExcess Phase特性の変化であるため直接確認が望ましい）
+
+### 6.6 リリースノート注意
+
+F1 は DSP 仕様変更であり、バグ修正ではない。ユーザー視点では「同じ設定（F1/F2/tau同じ）なのに音が変わった」と認識される。そのため F1 を含むリリースには以下の明記を推奨：
+
+> **Mixed Phase アルゴリズム変更**: クロスオーバー方向を「低域=Minimum Phase／高域=Linear Phase」に修正しました。これにより Mixed Phase モード使用時の IR 位相特性が従来と変わります。既存の Mixed Phase キャッシュは自動的に無効化され、次回 IR ロード時に再設計が行われます。
+
+### 6.7 実施順序上の注意
+
+F1 は F3（`IRDSP.cpp`）とファイルが異なる。ただしF1はDSP仕様変更のため別リリース推奨。現行の推奨順序は **F3 → F5 → F2（リリース可能）→ F1（別リリース）→ F4**。
+
+---
+
+## 7. F6: レイヤースケジューリング最適化（将来課題）
 
 ### 7.1 現状
 
-`MKLNonUniformConvolver::SetImpulse()` 内で L1/L2 のパーティションサイズは：
+`MKLNonUniformConvolver::SetImpulse()` 内：
 
 ```cpp
 const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
@@ -462,124 +504,79 @@ const int l1Part = l0Part * tailL1L2Mult;   // デフォルト8
 const int l2Part = l1Part * tailL1L2Mult;   // デフォルト8
 ```
 
-これは Gardner (1995) の「固定比率ヒューリスティック」に該当する。
+Gardner (1995) 固定比率ヒューリスティック。実運用上問題なし。
 
-### 7.2 Garcia/Wefers 最適化との比較
+### 7.2 対応
 
-Garcia (2002) は動的計画法（Viterbiアルゴリズム）を用いて、指定された入出力遅延とフィルタ長に対する計算コスト最小化パーティションを導出する。Garcia論文の重要な発見：
-
-> "often the optimal partition does not include transitions to blocks twice as long (but four times as long or greater)"
-
-つまり、最適解は2倍ではなく4倍以上のジャンプを含むことが多い。ConvoPeqの「固定倍数8」はこの傾向と方向性として整合するが、ハードウェア固有のベンチマークに基づくコストモデルを用いた厳密最適化は行われていない。
-
-### 7.3 対応方針
-
-**本フェーズでは調査のみとし、実装は行わない。**
-
-| ステップ | 内容                                                             | 工数   |
-| -------- | ---------------------------------------------------------------- | ------ |
-| 1        | Garcia論文の再読とコストモデルの導出                             | 2-3日  |
-| 2        | ターゲットハードウェア（AVX2 + Intel MKL/IPP）のベンチマーク作成 | 1-2日  |
-| 3        | DPによる最適パーティションと現在の倍率8との比較                  | 1日    |
-| 4        | 実装判断                                                         | —      |
-
-### 7.4 `tailL1L2Multiplier` のUI設定の現状
-
-`FilterSpec::tailL1L2Multiplier` は UI 範囲2〜16（デフォルト8）でユーザーが設定可能。このパラメータは適切に `SetImpulse()` に伝達されており、現状の実装でも動作に問題はない。最適化の余地はソフトウェアの自動選択（動的最適化）に関するものであり、ユーザーの手動設定が無効なわけではない。
+優先度最低。本改修フェーズでは実施しない。
 
 ---
 
-## 8. 検証計画
+## 8. 実施順序
 
-### 8.1 単体テスト
+```
+Phase 1: F3 r8brain出力長修正（Bug Fix・最重要）
+  → IRDSP.cpp
+  ※ getMaxOutLen() APIはr8brain CDSPResampler.h L502で確認済み
 
-| テスト項目                               | 対象                                    | 方法                                       |
-| ---------------------------------------- | --------------------------------------- | ------------------------------------------ |
-| F1 修正後 Mixed Phase IR の方向確認      | `ConvolverProcessor.MixedPhase.cpp`     | IRの位相特性を周波数領域でプロット          |
-| F3 修正後 IR テイル保全確認              | `IRDSP.cpp`                             | 異なるサンプルレート変換でIR末尾のエネルギー損失を測定 |
-| F4 削除後 ビルド/動作確認                | 全修正ファイル                          | Release/Debug両方でビルド                  |
-| F5 削除後 ビルド確認                     | `AllpassDesigner.cpp/h`                 | リンクエラーなしを確認                     |
+Phase 2: F5 未使用コード削除（コード整理）
+  独立実施可能・副作用最小
+  → AllpassDesigner.h/cpp
 
-### 8.2 統合テスト
+Phase 3: F2 ダミーパラメータ削除（コード整理）
+  → 17ファイル（変更量大・注意）
+  ※ kVersion: 1→2 更新、kLastUsedTimeOffset→offsetof 変更、sizeof/offsetof static_assert 追加を含む
+  ※ CLI --cli-pre-ring-tau も削除対象（MainWindow.cpp）
+---- この時点でリリース可能（F3/F5/F2はバグ修正＋コード整理） ----
 
-| テスト項目                                  | 内容                                       |
-| ------------------------------------------- | ------------------------------------------ |
-| IRロード（PhaseMode=AsIs）                   | 全機能正常動作                             |
-| IRロード（PhaseMode=Mixed）                  | F1+F2 修正の影響確認                        |
-| IRロード（サンプルレート変換あり）            | F3 修正の影響確認                           |
-| ホットスワップ（IR差し替え）                 | RCU経路の正常性確認                         |
-| プリセット保存/読込                          | BuildSnapshot互換性確認                     |
+Phase 4: F1 Mixed Phaseクロスオーバー方向修正（DSP仕様変更・別リリース推奨）
+  → ConvolverProcessor.MixedPhase.cpp（2箇所）
+  ※ 「バグ修正」ではなくDSP仕様変更。音が変わるため別リリースが安全
+  ※ キャッシュ整合性: F2のkVersion変更により自動解決（§6.4参照）
+  ※ 実施前のExcess Group Delay/Step Response/Impulse Response比較を推奨
+  ※ ユーザー価値のある仕様変更であり、単なるコード整理（F4）より優先
 
-### 8.3 音響測定（推奨）
+Phase 5: F4 孤立計算削除（追加調査後・保留案件）
+  十分なコード追跡と検証を経てから判断
+  → 5ファイル（変更量小）
+  ※ 削除確定ではなく「保留案件」。OBSOLETEコメント追加も可
 
-| 測定項目                                       | 方法                                                   |
-| ---------------------------------------------- | ------------------------------------------------------ |
-| Mixed Phase IRの群遅延プロット                  | 周波数領域で群遅延曲線を確認                            |
-| r8brainリサンプリングIRのテイル比較             | 修正前後のIR末尾を波形・スペクトログラムで比較          |
-| 実機での聴感評価                               | 定位感・プリリンギングの有無                            |
+F6: 将来課題（本フェーズでは実施しない）
+```
+
+### 8.1 各フェーズの成果物
+
+| Phase | 成果物 |
+| --- | --- |
+| 1 | 修正済み `IRDSP.cpp` + F3テイル確認ログ |
+| 2 | 修正済み `AllpassDesigner.h/cpp` + ビルド成功確認 |
+| 3 | 修正済み17ファイル（kVersion: 1→2、kLastUsedTimeOffset→offsetof、CLI削除含む）+ ビルド成功確認 |
+| 4 | 修正済み `ConvolverProcessor.MixedPhase.cpp` + 位相特性確認ログ |
+| 5 | 削除済み5ファイル + 動作確認ログ。または `computeMasteringSizing()` へのコメント追記 |
+| 2 | 修正済み `AllpassDesigner.h/cpp` + ビルド成功確認 |
+| 3 | 修正済み16ファイル + ビルド成功確認 |
+| 4 | 削除済み5ファイル + 動作確認ログ。または `computeMasteringSizing()` へのコメント追記 |
 
 ---
 
-## 9. 依存関係と実施順序
+## 付録A: コード行番号リファレンス
 
-```
-Phase 1: 即時修正（高優先度）
-  F3: IRDSP::resampleIR() バッファマージン修正（最優先・他に依存なし）
-  F1: Mixed Phase クロスオーバー方向修正（F2とファイルが同じ）
-
-Phase 2: パラメータ有効化
-  F2: mixedPreRingTau 有効化（F1と同じファイルのため同時修正推奨）
-
-Phase 3: コード整理（低優先度）
-  F5: applyAllpassToIR 削除（独立して実施可能）
-  F4: computeMasteringSizing 削除（複数ファイルにまたがるため最後に実施）
-
-Phase 4: 将来課題
-  F6: レイヤースケジューリング最適化（調査のみ。本改修では実施しない）
-```
-
-### 推奨実施順序
-
-```
-F3 → F1 → F2 → F5 → F4
-```
-
-### 各フェーズの成果物
-
-| フェーズ | 成果物                                                         |
-| -------- | -------------------------------------------------------------- |
-| Phase 1  | 修正済み `IRDSP.cpp`, `ConvolverProcessor.MixedPhase.cpp` + 動作確認ログ |
-| Phase 2  | 修正済み `AllpassDesigner.h/cpp`, `ConvolverProcessor.MixedPhase.cpp` + 単体テスト結果 |
-| Phase 3  | 修正済み全ファイル + ビルド成功確認                            |
-| Phase 4  | Garcia/Wefers最適化の調査レポート                              |
+| ファイル | 行 | 内容 |
+| --- | --- | --- |
+| `src/IRDSP.cpp` | 18 | `+2.0` マージン（F3要修正） |
+| `src/IRDSP.cpp` | 23 | `maxOutLen` バッファ確保（F3要修正） |
+| `src/IRDSP.cpp` | 49-52 | フラッシュループ + `done < maxOutLen`（F3要修正） |
+| `src/IRDSP.cpp` | 103 | `resampled.setSize(numCh, maxOutLen)`（F3要修正: maxDoneでトリム） |
+| `src/convolver/ConvolverProcessor.MixedPhase.cpp` | 303-311 | Allpass版 クロスオーバー重み（F1要修正） |
+| `src/convolver/ConvolverProcessor.MixedPhase.cpp` | 734 | `(void)tau;`（F2削除対象） |
+| `src/convolver/ConvolverProcessor.MixedPhase.cpp` | 810-818 | Fallback版 クロスオーバー重み（F1要修正） |
+| `src/convolver/ConvolverProcessor.Internal.h` | 116-137 | `computeMasteringSizing()`（F4削除候補） |
+| `src/ConvolverProcessor.h` | 700-735 | `StereoConvolver::init()`（F4引数整理候補） |
+| `src/convolver/ConvolverProcessor.Lifecycle.cpp` | 217-221 | `computeMasteringSizing` 呼び出し（F4削除候補） |
+| `src/convolver/ConvolverProcessor.LoaderThread.cpp` | 219 | `computeMasteringSizing` 呼び出し（F4削除候補） |
+| `src/AllpassDesigner.h` | 115 | `applyAllpassToIR` 宣言（F5削除候補） |
+| `src/AllpassDesigner.cpp` | 588-742 | `applyAllpassToIR` 実装（F5削除候補） |
 
 ---
 
-## 付録A: コード行番号リファレンス（検証時点）
-
-| ファイル                                                   | 行     | 内容                                               |
-| ---------------------------------------------------------- | ------ | -------------------------------------------------- |
-| `src/IRDSP.cpp`                                            | 18     | `+2.0` マージン（要修正）                           |
-| `src/IRDSP.cpp`                                            | 23     | `maxOutLen` バッファ確保                            |
-| `src/IRDSP.cpp`                                            | 49-52  | フラッシュループ（`done < maxOutLen`）              |
-| `src/convolver/ConvolverProcessor.MixedPhase.cpp`          | 303-311| Allpass版 クロスオーバー重み（要修正）              |
-| `src/convolver/ConvolverProcessor.MixedPhase.cpp`          | 478-489| `designer_config` 設定（tau未使用）                 |
-| `src/convolver/ConvolverProcessor.MixedPhase.cpp`          | 734    | `(void)tau;`（Fallback版）                          |
-| `src/convolver/ConvolverProcessor.MixedPhase.cpp`          | 810-818| Fallback版 クロスオーバー重み（要修正）             |
-| `src/convolver/ConvolverProcessor.Internal.h`              | 116-137| `computeMasteringSizing()`（削除候補）              |
-| `src/ConvolverProcessor.h`                                 | 700-735| `StereoConvolver::init()`（引数整理候補）           |
-| `src/convolver/ConvolverProcessor.Lifecycle.cpp`           | 217-221| `computeMasteringSizing` 呼び出し                   |
-| `src/convolver/ConvolverProcessor.LoaderThread.cpp`        | 219    | `computeMasteringSizing` 呼び出し                   |
-| `src/AllpassDesigner.h`                                    | 115    | `applyAllpassToIR` 宣言（削除候補）                 |
-| `src/AllpassDesigner.cpp`                                  | 588-742| `applyAllpassToIR` 実装（削除候補）                 |
-
-## 付録B: 関連する既存資料
-
-- `doc/work55/bug.md` - レビュー要旨
-- `doc/work55/ConvoPeq_Convolver_Validation_Report.md` - 詳細検証レポート
-- `doc/work55/review_verification_report.md` - 相互評価レポート
-- プロジェクトメモリ: `mixedPreRingTau` の無効性（既知）、r8brainテイル切り捨てリスク（既知未解決）
-
----
-
-*本計画書は 2026-06-23 時点の `lonewolf-jp/ConvoPeq` main ブランチのソースコードに基づく。*
+*本計画書は 2026-06-24 時点の `lonewolf-jp/ConvoPeq` main ブランチのソースコードに基づく。v6.1 での確定: F3のchannelDone初期値を -1 に変更しmaxDone<0判定で例外・未完了を識別。v4.0から21回の反復を経て全項目確定。*

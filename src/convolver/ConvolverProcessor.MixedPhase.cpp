@@ -92,7 +92,6 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
         key.f1 = static_cast<float>(transitionLoHz);
         key.f2 = static_cast<float>(transitionHiHz);
-        key.tau = static_cast<float>(tau);
         key.targetLength = linearIR.getNumSamples();
 
         const juce::ScopedLock sl(owner->cacheMutex);
@@ -118,14 +117,13 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
         key.f1 = static_cast<float>(transitionLoHz);
         key.f2 = static_cast<float>(transitionHiHz);
-        key.tau = static_cast<float>(tau);
         key.targetLength = linearIR.getNumSamples();
 
         juce::AudioBuffer<double> cachedIr;
         std::vector<double> cachedRho, cachedTheta;
         if (convo::MixedPhasePersistentCache::load(
                 key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
-                key.f1, key.f2, key.tau, key.targetLength,
+                key.f1, key.f2, key.targetLength,
                 cachedIr, cachedRho, cachedTheta))
         {
             juce::Logger::writeToLog("convertToMixedPhaseAllpass: Persistent cache HIT! Loading optimized IR from disk.");
@@ -298,15 +296,15 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             {
                 const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
 
-                double wLinear = 1.0;
+                double wMinimum = 1.0;
                 if (freq >= transitionHiHz)
-                    wLinear = 0.0;
+                    wMinimum = 0.0;
                 else if (freq > transitionLoHz)
                 {
                     const double x = (freq - transitionLoHz) * invSpan;
-                    wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+                    wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
                 }
-                const double wMinimum = 1.0 - wLinear;
+                const double wLinear = 1.0 - wMinimum;
 
                 const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
                 const double phi_lin = -omega * peakDelay;
@@ -671,7 +669,6 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
             key.f1 = static_cast<float>(transitionLoHz);
             key.f2 = static_cast<float>(transitionHiHz);
-            key.tau = static_cast<float>(tau);
             key.targetLength = linearIR.getNumSamples();
 
             // メモリキャッシュに保存
@@ -697,7 +694,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 }
                 convo::MixedPhasePersistentCache::save(
                     key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
-                    key.f1, key.f2, key.tau, key.targetLength,
+                    key.f1, key.f2, key.targetLength,
                     mixedIR, rho, theta);
 
                 // ディスクキャッシュのLRUエビクション
@@ -818,15 +815,15 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
         {
             const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
 
-            double wLinear = 1.0;
+            double wMinimum = 1.0;
             if (freq >= transitionHiHz)
-                wLinear = 0.0;
+                wMinimum = 0.0;
             else if (freq > transitionLoHz)
             {
                 const double x = (freq - transitionLoHz) * invSpan;
-                wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+                wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
             }
-            const double wMinimum = 1.0 - wLinear;
+            const double wLinear = 1.0 - wMinimum;
 
             const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
             const double phi_lin = -omega * peakDelay;

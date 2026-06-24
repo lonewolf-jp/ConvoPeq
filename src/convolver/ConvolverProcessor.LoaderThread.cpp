@@ -10,18 +10,18 @@
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD)
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                                 float mixedF1, float mixedF2, float mixedTau,
+                                 float mixedF1, float mixedF2,
                                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
     : Thread("IRLoader"), owner(p), weakOwner(&p), file(f), sampleRate(sr), blockSize(bs), phaseMode(phase),
-    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau),
+    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2),
     buildSnapshot(buildSnapshotIn), isRebuild(false)
 {}
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                                 float mixedF1, float mixedF2, float mixedTau, double scale,
+                                 float mixedF1, float mixedF2, double scale,
                                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
     : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), phaseMode(phase),
-    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau),
+    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2),
     buildSnapshot(buildSnapshotIn), isRebuild(true), scaleFactor(scale)
 {}
 
@@ -217,7 +217,6 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
     std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
 
     const int internalBlockSize = juce::nextPowerOfTwo(bs);
-    const auto sizing = ConvolverProcessorInternal::computeMasteringSizing(internalBlockSize, result.targetLength);
 
     if (owner.isVisualizationEnabled())
     {
@@ -231,9 +230,7 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
                                                 std::move(irR),
                                                 sr,
                                                 irPeakLatency,
-                                                sizing.maxFFTSize,
                                                 internalBlockSize,
-                                                sizing.firstPartition,
                                                 bs);
 
     return queueFinalizeOnMessageThread(result,
@@ -241,9 +238,7 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
                                         std::move(irR),
                                         sr,
                                         irPeakLatency,
-                                        sizing.maxFFTSize,
                                         internalBlockSize,
-                                        sizing.firstPartition,
                                         bs);
 }
 
@@ -252,9 +247,7 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
                                                                          convo::ScopedAlignedPtr<double> irR,
                                                                          double sr,
                                                                          int irPeakLatency,
-                                                                         int maxFFTSize,
                                                                          int internalBlockSize,
-                                                                         int firstPartition,
                                                                          int callBlockSize)
 {
     auto newConv = convo::aligned_make_unique<StereoConvolver>();
@@ -274,7 +267,7 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
     }
 
     if (newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
-                             maxFFTSize, internalBlockSize, firstPartition, callBlockSize, result.scaleFactor,
+                             internalBlockSize, callBlockSize, result.scaleFactor,
                              owner.getExperimentalDirectHeadEnabled(),
                              &spec, &owner))
     {
@@ -293,9 +286,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                                                      convo::ScopedAlignedPtr<double> irR,
                                                                      double sr,
                                                                      int irPeakLatency,
-                                                                     int maxFFTSize,
                                                                      int internalBlockSize,
-                                                                     int firstPartition,
                                                                      int callBlockSize)
 {
     auto loadedIRRaw = new juce::AudioBuffer<double>(std::move(result.loadedIR));
@@ -315,9 +306,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                      length = result.targetLength,
                                      sr,
                                      peak = irPeakLatency,
-                                     maxFFT = maxFFTSize,
                                      known = internalBlockSize,
-                                     first = firstPartition,
                                      callQ = callBlockSize,
                                      isReb = isRebuild,
                                      file = file,
@@ -333,7 +322,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
         {
             ownerPtr->finalizeNUCEngineOnMessageThread(std::move(irLHolder),
                                                        std::move(irRHolder),
-                                                       length, sr, peak, maxFFT, known, first, callQ, isReb, file,
+                                                       length, sr, peak, known, callQ, isReb, file,
                                                        buildSnapshot,
                                                        scale, std::move(loadedIRHolder), std::move(displayIRHolder));
         }
@@ -683,7 +672,7 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
                                                    sampleRate,
                                                    static_cast<double>(mixedTransitionStartHz),
                                                    static_cast<double>(mixedTransitionEndHz),
-                                                   static_cast<double>(mixedPreRingTau),
+                                                   32.0,  // tau (dummy, unused in DSP)
                                                    shouldStop, &mixedCancelled, progressCb);
                 if (mixedCancelled) return false;
                 if (validateBuffer(mixedIR))

@@ -81,12 +81,9 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             const float clampedMixedF2 = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, clampedMixedF1 + 10.0f),
                                                       MIXED_F2_MAX_HZ,
                                                       buildSnapshot.mixedTransitionEndHz);
-            const float clampedMixedTau = juce::jlimit(MIXED_TAU_MIN,
-                                                       MIXED_TAU_MAX,
-                                                       buildSnapshot.mixedPreRingTau);
             LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), static_cast<PhaseMode>(clampedPhaseMode), // acquire: prepareToPlay の publishAtomic release と HB
                         clampedMixedF1, clampedMixedF2,
-                        clampedMixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
+                        convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
                         buildSnapshot);
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
@@ -173,9 +170,6 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
         const float clampedMixedF2 = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, clampedMixedF1 + 10.0f),
                                                   MIXED_F2_MAX_HZ,
                                                   buildSnapshot.mixedTransitionEndHz);
-        const float clampedMixedTau = juce::jlimit(MIXED_TAU_MIN,
-                                                   MIXED_TAU_MAX,
-                                                   buildSnapshot.mixedPreRingTau);
         job.incrementalLoader = std::make_unique<LoaderThread>(
             *this,
             *(job.preparedIR),
@@ -185,7 +179,6 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
             static_cast<PhaseMode>(clampedPhaseMode),
             clampedMixedF1,
             clampedMixedF2,
-            clampedMixedTau,
             convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
             buildSnapshot);
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;

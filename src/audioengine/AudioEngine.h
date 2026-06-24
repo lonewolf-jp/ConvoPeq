@@ -992,7 +992,6 @@ public:
     void setConvolverTargetIRLength(float timeSec, bool manualOverride = false) noexcept;
     void setConvolverMixedTransitionStartHz(float hz) noexcept;
     void setConvolverMixedTransitionEndHz(float hz) noexcept;
-    void setConvolverMixedPreRingTau(float tau) noexcept;
     void setConvolverRebuildDebounceMs(int ms) noexcept;
     void setConvolverTailMode(ConvolverProcessor::TailMode mode) noexcept;
     void setConvolverTailStartSec(float sec) noexcept;

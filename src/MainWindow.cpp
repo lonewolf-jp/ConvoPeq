@@ -384,7 +384,6 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-debounce-ms").isEmpty()
         || !findValue("--cli-f1-hz").isEmpty()
         || !findValue("--cli-f2-hz").isEmpty()
-        || !findValue("--cli-pre-ring-tau").isEmpty()
         || !findValue("--cli-learning-action").isEmpty()
         || !findValue("--cli-learning-mode").isEmpty()
         || !findValue("--cli-exit-ms").isEmpty();
@@ -664,20 +663,6 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         else
         {
             juce::Logger::writeToLog("[CLI] Invalid --cli-f2-hz: " + f2Value);
-        }
-    }
-
-    if (const auto tauValue = findValue("--cli-pre-ring-tau"); !tauValue.isEmpty())
-    {
-        float tau = 0.0f;
-        if (tryParseFloatOption(tauValue, tau))
-        {
-            audioEngine.setConvolverMixedPreRingTau(tau);
-            juce::Logger::writeToLog("[CLI] Applied mixed pre-ring tau: " + juce::String(tau, 2));
-        }
-        else
-        {
-            juce::Logger::writeToLog("[CLI] Invalid --cli-pre-ring-tau: " + tauValue);
         }
     }
 

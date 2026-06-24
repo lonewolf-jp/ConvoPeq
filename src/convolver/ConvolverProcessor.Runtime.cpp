@@ -901,29 +901,6 @@ void ConvolverProcessor::setMixedTransitionEndHz(float hz)
     return snapshot.mixedTransitionEndHz;
 }
 
-void ConvolverProcessor::setMixedPreRingTau(float tau)
-{
-    const float clamped = juce::jlimit(MIXED_TAU_MIN, MIXED_TAU_MAX, tau);
-    float prev;
-    {
-        pendingOverrideLock.enter();
-        prev = pendingOverride.mixedPreRingTau;
-        pendingOverride.mixedPreRingTau = clamped;
-        pendingOverrideLock.exit();
-    }
-    if (std::abs(prev - clamped) > 1.0e-5f)
-    {
-        // H4 fix: UI notification のみ。rebuild トリガーは UI layer から snapshot publication 経由で行うこと。
-        postCoalescedChangeNotification();
-    }
-}
-
-[[nodiscard]] float ConvolverProcessor::getMixedPreRingTau() const
-{
-    const BuildSnapshot snapshot = captureBuildSnapshot();
-    return snapshot.mixedPreRingTau;
-}
-
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
 {
     bool prev;

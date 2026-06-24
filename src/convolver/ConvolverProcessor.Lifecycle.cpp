@@ -215,8 +215,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
                 std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
 
-                auto sizing = ConvolverProcessorInternal::computeMasteringSizing(internalBlockSize, conv->irDataLength);
-
                 convo::FilterSpec tailSpec;
                 tailSpec.sampleRate = sampleRate;
                 {
@@ -232,7 +230,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 }
 
                 if (newConv->init(irL.release(), irR.release(),
-                                  conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
+                                  conv->irDataLength, sampleRate, conv->irLatency, internalBlockSize, samplesPerBlock, conv->storedScale,
                                   getExperimentalDirectHeadEnabled(),
                                   &tailSpec, this))
                 {

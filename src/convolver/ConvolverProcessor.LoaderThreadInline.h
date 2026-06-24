@@ -4,10 +4,10 @@ class LoaderThread : public juce::Thread
 {
 public:
     LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                 float mixedF1, float mixedF2, float mixedTau,
+                 float mixedF1, float mixedF2,
                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn);
     LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                 float mixedF1, float mixedF2, float mixedTau, double scale,
+                 float mixedF1, float mixedF2, double scale,
                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn);
     ~LoaderThread() override;
 
@@ -41,9 +41,7 @@ public:
                                           convo::ScopedAlignedPtr<double> irR,
                                           double sr,
                                           int irPeakLatency,
-                                          int maxFFTSize,
                                           int internalBlockSize,
-                                          int firstPartition,
                                           int callBlockSize);
 
     bool queueFinalizeOnMessageThread(LoadResult& result,
@@ -51,9 +49,7 @@ public:
                                       convo::ScopedAlignedPtr<double> irR,
                                       double sr,
                                       int irPeakLatency,
-                                      int maxFFTSize,
                                       int internalBlockSize,
-                                      int firstPartition,
                                       int callBlockSize);
 
     void runSynchronously();
@@ -87,7 +83,6 @@ private:
     ConvolverProcessor::PhaseMode phaseMode;
     float mixedTransitionStartHz;
     float mixedTransitionEndHz;
-    float mixedPreRingTau;
     ConvolverProcessor::BuildSnapshot buildSnapshot;
     bool isRebuild;
     double scaleFactor = 1.0;

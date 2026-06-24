@@ -41,7 +41,6 @@ std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSna
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.targetIRLengthSec)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedTransitionStartHz)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedTransitionEndHz)));
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedPreRingTau)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.rebuildDebounceMs));
     hashCombineUInt64(hash, snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.tailMode));
@@ -131,7 +130,6 @@ void ConvolverProcessor::copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) 
     snapshot.irLengthManualOverride = pendingOverride.irLengthManualOverride;
     snapshot.mixedTransitionStartHz = pendingOverride.mixedTransitionStartHz;
     snapshot.mixedTransitionEndHz = pendingOverride.mixedTransitionEndHz;
-    snapshot.mixedPreRingTau = pendingOverride.mixedPreRingTau;
     snapshot.rebuildDebounceMs = pendingOverride.rebuildDebounceMs;
     snapshot.experimentalDirectHeadEnabled = pendingOverride.experimentalDirectHeadEnabled;
     snapshot.tailMode = pendingOverride.tailMode;
@@ -174,9 +172,6 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     pendingOverride.mixedTransitionEndHz = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, pendingOverride.mixedTransitionStartHz + 10.0f),
                                                         MIXED_F2_MAX_HZ,
                                                         snapshot.mixedTransitionEndHz);
-    pendingOverride.mixedPreRingTau = juce::jlimit(MIXED_TAU_MIN,
-                                                   MIXED_TAU_MAX,
-                                                   snapshot.mixedPreRingTau);
     pendingOverride.rebuildDebounceMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS,
                                                      REBUILD_DEBOUNCE_MAX_MS,
                                                      snapshot.rebuildDebounceMs);
@@ -209,7 +204,7 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     juce::ValueTree v ("Convolver");
     v.setProperty ("phaseMode", static_cast<int>(getPhaseMode()), nullptr);
     v.setProperty ("useMinPhase", getUseMinPhase(), nullptr);
-    float mix, smoothingTime, irLen, autoIRL, mixF1, mixF2, mixTau;
+    float mix, smoothingTime, irLen, autoIRL, mixF1, mixF2;
     int tailMode, tailMult;
     float tailStart, tailStrength;
     bool bypassedState, irManual;
@@ -223,7 +218,6 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
         irManual = pendingOverride.irLengthManualOverride;
         mixF1   = pendingOverride.mixedTransitionStartHz;
         mixF2   = pendingOverride.mixedTransitionEndHz;
-        mixTau  = pendingOverride.mixedPreRingTau;
         tailMode = pendingOverride.tailMode;
         tailStart = pendingOverride.tailStartSec;
         tailStrength = pendingOverride.tailStrength;
@@ -237,7 +231,6 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     v.setProperty ("irLengthManualOverride", irManual, nullptr);
     v.setProperty ("mixedF1Hz", mixF1, nullptr);
     v.setProperty ("mixedF2Hz", mixF2, nullptr);
-    v.setProperty ("mixedTau", mixTau, nullptr);
     v.setProperty ("rebuildDebounceMs", getRebuildDebounceMs(), nullptr);
     v.setProperty ("experimentalDirectHeadEnabled", getExperimentalDirectHeadEnabled(), nullptr);
     v.setProperty ("tailMode", tailMode, nullptr);
@@ -352,7 +345,6 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
 
     if (v.hasProperty ("mixedF1Hz")) setMixedTransitionStartHz (v.getProperty ("mixedF1Hz"));
     if (v.hasProperty ("mixedF2Hz")) setMixedTransitionEndHz (v.getProperty ("mixedF2Hz"));
-    if (v.hasProperty ("mixedTau")) setMixedPreRingTau (v.getProperty ("mixedTau"));
     if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
     if (v.hasProperty ("experimentalDirectHeadEnabled")) setExperimentalDirectHeadEnabled (v.getProperty ("experimentalDirectHeadEnabled"));
 
@@ -866,7 +858,6 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
     };
     hashCombine(floatBits(snapshot.mixedTransitionStartHz));
     hashCombine(floatBits(snapshot.mixedTransitionEndHz));
-    hashCombine(floatBits(snapshot.mixedPreRingTau));
 
     hashCombine(snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
     hashCombine(static_cast<uint64_t>(snapshot.nucHCMode));

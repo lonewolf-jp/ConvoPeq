@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-06-24 00:39:27
+> Generated: 2026-06-24 21:13:02
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1687,7 +1687,6 @@ inline ScopedAlignedPtr<double> makeAlignedCopy(const double* src, int numSample
 
 ```
 #include "AllpassDesigner.h"
-#include "DftiHandle.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -2274,155 +2273,6 @@ AllpassDesigner::computeResponse(const std::vector<SecondOrderAllpass>& sections
 }
 
 //==============================================================================
-// applyAllpassToIR  (Patch ①+⑤: MKL DFTI による正しい全通過変換実装)
-//
-// linearIR の各チャンネルを FFT し、設計済み全通過セクションの複素応答を
-// Hermitian 対称性を保ちながら乗算したのち IFFT する。
-// 振幅は必ず 1 に正規化 (resp /= mag) するため IR のレベルが保存される。
-//==============================================================================
-juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
-    const juce::AudioBuffer<double>& linearIR,
-    const std::vector<SecondOrderAllpass>& sections,
-    double sampleRate,
-    const std::vector<double>& /*freq_hz*/,
-    int fftSize,
-    const std::function<bool()>& shouldExit,
-    std::function<void(float)> progressCallback)
-{
-    if (shouldExit && shouldExit()) return {};
-
-    const int numChannels = linearIR.getNumChannels();
-    const int irLen       = linearIR.getNumSamples();
-    if (numChannels <= 0 || irLen <= 0 || sampleRate <= 0.0) return {};
-
-    // FFT サイズを IR 長以上の次の 2 のべき乗に固定
-    if (fftSize < irLen)
-        fftSize = juce::nextPowerOfTwo(irLen);
-
-    const int half        = fftSize / 2;
-    const int complexSize = half + 1;
-
-    // 1. 全通過フィルタの周波数応答を FFT ビン単位 (k = 0..N/2) で計算し
-    //    振幅を 1 に強制正規化する (Patch ①核心)
-    std::vector<std::complex<double>, convo::MKLAllocator<std::complex<double>>> allpassResp(complexSize);
-    for (int k = 0; k < complexSize; ++k)
-    {
-        const double omega     = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
-        std::complex<double> resp(1.0, 0.0);
-        for (const auto& sec : sections)
-            resp *= sec.response(omega);
-        const double mag = std::abs(resp);
-        allpassResp[k] = (mag > 1e-12) ? (resp / mag) : std::complex<double>(1.0, 0.0);
-    }
-    // DC (k=0) と Nyquist (k=half) は実数のみ（位相は 0 か π のみ許容）
-    allpassResp[0]    = std::complex<double>(1.0, 0.0);
-    allpassResp[half] = std::complex<double>(
-        std::real(allpassResp[half]) >= 0.0 ? 1.0 : -1.0, 0.0);
-
-    // 2. MKL DFTI ディスクリプタ作成 (複素 in-place, BACKWARD_SCALE = 1/N)
-    ScopedDftiDescriptor dfti;
-    const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
-    if (DftiCreateDescriptor(dfti.put(), DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
-        return {};
-    if (DftiSetValue(dfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR ||
-        DftiSetValue(dfti.handle, DFTI_BACKWARD_SCALE,
-                     1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR ||
-        DftiCommitDescriptor(dfti.handle) != DFTI_NO_ERROR)
-    {
-        return {};
-    }
-
-    // 3. 作業バッファ: 複素数列 (fftSize 要素)
-    auto spec = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
-    if (!spec) { return {}; }
-
-    juce::AudioBuffer<double> result(numChannels, irLen);
-    result.clear();
-
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        if (shouldExit && shouldExit()) { return {}; }
-
-        // ゼロパディングしながら実部に IR をコピー
-        std::memset(spec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
-        const double* src = linearIR.getReadPointer(ch);
-        for (int i = 0; i < irLen; ++i)
-            spec.get()[i].real = src[i];
-
-        // 順方向 FFT
-        if (DftiComputeForward(dfti.handle, spec.get()) != DFTI_NO_ERROR)
-        { return {}; }
-
-        // 全通過応答を正の半スペクトル (k = 0..N/2) に乗算
-        for (int k = 0; k <= half; ++k)
-        {
-            const std::complex<double> h(spec.get()[k].real, spec.get()[k].imag);
-            const std::complex<double> out = h * allpassResp[k];
-            spec.get()[k].real = out.real();
-            spec.get()[k].imag = out.imag();
-        }
-        // 負側は更新済み正側 half-spectrum から共役再構築し、Hermitian 対称性を厳密化する。
-        for (int k = half + 1; k < fftSize; ++k)
-        {
-            const int mirror = fftSize - k;
-            spec.get()[k].real = spec.get()[mirror].real;
-            spec.get()[k].imag = -spec.get()[mirror].imag;
-        }
-        // DC と Nyquist の虚部を強制ゼロ（実 IR の Hermitian 条件）
-        spec.get()[0].imag    = 0.0;
-        spec.get()[half].imag = 0.0;
-
-        // 逆方向 FFT (1/N スケーリング適用済み)
-        if (DftiComputeBackward(dfti.handle, spec.get()) != DFTI_NO_ERROR)
-        { return {}; }
-
-        // 実部のみ irLen サンプル書き出し（デノーマル抑制付き）
-        double* dst = result.getWritePointer(ch);
-        for (int i = 0; i < irLen; ++i)
-        {
-            const double v = spec.get()[i].real;
-            dst[i] = (std::abs(v) < 1.0e-18) ? 0.0 : v;
-        }
-
-        if (progressCallback)
-            progressCallback(0.75f + 0.25f * static_cast<float>(ch + 1) / numChannels);
-    }
-
-    // Patch ⑤: 安全ガード - NaN/Inf チェック
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        const double* p = result.getReadPointer(ch);
-        for (int i = 0; i < irLen; ++i)
-        {
-            if (!std::isfinite(p[i]))
-            {
-                DBG("applyAllpassToIR: Safety guard triggered (NaN/Inf detected).");
-                return {};
-            }
-        }
-    }
-
-    double peak = 0.0;
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        const double* data = result.getReadPointer(ch);
-        for (int i = 0; i < irLen; ++i)
-            peak = std::max(peak, std::abs(data[i]));
-    }
-
-    constexpr double kHeadroom = 0.708; // -3dB
-    if (peak > kHeadroom)
-    {
-        const double gain = kHeadroom / peak;
-        for (int ch = 0; ch < result.getNumChannels(); ++ch)
-            result.applyGain(ch, 0, result.getNumSamples(), gain);
-        DBG("applyAllpassToIR: peak reduced from " << peak << " to " << (peak * gain));
-    }
-
-    return result;
-}
-
-//==============================================================================
 // computeIRHash
 //==============================================================================
 uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*/) {
@@ -2593,16 +2443,6 @@ public:
                                  std::vector<SecondOrderAllpass>& sections,
                                  const std::function<bool()>& shouldExit = nullptr,
                                  std::function<void(float)> progressCallback = nullptr);
-
-    // 設計済みセクションを IR に適用する関数
-    static juce::AudioBuffer<double> applyAllpassToIR(
-        const juce::AudioBuffer<double>& linearIR,
-        const std::vector<SecondOrderAllpass>& sections,
-        double sampleRate,
-        const std::vector<double>& freq_hz,
-        int fftSize,
-        const std::function<bool()>& shouldExit = nullptr,
-        std::function<void(float)> progressCallback = nullptr);
 
     // ユーティリティ：IR ファイルのハッシュ計算（キャッシュキー用）
     static uint64_t computeIRHash(const juce::File& irFile, bool useMD5 = false);
@@ -4373,23 +4213,6 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixedF2Label.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(mixedF2Label);
 
-    // Mixed Tau スライダー
-    mixedTauSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    mixedTauSlider.setRange(ConvolverProcessor::MIXED_TAU_MIN,
-                            ConvolverProcessor::MIXED_TAU_MAX, 1.0);
-    mixedTauSlider.setSkewFactorFromMidPoint(48.0);
-    mixedTauSlider.setTextValueSuffix(" smp");
-    mixedTauSlider.setNumDecimalPlacesToDisplay(0);
-    mixedTauSlider.setValue(engine.getConvolverProcessor().getMixedPreRingTau(), juce::dontSendNotification);
-    mixedTauSlider.addListener(this);
-    mixedTauSlider.setTooltip("Mixed phase pre-ringing attenuation tau");
-    addAndMakeVisible(mixedTauSlider);
-
-    mixedTauLabel.setText("Mix tau:", juce::dontSendNotification);
-    mixedTauLabel.setJustificationType(juce::Justification::centredRight);
-    mixedTauLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-    addAndMakeVisible(mixedTauLabel);
-
     // 詳細設定は別ウインドウへ移動 (メインパネルでは非表示)
     irLengthSlider.setVisible(false);
     irLengthLabel.setVisible(false);
@@ -4399,8 +4222,6 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixedF1Label.setVisible(false);
     mixedF2Slider.setVisible(false);
     mixedF2Label.setVisible(false);
-    mixedTauSlider.setVisible(false);
-    mixedTauLabel.setVisible(false);
 
     // IR情報ラベル
     irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
@@ -4797,29 +4618,23 @@ void ConvolverControlPanel::updateMixedPhaseControlsEnabled()
 
     mixedF1Slider.setEnabled(enabled);
     mixedF2Slider.setEnabled(enabled);
-    mixedTauSlider.setEnabled(enabled);
 
     mixedF1Label.setEnabled(enabled);
     mixedF2Label.setEnabled(enabled);
-    mixedTauLabel.setEnabled(enabled);
 
     if (enabled)
     {
         mixedF1Slider.setTooltip("Mixed phase transition start frequency (f1)");
         mixedF2Slider.setTooltip("Mixed phase transition end frequency (f2)");
-        mixedTauSlider.setTooltip("Mixed phase pre-ringing attenuation tau");
         mixedF1Label.setTooltip({});
         mixedF2Label.setTooltip({});
-        mixedTauLabel.setTooltip({});
     }
     else
     {
         mixedF1Slider.setTooltip("Mixedで有効");
         mixedF2Slider.setTooltip("Mixedで有効");
-        mixedTauSlider.setTooltip("Mixedで有効");
         mixedF1Label.setTooltip("Mixedで有効");
         mixedF2Label.setTooltip("Mixedで有効");
-        mixedTauLabel.setTooltip("Mixedで有効");
     }
 }
 
@@ -5147,10 +4962,6 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
     {
         engine.setConvolverMixedTransitionEndHz(static_cast<float>(slider->getValue()));
     }
-    else if (slider == &mixedTauSlider)
-    {
-        engine.setConvolverMixedPreRingTau(static_cast<float>(slider->getValue()));
-    }
     else if (slider == &rebuildDebounceSlider)
     {
         engine.getConvolverProcessor().setRebuildDebounceMs(static_cast<int>(slider->getValue()));
@@ -5215,8 +5026,6 @@ void ConvolverControlPanel::updateIRInfo()
                            juce::dontSendNotification);
     mixedF2Slider.setValue(pendingMixedF2Dirty ? pendingMixedF2Hz : convolver.getMixedTransitionEndHz(),
                            juce::dontSendNotification);
-    mixedTauSlider.setValue(pendingMixedTauDirty ? pendingMixedTau : convolver.getMixedPreRingTau(),
-                            juce::dontSendNotification);
     rebuildDebounceSlider.setValue(static_cast<double>(convolver.getRebuildDebounceMs()), juce::dontSendNotification);
     updateFilterModeButtons();
     updateTrimSlider();
@@ -5439,9 +5248,6 @@ private:
     juce::Slider mixedF2Slider;
     juce::Label mixedF2Label;
 
-    juce::Slider mixedTauSlider;
-    juce::Label mixedTauLabel;
-
     juce::Label irInfoLabel;
 
     // 出力周波数フィルター UI (① コンボルバー最終段の場合に使用)
@@ -5501,8 +5307,6 @@ private:
     double pendingMixedF1Hz = 0.0;
     bool pendingMixedF2Dirty = false;
     double pendingMixedF2Hz = 0.0;
-    bool pendingMixedTauDirty = false;
-    double pendingMixedTau = 0.0;
 
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
@@ -5596,7 +5400,6 @@ public:
         bool irLengthManualOverride = false;
         float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
         float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
-        float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
         int tailMode = static_cast<int>(TailMode::LayerTailContouring);
@@ -5688,9 +5491,6 @@ public:
     static constexpr float MIXED_F2_MIN_HZ = 700.0f;
     static constexpr float MIXED_F2_MAX_HZ = 1300.0f;
     static constexpr float MIXED_F2_DEFAULT_HZ = 1000.0f;
-    static constexpr float MIXED_TAU_MIN = 4.0f;
-    static constexpr float MIXED_TAU_MAX = 256.0f;
-    static constexpr float MIXED_TAU_DEFAULT = 32.0f;
     static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
     static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
@@ -5838,14 +5638,12 @@ public:
     // setMixRT / setSmoothingTimeRT: H3 修正により廃止 (shadow atomic 除去)
 
     //----------------------------------------------------------
-    // Mixed Phase Parameters (f1/f2/tau)
+    // Mixed Phase Parameters (f1/f2)
     //----------------------------------------------------------
     void setMixedTransitionStartHz(float hz);
     [[nodiscard]] float getMixedTransitionStartHz() const;
     void setMixedTransitionEndHz(float hz);
     [[nodiscard]] float getMixedTransitionEndHz() const;
-    void setMixedPreRingTau(float tau);
-    [[nodiscard]] float getMixedPreRingTau() const;
 
     //----------------------------------------------------------
     // Rebuild Debounce Time (Message/Worker burst control)
@@ -6013,9 +5811,7 @@ public:
                                           int length,
                                           double sr,
                                           int peakDelay,
-                                          int maxFFTSize,
                                           int knownBlockSize,
-                                          int firstPartition,
                                           int preferredCallSize,
                                           bool isRebuild,
                                           const juce::File& irFile,
@@ -6164,9 +5960,7 @@ private:
 
         // Clone用に初期化パラメータを保存
         double storedSampleRate = 0.0;
-        int storedMaxFFTSize = 0;
         int storedKnownBlockSize = 0;
-        int storedFirstPartition = 0;
         double storedScale = 1.0;
         bool storedDirectHeadEnabled = false;
 
@@ -6217,7 +6011,7 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0,
+        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int knownBlockSize, int preferredCallSize, double scale = 1.0,
               bool enableDirectHead = false,
               const convo::FilterSpec* filterSpec = nullptr,
               ConvolverProcessor* ownerProcessor = nullptr)
@@ -6233,9 +6027,7 @@ private:
             this->irLatency = peakDelay;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             storedSampleRate = sr;
-            storedMaxFFTSize = maxFFTSize;
             storedKnownBlockSize = knownBlockSize;
-            storedFirstPartition = firstPartition;
             storedScale = scale;
             storedDirectHeadEnabled = enableDirectHead;
 
@@ -6292,7 +6084,7 @@ private:
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
-                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale, storedDirectHeadEnabled))
+                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedKnownBlockSize, callQuantumSamples, storedScale, storedDirectHeadEnabled))
                         return nullptr;
                 }
                 return newConv.release();
@@ -6400,7 +6192,6 @@ private:
         bool irLengthManualOverride = false;
         float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
         float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
-        float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
         int tailMode = static_cast<int>(TailMode::LayerTailContouring);
@@ -6612,7 +6403,7 @@ public: // Added for AudioEngine access
         uint64_t fileHash;
         double sampleRate;
         PhaseMode phaseMode;
-        float f1, f2, tau;
+        float f1, f2;
         int targetLength;
 
         bool operator<(const IRCacheKey& other) const {
@@ -6621,7 +6412,6 @@ public: // Added for AudioEngine access
             if (phaseMode != other.phaseMode) return phaseMode < other.phaseMode;
             if (f1 != other.f1) return f1 < other.f1;
             if (f2 != other.f2) return f2 < other.f2;
-            if (tau != other.tau) return tau < other.tau;
             return targetLength < other.targetLength;
         }
     };
@@ -12413,6 +12203,7 @@ private:
 #include <future>
 #include <cstring>
 #include <vector>
+#include <atomic>
 
 namespace IRDSP {
 
@@ -12426,13 +12217,19 @@ juce::AudioBuffer<double> resampleIR(
     if (inputSR <= 0.0 || targetSR <= 0.0 || std::abs(inputSR - targetSR) <= 1e-6)
         return inputIR;
 
-    const double ratio = targetSR / inputSR;
     const int inLength = inputIR.getNumSamples();
-    const double expectedLen = static_cast<double>(inLength) * ratio + 2.0;
-    if (expectedLen > static_cast<double>(std::numeric_limits<int>::max()))
+
+    // r8brain の内部フィルタレイテンシを考慮した出力バッファサイズ。
+    // CDSPResampler::getLatency() は常に 0 を返す（内部レイテンシ自動除去）ため、
+    // 単純な inLength * ratio + margin ではフィルタタップ長が考慮されず、
+    // 高品質設定（140dB/2%）ではフラッシュ出力が切り捨てられるリスクがある。
+    // getMaxOutLen() は理論上の最大出力長を返すため、これをバッファサイズとして使用する。
+    r8b::CDSPResampler tempResampler(inputSR, targetSR, inLength,
+                                      cfg.transBand, cfg.stopBandAtten, cfg.phase);
+    const int maxOutLen = tempResampler.getMaxOutLen(inLength);
+    if (maxOutLen <= 0)
         return {};
 
-    const int maxOutLen = static_cast<int>(expectedLen);
     juce::AudioBuffer<double> resampled(inputIR.getNumChannels(), maxOutLen);
     resampled.clear();
 
@@ -12441,57 +12238,78 @@ juce::AudioBuffer<double> resampleIR(
 
     // チャンネル並列処理（Loader Thread のみ）
     std::vector<std::future<void>> futures;
+    std::vector<int> channelDone(numCh, -1);  // -1初期化: 例外・未完了を識別
+    std::atomic<bool> anyChannelCancelled{false};
 
     for (int ch = 0; ch < numCh; ++ch) {
         futures.emplace_back(std::async(std::launch::async, [&, ch]() {
-            if (shouldExit && shouldExit()) return;
+            try {
+                auto resampler = std::make_unique<r8b::CDSPResampler>(
+                    inputSR, targetSR, inLength,
+                    cfg.transBand, cfg.stopBandAtten, cfg.phase);
 
-            auto resampler = std::make_unique<r8b::CDSPResampler>(
-                inputSR, targetSR, inLength,
-                cfg.transBand, cfg.stopBandAtten, cfg.phase);
+                const double* inPtr = inputIR.getReadPointer(ch);
+                double* outPtr = resampled.getWritePointer(ch);
 
-            const double* inPtr = inputIR.getReadPointer(ch);
-            double* outPtr = resampled.getWritePointer(ch);
+                int inputProcessed = 0;
+                int done = 0;
+                int iterations = 0;
+                constexpr int maxIterations = 1000000;
 
-            int inputProcessed = 0;
-            int done = 0;
-            int iterations = 0;
-            constexpr int maxIterations = 1000000;
+                while (inputProcessed < inLength && done < maxOutLen && ++iterations < maxIterations) {
+                    if (shouldExit && shouldExit()) {
+                        anyChannelCancelled.store(true, std::memory_order_relaxed);
+                        return;
+                    }
 
-            while (inputProcessed < inLength && done < maxOutLen && ++iterations < maxIterations) {
-                if (shouldExit && shouldExit()) return;
+                    const int chunk = std::min(chunkSize, inLength - inputProcessed);
+                    std::vector<double> tempIn(chunk);
+                    std::memcpy(tempIn.data(), inPtr + inputProcessed, chunk * sizeof(double));
 
-                const int chunk = std::min(chunkSize, inLength - inputProcessed);
-                // const_cast を排除：一時バッファにコピー
-                std::vector<double> tempIn(chunk);
-                std::memcpy(tempIn.data(), inPtr + inputProcessed, chunk * sizeof(double));
+                    double* r8bOutput = nullptr;
+                    const int generated = resampler->process(tempIn.data(), chunk, r8bOutput);
+                    inputProcessed += chunk;
 
-                double* r8bOutput = nullptr;
-                const int generated = resampler->process(tempIn.data(), chunk, r8bOutput);
-                inputProcessed += chunk;
+                    if (generated > 0) {
+                        const int toCopy = std::min(generated, maxOutLen - done);
+                        std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
+                        done += toCopy;
+                    }
+                }
 
-                if (generated > 0) {
+                while (done < maxOutLen && ++iterations < maxIterations) {
+                    if (shouldExit && shouldExit()) {
+                        anyChannelCancelled.store(true, std::memory_order_relaxed);
+                        return;
+                    }
+                    double* r8bOutput = nullptr;
+                    const int generated = resampler->process(nullptr, 0, r8bOutput);
+                    if (generated <= 0) break;
                     const int toCopy = std::min(generated, maxOutLen - done);
                     std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
                     done += toCopy;
                 }
-            }
 
-            while (done < maxOutLen && ++iterations < maxIterations) {
-                if (shouldExit && shouldExit()) return;
-                double* r8bOutput = nullptr;
-                const int generated = resampler->process(nullptr, 0, r8bOutput);
-                if (generated <= 0) break;
-                const int toCopy = std::min(generated, maxOutLen - done);
-                std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
-                done += toCopy;
+                channelDone[ch] = done;
+            } catch (...) {
+                anyChannelCancelled.store(true, std::memory_order_relaxed);
+                throw;  // get() で再送出
             }
         }));
     }
 
-    for (auto& f : futures) f.wait();
+    for (auto& f : futures) f.get();  // get(): 例外を確実に伝播
 
-    resampled.setSize(numCh, maxOutLen, true, true, true);
+    if (anyChannelCancelled.load(std::memory_order_relaxed))
+        return {};
+
+    // 理論上は全チャンネル同一長となるが、安全のため maxDone を採用
+    const int maxDone = *std::max_element(channelDone.begin(), channelDone.end());
+    if (maxDone < 0)
+        return {};
+    if (maxDone < maxOutLen)
+        resampled.setSize(numCh, maxDone, true, true, true);
+    // maxDone == maxOutLen の場合はバッファサイズを維持
 
     return resampled;
 }
@@ -16043,7 +15861,6 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-debounce-ms").isEmpty()
         || !findValue("--cli-f1-hz").isEmpty()
         || !findValue("--cli-f2-hz").isEmpty()
-        || !findValue("--cli-pre-ring-tau").isEmpty()
         || !findValue("--cli-learning-action").isEmpty()
         || !findValue("--cli-learning-mode").isEmpty()
         || !findValue("--cli-exit-ms").isEmpty();
@@ -16323,20 +16140,6 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         else
         {
             juce::Logger::writeToLog("[CLI] Invalid --cli-f2-hz: " + f2Value);
-        }
-    }
-
-    if (const auto tauValue = findValue("--cli-pre-ring-tau"); !tauValue.isEmpty())
-    {
-        float tau = 0.0f;
-        if (tryParseFloatOption(tauValue, tau))
-        {
-            audioEngine.setConvolverMixedPreRingTau(tau);
-            juce::Logger::writeToLog("[CLI] Applied mixed pre-ring tau: " + juce::String(tau, 2));
-        }
-        else
-        {
-            juce::Logger::writeToLog("[CLI] Invalid --cli-pre-ring-tau: " + tauValue);
         }
     }
 
@@ -17510,6 +17313,7 @@ private:
 
 #include <JuceHeader.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -17527,7 +17331,7 @@ static uint64_t hashCombine(uint64_t seed, uint64_t value)
 uint64_t MixedPhasePersistentCache::computeKeyHash(uint64_t fileHash,
                                                     double sampleRate,
                                                     int phaseMode,
-                                                    float freqStartHz, float freqEndHz, float tau,
+                                                    float freqStartHz, float freqEndHz,
                                                     int targetLength)
 {
     uint64_t h = fileHash;
@@ -17538,13 +17342,10 @@ uint64_t MixedPhasePersistentCache::computeKeyHash(uint64_t fileHash,
 
     uint32_t f1Bits = 0;
     uint32_t f2Bits = 0;
-    uint32_t tauBits = 0;
     std::memcpy(&f1Bits, &freqStartHz, sizeof(float));
     std::memcpy(&f2Bits, &freqEndHz, sizeof(float));
-    std::memcpy(&tauBits, &tau, sizeof(float));
     h = hashCombine(h, static_cast<uint64_t>(f1Bits));
     h = hashCombine(h, static_cast<uint64_t>(f2Bits));
-    h = hashCombine(h, static_cast<uint64_t>(tauBits));
     h = hashCombine(h, static_cast<uint64_t>(targetLength));
     return h;
 }
@@ -17566,11 +17367,11 @@ juce::File MixedPhasePersistentCache::getCacheDirectory()
 juce::File MixedPhasePersistentCache::getCacheFile(uint64_t fileHash,
                                                     double sampleRate,
                                                     int phaseMode,
-                                                    float freqStartHz, float freqEndHz, float tau,
+                                                    float freqStartHz, float freqEndHz,
                                                     int targetLength)
 {
     const auto hash = computeKeyHash(fileHash, sampleRate, phaseMode,
-                                     freqStartHz, freqEndHz, tau, targetLength);
+                                     freqStartHz, freqEndHz, targetLength);
     const auto filename = juce::String::toHexString(static_cast<int64_t>(hash)) + ".mph";
     return getCacheDirectory().getChildFile(filename);
 }
@@ -17582,14 +17383,14 @@ juce::File MixedPhasePersistentCache::getCacheFile(uint64_t fileHash,
 bool MixedPhasePersistentCache::load(uint64_t fileHash,
                                      double sampleRate,
                                      int phaseMode,
-                                     float freqStartHz, float freqEndHz, float tau,
+                                     float freqStartHz, float freqEndHz,
                                      int targetLength,
                                      juce::AudioBuffer<double>& outIr,
                                      std::vector<double>& outRho,
                                      std::vector<double>& outTheta)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     if (!file.existsAsFile())
         return false;
 
@@ -17610,7 +17411,6 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
         || header.phaseMode != static_cast<int32_t>(phaseMode)
         || std::abs(header.freqStartHz - freqStartHz) > 1.0e-6f
         || std::abs(header.freqEndHz - freqEndHz) > 1.0e-6f
-        || std::abs(header.tau - tau) > 1.0e-6f
         || header.targetLength != static_cast<int32_t>(targetLength))
         return false;
 
@@ -17645,7 +17445,7 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
     }
 
     // LRU用にタイムスタンプ更新（touch相当）
-    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, tau, targetLength);
+    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, targetLength);
 
     return true;
 }
@@ -17657,14 +17457,14 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
 bool MixedPhasePersistentCache::save(uint64_t fileHash,
                                      double sampleRate,
                                      int phaseMode,
-                                     float freqStartHz, float freqEndHz, float tau,
+                                     float freqStartHz, float freqEndHz,
                                      int targetLength,
                                      const juce::AudioBuffer<double>& ir,
                                      const std::vector<double>& rho,
                                      const std::vector<double>& theta)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     const auto dir = file.getParentDirectory();
     if (!dir.exists())
         dir.createDirectory();
@@ -17689,7 +17489,6 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
         header.phaseMode = static_cast<int32_t>(phaseMode);
         header.freqStartHz = freqStartHz;
         header.freqEndHz = freqEndHz;
-        header.tau = tau;
         header.targetLength = static_cast<int32_t>(targetLength);
         header.lastUsedTime = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
         header.numChannels = static_cast<int32_t>(numChannels);
@@ -17735,11 +17534,11 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
 void MixedPhasePersistentCache::touch(uint64_t fileHash,
                                       double sampleRate,
                                       int phaseMode,
-                                      float freqStartHz, float freqEndHz, float tau,
+                                      float freqStartHz, float freqEndHz,
                                       int targetLength)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     if (!file.existsAsFile())
         return;
 
@@ -17760,13 +17559,13 @@ void MixedPhasePersistentCache::touch(uint64_t fileHash,
             return;
     } // inStream はここで破棄され、ファイルも閉じられる
 
-    // DiskHeader 内 lastUsedTime のバイトオフセット: 52
-    static constexpr int kLastUsedTimeOffset = 52;
-    if (static_cast<size_t>(kLastUsedTimeOffset) + sizeof(uint64_t) > buffer.size())
+    // DiskHeader 内 lastUsedTime のオフセットをコンパイル時に計算
+    const size_t lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
+    if (lastUsedTimeOffset + sizeof(uint64_t) > buffer.size())
         return;
 
     const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
-    std::memcpy(&buffer[static_cast<size_t>(kLastUsedTimeOffset)], &now, sizeof(now));
+    std::memcpy(&buffer[lastUsedTimeOffset], &now, sizeof(now));
 
     juce::FileOutputStream outStream(file);
     if (!outStream.openedOk())
@@ -17820,11 +17619,11 @@ void MixedPhasePersistentCache::evictLRU(size_t maxCount)
 void MixedPhasePersistentCache::remove(uint64_t fileHash,
                                        double sampleRate,
                                        int phaseMode,
-                                       float freqStartHz, float freqEndHz, float tau,
+                                       float freqStartHz, float freqEndHz,
                                        int targetLength)
 {
     const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, tau, targetLength);
+                                   freqStartHz, freqEndHz, targetLength);
     if (file.existsAsFile())
         file.deleteFile();
 }
@@ -17883,13 +17682,13 @@ public:
     static juce::File getCacheFile(uint64_t fileHash,
                                    double sampleRate,
                                    int phaseMode,
-                                   float freqStartHz, float freqEndHz, float tau,
+                                   float freqStartHz, float freqEndHz,
                                    int targetLength);
 
     static bool load(uint64_t fileHash,
                      double sampleRate,
                      int phaseMode,
-                     float freqStartHz, float freqEndHz, float tau,
+                     float freqStartHz, float freqEndHz,
                      int targetLength,
                      juce::AudioBuffer<double>& outIr,
                      std::vector<double>& outRho,
@@ -17898,7 +17697,7 @@ public:
     static bool save(uint64_t fileHash,
                      double sampleRate,
                      int phaseMode,
-                     float freqStartHz, float freqEndHz, float tau,
+                     float freqStartHz, float freqEndHz,
                      int targetLength,
                      const juce::AudioBuffer<double>& ir,
                      const std::vector<double>& rho,
@@ -17907,7 +17706,7 @@ public:
     static void touch(uint64_t fileHash,
                       double sampleRate,
                       int phaseMode,
-                      float freqStartHz, float freqEndHz, float tau,
+                      float freqStartHz, float freqEndHz,
                       int targetLength);
 
     static void evictLRU(size_t maxCount);
@@ -17915,7 +17714,7 @@ public:
     static void remove(uint64_t fileHash,
                        double sampleRate,
                        int phaseMode,
-                       float freqStartHz, float freqEndHz, float tau,
+                       float freqStartHz, float freqEndHz,
                        int targetLength);
 
     static void clear();
@@ -17924,7 +17723,7 @@ public:
 
 private:
     static constexpr uint64_t kMagic = 0x4D69786564506800ULL;
-    static constexpr uint32_t kVersion = 1;
+    static constexpr uint32_t kVersion = 2;
 
 #pragma pack(push, 1)
     struct DiskHeader {
@@ -17936,7 +17735,6 @@ private:
         int32_t phaseMode;
         float freqStartHz;
         float freqEndHz;
-        float tau;
         int32_t targetLength;
         uint64_t lastUsedTime;
         int32_t numChannels;
@@ -17951,7 +17749,7 @@ private:
     static uint64_t computeKeyHash(uint64_t fileHash,
                                    double sampleRate,
                                    int phaseMode,
-                                   float freqStartHz, float freqEndHz, float tau,
+                                   float freqStartHz, float freqEndHz,
                                    int targetLength);
 };
 
@@ -27816,7 +27614,6 @@ void diagLog(const juce::String& message)
     if (!hasFiniteDouble("autoDetectedIRLength", ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC)) return false;
     if (!hasFiniteDouble("mixedF1Hz", ConvolverProcessor::MIXED_F1_MIN_HZ, ConvolverProcessor::MIXED_F1_MAX_HZ)) return false;
     if (!hasFiniteDouble("mixedF2Hz", ConvolverProcessor::MIXED_F2_MIN_HZ, ConvolverProcessor::MIXED_F2_MAX_HZ)) return false;
-    if (!hasFiniteDouble("mixedTau", ConvolverProcessor::MIXED_TAU_MIN, ConvolverProcessor::MIXED_TAU_MAX)) return false;
     if (!hasIntRange("rebuildDebounceMs", ConvolverProcessor::REBUILD_DEBOUNCE_MIN_MS, ConvolverProcessor::REBUILD_DEBOUNCE_MAX_MS)) return false;
     if (!hasIntRange("tailMode", static_cast<int>(ConvolverProcessor::TailMode::AirAbsorption), static_cast<int>(ConvolverProcessor::TailMode::Bypass))) return false;
     if (!hasFiniteDouble("tailStartSec", ConvolverProcessor::TAIL_START_MIN_SEC, ConvolverProcessor::TAIL_START_MAX_SEC)) return false;
@@ -28334,11 +28131,6 @@ void AudioEngine::setConvolverMixedTransitionStartHz(float hz) noexcept
 void AudioEngine::setConvolverMixedTransitionEndHz(float hz) noexcept
 {
     uiConvolverProcessor.setMixedTransitionEndHz(hz);
-}
-
-void AudioEngine::setConvolverMixedPreRingTau(float tau) noexcept
-{
-    uiConvolverProcessor.setMixedPreRingTau(tau);
 }
 
 void AudioEngine::setConvolverRebuildDebounceMs(int ms) noexcept
@@ -34002,7 +33794,7 @@ void AudioEngine::timerCallback()
             diagLog("[COEFF_AUTH] worldGen=" + juce::String(worldGen)
                 + " bankGen=" + juce::String(liveBankGen)
                 + " bankIdx=" + juce::String(liveBankIdx)
-                + " divergence=" + juce::String(liveBankGen - worldGen));
+                + " lag=" + juce::String(liveBankGen - worldGen));
         }
     }
 
@@ -34870,6 +34662,12 @@ static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
 static constexpr int kAdaptiveBitDepthCount = 3;
 inline constexpr int kAdaptiveBitDepthValues[kAdaptiveBitDepthCount] = {16, 24, 32};
 static constexpr int kLearningModeCount = 6;
+
+// 総バンク数（10 SR × 3 bit-depth × 6 mode = 180）
+static constexpr int kNumAdaptiveCoeffBanks =
+    kAdaptiveNoiseShaperSampleRateBankCount
+    * kAdaptiveBitDepthCount
+    * kLearningModeCount;
 
 // ストリーミング信号キャプチャ用 AudioBlock（2ch, 256サンプル）
 struct AudioBlock {
@@ -35844,7 +35642,6 @@ public:
     void setConvolverTargetIRLength(float timeSec, bool manualOverride = false) noexcept;
     void setConvolverMixedTransitionStartHz(float hz) noexcept;
     void setConvolverMixedTransitionEndHz(float hz) noexcept;
-    void setConvolverMixedPreRingTau(float tau) noexcept;
     void setConvolverRebuildDebounceMs(int ms) noexcept;
     void setConvolverTailMode(ConvolverProcessor::TailMode mode) noexcept;
     void setConvolverTailStartSec(float sec) noexcept;
@@ -37869,9 +37666,11 @@ public:
             snapshot.convolverInputTrimGain = world->automation.convolverInputTrimGain;
             snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;
             const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
-            // ★ 2026-06-23: bankのlive generationを読み、storeLearnedCoeffsToBank による
+            // ★ 2026-06-24 [P1]: bankのlive generationを読み、storeLearnedCoeffsToBank による
             //   activeIndex flip + generation increment を検出できるようにする。
-            //   world->coefficient.adaptiveCoeffGeneration は常に0のため代用不可。
+            //   world->coefficient.adaptiveCoeffGeneration は P1 により投影値を持つが、
+            //   バンクのlive generation を直接読むことで、Publish以降の Learner 更新も
+            //   確実に検出する（Audio Thread は常に最新値を使用する）。
             snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
             snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
             snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;
@@ -46193,8 +45992,26 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
     // Note: SchedulingSemantic can be removed after all consumers migrate to execution.*
 
-    worldOwner->coefficient.adaptiveCoeffBankIndex = 0;
-    worldOwner->coefficient.adaptiveCoeffGeneration = 0;
+    // Coefficient fields: Publish開始時点の live 値を投影
+    // ★ ISR Runtime 契約: RuntimeWorld.coefficientGeneration = Publish開始時点の bank.generation
+    //   Learner は独立 Authority のため、Publish中に generation が進んでも RuntimeWorld は
+    //   Publish開始時点の値を保持する。これは正常動作でありバグではない。
+    //
+    //   NOTE: bankIndex と generation は lock-free snapshot で取得（個別 atomic load）。
+    //   完全な transactional snapshot は保証しない。RuntimeWorld.coefficient は診断・投影用途。
+    //   実際の係数適用は Audio Thread の generation tracking が行う。
+    const int bankIndex = convo::consumeAtomic(
+        engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+    worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
+
+    // ★ ISR Runtime 契約: RuntimeWorld 構築は accessor の副作用に依存しない。
+    //   明示的な範囲チェックにより純粋な Projection を保証する。
+    if (bankIndex >= 0 && bankIndex < static_cast<int>(kNumAdaptiveCoeffBanks))
+    {
+        const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIndex);
+        worldOwner->coefficient.adaptiveCoeffGeneration = convo::consumeAtomic(
+            bank.generation, std::memory_order_acquire);
+    }
     worldOwner->coefficient.eqCoeffHash = 0;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
@@ -51072,35 +50889,6 @@ namespace ConvolverProcessorInternal
         return x + 1;
     }
 
-    // ────────────────────────────────────────────────────────────────
-    // コンボリューション サイジング計算
-    // ────────────────────────────────────────────────────────────────
-    struct ConvolverSizing
-    {
-        int firstPartition;
-        int maxFFTSize;
-    };
-
-    inline ConvolverSizing computeMasteringSizing(int internalBlockSize, int irLength)
-    {
-        ConvolverSizing s{};
-        int fp = nextPow2(internalBlockSize * 4);
-        fp = std::clamp(fp, 4096, 16384);
-        s.firstPartition = fp;
-
-        int mfsBase = irLength / 4;
-        constexpr int kMFSUpper = 131072;
-        mfsBase = std::clamp(mfsBase, s.firstPartition, kMFSUpper);
-        s.maxFFTSize = nextPow2(mfsBase);
-
-        if (s.maxFFTSize < s.firstPartition)
-            s.maxFFTSize = s.firstPartition;
-        if (s.maxFFTSize < internalBlockSize)
-            s.maxFFTSize = nextPow2(internalBlockSize);
-
-        return s;
-    }
-
 } // namespace ConvolverProcessorInternal
 
 ```
@@ -51325,8 +51113,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
                 std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
 
-                auto sizing = ConvolverProcessorInternal::computeMasteringSizing(internalBlockSize, conv->irDataLength);
-
                 convo::FilterSpec tailSpec;
                 tailSpec.sampleRate = sampleRate;
                 {
@@ -51342,7 +51128,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 }
 
                 if (newConv->init(irL.release(), irR.release(),
-                                  conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
+                                  conv->irDataLength, sampleRate, conv->irLatency, internalBlockSize, samplesPerBlock, conv->storedScale,
                                   getExperimentalDirectHeadEnabled(),
                                   &tailSpec, this))
                 {
@@ -51642,7 +51428,6 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
 
         activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, snapshotPhaseMode,
                                                       buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
-                                                      buildSnapshot.mixedPreRingTau,
                                                       convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState/snapshot restore 側 publishAtomic release と HB
                                                       buildSnapshot);
         releaseIRState(state);
@@ -51651,7 +51436,6 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     {
         activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, snapshotPhaseMode,
                                                       buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
-                                                      buildSnapshot.mixedPreRingTau,
                                                       buildSnapshot);
         convo::publishAtomic(currentIrOptimized, optimizeForRealTime, std::memory_order_release); // release: UI/loader 側 acquire と HB
     }
@@ -52122,9 +51906,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           int length,
                                                           double sr,
                                                           int peakDelay,
-                                                          int maxFFTSize,
                                                           int knownBlockSize,
-                                                          int firstPartition,
                                                           int preferredCallSize,
                                                           bool isRebuild,
                                                           const juce::File& irFile,
@@ -52154,7 +51936,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         }
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
+                  knownBlockSize, preferredCallSize, scaleFactor,
                   getExperimentalDirectHeadEnabled(),
                   &spec, this))
         {
@@ -52309,18 +52091,18 @@ void ConvolverProcessor::setLoadingProgress(float p)
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD)
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                                 float mixedF1, float mixedF2, float mixedTau,
+                                 float mixedF1, float mixedF2,
                                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
     : Thread("IRLoader"), owner(p), weakOwner(&p), file(f), sampleRate(sr), blockSize(bs), phaseMode(phase),
-    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau),
+    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2),
     buildSnapshot(buildSnapshotIn), isRebuild(false)
 {}
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                                 float mixedF1, float mixedF2, float mixedTau, double scale,
+                                 float mixedF1, float mixedF2, double scale,
                                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
     : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), phaseMode(phase),
-    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau),
+    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2),
     buildSnapshot(buildSnapshotIn), isRebuild(true), scaleFactor(scale)
 {}
 
@@ -52516,7 +52298,6 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
     std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
 
     const int internalBlockSize = juce::nextPowerOfTwo(bs);
-    const auto sizing = ConvolverProcessorInternal::computeMasteringSizing(internalBlockSize, result.targetLength);
 
     if (owner.isVisualizationEnabled())
     {
@@ -52530,9 +52311,7 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
                                                 std::move(irR),
                                                 sr,
                                                 irPeakLatency,
-                                                sizing.maxFFTSize,
                                                 internalBlockSize,
-                                                sizing.firstPartition,
                                                 bs);
 
     return queueFinalizeOnMessageThread(result,
@@ -52540,9 +52319,7 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
                                         std::move(irR),
                                         sr,
                                         irPeakLatency,
-                                        sizing.maxFFTSize,
                                         internalBlockSize,
-                                        sizing.firstPartition,
                                         bs);
 }
 
@@ -52551,9 +52328,7 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
                                                                          convo::ScopedAlignedPtr<double> irR,
                                                                          double sr,
                                                                          int irPeakLatency,
-                                                                         int maxFFTSize,
                                                                          int internalBlockSize,
-                                                                         int firstPartition,
                                                                          int callBlockSize)
 {
     auto newConv = convo::aligned_make_unique<StereoConvolver>();
@@ -52573,7 +52348,7 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
     }
 
     if (newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
-                             maxFFTSize, internalBlockSize, firstPartition, callBlockSize, result.scaleFactor,
+                             internalBlockSize, callBlockSize, result.scaleFactor,
                              owner.getExperimentalDirectHeadEnabled(),
                              &spec, &owner))
     {
@@ -52592,9 +52367,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                                                      convo::ScopedAlignedPtr<double> irR,
                                                                      double sr,
                                                                      int irPeakLatency,
-                                                                     int maxFFTSize,
                                                                      int internalBlockSize,
-                                                                     int firstPartition,
                                                                      int callBlockSize)
 {
     auto loadedIRRaw = new juce::AudioBuffer<double>(std::move(result.loadedIR));
@@ -52614,9 +52387,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                      length = result.targetLength,
                                      sr,
                                      peak = irPeakLatency,
-                                     maxFFT = maxFFTSize,
                                      known = internalBlockSize,
-                                     first = firstPartition,
                                      callQ = callBlockSize,
                                      isReb = isRebuild,
                                      file = file,
@@ -52632,7 +52403,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
         {
             ownerPtr->finalizeNUCEngineOnMessageThread(std::move(irLHolder),
                                                        std::move(irRHolder),
-                                                       length, sr, peak, maxFFT, known, first, callQ, isReb, file,
+                                                       length, sr, peak, known, callQ, isReb, file,
                                                        buildSnapshot,
                                                        scale, std::move(loadedIRHolder), std::move(displayIRHolder));
         }
@@ -52982,7 +52753,7 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
                                                    sampleRate,
                                                    static_cast<double>(mixedTransitionStartHz),
                                                    static_cast<double>(mixedTransitionEndHz),
-                                                   static_cast<double>(mixedPreRingTau),
+                                                   32.0,  // tau (dummy, unused in DSP)
                                                    shouldStop, &mixedCancelled, progressCb);
                 if (mixedCancelled) return false;
                 if (validateBuffer(mixedIR))
@@ -53024,10 +52795,10 @@ class LoaderThread : public juce::Thread
 {
 public:
     LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                 float mixedF1, float mixedF2, float mixedTau,
+                 float mixedF1, float mixedF2,
                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn);
     LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                 float mixedF1, float mixedF2, float mixedTau, double scale,
+                 float mixedF1, float mixedF2, double scale,
                  const ConvolverProcessor::BuildSnapshot& buildSnapshotIn);
     ~LoaderThread() override;
 
@@ -53061,9 +52832,7 @@ public:
                                           convo::ScopedAlignedPtr<double> irR,
                                           double sr,
                                           int irPeakLatency,
-                                          int maxFFTSize,
                                           int internalBlockSize,
-                                          int firstPartition,
                                           int callBlockSize);
 
     bool queueFinalizeOnMessageThread(LoadResult& result,
@@ -53071,9 +52840,7 @@ public:
                                       convo::ScopedAlignedPtr<double> irR,
                                       double sr,
                                       int irPeakLatency,
-                                      int maxFFTSize,
                                       int internalBlockSize,
-                                      int firstPartition,
                                       int callBlockSize);
 
     void runSynchronously();
@@ -53107,7 +52874,6 @@ private:
     ConvolverProcessor::PhaseMode phaseMode;
     float mixedTransitionStartHz;
     float mixedTransitionEndHz;
-    float mixedPreRingTau;
     ConvolverProcessor::BuildSnapshot buildSnapshot;
     bool isRebuild;
     double scaleFactor = 1.0;
@@ -53212,7 +52978,6 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
         key.f1 = static_cast<float>(transitionLoHz);
         key.f2 = static_cast<float>(transitionHiHz);
-        key.tau = static_cast<float>(tau);
         key.targetLength = linearIR.getNumSamples();
 
         const juce::ScopedLock sl(owner->cacheMutex);
@@ -53238,14 +53003,13 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
         key.f1 = static_cast<float>(transitionLoHz);
         key.f2 = static_cast<float>(transitionHiHz);
-        key.tau = static_cast<float>(tau);
         key.targetLength = linearIR.getNumSamples();
 
         juce::AudioBuffer<double> cachedIr;
         std::vector<double> cachedRho, cachedTheta;
         if (convo::MixedPhasePersistentCache::load(
                 key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
-                key.f1, key.f2, key.tau, key.targetLength,
+                key.f1, key.f2, key.targetLength,
                 cachedIr, cachedRho, cachedTheta))
         {
             juce::Logger::writeToLog("convertToMixedPhaseAllpass: Persistent cache HIT! Loading optimized IR from disk.");
@@ -53418,15 +53182,15 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             {
                 const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
 
-                double wLinear = 1.0;
+                double wMinimum = 1.0;
                 if (freq >= transitionHiHz)
-                    wLinear = 0.0;
+                    wMinimum = 0.0;
                 else if (freq > transitionLoHz)
                 {
                     const double x = (freq - transitionLoHz) * invSpan;
-                    wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+                    wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
                 }
-                const double wMinimum = 1.0 - wLinear;
+                const double wLinear = 1.0 - wMinimum;
 
                 const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
                 const double phi_lin = -omega * peakDelay;
@@ -53791,7 +53555,6 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
             key.f1 = static_cast<float>(transitionLoHz);
             key.f2 = static_cast<float>(transitionHiHz);
-            key.tau = static_cast<float>(tau);
             key.targetLength = linearIR.getNumSamples();
 
             // メモリキャッシュに保存
@@ -53817,7 +53580,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 }
                 convo::MixedPhasePersistentCache::save(
                     key.fileHash, key.sampleRate, static_cast<int>(key.phaseMode),
-                    key.f1, key.f2, key.tau, key.targetLength,
+                    key.f1, key.f2, key.targetLength,
                     mixedIR, rho, theta);
 
                 // ディスクキャッシュのLRUエビクション
@@ -53938,15 +53701,15 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
         {
             const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
 
-            double wLinear = 1.0;
+            double wMinimum = 1.0;
             if (freq >= transitionHiHz)
-                wLinear = 0.0;
+                wMinimum = 0.0;
             else if (freq > transitionLoHz)
             {
                 const double x = (freq - transitionLoHz) * invSpan;
-                wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+                wMinimum = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
             }
-            const double wMinimum = 1.0 - wLinear;
+            const double wLinear = 1.0 - wMinimum;
 
             const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
             const double phi_lin = -omega * peakDelay;
@@ -54078,12 +53841,9 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             const float clampedMixedF2 = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, clampedMixedF1 + 10.0f),
                                                       MIXED_F2_MAX_HZ,
                                                       buildSnapshot.mixedTransitionEndHz);
-            const float clampedMixedTau = juce::jlimit(MIXED_TAU_MIN,
-                                                       MIXED_TAU_MAX,
-                                                       buildSnapshot.mixedPreRingTau);
             LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), static_cast<PhaseMode>(clampedPhaseMode), // acquire: prepareToPlay の publishAtomic release と HB
                         clampedMixedF1, clampedMixedF2,
-                        clampedMixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
+                        convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
                         buildSnapshot);
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
@@ -54170,9 +53930,6 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
         const float clampedMixedF2 = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, clampedMixedF1 + 10.0f),
                                                   MIXED_F2_MAX_HZ,
                                                   buildSnapshot.mixedTransitionEndHz);
-        const float clampedMixedTau = juce::jlimit(MIXED_TAU_MIN,
-                                                   MIXED_TAU_MAX,
-                                                   buildSnapshot.mixedPreRingTau);
         job.incrementalLoader = std::make_unique<LoaderThread>(
             *this,
             *(job.preparedIR),
@@ -54182,7 +53939,6 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
             static_cast<PhaseMode>(clampedPhaseMode),
             clampedMixedF1,
             clampedMixedF2,
-            clampedMixedTau,
             convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
             buildSnapshot);
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
@@ -55684,29 +55440,6 @@ void ConvolverProcessor::setMixedTransitionEndHz(float hz)
     return snapshot.mixedTransitionEndHz;
 }
 
-void ConvolverProcessor::setMixedPreRingTau(float tau)
-{
-    const float clamped = juce::jlimit(MIXED_TAU_MIN, MIXED_TAU_MAX, tau);
-    float prev;
-    {
-        pendingOverrideLock.enter();
-        prev = pendingOverride.mixedPreRingTau;
-        pendingOverride.mixedPreRingTau = clamped;
-        pendingOverrideLock.exit();
-    }
-    if (std::abs(prev - clamped) > 1.0e-5f)
-    {
-        // H4 fix: UI notification のみ。rebuild トリガーは UI layer から snapshot publication 経由で行うこと。
-        postCoalescedChangeNotification();
-    }
-}
-
-[[nodiscard]] float ConvolverProcessor::getMixedPreRingTau() const
-{
-    const BuildSnapshot snapshot = captureBuildSnapshot();
-    return snapshot.mixedPreRingTau;
-}
-
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
 {
     bool prev;
@@ -55898,7 +55631,6 @@ std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSna
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.targetIRLengthSec)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedTransitionStartHz)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedTransitionEndHz)));
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedPreRingTau)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.rebuildDebounceMs));
     hashCombineUInt64(hash, snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.tailMode));
@@ -55988,7 +55720,6 @@ void ConvolverProcessor::copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) 
     snapshot.irLengthManualOverride = pendingOverride.irLengthManualOverride;
     snapshot.mixedTransitionStartHz = pendingOverride.mixedTransitionStartHz;
     snapshot.mixedTransitionEndHz = pendingOverride.mixedTransitionEndHz;
-    snapshot.mixedPreRingTau = pendingOverride.mixedPreRingTau;
     snapshot.rebuildDebounceMs = pendingOverride.rebuildDebounceMs;
     snapshot.experimentalDirectHeadEnabled = pendingOverride.experimentalDirectHeadEnabled;
     snapshot.tailMode = pendingOverride.tailMode;
@@ -56031,9 +55762,6 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     pendingOverride.mixedTransitionEndHz = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, pendingOverride.mixedTransitionStartHz + 10.0f),
                                                         MIXED_F2_MAX_HZ,
                                                         snapshot.mixedTransitionEndHz);
-    pendingOverride.mixedPreRingTau = juce::jlimit(MIXED_TAU_MIN,
-                                                   MIXED_TAU_MAX,
-                                                   snapshot.mixedPreRingTau);
     pendingOverride.rebuildDebounceMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS,
                                                      REBUILD_DEBOUNCE_MAX_MS,
                                                      snapshot.rebuildDebounceMs);
@@ -56066,7 +55794,7 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     juce::ValueTree v ("Convolver");
     v.setProperty ("phaseMode", static_cast<int>(getPhaseMode()), nullptr);
     v.setProperty ("useMinPhase", getUseMinPhase(), nullptr);
-    float mix, smoothingTime, irLen, autoIRL, mixF1, mixF2, mixTau;
+    float mix, smoothingTime, irLen, autoIRL, mixF1, mixF2;
     int tailMode, tailMult;
     float tailStart, tailStrength;
     bool bypassedState, irManual;
@@ -56080,7 +55808,6 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
         irManual = pendingOverride.irLengthManualOverride;
         mixF1   = pendingOverride.mixedTransitionStartHz;
         mixF2   = pendingOverride.mixedTransitionEndHz;
-        mixTau  = pendingOverride.mixedPreRingTau;
         tailMode = pendingOverride.tailMode;
         tailStart = pendingOverride.tailStartSec;
         tailStrength = pendingOverride.tailStrength;
@@ -56094,7 +55821,6 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     v.setProperty ("irLengthManualOverride", irManual, nullptr);
     v.setProperty ("mixedF1Hz", mixF1, nullptr);
     v.setProperty ("mixedF2Hz", mixF2, nullptr);
-    v.setProperty ("mixedTau", mixTau, nullptr);
     v.setProperty ("rebuildDebounceMs", getRebuildDebounceMs(), nullptr);
     v.setProperty ("experimentalDirectHeadEnabled", getExperimentalDirectHeadEnabled(), nullptr);
     v.setProperty ("tailMode", tailMode, nullptr);
@@ -56209,7 +55935,6 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
 
     if (v.hasProperty ("mixedF1Hz")) setMixedTransitionStartHz (v.getProperty ("mixedF1Hz"));
     if (v.hasProperty ("mixedF2Hz")) setMixedTransitionEndHz (v.getProperty ("mixedF2Hz"));
-    if (v.hasProperty ("mixedTau")) setMixedPreRingTau (v.getProperty ("mixedTau"));
     if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
     if (v.hasProperty ("experimentalDirectHeadEnabled")) setExperimentalDirectHeadEnabled (v.getProperty ("experimentalDirectHeadEnabled"));
 
@@ -56723,7 +56448,6 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
     };
     hashCombine(floatBits(snapshot.mixedTransitionStartHz));
     hashCombine(floatBits(snapshot.mixedTransitionEndHz));
-    hashCombine(floatBits(snapshot.mixedPreRingTau));
 
     hashCombine(snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
     hashCombine(static_cast<uint64_t>(snapshot.nucHCMode));
@@ -67493,17 +67217,17 @@ namespace {
     if (!contains(schema, "double convolverInputTrimGain = 1.0;"))
         return false;
 
-    if (!contains(builder, "worldOwner->automation.saturationAmount = engineState.saturationAmount;"))
+    if (!contains(builder, "worldOwner->automation.saturationAmount = saturationAmount;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = engineState.inputHeadroomGain;"))
+    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = inputHeadroomGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.outputMakeupGain = engineState.outputMakeupGain;"))
+    if (!contains(builder, "worldOwner->automation.outputMakeupGain = outputMakeupGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = engineState.convolverInputTrimGain;"))
+    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;"))
         return false;
-    if (!contains(builder, "worldOwner->coefficient.adaptiveCoeffBankIndex = engineState.adaptiveCoeffBankIndex;"))
+    if (!contains(builder, "coefficient.adaptiveCoeffBankIndex"))
         return false;
-    if (!contains(builder, "worldOwner->coefficient.adaptiveCoeffGeneration = engineState.adaptiveCoeffGeneration;"))
+    if (!contains(builder, "coefficient.adaptiveCoeffGeneration"))
         return false;
     if (contains(header, "graph.oversamplingFactor = std::max(1, consumeAtomic(manualOversamplingFactor, std::memory_order_acquire));"))
         return false;
@@ -67524,9 +67248,9 @@ namespace {
         return false;
     if (!contains(header, "snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;"))
         return false;
-    if (!contains(header, "snapshot.adaptiveCoeffGeneration = world->coefficient.adaptiveCoeffGeneration;"))
+    if (!contains(header, "snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);"))
         return false;
-    if (!contains(header, "static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 9> kRuntimeReadAuthorityInventory"))
+    if (!contains(header, "static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 10> kRuntimeReadAuthorityInventory"))
         return false;
     if (!contains(header, "{\"automation\", convo::isr::RuntimeAuthorityClass::Derived}"))
         return false;
@@ -67572,27 +67296,15 @@ namespace {
         return false;
     if (!contains(header, "// Bootstrap World guarantees non-null (#3.2.5)"))
         return false;
-    if (!contains(header, "&& (consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire) == 0);"))
+    if (!contains(header, "runtime.retireBacklog = runtimeWorld->retire.retireBacklog;"))
         return false;
-    if (!contains(header, ".allowRetireFallback = false"))
-        return false;
-    if (!contains(header, ".allowAdaptiveBankIndexFallback = allowInitialAtomicFallback"))
+    if (!contains(header, "runtime.deferredResidency = runtimeWorld->retire.deferredResidency;"))
         return false;
     if (contains(header, ".allowAdaptiveGenerationFallback"))
         return false;
-    if (!contains(header, "runtime.adaptiveCoeffBankIndex = (runtimeWorld != nullptr)"))
+    if (!contains(header, "runtime.adaptiveCoeffBankIndex = runtimeWorld->coefficient.adaptiveCoeffBankIndex;"))
         return false;
-    if (!contains(header, "runtime.adaptiveCoeffGeneration = (runtimeWorld != nullptr)"))
-        return false;
-    if (!contains(header, ": 0u;"))
-        return false;
-    if (!contains(header, "runtime.retireBacklog = (runtimeWorld != nullptr)"))
-        return false;
-    if (!contains(header, "? runtimeWorld->retire.retireBacklog"))
-        return false;
-    if (!contains(header, "runtime.deferredResidency = (runtimeWorld != nullptr)"))
-        return false;
-    if (!contains(header, "? runtimeWorld->retire.deferredResidency"))
+    if (!contains(header, "runtime.adaptiveCoeffGeneration = runtimeWorld->coefficient.adaptiveCoeffGeneration;"))
         return false;
     if (contains(header, "runtime.retireBacklog = consumeAtomic(retireQueueDepth_, std::memory_order_acquire);"))
         return false;
@@ -67600,15 +67312,11 @@ namespace {
         return false;
     if (!contains(header, "jassert(runtimeWorld != nullptr"))
         return false;
-    if (!contains(header, "|| fallbackPolicy.allowTransitionFallback"))
-        return false;
     if (!contains(header, "if (runtimeWorld == nullptr"))
         return false;
-    if (!contains(header, "&& !(fallbackPolicy.allowTransitionFallback"))
+    if (!contains(header, "fetchAddAtomic(observeMonotonicViolationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);"))
         return false;
-    if (!contains(header, "convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);"))
-        return false;
-    if (!contains(header, "convo::publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);"))
+    if (!contains(header, "publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);"))
         return false;
     if (contains(learner, "runtimeReadHandle.runtimePublish.transition.current"))
         return false;
@@ -67646,7 +67354,7 @@ namespace {
         return false;
     if (!contains(prepareToPlay, "getTransitionPolicyFromRuntimeWorld(runtimeReadHandle"))
         return false;
-    if (!contains(commit, "hasFadingRuntimeInWorld(runtimeReadHandle)"))
+    if (!contains(timer, "hasFadingRuntimeInWorld(runtimeReadHandle"))
         return false;
     if (!contains(audioBlock, "getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef"))
         return false;

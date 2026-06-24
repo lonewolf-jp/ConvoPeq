@@ -501,23 +501,6 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixedF2Label.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(mixedF2Label);
 
-    // Mixed Tau スライダー
-    mixedTauSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    mixedTauSlider.setRange(ConvolverProcessor::MIXED_TAU_MIN,
-                            ConvolverProcessor::MIXED_TAU_MAX, 1.0);
-    mixedTauSlider.setSkewFactorFromMidPoint(48.0);
-    mixedTauSlider.setTextValueSuffix(" smp");
-    mixedTauSlider.setNumDecimalPlacesToDisplay(0);
-    mixedTauSlider.setValue(engine.getConvolverProcessor().getMixedPreRingTau(), juce::dontSendNotification);
-    mixedTauSlider.addListener(this);
-    mixedTauSlider.setTooltip("Mixed phase pre-ringing attenuation tau");
-    addAndMakeVisible(mixedTauSlider);
-
-    mixedTauLabel.setText("Mix tau:", juce::dontSendNotification);
-    mixedTauLabel.setJustificationType(juce::Justification::centredRight);
-    mixedTauLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-    addAndMakeVisible(mixedTauLabel);
-
     // 詳細設定は別ウインドウへ移動 (メインパネルでは非表示)
     irLengthSlider.setVisible(false);
     irLengthLabel.setVisible(false);
@@ -527,8 +510,6 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixedF1Label.setVisible(false);
     mixedF2Slider.setVisible(false);
     mixedF2Label.setVisible(false);
-    mixedTauSlider.setVisible(false);
-    mixedTauLabel.setVisible(false);
 
     // IR情報ラベル
     irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
@@ -925,29 +906,23 @@ void ConvolverControlPanel::updateMixedPhaseControlsEnabled()
 
     mixedF1Slider.setEnabled(enabled);
     mixedF2Slider.setEnabled(enabled);
-    mixedTauSlider.setEnabled(enabled);
 
     mixedF1Label.setEnabled(enabled);
     mixedF2Label.setEnabled(enabled);
-    mixedTauLabel.setEnabled(enabled);
 
     if (enabled)
     {
         mixedF1Slider.setTooltip("Mixed phase transition start frequency (f1)");
         mixedF2Slider.setTooltip("Mixed phase transition end frequency (f2)");
-        mixedTauSlider.setTooltip("Mixed phase pre-ringing attenuation tau");
         mixedF1Label.setTooltip({});
         mixedF2Label.setTooltip({});
-        mixedTauLabel.setTooltip({});
     }
     else
     {
         mixedF1Slider.setTooltip("Mixedで有効");
         mixedF2Slider.setTooltip("Mixedで有効");
-        mixedTauSlider.setTooltip("Mixedで有効");
         mixedF1Label.setTooltip("Mixedで有効");
         mixedF2Label.setTooltip("Mixedで有効");
-        mixedTauLabel.setTooltip("Mixedで有効");
     }
 }
 
@@ -1275,10 +1250,6 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
     {
         engine.setConvolverMixedTransitionEndHz(static_cast<float>(slider->getValue()));
     }
-    else if (slider == &mixedTauSlider)
-    {
-        engine.setConvolverMixedPreRingTau(static_cast<float>(slider->getValue()));
-    }
     else if (slider == &rebuildDebounceSlider)
     {
         engine.getConvolverProcessor().setRebuildDebounceMs(static_cast<int>(slider->getValue()));
@@ -1343,8 +1314,6 @@ void ConvolverControlPanel::updateIRInfo()
                            juce::dontSendNotification);
     mixedF2Slider.setValue(pendingMixedF2Dirty ? pendingMixedF2Hz : convolver.getMixedTransitionEndHz(),
                            juce::dontSendNotification);
-    mixedTauSlider.setValue(pendingMixedTauDirty ? pendingMixedTau : convolver.getMixedPreRingTau(),
-                            juce::dontSendNotification);
     rebuildDebounceSlider.setValue(static_cast<double>(convolver.getRebuildDebounceMs()), juce::dontSendNotification);
     updateFilterModeButtons();
     updateTrimSlider();
