@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-06-24 21:13:02
+> Generated: 2026-06-24 23:51:22
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -32693,6 +32693,20 @@ void AudioEngine::rebuildThreadLoop()
                     + " processingRate=" + juce::String(newDSP->sampleRate * static_cast<double>(newDSP->oversamplingFactor), 1));
             }
 
+            // ★ Phase2: DSP構築完了後の RuntimeBuildSnapshot 投影値更新
+            // PR-2 設計: snapshot 投影値は DSPCore の実値を持つべき。
+            // buildInput.oversamplingFactor (=0 for Auto) を DSP 解決値で上書きする。
+            // これにより dspProjection.oversamplingFactor が正しい値を持つ。
+            //
+            // NOTE: 現在は oversamplingFactor のみ修正。他の PR-2 投影フィールド
+            // (irLoaded/irFinalized/structuralHash/sampleRate/baseLatencySamples) は
+            // 以下の理由により意図的に deferred:
+            // - irLoaded/irFinalized/structuralHash: UI ConvolverProcessor 由来だが
+            //   CrossfadeAuthority の実用上問題ない
+            // - sampleRate: buildInput 値が実質的に DSP 値と一致
+            // - baseLatencySamples: 生産コードで未消費
+            task.runtimeBuildSnapshot.oversamplingFactor = static_cast<int>(newDSP->oversamplingFactor);
+
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
@@ -45892,30 +45906,13 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         }
     }
 
-    // [100%] sealedSnapshot Authority (選択肢A):
-    // sealedSnapshot が存在する場合、その BuildInput 値が唯一の Authority。
-    // atomic からの読み取りは sealedSnapshot 不在時（bootstrap/fallback）のみ行う。
-    // ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
+    // ★ work56 Phase1: sealedSnapshot Authority 経路と fallback 経路を明示的に分離。
+    //   sealedSnapshot 存在時は BuildInput 値が唯一の Authority（oversamplingFactor 除く）。
+    //   sealedSnapshot 不在時（bootstrap/fallback）は atomic から直接読み取る。
+    //   ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
     const bool useSealedSnapshot = (sealedSnapshot != nullptr);
     // [C4996 fix] Read value fields from AudioEngine atomics directly (was engineState.X)
     {
-        // These values are obtained from AudioEngine's atomic members (non-deprecated access)
-        const auto processingOrder = useSealedSnapshot ? static_cast<convo::ProcessingOrder>(sealedSnapshot->buildInput.processingOrder)
-            : convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
-        const bool eqBypassed = useSealedSnapshot ? sealedSnapshot->buildInput.eqBypassed
-            : convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
-        const bool convBypassed = useSealedSnapshot ? sealedSnapshot->buildInput.convBypassed
-            : convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
-        const bool softClipEnabled = useSealedSnapshot ? sealedSnapshot->buildInput.softClipEnabled
-            : convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
-        const float saturationAmount = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.saturationAmount)
-            : static_cast<float>(convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
-        const float inputHeadroomGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.inputHeadroomGain)
-            : static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
-        const float outputMakeupGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.outputMakeupGain)
-            : static_cast<float>(convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
-        const float convolverInputTrimGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.convolverInputTrimGain)
-            : static_cast<float>(convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
         // Non-sealedSnapshot fields: always read from atomics
         const int latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_acquire);
         const int latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_acquire));
@@ -45925,10 +45922,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         const bool firstIrDry = engine.crossfadeRuntime_.isFirstIrDryPending();
         const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
         const bool rebuildWorkerRunning = false; // not available as atomic; default false
-
-        worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
-        worldOwner->routing.eqBypassed = eqBypassed;
-        worldOwner->routing.convBypassed = convBypassed;
 
         worldOwner->execution.transitionActive = active;
         worldOwner->execution.transitionPolicy = static_cast<int>(policy);
@@ -45940,14 +45933,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
         worldOwner->overlap.dryScaleTarget = dryScaleTarget;
 
-        worldOwner->automation.eqBypassed = eqBypassed;
-        worldOwner->automation.convBypassed = convBypassed;
-        worldOwner->automation.softClipEnabled = softClipEnabled;
-        worldOwner->automation.saturationAmount = saturationAmount;
-        worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
-        worldOwner->automation.outputMakeupGain = outputMakeupGain;
-        worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
-
         worldOwner->latency.latencyDelayOld = latencyDelayOld;
         worldOwner->latency.latencyDelayNew = latencyDelayNew;
 
@@ -45955,16 +45940,60 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
         worldOwner->affinity.rebuildWorkerRunning = rebuildWorkerRunning;
 
-        // [100%] sealedSnapshot が存在する場合、resource/timing フィールドも atomic ではなく snapshot から設定
         if (useSealedSnapshot)
         {
-            worldOwner->resource.oversamplingFactor = sealedSnapshot->buildInput.oversamplingFactor;
-            worldOwner->resource.ditherBitDepth = sealedSnapshot->buildInput.ditherBitDepth;
-            worldOwner->resource.noiseShaperType = sealedSnapshot->buildInput.noiseShaperType;
-            worldOwner->timing.sampleRateHz = sealedSnapshot->buildInput.sampleRate;
+            const auto& sealedBuildInput = sealedSnapshot->buildInput;
+
+            // routing - from sealedBuildInput
+            worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);
+            worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;
+            worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;
+
+            // automation - from sealedBuildInput
+            worldOwner->automation.eqBypassed = sealedBuildInput.eqBypassed;
+            worldOwner->automation.convBypassed = sealedBuildInput.convBypassed;
+            worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;
+            worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;
+            worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
+            worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;
+            worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
+
+            // resource/timing - from sealedBuildInput (oversamplingFactor は current->oversamplingFactor を維持)
+            // ★ Phase1: oversamplingFactor は直前行~216 の current->oversamplingFactor（新規DSP解決値）を維持。
+            //   sealedBuildInput.oversamplingFactor (=0 for Auto) で上書きしない。
+            worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
+            worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
+            worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;
         }
         else
         {
+            // routing - from atomics
+            const auto processingOrder = convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
+            const bool eqBypassed = convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
+            const bool convBypassed = convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
+            worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
+            worldOwner->routing.eqBypassed = eqBypassed;
+            worldOwner->routing.convBypassed = convBypassed;
+
+            // automation - from atomics
+            const bool softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
+            const float saturationAmount = static_cast<float>(
+                convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
+            const float inputHeadroomGain = static_cast<float>(
+                convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
+            const float outputMakeupGain = static_cast<float>(
+                convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
+            const float convolverInputTrimGain = static_cast<float>(
+                convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
+            worldOwner->automation.eqBypassed = eqBypassed;
+            worldOwner->automation.convBypassed = convBypassed;
+            worldOwner->automation.softClipEnabled = softClipEnabled;
+            worldOwner->automation.saturationAmount = saturationAmount;
+            worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
+            worldOwner->automation.outputMakeupGain = outputMakeupGain;
+            worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
+
+            // resource/timing - from DSPCore or defaults
             worldOwner->resource.oversamplingFactor = (current != nullptr)
                 ? static_cast<int>(current->oversamplingFactor) : 1;
             worldOwner->resource.ditherBitDepth = (current != nullptr)
@@ -63732,20 +63761,17 @@ namespace {
         return false;
     if (!requireContains(runtimeBuilderCpp, "if (sealedSnapshot != nullptr)", "runtime builder cpp sealed branch"))
         return false;
+    // ★ work56 Phase1: sealedSnapshot ブロック内でローカルエイリアス使用
     if (!requireContains(runtimeBuilderCpp, "const auto& sealedBuildInput = sealedSnapshot->buildInput;", "runtime builder cpp sealed build input alias"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = sealedBuildInput.processingOrder;", "runtime builder cpp sealed routing processingOrder"))
+    // routing - from sealedBuildInput
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);", "runtime builder cpp sealed routing processingOrder"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;", "runtime builder cpp sealed routing eqBypassed"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;", "runtime builder cpp sealed routing convBypassed"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.oversamplingFactor = sealedBuildInput.oversamplingFactor;", "runtime builder cpp sealed resource oversampling"))
-        return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;", "runtime builder cpp sealed resource dither"))
-        return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;", "runtime builder cpp sealed resource noise shaper"))
-        return false;
+    // automation - from sealedBuildInput
     if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;", "runtime builder cpp sealed automation soft clip"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;", "runtime builder cpp sealed automation saturation"))
@@ -63756,6 +63782,15 @@ namespace {
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;", "runtime builder cpp sealed automation convolver trim"))
         return false;
+    // resource/timing - from sealedBuildInput (oversamplingFactor 除く)
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;", "runtime builder cpp sealed resource dither"))
+        return false;
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;", "runtime builder cpp sealed resource noise shaper"))
+        return false;
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;", "runtime builder cpp sealed timing sample rate"))
+        return false;
+    // ★ work56 Phase1: oversamplingFactor の sealedBuildInput からの投影を削除。
+    //   resource.oversamplingFactor は current->oversamplingFactor（DSP解決値）を維持する。
     if (!requireContains(runtimeBuilderCpp, "worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);", "runtime builder cpp payload hash"))
         return false;
     if (!requireContains(rebuildDispatch,

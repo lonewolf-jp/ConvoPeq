@@ -124,20 +124,17 @@ namespace {
         return false;
     if (!requireContains(runtimeBuilderCpp, "if (sealedSnapshot != nullptr)", "runtime builder cpp sealed branch"))
         return false;
+    // ★ work56 Phase1: sealedSnapshot ブロック内でローカルエイリアス使用
     if (!requireContains(runtimeBuilderCpp, "const auto& sealedBuildInput = sealedSnapshot->buildInput;", "runtime builder cpp sealed build input alias"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = sealedBuildInput.processingOrder;", "runtime builder cpp sealed routing processingOrder"))
+    // routing - from sealedBuildInput
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);", "runtime builder cpp sealed routing processingOrder"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;", "runtime builder cpp sealed routing eqBypassed"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;", "runtime builder cpp sealed routing convBypassed"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.oversamplingFactor = sealedBuildInput.oversamplingFactor;", "runtime builder cpp sealed resource oversampling"))
-        return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;", "runtime builder cpp sealed resource dither"))
-        return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;", "runtime builder cpp sealed resource noise shaper"))
-        return false;
+    // automation - from sealedBuildInput
     if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;", "runtime builder cpp sealed automation soft clip"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;", "runtime builder cpp sealed automation saturation"))
@@ -148,6 +145,15 @@ namespace {
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;", "runtime builder cpp sealed automation convolver trim"))
         return false;
+    // resource/timing - from sealedBuildInput (oversamplingFactor 除く)
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;", "runtime builder cpp sealed resource dither"))
+        return false;
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;", "runtime builder cpp sealed resource noise shaper"))
+        return false;
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;", "runtime builder cpp sealed timing sample rate"))
+        return false;
+    // ★ work56 Phase1: oversamplingFactor の sealedBuildInput からの投影を削除。
+    //   resource.oversamplingFactor は current->oversamplingFactor（DSP解決値）を維持する。
     if (!requireContains(runtimeBuilderCpp, "worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);", "runtime builder cpp payload hash"))
         return false;
     if (!requireContains(rebuildDispatch,

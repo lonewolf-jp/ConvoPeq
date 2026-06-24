@@ -242,30 +242,13 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         }
     }
 
-    // [100%] sealedSnapshot Authority (選択肢A):
-    // sealedSnapshot が存在する場合、その BuildInput 値が唯一の Authority。
-    // atomic からの読み取りは sealedSnapshot 不在時（bootstrap/fallback）のみ行う。
-    // ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
+    // ★ work56 Phase1: sealedSnapshot Authority 経路と fallback 経路を明示的に分離。
+    //   sealedSnapshot 存在時は BuildInput 値が唯一の Authority（oversamplingFactor 除く）。
+    //   sealedSnapshot 不在時（bootstrap/fallback）は atomic から直接読み取る。
+    //   ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
     const bool useSealedSnapshot = (sealedSnapshot != nullptr);
     // [C4996 fix] Read value fields from AudioEngine atomics directly (was engineState.X)
     {
-        // These values are obtained from AudioEngine's atomic members (non-deprecated access)
-        const auto processingOrder = useSealedSnapshot ? static_cast<convo::ProcessingOrder>(sealedSnapshot->buildInput.processingOrder)
-            : convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
-        const bool eqBypassed = useSealedSnapshot ? sealedSnapshot->buildInput.eqBypassed
-            : convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
-        const bool convBypassed = useSealedSnapshot ? sealedSnapshot->buildInput.convBypassed
-            : convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
-        const bool softClipEnabled = useSealedSnapshot ? sealedSnapshot->buildInput.softClipEnabled
-            : convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
-        const float saturationAmount = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.saturationAmount)
-            : static_cast<float>(convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
-        const float inputHeadroomGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.inputHeadroomGain)
-            : static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
-        const float outputMakeupGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.outputMakeupGain)
-            : static_cast<float>(convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
-        const float convolverInputTrimGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.convolverInputTrimGain)
-            : static_cast<float>(convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
         // Non-sealedSnapshot fields: always read from atomics
         const int latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_acquire);
         const int latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_acquire));
@@ -275,10 +258,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         const bool firstIrDry = engine.crossfadeRuntime_.isFirstIrDryPending();
         const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
         const bool rebuildWorkerRunning = false; // not available as atomic; default false
-
-        worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
-        worldOwner->routing.eqBypassed = eqBypassed;
-        worldOwner->routing.convBypassed = convBypassed;
 
         worldOwner->execution.transitionActive = active;
         worldOwner->execution.transitionPolicy = static_cast<int>(policy);
@@ -290,14 +269,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
         worldOwner->overlap.dryScaleTarget = dryScaleTarget;
 
-        worldOwner->automation.eqBypassed = eqBypassed;
-        worldOwner->automation.convBypassed = convBypassed;
-        worldOwner->automation.softClipEnabled = softClipEnabled;
-        worldOwner->automation.saturationAmount = saturationAmount;
-        worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
-        worldOwner->automation.outputMakeupGain = outputMakeupGain;
-        worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
-
         worldOwner->latency.latencyDelayOld = latencyDelayOld;
         worldOwner->latency.latencyDelayNew = latencyDelayNew;
 
@@ -305,16 +276,60 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
         worldOwner->affinity.rebuildWorkerRunning = rebuildWorkerRunning;
 
-        // [100%] sealedSnapshot が存在する場合、resource/timing フィールドも atomic ではなく snapshot から設定
         if (useSealedSnapshot)
         {
-            worldOwner->resource.oversamplingFactor = sealedSnapshot->buildInput.oversamplingFactor;
-            worldOwner->resource.ditherBitDepth = sealedSnapshot->buildInput.ditherBitDepth;
-            worldOwner->resource.noiseShaperType = sealedSnapshot->buildInput.noiseShaperType;
-            worldOwner->timing.sampleRateHz = sealedSnapshot->buildInput.sampleRate;
+            const auto& sealedBuildInput = sealedSnapshot->buildInput;
+
+            // routing - from sealedBuildInput
+            worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);
+            worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;
+            worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;
+
+            // automation - from sealedBuildInput
+            worldOwner->automation.eqBypassed = sealedBuildInput.eqBypassed;
+            worldOwner->automation.convBypassed = sealedBuildInput.convBypassed;
+            worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;
+            worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;
+            worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
+            worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;
+            worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
+
+            // resource/timing - from sealedBuildInput (oversamplingFactor は current->oversamplingFactor を維持)
+            // ★ Phase1: oversamplingFactor は直前行~216 の current->oversamplingFactor（新規DSP解決値）を維持。
+            //   sealedBuildInput.oversamplingFactor (=0 for Auto) で上書きしない。
+            worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
+            worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
+            worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;
         }
         else
         {
+            // routing - from atomics
+            const auto processingOrder = convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
+            const bool eqBypassed = convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
+            const bool convBypassed = convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
+            worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
+            worldOwner->routing.eqBypassed = eqBypassed;
+            worldOwner->routing.convBypassed = convBypassed;
+
+            // automation - from atomics
+            const bool softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
+            const float saturationAmount = static_cast<float>(
+                convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
+            const float inputHeadroomGain = static_cast<float>(
+                convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
+            const float outputMakeupGain = static_cast<float>(
+                convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
+            const float convolverInputTrimGain = static_cast<float>(
+                convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
+            worldOwner->automation.eqBypassed = eqBypassed;
+            worldOwner->automation.convBypassed = convBypassed;
+            worldOwner->automation.softClipEnabled = softClipEnabled;
+            worldOwner->automation.saturationAmount = saturationAmount;
+            worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
+            worldOwner->automation.outputMakeupGain = outputMakeupGain;
+            worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
+
+            // resource/timing - from DSPCore or defaults
             worldOwner->resource.oversamplingFactor = (current != nullptr)
                 ? static_cast<int>(current->oversamplingFactor) : 1;
             worldOwner->resource.ditherBitDepth = (current != nullptr)

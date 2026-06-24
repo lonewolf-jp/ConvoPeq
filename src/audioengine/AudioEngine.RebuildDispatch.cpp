@@ -856,6 +856,20 @@ void AudioEngine::rebuildThreadLoop()
                     + " processingRate=" + juce::String(newDSP->sampleRate * static_cast<double>(newDSP->oversamplingFactor), 1));
             }
 
+            // ★ Phase2: DSP構築完了後の RuntimeBuildSnapshot 投影値更新
+            // PR-2 設計: snapshot 投影値は DSPCore の実値を持つべき。
+            // buildInput.oversamplingFactor (=0 for Auto) を DSP 解決値で上書きする。
+            // これにより dspProjection.oversamplingFactor が正しい値を持つ。
+            //
+            // NOTE: 現在は oversamplingFactor のみ修正。他の PR-2 投影フィールド
+            // (irLoaded/irFinalized/structuralHash/sampleRate/baseLatencySamples) は
+            // 以下の理由により意図的に deferred:
+            // - irLoaded/irFinalized/structuralHash: UI ConvolverProcessor 由来だが
+            //   CrossfadeAuthority の実用上問題ない
+            // - sampleRate: buildInput 値が実質的に DSP 値と一致
+            // - baseLatencySamples: 生産コードで未消費
+            task.runtimeBuildSnapshot.oversamplingFactor = static_cast<int>(newDSP->oversamplingFactor);
+
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
