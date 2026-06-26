@@ -61,11 +61,6 @@ graphify-out/
 .claude/
 CLAUDE.md
 .aidex/
-headroom_memory.db
-memory_graph.db
-memory_vectors.db
-memory.db
-
 # Coverage reports
 coverage/
 htmlcov/

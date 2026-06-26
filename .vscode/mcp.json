@@ -1,51 +1,19 @@
 {
     "servers": {
-        "ql-mcp": {
-            "type": "stdio",
-            "command": "npx",
-            "args": [
-                "-y",
-                "codeql-development-mcp-server"
-            ],
-            "env": {
-                "CODEQL_PATH": "C:\\Users\\user\\tools\\codeql\\codeql.exe",
-                "CODEQL_MCP_WORKSPACE": "${workspaceFolder}",
-                "CODEQL_MCP_SCAN_EXCLUDE_DIRS": "JUCE,r8brain-free-src,doc,manual,evidence,sampledata,resources,storage",
-                "CODEQL_DATABASES_BASE_DIRS": "${workspaceFolder}\\storage\\codeql\\databases",
-                "CODEQL_QUERY_RUN_RESULTS_DIRS": "${workspaceFolder}\\storage\\codeql\\query-runs",
-                "CODEQL_MRVA_RUN_RESULTS_DIRS": "${workspaceFolder}\\storage\\codeql\\mrva-runs",
-                "CODEQL_MCP_TMP_DIR": "${workspaceFolder}\\storage\\codeql\\tmp"
-            }
-        },
-        "codegraph": {
-            "type": "stdio",
-            "command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
-            "args": [
-                "serve",
-                "--repo",
-                "${workspaceFolder}"
-            ]
-        },
-        "graphify": {
-            "type": "stdio",
-            "command": "graphify-mcp",
-            "args": [
-                "${workspaceFolder}\\graphify-out\\graph.json"
-            ]
-        },
-        "aidex": {
-            "type": "stdio",
-            "command": "aidex"
-        },
         "serena": {
             "type": "stdio",
             "command": "serena",
             "args": [
                 "start-mcp-server",
-                "--context=vscode",
                 "--project",
-                "${workspaceFolder}"
+                "c:\\VSC_Project\\ConvoPeq",
+                "--transport",
+                "stdio"
             ]
+        },
+        "context-mode": {
+            "type": "stdio",
+            "command": "context-mode"
         }
     }
 }

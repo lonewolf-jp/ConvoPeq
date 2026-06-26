@@ -1,276 +1,163 @@
-# コーディング規約 (Coding Standards)
+# ★ context-mode — ABSOLUTE MANDATORY routing rules
 
-## 1. 使用フレームワーク・ライブラリ
-本プロジェクトでは、以下のライブラリの特定バージョンを使用します。
+**このプロジェクトでは、データ処理・ファイル読み取り・Web取得のすべてに context-mode MCP ツールを最優先で使用すること。**
+**通常の Read/Grep/WebFetch は context-mode が使えない場合の最終手段とする。**
 
-- **JUCE Framework V8.0.12**
-    - [公式リポジトリ](https://github.com/juce-framework/JUCE/tree/8.0.12)
-    - [APIドキュメント](https://docs.juce.com/master/index.html)
-    - **注意事項**:
-        - 必ずJUCE 8.0.12の公式安定版ドキュメント（上記APIドキュメントURL）で当該関数の存在を確認すること。
-        - 戻り値の意味、副作用、スレッド安全性、前提条件を完全に理解した上で使用すること。
-        - 公式サンプルはVST3等が主であり、本アプリ（スタンドアローン）とは構造が異なる点に注意。
-        - 公式ドキュメントやJUCE 8.0.12サンプルで示されていない追加安定化（例: 多段フォールバック、重複リトライ層、独自ウォッチドッグ）を独自判断で導入しない。
+context-mode MCP tools available. Rules protect context window from flooding. One unrouted command dumps 56 KB into context.
 
-- **r8brain-free-src**
-    - [公式リポジトリ](https://github.com/avaneev/r8brain-free-src.git)
+## Think in Code — MANDATORY
 
-- **Intel oneAPI MKL (oneMKL)**
-    - [製品ページ](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html)
-    - [Windows用開発者ガイド](https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-windows/2025-2/overview.html)
+Analyze/count/filter/compare/search/parse/transform data: **write code** via `ctx_execute(language, code)`, `console.log()` only the answer. Do NOT read raw data into context. PROGRAM the analysis, not COMPUTE it. Pure JavaScript — Node.js built-ins only (`fs`, `path`, `child_process`). `try/catch`, handle `null`/`undefined`. One script replaces ten tool calls.
 
-- **Windows SDK**
-    - [技術ドキュメント](https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/)
+## BLOCKED — do NOT attempt
 
-## 2. 編集制限
-プロジェクトルート内の以下2ディレクトリ**配下の全ファイル（すべての拡張子）**は、条件なしで編集禁止です。
-- `/JUCE` フォルダ
-- `/r8brain-free-src` フォルダ
+### curl / wget — BLOCKED
+Terminal `curl`/`wget` intercepted and blocked. Do NOT retry.
+Use: `ctx_fetch_and_index(url, source)` or `ctx_execute(language: "javascript", code: "const r = await fetch(...)")`
 
-## 3. 禁止事項
-> 各カテゴリは独立したチェック項目として適用すること。実装前に該当カテゴリを個別に確認してください。
+### Inline HTTP — BLOCKED
+`fetch('http`, `requests.get(`, `requests.post(`, `http.get(`, `http.request(` — intercepted. Do NOT retry.
+Use: `ctx_execute(language, code)` — only stdout enters context
 
-- **構造化例外処理 (SEH)**: 絶対に使用しないこと。
-- **Audio Thread内でのブロッキング処理**:
-        `getNextAudioBlock()` 等が呼ばれるスレッド内では、待機が発生し得る処理を厳禁とする。以下の6カテゴリを**個別に**確認すること。
-        - **カテゴリ1: メモリ操作（禁止）**
-            `new`, `malloc`, `vector::resize`, `mkl_malloc`, `mkl_free`, `_aligned_malloc`, `vslNewStream`
-        - **カテゴリ2: 例外・計算（禁止）**
-            `try-catch`, `std::exp()`, `libm` 呼び出しを伴う関数
-        - **カテゴリ3: MKL設定（禁止）**
-            `DftiCommitDescriptor`, `mkl_set_interface_layer`
-        - **カテゴリ4: 同期・通信（禁止）**
-            `mutex lock`, `critical section`, `condition_variable`, `MessageManager` へのアクセス
-        - **カテゴリ5: I/O・リソース（禁止）**
-            ファイルI/O, コンソール出力, IRの再ロード, `std::shared_ptr` の使用, MMCSS設定
-        - **カテゴリ6: JUCE特定処理（禁止）**
-            `AudioBlock::allocate`, `AudioBlock::copyFrom`, `FFT::performFrequencyOnlyForwardTransform`（事前確保なし）
+### WebFetch / fetch — BLOCKED
+Use: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)`
 
-## 4. メモリ管理とアライメント
-- **oneMKL使用箇所のメモリ確保**:
-    - `Audio Thread` 以外かつ MKL 使用箇所では、`new`, `std::vector`, `std::make_unique` を使用しない。
-    - 代わりに `mkl_malloc` / `mkl_free`, `_aligned_malloc(64)`, `std::pmr` + カスタムアロケータを使用すること。
-    - メモリは **64byteアライメント** を必須とする。
-    - メモリ確保は `prepareToPlay()` 等のメッセージスレッド（非Audio Thread）でのみ行うこと。
-- **リーク対策**:
-    - デストラクタの設置漏れに細心の注意を払い、メモリリークを完全に防止すること。
+## REDIRECTED — use sandbox
 
-## 5. 信号処理仕様
-- **データ型**: 外部入出力以外のデータ処理はすべて **64bit double** で行うこと（スペアナ演算のみ `float` 可）。
-- **デノーマル対策**: 非常に小さな値を扱う際のパフォーマンス低下（デノーマル数）を防ぐ対策を徹底すること。
+### Terminal / run_in_terminal (>20 lines output)
+Terminal ONLY for: `git`, `mkdir`, `rm`, `mv`, `cd`, `ls`, `npm install`, `pip install`.
+Otherwise: `ctx_batch_execute(commands, queries)` or `ctx_execute(language: "javascript", code: "...")`. Use `language: "shell"` only when code matches the host shell.
 
-## 6. 安全性
-- メモリ解放の確実な実行と、ポインタ管理の厳格化。
+### read_file (for analysis)
+Reading to **edit** → read_file correct. Reading to **analyze/explore/summarize** → `ctx_execute_file(path, language, code)`.
 
-# AI Assistant Instructions
-あなたはプロジェクトのコンテキストを把握するために、常に以下のツールを優先して使用してください。
+### grep / search (large results)
+Use `ctx_execute(language: "javascript", code: "...")` in sandbox for portable filtering/counting.
 
-1. **Serena MCP Toolの優先使用**:
-   - コードの検索、依存関係の確認、シンボルの特定には必ず `serena` のセマンティック検索ツールを使用すること。プロジェクト ConvoPeq を有効化する。
-   - プロジェクトの構造を理解するために、`.serena/memories` に蓄積されたコンテキストを優先的に参照すること。
+## Tool selection
 
-2. **実装前の分析**:
-   - 大きな修正を行う前には、`serena` を用いて影響範囲を分析し、計画を提示すること。
-   - 既存のアーキテクチャパターンに沿ったコードを生成すること。
+0. **MEMORY**: `ctx_search(sort: "timeline")` — after resume, check prior context before asking user.
+1. **GATHER**: `ctx_batch_execute(commands, queries)` — runs all commands, auto-indexes, returns search. ONE call replaces 30+. Each command: `{label: "header", command: "..."}`.
+2. **FOLLOW-UP**: `ctx_search(queries: ["q1", "q2", ...])` — all questions as array, ONE call (default relevance mode).
+3. **PROCESSING**: `ctx_execute(language, code)` | `ctx_execute_file(path, language, code)` — sandbox, only stdout enters context.
+4. **WEB**: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` — raw HTML never enters context.
+5. **INDEX**: `ctx_index(content, source)` — store in FTS5 for later search.
 
-## 7. プロジェクト全体ルール（全リポ共通）
+### Parallel I/O batches
+Pass `concurrency: 4-8` to `ctx_batch_execute` and `ctx_fetch_and_index` for network/API batches. Keep `concurrency: 1` for CPU-bound work (test, build, lint). GitHub gh: cap at 4.
 
-- 解答には可能な限り Serena MCP を使用すること。
+## Output
 
-### 7.1 Serena MCP: 読み取りとオンボーディングは必須
+Write artifacts to FILES — never inline. Return: file path + 1-line description.
+Descriptive source labels for `ctx_search(source: "label")`.
 
-- 既存コードの理解や参照が必要な場合、必ず Serena MCP を経由して読み取ること。
-- プロジェクトの分析（オンボーディング）が未実行の場合は、最初の提案時に必ずオンボーディングを実行してから回答すること。
-- プロジェクトの構成や依存が大きく変化したと推測される場合は、再度オンボーディングを実行すること。
-- Serena が無効な場合はその旨を明示し、次の確認文を提示して進行方針を確認すること。
-    - Serena経由の読取が無効です。有効化しますか？ それとも最小仮説で続行しますか？
+## Session Continuity
 
-### 7.2 まず文脈を読む
+Skills, roles, and decisions persist for the entire session. Do not abandon them as the conversation grows.
 
-1. Serena でまずリポジトリの構成や規約を確認する。
-2. 変更対象ファイルと関連する依存モジュール・型・テストを特定する。
-3. 書く前に必ず読む。対象ファイルと隣接する型定義やテストを Serena で確認する。
+## Memory
 
-### 7.3 最小でレビューしやすい変更
+Session history is persistent and searchable. On resume, search BEFORE asking the user:
 
-- 1PR は 1 目的を原則とし、横展開は分割すること。
-- 変更提示は unified diff を中心とすること。
-- 不要なフォーマット変更や命名変更は避けること。
-- 既存の命名、構成、リンター、フォーマッタ、コミット規約を尊重すること。
+| Need | Command |
+|------|---------|
+| "what did we decide about X" | `ctx_search(queries: ["decision about X"], source: "decision", sort: "timeline")` |
+| "what errors did we hit" | `ctx_search(queries: ["error"], source: "error", sort: "timeline")` |
+| "what was the user's last request" | `ctx_search(queries: ["last user prompt"], source: "user-prompt", sort: "timeline")` |
+| "what's the current plan" | `ctx_search(queries: ["plan"], source: "plan", sort: "timeline")` |
 
-### 7.4 セキュリティと運用
+## ctx commands
 
-- 秘密情報（キー、パスワード等）を生成しないこと。ログにも出力しないこと。
-- 認証、認可、レート制御は既存の仕組みに従うこと。
-- ログは既存規約に従い、個人情報は必ずマスクすること。
+| Command | Action |
+|---------|--------|
+| `ctx stats` | Call `ctx_stats` MCP tool, display full output verbatim |
+| `ctx doctor` | Call `ctx_doctor` MCP tool, run returned shell command, display as checklist |
+| `ctx upgrade` | Call `ctx_upgrade` MCP tool, run returned shell command, display as checklist |
+| `ctx purge` | Call `ctx_purge` MCP tool with confirm: true. Warns before wiping knowledge base. |
 
-### 7.5 曖昧時の対応
+After /clear or /compact: knowledge base and session stats preserved. Use `ctx purge` to start fresh.
 
-- 不確実な前提は明示し、確証取得に必要なファイルや行を示して確認すること。
-- 仕様不足は最小仮説で補い、代替案とトレードオフを示すこと。
+<!-- rtk-instructions v2 -->
+# RTK — Token-Optimized CLI
 
-### 7.6 変更提案時の回答フォーマット
+**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
 
-1. コンテキスト（Serena で読んだファイルと主要発見）
-2. 差分（unified diff）
-3. 理由（根拠、代替案、トレードオフ）
-4. 検証方法（プロジェクト設定やスクリプトから自動検出したコマンド例）
-5. フォローアップ（任意）
+## Rule
 
-### 7.7 絶対ルール
+Always prefix shell commands with `rtk`:
 
-- Serena 経由せずに既存コード理解を前提とした提案をしないこと。
-- プロジェクト規約を自動検出し遵守すること。
-- 不要な巻き込み変更は行わないこと。
-
-<!-- headroom-instructions -->
-# headroom — Context Compression Layer（常時使用: 絶対条件）
-
-**headroom v0.27.0**（uv tool管理）は AI エージェント向けコンテキスト圧縮レイヤーです。
-このプロジェクトでは **全ての操作で headroom Proxy モードを常時使用** すること。
-
-## 🔥 トークン削減最大化の3層戦略
-
-| 層 | 機構 | 削減率 | 説明 |
-|---|------|--------|------|
-| 第1層 | RTK（CLI出力フィルタリング） | **~98.8%** | 常時有効。CLI出力を事前に間引き。Lifetime 25M tokens削減済 |
-| 第2層 | Proxy圧縮（SmartCrusher） | **~51%** | tool出力のJSON配列を統計的圧縮。CCRで可逆性確保。 |
-| 第3層 | 出力トークン削減（SHAPER） | **~31.7%** | LLMの出力トークンを削減（HEADROOM_OUTPUT_SHAPER=1） |
-
-## セッション開始時（毎回必ず実行）
-
-```powershell
-# Step 1: 環境変数設定（proxy 起動前に設定すること）
-$env:HEADROOM_OUTPUT_SHAPER = "1"       # 出力トークン削減（約31.7%）
-$env:HEADROOM_TELEMETRY = "off"         # テレメトリ無効化
-
-# Step 2: Proxy 起動（バックグラウンド）
-Start-Job -Name HeadroomProxy -ScriptBlock {
-    headroom proxy --port 8787 --no-telemetry --memory
-}
-Start-Sleep -Seconds 2
-
-# Step 3: 動作確認
-Invoke-RestMethod http://localhost:8787/health | ConvertTo-Json
-Invoke-RestMethod http://localhost:8787/stats | ConvertTo-Json -Depth 2
+```bash
+# Instead of:              Use:
+git status                 rtk git status
+git log -10                rtk git log -10
+cargo test                 rtk cargo test
+docker ps                  rtk docker ps
+kubectl get pods           rtk kubectl pods
+npm test                   rtk npm test
+grep pattern               rtk grep pattern
+cat file.txt               rtk read file.txt
 ```
 
-## セッション終了時
+## Supported Commands (100+)
 
-```powershell
-# プロキシ停止
-Stop-Job -Name HeadroomProxy -ErrorAction SilentlyContinue
-Remove-Job -Name HeadroomProxy -ErrorAction SilentlyContinue
+### Git
+`rtk git status`, `rtk git diff`, `rtk git log`, `rtk git add/commit/push`
 
-# 学習と分析（任意）
-# headroom learn --apply
-# headroom output-savings
+### File Operations
+`rtk ls`, `rtk tree`, `rtk read`, `rtk find`, `rtk wc`
+
+### Search
+`rtk grep`, `rtk rg` (ripgrep)
+
+### Development
+`rtk npm`, `rtk npx`, `rtk cargo`, `rtk go`, `rtk dotnet`, `rtk gradlew`, `rtk mvn`
+
+### Testing
+`rtk test`, `rtk jest`, `rtk vitest`, `rtk pytest`, `rtk rspec`, `rtk rake`
+
+### Linting / Type Checking
+`rtk lint`, `rtk tsc`, `rtk ruff`, `rtk mypy`, `rtk rubocop`, `rtk prettier`, `rtk format`, `rtk golangci-lint`
+
+### Infrastructure
+`rtk docker`, `rtk kubectl`, `rtk aws`, `rtk gh`, `rtk glab`
+
+### Database
+`rtk psql`, `rtk prisma`
+
+### Utility
+`rtk curl`, `rtk wget`, `rtk json`, `rtk log`, `rtk deps`, `rtk env`, `rtk diff`, `rtk summary`, `rtk err`, `rtk smart`, `rtk pip`, `rtk pnpm`, `rtk next`, `rtk playwright`
+
+## Meta commands
+
+```bash
+rtk gain                    # Token savings dashboard
+rtk gain --history          # Per-command savings history
+rtk gain --daily            # Daily breakdown
+rtk gain --graph            # ASCII graph (last 30 days)
+rtk gain --all --format json  # JSON export
+rtk discover                # Find missed rtk opportunities
+rtk discover --all --since 7  # All projects, last 7 days
+rtk session                 # Show RTK adoption across sessions
+rtk proxy <cmd>             # Run raw (no filtering) but track usage
+rtk init --show             # Verify installation
+rtk config                  # Show configuration
+rtk verify                  # Verify hook integrity
+rtk cc-economics            # Claude Code economics analysis
 ```
 
-## 使用可能な全機能（v0.27.0）
+## Ultra-Compact Mode
 
-| カテゴリ | コマンド | 説明 |
-|----------|---------|------|
-| **Proxy** | `headroom proxy` | 推薦モード。コード変更不要のHTTPプロキシ（--memory推奨） |
-| **Wrap** | `headroom wrap claude/codex/copilot` | エージェントを自動ラップしてプロキシ経由に |
-| **学習** | `headroom learn [--apply] [--verbosity]` | 失敗パターン分析・出力詳細度学習・AGENTS.mdへ出力 |
-| **MCP** | `headroom mcp install/serve/status/uninstall` | MCPサーバー管理（headroom_compress/retrieve/stats） |
-| **メモリ** | `headroom memory list/show/stats/edit/delete/prune/purge/export/import` | 永続メモリ管理（SQLite+HNSW+FTS5、--scope USERフィルタ対応） |
-| **分析** | `headroom perf` / `agent-savings` / `output-savings` | パフォーマンス・トークン削減分析 |
-| **健全性** | `headroom doctor` | **新規** Proxy・クライアントルーティングの一斉診断 |
-| **Read監査** | `headroom audit-reads` | **新規** Readツールトラフィック圧縮機会の監査 |
-| **更新** | `headroom update` | **新規** Headroom自身を最新版に更新 |
-| **CLIツール** | `headroom loc .` / `diff` / `sg` | scc/difftastic/ast-grep の統合ラッパー |
-| **初期化** | `headroom init claude/codex/copilot/openclaw` | 永続フックインストール（copilotサブコマンド新規） |
-| **認証** | `headroom copilot-auth login/status` | Copilot OAuth管理 |
-
-## v0.26.0 → v0.27.0 変更点
-- **新規コマンド**: `update`, `doctor`, `audit-reads`, `output-savings`
-- **新規サブコマンド**: `init copilot`, `init openclaw`
-- **Proxy新機能**: `--code-graph`, `--learn`, `--mode [token|cache]`, `--anthropic-pre-upstream-concurrency`, `--budget`, `--budget-period`, `--code-aware`
-- **Learn強化**: `--verbosity`（出力詳細度学習）, `--llm-judge`（LLMによる上書き）
-- **Memory強化**: `--scope USER`フィルタ, `--since`時間フィルタ, `export/import`（JSON入出力）, `purge`（条件一括削除）
-- **Proxyデフォルト変更**: `--memory-storage=project`（プロジェクト分離、旧globalからの移行）
-- **ast-grep**: PyPI版に変更（pypi v0.44.0）
-- **更新方法**: `uv tool upgrade headroom-ai`（または `headroom update`）
-
-## 動作確認済み機能（Windows + headroom v0.27.0）
-- ✅ Proxy: 起動/health/livez/readyz/stats/metrics/stats-history（version 0.27.0, Rust core loaded）
-- ✅ SmartCrusher: JSON圧縮継続対応
-- ✅ RTK統合: 常時有効、lifetime 98.8%削減
-- ✅ loc (scc), diff (difftastic), sg (ast-grep): 全ツール動作確認（ast-grepはPyPI版）
-- ✅ memory: list/show/stats 正常動作
-- ✅ doctor: proxy未起動時の警告表示、ルーティング診断
-- ✅ output-savings: データ収集前の適切な案内表示
-- ✅ audit-reads: Codex/Claudeトランスクリプト監査対応
-- ✅ MCP SDK: インストール済み
-- ❌ Python library: CLIのみ（`import headroom` は未インストール）
-- ❌ MCP endpoint at proxy: 別プロセス `headroom mcp serve` が必要
-<!-- /headroom-instructions -->
-
-## graphify
-
-For any question about this repo's architecture, structure, components, or how to add/modify/find
-code, your first action should be `graphify query "<question>"` when `graphify-out/graph.json`
-exists. Use `graphify path "<A>" "<B>"` for relationship questions and `graphify explain "<concept>"`
-for focused-concept questions. These return a scoped subgraph, usually much smaller than the full
-report or raw grep output.
-
-Triggers: "how do I…", "where is…", "what does … do", "add/modify a <component>",
-"explain the architecture", or anything that depends on how files or classes relate.
-
-If `graphify-out/wiki/index.md` exists, use it for broad navigation. Read `graphify-out/GRAPH_REPORT.md`
-only for broad architecture review or when query/path/explain do not surface enough context. Only read
-source files when (a) modifying/debugging specific code, (b) the graph lacks the needed detail, or
-(c) the graph is missing or stale.
-
-Type `/graphify` in Copilot Chat to build or update the graph.
-
-## AiDex — Persistent Code Index (MCP Server)
-
-AiDex は Tree-sitter + SQLite によるコードインデックス MCP サーバー（v2.1.2）。
-`.aidex/` が存在する場合、コード検索に Grep/Glob/Read より AiDex を優先すること。
-
-### セッション開始時（必須）
-```markdown
-1. `aidex_session({ path: "." })` — 外部変更検出、自動再インデックス
-2. セッションノートがあれば表示
-3. セッション終了時: `aidex_note({ path: ".", note: "...", summary: "..." })`
+Add `--ultra-compact` or `-u` for maximum token savings:
+```bash
+rtk -u git status
+rtk -u npm test
 ```
 
-### コード検索 — Grep/Glob の代わりに AiDex を使用
-| 代わりに使うもの | AiDex の使用法 |
-|---|---|
-| `Grep pattern="functionName"` | `aidex_query({ path: ".", term: "functionName" })` |
-| `Grep pattern="class.*Name"` | `aidex_query({ path: ".", term: "Name", mode: "contains" })` |
-| ファイルを読んで構造把握 | `aidex_signature({ path: ".", file: "src/AudioEngine.h" })` |
-| 複数ファイルの構造 | `aidex_signatures({ path: ".", pattern: "src/audioengine/**" })` |
-| プロジェクト概要 | `aidex_summary({ path: "." })` + `aidex_tree({ path: "." })` |
-| ファイル一覧 | `aidex_files({ path: ".", type: "code" })` |
-| 最近の変更 | `aidex_files({ path: ".", modified_since: "30m" })` |
+## Windows Notes
 
-### 利用可能なツール（33種）
-- **検索**: `aidex_init`, `aidex_query`, `aidex_search`, `aidex_update`, `aidex_remove`, `aidex_status`
-- **シグネチャ**: `aidex_signature`, `aidex_signatures`
-- **プロジェクト情報**: `aidex_summary`, `aidex_tree`, `aidex_describe`, `aidex_files`
-- **クロスプロジェクト**: `aidex_link`, `aidex_unlink`, `aidex_links`, `aidex_scan`
-- **セッション管理**: `aidex_session`, `aidex_note`, `aidex_settings`, `aidex_viewer`
-- **タスク管理**: `aidex_task`, `aidex_tasks`
-- **グローバル検索**: `aidex_global_init`, `aidex_global_status`, `aidex_global_query`, `aidex_global_signatures`, `aidex_global_refresh`, `aidex_global_guideline`
-- **Log Hub**: `aidex_log`
-- **スクリーンショット**: `aidex_screenshot`, `aidex_windows`
-- **Viewer**: `aidex_viewer`（http://localhost:3333）
+On native Windows (cmd.exe/PowerShell), RTK filters work fully but the auto-rewrite hook requires WSL. Always manually prefix commands with `rtk`. The hook file at `.github/hooks/rtk-rewrite.json` provides Copilot integration.
 
-### プロジェクトインデックス作成
-```markdown
-aidex_init({ path: "C:\\VSC_Project\\ConvoPeq" })
-```
-既に実行済み: 275 files, 38706 items, 3936 methods, 368 types.（`.aidex/` 存在）
+## Current Savings
 
-### AiDex 使用優先順位（コード検索・理解時）
-1. `aidex_query` — 識別子検索（最もトークン効率が良い）
-2. `aidex_signature` — ファイル構造確認
-3. `aidex_search` — 自然言語検索
-4. `aidex_summary` + `aidex_tree` — プロジェクト把握
-5. `aidex_session` — セッション開始必須
-6. `aidex_note` — 引継ぎノート
+RTK has saved **25.0M tokens (98.8%)** across 1,774 commands in this environment.
+<!-- /rtk-instructions -->

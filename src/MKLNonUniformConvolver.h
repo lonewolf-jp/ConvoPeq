@@ -189,6 +189,25 @@ public:
     int getLatency() const noexcept { return m_latency; }
 
     //----------------------------------------------------------
+    // getRingOverflowCount  ─ リングバッファオーバーフロー回数
+    // Audio Thread からいつでも呼び出し可 (atomic load)。
+    // 診断・ログ出力用。値は ringWrite 内で increment される。
+    //----------------------------------------------------------
+    int getRingOverflowCount() const noexcept
+    {
+        return convo::consumeAtomic(m_ringOverflowCount, std::memory_order_relaxed);
+    }
+
+    //----------------------------------------------------------
+    // resetRingOverflowCount  ─ オーバーフローカウンタを0にリセット
+    // Message Thread からのみ呼び出すこと。
+    //----------------------------------------------------------
+    void resetRingOverflowCount() noexcept
+    {
+        convo::publishAtomic(m_ringOverflowCount, 0, std::memory_order_relaxed);
+    }
+
+    //----------------------------------------------------------
     // setOverflowCallback  ─ Audio Thread セーフなオーバーフロー通知
     // ringWrite() でオーバーフローが発生した際に一度呼ばれる。
     // 実装はロックフリー・メモリ確保禁止。生関数ポインタのみ (std::function 禁止)。

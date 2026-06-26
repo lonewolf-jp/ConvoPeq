@@ -140,6 +140,27 @@ void ConvolverProcessor::timerCallback()
         lastReportedClampCount_ = currentClampCount;
     }
 
+    // ── リングバッファオーバーフロー診断 (NUC ringOverflowCount の確認) ──
+    {
+        auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB
+        if (conv != nullptr)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                if (conv->nucConvolvers[ch] != nullptr)
+                {
+                    const int ov = conv->nucConvolvers[ch]->getRingOverflowCount();
+                    if (ov > 0)
+                    {
+                        juce::Logger::writeToLog("ConvolverProcessor: NUC ring overflow detected (ch="
+                                                 + juce::String(ch) + ", count=" + juce::String(ov) + ")");
+                        conv->nucConvolvers[ch]->resetRingOverflowCount();
+                    }
+                }
+            }
+        }
+    }
+
     // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)
     if (convo::consumeAtomic(rebuildPendingAfterLoad, std::memory_order_acquire)) // acquire: LoadPipeline 側 publishAtomic/exchangeAtomic と HB
     {

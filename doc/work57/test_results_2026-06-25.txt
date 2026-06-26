@@ -1,0 +1,29 @@
+﻿Test project C:/VSC_Project/ConvoPeq/build
+      Start  1: ISRRuntimeIdentityGenerators
+ 1/12 Test  #1: ISRRuntimeIdentityGenerators ...........   Passed    0.02 sec
+      Start  2: RuntimePublicationCoordinatorRejects
+ 2/12 Test  #2: RuntimePublicationCoordinatorRejects ...   Passed    0.02 sec
+      Start  3: ISRSemanticValidationRejects
+ 3/12 Test  #3: ISRSemanticValidationRejects ...........   Passed    0.02 sec
+      Start  4: RetireGraceSemantics
+ 4/12 Test  #4: RetireGraceSemantics ...................   Passed    0.02 sec
+      Start  5: RuntimeSemanticSchemaValidation
+ 5/12 Test  #5: RuntimeSemanticSchemaValidation ........   Passed    0.02 sec
+      Start  6: ObservePathSingleSource
+ 6/12 Test  #6: ObservePathSingleSource ................   Passed    0.02 sec
+      Start  7: OverlapAuthoritySingular
+ 7/12 Test  #7: OverlapAuthoritySingular ...............   Passed    0.02 sec
+      Start  8: ShadowCompareContract
+ 8/12 Test  #8: ShadowCompareContract ..................   Passed    0.02 sec
+      Start  9: CrossfadeExecutorLocalContract
+ 9/12 Test  #9: CrossfadeExecutorLocalContract .........   Passed    0.03 sec
+      Start 10: PartialPublicationReject
+10/12 Test #10: PartialPublicationReject ...............   Passed    0.02 sec
+      Start 11: RebuildAdmissionRegression
+11/12 Test #11: RebuildAdmissionRegression .............   Passed    0.02 sec
+      Start 12: HeadlessAudioPathVerification
+12/12 Test #12: HeadlessAudioPathVerification ..........   Passed   10.83 sec
+
+100% tests passed, 0 tests failed out of 12
+
+Total Test time (real) =  11.06 sec

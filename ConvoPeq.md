@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-06-24 23:51:22
+> Generated: 2026-06-25 23:28:06
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -15021,6 +15021,25 @@ public:
     // = Layer0 の partitionSize
     //----------------------------------------------------------
     int getLatency() const noexcept { return m_latency; }
+
+    //----------------------------------------------------------
+    // getRingOverflowCount  ─ リングバッファオーバーフロー回数
+    // Audio Thread からいつでも呼び出し可 (atomic load)。
+    // 診断・ログ出力用。値は ringWrite 内で increment される。
+    //----------------------------------------------------------
+    int getRingOverflowCount() const noexcept
+    {
+        return convo::consumeAtomic(m_ringOverflowCount, std::memory_order_relaxed);
+    }
+
+    //----------------------------------------------------------
+    // resetRingOverflowCount  ─ オーバーフローカウンタを0にリセット
+    // Message Thread からのみ呼び出すこと。
+    //----------------------------------------------------------
+    void resetRingOverflowCount() noexcept
+    {
+        convo::publishAtomic(m_ringOverflowCount, 0, std::memory_order_relaxed);
+    }
 
     //----------------------------------------------------------
     // setOverflowCallback  ─ Audio Thread セーフなオーバーフロー通知
@@ -51065,6 +51084,27 @@ void ConvolverProcessor::timerCallback()
         juce::Logger::writeToLog("ConvolverProcessor: Latency clamp triggered (total: "
                                  + juce::String(currentClampCount) + " times)");
         lastReportedClampCount_ = currentClampCount;
+    }
+
+    // ── リングバッファオーバーフロー診断 (NUC ringOverflowCount の確認) ──
+    {
+        auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB
+        if (conv != nullptr)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                if (conv->nucConvolvers[ch] != nullptr)
+                {
+                    const int ov = conv->nucConvolvers[ch]->getRingOverflowCount();
+                    if (ov > 0)
+                    {
+                        juce::Logger::writeToLog("ConvolverProcessor: NUC ring overflow detected (ch="
+                                                 + juce::String(ch) + ", count=" + juce::String(ov) + ")");
+                        conv->nucConvolvers[ch]->resetRingOverflowCount();
+                    }
+                }
+            }
+        }
     }
 
     // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)
