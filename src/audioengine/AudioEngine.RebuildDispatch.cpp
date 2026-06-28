@@ -1,9 +1,16 @@
 #include <JuceHeader.h>
 #include <bit>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
 #include "DSPLifetimeManager.h"
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
 
 namespace {
 void diagLog(const juce::String& message)
@@ -772,8 +779,15 @@ void AudioEngine::rebuildThreadLoop()
                 return isRebuildObsolete(task.generation) || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
             };
 
-            if (isObsolete())
+            if (isObsolete()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const uint64_t pubGen = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_relaxed);
+                diagLog("[DIAG] rebuildThreadLoop: obsolete before prepare gen="
+                    + juce::String(task.generation)
+                    + " currentGen=" + juce::String(static_cast<juce::int64>(pubGen)));
+#endif
                 continue;
+            }
 
             if (!task.runtimeBuildSnapshot.sealed)
                 continue;
@@ -796,15 +810,33 @@ void AudioEngine::rebuildThreadLoop()
             dspGuard.ptr = buildResult.runtime;
             auto* newDSP = buildResult.runtime;
 
-            if (isObsolete())
+            if (isObsolete()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const double wastedMs = juce::Time::getMillisecondCounterHiRes() - buildStartMs;
+                const uint64_t pubGen = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_relaxed);
+                diagLog("[DIAG] rebuild obsolete phase=prepare gen="
+                    + juce::String(task.generation)
+                    + " currentGen=" + juce::String(static_cast<juce::int64>(pubGen))
+                    + " wasted=" + juce::String(wastedMs, 1) + "ms");
+#endif
                 continue;
+            }
 
             // 2. Rebuild IR if needed (Heavy operation)
             double rebuildIrElapsedMs = 0.0;
             if (newDSP->convolverRt().getIRLength() > 0)
             {
-                if (isObsolete())
+                if (isObsolete()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                    const double wastedMs = juce::Time::getMillisecondCounterHiRes() - buildStartMs;
+                    const uint64_t pubGen = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_relaxed);
+                    diagLog("[DIAG] rebuild obsolete phase=rebuildIR gen="
+                        + juce::String(task.generation)
+                        + " currentGen=" + juce::String(static_cast<juce::int64>(pubGen))
+                        + " wasted=" + juce::String(wastedMs, 1) + "ms");
+#endif
                     continue;
+                }
                 const double rebuildIrStartMs = juce::Time::getMillisecondCounterHiRes();
                 newDSP->convolverRt().rebuildAllIRsSynchronous(isObsolete);
                 rebuildIrElapsedMs = juce::Time::getMillisecondCounterHiRes() - rebuildIrStartMs;
@@ -812,6 +844,11 @@ void AudioEngine::rebuildThreadLoop()
             diagLog("[DIAG] rebuildThreadLoop: generation=" + juce::String(task.generation)
                 + " build=" + juce::String(buildElapsedMs, 1) + "ms"
                 + " rebuildIR=" + juce::String(rebuildIrElapsedMs, 1) + "ms");
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ フェーズ別メモリ: build後
+            const auto memAfterBuild = getProcessMemoryInfo();
+#endif
 
             const auto warmupError = runtimeBuilder.validateWarmup(*newDSP);
             if (warmupError != convo::BuildError::None)
@@ -834,8 +871,17 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
             }
 
-            if (isObsolete())
+            if (isObsolete()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const double wastedMs = juce::Time::getMillisecondCounterHiRes() - buildStartMs;
+                const uint64_t pubGen = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_relaxed);
+                diagLog("[DIAG] rebuild obsolete phase=warmup gen="
+                    + juce::String(task.generation)
+                    + " currentGen=" + juce::String(static_cast<juce::int64>(pubGen))
+                    + " wasted=" + juce::String(wastedMs, 1) + "ms");
+#endif
                 continue;
+            }
 
             // 4. Refresh Latency (Prevent pitch slide during fade-in)
             newDSP->convolverRt().refreshLatency();
@@ -874,6 +920,23 @@ void AudioEngine::rebuildThreadLoop()
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
             dspGuard.ptr = nullptr;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const double e2eElapsedMs = juce::Time::getMillisecondCounterHiRes() - buildStartMs;
+                // ★ フェーズ別メモリ: rebuildIR後とcommit前
+                const auto memAfterIR = getProcessMemoryInfo();
+                diagLog("[BUILD_PHASE] generation=" + juce::String(task.generation)
+                    + " build=" + juce::String(buildElapsedMs, 1) + "ms"
+                    + " rebuildIR=" + juce::String(rebuildIrElapsedMs, 1) + "ms"
+                    + " e2e=" + juce::String(e2eElapsedMs, 1) + "ms"
+                    + " memBuild=Private=" + juce::String(static_cast<juce::int64>(memAfterBuild.privateUsageMB)) + "MB"
+                    + ",WS=" + juce::String(static_cast<juce::int64>(memAfterBuild.workingSetMB)) + "MB"
+                    + ",PF=" + juce::String(static_cast<juce::int64>(memAfterBuild.pageFaultCount))
+                    + " memIR=Private=" + juce::String(static_cast<juce::int64>(memAfterIR.privateUsageMB)) + "MB"
+                    + ",WS=" + juce::String(static_cast<juce::int64>(memAfterIR.workingSetMB)) + "MB"
+                    + ",PF=" + juce::String(static_cast<juce::int64>(memAfterIR.pageFaultCount)));
+            }
+#endif
             enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);
         }
         catch (const std::exception& e)

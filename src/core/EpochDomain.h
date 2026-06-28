@@ -198,9 +198,17 @@ public:
         for (const auto& slot : readers)
         {
             // ★ Phase 3: quarantined Reader は safe-epoch 計算から除外
+            //   kQuarantinedFlag 設定時は depth==0 が不変条件:
+            //     - 即座 quarantine: depth==0 でのみ設定
+            //     - 遅延 quarantine: exitReader で depth:1→0 後に昇格
+            //   したがって depth の再チェックは不要だが、防衛的アサートで担保する。
             const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
             if ((flags & ReaderSlot::kQuarantinedFlag) != 0)
+            {
+                assert(convo::consumeAtomic(slot.depth, std::memory_order_acquire) == 0
+                    && "quarantined reader must have depth==0");
                 continue;
+            }
 
             // acquire: enterReader release の depth 書き込みと HB し、depth 読み取り後に epoch を読む。
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);

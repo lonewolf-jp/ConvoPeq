@@ -1,10 +1,17 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
 #include "RuntimePublicationOrchestrator.h"
 
 #include <filesystem>
 #include <fstream>  // ★ A-7: epoch_reclaim_audit.json 出力用
 #include <system_error>  // ★ A-7: std::error_code
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
 
 namespace {
 void diagLog(const juce::String& message)
@@ -380,6 +387,18 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     convo::fetchAddAtomic(publishedWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     updateMinMetric(oldestPublishedGeneration_, world.generation);
     updateMaxMetric(youngestPublishedGeneration_, world.generation);
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const auto memInfo = getProcessMemoryInfo();
+        if (memInfo.privateUsageMB > 0)
+        {
+            diagLog("[MEM] publish gen=" + juce::String(static_cast<juce::int64>(world.generation))
+                + " Private=" + juce::String(static_cast<juce::int64>(memInfo.privateUsageMB)) + "MB"
+                + " WS=" + juce::String(static_cast<juce::int64>(memInfo.workingSetMB)) + "MB");
+        }
+    }
+#endif
 
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     debugRuntime_.emitCIArtifacts();

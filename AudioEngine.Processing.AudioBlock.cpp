@@ -294,18 +294,19 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     }
 
+    // ★【DEBUG】callbackCount_ 直接書き込み — #if ブロックに入らなくても常にインクリメント
+    callbackCount_.fetch_add(1u, std::memory_order_relaxed);
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ callback 開始 tick（フル callback 時間計測用）
     //   早期 return でこの値が使われないケースがあるが、無視して問題ない。
     static constexpr auto kNeverStartedTicks = std::numeric_limits<int64_t>::min();
     int64_t cbStartTicks = kNeverStartedTicks;
-    uint64_t cbPrevEndTicks = 0;  // XRUNブロックが上書きする前の前回終了tickを保存
 
     // ★ XRUN 検出（callback 時間 + interval 超過）
     {
         const auto t0_start = juce::Time::getHighResolutionTicks();
         cbStartTicks = t0_start;  // 早期 return を通過した時点で確定
-        cbPrevEndTicks = convo::consumeAtomic(rtLocalState_.lastCallbackEndTicks, std::memory_order_relaxed);
         const auto ticksPerSec = juce::Time::getHighResolutionTicksPerSecond();
         const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         const double expectedMs = (engineSampleRate > 0.0)
@@ -314,9 +315,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         // interval 計測（前回終了時刻からの経過）
         double intervalMs = 0.0;
-        if (cbPrevEndTicks > 0)
+        const uint64_t lastEnd = convo::consumeAtomic(rtLocalState_.lastCallbackEndTicks, std::memory_order_relaxed);
+        if (lastEnd > 0)
         {
-            intervalMs = static_cast<double>(t0_start - cbPrevEndTicks)
+            intervalMs = static_cast<double>(t0_start - lastEnd)
                 * 1000.0 / static_cast<double>(ticksPerSec);
         }
 
@@ -401,11 +403,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 * 1000000.0 / static_cast<double>(ticksPerSec));
             updateAtomicMaximum(callbackMaxUs_, callbackUs);
 
-            // interval計測(μs) — cbPrevEndTicksからcbStartTicksまでの経過時間
-            if (cbPrevEndTicks > 0)
+            // interval計測(μs) — lastEndからcbStartTicksまでの経過時間
+            // lastEnd は前回の t1_end（前回callbackの終了tick）
+            const uint64_t prevEnd = convo::consumeAtomic(rtLocalState_.lastCallbackEndTicks, std::memory_order_relaxed);
+            if (prevEnd > 0)
             {
                 const auto intervalUs = static_cast<uint32_t>(
-                    static_cast<double>(cbStartTicks - cbPrevEndTicks)
+                    static_cast<double>(cbStartTicks - prevEnd)
                     * 1000000.0 / static_cast<double>(ticksPerSec));
                 updateAtomicMaximum(intervalMaxUs_, intervalUs);
             }

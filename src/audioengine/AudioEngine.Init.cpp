@@ -69,6 +69,7 @@ void AudioEngine::initialize()
     // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)
     // - ガベージコレクション
     startTimer(100);
+    timerPeriodMs_ = 100;
 
     initWorkerThread();
 }

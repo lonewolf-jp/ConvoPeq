@@ -1174,6 +1174,20 @@ public:
         double reclaimLatency = 0.0;
     };
 
+    // ★ 計測ログ追加: RT-safe XRUN イベント（trivially copyable → LockFreeRingBuffer 対応）
+    struct XRunEvent
+    {
+        uint64_t timestampTicks = 0;            // HighResolutionTicks（Audio Threadで取得）
+        double callbackMs = 0.0;                // 今回のcallback処理時間
+        double intervalMs = 0.0;                // 前回callbackからの経過時間
+        double expectedMs = 0.0;                // 期待されるブロック時間
+        int generation = 0;                     // XRUN検出時点の publish 世代
+        uint64_t retireQueueDepth = 0;          // XRUN発生時点のRetire滞留数（atomic load）
+        uint64_t sequenceNumber = 0;            // XRUN連番（単調増加カウンタ、ログ突き合わせ用）
+    };
+    static_assert(std::is_trivially_copyable_v<XRunEvent>,
+        "XRunEvent must be trivially copyable for LockFreeRingBuffer");
+
     enum class ResidencyAuthority : uint8_t
     {
         PublicationCoordinator = 0,
@@ -1237,6 +1251,10 @@ public:
         std::atomic<uint64_t> audioSampleCursorCounter { 0 };
         std::atomic<uint32_t> audioCallbackActiveCount { 0 };
         std::atomic<uint64_t> audioThreadRetireEnqueueDropped { 0 };
+        // ★ 計測ログ追加: XRUN/ACTIVATE 追跡用（RT-safe, atomic）
+        std::atomic<uint64_t> lastCallbackEndTicks { 0 };       // 前回コールバック終了の HighResolutionTicks
+        std::atomic<uint64_t> xrunSequenceCounter { 0 };        // XRUN連番カウンタ
+        std::atomic<uint64_t> lastActivatedGeneration { 0 };    // ACTIVATE 追跡用（直前の generation）
     };
 
     struct RTAuxMutable
@@ -1307,6 +1325,27 @@ public:
         int debugLastReportedCoeffBankIdx { -1 };
         // Adaptive bank switch count tracker (read from DSPCore atomic on Message Thread)
         uint64_t debugLastReportedBankSwitchCount { std::numeric_limits<uint64_t>::max() };
+
+        // ★ 計測ログ追加: Retire/Backpressure tracking
+        uint64_t debugLastReportedRetireQueueDepth { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedFallbackQueueDepth { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedQuarantineResident { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedMaxPendingRetireObserved { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildBacklog { std::numeric_limits<uint64_t>::max() };
+        int debugLastReportedRetirePressureLevel { -1 };
+
+        // ★ 計測ログ追加: Memory tracking
+        uint64_t debugLastReportedPrivateUsageMB { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedWorkingSetMB { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedPageFaultCount { std::numeric_limits<uint64_t>::max() };
+
+        // ★ 計測ログ追加: World count tracking
+        int debugLastReportedWorldActiveCount { -1 };
+        int debugLastReportedWorldFadingCount { -1 };
+
+        // ★ 計測ログ追加: XRUN drop カウンタ
+        // Audio Thread から atomic increment される。Timer Thread が消費時に読み取り・リセット。
+        std::atomic<uint64_t> xRunDropCount { 0 };
     };
 
     void setCliProcessingTelemetryEnabled(bool enabled) noexcept
@@ -1689,6 +1728,16 @@ public:
     std::atomic<float> outputLevelLinear{0.0f};
     std::atomic<int>   maxSamplesPerBlock{4096};
 
+    // ---- Audio callback 1秒サマリ用（CBSUMMARY） ----
+    // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS に依存しない（常時定義、未使用時は最適化で除去）
+    std::atomic<uint32_t> callbackMaxUs_{0};    // 1秒間のcallback実行時間最大値(μs)
+    std::atomic<uint32_t> intervalMaxUs_{0};    // 1秒間のcallback間隔最大値(μs) ★主指標
+    std::atomic<uint32_t> callbackCount_{0};    // 1秒間のcallback実行回数(参考値)
+
+    // ---- Timer周期 ----
+    // startTimer(100) で設定される。将来の周期変更に追従可能。
+    int timerPeriodMs_ = 100;  // Timerスレッドのみ読み書き。複数スレッド読み取りが必要な場合はatomic化
+
     std::atomic<bool> eqBypassRequested { false };
     std::atomic<bool> convBypassRequested { false };
     std::atomic<bool> eqBypassActive   { false };
@@ -1945,6 +1994,9 @@ public:
     };
 
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
+    // ★ 計測ログ追加: XRUN リングバッファ（Audio Thread write, Timer Thread read）
+    static constexpr size_t kXRunBufferCapacity = 64;
+    LockFreeRingBuffer<XRunEvent, kXRunBufferCapacity> xRunBuffer;
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
     struct LearnerStateSnapshot {

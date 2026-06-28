@@ -1,5 +1,16 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+namespace {
+void diagLog(const juce::String& message)
+{
+    DBG(message);
+    juce::Logger::writeToLog(message);
+}
+} // namespace
+#endif
 
 namespace
 {
@@ -51,15 +62,31 @@ AudioEngine::DSPCore::DSPCore()
 
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const double prepareStartMs = juce::Time::getMillisecondCounterHiRes();
+    static const auto elapsedSince = [](double fromMs) -> double {
+        return juce::Time::getMillisecondCounterHiRes() - fromMs;
+    };
+    diagLog("[DSPCORE_PREPARE] enter");
+#else
     juce::Logger::writeToLog("[DSPCORE_PREPARE] enter");
+#endif
 
     // Route EQ and Convolver retirement through AudioEngine's coordinator
     if (owner != nullptr)
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        double t0 = juce::Time::getMillisecondCounterHiRes();
+        diagLog("[DSPCORE_PREPARE] calling setRetireCoordinator");
+        eq.setRetireCoordinator(&owner->runtimePublicationBridge_);
+        convolver.setRetireCoordinator(&owner->runtimePublicationBridge_);
+        diagLog("[DSPCORE_PREPARE] setRetireCoordinator done: " + juce::String(elapsedSince(t0), 2) + "ms");
+#else
         juce::Logger::writeToLog("[DSPCORE_PREPARE] setRetireCoordinator");
         eq.setRetireCoordinator(&owner->runtimePublicationBridge_);
         convolver.setRetireCoordinator(&owner->runtimePublicationBridge_);
         juce::Logger::writeToLog("[DSPCORE_PREPARE] setRetireCoordinator done");
+#endif
     }
 
     // Exception-safety context:
@@ -68,34 +95,29 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // - ここでの確保は RAII で commit 前に完了させ、Audio Thread へは完成状態のみ publish する。
     this->sampleRate = newSampleRate;
     this->noiseShaperType = selectedNoiseShaperType;
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DSPCORE_PREPARE] sampleRate set: sr=" + juce::String(newSampleRate) + " spb=" + juce::String(samplesPerBlock));
+#else
     juce::Logger::writeToLog("[DSPCORE_PREPARE] sampleRate set: sr=" + juce::String(newSampleRate) + " spb=" + juce::String(samplesPerBlock));
+#endif
 
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
-    {
         targetFactor = manualOversamplingFactor;
-    }
     else
     {
-        // 自動設定 (デフォルト)
-        if (newSampleRate >= 705600)
-            targetFactor = 1;
-        else if (newSampleRate >= 352800)
-            targetFactor =  2;
-        else if (newSampleRate >= 176400)
-            targetFactor =  4;
-        else if (newSampleRate >= 88200)
-            targetFactor = 8;
-         else
-             targetFactor = 8;
+        if (newSampleRate >= 705600)      targetFactor = 1;
+        else if (newSampleRate >= 352800) targetFactor = 2;
+        else if (newSampleRate >= 176400) targetFactor = 4;
+        else if (newSampleRate >= 88200)  targetFactor = 8;
+        else                              targetFactor = 8;
     }
 
-    // 制限: サンプルレートに応じた最大倍率を適用
     int maxFactor = 1;
     if (newSampleRate <= 96000.0)       maxFactor = 8;
     else if (newSampleRate <= 192000.0) maxFactor = 4;
     else if (newSampleRate <= 384000.0) maxFactor = 2;
-
     targetFactor = std::min(targetFactor, maxFactor);
 
     size_t factorLog2 = 0;
@@ -107,38 +129,28 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     oversamplingFactor = (size_t)1 << factorLog2;
     activeOversamplingType = oversamplingType;
 
-    // ==================================================================
-    // 【Issue 3 完全修正】内部最大バッファサイズの計算（推奨A）
-    // 固定で SAFE_MAX_BLOCK_SIZE × 8 を確保
-    // 理由:
-    //   ・OS=8x時のupBlockサイズを完全にカバー
-    //   ・RCU再構築（IRロード・プリセット切替・OS変更）ごとにresizeしない
-    //   ・MKLAllocator + 64byteアライメントの最適化が最大限活きる
-    //   ・将来16x OS対応もこの定数1箇所変更だけで済む
-    // ==================================================================
     constexpr int MAX_OS_FACTOR = 8;
-    // [FIX] Ensure we cover the requested block size even if it exceeds SAFE_MAX_BLOCK_SIZE
     const int inputMaxBlock     = std::max(SAFE_MAX_BLOCK_SIZE, samplesPerBlock);
     const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
-
     maxSamplesPerBlock   = inputMaxBlock;
     maxInternalBlockSize = internalMaxBlock;
-    juce::Logger::writeToLog("[DSPCORE_PREPARE] blockCalc: inputMaxBlock=" + juce::String(inputMaxBlock) + " internalMaxBlock=" + juce::String(internalMaxBlock));
 
-// === 【パッチ3】raw aligned_malloc確保（message threadのみ・64byte保証）===
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DSPCORE_PREPARE] blockCalc: inputMaxBlock=" + juce::String(inputMaxBlock) + " internalMaxBlock=" + juce::String(internalMaxBlock));
     const int newRequired = internalMaxBlock;
-    juce::Logger::writeToLog("[DSPCORE_PREPARE] allocating aligned buffers: required=" + juce::String(newRequired));
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] allocating aligned buffers: required=" + juce::String(internalMaxBlock));
+#else
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] blockCalc: inputMaxBlock=" + juce::String(inputMaxBlock) + " internalMaxBlock=" + juce::String(internalMaxBlock));
+    const int newRequired = internalMaxBlock;
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] allocating aligned buffers: required=" + juce::String(internalMaxBlock));
+#endif
+
     if (newRequired > alignedCapacity || !alignedL || !alignedR)
     {
-        // Exception-safe allocation using local ScopedAlignedPtr
         auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(newRequired));
         auto newR = convo::makeAlignedArray<double>(static_cast<size_t>(newRequired));
-
-        // 明示的ゼロクリア（Denormal/NaN防止）
         juce::FloatVectorOperations::clear(newL.get(), newRequired);
         juce::FloatVectorOperations::clear(newR.get(), newRequired);
-
-        // Commit (noexcept move)
         alignedL = std::move(newL);
         alignedR = std::move(newR);
         alignedCapacity = newRequired;
@@ -155,84 +167,110 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         dryBypassCapacityDouble = newRequired;
     }
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DSPCORE_PREPARE] aligned buffers done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    auto& ramp = ramps();
+
+    // 11 timing pairs
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling ramp.prepare");
+    ramp.prepare(newSampleRate);
+    diagLog("[DSPCORE_PREPARE] ramp.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling oversampling.prepare");
+    oversampling.prepare(inputMaxBlock, static_cast<int>(oversamplingFactor),
+        (oversamplingType == OversamplingType::LinearPhase) ? CustomInputOversampler::Preset::LinearPhase : CustomInputOversampler::Preset::IIRLike);
+    diagLog("[DSPCORE_PREPARE] oversampling.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling softClipOS.prepareSingleStage");
+    softClipOS.prepareSingleStage(31, 90.0, internalMaxBlock);
+    diagLog("[DSPCORE_PREPARE] softClipOS.prepareSingleStage done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
+    const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
+    diagLog("[DSPCORE_PREPARE] processingRate=" + juce::String(processingRate) + " processingBlockSize=" + juce::String(processingBlockSize));
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling convolverState->prepare");
+    convolverState->prepare(owner, processingRate, processingBlockSize);
+    diagLog("[DSPCORE_PREPARE] convolverState->prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling eqState->prepare");
+    eqState->prepare(processingRate, internalMaxBlock);
+    diagLog("[DSPCORE_PREPARE] eqState->prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling dcBlockers().init");
+    dcBlockers().init(newSampleRate, processingRate);
+    diagLog("[DSPCORE_PREPARE] dcBlockers().init done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling noise shaper prepare: type=" + juce::String(static_cast<int>(selectedNoiseShaperType)));
+    if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic) dither.prepare(newSampleRate, bitDepth);
+    else if (selectedNoiseShaperType == NoiseShaperType::Fixed4Tap) { fixedNoiseShaper.setCoefficients(kFixedNoiseShaperTunedCoeffs); fixedNoiseShaper.prepare(newSampleRate, bitDepth); }
+    else if (selectedNoiseShaperType == NoiseShaperType::Fixed15Tap) { fixed15TapNoiseShaper.setCoefficients(kFixed15TapNoiseShaperTunedCoeffs); fixed15TapNoiseShaper.prepare(newSampleRate, bitDepth); }
+    else { adaptiveNoiseShaper.prepare(bitDepth); adaptiveNoiseShaper.setCoefficients(kDefaultAdaptiveNoiseShaperCoeffs.data(), kAdaptiveNoiseShaperOrder); activeAdaptiveCoeffGeneration = 0; activeAdaptiveCoeffBankIndex = -1; }
+    this->ditherBitDepth = bitDepth;
+    diagLog("[DSPCORE_PREPARE] noise shaper prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling outputFilter.prepare");
+    outputFilter.prepare(processingRate);
+    diagLog("[DSPCORE_PREPARE] outputFilter.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling truePeakDetector.prepare");
+    truePeakDetector.prepare(newSampleRate, maxInternalBlockSize);
+    diagLog("[DSPCORE_PREPARE] truePeakDetector.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling loudnessMeter.prepare");
+    loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
+    diagLog("[DSPCORE_PREPARE] loudnessMeter.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
+    setFixedLatencySamples(0);
+    diagLog("[DSPCORE_PREPARE] setFixedLatencySamples done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
+    diagLog("[DSPCORE_PREPARE] total: " + juce::String(elapsedSince(prepareStartMs), 2) + "ms");
+#else
     auto& ramp = ramps();
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling ramp.prepare");
     ramp.prepare(newSampleRate);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] ramp.prepare done");
-
-    const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
-                        ? CustomInputOversampler::Preset::LinearPhase
-                        : CustomInputOversampler::Preset::IIRLike;
+    const auto osPreset = (oversamplingType == OversamplingType::LinearPhase) ? CustomInputOversampler::Preset::LinearPhase : CustomInputOversampler::Preset::IIRLike;
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling oversampling.prepare");
     oversampling.prepare(inputMaxBlock, static_cast<int>(oversamplingFactor), osPreset);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] oversampling.prepare done");
-
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling softClipOS.prepareSingleStage");
     softClipOS.prepareSingleStage(31, 90.0, internalMaxBlock);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] softClipOS.prepareSingleStage done");
-
     const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] processingRate=" + juce::String(processingRate) + " processingBlockSize=" + juce::String(processingBlockSize));
-
-    // プロセッサの準備
-    // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling convolverState->prepare");
     convolverState->prepare(owner, processingRate, processingBlockSize);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] convolverState->prepare done");
-
-    // EQも内部最大サイズで準備（より安全）
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling eqState->prepare");
     eqState->prepare(processingRate, internalMaxBlock);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] eqState->prepare done");
-
-    // 出力段・入力段・OS後の DC blocker 状態を sidecar に初期化する。
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling dcBlockers().init");
     dcBlockers().init(newSampleRate, processingRate);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] dcBlockers().init done");
-
-    // ノイズシェーパーの準備 (出力段で行うため元のサンプルレート)
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling noise shaper prepare: type=" + juce::String(static_cast<int>(selectedNoiseShaperType)));
-    if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic)
-        dither.prepare(newSampleRate, bitDepth);
-    else if (selectedNoiseShaperType == NoiseShaperType::Fixed4Tap)
-    {
-        fixedNoiseShaper.setCoefficients(kFixedNoiseShaperTunedCoeffs);
-        fixedNoiseShaper.prepare(newSampleRate, bitDepth);
-    }
-    else if (selectedNoiseShaperType == NoiseShaperType::Fixed15Tap)
-    {
-        fixed15TapNoiseShaper.setCoefficients(kFixed15TapNoiseShaperTunedCoeffs);
-        fixed15TapNoiseShaper.prepare(newSampleRate, bitDepth);
-    }
-    else
-    {
-        adaptiveNoiseShaper.prepare(bitDepth);
-        adaptiveNoiseShaper.setCoefficients(kDefaultAdaptiveNoiseShaperCoeffs.data(), kAdaptiveNoiseShaperOrder);
-        activeAdaptiveCoeffGeneration = 0;
-        activeAdaptiveCoeffBankIndex = -1;
-    }
-    this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
+    if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic) dither.prepare(newSampleRate, bitDepth);
+    else if (selectedNoiseShaperType == NoiseShaperType::Fixed4Tap) { fixedNoiseShaper.setCoefficients(kFixedNoiseShaperTunedCoeffs); fixedNoiseShaper.prepare(newSampleRate, bitDepth); }
+    else if (selectedNoiseShaperType == NoiseShaperType::Fixed15Tap) { fixed15TapNoiseShaper.setCoefficients(kFixed15TapNoiseShaperTunedCoeffs); fixed15TapNoiseShaper.prepare(newSampleRate, bitDepth); }
+    else { adaptiveNoiseShaper.prepare(bitDepth); adaptiveNoiseShaper.setCoefficients(kDefaultAdaptiveNoiseShaperCoeffs.data(), kAdaptiveNoiseShaperOrder); activeAdaptiveCoeffGeneration = 0; activeAdaptiveCoeffBankIndex = -1; }
+    this->ditherBitDepth = bitDepth;
     juce::Logger::writeToLog("[DSPCORE_PREPARE] noise shaper prepare done");
-
-    // 出力周波数フィルターの係数を事前計算 (processingRate: OS後のレート)
-    // filter.txt: ハイカット/ローカット(①) / ローパス/ハイパス(②) の全モード分を一括生成
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling outputFilter.prepare");
     outputFilter.prepare(processingRate);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] outputFilter.prepare done");
-
-    // TruePeakDetector / LoudnessMeter 準備（ベースレート）
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling truePeakDetector.prepare");
     truePeakDetector.prepare(newSampleRate, maxInternalBlockSize);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] truePeakDetector.prepare done");
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling loudnessMeter.prepare");
     loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] loudnessMeter.prepare done");
-
-    // 初期状態は固定レイテンシなし
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
     setFixedLatencySamples(0);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] setFixedLatencySamples done");
+#endif
 }
 
 void AudioEngine::DSPCore::setFixedLatencySamples(int samples)

@@ -4,10 +4,19 @@
 // ★ 責務: tryPush / pop / residentCount / drainAll のみ
 //   retry/age/deferred/priority は一切判断しない → Coordinator の責務
 //
-// ★ ADR-001: SPSC 前提
+// ★ ADR-001: SPSC 前提（アーキテクチャ前提条件 — 永久設計ではない）
 //   Producer: Audio Callback（processBlock）のみ
 //   Consumer: Coordinator (NonRT Timer) のみ
-//   複数Producerが必要な場合は MPSC Ring への置き換えが必要
+//
+//   ⚠ 重要: この Ring は SPSC (Single Producer, Single Consumer) を前提とする。
+//   将来以下のシナリオが発生した場合、本設計は成立せず MPSC Ring への置き換えが必要:
+//     - Offline Render (レンダリングスレッドが別に存在)
+//     - Multi Device / ASIO Dual Callback (複数オーディオコールバック)
+//     - Worker Thread からの直接 emitRetireIntent
+//
+//   これは「将来変更時に再評価」ではなく、アーキテクチャの前提条件である。
+//   複数 Producer が必要になった場合は ISRRetireOverflowRing 全体を
+//   MPSC 対応の Ring に置き換えること（LockFreeRingBuffer は SPSC 専用）。
 //
 // ★ 設計: LockFreeRingBuffer.h テンプレートを直接流用
 //   - trivially copyable 制約
@@ -45,9 +54,13 @@ struct RetireOverflowEntry
  * 責務: tryPush / pop / residentCount / drainAll のみ
  * retry/age/deferred/priority は一切判断しない
  *
- * SPSC前提 (ADR-001):
+ * ⚠ SPSC前提 (ADR-001) — アーキテクチャ前提条件:
  *   Producer: Audio Callback（processBlock）のみ
  *   Consumer: Coordinator (NonRT Timer) のみ
+ *
+ *   本クラスは SPSC 専用に設計されている。
+ *   複数 Producer が必要になった場合は MPSC Ring への置き換えが必須。
+ *   詳細はファイル先頭の ADR-001 を参照。
  */
 class RetireOverflowRing
 {

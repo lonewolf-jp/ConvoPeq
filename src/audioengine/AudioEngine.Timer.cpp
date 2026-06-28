@@ -1,12 +1,34 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
 #include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "DSPLifetimeManager.h"
 #include "../NoiseShaperLearner.h"  // ★ Work39: Restore Learner Rollback 用
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
+
 namespace {
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+juce::String diagPrefix(uint64_t currentGeneration)
+{
+    const auto now = juce::Time::getCurrentTime();
+    const auto timestamp = now.formatted("%H:%M:%S.")
+        + juce::String(now.getMilliseconds()).paddedLeft('0', 3);
+    const auto ticks = juce::Time::getHighResolutionTicks();
+    return "[" + timestamp + "]"
+        + " Gen=" + juce::String(static_cast<juce::int64>(currentGeneration))
+        + " Ticks=" + juce::String(static_cast<juce::int64>(ticks));
+}
+
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
 void diagLog(const juce::String& message)
 {
     DBG(message);
@@ -19,6 +41,38 @@ void AudioEngine::timerCallback()
     const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
     const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ Timer exec開始時刻（timerCallback全体の実行時間計測用）
+    //    関数スコープのstatic変数。末尾のexecブロックと共有。
+    static double s_timerExecStartMs = 0.0;
+    s_timerExecStartMs = juce::Time::getMillisecondCounterHiRes();
+
+    // ★ Timer jitter計測（timerCallback先頭）
+    {
+        static double s_prevCallbackMs = 0.0;
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        const double expectedMs = static_cast<double>(timerPeriodMs_);
+
+        if (s_prevCallbackMs > 0.0) {
+            const double timerIntervalMs = nowMs - s_prevCallbackMs;
+            const double jitterMs = timerIntervalMs - expectedMs;
+            const double jitterThreshold = std::max(20.0, expectedMs * 0.1);
+            if (std::abs(jitterMs) > jitterThreshold) {
+                const int estimatedMissed = static_cast<int>(std::abs(jitterMs) / expectedMs);
+                const uint64_t gen = (runtimeWorld != nullptr)
+                    ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+                const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+                diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
+                    + "] [TIMER] jitter: interval=" + juce::String(timerIntervalMs, 2) + "ms"
+                    + " (expected=" + juce::String(expectedMs, 0) + "ms, delta=" + juce::String(jitterMs, 2) + "ms"
+                    + ", estimatedMissed=" + juce::String(estimatedMissed) + ")");
+            }
+        }
+        s_prevCallbackMs = nowMs;
+    }
+#endif
+
     const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
     const auto* currentSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
 
@@ -425,12 +479,40 @@ void AudioEngine::timerCallback()
     const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle)
         || shouldUseDryAsOldInWorld(runtimeReadHandle);
 
+    // ★ XFADE start 検出: crossfadeRuntime_ が非pending→pendingに遷移した瞬間を記録
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        static bool s_prevPending = false;
+        const bool nowPending = crossfadeRuntime_.isPending();
+        if (nowPending && !s_prevPending) {
+            const double expectedSec = crossfadeRuntime_.getQueuedFadeTimeSec();
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+            const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+            diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
+                + "] [XFADE] start expected=" + juce::String(expectedSec, 3) + "s");
+        }
+        s_prevPending = nowPending;
+    }
+#endif
+
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
 
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ XFADE completed ログ（既存のfade完了ブロックに追記）
+        {
+            const double elapsedSec = static_cast<double>(crossfadeRuntime_.getFadeAgeUs()) / 1'000'000.0;
+            const double expectedSec = crossfadeRuntime_.getQueuedFadeTimeSec();
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+            const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+            diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
+                + "] [XFADE] completed: elapsed=" + juce::String(elapsedSec, 3) + "s"
+                + " expected=" + juce::String(expectedSec, 3) + "s");
+        }
+#endif
         // ★ PR2/PR4: Authority の Registry から active crossfade を取得
         auto records = crossfadeAuthorityRuntime_.getActiveCrossfades();
         if (!records.empty())
@@ -601,6 +683,253 @@ void AudioEngine::timerCallback()
     // UI用プロセッサのクリーンアップ
     uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ 計測ログ: Backpressure 診断（変化時のみ [BACKPRESSURE] として出力）
+    {
+        const auto backpressure = getRuntimeBackpressureTelemetry();
+        if (backpressure.retireQueueDepth != rtAuxMutable_.debugLastReportedRetireQueueDepth
+            || backpressure.fallbackQueueDepth != rtAuxMutable_.debugLastReportedFallbackQueueDepth
+            || backpressure.quarantineResident != rtAuxMutable_.debugLastReportedQuarantineResident
+            || backpressure.retirePressureLevel != rtAuxMutable_.debugLastReportedRetirePressureLevel)
+        {
+            rtAuxMutable_.debugLastReportedRetireQueueDepth = backpressure.retireQueueDepth;
+            rtAuxMutable_.debugLastReportedFallbackQueueDepth = backpressure.fallbackQueueDepth;
+            rtAuxMutable_.debugLastReportedQuarantineResident = backpressure.quarantineResident;
+            rtAuxMutable_.debugLastReportedRetirePressureLevel = backpressure.retirePressureLevel;
+
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+            diagLog(diagPrefix(gen) + " [BACKPRESSURE] retireDepth="
+                + juce::String(static_cast<juce::int64>(backpressure.retireQueueDepth))
+                + " fallback=" + juce::String(static_cast<juce::int64>(backpressure.fallbackQueueDepth))
+                + " quarantine=" + juce::String(static_cast<juce::int64>(backpressure.quarantineResident))
+                + " pressureLevel=" + juce::String(backpressure.retirePressureLevel));
+        }
+    }
+
+    // ★ メモリ情報のキャッシュ
+    // MEMブロックで毎秒更新。XRUN消費ループではこのキャッシュを参照して
+    // GetProcessMemoryInfo() の多重呼び出しを避ける。
+    static ProcessMemoryInfo s_cachedMemInfo {};
+
+    // ★ 計測ログ: Memory 定期ログ（1秒ごと・常時出力）+ PageFault Delta警告
+    {
+        static int64_t lastMemLogTicks = 0;
+        static uint64_t s_prevPageFaults = 0;
+        static double s_pfEwmaAvg = 0.0;
+        static int s_pfSampleCount = 0;
+        static constexpr int kEwmaWarmupSamples = 10;
+        static constexpr uint64_t kAbsoluteThreshold = 50000;
+
+        const auto nowTicks = juce::Time::getHighResolutionTicks();
+        const auto ticksPerSec = juce::Time::getHighResolutionTicksPerSecond();
+        if (nowTicks - lastMemLogTicks >= ticksPerSec)
+        {
+            lastMemLogTicks = nowTicks;
+            const auto memInfo = getProcessMemoryInfo();
+            s_cachedMemInfo = memInfo;  // ★ XRUN消費ループ用にキャッシュ更新
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+            const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+
+            // Delta計算（初回は0）
+            const uint64_t pfDelta = (s_prevPageFaults > 0)
+                ? (memInfo.pageFaultCount - s_prevPageFaults) : 0;
+            s_prevPageFaults = memInfo.pageFaultCount;
+
+            // ★【重要】PageFault警告判定はEWMA更新の前に行う
+            const double thresholdRel = (s_pfSampleCount >= kEwmaWarmupSamples)
+                ? std::max(1000.0, s_pfEwmaAvg * 5.0) : 0.0;
+            const uint64_t threshold = std::max<uint64_t>(kAbsoluteThreshold,
+                static_cast<uint64_t>(thresholdRel));
+            const bool warnAbsolute = (pfDelta > kAbsoluteThreshold);
+            const bool warnRelative = (s_pfSampleCount >= kEwmaWarmupSamples)
+                && (pfDelta > static_cast<uint64_t>(thresholdRel));
+
+            // ★ MEMログ（Seq+Delta+Pagefile付き）
+            diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
+                + "] [MEM] Private=" + juce::String(static_cast<juce::int64>(memInfo.privateUsageMB)) + "MB"
+                + " WS=" + juce::String(static_cast<juce::int64>(memInfo.workingSetMB)) + "MB"
+                + " Pagefile=" + juce::String(static_cast<juce::int64>(memInfo.pagefileUsageMB)) + "MB"
+                + " PageFaults=" + juce::String(static_cast<juce::int64>(memInfo.pageFaultCount))
+                + " Delta=+" + juce::String(static_cast<juce::int64>(pfDelta)));
+
+            // ★ PageFault警告（absolute OR relative）
+            if (pfDelta > 0 && (warnAbsolute || warnRelative)) {
+                const auto warnSeq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+                diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(warnSeq))
+                    + "] [WARN] PageFault surge: +" + juce::String(static_cast<juce::int64>(pfDelta))
+                    + " faults (EWMA=" + juce::String(s_pfEwmaAvg, 0)
+                    + ", threshold=" + juce::String(static_cast<juce::int64>(threshold)) + ")");
+            }
+
+            // ★ EWMA更新（警告判定の後）+ クリッピング
+            const double clippedDelta = std::min<double>(static_cast<double>(pfDelta), 50000.0);
+            if (s_pfSampleCount < kEwmaWarmupSamples) {
+                s_pfEwmaAvg = (s_pfEwmaAvg * static_cast<double>(s_pfSampleCount) + clippedDelta)
+                    / static_cast<double>(s_pfSampleCount + 1);
+                ++s_pfSampleCount;
+            } else {
+                s_pfEwmaAvg = 0.05 * clippedDelta + 0.95 * s_pfEwmaAvg;
+            }
+
+            // ★ WS減少警告（absolute AND relative）
+            //    前回のWSをstatic保持し、5%以上かつ50MB以上の減少を検出
+            {
+                static uint64_t s_prevWsMB = 0;
+                if (s_prevWsMB > 0 && memInfo.workingSetMB < s_prevWsMB) {
+                    const uint64_t wsDropMB = s_prevWsMB - memInfo.workingSetMB;
+                    const double wsDropPct = static_cast<double>(wsDropMB) / static_cast<double>(s_prevWsMB) * 100.0;
+                    static constexpr uint64_t kMinWsDropMB = 50;
+                    static constexpr double kMinWsDropPct = 5.0;
+                    if (wsDropMB >= kMinWsDropMB && wsDropPct >= kMinWsDropPct) {
+                        const auto warnSeq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+                        diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(warnSeq))
+                            + "] [WARN] WS dropped: " + juce::String(static_cast<juce::int64>(wsDropMB)) + "MB"
+                            + " (" + juce::String(wsDropPct, 1) + "%)"
+                            + " from " + juce::String(static_cast<juce::int64>(s_prevWsMB)) + "MB"
+                            + " to " + juce::String(static_cast<juce::int64>(memInfo.workingSetMB)) + "MB");
+                    }
+                }
+                s_prevWsMB = memInfo.workingSetMB;
+            }
+        }
+    }
+
+    // ★ 計測ログ: Audio callback 1秒サマリ（CBSUMMARY）
+    //    intervalMax を主指標、callbackMax を副指標とする。
+    //    変化があった秒のみ出力（通常時0行）。
+    {
+        static int64_t lastCbSummaryTicks = 0;
+        const auto nowTicks = juce::Time::getHighResolutionTicks();
+        const auto ticksPerSec = juce::Time::getHighResolutionTicksPerSecond();
+        if (nowTicks - lastCbSummaryTicks >= ticksPerSec)
+        {
+            lastCbSummaryTicks = nowTicks;
+            const uint32_t ivMaxUs = convo::exchangeAtomic(intervalMaxUs_, 0u, std::memory_order_relaxed);
+            const uint32_t cbMaxUs = convo::exchangeAtomic(callbackMaxUs_, 0u, std::memory_order_relaxed);
+            const uint32_t cbCount = convo::exchangeAtomic(callbackCount_, 0u, std::memory_order_relaxed);
+
+            const uint32_t expectedCbCount = (currentSampleRate.load(std::memory_order_relaxed) > 0.0
+                && maxSamplesPerBlock.load(std::memory_order_relaxed) > 0)
+                ? static_cast<uint32_t>(currentSampleRate.load(std::memory_order_relaxed)
+                    / static_cast<double>(maxSamplesPerBlock.load(std::memory_order_relaxed)))
+                : 0;
+            const int32_t lossCount = static_cast<int32_t>(expectedCbCount) - static_cast<int32_t>(cbCount);
+
+            static uint32_t s_prevIntervalMaxUs = 0;
+            static uint32_t s_prevCbMaxUs = 0;
+            const bool hasChange = (ivMaxUs != s_prevIntervalMaxUs)
+                || (cbMaxUs != s_prevCbMaxUs);
+            s_prevIntervalMaxUs = ivMaxUs;
+            s_prevCbMaxUs = cbMaxUs;
+
+            if (hasChange && (ivMaxUs > 0 || cbMaxUs > 0 || cbCount > 0)) {
+                const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+                const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+                diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
+                    + "] [CBSUMMARY] intervalMax=" + juce::String(static_cast<double>(ivMaxUs) / 1000.0, 3) + "ms"
+                    + " callbackMax=" + juce::String(static_cast<double>(cbMaxUs) / 1000.0, 3) + "ms"
+                    + " (expected=" + juce::String(static_cast<juce::int64>(expectedCbCount))
+                    + " actual=" + juce::String(static_cast<juce::int64>(cbCount))
+                    + " loss=" + juce::String(static_cast<juce::int64>(lossCount)) + ")");
+            }
+        }
+    }
+
+    // ★ 計測ログ: WORLD count（Active/Fading/Retired）
+    {
+        auto* activeDsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        auto* fadingDsp = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        const auto backpressure = getRuntimeBackpressureTelemetry();
+        const int activeCount = (activeDsp != nullptr) ? 1 : 0;
+        const int fadingCount = (fadingDsp != nullptr) ? 1 : 0;
+
+        if (activeCount != rtAuxMutable_.debugLastReportedWorldActiveCount
+            || fadingCount != rtAuxMutable_.debugLastReportedWorldFadingCount
+            || backpressure.retireQueueDepth != rtAuxMutable_.debugLastReportedRetireQueueDepth)
+        {
+            rtAuxMutable_.debugLastReportedWorldActiveCount = activeCount;
+            rtAuxMutable_.debugLastReportedWorldFadingCount = fadingCount;
+
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+            diagLog(diagPrefix(gen) + " [WORLD] Active=" + juce::String(activeCount)
+                + " Fading=" + juce::String(fadingCount)
+                + " RetireQueue=" + juce::String(static_cast<juce::int64>(backpressure.retireQueueDepth))
+                + " Quarantine=" + juce::String(static_cast<juce::int64>(backpressure.quarantineResident)));
+        }
+    }
+
+    // ★ 計測ログ: XRUN リングバッファ消費（100ms毎）
+    {
+        // XRUN drop count を読み取り・リセット
+        const uint64_t xRunDropped = convo::exchangeAtomic(rtAuxMutable_.xRunDropCount, 0, std::memory_order_acq_rel);
+        if (xRunDropped > 0)
+        {
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+            diagLog(diagPrefix(gen) + " [XRUN] dropped="
+                + juce::String(static_cast<juce::int64>(xRunDropped))
+                + " events (ring buffer full)");
+        }
+
+        // ★ メモリはキャッシュから取得（毎回 GetProcessMemoryInfo を呼ばない）
+        //    初回は MEM ブロックより先に XRUN が発生する可能性があるため、
+        //    キャッシュが空ならここで初期化する。
+        if (s_cachedMemInfo.privateUsageMB == 0 && s_cachedMemInfo.workingSetMB == 0)
+        {
+            s_cachedMemInfo = getProcessMemoryInfo();
+        }
+
+        XRunEvent ev;
+        while (xRunBuffer.pop(ev))
+        {
+            const auto backpressure = getRuntimeBackpressureTelemetry();
+            const auto lifecycle = getRuntimeLifecycleDiagnostics();
+            const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+
+            // ★ ACTIVATE イベント（callbackMs==0 && intervalMs==0 が ACTIVATE）
+            if (ev.callbackMs == 0.0 && ev.intervalMs == 0.0)
+            {
+                diagLog(diagPrefix(gen) + " [ACTIVATE] EventGen=" + juce::String(ev.generation));
+                continue;
+            }
+
+            // ★ XRUN イベント — メモリ情報はキャッシュを使用
+            const juce::String xrunId = "XRUN#" + juce::String(static_cast<juce::int64>(ev.sequenceNumber));
+            const auto* activeDsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+            const auto* fadingDsp = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+            const int activeCount = (activeDsp != nullptr) ? 1 : 0;
+            const int fadingCount = (fadingDsp != nullptr) ? 1 : 0;
+
+            diagLog(diagPrefix(gen) + " [" + xrunId + "]"
+                + " Callback=" + juce::String(ev.callbackMs, 2) + "ms"
+                + " Interval=" + juce::String(ev.intervalMs, 2) + "ms"
+                + " Expected=" + juce::String(ev.expectedMs, 2) + "ms"
+                + " EventGen=" + juce::String(ev.generation)
+                + " RetireDepth=" + juce::String(static_cast<juce::int64>(ev.retireQueueDepth))
+                + " Private=" + juce::String(static_cast<juce::int64>(s_cachedMemInfo.privateUsageMB)) + "MB"
+                + " WS=" + juce::String(static_cast<juce::int64>(s_cachedMemInfo.workingSetMB)) + "MB"
+                + " World=" + juce::String(activeCount) + "/" + juce::String(fadingCount)
+                + "/" + juce::String(static_cast<juce::int64>(backpressure.retireQueueDepth))
+                + " Pressure=" + juce::String(backpressure.retirePressureLevel)
+                + " PublishTotal=" + juce::String(static_cast<juce::int64>(lifecycle.publishCount)));
+        }
+    }
+
+    // ★ timerCallback 末尾 — 実行時間計測
+    {
+        static double s_timerStartMs = 0.0;
+        if (s_timerStartMs > 0.0) {
+            const double execMs = juce::Time::getMillisecondCounterHiRes() - s_timerExecStartMs;
+            if (execMs > 10.0) {
+                const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+                const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
+                diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
+                    + "] [TIMER] exec=" + juce::String(execMs, 3) + "ms");
+            }
+        }
+        s_timerExecStartMs = juce::Time::getMillisecondCounterHiRes();
+    }
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 }
 
 // ★ P1-8: HealthMonitor コールバック実装

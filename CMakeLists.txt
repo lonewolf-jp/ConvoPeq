@@ -52,6 +52,7 @@ endif()
 # ISR Runtime Regression Tests (minimal CTest)
 #------------------------------------------------------------
 option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
+option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.)" OFF)
 
 if(CONVOPEQ_ENABLE_ISR_TESTS)
     enable_testing()
@@ -574,6 +575,7 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
+    $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
     JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
     JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
@@ -628,6 +630,25 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # Windows では static link がデフォルト、/MT と一貫性あり
     # コンパイル時オプションとして指定し、リンカ指令をオブジェクトファイルに埋め込む
     target_compile_options(ConvoPeq PRIVATE /Qmkl:sequential)
+    # icx: Intel コンパイラランタイム (libircmt.lib / libmmd.lib) のパスを明示
+    # icx がリンカとして呼ばれる際に Intel ランタイムを見つけられるようにする。
+    # 典型的なパス: compiler\2026.0\lib\ (oneAPI 2026.0)
+    # ONEAPI_ROOT は oneAPI setvars.bat で設定される環境変数
+    set(_INTEL_COMPILER_ROOT "")
+    if(DEFINED ENV{ONEAPI_ROOT})
+        set(_INTEL_COMPILER_ROOT "$ENV{ONEAPI_ROOT}/compiler/latest/lib")
+    endif()
+    if(NOT _INTEL_COMPILER_ROOT OR NOT EXISTS "${_INTEL_COMPILER_ROOT}")
+        # フォールバック: ProgramFiles(x86) から検出
+        set(_INTEL_COMPILER_ROOT "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib")
+    endif()
+    if(EXISTS "${_INTEL_COMPILER_ROOT}")
+        target_link_directories(ConvoPeq PRIVATE "${_INTEL_COMPILER_ROOT}")
+        message(STATUS "icx: Intel compiler runtime lib dir = ${_INTEL_COMPILER_ROOT}")
+    else()
+        message(WARNING "icx: Intel compiler runtime lib dir not found. Link may fail with LNK1104 (libircmt.lib).")
+    endif()
+    unset(_INTEL_COMPILER_ROOT)
 endif()
 
 message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
