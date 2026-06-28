@@ -12,6 +12,8 @@
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRAuthorityClass.h"
 #include "ISRRetireRouter.h"
+#include "ISRRetireOverflowRing.h"     // ★ Phase5: RetireOverflowEntry
+#include "../LockFreeRingBuffer.h"     // ★ Phase5: coordinatorDeferredRing_
 
 namespace convo::isr {
 
@@ -63,6 +65,9 @@ public:
     void setFallbackBacklogCount(std::uint64_t count) noexcept;
     void setReclaimInFlightCount(std::uint64_t count) noexcept;
     void setDeferredRetireResidencyCount(std::uint64_t count) noexcept;
+    void setQuarantineResidentCount(std::uint64_t count) noexcept;  // ★ Phase2
+    void escalateAllRetires(RetirePriority minPriority) noexcept;    // ★ Phase5: 全RetireIntent の優先度を底上げ
+    void setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept;       // ★ Phase5: OverflowRing 滞留年限警告しきい値
     void setSwapPending(bool pending) noexcept;
     [[nodiscard]] bool isSwapPending() const noexcept;
     // ★ A-2.4: getter 群（DrainAudit 用）
@@ -71,14 +76,83 @@ public:
     [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
+    [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;  // ★ Phase2
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
+    [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
     [[nodiscard]] bool isFullyDrained() const noexcept;
     [[nodiscard]] CoordinatorState getState() const noexcept;
     void markTransitionStart() noexcept;
     void markTransitionCommitted() noexcept;
     void requestShutdown() noexcept;
     void markShutdownComplete() noexcept;
+
+    // ── ★ Phase 5: OverflowRing 統合管理 ──
+
+    struct OverflowDrainResult {
+        size_t reinjectedCount{0};
+        size_t deferredCount{0};
+        size_t droppedCount{0};
+        uint64_t oldestOverflowAgeUs{0};
+        size_t deferredRingOccupancy{0};
+    };
+
+    // ★ OverflowRing の定期 drain + 再注入
+    //   unlimited=true: 予算無制限（Shutdown Drain用）
+    //   retireRuntime.emitRetireIntent() で再注入
+    [[nodiscard]] OverflowDrainResult drainOverflowRing(
+        class RetireOverflowRing& overflowRing,
+        class RetireRuntime& retireRuntime,
+        bool unlimited = false) noexcept;
+
+    // ★ 滞留年限警告コールバック
+    using AgeWarnCallback = void(*)(uint64_t maxAgeUs, uint64_t droppedCount);
+    void setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept;
+
+    // ★ DeferredRing 占有状態
+    [[nodiscard]] size_t deferredRingOccupancy() const noexcept;
+
 private:
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ★ Phase5: 内部スケジューラ — 3 scheduler inner classes
+    //   RuntimePublicationCoordinator（公開API）は各 scheduler へ委譲
+    //   責務分離: God Object 防止 + 単一責任 + ユニットテスト容易性
+    //   各 scheduler は coordinator_ 参照を保持し、親クラスのプライベートメンバにアクセス
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    class OverflowScheduler {
+        RuntimePublicationCoordinator& coordinator_;
+    public:
+        explicit OverflowScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        [[nodiscard]] OverflowDrainResult drainOverflowRing(
+            class RetireOverflowRing& overflowRing,
+            class RetireRuntime& retireRuntime,
+            bool unlimited) noexcept;
+        [[nodiscard]] size_t deferredRingOccupancy() const noexcept;
+    };
+
+    class ShutdownScheduler {
+        RuntimePublicationCoordinator& coordinator_;
+    public:
+        explicit ShutdownScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        [[nodiscard]] bool isFullyDrained() const noexcept;
+        void requestShutdown() noexcept;
+        void markShutdownComplete() noexcept;
+    };
+
+    class PriorityScheduler {
+        RuntimePublicationCoordinator& coordinator_;
+    public:
+        explicit PriorityScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        void escalateAllRetires(RetirePriority minPriority) noexcept;
+        void setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept;
+    };
+
+    // ★ Phase5: 内部スケジューラインスタンス
+    OverflowScheduler overflowScheduler_;
+    ShutdownScheduler shutdownScheduler_;
+    PriorityScheduler priorityScheduler_;
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     enum class RejectCode : uint8_t {
         None = 0,
         InvalidClosure,
@@ -131,11 +205,25 @@ private:
     std::atomic<std::uint64_t> fallbackBacklogCount_;
     std::atomic<std::uint64_t> reclaimInFlightCount_;
     std::atomic<std::uint64_t> deferredRetireResidencyCount_;
+    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_;
     std::atomic<CoordinatorState> state_;
     std::atomic<std::uint64_t> retireAuthorityCount_;
+    std::atomic<std::uint64_t> overflowMaxAgeUs_{500'000};  // ★ Phase5: 500ms デフォルト
+
+    // ★ Phase5: Overflow Ring / Deferred 管理メンバ
+    static constexpr size_t kCoordinatorDeferredRingCapacity = 1024;
+    LockFreeRingBuffer<RetireOverflowEntry, kCoordinatorDeferredRingCapacity> coordinatorDeferredRing_;
+    std::atomic<size_t> coordinatorDeferredCount_{0};
+    static constexpr size_t kLastResortQueueCapacity = 4096;
+    RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity];
+    std::atomic<size_t> lastResortCount_{0};
+
+    // ★ Phase5: 滞留年限警告コールバック
+    AgeWarnCallback overflowAgeWarnCallback_{nullptr};
+
     static constexpr std::uint64_t kPressureSlopeThreshold = 8;
     static constexpr std::uint32_t kPressureNormalizeWindows = 3;
 };

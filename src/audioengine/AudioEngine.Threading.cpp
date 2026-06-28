@@ -4,6 +4,7 @@
 #include "ISRDSPQuarantine.h"
 #include "RuntimeDrainAudit.h"
 #include "RuntimePublicationOrchestrator.h"
+#include "ISRRetireOverflowRing.h"         // ★ Phase1: RetireOverflowRing 完全型
 
 //==============================================================================
 // [P0-15] AudioEngine.Threading.cpp — 3PR分割済み.
@@ -89,7 +90,10 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .reclaimSuccessCount = m_retireRouter
             ? m_retireRouter->reclaimSuccessCount() : 0,
         .overflowCount = m_retireRouter
-            ? m_retireRouter->overflowCount() : 0
+            ? m_retireRouter->overflowCount() : 0,
+        // ★ Phase2: OverflowRing 滞留数
+        .overflowRingResident = retireRuntime_.getOverflowRing()
+            ? retireRuntime_.getOverflowRing()->residentCount() : 0
     };
 }
 
@@ -104,6 +108,15 @@ bool AudioEngine::isFullyDrained() noexcept
     runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
+
+    // ★ Phase2: OverflowRing + DSPQuarantine の滞留数で quarantineResidentCount を設定
+    {
+        const auto ringResident = retireRuntime_.getOverflowRing()
+            ? retireRuntime_.getOverflowRing()->residentCount() : size_t{0};
+        const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
+        runtimePublicationBridge_.setQuarantineResidentCount(
+            static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
+    }
 
     return !hasDeferredCommit && runtimePublicationBridge_.isFullyDrained();
 }

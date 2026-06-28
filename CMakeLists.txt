@@ -74,6 +74,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRClosure.cpp
         src/audioengine/ISRPayloadTier.cpp
         src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp               # ★ Phase5: coordinator が RetireRuntime を参照
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
     )
 
@@ -117,6 +118,12 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/BuildInputSemanticContractTests.cpp
     )
 
+    # ★ Phase3/5: Priority Integration Tests
+    add_executable(PriorityIntegrationTests
+        src/tests/PriorityIntegrationTests.cpp
+        src/audioengine/ISRRetire.cpp              # RetireRuntime
+    )
+
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
@@ -135,6 +142,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(PartialPublicationRejectTests PRIVATE cxx_std_20)
     target_compile_features(RebuildAdmissionRegressionTests PRIVATE cxx_std_20)
     target_compile_features(BuildInputSemanticContractTests PRIVATE cxx_std_20)
+    target_compile_features(PriorityIntegrationTests PRIVATE cxx_std_20)
     target_include_directories(ISRRuntimeIdentityTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -216,7 +224,12 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
-
+    target_include_directories(PriorityIntegrationTests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    )
     add_test(NAME ISRRuntimeIdentityGenerators COMMAND ISRRuntimeIdentityTests)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
@@ -234,6 +247,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks)
     endif()
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
+    add_test(NAME PriorityIntegration COMMAND PriorityIntegrationTests)
 
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
@@ -249,6 +263,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(PartialPublicationRejectTests PRIVATE /utf-8)
         target_compile_options(RebuildAdmissionRegressionTests PRIVATE /utf-8)
         target_compile_options(BuildInputSemanticContractTests PRIVATE /utf-8)
+        target_compile_options(PriorityIntegrationTests PRIVATE /utf-8)
+    endif()
+
+    # テストターゲットに Windows プラットフォーム定義を追加（Debug ビルドでも標準ヘッダーが正しく include されるよう確保）
+    if(WIN32)
+        foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
+                     ISRSemanticValidationTests RetireGraceSemanticsTests
+                     RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
+                     OverlapAuthoritySingularTests ShadowCompareContractTests
+                     CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
+                     PartialPublicationRejectTests RebuildAdmissionRegressionTests
+                     BuildInputSemanticContractTests PriorityIntegrationTests)
+            target_compile_definitions(${tgt} PRIVATE
+                _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+            )
+        endforeach()
     endif()
 
     # icx: テスト実行ファイルで LTCG(/Qipo) を無効化
@@ -286,6 +316,11 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(PartialPublicationRejectTests PRIVATE /EHsc)
     target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
     target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
+    # BuildInputSemanticContractTests: 大規模ソース読み取りでスタックオーバーフローを防ぐため8MBに拡大
+    if(MSVC)
+        target_compile_options(BuildInputSemanticContractTests PRIVATE /GS-)
+        target_link_options(BuildInputSemanticContractTests PRIVATE "/STACK:8388608")
+    endif()
 
     # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
     # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
@@ -321,7 +356,7 @@ endif()
 #------------------------------------------------------------
 # Windows RC Compiler Fix for Ninja
 #------------------------------------------------------------
-if(WIN32 AND CMAKE_GENERATOR STREQUAL "Ninja")
+if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
     # MSVC環境が未初期化だと windows.h / C++標準ヘッダーが見つからない
     if(MSVC AND (NOT DEFINED ENV{VCToolsInstallDir} OR NOT DEFINED ENV{WindowsSdkDir}))
         message(FATAL_ERROR
@@ -418,6 +453,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRClosureGraphWalker.cpp
                 src/audioengine/ISRDebugRuntime.cpp
                 src/audioengine/ISRRetireRuntimeEx.cpp
+                src/audioengine/FrozenRuntimeWorld.cpp          # ★ Phase4
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
                 src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0
@@ -714,6 +750,11 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /arch:AVX2 → target_compile_options(ConvoPeq PRIVATE /arch:AVX2) で追加
     set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi")
     set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi")
+
+    # Debugフラグを明示設定（CMakeデフォルトに /utf-8 /bigobj /Zm400 を追加）
+    # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
+    set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_DEBUG   "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
     # MSVCリンカーフラグは target_link_options で設定（他コンパイラに漏洩しない）
     target_link_options(ConvoPeq PRIVATE
         $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR>

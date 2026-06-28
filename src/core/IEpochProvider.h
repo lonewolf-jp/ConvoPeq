@@ -66,6 +66,20 @@ public:
     //   Default: 0 を返す。EpochDomain がオーバーライドして実統計を提供。
     [[nodiscard]] virtual uint64_t reclaimAttemptCount() const noexcept { return 0; }
     [[nodiscard]] virtual uint64_t reclaimSuccessCount() const noexcept { return 0; }
+
+    // ── ★ Phase 3: Reader Quarantine API ──
+
+    // ★ stuck Reader を quarantined にマーク（killしない）
+    //   depth==0: 即座quarantine → true
+    //   depth>0: pendingQuarantine設定 → exitReader時にquarantine → false (deferred)
+    //   戻り値: true=即座隔離成功, false=遅延隔離（exitReader待ち）
+    [[nodiscard]] virtual bool quarantineReader(int /*readerIndex*/) noexcept { return false; }
+
+    // ★ Shutdown専用: 全quarantined Readerを解放（destroyForShutdown と同じパターン）
+    virtual void unquarantineAllReaders() noexcept {}
+
+    // ★ quarantined Reader数の取得（kQuarantinedFlagでカウント）
+    [[nodiscard]] virtual int quarantinedReaderCount() const noexcept { return 0; }
 };
 
 } // namespace convo

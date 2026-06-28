@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-06-25 23:28:06
+> Generated: 2026-06-27 01:20:32
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -5491,9 +5491,9 @@ public:
     static constexpr float MIXED_F2_MIN_HZ = 700.0f;
     static constexpr float MIXED_F2_MAX_HZ = 1300.0f;
     static constexpr float MIXED_F2_DEFAULT_HZ = 1000.0f;
-    static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
+    static constexpr int REBUILD_DEBOUNCE_MIN_MS = 10;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
-    static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
+    static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 20;
     static constexpr float TAIL_START_MIN_SEC = 0.01f;
     static constexpr float TAIL_START_MAX_SEC = 0.80f;
     static constexpr float TAIL_START_DEFAULT_SEC = 0.085f;

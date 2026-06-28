@@ -583,6 +583,21 @@ void AudioEngine::timerCallback()
         m_healthMonitor.tick();
     }
 
+    // ★ Phase1: OverflowRing 定期 drain — Coordinator 経由で一元管理
+    //   50ms周期のtimerCallbackごとにdrainOverflowRingを呼出
+    //   Coordinator が retry/age/deferred を管理
+    {
+        if (retireRuntime_.getOverflowRing())
+        {
+            const auto drainResult = runtimePublicationBridge_.drainOverflowRing(
+                *retireRuntime_.getOverflowRing(), retireRuntime_, false);
+            if (drainResult.reinjectedCount > 0)
+            {
+                m_retireRouter->tryReclaim();
+            }
+        }
+    }
+
     // UI用プロセッサのクリーンアップ
     uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();
@@ -696,13 +711,34 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         diagLog("[HEALTH] Crossfade timeout recovery completed");
     }
 
-    // ★ A-3: EVENT_READER_STUCK — Evidence 出力のみ（Shutdown Authority は collectDrainAudit が担当）
+    // ★ A-3: EVENT_READER_STUCK — Evidence 出力 + Reader quarantine + High優先度Retire
     if (event.eventCode == convo::EVENT_READER_STUCK)
     {
         diagLog("[HEALTH] Reader stuck detected"
             + juce::String(" readerIndex=") + juce::String(static_cast<int>(event.readerIndex))
             + juce::String(" residencyUs=") + juce::String(static_cast<juce::int64>(event.residencyTimeUs))
             + juce::String(" pendingRetire=") + juce::String(static_cast<juce::int64>(event.value)));
+
+        // ★ Phase3: この Reader を quarantine（stuck Reader の epoch を safe-epoch 計算から除外）
+        const bool immediate = m_retireRouter->quarantineReader(event.readerIndex);
+        diagLog("[PHASE3] quarantineReader idx=" + juce::String(static_cast<int>(event.readerIndex))
+            + " immediate=" + (immediate ? "true" : "false"));
+
+        // ★ Phase5: quarantine された Reader が参照していた slot の Retire を High 優先度で投入
+        //   （stuck Reader の epoch が safe-epoch から除外されたため、Reclaim が進行可能）
+        if (immediate && event.slot != std::numeric_limits<uint32_t>::max())
+        {
+            // 即座 quarantine 成功 → 該当 slot の RetireIntent を High 優先度で発行
+            convo::isr::RetireIntent highIntent{};
+            highIntent.dspSlot = event.slot;
+            highIntent.generation = event.readerEpoch;
+            highIntent.retireEpoch = m_retireRouter->currentEpoch();
+            highIntent.isValid = true;
+            highIntent.priority = convo::isr::RetirePriority::High;
+            retireRuntime_.emitRetireIntent(highIntent);
+            diagLog("[PHASE5] High priority retire emitted for slot="
+                + juce::String(static_cast<int>(event.slot)));
+        }
 
         // 強制診断ダンプ
         emitEvidenceTickNonRt(true);

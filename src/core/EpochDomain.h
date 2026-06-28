@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -29,6 +30,8 @@ public:
             //          完了後に他スレッドがオブジェクトを取得する際に acquire で可視性を保証するため release。
             convo::publishAtomic(slot.epoch, kInactiveEpoch, std::memory_order_release);
             convo::publishAtomic(slot.depth, static_cast<uint32_t>(0), std::memory_order_release);
+            // ★ Phase 3: quarantineFlags ゼロ初期化
+            convo::publishAtomic(slot.quarantineFlags, static_cast<uint8_t>(0), std::memory_order_release);
         }
     }
 
@@ -150,6 +153,18 @@ public:
 
         // release: epoch を kInactiveEpoch に戻し、reclaimers がこのスロットを safe-below 判定から除外可能にする。
         convo::publishAtomic(slot.epoch, kInactiveEpoch, std::memory_order_release);
+
+        // ★ Phase 3: pendingQuarantine が設定されていた場合、今 quarantine を確定する。
+        //   この Reader は exit 後も quarantined フラグにより getMinReaderEpoch から除外される。
+        const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+        if ((flags & ReaderSlot::kPendingQuarantineFlag) != 0)
+        {
+            // release: quarantined フラグを設定し、pending をクリア。
+            //   Coordinator が acquire でこの書き込みを観測する。
+            convo::publishAtomic(slot.quarantineFlags,
+                                 static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                 std::memory_order_release);
+        }
     }
 
     uint64_t currentEpoch() const noexcept override
@@ -182,6 +197,11 @@ public:
 
         for (const auto& slot : readers)
         {
+            // ★ Phase 3: quarantined Reader は safe-epoch 計算から除外
+            const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+            if ((flags & ReaderSlot::kQuarantinedFlag) != 0)
+                continue;
+
             // acquire: enterReader release の depth 書き込みと HB し、depth 読み取り後に epoch を読む。
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
             if (depth == 0)
@@ -216,6 +236,96 @@ public:
     int readerCapacity() const noexcept override
     {
         return kMaxReaders;
+    }
+
+    // ── ★ Phase 3: Reader Quarantine API ──
+
+    // ★ stuck Reader を quarantined にマーク（killしない）
+    //   depth==0: 即座quarantine → true
+    //   depth>0: pendingQuarantine設定 → exitReader時にquarantine → false (deferred)
+    [[nodiscard]] bool quarantineReader(int readerIndex) noexcept override
+    {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return false;
+
+        auto& slot = readers[static_cast<size_t>(readerIndex)];
+        // acquire: enterReader/exitReader の深度変更を観測
+        const uint32_t d = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+
+        if (d == 0)
+        {
+            // 即座 quarantine: 深度0 → 他スレッドが参照していない
+            // release: Coordinator が設定した quarantined フラグを
+            //   getMinReaderEpoch が acquire で観測可能にする。
+            convo::publishAtomic(slot.quarantineFlags,
+                                 static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                 std::memory_order_release);
+            return true;
+        }
+
+        // depth > 0: 遅延隔離 — exitReader で depth==0 になった時点で quarantine 確定
+        // release: pending フラグを exitReader が acquire で観測可能にする。
+        convo::publishAtomic(slot.quarantineFlags,
+                             static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag),
+                             std::memory_order_release);
+        return false;
+    }
+
+    // ★ Shutdown専用: 全quarantined Readerを解放（destroyForShutdown と同じパターン）
+    void unquarantineAllReaders() noexcept override
+    {
+        for (auto& slot : readers)
+        {
+            convo::publishAtomic(slot.quarantineFlags,
+                                 static_cast<uint8_t>(0),
+                                 std::memory_order_release);
+        }
+    }
+
+    // ★ quarantined Reader数の取得（kQuarantinedFlagでカウント）
+    [[nodiscard]] int quarantinedReaderCount() const noexcept override
+    {
+        int count = 0;
+        for (const auto& slot : readers)
+        {
+            const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+            if ((flags & ReaderSlot::kQuarantinedFlag) != 0)
+                ++count;
+        }
+        return count;
+    }
+
+    // ★ Phase 3: Debug 検証 — quarantined slot の不変条件をチェック
+    //   Release ビルドでは除去される（assert は NDEBUG で消滅）
+    void verifyReaderInvariants() const noexcept
+    {
+        for (int i = 0; i < kMaxReaders; ++i)
+        {
+            const auto& slot = readers[static_cast<size_t>(i)];
+            const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+            const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+            const uint64_t epoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
+
+            const bool isQuarantined = (flags & ReaderSlot::kQuarantinedFlag) != 0;
+            const bool isPending = (flags & ReaderSlot::kPendingQuarantineFlag) != 0;
+
+            // ★ quarantined Reader は epoch==kInactiveEpoch を期待（exitReader が epoch を inactive にした後で quarantine に遷移する）
+            //   ※ 厳密には quarantined フラグ設定前に epoch が inactive になる保証はない（exitReader の acq_rel 順序で暗黙保証）。
+            //     ここでは depth==0 かつ quarantined の場合は epoch も inactive であることを確認。
+            if (isQuarantined && depth == 0)
+            {
+                assert(epoch == kInactiveEpoch || epoch == kReservedEpoch);
+            }
+
+            // ★ pendingQuarantine 設定中は depth > 0 を期待（depth==0 なら即座に quarantined に遷移するため pending は残らない）
+            if (isPending)
+            {
+                assert(depth > 0 && "pendingQuarantine set but depth==0: should have been promoted to quarantined");
+            }
+
+            // ★ quarantined + pending は同時に成立しない
+            assert(!(isQuarantined && isPending));
+        }
     }
 
     // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
@@ -384,6 +494,13 @@ private:
         // ★ C-3: Reader 所有者情報
         std::atomic<uint64_t> ownerThreadId { 0 };       // std::thread::id のハッシュ値
         char ownerTag[32] {};  // "AudioThread", "TimerThread" 等（CAS 排他下で設定、stale read 許容）
+
+        // ★ Phase 3: Reader Quarantine フラグ
+        //   bit 0 (kQuarantinedFlag):   隔離済 — getMinReaderEpoch から除外
+        //   bit 1 (kPendingQuarantineFlag):  exitReader で depth==0 になったら隔離
+        static constexpr uint8_t kQuarantinedFlag       = 0x01;
+        static constexpr uint8_t kPendingQuarantineFlag  = 0x02;
+        std::atomic<uint8_t> quarantineFlags{0};
     };
 
     std::atomic<uint64_t> globalEpoch;

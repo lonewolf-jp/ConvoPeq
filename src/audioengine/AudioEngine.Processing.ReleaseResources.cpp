@@ -5,6 +5,7 @@
 #include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
 #include "RuntimePublicationOrchestrator.h"  // ★ work37: clearDeferredForShutdown 完全型必要
+#include "ISRRetireOverflowRing.h"           // ★ Phase2: RetireOverflowEntry 完全型
 
 namespace {
 
@@ -170,28 +171,96 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
-    // ★ Practical-7: Graceful Drain Phase（最大5秒間のポーリング待機）
+    // ★ Phase5: Shutdown 時、全保留Intentを Critical に昇格（優先度ベースの早期回収）
+    retireRuntime_.escalateAllRetires(convo::isr::RetirePriority::Critical);
+
+    // ★ Practical-7: Graceful Drain Phase（最大5秒間のポーリング待機 + OverflowRing 再注入）
     {
         constexpr int kGracefulDrainMaxMs = 5000;
         constexpr int kGracefulDrainPollMs = 10;
+        constexpr uint32_t kMaxReinjectPerCycle = 128;  // ★ Phase2: 1ループ当たりの再注入上限
         int waitedMs = 0;
         while (waitedMs < kGracefulDrainMaxMs)
         {
             if (m_retireRouter->pendingRetireCount() == 0
                 && m_retireRouter->activeReaderCount() == 0)
                 break;
+
+            // ★ Phase2: OverflowRing 再注入（DSPQuarantine エントリを最後まで再注入機会あり）
+            {
+                uint32_t reinjectBudget = kMaxReinjectPerCycle;
+                convo::isr::RetireOverflowEntry entry;
+                while (reinjectBudget > 0 && retireRuntime_.getOverflowRing()
+                       && retireRuntime_.getOverflowRing()->pop(entry))
+                {
+                    retireRuntime_.emitRetireIntent(entry.intent);
+                    --reinjectBudget;
+                }
+            }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(kGracefulDrainPollMs));
             waitedMs += kGracefulDrainPollMs;
             m_retireRouter->publishEpoch();
             m_retireRouter->tryReclaim();
+
+            // ★ Phase2: 各ループで coordinator の QuarantineResidentCount を更新
+            {
+                const auto ringResident = retireRuntime_.getOverflowRing()
+                    ? retireRuntime_.getOverflowRing()->residentCount() : size_t{0};
+                const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
+                runtimePublicationBridge_.setQuarantineResidentCount(
+                    static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
+            }
         }
+
+        // ★ Phase2 5.5: Timeout到達 → 最終Drain（1回限定）
         if (waitedMs >= kGracefulDrainMaxMs)
         {
             diagLog("[AUDIT] releaseResources: graceful drain timeout after "
                 + juce::String(kGracefulDrainMaxMs)
                 + "ms, pendingRetireCount="
                 + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
-                + " -- forcing drain");
+                + " -- performing final drain");
+
+            // a. ForceEpochAdvance
+            m_retireRouter->publishEpoch();
+
+            // b. OverflowRing 全件Drain（unlimited）
+            if (retireRuntime_.getOverflowRing())
+            {
+                convo::isr::RetireOverflowEntry entry;
+                while (retireRuntime_.getOverflowRing()->pop(entry))
+                {
+                    retireRuntime_.emitRetireIntent(entry.intent);
+                }
+            }
+
+            // c. 最終Reclaim
+            m_retireRouter->tryReclaim();
+
+            // d. 最終DeferredDrain
+            drainDeferredRetireQueues(false);
+
+            if (m_retireRouter->pendingRetireCount() == 0
+                && m_retireRouter->activeReaderCount() == 0)
+            {
+                diagLog("[AUDIT] releaseResources: final drain succeeded");
+            }
+            else
+            {
+                diagLog("[AUDIT] releaseResources: final drain incomplete -- pendingRetire="
+                    + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
+                    + " activeReaders="
+                    + juce::String(static_cast<int>(m_retireRouter->activeReaderCount())));
+            }
+        }
+        else
+        {
+            // ★ Phase2: タイムアウト前に完了した場合も coordinator カウントを最終更新
+            const auto ringResident = retireRuntime_.getOverflowRing()
+                ? retireRuntime_.getOverflowRing()->residentCount() : size_t{0};
+            runtimePublicationBridge_.setQuarantineResidentCount(
+                static_cast<std::uint64_t>(ringResident));
         }
     }
 
@@ -267,6 +336,9 @@ void AudioEngine::releaseResources()
     // ★★★ PR2: Quarantine 全スロット強制解放（シャットダウン専用）
     //    この時点で GracefulDrain が activeReaderCount==0 を確認済み
     {
+        // ★ Phase 3: EpochDomain の Reader quarantine を全解除
+        m_retireRouter->unquarantineAllReaders();
+
         const auto residentBefore = dspQuarantineManager_.residentCount();
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="

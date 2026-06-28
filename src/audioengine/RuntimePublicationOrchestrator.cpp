@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
 #include "CrossfadeAuthority.h"
+#include "FrozenRuntimeWorld.h"
 #include <chrono>
 
 namespace convo::isr {
@@ -152,7 +153,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Validated, nowUs);
 
-    auto result = executor_.publish(engine_, std::move(worldOwner));
+    // ★ Phase4: mutable worldOwner → FrozenRuntimeWorld wrap → publish
+    auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(std::move(worldOwner));
+    auto result = executor_.publish(engine_, std::move(frozen));
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
             + juce::String(req.generation)

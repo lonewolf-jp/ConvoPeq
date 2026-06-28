@@ -29,4 +29,16 @@ enum class RetireEnqueueResult : std::uint8_t {
     Shutdown
 };
 
+// ★ Phase5: Retire 優先度 enum
+//   Low=0:      通常の定期Drain / Batch処理
+//   Normal=1:   デフォルト — 通常のRetireIntent
+//   High=2:     Quarantine解放直後 / 緊急度の高いRetire
+//   Critical=3: Shutdown / 強制Drain
+enum class RetirePriority : std::uint8_t {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+    Critical = 3
+};
+
 } // namespace convo::isr

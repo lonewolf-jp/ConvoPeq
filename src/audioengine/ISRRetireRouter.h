@@ -107,6 +107,22 @@ public:
         return convo::consumeAtomic(m_lastForcedReclaimTimeUs_, std::memory_order_acquire);
     }
 
+    // ★ Phase 3: Reader Quarantine 委譲（IEpochProvider → EpochDomain）
+    [[nodiscard]] bool quarantineReader(int readerIndex) noexcept override
+    {
+        return provider_->quarantineReader(readerIndex);
+    }
+
+    void unquarantineAllReaders() noexcept override
+    {
+        provider_->unquarantineAllReaders();
+    }
+
+    [[nodiscard]] int quarantinedReaderCount() const noexcept override
+    {
+        return provider_->quarantinedReaderCount();
+    }
+
 private:
     convo::IEpochProvider* provider_ = nullptr;
     std::atomic<uint64_t> m_overflowCount_{0};          // ★ Practical-3: enqueueRetire QueuePressure 回数

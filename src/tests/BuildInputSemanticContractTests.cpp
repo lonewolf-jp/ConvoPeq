@@ -70,8 +70,10 @@ namespace {
              std::string("double outputMakeupGain = 1.0;"),
              std::string("double convolverInputTrimGain = 1.0;") })
     {
-        if (!contains(buildTypes, requiredField))
+        if (!contains(buildTypes, requiredField)) {
+            std::cerr << "[FAIL] Phase1 missing: " << requiredField << '\n';
             return false;
+        }
     }
 
     for (const auto& compatibilityField : {
@@ -84,8 +86,10 @@ namespace {
              std::string("&& snapshot.buildInput.outputMakeupGain == other.buildInput.outputMakeupGain"),
              std::string("&& snapshot.buildInput.convolverInputTrimGain == other.buildInput.convolverInputTrimGain") })
     {
-        if (!contains(buildTypes, compatibilityField))
+        if (!contains(buildTypes, compatibilityField)) {
+            std::cerr << "[FAIL] Phase2 missing: " << compatibilityField << '\n';
             return false;
+        }
     }
 
     for (const auto& requiredAssignment : {
@@ -98,8 +102,10 @@ namespace {
              std::string("task.buildInput.outputMakeupGain = paramSnapshot.outputMakeupGain;"),
              std::string("task.buildInput.convolverInputTrimGain = paramSnapshot.convolverInputTrimGain;") })
     {
-        if (!contains(rebuildDispatch, requiredAssignment))
+        if (!contains(rebuildDispatch, requiredAssignment)) {
+            std::cerr << "[FAIL] Phase3 missing: " << requiredAssignment << '\n';
             return false;
+        }
     }
 
     for (const auto& requiredSnapshotPlumbing : {
@@ -237,16 +243,16 @@ namespace {
     }
 
     for (const auto& requiredDebounceSource : {
-             std::string("convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(convBypassRequested, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(softClipEnabled, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire)"),
-             std::string("convo::consumeAtomic(saturationAmount, std::memory_order_acquire)") })
+             std::string("consumeAtomic(eqBypassRequested, std::memory_order_acquire)"),
+             std::string("consumeAtomic(convBypassRequested, std::memory_order_acquire)"),
+             std::string("consumeAtomic(currentProcessingOrder, std::memory_order_acquire)"),
+             std::string("consumeAtomic(softClipEnabled, std::memory_order_acquire)"),
+             std::string("consumeAtomic(inputHeadroomGain, std::memory_order_acquire)"),
+             std::string("consumeAtomic(outputMakeupGain, std::memory_order_acquire)"),
+             std::string("consumeAtomic(convolverInputTrimGain, std::memory_order_acquire)"),
+             std::string("consumeAtomic(saturationAmount, std::memory_order_acquire)") })
     {
-        if (!contains(init, requiredDebounceSource))
+        if (!contains(audioHeader, requiredDebounceSource))
             return false;
     }
 
@@ -255,9 +261,9 @@ namespace {
              std::string("m_currentConvBypass"),
              std::string("m_currentProcessingOrder"),
              std::string("m_currentSoftClipEnabled"),
-             std::string("m_currentInputHeadroomDb"),
-             std::string("m_currentOutputMakeupDb"),
-             std::string("m_currentConvInputTrimDb"),
+             std::string("m_currentInputHeadroomGain"),
+             std::string("m_currentOutputMakeupGain"),
+             std::string("m_currentConvInputTrimGain"),
              std::string("m_currentSaturationAmount") })
     {
         if (contains(init, forbiddenInitShadow))
@@ -271,8 +277,13 @@ namespace {
 
 int main()
 {
-    if (!testBuildInputSemanticContract())
-        throw std::runtime_error("build input semantic contract failed");
-
+    std::cerr << "[START] test begin" << std::endl;
+    const bool result = testBuildInputSemanticContract();
+    std::cerr << "[END] result=" << (result ? "true" : "false") << std::endl;
+    if (!result)
+    {
+        std::cerr << "build input semantic contract failed" << std::endl;
+        return 1;
+    }
     return 0;
 }

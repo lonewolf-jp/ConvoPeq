@@ -6,8 +6,14 @@
 #include <array>
 #include <mutex>
 
+#include "AtomicAccess.h"
+#include "ISRAuthorityClass.h"  // RetirePriority
+
 namespace convo {
 namespace isr {
+
+// ★ Phase 1: 前方宣言（ISRRetireOverflowRing.h で完全定義）
+class RetireOverflowRing;
 
 /**
  * ISR 10層 Architecture Layer 7: RetireIntent
@@ -23,6 +29,8 @@ struct RetireIntent
     uint64_t generation;  // ★ B-1: 64bit化
     uint64_t retireEpoch;
     bool isValid;
+    // ★ Phase 5: 優先度フィールド（デフォルト Normal）
+    RetirePriority priority{RetirePriority::Normal};
 };
 
 /**
@@ -47,6 +55,9 @@ public:
     // ★ P1: Fallback queue metrics
     [[nodiscard]] std::size_t fallbackOccupancy() const noexcept;
     [[nodiscard]] std::size_t fallbackHighWatermark() const noexcept;
+
+    // ★ Phase5: 全保留中Intentの優先度を底上げ（Shutdown時の Critical 一括昇格用）
+    void escalateAllRetires(RetirePriority minPriority) noexcept;
     [[nodiscard]] std::uint64_t fallbackOverflowCount() const noexcept;
 
     // ★ C-1: overflow 継続時間追跡
@@ -58,7 +69,20 @@ public:
     // NonRT: acknowledge retire coordination
     void acknowledgeRetireCoordination(const RetireIntent& intent);
 
+    // ★ Phase 1: OverflowRing 連携
+    void setOverflowRing(RetireOverflowRing* ring) noexcept { overflowRing_ = ring; }
+    [[nodiscard]] RetireOverflowRing* getOverflowRing() const noexcept { return overflowRing_; }
+
+    // ★ Phase 1: OverflowRing 救済統計
+    [[nodiscard]] std::uint64_t quarantineRescuedCount() const noexcept
+    {
+        return convo::consumeAtomic(quarantineRescuedCount_, std::memory_order_acquire);
+    }
+
 private:
+    // ★ Phase 1: OverflowRing（純粋保存ストア、Coordinator管理）
+    RetireOverflowRing* overflowRing_ = nullptr;
+
     // Lock-free queue (using atomics)
     std::atomic<uint64_t> retireIntentHead_{0};
     std::atomic<uint64_t> retireIntentTail_{0};
@@ -69,6 +93,9 @@ private:
     std::atomic<uint64_t> acknowledgedCount_{0};
     std::atomic<uint64_t> overflowCount_{0};
     std::atomic<uint64_t> droppedIntentCount_{0};
+
+    // ★ Phase 1: OverflowRing救済カウンタ
+    std::atomic<uint64_t> quarantineRescuedCount_{0};
 
     // ★ P1: Bounded Fallback Queue (mutex-protected, 上限 retireHighWatermark*2)
     static constexpr size_t FALLBACK_QUEUE_CAPACITY = 4096;

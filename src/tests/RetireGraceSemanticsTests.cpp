@@ -1,6 +1,83 @@
+#include <algorithm>
 #include <stdexcept>
+#include <vector>
 
+#include "audioengine/ISRRetire.h"
 #include "audioengine/ISRRetireRuntimeEx.h"
+#include "audioengine/ISRAuthorityClass.h"
+#include "audioengine/ISRRetireOverflowRing.h"
+
+// ── ★ Phase5: 複合ソートキー (priority, retireEpoch, generation, dspSlot) 検証 ──
+
+[[nodiscard]] bool testPrioritySortCompositeKey()
+{
+    using convo::isr::RetireIntent;
+    using convo::isr::RetirePriority;
+
+    // dequeuePendingRetireIntents と同じ comparator
+    auto sorter = [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
+        if (lhs.priority != rhs.priority)
+            return lhs.priority > rhs.priority;   // priority降順（Critical最先頭）
+        if (lhs.retireEpoch != rhs.retireEpoch)
+            return lhs.retireEpoch < rhs.retireEpoch;
+        if (lhs.generation != rhs.generation)
+            return lhs.generation < rhs.generation;
+        return lhs.dspSlot < rhs.dspSlot;
+    };
+
+    // 1. Critical > Normal (priority降順)
+    {
+        const RetireIntent critical{1, 100, 1000, true, RetirePriority::Critical};
+        const RetireIntent normal{2, 100, 1000, true, RetirePriority::Normal};
+        if (!sorter(critical, normal) || sorter(normal, critical))
+            return false;
+    }
+
+    // 2. 同priority内: 古いepochが先（FIFO）
+    {
+        const RetireIntent older{1, 100, 500, true, RetirePriority::Normal};
+        const RetireIntent newer{2, 100, 1000, true, RetirePriority::Normal};
+        if (!sorter(older, newer) || sorter(newer, older))
+            return false;
+    }
+
+    // 3. 同priority+epoch: 低いgenerationが先
+    {
+        const RetireIntent early{1, 50, 1000, true, RetirePriority::Normal};
+        const RetireIntent late{2, 100, 1000, true, RetirePriority::Normal};
+        if (!sorter(early, late) || sorter(late, early))
+            return false;
+    }
+
+    // 4. 同priority+epoch+generation: 低いdspSlotが先
+    {
+        const RetireIntent first{1, 100, 1000, true, RetirePriority::Normal};
+        const RetireIntent second{2, 100, 1000, true, RetirePriority::Normal};
+        if (!sorter(first, second) || sorter(second, first))
+            return false;
+    }
+
+    // 5. 完全ソート: Critical > High > Normal > Low
+    {
+        std::vector<RetireIntent> intents = {
+            {3, 100, 1000, true, RetirePriority::Low},
+            {1, 100, 1000, true, RetirePriority::Critical},
+            {4, 100, 1000, true, RetirePriority::High},
+            {2, 100, 1000, true, RetirePriority::Normal},
+        };
+        std::stable_sort(intents.begin(), intents.end(), sorter);
+        if (intents[0].dspSlot != 1 || intents[0].priority != RetirePriority::Critical)
+            return false;
+        if (intents[1].dspSlot != 4 || intents[1].priority != RetirePriority::High)
+            return false;
+        if (intents[2].dspSlot != 2 || intents[2].priority != RetirePriority::Normal)
+            return false;
+        if (intents[3].dspSlot != 3 || intents[3].priority != RetirePriority::Low)
+            return false;
+    }
+
+    return true;
+}
 
 [[nodiscard]] bool testGracePeriodCompletionRules()
 {
@@ -111,6 +188,129 @@
     return true;
 }
 
+// ── ★ Phase1: OverflowRing 基本 FIFO 検証 ──
+
+[[nodiscard]] bool testOverflowRingFifoOrder()
+{
+    using convo::isr::RetireOverflowEntry;
+    using convo::isr::RetireOverflowRing;
+    using convo::isr::RetireIntent;
+    using convo::isr::RetirePriority;
+
+    RetireOverflowRing ring;
+
+    RetireOverflowEntry e1{{1, 100, 1000, true, RetirePriority::Normal}, 100, 0};
+    RetireOverflowEntry e2{{2, 200, 2000, true, RetirePriority::Normal}, 200, 0};
+    RetireOverflowEntry e3{{3, 300, 3000, true, RetirePriority::Normal}, 300, 0};
+
+    if (!ring.tryPush(e1)) return false;
+    if (!ring.tryPush(e2)) return false;
+    if (!ring.tryPush(e3)) return false;
+    if (ring.residentCount() != 3) return false;
+
+    RetireOverflowEntry out;
+    if (!ring.pop(out) || out.intent.dspSlot != 1) return false;
+    if (!ring.pop(out) || out.intent.dspSlot != 2) return false;
+    if (!ring.pop(out) || out.intent.dspSlot != 3) return false;
+    if (ring.residentCount() != 0) return false;
+    if (ring.pop(out)) return false;
+
+    std::vector<RetireOverflowEntry> drained;
+    (void)ring.tryPush(e1);
+    (void)ring.tryPush(e2);
+    ring.drainAll(drained);
+    if (drained.size() != 2) return false;
+
+    return true;
+}
+
+// ── ★ Phase5: 優先度ソート Critical最優先 + 異種priority混合 ──
+
+[[nodiscard]] bool testPrioritySortCriticalFirst()
+{
+    using convo::isr::RetireIntent;
+    using convo::isr::RetirePriority;
+
+    auto sorter = [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
+        if (lhs.priority != rhs.priority) return lhs.priority > rhs.priority;
+        if (lhs.retireEpoch != rhs.retireEpoch) return lhs.retireEpoch < rhs.retireEpoch;
+        if (lhs.generation != rhs.generation) return lhs.generation < rhs.generation;
+        return lhs.dspSlot < rhs.dspSlot;
+    };
+
+    // Critical vs High vs Normal vs Low (same epoch)
+    {
+        std::vector<RetireIntent> intents = {
+            {1, 100, 1000, true, RetirePriority::Low},
+            {2, 100, 1000, true, RetirePriority::High},
+            {3, 100, 1000, true, RetirePriority::Critical},
+            {4, 100, 1000, true, RetirePriority::Normal},
+        };
+        std::stable_sort(intents.begin(), intents.end(), sorter);
+        if (intents[0].priority != RetirePriority::Critical) return false;
+        if (intents[1].priority != RetirePriority::High) return false;
+        if (intents[2].priority != RetirePriority::Normal) return false;
+        if (intents[3].priority != RetirePriority::Low) return false;
+    }
+
+    // Cross-priority with mixed epochs
+    {
+        std::vector<RetireIntent> intents = {
+            {1, 100, 1000, true, RetirePriority::High},
+            {2, 100, 3000, true, RetirePriority::Critical},
+        };
+        std::stable_sort(intents.begin(), intents.end(), sorter);
+        if (intents[0].priority != RetirePriority::Critical) return false;
+    }
+
+    return true;
+}
+
+// ── ★ Phase5: 既存 enqueueRetire 互換性（Normal 優先度として動作）──
+
+[[nodiscard]] bool testRetirePriorityCompatibility()
+{
+    using convo::isr::RetireIntent;
+    using convo::isr::RetirePriority;
+
+    // デフォルト priority が Normal であることを確認
+    {
+        const RetireIntent intent{1, 100, 1000, true};
+        if (intent.priority != RetirePriority::Normal)
+            return false;
+    }
+
+    // 明示的に Normal を設定
+    {
+        const RetireIntent intent{1, 100, 1000, true, RetirePriority::Normal};
+        if (intent.priority != RetirePriority::Normal)
+            return false;
+    }
+
+    // ソートで Normal が正しい位置に入る
+    {
+        auto sorter = [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
+            if (lhs.priority != rhs.priority) return lhs.priority > rhs.priority;
+            return lhs.retireEpoch < rhs.retireEpoch;
+        };
+
+        std::vector<RetireIntent> intents = {
+            {1, 100, 3000, true},                       // デフォルト Normal
+            {2, 100, 1000, true, RetirePriority::High},
+            {3, 100, 2000, true, RetirePriority::Normal},
+        };
+        std::stable_sort(intents.begin(), intents.end(), sorter);
+        // High > Normal(2) > Normal(1, default)
+        if (intents[0].priority != RetirePriority::High) return false;
+        if (intents[1].priority != RetirePriority::Normal) return false;
+        if (intents[1].dspSlot != 3) return false;  // epoch 2000 が先
+        if (intents[2].priority != RetirePriority::Normal) return false;
+        if (intents[2].dspSlot != 1) return false;  // epoch 3000 が後
+    }
+
+    return true;
+}
+
 int main()
 {
     if (!testGracePeriodCompletionRules())
@@ -127,6 +327,18 @@ int main()
 
     if (!testRetirePressureThresholdPolicyRules())
         throw std::runtime_error("retire pressure threshold policy rules failed");
+
+    if (!testPrioritySortCompositeKey())
+        throw std::runtime_error("priority sort composite key failed");
+
+    if (!testOverflowRingFifoOrder())
+        throw std::runtime_error("overflow ring FIFO order failed");
+
+    if (!testPrioritySortCriticalFirst())
+        throw std::runtime_error("priority sort critical first failed");
+
+    if (!testRetirePriorityCompatibility())
+        throw std::runtime_error("retire priority compatibility failed");
 
     return 0;
 }

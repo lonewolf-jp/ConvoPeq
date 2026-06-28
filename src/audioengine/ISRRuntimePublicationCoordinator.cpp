@@ -1,10 +1,14 @@
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
+#include "ISRRetireOverflowRing.h"
 
 namespace convo::isr {
 
 RuntimePublicationCoordinator::RuntimePublicationCoordinator()
-    : currentWorld_(nullptr)
+    : overflowScheduler_(*this)
+    , shutdownScheduler_(*this)
+    , priorityScheduler_(*this)
+    , currentWorld_(nullptr)
     , lastRejectCode_(RejectCode::None)
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
@@ -213,6 +217,145 @@ void RuntimePublicationCoordinator::setDeferredRetireResidencyCount(std::uint64_
     convo::publishAtomic(deferredRetireResidencyCount_, count, std::memory_order_release);
 }
 
+void RuntimePublicationCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(quarantineResidentCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
+    convo::publishAtomic(overflowMaxAgeUs_, maxAgeUs, std::memory_order_release);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getOverflowMaxAgeUs() const noexcept {
+    return convo::consumeAtomic(overflowMaxAgeUs_, std::memory_order_acquire);
+}
+
+RuntimePublicationCoordinator::OverflowDrainResult
+RuntimePublicationCoordinator::drainOverflowRing(
+    RetireOverflowRing& overflowRing, RetireRuntime& retireRuntime, bool unlimited) noexcept
+{
+    return overflowScheduler_.drainOverflowRing(overflowRing, retireRuntime, unlimited);
+}
+
+void RuntimePublicationCoordinator::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
+    priorityScheduler_.setOverflowAgeWarnCallback(cb);
+}
+
+size_t RuntimePublicationCoordinator::deferredRingOccupancy() const noexcept {
+    return overflowScheduler_.deferredRingOccupancy();
+}
+
+// ═══════════════════════════════════════════════════════════
+// ★ Phase5: OverflowScheduler implementation
+// ═══════════════════════════════════════════════════════════
+
+RuntimePublicationCoordinator::OverflowDrainResult
+RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
+    RetireOverflowRing& overflowRing, RetireRuntime& retireRuntime, bool unlimited) noexcept
+{
+    OverflowDrainResult result;
+    constexpr uint32_t kDefaultBudget = 64;
+    constexpr uint32_t kMaxReinjectRetries = 10;
+    const uint32_t budget = unlimited ? 0xFFFFFFFFu : kDefaultBudget;
+    uint32_t consumed = 0;
+
+    // ★ Phase1: OverflowRing から drain（優先度高）
+    RetireOverflowEntry entry;
+    while (consumed < budget && overflowRing.pop(entry))
+    {
+        ++consumed;
+
+        // 滞留時間監視
+        if (coordinator_.overflowAgeWarnCallback_ != nullptr)
+        {
+            const uint64_t nowUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (entry.overflowTimestampUs > 0 && nowUs > entry.overflowTimestampUs)
+            {
+                const uint64_t ageUs = nowUs - entry.overflowTimestampUs;
+                if (ageUs > result.oldestOverflowAgeUs)
+                    result.oldestOverflowAgeUs = ageUs;
+                const uint64_t maxAgeUs = convo::consumeAtomic(coordinator_.overflowMaxAgeUs_, std::memory_order_acquire);
+                if (maxAgeUs > 0 && ageUs > maxAgeUs)
+                    coordinator_.overflowAgeWarnCallback_(ageUs, result.droppedCount);
+            }
+        }
+
+        // retry超過 → Drop
+        if (entry.reinjectRetryCount >= kMaxReinjectRetries)
+        {
+            ++result.droppedCount;
+            continue;
+        }
+
+        // 再注入: Overflowからの再注入は High 優先度
+        ++entry.reinjectRetryCount;
+        entry.intent.priority = RetirePriority::High;
+        retireRuntime.emitRetireIntent(entry.intent);
+        ++result.reinjectedCount;
+    }
+
+    // ★ Phase5: Coordinator DeferredRing から drain（優先度中）
+    {
+        RetireOverflowEntry deferredEntry;
+        constexpr uint32_t kDeferredBudget = 32;
+        uint32_t deferredDrained = 0;
+        while (deferredDrained < kDeferredBudget && coordinator_.coordinatorDeferredRing_.pop(deferredEntry))
+        {
+            ++deferredDrained;
+            retireRuntime.emitRetireIntent(deferredEntry.intent);
+            ++result.reinjectedCount;
+        }
+        result.deferredRingOccupancy = convo::consumeAtomic(coordinator_.coordinatorDeferredCount_, std::memory_order_acquire);
+        // 排出成功分をカウントから減算
+        if (deferredDrained > 0)
+        {
+            convo::fetchSubAtomic(coordinator_.coordinatorDeferredCount_,
+                                  static_cast<size_t>(deferredDrained),
+                                  std::memory_order_acq_rel);
+        }
+    }
+
+    // ★ Phase5: LastResortQueue から drain（優先度低）
+    {
+        const size_t lrCount = convo::consumeAtomic(coordinator_.lastResortCount_, std::memory_order_acquire);
+        if (lrCount > 0)
+        {
+            constexpr uint32_t kLastResortBudget = 16;
+            uint32_t lrDrained = 0;
+            for (size_t i = 0; i < lrCount && lrDrained < kLastResortBudget; ++i)
+            {
+                auto& lrEntry = coordinator_.lastResortQueue_[i];
+                if (lrEntry.intent.isValid)
+                {
+                    lrEntry.intent.priority = RetirePriority::High;
+                    retireRuntime.emitRetireIntent(lrEntry.intent);
+                    lrEntry.intent.isValid = false;
+                    ++lrDrained;
+                    ++result.reinjectedCount;
+                }
+            }
+            if (lrDrained > 0)
+            {
+                // 排出済みエントリを詰める
+                size_t writeIdx = 0;
+                for (size_t readIdx = 0; readIdx < lrCount; ++readIdx)
+                {
+                    if (coordinator_.lastResortQueue_[readIdx].intent.isValid)
+                    {
+                        if (writeIdx != readIdx)
+                            coordinator_.lastResortQueue_[writeIdx] = coordinator_.lastResortQueue_[readIdx];
+                        ++writeIdx;
+                    }
+                }
+                convo::publishAtomic(coordinator_.lastResortCount_, writeIdx, std::memory_order_release);
+            }
+        }
+    }
+
+    return result;
+}
+
 void RuntimePublicationCoordinator::setSwapPending(bool pending) noexcept {
     convo::publishAtomic(swapPending_, pending, std::memory_order_release);
 }
@@ -246,17 +389,21 @@ std::uint64_t RuntimePublicationCoordinator::getDeferredRetireResidencyCount() c
     return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
 }
 
-bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
-    if (convo::consumeAtomic(swapPending_, std::memory_order_acquire)) {
-        return false;
-    }
+std::uint64_t RuntimePublicationCoordinator::getQuarantineResidentCount() const noexcept {
+    return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
+}
 
-    return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire) == 0;
+// ★ Phase5: Delegation to ShutdownScheduler
+bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
+    return shutdownScheduler_.isFullyDrained();
+}
+
+void RuntimePublicationCoordinator::requestShutdown() noexcept {
+    shutdownScheduler_.requestShutdown();
+}
+
+void RuntimePublicationCoordinator::markShutdownComplete() noexcept {
+    shutdownScheduler_.markShutdownComplete();
 }
 
 RuntimePublicationCoordinator::CoordinatorState RuntimePublicationCoordinator::getState() const noexcept {
@@ -268,7 +415,6 @@ void RuntimePublicationCoordinator::markTransitionStart() noexcept {
     if (state != CoordinatorState::Ready) {
         return;
     }
-
     convo::publishAtomic(state_, CoordinatorState::Transitioning, std::memory_order_release);
 }
 
@@ -277,27 +423,67 @@ void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
     if (state != CoordinatorState::Transitioning) {
         return;
     }
-
     if (!isSwapPending()) {
         convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
     }
 }
 
-void RuntimePublicationCoordinator::requestShutdown() noexcept {
-    convo::publishAtomic(state_, CoordinatorState::ShuttingDown, std::memory_order_release);
+// ═══════════════════════════════════════════════════════════
+// ★ Phase5: OverflowScheduler deferredRingOccupancy
+// ═══════════════════════════════════════════════════════════
+
+size_t RuntimePublicationCoordinator::OverflowScheduler::deferredRingOccupancy() const noexcept {
+    return convo::consumeAtomic(coordinator_.coordinatorDeferredCount_, std::memory_order_acquire);
 }
 
-void RuntimePublicationCoordinator::markShutdownComplete() noexcept {
-    const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
+// ═══════════════════════════════════════════════════════════
+// ★ Phase5: ShutdownScheduler implementation
+// ═══════════════════════════════════════════════════════════
+
+bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const noexcept {
+    if (convo::consumeAtomic(coordinator_.swapPending_, std::memory_order_acquire)) {
+        return false;
+    }
+
+    return convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.reclaimInFlightCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.deferredRetireResidencyCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0;
+}
+
+void RuntimePublicationCoordinator::ShutdownScheduler::requestShutdown() noexcept {
+    convo::publishAtomic(coordinator_.state_, CoordinatorState::ShuttingDown, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::ShutdownScheduler::markShutdownComplete() noexcept {
+    const auto state = convo::consumeAtomic(coordinator_.state_, std::memory_order_acquire);
     if (state != CoordinatorState::ShuttingDown) {
         return;
     }
 
     if (isFullyDrained()) {
-        convo::publishAtomic(state_, CoordinatorState::Bootstrapping, std::memory_order_release);
+        convo::publishAtomic(coordinator_.state_, CoordinatorState::Bootstrapping, std::memory_order_release);
     } else {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        convo::publishAtomic(coordinator_.state_, CoordinatorState::Faulted, std::memory_order_release);
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ★ Phase5: PriorityScheduler implementation
+// ═══════════════════════════════════════════════════════════
+
+void RuntimePublicationCoordinator::PriorityScheduler::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
+    coordinator_.overflowAgeWarnCallback_ = cb;
+}
+
+void RuntimePublicationCoordinator::PriorityScheduler::escalateAllRetires(RetirePriority minPriority) noexcept {
+    // ★ Phase5: Coordinator の escalateAllRetires は RetireRuntime に委譲
+    //   実装は AudioEngine.Processing.ReleaseResources.cpp の retireRuntime_.escalateAllRetires() が担当
+    //   本メソッドは Coordinator の公開APIとしての将来拡張用プレースホルダ
+    (void)minPriority;
 }
 
 void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {

@@ -47,6 +47,7 @@ struct RuntimeDrainAudit {
     uint64_t reclaimAttemptCount{0};
     uint64_t reclaimSuccessCount{0};
     uint64_t overflowCount{0};
+    uint64_t overflowRingResident{0};  // ★ Phase2: OverflowRing 滞留数（Drain 完了判定用）
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {

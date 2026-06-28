@@ -14,6 +14,14 @@
         "context-mode": {
             "type": "stdio",
             "command": "context-mode"
+        },
+        "headroom": {
+            "type": "stdio",
+            "command": "C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\Scripts\\headroom.exe",
+            "args": [
+                "mcp",
+                "serve"
+            ]
         }
     }
 }

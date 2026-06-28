@@ -298,6 +298,22 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     }
 };
 
+// ★ Phase4 (ALTERNATIVE DESIGN — Builder/Runtime 二段階モデル):
+//   Coordinator テンプレート World = RuntimeState (維持、エイリアス置換しない)
+//   詳細設計: doc/work59/PHASE4_TWO_STAGE_DESIGN.md
+//
+//   設計方針:
+//   1. Coordinator World パラメータを RuntimeState のまま維持
+//      → consumeWorldHandle が const RuntimeState* を返す
+//      → world->field は全261箇所で変更不要
+//   2. Builder: RuntimeState (mutable, 従来通り)
+//   3. Retire時: bridge の retireRuntimePublishWorldNonRt が
+//      ptr->unseal() を呼び出し frozen 状態を解放
+//   4. FrozenRuntimeWorld: builder 境界の RAII wrapper
+//      (coordinator の World パラメータとしては使用しない)
+//
+//   この方式により、C++ operator-> 制約の問題を回避しつつ、
+//   publish 後の不変性をランタイム保証する。
 using RuntimePublishWorld = RuntimeState;
 static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
               "RuntimePublishWorld must not be default-constructible outside builder path");
@@ -2802,6 +2818,7 @@ public:
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                ptr->unseal();                      // ★ Phase4: SealedObject の unseal — publish 時に設定された frozen 状態を解放
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
             });

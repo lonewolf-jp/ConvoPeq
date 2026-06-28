@@ -1,4 +1,5 @@
 #include "ISRRetire.h"
+#include "ISRRetireOverflowRing.h"
 #include "AtomicAccess.h"
 
 #include <algorithm>
@@ -22,19 +23,35 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
                 const size_t idx = fallbackCount_.load(std::memory_order_relaxed);
                 fallbackQueue_[idx] = intent;
                 convo::publishAtomic(fallbackCount_, idx + 1, std::memory_order_release);
-
-                // 最大使用量を更新
                 size_t prevHwm = convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_relaxed);
                 while (idx + 1 > prevHwm
                     && !convo::compareExchangeAtomic(fallbackHighWatermark_, prevHwm, idx + 1,
                         std::memory_order_release, std::memory_order_relaxed)) {}
-
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
-                // droppedIntentCount_ はインクリメントしない（保存成功）
             }
             else
             {
-                // Fallback も満杯 → overflow としてカウント
+                // ★ Phase 1: Fallback も満杯 → OverflowRing へ退避試行
+                if (overflowRing_ != nullptr) {
+                    RetireOverflowEntry entry{intent, static_cast<uint64_t>(
+                        std::chrono::steady_clock::now().time_since_epoch().count()), 0};
+                    if (overflowRing_->tryPush(entry)) {
+                        // ★ OverflowRing 退避成功 → droppedIntentCount は増やさない
+                        convo::fetchAddAtomic(quarantineRescuedCount_, uint64_t{1}, std::memory_order_release);
+                        // ★ C-1: overflowStartTimestamp_ 設定
+                        uint64_t expected = 0;
+                        convo::compareExchangeAtomic(overflowStartTimestamp_, expected,
+                            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+                            std::memory_order_release);
+                        (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1},
+                            std::memory_order_release);
+                        convo::publishAtomic(lastOverflowTicks_,
+                            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+                            std::memory_order_release);
+                        return;
+                    }
+                }
+                // ★ 最終手段: 完全破棄
                 (void)convo::fetchAddAtomic(fallbackOverflowCount_, uint64_t{1}, std::memory_order_acq_rel);
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
                 (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
@@ -95,17 +112,18 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
         convo::publishAtomic(fallbackCount_, size_t{0}, std::memory_order_release);
     }
 
+    // ★ Phase 5: 複合ソートキー (priority, retireEpoch, generation, dspSlot)
     std::stable_sort(result.begin(), result.end(), [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
+        if (lhs.priority != rhs.priority)
+            return lhs.priority > rhs.priority;  // priority降順（Critical最先頭）
         if (lhs.retireEpoch != rhs.retireEpoch)
             return lhs.retireEpoch < rhs.retireEpoch;
-
         if (lhs.generation != rhs.generation)
             return lhs.generation < rhs.generation;
-
         return lhs.dspSlot < rhs.dspSlot;
     });
 
-    convo::publishAtomic(retireIntentHead_, head, std::memory_order_release);
+    // ★ 注意: 2重 publishAtomic はここでは行わない（1回目が上で完了済み）
     return result;
 }
 
@@ -170,6 +188,39 @@ std::size_t RetireRuntime::fallbackHighWatermark() const noexcept
 std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
 {
     return convo::consumeAtomic(fallbackOverflowCount_, std::memory_order_acquire);
+}
+
+// ★ Phase5: 全保留中Intentの優先度を底上げ（Shutdown時の Critical 一括昇格用）
+//   Shutdown/AudioStopped 後は Audio Thread が動作していないため、
+//   MPSC queue + fallback queue の走査は安全。
+//   ※ isValid/priority は std::atomic ではないが、Shutdown中は単一スレッドアクセス。
+void RetireRuntime::escalateAllRetires(RetirePriority minPriority) noexcept
+{
+    // MPSC queue: 全スロットを走査
+    for (size_t i = 0; i < RETIRE_INTENT_QUEUE_SIZE; ++i)
+    {
+        auto& intent = retireIntentQueue_[i];
+        const auto rawIsValid = convo::consumeAtomic(
+            reinterpret_cast<const std::atomic<bool>&>(intent.isValid),
+            std::memory_order_acquire);
+        if (rawIsValid && static_cast<uint8_t>(intent.priority) < static_cast<uint8_t>(minPriority))
+        {
+            intent.priority = minPriority;
+        }
+    }
+
+    // Fallback queue: 全エントリを走査
+    {
+        const size_t count = convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
+        for (size_t i = 0; i < count && i < FALLBACK_QUEUE_CAPACITY; ++i)
+        {
+            auto& intent = fallbackQueue_[i];
+            if (static_cast<uint8_t>(intent.priority) < static_cast<uint8_t>(minPriority))
+            {
+                intent.priority = minPriority;
+            }
+        }
+    }
 }
 
 }  // namespace isr
