@@ -33,7 +33,6 @@ namespace {
 
     // ── テストトーン注入（前方宣言、機能は削除済み） ──
     void diagEnableToneInjection();
-    void diagFillTestTone(double*, double*, int, double);
 
     void diagStartCapture() {
         if (g_diagCaptureFile) return;
@@ -89,8 +88,6 @@ namespace {
     void diagEnableToneInjection() {
     }
 
-    void diagFillTestTone(double* /*dataL*/, double* /*dataR*/, int /*numSamples*/, double /*sampleRate*/) {
-    }
 }
 
 namespace

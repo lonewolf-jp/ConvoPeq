@@ -61,6 +61,8 @@ graphify-out/
 .claude/
 CLAUDE.md
 .aidex/
+.github/context-mode/
+
 # Coverage reports
 coverage/
 htmlcov/

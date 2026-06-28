@@ -305,6 +305,7 @@ public:
             const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
             const uint64_t epoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
+            (void)epoch;  // suppress icx -Wunused-variable (used only in assert)
 
             const bool isQuarantined = (flags & ReaderSlot::kQuarantinedFlag) != 0;
             const bool isPending = (flags & ReaderSlot::kPendingQuarantineFlag) != 0;
