@@ -5,7 +5,8 @@
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "DSPLifetimeManager.h"
-#include "../NoiseShaperLearner.h"  // ★ Work39: Restore Learner Rollback 用
+#include "../NoiseShaperLearner.h"
+#include "core/TimeUtils.h"  // ★ Work39: Restore Learner Rollback 用
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 #include <windows.h>
@@ -21,10 +22,10 @@ juce::String diagPrefix(uint64_t currentGeneration)
     const auto now = juce::Time::getCurrentTime();
     const auto timestamp = now.formatted("%H:%M:%S.")
         + juce::String(now.getMilliseconds()).paddedLeft('0', 3);
-    const auto ticks = juce::Time::getHighResolutionTicks();
+    const auto us = convo::getCurrentTimeUs();
     return "[" + timestamp + "]"
         + " Gen=" + juce::String(static_cast<juce::int64>(currentGeneration))
-        + " Ticks=" + juce::String(static_cast<juce::int64>(ticks));
+        + " Us=" + juce::String(static_cast<juce::int64>(us));
 }
 
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -714,18 +715,17 @@ void AudioEngine::timerCallback()
 
     // ★ 計測ログ: Memory 定期ログ（1秒ごと・常時出力）+ PageFault Delta警告
     {
-        static int64_t lastMemLogTicks = 0;
+        static uint64_t lastMemLogUs = 0;
         static uint64_t s_prevPageFaults = 0;
         static double s_pfEwmaAvg = 0.0;
         static int s_pfSampleCount = 0;
         static constexpr int kEwmaWarmupSamples = 10;
         static constexpr uint64_t kAbsoluteThreshold = 50000;
 
-        const auto nowTicks = juce::Time::getHighResolutionTicks();
-        const auto ticksPerSec = juce::Time::getHighResolutionTicksPerSecond();
-        if (nowTicks - lastMemLogTicks >= ticksPerSec)
+        const auto nowUs = convo::getCurrentTimeUs();
+        if (nowUs - lastMemLogUs >= 1'000'000)
         {
-            lastMemLogTicks = nowTicks;
+            lastMemLogUs = nowUs;
             const auto memInfo = getProcessMemoryInfo();
             s_cachedMemInfo = memInfo;  // ★ XRUN消費ループ用にキャッシュ更新
             const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
@@ -799,12 +799,11 @@ void AudioEngine::timerCallback()
     //    intervalMax を主指標、callbackMax を副指標とする。
     //    変化があった秒のみ出力（通常時0行）。
     {
-        static int64_t lastCbSummaryTicks = 0;
-        const auto nowTicks = juce::Time::getHighResolutionTicks();
-        const auto ticksPerSec = juce::Time::getHighResolutionTicksPerSecond();
-        if (nowTicks - lastCbSummaryTicks >= ticksPerSec)
+        static uint64_t lastCbSummaryUs = 0;
+        const auto nowUs = convo::getCurrentTimeUs();
+        if (nowUs - lastCbSummaryUs >= 1'000'000)
         {
-            lastCbSummaryTicks = nowTicks;
+            lastCbSummaryUs = nowUs;
             const uint32_t ivMaxUs = convo::exchangeAtomic(intervalMaxUs_, 0u, std::memory_order_relaxed);
             const uint32_t cbMaxUs = convo::exchangeAtomic(callbackMaxUs_, 0u, std::memory_order_relaxed);
             const uint32_t cbCount = convo::exchangeAtomic(callbackCount_, 0u, std::memory_order_relaxed);
@@ -911,7 +910,39 @@ void AudioEngine::timerCallback()
                 + " World=" + juce::String(activeCount) + "/" + juce::String(fadingCount)
                 + "/" + juce::String(static_cast<juce::int64>(backpressure.retireQueueDepth))
                 + " Pressure=" + juce::String(backpressure.retirePressureLevel)
-                + " PublishTotal=" + juce::String(static_cast<juce::int64>(lifecycle.publishCount)));
+                + " PublishTotal=" + juce::String(static_cast<juce::int64>(lifecycle.publishCount))
+                + " DriftUs=" + juce::String(static_cast<juce::int64>(ev.driftUs)));
+        }
+
+        // ★ B: CB_HIST リングバッファダンプ（XRUN検出時の最新32件、timer callback1回につき1度のみ）
+        {
+            const uint64_t wc = rtLocalState_.callbackTimingWriteCount.load(
+                std::memory_order_relaxed);
+            if (wc != rtAuxMutable_.lastCbHistDumpedWriteCount)
+            {
+                rtAuxMutable_.lastCbHistDumpedWriteCount = wc;
+                const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+                const uint64_t start = (wc > RTLocalState::kCallbackTimingSlots)
+                    ? wc - RTLocalState::kCallbackTimingSlots : 0;
+                for (uint64_t i = start; i < wc; ++i)
+                {
+                    const size_t idx = i % RTLocalState::kCallbackTimingSlots;
+                    const auto& e = rtLocalState_.callbackTimingHistory[idx];
+                    const uint64_t seq = e.sequence.load(std::memory_order_acquire);
+                    if (seq == 0) continue;
+                    if (e.sequence.load(std::memory_order_acquire) == seq)
+                    {
+                        const double pct = static_cast<double>(e.budgetPermille) / 10.0;
+                        diagLog(diagPrefix(gen) + " [CB_HIST] idx="
+                            + juce::String(static_cast<int64_t>(e.callbackIndex))
+                            + " proc=" + juce::String(static_cast<int64_t>(e.processTimeUs))
+                            + " drift=" + juce::String(static_cast<int64_t>(e.driftUs))
+                            + " cpu=" + juce::String(static_cast<int>(e.cpu))
+                            + " budget=" + juce::String(pct, 1) + "%"
+                            + " expected=" + juce::String(static_cast<int64_t>(e.expectedIntervalUs)));
+                    }
+                }
+            }
         }
     }
 

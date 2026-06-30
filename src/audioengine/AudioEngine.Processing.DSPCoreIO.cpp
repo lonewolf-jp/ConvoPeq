@@ -422,10 +422,23 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        const uint64_t ansStartUs = convo::getCurrentTimeUs();
+#endif
         adaptiveBankSwitchCount.fetch_add(1, std::memory_order_relaxed);
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
+        if (ansElapsedUs > 10)
+        {
+            juce::String alog("[ANS_SWITCH] us=");
+            alog += juce::String(static_cast<int64_t>(ansElapsedUs));
+            DBG(alog);
+            juce::Logger::writeToLog(alog);
+        }
+#endif
     }
 
     if (applyDither)

@@ -1,8 +1,10 @@
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
+#include "DiagnosticsConfig.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/RCUReader.h"
+#include "core/TimeUtils.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -215,6 +217,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     if (!conv)
         return;
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const uint64_t convStartUs = convo::getCurrentTimeUs();
+    const double srForConv = convo::consumeAtomic(currentSampleRate, std::memory_order_relaxed);
+#endif
 
     const auto runtimeSnapshot = captureRuntimeProcessSnapshot();
 
@@ -632,7 +639,35 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             const double dryG = needsDrySignal ? equalPowerSin(1.0 - targetMixValue) : 0.0;
             double* wetOut = wetBase + processed;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            const uint64_t scStartUs = convo::getCurrentTimeUs();
+#endif
             conv->process(ch, input, wetOut, chunkSamples);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            const uint64_t scElapsedUs = convo::getCurrentTimeUs() - scStartUs;
+            // work60: thr撤廃、callbackSeqベースのサンプリング
+            if (chunkSamples > 0 && srForConv > 0.0)
+            {
+                const uint64_t cbSeq = convo::consumeAtomic(currentCallbackSeq, std::memory_order_relaxed);
+                if ((cbSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
+                    ; // skip print
+                else
+                {
+                    const double expectedUs = static_cast<double>(chunkSamples) / srForConv * 1e6;
+                    const uint32_t cpu = convo::consumeAtomic(currentCpu, std::memory_order_relaxed);
+                    juce::String slog("[STCONV_TIME]");
+                    slog += " seq=" + juce::String(static_cast<int64_t>(cbSeq));
+                    slog += " cpu=" + juce::String(static_cast<int>(cpu));
+                    slog += " us=" + juce::String(static_cast<int64_t>(scElapsedUs));
+                    slog += " chunk=" + juce::String(chunkSamples);
+                    slog += " ch=" + juce::String(ch);
+                    slog += " budget=" + juce::String(
+                        (static_cast<double>(scElapsedUs) / expectedUs) * 100.0, 1) + "%";
+                    DBG(slog);
+                    juce::Logger::writeToLog(slog);
+                }
+            }
+#endif
             sanitizeFiniteChunk(wetOut, chunkSamples);
 
             const double* wetSignal = wetOut;
@@ -674,6 +709,38 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             processed += chunkSamples;
         }
     }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const uint64_t convElapsedUs = convo::getCurrentTimeUs() - convStartUs;
+        // work60: thr撤廃、callbackSeqベースのサンプリング
+        if (block.getNumSamples() > 0 && srForConv > 0.0)
+        {
+            const uint64_t cbSeq = convo::consumeAtomic(currentCallbackSeq, std::memory_order_relaxed);
+            if ((cbSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
+                ; // skip print
+            else
+            {
+                const uint32_t cpu = convo::consumeAtomic(currentCpu, std::memory_order_relaxed);
+                const double expectedUs = static_cast<double>(block.getNumSamples()) / srForConv * 1e6;
+                juce::String clog("[CONV_TIME]");
+                clog += " seq=" + juce::String(static_cast<int64_t>(cbSeq));
+                clog += " cpu=" + juce::String(static_cast<int>(cpu));
+                clog += " us=" + juce::String(static_cast<int64_t>(convElapsedUs));
+                clog += " block=" + juce::String(static_cast<int>(block.getNumSamples()));
+                clog += " budget=" + juce::String(
+                    (static_cast<double>(convElapsedUs) / expectedUs) * 100.0, 1) + "%";
+                clog += " expected=" + juce::String(static_cast<int64_t>(expectedUs));
+                if (conv != nullptr) {
+                    clog += " callQ=" + juce::String(conv->callQuantumSamples);
+                    clog += " lat=" + juce::String(conv->latency);
+                }
+                DBG(clog);
+                juce::Logger::writeToLog(clog);
+            }
+        }
+    }
+#endif
 
 }
 

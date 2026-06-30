@@ -15,6 +15,12 @@
 #define CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS 1
 #endif
 
+// work60: 診断ログサンプリングマスク。CMakeのtarget_compile_definitionsで指定可能。
+// デフォルト 0xF = 1/16。Debug:0x3(1/4), HeavyAnalyze:0x1(1/2)。
+#ifndef CONVOPEQ_DIAG_SAMPLE_MASK
+#define CONVOPEQ_DIAG_SAMPLE_MASK 0xF
+#endif
+
 // ★ RUNTIME_DIAG_LOG マクロ: 単一の diagLog 呼び出しをマクロで囲む
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 #define RUNTIME_DIAG_LOG(x) diagLog(x)

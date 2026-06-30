@@ -247,8 +247,7 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         convo::fetchAddAtomic(deferredOverwriteCount_, uint64_t{1},
             std::memory_order_release);
 
-    const auto now = static_cast<uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto now = convo::getCurrentTimeUs();
 
     // 上書き時は滞留時間を maxDeferredAgeMs に反映
     if (deferredSlot_.has_value()) {

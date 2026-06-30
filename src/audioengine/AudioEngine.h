@@ -733,6 +733,9 @@ public:
         int alignedCapacity = 0;                  // 現在確保済み容量（再確保判定用）
 
         int maxSamplesPerBlock = 0;               // ホスト指定の入力ブロック上限（DSPCore::prepare() で設定）
+        // work60: dsp->process()直前にAudioBlockから設定、logEqTimeで読取
+        uint64_t currentCallbackSeq { 0 };
+        uint32_t currentCpu { UINT32_MAX };
 
         // ─────────────────────────────────────────────────────────────
         // 【Issue 3 修正】内部処理用最大バッファサイズ
@@ -1184,6 +1187,7 @@ public:
         int generation = 0;                     // XRUN検出時点の publish 世代
         uint64_t retireQueueDepth = 0;          // XRUN発生時点のRetire滞留数（atomic load）
         uint64_t sequenceNumber = 0;            // XRUN連番（単調増加カウンタ、ログ突き合わせ用）
+        int64_t driftUs = 0;                    // callback受信ジッター(us, A計測)
     };
     static_assert(std::is_trivially_copyable_v<XRunEvent>,
         "XRunEvent must be trivially copyable for LockFreeRingBuffer");
@@ -1245,6 +1249,17 @@ public:
         double sampleRateHz = 0.0;
     };
 
+    // ★ PublishTimingEntry: Publish完了時刻をDSP側へ伝える固定長Historyの1エントリ
+    struct PublishTimingEntry
+    {
+        uint64_t sequence = 0;
+        uint64_t publishStartUs = 0;
+        uint64_t publishEndUs = 0;
+        uint64_t gen = 0;
+        uint64_t worldId = 0;
+        uint64_t publishCallbackIndex = 0;  // publish完了時のcallbackIndex
+    };
+
     struct RTLocalState
     {
         std::atomic<uint64_t> audioCallbackEpochCounter { 0 };
@@ -1255,7 +1270,45 @@ public:
         std::atomic<uint64_t> lastCallbackEndTicks { 0 };       // 前回コールバック終了の HighResolutionTicks
         std::atomic<uint64_t> xrunSequenceCounter { 0 };        // XRUN連番カウンタ
         std::atomic<uint64_t> lastActivatedGeneration { 0 };    // ACTIVATE 追跡用（直前の generation）
+
+        // ★ PublishTimingHistory: Fixed-size history (writer=NonRT, reader=RT, lookup-only)
+        //    NOT a ring buffer — no pop/consume, reader searches by sequence match.
+        std::atomic<uint64_t> publishTimingWriteCount { 0 };
+        static constexpr size_t kPublishTimingSlots = 16;
+        PublishTimingEntry publishTimingHistory[kPublishTimingSlots];
+
+        // ★ v3rd-observation 診断計測: callback受信時刻 / drift / CPU migration / pub seq / CB履歴
+        std::atomic<uint64_t> lastCallbackEntryUs { 0 };        // A: callback受信時刻(us)
+        std::atomic<int64_t>  lastCallbackDriftUs { 0 };        // A: callbackジッター(us)
+        std::atomic<uint32_t> lastCallbackProcessor { UINT32_MAX }; // G: 直前CPU番号
+        std::atomic<uint64_t> cpuMigrationCount { 0 };          // G: CPU migration累計
+        std::atomic<uint64_t> lastCallbackPublicationSeq { 0 }; // H: 直前publicationSequence
+
+        // B: callback処理時間履歴（固定長ring buffer, commit seq方式）
+        static constexpr size_t kCallbackTimingSlots = 32;
+        struct CallbackTimingEntry {
+            uint64_t callbackIndex = 0;
+            uint64_t processTimeUs = 0;
+            int64_t driftUs = 0;
+            uint32_t cpu = UINT32_MAX;
+            uint16_t budgetPermille = 0;
+            uint32_t expectedIntervalUs = 0;
+            std::atomic<uint64_t> sequence{0};  // commit seq
+        };
+        CallbackTimingEntry callbackTimingHistory[kCallbackTimingSlots];
+        std::atomic<uint64_t> callbackTimingWriteCount{0};
+
+        // ★ work60 診断拡張: prepareToPlay 時に事前計算した期待callback間隔(us)
+        //   非atomic（prepareToPlay/device restart時のみ更新、callback内は読取専用）
+        uint64_t expectedCallbackIntervalUs { 0 };
     };
+
+    // ★ work60: 共通callbackSeq取得ヘルパー（BlockDouble/BlockFloat用）
+    //   AudioBlock.cpp では既存の thisCallbackIndex を流用する（二度読みしない）。
+    static inline uint64_t currentCallbackSeq(const RTLocalState& rls) noexcept
+    {
+        return convo::consumeAtomic(rls.audioCallbackEpochCounter, std::memory_order_relaxed);
+    }
 
     struct RTAuxMutable
     {
@@ -1279,6 +1332,7 @@ public:
         uint64_t debugLastReportedRebuildQueuedCount { std::numeric_limits<uint64_t>::max() };
         uint64_t debugLastReportedRebuildBlockedPendingDuplicateCount { std::numeric_limits<uint64_t>::max() };
         uint64_t debugLastReportedRebuildBlockedRecentDuplicateCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t lastCbHistDumpedWriteCount { std::numeric_limits<uint64_t>::max() };
         uint64_t debugLastReportedRebuildRuntimeQueueFullCount { std::numeric_limits<uint64_t>::max() };
         uint64_t debugLastReportedRebuildDrainedCommandCount { std::numeric_limits<uint64_t>::max() };
         uint64_t debugLastReportedRebuildMatchedRuntimeCommandCount { std::numeric_limits<uint64_t>::max() };

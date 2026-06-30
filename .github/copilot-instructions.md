@@ -28,6 +28,22 @@ Use: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)`
 Terminal ONLY for: `git`, `mkdir`, `rm`, `mv`, `cd`, `ls`, `npm install`, `pip install`.
 Otherwise: `ctx_batch_execute(commands, queries)` or `ctx_execute(language: "javascript", code: "...")`. Use `language: "shell"` only when code matches the host shell.
 
+## ★ RTK 使用ルール（絶対遵守）
+
+**RTK は常に WSL 版を使用すること。`rtk.exe`（Windowsネイティブ）は使用禁止。**
+
+```bash
+# ✅ 正しい呼び出し形式（WSL版）
+wsl bash -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk <command>'
+
+# ❌ 禁止（Windows版は使わない）
+# rtk <command>
+```
+
+- RTK v0.43.0 が WSL `/home/user/.local/bin/rtk` にインストール済み（全38機能動作可能）
+- シングルクォートで囲むことで PowerShell の変数展開問題を回避
+- `wsl bash -c '...'` を使う（`sh`より高機能。`wsl rtk` 単体は PATH 問題で不可）
+
 ### read_file (for analysis)
 Reading to **edit** → read_file correct. Reading to **analyze/explore/summarize** → `ctx_execute_file(path, language, code)`.
 
@@ -153,9 +169,23 @@ rtk -u git status
 rtk -u npm test
 ```
 
-## Windows Notes
+## Windows Notes — WSL RTK 使用（2026-06-29 変更）
 
-On native Windows (cmd.exe/PowerShell), RTK filters work fully but the auto-rewrite hook requires WSL. Always manually prefix commands with `rtk`. The hook file at `.github/hooks/rtk-rewrite.json` provides Copilot integration.
+`rtk.exe`（Windowsネイティブ）は使用禁止。**常に WSL 版を使用する。**
+
+```bash
+# 形式:
+wsl bash -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk <command>'
+
+# 例:
+wsl bash -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk git status'
+wsl bash -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk grep -rn "pattern" src/'
+```
+
+- RTK v0.43.0 が WSL `/home/user/.local/bin/rtk` にインストール済み（全38機能動作可能）
+- `wsl rtk` 単体は PATH 問題で失敗するため、必ず `wsl bash -c` 経由でフルパス指定
+- PowerShellのクォーテーションに注意: 全体を `'single quotes'` で囲む
+- `--include` 等の長いオプションはクォーテーション処理で失敗する場合あり
 
 ## Current Savings
 

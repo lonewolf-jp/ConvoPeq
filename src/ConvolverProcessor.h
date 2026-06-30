@@ -1039,6 +1039,9 @@ public: // Added for AudioEngine access
     convo::ScopedAlignedPtr<float> cachedSmoothedMagsBuffer; // スムージング出力用キャッシュ
     int cachedMagnitudeBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
+    // work60: 現在のcallbackSeq/Cpu（AudioBlockからdsp->process()直前に設定）
+    std::atomic<uint64_t> currentCallbackSeq { 0 };
+    std::atomic<uint32_t> currentCpu { UINT32_MAX };
 
     convo::ScopedDftiDescriptor fftHandle;
     int fftHandleSize = 0;

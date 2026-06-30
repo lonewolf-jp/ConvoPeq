@@ -1,6 +1,8 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
+#include "core/TimeUtils.h"
 
 // [DIAG] Convolver出力キャプチャ（work52 調査用）
 #include <cstdio>
@@ -34,11 +36,56 @@ namespace {
     // ── テストトーン注入（前方宣言、機能は削除済み） ──
     void diagEnableToneInjection();
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+namespace {
+[[maybe_unused]] void diagLog(const juce::String& message)
+{
+    DBG(message);
+    juce::Logger::writeToLog(message);
+}
+}
+
+// ★ D: EQ処理時間ログ出力（共通ヘルパー）
+// work60: callbackSeq/cpu対応、CONVOPEQ_DIAG_SAMPLE_MASK サンプリング
+void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
+               const convo::EQParameters* eqParams,
+               convo::ProcessingOrder order,
+               double sampleRate,
+               uint64_t callbackSeq, uint32_t cpu)
+{
+    const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
+    if (sampleRate <= 0.0 || numSamples <= 0) return;
+
+    // ★ work60: callbackSeqベースのサンプリング
+    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
+        return;
+
+    int activeBands = 0;
+    if (eqParams != nullptr) {
+        for (int i = 0; i < 20; ++i)
+            if (eqParams->bands[i].enabled
+                && std::abs(eqParams->bands[i].gain) > 0.01f)
+                ++activeBands;
+    }
+    const char* orderStr = (order == convo::ProcessingOrder::ConvolverThenEQ)
+        ? "Conv->EQ" : "EQ->Conv";
+    const double expectedUs = static_cast<double>(numSamples) / sampleRate * 1e6;
+    juce::String eqtLog("[EQ_TIME]");
+    eqtLog += " seq=" + juce::String(static_cast<int64_t>(callbackSeq));
+    eqtLog += " cpu=" + juce::String(static_cast<int>(cpu));
+    eqtLog += " us=" + juce::String(static_cast<int64_t>(eqElapsedUs));
+    eqtLog += " bands=" + juce::String(activeBands);
+    eqtLog += " order=" + juce::String(orderStr);
+    eqtLog += " budget=" + juce::String(
+        (static_cast<double>(eqElapsedUs) / expectedUs) * 100.0, 1) + "%";
+    diagLog(eqtLog);
+}
+#endif
+
     void diagStartCapture() {
         if (g_diagCaptureFile) return;
         fopen_s(&g_diagCaptureFile, "C:\\TEMP\\conv_output_l.raw", "wb");
         if (!g_diagCaptureFile) return;
-        g_diagCaptureRemaining = kDiagCaptureMaxSamples;
 
         // ヘッダ書き込み
         CaptureHeader hdr = {};
@@ -470,7 +517,13 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             if (eqParamsToUse != nullptr)
             {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const uint64_t eqStartUs = convo::getCurrentTimeUs();
+#endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+#endif
             }
             else
             {
@@ -488,7 +541,13 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             if (eqParamsToUse != nullptr)
             {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const uint64_t eqStartUs = convo::getCurrentTimeUs();
+#endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+#endif
             }
             else
             {
@@ -719,10 +778,23 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
             || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        const uint64_t ansStartUs = convo::getCurrentTimeUs();
+#endif
         adaptiveBankSwitchCount.fetch_add(1, std::memory_order_relaxed);
         adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
         activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
+        if (ansElapsedUs > 10)
+        {
+            juce::String alog("[ANS_SWITCH] us=");
+            alog += juce::String(static_cast<int64_t>(ansElapsedUs));
+            DBG(alog);
+            juce::Logger::writeToLog(alog);
+        }
+#endif
     }
 
     if (applyDither)

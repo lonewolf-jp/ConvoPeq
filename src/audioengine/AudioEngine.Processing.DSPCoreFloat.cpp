@@ -1,9 +1,17 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
+#include "core/TimeUtils.h"
 
 namespace
 {
+[[maybe_unused]] void diagLog(const juce::String& message)
+{
+    DBG(message);
+    juce::Logger::writeToLog(message);
+}
+
 inline bool isFiniteNoLibm(double x) noexcept
 {
     union { double d; uint64_t u; } v { x };
@@ -19,6 +27,43 @@ inline double absDiffNoLibm(double a, double b) noexcept
 {
     return absNoLibm(a - b);
 }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// work60: callbackSeq/cpu対応、CONVOPEQ_DIAG_SAMPLE_MASK サンプリング
+inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
+                      const convo::EQParameters* eqParams,
+                      convo::ProcessingOrder order,
+                      double sampleRate,
+                      uint64_t callbackSeq, uint32_t cpu)
+{
+    const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
+    if (sampleRate <= 0.0 || numSamples <= 0) return;
+
+    // ★ work60: callbackSeqベースのサンプリング
+    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
+        return;
+
+    int activeBands = 0;
+    if (eqParams != nullptr) {
+        for (int i = 0; i < 20; ++i)
+            if (eqParams->bands[i].enabled
+                && std::abs(eqParams->bands[i].gain) > 0.01f)
+                ++activeBands;
+    }
+    const char* orderStr = (order == convo::ProcessingOrder::ConvolverThenEQ)
+        ? "Conv->EQ" : "EQ->Conv";
+    const double expectedUs = static_cast<double>(numSamples) / sampleRate * 1e6;
+    juce::String eqtLog("[EQ_TIME]");
+    eqtLog += " seq=" + juce::String(static_cast<int64_t>(callbackSeq));
+    eqtLog += " cpu=" + juce::String(static_cast<int>(cpu));
+    eqtLog += " us=" + juce::String(static_cast<int64_t>(eqElapsedUs));
+    eqtLog += " bands=" + juce::String(activeBands);
+    eqtLog += " order=" + juce::String(orderStr);
+    eqtLog += " budget=" + juce::String(
+        (static_cast<double>(eqElapsedUs) / expectedUs) * 100.0, 1) + "%";
+    diagLog(eqtLog);
+}
+#endif
 
 inline void applyGainRamp(float* __restrict data, int numSamples,
                           float startGain, float gainStep) noexcept
@@ -195,9 +240,19 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         if (!state.eqBypassed)
         {
             if (eqParamsToUse != nullptr)
+            {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const uint64_t eqStartUs = convo::getCurrentTimeUs();
+#endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+#endif
+            }
             else
+            {
                 eqRt().process(processBlock);
+            }
         }
         else
         {
@@ -209,9 +264,19 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         if (!state.eqBypassed)
         {
             if (eqParamsToUse != nullptr)
+            {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                const uint64_t eqStartUs = convo::getCurrentTimeUs();
+#endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+#endif
+            }
             else
+            {
                 eqRt().process(processBlock);
+            }
         }
         else
         {

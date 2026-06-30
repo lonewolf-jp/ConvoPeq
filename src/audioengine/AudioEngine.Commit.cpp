@@ -16,7 +16,7 @@
 namespace {
 void diagLog(const juce::String& message)
 {
-#if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     DBG(message);
     juce::Logger::writeToLog(message);
 #else

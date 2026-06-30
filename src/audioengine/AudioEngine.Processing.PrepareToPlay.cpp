@@ -211,6 +211,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // JUCE 契約上 prepareToPlay 実行中は Audio Thread callback が走らないため、
     // ここでの状態公開は安全。
     diagLog("[DIAG] prepareToPlay: latency buffers ready");
+    // work60: 期待callback間隔を事前計算
+    rtLocalState_.expectedCallbackIntervalUs =
+        (sampleRate > 0.0 && samplesPerBlockExpected > 0)
+        ? static_cast<uint64_t>(static_cast<double>(samplesPerBlockExpected) / sampleRate * 1e6)
+        : 0;
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
     diagLog("[DIAG] prepareToPlay: lifecycleState set to Prepared");
 
