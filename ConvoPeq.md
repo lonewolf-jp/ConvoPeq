@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-06-30 20:42:51
+> Generated: 2026-07-05 01:05:24
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -845,7 +845,9 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
     $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
-    $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_DIAG_SAMPLE_MASK=$<IF:$<BOOL:${CONVOPEQ_DIAG_SAMPLE_MASK}>,${CONVOPEQ_DIAG_SAMPLE_MASK},0xF>>
+    # CONVOPEQ_DIAG_SAMPLE_MASK は DiagnosticsConfig.h で自動設定 (Release:0xFF, Debug:0x3F)。
+    # CMake 変数 CONVOPEQ_DIAG_SAMPLE_MASK が明示的に指定された場合のみ上書きする。
+    $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:$<$<BOOL:${CONVOPEQ_DIAG_SAMPLE_MASK}>:CONVOPEQ_DIAG_SAMPLE_MASK=${CONVOPEQ_DIAG_SAMPLE_MASK}>>
     JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
     JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
@@ -8792,6 +8794,25 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     updateNoiseShaperControls();
     // loadSettings()後にUIの値を更新
 
+    // ★ [work63] Audio Thread Priority toggle（再起動前提）
+    addAndMakeVisible(audioThreadPriorityToggle);
+    audioThreadPriorityToggle.setButtonText("Audio Thread Priority: MMCSS");
+    audioThreadPriorityToggle.setToggleState(engine.isAudioThreadPriorityMmcss(), juce::dontSendNotification);
+    audioThreadPriorityToggle.setTooltip("Toggle and restart to apply");
+    audioThreadPriorityToggle.onClick = [this] {
+        const bool useMmcss = audioThreadPriorityToggle.getToggleState();
+        audioEngine.setAudioThreadPriorityMode(useMmcss);
+        audioThreadPriorityToggle.setButtonText(useMmcss ? "Audio Thread Priority: MMCSS" : "Audio Thread Priority: Native RT");
+        DeviceSettings::saveSettings(audioDeviceManager, audioEngine);
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::InfoIcon)
+                .withTitle("Audio Thread Priority")
+                .withMessage("Setting saved. Please restart the application for the change to take effect.")
+                .withButton("OK"),
+            nullptr);
+    };
+
     updateGainStagingDisplay();
     startTimerHz(5);
 }
@@ -8808,7 +8829,7 @@ void DeviceSettings::resized()
     auto bounds = getLocalBounds();
     // Adaptive learningボタンの下の余白を詰めるため、controlsAreaの高さを自動計算
     constexpr int rowHeight = 30;
-    constexpr int numRows = 6; // Dither, Input, Output, Tabs, Over/Noise, Adaptive
+    constexpr int numRows = 7; // Dither, Input, Output, Tabs, Over/Noise, Adaptive, Priority
     auto controlsArea = bounds.removeFromTop(rowHeight * numRows); // 必要な分だけ
     auto row1 = controlsArea.removeFromTop(rowHeight); // Dither Bit Depth
     auto row2 = controlsArea.removeFromTop(rowHeight); // Input Headroom
@@ -8816,6 +8837,7 @@ void DeviceSettings::resized()
     auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
     auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
     [[maybe_unused]] auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
+    auto row7 = controlsArea.removeFromTop(rowHeight); // Audio Thread Priority
 
     // 1行目: Dither Bit Depth
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
@@ -8845,6 +8867,9 @@ void DeviceSettings::resized()
 
     // 6行目: Adaptive learningボタンをNoiseShaperの真下・同じ幅で配置
     adaptiveLearningButton.setBounds(nsComboX, nsComboY + nsComboH, nsComboW, nsComboH - 2);
+
+    // 7行目: Audio Thread Priority toggle
+    audioThreadPriorityToggle.setBounds(row7.reduced(5));
 
     fixedNoiseLogIntervalLabel.setBounds(0, 0, 0, 0); // 非表示時のダミー配置
     fixedNoiseLogIntervalComboBox.setBounds(0, 0, 0, 0);
@@ -9243,6 +9268,22 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
     }
 }
 
+// ★ [work63] preloadThreadPriorityMode — オーディオスレッド開始前に設定を先読み
+//    device_settings.xml から threadPriorityMode 属性のみを読み込み、
+//    オーディオデバイスの初期化より先にエンジンに設定する。
+void DeviceSettings::preloadThreadPriorityMode (AudioEngine& engine)
+{
+    const auto file = getSettingsFile();
+    if (! file.existsAsFile())
+        return; // デフォルト MMCSS のまま
+
+    if (auto xml = juce::XmlDocument::parse(file))
+    {
+        const juce::String mode = xml->getStringAttribute("threadPriorityMode", "MMCSS");
+        engine.setAudioThreadPriorityMode(mode == "MMCSS");
+    }
+}
+
 void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine)
 {
     saveNoiseShaperState(engine);
@@ -9261,6 +9302,8 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
+        // Audio Thread Priority 設定
+        xml->setAttribute("threadPriorityMode", engine.isAudioThreadPriorityMmcss() ? "MMCSS" : "NativeRT");
 
         // Convolver state
         auto convolverState = engine.getConvolverStateTree();
@@ -9462,6 +9505,12 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             int type = xml->getIntAttribute("oversamplingType", 0);
             engine.setOversamplingType((AudioEngine::OversamplingType)type);
 
+            // Audio Thread Priority 設定の読み込み (デフォルト "MMCSS")
+            {
+                const juce::String mode = xml->getStringAttribute("threadPriorityMode", "MMCSS");
+                engine.setAudioThreadPriorityMode(mode == "MMCSS");
+            }
+
             // Convolver state
             if (auto* convXml = xml->getChildByName("Convolver"))
             {
@@ -9582,6 +9631,9 @@ public:
     static void saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine);
     static void loadSettings (juce::AudioDeviceManager& deviceManager, AudioEngine& engine);
 
+    // ★ [work63] オーディオスレッド開始前に設定を先読み（デバイス初期化不要）
+    static void preloadThreadPriorityMode (AudioEngine& engine);
+
     static void applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist);
 
 private:
@@ -9619,6 +9671,9 @@ private:
 
     juce::Label outputMakeupLabel;
     juce::TextEditor outputMakeupEditor;
+
+    juce::ToggleButton audioThreadPriorityToggle;
+
     juce::String gainDisplaySignature;
     juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
 
@@ -9713,6 +9768,9 @@ struct ScopedDftiDescriptor
 ```
 #pragma once
 
+#include <cstdint>
+#include <atomic>
+
 // ============================================================================
 // Runtime診断ログの一括制御マクロ
 //
@@ -9729,9 +9787,13 @@ struct ScopedDftiDescriptor
 #endif
 
 // work60: 診断ログサンプリングマスク。CMakeのtarget_compile_definitionsで指定可能。
-// デフォルト 0xF = 1/16。Debug:0x3(1/4), HeavyAnalyze:0x1(1/2)。
+// ★ [work62] Release:0xFF(1/256), Debug:0x3F(1/64) に引き上げ
 #ifndef CONVOPEQ_DIAG_SAMPLE_MASK
-#define CONVOPEQ_DIAG_SAMPLE_MASK 0xF
+#ifdef NDEBUG
+#define CONVOPEQ_DIAG_SAMPLE_MASK 0xFF  // Release: 1/256
+#else
+#define CONVOPEQ_DIAG_SAMPLE_MASK 0x3F  // Debug: 1/64
+#endif
 #endif
 
 // ★ RUNTIME_DIAG_LOG マクロ: 単一の diagLog 呼び出しをマクロで囲む
@@ -9790,7 +9852,7 @@ inline ProcessMemoryInfo getProcessMemoryInfo() noexcept
 inline void updateAtomicMaximum(std::atomic<uint32_t>& target, uint32_t value) noexcept
 {
     uint32_t expected = target.load(std::memory_order_relaxed);
-    while (value > expected && !target.compare_exchange_weak(expected, value,
+    while (value > expected && !target.compare_exchange_weak(expected, value, // NOLINT(atomic-dot-call)
         std::memory_order_relaxed, std::memory_order_relaxed)) {}
 }
 
@@ -15939,6 +16001,10 @@ MainWindow::MainWindow (const juce::String& name)
     audioProcessorPlayer.setDoublePrecisionProcessing(true);
     audioProcessorPlayer.setProcessor(audioEngineProcessor.get());
     audioEngine.addChangeListener (this);
+
+    // ★ [work63] オーディオスレッドが開始される前に、前回の優先度設定を読み込む
+    DeviceSettings::preloadThreadPriorityMode(audioEngine);
+
     audioDeviceManager.addAudioCallback (&audioProcessorPlayer);
 
     juce::Component::SafePointer<MainWindow> safeThis(this);
@@ -16658,6 +16724,12 @@ MainWindow::~MainWindow()
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 3 setCliProcessingTelemetryEnabled");
     audioEngine.setCliProcessingTelemetryEnabled(false);
     cliAutomationTelemetryLoggingEnabled = false;
+
+    // ★ [work63] シャットダウン要求: Audio Thread に MMCSS 解除を指示
+    //    setProcessor(nullptr) 以降も数回コールバックが走るため、その間に Audio Thread が
+    //    AvRevertMmThreadCharacteristics を実行できる。removeAudioCallback までの間に
+    //    Audio Thread がフラグを検知できる十分な時間的余裕がある。
+    convo::publishAtomic(audioEngine.mmcssShutdownRequested, true, std::memory_order_release);
 
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 4 setProcessor(nullptr)");
     audioProcessorPlayer.setProcessor (nullptr);
@@ -27081,6 +27153,14 @@ void AudioEngine::initialize()
     m_fadeDoubleBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
 
     // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
+
+    // ★ work60: モジュール別 DiagEvent リングバッファポインタを初期化
+    //   DSPCoreFloat/DSPCoreDouble の logEqTime → eqDiagBuffer
+    //   ConvolverProcessor.Runtime の convDiagBuffer
+    setEqDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
+                    rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
+    setConvDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
+                      rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
     // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
     // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
     uiConvolverProcessor.prepareToPlay(48000.0, 512);
@@ -27095,12 +27175,30 @@ void AudioEngine::initialize()
     timerPeriodMs_ = 100;
 
     initWorkerThread();
+
+    // ★ [work62] ThreadAffinityManager 初期化（診断目的）
+    //   CPU 0-3 に Worker/Learner を分散。必要に応じて調整。
+    //   affinityManager.getAffinityManager() でアクセス。
+    {
+        ThreadAffinityMasks masks{};
+#ifdef _WIN32
+        masks.worker = 0x01;          // CPU 0
+        masks.learnerMain = 0x02;     // CPU 1
+        masks.learnerEvalBase = 0x04; // CPU 2 (evaluator は index で分散)
+        masks.heavyBackground = 0x08; // CPU 3
+        masks.lightBackground = 0x0F; // 全CPU許可（負荷軽微のため）
+        masks.ui = 0x0F;              // 全CPU許可（UIスレッド）
+#endif
+        affinityManager.initialize(masks);
+        diagLog("[AFFINITY] ThreadAffinityManager initialized: worker=0x01 learner=0x02 eval=0x04 heavy=0x08 light=0x0F ui=0x0F");
+    }
 }
 
 void AudioEngine::initWorkerThread()
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
     m_workerThread.start();
+    affinityManager.applyCurrentThreadPolicy(ThreadType::Worker);
 }
 
 void AudioEngine::shutdownWorkerThread()
@@ -28262,6 +28360,16 @@ void AudioEngine::setSoftClipEnabled(bool enabled)
     return convo::consumeAtomic(softClipEnabled, std::memory_order_acquire);
 }
 
+void AudioEngine::setAudioThreadPriorityMode(bool useMmcss)
+{
+    convo::publishAtomic(useMmcssPriority, useMmcss, std::memory_order_release);
+}
+
+[[nodiscard]] bool AudioEngine::isAudioThreadPriorityMmcss() const noexcept
+{
+    return convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire);
+}
+
 void AudioEngine::setSaturationAmount(float amount)
 {
     const float clamped = juce::jlimit(0.0f, 1.0f, amount);
@@ -28491,6 +28599,10 @@ void AudioEngine::clearConvolverCache()
 #include "NoiseShaperLearner.h"
 #include "core/TimeUtils.h"
 
+// MMCSS applyMmcssPriority() は常に呼ばれる（診断有効時のみログ出力）
+#include <windows.h>
+#include <avrt.h>
+
 namespace
 {
     inline double absDiffNoLibm(double a, double b) noexcept
@@ -28514,6 +28626,23 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         bufferToFill.clearActiveBufferRegion();
         return;
     }
+
+    // ★ [work62] callbackIndex を早期に取得（RuntimeScopeより前）
+    //   fetchAddAtomic は pre-increment 値を返すため +1 して post-increment に。
+    const auto thisCallbackIndex = convo::fetchAddAtomic(
+        rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+
+    // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
+    //    常に適用（診断有効時のみログ出力。無効時はスタブ）
+    {
+        static std::atomic<bool> s_mmcssDone{false};
+        bool expected = false;
+        if (s_mmcssDone.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            applyMmcssPriority();
+        }
+    }
+
+    const int numSamples = bufferToFill.numSamples;
 
     struct AudioCallbackRuntimeScope final
     {
@@ -28548,7 +28677,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-    const int numSamples = bufferToFill.numSamples;
     const int startSample = bufferToFill.startSample;
     auto* buffer = bufferToFill.buffer;
 
@@ -28616,6 +28744,20 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
+    // ★ work61: CallbackArrival 最初の記録（RuntimeScope/ISR firewall後、A/G/H/Xrun/Stageより前）
+    //   ISR準拠: getRuntimeSampleRateHzFromWorld で sampleRate を取得。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const double sr = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
+        recordCallbackArrival(
+            diagBuffer, thisCallbackIndex, numSamples, sr,
+            rtLocalState_.cachedThreadId,
+            rtAuxMutable_.cbArrivalWritten,
+            rtAuxMutable_.cbArrivalDropped,
+            rtAuxMutable_.cbArrivalConsecutiveDrops);
+    }
+#endif
+
     // ★ A/G/H: コールバック受信診断
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // A: callback受信時刻 + drift計測
@@ -28656,12 +28798,23 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                     std::memory_order_relaxed);
                 const uint64_t pubSeq = runtimeWorld->metadata.publicationSequence;
                 const uint64_t gen = static_cast<uint64_t>(runtimeWorld->generation);
-                juce::Logger::writeToLog(
-                    "[CPU_MIG] callback=" + juce::String(static_cast<int64_t>(cbIdx))
-                    + " seq=" + juce::String(static_cast<int64_t>(pubSeq))
-                    + " gen=" + juce::String(static_cast<int64_t>(gen))
-                    + " cpu=" + juce::String(static_cast<int>(cpu))
-                    + " prev=" + juce::String(static_cast<int>(prev)));
+                // work60: Numeric-Only DiagEvent
+                DiagEvent event{};
+                event.category = DiagCategory::CpuMig;
+                event.eventIndex = cbIdx;
+                event.data.cpuMig.pubSeq = pubSeq;
+                event.data.cpuMig.generation = gen;
+                event.data.cpuMig.cpu = cpu;
+                event.data.cpuMig.prevCpu = prev;
+                if (diagBuffer.push(event))
+                {
+                    rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                    rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -28678,11 +28831,23 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             {
                 const uint64_t cbIdx = rtLocalState_.audioCallbackEpochCounter.load(
                     std::memory_order_relaxed);
-                juce::Logger::writeToLog(
-                    "[CB_SEQ] callback=" + juce::String(static_cast<int64_t>(cbIdx))
-                    + " gen=" + juce::String(static_cast<int64_t>(runtimeWorld->generation))
-                    + " seq=" + juce::String(static_cast<int64_t>(seq))
-                    + " prevSeq=" + juce::String(static_cast<int64_t>(prevSeq)));
+                const uint64_t gen = static_cast<uint64_t>(runtimeWorld->generation);
+                // work60: Numeric-Only DiagEvent
+                DiagEvent event{};
+                event.category = DiagCategory::CallbackSequence;
+                event.eventIndex = cbIdx;
+                event.data.callbackSequence.generation = gen;
+                event.data.callbackSequence.seq = seq;
+                event.data.callbackSequence.prevSeq = prevSeq;
+                if (diagBuffer.push(event))
+                {
+                    rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                    rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -28690,7 +28855,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
 
-    const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+    const auto callbackEpoch = thisCallbackIndex;  // work61: 早期取得版を流用
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
     const auto packedActiveHandle = static_cast<std::uint64_t>(
         reinterpret_cast<uintptr_t>(resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef)));
@@ -28876,11 +29041,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // ★ work60: DSP_STAGE終了時刻（t2）。dsp->process() 完了直後。
     const uint64_t t2_dspEndUs = convo::getCurrentTimeUs();
 
-    // ★ callbackIndex（callback開始直後に1度だけ取得、全診断ブロックで同じ値を使用）
-    const auto thisCallbackIndex = convo::consumeAtomic(
-        rtLocalState_.audioCallbackEpochCounter, std::memory_order_relaxed);
+    // ★ callbackIndex（callback開始直後に1度だけ取得、全診断ブロックで同じ値を使用。work61: 早期取得版を流用）
+    //    thisCallbackIndex は関数冒頭で fetchAddAtomic により取得済み
 
-    // ★ DSP Observe 検出: publicationSequence 変化時のみ記録 + ObserveReason
+    // ★ DSP Observe 検出: publicationSequence 変化時のみ記録 + PublicationDirection
     static uint64_t s_lastObservedSeq = 0;
     uint64_t observeUs = 0;
     const char* observeReason = "";
@@ -29036,26 +29200,46 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // ★ DSP_TIMING 出力（Observe検出時のみ）
     if (observeUs > 0 && dspSeq > 0)
     {
-        juce::String log("[DSP_TIMING] seq=");
-        log += juce::String(static_cast<juce::int64>(dspSeq));
-        log += " gen=" + juce::String(static_cast<juce::int64>(runtimeWorld ? static_cast<uint64_t>(runtimeWorld->generation) : 0));
-        log += " worldId=" + juce::String(static_cast<juce::int64>(runtimeWorld ? static_cast<uint64_t>(runtimeWorld->worldId) : 0));
-        log += " reason=" + juce::String(observeReason);
-        log += " callbackIndex=" + juce::String(static_cast<juce::int64>(thisCallbackIndex));
+        // work60: Numeric-Only DiagEvent
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+        const uint64_t worldId = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->worldId) : 0;
+        DiagEvent event{};
+        event.category = DiagCategory::DspTiming;
+        event.eventIndex = thisCallbackIndex;
+        event.data.dspTiming.dspSeq = static_cast<uint64_t>(dspSeq);
+        event.data.dspTiming.generation = gen;
+        event.data.dspTiming.worldId = worldId;
+        // DspTimingData.direction は uint8_t。observeReason(const char*) を数値にマップ。
+        //   0 = None(空文字), 1 = Forward, 2 = Rollback, 3 = Replay
+        uint8_t reasonVal = 0;
+        if (observeReason[0] != '\0') {
+            if (std::strcmp(observeReason, "Forward") == 0) reasonVal = 1;
+            else if (std::strcmp(observeReason, "Rollback") == 0) reasonVal = 2;
+            else if (std::strcmp(observeReason, "Replay") == 0) reasonVal = 3;
+        }
+        event.data.dspTiming.direction = static_cast<PublicationDirection>(reasonVal);
         if (matchedPublishEndUs > 0)
         {
             const uint64_t observeLatencyUs = observeUs - matchedPublishEndUs;
-            log += " observeLatencyUs=" + juce::String(static_cast<juce::int64>(observeLatencyUs));
-            log += " pubToObserveUs=" + juce::String(static_cast<juce::int64>(observeLatencyUs));
+            event.data.dspTiming.observeLatencyUs = observeLatencyUs;
+            event.data.dspTiming.pubToObserveUs = observeLatencyUs;
             if (matchedPublishCallbackIdx > 0 && matchedPublishCallbackIdx < thisCallbackIndex)
             {
-                const uint64_t callbacksUntilObserve = thisCallbackIndex - matchedPublishCallbackIdx;
-                log += " callbacksUntilObserve=" + juce::String(static_cast<juce::int64>(callbacksUntilObserve));
-                log += " publishCallbackIdx=" + juce::String(static_cast<juce::int64>(matchedPublishCallbackIdx));
+                event.data.dspTiming.callbacksUntilObserve = thisCallbackIndex - matchedPublishCallbackIdx;
+                event.data.dspTiming.publishCallbackIdx = matchedPublishCallbackIdx;
             }
         }
-        DBG(log);
-        juce::Logger::writeToLog(log);
+        if (diagBuffer.push(event))
+        {
+            rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+            rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // ★ work60: CALLBACK_STAGE（INPUT/DSP/OUTPUT 3区間 + drift + budget）
@@ -29077,20 +29261,28 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             const uint64_t totalUs = (t3 > t0) ? t3 - t0 : 0;
             const uint32_t budgetPermille = (expectedUs > 0)
                 ? static_cast<uint32_t>(totalUs * 1000 / expectedUs) : 0;
-            juce::String cclog("[CALLBACK_STAGE]");
-            cclog += " seq=" + juce::String(static_cast<int64_t>(thisCallbackIndex));
-            cclog += " cpu=" + juce::String(static_cast<int>(cpu));
-            cclog += " gen=" + juce::String(static_cast<int64_t>(gen));
-            cclog += " expected=" + juce::String(static_cast<int64_t>(expectedUs));
-            cclog += " drift=" + juce::String(static_cast<int64_t>(driftUs));
-            cclog += " input=" + juce::String(static_cast<int64_t>(inputUs));
-            cclog += " dsp=" + juce::String(static_cast<int64_t>(dspUs));
-            cclog += " output=" + juce::String(static_cast<int64_t>(outputUs));
-            cclog += " total=" + juce::String(static_cast<int64_t>(totalUs));
-            cclog += " budget=" + juce::String(static_cast<int>(budgetPermille / 10)) + "."
-                + juce::String(static_cast<int>(budgetPermille % 10)) + "%";
-            DBG(cclog);
-            juce::Logger::writeToLog(cclog);
+            // work60: Numeric-Only DiagEvent
+            DiagEvent event{};
+            event.category = DiagCategory::CallbackStage;
+            event.eventIndex = thisCallbackIndex;
+            event.data.callbackStage.cpu = cpu;
+            event.data.callbackStage.generation = gen;
+            event.data.callbackStage.expectedUs = expectedUs;
+            event.data.callbackStage.driftUs = driftUs;
+            event.data.callbackStage.inputUs = inputUs;
+            event.data.callbackStage.dspUs = dspUs;
+            event.data.callbackStage.outputUs = outputUs;
+            event.data.callbackStage.totalUs = totalUs;
+            event.data.callbackStage.budgetPermille = static_cast<uint16_t>(budgetPermille);
+            if (diagBuffer.push(event))
+            {
+                rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -29130,6 +29322,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 #endif
 
+    // ★ [work63] シャットダウン要求: Audio Thread 自ら MMCSS を解除（診断ガード外＝常時有効）
+    //    Message Thread が mmcssShutdownRequested をセットすると、
+    //    次のコールバック終了時にこのスレッド上で AvRevertMmThreadCharacteristics を実行する。
+    if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
+    {
+        revertMmcssPriorityOnAudioThread();
+    }
+
 }
 
 
@@ -29139,6 +29339,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
 ```
 #include <JuceHeader.h>
+#include <cstring>
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
 #include "core/RuntimeReaderContext.h"
@@ -29170,6 +29371,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
+    // Extract numSamples from buffer
+    const int numSamples = buffer.getNumSamples();
+
+    // ★ work61: callbackIndex を早期に取得（RuntimeScopeより前）
+    //   これにより recordCallbackArrival() は正しい eventIndex を持つ。
+    //   fetchAddAtomic は pre-increment 値を返すため +1 して post-increment に。
+    const auto thisCallbackIndex = convo::fetchAddAtomic(
+        rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+
     struct AudioCallbackRuntimeScope final
     {
         AudioEngine& engine;
@@ -29197,7 +29407,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
-    const int numSamples = buffer.getNumSamples();
 
     struct CallbackTelemetryScope final
     {
@@ -29249,6 +29458,20 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
+    // ★ work61: CallbackArrival 最初の記録（RuntimeScope/ISR firewall後、A/G/H/Xrun/Stageより前）
+    //   runtimeWorld が利用可能になった直後に記録。ISR準拠のため getRuntimeSampleRateHzFromWorld を使用。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const double sr = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
+        recordCallbackArrival(
+            diagBuffer, thisCallbackIndex, numSamples, sr,
+            rtLocalState_.cachedThreadId,
+            rtAuxMutable_.cbArrivalWritten,
+            rtAuxMutable_.cbArrivalDropped,
+            rtAuxMutable_.cbArrivalConsecutiveDrops);
+    }
+#endif
+
     // ★ A/G/H: コールバック受信診断
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // A: callback受信時刻 + drift計測
@@ -29291,12 +29514,27 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                     ? runtimeWorld->metadata.publicationSequence : 0;
                 const uint64_t gen = (runtimeWorld != nullptr)
                     ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
-                juce::Logger::writeToLog(
-                    "[CPU_MIG] callback=" + juce::String(static_cast<int64_t>(cbIdx))
-                    + " seq=" + juce::String(static_cast<int64_t>(pubSeq))
-                    + " gen=" + juce::String(static_cast<int64_t>(gen))
-                    + " cpu=" + juce::String(static_cast<int>(cpu))
-                    + " prev=" + juce::String(static_cast<int>(prev)));
+                // work60: Numeric-Only DiagEvent
+                // ★ [work62] サンプリング: cbIdx が SAMPLE_MASK に適合した時のみ DiagEvent を生成
+                if ((cbIdx & CONVOPEQ_DIAG_SAMPLE_MASK) == 0)
+                {
+                    DiagEvent event{};
+                    event.category = DiagCategory::CpuMig;
+                    event.eventIndex = cbIdx;
+                    event.data.cpuMig.pubSeq = pubSeq;
+                    event.data.cpuMig.generation = gen;
+                    event.data.cpuMig.cpu = cpu;
+                    event.data.cpuMig.prevCpu = prev;
+                    if (diagBuffer.push(event))
+                    {
+                        rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                        rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
             }
         }
     }
@@ -29315,11 +29553,23 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                 {
                     const uint64_t cbIdx = rtLocalState_.audioCallbackEpochCounter.load(
                         std::memory_order_relaxed);
-                    juce::Logger::writeToLog(
-                        "[CB_SEQ] callback=" + juce::String(static_cast<int64_t>(cbIdx))
-                        + " gen=" + juce::String(static_cast<int64_t>(runtimeWorld->generation))
-                        + " seq=" + juce::String(static_cast<int64_t>(seq))
-                        + " prevSeq=" + juce::String(static_cast<int64_t>(prevSeq)));
+                    const uint64_t gen = static_cast<uint64_t>(runtimeWorld->generation);
+                    // work60: Numeric-Only DiagEvent
+                    DiagEvent event{};
+                    event.category = DiagCategory::CallbackSequence;
+                    event.eventIndex = cbIdx;
+                    event.data.callbackSequence.generation = gen;
+                    event.data.callbackSequence.seq = seq;
+                    event.data.callbackSequence.prevSeq = prevSeq;
+                    if (diagBuffer.push(event))
+                    {
+                        rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                        rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
         }
@@ -29327,9 +29577,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 #endif
 
     const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
-
-    // ★ callback epoch counter（全診断ブロックで使用するcallbackIndexの基盤）
-    (void)convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel);
 
     DSPCore* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
     if (dsp == nullptr)
@@ -29495,11 +29742,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ work60: DSP_STAGE終了時刻（t2）
     const uint64_t t2_dspEndUs = convo::getCurrentTimeUs();
 
-    // ★ callbackIndex（callback開始直後に1度だけ取得、全診断ブロックで同じ値を使用）
-    const auto thisCallbackIndex = convo::consumeAtomic(
-        rtLocalState_.audioCallbackEpochCounter, std::memory_order_relaxed);
+    // ★ callbackIndex（callback開始直後に1度だけ取得、全診断ブロックで同じ値を使用。work61: 早期取得版を流用）
+    //    thisCallbackIndex は関数冒頭で fetchAddAtomic により取得済み
 
-    // ★ DSP Observe 検出: publicationSequence 変化時のみ記録 + ObserveReason
+    // ★ DSP Observe 検出: publicationSequence 変化時のみ記録 + PublicationDirection
     static uint64_t s_lastObservedSeq = 0;
     uint64_t observeUs = 0;
     const char* observeReason = "";
@@ -29644,26 +29890,45 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ DSP_TIMING 出力（Observe検出時のみ）
     if (observeUs > 0 && dspSeq > 0)
     {
-        juce::String log("[DSP_TIMING] seq=");
-        log += juce::String(static_cast<juce::int64>(dspSeq));
-        log += " gen=" + juce::String(static_cast<juce::int64>(runtimeWorld ? static_cast<uint64_t>(runtimeWorld->generation) : 0));
-        log += " worldId=" + juce::String(static_cast<juce::int64>(runtimeWorld ? static_cast<uint64_t>(runtimeWorld->worldId) : 0));
-        log += " reason=" + juce::String(observeReason);
-        log += " callbackIndex=" + juce::String(static_cast<juce::int64>(thisCallbackIndex));
+        // work60: Numeric-Only DiagEvent
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+        const uint64_t worldId = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->worldId) : 0;
+        // observeReason(const char*) → uint8_t: 0=None, 1=Forward, 2=Rollback, 3=Replay
+        uint8_t reasonVal = 0;
+        if (observeReason[0] != '\0') {
+            if (std::strcmp(observeReason, "Forward") == 0) reasonVal = 1;
+            else if (std::strcmp(observeReason, "Rollback") == 0) reasonVal = 2;
+            else if (std::strcmp(observeReason, "Replay") == 0) reasonVal = 3;
+        }
+        DiagEvent event{};
+        event.category = DiagCategory::DspTiming;
+        event.eventIndex = thisCallbackIndex;
+        event.data.dspTiming.dspSeq = static_cast<uint64_t>(dspSeq);
+        event.data.dspTiming.generation = gen;
+        event.data.dspTiming.worldId = worldId;
+        event.data.dspTiming.direction = static_cast<PublicationDirection>(reasonVal);
         if (matchedPublishEndUs > 0)
         {
             const uint64_t observeLatencyUs = observeUs - matchedPublishEndUs;
-            log += " observeLatencyUs=" + juce::String(static_cast<juce::int64>(observeLatencyUs));
-            log += " pubToObserveUs=" + juce::String(static_cast<juce::int64>(observeLatencyUs));
+            event.data.dspTiming.observeLatencyUs = observeLatencyUs;
+            event.data.dspTiming.pubToObserveUs = observeLatencyUs;
             if (matchedPublishCallbackIdx > 0 && matchedPublishCallbackIdx < thisCallbackIndex)
             {
-                const uint64_t callbacksUntilObserve = thisCallbackIndex - matchedPublishCallbackIdx;
-                log += " callbacksUntilObserve=" + juce::String(static_cast<juce::int64>(callbacksUntilObserve));
-                log += " publishCallbackIdx=" + juce::String(static_cast<juce::int64>(matchedPublishCallbackIdx));
+                event.data.dspTiming.callbacksUntilObserve = thisCallbackIndex - matchedPublishCallbackIdx;
+                event.data.dspTiming.publishCallbackIdx = matchedPublishCallbackIdx;
             }
         }
-        DBG(log);
-        juce::Logger::writeToLog(log);
+        if (diagBuffer.push(event))
+        {
+            rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+            rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // ★ work60: CALLBACK_STAGE（INPUT/DSP/OUTPUT 3区間 + drift + budget）
@@ -29685,20 +29950,28 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             const uint64_t totalUs = (t3 > t0) ? t3 - t0 : 0;
             const uint32_t budgetPermille = (expectedUs > 0)
                 ? static_cast<uint32_t>(totalUs * 1000 / expectedUs) : 0;
-            juce::String cclog("[CALLBACK_STAGE]");
-            cclog += " seq=" + juce::String(static_cast<int64_t>(thisCallbackIndex));
-            cclog += " cpu=" + juce::String(static_cast<int>(cpu));
-            cclog += " gen=" + juce::String(static_cast<int64_t>(gen));
-            cclog += " expected=" + juce::String(static_cast<int64_t>(expectedUs));
-            cclog += " drift=" + juce::String(static_cast<int64_t>(driftUs));
-            cclog += " input=" + juce::String(static_cast<int64_t>(inputUs));
-            cclog += " dsp=" + juce::String(static_cast<int64_t>(dspUs));
-            cclog += " output=" + juce::String(static_cast<int64_t>(outputUs));
-            cclog += " total=" + juce::String(static_cast<int64_t>(totalUs));
-            cclog += " budget=" + juce::String(static_cast<int>(budgetPermille / 10)) + "."
-                + juce::String(static_cast<int>(budgetPermille % 10)) + "%";
-            DBG(cclog);
-            juce::Logger::writeToLog(cclog);
+            // work60: Numeric-Only DiagEvent
+            DiagEvent event{};
+            event.category = DiagCategory::CallbackStage;
+            event.eventIndex = thisCallbackIndex;
+            event.data.callbackStage.cpu = cpu;
+            event.data.callbackStage.generation = gen;
+            event.data.callbackStage.expectedUs = expectedUs;
+            event.data.callbackStage.driftUs = driftUs;
+            event.data.callbackStage.inputUs = inputUs;
+            event.data.callbackStage.dspUs = dspUs;
+            event.data.callbackStage.outputUs = outputUs;
+            event.data.callbackStage.totalUs = totalUs;
+            event.data.callbackStage.budgetPermille = static_cast<uint16_t>(budgetPermille);
+            if (diagBuffer.push(event))
+            {
+                rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -29788,13 +30061,20 @@ namespace {
 namespace {
 [[maybe_unused]] void diagLog(const juce::String& message)
 {
-    DBG(message);
-    juce::Logger::writeToLog(message);
+    DBG(message); // NOLINT(rt-logger)
+    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
 }
 }
 
-// ★ D: EQ処理時間ログ出力（共通ヘルパー）
-// work60: callbackSeq/cpu対応、CONVOPEQ_DIAG_SAMPLE_MASK サンプリング
+// work60: Numeric-Only DiagEvent — String構築を排除
+namespace {
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
+    DiagPerTickCounter* eqTickPushed = nullptr;
+    DiagPerTickCounter* eqTickDropped = nullptr;
+    std::atomic<uint64_t>* eqTotalPushed = nullptr;
+}
+// setEqDiagBuffer の実体は DSPCoreFloat.cpp にあり（ODR回避）
+
 void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                const convo::EQParameters* eqParams,
                convo::ProcessingOrder order,
@@ -29802,11 +30082,8 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                uint64_t callbackSeq, uint32_t cpu)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0) return;
-
-    // ★ work60: callbackSeqベースのサンプリング
-    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
-        return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
     if (eqParams != nullptr) {
@@ -29815,18 +30092,28 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                 && std::abs(eqParams->bands[i].gain) > 0.01f)
                 ++activeBands;
     }
-    const char* orderStr = (order == convo::ProcessingOrder::ConvolverThenEQ)
-        ? "Conv->EQ" : "EQ->Conv";
     const double expectedUs = static_cast<double>(numSamples) / sampleRate * 1e6;
-    juce::String eqtLog("[EQ_TIME]");
-    eqtLog += " seq=" + juce::String(static_cast<int64_t>(callbackSeq));
-    eqtLog += " cpu=" + juce::String(static_cast<int>(cpu));
-    eqtLog += " us=" + juce::String(static_cast<int64_t>(eqElapsedUs));
-    eqtLog += " bands=" + juce::String(activeBands);
-    eqtLog += " order=" + juce::String(orderStr);
-    eqtLog += " budget=" + juce::String(
-        (static_cast<double>(eqElapsedUs) / expectedUs) * 100.0, 1) + "%";
-    diagLog(eqtLog);
+    const uint32_t budgetPermille = (expectedUs > 0.0)
+        ? static_cast<uint32_t>((static_cast<double>(eqElapsedUs) / expectedUs) * 1000.0)
+        : 0;
+
+    DiagEvent event{};
+    event.category = DiagCategory::EqTime;
+    event.eventIndex = callbackSeq;
+    event.data.eqTime.cpu = cpu;
+    event.data.eqTime.us = eqElapsedUs;
+    event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
+    event.data.eqTime.order = static_cast<uint8_t>(order);
+    event.data.eqTime.budgetPercent = budgetPermille;
+    if (eqDiagBuffer->push(event))
+    {
+        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 #endif
 
@@ -30539,8 +30826,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         {
             juce::String alog("[ANS_SWITCH] us=");
             alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog);
-            juce::Logger::writeToLog(alog);
+            DBG(alog); // NOLINT(rt-logger)
+            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
         }
 #endif
     }
@@ -30648,8 +30935,8 @@ namespace
 {
 [[maybe_unused]] void diagLog(const juce::String& message)
 {
-    DBG(message);
-    juce::Logger::writeToLog(message);
+    DBG(message); // NOLINT(rt-logger)
+    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
 }
 
 inline bool isFiniteNoLibm(double x) noexcept
@@ -30669,7 +30956,37 @@ inline double absDiffNoLibm(double a, double b) noexcept
 }
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-// work60: callbackSeq/cpu対応、CONVOPEQ_DIAG_SAMPLE_MASK サンプリング
+// work60: Numeric-Only DiagEvent — String構築を排除
+// eqDiagBuffer は AudioEngine::diagBuffer への参照（AudioBlock.cpp で設定）
+namespace {
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
+    DiagPerTickCounter* eqTickPushed = nullptr;
+    DiagPerTickCounter* eqTickDropped = nullptr;
+    std::atomic<uint64_t>* eqTotalPushed = nullptr;
+}
+#endif
+
+} // work60: setEqDiagBuffer に外部リンケージを与えるため無名名前空間を一旦閉じる
+
+// work60: setEqDiagBuffer は #if 外で常時コンパイル（AudioEngine.Init.cpp からの呼出用）
+void setEqDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+                     DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+                     std::atomic<uint64_t>& totalPushed) noexcept
+{
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    eqDiagBuffer = &db;
+    eqTickPushed = &tickPushed;
+    eqTickDropped = &tickDropped;
+    eqTotalPushed = &totalPushed;
+#else
+    juce::ignoreUnused(db, tickPushed, tickDropped, totalPushed);
+#endif
+}
+
+namespace {
+// work60: 以降のヘルパーは再び無名名前空間（internal linkage）に戻す
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                       const convo::EQParameters* eqParams,
                       convo::ProcessingOrder order,
@@ -30677,11 +30994,8 @@ inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                       uint64_t callbackSeq, uint32_t cpu)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0) return;
-
-    // ★ work60: callbackSeqベースのサンプリング
-    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
-        return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
     if (eqParams != nullptr) {
@@ -30690,18 +31004,28 @@ inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                 && std::abs(eqParams->bands[i].gain) > 0.01f)
                 ++activeBands;
     }
-    const char* orderStr = (order == convo::ProcessingOrder::ConvolverThenEQ)
-        ? "Conv->EQ" : "EQ->Conv";
     const double expectedUs = static_cast<double>(numSamples) / sampleRate * 1e6;
-    juce::String eqtLog("[EQ_TIME]");
-    eqtLog += " seq=" + juce::String(static_cast<int64_t>(callbackSeq));
-    eqtLog += " cpu=" + juce::String(static_cast<int>(cpu));
-    eqtLog += " us=" + juce::String(static_cast<int64_t>(eqElapsedUs));
-    eqtLog += " bands=" + juce::String(activeBands);
-    eqtLog += " order=" + juce::String(orderStr);
-    eqtLog += " budget=" + juce::String(
-        (static_cast<double>(eqElapsedUs) / expectedUs) * 100.0, 1) + "%";
-    diagLog(eqtLog);
+    const uint32_t budgetPermille = (expectedUs > 0.0)
+        ? static_cast<uint32_t>((static_cast<double>(eqElapsedUs) / expectedUs) * 1000.0)
+        : 0;
+
+    DiagEvent event{};
+    event.category = DiagCategory::EqTime;
+    event.eventIndex = callbackSeq;
+    event.data.eqTime.cpu = cpu;
+    event.data.eqTime.us = eqElapsedUs;
+    event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
+    event.data.eqTime.order = static_cast<uint8_t>(order);
+    event.data.eqTime.budgetPercent = budgetPermille;
+    if (eqDiagBuffer->push(event))
+    {
+        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 #endif
 
@@ -31462,8 +31786,8 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         {
             juce::String alog("[ANS_SWITCH] us=");
             alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog);
-            juce::Logger::writeToLog(alog);
+            DBG(alog); // NOLINT(rt-logger)
+            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
         }
 #endif
     }
@@ -32060,6 +32384,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
     diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 
+    // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
+    //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
+
     const auto rollbackPrepareFailure = [this]() noexcept
     {
         if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -32255,6 +32582,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         (sampleRate > 0.0 && samplesPerBlockExpected > 0)
         ? static_cast<uint64_t>(static_cast<double>(samplesPerBlockExpected) / sampleRate * 1e6)
         : 0;
+    // ★ work61: Audio Thread ThreadID をキャッシュ（以降はAPI呼び出し不要）
+    rtLocalState_.cachedThreadId = ::GetCurrentThreadId();
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
     diagLog("[DIAG] prepareToPlay: lifecycleState set to Prepared");
 
@@ -32412,6 +32741,9 @@ void AudioEngine::releaseResources()
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "releaseResources");
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
     runtimePublicationBridge_.requestShutdown();
+
+    // ★ [work63] シャットダウン完了処理（NativeRT 復元 + MMCSS 未解除時の安全網）
+    finalizeMmcssShutdown();
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
     // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
@@ -34851,9 +35183,15 @@ void AudioEngine::processDeferredReleases()
 #include "DSPLifetimeManager.h"
 #include "../NoiseShaperLearner.h"
 #include "core/TimeUtils.h"  // ★ Work39: Restore Learner Rollback 用
+#include <string>
+#include <mutex>
+
+// MMCSS: 常に必要（診断有効/無効の両ブランチで使用）
+#include <windows.h>
+#include <avrt.h>
+#pragma comment(lib, "avrt.lib")
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-#include <windows.h>
 #include <psapi.h>
 #pragma comment(lib, "psapi.lib")
 #endif
@@ -34872,13 +35210,309 @@ juce::String diagPrefix(uint64_t currentGeneration)
         + " Us=" + juce::String(static_cast<juce::int64>(us));
 }
 
+// ★ [work62] BlockTimingStats — ブロック別実行時間の集計用（24 bytes）
+struct BlockTimingStats {
+    uint64_t sumUs = 0;
+    uint64_t maxUs = 0;
+    uint64_t count = 0;
+    void addSample(uint64_t elapsed) noexcept {
+        sumUs += elapsed;
+        if (elapsed > maxUs) maxUs = elapsed;
+        ++count;
+    }
+};
+
+// ★ [work62] ScopedBlockTimer — RAII でブロック実行時間を計測
+struct ScopedBlockTimer {
+    BlockTimingStats* stats;
+    uint64_t* outElapsed;
+    uint64_t startUs;
+    ScopedBlockTimer(BlockTimingStats* s, uint64_t* out = nullptr) noexcept
+        : stats(s), outElapsed(out), startUs(convo::getCurrentTimeUs()) {}
+    ~ScopedBlockTimer() noexcept {
+        if (stats != nullptr) {
+            const uint64_t elapsed = convo::getCurrentTimeUs() - startUs;
+            stats->addSample(elapsed);
+            if (outElapsed != nullptr)
+                *outElapsed = elapsed;
+        }
+    }
+};
+
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
+// ★ [work62] diagSink 関数ポインタ — ログ出力先を切り替え可能に
+using DiagSink = void(*)(const juce::String&);
+static void fileSink(const juce::String& message) {
+    juce::Logger::writeToLog(message);
+}
+static void nullSink(const juce::String&) {}
+
+// ★ [work62] asyncSink: LogEntry + LockFreeRingBuffer + 非同期Logger
+struct alignas(64) LogEntry {
+    uint16_t length;
+    char text[254];
+};
+static_assert(std::is_trivially_copyable_v<LogEntry>,
+    "LogEntry must be trivially copyable for LockFreeRingBuffer");
+static_assert(sizeof(LogEntry) == 256, "LogEntry size mismatch");
+
+static constexpr size_t kLogBufferCapacity = 4096;
+static LockFreeRingBuffer<LogEntry, kLogBufferCapacity> s_logBuffer;
+static std::atomic<uint64_t> s_droppedLogs{0};
+static std::mutex s_logMutex;  // ★ [work62] MP→SPSC mutex: asyncSink は2スレッド(Message+Rebuild) Producer のため
+
+static void asyncSink(const juce::String& message)
+{
+    const bool pushed = [&]() -> bool {
+        const std::lock_guard<std::mutex> lock(s_logMutex);
+        return s_logBuffer.pushWithWriter([&](LogEntry& entry) {
+            const size_t copied = message.copyToUTF8(entry.text, sizeof(entry.text));
+            entry.length = (copied > 0) ? static_cast<uint16_t>(copied - 1) : 0;
+        });
+    }();
+    if (!pushed) {
+        s_droppedLogs.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+static DiagSink diagSink = asyncSink;  // ★ [work62] デフォルトを asyncSink に
+
+// ★ [work62] flushLogBuffer — Multi-Producer→SPSCリングバッファをバッチ書き込み
+//    MP間は mutex で逐次化。mutex は pop() の間だけ保持し、Logger I/O は常に mutex 外で行う。
+//    小バッチ（kDrainBatch=100）に分割することで、一度のロック保持時間を抑制する。
+static void flushLogBuffer()
+{
+    static constexpr int kDrainBatch = 100;
+    std::string batch;
+    batch.reserve(32768);
+
+    for (;;) {
+        int count = 0;
+        batch.clear();
+
+        // Phase 1: Drain up to kDrainBatch entries under mutex only (no I/O)
+        {
+            const std::lock_guard<std::mutex> lock(s_logMutex);
+            LogEntry entry;
+            while (count < kDrainBatch && s_logBuffer.pop(entry)) {
+                batch.append(entry.text, entry.length);
+                batch += '\n';
+                ++count;
+            }
+        }
+
+        // Phase 2: Write batched output outside mutex
+        if (count == 0)
+            break;
+        juce::Logger::writeToLog(juce::String(batch));
+    }
+
+    const uint64_t dropped = s_droppedLogs.exchange(0, std::memory_order_acq_rel);
+    if (dropped > 0) {
+        DBG("[LOG_DROP] async log dropped " + juce::String(static_cast<juce::int64>(dropped)) + " messages");
+    }
+}
 
 void diagLog(const juce::String& message)
 {
     DBG(message);
-    juce::Logger::writeToLog(message);
+    diagSink(message);
 }
+
+// ★ [work62] formatDiagEvent — DiagEvent を文字列化する単一フォーマッタ
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
+    switch (event.category) {
+        case DiagCategory::CpuMig:
+            return diagPrefix(gen) + " [CPU_MIG] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " pubSeq=" + juce::String(static_cast<juce::int64>(event.data.cpuMig.pubSeq))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.cpuMig.generation))
+                + " cpu=" + juce::String(static_cast<int>(event.data.cpuMig.cpu))
+                + " prev=" + juce::String(static_cast<int>(event.data.cpuMig.prevCpu));
+        case DiagCategory::CallbackArrival:
+            return diagPrefix(gen) + " [CB_ARRIVAL] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " ts=" + juce::String(static_cast<juce::int64>(event.data.callbackArrival.timestampUs))
+                + " expected=" + juce::String(static_cast<juce::int64>(event.data.callbackArrival.expectedUs))
+                + " cpu=" + juce::String(static_cast<int>(event.data.callbackArrival.cpu))
+                + " tid=" + juce::String(static_cast<int>(event.data.callbackArrival.threadId));
+        case DiagCategory::CallbackSequence:
+            return diagPrefix(gen) + " [CB_SEQ] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.callbackSequence.generation))
+                + " seq=" + juce::String(static_cast<juce::int64>(event.data.callbackSequence.seq))
+                + " prevSeq=" + juce::String(static_cast<juce::int64>(event.data.callbackSequence.prevSeq));
+        case DiagCategory::DspTiming:
+            return diagPrefix(gen) + " [DSP_TIMING] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " dspSeq=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.dspSeq))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.generation))
+                + " worldId=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.worldId))
+                + " direction=" + juce::String(static_cast<int>(static_cast<uint8_t>(event.data.dspTiming.direction)))
+                + " observeLatencyUs=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.observeLatencyUs))
+                + " pubToObserveUs=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.pubToObserveUs))
+                + " callbacksUntilObserve=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.callbacksUntilObserve))
+                + " publishCallbackIdx=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.publishCallbackIdx));
+        case DiagCategory::CallbackStage:
+            return diagPrefix(gen) + " [CALLBACK_STAGE] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.callbackStage.cpu))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.generation))
+                + " expectedUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.expectedUs))
+                + " driftUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.driftUs))
+                + " inputUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.inputUs))
+                + " dspUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.dspUs))
+                + " totalUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.totalUs))
+                + " budget=" + juce::String(static_cast<int>(event.data.callbackStage.budgetPermille)) + "permille";
+        case DiagCategory::EqTime:
+            return diagPrefix(gen) + " [EQ_TIME] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.eqTime.cpu))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.eqTime.us))
+                + " bands=" + juce::String(static_cast<int>(event.data.eqTime.activeBands))
+                + " order=" + juce::String(static_cast<int>(event.data.eqTime.order));
+        case DiagCategory::ConvTime:
+            return diagPrefix(gen) + " [CONV_TIME] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.convTime.cpu))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.convTime.us))
+                + " block=" + juce::String(static_cast<int>(event.data.convTime.blockSamples))
+                + " budget=" + juce::String(static_cast<int>(event.data.convTime.budgetPercent)) + "%";
+        case DiagCategory::StereoConvTime:
+            return diagPrefix(gen) + " [STCONV_TIME] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.stereoConvTime.cpu))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.stereoConvTime.us))
+                + " chunk=" + juce::String(static_cast<int>(event.data.stereoConvTime.chunkSamples))
+                + " ch=" + juce::String(static_cast<int>(event.data.stereoConvTime.channels))
+                + " budget=" + juce::String(static_cast<int>(event.data.stereoConvTime.budgetPercent)) + "%";
+        default:
+            return diagPrefix(gen) + " [UNKNOWN] category=" + juce::String(static_cast<int>(event.category));
+    }
+}
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
+// formatDiagEvent が全カテゴリを網羅していることをコンパイル時検証
+// Count センチネルにより、末尾以外へのカテゴリ追加も検出可能
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+static_assert(static_cast<int>(DiagCategory::Count) == 9,
+    "DiagCategory enum changed: update formatDiagEvent() switch accordingly");
+#endif
+
+} // anonymous namespace
+
+// ★ [work63] applyMmcssPriority — Audio スレッド優先度設定（初回コールバックで一度だけ）
+void AudioEngine::applyMmcssPriority() noexcept
+{
+    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    {
+        // ── MMCSS モード ──
+        DWORD taskIndex = 0;
+        HANDLE hTask = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
+        if (hTask != nullptr) {
+            AvSetMmThreadPriority(hTask, AVRT_PRIORITY_CRITICAL);
+            m_avrtHandle = hTask;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
+                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
+                diagLog("[MMCSS] registered: taskIndex=" + juce::String(static_cast<int>(taskIndex))
+                    + " priority=AVRT_PRIORITY_CRITICAL"
+                    + " win32Prio=" + juce::String(win32Priority)
+                    + " procClass=" + juce::String(static_cast<int>(pc)));
+            }
+#endif
+        } else {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const DWORD err = ::GetLastError();
+                diagLog("[MMCSS] FAILED: GetLastError=" + juce::String(static_cast<int>(err))
+                    + " taskIndex=" + juce::String(static_cast<int>(taskIndex)));
+            }
+#endif
+        }
+    }
+    else
+    {
+        // ── Native RT モード ──
+        {
+            savedProcessPriorityClass = ::GetPriorityClass(::GetCurrentProcess());
+            const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+            const BOOL tpResult = ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            if (pcResult == 0) {
+                const DWORD err = ::GetLastError();
+                diagLog("[NATIVE_RT] SetPriorityClass(REALTIME) FAILED: GetLastError="
+                    + juce::String(static_cast<int>(err)));
+            }
+            if (tpResult == 0) {
+                const DWORD err = ::GetLastError();
+                diagLog("[NATIVE_RT] SetThreadPriority(TIME_CRITICAL) FAILED: GetLastError="
+                    + juce::String(static_cast<int>(err)));
+            }
+            if (pcResult != 0 && tpResult != 0) {
+                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
+                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
+                diagLog("[NATIVE_RT] applied: win32Prio=" + juce::String(win32Priority)
+                    + " procClass=" + juce::String(static_cast<int>(pc))
+                    + " savedClass=" + juce::String(static_cast<int>(savedProcessPriorityClass)));
+            }
+#endif
+        }
+    }
+}
+
+// ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
+void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
+{
+    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    {
+        if (m_avrtHandle != nullptr) {
+            ::AvRevertMmThreadCharacteristics(m_avrtHandle);
+            m_avrtHandle = nullptr;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            diagLog("[MMCSS] reverted on Audio Thread (AvRevertMmThreadCharacteristics)");
+#endif
+        }
+    }
+    else
+    {
+        const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), savedProcessPriorityClass);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (pcResult == 0) {
+            const DWORD err = ::GetLastError();
+            diagLog("[NATIVE_RT] Audio Thread restore FAILED: GetLastError="
+                + juce::String(static_cast<int>(err)));
+        } else {
+            diagLog("[NATIVE_RT] Audio Thread restored priority class to "
+                + juce::String(static_cast<int>(savedProcessPriorityClass)));
+        }
+#endif
+    }
+    convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
+}
+
+// ★ [work63] finalizeMmcssShutdown — シャットダウン完了処理（安全網）
+void AudioEngine::finalizeMmcssShutdown() noexcept
+{
+    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (m_avrtHandle != nullptr) {
+            diagLog("[MMCSS] WARNING: Audio Thread did not revert MMCSS (OS auto-cleanup)");
+        } else {
+            diagLog("[MMCSS] already reverted by Audio Thread. OK.");
+        }
+#endif
+    }
+    else
+    {
+        const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), savedProcessPriorityClass);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (pcResult == 0) {
+            const DWORD err = ::GetLastError();
+            diagLog("[NATIVE_RT] finalize restore FAILED: GetLastError="
+                + juce::String(static_cast<int>(err)));
+        } else {
+            diagLog("[NATIVE_RT] finalize: restored priority class to "
+                + juce::String(static_cast<int>(savedProcessPriorityClass)));
+        }
+#endif
+    }
 }
 
 void AudioEngine::timerCallback()
@@ -34892,6 +35526,15 @@ void AudioEngine::timerCallback()
     //    関数スコープのstatic変数。末尾のexecブロックと共有。
     static double s_timerExecStartMs = 0.0;
     s_timerExecStartMs = juce::Time::getMillisecondCounterHiRes();
+
+    // ★ [work62] BlockTimingStats 集計変数
+    static BlockTimingStats s_hist, s_other;
+    static uint64_t s_histElapsed = 0;
+    static int s_blockTickCount = 0;
+    ++s_blockTickCount;
+    s_histElapsed = 0;
+    static uint32_t s_xRunPopCount = 0;
+    s_xRunPopCount = 0;
 
     // ★ Timer jitter計測（timerCallback先頭）
     {
@@ -35725,6 +36368,7 @@ void AudioEngine::timerCallback()
         XRunEvent ev;
         while (xRunBuffer.pop(ev))
         {
+            ++s_xRunPopCount;
             const auto backpressure = getRuntimeBackpressureTelemetry();
             const auto lifecycle = getRuntimeLifecycleDiagnostics();
             const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
@@ -35760,12 +36404,16 @@ void AudioEngine::timerCallback()
 
         // ★ B: CB_HIST リングバッファダンプ（XRUN検出時の最新32件、timer callback1回につき1度のみ）
         {
+            s_histElapsed = 0;
+            ScopedBlockTimer t_hist(&s_hist, &s_histElapsed);
             const uint64_t wc = rtLocalState_.callbackTimingWriteCount.load(
                 std::memory_order_relaxed);
             if (wc != rtAuxMutable_.lastCbHistDumpedWriteCount)
             {
                 rtAuxMutable_.lastCbHistDumpedWriteCount = wc;
-                const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+                if (s_xRunPopCount > 0)
+                {
+                    const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
                 const uint64_t start = (wc > RTLocalState::kCallbackTimingSlots)
                     ? wc - RTLocalState::kCallbackTimingSlots : 0;
                 for (uint64_t i = start; i < wc; ++i)
@@ -35789,21 +36437,99 @@ void AudioEngine::timerCallback()
             }
         }
     }
+    }
 
     // ★ timerCallback 末尾 — 実行時間計測
     {
-        static double s_timerStartMs = 0.0;
-        if (s_timerStartMs > 0.0) {
+        // ★ [work62] バグ修正: s_timerStartMs → s_timerExecStartMs
+        if (s_timerExecStartMs > 0.0) {
             const double execMs = juce::Time::getMillisecondCounterHiRes() - s_timerExecStartMs;
             if (execMs > 10.0) {
                 const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
                 const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
                 diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
                     + "] [TIMER] exec=" + juce::String(execMs, 3) + "ms");
+
+                // ★ [work62] BLOCK_TIMING — ブロック別実行時間集計（100 tick 毎、DBGのみLogger非通過）
+                if ((s_blockTickCount % 100) == 0) {
+                    const uint64_t histAvgUs = (s_hist.count > 0) ? (s_hist.sumUs / s_hist.count) : 0;
+                    const uint64_t histMaxUs = s_hist.maxUs;
+                    const uint64_t totalUs = static_cast<uint64_t>(execMs * 1000.0);
+                    const uint64_t otherUs = (s_histElapsed < totalUs) ? (totalUs - s_histElapsed) : 0;
+                    s_other.addSample(otherUs);
+                    const uint64_t otherAvgUs = (s_other.count > 0) ? (s_other.sumUs / s_other.count) : 0;
+                    const uint64_t otherMaxUs = s_other.maxUs;
+                    diagLog(diagPrefix(gen) + " [BLOCK_TIMING] tick=" + juce::String(s_blockTickCount)
+                        + " hist_avg=" + juce::String(static_cast<juce::int64>(histAvgUs)) + "us"
+                        + " hist_max=" + juce::String(static_cast<juce::int64>(histMaxUs)) + "us"
+                        + " other_avg=" + juce::String(static_cast<juce::int64>(otherAvgUs)) + "us"
+                        + " other_max=" + juce::String(static_cast<juce::int64>(otherMaxUs)) + "us"
+                        + " total_ms=" + juce::String(execMs, 3) + "ms");
+                    s_hist = s_other = BlockTimingStats{};
+                }
             }
         }
         s_timerExecStartMs = juce::Time::getMillisecondCounterHiRes();
     }
+
+    // ★ [work62] DiagDrain: RTスレッドが書き込んだ DiagEvent リングバッファを消費
+    {
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+
+        DiagEvent event;
+        int drained = 0;
+        const uint64_t drainStartUs = convo::getCurrentTimeUs();
+        while (drained < static_cast<int>(DiagRuntimeLimits::MaxDrainPerTick)
+               && diagBuffer.pop(event))
+        {
+            ++drained;
+            rtAuxMutable_.diagTickPopped.value.fetch_add(1, std::memory_order_relaxed);
+            rtAuxMutable_.diagTotalPopped.fetch_add(1, std::memory_order_relaxed);
+            diagLog(formatDiagEvent(event, gen));
+        }
+        const uint64_t drainUs = convo::getCurrentTimeUs() - drainStartUs;
+
+        // 500tick周期で DiagDrain 統計を記録
+        if ((s_blockTickCount % 500) == 0) {
+            const size_t approxOcc = diagBuffer.size();
+            diagLog(diagPrefix(gen) + " [DIAG_DRAIN] tick=" + juce::String(static_cast<juce::int64>(s_blockTickCount))
+                + " drained=" + juce::String(drained)
+                + " drainUs=" + juce::String(static_cast<juce::int64>(drainUs))
+                + " max=" + juce::String(static_cast<int>(DiagRuntimeLimits::MaxDrainPerTick))
+                + " hitLimit=" + juce::String(drained == static_cast<int>(DiagRuntimeLimits::MaxDrainPerTick) ? "true" : "false")
+                + " approxOcc=" + juce::String(static_cast<juce::int64>(approxOcc)));
+        }
+    }
+
+    // ★ [work62] DiagStatistics: per-tick カウンタを exchangeAtomic で取得
+    {
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+
+        const uint64_t pushed = convo::exchangeAtomic(rtAuxMutable_.diagTickPushed.value, 0, std::memory_order_acq_rel);
+        const uint64_t popped = convo::exchangeAtomic(rtAuxMutable_.diagTickPopped.value, 0, std::memory_order_acq_rel);
+        const uint64_t dropped = convo::exchangeAtomic(rtAuxMutable_.diagTickDropped.value, 0, std::memory_order_acq_rel);
+        const uint64_t totalP = convo::consumeAtomic(rtAuxMutable_.diagTotalPushed, std::memory_order_acquire);
+        const uint64_t totalPop = convo::consumeAtomic(rtAuxMutable_.diagTotalPopped, std::memory_order_acquire);
+        const uint64_t cbW = convo::exchangeAtomic(rtAuxMutable_.cbArrivalWritten, 0, std::memory_order_acq_rel);
+        const uint64_t cbD = convo::exchangeAtomic(rtAuxMutable_.cbArrivalDropped, 0, std::memory_order_acq_rel);
+
+        // 100tick周期で DIAG_STAT を記録
+        if ((s_blockTickCount % 100) == 0) {
+            diagLog(diagPrefix(gen) + " [DIAG_STAT] tick=" + juce::String(static_cast<juce::int64>(s_blockTickCount))
+                + " pushed=" + juce::String(static_cast<juce::int64>(pushed))
+                + " popped=" + juce::String(static_cast<juce::int64>(popped))
+                + " dropped=" + juce::String(static_cast<juce::int64>(dropped))
+                + " totalP=" + juce::String(static_cast<juce::int64>(totalP))
+                + " totalPop=" + juce::String(static_cast<juce::int64>(totalPop))
+                + " cbW=" + juce::String(static_cast<juce::int64>(cbW))
+                + " cbD=" + juce::String(static_cast<juce::int64>(cbD)));
+        }
+    }
+
+    // ★ [work62] flushLogBuffer — 非同期Loggerのリングバッファをファイルに書き出し
+    flushLogBuffer();
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 }
 
@@ -36295,6 +37021,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 //============================================================================
 
 #include <cstdint>
+#include <cmath>
 
 static constexpr int kAdaptiveNoiseShaperOrder = 9;
 static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
@@ -36609,7 +37336,197 @@ using RuntimePublishWorld = RuntimeState;
 static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
               "RuntimePublishWorld must not be default-constructible outside builder path");
 
-// ★ P0-2/3: Forward declarations for friend classes
+//============================================================================
+// ★ work60: Numeric-Only DiagEvent — RTスレッドから String 構築と Logger を排除
+//   RT側: DiagEvent を生成し LockFreeRingBuffer に push() するだけ
+//   Timer側: pop() → String フォーマット → diagLog() で出力
+//============================================================================
+
+// 診断イベントカテゴリ
+enum class DiagCategory : uint8_t {
+    None = 0,
+    CpuMig = 1,           // CPU_MIG
+    CallbackSequence = 2, // CB_SEQ
+    DspTiming = 3,        // DSP_TIMING
+    CallbackStage = 4,    // CALLBACK_STAGE
+    EqTime = 5,           // EQ_TIME
+    ConvTime = 6,         // CONV_TIME
+    StereoConvTime = 7,   // STCONV_TIME
+    CallbackArrival = 8,  // CB_ARRIVAL（work61: callback到着時刻）
+    Count                 // カテゴリ総数（センチネル、9）
+};
+
+// カテゴリ固有データ構造（POD, trivially copyable）
+struct CpuMigData {
+    uint64_t pubSeq;
+    uint64_t generation;
+    uint32_t cpu;
+    uint32_t prevCpu;
+};
+
+struct CallbackSequenceData {
+    uint64_t generation;
+    uint64_t seq;
+    uint64_t prevSeq;
+};
+
+enum class PublicationDirection : uint8_t {
+    None = 0,
+    Forward = 1,
+    Rollback = 2,
+    Replay = 3
+};
+
+struct DspTimingData {
+    uint64_t dspSeq;
+    uint64_t generation;
+    uint64_t worldId;
+    PublicationDirection direction;
+    uint64_t observeLatencyUs;
+    uint64_t pubToObserveUs;
+    uint64_t callbacksUntilObserve;
+    uint64_t publishCallbackIdx;
+};
+
+struct CallbackStageData {
+    uint32_t cpu;
+    uint64_t generation;
+    uint64_t expectedUs;
+    int64_t  driftUs;
+    uint64_t inputUs;
+    uint64_t dspUs;
+    uint64_t outputUs;
+    uint64_t totalUs;
+    uint16_t budgetPermille;
+};
+
+struct EqTimeData {
+    uint32_t cpu;
+    uint64_t us;
+    uint8_t  activeBands;
+    uint8_t  order;
+    uint32_t budgetPercent;
+};
+
+struct ConvTimeData {
+    uint32_t cpu;
+    uint64_t us;
+    uint32_t blockSamples;
+    uint16_t budgetPercent;
+    uint32_t expectedUs;
+    uint32_t callQuantumSamples;
+    uint32_t latency;
+};
+
+struct StereoConvTimeData {
+    uint32_t cpu;
+    uint64_t us;
+    uint32_t chunkSamples;
+    uint8_t  channels;
+    uint16_t budgetPercent;
+};
+
+// ★ work61: CallbackArrival — callback到着時刻記録（20byte）
+struct CallbackArrivalData {
+    uint64_t timestampUs;     // callback entry 時刻（getCurrentTimeUs）
+    uint32_t expectedUs;      // 期待間隔（numSamples/sampleRate*1e6、lround使用）
+    uint16_t cpu;             // 実行CPU番号
+    uint16_t reserved;        // alignment padding
+    uint32_t threadId;        // スレッドID（optional、32bit完全値）
+};
+static_assert(sizeof(CallbackArrivalData) <= 24, "CallbackArrivalData size check");
+
+// メイン DiagEvent 構造体
+struct DiagEvent {
+    DiagCategory category;
+    uint64_t eventIndex;  // グローバルコールバック通し番号
+
+    union {
+        CpuMigData cpuMig;
+        CallbackSequenceData callbackSequence;
+        DspTimingData dspTiming;
+        CallbackStageData callbackStage;
+        EqTimeData eqTime;
+        ConvTimeData convTime;
+        StereoConvTimeData stereoConvTime;
+        CallbackArrivalData callbackArrival; // ★ work61
+    } data;
+};
+
+static_assert(std::is_trivially_copyable_v<DiagEvent>,
+    "DiagEvent must be trivially copyable for LockFreeRingBuffer");
+static_assert(std::is_standard_layout_v<DiagEvent>,
+    "DiagEvent must be standard layout for memcpy safety");
+static_assert(std::is_trivial_v<DiagEvent>,
+    "DiagEvent must be trivial (trivially_copyable + default_constructible)");
+static_assert(std::is_trivially_destructible_v<DiagEvent>,
+    "DiagEvent must be trivially destructible; check data members");
+static_assert(alignof(DiagEvent) == alignof(uint64_t),
+    "DiagEvent alignment mismatch; check struct members");
+static_assert(offsetof(DiagEvent, data) % alignof(uint64_t) == 0,
+    "DiagEvent.data must be uint64_t-aligned for efficient union access");
+// ★ [work62] sizeof(DiagEvent) == 88 確定（static_assert で常時検証済み）
+static constexpr size_t kDiagEventSizeMax = 88;
+static_assert(sizeof(DiagEvent) == kDiagEventSizeMax, "DiagEvent layout changed; review struct members");
+
+// 診断リングバッファ実行時定数
+struct DiagRuntimeLimits {
+    static constexpr size_t BufferCapacity = 512;  // 2^9, ~45KB
+    static constexpr size_t MaxDrainPerTick = 16;  // ★ [work62] 64→16: asyncSink導入に伴い減少
+};
+
+// per-tick統計カウンタ（alignas(64)で他オブジェクトとの境界分離）
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignasによるパディングは意図的
+struct alignas(64) DiagPerTickCounter {
+    std::atomic<uint64_t> value { 0 };
+};
+#pragma warning(pop)
+
+// work60: モジュール別 diagBuffer アクセス用 setter（extern linkage - 実体は各.cpp）
+void setEqDiagBuffer(
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+    std::atomic<uint64_t>& totalPushed) noexcept;
+void setConvDiagBuffer(
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+    std::atomic<uint64_t>& totalPushed) noexcept;
+
+// work60: 実体定義は DSPCoreFloat.cpp（setEqDiagBuffer）と
+// ConvolverProcessor.Runtime.cpp（setConvDiagBuffer）にある。
+
+// ★ work61: CallbackArrival 記録ヘルパー（inline、RT-safe）
+//   BlockDouble.cpp / AudioBlock.cpp の両方から呼ばれる。
+//   関数の冒頭（RuntimeScopeより前）で呼び出すこと。
+inline void recordCallbackArrival(
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& diagBuffer,
+    uint64_t thisCallbackIndex,
+    int numSamples,
+    double sampleRate,
+    uint32_t cachedThreadId,
+    std::atomic<uint64_t>& writtenCounter,
+    std::atomic<uint64_t>& droppedCounter,
+    std::atomic<uint64_t>& consecutiveDrops) noexcept
+{
+    DiagEvent event{};
+    event.category = DiagCategory::CallbackArrival;
+    event.eventIndex = thisCallbackIndex;
+    event.data.callbackArrival.timestampUs = convo::getCurrentTimeUs();
+    event.data.callbackArrival.cpu = static_cast<uint16_t>(::GetCurrentProcessorNumber());
+    event.data.callbackArrival.threadId = cachedThreadId;
+    event.data.callbackArrival.expectedUs = (sampleRate > 0.0 && numSamples > 0)
+        ? static_cast<uint32_t>(std::lround(static_cast<double>(numSamples) / sampleRate * 1e6)) : 0;
+    if (!diagBuffer.push(event)) {
+        droppedCounter.fetch_add(1, std::memory_order_relaxed);
+        consecutiveDrops.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        writtenCounter.fetch_add(1, std::memory_order_relaxed);
+        consecutiveDrops.store(0, std::memory_order_relaxed);
+    }
+}
+
+//============================================================================
 namespace convo::isr {
     class PublicationExecutor;
     class DSPTransition;
@@ -37592,6 +38509,9 @@ public:
         // ★ work60 診断拡張: prepareToPlay 時に事前計算した期待callback間隔(us)
         //   非atomic（prepareToPlay/device restart時のみ更新、callback内は読取専用）
         uint64_t expectedCallbackIntervalUs { 0 };
+
+        // ★ work61: ThreadID キャッシュ（開始時1回取得、以降はAPI呼び出しせず流用）
+        uint32_t cachedThreadId { 0 };
     };
 
     // ★ work60: 共通callbackSeq取得ヘルパー（BlockDouble/BlockFloat用）
@@ -37602,6 +38522,8 @@ public:
     }
 
     struct RTAuxMutable
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignasメンバによるパディングは意図的
     {
         uint64_t debugLastReportedCreatedEqHash { std::numeric_limits<uint64_t>::max() };
         int debugLastReportedDspReady { -1 };
@@ -37691,7 +38613,23 @@ public:
         // ★ 計測ログ追加: XRUN drop カウンタ
         // Audio Thread から atomic increment される。Timer Thread が消費時に読み取り・リセット。
         std::atomic<uint64_t> xRunDropCount { 0 };
+
+        // ★ work60: DiagEvent 運用統計カウンタ
+        //   per-tick: exchangeAtomic でリセット
+        DiagPerTickCounter diagTickPushed;   // push成功数
+        DiagPerTickCounter diagTickPopped;   // pop成功数
+        DiagPerTickCounter diagTickDropped;  // drop数
+        //   モノトニック（一度もリセットしない）
+        alignas(64) std::atomic<uint64_t> diagTotalPushed { 0 };
+        alignas(64) std::atomic<uint64_t> diagTotalPopped { 0 };
+
+        // ★ work61: CallbackArrival 専用統計
+        //   周期カウンタは Timer 側で collect & exchange
+        alignas(64) std::atomic<uint64_t> cbArrivalWritten { 0 };
+        alignas(64) std::atomic<uint64_t> cbArrivalDropped { 0 };
+        alignas(64) std::atomic<uint64_t> cbArrivalConsecutiveDrops { 0 };
     };
+#pragma warning(pop) // C4324 suppression end
 
     void setCliProcessingTelemetryEnabled(bool enabled) noexcept
     {
@@ -38170,6 +39108,17 @@ public:
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
+    std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
+
+    // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
+    //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）
+    //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
+    HANDLE m_avrtHandle = nullptr;
+    DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
+
+    // ★ [work63] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
+    //    Audio Thread が終了間際のコールバックでこれを検知し、自スレッド上で AvRevert する。
+    std::atomic<bool> mmcssShutdownRequested{false};
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -38248,7 +39197,19 @@ public:
 
     void createSnapshotFromCurrentState(uint64_t generation);
     void initWorkerThread();
+
+    // ★ [work62] MMCSS — Pro Audio 優先度設定
+    void applyMmcssPriority() noexcept;
+    // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）
+    void revertMmcssPriorityOnAudioThread() noexcept;
+    // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）
+    void finalizeMmcssShutdown() noexcept;
     void shutdownWorkerThread();
+
+    // ★ [work63] Audio Thread 優先度モード設定／解除
+    void setAudioThreadPriorityMode(bool useMmcss);
+    [[nodiscard]] bool isAudioThreadPriorityMmcss() const noexcept;
+    void revertThreadPriority() noexcept;
 
     enum class EngineLifecycleState : int
     {
@@ -38342,6 +39303,8 @@ public:
     // ★ 計測ログ追加: XRUN リングバッファ（Audio Thread write, Timer Thread read）
     static constexpr size_t kXRunBufferCapacity = 64;
     LockFreeRingBuffer<XRunEvent, kXRunBufferCapacity> xRunBuffer;
+    // ★ work60: DiagEvent リングバッファ（Audio Thread write, Timer Thread read）
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity> diagBuffer;
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
     struct LearnerStateSnapshot {
@@ -56527,9 +57490,8 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 
 void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
 {
-    juce::ignoreUnused(enable);
-    convo::publishAtomic(useIncrementalRebuild, false, std::memory_order_release); // release: isIncrementalRebuildEnabled 側 acquire と HB
-    if (rebuildJob)
+    convo::publishAtomic(useIncrementalRebuild, enable, std::memory_order_release); // release: isIncrementalRebuildEnabled 側 acquire と HB
+    if (!enable && rebuildJob)
         rebuildJob->reset();
 }
 
@@ -57085,6 +58047,24 @@ namespace
                 data[i] = 0.0;
         }
     }
+}
+
+// work60: module-level pointers to AudioEngine::diagBuffer for CONV_TIME/STCONV_TIME
+//   Set via setConvDiagBuffer() called from AudioEngine initialization.
+namespace {
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* convDiagBuffer = nullptr;
+    DiagPerTickCounter* convTickPushed = nullptr;
+    DiagPerTickCounter* convTickDropped = nullptr;
+    std::atomic<uint64_t>* convTotalPushed = nullptr;
+}
+void setConvDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+                       DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+                       std::atomic<uint64_t>& totalPushed) noexcept
+{
+    convDiagBuffer = &db;
+    convTickPushed = &tickPushed;
+    convTickDropped = &tickDropped;
+    convTotalPushed = &totalPushed;
 }
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME)
@@ -57687,16 +58667,30 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     const double expectedUs = static_cast<double>(chunkSamples) / srForConv * 1e6;
                     const uint32_t cpu = convo::consumeAtomic(currentCpu, std::memory_order_relaxed);
-                    juce::String slog("[STCONV_TIME]");
-                    slog += " seq=" + juce::String(static_cast<int64_t>(cbSeq));
-                    slog += " cpu=" + juce::String(static_cast<int>(cpu));
-                    slog += " us=" + juce::String(static_cast<int64_t>(scElapsedUs));
-                    slog += " chunk=" + juce::String(chunkSamples);
-                    slog += " ch=" + juce::String(ch);
-                    slog += " budget=" + juce::String(
-                        (static_cast<double>(scElapsedUs) / expectedUs) * 100.0, 1) + "%";
-                    DBG(slog);
-                    juce::Logger::writeToLog(slog);
+                    const uint32_t budgetPermille = (expectedUs > 0.0)
+                        ? static_cast<uint32_t>((static_cast<double>(scElapsedUs) / expectedUs) * 1000.0)
+                        : 0;
+                    // work60: Numeric-Only DiagEvent
+                    if (convDiagBuffer != nullptr)
+                    {
+                        DiagEvent event{};
+                        event.category = DiagCategory::StereoConvTime;
+                        event.eventIndex = cbSeq;
+                        event.data.stereoConvTime.cpu = cpu;
+                        event.data.stereoConvTime.us = scElapsedUs;
+                        event.data.stereoConvTime.chunkSamples = static_cast<uint32_t>(chunkSamples);
+                        event.data.stereoConvTime.channels = static_cast<uint8_t>(ch);
+                        event.data.stereoConvTime.budgetPercent = static_cast<uint16_t>(budgetPermille);
+                        if (convDiagBuffer->push(event))
+                        {
+                            convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+                            convTotalPushed->fetch_add(1, std::memory_order_relaxed);
+                        }
+                        else
+                        {
+                            convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                 }
             }
 #endif
@@ -57755,20 +58749,34 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 const uint32_t cpu = convo::consumeAtomic(currentCpu, std::memory_order_relaxed);
                 const double expectedUs = static_cast<double>(block.getNumSamples()) / srForConv * 1e6;
-                juce::String clog("[CONV_TIME]");
-                clog += " seq=" + juce::String(static_cast<int64_t>(cbSeq));
-                clog += " cpu=" + juce::String(static_cast<int>(cpu));
-                clog += " us=" + juce::String(static_cast<int64_t>(convElapsedUs));
-                clog += " block=" + juce::String(static_cast<int>(block.getNumSamples()));
-                clog += " budget=" + juce::String(
-                    (static_cast<double>(convElapsedUs) / expectedUs) * 100.0, 1) + "%";
-                clog += " expected=" + juce::String(static_cast<int64_t>(expectedUs));
-                if (conv != nullptr) {
-                    clog += " callQ=" + juce::String(conv->callQuantumSamples);
-                    clog += " lat=" + juce::String(conv->latency);
+                const uint32_t budgetPermille = (expectedUs > 0.0)
+                    ? static_cast<uint32_t>((static_cast<double>(convElapsedUs) / expectedUs) * 1000.0)
+                    : 0;
+                // work60: Numeric-Only DiagEvent
+                if (convDiagBuffer != nullptr)
+                {
+                    DiagEvent event{};
+                    event.category = DiagCategory::ConvTime;
+                    event.eventIndex = cbSeq;
+                    event.data.convTime.cpu = cpu;
+                    event.data.convTime.us = convElapsedUs;
+                    event.data.convTime.blockSamples = static_cast<uint32_t>(block.getNumSamples());
+                    event.data.convTime.budgetPercent = static_cast<uint16_t>(budgetPermille);
+                    event.data.convTime.expectedUs = static_cast<uint32_t>(expectedUs);
+                    if (conv != nullptr) {
+                        event.data.convTime.callQuantumSamples = static_cast<uint32_t>(conv->callQuantumSamples);
+                        event.data.convTime.latency = static_cast<uint32_t>(conv->latency);
+                    }
+                    if (convDiagBuffer->push(event))
+                    {
+                        convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+                        convTotalPushed->fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-                DBG(clog);
-                juce::Logger::writeToLog(clog);
             }
         }
     }
@@ -62208,6 +63216,18 @@ class ThreadAffinityManager
 {
 public:
     ThreadAffinityManager() = default;
+
+    // ★ [work62] ThreadAffinityManager 初期化 — affinity mask 設定 + initialized_ 有効化
+    void initialize(const ThreadAffinityMasks& masks) noexcept
+    {
+        masks_ = masks;
+        convo::publishAtomic(initialized_, true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isInitialized() const noexcept
+    {
+        return convo::consumeAtomic(initialized_, std::memory_order_acquire);
+    }
 
     void applyMessageThreadPolicy() const noexcept
     {

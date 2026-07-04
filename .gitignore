@@ -62,6 +62,8 @@ graphify-out/
 CLAUDE.md
 .aidex/
 .github/context-mode/
+.venv/
+doc/BIGDATA/
 
 # Coverage reports
 coverage/

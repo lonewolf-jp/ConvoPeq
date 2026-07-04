@@ -1,4 +1,5 @@
 #include <JuceHeader.h>
+#include <cstring>
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
 #include "core/RuntimeReaderContext.h"
@@ -30,6 +31,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
+    // Extract numSamples from buffer
+    const int numSamples = buffer.getNumSamples();
+
+    // ★ work61: callbackIndex を早期に取得（RuntimeScopeより前）
+    //   これにより recordCallbackArrival() は正しい eventIndex を持つ。
+    //   fetchAddAtomic は pre-increment 値を返すため +1 して post-increment に。
+    const auto thisCallbackIndex = convo::fetchAddAtomic(
+        rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+
     struct AudioCallbackRuntimeScope final
     {
         AudioEngine& engine;
@@ -57,7 +67,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
-    const int numSamples = buffer.getNumSamples();
 
     struct CallbackTelemetryScope final
     {
@@ -109,6 +118,20 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
+    // ★ work61: CallbackArrival 最初の記録（RuntimeScope/ISR firewall後、A/G/H/Xrun/Stageより前）
+    //   runtimeWorld が利用可能になった直後に記録。ISR準拠のため getRuntimeSampleRateHzFromWorld を使用。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const double sr = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
+        recordCallbackArrival(
+            diagBuffer, thisCallbackIndex, numSamples, sr,
+            rtLocalState_.cachedThreadId,
+            rtAuxMutable_.cbArrivalWritten,
+            rtAuxMutable_.cbArrivalDropped,
+            rtAuxMutable_.cbArrivalConsecutiveDrops);
+    }
+#endif
+
     // ★ A/G/H: コールバック受信診断
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // A: callback受信時刻 + drift計測
@@ -151,12 +174,27 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                     ? runtimeWorld->metadata.publicationSequence : 0;
                 const uint64_t gen = (runtimeWorld != nullptr)
                     ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
-                juce::Logger::writeToLog(
-                    "[CPU_MIG] callback=" + juce::String(static_cast<int64_t>(cbIdx))
-                    + " seq=" + juce::String(static_cast<int64_t>(pubSeq))
-                    + " gen=" + juce::String(static_cast<int64_t>(gen))
-                    + " cpu=" + juce::String(static_cast<int>(cpu))
-                    + " prev=" + juce::String(static_cast<int>(prev)));
+                // work60: Numeric-Only DiagEvent
+                // ★ [work62] サンプリング: cbIdx が SAMPLE_MASK に適合した時のみ DiagEvent を生成
+                if ((cbIdx & CONVOPEQ_DIAG_SAMPLE_MASK) == 0)
+                {
+                    DiagEvent event{};
+                    event.category = DiagCategory::CpuMig;
+                    event.eventIndex = cbIdx;
+                    event.data.cpuMig.pubSeq = pubSeq;
+                    event.data.cpuMig.generation = gen;
+                    event.data.cpuMig.cpu = cpu;
+                    event.data.cpuMig.prevCpu = prev;
+                    if (diagBuffer.push(event))
+                    {
+                        rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                        rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
             }
         }
     }
@@ -175,11 +213,23 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                 {
                     const uint64_t cbIdx = rtLocalState_.audioCallbackEpochCounter.load(
                         std::memory_order_relaxed);
-                    juce::Logger::writeToLog(
-                        "[CB_SEQ] callback=" + juce::String(static_cast<int64_t>(cbIdx))
-                        + " gen=" + juce::String(static_cast<int64_t>(runtimeWorld->generation))
-                        + " seq=" + juce::String(static_cast<int64_t>(seq))
-                        + " prevSeq=" + juce::String(static_cast<int64_t>(prevSeq)));
+                    const uint64_t gen = static_cast<uint64_t>(runtimeWorld->generation);
+                    // work60: Numeric-Only DiagEvent
+                    DiagEvent event{};
+                    event.category = DiagCategory::CallbackSequence;
+                    event.eventIndex = cbIdx;
+                    event.data.callbackSequence.generation = gen;
+                    event.data.callbackSequence.seq = seq;
+                    event.data.callbackSequence.prevSeq = prevSeq;
+                    if (diagBuffer.push(event))
+                    {
+                        rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                        rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
         }
@@ -187,9 +237,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 #endif
 
     const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
-
-    // ★ callback epoch counter（全診断ブロックで使用するcallbackIndexの基盤）
-    (void)convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel);
 
     DSPCore* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
     if (dsp == nullptr)
@@ -355,11 +402,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ work60: DSP_STAGE終了時刻（t2）
     const uint64_t t2_dspEndUs = convo::getCurrentTimeUs();
 
-    // ★ callbackIndex（callback開始直後に1度だけ取得、全診断ブロックで同じ値を使用）
-    const auto thisCallbackIndex = convo::consumeAtomic(
-        rtLocalState_.audioCallbackEpochCounter, std::memory_order_relaxed);
+    // ★ callbackIndex（callback開始直後に1度だけ取得、全診断ブロックで同じ値を使用。work61: 早期取得版を流用）
+    //    thisCallbackIndex は関数冒頭で fetchAddAtomic により取得済み
 
-    // ★ DSP Observe 検出: publicationSequence 変化時のみ記録 + ObserveReason
+    // ★ DSP Observe 検出: publicationSequence 変化時のみ記録 + PublicationDirection
     static uint64_t s_lastObservedSeq = 0;
     uint64_t observeUs = 0;
     const char* observeReason = "";
@@ -504,26 +550,45 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ DSP_TIMING 出力（Observe検出時のみ）
     if (observeUs > 0 && dspSeq > 0)
     {
-        juce::String log("[DSP_TIMING] seq=");
-        log += juce::String(static_cast<juce::int64>(dspSeq));
-        log += " gen=" + juce::String(static_cast<juce::int64>(runtimeWorld ? static_cast<uint64_t>(runtimeWorld->generation) : 0));
-        log += " worldId=" + juce::String(static_cast<juce::int64>(runtimeWorld ? static_cast<uint64_t>(runtimeWorld->worldId) : 0));
-        log += " reason=" + juce::String(observeReason);
-        log += " callbackIndex=" + juce::String(static_cast<juce::int64>(thisCallbackIndex));
+        // work60: Numeric-Only DiagEvent
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+        const uint64_t worldId = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->worldId) : 0;
+        // observeReason(const char*) → uint8_t: 0=None, 1=Forward, 2=Rollback, 3=Replay
+        uint8_t reasonVal = 0;
+        if (observeReason[0] != '\0') {
+            if (std::strcmp(observeReason, "Forward") == 0) reasonVal = 1;
+            else if (std::strcmp(observeReason, "Rollback") == 0) reasonVal = 2;
+            else if (std::strcmp(observeReason, "Replay") == 0) reasonVal = 3;
+        }
+        DiagEvent event{};
+        event.category = DiagCategory::DspTiming;
+        event.eventIndex = thisCallbackIndex;
+        event.data.dspTiming.dspSeq = static_cast<uint64_t>(dspSeq);
+        event.data.dspTiming.generation = gen;
+        event.data.dspTiming.worldId = worldId;
+        event.data.dspTiming.direction = static_cast<PublicationDirection>(reasonVal);
         if (matchedPublishEndUs > 0)
         {
             const uint64_t observeLatencyUs = observeUs - matchedPublishEndUs;
-            log += " observeLatencyUs=" + juce::String(static_cast<juce::int64>(observeLatencyUs));
-            log += " pubToObserveUs=" + juce::String(static_cast<juce::int64>(observeLatencyUs));
+            event.data.dspTiming.observeLatencyUs = observeLatencyUs;
+            event.data.dspTiming.pubToObserveUs = observeLatencyUs;
             if (matchedPublishCallbackIdx > 0 && matchedPublishCallbackIdx < thisCallbackIndex)
             {
-                const uint64_t callbacksUntilObserve = thisCallbackIndex - matchedPublishCallbackIdx;
-                log += " callbacksUntilObserve=" + juce::String(static_cast<juce::int64>(callbacksUntilObserve));
-                log += " publishCallbackIdx=" + juce::String(static_cast<juce::int64>(matchedPublishCallbackIdx));
+                event.data.dspTiming.callbacksUntilObserve = thisCallbackIndex - matchedPublishCallbackIdx;
+                event.data.dspTiming.publishCallbackIdx = matchedPublishCallbackIdx;
             }
         }
-        DBG(log);
-        juce::Logger::writeToLog(log);
+        if (diagBuffer.push(event))
+        {
+            rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+            rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // ★ work60: CALLBACK_STAGE（INPUT/DSP/OUTPUT 3区間 + drift + budget）
@@ -545,20 +610,28 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             const uint64_t totalUs = (t3 > t0) ? t3 - t0 : 0;
             const uint32_t budgetPermille = (expectedUs > 0)
                 ? static_cast<uint32_t>(totalUs * 1000 / expectedUs) : 0;
-            juce::String cclog("[CALLBACK_STAGE]");
-            cclog += " seq=" + juce::String(static_cast<int64_t>(thisCallbackIndex));
-            cclog += " cpu=" + juce::String(static_cast<int>(cpu));
-            cclog += " gen=" + juce::String(static_cast<int64_t>(gen));
-            cclog += " expected=" + juce::String(static_cast<int64_t>(expectedUs));
-            cclog += " drift=" + juce::String(static_cast<int64_t>(driftUs));
-            cclog += " input=" + juce::String(static_cast<int64_t>(inputUs));
-            cclog += " dsp=" + juce::String(static_cast<int64_t>(dspUs));
-            cclog += " output=" + juce::String(static_cast<int64_t>(outputUs));
-            cclog += " total=" + juce::String(static_cast<int64_t>(totalUs));
-            cclog += " budget=" + juce::String(static_cast<int>(budgetPermille / 10)) + "."
-                + juce::String(static_cast<int>(budgetPermille % 10)) + "%";
-            DBG(cclog);
-            juce::Logger::writeToLog(cclog);
+            // work60: Numeric-Only DiagEvent
+            DiagEvent event{};
+            event.category = DiagCategory::CallbackStage;
+            event.eventIndex = thisCallbackIndex;
+            event.data.callbackStage.cpu = cpu;
+            event.data.callbackStage.generation = gen;
+            event.data.callbackStage.expectedUs = expectedUs;
+            event.data.callbackStage.driftUs = driftUs;
+            event.data.callbackStage.inputUs = inputUs;
+            event.data.callbackStage.dspUs = dspUs;
+            event.data.callbackStage.outputUs = outputUs;
+            event.data.callbackStage.totalUs = totalUs;
+            event.data.callbackStage.budgetPermille = static_cast<uint16_t>(budgetPermille);
+            if (diagBuffer.push(event))
+            {
+                rtAuxMutable_.diagTickPushed.value.fetch_add(1, std::memory_order_relaxed);
+                rtAuxMutable_.diagTotalPushed.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                rtAuxMutable_.diagTickDropped.value.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 

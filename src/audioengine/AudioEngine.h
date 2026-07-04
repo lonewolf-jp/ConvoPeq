@@ -4,6 +4,7 @@
 //============================================================================
 
 #include <cstdint>
+#include <cmath>
 
 static constexpr int kAdaptiveNoiseShaperOrder = 9;
 static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
@@ -318,7 +319,197 @@ using RuntimePublishWorld = RuntimeState;
 static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
               "RuntimePublishWorld must not be default-constructible outside builder path");
 
-// ★ P0-2/3: Forward declarations for friend classes
+//============================================================================
+// ★ work60: Numeric-Only DiagEvent — RTスレッドから String 構築と Logger を排除
+//   RT側: DiagEvent を生成し LockFreeRingBuffer に push() するだけ
+//   Timer側: pop() → String フォーマット → diagLog() で出力
+//============================================================================
+
+// 診断イベントカテゴリ
+enum class DiagCategory : uint8_t {
+    None = 0,
+    CpuMig = 1,           // CPU_MIG
+    CallbackSequence = 2, // CB_SEQ
+    DspTiming = 3,        // DSP_TIMING
+    CallbackStage = 4,    // CALLBACK_STAGE
+    EqTime = 5,           // EQ_TIME
+    ConvTime = 6,         // CONV_TIME
+    StereoConvTime = 7,   // STCONV_TIME
+    CallbackArrival = 8,  // CB_ARRIVAL（work61: callback到着時刻）
+    Count                 // カテゴリ総数（センチネル、9）
+};
+
+// カテゴリ固有データ構造（POD, trivially copyable）
+struct CpuMigData {
+    uint64_t pubSeq;
+    uint64_t generation;
+    uint32_t cpu;
+    uint32_t prevCpu;
+};
+
+struct CallbackSequenceData {
+    uint64_t generation;
+    uint64_t seq;
+    uint64_t prevSeq;
+};
+
+enum class PublicationDirection : uint8_t {
+    None = 0,
+    Forward = 1,
+    Rollback = 2,
+    Replay = 3
+};
+
+struct DspTimingData {
+    uint64_t dspSeq;
+    uint64_t generation;
+    uint64_t worldId;
+    PublicationDirection direction;
+    uint64_t observeLatencyUs;
+    uint64_t pubToObserveUs;
+    uint64_t callbacksUntilObserve;
+    uint64_t publishCallbackIdx;
+};
+
+struct CallbackStageData {
+    uint32_t cpu;
+    uint64_t generation;
+    uint64_t expectedUs;
+    int64_t  driftUs;
+    uint64_t inputUs;
+    uint64_t dspUs;
+    uint64_t outputUs;
+    uint64_t totalUs;
+    uint16_t budgetPermille;
+};
+
+struct EqTimeData {
+    uint32_t cpu;
+    uint64_t us;
+    uint8_t  activeBands;
+    uint8_t  order;
+    uint32_t budgetPercent;
+};
+
+struct ConvTimeData {
+    uint32_t cpu;
+    uint64_t us;
+    uint32_t blockSamples;
+    uint16_t budgetPercent;
+    uint32_t expectedUs;
+    uint32_t callQuantumSamples;
+    uint32_t latency;
+};
+
+struct StereoConvTimeData {
+    uint32_t cpu;
+    uint64_t us;
+    uint32_t chunkSamples;
+    uint8_t  channels;
+    uint16_t budgetPercent;
+};
+
+// ★ work61: CallbackArrival — callback到着時刻記録（20byte）
+struct CallbackArrivalData {
+    uint64_t timestampUs;     // callback entry 時刻（getCurrentTimeUs）
+    uint32_t expectedUs;      // 期待間隔（numSamples/sampleRate*1e6、lround使用）
+    uint16_t cpu;             // 実行CPU番号
+    uint16_t reserved;        // alignment padding
+    uint32_t threadId;        // スレッドID（optional、32bit完全値）
+};
+static_assert(sizeof(CallbackArrivalData) <= 24, "CallbackArrivalData size check");
+
+// メイン DiagEvent 構造体
+struct DiagEvent {
+    DiagCategory category;
+    uint64_t eventIndex;  // グローバルコールバック通し番号
+
+    union {
+        CpuMigData cpuMig;
+        CallbackSequenceData callbackSequence;
+        DspTimingData dspTiming;
+        CallbackStageData callbackStage;
+        EqTimeData eqTime;
+        ConvTimeData convTime;
+        StereoConvTimeData stereoConvTime;
+        CallbackArrivalData callbackArrival; // ★ work61
+    } data;
+};
+
+static_assert(std::is_trivially_copyable_v<DiagEvent>,
+    "DiagEvent must be trivially copyable for LockFreeRingBuffer");
+static_assert(std::is_standard_layout_v<DiagEvent>,
+    "DiagEvent must be standard layout for memcpy safety");
+static_assert(std::is_trivial_v<DiagEvent>,
+    "DiagEvent must be trivial (trivially_copyable + default_constructible)");
+static_assert(std::is_trivially_destructible_v<DiagEvent>,
+    "DiagEvent must be trivially destructible; check data members");
+static_assert(alignof(DiagEvent) == alignof(uint64_t),
+    "DiagEvent alignment mismatch; check struct members");
+static_assert(offsetof(DiagEvent, data) % alignof(uint64_t) == 0,
+    "DiagEvent.data must be uint64_t-aligned for efficient union access");
+// ★ [work62] sizeof(DiagEvent) == 88 確定（static_assert で常時検証済み）
+static constexpr size_t kDiagEventSizeMax = 88;
+static_assert(sizeof(DiagEvent) == kDiagEventSizeMax, "DiagEvent layout changed; review struct members");
+
+// 診断リングバッファ実行時定数
+struct DiagRuntimeLimits {
+    static constexpr size_t BufferCapacity = 512;  // 2^9, ~45KB
+    static constexpr size_t MaxDrainPerTick = 16;  // ★ [work62] 64→16: asyncSink導入に伴い減少
+};
+
+// per-tick統計カウンタ（alignas(64)で他オブジェクトとの境界分離）
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignasによるパディングは意図的
+struct alignas(64) DiagPerTickCounter {
+    std::atomic<uint64_t> value { 0 };
+};
+#pragma warning(pop)
+
+// work60: モジュール別 diagBuffer アクセス用 setter（extern linkage - 実体は各.cpp）
+void setEqDiagBuffer(
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+    std::atomic<uint64_t>& totalPushed) noexcept;
+void setConvDiagBuffer(
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+    std::atomic<uint64_t>& totalPushed) noexcept;
+
+// work60: 実体定義は DSPCoreFloat.cpp（setEqDiagBuffer）と
+// ConvolverProcessor.Runtime.cpp（setConvDiagBuffer）にある。
+
+// ★ work61: CallbackArrival 記録ヘルパー（inline、RT-safe）
+//   BlockDouble.cpp / AudioBlock.cpp の両方から呼ばれる。
+//   関数の冒頭（RuntimeScopeより前）で呼び出すこと。
+inline void recordCallbackArrival(
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& diagBuffer,
+    uint64_t thisCallbackIndex,
+    int numSamples,
+    double sampleRate,
+    uint32_t cachedThreadId,
+    std::atomic<uint64_t>& writtenCounter,
+    std::atomic<uint64_t>& droppedCounter,
+    std::atomic<uint64_t>& consecutiveDrops) noexcept
+{
+    DiagEvent event{};
+    event.category = DiagCategory::CallbackArrival;
+    event.eventIndex = thisCallbackIndex;
+    event.data.callbackArrival.timestampUs = convo::getCurrentTimeUs();
+    event.data.callbackArrival.cpu = static_cast<uint16_t>(::GetCurrentProcessorNumber());
+    event.data.callbackArrival.threadId = cachedThreadId;
+    event.data.callbackArrival.expectedUs = (sampleRate > 0.0 && numSamples > 0)
+        ? static_cast<uint32_t>(std::lround(static_cast<double>(numSamples) / sampleRate * 1e6)) : 0;
+    if (!diagBuffer.push(event)) {
+        droppedCounter.fetch_add(1, std::memory_order_relaxed);
+        consecutiveDrops.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        writtenCounter.fetch_add(1, std::memory_order_relaxed);
+        consecutiveDrops.store(0, std::memory_order_relaxed);
+    }
+}
+
+//============================================================================
 namespace convo::isr {
     class PublicationExecutor;
     class DSPTransition;
@@ -1301,6 +1492,9 @@ public:
         // ★ work60 診断拡張: prepareToPlay 時に事前計算した期待callback間隔(us)
         //   非atomic（prepareToPlay/device restart時のみ更新、callback内は読取専用）
         uint64_t expectedCallbackIntervalUs { 0 };
+
+        // ★ work61: ThreadID キャッシュ（開始時1回取得、以降はAPI呼び出しせず流用）
+        uint32_t cachedThreadId { 0 };
     };
 
     // ★ work60: 共通callbackSeq取得ヘルパー（BlockDouble/BlockFloat用）
@@ -1311,6 +1505,8 @@ public:
     }
 
     struct RTAuxMutable
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignasメンバによるパディングは意図的
     {
         uint64_t debugLastReportedCreatedEqHash { std::numeric_limits<uint64_t>::max() };
         int debugLastReportedDspReady { -1 };
@@ -1400,7 +1596,23 @@ public:
         // ★ 計測ログ追加: XRUN drop カウンタ
         // Audio Thread から atomic increment される。Timer Thread が消費時に読み取り・リセット。
         std::atomic<uint64_t> xRunDropCount { 0 };
+
+        // ★ work60: DiagEvent 運用統計カウンタ
+        //   per-tick: exchangeAtomic でリセット
+        DiagPerTickCounter diagTickPushed;   // push成功数
+        DiagPerTickCounter diagTickPopped;   // pop成功数
+        DiagPerTickCounter diagTickDropped;  // drop数
+        //   モノトニック（一度もリセットしない）
+        alignas(64) std::atomic<uint64_t> diagTotalPushed { 0 };
+        alignas(64) std::atomic<uint64_t> diagTotalPopped { 0 };
+
+        // ★ work61: CallbackArrival 専用統計
+        //   周期カウンタは Timer 側で collect & exchange
+        alignas(64) std::atomic<uint64_t> cbArrivalWritten { 0 };
+        alignas(64) std::atomic<uint64_t> cbArrivalDropped { 0 };
+        alignas(64) std::atomic<uint64_t> cbArrivalConsecutiveDrops { 0 };
     };
+#pragma warning(pop) // C4324 suppression end
 
     void setCliProcessingTelemetryEnabled(bool enabled) noexcept
     {
@@ -1879,6 +2091,17 @@ public:
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
+    std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
+
+    // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
+    //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）
+    //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
+    HANDLE m_avrtHandle = nullptr;
+    DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
+
+    // ★ [work63] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
+    //    Audio Thread が終了間際のコールバックでこれを検知し、自スレッド上で AvRevert する。
+    std::atomic<bool> mmcssShutdownRequested{false};
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -1957,7 +2180,19 @@ public:
 
     void createSnapshotFromCurrentState(uint64_t generation);
     void initWorkerThread();
+
+    // ★ [work62] MMCSS — Pro Audio 優先度設定
+    void applyMmcssPriority() noexcept;
+    // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）
+    void revertMmcssPriorityOnAudioThread() noexcept;
+    // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）
+    void finalizeMmcssShutdown() noexcept;
     void shutdownWorkerThread();
+
+    // ★ [work63] Audio Thread 優先度モード設定／解除
+    void setAudioThreadPriorityMode(bool useMmcss);
+    [[nodiscard]] bool isAudioThreadPriorityMmcss() const noexcept;
+    void revertThreadPriority() noexcept;
 
     enum class EngineLifecycleState : int
     {
@@ -2051,6 +2286,8 @@ public:
     // ★ 計測ログ追加: XRUN リングバッファ（Audio Thread write, Timer Thread read）
     static constexpr size_t kXRunBufferCapacity = 64;
     LockFreeRingBuffer<XRunEvent, kXRunBufferCapacity> xRunBuffer;
+    // ★ work60: DiagEvent リングバッファ（Audio Thread write, Timer Thread read）
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity> diagBuffer;
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
     struct LearnerStateSnapshot {

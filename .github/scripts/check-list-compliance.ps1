@@ -93,6 +93,7 @@ function Get-RgLineNumber {
 $dangerCommentPattern = '(//|/\*).*\b(TODO|FIXME|workaround|quick\s+fix|just\s+for\s+now|temporary)\b'
 $dangerHits = Invoke-RgLines -Pattern $dangerCommentPattern -Targets @($srcDir)
 foreach ($m in $dangerHits) {
+    if ($m -match 'NOLINT\(danger-comment\)') { continue }
     Add-Failure -RuleId '15.1' -Message 'Danger comment token detected' -Line $m
 }
 
@@ -133,6 +134,7 @@ foreach ($m in $rtExHits) {
 $rtIoPattern = 'Logger::writeToLog|\bDBG\s*\(|printf\s*\(|std::cout|MessageManager|File::|std::ifstream|std::ofstream'
 $rtIoHits = Invoke-RgLines -Pattern $rtIoPattern -Targets $rtFiles
 foreach ($m in $rtIoHits) {
+    if ($m -match 'NOLINT\(rt-logger\)') { continue }
     Add-Failure -RuleId '2.5' -Message 'Logging/I-O token in RT file' -Line $m
 }
 

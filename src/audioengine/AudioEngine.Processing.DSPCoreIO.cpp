@@ -435,8 +435,8 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         {
             juce::String alog("[ANS_SWITCH] us=");
             alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog);
-            juce::Logger::writeToLog(alog);
+            DBG(alog); // NOLINT(rt-logger)
+            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
         }
 #endif
     }

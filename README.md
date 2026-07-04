@@ -15,12 +15,18 @@ ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combi
 
 ## Overview
 
-ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows.
+ConvoPeq v0.6.8 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
 
-- Platform: **Windows 11 x64 only**
-- Framework: **JUCE 8.0.12**
-- Precision: **64-bit double** on the main DSP path
-- Performance focus: **AVX2 + Intel oneMKL and IPP** (best experience on modern multi-core x64 CPUs)
+| Aspect | Detail |
+|--------|--------|
+| Platform | **Windows 11 x64** (standalone, not a plugin) |
+| Framework | **JUCE 8.0.12** |
+| Compilers | **MSVC 19.44+** (VS2022 17.11+ or VS2026) / **Intel icx** (oneAPI 2026.0) |
+| DSP Precision | **64-bit double** throughout the main processing path |
+| SIMD / Math | **AVX2** + **Intel oneMKL** (sequential, static link) + **Intel IPP** |
+| Build System | **CMake 3.22+** + **Ninja Multi-Config** |
+| Language | **C++20** |
+| Source | **246 files** (~2.78 MB) across `src/` + 15 test files
 
 ---
 
@@ -35,11 +41,17 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 - [BUILD_GUIDE_WINDOWS.md](BUILD_GUIDE_WINDOWS.md): Windows build instructions and troubleshooting
 - [HOW_TO_USE.md](HOW_TO_USE.md): Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
 
-### ISR Rebuild Admission Docs ([doc/work/](doc/work/))
+### ISR Design & Audit Docs ([doc/work/](doc/work/))
+
+The `doc/work/` directory contains ~80+ ISR design documents covering the full ISR development lifecycle (Phases 0–4, Bridge Runtime, Rebuild Admission, EpochDomain migration, Shutdown State Machine, and formal compliance audits). Key entry points:
 
 - [doc/work/ISR_Rebuild_Admission_最終計画書_2026-05-23.md](doc/work/ISR_Rebuild_Admission_最終計画書_2026-05-23.md): 実装計画と受入基準（8章）
 - [doc/work/ISR_Rebuild_Admission_受入基準クローズログ_2026-05-23.md](doc/work/ISR_Rebuild_Admission_受入基準クローズログ_2026-05-23.md): 実測ログ付きのクローズ判定台帳
-- [doc/work/R11-R25_Closed判定監査表_2026-05-21.md](doc/work/R11-R25_Closed判定監査表_2026-05-21.md): R11〜R25監査の正本（8.1連携注記あり）
+- [doc/work/R11-R25_Closed判定監査表_2026-05-21.md](doc/work/R11-R25_Closed判定監査表_2026-05-21.md): R11〜R25監査の正本
+
+### Companion Analysis
+
+- [doc/sourcecode_analysis_2026-07-03.md](doc/sourcecode_analysis_2026-07-03.md): Complete source code structure analysis (246 files, 25 sections, all data flows)
 
 ### Manuals ([manual/](manual/))
 
@@ -61,166 +73,214 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 
 ```text
 ConvoPeq/
-|-- src/                      # Main C++ source (DSP, engine, UI)
-|   |-- core/                 # Snapshot/RCU foundation and thread-safe state handoff
-|   |-- AudioEngine.*         # Audio processing core
-|   |-- EQProcessor.*         # 20-band parametric EQ
-|   |-- ConvolverProcessor.*  # IR convolution processing
-|   `-- MainApplication.*     # App entry/runtime wiring
-|-- manual/                   # User manuals (EN/JP)
-|-- resources/                # App resources (icons, assets)
-|-- sampledata/               # Sample IR/EQ files
-|-- JUCE/                     # JUCE framework source (external dependency)
-|-- r8brain-free-src/         # r8brain source (external dependency)
-|-- build/                    # Generated build outputs (CMake/Ninja)
-|-- README.md
-|-- ARCHITECTURE.md
-|-- SOUND_PROCESSING.md
-|-- BUILD_GUIDE_WINDOWS.md
-`-- HOW_TO_USE.md
-```
+├── src/                       # Main C++ source (246 files, ~2.78 MB)
+│   ├── audioengine/           # ISR runtime governance, AudioEngine split TU (101 files)
+│   │   ├── AudioEngine.Processing.*.cpp  # Audio thread core (DSPCore, Block, Latency)
+│   │   ├── AudioEngine.*.cpp            # Lifecycle, Timer, Commit, Rebuild, Retire
+│   │   └── ISR*.cpp                     # Closure, HB, Shutdown, Publication, Retire, etc.
+│   ├── eqprocessor/           # 20-band EQ split TU (6 files)
+│   │   └── EQProcessor.{Core,Coefficients,Parameters,Processing,ProcessingCache}.cpp
+│   ├── convolver/             # Convolution split TU (10 files)
+│   │   └── ConvolverProcessor.{Lifecycle,Rebuild,LoaderThread,...,StateAndUI}.cpp
+│   ├── core/                  # RCU snapshot foundation (37 files)
+│   │   ├── EpochDomain.h      # 64-slot named reader domain (26 KB)
+│   │   ├── RCUReader.h, SnapshotCoordinator, GlobalSnapshot, DeletionQueue
+│   │   └── FadeEngine.h, WorkerThread, Types, CommandBuffer
+│   └── tests/                 # CTest regression suite (15 files)
+├── config/                    # JSON authority manifests (4 files)
+├── tools/                     # CodeGraph, CodeQL, CI verification scripts
+├── doc/                       # Architecture work docs (~80+ ISR design files)
+│   ├── work/                  # ISR design, audit, compliance
+│   └── sourcecode_analysis_2026-07-03.md  # Full source analysis
+├── manual/                    # User manuals (EN/JP, 4 topics each)
+├── .github/                   # CI workflows, ISR policies, scripts, prompts
+├── .vscode/                   # tasks.json (22 tasks), launch.json (5 configs), mcp.json
+├── resources/                 # App resources (icons, assets)
+├── sampledata/                # Sample IR/EQ files
+├── JUCE/                      # JUCE 8.0.12 framework source (in-tree)
+├── r8brain-free-src/          # IR resampler (external dependency)
+├── CMakeLists.txt             # Build configuration (985 lines, v0.5.0)
+├── CMakePresets.json          # 3 configure + 2 build presets
+├── build.bat                  # Primary build script (MSVC + icx)
+├── ProjectMetadata.cmake      # App name, version (v0.6.8), company
+├── README.md                  # This file
+├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.8)
+├── SOUND_PROCESSING.md        # Complete signal processing guide
+├── BUILD_GUIDE_WINDOWS.md     # Windows build instructions
+└── HOW_TO_USE.md              # Practical usage guide (REW + AutoEq)
 
 ---
 
 ## Key Features
 
-- 20-band parametric EQ (`EQProcessor`)
-- IR convolution with MKL-backed non-uniform partitioning (`ConvolverProcessor`, `MKLNonUniformConvolver`)
-- Runtime-selectable processing order (**EQ -> Convolver** or **Convolver -> EQ**)
-- Convolver phase modes: **As-Is / Mixed / Minimum** with persisted Mixed tuning (`f1`, `f2`, `tau`)
-- IR workflow with **Auto/Manual IR Length** state persistence in manual preset XML
-- Input oversampling and output conditioning (`CustomInputOversampler`, `OutputFilter`)
-- Optional soft clipping and final dither stage
-- Real-time spectrum analyzer with EQ overlay (`SpectrumAnalyzerComponent`)
-- Standalone runtime with ASIO/WASAPI/DirectSound device support and persistent device settings
+### Core DSP
+- **20-band parametric EQ** (`EQProcessor`, split TU: 6 files in `src/eqprocessor/`)
+  - TPT (Topology-Preserving Transform) State Variable Filters per band
+  - `EQBandType`: LowShelf / Peaking / HighShelf / LowPass / HighPass
+  - `EQChannelMode`: Stereo / Left / Right / Mid / Side (M/S processing)
+  - Filter structure: **Serial** (default) or **Parallel**
+  - Auto Gain Control (AGC): attack 0.2 s, release 2.0 s, smooth 0.2 s
+  - Nonlinear saturation via `fastTanh` rational approximation (no libm)
+  - `EQCoeffCache`: refcounted shared coefficient cache (v2.3)
+- **IR convolution** (`ConvolverProcessor`, split TU: 10 files in `src/convolver/`)
+  - Intel MKL **Non-Uniform Partitioned Convolution (NUC)** engine
+  - Phase modes: **As-Is / Minimum / Mixed** with tunable transition (`f1`, `f2`, `tau`)
+  - IR loading on dedicated background `LoaderThread` — no audio thread blocking
+  - RCU (Read-Copy-Update) pattern for glitch-free IR handoff
+  - Legacy `MKLNonUniformConvolver.cpp` retained for backward compatibility
+- **Runtime-selectable processing order**: EQ→Convolver, Convolver→EQ, or **Mixed (parallel)**
+- **Input oversampling**: 2×/4×/8× via `CustomInputOversampler` (IIRLike / LinearPhase presets)
+- **Output conditioning**: `OutputFilter` (HCF/LCF conditional on final processor), musical soft clipping with `fastTanh` (AVX2 vectorized), makeup gain
+
+### Noise Shaping & Dithering
+- **PsychoacousticDither**: 12th-order error-feedback (GUI: "9th-order"), MKL VSL RNG + TPDF, `kCoeffTable[6][3][12]` per sample rate and bit depth
+- **FixedNoiseShaper**: 4th-order error-feedback, psychoacoustically tuned coefficients
+- **Fixed15TapNoiseShaper**: 15th-order error-feedback
+- **Adaptive 9th-order** (`NoiseShaperLearner`, 68 KB): lattice-ladder noise shaper with CMA-ES optimization on a dedicated worker thread, RCU coefficient handoff, per-(sample rate, bit depth, mode) banks, converge in 10–80 minutes
+
+### Analysis & Metering
+- **Real-time spectrum analyzer** with EQ overlay (`SpectrumAnalyzerComponent`, 52 KB)
+- **LoudnessMeter**: ITU-R BS.1770-4/5 K-weighting (2-stage biquad), lock-free ring buffer publish to worker thread
+- **TruePeakDetector**: 4× oversampled true peak (63-tap linear phase FIR, ITU-R BS.1770-3)
+- **DC blocking**: two-stage IIR per `UltraHighRateDCBlocker` (input + post-upsampling)
+
+### I/O & Device Support
+- Standalone runtime with **ASIO / WASAPI / DirectSound** device support
+- Persistent device settings (`device_settings.xml`)
+- `AsioBlacklist.h` for known broken ASIO drivers
+
+### ISR Runtime Governance (101 files in `src/audioengine/`)
+- **RCU + atomic** parameter handoff (`publishAtomic` / `consumeAtomic` primitives)
+- **EpochDomain** (64 named reader slots) + `RCUReader` RAII pattern
+- Publication choreography: `ISRRuntimePublicationCoordinator`, `PublicationAdmission`, `PublicationExecutor`
+- Retire pipeline: `DSPLifetimeManager` → `ISRRetireRouter` → `DeletionQueue`
+- Crossfade governance: `CrossfadeAuthority` / `CrossfadeRuntime` (Authority pattern)
+- Health monitoring: `RuntimeHealthMonitor`, `RuntimePolicyEngine`
+- Deferred garbage collection: `DeferredDeletionQueue`, `RefCountedDeferred`, `DeferredFreeThread`
+
+### Build & Test Infrastructure
+- **CTest regression suite**: 16 test executables (ISR identity, publication coordinator, semantic validation, grace semantics, etc.)
 
 ---
 
 ## Audio Processing Method
 
-This section is a user-facing summary of the current block processing strategy. For subsystem-level architectural details, threading model, snapshot/RCU patterns, and component interactions, see `ARCHITECTURE.md`.
+This section is a user-facing summary of the current block processing strategy. For in-depth, code-referenced technical documentation (DSP stages, mathematical formulas, SIMD/real-time safety, code path examples), see `SOUND_PROCESSING.md`. For subsystem-level architectural details, threading model, RCU patterns, and ISR governance, see `ARCHITECTURE.md`.
 
 ### 1) Quality-Oriented Design Principles
 
 ConvoPeq is designed to preserve fidelity under real-time conditions.
 
-- **64-bit double-precision DSP** is used on the main processing path to reduce cumulative rounding error.
-- **Heavy preparation is moved off the audio thread** so high-quality processing can be used without callback-time stalls.
-- **SIMD + Intel oneMKL acceleration** are used where throughput matters, allowing more expensive processing strategies while keeping the app responsive.
-- **Transition-safe state changes** are used to avoid clicks, zipper noise, and abrupt latency jumps.
+- **64-bit double-precision DSP** throughout the main processing path — reduces cumulative rounding error across cascaded stages.
+- **All heavy preparation is moved off the audio thread**: filter coefficient computation (`std::sin`/`std::cos`), IR loading/resampling, noise shaper coefficient learning (CMA-ES), and state validation occur on message/worker threads.
+- **SIMD (AVX2/FMA) + Intel oneMKL acceleration** are used where throughput matters: `scaleBlockFallback`, `softClipBlockAVX2`, FIR convolution in oversampling stages, MKL DFTI for IR convolution, VSL RNG for dither generation.
+- **Transition-safe state changes**: all parameter handoff uses atomic publish/consume or RCU (Read-Copy-Update) with `EpochDomain` — no clicks, zipper noise, or abrupt latency jumps.
 
 ### 2) Block Entry and State Snapshot
 
-For each callback block, `AudioEngine` obtains a snapshot of the current global DSP state via `SnapshotCoordinator`, capturing all runtime flags (bypass/order/analyzer source/quality options), parameter sets, and processor states in a thread-safe, read-only aggregate. This snapshot is assembled from atomic reads and pre-computed shared state (RCU-style pattern); the block is then processed using only this snapshot, ensuring no blocking operations or parameter races occur during audio execution.
+For each callback block, `AudioEngine::processBlockDouble()` enters the audio thread with:
+
+```cpp
+AudioCallbackRuntimeScope (lifecycleToken + firewallToken)
+ScopedNoDenormals              // flush denormals to zero
+ThreadRole::AudioRealtime      // numeric policy verification
+```
+
+The `ProcessingState` snapshot is assembled from atomic reads and RCU-published shared state at block start. The entire block is then processed using only this **read-only, consistent snapshot** — no blocking operations, no parameter races, no allocation.
 
 ### 3) Main DSP Chain
 
-Typical logical flow:
+Typical logical flow (exact sequence from `SOUND_PROCESSING.md`):
 
-`Input -> input conditioning -> oversampling (optional) -> [EQ <-> Convolver] -> output filter -> soft clipping (optional) -> dither -> Output`
+```
+Input → Headroom Gain → DC Block → Oversampling (optional) →
+[EQ ↔ Convolver] (order selectable, or Mixed parallel) →
+OutputFilter (HCF/LCF or HPF/LPF conditional) →
+Soft Clip (musical, fastTanh, AVX2) → Makeup Gain →
+Dither/Noise Shaping → Downsampling (if OS) → Output
+```
 
-Notes:
-
-- **Order is runtime-selectable** between EQ and convolver.
-- Oversampling factor depends on runtime configuration.
-- Main processing uses double precision.
+- **Order is runtime-selectable**: EQ→Convolver, Convolver→EQ, or **Mixed** (parallel processing, blended by α mix ratio).
+- Oversampling factor: 1×/2×/4×/8× (IIRLike or LinearPhase preset).
+- Input headroom gain and output makeup gain are AVX2-optimized, gain values pre-converted to linear in the message thread (no `std::pow` on audio thread).
+- Convolver input trim is applied only when processing order is **EQ→Convolver** and both processors are active.
 
 ### 4) Convolution Strategy
 
-`ConvolverProcessor` uses asynchronous IR preparation and a safe handoff model:
+`ConvolverProcessor` (split TU, 10 files in `src/convolver/`) uses asynchronous IR preparation and RCU-based safe handoff:
 
-- IR load/rebuild is handled off the audio thread.
-- Rebuild requests are debounced to reduce burst load.
-- Old/new states are transitioned with crossfade-aware paths.
-- Latency retargeting is hysteresis-controlled to avoid frequent retriggers.
+- **IR load/rebuild** is handled by a dedicated `LoaderThread` (`std::thread`) — audio thread never blocks on file I/O or IR resampling.
+- **Rebuild requests are debounced** (`REBUILD_DEBOUNCE_DEFAULT_MS`) to reduce burst load from rapid parameter changes.
+- **RCU handoff**: new IR state atomically swapped; audio thread continues with old IR without interruption. Old engines retired via `ISRRetireRouter` → `DeletionQueue`.
+- **Latency retargeting** is hysteresis-controlled to avoid frequent retriggers.
+- User-facing controls are debounced to avoid unnecessary rebuild pressure during UI dragging.
 
-User-facing controls for expensive convolver updates are also debounced to avoid unnecessary rebuild pressure while dragging.
+Convolution algorithm: **Intel MKL NUC (Non-Uniform Partitioned Convolution)** with non-uniform block partitioning (shorter blocks near IR start for low latency, longer blocks toward the tail for efficiency).
 
-Convolution quality notes:
-
-- The convolution backend uses a **non-uniform partitioned convolution** strategy, which is a practical way to keep long IR processing efficient while maintaining low real-time cost.
-- IR preparation can include **resampling** and **phase-mode dependent preprocessing**, allowing the runtime path to use already-prepared data.
-- Transition management is designed to keep IR changes smooth rather than abruptly swapping processing state.
-
-Convolver control notes:
-
-- Phase mode supports **As-Is / Mixed / Minimum**.
-- Mixed mode exposes tunable transition controls (`f1`, `f2`, `tau`).
-- IR length supports both Auto and Manual operation; manual preset XML now stores both the target length and Auto/Manual intent.
+Phase modes: **As-Is / Minimum / Mixed**. Mixed mode blends linear-phase (low frequencies) with minimum-phase (high frequencies) per `mixedTransitionStartHz` / `mixedTransitionEndHz` / `tau`.
 
 ### 5) EQ Strategy
 
-`EQProcessor` applies per-band parametric filtering in real time. EQ response visualization and coefficient updates are handled by `EQEditProcessor` on the message/worker thread; the Audio Thread uses only pre-computed, read-only coefficient tables obtained from the current snapshot.
+`EQProcessor` (split TU, 6 files in `src/eqprocessor/`) applies per-band parametric filtering in real time:
 
-EQ quality notes:
-
-- The EQ is implemented as a **20-band parametric stage**, intended for precise tonal shaping.
-- Parameter edits (`EQEditProcessor`) are performed asynchronously on a non-real-time thread; audio computation uses RCU-style snapshots of the latest validated coefficients.
-- Display computation is separated from audio computation so the audible path remains focused on deterministic DSP work.
-- Processing order with the convolver is selectable, which makes the EQ usable either as a corrective stage before convolution or as a tonal finishing stage after convolution.
+- **20-band TPT (Topology-Preserving Transform) SVF** based on Vadim Zavalishin's "The Art of VA Filter Design" — smooth parameter modulation, low noise.
+- **RCU-based coefficient handoff**: UI/worker thread creates new `EQState` / `BandNode`, publishes via `publishAtomic(currentStateBits, ...)`. Audio thread loads via `loadCurrentState(acquire)`.
+- **EQCoeffCache**: refcounted shared coefficient cache — multiple snapshots share coefficients when parameters are identical.
+- **Nonlinear saturation**: `fastTanh` rational polynomial approximation applied per-sample within the SVF loop (no `libm`, branchless for |x| < CLIP_THRESHOLD).
+- **AGC** (Auto Gain Control): envelope-tracking automatic gain adjustment with precomputed attack/release/smooth coefficient lookup tables.
+- **M/S (Mid-Side) processing**: supports per-band Left/Right/Mid/Side channel modes via `kFilterChannels=4`.
 
 ### 6) Oversampling, Output Conditioning, and Finalization
 
-Additional quality-oriented stages are applied around the core EQ/convolution chain:
+Additional quality-oriented stages applied around the core EQ/convolution chain:
 
-- **Input oversampling** can be used to improve the behavior of nonlinear or high-frequency-sensitive stages.
-- **Output filtering** provides controlled final conditioning.
-- **Optional soft clipping** is used as a controlled output-stage protection/tone-shaping step.
-- **Final dither/noise shaping** is available to make the final output stage more robust when reducing effective resolution.
-
-These stages are part of the overall sound-quality strategy, not just utility add-ons.
-
-Gain-staging notes:
-
-- Input headroom and output makeup are mode-aware and clamped by processing topology.
-- Convolver input trim is applied only when processing order is **EQ -> Convolver** and both processors are active.
-- Output makeup is applied before optional soft clipping.
+- **Input oversampling** (`CustomInputOversampler`): 2×/4×/8× via multi-stage Kaiser-windowed FIR interpolation, AVX2/FMA SIMD, denormal flush. DC blocker applied after upsampling.
+- **Output filtering** (`OutputFilter`): conditional on final processor — HCF+LCF when convolver is last (4th-order Butterworth/LR, 18–22 kHz), or HPF+LPF when EQ is last (Butterworth 2nd, 19–24 kHz). All coefficients precomputed in message thread; audio thread performs only biquad SOS evaluation (no `libm`).
+- **Soft clipping** (`softClipBlockAVX2`): piecewise musical clip (linear → knee `t²(3−2t)` → `fastTanh` saturation), AVX2 vectorized (4 doubles/IP), `prevSampleInOut` scalar feedback across blocks. Anti-inter-sample-peak protection via smooth knee transition.
+- **Dither/noise shaping**: 4 types (Psychoacoustic 12th-order / Fixed 4th-order / Fixed 15th-order / Adaptive 9th-order with CMA-ES). All TPDF dither, 64-byte aligned, lock-free audio thread path. RNG ring buffer pre-filled, worker thread refills.
 
 ### 7) Analyzer Path
 
 Analyzer data is decoupled from output audio:
 
-- Audio thread pushes analyzer source data to FIFO.
-- UI timer reads FIFO and runs FFT visualization.
+- Audio thread pushes analyzer source data to `LockFreeRingBuffer` (SPSC, 64-byte aligned, atomic head/tail).
+- UI timer reads FIFO and runs FFT visualization (`SpectrumAnalyzerComponent`).
 - Analyzer update rate is adaptive by state (active/disabled/hidden) to limit UI-thread load.
 
-This separation ensures that visualization quality does not compromise audio-thread safety.
+This separation ensures visualization quality does not compromise audio-thread safety.
 
 ### 8) Latency Reporting
 
-Latency display is sourced from a unified breakdown model:
+Latency display uses a unified breakdown model from `AudioEngine::getCurrentLatencyBreakdown()`:
 
-- Oversampling latency (base-rate estimated)
-- Convolver algorithm latency
-- Convolver IR peak latency
+- **Oversampling latency**: base-rate estimated from FIR tap counts per stage (IIRLike: 511/127/31, LinearPhase: 1023/255/63).
+- **Convolver algorithm latency** + **IR peak latency**: reported from `ConvolverProcessor::getLatencyBreakdown()`.
+- **SoftClip local OS latency**: 15 base-rate samples (31-tap Halfband, 2 passes).
+- All values reported in both `ms` and `samples` from `totalLatencyBaseRateSamples`.
 
-The main window renders both `ms` and `samples` from the same `totalLatencyBaseRateSamples` source to keep display values numerically consistent.
+### 9) State Persistence
 
-### 9) State Persistence (Auto Save vs Manual Preset)
+Two persistence paths:
 
-ConvoPeq currently uses two persistence paths:
-
-- **Auto-save (`device_settings.xml`)**
-  - Device state plus a compact set of runtime settings (`ditherBitDepth`, oversampling factor/type, input headroom, output makeup).
-- **Manual preset XML (Save/Load Preset in main window)**
-  - Full `AudioEngine` state plus `EQ` and `Convolver` child states.
-  - Includes convolver phase/mixed parameters and Auto/Manual IR-length state.
+- **Auto-save** (`device_settings.xml`): device state + compact runtime settings (dither bit depth, oversampling factor/type, input headroom, output makeup).
+- **Manual preset XML** (Save/Load Preset): full `AudioEngine` + `EQ` + `Convolver` state including phase/mixed parameters, Auto/Manual IR-length state.
 
 ### 10) Real-Time Safety Rules
 
-The callback path avoids:
+The audio callback path avoids:
 
-- file I/O,
-- blocking locks/waits,
-- heavy runtime allocations,
-- UI thread interactions.
+- file I/O, blocking locks/waits,
+- heavy runtime allocations (`malloc`/`new`/`resize`),
+- `libm` calls (`std::sin`/`std::cos`/`std::pow`/`std::log`/`std::exp`),
+- exceptions, UI thread interactions,
+- `std::condition_variable` waits.
 
-Buffers and heavy state are prepared outside the callback whenever possible.
+Buffers and heavy state are prepared outside the callback (`prepareToPlay()`). Old resources are garbage collected asynchronously (`DeferredDeletionQueue`, `RefCountedDeferred`, `DeferredFreeThread`).
 
-In practice, this means ConvoPeq aims for both:
+In practice, ConvoPeq aims for both:
 
-- **high sound quality**, through double-precision DSP, long-form convolution support, oversampling, and careful output conditioning, and
-- **stable real-time behavior**, through asynchronous preparation, debounce, staged activation, and callback-safe processing boundaries.
+- **high sound quality**: double-precision DSP, long-form convolution (MKL NUC), oversampling, TPT SVF EQ, psychoacoustic noise shaping, ITU-R BS.1770 metering, and
+- **stable real-time behavior**: asynchronous preparation, debounce, RCU state handoff, ISR runtime governance, and callback-safe processing boundaries.
 
 ---
 
@@ -232,48 +292,78 @@ In practice, this means ConvoPeq aims for both:
 
 ## Build Requirements
 
-1. **Visual Studio 2022** with Desktop C++ workload
+1. **Visual Studio 2022 (17.x) or 2026 (18.x)** with *Desktop development with C++* workload
+   - Alternatively: **Intel icx** compiler (oneAPI 2026.0) — no VS required for icx mode
 2. **CMake 3.22+**
-3. **Ninja**
-4. **Intel oneAPI Base Toolkit** (MKL)
-5. Local `JUCE/` directory (JUCE 8.0.12 expected)
+3. **Ninja** (build system, used via `Ninja Multi-Config` generator)
+4. **Intel oneAPI Base Toolkit** (MKL) — required for both MSVC and icx
+5. Local `JUCE/` directory (JUCE 8.0.12 expected, containing `JUCE/CMakeLists.txt`)
+
+For full instructions including PGO, icx compiler flags, CTest suite, ASan, and troubleshooting, see `BUILD_GUIDE_WINDOWS.md`.
 
 ---
 
 ## Quick Build
 
-From the project root, run the following commands to build:
+**Recommended**: use `build.bat` from the repository root:
 
 ```cmd
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+build.bat Release              # MSVC Release (default)
+build.bat Debug                # MSVC Debug
+build.bat Release icx          # Intel icx Release
+build.bat Debug   icx          # Intel icx Debug
+build.bat Release clean        # Clean + build
+build.bat Release pgo-gen      # MSVC PGO instrumentation
+build.bat Release pgo-use     # MSVC PGO optimization
+```
+
+What `build.bat` does:
+
+1. Auto-detects Visual Studio via `vswhere` (or falls back to known VS17/VS18 paths)
+2. Calls `vcvarsall.bat x64` (MSVC mode) — skipped for icx
+3. Calls Intel `setvars.bat intel64` (both MSVC and icx)
+4. Configures CMake with `Ninja Multi-Config` generator
+5. Builds selected configuration
+6. Retries once on RC1109 (common icx first-build issue)
+
+**Output binaries:**
+
+| Compiler | Build Dir | Binary |
+|----------|-----------|--------|
+| MSVC Debug | `build/` | `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe` |
+| MSVC Release | `build/` | `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` |
+| icx Debug | `build-icx/` | `build-icx\ConvoPeq_artefacts\Debug\ConvoPeq.exe` |
+| icx Release | `build-icx/` | `build-icx\ConvoPeq_artefacts\Release\ConvoPeq.exe` |
+
+MSVC and icx use **completely separate build directories** — both can be kept simultaneously.
+
+### Manual Build (MSVC Equivalent)
+
+```cmd
+call "C:\Program Files\Microsoft Visual Studio\[2022|2026]\VC\Auxiliary\Build\vcvarsall.bat" x64
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
 cmake -S . -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 cmake --build build --config Debug
 ```
 
-**Output binaries:**
-
-- Debug: `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
-- Release: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
-
-**PowerShell (to ensure environment variables are passed in the same process, use `cmd.exe /d /c` to run all commands together):**
-
-```powershell
-cmd.exe /d /c "call `"%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat`" x64 && call `"%ProgramFiles(x86)%\Intel\oneAPI\setvars.bat`" intel64 && cmake -S . -B build -G `"Ninja Multi-Config`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
-```
-
-For more details, see `BUILD_GUIDE_WINDOWS.md`.
+For `CMakePresets.json` usage, VS Code task reference, CTest suite commands, and full icx configuration, see `BUILD_GUIDE_WINDOWS.md`.
 
 ## Notes
 
-- Standalone app target (not a plugin target)
+- Standalone app target (not a plugin target) — **Windows 11 x64 only**
+- Default daily workflow: `build.bat` or VS Code tasks (22 tasks in `.vscode/tasks.json`)
+- MSVC and icx build directories are fully isolated (`build/` vs `build-icx/`) — can coexist
+- PGO (Profile-Guided Optimization) is MSVC-only; not supported for icx
+- RNG ring buffer for dither is pre-filled by worker thread — no RNG generation on audio thread
+- All coefficients (EQ SVF, filter biquad, AGC tables, noise shaper) precomputed in message thread
+- 16 CTest regression tests available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
 - Do not modify external dependency trees directly:
   - `JUCE/`
   - `r8brain-free-src/`
 
 ## License
 
-- **ConvoPeq**: Copyright (c) lonewolf-jp (CC BY-NC 4.0)
+- **ConvoPeq**: Copyright (c) 2024-2025 lonewolf-jp — source available, see `ProjectMetadata.cmake`
 - **JUCE**: GPLv3 / Commercial
 - **r8brain-free-src**: MIT
 - **Intel oneMKL**: Intel Simplified Software License

@@ -1,20 +1,28 @@
 # ConvoPeq clang-tidy config
+#
+# 有効なチェックのみを明示的に指定。負のグロブ（-*）でカテゴリ全体を無効化し、
+# 必要な個別チェックのみを有効化するアプローチを取る。
+# clang-tidy のチェックリストは左から右に評価され、否定パターンが肯定パターンより優先される。
+#
+# 有効化されているチェック:
+#   - bugprone-use-after-move       : ムーブ後アクセス検出
+#   - bugprone-branch-clone         : 分岐クローン検出
+#   - clang-analyzer-core.*         : コア解析（未初期化読み取り、NULL参照外し等）
+#   - clang-analyzer-cplusplus.*    : C++ new/delete リーク検出
+#   - clang-analyzer-unix.Malloc    : malloc/free リーク検出
 
-Checks: '-bugprone-*,-performance-*,-modernize-*,-readability-*,-cppcoreguidelines-*,-hicpp-*,-clang-analyzer-*,-altera-*,-fuchsia-*,-google-*,-llvm-*,-mpi-*,-objc-*,-openmp-*,-zircon-*,-cppcoreguidelines-owning-memory,-cppcoreguidelines-pro-type-vararg,-readability-identifier-naming,bugprone-use-after-move,bugprone-branch-clone,clang-analyzer-core.CallAndMessage,clang-analyzer-core.NullDereference,clang-analyzer-cplusplus.NewDelete,clang-analyzer-cplusplus.NewDeleteLeaks,clang-analyzer-unix.Malloc'
+Checks: >
+    -*,
+    bugprone-use-after-move,
+    bugprone-branch-clone,
+    clang-analyzer-core.CallAndMessage,
+    clang-analyzer-core.NullDereference,
+    clang-analyzer-cplusplus.NewDelete,
+    clang-analyzer-cplusplus.NewDeleteLeaks,
+    clang-analyzer-unix.Malloc
 
 FormatStyle: file
 HeaderFilterRegex: '.*/src/.*'
 
 CheckOptions:
-    - { key: readability-identifier-naming.ClassCase, value: CamelCase }
-    - { key: readability-identifier-naming.StructCase, value: CamelCase }
-    - { key: readability-identifier-naming.FunctionCase, value: camelBack }
-    - { key: readability-identifier-naming.VariableCase, value: camelBack }
-    - { key: readability-identifier-naming.MemberCase, value: camelBack }
-    - { key: readability-identifier-naming.ConstantCase, value: UPPER_CASE }
-    - { key: readability-identifier-naming.EnumCase, value: CamelCase }
-    - { key: readability-identifier-naming.EnumConstantCase, value: UPPER_CASE }
-    - { key: cppcoreguidelines-init-variables.CheckArrays, value: 'true' }
-    - { key: cppcoreguidelines-init-variables.CheckPointers, value: 'true' }
-    - { key: bugprone-unhandled-exception-at-new.Exceptions, value: 'std::bad_alloc,std::exception' }
     - { key: bugprone-use-after-move.CheckAfterMove, value: 'true' }

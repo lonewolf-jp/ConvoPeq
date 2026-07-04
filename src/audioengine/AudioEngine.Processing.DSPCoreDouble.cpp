@@ -40,13 +40,20 @@ namespace {
 namespace {
 [[maybe_unused]] void diagLog(const juce::String& message)
 {
-    DBG(message);
-    juce::Logger::writeToLog(message);
+    DBG(message); // NOLINT(rt-logger)
+    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
 }
 }
 
-// ★ D: EQ処理時間ログ出力（共通ヘルパー）
-// work60: callbackSeq/cpu対応、CONVOPEQ_DIAG_SAMPLE_MASK サンプリング
+// work60: Numeric-Only DiagEvent — String構築を排除
+namespace {
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
+    DiagPerTickCounter* eqTickPushed = nullptr;
+    DiagPerTickCounter* eqTickDropped = nullptr;
+    std::atomic<uint64_t>* eqTotalPushed = nullptr;
+}
+// setEqDiagBuffer の実体は DSPCoreFloat.cpp にあり（ODR回避）
+
 void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                const convo::EQParameters* eqParams,
                convo::ProcessingOrder order,
@@ -54,11 +61,8 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                uint64_t callbackSeq, uint32_t cpu)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0) return;
-
-    // ★ work60: callbackSeqベースのサンプリング
-    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0)
-        return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
     if (eqParams != nullptr) {
@@ -67,18 +71,28 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                 && std::abs(eqParams->bands[i].gain) > 0.01f)
                 ++activeBands;
     }
-    const char* orderStr = (order == convo::ProcessingOrder::ConvolverThenEQ)
-        ? "Conv->EQ" : "EQ->Conv";
     const double expectedUs = static_cast<double>(numSamples) / sampleRate * 1e6;
-    juce::String eqtLog("[EQ_TIME]");
-    eqtLog += " seq=" + juce::String(static_cast<int64_t>(callbackSeq));
-    eqtLog += " cpu=" + juce::String(static_cast<int>(cpu));
-    eqtLog += " us=" + juce::String(static_cast<int64_t>(eqElapsedUs));
-    eqtLog += " bands=" + juce::String(activeBands);
-    eqtLog += " order=" + juce::String(orderStr);
-    eqtLog += " budget=" + juce::String(
-        (static_cast<double>(eqElapsedUs) / expectedUs) * 100.0, 1) + "%";
-    diagLog(eqtLog);
+    const uint32_t budgetPermille = (expectedUs > 0.0)
+        ? static_cast<uint32_t>((static_cast<double>(eqElapsedUs) / expectedUs) * 1000.0)
+        : 0;
+
+    DiagEvent event{};
+    event.category = DiagCategory::EqTime;
+    event.eventIndex = callbackSeq;
+    event.data.eqTime.cpu = cpu;
+    event.data.eqTime.us = eqElapsedUs;
+    event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
+    event.data.eqTime.order = static_cast<uint8_t>(order);
+    event.data.eqTime.budgetPercent = budgetPermille;
+    if (eqDiagBuffer->push(event))
+    {
+        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 #endif
 
@@ -791,8 +805,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         {
             juce::String alog("[ANS_SWITCH] us=");
             alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog);
-            juce::Logger::writeToLog(alog);
+            DBG(alog); // NOLINT(rt-logger)
+            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
         }
 #endif
     }

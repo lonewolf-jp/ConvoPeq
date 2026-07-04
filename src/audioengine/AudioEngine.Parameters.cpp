@@ -501,6 +501,16 @@ void AudioEngine::setSoftClipEnabled(bool enabled)
     return convo::consumeAtomic(softClipEnabled, std::memory_order_acquire);
 }
 
+void AudioEngine::setAudioThreadPriorityMode(bool useMmcss)
+{
+    convo::publishAtomic(useMmcssPriority, useMmcss, std::memory_order_release);
+}
+
+[[nodiscard]] bool AudioEngine::isAudioThreadPriorityMmcss() const noexcept
+{
+    return convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire);
+}
+
 void AudioEngine::setSaturationAmount(float amount)
 {
     const float clamped = juce::jlimit(0.0f, 1.0f, amount);

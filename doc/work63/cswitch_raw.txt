@@ -1,0 +1,92 @@
+BeginHeader
+   UnknownEvent/Classic,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                              EventGuid, Type, Level, Version, MofLength
+   InvalidEvent/Classic,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                              EventGuid, Type, Level, Version, MofLength
+   UnknownEvent/Crimson,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                             ProviderId,     Id,   Task, Opcode, Version, Channel, Level,            Keyword, UserDataLength
+   InvalidEvent/Crimson,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                             ProviderId,     Id,   Task, Opcode, Version, Channel, Level,            Keyword, UserDataLength
+             GroupMasks,  TimeStamp, Index, Mask
+          GroupMasksEnd,  TimeStamp, Index, Mask
+     EtwInternalVersion,  TimeStamp, Version
+              BuildInfo,  TimeStamp, InstallDate, BuildLab, ProductName
+            SystemPaths,  TimeStamp, SystemDirectory, SystemWindowsDirectory
+          UnknownVolume,  TimeStamp, NtPath
+          VolumeMapping,  TimeStamp, NtPath, DosPath
+            LogicalDisk,  TimeStamp, StartingOffset, PartitionSize, DiskNumber, DriveType, DriveLetter, PartitionNumber, SectorsPerCluster, BytesPerSector, FreeClusters, TotalClusters, FileSystemType
+           PhysicalDisk,  TimeStamp, DiskNumber, BytesPerSector, SectorsPerTrack, TracksPerCylinder, Cylinders, SCSIPortNumber, SCSIPathId, SCSITargetId, SCSILun, Manufacturer, PartitionCount, WriteCacheEnabled, BootDriveLetter
+         PhysicalDiskEx,  TimeStamp, DiskNumber, DiskType
+              MachineId,  TimeStamp, MachineGuid
+FirstReliableEventTimeStamp, TimeStamp
+FirstReliableCSwitchEventTimeStamp, TimeStamp
+                P-Start,  TimeStamp,     Process Name ( PID),  ParentPID,  SessionID,          UniqueKey, DirectoryTableBase, Flags, UserSid, Command Line, Package Full Name, Package Relative Application Id
+                  P-End,  TimeStamp,     Process Name ( PID),  ParentPID,  SessionID,          UniqueKey,     Status, DirectoryTableBase, Flags, UserSid, Command Line, Package Full Name, Package Relative Application Id
+              P-DCStart,  TimeStamp,     Process Name ( PID),  ParentPID,  SessionID,          UniqueKey, DirectoryTableBase, Flags, UserSid, Command Line, Package Full Name, Package Relative Application Id
+                P-DCEnd,  TimeStamp,     Process Name ( PID),  ParentPID,  SessionID,          UniqueKey, DirectoryTableBase, Flags, UserSid, Command Line, Package Full Name, Package Relative Application Id
+               P-Zombie,  TimeStamp,     Process Name ( PID),  ParentPID,  SessionID,          UniqueKey,     Status, DirectoryTableBase, Flags, UserSid, Command Line, Package Full Name, Package Relative Application Id
+                T-Start,  TimeStamp,     Process Name ( PID),   ThreadID,          StackBase,         StackLimit,         UsrStkBase,          UsrStkLmt,            TebBase, SubProcessTag, BasePri, PagePri, IoPri, Flags,            Image!Function
+                  T-End,  TimeStamp,     Process Name ( PID),   ThreadID,          StackBase,         StackLimit,         UsrStkBase,          UsrStkLmt,            TebBase, SubProcessTag, BasePri, PagePri, IoPri, Flags,            Image!Function
+              T-DCStart,  TimeStamp,     Process Name ( PID),   ThreadID,          StackBase,         StackLimit,         UsrStkBase,          UsrStkLmt,            TebBase, SubProcessTag, BasePri, PagePri, IoPri, Flags,            Image!Function
+                T-DCEnd,  TimeStamp,     Process Name ( PID),   ThreadID,          StackBase,         StackLimit,         UsrStkBase,          UsrStkLmt,            TebBase, SubProcessTag, BasePri, PagePri, IoPri, Flags,            Image!Function
+               VTLEntry,  TimeStamp,     Process Name ( PID),   ThreadID, VTLEntryOperation, VTLEntryReason
+                VTLExit,  TimeStamp,     Process Name ( PID),   ThreadID, VTLEntryOperation, VTLEntryReason
+                I-Start,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr,   Checksum, TimeDateStamp,        DefaultBase, FileName, Relocated, NT FileName
+                  I-End,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr,   Checksum, TimeDateStamp,        DefaultBase, FileName, Relocated, NT FileName
+              I-DCStart,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr,   Checksum, TimeDateStamp,        DefaultBase, FileName, Relocated, NT FileName
+                I-DCEnd,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr,   Checksum, TimeDateStamp,        DefaultBase, FileName, Relocated, NT FileName
+    ImageLoadDependence,  TimeStamp,     Process Name ( PID),           BaseAddr, FileName, ParentBaseAddress64, ParentFileName, LoadReason
+           VirtualAlloc,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr, Flags
+            VirtualFree,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr, Flags
+    VirtualAllocDCStart,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr, Flags
+      VirtualAllocDCEnd,  TimeStamp,     Process Name ( PID),           BaseAddr,            EndAddr, Flags
+                MapFile,  TimeStamp,     Process Name ( PID),        VirtualAddr,       Size,   ByteOffset, FileName
+              UnmapFile,  TimeStamp,     Process Name ( PID),        VirtualAddr,       Size,   ByteOffset, FileName
+         MapFileDCStart,  TimeStamp,     Process Name ( PID),        VirtualAddr,       Size,   ByteOffset, FileName
+           MapFileDCEnd,  TimeStamp,     Process Name ( PID),        VirtualAddr,       Size,   ByteOffset, FileName
+          SessionCreate,  TimeStamp,  SessionID,          UniqueKey
+    SessionRundownDCEnd,  TimeStamp,  SessionID,          UniqueKey
+  SessionRundownDCStart,  TimeStamp,  SessionID,          UniqueKey
+          SessionDelete,  TimeStamp,  SessionID,          UniqueKey
+        GrowKernelStack,  TimeStamp,     Process Name ( PID),   ThreadID,          StackBase,         StackLimit
+                  T-GUI,  TimeStamp,     Process Name ( PID),   ThreadID,          StackBase,         StackLimit
+       HeapRangeRundown,  TimeStamp,     Process Name ( PID),         HeapHandle,      Flags
+        HeapCreateRange,  TimeStamp,     Process Name ( PID),   ThreadID,         HeapHandle,       Size,      Flags
+       HeapRangeReserve,  TimeStamp,     Process Name ( PID),   ThreadID,         HeapHandle,        VirtualAddr,       Size
+       HeapRangeRelease,  TimeStamp,     Process Name ( PID),   ThreadID,         HeapHandle,        VirtualAddr,       Size
+       HeapRangeDestroy,  TimeStamp,     Process Name ( PID),   ThreadID,         HeapHandle
+      HeapCreateRundown,  TimeStamp,     Process Name ( PID),         HeapHandle,           BaseAddr,       Size
+             ThreadName,  TimeStamp,     Process Name ( PID),   ThreadID, ThreadName
+       KernelDebugEvent,  TimeStamp,     Process Name ( PID),   ThreadID, Reason
+         ProcessPerfCtr,  TimeStamp,     Process Name ( PID),    Peak WS,    Peak VM,    Peak PF,    Peak PP,   Peak NPP
+  ProcessPerfCtrRundown,  TimeStamp,     Process Name ( PID),    Peak WS,    Peak VM,    Peak PF,    Peak PP,   Peak NPP,     End WS,     End VM,     End PF,     End PP,    End NPP,  # Handles, #PageFault
+                CSwitch,  TimeStamp, New Process Name ( PID),    New TID, NPri, NQnt, TmSinceLast, WaitTime, Old Process Name ( PID),    Old TID, OPri, OQnt,        OldState,      Wait Reason, Swapable, InSwitchTime, CPU, IdealProc,  OldRemQnt, NewPriDecr, PrevCState, OldThrdBamQosLevel, NewThrdBamQosLevel
+                ImageId,  TimeStamp,     Process Name ( PID),           BaseAddr,  ImageSize, TimeDateStamp, OrigFileName
+             DbgId/None,  TimeStamp,     Process Name ( PID),           BaseAddr
+              DbgId/Bin,  TimeStamp,     Process Name ( PID),           BaseAddr,  ImageSize, TimeDateStamp,   Checksum, OrigFileName
+              DbgId/Dbg,  TimeStamp,     Process Name ( PID),           BaseAddr,  ImageSize, TimeDateStamp,   Checksum, OrigFileName
+             DbgId/NB10,  TimeStamp,     Process Name ( PID),           BaseAddr,  Signature,        Age, Pdb
+             DbgId/RSDS,  TimeStamp,     Process Name ( PID),           BaseAddr,                              Signature,        Age, Pdb
+           DbgId/ILRSDS,  TimeStamp,     Process Name ( PID),           BaseAddr,                              Signature,        Age, Pdb
+        DbgId/RSDS(Tmf),  TimeStamp,                              Signature,        Age, Pdb
+       NetworkInterface,  TimeStamp, IFIndex,                                 IFGuid,                               NTWKGuid,                         PhysicalAddr,   MTU,  Type, TunnelType,           Medium,   PhysicalMedium,           AccessType, DirectionType,   HwdIF, FilterIF, ConnAvail,    Auth,   Media, NotPaused,    Power, NotEndPointIF,     OperStatus, AdminStatus, ConnectState, ConnectionType, TransmitSpeed, ReceiveSpeed,   InOctets, InUcastPkts, InNUcastPkts, InDiscards,   InErrors, InUnknownProtos, InUcastOctets, InMulticastOctets, InBroadcastOctets,  OutOctets, OutUcastPkts, OutNUcastPkts, OutDiscards,  OutErrors, OutUcastOctets, OutMulticastOctets, OutBroadcastOctets,    OutQLen, Alias, Description
+            FileVersion,  TimeStamp,  ImageSize, TimeDateStamp, OrigFileName, FileDescription, FileVersion, BinFileVersion, VerLanguage, ProductName, CompanyName, ProductVersion, FileId, ProgramId
+                   Mark,  TimeStamp, Mark
+              AsyncMark,  TimeStamp, Mark
+              MarkEvent,  TimeStamp,     Type, Level,     TranId,    AppId,     OpId, Text
+              Interrupt,  TimeStamp, ElapsedTime, CPU, Vector, MessageIndex,     Status,        ServiceAddr,            Image!Function
+                    DPC,  TimeStamp, ElapsedTime, CPU,        ServiceAddr,            Image!Function
+                 DPCTmr,  TimeStamp, ElapsedTime, CPU,        ServiceAddr,            Image!Function
+           SysCallEnter,  TimeStamp,     Process Name ( PID),   ThreadID,        ServiceAddr,            Image!Function
+            SysCallExit,  TimeStamp,     Process Name ( PID),   ThreadID,     Status
+      SampledProfileNmi,  TimeStamp,     Process Name ( PID),   ThreadID,           PrgrmCtr, CPU, ThreadStartImage!Function,            Image!Function, Interrupts Masked
+         SampledProfile,  TimeStamp,     Process Name ( PID),   ThreadID,           PrgrmCtr, CPU, ThreadStartImage!Function,            Image!Function, Count, SampledProfile type
+ProfileFreq-SetInterval,  TimeStamp,     Process Name ( PID),   ThreadID, Source, New Interval, Old Interval
+    ProfileFreq-DCStart,  TimeStamp,     Process Name ( PID),   ThreadID, Source, New Interval, Old Interval
+      ProfileFreq-DCEnd,  TimeStamp,     Process Name ( PID),   ThreadID, Source, New Interval, Old Interval
+                  Stack,  TimeStamp,   ThreadID, No.,            Address,            Image!Function
+    StackWalkDef/Create,  TimeStamp,                Key,        VirtualAddr ...
+    StackWalkDef/Delete,  TimeStamp,                Key,        VirtualAddr ...
+   StackWalkDef/Rundown,  TimeStamp,                Key,        VirtualAddr ...
+    StackWalkRef/Kernel,  TimeStamp,   ThreadID, CPU,                Key
+      StackWalkRef/User,  TimeStamp,   ThreadID, CPU,                Key
+          WinSAT_WinSPR,  TimeStamp, State, Xml
+         WinSAT_Metrics,  TimeStamp, State, Xml
+    WinSAT_SystemConfig,  TimeStamp, State, Xml
+EndHeader

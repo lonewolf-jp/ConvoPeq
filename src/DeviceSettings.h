@@ -40,6 +40,9 @@ public:
     static void saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine);
     static void loadSettings (juce::AudioDeviceManager& deviceManager, AudioEngine& engine);
 
+    // ★ [work63] オーディオスレッド開始前に設定を先読み（デバイス初期化不要）
+    static void preloadThreadPriorityMode (AudioEngine& engine);
+
     static void applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist);
 
 private:
@@ -77,6 +80,9 @@ private:
 
     juce::Label outputMakeupLabel;
     juce::TextEditor outputMakeupEditor;
+
+    juce::ToggleButton audioThreadPriorityToggle;
+
     juce::String gainDisplaySignature;
     juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
 

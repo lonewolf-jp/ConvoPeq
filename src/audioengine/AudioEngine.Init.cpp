@@ -58,6 +58,14 @@ void AudioEngine::initialize()
     m_fadeDoubleBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
 
     // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
+
+    // ★ work60: モジュール別 DiagEvent リングバッファポインタを初期化
+    //   DSPCoreFloat/DSPCoreDouble の logEqTime → eqDiagBuffer
+    //   ConvolverProcessor.Runtime の convDiagBuffer
+    setEqDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
+                    rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
+    setConvDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
+                      rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
     // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
     // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
     uiConvolverProcessor.prepareToPlay(48000.0, 512);
@@ -72,12 +80,30 @@ void AudioEngine::initialize()
     timerPeriodMs_ = 100;
 
     initWorkerThread();
+
+    // ★ [work62] ThreadAffinityManager 初期化（診断目的）
+    //   CPU 0-3 に Worker/Learner を分散。必要に応じて調整。
+    //   affinityManager.getAffinityManager() でアクセス。
+    {
+        ThreadAffinityMasks masks{};
+#ifdef _WIN32
+        masks.worker = 0x01;          // CPU 0
+        masks.learnerMain = 0x02;     // CPU 1
+        masks.learnerEvalBase = 0x04; // CPU 2 (evaluator は index で分散)
+        masks.heavyBackground = 0x08; // CPU 3
+        masks.lightBackground = 0x0F; // 全CPU許可（負荷軽微のため）
+        masks.ui = 0x0F;              // 全CPU許可（UIスレッド）
+#endif
+        affinityManager.initialize(masks);
+        diagLog("[AFFINITY] ThreadAffinityManager initialized: worker=0x01 learner=0x02 eval=0x04 heavy=0x08 light=0x0F ui=0x0F");
+    }
 }
 
 void AudioEngine::initWorkerThread()
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
     m_workerThread.start();
+    affinityManager.applyCurrentThreadPolicy(ThreadType::Worker);
 }
 
 void AudioEngine::shutdownWorkerThread()

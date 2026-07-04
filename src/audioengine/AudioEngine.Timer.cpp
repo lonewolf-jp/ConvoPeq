@@ -7,9 +7,15 @@
 #include "DSPLifetimeManager.h"
 #include "../NoiseShaperLearner.h"
 #include "core/TimeUtils.h"  // ★ Work39: Restore Learner Rollback 用
+#include <string>
+#include <mutex>
+
+// MMCSS: 常に必要（診断有効/無効の両ブランチで使用）
+#include <windows.h>
+#include <avrt.h>
+#pragma comment(lib, "avrt.lib")
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-#include <windows.h>
 #include <psapi.h>
 #pragma comment(lib, "psapi.lib")
 #endif
@@ -28,13 +34,309 @@ juce::String diagPrefix(uint64_t currentGeneration)
         + " Us=" + juce::String(static_cast<juce::int64>(us));
 }
 
+// ★ [work62] BlockTimingStats — ブロック別実行時間の集計用（24 bytes）
+struct BlockTimingStats {
+    uint64_t sumUs = 0;
+    uint64_t maxUs = 0;
+    uint64_t count = 0;
+    void addSample(uint64_t elapsed) noexcept {
+        sumUs += elapsed;
+        if (elapsed > maxUs) maxUs = elapsed;
+        ++count;
+    }
+};
+
+// ★ [work62] ScopedBlockTimer — RAII でブロック実行時間を計測
+struct ScopedBlockTimer {
+    BlockTimingStats* stats;
+    uint64_t* outElapsed;
+    uint64_t startUs;
+    ScopedBlockTimer(BlockTimingStats* s, uint64_t* out = nullptr) noexcept
+        : stats(s), outElapsed(out), startUs(convo::getCurrentTimeUs()) {}
+    ~ScopedBlockTimer() noexcept {
+        if (stats != nullptr) {
+            const uint64_t elapsed = convo::getCurrentTimeUs() - startUs;
+            stats->addSample(elapsed);
+            if (outElapsed != nullptr)
+                *outElapsed = elapsed;
+        }
+    }
+};
+
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
+// ★ [work62] diagSink 関数ポインタ — ログ出力先を切り替え可能に
+using DiagSink = void(*)(const juce::String&);
+static void fileSink(const juce::String& message) {
+    juce::Logger::writeToLog(message);
+}
+static void nullSink(const juce::String&) {}
+
+// ★ [work62] asyncSink: LogEntry + LockFreeRingBuffer + 非同期Logger
+struct alignas(64) LogEntry {
+    uint16_t length;
+    char text[254];
+};
+static_assert(std::is_trivially_copyable_v<LogEntry>,
+    "LogEntry must be trivially copyable for LockFreeRingBuffer");
+static_assert(sizeof(LogEntry) == 256, "LogEntry size mismatch");
+
+static constexpr size_t kLogBufferCapacity = 4096;
+static LockFreeRingBuffer<LogEntry, kLogBufferCapacity> s_logBuffer;
+static std::atomic<uint64_t> s_droppedLogs{0};
+static std::mutex s_logMutex;  // ★ [work62] MP→SPSC mutex: asyncSink は2スレッド(Message+Rebuild) Producer のため
+
+static void asyncSink(const juce::String& message)
+{
+    const bool pushed = [&]() -> bool {
+        const std::lock_guard<std::mutex> lock(s_logMutex);
+        return s_logBuffer.pushWithWriter([&](LogEntry& entry) {
+            const size_t copied = message.copyToUTF8(entry.text, sizeof(entry.text));
+            entry.length = (copied > 0) ? static_cast<uint16_t>(copied - 1) : 0;
+        });
+    }();
+    if (!pushed) {
+        s_droppedLogs.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+static DiagSink diagSink = asyncSink;  // ★ [work62] デフォルトを asyncSink に
+
+// ★ [work62] flushLogBuffer — Multi-Producer→SPSCリングバッファをバッチ書き込み
+//    MP間は mutex で逐次化。mutex は pop() の間だけ保持し、Logger I/O は常に mutex 外で行う。
+//    小バッチ（kDrainBatch=100）に分割することで、一度のロック保持時間を抑制する。
+static void flushLogBuffer()
+{
+    static constexpr int kDrainBatch = 100;
+    std::string batch;
+    batch.reserve(32768);
+
+    for (;;) {
+        int count = 0;
+        batch.clear();
+
+        // Phase 1: Drain up to kDrainBatch entries under mutex only (no I/O)
+        {
+            const std::lock_guard<std::mutex> lock(s_logMutex);
+            LogEntry entry;
+            while (count < kDrainBatch && s_logBuffer.pop(entry)) {
+                batch.append(entry.text, entry.length);
+                batch += '\n';
+                ++count;
+            }
+        }
+
+        // Phase 2: Write batched output outside mutex
+        if (count == 0)
+            break;
+        juce::Logger::writeToLog(juce::String(batch));
+    }
+
+    const uint64_t dropped = s_droppedLogs.exchange(0, std::memory_order_acq_rel);
+    if (dropped > 0) {
+        DBG("[LOG_DROP] async log dropped " + juce::String(static_cast<juce::int64>(dropped)) + " messages");
+    }
+}
 
 void diagLog(const juce::String& message)
 {
     DBG(message);
-    juce::Logger::writeToLog(message);
+    diagSink(message);
 }
+
+// ★ [work62] formatDiagEvent — DiagEvent を文字列化する単一フォーマッタ
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
+    switch (event.category) {
+        case DiagCategory::CpuMig:
+            return diagPrefix(gen) + " [CPU_MIG] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " pubSeq=" + juce::String(static_cast<juce::int64>(event.data.cpuMig.pubSeq))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.cpuMig.generation))
+                + " cpu=" + juce::String(static_cast<int>(event.data.cpuMig.cpu))
+                + " prev=" + juce::String(static_cast<int>(event.data.cpuMig.prevCpu));
+        case DiagCategory::CallbackArrival:
+            return diagPrefix(gen) + " [CB_ARRIVAL] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " ts=" + juce::String(static_cast<juce::int64>(event.data.callbackArrival.timestampUs))
+                + " expected=" + juce::String(static_cast<juce::int64>(event.data.callbackArrival.expectedUs))
+                + " cpu=" + juce::String(static_cast<int>(event.data.callbackArrival.cpu))
+                + " tid=" + juce::String(static_cast<int>(event.data.callbackArrival.threadId));
+        case DiagCategory::CallbackSequence:
+            return diagPrefix(gen) + " [CB_SEQ] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.callbackSequence.generation))
+                + " seq=" + juce::String(static_cast<juce::int64>(event.data.callbackSequence.seq))
+                + " prevSeq=" + juce::String(static_cast<juce::int64>(event.data.callbackSequence.prevSeq));
+        case DiagCategory::DspTiming:
+            return diagPrefix(gen) + " [DSP_TIMING] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " dspSeq=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.dspSeq))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.generation))
+                + " worldId=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.worldId))
+                + " direction=" + juce::String(static_cast<int>(static_cast<uint8_t>(event.data.dspTiming.direction)))
+                + " observeLatencyUs=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.observeLatencyUs))
+                + " pubToObserveUs=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.pubToObserveUs))
+                + " callbacksUntilObserve=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.callbacksUntilObserve))
+                + " publishCallbackIdx=" + juce::String(static_cast<juce::int64>(event.data.dspTiming.publishCallbackIdx));
+        case DiagCategory::CallbackStage:
+            return diagPrefix(gen) + " [CALLBACK_STAGE] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.callbackStage.cpu))
+                + " gen=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.generation))
+                + " expectedUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.expectedUs))
+                + " driftUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.driftUs))
+                + " inputUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.inputUs))
+                + " dspUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.dspUs))
+                + " totalUs=" + juce::String(static_cast<juce::int64>(event.data.callbackStage.totalUs))
+                + " budget=" + juce::String(static_cast<int>(event.data.callbackStage.budgetPermille)) + "permille";
+        case DiagCategory::EqTime:
+            return diagPrefix(gen) + " [EQ_TIME] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.eqTime.cpu))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.eqTime.us))
+                + " bands=" + juce::String(static_cast<int>(event.data.eqTime.activeBands))
+                + " order=" + juce::String(static_cast<int>(event.data.eqTime.order));
+        case DiagCategory::ConvTime:
+            return diagPrefix(gen) + " [CONV_TIME] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.convTime.cpu))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.convTime.us))
+                + " block=" + juce::String(static_cast<int>(event.data.convTime.blockSamples))
+                + " budget=" + juce::String(static_cast<int>(event.data.convTime.budgetPercent)) + "%";
+        case DiagCategory::StereoConvTime:
+            return diagPrefix(gen) + " [STCONV_TIME] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " cpu=" + juce::String(static_cast<int>(event.data.stereoConvTime.cpu))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.stereoConvTime.us))
+                + " chunk=" + juce::String(static_cast<int>(event.data.stereoConvTime.chunkSamples))
+                + " ch=" + juce::String(static_cast<int>(event.data.stereoConvTime.channels))
+                + " budget=" + juce::String(static_cast<int>(event.data.stereoConvTime.budgetPercent)) + "%";
+        default:
+            return diagPrefix(gen) + " [UNKNOWN] category=" + juce::String(static_cast<int>(event.category));
+    }
+}
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
+// formatDiagEvent が全カテゴリを網羅していることをコンパイル時検証
+// Count センチネルにより、末尾以外へのカテゴリ追加も検出可能
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+static_assert(static_cast<int>(DiagCategory::Count) == 9,
+    "DiagCategory enum changed: update formatDiagEvent() switch accordingly");
+#endif
+
+} // anonymous namespace
+
+// ★ [work63] applyMmcssPriority — Audio スレッド優先度設定（初回コールバックで一度だけ）
+void AudioEngine::applyMmcssPriority() noexcept
+{
+    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    {
+        // ── MMCSS モード ──
+        DWORD taskIndex = 0;
+        HANDLE hTask = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
+        if (hTask != nullptr) {
+            AvSetMmThreadPriority(hTask, AVRT_PRIORITY_CRITICAL);
+            m_avrtHandle = hTask;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
+                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
+                diagLog("[MMCSS] registered: taskIndex=" + juce::String(static_cast<int>(taskIndex))
+                    + " priority=AVRT_PRIORITY_CRITICAL"
+                    + " win32Prio=" + juce::String(win32Priority)
+                    + " procClass=" + juce::String(static_cast<int>(pc)));
+            }
+#endif
+        } else {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const DWORD err = ::GetLastError();
+                diagLog("[MMCSS] FAILED: GetLastError=" + juce::String(static_cast<int>(err))
+                    + " taskIndex=" + juce::String(static_cast<int>(taskIndex)));
+            }
+#endif
+        }
+    }
+    else
+    {
+        // ── Native RT モード ──
+        {
+            savedProcessPriorityClass = ::GetPriorityClass(::GetCurrentProcess());
+            const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+            const BOOL tpResult = ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            if (pcResult == 0) {
+                const DWORD err = ::GetLastError();
+                diagLog("[NATIVE_RT] SetPriorityClass(REALTIME) FAILED: GetLastError="
+                    + juce::String(static_cast<int>(err)));
+            }
+            if (tpResult == 0) {
+                const DWORD err = ::GetLastError();
+                diagLog("[NATIVE_RT] SetThreadPriority(TIME_CRITICAL) FAILED: GetLastError="
+                    + juce::String(static_cast<int>(err)));
+            }
+            if (pcResult != 0 && tpResult != 0) {
+                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
+                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
+                diagLog("[NATIVE_RT] applied: win32Prio=" + juce::String(win32Priority)
+                    + " procClass=" + juce::String(static_cast<int>(pc))
+                    + " savedClass=" + juce::String(static_cast<int>(savedProcessPriorityClass)));
+            }
+#endif
+        }
+    }
+}
+
+// ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
+void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
+{
+    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    {
+        if (m_avrtHandle != nullptr) {
+            ::AvRevertMmThreadCharacteristics(m_avrtHandle);
+            m_avrtHandle = nullptr;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            diagLog("[MMCSS] reverted on Audio Thread (AvRevertMmThreadCharacteristics)");
+#endif
+        }
+    }
+    else
+    {
+        const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), savedProcessPriorityClass);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (pcResult == 0) {
+            const DWORD err = ::GetLastError();
+            diagLog("[NATIVE_RT] Audio Thread restore FAILED: GetLastError="
+                + juce::String(static_cast<int>(err)));
+        } else {
+            diagLog("[NATIVE_RT] Audio Thread restored priority class to "
+                + juce::String(static_cast<int>(savedProcessPriorityClass)));
+        }
+#endif
+    }
+    convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
+}
+
+// ★ [work63] finalizeMmcssShutdown — シャットダウン完了処理（安全網）
+void AudioEngine::finalizeMmcssShutdown() noexcept
+{
+    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (m_avrtHandle != nullptr) {
+            diagLog("[MMCSS] WARNING: Audio Thread did not revert MMCSS (OS auto-cleanup)");
+        } else {
+            diagLog("[MMCSS] already reverted by Audio Thread. OK.");
+        }
+#endif
+    }
+    else
+    {
+        const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), savedProcessPriorityClass);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (pcResult == 0) {
+            const DWORD err = ::GetLastError();
+            diagLog("[NATIVE_RT] finalize restore FAILED: GetLastError="
+                + juce::String(static_cast<int>(err)));
+        } else {
+            diagLog("[NATIVE_RT] finalize: restored priority class to "
+                + juce::String(static_cast<int>(savedProcessPriorityClass)));
+        }
+#endif
+    }
 }
 
 void AudioEngine::timerCallback()
@@ -48,6 +350,15 @@ void AudioEngine::timerCallback()
     //    関数スコープのstatic変数。末尾のexecブロックと共有。
     static double s_timerExecStartMs = 0.0;
     s_timerExecStartMs = juce::Time::getMillisecondCounterHiRes();
+
+    // ★ [work62] BlockTimingStats 集計変数
+    static BlockTimingStats s_hist, s_other;
+    static uint64_t s_histElapsed = 0;
+    static int s_blockTickCount = 0;
+    ++s_blockTickCount;
+    s_histElapsed = 0;
+    static uint32_t s_xRunPopCount = 0;
+    s_xRunPopCount = 0;
 
     // ★ Timer jitter計測（timerCallback先頭）
     {
@@ -881,6 +1192,7 @@ void AudioEngine::timerCallback()
         XRunEvent ev;
         while (xRunBuffer.pop(ev))
         {
+            ++s_xRunPopCount;
             const auto backpressure = getRuntimeBackpressureTelemetry();
             const auto lifecycle = getRuntimeLifecycleDiagnostics();
             const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
@@ -916,12 +1228,16 @@ void AudioEngine::timerCallback()
 
         // ★ B: CB_HIST リングバッファダンプ（XRUN検出時の最新32件、timer callback1回につき1度のみ）
         {
+            s_histElapsed = 0;
+            ScopedBlockTimer t_hist(&s_hist, &s_histElapsed);
             const uint64_t wc = rtLocalState_.callbackTimingWriteCount.load(
                 std::memory_order_relaxed);
             if (wc != rtAuxMutable_.lastCbHistDumpedWriteCount)
             {
                 rtAuxMutable_.lastCbHistDumpedWriteCount = wc;
-                const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+                if (s_xRunPopCount > 0)
+                {
+                    const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
                 const uint64_t start = (wc > RTLocalState::kCallbackTimingSlots)
                     ? wc - RTLocalState::kCallbackTimingSlots : 0;
                 for (uint64_t i = start; i < wc; ++i)
@@ -945,21 +1261,99 @@ void AudioEngine::timerCallback()
             }
         }
     }
+    }
 
     // ★ timerCallback 末尾 — 実行時間計測
     {
-        static double s_timerStartMs = 0.0;
-        if (s_timerStartMs > 0.0) {
+        // ★ [work62] バグ修正: s_timerStartMs → s_timerExecStartMs
+        if (s_timerExecStartMs > 0.0) {
             const double execMs = juce::Time::getMillisecondCounterHiRes() - s_timerExecStartMs;
             if (execMs > 10.0) {
                 const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
                 const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
                 diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(seq))
                     + "] [TIMER] exec=" + juce::String(execMs, 3) + "ms");
+
+                // ★ [work62] BLOCK_TIMING — ブロック別実行時間集計（100 tick 毎、DBGのみLogger非通過）
+                if ((s_blockTickCount % 100) == 0) {
+                    const uint64_t histAvgUs = (s_hist.count > 0) ? (s_hist.sumUs / s_hist.count) : 0;
+                    const uint64_t histMaxUs = s_hist.maxUs;
+                    const uint64_t totalUs = static_cast<uint64_t>(execMs * 1000.0);
+                    const uint64_t otherUs = (s_histElapsed < totalUs) ? (totalUs - s_histElapsed) : 0;
+                    s_other.addSample(otherUs);
+                    const uint64_t otherAvgUs = (s_other.count > 0) ? (s_other.sumUs / s_other.count) : 0;
+                    const uint64_t otherMaxUs = s_other.maxUs;
+                    diagLog(diagPrefix(gen) + " [BLOCK_TIMING] tick=" + juce::String(s_blockTickCount)
+                        + " hist_avg=" + juce::String(static_cast<juce::int64>(histAvgUs)) + "us"
+                        + " hist_max=" + juce::String(static_cast<juce::int64>(histMaxUs)) + "us"
+                        + " other_avg=" + juce::String(static_cast<juce::int64>(otherAvgUs)) + "us"
+                        + " other_max=" + juce::String(static_cast<juce::int64>(otherMaxUs)) + "us"
+                        + " total_ms=" + juce::String(execMs, 3) + "ms");
+                    s_hist = s_other = BlockTimingStats{};
+                }
             }
         }
         s_timerExecStartMs = juce::Time::getMillisecondCounterHiRes();
     }
+
+    // ★ [work62] DiagDrain: RTスレッドが書き込んだ DiagEvent リングバッファを消費
+    {
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+
+        DiagEvent event;
+        int drained = 0;
+        const uint64_t drainStartUs = convo::getCurrentTimeUs();
+        while (drained < static_cast<int>(DiagRuntimeLimits::MaxDrainPerTick)
+               && diagBuffer.pop(event))
+        {
+            ++drained;
+            rtAuxMutable_.diagTickPopped.value.fetch_add(1, std::memory_order_relaxed);
+            rtAuxMutable_.diagTotalPopped.fetch_add(1, std::memory_order_relaxed);
+            diagLog(formatDiagEvent(event, gen));
+        }
+        const uint64_t drainUs = convo::getCurrentTimeUs() - drainStartUs;
+
+        // 500tick周期で DiagDrain 統計を記録
+        if ((s_blockTickCount % 500) == 0) {
+            const size_t approxOcc = diagBuffer.size();
+            diagLog(diagPrefix(gen) + " [DIAG_DRAIN] tick=" + juce::String(static_cast<juce::int64>(s_blockTickCount))
+                + " drained=" + juce::String(drained)
+                + " drainUs=" + juce::String(static_cast<juce::int64>(drainUs))
+                + " max=" + juce::String(static_cast<int>(DiagRuntimeLimits::MaxDrainPerTick))
+                + " hitLimit=" + juce::String(drained == static_cast<int>(DiagRuntimeLimits::MaxDrainPerTick) ? "true" : "false")
+                + " approxOcc=" + juce::String(static_cast<juce::int64>(approxOcc)));
+        }
+    }
+
+    // ★ [work62] DiagStatistics: per-tick カウンタを exchangeAtomic で取得
+    {
+        const uint64_t gen = (runtimeWorld != nullptr)
+            ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+
+        const uint64_t pushed = convo::exchangeAtomic(rtAuxMutable_.diagTickPushed.value, 0, std::memory_order_acq_rel);
+        const uint64_t popped = convo::exchangeAtomic(rtAuxMutable_.diagTickPopped.value, 0, std::memory_order_acq_rel);
+        const uint64_t dropped = convo::exchangeAtomic(rtAuxMutable_.diagTickDropped.value, 0, std::memory_order_acq_rel);
+        const uint64_t totalP = convo::consumeAtomic(rtAuxMutable_.diagTotalPushed, std::memory_order_acquire);
+        const uint64_t totalPop = convo::consumeAtomic(rtAuxMutable_.diagTotalPopped, std::memory_order_acquire);
+        const uint64_t cbW = convo::exchangeAtomic(rtAuxMutable_.cbArrivalWritten, 0, std::memory_order_acq_rel);
+        const uint64_t cbD = convo::exchangeAtomic(rtAuxMutable_.cbArrivalDropped, 0, std::memory_order_acq_rel);
+
+        // 100tick周期で DIAG_STAT を記録
+        if ((s_blockTickCount % 100) == 0) {
+            diagLog(diagPrefix(gen) + " [DIAG_STAT] tick=" + juce::String(static_cast<juce::int64>(s_blockTickCount))
+                + " pushed=" + juce::String(static_cast<juce::int64>(pushed))
+                + " popped=" + juce::String(static_cast<juce::int64>(popped))
+                + " dropped=" + juce::String(static_cast<juce::int64>(dropped))
+                + " totalP=" + juce::String(static_cast<juce::int64>(totalP))
+                + " totalPop=" + juce::String(static_cast<juce::int64>(totalPop))
+                + " cbW=" + juce::String(static_cast<juce::int64>(cbW))
+                + " cbD=" + juce::String(static_cast<juce::int64>(cbD)));
+        }
+    }
+
+    // ★ [work62] flushLogBuffer — 非同期Loggerのリングバッファをファイルに書き出し
+    flushLogBuffer();
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 }
 

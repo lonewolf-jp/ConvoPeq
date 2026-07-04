@@ -1,15 +1,16 @@
 {
-	// 推奨拡張機能
-	"recommendations": [
-		// headroom proxy 自動起動・終了（ConvoPeq用）
-		// インストール方法:
-		//   .vscode\convopeq-headroom-ext\install.ps1
-	]
-}
+    // ── 推奨拡張機能 ──────────────────────────────────────────────────
+    // インストールされていない場合、VS Code が自動的に通知します。
     "recommendations": [
-        "ms-vscode.cpptools",
-        "ms-vscode.cpptools-extension-pack",
-        "ms-vscode.cmake-tools",
-        "twxs.cmake"
-    ]
+        "ms-vscode.cpptools",                    // C/C++ IntelliSense, デバッグ, コード解析
+        "ms-vscode.cpptools-extension-pack",      // C/C++ 拡張機能パック
+        "ms-vscode.cmake-tools",                 // CMake プロジェクトのビルド・構成
+        "twxs.cmake",                            // CMake 文法ハイライト
+        "xaver.clang-format",                    // clang-format 統合（手動フォーマット用）
+        "cschlosser.doxdocgen"                   // Doxygen コメント生成補助
+    ],
+
+    // ── 非推奨拡張機能 ────────────────────────────────────────────────
+    // VS Marketplace で非推奨としてマークするもの
+    "unwantedRecommendations": []
 }

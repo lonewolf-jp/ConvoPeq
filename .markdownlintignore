@@ -1,1 +1,7 @@
 .clang-tidy
+*.cpp
+*.h
+JUCE/**
+r8brain-free-src/**
+*.bat
+*.txt

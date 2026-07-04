@@ -439,6 +439,25 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     updateNoiseShaperControls();
     // loadSettings()後にUIの値を更新
 
+    // ★ [work63] Audio Thread Priority toggle（再起動前提）
+    addAndMakeVisible(audioThreadPriorityToggle);
+    audioThreadPriorityToggle.setButtonText("Audio Thread Priority: MMCSS");
+    audioThreadPriorityToggle.setToggleState(engine.isAudioThreadPriorityMmcss(), juce::dontSendNotification);
+    audioThreadPriorityToggle.setTooltip("Toggle and restart to apply");
+    audioThreadPriorityToggle.onClick = [this] {
+        const bool useMmcss = audioThreadPriorityToggle.getToggleState();
+        audioEngine.setAudioThreadPriorityMode(useMmcss);
+        audioThreadPriorityToggle.setButtonText(useMmcss ? "Audio Thread Priority: MMCSS" : "Audio Thread Priority: Native RT");
+        DeviceSettings::saveSettings(audioDeviceManager, audioEngine);
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::InfoIcon)
+                .withTitle("Audio Thread Priority")
+                .withMessage("Setting saved. Please restart the application for the change to take effect.")
+                .withButton("OK"),
+            nullptr);
+    };
+
     updateGainStagingDisplay();
     startTimerHz(5);
 }
@@ -455,7 +474,7 @@ void DeviceSettings::resized()
     auto bounds = getLocalBounds();
     // Adaptive learningボタンの下の余白を詰めるため、controlsAreaの高さを自動計算
     constexpr int rowHeight = 30;
-    constexpr int numRows = 6; // Dither, Input, Output, Tabs, Over/Noise, Adaptive
+    constexpr int numRows = 7; // Dither, Input, Output, Tabs, Over/Noise, Adaptive, Priority
     auto controlsArea = bounds.removeFromTop(rowHeight * numRows); // 必要な分だけ
     auto row1 = controlsArea.removeFromTop(rowHeight); // Dither Bit Depth
     auto row2 = controlsArea.removeFromTop(rowHeight); // Input Headroom
@@ -463,6 +482,7 @@ void DeviceSettings::resized()
     auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
     auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
     [[maybe_unused]] auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
+    auto row7 = controlsArea.removeFromTop(rowHeight); // Audio Thread Priority
 
     // 1行目: Dither Bit Depth
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
@@ -492,6 +512,9 @@ void DeviceSettings::resized()
 
     // 6行目: Adaptive learningボタンをNoiseShaperの真下・同じ幅で配置
     adaptiveLearningButton.setBounds(nsComboX, nsComboY + nsComboH, nsComboW, nsComboH - 2);
+
+    // 7行目: Audio Thread Priority toggle
+    audioThreadPriorityToggle.setBounds(row7.reduced(5));
 
     fixedNoiseLogIntervalLabel.setBounds(0, 0, 0, 0); // 非表示時のダミー配置
     fixedNoiseLogIntervalComboBox.setBounds(0, 0, 0, 0);
@@ -890,6 +913,22 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
     }
 }
 
+// ★ [work63] preloadThreadPriorityMode — オーディオスレッド開始前に設定を先読み
+//    device_settings.xml から threadPriorityMode 属性のみを読み込み、
+//    オーディオデバイスの初期化より先にエンジンに設定する。
+void DeviceSettings::preloadThreadPriorityMode (AudioEngine& engine)
+{
+    const auto file = getSettingsFile();
+    if (! file.existsAsFile())
+        return; // デフォルト MMCSS のまま
+
+    if (auto xml = juce::XmlDocument::parse(file))
+    {
+        const juce::String mode = xml->getStringAttribute("threadPriorityMode", "MMCSS");
+        engine.setAudioThreadPriorityMode(mode == "MMCSS");
+    }
+}
+
 void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine)
 {
     saveNoiseShaperState(engine);
@@ -908,6 +947,8 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
+        // Audio Thread Priority 設定
+        xml->setAttribute("threadPriorityMode", engine.isAudioThreadPriorityMmcss() ? "MMCSS" : "NativeRT");
 
         // Convolver state
         auto convolverState = engine.getConvolverStateTree();
@@ -1108,6 +1149,12 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
             int type = xml->getIntAttribute("oversamplingType", 0);
             engine.setOversamplingType((AudioEngine::OversamplingType)type);
+
+            // Audio Thread Priority 設定の読み込み (デフォルト "MMCSS")
+            {
+                const juce::String mode = xml->getStringAttribute("threadPriorityMode", "MMCSS");
+                engine.setAudioThreadPriorityMode(mode == "MMCSS");
+            }
 
             // Convolver state
             if (auto* convXml = xml->getChildByName("Convolver"))

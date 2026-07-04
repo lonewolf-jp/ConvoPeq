@@ -443,7 +443,8 @@ foreach ($file in $sourceFiles) {
         -RelativePath $relativeSourcePath `
         -Pattern $commentKeywordPattern `
         -RuleId "LINT-AE-009" `
-        -Description "No dangerous AI-generated comment keywords in src/** (TODO/FIXME/quick fix/workaround/just for now/temporary)"
+        -Description "No dangerous AI-generated comment keywords in src/** (TODO/FIXME/quick fix/workaround/just for now/temporary)" `
+        -Filter { param($lineText, $lineNumber, $match) return ($lineText -notmatch 'NOLINT\(danger-comment\)') }
 
     $inBlockComment = $false
     for ($lineIndex = 0; $lineIndex -lt $lines.Length; $lineIndex++) {

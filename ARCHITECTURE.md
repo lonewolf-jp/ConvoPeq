@@ -1,7 +1,6 @@
+# ConvoPeq Architecture (v0.6.8)
 
-# ConvoPeq Architecture (v0.6.4+)
-
-This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL. It is intended for developers and contributors working on DSP, threading, state transitions, and runtime behavior.
+This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL/IPP. It is intended for developers and contributors working on DSP, threading, state transitions, runtime governance, and ISR (Intelligent State Reconstruction) behavior.
 
 For user-facing features and usage, see `README.md`.
 
@@ -11,409 +10,755 @@ For user-facing features and usage, see `README.md`.
 
 ConvoPeq is organized around four priorities:
 
-- Runtime-critical memory is pre-allocated and reused.
-
 1. **Audio quality**
-   - Core processors are high-quality convolution and 20-band parametric EQ.
-   - Output conditioning includes output filtering, soft clipping (optional), and dither.
+   - 64-bit double precision throughout the main DSP path.
+   - IR convolution (MKL NUC) + 20-band parametric EQ (TPT SVF).
+   - Output conditioning: output filter (HC/LC), musical soft clipping, and dither/noise shaping.
 
 2. **Performance**
-   - Optimized for Windows x64 + AVX2-class CPUs.
-   - Uses Intel oneMKL where beneficial (FFT/BLAS/VML paths).
-   - Uses alignment-aware memory allocation for SIMD/MKL efficiency.
+   - Optimized for Windows 11 x64 + AVX2-class CPUs.
+   - Intel oneMKL for FFT/BLAS/VML paths (sequential, static link).
+   - Intel IPP for optimized signal processing primitives.
+   - Alignment-aware memory allocation (64-byte) for SIMD/MKL efficiency.
+   - AVX2 intrinsics for FIR, Upsample, Tanh, EQ processes.
 
 3. **Operational robustness**
-   - UI/control logic is decoupled from DSP execution.
-   - Heavy work (IR load/rebuild) is asynchronous.
-   - State transitions are staged to avoid audible artifacts.
+   - UI/control logic is fully decoupled from Audio Thread DSP execution.
+   - Heavy work (IR load/rebuild, NoiseShaper learning, CMA-ES optimization) is asynchronous.
+   - ISR runtime governance ensures all state transitions are validated, authority-checked, and artifact-free.
+   - RCU (Read-Copy-Update) / epoch-based reclamation prevents use-after-free and data races.
 
-## Adaptive Noise Shaper Learning (v0.5.8+)
-
-- `NoiseShaperLearner` receives 256-sample AudioBlocks from the Audio Thread via a LockFreeRingBuffer and performs CMA-ES optimization (9th-order IIR noise shaper coefficients) on a dedicated worker thread.
-- Coefficient banks are managed per sample rate and bit depth; progress, error, and coefficients are reported to the UI/Engine via atomic variables.
-- All inter-thread data transfer is designed for real-time safety using RCU/atomic/lock-free patterns.
-- Three learning modes (Short/Middle/Long) control convergence speed and stability.
-- Typical convergence times: Short 10–20 min, Middle 20–40 min, Long 40–80 min.
-- See README.md and NoiseShaperLearner.h/.cpp for details.
+4. **Real-time safety**
+   - Audio Thread: no allocations, no libm calls, no locks, no blocking, no exceptions.
+   - All inter-thread state handoff uses RCU + atomic publish/consume patterns.
+   - All temporary buffers are RAII-managed; no leaks on exceptions or early returns.
 
 ---
 
-## 2. Design View of `src/`
+## 2. Adaptive Noise Shaper Learning (v0.5.8+)
 
-### 2.1 Application / UI Layer
-
-- `MainApplication.h/.cpp`
-  - JUCE app entry and lifecycle management.
-
-- `MainWindow.h/.cpp`
-  - Main desktop window composition.
-  - Wires UI controls to `AudioEngine` operations.
-
-- `EQControlPanel.h/.cpp`
-  - EQ parameter UI and user interaction.
-
-- `ConvolverControlPanel.h/.cpp`
-  - Convolver UI (IR load, phase mode, mix, smoothing, IR length, output filter modes).
-  - Includes UI-side debounce for expensive convolver parameter changes.
-
-- `SpectrumAnalyzerComponent.h/.cpp`
-  - Real-time analyzer and EQ overlay rendering.
-  - Uses lock-free FIFO input, FFT visualization pipeline, smoothing, peak hold, and adaptive update throttling.
-
-### 2.2 Engine / Runtime Coordination Layer
-
-- `AudioEngine.h/.cpp`
-  - Main orchestration and runtime control layer.
-  - Owns and coordinates EQ, convolver, utility DSP stages, and analyzer path.
-  - Exposes high-level control API to UI.
-
-- `AudioEngineProcessor.h/.cpp`
-  - Adapter from device callback into `AudioEngine` processing.
-
-  - Compatibility guard for known problematic ASIO scenarios.
-
-### 2.3 DSP Layer
-
-- `EQProcessor.h/.cpp`
-  - 20-band parametric EQ core processing. Manages band/channel modes and real-time parameter application.
-
-- `ConvolverProcessor.h/.cpp`
-  - IR-based convolution runtime. Handles asynchronous IR loading/rebuild, crossfade-safe transitions, and latency/delay management.
-  - Implements rebuild debounce, coalesced notifications, crossfade, and hysteresis to suppress clicks and bursty updates.
-  - IR loading/rebuild is performed on the Message/Worker Thread; the Audio Thread only performs atomic reference switching.
-
-- `MKLNonUniformConvolver.h/.cpp`
-  - Intel oneMKL-backed non-uniform partitioned convolution backend.
-  - All large buffers (IR, FFT, workspaces, etc.) are allocated/freed using convo::aligned_malloc (64-byte alignment) and ScopedAlignedPtr (RAII).
-  - Memory allocation/deallocation and libm calls are strictly prohibited on the Audio Thread.
-
-- `CustomInputOversampler.h/.cpp`
-  - Input oversampling for quality/performance modes.
-
-- `OutputFilter.h/.cpp`
-  - Output filtering/conditioning stage.
-
-- `PsychoacousticDither.h`
-  - Final-stage dither/noise shaping.
-
-- `NoiseShaperLearner.h/.cpp`
-  - Adaptive Noise Shaper Learning (see above for details).
-
-- `InputBitDepthTransform.h`
-  - Input bit-depth/quantization utilities.
-
-### 2.4 Utility / Memory
-
-- `AlignedAllocation.h`
-  - 64-byte alignment helpers for SIMD/MKL-friendly buffer allocation.
-  - All buffers are managed with convo::aligned_malloc and ScopedAlignedPtr (RAII).
+- `NoiseShaperLearner` receives 256-sample `AudioBlock` structs from the Audio Thread via a `LockFreeRingBuffer<AudioBlock, 4096>`. CMA-ES optimization for 9th-order IIR noise shaper coefficients runs on a dedicated worker thread.
+- Coefficient banks are managed per sample rate (10 banks) × bit depth (16/24/32) × learning mode (6 modes) = **180 total**.
+- Three base learning modes (Short / Medium / Long) plus three spectral modes (Broadcast / Tonal / Custom).
+- All inter-thread data transfer uses RCU/atomic/lock-free patterns.
+- Typical convergence times: Short 10–20 min, Medium 20–40 min, Long 40–80 min.
+- See `NoiseShaperLearner.h/.cpp` (68 KB, largest TU) and `README.md` for details.
 
 ---
 
-## 3. Runtime Topology and Data Flow
+## 3. Source Directory Structure (`src/` — 246 files, ~2.78 MB)
 
-At runtime, `AudioEngine` coordinates all processing, including adaptive noise shaper learning, and `AudioEngineProcessor` invokes the main DSP chain from the device callback.
+```
+src/
+├── [77 root files]          — Top-level DSP + UI + Framework adapters
+├── audioengine/ (101 files) — ISR Runtime Governance + Orchestration + State Management
+├── core/         (37 files) — RCU Foundation: EpochDomain, SnapshotCoordinator, Store
+├── convolver/    (10 files) — Convolver Split (8 TU) + Internal Helpers
+├── eqprocessor/   ( 6 files) — EQ Split (5 TU) + EQProcessor.h
+└── tests/        (15 files) — CTest Regression Suite
+```
 
-Typical logical chain:
+### 3.1 `src/` Root — Core DSP / UI / Entry Points
 
-`Audio Input -> Input conditioning -> Oversampling (optional) -> [EQ <-> Convolver (order selectable)] -> Output filter / soft clipping -> Dither / final conditioning (with optional Adaptive Noise Shaper) -> Audio Output`
+| File(s) | Size | Role |
+|---|---|---|
+| `MainApplication.{h,cpp}` | 171 lines | JUCEApplication singleton. Initializes MKL, IPP, ProcessPriority, EcoQoS bypass, Denormal handling, and FileLogger. |
+| `MainWindow.{h,cpp}` | 62.2 KB | JUCE DocumentWindow. Owns AudioEngine, AudioEngineProcessor, EQControlPanel, ConvolverControlPanel, SpectrumAnalyzer, DeviceSettings. |
+| `AudioEngineProcessor.{h,cpp}` | 4.5 KB | `juce::AudioProcessor` adapter. Bridges `AudioProcessorPlayer` device callback into `AudioEngine::getNextAudioBlock()`. Supports both float and double paths. |
+| `DeviceSettings.{h,cpp}` | 51.7 KB | ASIO/WASAPI persistence (`device_settings.xml`). Adaptive coefficient persistence. Channel mask auto-recovery. ASIO driver blacklist wrapper class. |
+| `AsioBlacklist.h` | 1.5 KB | Compatibility guard for known-broken ASIO drivers. |
+| `ConvolverProcessor.h` | 1180 lines, 60 KB | Public API header for IR convolution. BuildSnapshot, IRLoadPreview, PhaseMode, TailMode enums. |
+| `MKLNonUniformConvolver.{h,cpp}` | 65.2 KB | Intel MKL-backed non-uniform partitioned convolution backend. |
+| `CustomInputOversampler.{h,cpp}` | 33.5 KB | AVX2 multi-stage FIR/IIR oversampler (2x/4x/8x). IIRLike and LinearPhase presets. Corruption auto-detection and fallback. |
+| `OutputFilter.{h,cpp}` | 20.2 KB | Biquad-based output conditioning (HPF, LPF, HC, LC). All coefficients pre-computed at prepare time. |
+| `NoiseShaperLearner.{h,cpp}` | **68.4 KB** | CMA-ES-driven adaptive noise shaper learning (9th-order IIR). Largest TU in the project. |
+| `EQControlPanel.{h,cpp}` | 26.0 KB | 20-band EQ user interface. |
+| `SpectrumAnalyzerComponent.{h,cpp}` | 52.3 KB | Real-time FFT analyzer (MKL 4096-point). EQ overlay, peak hold, level meter bar rendering. |
+| `AllpassDesigner.{h,cpp}` | 26.8 KB | All-pass filter design for mixed-phase decomposition. CMA-ES / AdaGrad optimization. |
+| `CmaEsOptimizer{,.Dynamic}.{h,cpp}` | 7.7 KB | CMA-ES subspace optimizer. |
+| `AlignedAllocation.h` | 6.0 KB | 64-byte SIMD-aligned `aligned_malloc` + `ScopedAlignedPtr`. |
+| `DspNumericPolicy.h` | 13.5 KB | Single source of truth for DSP numeric constants and types. |
+| `LockFreeRingBuffer.h` / `LockFreeAudioRingBuffer.h` | 12 KB | SPSC lock-free ring buffers for audio-thread-safe intra-thread communication. |
+| `DeferredDeletionQueue.h` / `DeferredFreeThread.h` | 21 KB | Asynchronous object reclamation after RCU grace period. |
+| `SafeStateSwapper.h` | 19.7 KB | RAII state swap with ownership transfer. |
+| `EQEditProcessor.{h,cpp}` | 4.2 KB | UI/worker-side EQ editing interface. |
+| `ConvolverState.{h,cpp}` / `IRConverter.{h,cpp}` / `IRDSP.{h,cpp}` | — | Convolver state serialization, IR normalization/preprocessing. |
 
-## Detailed Data Processing Flow
+### 3.2 `src/audioengine/` — ISR Runtime Governance (101 files, ~1.19 MB)
 
-The following describes the precise, step-by-step flow of audio data through ConvoPeq’s processing pipeline, referencing key classes and methods:
+The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,600+ lines (207 KB).
 
-1. **Audio Input Reception**
+**AudioEngine Split Translation Units** (PImpl-style responsibility split):
 
-- The audio device callback invokes `AudioEngineProcessor::getNextAudioBlock()`, which delegates to `AudioEngine::getNextAudioBlock()`.
-- Input buffer is received as a `juce::AudioSourceChannelInfo` object.
+| File | Size | Responsibility |
+|---|---|---|
+| `AudioEngine.h` | 207 KB | All type definitions: `RuntimeState` (sealed via `BuilderToken`), `DSPCore`, `DiagEvent`, `EngineParameterSnapshot`, `RTLocalState`, `RTAuxMutable`, `EQCacheManager`, all atomic state variables. |
+| `.CtorDtor.cpp` | 11.9 KB | Constructor / Destructor. ISRRetireRouter, RuntimePublicationOrchestrator, HealthMonitor, SnapshotWorker initialization. Shutdown sequence. |
+| `.Init.cpp` | 4.7 KB | Post-construction initialization. |
+| `.Parameters.cpp` | 32.5 KB | High-level UI parameters. |
+| `.Processing.AudioBlock.cpp` | 32.8 KB | Audio Thread entry (float path). `getNextAudioBlock()`. |
+| `.Processing.BlockDouble.cpp` | 28.7 KB | Audio Thread entry (double path). |
+| `.Processing.DSPCoreFloat.cpp` | 15.3 KB | DSP core float processing. |
+| `.Processing.DSPCoreDouble.cpp` | 36.0 KB | DSP core double processing. |
+| `.Processing.DSPCoreLifecycle.cpp` | 17.2 KB | DSPCore prepare/reset lifecycle. |
+| `.Processing.DSPCoreIO.cpp` | 18.8 KB | DSPCore I/O + crossfade delay gate. |
+| `.Processing.PrepareToPlay.cpp` | 16.2 KB | Device callback start preparation. Lifecycle state transitions. |
+| `.Processing.ReleaseResources.cpp` | 23.6 KB | Device stop resource release. |
+| `.Commit.cpp` | 32.2 KB | Atomic RuntimeState commit/publish. `runPublicationPrecheckNonRt()`, `onRuntimePublishedNonRt()`, `onRuntimeRetiredNonRt()`. |
+| `.RebuildDispatch.cpp` | 46.3 KB | Debounced rebuild dispatcher. `captureRuntimeBuildSnapshot()`, `equalsBuildParameterSnapshot()`, spell/rejection logic. |
+| `.Timer.cpp` | **75.6 KB** | UI timer polling (100 ms). Transition verification, publication monitoring, memory tracking, learning dispatch, XRUN/crossfade/backpressure telemetry. Largest TU. |
+| `.Retire.cpp` | 18.5 KB | Old `RuntimeState` retire-router logic. |
+| `.Learning.cpp` | 26.0 KB | Adaptive noise shaper learning integration. |
 
-1. **Oversampling (Optional)**
+**ISR Subsystem** (modular runtime governance):
 
-- If enabled, `CustomInputOversampler::processUp()` is called.
-- Multi-stage FIR/IIR upsampling is performed (factor 2x/4x/8x), using AVX2-optimized routines.
-- Input DC offset is removed by `UltraHighRateDCBlocker`.
+| File | Size | Role |
+|---|---|---|
+| `ISRAuthorityClass.h` | 1.5 KB | `Authoritative/Derived/Diagnostic/ExecutorLocal` enum. |
+| `ISRLifecycle.{h,cpp}` | 9.7 KB | Lifecycle scheduler (enter/leave audio callback). |
+| `ISRRTExecution.{h,cpp}` | 4.5 KB | Real-time execution contract. |
+| `ISRShutdown.{h,cpp}` | 17.4 KB | Shutdown FSM (10 states), `alignas(64) BlockingReasonStats`. |
+| `ISRDSPHandle.{h,cpp}` | 9.3 KB | Handle-based DSP registry (`DSPHandleRuntime::MAX_DSP_SLOTS`). |
+| `ISRDSPQuarantine.{h,cpp}` | 2.4 KB | Quarantine semantics for DSP objects. |
+| `ISRClosure.{h,cpp}` | 3.1 KB | Reflective closure graph. |
+| `ISRClosureGraphWalker.{h,cpp}` | 3.0 KB | Graph traversal. `validateGraph()`. |
+| `ISRPayloadTier.{h,cpp}` | 2.6 KB | Payload tiering (`InlineImmutable` / `ImmutableShared`). |
+| `ISRHB.{h,cpp}` | 9.2 KB | Heartbeat/hazard barrier. |
+| `ISRRetire.{h,cpp}` | 9.8 KB | `RuntimeState` retirement. |
+| `ISRRetireLane.h` | 0.2 KB | Retire lane classification. |
+| `ISRRetireOverflowRing.h` | 4.8 KB | Overflow retirement ring. |
+| `ISRRetireRouter.{h,cpp}` | 5.3 KB | Router for retirement entry + epoch coordination. |
+| `ISRRetireRuntimeEx.{h,cpp}` | 21.3 KB | Extended retirement runtime (grace period, escalation, reclaim). |
+| `ISRRuntimePublicationCoordinator.{h,cpp}` | 23.3 KB | Publication coordinator with overflow/deferred/shutdown schedulers. |
+| `ISRRuntimeSemanticSchema.h` | 19.6 KB | Schema v9: single source of truth for authority class, ownership, mutability, visibility, and lifetime per field. |
+| `ISRRuntimeIdentityGenerators.h` | 1.0 KB | Runtime/transition UUID generators. |
+| `ISRSealedObject.h` | 2.9 KB | RAII seal wrapper (only Builder/Engine can construct). |
+| `ISRDebugRuntime.{h,cpp}` | 6.0 KB | Debug runtime diagnostics (shadow compare, CI artifacts). |
 
-1. **Processing Order Selection**
+**Runtime Publication Pipeline:**
 
-- The processing order is determined by `AudioEngine::ProcessingOrder` (Convolver→EQ or EQ→Convolver).
-- This is set via the UI and stored atomically.
+| File | Size | Role |
+|---|---|---|
+| `RuntimeHealthMonitor.{h,cpp}` | 57.9 KB | Continuous runtime health/telemetry. Pull-based monitoring with 27+ monitor references. |
+| `RuntimePolicyEngine.{h,cpp}` | 10.4 KB | Recovery action selection (6-level hierarchy: Observe → Throttle → Recover → Restore → Safe → Critical). |
+| `RuntimePublicationOrchestrator.{h,cpp}` | 18.6 KB | Publish orchestration: Admission → Executor → DSPTransition. Deferred publish (30s TTL). |
+| `RuntimePublicationValidator.{h,cpp}` | 7.8 KB | Validation pipeline (schema/authority/topology/transition). |
+| `RuntimePublicationState.h` | 7.0 KB | Publication state owner + ledger. |
+| `RuntimePublisher.{h,cpp}` | — | Publish executor (Coordinator-level). |
+| `PublicationAdmission.{h,cpp}` | 2.4 KB | Admission evaluation (generation check, HealthState, shutdown check). |
+| `PublicationExecutor.{h,cpp}` | 3.3 KB | Executor for publication (commit/dispatch). |
+| `CrossfadeAuthority.{h,cpp}` | 2.3 KB | Crossfade decision authority (dspProjection-based, no DSPCore dependency). |
+| `CrossfadeRuntime.h` | 9.0 KB | Crossfade executor runtime state. |
+| `RuntimeBuilder.{h,cpp}` | 28.0 KB | Only entity that can construct `RuntimeState` (via `BuilderToken`). |
+| `RuntimeBuildTypes.h` | 3.7 KB | Build snapshot and fingerprint types. |
+| `RuntimeGraph.h` | 5.1 KB | Runtime graph representation. |
+| `RuntimeTransition.h` | 2.3 KB | State transition description. |
+| `FrozenRuntimeWorld.{h,cpp}` | 4.4 KB | Phase-4 frozen world concept. |
+| `WorldLifecycleAudit.{h,cpp}` | 4.1 KB | World lifecycle audit trail. |
+| `TelemetryRecorder.{h,cpp}` | 4.3 KB | Telemetry recording (progress, failure, correlation). |
+| `RuntimeDrainAudit.h` | — | Drain audit for shutdown diagnostics. |
+| `ISREvidenceExporter.{h,cpp}` | — | Evidence export for CI and auditing. |
+| `AtomicAccess.h` | 5.8 KB | `consumeAtomic` / `publishAtomic` / `fetchAddAtomic` / `compareExchangeAtomic` API. Module-wide consistency for atomic operations. |
+| `DSPLifetimeManager.h` / `DSPTransition.h` | 10 KB | DSP lifetime management and transition handling. |
 
-1. **EQ Processing**
+### 3.3 `src/convolver/` — Convolver Split (10 files, ~251 KB)
 
-- `EQProcessor::process()` is called.
-- 20-band parametric EQ is applied using TPT SVF filters.
-- All parameter/state updates are lock-free (RCU pattern).
-- AGC (automatic gain control) is applied if enabled.
+8 feature flags (`CONVOPEQ_ENABLE_CONVOLVER_SPLIT_*`) control TU segmentation:
 
-1. **Convolution Processing**
+| File | Size | Responsibility |
+|---|---|---|
+| `ConvolverProcessor.Internal.h` | 5.5 KB | Split-internal helpers: `unwrapPhaseRadians`, `nextPow2`, `resampleIR`, `convertToMinimumPhase`. |
+| `.Lifecycle.cpp` | 22.1 KB | Lifecycle management (RCU integration). |
+| `.Rebuild.cpp` | 12.4 KB | Rebuild determination logic. |
+| `.LoaderThread.cpp` | 29.5 KB | IR loading thread + `LoaderThreadInline.h`. |
+| `.LoadPipeline.cpp` | 32.1 KB | Pipeline processing (load stages). |
+| `.MixedPhase.cpp` | 38.9 KB | As-Is/Mixed/Minimum phase conversion. AllpassDesigner integration, disk cache, CMA-ES fallback. |
+| `.ResampleAndFallback.cpp` | 18.0 KB | r8brain resampling and fallback paths. |
+| `.Runtime.cpp` | 47.8 KB | Audio-thread runtime (process, bypass, latency). |
+| `.StateAndUI.cpp` | 47.5 KB | Preset save/load, UI bridge, serialization. |
 
-- `ConvolverProcessor::process()` is called.
-- Performs high-performance convolution (linear/minimum phase, IR smoothing, output filter).
-- IR and parameters are updated asynchronously and atomically.
+> Legacy monolithic `MKLNonUniformConvolver.cpp` (~65 KB) is kept compiled for backward compatibility, guarded by `#ifdef`.
 
-1. **Output Conditioning**
+### 3.4 `src/eqprocessor/` — 20-Band EQ Split (6 files, ~163 KB)
 
-- `OutputFilter::process()` applies high/low cut filtering.
-- `UltraHighRateDCBlocker` removes output DC offset.
-- If enabled, `AudioEngine::DSPCore::softClipBlockAVX2()` applies musical soft clipping (AVX2-optimized).
+| File | Size | Responsibility |
+|---|---|---|
+| `EQProcessor.h` | 32.3 KB | `EQBandType`, `EQChannelMode`, `EQBandParams`, `EQCoeffsSVF`, `EQCoeffsBiquad`, `EQCoeffCache`, AGC constants. |
+| `.Core.cpp` | 42.4 KB | Core initialization and public API. |
+| `.Coefficients.cpp` | 19.3 KB | SVF and Biquad coefficient calculation (all 5 filter types). |
+| `.Parameters.cpp` | 12.7 KB | Parameter update (RCU via `uintptr_t` atomic handles). |
+| `.Processing.cpp` | **57.2 KB** | TPT SVF per-band processing (AVX2 FMA). Serial/Parallel structure, M/S mode, AGC, saturation. |
+| `.ProcessingCache.cpp` | 2.7 KB | `EQCoeffCache` management. |
 
-1. **Dither & Noise Shaping**
+### 3.5 `src/core/` — RCU Foundation (37 files, ~118 KB)
 
-- Dither and noise shaping are applied according to user selection:
-  - `PsychoacousticDither`, `FixedNoiseShaper`, `Fixed15TapNoiseShaper`, or `LatticeNoiseShaper` (adaptive, CMA-ES optimized).
-- Adaptive coefficients are managed per sample rate/bit depth/mode and updated atomically.
+Cross-cutting foundation delivered in phases (v13.0 redesign):
 
-1. **Downsampling (If Oversampled)**
+**Snapshot / RCU:**
+| File | Size | Role |
+|---|---|---|
+| `EpochDomain.h` | **26.0 KB** | 64 named reader slots, `globalEpoch` management, quiescent-state-based reader registration/tracking. |
+| `RCUReader.h` | 8.7 KB | RAII reader epoch enter/exit. |
+| `SnapshotCoordinator.{h,cpp}` | 7.9 KB | Thread-safe snapshot publication and fade. |
+| `SnapshotFactory.{h,cpp}` | 5.9 KB | Snapshot creation and destruction. |
+| `SnapshotAssembler.{h,cpp}` | — | Snapshot assembly pipeline. |
+| `RuntimeStore.h` | — | Internal store for `RuntimePublicationCoordinator`. |
+| `RuntimeReaderContext.h` | — | Reader context (`ObserveChannel::Audio` / `Message` / `Publication`). |
+| `ObservedRuntime.h` | — | Observed runtime abstraction (token-based). |
+| `GlobalSnapshot.{h,cpp}` | — | Immutable snapshot base. |
+| `ObserveChannel.h` | — | Observation channel classification. |
+| `RebuildTypes.h` | — | Rebuild intent and classification types. |
+| `Types.h` / `TimeUtils.h` | — | Common types, time measurement harness. |
+| `EQParameters.h` | — | EQ parameter container. |
 
-- `CustomInputOversampler::processDown()` is called.
-- Multi-stage FIR/IIR downsampling is performed, AVX2-optimized, with real-time safety.
+**Async Reclamation:**
+| File | Role |
+|---|---|
+| `DeletionQueue.{h,cpp}` | Deferred object deletion queue. |
+| `DeferredRetireFallbackQueue.h` | Overflow fallback for RetireRouter. |
+| `WorkerThread.{h,cpp}` | Background snapshot worker thread. |
+| `ThreadAffinityManager.h` | Thread affinity policy management. |
+| `CommandBuffer.h` | Non-blocking command dispatch. |
+| `FadeEngine.h` | Fade computation engine. |
 
-1. **Output Buffer Delivery**
+### 3.6 `src/tests/` — CTest Regression (15 files, ~153 KB)
 
-- The processed buffer is written back to the output channels in `juce::AudioSourceChannelInfo`.
-- Level meters and spectrum analyzer taps are updated via lock-free FIFO.
+All tests registered via `add_test()` in CMakeLists.txt. Many are JUCE-independent.
 
-1. **UI/Analyzer/Worker Thread Data Transfer**
+| Test | KB | Focus |
+|---|---|---|
+| `RuntimePublicationCoordinatorTests` | 5.3 | Coordinator template contract. |
+| `ISRSemanticValidationTests` | 19.2 | Semantic validation (schema v9). |
+| `RuntimeSemanticSchemaValidationTests` | 26.7 | Field/authority invariants. |
+| `RetireGraceSemanticsTests` | 12.7 | Grace period semantics. |
+| `PartialPublicationRejectTests` | 21.2 | Partial publication rejection (MKL-linked). |
+| `BuildInputSemanticContractTests` | 16.5 | Build input contract (large stack 8MB). |
+| `RuntimeWorldAuthorityProjectionTests` | 13.1 | World authority projection invariants. |
+| `OverlapAuthoritySingularTests` / `ShadowCompareContractTests` / `CrossfadeExecutorLocalContractTests` / `ObservePathSingleSourceTests` | 1–2 each | Singular authority boundaries. |
+| `PublicationValidatorIsolationTests` / `RebuildAdmissionRegressionTests` / `PriorityIntegrationTests` | | Validator/release/priority tests. |
+| `ISRRuntimeIdentityGeneratorsTests` | 1.5 | UUID/Generation generator correctness. |
 
-- Analyzer and learning data are pushed to `LockFreeRingBuffer` for consumption by the UI and `NoiseShaperLearner` worker thread.
-- All inter-thread communication uses atomic/lock-free/RCU patterns for real-time safety.
++ External CI: `HeadlessAudioPathVerification` (PowerShell, gated by `$CONVO_CI_BUILD`).
 
-**See also:**
+### 3.7 `config/` — JSON Authority Manifests (4 files)
 
-- `src/AudioEngine.cpp` (`getNextAudioBlock`, `DSPCore::process`)
-- `src/EQProcessor.cpp`, `src/ConvolverProcessor.cpp`, `src/CustomInputOversampler.cpp`, `src/OutputFilter.cpp`
-- `SOUND_PROCESSING.md` for mathematical and code-level details.
+| File | Bytes | Role |
+|---|---|---|
+| `runtime_graph_baseline.json` | 97 | Baseline topology snapshot reference. |
+| `publication_manifest.json` | 2,001 | Machine-readable publication inventory. |
+| `authority_inventory.json` | 10,509 | Generated from `ISRRuntimeSemanticSchema.h` + `RuntimeGraph.h` + `AudioEngine.h`. Declares `Authoritative/Derived/Diagnostic` authority per field. |
+| `pub_boundary_registry.json` | 2,255 | Publication-boundary registry (single source of publication transitions). |
+
+Python verifiers in `tools/` cross-check source against these JSONs at build/commit time — guards against authority drift.
 
 ---
 
-Key points:
+## 4. Runtime Topology and Data Flow
 
-- **EQ/Convolver order is runtime-selectable**.
-- Analyzer source can be input or output path.
-- Analyzer data flow is decoupled from final output and read through FIFO on the UI side.
-- Gain staging is mode-aware:
-  - input headroom is applied before core DSP,
-  - convolver input trim is applied only in **EQ -> Convolver** when both stages are active,
-  - output makeup is applied before optional soft clipping.
-- **Adaptive Noise Shaper Learning**:
-  - When enabled, the audio thread pushes audio blocks to a lock-free ring buffer for the learner.
-  - The learner runs on a dedicated worker thread, asynchronously optimizing noise shaper coefficients using recent audio.
-  - State handoff between audio and learner threads is RCU-style and lock-free for real-time safety.
-  - UI progress and error state are exposed via atomic variables and polled by the engine/UI.
+### 4.1 Logical Processing Chain
+
+```
+Audio Input
+  → Input conditioning (DC removal, input headroom gain)
+  → Oversampling (optional, 2x/4x/8x)
+  → [EQ <-> Convolver] (order selectable)
+  → Output Filter (HC/LC/HPF/LPF, mode-dependent)
+  → Output Makeup Gain
+  → Soft Clipping (optional, musical soft clip)
+  → Downsampling (if oversampled)
+  → Fixed Latency Delay (latency compensation)
+  → Analyzer FIFO Tap (optional)
+  → Audio Output (float back to device buffer)
+```
+
+### 4.2 Callback-Level Detailed Flow
+
+```
+AudioDeviceCallback → AudioProcessorPlayer → AudioEngineProcessor.getNextAudioBlock()
+  → AudioEngine::getNextAudioBlock()                                                                   [Audio Thread]
+    ├─ AudioCallbackRuntimeScope: lifecycle/firewall/allocator scope
+    ├─ RuntimeWorld read (RCU): readAudioRuntimeView()
+    │   ├─ audioThreadRcuReader.enter()
+    │   ├─ RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore) → RuntimeState*
+    │   ├─ resolveActiveRuntimeDSPFromRuntimeWorldOnly() → DSPCore*
+    │   └─ resolveFadingRuntimeDSPFromRuntimeWorldOnly() → DSPCore*
+    ├─ EngineParameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld)
+    ├─ Crossfade delay gate (if pending), arm crossfade
+    ├─ DSPCore::process(bufferToFill, ...)                                                            [DSP Flow]
+    │   ├─ processInput: headroom gain, DC remove, input level metering
+    │   ├─ [if OS] processUp: multi-stage AVX2 FIR/IIR upsample
+    │   │   └─ UltraHighRateDCBlocker.oversampledL/R
+    │   ├─ route(order): EQThenConvolver → eqRt.process → convolverRt.process
+    │   │                ConvolverThenEQ → convolverRt.process → eqRt.process
+    │   ├─ outputFilter.process(HCMode/LCMode)
+    │   ├─ scaleBlockFallback(outputMakeupGain) [AVX2]
+    │   ├─ [if softClip] softClipBlockAVX2(fastTanh musical soft clip)
+    │   ├─ [if OS] processDown: multi-stage AVX2 FIR downsampling
+    │   ├─ pushToFifo(analyzerFifo) [if analyzer output tap]
+    │   ├─ outputLevelLinear ← measureLevel(publishAtomic)
+    │   └─ processOutput: DC remove, fixed latency delay, fade in ramp
+    ├─ [if canCrossfade] runLatencyAlignedCrossfadeMixLoop (new/old equal-power blend)
+    ├─ finish crossfade / cleanup
+    └─ Diagnostic telemetry (CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS)
+        ├─ CPU migration / callback sequence / DSP timing
+        ├─ XRUN detection (interval > 1.5x expected || callback > 1.5x expected)
+        ├─ CBSUMMARY (callback + interval max per second)
+        └─ DiagEvent → LockFreeRingBuffer → Timer side drain
+```
+
+### 4.3 Inter-Thread Data Flow Architecture
+
+```
+┌─────────────────────┐     LockFreeRingBuffer<DiagEvent, 512>
+│    Audio Thread     │─────→ Timer Thread (diag formatting + Logger write)
+│ (DSP callback)      │
+│                     │     LockFreeAudioRingBuffer (FIFO_SIZE = 1M samples)
+│                     │─────→ Message Thread (SpectrumAnalyzer FFT + paint)
+│                     │
+│                     │     LockFreeRingBuffer<AudioBlock, 4096>
+│                     │─────→ Worker Thread (NoiseShaperLearner CMA-ES)
+│                     │
+│                     │     publishAtomic / consumeAtomic (atomic variables)
+│                     │─────→ Message/Timer Threads (all parameters + telemetry)
+└─────────────────────┘
+
+┌─────────────────────┐
+│  Message Thread     │  submitRebuildIntent(Structural/...) + loadPreset + configure
+│  (UI + Control)     │
+│                     │─────────────────────────────────────────────↓
+└─────────────────────┘                                           rebuildThreadLoop()
+                                                                     ├─ buildNewDSP()
+                                                                     ├─ enqueuePublicationIntent()
+                                                                     └─ RuntimeBuilder.buildRuntimePublishWorld()
+                                                                           → RuntimePublicationOrchestrator.submitPublishRequest()
+                                                                             → PublicationAdmission.evaluate()
+                                                                               → Accepted → RuntimePublicationCoordinator.publishWorld()
+┌─────────────────────┐
+│  Timer Thread       │  Orchestrator.tick() (100ms), HealthMonitor.tick(),
+│  (100ms polling)    │  Telemetry drain, Evidence emit, Retire reclaim
+└─────────────────────┘
+
+┌─────────────────────┐     DeferredDeletionQueue → tryReclaim()
+│ ISRRetireRouter     │     → old DSPCore/EQState/ConvolverState released
+│ + DeferredFreeThread│     → aligned_free() / delete
+└─────────────────────┘
+```
+
+### 4.4 Processing Order Routing Table
+
+| order | convBypass | eqBypass | DSP Path |
+|---|---|---|---|
+| `ConvolverThenEQ` | false | false | `convolverRt.process` → `eqRt.process(eqParams, eqCache)` |
+| `ConvolverThenEQ` | false | true | `convolverRt.process` → `eqRt.process()` (pass-through) |
+| `ConvolverThenEQ` | true | false | bypass conv → `eqRt.process(eqParams, eqCache)` |
+| `ConvolverThenEQ` | true | true | bypass conv → `eqRt.process()` (pass-through) |
+| `EQThenConvolver` | false | false | `eqRt.process(eqParams, eqCache)` → `convolverInputTrimGain` → `convolverRt.process` |
+| `EQThenConvolver` | true | false | `eqRt.process()` → `convolverRt.process` |
+
+After core DSP: outputFilter always applied (convIsLast flag determines HC/LC/HPF/LPF selection). Makeup gain applied. Soft clip applied (saturation-dependent).
 
 ---
 
-## 4. Subsystem Responsibilities
+## 5. ISR Runtime Governance System
 
-### 4.1 AudioEngine
+ConvoPeq implements a custom runtime governance layer (ISR) that treats every stateful field as belonging to exactly one AuthorityClass.
+
+### 5.1 Authority Classification
+
+| AuthorityClass | Meaning | Example Fields |
+|---|---|---|
+| **Authoritative** | Set in exactly one place; never derived. Mutations must be controlled. | `generation`, `topology`, `routing`, `execution`, `publication`, `overlap`, `metadata`, `retire`, `timing`, `latency` |
+| **Derived** | Recomputed from authoritative fields. Not independently mutable. | `generationSemantic`, `graph`, `engine`, `resource`, `automation`, `coefficient`, `dspProjection` |
+| **Diagnostic** | Observation only; must not drive runtime branching. | `worldId`, `affinity`, `projectionFreshness`, `semanticHash` |
+| **ExecutorLocal** | Transient to one execution; not shared. | (none in current `RuntimeState`) |
+
+Declared in `RuntimeState::kFieldDescriptors[21]` and ` RuntimeState::kRuntimeAuthorityInventory[21]`, verified against `config/authority_inventory.json`.
+
+### 5.2 ISR 10-Layer Architecture
+
+```
+Layer 1    RuntimeGraph                 src/core/RuntimeGraph.h
+             ├─ Active/fading node description
+             └─ Contract: validateDecisionCoverageContract()
+
+Layer 2    RuntimeState (sealed)        AudioEngine.h L133-299
+             ├─ BuilderToken-protected construction
+             ├─ 21 field descriptors, 21 authority inventory entries
+             ├─ 10 read-authority inventory entries
+             └─ Freeze/Seal for immutability post-publish
+
+Layer 3    RuntimeBuilder               src/audioengine/RuntimeBuilder.h
+             ├─ Only entity that can construct RuntimeState
+             ├─ Populates all Semantic structs (topology, routing, execution, ...)
+             └─ buildRuntimePublishWorld(dsp, oldDSP, policy, fadeSec, ...)
+
+Layer 4    RuntimePublicationCoordinator  src/core/RuntimePublicationCoordinator.h
+             ├─ Template <World, Handle, Bridge>
+             ├─ publishWorld() — validates → commits → publishes
+             └─ consumeWorldHandle() — RT read path (atomic observe)
+
+Layer 5    RuntimePublicationValidator   src/audioengine/RuntimePublicationValidator.h
+             └─ Validates schema/authority/topology/resource contracts
+
+Layer 6    PublicationAdmission / Executor
+             ├─ Admission.evaluate(healthState): generation check + shutdown + health
+             └─ Executor: commit runtime world into store
+
+Layer 7    CrossfadeAuthority            src/audioengine/CrossfadeAuthority.h
+             ├─ evaluate(oldWorld, newWorld, policy) from dspProjection
+             └─ Decision { needsCrossfade, fadeTimeSec }
+
+Layer 8    ISRShutdown (FSM)             src/audioengine/ISRShutdown.h
+             ├─ Running → AudioStopped → ObserverDrained → RetireClosed
+             │   → EpochSettled → ReclaimComplete → [EmergencyDrain]
+             │   → VerifyDrained → TimedOut|Failed → ShutdownComplete
+             └─ BlockingReasonStats (alignas(64)) per-reason
+
+Layer 9    ISRRetire / ISRRetireRouter / OverflowRing
+             ├─ Router: epoch-coordinated retire entry
+             ├─ OverflowRing: hardware-safe false sharing isolation
+             └─ Grace period → reclaim: deferred deletion queue
+
+Layer 10   RuntimeHealthMonitor + TelemetryRecorder + RuntimePolicyEngine
+             ├─ Pull-based monitoring (27+ monitor references)
+             ├─ ISRHealthState: Healthy → Degraded → Critical
+             ├─ RecoveryAction hierarchy: Observe→Throttle→Recover→Restore→Safe→Critical
+             └─ Telemetry/Evidence export (CI correlation)
+
+Cross-layer    RuntimePublicationBridge
+                 ├─ commit(PublishAuthority, RuntimeBoundary, newWorld, ver, seq, epoch, mappedGen)
+                 └─ retire(RetireAuthority, RuntimeBoundary, oldWorld)
+```
+
+### 5.3 Publication Pipeline
+
+```
+Non-RT Path (Message/Worker/Timer Threads):
+  submitRebuildIntent(kind) → RebuildDispatch.enqueueCommand()
+    → rebuildThreadLoop() → buildNewDSP()
+      → enqueuePublicationIntentForRuntimeCommit(newDSP, gen, sealedSnapshot)
+        → RuntimePublicationOrchestrator.submitPublishRequest(req)
+          ├─ admission_.evaluate(healthState, req) → Accepted
+          ├─ RuntimeBuilder.buildRuntimePublishWorld()
+          ├─ CrossfadeAuthority.evaluate(oldWorld, newWorld, policy)
+          └─ Coordinator.publishWorld(worldOwner)
+              ├─ runPublicationPrecheckNonRt(world)
+              │   ├─ validateSemanticCompleteness()
+              │   ├─ validateRuntimeGraphAuthorityContract()
+              │   └─ precheckRuntimePublication(closure, descriptor)
+              ├─ onRuntimePublishedNonRt(world)
+              │   ├─ worldLifecycleAudit_.onWorldPublished()
+              │   ├─ runtimePublicationBridge_.commit()
+              │   ├─ lastCommittedRuntimeGeneration_ = world.generation
+              │   └─ emitEvidenceTickNonRt()
+              └─ RuntimeStore publish (atomic world* swap)
+
+RT Path (Audio Thread):
+  readAudioRuntimeView() → makeRuntimeReadHandle(audioCtx)
+    → RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)
+      → RuntimeState* (atomic load)
+        → resolveActiveRuntimeDSPFromRuntimeWorldOnly() → DSPCore*
+```
+
+### 5.4 Shutdown Sequence
+
+```
+~AudioEngine():
+  1. ShutdownPhase::StopAcceptingWork    → lifecycleState=Releasing
+  2. ShutdownPhase::StopAudio            → stopTimer()
+  3. ShutdownPhase::StopWorkers          → stopRebuildThread()
+                                        → retire active/fading DSP
+                                        → shutdownWorkerThread()
+  4. ShutdownPhase::ForceEpochAdvance    → m_retireRouter->publishEpoch()
+  5. ShutdownPhase::DrainRetire          → poll up to 5 sec:
+     while (pendingRetireCount > 0 || activeReaderCount > 0)
+         m_retireRouter->publishEpoch() / tryReclaim()
+  6. publishCoordinator.requestShutdownClearNonRt()
+  7. runtimePublicationBridge_.markShutdownComplete()
+  8. drainDeferredRetireQueues(true)
+  9. m_epochDomain.drainAll()
+ 10. latencyBuf aligned_free
+ 11. lifecycleState = Destroyed
+```
+
+---
+
+## 6. Subsystem Responsibilities
+
+### 6.1 AudioEngine
 
 - Owns the high-level runtime state exposed to UI.
-- Bridges UI requests to DSP-safe update paths.
+- Bridges UI requests to DSP-safe update paths via `submitRebuildIntent()`.
 - Coordinates processing order, bypass states, analyzer routing, device-driven prepare/reset, and rebuild staging.
+- Owns `RuntimePublicationOrchestrator`, `RuntimeHealthMonitor`, `ISRRetireRouter`, `RuntimePublicationBridge`, `CrossfadeRuntime`, `EQCacheManager`, `WorkerThread`.
+- Manages Adaptive Noise Shaper Learner lifecycle (start/stop learning, progress polling, error reporting).
 
-- Manages the lifecycle and control of the Adaptive Noise Shaper Learner, including starting/stopping learning, progress polling, and error reporting.
+### 6.2 EQProcessor
 
-### 4.2 EQProcessor
+- 20-band parametric EQ in the real-time path using TPT SVF filters.
+- RCU parameter updates via `uintptr_t`-backed atomic handles + `EpochDomain`.
+- AGC (automatic gain control) with pre-computed attack/release/smooth coefficient tables.
+- Nonlinear saturation via `fastTanh` approximation (AVX2).
+- `EQCoeffCache` (RefCountedDeferred) for cross-snapshot coefficient sharing.
+- Serial/Parallel filter structure with crossfade-able transition.
 
-- Applies the 20-band parametric EQ in the real-time path.
-- Exposes parameter/state interfaces used by UI and engine.
-- Keeps display-oriented EQ response work outside the callback path.
+### 6.3 ConvolverProcessor
 
-### 4.3 ConvolverProcessor
+- IR-based convolution via Intel MKL Non-Uniform Partitioned Convolution (NUC).
+- Asynchronous IR loading/rebuild on Worker Thread. `BuildSnapshot` + `StructuralHash` for rebuild decision.
+- Configurable rebuild debounce (20 ms default, 10–3000 ms range).
+- Crossfade-safe transitions (old/new DSP fade with latency compensation).
+- Phase modes: As-Is / Mixed / Minimum. Mixed-phase uses `AllpassDesigner` (CMA-ES).
+- Tail modes: AirAbsorption / LayerTailContouring / Bypass.
+- Progressive FFT upgrade (background thread).
 
-- Owns IR runtime state and rebuild lifecycle.
-- Handles asynchronous IR preparation, debounce, crossfade-safe transitions, and notification coalescing.
-- Separates heavy rebuild work from callback-time use.
+### 6.4 NoiseShaperLearner
 
-### 4.4 NoiseShaperLearner
+- Dedicated worker thread for adaptive noise shaper learning.
+- Audio thread pushes `AudioBlock` structs (256 samples, 2ch) to `LockFreeRingBuffer<AudioBlock, 4096>`.
+- CMA-ES optimization of 9th-order IIR coefficients (180 coefficient banks).
+- Multi-level normalization (4 target levels: -40/-30/-20/-10 dBFS).
+- Progress, error, and best coefficients reported via atomic variables to engine/UI.
+- All memory handoff and state transitions are real-time safe (RCU + lock-free).
 
-- Dedicated background worker thread for adaptive noise shaper learning.
-- Audio thread pushes audio blocks to a lock-free ring buffer (256-sample blocks, real-time safe).
-- Worker thread runs CMA-ES optimization using the most recent audio (up to 8 segments per generation).
-- Three learning modes (Short/Middle/Long) select convergence speed and stability.
-- Coefficient banks are saved/loaded per sample rate and bit depth.
-- Progress, error, and best coefficients are reported via atomic variables and polled by engine/UI.
-- All memory handoff and state transitions are real-time safe (no locks or blocking in the audio thread).
-- Typical convergence time: Short 10–20min, Middle 20–40min, Long 40–80min.
+### 6.5 SpectrumAnalyzerComponent
 
-### 4.5 SpectrumAnalyzerComponent
-
-- Consumes analyzer FIFO data on the UI side.
-- Runs FFT visualization, smoothing, peak hold, and EQ overlay drawing.
-- Uses adaptive update rates to reduce UI/message-thread burst load.
-
----
-
-## 5. Threading Model / Thread Classification and Responsibilities
-
-### 5.1 Message Thread (UI Thread)
-
-- Handles UI rendering, event processing, user actions, device settings, and dispatches asynchronous requests.
-- Heavy operations such as IR loading/rebuild and NoiseShaper learning are delegated to the Worker Thread from here.
-
-### 5.2 Audio Thread (Real-Time Callback)
-
-- Performs only block-based DSP processing; always references pre-constructed state.
-- Memory allocation/deallocation, libm calls, synchronization/communication, I/O, and UI access are strictly prohibited.
-- For Adaptive Noise Shaper Learning, pushes AudioBlocks to the LockFreeRingBuffer (non-blocking, lock-free).
-
-### 5.3 Worker / Background Thread
-
-- Handles heavy tasks: IR parsing/loading/resampling/phase conversion, convolution state construction, engine rebuild, etc.
-- Adaptive Noise Shaper Learning: CMA-ES optimization using recent AudioBlocks.
-- All handoff to/from the Audio Thread is done with RCU/atomic/lock-free patterns for real-time safety.
+- Consumes `analyzerFifo` (LockFreeAudioRingBuffer) on the UI side.
+- MKL 4096-point FFT. Hann windowing. Smoothing (α=0.15, 85% old retention).
+- 1-second peak hold with decay. EQ overlay paths (L/R/Mid/Side individual curves).
+- Adaptive timer rates: active analyzer 60 Hz, disabled-but-visible 15 Hz, hidden 5 Hz.
 
 ---
 
-## 6. State and Transition Strategy
+## 7. Threading Model
+
+### Thread Classification
+
+| Thread | Responsibility | Constraints |
+|---|---|---|
+| **Message Thread** (GUI) | UI rendering, event processing, user actions, device settings, dispatches async requests | Heavy work delegated to Worker thread |
+| **Audio Thread** (RT Callback) | Block-based DSP processing only; always references pre-constructed state | **No** allocations, libm, locks, blocking, exceptions, I/O |
+| **Timer Thread** (100ms) | Telemetry drain, rebuild dispatch, HealthMonitor polling, spectro-analysis trigger, Evidence export | |
+| **Worker / Rebuild Thread** | IR parsing/loading/resampling/phase conversion, DSPCore construction, snapshot assembly | |
+| **DeferredFree Thread** | Asynchronous object reclamation after RCU grace period | |
+| **NoiseShaperLearner Thread** | CMA-ES optimization using recent AudioBlocks | |
+
+### Thread-Safe Communication
+
+| Pattern | Mechanism | Used For |
+|---|---|---|
+| RCU (Read-Copy-Update) | `EpochDomain` (64 slots) + `RCUReader` | EQ parameters, Convolver IR, NoiseShaper coefficients, RuntimeWorld |
+| Atomic publish/consume | `publishAtomic` / `consumeAtomic` / `compareExchangeAtomic` | All scalar parameters (bypass, gain, order, mode, etc.) |
+| Lock-Free SPSC Ring | `LockFreeRingBuffer<T,N>` | DiagEvent (512), XRunEvent, AudioBlock (4096) |
+| Lock-Free Audio FIFO | `LockFreeAudioRingBuffer` | Spectrum analyzer (FIFO_SIZE = 1M samples) |
+| Deferred Deletion | `DeferredDeletionQueue` + `DeferredFreeThread` | Old DSPCore, EQState, BandNode after grace period |
+
+---
+
+## 8. State and Transition Strategy
 
 ConvoPeq follows a staged update model:
 
 1. **Request phase (UI/control path)**
-   - User or settings request a change.
+   - User or settings request a change (e.g., EQ band frequency, convolver IR file, oversampling factor).
 
 2. **Prepare phase (non-real-time path)**
-   - Expensive structures are built asynchronously.
+   - Expensive structures are built asynchronously:
+     - DSPCore reconstruction (Convolver + EQ + Oversampler + OutputFilter)
+     - Parameter snapshots (EQParameters, BuildSnapshot)
+     - MKL NUC engine creation
+   - `captureRuntimeBuildSnapshot()` captures sealed build fingerprint for admission comparison.
 
-3. **Apply/swap phase (real-time-safe boundary)**
-   - Prepared state is activated with minimal callback disruption.
+3. **Publish phase (ISR pipeline)**
+   - `RuntimePublicationOrchestrator` executes admission evaluation (`PublicationAdmission::evaluate`):
+     - Check HealthState (Healthy/Degraded/Critical)
+     - Check shutdown state
+     - Check generation monotonicity
+     - Check structural hash equivalence
+   - If accepted: `RuntimeBuilder.buildRuntimePublishWorld()` → `RuntimePublicationCoordinator.publishWorld()`.
+   - `CrossfadeAuthority` determines crossfade type (smooth/hard reset).
 
-This is especially important for convolver IR operations and engine rebuilds.
+4. **Apply/swap phase (real-time-safe boundary)**
+   - `DSPTransition` atomically swaps active/fading DSPCore pointers.
+   - Audio Thread observes new world via RCU read path on next callback.
+   - Crossfade executes over fade duration (typically 30–80 ms, mode-dependent).
 
-Persistence is split into two paths:
+### Persistence Paths
 
-- `DeviceSettings::saveSettings/loadSettings`
-  - Restores device state and a small set of session-like engine settings (`ditherBitDepth`, `oversamplingFactor`, `oversamplingType`, `inputHeadroomDb`, `outputMakeupDb`).
-- `AudioEngine::getCurrentState()/requestLoadState()`
-  - Manual preset XML path used by the main window save/load actions.
-  - Restores processing order, bypass state, gain staging, analyzer routing, filter modes, dither, oversampling, EQ state, and Convolver state.
+- `device_settings.xml` (`DeviceSettings::saveSettings/loadSettings`)
+  - Restores device state, ditherBitDepth, oversamplingFactor/Type, inputHeadroomDb, outputMakeupDb, adaptive noise shaper coefficients.
+- Manual preset XML (`AudioEngine::getCurrentState()/requestLoadState()`)
+  - Full processing-state portability: processing order, bypass, gain staging, filter modes, EQ 20-band parameters, Convolver params.
   - Load order is staged to prevent mode-dependent defaults from overwriting restored gain settings.
 
 ---
 
-## 7. Convolver Runtime Design (Current)
+## 9. Crossfade System
 
-`ConvolverProcessor` combines asynchronous rebuild with click-safe transitions:
+### Crossfade Modes
 
-- **Async IR loading/rebuilding** through worker paths.
-- **Debounced rebuild scheduling** for bursty UI updates.
-- **Configurable rebuild debounce** (`50..3000 ms`, default `400 ms`), persisted in state.
-- **Coalesced change notifications** to reduce message-thread bursts.
-- **Crossfade-aware processing** so old/new wet/delay paths overlap only where needed.
-- **Latency retarget hysteresis** to reduce frequent retriggering.
-- **Phase state persistence** for `AsIs / Mixed / Minimum` plus `mixedF1Hz / mixedF2Hz / mixedTau`.
-- **IR length persistence** for both target length and auto/manual selection state.
+| Trigger | fadeTimeSec | Source |
+|---|---|---|
+| Convolver bypass toggle | `m_irFadeTimeSec` (80 ms default) | atomic |
+| IR length change | `m_irLengthFadeTimeSec` (50 ms) | atomic |
+| Phase mode change | `m_phaseFadeTimeSec` (60 ms) | atomic |
+| Direct head mode change | `m_directHeadFadeTimeSec` (10 ms) | atomic |
+| NUC filter change | `m_nucFilterFadeTimeSec` (30 ms) | atomic |
+| Tail mode change | `m_tailFadeTimeSec` (30 ms) | atomic |
+| Oversampling change | `m_osFadeTimeSec` (30 ms) | atomic |
 
-UI integration details:
+### Crossfade Execution
 
-- `ConvolverControlPanel` applies a **3-second idle debounce** for selected expensive controls (mix/smoothing/IR length) to avoid repeated rebuild pressure during active dragging.
-- Processor-side rebuild debounce (`50..3000 ms`) remains active as a second guard against bursty rebuild requests from any caller.
-- Advanced IR settings are hosted in a separate dialog and include IR length, rebuild debounce, and Mixed-phase tuning controls.
+```
+AudioBlock.cpp: getNextAudioBlock()
+  ├─ processCrossfadeDelayGateIfPending(): delay-gate when LT delay has changed
+  ├─ armCrossfadeIfPending(): activate crossfade tracking
+  └─ if (canCrossfade):
+      ├─ new DSP → current process path
+      ├─ old DSP → dspCrossfadeFloatBuffer (fadingState, no analyzer)
+      └─ runLatencyAlignedCrossfadeMixLoop(new, old, latencyDelay, gNew, gOld)
+          └─ equal power sine mixing: out[i] = newL[i]*gNew + dryScaledL[i]*(1-gNew)
+```
 
-Latency reporting details:
-
-- `AudioEngine::getCurrentLatencyBreakdown()` publishes oversampling latency, convolver algorithm latency, IR peak latency, and total base-rate latency.
-- `MainWindow::timerCallback()` renders latency from the single source `totalLatencyBaseRateSamples` to keep `ms` and `samples` numerically consistent.
-- `AudioEngine::getCurrentLatencyMs()` also derives from total samples (single-source conversion), avoiding per-component rounding drift.
-
----
-
-## 8. Analyzer and Visualization Path (Current)
-
-`SpectrumAnalyzerComponent` uses a throttled UI pipeline:
-
-- Input source is read from engine FIFO on timer callbacks.
-- FFT path includes windowing, magnitude conversion, smoothing, and peak hold.
-- EQ response overlays are computed and rendered separately from audio processing.
-
-Performance controls:
-
-- **Adaptive timer rates by state**:
-  - active analyzer: `60 Hz`,
-  - analyzer disabled but visible: `15 Hz`,
-  - hidden component: `5 Hz`.
-- **Coalesced EQ update requests** using dirty-flag + interval gating.
-- Analyzer-off path avoids unnecessary repeated full visual updates.
-- Input/output analyzer routing is selected in `AudioEngine`, while the UI consumes data through the engine FIFO without touching callback-time state.
+Crossfade runtime state: `CrossfadeRuntime` tracks `LinearRamp` gain (exponential ramp, 30 ms default), dry scale gain, crossfade arm status, event drop counter. `CrossfadeAuthority` determines whether crossfade is needed from `dspProjection` fields (irLoaded, structuralHash, oversamplingFactor) — no DSPCore dependency.
 
 ---
 
-## 9. Real-Time Safety and Memory Discipline
+## 10. Memory and Alignment Discipline
 
-- The main DSP path uses 64-bit double precision.
-- All large buffers (IR, FFT, workspaces, etc.) are allocated/freed using convo::aligned_malloc (64-byte alignment) and ScopedAlignedPtr (RAII).
-- Memory allocation/deallocation, libm calls, synchronization/communication, exceptions, etc. are strictly prohibited on the Audio Thread.
-- All temporary buffers are managed with RAII; no leaks even on exceptions or early returns.
-- Dynamic growth patterns (e.g., std::vector) are allowed only outside the Audio Thread.
-- Denormal handling and stable smoothing/crossfade transitions are enforced.
-- Object retirement uses reference counting and deferred retirement for safety.
-
----
-
-## 10. Device and Configuration Lifecycle
-
-Device lifecycle is coordinated by `DeviceSettings` + `AudioEngine`:
-
-- Device start/open -> prepare/init processing resources.
-- Runtime -> per-block execution through `AudioEngineProcessor`.
-- Device stop/restart/sample-rate change -> reset/reprepare flow.
-- ASIO blacklist support reduces unstable driver scenarios.
-
-Configuration lifecycle uses both persistence paths:
-
-- `device_settings.xml` for device-centric auto-restore and a compact runtime subset.
-- Manual preset XML for full processing-state portability (including EQ/Convolver internals).
+- Main DSP path: 64-bit double precision.
+- All large buffers (IR, FFT, workspaces): `convo::aligned_malloc` (64-byte alignment) + `ScopedAlignedPtr` (RAII).
+- Audio Thread: allocations, libm calls, locks, exceptions, I/O **strictly prohibited**.
+- `EpochDomain`: 64 named reader slots with per-slot epoch tracking and `alignas(64)` isolation.
+- False-sharing prevention: critical atomics (`pendingLearningMode`, `globalCaptureSessionId`, `learningCommandWrite/Read`, et al.) use `alignas(64)`.
+- All RAII-managed buffers; no leaks on exceptions or early returns.
+- Denormal handling: DAZ/FTZ mode enabled at app startup + per-sample `killDenormal()` check in TPT SVF state variables.
 
 ---
 
 ## 11. Build and Runtime Context
 
-- OS: **Windows 11 x64**
-- Framework: **JUCE 8.0.12**
-- Compiler: **MSVC (VS2022)**
-- Build system: **CMake**
-- Recommended generator: **Ninja Multi-Config**
-- Math acceleration: **Intel oneMKL**
+| Aspect | Detail |
+|---|---|
+| OS | **Windows 11 x64** (Windows 7+ compatible API subset) |
+| Framework | **JUCE 8.0.12** |
+| C++ Standard | **C++20** |
+| Compiler (primary) | **MSVC 19.44+ (Visual Studio 2022 17.11+)** |
+| Compiler (alternative) | **Intel icx (oneAPI 2026.0)** |
+| Build System | **CMake** with Ninja Multi-Config |
+| Math Acceleration | **Intel oneMKL** (sequential, LP64, static) + **Intel IPP** |
+| CRT | **Static** (`/MT` Release, `/MTd` Debug) |
 
-Artifacts:
+### Build Presets (CMakePresets.json)
 
-- Debug: `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
-- Release: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
+| Preset | Generator | Compiler | Output |
+|---|---|---|---|
+| `vs2026-x64` | Ninja Multi-Config | `cl` | `build/` |
+| `icx-x64` | Ninja Multi-Config | `icx` | `build-icx/` |
+| custom | Ninja (single) | auto | `out/build/${presetName}/` |
+
+**Build Presets**: `debug` / `release` (configurePreset: `vs2026-x64`).
+
+### Build Options
+
+| Option | Default | Description |
+|---|---|---|
+| `CONVOPEQ_ENABLE_CLANG_TIDY` | OFF | Build-time clang-tidy analysis |
+| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | CTest regression suite (15 tests) |
+| `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` | OFF | Runtime diagnostic logging (XRUN/MEM/VERIFY) |
+| `ENABLE_ASAN` | OFF | AddressSanitizer (Debug only, forces /MDd) |
+| `CONVOPEQ_PGO_INSTRUMENT` | OFF | PGO instrumentation |
+| `CONVOPEQ_PGO_USE` | OFF | PGO optimized build |
+
+### Convolver Split Feature Flags (all ON)
+
+```
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RESAMPLE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
+```
+
+### Artifacts
+
+| Configuration | Path |
+|---|---|
+| Debug (MSVC) | `build/ConvoPeq_artefacts/Debug/ConvoPeq.exe` |
+| Release (MSVC) | `build/ConvoPeq_artefacts/Release/ConvoPeq.exe` |
+| Release (icx) | `build-icx/ConvoPeq_artefacts/Release/ConvoPeq.exe` |
 
 ---
 
 ## 12. Dependency Boundaries
 
-The following directories are external dependencies and must be treated as strictly read-only during normal development:
+The following directories are external dependencies and must be treated as **strictly read-only** during normal development:
 
-- `JUCE/`
-- `r8brain-free-src/`
+- `JUCE/` (JUCE 8.0.12, 3,056 files, 44 MB)
+- `r8brain-free-src/` (r8brain sample-rate converter, 49 files, 14.5 MB)
+- `.clang-format` / `.clang-tidy` / `.editorconfig` — coding style enforcement
+- `.gitignore` — tracked exclusion rules
 
 ---
 
 ## 13. Development Notes
 
 - Keep callback-time work deterministic and allocation-free.
-- Treat convolver rebuilds and analyzer refresh as separate burst-control problems.
+- Treat convolver rebuilds, analyzer refresh, and NoiseShaper learning as separate burst-control problems.
 - Prefer staging, debounce, and handoff over immediate heavy reconfiguration.
+- All Atomic operations must use the `AtomicAccess.h` API (`publishAtomic` / `consumeAtomic` / `fetchAddAtomic` / `compareExchangeAtomic`). Direct `std::atomic::load/store` must be reviewed.
 - Preserve the current read-only boundary for external dependencies.
+- Runtime diagnostics (`CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS`) should remain OFF in Release builds; diagnostics use `LockFreeRingBuffer<DiagEvent>` to avoid Logger allocation on the Audio Thread.
+- CI builds set `CONVO_CI_BUILD` environment variable to enable `NUC_DEBUG_GUARDS` and `HeadlessAudioPathVerification`.
 
 ---
 
-## 14. Current Architectural Summary
+## 14. Architectural Summary (Current)
 
-ConvoPeq uses the following layered architecture:
+ConvoPeq v0.6.8 uses a five-layer architecture:
 
-- **UI Layer**: User interaction, visualization, and state display
-- **Engine Layer**: Orchestration and lifecycle management
-- **DSP Layer**: Quality/performance-focused signal processing
+```
+┌────────────────────────────────────────────────────────────────┐
+│                          UI Layer                               │
+│  MainWindow, EQControlPanel, ConvolverControlPanel,             │
+│  SpectrumAnalyzerComponent, DeviceSettings                      │
+├────────────────────────────────────────────────────────────────┤
+│                       Engine Layer                              │
+│  AudioEngine (orchestration, state lifecycle, audio I/O bridge) │
+├────────────────────────────────────────────────────────────────┤
+│                       ISR Layer                                 │
+│  RuntimePublicationOrchestrator, RuntimeHealthMonitor,           │
+│  RuntimePolicyEngine, ISRShutdown, ISRRetireRouter,              │
+│  CrossfadeAuthority, RuntimeBuilder, Publication Pipeline        │
+├────────────────────────────────────────────────────────────────┤
+│                        DSP Layer                                 │
+│  EQProcessor (20-band TPT SVF), ConvolverProcessor (MKL NUC),    │
+│  CustomInputOversampler (AVX2 FIR/IIR), OutputFilter (Biquad),   │
+│  NoiseShaperLearner (CMA-ES), PsychoacousticDither, TruePeak     │
+├────────────────────────────────────────────────────────────────┤
+│                       Core Layer                                 │
+│  EpochDomain (64-slot RCU), SnapshotCoordinator,                  │
+│  RuntimeStore, DeferredDeletionQueue, AlignedAllocation          │
+└────────────────────────────────────────────────────────────────┘
+```
 
 Design focus:
 
-- Strict real-time safety (all Audio Thread prohibitions strictly enforced)
-- Asynchronous and heavy state construction is always performed on Worker/Message Threads in advance
-- All inter-thread data transfer uses lock-free/RCU/atomic patterns
-- All buffers in the MKL path are strictly 64-byte aligned
-- Dependency directories (JUCE/ and r8brain-free-src/) are strictly read-only
+- **Strict real-time safety**: Audio Thread prohibitions enforced via Firewall (`ISRRTExecution`), zero-allocation path verification.
+- **Asynchronous state construction**: Always on Worker/Message Threads; published atomically via ISR Publication Pipeline.
+- **All inter-thread data transfer**: lock-free/RCU/atomic patterns; no mutex on Audio Thread.
+- **All large buffers**: 64-byte aligned (`aligned_malloc` / MKL `DftiMalloc` / `PFFFT`).
+- **Authority governance**: `authority_inventory.json` + `pub_boundary_registry.json` + Python verifiers → compile-time authority contract enforcement.
+- **Dependency directories** (`JUCE/`, `r8brain-free-src/`): strictly read-only.
+- **Schema versioning**: `ISRRuntimeSemanticSchema.h` schema v9 + `RuntimeState::kFieldDescriptors` + `RuntimeState::validateDescriptorSet()` → contract compiler-time verified.
 
-For details on the learning algorithm, convergence, and bit depth management, see `README.md` and `NoiseShaperLearner.h/.cpp`.
+---
+
+*Version: v0.6.8 (Updated 2026-07-03)*
+*Compiler: MSVC 19.44+ / Intel icx 2026.0*
+*Platform: Windows 11 x64*
+*JUCE: 8.0.12*
+*MKL: oneAPI sequential (static)*

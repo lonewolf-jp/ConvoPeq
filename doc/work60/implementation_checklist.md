@@ -1,51 +1,87 @@
-# 実装チェックリスト — 計測追加改修 v7
+# Numeric-Only DiagEvent 実装チェックリスト（完了）
 
-**対象**: ConvoPeq 3rd-observation | **開始**: 2026-06-30 | **Status**: In Progress
+**作成日**: 2026-07-02 | **最終更新**: 2026-07-02
+**対象設計書**: `診断ログRT違反_numeric-only設計レポート_2026-06-30.md`
+**凡例**: ✅ = 完了 | 🔄 = 作業中 | ❌ = 未着手
 
 ---
 
-## Phase 0: 基盤整備
+## Phase 1: AudioEngine.h — 型定義追加 ✅
 
-- [ ] F: diagLog Commit.cpp 修正（`JUCE_DEBUG` → `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS`）
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 1a | `DiagCategory` enum class | ✅ | `enum class DiagCategory : uint8_t` 追加（7カテゴリ） |
+| 1b | サブ構造体（CpuMigData他7種） | ✅ | CpuMigData, CallbackSequenceData, DspTimingData, CallbackStageData, EqTimeData, ConvTimeData, StereoConvTimeData + PublicationDirection enum |
+| 1c | `DiagEvent` 主構造体 | ✅ | category + eventIndex + union{7種}、6個のstatic_assert（trivially_copyable, standard_layout, trivial, trivially_destructible, alignof, offsetof）|
+| 1d | `DiagRuntimeLimits` | ✅ | BufferCapacity=512, MaxDrainPerTick=64 |
+| 1e | `DiagPerTickCounter` | ✅ | `struct alignas(64)` per-tick counter |
+| 1f | RTAuxMutable内カウンタ | ✅ | diagTickPushed/Popped/Dropped + diagTotalPushed/Popped + setEqDiagBuffer/setConvDiagBuffer宣言 |
+| 1g | diagBuffer メンバ | ✅ | `LockFreeRingBuffer<DiagEvent, 512>` を AudioEngine クラスに追加（xRunBuffer隣）|
 
-## Phase 1: RTLocalState メンバ変数追加（AudioEngine.h）
+## Phase 2: AudioBlock.cpp — CPU_MIG + CB_SEQ ✅
 
-- [ ] RTLocalState に以下を追加:
-  - `lastCallbackEntryUs` (atomic<uint64_t>)
-  - `lastCallbackDriftUs` (atomic<int64_t>)
-  - `lastCallbackProcessor` (atomic<uint32_t>, UINT32_MAX初期値)
-  - `cpuMigrationCount` (atomic<uint64_t>)
-  - `lastCallbackPublicationSeq` (atomic<uint64_t>)
-  - `CallbackTimingEntry` 構造体
-  - `callbackTimingHistory[32]`
-  - `callbackTimingWriteCount` (atomic<uint64_t>)
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 2a | CPU_MIG → DiagEvent push | ✅ | `juce::Logger::writeToLog` → `DiagEvent{}` + `diagBuffer.push()` + counter更新 |
+| 2b | CB_SEQ → DiagEvent push | ✅ | 同上 |
 
-## Phase 2: AudioBlock.cpp / BlockDouble.cpp 改修
+## Phase 3: AudioBlock.cpp — DSP_TIMING + CALLBACK_STAGE ✅
 
-- [ ] A: callback entry timing（RuntimeScope直後, 3ブロック）
-- [ ] G: CPU migration（Aと同時、1ブロック）
-- [ ] H: publicationSequence（Aと同時、1ブロック）
-- [ ] A: DriftUs を [XRUN] ログに追記
-- [ ] B: CallbackTelemetryScope 常時化 + リングバッファ書込
-- [ ] B: CB_HIST ダンプ（XRUN検出ブロック内）
-- [ ] B: 新 CallbackTelemetryScope 構築引数対応
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 3a | DSP_TIMING → DiagEvent push | ✅ | observeReason文字列から数値マッピング（Forward→1, Rollback→2, Replay→3）→ PublicationDirection |
+| 3b | CALLBACK_STAGE → DiagEvent push | ✅ | budgetPermille保持（formatはTimer側）|
 
-## Phase 3: ConvolverProcessor.Runtime.cpp 改修
+## Phase 4: BlockDouble.cpp — CPU_MIG ✅
 
-- [ ] C: ConvolverProcessor::process() 全体タイマー + [CONV_TIME] 出力
-- [ ] C2: StereoConvolver::process() 単体タイマー + [STCONV_TIME] 出力
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 4a | CPU_MIG → DiagEvent push | ✅ | AudioBlock.cppと同一パターン |
 
-## Phase 4: DSPCoreDouble.cpp / DSPCoreFloat.cpp 改修
+## Phase 5: DSPCoreFloat.cpp — EQ_TIME ✅
 
-- [ ] D: EQ::process() タイマー + bandカウント + [EQ_TIME] 出力（各4箇所×2ファイル）
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 5a | logEqTime → DiagEvent push | ✅ | モジュール別ポインタ経由（eqDiagBuffer）+ budgetPermille計算 |
 
-## Phase 5: DSPCoreDouble.cpp / DSPCoreIO.cpp 改修
+## Phase 6: DSPCoreDouble.cpp — EQ_TIME ✅
 
-- [ ] E: ANS applyMatchedCoefficients タイマー + [ANS_SWITCH] 出力
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 6a | logEqTime → DiagEvent push | ✅ | Float版と同一（setEqDiagBuffer定義はFloat側のみ、ODR回避） |
 
-## Phase 6: 検証
+## Phase 7: ConvolverProcessor.Runtime.cpp — CONV_TIME + STCONV_TIME ✅
 
-- [ ] Release ビルド成功確認
-- [ ] CLI smoke test（起動→終了）
-- [ ] テストシナリオ実行（無音→IR+PEQ→ANS→音楽）
-- [ ] ログに新規診断タグ出現確認
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 7a | CONV_TIME → DiagEvent push | ✅ | convDiagBuffer経由、callQ/lat保持 |
+| 7b | STCONV_TIME → DiagEvent push | ✅ | 同上 |
+
+## Phase 8: AudioEngine.Timer.cpp — 消費 + 統計 ✅
+
+| # | 項目 | 状態 | 変更内容 |
+|---|------|------|---------|
+| 8a | diagBuffer pop + フォーマット | ✅ | while(pop()) + switch 7種 + diagLog（PublicationDirection文字列変換含む） |
+| 8b | DiagStatistics | ✅ | [DIAG_STAT] pushed/popped/dropped/approxOcc/backlog/dropRate |
+
+## Phase 9: ビルド確認 ⚠️
+
+| # | 項目 | 状態 | 備考 |
+|---|------|------|------|
+| 9a | Debug ビルド | ⚠️ | **ビルド環境の問題**（VS2026 previewの標準ライブラリヘッダ不足:`'algorithm':No such file or directory`）により確認不可 |
+| 9b | Release ビルド | ⚠️ | 同上（ビルド環境復旧後に確認） |
+| 9c | sizeof確認→static_assert== | ⏳ | ビルド通貨後に `sizeof(DiagEvent)` を出力して `== 実測値` に変更 |
+
+---
+
+## 変更ファイル一覧
+
+| ファイル | 変更種別 | 概要 |
+|---------|---------|------|
+| `src/audioengine/AudioEngine.h` | 追加 | DiagCategory, 7種Data構造体, DiagEvent, DiagRuntimeLimits, DiagPerTickCounter, RTAuxMutableカウンタ, diagBufferメンバ, setter宣言 |
+| `src/audioengine/AudioEngine.Processing.AudioBlock.cpp` | 変更 | CPU_MIG, CB_SEQ, DSP_TIMING, CALLBACK_STAGE→DiagEvent push |
+| `src/audioengine/AudioEngine.Processing.BlockDouble.cpp` | 変更 | CPU_MIG→DiagEvent push |
+| `src/audioengine/AudioEngine.Processing.DSPCoreFloat.cpp` | 変更 | logEqTime→DiagEvent push + setEqDiagBuffer定義 |
+| `src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp` | 変更 | logEqTime→DiagEvent push（setter定義削除でODR回避） |
+| `src/convolver/ConvolverProcessor.Runtime.cpp` | 変更 | CONV_TIME, STCONV_TIME→DiagEvent push + setConvDiagBuffer定義 |
+| `src/audioengine/AudioEngine.Timer.cpp` | 追加 | diagBuffer pop+format+diagLog + [DIAG_STAT] |

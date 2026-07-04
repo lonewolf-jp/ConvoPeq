@@ -74,6 +74,9 @@ void AudioEngine::releaseResources()
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
     runtimePublicationBridge_.requestShutdown();
 
+    // ★ [work63] シャットダウン完了処理（NativeRT 復元 + MMCSS 未解除時の安全網）
+    finalizeMmcssShutdown();
+
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
     // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
     clearRebuildReason(RebuildReason::StructuralFromNonMT);

@@ -7,6 +7,7 @@ $failed = $false
 Write-Host "===== list-compliance.yml ====="
 try {
     & "$PSScriptRoot\check-list-compliance.ps1"
+    if ($LASTEXITCODE -ne 0) { throw "check-list-compliance.ps1 failed (exit=$LASTEXITCODE)" }
     Write-Host "PASS: check-list-compliance.ps1"
 } catch {
     Write-Host "FAIL: check-list-compliance.ps1 : $_"
@@ -15,6 +16,7 @@ try {
 
 try {
     & "$PSScriptRoot\check-src-size-mul-cast.ps1"
+    if ($LASTEXITCODE -ne 0) { throw "check-src-size-mul-cast.ps1 failed (exit=$LASTEXITCODE)" }
     Write-Host "PASS: check-src-size-mul-cast.ps1"
 } catch {
     Write-Host "FAIL: check-src-size-mul-cast.ps1 : $_"
@@ -24,6 +26,7 @@ try {
 Write-Host "`n===== audioengine-lint.yml ====="
 try {
     & "$PSScriptRoot\check-audioengine-lint.ps1"
+    if ($LASTEXITCODE -ne 0) { throw "check-audioengine-lint.ps1 failed (exit=$LASTEXITCODE)" }
     Write-Host "PASS: check-audioengine-lint.ps1"
 } catch {
     Write-Host "FAIL: check-audioengine-lint.ps1 : $_"

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <atomic>
+
 // ============================================================================
 // Runtime診断ログの一括制御マクロ
 //
@@ -16,9 +19,13 @@
 #endif
 
 // work60: 診断ログサンプリングマスク。CMakeのtarget_compile_definitionsで指定可能。
-// デフォルト 0xF = 1/16。Debug:0x3(1/4), HeavyAnalyze:0x1(1/2)。
+// ★ [work62] Release:0xFF(1/256), Debug:0x3F(1/64) に引き上げ
 #ifndef CONVOPEQ_DIAG_SAMPLE_MASK
-#define CONVOPEQ_DIAG_SAMPLE_MASK 0xF
+#ifdef NDEBUG
+#define CONVOPEQ_DIAG_SAMPLE_MASK 0xFF  // Release: 1/256
+#else
+#define CONVOPEQ_DIAG_SAMPLE_MASK 0x3F  // Debug: 1/64
+#endif
 #endif
 
 // ★ RUNTIME_DIAG_LOG マクロ: 単一の diagLog 呼び出しをマクロで囲む
@@ -77,7 +84,7 @@ inline ProcessMemoryInfo getProcessMemoryInfo() noexcept
 inline void updateAtomicMaximum(std::atomic<uint32_t>& target, uint32_t value) noexcept
 {
     uint32_t expected = target.load(std::memory_order_relaxed);
-    while (value > expected && !target.compare_exchange_weak(expected, value,
+    while (value > expected && !target.compare_exchange_weak(expected, value, // NOLINT(atomic-dot-call)
         std::memory_order_relaxed, std::memory_order_relaxed)) {}
 }
 

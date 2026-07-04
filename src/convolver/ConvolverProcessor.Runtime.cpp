@@ -55,6 +55,24 @@ namespace
     }
 }
 
+// work60: module-level pointers to AudioEngine::diagBuffer for CONV_TIME/STCONV_TIME
+//   Set via setConvDiagBuffer() called from AudioEngine initialization.
+namespace {
+    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* convDiagBuffer = nullptr;
+    DiagPerTickCounter* convTickPushed = nullptr;
+    DiagPerTickCounter* convTickDropped = nullptr;
+    std::atomic<uint64_t>* convTotalPushed = nullptr;
+}
+void setConvDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
+                       DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
+                       std::atomic<uint64_t>& totalPushed) noexcept
+{
+    convDiagBuffer = &db;
+    convTickPushed = &tickPushed;
+    convTickDropped = &tickDropped;
+    convTotalPushed = &totalPushed;
+}
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME)
 
 // ────────────────────────────────────────────────────────────────
@@ -655,16 +673,30 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     const double expectedUs = static_cast<double>(chunkSamples) / srForConv * 1e6;
                     const uint32_t cpu = convo::consumeAtomic(currentCpu, std::memory_order_relaxed);
-                    juce::String slog("[STCONV_TIME]");
-                    slog += " seq=" + juce::String(static_cast<int64_t>(cbSeq));
-                    slog += " cpu=" + juce::String(static_cast<int>(cpu));
-                    slog += " us=" + juce::String(static_cast<int64_t>(scElapsedUs));
-                    slog += " chunk=" + juce::String(chunkSamples);
-                    slog += " ch=" + juce::String(ch);
-                    slog += " budget=" + juce::String(
-                        (static_cast<double>(scElapsedUs) / expectedUs) * 100.0, 1) + "%";
-                    DBG(slog);
-                    juce::Logger::writeToLog(slog);
+                    const uint32_t budgetPermille = (expectedUs > 0.0)
+                        ? static_cast<uint32_t>((static_cast<double>(scElapsedUs) / expectedUs) * 1000.0)
+                        : 0;
+                    // work60: Numeric-Only DiagEvent
+                    if (convDiagBuffer != nullptr)
+                    {
+                        DiagEvent event{};
+                        event.category = DiagCategory::StereoConvTime;
+                        event.eventIndex = cbSeq;
+                        event.data.stereoConvTime.cpu = cpu;
+                        event.data.stereoConvTime.us = scElapsedUs;
+                        event.data.stereoConvTime.chunkSamples = static_cast<uint32_t>(chunkSamples);
+                        event.data.stereoConvTime.channels = static_cast<uint8_t>(ch);
+                        event.data.stereoConvTime.budgetPercent = static_cast<uint16_t>(budgetPermille);
+                        if (convDiagBuffer->push(event))
+                        {
+                            convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+                            convTotalPushed->fetch_add(1, std::memory_order_relaxed);
+                        }
+                        else
+                        {
+                            convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                 }
             }
 #endif
@@ -723,20 +755,34 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 const uint32_t cpu = convo::consumeAtomic(currentCpu, std::memory_order_relaxed);
                 const double expectedUs = static_cast<double>(block.getNumSamples()) / srForConv * 1e6;
-                juce::String clog("[CONV_TIME]");
-                clog += " seq=" + juce::String(static_cast<int64_t>(cbSeq));
-                clog += " cpu=" + juce::String(static_cast<int>(cpu));
-                clog += " us=" + juce::String(static_cast<int64_t>(convElapsedUs));
-                clog += " block=" + juce::String(static_cast<int>(block.getNumSamples()));
-                clog += " budget=" + juce::String(
-                    (static_cast<double>(convElapsedUs) / expectedUs) * 100.0, 1) + "%";
-                clog += " expected=" + juce::String(static_cast<int64_t>(expectedUs));
-                if (conv != nullptr) {
-                    clog += " callQ=" + juce::String(conv->callQuantumSamples);
-                    clog += " lat=" + juce::String(conv->latency);
+                const uint32_t budgetPermille = (expectedUs > 0.0)
+                    ? static_cast<uint32_t>((static_cast<double>(convElapsedUs) / expectedUs) * 1000.0)
+                    : 0;
+                // work60: Numeric-Only DiagEvent
+                if (convDiagBuffer != nullptr)
+                {
+                    DiagEvent event{};
+                    event.category = DiagCategory::ConvTime;
+                    event.eventIndex = cbSeq;
+                    event.data.convTime.cpu = cpu;
+                    event.data.convTime.us = convElapsedUs;
+                    event.data.convTime.blockSamples = static_cast<uint32_t>(block.getNumSamples());
+                    event.data.convTime.budgetPercent = static_cast<uint16_t>(budgetPermille);
+                    event.data.convTime.expectedUs = static_cast<uint32_t>(expectedUs);
+                    if (conv != nullptr) {
+                        event.data.convTime.callQuantumSamples = static_cast<uint32_t>(conv->callQuantumSamples);
+                        event.data.convTime.latency = static_cast<uint32_t>(conv->latency);
+                    }
+                    if (convDiagBuffer->push(event))
+                    {
+                        convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
+                        convTotalPushed->fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-                DBG(clog);
-                juce::Logger::writeToLog(clog);
             }
         }
     }

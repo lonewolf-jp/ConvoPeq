@@ -1,1000 +1,895 @@
-# Detailed Audio Signal Processing Flow in ConvoPeq
+# ConvoPeq Audio Signal Processing Guide
 
-This document describes, in as much detail as possible, the entire audio signal processing flow in ConvoPeq, from external audio input to external audio output. The analysis covers all major components, including threading, buffer management, and real-time safety strategies.
+This document describes the complete audio signal processing flow in ConvoPeq v0.6.8, from external audio input to external audio output. It covers all major components, threading, buffer management, and real-time safety strategies.
 
----
-
-## 1. Audio Input (External to Application)
-
-### Platform Layer & Entry Point
-
-- **JUCE Audio Device Callback**: Audio input is delivered by the JUCE audio engine via the `AudioIODeviceCallback` or, in plugin/standalone mode, via the `juce::AudioProcessor::processBlock()` method.
-- **Entry Function**: In ConvoPeq, the main entry is `AudioEngineProcessor::processBlock()` (float/double), which is called by the audio device driver thread for each audio block.
-  - For float: `void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)`
-  - For double: `void processBlock(juce::AudioBuffer<double>& buffer, juce::MidiBuffer&)`
-- **Thread Context**: This callback runs on the real-time audio thread, with strict timing and real-time safety requirements (no blocking, no allocation, no locks).
-
-### Buffer Structure & Memory Layout
-
-- **Buffer Type**: The input buffer is a `juce::AudioBuffer<float>` or `juce::AudioBuffer<double>`, which is a planar (non-interleaved) buffer:
-  - Channels: Typically 2 (stereo), but can be mono.
-  - Each channel is a contiguous array of samples.
-  - The buffer is not guaranteed to be 64-byte aligned, so internal processing copies data to aligned buffers for SIMD/MKL efficiency.
-- **Buffer Lifetime**: The buffer is only valid for the duration of the callback. All processing must be completed before returning.
-
-### AudioEngineProcessor → AudioEngine
-
-- **Delegation**: `AudioEngineProcessor::processBlock()` wraps the buffer in a `juce::AudioSourceChannelInfo` and calls `AudioEngine::getNextAudioBlock()`.
-  - For double-precision, it calls `AudioEngine::processBlockDouble()`.
-- **No MIDI**: MIDI input is ignored; only audio is processed.
-
-### AudioEngine Input Handling
-
-- **Aligned Buffering**: Input samples are copied into internal, 64-byte aligned buffers (see `AlignedAllocation.h`) to enable AVX2 and MKL operations.
-  - This avoids any dynamic allocation in the audio thread; all buffers are pre-allocated during `prepareToPlay()`.
-  - Copying is performed using `std::memcpy` or SIMD routines for maximum efficiency.
-- **Channel Handling**: If the input is mono, the single channel is duplicated to both left and right internal buffers.
-- **Sample Format**: All internal processing is performed in double-precision (`double`), regardless of input format.
-  - If the input is float, samples are converted to double before further processing.
-
-### Real-Time Safety & Synchronization
-
-- **No Dynamic Allocation**: Absolutely no `malloc`, `new`, or `std::vector::resize` in the audio thread.
-- **No Locks**: No mutexes or blocking synchronization. All parameter/state changes are handled via `std::atomic` or lock-free patterns.
-- **Atomic State Snapshot**: At the start of each block, all runtime parameters (bypass, order, analyzer, gain, etc.) are snapshotted from atomics for thread safety and consistency.
-
-### Input Dataflow Summary
-
-1. **Audio device driver** fills a `juce::AudioBuffer<float/double>` and calls `AudioEngineProcessor::processBlock()`.
-2. **AudioEngineProcessor** delegates to `AudioEngine`, passing the buffer.
-3. **AudioEngine** copies input samples to internal, 64-byte aligned double-precision buffers.
-4. **All further processing** (headroom, DC blocking, oversampling, DSP, etc.) operates on these aligned, double-precision buffers.
-
-### FFT Convolver (ConvolverProcessor)
-
-The ConvolverProcessor is a high-performance, real-time safe convolution engine designed for audio applications requiring long impulse responses (IRs), such as reverb, speaker simulation, and correction filters. It utilizes Intel MKL's Non-Uniform Partitioned Convolution (NUC) for efficient FFT-based processing, supporting stereo operation and seamless IR switching.
-
-**Key architectural features:**
-
-- **Thread Safety:** IR loading and switching are performed asynchronously on the message thread, using RCU (Read-Copy-Update) to ensure glitch-free operation. The audio thread never allocates memory or reloads IRs.
-- **Real-Time Safety:** All buffers are pre-allocated and 64-byte aligned for SIMD/MKL efficiency. No dynamic allocation, locks, or I/O occur in the audio thread.
-- **Stereo Processing:** Internally manages separate convolution engines for left and right channels, each with its own IR data and MKL NUC instance.
-- **Parameter Management:** All parameters (mix, phase mode, smoothing time, IR length, etc.) are managed atomically for lock-free, thread-safe updates.
-- **Visualization:** Generates IR waveform and frequency response snapshots for UI display, without impacting audio thread performance.
-- **Garbage Collection:** Old convolution engines are safely garbage collected after IR switches, ensuring no memory leaks or thread hazards.
-
-**Processing Flow:**
-
-1. At block start, the audio thread atomically loads the current IR state.
-2. For each channel, partitioned FFT convolution is performed using the MKL NUC engine.
-3. Dry/wet mixing, latency compensation, and crossfading are handled in real time, with all operations performed on pre-allocated, aligned buffers.
-4. All state changes (e.g., IR switch, parameter update) are applied atomically and safely, with no interruption to audio processing.
-
-### Main DSP Chain: Code Path Example (ConvolverProcessor)
-
-```cpp
-// At block start (audio thread):
-auto* currentIR = irState.load(std::memory_order_acquire);
-for (int ch = 0; ch < numChannels; ++ch) {
-  // Partitioned FFT convolution (MKL NUC)
-  mklNUC.process(channelBuffer, currentIR, ...);
-}
-```
-
-### Mixed (Parallel) IR Mode: Signal Processing Flow
-
-When the IR mode is set to "Mixed" (parallel), the input signal is split and processed in parallel by both the EQ and Convolver modules, then recombined. This enables hybrid processing, such as blending a clean EQ path with a colored convolution IR.
-
-#### Signal Flow
-
-1. **Input Buffer**: The aligned, double-precision input buffer $x[n]$ is prepared as usual.
-2. **Parallel Processing**:
-
-- **EQ Path**: $y_{\mathrm{EQ}}[n] = \mathrm{EQ}(x[n])$
-- **Convolver Path**: $y_{\mathrm{Conv}}[n] = \mathrm{Convolver}(x[n])$
-
-1. **Mixing**:
-
-- The outputs are blended using a user-configurable mix ratio $\alpha$ (0 ≤ $\alpha$ ≤ 1):
-    $$
-    y[n] = (1 - \alpha) \cdot y_{\mathrm{EQ}}[n] + \alpha \cdot y_{\mathrm{Conv}}[n]
-    $$
-- $\alpha$ is typically set via the UI or preset, and may be smoothed atomically per block for click-free transitions.
-
-1. **Post-Processing**: The mixed output $y[n]$ proceeds to output conditioning (filters, gain, soft clipping, dither, etc.).
-
-#### Mathematical Formulation
-
-- Let $x[n]$ be the input sample at time $n$.
-- $y_{\mathrm{EQ}}[n]$ is the output of the parametric EQ (see EQProcessor section for details).
-- $y_{\mathrm{Conv}}[n]$ is the output of the FFT-based convolution (see ConvolverProcessor section).
-- The final output is:
-  $$
-  y[n] = (1 - \alpha) \cdot \mathrm{EQ}(x[n]) + \alpha \cdot \mathrm{Convolver}(x[n])
-  $$
-
-#### Buffer Management & SIMD
-
-- Both EQ and Convolver operate on separate, 64-byte aligned double-precision working buffers.
-- The mixing operation is performed using AVX2 SIMD for maximum throughput:
-  $$
-  y[n:n+3] = (1 - \alpha) \cdot y_{\mathrm{EQ}}[n:n+3] + \alpha \cdot y_{\mathrm{Conv}}[n:n+3]
-  $$
-- All buffers are pre-allocated in `prepareToPlay()`; no dynamic allocation occurs in the audio thread.
-
-#### Parameter Management & Real-Time Safety
-
-- The mix ratio $\alpha$ is stored as an atomic variable and snapshotted at block start.
-- All parameter/state changes are atomic or lock-free.
-- No locks, no dynamic allocation, and no blocking in the audio thread.
-
-#### Code Path Example
-
-```cpp
-
-// In DSPCore::process() (pseudo-code):
-if (processingMode == Mixed) {
-   eq.process(inputBuffer, eqBuffer);
-   convolver.process(inputBuffer, convBuffer);
-   for (int n = 0; n < numSamples; ++n)
-      outputBuffer[n] = (1 - alpha) *eqBuffer[n] + alpha* convBuffer[n];
-}
-
-```
-
-#### Summary
-
-- Mixed IR mode enables flexible hybrid processing by blending EQ and convolution outputs in parallel.
-- All operations are double-precision, SIMD-optimized, and real-time safe.
-- The design ensures maximum fidelity and glitch-free transitions between processing modes.
+**Project**: ConvoPeq v0.6.8 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
+**Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20
+**Platform**: Windows 11 x64 · Real-time safe (no allocation/locks/libm/exceptions/I/O on audio thread)
 
 ---
 
-### 9th-Order Adaptive Noise Shaper Learning (CMA-ES)
+## 1. Audio Input & Device Callback Entry Point
 
-ConvoPeq features a 9th-order adaptive noise shaper whose coefficients are optimized in real time using the Covariance Matrix Adaptation Evolution Strategy (CMA-ES). This enables the system to minimize perceived quantization noise for the current audio material and output bit depth.
+### 1.1 Platform Layer
 
-#### Mathematical Model
+- **JUCE Audio Device Manager** manages ASIO/WASAPI/DirectSound drivers and delivers audio via `AudioIODeviceCallback`.
+- In ConvoPeq standalone mode, `AudioEngineProcessor` (a `juce::AudioProcessor` subclass) acts as the bridge.
+- The audio device driver calls `AudioEngineProcessor::processBlock()` on its own high-priority thread (the **real-time audio thread**).
 
-The noise shaper is modeled as an IIR filter of the form:
-
-$$
-e[n] = x[n] - y[n]
-$$
-$$
-y[n] = x[n] + \sum_{k=1}^{12} a_k \cdot e[n-k]
-$$
-
-where:
-
-- $x[n]$: input sample (pre-quantization)
-- $y[n]$: output sample (post-shaping, pre-quantization)
-- $e[n]$: quantization error at time $n$
-- $a_k$: adaptive feedback coefficients (to be optimized)
-
-The goal is to find the set $\{a_1, ..., a_{12}\}$ that minimizes the weighted error energy in the output, subject to stability and real-time constraints.
-
-#### Optimization Objective
-
-The cost function $J$ is typically defined as:
-
-$$
-J = \sum_{n=0}^{N-1} w[n] \cdot (e[n])^2
-$$
-
-where $w[n]$ is a perceptual weighting function (e.g., A-weighting or psychoacoustic masking curve) and $N$ is the block length.
-
-#### CMA-ES Learning Loop
-
-1. **Initialization**: Start with a population of candidate coefficient vectors $\mathbf{a}^{(i)} = [a_1^{(i)}, ..., a_9^{(i)}]$.
-2. **Evaluation**: For each candidate, run the noise shaper on the most recent audio block and compute $J^{(i)}$.
-3. **Selection**: Rank candidates by $J^{(i)}$ and select the best-performing subset.
-4. **Adaptation**: Update the mean and covariance of the coefficient distribution according to the CMA-ES algorithm.
-5. **Repeat**: Iterate until convergence or for a fixed number of generations per block.
-
-#### Real-Time & Threading Considerations
-
-- The audio thread pushes recent audio blocks to a lock-free FIFO for the learner.
-- The CMA-ES optimization runs on a dedicated worker thread, never blocking the audio thread.
-- Coefficient updates are handed off using atomic/RCU patterns for glitch-free, real-time-safe application.
-- The learning process is controlled by the UI (start/stop, mode selection) and progress is reported atomically.
-
-#### Practical Notes
-
-- The adaptive shaper can converge in 10–80 minutes depending on mode (Short/Middle/Long).
-- Coefficient banks are saved/loaded per sample rate and bit depth.
-- The system ensures stability by constraining the feedback polynomial roots inside the unit circle.
-- All learning and application is performed in double-precision, SIMD-optimized code paths.
-
-### Key Internal Structures
-
-- **DSPCore::ProcessingState**: Struct holding all parameters needed for one block, snapshotted from atomics.
-- **ScopedAlignedPtr&lt;double&gt; alignedL/R**: 64-byte aligned input/output buffers for SIMD/MKL.
-- **LockFreeRingBuffer**: Used for analyzer tap and inter-thread communication.
-- **RCU/Atomic Generation**: Used for IR and adaptive coefficient handoff.
-
-### Real-Time Safety Summary
-
-- No dynamic allocation, no locks, no blocking in audio thread.
-- All parameter/state changes are atomic or lock-free.
-- All memory is pre-allocated in `prepareToPlay()`.
-- Old DSP/IR/coefficients are garbage collected asynchronously.
-
-## 3. Input Conditioning
-
-### Input Conditioning Overview
-
-Input conditioning is the first stage of internal processing after input buffer alignment. It prepares the signal for high-fidelity DSP by applying headroom gain, removing DC offset, and optionally capturing raw input for UI analysis.
-
-### 1. Headroom Gain (SIMD Optimized)
-
-- **Purpose**: Prevents internal DSP from clipping by scaling input samples down by a configurable gain (typically -3dB to -6dB).
-- **Implementation**: SIMD-optimized scaling using AVX2 instructions for double-precision buffers.
-  - Function: `scaleBlockFallback(double* data, int numSamples, double gain)`
-  - All gain calculations and application are performed without libm calls in the audio thread.
-- **No Dynamic Allocation**: All buffers are pre-allocated and aligned for SIMD.
-
-### 2. Input DC Blocking (UltraHighRateDCBlocker)
-
-- **Purpose**: Removes DC offset from each channel using a two-stage first-order IIR DC blocker.
-- **Implementation**: `UltraHighRateDCBlocker` (see UltraHighRateDCBlocker.h)
-  - Two cascaded 1st-order IIR filters with slightly different cutoff frequencies for minimal phase distortion.
-  - SIMD-safe, no dynamic allocation, no libm calls in audio thread.
-  - State is maintained per channel, per block.
-- **Initialization**: All filter coefficients are set up in `prepareToPlay()` (never in audio thread).
-
-### 3. Analyzer Tap (Lock-Free FIFO)
-
-- **Purpose**: Captures raw input samples (pre-gain, pre-DC block) for UI spectrum analysis.
-- **Implementation**:
-  - Uses a lock-free, single-producer single-consumer ring buffer (`LockFreeRingBuffer<AudioBlock, 4096>`) for real-time safety.
-  - Function: `pushAdaptiveCaptureBlocks()` splits the input into 256-sample blocks, copies with `memcpy`, and pushes to the FIFO.
-  - No locks, no allocation, all operations are atomic and cache-line aligned.
-- **Consumption**: UI thread reads from FIFO using `readFromFifo()`, which is also lock-free for the audio thread.
-
-### SIMD & Real-Time Safety
-
-- All conditioning steps use AVX2 SIMD for maximum throughput.
-- No blocking, no locks, no dynamic allocation in the audio thread.
-- All state (gain, DC blocker, FIFO pointers) is maintained per block and per channel.
-
-### Example (Code Path)
+### 1.2 AudioEngineProcessor Entry
 
 ```cpp
-
-// Headroom Gain (SIMD)
-scaleBlockFallback(alignedL, numSamples, headroomGain);
-scaleBlockFallback(alignedR, numSamples, headroomGain);
-
-// DC Blocking
-inputDCBlockerL.process(alignedL, numSamples);
-inputDCBlockerR.process(alignedR, numSamples);
-
-// Analyzer Tap (if enabled)
-if (analyzerEnabled)
-   pushAdaptiveCaptureBlocks(captureQueue, alignedL, alignedR, numSamples, sampleRate, bitDepth, coeffBankIndex);
-
-```
-
-### Key Internal Structures
-
-- **UltraHighRateDCBlocker**: Two-stage IIR DC blocker, SIMD-safe, no libm, no allocation.
-- **LockFreeRingBuffer**: SPSC, 64-byte aligned, atomic, no locks.
-- **AudioBlock**: 256-sample, double-precision, planar, used for analyzer FIFO.
-
-### Notes
-
-- All conditioning is performed before oversampling or main DSP.
-- Analyzer tap is optional and only enabled if UI requests spectrum data.
-- All code paths are designed for maximum real-time safety and SIMD efficiency.
-
-## 4. Oversampling (Optional)
-
-### Oversampling Overview
-
-Oversampling increases the internal sample rate (2x, 4x, or 8x) to reduce aliasing and improve DSP quality. It is implemented by the `CustomInputOversampler` class, which supports both IIR-like and linear-phase FIR upsampling.
-
-### 1. Structure & Initialization
-
-- **Class**: `CustomInputOversampler`
-  - Supports up to 8x oversampling via cascaded stages (2x per stage, up to 3 stages).
-  - Two presets: `IIRLike` (lower latency, fewer taps), `LinearPhase` (more taps, higher attenuation).
-- **Buffering**: All working buffers (`workA`, `workB`, histories, coefficients) are pre-allocated and 64-byte aligned for SIMD.
-- **prepare()**: Called from the message thread before audio starts. Sets up all stages, allocates buffers, computes FIR coefficients (Kaiser window, sinc), and clears histories.
-
-### 2. Upsampling (processUp)
-
-- **Entry**: `processUp(const juce::dsp::AudioBlock<double>& inputBlock, int numChannels)`
-- **Flow**:
-   1. For each stage, calls `interpolateStage()` per channel:
-      - Applies FIR interpolation using precomputed coefficients.
-      - Uses AVX2 SIMD for dot product and buffer operations.
-      - Handles denormal numbers explicitly (flush-to-zero).
-   2. Doubles the sample count at each stage.
-   3. Final output is a double-precision, planar, aligned buffer.
-- **SIMD Optimization**: All convolution and buffer ops use AVX2/FMA where available.
-- **No Dynamic Allocation**: All memory is reserved in `prepare()`.
-
-### 3. Downsampling (processDown)
-
-- **Entry**: `processDown(const juce::dsp::AudioBlock<double>& upsampledBlock, juce::dsp::AudioBlock<double>& outputBlock, int numChannels)`
-- **Flow**:
-   1. For each stage (reverse order), calls `decimateStage()` per channel:
-      - Applies FIR decimation using precomputed coefficients.
-      - Uses AVX2 SIMD for convolution.
-      - Handles denormal numbers explicitly.
-   2. Halves the sample count at each stage.
-   3. Final output is written to the aligned output buffer.
-- **Safety**: If input size exceeds pre-allocated capacity, output is zeroed and processing is skipped.
-
-### 4. FIR Filter Design
-
-- **Coefficients**: Computed per stage using Kaiser windowed sinc, with tap count and attenuation depending on preset and stage.
-- **Alignment**: All coefficient arrays are 64-byte aligned for SIMD.
-- **Normalization**: Coefficients are normalized to ensure unity gain at DC.
-
-### 5. Real-Time Safety & SIMD
-
-- **No allocation, no locks, no libm calls** in the audio thread.
-- **All buffer and history management** is explicit and pre-allocated.
-- **Denormal Handling**: All stages flush denormals to zero for performance.
-- **All up/downsampling is performed in double-precision** for maximum fidelity.
-
-### 6. DC Blocker Integration
-
-- **Post-Oversampling**: After upsampling, a DC blocker (`UltraHighRateDCBlocker`) is applied to remove any DC introduced by interpolation.
-- **Pre-Downsampling**: After main DSP and before downsampling, another DC blocker may be applied to suppress DC artifacts.
-
-### Example (Code Path)
-
-```cpp
-
-// Oversampling up (in AudioEngine/DSPCore)
-if (oversamplingEnabled)
+// src/audioengine/AudioEngineProcessor.h
+class AudioEngineProcessor final : public juce::AudioProcessor
 {
-   auto upBlock = customOversampler.processUp(inputBlock, numChannels);
-   dcBlocker.process(upBlock.getChannelPointer(0), upBlock.getNumSamples());
-   // ... main DSP processing at high rate ...
-   customOversampler.processDown(upBlock, outputBlock, numChannels);
-}
-
+    void processBlock(juce::AudioBuffer<float>& buffer,  juce::MidiBuffer&) override;
+    void processBlock(juce::AudioBuffer<double>& buffer, juce::MidiBuffer&) override;
+    bool supportsDoublePrecisionProcessing() const override { return true; }
+};
 ```
 
-### Key Internal Structures
+- `AudioEngineProcessor::processBlock(float)` wraps the buffer in `juce::AudioSourceChannelInfo` and delegates to `AudioEngine::getNextAudioBlock()`.
+- `AudioEngineProcessor::processBlock(double)` delegates to `AudioEngine::processBlockDouble()`.
+- MIDI input is ignored (only audio is processed).
 
-- **CustomInputOversampler::Stage**: Holds FIR coefficients, histories, tap counts, all 64-byte aligned.
-- **workA/workB**: Double-precision, aligned working buffers for ping-pong processing.
-- **All buffer sizes**: Determined at prepare-time, never resized in audio thread.
+### 1.3 Buffer Structure & Lifetime
 
-### Notes
+- Input buffer is a `juce::AudioBuffer<float>` or `juce::AudioBuffer<double>` — **planar (non-interleaved)**, one contiguous array per channel.
+- Channels: typically 2 (stereo); mono is duplicated to both channels.
+- **Buffer validity**: only for the duration of the callback. All processing must complete before return.
+- The incoming buffer is **not guaranteed 64-byte aligned**, so internal processing copies samples into pre-allocated, 64-byte aligned double-precision working buffers (`alignedL`, `alignedR`).
 
-- Oversampling is optional and only enabled if selected by the user.
-- All up/downsampling is performed in-place, with no extra allocation or copying.
-- All code paths are designed for maximum SIMD throughput and real-time safety.
+### 1.4 Double-Precision Internals
 
-## 5. Main DSP Chain
+- All internal DSP processing is performed in **double-precision (`double`)**, regardless of input format.
+- If the input is `float`, samples are promoted to `double` during the copy to aligned buffers.
+- Using `double` throughout ensures sufficient precision for the entire processing chain.
 
-### Code Path Example (ConvolverProcessor)
+### 1.5 Real-Time Thread Safety at Entry
+
+- `AudioEngine::processBlockDouble()` immediately acquires:
+  - `lifecycleToken` from `lifecycleRuntime_.enterAudioCallback()` — engine lifecycle state gate
+  - `firewallToken` from `rtCapabilityFirewall_.enter()` — RT capability verification
+  - `ScopedNoDenormals` — flush denormals to zero for the entire callback duration
+  - `ThreadRole::AudioRealtime` scoped role marker for numeric policy verification
+- If `lifecycleState != EngineLifecycleState::Prepared`, the buffer is cleared and the function returns immediately.
+- If shutdown is in progress, `shutdownRuntime_.markLateCallback()` is called and the buffer is cleared.
+
+### 1.6 DSPCore Process Entry
+
+- `DSPCore::process()` is the main audio-thread processing function.
+- It receives the aligned double-precision buffers and a `ProcessingState` snapshot (all parameters atomically loaded at block start).
+- All processing occurs within `DSPCore::process()` on the audio thread.
+
+---
+
+## 2. Input Conditioning
+
+Input conditioning is the first DSP stage after buffer alignment. It prepares the signal without altering the signal content in a way that affects downstream processing fundamentally.
+
+### 2.1 Headroom Gain
+
+- **Purpose**: Prevents internal DSP clipping by scaling input samples by a configurable gain (typically -3 dB to -6 dB).
+- **Implementation**: `scaleBlockFallback()` in `AudioEngine.Processing.DSPCoreDouble.cpp`:
+  ```cpp
+  inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
+  {
+      // AVX2: 4 doubles per instruction
+      const __m256d vGain = _mm256_set1_pd(gain);
+      for (int i = 0; i < numSamples/4*4; i += 4)
+          _mm256_storeu_pd(data+i, _mm256_mul_pd(_mm256_loadu_pd(data+i), vGain));
+      // scalar tail
+  }
+  ```
+- **No `libm` calls**: the gain is pre-converted from dB to linear in the message thread; the audio thread only performs multiplication.
+- **No dynamic allocation**: all buffers are pre-allocated and 64-byte aligned.
+
+### 2.2 Input DC Blocking — UltraHighRateDCBlocker
+
+- **Purpose**: Removes DC offset from each channel using a **two-stage first-order IIR high-pass filter**.
+- **Class**: `UltraHighRateDCBlocker` (header-only, `src/UltraHighRateDCBlocker.h`).
+- **Structure**: Two cascaded 1st-order IIR sections with slightly different cutoff frequencies for minimal phase distortion.
+- **Coefficients**: computed once in `prepareToPlay()` (message thread), using `std::sin`/`std::cos`. On the audio thread, only the difference equation is evaluated.
+- **State**: maintained per channel, per block. Filter states are stored in aligned memory.
+- **SIMD safety**: no `libm` calls, no dynamic allocation, no branching on audio thread.
+- **Real-time guarantee**: all state variables are pre-allocated and initialized to zero in `prepareToPlay()`.
+
+### 2.3 Analyzer Input Tap (Lock-Free FIFO)
+
+- **Purpose**: Captures raw input samples (pre-gain, pre-DC block) for the UI spectrum analyzer.
+- **Implementation**: `LockFreeRingBuffer<AudioBlock, 4096>` — a **SPSC (single-producer, single-consumer)** lock-free ring buffer.
+  ```cpp
+  // Audio thread: split into 256-sample blocks and push
+  pushAdaptiveCaptureBlocks(captureQueue, alignedL, alignedR,
+                              numSamples, sampleRate, bitDepth, coeffBankIndex);
+  ```
+- **Mechanism**:
+  - `AudioBlock` contains 256 samples (double-precision, planar L/R).
+  - `memcpy` is used to copy samples — no dynamic allocation.
+  - Atomic head/tail counters ensure the SPSC property.
+  - `readFromFifo()` in the UI thread consumes data — also lock-free for the audio thread.
+- **Cache-line alignment**: ring buffer and control structures are `alignas(64)` to prevent false sharing.
+
+---
+
+## 3. Oversampling
+
+### 3.1 Overview
+
+Oversampling increases the internal sample rate (2×, 4×, or 8×) to reduce aliasing in subsequent DSP stages (particularly the EQ and convolution). It is implemented in `CustomInputOversampler`.
+
+### 3.2 Structure & Initialization
+
+- **Class**: `CustomInputOversampler` (`src/CustomInputOversampler.h/cpp`).
+- **Stages**: Up to 3 cascaded 2× stages (maximum 8× oversampling).
+- **Presets**:
+  - `IIRLike`: lower latency, fewer FIR taps per stage.
+  - `LinearPhase`: more taps, higher stopband attenuation.
+- **All working buffers** (`workA`, `workB`, histories, coefficient arrays) are **pre-allocated and 64-byte aligned** in `prepare()`.
+- `prepare()` (called from message thread before audio starts):
+  - Computes FIR coefficients using a Kaiser windowed sinc kernel.
+  - Determines tap count and attenuation based on preset and stage.
+  - Normalizes coefficients for unity gain at DC.
+  - Clears all history buffers.
+
+### 3.3 Upsampling — processUp()
 
 ```cpp
-// At block start (audio thread):
+juce::dsp::AudioBlock<double> processUp(juce::dsp::AudioBlock<double>& inputBlock,
+                                        int numChannels) noexcept;
+```
+
+- For each 2× stage, calls `interpolateStage()` per channel:
+  - Applies FIR interpolation using precomputed coefficients.
+  - Uses **AVX2/FMA** SIMD for dot product operations.
+  - Explicitly flushes denormal numbers to zero (`killDenormal`).
+- Each stage doubles the sample count.
+- Final output: double-precision, planar, 64-byte aligned buffer.
+
+### 3.4 Post-Upsampling DC Blocker
+
+After upsampling, `UltraHighRateDCBlocker` is applied to remove any DC introduced by interpolation. This is a separate instance from the input DC blocker and is configured for the higher sample rate.
+
+### 3.5 Downsampling — processDown()
+
+```cpp
+void processDown(const juce::dsp::AudioBlock<double>& upsampledBlock,
+                 juce::dsp::AudioBlock<double>& outputBlock,
+                 int numChannels) noexcept;
+```
+
+- For each 2× stage (in reverse order), calls `decimateStage()` per channel:
+  - Applies FIR decimation using precomputed coefficients.
+  - Uses **AVX2/FMA** SIMD for convolution.
+  - Explicitly flushes denormal numbers to zero.
+- Each stage halves the sample count.
+- **Fail-safe**: if input size exceeds pre-allocated capacity, output is zeroed and processing is skipped (no crash, no allocation).
+
+### 3.6 Real-Time Safety
+
+- **No allocation, no locks, no `libm` calls** on the audio thread.
+- All buffer and history management is explicit and pre-allocated.
+- Denormal handling: all stages flush denormals to zero for performance.
+- All up/downsampling is performed in double-precision.
+
+### 3.7 Corruption Detection
+
+`CustomInputOversampler` maintains a `corruptionDetected` atomic flag:
+- If any stage detects numerical corruption (e.g., NaN, Inf), it sets the flag.
+- The flag can be consumed atomically by the UI thread via `consumeCorruptionFlag()`.
+- Event counters track total corruption occurrences and auto-clear counts.
+
+---
+
+## 4. Main DSP Chain
+
+### 4.1 Selectable Processing Order
+
+The main chain can process in two orders, controlled by the atomic `ProcessingState` snapshot at block start:
+
+- **EQ → Convolver**: EQ is applied first, then convolution.
+- **Convolver → EQ**: Convolution is applied first, then EQ.
+- **Mixed (Parallel)**: Both EQ and Convolver process the input independently in parallel; outputs are blended by a mix ratio α.
+
+### 4.2 EQProcessor (20-Band Parametric EQ)
+
+**Source**: `src/eqprocessor/` (6 files, split TU implementation)
+
+| File | Size | Role |
+|------|------|------|
+| `EQProcessor.h` | 32.3 KB | Class definition, types, RCU handle |
+| `EQProcessor.Core.cpp` | 42.4 KB | Core processing logic, M/S, AGC |
+| `EQProcessor.Coefficients.cpp` | 19.3 KB | TPT SVF & biquad coefficient calculation |
+| `EQProcessor.Parameters.cpp` | 12.7 KB | Parameter getters/setters |
+| `EQProcessor.Processing.cpp` | 57.2 KB | **Largest TU** — AVX2 FMA TPT SVF processing |
+| `EQProcessor.ProcessingCache.cpp` | 2.7 KB | EQCoeffCache management |
+
+**Band configuration**:
+- `NUM_BANDS = 20` (bands 0–19 with default frequencies from 25 Hz to 19.5 kHz)
+- `kFilterChannels = 4` (L=0, R=1, Mid=2, Side=3 for M/S processing)
+- Filter types: `LowShelf`, `Peaking`, `HighShelf`, `LowPass`, `HighPass`
+- Channel modes: `Stereo`, `Left`, `Right`, `Mid`, `Side`
+- Filter structures: `Serial` (default) or `Parallel`
+
+**Filter implementation** — TPT (Topology-Preserving Transform) State Variable Filter:
+- Based on Vadim Zavalishin's "The Art of VA Filter Design".
+- Coefficients (`g`, `k`, `a1`, `a2`, `a3`, `m0`, `m1`, `m2`) preserve filter state topology under coefficient modulation, providing smooth parameter changes and low noise.
+- For UI magnitude response display, separate **biquad coefficients** (RBJ Audio EQ Cookbook) are computed.
+- SVF state: `ic1eq`, `ic2eq` (two integrator states) per band per channel, stored in `filterState[4][20][2]`.
+
+**RCU + Atomic Parameter Update**:
+- `currentStateBits`: `uintptr_t`-backed atomic handle for the whole `EQState`.
+- `bandNodeBits[20]`: per-band atomic handles for individual `BandNode` objects.
+- `publishAtomic` / `consumeAtomic` / `compareExchangeAtomic` primitives from `AtomicAccess.h`.
+- Message thread: creates new `EQState`/`BandNode`, calls `publishCurrentState()`.
+- Audio thread: `loadCurrentState()` with `acquire` order reads the latest snapshot.
+- Old states retired via `retireEQStateDeferred()` / `retireBandNodeDeferred()` → `enqueueDeferredDeleteWithFallback()` → `DeletionQueue`.
+
+**EQCoeffCache (Phase 1 v2.3)**:
+- `EQCoeffCache` is a `RefCountedDeferred<EQCoeffCache>` — refcounted, shared coefficient cache.
+- Multiple snapshots share the same `EQCoeffCache` if parameters are identical.
+- Hash-based lookup via `computeParamsHash()`.
+- Reduces coefficient recalculation when multiple `RuntimeState` snapshots share EQ parameters.
+
+**Auto Gain Control (AGC)**:
+- Attack time: **0.2 s**, release time: **2.0 s**, smooth time: **0.2 s**.
+- AGC gain range: −24 dB to +24 dB (linear: 0.06 to 16.0).
+- Attack/release/smooth coefficients precomputed as lookup tables (`agcAttackCoeffTable`, `agcReleaseCoeffTable`, `agcSmoothCoeffTable`) in `prepareToPlay()` — no `libm` calls on audio thread.
+- Per-block: computes input/output envelope via RMS, applies adaptive gain.
+
+**Nonlinear Saturation**:
+- Uses `fastTanh` approximation (rational polynomial, branchless for |x| < CLIP_THRESHOLD).
+- Applied per-sample within the SVF processing loop when `nonlinearSaturation > 0`.
+- No `libm` calls, no branching on audio thread.
+
+**Bypass Crossfade**:
+- `BYPASS_FADE_TIME_SEC = 0.005` (5 ms) linear fade.
+- `bypassFadeGain` (a `LinearRamp`) ramps from 0 to 1 on engage, 1 to 0 on disengage.
+
+**Total Gain Smoothing**:
+- `SMOOTHING_TIME_SEC = 0.05` (50 ms) exponential ramp.
+- `totalGainTarget` stored as linear gain (converted in message thread — no `std::pow` on audio thread).
+
+**M/S (Mid-Side) Processing**:
+- Convert L/R to Mid/Side in the scratch buffer.
+- Process each band with appropriate `EQChannelMode` (Stereo: both, Left: L only, Right: R only, Mid: M only, Side: S only).
+- Convert back to L/R.
+
+**Parallel Filter Structure**:
+- When `FilterStructure::Parallel` is selected, bands process in parallel paths and are summed.
+- `parallelInputBuffer`, `parallelWorkBuffer`, `parallelAccumBuffer` are pre-allocated.
+- Crossfade between Serial and Parallel structures: `structureOldOutBuffer` / `structureNewOutBuffer` with `structureXfadeBufferCapacity`.
+
+### 4.3 ConvolverProcessor (FFT Convolution Engine)
+
+**Source**: `src/convolver/` (10 files, split TU implementation)
+
+| File | Role |
+|------|------|
+| `ConvolverProcessor.Internal.h` | Helpers: `unwrapPhaseRadians`, `nextPow2`, `resampleIR`, `convertToMinimumPhase` |
+| `ConvolverProcessor.Lifecycle.cpp` | Lifecycle, RCU integration, `ChangeBroadcaster` |
+| `ConvolverProcessor.Rebuild.cpp` | Rebuild decision, debouncing (`REBUILD_DEBOUNCE_DEFAULT_MS`) |
+| `ConvolverProcessor.LoaderThread.cpp` + `LoaderThreadInline.h` | Background IR loading, progress tracking |
+| `ConvolverProcessor.LoadPipeline.cpp` | Pipeline processing, IR validation |
+| `ConvolverProcessor.MixedPhase.cpp` | Phase modes, mixed-phase transition |
+| `ConvolverProcessor.ResampleAndFallback.cpp` | r8brain resampling, hard fallback |
+| `ConvolverProcessor.Runtime.cpp` | **Audio thread** — partitioned FFT convolution via MKL NUC |
+| `ConvolverProcessor.StateAndUI.cpp` | Preset management, UI state |
+| `ConvolverProcessor.h` (at `src/` root, 1180 lines) | Public API, `BuildSnapshot`, `PhaseMode`, `ResamplingPhaseMode` |
+
+The **legacy monolithic** `MKLNonUniformConvolver.cpp` (~65 KB) is retained under `#ifdef` for backward compatibility.
+
+**Algorithm** — Intel MKL Non-Uniform Partitioned Convolution (NUC):
+- Partitions the impulse response into non-uniform blocks (shorter blocks near the start for low-latency, longer blocks toward the tail for efficiency).
+- Uses **MKL DFTI** (Discrete Fourier Transform Interface) for forward/backward FFTs.
+- All FFT and buffer operations use **AVX2/FMA SIMD**.
+- 64-byte aligned buffers throughout.
+
+**Phase Modes**:
+- `PhaseMode::AsIs`: use IR as-is (linear phase).
+- `PhaseMode::Minimum`: convert IR to minimum phase.
+- `PhaseMode::Mixed`: blend linear-phase (low frequencies) with minimum-phase (high frequencies) — controlled by `mixedTransitionStartHz` and `mixedTransitionEndHz`.
+
+**IR Loading (Background)**:
+- `loadImpulseResponse()` is called from the **message thread**.
+- A `LoaderThread` (`std::thread`) performs the actual file read, resampling (via `r8brain-free-src`), and phase conversion **asynchronously**.
+- On completion, the new IR state is atomically swapped via **RCU** — audio thread continues processing with the old IR without interruption or blocking.
+- Old convolution engines are retired via the ISR retire pipeline (`DSPLifetimeManager → ISRRetireRouter → EpochDomain`).
+
+**Audio Thread Runtime** (`ConvolverProcessor.Runtime.cpp`):
+```cpp
+// At block start (audio thread): RCU load of latest IR state
 auto* currentIR = irState.load(std::memory_order_acquire);
-for (int ch = 0; ch < numChannels; ++ch) {
-  // Partitioned FFT convolution (MKL NUC)
-  mklNUC.process(channelBuffer, currentIR, ...);
-}
+// For each channel: MKL NUC partitioned convolution
+mklNUC.process(channelBuffer, currentIR, ...);
+// Dry/wet mix, crossfade, latency compensation — all atomic, no allocation
 ```
 
-### Main DSP Chain Overview
+**Parameters** (all atomic, snapshotted at block start):
+- `mix` (dry/wet)
+- `bypassed`
+- `phaseMode`
+- `smoothingTimeSec`
+- `targetIRLengthSec`
+- `mixedTransitionStartHz` / `mixedTransitionEndHz`
 
-- **Processing Order**: The main DSP chain order is selectable at runtime: `EQ -> Convolver` or `Convolver -> EQ`. This is controlled by the atomic ProcessingState snapshot at the start of each block.
-- **All processing is performed in double-precision, 64-byte aligned buffers, with AVX2/FMA SIMD optimization throughout.**
+**Thread Safety**:
+- No `malloc`/`new`/`resize` on audio thread.
+- No `libm` calls on audio thread.
+- No locks on audio thread.
+- Old engines/IRs garbage collected asynchronously via the ISR retire pipeline.
+
+### 4.4 Mixed (Parallel) Mode
+
+When `processingMode == Mixed`, input is processed in parallel by EQ and Convolver, then blended:
+
+```
+y[n] = (1 − α) · EQ(x[n]) + α · Convolver(x[n])
+```
+
+- `α` (mix ratio): atomic variable, snapshotted at block start, smoothed for click-free transitions.
+- EQ path: `eqBuffer` (separate pre-allocated working buffer).
+- Convolver path: `convBuffer` (separate pre-allocated working buffer).
+- Both paths operate on independent 64-byte aligned buffers.
+- Blending: AVX2 SIMD on the output buffer.
+- No dynamic allocation.
 
 ---
 
-### Parametric Equalizer (EQProcessor)
+## 5. Output Conditioning
 
-- **Class**: `EQProcessor` ([src/EQProcessor.h](src/EQProcessor.h), [src/EQProcessor.cpp](src/EQProcessor.cpp))
-- **Bands**: 20-band parametric EQ, each band independently configurable (frequency, gain, Q, type, channel mode, enabled).
-- **Filter Structure**: Each band uses a TPT (Topology-Preserving Transform) State Variable Filter (SVF), based on Vadim Zavalishin's "The Art of VA Filter Design" for minimal noise and smooth modulation.
-  - SVF coefficients: Calculated per band, per block, using sample-rate-correct formulas.
-  - Biquad coefficients (for UI/magnitude response): Calculated using Audio EQ Cookbook (RBJ) formulas.
-- **Parameter Management**:
-  - All band parameters are stored in atomic structures (`EQBandParams`), ensuring lock-free, thread-safe updates.
-  - UI thread updates parameters via `setBandXxx()` methods, which atomically swap in new BandNode objects (RCU pattern).
-  - Audio thread always loads the latest parameters atomically at block start; no locks or blocking.
-- **Processing**:
-  - `process(juce::dsp::AudioBlock<double>& block)` applies all enabled bands in series (cascade) per channel.
-  - SIMD (AVX2) is used for block processing where possible.
-  - Bypass is handled with a short crossfade (bypassFadeGain) for click-free switching, using atomic flags.
-  - AGC (auto gain control) is available, with attack/release/smoothing time constants, all atomic and SIMD-safe.
-- **State/Memory**:
-  - All filter states, coefficients, and working buffers are pre-allocated and 64-byte aligned.
-  - No dynamic allocation, no locks, no libm calls in the audio thread.
-  - All parameter/state changes are atomic or lock-free.
-  - Old states are garbage collected asynchronously (trash bin pattern).
+### 5.1 OutputFilter — Conditional on Final Processor
 
-#### Signal Processing Flow (EQProcessor)
+**Source**: `src/OutputFilter.h/cpp`
 
-1. At block start, the audio thread atomically loads the current EQ state (all band parameters, types, channel modes).
-2. For each channel (typically stereo):
-   - For each band (up to 20):
-      - If enabled, applies TPT SVF filtering to the channel buffer using the current band's parameters.
-      - SVF state (integrators) is maintained per band, per channel, in aligned memory.
-      - SIMD (AVX2) is used for blockwise multiply/adds.
-3. If bypass is requested, a crossfade ramp is applied to smoothly transition in/out of EQ processing.
-4. AGC (if enabled) computes input/output envelope, applies gain smoothing, and updates total gain atomically.
+The output filter configuration depends on **which processor is last in the chain**:
 
-#### Key Internal Structures (EQProcessor)
+#### Case ① — Convolver is Last
 
-- `EQBandParams`: Atomic struct for each band's frequency, gain, Q, enabled flag.
-- `EQCoeffsSVF`: Struct holding TPT SVF coefficients (g, k, a1, a2, a3, m0, m1, m2).
-- `EQState`: Ref-counted object holding all band parameters, types, channel modes, and total gain.
-- `BandNode`: Per-band filter state, atomically swapped via RCU.
-- All filter states and coefficients are 64-byte aligned for SIMD.
+- **High-Cut Filter (HCF)**:
+  - `Sharp`: Butterworth 4th-order cascaded (Q1=0.5412, Q2=1.3066) — steep, maintains sound pressure at cutoff
+  - `Natural`: Linkwitz-Riley 4th-order (Q=0.7071 for both stages) — better phase response, default
+  - `Soft`: 2nd-order (Q=0.5) — gentle, no time-domain smear
+  - Cutoff: **19 kHz** (fs ≤ 48 kHz) / **22 kHz** (fs > 48 kHz)
 
-#### Code Path Example (EQProcessor)
+- **Low-Cut Filter (LCF)**:
+  - `Natural`: Butterworth 2nd-order **HPF, 18 Hz** — minimum low-frequency distortion
+  - `Soft`: 2nd-order HPF, Q=0.5, **15 Hz** — gentler, more subsonic removal
+
+#### Case ② — EQ is Last
+
+- **High-Pass Filter (HPF)**: Fixed Butterworth 2nd-order, **20 Hz** (always).
+- **Low-Pass Filter (LPF)**:
+  - `Sharp`: Q=1.0 (two cascaded stages)
+  - `Natural`: Q=0.7071 (two cascaded stages)
+  - `Soft`: Q=0.5 (two cascaded stages)
+  - Cutoff: **19 kHz** (fs ≤ 48 kHz) / **24 kHz** (fs > 48 kHz)
+
+**Coefficient Precomputation** (`prepare()`, message thread only):
+- Uses **RBJ Audio EQ Cookbook** biquad formulas with `std::sin`/`std::cos`.
+- All coefficients for all modes and configurations are precomputed and stored in lookup tables.
+- `process()` (audio thread): only performs the **Direct Form II Transposed** difference equation — no `libm` calls.
+
+**Biquad Structure**:
+```
+y[n] = b0·x[n] + w1[n-1]
+w1[n] = b1·x[n] − a1·y[n] + w2[n-1]
+w2[n] = b2·x[n] − a2·y[n]
+```
+State (`w1`, `w2`) maintained per channel per stage, zeroed in `reset()`.
+
+**SIMD**: all state and coefficient arrays are 64-byte aligned for AVX2 efficiency.
+
+### 5.2 Soft Clipping
+
+**Source**: `AudioEngine.Processing.DSPCoreDouble.cpp` — `softClipBlockAVX2()`, `musicalSoftClipScalar()`, `fastTanh()`
+
+**Algorithm** — piecewise function (NOT simple cubic saturation):
+
+For input `x` with `threshold`, `knee`, `asymmetry`:
+- `clip_start = threshold − knee`
+- If `|x| < clip_start`: **linear** — return `x` unchanged
+- If `clip_start ≤ |x| < threshold + knee`: **knee region**
+  - `t = (|x| − clip_start) / (2·knee)` → `t ∈ [0, 1]`
+  - `knee_shape = t² · (3 − 2t)` — smooth S-curve
+  - `clipped = threshold + knee · fastTanh((|x| − threshold) / knee)`
+  - `mixed = |x| · (1 − knee_shape) + clipped · knee_shape`
+- If `|x| ≥ threshold + knee`: **saturation region**
+  - `mixed = threshold + knee · fastTanh((|x| − threshold) / knee)`
+- `asymmetric_gain = 1 − asymmetry · (1 − sign) · 0.5 · knee_shape`
+- `return sign · mixed · asymmetric_gain`
+
+**fastTanh Approximation** (branchless, no `libm`):
+```cpp
+// Valid for |x| < CLIP_THRESHOLD (branchless)
+const double x2 = x * x;
+const double num = x * (NUM_A + x2 * (NUM_B + x2 * NUM_C));
+const double den = DEN_A + x2 * (DEN_B + x2 * (DEN_C + x2));
+return num / den;
+```
+- For `x ≥ CLIP_THRESHOLD`: returns ±1.0
+- For `x ≤ −CLIP_THRESHOLD`: returns ∓1.0
+
+**AVX2 Vectorized Version** (`softClipBlockAVX2`):
+- Processes 4 doubles per instruction using `_mm256_*` intrinsics.
+- `prevSampleInOut` scalar feedback carried across blocks (to maintain state across calls).
+- `_mm256_set_pd` / `_mm256_mul_pd` / `_mm256_fnmadd_pd` / `_mm256_blendv_pd` etc.
+- `_mm256_round_pd(..., _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)` for nearest-even quantization.
+
+**Parameters** (all atomic, snapshotted at block start):
+- `threshold` (default ~1.0)
+- `knee` (default ~0.2)
+- `asymmetry` (default ~0.0)
+
+**Real-time safety**:
+- No `libm` calls (fastTanh is a rational polynomial approximation).
+- No dynamic allocation.
+- Parameters pre-validated and clamped in the message thread.
+
+### 5.3 Output Makeup Gain
+
+- **Purpose**: Final gain adjustment after filtering and soft clipping to match target output level.
+- **Implementation**: AVX2 SIMD scaling using the same `scaleBlockFallback()` function as input headroom gain.
+- **Gain value**: atomic, converted from dB to linear in the message thread (no `std::pow` on audio thread).
+- All buffers 64-byte aligned.
+
+---
+
+## 6. Dithering & Noise Shaping
+
+All four noise shaper types share these properties:
+- Double-precision processing throughout.
+- All state and buffers **pre-allocated and 64-byte aligned** for SIMD.
+- **No dynamic allocation, no locks** on the audio thread.
+- **TPDF (Triangular Probability Density Function) dither** — two uniform random samples summed.
+- **Error-feedback** topology: the quantization error is fed back and shaped by the noise shaper coefficients.
+
+### 6.1 PsychoacousticDither (GUI: "9th-order")
+
+**Source**: `src/PsychoacousticDither.h`
+
+Despite the GUI label "9th-order", the actual order is **NS_ORDER = 12** (12-tap error-feedback). The discrepancy exists because the coefficient table (`kCoeffTable`) design uses only 9 independently variable coefficients per preset, while the remaining 3 coefficients are fixed for stability.
+
+**Architecture**:
+- **12th-order error-feedback** noise shaper (NS_ORDER = 12).
+- **TPDF dither** via **MKL VSL** (`vdRngUniform`, BRNG = `VSL_BRNG_SFMT19937`) or **Xoshiro256\*\* fallback** if MKL VSL is unavailable.
+- **RNG ring buffer**: 65,536 entries per channel, SPSC, pre-filled.
+  - `rngRing[2][65536]` with atomic `rngReadPos[2]` / `rngWritePos[2]`.
+  - Refilled by worker thread (non-RT) via `refillRandomRingNonRt()`.
+  - `fillChunkForChannel()` uses `vdRngUniform` for bulk fill.
+
+**Coefficient Table** (`kCoeffTable[6][3][12]`):
+- **6 sample rate bands** × **3 bit depth presets** × **12 coefficients**.
+- SR bands:
+  - Band 0: 44.1 kHz
+  - Band 1: 48 kHz
+  - Band 2: 96 kHz
+  - Band 3: 176.4 / 192 kHz
+  - Band 4: 352.8 / 384 kHz
+  - Band 5: 705.6 kHz+
+- Bit depth presets:
+  - 0: "16-bit strong" — pushes noise aggressively into ultrasonic range
+  - 1: "24-bit standard" — balanced, POW-r #3 class
+  - 2: "32-bit mild" — gentle shape since floor noise is already low
+
+**Block Processing** (`processStereoBlock`):
+- Unrolls 12 coefficients into local scalars (avoids repeated memory loads).
+- Computes `shapedErrorL/R = Σ c_k · z_k[n−k−1]` for 12 taps.
+- Generates TPDF dither: `dL = (u1 − 0.5) + (u2 − 0.5)` from the ring buffer.
+- `tmp = (sample × headroom) + d + shapedError`.
+- **SSE4.1 quantization**: `_mm_round_pd(v_scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)` for nearest-even rounding.
+- Error shift-register: `z_k[n+1] = z_{k−1}[n]` (12-tap shift left), `z_0[n+1] = error` with denormal kill.
+
+**Error Feedback Stability**:
+- Uses error-feedback (not direct-form IIR) topology — all poles are at z=0 → **always BIBO stable**.
+- Maximum shaping error = `(scale/2) × Σ|c_k|` — worst case at 705.6 kHz / 16-bit ≈ −66 dBFS.
+
+### 6.2 FixedNoiseShaper (GUI: "4th-order")
+
+**Source**: `src/FixedNoiseShaper.h`
+
+- **4th-order error-feedback** noise shaper.
+- Coefficients: psychoacoustically tuned, sum to 1.0 for stability (e.g., `{0.46, 0.28, 0.17, 0.09}`).
+- TPDF dither added before quantization.
+- All state 64-byte aligned, pre-allocated.
+- Diagnostics (RMS/peak error) computed in background thread.
+- **SIMD fallback**: scalar processing when AVX2 is not beneficial.
+
+### 6.3 Fixed15TapNoiseShaper (GUI: "15th-order")
+
+**Source**: `src/Fixed15TapNoiseShaper.h`
+
+- **15th-order error-feedback** noise shaper.
+- Coefficients: `kFixed15TapNoiseShaperTunedCoeffs` (psychoacoustically optimized).
+- TPDF dither added before quantization.
+- All state 64-byte aligned, pre-allocated.
+- Diagnostics (RMS/peak error) computed in background thread.
+
+### 6.4 AdaptiveNoiseShaper — NoiseShaperLearner (GUI: "9th-order adaptive")
+
+**Source**: `src/NoiseShaperLearner.h/cpp` (68.4 KB — largest source file in the project)
+
+**Structure** — Lattice (ladder) filter:
+- Order = 9 (`LatticeNoiseShaper::kOrder`).
+- Lattice topology: reflection coefficients stay inside the unit circle by construction → unconditionally stable.
+- Error feedback via lattice structure, not direct-form IIR.
+
+**CMA-ES Optimization**:
+- Covariance Matrix Adaptation Evolution Strategy running on a **dedicated worker thread** (not the audio thread).
+- Receives audio blocks via `LockFreeRingBuffer<AudioSegment, N>` from the audio thread.
+- `AudioSegment`: `double left[kFftLength]`, `double right[kFftLength]`, `std::array<double, kSpectrumBins> maskingThresholds`.
+- For each generation: evaluates candidate coefficient sets by simulating the noise shaper and computing weighted error (psychoacoustic masking or A-weighting).
+- Updates mean and covariance of the coefficient distribution.
+- Converges over 10–80 minutes depending on mode (Short/Middle/Long).
+
+**Coefficient Handoff** (RCU pattern):
+- Best coefficient set published as `LearnedState` via atomic generation counter.
+- Audio thread: `RCUReader` enters epoch, reads current `LearnedState`, processes, exits epoch.
+- No blocking, no locks, no allocation on audio thread.
+
+**Bank Management**:
+- Coefficient banks keyed by `StateKey` (sample rate, bit depth, mode).
+- Each bank stores current best coefficients, learning history, progress metrics.
+- Resume / stop / save / load per bank.
+- UI polls `Status`, `Progress`, `State` atomically.
+
+**Stability Guarantee**:
+- Reflection coefficients constrained to stay inside the unit circle.
+- Lattice structure guarantees BIBO stability regardless of coefficient values.
+
+---
+
+## 7. Downsampling (Post-DSP)
+
+If oversampling was enabled, `CustomInputOversampler::processDown()` is called after the main DSP chain and before output level measurement.
+
+- **Multi-stage FIR decimation** in reverse order of upsampling.
+- **Kaiser windowed sinc** kernel for each stage.
+- **AVX2/FMA SIMD** for convolution (multiple accumulators to hide FMA latency).
+- **Denormal flush to zero** in all stages.
+- **Fail-safe**: if input size exceeds pre-allocated capacity, output is zeroed and processing is skipped.
+- All buffers pre-allocated, 64-byte aligned.
+- In-place operation — no extra memory allocation.
+
+---
+
+## 8. Output Level Measurement & Analysis
+
+### 8.1 LoudnessMeter — ITU-R BS.1770-4/5
+
+**Source**: `src/LoudnessMeter.h`
+
+- **K-weighting**: two-stage biquad (pre-filter high-shelf + RLB high-pass) per ITU-R BS.1770-4 Table 1.
+  - Pre-filter coefficients: `{1.535124859586970, −2.691696189406380, 1.198392810852850, −1.690659293182410, 0.732480774215850}`
+  - RLB filter coefficients: `{1.0, −2.0, 1.0, −1.990047454833980, 0.990072250366210}`
+- Channel weights: stereo = `{1.0, 1.0}`.
+- **Block mean square** computed per channel, weighted and summed.
+- Published to **worker thread** via `LockFreeRingBuffer<BlockPower, 4096>`.
+- Worker thread aggregates Momentary / Short-term / Integrated loudness.
+- All filter states per-channel, pre-allocated, 64-byte aligned.
+
+### 8.2 TruePeakDetector — ITU-R BS.1770-4/5
+
+**Source**: `src/TruePeakDetector.h`
+
+- **4× oversampling** (2 stages of 2×) using linear-phase FIR interpolation.
+- **63 taps** per stage (Kaiser window, Bessel I0 for side-lobe suppression) — exceeds ITU-R BS.1770-3 Example reference (48 taps).
+- **AVX2 dot product** (`dotProductAvx2()`) for convolution.
+- Peak hold published atomically for UI display.
+- Measurement-only — no gain applied to the audio signal.
+
+### 8.3 Spectrum Analyzer — UI Component
+
+**Source**: `src/SpectrumAnalyzerComponent.h/cpp` (52.3 KB)
+
+- FFT-based spectrum display.
+- EQ response curve overlay.
+- Peak hold and smoothing.
+- Consumes data from the analyzer output tap (lock-free FIFO).
+
+---
+
+## 9. Real-Time Safety Architecture
+
+### 9.1 Absolute Prohibitions on Audio Thread
+
+ConvoPeq enforces these rules on every audio callback without exception:
+
+| Prohibition | Rationale |
+|-------------|-----------|
+| No `malloc`, `new`, `std::vector::resize`, `unique_ptr` | Memory allocation may trigger OS lock or page fault |
+| No `std::mutex`, `std::condition_variable`, or any blocking lock | May block indefinitely, causing audio dropout |
+| No `std::log`, `std::exp`, `std::pow`, `std::sin`, `std::cos` (libm calls) | Variable-time execution; may trigger denormal flush |
+| No exceptions | Stack unwinding is non-deterministic |
+| No file I/O, network I/O | Unbounded latency |
+| No `std::this_thread::sleep` or wait primitives | Blocking wait |
+
+**Verification**: `ASSERT_AUDIO_THREAD()` and `convo::numeric_policy::ThreadRole::AudioRealtime` scope marker at the start of `processBlockDouble()`.
+
+### 9.2 Atomic Parameter Updates
+
+All parameter changes from the UI thread use **atomic publish/consume**:
 
 ```cpp
-// At block start (audio thread):
-auto* state = currentStateRaw.load(std::memory_order_acquire);
-for (int ch = 0; ch < numChannels; ++ch) {
-   for (int band = 0; band < NUM_BANDS; ++band) {
-      if (state->bands[band].enabled) {
-         // Apply TPT SVF filter to channel buffer
-         processSVF(channelBuffer, state->bands[band], ...);
-      }
-   }
-}
+// Message thread: publish new value
+convo::publishAtomic(param, newValue, std::memory_order_release);
+
+// Audio thread: consume latest value
+auto value = convo::consumeAtomic(param, std::memory_order_acquire);
 ```
 
+Key atomics:
+- `ProcessingState` snapshot: all parameters copied at block start into a struct — audio thread sees a consistent snapshot.
+- `bypassRequested`, `totalGainTarget` (linear, pre-computed), `totalGainDbTarget`.
+- `bandNodeBits[20]`, `currentStateBits` for EQ.
+- `irState` generation counter for Convolver.
+- `m_pendingAGCChange`, `agcResetSerial`, `bandResetPacked`.
+
+### 9.3 RCU (Read-Copy-Update) Pattern
+
+- **EpochDomain** (`src/core/EpochDomain.h`, 26 KB): manages named reader slots and a global epoch counter.
+- **RCUReader** (`src/core/RCUReader.h`): RAII reader — enters epoch on construction, exits on destruction.
+- **Publication flow**: message thread creates new object → `publishCurrentState()` → audio thread `loadCurrentState(acquire)` → old object retired via `enqueueRetire()`.
+- **Retire pipeline**: `DSPLifetimeManager → ISRRetireRouter → EpochDomain →DeletionQueue`.
+- Old objects are not deleted immediately — they are deferred until all in-flight readers exit the epoch.
+
+### 9.4 Lock-Free Inter-Thread Communication
+
+| Communication | Mechanism |
+|---------------|-----------|
+| UI parameter updates | `std::atomic` publish/consume |
+| Analyzer data (audio → UI) | `LockFreeRingBuffer<SPSC>` |
+| Loudness/TruePeak data (audio → UI) | `LockFreeRingBuffer<SPSC>` |
+| Adaptive noise shaper (audio → worker) | `LockFreeRingBuffer<AudioSegment>` |
+| Coefficient handoff (worker → audio) | RCU + atomic generation counter |
+| IR handoff (loader → audio) | RCU + atomic `irState` |
+
+### 9.5 Pre-Allocation Strategy
+
+**All** buffers, states, and working memory are allocated in `prepareToPlay()`:
+
+- `alignedL`, `alignedR` — 64-byte aligned input buffers.
+- `eqBuffer`, `convBuffer`, `parallelInputBuffer`, `parallelWorkBuffer`, `parallelAccumBuffer`, `dryBypassBuffer`, `structureOldOutBuffer`, `structureNewOutBuffer`.
+- `msWorkBuffer` (M/S processing).
+- `scratchBuffer`, `filterState[4][20][2]` (EQ SVF integrators).
+- `agcAttackCoeffTable`, `agcReleaseCoeffTable`, `agcSmoothCoeffTable`.
+- All filter coefficients, lookup tables, and coefficient caches.
+
+### 9.6 Asynchronous Garbage Collection
+
+| Mechanism | Path |
+|-----------|------|
+| `DeferredDeletionQueue` | Thread-safe queue of delete requests |
+| `RefCountedDeferred` | Reference-counted deferred delete |
+| `DeferredFreeThread` | Dedicated background thread for actual deallocation |
+| `enqueueDeferredDeleteWithFallback` | EO-style deferred delete with EpochDomain fallback |
+| `retireEQStateDeferred` / `retireBandNodeDeferred` | Per-object EQ state retirement |
+| `DSPLifetimeManager::retire()` | Orchestrates retire via `ISRRetireRouter` |
+| `ISRRetireRouter::enqueueRetire()` | Queues retire to `EpochDomain` |
+
+### 9.7 ISR Runtime Governance (101 files in `src/audioengine/`)
+
+The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DSP lifecycle, publication, crossfade, and health monitoring:
+
+| Component | File | Role |
+|-----------|------|------|
+| `ISRLifecycle` | `ISRLifecycle.h/cpp` | Lifecycle state machine |
+| `ISRRuntimePublicationCoordinator` | `ISRRuntimePublicationCoordinator.cpp` | Publication choreography |
+| `ISRRetireRouter` | `ISRRetireRouter.h/cpp` | Unified retire API |
+| `ISRRetireRuntimeEx` | `ISRRetireRuntimeEx.h/cpp` | Extended retire runtime |
+| `RuntimeHealthMonitor` | `RuntimeHealthMonitor.h/cpp` | Continuous telemetry |
+| `RuntimePolicyEngine` | `RuntimePolicyEngine.h/cpp` | Rebuild admission policy |
+| `DSPLifetimeManager` | `DSPLifetimeManager.h` | DSP activation / retire / crossfade |
+| `CrossfadeAuthority` | `CrossfadeAuthority.h/cpp` | Crossfade governance (Authority pattern) |
+| `CrossfadeRuntime` | `CrossfadeRuntime.h` | Crossfade runtime state |
+| `ISRHB` | `ISRHB.h/cpp` | Heartbeat and hazard barrier |
+| `SnapshotCoordinator` | `SnapshotCoordinator.h/cpp` | Snapshot management |
+| `SnapshotFactory` | `SnapshotFactory.h/cpp` | Snapshot creation |
+| `CommandBuffer` | `CommandBuffer.h` | Debounced snapshot worker |
+| `FadeEngine` | `FadeEngine.h` | Fade shape generation |
+
 ---
 
-### FFT Convolver (ConvolverProcessor)
-
-- **Class**: `ConvolverProcessor` ([src/ConvolverProcessor.h](src/ConvolverProcessor.h), [src/ConvolverProcessor.cpp](src/ConvolverProcessor.cpp))
-- **Algorithm**: FFT-based partitioned convolution using Intel oneMKL Non-Uniform Convolution (NUC) engine.
-  - Supports very long IRs (impulse responses) with low latency via non-uniform partitioning.
-  - All FFTs and buffer operations are performed with AVX2/FMA SIMD and MKL routines.
-- **Impulse Response (IR) Management**:
-  - IRs are loaded asynchronously on the message/worker thread via `loadImpulseResponse()`.
-  - New IRs are atomically swapped in using the RCU pattern; audio thread always processes with the latest available IR, with no blocking or allocation.
-  - Supports phase modes (as-is, minimum, mixed), IR length trimming, resampling, and windowing (Tukey, etc.).
-  - All IR buffers are 64-byte aligned and pre-allocated.
-- **Processing**:
-  - `process(juce::dsp::AudioBlock<double>& block)` performs partitioned convolution per channel, using the current IR and NUC engine.
-  - Dry/wet mix, bypass, and smoothing are all atomic and SIMD-optimized.
-  - No dynamic allocation, no locks, no libm calls in the audio thread.
-  - All parameter/state changes are atomic or lock-free.
-- **Thread Safety**:
-  - All IR/parameter updates use atomic variables and RCU for glitch-free, real-time-safe handoff.
-  - Old IRs and convolution engines are garbage collected asynchronously.
-
-#### Signal Processing Flow (ConvolverProcessor)
-
-1. At block start, the audio thread atomically loads the current IR and convolution engine state.
-2. For each channel:
-   - Partitioned FFT convolution is performed using the Intel MKL NUC engine.
-   - Input buffer is transformed to frequency domain, multiplied by IR partitions, and inverse-transformed.
-   - All FFTs and buffer operations use AVX2/FMA SIMD and are 64-byte aligned.
-   - Dry/wet mix is applied per sample, with atomic smoothing.
-3. If bypass is requested, a crossfade ramp is applied to smoothly transition in/out of convolution.
-4. All IR/engine state changes are handled via atomic swap (RCU), with no blocking or allocation in the audio thread.
-
-#### Key Internal Structures (ConvolverProcessor)
-
-- `MKLNonUniformConvolver`: Core engine for partitioned FFT convolution, using Intel oneMKL DFTI.
-- `IRState`: Ref-counted object holding current IR, phase mode, windowing, and partitioning info.
-- All FFT buffers, IRs, and working memory are 64-byte aligned and pre-allocated.
-- All parameter/state changes are atomic or lock-free.
-
-#### Code Path Example (ConvolverProcessor)
-
-```cpp
-// At block start (audio thread):
-auto* currentIR = irState.load(std::memory_order_acquire);
-for (int ch = 0; ch < numChannels; ++ch) {
-  // Partitioned FFT convolution (MKL NUC)
-  mklNUC.process(channelBuffer, currentIR, ...);
-}
-```
-
-### Mixed (Parallel) IR Mode: Signal Processing Flow
-
-When the IR mode is set to "Mixed" (parallel), the input signal is split and processed in parallel by both the EQ and Convolver modules, then recombined. This enables hybrid processing, such as blending a clean EQ path with a colored convolution IR.
-
-#### Signal Flow
-
-1. **Input Buffer**: The aligned, double-precision input buffer $x[n]$ is prepared as usual.
-2. **Parallel Processing**:
-
-- **EQ Path**: $y_{\mathrm{EQ}}[n] = \mathrm{EQ}(x[n])$
-- **Convolver Path**: $y_{\mathrm{Conv}}[n] = \mathrm{Convolver}(x[n])$
-
-1. **Mixing**:
-
-- The outputs are blended using a user-configurable mix ratio $\alpha$ (0 ≤ $\alpha$ ≤ 1):
-    $$
-    y[n] = (1 - \alpha) \cdot y_{\mathrm{EQ}}[n] + \alpha \cdot y_{\mathrm{Conv}}[n]
-    $$
-- $\alpha$ is typically set via the UI or preset, and may be smoothed atomically per block for click-free transitions.
-
-1. **Post-Processing**: The mixed output $y[n]$ proceeds to output conditioning (filters, gain, soft clipping, dither, etc.).
-
-#### Mathematical Formulation
-
-- Let $x[n]$ be the input sample at time $n$.
-- $y_{\mathrm{EQ}}[n]$ is the output of the parametric EQ (see EQProcessor section for details).
-- $y_{\mathrm{Conv}}[n]$ is the output of the FFT-based convolution (see ConvolverProcessor section).
-- The final output is:
-  $$
-  y[n] = (1 - \alpha) \cdot \mathrm{EQ}(x[n]) + \alpha \cdot \mathrm{Convolver}(x[n])
-  $$
-
-#### Buffer Management & SIMD
-
-- Both EQ and Convolver operate on separate, 64-byte aligned double-precision working buffers.
-- The mixing operation is performed using AVX2 SIMD for maximum throughput:
-  $$
-  y[n:n+3] = (1 - \alpha) \cdot y_{\mathrm{EQ}}[n:n+3] + \alpha \cdot y_{\mathrm{Conv}}[n:n+3]
-  $$
-- All buffers are pre-allocated in `prepareToPlay()`; no dynamic allocation occurs in the audio thread.
-
-#### Parameter Management & Real-Time Safety
-
-- The mix ratio $\alpha$ is stored as an atomic variable and snapshotted at block start.
-- All parameter/state changes are atomic or lock-free.
-- No locks, no dynamic allocation, and no blocking in the audio thread.
-
-#### Code Path Example
-
-```cpp
-// In DSPCore::process() (pseudo-code):
-if (processingMode == Mixed) {
-   eq.process(inputBuffer, eqBuffer);
-   convolver.process(inputBuffer, convBuffer);
-   for (int n = 0; n < numSamples; ++n)
-      outputBuffer[n] = (1 - alpha) * eqBuffer[n] + alpha * convBuffer[n];
-}
-```
-
-#### Summary
-
-- Mixed IR mode enables flexible hybrid processing by blending EQ and convolution outputs in parallel.
-- All operations are double-precision, SIMD-optimized, and real-time safe.
-- The design ensures maximum fidelity and glitch-free transitions between processing modes.
-
-### Input Trim & Processing Order
-
-- When EQ precedes Convolver, an input trim gain may be applied before convolution to prevent IR overload.
-- The chain order (`EQ -> Convolver` or `Convolver -> EQ`) is selected per block via atomic ProcessingState.
-- All modules are designed for maximum SIMD throughput, real-time safety, and glitch-free parameter/IR handoff.
-
-## 6. Output Conditioning
-
-### Output Filter (High-Cut, Low-Cut, Low-Pass)
-
-- **Component**: `OutputFilter` ([src/OutputFilter.h](src/OutputFilter.h), [src/OutputFilter.cpp](src/OutputFilter.cpp))
-- **Purpose**: Applies high-cut (HCF), low-cut (LCF), and optionally low-pass filtering to the output signal, depending on user settings and processing order.
-- **Filter Structure**:
-  - Implements cascaded biquad IIR filters for both HCF and LCF.
-  - Each filter is configured as a second-order section (SOS), with coefficients precomputed in the message thread and stored in aligned memory.
-  - All filter states are maintained per channel, per block, and are 64-byte aligned for SIMD efficiency.
-- **Mathematical Formulation**:
-  - Each biquad section implements the standard difference equation:
-      $$
-      y[n] = b_0 x[n] + b_1 x[n-1] + b_2 x[n-2] - a_1 y[n-1] - a_2 y[n-2]
-      $$
-      where $b_0, b_1, b_2, a_1, a_2$ are the filter coefficients.
-  - HCF and LCF cutoff frequencies are user-configurable (e.g., LCF: 10–40 Hz, HCF: 20–40 kHz).
-  - Filter design uses Butterworth or Bessel topology for maximally flat or phase-linear response, as selected in code.
-- **SIMD Optimization**:
-  - All filtering is performed using AVX2 SIMD intrinsics for double-precision blocks.
-  - Filter states and coefficients are 64-byte aligned to maximize throughput.
-- **Real-Time Safety**:
-  - No dynamic allocation or libm calls in the audio thread.
-  - All coefficients are precomputed in `prepareToPlay()` or on parameter change (never in the audio thread).
-  - All state updates are atomic or lock-free.
-- **Code Path Example**:
-
-```cpp
-
-   // OutputFilter processing (per channel)
-   outputFilterL.processBlock(alignedL, numSamples);
-   outputFilterR.processBlock(alignedR, numSamples);
+## 10. Complete Signal Flow Diagram
 
 ```
-
-- **Parameter Management**:
-  - Cutoff frequencies, filter order, and enable/disable flags are managed via atomic variables and updated by the UI thread.
-  - Audio thread always uses the latest snapshot, with no locks or blocking.
-
-### Output Makeup Gain
-
-- **Purpose**: Applies a final gain adjustment after output filtering, before soft clipping, to compensate for any level loss or to match target output level.
-- **Implementation**:
-  - SIMD-optimized gain scaling using AVX2 for double-precision buffers.
-  - Gain value is atomic and updated by the UI thread; audio thread reads the latest value per block.
-  - No dynamic allocation or libm calls in the audio thread.
-  - All buffers are 64-byte aligned for SIMD.
-
-### Soft Clipping Saturation
-
-- **Component**: Soft clipper implemented in [src/AudioEngine.cpp](src/AudioEngine.cpp) as `musicalSoftClipScalar()` and `softClipBlockAVX2()`.
-- **Purpose**: Prevents digital clipping and shapes output dynamics by applying a smooth, anti-inter-sample-peak soft clipping curve.
-- **Algorithm**:
-  - The soft clipper uses a piecewise function:
-      $$
-      y = \begin{cases}
-         x & |x| < t_1 \\
-          ext{cubic curve} & t_1 \leq |x| < t_2 \\
-          ext{sign}(x) \cdot s & |x| \geq t_2
-      \end{cases}
-      $$
-      where $t_1$ and $t_2$ are threshold values, and $s$ is the saturation ceiling.
-  - The cubic region ensures a smooth transition into limiting, minimizing odd-order distortion and aliasing.
-  - The function is branchless and SIMD-friendly for maximum efficiency.
-- **SIMD Optimization**:
-  - `softClipBlockAVX2()` processes entire blocks using AVX2 intrinsics, handling 4–8 samples per instruction.
-  - All buffers and states are 64-byte aligned.
-- **Anti-Inter-Sample-Peak Logic**:
-  - The soft clipper is designed to minimize inter-sample peaks by smoothing transitions and avoiding hard limiting.
-  - This reduces the risk of DAC overload and preserves musicality.
-- **Real-Time Safety**:
-  - No dynamic allocation, no locks, no libm calls in the audio thread.
-  - All parameters (thresholds, ceiling) are atomic and updated by the UI thread.
-- **Code Path Example**:
-
-```cpp
-
-   // Soft clipping (per channel, after makeup gain)
-   softClipBlockAVX2(alignedL, numSamples);
-   softClipBlockAVX2(alignedR, numSamples);
-
-```
-
-- **Parameter Management**:
-  - Enable/disable, thresholds, and ceiling are managed via atomic variables.
-  - Audio thread always uses the latest snapshot, with no locks or blocking.
-
-### Summary
-
-- All output conditioning steps (filtering, gain, soft clipping) are performed in double-precision, SIMD-optimized, real-time-safe code paths.
-- All parameters are atomic or lock-free, with no dynamic allocation or blocking in the audio thread.
-- The design ensures maximum fidelity, safety, and musicality at the final output stage.
-
-## 7. Dithering & Noise Shaping (Optional)
-
-### Output Conditioning Overview
-
-At the output stage, one of several dither/noise shaper algorithms can be selected. Each is implemented as a real-time-safe, allocation-free, double-precision processor. The available types and their GUI names are:
-
-- **Psychoacoustic** (GUI: "9th-order")
-- **Fixed4Tap** (GUI: "4th-order")
-- **Fixed15Tap** (GUI: "15th-order")
-- **Adaptive9thOrder** (GUI: "9th-order adaptive")
-
-All types apply TPDF dither and error-feedback noise shaping to minimize quantization noise and maximize subjective audio quality at the target bit depth.
-
----
-
-### Psychoacoustic (GUI: "9th-order")
-
-- **Component**: `PsychoacousticDither` ([src/PsychoacousticDither.h](src/PsychoacousticDither.h))
-- **Algorithm**:
-  - Uses a 12th-order error-feedback noise shaper (NS_ORDER=12), but is labeled as "9th-order" in the GUI for user familiarity.
-  - Applies true TPDF dither using a high-quality RNG (Xoshiro256** or MKL VSL).
-  - Noise shaping coefficients are psychoacoustically optimized for each sample rate and bit depth (see `kCoeffTable`).
-  - The core process for each sample is:
-    $$
-     ext{shapedError}[n] = \sum_{k=0}^{11} c_k \cdot z_k[n] \\
-    d[n] = \text{TPDF dither} \\
-    y[n] = x[n] + d[n] + \text{shapedError}[n] \\
-    q[n] = \text{Quantize}(y[n]) \\
-    e[n] = y[n] - q[n] \\
-    z_0[n+1] = e[n],\ z_{k+1}[n+1] = z_k[n] \ (k=0..10)
-    $$
-    where $c_k$ are the shaping coefficients, $z_k$ are the error states, and $d[n]$ is TPDF dither.
-  - SIMD (SSE4.1/AVX2) is used for block processing.
-- **Parameter Management**:
-  - Coefficients are selected per sample rate and bit depth.
-  - All state is 64-byte aligned and pre-allocated.
-- **Real-Time Safety**:
-  - No dynamic allocation or locks in the audio thread.
-  - All random number generation is performed in a background thread and buffered.
-
----
-
-### Fixed4Tap (GUI: "4th-order")
-
-- **Component**: `FixedNoiseShaper` ([src/FixedNoiseShaper.h](src/FixedNoiseShaper.h))
-- **Algorithm**:
-  - Implements a 4th-order error-feedback noise shaper:
-    $$
-    fb[n] = \sum_{k=0}^{3} c_k \cdot e_k[n] \\
-    y[n] = x[n] - fb[n] \\
-    q[n] = \text{Quantize}(y[n]) \\
-    e_0[n+1] = q[n] - y[n],\ e_{k+1}[n+1] = e_k[n] \ (k=0..2)
-    $$
-    where $c_k$ are the shaping coefficients, $e_k$ are the error states.
-  - Coefficients are psychoacoustically tuned and sum to 1.0 for stability (e.g., {0.46, 0.28, 0.17, 0.09}).
-  - TPDF dither is added before quantization.
-- **Parameter Management**:
-  - Coefficients are interpolated per sample rate.
-  - All state is pre-allocated and 64-byte aligned.
-- **Real-Time Safety**:
-  - No dynamic allocation or locks in the audio thread.
-  - Diagnostics (RMS/peak error) are computed in the background.
-
----
-
-### Fixed15Tap (GUI: "15th-order")
-
-- **Component**: `Fixed15TapNoiseShaper` ([src/Fixed15TapNoiseShaper.h](src/Fixed15TapNoiseShaper.h))
-- **Algorithm**:
-  - Implements a 15th-order error-feedback noise shaper:
-    $$
-    fb[n] = \sum_{k=0}^{14} c_k \cdot e_k[n] \\
-    y[n] = x[n] - fb[n] \\
-    q[n] = \text{Quantize}(y[n]) \\
-    e_0[n+1] = q[n] - y[n],\ e_{k+1}[n+1] = e_k[n] \ (k=0..13)
-    $$
-    where $c_k$ are the shaping coefficients, $e_k$ are the error states.
-  - Coefficients are psychoacoustically optimized (see `kFixed15TapNoiseShaperTunedCoeffs`).
-  - TPDF dither is added before quantization.
-- **Parameter Management**:
-  - Coefficients are fixed and precomputed.
-  - All state is pre-allocated and 64-byte aligned.
-- **Real-Time Safety**:
-  - No dynamic allocation or locks in the audio thread.
-  - Diagnostics (RMS/peak error) are computed in the background.
-
----
-
-### Adaptive9thOrder (GUI: "9th-order adaptive")
-
-- **Component**: `AdaptiveNoiseShaper` ([src/AdaptiveNoiseShaper.h](src/AdaptiveNoiseShaper.h), [src/NoiseShaperLearner.cpp](src/NoiseShaperLearner.cpp))
-- **Algorithm**:
-  - Implements a 9th-order error-feedback noise shaper with coefficients that are learned and updated in real time by a background worker thread.
-  - The core process is:
-    $$
-    fb[n] = \sum_{k=0}^{8} c_k[n] \cdot e_k[n] \\
-    y[n] = x[n] - fb[n] \\
-    q[n] = \text{Quantize}(y[n]) \\
-    e_0[n+1] = q[n] - y[n],\ e_{k+1}[n+1] = e_k[n] \ (k=0..7)
-    $$
-    where $c_k[n]$ are the adaptive coefficients, $e_k$ are the error states.
-
-- **Learning Mechanism (CMA-ES Optimization)**:
-  - The adaptive coefficients $c_k[n]$ are optimized in real time using a background worker thread running a Covariance Matrix Adaptation Evolution Strategy (CMA-ES) algorithm.
-  - The worker thread receives blocks of audio and error signals from the audio thread via a lock-free ring buffer (see `LockFreeRingBuffer`).
-  - For each learning iteration, the worker evaluates candidate coefficient sets by simulating the noise shaping process and measuring the resulting error (e.g., weighted RMS or psychoacoustic error metrics).
-  - The CMA-ES optimizer updates the population of candidate solutions, converging toward coefficient sets that minimize perceived quantization noise.
-  - The best-performing coefficient set is atomically published to the audio thread using a lock-free RCU (Read-Copy-Update) pattern, ensuring glitch-free handoff.
-
-- **Bank Management and State Handling**:
-  - Coefficient banks are managed per sample rate and bit depth, allowing optimal shaping for each output format.
-  - Each bank stores the current best coefficients, learning history, and progress metrics.
-  - The system supports multiple learning sessions ("banks") in parallel, with each session keyed by a unique StateKey (sample rate, bit depth, mode, etc.).
-  - All state transitions and bank swaps are performed atomically, with no blocking or dynamic allocation in the audio thread.
-
-- **Threading and Real-Time Safety**:
-  - The audio thread never performs learning or heavy computation; it only snapshots the latest coefficients at block start.
-  - All learning, error analysis, and coefficient updates are performed on the worker thread.
-  - Communication between threads uses lock-free ring buffers and atomic generation counters for progress tracking.
-  - No dynamic memory allocation, locks, or blocking calls are ever made in the audio thread.
-  - All buffers and state are pre-allocated and 64-byte aligned for SIMD efficiency.
-
-- **UI Integration and Progress Reporting**:
-  - The UI can display real-time learning progress, best score history, and current coefficient values by polling atomic variables and progress buffers.
-  - Resume, stop, and save/load operations are supported for each learning session, with all state transitions handled safely outside the audio thread.
-  - The system is designed for robust, user-interruptible learning with immediate UI feedback and no risk of audio dropouts.
-
-- **Design Notes**:
-  - The entire adaptive learning system is engineered for maximum real-time safety, extensibility, and audio fidelity.
-  - All parameter/state changes are atomic or lock-free, and all learning logic is isolated from the audio callback.
-  - The architecture supports future extensions such as alternative optimization algorithms, multi-objective learning, or advanced error metrics.
-
----
-
-### General Notes
-
-- All noise shaper types are implemented as double-precision, SIMD-optimized, allocation-free processors.
-- All state and buffers are pre-allocated and 64-byte aligned for maximum throughput.
-- All parameter/state changes are atomic or lock-free.
-- Diagnostics (RMS/peak error) are available for Fixed4Tap and Fixed15Tap.
-- Adaptive9thOrder uses a background worker thread for real-time coefficient learning and RCU handoff.
-- All algorithms are designed for maximum real-time safety and audio fidelity.
-
-## 8. Downsampling (If Oversampling Was Used)
-
-### Downsampling Overview
-
-If oversampling was enabled, the processed audio block is downsampled back to the original sample rate using a multi-stage, double-precision, SIMD-optimized FIR filter chain implemented in `CustomInputOversampler::processDown()`.
-
-### Component
-
-- **Class**: `CustomInputOversampler` ([src/CustomInputOversampler.h](src/CustomInputOversampler.h), [src/CustomInputOversampler.cpp](src/CustomInputOversampler.cpp))
-- **Key Methods**:
-  - `processDown(const juce::dsp::AudioBlock<double>& upsampledBlock, juce::dsp::AudioBlock<double>& outputBlock, int numChannels)`
-  - `decimateStage(const Stage& stage, const double* input, int inputSamples, double* output, int channel)`
-
-### Algorithm & Mathematical Formulation
-
-- Downsampling is performed in multiple stages (1–3), each halving the sample rate (e.g., 8x → 4x → 2x → 1x).
-- Each stage applies a linear-phase FIR decimation filter, designed using a Kaiser-windowed sinc kernel:
-  $$
-  h[n] = \text{sinc}\left(\frac{n-M}{2}\right) \cdot w[n],\quad n=0..N-1
-  $$
-  where $w[n]$ is the Kaiser window, $M$ is the center tap, and $N$ is the number of taps.
-- The output sample at each stage is computed as:
-  $$
-  y[m] = h_c \cdot x[mR - M] + \sum_{k=0}^{K-1} h_k \cdot x[mR - kS]
-  $$
-  where $h_c$ is the center coefficient, $h_k$ are the symmetric FIR coefficients, $R$ is the decimation ratio (2), $S$ is the stride, and $x[]$ is the input buffer.
-- All coefficients and buffers are 64-byte aligned for SIMD.
-
-### Buffer & State Management
-
-- Each stage maintains per-channel history buffers for input and output, sized to accommodate the maximum block size and filter length.
-- All working buffers (`workA`, `workB`) are double-precision and 64-byte aligned.
-- No dynamic allocation occurs in the audio thread; all memory is pre-allocated in `prepare()`.
-
-### SIMD Optimization
-
-- The core convolution (dot product) in `decimateStage` uses AVX2/FMA intrinsics for maximum throughput:
-  - Multiple accumulators are used to hide FMA latency and maximize instruction-level parallelism.
-  - Unaligned loads are used for input history; aligned loads for coefficients.
-- Scalar fallback is provided if AVX2 is not available.
-
-### Real-Time Safety
-
-- No dynamic allocation, locks, or libm calls in the audio thread.
-- All state and buffers are pre-allocated and zeroed in `prepare()`.
-- Denormal numbers are explicitly flushed to zero for performance.
-- If input size exceeds pre-allocated capacity, output is zeroed and processing is skipped (fail-safe).
-
-### Parameter Management
-
-- The number of stages, taps per stage, and attenuation are determined by the oversampling ratio and preset (IIR-like or LinearPhase).
-- All filter coefficients are computed in `prepareStage()` using the Kaiser window and normalized for unity gain at DC.
-- All parameters are atomic or lock-free.
-
-### Code Path Example
-
-```cpp
-
-// Downsampling after main DSP (in AudioEngine)
-customOversampler.processDown(upsampledBlock, outputBlock, numChannels);
-
-```
-
-### Summary
-
-- Downsampling is performed in-place, double-precision, SIMD-optimized, and real-time-safe.
-- All buffer management, filter design, and state handling are explicit and allocation-free in the audio thread.
-- The design ensures maximum fidelity and glitch-free operation even at high oversampling ratios.
-
-## 9. Output Level Measurement
-
-- **Level Metering**: Output level is measured (RMS or peak) after all processing, and the value is stored atomically for UI display.
-
-## 10. Analyzer Output Tap (Optional)
-
-- **Analyzer Tap**: If enabled, post-DSP output samples are pushed to a FIFO for spectrum analysis in the UI thread.
-
-## 11. Fade-In Ramp (On DSP Change)
-
-- **Purpose**: When switching DSP configurations, a fade-in ramp is applied to the output to prevent clicks or pops.
-
-## 12. Final Output (External)
-
-- **Buffer Writeback**: The processed samples are written back to the output buffer provided by the audio device.
-- **Thread**: The audio device driver reads the buffer and sends it to the physical output (speakers, headphones, etc.).
-
----
-
-## Threading & Real-Time Safety
-
-- **No Dynamic Allocation**: All memory is pre-allocated outside the audio thread. No malloc/new/vector::resize/etc. in the callback.
-- **No Locks**: No mutexes or blocking synchronization in the audio thread. All parameter/state changes use atomics or lock-free patterns.
-- **RCU/Atomic Patterns**: IR and coefficient updates use Read-Copy-Update and atomic generation counters for glitch-free handoff.
-- **Analyzer/UI Communication**: All data for UI (spectrum, meters) is pushed to lock-free FIFOs for polling by the UI thread.
-
----
-
-## Summary Diagram
-
-```text
-[Audio Input]
-   |
-   v
-[Input Conditioning]
-   |
-   v
-[Oversampling (optional)]
-   |
-   v
-[EQ] <-> [Convolver] (order selectable)
-   |
-   v
-[Output Filter]
-   |
-   v
+[JUCE Audio Device Callback]
+        │
+        ▼
+[AudioEngineProcessor::processBlock (float or double)]
+        │
+        ▼
+[AudioEngine::processBlockDouble]
+        ├── AudioCallbackRuntimeScope (lifecycle + firewall token)
+        ├── ScopedNoDenormals
+        └── ThreadRole::AudioRealtime
+        ▼
+[DSPCore::process — Input Conditioning]
+        │
+        ├── 1. Copy to 64-byte aligned buffers (alignedL, alignedR)
+        ├── 2. Headroom gain (AVX2 scaleBlockFallback)
+        ├── 3. DC blocking (UltraHighRateDCBlocker × 2 stages)
+        └── 4. Analyzer input tap (LockFreeRingBuffer SPSC)
+        ▼
+[Oversampling — CustomInputOversampler::processUp]
+        (if enabled: 2×/4×/8× FIR, AVX2/FMA, Kaiser windowed sinc)
+        ▼
+[Main DSP Chain]
+        │
+        ├── [EQ → Convolver]
+        │       ├── EQProcessor::process()
+        │       │     (20-band TPT SVF, Serial/Parallel, M/S,
+        │       │      AGC, nonlinearSaturation, fastTanh)
+        │       │     RCU: load currentStateBits + bandNodeBits[20]
+        │       │     EQCoeffCache (refcounted shared coefficient cache)
+        │       │
+        │       └── ConvolverProcessor::process()
+        │             (MKL NUC partitioned FFT convolution)
+        │             RCU: irState.load(acquire)
+        │
+        ├── [Convolver → EQ]
+        │       ├── ConvolverProcessor::process()
+        │       └── EQProcessor::process()
+        │
+        └── [Mixed — Parallel]
+                ├── EQProcessor::process() → eqBuffer
+                ├── ConvolverProcessor::process() → convBuffer
+                └── y = (1−α)·eqBuffer + α·convBuffer (AVX2 SIMD)
+        ▼
+[OutputFilter (conditional on final processor)]
+        │
+        ├── Case ① (Convolver-last): HCF (Sharp/Natural/Soft 4th-order)
+        │                          + LCF (Natural Butterworth 2nd HPF 18Hz
+        │                              / Soft 2nd HPF Q=0.5 15Hz)
+        │
+        └── Case ② (EQ-last): HPF (Butterworth 2nd 20Hz, fixed)
+        │                    + LPF (Sharp/Natural/Soft 2nd × 2 stages)
+        │  All coefficients precomputed in prepare() (std::sin/cos),
+        │  process() = table lookup only, no libm, in-place biquad SOS
+        ▼
+[Soft Clipping — softClipBlockAVX2]
+        ├── piecewise: linear → knee (t²(3−2t)) → clipped (fastTanh)
+        ├── fastTanh: rational polynomial approximation, branchless
+        ├── AVX2: 4 doubles per instruction, _mm256_round_pd
+        ├── prevSampleInOut scalar feedback across blocks
+        └── Parameters: threshold, knee, asymmetry (atomic snapshot)
+        ▼
 [Output Makeup Gain]
-   |
-   v
-[Soft Clipping (optional)]
-   |
-   v
-[Dither/Noise Shaping (optional)]
-   |
-   v
-[Downsampling (if used)]
-   |
-   v
-[Output Level Metering]
-   |
-   v
-[Analyzer Tap (optional)]
-   |
-   v
-[Fade-In Ramp (on DSP change)]
-   |
-   v
-[Audio Output]
+        │  (AVX2 SIMD, atomic gain pre-converted to linear)
+        ▼
+[Dither / Noise Shaping]
+        │
+        ├── PsychoacousticDither: 12th-order (NS_ORDER=12)
+        │     MKL VSL RNG ring buffer (65,536 × 2 ch) or Xoshiro fallback
+        │     TPDF dither, kCoeffTable[6][3][12] (6 SR bands × 3 bitdepths)
+        │     SSE4.1 stereo quantization, error shift-register
+        │
+        ├── FixedNoiseShaper: 4th-order error-feedback, psychoacoustic coeffs
+        │
+        ├── Fixed15TapNoiseShaper: 15th-order error-feedback
+        │
+        └── AdaptiveNoiseShaper (NoiseShaperLearner)
+              LatticeNoiseShaper (9th-order, kOrder=9)
+              CMA-ES optimizer on worker thread
+              LockFreeRingBuffer<AudioSegment> for audio transfer
+              RCU handoff of LearnedState to audio thread
+        ▼
+[Downsampling — CustomInputOversampler::processDown]
+        (if oversampling: multi-stage FIR decimation, AVX2/FMA, fail-safe)
+        ▼
+[Output Level Measurement]
+        │
+        ├── LoudnessMeter: ITU-R BS.1770-4/5 K-weighting
+        │     LockFreeRingBuffer publish to worker thread
+        │
+        └── TruePeakDetector: 4× OS, 63-tap FIR, AVX2 dot product
+        ▼
+[Analyzer Output Tap]
+        │  (optional spectrum analysis via LockFreeRingBuffer)
+        ▼
+[DSPCore::processToBuffer — write to output buffer]
+        │
+        ▼
+[JUCE Audio Device Output]
 ```
 
 ---
 
-This flow ensures high-fidelity, real-time-safe audio processing with robust UI integration and flexible DSP configuration.
+## 11. Key DSP Numeric Constants
 
-## Reference Materials & Related Files
-
-- **Core Design Files**:
-  - ARCHITECTURE.md — Overall architecture, dependencies, threading design
-  - .github/copilot-instructions.md — Coding standards, prohibitions, design policies
-  - src/AudioEngine.cpp, .h — Top-level processing, buffer management, DSPCore
-  - src/EQProcessor.cpp, .h — 20-band PEQ implementation, parameter management
-  - src/ConvolverProcessor.cpp, .h — FFT convolution, IR management, RCU
-  - src/CustomInputOversampler.cpp, .h — Oversampling, FIR design
-  - src/UltraHighRateDCBlocker.h — DC removal IIR
-  - src/LockFreeRingBuffer.h — Lock-free FIFO implementation
-  - src/AlignedAllocation.h — 64-byte aligned buffer
-  - MEMORY_ALLOCATION_AUDIT.md — Memory allocation & release design
-  - BUILD_GUIDE_WINDOWS.md — Build instructions & environment requirements
-
-- **External References**:
-  - JUCE Official API: <https://docs.juce.com/master/index.html>
-  - Vadim Zavalishin "The Art of VA Filter Design" (TPT SVF theory)
-  - Audio EQ Cookbook (RBJ) (Biquad coefficient design)
-  - Intel oneMKL: <https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html>
-
-- **Future Documentation Expansion Guidelines**:
-  - Detailed algorithm explanations for each module (e.g., noise shaper, spectrum analyzer, adaptive learning)
-  - Testing, debugging, and profiling methods
-  - UI integration and external control API design
-  - Design patterns and caveats for adding new DSP modules
-  - Implementation examples and performance tuning tips
+| Constant | Value | Location |
+|----------|-------|----------|
+| `NUM_BANDS` | 20 | `EQProcessor.h` |
+| `kFilterChannels` | 4 (L/R/Mid/Side) | `EQProcessor.h` |
+| `NS_ORDER` | 12 | `PsychoacousticDither.h` |
+| `LatticeNoiseShaper::kOrder` | 9 | `LatticeNoiseShaper.h` |
+| `AGC_ATTACK_TIME_SEC` | 0.2 | `EQProcessor.h` |
+| `AGC_RELEASE_TIME_SEC` | 2.0 | `EQProcessor.h` |
+| `AGC_SMOOTH_TIME_SEC` | 0.2 | `EQProcessor.h` |
+| `BYPASS_FADE_TIME_SEC` | 0.005 (5 ms) | `EQProcessor.h` |
+| `SMOOTHING_TIME_SEC` | 0.05 (50 ms) | `EQProcessor.h` |
+| `LoudnessMeter kMaxChannels` | 2 | `LoudnessMeter.h` |
+| `TruePeakDetector kOversamplingRatio` | 4 | `TruePeakDetector.h` |
+| `TruePeakDetector kDefaultTaps` | 63 | `TruePeakDetector.h` |
+| `RNG_RING_SIZE` | 65,536 | `PsychoacousticDither.h` |
+| `kDenormThresholdAudioState` | `~1e-300` | `DspNumericPolicy.h` |
 
 ---
 
-## Documentation Usage Guide & Contribution
+## 12. Reference
 
-- **Usage Guide**:
-  - This document serves as a reference for understanding the overall signal processing flow, design philosophy, and real-time safety of ConvoPeq.
-  - When adding new features, fixing bugs, or improving performance, always consult the relevant sections and strictly adhere to the design policies, prohibitions, buffer management, and thread safety requirements described herein.
-  - For code reading and debugging, use this document to trace buffer flow, atomic/lock-free design, and UI integration patterns at each processing stage.
+### Core DSP Source Files
 
-- **Contribution & Inquiry**:
-  - Corrections, missing information, and improvement suggestions for this documentation are welcome via GitHub Issues or Pull Requests.
-  - When adding new modules, ensure your design and implementation address "real-time safety," "atomic/lock-free design," "garbage collection," and "UI integration," and update this document accordingly.
-  - For questions about core design or implementation policies, consult ARCHITECTURE.md and .github/copilot-instructions.md, and feel free to open an Issue for discussion.
+| File | Description |
+|------|-------------|
+| `src/audioengine/AudioEngineProcessor.{h,cpp}` | JUCE AudioProcessor entry, float/double dispatch |
+| `src/audioengine/AudioEngine.Processing.BlockDouble.cpp` | Audio thread entry, lifecycle/firewall tokens |
+| `src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp` | DSPCore, softClipBlockAVX2, scaleBlockFallback, fastTanh |
+| `src/audioengine/AudioEngine.Processing.DSPCoreToBuffer.cpp` | Output buffer write |
+| `src/audioengine/AudioEngine.Processing.AudioBlock.cpp` | Float processing path |
+| `src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp` | Buffer allocation, filter initialization |
+| `src/audioengine/AudioEngine.Processing.ReleaseResources.cpp` | Resource release |
+| `src/audioengine/AudioEngine.Processing.Latency.cpp` | Latency reporting |
+| `src/audioengine/AudioEngine.Processing.Snapshot.cpp` | Snapshot creation |
+| `src/audioengine/AudioEngine.Processing.DSPCoreLifecycle.cpp` | DSP core lifecycle |
+| `src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp` | I/O helpers |
+| `src/eqprocessor/EQProcessor.h` | EQ class definition, 20-band, TPT SVF, RCU |
+| `src/eqprocessor/EQProcessor.Core.cpp` | Core EQ logic, M/S, AGC |
+| `src/eqprocessor/EQProcessor.Coefficients.cpp` | TPT SVF + RBJ biquad coefficient computation |
+| `src/eqprocessor/EQProcessor.Parameters.cpp` | Parameter getters/setters |
+| `src/eqprocessor/EQProcessor.Processing.cpp` | TPT SVF processing, AVX2 FMA (largest TU) |
+| `src/eqprocessor/EQProcessor.ProcessingCache.cpp` | EQCoeffCache management |
+| `src/convolver/ConvolverProcessor.Lifecycle.cpp` | RCU, lifecycle, ChangeBroadcaster |
+| `src/convolver/ConvolverProcessor.Rebuild.cpp` | Rebuild decision, debouncing |
+| `src/convolver/ConvolverProcessor.LoaderThread.cpp` | Background IR loading |
+| `src/convolver/ConvolverProcessor.LoadPipeline.cpp` | Pipeline processing |
+| `src/convolver/ConvolverProcessor.MixedPhase.cpp` | Phase modes, mixed-phase transition |
+| `src/convolver/ConvolverProcessor.ResampleAndFallback.cpp` | r8brain resampling, hard fallback |
+| `src/convolver/ConvolverProcessor.Runtime.cpp` | **Audio thread** MKL NUC partitioned convolution |
+| `src/convolver/ConvolverProcessor.StateAndUI.cpp` | Preset management, UI state |
+| `src/convolver/ConvolverProcessor.Internal.h` | Helper functions |
+| `src/UltraHighRateDCBlocker.h` | Two-stage IIR DC blocker |
+| `src/CustomInputOversampler.{h,cpp}` | FIR oversampler (2×/4×/8×) |
+| `src/OutputFilter.{h,cpp}` | Output HCF/LCF/HPF/LPF (conditional) |
+| `src/PsychoacousticDither.h` | 12th-order psychoacoustic dither |
+| `src/FixedNoiseShaper.h` | 4th-order fixed noise shaper |
+| `src/Fixed15TapNoiseShaper.h` | 15th-order fixed noise shaper |
+| `src/LatticeNoiseShaper.h` | Lattice noise shaper structure (9th-order) |
+| `src/NoiseShaperLearner.{h,cpp}` | CMA-ES adaptive learning (largest TU) |
+| `src/LoudnessMeter.h` | ITU-R BS.1770-4/5 K-weighting |
+| `src/TruePeakDetector.h` | 4× OS true peak, 63-tap FIR |
+| `src/SpectrumAnalyzerComponent.{h,cpp}` | FFT spectrum UI |
+| `src/MKLNonUniformConvolver.{h,cpp}` | Legacy MKL NUC (backward compat) |
+| `src/AlignedAllocation.h` | 64-byte aligned `malloc`/`free` |
+| `src/LockFreeRingBuffer.h` | SPSC lock-free ring buffer |
+| `src/DspNumericPolicy.h` | Numeric constants, denorm thresholds |
+| `src/audioengine/DSPLifetimeManager.h` | DSP lifecycle orchestration |
+| `src/audioengine/CrossfadeAuthority.{h,cpp}` | Crossfade governance (Authority) |
+| `src/audioengine/CrossfadeRuntime.h` | Crossfade runtime state |
+| `src/audioengine/ISRRetireRouter.{h,cpp}` | Unified retire API |
+| `src/audioengine/RuntimeHealthMonitor.{h,cpp}` | Telemetry / health monitoring |
+| `src/audioengine/RuntimePolicyEngine.{h,cpp}` | Rebuild admission policy |
+| `src/audioengine/AtomicAccess.h` | Atomic primitives (`publishAtomic`, etc.) |
+| `src/core/EpochDomain.h` | RCU epoch domain (64 reader slots) |
+| `src/core/RCUReader.h` | RAII RCU reader |
+| `src/core/SnapshotCoordinator.{h,cpp}` | Snapshot coordination |
+| `src/core/SnapshotFactory.{h,cpp}` | Snapshot creation |
+| `src/core/FadeEngine.h` | Fade shape generation |
+| `src/core/DeletionQueue.{h,cpp}` | Deferred deletion queue |
 
-- **FAQ / Troubleshooting**:
-  - **Q: Crash or noise occurs in the audio thread**
-      → Check for dynamic memory allocation, libm calls, locks, exceptions, or I/O in the audio thread. See copilot-instructions.md for prohibitions.
-  - **Q: UI freezes or lags**
-      → Ensure synchronization between audio and UI threads is only via lock-free FIFO or atomics. Heavy UI processing should be deferred or made asynchronous.
-  - **Q: What should I watch out for when adding new DSP modules?**
-      → Follow existing buffer management, atomic/lock-free design, garbage collection, and UI integration patterns. Never compromise real-time safety in the audio thread.
+### Architecture Documents
+
+- `ARCHITECTURE.md` — Overall system architecture, threading design
+- `BUILD_GUIDE_WINDOWS.md` — Build instructions, toolchain setup
+- `.github/copilot-instructions.md` — Coding standards, prohibitions
+- `MEMORY_ALLOCATION_AUDIT.md` — Memory management design
+- `doc/sourcecode_analysis_2026-07-03.md` — Detailed source code companion analysis
+
+### External References
+
+- **Vadim Zavalishin** — "The Art of VA Filter Design" (TPT SVF theory)
+- **Robert Bristow-Johnson** — "Audio EQ Cookbook" (RBJ biquad formulas)
+- **Intel oneMKL** — Non-Uniform Partitioned Convolution (NUC) engine
+- **ITU-R BS.1770-4/5** — Loudness measurement (K-weighting)
+- **ITU-R BS.1770-3** — True peak detection
+- **Hansen, J. (2012)** — True peak detection literature

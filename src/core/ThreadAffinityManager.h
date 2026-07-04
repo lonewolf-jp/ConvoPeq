@@ -49,6 +49,18 @@ class ThreadAffinityManager
 public:
     ThreadAffinityManager() = default;
 
+    // ★ [work62] ThreadAffinityManager 初期化 — affinity mask 設定 + initialized_ 有効化
+    void initialize(const ThreadAffinityMasks& masks) noexcept
+    {
+        masks_ = masks;
+        convo::publishAtomic(initialized_, true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isInitialized() const noexcept
+    {
+        return convo::consumeAtomic(initialized_, std::memory_order_acquire);
+    }
+
     void applyMessageThreadPolicy() const noexcept
     {
 #ifdef _WIN32

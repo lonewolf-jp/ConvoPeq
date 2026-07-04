@@ -282,6 +282,10 @@ MainWindow::MainWindow (const juce::String& name)
     audioProcessorPlayer.setDoublePrecisionProcessing(true);
     audioProcessorPlayer.setProcessor(audioEngineProcessor.get());
     audioEngine.addChangeListener (this);
+
+    // ★ [work63] オーディオスレッドが開始される前に、前回の優先度設定を読み込む
+    DeviceSettings::preloadThreadPriorityMode(audioEngine);
+
     audioDeviceManager.addAudioCallback (&audioProcessorPlayer);
 
     juce::Component::SafePointer<MainWindow> safeThis(this);
@@ -1001,6 +1005,12 @@ MainWindow::~MainWindow()
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 3 setCliProcessingTelemetryEnabled");
     audioEngine.setCliProcessingTelemetryEnabled(false);
     cliAutomationTelemetryLoggingEnabled = false;
+
+    // ★ [work63] シャットダウン要求: Audio Thread に MMCSS 解除を指示
+    //    setProcessor(nullptr) 以降も数回コールバックが走るため、その間に Audio Thread が
+    //    AvRevertMmThreadCharacteristics を実行できる。removeAudioCallback までの間に
+    //    Audio Thread がフラグを検知できる十分な時間的余裕がある。
+    convo::publishAtomic(audioEngine.mmcssShutdownRequested, true, std::memory_order_release);
 
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 4 setProcessor(nullptr)");
     audioProcessorPlayer.setProcessor (nullptr);

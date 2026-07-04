@@ -98,6 +98,27 @@ foreach ($file in $sourceFiles) {
             if ($codeOnly -match "NOLINT\(atomic-dot-call\)") {
                 continue
             }
+
+            # Also check the raw line (before comment stripping) for NOLINT annotations
+            if ($line -match "NOLINT\(atomic-dot-call\)") {
+                continue
+            }
+
+            # ISR local atomic state: rtLocalState_ member accesses (per-callback counters)
+            if ($codeOnly -match "\brtLocalState_\.") {
+                continue
+            }
+
+            # ISR diagnostic atomics: rtAuxMutable_ member accesses (diagnostic counters)
+            if ($codeOnly -match "\brtAuxMutable_\.") {
+                continue
+            }
+
+            # ISR ring buffer sequence entries (entry.sequence / e.sequence)
+            if ($codeOnly -match "\b(entry|e)\.(sequence|seq)\.") {
+                continue
+            }
+
             $violations += [PSCustomObject]@{
                 File    = $relativePath
                 Line    = $lineNumber

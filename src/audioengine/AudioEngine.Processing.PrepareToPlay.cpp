@@ -21,6 +21,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
     diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 
+    // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
+    //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
+
     const auto rollbackPrepareFailure = [this]() noexcept
     {
         if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -216,6 +219,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         (sampleRate > 0.0 && samplesPerBlockExpected > 0)
         ? static_cast<uint64_t>(static_cast<double>(samplesPerBlockExpected) / sampleRate * 1e6)
         : 0;
+    // ★ work61: Audio Thread ThreadID をキャッシュ（以降はAPI呼び出し不要）
+    rtLocalState_.cachedThreadId = ::GetCurrentThreadId();
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
     diagLog("[DIAG] prepareToPlay: lifecycleState set to Prepared");
 

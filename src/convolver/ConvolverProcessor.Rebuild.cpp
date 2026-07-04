@@ -274,9 +274,8 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 
 void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
 {
-    juce::ignoreUnused(enable);
-    convo::publishAtomic(useIncrementalRebuild, false, std::memory_order_release); // release: isIncrementalRebuildEnabled 側 acquire と HB
-    if (rebuildJob)
+    convo::publishAtomic(useIncrementalRebuild, enable, std::memory_order_release); // release: isIncrementalRebuildEnabled 側 acquire と HB
+    if (!enable && rebuildJob)
         rebuildJob->reset();
 }
 
