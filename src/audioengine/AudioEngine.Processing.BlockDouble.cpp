@@ -40,6 +40,16 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
+    // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
+    //    常に適用（診断有効時のみログ出力。無効時はスタブ）
+    {
+        static std::atomic<bool> s_mmcssDone{false};
+        bool expected = false;
+        if (convo::compareExchangeAtomic(s_mmcssDone, expected, true, std::memory_order_acq_rel)) {
+            applyMmcssPriority();
+        }
+    }
+
     struct AudioCallbackRuntimeScope final
     {
         AudioEngine& engine;
@@ -670,6 +680,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         entry.sequence.store(thisCallbackIndex, std::memory_order_release);
     }
 #endif
+
+    // ★ [work63] シャットダウン要求: Audio Thread 自ら MMCSS を解除（診断ガード外＝常時有効）
+    //    Message Thread が mmcssShutdownRequested をセットすると、
+    //    次のコールバック終了時にこのスレッド上で AvRevertMmThreadCharacteristics を実行する。
+    if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
+    {
+        revertMmcssPriorityOnAudioThread();
+    }
+
 }
 
 

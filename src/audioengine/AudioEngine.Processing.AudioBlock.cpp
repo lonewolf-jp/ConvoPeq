@@ -42,7 +42,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     {
         static std::atomic<bool> s_mmcssDone{false};
         bool expected = false;
-        if (s_mmcssDone.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        if (convo::compareExchangeAtomic(s_mmcssDone, expected, true, std::memory_order_acq_rel)) {
             applyMmcssPriority();
         }
     }

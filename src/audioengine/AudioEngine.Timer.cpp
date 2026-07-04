@@ -132,7 +132,7 @@ static void flushLogBuffer()
         juce::Logger::writeToLog(juce::String(batch));
     }
 
-    const uint64_t dropped = s_droppedLogs.exchange(0, std::memory_order_acq_rel);
+    const uint64_t dropped = convo::exchangeAtomic(s_droppedLogs, 0, std::memory_order_acq_rel);
     if (dropped > 0) {
         DBG("[LOG_DROP] async log dropped " + juce::String(static_cast<juce::int64>(dropped)) + " messages");
     }
