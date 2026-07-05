@@ -37,15 +37,16 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ work61: callbackIndex を早期に取得（RuntimeScopeより前）
     //   これにより recordCallbackArrival() は正しい eventIndex を持つ。
     //   fetchAddAtomic は pre-increment 値を返すため +1 して post-increment に。
-    const auto thisCallbackIndex = convo::fetchAddAtomic(
+    [[maybe_unused]] const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
     // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
     //    常に適用（診断有効時のみログ出力。無効時はスタブ）
+    //    mmcssApplied_ は prepareToPlay() でリセットされるため、
+    //    デバイス再初期化後も正しく再適用される。
     {
-        static std::atomic<bool> s_mmcssDone{false};
         bool expected = false;
-        if (convo::compareExchangeAtomic(s_mmcssDone, expected, true, std::memory_order_acq_rel)) {
+        if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
             applyMmcssPriority();
         }
     }

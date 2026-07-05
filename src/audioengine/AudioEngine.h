@@ -336,7 +336,8 @@ enum class DiagCategory : uint8_t {
     ConvTime = 6,         // CONV_TIME
     StereoConvTime = 7,   // STCONV_TIME
     CallbackArrival = 8,  // CB_ARRIVAL（work61: callback到着時刻）
-    Count                 // カテゴリ総数（センチネル、9）
+    AnsSwitchTime = 9,    // ANS_SWITCH（work65: adaptive noise shaper bank switch）
+    Count                 // カテゴリ総数（センチネル、10）
 };
 
 // カテゴリ固有データ構造（POD, trivially copyable）
@@ -409,6 +410,11 @@ struct StereoConvTimeData {
     uint16_t budgetPercent;
 };
 
+// ★ [work65] AnsSwitchTime — Adaptive Noise Shaper bank switch timing
+struct AnsSwitchData {
+    uint64_t elapsedUs;       // バンク切替に要した時間 (μs)
+};
+
 // ★ work61: CallbackArrival — callback到着時刻記録（20byte）
 struct CallbackArrivalData {
     uint64_t timestampUs;     // callback entry 時刻（getCurrentTimeUs）
@@ -433,6 +439,7 @@ struct DiagEvent {
         ConvTimeData convTime;
         StereoConvTimeData stereoConvTime;
         CallbackArrivalData callbackArrival; // ★ work61
+        AnsSwitchData ansSwitchTime;          // ★ [work65] ANS_SWITCH
     } data;
 };
 
@@ -478,6 +485,17 @@ void setConvDiagBuffer(
 
 // work60: 実体定義は DSPCoreFloat.cpp（setEqDiagBuffer）と
 // ConvolverProcessor.Runtime.cpp（setConvDiagBuffer）にある。
+
+// ★ [work65] Shared runtime diagnostics state — external linkage.
+// Must be shared across DSPCoreFloat.cpp, DSPCoreDouble.cpp, and
+// DSPCoreIO.cpp. DO NOT move into an anonymous namespace in any
+// of those translation units.
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+extern LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer;
+extern DiagPerTickCounter* eqTickPushed;
+extern DiagPerTickCounter* eqTickDropped;
+extern std::atomic<uint64_t>* eqTotalPushed;
+#endif
 
 // ★ work61: CallbackArrival 記録ヘルパー（inline、RT-safe）
 //   BlockDouble.cpp / AudioBlock.cpp の両方から呼ばれる。
@@ -2092,6 +2110,7 @@ public:
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
     std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
+    std::atomic<bool> mmcssApplied_{false};       // ★ [work64] 初回適用済みフラグ（prepareToPlayでリセット）
 
     // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
     //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）

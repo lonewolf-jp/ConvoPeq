@@ -4,37 +4,8 @@
 #include "DiagnosticsConfig.h"
 #include "core/TimeUtils.h"
 
-// [DIAG] Convolver出力キャプチャ（work52 調査用）
-#include <cstdio>
 #include <cstdint>
 #include <atomic>
-namespace {
-    // ── キャプチャヘッダ ──
-    struct CaptureHeader {
-        uint32_t magic = 0xCAD0DE52;        // work52 magic
-        uint32_t version = 1;
-        uint32_t captureInput   : 1;        // CONVOPEQ_CAPTURE_INPUT
-        uint32_t tailBypass     : 1;        // CONVOPEQ_TAIL_BYPASS
-        uint32_t directHeadOff  : 1;        // CONVOPEQ_DIRECT_HEAD=0
-        uint32_t injectTone     : 1;        // テストトーン注入
-        uint32_t reserved       : 28;
-        uint32_t sampleRate;
-        uint32_t numSamples;                // 生サンプル数（ヘッダ以降）
-        int64_t  buildGeneration;           // 未使用時0
-        int64_t  captureTimestamp;          // Windows FILETIME
-        double   toneFreq;                  // テストトーン周波数
-        double   toneAmp;                   // テストトーン振幅
-        double   toneBeatFreq;              // ビート周波数
-    };
-    static_assert(sizeof(CaptureHeader) == 64, "CaptureHeader must be 64 bytes");
-
-    // ── キャプチャ ──
-    static FILE* g_diagCaptureFile = nullptr;
-    static int g_diagCaptureRemaining = 0;
-    static constexpr int kDiagCaptureMaxSamples = 48000 * 10; // 10秒 @ 48kHz
-
-    // ── テストトーン注入（前方宣言、機能は削除済み） ──
-    void diagEnableToneInjection();
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 namespace {
@@ -45,14 +16,8 @@ namespace {
 }
 }
 
-// work60: Numeric-Only DiagEvent — String構築を排除
-namespace {
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
-    DiagPerTickCounter* eqTickPushed = nullptr;
-    DiagPerTickCounter* eqTickDropped = nullptr;
-    std::atomic<uint64_t>* eqTotalPushed = nullptr;
-}
-// setEqDiagBuffer の実体は DSPCoreFloat.cpp にあり（ODR回避）
+// work60: Numeric-Only DiagEvent — String構築を排除（変数は extern / DSPCoreFloat.cpp で一元管理）
+// ★ [work65] eqDiagBuffer は AudioEngine.h の extern 宣言 + DSPCoreFloat.cpp の実体を参照
 
 void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                const convo::EQParameters* eqParams,
@@ -95,61 +60,6 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
     }
 }
 #endif
-
-    void diagStartCapture() {
-        if (g_diagCaptureFile) return;
-        fopen_s(&g_diagCaptureFile, "C:\\TEMP\\conv_output_l.raw", "wb");
-        if (!g_diagCaptureFile) return;
-
-        // ヘッダ書き込み
-        CaptureHeader hdr = {};
-        hdr.magic      = 0xCAD0DE52;
-        hdr.version    = 1;
-        hdr.captureInput  = 0;  // 削除済み
-        hdr.tailBypass    = 0;
-        hdr.directHeadOff = 0;
-        hdr.injectTone    = 0;  // 削除済み
-        // tailBypass
-        {
-            const char* env = std::getenv("CONVOPEQ_TAIL_BYPASS");
-            if (env && env[0] == '1') hdr.tailBypass = 1;
-        }
-        // directHeadOff
-        {
-            const char* env = std::getenv("CONVOPEQ_DIRECT_HEAD");
-            if (env && env[0] == '0') hdr.directHeadOff = 1;
-        }
-        hdr.sampleRate = 48000;
-        hdr.numSamples = kDiagCaptureMaxSamples;
-        hdr.toneFreq    = 40.0;
-        hdr.toneAmp     = 0.5;
-        hdr.toneBeatFreq = 2.5;
-        // timestamp
-        FILETIME ft;
-        GetSystemTimePreciseAsFileTime(&ft);
-        hdr.captureTimestamp = (static_cast<int64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-
-        fwrite(&hdr, sizeof(hdr), 1, g_diagCaptureFile);
-
-        diagEnableToneInjection(); // テストトーン注入を自動開始
-    }
-
-    void diagWriteCapture(const double* dataL, int numSamples) {
-        if (!g_diagCaptureFile || g_diagCaptureRemaining <= 0) return;
-        const int n = std::min(numSamples, g_diagCaptureRemaining);
-        fwrite(dataL, sizeof(double), n, g_diagCaptureFile);
-        g_diagCaptureRemaining -= n;
-        if (g_diagCaptureRemaining <= 0) {
-            fclose(g_diagCaptureFile);
-            g_diagCaptureFile = nullptr;
-        }
-    }
-
-    // ── テストトーン注入（機能は削除済み） ──
-    void diagEnableToneInjection() {
-    }
-
-}
 
 namespace
 {
@@ -521,11 +431,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         if (!state.convBypassed)
         {
             convolverRt().process(processBlock);
-            // [DIAG] Convolver出力をRAWファイルにキャプチャ（work52）
-            // g_diagCaptureInput=true 時は上記の早期captureで代用
-            diagStartCapture();
-            diagWriteCapture(processBlock.getChannelPointer(0),
-                             static_cast<int>(processBlock.getNumSamples()));
+            // ★ [work65] work52キャプチャコード削除
         }
         if (!state.eqBypassed)
         {
@@ -583,11 +489,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                 }
             }
             convolverRt().process(processBlock);
-            // [DIAG] Convolver出力をRAWファイルにキャプチャ（work52）
-            // CONVOPEQ_CAPTURE_INPUT=1 時は上記の早期captureが使われる
-            diagStartCapture();
-            diagWriteCapture(processBlock.getChannelPointer(0),
-                             static_cast<int>(processBlock.getNumSamples()));
+            // ★ [work65] work52キャプチャコード削除
         }
     }
 
@@ -801,12 +703,15 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
-        if (ansElapsedUs > 10)
+        // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
         {
-            juce::String alog("[ANS_SWITCH] us=");
-            alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog); // NOLINT(rt-logger)
-            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
+            DiagEvent event{};
+            event.category = DiagCategory::AnsSwitchTime;
+            event.eventIndex = currentCallbackSeq;
+            event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
+            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
+            juce::ignoreUnused(pushed); // drop on full is acceptable
         }
 #endif
     }

@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
 #include "InputBitDepthTransform.h"
 
 namespace
@@ -431,12 +432,15 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
-        if (ansElapsedUs > 10)
+        // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
         {
-            juce::String alog("[ANS_SWITCH] us=");
-            alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog); // NOLINT(rt-logger)
-            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
+            DiagEvent event{};
+            event.category = DiagCategory::AnsSwitchTime;
+            event.eventIndex = currentCallbackSeq;
+            event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
+            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
+            juce::ignoreUnused(pushed); // drop on full is acceptable
         }
 #endif
     }

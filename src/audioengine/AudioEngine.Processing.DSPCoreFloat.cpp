@@ -28,18 +28,16 @@ inline double absDiffNoLibm(double a, double b) noexcept
     return absNoLibm(a - b);
 }
 
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-// work60: Numeric-Only DiagEvent — String構築を排除
-// eqDiagBuffer は AudioEngine::diagBuffer への参照（AudioBlock.cpp で設定）
-namespace {
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
-    DiagPerTickCounter* eqTickPushed = nullptr;
-    DiagPerTickCounter* eqTickDropped = nullptr;
-    std::atomic<uint64_t>* eqTotalPushed = nullptr;
 }
-#endif
 
-} // work60: setEqDiagBuffer に外部リンケージを与えるため無名名前空間を一旦閉じる
+// ★ [work65] eqDiagBuffer: external linkage (shared across DSPCoreFloat/Double/IO)
+//   AudioEngine.h で extern 宣言。DO NOT move into anonymous namespace.
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
+DiagPerTickCounter* eqTickPushed = nullptr;
+DiagPerTickCounter* eqTickDropped = nullptr;
+std::atomic<uint64_t>* eqTotalPushed = nullptr;
+#endif
 
 // work60: setEqDiagBuffer は #if 外で常時コンパイル（AudioEngine.Init.cpp からの呼出用）
 void setEqDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,

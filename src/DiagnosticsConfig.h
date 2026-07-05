@@ -15,7 +15,7 @@
 // ============================================================================
 
 #ifndef CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-#define CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS 1
+#define CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS 0
 #endif
 
 // work60: 診断ログサンプリングマスク。CMakeのtarget_compile_definitionsで指定可能。

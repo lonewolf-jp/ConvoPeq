@@ -65,13 +65,6 @@ struct ScopedBlockTimer {
 
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
-// ★ [work62] diagSink 関数ポインタ — ログ出力先を切り替え可能に
-using DiagSink = void(*)(const juce::String&);
-static void fileSink(const juce::String& message) {
-    juce::Logger::writeToLog(message);
-}
-static void nullSink(const juce::String&) {}
-
 // ★ [work62] asyncSink: LogEntry + LockFreeRingBuffer + 非同期Logger
 struct alignas(64) LogEntry {
     uint16_t length;
@@ -100,11 +93,10 @@ static void asyncSink(const juce::String& message)
     }
 }
 
-static DiagSink diagSink = asyncSink;  // ★ [work62] デフォルトを asyncSink に
-
 // ★ [work62] flushLogBuffer — Multi-Producer→SPSCリングバッファをバッチ書き込み
 //    MP間は mutex で逐次化。mutex は pop() の間だけ保持し、Logger I/O は常に mutex 外で行う。
 //    小バッチ（kDrainBatch=100）に分割することで、一度のロック保持時間を抑制する。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 static void flushLogBuffer()
 {
     static constexpr int kDrainBatch = 100;
@@ -137,11 +129,12 @@ static void flushLogBuffer()
         DBG("[LOG_DROP] async log dropped " + juce::String(static_cast<juce::int64>(dropped)) + " messages");
     }
 }
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
 void diagLog(const juce::String& message)
 {
     DBG(message);
-    diagSink(message);
+    asyncSink(message);
 }
 
 // ★ [work62] formatDiagEvent — DiagEvent を文字列化する単一フォーマッタ
@@ -204,6 +197,9 @@ static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
                 + " chunk=" + juce::String(static_cast<int>(event.data.stereoConvTime.chunkSamples))
                 + " ch=" + juce::String(static_cast<int>(event.data.stereoConvTime.channels))
                 + " budget=" + juce::String(static_cast<int>(event.data.stereoConvTime.budgetPercent)) + "%";
+        case DiagCategory::AnsSwitchTime:
+            return diagPrefix(gen) + " [ANS_SWITCH] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.ansSwitchTime.elapsedUs));
         default:
             return diagPrefix(gen) + " [UNKNOWN] category=" + juce::String(static_cast<int>(event.category));
     }
@@ -213,7 +209,7 @@ static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
 // formatDiagEvent が全カテゴリを網羅していることをコンパイル時検証
 // Count センチネルにより、末尾以外へのカテゴリ追加も検出可能
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-static_assert(static_cast<int>(DiagCategory::Count) == 9,
+static_assert(static_cast<int>(DiagCategory::Count) == 10,
     "DiagCategory enum changed: update formatDiagEvent() switch accordingly");
 #endif
 
@@ -275,6 +271,9 @@ void AudioEngine::applyMmcssPriority() noexcept
                     + " procClass=" + juce::String(static_cast<int>(pc))
                     + " savedClass=" + juce::String(static_cast<int>(savedProcessPriorityClass)));
             }
+#else
+            (void)pcResult;
+            (void)tpResult;
 #endif
         }
     }
@@ -305,6 +304,8 @@ void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
             diagLog("[NATIVE_RT] Audio Thread restored priority class to "
                 + juce::String(static_cast<int>(savedProcessPriorityClass)));
         }
+#else
+        (void)pcResult;
 #endif
     }
     convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
@@ -335,6 +336,8 @@ void AudioEngine::finalizeMmcssShutdown() noexcept
             diagLog("[NATIVE_RT] finalize: restored priority class to "
                 + juce::String(static_cast<int>(savedProcessPriorityClass)));
         }
+#else
+        (void)pcResult;
 #endif
     }
 }

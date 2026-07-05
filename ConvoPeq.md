@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-05 01:05:24
+> Generated: 2026-07-05 13:27:56
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -9783,7 +9783,7 @@ struct ScopedDftiDescriptor
 // ============================================================================
 
 #ifndef CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-#define CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS 1
+#define CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS 0
 #endif
 
 // work60: 診断ログサンプリングマスク。CMakeのtarget_compile_definitionsで指定可能。
@@ -28629,15 +28629,16 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     // ★ [work62] callbackIndex を早期に取得（RuntimeScopeより前）
     //   fetchAddAtomic は pre-increment 値を返すため +1 して post-increment に。
-    const auto thisCallbackIndex = convo::fetchAddAtomic(
+    [[maybe_unused]] const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
     // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
     //    常に適用（診断有効時のみログ出力。無効時はスタブ）
+    //    mmcssApplied_ は prepareToPlay() でリセットされるため、
+    //    デバイス再初期化後も正しく再適用される。
     {
-        static std::atomic<bool> s_mmcssDone{false};
         bool expected = false;
-        if (s_mmcssDone.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
             applyMmcssPriority();
         }
     }
@@ -29377,8 +29378,19 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ work61: callbackIndex を早期に取得（RuntimeScopeより前）
     //   これにより recordCallbackArrival() は正しい eventIndex を持つ。
     //   fetchAddAtomic は pre-increment 値を返すため +1 して post-increment に。
-    const auto thisCallbackIndex = convo::fetchAddAtomic(
+    [[maybe_unused]] const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+
+    // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
+    //    常に適用（診断有効時のみログ出力。無効時はスタブ）
+    //    mmcssApplied_ は prepareToPlay() でリセットされるため、
+    //    デバイス再初期化後も正しく再適用される。
+    {
+        bool expected = false;
+        if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
+            applyMmcssPriority();
+        }
+    }
 
     struct AudioCallbackRuntimeScope final
     {
@@ -30010,6 +30022,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         entry.sequence.store(thisCallbackIndex, std::memory_order_release);
     }
 #endif
+
+    // ★ [work63] シャットダウン要求: Audio Thread 自ら MMCSS を解除（診断ガード外＝常時有効）
+    //    Message Thread が mmcssShutdownRequested をセットすると、
+    //    次のコールバック終了時にこのスレッド上で AvRevertMmThreadCharacteristics を実行する。
+    if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
+    {
+        revertMmcssPriorityOnAudioThread();
+    }
+
 }
 
 
@@ -30025,37 +30046,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 #include "DiagnosticsConfig.h"
 #include "core/TimeUtils.h"
 
-// [DIAG] Convolver出力キャプチャ（work52 調査用）
-#include <cstdio>
 #include <cstdint>
 #include <atomic>
-namespace {
-    // ── キャプチャヘッダ ──
-    struct CaptureHeader {
-        uint32_t magic = 0xCAD0DE52;        // work52 magic
-        uint32_t version = 1;
-        uint32_t captureInput   : 1;        // CONVOPEQ_CAPTURE_INPUT
-        uint32_t tailBypass     : 1;        // CONVOPEQ_TAIL_BYPASS
-        uint32_t directHeadOff  : 1;        // CONVOPEQ_DIRECT_HEAD=0
-        uint32_t injectTone     : 1;        // テストトーン注入
-        uint32_t reserved       : 28;
-        uint32_t sampleRate;
-        uint32_t numSamples;                // 生サンプル数（ヘッダ以降）
-        int64_t  buildGeneration;           // 未使用時0
-        int64_t  captureTimestamp;          // Windows FILETIME
-        double   toneFreq;                  // テストトーン周波数
-        double   toneAmp;                   // テストトーン振幅
-        double   toneBeatFreq;              // ビート周波数
-    };
-    static_assert(sizeof(CaptureHeader) == 64, "CaptureHeader must be 64 bytes");
-
-    // ── キャプチャ ──
-    static FILE* g_diagCaptureFile = nullptr;
-    static int g_diagCaptureRemaining = 0;
-    static constexpr int kDiagCaptureMaxSamples = 48000 * 10; // 10秒 @ 48kHz
-
-    // ── テストトーン注入（前方宣言、機能は削除済み） ──
-    void diagEnableToneInjection();
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 namespace {
@@ -30066,14 +30058,8 @@ namespace {
 }
 }
 
-// work60: Numeric-Only DiagEvent — String構築を排除
-namespace {
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
-    DiagPerTickCounter* eqTickPushed = nullptr;
-    DiagPerTickCounter* eqTickDropped = nullptr;
-    std::atomic<uint64_t>* eqTotalPushed = nullptr;
-}
-// setEqDiagBuffer の実体は DSPCoreFloat.cpp にあり（ODR回避）
+// work60: Numeric-Only DiagEvent — String構築を排除（変数は extern / DSPCoreFloat.cpp で一元管理）
+// ★ [work65] eqDiagBuffer は AudioEngine.h の extern 宣言 + DSPCoreFloat.cpp の実体を参照
 
 void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                const convo::EQParameters* eqParams,
@@ -30116,61 +30102,6 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
     }
 }
 #endif
-
-    void diagStartCapture() {
-        if (g_diagCaptureFile) return;
-        fopen_s(&g_diagCaptureFile, "C:\\TEMP\\conv_output_l.raw", "wb");
-        if (!g_diagCaptureFile) return;
-
-        // ヘッダ書き込み
-        CaptureHeader hdr = {};
-        hdr.magic      = 0xCAD0DE52;
-        hdr.version    = 1;
-        hdr.captureInput  = 0;  // 削除済み
-        hdr.tailBypass    = 0;
-        hdr.directHeadOff = 0;
-        hdr.injectTone    = 0;  // 削除済み
-        // tailBypass
-        {
-            const char* env = std::getenv("CONVOPEQ_TAIL_BYPASS");
-            if (env && env[0] == '1') hdr.tailBypass = 1;
-        }
-        // directHeadOff
-        {
-            const char* env = std::getenv("CONVOPEQ_DIRECT_HEAD");
-            if (env && env[0] == '0') hdr.directHeadOff = 1;
-        }
-        hdr.sampleRate = 48000;
-        hdr.numSamples = kDiagCaptureMaxSamples;
-        hdr.toneFreq    = 40.0;
-        hdr.toneAmp     = 0.5;
-        hdr.toneBeatFreq = 2.5;
-        // timestamp
-        FILETIME ft;
-        GetSystemTimePreciseAsFileTime(&ft);
-        hdr.captureTimestamp = (static_cast<int64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-
-        fwrite(&hdr, sizeof(hdr), 1, g_diagCaptureFile);
-
-        diagEnableToneInjection(); // テストトーン注入を自動開始
-    }
-
-    void diagWriteCapture(const double* dataL, int numSamples) {
-        if (!g_diagCaptureFile || g_diagCaptureRemaining <= 0) return;
-        const int n = std::min(numSamples, g_diagCaptureRemaining);
-        fwrite(dataL, sizeof(double), n, g_diagCaptureFile);
-        g_diagCaptureRemaining -= n;
-        if (g_diagCaptureRemaining <= 0) {
-            fclose(g_diagCaptureFile);
-            g_diagCaptureFile = nullptr;
-        }
-    }
-
-    // ── テストトーン注入（機能は削除済み） ──
-    void diagEnableToneInjection() {
-    }
-
-}
 
 namespace
 {
@@ -30542,11 +30473,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         if (!state.convBypassed)
         {
             convolverRt().process(processBlock);
-            // [DIAG] Convolver出力をRAWファイルにキャプチャ（work52）
-            // g_diagCaptureInput=true 時は上記の早期captureで代用
-            diagStartCapture();
-            diagWriteCapture(processBlock.getChannelPointer(0),
-                             static_cast<int>(processBlock.getNumSamples()));
+            // ★ [work65] work52キャプチャコード削除
         }
         if (!state.eqBypassed)
         {
@@ -30604,11 +30531,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                 }
             }
             convolverRt().process(processBlock);
-            // [DIAG] Convolver出力をRAWファイルにキャプチャ（work52）
-            // CONVOPEQ_CAPTURE_INPUT=1 時は上記の早期captureが使われる
-            diagStartCapture();
-            diagWriteCapture(processBlock.getChannelPointer(0),
-                             static_cast<int>(processBlock.getNumSamples()));
+            // ★ [work65] work52キャプチャコード削除
         }
     }
 
@@ -30822,12 +30745,15 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
-        if (ansElapsedUs > 10)
+        // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
         {
-            juce::String alog("[ANS_SWITCH] us=");
-            alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog); // NOLINT(rt-logger)
-            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
+            DiagEvent event{};
+            event.category = DiagCategory::AnsSwitchTime;
+            event.eventIndex = currentCallbackSeq;
+            event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
+            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
+            juce::ignoreUnused(pushed); // drop on full is acceptable
         }
 #endif
     }
@@ -30955,18 +30881,16 @@ inline double absDiffNoLibm(double a, double b) noexcept
     return absNoLibm(a - b);
 }
 
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-// work60: Numeric-Only DiagEvent — String構築を排除
-// eqDiagBuffer は AudioEngine::diagBuffer への参照（AudioBlock.cpp で設定）
-namespace {
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
-    DiagPerTickCounter* eqTickPushed = nullptr;
-    DiagPerTickCounter* eqTickDropped = nullptr;
-    std::atomic<uint64_t>* eqTotalPushed = nullptr;
 }
-#endif
 
-} // work60: setEqDiagBuffer に外部リンケージを与えるため無名名前空間を一旦閉じる
+// ★ [work65] eqDiagBuffer: external linkage (shared across DSPCoreFloat/Double/IO)
+//   AudioEngine.h で extern 宣言。DO NOT move into anonymous namespace.
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
+DiagPerTickCounter* eqTickPushed = nullptr;
+DiagPerTickCounter* eqTickDropped = nullptr;
+std::atomic<uint64_t>* eqTotalPushed = nullptr;
+#endif
 
 // work60: setEqDiagBuffer は #if 外で常時コンパイル（AudioEngine.Init.cpp からの呼出用）
 void setEqDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
@@ -31352,6 +31276,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 #include <JuceHeader.h>
 #include <immintrin.h>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
 #include "InputBitDepthTransform.h"
 
 namespace
@@ -31782,12 +31707,15 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
-        if (ansElapsedUs > 10)
+        // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
         {
-            juce::String alog("[ANS_SWITCH] us=");
-            alog += juce::String(static_cast<int64_t>(ansElapsedUs));
-            DBG(alog); // NOLINT(rt-logger)
-            juce::Logger::writeToLog(alog); // NOLINT(rt-logger)
+            DiagEvent event{};
+            event.category = DiagCategory::AnsSwitchTime;
+            event.eventIndex = currentCallbackSeq;
+            event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
+            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
+            juce::ignoreUnused(pushed); // drop on full is acceptable
         }
 #endif
     }
@@ -32386,6 +32314,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
     //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
+    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssApplied_ をリセットする。
+    convo::publishAtomic(mmcssApplied_, false, std::memory_order_release);
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
@@ -35241,13 +35171,6 @@ struct ScopedBlockTimer {
 
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
-// ★ [work62] diagSink 関数ポインタ — ログ出力先を切り替え可能に
-using DiagSink = void(*)(const juce::String&);
-static void fileSink(const juce::String& message) {
-    juce::Logger::writeToLog(message);
-}
-static void nullSink(const juce::String&) {}
-
 // ★ [work62] asyncSink: LogEntry + LockFreeRingBuffer + 非同期Logger
 struct alignas(64) LogEntry {
     uint16_t length;
@@ -35276,11 +35199,10 @@ static void asyncSink(const juce::String& message)
     }
 }
 
-static DiagSink diagSink = asyncSink;  // ★ [work62] デフォルトを asyncSink に
-
 // ★ [work62] flushLogBuffer — Multi-Producer→SPSCリングバッファをバッチ書き込み
 //    MP間は mutex で逐次化。mutex は pop() の間だけ保持し、Logger I/O は常に mutex 外で行う。
 //    小バッチ（kDrainBatch=100）に分割することで、一度のロック保持時間を抑制する。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 static void flushLogBuffer()
 {
     static constexpr int kDrainBatch = 100;
@@ -35308,16 +35230,17 @@ static void flushLogBuffer()
         juce::Logger::writeToLog(juce::String(batch));
     }
 
-    const uint64_t dropped = s_droppedLogs.exchange(0, std::memory_order_acq_rel);
+    const uint64_t dropped = convo::exchangeAtomic(s_droppedLogs, 0, std::memory_order_acq_rel);
     if (dropped > 0) {
         DBG("[LOG_DROP] async log dropped " + juce::String(static_cast<juce::int64>(dropped)) + " messages");
     }
 }
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
 void diagLog(const juce::String& message)
 {
     DBG(message);
-    diagSink(message);
+    asyncSink(message);
 }
 
 // ★ [work62] formatDiagEvent — DiagEvent を文字列化する単一フォーマッタ
@@ -35380,6 +35303,9 @@ static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
                 + " chunk=" + juce::String(static_cast<int>(event.data.stereoConvTime.chunkSamples))
                 + " ch=" + juce::String(static_cast<int>(event.data.stereoConvTime.channels))
                 + " budget=" + juce::String(static_cast<int>(event.data.stereoConvTime.budgetPercent)) + "%";
+        case DiagCategory::AnsSwitchTime:
+            return diagPrefix(gen) + " [ANS_SWITCH] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " us=" + juce::String(static_cast<juce::int64>(event.data.ansSwitchTime.elapsedUs));
         default:
             return diagPrefix(gen) + " [UNKNOWN] category=" + juce::String(static_cast<int>(event.category));
     }
@@ -35389,7 +35315,7 @@ static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
 // formatDiagEvent が全カテゴリを網羅していることをコンパイル時検証
 // Count センチネルにより、末尾以外へのカテゴリ追加も検出可能
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-static_assert(static_cast<int>(DiagCategory::Count) == 9,
+static_assert(static_cast<int>(DiagCategory::Count) == 10,
     "DiagCategory enum changed: update formatDiagEvent() switch accordingly");
 #endif
 
@@ -35451,6 +35377,9 @@ void AudioEngine::applyMmcssPriority() noexcept
                     + " procClass=" + juce::String(static_cast<int>(pc))
                     + " savedClass=" + juce::String(static_cast<int>(savedProcessPriorityClass)));
             }
+#else
+            (void)pcResult;
+            (void)tpResult;
 #endif
         }
     }
@@ -35481,6 +35410,8 @@ void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
             diagLog("[NATIVE_RT] Audio Thread restored priority class to "
                 + juce::String(static_cast<int>(savedProcessPriorityClass)));
         }
+#else
+        (void)pcResult;
 #endif
     }
     convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
@@ -35511,6 +35442,8 @@ void AudioEngine::finalizeMmcssShutdown() noexcept
             diagLog("[NATIVE_RT] finalize: restored priority class to "
                 + juce::String(static_cast<int>(savedProcessPriorityClass)));
         }
+#else
+        (void)pcResult;
 #endif
     }
 }
@@ -37353,7 +37286,8 @@ enum class DiagCategory : uint8_t {
     ConvTime = 6,         // CONV_TIME
     StereoConvTime = 7,   // STCONV_TIME
     CallbackArrival = 8,  // CB_ARRIVAL（work61: callback到着時刻）
-    Count                 // カテゴリ総数（センチネル、9）
+    AnsSwitchTime = 9,    // ANS_SWITCH（work65: adaptive noise shaper bank switch）
+    Count                 // カテゴリ総数（センチネル、10）
 };
 
 // カテゴリ固有データ構造（POD, trivially copyable）
@@ -37426,6 +37360,11 @@ struct StereoConvTimeData {
     uint16_t budgetPercent;
 };
 
+// ★ [work65] AnsSwitchTime — Adaptive Noise Shaper bank switch timing
+struct AnsSwitchData {
+    uint64_t elapsedUs;       // バンク切替に要した時間 (μs)
+};
+
 // ★ work61: CallbackArrival — callback到着時刻記録（20byte）
 struct CallbackArrivalData {
     uint64_t timestampUs;     // callback entry 時刻（getCurrentTimeUs）
@@ -37450,6 +37389,7 @@ struct DiagEvent {
         ConvTimeData convTime;
         StereoConvTimeData stereoConvTime;
         CallbackArrivalData callbackArrival; // ★ work61
+        AnsSwitchData ansSwitchTime;          // ★ [work65] ANS_SWITCH
     } data;
 };
 
@@ -37495,6 +37435,17 @@ void setConvDiagBuffer(
 
 // work60: 実体定義は DSPCoreFloat.cpp（setEqDiagBuffer）と
 // ConvolverProcessor.Runtime.cpp（setConvDiagBuffer）にある。
+
+// ★ [work65] Shared runtime diagnostics state — external linkage.
+// Must be shared across DSPCoreFloat.cpp, DSPCoreDouble.cpp, and
+// DSPCoreIO.cpp. DO NOT move into an anonymous namespace in any
+// of those translation units.
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+extern LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer;
+extern DiagPerTickCounter* eqTickPushed;
+extern DiagPerTickCounter* eqTickDropped;
+extern std::atomic<uint64_t>* eqTotalPushed;
+#endif
 
 // ★ work61: CallbackArrival 記録ヘルパー（inline、RT-safe）
 //   BlockDouble.cpp / AudioBlock.cpp の両方から呼ばれる。
@@ -39109,6 +39060,7 @@ public:
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
     std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
+    std::atomic<bool> mmcssApplied_{false};       // ★ [work64] 初回適用済みフラグ（prepareToPlayでリセット）
 
     // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
     //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）

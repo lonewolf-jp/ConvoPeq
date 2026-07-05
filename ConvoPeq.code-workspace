@@ -3,23 +3,20 @@
 		{
 			"path": "."
 		}
-	],
-	"settings": {
-		// ── AI / Copilot 設定（workspace 単位）────────────────────────
-		"chat.agent.maxRequests": 200,
-		"inlineChat.enableV2": true,
-		"chat.useNestedAgentsMdFiles": true,
-		"chat.agentSessionProjection.enabled": true,
-
-		// ── C++ Lint / Editor 設定は .vscode/settings.json を参照 ────
-		// （workspace レベルの設定より folder レベルの設定が優先される）
-		//
-		// 管理ファイル:
-		//   .vscode/settings.json          → C++ lint / format / IntelliSense
-		//   .vscode/c_cpp_properties.json  → C++ IntelliSense 構成
-		//   .vscode/extensions.json         → 推奨拡張機能
-		//   .clang-tidy                      → clang-tidy チェック定義
-		//   .clang-format                    → clang-format スタイル定義
-		//   .editorconfig                    → 基本エディタ設定
-	}
+    ],
+    "settings": {
+        "c-cpp-flylint.run": "onSave",
+        "c-cpp-flylint.flawfinder.enable": false,
+        "c-cpp-flylint.cppcheck.enable": false,
+        "c-cpp-flylint.clang.enable": false,
+        "c-cpp-flylint.lizard.enable": false,
+        "c-cpp-flylint.flexelint.enable": false,
+        "c-cpp-flylint.debug": false,
+        "extensions.ignoreRecommendations": false,
+        "files.associations": {
+            "*.h": "cpp"
+        },
+        "workbench.colorTheme": "Dark Modern",
+        "workbench.preferredDarkColorTheme": "Dark Modern"
+    }
 }

@@ -23,6 +23,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
     //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
+    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssApplied_ をリセットする。
+    convo::publishAtomic(mmcssApplied_, false, std::memory_order_release);
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
