@@ -86,6 +86,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const int startSample = bufferToFill.startSample;
     auto* buffer = bufferToFill.buffer;
 
+    // ★ [work66-P2-4] 共通開始時刻（関数先頭で1回のみ取得。XRUN/t0_start と共有）
+    const auto cbStartUs = convo::getCurrentTimeUs();
+
     struct CallbackTelemetryScope final
     {
         AudioEngine& engine;
@@ -93,30 +96,27 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         bool enabled;
         uint64_t startUs;
 
-        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn) noexcept
+        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn,
+                                uint64_t cbStartUs) noexcept
             : engine(owner)
             , samples(numSamplesIn)
             , enabled(owner.isCliProcessingTelemetryEnabled())
-            , startUs(convo::getCurrentTimeUs())  // ★ 常時取得（A/B計測用）
+            , startUs(enabled ? cbStartUs : 0)
         {
         }
 
         ~CallbackTelemetryScope() noexcept
         {
+            if (!enabled)
+                return;
+
             const uint64_t endUs = convo::getCurrentTimeUs();
             const uint64_t processTime = (endUs > startUs) ? (endUs - startUs) : 0;
 
-            // CLI連携（既存）
-            if (enabled)
-            {
-                const double processTimeUs = static_cast<double>(processTime);
-                engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
-            }
-
-            // ★ B: リングバッファ書込は #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS ブロック内で行う
-            // （thisCallbackIndex / expectedIntervalUs が必要なため）
+            const double processTimeUs = static_cast<double>(processTime);
+            engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
         }
-    } callbackTelemetry(*this, numSamples);
+    } callbackTelemetry(*this, numSamples, cbStartUs);
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ work60: DSP_STAGE計測用タイムスタンプ。dsp->process()前後で設定。
@@ -490,15 +490,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // ★ callback 開始時刻（フル callback 時間計測用）
-    //   早期 return でこの値が使われないケースがあるが、無視して問題ない。
+    //   cbStartUs は関数先頭で取得済みの共通タイムスタンプを流用。
     static constexpr auto kNeverStartedUs = std::numeric_limits<uint64_t>::max();
-    uint64_t cbStartUs = kNeverStartedUs;
     uint64_t cbPrevEndUs = 0;  // XRUNブロックが上書きする前の前回終了時刻を保存
 
     // ★ XRUN 検出（callback 時間 + interval 超過）
     {
-        const auto t0_start = convo::getCurrentTimeUs();
-        cbStartUs = t0_start;  // 早期 return を通過した時点で確定
+        const auto t0_start = cbStartUs;  // ★ P2-4: 共通開始時刻を流用
         cbPrevEndUs = convo::consumeAtomic(rtLocalState_.lastCallbackEndTicks, std::memory_order_relaxed);
         const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         const double expectedMs = (engineSampleRate > 0.0)
@@ -651,10 +649,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // ★ work60: CALLBACK_STAGE（INPUT/DSP/OUTPUT 3区間 + drift + budget）
     {
         const uint64_t t0 = callbackTelemetry.startUs;
-        const uint64_t t3 = convo::getCurrentTimeUs();
         const uint64_t gen = (runtimeWorld != nullptr)
             ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
-        const uint32_t cpu = static_cast<uint32_t>(::GetCurrentProcessorNumber());
         const uint64_t expectedUs = rtLocalState_.expectedCallbackIntervalUs;
         const int64_t driftUs = convo::consumeAtomic(
             rtLocalState_.lastCallbackDriftUs, std::memory_order_relaxed);
@@ -662,6 +658,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         if ((thisCallbackIndex & CONVOPEQ_DIAG_SAMPLE_MASK) == 0)
         {
             const uint64_t inputUs = (t1_dspStartUs > t0) ? t1_dspStartUs - t0 : 0;
+            const uint64_t t3 = convo::getCurrentTimeUs();
+            const uint32_t cpu = static_cast<uint32_t>(::GetCurrentProcessorNumber());
             const uint64_t dspUs = (t2_dspEndUs > t1_dspStartUs) ? t2_dspEndUs - t1_dspStartUs : 0;
             const uint64_t outputUs = (t3 > t2_dspEndUs) ? t3 - t2_dspEndUs : 0;
             const uint64_t totalUs = (t3 > t0) ? t3 - t0 : 0;

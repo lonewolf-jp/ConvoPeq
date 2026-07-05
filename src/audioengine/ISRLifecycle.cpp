@@ -184,6 +184,8 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
     convo::publishAtomic(phase_, next, std::memory_order_release);
 
     // Record transition（ロックフリーリングバッファ）
+    // ★ [work66-P2-2] traceFull_ フラグで満杯後の fetchAddAtomic を防止
+    if (!traceFull_.load(std::memory_order_relaxed))
     {
         const size_t idx = convo::fetchAddAtomic(traceWriteIndex_, size_t{1}, std::memory_order_acq_rel);
         if (idx < kTraceBufferSize)
@@ -193,6 +195,10 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
             traceBuffer_[idx].epochId = convo::consumeAtomic(epochCounter_, std::memory_order_acquire);
             traceBuffer_[idx].timestamp_ns = std::chrono::high_resolution_clock::now()
                 .time_since_epoch().count();
+        }
+        else
+        {
+            convo::publishAtomic(traceFull_, true, std::memory_order_release);
         }
     }
 

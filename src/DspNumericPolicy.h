@@ -11,6 +11,7 @@
 #include <JuceHeader.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "core/ThreadHash.h"
 
 namespace convo::numeric_policy
 {
@@ -40,7 +41,7 @@ namespace convo::numeric_policy
 
     inline uint64_t currentThreadTag() noexcept
     {
-        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        return convo::cachedThreadHash();
     }
 
     struct ScopedThreadRole final
@@ -116,7 +117,7 @@ namespace convo::numeric_policy
 
     inline bool isAudioThread() noexcept
     {
-        const uint64_t tag = currentThreadTag();
+        const uint64_t tag = convo::cachedThreadHash();
         for (auto& slot : audioThreadSlots())
         {
             if (convo::consumeAtomic(slot.tag, std::memory_order_acquire) == tag)

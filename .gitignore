@@ -73,9 +73,11 @@ htmlcov/
 # CocoIndex Code (ccc)
 .cocoindex_code/
 
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+
 # OS generated files
 .DS_Store
 Thumbs.db
 ```
-# CocoIndex Code (ccc)
-/.cocoindex_code/
+

@@ -4,6 +4,7 @@
 #include "DiagnosticsConfig.h"
 #include "core/TimeUtils.h"
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 namespace
 {
 [[maybe_unused]] void diagLog(const juce::String& message)
@@ -11,6 +12,8 @@ namespace
     DBG(message); // NOLINT(rt-logger)
     juce::Logger::writeToLog(message); // NOLINT(rt-logger)
 }
+}
+#endif
 
 inline bool isFiniteNoLibm(double x) noexcept
 {
@@ -26,8 +29,6 @@ inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
 inline double absDiffNoLibm(double a, double b) noexcept
 {
     return absNoLibm(a - b);
-}
-
 }
 
 // ★ [work65] eqDiagBuffer: external linkage (shared across DSPCoreFloat/Double/IO)

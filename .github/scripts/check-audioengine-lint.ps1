@@ -460,6 +460,11 @@ foreach ($file in $sourceFiles) {
             if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, $allowedMutablePattern)) {
                 # Legitimate const-correct mutex pattern, skip
             }
+            elseif ($lineText -match 'NOLINT\(thread-local\)' -and $lineText -match 'RT-SAFE:') {
+                # NOLINT(thread-local) + RT-SAFE: intentinally reviewed thread-local cache.
+                # ISR rule: allowed only when the comment documents WHY it is RT-safe
+                # (POD type, const, no destructor, single initialization, etc.)
+            }
             else {
                 $violations += [PSCustomObject]@{
                     Rule        = "LINT-AE-011"

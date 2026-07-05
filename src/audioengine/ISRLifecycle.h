@@ -109,6 +109,7 @@ private:
     static constexpr size_t kTraceBufferSize = 4096;
     std::array<PhaseTransition, kTraceBufferSize> traceBuffer_{};
     std::atomic<size_t> traceWriteIndex_{0};
+    std::atomic<bool> traceFull_{false};
 };
 
 /**

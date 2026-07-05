@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-05 16:12:29
+> Generated: 2026-07-06 00:42:35
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -233,6 +233,7 @@
         │   ├── SnapshotRetireManager.h
         │   ├── SnapshotSlotStore.h
         │   ├── ThreadAffinityManager.h
+        │   ├── ThreadHash.h
         │   ├── TimeUtils.h
         │   ├── Types.h
         │   ├── WorkerThread.cpp
@@ -4632,16 +4633,17 @@ void ConvolverControlPanel::resized()
     auto hcfRow = bounds.removeFromTop(26);
     hcfLabel.setBounds(hcfRow.removeFromLeft(38).reduced(0, 3));
     hcfRow.removeFromLeft(4);
-    hcfSharpButton.setBounds(hcfRow.removeFromLeft(52).reduced(2, 2));
+    hcfSharpButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
     hcfNaturalButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
-    hcfSoftButton.setBounds(hcfRow.removeFromLeft(48).reduced(2, 2));
+    hcfSoftButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
 
     // --- 5行目: ローカットフィルターモード ---
     auto lcfRow = bounds.removeFromTop(26);
     lcfLabel.setBounds(lcfRow.removeFromLeft(38).reduced(0, 3));
     lcfRow.removeFromLeft(4);
+    lcfRow.removeFromLeft(60); // HCFのSharpの位置に合わせるためスキップ
     lcfNaturalButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
-    lcfSoftButton.setBounds(lcfRow.removeFromLeft(48).reduced(2, 2));
+    lcfSoftButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
 
     // --- 10行目: Convolver Input Trim (EQ→Conv モード時のみ表示) ---
     auto trimRow = bounds.removeFromTop(26);
@@ -8829,15 +8831,14 @@ void DeviceSettings::resized()
     auto bounds = getLocalBounds();
     // Adaptive learningボタンの下の余白を詰めるため、controlsAreaの高さを自動計算
     constexpr int rowHeight = 30;
-    constexpr int numRows = 7; // Dither, Input, Output, Tabs, Over/Noise, Adaptive, Priority
+    constexpr int numRows = 6; // Dither, Input, Output, Tabs, Over/Noise, Priority/Adaptive
     auto controlsArea = bounds.removeFromTop(rowHeight * numRows); // 必要な分だけ
     auto row1 = controlsArea.removeFromTop(rowHeight); // Dither Bit Depth
     auto row2 = controlsArea.removeFromTop(rowHeight); // Input Headroom
     auto row3 = controlsArea.removeFromTop(rowHeight); // Output Makeup
     auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
     auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
-    [[maybe_unused]] auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
-    auto row7 = controlsArea.removeFromTop(rowHeight); // Audio Thread Priority
+    auto row6 = controlsArea.removeFromTop(rowHeight); // Priority / Adaptive learning
 
     // 1行目: Dither Bit Depth
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
@@ -8858,29 +8859,22 @@ void DeviceSettings::resized()
     oversamplingLabel.setBounds(row5.removeFromLeft(120).reduced(5));
     oversamplingComboBox.setBounds(row5.removeFromLeft(100).reduced(2));
     noiseShaperLabel.setBounds(row5.removeFromLeft(120).reduced(5));
-    // NoiseShaperの位置・幅を記録
     auto nsComboX = row5.getX();
-    auto nsComboY = row5.getY();
     auto nsComboW = 160;
-    auto nsComboH = row5.getHeight();
-    noiseShaperComboBox.setBounds(nsComboX, nsComboY, nsComboW, nsComboH - 2);
+    noiseShaperComboBox.setBounds(nsComboX, row5.getY(), nsComboW, row5.getHeight() - 2);
 
-    // 6行目: Adaptive learningボタンをNoiseShaperの真下・同じ幅で配置
-    adaptiveLearningButton.setBounds(nsComboX, nsComboY + nsComboH, nsComboW, nsComboH - 2);
-
-    // 7行目: Audio Thread Priority toggle
-    audioThreadPriorityToggle.setBounds(row7.reduced(5));
+    // 6行目: Audio Thread Priority (Oversamplingの真下) と Adaptive learningボタン
+    audioThreadPriorityToggle.setBounds(row6.removeFromLeft(340).reduced(5));
+    adaptiveLearningButton.setBounds(nsComboX, row6.getY(), nsComboW, row6.getHeight() - 2);
 
     fixedNoiseLogIntervalLabel.setBounds(0, 0, 0, 0); // 非表示時のダミー配置
     fixedNoiseLogIntervalComboBox.setBounds(0, 0, 0, 0);
     fixedNoiseWindowLabel.setBounds(0, 0, 0, 0);
     fixedNoiseWindowComboBox.setBounds(0, 0, 0, 0);
 
-    // Audio device selectorをAdaptive learningボタンの直下に詰めて配置
+    // Audio device selectorをコントロールの下に配置
     if (selector != nullptr) {
-        auto selectorBounds = bounds;
-        selectorBounds.setY(nsComboY + nsComboH * 2); // Adaptive learningボタンの下端から開始
-        selector->setBounds(selectorBounds);
+        selector->setBounds(bounds);
     }
 }
 
@@ -9876,6 +9870,7 @@ inline void updateAtomicMaximum(std::atomic<uint32_t>& target, uint32_t value) n
 #include <JuceHeader.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "core/ThreadHash.h"
 
 namespace convo::numeric_policy
 {
@@ -9905,7 +9900,7 @@ namespace convo::numeric_policy
 
     inline uint64_t currentThreadTag() noexcept
     {
-        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        return convo::cachedThreadHash();
     }
 
     struct ScopedThreadRole final
@@ -9981,7 +9976,7 @@ namespace convo::numeric_policy
 
     inline bool isAudioThread() noexcept
     {
-        const uint64_t tag = currentThreadTag();
+        const uint64_t tag = convo::cachedThreadHash();
         for (auto& slot : audioThreadSlots())
         {
             if (convo::consumeAtomic(slot.tag, std::memory_order_acquire) == tag)
@@ -10764,9 +10759,9 @@ void EQControlPanel::resized()
     lpfRow.removeFromLeft(10);
     eqLpfLabel.setBounds(lpfRow.removeFromLeft(38).reduced(0, 3));
     lpfRow.removeFromLeft(4);
-    eqLpfSharpButton  .setBounds(lpfRow.removeFromLeft(52).reduced(2, 2));
+    eqLpfSharpButton  .setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
     eqLpfNaturalButton.setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
-    eqLpfSoftButton   .setBounds(lpfRow.removeFromLeft(48).reduced(2, 2));
+    eqLpfSoftButton   .setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
 
     // ── 各バンド列 ──
     // 2段表示 (10バンド x 2行)
@@ -13615,6 +13610,7 @@ class IppFFTPlanCache
 public:
     static const IppFFTPlan* getOrCreate(int order)
     {
+        ASSERT_NON_RT_THREAD();
         std::lock_guard<std::mutex> lock(getMutex());
         auto& cache = getCache();
         const auto it = cache.find(order);
@@ -13871,7 +13867,9 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         }
         if (!reusableGain.get())
         {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             juce::Logger::writeToLog("MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " + juce::String(li));
+#endif
             continue;
         }
         double* gain = reusableGain.get();
@@ -14207,8 +14205,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
             if (!l.fftPlanOwner.has_value() || l.fftPlanOwner->get().fftSpec == nullptr)
             {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
                 juce::Logger::writeToLog("MKLNonUniformConvolver: FFT plan cache creation failed for layer "
                                          + juce::String(li) + " (order=" + juce::String(order) + ")");
+#endif
                 releaseAllLayers();
                 return false;
             }
@@ -14223,8 +14223,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 l.fftWorkBuf = ippsMalloc_8u(l.fftPlanOwner->get().sizeWork);
                 if (!l.fftWorkBuf)
                 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
                     juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(l.fftPlanOwner->get().sizeWork)
                                              + ") failed for layer " + juce::String(li));
+#endif
                     releaseAllLayers();
                     return false;
                 }
@@ -17068,7 +17070,7 @@ void MainWindow::resized()
     saveButton.setBounds (buttonRow.removeFromRight (46).reduced (2, 2));
 
     if (convolverPanel)
-        convolverPanel->setBounds (bounds.removeFromTop (280));
+        convolverPanel->setBounds (bounds.removeFromTop (320));
 
     const int eqH = static_cast<int> (bounds.getHeight() * 0.48f);
     if (eqPanel)
@@ -28715,6 +28717,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const int startSample = bufferToFill.startSample;
     auto* buffer = bufferToFill.buffer;
 
+    // ★ [work66-P2-4] 共通開始時刻（関数先頭で1回のみ取得。XRUN/t0_start と共有）
+    const auto cbStartUs = convo::getCurrentTimeUs();
+
     struct CallbackTelemetryScope final
     {
         AudioEngine& engine;
@@ -28722,30 +28727,27 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         bool enabled;
         uint64_t startUs;
 
-        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn) noexcept
+        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn,
+                                uint64_t cbStartUs) noexcept
             : engine(owner)
             , samples(numSamplesIn)
             , enabled(owner.isCliProcessingTelemetryEnabled())
-            , startUs(convo::getCurrentTimeUs())  // ★ 常時取得（A/B計測用）
+            , startUs(enabled ? cbStartUs : 0)
         {
         }
 
         ~CallbackTelemetryScope() noexcept
         {
+            if (!enabled)
+                return;
+
             const uint64_t endUs = convo::getCurrentTimeUs();
             const uint64_t processTime = (endUs > startUs) ? (endUs - startUs) : 0;
 
-            // CLI連携（既存）
-            if (enabled)
-            {
-                const double processTimeUs = static_cast<double>(processTime);
-                engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
-            }
-
-            // ★ B: リングバッファ書込は #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS ブロック内で行う
-            // （thisCallbackIndex / expectedIntervalUs が必要なため）
+            const double processTimeUs = static_cast<double>(processTime);
+            engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
         }
-    } callbackTelemetry(*this, numSamples);
+    } callbackTelemetry(*this, numSamples, cbStartUs);
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ work60: DSP_STAGE計測用タイムスタンプ。dsp->process()前後で設定。
@@ -29119,15 +29121,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // ★ callback 開始時刻（フル callback 時間計測用）
-    //   早期 return でこの値が使われないケースがあるが、無視して問題ない。
+    //   cbStartUs は関数先頭で取得済みの共通タイムスタンプを流用。
     static constexpr auto kNeverStartedUs = std::numeric_limits<uint64_t>::max();
-    uint64_t cbStartUs = kNeverStartedUs;
     uint64_t cbPrevEndUs = 0;  // XRUNブロックが上書きする前の前回終了時刻を保存
 
     // ★ XRUN 検出（callback 時間 + interval 超過）
     {
-        const auto t0_start = convo::getCurrentTimeUs();
-        cbStartUs = t0_start;  // 早期 return を通過した時点で確定
+        const auto t0_start = cbStartUs;  // ★ P2-4: 共通開始時刻を流用
         cbPrevEndUs = convo::consumeAtomic(rtLocalState_.lastCallbackEndTicks, std::memory_order_relaxed);
         const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         const double expectedMs = (engineSampleRate > 0.0)
@@ -29280,10 +29280,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // ★ work60: CALLBACK_STAGE（INPUT/DSP/OUTPUT 3区間 + drift + budget）
     {
         const uint64_t t0 = callbackTelemetry.startUs;
-        const uint64_t t3 = convo::getCurrentTimeUs();
         const uint64_t gen = (runtimeWorld != nullptr)
             ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
-        const uint32_t cpu = static_cast<uint32_t>(::GetCurrentProcessorNumber());
         const uint64_t expectedUs = rtLocalState_.expectedCallbackIntervalUs;
         const int64_t driftUs = convo::consumeAtomic(
             rtLocalState_.lastCallbackDriftUs, std::memory_order_relaxed);
@@ -29291,6 +29289,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         if ((thisCallbackIndex & CONVOPEQ_DIAG_SAMPLE_MASK) == 0)
         {
             const uint64_t inputUs = (t1_dspStartUs > t0) ? t1_dspStartUs - t0 : 0;
+            const uint64_t t3 = convo::getCurrentTimeUs();
+            const uint32_t cpu = static_cast<uint32_t>(::GetCurrentProcessorNumber());
             const uint64_t dspUs = (t2_dspEndUs > t1_dspStartUs) ? t2_dspEndUs - t1_dspStartUs : 0;
             const uint64_t outputUs = (t3 > t2_dspEndUs) ? t3 - t2_dspEndUs : 0;
             const uint64_t totalUs = (t3 > t0) ? t3 - t0 : 0;
@@ -29454,6 +29454,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
 
+    // ★ [work66-P2-4] 共通開始時刻（関数先頭で1回のみ取得。XRUN/t0_start と共有）
+    const auto cbStartUs = convo::getCurrentTimeUs();
+
     struct CallbackTelemetryScope final
     {
         AudioEngine& engine;
@@ -29461,25 +29464,26 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         bool enabled;
         uint64_t startUs;
 
-        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn) noexcept
+        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn,
+                                uint64_t cbStartUs) noexcept
             : engine(owner)
             , samples(numSamplesIn)
             , enabled(owner.isCliProcessingTelemetryEnabled())
-            , startUs(convo::getCurrentTimeUs())  // ★ 常時取得（A/B計測用）
+            , startUs(enabled ? cbStartUs : 0)
         {
         }
 
         ~CallbackTelemetryScope() noexcept
         {
+            if (!enabled)
+                return;
+
             const uint64_t endUs = convo::getCurrentTimeUs();
             const uint64_t processTime = (endUs > startUs) ? (endUs - startUs) : 0;
-            if (enabled)
-            {
-                const double processTimeUs = static_cast<double>(processTime);
-                engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
-            }
+            const double processTimeUs = static_cast<double>(processTime);
+            engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
         }
-    } callbackTelemetry(*this, numSamples);
+    } callbackTelemetry(*this, numSamples, cbStartUs);
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ work60: DSP_STAGE計測用タイムスタンプ
@@ -29831,14 +29835,13 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // ★ callback 開始時刻（フル callback 時間計測用）
+    //   cbStartUs は関数先頭で取得済みの共通タイムスタンプを流用。
     static constexpr auto kNeverStartedUs = std::numeric_limits<uint64_t>::max();
-    uint64_t cbStartUs = kNeverStartedUs;
     uint64_t cbPrevEndUs = 0;  // XRUNブロックが上書きする前の前回終了時刻を保存
 
     // ★ XRUN 検出（callback 時間 + interval 超過）
     {
-        const auto t0_start = convo::getCurrentTimeUs();
-        cbStartUs = t0_start;
+        const auto t0_start = cbStartUs;  // ★ P2-4: 共通開始時刻を流用
         cbPrevEndUs = convo::consumeAtomic(rtLocalState_.lastCallbackEndTicks, std::memory_order_relaxed);
         const double xrunSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         const double expectedMs = (xrunSampleRate > 0.0)
@@ -29980,10 +29983,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // ★ work60: CALLBACK_STAGE（INPUT/DSP/OUTPUT 3区間 + drift + budget）
     {
         const uint64_t t0 = callbackTelemetry.startUs;
-        const uint64_t t3 = convo::getCurrentTimeUs();
         const uint64_t gen = (runtimeWorld != nullptr)
             ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
-        const uint32_t cpu = static_cast<uint32_t>(::GetCurrentProcessorNumber());
         const uint64_t expectedUs = rtLocalState_.expectedCallbackIntervalUs;
         const int64_t driftUs = convo::consumeAtomic(
             rtLocalState_.lastCallbackDriftUs, std::memory_order_relaxed);
@@ -29991,6 +29992,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         if ((thisCallbackIndex & CONVOPEQ_DIAG_SAMPLE_MASK) == 0)
         {
             const uint64_t inputUs = (t1_dspStartUs > t0) ? t1_dspStartUs - t0 : 0;
+            const uint64_t t3 = convo::getCurrentTimeUs();
+            const uint32_t cpu = static_cast<uint32_t>(::GetCurrentProcessorNumber());
             const uint64_t dspUs = (t2_dspEndUs > t1_dspStartUs) ? t2_dspEndUs - t1_dspStartUs : 0;
             const uint64_t outputUs = (t3 > t2_dspEndUs) ? t3 - t2_dspEndUs : 0;
             const uint64_t totalUs = (t3 > t0) ? t3 - t0 : 0;
@@ -30891,6 +30894,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 #include "DiagnosticsConfig.h"
 #include "core/TimeUtils.h"
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 namespace
 {
 [[maybe_unused]] void diagLog(const juce::String& message)
@@ -30898,6 +30902,8 @@ namespace
     DBG(message); // NOLINT(rt-logger)
     juce::Logger::writeToLog(message); // NOLINT(rt-logger)
 }
+}
+#endif
 
 inline bool isFiniteNoLibm(double x) noexcept
 {
@@ -30913,8 +30919,6 @@ inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
 inline double absDiffNoLibm(double a, double b) noexcept
 {
     return absNoLibm(a - b);
-}
-
 }
 
 // ★ [work65] eqDiagBuffer: external linkage (shared across DSPCoreFloat/Double/IO)
@@ -38515,6 +38519,14 @@ public:
             uint32_t expectedIntervalUs = 0;
             std::atomic<uint64_t> sequence{0};  // commit seq
         };
+        // ★ [work66-新規A] CallbackTimingEntry は 1 cache line に収まること
+#if defined(__cpp_lib_hardware_interference_size)
+        static_assert(sizeof(CallbackTimingEntry) <= std::hardware_destructive_interference_size,
+            "CallbackTimingEntry must fit in one cache line");
+#else
+        static_assert(sizeof(CallbackTimingEntry) <= 64,
+            "CallbackTimingEntry must fit in one cache line (64 bytes)");
+#endif
         CallbackTimingEntry callbackTimingHistory[kCallbackTimingSlots];
         std::atomic<uint64_t> callbackTimingWriteCount{0};
 
@@ -39129,9 +39141,15 @@ public:
     HANDLE m_avrtHandle = nullptr;
     DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
 
-    // ★ [work63] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
+    // ★ [work66-P1-4] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
+    //   書込頻度はシャットダウン時のみのため false sharing 影響は極小。
+    //   alignas(64) は「将来ここだけ分離したい」意思表示として配置。
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas による意図的なパディングを許容
+    alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
+#pragma warning(pop)
     //    Audio Thread が終了間際のコールバックでこれを検知し、自スレッド上で AvRevert する。
-    std::atomic<bool> mmcssShutdownRequested{false};
+
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -44420,6 +44438,8 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
     convo::publishAtomic(phase_, next, std::memory_order_release);
 
     // Record transition（ロックフリーリングバッファ）
+    // ★ [work66-P2-2] traceFull_ フラグで満杯後の fetchAddAtomic を防止
+    if (!traceFull_.load(std::memory_order_relaxed))
     {
         const size_t idx = convo::fetchAddAtomic(traceWriteIndex_, size_t{1}, std::memory_order_acq_rel);
         if (idx < kTraceBufferSize)
@@ -44429,6 +44449,10 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
             traceBuffer_[idx].epochId = convo::consumeAtomic(epochCounter_, std::memory_order_acquire);
             traceBuffer_[idx].timestamp_ns = std::chrono::high_resolution_clock::now()
                 .time_since_epoch().count();
+        }
+        else
+        {
+            convo::publishAtomic(traceFull_, true, std::memory_order_release);
         }
     }
 
@@ -44628,6 +44652,7 @@ private:
     static constexpr size_t kTraceBufferSize = 4096;
     std::array<PhaseTransition, kTraceBufferSize> traceBuffer_{};
     std::atomic<size_t> traceWriteIndex_{0};
+    std::atomic<bool> traceFull_{false};
 };
 
 /**
@@ -44931,17 +44956,37 @@ FirewallToken RTCapabilityFirewall::enter() noexcept
         .isValid = true
     };
 
+    // ★ [work66-P2-3] sharedRtContextFlag は単なる状態フラグであり、
+    //   他データとの同期(HB)を必要としないため relaxed が許される。
+    //   前提: isRTContext() 自体は実装済みだが、現時点のコードベースで呼出箇所は存在しない。
+    //   将来 CONVO_USE_IS_RT_CONTEXT を定義して isRTContext() を使用する場合、
+    //   writer の memory_order を release に戻す必要がある（reader 側が acquire のため）。
+#if defined(NDEBUG) && !defined(CONVO_CI_BUILD)
+ #if defined(CONVO_USE_IS_RT_CONTEXT)
     convo::publishAtomic(detail::sharedRtContextFlag(), true, std::memory_order_release);
+ #else
+    convo::publishAtomic(detail::sharedRtContextFlag(), true, std::memory_order_relaxed);
+ #endif
+#else
+    convo::publishAtomic(detail::sharedRtContextFlag(), true, std::memory_order_release);
+#endif
     return token;
 }
 
 void RTCapabilityFirewall::leave(const FirewallToken& token) noexcept
 {
-    // Verify epoch consistency and clear context
     assert(token.isValid);
     assert(token.threadId == std::this_thread::get_id());
 
+#if defined(NDEBUG) && !defined(CONVO_CI_BUILD)
+ #if defined(CONVO_USE_IS_RT_CONTEXT)
     convo::publishAtomic(detail::sharedRtContextFlag(), false, std::memory_order_release);
+ #else
+    convo::publishAtomic(detail::sharedRtContextFlag(), false, std::memory_order_relaxed);
+ #endif
+#else
+    convo::publishAtomic(detail::sharedRtContextFlag(), false, std::memory_order_release);
+#endif
 }
 
 void RTCapabilityFirewall::auditPublishAttempt(const char* callSite) noexcept
@@ -44971,7 +45016,11 @@ void RTAllocatorFirewall::onAllocAttempt(size_t size, const char* callSite) noex
 
 void RTAllocatorFirewall::markRTContext(bool entering) noexcept
 {
+#if defined(NDEBUG) && !defined(CONVO_CI_BUILD)
+    convo::publishAtomic(detail::sharedRtContextFlag(), entering, std::memory_order_relaxed);
+#else
     convo::publishAtomic(detail::sharedRtContextFlag(), entering, std::memory_order_release);
+#endif
 }
 
 bool RTAllocatorFirewall::isRTContext() noexcept
@@ -60593,6 +60642,7 @@ struct EQParameters {
 #include "../DeferredDeletionQueue.h"
 #include "IEpochProvider.h"
 #include "audioengine/AtomicAccess.h"
+#include "ThreadHash.h"
 
 namespace convo {
 
@@ -60647,7 +60697,7 @@ public:
                         sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1] = '\0';
                 }
                 convo::publishAtomic(readers[static_cast<size_t>(i)].ownerThreadId,
-                                     std::hash<std::thread::id>{}(std::this_thread::get_id()),
+                                     convo::cachedThreadHash(),
                                      std::memory_order_release);
                 return i;
             }
@@ -61658,6 +61708,7 @@ static_assert(std::is_move_constructible_v<ObserveToken>);
 #include <thread>
 
 #include "audioengine/AtomicAccess.h"
+#include "ThreadHash.h"
 
 namespace convo {
 
@@ -61800,7 +61851,7 @@ public:
 private:
     static uint64_t currentThreadToken() noexcept
     {
-        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        return convo::cachedThreadHash();
     }
 
     int acquireThreadSlot() noexcept
@@ -63472,6 +63523,29 @@ private:
     ThreadAffinityMasks masks_;
     std::atomic<bool> initialized_{false};
 };
+
+```
+
+### 📄 `src\core\ThreadHash.h`
+
+```
+#pragma once
+#include <thread>
+#include <cstdint>
+
+namespace convo {
+
+/// Audioスレッドに最適化された thread::id -> uint64_t キャッシュ。
+/// 一度計算したハッシュ値を thread_local に保持する。
+inline uint64_t cachedThreadHash() noexcept
+{
+    // RT-SAFE: POD, const, no destructor, once/thread, avoids std::hash per callback (ISR perf)
+    static thread_local const uint64_t s_cachedHash = // NOLINT(thread-local) RT-SAFE:
+        static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    return s_cachedHash;
+}
+
+} // namespace convo
 
 ```
 

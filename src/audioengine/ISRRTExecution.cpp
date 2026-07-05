@@ -95,17 +95,37 @@ FirewallToken RTCapabilityFirewall::enter() noexcept
         .isValid = true
     };
 
+    // ★ [work66-P2-3] sharedRtContextFlag は単なる状態フラグであり、
+    //   他データとの同期(HB)を必要としないため relaxed が許される。
+    //   前提: isRTContext() 自体は実装済みだが、現時点のコードベースで呼出箇所は存在しない。
+    //   将来 CONVO_USE_IS_RT_CONTEXT を定義して isRTContext() を使用する場合、
+    //   writer の memory_order を release に戻す必要がある（reader 側が acquire のため）。
+#if defined(NDEBUG) && !defined(CONVO_CI_BUILD)
+ #if defined(CONVO_USE_IS_RT_CONTEXT)
     convo::publishAtomic(detail::sharedRtContextFlag(), true, std::memory_order_release);
+ #else
+    convo::publishAtomic(detail::sharedRtContextFlag(), true, std::memory_order_relaxed);
+ #endif
+#else
+    convo::publishAtomic(detail::sharedRtContextFlag(), true, std::memory_order_release);
+#endif
     return token;
 }
 
 void RTCapabilityFirewall::leave(const FirewallToken& token) noexcept
 {
-    // Verify epoch consistency and clear context
     assert(token.isValid);
     assert(token.threadId == std::this_thread::get_id());
 
+#if defined(NDEBUG) && !defined(CONVO_CI_BUILD)
+ #if defined(CONVO_USE_IS_RT_CONTEXT)
     convo::publishAtomic(detail::sharedRtContextFlag(), false, std::memory_order_release);
+ #else
+    convo::publishAtomic(detail::sharedRtContextFlag(), false, std::memory_order_relaxed);
+ #endif
+#else
+    convo::publishAtomic(detail::sharedRtContextFlag(), false, std::memory_order_release);
+#endif
 }
 
 void RTCapabilityFirewall::auditPublishAttempt(const char* callSite) noexcept
@@ -135,7 +155,11 @@ void RTAllocatorFirewall::onAllocAttempt(size_t size, const char* callSite) noex
 
 void RTAllocatorFirewall::markRTContext(bool entering) noexcept
 {
+#if defined(NDEBUG) && !defined(CONVO_CI_BUILD)
+    convo::publishAtomic(detail::sharedRtContextFlag(), entering, std::memory_order_relaxed);
+#else
     convo::publishAtomic(detail::sharedRtContextFlag(), entering, std::memory_order_release);
+#endif
 }
 
 bool RTAllocatorFirewall::isRTContext() noexcept

@@ -1504,6 +1504,14 @@ public:
             uint32_t expectedIntervalUs = 0;
             std::atomic<uint64_t> sequence{0};  // commit seq
         };
+        // ★ [work66-新規A] CallbackTimingEntry は 1 cache line に収まること
+#if defined(__cpp_lib_hardware_interference_size)
+        static_assert(sizeof(CallbackTimingEntry) <= std::hardware_destructive_interference_size,
+            "CallbackTimingEntry must fit in one cache line");
+#else
+        static_assert(sizeof(CallbackTimingEntry) <= 64,
+            "CallbackTimingEntry must fit in one cache line (64 bytes)");
+#endif
         CallbackTimingEntry callbackTimingHistory[kCallbackTimingSlots];
         std::atomic<uint64_t> callbackTimingWriteCount{0};
 
@@ -2118,9 +2126,15 @@ public:
     HANDLE m_avrtHandle = nullptr;
     DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
 
-    // ★ [work63] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
+    // ★ [work66-P1-4] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
+    //   書込頻度はシャットダウン時のみのため false sharing 影響は極小。
+    //   alignas(64) は「将来ここだけ分離したい」意思表示として配置。
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas による意図的なパディングを許容
+    alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
+#pragma warning(pop)
     //    Audio Thread が終了間際のコールバックでこれを検知し、自スレッド上で AvRevert する。
-    std::atomic<bool> mmcssShutdownRequested{false};
+
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容

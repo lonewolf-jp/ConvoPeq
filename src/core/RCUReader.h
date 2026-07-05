@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "audioengine/AtomicAccess.h"
+#include "ThreadHash.h"
 
 namespace convo {
 
@@ -148,7 +149,7 @@ public:
 private:
     static uint64_t currentThreadToken() noexcept
     {
-        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        return convo::cachedThreadHash();
     }
 
     int acquireThreadSlot() noexcept

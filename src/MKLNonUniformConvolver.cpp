@@ -86,6 +86,7 @@ class IppFFTPlanCache
 public:
     static const IppFFTPlan* getOrCreate(int order)
     {
+        ASSERT_NON_RT_THREAD();
         std::lock_guard<std::mutex> lock(getMutex());
         auto& cache = getCache();
         const auto it = cache.find(order);
@@ -342,7 +343,9 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         }
         if (!reusableGain.get())
         {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             juce::Logger::writeToLog("MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " + juce::String(li));
+#endif
             continue;
         }
         double* gain = reusableGain.get();
@@ -678,8 +681,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
             if (!l.fftPlanOwner.has_value() || l.fftPlanOwner->get().fftSpec == nullptr)
             {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
                 juce::Logger::writeToLog("MKLNonUniformConvolver: FFT plan cache creation failed for layer "
                                          + juce::String(li) + " (order=" + juce::String(order) + ")");
+#endif
                 releaseAllLayers();
                 return false;
             }
@@ -694,8 +699,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 l.fftWorkBuf = ippsMalloc_8u(l.fftPlanOwner->get().sizeWork);
                 if (!l.fftWorkBuf)
                 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
                     juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(l.fftPlanOwner->get().sizeWork)
                                              + ") failed for layer " + juce::String(li));
+#endif
                     releaseAllLayers();
                     return false;
                 }

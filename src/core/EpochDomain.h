@@ -12,6 +12,7 @@
 #include "../DeferredDeletionQueue.h"
 #include "IEpochProvider.h"
 #include "audioengine/AtomicAccess.h"
+#include "ThreadHash.h"
 
 namespace convo {
 
@@ -66,7 +67,7 @@ public:
                         sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1] = '\0';
                 }
                 convo::publishAtomic(readers[static_cast<size_t>(i)].ownerThreadId,
-                                     std::hash<std::thread::id>{}(std::this_thread::get_id()),
+                                     convo::cachedThreadHash(),
                                      std::memory_order_release);
                 return i;
             }
