@@ -3,19 +3,19 @@
 
 ---
 
-## New in v0.6.8
+## New in v0.6.9
 
-- **Silent Success elimination:** `RuntimePublicationCoordinator::publishWorld()` now returns `[[nodiscard]] PublishStageResult` instead of `void`; `PublicationExecutor` propagates it to `PublishResult`, enabling the `trySubmit()` failure path in the orchestrator.
-- **Validator fixes:** `RuntimePublicationValidator` now accepts ditherBitDepth=32 and NoiseShaperType::Fixed15Tap(3); `validateTopology` switched from generation-based runtimeUuid rejection to authoritative invariant checks (Option A), allowing Bootstrap/Shutdown worlds with `runtimeUuid==0`.
-- **Double validation removed:** The static `RuntimePublicationValidator` instance was deleted from `runPublicationPrecheckNonRt()`; Bridge-layer `emitValidationEvent` replaces it. The `AudioEngine::publishWorld()` wrapper (which returned `void`) was also deleted — all callers now use `coordinator.publishWorld()` directly.
-- **Non-authoritative observe fixed:** `AudioBlock.cpp` and `BlockDouble.cpp` replaced `consumeAtomic(currentSampleRate)` with `getRuntimeSampleRateHzFromWorld()`, bringing audio-thread observation into ISR compliance.
-- **Supporting changes:** Audio thread safety guard enhanced (`Publication.cpp`), `DSPCoreLifecycle` null-world gap closed, `RuntimeHealthMonitor` validation event emission added, `CrossfadeAuthority` signatures updated, `ISRBarrierOptimizer` removed, `ISRShutdown` lifecycle improved, test suite expanded (445 lines), and version bumped to **v0.6.8**.
+- **ISR runtime governance overhaul** — The publication coordinator, retirement pipeline, and commit/shutdown state machine were significantly reworked: silent failures eliminated via `[[nodiscard]] PublishStageResult`, double validation removed, monotonic rollback and observe path hardened, and `FrozenRuntimeWorld` null-world gap closed.
+- **UI layout fixes across multiple panels** — The Audio Settings window received a 7-to-6 row compaction with `Audio Thread Priority` correctly aligned under `Oversampling`; the MainWindow's HCF/LCF filter buttons were resized to uniform 60 px width and given adequate vertical space (convolver panel height bumped from 280 px to 320 px) to prevent compression.
+- **Build and CI infrastructure expansion** — CMakeLists.txt saw major edits (~145 lines), new CI scripts were added (atomic dot-call scanning, authority/audit verification), `.gitignore` and `.markdownlintignore` were introduced, launch/task configurations refined, and a `build-icx/` Ninja preset directory was added.
+- **Comprehensive documentation rewrite** — `ARCHITECTURE.md`, `BUILD_GUIDE_WINDOWS.md`, and `SOUND_PROCESSING.md` were heavily revised (+987, +709, +1639 lines respectively); dozens of new design-plan documents under `doc/work49/` and `doc/work66/` (PDF layout specs) were added; the README was restructured with a properly terminated directory tree.
+- **Noise shaper refactoring and DSP hardening** — `Fixed15TapNoiseShaper`, `LatticeNoiseShaper`, and `FixedNoiseShaper` were restructured; the DSP core lifecycle null-world gap was closed, `RuntimeHealthMonitor` validation events were added, `CrossfadeAuthority` signatures updated, `ISRShutdown` lifecycle improved, and the test suite expanded by 445 lines.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
 ## Overview
 
-ConvoPeq v0.6.8 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
+ConvoPeq v0.6.9 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
 
 | Aspect | Detail |
 |--------|--------|
@@ -102,12 +102,13 @@ ConvoPeq/
 ├── CMakeLists.txt             # Build configuration (985 lines, v0.5.0)
 ├── CMakePresets.json          # 3 configure + 2 build presets
 ├── build.bat                  # Primary build script (MSVC + icx)
-├── ProjectMetadata.cmake      # App name, version (v0.6.8), company
+├── ProjectMetadata.cmake      # App name, version (v0.6.9), company
 ├── README.md                  # This file
-├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.8)
+├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.9)
 ├── SOUND_PROCESSING.md        # Complete signal processing guide
 ├── BUILD_GUIDE_WINDOWS.md     # Windows build instructions
 └── HOW_TO_USE.md              # Practical usage guide (REW + AutoEq)
+```
 
 ---
 

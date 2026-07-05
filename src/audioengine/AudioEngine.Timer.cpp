@@ -277,6 +277,33 @@ void AudioEngine::applyMmcssPriority() noexcept
 #endif
         }
     }
+    // ★ [work64 v14/v16] Audioスレッド CPUアフィニティ固定（対称コア環境のみ）
+    //   v16: toHexString(static_cast<uint64_t>(...)) は JUCE 8.0.12 template で有効確認済み。
+    if (!hasHeterogeneousCores_) {
+        const DWORD_PTR audioMask = affinityManager.getAudioRealtimeMask();
+        if (audioMask != 0) {
+            const DWORD_PTR prevMask = ::SetThreadAffinityMask(
+                ::GetCurrentThread(), audioMask);
+            if (prevMask == 0) {
+                const DWORD err = ::GetLastError();
+                diagLog("[AFFINITY] FAILED: mask=0x"
+                        + juce::String::toHexString(static_cast<uint64_t>(audioMask))
+                        + " GetLastError=" + juce::String(static_cast<int>(err)));
+            }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            else {
+                diagLog("[AFFINITY] AudioThread pinned mask=0x"
+                        + juce::String::toHexString(static_cast<uint64_t>(audioMask))
+                        + " prev=0x" + juce::String::toHexString(static_cast<uint64_t>(prevMask)));
+            }
+#endif
+        }
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    else {
+        diagLog("[AFFINITY] P/E cores: AudioThread affinity skipped (MMCSS Deadline QoS)");
+    }
+#endif
 }
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除

@@ -1349,7 +1349,7 @@ void MainWindow::resized()
     saveButton.setBounds (buttonRow.removeFromRight (46).reduced (2, 2));
 
     if (convolverPanel)
-        convolverPanel->setBounds (bounds.removeFromTop (280));
+        convolverPanel->setBounds (bounds.removeFromTop (320));
 
     const int eqH = static_cast<int> (bounds.getHeight() * 0.48f);
     if (eqPanel)

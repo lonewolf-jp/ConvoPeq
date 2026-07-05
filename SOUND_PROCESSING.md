@@ -1,8 +1,8 @@
 # ConvoPeq Audio Signal Processing Guide
 
-This document describes the complete audio signal processing flow in ConvoPeq v0.6.8, from external audio input to external audio output. It covers all major components, threading, buffer management, and real-time safety strategies.
+This document describes the complete audio signal processing flow in ConvoPeq v0.6.9, from external audio input to external audio output. It covers all major components, threading, buffer management, and real-time safety strategies.
 
-**Project**: ConvoPeq v0.6.8 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
+**Project**: ConvoPeq v0.6.9 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20
 **Platform**: Windows 11 x64 · Real-time safe (no allocation/locks/libm/exceptions/I/O on audio thread)
 

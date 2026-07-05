@@ -212,13 +212,18 @@ jobs:
           function Get-WorkflowInputOptions { param([string]$Block, [string]$Name) }
           function Get-WorkflowInputContractEntry { param($Contract, [string]$Name) }
           function Resolve-WorkflowPolicyIntDefault { param($Policy, [string]$InputName) }
-          function expiryGuardDaysByTier { param([string]$tier) }
+          function expiryGuardDaysByTier {
+            param([string]$tier)
+            # Practical expiry guard: returns null (no breach) for all known tiers.
+            # Returns a positive integer (expiry days) for unknown tiers as a safety measure.
+            switch ($tier) {
+              'smoke'     { return $null }  # no expiry gate for smoke
+              'standard'  { return $null }
+              'exhaustive'{ return $null }
+              default     { return 90 }     # unknown tier → 90 day soft expiry
+            }
+          }
           function Assert-WorkflowRangeParse { param([int]$v, [string]$n) }
-
-          $validatorTieringPolicyPath = Join-Path $repoRoot '.github\isr-validator-tiering-policy.json'
-          $workflowDispatchInputPolicyPath = Join-Path $repoRoot '.github\isr-workflow-dispatch-input-policy.json'
-          $expiryGuardResult = expiryGuardDaysByTier -tier $tier
-          if ($expiryGuardResult -ne $null) { throw "expiry guard breached for tier=$tier" }
 
           $collectWindowSecInput = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81WindowSec'
           $collectTimeoutSecInput = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81AutoCaptureTimeoutSec'
@@ -228,7 +233,24 @@ jobs:
           $closePolicyExpiry = "$($closePolicy.expiry)"
           Assert-WorkflowPolicyExpiryGuard -expiry $closePolicyExpiry
 
+          # ★ fix: resolve $tier before using it in expiryGuardDaysByTier and policy checks
           $tier = "${{ inputs.verificationTier || 'standard' }}"
+
+          $validatorTieringPolicyPath = Join-Path $repoRoot '.github\isr-validator-tiering-policy.json'
+          $workflowDispatchInputPolicyPath = Join-Path $repoRoot '.github\isr-workflow-dispatch-input-policy.json'
+          if (Test-Path $validatorTieringPolicyPath) {
+            $tieringPolicy = Get-Content -LiteralPath $validatorTieringPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $expiryGuardResult = expiryGuardDaysByTier -tier $tier
+            if ($expiryGuardResult -ne $null) { throw "expiry guard breached for tier=$tier" }
+          } else {
+            Write-Host "[SKIP] validator tiering policy not found at $validatorTieringPolicyPath"
+          }
+          if (Test-Path $workflowDispatchInputPolicyPath) {
+            $dispatchPolicy = Get-Content -LiteralPath $workflowDispatchInputPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          } else {
+            Write-Host "[SKIP] workflow dispatch input policy not found at $workflowDispatchInputPolicyPath"
+          }
+
           $soakMin = "${{ inputs.soakMinutes || '0' }}"
           $declaredClass = "${{ inputs.declaredPrClass || 'Class-A' }}"
           $collectWindowSec = "${{ inputs.collect81WindowSec || '20' }}"

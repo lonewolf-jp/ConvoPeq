@@ -92,24 +92,58 @@ jobs:
         uses: ashutoshvarma/setup-ninja@v1.1
 
       # Intel oneAPI MKL をインストール（find_package(MKL) に必要）
-      # install_windows.bat と同一手法（https://github.com/oneapi-src/oneapi-ci）
+      # Practical Stable ISR: download failure is non-fatal → falls back to CMake config
       - name: Install Intel oneAPI MKL
         shell: pwsh
+        continue-on-error: true  # ★ Practical Stable: MKL download/install failure should not block CI
         run: |
           $mklCfg = "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\lib\cmake\mkl\MKLConfig.cmake"
           if (Test-Path $mklCfg) { Write-Host "MKL already installed."; exit 0 }
-          # 1. Download
+
+          # 1. Check connectivity before large download
+          try {
+            $testUrl = "https://registrationcenter-download.intel.com"
+            $request = [System.Net.WebRequest]::Create($testUrl)
+            $request.Timeout = 5000
+            $request.Method = "HEAD"
+            $response = $request.GetResponse()
+            $response.Close()
+          } catch {
+            Write-Host "::warning::Cannot reach Intel download server (${_}). MKL-dependent features will be unavailable."
+            exit 0
+          }
+
+          # 2. Download (with timeout guard against stalled downloads)
           $exe = "$env:TEMP\oneapi-toolkit.exe"
           if (-not (Test-Path $exe)) {
             Write-Host "Downloading Intel oneAPI toolkit (~3.5 GB)..."
-            curl.exe -L --retry 5 --retry-delay 10 -o $exe "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/bae85ab1-cfcd-4251-8d42-a0c27949ea33/intel-oneapi-toolkit-2026.0.0.193_offline.exe"
-            if ($LASTEXITCODE -ne 0) { throw "Download failed (exit=$LASTEXITCODE)" }
+            try {
+              $webClient = New-Object System.Net.WebClient
+              $downloadTask = $webClient.DownloadFileTaskAsync(
+                "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/bae85ab1-cfcd-4251-8d42-a0c27949ea33/intel-oneapi-toolkit-2026.0.0.193_offline.exe",
+                $exe
+              )
+              $timeoutSec = 300  # 5 min max wait
+              if (-not $downloadTask.Wait(($timeoutSec * 1000))) {
+                $webClient.CancelAsync()
+                throw "Download timed out after ${timeoutSec}s"
+              }
+              if ($downloadTask.Exception) { throw $downloadTask.Exception.InnerException }
+            } catch {
+              Write-Host "::warning::MKL download failed (${_}). MKL-dependent features will be unavailable."
+              exit 0
+            }
           } else { Write-Host "Using cached installer." }
-          # 2. Extract (cached)
+
+          # 3. Extract (cached)
           $extDir = "$env:TEMP\oneapi_extracted"
           if (-not (Test-Path "$extDir\bootstrapper.exe")) {
             Write-Host "Extracting installer..."
-            Start-Process -Wait -FilePath $exe -ArgumentList "-s -x -f $extDir --log $env:TEMP\extract.log"
+            $proc = Start-Process -Wait -PassThru -FilePath $exe -ArgumentList "-s -x -f $extDir --log $env:TEMP\extract.log"
+            if ($proc.ExitCode -ne 0) {
+              Write-Host "::warning::MKL extraction failed (exit=$($proc.ExitCode)). MKL-dependent features will be unavailable."
+              exit 0
+            }
           }
           # 3. Install MKL
           Write-Host "Installing MKL..."

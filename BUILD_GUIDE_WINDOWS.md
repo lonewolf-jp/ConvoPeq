@@ -2,7 +2,7 @@
 
 This guide reflects the **current repository setup** — `build.bat`, `CMakeLists.txt` (v0.5.0), `CMakePresets.json`, and `.vscode/tasks.json` (22 tasks).
 
-**Project**: ConvoPeq v0.6.8 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
+**Project**: ConvoPeq v0.6.9 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20 · MSVC 19.44+ / icx 2026.0
 
 ---
@@ -63,7 +63,7 @@ ConvoPeq/
 ├── build.bat                    # Primary build script
 ├── CMakeLists.txt               # v0.5.0, 985 lines
 ├── CMakePresets.json            # 3 configure presets
-├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.8), COMPANY, BUNDLE_ID
+├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.9), COMPANY, BUNDLE_ID
 ├── JUCE/                        # JUCE 8.0.12 (in-tree, required)
 ├── r8brain-free-src/            # IR resampler (optional, for 内蔵 FFT)
 ├── src/                         # 246 source files

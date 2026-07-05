@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-05 13:27:56
+> Generated: 2026-07-05 16:12:29
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -27174,24 +27174,58 @@ void AudioEngine::initialize()
     startTimer(100);
     timerPeriodMs_ = 100;
 
-    initWorkerThread();
-
-    // ★ [work62] ThreadAffinityManager 初期化（診断目的）
-    //   CPU 0-3 に Worker/Learner を分散。必要に応じて調整。
-    //   affinityManager.getAffinityManager() でアクセス。
+    // ★ [work64] ThreadAffinityManager 初期化（動的計算）
     {
-        ThreadAffinityMasks masks{};
-#ifdef _WIN32
-        masks.worker = 0x01;          // CPU 0
-        masks.learnerMain = 0x02;     // CPU 1
-        masks.learnerEvalBase = 0x04; // CPU 2 (evaluator は index で分散)
-        masks.heavyBackground = 0x08; // CPU 3
-        masks.lightBackground = 0x0F; // 全CPU許可（負荷軽微のため）
-        masks.ui = 0x0F;              // 全CPU許可（UIスレッド）
-#endif
-        affinityManager.initialize(masks);
-        diagLog("[AFFINITY] ThreadAffinityManager initialized: worker=0x01 learner=0x02 eval=0x04 heavy=0x08 light=0x0F ui=0x0F");
+        ThreadAffinityMasks affinityMasks{};
+        auto topo = ThreadAffinityManager::detectCoreTopology();
+
+        if (topo.physicalCoreCount == 0) {
+            // ★ v16: API 失敗 → アフィニティ無効
+            hasHeterogeneousCores_ = false;
+            diagLog("[AFFINITY] GetLogicalProcessorInformationEx failed: Affinity disabled.");
+        } else if (topo.hasHeterogeneousArchitecture) {
+            // P/E混在 → MMCSS Deadline QoS に委任
+            hasHeterogeneousCores_ = true;
+            diagLog("[AFFINITY] P/E heterogeneous cores (N="
+                    + juce::String(topo.physicalCoreCount)
+                    + "). Affinity disabled — MMCSS Deadline QoS active.");
+        } else {
+            // 対称コア → 末尾1物理コアをAudio専用に
+            affinityMasks = ThreadAffinityManager::computeSymmetricMasks(topo);
+            hasHeterogeneousCores_ = false;
+            diagLog("[AFFINITY] Symmetric cores (N="
+                    + juce::String(topo.physicalCoreCount)
+                    + "). Audio pinned to last physical core.");
+        }
+
+        affinityManager.initialize(affinityMasks);
+
+        // ★ v14/v21: 起動時診断ログ — nonAudioMask は affinityMasks の実フィールドから計算
+        //   （P/E環境では全マスクがゼロで正しく表示される）
+        {
+            DWORD_PTR nonAudioMask = 0;
+            nonAudioMask |= affinityMasks.worker;
+            nonAudioMask |= affinityMasks.learnerMain;
+            nonAudioMask |= affinityMasks.learnerEvalBase;
+            nonAudioMask |= affinityMasks.heavyBackground;
+            nonAudioMask |= affinityMasks.lightBackground;
+            nonAudioMask |= affinityMasks.ui;
+
+            diagLog("[AFFINITY] coreTopology: physical=" + juce::String(topo.physicalCoreCount)
+                + " logical=" + juce::String(::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS))
+                + " heterogeneous=" + juce::String(hasHeterogeneousCores_ ? "true" : "false"));
+            diagLog("[AFFINITY] audioMask=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.audioRealtime))
+                + " nonAudio=0x" + juce::String::toHexString(static_cast<uint64_t>(nonAudioMask))
+                + " worker=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.worker))
+                + " learner=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.learnerMain))
+                + " heavyBG=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.heavyBackground))
+                + " lightBG=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.lightBackground))
+                + " ui=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.ui)));
+        }
     }
+
+    // ★ [work64] 順序入替（v7）: initialize() の後で WorkerThread を起動
+    initWorkerThread();
 }
 
 void AudioEngine::initWorkerThread()
@@ -35383,6 +35417,33 @@ void AudioEngine::applyMmcssPriority() noexcept
 #endif
         }
     }
+    // ★ [work64 v14/v16] Audioスレッド CPUアフィニティ固定（対称コア環境のみ）
+    //   v16: toHexString(static_cast<uint64_t>(...)) は JUCE 8.0.12 template で有効確認済み。
+    if (!hasHeterogeneousCores_) {
+        const DWORD_PTR audioMask = affinityManager.getAudioRealtimeMask();
+        if (audioMask != 0) {
+            const DWORD_PTR prevMask = ::SetThreadAffinityMask(
+                ::GetCurrentThread(), audioMask);
+            if (prevMask == 0) {
+                const DWORD err = ::GetLastError();
+                diagLog("[AFFINITY] FAILED: mask=0x"
+                        + juce::String::toHexString(static_cast<uint64_t>(audioMask))
+                        + " GetLastError=" + juce::String(static_cast<int>(err)));
+            }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            else {
+                diagLog("[AFFINITY] AudioThread pinned mask=0x"
+                        + juce::String::toHexString(static_cast<uint64_t>(audioMask))
+                        + " prev=0x" + juce::String::toHexString(static_cast<uint64_t>(prevMask)));
+            }
+#endif
+        }
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    else {
+        diagLog("[AFFINITY] P/E cores: AudioThread affinity skipped (MMCSS Deadline QoS)");
+    }
+#endif
 }
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
@@ -39267,6 +39328,7 @@ public:
     };
     LearnerStateSnapshot lastKnownGoodNoiseShaper_;
     ThreadAffinityManager affinityManager;
+    bool hasHeterogeneousCores_ = false; // ★ [work64] P/E混在フラグ（initialize時に設定）
     std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
     std::mutex adaptiveAutosaveCallbackMutex;
@@ -63122,9 +63184,12 @@ private:
 
 #include <JuceHeader.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdint>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -63142,7 +63207,16 @@ enum class ThreadType
     LearnerEval,
     HeavyBackground,
     LightBackground,
-    UI
+    UI,
+    AudioRealtime  // ★ [work64] 将来の拡張性のため。現在 AudioThread の affinity は
+                   //   applyMmcssPriority() 末尾で直接 SetThreadAffinityMask しているため、
+                   //   本 enum を applyCurrentThreadPolicy() で使うと二重適用になる。
+                   //   二重適用自体は無害（同一マスクの再設定）だが、責務は
+                   //   applyMmcssPriority() (Timer.cpp) 側にあり、
+                   //   applyCurrentThreadPolicy は将来のリファクタリング用に用意。
+                   // ★ v19: convo::numeric_policy::ThreadRole::AudioRealtime (DspNumericPolicy.h)
+                   //   とは別概念。そちらはランタイムスレッド検出（assertion用）であり、
+                   //   CPUアフィニティ管理とは無関係。名前空間が異なるため衝突なし。
 };
 
 struct ThreadAffinityMasks
@@ -63152,6 +63226,7 @@ struct ThreadAffinityMasks
     DWORD_PTR learnerMain = 0;
     DWORD_PTR learnerEvalBase = 0;
     DWORD_PTR heavyBackground = 0;
+    DWORD_PTR audioRealtime = 0;  // ★ [work64] Audioスレッド専用コアマスク
     DWORD_PTR lightBackground = 0;
     DWORD_PTR ui = 0;
 #else
@@ -63159,9 +63234,23 @@ struct ThreadAffinityMasks
     std::uint64_t learnerMain = 0;
     std::uint64_t learnerEvalBase = 0;
     std::uint64_t heavyBackground = 0;
+    std::uint64_t audioRealtime = 0;
     std::uint64_t lightBackground = 0;
     std::uint64_t ui = 0;
 #endif
+};
+
+// ★ [work64 v15] 物理コア情報: mask (SMT兄弟含む論理プロセッサ集合) + efficiencyClass (P/E判定用)
+struct PhysicalCoreInfo {
+    DWORD_PTR mask;
+    BYTE efficiencyClass;
+};
+
+// ★ [work64 v15] コアトポロジ情報 (detectCoreTopology の戻り値)
+struct CoreTopology {
+    int physicalCoreCount = 0;
+    bool hasHeterogeneousArchitecture = false;
+    std::vector<PhysicalCoreInfo> cores;  // mask 最下位ビット順にソート済み
 };
 
 class ThreadAffinityManager
@@ -63230,15 +63319,123 @@ public:
                 mask = masks_.ui;
                 priority = THREAD_PRIORITY_NORMAL;
                 break;
+            case ThreadType::AudioRealtime:
+                // ★ [work64] MMCSS が優先度管理済みのため SetThreadPriority を呼ばず return
+                mask = masks_.audioRealtime;
+                if (mask != 0)
+                    ::SetThreadAffinityMask(::GetCurrentThread(), mask);
+                return;
         }
 
-        if (mask != 0)
-            ::SetThreadAffinityMask(::GetCurrentThread(), mask);
+        // ★ v17: prevMask を取得（診断ログ有効時に追跡可能にするため）
+        if (mask != 0) {
+            const DWORD_PTR prevMask = ::SetThreadAffinityMask(::GetCurrentThread(), mask);
+            juce::ignoreUnused(prevMask);
+        }
 
         ::SetThreadPriority(::GetCurrentThread(), priority);
 #else
         juce::ignoreUnused(type, evalWorkerIndex);
 #endif
+    }
+
+    // ★ [work64] AudioRealtime マスクアクセサ
+    [[nodiscard]] DWORD_PTR getAudioRealtimeMask() const noexcept {
+        return masks_.audioRealtime;
+    }
+
+    // ★ [work64] コアトポロジ検出（static メソッド / 起動時に1度だけ呼ばれる）
+    static CoreTopology detectCoreTopology() noexcept
+    {
+        // ★ v20: noexcept を維持する。起動時初期化であり、
+        //   メモリ確保失敗は回復不能と判断している。
+        CoreTopology topo;
+#ifdef _WIN32
+        // 1. バッファサイズ取得
+        DWORD bufLen = 0;
+        if (!::GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bufLen)
+            && ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+            // API 未対応 → 空の topo（呼び出し側が physicalCoreCount==0 で検出）
+            return topo;
+        }
+
+        // 2. バッファ確保・取得
+        std::vector<BYTE> buf(bufLen);
+        if (!::GetLogicalProcessorInformationEx(RelationProcessorCore,
+            reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()),
+            &bufLen)) {
+            return topo;
+        }
+
+        // 3. 可変長レコードを走査
+        DWORD offset = 0;
+        while (offset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= bufLen) {
+            auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+                buf.data() + offset);
+            if (info->Size == 0) break;
+            if (offset + info->Size > bufLen) break;
+
+            if (info->Relationship == RelationProcessorCore) {
+                const auto& proc = info->Processor;
+                // ★ v21: Mask!=0 の防御チェック
+                if (proc.GroupCount == 1 && proc.GroupMask[0].Mask != 0) {
+                    topo.cores.push_back({proc.GroupMask[0].Mask, proc.EfficiencyClass});
+                }
+            }
+            offset += info->Size;
+        }
+
+        topo.physicalCoreCount = static_cast<int>(topo.cores.size());
+
+        // 4. 最下位ビット（論理CPU番号）順にソート
+        std::sort(topo.cores.begin(), topo.cores.end(),
+            [](const PhysicalCoreInfo& a, const PhysicalCoreInfo& b) noexcept {
+                auto lowestBit = [](DWORD_PTR mask) noexcept -> int {
+                    // ★ v20: C++20 std::countr_zero（<bit> ヘッダ）
+                    return mask == 0 ? 64 : static_cast<int>(std::countr_zero(mask));
+                };
+                return lowestBit(a.mask) < lowestBit(b.mask);
+            });
+
+        // 5. P/E混在判定: 全コアの EfficiencyClass が同一か検査
+        if (topo.physicalCoreCount > 1) {
+            const BYTE first = topo.cores.empty() ? 0 : topo.cores[0].efficiencyClass;
+            for (const auto& core : topo.cores) {
+                if (core.efficiencyClass != first) {
+                    topo.hasHeterogeneousArchitecture = true;
+                    break;
+                }
+            }
+        }
+#endif
+        return topo;
+    }
+
+    // ★ [work64] 対称コア環境のマスク計算（static メソッド）
+    static ThreadAffinityMasks computeSymmetricMasks(const CoreTopology& topo) noexcept
+    {
+        ThreadAffinityMasks m{};
+        // ★ v20: cores.size() を計算基準に使用
+        const size_t N = topo.cores.size();
+        if (N < 2)
+            return m;
+
+        // ★ v17: 整合性チェック（万が一の防御）
+        if (static_cast<size_t>(topo.physicalCoreCount) != N)
+            return m;
+
+        DWORD_PTR nonAudioMask = 0;
+        for (size_t i = 0; i < N - 1; ++i)
+            nonAudioMask |= topo.cores[i].mask;
+
+        m.audioRealtime   = topo.cores[N - 1].mask;
+        m.worker          = topo.cores[0].mask;
+        m.learnerMain     = topo.cores[std::min(size_t{1}, N - 2)].mask;
+        m.learnerEvalBase = nonAudioMask;
+        m.heavyBackground = nonAudioMask;
+        m.lightBackground = nonAudioMask;
+        m.ui              = nonAudioMask;
+        return m;
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ThreadAffinityManager)

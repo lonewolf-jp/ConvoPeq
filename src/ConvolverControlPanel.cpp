@@ -850,16 +850,17 @@ void ConvolverControlPanel::resized()
     auto hcfRow = bounds.removeFromTop(26);
     hcfLabel.setBounds(hcfRow.removeFromLeft(38).reduced(0, 3));
     hcfRow.removeFromLeft(4);
-    hcfSharpButton.setBounds(hcfRow.removeFromLeft(52).reduced(2, 2));
+    hcfSharpButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
     hcfNaturalButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
-    hcfSoftButton.setBounds(hcfRow.removeFromLeft(48).reduced(2, 2));
+    hcfSoftButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
 
     // --- 5行目: ローカットフィルターモード ---
     auto lcfRow = bounds.removeFromTop(26);
     lcfLabel.setBounds(lcfRow.removeFromLeft(38).reduced(0, 3));
     lcfRow.removeFromLeft(4);
+    lcfRow.removeFromLeft(60); // HCFのSharpの位置に合わせるためスキップ
     lcfNaturalButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
-    lcfSoftButton.setBounds(lcfRow.removeFromLeft(48).reduced(2, 2));
+    lcfSoftButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
 
     // --- 10行目: Convolver Input Trim (EQ→Conv モード時のみ表示) ---
     auto trimRow = bounds.removeFromTop(26);

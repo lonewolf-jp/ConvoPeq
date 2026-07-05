@@ -2317,6 +2317,7 @@ public:
     };
     LearnerStateSnapshot lastKnownGoodNoiseShaper_;
     ThreadAffinityManager affinityManager;
+    bool hasHeterogeneousCores_ = false; // ★ [work64] P/E混在フラグ（initialize時に設定）
     std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
     std::mutex adaptiveAutosaveCallbackMutex;

@@ -474,15 +474,14 @@ void DeviceSettings::resized()
     auto bounds = getLocalBounds();
     // Adaptive learningボタンの下の余白を詰めるため、controlsAreaの高さを自動計算
     constexpr int rowHeight = 30;
-    constexpr int numRows = 7; // Dither, Input, Output, Tabs, Over/Noise, Adaptive, Priority
+    constexpr int numRows = 6; // Dither, Input, Output, Tabs, Over/Noise, Priority/Adaptive
     auto controlsArea = bounds.removeFromTop(rowHeight * numRows); // 必要な分だけ
     auto row1 = controlsArea.removeFromTop(rowHeight); // Dither Bit Depth
     auto row2 = controlsArea.removeFromTop(rowHeight); // Input Headroom
     auto row3 = controlsArea.removeFromTop(rowHeight); // Output Makeup
     auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
     auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
-    [[maybe_unused]] auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
-    auto row7 = controlsArea.removeFromTop(rowHeight); // Audio Thread Priority
+    auto row6 = controlsArea.removeFromTop(rowHeight); // Priority / Adaptive learning
 
     // 1行目: Dither Bit Depth
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
@@ -503,29 +502,22 @@ void DeviceSettings::resized()
     oversamplingLabel.setBounds(row5.removeFromLeft(120).reduced(5));
     oversamplingComboBox.setBounds(row5.removeFromLeft(100).reduced(2));
     noiseShaperLabel.setBounds(row5.removeFromLeft(120).reduced(5));
-    // NoiseShaperの位置・幅を記録
     auto nsComboX = row5.getX();
-    auto nsComboY = row5.getY();
     auto nsComboW = 160;
-    auto nsComboH = row5.getHeight();
-    noiseShaperComboBox.setBounds(nsComboX, nsComboY, nsComboW, nsComboH - 2);
+    noiseShaperComboBox.setBounds(nsComboX, row5.getY(), nsComboW, row5.getHeight() - 2);
 
-    // 6行目: Adaptive learningボタンをNoiseShaperの真下・同じ幅で配置
-    adaptiveLearningButton.setBounds(nsComboX, nsComboY + nsComboH, nsComboW, nsComboH - 2);
-
-    // 7行目: Audio Thread Priority toggle
-    audioThreadPriorityToggle.setBounds(row7.reduced(5));
+    // 6行目: Audio Thread Priority (Oversamplingの真下) と Adaptive learningボタン
+    audioThreadPriorityToggle.setBounds(row6.removeFromLeft(340).reduced(5));
+    adaptiveLearningButton.setBounds(nsComboX, row6.getY(), nsComboW, row6.getHeight() - 2);
 
     fixedNoiseLogIntervalLabel.setBounds(0, 0, 0, 0); // 非表示時のダミー配置
     fixedNoiseLogIntervalComboBox.setBounds(0, 0, 0, 0);
     fixedNoiseWindowLabel.setBounds(0, 0, 0, 0);
     fixedNoiseWindowComboBox.setBounds(0, 0, 0, 0);
 
-    // Audio device selectorをAdaptive learningボタンの直下に詰めて配置
+    // Audio device selectorをコントロールの下に配置
     if (selector != nullptr) {
-        auto selectorBounds = bounds;
-        selectorBounds.setY(nsComboY + nsComboH * 2); // Adaptive learningボタンの下端から開始
-        selector->setBounds(selectorBounds);
+        selector->setBounds(bounds);
     }
 }
 

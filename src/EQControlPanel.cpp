@@ -543,9 +543,9 @@ void EQControlPanel::resized()
     lpfRow.removeFromLeft(10);
     eqLpfLabel.setBounds(lpfRow.removeFromLeft(38).reduced(0, 3));
     lpfRow.removeFromLeft(4);
-    eqLpfSharpButton  .setBounds(lpfRow.removeFromLeft(52).reduced(2, 2));
+    eqLpfSharpButton  .setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
     eqLpfNaturalButton.setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
-    eqLpfSoftButton   .setBounds(lpfRow.removeFromLeft(48).reduced(2, 2));
+    eqLpfSoftButton   .setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
 
     // ── 各バンド列 ──
     // 2段表示 (10バンド x 2行)

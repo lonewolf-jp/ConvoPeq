@@ -79,24 +79,58 @@ void AudioEngine::initialize()
     startTimer(100);
     timerPeriodMs_ = 100;
 
-    initWorkerThread();
-
-    // ★ [work62] ThreadAffinityManager 初期化（診断目的）
-    //   CPU 0-3 に Worker/Learner を分散。必要に応じて調整。
-    //   affinityManager.getAffinityManager() でアクセス。
+    // ★ [work64] ThreadAffinityManager 初期化（動的計算）
     {
-        ThreadAffinityMasks masks{};
-#ifdef _WIN32
-        masks.worker = 0x01;          // CPU 0
-        masks.learnerMain = 0x02;     // CPU 1
-        masks.learnerEvalBase = 0x04; // CPU 2 (evaluator は index で分散)
-        masks.heavyBackground = 0x08; // CPU 3
-        masks.lightBackground = 0x0F; // 全CPU許可（負荷軽微のため）
-        masks.ui = 0x0F;              // 全CPU許可（UIスレッド）
-#endif
-        affinityManager.initialize(masks);
-        diagLog("[AFFINITY] ThreadAffinityManager initialized: worker=0x01 learner=0x02 eval=0x04 heavy=0x08 light=0x0F ui=0x0F");
+        ThreadAffinityMasks affinityMasks{};
+        auto topo = ThreadAffinityManager::detectCoreTopology();
+
+        if (topo.physicalCoreCount == 0) {
+            // ★ v16: API 失敗 → アフィニティ無効
+            hasHeterogeneousCores_ = false;
+            diagLog("[AFFINITY] GetLogicalProcessorInformationEx failed: Affinity disabled.");
+        } else if (topo.hasHeterogeneousArchitecture) {
+            // P/E混在 → MMCSS Deadline QoS に委任
+            hasHeterogeneousCores_ = true;
+            diagLog("[AFFINITY] P/E heterogeneous cores (N="
+                    + juce::String(topo.physicalCoreCount)
+                    + "). Affinity disabled — MMCSS Deadline QoS active.");
+        } else {
+            // 対称コア → 末尾1物理コアをAudio専用に
+            affinityMasks = ThreadAffinityManager::computeSymmetricMasks(topo);
+            hasHeterogeneousCores_ = false;
+            diagLog("[AFFINITY] Symmetric cores (N="
+                    + juce::String(topo.physicalCoreCount)
+                    + "). Audio pinned to last physical core.");
+        }
+
+        affinityManager.initialize(affinityMasks);
+
+        // ★ v14/v21: 起動時診断ログ — nonAudioMask は affinityMasks の実フィールドから計算
+        //   （P/E環境では全マスクがゼロで正しく表示される）
+        {
+            DWORD_PTR nonAudioMask = 0;
+            nonAudioMask |= affinityMasks.worker;
+            nonAudioMask |= affinityMasks.learnerMain;
+            nonAudioMask |= affinityMasks.learnerEvalBase;
+            nonAudioMask |= affinityMasks.heavyBackground;
+            nonAudioMask |= affinityMasks.lightBackground;
+            nonAudioMask |= affinityMasks.ui;
+
+            diagLog("[AFFINITY] coreTopology: physical=" + juce::String(topo.physicalCoreCount)
+                + " logical=" + juce::String(::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS))
+                + " heterogeneous=" + juce::String(hasHeterogeneousCores_ ? "true" : "false"));
+            diagLog("[AFFINITY] audioMask=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.audioRealtime))
+                + " nonAudio=0x" + juce::String::toHexString(static_cast<uint64_t>(nonAudioMask))
+                + " worker=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.worker))
+                + " learner=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.learnerMain))
+                + " heavyBG=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.heavyBackground))
+                + " lightBG=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.lightBackground))
+                + " ui=0x" + juce::String::toHexString(static_cast<uint64_t>(affinityMasks.ui)));
+        }
     }
+
+    // ★ [work64] 順序入替（v7）: initialize() の後で WorkerThread を起動
+    initWorkerThread();
 }
 
 void AudioEngine::initWorkerThread()
