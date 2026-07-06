@@ -6,8 +6,9 @@ This is actually the very reason the author built this software.
 
 1. Measure your room environment using [REW (Room EQ Wizard)](https://www.roomeqwizard.com/).Then output measurement file and correction PEQ settings.
 2. Import measuremnt file and correction PEQ settings to [rePahse](https://rephase.org/).Then output FIR filter file.
-3. Install a music subscription app such as Amazon Music.
-4. Install [VB-AUDIO Voicemeeter Banana](https://vb-audio.com/Voicemeeter/).
+3. Open the FIR file in Audacity and use the equalizer settings to apply a gentle roll-off below 20 Hz and above 10 kHz. Apply a fade-in to the beginning of the file and a fade-out to the end. Normalize the entire file.
+4. Install a music subscription app such as Amazon Music.
+5. Install [VB-AUDIO Voicemeeter Banana](https://vb-audio.com/Voicemeeter/).
 
 ## Usage Scenarios
 
