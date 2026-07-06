@@ -19,6 +19,7 @@
 #include "MainApplication.h"
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
+#include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -52,6 +53,13 @@
 
 void MainApplication::initialise(const juce::String& commandLine)
 {
+    // ★ [P0-1] AVX2 ランタイムチェック（非対応 CPU はここで終了）
+    if (!convo::checkAVX2SupportAndWarn())
+    {
+        juce::Logger::writeToLog("[P0-1] AVX2 非対応 CPU - 起動中断");
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
     {
         const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
         const auto logFile = exeDir.getChildFile("ConvoPeq.log");

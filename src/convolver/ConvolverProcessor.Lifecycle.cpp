@@ -224,6 +224,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
         if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
+            // ★ [M-1] 責務: この分岐は IR サンプル配列をリサンプリングせず再利用するため、
+            // 生成された engine は未完成状態（IR 時間軸が processingRate 変化に対応していない）。
+            // 呼び出し元（rebuildThreadLoop）はこの直後に必ず rebuildAllIRsSynchronous() を呼び、
+            // ソース IR（IRState）から正しいリサンプリングを行って engine を完成させること。
+            // この engine を単独で commit / publish してはならない。
             StereoConvolver* newConv = nullptr;
             try
             {

@@ -1270,6 +1270,11 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 else
                 {
                     jassert(consumed <= numSamples);
+                    // ★ [P0-3] Release 安全ガード: 超過時は clamp
+                    if (consumed > numSamples) [[unlikely]]
+                    {
+                        consumed = numSamples;
+                    }
 
                     juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
                     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);

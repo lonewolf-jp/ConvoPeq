@@ -297,7 +297,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
     if (fading != nullptr && fading == dsp)
     {
-        jassertfalse;
+        jassertfalse; // ★ [P0-3] Release: フォールバックで安全
         fading = nullptr;
         useDryAsOld = true;
     }

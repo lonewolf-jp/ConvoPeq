@@ -5,14 +5,7 @@
 #include "core/TimeUtils.h"
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-namespace
-{
-[[maybe_unused]] void diagLog(const juce::String& message)
-{
-    DBG(message); // NOLINT(rt-logger)
-    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
-}
-}
+// ★ [P2-5] diagLog 削除: 呼び出し箇所ゼロのデッドコード。
 #endif
 
 inline bool isFiniteNoLibm(double x) noexcept

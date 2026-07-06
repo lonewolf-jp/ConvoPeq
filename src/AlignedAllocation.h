@@ -19,6 +19,13 @@ inline void* aligned_malloc(size_t size, size_t alignment) {
     return ptr;
 }
 
+// ★ [P1-3] 非スロー版: 失敗時は nullptr を返す（RT ファイル用ではない — mkl_malloc は HeapAlloc を呼ぶ）
+//   命名: _nothrow (例外を投げない契約) — "_rt" は「RT-safe」と誤解されるため不使用
+inline void* aligned_malloc_nothrow(size_t size, size_t alignment) noexcept
+{
+    return mkl_malloc(size, (int)alignment);
+}
+
 inline void aligned_free(void* ptr) {
     if (ptr != nullptr) {
         mkl_free(ptr);
@@ -118,6 +125,15 @@ inline ScopedAlignedArray<T> makeAlignedArray(size_t count) {
                   "Aligned array only supports trivially destructible types");
     T* ptr = static_cast<T*>(aligned_malloc(count * sizeof(T), 64));
     if (!ptr) throw std::bad_alloc();
+    return ScopedAlignedArray<T>(ptr);
+}
+
+// ★ [P1-3] 非スロー版の配列ファクトリ（失敗時は nullptr 内包の ScopedAlignedArray を返す）
+template <typename T>
+inline ScopedAlignedArray<T> makeAlignedArray_nothrow(size_t count) noexcept {
+    static_assert(std::is_trivially_destructible_v<T>,
+                  "Aligned array only supports trivially destructible types");
+    T* ptr = static_cast<T*>(aligned_malloc_nothrow(count * sizeof(T), 64));
     return ScopedAlignedArray<T>(ptr);
 }
 

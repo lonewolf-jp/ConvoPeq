@@ -1,0 +1,70 @@
+flowchart TD
+    A["ASIO入力 float32\n(Voicemeeter等)"] --> B["AudioProcessorPlayer\nfloat→double変換\n(setDoublePrecisionProcessing強制)"]
+
+    subgraph INPUT["入力段 processInputDouble()"]
+        B --> C1["フォーマット変換\nconvertDoubleToDoubleHighQuality"]
+        C1 --> C2["Mono→Stereo展開\n(モノラル入力時)"]
+        C2 --> C3["NaN/Inf sanitize #1\nsanitizeFiniteChunk"]
+        C3 --> C4["入力レベル計測\nmeasureLevel"]
+        C4 --> C5["Analyzerタップ\n(入力表示用, 任意)"]
+        C5 --> C6["入力ヘッドルームゲイン"]
+        C6 --> C7["DCブロッカー(入力)\n2段カスケード 1次IIR, 3Hz"]
+    end
+
+    C7 --> D{"オーバーサンプリング\n有効?"}
+    D -->|"Yes (2x/4x/8x)"| E1["Polyphase Halfband FIR\nKaiser窓, 90〜160dB減衰\n(CustomInputOversampler)"]
+    E1 --> E2["DCブロッカー\n(オーバーサンプル域)"]
+    E2 --> F
+    D -->|No| F{"処理順序\n(ユーザー選択)"}
+
+    F -->|"ConvolverThenEQ"| G1["畳み込みエンジン\nMKLNonUniformConvolver\n(TDUPC/NUC, IPP FFT)"]
+    G1 --> G2["20バンドEQ\nEQProcessor (TPT-SVF)"]
+    G2 --> I
+
+    F -->|"EQThenConvolver"| H1["20バンドEQ\nEQProcessor (TPT-SVF)"]
+    H1 --> H2["Convolver入力\nトリムゲイン"]
+    H2 --> H3["畳み込みエンジン\nMKLNonUniformConvolver"]
+    H3 --> I
+
+    I["OutputFilter\nHC(19-24kHz LPF)/LC(15-18Hz HPF)/\nEQのLPFモード\n※どちらが最終段かで内容切替"]
+    I --> J["出力メイクアップゲイン"]
+
+    J --> K{"ソフトクリップ\n有効?"}
+    K -->|"OS中(既にover1x)"| L1["musicalSoftClip\nオーバーサンプル域内で適用\n(エイリアス保護済み)"]
+    K -->|"OS無効時"| L2["ローカル2倍OS\n→SoftClip→ダウンサンプル"]
+    K -->|No| M
+    L1 --> M["バイパスクロスフェード\n(dry/wet, OS領域)"]
+    L2 --> M
+
+    M --> N{"オーバーサンプリング\n有効?"}
+    N -->|Yes| O1["ダウンサンプル\nprocessDown"]
+    O1 --> O2["バイパスクロスフェード\n(ベースレート, 2回目)"]
+    O2 --> P
+    N -->|No| P["Analyzerタップ\n(出力表示用, 任意)"]
+
+    P --> Q["出力レベル計測\nmeasureLevel"]
+
+    subgraph OUTPUT["出力段 processOutputDouble()"]
+        Q --> R1["DCブロッカー(出力)\n2段カスケード, 3Hz"]
+        R1 --> R2["NaN/Inf scrub #2"]
+        R2 --> R3["Adaptiveキャプチャキュー\n(学習用テレメトリ)"]
+        R3 --> R4["TruePeakDetector\n4xオーバーサンプル\n(ITU-R BS.1770-4準拠)\n★メータリングのみ・非能動"]
+        R4 --> R5["LoudnessMeter\nK-weighting (Pre+RLB)\n(BS.1770-4/EBU R128)\n★メータリングのみ・非能動"]
+        R5 --> R6{"Adaptiveノイズシェイパ\nバンク切替?"}
+        R6 -->|Yes| R7["係数適用\napplyMatchedCoefficients\n→ clampCoeff (NaNガード)"]
+        R6 -->|No| R8
+        R7 --> R8["Dither/NoiseShaping\n(Fixed4Tap/Fixed15Tap/\nAdaptive9th/plain TPDF)\n× kOutputHeadroom(-1.0dB)"]
+        R8 --> R9["NaN/Inf scrub #3"]
+        R9 --> R10["ハードクランプ\n±kOutputHeadroom\n(ブリックウォール, 瞬時クリップ)"]
+        R10 --> R11["固定レイテンシ整列\napplyFixedLatencyDelay"]
+    end
+
+    R11 --> S["AudioProcessorPlayer\ndouble→float変換"]
+    S --> T["ASIO出力 float32"]
+
+    style R4 fill:#fff3cd,stroke:#856404
+    style R5 fill:#fff3cd,stroke:#856404
+    style R10 fill:#f8d7da,stroke:#721c24
+    style C3 fill:#e2e3e5,stroke:#383d41
+    style R2 fill:#e2e3e5,stroke:#383d41
+    style R9 fill:#e2e3e5,stroke:#383d41

@@ -46,6 +46,8 @@ endif()
 if(DEFINED ENV{CONVO_CI_BUILD})
     add_compile_definitions(NUC_DEBUG_GUARDS)
     message(STATUS "CI build detected: NUC_DEBUG_GUARDS enabled")
+    # ★ [P2-2] CI ビルド時は clang-tidy を強制 ON（ローカルは OFF 維持）
+    set(CONVOPEQ_ENABLE_CLANG_TIDY ON CACHE BOOL "Run clang-tidy during build" FORCE)
 endif()
 
 #------------------------------------------------------------
@@ -543,6 +545,8 @@ target_sources(ConvoPeq PRIVATE
     src/core/ThreadAffinityManager.h
     src/core/WorkerThread.h
     src/core/WorkerThread.cpp
+    # ★ [P0-1] AVX2 ランタイムチェック
+    src/CpuFeatureCheck.cpp
 )
 
 #------------------------------------------------------------

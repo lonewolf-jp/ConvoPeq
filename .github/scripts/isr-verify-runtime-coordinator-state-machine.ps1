@@ -83,17 +83,23 @@ if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTra
     $violations.Add('markTransitionCommitted must reject requests when current coordinator state is not Transitioning')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::requestShutdown\(\) noexcept \{\s*convo::publishAtomic\(state_, CoordinatorState::ShuttingDown')) {
-    $violations.Add('requestShutdown must transition state to ShuttingDown')
+if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::requestShutdown\(\) noexcept \{') -or
+    (-not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::ShuttingDown') -and
+     -not [regex]::IsMatch($cppText, 'ShutdownScheduler::requestShutdown\(\) noexcept \{\s*convo::publishAtomic\(coordinator_\.state_, CoordinatorState::ShuttingDown'))) {
+    $violations.Add('requestShutdown must transition state to ShuttingDown (directly or via ShutdownScheduler)')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markShutdownComplete\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::ShuttingDown\) \{\s*return;\s*\}')) {
-    $violations.Add('markShutdownComplete must reject requests when current coordinator state is not ShuttingDown')
+if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markShutdownComplete\(\) noexcept \{') -or
+    (-not [regex]::IsMatch($cppText, 'ShutdownScheduler::markShutdownComplete\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(coordinator_\.state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::ShuttingDown\) \{\s*return;\s*\}') -and
+     -not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markShutdownComplete\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::ShuttingDown\) \{\s*return;\s*\}'))) {
+    $violations.Add('markShutdownComplete must reject requests when current coordinator state is not ShuttingDown (directly or via ShutdownScheduler)')
 }
 
-if (-not [regex]::IsMatch($cppText, 'if \(isFullyDrained\(\)\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Bootstrapping') -or
-    -not [regex]::IsMatch($cppText, 'else \{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
-    $violations.Add('markShutdownComplete must branch Bootstrapping/Faulted by full-drain result')
+if ((-not [regex]::IsMatch($cppText, 'if \(isFullyDrained\(\)\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Bootstrapping') -and
+     -not [regex]::IsMatch($cppText, 'if \(isFullyDrained\(\)\) \{\s*convo::publishAtomic\(coordinator_\.state_, CoordinatorState::Bootstrapping')) -or
+    ((-not [regex]::IsMatch($cppText, 'else \{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted') -and
+      -not [regex]::IsMatch($cppText, 'else \{\s*convo::publishAtomic\(coordinator_\.state_, CoordinatorState::Faulted')))) {
+    $violations.Add('markShutdownComplete must branch Bootstrapping/Faulted by full-drain result (directly or via ShutdownScheduler)')
 }
 
 $report = [ordered]@{

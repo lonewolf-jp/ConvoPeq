@@ -110,7 +110,8 @@ public:
     {
         // 【修正】9th-order の安定性を優先し 0.85 に設定
         constexpr double kLimit = 0.85;
-        if (std::isnan(value))
+        // ★ [P0-2] fp:fast 安全: ビットパターン判定で NaN 検出
+        if (!convo::numeric_policy::isFinite(value))
             return 0.0;
         if (value > kLimit)
             return kLimit;
@@ -123,7 +124,8 @@ public:
     static inline double clampCoeff(double value, double margin) noexcept
     {
         const double kLimit = margin;
-        if (std::isnan(value))
+        // ★ [P0-2] fp:fast 安全: ビットパターン判定で NaN 検出
+        if (!convo::numeric_policy::isFinite(value))
             return 0.0;
         if (value > kLimit) return kLimit;
         if (value < -kLimit) return -kLimit;

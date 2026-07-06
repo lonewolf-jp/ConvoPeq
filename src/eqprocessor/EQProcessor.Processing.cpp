@@ -348,6 +348,10 @@ double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const no
 
 //--------------------------------------------------------------
 // AGC処理 (Private)
+// ★ [P2-3] 注意: AGC はブロックレート（コールバック単位）で RMS エンベロープを更新する。
+//   アタック/リリースの実効時間分解能はブロックサイズに依存する。
+//   ブロックサイズが大きい（1024 等）場合 + 速いアタック設定では、
+//   意図通りの追従速度にならない可能性がある。
 //--------------------------------------------------------------
 void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 {

@@ -16,7 +16,7 @@ if(-not(Test-Path -LiteralPath $commitPath)){
     $requiredPatterns = @(
         'hasExceededDeferralThresholds\(',
         'fetchAddAtomic\(retireEscalationCount_',
-        'retireRuntimeEx_\.quarantine\(',
+        'quarantineSlot\(',
         'retireRuntimeEx_\.canReclaimAfterEscalation\(',
         'retireRuntimeEx_\.reclaim\('
     )
@@ -29,7 +29,7 @@ if(-not(Test-Path -LiteralPath $commitPath)){
 
     $exceededIndex = $s.IndexOf('if (exceededDeferralThresholds)', [System.StringComparison]::Ordinal)
     $countIndex = $s.IndexOf('fetchAddAtomic(retireEscalationCount_', [System.StringComparison]::Ordinal)
-    $quarantineIndex = $s.IndexOf('retireRuntimeEx_.quarantine(', [System.StringComparison]::Ordinal)
+    $quarantineIndex = $s.IndexOf('quarantineSlot(', [System.StringComparison]::Ordinal)
     $canReclaimAfterEscalationIndex = $s.IndexOf('retireRuntimeEx_.canReclaimAfterEscalation(', [System.StringComparison]::Ordinal)
 
     if ($exceededIndex -lt 0) {
@@ -41,7 +41,7 @@ if(-not(Test-Path -LiteralPath $commitPath)){
         }
 
         if ($quarantineIndex -lt 0 -or $quarantineIndex -le $exceededIndex) {
-            $violations.Add('Retire escalation contract violation: quarantine must execute inside exceededDeferralThresholds branch')|Out-Null
+            $violations.Add('Retire escalation contract violation: quarantineSlot must execute inside exceededDeferralThresholds branch')|Out-Null
         }
 
         if ($canReclaimAfterEscalationIndex -lt 0 -or $canReclaimAfterEscalationIndex -le $exceededIndex) {

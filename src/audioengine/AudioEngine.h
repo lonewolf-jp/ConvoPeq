@@ -87,6 +87,7 @@ struct CoeffSet {
 #include "core/RebuildTypes.h"
 #include "TruePeakDetector.h"
 #include "LoudnessMeter.h"
+#include "SimplePeakLimiter.h" // ★ [P1-1] Simple Peak Limiter
 #include "ISRLifecycle.h"
 #include "ISRRTExecution.h"
 #include "ISRDSPHandle.h"
@@ -921,6 +922,9 @@ public:
         CustomInputOversampler softClipOS; // 局所2倍OS（SoftClip用、prepareSingleStageで構築）
         size_t oversamplingFactor = 1;
         OversamplingType activeOversamplingType = OversamplingType::IIR;
+        // ★ [P1-1] Simple Peak Limiter (Release-only, LookAhead なし)
+        ::SimplePeakLimiter peakLimiter;
+
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         uint32_t activeAdaptiveCoeffGeneration = 0;
@@ -1063,6 +1067,10 @@ public:
     }
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
+
+    // ★ [P1-4] template 統合用エントリポイント（準備のみ。未使用）
+    struct AudioCallbackAuthorityView; // 前方宣言 (L1977 で完全定義)
+
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
     void timerCallback() override;
@@ -2013,6 +2021,16 @@ public:
     convo::isr::CrossfadeRuntime crossfadeRuntime_;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
+
+    // ★ [P1-4] template 統合用ヘルパー
+    template<typename SampleType>
+    juce::AudioBuffer<SampleType>& getCrossfadeBufferRef() noexcept
+    {
+        if constexpr (std::is_same_v<SampleType, double>)
+            return dspCrossfadeDoubleBuffer;
+        else
+            return dspCrossfadeFloatBuffer;
+    }
 
     std::atomic<double> currentSampleRate{48000.0};
     // 【Fix Bug #8】linear gain を格納 (dB変換はgetInputLevel/getOutputLevelで行う)

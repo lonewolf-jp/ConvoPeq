@@ -43,6 +43,10 @@ void ConvolverProcessor::postCoalescedChangeNotification()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
+    // ★ [M-1] 責務: prepareToPlay() で生成された未完成 engine（IR が未リサンプリング状態）の
+    //   IR をソース（IRState）から正しくリサンプリングして完成させる。
+    //   この関数は prepareToPlay() → rebuildThreadLoop の呼び出し経路でのみ使用されること。
+    //   単独で呼び出した場合、prepareToPlay で生成された engine がないため動作は未定義。
     [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)

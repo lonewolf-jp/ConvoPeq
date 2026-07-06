@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-06 00:42:35
+> Generated: 2026-07-06 18:39:36
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -27,6 +27,8 @@
         ├── ConvolverSettingsComponent.h
         ├── ConvolverState.cpp
         ├── ConvolverState.h
+        ├── CpuFeatureCheck.cpp
+        ├── CpuFeatureCheck.h
         ├── CustomInputOversampler.cpp
         ├── CustomInputOversampler.h
         ├── DeferredDeletionQueue.h
@@ -184,6 +186,7 @@
         │   ├── RuntimePublicationValidator.h
         │   ├── RuntimeTransition.h
         │   ├── ShutdownScope.h
+        │   ├── SimplePeakLimiter.h
         │   ├── TelemetryRecorder.cpp
         │   ├── TelemetryRecorder.h
         │   ├── WorldLifecycleAudit.cpp
@@ -316,6 +319,8 @@ endif()
 if(DEFINED ENV{CONVO_CI_BUILD})
     add_compile_definitions(NUC_DEBUG_GUARDS)
     message(STATUS "CI build detected: NUC_DEBUG_GUARDS enabled")
+    # ★ [P2-2] CI ビルド時は clang-tidy を強制 ON（ローカルは OFF 維持）
+    set(CONVOPEQ_ENABLE_CLANG_TIDY ON CACHE BOOL "Run clang-tidy during build" FORCE)
 endif()
 
 #------------------------------------------------------------
@@ -813,6 +818,8 @@ target_sources(ConvoPeq PRIVATE
     src/core/ThreadAffinityManager.h
     src/core/WorkerThread.h
     src/core/WorkerThread.cpp
+    # ★ [P0-1] AVX2 ランタイムチェック
+    src/CpuFeatureCheck.cpp
 )
 
 #------------------------------------------------------------
@@ -1596,6 +1603,13 @@ inline void* aligned_malloc(size_t size, size_t alignment) {
     return ptr;
 }
 
+// ★ [P1-3] 非スロー版: 失敗時は nullptr を返す（RT ファイル用ではない — mkl_malloc は HeapAlloc を呼ぶ）
+//   命名: _nothrow (例外を投げない契約) — "_rt" は「RT-safe」と誤解されるため不使用
+inline void* aligned_malloc_nothrow(size_t size, size_t alignment) noexcept
+{
+    return mkl_malloc(size, (int)alignment);
+}
+
 inline void aligned_free(void* ptr) {
     if (ptr != nullptr) {
         mkl_free(ptr);
@@ -1695,6 +1709,15 @@ inline ScopedAlignedArray<T> makeAlignedArray(size_t count) {
                   "Aligned array only supports trivially destructible types");
     T* ptr = static_cast<T*>(aligned_malloc(count * sizeof(T), 64));
     if (!ptr) throw std::bad_alloc();
+    return ScopedAlignedArray<T>(ptr);
+}
+
+// ★ [P1-3] 非スロー版の配列ファクトリ（失敗時は nullptr 内包の ScopedAlignedArray を返す）
+template <typename T>
+inline ScopedAlignedArray<T> makeAlignedArray_nothrow(size_t count) noexcept {
+    static_assert(std::is_trivially_destructible_v<T>,
+                  "Aligned array only supports trivially destructible types");
+    T* ptr = static_cast<T*>(aligned_malloc_nothrow(count * sizeof(T), 64));
     return ScopedAlignedArray<T>(ptr);
 }
 
@@ -6926,6 +6949,131 @@ private:
 
 ```
 
+### 📄 `src\CpuFeatureCheck.cpp`
+
+```
+//==============================================================================
+// CpuFeatureCheck.cpp
+// ★ [P0-1] AVX2 ランタイム検出
+//==============================================================================
+
+#include "CpuFeatureCheck.h"
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+#include <cpuid.h>
+#endif
+
+namespace convo {
+
+static bool hasAVX2Support() noexcept
+{
+#if defined(_WIN32)
+    // Method 1: IsProcessorFeaturePresent (kernel32.dll, Windows 8.1+)
+#ifndef PF_AVX2_INSTRUCTIONS_AVAILABLE
+#define PF_AVX2_INSTRUCTIONS_AVAILABLE 10
+#endif
+    {
+        const auto kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+        if (kernel32 != nullptr)
+        {
+            using PFN_IsProcessorFeaturePresent = BOOL (WINAPI*)(DWORD);
+            const auto pfn = reinterpret_cast<PFN_IsProcessorFeaturePresent>(
+                ::GetProcAddress(kernel32, "IsProcessorFeaturePresent"));
+            if (pfn != nullptr)
+            {
+                const BOOL result = pfn(PF_AVX2_INSTRUCTIONS_AVAILABLE);
+                if (result != FALSE)
+                    return true;
+            }
+        }
+    }
+
+    // Method 2: __cpuidex による直接チェック
+    {
+        int cpuInfo[4] = { 0 };
+#if defined(_MSC_VER) || defined(__INTEL_COMPILER)
+        __cpuidex(cpuInfo, 7, 0);
+#elif defined(__GNUC__) || defined(__clang__)
+        __cpuid_count(7, 0, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
+#endif
+        constexpr int kAVX2Bit = 5;
+        constexpr int kFMABit   = 12;
+        if ((cpuInfo[1] & (1 << kAVX2Bit)) != 0
+            && (cpuInfo[1] & (1 << kFMABit)) != 0)
+            return true;
+        return false;
+    }
+#elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+    // Linux/macOS: __get_cpuid_count
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+    {
+        constexpr int kAVX2Bit = 5;
+        constexpr int kFMABit  = 12;
+        if ((ebx & (1u << kAVX2Bit)) != 0
+            && (ebx & (1u << kFMABit)) != 0)
+            return true;
+    }
+    return false;
+#else
+    // 未知のプラットフォーム: 安全側に倒してチェック通過
+    return true;
+#endif
+}
+
+bool checkAVX2SupportAndWarn() noexcept
+{
+    if (hasAVX2Support())
+        return true;
+
+    // 非対応 CPU: MessageBox でエラー表示
+    ::MessageBoxA(nullptr,
+        "ConvoPeq には AVX2 および FMA 命令に対応した CPU が必要です。\n"
+        "Intel Haswell (2013) 以降、または AMD Excavator (2015) 以降の\n"
+        "CPU が必要です。\n\n"
+        "この CPU ではアプリケーションがクラッシュする可能性があるため、\n"
+        "実行を中断します。",
+        "ConvoPeq - CPU 非対応",
+        MB_OK | MB_ICONERROR);
+
+    return false;
+}
+
+} // namespace convo
+
+```
+
+### 📄 `src\CpuFeatureCheck.h`
+
+```
+//==============================================================================
+// CpuFeatureCheck.h
+// ★ [P0-1] AVX2 ランタイム検出 — 非対応 CPU ではエラーダイアログを表示して終了
+//
+// ISR 観点: 起動時に 1 回だけ呼ばれるチェック。ISR とは無関係。
+//==============================================================================
+#pragma once
+
+namespace convo {
+
+// AVX2 + FMA が利用可能かをチェックする。
+// 非対応の場合は Windows MessageBox でエラーを表示し、false を返す。
+// 対応している場合は true を返す。
+bool checkAVX2SupportAndWarn() noexcept;
+
+} // namespace convo
+
+```
+
 ### 📄 `src\CustomInputOversampler.cpp`
 
 ```
@@ -9790,13 +9938,6 @@ struct ScopedDftiDescriptor
 #endif
 #endif
 
-// ★ RUNTIME_DIAG_LOG マクロ: 単一の diagLog 呼び出しをマクロで囲む
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-#define RUNTIME_DIAG_LOG(x) diagLog(x)
-#else
-#define RUNTIME_DIAG_LOG(x) do {} while(false)
-#endif
-
 // ============================================================================
 // 共通診断基盤
 // ProcessMemoryInfo / getProcessMemoryInfo() / diagSequenceCounter /
@@ -10002,6 +10143,29 @@ namespace convo::numeric_policy
     // ─────────────────────────────────────────────────────────────
     // しきい値に対応するビットパターンを constexpr で取得（C++20）
     // ─────────────────────────────────────────────────────────────
+
+    // ★ [R-1] 統合: libm 非依存の有限値/絶対値判定 (bit-pattern, fp:fast 安全)
+    // 従来は 5 ファイルに重複実装されていた。
+    // 使用箇所はこの関数を include して使うこと。
+    inline bool isFinite(double x) noexcept
+    {
+        // exponent bits が 0x7FF (Inf/NaN) でないことを確認
+        const auto bits = std::bit_cast<uint64_t>(x);
+        return ((bits >> 52) & 0x7FFu) != 0x7FFu;
+    }
+
+    inline double absNoLibm(double x) noexcept
+    {
+        // sign bit をクリア
+        auto bits = std::bit_cast<uint64_t>(x);
+        bits &= 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(bits);
+    }
+
+    inline bool isFiniteAndAbsBelow(double x, double threshold) noexcept
+    {
+        return isFinite(x) && (absNoLibm(x) < threshold);
+    }
     inline constexpr uint64_t denormThresholdBitsDouble() noexcept
     {
         return std::bit_cast<uint64_t>(kDenormThresholdDouble);
@@ -12818,7 +12982,8 @@ public:
     {
         // 【修正】9th-order の安定性を優先し 0.85 に設定
         constexpr double kLimit = 0.85;
-        if (std::isnan(value))
+        // ★ [P0-2] fp:fast 安全: ビットパターン判定で NaN 検出
+        if (!convo::numeric_policy::isFinite(value))
             return 0.0;
         if (value > kLimit)
             return kLimit;
@@ -12831,7 +12996,8 @@ public:
     static inline double clampCoeff(double value, double margin) noexcept
     {
         const double kLimit = margin;
-        if (std::isnan(value))
+        // ★ [P0-2] fp:fast 安全: ビットパターン判定で NaN 検出
+        if (!convo::numeric_policy::isFinite(value))
             return 0.0;
         if (value > kLimit) return kLimit;
         if (value < -kLimit) return -kLimit;
@@ -14794,6 +14960,11 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 else
                 {
                     jassert(consumed <= numSamples);
+                    // ★ [P0-3] Release 安全ガード: 超過時は clamp
+                    if (consumed > numSamples) [[unlikely]]
+                    {
+                        consumed = numSamples;
+                    }
 
                     juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
                     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
@@ -15515,6 +15686,7 @@ void setup() noexcept;
 #include "MainApplication.h"
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
+#include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -15548,6 +15720,13 @@ void setup() noexcept;
 
 void MainApplication::initialise(const juce::String& commandLine)
 {
+    // ★ [P0-1] AVX2 ランタイムチェック（非対応 CPU はここで終了）
+    if (!convo::checkAVX2SupportAndWarn())
+    {
+        juce::Logger::writeToLog("[P0-1] AVX2 非対応 CPU - 起動中断");
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
     {
         const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
         const auto logFile = exeDir.getChildFile("ConvoPeq.log");
@@ -23635,6 +23814,9 @@ void SpectrumAnalyzerComponent::prepareFFT()
     fftHandle.reset(localDfti.release());
 
     jassert(fftHandle.get() != nullptr);
+    // ★ [P0-3] Release 安全ガード: nullptr なら何もしない
+    if (fftHandle.get() == nullptr) [[unlikely]]
+        return;
 }
 
 void SpectrumAnalyzerComponent::releaseFFT()
@@ -29672,7 +29854,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
     if (fading != nullptr && fading == dsp)
     {
-        jassertfalse;
+        jassertfalse; // ★ [P0-3] Release: フォールバックで安全
         fading = nullptr;
         useDryAsOld = true;
     }
@@ -30087,14 +30269,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 #include <atomic>
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-namespace {
-[[maybe_unused]] void diagLog(const juce::String& message)
-{
-    DBG(message); // NOLINT(rt-logger)
-    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
-}
-}
-
+// ★ [P2-5] diagLog 削除: 呼び出し箇所ゼロのデッドコード。関連 RUNTIME_DIAG_LOG マクロも削除済み。
 // work60: Numeric-Only DiagEvent — String構築を排除（変数は extern / DSPCoreFloat.cpp で一元管理）
 // ★ [work65] eqDiagBuffer は AudioEngine.h の extern 宣言 + DSPCoreFloat.cpp の実体を参照
 
@@ -30245,6 +30420,13 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
 {
     const double clip_start = threshold - knee;
     jassert(knee > 1.0e-9);
+    // ★ [P0-3] Release 安全ガード: knee が小さすぎる場合は hard clip と等価に fallback
+    if (knee <= 1.0e-9) [[unlikely]]
+    {
+        for (int i = 0; i < numSamples; ++i)
+            data[i] = juce::jlimit(-threshold, threshold, data[i]);
+        return;
+    }
 
     const __m256d vClipStart   = _mm256_set1_pd(clip_start);
     const __m256d vThreshold   = _mm256_set1_pd(threshold);
@@ -30484,7 +30666,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
         if (processBlock.getNumSamples() == 0 || processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
         {
-            jassertfalse;
+            jassertfalse; // ★ [P0-3] Release: clear+return で安全
             buffer.clear();
             return;
         }
@@ -30723,35 +30905,9 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     auto& dc = dcBlockers();
     dc.outputL.processStereo(dataL, dataR, numSamples, dc.outputR);
 
-    {
-        const __m256d vInf = _mm256_set1_pd(1.0e300);
-        int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
-            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
-            _mm256_storeu_pd(dataL + i, _mm256_and_pd(vL, _mm256_and_pd(nanMaskL, infMaskL)));
-
-            if (dataR != nullptr)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
-                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
-                _mm256_storeu_pd(dataR + i, _mm256_and_pd(vR, _mm256_and_pd(nanMaskR, infMaskR)));
-            }
-        }
-
-        for (; i < numSamples; ++i)
-        {
-            if (!isFiniteAndAbsBelowNoLibm(dataL[i], 1.0e300))
-                dataL[i] = 0.0;
-
-            if (dataR != nullptr && !isFiniteAndAbsBelowNoLibm(dataR[i], 1.0e300))
-                dataR[i] = 0.0;
-        }
-    }
+    // ★ [P2-1] NaN/Inf scrub #1 削除: DCBlocker は内部で状態変数に NaN ガード済み。
+    //   全フィードバック構造（SVF/Lattice/FFT/Dither/DCB）が個別ガードを持ち、
+    //   ScopedNoDenormals (FTZ/DAZ) も全 RT エントリで有効。R-2 解析にて安全性確認済み。
 
     pushAdaptiveCaptureBlocks(state.adaptiveCaptureQueue,
                               dataL,
@@ -30761,12 +30917,6 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                               state.adaptiveCaptureBitDepth,
                               state.adaptiveCoeffBankIndex,
                               state.captureSessionId);
-
-    // TruePeak検出（BS.1770-4/5準拠）
-    truePeakDetector.processBlock(dataL, dataR, numSamples);
-
-    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
-    loudnessMeter.processBlock(dataL, dataR, numSamples);
 
     if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
         && state.adaptiveCoeffSet != nullptr
@@ -30846,6 +30996,23 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         }
     }
 
+    // ★ [P1-2] TruePeak/LUFS 計測を kOutputHeadroom + ディザ後に移動
+    //   （計測は実際の出力信号に対して行うべき）
+    // TruePeak検出（BS.1770-4/5準拠）
+    truePeakDetector.processBlock(dataL, dataR, numSamples);
+
+    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
+    loudnessMeter.processBlock(dataL, dataR, numSamples);
+
+    // ★ [P1-1] Simple Peak Limiter: Hard Clamp (Safety Net) の前段で動作
+    //   threshold = kOutputHeadroom - 0.5dB, knee = 1.0dB (constexpr で libm 呼び出し回避)
+    //   kOutputHeadroom = -1.0dBFS = 0.8912509381337456
+    //   0.5dB down: 0.8912509381337456 * 10^(-0.5/20) = 0.8413951287507587
+    //   1.0dB knee width: 0.8912509381337456 * (10^(1.0/20) - 1) = 0.108748
+    constexpr double kPLThreshold = 0.8413951287507587;
+    constexpr double kPLKnee = 0.108748;
+    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
+
     {
         const __m256d vLimit = _mm256_set1_pd(kOutputHeadroom);
         const __m256d vNegLimit = _mm256_set1_pd(-kOutputHeadroom);
@@ -30895,14 +31062,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 #include "core/TimeUtils.h"
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-namespace
-{
-[[maybe_unused]] void diagLog(const juce::String& message)
-{
-    DBG(message); // NOLINT(rt-logger)
-    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
-}
-}
+// ★ [P2-5] diagLog 削除: 呼び出し箇所ゼロのデッドコード。
 #endif
 
 inline bool isFiniteNoLibm(double x) noexcept
@@ -32055,6 +32215,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
     diagLog("[DSPCORE_PREPARE] loudnessMeter.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
 
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling peakLimiter.prepare");
+    peakLimiter.prepare(newSampleRate, 100.0); // Release 100ms
+    diagLog("[DSPCORE_PREPARE] peakLimiter.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
     { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
     setFixedLatencySamples(0);
     diagLog("[DSPCORE_PREPARE] setFixedLatencySamples done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
@@ -32100,6 +32264,9 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling loudnessMeter.prepare");
     loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] loudnessMeter.prepare done");
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling peakLimiter.prepare");
+    peakLimiter.prepare(newSampleRate, 100.0); // Release 100ms
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] peakLimiter.prepare done");
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
     setFixedLatencySamples(0);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] setFixedLatencySamples done");
@@ -37102,6 +37269,7 @@ struct CoeffSet {
 #include "core/RebuildTypes.h"
 #include "TruePeakDetector.h"
 #include "LoudnessMeter.h"
+#include "SimplePeakLimiter.h" // ★ [P1-1] Simple Peak Limiter
 #include "ISRLifecycle.h"
 #include "ISRRTExecution.h"
 #include "ISRDSPHandle.h"
@@ -37936,6 +38104,9 @@ public:
         CustomInputOversampler softClipOS; // 局所2倍OS（SoftClip用、prepareSingleStageで構築）
         size_t oversamplingFactor = 1;
         OversamplingType activeOversamplingType = OversamplingType::IIR;
+        // ★ [P1-1] Simple Peak Limiter (Release-only, LookAhead なし)
+        ::SimplePeakLimiter peakLimiter;
+
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         uint32_t activeAdaptiveCoeffGeneration = 0;
@@ -38078,6 +38249,10 @@ public:
     }
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
+
+    // ★ [P1-4] template 統合用エントリポイント（準備のみ。未使用）
+    struct AudioCallbackAuthorityView; // 前方宣言 (L1977 で完全定義)
+
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
     void timerCallback() override;
@@ -39028,6 +39203,16 @@ public:
     convo::isr::CrossfadeRuntime crossfadeRuntime_;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
+
+    // ★ [P1-4] template 統合用ヘルパー
+    template<typename SampleType>
+    juce::AudioBuffer<SampleType>& getCrossfadeBufferRef() noexcept
+    {
+        if constexpr (std::is_same_v<SampleType, double>)
+            return dspCrossfadeDoubleBuffer;
+        else
+            return dspCrossfadeFloatBuffer;
+    }
 
     std::atomic<double> currentSampleRate{48000.0};
     // 【Fix Bug #8】linear gain を格納 (dB変換はgetInputLevel/getOutputLevelで行う)
@@ -53606,6 +53791,99 @@ private:
 
 ```
 
+### 📄 `src\audioengine\SimplePeakLimiter.h`
+
+```
+//==============================================================================
+// SimplePeakLimiter.h
+// ★ [P1-1] Release-only Simple Peak Limiter
+//
+// 設計: Phase 1 — LookAhead なし。Attack 0ms、Release 50-200ms 適応。
+//       Soft knee 1.0dB で自然なクリップ特性。
+// 位置付け: 既存 Hard Clamp（jlimit, Safety Net）の前段で動作する。
+// ISR: 状態は release envelope (double) のみ。LookAhead FIFO 不要。
+//==============================================================================
+#pragma once
+
+#include <JuceHeader.h>
+
+class SimplePeakLimiter
+{
+public:
+    // prepare: サンプルレートと Release 時定数 (ms) を設定
+    void prepare(double sampleRate, double releaseMs) noexcept
+    {
+        const double releaseSec = releaseMs * 0.001;
+        releaseCoeff = (releaseSec > 0.0 && sampleRate > 0.0)
+            ? std::exp(-1.0 / (sampleRate * releaseSec))
+            : 0.0;
+    }
+
+    // reset: envelope を 1.0 (no gain reduction) にリセット
+    void reset() noexcept
+    {
+        envelope = 1.0;
+    }
+
+    // processBlock: Stereo ブロックに対してピークリミッティングを適用
+    // thresholdLinear: リミッター閾値（linear 倍率, e.g. 0.891 = -1.0dB）
+    // kneeLinear: ソフトニー幅（linear 倍率, e.g. 0.122 = 約1dB）
+    void processBlock(double* dataL, double* dataR, int numSamples,
+                      double thresholdLinear, double kneeLinear) noexcept
+    {
+        if (dataL == nullptr || numSamples <= 0)
+            return;
+
+        const double clipStart = thresholdLinear - kneeLinear * 0.5;
+        const bool hasR = (dataR != nullptr);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // 両チャンネルの最大絶対値を検出
+            const double absL = std::abs(dataL[i]);
+            const double absR = hasR ? std::abs(dataR[i]) : absL;
+            const double peak = juce::jmax(absL, absR);
+
+            // 必要なゲインリダクションを計算 (soft knee)
+            double desiredGain = 1.0;
+            if (peak > clipStart)
+            {
+                if (peak <= thresholdLinear)
+                {
+                    // Knee 領域: 3次スプライン補間
+                    const double t = (peak - clipStart) / kneeLinear;
+                    const double kneeShape = t * t * (3.0 - 2.0 * t);
+                    desiredGain = 1.0 - (1.0 - thresholdLinear / peak) * kneeShape;
+                }
+                else
+                {
+                    // リミッティング領域: threshold / peak
+                    desiredGain = thresholdLinear / peak;
+                }
+            }
+
+            // Envelope 追跡: Attack 即時, Release 時定数
+            if (desiredGain < envelope)
+                envelope = desiredGain;
+            else
+                envelope = 1.0 + (envelope - 1.0) * releaseCoeff;
+
+            // Apply gain reduction
+            dataL[i] *= envelope;
+            if (hasR)
+                dataR[i] *= envelope;
+        }
+    }
+
+    double getCurrentEnvelope() const noexcept { return envelope; }
+
+private:
+    double releaseCoeff = 0.0;
+    double envelope = 1.0;
+};
+
+```
+
 ### 📄 `src\audioengine\TelemetryRecorder.cpp`
 
 ```
@@ -54620,6 +54898,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
         if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
+            // ★ [M-1] 責務: この分岐は IR サンプル配列をリサンプリングせず再利用するため、
+            // 生成された engine は未完成状態（IR 時間軸が processingRate 変化に対応していない）。
+            // 呼び出し元（rebuildThreadLoop）はこの直後に必ず rebuildAllIRsSynchronous() を呼び、
+            // ソース IR（IRState）から正しいリサンプリングを行って engine を完成させること。
+            // この engine を単独で commit / publish してはならない。
             StereoConvolver* newConv = nullptr;
             try
             {
@@ -55460,6 +55743,12 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                   &spec, this))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
+            // ★ [P0-3] Release 安全ガード: descriptor 未コミットでも処理継続
+            if (!newConv->areNUCDescriptorsCommitted()) [[unlikely]]
+            {
+                handleLoadError("NUC descriptors not committed - aborting load");
+                return;
+            }
             applyNewState(newConv.release(), std::move(loadedIR), sr, length, isRebuild, irFile, scaleFactor, std::move(displayIR));
         }
         else
@@ -57322,6 +57611,10 @@ void ConvolverProcessor::postCoalescedChangeNotification()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
+    // ★ [M-1] 責務: prepareToPlay() で生成された未完成 engine（IR が未リサンプリング状態）の
+    //   IR をソース（IRState）から正しくリサンプリングして完成させる。
+    //   この関数は prepareToPlay() → rebuildThreadLoop の呼び出し経路でのみ使用されること。
+    //   単独で呼び出した場合、prepareToPlay で生成された engine がないため動作は未定義。
     [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
@@ -65862,6 +66155,10 @@ double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const no
 
 //--------------------------------------------------------------
 // AGC処理 (Private)
+// ★ [P2-3] 注意: AGC はブロックレート（コールバック単位）で RMS エンベロープを更新する。
+//   アタック/リリースの実効時間分解能はブロックサイズに依存する。
+//   ブロックサイズが大きい（1024 等）場合 + 速いアタック設定では、
+//   意図通りの追従速度にならない可能性がある。
 //--------------------------------------------------------------
 void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 {

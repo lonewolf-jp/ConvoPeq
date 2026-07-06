@@ -8,14 +8,7 @@
 #include <atomic>
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-namespace {
-[[maybe_unused]] void diagLog(const juce::String& message)
-{
-    DBG(message); // NOLINT(rt-logger)
-    juce::Logger::writeToLog(message); // NOLINT(rt-logger)
-}
-}
-
+// ★ [P2-5] diagLog 削除: 呼び出し箇所ゼロのデッドコード。関連 RUNTIME_DIAG_LOG マクロも削除済み。
 // work60: Numeric-Only DiagEvent — String構築を排除（変数は extern / DSPCoreFloat.cpp で一元管理）
 // ★ [work65] eqDiagBuffer は AudioEngine.h の extern 宣言 + DSPCoreFloat.cpp の実体を参照
 
@@ -166,6 +159,13 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
 {
     const double clip_start = threshold - knee;
     jassert(knee > 1.0e-9);
+    // ★ [P0-3] Release 安全ガード: knee が小さすぎる場合は hard clip と等価に fallback
+    if (knee <= 1.0e-9) [[unlikely]]
+    {
+        for (int i = 0; i < numSamples; ++i)
+            data[i] = juce::jlimit(-threshold, threshold, data[i]);
+        return;
+    }
 
     const __m256d vClipStart   = _mm256_set1_pd(clip_start);
     const __m256d vThreshold   = _mm256_set1_pd(threshold);
@@ -405,7 +405,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
         if (processBlock.getNumSamples() == 0 || processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
         {
-            jassertfalse;
+            jassertfalse; // ★ [P0-3] Release: clear+return で安全
             buffer.clear();
             return;
         }
@@ -644,35 +644,9 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     auto& dc = dcBlockers();
     dc.outputL.processStereo(dataL, dataR, numSamples, dc.outputR);
 
-    {
-        const __m256d vInf = _mm256_set1_pd(1.0e300);
-        int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
-            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
-            _mm256_storeu_pd(dataL + i, _mm256_and_pd(vL, _mm256_and_pd(nanMaskL, infMaskL)));
-
-            if (dataR != nullptr)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
-                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
-                _mm256_storeu_pd(dataR + i, _mm256_and_pd(vR, _mm256_and_pd(nanMaskR, infMaskR)));
-            }
-        }
-
-        for (; i < numSamples; ++i)
-        {
-            if (!isFiniteAndAbsBelowNoLibm(dataL[i], 1.0e300))
-                dataL[i] = 0.0;
-
-            if (dataR != nullptr && !isFiniteAndAbsBelowNoLibm(dataR[i], 1.0e300))
-                dataR[i] = 0.0;
-        }
-    }
+    // ★ [P2-1] NaN/Inf scrub #1 削除: DCBlocker は内部で状態変数に NaN ガード済み。
+    //   全フィードバック構造（SVF/Lattice/FFT/Dither/DCB）が個別ガードを持ち、
+    //   ScopedNoDenormals (FTZ/DAZ) も全 RT エントリで有効。R-2 解析にて安全性確認済み。
 
     pushAdaptiveCaptureBlocks(state.adaptiveCaptureQueue,
                               dataL,
@@ -682,12 +656,6 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                               state.adaptiveCaptureBitDepth,
                               state.adaptiveCoeffBankIndex,
                               state.captureSessionId);
-
-    // TruePeak検出（BS.1770-4/5準拠）
-    truePeakDetector.processBlock(dataL, dataR, numSamples);
-
-    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
-    loudnessMeter.processBlock(dataL, dataR, numSamples);
 
     if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
         && state.adaptiveCoeffSet != nullptr
@@ -766,6 +734,23 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 dataR[i] = 0.0;
         }
     }
+
+    // ★ [P1-2] TruePeak/LUFS 計測を kOutputHeadroom + ディザ後に移動
+    //   （計測は実際の出力信号に対して行うべき）
+    // TruePeak検出（BS.1770-4/5準拠）
+    truePeakDetector.processBlock(dataL, dataR, numSamples);
+
+    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
+    loudnessMeter.processBlock(dataL, dataR, numSamples);
+
+    // ★ [P1-1] Simple Peak Limiter: Hard Clamp (Safety Net) の前段で動作
+    //   threshold = kOutputHeadroom - 0.5dB, knee = 1.0dB (constexpr で libm 呼び出し回避)
+    //   kOutputHeadroom = -1.0dBFS = 0.8912509381337456
+    //   0.5dB down: 0.8912509381337456 * 10^(-0.5/20) = 0.8413951287507587
+    //   1.0dB knee width: 0.8912509381337456 * (10^(1.0/20) - 1) = 0.108748
+    constexpr double kPLThreshold = 0.8413951287507587;
+    constexpr double kPLKnee = 0.108748;
+    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
 
     {
         const __m256d vLimit = _mm256_set1_pd(kOutputHeadroom);

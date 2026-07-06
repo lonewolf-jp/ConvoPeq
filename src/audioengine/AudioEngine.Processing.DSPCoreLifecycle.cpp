@@ -222,6 +222,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
     diagLog("[DSPCORE_PREPARE] loudnessMeter.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
 
+    { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling peakLimiter.prepare");
+    peakLimiter.prepare(newSampleRate, 100.0); // Release 100ms
+    diagLog("[DSPCORE_PREPARE] peakLimiter.prepare done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
+
     { double t0 = juce::Time::getMillisecondCounterHiRes(); diagLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
     setFixedLatencySamples(0);
     diagLog("[DSPCORE_PREPARE] setFixedLatencySamples done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
@@ -267,6 +271,9 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling loudnessMeter.prepare");
     loudnessMeter.prepare(newSampleRate, maxInternalBlockSize);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] loudnessMeter.prepare done");
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling peakLimiter.prepare");
+    peakLimiter.prepare(newSampleRate, 100.0); // Release 100ms
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] peakLimiter.prepare done");
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
     setFixedLatencySamples(0);
     juce::Logger::writeToLog("[DSPCORE_PREPARE] setFixedLatencySamples done");

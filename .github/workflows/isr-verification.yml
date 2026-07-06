@@ -292,6 +292,11 @@ jobs:
           $invokeArgs += '-InputName'; $invokeArgs += 'collect81ProbeExitMs'
           $invokeArgs += '-InputName'; $invokeArgs += 'enforce81CloseDecisionRetryMax'
           if ('${{ inputs.autoPruneCleanupDeferred }}' -eq 'true') { $invokeArgs += '-AutoPruneCleanupDeferred' }
+          if ('${{ inputs.requireRuntimeEvidence }}' -eq 'true') { $invokeArgs += '-RequireRuntimeEvidence' }
+          if ('${{ inputs.enforceTriggerPolicy }}' -eq 'true') { $invokeArgs += '-EnforceTriggerPolicy' }
+          if ('${{ inputs.requireAstTriggerCheck }}' -eq 'true') { $invokeArgs += '-RequireAstTriggerCheck' }
+          if ('${{ inputs.requireClangTidyAudit }}' -eq 'true') { $invokeArgs += '-RequireClangTidyAudit' }
+          if ('${{ inputs.prOpenedAt }}' -ne '') { $invokeArgs += '-PrOpenedAt'; $invokeArgs += '${{ inputs.prOpenedAt }}' }
           if ('${{ inputs.enforce81CloseDecisionRetryMax }}' -ne '') { $invokeArgs += '-Enforce81CloseDecisionRetryMax'; $invokeArgs += '${{ inputs.enforce81CloseDecisionRetryMax }}' }
           & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
 

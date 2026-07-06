@@ -259,6 +259,9 @@ void SpectrumAnalyzerComponent::prepareFFT()
     fftHandle.reset(localDfti.release());
 
     jassert(fftHandle.get() != nullptr);
+    // ★ [P0-3] Release 安全ガード: nullptr なら何もしない
+    if (fftHandle.get() == nullptr) [[unlikely]]
+        return;
 }
 
 void SpectrumAnalyzerComponent::releaseFFT()

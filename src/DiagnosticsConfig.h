@@ -28,13 +28,6 @@
 #endif
 #endif
 
-// ★ RUNTIME_DIAG_LOG マクロ: 単一の diagLog 呼び出しをマクロで囲む
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-#define RUNTIME_DIAG_LOG(x) diagLog(x)
-#else
-#define RUNTIME_DIAG_LOG(x) do {} while(false)
-#endif
-
 // ============================================================================
 // 共通診断基盤
 // ProcessMemoryInfo / getProcessMemoryInfo() / diagSequenceCounter /

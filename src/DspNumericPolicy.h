@@ -143,6 +143,29 @@ namespace convo::numeric_policy
     // ─────────────────────────────────────────────────────────────
     // しきい値に対応するビットパターンを constexpr で取得（C++20）
     // ─────────────────────────────────────────────────────────────
+
+    // ★ [R-1] 統合: libm 非依存の有限値/絶対値判定 (bit-pattern, fp:fast 安全)
+    // 従来は 5 ファイルに重複実装されていた。
+    // 使用箇所はこの関数を include して使うこと。
+    inline bool isFinite(double x) noexcept
+    {
+        // exponent bits が 0x7FF (Inf/NaN) でないことを確認
+        const auto bits = std::bit_cast<uint64_t>(x);
+        return ((bits >> 52) & 0x7FFu) != 0x7FFu;
+    }
+
+    inline double absNoLibm(double x) noexcept
+    {
+        // sign bit をクリア
+        auto bits = std::bit_cast<uint64_t>(x);
+        bits &= 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(bits);
+    }
+
+    inline bool isFiniteAndAbsBelow(double x, double threshold) noexcept
+    {
+        return isFinite(x) && (absNoLibm(x) < threshold);
+    }
     inline constexpr uint64_t denormThresholdBitsDouble() noexcept
     {
         return std::bit_cast<uint64_t>(kDenormThresholdDouble);

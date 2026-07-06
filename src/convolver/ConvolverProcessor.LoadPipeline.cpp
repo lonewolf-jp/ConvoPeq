@@ -590,6 +590,12 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                   &spec, this))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
+            // ★ [P0-3] Release 安全ガード: descriptor 未コミットでも処理継続
+            if (!newConv->areNUCDescriptorsCommitted()) [[unlikely]]
+            {
+                handleLoadError("NUC descriptors not committed - aborting load");
+                return;
+            }
             applyNewState(newConv.release(), std::move(loadedIR), sr, length, isRebuild, irFile, scaleFactor, std::move(displayIR));
         }
         else
