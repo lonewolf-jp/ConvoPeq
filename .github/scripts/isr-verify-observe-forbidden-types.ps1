@@ -2,8 +2,6 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $headerPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
-$audioBlockPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.AudioBlock.cpp'
-$blockDoublePath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.BlockDouble.cpp'
 $timerPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Timer.cpp'
 $evidenceDir = Join-Path $repoRoot 'evidence'
 $reportPath = Join-Path $evidenceDir 'observe_forbidden_types_report.json'
@@ -21,7 +19,7 @@ $forbiddenTypePatterns = @(
     'TransitionState\s*\*'
 )
 
-foreach ($path in @($headerPath, $audioBlockPath, $blockDoublePath, $timerPath)) {
+foreach ($path in @($headerPath, $timerPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         $violations.Add("Missing observe-forbidden target: $path") | Out-Null
     }

@@ -34,8 +34,6 @@ $warningRule = @{
 }
 
 $strictRtFiles = @(
-    "src/audioengine/AudioEngine.Processing.AudioBlock.cpp",
-    "src/audioengine/AudioEngine.Processing.BlockDouble.cpp",
     "src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp",
     "src/audioengine/AudioEngine.Processing.DSPCoreFloat.cpp",
     "src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp",

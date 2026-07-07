@@ -72,11 +72,21 @@ bool AudioEngineProcessor::isBusesLayoutSupported(const BusesLayout& layouts) co
     return true;
 }
 
+#ifndef CONVOPEQ_STANDALONE_ONLY
 void AudioEngineProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::AudioSourceChannelInfo info(&buffer, 0, buffer.getNumSamples());
     audioEngine.getNextAudioBlock(info);
 }
+#else
+void AudioEngineProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // Standalone-only: Float route is unused; setDoublePrecisionProcessing(true)
+    // ensures processBlock(double&) is always called. This stub satisfies the
+    // pure virtual interface requirement of juce::AudioProcessor.
+    buffer.clear();
+}
+#endif
 
 void AudioEngineProcessor::processBlock(juce::AudioBuffer<double>& buffer, juce::MidiBuffer&)
 {

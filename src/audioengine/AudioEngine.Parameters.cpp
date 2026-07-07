@@ -633,7 +633,7 @@ void AudioEngine::setOversamplingType(OversamplingType type)
 void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 {
     convo::publishAtomic(convHCFilterMode, mode, std::memory_order_release);
-    // NUC irFreqDomain を再焼き込みするため、uiConvolverProcessor を再構築する。
+    // [Mem-Fix] NUC SoA (irFreqReal/irFreqImag) を再適用するため、uiConvolverProcessor を再構築する。
     // DSPCore::convolver は次回 requestRebuild 時に syncStateFrom + rebuildAllIRsSynchronous で追従する。
     uiConvolverProcessor.setNUCFilterModes(
         convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),

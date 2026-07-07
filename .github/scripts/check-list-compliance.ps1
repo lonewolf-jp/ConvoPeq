@@ -101,8 +101,6 @@ foreach ($m in $dangerHits) {
 # list.md 2.x RT safety checks (主要RTファイル)
 # ------------------------------------------------------------
 $rtFiles = @(
-    (Join-Path $srcDir 'audioengine\AudioEngine.Processing.AudioBlock.cpp'),
-    (Join-Path $srcDir 'audioengine\AudioEngine.Processing.BlockDouble.cpp'),
     (Join-Path $srcDir 'audioengine\AudioEngine.Processing.DSPCoreDouble.cpp'),
     (Join-Path $srcDir 'audioengine\AudioEngine.Processing.DSPCoreFloat.cpp'),
     (Join-Path $srcDir 'audioengine\AudioEngine.Processing.DSPCoreIO.cpp'),

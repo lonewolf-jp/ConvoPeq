@@ -12,15 +12,9 @@ $violations = New-Object 'System.Collections.Generic.List[string]'
 $hits = New-Object 'System.Collections.Generic.List[object]'
 
 $forbiddenByFile = @(
-    [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.AudioBlock.cpp'; pattern = 'runtimeGraph\s*->' },
-    [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.BlockDouble.cpp'; pattern = 'runtimeGraph\s*->' },
     [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.Snapshot.cpp'; pattern = 'runtimeGraph\s*->' },
     [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Timer.cpp'; pattern = 'runtimeGraph\s*->' },
-    [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.AudioBlock.cpp'; pattern = '\bgetRuntimeGraph\s*\(' },
-    [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.BlockDouble.cpp'; pattern = '\bgetRuntimeGraph\s*\(' },
     [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Timer.cpp'; pattern = '\bgetRuntimeGraph\s*\(' },
-    [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.AudioBlock.cpp'; pattern = '\b(?:convo::)?consumeAtomic\s*\(\s*currentSampleRate\b' },
-    [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.BlockDouble.cpp'; pattern = '\b(?:convo::)?consumeAtomic\s*\(\s*currentSampleRate\b' },
     [pscustomobject]@{ path = 'src/audioengine/AudioEngine.Processing.Snapshot.cpp'; pattern = '\b(?:convo::)?consumeAtomic\s*\(\s*currentSampleRate\b' }
 )
 

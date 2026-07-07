@@ -476,10 +476,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     for (; i < samplesToRead; ++i)
                     {
                         int idx = iRead + i;
-                        double p0 = srcBuf[(idx - 1) & DELAY_BUFFER_MASK];
-                        double p1 = srcBuf[(idx    ) & DELAY_BUFFER_MASK];
-                        double p2 = srcBuf[(idx + 1) & DELAY_BUFFER_MASK];
-                        double p3 = srcBuf[(idx + 2) & DELAY_BUFFER_MASK];
+                        // Shift before mask to keep subtraction in non-negative range
+                        // (fully portable across C++11/14/17, not relying on two's complement
+                        // guarantee that is only mandatory from C++20 onward)
+                        double p0 = srcBuf[(idx - 1 + DELAY_BUFFER_SIZE) & DELAY_BUFFER_MASK];
+                        double p1 = srcBuf[(idx)                       & DELAY_BUFFER_MASK];
+                        double p2 = srcBuf[(idx + 1)                    & DELAY_BUFFER_MASK];
+                        double p3 = srcBuf[(idx + 2)                    & DELAY_BUFFER_MASK];
                         dst[i] = w0 * p0 + w1 * p1 + w2 * p2 + w3 * p3;
                     }
                 }

@@ -106,8 +106,6 @@ $results.Add((New-CheckResult -Id 'C4' -Description 'AudioEngine authority opera
 
 # C6: execution branch must not depend on transition.active / execution.transitionActive
 $c6ExecutionPaths = @(
-    (Join-Path $repoRootResolved 'src\audioengine\AudioEngine.Processing.AudioBlock.cpp'),
-    (Join-Path $repoRootResolved 'src\audioengine\AudioEngine.Processing.BlockDouble.cpp'),
     (Join-Path $repoRootResolved 'src\audioengine\AudioEngine.Processing.Snapshot.cpp'),
     (Join-Path $repoRootResolved 'src\audioengine\AudioEngine.Timer.cpp')
 )

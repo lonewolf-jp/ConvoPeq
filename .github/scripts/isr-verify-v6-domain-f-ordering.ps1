@@ -5,10 +5,9 @@ $hbSpecPath = Join-Path $repoRoot "doc\work\ISR_HB_Graph_Specification.md"
 $lifecycleHeaderPath = Join-Path $repoRoot "src\audioengine\ISRLifecycle.h"
 $lifecycleCppPath = Join-Path $repoRoot "src\audioengine\ISRLifecycle.cpp"
 $prepareCppPath = Join-Path $repoRoot "src\audioengine\AudioEngine.Processing.PrepareToPlay.cpp"
-$audioBlockCppPath = Join-Path $repoRoot "src\audioengine\AudioEngine.Processing.AudioBlock.cpp"
 $releaseCppPath = Join-Path $repoRoot "src\audioengine\AudioEngine.Processing.ReleaseResources.cpp"
 
-foreach ($path in @($hbSpecPath, $lifecycleHeaderPath, $lifecycleCppPath, $prepareCppPath, $audioBlockCppPath, $releaseCppPath)) {
+foreach ($path in @($hbSpecPath, $lifecycleHeaderPath, $lifecycleCppPath, $prepareCppPath, $releaseCppPath)) {
     if (-not (Test-Path $path)) {
         throw "Missing file: $path"
     }

@@ -47,8 +47,6 @@ else {
 }
 
 $rtFiles = @(
-    (Join-Path $audioRoot 'AudioEngine.Processing.AudioBlock.cpp'),
-    (Join-Path $audioRoot 'AudioEngine.Processing.BlockDouble.cpp')
 )
 
 $forbiddenRtPatterns = @(

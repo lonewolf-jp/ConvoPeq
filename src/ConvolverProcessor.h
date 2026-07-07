@@ -282,7 +282,8 @@ public:
     //------------------------------------------------------------------
     // NUC 出力周波数フィルターモード設定
     //
-    // フィルターは SetImpulse() 内で irFreqDomain に焼き込まれる。
+    // [Mem-Fix] フィルターは SetImpulse() 内で SoA (irFreqReal/irFreqImag) に直接適用される。
+    // AoS (irFreqDomain) は FFT出力→deinterleave の中継スクラッチのみ。
     // モード変更時は内部で rebuildAllIRs() を呼んで NUC を再構築する。
     // Message Thread からのみ呼ぶこと。
     //------------------------------------------------------------------

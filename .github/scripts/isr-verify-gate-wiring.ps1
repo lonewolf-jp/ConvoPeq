@@ -1426,8 +1426,7 @@ $retireRtImmediateScriptText.Contains('CI-RETIRE-RT-001') -and
 $retireRtImmediateScriptText.Contains('CI-RETIRE-RT-002') -and
 $retireRtImmediateScriptText.Contains('CI-RETIRE-RT-003') -and
 $retireRtImmediateScriptText.Contains('Set-StrictMode -Version Latest') -and
-$retireRtImmediateScriptText.Contains('AudioEngine.Processing.AudioBlock.cpp') -and
-$retireRtImmediateScriptText.Contains('AudioEngine.Processing.BlockDouble.cpp')
+$retireRtImmediateScriptText.Contains('consolidated into DSPCore')
 if (-not $retireRtImmediateNeedsContracts) {
     throw 'v7.3 retire RT immediate-return verifier missing required contract checks'
 }

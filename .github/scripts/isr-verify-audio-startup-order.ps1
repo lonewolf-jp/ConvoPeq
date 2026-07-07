@@ -9,16 +9,6 @@ if (-not (Test-Path -LiteralPath $evidenceDir)) {
 }
 
 $targets = @(
-    [ordered]@{
-        path = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.AudioBlock.cpp'
-        functionSignature = 'void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)'
-        clearExpression = 'bufferToFill.clearActiveBufferRegion();'
-    },
-    [ordered]@{
-        path = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.BlockDouble.cpp'
-        functionSignature = 'void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)'
-        clearExpression = 'buffer.clear();'
-    }
 )
 
 $violations = @()

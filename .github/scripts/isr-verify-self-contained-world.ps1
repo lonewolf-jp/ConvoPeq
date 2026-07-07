@@ -55,53 +55,17 @@ if (Test-Path -LiteralPath $audioEngineHeader) {
     }
 }
 
-$audioBlockCpp = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.AudioBlock.cpp'
-if (-not (Test-Path -LiteralPath $audioBlockCpp)) {
-    Add-Violation "AudioEngine.Processing.AudioBlock.cpp not found: $audioBlockCpp"
-}
-else {
-    $ab = Get-Content -LiteralPath $audioBlockCpp -Raw
-    if ($ab.Contains('processWithSnapshot(')) {
-        Add-Violation 'AudioBlock processing must not call processWithSnapshot (observe path collapse violation)'
-    }
-    if ($ab.Contains('captureAudioThreadParameterSnapshot(nullptr)')) {
-        Add-Violation 'AudioBlock processing must not call captureAudioThreadParameterSnapshot(nullptr) (world authority fallback prohibited)'
-    }
-    if ($ab.Contains('consumeCrossfadePreparedSnapshot()')) {
-        Add-Violation 'AudioBlock processing must not use consumeCrossfadePreparedSnapshot() as authority input'
-    }
-}
-
-$blockDoubleCpp = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.BlockDouble.cpp'
-if (-not (Test-Path -LiteralPath $blockDoubleCpp)) {
-    Add-Violation "AudioEngine.Processing.BlockDouble.cpp not found: $blockDoubleCpp"
-}
-else {
-    $bd = Get-Content -LiteralPath $blockDoubleCpp -Raw
-    if ($bd.Contains('processWithSnapshot(')) {
-        Add-Violation 'BlockDouble processing must not call processWithSnapshot (observe path collapse violation)'
-    }
-    if ($bd.Contains('updateAudioThreadSnapshotFade(')) {
-        Add-Violation 'BlockDouble processing must not call updateAudioThreadSnapshotFade after observe collapse'
-    }
-    if ($bd.Contains('captureAudioThreadParameterSnapshot(snapshotFrom)') -or $bd.Contains('captureAudioThreadParameterSnapshot(snapshotTo)')) {
-        Add-Violation 'BlockDouble processing must not read snapshotFrom/snapshotTo parameter snapshots'
-    }
-    if ($bd.Contains('captureAudioThreadParameterSnapshot(nullptr)')) {
-        Add-Violation 'BlockDouble processing must not call captureAudioThreadParameterSnapshot(nullptr) (world authority fallback prohibited)'
-    }
-    if ($bd.Contains('consumeCrossfadePreparedSnapshot()')) {
-        Add-Violation 'BlockDouble processing must not use consumeCrossfadePreparedSnapshot() as authority input'
-    }
-}
+$schemaHeader = Join-Path $repoRoot 'src\audioengine\ISRRuntimePublicationCoordinator.h'
+$coordHeader = Join-Path $repoRoot 'src\core\RuntimePublicationCoordinator.h'
+$audioEngineHeader = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
+$timerCpp = Join-Path $repoRoot 'src\audioengine\AudioEngine.Timer.cpp'
 
 $findings = @{
-    schemaHeaderFound = (Test-Path -LiteralPath $schemaHeader)
-    coordHeaderFound  = (Test-Path -LiteralPath $coordHeader)
-    audioEngineFound  = (Test-Path -LiteralPath $audioEngineHeader)
-    audioBlockFound   = (Test-Path -LiteralPath $audioBlockCpp)
-    blockDoubleFound  = (Test-Path -LiteralPath $blockDoubleCpp)
-    violationCount    = $violations.Count
+    schemaHeaderFound    = (Test-Path -LiteralPath $schemaHeader)
+    coordHeaderFound     = (Test-Path -LiteralPath $coordHeader)
+    audioEngineFound     = (Test-Path -LiteralPath $audioEngineHeader)
+    timerFound           = (Test-Path -LiteralPath $timerCpp)
+    violationCount       = $violations.Count
 }
 
 $report = [ordered]@{

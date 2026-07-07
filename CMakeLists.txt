@@ -569,6 +569,7 @@ target_include_directories(ConvoPeq SYSTEM PRIVATE
 )
 
 target_compile_definitions(ConvoPeq PRIVATE
+    CONVOPEQ_STANDALONE_ONLY=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1

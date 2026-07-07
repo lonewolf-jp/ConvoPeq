@@ -67,7 +67,8 @@ struct IppFFTPlan;
 //==============================================================================
 // FilterSpec  ─ SetImpulse() に渡す出力周波数フィルター仕様
 //
-// NUC は SetImpulse() 内で irFreqDomain に周波数ゲインを乗算して「焼き込む」。
+// NUC は SetImpulse() 内で SoA (irFreqReal/irFreqImag) に周波数ゲインを直接適用する。
+// AoS (irFreqDomain) は FFT出力→deinterleave の中継スクラッチのみ。
 // Audio Thread の追加コストはゼロ。モード変更時は SetImpulse() を再実行する
 // (rebuildAllIRs() トリガー)。
 //
@@ -138,7 +139,7 @@ public:
     // @param blockSize     Audio Thread の呼び出しブロックサイズ
     // @param scale         IRの振幅スケール (ヘッドルーム確保用, デフォルト=1.0)
     // @param filterSpec    出力周波数フィルター仕様。nullptr の場合フィルターなし。
-    //                      irFreqDomain に周波数ゲインを焼き込む (Audio Thread コストゼロ)。
+    //                      SoA (irFreqReal/irFreqImag) に周波数ゲインを直接適用する (Audio Thread コストゼロ)。
     // @return true=成功, false=パラメータ不正またはIPP初期化失敗
     //----------------------------------------------------------
     bool SetImpulse(const double* impulse, int irLen, int blockSize,
@@ -261,17 +262,16 @@ private:
         bool               descriptorCommitted = false; ///< IPP 初期化成功フラグ
 
         // ── IR 周波数領域 (Message Thread で確保・プリコンピュート) ──
-        // レイアウト: [numParts][partStride] (double 配列として管理)
-        // IPP CCS 形式: [re0,im0,re1,im1,...] は MKL DFTI_COMPLEX_COMPLEX と同一レイアウト。
-        // → 既存の AVX2 複素乗算コードは無変更で動作する。
-        double* irFreqDomain  = nullptr;  // mkl_malloc(numParts * partStride * sizeof(double), 64)
-        // split-complex 検証用 SoA ストレージ（実部/虚部分離）
+        // [Mem-Fix] irFreqDomain は 1 パーティション分の使い捨てスクラッチ（FFT出力→deinterleave中継のみ）。
+        // ★ 本番系の実データ本体 (Audio Thread が読む唯一の表現) は irFreqReal/irFreqImag (SoA) 側。
+        double* irFreqDomain  = nullptr;  // mkl_malloc(partStride * sizeof(double), 64) ← スクラッチ (旧: numParts*partStride)
         double* irFreqReal    = nullptr;  // mkl_malloc(numParts * complexSize * sizeof(double), 64)
         double* irFreqImag    = nullptr;  // mkl_malloc(numParts * complexSize * sizeof(double), 64)
 
         // ── 入力 FDL (Frequency Domain Delay Line, Audio Thread で更新) ──
-        // レイアウト: [numParts][partStride]
-        double* fdlBuf        = nullptr;  // mkl_malloc(...)
+        // [Mem-Fix] fdlBuf も current(offset0) + mirror(offset partStride) の 2 スロットのみのスクラッチ。
+        // 永続履歴は fdlReal/fdlImag (SoA) が保持する。
+        double* fdlBuf        = nullptr;  // mkl_malloc(2 * partStride * sizeof(double), 64) ← スクラッチ (旧: numParts*2*partStride)
         double* fdlReal       = nullptr;  // mkl_malloc((numParts*2) * complexSize * sizeof(double), 64)
         double* fdlImag       = nullptr;  // mkl_malloc((numParts*2) * complexSize * sizeof(double), 64)
 

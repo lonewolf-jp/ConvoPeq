@@ -2,8 +2,6 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $headerPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
-$audioBlockPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.AudioBlock.cpp'
-$blockDoublePath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.BlockDouble.cpp'
 $evidenceDir = Join-Path $repoRoot 'evidence'
 $reportPath = Join-Path $evidenceDir 'overlap_authority_report.json'
 
