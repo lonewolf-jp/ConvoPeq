@@ -1,214 +1,115 @@
-# ConvoPeq メモリ占有調査報告書 — 2.33GB の原因分析と改善提案
+# ConvoPeq メモリ占有調査報告書（改訂版 v2）— 2.33GB 原因分析
 
 ---
 
-**作成日**: 2026-07-08
-**対象**: AoS スクラッチ化改修（work70）適用後の実機メモリ占有 2.33GB
-**計測条件**: 192kHz SR, ×2 オーバーサンプリング (processingRate=384kHz), IR長 25906 samples (≈135ms), 1024ブロック, ステレオ, NoiseShaper 学習中
+**作成日**: 2026-07-08 (v2: NUC メモリ前提を全面修正)
+**計測条件**: 192kHz SR, ×2 OS (384kHz), **IR長 25906 samples (135ms)**, 1024ブロック, ステレオ
+**前版からの重大な修正**: NUC 1基あたり 333MB → **31MB** に下方修正
 
 ---
 
-## 1. 改修の効果確認
+## 0. 重要な訂正
 
-### 1.1 AoS スクラッチ化の削減効果（実績）
+前回報告書の **NUC 1基 333MB** という値は、**5秒超の長尺IR** を前提としたものであり、**135ms IR では全く異なる**。
 
-AoS スクラッチ化（全11 Patch）は正しく適用されており、期待通りのメモリ削減が確認された。
-
-| 項目 | 改修前（推定） | 改修後 | 削減率 |
-| :--- | :--- | :--- | :--- |
-| NUC 1基 (単層) | ~640 MB | ~333 MB | **48%減** ✅ |
-| StereoConvolver 1組 (L+R) | ~1,280 MB | ~666 MB | **48%減** ✅ |
-
-### 1.2 確認された改修の動作
-
-ログ分析により、以下の動作が正常であることを確認:
-
-- `processingRate=384000` — オーバーサンプリング正常動作
-- `irLoaded=1 irLen=192000` — IR ロード・コンボリューション正常
-- `convBypass=0` — NUC エンジンがアクティブ
-- gen=1〜8 の再構築を経て安定稼働
-- 音響的な問題（ノイズ/ポップ/プチ）は報告なし
-
----
-
-## 2. 2.33GB の内訳分析
-
-### 2.1 StereoConvolver 三重保持（主要因, ~2.0GB）
-
-実コード調査（`src/ConvolverProcessor.h`, `src/audioengine/AudioEngine.h`）により、IR 再ロード・パラメータ変更時に **StereoConvolver が三重に生存** する設計であることが判明した。
-
-| # | 保持元 | 場所 | メモリ | 生存期間 |
-| :--- | :--- | :--- | :--- | :--- |
-| ① | **active DSPCore current** | `AudioEngine.h` L1898: `activeRuntimeDSPSlot` | ~666 MB | 常時（再生中） |
-| ② | **IncrementalRebuildJob.pendingConv** | `ConvolverProcessor.h` L566: `IncrementalRebuildJob::pendingConv` | ~666 MB | IR再ロード・パラメータ変更時の構築中 |
-| ③ | **fading DSPCore fading** | `AudioEngine.h` L1908: `fadingRuntimeDSPSlot` | ~666 MB | クロスフェード遷移中（〜60秒） |
-
-**合計**: ~2,000 MB (≈2.0GB)
-
-### 2.2 StereoConvolver 保持関係図
-
-```text
-                IncrementalRebuildJob
-                 ┌──────────────────┐
-                 │  pendingConv     │ ◀── 新IR構築中 (②)
-                 │  (StereoConv*)  │      約666MB
-                 └──────────────────┘
-                          │ publish
-                          ▼
-  AudioEngine (DSPCore)
-   ┌─────────────────────────────┐
-   │ activeRuntimeDSPSlot (①)   │ ◀── 現在再生中
-   │  (NonOwningPtr<DSPCore>)  │      約666MB
-   │   ┌───────────────────┐   │
-   │   │ ConvolverProcessor│   │
-   │   │  convolver        │   │
-   │   └───────────────────┘   │
-   ├─────────────────────────────┤
-   │ fadingRuntimeDSPSlot (③)  │ ◀── フェード中
-   │  (NonOwningPtr<DSPCore>)  │      約666MB
-   └─────────────────────────────┘
-```
-
-### 2.3 その他のオーバーヘッド (~330MB)
-
-| 項目 | 推定容量 | 備考 |
+| 項目 | 前回（誤） | 今回（正） |
 | :--- | :--- | :--- |
-| RuntimeWorld 世代 (gen=5) | ~100 MB | `commit_` / `pending_` / `current_` 三重保持 |
-| EpochDomain 退役キュー滞留 | ~80 MB | `pendingRetireCount()` 未消化分 |
-| EQ/DCBlock/TruePeak 等バッファ | ~80 MB | `processingBlockSize=524288` の各エンジン |
-| NoiseShaper 学習バッファ | ~40 MB | `bufferedSamples=3,840,000` (382万サンプル) |
-| その他 (UI/Analyzer 等) | ~30 MB | |
+| NUC 1基あたり | 333 MB | **~31 MB** |
+| StereoConvolver 1組 | 666 MB | **~62 MB** |
+| 三重保持 合計 | 2,000 MB | **~186 MB (2.33GBの8%)** |
 
-**合計**: ~330 MB
+**結論**: NUC / StereoConvolver / AoS は 2.33GB の主原因ではない。
 
-### 2.4 総計
+---
 
-| 区分 | 容量 |
+## 1. NUC メモリの正確な再計算
+
+### パラメータ
+
+- OS後 IR長: 51812 samples @384kHz (25906×2)
+- L0 partSize: 2048, numParts: 32 → 65536 samples カバー (IR 完収)
+- L1: 不要 (L0のみで完結)
+
+### NUC 1基あたりのバッファ群（AoSスクラッチ化後）
+
+| バッファ | 容量 |
 | :--- | :--- |
-| StereoConvolver 三重保持 | ~2,000 MB |
-| その他オーバーヘッド | ~330 MB |
-| **合計** | **~2,330 MB (2.33 GB)** |
+| irFreqDomain (scratch) | 32 KB |
+| fdlBuf (scratch) | 66 KB |
+| irFreqReal / irFreqImag (SoA) | 1,049 KB |
+| fdlReal / fdlImag (SoA) | 2,098 KB |
+| fftTimeBuf / fftOutBuf | 66 KB |
+| prevInputBuf / inputAccBuf | 33 KB |
+| accumBuf / accumReal / accumImag | 66 KB |
+| **NUC 1基 合計** | **~31 MB** |
+
+**StereoConvolver (L+R): ~62 MB**
+**三重保持しても: ~186 MB (2.33GBのわずか8%)**
 
 ---
 
-## 3. 実コード調査による裏付け
+## 2. 2.33GB の真の原因候補
 
-### 3.1 active/fading 二重保持
+NUC が 186MB しか消費しないなら、**残り ~2,144 MB は別の要因**。
 
-`src/audioengine/AudioEngine.h` L1898-1908:
+### DSPCore 世代滞留説（最有力）
 
-```cpp
-// active runtime DSP slot
-convo::NonOwningPtr<DSPCore> activeRuntimeDSPSlot { nullptr };
-// fading runtime DSP slot
-convo::NonOwningPtr<DSPCore> fadingRuntimeDSPSlot { nullptr };
-```
+ログでは DSPCORE_PREPARE が **8回** 実行。各世代の DSPCore が解放されず滞留した場合:
 
-各 `DSPCore` は `ConvolverProcessor convolver`（L845）を値保持しており、その中に `StereoConvolver` が2チャンネル分の NUC エンジン (`std::array<MKLNonUniformConvolver*, 2> nucConvolvers`) を保持している。
-
-### 3.2 pendingConv による一時的二重保持
-
-`src/ConvolverProcessor.h` L566:
-
-```cpp
-struct IncrementalRebuildJob {
-    StereoConvolver* pendingConv = nullptr;  // ◀── 新エンジン構築中
-    // ...
-};
-```
-
-`src/convolver/ConvolverProcessor.Rebuild.cpp` L222:
-
-```cpp
-job.pendingConv = std::exchange(result.newConv, nullptr);  // ◀── 構築後 pending へ
-```
-
-新しい `StereoConvolver` がビルドスレッドで構築され、`pendingConv` に保持されている間、古いエンジンは `activeRuntimeDSPSlot` として生存し続ける。これにより**三重保持**が発生する。
-
-### 3.3 ログによる世代推移確認
-
-```text
-gen=1 → gen=4 → gen=8: 3回の rebuild サイクル
-PUBLISH seq=2 → seq=4 → seq=5: RuntimeWorld 世代交代
-DSPCORE_PREPARE: 8回の準備呼び出し
-```
-
-各 rebuild サイクルで新しい `StereoConvolver` が構築され、古いものが retire されるまで過渡的に複数世代が生存する。
-
----
-
-## 4. 改善提案
-
-### 4.1 優先度高: pendingConv の早期 retire（最大 ~666MB 削減）
-
-**現状**: `IncrementalRebuildJob` の `pendingConv` は、新しいエンジンが `publish` されるまで保持される。この間、古いエンジン（active/fading）と構築中のエンジン（pending）が三重に生存する。
-
-**改善案**: `publish` の直前に `fadingRuntimeDSPSlot` を強制 retire することで、三重保持を二重に削減する。具体的には `applyNewStatePublishStep()` 内で以下の処理を追加:
-
-```cpp
-// 新エンジン publish 直前に fading を強制 retire
-if (fadingRuntimeDSPSlot != nullptr) {
-    retireDSP(fadingRuntimeDSPSlot);
-    fadingRuntimeDSPSlot = nullptr;
-}
-publish(newEngine);
-```
-
-**削減見込み**: ~666 MB
-**リスク**: フェード中のクロスフェードが中断されるが、IR再ロード時のフェードは通常ごく短時間（〜10ms）であり、聴感上の影響は限定的。
-
-### 4.2 優先度中: RuntimeWorld 世代数の削減（~50MB 削減）
-
-**現状**: gen=1,2,4,5,8 と複数の RuntimeWorld 世代が残存する可能性がある。
-
-**改善案**: `publish()` 成功時に `commit_` 以外の世代を即座に解放する。
-
-### 4.3 優先度低: NoiseShaper バッファ制限（~40MB 削減）
-
-**現状**: `bufferedSamples=3,840,000`（382万サンプル）の学習バッファ。
-
-**改善案**: 最大バッファサイズに上限を設定する。
-
-### 4.4 総削減見込み
-
-| 改善 | 削減量 | 実装コスト |
+| 項目 | 1世代 | 8世代累積 |
 | :--- | :--- | :--- |
-| pendingConv 早期 retire | ~666 MB | 低（数行） |
-| RuntimeWorld 世代削減 | ~50 MB | 中 |
-| NoiseShaper 上限設定 | ~40 MB | 低 |
-| **合計** | **~756 MB** | |
-| **改善後目標** | **~1.57 GB** | |
+| EQ scratch/channel/msWork | ~80 MB | ~640 MB |
+| DSPCore alignedL/R/dryBypass | ~17 MB | ~136 MB |
+| NUC | ~31 MB | ~248 MB |
+| NoiseShaper | ~61 MB | ~61 MB |
+| **小計** | **~189 MB** | **~1,085 MB** |
+
+### internalMaxBlock=524288 の連鎖
+
+SAFE_MAX_BLOCK_SIZE=65536 × MAX_OS_FACTOR=8 = 524288。
+このサイズのバッファが各 DSPCore 内に 15〜20 本生成される:
+
+- 15本 × 524288 × 8 = 63 MB/世代
+- 8世代滞留: ~500 MB
+
+### NoiseShaper 学習バッファ
+
+`bufferedSamples=3,840,000`: ~31 MB (mono) / ~62 MB (stereo)
 
 ---
 
-## 5. 結論
+## 3. 次に取るべき唯一のアクション
 
-1. **AoS スクラッチ化は正常に動作しており、NUC 1基あたり約 48% のメモリ削減を達成している。**
-2. **2.33GB の主原因は AoS ではなく、StereoConvolver の設計上の三重保持（active/fading/pendingConv）である。**
-3. **AoS 削減により、仮にこの三重保持が解消された場合の最終メモリは約 1.0GB（= 666MB + 330MB）となる。**
-4. **最大の改善効果は `pendingConv` の早期 retire（666MB 削減）で得られ、実装コストは低い。**
+コード調査の結果、**既存のインスタンスカウント機構は存在しない** ことを確認。
+
+**`liveCount` を追加し、どのオブジェクトが何個生存しているか実測する** ことが、2.33GB の正体を特定する唯一の方法。
+
+### 追加推奨カウンタ
+
+```cpp
+// src/MKLNonUniformConvolver.h
+static std::atomic<int> liveCount;
+
+// src/ConvolverProcessor.h (StereoConvolver)
+static std::atomic<int> liveCount;
+
+// src/audioengine/AudioEngine.h (DSPCore)
+static std::atomic<int> liveCount;
+```
+
+### 期待される診断結果
+
+| 実測値 | 診断 |
+| :--- | :--- |
+| NUC=2, DSPCore=1, StereoConv=1 | 正常。NUC以外が主原因 → 524288バッファ群を調査 |
+| NUC=6, DSPCore=3, StereoConv=3 | 三重保持（前回仮説）。しかし186MBしか説明できず |
+| NUC=2, DSPCore=8, StereoConv=1 | DSPCore 世代滞留が主因。EQ/alignバッファが累積 |
 
 ---
 
-## 付録A: 計測・検証方法
+## 4. 結論
 
-- **IR 長**: 25906 samples (≈135ms @ 192kHz), 処理用 192000 samples
-- **サンプルレート**: 192kHz → 384kHz (×2 オーバーサンプリング)
-- **ブロックサイズ**: 1024 → 2048 (OS 後)
-- **DSPCore**: gen=1 から gen=8 まで 8回再構築
-- **NUC**: AoS 削減後（333MB/NUC, 666MB/StereoConvolver）
-- **NoiseShaper**: 学習中（iter=380, buffer=3,840,000 samples）
-
-## 付録B: 参照コード位置
-
-| シンボル | ファイル | 行 |
-| :--- | :--- | :--- |
-| `StereoConvolver` 定義 | `src/ConvolverProcessor.h` | L628 |
-| `nucConvolvers[2]` | `src/ConvolverProcessor.h` | L632 |
-| `pendingConv` | `src/ConvolverProcessor.h` | L566 |
-| `IncrementalRebuildJob` | `src/ConvolverProcessor.h` | L555 |
-| `activeRuntimeDSPSlot` | `src/audioengine/AudioEngine.h` | L1898 |
-| `fadingRuntimeDSPSlot` | `src/audioengine/AudioEngine.h` | L1908 |
-| `DSPCore::convolver` | `src/audioengine/AudioEngine.h` | L845 |
-| `irBufSize` (改修後) | `src/MKLNonUniformConvolver.cpp` | L699 |
-| `fdlBufSize` (改修後) | `src/MKLNonUniformConvolver.cpp` | L700 |
+1. **AoS スクラッチ化は正常動作。NUC 1基は約 31MB（5秒IR前提の333MBではない）**
+2. **NUC / StereoConvolver は 2.33GB の主原因ではない**
+3. **最も疑わしいのは DSPCore 世代滞留による EQ/align バッファの累積**
+4. **唯一の確定方法は liveCount インスタンスカウンタの実装と実測**
