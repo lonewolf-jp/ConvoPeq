@@ -1,0 +1,239 @@
+﻿{
+    "schema":  "workflow_dispatch_input_policy_report_v1",
+    "generatedAt":  "2026-07-06T17:42:02.9374056+09:00",
+    "workflowPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
+    "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-workflow-dispatch-input-policy.json",
+    "inputStatus":  [
+                        {
+                            "name":  "requireRuntimeEvidence",
+                            "expectedType":  "boolean",
+                            "actualType":  "boolean",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "false",
+                            "actualDefault":  "false",
+                            "expectedDescriptionKey":  "Require runtime-generated evidence",
+                            "actualDescription":  "Require runtime-generated evidence only (do not seed evidence)",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+                                                  "smoke",
+                                                  "standard",
+                                                  "exhaustive"
+                                              ]
+                        },
+                        {
+                            "name":  "verificationTier",
+                            "expectedType":  "choice",
+                            "actualType":  "choice",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "standard",
+                            "actualDefault":  "standard",
+                            "expectedDescriptionKey":  "Verification tier",
+                            "actualDescription":  "Verification tier (smoke/standard/exhaustive)",
+                            "expectedOptions":  [
+                                                    "smoke",
+                                                    "standard",
+                                                    "exhaustive"
+                                                ],
+                            "actualOptions":  [
+                                                  "smoke",
+                                                  "standard",
+                                                  "exhaustive"
+                                              ]
+                        },
+                        {
+                            "name":  "declaredPrClass",
+                            "expectedType":  "choice",
+                            "actualType":  "choice",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "Class-A",
+                            "actualDefault":  "Class-A",
+                            "expectedDescriptionKey":  "Declared PR class",
+                            "actualDescription":  "Declared PR class (Class-S/Class-A/Class-B/Class-C/Class-D)",
+                            "expectedOptions":  [
+                                                    "Class-S",
+                                                    "Class-A",
+                                                    "Class-B",
+                                                    "Class-C",
+                                                    "Class-D"
+                                                ],
+                            "actualOptions":  [
+                                                  "Class-S",
+                                                  "Class-A",
+                                                  "Class-B",
+                                                  "Class-C",
+                                                  "Class-D"
+                                              ]
+                        },
+                        {
+                            "name":  "prOpenedAt",
+                            "expectedType":  "string",
+                            "actualType":  "string",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "",
+                            "actualDefault":  "",
+                            "expectedDescriptionKey":  "Optional PR opened-at timestamp",
+                            "actualDescription":  "Optional PR opened-at timestamp (ISO 8601) for PR SLA evaluation",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+
+                                              ]
+                        },
+                        {
+                            "name":  "soakMinutes",
+                            "expectedType":  "string",
+                            "actualType":  "string",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "0",
+                            "actualDefault":  "0",
+                            "expectedDescriptionKey":  "Optional soak duration",
+                            "actualDescription":  "Optional soak duration in minutes for PR SLA required note evaluation",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+
+                                              ]
+                        },
+                        {
+                            "name":  "enforceTriggerPolicy",
+                            "expectedType":  "boolean",
+                            "actualType":  "boolean",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "false",
+                            "actualDefault":  "false",
+                            "expectedDescriptionKey":  "Enforce trigger policy targets",
+                            "actualDescription":  "Enforce trigger policy targets (fails if trigger metrics exceed targetMax)",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+
+                                              ]
+                        },
+                        {
+                            "name":  "requireAstTriggerCheck",
+                            "expectedType":  "boolean",
+                            "actualType":  "boolean",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "false",
+                            "actualDefault":  "false",
+                            "expectedDescriptionKey":  "Require AST trigger checks",
+                            "actualDescription":  "Require AST trigger checks (fails if ast-grep is unavailable or scan errors)",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+
+                                              ]
+                        },
+                        {
+                            "name":  "requireClangTidyAudit",
+                            "expectedType":  "boolean",
+                            "actualType":  "boolean",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "false",
+                            "actualDefault":  "false",
+                            "expectedDescriptionKey":  "Require clang-tidy audit gate",
+                            "actualDescription":  "Require clang-tidy audit gate (fails if clang-tidy/compile_commands are unavailable)",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+
+                                              ]
+                        },
+                        {
+                            "name":  "autoPruneCleanupDeferred",
+                            "expectedType":  "boolean",
+                            "actualType":  "boolean",
+                            "expectedRequired":  "false",
+                            "actualRequired":  "false",
+                            "expectedDefault":  "false",
+                            "actualDefault":  "false",
+                            "expectedDescriptionKey":  "Auto-prune ready deferred cleanup entries",
+                            "actualDescription":  "Auto-prune ready deferred cleanup entries during verification",
+                            "expectedOptions":  [
+                                                    null
+                                                ],
+                            "actualOptions":  [
+
+                                              ]
+                        }
+                    ],
+    "forwardingStatus":  [
+                             {
+                                 "inputName":  "requireRuntimeEvidence",
+                                 "forwardingKind":  "switch",
+                                 "runnerSwitch":  "-RequireRuntimeEvidence",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "enforceTriggerPolicy",
+                                 "forwardingKind":  "switch",
+                                 "runnerSwitch":  "-EnforceTriggerPolicy",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "requireAstTriggerCheck",
+                                 "forwardingKind":  "switch",
+                                 "runnerSwitch":  "-RequireAstTriggerCheck",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "requireClangTidyAudit",
+                                 "forwardingKind":  "switch",
+                                 "runnerSwitch":  "-RequireClangTidyAudit",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "autoPruneCleanupDeferred",
+                                 "forwardingKind":  "switch",
+                                 "runnerSwitch":  "-AutoPruneCleanupDeferred",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "declaredPrClass",
+                                 "forwardingKind":  "argument",
+                                 "runnerSwitch":  "-DeclaredClass",
+                                 "valueMode":  "rawNonEmpty",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "prOpenedAt",
+                                 "forwardingKind":  "argument",
+                                 "runnerSwitch":  "-PrOpenedAt",
+                                 "valueMode":  "rawNonEmpty",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             },
+                             {
+                                 "inputName":  "soakMinutes",
+                                 "forwardingKind":  "argument",
+                                 "runnerSwitch":  "-SoakMinutes",
+                                 "valueMode":  "nonNegativeInt",
+                                 "inputReferenced":  true,
+                                 "switchForwarded":  true
+                             }
+                         ],
+    "violations":  [
+
+                   ]
+}

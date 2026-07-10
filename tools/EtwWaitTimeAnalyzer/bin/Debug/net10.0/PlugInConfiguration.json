@@ -1,0 +1,15 @@
+{
+  "Options": [
+    {
+      "Applications": [],
+      "Description": "Only queried PerfCore add-ins are loaded.",
+      "Name": "SkipAutoLoad",
+      "Runtimes": [
+        "Microsoft.Windows.EventTracing",
+        "Microsoft.Performance.Toolkit.Engine"
+      ]
+    }
+  ],
+    "PlugInName": "PerfCore",
+    "Version": "1.0.0"
+}

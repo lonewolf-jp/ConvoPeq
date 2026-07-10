@@ -1,0 +1,9 @@
+﻿{
+    "schema":  "retire_escalation_safety_report_v1",
+    "generatedAt":  "2026-07-06T17:42:02.7783980+09:00",
+    "sourcePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

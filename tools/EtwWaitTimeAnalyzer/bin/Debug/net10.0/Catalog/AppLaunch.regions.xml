@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="utf-8"?>
+<InstrumentationManifest xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Instrumentation>
+    <Regions>
+      <RegionRoot Guid="{209b787e-7b9d-4feb-a57a-2addc4452863}" Name="[Root]" FriendlyName="[Root]">
+        <Region Guid="{7632e6fb-e1b2-4ff5-9558-eeefd0769ada}" Name="WinStoreApps" FriendlyName="WinStoreApps">
+          <Region Guid="{6b7daa79-04c6-4c23-b178-3561ed083409}" Name="WinStoreAppSplashScreenDuration" FriendlyName="AppLaunchSplashScreen">
+            <Start>
+              <Event  Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="6260" Version="0"/>
+            </Start>
+            <Stop>
+              <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="6261" Version="0"/>
+              <PayloadIdentifier FieldName="ContractId" FieldValue="Windows.Launch"/>
+            </Stop>
+            <Naming>
+              <PayloadBased NameField="AppId" InstanceEndpoint="Start"/>
+            </Naming>
+            <Match>
+              <Event PID="true">
+                <Payload FieldName="AppId"/>
+              </Event>
+            </Match>
+            <Region Guid="{b0a0bcbe-b281-438f-a19f-f96fbf15a05c}" Name="WinStoreAppActivationDurationWin8.0" FriendlyName="AppActivate">
+              <Start>
+                <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="5901" Version="0"/>
+                <PayloadIdentifier FieldName="ContractID" FieldValue="Windows.Launch"/>
+              </Start>
+              <Stop>
+                <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="5902" Version="0"/>
+                <PayloadIdentifier FieldName="ContractID" FieldValue="Windows.Launch"/>
+              </Stop>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="AppID"/>
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="AppID" InstanceEndpoint="Start"/>
+              </Naming>
+            </Region>
+            <Region Guid="{4f8f7484-49be-48a8-8194-fdd89fb1def6}" Name="WinStoreAppActivationDurationWin8.1_v1" FriendlyName="AppActivate">
+              <Start>
+                <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="5901" Version="1"/>
+                <PayloadIdentifier FieldName="SqmableContractID" FieldValue="Windows.Launch"/>
+              </Start>
+              <Stop>
+                <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="5902" Version="1"/>
+                <PayloadIdentifier FieldName="SqmableContractID" FieldValue="Windows.Launch"/>
+              </Stop>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="AppID"/>
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="AppID" InstanceEndpoint="Start"/>
+              </Naming>
+              <Region Guid="{BF017C60-CA11-489F-81C8-90055A4289AE}" Name="WinStoreAppActivation-AppHost" FriendlyName="AppHost">
+                <Region Guid="{BF017C60-CA11-489F-81C8-90055A4289B0}" Name="WinStoreAppActivation-AppHost-Host.Setup" FriendlyName="Host.Setup">
+                  <Start>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1009" Version="0" />
+                  </Start>
+                  <Stop>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1010" Version="0" />
+                  </Stop>
+                  <Match>
+                    <Event TID="true" />
+                  </Match>
+                </Region>
+
+                <Region Guid="{BF017C60-CA11-489F-81C8-90055A4289B1}" Name="WinStoreAppActivation-AppHost-Host.HostModulesInitialization" FriendlyName="Host.HostModulesInitialization">
+                  <Start>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1051" Version="0" />
+                  </Start>
+                  <Stop>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1052" Version="0" />
+                  </Stop>
+                  <Match>
+                    <Event TID="true" />
+                  </Match>
+                </Region>
+              </Region>
+
+              <Region Guid="{BF017C60-CA11-489F-81C9-90055A4289AE}" Name="WinStoreAppActivation-CoreApplicationActivation" FriendlyName="CoreApplicationActivation">
+                <Start>
+                  <Event Provider="{5f0e257f-c224-43e5-9555-2adcb8540a58}" Id="2000" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{5f0e257f-c224-43e5-9555-2adcb8540a58}" Id="2001" Version="0" />
+                </Stop>
+                <Match>
+                  <Event TID="true" />
+                </Match>
+                <Region Guid="{BF017C60-CA11-489F-81C8-90055A4289B2}" Name="WinStoreAppActivation-AppHost-WebInstance.Setup" FriendlyName="WebInstance.Setup">
+                  <Start>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1027" Version="0" />
+                  </Start>
+                  <Stop>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1028" Version="0" />
+                  </Stop>
+                  <Match>
+                    <Event TID="true" />
+                    <Parent PID ="true"/>
+                  </Match>
+                </Region>
+
+                <Region Guid="{BF017C60-CA11-489F-81C8-90055A4289B3}" Name="WinStoreAppActivation-AppHost-WebInstance.Dispatch" FriendlyName="WebInstance.Dispatch">
+                  <Start>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1057" Version="0" />
+                  </Start>
+                  <Stop>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1058" Version="0" />
+                  </Stop>
+                  <Match>
+                    <Event TID="true" />
+                    <Parent PID ="true"/>
+                  </Match>
+                </Region>
+                
+                <Region Guid="{BF017C60-CA11-489F-81C8-90055A4289B4}" Name="WinStoreAppActivation-AppHost-Navigation" FriendlyName="Navigation">
+                  <Start>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1011" Version="0" />
+                  </Start>
+                  <Stop>
+                    <Event Provider="{98e0765d-8c42-44a3-a57b-760d7f93225a}" Id="1012" Version="0" />
+                  </Stop>
+                  <Match>
+                    <Event PID="true">
+                      <Payload FieldName="ObjectWWA"/>
+                    </Event>
+                    <Parent PID ="true"/>
+                  </Match>
+                </Region>
+              </Region>
+            </Region>
+          </Region>
+          <Region Guid="{1e4f456f-dfb1-4eac-ba90-458797b37fd8}" Name="WinStoreAppResumePLMWin8.0" FriendlyName="AppResume">
+            <Start>
+              <Event  Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2463" Version="0"/>
+            </Start>
+            <Stop>
+              <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2464" Version="0"/>
+            </Stop>
+            <Match>
+              <Event PID="true">
+                <Payload FieldName="PackageFullName"/>
+              </Event>
+            </Match>
+            <Naming>
+              <PayloadBased NameField="ApplicationId" InstanceEndpoint="Stop"/>
+            </Naming>
+          </Region>
+          <Region Guid="{6018ef7e-5d24-4bb3-ae93-f03f2ecd83a5}" Name="WinStoreAppResumePLMWin8.1_v1" FriendlyName="AppResume">
+            <Start>
+              <Event  Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2463" Version="1"/>
+            </Start>
+            <Stop>
+              <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2464" Version="1"/>
+            </Stop>
+            <Match>
+              <Event PID="true">
+                <Payload FieldName="PsmKey"/>
+              </Event>
+            </Match>
+            <Naming>
+              <PayloadBased NameField="AppUserModelId" InstanceEndpoint="Stop"/>
+            </Naming>
+          </Region>
+          <Region Guid="{2229d374-a446-411a-a0b9-4ec96b8c38e8}" Name="WinStoreCoreAppResumeHandlers" FriendlyName="AppResumeHandlers">
+            <Start>
+              <Event Provider="{5f0e257f-c224-43e5-9555-2adcb8540a58}" Id="2018" Version="0"/>
+            </Start>
+            <Stop>
+              <Event Provider="{5f0e257f-c224-43e5-9555-2adcb8540a58}" Id="2019" Version="0"/>
+            </Stop>
+            <Match>
+              <Event TID="true"/>
+            </Match>
+          </Region>
+          <Region Guid="{222b5204-385d-4d45-a6b6-f8c865d85929}" Name="WinStoreAppSuspendDurationWin8.0" FriendlyName="AppSuspend">
+            <Start>
+              <Event  Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2450" Version="0"/>
+            </Start>
+            <Stop>
+              <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2451" Version="0"/>
+            </Stop>
+            <Match>
+              <Event PID="true">
+                <Payload FieldName="PackageFullName"/>
+              </Event>
+            </Match>
+            <Naming>
+              <PayloadBased NameField="PackageFullName" InstanceEndpoint="Stop"/>
+            </Naming>
+          </Region>
+          <Region Guid="{ae6b6b4d-8d9e-46a6-928d-36ceabd38db8}" Name="WinStoreAppSuspendDurationWin8.1_v1" FriendlyName="AppSuspend">
+            <Start>
+              <Event  Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2450" Version="1"/>
+            </Start>
+            <Stop>
+              <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2451" Version="1"/>
+            </Stop>
+            <Match>
+              <Event PID="true">
+                <Payload FieldName="PsmKey"/>
+              </Event>
+            </Match>
+            <Naming>
+              <PayloadBased NameField="AppUserModelId" InstanceEndpoint="Stop"/>
+            </Naming>
+          </Region>
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>
+

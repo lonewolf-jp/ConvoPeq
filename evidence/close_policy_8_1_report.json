@@ -1,0 +1,40 @@
+{
+  "schema": "close_policy_8_1_report_v1",
+  "generatedAt": "2026-07-09T20:24:38.4797488+09:00",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-8_1-close-policy.json",
+  "policy": {
+    "schema": "isr_8_1_close_policy_v1",
+    "owner": "runtime-governance",
+    "issue": "BRIDGE-8_1-CLOSE-POLICY",
+    "rationale": "8.1 close evidence collection and enforcement parameters must be policy-driven and fail-closed.",
+    "expiry": "2026-12-31",
+    "expiryDaysRemaining": 175,
+    "expiryValid": true,
+    "expired": false,
+    "expiryGuardDaysByTier": {
+      "standard": 14,
+      "exhaustive": 30
+    },
+    "activeTier": "exhaustive",
+    "activeTierGuardDays": 14,
+    "collector": {
+      "minWindowSec": 1,
+      "maxWindowSec": 120,
+      "minAutoCaptureTimeoutSec": 1,
+      "maxAutoCaptureTimeoutSec": 120,
+      "minProbeExitMs": 100,
+      "maxProbeExitMs": 30000,
+      "minRetryMax": 1,
+      "maxRetryMax": 5,
+      "allowedCollectTiers": [
+        "standard",
+        "exhaustive"
+      ],
+      "allowedEnforceTiers": [
+        "standard",
+        "exhaustive"
+      ]
+    }
+  },
+  "violations": []
+}

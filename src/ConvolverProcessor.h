@@ -138,6 +138,11 @@ public:
     void setResamplingPhaseMode(ResamplingPhaseMode mode);
     [[nodiscard]] ResamplingPhaseMode getResamplingPhaseMode() const;
 
+    // ★ work70 P1-c: liveCount 公開アクセサ（StereoConvolver が private nested type のため）
+    [[nodiscard]] static uint32_t getStereoLiveCount() noexcept {
+        return StereoConvolver::liveCount.load(std::memory_order_relaxed);
+    }
+
     class Listener
     {
     public:
@@ -627,6 +632,10 @@ private:
     // Stereo processing wrapper
     struct StereoConvolver
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        static std::atomic<uint32_t> liveCount;
+#endif
+
         double* irData[2] = { nullptr, nullptr };
 
         std::array<convo::MKLNonUniformConvolver*, 2> nucConvolvers { nullptr, nullptr };
@@ -642,7 +651,12 @@ private:
         double storedScale = 1.0;
         bool storedDirectHeadEnabled = false;
 
-        StereoConvolver() = default;
+        StereoConvolver()
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            liveCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+        }
 
         static void destroyNUCConvolver(convo::MKLNonUniformConvolver*& ptr) noexcept
         {
@@ -675,6 +689,11 @@ private:
 
         // デストラクタは空（実際の解放は retire 経由）
         ~StereoConvolver() {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            const uint32_t oldLive = liveCount.fetch_sub(1, std::memory_order_relaxed);
+            (void)oldLive;
+            jassert(oldLive > 0);
+#endif
             // 直接 delete は禁止だが、retire 経由の正規破棄ではデストラクタ自体は呼ばれる。
             // ここでは「未解放リソースを抱えたまま破棄されていないか」のみを検証する。
             #if JUCE_DEBUG

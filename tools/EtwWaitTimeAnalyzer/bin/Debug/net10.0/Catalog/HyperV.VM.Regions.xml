@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?Copyright (c) Microsoft Corporation. All rights reserved.?>
+<InstrumentationManifest xmlns:xsd="http://www.w3.org/2001/XMLSchema" 
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Instrumentation>
+        <Regions>
+            <RegionRoot Name="Hyper-V-VM" Guid="{A2EB8218-3E71-4C8F-9A78-C10CB1891BD9}" FriendlyName="Hyper-V VM">
+                <Region Name="Hyper-V-VM-Create" Guid="{23843EC5-BE6E-47EE-AE68-88AE13013884}" FriendlyName="Hyper-V VM Create">
+                    <Start>
+                        <!-- Microsoft-Windows-Hyper-V-VMMS -->
+                        <Event Provider="{6066f867-7ca1-4418-85fd-36e3f9c0600c}" Id="12160" Version="0" />
+                    </Start>
+                    <Stop>
+                        <!-- Microsoft-Windows-Hyper-V-VMMS -->
+                        <Event Provider="{6066f867-7ca1-4418-85fd-36e3f9c0600c}" Id="13002" Version="0" />
+                    </Stop>
+                    <Match>
+                        <Event>
+                            <Payload FieldName="VmId"/>
+                        </Event>
+                    </Match>
+                </Region>
+                <Region Name="Hyper-V-VM-Start" Guid="{B7C7D18E-542B-4C89-BE83-0F0741699D2F}" FriendlyName="Hyper-V VM Start">
+                    <Start>
+                        <!-- Microsoft-Windows-Hyper-V-Compute -->
+                        <Event Provider="{17103e3f-3c6e-4677-bb17-3b267eb5be57}" Id="2014" Version="0" />
+                    </Start>
+                    <Stop>
+                        <!-- Microsoft-Windows-Hyper-V-Worker -->
+                        <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Id="18500" Version="0" />
+                    </Stop>
+                    <Match>
+                        <Event>
+                            <Payload FieldName="SystemId" TargetFieldName="VmId" />
+                        </Event>
+                    </Match>
+                    <Region Name="VmInitialize" Guid="{7DC71145-BE58-4F54-9203-48F504411391}" FriendlyName="VmInitialize">
+                        <Start>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="&quot;VmInitialize&quot;" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VmInitialize" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                    </Region>
+                    <!-- Duplicated to the one above for compatibility. -->
+                    <Region Name="VmInitialize" Guid="{7DC71145-BE58-4F54-9203-48F504411392}" FriendlyName="VmInitialize">
+                        <Start>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmInitialize" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmInitialize" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                        </Match>
+                    </Region>
+                    <Region Name="ConstructGuestRam" Guid="{A7EE7A56-8EF8-4A8C-8E49-70307B524BC6}" FriendlyName="ConstructGuestRam">
+                        <Start>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="&quot;ConstructGuestRam&quot;" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="ConstructGuestRam" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                    </Region>
+                    <!-- Duplicated to the one above for compatibility. -->
+                    <Region Name="ConstructGuestRam" Guid="{A7EE7A56-8EF8-4A8C-8E49-70307B524BC7}" FriendlyName="ConstructGuestRam">
+                        <Start>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="ConstructGuestRam" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="ConstructGuestRam" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                        </Match>
+                    </Region>
+                    <Region Name="VmbPowerOn" Guid="{67B8A180-F5FD-4903-BC46-AAF93AC7D13E}" FriendlyName="VmbPowerOn">
+                        <Start>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="&quot;VmbPowerOn&quot;" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VmbPowerOn" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                    </Region>
+                    <!-- Duplicated to the one above for compatibility. -->
+                    <Region Name="VmbPowerOn" Guid="{67B8A180-F5FD-4903-BC46-AAF93AC7D13F}" FriendlyName="VmbPowerOn">
+                        <Start>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmbPowerOn" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmbPowerOn" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                        </Match>
+                    </Region>
+                    <Region Name="VmbResume" Guid="{64147A9D-EF23-417B-A83C-4ED73089F055}" FriendlyName="VmbResume">
+                        <Start>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="&quot;VmbResume&quot;" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VmbResume" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                    </Region>
+                    <!-- Duplicated to the one above for compatibility. -->
+                    <Region Name="VmbResume" Guid="{64147A9D-EF23-417B-A83C-4ED73089F056}" FriendlyName="VmbResume">
+                        <Start>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmbResume" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmbResume" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                        </Match>
+                    </Region>
+                    <Region Name="VmbOperation" Guid="{260CA994-4DC4-45A8-ADA1-252B61466D6C}" FriendlyName="VmbOperation">
+                        <Start>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VmbOperation" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VmbOperation" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                        <Naming>
+                            <PayloadBased NameField="Operation" />
+                        </Naming>
+                    </Region>
+                    <!-- Duplicated to the one above for compatibility. -->
+                    <Region Name="VmbOperation" Guid="{260CA994-4DC4-45A8-ADA1-252B61466D6D}" FriendlyName="VmbOperation">
+                        <Start>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmbOperation" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VmbOperation" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                        <Naming>
+                            <PayloadBased NameField="Operation" />
+                        </Naming>
+                    </Region>
+                    <Region Name="VdevOperation" Guid="{E883E646-5D6D-46B2-BF4C-3FA66006A375}" FriendlyName="VdevOperation">
+                        <Start>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VdevOperation" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft-Windows-Hyper-V-Worker -->
+                            <Event Provider="{51ddfa29-d5c8-4803-be4b-2ecb715570fe}" Name="VdevOperation" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                            <Parent>
+                                <Payload FieldName="VmId" TargetFieldName="VmId" />
+                            </Parent>
+                        </Match>
+                        <Naming>
+                            <PayloadBased NameField="DeviceName" />
+                        </Naming>
+                    </Region>
+                    <!-- Duplicated to the one above for compatibility. -->
+                    <Region Name="VdevOperation" Guid="{E883E646-5D6D-46B2-BF4C-3FA66006A376}" FriendlyName="VdevOperation">
+                        <Start>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VdevOperation" Opcode="1"/>
+                        </Start>
+                        <Stop>
+                            <!-- Microsoft.Windows.HyperV.Worker -->
+                            <Event Provider="{06c601b3-6957-4f8c-a15f-74875b24429d}" Name="VdevOperation" Opcode="2"/>
+                        </Stop>
+                        <Match>
+                            <Event AID="true"/>
+                        </Match>
+                        <Naming>
+                            <PayloadBased NameField="DeviceName" />
+                        </Naming>
+                    </Region>
+                </Region>
+            </RegionRoot>
+        </Regions>
+    </Instrumentation>
+</InstrumentationManifest>

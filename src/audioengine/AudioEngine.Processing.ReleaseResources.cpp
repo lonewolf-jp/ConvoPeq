@@ -152,7 +152,9 @@ void AudioEngine::releaseResources()
                                                                      convo::TransitionPolicy::HardReset,
                                                                      0.0,
                                                                      false);
-            coordinator.publishWorld(std::move(worldOwner));
+            const auto pubResult = commitRuntimePublication(coordinator, std::move(worldOwner),
+                                     RegistrationContext::none());
+            juce::ignoreUnused(pubResult);
         }
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",

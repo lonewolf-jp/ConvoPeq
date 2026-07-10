@@ -47,10 +47,8 @@ vendor/
 .venv-codegraph/
 steering/
 storage/
-tools/
 .github/tmp/
 .vs/
-evidence/
 JUCE/
 !JUCE/extras/
 !JUCE/extras/Build/

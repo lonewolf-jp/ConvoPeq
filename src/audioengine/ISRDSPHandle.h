@@ -135,6 +135,10 @@ public:
     // NonRT: 問題検出時に DSP を Quarantined に遷移
     void quarantine(DSPHandle handle);
 
+    // ★ work70: 登録のロールバック（Constructing → Reclaimed）
+    //   Only Constructing may be rolled back. Future intermediate states require redesign.
+    [[nodiscard]] bool rollbackRegistration(DSPHandle handle) noexcept;
+
     // ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
     void quarantineSlot(uint32_t slot) noexcept;
 

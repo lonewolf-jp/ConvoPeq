@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "dgSpecHash": "+/HT97mo5gY=",
+  "success": true,
+  "projectFilePath": "C:\\VSC_Project\\ConvoPeq\\tools\\EtwWaitTimeAnalyzer\\EtwWaitTimeAnalyzer.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\user\\.nuget\\packages\\azure.core\\1.44.1\\azure.core.1.44.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\azure.identity\\1.13.1\\azure.identity.1.13.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.bcl.asyncinterfaces\\6.0.0\\microsoft.bcl.asyncinterfaces.6.0.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identity.client\\4.66.1\\microsoft.identity.client.4.66.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identity.client.extensions.msal\\4.66.1\\microsoft.identity.client.extensions.msal.4.66.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identitymodel.abstractions\\6.35.0\\microsoft.identitymodel.abstractions.6.35.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.performance.sdk\\1.4.7-preview2\\microsoft.performance.sdk.1.4.7-preview2.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.performance.sdk.runtime\\1.4.7-preview2\\microsoft.performance.sdk.runtime.1.4.7-preview2.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.performance.toolkit.engine\\1.4.7-preview2\\microsoft.performance.toolkit.engine.1.4.7-preview2.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.core4.interop\\20.0.150\\microsoft.windows.core4.interop.20.0.150.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.eventtracing\\2.0.711-preview\\microsoft.windows.eventtracing.2.0.711-preview.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.eventtracing.core\\2.0.711-preview\\microsoft.windows.eventtracing.core.2.0.711-preview.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.bridge\\19.0.52\\microsoft.windows.xperfplugin.bridge.19.0.52.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.catalog\\20.0.150\\microsoft.windows.xperfplugin.catalog.20.0.150.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.core\\20.0.150\\microsoft.windows.xperfplugin.core.20.0.150.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.eventtracing.v2\\20.0.150\\microsoft.windows.xperfplugin.eventtracing.v2.20.0.150.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.native\\1.1.955\\microsoft.windows.xperfplugin.native.1.1.955.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.processing\\20.0.150\\microsoft.windows.xperfplugin.processing.20.0.150.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.windows.xperfplugin.symcredentialprovider\\1.0.47\\microsoft.windows.xperfplugin.symcredentialprovider.1.0.47.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\nuget.versioning\\5.11.5\\nuget.versioning.5.11.5.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\simpleinjector\\5.4.1\\simpleinjector.5.4.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\system.clientmodel\\1.1.0\\system.clientmodel.1.1.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\system.memory.data\\6.0.0\\system.memory.data.6.0.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\system.security.cryptography.protecteddata\\4.5.0\\system.security.cryptography.protecteddata.4.5.0.nupkg.sha512"
+  ],
+  "logs": []
+}

@@ -1,0 +1,115 @@
+﻿{
+    "schema":  "c1_c15_minimal_report_v1",
+    "generatedAt":  "2026-07-06T17:42:02.6675730+09:00",
+    "source":  ".github/scripts/isr-verify-c1-c15-minimal.ps1",
+    "passCount":  15,
+    "failCount":  0,
+    "manualCount":  0,
+    "checks":  [
+                   {
+                       "id":  "C1",
+                       "description":  "publishState removed after ISR Bridge migration",
+                       "status":  "pass",
+                       "evidence":  "publishStateAll=0 publishStateDecl=0 callsites=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C14",
+                       "description":  "publishState() removed after ISR Bridge migration (PRT)",
+                       "status":  "pass",
+                       "evidence":  "publishStateAll=0 publishStateDecl=0 callsites=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C2",
+                       "description":  "commitRuntimePublication removed/non-used",
+                       "status":  "pass",
+                       "evidence":  "count=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C3",
+                       "description":  "retireRuntimePublication removed/non-used",
+                       "status":  "pass",
+                       "evidence":  "count=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C4",
+                       "description":  "AudioEngine authority operations removed from legacy path",
+                       "status":  "pass",
+                       "evidence":  "legacyPrepareCommit=0 legacyExecuteCommit=0 legacyCommitNewDSP=0 bridgeCommit=1 bridgeRetire=1 forbiddenAudioEngineOps=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C6",
+                       "description":  "Execution branch does not depend on transition.active aliases",
+                       "status":  "pass",
+                       "evidence":  "tokenCount=0 files=4",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C7",
+                       "description":  "Generation authority = 1 (minimal heuristic)",
+                       "status":  "pass",
+                       "evidence":  "generationAuthoritative=True generationSemanticDerived=True mappedRuntimeGenerationDerived=True",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C5",
+                       "description":  "RuntimeState self-contained execution metadata present",
+                       "status":  "pass",
+                       "evidence":  "runtimeState=True executionSemantic=True publicationSemantic=True retireSemantic=True descriptorValidation=True",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C8",
+                       "description":  "Retire authority = 1 and AudioEngine fallback queue symbols = 0",
+                       "status":  "pass",
+                       "evidence":  "isr-verify-v5-retire-authority-lane.ps1=PASS audioEngineFallbackQueueCount=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C9",
+                       "description":  "Snapshot authority = 0",
+                       "status":  "pass",
+                       "evidence":  "snapshotInventoryAuthoritativeCount=0 snapshotDescriptorAuthorityCount=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C10",
+                       "description":  "Runtime authority = RuntimeState only (inventory confinement)",
+                       "status":  "pass",
+                       "evidence":  "authoritativeDeclFiles=1 files=C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C11",
+                       "description":  "SafeStateSwapper = 0 (PRT)",
+                       "status":  "pass",
+                       "evidence":  "count=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C12",
+                       "description":  "PendingParams = 0 (PRT)",
+                       "status":  "pass",
+                       "evidence":  "count=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C13",
+                       "description":  "PreparedIRState = 0 (PRT)",
+                       "status":  "pass",
+                       "evidence":  "count=0",
+                       "note":  ""
+                   },
+                   {
+                       "id":  "C15",
+                       "description":  "EQ fallback queue concrete symbols = 0 (PRT)",
+                       "status":  "pass",
+                       "evidence":  "count=0",
+                       "note":  ""
+                   }
+               ]
+}

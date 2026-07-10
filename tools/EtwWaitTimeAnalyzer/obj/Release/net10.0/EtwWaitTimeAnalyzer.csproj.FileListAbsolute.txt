@@ -1,0 +1,6 @@
+C:\VSC_Project\ConvoPeq\tools\EtwWaitTimeAnalyzer\obj\Release\net10.0\EtwWaitTimeAnalyzer.csproj.AssemblyReference.cache
+C:\VSC_Project\ConvoPeq\tools\EtwWaitTimeAnalyzer\obj\Release\net10.0\EtwWaitTimeAnalyzer.GeneratedMSBuildEditorConfig.editorconfig
+C:\VSC_Project\ConvoPeq\tools\EtwWaitTimeAnalyzer\obj\Release\net10.0\EtwWaitTimeAnalyzer.AssemblyInfoInputs.cache
+C:\VSC_Project\ConvoPeq\tools\EtwWaitTimeAnalyzer\obj\Release\net10.0\EtwWaitTimeAnalyzer.AssemblyInfo.cs
+C:\VSC_Project\ConvoPeq\tools\EtwWaitTimeAnalyzer\obj\Release\net10.0\EtwWaitTimeAnalyzer.csproj.CoreCompileInputs.cache
+C:\VSC_Project\ConvoPeq\tools\EtwWaitTimeAnalyzer\obj\Release\net10.0\EtwWaitTimeAnalyzer.sourcelink.json

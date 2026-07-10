@@ -65,6 +65,45 @@ namespace convo
 struct IppFFTPlan;
 
 //==============================================================================
+// ★ work70: LayerAllocSizes — レイヤーの全 MKL バッファサイズ
+//   SetImpulse() で確保時に計算・保存し、freeAll() で DIAG_MKL_FREE に渡す。
+//==============================================================================
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+struct LayerAllocSizes {
+    size_t irFreqDomain = 0;
+    size_t irFreqReal   = 0;
+    size_t irFreqImag   = 0;
+    size_t fdlBuf       = 0;
+    size_t fdlReal      = 0;
+    size_t fdlImag      = 0;
+    size_t fftTimeBuf   = 0;
+    size_t fftOutBuf    = 0;
+    size_t prevInputBuf = 0;
+    size_t accumBuf     = 0;
+    size_t accumReal    = 0;
+    size_t accumImag    = 0;
+    size_t inputAccBuf  = 0;
+    size_t tailOutputBuf= 0;
+};
+
+/// NUC インスタンス単位の診断スナップショット（グローバル統計は含まない）。
+struct NucDiagnosticsSnapshot {
+    uint64_t layerBufs[3] = { 0, 0, 0 };
+    uint64_t irFreqBytes  = 0;
+    uint64_t fdlBytes     = 0;
+    uint64_t accumBytes   = 0;
+    uint64_t tailBytes    = 0;
+    uint64_t directBytes  = 0;
+    uint64_t ringBytes    = 0;
+    int      numActiveLayers = 0;
+    bool     isReady         = false;
+    [[nodiscard]] uint64_t totalBytes() const noexcept {
+        return layerBufs[0] + layerBufs[1] + layerBufs[2] + directBytes + ringBytes;
+    }
+};
+#endif
+
+//==============================================================================
 // FilterSpec  ─ SetImpulse() に渡す出力周波数フィルター仕様
 //
 // NUC は SetImpulse() 内で SoA (irFreqReal/irFreqImag) に周波数ゲインを直接適用する。
@@ -130,6 +169,20 @@ public:
 
     MKLNonUniformConvolver();
     ~MKLNonUniformConvolver();
+
+    //----------------------------------------------------------
+    // 診断用静的管理
+    //----------------------------------------------------------
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    static std::atomic<uint32_t> liveCount;
+    static std::atomic<uint64_t> globalDiagSeq;
+
+    /// ★ work70: 診断シーケンス番号の定数。
+    enum : uint64_t {
+        kDiagSeqReserved = 0,        ///< デストラクタ等、SetImpulse 以外の経路
+        kDiagSeqFirstRuntime = 1     ///< SetImpulse の最初の seq 値
+    };
+#endif
 
     //----------------------------------------------------------
     // SetImpulse  ─ Message Thread のみ
@@ -305,8 +358,19 @@ private:
         // 分散計算進行中フラグ (トリガ → true, IFFT 完了 → false)
         bool distributing      = false;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        LayerAllocSizes allocSizes;
+#endif
+
         void freeAll() noexcept;
     };
+
+    //----------------------------------------------------------
+    // 診断用スナップショット
+    //----------------------------------------------------------
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    [[nodiscard]] NucDiagnosticsSnapshot getDiagnostics() const noexcept;
+#endif
 
     //----------------------------------------------------------
     // 内部ヘルパー

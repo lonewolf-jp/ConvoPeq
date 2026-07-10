@@ -1,0 +1,796 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<InstrumentationManifest>
+  <Instrumentation>
+    <Regions>
+      <!-->
+      Standby:
+      Begin Root Container
+      <-->
+      <RegionRoot Name="Standby" Guid="{d8d639a0-cf4c-45fb-976a-0000DEADBEEF}" FriendlyName="Standby">
+        <!-->
+        Standby Suspend:
+        Children:
+          SuspendProcesses
+          
+        <-->
+        <Region Name="Standby-Suspend-Overall-Time" Guid="{D38BE1A3-2A14-436A-9064-6D3E6CB85F88}" FriendlyName="Standby Suspend">
+
+          <!-->
+          Suspend Processes:
+          
+          Event-Based Start with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=22, and version=0
+          Event-Based Stop with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=23, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+                
+          Children:
+             Suspend Process
+          <-->
+
+          <Region Name="Standby-Suspend-Apps-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000000000}" FriendlyName="Suspend Processes">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="22" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="23" Version="0" />
+            </Stop>
+
+            <!-->
+            Suspend Process
+              Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=16, and version=1
+              Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=17, and version=1
+              
+              Additionally, only match start to stop if the field "Pid" is the same.
+              
+              Instance based off payload field called "Pid" In the start event. This field is of type PID and will have a proces name associated with it as well as ID. 
+            <-->
+
+            <Region Name="Standby-Suspend-Apps-App" Guid="{d8d639a0-0000-0000-0000-000000000001}" FriendlyName="Suspend Process">
+              <Match>
+                <Event>
+                  <Payload FieldName="Pid" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="Pid" Type="Pid" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="16" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="17" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Suspend Processes
+          <-->
+          </Region>
+          <!-->
+          
+          Suspend Services:
+          
+          Event-Based Start with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=24, and version=0
+          Event-Based Stop with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=25, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+                
+          Children:
+             Suspend Service
+          <-->
+
+          <Region Name="Standby-Suspend-Services-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000000002}" FriendlyName="Suspend Services">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="24" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="25" Version="0" />
+            </Stop>
+
+            <!-->
+            Suspend Service
+              Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=18, and version=1
+              Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=19, and version=1
+              
+              Additionally, only match start to stop if the field "Name" is the same.
+              
+              Instance based off payload field called "Name" in the start event.
+            <-->
+
+            <Region Name="Standby-Suspend-Services-Service" Guid="{d8d639a0-0000-0000-0000-000000000003}" FriendlyName="Suspend Service">
+              <Match>
+                <Event>
+                  <Payload FieldName="Name" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="Name" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="18" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="19" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Suspend Services
+          <-->
+          </Region>
+
+          <!-->
+          Superfetch Prepare Memory
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=64, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=65, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Standby-Suspend-Superfetch-PageIn" Guid="{d8d639a0-cf4c-45fb-976a-000000000005}" FriendlyName="Superfetch Prepare Memory">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="64" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="65" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Pre-Sleep Callbacks
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=68, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=69, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Standby-Suspend-PreSleepCallbacks" Guid="{d8d639a0-cf4c-45fb-976a-000000000008}" FriendlyName="Pre-Sleep Callbacks">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="68" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="69" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Worker Threads Swap-In
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=69, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0, and Query="true"
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Standby-Suspend-SwapInWorkerThreads" Guid="{d8d639a0-cf4c-45fb-976a-000000000009}" FriendlyName="Worker Threads Swap-in">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="69" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="true" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Flush Storage Volumes
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=36, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0, and Query="false"
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Standby-Suspend-FlushVolumes" Guid="{d8d639a0-cf4c-45fb-976a-00000000000a}" FriendlyName="Flush Storage Volumes">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="36" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="false" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Query Devices:
+          
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0 and Query="true"
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=36, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          
+          Children:
+            Query Device
+          <-->
+
+          <Region Name="Standby-Suspend-QueryDevices-Phase" Guid="{d8d639a0-cf4c-45fb-976a-00000000000b}" FriendlyName="Query Devices">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="true" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="36" Version="0" />
+            </Stop>
+
+            <!-->
+            Query Device:
+          
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=7, version=1, MinorFunction="3" and PowerStateType="0"
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=8, and version=0
+              
+            Additionally, only match start to stop if the field "Irp" is the same.
+            
+            Instance based off payload field called "InstanceName" in the start event. This is of type Device and will have a device description, name, and ID associated with it. 
+            <-->
+
+            <Region Name="Standby-Suspend-QueryDevices-Device" Guid="{d8d639a0-0000-0000-0000-00000000000e}" FriendlyName="Query Device">
+              <Match>
+                <Event>
+                  <Payload FieldName="Irp" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="InstanceName" Type="device" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1" />
+                <PayloadIdentifier FieldName="MinorFunction" FieldValue="3" />
+                <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Query Devices
+          <-->
+          </Region>
+
+          <!-->
+          Suspend Devices:
+          
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0 and Query="false"
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=36, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          
+          Children:
+            Suspend Device
+          <-->
+
+          <Region Name="Standby-Suspend-Devices-Phase" Guid="{d8d639a0-cf4c-45fb-976a-00000000000c}" FriendlyName="Suspend Devices">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="false" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="36" Version="0" />
+            </Stop>
+
+            <!-->
+            Suspend Device:
+          
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=7, version=1, MinorFunction="2" and PowerStateType="0"
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=8, and version=0
+              
+            Additionally, only match start to stop if the field "Irp" is the same.
+            
+            Instance based off payload field called "InstanceName" in the start event. This is of type Device and will have a device description, name, and ID associated with it. 
+            <-->
+
+            <Region Name="Standby-Suspend-Devices-Device" Guid="{d8d639a0-0000-0000-0000-00000000000d}" FriendlyName="Suspend Device">
+              <Match>
+                <Event>
+                  <Payload FieldName="Irp" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="InstanceName" Type="device" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1" />
+                <PayloadIdentifier FieldName="MinorFunction" FieldValue="2" />
+                <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Supend Devices
+          <-->
+          </Region>
+
+          <!-->
+          User Session Shutdown:
+          Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=301, and version=0
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=201, version=0
+          <-->
+
+          <Region Name="Standby-Suspend-Winlogon-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000111000100}" FriendlyName="Winlogon Suspend">
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="301" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="201" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Total Hiberfile Write [Hybrid Sleep]:
+          Children:
+            Hiberfile Initialization [Hybrid Sleep]
+            Hiberfile Write [Hybrid Sleep]
+            
+          Begin Container
+          <-->
+
+          <Region Name="Standby-Suspend-HiberFileTime" Guid="{60AE2029-73DD-4242-9914-E4FD74A7D4A0}" FriendlyName="Total Hiberfile Write [Hybrid Sleep]">
+
+            <!-->
+            Hiberfile Initialization [Hybrid Sleep]:
+            
+            Region-Based Start based off the stop of region: d8d639a0-cf4c-45fb-976a-00000000000c (Suspend Devices)
+            Duration-Based Stop, add the duration * 1000000 found in payload field "InitTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 from the Start.
+            <-->
+
+            <Region Name="Standby-Suspend-HiberInitTime" Guid="{A384ECC4-1F9A-4b12-9965-21531C725618}" FriendlyName="Hiberfile Initialization [Hybrid Sleep]">
+              <Start>
+                <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-00000000000c}" />
+              </Start>
+              <Stop>
+                <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="InitTime" Multiplier="1000000" />
+              </Stop>
+            </Region>
+
+            <!-->
+            Hiberfile Write [Hybrid Sleep]:
+            
+            Region-Based Start based off the stop of region: A384ECC4-1F9A-4b12-9965-21531C725618 (Hiberfile Initialization [Hybrid Sleep])
+            Duration-Based Stop, add the duration * 1000000 found in payload field "HiberHiberFileTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 from the Start.
+            <-->
+
+            <Region Name="Standby-Suspend-WriteHiberFile" Guid="{3B1B3052-B3B9-4956-9A90-6898DBAB70A3}" FriendlyName="Hiberfile Write [Hybrid Sleep]">
+              <Start>
+                <Region RegionGuid="{A384ECC4-1F9A-4b12-9965-21531C725618}" />
+              </Start>
+              <Stop>
+                <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="HiberHiberFileTime" Multiplier="1000000" />
+              </Stop>
+            </Region>
+            <!-->
+           End Total Hiberfile Write [Hybrid Sleep]
+           <-->
+          </Region>
+          <!-->
+        End Standby Suspend
+        <-->
+        </Region>
+
+        <!-->
+        Powered Off/Sleeping:
+            
+        Region-Based Start based off the stop of region: D38BE1A3-2A14-436A-9064-6D3E6CB85F88(Standby Suspend)
+        Region-Based Stop based off the start of region: A7BD69A9-C484-4795-B4B6-DD8BEFB4F3F2 (Standby Resume)
+        <-->
+
+        <Region Name="Standby-Powered-Down" Guid="{d8d639a0-cf4c-45fb-976a-000000004000}" FriendlyName="Sleeping">
+          <Start>
+            <Region RegionGuid="{D38BE1A3-2A14-436A-9064-6D3E6CB85F88}" />
+          </Start>
+          <Stop>
+            <Region RegionGuid="{A7BD69A9-C484-4795-B4B6-DD8BEFB4F3F2}" />
+          </Stop>
+        </Region>
+        <Region Name="Standby-Resume-BIOS-Phase" Guid="{d8d639a0-cf4c-45fb-976a-020000000000}" FriendlyName="BIOS Initialization">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="39" Version="0" Duration="BiosInitTime" Multiplier="1000000" />
+          </Start>
+          <Stop>
+            <Region RegionGuid="{A7BD69A9-C484-4795-B4B6-DD8BEFB4F3F2}" />
+          </Stop>
+        </Region>
+
+        <!-->
+        Standby Resume:
+        Children:
+          Main Path Resume
+          Console Session Disconnect
+            
+        Begin Standby Resume Container
+        <-->
+
+        <Region Name="Standby-Resume-Overall-Time" Guid="{A7BD69A9-C484-4795-B4B6-DD8BEFB4F3F2}" FriendlyName="Standby Resume">
+
+          <!-->
+          Main Path Resume:
+          Children:
+            Resume Devices
+            Winlogon Resume
+            Time to Idle Detection starts
+            
+          Begin Main Path Resume Container
+          <-->
+
+          <Region Name="Standby-Resume-MainPath" Guid="{9964C11C-574E-4497-B7F8-15A9E6A53265}" FriendlyName="Main Path Resume">
+            <!-->
+            Resume Devices:
+
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=37, and version=0
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=38, and version=0
+
+            Additionally, only match start to stop if the PIDs are the same.
+
+            Children:
+            Resume Device
+
+            Begin Resume Devices
+            <-->
+
+            <Region Name="Standby-Resume-Devices-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000010000}" FriendlyName="Resume Devices">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="37" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="38" Version="0" />
+              </Stop>
+
+              <!-->
+              Resume Device:
+            
+              Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=7, version=1, MinorFunction=2, PowerStateType=0
+              Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=8, and version=0
+            
+              Additionally, only match start to stop if the field "Irp" is the same.
+              
+              Instance based off payload field called "InstanceName" in the start event. This is of type Device and will have a device description, name, and ID associated with it.               
+              <-->
+
+              <Region Name="Standby-Resume-Devices-Device" Guid="{d8d639a0-0000-0000-0000-00000001000d}" FriendlyName="Resume Device">
+                <Match>
+                  <Event>
+                    <Payload FieldName="Irp" />
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="InstanceName" Type="device" />
+                </Naming>
+                <Start>
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1" />
+                  <PayloadIdentifier FieldName="MinorFunction" FieldValue="2" />
+                  <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0" />
+                </Stop>
+              </Region>
+              <!-->
+            End Resume Devices 
+            <-->
+            </Region>
+
+            <!-->
+            Winlogon Resume:
+            
+            Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=202, and version=0
+            Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=10, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            
+            Children:
+              Request Credentials
+              Authenticate User
+              Prepare Themes
+              Notify DWM
+              Notify Themes
+              Check License
+              Restore Network Connections
+              Logon
+              Start Shell
+              
+              Begin Winlogon Resume
+            <-->
+
+            <Region Name="Standby-Resume-Winlogon-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000000100}" FriendlyName="Winlogon Resume">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Start>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="202" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="10" Version="0" />
+              </Stop>
+
+              <!-->
+              Request Credentials:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=203, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=204, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-Request Credentials" Guid="{d8d639a0-0000-0000-0000-000000000101}" FriendlyName="Request Credentials">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="203" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="204" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Authenticate User:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=1, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=2, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-AuthenticateUser" Guid="{d8d639a0-0000-0000-0000-000000000102}" FriendlyName="Authenticate User">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="1" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="2" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Prepare Themes:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=11, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=12, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-ThemesOnLogonPre" Guid="{d8d639a0-0000-0000-0000-000000000105}" FriendlyName="Prepare Themes">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="11" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="12" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Notify DWM:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=67, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=68, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-DwmpNotifyUserLogon" Guid="{d8d639a0-0000-0000-0000-000000000106}" FriendlyName="Notify DWM">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="67" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="68" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Notify Themes:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=13, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=14, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-ThemesOnLogonPost" Guid="{d8d639a0-0000-0000-0000-000000000107}" FriendlyName="Notify Themes">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="13" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="14" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Check License:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=5, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=6, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-CheckWindowsLicenseStatus" Guid="{d8d639a0-0000-0000-0000-000000000108}" FriendlyName="Check License">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="5" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Restore Connections
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=7, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=8, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-RestoringNetConnections" Guid="{d8d639a0-0000-0000-0000-000000000109}" FriendlyName="Restore Connections">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="7" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="8" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Explorer Initialization
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=9, and version=0
+              Event-Based Stop with provider=30336ed4-e327-447c-9de0-51b652c86108, id=27231, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Standby-Resume-Winlogon-UserInit-Explorer-Start" Guid="{d8d639a0-0000-0000-0000-00000000010a}" FriendlyName="Explorer Initialization">
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="9" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="27230" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+            End Winlogon Resume
+            <-->
+            </Region>
+
+            <!-->
+              Time to Idle Detection starts:
+            
+              Region-Based Start based off the stop of region: 9964C11C-574E-4497-B7F8-15A9E6A53265
+              Event-Based Stop with provider=331C3B3A-2005-44C2-AC5E-77220C37D6B4, id=121, and version=0
+            
+              This region is a temperory one until we get the Idle Detection start changed to begin when the Standby process is done
+              <-->
+
+            <Region Name="Standby-Resume-Idle-Detection-Start" Guid="{052335f4-ccd6-4407-811b-52d0736acf97}" FriendlyName="Time to Idle Detection Start">
+              <Start>
+                <Region RegionGuid="{9964C11C-574E-4497-B7F8-15A9E6A53265}" />
+              </Start>
+              <Stop>
+                <Event Provider="{331C3B3A-2005-44C2-AC5E-77220C37D6B4}" Id="121" Version="1"/>
+              </Stop>
+            </Region>
+
+            <!-->
+            UNSUPPORTED REGION:
+            In future versions, this will contain the following region:
+          
+              Post On/Off
+              Region-Based Start based off the stop of region: 9964C11C-574E-4497-B7F8-15A9E6A53265 (Main Path Resume)
+              Idle-Based Stop based after we detect idle for 5000 ms
+          
+              Additionally, only match start to stop if the PIDs are the same.
+    
+          
+              <Region Guid="{BD4C89BE-6866-4376-954A-F3F48ACE2727}" Name="FastStartup-Resume-PostOnOff" FriendlyName="Post On/Off">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Region RegionGuid="{9964C11C-574E-4497-B7F8-15A9E6A53265}"/>
+                </Start>
+                <Stop>
+                  <Idle AccumulateMS="5000"/>
+                </Stop>
+              </Region>
+            <-->
+
+            <!-->
+          End Main Path Resume
+          <-->
+          </Region>
+
+          <!-->
+          Console Session Disconnect
+            
+          Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=801 version=0, and Event=8
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=802 version=0, and Event=8
+            
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="FastStartup-ConsoleSessionDisconnect" Guid="{354B480B-673A-45f8-8154-814C35D18294}" FriendlyName="Console Session Disconnect">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0" />
+              <PayloadIdentifier FieldName="Event" FieldValue="8" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0" />
+            </Stop>
+          </Region>
+          <!-->
+        End Standby Resume
+        <-->
+        </Region>
+
+        <!-->
+          Post On/Off
+          Event-Based Start with Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1102", and version=0
+          Event-Based Stop with Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1103", and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+        <Region Name="Standby-Postboot-Overall-Time" Guid="{d536713b-231b-4fda-8117-76141d49ed6e}"  FriendlyName="Postboot">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1101" Version="0"/>
+          </Start>
+          <Stop>
+            <Event Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1103" Version="0"/>
+          </Stop>
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>

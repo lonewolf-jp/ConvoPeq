@@ -114,6 +114,17 @@ void DSPHandleRuntime::quarantine(DSPHandle handle)
     }
 }
 
+bool DSPHandleRuntime::rollbackRegistration(DSPHandle handle) noexcept
+{
+    if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS) return false;
+    auto& reg = registry_[handle.slot];
+    DSPState expected = DSPState::Constructing;
+    // state のみ CAS（instance は不変）。create() が上書きするため不要。
+    return convo::compareExchangeAtomic(reg.state, expected, DSPState::Reclaimed,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_acquire);
+}
+
 // ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
 void DSPHandleRuntime::quarantineSlot(uint32_t slot) noexcept
 {

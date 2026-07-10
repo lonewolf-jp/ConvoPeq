@@ -1,0 +1,881 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<InstrumentationManifest>
+  <Instrumentation>
+    <Regions>
+      <!-->
+      Hibernate:
+      Begin Root Container
+      <-->
+      <RegionRoot Name="Hibernate" Guid="{70667D34-C304-48f1-9528-18E62E8A54C0}" FriendlyName="Hibernate">
+
+        <!-->
+        Hibernate Suspend:
+        Children:
+          Suspend Processes
+          Suspend Services
+          Superfetch Prepare Memory
+          Pre-Sleep Callbacks
+          Worker Threads Swap-in
+          Flush Storage Volumes
+          Query Devices
+          Suspend Devices
+          Winlogon Suspend
+          Total Hiberfile Write
+          Hibernate
+          
+        <-->
+
+        <Region Name="Hibernate-Suspend-Overall-Time" Guid="{C4962BA0-DCD8-4022-8BFF-E18BEFF96094}" FriendlyName="Hibernate Suspend">
+
+          <!-->
+          Suspend Processes:
+          
+          Event-Based Start with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=22, and version=0
+          Event-Based Stop with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=23, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+                
+          Children:
+             Suspend Process
+          <-->
+
+          <Region Name="Hibernate-Suspend-Apps-Phase" Guid="{10A68732-4298-4f04-9A6B-371E1350A8F8}" FriendlyName="Suspend Processes">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="22" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="23" Version="0" />
+            </Stop>
+
+            <!-->
+            Suspend Process
+              Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=16, and version=1
+              Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=17, and version=1
+              
+              Additionally, only match start to stop if the field "Pid" is the same.
+              
+              Instance based off payload field called "Pid" In the start event. This field is of type PID and will have a proces name associated with it as well as ID. 
+            <-->
+
+            <Region Name="Hibernate-Suspend-Apps-App" Guid="{4EB948D8-4FEF-470c-8C16-A7BA206F80E5}" FriendlyName="Suspend Process">
+              <Match>
+                <Event>
+                  <Payload FieldName="Pid" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="Pid" Type="Pid" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="16" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="17" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Suspend Process
+          <-->
+          </Region>
+
+          <!-->
+          Suspend Services:
+          
+          Event-Based Start with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=24, and version=0
+          Event-Based Stop with provider=31c3b3a-2005-44c2-ac5e-77220c37d6b4, id=25, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+                
+          Children:
+             Suspend Service
+             
+          Begin Suspend Services
+          <-->
+
+          <Region Name="Hibernate-Suspend-Services-Phase" Guid="{23D57F3F-32B2-49de-A38E-6F046B43BD36}" FriendlyName="Suspend Services">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="24" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="25" Version="0" />
+            </Stop>
+
+            <!-->
+            Suspend Service
+              Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=18, and version=1
+              Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=19, and version=1
+              
+              Additionally, only match start to stop if the field "Name" is the same.
+              
+              Instance based off payload field called "Name" in the start event.
+            <-->
+
+            <Region Name="Hibernate-Suspend-Services-Service" Guid="{01BFFFD4-1FBC-4e3c-B195-AA0294B1844E}" FriendlyName="Suspend Service">
+              <Match>
+                <Event>
+                  <Payload FieldName="Name" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="Name" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="18" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="19" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Suspend Service
+          <-->
+          </Region>
+
+          <!-->
+          Superfetch Prepare Memory
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=64, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=65, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Hibernate-Suspend-Superfetch-PageIn" Guid="{98AF4998-2458-4039-AE49-063627B445EE}" FriendlyName="Superfetch Prepare Memory">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="64" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="65" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Pre-Sleep Callbacks
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=68, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=69, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Hibernate-Suspend-PreSleepCallbacks" Guid="{FE0460B7-DF93-4e5b-8914-65E5444A2531}" FriendlyName="Pre-Sleep Callbacks">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="68" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="69" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Worker Threads Swap-In
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=69, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0, and Query="true"
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Hibernate-Suspend-SwapInWorkerThreads" Guid="{6537CFB4-26B0-4ff0-A72F-EEE42D3B849D}" FriendlyName="Worker Threads Swap-in">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="69" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="true" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Flush Storage Volumes
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=36, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0, and Query="false"
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Hibernate-Suspend-FlushVolumes" Guid="{22A16F13-BAB4-4377-83AB-DF22F573CAC6}" FriendlyName="Flush Storage Volumes">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="36" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="false" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Query Devices:
+          
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0 and Query="true"
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=36, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          
+          Children:
+            Query Device
+            
+          Begin Query Devices
+          <-->
+
+          <Region Name="Hibernate-Suspend-QueryDevices-Phase" Guid="{88ED6054-90A9-467e-A83E-B797F5C6A456}" FriendlyName="Query Devices">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="true" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="36" Version="0" />
+            </Stop>
+
+            <!-->
+            Query Device:
+          
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=7, version=1, MinorFunction="3" and PowerStateType="0"
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=8, and version=0
+              
+            Additionally, only match start to stop if the field "Irp" is the same.
+            
+            Instance based off payload field called "InstanceName" in the start event. This is of type Device and will have a device description, name, and ID associated with it. 
+            <-->
+
+            <Region Name="Hibernate-Suspend-QueryDevices-Device" Guid="{A9F35A68-C1C0-435e-94AE-3CD0E334CFD5}" FriendlyName="Query Device">
+              <Match>
+                <Event>
+                  <Payload FieldName="Irp" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="InstanceName" Type="device" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1" />
+                <PayloadIdentifier FieldName="MinorFunction" FieldValue="3" />
+                <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Query Device
+          <-->
+          </Region>
+
+          <!-->
+          Suspend Devices:
+          
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=35, version=0 and Query="false"
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=36, and version=0
+              
+          Additionally, only match start to stop if the PIDs are the same.
+          
+          Children:
+            Suspend Device
+            
+          Begin Suspend Devices
+          <-->
+
+          <Region Name="Hibernate-Suspend-Devices-Phase" Guid="{EFB8A907-72AE-489d-ADCF-A45AA6557A43}" FriendlyName="Suspend Devices">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="35" Version="0" />
+              <PayloadIdentifier FieldName="Query" FieldValue="false" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="36" Version="0" />
+            </Stop>
+
+            <!-->
+            Suspend Device:
+          
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=7, version=1, MinorFunction="2" and PowerStateType="0"
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=8, and version=0
+              
+            Additionally, only match start to stop if the field "Irp" is the same.
+            
+            Instance based off payload field called "InstanceName" in the start event. This is of type Device and will have a device description, name, and ID associated with it. 
+            <-->
+
+            <Region Name="Hibernate-Suspend-Devices-Device" Guid="{8E3B6049-1AB8-4534-9259-E604174A24E5}" FriendlyName="Suspend Device">
+              <Match>
+                <Event>
+                  <Payload FieldName="Irp" />
+                </Event>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="InstanceName" Type="device" />
+              </Naming>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1" />
+                <PayloadIdentifier FieldName="MinorFunction" FieldValue="2" />
+                <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0" />
+              </Stop>
+            </Region>
+          </Region>
+
+          <!-->
+          Winlogon Suspend:
+          Children:
+            LogonUI Server Startup
+            
+          Begin Winlogon Suspend Container
+          <-->
+
+          <Region Name="Hibernate-Suspend-Winlogon-Phase" Guid="{DABDD3CF-13BD-40c3-9553-36EF4D0931FC}" FriendlyName="Winlogon Suspend">
+
+            <!-->
+            LogonUI Server Startup:
+          
+            Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=501 and version=0
+            Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=502, and version=0
+              
+            Additionally, only match start to stop if the field "Irp" is the same.
+            <-->
+
+            <Region Name="Hibernate-Suspend-Winlogon-WluiServerStartup" Guid="{F9064B52-1E91-4c9e-9C22-EA84F5AC04B3}" FriendlyName="LogonUI Server Startup">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Start>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="501" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="502" Version="0" />
+              </Stop>
+            </Region>
+            <!-->
+          End Winlogon Suspend
+          <-->
+          </Region>
+
+          <!-->
+          Total Hiberfile Write:
+          Children:
+            Hiberfile Initialization
+            Hiberfile Write
+            
+          Begin Total Hiberfile Write Container
+          <-->
+
+          <Region Name="Hibernate-Suspend-HiberFileTime" Guid="{40A83C18-0A37-4855-94E6-64EE16C3FA83}" FriendlyName="Total Hiberfile Write">
+
+            <!-->
+            Hiberfile Initialization:
+            
+            Region-Based Start based off the stop of region: EFB8A907-72AE-489d-ADCF-A45AA6557A43 (Suspend Devices)
+            Region-Based Stop based off the start of region: CA0C6A87-67F6-4b99-889E-1C1365A1CBD9 (Hiberfile Write)
+            <-->
+
+            <Region Name="Hibernate-Suspend-HiberInitTime" Guid="{FB05884B-8E7D-4a98-A568-37BAEF1A3119}" FriendlyName="Hiberfile Initialization">
+              <Start>
+                <Region RegionGuid="{EFB8A907-72AE-489d-ADCF-A45AA6557A43}" />
+              </Start>
+              <Stop>
+                <Region RegionGuid="{CA0C6A87-67F6-4b99-889E-1C1365A1CBD9}" />
+              </Stop>
+            </Region>
+
+            <!-->
+            Hiberfile Write:
+            
+            Duration-Based Start, subtract the duration * 1000000 found in payload field "TotalHibernateTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 from the Stop.
+            Region-Based Stop based off the start of region: AFF6A955-8918-4e1f-855D-022B3D2AED54 (Powered Off/ Sleeping)
+            <-->
+
+            <Region Name="Hibernate-Suspend-WriteHiberFile" Guid="{CA0C6A87-67F6-4b99-889E-1C1365A1CBD9}" FriendlyName="Hiberfile Write">
+              <Stop>
+                <Region RegionGuid="{AFF6A955-8918-4e1f-855D-022B3D2AED54}" />
+              </Stop>
+              <Start>
+                <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="HiberHiberFileTime" Multiplier="1000000" />
+              </Start>
+            </Region>
+            <!-->
+          End Total Hiberfile Write
+          <-->
+          </Region>
+          <Region Name="Hibernate-Hibernate-Total" Guid="{2A6FBA9A-44D4-4511-A7C8-6D4040E98EC5}" FriendlyName="Hibernate">
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="1" Version="0" />
+            </Start>
+            <Stop>
+              <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="TotalHibernateTime" Multiplier="1000000" />
+            </Stop>
+          </Region>
+          <!-->
+        End Hibernate Suspend
+        <-->
+        </Region>
+
+        <!-->
+        Powered Off/Sleeping:
+            
+        Region-Based Start based off the stop of region: 2A6FBA9A-44D4-4511-A7C8-6D4040E98EC5 (System Suspend)
+        Region-Based Stop based off the start of region: d8d639a0-cf4c-45fb-976a-000006002000 (Powered On to Kernel Resume Complete)
+        <-->
+
+        <Region Name="Hibernate-Powered-Down" Guid="{AFF6A955-8918-4e1f-855D-022B3D2AED54}" FriendlyName="Powered Off/Sleeping">
+          <Start>
+            <Region RegionGuid="{2A6FBA9A-44D4-4511-A7C8-6D4040E98EC5}" />
+          </Start>
+          <Stop>
+            <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000006002000}" />
+          </Stop>
+        </Region>
+
+        <!-->
+        BIOS Initialization:
+            
+        Region-Based Start based off the stop of region: AFF6A955-8918-4e1f-855D-022B3D2AED54 (Powered Off/Sleeping)
+        Duration-Based Stop, add the duration * 1000000 found in payload field "POSTTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 to the Start
+        <-->
+
+        <Region Name="Hibernate-Resume-BIOS" Guid="{99EB5E4B-0338-4e25-9ECC-846767A9EA5C}" FriendlyName="BIOS Initialization">
+          <Start>
+            <Region RegionGuid="{AFF6A955-8918-4e1f-855D-022B3D2AED54}" />
+          </Start>
+          <Stop>
+            <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="POSTTime" Multiplier="1000000" />
+          </Stop>
+        </Region>
+
+        <!-->
+        Powered On to Kernel Resume Complete:
+
+        Duration-Based Start, subtract the duration * 1000000 found in payload field "TotalResumeTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 from the Stop
+        Event-Based stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0
+        <-->
+
+        <Region Name="Hibernate-Resume-PoweredOnToKernelResumeComplete" Guid="{d8d639a0-cf4c-45fb-976a-000006002000}" FriendlyName="Powered On to Kernel Resume Complete">
+          <Stop>
+            <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" />
+          </Stop>
+          <Start>
+            <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="TotalResumeTime" Multiplier="1000000" />
+          </Start>
+        </Region>
+
+        <!-->
+        Hibernate Resume:
+        Children:
+          Main Path Resume
+          Console Session Disconnect
+        
+        Begin Hibernate Resume Container
+        <-->
+
+        <Region Name="Hibernate-Resume-Overall-Time" Guid="{9A15DB5C-22EE-47a1-8D6D-530C81E4B22A}" FriendlyName="Hibernate Resume">
+
+          <!-->
+          Main Path Resume:
+          Children:
+            Boot Manager
+            Hiberfile Read
+            Resume Devices
+            Resume Components
+            Winlogon Resume
+            
+          Begin Main Path Resume Container
+          <-->
+          <Region Name="Hibernate-Resume-MainPath" Guid="{EA706223-22F4-4b57-91E7-B5244299B5BA}" FriendlyName="Main Path Resume">
+
+            <!-->
+            Boot Manager:
+            
+            Region-Based Start based off the stop of region: 99EB5E4B-0338-4e25-9ECC-846767A9EA5C (BIOS Initialization)
+            Duration-Based Stop, add the duration * 1000000 found in payload field "ResumeBootMgrTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 to the Start
+            <-->
+            <Region Name="Hibernate-Resume-BootMgr" Guid="{d8d639a0-cf4c-45fb-976a-000002002000}" FriendlyName="Boot Manager">
+              <Start>
+                <Region RegionGuid="{99EB5E4B-0338-4e25-9ECC-846767A9EA5C}" />
+              </Start>
+              <Stop>
+                <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="ResumeBootMgrTime" Multiplier="1000000" />
+              </Stop>
+            </Region>
+            <!-->
+           Hiberfile Read:
+           Children:
+            Resume Application
+            
+           Begin Hiberfile Read Container
+           <-->
+            <Region Name="Hibernate-Resume-ReadHiberFile" Guid="{7562A8E7-02DF-4190-875B-95EE3BAE9D0C}" FriendlyName="Hiberfile Read">
+
+              <!-->
+              Resume Application:
+            
+              Region-Based Start based off the stop of region: d8d639a0-cf4c-45fb-976a-000002002000 (Boot Manager)
+              Duration-Based Stop, add the duration * 1000000 found in payload field "ResumeAppTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 to the Start
+              <-->
+
+              <Region Name="Hibernate-Resume-Winresume" Guid="{d8d639a0-cf4c-45fb-976a-000003002000}" FriendlyName="Resume Application">
+                <Start>
+                  <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000002002000}" />
+                </Start>
+                <Stop>
+                  <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="ResumeAppTime" Multiplier="1000000" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Kernel Hiberfile Read:
+            
+              Region-Based Start based off the stop of region: d8d639a0-cf4c-45fb-976a-000003002000 (Resume Application)
+              Duration-Based Stop, add the duration * 1000000 found in payload field "KernelResumeHiberFileTime" of event provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=117, and version=0 to the Start
+              <-->
+
+              <Region Name="Hibernate-Resume-KernelPhase" Guid="{d8d639a0-cf4c-45fb-976a-000004002000}" FriendlyName="Kernel Hiberfile Read">
+                <Start>
+                  <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000003002000}" />
+                </Start>
+                <Stop>
+                  <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="0" Duration="KernelResumeHiberFileTime" Multiplier="1000000" />
+                </Stop>
+              </Region>
+              <!-->
+            End Hiberfile Read
+            <-->
+            </Region>
+
+            <!-->
+            Resume Devices:
+            
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=37, and version=0
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=38, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            
+            Children:
+              Resume Device
+              
+            Begin Resume Devices
+            <-->
+
+            <Region Name="Hibernate-Resume-Devices-Phase" Guid="{2F3D6AD2-AEFD-4dfb-A3A4-F9B55945EF86}" FriendlyName="Resume Devices">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="37" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="38" Version="0" />
+              </Stop>
+
+              <!-->
+              Resume Device:
+            
+              Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=7, version=1, MinorFunction=2, PowerStateType=0
+              Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=8, and version=0
+            
+              Additionally, only match start to stop if the field "Irp" is the same.
+              
+              Instance based off payload field called "InstanceName" in the start event. This is of type Device and will have a device description, name, and ID associated with it.               
+              <-->
+
+              <Region Name="Hibernate-Resume-Devices-Device" Guid="{1B10C75D-FEB2-488d-9C1F-F8D9D6F8E41C}" FriendlyName="Resume Device">
+                <Match>
+                  <Event>
+                    <Payload FieldName="Irp" />
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="InstanceName" Type="device" />
+                </Naming>
+                <Start>
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1" />
+                  <PayloadIdentifier FieldName="MinorFunction" FieldValue="2" />
+                  <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0" />
+                </Stop>
+              </Region>
+              <!-->
+            End Resume Devices
+            <-->
+            </Region>
+
+            <!-->
+            Resume Components:
+            
+            Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=38, and version=0
+            Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=2, and version=0
+            <-->
+
+            <Region Name="Hibernate-Resume-Components" Guid="{D1DD6156-ECC4-4b4f-A543-F7F708D6124D}" FriendlyName="Resume Components">
+              <Start>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="38" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="2" Version="0" />
+              </Stop>
+            </Region>
+
+            <!-->
+            Winlogon Resume:
+            
+            Children:
+              LogonUI Server Shutdown
+              Request Credentials
+              Authenticate User
+              Prepare Themes
+              Notify DWM
+              Notify Themes
+              Check License
+              Restore Connections
+              
+              Begin Winlogon Resume
+            <-->
+
+            <Region Name="Hibernate-Resume-Winlogon-Phase" Guid="{87B3AF17-062C-4a7b-B3EE-6F4C79B5B26A}" FriendlyName="Winlogon Resume">
+
+              <!-->
+              LogonUI Server Shutdown:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=503, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=504, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-WluiServerShutdown" Guid="{9691365D-59D0-47a4-9031-5EF0E7475D02}" FriendlyName="LogonUI Server Shutdown">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="503" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="504" Version="0" />
+                </Stop>
+              </Region>
+
+
+              <!-->
+              Request Credentials:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=203, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=204, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-Request Credentials" Guid="{7A01C252-3DCE-4046-9BBD-979B4FDDC45D}" FriendlyName="Request Credentials">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="203" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="204" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Authenticate User:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=1, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=2, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-AuthenticateUser" Guid="{C1189ECA-10B6-4ed8-990C-3F18610ACA06}" FriendlyName="Authenticate User">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="1" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="2" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Prepare Themes:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=11, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=12, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-ThemesOnLogonPre" Guid="{422FAEDD-B299-4020-AC43-86FDD4077CF4}" FriendlyName="Prepare Themes">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="11" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="12" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Notify DWM:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=67, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=68, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-DwmpNotifyUserLogon" Guid="{F0871E7F-5883-471c-8B99-4D8A8CE6987C}" FriendlyName="Notify DWM">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="67" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="68" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Notify Themes:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=13, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=14, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-ThemesOnLogonPost" Guid="{5442724C-B48C-4ab2-B164-05A9F8C0438C}" FriendlyName="Notify Themes">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="13" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="14" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Check License:
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=5, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=6, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-CheckWindowsLicenseStatus" Guid="{4DB37F3D-5CBD-494a-80E4-1DC02CF66F1E}" FriendlyName="Check License">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="5" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Restore Network Connections
+            
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=7, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=8, and version=0
+            
+              Additionally, only match start to stop if the PIDs are the same.
+              <-->
+
+              <Region Name="Hibernate-Resume-Winlogon-RestoringNetConnections" Guid="{F47E77E2-F7AE-4f00-8E66-9C1E69C2B384}" FriendlyName="Restore Connections">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="7" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="8" Version="0" />
+                </Stop>
+              </Region>
+            </Region>
+            <!-->
+          End Main Path Resume
+          <-->
+          </Region>
+          <!-->
+        End Winlogon Resume
+        <-->
+        </Region>
+
+        <!-->
+          Post On/Off
+          
+          Event-Based Start with Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1102", and version=0
+          Event-Based Stop with Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1103", and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+        <Region Name="Hibernate-Postboot-Overall-Time" Guid="{d536713b-231b-4fda-8117-76141d49ed6e}"  FriendlyName="Postboot">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1102" Version="0"/>
+          </Start>
+          <Stop>
+            <Event Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1103" Version="0"/>
+          </Stop>
+        </Region>
+
+        <!-->
+        Console Session Disconnect
+            
+        Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=801 version=0, and Event=8
+        Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=802 version=0, and Event=8
+            
+        Additionally, only match start to stop if the PIDs are the same.
+        <-->
+
+        <Region Name="FastStartup-ConsoleSessionDisconnect" Guid="{BD224FA2-8082-4571-9C20-56F95DB12B4D}" FriendlyName="Console Session Disconnect">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0" />
+            <PayloadIdentifier FieldName="Event" FieldValue="8" />
+          </Start>
+          <Stop>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0" />
+            <PayloadIdentifier FieldName="Event" FieldValue="8" />
+          </Stop>
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>

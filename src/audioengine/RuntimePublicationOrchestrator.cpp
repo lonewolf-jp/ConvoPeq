@@ -154,8 +154,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         PublishStage::Validated, nowUs);
 
     // ★ Phase4: mutable worldOwner → FrozenRuntimeWorld wrap → publish
+    // ★ work70 P1-a: req.newDSP（事前登録済みのDSPHandle）を existingHandle として渡す
     auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(std::move(worldOwner));
-    auto result = executor_.publish(engine_, std::move(frozen));
+    auto result = executor_.publish(engine_, std::move(frozen), req.newDSP);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
             + juce::String(req.generation)

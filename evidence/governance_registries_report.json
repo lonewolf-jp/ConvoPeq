@@ -1,0 +1,10 @@
+﻿{
+    "schema":  "governance_registries_report_v1",
+    "generatedAt":  "2026-07-06T17:42:00.3495163+09:00",
+    "contractRegistryPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-contract-registry.json",
+    "verifierRegistryPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-verifier-registry.json",
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

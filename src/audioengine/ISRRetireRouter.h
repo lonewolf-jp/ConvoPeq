@@ -123,10 +123,42 @@ public:
         return provider_->quarantinedReaderCount();
     }
 
+    // ★ work70: 退役キュー滞留バイト数（診断用概算）
+    //   Diagnostic estimate only.
+    //   Returns the sum of object sizes for which a non-zero objectBytes
+    //   was provided at enqueue time.
+    //   Does NOT include allocator overhead (malloc bookkeeping, alignment padding).
+    //   Does NOT represent process heap usage of the retire queue.
+    [[nodiscard]] uint64_t pendingRetireBytes() const noexcept override
+    {
+        return convo::consumeAtomic(m_pendingRetireBytes_, std::memory_order_acquire);
+    }
+
+    /// trackedPendingEntries と pendingRetireCount の比率（0.0〜1.0）。
+    /// objectBytes > 0 のエントリの割合。
+    [[nodiscard]] double trackedRatio() const noexcept
+    {
+        const uint32_t tracked = convo::consumeAtomic(
+            m_trackedPendingEntries_, std::memory_order_acquire);
+        const uint32_t total = pendingRetireCount();
+        if (total == 0) return 0.0;
+        const uint32_t clamped = std::min(tracked, total);
+        return static_cast<double>(clamped) / static_cast<double>(total);
+    }
+
+    /// trackedPendingEntries の raw 値。objectBytes > 0 のエントリ数。
+    [[nodiscard]] uint32_t trackedPendingEntries() const noexcept
+    {
+        return convo::consumeAtomic(m_trackedPendingEntries_, std::memory_order_acquire);
+    }
+
 private:
     convo::IEpochProvider* provider_ = nullptr;
-    std::atomic<uint64_t> m_overflowCount_{0};          // ★ Practical-3: enqueueRetire QueuePressure 回数
-    std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0}; // ★ Practical-4: 最終強制 reclaim 時刻
+    std::atomic<uint64_t> m_overflowCount_{0};
+    std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0};
+    // ★ work70: 診断用カウンタ
+    std::atomic<uint64_t> m_pendingRetireBytes_{0};
+    std::atomic<uint32_t> m_trackedPendingEntries_{0};
 };
 
 } // namespace isr

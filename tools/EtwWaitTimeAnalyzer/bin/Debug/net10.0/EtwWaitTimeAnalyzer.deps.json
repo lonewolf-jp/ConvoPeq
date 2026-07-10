@@ -1,0 +1,410 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "EtwWaitTimeAnalyzer/1.0.0": {
+        "dependencies": {
+          "Microsoft.Windows.EventTracing": "2.0.711-preview",
+          "Microsoft.Windows.EventTracing.Core": "2.0.711-preview",
+          "Microsoft.Windows.XPerfPlugin.Processing": "20.0.150"
+        },
+        "runtime": {
+          "EtwWaitTimeAnalyzer.dll": {}
+        }
+      },
+      "Azure.Core/1.44.1": {
+        "dependencies": {
+          "Microsoft.Bcl.AsyncInterfaces": "6.0.0",
+          "System.ClientModel": "1.1.0",
+          "System.Memory.Data": "6.0.0"
+        },
+        "runtime": {
+          "lib/net6.0/Azure.Core.dll": {
+            "assemblyVersion": "1.44.1.0",
+            "fileVersion": "1.4400.124.50905"
+          }
+        }
+      },
+      "Azure.Identity/1.13.1": {
+        "dependencies": {
+          "Azure.Core": "1.44.1",
+          "Microsoft.Identity.Client": "4.66.1",
+          "Microsoft.Identity.Client.Extensions.Msal": "4.66.1"
+        },
+        "runtime": {
+          "lib/netstandard2.0/Azure.Identity.dll": {
+            "assemblyVersion": "1.13.1.0",
+            "fileVersion": "1.1300.124.52405"
+          }
+        }
+      },
+      "Microsoft.Bcl.AsyncInterfaces/6.0.0": {
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Bcl.AsyncInterfaces.dll": {
+            "assemblyVersion": "6.0.0.0",
+            "fileVersion": "6.0.21.52210"
+          }
+        }
+      },
+      "Microsoft.Identity.Client/4.66.1": {
+        "dependencies": {
+          "Microsoft.IdentityModel.Abstractions": "6.35.0"
+        },
+        "runtime": {
+          "lib/net6.0/Microsoft.Identity.Client.dll": {
+            "assemblyVersion": "4.66.1.0",
+            "fileVersion": "4.66.1.0"
+          }
+        }
+      },
+      "Microsoft.Identity.Client.Extensions.Msal/4.66.1": {
+        "dependencies": {
+          "Microsoft.Identity.Client": "4.66.1",
+          "System.Security.Cryptography.ProtectedData": "4.5.0"
+        },
+        "runtime": {
+          "lib/net6.0/Microsoft.Identity.Client.Extensions.Msal.dll": {
+            "assemblyVersion": "4.66.1.0",
+            "fileVersion": "4.66.1.0"
+          }
+        }
+      },
+      "Microsoft.IdentityModel.Abstractions/6.35.0": {
+        "runtime": {
+          "lib/net6.0/Microsoft.IdentityModel.Abstractions.dll": {
+            "assemblyVersion": "6.35.0.0",
+            "fileVersion": "6.35.0.41201"
+          }
+        }
+      },
+      "Microsoft.Performance.SDK/1.4.7-preview2": {
+        "dependencies": {
+          "NuGet.Versioning": "5.11.5"
+        },
+        "runtime": {
+          "lib/netstandard2.0/Microsoft.Performance.SDK.dll": {
+            "assemblyVersion": "1.4.0.0",
+            "fileVersion": "1.4.7.13171"
+          }
+        }
+      },
+      "Microsoft.Performance.SDK.Runtime/1.4.7-preview2": {
+        "dependencies": {
+          "Microsoft.Performance.SDK": "1.4.7-preview2"
+        },
+        "runtime": {
+          "lib/netstandard2.0/Microsoft.Performance.SDK.Runtime.dll": {
+            "assemblyVersion": "1.4.0.0",
+            "fileVersion": "1.4.7.13171"
+          }
+        }
+      },
+      "Microsoft.Performance.Toolkit.Engine/1.4.7-preview2": {
+        "dependencies": {
+          "Microsoft.Performance.SDK": "1.4.7-preview2",
+          "Microsoft.Performance.SDK.Runtime": "1.4.7-preview2"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Performance.Toolkit.Engine.dll": {
+            "assemblyVersion": "1.4.0.0",
+            "fileVersion": "1.4.7.13171"
+          }
+        }
+      },
+      "Microsoft.Windows.Core4.Interop/20.0.150": {
+        "dependencies": {
+          "Microsoft.Performance.SDK": "1.4.7-preview2"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Performance.Core4.Interop.dll": {
+            "assemblyVersion": "20.0.0.0",
+            "fileVersion": "20.0.150.60674"
+          }
+        }
+      },
+      "Microsoft.Windows.EventTracing/2.0.711-preview": {
+        "dependencies": {
+          "Microsoft.Windows.EventTracing.Core": "2.0.711-preview",
+          "Microsoft.Windows.XPerfPlugin.Processing": "20.0.150"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Windows.EventTracing.dll": {
+            "assemblyVersion": "2.0.0.0",
+            "fileVersion": "2.0.711.60674"
+          }
+        }
+      },
+      "Microsoft.Windows.EventTracing.Core/2.0.711-preview": {
+        "dependencies": {
+          "Azure.Identity": "1.13.1",
+          "Microsoft.Performance.SDK": "1.4.7-preview2",
+          "Microsoft.Performance.Toolkit.Engine": "1.4.7-preview2",
+          "Microsoft.Windows.XPerfPlugin.EventTracing.V2": "20.0.150"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Windows.EventTracing.Core.dll": {
+            "assemblyVersion": "2.0.0.0",
+            "fileVersion": "2.0.711.60674"
+          }
+        }
+      },
+      "Microsoft.Windows.XPerfPlugin.Bridge/19.0.52": {
+        "dependencies": {
+          "Microsoft.Performance.SDK": "1.4.7-preview2"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Performance.XPerfPlugin.Bridge.dll": {
+            "assemblyVersion": "19.0.0.0",
+            "fileVersion": "19.0.52.60674"
+          }
+        }
+      },
+      "Microsoft.Windows.XPerfPlugin.Core/20.0.150": {
+        "dependencies": {
+          "Microsoft.Performance.SDK": "1.4.7-preview2",
+          "Microsoft.Performance.SDK.Runtime": "1.4.7-preview2",
+          "Microsoft.Windows.Core4.Interop": "20.0.150",
+          "Microsoft.Windows.XPerfPlugin.Bridge": "19.0.52",
+          "SimpleInjector": "5.4.1"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Performance.XPerfPlugin.Core.dll": {
+            "assemblyVersion": "20.0.0.0",
+            "fileVersion": "20.0.150.60674"
+          }
+        }
+      },
+      "Microsoft.Windows.XPerfPlugin.EventTracing.V2/20.0.150": {
+        "dependencies": {
+          "Microsoft.Windows.XPerfPlugin.Core": "20.0.150"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Performance.XPerfPlugin.EventTracing.V2.dll": {
+            "assemblyVersion": "20.0.0.0",
+            "fileVersion": "20.0.150.60674"
+          }
+        }
+      },
+      "Microsoft.Windows.XPerfPlugin.Processing/20.0.150": {
+        "dependencies": {
+          "Microsoft.Windows.XPerfPlugin.Core": "20.0.150"
+        },
+        "runtime": {
+          "lib/netstandard2.1/Microsoft.Performance.XPerfPlugin.Processing.dll": {
+            "assemblyVersion": "20.0.0.0",
+            "fileVersion": "20.0.150.60674"
+          }
+        }
+      },
+      "NuGet.Versioning/5.11.5": {
+        "runtime": {
+          "lib/netstandard2.0/NuGet.Versioning.dll": {
+            "assemblyVersion": "5.11.5.1",
+            "fileVersion": "5.11.5.1"
+          }
+        }
+      },
+      "SimpleInjector/5.4.1": {
+        "runtime": {
+          "lib/netstandard2.1/SimpleInjector.dll": {
+            "assemblyVersion": "5.0.0.0",
+            "fileVersion": "5.0.0.0"
+          }
+        }
+      },
+      "System.ClientModel/1.1.0": {
+        "dependencies": {
+          "System.Memory.Data": "6.0.0"
+        },
+        "runtime": {
+          "lib/net6.0/System.ClientModel.dll": {
+            "assemblyVersion": "1.1.0.0",
+            "fileVersion": "1.100.24.46703"
+          }
+        }
+      },
+      "System.Memory.Data/6.0.0": {
+        "runtime": {
+          "lib/net6.0/System.Memory.Data.dll": {
+            "assemblyVersion": "6.0.0.0",
+            "fileVersion": "6.0.21.52210"
+          }
+        }
+      },
+      "System.Security.Cryptography.ProtectedData/4.5.0": {
+        "runtime": {
+          "lib/netstandard2.0/System.Security.Cryptography.ProtectedData.dll": {
+            "assemblyVersion": "4.0.3.0",
+            "fileVersion": "4.6.26515.6"
+          }
+        },
+        "runtimeTargets": {
+          "runtimes/win/lib/netstandard2.0/System.Security.Cryptography.ProtectedData.dll": {
+            "rid": "win",
+            "assetType": "runtime",
+            "assemblyVersion": "4.0.3.0",
+            "fileVersion": "4.6.26515.6"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "EtwWaitTimeAnalyzer/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Azure.Core/1.44.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-YyznXLQZCregzHvioip07/BkzjuWNXogJEVz9T5W6TwjNr17ax41YGzYMptlo2G10oLCuVPoyva62y0SIRDixg==",
+      "path": "azure.core/1.44.1",
+      "hashPath": "azure.core.1.44.1.nupkg.sha512"
+    },
+    "Azure.Identity/1.13.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-4eeK9XztjTmvA4WN+qAvlUCSxSv45+LqTMeC8XT2giGGZHKthTMU2IuXcHjAOf5VLH3wE3Bo6EwhIcJxVB8RmQ==",
+      "path": "azure.identity/1.13.1",
+      "hashPath": "azure.identity.1.13.1.nupkg.sha512"
+    },
+    "Microsoft.Bcl.AsyncInterfaces/6.0.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-UcSjPsst+DfAdJGVDsu346FX0ci0ah+lw3WRtn18NUwEqRt70HaOQ7lI72vy3+1LxtqI3T5GWwV39rQSrCzAeg==",
+      "path": "microsoft.bcl.asyncinterfaces/6.0.0",
+      "hashPath": "microsoft.bcl.asyncinterfaces.6.0.0.nupkg.sha512"
+    },
+    "Microsoft.Identity.Client/4.66.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-mE+m3pZ7zSKocSubKXxwZcUrCzLflC86IdLxrVjS8tialy0b1L+aECBqRBC/ykcPlB4y7skg49TaTiA+O2UfDw==",
+      "path": "microsoft.identity.client/4.66.1",
+      "hashPath": "microsoft.identity.client.4.66.1.nupkg.sha512"
+    },
+    "Microsoft.Identity.Client.Extensions.Msal/4.66.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-osgt1J9Rve3LO7wXqpWoFx9UFjl0oeqoUMK/xEru7dvafQ28RgV1A17CoCGCCRSUbgDQ4Arg5FgGK2lQ3lXR4A==",
+      "path": "microsoft.identity.client.extensions.msal/4.66.1",
+      "hashPath": "microsoft.identity.client.extensions.msal.4.66.1.nupkg.sha512"
+    },
+    "Microsoft.IdentityModel.Abstractions/6.35.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-xuR8E4Rd96M41CnUSCiOJ2DBh+z+zQSmyrYHdYhD6K4fXBcQGVnRCFQ0efROUYpP+p0zC1BLKr0JRpVuujTZSg==",
+      "path": "microsoft.identitymodel.abstractions/6.35.0",
+      "hashPath": "microsoft.identitymodel.abstractions.6.35.0.nupkg.sha512"
+    },
+    "Microsoft.Performance.SDK/1.4.7-preview2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-JQPXxVj9yki0ZczOvLDpWr2c01FyvL9yUUY1JevOyg7g4B1BubU+vZ7L1PtiNq/4UA0TpHOcf+oCAMSc2l26eg==",
+      "path": "microsoft.performance.sdk/1.4.7-preview2",
+      "hashPath": "microsoft.performance.sdk.1.4.7-preview2.nupkg.sha512"
+    },
+    "Microsoft.Performance.SDK.Runtime/1.4.7-preview2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-M47jUYXxRh9pU9wTT3KUa5Dvdw0goiSAkGA4wo218qiDQZ663VpVOc+3r8mzPrJOcjO+pKiXDd9TZULvizATXg==",
+      "path": "microsoft.performance.sdk.runtime/1.4.7-preview2",
+      "hashPath": "microsoft.performance.sdk.runtime.1.4.7-preview2.nupkg.sha512"
+    },
+    "Microsoft.Performance.Toolkit.Engine/1.4.7-preview2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-a57eNupNtL9MvfP7iNVdAfDRyoyOBn6KM2SmZPV1V+E9hAFctnVqCCBhVQfhL46NlfkibbzHzg1YaVzyEJnViw==",
+      "path": "microsoft.performance.toolkit.engine/1.4.7-preview2",
+      "hashPath": "microsoft.performance.toolkit.engine.1.4.7-preview2.nupkg.sha512"
+    },
+    "Microsoft.Windows.Core4.Interop/20.0.150": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-vjgkXXnderBOmHLKzXN9ESqdTQVlaf6PF8AlG1zyZStt7WKX40cYElD54JzjfPvwZRrdC8kWDrWT9y5v0YbcLA==",
+      "path": "microsoft.windows.core4.interop/20.0.150",
+      "hashPath": "microsoft.windows.core4.interop.20.0.150.nupkg.sha512"
+    },
+    "Microsoft.Windows.EventTracing/2.0.711-preview": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-mhKZmLArczlNqM2h2w/ts4Eql/9AeglJWUsmtPL162Lt+EHmtX2tLEoBbxtHt8dwIDhDUlRhWsGGQfQe0leQEw==",
+      "path": "microsoft.windows.eventtracing/2.0.711-preview",
+      "hashPath": "microsoft.windows.eventtracing.2.0.711-preview.nupkg.sha512"
+    },
+    "Microsoft.Windows.EventTracing.Core/2.0.711-preview": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-uQlYRahRWQgYrVb2QiiuesNKWwi/x5gcn47PhCWvOCNp5lYavLjn4s1qw5ZXZL2MOEdKTQa0nXCZkDmPluJGDw==",
+      "path": "microsoft.windows.eventtracing.core/2.0.711-preview",
+      "hashPath": "microsoft.windows.eventtracing.core.2.0.711-preview.nupkg.sha512"
+    },
+    "Microsoft.Windows.XPerfPlugin.Bridge/19.0.52": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-mbwobQYl6EYrJaRitintljx9giBjwhKui0xs1q0b5enYuz+OtFfyzD5UIupMhvvZlOpYktrHDRpNPDBSp2npKw==",
+      "path": "microsoft.windows.xperfplugin.bridge/19.0.52",
+      "hashPath": "microsoft.windows.xperfplugin.bridge.19.0.52.nupkg.sha512"
+    },
+    "Microsoft.Windows.XPerfPlugin.Core/20.0.150": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-7yzW/Pm2O0dxQKSZwe8HBgZvajYoIop/JX8hVVICm3K3UfWOWJNgGyftODm8IhPZPN93zBr4SsZvXJcjeovrXg==",
+      "path": "microsoft.windows.xperfplugin.core/20.0.150",
+      "hashPath": "microsoft.windows.xperfplugin.core.20.0.150.nupkg.sha512"
+    },
+    "Microsoft.Windows.XPerfPlugin.EventTracing.V2/20.0.150": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-H0qUuz1j4veFwPyU6VPzY5UvFISfK23M0o3RbnErX3pbTyX0BvaUqsfJnH8+R97y5Yn3CRWkgfvHFLcuRBsehQ==",
+      "path": "microsoft.windows.xperfplugin.eventtracing.v2/20.0.150",
+      "hashPath": "microsoft.windows.xperfplugin.eventtracing.v2.20.0.150.nupkg.sha512"
+    },
+    "Microsoft.Windows.XPerfPlugin.Processing/20.0.150": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-o0/Q7cBASgobh+zv9+qo2HkyNqavE2sW5MdjOZ6OV1Q6K/OPzv8N8XDyWAq7yWkdVYIhjQPNrh6wcQklZJhHyA==",
+      "path": "microsoft.windows.xperfplugin.processing/20.0.150",
+      "hashPath": "microsoft.windows.xperfplugin.processing.20.0.150.nupkg.sha512"
+    },
+    "NuGet.Versioning/5.11.5": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-BYAHKZnUi6M0loAjrQGKUdPKERBKB+YgRi740vwsV0zcq+KfFnn5lUd9roQlmANUt5byRbNSEaSmA5QfEUZmOA==",
+      "path": "nuget.versioning/5.11.5",
+      "hashPath": "nuget.versioning.5.11.5.nupkg.sha512"
+    },
+    "SimpleInjector/5.4.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-L7s/snITatVAFz3dKM0+YVO0XApEj+ugCstDhq9eQLi1UYnKFyoNW6RtHkYfv5ue/UVrbS3l6ivTKIUO3FcRRg==",
+      "path": "simpleinjector/5.4.1",
+      "hashPath": "simpleinjector.5.4.1.nupkg.sha512"
+    },
+    "System.ClientModel/1.1.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-UocOlCkxLZrG2CKMAAImPcldJTxeesHnHGHwhJ0pNlZEvEXcWKuQvVOER2/NiOkJGRJk978SNdw3j6/7O9H1lg==",
+      "path": "system.clientmodel/1.1.0",
+      "hashPath": "system.clientmodel.1.1.0.nupkg.sha512"
+    },
+    "System.Memory.Data/6.0.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-ntFHArH3I4Lpjf5m4DCXQHJuGwWPNVJPaAvM95Jy/u+2Yzt2ryiyIN04LAogkjP9DeRcEOiviAjQotfmPq/FrQ==",
+      "path": "system.memory.data/6.0.0",
+      "hashPath": "system.memory.data.6.0.0.nupkg.sha512"
+    },
+    "System.Security.Cryptography.ProtectedData/4.5.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-wLBKzFnDCxP12VL9ANydSYhk59fC4cvOr9ypYQLPnAj48NQIhqnjdD2yhP8yEKyBJEjERWS9DisKL7rX5eU25Q==",
+      "path": "system.security.cryptography.protecteddata/4.5.0",
+      "hashPath": "system.security.cryptography.protecteddata.4.5.0.nupkg.sha512"
+    }
+  }
+}

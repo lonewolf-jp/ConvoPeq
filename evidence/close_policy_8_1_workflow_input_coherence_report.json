@@ -1,0 +1,37 @@
+{
+  "schema": "close_policy_8_1_workflow_input_coherence_report_v1",
+  "generatedAt": "2026-07-09T20:25:48.8202648+09:00",
+  "workflowPath": "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-8_1-close-policy.json",
+  "defaults": {
+    "collect81WindowSec": "20",
+    "collect81AutoCaptureTimeoutSec": "10",
+    "collect81ProbeExitMs": "8000",
+    "enforce81CloseDecisionRetryMax": "2"
+  },
+  "resolvedDefaults": {
+    "collect81WindowSec": 20,
+    "collect81AutoCaptureTimeoutSec": 10,
+    "collect81ProbeExitMs": 8000,
+    "enforce81CloseDecisionRetryMax": 2
+  },
+  "collectorPolicy": {
+    "minWindowSec": 1,
+    "maxWindowSec": 120,
+    "minAutoCaptureTimeoutSec": 1,
+    "maxAutoCaptureTimeoutSec": 120,
+    "minProbeExitMs": 100,
+    "maxProbeExitMs": 30000,
+    "minRetryMax": 1,
+    "maxRetryMax": 5,
+    "allowedCollectTiers": [
+      "standard",
+      "exhaustive"
+    ],
+    "allowedEnforceTiers": [
+      "standard",
+      "exhaustive"
+    ]
+  },
+  "violations": []
+}

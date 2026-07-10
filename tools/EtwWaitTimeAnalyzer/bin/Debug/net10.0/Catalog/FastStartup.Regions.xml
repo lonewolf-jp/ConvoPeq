@@ -1,0 +1,1589 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes'?>
+<?Copyright (c) Microsoft Corporation. All rights reserved.?>
+<InstrumentationManifest>
+  <Instrumentation>
+    <Regions>
+      <RegionRoot Guid="{d8d639a0-cf4c-45fb-976a-0000DEADBEEF}" Name="FastStartup" FriendlyName="Fast Startup">
+
+        <Region Guid="{D38BE1A3-2A14-436A-9064-6D3E6CB85F88}" Name="FastStartup-Suspend-Overall-Time" FriendlyName="Overall Shutdown">
+
+          <Region Guid="{d8d639a0-cf4c-45fb-976a-000111000100}" Name="FastStartup-Suspend-UserSession-Shutdown" FriendlyName="User Session Shutdown">
+            <Start>
+              <!-- Microsoft-Windows-Winlogon/ReceivedLogoffRequest/win:Info -->
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="301" Version="0"/>
+            </Start>
+            <Stop>
+              <!-- Microsoft-Windows-Kernel-Power/SuspendApps/PhaseStart -->
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="22" Version="0"/>
+            </Stop>
+
+            <Region Guid="{6a5f06ec-f18a-43dd-8a2f-0bc1fb3ac67a}" Name="FastStartup-Suspend-Winlogon-DisplayLoggingOff" FriendlyName="Display Signing Out">
+              <Start>
+                <!-- Microsoft-Windows-Winlogon/LogoffRequestToUserFeedback/win:Start -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6101" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Winlogon/LogoffRequestToUserFeedback/win:Stop -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6102" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{e27343b9-74eb-415e-b630-b648b387aa51}" Name="FastStartup-Suspend-Winlogon-UIServerStartup" FriendlyName="UI Server Startup">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/WluiServerStartup/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="501" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/WluiServerStartup/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="502" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <!-- End Display Signing Out -->
+            </Region>
+
+            <Region Guid="{d8d639a0-0000-0000-0000-000000000090}" Name="FastStartup-Suspend-Winlogon-CreatePrimaryTerminal" FriendlyName="Create Primary Terminal">
+              <Start>
+                <!-- Microsoft-Windows-Winlogon/CreatePrimaryTerminal/win:Start -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="101" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Winlogon/CreatePrimaryTerminal/win:Stop -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="102" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000091}" Name="FastStartup-Suspend-Winlogon-WaitForLSM" FriendlyName="Wait For LSM">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/WaitForLSM/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="107" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/WaitForLSM/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="108" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <!-- End Create Primary Terminal -->
+            </Region>
+
+            <Region Guid="{7A7C6217-9A3E-4ecf-A2DD-E2819AF7C7A8}" Name="FastStartup-Suspend-Winlogon-Notifications" FriendlyName="Winlogon Notifications">
+
+              <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000300}" Name="FastStartup-Suspend-ShutdownProcesses-Phase" FriendlyName="Shutdown Processes">
+
+                <Region Guid="{d8d639a0-0000-0000-0000-000000000301}" Name="FastStartup-Suspend-ShutdownProcesses-Process" FriendlyName="Shutdown Process">
+                  <Start>
+                    <!-- Microsoft-Windows-Winsrv/ShutdownProcess/win:Start -->
+                    <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12009" Version="1" />
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winsrv/ShutdownProcess/win:Stop -->
+                    <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12010" Version="1"/>
+                  </Stop>
+                  <Match>
+                    <Event TID="true"/>
+                  </Match>
+                  <Naming>
+                    <PayloadBased NameField="ProcessId" Type="Pid"/>
+                  </Naming>
+                </Region>
+
+                <!-- End Shutdown Processes -->
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000100}" Name="FastStartup-Resume-Winlogon-UpdatePerUserSystemParameters" FriendlyName="Update PerUser System Parameters">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/UpdatePerUserSystemParameters/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="3" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/UpdatePerUserSystemParameters/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="4" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000092}" Name="FastStartup-Suspend-Winlogon-ThemesOnEarlyCreateSession" FriendlyName="Themes On EarlyCreateSession">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnEarlyCreateSession/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="70" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnEarlyCreateSession/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="71" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000093}" Name="FastStartup-Suspend-Winlogon-DwmpCreateSessionProcess" FriendlyName="Create Session Process">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/DwmpCreateSessionProcess/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="61" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/DwmpCreateSessionProcess/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="62" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000094}" Name="FastStartup-Suspend-Winlogon-StartLogonUI" FriendlyName="Start Logon UI">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/StartLogonUI/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="103" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/StartLogonUI/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="104" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{05C4C8EF-78E2-4cf9-B965-A628957D337F}" Name="FastStartup-Suspend-Winlogon-CreateSession" FriendlyName="Create Session">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0"/>
+                  <PayloadIdentifier FieldName="Event" FieldValue="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0"/>
+                  <PayloadIdentifier FieldName="Event" FieldValue="0"/>
+                </Stop>
+                <Match>
+                  <Event PID ="true"/>
+                </Match>
+
+                <Region Guid="{A75D8F5D-E8F8-40b8-B453-5CC70DEAC06F}" Name="FastStartup-Suspend-Winlogon-CreateSession-Subscribers" FriendlyName="Subscribers for Create Session">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="805" Version="0" />
+                    <PayloadIdentifier FieldName="Event" FieldValue="0"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="806" Version="0"/>
+                    <PayloadIdentifier FieldName="Event" FieldValue="0"/>
+                  </Stop>
+                  <Naming>
+                    <PayloadBased NameField="SubscriberName"/>
+                  </Naming>
+
+                  <Region Guid="{2E69E6FB-3924-4deb-8B71-E5198A9952EF}" Name="FastStartup-Suspend-Winlogon-CreateSession-ConnectToSubscriber" FriendlyName="Connect to Subscriber for Create Session">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0" />
+                    </Stop>
+                    <Match>
+                      <Event PID ="true"/>
+                      <Parent PID ="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{35F234D7-CF6D-44ae-A991-9B89BEA5FA31}" Name="FastStartup-Suspend-Winlogon-CreateSession-CallSubscriber" FriendlyName="Call Subscriber for Create Session">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                      <PayloadIdentifier FieldName ="Event" FieldValue="0"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName ="Event" FieldValue="0"/>
+                    </Stop>
+                    <Match>
+                      <Event PID ="true"/>
+                      <Parent PID ="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{F760BB96-7C01-4912-8643-94E7B3D59F30}" Name="FastStartup-Suspend-Winlogon-CreateSession-NotificationPended" FriendlyName="Pended Notification for Create Session">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/NotifySubscriber/NotificationPended -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="807" Version="0" />
+                      <PayloadIdentifier FieldName ="Event" FieldValue="0"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName ="Event" FieldValue="0"/>
+                    </Stop>
+                    <Match>
+                      <Event>
+                        <Payload FieldName="SubscriberName"/>
+                      </Event>
+                      <Parent>
+                        <Payload FieldName="SubscriberName"/>
+                      </Parent>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="Message"/>
+                    </Naming>
+                  </Region>
+
+                  <!-- End Subscribers For Create Session -->
+                </Region>
+
+                <!-- End Create Session -->
+              </Region>
+
+              <Region Guid="{d84bc9ac-46b2-43d7-8288-4105458cf340}" Name="FastStartup-Suspend-Winlogon-ThemesOnCreateSession" FriendlyName="Themes On CreateSession">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnCreateSession/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="205" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnCreateSession/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="206" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{30f5716c-10c2-4840-b4ea-352b2b23ddf0}" Name="FastStartup-Suspend-Winlogon-Winlogon-DwmpNotifyUserLogon" FriendlyName="Notify DWM (Logon)">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/DwmpNotifyUserLogon/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="67" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/DwmpNotifyUserLogon/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="68" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{FB9348A5-319C-42aa-81B3-585F305963D0}" Name="FastStartup-Suspend-Winlogon-EndShell" FriendlyName="End Shell">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0"/>
+                  <PayloadIdentifier FieldName ="Event" FieldValue="13"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0"/>
+                  <PayloadIdentifier FieldName ="Event" FieldValue="13"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+
+                <Region Guid="{D5C41F3D-5BAB-41bd-9E7F-70E76BCD4D2B}" Name="FastStartup-Suspend-Winlogon-EndShell-Subscribers" FriendlyName="Subscribers for End Shell">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="805" Version="0"/>
+                    <PayloadIdentifier FieldName ="Event" FieldValue="13"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="806" Version="0"/>
+                    <PayloadIdentifier FieldName ="Event" FieldValue="13"/>
+                  </Stop>
+                  <Match>
+                    <Event PID="true"/>
+                  </Match>
+                  <Naming>
+                    <PayloadBased NameField="SubscriberName"/>
+                  </Naming>
+
+                  <Region Guid="{BFC5A2BB-71D1-49f1-A052-3B3948A32392}" Name="FastStartup-Suspend-Winlogon-EndShell-ConnectToSubscriber" FriendlyName="Connect to Subscriber for End Shell">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0" />
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID ="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{9261872F-D3A7-4d80-BDE3-8479CC920639}" Name="FastStartup-Suspend-Winlogon-EndShell-CallSubscriber" FriendlyName="Call Subscriber for End Shell">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0"/>
+                      <PayloadIdentifier FieldName ="Event" FieldValue="13"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                      <PayloadIdentifier FieldName ="Event" FieldValue="13"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{62619109-0FDC-4143-9A33-4AFC9A0F0E4B}" Name="FastStartup-Suspend-Winlogon-EndShell-NotificationPended" FriendlyName="Pended Notification for End Shell">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/NotifySubscriber/NotificationPended -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="807" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="13"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                      <PayloadIdentifier FieldName="Event" FieldValue="13"/>
+                    </Stop>
+                    <Match>
+                      <Event>
+                        <Payload FieldName ="SubscriberName" />
+                      </Event>
+                      <Parent>
+                        <Payload FieldName="SubscriberName"/>
+                      </Parent>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="Message"/>
+                    </Naming>
+                  </Region>
+
+                  <!-- End Pended Notification for End Shell -->
+                </Region>
+
+                <!-- End End Shell -->
+              </Region>
+
+              <Region Guid="{a6445e4e-c7de-409a-9e63-fb97f8668e90}" Name="FastStartup-Suspend-Winlogon-NotifyLogoff" FriendlyName="Notify DWM (Logoff)">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/DwmpNotifyUserLogoff/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="72" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/DwmpNotifyUserLogoff/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="73" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{3171b584-df01-48e0-a3a4-58f58144d13c}" Name="FastStartup-Suspend-Winlogon-ThemesOnLogoff" FriendlyName="Themes On Logoff">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnLogoff/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="51" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnLogoff/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="52" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{3F0622CA-4537-4419-8BCE-4FEB10AAF097}" Name="FastStartup-Suspend-Winlogon-Logoff" FriendlyName="Logoff">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0"/>
+                  <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0"/>
+                  <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+
+                <Region Guid="{F466EE67-192C-4772-B13D-052CCD2D70B3}" Name="FastStartup-Suspend-Winlogon-Logoff-Subscribers" FriendlyName="Subscribers for Logoff">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="805" Version="0"/>
+                    <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="806" Version="0"/>
+                    <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                  </Stop>
+                  <Naming>
+                    <PayloadBased NameField="SubscriberName"/>
+                  </Naming>
+
+                  <Region Guid="{46DEFEC9-AC3F-4762-86F6-56E6B6295473}" Name="FastStartup-Suspend-Winlogon-Logoff-ConnectToSubscriber" FriendlyName="Connect to Subscriber for Logoff">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{B2891DFB-0621-45af-B55B-17A781BEEE80}" Name="FastStartup-Suspend-Winlogon-Logoff-CallSubscriber" FriendlyName="Call Subscriber for Logoff">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{00F052C0-2BCD-4c4a-8BC0-252AA6F9E9C5}" Name="FastStartup-Suspend-Winlogon-Logoff-NotificationPended" FriendlyName="Pended Notification for Logoff" >
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/NotifySubscriber/NotificationPended -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="807" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="3"/>
+                    </Stop>
+                    <Match>
+                      <Event>
+                        <Payload FieldName="SubscriberName"/>
+                      </Event>
+                      <Parent>
+                        <Payload FieldName="SubscriberName"/>
+                      </Parent>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="Message"/>
+                    </Naming>
+                  </Region>
+
+                  <!-- End Subscribers for Logoff -->
+                </Region>
+
+                <!-- End Logoff -->
+              </Region>
+
+              <Region Guid="{a69be856-6591-43ef-bdc7-736c845d3059}" Name="FastStartup-Suspend-Winlogon-InitiateShutdown" FriendlyName="Initiate Shutdown">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/InitiateShutdown/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="403" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/InitiateShutdown/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="404" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID ="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{9B3F1FCE-600E-4834-80DF-6091A1D6DEB8}" Name="FastStartup-Suspend-Winlogon-TerminateSession" FriendlyName="Terminate Session">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0"/>
+                  <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0"/>
+                  <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                </Stop>
+                <Match>
+                  <Event PID ="true"/>
+                </Match>
+
+                <Region Guid="{405FAB48-DE52-405a-8DB1-F4E3BEFA444D}" Name="FastStartup-Suspend-Winlogon-TerminateSession-Subscribers" FriendlyName="Subscribers for Terminate Session">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="805" Version="0"/>
+                    <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="806" Version="0"/>
+                    <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                  </Stop>
+
+                  <Region Guid="{319F254D-1696-4188-A132-B172DD85D700}" Name="FastStartup-Suspend-Winlogon-TerminateSession-ConnectToSubscriber" FriendlyName="Connect to Subscriber for Terminate Session">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{7893E580-71B0-48e0-BFD0-AE0F2BCE4AC0}" Name="FastStartup-Suspend-Winlogon-TerminateSession-CallSubscriber" FriendlyName="Call Subscriber for Terminate Session">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                      <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                      <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{88FAA4C2-B25F-42e7-BE1B-DA98008E0CDD}" Name="FastStartup-Suspend-Winlogon-TerminateSession-NotificationPended" FriendlyName="Pended Notification for Terminate Session">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/NotifySubscriber/NotificationPended -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="807" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue ="1"/>
+                    </Stop>
+                    <Match>
+                      <Event>
+                        <Payload FieldName="SubscriberName"/>
+                      </Event>
+                      <Parent>
+                        <Payload FieldName="SubscriberName"/>
+                      </Parent>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="Message"/>
+                    </Naming>
+                  </Region>
+
+                  <!-- End Subscribers for Terminate Session -->
+                </Region>
+
+                <!-- End Terminate Session -->
+              </Region>
+
+              <Region Guid="{a4963ae5-b65a-4964-8252-e4a269680ea3}" Name="FastStartup-Suspend-Winlogon-UIServerShutdown" FriendlyName="UI Server Shutdown">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/WluiServerShutdown/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="503" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/WluiServerShutdown/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="504" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{90e928d9-dfcc-454c-a9e8-0b7e950e4beb}" Name="FastStartup-Suspend-Winlogon-TerminateSessionProcess" FriendlyName="Terminate Session Process">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/DwmpTerminateSessionProcess/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="64" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/DwmpTerminateSessionProcess/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="65" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{bb401c22-6121-4c3d-866a-a0a2c8561b37}" Name="FastStartup-Suspend-Winlogon-ThemesOnTerminateSession" FriendlyName="Themes On Terminate Session">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnTerminateSession/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="207" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnTerminateSession/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="208" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <!-- End Winlogon Notifications -->
+            </Region>
+
+            <!-- End User Session Shutdown -->
+          </Region>
+
+          <Region Guid="{B9551085-F8D2-4131-A4B4-535FDC48E949}" Name="FastStartup-Hibernate-Total" FriendlyName="System Suspend">
+            <Start>
+              <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Start -->
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="1" Version="0"/>
+            </Start>
+            <Stop>
+              <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+              <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="TotalHibernateTime" Multiplier="1000000"/>
+            </Stop>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000000}" Name="FastStartup-Suspend-Apps-Phase" FriendlyName="Suspend Processes">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendApps/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="22" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendApps/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="23" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000001}" Name="FastStartup-Suspend-Apps-App" FriendlyName="Suspend Process">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/SuspendApps/win:Start -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="16" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/SuspendApps/win:Stop -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="17" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="Pid"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="Pid" Type="Pid"/>
+                </Naming>
+              </Region>
+
+              <!-- End Suspend Processes -->
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000002}" Name="FastStartup-Suspend-Services-Phase" FriendlyName="Suspend Services">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendServices/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="24" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendServices/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="25" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000003}" Name="FastStartup-Suspend-Services-Service" FriendlyName="Suspend Service">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/SuspendServices/win:Start -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="18" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/SuspendServices/win:Stop -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="19" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="Name"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="Name"/>
+                </Naming>
+              </Region>
+
+              <!-- End Suspend Services -->
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000005}" Name="FastStartup-Suspend-Superfetch-PageIn" FriendlyName="Superfetch Prepare Memory">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/Superfetch/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="64" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/Superfetch/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="65" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000008}" Name="FastStartup-Suspend-PreSleepCallbacks" FriendlyName="Pre-Sleep Callbacks">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/PreSleepCallbacks/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="68" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/PreSleepCallbacks/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="69" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000009}" Name="FastStartup-Suspend-SwapInWorkerThreads" FriendlyName="Worker Threads Swap-in">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/PreSleepCallbacks/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="69" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="35" Version="0"/>
+                <PayloadIdentifier FieldName="Query" FieldValue="true"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-00000000000b}" Name="FastStartup-Suspend-QueryDevices-Phase" FriendlyName="Query Devices">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="35" Version="0"/>
+                <PayloadIdentifier FieldName="Query" FieldValue="true"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="36" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-00000000000e}" Name="FastStartup-Suspend-QueryDevices-Device" FriendlyName="Query Device">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Start -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="7" Version="1"/>
+                  <PayloadIdentifier FieldName="MinorFunction" FieldValue="3" />
+                  <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Stop -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="8" Version="0" />
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="Irp"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="InstanceName" Type="Device"/>
+                </Naming>
+              </Region>
+
+              <!-- End Query Devices -->
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-00000000000a}" Name="FastStartup-Suspend-FlushVolumes" FriendlyName="Flush Storage Volumes">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="36" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="35" Version="0"/>
+                <PayloadIdentifier FieldName="Query" FieldValue="false"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+            </Region>
+
+            <Region Guid="{5E81D74C-0CCC-43f9-8119-953F827BCD12}" Name="FastStartup-Suspend-Devices-Phase" FriendlyName="Suspend Devices">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="35" Version="0"/>
+                <PayloadIdentifier FieldName="Query" FieldValue="false"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/SuspendDevices/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="36" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-00000000000d}" Name="FastStartup-Suspend-Devices-Device" FriendlyName="Suspend Device">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Start -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="7" Version="1"/>
+                  <PayloadIdentifier FieldName="MinorFunction" FieldValue="2" />
+                  <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Stop -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="8" Version="0" />
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="Irp"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="InstanceName" Type="Device"/>
+                </Naming>
+              </Region>
+
+              <!-- End Suspend Devices -->
+            </Region>
+
+            <Region Guid="{BFDF0516-CAA9-4b3a-A480-8FBA9146A34A}" Name="FastStartup-Suspend-HiberFileTime" FriendlyName="Total Hiberfile Write">
+
+              <Region Guid="{93783B2C-A67F-49cb-89BC-BF305D7E2CEA}" Name="FastStartup-Suspend-HiberInitTime" FriendlyName="Hiberfile Initialization">
+                <Start>
+                  <Region  RegionGuid="{5E81D74C-0CCC-43f9-8119-953F827BCD12}"/>
+                </Start>
+                <Stop>
+                  <Region RegionGuid="{7D6BA3F6-BC04-4776-8A7F-93CF7F4E2B6D}"/>
+                </Stop>
+              </Region>
+
+              <Region Guid="{7D6BA3F6-BC04-4776-8A7F-93CF7F4E2B6D}" Name="FastStartup-Suspend-WriteHiberFile" FriendlyName="Hiberfile Write">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+                  <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="HiberHiberFileTime"  Multiplier="1000000"/>
+                </Start>
+                <Stop>
+                  <Region RegionGuid="{EC1BB2D9-4AA8-4d82-84AA-6042FF4CFBE3}"/>
+                </Stop>
+              </Region>
+
+              <!-- End Total Hiberfile Write -->
+            </Region>
+
+            <!-- End System Suspend -->
+          </Region>
+
+          <!-- End Overall Shutdown -->
+        </Region>
+
+        <Region Guid="{EC1BB2D9-4AA8-4d82-84AA-6042FF4CFBE3}" Name="FastStartup-Powered-Down" FriendlyName="Powered Off/Sleeping">
+          <Start>
+            <Region RegionGuid="{B9551085-F8D2-4131-A4B4-535FDC48E949}"/>
+          </Start>
+          <Stop>
+            <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000006002000}"/>
+          </Stop>
+        </Region>
+
+        <Region Guid="{B5243DEF-E83B-450f-99EC-BFCE45D449BC}" Name="FastStartup-Resume-BIOS" FriendlyName="BIOS Initialization">
+          <Start>
+            <Region RegionGuid="{EC1BB2D9-4AA8-4d82-84AA-6042FF4CFBE3}"/>
+          </Start>
+          <Stop>
+            <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+            <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="POSTTime" Multiplier="1000000" />
+          </Stop>
+        </Region>
+
+        <Region Guid="{6561933E-449F-4d47-9C02-87295C9632BD}" Name="FastStartup-Resume-FwPostTime" FriendlyName="Firmware POST Duration">
+          <Start>
+            <Region RegionGuid="{EC1BB2D9-4AA8-4d82-84AA-6042FF4CFBE3}"/>
+          </Start>
+          <Stop>
+            <!-- Microsoft-Windows-Kernel-Boot BOOT_FW_BOOT_PERF_DATA -->
+            <Duration  Provider="{15ca44ff-4d7a-4baa-bba5-0998955e531e}" Id="30" Version="0" Duration="StartOSImageStart" Multiplier="1000000" />
+          </Stop>
+        </Region>
+
+        <Region Guid="{d8d639a0-cf4c-45fb-976a-000006002000}" Name="FastStartup-Resume-PoweredOnToKernelResumeComplete" FriendlyName="Powered On to Kernel Resume Complete">
+          <Start>
+            <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+            <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="TotalResumeTime" Multiplier="1000000" />
+          </Start>
+          <Stop>
+            <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+            <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1"/>
+          </Stop>
+        </Region>
+
+        <Region Guid="{3E6F217A-5C2F-4126-993F-69BC46A6A881}" Name="FastStartup-Resume-Overall-Time" FriendlyName="Total Boot [Excluding BIOS]">
+
+          <Region Guid="{2E0B9837-6FE0-4873-9C89-46BCCCB8C222}" Name="FastStartup-Resume-MainPath-Time" FriendlyName="Boot Main Path">
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000002002000}" Name="FastStartup-Resume-BootMgr" FriendlyName="Boot Manager">
+              <Start>
+                <Region RegionGuid="{B5243DEF-E83B-450f-99EC-BFCE45D449BC}"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+                <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="ResumeBootMgrTime" Multiplier="1000000" />
+              </Stop>
+            </Region>
+
+            <Region Guid="{40B4F094-C0AA-4d3d-B7F0-0764C005D4B8}" Name="FastStartup-Resume-ReadHiberFile" FriendlyName="Hiberfile Read">
+
+              <Region Guid="{d8d639a0-cf4c-45fb-976a-000003002000}" Name="FastStartup-Resume-Winresume" FriendlyName="Resume Application">
+                <Start>
+                  <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000002002000}"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+                  <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="ResumeAppTime" Multiplier="1000000" />
+                </Stop>
+              </Region>
+
+              <Region Guid="{d8d639a0-cf4c-45fb-976a-000004002000}" Name="FastStartup-Resume-KernelPhase" FriendlyName="Kernel Hiberfile Read">
+                <Start>
+                  <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000003002000}"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/PowerTransition/win:Info -->
+                  <Duration Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="117" Version="1" Duration="KernelResumeHiberFileTime" Multiplier="1000000"/>
+                </Stop>
+              </Region>
+
+              <!-- End Hiberfile Read -->
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000010000}" Name="FastStartup-Resume-Devices-Phase" FriendlyName="Resume Devices">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/WakeDevices/PhaseStart -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="37" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/WakeDevices/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="38" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-00000001000d}" Name="FastStartup-Resume-Devices-Device" FriendlyName="Resume Device">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Start -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="7" Version="1"/>
+                  <PayloadIdentifier FieldName="MinorFunction" FieldValue="2"/>
+                  <PayloadIdentifier FieldName="PowerStateType" FieldValue="0" />
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Stop -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="8" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="Irp"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="InstanceName" Type="Device"/>
+                </Naming>
+              </Region>
+
+              <!-- End Resume Devices -->
+            </Region>
+
+            <Region Guid="{30E09274-4681-4215-B471-A1637050C8F4}" Name="FastStartup-Resume-Components" FriendlyName="Resume Components">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/WakeDevices/PhaseStop -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="38" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/DirtyTransition/win:Info -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="2" Version="0"/>
+              </Stop>
+            </Region>
+
+            <Region Guid="{67FEC554-A6CC-4b6f-A941-4CA449AA4ED3}" Name="FastStartup-Resume-OsSelectionMenu" FriendlyName="Operating System Selection Menu">
+              <Start>
+                <!-- Microsoft-Windows-BootUX/LaunchUX/win:Start -->
+                <Event Provider="{67d781bd-cbd2-4bd2-ad1f-6152fb891246}" Id="1000" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-BootUX/LaunchUX/win:Stop -->
+                <Event Provider="{67d781bd-cbd2-4bd2-ad1f-6152fb891246}" Id="1001" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+            </Region>
+
+            <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000100}" Name="FastStartup-Resume-Winlogon-Phase" FriendlyName="Winlogon Resume">
+              <Start>
+                <!-- Microsoft-Windows-Winlogon/DisplayWelcomeScreen/win:Stop -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="202" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Winlogon/ExecuteShellCommandList/win:Stop -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="10" Version="0"/>
+              </Stop>
+              <Match>
+                <Event PID="true"/>
+              </Match>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000101}" Name="FastStartup-Resume-Winlogon-Request Credentials" FriendlyName="Request Credentials">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/RequestCredentials/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="203" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/RequestCredentials/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="204" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000102}" Name="FastStartup-Resume-Winlogon-AuthenticateUser" FriendlyName="Authenticate User">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/AuthenticateUser/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="1" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/AuthenticateUser/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="2" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000111}" Name="FastStartup-Resume-Winlogon-IHMDismissAnimation" FriendlyName="IHM Dismiss Animation">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-AuthUI/Logon_ServerCallback_ReportResult/win:Start -->
+                  <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}"  Id="25015" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-AuthUI/Logon_CredentialsToExit/win:Start -->
+                  <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}"  Id="25059" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000105}" Name="FastStartup-Resume-Winlogon-ThemesOnLogonPre" FriendlyName="Prepare Themes">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnLogonPre/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="11" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnLogonPre/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="12" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{B1F9921C-BD0B-42c4-962F-F4CAAA37DF84}" Name="FastStartup-Resume-Winlogon-Logon" FriendlyName="Logon">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="801" Version="0"/>
+                  <PayloadIdentifier FieldName="Event"  FieldValue="2"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="802" Version="0"/>
+                  <PayloadIdentifier FieldName="Event"  FieldValue="2"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+
+                <Region Guid="{1FBC9FDF-DA40-4fdf-8CEE-F4165B7C991A}" Name="FastStartup-Resume-Winlogon-Logon-Subscribers" FriendlyName="Subscribers for Logon">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="805" Version="0"/>
+                    <PayloadIdentifier FieldName="Event"  FieldValue="2"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="806" Version="0"/>
+                    <PayloadIdentifier FieldName="Event"  FieldValue="2"/>
+                  </Stop>
+                  <Naming>
+                    <PayloadBased NameField="SubscriberName"/>
+                  </Naming>
+
+                  <Region Guid="{B2BD458F-B29D-4379-9D4C-B7B42B3CBC92}" Name="FastStartup-Resume-Winlogon-Logon-ConnectToSubscriber" FriendlyName="Connect to Subscriber for Logon" >
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="809" Version="0"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="810" Version="0"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{A8EB4DB9-27B1-4aaf-BDCE-739BE16C85F9}" Name="FastStartup-Resume-Winlogon-Logon-CallSubscriber" FriendlyName="Call Subscriber for Logon">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="811" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue="2"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue="2"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{3E0AED14-7021-4864-B183-66A1B14261B7}" Name="FastStartup-Resume-Winlogon-Logon-NotificationPended" FriendlyName="Pended Notification for Logon">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/NotifySubscriber/NotificationPended -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="807" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue="2"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="812" Version="0" />
+                      <PayloadIdentifier FieldName="Event" FieldValue="2"/>
+                    </Stop>
+                    <Match>
+                      <Event>
+                        <Payload FieldName="SubscriberName"/>
+                      </Event>
+                      <Parent>
+                        <Payload FieldName="SubscriberName"/>
+                      </Parent>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="Message"/>
+                    </Naming>
+                  </Region>
+
+                  <!-- End Subscribers for Logon -->
+                </Region>
+
+                <!-- End Logon -->
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000110}" Name="FastStartup-Resume-Winlogon-UpdatePerUserSystemParameters" FriendlyName="Update PerUser System Parameters">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/UpdatePerUserSystemParameters/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="3" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/UpdatePerUserSystemParameters/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="4" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000107}" Name="FastStartup-Resume-Winlogon-ThemesOnLogonPost" FriendlyName="Notify Themes">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnLogonPost/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="13" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ThemesOnLogonPost/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="14" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+
+                <Region Guid="{d8d639a0-0000-0000-0000-000000000106}" Name="FastStartup-Resume-Winlogon-DwmpNotifyUserLogon" FriendlyName="Notify DWM">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/DwmpNotifyUserLogon/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="67" Version="0"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/DwmpNotifyUserLogon/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="68" Version="0"/>
+                  </Stop>
+                  <Match>
+                    <Event PID="true"/>
+                  </Match>
+                </Region>
+
+                <!-- End Notify Themes -->
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000108}" Name="FastStartup-Resume-Winlogon-CheckWindowsLicenseStatus" FriendlyName="Check License">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/CheckWindowsLicenseStatus/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="5" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/CheckWindowsLicenseStatus/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="6" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000109}" Name="FastStartup-Resume-Winlogon-RestoringNetConnections" FriendlyName="Restore Network Connections">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/RestoringNetConnections/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="7" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/RestoringNetConnections/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="8" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{2C6CC266-ACB5-4e17-87C2-1F1197B421A2}" Name="FastStartup-Resume-Winlogon-StartShell" FriendlyName="Start Shell">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="801" Version="0"/>
+                  <PayloadIdentifier FieldName ="Event" FieldValue="12"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/NotifyExecute/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="802" Version="0"/>
+                  <PayloadIdentifier FieldName ="Event" FieldValue="12"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+
+                <Region Guid="{85AB4A5C-ADB3-4147-95AD-D428E758632F}" Name="FastStartup-Resume-Winlogon-StartShell-Subscribers" FriendlyName="Subscribers for Start Shell">
+                  <Start>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Start -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="805" Version="0"/>
+                    <PayloadIdentifier FieldName ="Event" FieldValue="12"/>
+                  </Start>
+                  <Stop>
+                    <!-- Microsoft-Windows-Winlogon/NotifySubscriber/win:Stop -->
+                    <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="806" Version="0"/>
+                    <PayloadIdentifier FieldName ="Event" FieldValue="12"/>
+                  </Stop>
+                  <Naming>
+                    <PayloadBased NameField="SubscriberName"/>
+                  </Naming>
+
+                  <Region Guid="{F6CC49BE-D647-472a-81ED-7C069B0F3E1B}" Name="FastStartup-Resume-Winlogon-StartShell-ConnectToSubscriber" FriendlyName="Connect to Subscriber for Start Shell"  >
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="809" Version="0" />
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/ConnectToSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="810" Version="0"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                  </Region>
+
+                  <Region Guid="{8B5B3845-91B2-436a-81EA-1273EA4AA359}" Name="FastStartup-Resume-Winlogon-StartShell-CallSubscriber" FriendlyName="Call Subscriber for Start Shell">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Start -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="811" Version="0" />
+                      <PayloadIdentifier FieldName="Event" FieldValue="12"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="812" Version="0"/>
+                      <PayloadIdentifier FieldName="Event" FieldValue="12"/>
+                    </Stop>
+                    <Naming>
+                      <PayloadBased NameField="SubscriberName"/>
+                    </Naming>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                  </Region>
+
+                  <Region Guid="{20319FB0-62F6-4a08-A44D-BE660B5BC22F}" Name="FastStartup-Resume-Winlogon-StartShell-NotificationPended" FriendlyName="Pended Notification for Start Shell">
+                    <Start>
+                      <!-- Microsoft-Windows-Winlogon/NotifySubscriber/NotificationPended -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="807" Version="0" />
+                      <PayloadIdentifier FieldName="Event" FieldValue="12"/>
+                    </Start>
+                    <Stop>
+                      <!-- Microsoft-Windows-Winlogon/CallSubscriber/win:Stop -->
+                      <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="812" Version="0"  />
+                      <PayloadIdentifier FieldName="Event" FieldValue="12"/>
+                    </Stop>
+                    <Match>
+                      <Event PID="true"/>
+                      <Parent PID="true"/>
+                    </Match>
+                    <Naming>
+                      <PayloadBased NameField="Message"/>
+                    </Naming>
+                  </Region>
+
+                  <!-- End Subscribers for Start Shell -->
+                </Region>
+
+                <!-- End Start Shell -->
+              </Region>
+
+              <Region Guid="{d8d639a0-0000-0000-0000-000000000209}" Name="FastStartup-Resume-Winlogon-ExecuteShellCommandList" FriendlyName="Execute Shell Command List">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ExecuteCommandList/win:Start -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="9" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Winlogon/ExecuteCommandList/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="10" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <!-- End Winlogon Resume -->
+            </Region>
+
+            <Region Guid="{A663FE45-C61B-4c62-B4BA-E6FE60C6F574}" Name="FastStartup-Resume-ExplorerInit" FriendlyName="Explorer Initialization">
+              <Start>
+                <!-- Microsoft-Windows-Winlogon/ExecuteShellCommandList/win:Stop -->
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="10" Version="0"/>
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Shell-Core/PerfTrack_Explorer_ExplorerStartToDesktopReady/win:Stop -->
+                <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}"  Id="27231" Version="0"/>
+              </Stop>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129005}" Name="FastStartup-Resume-ExplorerInit-CreateExplorerProcess" FriendlyName="Create Explorer Process">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/ExecuteShellCommandList/win:Stop -->
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="10" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_InitializingExplorer/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9601" Version="0"/>
+                </Stop>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129006}" Name="FastStartup-Resume-ExplorerInit-InitExplorer" FriendlyName="Init Explorer">
+                <Start>
+                  <!-- Microsoft-Windows-Winlogon/Explorer_InitializingExplorer/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9601" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/LogonPerformance_TaskRunTime/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="62170" Version="0"/>
+                  <PayloadIdentifier FieldName="TaskName"  FieldValue="AllLogonTasks"/>
+                </Stop>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129008}" Name="FastStartup-Resume-ExplorerInit-ProcessRunOnce" FriendlyName="Process RunOnce">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_ProcessRunOnce/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9703" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_ProcessRunOnce/win:Stop -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9704" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129004}" Name="FastStartup-Resume-ExplorerInit-LogonPerformance_TaskRunTime" FriendlyName="LogonPerformance TaskRunTime">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-Core/LogonPerformance_TaskRunTime/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="62170" Version="0"/>
+                  <PayloadIdentifier FieldName="TaskName"  FieldValue="AllLogonTasks" FieldValueRelationship="DoesNotContain"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/LogonPerformance_TaskRunTime/win:Stop -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="62171" Version="0"/>
+                  <PayloadIdentifier FieldName="TaskName"  FieldValue="AllLogonTasks" FieldValueRelationship="DoesNotContain"/>
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="TaskName"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="TaskName"/>
+                </Naming>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129001}" Name="FastStartup-Resume-ExplorerInit-CreateTray" FriendlyName="Create Tray">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_CreateTray/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9603" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_CreateTray/win:Stop -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9604" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129000}" Name="FastStartup-Resume-ExplorerInit-CreateDesktop" FriendlyName="Create Desktop">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_CreateDesktop/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9611" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_CreateDesktop/win:Stop -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9612" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129007}" Name="FastStartup-Resume-ExplorerInit-LauncherShow" FriendlyName="Launcher Show">
+                <Start>
+                  <!-- Microsoft-Windows-Immersive-Shell/Launcher_Show_FromImmersiveMode/win:Start -->
+                  <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2365" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Immersive-Shell/Launcher_Show_FromImmersiveMode/win:Stop -->
+                  <Event Provider="{315a8872-923e-4ea2-9889-33cd4754bf64}" Id="2366" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event PID="true"/>
+                </Match>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129002}" Name="FastStartup-Resume-ExplorerInit-Startup_Step" FriendlyName="Startup Step">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_Startup_Step/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9648" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_Startup_Step/win:Stop -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9649" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="psz"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="psz"/>
+                </Naming>
+              </Region>
+
+              <Region Guid="{11821003-CD0F-4BD9-AA98-B238D6129003}" Name="FastStartup-Resume-ExplorerInit-Startup_ParallelStep" FriendlyName="Startup ParallelStep">
+                <Start>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_Startup_ParallelStep/win:Start -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9652" Version="0"/>
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Shell-Core/Explorer_Startup_ParallelStep/win:Stop -->
+                  <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="9653" Version="0"/>
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="psz"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="psz"/>
+                </Naming>
+              </Region>
+
+              <!-- End Explorer Initialization -->
+            </Region>
+
+            <!-- End Boot Main Path -->
+          </Region>
+
+          <!-- End Total Boot [Excluding BIOS] -->
+        </Region>
+
+        <Region Guid="{AB719FB1-D863-4305-AE8E-F21281899A85}" Name="FastStartup-ConsoleSessionDisconnect" FriendlyName="Console Session Disconnect">
+          <Start>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="801" Version="0"/>
+            <PayloadIdentifier FieldName="Event" FieldValue="8"/>
+          </Start>
+          <Stop>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}"  Id="802" Version="0"/>
+            <PayloadIdentifier FieldName="Event" FieldValue="8"/>
+          </Stop>
+          <Match>
+            <Event PID="true"/>
+          </Match>
+        </Region>
+
+        <Region Guid="{7D692487-6F38-4FDB-99E1-101C6890B498}" Name="FastStartup-PostBoot" FriendlyName="Post Boot">
+          <Start>
+            <Region RegionGuid="{2E0B9837-6FE0-4873-9C89-46BCCCB8C222}" />
+          </Start>
+          <Stop>
+            <Event Provider="{030F2F57-ABD0-4427-BCF1-3A3587D7DC7D}" Id="1103" Version="0"/>
+          </Stop>
+        </Region>
+
+      </RegionRoot>
+
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>

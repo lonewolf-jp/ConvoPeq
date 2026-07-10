@@ -36,6 +36,10 @@ public:
 
     /** Drain all pending retire entries (unsafe; shutdown only). */
     virtual void drainAll() noexcept = 0;
+
+    // ★ work70: 退役キュー滞留バイト数（診断用概算）。既定値 0。
+    //   pendingRetireCount() だけでは「100個=100KB か 1GB か」が不明。
+    [[nodiscard]] virtual uint64_t pendingRetireBytes() const noexcept { return 0; }
 };
 
 } // namespace convo

@@ -58,6 +58,11 @@ public:
         convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
                               static_cast<std::uint64_t>(1),
                               std::memory_order_acq_rel);
+
+        // ★ work70 P1-c: 最新の retire 対象世代を記録（MEM_SNAP の retiringGeneration 用）
+        const uint64_t committedGen = convo::consumeAtomic(
+            engine_.lastCommittedRuntimeGeneration_, std::memory_order_acquire);
+        convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
     }
 
     void retireDeferred() noexcept
@@ -67,7 +72,13 @@ public:
 
     AudioEngine::DSPCore* getActive() const noexcept { return engine_.getActiveRuntimeDSP(); }
 
+    // ★ work70 P1-c: MEM_SNAP の retiringGeneration 用（DSPLifetimeManager が唯一の Authority）
+    [[nodiscard]] uint64_t retiringGeneration() const noexcept {
+        return convo::consumeAtomic(currentRetiringGeneration_, std::memory_order_acquire);
+    }
+
 private:
     AudioEngine& engine_;
     convo::isr::ISRRetireRouter* router_;
+    std::atomic<uint64_t> currentRetiringGeneration_{0};  // ★ work70 P1-c: retire 対象世代
 };

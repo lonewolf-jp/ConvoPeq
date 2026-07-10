@@ -1,0 +1,16 @@
+﻿{
+    "schema":  "verifier_execution_layers_report_v1",
+    "generatedAt":  "2026-07-06T17:42:00.6210116+09:00",
+    "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-verifier-execution-layers.json",
+    "compileTimeHeader":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
+    "unitTests":  [
+                      "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RuntimeSemanticSchemaValidationTests.cpp",
+                      "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RetireGraceSemanticsTests.cpp"
+                  ],
+    "tierRunner":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
+    "verifierCount":  37,
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

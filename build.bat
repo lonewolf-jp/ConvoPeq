@@ -7,7 +7,12 @@ REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
 REM
 REM Usage:
-REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx]
+REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [-DVAR]
+REM
+REM   -DVAR : CMake definition (cmd.exe strips =VALUE, so =ON is
+REM           auto-appended). Examples:
+REM             build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+REM             build.bat Debug icx -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 REM ============================================================================
 
 echo ==========================================
@@ -24,8 +29,15 @@ set "PGO_MODE=normal"
 set "DO_CLEAN=0"
 set "NO_PAUSE=0"
 set "COMPILER_MODE=msvc"
+set "CMAKE_EXTRA_FLAGS="
 
 for %%A in (%*) do (
+    set "arg=%%~A"
+    if "!arg:~0,2!"=="-D" (
+        REM cmd.exe strips =VALUE, so append =ON.
+        set "CMAKE_EXTRA_FLAGS=!CMAKE_EXTRA_FLAGS! !arg!=ON"
+        echo [INFO] Extra CMake define: !arg!=ON
+    )
     if /i "%%~A"=="Debug" set "BUILD_CONFIG=Debug"
     if /i "%%~A"=="Release" set "BUILD_CONFIG=Release"
     if /i "%%~A"=="clean" set "DO_CLEAN=1"
@@ -55,6 +67,7 @@ echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
 echo [INFO] COMPILER_MODE: !COMPILER_MODE!
+echo [INFO] Extra CMake flags: !CMAKE_EXTRA_FLAGS!
 REM icx PGO exclusion: icx/icpx does not support PGO
 if not "!COMPILER_MODE!"=="msvc" if not "!PGO_MODE!"=="normal" (
     echo [ERROR] PGO is only supported with MSVC compiler.
@@ -201,9 +214,9 @@ set "CMAKE_CONFIG_ATTEMPT=0"
 set /a CMAKE_CONFIG_ATTEMPT+=1
 echo [2/4] Configuring CMake... (attempt !CMAKE_CONFIG_ATTEMPT!)
 if "!COMPILER_MODE!"=="msvc" (
-    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS%
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS% %CMAKE_EXTRA_FLAGS%
 ) else (
-    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx %CMAKE_EXTRA_FLAGS%
 )
 if not errorlevel 1 goto configure_cmake_ok
 

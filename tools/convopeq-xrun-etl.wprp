@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<WindowsPerformanceRecorder Version="1.0" Comments="ConvoPeq XRUN診断用プロファイル">
+  <Profiles>
+    <SystemCollector Id="SystemCollector" Name="NT Kernel Logger">
+      <BufferSize Value="1024" />
+      <Buffers Value="64" />
+    </SystemCollector>
+    <EventCollector Id="EventCollector" Name="ConvoPeqTrace">
+      <BufferSize Value="512" />
+      <Buffers Value="32" />
+    </EventCollector>
+    <TraceMergeProperties>
+      <TraceMergeProperty Id="TraceMerge_Default" Name="TraceMerge_Default">
+        <DeletePreMergedTraceFiles Value="true" />
+        <FileCompression Value="true" />
+        <CustomEvents>
+          <CustomEvent Value="true" />
+        </CustomEvents>
+      </TraceMergeProperty>
+    </TraceMergeProperties>
+    <SystemProvider Id="SystemProvider">
+      <Keywords>
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="CSwitch" />
+        <Keyword Value="ReadyThread" />
+        <Keyword Value="DPC" />
+        <Keyword Value="Interrupt" />
+        <Keyword Value="Priority" />
+        <Keyword Value="Dispatcher" />
+      </Keywords>
+      <Stacks>
+        <Stack Value="CSwitch" />
+        <Stack Value="ReadyThread" />
+      </Stacks>
+    </SystemProvider>
+    <Profile Id="ConvoPeq.Verbose.File" Name="ConvoPeq" Description="ConvoPeq XRUN診断トレース" LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="SystemCollector">
+          <SystemProviderId Value="SystemProvider" />
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="ConvoPeq.Light.File" Name="ConvoPeqLight" Description="ConvoPeq XRUN診断（軽量）" LoggingMode="File" DetailLevel="Light">
+      <Collectors>
+        <SystemCollectorId Value="SystemCollector">
+          <SystemProviderId Value="SystemProvider" />
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

@@ -45,7 +45,9 @@ void AudioEngine::initialize()
         bootstrapBuilder.setHealthStateRef(getHealthStateRef());
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
         auto coordinator = makeRuntimePublicationCoordinator();
-        coordinator.publishWorld(std::move(bootstrapWorld));
+        const auto result = commitRuntimePublication(coordinator, std::move(bootstrapWorld),
+                                 RegistrationContext::none());
+        juce::ignoreUnused(result);
     }
 
     // Now submit rebuild intent — the worker will find a valid Bootstrap World.

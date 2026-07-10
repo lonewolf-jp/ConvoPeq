@@ -41,6 +41,11 @@ std::atomic<std::uint64_t>& AudioEngine::DSPCore::runtimeUuidCounter() noexcept
     return runtimeUuidCounterStorage_;
 }
 
+// ★ work70: DSPCore::liveCount 静的定義
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+std::atomic<uint32_t> AudioEngine::DSPCore::liveCount { 0 };
+#endif
+
 [[nodiscard]] std::uint64_t AudioEngine::DSPCore::reserveNextRuntimeUuid() noexcept
 {
     return convo::fetchAddAtomic(runtimeUuidCounter(),
@@ -56,6 +61,9 @@ AudioEngine::DSPCore::DSPCore()
     , historyState(new HistoryRuntimeState())
     , runtimeUuid(reserveNextRuntimeUuid())
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    liveCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     convolverState->bind(convolver);
     eqState->bind(eq);
 }

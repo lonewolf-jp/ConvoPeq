@@ -30,6 +30,9 @@ struct DeletionEntry {
     DeletionEntryType type = DeletionEntryType::Generic;
     uint64_t publicationSequenceId{0};  // ★ P2-2: 出版-退役の因果追跡用
     uint64_t generation{0};             // ★ P2-2: generation 追跡
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    size_t objectBytes{0};  // ★ work70: Retire 対象のオブジェクトバイト数（sizeof、診断のみ）
+#endif
 };
 
 // B23: リアルタイム安全性のための静的チェック

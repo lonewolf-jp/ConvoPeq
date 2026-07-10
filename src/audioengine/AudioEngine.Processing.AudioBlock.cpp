@@ -443,6 +443,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     }
 
+    // ★ work70 P1-b: SnapshotCoordinator の fade 進行。remaining を処理済みサンプル数だけ進める。
+    //   DSP 処理完了直後（Audio callback 終了直前）。advanceFade はカウンタ減算のみ。
+    //   Timer 側の tryCompleteFade() は別途動作。
+    m_coordinator.advanceFade(numSamples);
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ work60: DSP_STAGE終了時刻（t2）。dsp->process() 完了直後。
     const uint64_t t2_dspEndUs = convo::getCurrentTimeUs();

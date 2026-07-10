@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<InstrumentationManifest>
+  <Instrumentation>
+    <Regions>
+      <!-->
+      Full Boot:
+      Begin Root Container
+      <-->
+      <RegionRoot Name="Boot-Overall-Time" Guid="{ACF96BF8-79BE-4467-9122-EB231896AD2A}" FriendlyName="Full Boot">
+        <!-->
+        Boot Main Path
+          Children:
+            Boot-PreSessionInit-Phase
+            Boot-SessionInit-Phase
+            Boot-Services-Phase
+            Boot-MobileUI-Phase
+            Boot-StartHost-Phase
+            
+        Being Boot Main Path Container
+        <-->
+        <Region Name="Boot-Main-Path" Guid="{48E873C6-74CA-4ddb-9BB1-1D3B5F750D8C}" FriendlyName="Boot Main Path">
+
+          <!-->
+          Boot-PreSessionInit-Phase
+          Children:
+            Boot-PnP-BootStart-Phase
+            Boot-PnP-SystemStart-Phase
+          <-->
+          <Region Name="Boot-PreSessionInit-Phase" Guid="{E1AABE77-050D-4a2a-9A9C-02CF29F89ECF}">
+
+            <!-->
+            Boot-PnP-BootStart-Phase
+                        
+            Event-Based Start with provider=9c205a39-1250-487d-abd7-e831c6290539, id=200, and version=0
+            Event-Based Stop with provider=9c205a39-1250-487d-abd7-e831c6290539, id=201, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            <-->
+            <Region Name="Boot-PnP-BootStart-Phase" Guid="{CDC4DDEB-995D-46aa-A9E6-F3D63B4C7A6E}">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Start>
+                <!-- Microsoft-Windows-Kernel-PnP : BootStart/Start -->
+                <Event Provider="{9c205a39-1250-487d-abd7-e831c6290539}" Id="200" Version="0" />
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-PnP : BootStart/Stop -->
+                <Event Provider="{9c205a39-1250-487d-abd7-e831c6290539}" Id="201" Version="0" />
+              </Stop>
+            </Region>
+
+            <!-->
+            Boot-PnP-SystemStart-Phase
+                        
+            Event-Based Start with provider=9c205a39-1250-487d-abd7-e831c6290539, id=202, and version=0
+            Event-Based Stop with provider=9c205a39-1250-487d-abd7-e831c6290539, id=203, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            <-->
+            <Region Name="Boot-PnP-SystemStart-Phase" Guid="{3826F5C1-6EC5-4046-A943-B27E965F3897}" >
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Start>
+                <!-- Microsoft-Windows-Kernel-PnP : SystemStart/Start -->
+                <Event Provider="{9c205a39-1250-487d-abd7-e831c6290539}" Id="202" Version="0" />
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-PnP : SystemStart/Stop -->
+                <Event Provider="{9c205a39-1250-487d-abd7-e831c6290539}" Id="203" Version="0" />
+              </Stop>
+            </Region>
+          <!-- End Boot-PreSessionInit-Phase -->
+          </Region>
+
+
+          <!-->
+          Boot-SessionInit-Phase
+                        
+          Event-Based Start with provider=43e63da5-41d1-4fbf-aded-1bbed98fdd1d, id=7, and version=0
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=101, and version=0
+          <-->
+          <Region Name="Boot-SessionInit-Phase" Guid="{FA473B22-58C7-4774-9EEE-C21B55F3A919}">
+            <Start>
+              <!-- Microsoft-Windows-Subsys-SMSS : smss:BootExecuteList/Start-->
+              <Event Provider="{43e63da5-41d1-4fbf-aded-1bbed98fdd1d}" Id="7" Version="0" />
+            </Start>
+            <Stop>
+              <!-- Boot-Services-Phase -->
+              <Region RegionGuid="{19a93396-8faa-4d6f-9109-19fa15450798}" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Boot-Services-Phase
+          This region is similar to the WinLogonInit phase on PC. This is when the service control
+          manager begins autostart services.
+                        
+          Event-Based Start with provider=0063715b-eeda-4007-9429-ad526f62696e, id=101, and version=0
+          Region ends when Boot-MobileUI-Phase begins
+          <-->
+          <Region Name="Boot-Services-Phase" Guid="{19a93396-8faa-4d6f-9109-19fa15450798}">
+            <Start>
+              <!-- Microsoft-Windows-Services : Autostart/Start -->
+              <Event Provider="{0063715b-eeda-4007-9429-ad526f62696e}" Id="101" Version="0" />
+            </Start>
+            <Stop>
+              <!-- Boot-MobileUI-Phase -->
+              <Region RegionGuid="{3affda51-cd55-407d-8318-bafc87aa4883}" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Boot-MobileUI-Phase
+          This region initializes MobileUI (graphics, compositor, etc.)
+                        
+          Event-Based Start with provider=f243dc34-205e-4d34-94ca-36e8c0859787, id=10, and version=0
+          Region ends when Boot-StartHost-Phase begins
+          <-->
+          <Region Name="Boot-MobileUI-Phase" Guid="{3affda51-cd55-407d-8318-bafc87aa4883}">
+            <Start>
+              <!-- Microsoft-WindowsPhone-MobileUI : WinMain_Entry -->
+              <Event Provider="{f243dc34-205e-4d34-94ca-36e8c0859787}" Id="10" Version="0" />
+            </Start>
+            <Stop>
+              <!-- Boot-StartHost-Phase -->
+              <Region RegionGuid="{cb6cea07-271f-4bed-bffb-5d8ddd4cd003}" />
+            </Stop>
+
+            <!-->
+  	        Boot-CompositorInit-Phase
+            Sub-region of Boot-MobileUI-Phase that indicatiosn when the compositor (dcomp/davecomp) is being initialized.
+	                        
+            Event-Based Start with provider=f243dc34-205e-4d34-94ca-36e8c0859787, id=11, and version=0
+            Event-Based Stop with provider=f243dc34-205e-4d34-94ca-36e8c0859787, id=12, and version=0
+	          <-->
+            <Region Name="Boot-CompositorInit-Phase" Guid="{277897db-6047-4d63-8a5c-035b7432d0c4}">
+              <Start>
+                <!-- Microsoft-WindowsPhone-MobileUI : InitializeCompositor/Start -->
+                <Event Provider="{f243dc34-205e-4d34-94ca-36e8c0859787}" Id="11" Version="0" />
+              </Start>
+              <Stop>
+                <!-- Microsoft-WindowsPhone-MobileUI : InitializeCompositor/Stop -->
+                <Event Provider="{f243dc34-205e-4d34-94ca-36e8c0859787}" Id="12" Version="0" />
+              </Stop>
+            </Region>
+          </Region>
+
+          <!-->
+          Boot-StartHost-Phase
+          This region begins initializing the start menu, enumerating apps, etc.
+                        
+          Event-Based Start with provider=becf83fd-d220-4b19-b7c1-c9127307f6b1, id=39, and version=0
+          Event-Based Start with provider=becf83fd-d220-4b19-b7c1-c9127307f6b1, id=120, and version=0
+          <-->
+          <Region Name="Boot-StartHost-Phase" Guid="{cb6cea07-271f-4bed-bffb-5d8ddd4cd003}">
+            <Start>
+              <!-- Microsoft-WindowsPhone-Shell-StartMenu : EntryPoint/EnterWinMain -->
+              <Event Provider="{becf83fd-d220-4b19-b7c1-c9127307f6b1}" Id="39" Version="0" />
+            </Start>
+            <Stop>
+              <!-- Microsoft-WindowsPhone-Shell-StartMenu : Ready/Info -->
+              <Event Provider="{becf83fd-d220-4b19-b7c1-c9127307f6b1}" Id="120" Version="0" />
+            </Stop>
+          </Region>
+
+        <!-- End Boot Main Path -->
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>

@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <Import Project="$(NuGetPackageRoot)microsoft.windows.xperfplugin.symcredentialprovider\1.0.47\buildTransitive\Microsoft.Windows.XPerfPlugin.SymCredentialProvider.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.windows.xperfplugin.symcredentialprovider\1.0.47\buildTransitive\Microsoft.Windows.XPerfPlugin.SymCredentialProvider.targets')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.windows.xperfplugin.native\1.1.955\buildTransitive\Microsoft.Windows.XPerfPlugin.Native.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.windows.xperfplugin.native\1.1.955\buildTransitive\Microsoft.Windows.XPerfPlugin.Native.targets')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.windows.xperfplugin.core\20.0.150\buildTransitive\Microsoft.Windows.XPerfPlugin.Core.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.windows.xperfplugin.core\20.0.150\buildTransitive\Microsoft.Windows.XPerfPlugin.Core.targets')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.windows.xperfplugin.catalog\20.0.150\buildTransitive\Microsoft.Windows.XPerfPlugin.Catalog.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.windows.xperfplugin.catalog\20.0.150\buildTransitive\Microsoft.Windows.XPerfPlugin.Catalog.targets')" />
+  </ImportGroup>
+</Project>

@@ -152,7 +152,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
                                                                      policy,
                                                                      fadeTimeSec,
                                                                      transitionActive);
-            coordinator.publishWorld(std::move(worldOwner));
+            const auto pubResult1 = commitRuntimePublication(coordinator, std::move(worldOwner),
+                                     RegistrationContext::needsRegistration(currentForPublish));
+            juce::ignoreUnused(pubResult1);
         }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -272,7 +274,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
                                                                      convo::TransitionPolicy::HardReset,
                                                                      0.0,
                                                                      false);
-            coordinator.publishWorld(std::move(worldOwner));
+            const auto pubResult2 = commitRuntimePublication(coordinator, std::move(worldOwner),
+                                     RegistrationContext::needsRegistration(getActiveRuntimeDSP()));
+            juce::ignoreUnused(pubResult2);
         }
     }
 

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema elementFormDefault="qualified"
+           xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           version="1.0">
+  <xs:element name="Tag" type="CTTag"/>
+
+  <xs:simpleType name="HintOperatorEnumeration">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Caller"/>
+      <xs:enumeration value="Callee"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="CTHintTag">
+    <xs:sequence>
+      <xs:element name="Tag" type="CTTag"  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="HintTag" type="CTHintTag" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="Entrypoint" type="CTEntrypoint"  minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="Name" type="xs:string" use="required"/>
+    <xs:attribute name="Priority" type="xs:int" default="0"/>
+    <xs:attribute name="HintOperator" type="HintOperatorEnumeration" use="required"/>
+    <xs:attribute name="OnlyShowModule" type="xs:boolean" use="optional" default="true"/>
+  </xs:complexType>
+
+  <xs:complexType name="CTTag">
+    <xs:sequence>
+      <xs:element name="Tag" type="CTTag"  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="HintTag" type="CTHintTag" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="Entrypoint" type="CTEntrypoint"  minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="Name" type="xs:string" use="required"/>
+    <xs:attribute name="Priority" type="xs:int" default="0"/>
+  </xs:complexType>
+
+  <xs:complexType name="CTEntrypoint">
+    <xs:attribute name="Module" type="xs:string" use="required"/>
+    <xs:attribute name="Method" type="xs:string" use="optional"/>
+  </xs:complexType>
+</xs:schema>

@@ -1,0 +1,14 @@
+﻿{
+    "schema":  "phase4_generation_drift_report_v2",
+    "generatedAt":  "2026-07-06T17:42:02.7538220+09:00",
+    "audioRoot":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine",
+    "requiredFiles":  {
+                          "dspHandleCpp":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRDSPHandle.cpp",
+                          "dspTransition":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\DSPTransition.h",
+                          "timerCpp":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Timer.cpp",
+                          "audioHeader":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h"
+                      },
+    "violations":  [
+
+                   ]
+}

@@ -1,0 +1,231 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<?Copyright (c) Microsoft Corporation. All rights reserved.?>
+<InstrumentationManifest>
+  <Instrumentation>
+    <Regions>
+      <RegionRoot Guid="{92159FA8-28AF-4651-AA6A-34D20A4767EA}" Name="ConnectedStandby" FriendlyName="Connected Standby">
+        <Metadata>
+          <FAS.TestNode>yes</FAS.TestNode>
+        </Metadata>
+        <Region Guid="{3C282074-5B64-4af8-814D-DC244E97EC0A}" Name="ConnectedStandby-Enter" FriendlyName="Enter Connected Standby">
+          <Start>
+            <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="62"  Version="0"/>
+          </Start>
+          <Stop>
+            <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="63"  Version="0"/>
+          </Stop>
+          <Metadata>
+            <FAS.TestNode>yes</FAS.TestNode>
+          </Metadata>
+          <Region Guid="{2A4DF0DE-1736-49ca-8D3F-69C31C244F37}" Name="ConnectedStandby-Enter-PowerOffDisplay" FriendlyName="Power Off Display">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="83"  Version="0"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="84"  Version="0"/>
+            </Stop>
+          </Region>
+          <Region Guid="{C94941AF-272E-41bc-9993-0CCC5D28A8E5}" Name="ConnectedStandby-Enter-ConnectionPhase" FriendlyName="Connection Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25"  Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000001"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26"  Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000001"/>
+            </Stop>
+          </Region>
+          <Region Guid="{C94941AF-272E-41bc-9993-0CCC5D28A8E3}" Name="ConnectedStandby-Enter-ShellPhase" FriendlyName="Shell Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25"  Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000002"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26"  Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000002"/>
+            </Stop>
+          </Region>
+          <Region Guid="{12FC3B5C-8BF6-4686-B35E-42B2F82C0C91}" Name="ConnectedStandby-Enter-PLMPhase" FriendlyName="PLM Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000003"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000003"/>
+            </Stop>
+            <Metadata>
+              <FAS.TestNode>yes</FAS.TestNode>
+            </Metadata>
+          </Region>
+          <Region Guid="{656275DC-65F2-4eec-8FA9-E9E63FA432D1}" Name="ConnectedStandby-Enter-MaintenancePhase" FriendlyName="Maintenance Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000004"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000004"/>
+            </Stop>
+          </Region>
+          <Region Guid="{05841DA8-0BF3-4c2e-BE6A-6E570763013E}" Name="ConnectedStandby-Enter-DAMPhase" FriendlyName="DAM Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000005"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000005"/>
+            </Stop>
+            <Metadata>
+              <FAS.TestNode>yes</FAS.TestNode>
+            </Metadata>
+          </Region>
+          <Region Guid="{7AF3A383-7DDB-49a1-B05C-EB4EAA3D7A98}" Name="ConnectedStandby-Enter-LowPowerPhase" FriendlyName="Low-Power Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000006"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000006"/>
+            </Stop>
+            <Metadata>
+              <FAS.TestNode>yes</FAS.TestNode>
+              <FAS.TestNode.ResourceMetrics>yes</FAS.TestNode.ResourceMetrics>
+            </Metadata>
+          </Region>
+          <Region Guid="{AE46C1E9-894D-46b2-B66F-2433C3A3426D}" Name="ConnectedStandby-Enter-ResiliencyNotificationPhase" FriendlyName="Resiliency Notification Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000007"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000007"/>
+            </Stop>
+          </Region>
+        </Region>
+        <!-- end Enter CS phase -->
+        <Region Guid="{439A8623-8E6A-4633-8C2E-C8B21D97A0C1}" Name="ConnectedStandby-Resiliency" FriendlyName="Resiliency/In Connected Standby">
+          <Metadata>
+            <FAS.TestNode>yes</FAS.TestNode>
+          </Metadata>
+          <Region Guid="{F8393889-DD37-4c27-B0EB-187C989EF0B4}" Name="ConnectedStandby-ResiliencyPhase" FriendlyName="Resiliency Phase">
+            <Start>
+              <Event Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}"  Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000008"/>
+            </Start>
+            <Stop>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}"  Id="26" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000008"/>
+            </Stop>
+          </Region>
+        </Region>
+        <!-- end of ConnectedStandby-Resiliency -->
+        <Region Guid="{297D5A94-C990-4249-96E6-6A737231947E}" Name="ConnectedStandby-Exit" FriendlyName="Exit Connected Standby">
+          <Start>
+            <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="64" Version="0"/>
+          </Start>
+          <Stop>
+            <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="65" Version="0"/>
+          </Stop>
+          <Metadata>
+            <FAS.TestNode>yes</FAS.TestNode>
+          </Metadata>
+          <Region Guid="{BD7972DF-A131-4c7b-8AC3-C3F726EB6BA9}" Name="ConnectedStandby-Exit-ConnectionPhase" FriendlyName="Connection Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000001"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000001"/>
+            </Stop>
+          </Region>
+          <Region Guid="{C94941AF-272E-41bc-9993-0CCC5D28A8C3}" Name="ConnectedStandby-Exitr-ShellPhase" FriendlyName="Shell Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25"  Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000002"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26"  Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000002"/>
+            </Stop>
+          </Region>
+          <Region Guid="{1EDA377E-B845-418f-B8DB-16D6F3C8EB0E}" Name="ConnectedStandby-Exit-PLMPhase" FriendlyName="PLM Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000003"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000003"/>
+            </Stop>
+            <Metadata>
+              <FAS.TestNode>yes</FAS.TestNode>
+            </Metadata>
+          </Region>
+          <Region Guid="{52F72AC5-404F-43fd-A210-B3FE55EA3F18}" Name="ConnectedStandby-Exit-MaintenancePhase" FriendlyName="Maintenance Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000004"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000004"/>
+            </Stop>
+          </Region>
+          <Region Guid="{5A7CE7EF-2D61-406a-9DE6-3CE75A286269}"  Name="ConnectedStandby-Exit-DAMPhase" FriendlyName="DAM Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000005"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000005"/>
+            </Stop>
+            <Metadata>
+              <FAS.TestNode>yes</FAS.TestNode>
+            </Metadata>
+          </Region>
+          <Region Guid="{B277DE3A-B133-43ff-9EBF-57CCDEA4FB37}" Name="ConnectedStandby-Exit-LowPowerPhase" FriendlyName="Low-Power Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000006"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000006"/>
+            </Stop>
+            <Metadata>
+              <FAS.TestNode>yes</FAS.TestNode>
+            </Metadata>
+          </Region>
+          <Region Guid="{E2505362-DB56-4c87-9AD1-73858C78AA14}" Name="ConnectedStandby-Exit-ResiliencyNotificationPhase" FriendlyName="Resiliency Notification Phase">
+            <Start>
+              <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="25" Version="0"/>
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000007"/>
+            </Start>
+            <Stop>
+              <Event   Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}" Id="26" Version="0" />
+              <PayloadIdentifier FieldName="Phase" FieldValue="0x00000007"/>
+            </Stop>
+          </Region>
+        </Region>
+        <!-- end Total Exit CS -->
+        <Region Guid="{30DD56C0-0D4E-4585-98C4-F5E574FC5245}" Name="ConnectedStandby-Abort" FriendlyName="Abort Connected Standby">
+          <Start>
+            <Event Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}"  Id="62" Version="0"/>
+          </Start>
+          <Stop>
+            <Event  Provider="{a6bf0deb-3659-40ad-9f81-e25af62ce3c7}"  Id="86" Version="0"/>
+          </Stop>
+          <Metadata>
+            <FAS.TestNode>yes</FAS.TestNode>
+          </Metadata>
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>

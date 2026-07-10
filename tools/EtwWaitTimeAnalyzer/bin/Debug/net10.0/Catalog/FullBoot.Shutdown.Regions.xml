@@ -1,0 +1,844 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<InstrumentationManifest>
+  <Instrumentation>
+    <Regions>
+      <!-->
+      Full Shutdown
+      Begin Root Container
+      <-->
+      <RegionRoot Name="Shutdown-Overall-Time" Guid="{d8d639a0-cf4c-45fb-976a-000000000900}" FriendlyName="Full Shutdown">
+        <!-->
+          Logoff Request To User Feedback:
+          
+          Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=6101, and version=0
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=6102, version=0
+        
+          Additionally, will only match start event to stop event when the PID is the same. 
+          
+        <-->
+        <Region Name="Shutdown-LogoffRequestToUserFeedback" Guid="{d8d639a0-cf4c-45fb-976a-000000000230}" FriendlyName="Logoff Request To User Feedback">
+          <Match>
+            <Event TID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6101" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6102" Version="0" />
+          </Stop>
+
+          <Region Name="Shutdown-WluiServerStartup" Guid="{d8d639a0-cf4c-45fb-976a-000000000231}" FriendlyName="Winlogon UI Server Startup">
+            <Match>
+              <Event TID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="501" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="502" Version="0" />
+            </Stop>
+          </Region>
+
+          <Region Name="Shutdown-LogonUI-InitializeFrame" Guid="{d8d639a0-cf4c-45fb-976a-000000000232}" FriendlyName="Logon UI Initialize Frame">
+            <Match>
+              <Event TID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}" Id="25035" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}" Id="25036" Version="0" />
+            </Stop>
+          </Region>
+
+          <Region Name="Shutdown-LogonUI-InitializeInputIndicator" Guid="{d8d639a0-cf4c-45fb-976a-000000000233}" FriendlyName="Logon UI Initialize Input Indicator">
+            <Match>
+              <Event TID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}" Id="65019" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}" Id="65020" Version="0" />
+            </Stop>
+          </Region>
+
+          <Region Name="Shutdown-LogonUI-LaunchToReadyForInput" Guid="{d8d639a0-cf4c-45fb-976a-000000000234}" FriendlyName="Logon UI Launch To Ready For Input">
+            <Match>
+              <Event TID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}" Id="25057" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{63d2bb1d-e39a-41b8-9a3d-52dd06677588}" Id="25058" Version="0" />
+            </Stop>
+          </Region>
+
+        </Region>
+
+        <!-->
+          User Session Shutdown:
+          Event-Based Start with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=1, and version=0
+          Event-Based Stop with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=2, version=0
+        
+          Additionally, will only match start event to stop event when the PID is the same. 
+          <-->
+        <Region Name="Shutdown-UserSessionShutdown" Guid="{d8d639a0-cf4c-45fb-976a-000000000220}" FriendlyName="User Session Shutdown">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="1" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="2" Version="0" />
+          </Stop>
+        </Region>
+
+        <!-->
+          Shutdown Processes:
+          
+          Event-Based Start with provider=e8316a2d-0d94-4f52-85dd-1e15b66c5891, id=1, and version=0
+          Event-Based Stop with provider=e8316a2d-0d94-4f52-85dd-1e15b66c5891, id=2, version=0
+        
+          Additionally, will only match start event to stop event when the PID is the same. 
+          
+          Children:
+             Shutdown Process
+             
+          Begin Shutdown Processes Container
+        <-->
+        
+        <Region Name="Shutdown-ShutdownProcesses-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000000300}" FriendlyName="Shutdown Processes">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{e8316a2d-0d94-4f52-85dd-1e15b66c5891}" Id="1" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{e8316a2d-0d94-4f52-85dd-1e15b66c5891}" Id="2" Version="0" />
+          </Stop>
+
+          <!-->
+          Shutdown Process
+          Event-Based Start with provider=9d55b53d-449b-4824-a637-24f9d69aa02f, id=12009, and version=1
+          Event-Based Stop with provider=9d55b53d-449b-4824-a637-24f9d69aa02f, id=12010, and version=1
+
+          Additionally, only match start to stop if the field "ProcessId" is the same.
+
+          Instance based off payload field called "ProcessId" In the start event. This field is of type PID and will have a proces name associated with it as well as ID.
+          <-->
+          
+          <Region Name="Shutdown-ShutdownProcesses-Process" Guid="{d8d639a0-0000-0000-0000-000000000301}" FriendlyName="Shutdown Process">
+            <Start>
+              <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12009" Version="1" />
+            </Start>
+            <Stop>
+              <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12010" Version="1" />
+            </Stop>
+            <Match>
+              <Event TID="true" />
+            </Match>
+            <Naming>
+              <PayloadBased NameField="ProcessId" />
+            </Naming>
+	    
+            <Region Name="Shutdown-ShutdownProcesses-Thread" Guid="{d8d639a0-0000-0000-0000-000000000302}" FriendlyName="Shutdown Thread">
+              <Start>
+                <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12001" Version="1" />
+              </Start>
+              <Stop>
+                <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12002" Version="1" />
+              </Stop>
+              <Match>
+                <Event TID="true" />
+                <Parent TID="true">
+                  <Payload FieldName="ProcessId" TargetFieldName="ProcessId" />
+                </Parent>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="ThreadId" />
+              </Naming>
+            </Region>
+            
+            <Region Name="Shutdown-ShutdownProcesses-WaitForProcessTermination" Guid="{d8d639a0-0000-0000-0000-000000000303}" FriendlyName="Wait For Process Termination">
+              <Start>
+                <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12007" Version="1" />
+              </Start>
+              <Stop>
+                <Event Provider="{9d55b53d-449b-4824-a637-24f9d69aa02f}" Id="12008" Version="1" />
+              </Stop>
+              <Match>
+                <Event TID="true" />
+                <Parent TID="true">
+                  <Payload FieldName="ProcessId" TargetFieldName="ProcessId" />
+                </Parent>
+              </Match>
+              <Naming>
+                <PayloadBased NameField="ProcessId" />
+              </Naming>
+            </Region>
+            
+          </Region>
+        <!-->
+        End Shutdown Processess
+        <-->
+        </Region>
+        
+        <!-->
+        Winlogon Shutdown
+        
+        Children:
+          Winlogon Notify Execute
+          
+        Begin Winlogon Shutdown Container
+        <-->
+        
+        <Region Name="Shutdown-Winlogon-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000000100}" FriendlyName="Winlogon Shutdown">
+
+          <!-->
+          Winlogon End Shell
+          
+          Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=801, and version=0
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=802, and version=0
+            
+          Additionally, only match start to stop if the PIDs are the same and start event field is 13.
+        
+          Children:
+            Notify Subscriber
+            
+          Begin Winlogon End Shell
+          <-->
+          
+          <Region Name="Shutdown-Winlogon-EndShell" Guid="{d8d639a0-0000-0000-0000-000000000101}" FriendlyName="Winlogon End Shell">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0" />
+              <PayloadIdentifier FieldName="Event" FieldValue="13" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0" />
+            </Stop>
+
+            <!-->
+            Notify Subscriber
+          
+            Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=805, and version=0
+            Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=806, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            
+            Instance based off payload field called "SubscriberName" in the start event.
+        
+            Children:
+              Connect to Subscriber
+              Call to Subscriber
+            
+            Notify Subscriber
+            <-->
+            
+            <Region Name="Shutdown-Winlogon-NotifySubscriber" Guid="{d8d639a0-0000-0000-0000-000000000102}" FriendlyName="Notify Subscriber">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Naming>
+                <PayloadBased NameField="SubscriberName" />
+              </Naming>
+              <Start>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="805" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="806" Version="0" />
+              </Stop>
+
+              <!-->
+              Connect to Subscriber
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=809, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=810, and version=0
+                
+              Additionally, only match start to stop if the PIDs are the same.
+            
+              Instance based off payload field called "SubscriberName" in the start event.
+              <-->
+              
+              <Region Name="Shutdown-Winlogon-ConnectToSubscriber" Guid="{d8d639a0-0000-0000-0000-000000000103}" FriendlyName="Connect to Subscriber">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+                </Naming>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Connect to Subscriber
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=811, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=812, and version=0
+                
+              Additionally, only match start to stop if the PIDs are the same.
+            
+              Instance based off payload field called "SubscriberName" in the start event.
+              <-->
+
+              <Region Name="Shutdown-Winlogon-CallSubscriber" Guid="{d8d639a0-0000-0000-0000-000000000104}" FriendlyName="Call Subscriber">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+                </Naming>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                </Stop>
+              </Region>
+            <!-->
+            End Notify Subscriber
+            <-->
+            </Region>
+          <!-->
+          End Winlogon Notify Execute
+          <-->
+          </Region>
+
+          <!-->
+          Winlogon Logoff
+          
+          Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=801, and version=0
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=802, and version=0
+            
+          Additionally, only match start to stop if the PIDs are the same and start event field is 3.
+        
+          Children:
+            Notify Subscriber
+            
+          Begin Winlogon Logoff
+          <-->
+
+          <Region Name="Shutdown-Winlogon-Logoff" Guid="{d8d639a0-0000-0000-0000-000000000105}" FriendlyName="Winlogon Logoff">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0" />
+              <PayloadIdentifier FieldName="Event" FieldValue="3" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0" />
+            </Stop>
+
+            <!-->
+            Notify Subscriber
+          
+            Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=805, and version=0
+            Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=806, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            
+            Instance based off payload field called "SubscriberName" in the start event.
+        
+            Children:
+              Connect to Subscriber
+              Call to Subscriber
+            
+            Notify Subscriber
+            <-->
+
+            <Region Name="Shutdown-Winlogon-NotifySubscriber" Guid="{d8d639a0-0000-0000-0000-000000000106}" FriendlyName="Notify Subscriber">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Naming>
+                <PayloadBased NameField="SubscriberName" />
+              </Naming>
+              <Start>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="805" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="806" Version="0" />
+              </Stop>
+
+              <!-->
+              Connect to Subscriber
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=809, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=810, and version=0
+                
+              Additionally, only match start to stop if the PIDs are the same.
+            
+              Instance based off payload field called "SubscriberName" in the start event.
+              <-->
+
+              <Region Name="Shutdown-Winlogon-ConnectToSubscriber" Guid="{d8d639a0-0000-0000-0000-000000000107}" FriendlyName="Connect to Subscriber">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+                </Naming>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Connect to Subscriber
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=811, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=812, and version=0
+                
+              Additionally, only match start to stop if the PIDs are the same.
+            
+              Instance based off payload field called "SubscriberName" in the start event.
+              <-->
+
+              <Region Name="Shutdown-Winlogon-CallSubscriber" Guid="{d8d639a0-0000-0000-0000-000000000108}" FriendlyName="Call Subscriber">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+                </Naming>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                </Stop>
+              </Region>
+              <!-->
+              End Notify Subscriber
+              <-->
+            </Region>
+            <!-->
+            End Winlogon Notify Execute
+            <-->
+          </Region>
+
+          <!-->
+          Winlogon Terminate Session
+          
+          Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=801, and version=0
+          Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=802, and version=0
+            
+          Additionally, only match start to stop if the PIDs are the same and start event field is 1.
+        
+          Children:
+            Notify Subscriber
+            
+          Begin Winlogon Notify Execute
+          <-->
+
+          <Region Name="Shutdown-Winlogon-TerminateSession" Guid="{d8d639a0-0000-0000-0000-000000000109}" FriendlyName="Winlogon Terminate Session">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="801" Version="0" />
+              <PayloadIdentifier FieldName="Event" FieldValue="1" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="802" Version="0" />
+            </Stop>
+
+            <!-->
+            Notify Subscriber
+          
+            Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=805, and version=0
+            Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=806, and version=0
+            
+            Additionally, only match start to stop if the PIDs are the same.
+            
+            Instance based off payload field called "SubscriberName" in the start event.
+        
+            Children:
+              Connect to Subscriber
+              Call to Subscriber
+            
+            Notify Subscriber
+            <-->
+
+            <Region Name="Shutdown-Winlogon-NotifySubscriber" Guid="{d8d639a0-0000-0000-0000-000000000110}" FriendlyName="Notify Subscriber">
+              <Match>
+                <Event PID="true" />
+              </Match>
+              <Naming>
+                <PayloadBased NameField="SubscriberName" />
+              </Naming>
+              <Start>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="805" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="806" Version="0" />
+              </Stop>
+
+              <!-->
+              Connect to Subscriber
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=809, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=810, and version=0
+                
+              Additionally, only match start to stop if the PIDs are the same.
+            
+              Instance based off payload field called "SubscriberName" in the start event.
+              <-->
+
+              <Region Name="Shutdown-Winlogon-ConnectToSubscriber" Guid="{d8d639a0-0000-0000-0000-000000000111}" FriendlyName="Connect to Subscriber">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+                </Naming>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="809" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="810" Version="0" />
+                </Stop>
+              </Region>
+
+              <!-->
+              Connect to Subscriber
+              Event-Based Start with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=811, and version=0
+              Event-Based Stop with provider=dbe9b383-7cf3-4331-91cc-a3cb16a3b538, id=812, and version=0
+                
+              Additionally, only match start to stop if the PIDs are the same.
+            
+              Instance based off payload field called "SubscriberName" in the start event.
+              <-->
+
+              <Region Name="Shutdown-Winlogon-CallSubscriber" Guid="{d8d639a0-0000-0000-0000-000000000112}" FriendlyName="Call Subscriber">
+                <Match>
+                  <Event PID="true" />
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+                </Naming>
+                <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                </Start>
+                <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                </Stop>
+              </Region>
+              <!-->
+              End Notify Subscriber
+              <-->
+            </Region>
+            <!-->
+            End Winlogon Notify Execute
+            <-->
+          </Region>
+          
+          <!-->
+          End Winlogon Shutdown
+          <-->
+        </Region>
+
+        <!-->
+        Pre-Shutdown Notification
+        Event-Based Start with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=3, and version=0
+        Event-Based Stop with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=4, and version=0
+                
+        Additionally, only match start to stop if the PIDs are the same.
+        <-->
+
+        <Region Name="Shutdown-PreShutdownNotification-Phase" Guid="{d8d639a0-0000-0000-0000-000000000310}" FriendlyName="Pre-Shutdown Notification">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="3" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="4" Version="0" />
+          </Stop>
+          <Region Name="Shutdown-PreShutdownNotification-Service" Guid="{d8d639a0-0000-0000-0000-000000000311}" FriendlyName="Pre-Shutdown Service">
+            <Match>
+              <Event>
+                <Payload FieldName="ServiceName" />
+              </Event>
+            </Match>
+            <Naming>
+              <PayloadBased NameField="ServiceName" />
+            </Naming>
+            <Start>
+              <Event Provider="{0063715b-eeda-4007-9429-ad526f62696e}" Id="105" Version="0" />
+              <PayloadIdentifier FieldName="CurrentState" FieldValue="3" />
+              <PayloadIdentifier FieldName="ExecutionPhase" FieldValue="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{0063715b-eeda-4007-9429-ad526f62696e}" Id="105" Version="0" />
+              <PayloadIdentifier FieldName="CurrentState" FieldValue="1" />
+            </Stop>
+          </Region>
+        </Region>
+
+        <!-->
+        System Session Shutdown
+        Event-Based Start with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=9, and version=0
+        Event-Based Stop with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=10, and version=0
+                
+        Additionally, only match start to stop if the PIDs are the same.
+        <-->
+        
+        <Region Name="Shutdown-ShutdownWindows-SystemSession" Guid="{d8d639a0-cf4c-45fb-976a-000000000200}" FriendlyName="System Session Shutdown">
+          <Match>
+            <Event PID="true" />
+          </Match>
+          <Start>
+            <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="9" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="10" Version="0" />
+          </Stop>
+        </Region>
+
+        <!-->
+        Shutdown Services
+        Children:
+          Shutdown Service
+          
+        Begin Shutdown Services Container
+        <-->
+        
+        <Region Name="Shutdown-ShutdownServices-Phase" Guid="{d8d639a0-cf4c-45fb-976a-000000000320}" FriendlyName="Shutdown Services">
+
+          <!-->
+          Shutdown Service
+          Event-Based Start with provider=0063715b-eeda-4007-9429-ad526f62696e, id=105, version=0, CurrentState=4, and ExecutionPhase=3
+          Event-Based Stop with provider=0063715b-eeda-4007-9429-ad526f62696e, id=105, version=0, and CurrentState=1
+                
+          Additionally, only match start to stop if the field "ServiceName" is the same.
+              
+          Instance based off payload field called "ServiceName" in the start event.
+          <-->
+          <Region Name="Shutdown-ShutdownServices-Service" Guid="{d8d639a0-cf4c-45fb-976a-000000000321}" FriendlyName="Shutdown Service">
+            <Match>
+              <Event>
+                <Payload FieldName="ServiceName" />
+              </Event>
+            </Match>
+            <Naming>
+              <PayloadBased NameField="ServiceName" />
+            </Naming>
+            <Start>
+              <Event Provider="{0063715b-eeda-4007-9429-ad526f62696e}" Id="105" Version="0" />
+              <PayloadIdentifier FieldName="CurrentState" FieldValue="4" />
+              <PayloadIdentifier FieldName="ExecutionPhase" FieldValue="3" />
+            </Start>
+            <Stop>
+              <Event Provider="{0063715b-eeda-4007-9429-ad526f62696e}" Id="105" Version="0" />
+              <PayloadIdentifier FieldName="CurrentState" FieldValue="1" />
+            </Stop>
+          </Region>
+        <!-->
+        End  Shutdown Services
+        <-->
+        </Region>
+
+
+        <!-->
+        UNSUPPORTED REGION:
+        In future versions, this will contain the following region:
+          
+          Post On/Off
+          Region-Based Start based off the stop of region: d8d639a0-cf4c-45fb-976a-000000000200 (System Session Shutdown)
+          Trace-Based Stop
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          
+          Children:
+             NT Shutdown System
+             Pre-Sleep Callbacks
+             Flush Storage Volumes
+             Shutdown Devices
+             Zero Page File
+             IO Shutdown System
+             CM Shutdown System
+          
+          <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000330}" Name="Shutdown-SystemShutdown-Phase" FriendlyName="Shutdown System">
+            <Start>
+              <Region RegionGuid="{d8d639a0-cf4c-45fb-976a-000000000200}"/>
+            </Start>
+            <Stop>
+              <Trace/>
+            </Stop>
+          
+          Instead, this region is being made a container.
+          <-->
+
+        <Region Guid="{d8d639a0-cf4c-45fb-976a-000000000330}" Name="Shutdown-SystemShutdown-Phase" FriendlyName="Shutdown System">
+
+          <!-->
+          NT Shutdown System
+          Event-Based Start with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=8, and version=0
+          Event-Based Stop with provider=206f6dea-d3c5-4d10-bc72-989f03c8b84b, id=51, and version=0
+          <-->
+
+          <Region Name="Shutdown-NtShutdownSystem" Guid="{d8d639a0-cf4c-45fb-976a-000000000331}" FriendlyName="NT Shutdown System">
+            <Start>
+              <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="8" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{206f6dea-d3c5-4d10-bc72-989f03c8b84b}" Id="51" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          PreSleep Callbacks
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=68, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=69, and version=0
+          <-->
+
+          <Region Name="Shutdown-PreSleepCallbacks" Guid="{d8d639a0-cf4c-45fb-976a-000000000332}" FriendlyName="PreSleep Callbacks">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <!-- Microsoft-Windows-Kernel-Power/PreSleepCallbacks/PhaseStart - POP_ETW_EVENT_PRESLEEP_CALLBACKS_START -->
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="68" Version="0" />
+            </Start>
+            <Stop>
+              <!-- Microsoft-Windows-Kernel-Power/PreSleepCallbacks/PhaseStop - POP_ETW_EVENT_PRESLEEP_CALLBACKS_STOP -->
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="69" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Flush Storage Volumes
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=45, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=46, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Shutdown-FlushVolumes" Guid="{d8d639a0-cf4c-45fb-976a-000000000333}" FriendlyName="Flush Storage Volumes">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="45" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="46" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          Shutdown Device
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=46, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=49, and version=0
+          <-->
+
+          <Region Name="Shutdown-Devices" Guid="{d8d639a0-cf4c-45fb-976a-000000000338}" FriendlyName="Shutdown Devices">
+              <Start>
+                <!-- Microsoft-Windows-Kernel-Power/FlushVolumes/win:Stop - POP_ETW_EVENT_FLUSHVOLUMES_STOP -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="46" Version="0" />
+              </Start>
+              <Stop>
+                <!-- Microsoft-Windows-Kernel-Power/ZeroPageFile/win:Start - POP_ETW_EVENT_ZEROPAGEFILE_START -->
+                <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="49" Version="0" />
+              </Stop>
+              <Region Name="Shutdown-Device" Guid="{d8d639a0-cf4c-45fb-976a-000000000340}" FriendlyName="Shutdown Device">
+                <Start>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Start - POP_ETW_EVENT_IRPSTART -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="7" Version="1"/>
+                  <PayloadIdentifier FieldName="MinorFunction" FieldValue="2" />
+                  <PayloadIdentifier FieldName="PowerStateType" FieldValue="1" />
+                </Start>
+                <Stop>
+                  <!-- Microsoft-Windows-Kernel-Power/Irp/win:Stop - POP_ETW_EVENT_IRPFINISH -->
+                  <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}"  Id="8" Version="0" />
+                </Stop>
+                <Match>
+                  <Event>
+                    <Payload FieldName="Irp"/>
+                  </Event>
+                </Match>
+                <Naming>
+                  <PayloadBased NameField="InstanceName" Type="Device"/>
+                </Naming>
+              </Region>
+          </Region>
+
+          <!-->
+          Zero Page File
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=49, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=50, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Shutdown-ZeroPageFile" Guid="{d8d639a0-cf4c-45fb-976a-000000000335}" FriendlyName="Zero Page File">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="49" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="50" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          IO Shutdown System
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=51, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=52, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+
+          <Region Name="Shutdown-IOShutdownSystem" Guid="{d8d639a0-cf4c-45fb-976a-000000000337}" FriendlyName="IO Shutdown System">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="51" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="52" Version="0" />
+            </Stop>
+          </Region>
+
+          <!-->
+          CM Shutdown System
+          Event-Based Start with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=55, and version=0
+          Event-Based Stop with provider=331c3b3a-2005-44c2-ac5e-77220c37d6b4, id=56, and version=0
+          
+          Additionally, only match start to stop if the PIDs are the same.
+          <-->
+          
+          <Region Name="Shutdown-CmShutdownSystem" Guid="{d8d639a0-cf4c-45fb-976a-000000000339}" FriendlyName="CM Shutdown System">
+            <Match>
+              <Event PID="true" />
+            </Match>
+            <Start>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="55" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{331c3b3a-2005-44c2-ac5e-77220c37d6b4}" Id="56" Version="0" />
+            </Stop>
+          </Region>
+        <!-->
+        End Shutdown System
+        <-->
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>

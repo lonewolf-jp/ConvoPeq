@@ -10,6 +10,11 @@
 
 #include "audioengine/AtomicAccess.h"
 
+// ★ work70: StereoConvolver::liveCount 静的定義
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+std::atomic<uint32_t> ConvolverProcessor::StereoConvolver::liveCount { 0 };
+#endif
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE)
 
 const ConvolverProcessor::IRState* ConvolverProcessor::acquireIRState() const noexcept

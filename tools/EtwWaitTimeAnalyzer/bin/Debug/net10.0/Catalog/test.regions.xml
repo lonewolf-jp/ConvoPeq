@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?Copyright (c) Microsoft Corporation. All rights reserved.?>
+<InstrumentationManifest xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Instrumentation>
+    <Regions>
+      <RegionRoot Guid="{24F0E8EC-2BDF-41ED-84F8-BFCBEF4461FC}" Name="[Root]" FriendlyName="[Root]">
+        <Region Guid="{A0338FCB-6151-494E-9333-52AB9EDDA903}" Name="DotNETRuntime" FriendlyName=".NET Runtime">
+          <!-- Garbage Collection -->
+          <Region Guid="{420f331d-7d02-4f84-bde0-a44bb51a9fed}" Name="GC" FriendlyName="Garbage Collection">
+            <Region Guid="{AF56BEAF-52F7-438B-B4AE-63B8E5701C84}" Name="Gen0" FriendlyName="Gen 0">
+              <Start>
+                <!-- GC/Start -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="1" Version="1"/>
+                <PayloadIdentifier FieldName="Depth" FieldValue="0" />
+              </Start>
+              <Stop>
+                <!-- GC/End -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="2" Version="1"/>
+              </Stop>
+              <Naming>
+                <PayloadBased NameField="Count" InstanceEndpoint="Start" />
+              </Naming>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="Count" />
+                </Event>
+              </Match>
+            </Region>
+            <Region Guid="{8be9a05d-4dd8-4d9a-a982-69a63f4b23b4}" Name="Gen1" FriendlyName="Gen 1">
+              <Start>
+                <!-- GC/Start -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="1" Version="1"/>
+                <PayloadIdentifier FieldName="Depth" FieldValue="1" />
+              </Start>
+              <Stop>
+                <!-- GC/End -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="2" Version="1"/>
+              </Stop>
+              <Naming>
+                <PayloadBased NameField="Count" InstanceEndpoint="Start" />
+              </Naming>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="Count" />
+                </Event>
+              </Match>
+            </Region>
+            <Region Guid="{50415579-b213-4a99-9af0-91f035c01249}" Name="Gen2" FriendlyName="Gen 2">
+              <Start>
+                <!-- GC/Start -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="1" Version="1"/>
+                <PayloadIdentifier FieldName="Depth" FieldValue="2" />
+              </Start>
+              <Stop>
+                <!-- GC/End -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="2" Version="1"/>
+              </Stop>
+              <Naming>
+                <PayloadBased NameField="Count" InstanceEndpoint="Start" />
+              </Naming>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="Count" />
+                </Event>
+              </Match>
+            </Region>
+         </Region>
+          <!-- JIT -->
+          <Region Guid="{d7922056-5de6-47ad-b7b4-678fe0bf1132}" Name="JIT" FriendlyName="JIT">
+            <Region Guid="{d8aa858f-bc7f-4a50-81da-22c6ded12c30}" Name="Compile" FriendlyName="Compile">
+              <Start>
+                <!-- MethodJittingStarted -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="145" Version="1"/>
+              </Start>
+              <Stop>
+                <!-- MethodLoadVerbose -->
+                <Event Provider="{e13c0d23-ccbc-4e12-931b-d9cc2eee27e4}" Id="143" Version="1"/>
+              </Stop>
+              <Naming>
+                <PayloadBased NameField="MethodName" InstanceEndpoint="Start" />
+              </Naming>
+              <Match>
+                <Event PID="true" TID="true">
+                  <Payload FieldName="ModuleID" />
+                  <Payload FieldName="MethodID" />
+                </Event>
+              </Match>
+            </Region>
+          </Region>
+          <!-- IIS Requests -->
+          <Region Guid="{d3f133f3-cd28-4517-b621-b9d4b1022eb6}" Name="IIS" FriendlyName="IIS Requests">
+            <Region Guid="{372bc568-385a-436c-a702-7f16ec0d441f}" Name="Request" FriendlyName="Request">
+              <Start>
+                <!-- IIS Start -->
+                <Event Provider="{de4649c9-15e8-4fea-9d85-1cdda520c334}" Id="1" Version="1"/>
+              </Start>
+              <Stop>
+                <!-- IIS Stop -->
+                <Event Provider="{de4649c9-15e8-4fea-9d85-1cdda520c334}" Id="2" Version="1"/>
+              </Stop>
+              <Naming>
+                <PayloadBased NameField="ContextId" InstanceEndpoint="Start" />
+              </Naming>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="ContextId" />
+                </Event>
+              </Match>
+            </Region>
+          </Region>
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>
+

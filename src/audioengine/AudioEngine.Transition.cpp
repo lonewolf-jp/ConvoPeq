@@ -23,6 +23,8 @@ bool AudioEngine::publishIdleWorldOnly(
     worldBuilder.setHealthStateRef(getHealthStateRef());
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(
         currentAfterFade, nullptr, idlePolicy, 0.0, false);
-    coordinator.publishWorld(std::move(worldOwner));
+    const auto pubResult = commitRuntimePublication(coordinator, std::move(worldOwner),
+                             RegistrationContext::needsRegistration(currentAfterFade));
+    juce::ignoreUnused(pubResult);
     return true;
 }

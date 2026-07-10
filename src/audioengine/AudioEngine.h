@@ -602,6 +602,10 @@ public:
     //----------------------------------------------------------
     struct DSPCore
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        static std::atomic<uint32_t> liveCount;
+#endif
+
         struct DCBlockerRuntimeState
         {
             convo::UltraHighRateDCBlocker outputL, outputR;
@@ -814,6 +818,11 @@ public:
 
     ~DSPCore()
     {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        const uint32_t oldLive = liveCount.fetch_sub(1, std::memory_order_relaxed);
+        (void)oldLive;
+        jassert(oldLive > 0);
+#endif
         // Explicitly clean up convolver resources to ensure no WDL memory is leaked,
         // especially for instances that are destroyed from the trash bin.
         convolver.forceCleanup();
@@ -3236,6 +3245,19 @@ public:
     static_assert(std::is_move_constructible_v<RuntimePublicationCoordinator>,
                   "RuntimePublicationCoordinator must remain move-constructible");
 
+    // ★ work70: PublishCommitResult — commitRuntimePublication() の戻り値
+    //   stage のみを保持（committed は PublishStageResultTraits::isCommitted で導出）
+    struct PublishCommitResult {
+        convo::PublishStageResult stage;
+    };
+
+    // ★ work70: commit point 判定 — Coordinator 実装から分離
+    struct PublishStageResultTraits {
+        [[nodiscard]] static bool isCommitted(convo::PublishStageResult stage) noexcept {
+            return stage == convo::PublishStageResult::Success;
+        }
+    };
+
     using RuntimePublishStore = RuntimePublicationCoordinator::Store;
 
     RuntimePublishStore runtimeStore;
@@ -3255,6 +3277,27 @@ private:
     friend class convo::isr::RuntimePublicationOrchestrator;
     friend class convo::isr::PublicationExecutor;
     friend class convo::isr::DSPTransition;
+
+    // ★ work70: RegistrationContext — commitRuntimePublication の registration コンテキスト。
+    //   dsp != nullptr: commitRuntimePublication が新規登録
+    //   handle != null (dsp==nullptr): 呼び出し元が事前登録済み
+    //   両方 null: 登録不要（Bootstrap world / Hard reset）
+    struct RegistrationContext {
+        DSPCore* dsp = nullptr;
+        convo::isr::DSPHandle handle;
+
+        static RegistrationContext needsRegistration(DSPCore* dsp_) noexcept { return { dsp_, convo::isr::DSPHandle::null() }; }
+        static RegistrationContext alreadyRegistered(convo::isr::DSPHandle handle_) noexcept { return { nullptr, handle_ }; }
+        static RegistrationContext none() noexcept { return { nullptr, convo::isr::DSPHandle::null() }; }
+    };
+
+    // ★ work70: ScopeExit — RAII によるスコープ終了処理
+    template <typename F>
+    struct ScopeExit {
+        F f;
+        ~ScopeExit() { f(); }
+    };
+    template <typename F> ScopeExit(F) -> ScopeExit<F>;
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
@@ -3848,6 +3891,77 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     }
 
     return true;
+}
+
+// ★ work70: eraseByHandle — Handle による Map erase 内部ヘルパー（HandleRegistry 移行準備）
+//   現状 O(n) linear scan（MAX_DSP_SLOTS=256 のため問題なし）。
+//   将来: HandleRegistry reverse map → O(1)。
+[[nodiscard]] inline bool eraseByHandle(convo::isr::DSPHandle handle) noexcept
+{
+    std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+    for (auto it = runtimeDSPHandleMap_.begin(); it != runtimeDSPHandleMap_.end(); ++it)
+    {
+        if (it->second == handle)
+        {
+            runtimeDSPHandleMap_.erase(it);
+            return true;
+        }
+    }
+    // Map に存在しなくても CAS 成功済みのため rollback は成功（INV-4/INV-7 対象外）
+    return true;
+}
+
+// ★ work70: Handle 登録のロールバック（DSPHandle 版）。
+//   古い DSPCore* 版より安全（Handle が確定しているため）。
+//   重要: HandleRuntime の rollback を先に実行し、成功した場合のみ Map から削除する。
+//   Runtime rollback（CAS）成功を最優先。Map cleanup は二次的。
+//   ★ CAS が失敗した場合（Constructing→Reclaimed 遷移不可＝publish 成功済み）は false を返す。
+//   ★ Production では CAS 成功後は常に true（Map 不整合は無視。DIAG で報告）。
+inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull()) return false;
+    // ★ 順序①: HandleRuntime を先に rollback（CAS: Constructing→Reclaimed）— 最重要
+    if (!dspHandleRuntime_.rollbackRegistration(handle))
+        return false;
+    // ★ 順序②: Map から削除（二次的。失敗しても Runtime rollback は完了済み）
+    eraseByHandle(handle);
+    // Production: CAS 成功後は常に成功。Map 不整合は DIAG のみで報告。
+    return true;
+}
+
+// ★ work70: commitRuntimePublication — publish の唯一の入口。
+//   register → publish → 失敗時 rollback のトランザクションを保証する。
+//   ★ SCOPE_EXIT は rollbackHandle を参照キャプチャする（コピーではない）。
+//   commit point 到達後は rollbackHandle = DSPHandle::null() で無効化し、
+//   SCOPE_EXIT による rollback を防止する。
+//   work72候補: Extract transaction logic into PublicationTransaction class.
+[[nodiscard]] inline PublishCommitResult commitRuntimePublication(
+    RuntimePublicationCoordinator& coordinator,
+    convo::aligned_unique_ptr<RuntimePublishWorld> world,
+    const RegistrationContext& regCtx) noexcept
+{
+    convo::isr::DSPHandle rollbackHandle;
+    ScopeExit guard { [&]() noexcept {
+        if (!rollbackHandle.isNull())
+            rollbackDSPHandleRegistration(rollbackHandle);
+    }};
+    if (regCtx.dsp != nullptr)
+    {
+        rollbackHandle = registerDSPHandleForRuntime(regCtx.dsp);
+        if (rollbackHandle.isNull())
+        {
+            jassertfalse;
+            return { convo::PublishStageResult::Failed };
+        }
+    }
+    else if (!regCtx.handle.isNull())
+    {
+        rollbackHandle = regCtx.handle;
+    }
+    const auto stage = coordinator.publishWorld(std::move(world));
+    if (PublishStageResultTraits::isCommitted(stage))
+        rollbackHandle = convo::isr::DSPHandle::null();  // commit point → rollbackHandle を無効化
+    return { stage };
 }
 
 //==============================================================================

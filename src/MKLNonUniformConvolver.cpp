@@ -30,9 +30,9 @@
 //   cblas_dscal (MKL BLAS)  : IR スケーリング
 //
 //============================================================================
-
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
+#include "DiagnosticsConfig.h"  // ★ work70: DIAG_MKL_MALLOC, convo::diag, getProcessMemoryInfo
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
@@ -50,6 +50,8 @@
 #include <mutex>
 #include <unordered_map>
 
+#pragma comment(lib, "psapi.lib")  // ★ work70: getProcessMemoryInfo
+
 #include <immintrin.h>  // AVX2
 
 #include "audioengine/AtomicAccess.h"
@@ -64,6 +66,12 @@ std::atomic<int>& MKLNonUniformConvolver::debugWarmupGuardCount() noexcept
 {
     return debugWarmupGuardCountStorage_;
 }
+#endif
+
+// ★ work70: 診断用静的変数
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+std::atomic<uint32_t> MKLNonUniformConvolver::liveCount { 0 };
+std::atomic<uint64_t> MKLNonUniformConvolver::globalDiagSeq { 0 };
 #endif
 
 struct IppFFTPlan
@@ -251,6 +259,56 @@ inline void accumulateSplitComplex(const double* srcAReal,
 } // namespace
 
 //==============================================================================
+// ★ work70: 診断ログ出力（無名名前空間、juce::Logger::writeToLog のラッパー）
+//==============================================================================
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+namespace {
+
+void diagLogNonRt(const juce::String& message) noexcept
+{
+    juce::Logger::writeToLog(message);
+}
+
+/// IR_RELEASE ログ出力（static free function）。
+/// 呼び出し元は解放前のスナップショット beforeSnap を引数で渡す。
+void logIrRelease(
+    const MKLNonUniformConvolver* nuc,
+    uint64_t diagSeq,
+    uint64_t beforeMkl,
+    uint32_t beforeLost,
+    const ProcessMemoryInfo& beforeOs,
+    const NucDiagnosticsSnapshot& beforeSnap,
+    const ProcessMemoryInfo& afterReleaseOs,
+    uint32_t liveBefore) noexcept
+{
+    const uint64_t afterMkl = convo::diag::allocatedBytes();
+    const uint32_t afterLost = convo::diag::lostFreeCount();
+    const int64_t deltaMkl = static_cast<int64_t>(afterMkl) - static_cast<int64_t>(beforeMkl);
+    const int32_t deltaLost = static_cast<int32_t>(afterLost) - static_cast<int32_t>(beforeLost);
+
+    diagLogNonRt(juce::String::formatted(
+        "[IR_RELEASE] NUC#%p seq=%llu "
+        "MKL: before=%lluMB after=%lluMB delta=%lldMB "
+        "LayersBefore=%d TotalBefore=%.0fMB(persistent) "
+        "lostFree=%u(+%d) liveBefore=%u | "
+        "OS: beforePrivate=%lluMB afterPrivate=%lluMB",
+        (void*)nuc,
+        (unsigned long long)diagSeq,
+        (unsigned long long)(beforeMkl / (1024*1024)),
+        (unsigned long long)(afterMkl / (1024*1024)),
+        (long long)(deltaMkl / (1024*1024)),
+        beforeSnap.numActiveLayers,
+        beforeSnap.totalBytes() / (1024.0 * 1024.0),
+        (unsigned)afterLost, (int)deltaLost,
+        (unsigned)liveBefore,
+        (unsigned long long)beforeOs.privateUsageMB,
+        (unsigned long long)afterReleaseOs.privateUsageMB));
+}
+
+} // namespace
+#endif
+
+//==============================================================================
 // Layer::freeAll
 //==============================================================================
 void MKLNonUniformConvolver::Layer::freeAll() noexcept
@@ -266,6 +324,24 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     }
     descriptorCommitted = false;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ work70: freeTracked を使用（allocSizes からサイズ取得）
+    freeTracked(irFreqDomain,  allocSizes.irFreqDomain);
+    freeTracked(irFreqReal,    allocSizes.irFreqReal);
+    freeTracked(irFreqImag,    allocSizes.irFreqImag);
+    freeTracked(fdlBuf,        allocSizes.fdlBuf);
+    freeTracked(fdlReal,       allocSizes.fdlReal);
+    freeTracked(fdlImag,       allocSizes.fdlImag);
+    freeTracked(fftTimeBuf,    allocSizes.fftTimeBuf);
+    freeTracked(fftOutBuf,     allocSizes.fftOutBuf);
+    freeTracked(prevInputBuf,  allocSizes.prevInputBuf);
+    freeTracked(accumBuf,      allocSizes.accumBuf);
+    freeTracked(accumReal,     allocSizes.accumReal);
+    freeTracked(accumImag,     allocSizes.accumImag);
+    freeTracked(inputAccBuf,   allocSizes.inputAccBuf);
+    freeTracked(tailOutputBuf, allocSizes.tailOutputBuf);
+    allocSizes = {};
+#else
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
     if (irFreqReal)    { mkl_free(irFreqReal);    irFreqReal    = nullptr; }
     if (irFreqImag)    { mkl_free(irFreqImag);    irFreqImag    = nullptr; }
@@ -280,6 +356,7 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     if (accumImag)     { mkl_free(accumImag);      accumImag     = nullptr; }
     if (inputAccBuf)   { mkl_free(inputAccBuf);    inputAccBuf   = nullptr; }
     if (tailOutputBuf) { mkl_free(tailOutputBuf);  tailOutputBuf = nullptr; }
+#endif
 
     fftSize = partSize = numParts = numPartsIR = 0;
     fdlMask = complexSize = partStride = 0;
@@ -298,10 +375,18 @@ MKLNonUniformConvolver::MKLNonUniformConvolver()
     // MKL VML / CBLAS (applySpectrumFilter) のスレッド数を制限。
     // IPP は単一スレッド設計のため、この設定は MKL 依存部のみに影響する。
     mkl_set_num_threads(1);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    liveCount.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 MKLNonUniformConvolver::~MKLNonUniformConvolver()
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const uint32_t oldLive = liveCount.fetch_sub(1, std::memory_order_relaxed);
+    (void)oldLive;
+    jassert(oldLive > 0);
+#endif
     #ifdef NUC_DEBUG_GUARDS
     checkGuards();
     #endif
@@ -425,11 +510,10 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
 {
     #ifdef NUC_DEBUG_GUARDS
         checkGuards();
-        // 解放前に、ポインタが異常でないかチェック（sentinel値は許可しない）
+        // ... 既存の checkPtr 群（変更なし）...
         auto checkPtr = [](double *&ptr){
             if (ptr != nullptr){
                 auto addr = reinterpret_cast<uintptr_t>(ptr);
-                // MSVC未初期化/解放済みパターンが混入していたら即座に停止
                 if (addr == 0xFFFFFFFFFFFFFFFFULL ||
                     (addr & 0xFFFFFFFF00000000) == 0xCDCDCDCD00000000ULL ||
                      addr < 0x10000)
@@ -444,29 +528,137 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
     checkPtr(m_directWindow);
     checkPtr(m_directOutBuf);
     #endif
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ work70: 解放前にスナップショットとサイズを取得
+    const uint64_t beforeMkl = convo::diag::allocatedBytes();
+    const uint32_t beforeLost = convo::diag::lostFreeCount();
+    const auto beforeOs = getProcessMemoryInfo();
+
+    // 解放前の NUC 状態を取得（TotalBefore / LayersBefore 用）
+    // ★ freeAll で Layer が初期化される前に呼ぶこと
+    NucDiagnosticsSnapshot beforeSnap;
+    beforeSnap.numActiveLayers = m_numActiveLayers;
+    beforeSnap.isReady = convo::consumeAtomic(m_ready, std::memory_order_acquire);
+    for (int li = 0; li < kNumLayers; ++li) {
+        const Layer& l = m_layers[li];
+        uint64_t irF = 0, fdl = 0, acc = 0, tail = 0;
+        irF += addIfAlive(l.irFreqDomain, l.allocSizes.irFreqDomain, "irFreqDomain");
+        irF += addIfAlive(l.irFreqReal,   l.allocSizes.irFreqReal,   "irFreqReal");
+        irF += addIfAlive(l.irFreqImag,   l.allocSizes.irFreqImag,   "irFreqImag");
+        fdl += addIfAlive(l.fdlBuf,       l.allocSizes.fdlBuf,       "fdlBuf");
+        fdl += addIfAlive(l.fdlReal,      l.allocSizes.fdlReal,      "fdlReal");
+        fdl += addIfAlive(l.fdlImag,      l.allocSizes.fdlImag,      "fdlImag");
+        acc += addIfAlive(l.fftTimeBuf,   l.allocSizes.fftTimeBuf,   "fftTimeBuf");
+        acc += addIfAlive(l.fftOutBuf,    l.allocSizes.fftOutBuf,    "fftOutBuf");
+        acc += addIfAlive(l.prevInputBuf, l.allocSizes.prevInputBuf, "prevInputBuf");
+        acc += addIfAlive(l.accumBuf,     l.allocSizes.accumBuf,     "accumBuf");
+        acc += addIfAlive(l.accumReal,    l.allocSizes.accumReal,    "accumReal");
+        acc += addIfAlive(l.accumImag,    l.allocSizes.accumImag,    "accumImag");
+        acc += addIfAlive(l.inputAccBuf,  l.allocSizes.inputAccBuf,  "inputAccBuf");
+        tail += addIfAlive(l.tailOutputBuf,l.allocSizes.tailOutputBuf,"tailOutputBuf");
+        beforeSnap.layerBufs[li] = irF + fdl + acc + tail;
+        beforeSnap.irFreqBytes   += irF;
+        beforeSnap.fdlBytes      += fdl;
+        beforeSnap.accumBytes    += acc;
+        beforeSnap.tailBytes     += tail;
+    }
+    const uint32_t liveBefore = liveCount.load(std::memory_order_relaxed);
+
+    // NUC レベルバッファの解放サイズを事前退避（ガード後、解放前に）
+    const size_t ringBufBytes    = static_cast<size_t>(m_ringSize) * sizeof(double);
+    const size_t directIRBytes   = static_cast<size_t>(m_directTapCount) * sizeof(double);
+    const size_t directHistBytes = static_cast<size_t>(m_directHistLen) * sizeof(double);
+    const size_t directWinBytes  = static_cast<size_t>(m_directHistLen + m_directMaxBlock) * sizeof(double);
+    const size_t directOutBytes  = static_cast<size_t>(m_directMaxBlock) * sizeof(double);
+#endif
+
     for (int i = 0; i < kNumLayers; ++i)
         m_layers[i].freeAll();
     m_numActiveLayers = 0;
     m_latency         = 0;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ work70: NUC レベルバッファも freeTracked で解放
+    freeTracked(m_ringBuf,       ringBufBytes);
+    freeTracked(m_directIRRev,   directIRBytes);
+    freeTracked(m_directHistory, directHistBytes);
+    freeTracked(m_directWindow,  directWinBytes);
+    freeTracked(m_directOutBuf,  directOutBytes);
+#else
     if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
-    m_ringSize = m_ringMask = m_ringWrite = m_ringRead = m_ringAvail = 0;
-
     if (m_directIRRev)   { mkl_free(m_directIRRev);   m_directIRRev = nullptr; }
     if (m_directHistory) { mkl_free(m_directHistory); m_directHistory = nullptr; }
     if (m_directWindow)  { mkl_free(m_directWindow);  m_directWindow = nullptr; }
     if (m_directOutBuf)  { mkl_free(m_directOutBuf);  m_directOutBuf = nullptr; }
+#endif
+
+    m_ringSize = m_ringMask = m_ringWrite = m_ringRead = m_ringAvail = 0;
 
     m_directTapCount = 0;
     m_directHistLen  = 0;
     m_directMaxBlock = 0;
     m_directPendingSamples = 0;
     m_directEnabled  = false;
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const auto afterReleaseOs = getProcessMemoryInfo();
+    logIrRelease(this, kDiagSeqReserved,
+                 beforeMkl, beforeLost, beforeOs,
+                 beforeSnap, afterReleaseOs, liveBefore);
+#endif
     m_tailEnabled = true;
     m_tailStrength = 1.0;
     for (int i = 0; i < kNumLayers; ++i)
         m_tailLayerGain[i] = 1.0;
 }
+
+//==============================================================================
+// ★ work70: getDiagnostics  ─ Message Thread のみ
+//==============================================================================
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+NucDiagnosticsSnapshot MKLNonUniformConvolver::getDiagnostics() const noexcept
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    NucDiagnosticsSnapshot snap{};
+    snap.numActiveLayers = m_numActiveLayers;
+    snap.isReady = convo::consumeAtomic(m_ready, std::memory_order_acquire);
+
+    for (int li = 0; li < kNumLayers; ++li)
+    {
+        const Layer& l = m_layers[li];
+        uint64_t irFreq = 0, fdl = 0, accum = 0, tail = 0;
+
+        irFreq += addIfAlive(l.irFreqDomain, l.allocSizes.irFreqDomain, "irFreqDomain");
+        irFreq += addIfAlive(l.irFreqReal,   l.allocSizes.irFreqReal,   "irFreqReal");
+        irFreq += addIfAlive(l.irFreqImag,   l.allocSizes.irFreqImag,   "irFreqImag");
+        fdl    += addIfAlive(l.fdlBuf,       l.allocSizes.fdlBuf,       "fdlBuf");
+        fdl    += addIfAlive(l.fdlReal,      l.allocSizes.fdlReal,      "fdlReal");
+        fdl    += addIfAlive(l.fdlImag,      l.allocSizes.fdlImag,      "fdlImag");
+        accum  += addIfAlive(l.fftTimeBuf,   l.allocSizes.fftTimeBuf,   "fftTimeBuf");
+        accum  += addIfAlive(l.fftOutBuf,    l.allocSizes.fftOutBuf,    "fftOutBuf");
+        accum  += addIfAlive(l.prevInputBuf, l.allocSizes.prevInputBuf, "prevInputBuf");
+        accum  += addIfAlive(l.accumBuf,     l.allocSizes.accumBuf,     "accumBuf");
+        accum  += addIfAlive(l.accumReal,    l.allocSizes.accumReal,    "accumReal");
+        accum  += addIfAlive(l.accumImag,    l.allocSizes.accumImag,    "accumImag");
+        accum  += addIfAlive(l.inputAccBuf,  l.allocSizes.inputAccBuf,  "inputAccBuf");
+        tail   += addIfAlive(l.tailOutputBuf,l.allocSizes.tailOutputBuf,"tailOutputBuf");
+
+        snap.layerBufs[li]  = irFreq + fdl + accum + tail;
+        snap.irFreqBytes   += irFreq;
+        snap.fdlBytes      += fdl;
+        snap.accumBytes    += accum;
+        snap.tailBytes     += tail;
+    }
+
+    snap.directBytes = addIfAlive(m_directIRRev,
+        static_cast<size_t>(m_directTapCount) * sizeof(double), "directIRRev");
+    snap.ringBytes   = addIfAlive(m_ringBuf,
+        static_cast<size_t>(m_ringSize) * sizeof(double), "ringBuf");
+    return snap;
+}
+#endif
 
 //==============================================================================
 // SetImpulse  ─ Message Thread のみ
@@ -480,6 +672,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     if (impulse == nullptr || irLen <= 0 || blockSize <= 0)
         return false;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const uint64_t diagSeq   = globalDiagSeq.fetch_add(1, std::memory_order_relaxed) + kDiagSeqFirstRuntime;
+    const uint64_t beforeMkl = convo::diag::allocatedBytes();
+    const uint32_t beforeLost = convo::diag::lostFreeCount();
+#endif
     releaseAllLayers();
 
     // tailMode: 0=Air Absorption, 1=Layer Tail Contouring, 2=Bypass
@@ -554,12 +751,12 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     if (m_directEnabled)
     {
-        m_directIRRev   = static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directTapCount) * sizeof(double), 64));
+        m_directIRRev   = static_cast<double*>(DIAG_MKL_MALLOC(static_cast<size_t>(m_directTapCount) * sizeof(double), 64));
         m_directHistory = (m_directHistLen > 0)
-            ? static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directHistLen) * sizeof(double), 64))
+            ? static_cast<double*>(DIAG_MKL_MALLOC(static_cast<size_t>(m_directHistLen) * sizeof(double), 64))
             : nullptr;
-        m_directWindow  = static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directHistLen + m_directMaxBlock) * sizeof(double), 64));
-        m_directOutBuf  = static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directMaxBlock) * sizeof(double), 64));
+        m_directWindow  = static_cast<double*>(DIAG_MKL_MALLOC(static_cast<size_t>(m_directHistLen + m_directMaxBlock) * sizeof(double), 64));
+        m_directOutBuf  = static_cast<double*>(DIAG_MKL_MALLOC(static_cast<size_t>(m_directMaxBlock) * sizeof(double), 64));
 
         if (!m_directIRRev || !m_directWindow || !m_directOutBuf || (m_directHistLen > 0 && !m_directHistory))
         {
@@ -701,22 +898,64 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         const size_t irSoaSize  = static_cast<size_t>(l.numParts) * static_cast<size_t>(l.complexSize);
         const size_t fdlSoaSize = static_cast<size_t>(l.numParts) * 2 * static_cast<size_t>(l.complexSize);
 
-        l.irFreqDomain = static_cast<double*>(mkl_malloc(irBufSize  * sizeof(double), 64));
-        l.irFreqReal   = static_cast<double*>(mkl_malloc(irSoaSize  * sizeof(double), 64));
-        l.irFreqImag   = static_cast<double*>(mkl_malloc(irSoaSize  * sizeof(double), 64));
-        l.fdlBuf       = static_cast<double*>(mkl_malloc(fdlBufSize * sizeof(double), 64));
-        l.fdlReal      = static_cast<double*>(mkl_malloc(fdlSoaSize * sizeof(double), 64));
-        l.fdlImag      = static_cast<double*>(mkl_malloc(fdlSoaSize * sizeof(double), 64));
-        l.fftTimeBuf   = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
-        l.fftOutBuf    = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
-        l.prevInputBuf = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
-        l.accumBuf     = static_cast<double*>(mkl_malloc(l.partStride * sizeof(double), 64));
-        l.accumReal    = static_cast<double*>(mkl_malloc(l.complexSize * sizeof(double), 64));
-        l.accumImag    = static_cast<double*>(mkl_malloc(l.complexSize * sizeof(double), 64));
-        l.inputAccBuf  = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
+        l.irFreqDomain = static_cast<double*>(DIAG_MKL_MALLOC(irBufSize  * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.irFreqDomain = irBufSize * sizeof(double);
+#endif
+        l.irFreqReal   = static_cast<double*>(DIAG_MKL_MALLOC(irSoaSize  * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.irFreqReal = irSoaSize * sizeof(double);
+#endif
+        l.irFreqImag   = static_cast<double*>(DIAG_MKL_MALLOC(irSoaSize  * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.irFreqImag = irSoaSize * sizeof(double);
+#endif
+        l.fdlBuf       = static_cast<double*>(DIAG_MKL_MALLOC(fdlBufSize * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.fdlBuf = fdlBufSize * sizeof(double);
+#endif
+        l.fdlReal      = static_cast<double*>(DIAG_MKL_MALLOC(fdlSoaSize * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.fdlReal = fdlSoaSize * sizeof(double);
+#endif
+        l.fdlImag      = static_cast<double*>(DIAG_MKL_MALLOC(fdlSoaSize * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.fdlImag = fdlSoaSize * sizeof(double);
+#endif
+        l.fftTimeBuf   = static_cast<double*>(DIAG_MKL_MALLOC(l.fftSize   * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.fftTimeBuf = l.fftSize * sizeof(double);
+#endif
+        l.fftOutBuf    = static_cast<double*>(DIAG_MKL_MALLOC(l.fftSize   * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.fftOutBuf = l.fftSize * sizeof(double);
+#endif
+        l.prevInputBuf = static_cast<double*>(DIAG_MKL_MALLOC(l.partSize  * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.prevInputBuf = l.partSize * sizeof(double);
+#endif
+        l.accumBuf     = static_cast<double*>(DIAG_MKL_MALLOC(l.partStride * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.accumBuf = l.partStride * sizeof(double);
+#endif
+        l.accumReal    = static_cast<double*>(DIAG_MKL_MALLOC(l.complexSize * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.accumReal = l.complexSize * sizeof(double);
+#endif
+        l.accumImag    = static_cast<double*>(DIAG_MKL_MALLOC(l.complexSize * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.accumImag = l.complexSize * sizeof(double);
+#endif
+        l.inputAccBuf  = static_cast<double*>(DIAG_MKL_MALLOC(l.partSize  * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
+#endif
 
         if (!l.isImmediate)
-            l.tailOutputBuf = static_cast<double*>(mkl_malloc(l.partSize * sizeof(double), 64));
+            l.tailOutputBuf = static_cast<double*>(DIAG_MKL_MALLOC(l.partSize * sizeof(double), 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);
+#endif
 
         if (!l.irFreqDomain || !l.irFreqReal || !l.irFreqImag || !l.fdlBuf || !l.fdlReal || !l.fdlImag || !l.fftTimeBuf ||
             !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.accumReal || !l.accumImag || !l.inputAccBuf ||
@@ -859,7 +1098,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     const int rSize       = juce::nextPowerOfTwo(baseSize + margin);
     const int minSize     = juce::nextPowerOfTwo(l0PartSize * 4 + blockSize * 4);
     const int finalSize   = std::max(rSize, minSize);
-    m_ringBuf = static_cast<double*>(mkl_malloc(finalSize * sizeof(double), 64));
+    m_ringBuf = static_cast<double*>(DIAG_MKL_MALLOC(finalSize * sizeof(double), 64));
     if (!m_ringBuf)
     {
         releaseAllLayers();
@@ -918,6 +1157,54 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     }
 
     convo::publishAtomic(m_ready, true, std::memory_order_release);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const uint64_t afterMkl = convo::diag::allocatedBytes();
+    const uint32_t afterLost = convo::diag::lostFreeCount();
+
+    const int l0p = m_numActiveLayers >= 1 ? m_layers[0].partSize : 0;
+    const int l1p = m_numActiveLayers >= 2 ? m_layers[1].partSize : 0;
+    const int l2p = m_numActiveLayers >= 3 ? m_layers[2].partSize : 0;
+
+    // IR_LOAD
+    diagLogNonRt(juce::String::formatted(
+        "[IR_LOAD] NUC#%p seq=%llu irLen=%d blockSize=%d "
+        "Layers=%d L0Part=%d L1Part=%d L2Part=%d "
+        "directTaps=%d ringSize=%d "
+        "MKL: before=%lluMB after=%lluMB delta=%lldMB "
+        "lostFree=%u(+%d) live=%u",
+        (void*)this,
+        (unsigned long long)diagSeq,
+        irLen, blockSize,
+        m_numActiveLayers, l0p, l1p, l2p,
+        m_directTapCount, m_ringSize,
+        (unsigned long long)(beforeMkl / (1024*1024)),
+        (unsigned long long)(afterMkl / (1024*1024)),
+        (long long)((int64_t)(afterMkl) - (int64_t)(beforeMkl)) / (1024*1024),
+        (unsigned)afterLost, (int)((int32_t)(afterLost) - (int32_t)(beforeLost)),
+        (unsigned)liveCount.load(std::memory_order_relaxed)));
+
+    // IR_LAYOUT (1 回の getDiagnostics で Layer 情報 + 種別内訳を取得)
+    const auto __snap = getDiagnostics();
+    diagLogNonRt(juce::String::formatted(
+        "[IR_LAYOUT] NUC#%p seq=%llu "
+        "IRFreq=%.0fMB FDL=%.0fMB Accum=%.0fMB Tail=%.0fMB "
+        "Direct=%.0fMB Ring=%.0fMB Total=%.0fMB(persistent data buffers only) | "
+        "L0=%.0fMB L1=%.0fMB L2=%.0fMB",
+        (void*)this,
+        (unsigned long long)diagSeq,
+        __snap.irFreqBytes / (1024.0*1024.0),
+        __snap.fdlBytes    / (1024.0*1024.0),
+        __snap.accumBytes  / (1024.0*1024.0),
+        __snap.tailBytes   / (1024.0*1024.0),
+        __snap.directBytes / (1024.0*1024.0),
+        __snap.ringBytes   / (1024.0*1024.0),
+        __snap.totalBytes() / (1024.0*1024.0),
+        __snap.layerBufs[0] / (1024.0*1024.0),
+        __snap.layerBufs[1] / (1024.0*1024.0),
+        __snap.layerBufs[2] / (1024.0*1024.0)));
+#endif
+
+
     return true;
 }
 

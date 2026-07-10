@@ -105,7 +105,12 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
 
     // Route through IEpochProvider interface.
     if (provider_->enqueueRetire(ptr, deleter, epoch))
+    {
+        // ★ work70: サイズ追跡は enqueue 時に objectBytes が設定されている場合のみ。
+        //   現在の呼び出し元は objectBytes=0 のため trackedRatio=0% となる。
+        //   将来、特定の呼び出し元でサイズ設定する場合に対応。
         return RetireEnqueueResult::Success;
+    }
 
     // ★ Practical-4: QueueFull → 同期的 tryReclaim を１度だけ試行（レート制限付き）
     const uint64_t nowUs = convo::getCurrentTimeUs();

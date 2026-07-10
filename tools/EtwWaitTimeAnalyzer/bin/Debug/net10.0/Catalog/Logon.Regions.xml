@@ -1,0 +1,457 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes'?>
+<?Copyright (c) Microsoft Corporation. All rights reserved.?>
+<!-- Regions file by Chris Anthony (alias:ChAnthon) -->
+<InstrumentationManifest>
+   <Instrumentation>
+    <Regions>
+      <!-- The region root describes the logon process starting from WinLogon, and into Explorer's logon tasks.  Here
+           are the friendly names for the providers used to generate these regions:
+           
+           dbe9b383-7cf3-4331-91cc-a3cb16a3b538 - Microsoft-Windows-Winlogon
+           30336ed4-e327-447c-9de0-51b652c86108 - Microsoft-Windows-Shell-Core
+           04d28e21-00aa-5228-cfd0-d70863aa5ce9 - Microsoft.Windows.Shell.Desktop.LogonFramework
+           2ca51213-29c5-564f-fd60-355148e8b47f - Microsoft.Windows.Shell.SingleViewExperience
+           8cba0f81-8ad7-5395-2125-5703822c822a - Microsoft.Windows.ContentDeliveryManager
+           f0be35f8-237b-4814-86b5-ade51192e503 - Microsoft-Windows-AppReadiness
+           030f2f57-abd0-4427-bcf1-3a3587d7dc7d - Microsoft-Windows-Diagnostics-PerfTrack 
+           3b3877a1-ae3b-54f1-0101-1e2424f6fcbb - SIHost -->
+      <RegionRoot Guid="{194B71A9-6D74-4F4A-9A45-C9FC0569E5A5}"
+                  Name="User-Logon"
+                  FriendlyName="User logon">
+
+        <!-- This is an overview region describing when a login is underway.  When this region stops, WinLogon switches
+             to the user's desktop. -->
+        <Region Guid="{680F2805-BE77-4046-9E4C-371FB0EF0406}"
+                Name="User-Logon-SecureDesktopLogin-First"
+                FriendlyName="Login start to switch away from LogonUI: first logon">
+          <Start>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6108" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6111" Version="0" />
+          </Stop>
+          <Match>
+            <Event PID="true" />
+          </Match>
+        </Region>
+
+        <!-- This is similar to the above, but applies to successful nth logons, not first logons. -->
+        <Region Guid="{3A0672A1-AFB9-43DD-87E4-1EEDB6F36B43}"
+                Name="User-Logon-SecureDesktopLogin-Nth"
+                FriendlyName="Login start to switch away from LogonUI: nth logon">
+          <Start>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6108" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="6112" Version="0" />
+          </Stop>
+          <Match>
+            <Event PID="true" />
+          </Match>
+        </Region>
+
+        <!-- This region is created by pulling the AuthenticateUser start event from WinLogon, and the
+             ExplorerStartToDesktopReady stop event from Shell-Core.  It's handy to have at the top level because it
+             summarizes the duration of the logon, including the first sign-in animation. -->
+        <Region Guid="{F641DB39-18F9-4BD5-BE37-CCA2894DA999}"
+                Name="User-Logon-AuthenticateToDesktopReady"
+                FriendlyName="Authentication to desktop ready">
+          <Start>
+            <Region RegionGuid="{1AB64A1A-3780-4A60-9098-CF6CE6815FCD}" Endpoint="Start" />
+          </Start>
+          <Stop>
+            <Region RegionGuid="{D52B32A9-1940-41D2-87BD-E48A2E2AE059}" Endpoint="Stop" />
+          </Stop>
+        </Region>
+
+        <!-- This region uses an existing post-boot event to gauge how long it takes the machine to be ready for user
+             interaction after the logon.  The event is logged after 5 seconds of idle time has been accumulated. -->
+        <Region Guid="{1090BEE3-95D5-4F51-AA03-3A13773F7693}"
+                Name="User-Logon-PostLogonIdleDetection"
+                FriendlyName="Post-logon idle detection">
+          <Start>
+            <Event Provider="{030f2f57-abd0-4427-bcf1-3a3587d7dc7d}" Id="1100" Version="0" />
+          </Start>
+          <Stop>
+            <Event Provider="{030f2f57-abd0-4427-bcf1-3a3587d7dc7d}" Id="1103" Version="0" />
+          </Stop>
+        </Region>
+
+        <!-- This region describes WinLogon's responsibilities during the logon. -->
+        <Region Guid="{3B422F08-DE33-43F8-8418-026B4A6D17EA}"
+                Name="User-Logon-Winlogon"
+                FriendlyName="Winlogon">
+          <!-- Put the AuthenticateUser regions into a container, so that it will be more clear when analyzing a trace
+               when there's a big gap in "Authentication to desktop ready" because of failed login attempts -->
+          <Region Guid="{52C5DAE4-14B3-43A5-8FE3-10DECF0D286A}"
+                  Name="User-Logon-Winlogon-AuthenticationAttempts"
+                  FriendlyName="Authentication attempts (0 indicates success)">
+             <!-- The AuthenticateUser events can be used to see when the user entered in their password.  Failed login
+                  attempts have a non-zero Win32Status.  I didn't figure out how to get WPA to match in a non-greedy way,
+                  so the regions contain both failed and successful authentication attempts -->
+            <Region Guid="{1AB64A1A-3780-4A60-9098-CF6CE6815FCD}"
+                    Name="User-Logon-Winlogon-AuthenticateUser"
+                    FriendlyName="Authenticate user">
+              <Start>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="1" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="2" Version="0" />
+              </Stop>
+              <Match>
+                <Event TID="true" PID="true" />
+                <Parent TID="true" PID="true" />
+              </Match>
+              <Naming>
+                <PayloadBased NameField="Win32Status" />
+              </Naming>
+            </Region>
+          </Region>
+          <!-- Put the SIHost (shell infrastructure host) start region into a container, so that it will be more clear 
+               when analyzing a trace if there's a big gap in "SIHost start" because of failed start SIHost attempts. -->
+          <Region Guid="{C68FBAFF-CAC2-4883-B619-D6E872BBD107}"
+                  Name="User-Logon-Winlogon-StartSIHostAttempts"
+                  FriendlyName="Start SIHost Attempts">
+            <Region Guid="{26AD7466-DE3D-42A4-B6D7-B015C215B6C9}"
+                    Name="User-Logon-Winlogon-StartSIHost"
+                    FriendlyName="Start SIHost">
+              <Start>
+                <Event Provider="{3b3877a1-ae3b-54f1-0101-1e2424f6fcbb}" Name="SIHostStart" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{3b3877a1-ae3b-54f1-0101-1e2424f6fcbb}" Name="SIHostReady" Version="0"  />
+              </Stop>
+              <Match>
+                <Event TID="true" PID="true" />
+                <Parent TID="true" PID="true" />
+              </Match>
+            </Region>
+          </Region>
+          <!-- WinLogon subscribers execute synchronously before the shell is started.  I think that there's a way to
+               auto-generate regions for each "Event", but initial attempts failed so I'm not doing that now.  The
+               WlnId_Logon-Entry and WlnId_StartShell-Entry regions are the same except for the "Event" field. -->
+          <Region Guid="{C4E8DB73-19CA-4B35-BF3A-7B48B0F927AB}"
+                  Name="User-Logon-Winlogon-CallSubscriber-WlnId_Logon"
+                  FriendlyName="Logon subscribers">
+            <Region Guid="{7172E9E4-E38C-4A1E-8156-415EC366F015}"
+                    Name="User-Logon-Winlogon-CallSubscriber-WlnId_Logon-Entry"
+                    FriendlyName="Logon subscriber">
+               <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                  <PayloadIdentifier FieldName="Event" FieldValue="2" />
+               </Start>
+               <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                  <PayloadIdentifier FieldName="Event" FieldValue="2" />
+               </Stop>
+               <Match>
+                  <Event PID="true">
+                    <Payload FieldName="SubscriberName" />
+                  </Event>
+               </Match>
+               <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+               </Naming>
+            </Region>
+          </Region>
+          <!-- This is the same as the above region, but with a different "Event" field. -->
+          <Region Guid="{C350C60A-8711-4249-A569-841CC38E1EE8}"
+                  Name="User-Logon-Winlogon-CallSubscriber-WlnId_StartShell"
+                  FriendlyName="StartShell subscribers">
+            <Region Guid="{B0907AB3-4D5D-4735-A640-165B014A2482}"
+                    Name="User-Logon-Winlogon-CallSubscriber-WlnId_StartShell-Entry"
+                    FriendlyName="StartShell subscriber">
+               <Start>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="811" Version="0" />
+                  <PayloadIdentifier FieldName="Event" FieldValue="12" />
+               </Start>
+               <Stop>
+                  <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="812" Version="0" />
+                  <PayloadIdentifier FieldName="Event" FieldValue="12" />
+               </Stop>
+               <Match>
+                  <Event PID="true">
+                    <Payload FieldName="SubscriberName" />
+                  </Event>
+                  <Parent TID="true" PID="true" />
+               </Match>
+               <Naming>
+                  <PayloadBased NameField="SubscriberName" />
+               </Naming>
+            </Region>
+          </Region>
+          <!-- These events mark when the shell is started.  Usually, userinit.exe is started, and is responsible for
+               kicking off a chain of events that will start Explorer. -->
+          <Region Guid="{C1A6A2C1-DBE9-4F4C-BADE-33EE4FC19A92}"
+                  Name="User-Logon-Winlogon-ExecuteShellCommandList"
+                  FriendlyName="Execute shell command list">
+            <Start>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="9" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}" Id="10" Version="0" />
+            </Stop>
+            <Match>
+              <Event PID="true" TID="true" />
+            </Match>
+            <Naming>
+              <PayloadBased NameField="CommandList" />
+            </Naming>
+          </Region>
+        </Region>
+        
+        <!-- This is an intermediate region representing the time between when Winlogon executes the shell commands
+             and Explorer starts its logon tasks -->
+        <Region Guid="{BD6F7004-1DC5-4A10-A764-9E9B61F17EB3}"
+                Name="User-Logon-LaunchingShell"
+                FriendlyName="Launching shell">
+          <Start>
+            <Region RegionGuid="{C1A6A2C1-DBE9-4F4C-BADE-33EE4FC19A92}" />
+          </Start>
+          <Stop>
+            <Region RegionGuid="{37A5766E-FAAB-48F9-A1E4-5D18DF969346}" />
+          </Stop>
+        </Region>
+        
+        <!-- This region describes Explorer's responsibilities during a logon. -->
+        <Region Guid="{3707B093-0676-4A75-91E6-502B28AC8CB6}"
+                Name="User-Logon-Explorer"
+                FriendlyName="Explorer logon framework">
+          <!-- This is an overview of the time that Explorer blocked the logon, using the
+               PerfTrack_Explorer_ExplorerStartToDesktopReady events. -->
+          <Region Guid="{D52B32A9-1940-41D2-87BD-E48A2E2AE059}"
+                  Name="User-Logon-Explorer-ExplorerStartToDesktopDesktopReady"
+                  FriendlyName="Explorer start to desktop ready">
+            <Start>
+              <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="27230" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="27231" Version="0" />
+            </Stop>
+            <Match>
+              <Event PID="true" />
+            </Match>
+          </Region>
+          
+          <!-- These events describe specific logon tasks that Explorer waits for before switching to the user's
+               desktop, using the LogonPerformance_TaskRunTime events. -->
+          <Region Guid="{37A5766E-FAAB-48F9-A1E4-5D18DF969346}"
+                  Name="User-Logon-Explorer-LogonTasks"
+                  FriendlyName="Logon tasks according to LogonPerformance_TaskRunTime events. Stop events may be glommed together so durations here may be longer than the async task actually took">
+            <Region Guid="{61AFF661-3812-4484-8727-DABFB812A91F}"
+                    Name="User-Logon-Explorer-LogonTasks-Entry"
+                    FriendlyName="Logon task">
+              <Start>
+                <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="62170" Version="0" />
+              </Start>
+              <Stop>
+                <Event Provider="{30336ed4-e327-447c-9de0-51b652c86108}" Id="62171" Version="0" />
+              </Stop>
+              <Match>
+                <Event PID="true">
+                  <Payload FieldName="TaskName" />
+                </Event>
+                <Parent PID="true" />
+              </Match>
+              <Naming>
+                <PayloadBased NameField="TaskName" />
+              </Naming>
+            </Region>
+          </Region>
+          
+          <!-- These events track otherwise-unattributed work that happens before the Explorer allows the switch to the
+               desktop.  This includes time spent dismissing the first sign-in animation. -->
+          <Region Guid="{CE513BC0-DA41-41BA-8DD3-C5E7684E1050}"
+                  Name="User-Logon-Explorer-LogonTasks-RunBeforePostStartTasks"
+                  FriendlyName="RunBeforePostStartTasks">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="RunBeforePostStartTasks" Opcode="1" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="RunBeforePostStartTasks" Opcode="2" Version="0" />
+            </Stop>
+          </Region>
+
+          <Region Guid="{EE3BAA99-256F-42B5-8E3A-0DCFEA403695}"
+                  Name="User-Logon-Explorer-LogonTasks-TerminateFirstSignInAnimation"
+                  FriendlyName="Terminate first sign-in animation">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="TerminateFirstSignInAnimation" Opcode="1" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="TerminateFirstSignInAnimation" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+          </Region>
+          
+          <!-- The AppResolver logon task executes on a background thread, but the LogonPerformance_TaskRuntime events
+               block the AppResolver:Stop event behind a slower AppReadiness :Stop event.  Usually this means that we
+               only have an upper bound for the App Resolver duration.  These events track the App Resolver work on its
+               background thread so that we can get an accurate duration. -->
+          <Region Guid="{C9965B67-C7B4-4FD0-AFF9-69DF9B3D7DB1}"
+                  Name="User-Logon-Explorer-LogonTasks-AppResolverWork"
+                  FriendlyName="AppResolverWork">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="AppResolverWork" Opcode="1" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="AppResolverWork" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+          </Region>
+          
+          <!-- This often runs in-between other logon tasks. -->
+          <Region Guid="{96483FB7-35B0-4A18-8B05-D4EE4557FEB2}"
+                  Name="User-Logon-Explorer-LogonTasks-WaitOnShellStartup"
+                  FriendlyName="Wait on shell startup">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="WaitOnShellStartup" Opcode="1" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="WaitOnShellStartup" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+          </Region>
+          
+          <!-- The Content Delivery Manager has a background task that is kicked off by the LaunchContentDeliveryManager
+               logon task.  The logon tasks don't block on the background task to complete - this event is here for the
+               curious. -->
+          <Region Guid="{53F3C5DD-48BD-4630-BF2F-CC9D123A6AA6}"
+                  Name="User-Logon-Explorer-LogonTasks-ContentDeliveryManagerRegistration"
+                  FriendlyName="Content Delivery Manager registration (non-blocking, for Logon task: LaunchContentDeliverManager)">
+            <Start>
+              <Event Provider="{8cba0f81-8ad7-5395-2125-5703822c822a}" Name="RegistrationTaskActivity" Opcode="1" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{8cba0f81-8ad7-5395-2125-5703822c822a}" Name="RegistrationTaskActivity" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+          </Region>
+          
+          <Region Guid="{15331E3D-59B4-46F4-8A83-0046C7B893AD}"
+                  Name="User-Logon-Explorer-LogonTasks-SignInSuggestionsGetContent"
+                  FriendlyName="Sign in suggestions get content">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="SignInSuggestionsGetContent" Opcode="1" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="SignInSuggestionsGetContent" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+          </Region>
+
+          <!-- The LaunchExperienceHost logon task kicks off the launch for Start and Cortana, and waits for each to
+               complete.  These events track the launch of Start (not Cortana) in a successful case (the common case).
+               Different events are logged for failure cases - we've only had to handle the successful case so far. -->
+          <Region Guid="{CF5D846F-F388-401D-B1B9-F4C03E380C69}"
+                  Name="User-Logon-Explorer-LogonTasks-LaunchStart"
+                  FriendlyName="Launch Start (for Logon task: LaunchExperienceHost)">
+            <Start>
+              <Event Provider="{2ca51213-29c5-564f-fd60-355148e8b47f}" Name="Launch" Opcode="1" Version="0" />
+              <PayloadIdentifier FieldName="experience" FieldValue="Windows.Internal.ShellExperience.StartMenu" />
+            </Start>
+            <Stop>
+              <Event Provider="{2ca51213-29c5-564f-fd60-355148e8b47f}" Name="InitializationComplete" Opcode="0" Version="0" />
+              <PayloadIdentifier FieldName="experienceId" FieldValue="Windows.Internal.ShellExperience.StartMenu" />
+            </Stop>
+          </Region>
+
+          <!-- These events are similar to the above for Start, but these track Cortana aka SearchApp. -->
+          <Region Guid="{031553C2-7C44-4A06-9802-333A279744EF}"
+                  Name="User-Logon-Explorer-LogonTasks-LaunchCortana"
+                  FriendlyName="Launch Cortana (for Logon task: LaunchExperienceHost)">
+            <Start>
+              <Event Provider="{2ca51213-29c5-564f-fd60-355148e8b47f}" Name="Launch" Opcode="1" Version="0" />
+              <PayloadIdentifier FieldName="experience" FieldValue="Windows.Internal.ShellExperience.SearchApp" />
+            </Start>
+            <Stop>
+              <Event Provider="{2ca51213-29c5-564f-fd60-355148e8b47f}" Name="InitializationComplete" Opcode="0" Version="0" />
+              <PayloadIdentifier FieldName="experienceId" FieldValue="Windows.Internal.ShellExperience.Cortana" />
+            </Stop>
+          </Region>
+          
+          <!-- The PerUserSetup logon task is split into two parts:
+                - To start, a Cloud Experience Host app is launched if necessary.  This region tracks this start.
+                - To stop, and after other logon tasks have completed, the Cloud Experience Host app is switched to,
+                  and PerUserSetup blocks until that experience is terminated.  This last part only happens if the
+                  Cloud Experience Host app was launched in the above step. -->
+          <Region Guid="{3669DDBE-0777-412A-B73E-F30EC70443AF}"
+                  Name="User-Logon-Explorer-LogonTasks-PerUserSetup-Start"
+                  FriendlyName="PerUserSetupStart">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="LogonTask" Opcode="1" Version="0" />
+              <PayloadIdentifier FieldName="logonTask" FieldValue="PerUserSetup" />
+              <PayloadIdentifier FieldName="isStartWaitTask" FieldValue="True" />
+              <PayloadIdentifier FieldName="isWaitMethod" FieldValue="False" />
+            </Start>
+            <!-- The event immediately following the Start event will be the Stop event for this activity -->
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="LogonTask" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+            <Naming>
+              <RegionBased RegionGuid="{92285ED0-3C3C-417E-9083-D7A26CDB86EF}"
+                           Relation="IsPresent"
+                           IfRelationTrue="Launched cloud experience"
+                           IfRelationFalse="No cloud experience" />
+            </Naming>
+          </Region>
+          
+          <!-- This tracks the "stop" for PerUserSetup described above. -->
+          <Region Guid="{92285ED0-3C3C-417E-9083-D7A26CDB86EF}"
+                  Name="User-Logon-Explorer-LogonTasks-PerUserSetup-SwitchToAndWaitForCloudExperience"
+                  FriendlyName="PerUserSetupStop: Switch to and wait for cloud experience">
+            <Start>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="SwitchingToCloudExperience" Version="0" />
+            </Start>
+            <!-- The event immediately following the Start event will be the Stop event for this activity -->
+            <Stop>
+              <Event Provider="{04d28e21-00aa-5228-cfd0-d70863aa5ce9}" Name="LogonTask" Opcode="2" Version="0" />
+            </Stop>
+            <Match>
+              <Event TID="true" PID="true" />
+            </Match>
+          </Region>
+        </Region>
+        
+        <!-- This region describes what the App Readiness Service is doing during the logon, using AppReadiness_PerfTrack
+             events. -->
+        <Region Guid="{06752343-3185-47DA-86B6-EB3F2E2CB8B6}"
+                Name="User-Logon-AppReadiness"
+                FriendlyName="App registration (AppReadiness)">
+          <Region Guid="{7AB432A9-EB6A-4CE3-832C-D775F890BA07}"
+                  Name="User-Logon-AppReadiness-Task"
+                  FriendlyName="Task">
+            <Start>
+              <Event Provider="{f0be35f8-237b-4814-86b5-ade51192e503}" Id="3000" Version="0" />
+            </Start>
+            <Stop>
+              <Event Provider="{f0be35f8-237b-4814-86b5-ade51192e503}" Id="3001" Version="0" />
+            </Stop>
+            <Match>
+              <Event PID="true">
+                <Payload FieldName="TaskId" />
+              </Event>
+              <Parent PID="true" />
+            </Match>
+            <Naming>
+              <PayloadBased NameField="TaskId" />
+            </Naming>
+          </Region>
+        </Region>
+      </RegionRoot>
+    </Regions>
+  </Instrumentation>
+</InstrumentationManifest>
