@@ -4,7 +4,7 @@
 **対象**: work70 (メモリ 2.5GB 肥大化問題)
 **前版**: v5.60-2 (2026-07-11)
 
-> **本計画書は「これから行う改修」を先頭にまとめ、「完了した改修」は Appendix に配置している。**
+> **本計画書は「これから行う改修」を先頭にまとめ、「完了した改修」は Appendix に配置している（Appendix は本計画書に含まれているが、レビュー時は本編のみの確認でも十分である）。**
 > 凡例: ✅ FACT / 🔍 Strong HYPOTHESIS / 🔍 HYPOTHESIS / 💡 PROPOSAL / ⚠️ CAVEAT
 
 ---
@@ -28,16 +28,41 @@ Builder は以下を**行わない**:
 - Policy Decision を行わない（No Policy Decision）
 - 入力を構造体へ忠実に写像するのみ（Pure Construction）
 - semantic intent を変更しない（Never mutates semantic intent — CrossfadePlan をそのまま写像）
+- **入力パラメータ間の意味的整合性を再解釈しない。Crossfade を含むトポロジ構成は CrossfadePlan に完全に記述され、Builder はその内容を忠実に構築する。**
 
 ```
-入力 (current, next, policy, fadeTimeSec, active, sealedSnapshot, CrossfadePlan)
+入力 (sealedSnapshot, RuntimeGraphDescription)
   ↓
-Builder（忠実な写像、No Validation / No Policy / No Mutation）
+Builder（Pure Construction — 入力を忠実に写像するのみ。自身では判断しない）
   ↓
-RuntimePublishWorld（Topology / Graph / Execution の**構造的整合性**のみ Builder 内で保証 — Semantic Invariant は Validator の責務）
+RuntimePublishWorld（完成状態 — 保証は一切行わない。保証は Validator の責務）
 ```
 
-この制約により、Builder にif文が増えることを構造的に防止する。将来の構築ルール変更は Builder の写像ロジックのみで対応し、判断ロジックは CrossfadeAuthority / Orchestrator が担当する。
+**Builder への入力は `RuntimeGraphDescription` のみ** — `current` / `next` / `RuntimeBuildPolicy` / `fadeTimeSec` / `active` は Builder に渡さない。これらは CrossfadeAuthority と Orchestrator だけが知るべき情報。Builder はグラフのノード構成（active/fading）だけを受け取り、それらの意味（`current` か `next` か）を知らない。このため `if (current && !next)` 等の意味推論が構造的に不可能になる。
+
+```cpp
+// ★ v6.8: Builder が唯一受け取るグラフ記述 — current/next を排除し、
+//   ノード構成のみを伝達する。Builder はノードの意味を推論できない。
+struct RuntimeGraphDescription {
+    DSPCore* activeDSP = nullptr;     // Active ノードとなる DSPCore（nullptr=該当なし）
+    DSPCore* fadingDSP = nullptr;     // Fading ノードとなる DSPCore（nullptr=クロスフェードなし）
+};
+
+// fadeSeconds は Builder の責務（Topology 構築）ではなく実行パラメータであり、
+// CrossfadeRuntime / TransitionState が保持する。Builder は fade 時間を知る必要がない。
+```
+
+**RuntimeBuilder のシグネチャ**（簡略化）:
+```cpp
+RuntimePublishWorld buildRuntimePublishWorld(
+    const GlobalSnapshot* sealedSnapshot,                     // 既存のデフォルト引数
+    const RuntimeGraphDescription& desc = RuntimeGraphDescription{}  // 唯一のグラフ入力
+) noexcept;
+```
+
+**Builder 内部の制約**: Builder は `RuntimeGraphDescription` のみから Graph を構築する。`desc.fadingDSP != nullptr` なら fadingNode を生成し、`activeDSP` / `fadingDSP` を対応するノードに設定する。`current` / `next` を知らないため、ノードの意味（新旧）を推論できない。
+
+**Builder は「構築のみ」を責務とし、出力の正当性は保証しない**。正当性の検証は Validator / Authority Contract / Precheck の三段階で行う。
 
 **コア原則: 各 Authority は他の Authority の内部状態を直接変更しない。必要な情報は入力として渡し、出力は完成したオブジェクトまたは状態遷移として受け渡す。**
 
@@ -59,10 +84,16 @@ Publication（公開）
 ```
 
 重要な設計判断:
-- Builder は Validator が通ることを前提とせず、自身の構築規則に従って正しい World を生成する
-- Validator は Builder の設定漏れを発見しても Builder を修正せず、Publication を拒否するのみ
-- **Validator 通過は「Validator が保証する Invariant が成立している」ことのみを意味する。Authority Contract (別段階の Precheck) までは保証しない。**
-- Validator 不合格 ≠ Builder が間違っている（Builder 入力が不適切な場合もあり得る）
+- Builder は Validator が通ることを前提とせず、自身の構築規則に従って World を生成する
+- Validator は **Builder の出力のみを評価する**。Builder 内部の実装ミスか入力データの問題かは判定しない。
+- **Validator が保証するのは「Structural Invariant（構造的不変条件）」のみ**。意味的正しさ（Semantic）、Authority Contract、Policy の正当性は保証しない。
+- Validator 不合格は Builder 出力に問題があることのみを示す。原因が Builder 内部か入力データかは切り分けられない。
+
+**Validator の保証範囲**:
+- ✅ **Structural Invariants**: hasFadingRuntime == fadingRuntimeUuid の有無、fadingNode の存在有無 等
+- ❌ **Semantic correctness**: Builder 入力の意味的整合性は保証しない
+- ❌ **Authority Contract**: graph.fadingNode と CrossfadeRuntime の一貫性は保証しない（Precheck の責務）
+- ❌ **Policy correctness**: RuntimeBuildPolicy の適切性は保証しない
 
 **Validator と Authority Contract / Precheck は独立した検証段階である**:
 - Validator 通過 ≠ Authority Contract 成立（gen=5/8 で実証済み）
@@ -146,47 +177,39 @@ gen=5/8: 同種のトポロジに crossfade rebuild のため override 適用
 **ConvoPeq.md の CrossfadeAuthority 定義に基づく**。
 
 ```cpp
-// 新規: CrossfadePlan — Builder への完全な Graph Topology 構築指示
-//   Builder はこの構造体に記述された内容をそのまま RuntimePublishWorld に写像する。
-//   自身で Crossfade 要否を判断せず、常に plan の指示に忠実に従う。
-//   将来 FadePolicy の種類が増えても（HardReset/SoftReset/Instant/Progressive 等）
-//   フィールド追加で対応可能。enum 拡張不要。
-enum class FadePolicy {
-    None,       // クロスフェードなし（即時切り替え）
-    Standard,   // 標準クロスフェード（Generator が fading を管理）
+```cpp
+// ★ v6.8: RuntimeGraphDescription — Builder が唯一受け取るグラフ記述。
+//   current/next を排除し、ノード構成のみを伝達する。
+//   Builder はノードの意味（新旧）を推論できない。
+//   fadeSeconds は Builder の責務ではなく CrossfadeRuntime の実行パラメータ。
+struct RuntimeGraphDescription {
+    DSPCore* activeDSP = nullptr;     // Active ノードとなる DSPCore（nullptr=該当なし）
+    DSPCore* fadingDSP = nullptr;     // Fading ノードとなる DSPCore（nullptr=クロスフェードなし）
 };
 
-struct CrossfadePlan {
-    FadePolicy policy = FadePolicy::None;
-    double fadeTimeSec = 0.0;
-    // Builder は fadingNode を plan から受け取り、そのまま graphState に設定する。
-    // 自身で fadingNode の有無を判断しない。
-    RuntimeGraphNode* fadingNode = nullptr;
-};
-
-// RuntimeBuilder のシグネチャ変更:
+// RuntimeBuilder のシグネチャ:
 RuntimePublishWorld buildRuntimePublishWorld(
-    DSPCore* current, DSPCore* next,
-    RuntimeBuildPolicy policy, double fadeTimeSec, bool active,
-    const GlobalSnapshot* sealedSnapshot,           // 既存のデフォルト引数
-    const CrossfadePlan& plan = CrossfadePlan{}     // 新規追加
+    const GlobalSnapshot* sealedSnapshot,                     // 既存のデフォルト引数
+    const RuntimeGraphDescription& desc = RuntimeGraphDescription{}  // 唯一のグラフ入力
 ) noexcept;
 ```
 
-**変更影響**: 7箇所の呼び出し中、Orchestrator のみが plan を渡す。残り6箇所（Init/PrepareToPlay/ReleaseResources/Timer/Transition/PublicationExecutor）はデフォルト値（policy=None, fadingNode=nullptr）を使用。
+**Builder 内部の制約**: Builder は `RuntimeGraphDescription` のみから Graph を構築する（`hasFading` は不要 — `desc.fadingDSP != nullptr` で代替）:
+- `desc.fadingDSP != nullptr` → fadingNode を生成し対応付ける
+- `desc.activeDSP` を対応する Active ノードに設定する
+- `current` / `next` を知らないため、「どちらが旧ノードか新ノードか」を推論できない
+- `fadeSeconds` は Builder に渡されない — Topology ではなく実行パラメータのため
 
-**期待効果**: Builder は Plan に書かれた Graph Topology をそのまま構築するのみ。自身で判断しない。Post-build Mutation が不要になり、AUTH_CONTRACT FAIL が解消される。
+**変更影響**: 7箇所の呼び出し元は、これまで `current` / `next` を渡していた代わりに `RuntimeGraphDescription` を構築して渡す。Orchestrator は CrossfadeAuthority の判断に基づいて desc を組み立て、残り6箇所はデフォルト値で動作。
 
-✅ **FACT（2026-07-11 コード調査確定）**: CrossfadePlan 追加は構造的に実現可能。`buildRuntimePublishWorld()` は既に `sealedSnapshot = nullptr` のデフォルト引数パターンを持つ。同様のパターンで `CrossfadePlan plan = CrossfadePlan{}` を追加可能。
-
-**将来の拡張性**: 現在は `FadePolicy::None / Standard` の2値だが、将来 `HardReset` / `SoftReset` / `Instant` / `Progressive` 等が追加されても CrossfadePlan のフィールド拡張のみで対応可能。Builder のシグネチャは不変。
+**期待効果**: Builder は Graph Topology のみを構築する。`current` / `next` にアクセスできないため、意味推論が構造的に不可能。Post-build Mutation が不要になり、AUTH_CONTRACT FAIL が解消される。
 
 ### 1.3 実装ステップ
 
 | Step | 内容 | ファイル |
 |:-----|:------|:---------|
-| 1 | `CrossfadePlan` 構造体を `RuntimeBuilder.h` に追加 | `RuntimeBuilder.h` |
-| 2 | `buildRuntimePublishWorld()` に `CrossfadePlan` 引数を追加（デフォルト値付き） | `RuntimeBuilder.h/.cpp` |
+| 1 | `RuntimeGraphDescription` 構造体を `RuntimeBuilder.h` に追加 | `RuntimeBuilder.h` |
+| 2 | `buildRuntimePublishWorld()` のシグネチャを `(sealedSnapshot, RuntimeGraphDescription)` に変更 | `RuntimeBuilder.h/.cpp` |
 | 3 | Orchestrator `trySubmit()` 内で CrossfadeAuthority の決定を plan に詰めて Builder に渡す | `RuntimePublicationOrchestrator.cpp` |
 | 4 | Builder 内で `plan` に記述された Graph Topology（fadingNode/policy）をそのまま `graphState` に写像 | `RuntimeBuilder.cpp` |
 | 5 | 残り6箇所の呼び出しを確認（デフォルト引数で動作。変更不要） | 各 .cpp |
@@ -220,7 +243,9 @@ RuntimePublishWorld buildRuntimePublishWorld(
 
 | 案 | 難易度 | リスク | 期待削減 | 説明 |
 |:---|:-------|:-------|:---------|:------|
-| **A（推奨）**: 初回 prepare 時に使用する `maxSamplesPerBlock` を小さな値（例: 512）に設定し、prepareToPlay で実SR/BSに再設定 | 中 | 低 | ~189MB/DSPCore | 最も実装自由度が高く、`SAFE_MAX_BLOCK_SIZE` 自体は変更しない |
+| **A（推奨）**: 初回 prepare 時に使用する `maxSamplesPerBlock` を適切な値に設定し、prepareToPlay で実 SR/BS に再設定。`SAFE_MAX_BLOCK_SIZE` 自体は Emergency Fallback として 65536 を維持。 | 中 | 低 | ~189MB/DSPCore | `SAFE_MAX_BLOCK_SIZE` を変更せず、初回 prepare 時のみ別値を使用。prepareToPlay 到達後に適切な値に再設定される。 |
+
+**設計上の定数**: `constexpr int kInitialPrepareMaxBlock = 4096;`（Init 直後の maxSamplesPerBlock 設定値）。4096 はオフラインレンダリングやホストバリデーションで 8192/16384 が来る可能性を考慮した安全な値。512 は小さすぎる。
 | B: `SAFE_MAX_BLOCK_SIZE` の低減 | 高 | 中 | ~189MB/DSPCore | クロスフェードバッファ等他の依存箇所に波及。独立性が低い |
 | C: 初回 prepare で internalMaxBlock 上限を実ブロックサイズに制限（osFactor 未確定のため 1x 相当） | 低 | 低 | ~189MB/DSPCore | 最も安全、後続の prepareToPlay で再設定される |
 
@@ -260,7 +285,7 @@ NoiseShaper learner の `Waiting diagnostics` ログでは `accepted=0, dropSamp
 |:-:|:---------|:---------|:-----|
 | 1 | `block.sampleRateHz` を `[NoiseShaperLearner] drainCaptureQueue` ログに出力 | `NoiseShaperLearner.cpp` | +1 |
 | 2 | `session.sampleRateHz` と `block.sampleRateHz` の実値同時出力（Waiting diagnostics行に追記） | `NoiseShaperLearner.cpp:916` | +1 |
-| 3 | GlobalSnapshot に `block.sampleRateHz` の統計情報を追加（可能な場合） | `AudioEngine.h` | +3 |
+| 3 | GlobalSnapshot に `block.sampleRateHz` の統計情報を追加。キャプチャキューの `queueSize` / `segmentQueueSize` も DIAG に追加（`segmentBuffer.pushBlock()` が false を返すケースの追跡用）。 | `AudioEngine.h`, `NoiseShaperLearner.cpp` | +5 |
 
 ### 4.3 期待効果
 
@@ -283,19 +308,24 @@ NoiseShaper learner の `Waiting diagnostics` ログでは `accepted=0, dropSamp
 - C++ CRT ヒープ断片化
 - JUCE framework
 
-### 5.2 変更内容（推奨: `DSPCore::memoryUsage()` 診断API方式）
+### 5.2 変更内容（推奨: `TrackedMemoryStatistics` 診断API方式）
 
 **設計判断**: `sizeof(DSPCore)` では内部の vector/AudioBuffer/Oversampler/Convolver 等のヒープ確保まで含まれない。そのため以下の2案を比較:
 
 | 案 | 実装量 | 正確さ | 将来保守性 |
 |:---|:-------|:-------|:----------|
-| **A（推奨）**: `DSPCore::memoryUsage()` 診断専用APIを追加 | 中 | ◎ | ◎ サブシステム追加時に追従容易 |
+| **A（推奨）**: `TrackedMemoryStatistics` 診断専用APIを追加 | 中 | ◎ | ◎ サブシステム追加時に追従容易 |
 | B: 個別フィールドを MEM_SNAP にベタ書き | 低 | ○ | △ サブシステム追加時に修正漏れリスク |
 
 **案Aの API 設計案**:
 ```cpp
-struct DSPCoreMemoryBreakdown {
-    size_t totalTracked = 0;       // 合計
+// DSPCore に追加する診断用メモリ統計取得API
+// 名称を DiagnosticMemoryStatistics とすることで
+// 「正確な物理メモリ使用量」ではなく「診断目的の追跡対象アロケーション統計」であることを明示する。
+// ★ v6.8: 名称を TrackedMemoryStatistics に統一。
+//   「正確な物理メモリ」ではなく「診断目的の追跡対象アロケーション統計」であることを明示する。
+struct TrackedMemoryStatistics {
+    size_t totalTracked = 0;       // 合計 tracked 確保量
     size_t oversampling = 0;       // Oversampling work buffers
     size_t softClip = 0;           // SoftClip OS work buffers
     size_t eqProcessor = 0;        // EQ scratch/dry/parallel/structure/msWorkBuffer
@@ -306,17 +336,8 @@ struct DSPCoreMemoryBreakdown {
     size_t crossfade = 0;          // JUCE crossfade buffers
     size_t misc = 0;               // DCBlocker/LoudnessMeter/PeakLimiter/NoiseShaper
 };
-DSPCoreMemoryBreakdown DSPCore::memoryUsage() const noexcept;
+TrackedMemoryStatistics DSPCore::collectTrackedMemoryStatistics() const noexcept;
 ```
-
-MEM_SNAP 出力の拡張例:
-```
-[MEM_SNAP] gen=3
-  DC: live=1 | OS:64MB SC:32MB EQ:21MB Buf:16MB Lat:16MB TPD:8MB Conv:0MB XF:2MB
-  DC-total:159MB | World: gen=3 size=??MB | Ret: slots=0 tot=0MB | NUC: live=0 alloc=0MB
-```
-
-**優先度**: 中。ただし `DSPCore::memoryUsage()` の設計・実装には工数がかかるため、P1-c の拡張範囲に入れるか否かは別途判断。
 
 | # | フィールド | 取得元 | 意味 |
 |:-:|:-----------|:-------|:------|
@@ -336,7 +357,7 @@ MEM_SNAP 出力の拡張例:
 
 *本節はすべてのフェーズに共通する設計参照情報。改修完了後も維持すべき不変条件を示す。*
 
-### 4.1 Authority Boundary Chart — Single Authority 設計
+### 6.1 Authority Boundary Chart — Single Authority 設計
 
 | 責務 | Authority | コード位置 | 備考 |
 |:-----|:----------|:----------|:------|
@@ -347,7 +368,7 @@ MEM_SNAP 出力の拡張例:
 | **EBR enqueue** | `DSPLifetimeManager::retire()` | `DSPLifetimeManager.h:37` | ISRRetireRouter 経由 |
 | **DSPCore* 物理破棄** | `destroyDSPCoreNode()` | `AudioEngine.Threading.cpp:15` | EBR callback または DSPGuard 直接破棄 |
 
-### 4.2 DSPHandle ライフサイクル状態遷移（確定）
+### 6.2 DSPHandle ライフサイクル状態遷移（確定）
 
 ```text
          [Constructing] ← 登録直後．rollback 可能な唯一の状態
@@ -364,14 +385,14 @@ MEM_SNAP 出力の拡張例:
 
 **Invariant**: Constructing のみ rollback 可能 / Reclaimed のみ create() 再利用 / Quarantined からの復帰は不可。
 
-### 4.3 RT Safety 証明
+### 6.3 RT Safety 証明
 
 - `activeRuntimeDSPHandle_`: publishAtomic(release) / consumeAtomic(acquire) — 正しい HB 順序
 - `runtimeDSPHandleMap_`: `std::mutex` 保護（NonRT のみ）— RT スレッドは map 非アクセス
 - `DSPHandleRuntime`: `std::atomic<DSPHandle>` + `std::atomic<DSPState>` ベース — ミューテックス不使用
 - EBR drain: 「全 Reader が epoch を離脱した」ことを保証してから callback 実行
 
-### 4.4 Invariant 一覧
+### 6.4 Invariant 一覧
 
 | ID | Invariant | 根拠 |
 |:---|:----------|:------|
@@ -394,12 +415,14 @@ MEM_SNAP 出力の拡張例:
 
 ### 7.1 NoiseShaper accepted=0 の真因
 
-🔍 **HYPOTHESIS**: `accepted=0` の原因はコード調査の範囲では特定できなかった。
+🔍 **HYPOTHESIS**: `accepted=0` の原因はコード調査の範囲では特定できなかった。コード上の全経路を検証したが、block.sampleRateHz と session.sampleRateHz の不一致を説明できるコード上のバグは発見できなかった。
 
 **確定済みの事実**:
-- セッション側 `session.sampleRateHz` は `engine.currentSampleRate`（192000）から設定（NoiseShaperLearner.cpp:1034）
-- ブロック側 `block.sampleRateHz` は `dsp->sampleRate`（192000 = base rate）から設定（AudioEngine.h:3552 → DSPCoreLifecycle.cpp:104）
-- 両者はコード上**一致するはず**（192000 = 192000）
+- セッション側 `session.sampleRateHz` は `engine.currentSampleRate`（192000, double→int変換:+0.5）から設定（NoiseShaperLearner.cpp:1034）
+- ブロック側 `adaptiveCaptureSampleRateHz` は `dsp->sampleRate`（192000, double→int変換:+0.5）から設定（AudioEngine.h:3552）
+- `pushAdaptiveCaptureBlocks` は `state.adaptiveCaptureSampleRateHz`（int 192000）をそのまま `block.sampleRateHz` に代入（DSPCoreDouble.cpp:291）
+- `drainCaptureQueue` の比較は `block.sampleRateHz == session.sampleRateHz`（int vs int）— 型の不整合なし
+- 両者はコード上 **192000 == 192000** となるはず
 
 **誤りと判明した仮説**: 従来の「`processingRate` bug」説（`dsp->sampleRate` が processingRate 768000 と誤って設定されている）はコード検証の結果誤り。`dsp->sampleRate` は正しく base rate を保持する。
 
@@ -410,84 +433,57 @@ MEM_SNAP 出力の拡張例:
 
 **結論**: コード調査では真因の特定は不可能。Runtime DIAG により `block.sampleRateHz` の実値を出力する改善が必要（→ [設計] 4. P-NS）。
 
+**新規確定事実（2026-07-11 追加コード調査）**:
+- ✅ `segmentBuffer.pushBlock()` は **void 戻り値**（AudioSegmentBuffer.h:23）。戻り値をチェックしない設計であり、「pushBlock の暗黙的な失敗」は発生しない。ブロック到達以前に `droppedBySampleRate` で弾かれていることが `accepted=0` の直接原因。
+- ✅ `audioCaptureQueue` は **AudioEngine に1つのみ存在**する共有リングバッファ（AudioEngine.h:2345）。全 DSPCore が同じキューに書き込む。4096エントリを 192kHz/256blockSize で約5.5秒で全上書き可能。gen=3 は約10秒間動作してから NoiseShaper が起動するため、gen=1 (48000Hz) のブロック残留はほぼ不可能。
+- ✅ DIAG ログで `sampleRateHz=192000`（session）、`dropSampleRate=3000`、`dropSession=0` を確認済み。したがってブロックは sampleRate 不一致のみでドロップ。
+
+**結論**: `block.sampleRateHz` と `session.sampleRateHz` の実値がコード解析上は一致するはずだが、Runtime では異なる可能性が高い。真因の特定には [設計] 4. P-NS による DIAG 改善が必須。
+
 **残存する可能性**（いずれも Runtime 観測が必要）:
-- `a`) `segmentBuffer.pushBlock()` の暗黙的な失敗（キューから pop できても segment キューが満杯で push できない）
-- `b`) セッション開始タイミングの競合：キューと `startLearning` の間の瞬間的な不整合
-- `c`) ConvoPeq.md 上の未確認な条件分岐
+- `a`) セッション開始タイミングの競合：キューと `startLearning` の間の瞬間的な不整合
+- `b`) ConvoPeq.md 上の未確認な条件分岐
+- ~~`segmentBuffer.pushBlock()` の暗黙的な失敗~~ → **void 戻り値のため成立しない**（v6.5 確定）
 
 **確認方法**: [設計] 4. P-NS の DIAG 改善適用後、`block.sampleRateHz` と `session.sampleRateHz` の実値を確認。
 
-### 7.2 EBR 経路の未検証
+### 7.2 EBR 経路の未検証と lifecycle(retire)=0
 
-⚠️ **CAVEAT**: 今回の ConvoPeq.log では EBR（Epoch-Based Reclamation）は一度も発動しなかった。
+⚠️ **CAVEAT**: 今回の ConvoPeq.log では EBR（Epoch-Based Reclamation）は一度も発動しなかった。`lifecycle(retire)=0` も同根の原因による。
 
-| 指標 | 値 | 意味 |
-|:-----|:----|:------|
-| `pend` | 0 | Retire 待ちエントリなし |
-| `reclaim` | 0 | EBR reclaim が一度も実行されず |
-| `retire` (lifecycle) | 0 | `retireDSPHandleForRuntime()` が一度も成功せず |
-
-✅ **FACT（2026-07-11 コード調査で確定）**: EBR 機構自体は**完全に実装されている**。
-- Reader thread 登録: `registerReaderThread()`（ISRRetireRouter.cpp:47）
-- Reader epoch 参加: `enterReader(readerIndex)`（ISRRetireRouter.cpp:59）
-- Reader epoch 離脱: `exitReader(readerIndex)`（ISRRetireRouter.cpp:65）
-- Epoch 進行: `ISRRetireRouter::currentEpoch()` → `EpochDomain` globalEpoch fetch_add
-- Enqueue: `enqueueRetire(ptr, deleter, epoch)`（DSPLifetimeManager.h:50）
-- Reclaim: Timer 50ms周期で `tryReclaim()` → `getMinReaderEpoch()` → safe entries freed
-- QueueFull フォールバック: `tryReclaim()` で backlog 消化後、再試行
-
-**⚠️ 重要訂正（2026-07-11 v6.2）**: 従来の「未発動の原因は handle 未登録のみ」という説明は**誤り**。ConvoPeq.log は P1-a/FIX 適用済みバイナリ（v5.44）で収録されているにもかかわらず `lifecycle(retire)=0` が継続しているため、handle 未登録が原因ではない。
-
-**正しい因果関係**:
+**両者に共通する真因（v6.2 訂正済み）**:
 1. ✅ P1-a/FIX により handle 登録は正しく行われていた
 2. gen=3 の Coordinator direct publish は成功し、DSPCore#3 が active に
 3. ❌ しかし gen=4/5/6/7/8 のリビルドが**全滅**（AUTH_CONTRACT / Validator reject）
 4. DSPTransition::onPublishCompleted() が一度も呼ばれず、retire の機会がなかった
-5. したがって EBR enqueueRetire() にエントリが投入されず → pend=0, reclaim=0
-
-`retire=0` の原因は「handle 未登録」ではなく、**「gen=3 以降に publish 成功が一度もなく、DSPCore#3 を置き換える後続 publish が存在しなかった」** ことにある。DSPCore#3 が active のまま置き換えられなかったため、retire する対象がそもそも発生しなかった。
-
-**確認方法**: CrossfadePlan 導入（[設計] 1）により gen=4+ の publish が成功するようになった後、IR 切替 → DSPTransition → `lifetimeMgr.retire(oldDSP)` → `retireDSPHandleForRuntime`（今度は handle が登録済みなので true）→ EBR enqueue → pending>0 → Timer tryReclaim → reclaim>0 → private 減少 の完全チェーンを確認する。
-
-### 7.3 lifecycle(retire) の実測値
-
-🔍 **HYPOTHESIS**: 現状の lifecycle(retire)=0 は「handle 未登録」ではなく「publish 成功自体が gen=3 以降存在しない」ことが原因。
-
-**確定済みのチェーン**（ConvoPeq.log v5.44 = P1-a/FIX 適用済み）:
-- gen=1: Coordinator direct publish（v5.44 の P1-a により handle 登録済み ✅）
-- gen=3: prepareToPlay 経由の Coordinator direct publish（handle 登録済み ✅）
-- gen=4/5/6/7/8: **全滅**（AUTH_CONTRACT / Validator reject）→ DSPTransition 未実行
-- → DSPCore#3（gen=3）は active のまま置き換えられず、retire 対象が発生しない
-- → `lifecycle(retire)=0` はこの状況を正しく反映している（前提条件の問題であって EBR 経路の問題ではない）
+5. したがって EBR enqueueRetire() にエントリが投入されず → pend=0, reclaim=0, lifecycle(retire)=0
 
 **CrossfadePlan 導入後（[設計] 1）の期待**:
-- gen=4+ の publish が成功する
-- DSPTransition::onPublishCompleted() が oldDSP を retire
-- `retireDSPHandleForRuntime(oldDSP)` → Map find → erase → Handle.retire/reclaim → EBR enqueue
-- → lifecycle(retire)>0 に増加
-
-✅ **FACT**: handle 登録さえ行われれば、retire → EBR → destroy の後段経路に既知のブロック要因は存在しない（QueueFull 時も tryReclaim フォールバックあり）。
+gen=4+ の publish が成功 → DSPTransition → `lifetimeMgr.retire(oldDSP)` → `retireDSPHandleForRuntime`（今度は handle が登録済みなので true）→ EBR enqueue → pending>0 → Timer tryReclaim → reclaim>0 → private 減少 の完全チェーンを確認する。
 
 **確認方法**: CrossfadePlan 導入後の MEM_SNAP で lifecycle(retire)>0, pending>0, reclaim>0 のシーケンスを確認。
 
-### 7.4 runtimeDSPHandleMap 収束値
+### 7.3 runtimeDSPHandleMap 収束値
 
 ⚠️ **CAVEAT**: steady-state では 2-3 エントリに収束する見込み（FACT #38）。ただし transition 中（crossfade / rollback / rebuild prepare の重なり）は一時的に増加し得る。MAX_DSP_SLOTS=256 に対して十分小さく、枯渇リスクは極めて低い。実測による確認が必要。Runtime 観測依存。
 
-### 7.5 BlockSize 削減効果の実測
+### 7.4 BlockSize 削減効果の実測
 
 🔍 **HYPOTHESIS**: P2-1 実装により SAFE_MAX_BLOCK_SIZE=65536→1024 で DSPCore 生確保量が 98.2%削減（~189MB/DSPCore）することをコード数式で定量化済み（[設計] 2）。ただしこの効果は隠れオーバーヘッド（~191MB）を含まない理論値であり、実メモリ削減量は P2-1 実装後の MEM_SNAP で確認する。メモリバケット DIAG（[設計] 5）と併用することで効果検証が容易になる。
 
-### 7.6 680MB "Other" の内訳
+### 7.5 680MB "Other" の内訳
 
 ⚠️ **CAVEAT**: 定常 683-686MB のうち、現状の MEM_SNAP は NUC/DC/SC/Ret 以外をすべて「Other」として一括計上する。以下のカテゴリが混在しており個別の内訳は診断不能:
 
-**Application-owned**: DSPCore + 全サブコンポーネント、RuntimeWorld、Transition/crossfade、Snapshot、IO/Capture buffer
-**Allocator-owned**: C++ CRT heap（断片化・フリーリスト）、VirtualAlloc reservation/commit、スレッドスタック
-**External library**: MKL internal（FFT plan/scratch/TLS）、IPP internal
+**Application-owned**:
+  - **RuntimeWorld**（active generation state + Transition/crossfade）
+  - **DSPCore**（Oversampling/SoftClip/EQ/Buffers/Latency/TPD/Convolver 等の全 tracked allocation — [設計] 5. P-DIAG の `TrackedMemoryStatistics` と対応）
+  - **Capture/Tracking**（IO buffers, Capture buffers, Telemetry, Snapshot Coordinator）
+**Allocator-owned**（推定値 — MEM_SNAP では直接診断不能）: C++ CRT heap（断片化・フリーリスト）、VirtualAlloc reservation/commit、スレッドスタック
+**External library**（一部推定）: MKL internal（FFT plan/scratch/TLS）、IPP internal
 **Framework**: JUCE（数十MB程度 — 680MBの主因ではない）
 
-**確認方法**: [設計] 5. P-DIAG の MEM_SNAP バケット改善により部分的な可視化が可能。
+**診断可能範囲の限界**: MEM_SNAP バケット改善（[設計] 5. P-DIAG）により **Application-owned のメモリ内訳（DSPCore / RuntimeWorld / Capture）は可視化可能**になる。しかし **Allocator-owned（CRT断片化/VirtualAlloc granularity 等）は OS/ランタイム管理領域であり、診断用 API では直接計測できない**。これらの内訳は引き続き推定値として扱う。
 
 ---
 
@@ -1077,4 +1073,7 @@ gen=5/8: 同種のトポロジに crossfade rebuild のため override 適用
 | **6.1** | **2026-07-11** | **調査結果を設計に反映**: [設計] 4. P-NS / [設計] 5. P-DIAG 新設。既存[設計] 4→6に繰り下げ。 |
 | **6.2** | **2026-07-11** | **FACT #78 誤り訂正: EBR 未発動の原因は handle 未登録ではなく、gen=3 以降の publish 全滅による retire 機会欠如。** P1-a/FIX 適用済みのログであることを考慮すると、handle 未登録説は矛盾。正しい因果: gen=4+ 全滅 → DSPTransition 未実行 → retire 対象なし → EBR にエントリ未投入。7.2/7.3 を全面修正。 |
 | **6.3** | **2026-07-11** | **レビュー指摘4点反映**: (1) BlockSize削減量に「tracked allocationsのみの理論値」と注釈追加、(2) 680MB Otherを4カテゴリに分類、(3) NoiseShaper DIAG目的を「drop判定実値のRuntime観測」に訂正、(4) runtimeDSPHandleMapにsteady-state/transition区別を追記。 |
-| **6.4** | **2026-07-11** | **設計の純粋性向上（5点反映）**: (1) CrossfadePlanをbool→FadePolicy+fadingNode完全構造体に拡張、(2) Builder責務を「planの写像」に修正、(3) Validator節を「通過≠Authority Contract成立」と明確化、(4) P2-1を「初回prepareのmaxSamplesPerBlock最適化」に修正、(5) MEM_SNAPをサブシステム単位に細分化しmemoryUsage()API設計案を提示。 |
+| **6.4** | **2026-07-11** | **設計の純粋性向上（レビュー指摘反映）**: (1) CrossfadePlanを最小構成(bool enabled+DSPCore* fadingDSP)に簡略化、(2) Builder責務に「再解釈しない」を追加、(3) P2-1初期値を512→4096に変更、(4) MEM_SNAP API名をDiagnosticMemoryStatistics表記に。 |
+| **6.5** | **2026-07-11** | **記述の明確化（6点）**: (1) Builder「if禁止」明確化、(2) Builder保証範囲、(3) `DiagnosticMemoryStatistics`命名オプション、(4) P2-1明確化、(5) NoiseShaper DIAG拡張、(6) 優先順位強化。 |
+| **6.6** | **2026-07-11** | **CrossfadeExecutionPlan導入 + Builder純化**: (1) CrossfadePlan→CrossfadeExecutionPlanに改名・RuntimeBuildPolicy等をBuilder入力から削除、(2) Builder「Topology保証」→「Construction only」に純化、(3) Validator修正、(4) P2-1具体定数追加、(5) 680MB Other細分化、(6) セクション番号4.x→6.x修正。 |
+| **6.7** | **2026-07-11** | **Builder 入力を RuntimeGraphDescription に純化**: (1) current/next を Builder 入力から完全削除—RuntimeGraphDescription(activeDSP/fadingDSP/hasActive/hasFading)のみに変更、(2) Validator保証範囲を「Structural Invariantsのみ」と明記、(3) 7.2(EBR)と7.3(lifecycle)統合。 |

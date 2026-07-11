@@ -1,0 +1,10 @@
+# Auto-snapshot after command — full viewport (viewport 0).
+# Use `browser4-cli snapshot grep <pattern>` to search the tree.
+
+# Viewport State
+# - processingViewport: 0
+# - viewportHeight: 985px
+# - viewportsTotal: 1
+# - hiddenTopHeight: 0px
+# - hiddenBottomHeight: 0px
+#

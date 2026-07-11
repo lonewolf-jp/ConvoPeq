@@ -1,0 +1,15 @@
+# Auto-snapshot after command — full viewport (viewport 0).
+# Use `browser4-cli snapshot grep <pattern>` to search the tree.
+
+# Viewport State
+# - processingViewport: 0
+# - viewportHeight: 985px
+# - viewportsTotal: 1
+# - hiddenTopHeight: 0px
+# - hiddenBottomHeight: 0px
+#
+- heading "Example Domain" [level=1] [ref=e12] [box=380,147,1142,32]
+- paragraph "This domain is for use in documentation examples without needing permission. Avoid use in operations." [ref=e13] [box=380,195,1142,21]
+- paragraph "Learn more https://iana.org/domains/example Learn more" [ref=e14] [box=380,232,1142,21]:
+  - link "Learn more" [ref=e15] [cursor=pointer] [box=380,232,80,21]:
+    - /url: https://iana.org/domains/example
