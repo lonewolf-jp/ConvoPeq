@@ -17,6 +17,11 @@ public:
         : engine_(engine), router_(router) {}
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
+    // ★ work70-FIX: activate — DSPCore* + DSPHandle 両方を活性化する。
+    //   Authority: DSPLifetimeManager (DSPCore* lifecycle) + DSPHandleRuntime (Handle lifecycle)
+    //   が、activeRuntimeDSPHandle_ の更新は commitRuntimePublication() が唯一のAuthority。
+    //   ここでは DSPCore* の setActiveRuntimeDSP のみ行い、Handle の activate は行わない。
+    //   [設計決定]: activeRuntimeDSPHandle_ は commitRuntimePublication() 内の publish 成功後にのみ更新。
     void activate(AudioEngine::DSPCore* dsp) noexcept
     {
         if (dsp == nullptr) return;
@@ -71,6 +76,18 @@ public:
     }
 
     AudioEngine::DSPCore* getActive() const noexcept { return engine_.getActiveRuntimeDSP(); }
+
+    // ★ work70 Phase2: destroyRolledBackDSP — EBR を経由しない特殊破棄ルート。
+    //   「Publication Authority から返却された未公開オブジェクト（Never Published Object）」
+    //   のみを対象とし、EBR epoch 保護は不要（publish されたことのない DSPCore は
+    //   Audio Thread から到達不能なため）。
+    //   事前条件: Handle は既に rollback 済み（Reclaimed）。
+    //   post-condition: DSPCore のメモリが解放される。
+    void destroyRolledBackDSP(AudioEngine::DSPCore* dsp) noexcept
+    {
+        if (dsp == nullptr) return;
+        engine_.destroyDSPCoreNode(dsp);
+    }
 
     // ★ work70 P1-c: MEM_SNAP の retiringGeneration 用（DSPLifetimeManager が唯一の Authority）
     [[nodiscard]] uint64_t retiringGeneration() const noexcept {

@@ -139,9 +139,11 @@ public:
     [[nodiscard]] ResamplingPhaseMode getResamplingPhaseMode() const;
 
     // ★ work70 P1-c: liveCount 公開アクセサ（StereoConvolver が private nested type のため）
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     [[nodiscard]] static uint32_t getStereoLiveCount() noexcept {
         return StereoConvolver::liveCount.load(std::memory_order_relaxed);
     }
+#endif
 
     class Listener
     {

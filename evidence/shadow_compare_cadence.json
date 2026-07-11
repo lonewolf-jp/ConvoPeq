@@ -1,1 +1,12 @@
-﻿{"burstWindowMs":250,"burstEscalationThreshold":3,"monotonicViolationCount":0,"runId":"a13bd66dbbf04db2adbfc6a3733a3727","provenance":"seed","minCadenceMs":1000,"schema":"shadow_compare_cadence_v1","totalObservations":1,"generatedAtNs":1783327320144000000,"cadenceViolationCount":0,"escalationCount":0,"lastSequenceId":1,"mismatchCount":0}
+{
+  "schema": "shadow_compare_cadence_v1",
+  "minCadenceMs": 1000,
+  "burstWindowMs": 250,
+  "burstEscalationThreshold": 3,
+  "totalObservations": 3,
+  "mismatchCount": 2,
+  "monotonicViolationCount": 0,
+  "cadenceViolationCount": 0,
+  "escalationCount": 0,
+  "lastSequenceId": 3
+}

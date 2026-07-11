@@ -1,0 +1,13 @@
+{
+  "artifact": "recovery_trace.json",
+  "generatedAtNs": 5155756448400,
+  "recoveryActions": [
+    {"failure":"closure invalid", "action":"RejectPublish"},
+    {"failure":"tier violation", "action":"RejectPublish"},
+    {"failure":"HB violation", "action":"Quarantine"},
+    {"failure":"retire timeout", "action":"DelayedReclaim"},
+    {"failure":"seal violation", "action":"Abort"},
+    {"failure":"shutdown violation", "action":"Continue"}
+  ],
+  "policy": "unsafe continuation prohibited"
+}

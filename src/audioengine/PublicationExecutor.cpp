@@ -40,7 +40,12 @@ PublishResult PublicationExecutor::publish(
 
     if (!AudioEngine::PublishStageResultTraits::isCommitted(result.stage)) {
         juce::Logger::writeToLog("[PUBLISH] commitRuntimePublication FAILED gen="
-            + juce::String(static_cast<juce::int64>(worldGen)));
+            + juce::String(static_cast<juce::int64>(worldGen))
+            + " ownership=" + juce::String(static_cast<int>(result.ownership)));
+        // ★ work70 Phase2: OwnershipDisposition::CallerDestroy の場合、
+        //   呼び出し元が DSPLifetimeManager::destroyRolledBackDSP() を呼んで
+        //   物理解放する必要がある。DSPHandle は既に rollback 済み（Reclaimed）。
+        //   ※ この関数では破棄を行わず、戻り値で所有権状態を通知する。
         return PublishResult::PublishFailed;
     }
 

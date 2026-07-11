@@ -764,8 +764,28 @@ void AudioEngine::rebuildThreadLoop()
                 {
                     if (owner != nullptr && ptr != nullptr)
                     {
-                        DSPLifetimeManager lifetimeMgr(*owner);
-                        lifetimeMgr.retire(ptr);
+                        // ★ work70-FIX(rebuild-obsolete): retireDSPHandleForRuntime が
+                        //   false を返す場合（未登録DSPCore）、EBR経由ではなく直接破棄する。
+                        //   rebuild-obsolete な DSPCore は publish されず RuntimeWorld に
+                        //   公開されていないため、EBR epoch 保護は不要。
+                        //   destroyDSPCoreNode を直接呼び出すことでメモリリークを防止。
+                        //
+                        // ★ CAVEAT: retireDSPHandleForRuntime を2回呼ばないよう注意。
+                        //   前回の #work70-v5.43 ではフォーマッタにより destroyDSPCoreNode が
+                        //   重複して記述され、二重解放 → 0xC0000005 アクセス違反を引き起こした。
+                        //   今後このブロックを編集する際は if-else の構造を壊さないこと。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                        // DIAG invariant: DSPCore は未登録であることを確認（読み取り専用）。
+                        // lookupDSPHandleForRuntime → isNull() を jassert で表明。
+                        // 将来のコード変更で registerDSPHandleForRuntime の呼び出し位置が
+                        // 変わった場合にこの表明が失敗し、開発者に知らせる。
+                        const auto diagHandle = owner->lookupDSPHandleForRuntime(ptr);
+                        jassert(diagHandle.isNull());
+#endif
+                        if (!owner->retireDSPHandleForRuntime(ptr))
+                        {
+                            owner->destroyDSPCoreNode(ptr);
+                        }
                     }
                 }
             } dspGuard { this, nullptr };

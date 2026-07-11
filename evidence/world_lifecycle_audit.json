@@ -1,0 +1,22 @@
+{
+  "schema": "world_lifecycle_audit_v1",
+  "activeWorldCount": 1,
+  "publishedCount": 1,
+  "retiredCount": 0,
+  "doubleRetireCount": 0,
+  "ringBufferSize": 1,
+  "ringBufferCapacity": 4096,
+  "lastRetiredWorldId": 0,
+  "lastRetireEpoch": 0,
+  "lastRetireTimestampUs": 0,
+  "recentRecords": [
+    {
+      "worldId": 1,
+      "publishEpoch": 1,
+      "retireEpoch": 0,
+      "publishTimestampUs": 5150999709,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 1
+    }
+  ]
+}

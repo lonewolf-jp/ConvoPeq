@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-11 01:36:56
+> Generated: 2026-07-11 17:10:03
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1372,6 +1372,20 @@ if not exist "JUCE\CMakeLists.txt" (
 
 echo [CHECK] JUCE Directory: OK
 echo:
+
+REM ------------------------------------------------------------
+REM Ensure stale juceaide sub-build cache does not cause generator mismatch.
+REM JUCE's juceaide bootstrap (JUCE/extras/Build/juceaide/CMakeLists.txt:136)
+REM invokes a sub-build at ${JUCE_BINARY_DIR}/tools/ with -G${CMAKE_GENERATOR}.
+REM If the generator changes (e.g., VS2026 <-> Ninja) while the tools sub-cache
+REM remains, CMake fails with "generator does not match the generator used previously".
+REM We delete the tools sub-cache on every reconfigure to prevent this.
+if exist "%BUILD_ROOT%\JUCE\tools\CMakeCache.txt" (
+    echo [CLEAN] Removing stale juceaide sub-build cache...
+    if exist "%BUILD_ROOT%\JUCE\tools\CMakeFiles" rmdir /s /q "%BUILD_ROOT%\JUCE\tools\CMakeFiles"
+    del /q "%BUILD_ROOT%\JUCE\tools\CMakeCache.txt" 2>nul
+    echo [CLEAN] Stale juceaide cache removed.
+)
 
 REM ------------------------------------------------------------
 REM Clean build directory if requested
@@ -5571,9 +5585,11 @@ public:
     [[nodiscard]] ResamplingPhaseMode getResamplingPhaseMode() const;
 
     // ★ work70 P1-c: liveCount 公開アクセサ（StereoConvolver が private nested type のため）
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     [[nodiscard]] static uint32_t getStereoLiveCount() noexcept {
         return StereoConvolver::liveCount.load(std::memory_order_relaxed);
     }
+#endif
 
     class Listener
     {
@@ -34722,8 +34738,28 @@ void AudioEngine::rebuildThreadLoop()
                 {
                     if (owner != nullptr && ptr != nullptr)
                     {
-                        DSPLifetimeManager lifetimeMgr(*owner);
-                        lifetimeMgr.retire(ptr);
+                        // ★ work70-FIX(rebuild-obsolete): retireDSPHandleForRuntime が
+                        //   false を返す場合（未登録DSPCore）、EBR経由ではなく直接破棄する。
+                        //   rebuild-obsolete な DSPCore は publish されず RuntimeWorld に
+                        //   公開されていないため、EBR epoch 保護は不要。
+                        //   destroyDSPCoreNode を直接呼び出すことでメモリリークを防止。
+                        //
+                        // ★ CAVEAT: retireDSPHandleForRuntime を2回呼ばないよう注意。
+                        //   前回の #work70-v5.43 ではフォーマッタにより destroyDSPCoreNode が
+                        //   重複して記述され、二重解放 → 0xC0000005 アクセス違反を引き起こした。
+                        //   今後このブロックを編集する際は if-else の構造を壊さないこと。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                        // DIAG invariant: DSPCore は未登録であることを確認（読み取り専用）。
+                        // lookupDSPHandleForRuntime → isNull() を jassert で表明。
+                        // 将来のコード変更で registerDSPHandleForRuntime の呼び出し位置が
+                        // 変わった場合にこの表明が失敗し、開発者に知らせる。
+                        const auto diagHandle = owner->lookupDSPHandleForRuntime(ptr);
+                        jassert(diagHandle.isNull());
+#endif
+                        if (!owner->retireDSPHandleForRuntime(ptr))
+                        {
+                            owner->destroyDSPCoreNode(ptr);
+                        }
                     }
                 }
             } dspGuard { this, nullptr };
@@ -40979,8 +41015,19 @@ public:
 
     // ★ work70: PublishCommitResult — commitRuntimePublication() の戻り値
     //   stage のみを保持（committed は PublishStageResultTraits::isCommitted で導出）
+    // ★ work70 Phase2: OwnershipDisposition を追加 — publish 失敗後の DSPCore
+    //   所有権状態を呼び出し元に通知し、リークを防止する。
+    //   Transferred: publish 成功、所有権移譲済み
+    //   CallerDestroy: publish 失敗、rollback 完了、呼び出し元が物理解放すべき
+    //     （実際の破棄は DSPLifetimeManager::destroyRolledBackDSP() 経由）
+    enum class OwnershipDisposition : uint8_t {
+        None,
+        Transferred,
+        CallerDestroy
+    };
     struct PublishCommitResult {
         convo::PublishStageResult stage;
+        OwnershipDisposition ownership = OwnershipDisposition::None;
     };
 
     // ★ work70: commit point 判定 — Coordinator 実装から分離
@@ -41625,6 +41672,23 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     return true;
 }
 
+// ★ work70-FIX: lookupDSPHandleForRuntime — DSPCore* → DSPHandle 逆引き（const）
+//   使用制限: DIAG ログ出力専用。Production コードでは参照禁止。
+//   ★ work70-v5.44: private に変更。呼び出し元は DSPGuard DIAG jassert のみ。
+//   activeRuntimeDSPHandle_ の更新は commitRuntimePublication() が唯一の Authority。
+private:
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+[[nodiscard]] inline convo::isr::DSPHandle lookupDSPHandleForRuntime(DSPCore* dsp) const noexcept
+{
+    if (dsp == nullptr) return {};
+    std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+    const auto it = runtimeDSPHandleMap_.find(dsp);
+    if (it == runtimeDSPHandleMap_.end()) return {};
+    return it->second;
+}
+#endif
+
+public:
 // ★ work70: eraseByHandle — Handle による Map erase 内部ヘルパー（HandleRegistry 移行準備）
 //   現状 O(n) linear scan（MAX_DSP_SLOTS=256 のため問題なし）。
 //   将来: HandleRegistry reverse map → O(1)。
@@ -41692,8 +41756,21 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     }
     const auto stage = coordinator.publishWorld(std::move(world));
     if (PublishStageResultTraits::isCommitted(stage))
-        rollbackHandle = convo::isr::DSPHandle::null();  // commit point → rollbackHandle を無効化
-    return { stage };
+    {
+        // ★ work70-FIX: publish 成功時に DSPHandle を Activate する。
+        if (!rollbackHandle.isNull())
+            dspHandleRuntime_.activate(rollbackHandle);
+        rollbackHandle = convo::isr::DSPHandle::null();
+        return { stage, OwnershipDisposition::Transferred };
+    }
+
+    // publish 失敗。rollbackHandle.isNull() == false ならロールバックが残っている
+    // （ScopeExit が未実行）。rollbackHandle.isNull() == true なら既に無効化 or 不要。
+    // OwnershipDisposition で呼び出し元に通知:
+    //   CallerDestroy → 呼び出し元が destroyRolledBackDSP で破棄
+    //   None → 破棄不要（Bootstrap等）
+    const bool needsDestroy = !rollbackHandle.isNull() && (regCtx.dsp != nullptr || !regCtx.handle.isNull());
+    return { stage, needsDestroy ? OwnershipDisposition::CallerDestroy : OwnershipDisposition::None };
 }
 
 //==============================================================================
@@ -41914,7 +41991,7 @@ public:
         // ==================================================================
         convo::isr::DSPHandleRuntime dspHandleRuntime_;
         convo::isr::CrossfadeAuthorityRuntime crossfadeAuthorityRuntime_;
-        std::mutex runtimeDSPHandleMapMutex_;
+        mutable std::mutex runtimeDSPHandleMapMutex_;
         std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
         // ==================================================================
 
@@ -42512,6 +42589,11 @@ public:
         : engine_(engine), router_(router) {}
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
+    // ★ work70-FIX: activate — DSPCore* + DSPHandle 両方を活性化する。
+    //   Authority: DSPLifetimeManager (DSPCore* lifecycle) + DSPHandleRuntime (Handle lifecycle)
+    //   が、activeRuntimeDSPHandle_ の更新は commitRuntimePublication() が唯一のAuthority。
+    //   ここでは DSPCore* の setActiveRuntimeDSP のみ行い、Handle の activate は行わない。
+    //   [設計決定]: activeRuntimeDSPHandle_ は commitRuntimePublication() 内の publish 成功後にのみ更新。
     void activate(AudioEngine::DSPCore* dsp) noexcept
     {
         if (dsp == nullptr) return;
@@ -42566,6 +42648,18 @@ public:
     }
 
     AudioEngine::DSPCore* getActive() const noexcept { return engine_.getActiveRuntimeDSP(); }
+
+    // ★ work70 Phase2: destroyRolledBackDSP — EBR を経由しない特殊破棄ルート。
+    //   「Publication Authority から返却された未公開オブジェクト（Never Published Object）」
+    //   のみを対象とし、EBR epoch 保護は不要（publish されたことのない DSPCore は
+    //   Audio Thread から到達不能なため）。
+    //   事前条件: Handle は既に rollback 済み（Reclaimed）。
+    //   post-condition: DSPCore のメモリが解放される。
+    void destroyRolledBackDSP(AudioEngine::DSPCore* dsp) noexcept
+    {
+        if (dsp == nullptr) return;
+        engine_.destroyDSPCoreNode(dsp);
+    }
 
     // ★ work70 P1-c: MEM_SNAP の retiringGeneration 用（DSPLifetimeManager が唯一の Authority）
     [[nodiscard]] uint64_t retiringGeneration() const noexcept {
@@ -49877,7 +49971,12 @@ PublishResult PublicationExecutor::publish(
 
     if (!AudioEngine::PublishStageResultTraits::isCommitted(result.stage)) {
         juce::Logger::writeToLog("[PUBLISH] commitRuntimePublication FAILED gen="
-            + juce::String(static_cast<juce::int64>(worldGen)));
+            + juce::String(static_cast<juce::int64>(worldGen))
+            + " ownership=" + juce::String(static_cast<int>(result.ownership)));
+        // ★ work70 Phase2: OwnershipDisposition::CallerDestroy の場合、
+        //   呼び出し元が DSPLifetimeManager::destroyRolledBackDSP() を呼んで
+        //   物理解放する必要がある。DSPHandle は既に rollback 済み（Reclaimed）。
+        //   ※ この関数では破棄を行わず、戻り値で所有権状態を通知する。
         return PublishResult::PublishFailed;
     }
 
@@ -53395,8 +53494,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
             + juce::String(req.generation)
             + " result=" + juce::String(static_cast<int>(result)));
         // publish 失敗: activate/crossfade/retire は一切行わない
-        if (!req.newDSP.isNull())
-            lifetime_.retire(newDSPResolved);
+        // ★ work70 Phase2: commitRuntimePublication の ScopeExit が Handle を
+        //   rollback 済み（Reclaimed）。したがって retireDSPHandleForRuntime は
+        //   false を返すため lifetime_.retire() は無効。
+        //   代わりに destroyRolledBackDSP() で未公開 DSPCore を直接破棄する。
+        if (newDSPResolved != nullptr)
+            lifetime_.destroyRolledBackDSP(newDSPResolved);
         // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordFailure(FailureStage::Execution,

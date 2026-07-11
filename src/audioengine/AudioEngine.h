@@ -3247,8 +3247,19 @@ public:
 
     // ★ work70: PublishCommitResult — commitRuntimePublication() の戻り値
     //   stage のみを保持（committed は PublishStageResultTraits::isCommitted で導出）
+    // ★ work70 Phase2: OwnershipDisposition を追加 — publish 失敗後の DSPCore
+    //   所有権状態を呼び出し元に通知し、リークを防止する。
+    //   Transferred: publish 成功、所有権移譲済み
+    //   CallerDestroy: publish 失敗、rollback 完了、呼び出し元が物理解放すべき
+    //     （実際の破棄は DSPLifetimeManager::destroyRolledBackDSP() 経由）
+    enum class OwnershipDisposition : uint8_t {
+        None,
+        Transferred,
+        CallerDestroy
+    };
     struct PublishCommitResult {
         convo::PublishStageResult stage;
+        OwnershipDisposition ownership = OwnershipDisposition::None;
     };
 
     // ★ work70: commit point 判定 — Coordinator 実装から分離
@@ -3893,6 +3904,23 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     return true;
 }
 
+// ★ work70-FIX: lookupDSPHandleForRuntime — DSPCore* → DSPHandle 逆引き（const）
+//   使用制限: DIAG ログ出力専用。Production コードでは参照禁止。
+//   ★ work70-v5.44: private に変更。呼び出し元は DSPGuard DIAG jassert のみ。
+//   activeRuntimeDSPHandle_ の更新は commitRuntimePublication() が唯一の Authority。
+private:
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+[[nodiscard]] inline convo::isr::DSPHandle lookupDSPHandleForRuntime(DSPCore* dsp) const noexcept
+{
+    if (dsp == nullptr) return {};
+    std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+    const auto it = runtimeDSPHandleMap_.find(dsp);
+    if (it == runtimeDSPHandleMap_.end()) return {};
+    return it->second;
+}
+#endif
+
+public:
 // ★ work70: eraseByHandle — Handle による Map erase 内部ヘルパー（HandleRegistry 移行準備）
 //   現状 O(n) linear scan（MAX_DSP_SLOTS=256 のため問題なし）。
 //   将来: HandleRegistry reverse map → O(1)。
@@ -3960,8 +3988,21 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     }
     const auto stage = coordinator.publishWorld(std::move(world));
     if (PublishStageResultTraits::isCommitted(stage))
-        rollbackHandle = convo::isr::DSPHandle::null();  // commit point → rollbackHandle を無効化
-    return { stage };
+    {
+        // ★ work70-FIX: publish 成功時に DSPHandle を Activate する。
+        if (!rollbackHandle.isNull())
+            dspHandleRuntime_.activate(rollbackHandle);
+        rollbackHandle = convo::isr::DSPHandle::null();
+        return { stage, OwnershipDisposition::Transferred };
+    }
+
+    // publish 失敗。rollbackHandle.isNull() == false ならロールバックが残っている
+    // （ScopeExit が未実行）。rollbackHandle.isNull() == true なら既に無効化 or 不要。
+    // OwnershipDisposition で呼び出し元に通知:
+    //   CallerDestroy → 呼び出し元が destroyRolledBackDSP で破棄
+    //   None → 破棄不要（Bootstrap等）
+    const bool needsDestroy = !rollbackHandle.isNull() && (regCtx.dsp != nullptr || !regCtx.handle.isNull());
+    return { stage, needsDestroy ? OwnershipDisposition::CallerDestroy : OwnershipDisposition::None };
 }
 
 //==============================================================================
@@ -4182,7 +4223,7 @@ public:
         // ==================================================================
         convo::isr::DSPHandleRuntime dspHandleRuntime_;
         convo::isr::CrossfadeAuthorityRuntime crossfadeAuthorityRuntime_;
-        std::mutex runtimeDSPHandleMapMutex_;
+        mutable std::mutex runtimeDSPHandleMapMutex_;
         std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
         // ==================================================================
 

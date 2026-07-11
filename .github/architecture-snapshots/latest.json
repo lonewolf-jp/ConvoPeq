@@ -1,14 +1,14 @@
 {
-  "exposure": 0,
-  "readerMethods": 8,
-  "pubMethods": 1,
-  "routerMethods": 3,
-  "enqueueRetire": 6,
-  "retireMethods": 4,
+  "timestamp": "2026-07-11 16:48:15",
   "iepMethods": 0,
+  "routerMethods": 3,
   "advanceEpoch": 0,
-  "templateCount": 0,
   "totalMethods": 13,
-  "timestamp": "2026-07-11 01:22:15",
-  "aliasCount": 0
+  "readerMethods": 8,
+  "templateCount": 0,
+  "pubMethods": 1,
+  "enqueueRetire": 6,
+  "aliasCount": 0,
+  "retireMethods": 4,
+  "exposure": 0
 }

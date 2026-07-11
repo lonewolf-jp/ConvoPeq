@@ -103,6 +103,20 @@ echo [CHECK] JUCE Directory: OK
 echo:
 
 REM ------------------------------------------------------------
+REM Ensure stale juceaide sub-build cache does not cause generator mismatch.
+REM JUCE's juceaide bootstrap (JUCE/extras/Build/juceaide/CMakeLists.txt:136)
+REM invokes a sub-build at ${JUCE_BINARY_DIR}/tools/ with -G${CMAKE_GENERATOR}.
+REM If the generator changes (e.g., VS2026 <-> Ninja) while the tools sub-cache
+REM remains, CMake fails with "generator does not match the generator used previously".
+REM We delete the tools sub-cache on every reconfigure to prevent this.
+if exist "%BUILD_ROOT%\JUCE\tools\CMakeCache.txt" (
+    echo [CLEAN] Removing stale juceaide sub-build cache...
+    if exist "%BUILD_ROOT%\JUCE\tools\CMakeFiles" rmdir /s /q "%BUILD_ROOT%\JUCE\tools\CMakeFiles"
+    del /q "%BUILD_ROOT%\JUCE\tools\CMakeCache.txt" 2>nul
+    echo [CLEAN] Stale juceaide cache removed.
+)
+
+REM ------------------------------------------------------------
 REM Clean build directory if requested
 if "%DO_CLEAN%"=="1" (
     echo [CLEAN] Removing "%BUILD_ROOT%"...

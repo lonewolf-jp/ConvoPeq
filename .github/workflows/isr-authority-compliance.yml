@@ -17,7 +17,7 @@ jobs:
   authority-static-checks:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -79,7 +79,7 @@ jobs:
     if: always()
     needs: authority-static-checks
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # MSVC コンパイラ（cl.exe）の環境変数をセットアップ
       - name: Set up MSVC Developer Command Prompt
@@ -207,7 +207,7 @@ jobs:
   audit-report-verification:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Verify audit reports (P11, P12, P14, P15)
         shell: pwsh

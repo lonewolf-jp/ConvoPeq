@@ -1,1 +1,73 @@
-﻿{"generatedAtNs":1783327320144000000,"sh1_callbackCount":0,"runId":"a13bd66dbbf04db2adbfc6a3733a3727","provenance":"seed","sh3_pendingRetire":0,"phase":0,"sh5_lateCallbackCount":0,"sh2_activeCrossfade":0,"schema":"shutdown_trace_v1","sh6_postStopEnqueueCount":0,"sh4_observerCount":0,"verified":true}
+{
+  "schema": "shutdown_trace_v4",
+  "phase": 10,
+  "phaseName": "ShutdownComplete",
+  "healthState": 0,
+  "healthStateName": "Healthy",
+  "blockingReason": "Unknown",
+  "blockingReasonCode": 8,
+  "transitionViolations": 0,
+  "sh1_callbackCount": 0,
+  "sh2_activeCrossfade": 0,
+  "sh3_pendingRetire": 2,
+  "sh4_observerCount": 0,
+  "sh5_lateCallbackCount": 0,
+  "sh6_postStopEnqueueCount": 0,
+  "blockingReasonStats": [
+    {
+      "reason": "None",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "PendingPublication",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "PendingRetire",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ActiveCrossfade",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "DeferredPublish",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "QuarantineResident",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "RouterPendingRetire",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ReaderActive",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "Unknown",
+      "count": 1,
+      "maxDurationUs": 5155728986,
+      "firstSeenUs": 5155728986
+    }
+  ],
+  "verified": false
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":5155746598300}

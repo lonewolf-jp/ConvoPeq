@@ -162,8 +162,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
             + juce::String(req.generation)
             + " result=" + juce::String(static_cast<int>(result)));
         // publish 失敗: activate/crossfade/retire は一切行わない
-        if (!req.newDSP.isNull())
-            lifetime_.retire(newDSPResolved);
+        // ★ work70 Phase2: commitRuntimePublication の ScopeExit が Handle を
+        //   rollback 済み（Reclaimed）。したがって retireDSPHandleForRuntime は
+        //   false を返すため lifetime_.retire() は無効。
+        //   代わりに destroyRolledBackDSP() で未公開 DSPCore を直接破棄する。
+        if (newDSPResolved != nullptr)
+            lifetime_.destroyRolledBackDSP(newDSPResolved);
         // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordFailure(FailureStage::Execution,

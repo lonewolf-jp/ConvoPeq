@@ -1,0 +1,11 @@
+{
+  "artifact": "runtime_snapshot.json",
+  "buildMode": "CI",
+  "generatedAtNs": 5155757236000,
+  "summary": {
+    "runtime": "minimal operational state",
+    "retire": "summary only",
+    "shutdown": "current + recent transitions"
+  },
+  "visibility": "Debug/CI or on-demand"
+}
