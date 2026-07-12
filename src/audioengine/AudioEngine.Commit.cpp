@@ -84,17 +84,19 @@ void diagLog(const juce::String& message)
         return false;
     }
 
-    if (hasGraphFadingNode != world.topology.hasFadingRuntime)
+    // ★ v8.3: hasFadingRuntime 削除 — topology.fadingRuntimeUuid から導出
+    const bool hasFadingByUuid = (world.topology.fadingRuntimeUuid != 0);
+    if (hasGraphFadingNode != hasFadingByUuid)
     {
         juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL fadingNode=" + juce::String(static_cast<int64_t>(reinterpret_cast<intptr_t>(world.graph.fadingNode)))
-            + " hasFading=" + juce::String(static_cast<int>(world.topology.hasFadingRuntime)));
+            + " hasFadingByUuid=" + juce::String(static_cast<int>(hasFadingByUuid)));
         return false;
     }
 
-    if (world.execution.transitionActive != world.topology.hasFadingRuntime)
+    if (world.execution.transitionActive != hasFadingByUuid)
     {
         juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL transitionActive=" + juce::String(static_cast<int>(world.execution.transitionActive))
-            + " hasFading=" + juce::String(static_cast<int>(world.topology.hasFadingRuntime)));
+            + " hasFadingByUuid=" + juce::String(static_cast<int>(hasFadingByUuid)));
         return false;
     }
 
@@ -103,7 +105,8 @@ void diagLog(const juce::String& message)
 
 [[nodiscard]] inline bool hasEquivalentTransitionSemantic(const RuntimePublishWorld& world) noexcept
 {
-    return world.execution.transitionActive == world.topology.hasFadingRuntime;
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
+    return world.execution.transitionActive == (world.topology.fadingRuntimeUuid != 0);
 }
 
 inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
@@ -201,10 +204,10 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         return rejectWithEvidence("sequence_not_monotonic");
     }
 
-    if (world.topology.hasFadingRuntime)
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid != 0 で代替
+    if (world.topology.fadingRuntimeUuid != 0)
     {
-        if (world.topology.fadingRuntimeUuid == 0
-            || world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
+        if (world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
             return rejectWithEvidence("invalid_fading_topology_identity");
     }
     else if (world.topology.fadingRuntimeUuid != 0)
@@ -212,7 +215,8 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         return rejectWithEvidence("unexpected_fading_uuid_without_flag");
     }
 
-    const bool hasTransitionNext = world.topology.hasFadingRuntime;
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
+    const bool hasTransitionNext = (world.topology.fadingRuntimeUuid != 0);
     if (hasTransitionNext)
     {
         if (world.execution.crossfadeStartDelayBlocks < 0
@@ -239,7 +243,8 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     }
 
     const bool hasActive = (world.topology.runtimeUuid != 0);
-    const bool hasFading = world.topology.hasFadingRuntime;
+    // ★ v8.3: hasFadingRuntime 削除
+    const bool hasFading = (world.topology.fadingRuntimeUuid != 0);
 
     if (!hasActive && !hasFading && !hasTransitionNext)
         return true;
@@ -526,12 +531,12 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     {
         diagLog("[ISR][Leak-04-Guard] transition semantic mismatch on retire path: execution.transitionActive="
             + juce::String(world->execution.transitionActive ? 1 : 0)
-            + " topology.hasFadingRuntime="
-            + juce::String(world->topology.hasFadingRuntime ? 1 : 0));
+            + " topology.fadingRuntimeUuid="
+            + juce::String(static_cast<juce::int64>(world->topology.fadingRuntimeUuid)));
         retireRuntimeEx_.requestRollback();
     }
 
-    const bool hasAnyPendingTransition = world->topology.hasFadingRuntime || !pendingIntents.empty();
+    const bool hasAnyPendingTransition = (world->topology.fadingRuntimeUuid != 0) || !pendingIntents.empty();
 
     for (const auto& pending : pendingIntents)
     {

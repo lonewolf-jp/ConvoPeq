@@ -962,10 +962,14 @@ public:
         // ─────────────────────────────────────────────────────────────
         // 【Issue 3 修正】内部処理用最大バッファサイズ
         // 理由: Oversampling有効時（最大8x）、processSamplesUp() 後の
-        //      ブロックサイズが SAFE_MAX_BLOCK_SIZE × 8 まで拡大しうるため。
-        //      固定で ×8 確保することで RCU 再構築時の resize を回避する。
+        //      ブロックサイズが PrepareBlockSizingPolicy::apply() の値 × 8
+        //      まで拡大しうるため。固定で ×8 確保することで RCU 再構築時の
+        //      resize を回避する。
+        //      ★ v8.3: SAFE_MAX_BLOCK_SIZE(65536) floor は廃止。
+        //        prepare() 時は kMinimumPrepareBlock(256) または actual
+        //        samplesPerBlock が使用される。
         // ─────────────────────────────────────────────────────────────
-        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（SAFE_MAX_BLOCK_SIZE × 8）
+        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（prepare samplesPerBlock × 8）
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
         // B2: processDouble 用のバイパスフェード状態
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
@@ -995,6 +999,33 @@ public:
         void processOutputDouble(juce::AudioBuffer<double>& buffer,
                                  int numSamples,
                                  const ProcessingState& state) noexcept;
+        // ★ v8.3: TrackedMemoryStatistics — 診断用メモリ追跡統計
+        //   「正確な物理メモリ使用量」ではなく「診断目的の追跡対象アロケーション統計」
+        //   ASSERT_NON_RT_THREAD() 必須 — RT スレッドからの呼び出しは禁止
+        struct TrackedMemoryStatistics {
+            size_t oversampling = 0;       // Oversampling work buffers
+            size_t softClip = 0;           // SoftClip OS work buffers
+            size_t eqProcessor = 0;        // EQ scratch/dry/parallel/structure/msWorkBuffer
+            size_t alignedBuffers = 0;     // alignedL/R + dryBypassL/R
+            size_t latencyBuffers = 0;     // fixedLatency × 4
+            size_t truePeakDetector = 0;   // TruePeakDetector internal
+            size_t convolver = 0;          // Convolver internal (no IR = minimal)
+            size_t crossfade = 0;          // JUCE crossfade buffers
+            size_t misc = 0;               // DCBlocker/LoudnessMeter/PeakLimiter/NoiseShaper
+            size_t otherTracked = 0;       // tracked だが特定カテゴリに分類されないもの
+            // totalTracked はメンバとして保持せず、SUM(categories) で算出
+
+            [[nodiscard]] size_t totalTracked() const noexcept {
+                return oversampling + softClip + eqProcessor + alignedBuffers
+                     + latencyBuffers + truePeakDetector + convolver + crossfade
+                     + misc + otherTracked;
+            }
+        };
+
+        // ★ v8.3: NonRT 専用 — 診断メモリ統計収集
+        //   ASSERT_NON_RT_THREAD() 必須
+        [[nodiscard]] TrackedMemoryStatistics collectTrackedMemoryStatistics() const noexcept;
+
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
         static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
@@ -1021,6 +1052,15 @@ public:
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
     static constexpr double SAFE_MAX_SAMPLE_RATE = 768000.0;
     static constexpr int    SAFE_MAX_BLOCK_SIZE  = 65536; // 8x Oversampling対応のため拡張
+    // ★ v8.3: PrepareBlockSizingPolicy — prepare 時のブロックサイズ決定ポリシー
+    //   （Allocator/AllocationPolicy ではなく、あくまで「初期ブロックサイズの下限決定」）
+    struct PrepareBlockSizingPolicy {
+        static constexpr int kMinimumPrepareBlock = 256; // 最低確保ブロックサイズ
+        [[nodiscard]] static constexpr int apply(int samplesPerBlock) noexcept {
+            jassert(samplesPerBlock > 0);
+            return std::max(kMinimumPrepareBlock, samplesPerBlock);
+        }
+    };
 
     //----------------------------------------------------------
     // コンストラクタ
@@ -2945,10 +2985,11 @@ public:
             : fallback;
     }
 
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
     [[nodiscard]] static inline bool hasFadingRuntimeInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
     {
         const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
-        return (runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime;
+        return (runtimeWorld != nullptr) && (runtimeWorld->topology.fadingRuntimeUuid != 0);
     }
 
     [[nodiscard]] static inline bool hasPendingCrossfadeInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
@@ -2989,7 +3030,7 @@ public:
     {
         const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
         if (runtimeWorld == nullptr
-            || !runtimeWorld->topology.hasFadingRuntime)
+            || runtimeWorld->topology.fadingRuntimeUuid == 0)
             return nullptr;
 
         return static_cast<DSPCore*>(runtimeWorld->engine.fading);
@@ -3358,7 +3399,7 @@ public:
         const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
         const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
-        const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.hasFadingRuntime;
+        const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.fadingRuntimeUuid != 0;
         auto* fading = (transitionActive && transition.next != nullptr)
             ? static_cast<DSPCore*>(transition.next)
             : nullptr;
@@ -3963,9 +4004,10 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 //   commit point 到達後は rollbackHandle = DSPHandle::null() で無効化し、
 //   SCOPE_EXIT による rollback を防止する。
 //   work72候補: Extract transaction logic into PublicationTransaction class.
+// ★ v8.3: const RuntimePublishWorld を受け入れる — INV-11 コンパイル時保証
 [[nodiscard]] inline PublishCommitResult commitRuntimePublication(
     RuntimePublicationCoordinator& coordinator,
-    convo::aligned_unique_ptr<RuntimePublishWorld> world,
+    convo::aligned_unique_ptr<const RuntimePublishWorld> world,
     const RegistrationContext& regCtx) noexcept
 {
     convo::isr::DSPHandle rollbackHandle;

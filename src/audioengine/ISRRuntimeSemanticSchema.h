@@ -206,7 +206,7 @@ struct TopologySemantic
 {
     std::uint64_t runtimeUuid = 0;
     std::uint64_t fadingRuntimeUuid = 0;
-    bool hasFadingRuntime = false;
+    // ★ v8.3: hasFadingRuntime 削除 — graph.fadingNode != nullptr から導出
 };
 
 struct RoutingSemantic

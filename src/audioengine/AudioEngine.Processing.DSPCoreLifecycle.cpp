@@ -138,7 +138,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     activeOversamplingType = oversamplingType;
 
     constexpr int MAX_OS_FACTOR = 8;
-    const int inputMaxBlock     = std::max(SAFE_MAX_BLOCK_SIZE, samplesPerBlock);
+    // ★ v8.3: PrepareBlockSizingPolicy を使用（SAFE_MAX_BLOCK_SIZE floor を廃止）
+    const int inputMaxBlock     = AudioEngine::PrepareBlockSizingPolicy::apply(samplesPerBlock);
     const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
     maxSamplesPerBlock   = inputMaxBlock;
     maxInternalBlockSize = internalMaxBlock;
@@ -291,6 +292,51 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
 {
     histories().configureFixedLatencySamples(samples, maxInternalBlockSize);
+}
+
+// ★ v8.3: TrackedMemoryStatistics 収集 — NonRT 専用
+AudioEngine::DSPCore::TrackedMemoryStatistics
+AudioEngine::DSPCore::collectTrackedMemoryStatistics() const noexcept
+{
+    ASSERT_NON_RT_THREAD();
+
+    TrackedMemoryStatistics stats {};
+
+    // Oversampling work buffers (stages[3] × upHistory/downHistory × 2ch)
+    // Estimate: maxInternalBlockSize × upsampleRatio × sizeof(double) × stages
+    //   (保守的に maxInputBlock × 8 × 8B × 2ch × 3stages = large, but practical)
+    const size_t osFactor = oversamplingFactor;
+    stats.oversampling = static_cast<size_t>(maxSamplesPerBlock) * osFactor * sizeof(double) * 2;
+
+    // SoftClip OS (single stage)
+    stats.softClip = static_cast<size_t>(maxInternalBlockSize) * sizeof(double) * 2;
+
+    // EQ scratch/dry/parallel buffers (estimated from internalBlockSize × 2ch)
+    stats.eqProcessor = static_cast<size_t>(maxInternalBlockSize) * sizeof(double) * 4;
+
+    // alignedL/R + dryBypassDoubleL/R
+    stats.alignedBuffers = static_cast<size_t>(alignedCapacity) * sizeof(double) * 2
+                         + static_cast<size_t>(dryBypassCapacityDouble) * sizeof(double) * 2;
+
+    // fixedLatency × 2 (old + new) × 2ch
+    stats.latencyBuffers = static_cast<size_t>(histories().fixedLatencyBufferSize) * sizeof(double) * 4;
+
+    // TruePeakDetector internal (estimated: internalBlockSize × 2ch × filter order)
+    stats.truePeakDetector = static_cast<size_t>(maxInternalBlockSize) * sizeof(double) * 4;
+
+    // Convolver internal (no IR = minimal — IR itself is not tracked here)
+    stats.convolver = 0;  // ConvolverProcessor manages its own memory separately
+
+    // Crossfade buffers (owned by AudioEngine, not DSPCore — report 0 here)
+    stats.crossfade = 0;
+
+    // DCBlocker/LoudnessMeter/PeakLimiter/NoiseShaper (fixed-size state, ~few KB each)
+    stats.misc = 4096 * 4;  // Conservative estimate for all fixed-size DSP states
+
+    // otherTracked: captured by summing prepare() allocated buffers not in above
+    stats.otherTracked = 0;
+
+    return stats;
 }
 
 void AudioEngine::DSPCore::reset()

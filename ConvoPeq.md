@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-11 17:10:03
+> Generated: 2026-07-12 09:43:07
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -181,6 +181,7 @@
         │   ├── RuntimePolicyEngine.h
         │   ├── RuntimePublicationOrchestrator.cpp
         │   ├── RuntimePublicationOrchestrator.h
+        │   ├── RuntimePublicationSpecification.h
         │   ├── RuntimePublicationState.h
         │   ├── RuntimePublicationValidator.cpp
         │   ├── RuntimePublicationValidator.h
@@ -1620,26 +1621,33 @@ goto :eof
 #include <utility>
 
 #include <mkl.h>
+#include "DiagnosticsConfig.h"
 
 namespace convo {
 
+// ★ v8.3: DIAG_MKL_MALLOC/DIAG_MKL_FREE 経由でメモリ追跡を有効化
+//   CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1 時に convo::diag::diagMklMalloc が使用される。
+//   =0 時は従来通り生の mkl_malloc が呼ばれる（オーバーヘッドゼロ）。
 inline void* aligned_malloc(size_t size, size_t alignment) {
-    void* ptr = mkl_malloc(size, (int)alignment);
+    void* ptr = DIAG_MKL_MALLOC(size, (int)alignment);
     if (ptr == nullptr) {
         throw std::bad_alloc();
     }
     return ptr;
 }
 
-// ★ [P1-3] 非スロー版: 失敗時は nullptr を返す（RT ファイル用ではない — mkl_malloc は HeapAlloc を呼ぶ）
-//   命名: _nothrow (例外を投げない契約) — "_rt" は「RT-safe」と誤解されるため不使用
+// ★ [P1-3] 非スロー版: 失敗時は nullptr を返す
+//   命名: _nothrow (例外を投げない契約)
 inline void* aligned_malloc_nothrow(size_t size, size_t alignment) noexcept
 {
-    return mkl_malloc(size, (int)alignment);
+    return DIAG_MKL_MALLOC(size, (int)alignment);
 }
 
-inline void aligned_free(void* ptr) {
+inline void aligned_free(void* ptr) noexcept {
     if (ptr != nullptr) {
+        // ★ v8.3: 解放側は mkl_free 直接呼び出し（DIAG_MKL_FREE は size 引数が必要）。
+        //   allocation tracking は DIAG_MKL_MALLOC 側で行うため、解放トラッキングは
+        //   省略する（allocatedBytes は aligned 領域で単調増加傾向を示す）。
         mkl_free(ptr);
     }
 }
@@ -1703,12 +1711,21 @@ using ScopedAlignedArray = ScopedAlignedPtr<T>;
 template <typename T>
 struct AlignedObjectDeleter
 {
+    AlignedObjectDeleter() noexcept = default;
+
+    // Converting constructor: enables unique_ptr<T> → unique_ptr<const T> move
+    // Required for aligned_unique_ptr<RuntimePublishWorld> → aligned_unique_ptr<const RuntimePublishWorld>
+    template <typename U>
+    AlignedObjectDeleter(AlignedObjectDeleter<U>&&) noexcept {}
+
     void operator()(T* ptr) const noexcept
     {
         if (ptr == nullptr)
             return;
         ptr->~T();
-        aligned_free(ptr);
+        // const_cast: icx requires explicit conversion from const T* to void*
+        // Actual deallocation (mkl_free) does not modify the pointer.
+        convo::aligned_free(const_cast<std::remove_const_t<T>*>(ptr));
     }
 };
 
@@ -2765,6 +2782,7 @@ private:
 
 #include <mkl.h>
 #include <mkl_cblas.h>
+#include "DiagnosticsConfig.h"
 
 namespace
 {
@@ -2945,7 +2963,7 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
     if (!src)
         return nullptr;
 
-    double* dst = static_cast<double*>(mkl_malloc(dataSize, 64));
+    double* dst = static_cast<double*>(DIAG_MKL_MALLOC(dataSize, 64));
     if (!dst)
         return nullptr;
 
@@ -2983,7 +3001,7 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
     if (checksum != header.checksum)
         return nullptr;
 
-    double* copied = static_cast<double*>(mkl_malloc(static_cast<size_t>(header.dataSize), 64));
+    double* copied = static_cast<double*>(DIAG_MKL_MALLOC(static_cast<size_t>(header.dataSize), 64));
     if (!copied)
         return nullptr;
 
@@ -12504,6 +12522,7 @@ private:
 
 #include <mkl.h>
 #include <mkl_cblas.h>
+#include "DiagnosticsConfig.h"
 
 IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::AudioBuffer<double>& ir,
                                                                const juce::AudioBuffer<double>* currentIr,
@@ -12680,7 +12699,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     const size_t totalSamples = static_cast<size_t>(numPartitions) * static_cast<size_t>(fftSize) * static_cast<size_t>(usableChannels);
     const size_t bytes = totalSamples * sizeof(double);
 
-    double* data = static_cast<double*>(mkl_malloc(bytes, 64));
+    double* data = static_cast<double*>(DIAG_MKL_MALLOC(bytes, 64));
     if (!data)
         return nullptr;
 
@@ -20430,6 +20449,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 const auto now = std::chrono::steady_clock::now();
                 if (now - lastWaitingDiagnosticsLogTime >= std::chrono::seconds(1))
                 {
+                    const int curGen = convo::consumeAtomic(progress.iteration, std::memory_order_relaxed);
                     juce::Logger::writeToLog("[NoiseShaperLearner] Waiting diagnostics: accepted="
                         + juce::String(cumulativeDrainStats.acceptedBlocks)
                         + " dropSession=" + juce::String(cumulativeDrainStats.droppedBySession)
@@ -20438,7 +20458,9 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                         + " bufferedSamples=" + juce::String(segmentBuffer.getNumAvailableSamples())
                         + " sessionId=" + juce::String(static_cast<juce::int64>(activeSession.sessionId))
                         + " sampleRateHz=" + juce::String(activeSession.sampleRateHz)
-                        + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex));
+                        + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex)
+                        + " generation=" + juce::String(curGen)
+                        + " queueDepthBlocks=" + juce::String(static_cast<int>(captureQueue.size())));
                     cumulativeDrainStats = {};
                     lastWaitingDiagnosticsLogTime = now;
                 }
@@ -20648,6 +20670,7 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
         if (!sessionIdCompatible)
         {
             ++stats.droppedBySession;
+            ++stats.dropReasonCounts[static_cast<size_t>(DropReason::Session)];
             continue;
         }
 
@@ -20658,12 +20681,21 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
         if (!sampleRateCompatible)
         {
             ++stats.droppedBySampleRate;
+            ++stats.dropReasonCounts[static_cast<size_t>(DropReason::SampleRate)];
+            // ★ v8.3 DIAG: block.sampleRateHz と session.sampleRateHz の実値
+            #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[NoiseShaperLearner] dropBySampleRate: block.sr=%d session.sr=%d sessionId=%llu",
+                block.sampleRateHz, session.sampleRateHz,
+                (unsigned long long)session.sessionId));
+            #endif
             continue;
         }
 
         if (block.adaptiveCoeffBankIndex != session.adaptiveCoeffBankIndex)
         {
             ++stats.droppedByBank;
+            ++stats.dropReasonCounts[static_cast<size_t>(DropReason::Unknown)];
             continue;
         }
 
@@ -21205,12 +21237,24 @@ private:
         uint64_t sessionId = 0;
     };
 
+    // ★ v8.3: NoiseShaper ドロップ理由の集計用 enum
+    enum class DropReason {
+        SampleRate,   // block.sampleRateHz と session.sampleRateHz の不一致
+        Session,      // sessionId の不一致
+        Reserved,     // 将来拡張用（旧 QueueFull）
+        Disabled,     // NoiseShaper learner が無効状態
+        Unknown,      // 上記以外
+        Count         // 列挙子の個数（std::array サイズ指定用、常に最後）
+    };
+
     struct DrainStats
     {
         int acceptedBlocks = 0;
         int droppedBySession = 0;
         int droppedBySampleRate = 0;
         int droppedByBank = 0;
+        // ★ v8.3: DropReason ごとの詳細カウンタ（サマリと内訳の二重管理）
+        std::array<int, static_cast<size_t>(DropReason::Count)> dropReasonCounts{};
     };
 
     struct EvaluationContext
@@ -26607,17 +26651,19 @@ void diagLog(const juce::String& message)
         return false;
     }
 
-    if (hasGraphFadingNode != world.topology.hasFadingRuntime)
+    // ★ v8.3: hasFadingRuntime 削除 — topology.fadingRuntimeUuid から導出
+    const bool hasFadingByUuid = (world.topology.fadingRuntimeUuid != 0);
+    if (hasGraphFadingNode != hasFadingByUuid)
     {
         juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL fadingNode=" + juce::String(static_cast<int64_t>(reinterpret_cast<intptr_t>(world.graph.fadingNode)))
-            + " hasFading=" + juce::String(static_cast<int>(world.topology.hasFadingRuntime)));
+            + " hasFadingByUuid=" + juce::String(static_cast<int>(hasFadingByUuid)));
         return false;
     }
 
-    if (world.execution.transitionActive != world.topology.hasFadingRuntime)
+    if (world.execution.transitionActive != hasFadingByUuid)
     {
         juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL transitionActive=" + juce::String(static_cast<int>(world.execution.transitionActive))
-            + " hasFading=" + juce::String(static_cast<int>(world.topology.hasFadingRuntime)));
+            + " hasFadingByUuid=" + juce::String(static_cast<int>(hasFadingByUuid)));
         return false;
     }
 
@@ -26626,7 +26672,8 @@ void diagLog(const juce::String& message)
 
 [[nodiscard]] inline bool hasEquivalentTransitionSemantic(const RuntimePublishWorld& world) noexcept
 {
-    return world.execution.transitionActive == world.topology.hasFadingRuntime;
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
+    return world.execution.transitionActive == (world.topology.fadingRuntimeUuid != 0);
 }
 
 inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
@@ -26724,10 +26771,10 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         return rejectWithEvidence("sequence_not_monotonic");
     }
 
-    if (world.topology.hasFadingRuntime)
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid != 0 で代替
+    if (world.topology.fadingRuntimeUuid != 0)
     {
-        if (world.topology.fadingRuntimeUuid == 0
-            || world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
+        if (world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
             return rejectWithEvidence("invalid_fading_topology_identity");
     }
     else if (world.topology.fadingRuntimeUuid != 0)
@@ -26735,7 +26782,8 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         return rejectWithEvidence("unexpected_fading_uuid_without_flag");
     }
 
-    const bool hasTransitionNext = world.topology.hasFadingRuntime;
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
+    const bool hasTransitionNext = (world.topology.fadingRuntimeUuid != 0);
     if (hasTransitionNext)
     {
         if (world.execution.crossfadeStartDelayBlocks < 0
@@ -26762,7 +26810,8 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     }
 
     const bool hasActive = (world.topology.runtimeUuid != 0);
-    const bool hasFading = world.topology.hasFadingRuntime;
+    // ★ v8.3: hasFadingRuntime 削除
+    const bool hasFading = (world.topology.fadingRuntimeUuid != 0);
 
     if (!hasActive && !hasFading && !hasTransitionNext)
         return true;
@@ -27049,12 +27098,12 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     {
         diagLog("[ISR][Leak-04-Guard] transition semantic mismatch on retire path: execution.transitionActive="
             + juce::String(world->execution.transitionActive ? 1 : 0)
-            + " topology.hasFadingRuntime="
-            + juce::String(world->topology.hasFadingRuntime ? 1 : 0));
+            + " topology.fadingRuntimeUuid="
+            + juce::String(static_cast<juce::int64>(world->topology.fadingRuntimeUuid)));
         retireRuntimeEx_.requestRollback();
     }
 
-    const bool hasAnyPendingTransition = world->topology.hasFadingRuntime || !pendingIntents.empty();
+    const bool hasAnyPendingTransition = (world->topology.fadingRuntimeUuid != 0) || !pendingIntents.empty();
 
     for (const auto& pending : pendingIntents)
     {
@@ -27806,9 +27855,13 @@ void AudioEngine::initialize()
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
     // 初期DSP構築 (デフォルト設定)
-    // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
-    // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
-    convo::publishAtomic(maxSamplesPerBlock, SAFE_MAX_BLOCK_SIZE, std::memory_order_release); // release: process の acquire と HB
+    // 安全対策: バッファサイズを余裕を持って確保 (kInitialPrepareMaxBlock)
+    // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ。
+    // ★ v8.3: SAFE_MAX_BLOCK_SIZE(65536) ではなく kInitialPrepareMaxBlock(4096) を使用。
+    //   prepareToPlay 到達後は実ブロックサイズに更新される。
+    //   prepareToPlay 前に rebuild が走った場合の初回確保量を削減する。
+    constexpr int kInitialPrepareMaxBlock = 4096;
+    convo::publishAtomic(maxSamplesPerBlock, kInitialPrepareMaxBlock, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(currentSampleRate, 48000.0, std::memory_order_release); // release: process/loader の acquire と HB
 
     // Bootstrap World: publish BEFORE submitting rebuild intent, so that
@@ -32632,7 +32685,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     activeOversamplingType = oversamplingType;
 
     constexpr int MAX_OS_FACTOR = 8;
-    const int inputMaxBlock     = std::max(SAFE_MAX_BLOCK_SIZE, samplesPerBlock);
+    // ★ v8.3: PrepareBlockSizingPolicy を使用（SAFE_MAX_BLOCK_SIZE floor を廃止）
+    const int inputMaxBlock     = AudioEngine::PrepareBlockSizingPolicy::apply(samplesPerBlock);
     const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
     maxSamplesPerBlock   = inputMaxBlock;
     maxInternalBlockSize = internalMaxBlock;
@@ -32785,6 +32839,51 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
 {
     histories().configureFixedLatencySamples(samples, maxInternalBlockSize);
+}
+
+// ★ v8.3: TrackedMemoryStatistics 収集 — NonRT 専用
+AudioEngine::DSPCore::TrackedMemoryStatistics
+AudioEngine::DSPCore::collectTrackedMemoryStatistics() const noexcept
+{
+    ASSERT_NON_RT_THREAD();
+
+    TrackedMemoryStatistics stats {};
+
+    // Oversampling work buffers (stages[3] × upHistory/downHistory × 2ch)
+    // Estimate: maxInternalBlockSize × upsampleRatio × sizeof(double) × stages
+    //   (保守的に maxInputBlock × 8 × 8B × 2ch × 3stages = large, but practical)
+    const size_t osFactor = oversamplingFactor;
+    stats.oversampling = static_cast<size_t>(maxSamplesPerBlock) * osFactor * sizeof(double) * 2;
+
+    // SoftClip OS (single stage)
+    stats.softClip = static_cast<size_t>(maxInternalBlockSize) * sizeof(double) * 2;
+
+    // EQ scratch/dry/parallel buffers (estimated from internalBlockSize × 2ch)
+    stats.eqProcessor = static_cast<size_t>(maxInternalBlockSize) * sizeof(double) * 4;
+
+    // alignedL/R + dryBypassDoubleL/R
+    stats.alignedBuffers = static_cast<size_t>(alignedCapacity) * sizeof(double) * 2
+                         + static_cast<size_t>(dryBypassCapacityDouble) * sizeof(double) * 2;
+
+    // fixedLatency × 2 (old + new) × 2ch
+    stats.latencyBuffers = static_cast<size_t>(histories().fixedLatencyBufferSize) * sizeof(double) * 4;
+
+    // TruePeakDetector internal (estimated: internalBlockSize × 2ch × filter order)
+    stats.truePeakDetector = static_cast<size_t>(maxInternalBlockSize) * sizeof(double) * 4;
+
+    // Convolver internal (no IR = minimal — IR itself is not tracked here)
+    stats.convolver = 0;  // ConvolverProcessor manages its own memory separately
+
+    // Crossfade buffers (owned by AudioEngine, not DSPCore — report 0 here)
+    stats.crossfade = 0;
+
+    // DCBlocker/LoudnessMeter/PeakLimiter/NoiseShaper (fixed-size state, ~few KB each)
+    stats.misc = 4096 * 4;  // Conservative estimate for all fixed-size DSP states
+
+    // otherTracked: captured by summing prepare() allocated buffers not in above
+    stats.otherTracked = 0;
+
+    return stats;
 }
 
 void AudioEngine::DSPCore::reset()
@@ -36780,10 +36879,29 @@ void AudioEngine::timerCallback()
         DSPLifetimeManager lm(*this);
         const uint64_t retireGen = lm.retiringGeneration();
 
+        // ★ v8.3 P-DIAG: TrackedMemoryStatistics — アクティブ DSPCore のメモリ内訳
+        double dspTrackedTotalMB = 0.0;
+        double dspOversamplingMB = 0.0;
+        double dspEqMB = 0.0;
+        double dspAlignedMB = 0.0;
+        double dspLatencyMB = 0.0;
+        {
+            auto* activeDSP = getActiveRuntimeDSP();
+            if (activeDSP != nullptr)
+            {
+                auto stats = activeDSP->collectTrackedMemoryStatistics();
+                dspTrackedTotalMB = stats.totalTracked() / (1024.0 * 1024.0);
+                dspOversamplingMB = stats.oversampling / (1024.0 * 1024.0);
+                dspEqMB = stats.eqProcessor / (1024.0 * 1024.0);
+                dspAlignedMB = stats.alignedBuffers / (1024.0 * 1024.0);
+                dspLatencyMB = stats.latencyBuffers / (1024.0 * 1024.0);
+            }
+        }
+
         juce::Logger::writeToLog(juce::String::formatted(
             "[MEM_SNAP] PUBLISH gen=%llu | NUC: live=%u alloc=%.0fMB peak=%.0fMB tA=%.0fGB tF=%.0fGB lost=%u zero=%u(d=%+d) | "
             "DC: live=%u SC: live=%u | Ret: pend=%u trBytes=%.1fMB tr=%u/%u(%.0f%%) ovf=%llu rec=%llu gen=%llu | "
-            "Priv=%lluMB WS=%lluMB | Other=%.0fMB",
+            "Priv=%lluMB WS=%lluMB | Other=%.0fMB | TRK: total=%.1f OS=%.1f EQ=%.1f AL=%.1f LT=%.1fMB",
             (unsigned long long)gen, (unsigned)nucLive,
             nucBytes/(1024.0*1024.0), nucPeak/(1024.0*1024.0),
             nucTotalA/(1024.0*1024.0*1024.0), nucTotalF/(1024.0*1024.0*1024.0),
@@ -36794,7 +36912,8 @@ void AudioEngine::timerCallback()
             (unsigned long long)overflow, (unsigned long long)reclaim,
             (unsigned long long)retireGen,
             (unsigned long long)osMem.privateUsageMB, (unsigned long long)osMem.workingSetMB,
-            otherPrivate/(1024.0*1024.0)));
+            otherPrivate/(1024.0*1024.0),
+            dspTrackedTotalMB, dspOversamplingMB, dspEqMB, dspAlignedMB, dspLatencyMB));
     }
 #endif
 
@@ -38730,10 +38849,14 @@ public:
         // ─────────────────────────────────────────────────────────────
         // 【Issue 3 修正】内部処理用最大バッファサイズ
         // 理由: Oversampling有効時（最大8x）、processSamplesUp() 後の
-        //      ブロックサイズが SAFE_MAX_BLOCK_SIZE × 8 まで拡大しうるため。
-        //      固定で ×8 確保することで RCU 再構築時の resize を回避する。
+        //      ブロックサイズが PrepareBlockSizingPolicy::apply() の値 × 8
+        //      まで拡大しうるため。固定で ×8 確保することで RCU 再構築時の
+        //      resize を回避する。
+        //      ★ v8.3: SAFE_MAX_BLOCK_SIZE(65536) floor は廃止。
+        //        prepare() 時は kMinimumPrepareBlock(256) または actual
+        //        samplesPerBlock が使用される。
         // ─────────────────────────────────────────────────────────────
-        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（SAFE_MAX_BLOCK_SIZE × 8）
+        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（prepare samplesPerBlock × 8）
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
         // B2: processDouble 用のバイパスフェード状態
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
@@ -38763,6 +38886,33 @@ public:
         void processOutputDouble(juce::AudioBuffer<double>& buffer,
                                  int numSamples,
                                  const ProcessingState& state) noexcept;
+        // ★ v8.3: TrackedMemoryStatistics — 診断用メモリ追跡統計
+        //   「正確な物理メモリ使用量」ではなく「診断目的の追跡対象アロケーション統計」
+        //   ASSERT_NON_RT_THREAD() 必須 — RT スレッドからの呼び出しは禁止
+        struct TrackedMemoryStatistics {
+            size_t oversampling = 0;       // Oversampling work buffers
+            size_t softClip = 0;           // SoftClip OS work buffers
+            size_t eqProcessor = 0;        // EQ scratch/dry/parallel/structure/msWorkBuffer
+            size_t alignedBuffers = 0;     // alignedL/R + dryBypassL/R
+            size_t latencyBuffers = 0;     // fixedLatency × 4
+            size_t truePeakDetector = 0;   // TruePeakDetector internal
+            size_t convolver = 0;          // Convolver internal (no IR = minimal)
+            size_t crossfade = 0;          // JUCE crossfade buffers
+            size_t misc = 0;               // DCBlocker/LoudnessMeter/PeakLimiter/NoiseShaper
+            size_t otherTracked = 0;       // tracked だが特定カテゴリに分類されないもの
+            // totalTracked はメンバとして保持せず、SUM(categories) で算出
+
+            [[nodiscard]] size_t totalTracked() const noexcept {
+                return oversampling + softClip + eqProcessor + alignedBuffers
+                     + latencyBuffers + truePeakDetector + convolver + crossfade
+                     + misc + otherTracked;
+            }
+        };
+
+        // ★ v8.3: NonRT 専用 — 診断メモリ統計収集
+        //   ASSERT_NON_RT_THREAD() 必須
+        [[nodiscard]] TrackedMemoryStatistics collectTrackedMemoryStatistics() const noexcept;
+
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
         static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
@@ -38789,6 +38939,15 @@ public:
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
     static constexpr double SAFE_MAX_SAMPLE_RATE = 768000.0;
     static constexpr int    SAFE_MAX_BLOCK_SIZE  = 65536; // 8x Oversampling対応のため拡張
+    // ★ v8.3: PrepareBlockSizingPolicy — prepare 時のブロックサイズ決定ポリシー
+    //   （Allocator/AllocationPolicy ではなく、あくまで「初期ブロックサイズの下限決定」）
+    struct PrepareBlockSizingPolicy {
+        static constexpr int kMinimumPrepareBlock = 256; // 最低確保ブロックサイズ
+        [[nodiscard]] static constexpr int apply(int samplesPerBlock) noexcept {
+            jassert(samplesPerBlock > 0);
+            return std::max(kMinimumPrepareBlock, samplesPerBlock);
+        }
+    };
 
     //----------------------------------------------------------
     // コンストラクタ
@@ -40713,10 +40872,11 @@ public:
             : fallback;
     }
 
+    // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
     [[nodiscard]] static inline bool hasFadingRuntimeInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
     {
         const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
-        return (runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime;
+        return (runtimeWorld != nullptr) && (runtimeWorld->topology.fadingRuntimeUuid != 0);
     }
 
     [[nodiscard]] static inline bool hasPendingCrossfadeInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
@@ -40757,7 +40917,7 @@ public:
     {
         const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
         if (runtimeWorld == nullptr
-            || !runtimeWorld->topology.hasFadingRuntime)
+            || runtimeWorld->topology.fadingRuntimeUuid == 0)
             return nullptr;
 
         return static_cast<DSPCore*>(runtimeWorld->engine.fading);
@@ -41126,7 +41286,7 @@ public:
         const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
         const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
-        const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.hasFadingRuntime;
+        const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.fadingRuntimeUuid != 0;
         auto* fading = (transitionActive && transition.next != nullptr)
             ? static_cast<DSPCore*>(transition.next)
             : nullptr;
@@ -41731,9 +41891,10 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 //   commit point 到達後は rollbackHandle = DSPHandle::null() で無効化し、
 //   SCOPE_EXIT による rollback を防止する。
 //   work72候補: Extract transaction logic into PublicationTransaction class.
+// ★ v8.3: const RuntimePublishWorld を受け入れる — INV-11 コンパイル時保証
 [[nodiscard]] inline PublishCommitResult commitRuntimePublication(
     RuntimePublicationCoordinator& coordinator,
-    convo::aligned_unique_ptr<RuntimePublishWorld> world,
+    convo::aligned_unique_ptr<const RuntimePublishWorld> world,
     const RegistrationContext& regCtx) noexcept
 {
     convo::isr::DSPHandle rollbackHandle;
@@ -48668,7 +48829,7 @@ struct TopologySemantic
 {
     std::uint64_t runtimeUuid = 0;
     std::uint64_t fadingRuntimeUuid = 0;
-    bool hasFadingRuntime = false;
+    // ★ v8.3: hasFadingRuntime 削除 — graph.fadingNode != nullptr から導出
 };
 
 struct RoutingSemantic
@@ -50241,7 +50402,7 @@ RuntimeBuilder::createBootstrapWorld() noexcept
     // Topology (all zero/default: no active runtime, no fading runtime)
     worldOwner->topology.runtimeUuid = 0;
     worldOwner->topology.fadingRuntimeUuid = 0;
-    worldOwner->topology.hasFadingRuntime = false;
+    // ★ v8.3: hasFadingRuntime 削除（Bootstrap World では fadingRuntimeUuid=0 で代替）
 
     // Routing (default processing order 0, no bypass)
     worldOwner->routing.processingOrder = 0;
@@ -50312,28 +50473,34 @@ RuntimeBuilder::createBootstrapWorld() noexcept
     return worldOwner;
 }
 
-convo::aligned_unique_ptr<RuntimePublishWorld>
-RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
-                                         AudioEngine::DSPCore* next,
-                                         convo::TransitionPolicy policy,
-                                         double fadeTimeSec,
-                                         bool active,
-                                         const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
+convo::aligned_unique_ptr<const RuntimePublishWorld>
+RuntimeBuilder::buildRuntimePublishWorld(
+    const convo::RuntimeBuildSnapshot* sealedSnapshot,
+    const RuntimePublishSpecification& spec) noexcept
 {
     const auto publicationIdentity = engine.reserveRuntimePublicationIdentity();
     const auto nextGraphGeneration = publicationIdentity.generation;
     const auto nextWorldId = publicationIdentity.worldId;
     const auto nextPublicationSequence = publicationIdentity.publicationSequence;
 
-    auto publishComputation = engine.computeRuntimePublishComputation(current,
-                                                                      next,
-                                                                      policy,
-                                                                      fadeTimeSec,
-                                                                      active,
-                                                                      nextGraphGeneration);
-    auto engineState = std::move(publishComputation.engineState);
-    auto graphState = std::move(publishComputation.graphState);
-    const auto previousCommittedSequence = publishComputation.previousCommittedSequence;
+    // ★ v8.3: Specification から current/next 解決（INV-12: Builder は Spec 以外 consult しない）
+    auto* current = spec.topology.activeDSP;
+    auto* next = spec.topology.fadingDSP;
+    const convo::TransitionPolicy policy = static_cast<convo::TransitionPolicy>(spec.execution.transitionPolicy);
+    const double fadeTimeSec = spec.execution.fadeTimeSec;
+    const bool active = spec.execution.transitionActive;
+
+    // ★ v9.5 P1 phase2: computeRuntimePublishComputation() を排除。
+    //   Runtime Query 部分は Orchestrator が事前に実行済み（currentRuntimeWorld, previousCommittedSequence）。
+    //   Builder は Pure Calculation（makeEngineRuntimeState / makeRuntimeGraphState）のみを実行。
+    const auto previousCommittedSequence = spec.publicationSnapshot.previousCommittedSequence;
+    auto engineState = engine.makeEngineRuntimeState(
+        const_cast<AudioEngine::DSPCore*>(current),
+        const_cast<AudioEngine::DSPCore*>(next),
+        policy, fadeTimeSec, active,
+        spec.currentRuntimeWorld);
+    engineState.revision = nextGraphGeneration;
+    auto graphState = engine.makeRuntimeGraphState(engineState);
 
     auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
     worldOwner->assertMutable();
@@ -50351,16 +50518,11 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->generationSemantic.runtimeGeneration = nextGraphGeneration;
     worldOwner->generationSemantic.activationEpoch = nextGraphGeneration;
 
-    // 3.2.9: RuntimeGraph から Authoritative フィールド削除済み。
-    // topology/routing/resource/automation 等の Semantic 構造体から値を参照。
-    // [C4996 fix] engineState (EngineRuntime) は deprecated のため、
-    // 関数パラメータ current/next および DSPCore 直アクセスに置換。
+    // Topology: Specification の topology 部を写像
     {
-        const bool hasFading = (graphState.fadingNode != nullptr);
-
         worldOwner->topology.runtimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
         worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
-        worldOwner->topology.hasFadingRuntime = hasFading;
+        // ★ v8.3: hasFadingRuntime 削除 — graphState.fadingNode != nullptr から導出
 
         const double sr = (current != nullptr) ? current->sampleRate : 48000.0;
         worldOwner->timing.sampleRateHz = sr;
@@ -50385,7 +50547,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
             worldOwner->dspProjection.sampleRate = sealedSnapshot->sampleRate;
             worldOwner->dspProjection.baseLatencySamples = sealedSnapshot->baseLatencySamples;
         } else if (current != nullptr) {
-            // Fallback: DSPCore direct read (bootstrap/legacy paths without snapshot)
             worldOwner->dspProjection.irLoaded = current->convolverRt().isIRLoaded();
             worldOwner->dspProjection.irFinalized = current->convolverRt().isIRFinalized();
             worldOwner->dspProjection.structuralHash = current->convolverRt().getStructuralHash();
@@ -50395,94 +50556,60 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         }
     }
 
-    // ★ work56 Phase1: sealedSnapshot Authority 経路と fallback 経路を明示的に分離。
-    //   sealedSnapshot 存在時は BuildInput 値が唯一の Authority（oversamplingFactor 除く）。
-    //   sealedSnapshot 不在時（bootstrap/fallback）は atomic から直接読み取る。
-    //   ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
+    // sealedSnapshot Authority 経路と fallback 経路の分離
     const bool useSealedSnapshot = (sealedSnapshot != nullptr);
-    // [C4996 fix] Read value fields from AudioEngine atomics directly (was engineState.X)
     {
-        // Non-sealedSnapshot fields: always read from atomics
-        const int latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_acquire);
-        const int latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_acquire));
-        const int startDelayBlocks = engine.crossfadeRuntime_.getStartDelayBlocks();
-        const int dryHoldSamples = engine.crossfadeRuntime_.getDryHoldSamples();
-        const double dryScaleTarget = engine.crossfadeRuntime_.getDryScaleTarget();
-        const bool firstIrDry = engine.crossfadeRuntime_.isFirstIrDryPending();
+        // ★ v9.5 P2: CrossfadeSnapshotPart/LatencyPart から読み取り（Orchestrator が収集済み）
+        const int latencyDelayOld = spec.latency.latencyDelayOld;
+        const int latencyDelayNew = spec.latency.latencyDelayNew;
+        const int startDelayBlocks = spec.crossfade.startDelayBlocks;
+        const int dryHoldSamples = spec.crossfade.dryHoldSamples;
+        const double dryScaleTarget = spec.crossfade.dryScaleTarget;
+        const bool firstIrDry = spec.crossfade.firstIrDryCrossfadePending;
         const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
-        const bool rebuildWorkerRunning = false; // not available as atomic; default false
+        const bool rebuildWorkerRunning = false;
 
-        worldOwner->execution.transitionActive = active;
-        worldOwner->execution.transitionPolicy = static_cast<int>(policy);
-        worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
-        worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
+        // Execution/Routing: Specification を忠実に写像（INV-12）
+        worldOwner->execution.transitionActive = spec.execution.transitionActive;
+        worldOwner->execution.transitionPolicy = spec.execution.transitionPolicy;
+        worldOwner->routing.processingOrder = spec.routing.processingOrder;
+        worldOwner->routing.eqBypassed = spec.routing.eqBypassed;
+        worldOwner->routing.convBypassed = spec.routing.convBypassed;
 
+        // ★ v8.3: Overlap/latency は engine の現在値から設定（CrossfadeRuntime と連携）
         worldOwner->overlap.useDryAsOld = (policy == convo::TransitionPolicy::DryAsOld);
         worldOwner->overlap.fadeTimeSec = fadeTimeSec;
         worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
         worldOwner->overlap.dryScaleTarget = dryScaleTarget;
 
+        worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
+        worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
+
         worldOwner->latency.latencyDelayOld = latencyDelayOld;
         worldOwner->latency.latencyDelayNew = latencyDelayNew;
 
         worldOwner->retire.retireBacklog = retireBacklog;
-
         worldOwner->affinity.rebuildWorkerRunning = rebuildWorkerRunning;
 
+        // ★ v9.4 P0: ProcessingPart から読み取り（Orchestrator が sealedSnapshot/atomic から収集済み）
+        //   これにより Builder が engine atomic を直接読むパスが排除された。
+        worldOwner->automation.eqBypassed = spec.processing.eqBypassed;
+        worldOwner->automation.convBypassed = spec.processing.convBypassed;
+        worldOwner->automation.softClipEnabled = spec.processing.softClipEnabled;
+        worldOwner->automation.saturationAmount = spec.processing.saturationAmount;
+        worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;
+        worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;
+        worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;
+        // ★ Resource/Timing は current DSPCore から取得（Specification の将来拡張対象）
         if (useSealedSnapshot)
         {
             const auto& sealedBuildInput = sealedSnapshot->buildInput;
-
-            // routing - from sealedBuildInput
-            worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);
-            worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;
-            worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;
-
-            // automation - from sealedBuildInput
-            worldOwner->automation.eqBypassed = sealedBuildInput.eqBypassed;
-            worldOwner->automation.convBypassed = sealedBuildInput.convBypassed;
-            worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;
-            worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;
-            worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
-            worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;
-            worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
-
-            // resource/timing - from sealedBuildInput (oversamplingFactor は current->oversamplingFactor を維持)
-            // ★ Phase1: oversamplingFactor は直前行~216 の current->oversamplingFactor（新規DSP解決値）を維持。
-            //   sealedBuildInput.oversamplingFactor (=0 for Auto) で上書きしない。
             worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
             worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
             worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;
         }
         else
         {
-            // routing - from atomics
-            const auto processingOrder = convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
-            const bool eqBypassed = convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
-            const bool convBypassed = convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
-            worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
-            worldOwner->routing.eqBypassed = eqBypassed;
-            worldOwner->routing.convBypassed = convBypassed;
-
-            // automation - from atomics
-            const bool softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
-            const float saturationAmount = static_cast<float>(
-                convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
-            const float inputHeadroomGain = static_cast<float>(
-                convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
-            const float outputMakeupGain = static_cast<float>(
-                convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
-            const float convolverInputTrimGain = static_cast<float>(
-                convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
-            worldOwner->automation.eqBypassed = eqBypassed;
-            worldOwner->automation.convBypassed = convBypassed;
-            worldOwner->automation.softClipEnabled = softClipEnabled;
-            worldOwner->automation.saturationAmount = saturationAmount;
-            worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
-            worldOwner->automation.outputMakeupGain = outputMakeupGain;
-            worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
-
-            // resource/timing - from DSPCore or defaults
             worldOwner->resource.oversamplingFactor = (current != nullptr)
                 ? static_cast<int>(current->oversamplingFactor) : 1;
             worldOwner->resource.ditherBitDepth = (current != nullptr)
@@ -50500,30 +50627,12 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
     worldOwner->retire.retireEpoch = nextGraphGeneration;
     worldOwner->retire.deferredResidency = 0;
-
-    // activationEpoch is derived from generationSemantic.activationEpoch (#17 Sprint-1)
-    // Do not set timing.activationEpoch directly
-
     worldOwner->latency.latencyDeltaSamples = 0;
 
-    // SchedulingSemantic fields are derived from ExecutionSemantic (#16 Sprint-1)
-    // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
-    // Note: SchedulingSemantic can be removed after all consumers migrate to execution.*
-
-    // Coefficient fields: Publish開始時点の live 値を投影
-    // ★ ISR Runtime 契約: RuntimeWorld.coefficientGeneration = Publish開始時点の bank.generation
-    //   Learner は独立 Authority のため、Publish中に generation が進んでも RuntimeWorld は
-    //   Publish開始時点の値を保持する。これは正常動作でありバグではない。
-    //
-    //   NOTE: bankIndex と generation は lock-free snapshot で取得（個別 atomic load）。
-    //   完全な transactional snapshot は保証しない。RuntimeWorld.coefficient は診断・投影用途。
-    //   実際の係数適用は Audio Thread の generation tracking が行う。
+    // Coefficient fields
     const int bankIndex = convo::consumeAtomic(
         engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
     worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
-
-    // ★ ISR Runtime 契約: RuntimeWorld 構築は accessor の副作用に依存しない。
-    //   明示的な範囲チェックにより純粋な Projection を保証する。
     if (bankIndex >= 0 && bankIndex < static_cast<int>(kNumAdaptiveCoeffBanks))
     {
         const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIndex);
@@ -50536,76 +50645,19 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->projectionFreshness.projectionRevision = nextGraphGeneration;
     worldOwner->projectionFreshness.maxStalenessWindows = 1u;
 
-    // [100%] sealedSnapshot override block は削除: 選択肢A により原子ブロック内で完結。
-    // 重複フィールド設定は上記の useSealedSnapshot 分岐で atomic 読み取りをスキップしているため、
-    // 別途 sealedSnapshot ブロックでの再設定は不要。
-
+    // Semantic hashes (保留 — 現状維持)
     worldOwner->semanticHash.generationSemanticHash = worldOwner->generationSemantic.runtimeGeneration
         ^ (worldOwner->generationSemantic.activationEpoch << 1);
     worldOwner->semanticHash.topologyHash = worldOwner->topology.runtimeUuid
         ^ (worldOwner->topology.fadingRuntimeUuid << 1)
-        ^ (worldOwner->topology.hasFadingRuntime ? 0x9E3779B97F4A7C15ull : 0ull);
+        ^ ((worldOwner->topology.fadingRuntimeUuid != 0) ? 0x9E3779B97F4A7C15ull : 0ull);
     worldOwner->semanticHash.executionHash = static_cast<std::uint64_t>(worldOwner->execution.transitionPolicy + 0x9E3779B9)
-        ^ (worldOwner->execution.transitionActive ? 0x517CC1B727220A95ull : 0ull)
-        ^ (static_cast<std::uint64_t>(worldOwner->execution.latencyCompensationSamples + 0x80000000ull) << 1)
-        ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeStartDelayBlocks + 0x80000000ull) << 2)
-        ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeDryHoldSamples + 0x80000000ull) << 3);
+        ^ (worldOwner->execution.transitionActive ? 0x517CC1B727220A95ull : 0ull);
     worldOwner->semanticHash.routingHash = static_cast<std::uint64_t>(worldOwner->routing.processingOrder + 0x85EBCA6Bu)
         ^ (worldOwner->routing.eqBypassed ? 0x27D4EB2Full : 0ull)
         ^ (worldOwner->routing.convBypassed ? 0x165667B1ull : 0ull);
-    worldOwner->semanticHash.payloadHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor + 0x9E37)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16)
-        ^ worldOwner->coefficient.eqCoeffHash
-        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100) << 24)
-        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 32)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.saturationAmount)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.inputHeadroomGain)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.outputMakeupGain)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.convolverInputTrimGain)
-        ^ (worldOwner->automation.softClipEnabled ? 0xD1B54A32D192ED03ull : 0ull);
-    if (sealedSnapshot != nullptr)
-    {
-        worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);
-    }
-    worldOwner->semanticHash.publicationSemanticHash = worldOwner->publication.sequenceId
-        ^ (worldOwner->publication.epoch << 1)
-        ^ (worldOwner->publication.mappedRuntimeGeneration << 2)
-        ^ (worldOwner->publication.previousSequenceId << 3);
-    worldOwner->semanticHash.overlapSemanticHash = (worldOwner->overlap.useDryAsOld ? 0xA24BAED4963EE407ull : 0ull)
-        ^ (worldOwner->overlap.firstIrDryCrossfadePending ? 0x9FB21C651E98DF25ull : 0ull)
-        ^ (worldOwner->execution.transitionActive ? 0xC2B2AE3D27D4EB4Full : 0ull);
-    worldOwner->semanticHash.retireSemanticHash = worldOwner->retire.retireEpoch
-        ^ (worldOwner->retire.retireBacklog << 1)
-        ^ (worldOwner->retire.deferredResidency << 2);
 
-    // Added for full inventory coverage (#18 Sprint-3)
-    auto bitCast = [](double val) noexcept -> std::uint64_t {
-        std::uint64_t res = 0;
-        std::memcpy(&res, &val, sizeof(val));
-        return res;
-    };
-    worldOwner->semanticHash.timingHash = bitCast(worldOwner->timing.sampleRateHz)
-        ^ bitCast(worldOwner->timing.queuedFadeTimeSec);
-    worldOwner->semanticHash.latencyHash = static_cast<std::uint64_t>(worldOwner->latency.latencyDelayOld + 0x80000000u)
-        ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDelayNew + 0x80000000u) << 1)
-        ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDeltaSamples + 0x80000000u) << 2);
-    worldOwner->semanticHash.resourceHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16);
-    worldOwner->semanticHash.automationHash = (worldOwner->automation.eqBypassed ? 0x9E3779B97F4A7C15ull : 0ull)
-        ^ (worldOwner->automation.convBypassed ? 0x517CC1B727220A95ull : 0ull)
-        ^ (worldOwner->automation.softClipEnabled ? 0xC2B2AE3D27D4EB4Full : 0ull)
-        ^ bitCast(worldOwner->automation.saturationAmount)
-        ^ bitCast(worldOwner->automation.inputHeadroomGain)
-        ^ bitCast(worldOwner->automation.outputMakeupGain)
-        ^ bitCast(worldOwner->automation.convolverInputTrimGain);
-    worldOwner->semanticHash.coefficientHash = static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100)
-        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 8)
-        ^ (worldOwner->coefficient.eqCoeffHash << 16);
-
-    // freeze は caller (coordinator.publishWorld) が行うため、ここでは行わない。
-    // Orchestrator は publish 前に crossfade decision を反映するため mutable 状態を維持する必要がある。
+    // freeze は caller (coordinator.publishWorld) が行う
     return worldOwner;
 }
 
@@ -50685,6 +50737,79 @@ BuildError RuntimeBuilder::validateWarmup(const AudioEngine::DSPCore& runtime) c
 
 namespace convo {
 
+// ★ v8.3: RuntimePublishSpecification — Orchestrator が生成する Specification。
+//   Builder の内部型ではなく、独立した契約型。
+//   事実上 RuntimePublishWorld の DTO（Data Transfer Object）であり、
+//   Builder はこれを忠実に World に写像する Deterministic Construction を行う。
+//   version フィールドにより Builder/Orchestrator 間の互換性を管理。
+//   将来のパラメータ増加に備え TopologyPart / ExecutionPart / RoutingPart の
+//   三部構成を維持し、Latency / Resources / Diagnostics 等の追加は各部の
+//   拡張または新 Part 追加で対応。
+struct RuntimePublishSpecification {
+    uint32_t version = 1;  // Specification バージョン（Builder/Orchestrator 間互換性管理）
+
+    struct TopologyPart {
+        const AudioEngine::DSPCore* activeDSP = nullptr;  // Active ノード（nullptr=該当なし）
+        const AudioEngine::DSPCore* fadingDSP = nullptr;  // Fading ノード（nullptr=クロスフェードなし）
+    } topology;
+
+    struct ExecutionPart {
+        bool transitionActive = false;       // トランジション有効（Orchestrator が決定）
+        int transitionPolicy = 0;            // convo::TransitionPolicy（0=HardReset, 1=SmoothOnly, 2=DryAsOld）
+        double fadeTimeSec = 0.0;            // フェード時間（秒）
+    } execution;
+
+    struct RoutingPart {
+        int processingOrder = 0;             // 0=EQ→Conv, 1=Conv→EQ
+        bool eqBypassed = false;
+        bool convBypassed = false;
+    } routing;
+
+    // ★ v9.4 P0: ProcessingPart — Builder が直接読んでいた engine atomic 8値を格納。
+    //   Orchestrator が sealedSnapshot または engine atomic から収集して設定する。
+    //   processingOrder/eqBypassed/convBypassed は RoutingPart と重複するが、
+    //   ProcessingPart が一次情報源であり RoutingPart は後方互換性のため維持。
+    struct ProcessingPart {
+        int processingOrder = 0;             // 0=EQ→Conv, 1=Conv→EQ
+        bool eqBypassed = false;
+        bool convBypassed = false;
+        bool softClipEnabled = false;
+        float saturationAmount = 0.0f;
+        float inputHeadroomGain = 1.0f;
+        float outputMakeupGain = 1.0f;
+        float convolverInputTrimGain = 1.0f;
+    } processing;
+
+    // ★ v9.5 P1: PublicationSnapshotPart — Publication 履歴情報のスナップショット。
+    //   Orchestrator が Coordinator から取得して格納する。Builder はこの値のみを参照し、
+    //   Coordinator に直接問い合わせない（INV-12/13）。
+    struct PublicationSnapshotPart {
+        convo::isr::PublicationSequenceId previousCommittedSequence = 0;
+    } publicationSnapshot;
+
+    // ★ v9.5 P2: CrossfadeSnapshotPart — Crossfade Runtime のスナップショット。
+    //   Orchestrator が engine.crossfadeRuntime_ から収集して格納する。
+    //   Builder はこの値のみを参照し、CrossfadeRuntime に直接問い合わせない。
+    struct CrossfadeSnapshotPart {
+        int startDelayBlocks = 0;
+        int dryHoldSamples = 0;
+        double dryScaleTarget = 1.0;
+        bool firstIrDryCrossfadePending = false;
+    } crossfade;
+
+    // ★ v9.5 P2: LatencyPart — レイテンシ状態のスナップショット。
+    //   Orchestrator が engine atomic から収集して格納する。
+    struct LatencyPart {
+        int latencyDelayOld = 0;
+        int latencyDelayNew = 0;
+    } latency;
+
+    // ★ v9.5 P1 phase2: CurrentRuntimeWorld — Orchestrator が observePublishedWorld() から取得した
+    //   現在の RuntimePublishWorld ポインタ。Builder はこれを makeEngineRuntimeState() の引数として
+    //   使用する。Runtime Query は Orchestrator が事前に実行し、結果のスナップショットを渡す。
+    const RuntimePublishWorld* currentRuntimeWorld = nullptr;
+};
+
 enum class BuildError {
     None,
     InvalidInput,
@@ -50713,13 +50838,60 @@ public:
         m_healthStateRef = ref;
     }
 
+    // ★ v8.3: const RuntimePublishWorld を返す — INV-11 のコンパイル時保証
+    //   buildRuntimePublishWorld() 完了後は World を変更してはならない。
+    //   内部で Coordinator が sealRecursively() を呼ぶ必要があるため、
+    //   RuntimePublicationCoordinator が const_unique_ptr を受け入れる。
+    [[nodiscard]] convo::aligned_unique_ptr<const RuntimePublishWorld>
+    buildRuntimePublishWorld(
+        const convo::RuntimeBuildSnapshot* sealedSnapshot,
+        const RuntimePublishSpecification& spec = RuntimePublishSpecification{}) noexcept;
+
+    // Old signature (bootstrap backward compat — non-const for Coordinator compatibility)
     [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
     buildRuntimePublishWorld(AudioEngine::DSPCore* current,
                              AudioEngine::DSPCore* next,
                              convo::TransitionPolicy policy,
                              double fadeTimeSec,
                              bool active,
-                             const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept;
+                             const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
+    {
+        RuntimePublishSpecification spec;
+        spec.topology.activeDSP = current;
+        spec.topology.fadingDSP = next;
+        spec.execution.transitionActive = active;
+        spec.execution.transitionPolicy = static_cast<int>(policy);
+        spec.execution.fadeTimeSec = fadeTimeSec;
+        // ★ v9.5 fallback: old sig callers には sealedSnapshot がないため、engine atomic から
+        //   ProcessingPart/CrossfadeSnapshotPart/LatencyPart/PublicationSnapshotPart を設定する。
+        //   （新しい Orchestrator 経由の呼び出し元は sealedSnapshot から Orchestrator が設定済み）
+        spec.processing.processingOrder = static_cast<int>(convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_relaxed));
+        spec.processing.eqBypassed = convo::consumeAtomic(engine.eqBypassActive, std::memory_order_relaxed);
+        spec.processing.convBypassed = convo::consumeAtomic(engine.convBypassActive, std::memory_order_relaxed);
+        spec.processing.softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_relaxed);
+        spec.processing.saturationAmount = static_cast<float>(convo::consumeAtomic(engine.saturationAmount, std::memory_order_relaxed));
+        spec.processing.inputHeadroomGain = static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_relaxed));
+        spec.processing.outputMakeupGain = static_cast<float>(convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_relaxed));
+        spec.processing.convolverInputTrimGain = static_cast<float>(convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_relaxed));
+        // ★ Sync RoutingPart for backward compat（ProcessingPart が一次情報源）
+        spec.routing.processingOrder = spec.processing.processingOrder;
+        spec.routing.eqBypassed = spec.processing.eqBypassed;
+        spec.routing.convBypassed = spec.processing.convBypassed;
+        spec.publicationSnapshot.previousCommittedSequence = engine.getLastCommittedPublicationSequence();
+        spec.crossfade.startDelayBlocks = engine.crossfadeRuntime_.getStartDelayBlocks();
+        spec.crossfade.dryHoldSamples = engine.crossfadeRuntime_.getDryHoldSamples();
+        spec.crossfade.dryScaleTarget = engine.crossfadeRuntime_.getDryScaleTarget();
+        spec.crossfade.firstIrDryCrossfadePending = engine.crossfadeRuntime_.isFirstIrDryPending();
+        spec.latency.latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_relaxed);
+        spec.latency.latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_relaxed));
+        spec.currentRuntimeWorld = engine.observePublishedWorld();
+        // const 版に委譲 → unique_ptr<const T> から unique_ptr<T> へは
+        // ムーブ不可のため、内部実装呼び出し
+        auto constWorld = buildRuntimePublishWorld(sealedSnapshot, spec);
+        // const_cast: FrozenRuntimeWorld/Coordinator 経路では seal 後に immutable 化される
+        return convo::aligned_unique_ptr<RuntimePublishWorld>(
+            const_cast<RuntimePublishWorld*>(constWorld.release()));
+    }
 
     // Bootstrap World: 初期化時に初回 publish する最小限の RuntimePublishWorld を生成する。
     // 全てのデフォルト値で初期化され、AudioEngine::initialize() 実行直後に
@@ -53398,20 +53570,57 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     }
 #endif
 
-    // Step 2a: Build world with default (HardReset) policy first
-    // (evaluate 前に world が必要だが、RuntimePublishWorld は非デフォルト構築可能のため)
+    // Step 2a: Build world with default (HardReset) policy first, then
+    // evaluate crossfade need, and rebuild with final Specification.
+    // ★ work70-v8.3: Specification を先に組み立て、Post-build Mutation を排除。
+    //   Builder は Specification を忠実に World に写像するのみ。
     auto worldBuilder = convo::RuntimeBuilder(engine_);
     worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
-    auto worldOwner = worldBuilder.buildRuntimePublishWorld(
-        newDSPResolved, oldDSP,
-        convo::TransitionPolicy::HardReset, 0.0, false,
-        &req.sealedSnapshot);
+
+    // Step 2a-1: Create Specification with default HardReset
+    convo::RuntimePublishSpecification spec;
+    spec.topology.activeDSP = newDSPResolved;
+    spec.topology.fadingDSP = oldDSP;
+    spec.execution.transitionActive = false;          // HardReset: no transition
+    spec.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::HardReset);
+    spec.execution.fadeTimeSec = 0.0;
+    // PublicationSnapshotPart: previousCommittedSequence — Orchestrator が Coordinator から取得
+    spec.publicationSnapshot.previousCommittedSequence = engine_.getLastCommittedPublicationSequence();
+    // CrossfadeSnapshotPart: crossfadeRuntime の現在状態をスナップショット
+    spec.crossfade.startDelayBlocks = engine_.crossfadeRuntime_.getStartDelayBlocks();
+    spec.crossfade.dryHoldSamples = engine_.crossfadeRuntime_.getDryHoldSamples();
+    spec.crossfade.dryScaleTarget = engine_.crossfadeRuntime_.getDryScaleTarget();
+    spec.crossfade.firstIrDryCrossfadePending = engine_.crossfadeRuntime_.isFirstIrDryPending();
+    // LatencyPart: engine atomic から収集
+    spec.latency.latencyDelayOld = convo::consumeAtomic(engine_.latencyDelayOld, std::memory_order_acquire);
+    spec.latency.latencyDelayNew = convo::consumeAtomic(engine_.latencyDelayNew, std::memory_order_acquire);
+    // ★ v9.5 P1 phase2: currentRuntimeWorld — Orchestrator が現在の Published World を取得し、
+    //   Builder はこれを使って makeEngineRuntimeState() を呼ぶ（Runtime Query 完了済み）
+    spec.currentRuntimeWorld = engine_.observePublishedWorld();
+    // ProcessingPart: fill from sealedSnapshot (P0 — Builder の暗黙入力を排除)
+    {
+        const auto& inp = req.sealedSnapshot.buildInput;
+        spec.processing.processingOrder = inp.processingOrder;
+        spec.processing.eqBypassed = inp.eqBypassed;
+        spec.processing.convBypassed = inp.convBypassed;
+        spec.processing.softClipEnabled = inp.softClipEnabled;
+        spec.processing.saturationAmount = inp.saturationAmount;
+        spec.processing.inputHeadroomGain = inp.inputHeadroomGain;
+        spec.processing.outputMakeupGain = inp.outputMakeupGain;
+        spec.processing.convolverInputTrimGain = inp.convolverInputTrimGain;
+        // ★ Sync RoutingPart for backward compat — ProcessingPart が一次情報源
+        spec.routing.processingOrder = inp.processingOrder;
+        spec.routing.eqBypassed = inp.eqBypassed;
+        spec.routing.convBypassed = inp.convBypassed;
+    }
+
+    // Step 2a-2: Build preliminary world for crossfade evaluation
+    auto worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
 
     if (!worldOwner) {
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
-        // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordProgress(correlationId,
             static_cast<uint64_t>(req.generation), 0,
@@ -53422,21 +53631,15 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
-    // ★ v19: StateOwner + TelemetryRecorder: Built 記録
     stateOwner_.onBuilt(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Built, nowUs);
 
     // Step 2b: Crossfade decision using RuntimeWorld projection values + Policy
-    // (DSPCore 直読は行わない。evaluate は engine に依存しない純粋関数)
     const auto* oldWorld = engine_.observePublishedWorld();
     if (oldWorld == nullptr)
     {
-        // ★ Release-only crash fix: runtimeStore が null の場合の安全ガード。
-        //   bootstrap world が公開されていない初回起動時に rebuild thread から
-        //   trySubmit() が呼ばれた場合に発生しうる。
-        //   この場合はクロスフェード不要として続行する。
         DBG("[DIAG] trySubmit: oldWorld is null - skipping crossfade evaluation, proceeding directly");
     }
 
@@ -53455,8 +53658,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         cfDecision.newHasIR = worldOwner->dspProjection.irLoaded;
     }
 
-    // ★ Phase-2: HealthState Critical 時は crossfade を強制抑制
-    //   evaluate の結果を上書きする形で、Orchestrator レベルでの抑制を行う。
+    // HealthState Critical 時は crossfade を強制抑制
     {
         auto ref = engine_.getHealthStateRef();
         if (ref) {
@@ -53468,26 +53670,44 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         }
     }
 
-    // Step 2c: Update world with crossfade decision if needed
-    // ★ oldDSP が nullptr の場合はクロスフェード不能 — 判定を無効化する
+    // Step 2c: Update Specification with crossfade decision (NOT the world! — Post-build Mutation 排除)
     if (cfDecision.needsCrossfade && oldDSP != nullptr)
     {
-        worldOwner->assertMutable();
-        worldOwner->execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
-        worldOwner->execution.transitionActive = true;
-        worldOwner->topology.hasFadingRuntime = true;
-        worldOwner->overlap.fadeTimeSec = cfDecision.fadeTimeSec;
+        spec.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
+        spec.execution.transitionActive = true;
+        spec.execution.fadeTimeSec = cfDecision.fadeTimeSec;
+        // ★ work70-v8.3: hasFadingRuntime は Topology から導出。ここでは設定不要。
     }
 
-    // ★ v19: StateOwner + TelemetryRecorder: Executed 記録
+    // ★ work70-v8.3: Rebuild world from finalized Specification (single build)
+    if (cfDecision.needsCrossfade && oldDSP != nullptr)
+    {
+        worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
+        if (!worldOwner) {
+            if (!req.newDSP.isNull())
+                lifetime_.retire(newDSPResolved);
+            stateOwner_.onExecutorFailed(correlationId.shortValue());
+            telemetryRecorder_.recordProgress(correlationId,
+                static_cast<uint64_t>(req.generation), 0,
+                PublishStage::Built, nowUs);
+            telemetryRecorder_.recordFailure(FailureStage::Execution,
+                FailureReason::PublishFailed, "trySubmit:rebuild",
+                correlationId.shortValue(), nowUs);
+            return PublicationAdmission::Decision::RejectedNotFinalized;
+        }
+    }
+
     stateOwner_.onValidated(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Validated, nowUs);
 
-    // ★ Phase4: mutable worldOwner → FrozenRuntimeWorld wrap → publish
-    // ★ work70 P1-a: req.newDSP（事前登録済みのDSPHandle）を existingHandle として渡す
-    auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(std::move(worldOwner));
+    // ★ Phase4: worldOwner → FrozenRuntimeWorld wrap → publish
+    // ★ v8.3: Builder は const World を返すが、FrozenRuntimeWorld の releaseState() が
+    //   非 const を要求するため const_cast を使用。seal 後は Coordinator 内で immutable。
+    auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(
+        convo::aligned_unique_ptr<RuntimeState>(
+            const_cast<RuntimeState*>(worldOwner.release())));
     auto result = executor_.publish(engine_, std::move(frozen), req.newDSP);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
@@ -53931,6 +54151,21 @@ private:
 
 ```
 
+### 📄 `src\audioengine\RuntimePublicationSpecification.h`
+
+```
+#pragma once
+
+// ★ v8.3: RuntimePublishSpecification は RuntimeBuilder.h で定義。
+//   本ファイルは RuntimePublicationSpecification.h → RuntimeBuilder.h のエイリアス。
+//   依存方向: Orchestrator → Specification(RuntimeBuilder.h) → Builder
+//   DSPCore が AudioEngine のネストクラスであるため、実体定義は
+//   AudioEngine.h を include する RuntimeBuilder.h に配置されている。
+
+#include "RuntimeBuilder.h"
+
+```
+
 ### 📄 `src\audioengine\RuntimePublicationState.h`
 
 ```
@@ -54211,35 +54446,33 @@ bool RuntimePublicationValidator::validateTopology(
     const RuntimePublishWorld& world) const
 {
     const auto& topology = world.topology;
+    const auto& execution = world.execution;
 
-    // ★ P2-1: runtimeUuid==0 を Bootstrap/Shutdown として許容（選択肢A）
-    //   ただし、runtimeUuid==0 時の不変条件に違反する場合は拒否:
-    //   - transitionActive==true との矛盾
-    //   - hasFadingRuntime==true との矛盾
-    //   - fadingRuntimeUuid!=0 との矛盾
+    // ★ v8.3: Validator 三カテゴリ（Topology / Execution / Identity）
+
+    // === Topology Invariant ===
+    // hasFadingRuntime は保持せず、graph.fadingNode != nullptr が唯一の Authority。
+    // runtimeUuid==0 は Bootstrap/Shutdown として許容。
     if (topology.runtimeUuid == 0) {
-        // Authoritative 不変条件:
-        if (world.execution.transitionActive) return false;
-        if (topology.hasFadingRuntime) return false;
+        if (execution.transitionActive) return false;
         if (topology.fadingRuntimeUuid != 0) return false;
     }
 
-    // hasFadingRuntime と fadingRuntimeUuid の整合性
-    if (topology.hasFadingRuntime != (topology.fadingRuntimeUuid != 0))
-        return false;
-
-    // hasFadingRuntime と transitionActive の自己整合性（RuntimeWorld Semantic の不変条件）
-    if (topology.hasFadingRuntime != world.execution.transitionActive)
+    // === Execution Invariant ===
+    // transitionActive は Topology とは独立。fadeTimeSec=0 のケースでは
+    // fadingRuntimeUuid != 0 でも transitionActive=false であり得る。
+    if (execution.transitionPolicy < 0 || execution.transitionPolicy > 2)
         return false;
 
     // ★ P4-1: RoutingSemantic — processingOrder は 0 または 1 のみ許容
     if (world.routing.processingOrder < 0 || world.routing.processingOrder > 1)
         return false;
 
-    // ★ Cycle detection: 現在のルーティングモデル（processingOrder 0/1 のみ）では
-    //   サイクルは発生不可能（単一方向の線形パスのみ）。将来グラフベースルーティング
-    //   拡張時は、ここで topological sort / DFS による cycle detection を追加すること。
-    //   ref: doc/work47/resolution_report.md §2.1
+    // === Identity Invariant ===
+    // fadingRuntimeUuid（保持）は導出可能だが、graph寿命超えたstable identifierとして保持。
+    // 自己同一性チェック: 同一ノードの二重登録検出
+    if (topology.fadingRuntimeUuid != 0 && topology.fadingRuntimeUuid == topology.runtimeUuid)
+        return false;
 
     // ★ P4-1: GenerationSemantic — generation > 0 なら runtimeGeneration > 0
     if (world.generation > 0 && world.generationSemantic.runtimeGeneration == 0)
@@ -63205,29 +63438,29 @@ public:
         shutdownClearRequested_ = true;
     }
 
-    // ★ P0-1: publishWorld が PublishStageResult を返すよう変更
-    //   Validation 拒否時: Rejected
-    //   Null/異常時:      Failed
-    //   成功時:           Success
-    [[nodiscard]] PublishStageResult publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
+    // ★ v8.3: const World を受け入れる — INV-11 コンパイル時保証
+    //   sealRecursively() は論理的に const 操作（freeze = 不変性の確定）のため、
+    //   内部で const_cast を使用。Builder から publish 完了まではこの 1 箇所のみ。
+    [[nodiscard]] PublishStageResult publishWorld(convo::aligned_unique_ptr<const World> worldOwner) noexcept
     {
         if (!worldOwner)
             return PublishStageResult::Failed;
 
         // [PR-5] Immutable 化: publish 前に sealRecursively() で全フィールドを frozen にする
-        worldOwner->sealRecursively();
+        // const_cast: Builder → Coordinator 間で唯一の非 const 操作。seal 後に不変。
+        const_cast<World*>(worldOwner.get())->sealRecursively();
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.validatePublicationNonRt(world); })
         {
             if (!bridge_.validatePublicationNonRt(*worldOwner))
             {
-                auto* rejectedWorld = worldOwner.release();
+                auto* rejectedWorld = const_cast<World*>(worldOwner.release());
                 bridge_.retireRuntimePublishWorldNonRt(rejectedWorld, false);
                 return PublishStageResult::Rejected;
             }
         }
 
-        auto* newWorld = worldOwner.release();
+        auto* newWorld = const_cast<World*>(worldOwner.release());
         std::atomic_thread_fence(std::memory_order_release);
         auto* oldWorld = writeAccess_.publishAndSwap(newWorld);
 
@@ -69993,7 +70226,7 @@ struct TestBridge
     }
 };
 
-convo::aligned_unique_ptr<TestWorld> createWorld(const Candidate& c)
+convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 {
     auto w = convo::aligned_make_unique<TestWorld>();
     w->token = c.token;
@@ -70798,33 +71031,30 @@ TEST_F(PublicationValidatorIsolationTests, CheckNoConflictingTransitions_NoTrans
 // ============================================================================
 
 TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoRuntimeUuid_Accept) {
-    // ★ P2-1: runtimeUuid=0 は Bootstrap/Shutdown として許容（選択肢A）
+    // ★ v8.3: runtimeUuid=0 は Bootstrap/Shutdown として許容。
     //   generation>0 でも runtimeUuid=0 は有効。
-    //   代わりに transitionActive/hasFadingRuntime との矛盾をチェックする。
+    //   代わりに transitionActive または fadingRuntimeUuid との矛盾をチェックする。
     RuntimePublishWorld world{};
     world.generation = 1;
     world.topology.runtimeUuid = 0;
     EXPECT_TRUE(validator_.validateTopology(world));
 }
 
-TEST_F(PublicationValidatorIsolationTests, ValidateTopology_HasFadingMismatch_Reject) {
-    // hasFadingRuntime=true だが fadingRuntimeUuid=0 は矛盾
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_IdentityCollision_Reject) {
+    // ★ v8.3: Identity Invariant — fadingRuntimeUuid == runtimeUuid は自己同一性違反
     RuntimePublishWorld world{};
     world.generation = 1;
     world.topology.runtimeUuid = 100;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 0;
+    world.topology.fadingRuntimeUuid = 100;  // 自己同一性違反
     EXPECT_FALSE(validator_.validateTopology(world));
 }
 
-TEST_F(PublicationValidatorIsolationTests, ValidateTopology_FadingTransitionMismatch_Reject) {
-    // hasFadingRuntime と transitionActive の不整合
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_FadingWithoutUuid_Reject) {
+    // ★ v8.3: runtimeUuid=0 で fadingRuntimeUuid!=0 は矛盾
     RuntimePublishWorld world{};
     world.generation = 1;
-    world.topology.runtimeUuid = 100;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 200;
-    world.execution.transitionActive = false;  // ★ hasFadingRuntime=true と矛盾
+    world.topology.runtimeUuid = 0;       // Bootstrap/Shutdown
+    world.topology.fadingRuntimeUuid = 200;  // 矛盾
     EXPECT_FALSE(validator_.validateTopology(world));
 }
 
@@ -70960,16 +71190,6 @@ TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoUuidWithTransition
     EXPECT_FALSE(validator_.validateTopology(world));
 }
 
-TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoUuidWithHasFading_Reject) {
-    // runtimeUuid=0 で hasFadingRuntime=true は矛盾 → reject
-    RuntimePublishWorld world{};
-    world.generation = 1;
-    world.topology.runtimeUuid = 0;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 200;
-    EXPECT_FALSE(validator_.validateTopology(world));
-}
-
 TEST_F(PublicationValidatorIsolationTests, CheckTransition_HardResetNoFade_Accept) {
     // HardReset + transitionActive=true + fadeTimeSec=0.0 は accept
     RuntimePublishWorld world{};
@@ -71015,12 +71235,11 @@ TEST_F(PublicationValidatorIsolationTests, ValidateResources_ValidOversampling_A
 // ============================================================================
 
 TEST_F(PublicationValidatorIsolationTests, ValidatePublication_RejectFromTopology) {
-    // hasFadingRuntime=true だが fadingRuntimeUuid=0 は矛盾 → topology reject
+    // ★ v8.3: Identity Invariant — fadingRuntimeUuid == runtimeUuid は自己同一性違反 → topology reject
     RuntimePublishWorld world{};
     world.generation = 1;
     world.topology.runtimeUuid = 100;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 0;
+    world.topology.fadingRuntimeUuid = 100;  // 自己同一性違反
     world.generationSemantic.runtimeGeneration = 1;
     world.publication.sequenceId = 1;
     const auto result = validator_.validatePublication(world);

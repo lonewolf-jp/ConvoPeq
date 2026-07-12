@@ -934,10 +934,29 @@ void AudioEngine::timerCallback()
         DSPLifetimeManager lm(*this);
         const uint64_t retireGen = lm.retiringGeneration();
 
+        // ★ v8.3 P-DIAG: TrackedMemoryStatistics — アクティブ DSPCore のメモリ内訳
+        double dspTrackedTotalMB = 0.0;
+        double dspOversamplingMB = 0.0;
+        double dspEqMB = 0.0;
+        double dspAlignedMB = 0.0;
+        double dspLatencyMB = 0.0;
+        {
+            auto* activeDSP = getActiveRuntimeDSP();
+            if (activeDSP != nullptr)
+            {
+                auto stats = activeDSP->collectTrackedMemoryStatistics();
+                dspTrackedTotalMB = stats.totalTracked() / (1024.0 * 1024.0);
+                dspOversamplingMB = stats.oversampling / (1024.0 * 1024.0);
+                dspEqMB = stats.eqProcessor / (1024.0 * 1024.0);
+                dspAlignedMB = stats.alignedBuffers / (1024.0 * 1024.0);
+                dspLatencyMB = stats.latencyBuffers / (1024.0 * 1024.0);
+            }
+        }
+
         juce::Logger::writeToLog(juce::String::formatted(
             "[MEM_SNAP] PUBLISH gen=%llu | NUC: live=%u alloc=%.0fMB peak=%.0fMB tA=%.0fGB tF=%.0fGB lost=%u zero=%u(d=%+d) | "
             "DC: live=%u SC: live=%u | Ret: pend=%u trBytes=%.1fMB tr=%u/%u(%.0f%%) ovf=%llu rec=%llu gen=%llu | "
-            "Priv=%lluMB WS=%lluMB | Other=%.0fMB",
+            "Priv=%lluMB WS=%lluMB | Other=%.0fMB | TRK: total=%.1f OS=%.1f EQ=%.1f AL=%.1f LT=%.1fMB",
             (unsigned long long)gen, (unsigned)nucLive,
             nucBytes/(1024.0*1024.0), nucPeak/(1024.0*1024.0),
             nucTotalA/(1024.0*1024.0*1024.0), nucTotalF/(1024.0*1024.0*1024.0),
@@ -948,7 +967,8 @@ void AudioEngine::timerCallback()
             (unsigned long long)overflow, (unsigned long long)reclaim,
             (unsigned long long)retireGen,
             (unsigned long long)osMem.privateUsageMB, (unsigned long long)osMem.workingSetMB,
-            otherPrivate/(1024.0*1024.0)));
+            otherPrivate/(1024.0*1024.0),
+            dspTrackedTotalMB, dspOversamplingMB, dspEqMB, dspAlignedMB, dspLatencyMB));
     }
 #endif
 

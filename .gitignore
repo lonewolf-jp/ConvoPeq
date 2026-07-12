@@ -63,6 +63,7 @@ CLAUDE.md
 .github/context-mode/
 .venv/
 doc/BIGDATA/
+.browser4-cli/
 
 # Coverage reports
 coverage/

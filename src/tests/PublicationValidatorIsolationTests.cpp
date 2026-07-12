@@ -143,33 +143,30 @@ TEST_F(PublicationValidatorIsolationTests, CheckNoConflictingTransitions_NoTrans
 // ============================================================================
 
 TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoRuntimeUuid_Accept) {
-    // ★ P2-1: runtimeUuid=0 は Bootstrap/Shutdown として許容（選択肢A）
+    // ★ v8.3: runtimeUuid=0 は Bootstrap/Shutdown として許容。
     //   generation>0 でも runtimeUuid=0 は有効。
-    //   代わりに transitionActive/hasFadingRuntime との矛盾をチェックする。
+    //   代わりに transitionActive または fadingRuntimeUuid との矛盾をチェックする。
     RuntimePublishWorld world{};
     world.generation = 1;
     world.topology.runtimeUuid = 0;
     EXPECT_TRUE(validator_.validateTopology(world));
 }
 
-TEST_F(PublicationValidatorIsolationTests, ValidateTopology_HasFadingMismatch_Reject) {
-    // hasFadingRuntime=true だが fadingRuntimeUuid=0 は矛盾
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_IdentityCollision_Reject) {
+    // ★ v8.3: Identity Invariant — fadingRuntimeUuid == runtimeUuid は自己同一性違反
     RuntimePublishWorld world{};
     world.generation = 1;
     world.topology.runtimeUuid = 100;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 0;
+    world.topology.fadingRuntimeUuid = 100;  // 自己同一性違反
     EXPECT_FALSE(validator_.validateTopology(world));
 }
 
-TEST_F(PublicationValidatorIsolationTests, ValidateTopology_FadingTransitionMismatch_Reject) {
-    // hasFadingRuntime と transitionActive の不整合
+TEST_F(PublicationValidatorIsolationTests, ValidateTopology_FadingWithoutUuid_Reject) {
+    // ★ v8.3: runtimeUuid=0 で fadingRuntimeUuid!=0 は矛盾
     RuntimePublishWorld world{};
     world.generation = 1;
-    world.topology.runtimeUuid = 100;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 200;
-    world.execution.transitionActive = false;  // ★ hasFadingRuntime=true と矛盾
+    world.topology.runtimeUuid = 0;       // Bootstrap/Shutdown
+    world.topology.fadingRuntimeUuid = 200;  // 矛盾
     EXPECT_FALSE(validator_.validateTopology(world));
 }
 
@@ -305,16 +302,6 @@ TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoUuidWithTransition
     EXPECT_FALSE(validator_.validateTopology(world));
 }
 
-TEST_F(PublicationValidatorIsolationTests, ValidateTopology_NoUuidWithHasFading_Reject) {
-    // runtimeUuid=0 で hasFadingRuntime=true は矛盾 → reject
-    RuntimePublishWorld world{};
-    world.generation = 1;
-    world.topology.runtimeUuid = 0;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 200;
-    EXPECT_FALSE(validator_.validateTopology(world));
-}
-
 TEST_F(PublicationValidatorIsolationTests, CheckTransition_HardResetNoFade_Accept) {
     // HardReset + transitionActive=true + fadeTimeSec=0.0 は accept
     RuntimePublishWorld world{};
@@ -360,12 +347,11 @@ TEST_F(PublicationValidatorIsolationTests, ValidateResources_ValidOversampling_A
 // ============================================================================
 
 TEST_F(PublicationValidatorIsolationTests, ValidatePublication_RejectFromTopology) {
-    // hasFadingRuntime=true だが fadingRuntimeUuid=0 は矛盾 → topology reject
+    // ★ v8.3: Identity Invariant — fadingRuntimeUuid == runtimeUuid は自己同一性違反 → topology reject
     RuntimePublishWorld world{};
     world.generation = 1;
     world.topology.runtimeUuid = 100;
-    world.topology.hasFadingRuntime = true;
-    world.topology.fadingRuntimeUuid = 0;
+    world.topology.fadingRuntimeUuid = 100;  // 自己同一性違反
     world.generationSemantic.runtimeGeneration = 1;
     world.publication.sequenceId = 1;
     const auto result = validator_.validatePublication(world);

@@ -8,26 +8,33 @@
 #include <utility>
 
 #include <mkl.h>
+#include "DiagnosticsConfig.h"
 
 namespace convo {
 
+// ★ v8.3: DIAG_MKL_MALLOC/DIAG_MKL_FREE 経由でメモリ追跡を有効化
+//   CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1 時に convo::diag::diagMklMalloc が使用される。
+//   =0 時は従来通り生の mkl_malloc が呼ばれる（オーバーヘッドゼロ）。
 inline void* aligned_malloc(size_t size, size_t alignment) {
-    void* ptr = mkl_malloc(size, (int)alignment);
+    void* ptr = DIAG_MKL_MALLOC(size, (int)alignment);
     if (ptr == nullptr) {
         throw std::bad_alloc();
     }
     return ptr;
 }
 
-// ★ [P1-3] 非スロー版: 失敗時は nullptr を返す（RT ファイル用ではない — mkl_malloc は HeapAlloc を呼ぶ）
-//   命名: _nothrow (例外を投げない契約) — "_rt" は「RT-safe」と誤解されるため不使用
+// ★ [P1-3] 非スロー版: 失敗時は nullptr を返す
+//   命名: _nothrow (例外を投げない契約)
 inline void* aligned_malloc_nothrow(size_t size, size_t alignment) noexcept
 {
-    return mkl_malloc(size, (int)alignment);
+    return DIAG_MKL_MALLOC(size, (int)alignment);
 }
 
-inline void aligned_free(void* ptr) {
+inline void aligned_free(void* ptr) noexcept {
     if (ptr != nullptr) {
+        // ★ v8.3: 解放側は mkl_free 直接呼び出し（DIAG_MKL_FREE は size 引数が必要）。
+        //   allocation tracking は DIAG_MKL_MALLOC 側で行うため、解放トラッキングは
+        //   省略する（allocatedBytes は aligned 領域で単調増加傾向を示す）。
         mkl_free(ptr);
     }
 }
@@ -91,12 +98,21 @@ using ScopedAlignedArray = ScopedAlignedPtr<T>;
 template <typename T>
 struct AlignedObjectDeleter
 {
+    AlignedObjectDeleter() noexcept = default;
+
+    // Converting constructor: enables unique_ptr<T> → unique_ptr<const T> move
+    // Required for aligned_unique_ptr<RuntimePublishWorld> → aligned_unique_ptr<const RuntimePublishWorld>
+    template <typename U>
+    AlignedObjectDeleter(AlignedObjectDeleter<U>&&) noexcept {}
+
     void operator()(T* ptr) const noexcept
     {
         if (ptr == nullptr)
             return;
         ptr->~T();
-        aligned_free(ptr);
+        // const_cast: icx requires explicit conversion from const T* to void*
+        // Actual deallocation (mkl_free) does not modify the pointer.
+        convo::aligned_free(const_cast<std::remove_const_t<T>*>(ptr));
     }
 };
 

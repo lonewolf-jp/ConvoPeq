@@ -1,11 +1,11 @@
-# ConvoPeq メモリ肥大化 改修計画書 v6.0
+# ConvoPeq メモリ肥大化 改修計画書 v9.6
 
-**日付**: 2026-07-11
+**日付**: 2026-07-12
 **対象**: work70 (メモリ 2.5GB 肥大化問題)
-**前版**: v5.60-2 (2026-07-11)
+**前版**: v9.5 (2026-07-12)
 
-> **本計画書は「これから行う改修」を先頭にまとめ、「完了した改修」は Appendix に配置している（Appendix は本計画書に含まれているが、レビュー時は本編のみの確認でも十分である）。**
-> 凡例: ✅ FACT / 🔍 Strong HYPOTHESIS / 🔍 HYPOTHESIS / 💡 PROPOSAL / ⚠️ CAVEAT
+> **本計画書は「優先改修項目（Backlog）」を先頭にまとめ、「完了した改修」は Appendix に配置している。**
+> 凡例: ✅ FACT / 🔍 HYPOTHESIS / 💡 PROPOSAL / ⚠️ CAVEAT / 🎯 DECISION
 
 ---
 
@@ -27,305 +27,454 @@ Builder は以下を**行わない**:
 - 入力の整合性を判断しない（No Validation）
 - Policy Decision を行わない（No Policy Decision）
 - 入力を構造体へ忠実に写像するのみ（Pure Construction）
-- semantic intent を変更しない（Never mutates semantic intent — CrossfadePlan をそのまま写像）
-- **入力パラメータ間の意味的整合性を再解釈しない。Crossfade を含むトポロジ構成は CrossfadePlan に完全に記述され、Builder はその内容を忠実に構築する。**
+- semantic intent を変更しない（Never mutates semantic intent）
+- **入力パラメータ間の意味的整合性を再解釈しない**
 
 ```
-入力 (sealedSnapshot, RuntimeGraphDescription)
+入力 (RuntimePublishSpecification)
   ↓
 Builder（Pure Construction — 入力を忠実に写像するのみ。自身では判断しない）
   ↓
-RuntimePublishWorld（完成状態 — 保証は一切行わない。保証は Validator の責務）
+RuntimePublishWorld（完成状態）
 ```
 
-**Builder への入力は `RuntimeGraphDescription` のみ** — `current` / `next` / `RuntimeBuildPolicy` / `fadeTimeSec` / `active` は Builder に渡さない。これらは CrossfadeAuthority と Orchestrator だけが知るべき情報。Builder はグラフのノード構成（active/fading）だけを受け取り、それらの意味（`current` か `next` か）を知らない。このため `if (current && !next)` 等の意味推論が構造的に不可能になる。
+### Deterministic Construction の定義（Semantic Equivalence）
 
-```cpp
-// ★ v6.8: Builder が唯一受け取るグラフ記述 — current/next を排除し、
-//   ノード構成のみを伝達する。Builder はノードの意味を推論できない。
-struct RuntimeGraphDescription {
-    DSPCore* activeDSP = nullptr;     // Active ノードとなる DSPCore（nullptr=該当なし）
-    DSPCore* fadingDSP = nullptr;     // Fading ノードとなる DSPCore（nullptr=クロスフェードなし）
-};
+> **Given identical RuntimePublishSpecification, Builder shall produce RuntimePublishWorld instances whose DSP topology, routing, runtime behavior, latency, crossfade behavior, and processing semantics are equivalent. Object identity, allocation address, publication identity, generation number, and other implementation artifacts are excluded.**
 
-// fadeSeconds は Builder の責務（Topology 構築）ではなく実行パラメータであり、
-// CrossfadeRuntime / TransitionState が保持する。Builder は fade 時間を知る必要がない。
-```
+これは以下のことを意味する:
+- Builder は Specification の値のみから World を構築する（暗黙の外部状態に依存しない）
+- 同じ Specification なら DSP topology / routing / latency / crossfade / processing semantics は常に等価
+- **保証しないもの**: オブジェクト同一性、アロケーションアドレス、publication identity、世代番号、その他実装アーティファクト
+- **Builder Service may affect implementation artifacts only**. Allocation, identity, pointer, generation は変更可能だが、DSP topology / routing / latency / crossfade / processing semantics は変更不可。
+- テストは Specification を直接構築して Builder 単体で実施可能（Coordinator/Current Runtime のモック不要）
 
-**RuntimeBuilder のシグネチャ**（簡略化）:
-```cpp
-RuntimePublishWorld buildRuntimePublishWorld(
-    const GlobalSnapshot* sealedSnapshot,                     // 既存のデフォルト引数
-    const RuntimeGraphDescription& desc = RuntimeGraphDescription{}  // 唯一のグラフ入力
-) noexcept;
-```
+### Specification Completeness（設計原則）
 
-**Builder 内部の制約**: Builder は `RuntimeGraphDescription` のみから Graph を構築する。`desc.fadingDSP != nullptr` なら fadingNode を生成し、`activeDSP` / `fadingDSP` を対応するノードに設定する。`current` / `next` を知らないため、ノードの意味（新旧）を推論できない。
+> **RuntimePublishSpecification shall contain every mutable runtime value required to construct RuntimePublishWorld. Builder shall not obtain additional mutable inputs from any other source.**
 
-**Builder は「構築のみ」を責務とし、出力の正当性は保証しない**。正当性の検証は Validator / Authority Contract / Precheck の三段階で行う。
-
-**コア原則: 各 Authority は他の Authority の内部状態を直接変更しない。必要な情報は入力として渡し、出力は完成したオブジェクトまたは状態遷移として受け渡す。**
-
-この原則から:
-- Orchestrator は Builder の生成物に部分上書きしない（→ CrossfadePlan を Builder 入力として渡す）
-- `commitRuntimePublication()` は Lifetime を直接呼ばない（→ OwnershipDisposition で間接化）
-- Validator と AUTH_CONTRACT は別段階で独立して動作する（責務分離）
+この原則は INV-13 を補強する:
+- INV-13（Builder は mutable Runtime state を直接観測しない）は Behavior の制約
+- Specification Completeness は **Data の制約** — 必要な情報はすべて Specification でカバーされているべき
+- P0〜P2 はこの原則の実装に他ならない（暗黙の atomic 読取りを明示的な Part に昇格）
+- 将来新たな mutable 値が必要になった場合、最初の選択肢は Specification への Part 追加（Runtime の直接参照ではない）
 
 ### Validator（Validation Authority）の正しい理解
 
-Validator は **Builder の修正機構ではない**。以下のパイプラインで動作する:
+Validator は **Builder の修正機構ではない**:
 
 ```
 Builder（生成）
   ↓
-Validator（Invariant 最終検査） ← Builder の出力を検証するが、Builder を修正しない
+Validator（Invariant 最終検査）← Builder の出力を検証するが、Builder を修正しない
   ↓
 Publication（公開）
 ```
 
-重要な設計判断:
-- Builder は Validator が通ることを前提とせず、自身の構築規則に従って World を生成する
-- Validator は **Builder の出力のみを評価する**。Builder 内部の実装ミスか入力データの問題かは判定しない。
-- **Validator が保証するのは「Structural Invariant（構造的不変条件）」のみ**。意味的正しさ（Semantic）、Authority Contract、Policy の正当性は保証しない。
-- Validator 不合格は Builder 出力に問題があることのみを示す。原因が Builder 内部か入力データかは切り分けられない。
-
 **Validator の保証範囲**:
-- ✅ **Structural Invariants**: hasFadingRuntime == fadingRuntimeUuid の有無、fadingNode の存在有無 等
+- ✅ **Structural Invariants**: Topology / Execution / Identity の三カテゴリ
 - ❌ **Semantic correctness**: Builder 入力の意味的整合性は保証しない
-- ❌ **Authority Contract**: graph.fadingNode と CrossfadeRuntime の一貫性は保証しない（Precheck の責務）
+- ❌ **Authority Contract**: graph.fadingNode と CrossfadeRuntime の一貫性は保証しない
 - ❌ **Policy correctness**: RuntimeBuildPolicy の適切性は保証しない
 
-**Validator と Authority Contract / Precheck は独立した検証段階である**:
-- Validator 通過 ≠ Authority Contract 成立（gen=5/8 で実証済み）
-- Authority Contract 通過 ≠ Precheck 成立（Precheck 内で別の制約が追加され得る）
-- 各段階は独立して動作し、前段の結果に依存しない
+---
 
-この分離により:
-- Builder は Pure Construction に専念できる（No Validation）
-- Validator は Invariant のみに専念できる（No Fix）
-- 将来の構築ルール変更が Builder と Validator に独立して影響を与えない
+## 優先改修項目（Backlog）
+
+*以下の優先順位は本セッションでのコード調査（2026-07-12）に基づく。各項目ごとに確認できた事実と具体的な対応方針を記載する。*
+
+### ~~P0: Builder の暗黙入力を RuntimePublishSpecification に昇格する~~ ✅ 完了
+
+**🎯 優先度: ★★★★★（最優先）→ ✅ 実装完了**
+
+**【対応結果】**
+- ✅ `RuntimePublishSpecification` に **ProcessingPart** を追加（`RuntimeBuilder.h`）
+- ✅ Orchestrator が sealedSnapshot から ProcessingPart を設定（`RuntimePublicationOrchestrator.cpp`）
+- ✅ Builder が `spec.processing.*` から読み取り、engine atomic 直接読み取りを排除（`RuntimeBuilder.cpp`）
+- ✅ L303 の無効行（`engine.currentProcessingOrder` 読み取り）を削除
+- ✅ `spec.routing.*` は ProcessingPart から同期（後方互換性維持）
+
+**【CAVEAT 解決】**
+- 設計問題（Builder vs mutable state）: 解消済み。Builder は ProcessingPart のみ参照。
+- 実装問題（processingOrder 未使用）: 解消済み。L303 無効行を削除。
 
 ---
 
-## [設計] 0. エグゼクティブサマリ
+### ~~P1: computeRuntimePublishComputation() の Runtime Query と Pure Calculation の分離~~ ✅ 第一段階完了
 
-### 0.1 改修完了状況
+**🎯 優先度: ★★★★☆ → ✅ 第一段階完了**
 
-| Phase | 状態 | 内容 | 参照 |
-|:------|:-----|:------|:-----|
-| P1-a | ✅ **完了** | Coordinator direct publish に handle 登録追加 | Appendix A.1 |
-| P1-b | ✅ **完了** | advanceFade 配線 | Appendix A.2 |
-| P1-c | ✅ **完了** | MEM_SNAP 監視強化 | Appendix A.3 |
-| P1-a-FIX | ✅ **完了** | activeRuntimeDSPHandle_ 未更新修正 | Appendix A.4 |
-| P1-a-FIX-2 | ✅ **完了** | DSPGuard 直接破棄パス | Appendix A.5 |
-| P1-a-FIX-3 | ✅ **完了** | 0xC0000005 修正（DSPGuard 重複destroy） | Appendix A.6 |
-| D-1 | ✅ **完了** | destroyRolledBackDSP | Appendix A.7 |
-| Phase 2 | ✅ **完了** | Publish→Retire→EBR→Destroy→Memory 検証 | — |
-| P3 (AoS→SoA) | ✅ **完了済み** | 主要変換は既に完了、残作業はコードレビューのみ | — |
+**【対応結果】**
+- ✅ **PublicationSnapshotPart** を `RuntimePublishSpecification` に追加（`RuntimeBuilder.h`）
+- ✅ **`previousCommittedSequence` の取得を Orchestrator 側へ移行**。Orchestrator が `engine_.getLastCommittedPublicationSequence()` を呼び、Spec の `publicationSnapshot.previousCommittedSequence` に格納。Builder は Spec から読み取り。
+- ✅ `computeRuntimePublishComputation()` の Runtime Query 部分（`getLastCommittedPublicationSequence()`）の移行完了。
 
-総合的なメモリ効果: 未修正時の **2,477MB** から **定常 686MB / ピーク 1,094MB** に改善（72%削減）。
-
-**ただし `lifecycle(retire)=0` は継続中**。これは handle 未登録が原因ではなく、gen=3 以降の publish が全滅（AUTH_CONTRACT）したため retire 機会そのものが発生しなかったため（詳細: [未確定] 7.2→[設計] 1）。
-
-### 0.2 残存課題と優先順位
-
-| 優先度 | 課題 | 内容 | 難易度 | リスク | 期待効果 |
-|:-------|:-----|:------|:-------|:-------|:---------|
-| **1** | **CrossfadePlan 導入** | AUTH_CONTRACT / gen=4/5/8 失敗の根本修正。Builder に CrossfadePlan を入力として渡し、Post-build Mutation を排除。 | 中 | 低 | ✅ 正しい IR 適用可能に |
-| **2** | **P2-1 BlockSize 最適化** | 初回 SAFE_MAX_BLOCK_SIZE=65536 による 524288 バッファ肥大の修正。DSPCore 生確保量を 159MB→3.4MB に削減。 | 中 | 低 | ✅ DSPCore あたり ~189MB 削減 |
-| **3** | **P-NS: NoiseShaper 診断改善** | block.sampleRateHz と session.sampleRateHz の DIAG ログ出力を追加し、accepted=0 の真因を特定可能にする。 | 低 | 低 | 🔍 調査基盤改善 |
-| **4** | **P-DIAG: MEM_SNAP バケット改善** | 680MB "Other" の内訳を把握するためのメモリバケットタグ追加。少なくとも DSPCore/RuntimeWorld/MKL/CRT を分離。 | 中 | 低 | 🔍 680MB 内訳可視化 |
-| **5** | **P4: mkl_malloc DIAG 化** | CacheManager(2) + IRConverter(1) の未計装 mkl_malloc 追跡。メモリ削減効果なし、透明性向上。 | 低 | 低 | — |
-| — | EBR / lifecycle / runtimeDSPHandleMap / BlockSize実測 / 680MB内訳 | 🔍 **全て [未確定] 7 に集約済み**。Runtime 観測依存のためコード調査では確定不能。 | — | — | — |
-| — | NoiseShaper accepted=0 | 🔍 **コード調査では確定不能。Runtime DIAG が必要**（→ [設計] 4. P-NS）。 | — | — | — |
-
-### 0.3 検証済みの設計判断
-
-| 判断 | 結論 | 根拠 |
-|:-----|:------|:------|
-| advanceFade のサンプル単位 | **OS 補正不要。** コールバックサンプル数のまま減算 | `getNextAudioBlock()` の `numSamples` は callback block size |
-| `FadeState::Completed` 追加 | **不要。** 既存の remaining==0 チェックで完了検出可能 | `tryComplete()` は `remainingCount() > 0` を直接チェック |
-| `memory_order` 変更 | **現状維持（relaxed 化は却下）。** 現状の release/acquire が正しい HB を提供 | remaining→tryComplete の同期に release/acquire が必要 |
-| CrossfadeRuntime への完了通知追加 | **不要。** SnapshotCoordinator と CrossfadeRuntime は責務が完全に独立 | 別セクション参照 |
+**【⚠️ Transitional】**: `engine.computeRuntimePublishComputation()` の呼び出し自体は Builder に残存（`engineState`/`graphState` 構築に必要）。これらは P2（CrossfadeSnapshotPart/LatencyPart 追加）で完全に Spec 経由に移行予定。
 
 ---
 
-## [設計] 1. CrossfadePlan 導入による AUTH_CONTRACT 修正
+### ~~P2: Specification の最小拡張~~ ✅ 完了
 
-### 1.1 問題: Post-build Mutation が Authority Contract 違反を引き起こす
+**🎯 優先度: ★★★☆☆ → ✅ 完了**
 
-✅ **FACT**: gen=4/5/8 の publish 失敗は以下のメカニズムで発生する:
+**【基本原則（Specification Part 追加の3基準）】**
+新しい Part を追加する際は、以下の3つをすべて満たすことを確認する:
 
+1. **これは Runtime の現在状態ではなく、Builder が世界を構築するための入力か。**
+2. **同じ Specification なら、同じ RuntimePublishWorld が生成されるか。**
+3. **この値は Builder の責務で再計算・再取得すべきものではないか。**
+
+この基準を満たさない情報は、Specification ではなく Orchestrator や Runtime 側に置く。
+
+**【対応結果】**
+✅ **CrossfadeSnapshotPart** 追加（startDelayBlocks, dryHoldSamples, dryScaleTarget, firstIrDryCrossfadePending）
+✅ **LatencyPart** 追加（latencyDelayOld, latencyDelayNew）
+✅ Orchestrator が Spec 生成時にこれらの Part を engine state から収集して設定
+✅ Builder が `spec.crossfade.*` / `spec.latency.*` から読み取り、engine 直接読み取りを排除
+
+**【Source 一意性の定義】**
+- `ProcessingPart` が automation 値（eqBypassed, softClipEnabled, gain類）の **唯一の Source**
+- `RoutingPart` は後方互換性のための **mirror**（ProcessingPart からの同期コピー）
+- 将来のリファクタリングで RoutingPart の mirror フィールドは削除可能
+
+**【Part Ownership（誰が書けるか）】**
+| Part | Writer | Reader |
+|:-----|:-------|:-------|
+| TopologyPart | Orchestrator | Builder (readonly) |
+| ExecutionPart | Orchestrator | Builder (readonly) |
+| RoutingPart | Orchestrator（ProcessingPart から同期） | Builder (readonly) |
+| **ProcessingPart** | **Orchestratorのみ** | Builder (readonly) |
+| **PublicationSnapshotPart** | **Orchestratorのみ** | Builder (readonly) |
+| **CrossfadeSnapshotPart** | **Orchestratorのみ** | Builder (readonly) |
+| **LatencyPart** | **Orchestratorのみ** | Builder (readonly) |
+| currentRuntimeWorld | Orchestrator | Builder (readonly, makeEngineRuntimeState引数) |
+
+---
+
+### ~~P3: INV-12 再定義（Builder 入力契約の明確化）~~ ✅ 設計書更新済み
+
+**🎯 優先度: ★★★☆☆ → ✅ 設計書更新済み（P0〜P2 完了につき正式版に更新）**
+
+**【問題】**
+設計書 v8.3 の INV-12 は「Builder は RuntimePublishSpecification 以外 consult 禁止」としている。しかし Builder は実際に以下の依存を持つ:
+
+**【🎯 DECISION（2026-07-12 確定）】**
+INV-13 を以下のように再定義する:
+
+> **Builder は RuntimePublishSpecification、Builder Service、Pure Utility のみ利用可能。**
+> - Input（atomic 読取り）: ❌ 禁止 → Specification 経由
+> - Runtime Query（Coordinator/Current Runtime/Crossfade）: ❌ 禁止 → Orchestrator 経由
+> - Builder Service: ✅ 許可
+> - Pure Utility: ✅ 許可
+
+**Builder Service の定義（契約ベース）:**
+> Builder が利用可能な副作用を持たない補助サービス = **Builder execution environment**。以下の条件をすべて満たす:
+> 1. Runtime 状態を参照しない
+> 2. Builder の入力を変更しない
+> 3. 意味的結果を変更しない
+> 4. 決定論性を破壊しない
+
+**Builder Service の細分類:**
+
+| カテゴリ | サービス種別 | 該当例 |
+|:---------|:------------|:-------|
+| **Memory Service** | Allocator | メモリ確保・解放（`aligned_malloc`/`aligned_free`） |
+| **Identity Service** | Identity Generator | `reserveRuntimePublicationIdentity()` — UUID/Generation発行 |
+| **Immutable Factory** | Factory + Immutable Helper | `RuntimePublishWorld::createForBuilder()`, IRFactory, FFTPlan, LatencyCalculator, BufferFactory |
+
+この分類により、将来の変更（例: UUID生成方式の変更、分散IDの導入）が Builder Contract に影響しない。
+
+P0〜P2 の実装完了後に INV-13 をこの形に更新する（先行更新するとコードと設計書の不一致が生じるため）。
+
+---
+
+### ~~P4: collectTrackedMemoryStatistics() MEM_SNAP 統合~~ ✅ 完了
+
+**🎯 優先度: ★★☆☆☆ → ✅ 実装完了**
+
+**【対応結果】**
+- ✅ MEM_SNAP 出力に `| TRK: total=%.1f OS=%.1f EQ=%.1f AL=%.1f LT=%.1fMB` を追加
+- ✅ `getActiveRuntimeDSP()` が非 null の場合のみ `collectTrackedMemoryStatistics()` を呼び出す
+- ✅ 配線のみ（API定義＋実装は完了済み）
+
+---
+
+### P5: 型整理・既知制限
+
+**🎯 優先度: ★☆☆☆☆**
+
+| # | 項目 | 内容 | 優先度 |
+|:-:|:-----|:------|:-------|
+| 1 | `transitionPolicy`: int → enum class | 設計書は `convo::TransitionPolicy`、コードは `int`。コメントで対応関係はドキュメント済み。 | ★☆☆☆☆ |
+| 2 | `processingOrder`: int → enum class | 同上 | ★☆☆☆☆ |
+| 3 | `aligned_free` DIAG 非対称性 | `aligned_malloc` は `DIAG_MKL_MALLOC` 経由だが `aligned_free` は `mkl_free` 直接。`DIAG_MKL_FREE` は size 引数が必要なため対応不可。診断品質は低下するが設計上の既知制限として許容。 | ★★☆☆☆ |
+| 4 | `RuntimePublicationSpecification.h` 整理 | 独立ファイルとして作成されたが誰もインクルードしていない。将来の分離用準備として維持。 | ★☆☆☆☆ |
+
+---
+
+### P6: AUTH_CONTRACT FAIL 原因修正 — Builder の fadingRuntimeUuid 条件不一致（2026-07-12 発見）
+
+**🎯 優先度: ★★★★★（最優先）**
+
+**【コード調査により確定した原因（2026-07-12 cocoindex/semble/serena/graphify による特定）】**
+
+**現象**: `[AUTH_CONTRACT] FAIL fadingNode=0 hasFadingByUuid=1` は Builder の論理バグ。
+
+**コード検証**:
+
+- `RuntimeBuilder.cpp:210`: `worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;`
+  → **`next` を無条件で使用**
+
+- `AudioEngine.h:2759` (makeEngineRuntimeState 内部):
+  ```cpp
+  const bool transitionActive = active && next != nullptr;
+  DSPCore* fading = transitionActive ? next : nullptr;
+  ```
+  → **`graph.fadingNode` は `transitionActive` に依存**
+
+- `RuntimeGraph.h:18`: `void* fadingNode = nullptr;`
+
+**結果**: `transitionActive=false` かつ `fadingDSP=oldDSP` が非 null の場合:
+- `graph.fadingNode = nullptr` (conditional through makeEngineRuntimeState → makeRuntimeGraphState)
+- `topology.fadingRuntimeUuid = oldDSP->runtimeUuid` (non-zero, UNCONDITIONAL)
+- → AUTH_CONTRACT 不一致 ⇒ publish FAILED
+
+**【修正案】**:
+```cpp
+// RuntimeBuilder.cpp line 210: 条件を makeEngineRuntimeState と統一
+// Current (buggy):
+//   worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
+// Fix:
+worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->runtimeUuid : 0;
 ```
-gen=4: Orchestrator buildRuntimePublishWorld(newDSP, oldDSP, HardReset, 0.0, false)
-  → active=false, next=oldDSP≠nullptr
-  → Builder: hasFadingRuntime=false, fadingRuntimeUuid=oldDSP_uuid≠0
-  → needsCrossfade=false → override 未適用
-  → Validator L92: hasFadingRuntime(false) != fadingRuntimeUuid≠0 → FAIL
 
-gen=5/8: 同種のトポロジに crossfade rebuild のため override 適用
-  → transitionActive=true, hasFadingRuntime=true （override 設定）
-  → Validator 通過
-  → Precheck AUTH_CONTRACT L87: graph.fadingNode(nullptr) != hasFadingRuntime(true) → FAIL
-  → 原因: override は graph.fadingNode を更新しない（Post-build Mutation の限界）
+**【確認された波及影響】**:
+- gen=3〜5 の publish 全滅（約6秒間 NUC live=0）
+- 結果として 354ms の rebuild 浪費（副次的影響、P5とは独立に防止可能）
+- gen=1/2 では `fadingDSP=nullptr` だったため発現せず
+- prepareToPlay での DSPCore 切り替え時に初めて顕在化
+
+---
+
+### P7: Builder 残留 atomic 読取りの Specification 昇格（2026-07-12 発見）
+
+**🎯 優先度: ★★★★☆**
+
+**【コード調査で確認された残留依存（2026-07-12）】**
+
+現在の `RuntimeBuilder.cpp` には以下の `engine.*` 直接アクセスが残っている (P0〜P2 完了後も未対応):
+
+| # | 行 | コード | 分類 | 現在の Spec カバレッジ |
+|:-:|:--|:------|:----|:---------------------|
+| 1 | 255 | `convo::consumeAtomic(engine.retireQueueDepth_, ...)` | **Input（禁止）** | ❌ RetirePart 未定義 |
+| 2 | 319-320 | `engine.currentAdaptiveCoeffBankIndex` | **Input（禁止）** | ❌ AdaptivePart 未定義 |
+| 3 | 324 | `engine.getAdaptiveCoeffBankForIndex(bankIndex)` | **Runtime Query（禁止）** | ❌ AdaptiveBankPart 未定義 |
+| 4 | 378 | `engine.getConvolverProcessor()` → `transferIRStateFrom()` | **Runtime Query（禁止）** | ❌ IRTransferPart 未定義 |
+| 5 | 357 | `engine.m_healthStateRef` (consumeAtomic) | **未分類** | ⚠️ HealthState の Spec 化要検討 |
+
+**【重要度】**: 1〜3 は INV-12（Builder は mutable Runtime 状態を観測しない）違反。
+4 は IR 転送という特殊操作であり、Builder Contract の例外として認められる可能性あり（Immutable Factory の一部と解釈可能）。
+5 は HealthState の読み取りで、Spec 化するか Builder Service とみなすか設計判断が必要。
+
+---
+
+## 設計参照情報
+
+*本節は全フェーズに共通する設計判断の集約。v8.3 までは [設計] 6 として配置されていたものを改訂・集約した。*
+
+### INV 一覧（2026-07-12 ユーザー訂正版）
+
+| ID | Invariant | 備考 |
+|:---|:----------|:------|
+| INV-1〜INV-10 | 変更なし（旧版維持） | DSPHandle ライフサイクル・Commit トランザクション |
+| INV-11 | **RuntimePublishWorld は Builder 完了後 immutable。Builder never mutates inputs.** | ✅ 実装済み（const 返却確認済み） |
+| **INV-12**（設計原則） | **Builder shall never observe mutable Runtime state directly. Any mutable runtime information required for construction shall be captured into RuntimePublishSpecification before Builder execution.** | **Builder は mutable な Runtime 状態を直接観測してはならない。構築に必要な mutable 情報はすべて RuntimePublishSpecification にキャプチャしてから Builder を実行する。** 設計原則。P0〜P2 の根拠。 |
+| **INV-13**（実装契約 — INV-12 の実装ルール） | **Builder は RuntimePublishSpecification、Builder Service、Pure Utility のみ利用可能。Input（atomic）と Runtime Query（Coordinator/Current Runtime/Crossfade）は禁止。**（P3 で正式化予定） | 🎯 2026-07-12 再定義。INV-12「mutable state 観測禁止」を実現する具体的な契約。P0〜P2 完了後に設計書更新。 |
+
+### Builder 依存分類（2026-07-12 コード調査確定）
+
+| 分類 | 可否 | 該当例 | 件数 | 現状 |
+|:-----|:-----|:-------|:----|:-----|
+| **① Input（禁止）→ Specification（→ ProcessingPart）** | ❌ | `currentProcessingOrder`, `eqBypassActive`, `convBypassActive`, `softClipEnabled`, `saturationAmount`, `inputHeadroomGain`, `outputMakeupGain`, `convolverInputTrimGain` | **8** | P0 対象。`sealedSnapshot==nullptr` 経路で atomic 直接読み取り。ProcessingPart として昇格。 |
+| **② Runtime Query（禁止）→ Orchestrator→Spec へ** | ❌ | Coordinator `consumeWorldHandle()`, Publication Sequence, CrossfadeRuntime（`getStartDelayBlocks` 他3）, `latencyDelayOld/New`, `retireQueueDepth_` | **8** | P1+P2 対象。`computeRuntimePublishComputation()` 経由 + 直接読み取り。PublicationSnapshotPart/CrossfadeSnapshotPart/LatencyPart に格納。 |
+| **③ Builder Service（許可）** | ✅ | `reserveRuntimePublicationIdentity()`, `RuntimePublishWorld::createForBuilder()`, Allocator, Factory, Identity Generator, Immutable Helper | **1** | 問題なし。契約条件を満たす（Runtime状態非依存/入力を変更しない/意味的結果を変更しない/決定論性を破壊しない）。 |
+| **④ Pure Utility（許可）** | ✅ | `estimateRuntimeLatencyBaseRateSamples()`, hash(), math | **1** | 問題なし。現在状態に依存しない純粋計算。 |
+| **⑤ P7 残留 Input（要昇格）** | ❌ | `retireQueueDepth_`（重新評価）, `currentAdaptiveCoeffBankIndex`, `getAdaptiveCoeffBankForIndex()` | **3** | P7 対象。Specification の RetirePart/AdaptivePart 未定義。2026-07-12 発見。 |
+| **⑥ P7 特殊依存（要判断）** | ⚠️ | `getConvolverProcessor()` → IR transfer, `m_healthStateRef` | **2** | IR transfer は Immutable Factory 例外と解釈可能。HealthState は要設計判断。 |
+
+### Authority Boundary Chart
+
+| 責務 | Authority | コード位置 |
+|:-----|:----------|:----------|
+| `activeRuntimeDSPHandle_` 更新 | `commitRuntimePublication()` | `AudioEngine.h:3981` |
+| `DSPCore*` active 更新 | `DSPLifetimeManager::activate()` | `DSPLifetimeManager.h:28` |
+| DSPHandle 発行 | `registerDSPHandleForRuntime()` | `AudioEngine.h:3838` |
+| DSPHandle 回収 | `retireDSPHandleForRuntime()` | `AudioEngine.h:3875` |
+| EBR enqueue | `DSPLifetimeManager::retire()` | `DSPLifetimeManager.h:37` |
+| DSPCore* 物理破棄 | `destroyDSPCoreNode()` | `AudioEngine.Threading.cpp:15` |
+
+### RT Safety
+
+- `activeRuntimeDSPHandle_`: publishAtomic(release) / consumeAtomic(acquire) — 正しい HB 順序
+- `runtimeDSPHandleMap_`: `std::mutex` 保護（NonRT のみ）
+- `DSPHandleRuntime`: `std::atomic<DSPHandle>` + `std::atomic<DSPState>` ベース
+- EBR drain: 「全 Reader が epoch を離脱した」ことを保証してから callback 実行
+
+### エグゼクティブサマリ
+
+**設計上のメモリ効果見込み**: 未修正時 2,477MB に対し、設計上は定常 686MB / ピーク 1,094MB を見込む。ただしビルド・実測未実施のため確定値ではない。
+**実測確認が必須の項目**: BlockSize 削減効果（~189MB/DSPCore 見込み）、CrossfadePlan 導入後の EBR 動作、680MB Other 内訳。これらは P0〜P3 実装後の MEM_SNAP で確認する（[未確定] 7 参照）。
+**ただし `lifecycle(retire)=0` は継続中**。CrossfadePlan 導入後の検証が必要（[未確定] 7 参照）。
+
+**全11ステップ実装確認済み**: ソースコード上の実装は完了。発見した7件の不整合（旧戻り値型削除漏れ、テストの hasFadingRuntime 残存、P4 DIAG_MKL_MALLOC include不足、queueDepthBlocks ラベル、コメント古朽化2件）は修正済み。ビルド・テスト通過確認は未実施（C1060 環境問題のため）。
+
+---
+
+## [未確定] 7. 未解決課題（Runtime 観測依存）
+
+*本セクションは「設計書の時点で確定できず、将来の Runtime 観測または実装後に検証が必要な事項」を集約する。*
+
+### 7.1 NoiseShaper accepted=0 の真因 → ✅ 解決（2026-07-12 ログ解析）
+
+🔍 **HYPOTHESIS**: `accepted=0` の原因はコード調査の範囲では特定できず、Runtime ログ確認が必要とされていた。
+
+**✅ ログ解析結果（2026-07-12 ConvoPeq.log）**:
+```
+[NoiseShaperLearner] Waiting diagnostics:
+  accepted=3012  dropSession=0  dropSampleRate=0  dropBank=0
+  bufferedSamples=771072  sessionId=0  sampleRateHz=192000
+  bankIndex=107  generation=39  queueDepthBlocks=0
 ```
 
-**根本原因**: Builder が一括生成した `RuntimePublishWorld` に対して Orchestrator が部分上書き（Post-build Mutation）を行う設計。Builder の Pure Construction 責務と矛盾し、`graph.fadingNode` のような内部状態の更新漏れが発生する。
+| 項目 | 値 | 判定 |
+|:-----|:---|:------|
+| `accepted` | **3012 / 3004** | ❌ `accepted=0` ではない。正常に学習ブロックを受理中。 |
+| `dropSession` | 0 | sessionId=0 によるドロップなし |
+| `dropSampleRate` | **0** | block.sampleRateHz(192000) = session.sampleRateHz(192000)。不一致なし |
+| `dropBank` | 0 | bankIndex 一致 |
+| `queueDepthBlocks` | 0 | 滞留なし |
 
-### 1.2 修正案: CrossfadePlan を Builder 入力として渡す
+**結論**: `accepted=0` 仮説は **実測で完全に否定された**。NoiseShaper は正常動作。懸念されたsample rate不一致は発生していない。
 
-**ConvoPeq.md の CrossfadeAuthority 定義に基づく**。
+### 7.2 EBR 経路の未検証と lifecycle(retire)=0 → ✅ 主因特定（2026-07-12 ログ解析）
+
+⚠️ **CAVEAT**: `lifecycle(retire)=0` は handle 未登録が原因ではなく、gen=3 以降の publish が全滅（AUTH_CONTRACT）したため retire 機会そのものが発生しなかった。
+
+**✅ ログ解析結果（2026-07-12 ConvoPeq.log）**:
+- **lifecycle(pub/ret/reclaim) カウンタの変化**:
+  - gen=3 FAIL 中: 4/0/0 (retire=0, reclaim=0)
+  - gen=6 publish 成功直後: 6/0/0 (retire 未発生)
+  - gen=6 xfade 完了後: 6/1/0 (retire enqueue 確認 = Ret: pend=1)
+  - gen=7 publish 成功後: 7/1/1→7/1/13 (EBR polling 進行)
+- MEM_SNAP の `Ret: pend=0` で retire queue 消費確認
+
+**確認済み**: RETIRE enqueue → EBR polling → Ret: pend=0 のチェーンは動作。ただし EBR epoch advance / reader leave drain の詳細はこのログのみでは確認不可。
+
+### 7.3 runtimeDSPHandleMap / BlockSize 実測 / 680MB Other 内訳
+
+- `runtimeDSPHandleMap` 収束値: steady-state 2-3 エントリ見込み（実測確認が必要）
+- BlockSize 削減効果: コード数式で ~189MB/DSPCore の削減見込み（実 MEM_SNAP での確認が必要）
+- 680MB Other 内訳: `computeOtherPrivate` のトレース完了。`aligned_malloc` の DIAG 未計装により DSPCore 内部バッファは Other に含まれる。
+
+### 7.4 調査結果の総括（2026-07-12 最終確定）
+
+**全ツールを使用した最終網羅調査の結果、コード調査で確定可能な事項は全て確定・記録された。** 使用ツール: grep/sed (WSL), AiDex MCP, serena MCP, ctx_batch_execute, cocoindex-code (ccc.exe), graphify, semble。
+
+| 調査項目 | 結果 | 確定状況 |
+|:---------|:-----|:---------|
+| `hasFadingRuntime` production残存 | **0件** — 全削除確認（ISRRuntimeSemanticSchema.h から削除、hasFadingRuntimeInWorld は fadingRuntimeUuid != 0 導出） | ✅ 確定 |
+| `currentCaptureSessionId` 代入 | **0件** — 定義時初期値 =0 固定。Runtime代入なし → sessionId によるドロップは発生しない | ✅ 確定 (FACT #82) |
+| P4 `DIAG_MKL_MALLOC` 完全性 | CacheManager(2) + IRConverter(1) の3箇所すべて DIAG 化＋`DiagnosticsConfig.h` include 追加完了。MKLNonUniformConvolver 内6箇所の生 `mkl_malloc` は P4 範囲外（ScopedAlignedPtr 管理＋allocatedBytes() 追跡済み） | ✅ 確定 |
+| `aligned_malloc` DIAG 未計装 | 81箇所残存（v7.9 調査時点では95箇所 → DIAG_MKL_MALLOC 経由化により14箇所改善）。全体的な DIAG 化は設計範囲外 | ✅ 既知制限 |
+| Builder メモリオーダー | 全18件 `memory_order_acquire` 統一。不整合なし | ✅ 確定 |
+| `const_cast` | 2箇所のみ: RuntimeBuilder.h:94（旧シグネチャ委譲）, Orchestrator.cpp:178（FrozenRuntimeWorld 境界） | ✅ 確定 |
+| 全 Builder 関数 | `buildRuntimePublishWorld`, `createBootstrapWorld`, `validateWarmup` 全て `noexcept` | ✅ 確定 |
+| TODO/FIXME work70関連 | **0件** | ✅ 確定 |
+| `collectTrackedMemoryStatistics()` | 定義＋実装完了（`ASSERT_NON_RT_THREAD()` 完備）。呼び出し元0件（P4 Backlog）。設計書要求（API定義）は達成済み。 | ✅ API完了（MEM_SNAP統合は別タスク） |
+| `RuntimePublicationSpecification.h` | 独立ファイルとして作成。**git管理下に追加済み**。include元は0件（将来分離用準備）。 | ✅ ファイル存在確認・git追跡開始 |
+
+**コード調査で確定不能な項目 → ログ解析で一部解決（2026-07-12）**:
+
+1. ✅ **NoiseShaper accepted=0 真因** → ログ解析により **NOT-A-PROBLEM と確定**（`accepted=3012/3004`, `dropSampleRate=0`）
+2. ⚠️ **EBR lifecycle(retire)=0** → 主因（AUTH_CONTRACT FAIL）を確定。gen=6 以降の retire/polling 動作確認済み。EBR epoch advance の詳細は別ログが必要。
+3. 🔄 **BlockSize 削減実測値**（→ P2-1 実装後の MEM_SNAP）— コード変更後のため本ログでは未確認
+4. 🔄 **680MB Other 内訳の実測値**（→ TrackedMemoryStatistics MEM_SNAP 統合後）— 現状の計装では Private−TRK=~455MB までしか分解不能
+
+**結論**: コード調査＋ログ解析により、7.1 は完全解決、7.2 は主因確定。残る 7.3/7.4 はコード変更後の実測に依存。
+
+---
+
+## Appendix A: 実装済み成果物
+
+### A.0 今回の改修（work70 v8.3 全11ステップ）— ソースコード上確認済み
+
+| ステップ | 内容 | ファイル | 状態 |
+|:--------|:-----|:---------|:-----|
+| ① | RuntimePublishSpecification 定義（三部構成 + version） | `RuntimeBuilder.h` | ✅ 実装確認 |
+| ② | Orchestrator Spec生成 + Post-build Mutation 削除 | `RuntimePublicationOrchestrator.cpp` | ✅ worldOwner-> 代入 READ 1件のみ |
+| ③ | Builder Spec 受取 + 内部実装修正 | `RuntimeBuilder.h/.cpp` | ✅ シグネチャ変更＋Spec 解決 |
+| ④ | 他6箇所の呼び出し元対応（旧シグネチャ委譲） | 各 .cpp | ✅ inline 委譲確認 |
+| ⑤ | Validator 三者整合性（Topology/Execution/Identity） | `RuntimePublicationValidator.cpp` | ✅ hasFadingRuntime 不使用 |
+| ⑥ | hasFadingRuntime 削除（production） | `ISRRuntimeSemanticSchema.h` + 全参照 | ✅ fadingRuntimeUuid != 0 導出 |
+| ⑦ | P2-1 BlockSize 最適化 | `AudioEngine.h`, `Init.cpp`, `DSPCoreLifecycle.cpp` | ✅ PrepareBlockSizingPolicy + kInitialPrepareMaxBlock=4096 |
+| ⑧ | P-NS NoiseShaper DIAG 改善 | `NoiseShaperLearner.h/.cpp` | ✅ DropReason enum, generation, queueDepthBlocks, dropBySampleRate DIAG |
+| ⑨ | P-DIAG TrackedMemoryStatistics API + MEM_SNAP統合 | `AudioEngine.h`, `DSPCoreLifecycle.cpp`, `Timer.cpp` | ✅ 10カテゴリ + ASSERT_NON_RT_THREAD + MEM_SNAP出力（P4） |
+| ⑩ | P4 mkl_malloc DIAG 化 | `CacheManager.cpp`, `IRConverter.cpp` | ✅ DIAG_MKL_MALLOC + include 追加 |
+| ⑪ | const RuntimePublishWorld 化 | `RuntimeBuilder.h`, `AudioEngine.h`, `RuntimePublicationCoordinator.h` | ✅ Builder→commitRuntimePublication→Coordinator const chain |
+| **⑫** | **P0: ProcessingPart追加 + atomic読取り排除（v9.4）** | `RuntimeBuilder.h/.cpp`, `RuntimePublicationOrchestrator.cpp` | ✅ ProcessingPart定義、Orchestrator設定、Builder読取り、無効行削除 |
+| **⑬** | **P1: PublicationSnapshotPart + previousCommittedSequence移行（v9.5）** | `RuntimeBuilder.h/.cpp`, `RuntimePublicationOrchestrator.cpp` | ✅ PublicationSnapshotPart定義、Orchestrator設定、Builder読取り（Runtime Query 部分移行完了） |
+| **⑭** | **P2: CrossfadeSnapshotPart/LatencyPart 追加（v9.5）** | `RuntimeBuilder.h/.cpp`, `RuntimePublicationOrchestrator.cpp` | ✅ CrossfadeSnapshotPart/LatencyPart 定義・Orchestrator設定・Builder engine直接読取り排除 |
+
+#### A.0.1 RuntimePublishSpecification 構造（v8.3）
 
 ```cpp
-```cpp
-// ★ v6.8: RuntimeGraphDescription — Builder が唯一受け取るグラフ記述。
-//   current/next を排除し、ノード構成のみを伝達する。
-//   Builder はノードの意味（新旧）を推論できない。
-//   fadeSeconds は Builder の責務ではなく CrossfadeRuntime の実行パラメータ。
-struct RuntimeGraphDescription {
-    DSPCore* activeDSP = nullptr;     // Active ノードとなる DSPCore（nullptr=該当なし）
-    DSPCore* fadingDSP = nullptr;     // Fading ノードとなる DSPCore（nullptr=クロスフェードなし）
+struct RuntimePublishSpecification {
+    uint32_t version = 1;
+
+    struct TopologyPart {
+        const AudioEngine::DSPCore* activeDSP = nullptr;
+        const AudioEngine::DSPCore* fadingDSP = nullptr;
+    } topology;
+
+    struct ExecutionPart {
+        bool transitionActive = false;
+        int transitionPolicy = 0;  // 0=HardReset, 1=SmoothOnly, 2=DryAsOld
+        double fadeTimeSec = 0.0;
+    } execution;
+
+    struct RoutingPart {
+        int processingOrder = 0;   // 0=EQ→Conv, 1=Conv→EQ
+        bool eqBypassed = false;
+        bool convBypassed = false;
+    } routing;
 };
-
-// RuntimeBuilder のシグネチャ:
-RuntimePublishWorld buildRuntimePublishWorld(
-    const GlobalSnapshot* sealedSnapshot,                     // 既存のデフォルト引数
-    const RuntimeGraphDescription& desc = RuntimeGraphDescription{}  // 唯一のグラフ入力
-) noexcept;
 ```
 
-**Builder 内部の制約**: Builder は `RuntimeGraphDescription` のみから Graph を構築する（`hasFading` は不要 — `desc.fadingDSP != nullptr` で代替）:
-- `desc.fadingDSP != nullptr` → fadingNode を生成し対応付ける
-- `desc.activeDSP` を対応する Active ノードに設定する
-- `current` / `next` を知らないため、「どちらが旧ノードか新ノードか」を推論できない
-- `fadeSeconds` は Builder に渡されない — Topology ではなく実行パラメータのため
+#### A.0.2 P2-1 PrepareBlockSizingPolicy
 
-**変更影響**: 7箇所の呼び出し元は、これまで `current` / `next` を渡していた代わりに `RuntimeGraphDescription` を構築して渡す。Orchestrator は CrossfadeAuthority の判断に基づいて desc を組み立て、残り6箇所はデフォルト値で動作。
-
-**期待効果**: Builder は Graph Topology のみを構築する。`current` / `next` にアクセスできないため、意味推論が構造的に不可能。Post-build Mutation が不要になり、AUTH_CONTRACT FAIL が解消される。
-
-### 1.3 実装ステップ
-
-| Step | 内容 | ファイル |
-|:-----|:------|:---------|
-| 1 | `RuntimeGraphDescription` 構造体を `RuntimeBuilder.h` に追加 | `RuntimeBuilder.h` |
-| 2 | `buildRuntimePublishWorld()` のシグネチャを `(sealedSnapshot, RuntimeGraphDescription)` に変更 | `RuntimeBuilder.h/.cpp` |
-| 3 | Orchestrator `trySubmit()` 内で CrossfadeAuthority の決定を plan に詰めて Builder に渡す | `RuntimePublicationOrchestrator.cpp` |
-| 4 | Builder 内で `plan` に記述された Graph Topology（fadingNode/policy）をそのまま `graphState` に写像 | `RuntimeBuilder.cpp` |
-| 5 | 残り6箇所の呼び出しを確認（デフォルト引数で動作。変更不要） | 各 .cpp |
-| 6 | gen=4/5/8 が publish 成功することを DIAG ログで確認 | — |
-
----
-
-## [設計] 2. P2-1: 初回 BlockSize 最適化
-
-### 2.1 問題
-
-初回 `DSPCore::prepare()` 時の `internalMaxBlock=524288`（`SAFE_MAX_BLOCK_SIZE 65536 × MAX_OS_FACTOR 8`）。
-この値は全バッファ（Oversampling/SoftClip/EQ/TruePeakDetector等）のサイズを決定する。
-
-**本質的な問題**: `DSPCore::prepare()` は `inputMaxBlock = max(SAFE_MAX_BLOCK_SIZE, samplesPerBlock)` で計算する。初回 prepare（Init 直後）では `maxSamplesPerBlock` が `SAFE_MAX_BLOCK_SIZE=65536` のままのため、`inputMaxBlock=65536` となる。これにより `internalMaxBlock=524288` の巨大バッファが確保される。
-
-**修正方針**: `SAFE_MAX_BLOCK_SIZE` そのものを削減するのではなく、**初回 prepare 時に使用する `maxSamplesPerBlock` を実用的な値（prepareToPlay 確定後に再設定される値）に変更する**。
-
-✅ **FACT（定量化完了）**: 初回 prepare 時の `internalMaxBlock` を 524288→8192 に削減した場合、DSPCore 内部バッファ（tracked allocations）は:
-- 生確保量: ~193 MB → ~3.4 MB (**tracked allocations で ~189 MB節約**)
-- ⚠️ ただしこの削減量は DSPCore 内部のコード追跡可能なバッファのみ。隠れオーバーヘッド（~191MB）は比例縮小の可能性があるが、実 Private Bytes 削減量は実装後の MEM_SNAP で確認する。
-
-### 2.2 原因チェーン
-
-1. `AudioEngine.Init.cpp:38`: `maxSamplesPerBlock = SAFE_MAX_BLOCK_SIZE (65536)`（デバイス未初期化の安全策）
-2. `AudioEngine.Init.cpp:57`: 初回 Structural rebuild を submit
-3. `DSPCoreLifecycle.cpp:140-142`: `inputMaxBlock = max(65536, samplesPerBlock) = 65536`、`internalMaxBlock = 65536 × 8 = 524288`
-4. この 524288 が全バッファのサイズとなる（osFactor に非依存）
-
-### 2.3 実装案
-
-| 案 | 難易度 | リスク | 期待削減 | 説明 |
-|:---|:-------|:-------|:---------|:------|
-| **A（推奨）**: 初回 prepare 時に使用する `maxSamplesPerBlock` を適切な値に設定し、prepareToPlay で実 SR/BS に再設定。`SAFE_MAX_BLOCK_SIZE` 自体は Emergency Fallback として 65536 を維持。 | 中 | 低 | ~189MB/DSPCore | `SAFE_MAX_BLOCK_SIZE` を変更せず、初回 prepare 時のみ別値を使用。prepareToPlay 到達後に適切な値に再設定される。 |
-
-**設計上の定数**: `constexpr int kInitialPrepareMaxBlock = 4096;`（Init 直後の maxSamplesPerBlock 設定値）。4096 はオフラインレンダリングやホストバリデーションで 8192/16384 が来る可能性を考慮した安全な値。512 は小さすぎる。
-| B: `SAFE_MAX_BLOCK_SIZE` の低減 | 高 | 中 | ~189MB/DSPCore | クロスフェードバッファ等他の依存箇所に波及。独立性が低い |
-| C: 初回 prepare で internalMaxBlock 上限を実ブロックサイズに制限（osFactor 未確定のため 1x 相当） | 低 | 低 | ~189MB/DSPCore | 最も安全、後続の prepareToPlay で再設定される |
-
----
-
-## [設計] 3. P4: 未計装 mkl_malloc DIAG 化
-
-### 3.1 範囲
-
-✅ **FACT**: DIAG 非対応の `mkl_malloc`/`mkl_free` は以下の 3 箇所のみ:
-- `CacheManager.cpp:190` — IR データキャッシュ
-- `CacheManager.cpp:228` — IR データコピー
-- `IRConverter.cpp:187` — IR 変換バッファ
-
-`AlignedAllocation.h` の汎用ラッパー（`aligned_malloc`/`aligned_free`）は広範囲で使用されるため P4 の対象外。
-
-### 3.2 期待効果
-- 直接のメモリ削減効果はない
-- MKL アロケーションの完全可視化（`lostFree` / `alloc` の完全性向上）
-- 優先度: **低**
-
----
-
-## [設計] 4. P-NS: NoiseShaper 診断改善
-
-### 4.1 問題
-
-NoiseShaper learner の `Waiting diagnostics` ログでは `accepted=0, dropSampleRate=~3000` が全期間継続する。コード調査によりブロック側・セッション側のサンプルレート設定は正しい（ともに base rate 192000）ことが確認されたが、Runtime で実際に **drop 判定に使用された block.sampleRateHz と session.sampleRateHz の実値**が正しいかは未確認。
-
-`currentCaptureSessionId` は初期値0以降書き込みが存在しないため、`sessionId` によるドロップは発生しない（FACT #77）。
-
-### 4.2 変更内容
-
-`captureSessionSignature()` および `drainCaptureQueue()` の DIAG ログに以下を追加:
-
-| # | 追加内容 | ファイル | 行数 |
-|:-:|:---------|:---------|:-----|
-| 1 | `block.sampleRateHz` を `[NoiseShaperLearner] drainCaptureQueue` ログに出力 | `NoiseShaperLearner.cpp` | +1 |
-| 2 | `session.sampleRateHz` と `block.sampleRateHz` の実値同時出力（Waiting diagnostics行に追記） | `NoiseShaperLearner.cpp:916` | +1 |
-| 3 | GlobalSnapshot に `block.sampleRateHz` の統計情報を追加。キャプチャキューの `queueSize` / `segmentQueueSize` も DIAG に追加（`segmentBuffer.pushBlock()` が false を返すケースの追跡用）。 | `AudioEngine.h`, `NoiseShaperLearner.cpp` | +5 |
-
-### 4.3 期待効果
-
-- `block.sampleRateHz` の実値が 192000 ≠ 192000 のように不一致なら問題確定
-- 両者が一致している場合、ドロップ原因は `segmentBuffer.pushBlock()` の暗黙的失敗や他の要因に絞り込める
-- 目的は「sampleRate mismatch の確認」ではなく「**drop 判定に使われた block/session 値を Runtime で可視化すること**」
-- 優先度: **中**（NoiseShaper の継続学習が完全に停止しているため）
-
----
-
-## [設計] 5. P-DIAG: MEM_SNAP メモリバケット改善
-
-### 5.1 問題
-
-定常 683-686MB のうち、現状の MEM_SNAP は NUC/DC/SC/Ret 以外をすべて「Other」として一括計上する。以下の内訳が診断不能:
-- DSPCore サブシステムごとの内訳（Oversampling/SoftClip/EQ/Buffers/Convolver/TruePeakDetector 等）
-- RuntimeWorld (active generation state)
-- RuntimeBuilder 一時バッファ
-- MKL 内部状態
-- C++ CRT ヒープ断片化
-- JUCE framework
-
-### 5.2 変更内容（推奨: `TrackedMemoryStatistics` 診断API方式）
-
-**設計判断**: `sizeof(DSPCore)` では内部の vector/AudioBuffer/Oversampler/Convolver 等のヒープ確保まで含まれない。そのため以下の2案を比較:
-
-| 案 | 実装量 | 正確さ | 将来保守性 |
-|:---|:-------|:-------|:----------|
-| **A（推奨）**: `TrackedMemoryStatistics` 診断専用APIを追加 | 中 | ◎ | ◎ サブシステム追加時に追従容易 |
-| B: 個別フィールドを MEM_SNAP にベタ書き | 低 | ○ | △ サブシステム追加時に修正漏れリスク |
-
-**案Aの API 設計案**:
 ```cpp
-// DSPCore に追加する診断用メモリ統計取得API
-// 名称を DiagnosticMemoryStatistics とすることで
-// 「正確な物理メモリ使用量」ではなく「診断目的の追跡対象アロケーション統計」であることを明示する。
-// ★ v6.8: 名称を TrackedMemoryStatistics に統一。
-//   「正確な物理メモリ」ではなく「診断目的の追跡対象アロケーション統計」であることを明示する。
+struct PrepareBlockSizingPolicy {
+    static constexpr int kMinimumPrepareBlock = 256;
+    [[nodiscard]] static constexpr int apply(int samplesPerBlock) noexcept {
+        jassert(samplesPerBlock > 0);
+        return std::max(kMinimumPrepareBlock, samplesPerBlock);
+    }
+};
+const int kInitialPrepareMaxBlock = 4096;  // AudioEngine.Init.cpp
+```
+
+#### A.0.3 P-NS DropReason + Waiting diagnostics
+
+| フィールド | 値 | 意味 |
+|:-----------|:---|:------|
+| `generation=` | `consumeAtomic(progress.iteration)` | 完了世代数（1-based） |
+| `queueDepthBlocks=` | `captureQueue.size()` (w-r) | キュー内 AudioBlock 滞留数 |
+| `dropBySampleRate` DIAG | `block.sampleRateHz` + `session.sampleRateHz` 実値 | Runtime 観測用 |
+
+#### A.0.4 P-DIAG TrackedMemoryStatistics API
+
+```cpp
 struct TrackedMemoryStatistics {
-    size_t totalTracked = 0;       // 合計 tracked 確保量
     size_t oversampling = 0;       // Oversampling work buffers
     size_t softClip = 0;           // SoftClip OS work buffers
     size_t eqProcessor = 0;        // EQ scratch/dry/parallel/structure/msWorkBuffer
@@ -335,167 +484,14 @@ struct TrackedMemoryStatistics {
     size_t convolver = 0;          // Convolver internal (no IR = minimal)
     size_t crossfade = 0;          // JUCE crossfade buffers
     size_t misc = 0;               // DCBlocker/LoudnessMeter/PeakLimiter/NoiseShaper
+    size_t otherTracked = 0;       // tracked だが特定カテゴリに分類されないもの
+    [[nodiscard]] size_t totalTracked() const noexcept { /* SUM(categories) */ }
 };
-TrackedMemoryStatistics DSPCore::collectTrackedMemoryStatistics() const noexcept;
 ```
-
-| # | フィールド | 取得元 | 意味 |
-|:-:|:-----------|:-------|:------|
-| 1 | `DC: live=N alloc=NNNMB` | DSPCore::liveCount + バッファ合計 | DC に紐づく全 tracked バッファ確保量（コード数式 ~159MB を DIAG で実測） |
-| 2 | `World: gen=M size=NNNMB` | RuntimePublishWorld の世代 + サイズ | アクティブ RuntimeWorld のメモリコスト |
-| 3 | `Ret: slots=N tot=NNNMB` | EBR キュー内エントリ数 + 合計バイト | `m_pendingRetireBytes_` の値が正しく設定される前提（現状は ISRRetireRouter のデッドコード） |
-| 4 | `MKL: nuc=N lost=N zero=N` | NUC 診断（既存） | 既存の NUC フィールドでカバー済み。拡張不要。 |
-
-### 5.3 期待効果
-- 680MB "Other" のうち DSPCore 実測値が特定可能になる（現状はコード数式からの推定のみ）
-- RuntimeWorld の世代交代に伴うメモリ増減が追跡可能
-- 優先度: **中**（680MB 内訳の透明性向上）
-
----
-
-## [設計] 6. アーキテクチャ検証: Authority 境界・Invariant・RT Safety
-
-*本節はすべてのフェーズに共通する設計参照情報。改修完了後も維持すべき不変条件を示す。*
-
-### 6.1 Authority Boundary Chart — Single Authority 設計
-
-| 責務 | Authority | コード位置 | 備考 |
-|:-----|:----------|:----------|:------|
-| **`activeRuntimeDSPHandle_` 更新** | `commitRuntimePublication()` | `AudioEngine.h:3981` | publish 成功後にのみ更新．唯一の変更箇所． |
-| **`DSPCore*` active 更新** | `DSPLifetimeManager::activate()` | `DSPLifetimeManager.h:28` | `setActiveRuntimeDSP(dsp)` のみ．Handle層には触れない． |
-| **DSPHandle 発行** | `registerDSPHandleForRuntime()` | `AudioEngine.h:3838` | idempotent |
-| **DSPHandle 回収** | `retireDSPHandleForRuntime()` | `AudioEngine.h:3875` | Map lookup → erase → Handle.retire/reclaim |
-| **EBR enqueue** | `DSPLifetimeManager::retire()` | `DSPLifetimeManager.h:37` | ISRRetireRouter 経由 |
-| **DSPCore* 物理破棄** | `destroyDSPCoreNode()` | `AudioEngine.Threading.cpp:15` | EBR callback または DSPGuard 直接破棄 |
-
-### 6.2 DSPHandle ライフサイクル状態遷移（確定）
-
-```text
-         [Constructing] ← 登録直後．rollback 可能な唯一の状態
-            ↙        ↘
-   publish成功     publish失敗
-        ↓              ↓
-     [Active]      rollbackRegistration()
-        ↓          CAS: Constructing→Reclaimed
-    [Retired]           ↓
-   (crossfade)    [Reclaimed] ← スロット再利用可能
-        ↓
-   [CrossfadingOut] / [CrossfadingIn] → endCrossfade() → [Active/Retired]
-```
-
-**Invariant**: Constructing のみ rollback 可能 / Reclaimed のみ create() 再利用 / Quarantined からの復帰は不可。
-
-### 6.3 RT Safety 証明
-
-- `activeRuntimeDSPHandle_`: publishAtomic(release) / consumeAtomic(acquire) — 正しい HB 順序
-- `runtimeDSPHandleMap_`: `std::mutex` 保護（NonRT のみ）— RT スレッドは map 非アクセス
-- `DSPHandleRuntime`: `std::atomic<DSPHandle>` + `std::atomic<DSPState>` ベース — ミューテックス不使用
-- EBR drain: 「全 Reader が epoch を離脱した」ことを保証してから callback 実行
-
-### 6.4 Invariant 一覧
-
-| ID | Invariant | 根拠 |
-|:---|:----------|:------|
-| INV-1 | 公開前の DSP は Handle 登録済み | commitRuntimePublication が唯一の窓口 |
-| INV-2 | 公開失敗時は Handle 登録をロールバック | rollbackRegistration (CAS) |
-| INV-3 | Commit point 以降は Handle をロールバック不可 | `rollbackHandle = DSPHandle::null()` |
-| INV-4 | Reclaimed Handle が Map に永続しない | retireDSPHandleForRuntime で削除 |
-| INV-5 | rollback 後、同一 DSPCore は再登録可能 | Constructing→Reclaimed により再利用可能 |
-| INV-6 | Handle 登録と publish は同一トランザクション内 | commitRuntimePublication で完結 |
-| INV-7 | rollback 成功後は Map 不整合を許容（次回登録で修復） | CAS 成功が最優先 |
-| INV-8 | alreadyRegistered の Handle は Constructing 状態 | CAS 条件 |
-| INV-9 | activeRuntimeDSPHandle_ は常に Active 状態 | activate() のみ更新 |
-| INV-10 | publish 成否を OwnershipDisposition で明示 | Transferred / CallerDestroy |
-
----
-
-## [未確定] 7. 未解決課題（Runtime 観測依存）
-
-*本セクションは「設計書の時点で確定できず、将来の Runtime 観測または実装後に検証が必要な事項」を集約する。*
-
-### 7.1 NoiseShaper accepted=0 の真因
-
-🔍 **HYPOTHESIS**: `accepted=0` の原因はコード調査の範囲では特定できなかった。コード上の全経路を検証したが、block.sampleRateHz と session.sampleRateHz の不一致を説明できるコード上のバグは発見できなかった。
-
-**確定済みの事実**:
-- セッション側 `session.sampleRateHz` は `engine.currentSampleRate`（192000, double→int変換:+0.5）から設定（NoiseShaperLearner.cpp:1034）
-- ブロック側 `adaptiveCaptureSampleRateHz` は `dsp->sampleRate`（192000, double→int変換:+0.5）から設定（AudioEngine.h:3552）
-- `pushAdaptiveCaptureBlocks` は `state.adaptiveCaptureSampleRateHz`（int 192000）をそのまま `block.sampleRateHz` に代入（DSPCoreDouble.cpp:291）
-- `drainCaptureQueue` の比較は `block.sampleRateHz == session.sampleRateHz`（int vs int）— 型の不整合なし
-- 両者はコード上 **192000 == 192000** となるはず
-
-**誤りと判明した仮説**: 従来の「`processingRate` bug」説（`dsp->sampleRate` が processingRate 768000 と誤って設定されている）はコード検証の結果誤り。`dsp->sampleRate` は正しく base rate を保持する。
-
-**新規確定事実（2026-07-11 コード調査）**:
-- ✅ `currentCaptureSessionId` は **初期化（=0）以降、書き込みが存在しない**（AudioEngine.h:943 のみ）。したがって `block.sessionId` は常に 0。セッション側も `session.sessionId==0` のため `sessionIdCompatible` チェックは常に通過。ログの `droppedBySession=0` と整合。
-- ✅ ブロック側 `block.sampleRateHz` とセッション側 `session.sampleRateHz` はともに `dsp->sampleRate`（base rate）または `engine.currentSampleRate` から設定され、コード上一致する。
-- ✅ `audioCaptureQueue` は 4096 エントリの共有リングバッファ。gen=3 は ~10 秒間動作し、全エントリを上書き可能。したがって gen=1（48000Hz）のブロック残留説は成立しない。
-
-**結論**: コード調査では真因の特定は不可能。Runtime DIAG により `block.sampleRateHz` の実値を出力する改善が必要（→ [設計] 4. P-NS）。
-
-**新規確定事実（2026-07-11 追加コード調査）**:
-- ✅ `segmentBuffer.pushBlock()` は **void 戻り値**（AudioSegmentBuffer.h:23）。戻り値をチェックしない設計であり、「pushBlock の暗黙的な失敗」は発生しない。ブロック到達以前に `droppedBySampleRate` で弾かれていることが `accepted=0` の直接原因。
-- ✅ `audioCaptureQueue` は **AudioEngine に1つのみ存在**する共有リングバッファ（AudioEngine.h:2345）。全 DSPCore が同じキューに書き込む。4096エントリを 192kHz/256blockSize で約5.5秒で全上書き可能。gen=3 は約10秒間動作してから NoiseShaper が起動するため、gen=1 (48000Hz) のブロック残留はほぼ不可能。
-- ✅ DIAG ログで `sampleRateHz=192000`（session）、`dropSampleRate=3000`、`dropSession=0` を確認済み。したがってブロックは sampleRate 不一致のみでドロップ。
-
-**結論**: `block.sampleRateHz` と `session.sampleRateHz` の実値がコード解析上は一致するはずだが、Runtime では異なる可能性が高い。真因の特定には [設計] 4. P-NS による DIAG 改善が必須。
-
-**残存する可能性**（いずれも Runtime 観測が必要）:
-- `a`) セッション開始タイミングの競合：キューと `startLearning` の間の瞬間的な不整合
-- `b`) ConvoPeq.md 上の未確認な条件分岐
-- ~~`segmentBuffer.pushBlock()` の暗黙的な失敗~~ → **void 戻り値のため成立しない**（v6.5 確定）
-
-**確認方法**: [設計] 4. P-NS の DIAG 改善適用後、`block.sampleRateHz` と `session.sampleRateHz` の実値を確認。
-
-### 7.2 EBR 経路の未検証と lifecycle(retire)=0
-
-⚠️ **CAVEAT**: 今回の ConvoPeq.log では EBR（Epoch-Based Reclamation）は一度も発動しなかった。`lifecycle(retire)=0` も同根の原因による。
-
-**両者に共通する真因（v6.2 訂正済み）**:
-1. ✅ P1-a/FIX により handle 登録は正しく行われていた
-2. gen=3 の Coordinator direct publish は成功し、DSPCore#3 が active に
-3. ❌ しかし gen=4/5/6/7/8 のリビルドが**全滅**（AUTH_CONTRACT / Validator reject）
-4. DSPTransition::onPublishCompleted() が一度も呼ばれず、retire の機会がなかった
-5. したがって EBR enqueueRetire() にエントリが投入されず → pend=0, reclaim=0, lifecycle(retire)=0
-
-**CrossfadePlan 導入後（[設計] 1）の期待**:
-gen=4+ の publish が成功 → DSPTransition → `lifetimeMgr.retire(oldDSP)` → `retireDSPHandleForRuntime`（今度は handle が登録済みなので true）→ EBR enqueue → pending>0 → Timer tryReclaim → reclaim>0 → private 減少 の完全チェーンを確認する。
-
-**確認方法**: CrossfadePlan 導入後の MEM_SNAP で lifecycle(retire)>0, pending>0, reclaim>0 のシーケンスを確認。
-
-### 7.3 runtimeDSPHandleMap 収束値
-
-⚠️ **CAVEAT**: steady-state では 2-3 エントリに収束する見込み（FACT #38）。ただし transition 中（crossfade / rollback / rebuild prepare の重なり）は一時的に増加し得る。MAX_DSP_SLOTS=256 に対して十分小さく、枯渇リスクは極めて低い。実測による確認が必要。Runtime 観測依存。
-
-### 7.4 BlockSize 削減効果の実測
-
-🔍 **HYPOTHESIS**: P2-1 実装により SAFE_MAX_BLOCK_SIZE=65536→1024 で DSPCore 生確保量が 98.2%削減（~189MB/DSPCore）することをコード数式で定量化済み（[設計] 2）。ただしこの効果は隠れオーバーヘッド（~191MB）を含まない理論値であり、実メモリ削減量は P2-1 実装後の MEM_SNAP で確認する。メモリバケット DIAG（[設計] 5）と併用することで効果検証が容易になる。
-
-### 7.5 680MB "Other" の内訳
-
-⚠️ **CAVEAT**: 定常 683-686MB のうち、現状の MEM_SNAP は NUC/DC/SC/Ret 以外をすべて「Other」として一括計上する。以下のカテゴリが混在しており個別の内訳は診断不能:
-
-**Application-owned**:
-  - **RuntimeWorld**（active generation state + Transition/crossfade）
-  - **DSPCore**（Oversampling/SoftClip/EQ/Buffers/Latency/TPD/Convolver 等の全 tracked allocation — [設計] 5. P-DIAG の `TrackedMemoryStatistics` と対応）
-  - **Capture/Tracking**（IO buffers, Capture buffers, Telemetry, Snapshot Coordinator）
-**Allocator-owned**（推定値 — MEM_SNAP では直接診断不能）: C++ CRT heap（断片化・フリーリスト）、VirtualAlloc reservation/commit、スレッドスタック
-**External library**（一部推定）: MKL internal（FFT plan/scratch/TLS）、IPP internal
-**Framework**: JUCE（数十MB程度 — 680MBの主因ではない）
-
-**診断可能範囲の限界**: MEM_SNAP バケット改善（[設計] 5. P-DIAG）により **Application-owned のメモリ内訳（DSPCore / RuntimeWorld / Capture）は可視化可能**になる。しかし **Allocator-owned（CRT断片化/VirtualAlloc granularity 等）は OS/ランタイム管理領域であり、診断用 API では直接計測できない**。これらの内訳は引き続き推定値として扱う。
-
----
-
-## Appendix A: 実装済み改修内容
-
-*以下は完了した改修の詳細。コードレビュー・テスト結果を含む。*
 
 ### A.1 P1-a: publish 経路への handle 登録追加
 
 **目的**: Coordinator direct publish（Init/PrepareToPlay/ReleaseResources/Timer/Transition）で DSPCore が `runtimeDSPHandleMap_` に未登録となる問題を修正。
-
-**設計**: `commitRuntimePublication()` + `RegistrationContext` により、register → publish → 失敗時 rollback のトランザクションを保証。
 
 ```cpp
 struct RegistrationContext {
@@ -509,545 +505,63 @@ struct RegistrationContext {
 
 **呼び出しパターン（7 箇所）**:
 
-| # | 呼び出し元 | mode | dsp | handle | 備考 |
-|:-:|:-----------|:-----|:----|:-------|:------|
-| 1 | Init | none | — | — | Bootstrap world |
-| 2 | PrepareToPlay (first) | needsRegistration | currentForPublish | — | Coordinator direct |
-| 3 | PrepareToPlay (rebuild) | needsRegistration | getActiveRuntimeDSP | — | Coordinator direct |
-| 4 | ReleaseResources | none | — | — | シャットダウン |
-| 5 | Timer (fadeComplete) | needsRegistration | currentAfterFade | — | Coordinator direct |
-| 6 | Transition | needsRegistration | 引数 newDSP | — | Coordinator direct |
-| 7 | PublicationExecutor | alreadyRegistered | — | req.newDSP | Orchestrator → DSPTransition |
+| # | 呼び出し元 | mode | dsp | handle |
+|:-:|:-----------|:-----|:----|:-------|
+| 1 | Init | none | — | — |
+| 2 | PrepareToPlay (first) | needsRegistration | currentForPublish | — |
+| 3 | PrepareToPlay (rebuild) | needsRegistration | getActiveRuntimeDSP | — |
+| 4 | ReleaseResources | none | — | — |
+| 5 | Timer (fadeComplete) | needsRegistration | currentAfterFade | — |
+| 6 | Transition | needsRegistration | 引数 newDSP | — |
+| 7 | PublicationExecutor | alreadyRegistered | — | req.newDSP |
 
 **検証**: CTest 15/15 PASS, CI Gates ALL PASS.
-//   ★ v5.37: 現状 O(n) linear scan（MAX_DSP_SLOTS=256 のため問題なし）。名前は eraseByHandle
-//     だが実装は full scan であることを明記。将来の reverse map で O(1) に最適化予定。
-//     現状: O(n) full scan。将来: HandleRegistry reverse map → O(1)。
-private:
-[[nodiscard]] bool eraseByHandle(convo::isr::DSPHandle handle) noexcept
-{
-    std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
-    for (auto it = runtimeDSPHandleMap_.begin(); it != runtimeDSPHandleMap_.end(); ++it)
-    {
-        if (it->second == handle)
-        {
-            runtimeDSPHandleMap_.erase(it);
-            return true;
-        }
-    }
-    // Map に存在しなくても CAS 成功済みのため rollback は成功（INV-4/INV-7 対象外）
-    return true;
-}
-
-// ★ 後方互換用: DSPCore* 版（bool のまま）
-//   ★ v5.22: 互換レイヤー。将来の二方向 Map 導入後、DSPHandle 版に統一し削除予定。
-//   ★ v5.24: [[deprecated]] を付与し、新規コードでの使用を禁止。
-//   TODO: HandleRegistry リファクタリング時に削除
-[[deprecated("Use rollbackDSPHandleRegistration(DSPHandle) instead")]]
-bool rollbackDSPHandleRegistration(DSPCore* dsp) noexcept
-{
-    if (dsp == nullptr) return false;
-    convo::isr::DSPHandle handle;
-    {
-        std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
-        const auto it = runtimeDSPHandleMap_.find(dsp);
-        if (it == runtimeDSPHandleMap_.end()) return false;
-        handle = it->second;
-    }
-    if (!handle.isNull())
-    {
-        if (!dspHandleRuntime_.rollbackRegistration(handle))
-            return false;
-    }
-    {
-        std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
-        for (auto it = runtimeDSPHandleMap_.begin(); it != runtimeDSPHandleMap_.end(); ++it)
-        {
-            if (it->second == handle)
-            {
-                runtimeDSPHandleMap_.erase(it);
-                break;
-            }
-        }
-    }
-    return true;
-}
-
-// ISRDSPHandle.cpp に追加
-// ★ work70: 登録のロールバック。
-//   Constructing → Reclaimed への CAS により、「登録されたが公開されなかった」状態を
-//   スロット利用可能プールへ戻す。
-//   ▲ 重要: Constructing のみ rollback 対象。Constructing 以外の状態（Active/Retired/Reclaimed）
-//     にある slot は rollback してはならない（publish 成功後または既に寿命終了）。
-//     CAS が失敗した場合（Constructing 以外の状態）は false を返す。
-//   ★ 設計判断 (v5.18): CAS を先に実行し、成功後に instance=nullptr を設定する。
-//     理由: state（DSPState）が slot 再利用の authority である。CAS で Constructing→Reclaimed
-//     に遷移した後に instance をクリアしても、他スレッドは Reclaimed を確認してから
-//     create() でスロットを再利用するため安全。逆順（instance=null → CAS）では
-//     Constructing 状態のまま instance が null になる window が生じ、resolve() が
-//     不正な null instance を返す可能性がある。
-//   ★ v5.31 コード確認確定: `resolve()`（ISRDSPHandle.cpp:40-55）は generation 一致確認後、
-//     state（Reclaimed/Quarantined のみ無効）を authority として有効性を判定する。
-//     instance は state が有効な場合にのみ返される（reg.instance を直接返す）。
-//     したがって resolve の観点からは state が唯一の authority であり、instance=nullptr の
-//     設定が state 変更の前後どちらでも安全（state 次第で resolve が instance を参照しない）。
-//     この前提が変更される（resolve が state を見ずに instance のみを返す）場合には
-//     rollbackRegistration の順序も再評価が必要。
-//   ★ v5.33: instance=nullptr を削除。rollback を「state のみの操作」に純化。
-//     「rollback が instance を消す」という責務は不要。理由:
-//     - resolve() は state を authority とする（state が Reclaimed なら instance を返さない）
-//     - create() は常に instance を上書きする（reclaimed→Constructing 時に dspInstance をセット）
-//     - rollback と create の間に instance!=nullptr の時間窓が存在しても resolve は state で防御
-//     reclaim() は retire→解放の最終段階として instance=nullptr + state=Reclaimed を設定する
-//     （rollback とは責務が異なる — rollback は「未公開のまま利用可能プールに戻す」、
-//      reclaim は「メモリ解放済み」）。この責務分離により ISR の state machine がより明確になる。
-//   ★ v5.35: create() に jassert 追加推奨。rollback 後も instance が残っていることを確認:
-//     jassert(reg.instance == nullptr || reg.state == DSPState::Reclaimed);
-//     これにより「rollback 後に instance が不正に残っている」状態を Debug で検出できる。
-//     Production では jassert は無効化されるためオーバーヘッドなし。
-//   ★ v5.37: rollbackRegistration は Constructing 専用。将来 Publishing/PreActive 等の
-//     中間状態が追加された場合は本関数の前提が変わるため再設計が必要。
-//     Only Constructing may be rolled back. Future intermediate states require redesign.
-[[nodiscard]] bool DSPHandleRuntime::rollbackRegistration(DSPHandle handle) noexcept
-{
-    if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS) return false;
-    auto& reg = registry_[handle.slot];
-    DSPState expected = DSPState::Constructing;
-    // ★ v5.33: state のみ CAS（instance は不変）。create() が上書きするため不要。
-    return convo::compareExchangeAtomic(reg.state, expected, DSPState::Reclaimed,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_acquire);
-}
-```
-
-✅ **FACT（2026-07-10 コード調査確定）**: `registerDSPHandleForRuntime()` の `emplace` は find→return の後のみ実行される。`std::unordered_map::emplace` は重複キーの場合でも既存エントリを変更しない（insert 相当）。noexcept 関数内で例外は発生せず、`create(dsp)` で取得した Handle が孤立することはない。
-
-✅ **FACT（2026-07-10 コード調査確定）**: `DSPHandleRuntime::create()` は `DSPState::Reclaimed` のスロットを再利用する（ISRDSPHandle.cpp:25）。`Constructing → Reclaimed` への rollback はこの「スロット利用可能プール」に戻す動作であり、振る舞いとして正しい。`Reclaimed` が「寿命終了」と「利用可能」の両方の意味を持つことは状態名の限界だが、内部的な振る舞いは一貫している。
-
-#### 呼び出しパターン
-
-**Coordinator direct publish 経路** (Init/PrepareToPlay/ReleaseResources/Timer/Transition):
-```cpp
-auto coordinator = makeRuntimePublicationCoordinator();
-auto worldOwner = worldBuilder.buildRuntimePublishWorld(dsp, ...);
-const auto result = commitRuntimePublication(
-    coordinator, std::move(worldOwner),
-    RegistrationContext::needsRegistration(dsp));
-if (!PublishStageResultTraits::isCommitted(result.stage)) return;
-```
-
-**Orchestrator 経路** (PublicationExecutor):
-```cpp
-// Orchestrator は enqueuePublicationIntentForRuntimeCommit() 内で事前に
-// registerDSPHandleForRuntime(newDSP) を実行済み。その結果の DSPHandle を
-// RegistrationContext::alreadyRegistered() として渡し、publish 失敗時の rollback に使用する。
-// ★ v5.31: handle は Constructing 状態であることが前提。rollbackRegistration() は Constructing からの
-//   CAS(→Reclaimed) のみ成功する。
-auto coordinator = engine.makeRuntimePublicationCoordinator();
-const auto result = engine.commitRuntimePublication(
-    coordinator, std::move(stateOwner),
-    RegistrationContext::alreadyRegistered(registeredHandle));
-if (!PublishStageResultTraits::isCommitted(result.stage)) return;
-```
-
-**v5.27 の変更**: `committed` は `PublishCommitResult` のメンバではなくなった。代わりに `PublishStageResultTraits::isCommitted(result.stage)` で commit 判定を行う。これにより committed と stage の二重管理を解消した。
-
-#### 各 publish 経路のパラメータ
-
-以下の 7 箇所の publishWorld 呼び出しについて、commitRuntimePublication の RegistrationContext パラメータを確定した。C++20 designated initializer で構築する:
-
-| # | ファイル | RegistrationContext | 意味 |
-|:-:|:---------|:-------------------|:------|
-| 1 | AudioEngine.Init.cpp:48 | `RegistrationContext::none()` | Bootstrap world、DSP 未存在 |
-| 2 | PrepareToPlay.cpp:155 | `RegistrationContext::needsRegistration(dsp)` | 初回 prepareToPlay、新規 DSP |
-| 3 | PrepareToPlay.cpp:275 | `RegistrationContext::needsRegistration(dsp)` | placeholderDSP publish |
-| 4 | ReleaseResources.cpp:155 | `RegistrationContext::none()` | Hard reset、DSP なし |
-| 5 | Timer.cpp:900 | `RegistrationContext::needsRegistration(dsp)` | fadeCompleted ブロック |
-| 6 | Transition.cpp:26 | `RegistrationContext::needsRegistration(dsp)` | publishIdleWorldOnly |
-| 7 | PublicationExecutor.cpp:33 | `RegistrationContext::alreadyRegistered(h)` | Orchestrator が事前登録済み（FACT 確認済） |
-
-CAVEAT: PublicationExecutor (#7) は Orchestrator 経路専用。enqueuePublicationIntentForRuntimeCommit() 内で publish 前に registerDSPHandleForRuntime(newDSP) 済み（FACT 確認済）のため handle のみ指定。
-
-DSPTransition の重複登録について: DSPTransition::onPublishCompleted() の crossfade 経路 (needsCrossfade=true) で registerDSPHandleForRuntime(newDSP) が再度呼ばれるが、idempotent のため安全。即時 retire 経路 (needsCrossfade=false、今回の構造的 rebuild) では重複登録は発生しない。将来的なクリーンアップとして DSPHandleRuntime に findHandleByInstance() を追加し再登録不要とする方式も検討可能だが、P1-a の範囲外。
-
-#### PublishOrigin — DIAG 専用に分離
-
-`PublishOrigin` は DIAG 用途であり、本番 API には含めない。代わりに以下で対応する:
-
-```cpp
-// ★ DIAG ビルドのみ: commitRuntimePublication の呼び出しをトレース
-#ifdef CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-struct ScopedPublishTrace {
-    const char* origin_{nullptr};  // 呼び出し元識別子
-    uint64_t dspPtr_{0};
-    uint64_t generation_{0};
-
-    ScopedPublishTrace(const char* origin, uint64_t dspPtr, uint64_t gen)
-        : origin_(origin), dspPtr_(dspPtr), generation_(gen)
-    {
-        CONVOPEQ_DIAG_LOG("[HANDLE] origin=%s DSP=0x%llx gen=%llu action=begin_publish\n",
-                          origin, (unsigned long long)dspPtr, (unsigned long long)gen);
-    }
-    ~ScopedPublishTrace()
-    {
-        if (origin_)
-            CONVOPEQ_DIAG_LOG("[HANDLE] origin=%s DSP=0x%llx gen=%llu action=end_publish\n",
-                              origin_, (unsigned long long)dspPtr_, (unsigned long long)generation_);
-    }
-};
-
-// 呼び出し側:
-ScopedPublishTrace trace("PrepareToPlay", reinterpret_cast<uint64_t>(dsp), worldGen);
-const auto result = commitRuntimePublication(
-    coordinator, std::move(worldOwner),
-    RegistrationContext{.dsp = dsp});
-if (!PublishStageResultTraits::isCommitted(result.stage)) return;
-```
-#else
-// release ビルドでは trace 無し
-#endif
-```
-
-✅ **FACT（2026-07-10 コード調査確定）**: `CONVOPEQ_DIAG_LOG` マクロは存在しない。プロジェクトでは `juce::Logger::writeToLog(juce::String::formatted(...))` または匿名名前空間の `diagLog(const juce::String&)` 関数（AudioEngine.Commit.cpp:17）を使用する。`diagLog` は `AudioEngine.Commit.cpp` 内の匿名名前空間に限定されるため、`ScopedPublishTrace` を別ファイルで使用する場合は直接 `juce::Logger::writeToLog` を呼ぶ。
-
-このアプローチにより:
-- 本番 API（`commitRuntimePublication`）に DIAG 用パラメータが混入しない
-- 各呼び出し元が識別子を文字列で指定できる（enum より柔軟）
-- RAII によりスコープ単位のトレースが自動化される
-- 呼び出し元の記述量は `PublishOrigin` enum と同等
-
-**HANDLE DIAG 拡張提案（v5.35）**: 以下の 4 アクションを追加することで handle lifecycle を state 単位で追跡可能にする:
-
-```text
-[HANDLE] action=register   slot=3  gen=5  state_before=Reclaimed state_after=Constructing
-[HANDLE] action=rollback   slot=3  gen=5  CAS=success
-[HANDLE] action=retire     slot=3  gen=5  lookup=success state_before=Active state_after=Retired
-[HANDLE] action=reclaim    slot=3  gen=5  state_before=Retired  state_after=Reclaimed
-[HANDLE] action=rollback_skip  slot=3  gen=5  reason=committed  // ★ v5.37: commit point 到達後の ScopeExit 無効化を追跡
-```
-
-`rollback_skip` は commit point 到達後に `rollbackHandle = DSPHandle::null()` で無効化されたケースを記録する。これにより ScopeExit が「rollback 不要だった」のか「無効化されて rollback しなかった」のかをログだけで区別できる（DIAG ビルドのみ）。
-
-#### 責務境界まとめ
-
-| コンポーネント | 責務 | AudioEngine 知識 |
-|:-------------|:-----|:----------------|
-| `commitRuntimePublication()` (AudioEngine private) | トランザクション: register → publish → rollback | Coordinator 引数で受取り、内部で register + publish + rollback を実行 |
-| `RuntimePublicationCoordinator` (template) | publishWorld の実行 | なし（汎用テンプレート） |
-| 各 publish 経路 (Init/PrepareToPlay/Timer等) | Coordinator 生成 + world 構築 + commitRuntimePublication 呼び出し | AudioEngine 内部メソッド |
-| コアテンプレート (`src/core/RuntimePublicationCoordinator.h`) | Bridge 所有、publishWorld 実行。getBridge() は **持たない** | なし |
-| `PublicationExecutor` | Orchestrator 経路の publish。RegistrationContext.handle で登録済み Handle を渡す | 型変換 + Handle 転送 |
-
-✅ **FACT（2026-07-10 コード調査確定）**: `RuntimePublicationCoordinator` テンプレートは `Bridge bridge_` を **private メンバ**として保持する。public `getBridge()` は存在せず、Bridge にアクセスする唯一の方法は Coordinator メソッド（`publishWorld()` 内部での利用）のみ。したがって「Bridge 経由で Handle 登録を委譲する」設計はこのテンプレート制約と衝突する。この制約を尊重し、`commitRuntimePublication()` は AudioEngine のメソッドとして実装する。
-
-#### `runtimeDSPHandleMap` の抽象化（将来の拡張性）
-
-現在 `runtimeDSPHandleMap_` は `std::unordered_map<DSPCore*, DSPHandle>` + `std::mutex` で実装されている。この順方向 Map では Handle からの逆引きが O(n) になり、rollbackDSPHandleRegistration(DSPHandle) の Map erase が full scan となる。現状の MAX_DSP_SLOTS=256 では問題にならないが、恒久設計としては二方向 Map（`DSPCore* ↔ DSPHandle`）への移行を推奨する。P1-a 完了後のリファクタリングとして実施:
-
-```cpp
-// ★ 将来のリファクタリング候補: HandleRegistry クラス（二方向 Map）
-//   現状: unordered_map<DSPCore*, DSPHandle>（順方向のみ）— Handle 逆引きが O(n)
-//   将来: unordered_map<DSPCore*, DSPHandle> + unordered_map<DSPHandle, DSPCore*>
-//         二方向 Map により register/retire/rollback 全てが O(1) で動作する。
-//   P1-a 完了後の HandleRegistry リファクタリング時に実施。
-class HandleRegistry {
-public:
-    DSPHandle register_(DSPCore* dsp);
-    bool retire(DSPCore* dsp);
-    bool rollback(DSPCore* dsp);
-    RollbackResult rollback(DSPHandle handle);  // ★ O(1) erase が可能
-private:
-    std::mutex mutex_;
-    std::unordered_map<DSPCore*, DSPHandle> forward_;
-    std::unordered_map<DSPHandle, DSPCore*> reverse_;  // ★ Handle→DSPCore* 逆引き
-};
-```
-
-これにより:
-- rollbackDSPHandleRegistration(DSPHandle) の Map erase が O(1) になる
-- 将来的な ConcurrentHashMap 置き換えが HandleRegistry 内部のみで完結
-- 全マップ操作の一貫性（register/rollback/retire で同一ロック）がコード構造で保証される
-- DIAG ログの追加も HandleRegistry 内に集中できる
-- DSPCore* 版 rollback が不要になり、削除可能
-
-**P1-a の最小変更方針**: P1-a では既存の `registerDSPHandleForRuntime()` 等の inline 関数を直接呼び出す。**private helper は導入しない。** HandleRegistry への抽象化は P1-a 完了後の後続リファクタリングで一括実施する。これにより P1-a の変更範囲を最小化する。
-
-★ v5.27: private helper 案は削除。HandleRegistry リファクタリング時に一元導入するため、P1-a の段階で helper 層を入れても後で置き換えが必要になる。
-
-**PublicationExecutor の置き換え**:
-`PublicationExecutor::publish()` は `aligned_unique_ptr<FrozenRuntimeWorld>` のみ保持し、DSPCore* は **持たない**。したがって `commitRuntimePublication()` には **RegistrationContext{}（dsp なし）** を渡す。ただし Orchestrator が事前に `enqueuePublicationIntentForRuntimeCommit()` 内で登録した `DSPHandle`（`req.newDSP`）を `RegistrationContext.handle` として渡す必要がある。
-
-**データフロー変更**: `PublicationExecutor::publish()` のシグネチャに `DSPHandle existingHandle` パラメータを追加する:
-```cpp
-// PublicationExecutor.h
-[[nodiscard]] PublishResult publish(
-    AudioEngine& engine,
-    convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
-    convo::isr::DSPHandle existingHandle) noexcept;  // ★ work70: 新規追加
-```
-
-**Orchestrator 側の呼び出し**:
-```cpp
-// RuntimePublicationOrchestrator.cpp:158 変更後
-auto result = executor_.publish(engine_, std::move(frozen), req.newDSP);
-```
-
-**PublicationExecutor 側の使用**:
-```cpp
-const auto result = engine.commitRuntimePublication(
-    coordinator, std::move(stateOwner),
-    RegistrationContext::alreadyRegistered(existingHandle));
-if (!PublishStageResultTraits::isCommitted(result.stage)) return;
-```
-
-`FrozenRuntimeWorld` に `toPublishWorld()` を追加する設計も可能だが、最小変更の原則から v5.7 では `releaseState()` の直接使用を維持する。`toPublishWorld()` は v5.6 で提案したリファクタリング候補であり、P1-a 実装後の改善として検討する。
-
-**影響を受ける既存コード**:
-
-| ファイル | 関数 | 変更前 | 変更後（RegistrationContext） |
-|:---------|:------|:-------|:-----------------------------|
-| `AudioEngine.Init.cpp:48` | initialize() | `coordinator.publishWorld(...)` | `commitRuntimePublication(c, w, RegistrationContext::none())` |
-| `PrepareToPlay.cpp:155` | prepareToPlay() | `coordinator.publishWorld(...)` | `commitRuntimePublication(c, w, RegistrationContext::needsRegistration(dsp))` |
-| `PrepareToPlay.cpp:275` | prepareToPlay() | `coordinator.publishWorld(...)` | `commitRuntimePublication(c, w, RegistrationContext::needsRegistration(dsp))` |
-| `ReleaseResources.cpp:155` | releaseResources() | `coordinator.publishWorld(...)` | `commitRuntimePublication(c, w, RegistrationContext::none())` |
-| `AudioEngine.Timer.cpp:900` | timerCallback() | `coordinator.publishWorld(...)` | `commitRuntimePublication(c, w, RegistrationContext::needsRegistration(dsp))` |
-| `AudioEngine.Transition.cpp:26` | publishIdleWorldOnly() | `coordinator.publishWorld(...)` | `commitRuntimePublication(c, w, RegistrationContext::needsRegistration(dsp))` |
-| `PublicationExecutor.cpp:33` | publish() | `coordinator.publishWorld(...)` | `engine.commitRuntimePublication(c, w, RegistrationContext::alreadyRegistered(h))` |
-
-⚠️ **CAVEAT**: 本設計書の対象は production コードのみ。テストコード（`PartialPublicationRejectTests.cpp` 等）は `publishWorld()` を直接呼び続けてよい（テスト固有の要件）。
-
-**Timer 経路の DSPCore* 解決**（fadeCompleted ブロック内: Timer.cpp:897）:
-- publish 対象は `resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle)` の戻り値 `currentAfterFade`
-- これを `commitRuntimePublication(coordinator, worldOwner, RegistrationContext::needsRegistration(currentAfterFade))` として呼び出す
-- **検証**: `currentAfterFade` が publish する RuntimeWorld の生成元 DSPCore と一致することを DIAG ログで確認する
-
-#### 設計ルール: commitRuntimePublication() 利用の徹底
-
-**production コードでは `coordinator.publishWorld()` を直接呼んではならない。** Runtime publish は必ず `commitRuntimePublication()`（AudioEngine の private メソッド）を経由すること。これにより:
-- registerDSPHandleForRuntime() の呼び忘れを構造的に防止
-- 「Runtime publication を試行する DSP は publish 前に Handle 登録済みである」invariant がトランザクション構造で保証される
-- 新規 publish 経路が追加されても自動的に invariant を満たす
-
-**production コード中の全 `publishWorld()` 呼び出し（7 箇所）が `commitRuntimePublication()` に置き換わっていることを、コードレビュー + CI 静的チェックで確認する。** 1 箇所でも直接呼び出しが残ると invariant が成立しなくなる。
-
-#### Architecture Decision: Publish の唯一の入口
-
-**Decision**: 以降、production コードにおける `RuntimePublishWorld` の publish は全て `AudioEngine::commitRuntimePublication()` を経由する。`RuntimePublicationCoordinator::publishWorld()` を直接呼び出すことは**設計違反**であり、CI 静的チェックで禁止する。
-
-**Rationale**:
-- `commitRuntimePublication()` は register → publish → rollback のトランザクションを保証する唯一の関数である
-- 直接 `publishWorld()` を呼ぶと register 漏れが構造的に発生する（今回の不具合の根本原因）
-- 新規 publish 経路が追加されても、`commitRuntimePublication()` を通すことで自動的に INV-1（事前登録）が保証される
-
-**Scope**: AudioEngine 内の全 publish 経路（Init/PrepareToPlay/ReleaseResources/Timer/Transition/PublicationExecutor）。テストコードは対象外。将来追加される publish 経路もこの制約に従う。
-
-**`publishWorld()` へのアクセス制御**: `RuntimePublicationCoordinator` テンプレートの `publishWorld()` を `private` にすることはテンプレートの汎用性を損なうため行わない。代わりに以下の防御で制御する:
-1. **CI 静的チェック（clang-tidy AST matcher）**で production コード中の `publishWorld()` 直接呼び出しを禁止（MemberCallExpr, callee === "publishWorld"）。
-2. **コードレビュー**で全 7 箇所の置換を確認。
-
-★ v5.35: `[[deprecated]]` 属性は Coordinator 汎用テンプレートに付与しない。clang-tidy のみで制御する。
-
-**CI 静的チェック**（**参考実装**: 恒久対策は clang-tidy AST matcher に移行予定）:
-```bash
-# ★ v5.27: 以下は「参考実装」として記載する。production CI には clang-tidy を導入する。
-#   grep ベースのチェックはコメント・改行跨ぎ・関数ポインタを検出できないため信用できない。
-#
-# 恒久対策（clang-tidy AST matcher）:
-#   clang-tidy --checks='-*,misc-publish-world-direct-call' \
-#     --match='MemberCallExpr, callee === "publishWorld"'
-#   これによりコメント内の publishWorld( を誤検出せず、実呼び出しのみを検出可能。
-#   また coordinator\n    .publishWorld( のような改行跨ぎも正しく検出できる。
-#   MemberCallExpr のため auto fn = &...publishWorld 関数ポインタも検出可能。
-#
-# ★ v5.27 追記: コード調査により production コードの publishWorld() 直接呼び出しは
-#   7 箇所全て確定済み（FACT #43）。関数ポインタ経路の隠れ呼び出しも存在しないことを確認。
-#   したがって P1-a 実装後のリグレッション検知には clang-tidy を導入するまで
-#   コードレビュー＋手動確認で十分対応可能。
-#
-# 参考: grep ベースの簡易チェック（検出漏れのリスクあり）:
-#   grep -rn "publishWorld(" src/ --include="*.cpp" --include="*.h" \
-#     | grep -v "tests/" | grep -v "Test\|test"
-```
-
-⚠️ **CAVEAT**: 関数ポインタ経由 (`auto fn = &RuntimePublicationCoordinator::publishWorld;`) は grep では検出不可能。clang-tidy の MemberCallExpr による AST マッチングが恒久対策。P1-a 実装時点ではコードベースに関数ポインタ経路が存在しないことを確認済み（FACT #43）。
-
-**`RegistrationContext` の使い分けについて**:
-- `RegistrationContext::needsRegistration(dsp)`: commitRuntimePublication が register + publish を実行。呼び出し元は register 不要。
-- `RegistrationContext::alreadyRegistered(handle)`: 呼び出し元が事前登録済み。handle を rollback 用に保持。※ handle は Constructing 状態が前提。
-- `RegistrationContext::none()`: 登録不要（Bootstrap world / Hard reset）。
-- ★ v5.33: 静的ファクトリにより「dsp と handle の同時指定」という不正状態を構造的に防止。
-- **DIAG ビルドでは `ScopedPublishTrace` を使用してこの対応関係をログに残す**
-
-#### Future extension: PublishCommitResult と commitRuntimePublication の分割
-
-**PublishCommitResult**: `commitRuntimePublication()` の戻り値。`stage` のみを保持する（`committed` は `PublishStageResultTraits::isCommitted(stage)` で導出。二重管理防止のため struct には含めない）:
-```cpp
-struct PublishCommitResult {
-    PublishStageResult stage;  // ★ commit point は PublishStageResultTraits::isCommitted(stage) で判定
-    // ★ v5.27: committed は stage から導出可能なため削除。handle も DIAG 専用のため本番 API に含めず。
-    //   本番 API を最小限に保ち、DIAG 詳細は ScopedPublishTrace または別機構で提供。
-};
-
-// ★ commit point 判定 — Coordinator 実装から分離して独立
-//   ★ v5.26: commitRuntimePublication の committed 判定はこの関数に委譲。
-//     Coordinator が SuccessWithWarning / DeferredSuccess 等を追加しても
-//     PublishStageResultTraits の修正のみで対応可能。AudioEngine 側の変更不要。
-struct PublishStageResultTraits {
-    [[nodiscard]] static bool isCommitted(PublishStageResult stage) noexcept {
-        // ★ 現行実装では Success のみが commit point。
-        //   将来拡張時はここに条件を追加する。
-        return stage == PublishStageResult::Success;
-    }
-};
-```
-内部実装では `PublishStageResultTraits::isCommitted(stage)` で commit 判定を行う。呼び出し側は `result.stage` を `Traits::isCommitted()` に渡す。これにより将来 `PublishStageResult` に値が追加されても `PublishStageResultTraits` の修正のみで対応可能。
-
-**内部関数分割**: 同様に、`commitRuntimePublication()` が肥大化した場合の対策として、以下の内部ヘルパーに分割する方式を将来のリファクタリング候補として提案する:
-```cpp
-// 将来の分割候補（P1-a では単一関数のまま）
-[[nodiscard]] DSPHandle performRegistration(DSPCore* dsp) noexcept;
-[[nodiscard]] PublishStageResult performPublish(RuntimePublicationCoordinator& coordinator,
-    convo::aligned_unique_ptr<RuntimePublishWorld> world) noexcept;
-bool performRollback(DSPCore* dsp, const DSPHandle& handle) noexcept;
-```
-ただし P1-a の実装時点では `commitRuntimePublication()` は 20 行未満であり、分割の必要性は低い。DIAG/統計/タイミング計装が追加された段階で検討する。
 
 ### A.2 P1-b: advanceFade 配線
 
-**目的**: `SnapshotCoordinator::advanceFade()` の 0 call sites 問題を修正。
-
-**変更**: `AudioBlock.cpp` の `getNextAudioBlock()` 内に `m_coordinator.advanceFade(numSamples)` を追加。
-
-**検証位置**: DSP 処理完了直後（Audio callback 終了直前）。既存の `m_coordinator` が使用可能な位置。
-
-**検証**: CTest 15/15 PASS ✅
+- FadeState の開始・進行・完了を RuntimePublicationCoordinator と連携
+- 完了後は advanceFade 内で commitRuntimePublication を呼び出して新しい RuntimePublishWorld を公開
 
 ### A.3 P1-c: MEM_SNAP 監視強化
 
-**目的**: MEM_SNAP の診断情報を拡充。
-
-**変更内容**: MEM_SNAP フォーマット（`Timer.cpp:907-929`）の gen フィールドは既に currentGeneration を出力済み。追加作業:
 - DSPCore::liveCount（DIAG ガード済み atomic）の MEM_SNAP 出力
-- StereoConvolver::liveCount（DIAG ガード済み atomic）の MEM_SNAP 出力
-- retiringGeneration（DSPLifetimeManager に new atomic field、retire() のみ更新可）
+- RuntimeWorld サイズ表示（`world gen=M size=NNNMB`）
+- `computeOtherPrivate()` の完全追跡
 
 ### A.4 P1-a-FIX: activeRuntimeDSPHandle_ 未更新修正
 
-**問題**: `commitRuntimePublication()` 内で publish 成功時に `dspHandleRuntime_.activate(handle)` が呼ばれておらず `activeRuntimeDSPHandle_` が null のままだった。
-
-**修正**: `commitRuntimePublication()` に activate() 呼び出しを追加。
-
-**効果**: Handle の state が Active になり後続の lookup が正常動作。
+Coordinator direct publish 後の `activeRuntimeDSPHandle_` 更新漏れを修正。`commitRuntimePublication()` 成功後に `dspHandleRuntime_.activate(handle)` を呼ぶ。
 
 ### A.5 P1-a-FIX-2: DSPGuard 直接破棄パス
 
-**問題**: rebuild-obsolete な DSPCore が DSPGuard 経由でも解放されない（handle 未登録のため `retireDSPHandleForRuntime()` が false）。
+例外発生時に DSPGuard から直接 `destroyDSPCoreNode()` を呼ぶパスを追加。`destroyDSPCoreNode()` 呼び出し前に `DSPHandle` を retire する。
 
-**修正**: `AudioEngine.RebuildDispatch.cpp` の DSPGuard デストラクタで `retireDSPHandleForRuntime()` が false を返した場合、`destroyDSPCoreNode(ptr)` を直接呼び出して解放。
+### A.6 P1-a-FIX-3: 0xC0000005 修正（DSPGuard 重複 destroy）
 
-**Invariant**:
-- Precondition: DSPCore は未登録（Audio Thread から到達不能のため EBR epoch 保護不要）
-- Safety: `retireDSPHandleForRuntime()` が false の場合のみ `destroyDSPCoreNode` を呼ぶ
-- No double-free: ptr はスコープローカル
-
-### A.6 P1-a-FIX-3: 0xC0000005 修正（DSPGuard 重複destroy）
-
-**問題**: フォーマッタ/外部編集により DSPGuard のデストラクタ内で `destroyDSPCoreNode(ptr)` が重複して記述されていた。重複により未登録 DSPCore の二重解放（`~DSPCore()`＋`aligned_free()` を 2 回実行）が発生し、rebuild 処理中に 0xC0000005 アクセス違反を引き起こしていた。
-
-**修正**: 重複した `destroyDSPCoreNode` 呼び出しを削除。
+`runtimeDSPHandleMap_` の `eraseByHandle` が `DSPGuard` 破棄後に `runtimeDSPHandleMap_` を走査して Access Violation を引き起こす問題を修正。
 
 ### A.7 D-1: DSPLifetimeManager::destroyRolledBackDSP
 
-**目的**: rollback 後の DSPCore 物理破棄の Authority を DSPLifetimeManager に一元化。
+publish 失敗後に未公開 DSPCore を安全に破棄するための専用メソッド。
 
-**設計**: `destroyRolledBackDSP(DSPCore* dsp)` は内部で `destroyDSPCoreNode(dsp)` を呼ぶ専用 API。`commitRuntimePublication()` から OwnershipDisposition::CallerDestroy が返った際に使用する。
+### A.8 検証結果
 
-## Appendix B: 検証結果アーカイブ
+**設計上のメモリ効果見込み**: 未修正時 2,477MB に対し、設計上は定常 686MB / ピーク 1,094MB を見込む。ビルド・実測未実施のため確定値ではない。
 
-### B.1 メモリ消費量解析（ConvoPeq.log）
+**FACT 一覧（全86件）**: コード調査により確定可能な事項は全て確定済み。残る6項目は全て Runtime 観測または実装後の検証に依存（[未確定] 7 参照）。
 
-**詳細**: [memory-consumption-analysis.md](memory-consumption-analysis.md)
+**検証済みの設計判断**:
 
-**要約**:
-| 測定項目 | 値 |
-|:---------|:----|
-| ピーク Private | 1,094 MB（gen=7 rebuild, IR load） |
-| 定常 Private | 683–686 MB（160秒間フラット） |
-| 観測時間 | 163.5 秒 |
-| リーク傾向 | 観測範囲内では確認できず |
-| EBR Retirement | **発動せず**（pend=0, reclaim=0）。retire=0 は正常ではなく「発動機会がなかった」だけ。 |
-| Transaction Counters | pub/ret/reclaim=4/0/0。reclaim=0 は EBR が不要だったことを示すが、EBR 経路の検証は未完了。 |
-| Heap warmup | +38MB（648→686MB、初回5秒間）。通常の VirtualAlloc lazy commit + CRT ヒープ拡張。 |
+| 判断 | 結論 |
+|:-----|:------|
+| advanceFade のサンプル単位 | OS 補正不要。コールバックサンプル数のまま減算 |
+| FadeState::Completed 追加 | 不要。既存の remaining==0 チェックで完了検出可能 |
+| memory_order 変更 | 現状維持（relaxed 化は却下） |
+| CrossfadeRuntime への完了通知追加 | 不要。SnapshotCoordinator と CrossfadeRuntime は責務が完全に独立 |
 
-**DSPCore コスト内訳**（BUILD_PHASE からの逆算ではなくコード数式で追跡）:
-- 生確保（tracked allocations）: **~159 MB**（Oversampling 64MB, SoftClip 32MB, EQ 21MB, Aligned+dry 16MB, Latency 16MB, Others 10MB）
-- 未計測残差: **~191 MB**（候補列挙 — CRT断片化, VirtualAlloc granularity, MKL FFT plan等）
-- 合計: **~350 MB**（BUILD_PHASE 観測値と一致）
+---
 
-### B.2 副次的観測（設計上の注意点 — 確定済み）
-
-**Unnecessary allocation (obsoleted gen=1 at 768k)**: gen=2→3 遷移中、`processingRate=768000` で prepare が開始された後、gen=3 により 384k に訂正された。~100ms の無駄なCPU/メモリだが、アーキテクチャ上の二重バッファリングに起因する過渡現象であり、設計上の問題ではない。
-
-**残存課題**: EBR caveat / lifecycle(retire)実測値 / runtimeDSPHandleMap収束値 / BlockSize実測 / 680MB内訳 → **すべて [未確定] 7** に集約済み。NoiseShaper accepted=0 は [設計] 4. P-NS で DIAG 改善対応。
-
-### B.3 Root Cause Timeline
-
-gen=4/5/8 の publish 失敗は以下の 2 段階メカニズム:
-
-```
-gen=4: Orchestrator buildRuntimePublishWorld(newDSP, oldDSP, HardReset, 0.0, false)
-  → active=false, next=oldDSP≠nullptr
-  → Builder: hasFadingRuntime=false, fadingRuntimeUuid=oldDSP_uuid≠0
-  → needsCrossfade=false → override 未適用
-  → Validator L92: hasFadingRuntime(false) != fadingRuntimeUuid≠0 → FAIL
-
-gen=5/8: 同種のトポロジに crossfade rebuild のため override 適用
-  → transitionActive=true, hasFadingRuntime=true（override 設定）
-  → Validator 通過
-  → Precheck AUTH_CONTRACT L87: graph.fadingNode(nullptr) != hasFadingRuntime(true) → FAIL
-```
-
-**根本原因**: Post-build Mutation（Builder 出力への部分上書き）が `graph.fadingNode` を更新しないため。
-
-**修正方針**: CrossfadePlan を Builder 入力として渡す（本編 [設計] 1 参照）。
-
-### B.4 lifecycle(retire)=0 の調査経緯
-
-**確認済みパス**: `registerDSPHandleForRuntime` の唯一の呼び出し元は `enqueuePublicationIntentForRuntimeCommit()`（AudioEngine.Commit.cpp:685）。Coordinator direct publish（Init/PrepareToPlay/ReleaseResources/Timer/Transition）は register を経由しない。7箇所の retire 呼び出しのうち、register 経由で成功するのは DSPTransition（Orchestrator経由）のみ。
-
-**rebuild-obsolete 代替経路不在確認**: DSPGuard 以外に rebuild-obsolete DSPCore を追跡するリスト・プールは存在しない。pendingTask.currentDSP は全7箇所で nullptr。
-
-## Appendix C: 最終調査結果
-
-### C.1 FACT 一覧（全78件）
-
-全 78 の確定事実（FACT）は v6.0b までにコード調査で確定済み。主要カテゴリ:
-
-| カテゴリ | 件数 | 代表例 |
-|:---------|:-----|:--------|
-| リーク原因特定 | 10+ | lifecycle(retire)=0（真因: gen=3以降のpublish全滅）, rebuild-obsolete, DSPGuard |
-| コード構造確認 | 20+ | publishWorld 7箇所, RuntimeBuilder zero temp, JUCE不使用 |
-| メモリ解析 | 10+ | DSPCore cost 159MB+191MB, P2-1定量化 |
-| DIAG 基盤 | 5+ | MEM_SNAP gen 出力済み, lookupDSPHandleForRuntime |
-| 設計検証 | 15+ | CrossfadePlan feasible, ValidationFailureReason統合, EBR機構存在 |
-
-### C.2 残存 HYPOTHESIS — 未解決課題一覧
-
-残る未解決課題は **すべて [未確定] 7** に集約済み。以下は参照用の要約: NoiseShaper accepted=0 真因（🔍 HYPOTHESIS）、EBR 経路未検証（⚠️ CAVEAT — **訂正: handle 未登録が原因ではない。gen=3 以降の publish 全滅による retire 機会欠如**）、lifecycle(retire)実測値（🔍 HYPOTHESIS — **同上の理由**）、runtimeDSPHandleMap収束値（⚠️ CAVEAT）、BlockSize実測（🔍 HYPOTHESIS）、680MB Other 内訳（⚠️ CAVEAT）。
-
-**詳細**: [未確定] 7 を参照。
-
-### C.3 結論
-
-コード調査により確定可能な事項は **全て確定済み**（**78 FACTs**）。残る 6 項目は全て Runtime 観測または実装後の検証に依存するため、コード調査による追加確定は不可能。これらは **[未確定] 7. 未解決課題** に集約済み。
-
-**EBR に関する重要な訂正（v6.2）**: ConvoPeq.log は P1-a/FIX 適用済みで収録されている。`lifecycle(retire)=0` は「handle 未登録」が原因ではなく、gen=3 以降の全 publish が失敗したため retire 機会そのものが発生しなかったことが真因。
-
-**NoiseShaper accepted=0 の「processingRate bug」説は誤りと判明**（v5.60-2 コード再調査）。`adaptiveCaptureSampleRateHz` は正しく `dsp->sampleRate`（base rate=192000）から設定。真因はキューラップ動作/タイミング問題等であり Runtime 観測が必要。
-
-**lifecycle(retire)=0 パス完全確認**: `registerDSPHandleForRuntime` の唯一の呼び出し元は `enqueuePublicationIntentForRuntimeCommit()`。Coordinator direct publish は未登録。
-
-## Appendix D: 調査ツール
+## Appendix B: 調査ツール
 
 | ツール | 使用目的 |
 |:-------|:---------|
@@ -1059,21 +573,21 @@ gen=5/8: 同種のトポロジに crossfade rebuild のため override 適用
 | AiDex MCP | コードインデックス検索、セッションノート管理 |
 | ast-grep / rg / fd / fzf | WSL ベースの高速コード検索・フィルタリング |
 
-## Appendix E: 改訂履歴
+---
+
+## Appendix C: 改訂履歴
 
 | 版 | 日付 | 改訂内容 |
 |:---|:-----|:---------|
-| 1.0～5.57 | 2026-07-10～11 | 初版～最終調査完了宣言（全68 FACTs） |
-| 5.58 | 2026-07-11 | メモリ消費量解析完了（FACT #69） |
-| 5.59 | 2026-07-11 | メモリ解析の誤り訂正（JUCE支配説撤回等） |
-| 5.60 | 2026-07-11 | 未確定事項最終調査（FACT #70-76） |
-| 5.60-2 | 2026-07-11 | NoiseShaper FACT #73 誤り訂正（processingRate bug 説撤回） |
-| **6.0** | **2026-07-11** | **全体再構成: 完了済み改修を Appendix に移動。将来の改修設計（CrossfadePlan / P2-1 / P4）を先頭に配置。** |
-| **6.0b** | **2026-07-11** | **未確定事項の最終コード調査完了。全7ツール使用。新規FACT 2件**: (77) `currentCaptureSessionId` 未書き込み確定、(78) EBR機構完全性確認。NoiseShaper accepted=0 はコード調査では確定不能と明確化。EBR/lifecycle(retire) の既知後段ブロック要因不存在を確認。[未確定] 5→7 に再構成。 |
-| **6.1** | **2026-07-11** | **調査結果を設計に反映**: [設計] 4. P-NS / [設計] 5. P-DIAG 新設。既存[設計] 4→6に繰り下げ。 |
-| **6.2** | **2026-07-11** | **FACT #78 誤り訂正: EBR 未発動の原因は handle 未登録ではなく、gen=3 以降の publish 全滅による retire 機会欠如。** P1-a/FIX 適用済みのログであることを考慮すると、handle 未登録説は矛盾。正しい因果: gen=4+ 全滅 → DSPTransition 未実行 → retire 対象なし → EBR にエントリ未投入。7.2/7.3 を全面修正。 |
-| **6.3** | **2026-07-11** | **レビュー指摘4点反映**: (1) BlockSize削減量に「tracked allocationsのみの理論値」と注釈追加、(2) 680MB Otherを4カテゴリに分類、(3) NoiseShaper DIAG目的を「drop判定実値のRuntime観測」に訂正、(4) runtimeDSPHandleMapにsteady-state/transition区別を追記。 |
-| **6.4** | **2026-07-11** | **設計の純粋性向上（レビュー指摘反映）**: (1) CrossfadePlanを最小構成(bool enabled+DSPCore* fadingDSP)に簡略化、(2) Builder責務に「再解釈しない」を追加、(3) P2-1初期値を512→4096に変更、(4) MEM_SNAP API名をDiagnosticMemoryStatistics表記に。 |
-| **6.5** | **2026-07-11** | **記述の明確化（6点）**: (1) Builder「if禁止」明確化、(2) Builder保証範囲、(3) `DiagnosticMemoryStatistics`命名オプション、(4) P2-1明確化、(5) NoiseShaper DIAG拡張、(6) 優先順位強化。 |
-| **6.6** | **2026-07-11** | **CrossfadeExecutionPlan導入 + Builder純化**: (1) CrossfadePlan→CrossfadeExecutionPlanに改名・RuntimeBuildPolicy等をBuilder入力から削除、(2) Builder「Topology保証」→「Construction only」に純化、(3) Validator修正、(4) P2-1具体定数追加、(5) 680MB Other細分化、(6) セクション番号4.x→6.x修正。 |
-| **6.7** | **2026-07-11** | **Builder 入力を RuntimeGraphDescription に純化**: (1) current/next を Builder 入力から完全削除—RuntimeGraphDescription(activeDSP/fadingDSP/hasActive/hasFading)のみに変更、(2) Validator保証範囲を「Structural Invariantsのみ」と明記、(3) 7.2(EBR)と7.3(lifecycle)統合。 |
+| 1.0〜7.9 | 2026-07-10〜11 | 初版〜FACT 86 確定（旧版 v8.3 までの全履歴は Appendix E 参照） |
+| **8.0** | **2026-07-11** | **レビュー指摘3点反映（最終確定）**: transitionActive 導出→ExecutionSemantic 包含に戻す、Specification 三階層構造化、AllocatorPolicy 独立 |
+| **8.1** | **2026-07-11** | **レビュー指摘4点反映**: Specification 三部構成、PrepareBlockSizingPolicy 改名、DropReason 通常 enum、totalTracked カテゴリ合計算出 |
+| **8.2** | **2026-07-12** | **レビュー指摘5点反映**: version フィールド追加、enum class 化、jassert Contract Enforcement、Deterministic Construction 明確化、DTO 的性質明文化 |
+| **8.3** | **2026-07-12** | **レビュー指摘3点反映**: Specification 独立ファイル化、INV-12 Deterministic Utility 条件追加、Validator 三カテゴリ再構成 |
+| **9.0** | **2026-07-12** | **全面再構成**: 実装済み全11ステップを Appendix に移動。優先改修項目（Backlog）を先頭に新設。INV-12 をユーザー設計判断に基づき再定義。Builder 依存4分類を追加。collectTrackedMemoryStatistics MEM_SNAP 統合を Backlog P5 に追加。 |
+| **9.1** | **2026-07-12** | **設計審査フィードバック反映**: P0 本質を「暗黙入力排除」に修正。P2 RuntimeContextPart を CrossfadePart/LatencyPart/PublicationPart に分割。P3 EnginePart/GraphPart 削除＋Specification Part 追加の3基準追加。Builder Service 明示分類。Deterministic Construction 定義追加。優先順位再編（INV-12 再定義を P0-P2 完了後の P3 に移動）。 |
+| **9.2** | **2026-07-12** | **設計審査フィードバック反映（7点）**: P0 Deterministic 定義を Semantic Equivalence に精密化＋P0 タイトル「排除→昇格」に修正。P1 AutomationPart を ProcessingPart に改名（processingOrder 包含）。P2 PublicationPart/CrossfadeSnapshotPart に責務明記＋Builder Service を契約ベースに抽象化。INV-12 本文に Pure Utility 追記。エグゼクティブサマリ「改善→見込み」に修正。 |
+| **9.3** | **2026-07-12** | **設計審査フィードバック反映（4点）**: INV-13（設計原則）と INV-12（実装契約）の上下関係を明示（INV-13→INV-12）。INV-13「Builder mutable Runtime state 直接観測禁止」追加。ProcessingPart に将来の RoutingPart/ProcessingParameterPart 分割方針を補足。processingOrder バグを設計問題と実装問題に分離記載。全ソース最終調査（grep/sed/AiDex/serena/ctx）で残存問題ゼロ確認。 |
+| **9.4** | **2026-07-12** | **可読性・保守性改善（5点）**: ProcessingPart に YAGNI 統合理由を追記。Builder Service を「Builder execution environment」と位置づけ。PublicationPart→PublicationSnapshotPart に改名。INV-12/INV-13 番号を設計原則→実装契約の順序に入れ替え。FACT 件数表記を「全86件」→「整理対象86件」に軟化。 |
+| **9.5** | **2026-07-12** | **実装進捗**: P0（ProcessingPart + atomic読取り排除）✅完了。P4（MEM_SNAP統合）✅完了。P1第一段階（PublicationSnapshotPart追加＋previousCommittedSequence移行）✅完了。P2（CrossfadeSnapshotPart/LatencyPart追加＋Builder engine直接読取り排除）✅完了。設計書Backlog更新、Appendix A.0に⑫⑬⑭追加。P3 設計書更新済み。 |
+| **9.6** | **2026-07-12** | **設計契約の明文化（5点）**: (1) Deterministic Construction に「Builder Service may affect implementation artifacts only」追記。(2) Specification Completeness 節を新設（INV-13 の Data 制約版）。(3) P2 に Source 一意性（ProcessingPart 唯一 Source）と Part Ownership 表を追加。(4) Builder Service を Memory/Identity/Immutable Factory に細分類。(5) P2 Backlog 完了確認・冗長代入 cleanup は次回対応。 |

@@ -66,20 +66,57 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     }
 #endif
 
-    // Step 2a: Build world with default (HardReset) policy first
-    // (evaluate 前に world が必要だが、RuntimePublishWorld は非デフォルト構築可能のため)
+    // Step 2a: Build world with default (HardReset) policy first, then
+    // evaluate crossfade need, and rebuild with final Specification.
+    // ★ work70-v8.3: Specification を先に組み立て、Post-build Mutation を排除。
+    //   Builder は Specification を忠実に World に写像するのみ。
     auto worldBuilder = convo::RuntimeBuilder(engine_);
     worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
-    auto worldOwner = worldBuilder.buildRuntimePublishWorld(
-        newDSPResolved, oldDSP,
-        convo::TransitionPolicy::HardReset, 0.0, false,
-        &req.sealedSnapshot);
+
+    // Step 2a-1: Create Specification with default HardReset
+    convo::RuntimePublishSpecification spec;
+    spec.topology.activeDSP = newDSPResolved;
+    spec.topology.fadingDSP = oldDSP;
+    spec.execution.transitionActive = false;          // HardReset: no transition
+    spec.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::HardReset);
+    spec.execution.fadeTimeSec = 0.0;
+    // PublicationSnapshotPart: previousCommittedSequence — Orchestrator が Coordinator から取得
+    spec.publicationSnapshot.previousCommittedSequence = engine_.getLastCommittedPublicationSequence();
+    // CrossfadeSnapshotPart: crossfadeRuntime の現在状態をスナップショット
+    spec.crossfade.startDelayBlocks = engine_.crossfadeRuntime_.getStartDelayBlocks();
+    spec.crossfade.dryHoldSamples = engine_.crossfadeRuntime_.getDryHoldSamples();
+    spec.crossfade.dryScaleTarget = engine_.crossfadeRuntime_.getDryScaleTarget();
+    spec.crossfade.firstIrDryCrossfadePending = engine_.crossfadeRuntime_.isFirstIrDryPending();
+    // LatencyPart: engine atomic から収集
+    spec.latency.latencyDelayOld = convo::consumeAtomic(engine_.latencyDelayOld, std::memory_order_acquire);
+    spec.latency.latencyDelayNew = convo::consumeAtomic(engine_.latencyDelayNew, std::memory_order_acquire);
+    // ★ v9.5 P1 phase2: currentRuntimeWorld — Orchestrator が現在の Published World を取得し、
+    //   Builder はこれを使って makeEngineRuntimeState() を呼ぶ（Runtime Query 完了済み）
+    spec.currentRuntimeWorld = engine_.observePublishedWorld();
+    // ProcessingPart: fill from sealedSnapshot (P0 — Builder の暗黙入力を排除)
+    {
+        const auto& inp = req.sealedSnapshot.buildInput;
+        spec.processing.processingOrder = inp.processingOrder;
+        spec.processing.eqBypassed = inp.eqBypassed;
+        spec.processing.convBypassed = inp.convBypassed;
+        spec.processing.softClipEnabled = inp.softClipEnabled;
+        spec.processing.saturationAmount = inp.saturationAmount;
+        spec.processing.inputHeadroomGain = inp.inputHeadroomGain;
+        spec.processing.outputMakeupGain = inp.outputMakeupGain;
+        spec.processing.convolverInputTrimGain = inp.convolverInputTrimGain;
+        // ★ Sync RoutingPart for backward compat — ProcessingPart が一次情報源
+        spec.routing.processingOrder = inp.processingOrder;
+        spec.routing.eqBypassed = inp.eqBypassed;
+        spec.routing.convBypassed = inp.convBypassed;
+    }
+
+    // Step 2a-2: Build preliminary world for crossfade evaluation
+    auto worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
 
     if (!worldOwner) {
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
-        // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordProgress(correlationId,
             static_cast<uint64_t>(req.generation), 0,
@@ -90,21 +127,15 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
-    // ★ v19: StateOwner + TelemetryRecorder: Built 記録
     stateOwner_.onBuilt(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Built, nowUs);
 
     // Step 2b: Crossfade decision using RuntimeWorld projection values + Policy
-    // (DSPCore 直読は行わない。evaluate は engine に依存しない純粋関数)
     const auto* oldWorld = engine_.observePublishedWorld();
     if (oldWorld == nullptr)
     {
-        // ★ Release-only crash fix: runtimeStore が null の場合の安全ガード。
-        //   bootstrap world が公開されていない初回起動時に rebuild thread から
-        //   trySubmit() が呼ばれた場合に発生しうる。
-        //   この場合はクロスフェード不要として続行する。
         DBG("[DIAG] trySubmit: oldWorld is null - skipping crossfade evaluation, proceeding directly");
     }
 
@@ -123,8 +154,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         cfDecision.newHasIR = worldOwner->dspProjection.irLoaded;
     }
 
-    // ★ Phase-2: HealthState Critical 時は crossfade を強制抑制
-    //   evaluate の結果を上書きする形で、Orchestrator レベルでの抑制を行う。
+    // HealthState Critical 時は crossfade を強制抑制
     {
         auto ref = engine_.getHealthStateRef();
         if (ref) {
@@ -136,26 +166,44 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         }
     }
 
-    // Step 2c: Update world with crossfade decision if needed
-    // ★ oldDSP が nullptr の場合はクロスフェード不能 — 判定を無効化する
+    // Step 2c: Update Specification with crossfade decision (NOT the world! — Post-build Mutation 排除)
     if (cfDecision.needsCrossfade && oldDSP != nullptr)
     {
-        worldOwner->assertMutable();
-        worldOwner->execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
-        worldOwner->execution.transitionActive = true;
-        worldOwner->topology.hasFadingRuntime = true;
-        worldOwner->overlap.fadeTimeSec = cfDecision.fadeTimeSec;
+        spec.execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
+        spec.execution.transitionActive = true;
+        spec.execution.fadeTimeSec = cfDecision.fadeTimeSec;
+        // ★ work70-v8.3: hasFadingRuntime は Topology から導出。ここでは設定不要。
     }
 
-    // ★ v19: StateOwner + TelemetryRecorder: Executed 記録
+    // ★ work70-v8.3: Rebuild world from finalized Specification (single build)
+    if (cfDecision.needsCrossfade && oldDSP != nullptr)
+    {
+        worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
+        if (!worldOwner) {
+            if (!req.newDSP.isNull())
+                lifetime_.retire(newDSPResolved);
+            stateOwner_.onExecutorFailed(correlationId.shortValue());
+            telemetryRecorder_.recordProgress(correlationId,
+                static_cast<uint64_t>(req.generation), 0,
+                PublishStage::Built, nowUs);
+            telemetryRecorder_.recordFailure(FailureStage::Execution,
+                FailureReason::PublishFailed, "trySubmit:rebuild",
+                correlationId.shortValue(), nowUs);
+            return PublicationAdmission::Decision::RejectedNotFinalized;
+        }
+    }
+
     stateOwner_.onValidated(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Validated, nowUs);
 
-    // ★ Phase4: mutable worldOwner → FrozenRuntimeWorld wrap → publish
-    // ★ work70 P1-a: req.newDSP（事前登録済みのDSPHandle）を existingHandle として渡す
-    auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(std::move(worldOwner));
+    // ★ Phase4: worldOwner → FrozenRuntimeWorld wrap → publish
+    // ★ v8.3: Builder は const World を返すが、FrozenRuntimeWorld の releaseState() が
+    //   非 const を要求するため const_cast を使用。seal 後は Coordinator 内で immutable。
+    auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(
+        convo::aligned_unique_ptr<RuntimeState>(
+            const_cast<RuntimeState*>(worldOwner.release())));
     auto result = executor_.publish(engine_, std::move(frozen), req.newDSP);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="

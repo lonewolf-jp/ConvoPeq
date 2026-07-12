@@ -33,9 +33,13 @@ void AudioEngine::initialize()
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
     // 初期DSP構築 (デフォルト設定)
-    // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
-    // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
-    convo::publishAtomic(maxSamplesPerBlock, SAFE_MAX_BLOCK_SIZE, std::memory_order_release); // release: process の acquire と HB
+    // 安全対策: バッファサイズを余裕を持って確保 (kInitialPrepareMaxBlock)
+    // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ。
+    // ★ v8.3: SAFE_MAX_BLOCK_SIZE(65536) ではなく kInitialPrepareMaxBlock(4096) を使用。
+    //   prepareToPlay 到達後は実ブロックサイズに更新される。
+    //   prepareToPlay 前に rebuild が走った場合の初回確保量を削減する。
+    constexpr int kInitialPrepareMaxBlock = 4096;
+    convo::publishAtomic(maxSamplesPerBlock, kInitialPrepareMaxBlock, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(currentSampleRate, 48000.0, std::memory_order_release); // release: process/loader の acquire と HB
 
     // Bootstrap World: publish BEFORE submitting rebuild intent, so that

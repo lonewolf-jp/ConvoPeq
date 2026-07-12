@@ -8,6 +8,7 @@
 
 #include <mkl.h>
 #include <mkl_cblas.h>
+#include "DiagnosticsConfig.h"
 
 IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::AudioBuffer<double>& ir,
                                                                const juce::AudioBuffer<double>* currentIr,
@@ -184,7 +185,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     const size_t totalSamples = static_cast<size_t>(numPartitions) * static_cast<size_t>(fftSize) * static_cast<size_t>(usableChannels);
     const size_t bytes = totalSamples * sizeof(double);
 
-    double* data = static_cast<double*>(mkl_malloc(bytes, 64));
+    double* data = static_cast<double*>(DIAG_MKL_MALLOC(bytes, 64));
     if (!data)
         return nullptr;
 

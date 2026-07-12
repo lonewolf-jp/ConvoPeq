@@ -116,7 +116,7 @@ struct TestBridge
     }
 };
 
-convo::aligned_unique_ptr<TestWorld> createWorld(const Candidate& c)
+convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 {
     auto w = convo::aligned_make_unique<TestWorld>();
     w->token = c.token;

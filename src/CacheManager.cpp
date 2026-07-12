@@ -7,6 +7,7 @@
 
 #include <mkl.h>
 #include <mkl_cblas.h>
+#include "DiagnosticsConfig.h"
 
 namespace
 {
@@ -187,7 +188,7 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
     if (!src)
         return nullptr;
 
-    double* dst = static_cast<double*>(mkl_malloc(dataSize, 64));
+    double* dst = static_cast<double*>(DIAG_MKL_MALLOC(dataSize, 64));
     if (!dst)
         return nullptr;
 
@@ -225,7 +226,7 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
     if (checksum != header.checksum)
         return nullptr;
 
-    double* copied = static_cast<double*>(mkl_malloc(static_cast<size_t>(header.dataSize), 64));
+    double* copied = static_cast<double*>(DIAG_MKL_MALLOC(static_cast<size_t>(header.dataSize), 64));
     if (!copied)
         return nullptr;
 

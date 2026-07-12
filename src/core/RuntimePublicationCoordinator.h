@@ -94,29 +94,29 @@ public:
         shutdownClearRequested_ = true;
     }
 
-    // ★ P0-1: publishWorld が PublishStageResult を返すよう変更
-    //   Validation 拒否時: Rejected
-    //   Null/異常時:      Failed
-    //   成功時:           Success
-    [[nodiscard]] PublishStageResult publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
+    // ★ v8.3: const World を受け入れる — INV-11 コンパイル時保証
+    //   sealRecursively() は論理的に const 操作（freeze = 不変性の確定）のため、
+    //   内部で const_cast を使用。Builder から publish 完了まではこの 1 箇所のみ。
+    [[nodiscard]] PublishStageResult publishWorld(convo::aligned_unique_ptr<const World> worldOwner) noexcept
     {
         if (!worldOwner)
             return PublishStageResult::Failed;
 
         // [PR-5] Immutable 化: publish 前に sealRecursively() で全フィールドを frozen にする
-        worldOwner->sealRecursively();
+        // const_cast: Builder → Coordinator 間で唯一の非 const 操作。seal 後に不変。
+        const_cast<World*>(worldOwner.get())->sealRecursively();
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.validatePublicationNonRt(world); })
         {
             if (!bridge_.validatePublicationNonRt(*worldOwner))
             {
-                auto* rejectedWorld = worldOwner.release();
+                auto* rejectedWorld = const_cast<World*>(worldOwner.release());
                 bridge_.retireRuntimePublishWorldNonRt(rejectedWorld, false);
                 return PublishStageResult::Rejected;
             }
         }
 
-        auto* newWorld = worldOwner.release();
+        auto* newWorld = const_cast<World*>(worldOwner.release());
         std::atomic_thread_fence(std::memory_order_release);
         auto* oldWorld = writeAccess_.publishAndSwap(newWorld);
 

@@ -906,6 +906,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 const auto now = std::chrono::steady_clock::now();
                 if (now - lastWaitingDiagnosticsLogTime >= std::chrono::seconds(1))
                 {
+                    const int curGen = convo::consumeAtomic(progress.iteration, std::memory_order_relaxed);
                     juce::Logger::writeToLog("[NoiseShaperLearner] Waiting diagnostics: accepted="
                         + juce::String(cumulativeDrainStats.acceptedBlocks)
                         + " dropSession=" + juce::String(cumulativeDrainStats.droppedBySession)
@@ -914,7 +915,9 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                         + " bufferedSamples=" + juce::String(segmentBuffer.getNumAvailableSamples())
                         + " sessionId=" + juce::String(static_cast<juce::int64>(activeSession.sessionId))
                         + " sampleRateHz=" + juce::String(activeSession.sampleRateHz)
-                        + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex));
+                        + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex)
+                        + " generation=" + juce::String(curGen)
+                        + " queueDepthBlocks=" + juce::String(static_cast<int>(captureQueue.size())));
                     cumulativeDrainStats = {};
                     lastWaitingDiagnosticsLogTime = now;
                 }
@@ -1124,6 +1127,7 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
         if (!sessionIdCompatible)
         {
             ++stats.droppedBySession;
+            ++stats.dropReasonCounts[static_cast<size_t>(DropReason::Session)];
             continue;
         }
 
@@ -1134,12 +1138,21 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
         if (!sampleRateCompatible)
         {
             ++stats.droppedBySampleRate;
+            ++stats.dropReasonCounts[static_cast<size_t>(DropReason::SampleRate)];
+            // ★ v8.3 DIAG: block.sampleRateHz と session.sampleRateHz の実値
+            #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[NoiseShaperLearner] dropBySampleRate: block.sr=%d session.sr=%d sessionId=%llu",
+                block.sampleRateHz, session.sampleRateHz,
+                (unsigned long long)session.sessionId));
+            #endif
             continue;
         }
 
         if (block.adaptiveCoeffBankIndex != session.adaptiveCoeffBankIndex)
         {
             ++stats.droppedByBank;
+            ++stats.dropReasonCounts[static_cast<size_t>(DropReason::Unknown)];
             continue;
         }
 

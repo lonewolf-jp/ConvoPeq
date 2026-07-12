@@ -88,7 +88,7 @@ RuntimeBuilder::createBootstrapWorld() noexcept
     // Topology (all zero/default: no active runtime, no fading runtime)
     worldOwner->topology.runtimeUuid = 0;
     worldOwner->topology.fadingRuntimeUuid = 0;
-    worldOwner->topology.hasFadingRuntime = false;
+    // ★ v8.3: hasFadingRuntime 削除（Bootstrap World では fadingRuntimeUuid=0 で代替）
 
     // Routing (default processing order 0, no bypass)
     worldOwner->routing.processingOrder = 0;
@@ -159,28 +159,34 @@ RuntimeBuilder::createBootstrapWorld() noexcept
     return worldOwner;
 }
 
-convo::aligned_unique_ptr<RuntimePublishWorld>
-RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
-                                         AudioEngine::DSPCore* next,
-                                         convo::TransitionPolicy policy,
-                                         double fadeTimeSec,
-                                         bool active,
-                                         const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
+convo::aligned_unique_ptr<const RuntimePublishWorld>
+RuntimeBuilder::buildRuntimePublishWorld(
+    const convo::RuntimeBuildSnapshot* sealedSnapshot,
+    const RuntimePublishSpecification& spec) noexcept
 {
     const auto publicationIdentity = engine.reserveRuntimePublicationIdentity();
     const auto nextGraphGeneration = publicationIdentity.generation;
     const auto nextWorldId = publicationIdentity.worldId;
     const auto nextPublicationSequence = publicationIdentity.publicationSequence;
 
-    auto publishComputation = engine.computeRuntimePublishComputation(current,
-                                                                      next,
-                                                                      policy,
-                                                                      fadeTimeSec,
-                                                                      active,
-                                                                      nextGraphGeneration);
-    auto engineState = std::move(publishComputation.engineState);
-    auto graphState = std::move(publishComputation.graphState);
-    const auto previousCommittedSequence = publishComputation.previousCommittedSequence;
+    // ★ v8.3: Specification から current/next 解決（INV-12: Builder は Spec 以外 consult しない）
+    auto* current = spec.topology.activeDSP;
+    auto* next = spec.topology.fadingDSP;
+    const convo::TransitionPolicy policy = static_cast<convo::TransitionPolicy>(spec.execution.transitionPolicy);
+    const double fadeTimeSec = spec.execution.fadeTimeSec;
+    const bool active = spec.execution.transitionActive;
+
+    // ★ v9.5 P1 phase2: computeRuntimePublishComputation() を排除。
+    //   Runtime Query 部分は Orchestrator が事前に実行済み（currentRuntimeWorld, previousCommittedSequence）。
+    //   Builder は Pure Calculation（makeEngineRuntimeState / makeRuntimeGraphState）のみを実行。
+    const auto previousCommittedSequence = spec.publicationSnapshot.previousCommittedSequence;
+    auto engineState = engine.makeEngineRuntimeState(
+        const_cast<AudioEngine::DSPCore*>(current),
+        const_cast<AudioEngine::DSPCore*>(next),
+        policy, fadeTimeSec, active,
+        spec.currentRuntimeWorld);
+    engineState.revision = nextGraphGeneration;
+    auto graphState = engine.makeRuntimeGraphState(engineState);
 
     auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
     worldOwner->assertMutable();
@@ -198,16 +204,11 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->generationSemantic.runtimeGeneration = nextGraphGeneration;
     worldOwner->generationSemantic.activationEpoch = nextGraphGeneration;
 
-    // 3.2.9: RuntimeGraph から Authoritative フィールド削除済み。
-    // topology/routing/resource/automation 等の Semantic 構造体から値を参照。
-    // [C4996 fix] engineState (EngineRuntime) は deprecated のため、
-    // 関数パラメータ current/next および DSPCore 直アクセスに置換。
+    // Topology: Specification の topology 部を写像
     {
-        const bool hasFading = (graphState.fadingNode != nullptr);
-
         worldOwner->topology.runtimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
         worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
-        worldOwner->topology.hasFadingRuntime = hasFading;
+        // ★ v8.3: hasFadingRuntime 削除 — graphState.fadingNode != nullptr から導出
 
         const double sr = (current != nullptr) ? current->sampleRate : 48000.0;
         worldOwner->timing.sampleRateHz = sr;
@@ -232,7 +233,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
             worldOwner->dspProjection.sampleRate = sealedSnapshot->sampleRate;
             worldOwner->dspProjection.baseLatencySamples = sealedSnapshot->baseLatencySamples;
         } else if (current != nullptr) {
-            // Fallback: DSPCore direct read (bootstrap/legacy paths without snapshot)
             worldOwner->dspProjection.irLoaded = current->convolverRt().isIRLoaded();
             worldOwner->dspProjection.irFinalized = current->convolverRt().isIRFinalized();
             worldOwner->dspProjection.structuralHash = current->convolverRt().getStructuralHash();
@@ -242,94 +242,60 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         }
     }
 
-    // ★ work56 Phase1: sealedSnapshot Authority 経路と fallback 経路を明示的に分離。
-    //   sealedSnapshot 存在時は BuildInput 値が唯一の Authority（oversamplingFactor 除く）。
-    //   sealedSnapshot 不在時（bootstrap/fallback）は atomic から直接読み取る。
-    //   ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
+    // sealedSnapshot Authority 経路と fallback 経路の分離
     const bool useSealedSnapshot = (sealedSnapshot != nullptr);
-    // [C4996 fix] Read value fields from AudioEngine atomics directly (was engineState.X)
     {
-        // Non-sealedSnapshot fields: always read from atomics
-        const int latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_acquire);
-        const int latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_acquire));
-        const int startDelayBlocks = engine.crossfadeRuntime_.getStartDelayBlocks();
-        const int dryHoldSamples = engine.crossfadeRuntime_.getDryHoldSamples();
-        const double dryScaleTarget = engine.crossfadeRuntime_.getDryScaleTarget();
-        const bool firstIrDry = engine.crossfadeRuntime_.isFirstIrDryPending();
+        // ★ v9.5 P2: CrossfadeSnapshotPart/LatencyPart から読み取り（Orchestrator が収集済み）
+        const int latencyDelayOld = spec.latency.latencyDelayOld;
+        const int latencyDelayNew = spec.latency.latencyDelayNew;
+        const int startDelayBlocks = spec.crossfade.startDelayBlocks;
+        const int dryHoldSamples = spec.crossfade.dryHoldSamples;
+        const double dryScaleTarget = spec.crossfade.dryScaleTarget;
+        const bool firstIrDry = spec.crossfade.firstIrDryCrossfadePending;
         const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
-        const bool rebuildWorkerRunning = false; // not available as atomic; default false
+        const bool rebuildWorkerRunning = false;
 
-        worldOwner->execution.transitionActive = active;
-        worldOwner->execution.transitionPolicy = static_cast<int>(policy);
-        worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
-        worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
+        // Execution/Routing: Specification を忠実に写像（INV-12）
+        worldOwner->execution.transitionActive = spec.execution.transitionActive;
+        worldOwner->execution.transitionPolicy = spec.execution.transitionPolicy;
+        worldOwner->routing.processingOrder = spec.routing.processingOrder;
+        worldOwner->routing.eqBypassed = spec.routing.eqBypassed;
+        worldOwner->routing.convBypassed = spec.routing.convBypassed;
 
+        // ★ v8.3: Overlap/latency は engine の現在値から設定（CrossfadeRuntime と連携）
         worldOwner->overlap.useDryAsOld = (policy == convo::TransitionPolicy::DryAsOld);
         worldOwner->overlap.fadeTimeSec = fadeTimeSec;
         worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
         worldOwner->overlap.dryScaleTarget = dryScaleTarget;
 
+        worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
+        worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
+
         worldOwner->latency.latencyDelayOld = latencyDelayOld;
         worldOwner->latency.latencyDelayNew = latencyDelayNew;
 
         worldOwner->retire.retireBacklog = retireBacklog;
-
         worldOwner->affinity.rebuildWorkerRunning = rebuildWorkerRunning;
 
+        // ★ v9.4 P0: ProcessingPart から読み取り（Orchestrator が sealedSnapshot/atomic から収集済み）
+        //   これにより Builder が engine atomic を直接読むパスが排除された。
+        worldOwner->automation.eqBypassed = spec.processing.eqBypassed;
+        worldOwner->automation.convBypassed = spec.processing.convBypassed;
+        worldOwner->automation.softClipEnabled = spec.processing.softClipEnabled;
+        worldOwner->automation.saturationAmount = spec.processing.saturationAmount;
+        worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;
+        worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;
+        worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;
+        // ★ Resource/Timing は current DSPCore から取得（Specification の将来拡張対象）
         if (useSealedSnapshot)
         {
             const auto& sealedBuildInput = sealedSnapshot->buildInput;
-
-            // routing - from sealedBuildInput
-            worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);
-            worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;
-            worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;
-
-            // automation - from sealedBuildInput
-            worldOwner->automation.eqBypassed = sealedBuildInput.eqBypassed;
-            worldOwner->automation.convBypassed = sealedBuildInput.convBypassed;
-            worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;
-            worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;
-            worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
-            worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;
-            worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
-
-            // resource/timing - from sealedBuildInput (oversamplingFactor は current->oversamplingFactor を維持)
-            // ★ Phase1: oversamplingFactor は直前行~216 の current->oversamplingFactor（新規DSP解決値）を維持。
-            //   sealedBuildInput.oversamplingFactor (=0 for Auto) で上書きしない。
             worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
             worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
             worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;
         }
         else
         {
-            // routing - from atomics
-            const auto processingOrder = convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
-            const bool eqBypassed = convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
-            const bool convBypassed = convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
-            worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
-            worldOwner->routing.eqBypassed = eqBypassed;
-            worldOwner->routing.convBypassed = convBypassed;
-
-            // automation - from atomics
-            const bool softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
-            const float saturationAmount = static_cast<float>(
-                convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
-            const float inputHeadroomGain = static_cast<float>(
-                convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
-            const float outputMakeupGain = static_cast<float>(
-                convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
-            const float convolverInputTrimGain = static_cast<float>(
-                convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
-            worldOwner->automation.eqBypassed = eqBypassed;
-            worldOwner->automation.convBypassed = convBypassed;
-            worldOwner->automation.softClipEnabled = softClipEnabled;
-            worldOwner->automation.saturationAmount = saturationAmount;
-            worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
-            worldOwner->automation.outputMakeupGain = outputMakeupGain;
-            worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
-
-            // resource/timing - from DSPCore or defaults
             worldOwner->resource.oversamplingFactor = (current != nullptr)
                 ? static_cast<int>(current->oversamplingFactor) : 1;
             worldOwner->resource.ditherBitDepth = (current != nullptr)
@@ -347,30 +313,12 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
     worldOwner->retire.retireEpoch = nextGraphGeneration;
     worldOwner->retire.deferredResidency = 0;
-
-    // activationEpoch is derived from generationSemantic.activationEpoch (#17 Sprint-1)
-    // Do not set timing.activationEpoch directly
-
     worldOwner->latency.latencyDeltaSamples = 0;
 
-    // SchedulingSemantic fields are derived from ExecutionSemantic (#16 Sprint-1)
-    // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
-    // Note: SchedulingSemantic can be removed after all consumers migrate to execution.*
-
-    // Coefficient fields: Publish開始時点の live 値を投影
-    // ★ ISR Runtime 契約: RuntimeWorld.coefficientGeneration = Publish開始時点の bank.generation
-    //   Learner は独立 Authority のため、Publish中に generation が進んでも RuntimeWorld は
-    //   Publish開始時点の値を保持する。これは正常動作でありバグではない。
-    //
-    //   NOTE: bankIndex と generation は lock-free snapshot で取得（個別 atomic load）。
-    //   完全な transactional snapshot は保証しない。RuntimeWorld.coefficient は診断・投影用途。
-    //   実際の係数適用は Audio Thread の generation tracking が行う。
+    // Coefficient fields
     const int bankIndex = convo::consumeAtomic(
         engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
     worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
-
-    // ★ ISR Runtime 契約: RuntimeWorld 構築は accessor の副作用に依存しない。
-    //   明示的な範囲チェックにより純粋な Projection を保証する。
     if (bankIndex >= 0 && bankIndex < static_cast<int>(kNumAdaptiveCoeffBanks))
     {
         const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIndex);
@@ -383,76 +331,19 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->projectionFreshness.projectionRevision = nextGraphGeneration;
     worldOwner->projectionFreshness.maxStalenessWindows = 1u;
 
-    // [100%] sealedSnapshot override block は削除: 選択肢A により原子ブロック内で完結。
-    // 重複フィールド設定は上記の useSealedSnapshot 分岐で atomic 読み取りをスキップしているため、
-    // 別途 sealedSnapshot ブロックでの再設定は不要。
-
+    // Semantic hashes (保留 — 現状維持)
     worldOwner->semanticHash.generationSemanticHash = worldOwner->generationSemantic.runtimeGeneration
         ^ (worldOwner->generationSemantic.activationEpoch << 1);
     worldOwner->semanticHash.topologyHash = worldOwner->topology.runtimeUuid
         ^ (worldOwner->topology.fadingRuntimeUuid << 1)
-        ^ (worldOwner->topology.hasFadingRuntime ? 0x9E3779B97F4A7C15ull : 0ull);
+        ^ ((worldOwner->topology.fadingRuntimeUuid != 0) ? 0x9E3779B97F4A7C15ull : 0ull);
     worldOwner->semanticHash.executionHash = static_cast<std::uint64_t>(worldOwner->execution.transitionPolicy + 0x9E3779B9)
-        ^ (worldOwner->execution.transitionActive ? 0x517CC1B727220A95ull : 0ull)
-        ^ (static_cast<std::uint64_t>(worldOwner->execution.latencyCompensationSamples + 0x80000000ull) << 1)
-        ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeStartDelayBlocks + 0x80000000ull) << 2)
-        ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeDryHoldSamples + 0x80000000ull) << 3);
+        ^ (worldOwner->execution.transitionActive ? 0x517CC1B727220A95ull : 0ull);
     worldOwner->semanticHash.routingHash = static_cast<std::uint64_t>(worldOwner->routing.processingOrder + 0x85EBCA6Bu)
         ^ (worldOwner->routing.eqBypassed ? 0x27D4EB2Full : 0ull)
         ^ (worldOwner->routing.convBypassed ? 0x165667B1ull : 0ull);
-    worldOwner->semanticHash.payloadHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor + 0x9E37)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16)
-        ^ worldOwner->coefficient.eqCoeffHash
-        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100) << 24)
-        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 32)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.saturationAmount)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.inputHeadroomGain)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.outputMakeupGain)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.convolverInputTrimGain)
-        ^ (worldOwner->automation.softClipEnabled ? 0xD1B54A32D192ED03ull : 0ull);
-    if (sealedSnapshot != nullptr)
-    {
-        worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);
-    }
-    worldOwner->semanticHash.publicationSemanticHash = worldOwner->publication.sequenceId
-        ^ (worldOwner->publication.epoch << 1)
-        ^ (worldOwner->publication.mappedRuntimeGeneration << 2)
-        ^ (worldOwner->publication.previousSequenceId << 3);
-    worldOwner->semanticHash.overlapSemanticHash = (worldOwner->overlap.useDryAsOld ? 0xA24BAED4963EE407ull : 0ull)
-        ^ (worldOwner->overlap.firstIrDryCrossfadePending ? 0x9FB21C651E98DF25ull : 0ull)
-        ^ (worldOwner->execution.transitionActive ? 0xC2B2AE3D27D4EB4Full : 0ull);
-    worldOwner->semanticHash.retireSemanticHash = worldOwner->retire.retireEpoch
-        ^ (worldOwner->retire.retireBacklog << 1)
-        ^ (worldOwner->retire.deferredResidency << 2);
 
-    // Added for full inventory coverage (#18 Sprint-3)
-    auto bitCast = [](double val) noexcept -> std::uint64_t {
-        std::uint64_t res = 0;
-        std::memcpy(&res, &val, sizeof(val));
-        return res;
-    };
-    worldOwner->semanticHash.timingHash = bitCast(worldOwner->timing.sampleRateHz)
-        ^ bitCast(worldOwner->timing.queuedFadeTimeSec);
-    worldOwner->semanticHash.latencyHash = static_cast<std::uint64_t>(worldOwner->latency.latencyDelayOld + 0x80000000u)
-        ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDelayNew + 0x80000000u) << 1)
-        ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDeltaSamples + 0x80000000u) << 2);
-    worldOwner->semanticHash.resourceHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
-        ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16);
-    worldOwner->semanticHash.automationHash = (worldOwner->automation.eqBypassed ? 0x9E3779B97F4A7C15ull : 0ull)
-        ^ (worldOwner->automation.convBypassed ? 0x517CC1B727220A95ull : 0ull)
-        ^ (worldOwner->automation.softClipEnabled ? 0xC2B2AE3D27D4EB4Full : 0ull)
-        ^ bitCast(worldOwner->automation.saturationAmount)
-        ^ bitCast(worldOwner->automation.inputHeadroomGain)
-        ^ bitCast(worldOwner->automation.outputMakeupGain)
-        ^ bitCast(worldOwner->automation.convolverInputTrimGain);
-    worldOwner->semanticHash.coefficientHash = static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100)
-        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 8)
-        ^ (worldOwner->coefficient.eqCoeffHash << 16);
-
-    // freeze は caller (coordinator.publishWorld) が行うため、ここでは行わない。
-    // Orchestrator は publish 前に crossfade decision を反映するため mutable 状態を維持する必要がある。
+    // freeze は caller (coordinator.publishWorld) が行う
     return worldOwner;
 }
 

@@ -75,35 +75,33 @@ bool RuntimePublicationValidator::validateTopology(
     const RuntimePublishWorld& world) const
 {
     const auto& topology = world.topology;
+    const auto& execution = world.execution;
 
-    // ★ P2-1: runtimeUuid==0 を Bootstrap/Shutdown として許容（選択肢A）
-    //   ただし、runtimeUuid==0 時の不変条件に違反する場合は拒否:
-    //   - transitionActive==true との矛盾
-    //   - hasFadingRuntime==true との矛盾
-    //   - fadingRuntimeUuid!=0 との矛盾
+    // ★ v8.3: Validator 三カテゴリ（Topology / Execution / Identity）
+
+    // === Topology Invariant ===
+    // hasFadingRuntime は保持せず、graph.fadingNode != nullptr が唯一の Authority。
+    // runtimeUuid==0 は Bootstrap/Shutdown として許容。
     if (topology.runtimeUuid == 0) {
-        // Authoritative 不変条件:
-        if (world.execution.transitionActive) return false;
-        if (topology.hasFadingRuntime) return false;
+        if (execution.transitionActive) return false;
         if (topology.fadingRuntimeUuid != 0) return false;
     }
 
-    // hasFadingRuntime と fadingRuntimeUuid の整合性
-    if (topology.hasFadingRuntime != (topology.fadingRuntimeUuid != 0))
-        return false;
-
-    // hasFadingRuntime と transitionActive の自己整合性（RuntimeWorld Semantic の不変条件）
-    if (topology.hasFadingRuntime != world.execution.transitionActive)
+    // === Execution Invariant ===
+    // transitionActive は Topology とは独立。fadeTimeSec=0 のケースでは
+    // fadingRuntimeUuid != 0 でも transitionActive=false であり得る。
+    if (execution.transitionPolicy < 0 || execution.transitionPolicy > 2)
         return false;
 
     // ★ P4-1: RoutingSemantic — processingOrder は 0 または 1 のみ許容
     if (world.routing.processingOrder < 0 || world.routing.processingOrder > 1)
         return false;
 
-    // ★ Cycle detection: 現在のルーティングモデル（processingOrder 0/1 のみ）では
-    //   サイクルは発生不可能（単一方向の線形パスのみ）。将来グラフベースルーティング
-    //   拡張時は、ここで topological sort / DFS による cycle detection を追加すること。
-    //   ref: doc/work47/resolution_report.md §2.1
+    // === Identity Invariant ===
+    // fadingRuntimeUuid（保持）は導出可能だが、graph寿命超えたstable identifierとして保持。
+    // 自己同一性チェック: 同一ノードの二重登録検出
+    if (topology.fadingRuntimeUuid != 0 && topology.fadingRuntimeUuid == topology.runtimeUuid)
+        return false;
 
     // ★ P4-1: GenerationSemantic — generation > 0 なら runtimeGeneration > 0
     if (world.generation > 0 && world.generationSemantic.runtimeGeneration == 0)

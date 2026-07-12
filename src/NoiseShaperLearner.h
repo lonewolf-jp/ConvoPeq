@@ -165,12 +165,24 @@ private:
         uint64_t sessionId = 0;
     };
 
+    // ★ v8.3: NoiseShaper ドロップ理由の集計用 enum
+    enum class DropReason {
+        SampleRate,   // block.sampleRateHz と session.sampleRateHz の不一致
+        Session,      // sessionId の不一致
+        Reserved,     // 将来拡張用（旧 QueueFull）
+        Disabled,     // NoiseShaper learner が無効状態
+        Unknown,      // 上記以外
+        Count         // 列挙子の個数（std::array サイズ指定用、常に最後）
+    };
+
     struct DrainStats
     {
         int acceptedBlocks = 0;
         int droppedBySession = 0;
         int droppedBySampleRate = 0;
         int droppedByBank = 0;
+        // ★ v8.3: DropReason ごとの詳細カウンタ（サマリと内訳の二重管理）
+        std::array<int, static_cast<size_t>(DropReason::Count)> dropReasonCounts{};
     };
 
     struct EvaluationContext
