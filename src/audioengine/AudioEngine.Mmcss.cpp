@@ -24,9 +24,9 @@ namespace {
 
 // thread_local: safe for driver-owned threads (ASIO), no locking needed,
 //               auto-cleanup on thread destruction, device switch creates new thread.
-thread_local HANDLE t_mmcssHandle = nullptr;
-thread_local DWORD  t_mmcssTaskIndex = 0;
-thread_local bool   t_mmcssTried = false;
+thread_local HANDLE t_mmcssHandle = nullptr; // NOLINT(thread-local) RT-SAFE: reviewed POD TLS for MMCSS, no destructor, single init per thread
+thread_local DWORD  t_mmcssTaskIndex = 0;     // NOLINT(thread-local) RT-SAFE: MMCSS task index, scalar POD
+thread_local bool   t_mmcssTried = false;       // NOLINT(thread-local) RT-SAFE: guard flag, written once per thread
 
 // Local diagLog — each engine .cpp defines its own for file-scoped asyncSink independence.
 void diagLog(const juce::String& message)
@@ -141,7 +141,13 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
     const DWORD err = ::GetLastError();
 
     // Already registered by JUCE (WASAPI) or professional driver (ASIO) → success
-    if (err == ERROR_ACCESS_DENIED || err == ERROR_ALREADY_EXISTS) {
+    //   5(ERROR_ACCESS_DENIED), 183(ERROR_ALREADY_EXISTS): 公式コード。
+    //   1552(ERROR_NO_MORE_ITEMS): MSDN未定義だが、タスク名がレジストリに存在することが
+    //     確認済み（Pro Audio, Audio 共に存在）で W 版 API を使用している場合、
+    //     1552 は「スレッドが既に別のMMCSSタスクに所属している」ことを示す。
+    //     このケースは ASIO ドライバが自前で MMCSS 登録済みの環境で発生する。
+    if (err == ERROR_ACCESS_DENIED || err == ERROR_ALREADY_EXISTS
+        || err == ERROR_NO_MORE_ITEMS) {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         // ★ [diagnostic] MMCSS already managed by JUCE/driver — expected, not an error
         diagLog("[MMCSS-" + juce::String(policyTag) + "] already registered by JUCE/driver (err="
@@ -151,30 +157,31 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
         return true;
     }
 
-    // Task name not found → fallback chain (1552 = RegEnumKeyEx ended without match)
-    auto attemptFallback = [&](LPCWSTR fallbackTask) -> bool {
-        if (fallbackTask == nullptr) return false;
-        DWORD idx2 = 0;
-        HANDLE h2 = tryTask(fallbackTask, idx2);
-        if (h2 != nullptr) {
-            ::AvSetMmThreadPriority(h2, static_cast<AVRT_PRIORITY>(avrtPriority));
-            t_mmcssHandle = h2;
-            t_mmcssTaskIndex = idx2;
+    // Task name not found → fallback chain
+    //   1531(ERROR_INVALID_TASK_NAME): タスク名がレジストリに存在しない。
+    //   1552 は上で処理済みのため、この分岐に入るのは 1531 のみ。
+    if (err == ERROR_INVALID_TASK_NAME) {
+        auto attemptFallback = [&](LPCWSTR fallbackTask) -> bool {
+            if (fallbackTask == nullptr) return false;
+            DWORD idx2 = 0;
+            HANDLE h2 = tryTask(fallbackTask, idx2);
+            if (h2 != nullptr) {
+                ::AvSetMmThreadPriority(h2, static_cast<AVRT_PRIORITY>(avrtPriority));
+                t_mmcssHandle = h2;
+                t_mmcssTaskIndex = idx2;
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::String prioStr = (avrtPriority == AVRT_PRIORITY_CRITICAL) ? "CRITICAL"
-                                 : (avrtPriority == AVRT_PRIORITY_HIGH)    ? "HIGH"
-                                 : (avrtPriority == AVRT_PRIORITY_NORMAL)  ? "NORMAL"
-                                                                           : "LOW";
-            diagLog("[MMCSS-" + juce::String(policyTag) + "] registered (fallback): task="
-                    + juce::String(fallbackTask) + " priority=" + prioStr
-                    + " taskIndex=" + juce::String(static_cast<int>(idx2)));
+                juce::String prioStr = (avrtPriority == AVRT_PRIORITY_CRITICAL) ? "CRITICAL"
+                                     : (avrtPriority == AVRT_PRIORITY_HIGH)    ? "HIGH"
+                                     : (avrtPriority == AVRT_PRIORITY_NORMAL)  ? "NORMAL"
+                                                                               : "LOW";
+                diagLog("[MMCSS-" + juce::String(policyTag) + "] registered (fallback): task="
+                        + juce::String(fallbackTask) + " priority=" + prioStr
+                        + " taskIndex=" + juce::String(static_cast<int>(idx2)));
 #endif
-            return true;
-        }
-        return false;
-    };
-
-    if (err == ERROR_NO_MORE_ITEMS || err == ERROR_INVALID_TASK_NAME) {
+                return true;
+            }
+            return false;
+        };
         if (attemptFallback(fallback1)) return true;
         if (attemptFallback(fallback2)) return true;
     }
