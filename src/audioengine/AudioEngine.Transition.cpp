@@ -20,7 +20,6 @@ bool AudioEngine::publishIdleWorldOnly(
     // Idle world 発行 — 呼び出し側ですべての前準備を完了している前提
     auto coordinator = makeRuntimePublicationCoordinator();
     auto worldBuilder = convo::RuntimeBuilder(*this);
-    worldBuilder.setHealthStateRef(getHealthStateRef());
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(
         currentAfterFade, nullptr, idlePolicy, 0.0, false);
     const auto pubResult = commitRuntimePublication(coordinator, std::move(worldOwner),

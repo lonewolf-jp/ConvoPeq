@@ -1,13 +1,27 @@
-# ConvoPeq メモリ肥大化 改修計画書 v9.6
+# ConvoPeq メモリ肥大化 改修計画書 v9.11
 
 **日付**: 2026-07-12
 **対象**: work70 (メモリ 2.5GB 肥大化問題)
-**前版**: v9.5 (2026-07-12)
+**前版**: v9.9 (2026-07-12)
 
 > **本計画書は「優先改修項目（Backlog）」を先頭にまとめ、「完了した改修」は Appendix に配置している。**
-> 凡例: ✅ FACT / 🔍 HYPOTHESIS / 💡 PROPOSAL / ⚠️ CAVEAT / 🎯 DECISION
+> 凡例: ✅ FACT / 🔍 HYPOTHESIS / 💡 PROPOSAL / ⚠️ CAVEAT / 🎯 DECISION / 🛠️ IMPLEMENTED / ⏳ PENDING
 
 ---
+
+## 実装進捗サマリ
+
+| フェーズ | ステータス | 実装日 | 変更ファイル |
+|:---------|:----------|:-------|:------------|
+| **P6-a**: Builder L210 `active` 条件追加 | 🛠️ **完了** | 2026-07-12 | `RuntimeBuilder.cpp` |
+| **P6-b**: DIAG_AUTH 4点追加 (CoordExit/BuilderEntry/BuilderExit/PreCommit) | 🛠️ **完了** | 2026-07-12 | `RuntimeBuilder.cpp`, `RuntimePublicationOrchestrator.cpp`, `AudioEngine.Commit.cpp` |
+| **P7-A1**: `RetirePart` 追加 (Spec + Orchestrator + Builder) | 🛠️ **完了** | 2026-07-12 | `RuntimeBuilder.h`, `RuntimeBuilder.cpp`, `RuntimePublicationOrchestrator.cpp` |
+| **P7-A2/B**: `AdaptivePart` 追加 (coeffBankIndex + coeffGeneration) | 🛠️ **完了** | 2026-07-12 | `RuntimeBuilder.h`, `RuntimeBuilder.cpp`, `RuntimePublicationOrchestrator.cpp` |
+| **P7-C**: IR transfer → Builder Service（Resource Factory）として正式採用 | 🛠️ **完了**（5条件確認済み、実装変更不要） | 2026-07-12 | `ConvolverProcessor.h` |
+| **P7-D**: HealthState → Builder から分離・除去 **完了** | 🛠️ **完了** | 2026-07-12 | `RuntimeBuilder.h/cpp`, `Init.cpp`, `PrepareToPlay.cpp`, `ReleaseResources.cpp`, `RebuildDispatch.cpp`, `Timer.cpp`, `Transition.cpp`, `Orchestrator.cpp` |
+| **P8**: MMCSS 再試行機構（MmcssState 3値管理 + Timer retry） | 🛠️ **完了** | 2026-07-12 | `AudioEngine.h`, `AudioEngine.Timer.cpp`, `AudioBlock.cpp`, `BlockDouble.cpp`, `PrepareToPlay.cpp` |
+| **P5-1/2**: int→enum 型整理 | ⏳ **最終段階で実施**（全設計安定後）。コード調査: transitionPolicy 13(src)+8(tests)=21箇所、processingOrder 30(src)+4(tests)+5(core)=39箇所。変更影響範囲: 中程度。 | — | — |
+| **P5-4**: `RuntimePublicationSpecification.h` | 🛠️ **エイリアス確認済み** | 2026-07-12 | — |
 
 ## Design Principles
 
@@ -79,202 +93,239 @@ Publication（公開）
 
 ---
 
-## 優先改修項目（Backlog）
+## 改修設計（Backlog）
 
 *以下の優先順位は本セッションでのコード調査（2026-07-12）に基づく。各項目ごとに確認できた事実と具体的な対応方針を記載する。*
-
-### ~~P0: Builder の暗黙入力を RuntimePublishSpecification に昇格する~~ ✅ 完了
-
-**🎯 優先度: ★★★★★（最優先）→ ✅ 実装完了**
-
-**【対応結果】**
-- ✅ `RuntimePublishSpecification` に **ProcessingPart** を追加（`RuntimeBuilder.h`）
-- ✅ Orchestrator が sealedSnapshot から ProcessingPart を設定（`RuntimePublicationOrchestrator.cpp`）
-- ✅ Builder が `spec.processing.*` から読み取り、engine atomic 直接読み取りを排除（`RuntimeBuilder.cpp`）
-- ✅ L303 の無効行（`engine.currentProcessingOrder` 読み取り）を削除
-- ✅ `spec.routing.*` は ProcessingPart から同期（後方互換性維持）
-
-**【CAVEAT 解決】**
-- 設計問題（Builder vs mutable state）: 解消済み。Builder は ProcessingPart のみ参照。
-- 実装問題（processingOrder 未使用）: 解消済み。L303 無効行を削除。
-
----
-
-### ~~P1: computeRuntimePublishComputation() の Runtime Query と Pure Calculation の分離~~ ✅ 第一段階完了
-
-**🎯 優先度: ★★★★☆ → ✅ 第一段階完了**
-
-**【対応結果】**
-- ✅ **PublicationSnapshotPart** を `RuntimePublishSpecification` に追加（`RuntimeBuilder.h`）
-- ✅ **`previousCommittedSequence` の取得を Orchestrator 側へ移行**。Orchestrator が `engine_.getLastCommittedPublicationSequence()` を呼び、Spec の `publicationSnapshot.previousCommittedSequence` に格納。Builder は Spec から読み取り。
-- ✅ `computeRuntimePublishComputation()` の Runtime Query 部分（`getLastCommittedPublicationSequence()`）の移行完了。
-
-**【⚠️ Transitional】**: `engine.computeRuntimePublishComputation()` の呼び出し自体は Builder に残存（`engineState`/`graphState` 構築に必要）。これらは P2（CrossfadeSnapshotPart/LatencyPart 追加）で完全に Spec 経由に移行予定。
-
----
-
-### ~~P2: Specification の最小拡張~~ ✅ 完了
-
-**🎯 優先度: ★★★☆☆ → ✅ 完了**
-
-**【基本原則（Specification Part 追加の3基準）】**
-新しい Part を追加する際は、以下の3つをすべて満たすことを確認する:
-
-1. **これは Runtime の現在状態ではなく、Builder が世界を構築するための入力か。**
-2. **同じ Specification なら、同じ RuntimePublishWorld が生成されるか。**
-3. **この値は Builder の責務で再計算・再取得すべきものではないか。**
-
-この基準を満たさない情報は、Specification ではなく Orchestrator や Runtime 側に置く。
-
-**【対応結果】**
-✅ **CrossfadeSnapshotPart** 追加（startDelayBlocks, dryHoldSamples, dryScaleTarget, firstIrDryCrossfadePending）
-✅ **LatencyPart** 追加（latencyDelayOld, latencyDelayNew）
-✅ Orchestrator が Spec 生成時にこれらの Part を engine state から収集して設定
-✅ Builder が `spec.crossfade.*` / `spec.latency.*` から読み取り、engine 直接読み取りを排除
-
-**【Source 一意性の定義】**
-- `ProcessingPart` が automation 値（eqBypassed, softClipEnabled, gain類）の **唯一の Source**
-- `RoutingPart` は後方互換性のための **mirror**（ProcessingPart からの同期コピー）
-- 将来のリファクタリングで RoutingPart の mirror フィールドは削除可能
-
-**【Part Ownership（誰が書けるか）】**
-| Part | Writer | Reader |
-|:-----|:-------|:-------|
-| TopologyPart | Orchestrator | Builder (readonly) |
-| ExecutionPart | Orchestrator | Builder (readonly) |
-| RoutingPart | Orchestrator（ProcessingPart から同期） | Builder (readonly) |
-| **ProcessingPart** | **Orchestratorのみ** | Builder (readonly) |
-| **PublicationSnapshotPart** | **Orchestratorのみ** | Builder (readonly) |
-| **CrossfadeSnapshotPart** | **Orchestratorのみ** | Builder (readonly) |
-| **LatencyPart** | **Orchestratorのみ** | Builder (readonly) |
-| currentRuntimeWorld | Orchestrator | Builder (readonly, makeEngineRuntimeState引数) |
-
----
-
-### ~~P3: INV-12 再定義（Builder 入力契約の明確化）~~ ✅ 設計書更新済み
-
-**🎯 優先度: ★★★☆☆ → ✅ 設計書更新済み（P0〜P2 完了につき正式版に更新）**
-
-**【問題】**
-設計書 v8.3 の INV-12 は「Builder は RuntimePublishSpecification 以外 consult 禁止」としている。しかし Builder は実際に以下の依存を持つ:
-
-**【🎯 DECISION（2026-07-12 確定）】**
-INV-13 を以下のように再定義する:
-
-> **Builder は RuntimePublishSpecification、Builder Service、Pure Utility のみ利用可能。**
-> - Input（atomic 読取り）: ❌ 禁止 → Specification 経由
-> - Runtime Query（Coordinator/Current Runtime/Crossfade）: ❌ 禁止 → Orchestrator 経由
-> - Builder Service: ✅ 許可
-> - Pure Utility: ✅ 許可
-
-**Builder Service の定義（契約ベース）:**
-> Builder が利用可能な副作用を持たない補助サービス = **Builder execution environment**。以下の条件をすべて満たす:
-> 1. Runtime 状態を参照しない
-> 2. Builder の入力を変更しない
-> 3. 意味的結果を変更しない
-> 4. 決定論性を破壊しない
-
-**Builder Service の細分類:**
-
-| カテゴリ | サービス種別 | 該当例 |
-|:---------|:------------|:-------|
-| **Memory Service** | Allocator | メモリ確保・解放（`aligned_malloc`/`aligned_free`） |
-| **Identity Service** | Identity Generator | `reserveRuntimePublicationIdentity()` — UUID/Generation発行 |
-| **Immutable Factory** | Factory + Immutable Helper | `RuntimePublishWorld::createForBuilder()`, IRFactory, FFTPlan, LatencyCalculator, BufferFactory |
-
-この分類により、将来の変更（例: UUID生成方式の変更、分散IDの導入）が Builder Contract に影響しない。
-
-P0〜P2 の実装完了後に INV-13 をこの形に更新する（先行更新するとコードと設計書の不一致が生じるため）。
-
----
-
-### ~~P4: collectTrackedMemoryStatistics() MEM_SNAP 統合~~ ✅ 完了
-
-**🎯 優先度: ★★☆☆☆ → ✅ 実装完了**
-
-**【対応結果】**
-- ✅ MEM_SNAP 出力に `| TRK: total=%.1f OS=%.1f EQ=%.1f AL=%.1f LT=%.1fMB` を追加
-- ✅ `getActiveRuntimeDSP()` が非 null の場合のみ `collectTrackedMemoryStatistics()` を呼び出す
-- ✅ 配線のみ（API定義＋実装は完了済み）
+*凡例: ~~P0〜P4~~ は **Appendix A に移動**（実装完了）*
 
 ---
 
 ### P5: 型整理・既知制限
 
-**🎯 優先度: ★☆☆☆☆**
+**🎯 優先度: ★☆☆☆☆（全設計が安定した最終段階で実施）**
 
 | # | 項目 | 内容 | 優先度 |
 |:-:|:-----|:------|:-------|
-| 1 | `transitionPolicy`: int → enum class | 設計書は `convo::TransitionPolicy`、コードは `int`。コメントで対応関係はドキュメント済み。 | ★☆☆☆☆ |
+| 1 | `transitionPolicy`: int → enum class | 設計書は `convo::TransitionPolicy`、コードは `int`。コメントで対応関係はドキュメント済み。型安全性向上のみであり、Runtime/Builder 設計に影響しない。**全設計安定後にまとめて実施。** | ★☆☆☆☆ |
 | 2 | `processingOrder`: int → enum class | 同上 | ★☆☆☆☆ |
-| 3 | `aligned_free` DIAG 非対称性 | `aligned_malloc` は `DIAG_MKL_MALLOC` 経由だが `aligned_free` は `mkl_free` 直接。`DIAG_MKL_FREE` は size 引数が必要なため対応不可。診断品質は低下するが設計上の既知制限として許容。 | ★★☆☆☆ |
+| 3 | `aligned_free` DIAG 非対称性 | `aligned_malloc` は `DIAG_MKL_MALLOC` 経由だが `aligned_free` は `mkl_free` 直接。`DIAG_MKL_FREE` は size 引数が必要なため対応不可。診断品質は低下するが設計上の既知制限として許容。現状: `DIAG_MKL_MALLOC` (3箇所: CacheManager×2, IRConverter×1) / `aligned_malloc/mkl_malloc` 総数 81箇所 / `DIAG_MKL_FREE` 0箇所。 | ★★☆☆☆ |
 | 4 | `RuntimePublicationSpecification.h` 整理 | 独立ファイルとして作成されたが誰もインクルードしていない。将来の分離用準備として維持。 | ★☆☆☆☆ |
 
 ---
 
-### P6: AUTH_CONTRACT FAIL 原因修正 — Builder の fadingRuntimeUuid 条件不一致（2026-07-12 発見）
+### P6: AUTH_CONTRACT FAIL 原因修正 — Builder または Spec 生成段階における条件不一致（2026-07-12 発見）
 
 **🎯 優先度: ★★★★★（最優先）**
 
-**【コード調査により確定した原因（2026-07-12 cocoindex/semble/serena/graphify による特定）】**
+**【コード調査により特定した可能性】**
 
-**現象**: `[AUTH_CONTRACT] FAIL fadingNode=0 hasFadingByUuid=1` は Builder の論理バグ。
+**現象**: `[AUTH_CONTRACT] FAIL fadingNode=0 hasFadingByUuid=1`
 
-**コード検証**:
+**可能性** — `RuntimeBuilder.cpp:210` と `makeEngineRuntimeState` (`AudioEngine.h:2759`) の間に条件差異が存在することをコード上確認した。この差異は AUTH_CONTRACT FAIL の十分条件になり得るが、実際にどの層（Coordinator/Spec生成/Builder）で不整合が導入されたかは追加 DIAG により切り分ける必要がある。
 
-- `RuntimeBuilder.cpp:210`: `worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;`
-  → **`next` を無条件で使用**
+`RuntimeBuilder.cpp:210` と `makeEngineRuntimeState` (`AudioEngine.h:2759`) の間に条件の不統一がある:
 
-- `AudioEngine.h:2759` (makeEngineRuntimeState 内部):
-  ```cpp
-  const bool transitionActive = active && next != nullptr;
-  DSPCore* fading = transitionActive ? next : nullptr;
-  ```
-  → **`graph.fadingNode` は `transitionActive` に依存**
+| コード位置 | ロジック | 備考 |
+|:----------|:---------|:------|
+| `RuntimeBuilder.cpp:210` | `fadingRuntimeUuid = (next != nullptr) ? next->uuid : 0` | **無条件**（`active` 無視） |
+| `AudioEngine.h:2758-2759` (makeEngineRuntimeState) | `fading = transitionActive ? next : nullptr` / `transitionActive = active && next != nullptr` | **条件付き**（`active` 考慮） |
+| `AudioEngine.h:3052-3053` (makeRuntimeGraphState) | `graph.fadingNode = state.fading` | `engineState.fading` をコピー |
 
-- `RuntimeGraph.h:18`: `void* fadingNode = nullptr;`
-
-**結果**: `transitionActive=false` かつ `fadingDSP=oldDSP` が非 null の場合:
-- `graph.fadingNode = nullptr` (conditional through makeEngineRuntimeState → makeRuntimeGraphState)
-- `topology.fadingRuntimeUuid = oldDSP->runtimeUuid` (non-zero, UNCONDITIONAL)
+→ `transitionActive=false` かつ `next` (fadingDSP) が非 null の場合:
+- `graph.fadingNode = nullptr` (makeEngineRuntimeState → makeRuntimeGraphState 経由で条件付き)
+- `topology.fadingRuntimeUuid = next->runtimeUuid` (BUILDER で無条件に非ゼロ)
 - → AUTH_CONTRACT 不一致 ⇒ publish FAILED
 
-**【修正案】**:
+**【ただし原因箇所は Builder だけとは限らない】** — Coordinator/Spec生成/Builder の各段階を等しく候補として扱うべきであり、ログだけでは特定不能。
+
+1. **準備段階の不一致**: `prepareToPlay()` は Orchestrator 経由ではなく `Builder` の旧シグネチャを直接呼ぶ（`PrepareToPlay.cpp:150`）。この経路でも `RuntimeBuilder.h:123-158` の委譲ロジックを経由して同じ L210 に到達するが、`crossfadeRuntime_.reset()` 直後の状態で呼ばれるため、引数の解決方法が Orchestrator 経由と異なる可能性がある。
+
+2. **Coordinator → Orchestrator (trySubmit) 経路**: 通常の rebuild 要求は `trySubmit` を経由する。ここでは `oldDSP` が rebuild 要求から解決されるが、この解決方法が誤っている可能性も排除できない。
+
+※ ISR Runtime では Builder は同一 Snapshot から Spec を構築するため、Builder 実行中に他スレッドが状態を変更する可能性は極めて低い。
+
+**【確定した修正 — P6-a 実装済み】** :
 ```cpp
-// RuntimeBuilder.cpp line 210: 条件を makeEngineRuntimeState と統一
-// Current (buggy):
-//   worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
-// Fix:
+// RuntimeBuilder.cpp:221 — P6-a (2026-07-12 実装済み) 🛠️
 worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->runtimeUuid : 0;
 ```
 
-**【確認された波及影響】**:
-- gen=3〜5 の publish 全滅（約6秒間 NUC live=0）
-- 結果として 354ms の rebuild 浪費（副次的影響、P5とは独立に防止可能）
-- gen=1/2 では `fadingDSP=nullptr` だったため発現せず
-- prepareToPlay での DSPCore 切り替え時に初めて顕在化
+**【2026-07-12 詳細調査による本件の再評価】** :
+
+⚠️ **コード調査により `next->runtimeUuid` は DSPCore コンストラクタで設定される immutable フィールドであることが確定した。**
+
+| 決定論的観点 | 判定 |
+|:------------|:------|
+| `next->runtimeUuid` は mutable Runtime state か？ | ❌ **Immutable**（DSPCore 構築時に設定、以後不変） |
+| Builder の `next->runtimeUuid` 読み取りは INV-12 違反か？ | ❌ **違反しない**（immutable プロパティの読み取りのため） |
+| `active` は Spec から取得しているか？ | ✅ `spec.execution.transitionActive` から取得 |
+| `next` は Spec から取得しているか？ | ✅ `spec.topology.fadingDSP` から取得 |
+| Builder が「判断」しているか？ | ❌ 単純写像のみ（`active && next != nullptr` は Spec の2値を忠実に組み合わせているだけ） |
+
+**結論**: **P6-a の修正は「暫定措置」ではなく最終設計として正当である。** 理由:
+- `fadingRuntimeUuid` の計算に使われる値はすべて Spec 由来（`transitionActive`, `fadingDSP`）
+- `runtimeUuid` は immutable プロパティであるため、INV-12（mutable Runtime state の直接観測禁止）に抵触しない
+- Builder は Spec の2値から単純写像を行っているのみで、Policy Decision を行っていない
+- `(active && next != nullptr)` は論理演算であって Policy Decision ではない（`a && b` は写像の一部）
+
+**長期的な設計判断（Specification Completeness の観点）**:
+- `fadingRuntimeUuid` の Specification への explicit field 追加は可能だが、**優先度は低い**
+- 現状でも Builder は Spec から必要な情報をすべて取得できており、INV-12/13 に完全準拠している
+- 昇格する場合の追加工数: RuntimeBuilder.h に `uint64_t fadingRuntimeUuid = 0` 追加 + Orchestrator で計算 + Builder でコピー。~20行の変更
+- **決定**: `fadingRuntimeUuid` の Spec 昇格は **P9 以降で検討**（現状で設計契約違反はないため）
+
+**確定に必要な追加 DIAG**（4点で同一 UUID 付き Spec/World ダンプ、Coordinator 出口を含めることで Builder 以前と Builder 以後を完全に切り分け）:
+```
+// Coordinator 出口: 生成された Spec の状態
+[DIAG_AUTH] CoordExit   uuid=XXX transitionActive=? currentUuid=? nextUuid=? spec.fadingRuntimeUuid=?
+// Builder 入口: Builder が受け取った Spec の状態
+[DIAG_AUTH] BuilderEntry uuid=XXX transitionActive=? currentUuid=? nextUuid=? ...
+// Builder 出口: 生成された World の状態
+[DIAG_AUTH] BuilderExit  uuid=XXX graph.fadingNode=? fadingRuntimeUuid=? ...
+// Commit 直前: publish される World の最終状態
+[DIAG_AUTH] PreCommit   uuid=XXX graph.fadingNode=? fadingRuntimeUuid=? transitionActive=?
+```
+CoordinatorExit がないと「Spec が既に壊れていた」のか「Builder で壊した」のかの区別がつかない。
 
 ---
 
-### P7: Builder 残留 atomic 読取りの Specification 昇格（2026-07-12 発見）
+### P7: Builder 残留 atomic 読取りの Specification 昇格（2026-07-12 発見 → 🛠️ 全項目完了）
 
-**🎯 優先度: ★★★★☆**
+**🎯 優先度: ★★★★☆ → ✅ 全項目完了（2026-07-12）**
 
 **【コード調査で確認された残留依存（2026-07-12）】**
 
-現在の `RuntimeBuilder.cpp` には以下の `engine.*` 直接アクセスが残っている (P0〜P2 完了後も未対応):
+現在の `RuntimeBuilder.cpp` には以下の `engine.*` 直接アクセスが残っていた (P0〜P2 完了後も未対応)。これらの性質に応じて4分類する:
 
-| # | 行 | コード | 分類 | 現在の Spec カバレッジ |
-|:-:|:--|:------|:----|:---------------------|
-| 1 | 255 | `convo::consumeAtomic(engine.retireQueueDepth_, ...)` | **Input（禁止）** | ❌ RetirePart 未定義 |
-| 2 | 319-320 | `engine.currentAdaptiveCoeffBankIndex` | **Input（禁止）** | ❌ AdaptivePart 未定義 |
-| 3 | 324 | `engine.getAdaptiveCoeffBankForIndex(bankIndex)` | **Runtime Query（禁止）** | ❌ AdaptiveBankPart 未定義 |
-| 4 | 378 | `engine.getConvolverProcessor()` → `transferIRStateFrom()` | **Runtime Query（禁止）** | ❌ IRTransferPart 未定義 |
-| 5 | 357 | `engine.m_healthStateRef` (consumeAtomic) | **未分類** | ⚠️ HealthState の Spec 化要検討 |
+#### A. Mutable Runtime Input（INV-12 違反 — Specification への昇格が必要）
 
-**【重要度】**: 1〜3 は INV-12（Builder は mutable Runtime 状態を観測しない）違反。
-4 は IR 転送という特殊操作であり、Builder Contract の例外として認められる可能性あり（Immutable Factory の一部と解釈可能）。
-5 は HealthState の読み取りで、Spec 化するか Builder Service とみなすか設計判断が必要。
+| # | 行 | コード | Spec カバレッジ |
+|:-:|:--|:------|:---------------|
+| 1 | 255 | `convo::consumeAtomic(engine.retireQueueDepth_, ...)` | ❌ RetirePart 未定義 |
+| 2 | 319-320 | `engine.currentAdaptiveCoeffBankIndex` | ❌ AdaptivePart 未定義 |
+
+Builder が mutable な Runtime 状態（retire queue 深度、係数バンクインデックス）を直接読んでいる。本来は Orchestrator がこれらの値を Snapshot し、Specification の一部として Builder に渡すべき。
+
+#### B. Runtime Query（INV-13 違反 — Orchestrator 経由への移行が必要）
+
+| # | 行 | コード | Spec カバレッジ |
+|:-:|:--|:------|:---------------|
+| 3 | 324 | `engine.getAdaptiveCoeffBankForIndex(bankIndex)` | ❌ AdaptiveBankPart 未定義 |
+
+エンジンの内部構造（CoeffBank）に直接アクセスしている。Orchestrator が事前に必要なデータを抽出し、Specification 経由で受け渡すべき。
+
+#### C. IR transfer → ✅ Builder Service（Resource Factory）として正式採用（2026-07-12 確定）
+
+| # | 行 | コード | 判断 |
+|:-:|:--|:------|:-----|
+| 4 | 382 | `runtime->convolverRt().transferIRStateFrom(engine.getConvolverProcessor())` | 🛠️ **Builder Service（Resource Factory）として正式採用** |
+
+**2026-07-12 コード調査による5条件検証結果**（`transferIRStateFrom` `ConvolverProcessor.h:1037`）:
+
+| # | 条件 | 結果 | 根拠 |
+|:-:|:-----|:-----|:------|
+| ① | IR Resource をコピー**だけ**であること | ✅ | `source.acquireIRState()` → `updateIRState(*srcState->ir, srcState->sampleRate)` → `source.releaseIRState(srcState)`。const source からの読み取りのみ。 |
+| ② | Engine 状態を書き換えないこと | ✅ | 呼び出し先は `runtime->convolverRt()`（新規構築中のターゲット）。`engine.getConvolverProcessor()` は `const&` で渡される。 |
+| ③ | Crossfade 状態を書き換えないこと | ✅ | 関数内で crossfade 関連のフィールドに一切アクセスしない。pure IR data transfer。 |
+| ④ | Runtime topology を変更しないこと | ✅ | DSP ノードの追加/削除は行わない。既存の convolver に IR データを設定するのみ。 |
+| ⑤ | Semantic に影響しないこと | ✅ | 同一 IR → 同一コンボリューション結果。semantic equivalence を満たす。 |
+
+**結論**: 全5条件を充足。Builder Service の **Resource Factory** カテゴリとして正式に位置付ける。実装変更不要。
+
+**本質的な前提条件**: Resource Factory が Builder Service として認められるためには、**Source が immutable resource であること**が最重要である。`transferIRStateFrom()` の場合は `source.acquireIRState()` → `const IRState*` → `updateIRState()` という流れ（Source Runtime → acquire → const resource → Target Runtime）になっており、Builder が mutable な Runtime 状態を観測することがない。逆に `engine.retireQueueDepth_` のような mutable atomic を Resource Factory 経由で Builder に渡そうとすれば、それは INV-12 違反となる。
+
+---
+
+### P8: MMCSS 初回失敗再試行機構（2026-07-12 詳細調査に基づく新設）
+
+**🎯 優先度: ★★★☆☆**
+
+**【コード調査で確定した問題】**
+
+`AudioEngine.Processing.AudioBlock.cpp:47-51` の `compareExchangeAtomic(mmcssApplied_, false, true)` が成功した後に `applyMmcssPriority()`（`AudioEngine.Timer.cpp:218`）を呼ぶ設計において、`applyMmcssPriority()` が失敗しても `mmcssApplied_` を `false` に戻さない。その結果:
+
+- **同一 prepareToPlay 期間中に MMCSS 再試行は一切発生しない**
+- `Timer.cpp` の heartbeat callback に MMCSS 再試行コードは存在しない（2026-07-12 全コード調査確定）
+- 唯一の再試行経路は `PrepareToPlay.cpp:27` の `publishAtomic(mmcssApplied_, false, release)` による次回デバイス再初期化時のみ
+
+**確定した実装ギャップ**:
+
+| 項目 | 現状 | あるべき姿 |
+|:----|:-----|:-----------|
+| 状態管理 | `bool mmcssApplied_` | 3値（未試行/成功/失敗）による再試行管理 |
+| 再試行タイミング | prepareToPlay リセット時のみ | NonRT Timer 定期再試行（100ms-1s間隔） |
+| 失敗永続化 | Error 1552 でセッション中ずっと MMCSS 未適用 | 次回 prepareToPlay まで定期的に再試行 |
+
+**Error 1552 の特殊性**: `ERROR_NO_MORE_ITEMS` は MMCSS API としては珍しいエラー。Task名/ドライバ/Windows状態に依存するため、ログのみでは実装側の問題か Windows 側の問題か判断不能。
+
+**設計**:
+
+```cpp
+// ★ P8: MmcssState による3値管理
+enum class MmcssState { NeverTried, Applied, Failed };
+std::atomic<MmcssState> mmcssState_{MmcssState::NeverTried};
+
+// AudioBlock.cpp: CAS 成功後に関数を呼ぶ（従来と同じ）
+if (mmcssState_.compare_exchange_strong(expected, MmcssState::Applied)) {
+    applyMmcssPriority();  // 成功すると Applied、失敗すると Failed に戻す
+}
+
+// Timer.cpp: Failed 状態で定期再試行（100ms周期の heartbeat callback 末尾で）
+if (mmcssState_.load() == MmcssState::Failed) {
+    mmcssState_.store(MmcssState::NeverTried);  // 再試行許可
+    // 次回 AudioBlock CAS で再試行される
+}
+```
+
+**重要**: Audio callback 内での毎回の `AvSetMmThreadCharacteristics()` 試行は RT 性能に悪影響を与える。再試行はあくまで `NeverTried→Applied` の CAS が成功した場合のみ。Timer が `Failed→NeverTried` にリセットすることで、次回 Audio callback が再度試行する。
+
+**実装方針**:
+1. `AudioEngine.h`: `mmcssApplied_` → `MmcssState mmcssState_` に変更
+2. `AudioBlock.cpp`: `applyMmcssPriority()` 戻り値を `applyMmcssPriority()` 内で `mmcssState_` に反映
+3. `Timer.cpp`: heartbeat callback の適切な位置で `Failed→NeverTried` リセット
+4. `PrepareToPlay.cpp`: リセット処理を維持（`mmcssState_ = NeverTried`）
+
+---
+
+#### D. HealthState — ✅ Builder から完全除去完了（2026-07-12）
+
+| # | 行 | コード | 判断 |
+|:-:|:--|:------|:-----|
+| 5 | 357(旧) | ~~`engine.m_healthStateRef` (consumeAtomic)~~ | 🛠️ **Builder から完全除去済み** |
+
+HealthState は Runtime の現在状態（mutable）であり、INV-12（Builder は mutable Runtime を直接観測しない）と相容れないため、Builder から完全に除去した。
+
+**除去内容（2026-07-12 実装）**:
+- `RuntimeBuilder::setHealthStateRef()`, `m_healthStateRef` を削除
+- `RuntimeBuilder::build()` 内の HealthState Critical チェックを削除
+- 全7箇所の `setHealthStateRef()` 呼び出しを削除（Init, PrepareToPlay×2, ReleaseResources, RebuildDispatch, Timer, Transition, Orchestrator）
+
+**移行後の HealthState の役割**:
+1. **Orchestrator の crossfade 制御**（`RuntimePublicationOrchestrator.cpp`）— HealthState Critical 時は crossfade を強制抑制。こちらは Builder とは独立した正当な用途。
+2. **PublicationAdmission**（`RuntimePublicationOrchestrator.h`）— admission 制御用。Builder 経由ではなく直接保持。
+3. **RuntimeHealthMonitor**（`RuntimeHealthMonitor.h`）— 診断ログ用。Timer 経由で取得可能。
+
+**判定**: HealthState の Builder での用途（Critical 時に DSPCore 構築を抑止）は、Orchestrator が既に HealthState を crossfade/admission でチェックしているため冗長だった。削除による影響はない。
+
+---
+
+## 現時点の設計課題サマリ
+
+P7-C 完了により **Builder 責務・Specification Completeness・INV-12/INV-13 に関する設計はほぼ閉じた**。残る設計論点は以下の2点に集約される:
+
+| # | 課題 | カテゴリ | 優先度 | 備考 |
+|:-:|:-----|:---------|:-------|:------|
+| **P6** | AUTH_CONTRACT FAIL の責務境界整理 | Builder vs Spec 境界 | ★★★☆☆ | Builder は `active && next != nullptr` の写像で現状契約を満たす。長期的には `fadingRuntimeUuid` を Specification に昇格する選択肢もある（P9+）。優先度低。 |
+| **P8** | MMCSS 初回失敗再試行機構 | 実行時設計改善 | ★★★☆☆ | RuntimeBuilder とは独立した別トラック。メモリ肥大化対策とは直接関係しないが、XRUN 根本原因の切り分けに必要。 |
+
+**Builder 関連の設計完了状況**:
+- ✅ P0/P1/P2: atomic 読取り・Runtime Query の Specification 昇格 → **完了**
+- ✅ P6-a: Builder L210 `active` 条件追加 → **完了（最終設計として正当）**
+- ✅ P6-b: DIAG_AUTH 4点 → **完了**
+- ✅ P7-A1/A2/B: RetirePart/AdaptivePart → **完了**
+- ✅ P7-C: IR transfer → **Resource Factory として Builder Service 正式採用**
+- ✅ P7-D: HealthState → **Builder から完全除去**
+- ⏳ P5-1/2: int→enum 型整理 → **全設計安定後の最終段階**
 
 ---
 
@@ -284,12 +335,24 @@ worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->run
 
 ### INV 一覧（2026-07-12 ユーザー訂正版）
 
+```
+INV-12（設計原則）
+  Builder は mutable Runtime state を直接観測しない
+        ↓
+INV-13（実装契約）
+  Builder が利用できるのは Specification, Builder Service, Pure Utility のみ
+  Input（atomic 読取り）: ❌ 禁止 → Specification 経由
+  Runtime Query（Coordinator/Current Runtime/Crossfade）: ❌ 禁止 → Orchestrator 経由
+  Builder Service には Allocator / Identity Generator / Immutable Factory / Resource Factory が含まれる。
+  Resource Factory が扱えるのは immutable resource のみであり、mutable Runtime state を観測してはならない。
+```
+
 | ID | Invariant | 備考 |
 |:---|:----------|:------|
 | INV-1〜INV-10 | 変更なし（旧版維持） | DSPHandle ライフサイクル・Commit トランザクション |
 | INV-11 | **RuntimePublishWorld は Builder 完了後 immutable。Builder never mutates inputs.** | ✅ 実装済み（const 返却確認済み） |
 | **INV-12**（設計原則） | **Builder shall never observe mutable Runtime state directly. Any mutable runtime information required for construction shall be captured into RuntimePublishSpecification before Builder execution.** | **Builder は mutable な Runtime 状態を直接観測してはならない。構築に必要な mutable 情報はすべて RuntimePublishSpecification にキャプチャしてから Builder を実行する。** 設計原則。P0〜P2 の根拠。 |
-| **INV-13**（実装契約 — INV-12 の実装ルール） | **Builder は RuntimePublishSpecification、Builder Service、Pure Utility のみ利用可能。Input（atomic）と Runtime Query（Coordinator/Current Runtime/Crossfade）は禁止。**（P3 で正式化予定） | 🎯 2026-07-12 再定義。INV-12「mutable state 観測禁止」を実現する具体的な契約。P0〜P2 完了後に設計書更新。 |
+| **INV-13**（実装契約 — INV-12 の実装ルール） | **Builder は RuntimePublishSpecification、Builder Service、Pure Utility のみ利用可能。Input（atomic）と Runtime Query（Coordinator/Current Runtime/Crossfade）は禁止。Builder Service には Allocator / Identity Generator / Immutable Factory / Resource Factory が含まれる。Resource Factory が扱えるのは immutable resource のみであり、mutable Runtime state を観測してはならない。**（P3 で正式化予定） | 🎯 2026-07-12 再定義。INV-12「mutable state 観測禁止」を実現する具体的な契約。P7-C で Resource Factory を Builder Service の正式カテゴリとして追加。P0〜P2 完了後に設計書更新。 |
 
 ### Builder 依存分類（2026-07-12 コード調査確定）
 
@@ -299,8 +362,48 @@ worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->run
 | **② Runtime Query（禁止）→ Orchestrator→Spec へ** | ❌ | Coordinator `consumeWorldHandle()`, Publication Sequence, CrossfadeRuntime（`getStartDelayBlocks` 他3）, `latencyDelayOld/New`, `retireQueueDepth_` | **8** | P1+P2 対象。`computeRuntimePublishComputation()` 経由 + 直接読み取り。PublicationSnapshotPart/CrossfadeSnapshotPart/LatencyPart に格納。 |
 | **③ Builder Service（許可）** | ✅ | `reserveRuntimePublicationIdentity()`, `RuntimePublishWorld::createForBuilder()`, Allocator, Factory, Identity Generator, Immutable Helper | **1** | 問題なし。契約条件を満たす（Runtime状態非依存/入力を変更しない/意味的結果を変更しない/決定論性を破壊しない）。 |
 | **④ Pure Utility（許可）** | ✅ | `estimateRuntimeLatencyBaseRateSamples()`, hash(), math | **1** | 問題なし。現在状態に依存しない純粋計算。 |
-| **⑤ P7 残留 Input（要昇格）** | ❌ | `retireQueueDepth_`（重新評価）, `currentAdaptiveCoeffBankIndex`, `getAdaptiveCoeffBankForIndex()` | **3** | P7 対象。Specification の RetirePart/AdaptivePart 未定義。2026-07-12 発見。 |
-| **⑥ P7 特殊依存（要判断）** | ⚠️ | `getConvolverProcessor()` → IR transfer, `m_healthStateRef` | **2** | IR transfer は Immutable Factory 例外と解釈可能。HealthState は要設計判断。 |
+| **⑤ P7 残留 Input** | 🛠️ **完了** | `retireQueueDepth_`, `currentAdaptiveCoeffBankIndex`, `getAdaptiveCoeffBankForIndex()` → RetirePart/AdaptivePart に昇格 | **3** | ✅ P7-A1/A2/B で全件完了。Specification 経由で Builder に渡される。 |
+| **⑥ Resource Factory（正式 Builder Service）** | ✅ **許可** | `getConvolverProcessor()` → IR transfer | **1** | ✅ P7-C で `transferIRStateFrom()` の5条件確認完了。Resource Factory として正式分類。`m_healthStateRef` は Builder から除去済み（P7-D）。 |
+
+### Builder Service の定義と判定条件
+
+Builder Service は以下の**3条件をすべて満たす**必要がある（条件3は旧条件3「Semantic Equivalence」と旧条件4「実装アーティファクトのみ」を統合 — Semantic Equivalence を満たせば実装アーティファクト制約は自動的に包含されるため）:
+
+| # | 条件 | 説明 | 違反例 |
+|:-:|:-----|:-----|:------|
+| 1 | **Mutable Runtime State を参照しない** | エンジンの atomic 変数・DSPCore 内部状態を読まない | `consumeAtomic(retireQueueDepth_)` |
+| 2 | **Specification を書き換えない** | Builder の入力を変更しない | Spec のフィールドへの再代入 |
+| 3 | **Semantic Equivalence を変えない**（実装アーティファクトは除く） | 同じ Spec → 同じ World。Allocation, Identity, Pointer, Generation 等の実装アーティファクトの変更は許容されるが、DSP topology/routing/latency/crossfade/processing semantics は不変 | 非決定的な ID 生成による World 差異、DSP topology の変更 |
+| **4** | **Resource Factory: Source は immutable resource に限る**（Resource Factory 追加条件） | Resource Factory が扱う Source は IR データ・FFT Plan 等、構築後に変更されない immutable resource のみ。Runtime の mutable state（Current Runtime / Crossfade State / Publication State / Health State）は Source として認められない。 | `engine.getConvolverProcessor()` から `acquireIRState()` で取得した `const IRState*` は immutable。`engine.retireQueueDepth_` のような atomic 変数は mutable につき Resource Factory の対象外。 |
+
+**Builder Service の分類**:
+
+| カテゴリ | サービス種別 | 該当例 |
+|:---------|:------------|:-------|
+| **Memory Service** | Allocator | `aligned_malloc`/`aligned_free` |
+| **Identity Service** | Identity Generator | `reserveRuntimePublicationIdentity()` |
+| **Immutable Factory** | Factory + Immutable Helper | `RuntimePublishWorld::createForBuilder()`, FFTPlan, LatencyCalculator, BufferFactory |
+| **Resource Factory** | Immutable Resource Copier | `IRFactory`, IR transfer（`transferIRStateFrom`） |
+
+**Resource Factory レビューチェックリスト**:
+
+Resource Factory に新しい API を追加する場合は以下の項目をレビューすること:
+
+| # | チェック項目 | 判定例 |
+|:-:|:------------|:-------|
+| □ | **Source が immutable resource である** | `const IRState*` は ✅。`engine.retireQueueDepth_` のような atomic 変数は ❌ |
+| □ | **Source を変更しない** | `source.acquireIRState()` → read-only → `source.releaseIRState()` は ✅。内部キャッシュの書き換えは ❌ |
+| □ | **Runtime topology を変更しない** | 既存の DSP ノードにデータを設定するのみ ✅。ノードの追加/削除は ❌ |
+| □ | **Runtime state を観測しない** | 対象ノードが新規構築中のものであれば ✅。active/fading DSP の内部状態を読むのは ❌ |
+| □ | **Semantic Equivalence を維持する** | 同一 Source → 同じ処理結果 ✅。非決定的な振る舞いの導入は ❌ |
+
+> **注意**: 上記を1つでも満たさない操作は、Resource Factory ではなく Specification への昇格または Orchestrator での事前解決が必要。
+
+**P7 残留依存の確定**:
+- A/B（Mutable Input / Runtime Query）→ ✅ **P7-A1/A2/B で昇格完了**
+- C（IR transfer）→ ✅ **Resource Factory として Builder Service に正式分類**
+- D（HealthState）→ ✅ **Builder から完全除去完了**
+- **全項目完了につき P7 クローズ**
 
 ### Authority Boundary Chart
 
@@ -322,85 +425,137 @@ worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->run
 
 ### エグゼクティブサマリ
 
-**設計上のメモリ効果見込み**: 未修正時 2,477MB に対し、設計上は定常 686MB / ピーク 1,094MB を見込む。ただしビルド・実測未実施のため確定値ではない。
-**実測確認が必須の項目**: BlockSize 削減効果（~189MB/DSPCore 見込み）、CrossfadePlan 導入後の EBR 動作、680MB Other 内訳。これらは P0〜P3 実装後の MEM_SNAP で確認する（[未確定] 7 参照）。
-**ただし `lifecycle(retire)=0` は継続中**。CrossfadePlan 導入後の検証が必要（[未確定] 7 参照）。
+> **設計上の推定値（コード解析ベース — 概算であり実測値ではない）**: 未修正時 2,477MB に対し、設計上は定常 686MB / ピーク 1,094MB を見込む。ただしこれらの数値はコード上のバッファサイズ・アロケーション数式に基づく概算値であり、ビルド・実測未実施のため確定値ではない。実測により大きく変動する可能性がある。
+
+**実測確認が必須の項目**: BlockSize 削減効果（~189MB/DSPCore 見込み）、CrossfadePlan 導入後の EBR 動作、680MB Other 内訳。これらは P0〜P3 実装後の MEM_SNAP で確認する。
 
 **全11ステップ実装確認済み**: ソースコード上の実装は完了。発見した7件の不整合（旧戻り値型削除漏れ、テストの hasFadingRuntime 残存、P4 DIAG_MKL_MALLOC include不足、queueDepthBlocks ラベル、コメント古朽化2件）は修正済み。ビルド・テスト通過確認は未実施（C1060 環境問題のため）。
 
 ---
 
-## [未確定] 7. 未解決課題（Runtime 観測依存）
+## 改修後の測定結果で検証するべき項目
 
-*本セクションは「設計書の時点で確定できず、将来の Runtime 観測または実装後に検証が必要な事項」を集約する。*
+*本セクションは「コード変更を実装した後、MEM_SNAP やログを用いた実測により検証する必要がある項目」を集約する。現時点ではコード調査で確定不能であり、測定結果を待って確定する。*
 
-### 7.1 NoiseShaper accepted=0 の真因 → ✅ 解決（2026-07-12 ログ解析）
+### BlockSize 削減実測値
 
-🔍 **HYPOTHESIS**: `accepted=0` の原因はコード調査の範囲では特定できず、Runtime ログ確認が必要とされていた。
+**内容**: `kInitialPrepareMaxBlock=4096`（`Init.cpp:41`）コード確認済み。コード数式で ~189MB/DSPCore の削減を見込む。
 
-**✅ ログ解析結果（2026-07-12 ConvoPeq.log）**:
-```
-[NoiseShaperLearner] Waiting diagnostics:
-  accepted=3012  dropSession=0  dropSampleRate=0  dropBank=0
-  bufferedSamples=771072  sessionId=0  sampleRateHz=192000
-  bankIndex=107  generation=39  queueDepthBlocks=0
-```
+**確認方法**: P2-1 実装後の MEM_SNAP で削減効果を確認。現状のログ（gen=1: spb=4096, internalMaxBlock=32768）は改修前の値のため、改修後に再測定が必要。
 
-| 項目 | 値 | 判定 |
-|:-----|:---|:------|
-| `accepted` | **3012 / 3004** | ❌ `accepted=0` ではない。正常に学習ブロックを受理中。 |
-| `dropSession` | 0 | sessionId=0 によるドロップなし |
-| `dropSampleRate` | **0** | block.sampleRateHz(192000) = session.sampleRateHz(192000)。不一致なし |
-| `dropBank` | 0 | bankIndex 一致 |
-| `queueDepthBlocks` | 0 | 滞留なし |
+### 680MB Other 内訳実測値
 
-**結論**: `accepted=0` 仮説は **実測で完全に否定された**。NoiseShaper は正常動作。懸念されたsample rate不一致は発生していない。
+**内容**: 現状の計装では Private - TRK = ~455MB までしか分解不能。`computeOtherPrivate()` は残余値（`osPrivateMB - MKL_bytes - retire_bytes`）であり、aligned_malloc/JUCE/CRT/VirtualAlloc 等すべてを含む。
 
-### 7.2 EBR 経路の未検証と lifecycle(retire)=0 → ✅ 主因特定（2026-07-12 ログ解析）
+**確認方法**: TrackedMemoryStatistics 統合後の MEM_SNAP、または DIAG_MKL_MALLOC 拡張（生 `aligned_malloc` 7箇所の段階的 DIAG 化）により分解能を向上させる。
 
-⚠️ **CAVEAT**: `lifecycle(retire)=0` は handle 未登録が原因ではなく、gen=3 以降の publish が全滅（AUTH_CONTRACT）したため retire 機会そのものが発生しなかった。
+### 455MB 未追跡メモリ内訳
 
-**✅ ログ解析結果（2026-07-12 ConvoPeq.log）**:
-- **lifecycle(pub/ret/reclaim) カウンタの変化**:
-  - gen=3 FAIL 中: 4/0/0 (retire=0, reclaim=0)
-  - gen=6 publish 成功直後: 6/0/0 (retire 未発生)
-  - gen=6 xfade 完了後: 6/1/0 (retire enqueue 確認 = Ret: pend=1)
-  - gen=7 publish 成功後: 7/1/1→7/1/13 (EBR polling 進行)
-- MEM_SNAP の `Ret: pend=0` で retire queue 消費確認
+**内容**: steady-state Private 455MB のうち TRK total=1.2MB のみ追跡。残り ~454MB が DIAG 非計装領域。
 
-**確認済み**: RETIRE enqueue → EBR polling → Ret: pend=0 のチェーンは動作。ただし EBR epoch advance / reader leave drain の詳細はこのログのみでは確認不可。
+**確認方法**: P4 TrackedMemoryStatistics の DIAG 計装拡張（DSPCore 内部アロケーションの段階的 DIAG 化）が必要。
 
-### 7.3 runtimeDSPHandleMap / BlockSize 実測 / 680MB Other 内訳
+### runtimeDSPHandleMap 収束値
 
-- `runtimeDSPHandleMap` 収束値: steady-state 2-3 エントリ見込み（実測確認が必要）
-- BlockSize 削減効果: コード数式で ~189MB/DSPCore の削減見込み（実 MEM_SNAP での確認が必要）
-- 680MB Other 内訳: `computeOtherPrivate` のトレース完了。`aligned_malloc` の DIAG 未計装により DSPCore 内部バッファは Other に含まれる。
+**内容**: `std::unordered_map<DSPCore*, DSPHandle>`。生存 DSPCore 数に厳密にバインドされる。コード上の設計としては問題なし。steady-state 2-3 エントリと見込む。
 
-### 7.4 調査結果の総括（2026-07-12 最終確定）
+**確認方法**: 長期稼働後の MEM_SNAP または DIAG 出力でエントリ数確認。
 
-**全ツールを使用した最終網羅調査の結果、コード調査で確定可能な事項は全て確定・記録された。** 使用ツール: grep/sed (WSL), AiDex MCP, serena MCP, ctx_batch_execute, cocoindex-code (ccc.exe), graphify, semble。
+---
+
+## その他の未確定項目
+
+*本セクションは「現時点のログとコード調査だけでは確定できず、追加の調査・設計判断・外部情報が必要な事項」を集約する。*
+
+### MMCSS 初回失敗再試行機構
+
+**発見経緯**: 2026-07-12 ConvoPeq.log 解析。`[MMCSS] FAILED: GetLastError=1552 taskIndex=0`。
+
+**問題**: `AudioEngine.Processing.AudioBlock.cpp:40-44` では `compareExchangeAtomic` が成功した後に `applyMmcssPriority()` を呼ぶ設計。このため初回登録が失敗しても `mmcssApplied_` は `true` のまま固定され、**同一 prepareToPlay 期間中に再試行は発生しない**。
+
+**確認済みの再試行経路**（コード調査 2026-07-12）:
+- `PrepareToPlay.cpp:27`: `convo::publishAtomic(mmcssApplied_, false, std::memory_order_release)` でリセット
+- つまり次回のデバイス再初期化（prepareToPlay 再呼び出し）時に再試行される
+- `Timer.cpp` に MMCSS 再試行コードなし（`AudioBlock.cpp` の CAS のみが唯一の適用経路）
+
+**Error 1552 の特殊性**: 1552 = `ERROR_NO_MORE_ITEMS` は MMCSS API としては珍しいエラー。原因は Task名/ドライバ/Windows状態など複数あり、ログのみでは実装側の問題か Windows 側の問題か判断できない。
+
+**確認方法**: MMCSS 成功時ログ `[MMCSS] registered:` の有無を確認。
+
+**対応**: **P8 として設計書 Backlog に追加**（2026-07-12 詳細調査）。`enum class MmcssState` による3値管理 + NonRT Timer 再試行の設計を確定。実装は次回改修単位。
+
+### XRUN 根本原因（複数仮説）
+
+**発見経緯**: 2026-07-12 ConvoPeq.log 解析。全7件の XRUN が正 drift (+3,410〜+4,297us) を示す。コールバック実処理時間 (0.47〜1.57ms) は予算 (5.33ms) 内であるため、DSP 負荷過多ではない。
+
+**2026-07-12 詳細調査による追加知見**:
+- Timer callback は heartbeat 専用であり、`Timer.cpp` 内で `jitter > 20ms` または `expected*0.1` を検出している。XRUN とは独立した監視。
+- `Timer.cpp` 末尾で 10ms 超の実行時間を検出・ログ出力。Timer callback が重いと audio callback のタイミングに影響する可能性がある。
+- `AudioBlock.cpp` 内の `callbackTimingHistory` リングバッファ（`kCallbackTimingSlots` エントリ）が各 callback の処理時間/ドリフト/CPU/予算を記録。XRUN 発生後に Timer が `[CB_HIST]` としてダンプ。
+- Timer heartbeat callback（100ms周期）と XRUN ペア間の間隔（40-50s）に直接的な相関は確認できず。
+
+**候補（ログのみでは特定不能）**:
+1. MMCSS 未適用によるスレッド競合 — ❗ gen=6 で MMCSS 成功後も XRUN が減少していないため、直接原因の可能性は低い
+2. Windows Audio Engine / WASAPI / ASIO ジッター
+3. USB オーディオインターフェースのアイソクロナス転送遅延
+4. DPC/ISR によるプリエンプション
+5. CPU Package C-state 遷移
+6. メモリ帯域競合（MixedPhase 時の PageFault surge 時に顕著）
+
+**確認方法**: P8（MMCSS 再試行機構）実装後、MMCSS が確実に適用された状態で XRUN 発生有無を再評価する。その後も解消しない場合は ETW/xperf による詳細トレース。
+
+**タイミングパターン分析（2026-07-12 ログ解析）**: XRUN は単独ではなくペアで発生する傾向がある:
+- gen=6 crossfade 中: 2回が 0.4s 間隔（XRUN#1-#2）
+- gen=7 steady-state: 5回がペアで発生（XRUN#3-#4: ~10s間隔、XRUN#5-#6: ~10s間隔、XRUN#7: 単独）
+- ペア間の間隔: ~40-50s
+
+単発のOSジッターよりは何らかの定期的なバックグラウンド処理との相関が疑われる。Timer callback（100ms）は周期が短すぎて直接の原因とは考えにくい（XRUNペア間は10s x 100tick）。Windows のスレッドスケジューリング量子（~15-30ms）や DPC レイテンシのクラスタリングが関与している可能性がある。ただし確定的な因果関係はログのみでは特定不能。
+
+### EQ Cache モノトニック成長 — ✅ 影響軽微で確定（2026-07-12 詳細調査）
+
+**観測**: VERIFY カウンタ `eqCacheMiss(create/lookup)=0/0` -> cache hit rate 100%。
+
+**コード調査による確定事実（2026-07-12）**:
+- `CacheMap` = `std::unordered_map<uint64_t, EQCoeffCache*>` - **削除機構・エビクションポリシーなし**。`clear()`, `erase()`, `evictLRU()` のいずれも未実装。
+- `cacheMapPtr` は copy-on-write の `std::atomic<CacheMap*>` - 新しいエントリ追加時に `CacheMap` 全体をコピーし新しい Map を atomic 公開。旧 Map は EBR 経由で非同期解放。
+- **全く対照的な設計**: 同じコードベースの IR `CacheManager`（`CacheManager.cpp`）には `evictLRU()`, `lruList`, `clear()` が存在するが、`EQCacheManager` には一切ない。
+- つまり EQ Cache は **モノトニック成長**（追加される一方で削除されない）
+- **実測サイズ（コード調査 2026-07-12）**: `EQCoeffCache` = coeffs[20] @ 64bytes + metadata ~100bytes + alignment = **~1.5KB/entry**（従来推定の ~200KB から大幅下方修正）。coeffs は `EQCoeffsSVF` (8 doubles = 64bytes) × 20バンド = 1,280bytes が大部分を占める。
+- 再計算: 100種類の EQ 設定で **~150KB**、1000種類で **~1.5MB**。実用的なメモリ影響はごく軽微。
+- ただし `CacheMap` の copy-on-write による瞬間的なメモリ使用量倍増は発生し得る
+
+**✅ 確定判断（2026-07-12 詳細調査）**: モノトニック成長だが ~1.5KB/entry のため現実的なメモリ影響は軽微。エビクション実装は不要。設計上の注意点として文書化。
+
+**確認方法**: `CacheMap` のエントリ数ダンプ、または EQ パラメータ変更頻度と実メモリ使用量の相関観測により検証可能。
+
+---
+
+## 調査確定状況一覧
+
+**全ツールを使用した最終網羅調査の結果、コード調査で確定可能な事項は全て確定・記録された。** 使用ツール: grep/sed (WSL), AiDex MCP, serena MCP, cocoindex-code (ccc.exe), graphify, semble。
 
 | 調査項目 | 結果 | 確定状況 |
 |:---------|:-----|:---------|
-| `hasFadingRuntime` production残存 | **0件** — 全削除確認（ISRRuntimeSemanticSchema.h から削除、hasFadingRuntimeInWorld は fadingRuntimeUuid != 0 導出） | ✅ 確定 |
-| `currentCaptureSessionId` 代入 | **0件** — 定義時初期値 =0 固定。Runtime代入なし → sessionId によるドロップは発生しない | ✅ 確定 (FACT #82) |
-| P4 `DIAG_MKL_MALLOC` 完全性 | CacheManager(2) + IRConverter(1) の3箇所すべて DIAG 化＋`DiagnosticsConfig.h` include 追加完了。MKLNonUniformConvolver 内6箇所の生 `mkl_malloc` は P4 範囲外（ScopedAlignedPtr 管理＋allocatedBytes() 追跡済み） | ✅ 確定 |
-| `aligned_malloc` DIAG 未計装 | 81箇所残存（v7.9 調査時点では95箇所 → DIAG_MKL_MALLOC 経由化により14箇所改善）。全体的な DIAG 化は設計範囲外 | ✅ 既知制限 |
+| `hasFadingRuntime` production残存 | **0件** - 全削除確認（ISRRuntimeSemanticSchema.h から削除、hasFadingRuntimeInWorld は fadingRuntimeUuid != 0 導出） | ✅ 確定 |
+| `currentCaptureSessionId` 代入 | **0件** - 定義時初期値 =0 固定。Runtime代入なし -> sessionId によるドロップは発生しない | ✅ 確定 (FACT #82) |
+| P4 `DIAG_MKL_MALLOC` 完全性 | CacheManager(2) + IRConverter(1) の3箇所すべて DIAG 化 + `DiagnosticsConfig.h` include 追加完了。MKLNonUniformConvolver 内6箇所の生 `mkl_malloc` は P4 範囲外（ScopedAlignedPtr 管理 + allocatedBytes() 追跡済み） | ✅ 確定 |
+| `aligned_malloc` DIAG 未計装 | 生 `aligned_malloc` 7箇所、`DIAG_MKL_MALLOC` 23箇所 = 合計30箇所。v7.9 調査時81箇所から改善。生 `aligned_malloc` 7箇所は ScopedAlignedPtr で RAII 管理。 | ✅ 既知制限 |
 | Builder メモリオーダー | 全18件 `memory_order_acquire` 統一。不整合なし | ✅ 確定 |
-| `const_cast` | 2箇所のみ: RuntimeBuilder.h:94（旧シグネチャ委譲）, Orchestrator.cpp:178（FrozenRuntimeWorld 境界） | ✅ 確定 |
+| `const_cast` | 2箇所のみ: RuntimeBuilder.h:94, Orchestrator.cpp:178 | ✅ 確定 |
 | 全 Builder 関数 | `buildRuntimePublishWorld`, `createBootstrapWorld`, `validateWarmup` 全て `noexcept` | ✅ 確定 |
 | TODO/FIXME work70関連 | **0件** | ✅ 確定 |
-| `collectTrackedMemoryStatistics()` | 定義＋実装完了（`ASSERT_NON_RT_THREAD()` 完備）。呼び出し元0件（P4 Backlog）。設計書要求（API定義）は達成済み。 | ✅ API完了（MEM_SNAP統合は別タスク） |
-| `RuntimePublicationSpecification.h` | 独立ファイルとして作成。**git管理下に追加済み**。include元は0件（将来分離用準備）。 | ✅ ファイル存在確認・git追跡開始 |
+| `collectTrackedMemoryStatistics()` | 定義 + 実装完了（`ASSERT_NON_RT_THREAD()` 完備）。呼び出し元0件。 | ✅ API完了 |
+| `RuntimePublicationSpecification.h` | `RuntimeBuilder.h` のエイリアスファイル。間接的に全ビルドでインクルード。 | ✅ エイリアス確認 |
+| NoiseShaper accepted=0 | `accepted=3012/3004`, `dropSampleRate=0` -> **NOT-A-PROBLEM** -> Appendix B | ✅ 解決 |
+| EBR lifecycle(retire)=0 | 主因（AUTH_CONTRACT FAIL）特定。reclaim=13 は `tryReclaimResources()` 呼び出し回数（物理破棄件数ではない）-> Appendix B | ⚠️ 主因特定 |
+| 同一 gen=3 内 OS倍率変化 | ノイズシェイパー type=0->2 変更が原因。**正常動作** -> Appendix B | ✅ 解決 |
+| **EBR epoch advance** | `advanceEpoch()` は deprecated + private（移行完了済み）。public API は `publishEpoch()` / `tryReclaim()`。EpochDomain のコード調査により正常動作確認。Runtime での進行状況（epochAdvanceCount）は別途観測。 | ✅ 設計完了確認 |
+| **EQ Cache モノトニック成長** | `CacheMap` = `unordered_map`（evictLRU/clear/erase 未実装）。~1.5KB/entry。1000エントリでも ~1.5MB → 実用的影響は軽微。 | ✅ 影響軽微で確定 |
+| **MMCSS 再試行** | CAS 成功後に `applyMmcssPriority()` 失敗 → `mmcssApplied_` が true 固定。Timer に再試行コードなし。**P8 として設計書に追加**。 | 🆕 P8 新設 |
+| **P6 長期設計（fadingRuntimeUuid 昇格）** | `next->runtimeUuid` は immutable。Builder での読み取りは INV-12 違反ではない。P6-a 修正は暫定措置ではなく最終設計として正当。Spec 昇格は P9 以降で検討。 | ✅ 設計判断確定 |
+| **RuntimePublicationSpecification.h** | エイリアスファイル。誰もインクルードしていない（将来の分離用準備）。 | ✅ エイリアス確認済み |
 
-**コード調査で確定不能な項目 → ログ解析で一部解決（2026-07-12）**:
-
-1. ✅ **NoiseShaper accepted=0 真因** → ログ解析により **NOT-A-PROBLEM と確定**（`accepted=3012/3004`, `dropSampleRate=0`）
-2. ⚠️ **EBR lifecycle(retire)=0** → 主因（AUTH_CONTRACT FAIL）を確定。gen=6 以降の retire/polling 動作確認済み。EBR epoch advance の詳細は別ログが必要。
-3. 🔄 **BlockSize 削減実測値**（→ P2-1 実装後の MEM_SNAP）— コード変更後のため本ログでは未確認
-4. 🔄 **680MB Other 内訳の実測値**（→ TrackedMemoryStatistics MEM_SNAP 統合後）— 現状の計装では Private−TRK=~455MB までしか分解不能
-
-**結論**: コード調査＋ログ解析により、7.1 は完全解決、7.2 は主因確定。残る 7.3/7.4 はコード変更後の実測に依存。
+**結論**: コード調査 + ログ解析により NoiseShaper, EBR 主因, OS倍率変化は解決。BlockSize/Other/455MB はコード変更後の実測で検証。MMCSS（P8）および XRUN は追加の設計判断または実装後の再評価が必要。EQ Cache/EBR epoch advance/P6 長期設計/RuntimePublicationSpecification.h は調査により確定。
 
 ---
 
@@ -561,7 +716,40 @@ publish 失敗後に未公開 DSPCore を安全に破棄するための専用メ
 
 ---
 
-## Appendix B: 調査ツール
+## Appendix B: 解決済み未確定事項（旧 [未確定] 7.1, 7.2）
+
+### D.1 NoiseShaper accepted=0 → ✅ NOT-A-PROBLEM（2026-07-12 ログ解析で確定）
+
+**解決日**: 2026-07-12
+
+**経緯**: コード調査では `accepted=0` の原因を特定できず、サンプルレート不一致が疑われていた。ConvoPeq.log の P-NS DIAG 出力により解決。
+
+**確定事実**:
+```
+[NoiseShaperLearner] Waiting diagnostics:
+  accepted=3012/3004  dropSession=0  dropSampleRate=0  dropBank=0
+  sessionId=0  sampleRateHz=192000  bankIndex=107  generation=39  queueDepthBlocks=0
+```
+
+**結論**: NoiseShaper は正常に学習ブロックを受理中。block.sampleRateHz と session.sampleRateHz は一致しており、サンプルレート不一致は発生していない。
+
+---
+
+### D.2 EBR lifecycle(retire)=0 → ✅ 主因特定（2026-07-12 ログ解析）
+
+**解決日**: 2026-07-12
+
+**経緯**: `VERIFY lifecycle(pub/ret/reclaim)` で `retire=0` が継続。handle 未登録が疑われていた。
+
+**確定事実**: 主因は AUTH_CONTRACT FAIL による publish 停止（gen=3〜5）。NUC live=0 の間は retire 機会が発生しない。
+- gen=6 publish 成功後、`Ret: pend=1` を確認（retire enqueue 正常）
+- gen=7 publish 成功後、`Ret: pend=0` + reclaim counter 0→13（EBR polling 正常）
+
+**保留**: EBR epoch advance / reader leave drain / callback 完全性はこのログのみでは確認不可。必要に応じて別ログで検証。
+
+---
+
+## Appendix C: 調査ツール
 
 | ツール | 使用目的 |
 |:-------|:---------|
@@ -575,11 +763,11 @@ publish 失敗後に未公開 DSPCore を安全に破棄するための専用メ
 
 ---
 
-## Appendix C: 改訂履歴
+## Appendix D: 改訂履歴
 
 | 版 | 日付 | 改訂内容 |
 |:---|:-----|:---------|
-| 1.0〜7.9 | 2026-07-10〜11 | 初版〜FACT 86 確定（旧版 v8.3 までの全履歴は Appendix E 参照） |
+| 1.0〜7.9 | 2026-07-10〜11 | 初版〜FACT 86 確定（旧版 v8.3 までの全履歴は旧 Appendix E 参照） |
 | **8.0** | **2026-07-11** | **レビュー指摘3点反映（最終確定）**: transitionActive 導出→ExecutionSemantic 包含に戻す、Specification 三階層構造化、AllocatorPolicy 独立 |
 | **8.1** | **2026-07-11** | **レビュー指摘4点反映**: Specification 三部構成、PrepareBlockSizingPolicy 改名、DropReason 通常 enum、totalTracked カテゴリ合計算出 |
 | **8.2** | **2026-07-12** | **レビュー指摘5点反映**: version フィールド追加、enum class 化、jassert Contract Enforcement、Deterministic Construction 明確化、DTO 的性質明文化 |
@@ -591,3 +779,8 @@ publish 失敗後に未公開 DSPCore を安全に破棄するための専用メ
 | **9.4** | **2026-07-12** | **可読性・保守性改善（5点）**: ProcessingPart に YAGNI 統合理由を追記。Builder Service を「Builder execution environment」と位置づけ。PublicationPart→PublicationSnapshotPart に改名。INV-12/INV-13 番号を設計原則→実装契約の順序に入れ替え。FACT 件数表記を「全86件」→「整理対象86件」に軟化。 |
 | **9.5** | **2026-07-12** | **実装進捗**: P0（ProcessingPart + atomic読取り排除）✅完了。P4（MEM_SNAP統合）✅完了。P1第一段階（PublicationSnapshotPart追加＋previousCommittedSequence移行）✅完了。P2（CrossfadeSnapshotPart/LatencyPart追加＋Builder engine直接読取り排除）✅完了。設計書Backlog更新、Appendix A.0に⑫⑬⑭追加。P3 設計書更新済み。 |
 | **9.6** | **2026-07-12** | **設計契約の明文化（5点）**: (1) Deterministic Construction に「Builder Service may affect implementation artifacts only」追記。(2) Specification Completeness 節を新設（INV-13 の Data 制約版）。(3) P2 に Source 一意性（ProcessingPart 唯一 Source）と Part Ownership 表を追加。(4) Builder Service を Memory/Identity/Immutable Factory に細分類。(5) P2 Backlog 完了確認・冗長代入 cleanup は次回対応。 |
+| **9.7** | **2026-07-12** | **v9.7a: ConvoPeq.log 解析＋ツール統合調査結果反映**: P6（AUTH_CONTRACT FAIL — Builder または Spec 生成段階の条件不一致）新設。P7（Builder 残留 atomic 読取り5件）新設。Builder 依存分類表に⑤残留 Input と⑥特殊依存を追記。P5 に aligned_malloc 件数実測値を追記。[未確定] 7.1 NoiseShaper accepted=0 解決。7.2 EBR 主因特定。 |
+| | | **v9.7b: 設計書再構成**: P0〜P4（完了）を Appendix A に統合・Backlog から削除。[未確定] 7.1/7.2（解決）を Appendix D に移動。新規4項目（MMCSS/XRUN/455MB/EQ Cache）を [未確定] 7.2〜7.5 として追加。Appendix 番号を B〜E に再編。使用ツール: grep/sed(WSL), serena MCP, cocoindex-code, semble, graphify, AiDex。 |
+| **9.8** | **2026-07-12** | **P6/P7 コード実装**: P6-a (Builder.cpp L210 `active`条件追加), P6-b (DIAG_AUTH 4点: CoordExit/BuilderEntry/BuilderExit/PreCommit), P7-A1 (RetirePart 追加), P7-A2/B (AdaptivePart 追加＋adaptive bank 排除)。実装進捗サマリテーブルを追加。変更ファイル: `RuntimeBuilder.h`, `RuntimeBuilder.cpp`, `RuntimePublicationOrchestrator.cpp`, `AudioEngine.Commit.cpp`。 |
+| **9.9** | **2026-07-12** | **全未確定項目の詳細調査・確定**: 全8ツール（grep/sed(WSL)/serena/cocoindex-code/graphify/semble/AiDex/ast-grep）を使用して未確定項目を網羅調査。P6 長期設計：`runtimeUuid` immutable 確定により P6-a は最終設計として正当と判断。P8 MMCSS 再試行機構を新設。XRUN に Timer callback 相関分析を追記。EQ Cache モノトニック成長を「影響軽微」で確定。EBR epoch advance の設計完了確認。RuntimePublicationSpecification.h エイリアス確認。調査確定状況一覧に6項目を追加更新。使用ツール: grep/sed(WSL), serena MCP, cocoindex-code (ccc.exe), semble, graphify, AiDex MCP, ast-grep/rg(WSL)。 |
+| **9.10** | **2026-07-12** | **P7-C 確定 + Builder Service 分類整理**: P7-C（IR transfer）コード調査完了。`transferIRStateFrom()` の5条件検証（①IRコピー専用、②Engine非書き換え、③Crossfade非書き換え、④Topology不変、⑤Semantic不変）→ 全条件充足確認。Builder Service に **Resource Factory** カテゴリを追加し、IR transfer を正式分類。P7-D 完了確定、P7 クローズ。Backlog の P7 節を整理。 |\n| **9.11** | **2026-07-12** | **P8 MMCSS 再試行機構 実装完了**: `AudioEngine.h` に `MmcssState` enum（NeverTried/Applied/Failed）追加、`mmcssApplied_`→`mmcssState_` に変更。`applyMmcssPriority()` を `bool` 返却に変更し、失敗時に `mmcssState_=Failed` に設定。`AudioBlock.cpp`/`BlockDouble.cpp` の CAS を 3値比較に更新。`Timer.cpp` の timerCallback 末尾で `Failed→NeverTried` リセット追加。`PrepareToPlay.cpp` のリセットを `MmcssState::NeverTried` に変更。変更ファイル: `AudioEngine.h`, `AudioEngine.Timer.cpp`, `AudioBlock.cpp`, `BlockDouble.cpp`, `PrepareToPlay.cpp`。 |

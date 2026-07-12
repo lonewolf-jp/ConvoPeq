@@ -5,6 +5,18 @@
 #include "FrozenRuntimeWorld.h"
 #include <chrono>
 
+// 局所 diagLog — 全ファイル統一パターン。
+// CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 時のみ出力、OFF 時は no-op。
+static void diagLog(const juce::String& message)
+{
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    DBG(message);
+    juce::Logger::writeToLog(message);
+#else
+    juce::ignoreUnused(message);
+#endif
+}
+
 namespace convo::isr {
 
 RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept
@@ -71,8 +83,6 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     // ★ work70-v8.3: Specification を先に組み立て、Post-build Mutation を排除。
     //   Builder は Specification を忠実に World に写像するのみ。
     auto worldBuilder = convo::RuntimeBuilder(engine_);
-    worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
-
     // Step 2a-1: Create Specification with default HardReset
     convo::RuntimePublishSpecification spec;
     spec.topology.activeDSP = newDSPResolved;
@@ -110,7 +120,29 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         spec.routing.convBypassed = inp.convBypassed;
     }
 
+    // ★ v9.7 P7-A1: RetirePart — engine atomic から収集（sealedSnapshot には含まれないため）
+    spec.retire.retireQueueDepth = convo::consumeAtomic(engine_.retireQueueDepth_, std::memory_order_acquire);
+    // ★ v9.7 P7-A2: AdaptivePart — engine atomic から収集
+    {
+        const int bankIdx = convo::consumeAtomic(engine_.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        spec.adaptive.coeffBankIndex = bankIdx;
+        if (bankIdx >= 0 && bankIdx < static_cast<int>(kNumAdaptiveCoeffBanks))
+        {
+            const auto& bank = engine_.getAdaptiveCoeffBankForIndex(bankIdx);
+            spec.adaptive.coeffGeneration = convo::consumeAtomic(bank.generation, std::memory_order_acquire);
+        }
+    }
+
     // Step 2a-2: Build preliminary world for crossfade evaluation
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DIAG_AUTH] CoordExit gen=" + juce::String(req.generation)
+        + " transitionActive=" + juce::String(static_cast<int>(spec.execution.transitionActive))
+        + " currentUuid=" + juce::String(static_cast<juce::int64>(newDSPResolved ? newDSPResolved->runtimeUuid : 0))
+        + " nextUuid=" + juce::String(static_cast<juce::int64>(oldDSP ? oldDSP->runtimeUuid : 0))
+        + " spec.fadingRuntimeUuid=" + juce::String(static_cast<juce::int64>(spec.topology.fadingDSP ? spec.topology.fadingDSP->runtimeUuid : 0)));
+#endif
+
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
 
     if (!worldOwner) {

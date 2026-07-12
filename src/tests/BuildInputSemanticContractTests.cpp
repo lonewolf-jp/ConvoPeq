@@ -133,35 +133,36 @@ namespace {
     // ★ work56 Phase1: sealedSnapshot ブロック内でローカルエイリアス使用
     if (!requireContains(runtimeBuilderCpp, "const auto& sealedBuildInput = sealedSnapshot->buildInput;", "runtime builder cpp sealed build input alias"))
         return false;
-    // routing - from sealedBuildInput
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);", "runtime builder cpp sealed routing processingOrder"))
+    // routing - from spec.routing (ProcessingPart 経由、Orchestrator が設定)
+    // ★ P0: sealedBuildInput からの直接読み取り → ProcessingPart 経由に移行
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = spec.routing.processingOrder;", "runtime builder cpp spec routing processingOrder"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;", "runtime builder cpp sealed routing eqBypassed"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.eqBypassed = spec.routing.eqBypassed;", "runtime builder cpp spec routing eqBypassed"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;", "runtime builder cpp sealed routing convBypassed"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.convBypassed = spec.routing.convBypassed;", "runtime builder cpp spec routing convBypassed"))
         return false;
-    // automation - from sealedBuildInput
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;", "runtime builder cpp sealed automation soft clip"))
+    // automation - from spec.processing (ProcessingPart 経由)
+    // ★ P0: sealedBuildInput → spec.processing に移行（Specification Completeness 原則）
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.softClipEnabled = spec.processing.softClipEnabled;", "runtime builder cpp spec automation soft clip"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;", "runtime builder cpp sealed automation saturation"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.saturationAmount = spec.processing.saturationAmount;", "runtime builder cpp spec automation saturation"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;", "runtime builder cpp sealed automation input gain"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;", "runtime builder cpp spec automation input gain"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;", "runtime builder cpp sealed automation output gain"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;", "runtime builder cpp spec automation output gain"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;", "runtime builder cpp sealed automation convolver trim"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;", "runtime builder cpp spec automation convolver trim"))
         return false;
-    // resource/timing - from sealedBuildInput (oversamplingFactor 除く)
+    // resource/timing - from sealedBuildInput (sealedSnapshot path, oversamplingFactor 除く)
     if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;", "runtime builder cpp sealed resource dither"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;", "runtime builder cpp sealed resource noise shaper"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;", "runtime builder cpp sealed timing sample rate"))
         return false;
-    // ★ work56 Phase1: oversamplingFactor の sealedBuildInput からの投影を削除。
-    //   resource.oversamplingFactor は current->oversamplingFactor（DSP解決値）を維持する。
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);", "runtime builder cpp payload hash"))
-        return false;
+    // ★ P0: semanticHash.payloadHash 計算は hashBuildInput の未使用化により削除済み
+    //   （セマンティックハッシュは semanticHash の各フィールドで個別に計算）
+    //   代替: セマンティックハッシュの完全性は executionHash/routingHash で担保
     if (!requireContains(rebuildDispatch,
                          "runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,",
                          "rebuild dispatch sealed convolver snapshot call"))

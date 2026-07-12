@@ -140,6 +140,14 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
+    // ★ v9.7 P6-b: PreCommit DIAG — validate 直前の World 状態を出力
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DIAG_AUTH] PreCommit gen=" + juce::String(static_cast<juce::int64>(world.generation))
+        + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
+        + " graph.fadingNode=" + juce::String(static_cast<juce::int64>(reinterpret_cast<intptr_t>(world.graph.fadingNode)))
+        + " fadingRuntimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.fadingRuntimeUuid))
+        + " transitionActive=" + juce::String(static_cast<int>(world.execution.transitionActive)));
+#endif
     // ★ P2-2: Validator の重複呼び出しを削除。
     //   Validator の検証は Bridge 層 (validatePublicationNonRt) で既に実行済み。
     //   Precheck は Semantic Transaction State / Authority Contract / Shutdown 等の

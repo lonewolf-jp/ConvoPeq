@@ -23,8 +23,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
     //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
-    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssApplied_ をリセットする。
-    convo::publishAtomic(mmcssApplied_, false, std::memory_order_release);
+    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssState_ をリセットする。
+    // ★ P8: MmcssState::NeverTried へのリセットにより、次回 Audio callback で CAS 再試行される。
+    convo::publishAtomic(mmcssState_, AudioEngine::MmcssState::NeverTried, std::memory_order_release);
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
@@ -146,7 +147,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentForPublish,
                                                                      fadingForPublish,
                                                                      policy,
@@ -268,7 +268,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,

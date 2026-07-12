@@ -3,11 +3,26 @@
 #include <bit>
 #include <cstdint>
 
+// 局所 diagLog — 全ファイル統一パターン。
+// CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 時のみ出力、OFF 時は no-op。
+static void diagLog(const juce::String& message)
+{
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    DBG(message);
+    juce::Logger::writeToLog(message);
+#else
+    juce::ignoreUnused(message);
+#endif
+}
+
+
+
 namespace convo {
 
 namespace {
 
-[[nodiscard]] std::uint64_t hashBuildInput(const BuildInput& buildInput) noexcept
+// ★ 現在は未使用（セマンティックハッシュの将来拡張用）。
+[[maybe_unused]] [[nodiscard]] std::uint64_t hashBuildInput(const BuildInput& buildInput) noexcept
 {
     std::uint64_t hash = 1469598103934665603ull;
     const auto mix = [&hash](std::uint64_t value) noexcept {
@@ -176,6 +191,15 @@ RuntimeBuilder::buildRuntimePublishWorld(
     const double fadeTimeSec = spec.execution.fadeTimeSec;
     const bool active = spec.execution.transitionActive;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        diagLog("[DIAG_AUTH] BuilderEntry gen=" + juce::String(static_cast<juce::int64>(nextGraphGeneration))
+            + " transitionActive=" + juce::String(static_cast<int>(active))
+            + " currentUuid=" + juce::String(static_cast<juce::int64>(current ? current->runtimeUuid : 0))
+            + " nextUuid=" + juce::String(static_cast<juce::int64>(next ? next->runtimeUuid : 0)));
+    }
+#endif
+
     // ★ v9.5 P1 phase2: computeRuntimePublishComputation() を排除。
     //   Runtime Query 部分は Orchestrator が事前に実行済み（currentRuntimeWorld, previousCommittedSequence）。
     //   Builder は Pure Calculation（makeEngineRuntimeState / makeRuntimeGraphState）のみを実行。
@@ -207,7 +231,7 @@ RuntimeBuilder::buildRuntimePublishWorld(
     // Topology: Specification の topology 部を写像
     {
         worldOwner->topology.runtimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
-        worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
+        worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->runtimeUuid : 0;
         // ★ v8.3: hasFadingRuntime 削除 — graphState.fadingNode != nullptr から導出
 
         const double sr = (current != nullptr) ? current->sampleRate : 48000.0;
@@ -252,7 +276,7 @@ RuntimeBuilder::buildRuntimePublishWorld(
         const int dryHoldSamples = spec.crossfade.dryHoldSamples;
         const double dryScaleTarget = spec.crossfade.dryScaleTarget;
         const bool firstIrDry = spec.crossfade.firstIrDryCrossfadePending;
-        const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
+        const std::uint64_t retireBacklog = spec.retire.retireQueueDepth;
         const bool rebuildWorkerRunning = false;
 
         // Execution/Routing: Specification を忠実に写像（INV-12）
@@ -316,15 +340,9 @@ RuntimeBuilder::buildRuntimePublishWorld(
     worldOwner->latency.latencyDeltaSamples = 0;
 
     // Coefficient fields
-    const int bankIndex = convo::consumeAtomic(
-        engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+    const int bankIndex = spec.adaptive.coeffBankIndex;
     worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
-    if (bankIndex >= 0 && bankIndex < static_cast<int>(kNumAdaptiveCoeffBanks))
-    {
-        const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIndex);
-        worldOwner->coefficient.adaptiveCoeffGeneration = convo::consumeAtomic(
-            bank.generation, std::memory_order_acquire);
-    }
+    worldOwner->coefficient.adaptiveCoeffGeneration = spec.adaptive.coeffGeneration;
     worldOwner->coefficient.eqCoeffHash = 0;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
@@ -344,6 +362,14 @@ RuntimeBuilder::buildRuntimePublishWorld(
         ^ (worldOwner->routing.convBypassed ? 0x165667B1ull : 0ull);
 
     // freeze は caller (coordinator.publishWorld) が行う
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DIAG_AUTH] BuilderExit gen=" + juce::String(static_cast<juce::int64>(worldOwner->generation))
+        + " graph.fadingNode=" + juce::String(static_cast<juce::int64>(reinterpret_cast<intptr_t>(worldOwner->graph.fadingNode)))
+        + " fadingRuntimeUuid=" + juce::String(static_cast<juce::int64>(worldOwner->topology.fadingRuntimeUuid))
+        + " transitionActive=" + juce::String(static_cast<int>(worldOwner->execution.transitionActive)));
+#endif
+
     return worldOwner;
 }
 
@@ -351,15 +377,6 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
                                   const ConvolverProcessor::BuildSnapshot& convolverBuildSnapshot) noexcept
 {
     BuildResult result {};
-
-    // ★ S-2: HealthState Critical チェック（負荷最大の処理を事前に抑止）
-    if (m_healthStateRef) {
-        auto health = convo::consumeAtomic(*m_healthStateRef, std::memory_order_acquire);
-        if (health == ISRHealthState::Critical) {
-            result.error = BuildError::ResourceUnavailable;
-            return result;
-        }
-    }
 
     if (in.sampleRate <= 0.0 || in.blockSize <= 0)
     {

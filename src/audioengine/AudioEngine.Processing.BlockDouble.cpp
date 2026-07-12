@@ -41,12 +41,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
     // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
-    //    常に適用（診断有効時のみログ出力。無効時はスタブ）
-    //    mmcssApplied_ は prepareToPlay() でリセットされるため、
-    //    デバイス再初期化後も正しく再適用される。
+    // ★ P8: 3値管理による再試行。CAS(NeverTried→Applied) 成功後に applyMmcssPriority() を呼ぶ。
+    //   失敗すると applyMmcssPriority() 内で mmcssState_ が Failed に戻され、
+    //   Timer callback が Failed→NeverTried にリセットして再試行を促す。
     {
-        bool expected = false;
-        if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
+        auto expected = AudioEngine::MmcssState::NeverTried;
+        if (convo::compareExchangeAtomic(mmcssState_, expected, AudioEngine::MmcssState::Applied,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire)) {
             applyMmcssPriority();
         }
     }

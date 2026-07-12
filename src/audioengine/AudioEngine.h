@@ -2185,7 +2185,12 @@ public:
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
     std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
-    std::atomic<bool> mmcssApplied_{false};       // ★ [work64] 初回適用済みフラグ（prepareToPlayでリセット）
+    // ★ P8: MmcssState — 3値管理による再試行可能なMMCSS状態
+    //   NeverTried: 未試行（prepareToPlay直後またはTimerによるリセット後）
+    //   Applied:    適用成功（次のprepareToPlayまで固定）
+    //   Failed:     適用失敗（Timer callbackがNeverTriedにリセットし再試行を促す）
+    enum class MmcssState : uint8_t { NeverTried, Applied, Failed };
+    std::atomic<MmcssState> mmcssState_{MmcssState::NeverTried};
 
     // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
     //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）
@@ -2282,7 +2287,8 @@ public:
     void initWorkerThread();
 
     // ★ [work62] MMCSS — Pro Audio 優先度設定
-    void applyMmcssPriority() noexcept;
+    // ★ P8: 戻り値 true=成功, false=失敗（mmcssState_ も自動更新）
+    bool applyMmcssPriority() noexcept;
     // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）

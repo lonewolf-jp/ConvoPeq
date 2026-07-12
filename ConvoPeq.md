@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-12 09:43:07
+> Generated: 2026-07-12 15:17:02
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -26707,6 +26707,14 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
+    // ★ v9.7 P6-b: PreCommit DIAG — validate 直前の World 状態を出力
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DIAG_AUTH] PreCommit gen=" + juce::String(static_cast<juce::int64>(world.generation))
+        + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
+        + " graph.fadingNode=" + juce::String(static_cast<juce::int64>(reinterpret_cast<intptr_t>(world.graph.fadingNode)))
+        + " fadingRuntimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.fadingRuntimeUuid))
+        + " transitionActive=" + juce::String(static_cast<int>(world.execution.transitionActive)));
+#endif
     // ★ P2-2: Validator の重複呼び出しを削除。
     //   Validator の検証は Bridge 層 (validatePublicationNonRt) で既に実行済み。
     //   Precheck は Semantic Transaction State / Authority Contract / Shutdown 等の
@@ -27868,7 +27876,6 @@ void AudioEngine::initialize()
     // the rebuild worker always finds a non-null runtimeWorld when building.
     {
         convo::RuntimeBuilder bootstrapBuilder(*this);
-        bootstrapBuilder.setHealthStateRef(getHealthStateRef());
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
         auto coordinator = makeRuntimePublicationCoordinator();
         const auto result = commitRuntimePublication(coordinator, std::move(bootstrapWorld),
@@ -29400,12 +29407,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
     // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
-    //    常に適用（診断有効時のみログ出力。無効時はスタブ）
-    //    mmcssApplied_ は prepareToPlay() でリセットされるため、
-    //    デバイス再初期化後も正しく再適用される。
+    // ★ P8: 3値管理による再試行。CAS(NeverTried→Applied) 成功後に applyMmcssPriority() を呼ぶ。
+    //   失敗すると applyMmcssPriority() 内で mmcssState_ が Failed に戻され、
+    //   Timer callback が Failed→NeverTried にリセットして再試行を促す。
     {
-        bool expected = false;
-        if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
+        auto expected = AudioEngine::MmcssState::NeverTried;
+        if (convo::compareExchangeAtomic(mmcssState_, expected, AudioEngine::MmcssState::Applied,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire)) {
             applyMmcssPriority();
         }
     }
@@ -30152,12 +30161,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
     // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
-    //    常に適用（診断有効時のみログ出力。無効時はスタブ）
-    //    mmcssApplied_ は prepareToPlay() でリセットされるため、
-    //    デバイス再初期化後も正しく再適用される。
+    // ★ P8: 3値管理による再試行。CAS(NeverTried→Applied) 成功後に applyMmcssPriority() を呼ぶ。
+    //   失敗すると applyMmcssPriority() 内で mmcssState_ が Failed に戻され、
+    //   Timer callback が Failed→NeverTried にリセットして再試行を促す。
     {
-        bool expected = false;
-        if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
+        auto expected = AudioEngine::MmcssState::NeverTried;
+        if (convo::compareExchangeAtomic(mmcssState_, expected, AudioEngine::MmcssState::Applied,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire)) {
             applyMmcssPriority();
         }
     }
@@ -33127,8 +33138,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
     //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
-    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssApplied_ をリセットする。
-    convo::publishAtomic(mmcssApplied_, false, std::memory_order_release);
+    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssState_ をリセットする。
+    // ★ P8: MmcssState::NeverTried へのリセットにより、次回 Audio callback で CAS 再試行される。
+    convo::publishAtomic(mmcssState_, AudioEngine::MmcssState::NeverTried, std::memory_order_release);
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
@@ -33250,7 +33262,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentForPublish,
                                                                      fadingForPublish,
                                                                      policy,
@@ -33372,7 +33383,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
@@ -33561,7 +33571,6 @@ void AudioEngine::releaseResources()
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(nullptr,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
@@ -34865,7 +34874,6 @@ void AudioEngine::rebuildThreadLoop()
 
             convo::RuntimeBuilder runtimeBuilder(*this);
             // ★ S-2: HealthState 参照を RuntimeBuilder に設定
-            runtimeBuilder.setHealthStateRef(getHealthStateRef());
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
@@ -36161,8 +36169,13 @@ static_assert(static_cast<int>(DiagCategory::Count) == 10,
 } // anonymous namespace
 
 // ★ [work63] applyMmcssPriority — Audio スレッド優先度設定（初回コールバックで一度だけ）
-void AudioEngine::applyMmcssPriority() noexcept
+// ★ P8: 戻り値 true=成功, false=失敗。失敗時は mmcssState_ を Failed に戻す。
+//   CPU アフィニティ設定は常に実行する（優先度設定の成功/失敗に依存しない）。
+//   （CAS で NeverTried→Applied は optimistically 行われている前提）
+bool AudioEngine::applyMmcssPriority() noexcept
 {
+    bool priorityApplied = false;
+
     if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
         // ── MMCSS モード ──
@@ -36181,6 +36194,7 @@ void AudioEngine::applyMmcssPriority() noexcept
                     + " procClass=" + juce::String(static_cast<int>(pc)));
             }
 #endif
+            priorityApplied = true;
         } else {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             {
@@ -36189,6 +36203,9 @@ void AudioEngine::applyMmcssPriority() noexcept
                     + " taskIndex=" + juce::String(static_cast<int>(taskIndex)));
             }
 #endif
+            // ★ P8: 失敗 → mmcssState_ を Failed に戻し、Timer retry を待つ
+            convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
+            // priorityApplied = false（初期値のまま）
         }
     }
     else
@@ -36198,6 +36215,7 @@ void AudioEngine::applyMmcssPriority() noexcept
             savedProcessPriorityClass = ::GetPriorityClass(::GetCurrentProcess());
             const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
             const BOOL tpResult = ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            const bool nativeRtOk = (pcResult != 0 && tpResult != 0);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             if (pcResult == 0) {
                 const DWORD err = ::GetLastError();
@@ -36209,7 +36227,7 @@ void AudioEngine::applyMmcssPriority() noexcept
                 diagLog("[NATIVE_RT] SetThreadPriority(TIME_CRITICAL) FAILED: GetLastError="
                     + juce::String(static_cast<int>(err)));
             }
-            if (pcResult != 0 && tpResult != 0) {
+            if (nativeRtOk) {
                 const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
                 const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
                 diagLog("[NATIVE_RT] applied: win32Prio=" + juce::String(win32Priority)
@@ -36220,10 +36238,19 @@ void AudioEngine::applyMmcssPriority() noexcept
             (void)pcResult;
             (void)tpResult;
 #endif
+            if (!nativeRtOk) {
+                // ★ P8: NativeRT 失敗 → mmcssState_ を Failed に戻す
+                convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
+                // priorityApplied = false（初期値のまま）
+            } else {
+                priorityApplied = true;
+            }
         }
     }
+
     // ★ [work64 v14/v16] Audioスレッド CPUアフィニティ固定（対称コア環境のみ）
     //   v16: toHexString(static_cast<uint64_t>(...)) は JUCE 8.0.12 template で有効確認済み。
+    //   優先度設定の成功/失敗にかかわらず常に実行する。
     if (!hasHeterogeneousCores_) {
         const DWORD_PTR audioMask = affinityManager.getAudioRealtimeMask();
         if (audioMask != 0) {
@@ -36249,6 +36276,8 @@ void AudioEngine::applyMmcssPriority() noexcept
         diagLog("[AFFINITY] P/E cores: AudioThread affinity skipped (MMCSS Deadline QoS)");
     }
 #endif
+
+    return priorityApplied;
 }
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
@@ -36836,7 +36865,6 @@ void AudioEngine::timerCallback()
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::SmoothOnly,
@@ -37396,6 +37424,17 @@ void AudioEngine::timerCallback()
         }
     }
 
+    // ★ P8: MMCSS 再試行トリガ — Failed 状態を NeverTried にリセット
+    //   次回 AudioBlock/BlockDouble の CAS(NeverTried→Applied) で再試行される。
+    //   Audio callback 内での AvSetMmThreadCharacteristics 試行は RT 性能に影響するため、
+    //   毎回の試行ではなく Timer によるリセット経由で制御する。
+    {
+        const auto state = convo::consumeAtomic(mmcssState_, std::memory_order_acquire);
+        if (state == MmcssState::Failed) {
+            convo::publishAtomic(mmcssState_, MmcssState::NeverTried, std::memory_order_release);
+        }
+    }
+
     // ★ [work62] flushLogBuffer — 非同期Loggerのリングバッファをファイルに書き出し
     flushLogBuffer();
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -37670,7 +37709,6 @@ bool AudioEngine::publishIdleWorldOnly(
     // Idle world 発行 — 呼び出し側ですべての前準備を完了している前提
     auto coordinator = makeRuntimePublicationCoordinator();
     auto worldBuilder = convo::RuntimeBuilder(*this);
-    worldBuilder.setHealthStateRef(getHealthStateRef());
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(
         currentAfterFade, nullptr, idlePolicy, 0.0, false);
     const auto pubResult = commitRuntimePublication(coordinator, std::move(worldOwner),
@@ -40072,7 +40110,12 @@ public:
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
     std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
-    std::atomic<bool> mmcssApplied_{false};       // ★ [work64] 初回適用済みフラグ（prepareToPlayでリセット）
+    // ★ P8: MmcssState — 3値管理による再試行可能なMMCSS状態
+    //   NeverTried: 未試行（prepareToPlay直後またはTimerによるリセット後）
+    //   Applied:    適用成功（次のprepareToPlayまで固定）
+    //   Failed:     適用失敗（Timer callbackがNeverTriedにリセットし再試行を促す）
+    enum class MmcssState : uint8_t { NeverTried, Applied, Failed };
+    std::atomic<MmcssState> mmcssState_{MmcssState::NeverTried};
 
     // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
     //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）
@@ -40169,7 +40212,8 @@ public:
     void initWorkerThread();
 
     // ★ [work62] MMCSS — Pro Audio 優先度設定
-    void applyMmcssPriority() noexcept;
+    // ★ P8: 戻り値 true=成功, false=失敗（mmcssState_ も自動更新）
+    bool applyMmcssPriority() noexcept;
     // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）
@@ -50317,11 +50361,26 @@ static_assert(std::is_same_v<decltype(RuntimeBuildSnapshot{}.buildInput), BuildI
 #include <bit>
 #include <cstdint>
 
+// 局所 diagLog — 全ファイル統一パターン。
+// CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 時のみ出力、OFF 時は no-op。
+static void diagLog(const juce::String& message)
+{
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    DBG(message);
+    juce::Logger::writeToLog(message);
+#else
+    juce::ignoreUnused(message);
+#endif
+}
+
+
+
 namespace convo {
 
 namespace {
 
-[[nodiscard]] std::uint64_t hashBuildInput(const BuildInput& buildInput) noexcept
+// ★ 現在は未使用（セマンティックハッシュの将来拡張用）。
+[[maybe_unused]] [[nodiscard]] std::uint64_t hashBuildInput(const BuildInput& buildInput) noexcept
 {
     std::uint64_t hash = 1469598103934665603ull;
     const auto mix = [&hash](std::uint64_t value) noexcept {
@@ -50490,6 +50549,15 @@ RuntimeBuilder::buildRuntimePublishWorld(
     const double fadeTimeSec = spec.execution.fadeTimeSec;
     const bool active = spec.execution.transitionActive;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        diagLog("[DIAG_AUTH] BuilderEntry gen=" + juce::String(static_cast<juce::int64>(nextGraphGeneration))
+            + " transitionActive=" + juce::String(static_cast<int>(active))
+            + " currentUuid=" + juce::String(static_cast<juce::int64>(current ? current->runtimeUuid : 0))
+            + " nextUuid=" + juce::String(static_cast<juce::int64>(next ? next->runtimeUuid : 0)));
+    }
+#endif
+
     // ★ v9.5 P1 phase2: computeRuntimePublishComputation() を排除。
     //   Runtime Query 部分は Orchestrator が事前に実行済み（currentRuntimeWorld, previousCommittedSequence）。
     //   Builder は Pure Calculation（makeEngineRuntimeState / makeRuntimeGraphState）のみを実行。
@@ -50521,7 +50589,7 @@ RuntimeBuilder::buildRuntimePublishWorld(
     // Topology: Specification の topology 部を写像
     {
         worldOwner->topology.runtimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
-        worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
+        worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->runtimeUuid : 0;
         // ★ v8.3: hasFadingRuntime 削除 — graphState.fadingNode != nullptr から導出
 
         const double sr = (current != nullptr) ? current->sampleRate : 48000.0;
@@ -50566,7 +50634,7 @@ RuntimeBuilder::buildRuntimePublishWorld(
         const int dryHoldSamples = spec.crossfade.dryHoldSamples;
         const double dryScaleTarget = spec.crossfade.dryScaleTarget;
         const bool firstIrDry = spec.crossfade.firstIrDryCrossfadePending;
-        const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
+        const std::uint64_t retireBacklog = spec.retire.retireQueueDepth;
         const bool rebuildWorkerRunning = false;
 
         // Execution/Routing: Specification を忠実に写像（INV-12）
@@ -50630,15 +50698,9 @@ RuntimeBuilder::buildRuntimePublishWorld(
     worldOwner->latency.latencyDeltaSamples = 0;
 
     // Coefficient fields
-    const int bankIndex = convo::consumeAtomic(
-        engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+    const int bankIndex = spec.adaptive.coeffBankIndex;
     worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
-    if (bankIndex >= 0 && bankIndex < static_cast<int>(kNumAdaptiveCoeffBanks))
-    {
-        const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIndex);
-        worldOwner->coefficient.adaptiveCoeffGeneration = convo::consumeAtomic(
-            bank.generation, std::memory_order_acquire);
-    }
+    worldOwner->coefficient.adaptiveCoeffGeneration = spec.adaptive.coeffGeneration;
     worldOwner->coefficient.eqCoeffHash = 0;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
@@ -50658,6 +50720,14 @@ RuntimeBuilder::buildRuntimePublishWorld(
         ^ (worldOwner->routing.convBypassed ? 0x165667B1ull : 0ull);
 
     // freeze は caller (coordinator.publishWorld) が行う
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DIAG_AUTH] BuilderExit gen=" + juce::String(static_cast<juce::int64>(worldOwner->generation))
+        + " graph.fadingNode=" + juce::String(static_cast<juce::int64>(reinterpret_cast<intptr_t>(worldOwner->graph.fadingNode)))
+        + " fadingRuntimeUuid=" + juce::String(static_cast<juce::int64>(worldOwner->topology.fadingRuntimeUuid))
+        + " transitionActive=" + juce::String(static_cast<int>(worldOwner->execution.transitionActive)));
+#endif
+
     return worldOwner;
 }
 
@@ -50665,15 +50735,6 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
                                   const ConvolverProcessor::BuildSnapshot& convolverBuildSnapshot) noexcept
 {
     BuildResult result {};
-
-    // ★ S-2: HealthState Critical チェック（負荷最大の処理を事前に抑止）
-    if (m_healthStateRef) {
-        auto health = convo::consumeAtomic(*m_healthStateRef, std::memory_order_acquire);
-        if (health == ISRHealthState::Critical) {
-            result.error = BuildError::ResourceUnavailable;
-            return result;
-        }
-    }
 
     if (in.sampleRate <= 0.0 || in.blockSize <= 0)
     {
@@ -50808,6 +50869,21 @@ struct RuntimePublishSpecification {
     //   現在の RuntimePublishWorld ポインタ。Builder はこれを makeEngineRuntimeState() の引数として
     //   使用する。Runtime Query は Orchestrator が事前に実行し、結果のスナップショットを渡す。
     const RuntimePublishWorld* currentRuntimeWorld = nullptr;
+
+    // ★ v9.7 P7-A1: RetirePart — Retire Queue 深度のスナップショット。
+    //   Orchestrator が engine atomic から収集して格納する。
+    //   Builder はこの値のみを参照し、engine.retireQueueDepth_ に直接アクセスしない。
+    struct RetirePart {
+        std::uint64_t retireQueueDepth = 0;
+    } retire;
+
+    // ★ v9.7 P7-A2: AdaptivePart — Adaptive 係数バンクインデックスと世代番号のスナップショット。
+    //   Orchestrator が engine.currentAdaptiveCoeffBankIndex および bank.generation から収集して格納する。
+    //   Builder はこの値のみを参照し、engine の atomic や CoeffBank に直接アクセスしない。
+    struct AdaptivePart {
+        int coeffBankIndex = -1;
+        std::uint64_t coeffGeneration = 0;
+    } adaptive;
 };
 
 enum class BuildError {
@@ -50832,11 +50908,6 @@ const char* toString(BuildError error) noexcept;
 class RuntimeBuilder {
 public:
     explicit RuntimeBuilder(AudioEngine& owner) noexcept : engine(owner) {}
-
-    // ★ S-2: HealthState 参照設定
-    void setHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
-        m_healthStateRef = ref;
-    }
 
     // ★ v8.3: const RuntimePublishWorld を返す — INV-11 のコンパイル時保証
     //   buildRuntimePublishWorld() 完了後は World を変更してはならない。
@@ -50884,6 +50955,18 @@ public:
         spec.crossfade.firstIrDryCrossfadePending = engine.crossfadeRuntime_.isFirstIrDryPending();
         spec.latency.latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_relaxed);
         spec.latency.latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_relaxed));
+        // ★ v9.7 P7-A1: RetirePart — old sig fallback: engine atomic から収集
+        spec.retire.retireQueueDepth = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_relaxed);
+        // ★ v9.7 P7-A2: AdaptivePart — old sig fallback: engine atomic から収集
+        {
+            const int bankIdx = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_relaxed);
+            spec.adaptive.coeffBankIndex = bankIdx;
+            if (bankIdx >= 0 && bankIdx < static_cast<int>(kNumAdaptiveCoeffBanks))
+            {
+                const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIdx);
+                spec.adaptive.coeffGeneration = convo::consumeAtomic(bank.generation, std::memory_order_relaxed);
+            }
+        }
         spec.currentRuntimeWorld = engine.observePublishedWorld();
         // const 版に委譲 → unique_ptr<const T> から unique_ptr<T> へは
         // ムーブ不可のため、内部実装呼び出し
@@ -50908,8 +50991,6 @@ public:
 
 private:
     AudioEngine& engine;
-    // ★ S-2: HealthState 参照
-    const std::atomic<ISRHealthState>* m_healthStateRef = nullptr;
 };
 
 } // namespace convo
@@ -53509,6 +53590,18 @@ private:
 #include "FrozenRuntimeWorld.h"
 #include <chrono>
 
+// 局所 diagLog — 全ファイル統一パターン。
+// CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 時のみ出力、OFF 時は no-op。
+static void diagLog(const juce::String& message)
+{
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    DBG(message);
+    juce::Logger::writeToLog(message);
+#else
+    juce::ignoreUnused(message);
+#endif
+}
+
 namespace convo::isr {
 
 RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept
@@ -53575,8 +53668,6 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     // ★ work70-v8.3: Specification を先に組み立て、Post-build Mutation を排除。
     //   Builder は Specification を忠実に World に写像するのみ。
     auto worldBuilder = convo::RuntimeBuilder(engine_);
-    worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
-
     // Step 2a-1: Create Specification with default HardReset
     convo::RuntimePublishSpecification spec;
     spec.topology.activeDSP = newDSPResolved;
@@ -53614,7 +53705,29 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         spec.routing.convBypassed = inp.convBypassed;
     }
 
+    // ★ v9.7 P7-A1: RetirePart — engine atomic から収集（sealedSnapshot には含まれないため）
+    spec.retire.retireQueueDepth = convo::consumeAtomic(engine_.retireQueueDepth_, std::memory_order_acquire);
+    // ★ v9.7 P7-A2: AdaptivePart — engine atomic から収集
+    {
+        const int bankIdx = convo::consumeAtomic(engine_.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        spec.adaptive.coeffBankIndex = bankIdx;
+        if (bankIdx >= 0 && bankIdx < static_cast<int>(kNumAdaptiveCoeffBanks))
+        {
+            const auto& bank = engine_.getAdaptiveCoeffBankForIndex(bankIdx);
+            spec.adaptive.coeffGeneration = convo::consumeAtomic(bank.generation, std::memory_order_acquire);
+        }
+    }
+
     // Step 2a-2: Build preliminary world for crossfade evaluation
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[DIAG_AUTH] CoordExit gen=" + juce::String(req.generation)
+        + " transitionActive=" + juce::String(static_cast<int>(spec.execution.transitionActive))
+        + " currentUuid=" + juce::String(static_cast<juce::int64>(newDSPResolved ? newDSPResolved->runtimeUuid : 0))
+        + " nextUuid=" + juce::String(static_cast<juce::int64>(oldDSP ? oldDSP->runtimeUuid : 0))
+        + " spec.fadingRuntimeUuid=" + juce::String(static_cast<juce::int64>(spec.topology.fadingDSP ? spec.topology.fadingDSP->runtimeUuid : 0)));
+#endif
+
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
 
     if (!worldOwner) {
@@ -69069,35 +69182,36 @@ namespace {
     // ★ work56 Phase1: sealedSnapshot ブロック内でローカルエイリアス使用
     if (!requireContains(runtimeBuilderCpp, "const auto& sealedBuildInput = sealedSnapshot->buildInput;", "runtime builder cpp sealed build input alias"))
         return false;
-    // routing - from sealedBuildInput
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = static_cast<int>(sealedBuildInput.processingOrder);", "runtime builder cpp sealed routing processingOrder"))
+    // routing - from spec.routing (ProcessingPart 経由、Orchestrator が設定)
+    // ★ P0: sealedBuildInput からの直接読み取り → ProcessingPart 経由に移行
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.processingOrder = spec.routing.processingOrder;", "runtime builder cpp spec routing processingOrder"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;", "runtime builder cpp sealed routing eqBypassed"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.eqBypassed = spec.routing.eqBypassed;", "runtime builder cpp spec routing eqBypassed"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;", "runtime builder cpp sealed routing convBypassed"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->routing.convBypassed = spec.routing.convBypassed;", "runtime builder cpp spec routing convBypassed"))
         return false;
-    // automation - from sealedBuildInput
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;", "runtime builder cpp sealed automation soft clip"))
+    // automation - from spec.processing (ProcessingPart 経由)
+    // ★ P0: sealedBuildInput → spec.processing に移行（Specification Completeness 原則）
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.softClipEnabled = spec.processing.softClipEnabled;", "runtime builder cpp spec automation soft clip"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;", "runtime builder cpp sealed automation saturation"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.saturationAmount = spec.processing.saturationAmount;", "runtime builder cpp spec automation saturation"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;", "runtime builder cpp sealed automation input gain"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;", "runtime builder cpp spec automation input gain"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;", "runtime builder cpp sealed automation output gain"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;", "runtime builder cpp spec automation output gain"))
         return false;
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;", "runtime builder cpp sealed automation convolver trim"))
+    if (!requireContains(runtimeBuilderCpp, "worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;", "runtime builder cpp spec automation convolver trim"))
         return false;
-    // resource/timing - from sealedBuildInput (oversamplingFactor 除く)
+    // resource/timing - from sealedBuildInput (sealedSnapshot path, oversamplingFactor 除く)
     if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;", "runtime builder cpp sealed resource dither"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;", "runtime builder cpp sealed resource noise shaper"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;", "runtime builder cpp sealed timing sample rate"))
         return false;
-    // ★ work56 Phase1: oversamplingFactor の sealedBuildInput からの投影を削除。
-    //   resource.oversamplingFactor は current->oversamplingFactor（DSP解決値）を維持する。
-    if (!requireContains(runtimeBuilderCpp, "worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);", "runtime builder cpp payload hash"))
-        return false;
+    // ★ P0: semanticHash.payloadHash 計算は hashBuildInput の未使用化により削除済み
+    //   （セマンティックハッシュは semanticHash の各フィールドで個別に計算）
+    //   代替: セマンティックハッシュの完全性は executionHash/routingHash で担保
     if (!requireContains(rebuildDispatch,
                          "runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,",
                          "rebuild dispatch sealed convolver snapshot call"))
@@ -72971,13 +73085,14 @@ namespace {
     if (!contains(schema, "double convolverInputTrimGain = 1.0;"))
         return false;
 
-    if (!contains(builder, "worldOwner->automation.saturationAmount = saturationAmount;"))
+    // ★ P0/P7: automation は spec.processing / spec.adaptive から設定（Specification Completeness）
+    if (!contains(builder, "worldOwner->automation.saturationAmount = spec.processing.saturationAmount;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = inputHeadroomGain;"))
+    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.outputMakeupGain = outputMakeupGain;"))
+    if (!contains(builder, "worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;"))
+    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;"))
         return false;
     if (!contains(builder, "coefficient.adaptiveCoeffBankIndex"))
         return false;

@@ -216,8 +216,13 @@ static_assert(static_cast<int>(DiagCategory::Count) == 10,
 } // anonymous namespace
 
 // ★ [work63] applyMmcssPriority — Audio スレッド優先度設定（初回コールバックで一度だけ）
-void AudioEngine::applyMmcssPriority() noexcept
+// ★ P8: 戻り値 true=成功, false=失敗。失敗時は mmcssState_ を Failed に戻す。
+//   CPU アフィニティ設定は常に実行する（優先度設定の成功/失敗に依存しない）。
+//   （CAS で NeverTried→Applied は optimistically 行われている前提）
+bool AudioEngine::applyMmcssPriority() noexcept
 {
+    bool priorityApplied = false;
+
     if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
         // ── MMCSS モード ──
@@ -236,6 +241,7 @@ void AudioEngine::applyMmcssPriority() noexcept
                     + " procClass=" + juce::String(static_cast<int>(pc)));
             }
 #endif
+            priorityApplied = true;
         } else {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             {
@@ -244,6 +250,9 @@ void AudioEngine::applyMmcssPriority() noexcept
                     + " taskIndex=" + juce::String(static_cast<int>(taskIndex)));
             }
 #endif
+            // ★ P8: 失敗 → mmcssState_ を Failed に戻し、Timer retry を待つ
+            convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
+            // priorityApplied = false（初期値のまま）
         }
     }
     else
@@ -253,6 +262,7 @@ void AudioEngine::applyMmcssPriority() noexcept
             savedProcessPriorityClass = ::GetPriorityClass(::GetCurrentProcess());
             const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
             const BOOL tpResult = ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            const bool nativeRtOk = (pcResult != 0 && tpResult != 0);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             if (pcResult == 0) {
                 const DWORD err = ::GetLastError();
@@ -264,7 +274,7 @@ void AudioEngine::applyMmcssPriority() noexcept
                 diagLog("[NATIVE_RT] SetThreadPriority(TIME_CRITICAL) FAILED: GetLastError="
                     + juce::String(static_cast<int>(err)));
             }
-            if (pcResult != 0 && tpResult != 0) {
+            if (nativeRtOk) {
                 const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
                 const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
                 diagLog("[NATIVE_RT] applied: win32Prio=" + juce::String(win32Priority)
@@ -275,10 +285,19 @@ void AudioEngine::applyMmcssPriority() noexcept
             (void)pcResult;
             (void)tpResult;
 #endif
+            if (!nativeRtOk) {
+                // ★ P8: NativeRT 失敗 → mmcssState_ を Failed に戻す
+                convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
+                // priorityApplied = false（初期値のまま）
+            } else {
+                priorityApplied = true;
+            }
         }
     }
+
     // ★ [work64 v14/v16] Audioスレッド CPUアフィニティ固定（対称コア環境のみ）
     //   v16: toHexString(static_cast<uint64_t>(...)) は JUCE 8.0.12 template で有効確認済み。
+    //   優先度設定の成功/失敗にかかわらず常に実行する。
     if (!hasHeterogeneousCores_) {
         const DWORD_PTR audioMask = affinityManager.getAudioRealtimeMask();
         if (audioMask != 0) {
@@ -304,6 +323,8 @@ void AudioEngine::applyMmcssPriority() noexcept
         diagLog("[AFFINITY] P/E cores: AudioThread affinity skipped (MMCSS Deadline QoS)");
     }
 #endif
+
+    return priorityApplied;
 }
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
@@ -891,7 +912,6 @@ void AudioEngine::timerCallback()
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::SmoothOnly,
@@ -1448,6 +1468,17 @@ void AudioEngine::timerCallback()
                 + " totalPop=" + juce::String(static_cast<juce::int64>(totalPop))
                 + " cbW=" + juce::String(static_cast<juce::int64>(cbW))
                 + " cbD=" + juce::String(static_cast<juce::int64>(cbD)));
+        }
+    }
+
+    // ★ P8: MMCSS 再試行トリガ — Failed 状態を NeverTried にリセット
+    //   次回 AudioBlock/BlockDouble の CAS(NeverTried→Applied) で再試行される。
+    //   Audio callback 内での AvSetMmThreadCharacteristics 試行は RT 性能に影響するため、
+    //   毎回の試行ではなく Timer によるリセット経由で制御する。
+    {
+        const auto state = convo::consumeAtomic(mmcssState_, std::memory_order_acquire);
+        if (state == MmcssState::Failed) {
+            convo::publishAtomic(mmcssState_, MmcssState::NeverTried, std::memory_order_release);
         }
     }
 

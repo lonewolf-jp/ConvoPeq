@@ -125,13 +125,14 @@ namespace {
     if (!contains(schema, "double convolverInputTrimGain = 1.0;"))
         return false;
 
-    if (!contains(builder, "worldOwner->automation.saturationAmount = saturationAmount;"))
+    // ★ P0/P7: automation は spec.processing / spec.adaptive から設定（Specification Completeness）
+    if (!contains(builder, "worldOwner->automation.saturationAmount = spec.processing.saturationAmount;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = inputHeadroomGain;"))
+    if (!contains(builder, "worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.outputMakeupGain = outputMakeupGain;"))
+    if (!contains(builder, "worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;"))
         return false;
-    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;"))
+    if (!contains(builder, "worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;"))
         return false;
     if (!contains(builder, "coefficient.adaptiveCoeffBankIndex"))
         return false;

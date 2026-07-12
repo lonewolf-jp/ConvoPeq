@@ -227,8 +227,7 @@ OS=0.0MB  EQ=0.2MB  AL=0.2MB  LT=0.3MB  total=1.2MB
 | 7.4 | collectTrackedMemoryStatistics | ✅ **MEM_SNAP 統合確認** | **確定** | TRK: 全カテゴリ表示 (OS/EQ/AL/LT) |
 
 ### 今後の注視点
-- steady-state 456MB Private (旧版推定 2,477MB 対比) → 今回のログは改修前のものか改修後かは未確定
-- 設計書 v9.6 の `定常 686MB / ピーク 1,094MB` 見込み → 今回実測 **456MB steady / 589MB peak** と乖離 → 改修コード未適用の可能性
+- steady-state 456MB Private (旧版推定 2,477MB 対比) → 差異の原因は改修有無だけでなく、IRサイズ/FFT長/チャンネル数/MixedPhase設定/Debug-Release/MKL設定など多数の要因があり得るため、特定不可
 - MEM_SNAP の `Other=0MB` は DIAG 非計装が原因 → P4 進行で改善見込み
 - XRUN drift 3-4ms は許容範囲だが、特に crossfade 中の XRUN (#1, #2) はオーディオ影響の可能性あり
 - **MMCSS `mmcssApplied_` 設計**: compare-exchange 成功後に apply を呼ぶ方式のため、初回失敗時は prepareToPlay まで再試行されない。改善検討の余地あり
@@ -237,7 +236,7 @@ OS=0.0MB  EQ=0.2MB  AL=0.2MB  LT=0.3MB  total=1.2MB
 
 ## 4. バグ・不適切動作の分析
 
-### 4.1 [CRITICAL] AUTH_CONTRACT FAIL — Runtime 状態不整合（原因特定済み）
+### 4.1 [CRITICAL] AUTH_CONTRACT FAIL — Runtime 状態不整合（原因は複数経路の可能性）
 
 **現象**: `[AUTH_CONTRACT] FAIL fadingNode=0 hasFadingByUuid=1` により gen=3〜5 の publish が全滅。約6秒間、有効な RuntimePublishWorld が存在しない状態が継続した。
 
@@ -251,26 +250,47 @@ OS=0.0MB  EQ=0.2MB  AL=0.2MB  LT=0.3MB  total=1.2MB
 [PUBLISH] commitRuntimePublication FAILED gen=4 ownership=2
 ```
 
-**原因（コード調査で確定 — 2026-07-12, cocoindex/semble/serena/graphify 統合調査）**:
+**確定している事実**:
+- `world.graph.fadingNode == nullptr` かつ `world.topology.fadingRuntimeUuid != 0` のため AUTH_CONTRACT チェックで FAIL
+- **publish 直前に検査された World が契約違反だった**ことは確定
+- しかし矛盾が **Spec生成 → Coordinator → Builder → publish のどの段階で作られたか**はログのみでは特定不能（Builder は Spec を World へコピーしているだけであり、Builder 自身のバグとは限らない）
 
-`RuntimeBuilder.cpp:210` で `topology.fadingRuntimeUuid` が `next` (=fadingDSP) から**無条件**に設定される一方、`graph.fadingNode` は `makeEngineRuntimeState()` → `makeRuntimeGraphState()` 経由で**条件付き**（`transitionActive && next != nullptr` の場合のみ非 null）で設定される不整合:
-
+**一貫性条件の確認**: AUTH_CONTRACT チェック（`AudioEngine.Commit.cpp:75-98`）は以下3項目の一致を検証:
 ```cpp
-// RuntimeBuilder.cpp L210 — 無条件 (BUG)
-worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
+// (1) graph.fadingNode != nullptr  ?= topology.fadingRuntimeUuid != 0
+if (hasGraphFadingNode != hasFadingByUuid) → FAIL
 
-// AudioEngine.h L2758-2759 — 条件付き（makeEngineRuntimeState 内部）
-const bool transitionActive = active && next != nullptr;
-DSPCore* fading = transitionActive ? next : nullptr;
-// → graph.fadingNode = state.fading (条件付き)
+// (2) execution.transitionActive ?= hasFadingByUuid
+if (world.execution.transitionActive != hasFadingByUuid) → FAIL
 ```
 
-**発現条件**: `transitionActive=false, fadingDSP=oldDSP(非null)` → gen=1/2 では agingDSP=nullptr で発現せず、prepareToPlay による DSPCore 切替で初めて顕在化。
+**可能性のある経路** — Builder または Spec 生成段階の不整合:
+`RuntimeBuilder.cpp:210` では `fadingRuntimeUuid` を `next`（=fadingDSP）から無条件に設定する一方、`makeEngineRuntimeState`（`AudioEngine.h:2758-2759`）では `graph.fadingNode` を `transitionActive` に依存して条件付きで設定する。この不統一が矛盾の原因である可能性がある。ただし Spec 生成段階（`RuntimePublicationOrchestrator.cpp`）で `spec.topology.fadingDSP` 自体が誤って設定された可能性も排除できない。
 
-**修正**: `RuntimeBuilder.cpp:210` を条件付きに変更:
-```cpp
-worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->runtimeUuid : 0;
+ログだけでは「Builder の写像処理」「Coordinator による Spec 生成」のどちらで矛盾が生じたかは特定不能。
+
+**【ただし原因箇所は Builder だけとは限らない】** — 矛盾が挿入され得る経路:
+1. **Builder 経路**: 上記の条件不統一
+2. **Coordinator / Orchestrator 経路**: `trySubmit` での `oldDSP` 解決方法の誤り
+3. **Spec 生成段階**: `RuntimePublicationOrchestrator.cpp` での `spec.topology.fadingDSP` 設定の誤り
+
+※ ISR Runtime では Builder は同一 Snapshot から Spec を構築するため、Builder 実行中に他スレッドが crossfade 状態を変更する可能性は極めて低い。したがって Coordinator/Spec生成/Builder の各段階を等しく候補として扱うべきである。
+
+**確定に必要な DIAG（4点で同一 UUID 付き Spec/World ダンプ、Coordinator 出口を含めることで Builder 以前と Builder 以後を完全に切り分け）**:
 ```
+// Coordinator 出口: 生成された Spec の状態（Coordinator → Builder 境界）
+[DIAG_AUTH] CoordExit uuid=XXX transitionActive=? currentUuid=? nextUuid=? spec.fadingRuntimeUuid=?
+
+// Builder 入口: Builder が受け取った Spec の状態
+[DIAG_AUTH] BuilderEnter uuid=XXX transitionActive=? currentUuid=? nextUuid=? ...
+
+// Builder 出口: 生成された World の状態
+[DIAG_AUTH] BuilderExit  uuid=XXX graph.currentNode=? graph.fadingNode=? graph.pendingNode=? fadingRuntimeUuid=?
+
+// Commit 直前: publish される World の最終状態
+[DIAG_AUTH] PreCommit  uuid=XXX graph.fadingNode=? fadingRuntimeUuid=? transitionActive=?
+```
+CoordinatorExit がないと「Spec が既に壊れていた」のか「Builder で壊した」のかの区別がつかない。
 
 ---
 
@@ -282,26 +302,32 @@ worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->run
 
 **ログ**: ログ全体でこの1件のみ。成功/再試行のログは確認できない。
 
-**コード調査で判明した設計:**
-- MMCSS 適用は `mmcssApplied_` フラグ (`std::atomic<bool>`) の `compareExchange` でガードされている
-- これは「最初の1回のみ適用」する意図だが、**失敗時もフラグが true になる**（exchange 成功後に apply を呼ぶ設計のため）
-- したがって `applyMmcssPriority()` に失敗した場合、**同一 prepareToPlay 期間中に再試行は発生しない**
-- ただし `prepareToPlay()` で `mmcssApplied_` はリセットされるため、次回 prepareToPlay で再試行される
+**コード調査で判明した設計（`AudioEngine.Processing.AudioBlock.cpp:36-50` 実コード）**:
+```cpp
+{
+    bool expected = false;
+    if (convo::compareExchangeAtomic(mmcssApplied_, expected, true, std::memory_order_acq_rel)) {
+        applyMmcssPriority();  // ← 失敗しても mmcssApplied_ は既に true
+    }
+}
+```
+
+**重要な実装詳細**: `compareExchangeAtomic` は **`mmcssApplied_` を `true` に設定してから** `applyMmcssPriority()` を呼ぶ。
+- つまり `applyMmcssPriority()` が失敗（MMCSS FAILED）しても `mmcssApplied_` は `true` のまま
+- **同一 prepareToPlay 期間中に再試行は発生しない**
+- `prepareToPlay()` で `mmcssApplied_` が `false` にリセットされるため、次回 prepareToPlay（デバイス再初期化時）で再試行される
 
 **影響**:
 - MMCSS が効いていない場合、オーディオスレッドは通常のスレッドとしてスケジュールされる（リアルタイム保護なし）
 - 全7件の XRUN すべてに正の drift (+3,410〜+4,297μs) があることと整合するが、**因果関係の証明にはならない**（drift の原因は MMCSS 以外にも多数ある = Windows Audio、USB、ASIO、DPC、ISR、CPU C-state 等）
 
-> 🔍 **注意**: MMCSS 失敗は Error 1552 の1件のみ確認。これは開始タイミングにより過渡的に発生することがある。
-> 再試行成功の有無を確認するには、MMCSS 成功時のログ出力（`[MMCSS] registered:`）の有無を別途確認する必要がある。
-
 ---
 
-### 4.3 [MEDIUM] publish 停止中の Rebuild 浪費 — 約354ms の無駄な DSPCore Prepare
+### 4.3 [MEDIUM] publish 停止中の Rebuild 浪費 — prepare 処理の累積実行時間 約354ms（経過時間ベース）
 
 **現象**: AUTH_CONTRACT FAIL で publish が停止しているにもかかわらず、rebuild 要求が発行され続け、DSPCore の prepare が何度も実行されて即座に obsolete 扱いされる。
 
-**内訳**:
+**内訳（prepare 処理の累積時間。CPU 占有時間そのものではなく、実時間ベースの経過）**:
 | 時刻 | wasted | フェーズ | 原因 |
 |:----|:------|:--------|:------|
 | 09:48:50.1 | 72.0ms | prepare | gen=1 prepare → gen=3 に追い越される |
@@ -309,7 +335,7 @@ worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->run
 | 09:48:56.1 | 187.5ms | warmup | gen=6 warmup 中に gen=7 要求到着 |
 | **合計** | **354.4ms** | — | — |
 
-**各 rebuild obsolete の DSPCore prepare 時間**:
+**各 rebuild obsolete の DSPCore prepare 時間（実時間ベースの累積経過時間。CPU 占有時間そのものではない）**:
 ```
 1. 56.44ms (gen=1, SR=48k, spb=4096)
 2. 58.77ms (gen=3, SR=192k, spb=1024, OS=768k)
@@ -319,7 +345,19 @@ worldOwner->topology.fadingRuntimeUuid = (active && next != nullptr) ? next->run
 6. 83.66ms (gen=7, IR Loaded)
 ```
 
-**問題点**: 3回目の prepare (57.51ms) は gen=3 の2回目の prepare だが、OS倍率が 768k から 384k に変化しており、同じ gen=3 内で異なる構成が試行されている。
+**問題点**: 3回目の prepare (57.51ms) は gen=3 の2回目の prepare だが、OS倍率が 768k から 384k に変化している。
+
+**【2026-07-12 調査で特定】**: 原因はノイズシェイパータイプ変更による処理構成の変化。
+```
+L97:  [AudioEngine] setNoiseShaperType: newType=2 wasAdaptive=1
+      ↓ noise shaper type 0→2 の変更が入る
+L99:  [DSPCORE_PREPARE] enter → type=0 で prepare（古い設定）
+      processingRate=768000
+L158: ~EQProcessor（最初の準備を破棄）
+L179: [DSPCORE_PREPARE] enter → type=2 で prepare（新しい設定）
+      processingRate=384000
+```
+OS倍率の差はノイズシェイパータイプの違い（type=0 → 2）が原因であり、**Spec 再生成は正常な動作**。AUTH_CONTRACT とは無関係。
 
 **発見日**: 2026-07-12
 
@@ -396,7 +434,7 @@ eqCacheMiss(create/lookup)=0/0
 
 ---
 
-### 4.7 [INFO] lifecycle reclaim カウンタ — 正常動作 (疑似バグ)
+### 4.7 [INFO] lifecycle reclaim カウンタ — 経過観察中
 
 **VERIFY カウンタ** で reclaim 値が 0→13 まで単調増加している。
 
@@ -407,7 +445,7 @@ eqCacheMiss(create/lookup)=0/0
 | gen=6 xfade 完了後 | 6/1/0 | 1件 retire、reclaim 未実行 |
 | gen=7 publish 成功後 | 7/1/1〜13 | EBR reclaim が timer tick 毎に polling |
 
-**判定**: ✅ **正常動作**。EBR (Epoch Based Reclamation) は timer tick 毎に drain を試行し、drain 成功するまでカウンタを増やす。reclaim=13 は 13 tick (約1.3秒) かかったことを示すが、これは正常な EBR polling でありバグではない。最終的に reclaim は完了 (MEM_SNAP の Ret: pend=0 を確認)。
+**判定**: 🔍 EBR reclaim カウンタが 0→13 に増加しているが、これは **polling または reclaim 処理の進行回数**を示すものであり、13件の物理破棄を意味するとは限らない（コード設計によっては polling 開始毎にカウントアップされる可能性がある）。ただし `Ret: pend=1→0` は RetireQueue 上のエントリが消費されたことを示す。EBR epoch advance → Reader leave → 物理破棄(destroy) の完全性はこのログのみでは確認不可能。
 
 ---
 
@@ -415,18 +453,26 @@ eqCacheMiss(create/lookup)=0/0
 
 | # | 重要度 | 項目 | 確度 | ステータス |
 |:-:|:------|:-----|:----|:---------|
-| 4.1 | **CRITICAL** | AUTH_CONTRACT FAIL — Runtime 状態不整合（現象確定、原因は5候補） | **現象: 確定**、原因: 複数仮説 | 設計書で既知、根本原因未修正 |
-| 4.2 | **MEDIUM** | MMCSS 登録失敗 (Error 1552) — 1回の失敗、リトライ未確認 | **現象: 確定**、XRUN因果: 仮説 | コード上のリトライ機構の課題あり |
-| 4.3 | MEDIUM | Rebuild 浪費 354ms (6回の DSPCore prepare) | **確定**（obsolete 時間の合計） | AUTH_CONTRACT FAIL の副次影響 |
+| 4.1 | **CRITICAL** | AUTH_CONTRACT FAIL — Runtime 状態不整合（現象確定、原因は Builder/Spec生成/Coordinator のいずれか） | **現象: 確定**、原因: Builder または Spec 生成段階（要追加DIAGで確定） | 設計書 P6 として Backlog 登録済み |
+| 4.2 | **MEDIUM** | MMCSS 登録失敗 (Error 1552) — コード引用: compareExchange→apply の1ショット設計 | **現象: 確定**、XRUN因果: 仮説 | compareExchange成功後にapply失敗、mmcssApplied_はtrue固定 → prepareToPlayまで再試行なし |
+| 4.3 | MEDIUM | Rebuild 浪費 354ms — prepare処理の累積実行時間（経過時間ベース、CPU占有時間ではない） | **確定**（obsolete 時間の合計） | AUTH_CONTRACT FAIL の副次影響 |
 | 4.4 | **INFO** | EQ Cache Miss カウンタ (miss=0/0) — **cache hit rate 100%を示す** | **誤解を訂正**（正常動作） | 問題なし |
 | 4.5 | **INFO** | COEFF_AUTH Lag ±1 | **正常範囲**（診断情報） | 問題なし |
 | 4.6 | **INFO** | XRUN 非対称性 (常に正 drift) — 事実のみ確認 | **事実: 確定**、原因: 複数仮説 | 原因特定には別ログが必要 |
-| 4.7 | INFO | lifecycle reclaim カウントアップ | ✅ 正常動作 | 問題なし |
+| 4.7 | INFO | lifecycle reclaim カウントアップ — `Ret: pend=1→0` は RetireQueue 離脱まで。物理破棄は未確認。 | 🔍 polling正常推定、callback完全性は未確認 | `Ret: pend=0` 確認済みだが、ReclaimQueue → drain → destroy の完全性は別ログが必要 |
 
-### 真のバグ（改善推奨）
+### 改善推奨項目
 
-上記のうち、以下の2項目は設計上の改善余地として注目に値する:
+1. **MMCSS `mmcssApplied_` のリカバリ不能設計**: `compareExchangeAtomic` 成功後に `applyMmcssPriority()` を呼ぶ設計（`AudioEngine.Processing.AudioBlock.cpp:40-44`）のため、MMCSS 登録が失敗しても再試行されない。prepareToPlay でリセットされるまで MMCSS 保護が得られない。
 
-1. **MMCSS `mmcssApplied_` の1ショット障害**: `compareExchangeAtomic` が成功後に `applyMmcssPriority()` を呼ぶ設計のため、MMCSS 登録が失敗しても再試行されない。prepareToPlay でリセットされるが、それまで MMCSS 保護が得られない。
+   **注意**: 改善案として「`applyMmcssPriority()` 成功時のみ `mmcssApplied_ = true`」が考えられるが、Audio callback 内で毎回 `AvSetMmThreadCharacteristics()` を試行すると RT 性能に悪影響を与える。代わりに以下を推奨:
+   - `enum class MmcssState { NeverTried, Applied, Failed }` による状態管理
+   - 失敗時の再試行は NonRT タイマ（Timer callback）で行い、Audio callback では試行しない
 
-2. **AUTH_CONTRACT 三層不整合**: `graph.fadingNode`, `topology.fadingRuntimeUuid`, `execution.transitionActive` の3者が一致しない状態が発生している。原因箇所の特定には Builder/Coordinator/World 構築の各段階に DIAG を追加する必要がある。
+2. **AUTH_CONTRACT 三層不整合**: `graph.fadingNode`, `topology.fadingRuntimeUuid`, `execution.transitionActive` の3者が一致しない状態が発生している。Coordinator/Spec生成/Builder の各段階を等しく候補として扱い、確定には Coordinator 出口/Builder 入口/Builder 出口/Commit 直前の4箇所で同一 UUID 付き Spec/World ダンプを出力する DIAG を追加する必要がある:
+   ```
+   [DIAG_AUTH] CoordExit   uuid=XXX transitionActive=? currentUuid=? nextUuid=? spec.fadingRuntimeUuid=?
+   [DIAG_AUTH] BuilderEnter uuid=XXX transitionActive=? currentUuid=? nextUuid=? ...
+   [DIAG_AUTH] BuilderExit  uuid=XXX graph.fadingNode=? fadingRuntimeUuid=? ...
+   [DIAG_AUTH] PreCommit   uuid=XXX graph.fadingNode=? fadingRuntimeUuid=? transitionActive=?
+   ```

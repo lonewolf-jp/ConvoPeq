@@ -76,6 +76,21 @@ struct RuntimePublishSpecification {
     //   現在の RuntimePublishWorld ポインタ。Builder はこれを makeEngineRuntimeState() の引数として
     //   使用する。Runtime Query は Orchestrator が事前に実行し、結果のスナップショットを渡す。
     const RuntimePublishWorld* currentRuntimeWorld = nullptr;
+
+    // ★ v9.7 P7-A1: RetirePart — Retire Queue 深度のスナップショット。
+    //   Orchestrator が engine atomic から収集して格納する。
+    //   Builder はこの値のみを参照し、engine.retireQueueDepth_ に直接アクセスしない。
+    struct RetirePart {
+        std::uint64_t retireQueueDepth = 0;
+    } retire;
+
+    // ★ v9.7 P7-A2: AdaptivePart — Adaptive 係数バンクインデックスと世代番号のスナップショット。
+    //   Orchestrator が engine.currentAdaptiveCoeffBankIndex および bank.generation から収集して格納する。
+    //   Builder はこの値のみを参照し、engine の atomic や CoeffBank に直接アクセスしない。
+    struct AdaptivePart {
+        int coeffBankIndex = -1;
+        std::uint64_t coeffGeneration = 0;
+    } adaptive;
 };
 
 enum class BuildError {
@@ -100,11 +115,6 @@ const char* toString(BuildError error) noexcept;
 class RuntimeBuilder {
 public:
     explicit RuntimeBuilder(AudioEngine& owner) noexcept : engine(owner) {}
-
-    // ★ S-2: HealthState 参照設定
-    void setHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
-        m_healthStateRef = ref;
-    }
 
     // ★ v8.3: const RuntimePublishWorld を返す — INV-11 のコンパイル時保証
     //   buildRuntimePublishWorld() 完了後は World を変更してはならない。
@@ -152,6 +162,18 @@ public:
         spec.crossfade.firstIrDryCrossfadePending = engine.crossfadeRuntime_.isFirstIrDryPending();
         spec.latency.latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_relaxed);
         spec.latency.latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_relaxed));
+        // ★ v9.7 P7-A1: RetirePart — old sig fallback: engine atomic から収集
+        spec.retire.retireQueueDepth = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_relaxed);
+        // ★ v9.7 P7-A2: AdaptivePart — old sig fallback: engine atomic から収集
+        {
+            const int bankIdx = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_relaxed);
+            spec.adaptive.coeffBankIndex = bankIdx;
+            if (bankIdx >= 0 && bankIdx < static_cast<int>(kNumAdaptiveCoeffBanks))
+            {
+                const auto& bank = engine.getAdaptiveCoeffBankForIndex(bankIdx);
+                spec.adaptive.coeffGeneration = convo::consumeAtomic(bank.generation, std::memory_order_relaxed);
+            }
+        }
         spec.currentRuntimeWorld = engine.observePublishedWorld();
         // const 版に委譲 → unique_ptr<const T> から unique_ptr<T> へは
         // ムーブ不可のため、内部実装呼び出し
@@ -176,8 +198,6 @@ public:
 
 private:
     AudioEngine& engine;
-    // ★ S-2: HealthState 参照
-    const std::atomic<ISRHealthState>* m_healthStateRef = nullptr;
 };
 
 } // namespace convo
