@@ -27,11 +27,11 @@ enum class ThreadType
     LightBackground,
     UI,
     AudioRealtime  // ★ [work64] 将来の拡張性のため。現在 AudioThread の affinity は
-                   //   applyMmcssPriority() 末尾で直接 SetThreadAffinityMask しているため、
+                   //   applyMmcssPriority() 内で直接 SetThreadAffinityMask しているため、
                    //   本 enum を applyCurrentThreadPolicy() で使うと二重適用になる。
                    //   二重適用自体は無害（同一マスクの再設定）だが、責務は
-                   //   applyMmcssPriority() (Timer.cpp) 側にあり、
-                   //   applyCurrentThreadPolicy は将来のリファクタリング用に用意。
+                   //   tryApplyMmcssForSelfManagedThread() → applyMmcssPriority() (Timer.cpp)
+                   //   側にあり、applyCurrentThreadPolicy は将来のリファクタリング用に用意。
                    // ★ v19: convo::numeric_policy::ThreadRole::AudioRealtime (DspNumericPolicy.h)
                    //   とは別概念。そちらはランタイムスレッド検出（assertion用）であり、
                    //   CPUアフィニティ管理とは無関係。名前空間が異なるため衝突なし。

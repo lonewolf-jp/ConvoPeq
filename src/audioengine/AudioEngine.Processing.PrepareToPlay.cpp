@@ -21,11 +21,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
     diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 
-    // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
-    //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
-    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssState_ をリセットする。
-    // ★ P8: MmcssState::NeverTried へのリセットにより、次回 Audio callback で CAS 再試行される。
-    convo::publishAtomic(mmcssState_, AudioEngine::MmcssState::NeverTried, std::memory_order_release);
+    // ★ [work70 v9.11] Unified MMCSS Layer: prepareToPlay は Message Thread のため
+    //    MMCSS 登録は行わない（Audio callback 初回で tryApplyMmcssForSelfManagedThread が実行）。
+    //    WASAPI: JUCE managed (JuceManaged) → nothing to do here.
+    //    ASIO/DS: Self-managed → callback で thread_local 登録。
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {

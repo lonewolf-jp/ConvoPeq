@@ -2184,28 +2184,34 @@ public:
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
-    std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
-    // ★ P8: MmcssState — 3値管理による再試行可能なMMCSS状態
-    //   NeverTried: 未試行（prepareToPlay直後またはTimerによるリセット後）
-    //   Applied:    適用成功（次のprepareToPlayまで固定）
-    //   Failed:     適用失敗（Timer callbackがNeverTriedにリセットし再試行を促す）
-    enum class MmcssState : uint8_t { NeverTried, Applied, Failed };
-    std::atomic<MmcssState> mmcssState_{MmcssState::NeverTried};
+    std::atomic<bool> useMmcssPriority { true }; // true=Unified MMCSS Layer, false=NativeRT
+    // ★ [work70 v9.11] Unified MMCSS Layer — Authority Singularization:
+    //   WASAPI(enum JuceManaged): JUCE manages → ConvoPeq does nothing.
+    //   ASIO (enum SelfManagedProAudio): Driver may or may not manage → Host recovers.
+    //   DirectSound(enum SelfManagedPlayback): Host manages → Playback/HIGH.
+    //   See AudioEngine.Mmcss.cpp for implementation.
+    enum class MmcssPolicy : uint8_t {
+        JuceManaged,           // WASAPI — JUCE has Authority
+        SelfManagedProAudio,   // ASIO — Driver has Authority, Host recovers
+        SelfManagedPlayback,   // DirectSound — Host manages
+        None                   // Unknown / other
+    };
 
-    // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
-    //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）
-    //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
-    HANDLE m_avrtHandle = nullptr;
-    DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
+    // ★ [work70 v9.11] 現在のオーディオデバイスの種類名（例: "WASAPI", "ASIO", "DirectSound"）。
+    //    setAudioDeviceTypeName() 経由で Message Thread からのみ書き込む（通常セッション開始時に1度だけ）。
+    //    getCurrentMmcssPolicy() はこの値に基づき MmcssPolicy を返す。
+    void setAudioDeviceTypeName(const juce::String& type) noexcept { currentDeviceTypeName_ = type; }
+    [[nodiscard]] const juce::String& getAudioDeviceTypeName() const noexcept { return currentDeviceTypeName_; }
 
-    // ★ [work66-P1-4] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
-    //   書込頻度はシャットダウン時のみのため false sharing 影響は極小。
-    //   alignas(64) は「将来ここだけ分離したい」意思表示として配置。
-#pragma warning(push)
-#pragma warning(disable : 4324) // C4324: alignas による意図的なパディングを許容
+    // ★ [work70 v9.11] MMCSS shutdown flag — Message Thread → Audio Thread notification.
+    //    Message Thread sets flag, Audio Thread performs actual AvRevert.
     alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
-#pragma warning(pop)
-    //    Audio Thread が終了間際のコールバックでこれを検知し、自スレッド上で AvRevert する。
+
+    // デバイス種類名キャッシュ（Message Thread からのみ書き込み、Audio Thread から読み取り）
+    juce::String currentDeviceTypeName_;
+
+    //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
+    DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
 
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -2286,12 +2292,20 @@ public:
     void createSnapshotFromCurrentState(uint64_t generation);
     void initWorkerThread();
 
-    // ★ [work62] MMCSS — Pro Audio 優先度設定
-    // ★ P8: 戻り値 true=成功, false=失敗（mmcssState_ も自動更新）
+    // ★ [work70 v9.11] Unified MMCSS Layer
+    //    - WASAPI: JUCE managed → getCurrentMmcssPolicy() returns JuceManaged
+    //    - ASIO:   Self-managed Pro Audio/CRITICAL → tryApplyMmcssForSelfManagedThread()
+    //    - DirectSound: Self-managed Playback/HIGH → tryApplyMmcssForSelfManagedThread()
+    //    All logging guarded by #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS.
+    [[nodiscard]] MmcssPolicy getCurrentMmcssPolicy() const noexcept;
+    [[nodiscard]] bool tryApplyMmcssForSelfManagedThread() noexcept;
+    void revertMmcssOnAudioThread() noexcept;
+    // ★ [work62/work70 v9.11] CPU affinity + NativeRT priority setting (always called once).
+    //    MMCSS registration is handled by tryApplyMmcssForSelfManagedThread() separately.
     bool applyMmcssPriority() noexcept;
-    // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）
+    // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）— legacy alias
     void revertMmcssPriorityOnAudioThread() noexcept;
-    // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）
+    // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias
     void finalizeMmcssShutdown() noexcept;
     void shutdownWorkerThread();
 

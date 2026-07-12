@@ -40,17 +40,28 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     [[maybe_unused]] const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
-    // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
-    // ★ P8: 3値管理による再試行。CAS(NeverTried→Applied) 成功後に applyMmcssPriority() を呼ぶ。
-    //   失敗すると applyMmcssPriority() 内で mmcssState_ が Failed に戻され、
-    //   Timer callback が Failed→NeverTried にリセットして再試行を促す。
+    // ★ [work70 v9.11] Unified MMCSS Layer:
+    //   - WASAPI(enum JuceManaged): JUCE manages → nothing to do
+    //   - ASIO(enum SelfManagedProAudio):  first-call registration (Pro Audio/CRITICAL)
+    //   - DirectSound(enum SelfManagedPlayback): first-call registration (Playback/HIGH)
+    //   Logging is guarded by #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS (zero cost in Release).
+    //   thread_local ensures safety across driver-owned ASIO threads.
+    //   Shutdown: mmcssShutdownRequested flag from Message Thread → AvRevert here.
     {
-        auto expected = AudioEngine::MmcssState::NeverTried;
-        if (convo::compareExchangeAtomic(mmcssState_, expected, AudioEngine::MmcssState::Applied,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire)) {
-            applyMmcssPriority();
+        const auto mmcssPolicy = getCurrentMmcssPolicy();
+        if (mmcssPolicy == MmcssPolicy::SelfManagedProAudio
+            || mmcssPolicy == MmcssPolicy::SelfManagedPlayback)
+        {
+            // tryApplyMmcssForSelfManagedThread() uses W API, logs success/failure
+            // under CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS. RT impact: first call only (~50-200μs).
+            tryApplyMmcssForSelfManagedThread();
+
+            if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire)) {
+                revertMmcssOnAudioThread();
+                convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
+            }
         }
+        // JuceManaged / None → nothing to do (JUCE manages or unknown backend)
     }
 
     struct AudioCallbackRuntimeScope final
@@ -687,13 +698,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 #endif
 
-    // ★ [work63] シャットダウン要求: Audio Thread 自ら MMCSS を解除（診断ガード外＝常時有効）
-    //    Message Thread が mmcssShutdownRequested をセットすると、
-    //    次のコールバック終了時にこのスレッド上で AvRevertMmThreadCharacteristics を実行する。
-    if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
-    {
-        revertMmcssPriorityOnAudioThread();
-    }
+    // ★ [work70 v9.11] MMCSS shutdown: handled above via mmcssShutdownRequested flag.
+    //    If policy is SelfManaged*, revertMmcssOnAudioThread() was called above.
 
 }
 

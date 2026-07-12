@@ -74,7 +74,18 @@ void AudioEngine::releaseResources()
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
     runtimePublicationBridge_.requestShutdown();
 
-    // ★ [work63] シャットダウン完了処理（NativeRT 復元 + MMCSS 未解除時の安全網）
+    // ★ [work70 v9.11] MMCSS シャットダウン: フラグ経由で Audio Thread に委譲。
+    //    Message Thread はフラグのみセットし、実際の AvRevert は次回コールバックで実行される。
+    //    NativeRT モード（useMmcssPriority=false）の復元は finalizeMmcssShutdown() で行う。
+    {
+        const auto mmcssPolicy = getCurrentMmcssPolicy();
+        if (mmcssPolicy == MmcssPolicy::SelfManagedProAudio
+            || mmcssPolicy == MmcssPolicy::SelfManagedPlayback)
+        {
+            convo::publishAtomic(mmcssShutdownRequested, true, std::memory_order_release);
+        }
+        // JuceManaged / None → JUCE manages shutdown. NativeRT は finalizeMmcssShutdown で復元。
+    }
     finalizeMmcssShutdown();
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。

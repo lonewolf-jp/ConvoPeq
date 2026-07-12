@@ -10,10 +10,8 @@
 #include <string>
 #include <mutex>
 
-// MMCSS: 常に必要（診断有効/無効の両ブランチで使用）
+// windows.h: SetThreadAffinityMask, SetPriorityClass, SetThreadPriority 用
 #include <windows.h>
-#include <avrt.h>
-#pragma comment(lib, "avrt.lib")
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 #include <psapi.h>
@@ -215,49 +213,26 @@ static_assert(static_cast<int>(DiagCategory::Count) == 10,
 
 } // anonymous namespace
 
-// ★ [work63] applyMmcssPriority — Audio スレッド優先度設定（初回コールバックで一度だけ）
-// ★ P8: 戻り値 true=成功, false=失敗。失敗時は mmcssState_ を Failed に戻す。
-//   CPU アフィニティ設定は常に実行する（優先度設定の成功/失敗に依存しない）。
-//   （CAS で NeverTried→Applied は optimistically 行われている前提）
+// ★ [work63] applyMmcssPriority — CPU affinity + NativeRT priority setting
+// ★ [work70 v9.11] Unified MMCSS Layer に移行。
+//   MMCSS 登録（W API）は AudioEngine.Mmcss.cpp の tryApplyMmcssForSelfManagedThread() が担当。
+//   本関数は以下に専念する：
+//   (1) CPU affinity (SetThreadAffinityMask) — 対称コア環境
+//   (2) NativeRT モード (SetPriorityClass + SetThreadPriority) — useMmcssPriority=false 時
 bool AudioEngine::applyMmcssPriority() noexcept
 {
-    bool priorityApplied = false;
+    // MMCSS モード（useMmcssPriority=true）:
+    //   MMCSS 登録は tryApplyMmcssForSelfManagedThread() (AudioEngine.Mmcss.cpp) で
+    //   初回コールバック時に1回だけ行われる。本関数では何もしない。
+    //
+    // NativeRT モード（useMmcssPriority=false）:
+    //   以下の SetPriorityClass + SetThreadPriority でネイティブRTに設定する。
 
-    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    bool priorityApplied = true;
+
+    if (!convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
-        // ── MMCSS モード ──
-        DWORD taskIndex = 0;
-        HANDLE hTask = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
-        if (hTask != nullptr) {
-            AvSetMmThreadPriority(hTask, AVRT_PRIORITY_CRITICAL);
-            m_avrtHandle = hTask;
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            {
-                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
-                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
-                diagLog("[MMCSS] registered: taskIndex=" + juce::String(static_cast<int>(taskIndex))
-                    + " priority=AVRT_PRIORITY_CRITICAL"
-                    + " win32Prio=" + juce::String(win32Priority)
-                    + " procClass=" + juce::String(static_cast<int>(pc)));
-            }
-#endif
-            priorityApplied = true;
-        } else {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            {
-                const DWORD err = ::GetLastError();
-                diagLog("[MMCSS] FAILED: GetLastError=" + juce::String(static_cast<int>(err))
-                    + " taskIndex=" + juce::String(static_cast<int>(taskIndex)));
-            }
-#endif
-            // ★ P8: 失敗 → mmcssState_ を Failed に戻し、Timer retry を待つ
-            convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
-            // priorityApplied = false（初期値のまま）
-        }
-    }
-    else
-    {
-        // ── Native RT モード ──
+        // ── Native RT モード（変更なし）──
         {
             savedProcessPriorityClass = ::GetPriorityClass(::GetCurrentProcess());
             const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
@@ -286,11 +261,7 @@ bool AudioEngine::applyMmcssPriority() noexcept
             (void)tpResult;
 #endif
             if (!nativeRtOk) {
-                // ★ P8: NativeRT 失敗 → mmcssState_ を Failed に戻す
-                convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
-                // priorityApplied = false（初期値のまま）
-            } else {
-                priorityApplied = true;
+                priorityApplied = false;
             }
         }
     }
@@ -328,17 +299,16 @@ bool AudioEngine::applyMmcssPriority() noexcept
 }
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
+// ★ JUCE委譲（work70 v9.11決定）: MMCSS は JUCE が管理するため自前での解除は不要。
+//   NativeRT モード（useMmcssPriority=false）時のみ明示的な復元を行う。
 void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
 {
     if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
-        if (m_avrtHandle != nullptr) {
-            ::AvRevertMmThreadCharacteristics(m_avrtHandle);
-            m_avrtHandle = nullptr;
+        // MMCSS: JUCE がライフサイクルを管理。自前での AvRevert は不要。
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            diagLog("[MMCSS] reverted on Audio Thread (AvRevertMmThreadCharacteristics)");
+        diagLog("[MMCSS] revert: delegated to JUCE, no action needed");
 #endif
-        }
     }
     else
     {
@@ -356,20 +326,17 @@ void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
         (void)pcResult;
 #endif
     }
-    convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
 }
 
+
 // ★ [work63] finalizeMmcssShutdown — シャットダウン完了処理（安全網）
+// ★ JUCE委譲（work70 v9.11決定）: MMCSS は JUCE 管理。NativeRT のみ復元。
 void AudioEngine::finalizeMmcssShutdown() noexcept
 {
     if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        if (m_avrtHandle != nullptr) {
-            diagLog("[MMCSS] WARNING: Audio Thread did not revert MMCSS (OS auto-cleanup)");
-        } else {
-            diagLog("[MMCSS] already reverted by Audio Thread. OK.");
-        }
+        diagLog("[MMCSS] shutdown: delegated to JUCE, no action needed");
 #endif
     }
     else
@@ -1471,16 +1438,7 @@ void AudioEngine::timerCallback()
         }
     }
 
-    // ★ P8: MMCSS 再試行トリガ — Failed 状態を NeverTried にリセット
-    //   次回 AudioBlock/BlockDouble の CAS(NeverTried→Applied) で再試行される。
-    //   Audio callback 内での AvSetMmThreadCharacteristics 試行は RT 性能に影響するため、
-    //   毎回の試行ではなく Timer によるリセット経由で制御する。
-    {
-        const auto state = convo::consumeAtomic(mmcssState_, std::memory_order_acquire);
-        if (state == MmcssState::Failed) {
-            convo::publishAtomic(mmcssState_, MmcssState::NeverTried, std::memory_order_release);
-        }
-    }
+
 
     // ★ [work62] flushLogBuffer — 非同期Loggerのリングバッファをファイルに書き出し
     flushLogBuffer();

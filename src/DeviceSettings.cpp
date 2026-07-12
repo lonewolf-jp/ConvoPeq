@@ -1045,6 +1045,10 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
             ensureUsableChannelSelection(deviceManager);
 
+            // ★ [work70 v9.11] MMCSS policy 判定用にデバイス種類名をエンジンに通知
+            if (auto* dev = deviceManager.getCurrentAudioDevice())
+                engine.setAudioDeviceTypeName(dev->getTypeName());
+
             // ビット深度設定の読み込み (デフォルト0 = 自動/最大)
             int bitDepth = xml->getIntAttribute("ditherBitDepth", 0);
             engine.setDitherBitDepth(bitDepth);
@@ -1161,8 +1165,13 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     }
 
     // 設定ファイルが存在しない、または読み込みに失敗した場合はデフォルト初期化
-    // MMCSSはJUCE 8.0.12で内部自動管理されるため明示的設定は不要
+    // MMCSSはWASAPIではJUCE 8.0.12が内部自動管理。ASIO/DirectSoundは
+    // Unified MMCSS Layer (AudioEngine.Mmcss.cpp) が自前登録する。
     initialiseDefaultDevice();
+
+    // ★ [work70 v9.11] MMCSS policy 判定用にデバイス種類名をエンジンに通知
+    if (auto* dev = deviceManager.getCurrentAudioDevice())
+        engine.setAudioDeviceTypeName(dev->getTypeName());
 
     // デフォルトで最大サンプルレートに設定
     auto* currentDevice = deviceManager.getCurrentAudioDevice();

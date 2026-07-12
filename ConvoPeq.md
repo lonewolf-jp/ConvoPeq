@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-12 15:17:02
+> Generated: 2026-07-12 18:40:06
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -98,6 +98,7 @@
         │   ├── AudioEngine.Globals.cpp
         │   ├── AudioEngine.Init.cpp
         │   ├── AudioEngine.Learning.cpp
+        │   ├── AudioEngine.Mmcss.cpp
         │   ├── AudioEngine.Parameters.cpp
         │   ├── AudioEngine.Processing.AudioBlock.cpp
         │   ├── AudioEngine.Processing.BlockDouble.cpp
@@ -701,6 +702,7 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Snapshot.cpp
     src/audioengine/AudioEngine.Fifo.cpp
     src/audioengine/AudioEngine.Timer.cpp
+    src/audioengine/AudioEngine.Mmcss.cpp
     src/audioengine/AudioEngine.Transition.cpp
     src/audioengine/AudioEngine.Parameters.cpp
     src/audioengine/AudioEngine.EQResponse.cpp
@@ -9621,6 +9623,10 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
             ensureUsableChannelSelection(deviceManager);
 
+            // ★ [work70 v9.11] MMCSS policy 判定用にデバイス種類名をエンジンに通知
+            if (auto* dev = deviceManager.getCurrentAudioDevice())
+                engine.setAudioDeviceTypeName(dev->getTypeName());
+
             // ビット深度設定の読み込み (デフォルト0 = 自動/最大)
             int bitDepth = xml->getIntAttribute("ditherBitDepth", 0);
             engine.setDitherBitDepth(bitDepth);
@@ -9737,8 +9743,13 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     }
 
     // 設定ファイルが存在しない、または読み込みに失敗した場合はデフォルト初期化
-    // MMCSSはJUCE 8.0.12で内部自動管理されるため明示的設定は不要
+    // MMCSSはWASAPIではJUCE 8.0.12が内部自動管理。ASIO/DirectSoundは
+    // Unified MMCSS Layer (AudioEngine.Mmcss.cpp) が自前登録する。
     initialiseDefaultDevice();
+
+    // ★ [work70 v9.11] MMCSS policy 判定用にデバイス種類名をエンジンに通知
+    if (auto* dev = deviceManager.getCurrentAudioDevice())
+        engine.setAudioDeviceTypeName(dev->getTypeName());
 
     // デフォルトで最大サンプルレートに設定
     auto* currentDevice = deviceManager.getCurrentAudioDevice();
@@ -17418,12 +17429,6 @@ MainWindow::~MainWindow()
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 3 setCliProcessingTelemetryEnabled");
     audioEngine.setCliProcessingTelemetryEnabled(false);
     cliAutomationTelemetryLoggingEnabled = false;
-
-    // ★ [work63] シャットダウン要求: Audio Thread に MMCSS 解除を指示
-    //    setProcessor(nullptr) 以降も数回コールバックが走るため、その間に Audio Thread が
-    //    AvRevertMmThreadCharacteristics を実行できる。removeAudioCallback までの間に
-    //    Audio Thread がフラグを検知できる十分な時間的余裕がある。
-    convo::publishAtomic(audioEngine.mmcssShutdownRequested, true, std::memory_order_release);
 
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 4 setProcessor(nullptr)");
     audioProcessorPlayer.setProcessor (nullptr);
@@ -28628,6 +28633,217 @@ void AudioEngine::setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseS
 
 ```
 
+### 📄 `src\audioengine\AudioEngine.Mmcss.cpp`
+
+```
+// AudioEngine.Mmcss.cpp — Unified MMCSS Layer for WASAPI/ASIO/DirectSound
+//
+// Authority Singularization:
+//   WASAPI:       JUCE manages (AvSetMmThreadCharacteristicsW) → our call will fail(5/183) → success
+//   ASIO(driver): Driver manages → our call may succeed or fail(5/183)
+//   DirectSound:  Host manages → our call succeeds with Playback/HIGH
+//
+// RT-safety:
+//   - thread_local ensures no lock contention across driver-owned threads (ASIO)
+//   - Registration attempted ONCE (t_mmcssTried) → minimal RT impact
+//   - Logging is guarded by #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS (compiled out in Release)
+//
+// Shutdown:
+//   - Message Thread sets mmcssShutdownRequested flag ONLY
+//   - Audio Thread performs actual AvRevert in next callback (MSDN: same-thread requirement)
+
+#include "AudioEngine.h"
+#include "DiagnosticsConfig.h"
+#include <windows.h>
+#include <avrt.h>
+#pragma comment(lib, "avrt.lib")
+
+namespace {
+
+// thread_local: safe for driver-owned threads (ASIO), no locking needed,
+//               auto-cleanup on thread destruction, device switch creates new thread.
+thread_local HANDLE t_mmcssHandle = nullptr;
+thread_local DWORD  t_mmcssTaskIndex = 0;
+thread_local bool   t_mmcssTried = false;
+
+// Local diagLog — each engine .cpp defines its own for file-scoped asyncSink independence.
+void diagLog(const juce::String& message)
+{
+    DBG(message);
+    juce::Logger::writeToLog(message);
+}
+
+// Wrapper: Unicode (W) version only. A version has ANSI→UTF-16 ambiguity + RegEnumKeyEx enumeration
+// issues that can produce ERROR_NO_MORE_ITEMS(1552) spuriously.
+HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
+{
+    idx = 0;
+    return ::AvSetMmThreadCharacteristicsW(taskName, &idx);
+}
+
+} // anonymous namespace
+
+// ── Public ──
+
+// Determine MMCSS policy based on current audio backend device type.
+// Uses the cached currentDeviceTypeName_ (set via setAudioDeviceTypeName from Message Thread).
+// Called from both Message Thread (prepareToPlay) and Audio Thread (callback).
+// Device type is immutable during a session → safe to call from either thread.
+[[nodiscard]] AudioEngine::MmcssPolicy AudioEngine::getCurrentMmcssPolicy() const noexcept
+{
+    const auto& type = currentDeviceTypeName_;
+    if (type.containsIgnoreCase("WASAPI") || type.containsIgnoreCase("Windows Audio"))
+        return MmcssPolicy::JuceManaged;
+    if (type.containsIgnoreCase("ASIO"))
+        return MmcssPolicy::SelfManagedProAudio;
+    if (type.containsIgnoreCase("DirectSound"))
+        return MmcssPolicy::SelfManagedPlayback;
+    return MmcssPolicy::None;
+}
+
+// Try to register the calling (audio) thread with MMCSS once.
+// - WASAPI (JuceManaged / None): skip, return true (JUCE manages or unknown backend).
+// - ASIO  (SelfManagedProAudio): AvSetMmThreadCharacteristicsW(L"Pro Audio") + AVRT_PRIORITY_CRITICAL.
+// - DS    (SelfManagedPlayback):  AvSetMmThreadCharacteristicsW(L"Playback") + AVRT_PRIORITY_HIGH.
+//
+// Logs success/failure via CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS guard (zero cost in Release).
+//
+// Return value:
+//   true  = MMCSS is active (by JUCE, driver, or our registration).
+//   false = MMCSS registration failed entirely (fallback to NativeRT or no special priority).
+//
+// RT impact: first call only (~50-200μs for LPC call to MMCSS service). Subsequent calls: O(1) TLS read.
+[[nodiscard]] bool AudioEngine::tryApplyMmcssForSelfManagedThread() noexcept
+{
+    if (t_mmcssTried)
+        return (t_mmcssHandle != nullptr);
+    t_mmcssTried = true;
+
+    // ★ CPU affinity + NativeRT: always set on first callback, regardless of policy.
+    //    applyMmcssPriority() handles SetThreadAffinityMask (all backends)
+    //    and SetPriorityClass/SetThreadPriority (NativeRT mode only).
+    applyMmcssPriority();
+
+    if (!convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+        return false; // NativeRT mode selected by user
+
+    const auto policy = getCurrentMmcssPolicy();
+
+    // WASAPI or unknown → JUCE manages or nothing to do
+    if (policy == MmcssPolicy::JuceManaged || policy == MmcssPolicy::None)
+        return true;
+
+    // ── Determine task name and priority ──
+    LPCWSTR primaryTask = nullptr;
+    LPCWSTR fallback1   = nullptr;
+    LPCWSTR fallback2   = nullptr;
+    int avrtPriority    = AVRT_PRIORITY_CRITICAL;
+    const char* policyTag = nullptr;
+
+    if (policy == MmcssPolicy::SelfManagedProAudio) {
+        primaryTask  = L"Pro Audio";
+        fallback1    = L"Audio";
+        fallback2    = nullptr;
+        avrtPriority = AVRT_PRIORITY_CRITICAL;
+        policyTag    = "ASIO";
+    } else { // SelfManagedPlayback
+        primaryTask  = L"Playback";
+        fallback1    = L"Audio";
+        fallback2    = L"Pro Audio";
+        avrtPriority = AVRT_PRIORITY_HIGH;
+        policyTag    = "DS";
+    }
+
+    // ── Attempt primary task registration ──
+    DWORD idx = 0;
+    HANDLE h = tryTask(primaryTask, idx);
+
+    if (h != nullptr) {
+        ::AvSetMmThreadPriority(h, static_cast<AVRT_PRIORITY>(avrtPriority));
+        t_mmcssHandle = h;
+        t_mmcssTaskIndex = idx;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ [diagnostic] MMCSS registration SUCCESS — logged once
+        juce::String prioStr = (avrtPriority == AVRT_PRIORITY_CRITICAL) ? "CRITICAL"
+                             : (avrtPriority == AVRT_PRIORITY_HIGH)    ? "HIGH"
+                             : (avrtPriority == AVRT_PRIORITY_NORMAL)  ? "NORMAL"
+                                                                       : "LOW";
+        diagLog("[MMCSS-" + juce::String(policyTag) + "] registered: task="
+                + juce::String(primaryTask) + " priority=" + prioStr
+                + " taskIndex=" + juce::String(static_cast<int>(idx)));
+#endif
+        return true;
+    }
+
+    // ── Failure analysis ──
+    const DWORD err = ::GetLastError();
+
+    // Already registered by JUCE (WASAPI) or professional driver (ASIO) → success
+    if (err == ERROR_ACCESS_DENIED || err == ERROR_ALREADY_EXISTS) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ [diagnostic] MMCSS already managed by JUCE/driver — expected, not an error
+        diagLog("[MMCSS-" + juce::String(policyTag) + "] already registered by JUCE/driver (err="
+                + juce::String(static_cast<int>(err)) + ") task="
+                + juce::String(primaryTask));
+#endif
+        return true;
+    }
+
+    // Task name not found → fallback chain (1552 = RegEnumKeyEx ended without match)
+    auto attemptFallback = [&](LPCWSTR fallbackTask) -> bool {
+        if (fallbackTask == nullptr) return false;
+        DWORD idx2 = 0;
+        HANDLE h2 = tryTask(fallbackTask, idx2);
+        if (h2 != nullptr) {
+            ::AvSetMmThreadPriority(h2, static_cast<AVRT_PRIORITY>(avrtPriority));
+            t_mmcssHandle = h2;
+            t_mmcssTaskIndex = idx2;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::String prioStr = (avrtPriority == AVRT_PRIORITY_CRITICAL) ? "CRITICAL"
+                                 : (avrtPriority == AVRT_PRIORITY_HIGH)    ? "HIGH"
+                                 : (avrtPriority == AVRT_PRIORITY_NORMAL)  ? "NORMAL"
+                                                                           : "LOW";
+            diagLog("[MMCSS-" + juce::String(policyTag) + "] registered (fallback): task="
+                    + juce::String(fallbackTask) + " priority=" + prioStr
+                    + " taskIndex=" + juce::String(static_cast<int>(idx2)));
+#endif
+            return true;
+        }
+        return false;
+    };
+
+    if (err == ERROR_NO_MORE_ITEMS || err == ERROR_INVALID_TASK_NAME) {
+        if (attemptFallback(fallback1)) return true;
+        if (attemptFallback(fallback2)) return true;
+    }
+
+    // All attempts failed
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ [diagnostic] MMCSS registration FAILURE — all paths exhausted
+    diagLog("[MMCSS-" + juce::String(policyTag) + "] FAILED: primary err="
+            + juce::String(static_cast<int>(err))
+            + " task=" + juce::String(primaryTask));
+#endif
+    return false;
+}
+
+// Revert MMCSS on the audio thread (MUST be called from same thread that registered).
+// Called when mmcssShutdownRequested flag is detected in the callback.
+void AudioEngine::revertMmcssOnAudioThread() noexcept
+{
+    if (t_mmcssHandle != nullptr) {
+        ::AvRevertMmThreadCharacteristics(t_mmcssHandle);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[MMCSS] reverted on Audio Thread");
+#endif
+        t_mmcssHandle = nullptr;
+        t_mmcssTaskIndex = 0;
+    }
+    t_mmcssTried = false; // Allow retry on next device open / thread creation
+}
+
+```
+
 ### 📄 `src\audioengine\AudioEngine.Parameters.cpp`
 
 ```
@@ -29373,9 +29589,8 @@ void AudioEngine::clearConvolverCache()
 #include "NoiseShaperLearner.h"
 #include "core/TimeUtils.h"
 
-// MMCSS applyMmcssPriority() は常に呼ばれる（診断有効時のみログ出力）
+// windows.h: SetThreadAffinityMask 用（applyMmcssPriority 経由）
 #include <windows.h>
-#include <avrt.h>
 
 namespace
 {
@@ -29406,17 +29621,28 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     [[maybe_unused]] const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
-    // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
-    // ★ P8: 3値管理による再試行。CAS(NeverTried→Applied) 成功後に applyMmcssPriority() を呼ぶ。
-    //   失敗すると applyMmcssPriority() 内で mmcssState_ が Failed に戻され、
-    //   Timer callback が Failed→NeverTried にリセットして再試行を促す。
+    // ★ [work70 v9.11] Unified MMCSS Layer:
+    //   - WASAPI(enum JuceManaged): JUCE manages → nothing to do
+    //   - ASIO(enum SelfManagedProAudio):  first-call registration (Pro Audio/CRITICAL)
+    //   - DirectSound(enum SelfManagedPlayback): first-call registration (Playback/HIGH)
+    //   Logging is guarded by #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS (zero cost in Release).
+    //   thread_local ensures safety across driver-owned ASIO threads.
+    //   Shutdown: mmcssShutdownRequested flag from Message Thread → AvRevert here.
     {
-        auto expected = AudioEngine::MmcssState::NeverTried;
-        if (convo::compareExchangeAtomic(mmcssState_, expected, AudioEngine::MmcssState::Applied,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire)) {
-            applyMmcssPriority();
+        const auto mmcssPolicy = getCurrentMmcssPolicy();
+        if (mmcssPolicy == MmcssPolicy::SelfManagedProAudio
+            || mmcssPolicy == MmcssPolicy::SelfManagedPlayback)
+        {
+            // tryApplyMmcssForSelfManagedThread() uses W API, logs success/failure
+            // under CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS. RT impact: first call only (~50-200μs).
+            tryApplyMmcssForSelfManagedThread();
+
+            if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire)) {
+                revertMmcssOnAudioThread();
+                convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
+            }
         }
+        // JuceManaged / None → nothing to do (JUCE manages or unknown backend)
     }
 
     const int numSamples = bufferToFill.numSamples;
@@ -30102,13 +30328,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 #endif
 
-    // ★ [work63] シャットダウン要求: Audio Thread 自ら MMCSS を解除（診断ガード外＝常時有効）
-    //    Message Thread が mmcssShutdownRequested をセットすると、
-    //    次のコールバック終了時にこのスレッド上で AvRevertMmThreadCharacteristics を実行する。
-    if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
-    {
-        revertMmcssPriorityOnAudioThread();
-    }
+    // ★ [work70 v9.11] MMCSS shutdown: handled above via mmcssShutdownRequested flag.
+    //    If policy is SelfManaged*, revertMmcssOnAudioThread() was called above.
 
 }
 
@@ -30160,17 +30381,28 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     [[maybe_unused]] const auto thisCallbackIndex = convo::fetchAddAtomic(
         rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
-    // ★ [work62] MMCSS: Audio スレッド初回コールで優先度設定（RT-safe: atomic flag）
-    // ★ P8: 3値管理による再試行。CAS(NeverTried→Applied) 成功後に applyMmcssPriority() を呼ぶ。
-    //   失敗すると applyMmcssPriority() 内で mmcssState_ が Failed に戻され、
-    //   Timer callback が Failed→NeverTried にリセットして再試行を促す。
+    // ★ [work70 v9.11] Unified MMCSS Layer:
+    //   - WASAPI(enum JuceManaged): JUCE manages → nothing to do
+    //   - ASIO(enum SelfManagedProAudio):  first-call registration (Pro Audio/CRITICAL)
+    //   - DirectSound(enum SelfManagedPlayback): first-call registration (Playback/HIGH)
+    //   Logging is guarded by #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS (zero cost in Release).
+    //   thread_local ensures safety across driver-owned ASIO threads.
+    //   Shutdown: mmcssShutdownRequested flag from Message Thread → AvRevert here.
     {
-        auto expected = AudioEngine::MmcssState::NeverTried;
-        if (convo::compareExchangeAtomic(mmcssState_, expected, AudioEngine::MmcssState::Applied,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire)) {
-            applyMmcssPriority();
+        const auto mmcssPolicy = getCurrentMmcssPolicy();
+        if (mmcssPolicy == MmcssPolicy::SelfManagedProAudio
+            || mmcssPolicy == MmcssPolicy::SelfManagedPlayback)
+        {
+            // tryApplyMmcssForSelfManagedThread() uses W API, logs success/failure
+            // under CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS. RT impact: first call only (~50-200μs).
+            tryApplyMmcssForSelfManagedThread();
+
+            if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire)) {
+                revertMmcssOnAudioThread();
+                convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
+            }
         }
+        // JuceManaged / None → nothing to do (JUCE manages or unknown backend)
     }
 
     struct AudioCallbackRuntimeScope final
@@ -30807,13 +31039,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 #endif
 
-    // ★ [work63] シャットダウン要求: Audio Thread 自ら MMCSS を解除（診断ガード外＝常時有効）
-    //    Message Thread が mmcssShutdownRequested をセットすると、
-    //    次のコールバック終了時にこのスレッド上で AvRevertMmThreadCharacteristics を実行する。
-    if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
-    {
-        revertMmcssPriorityOnAudioThread();
-    }
+    // ★ [work70 v9.11] MMCSS shutdown: handled above via mmcssShutdownRequested flag.
+    //    If policy is SelfManaged*, revertMmcssOnAudioThread() was called above.
 
 }
 
@@ -33136,11 +33363,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
     diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 
-    // ★ [work62] MMCSS: prepareToPlay は Message Thread のため適用しない。
-    //    Audio スレッド（getNextAudioBlock 初回コール）で適用する。
-    // ★ [work64] デバイス再初期化後も正しく MMCSS を再適用するため、mmcssState_ をリセットする。
-    // ★ P8: MmcssState::NeverTried へのリセットにより、次回 Audio callback で CAS 再試行される。
-    convo::publishAtomic(mmcssState_, AudioEngine::MmcssState::NeverTried, std::memory_order_release);
+    // ★ [work70 v9.11] Unified MMCSS Layer: prepareToPlay は Message Thread のため
+    //    MMCSS 登録は行わない（Audio callback 初回で tryApplyMmcssForSelfManagedThread が実行）。
+    //    WASAPI: JUCE managed (JuceManaged) → nothing to do here.
+    //    ASIO/DS: Self-managed → callback で thread_local 登録。
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
@@ -33499,7 +33725,18 @@ void AudioEngine::releaseResources()
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
     runtimePublicationBridge_.requestShutdown();
 
-    // ★ [work63] シャットダウン完了処理（NativeRT 復元 + MMCSS 未解除時の安全網）
+    // ★ [work70 v9.11] MMCSS シャットダウン: フラグ経由で Audio Thread に委譲。
+    //    Message Thread はフラグのみセットし、実際の AvRevert は次回コールバックで実行される。
+    //    NativeRT モード（useMmcssPriority=false）の復元は finalizeMmcssShutdown() で行う。
+    {
+        const auto mmcssPolicy = getCurrentMmcssPolicy();
+        if (mmcssPolicy == MmcssPolicy::SelfManagedProAudio
+            || mmcssPolicy == MmcssPolicy::SelfManagedPlayback)
+        {
+            convo::publishAtomic(mmcssShutdownRequested, true, std::memory_order_release);
+        }
+        // JuceManaged / None → JUCE manages shutdown. NativeRT は finalizeMmcssShutdown で復元。
+    }
     finalizeMmcssShutdown();
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
@@ -34861,7 +35098,7 @@ void AudioEngine::rebuildThreadLoop()
                         // lookupDSPHandleForRuntime → isNull() を jassert で表明。
                         // 将来のコード変更で registerDSPHandleForRuntime の呼び出し位置が
                         // 変わった場合にこの表明が失敗し、開発者に知らせる。
-                        const auto diagHandle = owner->lookupDSPHandleForRuntime(ptr);
+                        [[maybe_unused]] const auto diagHandle = owner->lookupDSPHandleForRuntime(ptr);
                         jassert(diagHandle.isNull());
 #endif
                         if (!owner->retireDSPHandleForRuntime(ptr))
@@ -35963,10 +36200,8 @@ void AudioEngine::processDeferredReleases()
 #include <string>
 #include <mutex>
 
-// MMCSS: 常に必要（診断有効/無効の両ブランチで使用）
+// windows.h: SetThreadAffinityMask, SetPriorityClass, SetThreadPriority 用
 #include <windows.h>
-#include <avrt.h>
-#pragma comment(lib, "avrt.lib")
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 #include <psapi.h>
@@ -36168,49 +36403,26 @@ static_assert(static_cast<int>(DiagCategory::Count) == 10,
 
 } // anonymous namespace
 
-// ★ [work63] applyMmcssPriority — Audio スレッド優先度設定（初回コールバックで一度だけ）
-// ★ P8: 戻り値 true=成功, false=失敗。失敗時は mmcssState_ を Failed に戻す。
-//   CPU アフィニティ設定は常に実行する（優先度設定の成功/失敗に依存しない）。
-//   （CAS で NeverTried→Applied は optimistically 行われている前提）
+// ★ [work63] applyMmcssPriority — CPU affinity + NativeRT priority setting
+// ★ [work70 v9.11] Unified MMCSS Layer に移行。
+//   MMCSS 登録（W API）は AudioEngine.Mmcss.cpp の tryApplyMmcssForSelfManagedThread() が担当。
+//   本関数は以下に専念する：
+//   (1) CPU affinity (SetThreadAffinityMask) — 対称コア環境
+//   (2) NativeRT モード (SetPriorityClass + SetThreadPriority) — useMmcssPriority=false 時
 bool AudioEngine::applyMmcssPriority() noexcept
 {
-    bool priorityApplied = false;
+    // MMCSS モード（useMmcssPriority=true）:
+    //   MMCSS 登録は tryApplyMmcssForSelfManagedThread() (AudioEngine.Mmcss.cpp) で
+    //   初回コールバック時に1回だけ行われる。本関数では何もしない。
+    //
+    // NativeRT モード（useMmcssPriority=false）:
+    //   以下の SetPriorityClass + SetThreadPriority でネイティブRTに設定する。
 
-    if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
+    bool priorityApplied = true;
+
+    if (!convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
-        // ── MMCSS モード ──
-        DWORD taskIndex = 0;
-        HANDLE hTask = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
-        if (hTask != nullptr) {
-            AvSetMmThreadPriority(hTask, AVRT_PRIORITY_CRITICAL);
-            m_avrtHandle = hTask;
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            {
-                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
-                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
-                diagLog("[MMCSS] registered: taskIndex=" + juce::String(static_cast<int>(taskIndex))
-                    + " priority=AVRT_PRIORITY_CRITICAL"
-                    + " win32Prio=" + juce::String(win32Priority)
-                    + " procClass=" + juce::String(static_cast<int>(pc)));
-            }
-#endif
-            priorityApplied = true;
-        } else {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            {
-                const DWORD err = ::GetLastError();
-                diagLog("[MMCSS] FAILED: GetLastError=" + juce::String(static_cast<int>(err))
-                    + " taskIndex=" + juce::String(static_cast<int>(taskIndex)));
-            }
-#endif
-            // ★ P8: 失敗 → mmcssState_ を Failed に戻し、Timer retry を待つ
-            convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
-            // priorityApplied = false（初期値のまま）
-        }
-    }
-    else
-    {
-        // ── Native RT モード ──
+        // ── Native RT モード（変更なし）──
         {
             savedProcessPriorityClass = ::GetPriorityClass(::GetCurrentProcess());
             const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
@@ -36239,11 +36451,7 @@ bool AudioEngine::applyMmcssPriority() noexcept
             (void)tpResult;
 #endif
             if (!nativeRtOk) {
-                // ★ P8: NativeRT 失敗 → mmcssState_ を Failed に戻す
-                convo::publishAtomic(mmcssState_, MmcssState::Failed, std::memory_order_release);
-                // priorityApplied = false（初期値のまま）
-            } else {
-                priorityApplied = true;
+                priorityApplied = false;
             }
         }
     }
@@ -36281,17 +36489,16 @@ bool AudioEngine::applyMmcssPriority() noexcept
 }
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
+// ★ JUCE委譲（work70 v9.11決定）: MMCSS は JUCE が管理するため自前での解除は不要。
+//   NativeRT モード（useMmcssPriority=false）時のみ明示的な復元を行う。
 void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
 {
     if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
-        if (m_avrtHandle != nullptr) {
-            ::AvRevertMmThreadCharacteristics(m_avrtHandle);
-            m_avrtHandle = nullptr;
+        // MMCSS: JUCE がライフサイクルを管理。自前での AvRevert は不要。
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            diagLog("[MMCSS] reverted on Audio Thread (AvRevertMmThreadCharacteristics)");
+        diagLog("[MMCSS] revert: delegated to JUCE, no action needed");
 #endif
-        }
     }
     else
     {
@@ -36309,20 +36516,17 @@ void AudioEngine::revertMmcssPriorityOnAudioThread() noexcept
         (void)pcResult;
 #endif
     }
-    convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
 }
 
+
 // ★ [work63] finalizeMmcssShutdown — シャットダウン完了処理（安全網）
+// ★ JUCE委譲（work70 v9.11決定）: MMCSS は JUCE 管理。NativeRT のみ復元。
 void AudioEngine::finalizeMmcssShutdown() noexcept
 {
     if (convo::consumeAtomic(useMmcssPriority, std::memory_order_acquire))
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        if (m_avrtHandle != nullptr) {
-            diagLog("[MMCSS] WARNING: Audio Thread did not revert MMCSS (OS auto-cleanup)");
-        } else {
-            diagLog("[MMCSS] already reverted by Audio Thread. OK.");
-        }
+        diagLog("[MMCSS] shutdown: delegated to JUCE, no action needed");
 #endif
     }
     else
@@ -37424,16 +37628,7 @@ void AudioEngine::timerCallback()
         }
     }
 
-    // ★ P8: MMCSS 再試行トリガ — Failed 状態を NeverTried にリセット
-    //   次回 AudioBlock/BlockDouble の CAS(NeverTried→Applied) で再試行される。
-    //   Audio callback 内での AvSetMmThreadCharacteristics 試行は RT 性能に影響するため、
-    //   毎回の試行ではなく Timer によるリセット経由で制御する。
-    {
-        const auto state = convo::consumeAtomic(mmcssState_, std::memory_order_acquire);
-        if (state == MmcssState::Failed) {
-            convo::publishAtomic(mmcssState_, MmcssState::NeverTried, std::memory_order_release);
-        }
-    }
+
 
     // ★ [work62] flushLogBuffer — 非同期Loggerのリングバッファをファイルに書き出し
     flushLogBuffer();
@@ -40109,28 +40304,34 @@ public:
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
-    std::atomic<bool> useMmcssPriority { true }; // true=MMCSS, false=NativeRT
-    // ★ P8: MmcssState — 3値管理による再試行可能なMMCSS状態
-    //   NeverTried: 未試行（prepareToPlay直後またはTimerによるリセット後）
-    //   Applied:    適用成功（次のprepareToPlayまで固定）
-    //   Failed:     適用失敗（Timer callbackがNeverTriedにリセットし再試行を促す）
-    enum class MmcssState : uint8_t { NeverTried, Applied, Failed };
-    std::atomic<MmcssState> mmcssState_{MmcssState::NeverTried};
+    std::atomic<bool> useMmcssPriority { true }; // true=Unified MMCSS Layer, false=NativeRT
+    // ★ [work70 v9.11] Unified MMCSS Layer — Authority Singularization:
+    //   WASAPI(enum JuceManaged): JUCE manages → ConvoPeq does nothing.
+    //   ASIO (enum SelfManagedProAudio): Driver may or may not manage → Host recovers.
+    //   DirectSound(enum SelfManagedPlayback): Host manages → Playback/HIGH.
+    //   See AudioEngine.Mmcss.cpp for implementation.
+    enum class MmcssPolicy : uint8_t {
+        JuceManaged,           // WASAPI — JUCE has Authority
+        SelfManagedProAudio,   // ASIO — Driver has Authority, Host recovers
+        SelfManagedPlayback,   // DirectSound — Host manages
+        None                   // Unknown / other
+    };
 
-    // ★ [work63] Audio Thread 優先度管理: MMCSS HANDLE / 優先度クラス退避
-    //    m_avrtHandle: MMCSS AvRevertMmThreadCharacteristics用（Audio Threadのみアクセス）
-    //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
-    HANDLE m_avrtHandle = nullptr;
-    DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
+    // ★ [work70 v9.11] 現在のオーディオデバイスの種類名（例: "WASAPI", "ASIO", "DirectSound"）。
+    //    setAudioDeviceTypeName() 経由で Message Thread からのみ書き込む（通常セッション開始時に1度だけ）。
+    //    getCurrentMmcssPolicy() はこの値に基づき MmcssPolicy を返す。
+    void setAudioDeviceTypeName(const juce::String& type) noexcept { currentDeviceTypeName_ = type; }
+    [[nodiscard]] const juce::String& getAudioDeviceTypeName() const noexcept { return currentDeviceTypeName_; }
 
-    // ★ [work66-P1-4] シャットダウン要求フラグ — Message Thread → Audio Thread への通知
-    //   書込頻度はシャットダウン時のみのため false sharing 影響は極小。
-    //   alignas(64) は「将来ここだけ分離したい」意思表示として配置。
-#pragma warning(push)
-#pragma warning(disable : 4324) // C4324: alignas による意図的なパディングを許容
+    // ★ [work70 v9.11] MMCSS shutdown flag — Message Thread → Audio Thread notification.
+    //    Message Thread sets flag, Audio Thread performs actual AvRevert.
     alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
-#pragma warning(pop)
-    //    Audio Thread が終了間際のコールバックでこれを検知し、自スレッド上で AvRevert する。
+
+    // デバイス種類名キャッシュ（Message Thread からのみ書き込み、Audio Thread から読み取り）
+    juce::String currentDeviceTypeName_;
+
+    //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
+    DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
 
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -40211,12 +40412,20 @@ public:
     void createSnapshotFromCurrentState(uint64_t generation);
     void initWorkerThread();
 
-    // ★ [work62] MMCSS — Pro Audio 優先度設定
-    // ★ P8: 戻り値 true=成功, false=失敗（mmcssState_ も自動更新）
+    // ★ [work70 v9.11] Unified MMCSS Layer
+    //    - WASAPI: JUCE managed → getCurrentMmcssPolicy() returns JuceManaged
+    //    - ASIO:   Self-managed Pro Audio/CRITICAL → tryApplyMmcssForSelfManagedThread()
+    //    - DirectSound: Self-managed Playback/HIGH → tryApplyMmcssForSelfManagedThread()
+    //    All logging guarded by #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS.
+    [[nodiscard]] MmcssPolicy getCurrentMmcssPolicy() const noexcept;
+    [[nodiscard]] bool tryApplyMmcssForSelfManagedThread() noexcept;
+    void revertMmcssOnAudioThread() noexcept;
+    // ★ [work62/work70 v9.11] CPU affinity + NativeRT priority setting (always called once).
+    //    MMCSS registration is handled by tryApplyMmcssForSelfManagedThread() separately.
     bool applyMmcssPriority() noexcept;
-    // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）
+    // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）— legacy alias
     void revertMmcssPriorityOnAudioThread() noexcept;
-    // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）
+    // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias
     void finalizeMmcssShutdown() noexcept;
     void shutdownWorkerThread();
 
@@ -64754,11 +64963,11 @@ enum class ThreadType
     LightBackground,
     UI,
     AudioRealtime  // ★ [work64] 将来の拡張性のため。現在 AudioThread の affinity は
-                   //   applyMmcssPriority() 末尾で直接 SetThreadAffinityMask しているため、
+                   //   applyMmcssPriority() 内で直接 SetThreadAffinityMask しているため、
                    //   本 enum を applyCurrentThreadPolicy() で使うと二重適用になる。
                    //   二重適用自体は無害（同一マスクの再設定）だが、責務は
-                   //   applyMmcssPriority() (Timer.cpp) 側にあり、
-                   //   applyCurrentThreadPolicy は将来のリファクタリング用に用意。
+                   //   tryApplyMmcssForSelfManagedThread() → applyMmcssPriority() (Timer.cpp)
+                   //   側にあり、applyCurrentThreadPolicy は将来のリファクタリング用に用意。
                    // ★ v19: convo::numeric_policy::ThreadRole::AudioRealtime (DspNumericPolicy.h)
                    //   とは別概念。そちらはランタイムスレッド検出（assertion用）であり、
                    //   CPUアフィニティ管理とは無関係。名前空間が異なるため衝突なし。

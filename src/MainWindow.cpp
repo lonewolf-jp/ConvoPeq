@@ -1006,12 +1006,6 @@ MainWindow::~MainWindow()
     audioEngine.setCliProcessingTelemetryEnabled(false);
     cliAutomationTelemetryLoggingEnabled = false;
 
-    // ★ [work63] シャットダウン要求: Audio Thread に MMCSS 解除を指示
-    //    setProcessor(nullptr) 以降も数回コールバックが走るため、その間に Audio Thread が
-    //    AvRevertMmThreadCharacteristics を実行できる。removeAudioCallback までの間に
-    //    Audio Thread がフラグを検知できる十分な時間的余裕がある。
-    convo::publishAtomic(audioEngine.mmcssShutdownRequested, true, std::memory_order_release);
-
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 4 setProcessor(nullptr)");
     audioProcessorPlayer.setProcessor (nullptr);
     juce::Logger::writeToLog("[DIAG] ~MainWindow: step 5 stopTimer");

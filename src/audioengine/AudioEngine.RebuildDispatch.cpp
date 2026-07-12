@@ -779,7 +779,7 @@ void AudioEngine::rebuildThreadLoop()
                         // lookupDSPHandleForRuntime → isNull() を jassert で表明。
                         // 将来のコード変更で registerDSPHandleForRuntime の呼び出し位置が
                         // 変わった場合にこの表明が失敗し、開発者に知らせる。
-                        const auto diagHandle = owner->lookupDSPHandleForRuntime(ptr);
+                        [[maybe_unused]] const auto diagHandle = owner->lookupDSPHandleForRuntime(ptr);
                         jassert(diagHandle.isNull());
 #endif
                         if (!owner->retireDSPHandleForRuntime(ptr))
