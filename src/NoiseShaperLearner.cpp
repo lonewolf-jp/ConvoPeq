@@ -601,23 +601,11 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
         return;
 
     auto& context = evaluationWorkers[static_cast<size_t>(workerIndex)].context;
-    alignas(64) double mappedPopulation[CmaEsOptimizer::kPopulation][CmaEsOptimizer::kDim] = {};
 
-    {
-        constexpr int totalCoeffs = CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim;
-        alignas(64) double tanhBuffer[totalCoeffs] = {};
-        const auto* population = candidatePopulationMatrix();
-        vdTanh(totalCoeffs,
-               reinterpret_cast<const double*>(population),
-               tanhBuffer);
-
-        const double safetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
-        for (int p = 0; p < CmaEsOptimizer::kPopulation; ++p)
-            for (int d = 0; d < CmaEsOptimizer::kDim; ++d)
-                mappedPopulation[p][d] = LatticeNoiseShaper::clampCoeff(
-                    tanhBuffer[p * CmaEsOptimizer::kDim + d],
-                    safetyMargin);
-    }
+    // ★ B03: sharedMappedPopulation は evaluatePopulation() が Generation ごとに1回計算済み
+    //    Worker はここで再計算せず、共有バッファを読み取り専用で使用する。
+    const double(*mappedPopulation)[CmaEsOptimizer::kDim] =
+        reinterpret_cast<double(*)[CmaEsOptimizer::kDim]>(sharedMappedPopulation.get());
 
     while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire)
         && (stopToken == nullptr || !stopToken->stop_requested()))
@@ -646,6 +634,28 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
         return 0;
 
     convo::publishAtomic(nextEvaluationCandidateIndex, 0, std::memory_order_release);
+
+    // ★ B03: Generation 開始時に vdTanh を1回だけ計算し、全 Worker で共有
+    //    sharedMappedPopulation は evaluatePopulation 終了時まで有効。
+    {
+        constexpr int totalCoeffs = CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim;
+        const size_t requiredSize = static_cast<size_t>(totalCoeffs);
+        if (!sharedMappedPopulation)
+        {
+            auto newBuf = convo::makeAlignedArray<double>(requiredSize);
+            sharedMappedPopulation = std::move(newBuf);
+        }
+
+        alignas(64) double tanhBuffer[totalCoeffs] = {};
+        const auto* population = candidatePopulationMatrix();
+        vdTanh(totalCoeffs,
+               reinterpret_cast<const double*>(population),
+               tanhBuffer);
+
+        const double safetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
+        for (int i = 0; i < totalCoeffs; ++i)
+            sharedMappedPopulation[i] = LatticeNoiseShaper::clampCoeff(tanhBuffer[i], safetyMargin);
+    }
 
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);

@@ -229,10 +229,26 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     if (inputLevelLinear != nullptr)
         convo::publishAtomic(*inputLevelLinear, rawInputLinear, std::memory_order_release);
 
+    // ★ B01: Float bypass blend — Double 版と同一パターン
+    const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
+    auto& ramp = ramps();
+    if (requestedFullBypass != ramp.bypassedFloat)
+    {
+        ramp.bypassFadeGainFloat.setTargetValue(requestedFullBypass ? 0.0f : 1.0f);
+        ramp.bypassedFloat = requestedFullBypass;
+    }
+
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
+
+    // ★ B01: Float 版 dry 信号保存 (Double 版と同じ dryBypassBufferDouble を使用)
+    if (dryBypassBufferDoubleL && dryBypassBufferDoubleR && dryBypassCapacityDouble >= numSamples)
+    {
+        juce::FloatVectorOperations::copy(dryBypassBufferDoubleL.get(), alignedL.get(), numSamples);
+        juce::FloatVectorOperations::copy(dryBypassBufferDoubleR.get(), alignedR.get(), numSamples);
+    }
 
     if (oversamplingFactor > 1)
     {
@@ -382,6 +398,51 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         processBlock = originalBlock;
     }
 
+    // ★ B01: Float 版 bypass blend (Double 版と同じ dryBypassBufferDouble を使用)
+    {
+        const bool bypassBlendRequested = ramp.bypassFadeGainFloat.isSmoothing() || requestedFullBypass;
+        if (oversamplingFactor == 1
+            && dryBypassBufferDoubleL
+            && dryBypassBufferDoubleR
+            && dryBypassCapacityDouble >= numSamples
+            && bypassBlendRequested)
+        {
+            double* wetL = (numProcChannels > 0) ? processBlock.getChannelPointer(0) : nullptr;
+            double* wetR = (numProcChannels > 1) ? processBlock.getChannelPointer(1) : nullptr;
+            const double* dryL = dryBypassBufferDoubleL.get();
+            const double* dryR = dryBypassBufferDoubleR.get();
+            for (int i = 0; i < numProcSamples; ++i)
+            {
+                const double gWet = ramp.bypassFadeGainFloat.getNextValue();
+                const double gDry = 1.0 - gWet;
+                if (wetL != nullptr)
+                    wetL[i] = wetL[i] * gWet + dryL[i] * gDry;
+                if (wetR != nullptr)
+                    wetR[i] = wetR[i] * gWet + dryR[i] * gDry;
+            }
+        }
+
+        if (oversamplingFactor > 1 && bypassBlendRequested)
+        {
+            double* wetL = processBlock.getNumChannels() > 0 ? processBlock.getChannelPointer(0) : nullptr;
+            double* wetR = processBlock.getNumChannels() > 1 ? processBlock.getChannelPointer(1) : nullptr;
+            const double* dryL = dryBypassBufferDoubleL ? dryBypassBufferDoubleL.get() : nullptr;
+            const double* dryR = dryBypassBufferDoubleR ? dryBypassBufferDoubleR.get() : nullptr;
+            const bool canUseDry = (dryL != nullptr)
+                && (dryR != nullptr)
+                && (dryBypassCapacityDouble >= numSamples);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double gWet = ramp.bypassFadeGainFloat.getNextValue();
+                const double gDry = 1.0 - gWet;
+                if (wetL != nullptr)
+                    wetL[i] = canUseDry ? (wetL[i] * gWet + dryL[i] * gDry) : (wetL[i] * gWet);
+                if (wetR != nullptr)
+                    wetR[i] = canUseDry ? (wetR[i] * gWet + dryR[i] * gDry) : (wetR[i] * gWet);
+            }
+        }
+    }
+
     if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
         pushToFifo(processBlock, analyzerFifo);
 
@@ -391,7 +452,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 
     processOutput(bufferToFill, numSamples, state);
 
-    auto& ramp = ramps();
     int fadeLeft = ramp.fadeInSamplesLeft;
     if (fadeLeft > 0)
     {

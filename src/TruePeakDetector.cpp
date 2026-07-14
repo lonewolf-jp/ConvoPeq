@@ -23,7 +23,17 @@ void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
 {
     convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
 
-    const int upBufferSize = maxBlockSize * kOversamplingRatio;
+    // ★ レイアウト [Stage0L | Stage0R | Stage1L | Stage1R] = 2N+2N+4N+4N = 12N
+    //    constexpr 導出: Stage0Channels(2)*UpsampleFactor1(2) + Stage1Channels(2)*UpsampleFactor2(4) = 12
+    constexpr int kStage0Channels = 2;
+    constexpr int kStage1Channels = 2;
+    constexpr int kUpsampleFactor1 = 2;
+    constexpr int kUpsampleFactor2 = 4;
+    constexpr int kWorkBufferMultiplier =
+        kStage0Channels * kUpsampleFactor1 +
+        kStage1Channels * kUpsampleFactor2;
+
+    const int upBufferSize = maxBlockSize * kWorkBufferMultiplier;
     if (upBufferSize > bufferCapacity || !upsampleBuffer)
     {
         upsampleBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(upBufferSize));
@@ -34,12 +44,11 @@ void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
     int stageInputMax = maxBlockSize;
     for (int i = 0; i < 2; ++i)
     {
-        // stage 0 は taps そのまま、stage 1 は taps/2 程度で十分
         const int stageTaps = (i == 0) ? taps : std::max(15, taps / 2);
         prepareStage(stages[i], stageTaps, kDefaultAttenuationDb, stageInputMax);
         stageInputMax *= 2;
     }
-    upsampledCapacity = maxBlockSize * kOversamplingRatio;
+    upsampledCapacity = maxBlockSize * kWorkBufferMultiplier;
     reset();
 }
 
@@ -56,47 +65,67 @@ void TruePeakDetector::reset() noexcept
     }
 }
 
+// ★ scanPeak: |buf[i]| の最大値を求めるヘルパー (匿名名前空間、static linkage)
+//    RT 初回初期化 (guard variable) を避けるため static local は使用しない。
+namespace {
+
+double scanPeak(const double* buf, int n) noexcept
+{
+    double peak = 0.0;
+#if defined(__AVX2__)
+    // ローカル変数 _mm256_set1_pd は 1 命令 (vsetpd) で実質ゼロコスト
+    const __m256d signMask = _mm256_set1_pd(-0.0);
+    __m256d vPeak = _mm256_setzero_pd();
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        __m256d v = _mm256_andnot_pd(signMask, _mm256_loadu_pd(buf + i));
+        vPeak = _mm256_max_pd(vPeak, v);
+    }
+    alignas(32) double tmp[4];
+    _mm256_store_pd(tmp, vPeak);
+    for (int j = 0; j < 4; ++j) if (tmp[j] > peak) peak = tmp[j];
+    for (; i < n; ++i) { double v = std::abs(buf[i]); if (v > peak) peak = v; }
+#else
+    for (int i = 0; i < n; ++i) { double v = std::abs(buf[i]); if (v > peak) peak = v; }
+#endif
+    return peak;
+}
+
+} // anonymous namespace
+
 double TruePeakDetector::processBlock(const double* dataL, const double* dataR, int numSamples) noexcept
 {
     if (numSamples <= 0 || !upsampleBuffer)
         return 0.0;
 
-    // 2段アップサンプル: ベースレート → 2x → 4x
-    // Stage 0: 1x → 2x (L)
     double* work = upsampleBuffer.get();
-    interpolateStage(stages[0], dataL, numSamples, work, 0);
     const int up1Samples = numSamples * 2;
+    const int up2Samples = numSamples * 4;
 
-    // Stage 0: 1x → 2x (R)
+    // オフセット: work 領域のレイアウト
+    //   [ Stage0 L | Stage0 R | Stage1 L | Stage1 R ]
+    //   Stage0 は zero-offset、それ以外は up1Samples/up2Samples に依存する runtime 値
+    constexpr int kStage0LOffset = 0;
+    const int   kStage0ROffset = up1Samples;
+    const int   kStage1LOffset = up1Samples * 2;
+    const int   kStage1ROffset = up1Samples * 2 + up2Samples;
+
+    // Stage 0: 1x -> 2x (L)
+    interpolateStage(stages[0], dataL, numSamples, work + kStage0LOffset, 0);
+    // Stage 0: 1x -> 2x (R)
     if (dataR != nullptr)
-        interpolateStage(stages[0], dataR, numSamples, work + up1Samples, 1);
+        interpolateStage(stages[0], dataR, numSamples, work + kStage0ROffset, 1);
     else
-        interpolateStage(stages[0], dataL, numSamples, work + up1Samples, 1);
+        interpolateStage(stages[0], dataL, numSamples, work + kStage0ROffset, 1);
 
-    // Stage 1: 2x → 4x (L/Rはworkにインターリーブ)
-    interpolateStage(stages[1], work, up1Samples, work + up1Samples * 2, 0);
-    const int up2Samples = up1Samples * 2;
+    // Stage 1: 2x -> 4x (L + R)
+    interpolateStage(stages[1], work + kStage0LOffset, up1Samples, work + kStage1LOffset, 0);  // L
+    interpolateStage(stages[1], work + kStage0ROffset, up1Samples, work + kStage1ROffset, 1);  // R
 
-    // 4x領域での最大絶対値検出
-    double peak = 0.0;
-    const int vEnd = up2Samples / 4 * 4;
-    for (int i = 0; i < vEnd; i += 4)
-    {
-        __m256d v = _mm256_loadu_pd(work + up1Samples * 2 + i);
-        __m256d absV = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
-        __m128d lo = _mm256_castpd256_pd128(absV);
-        __m128d hi = _mm256_extractf128_pd(absV, 1);
-        __m128d max01 = _mm_max_pd(lo, hi);
-        __m128d max0 = _mm_max_sd(max01, _mm_unpackhi_pd(max01, max01));
-        double m;
-        _mm_store_sd(&m, max0);
-        if (m > peak) peak = m;
-    }
-    for (int i = vEnd; i < up2Samples; ++i)
-    {
-        const double v = std::abs(work[up1Samples * 2 + i]);
-        if (v > peak) peak = v;
-    }
+    // Peak scan: L/R 別領域で独立実行
+    double peakL = scanPeak(work + kStage1LOffset, up2Samples);
+    double peakR = scanPeak(work + kStage1ROffset, up2Samples);
+    double peak = std::max(peakL, peakR);
 
     // ピークホールド（指数平滑）
     if (peak > peakHold)

@@ -281,6 +281,9 @@ private:
     convo::ScopedAlignedPtr<double> candidatePopulation;
     convo::ScopedAlignedPtr<double> candidateFitness;
 
+    // ★ B03: Generation 単位で共有する vdTanh 結果 (64バイトアライメント)
+    convo::ScopedAlignedPtr<double> sharedMappedPopulation;
+
     std::array<LeveledSegment, kMaxSegmentsPerLevel> levelBuckets[kNumLevels] = {};
     int levelBucketCounts[kNumLevels] = {};
 

@@ -3,17 +3,16 @@
 #include <bit>
 #include <cstdint>
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 // 局所 diagLog — 全ファイル統一パターン。
-// CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 時のみ出力、OFF 時は no-op。
 static void diagLog(const juce::String& message)
 {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     DBG(message);
     juce::Logger::writeToLog(message);
-#else
-    juce::ignoreUnused(message);
-#endif
 }
+#endif
+
+
 
 
 
@@ -209,7 +208,10 @@ RuntimeBuilder::buildRuntimePublishWorld(
         const_cast<AudioEngine::DSPCore*>(next),
         policy, fadeTimeSec, active,
         spec.currentRuntimeWorld);
+#pragma warning(push)
+#pragma warning(disable : 4996)
     engineState.revision = nextGraphGeneration;
+#pragma warning(pop)
     auto graphState = engine.makeRuntimeGraphState(engineState);
 
     auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
@@ -342,7 +344,7 @@ RuntimeBuilder::buildRuntimePublishWorld(
     // Coefficient fields
     const int bankIndex = spec.adaptive.coeffBankIndex;
     worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
-    worldOwner->coefficient.adaptiveCoeffGeneration = spec.adaptive.coeffGeneration;
+    worldOwner->coefficient.adaptiveCoeffGeneration = static_cast<uint32_t>(spec.adaptive.coeffGeneration);
     worldOwner->coefficient.eqCoeffHash = 0;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;

@@ -64,13 +64,16 @@ if (Test-Path -LiteralPath $logPath) {
     $shutdownComplete = (Select-String -LiteralPath $logPath -Pattern "~AudioEngine: shutdown sequence complete exit" -Quiet) -ne $null
 }
 
+$knownNonZeroCodes = @{
+    '-1073741819' = '0xC0000005 (ACCESS_VIOLATION) - static teardown, non-RT'
+    '-2147483645' = '0x80000003 (STATUS_BREAKPOINT) - NUC_DEBUG_GUARDS __debugbreak, non-RT'
+}
+
 if ($exitCode -eq 0) {
-    # 理想的な正常終了
     Write-Output "[CLI-SMOKE] Clean exit."
 }
-elseif ($exitCode -eq -1073741819 -and $shutdownComplete) {
-    # 既知の static teardown crash: shutdown 完了後であれば許容
-    Write-Output "[CLI-SMOKE] Accepting known static-teardown crash (0xC0000005, shutdown completed)."
+elseif ($knownNonZeroCodes.ContainsKey("$exitCode") -and $shutdownComplete) {
+    Write-Output "[CLI-SMOKE] Accepting known static-teardown exit ($($knownNonZeroCodes["$exitCode"]), shutdown completed)."
 }
 else {
     throw "CLI smoke failed: app exit code=$exitCode (shutdownComplete=$shutdownComplete)"

@@ -1575,7 +1575,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
             highIntent.dspSlot = event.slot;
             highIntent.generation = event.readerEpoch;
             highIntent.retireEpoch = m_retireRouter->currentEpoch();
-            highIntent.isValid = true;
+            // isValid 廃止 (B14: dspSlot!=UINT32_MAX で有効識別)
             highIntent.priority = convo::isr::RetirePriority::High;
             retireRuntime_.emitRetireIntent(highIntent);
             diagLog("[PHASE5] High priority retire emitted for slot="

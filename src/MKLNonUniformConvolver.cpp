@@ -36,8 +36,15 @@
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
-#include "audioengine/AudioEngine.h" // absNoLibm, isFiniteNoLibm
+#include "AtomicAccess.h"  // convo::consumeAtomic
 
+// absNoLibm — 標準ライブラリ abs を経由せずビット操作で |x| を求める (RT-safe)
+inline double absNoLibm(double x) noexcept
+{
+    auto bits = std::bit_cast<std::uint64_t>(x);
+    bits &= 0x7FFFFFFFFFFFFFFFULL;
+    return std::bit_cast<double>(bits);
+}
 #include <mkl.h>        // mkl_malloc, mkl_free, mkl_set_num_threads
 #include <mkl_vml.h>    // vdMul
 #include <mkl_cblas.h>  // cblas_dscal
@@ -356,7 +363,13 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     if (accumImag)     { mkl_free(accumImag);      accumImag     = nullptr; }
     if (inputAccBuf)   { mkl_free(inputAccBuf);    inputAccBuf   = nullptr; }
     if (tailOutputBuf) { mkl_free(tailOutputBuf);  tailOutputBuf = nullptr; }
+    if (delayLineBuf)  { mkl_free(delayLineBuf);   delayLineBuf  = nullptr; }
 #endif
+
+    outputDelaySamples = 0;
+    delayLineCapacity  = 0;
+    delayWriteCursor   = 0;
+    delayReadCursor    = 0;
 
     fftSize = partSize = numParts = numPartsIR = 0;
     fdlMask = complexSize = partStride = 0;
@@ -734,6 +747,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     m_tailEnabled = tailEnabled;
     m_tailStrength = tailEnabled ? tailStrength : 0.0;
+    m_maxBlockSize = blockSize;
     m_tailLayerGain[0] = 1.0;
     m_tailLayerGain[1] = layer1Gain;
     m_tailLayerGain[2] = layer2Gain;
@@ -813,6 +827,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     };
 
     m_numActiveLayers = 0;
+
+    // ────────────────────────────────────────────────
+    // 各レイヤーの遅延補償用エントリを保持
+    int prevLayerTotalSamples = 0;  // ★ B13: 先行レイヤーの IR 総長
 
     // ────────────────────────────────────────────────
     // 各レイヤーを初期化
@@ -1080,8 +1098,26 @@ l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);
         l.tailOutputPos  = 0;
         l.baseFdlIdxSaved = 0;
         l.distributing   = false;
+        l.outputDelaySamples = 0;
+
+        // ★ B13: 遅延補償リングバッファ設定 (L1/L2)
+        if (prevLayerTotalSamples > 0) {
+            l.outputDelaySamples = prevLayerTotalSamples;
+            l.delayLineCapacity = ((prevLayerTotalSamples + l.partSize + m_maxBlockSize + 15) / 16) * 16;
+            l.delayLineBuf = static_cast<double*>(
+                mkl_malloc(static_cast<size_t>(l.delayLineCapacity) * sizeof(double), 64));
+            if (l.delayLineBuf == nullptr) {
+                releaseAllLayers();
+                return false;
+            }
+            juce::FloatVectorOperations::clear(l.delayLineBuf, l.delayLineCapacity);
+            jassert(l.outputDelaySamples > 0);
+        }
 
         ++m_numActiveLayers;
+
+        // ★ B13: 先行レイヤーの IR 総長を累積 (次レイヤーの outputDelaySamples 用)
+        prevLayerTotalSamples += cfgs[li].len;
     }
 
     if (m_numActiveLayers == 0)
@@ -1589,6 +1625,10 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, l.partSize * sizeof(double));
                 l.tailOutputPos = 0;
 
+                // ★ B13: 遅延補償リングバッファに書き込み
+                if (l.delayLineBuf != nullptr)
+                    delayLineWrite(l, l.tailOutputBuf, l.partSize);
+
                 l.distributing = false;
                 l.nextPart     = 0;
             }
@@ -1664,30 +1704,76 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         }
     }
 
-    // ── L1/L2 出力 ──
+    // ── L1/L2 出力 (B13: 遅延補償リングバッファ経由) ──
     for (int li = 1; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
-        if (l.tailOutputBuf == nullptr) continue;
-
-        const int remaining = l.partSize - l.tailOutputPos;
-        if (remaining <= 0) continue;
-
-        const int toAdd = std::min(numSamples, remaining);
+        if (l.delayLineBuf == nullptr) continue;
 
         if (output != nullptr)
         {
-            const double* tailPtr = l.tailOutputBuf + l.tailOutputPos;
             const double layerGain = m_tailEnabled
                 ? m_tailLayerGain[juce::jlimit(0, kNumLayers - 1, li)]
                 : 0.0;
-            addScaledFallback(toAdd, output, tailPtr, layerGain);
+            delayLineReadAdd(l, output, numSamples, layerGain);
         }
-
-        l.tailOutputPos += toAdd;
     }
 
     return got;
+}
+
+//==============================================================================
+// ★ B13: delayLineWrite — 遅延補償リングバッファ書き込み (Add / IFFT完了時)
+//==============================================================================
+void MKLNonUniformConvolver::delayLineWrite(Layer& l, const double* src, int n) noexcept
+{
+    const size_t writeOffset = static_cast<size_t>(l.delayWriteCursor % static_cast<uint64_t>(l.delayLineCapacity));
+    const int remain = l.delayLineCapacity - static_cast<int>(writeOffset);
+    const int first = std::min(n, remain);
+    juce::FloatVectorOperations::copy(l.delayLineBuf + writeOffset, src, first);
+    if (first < n)
+        juce::FloatVectorOperations::copy(l.delayLineBuf, src + first, n - first);
+    l.delayWriteCursor += static_cast<uint64_t>(n);
+}
+
+//==============================================================================
+// ★ B13: delayLineReadAdd — 遅延補償リングバッファ読み出し + 加算 (Get)
+//==============================================================================
+void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamples, double gain) noexcept
+{
+    if (l.delayLineBuf == nullptr || l.delayLineCapacity <= 0 || dst == nullptr)
+        return;
+
+    // ★ readCursor = max(readCursor, writeCursor - outputDelaySamples)
+    const uint64_t maxRead = (l.delayWriteCursor >= static_cast<uint64_t>(l.outputDelaySamples))
+        ? (l.delayWriteCursor - static_cast<uint64_t>(l.outputDelaySamples))
+        : 0;
+    const uint64_t actualReadStart = std::max(l.delayReadCursor, maxRead);
+
+    // ★ Writer がまだ outputDelaySamples 分先に進んでいない → スキップ
+    if (actualReadStart + static_cast<uint64_t>(numSamples) > l.delayWriteCursor)
+        return;
+
+    // ★ リングバッファ読み出し
+    const size_t readOffset = static_cast<size_t>(actualReadStart % static_cast<uint64_t>(l.delayLineCapacity));
+    const int first = std::min(numSamples, l.delayLineCapacity - static_cast<int>(readOffset));
+    if (first > 0) {
+        const double* src = l.delayLineBuf + readOffset;
+        if (std::abs(gain - 1.0) < 1.0e-12)
+            for (int i = 0; i < first; ++i) dst[i] += src[i];
+        else
+            for (int i = 0; i < first; ++i) dst[i] += src[i] * gain;
+    }
+    if (first < numSamples) {
+        const double* src = l.delayLineBuf;
+        const int second = numSamples - first;
+        if (std::abs(gain - 1.0) < 1.0e-12)
+            for (int i = 0; i < second; ++i) dst[first + i] += src[i];
+        else
+            for (int i = 0; i < second; ++i) dst[first + i] += src[i] * gain;
+    }
+
+    l.delayReadCursor = actualReadStart + static_cast<uint64_t>(numSamples);
 }
 
 //==============================================================================
@@ -1724,6 +1810,9 @@ void MKLNonUniformConvolver::Reset()
         l.tailOutputPos   = 0;
         l.baseFdlIdxSaved = 0;
         l.distributing    = false;
+
+        // ★ B13: 遅延補償リセット (状態のみ、構成情報は保持)
+        l.resetDelayAlignment();
     }
 
     if (m_ringBuf)

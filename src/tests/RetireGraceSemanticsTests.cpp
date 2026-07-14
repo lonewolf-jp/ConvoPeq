@@ -27,32 +27,32 @@
 
     // 1. Critical > Normal (priority降順)
     {
-        const RetireIntent critical{1, 100, 1000, true, RetirePriority::Critical};
-        const RetireIntent normal{2, 100, 1000, true, RetirePriority::Normal};
+        const RetireIntent critical{1, 100, 1000, RetirePriority::Critical};
+        const RetireIntent normal{2, 100, 1000, RetirePriority::Normal};
         if (!sorter(critical, normal) || sorter(normal, critical))
             return false;
     }
 
     // 2. 同priority内: 古いepochが先（FIFO）
     {
-        const RetireIntent older{1, 100, 500, true, RetirePriority::Normal};
-        const RetireIntent newer{2, 100, 1000, true, RetirePriority::Normal};
+        const RetireIntent older{1, 100, 500, RetirePriority::Normal};
+        const RetireIntent newer{2, 100, 1000, RetirePriority::Normal};
         if (!sorter(older, newer) || sorter(newer, older))
             return false;
     }
 
     // 3. 同priority+epoch: 低いgenerationが先
     {
-        const RetireIntent early{1, 50, 1000, true, RetirePriority::Normal};
-        const RetireIntent late{2, 100, 1000, true, RetirePriority::Normal};
+        const RetireIntent early{1, 50, 1000, RetirePriority::Normal};
+        const RetireIntent late{2, 100, 1000, RetirePriority::Normal};
         if (!sorter(early, late) || sorter(late, early))
             return false;
     }
 
     // 4. 同priority+epoch+generation: 低いdspSlotが先
     {
-        const RetireIntent first{1, 100, 1000, true, RetirePriority::Normal};
-        const RetireIntent second{2, 100, 1000, true, RetirePriority::Normal};
+        const RetireIntent first{1, 100, 1000, RetirePriority::Normal};
+        const RetireIntent second{2, 100, 1000, RetirePriority::Normal};
         if (!sorter(first, second) || sorter(second, first))
             return false;
     }
@@ -60,10 +60,10 @@
     // 5. 完全ソート: Critical > High > Normal > Low
     {
         std::vector<RetireIntent> intents = {
-            {3, 100, 1000, true, RetirePriority::Low},
-            {1, 100, 1000, true, RetirePriority::Critical},
-            {4, 100, 1000, true, RetirePriority::High},
-            {2, 100, 1000, true, RetirePriority::Normal},
+            {3, 100, 1000, RetirePriority::Low},
+            {1, 100, 1000, RetirePriority::Critical},
+            {4, 100, 1000, RetirePriority::High},
+            {2, 100, 1000, RetirePriority::Normal},
         };
         std::stable_sort(intents.begin(), intents.end(), sorter);
         if (intents[0].dspSlot != 1 || intents[0].priority != RetirePriority::Critical)
@@ -199,9 +199,9 @@
 
     RetireOverflowRing ring;
 
-    RetireOverflowEntry e1{{1, 100, 1000, true, RetirePriority::Normal}, 100, 0};
-    RetireOverflowEntry e2{{2, 200, 2000, true, RetirePriority::Normal}, 200, 0};
-    RetireOverflowEntry e3{{3, 300, 3000, true, RetirePriority::Normal}, 300, 0};
+    RetireOverflowEntry e1{{1, 100, 1000, RetirePriority::Normal}, 100, 0};
+    RetireOverflowEntry e2{{2, 200, 2000, RetirePriority::Normal}, 200, 0};
+    RetireOverflowEntry e3{{3, 300, 3000, RetirePriority::Normal}, 300, 0};
 
     if (!ring.tryPush(e1)) return false;
     if (!ring.tryPush(e2)) return false;
@@ -241,10 +241,10 @@
     // Critical vs High vs Normal vs Low (same epoch)
     {
         std::vector<RetireIntent> intents = {
-            {1, 100, 1000, true, RetirePriority::Low},
-            {2, 100, 1000, true, RetirePriority::High},
-            {3, 100, 1000, true, RetirePriority::Critical},
-            {4, 100, 1000, true, RetirePriority::Normal},
+            {1, 100, 1000, RetirePriority::Low},
+            {2, 100, 1000, RetirePriority::High},
+            {3, 100, 1000, RetirePriority::Critical},
+            {4, 100, 1000, RetirePriority::Normal},
         };
         std::stable_sort(intents.begin(), intents.end(), sorter);
         if (intents[0].priority != RetirePriority::Critical) return false;
@@ -256,8 +256,8 @@
     // Cross-priority with mixed epochs
     {
         std::vector<RetireIntent> intents = {
-            {1, 100, 1000, true, RetirePriority::High},
-            {2, 100, 3000, true, RetirePriority::Critical},
+            {1, 100, 1000, RetirePriority::High},
+            {2, 100, 3000, RetirePriority::Critical},
         };
         std::stable_sort(intents.begin(), intents.end(), sorter);
         if (intents[0].priority != RetirePriority::Critical) return false;
@@ -275,14 +275,14 @@
 
     // デフォルト priority が Normal であることを確認
     {
-        const RetireIntent intent{1, 100, 1000, true};
+        const RetireIntent intent{1, 100, 1000};
         if (intent.priority != RetirePriority::Normal)
             return false;
     }
 
     // 明示的に Normal を設定
     {
-        const RetireIntent intent{1, 100, 1000, true, RetirePriority::Normal};
+        const RetireIntent intent{1, 100, 1000, RetirePriority::Normal};
         if (intent.priority != RetirePriority::Normal)
             return false;
     }
@@ -295,9 +295,9 @@
         };
 
         std::vector<RetireIntent> intents = {
-            {1, 100, 3000, true},                       // デフォルト Normal
-            {2, 100, 1000, true, RetirePriority::High},
-            {3, 100, 2000, true, RetirePriority::Normal},
+            {1, 100, 3000},                       // デフォルト Normal
+            {2, 100, 1000, RetirePriority::High},
+            {3, 100, 2000, RetirePriority::Normal},
         };
         std::stable_sort(intents.begin(), intents.end(), sorter);
         // High > Normal(2) > Normal(1, default)

@@ -1,10 +1,12 @@
 {
   "schema": "hb_trace_v1",
-  "eventCount": 4,
+  "eventCount": 6,
   "events": [
-    {"ts": 5151003686800, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
-    {"ts": 5151193305400, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
-    {"ts": 5151198325800, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
-    {"ts": 5151604971900, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false}
+    {"ts": 22044684590300, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 22044791934000, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
+    {"ts": 22044796086300, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 22045228179400, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
+    {"ts": 22045232923800, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 22045440751000, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":5152223561800}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":22045807647100}

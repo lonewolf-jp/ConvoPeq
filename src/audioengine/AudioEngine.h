@@ -553,6 +553,9 @@ namespace convo::isr {
 //============================================================================
 
 
+// ★ C4324 suppression: alignas(64) メンバによる意図的なパディングの警告を抑制
+#pragma warning(push)
+#pragma warning(disable : 4324)
 class AudioEngine : public juce::AudioSource,
                                      public juce::ChangeBroadcaster,
                                      private juce::ChangeListener,
@@ -715,12 +718,19 @@ public:
             int fadeInSamplesLeft = 0;
             convo::LinearRamp bypassFadeGainDouble;
             bool bypassedDouble = false;
+            // ★ B01: Float 版 bypass blend 用メンバ (Double 版と同一構造)
+            convo::LinearRamp bypassFadeGainFloat;
+            bool bypassedFloat = false;
 
             void prepare(double sampleRate) noexcept
             {
                 bypassFadeGainDouble.reset(sampleRate, 0.005);
                 bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
                 bypassedDouble = false;
+                // ★ B01: Float 版も同じフェード時間で初期化
+                bypassFadeGainFloat.reset(sampleRate, 0.005);
+                bypassFadeGainFloat.setCurrentAndTargetValue(1.0);
+                bypassedFloat = false;
                 fadeInSamplesLeft = 0;
             }
 
@@ -728,6 +738,9 @@ public:
             {
                 bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
                 bypassedDouble = false;
+                // ★ B01: Float 版もリセット
+                bypassFadeGainFloat.setCurrentAndTargetValue(1.0);
+                bypassedFloat = false;
                 fadeInSamplesLeft = 0;
             }
         };
@@ -1890,10 +1903,20 @@ private:
             ~CacheMap()
             {
                 jassert(owner != nullptr);
-                for (auto& entry : map)
-                {
-                    if (entry.second != nullptr)
-                        entry.second->release(*owner->m_retireRouter);
+                // ★ B08: Shutdown 時は EBR を迂回し即時 delete (m_retireRouter は既に破棄されている)
+                //    通常運用時 (キャッシュ世代交代) は従来通り EBR 経由
+                if (convo::consumeAtomic(owner->shutdownPhase, std::memory_order_acquire) >= AudioEngine::ShutdownPhase::Destroy) {
+                    for (auto& entry : map)
+                    {
+                        if (entry.second != nullptr)
+                            entry.second->release(RetirePolicy::Immediate);
+                    }
+                } else {
+                    for (auto& entry : map)
+                    {
+                        if (entry.second != nullptr)
+                            entry.second->release(*owner->m_retireRouter);
+                    }
                 }
             }
 
@@ -4291,6 +4314,7 @@ public:
 
 };
 
+#pragma warning(pop) // C4324 suppression end
 #pragma warning(pop) // EngineRuntime deprecation — transitional
 
 inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noexcept

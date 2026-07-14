@@ -272,6 +272,7 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     applyDefaultsForCurrentMode();
+    sendChangeMessage();
 }
 
 void AudioEngine::setConvolverInputTrimDb(float db)

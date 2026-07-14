@@ -31,9 +31,9 @@ using convo::isr::RetireRuntime;
     RetireRuntime runtime;
 
     // 3つのIntentを投入（すべて Normal 優先度）
-    runtime.emitRetireIntent({1, 100, 1000, true, RetirePriority::Normal});
-    runtime.emitRetireIntent({2, 200, 2000, true, RetirePriority::Normal});
-    runtime.emitRetireIntent({3, 300, 3000, true, RetirePriority::Normal});
+    runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Normal});
+    runtime.emitRetireIntent({2, 200, 2000, RetirePriority::Normal});
+    runtime.emitRetireIntent({3, 300, 3000, RetirePriority::Normal});
 
     // ★ escalateAllRetires(Critical): 全intent の優先度を Critical に底上げ
     runtime.escalateAllRetires(RetirePriority::Critical);
@@ -57,9 +57,9 @@ using convo::isr::RetireRuntime;
 {
     RetireRuntime runtime;
 
-    runtime.emitRetireIntent({1, 100, 1000, true, RetirePriority::Low});
-    runtime.emitRetireIntent({2, 200, 2000, true, RetirePriority::Normal});
-    runtime.emitRetireIntent({3, 300, 3000, true, RetirePriority::High});
+    runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Low});
+    runtime.emitRetireIntent({2, 200, 2000, RetirePriority::Normal});
+    runtime.emitRetireIntent({3, 300, 3000, RetirePriority::High});
 
     // ★ Normal 以上に昇格: Low→Normal, Normal→Normal(維持), High→High(維持)
     runtime.escalateAllRetires(RetirePriority::Normal);
@@ -90,11 +90,11 @@ using convo::isr::RetireRuntime;
     //   通常の Normal intent と混在させ、High が先に dequeue されることを確認
 
     // 通常の retire intent (Normal)
-    runtime.emitRetireIntent({1, 100, 1000, true, RetirePriority::Normal});
+    runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Normal});
     // quarantine トリガーの retire intent (High)
-    runtime.emitRetireIntent({2, 100, 1000, true, RetirePriority::High});
+    runtime.emitRetireIntent({2, 100, 1000, RetirePriority::High});
     // 別の通常 intent
-    runtime.emitRetireIntent({3, 100, 1000, true, RetirePriority::Normal});
+    runtime.emitRetireIntent({3, 100, 1000, RetirePriority::Normal});
 
     auto intents = runtime.dequeuePendingRetireIntents();
 
@@ -117,9 +117,9 @@ using convo::isr::RetireRuntime;
     RetireRuntime runtime;
 
     // 様々な優先度の intent を投入
-    runtime.emitRetireIntent({1, 100, 3000, true, RetirePriority::Low});
-    runtime.emitRetireIntent({2, 200, 2000, true, RetirePriority::Normal});
-    runtime.emitRetireIntent({3, 300, 1000, true, RetirePriority::High});
+    runtime.emitRetireIntent({1, 100, 3000, RetirePriority::Low});
+    runtime.emitRetireIntent({2, 200, 2000, RetirePriority::Normal});
+    runtime.emitRetireIntent({3, 300, 1000, RetirePriority::High});
 
     // ★ Shutdown: 全intent を Critical に昇格
     runtime.escalateAllRetires(RetirePriority::Critical);
@@ -151,10 +151,10 @@ using convo::isr::RetireRuntime;
     RetireRuntime runtime;
 
     // 各優先度1つずつ
-    runtime.emitRetireIntent({1, 100, 1000, true, RetirePriority::Critical});
-    runtime.emitRetireIntent({2, 200, 2000, true, RetirePriority::High});
-    runtime.emitRetireIntent({3, 300, 3000, true, RetirePriority::Normal});
-    runtime.emitRetireIntent({4, 400, 4000, true, RetirePriority::Low});
+    runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Critical});
+    runtime.emitRetireIntent({2, 200, 2000, RetirePriority::High});
+    runtime.emitRetireIntent({3, 300, 3000, RetirePriority::Normal});
+    runtime.emitRetireIntent({4, 400, 4000, RetirePriority::Low});
 
     auto intents = runtime.dequeuePendingRetireIntents();
 

@@ -45,6 +45,18 @@ bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
     if (!applied)
         return false;
 
+    // ★ B18: Step 2b — Projection 更新前に resolve() して retire に委譲する
+    //    resolve() は registry_ (state==Active) を読む必要があるため、
+    //    quarantineSlot() (state→Quarantined) より前に実行必須。
+    const convo::isr::DSPHandle handle{slot, generation};
+    const auto resolved = dspHandleRuntime_.resolve(handle);
+    DSPCore* dsp = static_cast<DSPCore*>(resolved.instance);
+    if (dsp != nullptr) {
+        // retireDSPHandleForRuntime は runtimeDSPHandleMap_ からエントリを削除する。
+        // 既に retired 済みの DSP には何もしない (二重登録防止)。
+        retireDSPHandleForRuntime(dsp);  // EpochDomain 経由の deferred delete
+    }
+
     // Step 3: Projection 更新（truth を反映）
     dspHandleRuntime_.quarantineSlot(slot);
     retireRuntimeEx_.quarantine(slot);

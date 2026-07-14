@@ -652,6 +652,8 @@ private:
         int storedKnownBlockSize = 0;
         double storedScale = 1.0;
         bool storedDirectHeadEnabled = false;
+        convo::FilterSpec storedFilterSpec{};
+        bool hasStoredFilterSpec = false;       // filterSpec==nullptr と {} を区別
 
         StereoConvolver()
         {
@@ -729,6 +731,12 @@ private:
             storedKnownBlockSize = knownBlockSize;
             storedScale = scale;
             storedDirectHeadEnabled = enableDirectHead;
+            if (filterSpec != nullptr) {
+                storedFilterSpec = *filterSpec;
+                hasStoredFilterSpec = true;
+            } else {
+                hasStoredFilterSpec = false;
+            }
 
             try
             {
@@ -783,7 +791,7 @@ private:
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
-                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedKnownBlockSize, callQuantumSamples, storedScale, storedDirectHeadEnabled))
+                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedKnownBlockSize, callQuantumSamples, storedScale, storedDirectHeadEnabled, hasStoredFilterSpec ? &storedFilterSpec : nullptr))
                         return nullptr;
                 }
                 return newConv.release();

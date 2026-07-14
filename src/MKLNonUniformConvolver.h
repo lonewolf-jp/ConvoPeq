@@ -345,6 +345,13 @@ private:
         double* tailOutputBuf = nullptr;  // mkl_malloc(partSize * sizeof(double), 64)
         int     tailOutputPos = 0;        // Get() での読み出しカーソル [0, partSize]
 
+        // ── B13: 遅延補償リングバッファ (L1/L2 の出力遅延アライメント) ──
+        int     outputDelaySamples = 0;   // このレイヤーの出力遅延量 (sample)
+        int     delayLineCapacity = 0;    // リングバッファ容量
+        double* delayLineBuf = nullptr;   // mkl_malloc(delayLineCapacity * sizeof(double), 64)
+        uint64_t delayWriteCursor = 0;    // Add() が書き込んだ累積サンプル数
+        uint64_t delayReadCursor = 0;     // Get() が読み出した累積サンプル数 (唯一のRead Authority)
+
         // B7: FFT ウォームアップ済みフラグ（レイヤーごと、Non-Audio Thread でセット）
         std::atomic<bool> warmupCompleted { false };
 
@@ -363,6 +370,15 @@ private:
 #endif
 
         void freeAll() noexcept;
+
+        // ★ B13: 遅延補償リセット (状態のみ、構成情報は保持)
+        void resetDelayAlignment() noexcept
+        {
+            delayWriteCursor = 0;
+            delayReadCursor = 0;
+            if (delayLineBuf)
+                juce::FloatVectorOperations::clear(delayLineBuf, delayLineCapacity);
+        }
     };
 
     //----------------------------------------------------------
@@ -381,6 +397,10 @@ private:
     void processDirectBlock(const double* input, int numSamples) noexcept;
     void releaseAllLayers() noexcept;
     void applySpectrumFilter(const FilterSpec& spec) noexcept;
+
+    // ★ B13: 遅延補償 内部ヘルパー
+    void delayLineWrite(Layer& l, const double* src, int n) noexcept;
+    void delayLineReadAdd(Layer& l, double* dst, int n, double gain) noexcept;
 
     //----------------------------------------------------------
     // メンバ変数
@@ -416,6 +436,7 @@ private:
 
     std::atomic<bool> m_ready { false };
     bool    m_tailEnabled = true;
+    int     m_maxBlockSize = 0;  // ★ B13: コールバックブロックサイズ (EnsureCapacity 算出用)
     double  m_tailStrength = 1.0;
     double  m_tailLayerGain[kNumLayers] { 1.0, 1.0, 1.0 };
 

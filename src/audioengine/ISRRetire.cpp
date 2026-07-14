@@ -1,4 +1,5 @@
 #include "ISRRetire.h"
+#include <immintrin.h>  // _mm_pause
 #include "ISRRetireOverflowRing.h"
 #include "AtomicAccess.h"
 
@@ -8,69 +9,75 @@
 namespace convo {
 namespace isr {
 
+void RetireRuntime::initQueue() noexcept
+{
+    for (size_t i = 0; i < RETIRE_INTENT_QUEUE_SIZE; ++i) {
+        convo::publishAtomic(slots_[i].sequence,
+                             static_cast<uint64_t>(i),
+                             std::memory_order_release);
+    }
+    convo::publishAtomic(enqueueTicket_, uint64_t{0}, std::memory_order_relaxed);
+    convo::publishAtomic(dequeuePos_, uint64_t{0}, std::memory_order_relaxed);
+}
+
 void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
 {
-    uint64_t tail = convo::consumeAtomic(retireIntentTail_, std::memory_order_relaxed);
-    uint64_t nextTail = (tail + 1) % RETIRE_INTENT_QUEUE_SIZE;
+    // ★ Step 1: MPSC Queue に slot を予約 (Vyukov protocol)
+    const uint64_t ticket = convo::fetchAddAtomic(enqueueTicket_, 1, std::memory_order_acq_rel);
+    const size_t idx = ticket % RETIRE_INTENT_QUEUE_SIZE;
 
-    uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
-    if (nextTail == head) {
-        // ★ P1: MPSC満杯 → Fallback queue へ退避
-        {
+    RetireIntent localIntent = intent;
+
+    // ★ Step 2: bounded spin — Consumer が slot を解放するまで待機
+    static constexpr int kMaxProducerSpin = 64;
+    for (int spin = 0;; ++spin) {
+        uint64_t slotSeq = convo::consumeAtomic(
+            slots_[idx].sequence, std::memory_order_acquire);
+        if (slotSeq == ticket) break;  // slot 獲得
+
+        if (spin >= kMaxProducerSpin) {
+            // ★ bounded spin 失敗 → tombstone + fallback
+            slots_[idx].payload = RetireIntent{};
+            slots_[idx].payload.dspSlot = UINT32_MAX;  // tombstone 識別子
+            convo::publishAtomic(slots_[idx].sequence, ticket + 1, std::memory_order_release);
+
             std::lock_guard<std::mutex> lock(fallbackMutex_);
-            if (fallbackCount_.load(std::memory_order_relaxed) < FALLBACK_QUEUE_CAPACITY)
-            {
-                const size_t idx = fallbackCount_.load(std::memory_order_relaxed);
-                fallbackQueue_[idx] = intent;
-                convo::publishAtomic(fallbackCount_, idx + 1, std::memory_order_release);
-                size_t prevHwm = convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_relaxed);
-                while (idx + 1 > prevHwm
-                    && !convo::compareExchangeAtomic(fallbackHighWatermark_, prevHwm, idx + 1,
-                        std::memory_order_release, std::memory_order_relaxed)) {}
+            if (fallbackCount_ < FALLBACK_QUEUE_CAPACITY) {
+                const size_t tail = (fallbackHead_ + fallbackCount_) % FALLBACK_QUEUE_CAPACITY;
+                fallbackQueue_[tail] = localIntent;
+                ++fallbackCount_;
+                convo::publishAtomic(fallbackQueuePeak_, fallbackCount_.load(std::memory_order_relaxed), std::memory_order_release);
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
-            }
-            else
-            {
-                // ★ Phase 1: Fallback も満杯 → OverflowRing へ退避試行
+            } else {
+                // ★ Fallback も満杯 → OverflowRing へ退避試行
+                bool dropped = true;
                 if (overflowRing_ != nullptr) {
-                    RetireOverflowEntry entry{intent, static_cast<uint64_t>(
+                    RetireOverflowEntry entry{localIntent, static_cast<uint64_t>(
                         std::chrono::steady_clock::now().time_since_epoch().count()), 0};
                     if (overflowRing_->tryPush(entry)) {
-                        // ★ OverflowRing 退避成功 → droppedIntentCount は増やさない
                         convo::fetchAddAtomic(quarantineRescuedCount_, uint64_t{1}, std::memory_order_release);
-                        // ★ C-1: overflowStartTimestamp_ 設定
-                        uint64_t expected = 0;
-                        convo::compareExchangeAtomic(overflowStartTimestamp_, expected,
-                            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
-                            std::memory_order_release);
-                        (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1},
-                            std::memory_order_release);
-                        convo::publishAtomic(lastOverflowTicks_,
-                            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
-                            std::memory_order_release);
-                        return;
+                        dropped = false;
                     }
                 }
-                // ★ 最終手段: 完全破棄
-                (void)convo::fetchAddAtomic(fallbackOverflowCount_, uint64_t{1}, std::memory_order_acq_rel);
-                (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
-                (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
+                if (dropped) {
+                    (void)convo::fetchAddAtomic(fallbackOverflowCount_, uint64_t{1}, std::memory_order_acq_rel);
+                    (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
+                    (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
+                }
             }
+
+            // ★ C-1: overflowStartTimestamp_ を初回のみ設定（CAS）
+            uint64_t expected = 0;
+            convo::compareExchangeAtomic(overflowStartTimestamp_, expected,
+                static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+                std::memory_order_release);
+            (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1}, std::memory_order_release);
+            convo::publishAtomic(lastOverflowTicks_,
+                static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+                std::memory_order_release);
+            return;
         }
-
-        // ★ C-1: overflowStartTimestamp_ を初回のみ設定（CAS）
-        uint64_t expected = 0;
-        convo::compareExchangeAtomic(overflowStartTimestamp_, expected,
-            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
-            std::memory_order_release);
-
-        (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1},
-            std::memory_order_release);
-
-        convo::publishAtomic(lastOverflowTicks_,
-            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
-            std::memory_order_release);
-        return;
+        _mm_pause();
     }
 
     // ★ C-1: success（キュー空きあり）: overflow が継続中ならタイムスタンプをリセット
@@ -78,8 +85,9 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
         std::memory_order_release);
     (void)prevStart;
 
-    retireIntentQueue_[tail] = intent;
-    convo::publishAtomic(retireIntentTail_, nextTail, std::memory_order_release);
+    // ★ Step 3: payload 書き込み + release
+    slots_[idx].payload = localIntent;
+    convo::publishAtomic(slots_[idx].sequence, ticket + 1, std::memory_order_release);
 }
 
 void RetireRuntime::emitRetireIntentRT(const RetireIntent& intent) noexcept
@@ -87,29 +95,67 @@ void RetireRuntime::emitRetireIntentRT(const RetireIntent& intent) noexcept
     emitRetireIntent(intent);
 }
 
+bool RetireRuntime::dequeueOne(RetireIntent& out) noexcept
+{
+    for (;;) {
+        const uint64_t pos = convo::consumeAtomic(dequeuePos_, std::memory_order_relaxed);
+        const size_t idx = static_cast<size_t>(pos % RETIRE_INTENT_QUEUE_SIZE);
+        const uint64_t expectedSeq = pos + 1;
+        const uint64_t slotSeq = convo::consumeAtomic(
+            slots_[idx].sequence, std::memory_order_acquire);
+        if (slotSeq != expectedSeq) return false;  // 未 ready
+
+        out = slots_[idx].payload;
+        // ★ tombstone check: dspSlot == UINT32_MAX で fallback 経由の無効 intent を識別
+        if (out.dspSlot == UINT32_MAX) {
+            convo::publishAtomic(slots_[idx].sequence,
+                pos + RETIRE_INTENT_QUEUE_SIZE,
+                std::memory_order_release);
+            convo::publishAtomic(dequeuePos_, pos + 1, std::memory_order_relaxed);
+            continue;  // 次へ (ループ)
+        }
+        // ★ slot 解放: sequence = dequeuePos + SIZE → 次 cycle Producer が再利用可能
+        convo::publishAtomic(slots_[idx].sequence,
+            pos + RETIRE_INTENT_QUEUE_SIZE,
+            std::memory_order_release);
+        convo::publishAtomic(dequeuePos_, pos + 1, std::memory_order_relaxed);
+        return true;
+    }
+}
+
+bool RetireRuntime::dequeueFallback(RetireIntent& out) noexcept
+{
+    std::lock_guard<std::mutex> lock(fallbackMutex_);
+    const size_t count = convo::consumeAtomic(fallbackCount_, std::memory_order_relaxed);
+    if (count == 0) return false;
+    out = fallbackQueue_[fallbackHead_];
+    fallbackHead_ = (fallbackHead_ + 1) % FALLBACK_QUEUE_CAPACITY;
+    convo::publishAtomic(fallbackCount_, count - 1, std::memory_order_relaxed);
+    return true;
+}
+
 std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
 {
     std::vector<RetireIntent> result;
+    result.reserve(128);
 
-    // 1. Drain MPSC queue
-    uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
-    uint64_t tail = convo::consumeAtomic(retireIntentTail_, std::memory_order_acquire);
-
-    while (head != tail) {
-        result.push_back(retireIntentQueue_[head]);
-        head = (head + 1) % RETIRE_INTENT_QUEUE_SIZE;
-    }
-
-    convo::publishAtomic(retireIntentHead_, head, std::memory_order_release);
-
-    // 2. ★ P1: Drain Fallback queue
+    // 1. Drain Vyukov MPSC queue + Fallback (fair scheduling: main 8 : fallback 1)
     {
-        std::lock_guard<std::mutex> lock(fallbackMutex_);
-        const size_t fbCount = convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
-        for (size_t i = 0; i < fbCount; ++i) {
-            result.push_back(fallbackQueue_[i]);
+        constexpr size_t kMainToFallbackRatio = 8;
+        RetireIntent raw;
+        while (true) {
+            bool progressed = false;
+            for (size_t i = 0; i < kMainToFallbackRatio; ++i) {
+                if (!dequeueOne(raw)) break;
+                result.push_back(raw);
+                progressed = true;
+            }
+            if (dequeueFallback(raw)) {
+                result.push_back(raw);
+                progressed = true;
+            }
+            if (!progressed) break;
         }
-        convo::publishAtomic(fallbackCount_, size_t{0}, std::memory_order_release);
     }
 
     // ★ Phase 5: 複合ソートキー (priority, retireEpoch, generation, dspSlot)
@@ -123,17 +169,16 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
         return lhs.dspSlot < rhs.dspSlot;
     });
 
-    // ★ 注意: 2重 publishAtomic はここでは行わない（1回目が上で完了済み）
     return result;
 }
 
 std::uint64_t RetireRuntime::pendingIntentCount() const noexcept
 {
-    const uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
-    const uint64_t tail = convo::consumeAtomic(retireIntentTail_, std::memory_order_acquire);
-    if (tail >= head)
-        return tail - head;
-    return (RETIRE_INTENT_QUEUE_SIZE - head) + tail;
+    const uint64_t enqueued = convo::consumeAtomic(enqueueTicket_, std::memory_order_acquire);
+    const uint64_t consumed = convo::consumeAtomic(dequeuePos_, std::memory_order_acquire);
+    const uint64_t mainPending = (enqueued > consumed) ? (enqueued - consumed) : 0;
+    const uint64_t fbPending = convo::consumeAtomic(fallbackCount_, std::memory_order_relaxed);
+    return mainPending + fbPending;
 }
 
 std::uint64_t RetireRuntime::overflowCount() const noexcept
@@ -182,7 +227,7 @@ std::size_t RetireRuntime::fallbackOccupancy() const noexcept
 
 std::size_t RetireRuntime::fallbackHighWatermark() const noexcept
 {
-    return convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_acquire);
+    return convo::consumeAtomic(fallbackQueuePeak_, std::memory_order_acquire);
 }
 
 std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
@@ -196,14 +241,13 @@ std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
 //   ※ isValid/priority は std::atomic ではないが、Shutdown中は単一スレッドアクセス。
 void RetireRuntime::escalateAllRetires(RetirePriority minPriority) noexcept
 {
-    // MPSC queue: 全スロットを走査
+    // Vyukov MPSC slots: 全スロットを走査
     for (size_t i = 0; i < RETIRE_INTENT_QUEUE_SIZE; ++i)
     {
-        auto& intent = retireIntentQueue_[i];
-        const auto rawIsValid = convo::consumeAtomic(
-            reinterpret_cast<const std::atomic<bool>&>(intent.isValid),
-            std::memory_order_acquire);
-        if (rawIsValid && static_cast<uint8_t>(intent.priority) < static_cast<uint8_t>(minPriority))
+        auto& intent = slots_[i].payload;
+        // ★ dspSlot != UINT32_MAX で有効な intent を識別 (isValid 廃止)
+        if (intent.dspSlot != UINT32_MAX
+            && static_cast<uint8_t>(intent.priority) < static_cast<uint8_t>(minPriority))
         {
             intent.priority = minPriority;
         }
@@ -211,10 +255,11 @@ void RetireRuntime::escalateAllRetires(RetirePriority minPriority) noexcept
 
     // Fallback queue: 全エントリを走査
     {
-        const size_t count = convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
-        for (size_t i = 0; i < count && i < FALLBACK_QUEUE_CAPACITY; ++i)
+        std::lock_guard<std::mutex> lock(fallbackMutex_);
+        for (size_t i = 0; i < fallbackCount_; ++i)
         {
-            auto& intent = fallbackQueue_[i];
+            const size_t idx = (fallbackHead_ + i) % FALLBACK_QUEUE_CAPACITY;
+            auto& intent = fallbackQueue_[idx];
             if (static_cast<uint8_t>(intent.priority) < static_cast<uint8_t>(minPriority))
             {
                 intent.priority = minPriority;

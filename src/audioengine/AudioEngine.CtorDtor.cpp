@@ -80,6 +80,9 @@ AudioEngine::AudioEngine()
 
     // ★ P1-B: Admission に HealthState 参照を設定
     runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
+
+    // ★ B14: Vyukov MPSC Retire Queue 初期化
+    retireRuntime_.initQueue();
 }
 
 AudioEngine::~AudioEngine()

@@ -411,6 +411,56 @@ juce_add_gui_app(ConvoPeq
     ICON_BIG "resources/icon.png"
 )
 
+# ★ B13: MT-NUPC Measurement (Phase 1 — コンソールアプリ)
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(MTNUPCMeasurement)
+    target_sources(MTNUPCMeasurement PRIVATE
+        src/tests/MT-NUPC-Measurement.cpp
+        src/MKLNonUniformConvolver.cpp
+    )
+    target_include_directories(MTNUPCMeasurement PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+    )
+    target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(MTNUPCMeasurement PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        JUCE_DSP_USE_INTEL_MKL=1
+        JUCE_USE_SIMD=1
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_link_libraries(MTNUPCMeasurement PRIVATE MKL::MKL)
+        target_compile_options(MTNUPCMeasurement PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(MTNUPCMeasurement PRIVATE /QxCORE-AVX2)
+    endif()
+    target_link_libraries(MTNUPCMeasurement PRIVATE r8brain)
+    if(MSVC)
+        target_compile_options(MTNUPCMeasurement PRIVATE /utf-8 /EHsc)
+    endif()
+    target_compile_definitions(MTNUPCMeasurement PRIVATE
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    add_test(NAME MTNUPCMeasurement COMMAND MTNUPCMeasurement)
+    juce_generate_juce_header(MTNUPCMeasurement)
+    # ★ JUCE モジュールをリンク
+    target_link_libraries(MTNUPCMeasurement PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+    # ★ IPP include (リンクは IPP 設定セクションで追加)
+    if(DEFINED ENV{IPPROOT})
+        target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    endif()
+endif()
+
 #------------------------------------------------------------
 # ソースファイル
 #------------------------------------------------------------
@@ -619,6 +669,9 @@ endif()
 # Add MKL include directory as a SYSTEM path to suppress clang-tidy warnings.
 if(DEFINED ENV{MKLROOT})
     target_include_directories(ConvoPeq SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    if(TARGET MTNUPCMeasurement)
+        target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    endif()
 endif()
 
 # スタティックリンクとシーケンシャル実行を指定してDLL依存を排除
@@ -670,6 +723,9 @@ if(DEFINED ENV{IPPROOT})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}")
     list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}/lib/cmake/ipp")
     target_include_directories(ConvoPeq SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    if(TARGET MTNUPCMeasurement)
+        target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    endif()
 endif()
 
 set(IPP_LINK static)
@@ -678,6 +734,9 @@ find_package(IPP QUIET CONFIG COMPONENTS ippcore ipps)
 if(IPP_FOUND)
     message(STATUS "Intel IPP found.")
     target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
+    if(TARGET MTNUPCMeasurement)
+        target_link_libraries(MTNUPCMeasurement PRIVATE IPP::ippcore IPP::ipps)
+    endif()
 else()
     message(STATUS "Intel IPP not found - skipping (CI build or no IPP SDK).")
 endif()

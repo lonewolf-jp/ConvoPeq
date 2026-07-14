@@ -326,11 +326,11 @@ RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
             for (size_t i = 0; i < lrCount && lrDrained < kLastResortBudget; ++i)
             {
                 auto& lrEntry = coordinator_.lastResortQueue_[i];
-                if (lrEntry.intent.isValid)
+                if (lrEntry.intent.dspSlot != UINT32_MAX)
                 {
                     lrEntry.intent.priority = RetirePriority::High;
                     retireRuntime.emitRetireIntent(lrEntry.intent);
-                    lrEntry.intent.isValid = false;
+                    lrEntry.intent.dspSlot = UINT32_MAX;
                     ++lrDrained;
                     ++result.reinjectedCount;
                 }
@@ -341,7 +341,7 @@ RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
                 size_t writeIdx = 0;
                 for (size_t readIdx = 0; readIdx < lrCount; ++readIdx)
                 {
-                    if (coordinator_.lastResortQueue_[readIdx].intent.isValid)
+                    if (coordinator_.lastResortQueue_[readIdx].intent.dspSlot != UINT32_MAX)
                     {
                         if (writeIdx != readIdx)
                             coordinator_.lastResortQueue_[writeIdx] = coordinator_.lastResortQueue_[readIdx];

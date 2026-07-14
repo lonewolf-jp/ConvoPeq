@@ -458,7 +458,6 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.dspSlot = slot;
     intent.generation = generation;
     intent.retireEpoch = static_cast<std::uint64_t>(world->generation);
-    intent.isValid = true;
 
     retireRuntime_.emitRetireIntentRT(intent);
     runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
@@ -496,7 +495,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     std::uint64_t pendingMaxGeneration = 0;
     for (const auto& pending : pendingIntents)
     {
-        if (!pending.isValid)
+        if (pending.dspSlot == UINT32_MAX)
             continue;
 
         const auto generationValue = static_cast<std::uint64_t>(pending.generation);
@@ -548,7 +547,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
 
     for (const auto& pending : pendingIntents)
     {
-        if (!pending.isValid)
+        if (pending.dspSlot == UINT32_MAX)
             continue;
 
         const auto pendingGeneration = static_cast<std::uint64_t>(pending.generation);
@@ -557,7 +556,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         const bool graceCompleted = retireRuntimeEx_.isGracePeriodCompleted(pendingGeneration,
                                              maxObservedGeneration,
                                              callbackActiveCount);
-        const bool pendingIntentOwned = pending.isValid;
+        const bool pendingIntentOwned = (pending.dspSlot != UINT32_MAX);
         const auto* currentPublished = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore);
         const bool authoritativeOwnershipReleased = (currentPublished != world);
         const std::uint64_t retireDeferralEpochs = (maxObservedGeneration > pendingGeneration)

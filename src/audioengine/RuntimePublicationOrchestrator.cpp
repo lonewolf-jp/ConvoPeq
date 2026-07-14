@@ -5,17 +5,14 @@
 #include "FrozenRuntimeWorld.h"
 #include <chrono>
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 // 局所 diagLog — 全ファイル統一パターン。
-// CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 時のみ出力、OFF 時は no-op。
 static void diagLog(const juce::String& message)
 {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     DBG(message);
     juce::Logger::writeToLog(message);
-#else
-    juce::ignoreUnused(message);
-#endif
 }
+#endif
 
 namespace convo::isr {
 
@@ -110,10 +107,10 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         spec.processing.eqBypassed = inp.eqBypassed;
         spec.processing.convBypassed = inp.convBypassed;
         spec.processing.softClipEnabled = inp.softClipEnabled;
-        spec.processing.saturationAmount = inp.saturationAmount;
-        spec.processing.inputHeadroomGain = inp.inputHeadroomGain;
-        spec.processing.outputMakeupGain = inp.outputMakeupGain;
-        spec.processing.convolverInputTrimGain = inp.convolverInputTrimGain;
+        spec.processing.saturationAmount = static_cast<float>(inp.saturationAmount);
+        spec.processing.inputHeadroomGain = static_cast<float>(inp.inputHeadroomGain);
+        spec.processing.outputMakeupGain = static_cast<float>(inp.outputMakeupGain);
+        spec.processing.convolverInputTrimGain = static_cast<float>(inp.convolverInputTrimGain);
         // ★ Sync RoutingPart for backward compat — ProcessingPart が一次情報源
         spec.routing.processingOrder = inp.processingOrder;
         spec.routing.eqBypassed = inp.eqBypassed;
