@@ -439,7 +439,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_link_libraries(MTNUPCMeasurement PRIVATE MKL::MKL)
         target_compile_options(MTNUPCMeasurement PRIVATE /arch:AVX2)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(MTNUPCMeasurement PRIVATE /QxCORE-AVX2)
+        target_compile_options(MTNUPCMeasurement PRIVATE /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
     endif()
     target_link_libraries(MTNUPCMeasurement PRIVATE r8brain)
     if(MSVC)

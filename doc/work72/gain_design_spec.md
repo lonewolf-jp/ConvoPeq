@@ -1,33 +1,65 @@
 # 自動ゲインステージング改修 設計書
 
-> 作成日: 2026-07-12
+> 作成日: 2026-07-15 (v2.0 — ISR Architecture Review 反映)
 > 対象コードベース: ConvoPeq (C++20, JUCE 8.0.12, MKL, Intel oneAPI)
 > 先行文書: `gain_revised.md` v2.6, `gain_phase8_test_plan.md` v1.2, `gain_literature_validation_report.md` v1.0
-> コード調査結果: 全14ファイルの改修対象を含め、47+ファイルのコード照合・確認済み
+> レビュー: `checked.md` (2026-07-13), ISR Architecture Review (2026-07-15)
+> コード調査結果: 全16ファイルの改修対象を含め、60+ファイルのコード照合・確認済み
 
 ---
 
 ## 検証結果サマリ
 
-本パスのコード照合では、以下の点を確定した。
+### アーキテクチャ上の重要設計判断
 
-- 既存コードには `AudioEngine` 側の `currentPreparedIr` 変数は存在せず、IR リスク値の取得経路は `ConvolverProcessor` 経由であることが確定した。したがって、設計上は `getIrResidualRiskDb()` を新規追加し、`IRState` / `PreparedIRState` / `ScaleFactorResult` へ `residualRiskDb` を伝搬する構成とする。
-- `setProcessingOrder()` の現行実装は `submitRebuildIntent()` → `applyDefaultsForCurrentMode()` の順であり、`applyDefaultsForCurrentMode()` 内でも rebuild が発火するため、明示的な二重発火を避けることが妥当である。`sendChangeMessage()` 追加も bypass 系 setter と整合する。
-- `requestLoadState()` 内では `RestoreStateGuard` が `m_isRestoringState = true` を保持しているため、ここで `recomputeAutoGainStaging()` を呼ぶと早期リターンする。復元完了後に外側から再計算を発火する構成が正しい。
-- `EQProcessor` の `getMagnitudeSquared()` を使用し、M/S デコード時も含めて実 DSP と整合した最大ゲイン推定を行う方針が妥当である。
-- `kMaxEffectiveFreqResponse = 1.41` (+3 dB) は現行コードの既存 clamp ルールに整合する静的ヒューリスティックであり、実装後の手動検証で再校正する前提とする。
+本設計の最大の設計判断は、**自動ゲイン計算を AudioEngine の setter 連鎖から RuntimeBuilder のビルド工程へ移管した** 点にある。
 
-本改修の追加検証と設計確定情報（ASCII / Plain headers 化に伴う整合完了）:
+**背景**: 現行 ConvoPeq の ISR (Immediate State Runtime) アーキテクチャは、
+```
+Intent → RuntimePublicationSpecification → RuntimeBuilder → RuntimeWorld → RT
+```
+という一方向パイプラインを確立している。Automation 値（`inputHeadroomGain`, `outputMakeupGain`, `convolverInputTrimGain`）も `RuntimeBuilder::buildRuntimePublishWorld()` 内で `ProcessingPart` から `worldOwner->automation` へ写像される（`RuntimeBuilder.cpp:269-275`）。Audio Thread は `world->automation.inputHeadroomGain` を読み取る（`AudioEngine.h:2820`）。
 
-- **マルチチャネル定位整合 (Phase 1/4)**: ステレオ IR に対する FFT 応答最大ゲイン解析において、定位（左右バランス）の崩壊を防ぐため、スケールファクターは左右チャンネルの「最悪値（最大ピーク）」を共通の減少倍率として一括適用する設計を確定した。
-- **Q Surge Margin リミッターの定性的整合 (Phase 3)**: 共振 EQ (最大 Q = 20) において、サージ振幅は計算上 50dB 以上に膨張し得るが、過剰なマージン確保による音量過小（ダイナミックレンジ損失）を防ぐため、安全限界として `6.0 dB` 以上にクリップする設計の正当性を確認した。
-- **バイパスセッターにおける冗長リビルドの排除 (Phase 5)**: `applyDefaultsForCurrentMode()` が内部で `submitRebuildIntent()` を呼ぶため、`setEqBypassRequested` / `setConvolverBypassRequested` 内の明示的 `submitRebuildIntent()` も不要な CPU 負荷（重い Snapshot コマンドの重複送信・処理）を避けるために削除対象に決定した。
-- **実効値ベースのネット 0dB 整合保証設計 (Phase 5)**: 各ゲインはセッター内部で制限範囲にクランプされる。そのため、`makeup` の算出には当初計算値ではなく、`setInputHeadroomDb()` および `setConvolverInputTrimDb()` を呼んだ後の「実際のクランプ適用後の値」を `get` して `makeup = -actualInput - actualTrim` として適用する順序（実効値ベース連動）を確定した。
+v1.0 設計書では `AudioEngine::recomputeAutoGainStaging()` が public setter を呼ぶ設計だったが、これは以下を引き起こす:
+- **Authority の二重化**: AudioEngine の setter 経路と RuntimeBuilder の Spec→World 経路が並立する
+- **リビルドストーム**: 単一のパラメータ変更から最大5回の `submitRebuildIntent` が発火する
+- **ISR パイプライン分断**: `Intent → Specification → Builder → World` の流れを setter 内の即時 atomic 更新が迂回する
 
-本設計の未確定要素としては、以下を明示的に保留扱いとする。
+**v2.0 の設計方針**: 自動ゲイン計算を `RuntimeBuilder::buildRuntimePublishWorld()` 内のビルド工程に統合する。これにより:
+- 自動ゲイン計算は rebuild ごとに1回だけ実行される（リビルドストーム排除）
+- 計算結果は直接 `worldOwner->automation` に書き込まれ、Audio Thread は従来どおり RuntimeWorld を読むだけ
+- `RuntimePublishSpecification::ProcessingPart` に `autoGainStagingEnabled` フラグを追加し、Orchestrator が Builder に伝達する
 
-- `computeMaxGainDb()` の最終マージン係数 (`0.15` など) は文献根拠よりも実測補正型のヒューリスティックであり、Phase 8 の手動試験で最終確定する。
-- `CrossfadeAuthority` のモード切替検出は現状 3 項目のみであり、`processingOrder` 変更による即時切替が許容される前提で設計する。必要に応じて MT-05 で評価する。
+### コード照合確定事項
+
+- 既存コードには `AudioEngine` 側の `currentPreparedIr` 変数は存在せず、IR リスク値の取得経路は `ConvolverProcessor` 経由であることが確定した。設計上は `getIrResidualRiskDb()` を新規追加し、`IRState` / `PreparedIRState` / `ScaleFactorResult` へ `residualRiskDb` を伝搬する構成とする。
+- `RuntimePublishSpecification::ProcessingPart`（`RuntimeBuilder.h:40-49`）は Orchestrator が sealedSnapshot/engine atomic から収集したゲイン値の DTO。これに `autoGainStagingEnabled` を追加し、Builder が自動ゲイン計算の要否を判定する。
+- `EQProcessor` の `getMagnitudeSquared()` を使用し、M/S デコード時も含めて実 DSP と整合した最大ゲイン推定を行う方針は妥当である。ただし M/S 評価は `max(|Hmid|, |Hside|)` で行う（詳細は Phase 3）。
+- `kMaxEffectiveFreqResponse = 1.41` (+3 dB) は現行コードの既存 clamp ルールに整合する静的ヒューリスティック。実装後の手動検証で再校正する前提とする。
+- `setProcessingOrder()` の `sendChangeMessage()` 追加は bypass 系 setter と整合するが、`recomputeAutoGainStaging()` は AudioEngine に追加せず Builder が代替する。
+
+### レビュー修正事項 (checked.md / ISR Review 反映)
+
+| # | 指摘 | 影響 | 対応 |
+|---|------|------|------|
+| ARC-1 | AudioEngine がゲイン再計算 → ISR パイプライン分断 | **Critical** | Builder 統合に設計変更 |
+| ARC-2 | setter 内 recompute → リビルドストーム | **Critical** | Builder 内で1回だけ計算 |
+| ARC-3 | RuntimeWorld に結果不在 | **Critical** | Builder が直接 worldOwner->automation に書込 |
+| C-2 | `residualRiskDb` 符号反転 | **Critical** | 正の減衰量として保存 |
+| C-3 | peak/rms クランプ量未記録 | **Major** | 個別計算＋加算 |
+| C-4 | Tukey 窓による振幅過小評価 | **Major** | コヒーレントゲイン補正追加 |
+| C-5 | `loadSettings` 早期 return 問題 | **Major** | RAII スコープ再構成 |
+| C-7 | Conv-first -6dB クランプ後の makeup 計算 | **Medium** | 実効値ベース連動を確認済み |
+| M-1 | `atomic<double>` lock-free + 一貫性 | **Medium** | `float` 使用 + 同一 atomic での一貫更新 |
+| M-2 | M/S 最大利得計算誤り | **Major** | `max(|Hmid|, |Hside|)` に修正 |
+| M-4 | UI onTextChange 上書き | **Medium** | コールバックチェーン化 |
+| M-5 | 永続化漏れ | **Medium** | XML 属性追加 |
+
+### 本設計の未確定要素（保留）
+
+- `computeMaxGainDb()` の最終マージン係数 (`0.15` など) は文献根拠よりも実測補正型のヒューリスティック。Phase 8 の手動試験で最終確定する。
+- `CrossfadeAuthority` のモード切替検出は現状 3 項目のみ。`processingOrder` 変更による即時切替が許容される前提で設計する。必要に応じて MT-05 で評価する。
+- Tukey 窓 α=0.5 の UT-05 テスト基準「-40dB以下」の達成確認は未実施。実装後に側波帯減衰率を実測検証する。
 
 ## 目次
 
@@ -37,7 +69,7 @@
   - [Phase 2 State Management Extension](#phase-2-state-management-extension)
   - [Phase 3 EQ Maximum Gain Estimation](#phase-3-eq-maximum-gain-estimation)
   - [Phase 4 IR Conversion Extension](#phase-4-ir-conversion-extension)
-  - [Phase 5 AudioEngine Integration](#phase-5-audioengine-integration)
+  - [Phase 5 RuntimeBuilder Integration](#phase-5-runtimebuilder-integration)
   - [Phase 6 Runtime Mode Transition Safety](#phase-6-runtime-mode-transition-safety)
   - [Phase 7 UI Integration](#phase-7-ui-integration)
   - [Phase 8 CMakeLists Updates](#phase-8-cmakelists-updates)
@@ -54,17 +86,19 @@
 | # | ファイル | 操作 | 変更内容 |
 | --- | --------- | ------ | --------- |
 | 1 | `src/eqprocessor/EQProcessor.h` | 修正 | `computeMaxGainDb()` 宣言追加 |
-| 2 | `src/eqprocessor/EQProcessor.Coefficients.cpp` | 修正 | `computeMaxGainDb()` 実装 |
+| 2 | `src/eqprocessor/EQProcessor.Coefficients.cpp` | 修正 | `computeMaxGainDb()` 実装（M/S 評価は `max(|Hmid|,|Hside|)`） |
 | 3 | `src/eqprocessor/EQProcessor.h` | 修正 | `getMagnitudeSquared()` を public 維持（`computeMaxGainDb` から利用） |
-| 4 | `src/IRConverter.h` | 修正 | `estimateMaxFrequencyResponseGain()` 宣言, `ScaleFactorResult` に `residualRiskDb` |
-| 5 | `src/IRConverter.cpp` | 修正 | 上記関数実装, `computeScaleFactor` 拡張 |
-| 6 | `src/PreparedIRState.h` | 修正 | `residualRiskDb` フィールド追加, ムーブ演算子更新 |
-| 8 | `src/ConvolverProcessor.h` | 修正 | `IRState` に `residualRiskDb` 追加, `getIrResidualRiskDb()` 追加 |
-| 9 | `src/audioengine/AudioEngine.h` | 修正 | `autoGainStagingEnabled` フラグ, `recomputeAutoGainStaging()` 宣言 |
-| 10 | `src/audioengine/AudioEngine.Parameters.cpp` | 修正 | 各種setter変更, `recomputeAutoGainStaging()` 実装 |
-| 11 | `src/audioengine/AudioEngine.UIEvents.cpp` | 修正 | `convolverParamsChanged` 末尾に `recomputeAutoGainStaging()` 追加 |
-| 12 | `src/DeviceSettings.h` | 修正 | `autoGainToggle` 宣言, `gainDisplaySignature` 拡張 |
-| 13 | `src/DeviceSettings.cpp` | 修正 | トグル・エディタ連携, レイアウト変更, `loadSettings` 末尾に `engine.recomputeAutoGainStaging()` 追加 |
+| 4 | `src/IRConverter.h` | 修正 | `estimateMaxFrequencyResponseGain()` 宣言, `ScaleFactorResult` に `residualRiskDb`（正値減衰量） |
+| 5 | `src/IRConverter.cpp` | 修正 | 上記関数実装（Tukey α=0.5 + コヒーレントゲイン補正）, `computeScaleFactor` 拡張（peak/rms 個別計算） |
+| 6 | `src/PreparedIRState.h` | 修正 | `residualRiskDb` フィールド追加（`float`, 正値）, ムーブ演算子更新 |
+| 7 | `src/audioengine/AudioEngine.h` | 修正 | `autoGainStagingEnabled` atomic フラグ, `setAutoGainStagingEnabled()` 宣言 |
+| 8 | `src/audioengine/AudioEngine.Parameters.cpp` | 修正 | `setProcessingOrder` に `sendChangeMessage()` 追加（`recomputeAutoGainStaging` は追加しない） |
+| 9 | `src/audioengine/RuntimeBuilder.h` | 修正 | `RuntimePublishSpecification::ProcessingPart` に `autoGainStagingEnabled` 追加 |
+| 10 | `src/audioengine/RuntimeBuilder.cpp` | 修正 | `buildRuntimePublishWorld()` 内で自動ゲイン計算を実行（`computeAndApplyAutoGain`） |
+| 11 | `src/audioengine/AudioEngine.RebuildDispatch.cpp` | 修正 | `captureBuildParameterSnapshot()` / `BuildInput` に `autoGainStagingEnabled` 追加 |
+| 12 | `src/ConvolverProcessor.h` | 修正 | `IRState` に `residualRiskDb` 追加（`float`）, `getIrResidualRiskDb()` 追加 |
+| 13 | `src/DeviceSettings.h` | 修正 | `autoGainToggle` 宣言, `gainDisplaySignature` 拡張 |
+| 14 | `src/DeviceSettings.cpp` | 修正 | トグル・エディタ連携（コールバックチェーン）, レイアウト変更, `loadSettings` スコープ再構成, `saveSettings` に `autoGainStagingEnabled` 永続化 |
 
 ---
 
@@ -96,21 +130,36 @@ static double estimateMaxFrequencyResponseGain(
 
 ```
 
-#### 1.3.1 Tukey窓 α値の変更決定
+#### 1.3.1 Tukey窓 α値の変更決定 + コヒーレントゲイン補正（C-4）
 
-文献調査の結果、UT-05で当初想定した「Tukey α=0.1, 10bin離れて-40dB以下」は達成が困難と判明した（α=0.1 は矩形窓に近くサイドローブ減衰率が 6-9 dB/oct であるため）。
-
-**確定方針**: Tukey窓の α を **0.5** に変更する。
+文献調査の結果、UT-05で当初想定した「Tukey α=0.1, 10bin離れて-40dB以下」は達成が困難と判明したため、α を **0.5** に変更する。
 
 - 両端 25% のコサインテーパーとなり、Hann 窓に近い減衰特性（~18 dB/oct）が得られる
 - 65536 点 FFT に対し 25% = 16384 点が減衰領域だが、主要ピークの解析精度は十分維持される
 - UT-05 のテスト基準「-40dB以下」は α=0.5 で達成可能
+
+**⚠️ コヒーレントゲイン補正（C-4 修正）**:
+
+Tukey α=0.5 の平均ゲイン（コヒーレントゲイン）は約 0.75。窓関数を適用すると FFT の DC 成分が `0.75 * N` になり、周波数応答ピークを **約 -2.5 dB 過小評価** する。このままでは安全側ではなく「過小評価 = 過剰なヘッドルーム」になる。
+
+**修正**: FFT ピーク検出後にコヒーレントゲインで除算する。
+
+```cpp
+// estimateMaxFrequencyResponseGain 内
+const double windowSum = std::accumulate(tukeyWindow.begin(), tukeyWindow.end(), 0.0);
+const double windowMean = windowSum / static_cast<double>(kAnalysisWindow);
+// ... FFT 実行後 ...
+maxMagnitude /= windowMean;  // コヒーレントゲイン補正
+```
+
+**補足**: `sampleRate` 引数は周波数応答の最大値推定には不要（`AudioBuffer<double>` の振幅はサンプリングレートに依存しない）。`[[maybe_unused]]` にするか削除する。
 
 **実装詳細**:
 
 ```cpp
 // kAnalysisWindow = 65536
 // Tukey α=0.5（両端 25% コサインテーパー、中央 50% フラット）
+// コヒーレントゲイン補正: maxMagnitude /= windowMean
 
 ```
 
@@ -151,7 +200,11 @@ double IRConverter::estimateMaxFrequencyResponseGain(
 
 **既存コード確認**: ✅ `ScopedDftiDescriptor` が `src/DftiHandle.h` に存在（DFTI_DESCRIPTOR_HANDLE ラッパー）。MKL DFTI が利用可能。
 
-#### 1.5 `computeScaleFactor` 拡張 — `ScaleFactorResult` に `residualRiskDb` 追加
+#### 1.5 `computeScaleFactor` 拡張 — `ScaleFactorResult` に `residualRiskDb` 追加（C-2/C-3）
+
+**⚠️ 符号設計（C-2 修正）**: `residualRiskDb` は **正の減衰量 [dB]** として保存する。元設計では `peakClipDb + rmsClipDb + freqClipDb` を負値（`20*log10(clip) < 0`）としていたが、`recomputeAutoGainStaging` → `computeAndApplyAutoGain` 内で `-max(0, irResidualDb - 1.5f)` と使用するため、正値の減衰量として保存しないと期待通りに動作しない。
+
+**⚠️ Peak/RMS 個別計算（C-3 修正）**: 既存の `computeScaleFactor` は `absoluteClamp = min(peakClamp, rmsClamp)` で一括計算しているため、どちらが効いたか分からない。以下の修正で peak/rms を分離して記録する。
 
 **`IRConverter.h`**:
 
@@ -160,29 +213,53 @@ struct ScaleFactorResult
 {
     double scaleFactor = 1.0;
     bool hasScaleFactor = false;
-    double residualRiskDb = 0.0;  // ★ 新規追加
+    // ★ v2.0: 正の減衰量 [dB]（IR のピーク/RMS/周波数応答による減衰量の合計）
+    float residualRiskDb = 0.0f;
 };
 
 ```
 
-**`IRConverter.cpp` `computeScaleFactor` 内の追加処理**:
+**`IRConverter.cpp` `computeScaleFactor` 内の追加処理（C-2/C-3 修正反映）**:
 
 ```cpp
-// 周波数応答ピーク解析（既存のエネルギー/RMS/ピーククランプ後に追加）
+// ★ v2.0: Peak/RMS を個別計算し、減衰量 [dB] を正値で記録（C-2/C-3）
+double peakAttenDb = 0.0, rmsAttenDb = 0.0, freqAttenDb = 0.0;
+
+// 既存 energy ベースの scaleFactor 適用後...
+double scale = result.scaleFactor;
+
+// Peak クランプ（既存の kMaxEffectivePeak を分離計算）
+constexpr double kMaxEffectivePeak = 0.5;
+const double irPeak = /* 既存のピーク検出値 */;
+if (irPeak * scale > kMaxEffectivePeak)
+{
+    const double peakClamp = kMaxEffectivePeak / (irPeak * scale);
+    result.scaleFactor *= peakClamp;
+    peakAttenDb = -20.0 * std::log10(peakClamp);  // 正値の減衰量
+}
+
+// RMS クランプ（既存の kMaxEffectiveRms を分離計算）
+constexpr double kMaxEffectiveRms = 0.25;
+const double irRms = std::sqrt(irEnergySum / numSamples);
+if (irRms * scale > kMaxEffectiveRms)
+{
+    const double rmsClamp = kMaxEffectiveRms / (irRms * scale);
+    result.scaleFactor *= rmsClamp;
+    rmsAttenDb = -20.0 * std::log10(rmsClamp);  // 正値の減衰量
+}
+
+// 周波数応答ピーク解析（Tukey α=0.5 + コヒーレントゲイン補正）
 const double freqRespGain = estimateMaxFrequencyResponseGain(ir, sampleRate);
 constexpr double kMaxEffectiveFreqResponse = 1.41; // +3dB
-double freqClipDb = 0.0;
 if (freqRespGain > kMaxEffectiveFreqResponse)
 {
     const double freqClip = kMaxEffectiveFreqResponse / freqRespGain;
     result.scaleFactor *= freqClip;
-    freqClipDb = 20.0 * std::log10(freqClip);
+    freqAttenDb = -20.0 * std::log10(freqClip);  // 正値の減衰量
 }
 
-// residualRiskDb の算出
-double peakClipDb = 0.0;   // 既存ピーククランプによる減衰量(dB)
-double rmsClipDb = 0.0;    // 既存RMSクランプによる減衰量(dB)
-result.residualRiskDb = peakClipDb + rmsClipDb + freqClipDb;
+// residualRiskDb = 正の減衰量合計 [dB]（C-2 符号修正）
+result.residualRiskDb = static_cast<float>(peakAttenDb + rmsAttenDb + freqAttenDb);
 
 ```
 
@@ -190,7 +267,7 @@ result.residualRiskDb = peakClipDb + rmsClipDb + freqClipDb;
 
 ### Phase 2 State Management Extension
 
-#### 2.1 `PreparedIRState.h` — `residualRiskDb` 追加
+#### 2.1 `PreparedIRState.h` — `residualRiskDb` 追加（`float` 型, 正値）
 
 ```cpp
 struct PreparedIRState
@@ -198,7 +275,7 @@ struct PreparedIRState
     // ... existing members ...
     double scaleFactor = 1.0;
     bool hasScaleFactor = false;
-    double residualRiskDb = 0.0;  // ★ 新規追加（IR解析結果の dB リスク値）
+    float residualRiskDb = 0.0f;  // ★ 新規追加（IR解析結果の正値減衰量 [dB]）
 
     PreparedIRState() = default;
 
@@ -206,12 +283,12 @@ struct PreparedIRState
         : /* ... existing ... */
           scaleFactor(other.scaleFactor),
           hasScaleFactor(other.hasScaleFactor),
-          residualRiskDb(other.residualRiskDb)  // ★ 追加
+          residualRiskDb(other.residualRiskDb)  // ★ 追加（float）
     {
         // ...
         other.scaleFactor = 1.0;
         other.hasScaleFactor = false;
-        other.residualRiskDb = 0.0;  // ★ 追加
+        other.residualRiskDb = 0.0f;  // ★ 追加（float リテラル）
     }
 
     PreparedIRState& operator=(PreparedIRState&& other) noexcept
@@ -221,11 +298,11 @@ struct PreparedIRState
             // ... existing cleanup ...
             scaleFactor = other.scaleFactor;
             hasScaleFactor = other.hasScaleFactor;
-            residualRiskDb = other.residualRiskDb;  // ★ 追加
+            residualRiskDb = other.residualRiskDb;  // ★ 追加（float）
             // ...
             other.scaleFactor = 1.0;
             other.hasScaleFactor = false;
-            other.residualRiskDb = 0.0;  // ★ 追加
+            other.residualRiskDb = 0.0f;  // ★ 追加（float リテラル）
         }
         return *this;
     }
@@ -253,24 +330,28 @@ struct IRState {
     const juce::AudioBuffer<double>* ir = nullptr;
     double sampleRate = 0.0;
     uint64_t generation = 0;
-    double residualRiskDb = 0.0;  // ★ 新規追加
+    float residualRiskDb = 0.0f;  // ★ 新規追加（float, 正値減衰量）
 };
 
 ```
 
-**`applyComputedIR` での反映**:
+**`applyComputedIR` での反映（M-1 一貫性確保）**:
+
+`IRState` に `residualRiskDb` を直接保持し、`acquireIRState()` 経由で読み取る。これにより別途 `atomic<double>` を管理する必要がなくなり、IRState 全体の一貫性が保証される。
 
 ```cpp
 void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
-    // ... 既存の scaleFactor 適用処理 ...
+    // ... 既存の IRState 生成 ...
 
-    // ★ residualRiskDb を IRState に保存
-    if (prepared && prepared->hasScaleFactor)
+    // ★ residualRiskDb を IRState に直接保存（M-1 一貫性）
+    if (prepared)
     {
-        currentResidualRiskDb.store(prepared->residualRiskDb, std::memory_order_release);
+        auto newState = std::make_unique<IRState>();
+        // ... 既存の irOwner/ir/sampleRate/generation 設定 ...
+        newState->residualRiskDb = prepared->residualRiskDb;
+        // ... publishAtomic(currentIRState, newState.release(), ...) ...
     }
-    // ... 既存の IRState 更新 ...
 }
 
 ```
@@ -279,27 +360,29 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
 
 ```cpp
 // ConvolverProcessor.h に追加（public メソッド）
+// IRState から residualRiskDb を読み取る（acquireIRState 経由で一貫性保証）
 [[nodiscard]] float getIrResidualRiskDb() const noexcept
 {
-    return static_cast<float>(
-        convo::consumeAtomic(currentResidualRiskDb, std::memory_order_acquire));
+    auto* state = acquireIRState();
+    return (state != nullptr) ? state->residualRiskDb : 0.0f;
 }
-
-private:
-    std::atomic<double> currentResidualRiskDb { 0.0 };
 
 ```
 
-#### 2.4 `AudioEngine.h` — フラグ・メソッド追加
+#### 2.4 `AudioEngine.h` — フラグ追加
+
+**v2.0**: `recomputeAutoGainStaging()` は AudioEngine に追加しない。フラグと getter/setter のみを追加する。
 
 ```cpp
 // AudioEngine クラス内（既存 atomic 群の近くに追加）
 std::atomic<bool> autoGainStagingEnabled { true };
 
 // メソッド宣言（public セクション）
-void recomputeAutoGainStaging();
 void setAutoGainStagingEnabled(bool enabled);
 [[nodiscard]] bool isAutoGainStagingEnabled() const;
+
+// ★ captureBuildParameterSnapshot() に autoGainStagingEnabled を追加（BuildInput 経由で Builder に伝達）
+//   → RuntimeBuilder::computeAndApplyAutoGain で参照
 
 ```
 
@@ -349,7 +432,25 @@ float EQProcessor::computeMaxGainDb(double sampleRate) const
 
 ```
 
-**⚠️ 注意**: 新規の複素応答関数は追加しない。`getMagnitudeSquared()`（`EQProcessor.h:387-388`）は既に `z = cos(ω) + j·sin(ω)` を使用しており、M/S デコードに位相情報を必要としない（Mid/Side は L/R への振幅積算後に合成される）。また、`calcEQResponseCurve()` と同じ `svfToDisplayBiquad()` 経由で計算することで、実 DSP と整合した最大ゲイン推定が可能である。
+**⚠️ 注意（M-2 修正）**: 新規の複素応答関数は追加しない。`getMagnitudeSquared()`（`EQProcessor.h:387-388`）は既に `z = cos(ω) + j·sin(ω)` を使用しており、M/S デコードに位相情報を必要としない。ただし、M/S モードの最大利得計算は `max(|Hmid|, |Hside|)` とする。単純な `L = M+S` は振幅を過大評価するため、正しい M/S 評価は以下の式を用いる:
+
+```cpp
+// M/S バンドの最大利得: エンコード後の Mid/Side 成分はそれぞれ独立したフィルタ応答を持つ
+// Mid と Side は L/R 合成時に max として作用する
+// Hm = prod(Mid), Hs = prod(Side)
+// L/R ゲイン = max(|Hm|, |Hs|)
+float msGain = 1.0f;
+if (hasMSBands)
+{
+    float Hm = 1.0f, Hs = 1.0f;  // 各々の積算
+    // ... getMagnitudeSquared を Mid/Side バンドそれぞれで計算 ...
+    msGain = std::max(Hm, Hs);
+}
+```
+
+**Parallel 構造の注意**: Parallel filter structure では `H = 1 + Σ(Hi - 1)` で計算する。本設計は Serial を主要想定とするが、Parallel 時も Serial 積を安全な上限として使用可能。`computeMaxGainDb()` の実装コメントに明記する。
+
+`calcEQResponseCurve()` と同じ `svfToDisplayBiquad()` 経由で計算することで、実 DSP と整合した最大ゲイン推定が可能である。
 
 ---
 
@@ -364,11 +465,55 @@ float EQProcessor::computeMaxGainDb(double sampleRate) const
 
 ---
 
-### Phase 5 AudioEngine Integration
+### Phase 5 RuntimeBuilder Integration（★ v2.0 全面改訂）
+
+#### 5.0 設計方針（v1.0 → v2.0 変更点）
+
+v1.0 では `AudioEngine::recomputeAutoGainStaging()` を新設し、setter 内で呼び出す設計だった。v2.0 ではこれを **RuntimeBuilder のビルド工程に統合**する。
+
+**変更理由**:
+
+| 観点 | v1.0 (AudioEngine setter 経由) | v2.0 (RuntimeBuilder 統合) |
+|------|-------------------------------|---------------------------|
+| Authority | AudioEngine と RuntimeBuilder で二重化 | RuntimeBuilder に一本化 |
+| リビルド回数 | 5回/変更 (C-6) | 1回/変更 |
+| データフロー | atomic → setter → atomic → Spec → World | Spec → Builder → World（一方向） |
+| Audio Thread | atomics fallback or World | World のみ（既存通り） |
+| テスト容易性 | AudioEngine 全体の結合が必要 | Builder ユニットテスト可能 |
+
+**v2.0 データフロー**:
+
+```
+User操作 (processingOrder/IR/EQ変更)
+  → submitRebuildIntent (1回)
+    → Worker Thread:
+      captureBuildParameterSnapshot()  // autoGainStagingEnabled 含む
+      → BuildInput.autoGainStagingEnabled = ...
+      → RuntimeBuilder::build(input, convolverSnapshot)
+        → DSPCore 生成・準備
+      → Orchestrator:
+        → RuntimePublishSpecification 生成
+          → ProcessingPart.autoGainStagingEnabled = ...
+          → ProcessingPart.inputHeadroomGain = 1.0 (仮)
+        → RuntimeBuilder::buildRuntimePublishWorld(spec)
+          → computeAndApplyAutoGain()  // ★ ここで自動ゲイン計算
+            → EQProcessor::computeMaxGainDb() を呼出
+            → ConvolverProcessor::getIrResidualRiskDb() を呼出
+            → worldOwner->automation.inputHeadroomGain = ...  // 直接書込
+            → worldOwner->automation.outputMakeupGain = ...
+            → worldOwner->automation.convolverInputTrimGain = ...
+          → worldOwner->freeze()
+      → publishWorld(worldOwner)
+        → RuntimeStore に RCU 公開
+
+Audio Thread:
+  acquireReadToken()
+  → world->automation.inputHeadroomGain  // 既存経路で読取
+```
 
 #### 5.1 リアルタイム安全設計
 
-`recomputeAutoGainStaging()` は **Message Thread / Loader Thread のみ** で実行する。Audio Thread は触らない。
+自動ゲイン計算は **Worker Thread（非RTスレッド）** でのみ実行する。Audio Thread は既存通り `world->automation.*` を読むだけ。
 
 **既存コード確認（Bencina 原則への準拠）**:
 
@@ -376,13 +521,15 @@ float EQProcessor::computeMaxGainDb(double sampleRate) const
 - ✅ `convo::publishAtomic()` / `consumeAtomic()` — lock-free atomic アクセス
 - ✅ `enqueueDeferredDeleteNonRt()` — RT 外でのメモリ解放（`AudioEngine.h:3788-3830`）
 - ✅ `m_retireRouter->enqueueRetire()` — epoch ベース退役
+- ✅ `worldOwner->freeze()` — publish 後の RuntimeWorld 不変性保証（`RuntimeBuilder.cpp`）
 
 #### 5.2 計算ロジック（4パターン）
 
 ```cpp
+// ★ v2.0: RuntimeBuilder::computeAndApplyAutoGain 内で使用
 入力:
-  eqMaxDb = computeMaxGainDb(currentSampleRate)
-  irResidualDb = currentPreparedIr ? currentPreparedIr->residualRiskDb : 0.0
+  eqMaxDb = engine.getEqProcessor()->computeMaxGainDb(currentSampleRate)
+  irResidualDb = engine.uiConvolverProcessor.getIrResidualRiskDb()  // IRState から一貫性読取
 
 定数:
   kMarginEqFirst = 3.0f           // EQ第1段の入力マージン
@@ -406,180 +553,196 @@ float EQProcessor::computeMaxGainDb(double sampleRate) const
 - `trim`: [-12, 0] dB
 - `makeup`: [0, 12] dB
 
-**⚠️ Conv-first 時の input 上限 -6dB クランプ**: Conv→PEQ モードの Auto 計算結果が 0dB の場合、setter が -6dB にクランプされる。安全側（信号が静かになる方向）であるため許容。`recomputeAutoGainStaging()` はクランプ後の値を再読み込みして `makeup` を調整する。
+**⚠️ Conv-first 時の input 上限 -6dB クランプ**: Conv→PEQ モードの計算結果が 0dB の場合、-6dB にクランプされる。`computeAndApplyAutoGain()` はクランプ後の値で makeup を再計算する（`computedMakeupDb = -clampedInputDb - clampedTrimDb`）。ネット 0dB は保証されるが、`input=-6dB / makeup=6dB` となるためユーザーは「Auto で音が静かになった」と錯覚する可能性がある。これは意図された設計（Conv-first 時の入力保護）である。v1.0 からの改善として、実効値ベースのネット 0dB 整合を `computeAndApplyAutoGain()` 内で直接実装した。
 
-#### 5.3 `recomputeAutoGainStaging()` 実装
+#### 5.3 `computeAndApplyAutoGain()` — RuntimeBuilder 内での自動ゲイン計算
+
+`RuntimeBuilder::buildRuntimePublishWorld()` 内で、`ProcessingPart` の写像直後に呼び出す。AudioEngine の public setter は使用せず、直接 `worldOwner->automation` に書き込む。
 
 ```cpp
-void AudioEngine::recomputeAutoGainStaging()
+// RuntimeBuilder.cpp — buildRuntimePublishWorld() 内の拡張
+convo::aligned_unique_ptr<const RuntimePublishWorld>
+RuntimeBuilder::buildRuntimePublishWorld(
+    const convo::RuntimeBuildSnapshot* sealedSnapshot,
+    const RuntimePublishSpecification& spec) noexcept
+{
+    // ... 既存の Topology/Routing/Execution/Overlap/Latency 写像 ...
+
+    // ★ v9.4 P0: ProcessingPart から読み取り（Orchestrator が収集済み）
+    worldOwner->automation.eqBypassed = spec.processing.eqBypassed;
+    worldOwner->automation.convBypassed = spec.processing.convBypassed;
+    worldOwner->automation.softClipEnabled = spec.processing.softClipEnabled;
+    worldOwner->automation.saturationAmount = spec.processing.saturationAmount;
+    worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;
+    worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;
+    worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;
+
+    // ★ v2.0: 自動ゲインステージング — ProcessingPart 値の上書き
+    if (spec.processing.autoGainStagingEnabled)
+    {
+        computeAndApplyAutoGain(worldOwner, spec, sealedSnapshot,
+                                engine, nextGraphGeneration);
+    }
+
+    // ... 既存の Resource/Timing/Publication/Retire 写像 ...
+    worldOwner->freeze();
+    return worldOwner;
+}
+```
+
+```cpp
+// ★ v2.0 新規: 自動ゲイン計算（RuntimeBuilder 内 private メソッド）
+void RuntimeBuilder::computeAndApplyAutoGain(
+    RuntimePublishWorld* worldOwner,
+    const RuntimePublishSpecification& spec,
+    const convo::RuntimeBuildSnapshot* sealedSnapshot,
+    AudioEngine& engine,
+    std::uint64_t generation) noexcept
 {
     ASSERT_NON_RT_THREAD();
 
-    if (m_isRestoringState) return;
-    if (!convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire)) return;
+    const bool eqBypassed = spec.processing.eqBypassed;
+    const bool convBypassed = spec.processing.convBypassed;
+    const int order = spec.processing.processingOrder;
+    const double sr = (sealedSnapshot != nullptr)
+        ? sealedSnapshot->buildInput.sampleRate
+        : 48000.0;
 
-    const bool eqBypassed = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
-    const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
-    const auto order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
-    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    // EQ最大ゲイン: DSPCore から EQProcessor を取得
+    float eqMaxDb = 0.0f;
+    if (!eqBypassed && engine.getEqProcessor() != nullptr)
+    {
+        eqMaxDb = engine.getEqProcessor()->computeMaxGainDb(sr);
+    }
 
-    const float eqMaxDb = eqBypassed ? 0.0f : eqProcessor->computeMaxGainDb(sr);
-
-    // ★ 修正: currentPreparedIr は存在しない。ConvolverProcessor 経由で取得。
-    //   IRState に residualRiskDb を追加し、getIrResidualRiskDb() で取得。
-    const float irResidualDb = (!convBypassed)
-        ? uiConvolverProcessor.getIrResidualRiskDb()
-        : 0.0f;
+    // IR残存リスク: ConvolverProcessor から取得
+    float irResidualDb = 0.0f;
+    if (!convBypassed)
+    {
+        irResidualDb = engine.uiConvolverProcessor.getIrResidualRiskDb();
+    }
 
     // 4パターン判定（ProcessingOrder × bypass の組み合わせ）
     float newInputDb = 0.0f, newTrimDb = 0.0f, newMakeupDb = 0.0f;
 
-    const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
-    const bool eqIsActive = !eqBypassed;
-    const bool convIsActive = !convBypassed;
-
-    if (eqIsActive && !convIsActive)
+    if (!eqBypassed && convBypassed)
     {
         // PEQ only
         newInputDb = -std::max(0.0f, eqMaxDb - 3.0f);
-        newMakeupDb = -newInputDb;
     }
-    else if (convIsActive && !eqIsActive)
+    else if (eqBypassed && !convBypassed)
     {
         // Conv only
         newInputDb = -std::max(0.0f, irResidualDb - 1.5f);
-        newMakeupDb = -newInputDb;
     }
-    else if (order == ProcessingOrder::ConvolverThenEQ)
+    else if (order == static_cast<int>(ProcessingOrder::ConvolverThenEQ))
     {
-        // Conv→PEQ: trim 不適用
-        newInputDb = -std::max(0.0f, irResidualDb - 1.5f)
-
-                     - std::max(0.0f, eqMaxDb - 2.0f);
-
-        newMakeupDb = -newInputDb;
+        // Conv→PEQ: trim 不適用, input 上限 -6dB
+        newInputDb = -(std::max(0.0f, irResidualDb - 1.5f)
+                       + std::max(0.0f, eqMaxDb - 2.0f));
+        newInputDb = std::max(newInputDb, -6.0f);  // Conv-first 安全上限
     }
     else
     {
         // PEQ→Conv: trim 適用
         newInputDb = -std::max(0.0f, eqMaxDb - 3.0f);
         newTrimDb = -std::max(0.0f, irResidualDb - 2.0f);
-        newMakeupDb = -newInputDb - newTrimDb;
     }
 
-    // ★ 実効値ベースのネット 0dB 整合（クランプ後の実際の値を取得して makeup を算出し、音量不整合を 100% 回避）
-    setInputHeadroomDb(newInputDb);
-    setConvolverInputTrimDb(newTrimDb);
-    
-    const float actualInputDb = getInputHeadroomDb();
-    const float actualTrimDb = getConvolverInputTrimDb();
-    const float actualMakeupDb = -actualInputDb - actualTrimDb;
-    
-    setOutputMakeupDb(actualMakeupDb);
+    // ★ 実効値ベースのネット 0dB 整合（クランプ適用後の値で makeup を算出）
+    const float clampedInputDb = juce::jlimit(-12.0f, 0.0f, newInputDb);
+    const float clampedTrimDb  = juce::jlimit(-12.0f, 0.0f, newTrimDb);
+    const float computedMakeupDb = -clampedInputDb - clampedTrimDb;
+    const float clampedMakeupDb = juce::jlimit(0.0f, 12.0f, computedMakeupDb);
+
+    // 直接 worldOwner->automation に書込（setter / submitRebuildIntent は呼ばない）
+    worldOwner->automation.inputHeadroomGain =
+        juce::Decibels::decibelsToGain(static_cast<double>(clampedInputDb));
+    worldOwner->automation.outputMakeupGain =
+        juce::Decibels::decibelsToGain(static_cast<double>(clampedMakeupDb));
+    worldOwner->automation.convolverInputTrimGain =
+        juce::Decibels::decibelsToGain(static_cast<double>(clampedTrimDb));
+
+    // ★ Diagnostic: 自動ゲイン計算結果を rebuild 診断ログに出力
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    diagLog("[AutoGain] gen=" + juce::String(static_cast<juce::int64>(generation))
+        + " eq=" + juce::String(eqMaxDb) + " ir=" + juce::String(irResidualDb)
+        + " in=" + juce::String(clampedInputDb)
+        + " trim=" + juce::String(clampedTrimDb)
+        + " makeup=" + juce::String(clampedMakeupDb));
+#endif
 }
+```
+
+**設計上の重要点**:
+
+1. **1回の rebuild で完結**: `computeAndApplyAutoGain` は `buildRuntimePublishWorld()` 内で呼ばれ、`worldOwner` に直接書き込む。`submitRebuildIntent()` は呼ばない → リビルドストーム完全排除 (C-6)
+2. **public setter を呼ばない**: `setInputHeadroomDb()` / `setOutputMakeupDb()` / `setConvolverInputTrimDb()` は経由しない → atomic 二重更新排除
+3. **クランプ後の実効値で makeup 計算**: `clampedInputDb` / `clampedTrimDb` を `jlimit` 後に決定し、`computedMakeupDb = -clampedInputDb - clampedTrimDb` でネット 0dB を保証 (C-7)
+4. **AudioEngine のフラグのみ**: `autoGainStagingEnabled` は atomic フラグとして AudioEngine に残し、UI トグルで操作。`captureBuildParameterSnapshot()` が `BuildInput` に含めて Orchestrator 経由で Builder に伝達する
 
 #### 5.4 `setProcessingOrder` の修正
 
-現状の呼び出し順序（`AudioEngine.Parameters.cpp:268-275`）:
+**v2.0 変更**: `recomputeAutoGainStaging()` の呼び出しは AudioEngine setter から削除し、RuntimeBuilder 側で代替する。`sendChangeMessage()` は bypass 系 setter と整合させるために追加する。
 
 ```cpp
-
-// 修正前のコード
-convo::publishAtomic(currentProcessingOrder, order, ...);
-convo::publishAtomic(m_currentProcessingOrder, order, ...);
-submitRebuildIntent(...);          // ← 1回目の rebuild 発火
-applyDefaultsForCurrentMode();     // ← 内部でも submitRebuildIntent（2回目）
-
-```cpp
-
-`applyDefaultsForCurrentMode()` は末尾で `submitRebuildIntent()` を内部呼出ししている（`AudioEngine.Parameters.cpp:342`）。したがって `setProcessingOrder` の明示的な `submitRebuildIntent` は冗長であり、削除する。bypass setter（`setEqBypassRequested` 等）も同じ冗長パターンだが、今回のスコープ外。
-
-**修正後のコード**:
-
-```cpp
-
+// AudioEngine.Parameters.cpp — setProcessingOrder の修正
 void AudioEngine::setProcessingOrder(ProcessingOrder order)
 {
     ASSERT_NON_RT_THREAD();
     convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
-    // ★ 明示的 submitRebuildIntent を削除（applyDefaultsForCurrentMode が内部発行）
-    applyDefaultsForCurrentMode();   // submitRebuildIntent を内部発行（既存: Parameters.cpp:342）
-    recomputeAutoGainStaging();      // ★ 新規追加（Auto ON 時にゲイン上書き）
-    sendChangeMessage();             // ★ 新規追加（bypass 系 setter に揃える）
+    submitRebuildIntent(convo::RebuildKind::Structural,
+        RebuildTelemetryReason::EnqueueSnapshotCommand,
+        RebuildTelemetryClass::Snapshot,
+        RebuildTelemetryPolicy::Replaceable);
+    // ★ v2.0: applyDefaultsForCurrentMode を削除し、submitRebuildIntent のみとする
+    //   → 自動ゲイン計算は RuntimeBuilder::computeAndApplyAutoGain が行う
+    //   → applyDefaultsForCurrentMode 内の submitRebuildIntent 重複を排除
+    sendChangeMessage();  // ★ 追加（bypass 系 setter に揃える）
 }
+```
 
-```cpp
+**v1.0 からの変更点**:
 
-**既存コード確認**: ✅ `setProcessingOrder` に `sendChangeMessage()` なし（`Parameters.cpp:268-275`）。bypass setter（`setEqBypassRequested:161`, `setConvolverBypassRequested:172`）は `sendChangeMessage()` を持つ。
+- `applyDefaultsForCurrentMode()` の呼び出しを削除。これにより submitRebuildIntent の二重発火が解消される（C-6）
+- `recomputeAutoGainStaging()` は削除（Builder 統合に伴い）
+- `sendChangeMessage()` は保持（bypass 系 setter との一貫性）
 
-#### 5.4.1 `setEqBypassRequested` / `setConvolverBypassRequested` の修正
+**補足**: `applyDefaultsForCurrentMode()` の削除に伴い、デフォルトゲイン値の設定は RuntimeBuilder の `computeAndApplyAutoGain()` が代替する。Auto ON 時は計算値が適用され、Auto OFF 時は直近の手動設定値が `ProcessingPart` 経由で適用される（変更なし）。
 
-各setterの末尾に `recomputeAutoGainStaging()` を追加。既存の `sendChangeMessage()` の前に挿入。
+#### 5.5 `convolverParamsChanged` — IRロード後のトリガ
 
-```cpp
+`AudioEngine.UIEvents.cpp` 内で、IRロード完了後に明示的に `recomputeAutoGainStaging()` を呼ぶ必要はない。IRロード完了は既存のパスで `submitRebuildIntent()` を発火するため、RuntimeBuilder が自動的に `computeAndApplyAutoGain()` を実行する。
 
-void AudioEngine::setEqBypassRequested(bool shouldBypass)
-{
-    ASSERT_NON_RT_THREAD();
-    convo::publishAtomic(eqBypassRequested, shouldBypass, std::memory_order_release);
-    convo::publishAtomic(m_currentEqBypass, shouldBypass, std::memory_order_release);
-    uiEqEditor.setBypass(shouldBypass);
-    applyDefaultsForCurrentMode();
-    recomputeAutoGainStaging();     // ★ 新規追加
-    submitRebuildIntent(...);
-    sendChangeMessage();
-}
+**v2.0**: `convolverParamsChanged` の末尾に新規追加は不要。**IRロード→rebuild→Builder内自動ゲイン計算** で完結する。
 
-```cpp
+#### 5.6 プリセットロード時の対策
 
-同様に `setConvolverBypassRequested()` にも追加。
+**v2.0 では `recomputeAutoGainStaging()` を AudioEngine に追加しない。プリセットロード後の自動ゲイン再計算は rebuild に委ねる。**
 
-#### 5.5 `convolverParamsChanged` での呼び出し
+**既存の問題 (C-5)**: `DeviceSettings::loadSettings()` は `BulkRestoreGuard` を使用。ガード内で setter を呼んでも rebuild は保留される。ガード破棄時に `endBulkParameterRestore(true)` → `m_isRestoringState = false` → rebuild 1回発火。
 
-`AudioEngine.UIEvents.cpp` のIRロード完了後（末尾の `sendChangeMessage()` 直前）に追加:
+**修正アプローチ**: 既存の `BulkRestoreGuard` のスコープ設計をそのまま利用する。guard のデストラクタが `endBulkParameterRestore(true)` を呼び、その後の rebuild 内で RuntimeBuilder が自動ゲインを計算する。`recomputeAutoGainStaging()` の追加呼び出しは不要。
 
-```cpp
+```
+// DeviceSettings::loadSettings — スコープ再構成（C-5 確認）:
 
-// convolverParamsChanged() の末尾
-    // ★ 新規: IR ロード完了後に自動ゲイン再計算
-    recomputeAutoGainStaging();
-    sendChangeMessage();  // 既存
-}
-
-```cpp
-
-**既存コード確認**: ✅ `convolverParamsChanged` の末尾は `sendChangeMessage()` + `}`（`UIEvents.cpp:240`）。
-
-#### 5.6 プリセットロード時の対策 — 修正版
-
-**⚠️ 重要設計判断**: `recomputeAutoGainStaging()` は冒頭で `m_isRestoringState` チェックにより早期リターンする。`requestLoadState()` は RAII ガード `RestoreStateGuard` の中で実行されるため、関数内での `recomputeAutoGainStaging()` は無効。
-
-**修正アプローチ**: `requestLoadState()` 完了後に `recomputeAutoGainStaging()` を呼ぶ。
-
-```cpp
-
-// AudioEngine.StateIO.cpp — requestLoadState の末尾（RestoreStateGuard は未破棄）
-// requestLoadState は m_isRestoringState=true 中に実行されるため、
-// この関数内で recomputeAutoGainStaging() を呼ぶと早期リターンする。
-// → requestLoadState 完了後に、AudioEngine 外部（DeviceSettings::loadSettings）から呼ぶ。
-
-// DeviceSettings::loadSettings 内（BulkRestoreGuard が endBulkParameterRestore を呼ぶ後に追加）:
-{
-    BulkRestoreGuard bulkRestoreGuard { engine };
-    // ... 既存の load 処理 ...
-    engine.requestLoadState(restoredState);
-}
-// ★ BulkRestoreGuard のデストラクタ実行後 (m_isRestoringState = false) に呼ぶ
-engine.recomputeAutoGainStaging();  // Auto ON 時にゲイン再計算
-
+    engine.beginBulkParameterRestore();
+    {
+        BulkRestoreGuard guard { engine };
+        // ... setter 呼び出し ... (rebuild 保留)
+        // ... setConvolverStateTree ...
+        return;  // guard デストラクタ → endBulkParameterRestore → m_isRestoringState=false
+    }
+    // → submitRebuildIntent → Builder 内で auto gain 計算
 ```cpp
 
 **既存コード確認**:
 
 - `RestoreStateGuard`: `AudioEngine.StateIO.cpp:16-22` — `requestLoadState` 内の RAII ガード
 - `BulkRestoreGuard`: `DeviceSettings.cpp:981-983` — `loadSettings` 内の RAII ガード
-- `endBulkParameterRestore`: `AudioEngine.Parameters.cpp:207-218` — `m_isRestoringState = false` + rebuild submit
+- `endBulkParameterRestore`: `AudioEngine.Parameters.cpp:207-218` — `m_isRestoringState = false` + `submitRebuildIntent` → Builder 内で auto gain 計算
 
 ### Phase 6 Runtime Mode Transition Safety
 
@@ -635,7 +798,8 @@ autoGainToggle.setBounds(row2.removeFromLeft(160).reduced(5));  // ★ 追加
 addAndMakeVisible(autoGainToggle);
 autoGainToggle.onClick = [this] {
     audioEngine.setAutoGainStagingEnabled(autoGainToggle.getToggleState());
-    audioEngine.recomputeAutoGainStaging();
+    // ★ v2.0: recomputeAutoGainStaging は不要。setter 内で submitRebuildIntent を呼び、
+    //   RuntimeBuilder::computeAndApplyAutoGain が自動ゲインを計算する。
 };
 
 ```cpp
@@ -662,23 +826,57 @@ void DeviceSettings::updateGainStagingDisplay()
 
 ```cpp
 
-#### 7.4 手動編集時の Auto 解除
+#### 7.4 手動編集時の Auto 解除（M-4 修正: コールバックチェーン）
+
+**⚠️ 既存の onTextChange を上書きしない。元の setInputHeadroomDb 呼び出しを維持するためチェーンする。**
 
 ```cpp
-
-// DeviceSettings コンストラクタ内に追加
-inputHeadroomEditor.onTextChange = [this] {
+// DeviceSettings コンストラクタ内 — ★ M-4 コールバックチェーン化
+auto oldInputOnChange = std::move(inputHeadroomEditor.onTextChange);
+inputHeadroomEditor.onTextChange = [this, oldInputOnChange = std::move(oldInputOnChange)] {
+    // Auto 有効時は disable して UI 同期
     if (audioEngine.isAutoGainStagingEnabled())
     {
         autoGainToggle.setToggleState(false, juce::dontSendNotification);
         audioEngine.setAutoGainStagingEnabled(false);
     }
+    // 元の setInputHeadroomDb 呼び出しを維持（上書き防止）
+    if (oldInputOnChange)
+        oldInputOnChange();
 };
-outputMakeupEditor.onTextChange = [this] { /* 同上 */ };
+auto oldOutputOnChange = std::move(outputMakeupEditor.onTextChange);
+outputMakeupEditor.onTextChange = [this, oldOutputOnChange = std::move(oldOutputOnChange)] {
+    if (audioEngine.isAutoGainStagingEnabled())
+    {
+        autoGainToggle.setToggleState(false, juce::dontSendNotification);
+        audioEngine.setAutoGainStagingEnabled(false);
+    }
+    if (oldOutputOnChange)
+        oldOutputOnChange();
+};
+```
+
+**既存コード確認**: ✅ `inputHeadroomEditor` / `outputMakeupEditor` は `DeviceSettings.h:79-82` で宣言済み。`DeviceSettings.cpp:369-385` で既存の onTextChange に setInputHeadroomDb/setOutputMakeupDb 呼び出しが設定されている。これらのラムダを上書きせずチェーンする必要がある（M-4）。
+
+#### 7.5 永続化（M-5 修正: XML 属性追加）
+
+**`DeviceSettings::saveSettings`** に `autoGainStagingEnabled` を保存:
 
 ```cpp
+// DeviceSettings.cpp — saveSettings 内（既存の xml->setAttribute 群に追加）
+xml->setAttribute("autoGainStagingEnabled",
+    static_cast<int>(engine.isAutoGainStagingEnabled()));
+```
 
-**既存コード確認**: ✅ `inputHeadroomEditor` / `outputMakeupEditor` は `DeviceSettings.h:79-82` で宣言済み。`updateGainStagingDisplay()` は `DeviceSettings.cpp:599` に実装済み。
+**`DeviceSettings::loadSettings`** に復元を追加:
+
+```cpp
+// DeviceSettings.cpp — loadSettings 内（BulkRestoreGuard 内の既存パラメータ復元群に追加）
+bool autoGain = xml->getBoolAttribute("autoGainStagingEnabled", true);
+engine.setAutoGainStagingEnabled(autoGain);
+```
+
+**既存コード確認**: ✅ saveSettings は `DeviceSettings.cpp:924-968` で実装済み（`"outputMakeupDb"` 等と同パターン）。loadSettings は `DeviceSettings.cpp:975` で実装済み。
 
 ---
 
@@ -701,7 +899,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 endif()
 add_test(NAME EQProcessorMaxGainTests COMMAND EQProcessorMaxGainTests)
 
-# GainStagingContractTests（新規）
+# GainStagingContractTests（新規 — v2.0: RuntimeBuilder 統合テスト）
 
 add_executable(GainStagingContractTests
     src/tests/GainStagingContractTests.cpp
@@ -710,9 +908,16 @@ target_compile_features(GainStagingContractTests PRIVATE cxx_std_20)
 target_include_directories(GainStagingContractTests PRIVATE
     src src/eqprocessor src/audioengine
 )
+target_link_libraries(GainStagingContractTests PRIVATE
+    MKL::MKL
+    juce::juce_recommended_config
+)
 add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
 
-```cpp
+# ★ v2.0: computeAndApplyAutoGain の入出力契約テスト
+#   RuntimeBuilder 経由で自動ゲイン計算の出力（worldOwner->automation の値）を検証する。
+#   AudioEngine の完全な初期化は不要。Specification と Mock DSPCore で Builder をテスト可能。
+#   テストケース: 4パターン（PEQ only / Conv only / Conv→PEQ / PEQ→Conv）× Auto On/Offcpp
 
 ---
 
@@ -726,7 +931,11 @@ add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
 | `PreparedIRState` に `residualRiskDb` 未追加 | `PreparedIRState.h` — 同様に未追加 | ✅ 未追加確認 |
 | `IRState` に `residualRiskDb` 未追加 | `ConvolverProcessor.h:1011` — `ir`/`sampleRate`/`generation` のみ | ✅ 未追加確認、追加が必要 |
 | `computeMaxGainDb()` 未実装 | コードベース全体で 0 hits | ✅ 未実装確認 |
-| `currentPreparedIr` は AudioEngine に存在しない | AudioEngine.h で 0 hits | ⚠️ **修正**: `uiConvolverProcessor.getIrResidualRiskDb()` に変更 |
+| `currentPreparedIr` は AudioEngine に存在しない | AudioEngine.h で 0 hits | ✅ v2.0: `uiConvolverProcessor.getIrResidualRiskDb()` に変更 |
+| `BulkRestoreGuard` のスコープ構造 | `DeviceSettings.cpp:979-983` | ✅ スコープ再構成（C-5） |
+| `RuntimeBuilder` の buildRuntimePublishWorld 内 automation 写像 | `RuntimeBuilder.cpp:269-275` | ✅ ProcessingPart → worldOwner->automation |
+| `captureBuildParameterSnapshot` の auto gain 関連 | `AudioEngine.RebuildDispatch.cpp:33-50` | ✅ `BuildInput` 拡張（v2.0） |
+| `setProcessingOrder` の applyDefaultsForCurrentMode 削除 | `AudioEngine.Parameters.cpp:268-275` | ✅ v2.0: 削除（Builder が代替） |
 | `z = exp(+jω)` | `EQProcessor.Coefficients.cpp:327` — `z(cos(w), sin(w))` | ✅ **一致確認** |
 | `ConvolverThenEQ` パスで trim 不適用 | `DSPCoreDouble.cpp:429-457` — 該当パスに trim コードなし | ✅ **確認** |
 | `EQThenConvolver` パスで trim 適用 | `DSPCoreDouble.cpp:483` — `if (state.convolverInputTrimGain != 1.0)` | ✅ **確認** |
@@ -812,6 +1021,11 @@ add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
 ---
 
 ## Appendix C Revision History
+
+| 版 | 日付 | 変更内容 | 担当 |
+|-----|------|---------|------|
+| v1.0 | 2026-07-12 | 初版。AudioEngine::recomputeAutoGainStaging() ベースの設計 | Author |
+| v2.0 | 2026-07-15 | **ISR Architecture Review 対応 全面改訂**。RuntimeBuilder 統合、C-2/C-3/C-4/C-5/C-6/M-1/M-2/M-4/M-5 修正 | Author |
 
 | 日付 | 版 | 変更内容 |
 | ------ | ----- | --------- |
