@@ -261,7 +261,10 @@ REM Build project (with automatic retry for RC1109 on first icx build)
 echo [3/4] Building %BUILD_CONFIG% configuration...
 set "BUILD_RETRY=0"
 :build_retry
-cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
+set "NINJA_FLAGS="
+if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
+if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
+cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
 if not errorlevel 1 goto build_ok
 
 REM icx 初回ビルドで RC1109 発生時は一度だけリトライ
@@ -281,6 +284,11 @@ exit /b 1
 
 :build_ok
 
+if /i "!COMPILER_MODE!"=="icx" (
+    echo [INFO] Building Phase 8 test targets...
+    cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target GainStagingContractTests --target EQProcessorMaxGainTests %NINJA_FLAGS% >nul 2>&1
+)
+
 REM ------------------------------------------------------------
 REM Verify build configuration
 echo [VERIFY] Checking CMakeCache.txt...
@@ -299,17 +307,26 @@ echo:
 REM ------------------------------------------------------------
 REM Check build artifacts
 echo [4/4] Checking build artifacts...
-set "EXE_PATH=build\ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe"
-if exist "%EXE_PATH%" (
+set "EXE_PATH=!BUILD_DIR!\ConvoPeq_artefacts\!BUILD_CONFIG!\ConvoPeq.exe"
+if exist "!EXE_PATH!" (
     echo [SUCCESS] Executable created successfully.
 ) else (
     echo [WARNING] Executable not found at:
-    echo   %EXE_PATH%
+    echo   !EXE_PATH!
 )
 
 echo.
 echo ==========================================
 echo Build Complete!
+echo.
+echo Build configuration: %BUILD_CONFIG%
+echo Build directory:
+echo   %BUILD_DIR%
+echo Executable location:
+echo   !EXE_PATH!
+echo.
+echo To run:
+echo   "!EXE_PATH!"
 echo ==========================================
 echo.
 echo Build configuration:

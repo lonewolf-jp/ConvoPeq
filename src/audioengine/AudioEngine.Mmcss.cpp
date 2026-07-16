@@ -29,7 +29,7 @@ thread_local DWORD  t_mmcssTaskIndex = 0;     // NOLINT(thread-local) RT-SAFE: M
 thread_local bool   t_mmcssTried = false;       // NOLINT(thread-local) RT-SAFE: guard flag, written once per thread
 
 // Local diagLog — each engine .cpp defines its own for file-scoped asyncSink independence.
-void diagLog(const juce::String& message)
+[[maybe_unused]] void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -100,7 +100,7 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
     LPCWSTR fallback1   = nullptr;
     LPCWSTR fallback2   = nullptr;
     int avrtPriority    = AVRT_PRIORITY_CRITICAL;
-    const char* policyTag = nullptr;
+    [[maybe_unused]] const char* policyTag = nullptr;
 
     if (policy == MmcssPolicy::SelfManagedProAudio) {
         primaryTask  = L"Pro Audio";

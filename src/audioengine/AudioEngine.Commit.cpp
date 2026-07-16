@@ -688,7 +688,8 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
 // Phase2: DSPHandle 事前登録 (Execution Path Handle Normalization)
 void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
                                                            int generation,
-                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot)
+                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot,
+                                                           const convo::BuildAnalysis& buildAnalysis)
 {
     if (newDSP == nullptr)
         return;
@@ -700,6 +701,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.newDSP = handle;
     req.generation = generation;
     req.sealedSnapshot = sealedSnapshot;
+    req.buildAnalysis = buildAnalysis;
 
     runtimeOrchestrator_->submitPublishRequest(req);
 

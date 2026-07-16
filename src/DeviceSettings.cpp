@@ -390,6 +390,39 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     };
 
 
+    // ★ v14.0: Auto Gain Staging Toggle
+    addAndMakeVisible(autoGainToggle);
+    autoGainToggle.onClick = [this] {
+        audioEngine.setAutoGainStagingEnabled(autoGainToggle.getToggleState());
+    };
+
+    // ★ v14.0: 手動編集時に Auto Gain を解除する onFocusLost チェーン
+    {
+        auto oldInputOnFocusLost = std::move(inputHeadroomEditor.onFocusLost);
+        inputHeadroomEditor.onFocusLost = [this, oldInputOnFocusLost = std::move(oldInputOnFocusLost)] {
+            if (audioEngine.isAutoGainStagingEnabled())
+            {
+                autoGainToggle.setToggleState(false, juce::dontSendNotification);
+                audioEngine.setAutoGainStagingEnabled(false);
+            }
+            if (oldInputOnFocusLost)
+                oldInputOnFocusLost();
+        };
+    }
+    {
+        auto oldOutputOnFocusLost = std::move(outputMakeupEditor.onFocusLost);
+        outputMakeupEditor.onFocusLost = [this, oldOutputOnFocusLost = std::move(oldOutputOnFocusLost)] {
+            if (audioEngine.isAutoGainStagingEnabled())
+            {
+                autoGainToggle.setToggleState(false, juce::dontSendNotification);
+                audioEngine.setAutoGainStagingEnabled(false);
+            }
+            if (oldOutputOnFocusLost)
+                oldOutputOnFocusLost();
+        };
+    }
+
+
     // デバイス変更を監視してビット深度リストを更新
     audioDeviceManager.addChangeListener(this);
 
@@ -487,9 +520,10 @@ void DeviceSettings::resized()
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
     bitDepthComboBox.setBounds(row1.removeFromLeft(120).reduced(2));
 
-    // 2行目: Input Headroom
+    // 2行目: Input Headroom + Auto Gain Toggle
     inputHeadroomLabel.setBounds(row2.removeFromLeft(200).reduced(5));
     inputHeadroomEditor.setBounds(row2.removeFromLeft(120).reduced(5));
+    autoGainToggle.setBounds(row2.removeFromLeft(160).reduced(5));
 
     // 3行目: Output Makeup
     outputMakeupLabel.setBounds(row3.removeFromLeft(200).reduced(5));
@@ -649,6 +683,12 @@ void DeviceSettings::updateGainStagingDisplay()
         inputHeadroomEditor.setText(juce::String(currentInput, 1), juce::dontSendNotification);
     if (std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
         outputMakeupEditor.setText(juce::String(currentMakeup, 1), juce::dontSendNotification);
+
+    // ★ v14.0: Auto Gain Toggle 同期
+    const bool autoEnabled = audioEngine.isAutoGainStagingEnabled();
+    autoGainToggle.setToggleState(autoEnabled, juce::dontSendNotification);
+    inputHeadroomEditor.setEnabled(!autoEnabled);
+    outputMakeupEditor.setEnabled(!autoEnabled);
 }
 
 void DeviceSettings::updateBitDepthList()
@@ -939,6 +979,8 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
+        // ★ v14.0: Auto Gain Staging 設定
+        xml->setAttribute("autoGainStagingEnabled", static_cast<int>(engine.isAutoGainStagingEnabled()));
         // Audio Thread Priority 設定
         xml->setAttribute("threadPriorityMode", engine.isAudioThreadPriorityMmcss() ? "MMCSS" : "NativeRT");
 
@@ -1141,6 +1183,9 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             // Output Makeup設定の読み込み (デフォルト +12.0dB)
             float makeup = static_cast<float>(sanitizeFiniteClamped(xml->getDoubleAttribute("outputMakeupDb", 12.0), 12.0, 0.0, 12.0)); // [Fix] default 15→12 dB
             engine.setOutputMakeupDb(makeup);
+
+            // ★ v14.0: Auto Gain Staging 設定の復元 (デフォルト true)
+            engine.setAutoGainStagingEnabled(xml->getBoolAttribute("autoGainStagingEnabled", true));
 
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
             int type = xml->getIntAttribute("oversamplingType", 0);

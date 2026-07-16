@@ -83,6 +83,9 @@ private:
 
     juce::ToggleButton audioThreadPriorityToggle;
 
+    // ★ v14.0: Auto Gain Staging toggle
+    juce::ToggleButton autoGainToggle { "Auto Gain Staging" };
+
     juce::String gainDisplaySignature;
     juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
 

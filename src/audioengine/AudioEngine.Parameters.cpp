@@ -271,7 +271,6 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
     convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
-    applyDefaultsForCurrentMode();
     sendChangeMessage();
 }
 

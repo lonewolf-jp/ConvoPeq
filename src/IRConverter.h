@@ -14,6 +14,7 @@ public:
     {
         double scaleFactor = 1.0;
         bool hasScaleFactor = false;
+        float additionalAttenuationDb = 0.0f;  // ★ v14.0: 追加減衰量 [dB]
     };
 
     struct ConvertConfig
@@ -40,6 +41,10 @@ public:
     static ScaleFactorResult computeScaleFactor(const juce::AudioBuffer<double>& ir,
                                                 const juce::AudioBuffer<double>* currentIr = nullptr,
                                                 double currentScale = 1.0) noexcept;
+
+    // ★ v14.0: IRAnalyzer へのデリゲート（後方互換性維持）
+    static double estimateMaxFrequencyResponseGain(const juce::AudioBuffer<double>& ir,
+                                                   double sampleRate) noexcept;
 
 private:
     static bool loadAudioFile(const juce::File& file,

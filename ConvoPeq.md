@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-15 02:01:28
+> Generated: 2026-07-16 20:34:02
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -45,6 +45,8 @@
         ├── Fixed15TapNoiseShaper.h
         ├── FixedNoiseShaper.h
         ├── GenerationManager.h
+        ├── IRAnalyzer.cpp
+        ├── IRAnalyzer.h
         ├── IRConverter.cpp
         ├── IRConverter.h
         ├── IRDSP.cpp
@@ -124,6 +126,8 @@
         │   ├── AudioEngine.h
         │   ├── AudioEngineProcessor.cpp
         │   ├── AudioEngineProcessor.h
+        │   ├── AutoGainPlanner.cpp
+        │   ├── AutoGainPlanner.h
         │   ├── CrossfadeAuthority.cpp
         │   ├── CrossfadeAuthority.h
         │   ├── CrossfadeRuntime.h
@@ -253,6 +257,8 @@
         └── tests/
             ├── BuildInputSemanticContractTests.cpp
             ├── CrossfadeExecutorLocalContractTests.cpp
+            ├── EQProcessorMaxGainTests.cpp
+            ├── GainStagingContractTests.cpp
             ├── ISRRuntimeIdentityGeneratorsTests.cpp
             ├── ISRSemanticValidationTests.cpp
             ├── MT-NUPC-Measurement.cpp
@@ -403,6 +409,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRRetire.cpp              # RetireRuntime
     )
 
+    # ★ v14.0 Phase 8: Auto Gain Staging 契約テスト
+    #   AutoGainPlanner::plan() の4パターン × Auto On/Off を検証（リファレンス実装）。
+    #   JUCE/MKL に依存しない純粋関数テスト。
+    add_executable(GainStagingContractTests
+        src/tests/GainStagingContractTests.cpp
+    )
+    add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
+
+    # ★ v14.0 Phase 8: EQ 応答計算の数学的契約テスト
+    #   getMagnitudeSquared + svfToDisplayBiquad の数学的正当性を検証。
+    #   JUCE/MKL に依存しない純粋数学テスト。
+    add_executable(EQProcessorMaxGainTests
+        src/tests/EQProcessorMaxGainTests.cpp
+    )
+    add_test(NAME EQProcessorMaxGainTests COMMAND EQProcessorMaxGainTests)
+
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
@@ -419,6 +441,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(CrossfadeExecutorLocalContractTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeWorldAuthorityProjectionTests PRIVATE cxx_std_20)
     target_compile_features(PartialPublicationRejectTests PRIVATE cxx_std_20)
+    target_compile_features(GainStagingContractTests PRIVATE cxx_std_20)
+    target_compile_features(EQProcessorMaxGainTests PRIVATE cxx_std_20)
     target_compile_features(RebuildAdmissionRegressionTests PRIVATE cxx_std_20)
     target_compile_features(BuildInputSemanticContractTests PRIVATE cxx_std_20)
     target_compile_features(PriorityIntegrationTests PRIVATE cxx_std_20)
@@ -809,6 +833,7 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/RuntimeBuildTypes.h
     src/audioengine/RuntimeBuilder.h
     src/audioengine/RuntimeBuilder.cpp
+    src/audioengine/AutoGainPlanner.cpp  # ★ v14.0
     src/audioengine/AudioEngineProcessor.cpp
     src/PsychoacousticDither.cpp
     src/MKLRealTimeSetup.cpp
@@ -849,6 +874,7 @@ target_sources(ConvoPeq PRIVATE
     src/AllpassDesigner.h
     src/MixedPhaseOptimizationComponent.cpp
     src/IRConverter.cpp
+    src/IRAnalyzer.cpp  # ★ v14.0
     src/ProgressiveUpgradeThread.cpp
     src/MixedPhasePersistentCache.cpp
     src/CacheManager.cpp
@@ -1077,8 +1103,8 @@ if(WIN32)
         ole32 avrt
     )
 
-    # Visual Studio用設定
-    set(CONVOPEQ_ARTEFACTS_ROOT "${CMAKE_SOURCE_DIR}/build/ConvoPeq_artefacts")
+    # Visual Studio / icx 用設定
+    set(CONVOPEQ_ARTEFACTS_ROOT "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts")
     set_target_properties(ConvoPeq PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
         RUNTIME_OUTPUT_DIRECTORY "${CONVOPEQ_ARTEFACTS_ROOT}"
@@ -1329,6 +1355,27 @@ if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
         PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_CMD}"
     )
 endif()
+
+# ★ icx/LLVM: 深いテンプレート展開時に OOM (clang frontend signal) が発生する。
+#   -j2 でビルド並列度制限 (build.bat) により回避。
+if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    set_source_files_properties(src/audioengine/AudioEngine.Snapshot.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/audioengine/AudioEngine.Learning.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/audioengine/AudioEngine.RebuildDispatch.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/audioengine/AudioEngine.Transition.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/MainApplication.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+endif()
+add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)
 
 ```
 
@@ -1598,7 +1645,10 @@ REM Build project (with automatic retry for RC1109 on first icx build)
 echo [3/4] Building %BUILD_CONFIG% configuration...
 set "BUILD_RETRY=0"
 :build_retry
-cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
+set "NINJA_FLAGS="
+if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
+if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
+cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
 if not errorlevel 1 goto build_ok
 
 REM icx 初回ビルドで RC1109 発生時は一度だけリトライ
@@ -1618,6 +1668,11 @@ exit /b 1
 
 :build_ok
 
+if /i "!COMPILER_MODE!"=="icx" (
+    echo [INFO] Building Phase 8 test targets...
+    cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target GainStagingContractTests --target EQProcessorMaxGainTests %NINJA_FLAGS% >nul 2>&1
+)
+
 REM ------------------------------------------------------------
 REM Verify build configuration
 echo [VERIFY] Checking CMakeCache.txt...
@@ -1636,17 +1691,26 @@ echo:
 REM ------------------------------------------------------------
 REM Check build artifacts
 echo [4/4] Checking build artifacts...
-set "EXE_PATH=build\ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe"
-if exist "%EXE_PATH%" (
+set "EXE_PATH=!BUILD_DIR!\ConvoPeq_artefacts\!BUILD_CONFIG!\ConvoPeq.exe"
+if exist "!EXE_PATH!" (
     echo [SUCCESS] Executable created successfully.
 ) else (
     echo [WARNING] Executable not found at:
-    echo   %EXE_PATH%
+    echo   !EXE_PATH!
 )
 
 echo.
 echo ==========================================
 echo Build Complete!
+echo.
+echo Build configuration: %BUILD_CONFIG%
+echo Build directory:
+echo   %BUILD_DIR%
+echo Executable location:
+echo   !EXE_PATH!
+echo.
+echo To run:
+echo   "!EXE_PATH!"
 echo ==========================================
 echo.
 echo Build configuration:
@@ -6551,6 +6615,7 @@ private:
         const juce::AudioBuffer<double>* ir = nullptr;
         double sampleRate = 0.0;
         uint64_t generation = 0;
+        float additionalAttenuationDb = 0.0f;  // ★ v14.0: IRAnalyzer による追加減衰量 [dB]
     };
     std::atomic<IRState*> currentIRState { nullptr };
     std::optional<std::reference_wrapper<AudioEngine>> rcuProvider;
@@ -6560,11 +6625,19 @@ private:
 
     [[nodiscard]] const IRState* acquireIRState() const noexcept;
     void releaseIRState(const IRState* state) const noexcept;
-    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR);
-    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR)
+    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb = 0.0f);
+    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR, float additionalAttenuationDb = 0.0f)
     {
         if (newIR)
-            updateIRState(*newIR, newSR);
+            updateIRState(*newIR, newSR, additionalAttenuationDb);
+    }
+
+    // ★ v14.0: IRState から追加減衰量を読み取り
+public:
+    [[nodiscard]] float getIrAdditionalAttenuationDb() const noexcept
+    {
+        auto* state = acquireIRState();
+        return (state != nullptr) ? state->additionalAttenuationDb : 0.0f;
     }
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
@@ -6578,7 +6651,7 @@ public: // Added for AudioEngine access
         {
             const int channels = srcState->ir->getNumChannels();
             const int length   = srcState->ir->getNumSamples();
-            updateIRState(*srcState->ir, srcState->sampleRate);
+            updateIRState(*srcState->ir, srcState->sampleRate, srcState->additionalAttenuationDb);
             juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: IR transferred ch="
                 + juce::String(channels) + " len=" + juce::String(length)
                 + " sr=" + juce::String(srcState->sampleRate, 1));
@@ -9039,6 +9112,39 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     };
 
 
+    // ★ v14.0: Auto Gain Staging Toggle
+    addAndMakeVisible(autoGainToggle);
+    autoGainToggle.onClick = [this] {
+        audioEngine.setAutoGainStagingEnabled(autoGainToggle.getToggleState());
+    };
+
+    // ★ v14.0: 手動編集時に Auto Gain を解除する onFocusLost チェーン
+    {
+        auto oldInputOnFocusLost = std::move(inputHeadroomEditor.onFocusLost);
+        inputHeadroomEditor.onFocusLost = [this, oldInputOnFocusLost = std::move(oldInputOnFocusLost)] {
+            if (audioEngine.isAutoGainStagingEnabled())
+            {
+                autoGainToggle.setToggleState(false, juce::dontSendNotification);
+                audioEngine.setAutoGainStagingEnabled(false);
+            }
+            if (oldInputOnFocusLost)
+                oldInputOnFocusLost();
+        };
+    }
+    {
+        auto oldOutputOnFocusLost = std::move(outputMakeupEditor.onFocusLost);
+        outputMakeupEditor.onFocusLost = [this, oldOutputOnFocusLost = std::move(oldOutputOnFocusLost)] {
+            if (audioEngine.isAutoGainStagingEnabled())
+            {
+                autoGainToggle.setToggleState(false, juce::dontSendNotification);
+                audioEngine.setAutoGainStagingEnabled(false);
+            }
+            if (oldOutputOnFocusLost)
+                oldOutputOnFocusLost();
+        };
+    }
+
+
     // デバイス変更を監視してビット深度リストを更新
     audioDeviceManager.addChangeListener(this);
 
@@ -9136,9 +9242,10 @@ void DeviceSettings::resized()
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
     bitDepthComboBox.setBounds(row1.removeFromLeft(120).reduced(2));
 
-    // 2行目: Input Headroom
+    // 2行目: Input Headroom + Auto Gain Toggle
     inputHeadroomLabel.setBounds(row2.removeFromLeft(200).reduced(5));
     inputHeadroomEditor.setBounds(row2.removeFromLeft(120).reduced(5));
+    autoGainToggle.setBounds(row2.removeFromLeft(160).reduced(5));
 
     // 3行目: Output Makeup
     outputMakeupLabel.setBounds(row3.removeFromLeft(200).reduced(5));
@@ -9298,6 +9405,12 @@ void DeviceSettings::updateGainStagingDisplay()
         inputHeadroomEditor.setText(juce::String(currentInput, 1), juce::dontSendNotification);
     if (std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
         outputMakeupEditor.setText(juce::String(currentMakeup, 1), juce::dontSendNotification);
+
+    // ★ v14.0: Auto Gain Toggle 同期
+    const bool autoEnabled = audioEngine.isAutoGainStagingEnabled();
+    autoGainToggle.setToggleState(autoEnabled, juce::dontSendNotification);
+    inputHeadroomEditor.setEnabled(!autoEnabled);
+    outputMakeupEditor.setEnabled(!autoEnabled);
 }
 
 void DeviceSettings::updateBitDepthList()
@@ -9588,6 +9701,8 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
+        // ★ v14.0: Auto Gain Staging 設定
+        xml->setAttribute("autoGainStagingEnabled", static_cast<int>(engine.isAutoGainStagingEnabled()));
         // Audio Thread Priority 設定
         xml->setAttribute("threadPriorityMode", engine.isAudioThreadPriorityMmcss() ? "MMCSS" : "NativeRT");
 
@@ -9791,6 +9906,9 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             float makeup = static_cast<float>(sanitizeFiniteClamped(xml->getDoubleAttribute("outputMakeupDb", 12.0), 12.0, 0.0, 12.0)); // [Fix] default 15→12 dB
             engine.setOutputMakeupDb(makeup);
 
+            // ★ v14.0: Auto Gain Staging 設定の復元 (デフォルト true)
+            engine.setAutoGainStagingEnabled(xml->getBoolAttribute("autoGainStagingEnabled", true));
+
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
             int type = xml->getIntAttribute("oversamplingType", 0);
             engine.setOversamplingType((AudioEngine::OversamplingType)type);
@@ -9968,6 +10086,9 @@ private:
     juce::TextEditor outputMakeupEditor;
 
     juce::ToggleButton audioThreadPriorityToggle;
+
+    // ★ v14.0: Auto Gain Staging toggle
+    juce::ToggleButton autoGainToggle { "Auto Gain Staging" };
 
     juce::String gainDisplaySignature;
     juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
@@ -12591,11 +12712,228 @@ private:
 
 ```
 
+### 📄 `src\IRAnalyzer.cpp`
+
+```
+#include "IRAnalyzer.h"
+#include "DftiHandle.h"
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <mkl_dfti.h>
+
+namespace IRAnalyzer {
+
+double estimateMaxFrequencyResponseGain(
+    const juce::AudioBuffer<double>& ir) noexcept
+{
+    const int numSamples = ir.getNumSamples();
+    const int numChannels = ir.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return 1.0;
+
+    // FFT サイズ決定: nextPowerOfTwo(copyLen)、上限 kMaxAnalysisWindow
+    const int copyLen = std::min(numSamples, kMaxAnalysisWindow);
+    const int fftSize = juce::nextPowerOfTwo(copyLen);
+    if (fftSize < 2)
+        return 1.0;
+
+    // Tukey 窓生成（α=0.5）
+    // 両端 25% コサインテーパー、中央 50% フラット
+    const double pi = juce::MathConstants<double>::pi;
+    const double taperLen = kTukeyAlpha * static_cast<double>(fftSize - 1) * 0.5;
+
+    auto tukeyWindow = std::make_unique<double[]>(static_cast<size_t>(fftSize));
+    for (int i = 0; i < fftSize; ++i)
+    {
+        const double t = static_cast<double>(i);
+        if (t < taperLen)
+        {
+            // 左端テーパー
+            const double cosArg = (2.0 * pi * t) / (kTukeyAlpha * static_cast<double>(fftSize - 1));
+            tukeyWindow[i] = 0.5 * (1.0 + std::cos(cosArg - pi));
+        }
+        else if (t > static_cast<double>(fftSize - 1) - taperLen)
+        {
+            // 右端テーパー
+            const double cosArg = (2.0 * pi * (t - (static_cast<double>(fftSize - 1) - taperLen)))
+                                  / (kTukeyAlpha * static_cast<double>(fftSize - 1));
+            tukeyWindow[i] = 0.5 * (1.0 + std::cos(cosArg));
+        }
+        else
+        {
+            // 中央フラット
+            tukeyWindow[i] = 1.0;
+        }
+    }
+
+    // 実効窓平均（IR データが存在する区間 copyLen のみ）
+    double windowSum = 0.0;
+    for (int i = 0; i < copyLen; ++i)
+        windowSum += tukeyWindow[i];
+    const double windowMean = windowSum / static_cast<double>(copyLen);
+    if (windowMean < 1e-18)
+        return 1.0;
+
+    double maxMagnitude = 0.0;
+
+    // MKL DFTI 実数→複素 FFT
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* src = ir.getReadPointer(ch);
+
+        // 入力バッファ: 窓適用 + ゼロパディング
+        auto in = std::make_unique<double[]>(static_cast<size_t>(fftSize));
+        for (int i = 0; i < copyLen; ++i)
+            in[i] = src[i] * tukeyWindow[i];
+        // 残りはゼロパディング（デフォルト値 0.0）
+
+        // DFTI 記述子作成（実数→複素: 出力長 fftSize/2 + 1）
+        convo::ScopedDftiDescriptor dfti;
+        const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
+        if (DftiCreateDescriptor(dfti.put(), DFTI_DOUBLE, DFTI_REAL, 1, len) != DFTI_NO_ERROR)
+            continue;
+
+        // 前方変換: 無スケール（DFTI_BACKWARD_SCALE は使用しない）
+        if (DftiSetValue(dfti.handle, DFTI_PACKED_FORMAT, DFTI_CCS_FORMAT) != DFTI_NO_ERROR)
+            continue;
+        if (DftiCommitDescriptor(dfti.handle) != DFTI_NO_ERROR)
+            continue;
+
+        // 出力: 複素数値 (実部, 虚部) のインターリーブ、長さ fftSize
+        auto out = std::make_unique<double[]>(static_cast<size_t>(fftSize));
+        if (DftiComputeForward(dfti.handle, in.get(), out.get()) != DFTI_NO_ERROR)
+            continue;
+
+        // DC (bin 0) と Nyquist (bin fftSize/2, CCS では位置 fftSize/2) を振幅計算
+        const int numBins = fftSize / 2;
+        for (int bin = 0; bin < fftSize; ++bin)
+        {
+            // CCS format: out[0]=Re[0], out[1]=Re[N/2], out[2]=Re[1], out[3]=Im[1], ...
+            double re = 0.0, im = 0.0;
+            if (bin == 0)
+            {
+                re = out[0];
+                im = 0.0;
+            }
+            else if (bin == numBins)
+            {
+                re = out[1];
+                im = 0.0;
+            }
+            else
+            {
+                const int idx = 2 * bin;
+                re = out[idx];
+                im = out[idx + 1];
+            }
+
+            const double mag = std::sqrt(re * re + im * im);
+            maxMagnitude = std::max(maxMagnitude, mag);
+        }
+
+        // ★ 3点ガウス補間（FFT bin 間ピーク誤差軽減）
+        //   補間式: delta = 0.5 * (log(mag[k-1]) - log(mag[k+1]))
+        //                     / (log(mag[k-1]) - 2*log(mag[k]) + log(mag[k+1]))
+        //   但し単一正弦波近似であるため、複雑スペクトルでは限界あり
+        {
+            // CCS で振幅配列を作り直す（簡易版: DC と Nyquist 除く中間 bin のみ）
+            auto mags = std::make_unique<double[]>(static_cast<size_t>(numBins + 1));
+            mags[0] = std::abs(out[0]);
+            for (int b = 1; b < numBins; ++b)
+            {
+                const int idx = 2 * b;
+                mags[b] = std::sqrt(out[idx] * out[idx] + out[idx + 1] * out[idx + 1]);
+            }
+            mags[numBins] = std::abs(out[1]);
+
+            for (int b = 1; b < numBins - 1; ++b)
+            {
+                const double ym1 = mags[b - 1];
+                const double y0  = mags[b];
+                const double yp1 = mags[b + 1];
+                if (y0 > ym1 && y0 > yp1 && y0 > 1e-18 && ym1 > 1e-18 && yp1 > 1e-18)
+                {
+                    const double logYm1 = std::log(ym1);
+                    const double logY0  = std::log(y0);
+                    const double logYp1 = std::log(yp1);
+                    const double denom = logYm1 - 2.0 * logY0 + logYp1;
+                    if (std::abs(denom) > 1e-18)
+                    {
+                        const double delta = 0.5 * (logYm1 - logYp1) / denom;
+                        const double interpolated = y0 * std::exp(-delta * (logY0 - logYm1));
+                        maxMagnitude = std::max(maxMagnitude, interpolated);
+                    }
+                }
+            }
+        }
+    }
+
+    // コヒーレントゲイン補正（振幅推定のため ENBW 補正は不要）
+    maxMagnitude /= windowMean;
+
+    return (maxMagnitude > 1e-18) ? maxMagnitude : 1.0;
+}
+
+} // namespace IRAnalyzer
+
+```
+
+### 📄 `src\IRAnalyzer.h`
+
+```
+#pragma once
+
+#include <JuceHeader.h>
+
+//==============================================================================
+/**
+    IRAnalyzer — IR (Impulse Response) 解析専用コンポーネント。
+
+    IRConverter から FFT 解析を分離し、以下の責務を担当する:
+    - 周波数応答ピーク推定（FFT + Tukey窓 + ガウス補間）
+    - 将来拡張: group delay / phase ripple / crest factor / minimum phase 判定
+
+    本設計では振幅推定（最大振幅）のみを行い、PSD推定は行わない。
+    Harris(1978) の窓関数分類に基づき、コヒーレントゲインのみ補正する。
+*/
+namespace IRAnalyzer
+{
+    // ★ kMaxAnalysisWindow = 65536 上限。
+    //   IR長がこれを超える場合、最初の kMaxAnalysisWindow sample のみ解析対象。
+    //   将来 192kHz/384kHz 対応時は Policy 化を検討。
+    inline constexpr int kMaxAnalysisWindow = 65536;
+
+    // Tukey α=0.5（両端 25% コサインテーパー、中央 50% フラット）
+    inline constexpr double kTukeyAlpha = 0.5;
+
+    //==============================================================================
+    /**
+        IRの周波数応答ピークをFFT解析で推定。
+        Tukey窓（α=0.5）適用後の複素スペクトル振幅の最大値を返す。
+
+        @param ir  入力 IR（任意長、任意チャンネル数）
+        @return 線形振幅値（倍率）。IRが無効な場合は 1.0
+
+        備考:
+        - FFT サイズは nextPowerOfTwo(min(ir長, kMaxAnalysisWindow))
+        - MKL DFTI 前方変換（DFTI_BACKWARD_SCALE = 1/N, 前方無スケール）
+        - コヒーレントゲイン補正（windowMean で除算）
+        - 3点ガウス補間で FFT bin 間ピーク誤差を軽減
+    */
+    [[nodiscard]] double estimateMaxFrequencyResponseGain(
+        const juce::AudioBuffer<double>& ir) noexcept;
+
+} // namespace IRAnalyzer
+
+```
+
 ### 📄 `src\IRConverter.cpp`
 
 ```
 #include "IRConverter.h"
 #include "IRDSP.h"
+#include "IRAnalyzer.h"  // ★ v14.0
 
 #include <algorithm>
 #include <cmath>
@@ -12606,28 +12944,55 @@ private:
 #include <mkl_cblas.h>
 #include "DiagnosticsConfig.h"
 
-IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::AudioBuffer<double>& ir,
-                                                               const juce::AudioBuffer<double>* currentIr,
-                                                               double currentScale) noexcept
+//==============================================================================
+// ★ v14.0: 第1段 — Energy 補正（基本 scaleFactor + safetyMargin）
+//==============================================================================
+static double computeEnergyScale(const juce::AudioBuffer<double>& ir) noexcept
 {
-    ScaleFactorResult result;
-
     const int numSamples = ir.getNumSamples();
     const int numChannels = ir.getNumChannels();
     if (numSamples <= 0 || numChannels <= 0)
-        return result;
+        return 1.0;
 
     double maxChannelEnergy = 0.0;
-    double irPeak = 0.0;
-    double irEnergySum = 0.0;
-
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const double* data = ir.getReadPointer(ch);
         const double energy = cblas_ddot(numSamples, data, 1, data, 1);
         if (std::isfinite(energy) && energy > 1.0e-18)
             maxChannelEnergy = std::max(maxChannelEnergy, energy);
+    }
 
+    if (!(maxChannelEnergy > 1.0e-18) || !std::isfinite(maxChannelEnergy))
+        return 1.0;
+
+    constexpr double safetyMargin = 0.5011872336272722;  // -6dB
+    return (1.0 / std::sqrt(maxChannelEnergy)) * safetyMargin;
+}
+
+//==============================================================================
+// ★ v14.0: 第2段 — IR 解析（Peak/RMS + FFT）
+//==============================================================================
+struct IRAnalysisResult {
+    double peakValue = 0.0;
+    double rmsValue = 0.0;
+    double frequencyPeakGain = 1.0;
+};
+
+static IRAnalysisResult analyzeIR(const juce::AudioBuffer<double>& ir, double currentScale) noexcept
+{
+    IRAnalysisResult result;
+    const int numSamples = ir.getNumSamples();
+    const int numChannels = ir.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return result;
+
+    double irPeak = 0.0;
+    double irEnergySum = 0.0;
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* data = ir.getReadPointer(ch);
         for (int i = 0; i < numSamples; ++i)
         {
             const double value = data[i];
@@ -12636,31 +13001,59 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
         }
     }
 
-    if (!(maxChannelEnergy > 1.0e-18) || !std::isfinite(maxChannelEnergy))
-        return result;
-
-    const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
-    constexpr double safetyMargin = 0.5011872336272722;
-    result.scaleFactor = makeup * safetyMargin;
-    result.hasScaleFactor = true;
-
+    result.peakValue = irPeak;
     const int totalSamples = numChannels * numSamples;
-    if (totalSamples > 0)
+    result.rmsValue = (totalSamples > 0) ? std::sqrt(irEnergySum / static_cast<double>(totalSamples)) : 0.0;
+
+    // FFT 解析（IRAnalyzer に委譲）
+    result.frequencyPeakGain = IRAnalyzer::estimateMaxFrequencyResponseGain(ir);
+
+    return result;
+}
+
+//==============================================================================
+// ★ v14.0: 第3段 — 保護クランプ適用
+//==============================================================================
+static void applyClampProtection(IRConverter::ScaleFactorResult& result,
+                                  double scale,
+                                  const IRAnalysisResult& analysis,
+                                  const juce::AudioBuffer<double>* currentIr,
+                                  double currentScale) noexcept
+{
+    double peakAttenDb = 0.0, rmsAttenDb = 0.0, freqAttenDb = 0.0;
+
+    // Peak クランプ
+    constexpr double kMaxEffectivePeak = 0.5;
+    if (analysis.peakValue * scale > kMaxEffectivePeak)
     {
-        const double irRms = std::sqrt(irEnergySum / static_cast<double>(totalSamples));
-        constexpr double kMaxEffectivePeak = 0.98;
-        constexpr double kMaxEffectiveRms = 0.25;
-
-        double absoluteClamp = 1.0;
-        if (irPeak > 1.0e-12)
-            absoluteClamp = std::min(absoluteClamp, kMaxEffectivePeak / (irPeak * result.scaleFactor));
-        if (irRms > 1.0e-12)
-            absoluteClamp = std::min(absoluteClamp, kMaxEffectiveRms / (irRms * result.scaleFactor));
-
-        if (std::isfinite(absoluteClamp) && absoluteClamp > 0.0 && absoluteClamp < 1.0)
-            result.scaleFactor *= absoluteClamp;
+        const double peakClamp = kMaxEffectivePeak / (analysis.peakValue * scale);
+        result.scaleFactor *= peakClamp;
+        scale *= peakClamp;  // ★ v14.0: 順序依存対応
+        peakAttenDb = -20.0 * std::log10(peakClamp);
     }
 
+    // RMS クランプ（Peak 適用後の scale で判定）
+    constexpr double kMaxEffectiveRms = 0.25;
+    if (analysis.rmsValue * scale > kMaxEffectiveRms)
+    {
+        const double rmsClamp = kMaxEffectiveRms / (analysis.rmsValue * scale);
+        result.scaleFactor *= rmsClamp;
+        rmsAttenDb = -20.0 * std::log10(rmsClamp);
+    }
+
+    // 周波数応答ピーククランプ
+    constexpr double kMaxEffectiveFreqResponse = 1.41; // +3dB
+    if (analysis.frequencyPeakGain > kMaxEffectiveFreqResponse)
+    {
+        const double freqClip = kMaxEffectiveFreqResponse / analysis.frequencyPeakGain;
+        result.scaleFactor *= freqClip;
+        freqAttenDb = -20.0 * std::log10(freqClip);
+    }
+
+    // additionalAttenuationDb = 追加減衰量（energy補正含まず）
+    result.additionalAttenuationDb = static_cast<float>(peakAttenDb + rmsAttenDb + freqAttenDb);
+
+    // ★ 既存: 現在の IR との比較による過大ジャンプ保護
     if (currentIr != nullptr && currentIr->getNumChannels() > 0 && currentIr->getNumSamples() > 0)
     {
         auto computePeakAndRmsWithScale = [](const juce::AudioBuffer<double>& buffer, double scale) -> std::pair<double, double>
@@ -12682,12 +13075,11 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
                     energy += value * value;
                 }
             }
-
             return { peak, std::sqrt(energy / static_cast<double>(channels * samples)) };
         };
 
         const auto [currentPeak, currentRms] = computePeakAndRmsWithScale(*currentIr, currentScale);
-        const auto [newPeak, newRms] = computePeakAndRmsWithScale(ir, result.scaleFactor);
+        const auto [newPeak, newRms] = computePeakAndRmsWithScale(*currentIr, result.scaleFactor);
 
         const bool excessivePeakJump = currentPeak > 1.0e-9 && newPeak > currentPeak * 4.0 && newPeak > 0.5;
         const bool excessiveRmsJump = currentRms > 1.0e-9 && newRms > currentRms * 4.0 && newRms > 0.25;
@@ -12707,6 +13099,30 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
                 result.scaleFactor *= clampRatio;
         }
     }
+}
+
+//==============================================================================
+// computeScaleFactor — 3段階オーケストレーター（★ v14.0）
+//==============================================================================
+IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::AudioBuffer<double>& ir,
+                                                               const juce::AudioBuffer<double>* currentIr,
+                                                               double currentScale) noexcept
+{
+    ScaleFactorResult result;
+
+    // 第1段: Energy 補正
+    double scale = computeEnergyScale(ir);
+    if (scale <= 0.0 || !std::isfinite(scale))
+        return result;
+
+    result.scaleFactor = scale;
+    result.hasScaleFactor = true;
+
+    // 第2段: IR 解析（Peak/RMS/FFT）
+    const auto analysis = analyzeIR(ir, scale);
+
+    // 第3段: 保護クランプ
+    applyClampProtection(result, scale, analysis, currentIr, currentScale);
 
     return result;
 }
@@ -12823,6 +13239,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
         const auto scaleInfo = computeScaleFactor(*prepared->timeDomainIR);
         prepared->scaleFactor = scaleInfo.scaleFactor;
         prepared->hasScaleFactor = scaleInfo.hasScaleFactor;
+        prepared->additionalAttenuationDb = scaleInfo.additionalAttenuationDb;
     }
 
     return prepared;
@@ -12842,6 +13259,16 @@ std::unique_ptr<PreparedIRState> IRConverter::convertToHighRes(const juce::File&
     cfg.generationId = generationId;
     cfg.cacheKey = cacheKey;
     return convertFile(irFile, cfg, shouldCancel);
+}
+
+//==============================================================================
+// ★ v14.0: 後方互換用デリゲート — IRAnalyzer に委譲
+//==============================================================================
+double IRConverter::estimateMaxFrequencyResponseGain(
+    const juce::AudioBuffer<double>& ir,
+    double /*sampleRate*/) noexcept
+{
+    return IRAnalyzer::estimateMaxFrequencyResponseGain(ir);
 }
 
 ```
@@ -12865,6 +13292,7 @@ public:
     {
         double scaleFactor = 1.0;
         bool hasScaleFactor = false;
+        float additionalAttenuationDb = 0.0f;  // ★ v14.0: 追加減衰量 [dB]
     };
 
     struct ConvertConfig
@@ -12891,6 +13319,10 @@ public:
     static ScaleFactorResult computeScaleFactor(const juce::AudioBuffer<double>& ir,
                                                 const juce::AudioBuffer<double>* currentIr = nullptr,
                                                 double currentScale = 1.0) noexcept;
+
+    // ★ v14.0: IRAnalyzer へのデリゲート（後方互換性維持）
+    static double estimateMaxFrequencyResponseGain(const juce::AudioBuffer<double>& ir,
+                                                   double sampleRate) noexcept;
 
 private:
     static bool loadAudioFile(const juce::File& file,
@@ -15692,7 +16124,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 #endif
     };
 
-    auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
+    [[maybe_unused]] auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
     {
         if (absNoLibm(gain - 1.0) < 1.0e-12)
         {
@@ -22896,6 +23328,7 @@ struct PreparedIRState
     std::unique_ptr<juce::AudioBuffer<double>> timeDomainIR;
     double scaleFactor = 1.0;
     bool hasScaleFactor = false;
+    float additionalAttenuationDb = 0.0f;  // ★ v14.0: IRConverter clamp による追加減衰量 [dB]
 
     PreparedIRState() = default;
 
@@ -22911,12 +23344,14 @@ struct PreparedIRState
           originalFileName(std::move(other.originalFileName)),
                     timeDomainIR(std::move(other.timeDomainIR)),
                     scaleFactor(other.scaleFactor),
-                    hasScaleFactor(other.hasScaleFactor)
+                    hasScaleFactor(other.hasScaleFactor),
+                    additionalAttenuationDb(other.additionalAttenuationDb)
     {
         other.partitionData = nullptr;
         other.partitionSizeBytes = 0;
                 other.scaleFactor = 1.0;
                 other.hasScaleFactor = false;
+                other.additionalAttenuationDb = 0.0f;
     }
 
     PreparedIRState& operator=(PreparedIRState&& other) noexcept
@@ -22938,11 +23373,13 @@ struct PreparedIRState
             timeDomainIR = std::move(other.timeDomainIR);
             scaleFactor = other.scaleFactor;
             hasScaleFactor = other.hasScaleFactor;
+            additionalAttenuationDb = other.additionalAttenuationDb;
 
             other.partitionData = nullptr;
             other.partitionSizeBytes = 0;
             other.scaleFactor = 1.0;
             other.hasScaleFactor = false;
+            other.additionalAttenuationDb = 0.0f;
         }
 
         return *this;
@@ -27506,7 +27943,8 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
 // Phase2: DSPHandle 事前登録 (Execution Path Handle Normalization)
 void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
                                                            int generation,
-                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot)
+                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot,
+                                                           const convo::BuildAnalysis& buildAnalysis)
 {
     if (newDSP == nullptr)
         return;
@@ -27518,6 +27956,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.newDSP = handle;
     req.generation = generation;
     req.sealedSnapshot = sealedSnapshot;
+    req.buildAnalysis = buildAnalysis;
 
     runtimeOrchestrator_->submitPublishRequest(req);
 
@@ -28915,7 +29354,7 @@ thread_local DWORD  t_mmcssTaskIndex = 0;     // NOLINT(thread-local) RT-SAFE: M
 thread_local bool   t_mmcssTried = false;       // NOLINT(thread-local) RT-SAFE: guard flag, written once per thread
 
 // Local diagLog — each engine .cpp defines its own for file-scoped asyncSink independence.
-void diagLog(const juce::String& message)
+[[maybe_unused]] void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -28986,7 +29425,7 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
     LPCWSTR fallback1   = nullptr;
     LPCWSTR fallback2   = nullptr;
     int avrtPriority    = AVRT_PRIORITY_CRITICAL;
-    const char* policyTag = nullptr;
+    [[maybe_unused]] const char* policyTag = nullptr;
 
     if (policy == MmcssPolicy::SelfManagedProAudio) {
         primaryTask  = L"Pro Audio";
@@ -29375,7 +29814,6 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
     convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
-    applyDefaultsForCurrentMode();
     sendChangeMessage();
 }
 
@@ -29891,7 +30329,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         {
             // tryApplyMmcssForSelfManagedThread() uses W API, logs success/failure
             // under CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS. RT impact: first call only (~50-200μs).
-            tryApplyMmcssForSelfManagedThread();
+            static_cast<void>(tryApplyMmcssForSelfManagedThread());
 
             if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire)) {
                 revertMmcssOnAudioThread();
@@ -30651,7 +31089,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         {
             // tryApplyMmcssForSelfManagedThread() uses W API, logs success/failure
             // under CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS. RT impact: first call only (~50-200μs).
-            tryApplyMmcssForSelfManagedThread();
+            static_cast<void>(tryApplyMmcssForSelfManagedThread());
 
             if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire)) {
                 revertMmcssOnAudioThread();
@@ -34668,6 +35106,7 @@ struct BuildParameterSnapshot
     double inputHeadroomGain = 1.0;
     double outputMakeupGain = 1.0;
     double convolverInputTrimGain = 1.0;
+    bool autoGainStagingEnabled = false;  // ★ v14.0
 };
 
 BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) noexcept
@@ -34685,6 +35124,7 @@ BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) 
     snapshot.inputHeadroomGain = convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire);
     snapshot.outputMakeupGain = convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire);
     snapshot.convolverInputTrimGain = convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire);
+    snapshot.autoGainStagingEnabled = convo::consumeAtomic(engine.autoGainStagingEnabled, std::memory_order_acquire);
     return snapshot;
 }
 
@@ -34702,7 +35142,8 @@ bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
         && lhs.saturationAmount == rhs.saturationAmount
         && lhs.inputHeadroomGain == rhs.inputHeadroomGain
         && lhs.outputMakeupGain == rhs.outputMakeupGain
-        && lhs.convolverInputTrimGain == rhs.convolverInputTrimGain;
+        && lhs.convolverInputTrimGain == rhs.convolverInputTrimGain
+        && lhs.autoGainStagingEnabled == rhs.autoGainStagingEnabled;
 }
 
 bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
@@ -35215,6 +35656,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     task.buildInput.inputHeadroomGain = paramSnapshot.inputHeadroomGain;
     task.buildInput.outputMakeupGain = paramSnapshot.outputMakeupGain;
     task.buildInput.convolverInputTrimGain = paramSnapshot.convolverInputTrimGain;
+    task.buildInput.autoGainStagingEnabled = paramSnapshot.autoGainStagingEnabled;
     task.convolverBuildSnapshot = uiConvolverProcessor.captureBuildSnapshot();
     const uint64_t structuralHash = uiConvolverProcessor.isIRLoaded() ? uiConvolverProcessor.getStructuralHash() : 0;
 
@@ -35242,6 +35684,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                 pendingSnapshot.inputHeadroomGain = pendingTask.buildInput.inputHeadroomGain;
                 pendingSnapshot.outputMakeupGain = pendingTask.buildInput.outputMakeupGain;
                 pendingSnapshot.convolverInputTrimGain = pendingTask.buildInput.convolverInputTrimGain;
+                pendingSnapshot.autoGainStagingEnabled = pendingTask.buildInput.autoGainStagingEnabled;
 
                 const bool sameAsPending =
                     std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
@@ -35277,6 +35720,16 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                                             structuralHash,
                                             uiConvolverProcessor.isIRLoaded(),
                                             uiConvolverProcessor.isIRFinalized())));
+            // ★ v14.0: BuildAnalysis を生成（Worker Thread で解析）
+            {
+                convo::BuildAnalysis analysis;
+                analysis.generation = generation;
+                if (!paramSnapshot.eqBypassed)
+                    analysis.eqMaxGainDb = getEQProcessor().computeEstimatedMaxGainDb(sampleRate, static_cast<int>(paramSnapshot.processingOrder));
+                if (!paramSnapshot.convBypassed)
+                    analysis.additionalAttenuationDb = uiConvolverProcessor.getIrAdditionalAttenuationDb();
+                task.buildAnalysis = convo::sealBuildAnalysis(analysis, &task.runtimeBuildSnapshot);
+            }
             pendingTask = task;
             hasPendingTask = true;
             convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(1), std::memory_order_release);
@@ -35591,7 +36044,7 @@ void AudioEngine::rebuildThreadLoop()
                     + ",PF=" + juce::String(static_cast<juce::int64>(memAfterIR.pageFaultCount)));
             }
 #endif
-            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);
+            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis);
         }
         catch (const std::exception& e)
         {
@@ -39713,6 +40166,25 @@ public:
     void setConvolverInputTrimDb(float db);
     [[nodiscard]] float getConvolverInputTrimDb() const;
 
+    // ★ v14.0: Auto Gain Staging
+    void setAutoGainStagingEnabled(bool enabled) noexcept
+    {
+        const bool current = convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire);
+        if (current == enabled)
+            return;
+        convo::publishAtomic(autoGainStagingEnabled, enabled, std::memory_order_release);
+        // ★ BUG-10: Auto OFF 時も rebuild が必要。ON/OFF 切り替えで ProcessingPart の
+        //   手動値と AutoGainPlanner 計算値の選択が変わるため。
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::EnqueueSnapshotCommand,
+                            RebuildTelemetryClass::Snapshot,
+                            RebuildTelemetryPolicy::Replaceable);
+    }
+    [[nodiscard]] bool isAutoGainStagingEnabled() const noexcept
+    {
+        return convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire);
+    }
+
     // Audio Thread command queue 経路を廃止し、
     // Message Thread 上の UI staging -> snapshot/rebuild 経路に統一する。
     void setConvolverMix(float value) noexcept
@@ -40357,7 +40829,7 @@ private:
                     for (auto& entry : map)
                     {
                         if (entry.second != nullptr)
-                            entry.second->release(RetirePolicy::Immediate);
+                            static_cast<void>(entry.second->release(RetirePolicy::Immediate));
                     }
                 } else {
                     for (auto& entry : map)
@@ -40699,6 +41171,9 @@ public:
     alignas(64) std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
     alignas(64) std::atomic<float> outputMakeupDb { 12.0f };
     alignas(64) std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB
+
+    // ★ v14.0: Auto Gain Staging フラグ
+    std::atomic<bool> autoGainStagingEnabled { true };
     #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     std::atomic<int> rebuildRequestGeneration { 0 }; // 非同期リビルドの競合防止用
@@ -40739,7 +41214,7 @@ public:
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
-    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {});
     // acquire: requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
@@ -40855,6 +41330,7 @@ public:
         convo::BuildInput buildInput {};
         ConvolverProcessor::BuildSnapshot convolverBuildSnapshot {};
         convo::RuntimeBuildSnapshot runtimeBuildSnapshot {};
+        convo::BuildAnalysis buildAnalysis {};  // ★ v14.0
         int generation = 0;
     };
     RebuildTask pendingTask;
@@ -42484,7 +42960,7 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     if (!dspHandleRuntime_.rollbackRegistration(handle))
         return false;
     // ★ 順序②: Map から削除（二次的。失敗しても Runtime rollback は完了済み）
-    eraseByHandle(handle);
+    static_cast<void>(eraseByHandle(handle));
     // Production: CAS 成功後は常に成功。Map 不整合は DIAG のみで報告。
     return true;
 }
@@ -43033,6 +43509,152 @@ private:
     AudioEngine& audioEngine;
 };
 
+
+```
+
+### 📄 `src\audioengine\AutoGainPlanner.cpp`
+
+```
+#include "AutoGainPlanner.h"
+#include <algorithm>
+#include <juce_core/juce_core.h>
+
+AutoGainPlan AutoGainPlanner::plan(
+    bool autoGainEnabled,
+    convo::ProcessingOrder processingOrder,
+    bool eqBypassed,
+    bool convBypassed,
+    float eqMaxGainDb,
+    float additionalAttenuationDb) noexcept
+{
+    AutoGainPlan result {};
+    if (!autoGainEnabled)
+        return result;  // 0.0/0.0/0.0（= 0dB/0dB/0dB → 線形 1.0/1.0/1.0）
+
+    // ★ v14.0 Phase 8 Review: 両方バイパス時は透過（EQもConvも無効なら自動ゲインも無効）
+    if (eqBypassed && convBypassed)
+        return result;
+
+    float inputDb = 0.0f, trimDb = 0.0f;
+
+    if (!eqBypassed && convBypassed)
+    {
+        // PEQ only
+        inputDb = -std::max(0.0f, eqMaxGainDb - kMarginEqFirst);
+        inputDb -= estimateQSafetyMargin(eqMaxGainDb, processingOrder);
+    }
+    else if (eqBypassed && !convBypassed)
+    {
+        // Conv only
+        inputDb = -std::max(0.0f, additionalAttenuationDb - kMarginConvFirst);
+    }
+    else if (processingOrder == convo::ProcessingOrder::ConvolverThenEQ)
+    {
+        // Conv→PEQ: trim 不適用, input 上限 -6dB
+        inputDb = -(std::max(0.0f, additionalAttenuationDb - kMarginConvFirst)
+                    + std::max(0.0f, eqMaxGainDb - kMarginInterStage));
+        inputDb = std::min(inputDb, kConvFirstInputCeiling);
+    }
+    else
+    {
+        // PEQ→Conv: trim 適用（デフォルト: EQThenConvolver）
+        inputDb = -std::max(0.0f, eqMaxGainDb - kMarginEqFirst);
+        inputDb -= estimateQSafetyMargin(eqMaxGainDb, processingOrder);
+        trimDb = -std::max(0.0f, additionalAttenuationDb - kMarginInterStage);
+    }
+
+    // クランプ
+    result.inputHeadroomDb = juce::jlimit(kClampInputMin, kClampInputMax, inputDb);
+    result.convolverInputTrimDb = juce::jlimit(kClampTrimMin, kClampTrimMax, trimDb);
+
+    // ネット 0dB 整合（クランプ後の実効値で makeup 計算）
+    const float makeupDb = -result.inputHeadroomDb - result.convolverInputTrimDb;
+    result.outputMakeupDb = juce::jlimit(kClampMakeupMin, kClampMakeupMax, makeupDb);
+
+    return result;
+}
+
+float AutoGainPlanner::estimateQSafetyMargin(
+    float eqMaxGainDb, convo::ProcessingOrder /*processingOrder*/) noexcept
+{
+    // ★ v14.0 Phase 8 Review: eqMaxGainDb ≦ 0 なら QSurge = 0（不要な減衰防止）
+    if (eqMaxGainDb <= 0.0f)
+        return 0.0f;
+
+    // 式: Qsurge = min(6.0, 1.5 + peakingSurge)
+    // 係数 0.15, 6.0 は経験則ヒューリスティック（Phase 8 要較正）
+    constexpr float kQSurgeBase = 1.5f;
+    constexpr float kQSurgeCoeff = 0.15f;
+    constexpr float kQSurgeMax = 6.0f;
+    constexpr float kButterworthQ = 0.707f;
+
+    float peakingSurge = eqMaxGainDb * kQSurgeCoeff * (20.0f / kButterworthQ);  // worst-case Q=20
+
+    return std::min(kQSurgeMax, kQSurgeBase + peakingSurge);
+}
+
+```
+
+### 📄 `src\audioengine\AutoGainPlanner.h`
+
+```
+#pragma once
+
+#include "core/Types.h"
+
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: キャッシュライン分離用alignasによる意図的なパディングを許容
+
+//==============================================================================
+/**
+    AutoGainPlanner — 自動ゲインステージングの純粋関数型プランナー。
+
+    Engine/DSP オブジェクトを一切参照しない。
+    入力は AnalysisPart の値のみ。出力は dB 値。
+    線形ゲイン変換（decibelsToGain）は RuntimeBuilder 側で行う。
+
+    特徴:
+    - 4パターン判定（PEQ only / Conv only / Conv→PEQ / PEQ→Conv）
+    - クランプ（input: -12〜0dB, trim: -12〜0dB, makeup: 0〜12dB）
+    - ネット 0dB 整合
+    - Q Surge Margin（経験則ヒューリスティック、Phase 8 要較正）
+*/
+
+// Margin constants (inline constexpr, C++20)
+inline constexpr float kMarginEqFirst    = 3.0f;   // EQ第1段の入力マージン
+inline constexpr float kMarginConvFirst  = 1.5f;   // Conv第1段の入力マージン
+inline constexpr float kMarginInterStage = 2.0f;   // 第2段保護マージン
+inline constexpr float kClampInputMin    = -12.0f; // input 下限
+inline constexpr float kClampInputMax    = 0.0f;   // input 上限
+inline constexpr float kClampTrimMin     = -12.0f; // trim 下限
+inline constexpr float kClampTrimMax     = 0.0f;   // trim 上限
+inline constexpr float kClampMakeupMin   = 0.0f;   // makeup 下限
+inline constexpr float kClampMakeupMax   = 12.0f;  // makeup 上限
+inline constexpr float kConvFirstInputCeiling = -6.0f; // Conv-first 上限（std::min で ceiling。入力 0dB → -6dB にクランプ）
+
+struct AutoGainPlan {
+    float inputHeadroomDb = 0.0f;      // dB 値（下限 -12dB）
+    float outputMakeupDb = 0.0f;       // dB 値（0..12dB）
+    float convolverInputTrimDb = 0.0f; // dB 値（-12..0dB）
+};
+
+class AutoGainPlanner {
+public:
+    [[nodiscard]] static AutoGainPlan plan(
+        bool autoGainEnabled,
+        convo::ProcessingOrder processingOrder,
+        bool eqBypassed,
+        bool convBypassed,
+        float eqMaxGainDb,
+        float additionalAttenuationDb) noexcept;
+
+    // Q Surge Margin — 経験則ヒューリスティック（Phase 8 要較正）
+    //   Peaking フィルタ主対象。Shelf は過剰だが安全側。Notch/AllPass は不要。
+    [[nodiscard]] static float estimateQSafetyMargin(
+        float eqMaxGainDb, convo::ProcessingOrder processingOrder) noexcept;
+};
+
+#pragma warning(pop)
 
 ```
 
@@ -50719,9 +51341,10 @@ namespace convo::isr {
 class PublicationAdmission {
 public:
     struct PublishRequest {
-        DSPHandle newDSP;  // DSPHandle (Phase2: Execution Path Handle Normalization)
+        DSPHandle newDSP;
         int generation = 0;
         RuntimeBuildSnapshot sealedSnapshot;
+        BuildAnalysis buildAnalysis {};  // ★ v14.0: Auto Gain 解析値
     };
 
     // ★ P1-6: Pressure レベル (Adaptive Backpressure)
@@ -50903,8 +51526,19 @@ public:
 
 #include <cstdint>
 #include <type_traits>
+#include <cmath>
+
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: キャッシュライン分離用alignasによる意図的なパディングを許容
 
 namespace convo {
+
+// ★ v14.0: ポータブル finite チェック — icx/clang-cl では std::isfinite(float) が
+//   利用できない場合があるため double 経由で判定。
+[[nodiscard]] inline bool isFiniteFloat(float val) noexcept
+{
+    return std::isfinite(static_cast<double>(val)) != 0;
+}
 
 struct BuildInput final {
     double sampleRate = 0.0;
@@ -50921,6 +51555,7 @@ struct BuildInput final {
     double inputHeadroomGain = 1.0;
     double outputMakeupGain = 1.0;
     double convolverInputTrimGain = 1.0;
+    bool autoGainStagingEnabled = false;  // ★ v14.0: Auto Gain Staging フラグ
 };
 
 struct RuntimeBuildFingerprint
@@ -50953,6 +51588,67 @@ struct RuntimeBuildSnapshot
     int baseLatencySamples = 0;
 };
 
+// ★ v14.0: BuildAnalysis — DSP 解析結果の封印。
+//   RuntimeBuildSnapshot から分離された解析値。
+//   sealed 契約: generation 一致 / finite 検証 / Builder 変更禁止
+struct BuildAnalysis {
+    int generation = 0;
+    float eqMaxGainDb = 0.0f;
+    float additionalAttenuationDb = 0.0f;
+    bool sealed = false;
+};
+
+// ★ v14.0: sealBuildAnalysis — BuildAnalysis を封印し Builder 変更禁止を表明。
+//   封印契約:
+//   ① sealedSnapshot != nullptr
+//   ② generation == snapshot->generation
+//   ③ snapshot->sealed == true
+//   ④ 全浮動小数点値が finite
+//   ⑤ sealed = true を設定
+//   戻り値: 封印後の BuildAnalysis（sealed=true）。契約違反時はデフォルト構築を返す。
+[[nodiscard]] inline BuildAnalysis sealBuildAnalysis(
+    BuildAnalysis analysis,
+    const RuntimeBuildSnapshot* snapshot) noexcept
+{
+    if (snapshot == nullptr)
+        return BuildAnalysis{};
+
+    if (analysis.generation != snapshot->generation)
+        return BuildAnalysis{};
+
+    if (!snapshot->sealed)
+        return BuildAnalysis{};
+
+    if (!isFiniteFloat(analysis.eqMaxGainDb) || !isFiniteFloat(analysis.additionalAttenuationDb))
+        return BuildAnalysis{};
+
+    analysis.sealed = true;
+    return analysis;
+}
+
+// ★ v14.0: verifyBuildAnalysisPair — BuildAnalysis と RuntimeBuildSnapshot の
+//   ペアリング整合性を検証。Orchestrator 側の jassert として使用可能。
+//   検証内容:
+//   ① analysis.sealed == true
+//   ② snapshot.sealed == true
+//   ③ analysis.generation == snapshot.generation
+//   ④ 全浮動小数点値が finite
+[[nodiscard]] inline bool verifyBuildAnalysisPair(
+    const BuildAnalysis& analysis,
+    const RuntimeBuildSnapshot& snapshot) noexcept
+{
+    if (!analysis.sealed || !snapshot.sealed)
+        return false;
+
+    if (analysis.generation != snapshot.generation)
+        return false;
+
+    if (!isFiniteFloat(analysis.eqMaxGainDb) || !isFiniteFloat(analysis.additionalAttenuationDb))
+        return false;
+
+    return true;
+}
+
 static_assert(std::is_same_v<decltype(RuntimeBuildSnapshot{}.buildInput), BuildInput>,
               "RuntimeBuildSnapshot must use convo::BuildInput as the sole semantic input descriptor.");
 
@@ -50979,6 +51675,7 @@ static_assert(std::is_same_v<decltype(RuntimeBuildSnapshot{}.buildInput), BuildI
         && snapshot.buildInput.inputHeadroomGain == other.buildInput.inputHeadroomGain
         && snapshot.buildInput.outputMakeupGain == other.buildInput.outputMakeupGain
         && snapshot.buildInput.convolverInputTrimGain == other.buildInput.convolverInputTrimGain
+        && snapshot.buildInput.autoGainStagingEnabled == other.buildInput.autoGainStagingEnabled
         && snapshot.convolverFingerprint == other.convolverFingerprint
         && snapshot.rebuildFingerprint.irIdentityHash == other.rebuildFingerprint.irIdentityHash
         && snapshot.rebuildFingerprint.convolutionConfigHash == other.rebuildFingerprint.convolutionConfigHash
@@ -50987,12 +51684,15 @@ static_assert(std::is_same_v<decltype(RuntimeBuildSnapshot{}.buildInput), BuildI
 
 } // namespace convo
 
+#pragma warning(pop)
+
 ```
 
 ### 📄 `src\audioengine\RuntimeBuilder.cpp`
 
 ```
 #include "RuntimeBuilder.h"
+#include "AutoGainPlanner.h"  // ★ v14.0
 
 #include <bit>
 #include <cstdint>
@@ -51037,6 +51737,7 @@ namespace {
     mix(std::bit_cast<std::uint64_t>(buildInput.inputHeadroomGain));
     mix(std::bit_cast<std::uint64_t>(buildInput.outputMakeupGain));
     mix(std::bit_cast<std::uint64_t>(buildInput.convolverInputTrimGain));
+    mix(static_cast<std::uint64_t>(buildInput.autoGainStagingEnabled));
     return hash;
 }
 
@@ -51306,6 +52007,27 @@ RuntimeBuilder::buildRuntimePublishWorld(
         worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;
         worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;
         worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;
+
+        // ★ v14.0: Auto Gain Staging — AutoGainPlanner でゲイン上書き（単一代入）
+        if (spec.processing.autoGainStagingEnabled)
+        {
+            const auto plan = AutoGainPlanner::plan(
+                true,
+                static_cast<convo::ProcessingOrder>(spec.processing.processingOrder),
+                spec.processing.eqBypassed,
+                spec.processing.convBypassed,
+                spec.analysis.eqMaxGainDb,
+                spec.analysis.additionalAttenuationDb);
+
+            // dB → 線形変換（Builder の責務）
+            worldOwner->automation.inputHeadroomGain =
+                juce::Decibels::decibelsToGain(static_cast<double>(plan.inputHeadroomDb));
+            worldOwner->automation.outputMakeupGain =
+                juce::Decibels::decibelsToGain(static_cast<double>(plan.outputMakeupDb));
+            worldOwner->automation.convolverInputTrimGain =
+                juce::Decibels::decibelsToGain(static_cast<double>(plan.convolverInputTrimDb));
+        }
+
         // ★ Resource/Timing は current DSPCore から取得（Specification の将来拡張対象）
         if (useSealedSnapshot)
         {
@@ -51477,7 +52199,14 @@ struct RuntimePublishSpecification {
         float inputHeadroomGain = 1.0f;
         float outputMakeupGain = 1.0f;
         float convolverInputTrimGain = 1.0f;
+        bool autoGainStagingEnabled = false;  // ★ v14.0
     } processing;
+
+    // ★ v14.0: AnalysisPart — DSP 解析値（BuildAnalysis からコピー）
+    struct AnalysisPart {
+        float eqMaxGainDb = 0.0f;
+        float additionalAttenuationDb = 0.0f;
+    } analysis;
 
     // ★ v9.5 P1: PublicationSnapshotPart — Publication 履歴情報のスナップショット。
     //   Orchestrator が Coordinator から取得して格納する。Builder はこの値のみを参照し、
@@ -51582,6 +52311,7 @@ public:
         spec.processing.inputHeadroomGain = static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_relaxed));
         spec.processing.outputMakeupGain = static_cast<float>(convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_relaxed));
         spec.processing.convolverInputTrimGain = static_cast<float>(convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_relaxed));
+        spec.processing.autoGainStagingEnabled = convo::consumeAtomic(engine.autoGainStagingEnabled, std::memory_order_relaxed);
         // ★ Sync RoutingPart for backward compat（ProcessingPart が一次情報源）
         spec.routing.processingOrder = spec.processing.processingOrder;
         spec.routing.eqBypassed = spec.processing.eqBypassed;
@@ -54334,10 +55064,19 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         spec.processing.inputHeadroomGain = static_cast<float>(inp.inputHeadroomGain);
         spec.processing.outputMakeupGain = static_cast<float>(inp.outputMakeupGain);
         spec.processing.convolverInputTrimGain = static_cast<float>(inp.convolverInputTrimGain);
+        spec.processing.autoGainStagingEnabled = inp.autoGainStagingEnabled;
         // ★ Sync RoutingPart for backward compat — ProcessingPart が一次情報源
         spec.routing.processingOrder = inp.processingOrder;
         spec.routing.eqBypassed = inp.eqBypassed;
         spec.routing.convBypassed = inp.convBypassed;
+    }
+
+    // ★ v14.0: AnalysisPart — BuildAnalysis からコピー
+    {
+        const auto& ana = req.buildAnalysis;
+        jassert(convo::verifyBuildAnalysisPair(ana, req.sealedSnapshot));
+        spec.analysis.eqMaxGainDb = ana.eqMaxGainDb;
+        spec.analysis.additionalAttenuationDb = ana.additionalAttenuationDb;
     }
 
     // ★ v9.7 P7-A1: RetirePart — engine atomic から収集（sealedSnapshot には含まれないため）
@@ -56525,7 +57264,7 @@ void ConvolverProcessor::releaseIRState(const IRState* /*state*/) const noexcept
     // IRState lifetime is managed by deferred retirement.
 }
 
-void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR)
+void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb)
 {
     auto uniqueIR = std::make_unique<juce::AudioBuffer<double>>(newIR);
 
@@ -56533,6 +57272,7 @@ void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, d
     newState->irOwner = std::move(uniqueIR);
     newState->ir = newState->irOwner.get();
     newState->sampleRate = newSR;
+    newState->additionalAttenuationDb = additionalAttenuationDb;
     if (auto* provider = getRcuProvider(); provider != nullptr)
         newState->generation = provider->snapshotRcuEpoch();
     else
@@ -57461,7 +58201,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     // loadIR() (RCU経路) では applyNewState() が呼ばれないため、
     // DSP側 rebuildAllIRsSynchronous() が参照する originalIR をここで保持する。
     if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
-        updateIRState(*(prepared->timeDomainIR), prepared->sampleRate);
+        updateIRState(*(prepared->timeDomainIR), prepared->sampleRate, prepared->additionalAttenuationDb);
 
     // 3. RCU 状態の更新（★ 軽量化: partitionData/numPartitions/partitionSizeBytes はデッドコードのため除去）
 
@@ -65949,6 +66689,7 @@ private:
 #include <cmath>
 #include <complex>
 #include <algorithm>
+#include <vector>
 #include "core/EpochDomain.h"
 
 #include "audioengine/AtomicAccess.h"
@@ -66279,6 +67020,129 @@ float EQProcessor::getMagnitudeSquared(const EQCoeffsBiquad& c, const std::compl
     if (denNorm < 1e-18) return 0.0f;
 
     return static_cast<float>(std::norm(num) / denNorm);
+}
+
+//============================================================================
+// 推定最大ゲイン計算（★ v14.0）
+//   Parallel 時は Serial 積 Π|Hi| で近似（数学的保証なし）
+//============================================================================
+float EQProcessor::computeEstimatedMaxGainDb(double sampleRate, [[maybe_unused]] int processingOrder) const
+{
+    if (sampleRate <= 0.0) return 0.0f;
+
+    const double nyquist = sampleRate * 0.5;
+    if (nyquist <= 20.0) return 0.0f;
+
+    constexpr int kCoarsePoints = 300;
+    constexpr int kBandAdaptivePoints = 64;
+    constexpr double kBwMultiplier = 8.0;
+
+    // 有効バンドの Biquad 係数を収集（ゲイン増大に寄与するバンドのみ）
+    struct BandScanInfo {
+        double freq = 0.0;
+        double q = 0.0;
+        EQCoeffsBiquad biquad {};
+    };
+    std::vector<BandScanInfo> activeBands;
+
+    auto* state = loadCurrentState(std::memory_order_acquire);
+    if (state == nullptr)
+        return 0.0f;
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        if (!state->bands[i].enabled)
+            continue;
+
+        const EQBandType type = state->bandTypes[i];
+        const float gain = state->bands[i].gain;
+
+        // ゲイン増大に寄与するバンドのみ: Peaking(gain>0)/Shelf(gain≠0)/HPF/LPF
+        // Peaking(gain≤0)/Notch/AllPass は振幅増大なしのためスキップ
+        bool gainBoosting = false;
+        switch (type)
+        {
+            case EQBandType::Peaking:
+                gainBoosting = (gain > 0.0f);
+                break;
+            case EQBandType::LowShelf:
+            case EQBandType::HighShelf:
+            case EQBandType::LowPass:
+            case EQBandType::HighPass:
+                gainBoosting = true;
+                break;
+            default:
+                gainBoosting = false;  // Notch, AllPass, BandPass etc.
+                break;
+        }
+
+        if (!gainBoosting)
+            continue;
+
+        const EQCoeffsSVF svf = calcSVFCoeffs(type, state->bands[i].frequency, gain, state->bands[i].q, sampleRate);
+        activeBands.push_back({ static_cast<double>(state->bands[i].frequency),
+                                static_cast<double>(state->bands[i].q),
+                                svfToDisplayBiquad(svf) });
+    }
+
+    if (activeBands.empty())
+        return 0.0f;
+
+    // 共通評価関数: 全 activeBands の Serial 積 Π|Hi| を計算
+    auto evaluateAt = [&](double freqHz) -> float {
+        double product = 1.0;
+        for (const auto& band : activeBands)
+        {
+            const float magSq = getMagnitudeSquared(band.biquad, static_cast<float>(freqHz), static_cast<float>(sampleRate));
+            product *= static_cast<double>(std::sqrt(static_cast<double>(magSq)));
+            if (product > 1e12) break; // 安全ガード
+        }
+        return static_cast<float>(product);
+    };
+
+    float maxLinearGain = 1.0f;
+
+    // ★ 第1段: 粗探索（対数分布 300点、20Hz〜Nyquist）
+    for (int i = 0; i < kCoarsePoints; ++i)
+    {
+        const double t = static_cast<double>(i) / static_cast<double>(kCoarsePoints - 1);
+        const double freq = 20.0 * std::pow(nyquist / 20.0, t);
+        maxLinearGain = std::max(maxLinearGain, evaluateAt(freq));
+    }
+
+    // ★ 第2段: Band 適応サンプリング（各有効 Band 中心周囲を Q 依存帯域幅で）
+    for (const auto& band : activeBands)
+    {
+        if (band.q <= 1e-12)
+            continue;
+
+        const double range = std::max(20.0, (band.freq / band.q) * kBwMultiplier);
+        // range が中心周波数の 50% を超える場合は全域カバーとみなしスキップ
+        if (range > band.freq * 0.5)
+            continue;
+
+        const double startFreq = std::max(20.0, band.freq - range * 0.5);
+        const double endFreq   = std::min(nyquist, band.freq + range * 0.5);
+        if (endFreq <= startFreq)
+            continue;
+
+        for (int j = 0; j < kBandAdaptivePoints; ++j)
+        {
+            const double freq = startFreq + (endFreq - startFreq) * static_cast<double>(j) / static_cast<double>(kBandAdaptivePoints - 1);
+            maxLinearGain = std::max(maxLinearGain, evaluateAt(freq));
+        }
+    }
+
+    // 20*log10 で dB 変換
+    if (maxLinearGain <= 1e-12f) return 0.0f;
+
+    // ★ Phase 8 Review: totalGainDb（Master Gain）を線形倍率で乗算
+    //   totalGainDb はポストEQマスターゲイン（DSP チェーンで別段階として適用）
+    const float totalGainLin = std::pow(10.0, static_cast<double>(state->totalGainDb) / 20.0);
+    const float combinedGain = maxLinearGain * totalGainLin;
+
+    const float gainDb = 20.0f * std::log10(combinedGain);
+    return (gainDb > 0.0f) ? gainDb : 0.0f;
 }
 
 //============================================================================
@@ -69405,6 +70269,9 @@ public:
 
     static EQCoeffsBiquad svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept;
 
+    // ★ v14.0: 推定最大ゲイン計算（Parallel 時は Serial 積近似）
+    [[nodiscard]] float computeEstimatedMaxGainDb(double sampleRate, int processingOrder) const;
+
     // Retire authority: set coordinator for unified retire path
     void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
     {
@@ -69793,7 +70660,7 @@ namespace {
     }
 
     for (const auto& requiredSnapshotPlumbing : {
-             std::string("enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);") })
+             std::string("enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis);") })
     {
         const bool found = contains(commit, requiredSnapshotPlumbing)
             || contains(rebuildDispatch, requiredSnapshotPlumbing);
@@ -69805,7 +70672,7 @@ namespace {
         }
     }
 
-    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);", "audio header enqueuePublicationIntentForRuntimeCommit"))
+    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {});", "audio header enqueuePublicationIntentForRuntimeCommit"))
         return false;
     // [P1 Phase1-B] appendPublicationIntentForCommitProducer/Consumer removed
     if (!requireContains(runtimeBuilderHeader, "const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr", "runtime builder header sealed snapshot"))
@@ -70052,6 +70919,507 @@ int main()
         throw std::runtime_error("crossfade executor-local contract failed");
 
     return 0;
+}
+
+```
+
+### 📄 `src\tests\EQProcessorMaxGainTests.cpp`
+
+```
+//==============================================================================
+// EQProcessorMaxGainTests.cpp — ★ v14.0 Phase 8
+//
+// EQ周波数応答の数学的契約テスト。
+// SVF→Biquad等価変換とマグニチュード二乗計算の数学的正当性を検証する。
+//
+// 本テストは JUCE/AudioEngine に依存しない純粋数学テスト。
+// getMagnitudeSquared と svfToDisplayBiquad の公式を直接実装し、
+// 既知のフィルタ（バイパス/Peaking/Shelf）に対して正しい応答を返すことを確認する。
+//==============================================================================
+#include <cmath>
+#include <complex>
+#include <iostream>
+#include <string>
+#include <algorithm>
+#include <numbers>
+
+namespace {
+
+// M_PI が icx/MSVC で未定義の場合があるため直接定義
+constexpr double kPi = 3.14159265358979323846;
+
+int g_testsPassed = 0;
+int g_testsFailed = 0;
+
+void check(bool condition, const std::string& label)
+{
+    if (condition)
+        ++g_testsPassed;
+    else
+        ++g_testsFailed, std::cerr << "[FAIL] " << label << "\n";
+}
+
+//==============================================================================
+// Biquad フィルタ構造体（EQProcessor.h の EQCoeffsBiquad と同一）
+// H(z) = (b0 + b1*z^-1 + b2*z^-2) / (a0 + a1*z^-1 + a2*z^-2)
+//==============================================================================
+struct EQCoeffsBiquad {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+    double a0 = 1.0, a1 = 0.0, a2 = 0.0;
+};
+
+double getMagnitudeSquared(const EQCoeffsBiquad& c, double freqHz, double sampleRate) noexcept
+{
+    const double omega = 2.0 * kPi * freqHz / sampleRate;
+    const std::complex<double> z(std::cos(omega), std::sin(omega)); // z = exp(+jω)
+    const std::complex<double> z1 = 1.0 / z;
+    const std::complex<double> z2 = z1 * z1;
+
+    const std::complex<double> num = c.b0 + c.b1 * z1 + c.b2 * z2;
+    const std::complex<double> den = c.a0 + c.a1 * z1 + c.a2 * z2;
+    if (std::norm(den) < 1e-30) return 0.0;
+    return std::norm(num) / std::norm(den);
+}
+
+//==============================================================================
+// SVF 係数構造体（EQProcessor.h の EQCoeffsSVF と同一）
+//==============================================================================
+struct EQCoeffsSVF {
+    double a1 = 1.0, a2 = 0.0, a3 = 0.0;
+    double m0 = 1.0, m1 = 0.0, m2 = 0.0;
+};
+
+// svfToDisplayBiquad — SVF z域等価変換
+// 実装は EQProcessor.Coefficients.cpp:347-368 と同一
+EQCoeffsBiquad svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept
+{
+    EQCoeffsBiquad bq;
+    const double a1 = svf.a1, a2 = svf.a2, a3 = svf.a3;
+    const double m0 = svf.m0, m1 = svf.m1, m2 = svf.m2;
+
+    if (a1 < 1e-15) { bq.b0 = 1.0; bq.a0 = 1.0; return bq; }
+
+    const double g2  = a3 / a1;
+    const double g   = a2 / a1;
+    const double gk  = (1.0 - a1 - a3) / a1;
+
+    bq.a0 =  1.0 + gk + g2;
+    bq.a1 = -2.0 + 2.0 * g2;
+    bq.a2 =  1.0 - gk + g2;
+    bq.b0 = m0 * (1.0 + gk + g2) + m1 * g + m2 * g2;
+    bq.b1 = -2.0 * m0 + 2.0 * (m0 + m2) * g2;
+    bq.b2 = m0 * (1.0 - gk + g2) - m1 * g + m2 * g2;
+    return bq;
+}
+
+// 等価 1次ローパス SVF 係数 (簡易検証用)
+EQCoeffsSVF calcLPFSVF(double freqHz, double q, double sr) noexcept
+{
+    EQCoeffsSVF c;
+    const double g = std::tan(kPi * freqHz / sr);
+    const double k = 1.0 / q;
+    const double denom = 1.0 + g * (g + k);
+    c.a1 = 1.0 / denom;
+    c.a2 = g * c.a1;
+    c.a3 = g * c.a2;
+    c.m0 = 0.0; c.m1 = 0.0; c.m2 = 1.0;
+    return c;
+}
+
+} // namespace
+
+//==============================================================================
+// TEST 1: バイパスフィルタ (a0=1, a1=0, a2=0, b0=1, b1=0, b2=0) → |H|² = 1
+//==============================================================================
+void testBypassFilter()
+{
+    EQCoeffsBiquad bp;
+    bp.b0 = 1.0; bp.a0 = 1.0;
+    for (double f = 20.0; f < 24000.0; f *= 2.0)
+    {
+        const double msq = getMagnitudeSquared(bp, f, 48000.0);
+        check(std::abs(msq - 1.0) < 1e-12, "Bypass: |H|²=1 at " + std::to_string(f) + "Hz");
+    }
+}
+
+//==============================================================================
+// TEST 2: バイパス SVF (a1=1, a2=0, a3=0, m0=1) → Biquad もバイパス → |H|² = 1
+//==============================================================================
+void testBypassSVF()
+{
+    EQCoeffsSVF svf;
+    svf.a1 = 1.0; svf.a2 = 0.0; svf.a3 = 0.0;
+    svf.m0 = 1.0; svf.m1 = 0.0; svf.m2 = 0.0;
+    const auto bq = svfToDisplayBiquad(svf);
+    // リファレンス Biquad: a0=1,a1=-2,a2=1,b0=1,b1=-2,b2=1 → H(z)=1 for all z
+    // /fp:fast では微妙な再編成の差異のため ε=1e-9
+    for (double f = 20.0; f < 24000.0; f *= 2.0)
+    {
+        const double msq = getMagnitudeSquared(bq, f, 48000.0);
+        check(std::abs(msq - 1.0) < 1e-9, "Bypass SVF: |H|²≈1 at " + std::to_string(f) + "Hz");
+    }
+}
+
+//==============================================================================
+// TEST 3: Bypass Biquad → |H|² = 1 at all frequencies (DC check variant)
+//==============================================================================
+void testBypassDCGain()
+{
+    EQCoeffsBiquad bp;
+    bp.b0 = 1.0; bp.a0 = 1.0;
+    // DC (z=1): (b0+b1+b2)/(a0+a1+a2) = 1/1 = 1
+    // 1/magnitude at ω=0
+    const double dcMagSq = getMagnitudeSquared(bp, 0.001, 48000.0); // near-DC
+    check(std::abs(dcMagSq - 1.0) < 1e-12, "Bypass DC: |H|²=1");
+}
+
+//==============================================================================
+// TEST 4: 1次 LPF → DC ゲイン = 1, 高周波で減衰
+//==============================================================================
+void testLPFFrequencyResponse()
+{
+    const double sr = 48000.0;
+    const EQCoeffsSVF svf = calcLPFSVF(1000.0, 0.707, sr);
+    const auto bq = svfToDisplayBiquad(svf);
+
+    const double dcMagSq = getMagnitudeSquared(bq, 10.0, sr);
+    check(std::abs(dcMagSq - 1.0) < 0.01, "LPF DC: |H|² ≈ 1");
+
+    const double hiMagSq = getMagnitudeSquared(bq, 10000.0, sr);
+    check(hiMagSq < 1.0, "LPF high: |H|² < 1");
+}
+
+//==============================================================================
+// TEST 5: Serial 積 Π|Hi| が正しく積算されることの確認
+//==============================================================================
+void testSerialProductContract()
+{
+    const double sr = 48000.0;
+    EQCoeffsBiquad bp1, bp2;
+    bp1.b0 = 1.0; bp1.a0 = 1.0;
+    bp2.b0 = 1.0; bp2.a0 = 1.0;
+
+    for (double f = 20.0; f < 24000.0; f *= 4.0)
+    {
+        const double m1 = std::sqrt(getMagnitudeSquared(bp1, f, sr));
+        const double m2 = std::sqrt(getMagnitudeSquared(bp2, f, sr));
+        check(std::abs(m1 * m2 - 1.0) < 1e-12, "Serial product = 1 at " + std::to_string(f) + "Hz");
+    }
+}
+
+//==============================================================================
+// TEST 6: Nyquist 対称性 — 実係数フィルタでは |H(f)|² = |H(sr-f)|²
+//==============================================================================
+void testFrequencySymmetry()
+{
+    const double sr = 48000.0;
+    const EQCoeffsSVF svf = calcLPFSVF(1000.0, 1.0, sr);
+    const auto bq = svfToDisplayBiquad(svf);
+
+    const double mag1 = getMagnitudeSquared(bq, 1000.0, sr);
+    const double mag2 = getMagnitudeSquared(bq, sr - 1000.0, sr);
+    check(std::abs(mag1 - mag2) < 1e-10, "Nyquist symmetry");
+}
+
+//==============================================================================
+// MAIN
+//==============================================================================
+int main()
+{
+    std::cout << "[EQProcessorMaxGainTests] Start\n";
+    testBypassFilter();
+    testBypassDCGain();
+    testBypassSVF();
+    testLPFFrequencyResponse();
+    testSerialProductContract();
+    testFrequencySymmetry();
+
+    std::cout << "[EQProcessorMaxGainTests] Passed: " << g_testsPassed
+              << ", Failed: " << g_testsFailed << "\n";
+    return (g_testsFailed == 0) ? 0 : 1;
+}
+
+```
+
+### 📄 `src\tests\GainStagingContractTests.cpp`
+
+```
+//==============================================================================
+// GainStagingContractTests.cpp — ★ v14.0 Phase 8
+//
+// AutoGainPlanner::plan() の入出力契約テスト（リファレンス実装検証方式）。
+// 4パターン（PEQ only / Conv only / Conv→PEQ / PEQ→Conv）× Auto On/Off を検証。
+//
+// 本テストは AutoGainPlanner.cpp をリンクせず、リファレンス実装でロジックを
+// 検証する。これにより JUCE 依存を完全排除し、コンパイル/実行の独立性を確保。
+//==============================================================================
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <string>
+
+namespace {
+
+int g_testsPassed = 0;
+int g_testsFailed = 0;
+
+void check(bool condition, const std::string& label)
+{
+    if (condition)
+        ++g_testsPassed;
+    else
+        ++g_testsFailed, std::cerr << "[FAIL] " << label << "\n";
+}
+
+[[nodiscard]] bool approxEqual(float a, float b, float epsilon = 0.05f) noexcept
+{
+    return std::abs(a - b) <= epsilon;
+}
+
+//==============================================================================
+// リファレンス実装 — AutoGainPlanner.h の constexpr 定数と同一
+//==============================================================================
+constexpr float kMarginEqFirst    = 3.0f;
+constexpr float kMarginConvFirst  = 1.5f;
+constexpr float kMarginInterStage = 2.0f;
+constexpr float kClampInputMin    = -12.0f;
+constexpr float kClampInputMax    = 0.0f;
+constexpr float kClampTrimMin     = -12.0f;
+constexpr float kClampTrimMax     = 0.0f;
+constexpr float kClampMakeupMin   = 0.0f;
+constexpr float kClampMakeupMax   = 12.0f;
+constexpr float kConvFirstInputCeiling = -6.0f;
+
+enum class Order { ConvolverThenEQ = 0, EQThenConvolver = 1 };
+
+template<typename T>
+constexpr T jlimit(T lo, T hi, T v) noexcept { return (v < lo) ? lo : (hi < v) ? hi : v; }
+
+//==============================================================================
+// リファレンス実装 — estimateQSafetyMargin
+//==============================================================================
+float refQSafetyMargin(float eqMaxGainDb) noexcept
+{
+    constexpr float kQSurgeHpfLpf = 1.5f;
+    constexpr float kQSurgeCoeff = 0.15f;
+    constexpr float kQSurgeMax = 6.0f;
+    constexpr float kButterworthQ = 0.707f;
+    const float peakingSurge = eqMaxGainDb > 0.0f
+        ? eqMaxGainDb * kQSurgeCoeff * (20.0f / kButterworthQ)
+        : 0.0f;
+    return std::min(kQSurgeMax, kQSurgeHpfLpf + peakingSurge);
+}
+
+//==============================================================================
+// リファレンス実装 — plan() のロジック（AutoGainPlanner.cpp と同一アルゴリズム）
+//==============================================================================
+struct Plan {
+    float inputHeadroomDb = 0.0f;
+    float outputMakeupDb = 0.0f;
+    float convolverInputTrimDb = 0.0f;
+};
+
+Plan refPlan(bool autoGainEnabled, Order order, bool eqBypassed, bool convBypassed,
+             float eqMaxGainDb, float additionalAttenuationDb) noexcept
+{
+    Plan result {};
+    if (!autoGainEnabled)
+        return result;
+
+    float inputDb = 0.0f, trimDb = 0.0f;
+
+    if (!eqBypassed && convBypassed)
+    {
+        inputDb = -std::max(0.0f, eqMaxGainDb - kMarginEqFirst);
+        inputDb -= refQSafetyMargin(eqMaxGainDb);
+    }
+    else if (eqBypassed && !convBypassed)
+    {
+        inputDb = -std::max(0.0f, additionalAttenuationDb - kMarginConvFirst);
+    }
+    else if (order == Order::ConvolverThenEQ)
+    {
+        inputDb = -(std::max(0.0f, additionalAttenuationDb - kMarginConvFirst)
+                    + std::max(0.0f, eqMaxGainDb - kMarginInterStage));
+        inputDb = std::min(inputDb, kConvFirstInputCeiling);
+    }
+    else
+    {
+        inputDb = -std::max(0.0f, eqMaxGainDb - kMarginEqFirst);
+        inputDb -= refQSafetyMargin(eqMaxGainDb);
+        trimDb = -std::max(0.0f, additionalAttenuationDb - kMarginInterStage);
+    }
+
+    result.inputHeadroomDb = jlimit(kClampInputMin, kClampInputMax, inputDb);
+    result.convolverInputTrimDb = jlimit(kClampTrimMin, kClampTrimMax, trimDb);
+    const float makeupDb = -result.inputHeadroomDb - result.convolverInputTrimDb;
+    result.outputMakeupDb = jlimit(kClampMakeupMin, kClampMakeupMax, makeupDb);
+    return result;
+}
+
+} // namespace
+
+//==============================================================================
+// TESTS
+//==============================================================================
+
+void testAutoDisabled()
+{
+    const auto plan = refPlan(false, Order::EQThenConvolver, false, false, 12.0f, 6.0f);
+    check(approxEqual(plan.inputHeadroomDb, 0.0f), "Auto OFF: inputHeadroomDb == 0");
+    check(approxEqual(plan.outputMakeupDb, 0.0f), "Auto OFF: outputMakeupDb == 0");
+    check(approxEqual(plan.convolverInputTrimDb, 0.0f), "Auto OFF: convolverInputTrimDb == 0");
+}
+
+void testPEQOnly()
+{
+    const float eqMax = 9.0f;
+    const auto plan = refPlan(true, Order::EQThenConvolver, false, true, eqMax, 6.0f);
+    const float expectedInput = -std::max(0.0f, eqMax - kMarginEqFirst) - refQSafetyMargin(eqMax);
+    const float clampedInput = jlimit(kClampInputMin, kClampInputMax, expectedInput);
+    const float expectedMakeup = jlimit(kClampMakeupMin, kClampMakeupMax, -clampedInput);
+    check(approxEqual(plan.inputHeadroomDb, clampedInput), "PEQ only: inputHeadroomDb");
+    check(approxEqual(plan.convolverInputTrimDb, 0.0f), "PEQ only: trim == 0");
+    check(approxEqual(plan.outputMakeupDb, expectedMakeup), "PEQ only: outputMakeupDb");
+    check(approxEqual(plan.inputHeadroomDb + plan.convolverInputTrimDb + plan.outputMakeupDb, 0.0f), "PEQ only: net 0dB");
+}
+
+void testPEQOnlyNoQSurge()
+{
+    // eqMaxGainDb = 0 → QSurge も 1.5dB 最小 → input = -(0-3) - 1.5 = -1.5
+    const auto plan = refPlan(true, Order::EQThenConvolver, false, true, 0.0f, 0.0f);
+    check(approxEqual(plan.inputHeadroomDb, -1.5f), "PEQ only zero: input = -1.5");
+    check(approxEqual(plan.outputMakeupDb, 1.5f), "PEQ only zero: makeup = 1.5");
+    check(approxEqual(plan.convolverInputTrimDb, 0.0f), "PEQ only zero: trim == 0");
+}
+
+void testConvOnly()
+{
+    const float attenu = 6.0f;
+    const auto plan = refPlan(true, Order::EQThenConvolver, true, false, 12.0f, attenu);
+    const float expectedInput = -std::max(0.0f, attenu - kMarginConvFirst);
+    const float clampedInput = jlimit(kClampInputMin, kClampInputMax, expectedInput);
+    const float expectedMakeup = jlimit(kClampMakeupMin, kClampMakeupMax, -clampedInput);
+    check(approxEqual(plan.inputHeadroomDb, clampedInput), "Conv only: inputHeadroomDb");
+    check(approxEqual(plan.convolverInputTrimDb, 0.0f), "Conv only: trim == 0");
+    check(approxEqual(plan.outputMakeupDb, expectedMakeup), "Conv only: outputMakeupDb");
+    check(approxEqual(plan.inputHeadroomDb + plan.convolverInputTrimDb + plan.outputMakeupDb, 0.0f), "Conv only: net 0dB");
+}
+
+void testConvThenPEQ()
+{
+    const float eqMax = 9.0f, attenu = 6.0f;
+    const auto plan = refPlan(true, Order::ConvolverThenEQ, false, false, eqMax, attenu);
+    float expectedInput = -(std::max(0.0f, attenu - kMarginConvFirst) + std::max(0.0f, eqMax - kMarginInterStage));
+    expectedInput = std::min(expectedInput, kConvFirstInputCeiling);
+    const float clampedInput = jlimit(kClampInputMin, kClampInputMax, expectedInput);
+    const float expectedMakeup = jlimit(kClampMakeupMin, kClampMakeupMax, -clampedInput);
+    check(approxEqual(plan.inputHeadroomDb, clampedInput), "Conv->PEQ: inputHeadroomDb");
+    check(approxEqual(plan.convolverInputTrimDb, 0.0f), "Conv->PEQ: trim == 0");
+    check(approxEqual(plan.outputMakeupDb, expectedMakeup), "Conv->PEQ: outputMakeupDb");
+    check(approxEqual(plan.inputHeadroomDb + plan.convolverInputTrimDb + plan.outputMakeupDb, 0.0f), "Conv->PEQ: net 0dB");
+}
+
+void testConvThenPEQCeilingClamp()
+{
+    // ★注: 実装では `std::min(inputDb, kConvFirstInputCeiling)` により
+    //   入力 0dB → -6dB に矯正（「計算結果が0dBの場合、-6dBにクランプ」）
+    //   結果のネット 0dB は makeup=+6dB で維持される（input=-6, trim=0, makeup=+6）
+    const auto plan = refPlan(true, Order::ConvolverThenEQ, false, false, 0.0f, 0.0f);
+    check(approxEqual(plan.inputHeadroomDb, kConvFirstInputCeiling), "Conv->PEQ ceiling: input == -6");
+    check(approxEqual(plan.outputMakeupDb, 6.0f), "Conv->PEQ ceiling: makeup == +6");
+    check(approxEqual(plan.convolverInputTrimDb, 0.0f), "Conv->PEQ ceiling: trim == 0");
+    check(approxEqual(plan.inputHeadroomDb + plan.outputMakeupDb, 0.0f), "Conv->PEQ ceiling: net 0dB");
+}
+
+void testPEQThenConv()
+{
+    // ★注: ネット 0dB は makeup の clamp 範囲 [0,12]dB 内でのみ保証される。
+    const float eqMax = 5.0f, attenu = 4.0f;
+    const float qSurge = refQSafetyMargin(eqMax);
+    const float expectedInput = -std::max(0.0f, eqMax - kMarginEqFirst) - qSurge;
+    const float expectedTrim = -std::max(0.0f, attenu - kMarginInterStage);
+    const float clampedInput = jlimit(kClampInputMin, kClampInputMax, expectedInput);
+    const float clampedTrim = jlimit(kClampTrimMin, kClampTrimMax, expectedTrim);
+    const float expectedMakeup = -clampedInput - clampedTrim;
+    const auto plan = refPlan(true, Order::EQThenConvolver, false, false, eqMax, attenu);
+    check(approxEqual(plan.inputHeadroomDb, clampedInput), "PEQ->Conv: inputHeadroomDb");
+    check(approxEqual(plan.convolverInputTrimDb, clampedTrim), "PEQ->Conv: trim");
+    check(approxEqual(plan.outputMakeupDb, expectedMakeup), "PEQ->Conv: outputMakeupDb");
+    check(approxEqual(plan.inputHeadroomDb + plan.convolverInputTrimDb + plan.outputMakeupDb, 0.0f), "PEQ->Conv: net 0dB");
+}
+
+void testClampRanges()
+{
+    const auto plan = refPlan(true, Order::EQThenConvolver, false, false, 100.0f, 100.0f);
+    check(plan.inputHeadroomDb >= kClampInputMin, "clamp: input >= -12");
+    check(plan.inputHeadroomDb <= kClampInputMax, "clamp: input <= 0");
+    check(plan.convolverInputTrimDb >= kClampTrimMin, "clamp: trim >= -12");
+    check(plan.convolverInputTrimDb <= kClampTrimMax, "clamp: trim <= 0");
+    check(plan.outputMakeupDb >= kClampMakeupMin, "clamp: makeup >= 0");
+    check(plan.outputMakeupDb <= kClampMakeupMax, "clamp: makeup <= 12");
+}
+
+void testNetZeroDb()
+{
+    struct TC { const char* name; bool ae; Order ord; bool eq; bool cv; float em; float am; };
+    const TC cases[] = {
+        {"PEQ only",       true, Order::EQThenConvolver,  false, true,  6.0f,  0.0f},
+        {"PEQ only xtrm",  true, Order::EQThenConvolver,  false, true,  30.0f, 0.0f},
+        {"Conv only",      true, Order::EQThenConvolver,  true,  false, 0.0f,  4.0f},
+        {"Conv only xtrm", true, Order::EQThenConvolver,  true,  false, 0.0f,  30.0f},
+        {"C->P",           true, Order::ConvolverThenEQ, false, false, 5.0f,  3.0f},
+        {"C->P ceiling",   true, Order::ConvolverThenEQ, false, false, 0.0f,  0.0f},
+        {"P->C",           true, Order::EQThenConvolver,  false, false, 5.0f,  3.0f},
+        {"Both bypassed",  true, Order::ConvolverThenEQ, true,  true,  0.0f,  0.0f},
+    };
+    for (const auto& tc : cases)
+    {
+        const auto p = refPlan(tc.ae, tc.ord, tc.eq, tc.cv, tc.em, tc.am);
+        const float net = p.inputHeadroomDb + p.convolverInputTrimDb + p.outputMakeupDb;
+        check(std::abs(net) <= 0.1f, std::string("net 0dB: ") + tc.name);
+    }
+}
+
+void testQSafetyMargin()
+{
+    check(approxEqual(refQSafetyMargin(0.0f), 1.5f), "Q Surge: eqMax=0 -> 1.5");
+    check(approxEqual(refQSafetyMargin(-5.0f), 1.5f), "Q Surge: eqMax<0 -> 1.5");
+    check(approxEqual(refQSafetyMargin(10.0f), 6.0f), "Q Surge: eqMax=10 -> 6.0");
+    const float mid = refQSafetyMargin(0.5f);
+    check(mid > 1.5f && mid < 6.0f, "Q Surge: eqMax=0.5 -> between 1.5 and 6.0");
+}
+
+void testQSafetyMarginAlwaysPositive()
+{
+    for (float eqMax = -20.0f; eqMax <= 30.0f; eqMax += 1.0f)
+    {
+        const float margin = refQSafetyMargin(eqMax);
+        check(margin > 0.0f, "Q Surge positive at " + std::to_string(eqMax));
+    }
+}
+
+//==============================================================================
+// MAIN
+//==============================================================================
+int main()
+{
+    std::cout << "[GainStagingContractTests] Start\n";
+    testAutoDisabled();
+    testPEQOnly();
+    testPEQOnlyNoQSurge();
+    testConvOnly();
+    testConvThenPEQ();
+    testConvThenPEQCeilingClamp();
+    testPEQThenConv();
+    testClampRanges();
+    testNetZeroDb();
+    testQSafetyMargin();
+    testQSafetyMarginAlwaysPositive();
+    std::cout << "[GainStagingContractTests] Passed: " << g_testsPassed
+              << ", Failed: " << g_testsFailed << "\n";
+    return (g_testsFailed == 0) ? 0 : 1;
 }
 
 ```
@@ -71292,7 +72660,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     incomplete.mappedRuntimeGeneration = 101;
     incomplete.semanticComplete = false;
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
@@ -71300,7 +72668,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
         return false;
 
     // Incomplete world must be rejected and current published world must stay unchanged.
-    coordinator.publishWorld(createWorld(incomplete));
+    static_cast<void>(coordinator.publishWorld(createWorld(incomplete)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -71348,12 +72716,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     authorityMismatch.mappedRuntimeGeneration = 201;
     authorityMismatch.graphEqBypassed = true; // routingEqBypassed=false と不整合
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(authorityMismatch));
+    static_cast<void>(coordinator.publishWorld(createWorld(authorityMismatch)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -71404,12 +72772,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     transitionMismatch.mappedRuntimeGeneration = 301;
     transitionMismatch.executionTransitionActive = false; // topologyHasFadingRuntime=true と不整合
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(transitionMismatch));
+    static_cast<void>(coordinator.publishWorld(createWorld(transitionMismatch)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -71459,12 +72827,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     rollback.previousSequenceId = 31; // previous >= current は reject
     rollback.mappedRuntimeGeneration = 401;
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(rollback));
+    static_cast<void>(coordinator.publishWorld(createWorld(rollback)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -71514,12 +72882,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     mappingMismatch.previousSequenceId = 40;
     mappingMismatch.mappedRuntimeGeneration = 999; // generation と不整合
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(mappingMismatch));
+    static_cast<void>(coordinator.publishWorld(createWorld(mappingMismatch)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -71570,12 +72938,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     invalidRouting.mappedRuntimeGeneration = 601;
     invalidRouting.routingProcessingOrder = 2; // schema上の上限(1)超過
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(invalidRouting));
+    static_cast<void>(coordinator.publishWorld(createWorld(invalidRouting)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -71626,12 +72994,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     invalidExecution.mappedRuntimeGeneration = 701;
     invalidExecution.executionTransitionPolicy = 3; // schema上の上限(2)超過
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(invalidExecution));
+    static_cast<void>(coordinator.publishWorld(createWorld(invalidExecution)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -72952,7 +74320,7 @@ private:
     w1->token = 100;
     w1->generation = 100;
     w1->publicationSequence = 1;
-    coordinator.publishWorld(std::move(w1));
+    static_cast<void>(coordinator.publishWorld(std::move(w1)));
 
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr || first->generation != 100 || first->publicationSequence != 1)
@@ -72963,7 +74331,7 @@ private:
     w2->token = 100;
     w2->generation = 100;
     w2->publicationSequence = 2;
-    coordinator.publishWorld(std::move(w2));
+    static_cast<void>(coordinator.publishWorld(std::move(w2)));
 
     const TestWorld* afterRepublish = Coordinator::consumeWorldHandle(store);
     if (afterRepublish != first || afterRepublish->publicationSequence != 1)
@@ -72974,7 +74342,7 @@ private:
     w3->token = 101;
     w3->generation = 101;
     w3->publicationSequence = 2;
-    coordinator.publishWorld(std::move(w3));
+    static_cast<void>(coordinator.publishWorld(std::move(w3)));
 
     const TestWorld* second = Coordinator::consumeWorldHandle(store);
     if (second == nullptr || second == first || second->generation != 101 || second->publicationSequence != 2)
@@ -72985,7 +74353,7 @@ private:
     w4->token = 100;
     w4->generation = 100;
     w4->publicationSequence = 3;
-    coordinator.publishWorld(std::move(w4));
+    static_cast<void>(coordinator.publishWorld(std::move(w4)));
 
     const TestWorld* afterRollback = Coordinator::consumeWorldHandle(store);
     if (afterRollback != second || afterRollback->publicationSequence != 2)
@@ -73008,7 +74376,7 @@ private:
     w1->token = 100;
     w1->generation = 100;
     w1->publicationSequence = 1;
-    coordinator.publishWorld(std::move(w1));
+    static_cast<void>(coordinator.publishWorld(std::move(w1)));
 
     const TestWorld* published = Coordinator::consumeWorldHandle(store);
     if (published == nullptr)

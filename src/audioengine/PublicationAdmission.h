@@ -15,9 +15,10 @@ namespace convo::isr {
 class PublicationAdmission {
 public:
     struct PublishRequest {
-        DSPHandle newDSP;  // DSPHandle (Phase2: Execution Path Handle Normalization)
+        DSPHandle newDSP;
         int generation = 0;
         RuntimeBuildSnapshot sealedSnapshot;
+        BuildAnalysis buildAnalysis {};  // ★ v14.0: Auto Gain 解析値
     };
 
     // ★ P1-6: Pressure レベル (Adaptive Backpressure)

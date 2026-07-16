@@ -1,4 +1,5 @@
 #include "RuntimeBuilder.h"
+#include "AutoGainPlanner.h"  // ★ v14.0
 
 #include <bit>
 #include <cstdint>
@@ -43,6 +44,7 @@ namespace {
     mix(std::bit_cast<std::uint64_t>(buildInput.inputHeadroomGain));
     mix(std::bit_cast<std::uint64_t>(buildInput.outputMakeupGain));
     mix(std::bit_cast<std::uint64_t>(buildInput.convolverInputTrimGain));
+    mix(static_cast<std::uint64_t>(buildInput.autoGainStagingEnabled));
     return hash;
 }
 
@@ -312,6 +314,27 @@ RuntimeBuilder::buildRuntimePublishWorld(
         worldOwner->automation.inputHeadroomGain = spec.processing.inputHeadroomGain;
         worldOwner->automation.outputMakeupGain = spec.processing.outputMakeupGain;
         worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;
+
+        // ★ v14.0: Auto Gain Staging — AutoGainPlanner でゲイン上書き（単一代入）
+        if (spec.processing.autoGainStagingEnabled)
+        {
+            const auto plan = AutoGainPlanner::plan(
+                true,
+                static_cast<convo::ProcessingOrder>(spec.processing.processingOrder),
+                spec.processing.eqBypassed,
+                spec.processing.convBypassed,
+                spec.analysis.eqMaxGainDb,
+                spec.analysis.additionalAttenuationDb);
+
+            // dB → 線形変換（Builder の責務）
+            worldOwner->automation.inputHeadroomGain =
+                juce::Decibels::decibelsToGain(static_cast<double>(plan.inputHeadroomDb));
+            worldOwner->automation.outputMakeupGain =
+                juce::Decibels::decibelsToGain(static_cast<double>(plan.outputMakeupDb));
+            worldOwner->automation.convolverInputTrimGain =
+                juce::Decibels::decibelsToGain(static_cast<double>(plan.convolverInputTrimDb));
+        }
+
         // ★ Resource/Timing は current DSPCore から取得（Specification の将来拡張対象）
         if (useSealedSnapshot)
         {

@@ -1,5 +1,6 @@
 #include "IRConverter.h"
 #include "IRDSP.h"
+#include "IRAnalyzer.h"  // ★ v14.0
 
 #include <algorithm>
 #include <cmath>
@@ -10,28 +11,55 @@
 #include <mkl_cblas.h>
 #include "DiagnosticsConfig.h"
 
-IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::AudioBuffer<double>& ir,
-                                                               const juce::AudioBuffer<double>* currentIr,
-                                                               double currentScale) noexcept
+//==============================================================================
+// ★ v14.0: 第1段 — Energy 補正（基本 scaleFactor + safetyMargin）
+//==============================================================================
+static double computeEnergyScale(const juce::AudioBuffer<double>& ir) noexcept
 {
-    ScaleFactorResult result;
-
     const int numSamples = ir.getNumSamples();
     const int numChannels = ir.getNumChannels();
     if (numSamples <= 0 || numChannels <= 0)
-        return result;
+        return 1.0;
 
     double maxChannelEnergy = 0.0;
-    double irPeak = 0.0;
-    double irEnergySum = 0.0;
-
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const double* data = ir.getReadPointer(ch);
         const double energy = cblas_ddot(numSamples, data, 1, data, 1);
         if (std::isfinite(energy) && energy > 1.0e-18)
             maxChannelEnergy = std::max(maxChannelEnergy, energy);
+    }
 
+    if (!(maxChannelEnergy > 1.0e-18) || !std::isfinite(maxChannelEnergy))
+        return 1.0;
+
+    constexpr double safetyMargin = 0.5011872336272722;  // -6dB
+    return (1.0 / std::sqrt(maxChannelEnergy)) * safetyMargin;
+}
+
+//==============================================================================
+// ★ v14.0: 第2段 — IR 解析（Peak/RMS + FFT）
+//==============================================================================
+struct IRAnalysisResult {
+    double peakValue = 0.0;
+    double rmsValue = 0.0;
+    double frequencyPeakGain = 1.0;
+};
+
+static IRAnalysisResult analyzeIR(const juce::AudioBuffer<double>& ir, double currentScale) noexcept
+{
+    IRAnalysisResult result;
+    const int numSamples = ir.getNumSamples();
+    const int numChannels = ir.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return result;
+
+    double irPeak = 0.0;
+    double irEnergySum = 0.0;
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* data = ir.getReadPointer(ch);
         for (int i = 0; i < numSamples; ++i)
         {
             const double value = data[i];
@@ -40,31 +68,59 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
         }
     }
 
-    if (!(maxChannelEnergy > 1.0e-18) || !std::isfinite(maxChannelEnergy))
-        return result;
-
-    const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
-    constexpr double safetyMargin = 0.5011872336272722;
-    result.scaleFactor = makeup * safetyMargin;
-    result.hasScaleFactor = true;
-
+    result.peakValue = irPeak;
     const int totalSamples = numChannels * numSamples;
-    if (totalSamples > 0)
+    result.rmsValue = (totalSamples > 0) ? std::sqrt(irEnergySum / static_cast<double>(totalSamples)) : 0.0;
+
+    // FFT 解析（IRAnalyzer に委譲）
+    result.frequencyPeakGain = IRAnalyzer::estimateMaxFrequencyResponseGain(ir);
+
+    return result;
+}
+
+//==============================================================================
+// ★ v14.0: 第3段 — 保護クランプ適用
+//==============================================================================
+static void applyClampProtection(IRConverter::ScaleFactorResult& result,
+                                  double scale,
+                                  const IRAnalysisResult& analysis,
+                                  const juce::AudioBuffer<double>* currentIr,
+                                  double currentScale) noexcept
+{
+    double peakAttenDb = 0.0, rmsAttenDb = 0.0, freqAttenDb = 0.0;
+
+    // Peak クランプ
+    constexpr double kMaxEffectivePeak = 0.5;
+    if (analysis.peakValue * scale > kMaxEffectivePeak)
     {
-        const double irRms = std::sqrt(irEnergySum / static_cast<double>(totalSamples));
-        constexpr double kMaxEffectivePeak = 0.98;
-        constexpr double kMaxEffectiveRms = 0.25;
-
-        double absoluteClamp = 1.0;
-        if (irPeak > 1.0e-12)
-            absoluteClamp = std::min(absoluteClamp, kMaxEffectivePeak / (irPeak * result.scaleFactor));
-        if (irRms > 1.0e-12)
-            absoluteClamp = std::min(absoluteClamp, kMaxEffectiveRms / (irRms * result.scaleFactor));
-
-        if (std::isfinite(absoluteClamp) && absoluteClamp > 0.0 && absoluteClamp < 1.0)
-            result.scaleFactor *= absoluteClamp;
+        const double peakClamp = kMaxEffectivePeak / (analysis.peakValue * scale);
+        result.scaleFactor *= peakClamp;
+        scale *= peakClamp;  // ★ v14.0: 順序依存対応
+        peakAttenDb = -20.0 * std::log10(peakClamp);
     }
 
+    // RMS クランプ（Peak 適用後の scale で判定）
+    constexpr double kMaxEffectiveRms = 0.25;
+    if (analysis.rmsValue * scale > kMaxEffectiveRms)
+    {
+        const double rmsClamp = kMaxEffectiveRms / (analysis.rmsValue * scale);
+        result.scaleFactor *= rmsClamp;
+        rmsAttenDb = -20.0 * std::log10(rmsClamp);
+    }
+
+    // 周波数応答ピーククランプ
+    constexpr double kMaxEffectiveFreqResponse = 1.41; // +3dB
+    if (analysis.frequencyPeakGain > kMaxEffectiveFreqResponse)
+    {
+        const double freqClip = kMaxEffectiveFreqResponse / analysis.frequencyPeakGain;
+        result.scaleFactor *= freqClip;
+        freqAttenDb = -20.0 * std::log10(freqClip);
+    }
+
+    // additionalAttenuationDb = 追加減衰量（energy補正含まず）
+    result.additionalAttenuationDb = static_cast<float>(peakAttenDb + rmsAttenDb + freqAttenDb);
+
+    // ★ 既存: 現在の IR との比較による過大ジャンプ保護
     if (currentIr != nullptr && currentIr->getNumChannels() > 0 && currentIr->getNumSamples() > 0)
     {
         auto computePeakAndRmsWithScale = [](const juce::AudioBuffer<double>& buffer, double scale) -> std::pair<double, double>
@@ -86,12 +142,11 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
                     energy += value * value;
                 }
             }
-
             return { peak, std::sqrt(energy / static_cast<double>(channels * samples)) };
         };
 
         const auto [currentPeak, currentRms] = computePeakAndRmsWithScale(*currentIr, currentScale);
-        const auto [newPeak, newRms] = computePeakAndRmsWithScale(ir, result.scaleFactor);
+        const auto [newPeak, newRms] = computePeakAndRmsWithScale(*currentIr, result.scaleFactor);
 
         const bool excessivePeakJump = currentPeak > 1.0e-9 && newPeak > currentPeak * 4.0 && newPeak > 0.5;
         const bool excessiveRmsJump = currentRms > 1.0e-9 && newRms > currentRms * 4.0 && newRms > 0.25;
@@ -111,6 +166,30 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
                 result.scaleFactor *= clampRatio;
         }
     }
+}
+
+//==============================================================================
+// computeScaleFactor — 3段階オーケストレーター（★ v14.0）
+//==============================================================================
+IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::AudioBuffer<double>& ir,
+                                                               const juce::AudioBuffer<double>* currentIr,
+                                                               double currentScale) noexcept
+{
+    ScaleFactorResult result;
+
+    // 第1段: Energy 補正
+    double scale = computeEnergyScale(ir);
+    if (scale <= 0.0 || !std::isfinite(scale))
+        return result;
+
+    result.scaleFactor = scale;
+    result.hasScaleFactor = true;
+
+    // 第2段: IR 解析（Peak/RMS/FFT）
+    const auto analysis = analyzeIR(ir, scale);
+
+    // 第3段: 保護クランプ
+    applyClampProtection(result, scale, analysis, currentIr, currentScale);
 
     return result;
 }
@@ -227,6 +306,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
         const auto scaleInfo = computeScaleFactor(*prepared->timeDomainIR);
         prepared->scaleFactor = scaleInfo.scaleFactor;
         prepared->hasScaleFactor = scaleInfo.hasScaleFactor;
+        prepared->additionalAttenuationDb = scaleInfo.additionalAttenuationDb;
     }
 
     return prepared;
@@ -246,4 +326,14 @@ std::unique_ptr<PreparedIRState> IRConverter::convertToHighRes(const juce::File&
     cfg.generationId = generationId;
     cfg.cacheKey = cacheKey;
     return convertFile(irFile, cfg, shouldCancel);
+}
+
+//==============================================================================
+// ★ v14.0: 後方互換用デリゲート — IRAnalyzer に委譲
+//==============================================================================
+double IRConverter::estimateMaxFrequencyResponseGain(
+    const juce::AudioBuffer<double>& ir,
+    double /*sampleRate*/) noexcept
+{
+    return IRAnalyzer::estimateMaxFrequencyResponseGain(ir);
 }

@@ -127,6 +127,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRRetire.cpp              # RetireRuntime
     )
 
+    # ★ v14.0 Phase 8: Auto Gain Staging 契約テスト
+    #   AutoGainPlanner::plan() の4パターン × Auto On/Off を検証（リファレンス実装）。
+    #   JUCE/MKL に依存しない純粋関数テスト。
+    add_executable(GainStagingContractTests
+        src/tests/GainStagingContractTests.cpp
+    )
+    add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
+
+    # ★ v14.0 Phase 8: EQ 応答計算の数学的契約テスト
+    #   getMagnitudeSquared + svfToDisplayBiquad の数学的正当性を検証。
+    #   JUCE/MKL に依存しない純粋数学テスト。
+    add_executable(EQProcessorMaxGainTests
+        src/tests/EQProcessorMaxGainTests.cpp
+    )
+    add_test(NAME EQProcessorMaxGainTests COMMAND EQProcessorMaxGainTests)
+
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
@@ -143,6 +159,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(CrossfadeExecutorLocalContractTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeWorldAuthorityProjectionTests PRIVATE cxx_std_20)
     target_compile_features(PartialPublicationRejectTests PRIVATE cxx_std_20)
+    target_compile_features(GainStagingContractTests PRIVATE cxx_std_20)
+    target_compile_features(EQProcessorMaxGainTests PRIVATE cxx_std_20)
     target_compile_features(RebuildAdmissionRegressionTests PRIVATE cxx_std_20)
     target_compile_features(BuildInputSemanticContractTests PRIVATE cxx_std_20)
     target_compile_features(PriorityIntegrationTests PRIVATE cxx_std_20)
@@ -533,6 +551,7 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/RuntimeBuildTypes.h
     src/audioengine/RuntimeBuilder.h
     src/audioengine/RuntimeBuilder.cpp
+    src/audioengine/AutoGainPlanner.cpp  # ★ v14.0
     src/audioengine/AudioEngineProcessor.cpp
     src/PsychoacousticDither.cpp
     src/MKLRealTimeSetup.cpp
@@ -573,6 +592,7 @@ target_sources(ConvoPeq PRIVATE
     src/AllpassDesigner.h
     src/MixedPhaseOptimizationComponent.cpp
     src/IRConverter.cpp
+    src/IRAnalyzer.cpp  # ★ v14.0
     src/ProgressiveUpgradeThread.cpp
     src/MixedPhasePersistentCache.cpp
     src/CacheManager.cpp
@@ -801,8 +821,8 @@ if(WIN32)
         ole32 avrt
     )
 
-    # Visual Studio用設定
-    set(CONVOPEQ_ARTEFACTS_ROOT "${CMAKE_SOURCE_DIR}/build/ConvoPeq_artefacts")
+    # Visual Studio / icx 用設定
+    set(CONVOPEQ_ARTEFACTS_ROOT "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts")
     set_target_properties(ConvoPeq PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
         RUNTIME_OUTPUT_DIRECTORY "${CONVOPEQ_ARTEFACTS_ROOT}"
@@ -1053,3 +1073,24 @@ if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
         PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_CMD}"
     )
 endif()
+
+# ★ icx/LLVM: 深いテンプレート展開時に OOM (clang frontend signal) が発生する。
+#   -j2 でビルド並列度制限 (build.bat) により回避。
+if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    set_source_files_properties(src/audioengine/AudioEngine.Snapshot.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/audioengine/AudioEngine.Learning.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/audioengine/AudioEngine.RebuildDispatch.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/audioengine/AudioEngine.Transition.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+    set_source_files_properties(src/MainApplication.cpp
+        PROPERTIES COMPILE_FLAGS "/O1"
+    )
+endif()
+add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)

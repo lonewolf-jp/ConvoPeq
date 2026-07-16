@@ -479,7 +479,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     // loadIR() (RCU経路) では applyNewState() が呼ばれないため、
     // DSP側 rebuildAllIRsSynchronous() が参照する originalIR をここで保持する。
     if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
-        updateIRState(*(prepared->timeDomainIR), prepared->sampleRate);
+        updateIRState(*(prepared->timeDomainIR), prepared->sampleRate, prepared->additionalAttenuationDb);
 
     // 3. RCU 状態の更新（★ 軽量化: partitionData/numPartitions/partitionSizeBytes はデッドコードのため除去）
 

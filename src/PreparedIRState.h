@@ -21,6 +21,7 @@ struct PreparedIRState
     std::unique_ptr<juce::AudioBuffer<double>> timeDomainIR;
     double scaleFactor = 1.0;
     bool hasScaleFactor = false;
+    float additionalAttenuationDb = 0.0f;  // ★ v14.0: IRConverter clamp による追加減衰量 [dB]
 
     PreparedIRState() = default;
 
@@ -36,12 +37,14 @@ struct PreparedIRState
           originalFileName(std::move(other.originalFileName)),
                     timeDomainIR(std::move(other.timeDomainIR)),
                     scaleFactor(other.scaleFactor),
-                    hasScaleFactor(other.hasScaleFactor)
+                    hasScaleFactor(other.hasScaleFactor),
+                    additionalAttenuationDb(other.additionalAttenuationDb)
     {
         other.partitionData = nullptr;
         other.partitionSizeBytes = 0;
                 other.scaleFactor = 1.0;
                 other.hasScaleFactor = false;
+                other.additionalAttenuationDb = 0.0f;
     }
 
     PreparedIRState& operator=(PreparedIRState&& other) noexcept
@@ -63,11 +66,13 @@ struct PreparedIRState
             timeDomainIR = std::move(other.timeDomainIR);
             scaleFactor = other.scaleFactor;
             hasScaleFactor = other.hasScaleFactor;
+            additionalAttenuationDb = other.additionalAttenuationDb;
 
             other.partitionData = nullptr;
             other.partitionSizeBytes = 0;
             other.scaleFactor = 1.0;
             other.hasScaleFactor = false;
+            other.additionalAttenuationDb = 0.0f;
         }
 
         return *this;

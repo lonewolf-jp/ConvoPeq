@@ -180,7 +180,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     incomplete.mappedRuntimeGeneration = 101;
     incomplete.semanticComplete = false;
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
@@ -188,7 +188,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
         return false;
 
     // Incomplete world must be rejected and current published world must stay unchanged.
-    coordinator.publishWorld(createWorld(incomplete));
+    static_cast<void>(coordinator.publishWorld(createWorld(incomplete)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -236,12 +236,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     authorityMismatch.mappedRuntimeGeneration = 201;
     authorityMismatch.graphEqBypassed = true; // routingEqBypassed=false と不整合
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(authorityMismatch));
+    static_cast<void>(coordinator.publishWorld(createWorld(authorityMismatch)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -292,12 +292,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     transitionMismatch.mappedRuntimeGeneration = 301;
     transitionMismatch.executionTransitionActive = false; // topologyHasFadingRuntime=true と不整合
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(transitionMismatch));
+    static_cast<void>(coordinator.publishWorld(createWorld(transitionMismatch)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -347,12 +347,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     rollback.previousSequenceId = 31; // previous >= current は reject
     rollback.mappedRuntimeGeneration = 401;
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(rollback));
+    static_cast<void>(coordinator.publishWorld(createWorld(rollback)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -402,12 +402,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     mappingMismatch.previousSequenceId = 40;
     mappingMismatch.mappedRuntimeGeneration = 999; // generation と不整合
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(mappingMismatch));
+    static_cast<void>(coordinator.publishWorld(createWorld(mappingMismatch)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -458,12 +458,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     invalidRouting.mappedRuntimeGeneration = 601;
     invalidRouting.routingProcessingOrder = 2; // schema上の上限(1)超過
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(invalidRouting));
+    static_cast<void>(coordinator.publishWorld(createWorld(invalidRouting)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -514,12 +514,12 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
     invalidExecution.mappedRuntimeGeneration = 701;
     invalidExecution.executionTransitionPolicy = 3; // schema上の上限(2)超過
 
-    coordinator.publishWorld(createWorld(complete));
+    static_cast<void>(coordinator.publishWorld(createWorld(complete)));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishWorld(createWorld(invalidExecution));
+    static_cast<void>(coordinator.publishWorld(createWorld(invalidExecution)));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;

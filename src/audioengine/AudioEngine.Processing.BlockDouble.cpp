@@ -54,7 +54,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         {
             // tryApplyMmcssForSelfManagedThread() uses W API, logs success/failure
             // under CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS. RT impact: first call only (~50-200μs).
-            tryApplyMmcssForSelfManagedThread();
+            static_cast<void>(tryApplyMmcssForSelfManagedThread());
 
             if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire)) {
                 revertMmcssOnAudioThread();

@@ -46,7 +46,14 @@ struct RuntimePublishSpecification {
         float inputHeadroomGain = 1.0f;
         float outputMakeupGain = 1.0f;
         float convolverInputTrimGain = 1.0f;
+        bool autoGainStagingEnabled = false;  // ★ v14.0
     } processing;
+
+    // ★ v14.0: AnalysisPart — DSP 解析値（BuildAnalysis からコピー）
+    struct AnalysisPart {
+        float eqMaxGainDb = 0.0f;
+        float additionalAttenuationDb = 0.0f;
+    } analysis;
 
     // ★ v9.5 P1: PublicationSnapshotPart — Publication 履歴情報のスナップショット。
     //   Orchestrator が Coordinator から取得して格納する。Builder はこの値のみを参照し、
@@ -151,6 +158,7 @@ public:
         spec.processing.inputHeadroomGain = static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_relaxed));
         spec.processing.outputMakeupGain = static_cast<float>(convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_relaxed));
         spec.processing.convolverInputTrimGain = static_cast<float>(convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_relaxed));
+        spec.processing.autoGainStagingEnabled = convo::consumeAtomic(engine.autoGainStagingEnabled, std::memory_order_relaxed);
         // ★ Sync RoutingPart for backward compat（ProcessingPart が一次情報源）
         spec.routing.processingOrder = spec.processing.processingOrder;
         spec.routing.eqBypassed = spec.processing.eqBypassed;

@@ -1679,7 +1679,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 #endif
     };
 
-    auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
+    [[maybe_unused]] auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
     {
         if (absNoLibm(gain - 1.0) < 1.0e-12)
         {

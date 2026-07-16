@@ -1,5 +1,5 @@
 param(
-    [string]$ExePath = "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\ConvoPeq.exe",
+    [string]$ExePath = "",
     [int]$ExitMs = 1500,
     [int]$TimeoutSec = 30,
     [switch]$UseReleaseLog,
@@ -10,16 +10,33 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Auto-detect executable if not specified
+if ([string]::IsNullOrEmpty($ExePath)) {
+    $candidates = @(
+        "c:\VSC_Project\ConvoPeq\build-icx\ConvoPeq_artefacts\Release\ConvoPeq.exe",
+        "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release\ConvoPeq.exe",
+        "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\ConvoPeq.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            $ExePath = $candidate
+            break
+        }
+    }
+}
+
+if ([string]::IsNullOrEmpty($ExePath)) {
+    throw "Auto-detect failed: no ConvoPeq.exe found in build/, build-icx/. Pass -ExePath explicitly."
+}
+
 if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Executable not found: $ExePath"
 }
 
-$logPath = if ($UseReleaseLog) {
-    "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release\ConvoPeq.log"
-}
-else {
-    "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\ConvoPeq.log"
-}
+$projRoot = "c:\VSC_Project\ConvoPeq"
+$buildDir = if ($ExePath -match '\\build-icx\\') { "build-icx" } else { "build" }
+$configDir = if ($UseReleaseLog -or $ExePath -match '\\Release\\') { "Release" } else { "Debug" }
+$logPath = "$projRoot\$buildDir\ConvoPeq_artefacts\$configDir\ConvoPeq.log"
 
 if ($KillExisting) {
     $existing = Get-Process -Name "ConvoPeq" -ErrorAction SilentlyContinue

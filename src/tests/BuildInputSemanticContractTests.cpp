@@ -109,7 +109,7 @@ namespace {
     }
 
     for (const auto& requiredSnapshotPlumbing : {
-             std::string("enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);") })
+             std::string("enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis);") })
     {
         const bool found = contains(commit, requiredSnapshotPlumbing)
             || contains(rebuildDispatch, requiredSnapshotPlumbing);
@@ -121,7 +121,7 @@ namespace {
         }
     }
 
-    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);", "audio header enqueuePublicationIntentForRuntimeCommit"))
+    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {});", "audio header enqueuePublicationIntentForRuntimeCommit"))
         return false;
     // [P1 Phase1-B] appendPublicationIntentForCommitProducer/Consumer removed
     if (!requireContains(runtimeBuilderHeader, "const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr", "runtime builder header sealed snapshot"))

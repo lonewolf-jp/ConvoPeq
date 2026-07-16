@@ -1265,6 +1265,25 @@ public:
     void setConvolverInputTrimDb(float db);
     [[nodiscard]] float getConvolverInputTrimDb() const;
 
+    // ★ v14.0: Auto Gain Staging
+    void setAutoGainStagingEnabled(bool enabled) noexcept
+    {
+        const bool current = convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire);
+        if (current == enabled)
+            return;
+        convo::publishAtomic(autoGainStagingEnabled, enabled, std::memory_order_release);
+        // ★ BUG-10: Auto OFF 時も rebuild が必要。ON/OFF 切り替えで ProcessingPart の
+        //   手動値と AutoGainPlanner 計算値の選択が変わるため。
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::EnqueueSnapshotCommand,
+                            RebuildTelemetryClass::Snapshot,
+                            RebuildTelemetryPolicy::Replaceable);
+    }
+    [[nodiscard]] bool isAutoGainStagingEnabled() const noexcept
+    {
+        return convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire);
+    }
+
     // Audio Thread command queue 経路を廃止し、
     // Message Thread 上の UI staging -> snapshot/rebuild 経路に統一する。
     void setConvolverMix(float value) noexcept
@@ -1909,7 +1928,7 @@ private:
                     for (auto& entry : map)
                     {
                         if (entry.second != nullptr)
-                            entry.second->release(RetirePolicy::Immediate);
+                            static_cast<void>(entry.second->release(RetirePolicy::Immediate));
                     }
                 } else {
                     for (auto& entry : map)
@@ -2251,6 +2270,9 @@ public:
     alignas(64) std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
     alignas(64) std::atomic<float> outputMakeupDb { 12.0f };
     alignas(64) std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB
+
+    // ★ v14.0: Auto Gain Staging フラグ
+    std::atomic<bool> autoGainStagingEnabled { true };
     #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     std::atomic<int> rebuildRequestGeneration { 0 }; // 非同期リビルドの競合防止用
@@ -2291,7 +2313,7 @@ public:
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
-    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {});
     // acquire: requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
@@ -2407,6 +2429,7 @@ public:
         convo::BuildInput buildInput {};
         ConvolverProcessor::BuildSnapshot convolverBuildSnapshot {};
         convo::RuntimeBuildSnapshot runtimeBuildSnapshot {};
+        convo::BuildAnalysis buildAnalysis {};  // ★ v14.0
         int generation = 0;
     };
     RebuildTask pendingTask;
@@ -4036,7 +4059,7 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     if (!dspHandleRuntime_.rollbackRegistration(handle))
         return false;
     // ★ 順序②: Map から削除（二次的。失敗しても Runtime rollback は完了済み）
-    eraseByHandle(handle);
+    static_cast<void>(eraseByHandle(handle));
     // Production: CAS 成功後は常に成功。Map 不整合は DIAG のみで報告。
     return true;
 }

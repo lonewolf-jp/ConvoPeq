@@ -33,6 +33,7 @@ struct BuildParameterSnapshot
     double inputHeadroomGain = 1.0;
     double outputMakeupGain = 1.0;
     double convolverInputTrimGain = 1.0;
+    bool autoGainStagingEnabled = false;  // ★ v14.0
 };
 
 BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) noexcept
@@ -50,6 +51,7 @@ BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) 
     snapshot.inputHeadroomGain = convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire);
     snapshot.outputMakeupGain = convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire);
     snapshot.convolverInputTrimGain = convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire);
+    snapshot.autoGainStagingEnabled = convo::consumeAtomic(engine.autoGainStagingEnabled, std::memory_order_acquire);
     return snapshot;
 }
 
@@ -67,7 +69,8 @@ bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
         && lhs.saturationAmount == rhs.saturationAmount
         && lhs.inputHeadroomGain == rhs.inputHeadroomGain
         && lhs.outputMakeupGain == rhs.outputMakeupGain
-        && lhs.convolverInputTrimGain == rhs.convolverInputTrimGain;
+        && lhs.convolverInputTrimGain == rhs.convolverInputTrimGain
+        && lhs.autoGainStagingEnabled == rhs.autoGainStagingEnabled;
 }
 
 bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
@@ -580,6 +583,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     task.buildInput.inputHeadroomGain = paramSnapshot.inputHeadroomGain;
     task.buildInput.outputMakeupGain = paramSnapshot.outputMakeupGain;
     task.buildInput.convolverInputTrimGain = paramSnapshot.convolverInputTrimGain;
+    task.buildInput.autoGainStagingEnabled = paramSnapshot.autoGainStagingEnabled;
     task.convolverBuildSnapshot = uiConvolverProcessor.captureBuildSnapshot();
     const uint64_t structuralHash = uiConvolverProcessor.isIRLoaded() ? uiConvolverProcessor.getStructuralHash() : 0;
 
@@ -607,6 +611,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                 pendingSnapshot.inputHeadroomGain = pendingTask.buildInput.inputHeadroomGain;
                 pendingSnapshot.outputMakeupGain = pendingTask.buildInput.outputMakeupGain;
                 pendingSnapshot.convolverInputTrimGain = pendingTask.buildInput.convolverInputTrimGain;
+                pendingSnapshot.autoGainStagingEnabled = pendingTask.buildInput.autoGainStagingEnabled;
 
                 const bool sameAsPending =
                     std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
@@ -642,6 +647,16 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                                             structuralHash,
                                             uiConvolverProcessor.isIRLoaded(),
                                             uiConvolverProcessor.isIRFinalized())));
+            // ★ v14.0: BuildAnalysis を生成（Worker Thread で解析）
+            {
+                convo::BuildAnalysis analysis;
+                analysis.generation = generation;
+                if (!paramSnapshot.eqBypassed)
+                    analysis.eqMaxGainDb = getEQProcessor().computeEstimatedMaxGainDb(sampleRate, static_cast<int>(paramSnapshot.processingOrder));
+                if (!paramSnapshot.convBypassed)
+                    analysis.additionalAttenuationDb = uiConvolverProcessor.getIrAdditionalAttenuationDb();
+                task.buildAnalysis = convo::sealBuildAnalysis(analysis, &task.runtimeBuildSnapshot);
+            }
             pendingTask = task;
             hasPendingTask = true;
             convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(1), std::memory_order_release);
@@ -956,7 +971,7 @@ void AudioEngine::rebuildThreadLoop()
                     + ",PF=" + juce::String(static_cast<juce::int64>(memAfterIR.pageFaultCount)));
             }
 #endif
-            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);
+            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis);
         }
         catch (const std::exception& e)
         {

@@ -79,7 +79,7 @@ private:
     w1->token = 100;
     w1->generation = 100;
     w1->publicationSequence = 1;
-    coordinator.publishWorld(std::move(w1));
+    static_cast<void>(coordinator.publishWorld(std::move(w1)));
 
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr || first->generation != 100 || first->publicationSequence != 1)
@@ -90,7 +90,7 @@ private:
     w2->token = 100;
     w2->generation = 100;
     w2->publicationSequence = 2;
-    coordinator.publishWorld(std::move(w2));
+    static_cast<void>(coordinator.publishWorld(std::move(w2)));
 
     const TestWorld* afterRepublish = Coordinator::consumeWorldHandle(store);
     if (afterRepublish != first || afterRepublish->publicationSequence != 1)
@@ -101,7 +101,7 @@ private:
     w3->token = 101;
     w3->generation = 101;
     w3->publicationSequence = 2;
-    coordinator.publishWorld(std::move(w3));
+    static_cast<void>(coordinator.publishWorld(std::move(w3)));
 
     const TestWorld* second = Coordinator::consumeWorldHandle(store);
     if (second == nullptr || second == first || second->generation != 101 || second->publicationSequence != 2)
@@ -112,7 +112,7 @@ private:
     w4->token = 100;
     w4->generation = 100;
     w4->publicationSequence = 3;
-    coordinator.publishWorld(std::move(w4));
+    static_cast<void>(coordinator.publishWorld(std::move(w4)));
 
     const TestWorld* afterRollback = Coordinator::consumeWorldHandle(store);
     if (afterRollback != second || afterRollback->publicationSequence != 2)
@@ -135,7 +135,7 @@ private:
     w1->token = 100;
     w1->generation = 100;
     w1->publicationSequence = 1;
-    coordinator.publishWorld(std::move(w1));
+    static_cast<void>(coordinator.publishWorld(std::move(w1)));
 
     const TestWorld* published = Coordinator::consumeWorldHandle(store);
     if (published == nullptr)

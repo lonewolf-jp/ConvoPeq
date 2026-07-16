@@ -3,19 +3,20 @@
   "totalSlots": 256,
   "slots": [
     { "slot": 1, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" }
+    { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 3, "lane": "reclaim", "lifecycle": "reclaimed" }
   ],
   "counts": {
-    "laneRTIntent": 2,
-    "laneCoordination": 2,
-    "laneEpoch": 2,
-    "laneReclaim": 2,
+    "laneRTIntent": 3,
+    "laneCoordination": 3,
+    "laneEpoch": 3,
+    "laneReclaim": 3,
     "laneQuarantine": 0,
     "lifecycleVisible": 0,
-    "lifecycleCompareEligible": 2,
-    "lifecycleTelemetryRetained": 2,
+    "lifecycleCompareEligible": 3,
+    "lifecycleTelemetryRetained": 3,
     "lifecycleReplayRetainedOptional": 0,
-    "lifecycleReclaimEligible": 2,
-    "lifecycleReclaimed": 2
+    "lifecycleReclaimEligible": 3,
+    "lifecycleReclaimed": 3
   }
 }

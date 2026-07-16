@@ -111,10 +111,19 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         spec.processing.inputHeadroomGain = static_cast<float>(inp.inputHeadroomGain);
         spec.processing.outputMakeupGain = static_cast<float>(inp.outputMakeupGain);
         spec.processing.convolverInputTrimGain = static_cast<float>(inp.convolverInputTrimGain);
+        spec.processing.autoGainStagingEnabled = inp.autoGainStagingEnabled;
         // ★ Sync RoutingPart for backward compat — ProcessingPart が一次情報源
         spec.routing.processingOrder = inp.processingOrder;
         spec.routing.eqBypassed = inp.eqBypassed;
         spec.routing.convBypassed = inp.convBypassed;
+    }
+
+    // ★ v14.0: AnalysisPart — BuildAnalysis からコピー
+    {
+        const auto& ana = req.buildAnalysis;
+        jassert(convo::verifyBuildAnalysisPair(ana, req.sealedSnapshot));
+        spec.analysis.eqMaxGainDb = ana.eqMaxGainDb;
+        spec.analysis.additionalAttenuationDb = ana.additionalAttenuationDb;
     }
 
     // ★ v9.7 P7-A1: RetirePart — engine atomic から収集（sealedSnapshot には含まれないため）

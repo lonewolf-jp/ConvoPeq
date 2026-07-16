@@ -390,6 +390,9 @@ public:
 
     static EQCoeffsBiquad svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept;
 
+    // ★ v14.0: 推定最大ゲイン計算（Parallel 時は Serial 積近似）
+    [[nodiscard]] float computeEstimatedMaxGainDb(double sampleRate, int processingOrder) const;
+
     // Retire authority: set coordinator for unified retire path
     void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
     {
