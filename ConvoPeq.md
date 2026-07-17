@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-17 15:21:13
+> Generated: 2026-07-18 00:09:53
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -223,6 +223,7 @@
         │   ├── IPublicationProvider.h
         │   ├── IReaderEpochProvider.h
         │   ├── IRetireProvider.h
+        │   ├── IRetireRouter.h
         │   ├── ObserveChannel.h
         │   ├── ObservedRuntime.h
         │   ├── RCUReader.h
@@ -231,6 +232,7 @@
         │   ├── RuntimePublicationCoordinator.h
         │   ├── RuntimeReaderContext.h
         │   ├── RuntimeStore.h
+        │   ├── ScopedMXCSR.h
         │   ├── SnapshotAssembler.cpp
         │   ├── SnapshotAssembler.h
         │   ├── SnapshotCoordinator.cpp
@@ -247,6 +249,9 @@
         │   ├── Types.h
         │   ├── WorkerThread.cpp
         │   └── WorkerThread.h
+        ├── dsp/
+        │   └── math/
+        │       └── FastTanhApprox.h
         ├── eqprocessor/
         │   ├── EQProcessor.Coefficients.cpp
         │   ├── EQProcessor.Core.cpp
@@ -13336,6 +13341,7 @@ private:
 
 ```
 #include "IRDSP.h"
+#include "core/ScopedMXCSR.h"
 #include <algorithm>
 #include <future>
 #include <cstring>
@@ -13380,6 +13386,8 @@ juce::AudioBuffer<double> resampleIR(
 
     for (int ch = 0; ch < numCh; ++ch) {
         futures.emplace_back(std::async(std::launch::async, [&, ch]() {
+            // ★ Bug#4: std::async ワーカー — ThreadPool 実装依存のため RAII で保存＋復元
+            const convo::cpu::ScopedMXCSR mxcsr;
             try {
                 auto resampler = std::make_unique<r8b::CDSPResampler>(
                     inputSR, targetSR, inLength,
@@ -14198,6 +14206,7 @@ public:
 
 ```
 //============================================================================
+#define _USE_MATH_DEFINES
 #include <JuceHeader.h>
 #include <immintrin.h>
 #include <cmath>
@@ -14583,7 +14592,7 @@ static constexpr double kRlbBiquad[5] = {
 #include "AtomicAccess.h"  // convo::consumeAtomic
 
 // absNoLibm — 標準ライブラリ abs を経由せずビット操作で |x| を求める (RT-safe)
-inline double absNoLibm(double x) noexcept
+[[nodiscard]] constexpr inline double absNoLibm(double x) noexcept
 {
     auto bits = std::bit_cast<std::uint64_t>(x);
     bits &= 0x7FFFFFFFFFFFFFFFULL;
@@ -14891,6 +14900,7 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     freeTracked(accumImag,     allocSizes.accumImag);
     freeTracked(inputAccBuf,   allocSizes.inputAccBuf);
     freeTracked(tailOutputBuf, allocSizes.tailOutputBuf);
+    freeTracked(delayLineBuf,  allocSizes.delayLineBuf);   // ★ Bug#1 B13 delayLineBuf 追跡
     allocSizes = {};
 #else
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
@@ -15515,10 +15525,12 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
 #endif
 
         if (!l.isImmediate)
+        {
             l.tailOutputBuf = static_cast<double*>(DIAG_MKL_MALLOC(l.partSize * sizeof(double), 64));
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);
+            l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);   // ★ Bug#7: isImmediate ガード内に移動
 #endif
+        }
 
         if (!l.irFreqDomain || !l.irFreqReal || !l.irFreqImag || !l.fdlBuf || !l.fdlReal || !l.fdlImag || !l.fftTimeBuf ||
             !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.accumReal || !l.accumImag || !l.inputAccBuf ||
@@ -15649,8 +15661,11 @@ l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);
         if (prevLayerTotalSamples > 0) {
             l.outputDelaySamples = prevLayerTotalSamples;
             l.delayLineCapacity = ((prevLayerTotalSamples + l.partSize + m_maxBlockSize + 15) / 16) * 16;
-            l.delayLineBuf = static_cast<double*>(
-                mkl_malloc(static_cast<size_t>(l.delayLineCapacity) * sizeof(double), 64));
+            const size_t delayLineBytes = static_cast<size_t>(l.delayLineCapacity) * sizeof(double);
+            l.delayLineBuf = static_cast<double*>(DIAG_MKL_MALLOC(delayLineBytes, 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            l.allocSizes.delayLineBuf = delayLineBytes;
+#endif
             if (l.delayLineBuf == nullptr) {
                 releaseAllLayers();
                 return false;
@@ -16304,7 +16319,7 @@ void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamp
     const int first = std::min(numSamples, l.delayLineCapacity - static_cast<int>(readOffset));
     if (first > 0) {
         const double* src = l.delayLineBuf + readOffset;
-        if (std::abs(gain - 1.0) < 1.0e-12)
+        if (absNoLibm(gain - 1.0) < 1.0e-12)
             for (int i = 0; i < first; ++i) dst[i] += src[i];
         else
             for (int i = 0; i < first; ++i) dst[i] += src[i] * gain;
@@ -16312,7 +16327,7 @@ void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamp
     if (first < numSamples) {
         const double* src = l.delayLineBuf;
         const int second = numSamples - first;
-        if (std::abs(gain - 1.0) < 1.0e-12)
+        if (absNoLibm(gain - 1.0) < 1.0e-12)
             for (int i = 0; i < second; ++i) dst[first + i] += src[i];
         else
             for (int i = 0; i < second; ++i) dst[first + i] += src[i] * gain;
@@ -16466,6 +16481,7 @@ struct LayerAllocSizes {
     size_t accumImag    = 0;
     size_t inputAccBuf  = 0;
     size_t tailOutputBuf= 0;
+    size_t delayLineBuf = 0;   // ★ Bug#1 B13遅延補償リングバッファのサイズ追跡
 };
 
 /// NUC インスタンス単位の診断スナップショット（グローバル統計は含まない）。
@@ -16867,9 +16883,8 @@ void setup() noexcept
         //   参考: bug-fix-plan.md FIX-01
 
         // シングルスレッド固定（スレッドローカル版: 他スレッド/プロセスに影響しない）
+        // ★ FIX-01: mkl_set_dynamic(0) は削除。sequential MKL + local設定で十分。
         mkl_set_num_threads_local(1);
-        // mkl_set_dynamic(0) はプロセスグローバル設定。必要性を評価した上で保持・削除を判断する。
-        mkl_set_dynamic(0);
 
         // FTZ/DAZ（既存設定と重複可）
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
@@ -23507,6 +23522,8 @@ struct PreparedIRState
 #include "core/ThreadAffinityManager.h"
 
 #include <cmath>
+#include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
+#include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
 
 #include "audioengine/AtomicAccess.h"
 
@@ -23572,6 +23589,10 @@ bool ProgressiveUpgradeThread::checkAndCancel()
 
 void ProgressiveUpgradeThread::run()
 {
+    // ★ Bug#4: FTZ/DAZ 有効化（専用スレッド: 設定のみ、RAII 保存＋復元は不要）
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
     if (affinityManager != nullptr)
         affinityManager->applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
@@ -24373,27 +24394,20 @@ private:
 ```
 #pragma once
 
-// [work21 Phase-D] RefCountedDeferred — Router-based retire only.
-// Old release(EpochDomain&) removed — use release(IEpochProvider&) instead.
+// ★ R-1: RefCountedDeferred — Router-based retire via IRetireRouter.
+//   release(IRetireRouter&): NonRT, リトライ込み（Router::retire 経由）
+//   releaseRT(IRetireRouter&): RT-safe, リトライなし（Router::retireRT 経由）。戻り値 bool
+//   releaseDirect(): Shutdown 専用。RetireRouter を経由せず即時 delete。
 //
-// [work37 Phase 1.3] enqueueRetire 戻り値チェック追加。
-//   canBlock() 判定により RT スレッドからは tryReclaim をスキップ。
-//
-// [work69 Phase B08] RetirePolicy による dispatch 追加。
-//   release(RetirePolicy::Immediate) は Shutdown 時に EBR を迂回する。
+// releaseDirect() 使用条件:
+//   AudioEngine::ShutdownPhase::Destroy 以上 (Shutdown 時のみ)
+//   Runtime publish 後の呼び出しは禁止 (EBR 迂回により Audio Thread 参照中破棄のリスク)
 
 #include <atomic>
 #include <memory>
-#include "core/IEpochProvider.h"
+#include "core/IRetireRouter.h"
 #include "DspNumericPolicy.h"
-
 #include "audioengine/AtomicAccess.h"
-
-// ★ B08: Retire policy — EBR 経由または即時 delete
-enum class RetirePolicy {
-    Epoch,      // 通常: EBR 経由 (IEpochProvider& が必要)
-    Immediate   // Shutdown: EBR を迂回し即時 delete
-};
 
 template <typename T>
 class RefCountedDeferred {
@@ -24402,27 +24416,26 @@ public:
         convo::fetchAddAtomic(refCount, 1, std::memory_order_acq_rel);
     }
 
-    // [work37 Phase 1.3] enqueueRetire 戻り値をチェック。RT から呼ばれ得るため、
-    //   canBlock() (Non-RT) の場合のみ tryReclaim 再試行を行う。
-    //   RT からの失敗は HealthMonitor overflowCount 監視に委ねる。
-    void release(convo::IEpochProvider& provider) {
+    // ★ R-1: NonRT release — Router::retire 経由（リトライ・QueuePressure 通知は Router 内部で完結）
+    void release(convo::IRetireRouter& router) {
         if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (!provider.enqueueRetire(
-                    static_cast<T*>(this),
-                    [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                    provider.currentEpoch())) {
-                // canBlock() が false (RT) なら tryReclaim 禁止
-                if (!convo::numeric_policy::isAudioThread()) {
-                    provider.tryReclaim();
-                    (void)provider.enqueueRetire(
-                        static_cast<T*>(this),
-                        [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                        provider.currentEpoch());
-                }
-                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる
-            }
+            router.retire(
+                static_cast<T*>(this),
+                [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); });
         }
+    }
+
+    // ★ R-1: RT-safe release — Router::retireRT 経由（単発 enqueue、リトライなし）
+    //   戻り値: true=成功/false=QueueFull
+    [[nodiscard]] bool releaseRT(convo::IRetireRouter& router) noexcept {
+        if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            return router.retireRT(
+                static_cast<T*>(this),
+                [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); });
+        }
+        return true; // Not the last ref, success by definition
     }
 
     // tryAddRef: オブジェクトがまだ有効な場合のみ参照カウントを増やす
@@ -24439,15 +24452,13 @@ public:
         return false;
     }
 
-    // ★ B08: Shutdown 専用 — RetireRouter を経由せず即時 delete
+    // ★ R-1: Shutdown 専用 — RetireRouter を経由せず即時 delete
     //    使用条件: AudioEngine::ShutdownPhase::Destroy 以上 (Shutdown 時のみ)
     //    Runtime publish 後の呼び出しは禁止 (EBR 迂回により Audio Thread 参照中破棄のリスク)
-    [[nodiscard]] bool release(RetirePolicy policy) noexcept {
+    [[nodiscard]] bool releaseDirect() noexcept {
         if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (policy == RetirePolicy::Immediate) {
-                delete static_cast<T*>(this);
-            }
+            delete static_cast<T*>(this);
             return true;
         }
         return false;
@@ -28200,7 +28211,7 @@ AudioEngine::~AudioEngine()
         convo::fetchAddAtomic(rebuildRequestGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
         // active runtime slot / fading runtime slot はここでスロットを切り離すだけにして、
-        // 実体の解放は retireDSP() → deferred delete / epoch drain に寄せる。
+        // 実体の解放は retireDSPHandleForRuntime() → deferred delete / epoch drain に寄せる。
         {
             constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
             DSPCore* activeRaw = getActiveRuntimeDSP();
@@ -31848,6 +31859,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
 #include "core/TimeUtils.h"
+#include "dsp/math/FastTanhApprox.h"
 
 #include <cstdint>
 #include <atomic>
@@ -31901,17 +31913,6 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
 
 namespace
 {
-namespace TanhApprox
-{
-    constexpr double NUM_A = 10395.0;
-    constexpr double NUM_B = 1260.0;
-    constexpr double NUM_C = 21.0;
-    constexpr double DEN_A = 10395.0;
-    constexpr double DEN_B = 4725.0;
-    constexpr double DEN_C = 210.0;
-    constexpr double CLIP_THRESHOLD = 4.5;
-}
-
 inline bool isFiniteNoLibm(double x) noexcept
 {
     union { double d; uint64_t u; } v { x };
@@ -31959,19 +31960,6 @@ inline void scaleBlockFallback(double* data, int numSamples, double gain) noexce
         data[i] *= gain;
 }
 
-inline double fastTanh(double x) noexcept
-{
-    using namespace TanhApprox;
-
-    if (x >= CLIP_THRESHOLD) return 1.0;
-    if (x <= -CLIP_THRESHOLD) return -1.0;
-    const double x2 = x * x;
-
-    const double num = x * (NUM_A + x2 * (NUM_B + x2 * NUM_C));
-    const double den = DEN_A + x2 * (DEN_B + x2 * (DEN_C + x2));
-    return num / den;
-}
-
 inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
     const double abs_x = absNoLibm(x);
@@ -31992,7 +31980,7 @@ inline double musicalSoftClipScalar(double x, double threshold, double knee, dou
     }
 
     const double linear = abs_x;
-    const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
+    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadéPolicy>((abs_x - threshold) / knee);
 
     const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
@@ -32026,13 +32014,6 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vThree       = _mm256_set1_pd(3.0);
     const __m256d vHalf        = _mm256_set1_pd(0.5);
 
-    const __m256d vNumA        = _mm256_set1_pd(TanhApprox::NUM_A);
-    const __m256d vNumB        = _mm256_set1_pd(TanhApprox::NUM_B);
-    const __m256d vNumC        = _mm256_set1_pd(TanhApprox::NUM_C);
-    const __m256d vDenA        = _mm256_set1_pd(TanhApprox::DEN_A);
-    const __m256d vDenB        = _mm256_set1_pd(TanhApprox::DEN_B);
-    const __m256d vDenC        = _mm256_set1_pd(TanhApprox::DEN_C);
-    const __m256d vClipThreshold = _mm256_set1_pd(TanhApprox::CLIP_THRESHOLD);
     const __m256d vZero        = _mm256_setzero_pd();
     const __m256d vSignMask    = _mm256_set1_pd(-0.0);
 
@@ -32063,20 +32044,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d ks = _mm256_mul_pd(t2, _mm256_fnmadd_pd(vTwo, t, vThree));
 
         __m256d arg = _mm256_mul_pd(_mm256_sub_pd(absX, vThreshold), vRecipKnee);
-        __m256d satHi    = _mm256_cmp_pd(arg, vClipThreshold, _CMP_GE_OQ);
-        __m256d satLo    = _mm256_cmp_pd(arg, _mm256_sub_pd(vZero, vClipThreshold), _CMP_LE_OQ);
-        __m256d arg2     = _mm256_mul_pd(arg, arg);
-
-        __m256d num      = _mm256_mul_pd(arg,
-                            _mm256_fmadd_pd(arg2,
-                                _mm256_fmadd_pd(arg2, vNumC, vNumB),
-                            vNumA));
-        __m256d denInner = _mm256_fmadd_pd(arg2, vOne, vDenC);
-        __m256d denMid   = _mm256_fmadd_pd(arg2, denInner, vDenB);
-        __m256d den      = _mm256_fmadd_pd(arg2, denMid, vDenA);
-        __m256d tanhVal  = _mm256_div_pd(num, den);
-        tanhVal = _mm256_blendv_pd(tanhVal, vOne,      satHi);
-        tanhVal = _mm256_blendv_pd(tanhVal, vMinusOne, satLo);
+        __m256d tanhVal = convo::dsp::fastTanhV256<convo::dsp::SoftClipPadéPolicy>(arg);
 
         __m256d clipped = _mm256_fmadd_pd(vKnee, tanhVal, vThreshold);
 
@@ -37133,7 +37101,10 @@ struct ScopedBlockTimer {
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
 // ★ [work62] asyncSink: LogEntry + LockFreeRingBuffer + 非同期Logger
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas(64) による意図的なパディングを許容
 struct alignas(64) LogEntry {
+#pragma warning(pop)
     uint16_t length;
     char text[254];
 };
@@ -40921,13 +40892,13 @@ private:
             ~CacheMap()
             {
                 jassert(owner != nullptr);
-                // ★ B08: Shutdown 時は EBR を迂回し即時 delete (m_retireRouter は既に破棄されている)
+                // ★ R-1: Shutdown 時は EBR を迂回し即時 delete (m_retireRouter は既に破棄されている)
                 //    通常運用時 (キャッシュ世代交代) は従来通り EBR 経由
                 if (convo::consumeAtomic(owner->shutdownPhase, std::memory_order_acquire) >= AudioEngine::ShutdownPhase::Destroy) {
                     for (auto& entry : map)
                     {
                         if (entry.second != nullptr)
-                            static_cast<void>(entry.second->release(RetirePolicy::Immediate));
+                            static_cast<void>(entry.second->releaseDirect());
                     }
                 } else {
                     for (auto& entry : map)
@@ -40975,7 +40946,7 @@ public:
     // 状態管理
     //----------------------------------------------------------
     // active runtime DSP slot: 現行 DSP の非所有スロット。
-    //            実際の解放は retireDSP() → deferred delete / retire queue で行う。
+    //            実際の解放は retireDSPHandleForRuntime() → deferred delete / retire queue で行う。
     convo::NonOwningPtr<DSPCore> activeRuntimeDSPSlot { nullptr };
     // fading runtime DSP slot: フェード中 DSP の非所有スロット。
     //               寿命は publish/retire の順序に従い、active runtime slot と独立して非所有で管理する。
@@ -42907,50 +42878,27 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
 
     const uint64_t epoch = markRetireEpoch();
 
-    // [P0-5] 単一回試行 + drop. Router経由.
-    if (m_retireRouter->enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic) == convo::isr::RetireEnqueueResult::Success)
+    // [Bug2 Phase1] Router の enqueueWithRetry に委譲（リトライロジックは Router に集約）
+    auto result = m_retireRouter->enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
+    if (result == convo::isr::RetireEnqueueResult::Success)
     {
         runtimePublicationBridge_.setRetireBacklogCount(
             static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()));
         return convo::isr::RetireEnqueueResult::Success;
     }
 
-    // [P0-5] enqueue failure -> best-effort drain + telemetry.
+    // enqueueWithRetry 内でリトライ・tryReclaim・QueuePressure 通知は完結している。
+    // ここでは backlog 情報の更新と best-effort drain を行い、結果を呼び出し元に返す。
     drainDeferredRetireQueues(false);
     const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
-    return convo::isr::RetireEnqueueResult::QueuePressure;
+    return result;
 }
 
-inline void retireDSP(DSPCore* dsp) noexcept
-{
-    if (dsp == nullptr)
-        return;
-
-    // 退役の唯一の入口。
-    // ここでは「公開済みハンドルの解放」と「実体の deferred delete 予約」をまとめて行い、
-    // active runtime slot / fading runtime slot など複数の非所有スロットからの回収責務を集約する。
-    if (!retireDSPHandleForRuntime(dsp))
-        return;
-
-    convo::fetchAddAtomic(rtAuxMutable_.runtimeRetireCount,
-                         static_cast<std::uint64_t>(1),
-                         std::memory_order_acq_rel);
-    switch (enqueueDeferredDeleteNonRtWithResult(dsp, &AudioEngine::destroyDSPCoreNode))
-    {
-        case convo::isr::RetireEnqueueResult::Success:
-        case convo::isr::RetireEnqueueResult::QueuePressure:
-            return;
-        case convo::isr::RetireEnqueueResult::QueueFull:
-            convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchRuntimeQueueFullCount,
-                                  static_cast<std::uint64_t>(1),
-                                  std::memory_order_acq_rel);
-            return;
-        case convo::isr::RetireEnqueueResult::Shutdown:
-            return;
-    }
-}
+// ★ R-2: retireDSP() 削除 — 呼び出し元不在のデッドコード。
+//   DSP の退役は DSPLifetimeManager 経由に一本化済み。
+//   代わりに retireDSPHandleForRuntime() を直接使用すること。
 
 inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
 {
@@ -44065,7 +44013,7 @@ private:
 // Publication 完了後に NonRT で非同期的に呼ばれる。
 //
 // ★Phase-B: ISRRetireRouter 経由で EpochDomain に直接 enqueueRetire する。
-//   retireDSP() のラッパではなく、Router → EpochDomain へ直接委譲する。
+//   retireDSP()（削除済み R-2）のラッパではなく、Router → EpochDomain へ直接委譲する。
 class DSPLifetimeManager {
 public:
     explicit DSPLifetimeManager(AudioEngine& engine) noexcept
@@ -44094,7 +44042,7 @@ public:
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
     // Retire pipeline: DSPLifetimeManager → ISRRetireRouter → EpochDomain
-    // [work37 Phase 1.1] enqueueRetire の戻り値をチェックし、失敗時に tryReclaim + 再試行
+    // [Bug2 Phase1] enqueueWithRetry に委譲（リトライロジックは Router に集約）
     void retire(AudioEngine::DSPCore* dsp) noexcept
     {
         if (dsp == nullptr) return;
@@ -44102,21 +44050,12 @@ public:
         if (!engine_.retireDSPHandleForRuntime(dsp))
             return;
 
-        // 2. Route through ISRRetireRouter → EpochDomain
-        // ★ S-1: publishEpoch() → currentEpoch() に変更。retire が epoch を進めない。
+        // 2. Route through ISRRetireRouter（enqueueWithRetry が tryReclaim + 再試行を内包）
         const uint64_t epoch = router_->currentEpoch();
-        if (!router_->enqueueRetire(static_cast<void*>(dsp),
-                                    &AudioEngine::destroyDSPCoreNode,
-                                    epoch)) {
-            // ★ work37: 初回失敗 → tryReclaim で backlog 消化後に再試行
-            router_->tryReclaim();
-            if (!router_->enqueueRetire(static_cast<void*>(dsp),
-                                        &AudioEngine::destroyDSPCoreNode,
-                                        epoch)) {
-                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる（ベストエフォート）
-                return;
-            }
-        }
+        router_->enqueueWithRetry(static_cast<void*>(dsp),
+                                   &AudioEngine::destroyDSPCoreNode,
+                                   epoch,
+                                   DeletionEntryType::Generic);
 
         convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
                               static_cast<std::uint64_t>(1),
@@ -48412,6 +48351,52 @@ bool ISRRetireRouter::enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t 
         == RetireEnqueueResult::Success;
 }
 
+// ★ R-1: IRetireRouter::retireRT — 単発 enqueue、リトライなし（RT-safe）
+bool ISRRetireRouter::retireRT(void* ptr, void (*deleter)(void*)) noexcept
+{
+    assert(provider_ != nullptr);
+    if (ptr == nullptr || deleter == nullptr)
+        return true;
+    return provider_->enqueueRetire(ptr, deleter, provider_->currentEpoch());
+}
+
+// ★ R-1: IRetireRouter::retire — リトライ込み（NonRT）
+void ISRRetireRouter::retire(void* ptr, void (*deleter)(void*)) noexcept
+{
+    assert(provider_ != nullptr);
+    if (ptr == nullptr || deleter == nullptr)
+        return;
+    (void)enqueueWithRetry(ptr, deleter, provider_->currentEpoch(), DeletionEntryType::Generic);
+}
+
+// ★ Bug2 Phase1: リトライロジックを Router に集約。呼び出し元はリトライループ不要。
+RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
+                                                        void (*deleter)(void*),
+                                                        uint64_t epoch,
+                                                        DeletionEntryType type) noexcept
+{
+    // 1. 通常の enqueue を試行 (内部で 500ms クールダウン付き tryReclaim を1回実行)
+    auto result = enqueueRetire(ptr, deleter, epoch, type);
+    if (result == RetireEnqueueResult::Success)
+        return result;
+
+    // 2. 追加リトライ: tryReclaim → enqueue（最大 2 回）
+    constexpr int kMaxRetry = 2;
+    for (int attempt = 0; attempt < kMaxRetry; ++attempt) {
+        provider_->tryReclaim();   // Router 内部で完結。呼び出し元は意識しない。
+        result = enqueueRetire(ptr, deleter, epoch, type);
+        if (result == RetireEnqueueResult::Success)
+            return result;
+        if (result != RetireEnqueueResult::QueuePressure)
+            break;  // QueuePressure 以外（Shutdown 等）は即座に終了
+    }
+
+    // 3. 全リトライ失敗 → QueuePressure。Router 内部で RuntimeHealthMonitor へ通知する。
+    //    （呼び出し側はこの戻り値をもとに動作。PolicyEngine へは HealthMonitor 経由。）
+    //    ★ Future: runtimeHealth_->notifyQueuePressure(QueuePressureInfo{...});
+    return RetireEnqueueResult::QueuePressure;
+}
+
 void ISRRetireRouter::tryReclaim() noexcept
 {
     assert(provider_ != nullptr);
@@ -48464,6 +48449,7 @@ uint64_t ISRRetireRouter::reclaimSuccessCount() const noexcept
 // コンストラクタは IEpochProvider& を受け取り、内部でダウンキャストする。
 #include "DeferredDeletionQueue.h" // DeletionEntryType
 #include "core/IEpochProvider.h"
+#include "core/IRetireRouter.h"
 #include "ISRAuthorityClass.h"
 
 namespace convo {
@@ -48501,7 +48487,8 @@ class DeferredRetirePolicy;
  * ISR P1-19 conformance: EpochDomain 完全型は .cpp のみでインクルード。
  *   .h では前方宣言のみで十分（コンストラクタの参照パラメータとポインタメンバ）。
  */
-class ISRRetireRouter : public convo::IEpochProvider
+class ISRRetireRouter : public convo::IEpochProvider,
+                        public convo::IRetireRouter
 {
 public:
     explicit ISRRetireRouter(convo::IEpochProvider& provider) noexcept;
@@ -48542,6 +48529,20 @@ public:
                                       uint64_t epoch,
                                       DeletionEntryType type) noexcept;
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override;
+
+    // ★ Bug2 Phase1: リトライロジックを内包した enqueue（Authority 集約）
+    //   内部で tryReclaim + 再試行を行い、最終失敗時に QueuePressure を RuntimeHealthMonitor へ通知する。
+    RetireEnqueueResult enqueueWithRetry(void* ptr,
+                                          void (*deleter)(void*),
+                                          uint64_t epoch,
+                                          DeletionEntryType type) noexcept;
+
+    // ★ R-1: IRetireRouter インターフェース実装
+    //   retireRT: 単発 enqueue、リトライなし（RT-safe）。bool 戻り値で成否を伝える。
+    [[nodiscard]] bool retireRT(void* ptr, void (*deleter)(void*)) noexcept override;
+    //   retire: リトライ込み（NonRT）。QueuePressure 通知は Router 内部で完結。
+    void retire(void* ptr, void (*deleter)(void*)) noexcept override;
+
     void tryReclaim() noexcept override;
     uint32_t pendingRetireCount() const noexcept override;
     void drainAll() noexcept override;
@@ -64513,6 +64514,48 @@ public:
 
 ```
 
+### 📄 `src\core\IRetireRouter.h`
+
+```
+#pragma once
+
+#include <cstdint>
+
+//==============================================================================
+// IRetireRouter.h — 最小限の Retire 抽象 Interface
+//
+// ★ R-1: RefCountedDeferred の Retire Router 統合（抽象 Interface 経由）
+//   「Retire してください」だけを表現する。リトライ戦略・epoch・削除分類は
+//   すべて Router 内部に隠蔽され、呼び出し元（RefCountedDeferred）はそれらを知らない。
+//   QueuePressure が発生した場合、Router が RuntimeHealthMonitor へ通知する責務を持つ。
+//
+// この Interface は src/core/ に配置され、src/audioengine/ISRRetireRouter が実装する。
+// これにより Core Utility 層が AudioEngine 層に依存する Layering 違反を防止する。
+//==============================================================================
+
+namespace convo {
+
+class IRetireRouter {
+public:
+    virtual ~IRetireRouter() = default;
+
+    // RT-safe: 単発 enqueue、リトライなし。戻り値で成否を呼び出し元に伝える。
+    // QueueFull 時は呼び出し元（AudioEngine）が後続処理を判断する。
+    // NonRT の retire() と異なり、RT はリトライ不可のため bool を返す。
+    virtual bool retireRT(
+        void* ptr, void (*deleter)(void*)) noexcept = 0;
+
+    // NonRT: リトライ込みの retire。Router 内部で tryReclaim + 再試行を行い、
+    // 最終失敗時に QueuePressure を RuntimeHealthMonitor へ通知する。
+    // 呼び出し元はリトライ回数・方針を一切知らない。戻り値不要のため void。
+    virtual void retire(
+        void* ptr, void (*deleter)(void*)) noexcept = 0;
+};
+
+} // namespace convo
+
+```
+
 ### 📄 `src\core\ObserveChannel.h`
 
 ```
@@ -65230,6 +65273,35 @@ private:
 };
 
 } // namespace convo
+
+```
+
+### 📄 `src\core\ScopedMXCSR.h`
+
+```
+#pragma once
+
+#include <xmmintrin.h>  // _MM_SET_FLUSH_ZERO_MODE, _mm_getcsr, _mm_setcsr
+#include <pmmintrin.h>  // _MM_SET_DENORMALS_ZERO_MODE
+
+namespace convo::cpu {
+
+/// RAII ラッパー: コンストラクタで FTZ/DAZ を設定し、デストラクタで復元する。
+/// ThreadPool ワーカー（std::async 等）で使用すること。
+/// 専用スレッドや Realtime Audio Thread では使用しない。
+class ScopedMXCSR final {
+    unsigned int oldCsr;
+public:
+    ScopedMXCSR() noexcept : oldCsr(_mm_getcsr()) {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    }
+    ~ScopedMXCSR() noexcept { _mm_setcsr(oldCsr); }
+    ScopedMXCSR(const ScopedMXCSR&) = delete;
+    ScopedMXCSR& operator=(const ScopedMXCSR&) = delete;
+};
+
+} // namespace convo::cpu
 
 ```
 
@@ -66773,6 +66845,181 @@ private:
 
 ```
 
+### 📄 `src\dsp\math\FastTanhApprox.h`
+
+```
+#pragma once
+
+#include <immintrin.h>
+#include <cstdint>
+#include <type_traits>
+
+//==============================================================================
+// FastTanhApprox — Tanh 近似の共通ユーティリティ
+//
+// ★ ISR Runtime 準拠（Single Semantic Source）:
+//   DSPCoreDouble（SoftClip）・EQProcessor（Saturation）のすべてが
+//   同一実装を参照する。係数と閾値は Policy テンプレートで注入し、
+//   将来の独立チューニングに備える。
+//
+// 使用方法:
+//   double y = convo::dsp::fastTanh<SoftClipPolicy>(x);
+//   __m128d yv = convo::dsp::fastTanhV128<EQSaturationPolicy>(xv);
+//
+//==============================================================================
+
+namespace convo::dsp {
+
+//==============================================================================
+// デフォルトポリシー — 現行コードの 27/9 係数 + 閾値 4.5 を維持
+//   f(x) = x * (27 + x²) / (27 + 9*x²)
+//   3次/2次 Padé近似。x=3 で厳密に 1.0 に収束。
+//==============================================================================
+struct DefaultFastTanhPolicy {
+    static constexpr double clipThreshold = 4.5;
+
+    // ★ R-3: PascalCase 定数（fastTanhV256 用）
+    //   27/9 Padé: x*(27 + x²) / (27 + 9*x²)
+    //   = x*(27 + x²*1 + 0*x⁴) / (27 + x²*9 + 0*x⁴ + 0*x⁶)
+    static constexpr double ClipThreshold = 4.5;
+    static constexpr double NumA = 27.0;
+    static constexpr double NumB = 1.0;
+    static constexpr double NumC = 0.0;
+    static constexpr double DenA = 27.0;
+    static constexpr double DenB = 9.0;
+    static constexpr double DenC = 0.0;
+
+    // ★ 各 Policy は static compute(x, x2) を提供する。
+    //    これにより係数構造に依存しない任意の多項式を表現可能。
+    [[nodiscard]] static double compute(double x, double x2) noexcept {
+        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+    }
+
+    // SSE2 版: __m128d を取るオーバーロード
+    [[nodiscard]] static __m128d compute(__m128d x, __m128d x2) noexcept {
+        const auto vNine = _mm_set1_pd(9.0);
+        const auto vTwentySeven = _mm_set1_pd(27.0);
+        const auto num = _mm_mul_pd(x, _mm_add_pd(vTwentySeven, x2));
+        const auto den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
+        return _mm_div_pd(num, den);
+    }
+};
+
+//==============================================================================
+// 高次 Padé 近似ポリシー — DSPCoreDouble の SoftClip 用（10395 係数）
+//   f(x) = x*(10395 + x²*(1260 + 21*x²)) / (10395 + x²*(4725 + x²*(210 + x²)))
+//   5次/6次 Padé近似。x=4.5 で約 0.99927 に収束。
+//==============================================================================
+struct SoftClipPadéPolicy {
+    static constexpr double clipThreshold = 4.5;
+
+    // ★ R-3: PascalCase 定数（fastTanhV256 用）
+    //   Policy は係数と閾値のみを保持するデータ構造。
+    //   SIMD 演算は FastTanhApprox 側の fastTanhV128<Policy>() / fastTanhV256<Policy>()
+    //   がこれらの定数を読み込んで実行する。
+    static constexpr double ClipThreshold = 4.5;
+    static constexpr double NumA = 10395.0;
+    static constexpr double NumB = 1260.0;
+    static constexpr double NumC = 21.0;
+    static constexpr double DenA = 10395.0;
+    static constexpr double DenB = 4725.0;
+    static constexpr double DenC = 210.0;
+
+    [[nodiscard]] static double compute(double x, double x2) noexcept {
+        const double num = x * (10395.0 + x2 * (1260.0 + x2 * 21.0));
+        const double den = 10395.0 + x2 * (4725.0 + x2 * (210.0 + x2));
+        return num / den;
+    }
+
+    [[nodiscard]] static __m128d compute(__m128d x, __m128d x2) noexcept {
+        const auto v10395 = _mm_set1_pd(10395.0);
+        const auto v1260  = _mm_set1_pd(1260.0);
+        const auto v21    = _mm_set1_pd(21.0);
+        const auto v4725  = _mm_set1_pd(4725.0);
+        const auto v210   = _mm_set1_pd(210.0);
+        const auto num = _mm_mul_pd(x, _mm_add_pd(v10395,
+            _mm_mul_pd(x2, _mm_add_pd(v1260, _mm_mul_pd(x2, v21)))));
+        const auto den = _mm_add_pd(v10395,
+            _mm_mul_pd(x2, _mm_add_pd(v4725, _mm_mul_pd(x2, _mm_add_pd(v210, x2)))));
+        return _mm_div_pd(num, den);
+    }
+};
+
+//==============================================================================
+// fastTanh — Policy ベース Scalar 版
+//==============================================================================
+template<class Policy = DefaultFastTanhPolicy>
+[[nodiscard]] inline double fastTanh(double x) noexcept
+{
+    if (x >= Policy::clipThreshold) return 1.0;
+    if (x <= -Policy::clipThreshold) return -1.0;
+    return Policy::compute(x, x * x);
+}
+
+//==============================================================================
+// fastTanhV128 — Policy ベース SSE2 版
+//==============================================================================
+template<class Policy = DefaultFastTanhPolicy>
+[[nodiscard]] inline __m128d fastTanhV128(__m128d x) noexcept
+{
+    const auto vClipHigh = _mm_set1_pd(Policy::clipThreshold);
+    const auto vClipLow  = _mm_set1_pd(-Policy::clipThreshold);
+    const auto xClamped = _mm_min_pd(_mm_max_pd(x, vClipLow), vClipHigh);
+    return Policy::compute(xClamped, _mm_mul_pd(xClamped, xClamped));
+}
+
+//==============================================================================
+// ★ Policy 要件検証用ヘルパー
+//   Policy は以下の static constexpr メンバを提供しなければならない:
+//     ClipThreshold, NumA, NumB, NumC, DenA, DenB, DenC
+//==============================================================================
+namespace detail {
+template<class P, class = void>
+struct has_fast_tanh_policy_constants : std::false_type {};
+
+template<class P>
+struct has_fast_tanh_policy_constants<P, std::void_t<
+    decltype(P::ClipThreshold),
+    decltype(P::NumA), decltype(P::NumB), decltype(P::NumC),
+    decltype(P::DenA), decltype(P::DenB), decltype(P::DenC)
+>> : std::true_type {};
+} // namespace detail
+
+//==============================================================================
+// fastTanhV256 — Policy ベース AVX2 版
+//==============================================================================
+#if defined(__AVX2__) || defined(__FMA__)
+template<class Policy = DefaultFastTanhPolicy>
+    requires detail::has_fast_tanh_policy_constants<Policy>::value
+[[nodiscard]] inline __m256d fastTanhV256(__m256d x) noexcept
+{
+    const auto vClipHigh = _mm256_set1_pd(Policy::ClipThreshold);
+    const auto vClipLow  = _mm256_set1_pd(-Policy::ClipThreshold);
+    const auto xClamped = _mm256_min_pd(_mm256_max_pd(x, vClipLow), vClipHigh);
+    const auto x2 = _mm256_mul_pd(xClamped, xClamped);
+
+    // ★ Policy が直接保持する static constexpr 係数を参照
+    //   （Coefficients 構造体のネストを避け、constexpr 最適化を促進）
+    const auto vNumA = _mm256_set1_pd(Policy::NumA);
+    const auto vNumB = _mm256_set1_pd(Policy::NumB);
+    const auto vNumC = _mm256_set1_pd(Policy::NumC);
+    const auto vDenA = _mm256_set1_pd(Policy::DenA);
+    const auto vDenB = _mm256_set1_pd(Policy::DenB);
+    const auto vDenC = _mm256_set1_pd(Policy::DenC);
+
+    const auto num = _mm256_mul_pd(xClamped, _mm256_add_pd(vNumA,
+        _mm256_mul_pd(x2, _mm256_add_pd(vNumB, _mm256_mul_pd(x2, vNumC)))));
+    const auto den = _mm256_add_pd(vDenA,
+        _mm256_mul_pd(x2, _mm256_add_pd(vDenB,
+            _mm256_mul_pd(x2, _mm256_add_pd(vDenC, x2)))));
+    return _mm256_div_pd(num, den);
+}
+#endif
+
+} // namespace convo::dsp
+
+```
+
 ### 📄 `src\eqprocessor\EQProcessor.Coefficients.cpp`
 
 ```
@@ -67236,7 +67483,7 @@ float EQProcessor::computeEstimatedMaxGainDb(double sampleRate, [[maybe_unused]]
 
     // ★ Phase 8 Review: totalGainDb（Master Gain）を線形倍率で乗算
     //   totalGainDb はポストEQマスターゲイン（DSP チェーンで別段階として適用）
-    const float totalGainLin = std::pow(10.0, static_cast<double>(state->totalGainDb) / 20.0);
+    const float totalGainLin = static_cast<float>(std::pow(10.0, static_cast<double>(state->totalGainDb) / 20.0));
     const float combinedGain = maxLinearGain * totalGainLin;
 
     const float gainDb = 20.0f * std::log10(combinedGain);
@@ -67516,6 +67763,8 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
     //   正しい対策: スタック上に ISRRetireRouter を構築する。
     convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+
+    // [Bug2 Phase1] 初回試行: Coordinator 経由で Authority チェック + 初回 enqueue
     auto result = m_retireCoordinator->enqueueRetire(
         convo::isr::RetireAuthority::Granted,
         stackRouter,
@@ -67523,18 +67772,10 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     if (result == convo::isr::RetireEnqueueResult::Success)
         return true;
 
-    // [work37 Phase 1.4] 失敗: tryReclaim + 再試行（NonRT安全）
-    //   スタック上の stackRouter は tryReclaim で内部 EpochDomain を操作
-    stackRouter.tryReclaim();
-    result = m_retireCoordinator->enqueueRetire(
-        convo::isr::RetireAuthority::Granted,
-        stackRouter,
-        ptr, deleter, retireEpoch);
-    if (result == convo::isr::RetireEnqueueResult::Success)
-        return true;
-
-    // [work37] 再試行も失敗 → drop（HealthMonitor overflowCount 監視に委ねる）
-    return false;
+    // 初回失敗 → enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
+    //   Coordinator の Authority チェックは初回で済んでいるため、直接 Router に委譲
+    result = stackRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
+    return result == convo::isr::RetireEnqueueResult::Success;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
@@ -68613,6 +68854,7 @@ EQProcessor::FilterStructure EQProcessor::getFilterStructure() const noexcept
 #include <cstdint>
 #include <cstring>
 #include "core/RCUReader.h"
+#include "dsp/math/FastTanhApprox.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -68688,32 +68930,17 @@ namespace
         return _mm_movemask_pd(validMask) == 0x3;
     }
 
-    // fastTanh（出力用）— クリップ閾値を 4.5 に引き上げ
-    // SVF出力信号（特に Low Shelf +12dB ブースト時）は容易に ±3.0 を超えるため、
-    // 状態変数用の fastTanh（閾値3.0）では通常のオーディオ信号が頻繁にクリップする。
-    // SoftClip用 TanhApprox（閾値4.5）に合わせることで、自然な飽和特性を維持する。
+    // fastTanh（出力用）— ★ Bug3: 共通 Utility convo::dsp::fastTanh に委譲
+    //   係数は現行の 27/9 を維持（DefaultFastTanhPolicy）。
+    //   Padé 近似の変更（5次/6次）は別チケットで実施。
     inline double fastTanhScalarOutput(double x) noexcept
     {
-        constexpr double kClipThreshold = 4.5;
-        if (x >= kClipThreshold) return 1.0;
-        if (x <= -kClipThreshold) return -1.0;
-        const double x2 = x * x;
-        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+        return convo::dsp::fastTanh<>(x);
     }
 
     inline __m128d fastTanhV128Output(__m128d x) noexcept
     {
-        constexpr double kClipThreshold = 4.5;
-        const __m128d vClipHigh = _mm_set1_pd(kClipThreshold);
-        const __m128d vClipLow  = _mm_set1_pd(-kClipThreshold);
-        const __m128d vNine = _mm_set1_pd(9.0);
-        const __m128d vTwentySeven = _mm_set1_pd(27.0);
-
-        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vClipLow), vClipHigh);
-        const __m128d x2 = _mm_mul_pd(xClamped, xClamped);
-        const __m128d num = _mm_mul_pd(xClamped, _mm_add_pd(vTwentySeven, x2));
-        const __m128d den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
-        return _mm_div_pd(num, den);
+        return convo::dsp::fastTanhV128<>(x);
     }
 
     inline double equalPowerSin(double x) noexcept
