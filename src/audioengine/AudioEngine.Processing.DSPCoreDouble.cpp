@@ -3,6 +3,7 @@
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
 #include "core/TimeUtils.h"
+#include "dsp/math/FastTanhApprox.h"
 
 #include <cstdint>
 #include <atomic>
@@ -56,17 +57,6 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
 
 namespace
 {
-namespace TanhApprox
-{
-    constexpr double NUM_A = 10395.0;
-    constexpr double NUM_B = 1260.0;
-    constexpr double NUM_C = 21.0;
-    constexpr double DEN_A = 10395.0;
-    constexpr double DEN_B = 4725.0;
-    constexpr double DEN_C = 210.0;
-    constexpr double CLIP_THRESHOLD = 4.5;
-}
-
 inline bool isFiniteNoLibm(double x) noexcept
 {
     union { double d; uint64_t u; } v { x };
@@ -114,19 +104,6 @@ inline void scaleBlockFallback(double* data, int numSamples, double gain) noexce
         data[i] *= gain;
 }
 
-inline double fastTanh(double x) noexcept
-{
-    using namespace TanhApprox;
-
-    if (x >= CLIP_THRESHOLD) return 1.0;
-    if (x <= -CLIP_THRESHOLD) return -1.0;
-    const double x2 = x * x;
-
-    const double num = x * (NUM_A + x2 * (NUM_B + x2 * NUM_C));
-    const double den = DEN_A + x2 * (DEN_B + x2 * (DEN_C + x2));
-    return num / den;
-}
-
 inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
     const double abs_x = absNoLibm(x);
@@ -147,7 +124,7 @@ inline double musicalSoftClipScalar(double x, double threshold, double knee, dou
     }
 
     const double linear = abs_x;
-    const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
+    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadéPolicy>((abs_x - threshold) / knee);
 
     const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
@@ -181,13 +158,6 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vThree       = _mm256_set1_pd(3.0);
     const __m256d vHalf        = _mm256_set1_pd(0.5);
 
-    const __m256d vNumA        = _mm256_set1_pd(TanhApprox::NUM_A);
-    const __m256d vNumB        = _mm256_set1_pd(TanhApprox::NUM_B);
-    const __m256d vNumC        = _mm256_set1_pd(TanhApprox::NUM_C);
-    const __m256d vDenA        = _mm256_set1_pd(TanhApprox::DEN_A);
-    const __m256d vDenB        = _mm256_set1_pd(TanhApprox::DEN_B);
-    const __m256d vDenC        = _mm256_set1_pd(TanhApprox::DEN_C);
-    const __m256d vClipThreshold = _mm256_set1_pd(TanhApprox::CLIP_THRESHOLD);
     const __m256d vZero        = _mm256_setzero_pd();
     const __m256d vSignMask    = _mm256_set1_pd(-0.0);
 
@@ -218,20 +188,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d ks = _mm256_mul_pd(t2, _mm256_fnmadd_pd(vTwo, t, vThree));
 
         __m256d arg = _mm256_mul_pd(_mm256_sub_pd(absX, vThreshold), vRecipKnee);
-        __m256d satHi    = _mm256_cmp_pd(arg, vClipThreshold, _CMP_GE_OQ);
-        __m256d satLo    = _mm256_cmp_pd(arg, _mm256_sub_pd(vZero, vClipThreshold), _CMP_LE_OQ);
-        __m256d arg2     = _mm256_mul_pd(arg, arg);
-
-        __m256d num      = _mm256_mul_pd(arg,
-                            _mm256_fmadd_pd(arg2,
-                                _mm256_fmadd_pd(arg2, vNumC, vNumB),
-                            vNumA));
-        __m256d denInner = _mm256_fmadd_pd(arg2, vOne, vDenC);
-        __m256d denMid   = _mm256_fmadd_pd(arg2, denInner, vDenB);
-        __m256d den      = _mm256_fmadd_pd(arg2, denMid, vDenA);
-        __m256d tanhVal  = _mm256_div_pd(num, den);
-        tanhVal = _mm256_blendv_pd(tanhVal, vOne,      satHi);
-        tanhVal = _mm256_blendv_pd(tanhVal, vMinusOne, satLo);
+        __m256d tanhVal = convo::dsp::fastTanhV256<convo::dsp::SoftClipPadéPolicy>(arg);
 
         __m256d clipped = _mm256_fmadd_pd(vKnee, tanhVal, vThreshold);
 

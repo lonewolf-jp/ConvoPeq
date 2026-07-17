@@ -15,18 +15,15 @@ namespace MKLRealTime {
 void setup() noexcept
 {
     std::call_once(g_setupOnceFlag, []() noexcept {
-        // 環境変数でさらに強制（OpenMP 対策）
-#ifdef _WIN32
-        _putenv_s("MKL_NUM_THREADS", "1");
-        _putenv_s("OMP_NUM_THREADS", "1");
-#else
-        setenv("MKL_NUM_THREADS", "1", 1);
-        setenv("OMP_NUM_THREADS", "1", 1);
-#endif
+        // ★ [work74 FIX-01] 環境変数（_putenv_s / setenv）はプロセスグローバルな影響を与えるため削除。
+        //   CMake では MKL_THREADING=sequential（シングルスレッドリンク）が指定されており、
+        //   MKL が内部でスレッドを生成することはない。従って環境変数によるスレッド数固定は不要。
+        //
+        //   参考: bug-fix-plan.md FIX-01
 
-        // シングルスレッド固定
-        mkl_set_num_threads(1);
-        mkl_set_dynamic(0);
+        // シングルスレッド固定（スレッドローカル版: 他スレッド/プロセスに影響しない）
+        // ★ FIX-01: mkl_set_dynamic(0) は削除。sequential MKL + local設定で十分。
+        mkl_set_num_threads_local(1);
 
         // FTZ/DAZ（既存設定と重複可）
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);

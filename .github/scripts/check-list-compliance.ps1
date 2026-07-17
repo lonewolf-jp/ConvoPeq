@@ -185,7 +185,6 @@ foreach ($m in $ownershipHits) {
 
     $allowed = (
         $m -match 'enqueueDeferredDeleteNonRt' -or
-        $m -match 'retireDSP\(' -or
         $m -match 'retireStereoConvolver' -or
         $m -match 'unique_ptr' -or
         $m -match '直接 delete 禁止' -or

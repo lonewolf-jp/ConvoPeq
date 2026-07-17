@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include "core/RCUReader.h"
+#include "dsp/math/FastTanhApprox.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -83,32 +84,17 @@ namespace
         return _mm_movemask_pd(validMask) == 0x3;
     }
 
-    // fastTanh（出力用）— クリップ閾値を 4.5 に引き上げ
-    // SVF出力信号（特に Low Shelf +12dB ブースト時）は容易に ±3.0 を超えるため、
-    // 状態変数用の fastTanh（閾値3.0）では通常のオーディオ信号が頻繁にクリップする。
-    // SoftClip用 TanhApprox（閾値4.5）に合わせることで、自然な飽和特性を維持する。
+    // fastTanh（出力用）— ★ Bug3: 共通 Utility convo::dsp::fastTanh に委譲
+    //   係数は現行の 27/9 を維持（DefaultFastTanhPolicy）。
+    //   Padé 近似の変更（5次/6次）は別チケットで実施。
     inline double fastTanhScalarOutput(double x) noexcept
     {
-        constexpr double kClipThreshold = 4.5;
-        if (x >= kClipThreshold) return 1.0;
-        if (x <= -kClipThreshold) return -1.0;
-        const double x2 = x * x;
-        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+        return convo::dsp::fastTanh<>(x);
     }
 
     inline __m128d fastTanhV128Output(__m128d x) noexcept
     {
-        constexpr double kClipThreshold = 4.5;
-        const __m128d vClipHigh = _mm_set1_pd(kClipThreshold);
-        const __m128d vClipLow  = _mm_set1_pd(-kClipThreshold);
-        const __m128d vNine = _mm_set1_pd(9.0);
-        const __m128d vTwentySeven = _mm_set1_pd(27.0);
-
-        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vClipLow), vClipHigh);
-        const __m128d x2 = _mm_mul_pd(xClamped, xClamped);
-        const __m128d num = _mm_mul_pd(xClamped, _mm_add_pd(vTwentySeven, x2));
-        const __m128d den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
-        return _mm_div_pd(num, den);
+        return convo::dsp::fastTanhV128<>(x);
     }
 
     inline double equalPowerSin(double x) noexcept

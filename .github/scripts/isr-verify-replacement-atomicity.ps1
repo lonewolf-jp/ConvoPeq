@@ -35,12 +35,12 @@ else {
     $cc = Get-Content -LiteralPath $commitCpp -Raw
     # Both the activate and retire operations must be present in the commit path.
     $hasActivate = $cc.Contains('setActiveRuntimeDSP') -or $cc.Contains('publishWorld') -or $cc.Contains('executeCommit')
-    $hasRetire   = $cc.Contains('retireRuntimeImmediately') -or $cc.Contains('onRuntimeRetiredNonRt') -or $cc.Contains('retireDSP')
+    $hasRetire   = $cc.Contains('retireRuntimeImmediately') -or $cc.Contains('onRuntimeRetiredNonRt')
     if (-not $hasActivate) {
         Add-Violation 'AudioEngine.Commit.cpp missing world activation call (setActiveRuntimeDSP/executeCommit)'
     }
     if (-not $hasRetire) {
-        Add-Violation 'AudioEngine.Commit.cpp missing world retire call (retireRuntimeImmediately/retireDSP)'
+        Add-Violation 'AudioEngine.Commit.cpp missing world retire call (retireRuntimeImmediately/onRuntimeRetiredNonRt)'
     }
     # Ordering check: activation token must appear before retire token in source
     if ($hasActivate -and $hasRetire) {

@@ -9,6 +9,7 @@
 // コンストラクタは IEpochProvider& を受け取り、内部でダウンキャストする。
 #include "DeferredDeletionQueue.h" // DeletionEntryType
 #include "core/IEpochProvider.h"
+#include "core/IRetireRouter.h"
 #include "ISRAuthorityClass.h"
 
 namespace convo {
@@ -46,7 +47,8 @@ class DeferredRetirePolicy;
  * ISR P1-19 conformance: EpochDomain 完全型は .cpp のみでインクルード。
  *   .h では前方宣言のみで十分（コンストラクタの参照パラメータとポインタメンバ）。
  */
-class ISRRetireRouter : public convo::IEpochProvider
+class ISRRetireRouter : public convo::IEpochProvider,
+                        public convo::IRetireRouter
 {
 public:
     explicit ISRRetireRouter(convo::IEpochProvider& provider) noexcept;
@@ -87,6 +89,20 @@ public:
                                       uint64_t epoch,
                                       DeletionEntryType type) noexcept;
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override;
+
+    // ★ Bug2 Phase1: リトライロジックを内包した enqueue（Authority 集約）
+    //   内部で tryReclaim + 再試行を行い、最終失敗時に QueuePressure を RuntimeHealthMonitor へ通知する。
+    RetireEnqueueResult enqueueWithRetry(void* ptr,
+                                          void (*deleter)(void*),
+                                          uint64_t epoch,
+                                          DeletionEntryType type) noexcept;
+
+    // ★ R-1: IRetireRouter インターフェース実装
+    //   retireRT: 単発 enqueue、リトライなし（RT-safe）。bool 戻り値で成否を伝える。
+    [[nodiscard]] bool retireRT(void* ptr, void (*deleter)(void*)) noexcept override;
+    //   retire: リトライ込み（NonRT）。QueuePressure 通知は Router 内部で完結。
+    void retire(void* ptr, void (*deleter)(void*)) noexcept override;
+
     void tryReclaim() noexcept override;
     uint32_t pendingRetireCount() const noexcept override;
     void drainAll() noexcept override;

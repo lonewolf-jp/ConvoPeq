@@ -458,7 +458,7 @@ float EQProcessor::computeEstimatedMaxGainDb(double sampleRate, [[maybe_unused]]
 
     // ★ Phase 8 Review: totalGainDb（Master Gain）を線形倍率で乗算
     //   totalGainDb はポストEQマスターゲイン（DSP チェーンで別段階として適用）
-    const float totalGainLin = std::pow(10.0, static_cast<double>(state->totalGainDb) / 20.0);
+    const float totalGainLin = static_cast<float>(std::pow(10.0, static_cast<double>(state->totalGainDb) / 20.0));
     const float combinedGain = maxLinearGain * totalGainLin;
 
     const float gainDb = 20.0f * std::log10(combinedGain);

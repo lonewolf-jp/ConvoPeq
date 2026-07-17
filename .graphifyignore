@@ -1,0 +1,36 @@
+# Graphify ignore rules — same syntax as .gitignore
+# Files and directories listed here are excluded from graph extraction.
+
+# Build artifacts
+build/
+build-icx/
+cmake-build-*/
+
+# Dependencies
+vendor/
+JUCE/
+
+# Environment
+.venv/
+.venv-codegraph/
+.env
+.env.local
+
+# Editors and IDE
+.vscode/
+.idea/
+.vs/
+
+# Cache and temp
+.cache/
+.cocoindex_code/
+.aidex/
+.serena/
+.continue/
+.github/tmp/
+
+# Large data / generated
+doc/BIGDATA/
+
+# Graphify output (don't re-index the output itself)
+graphify-out/

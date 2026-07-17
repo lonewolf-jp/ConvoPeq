@@ -136,6 +136,52 @@ bool ISRRetireRouter::enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t 
         == RetireEnqueueResult::Success;
 }
 
+// ★ R-1: IRetireRouter::retireRT — 単発 enqueue、リトライなし（RT-safe）
+bool ISRRetireRouter::retireRT(void* ptr, void (*deleter)(void*)) noexcept
+{
+    assert(provider_ != nullptr);
+    if (ptr == nullptr || deleter == nullptr)
+        return true;
+    return provider_->enqueueRetire(ptr, deleter, provider_->currentEpoch());
+}
+
+// ★ R-1: IRetireRouter::retire — リトライ込み（NonRT）
+void ISRRetireRouter::retire(void* ptr, void (*deleter)(void*)) noexcept
+{
+    assert(provider_ != nullptr);
+    if (ptr == nullptr || deleter == nullptr)
+        return;
+    (void)enqueueWithRetry(ptr, deleter, provider_->currentEpoch(), DeletionEntryType::Generic);
+}
+
+// ★ Bug2 Phase1: リトライロジックを Router に集約。呼び出し元はリトライループ不要。
+RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
+                                                        void (*deleter)(void*),
+                                                        uint64_t epoch,
+                                                        DeletionEntryType type) noexcept
+{
+    // 1. 通常の enqueue を試行 (内部で 500ms クールダウン付き tryReclaim を1回実行)
+    auto result = enqueueRetire(ptr, deleter, epoch, type);
+    if (result == RetireEnqueueResult::Success)
+        return result;
+
+    // 2. 追加リトライ: tryReclaim → enqueue（最大 2 回）
+    constexpr int kMaxRetry = 2;
+    for (int attempt = 0; attempt < kMaxRetry; ++attempt) {
+        provider_->tryReclaim();   // Router 内部で完結。呼び出し元は意識しない。
+        result = enqueueRetire(ptr, deleter, epoch, type);
+        if (result == RetireEnqueueResult::Success)
+            return result;
+        if (result != RetireEnqueueResult::QueuePressure)
+            break;  // QueuePressure 以外（Shutdown 等）は即座に終了
+    }
+
+    // 3. 全リトライ失敗 → QueuePressure。Router 内部で RuntimeHealthMonitor へ通知する。
+    //    （呼び出し側はこの戻り値をもとに動作。PolicyEngine へは HealthMonitor 経由。）
+    //    ★ Future: runtimeHealth_->notifyQueuePressure(QueuePressureInfo{...});
+    return RetireEnqueueResult::QueuePressure;
+}
+
 void ISRRetireRouter::tryReclaim() noexcept
 {
     assert(provider_ != nullptr);

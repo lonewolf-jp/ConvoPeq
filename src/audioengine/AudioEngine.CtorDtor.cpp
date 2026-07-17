@@ -122,7 +122,7 @@ AudioEngine::~AudioEngine()
         convo::fetchAddAtomic(rebuildRequestGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
         // active runtime slot / fading runtime slot はここでスロットを切り離すだけにして、
-        // 実体の解放は retireDSP() → deferred delete / epoch drain に寄せる。
+        // 実体の解放は retireDSPHandleForRuntime() → deferred delete / epoch drain に寄せる。
         {
             constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
             DSPCore* activeRaw = getActiveRuntimeDSP();

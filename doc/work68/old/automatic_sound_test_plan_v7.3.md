@@ -369,9 +369,9 @@ PushResult pushBecameNonEmptyWithWriter(Writer&& writer) noexcept {
 > OutputCaptureSink の停止とは関連しないため。
 > 整合のため明示し、メモとして残す。
 
-### 2.5 CLIオプション（全30: 既存25 + 新規5）
+### 2.5 CLIオプション（全32: 既存27（hasFlag 3 + findValue 24）+ 新規5）
 
-**既存（25）**: `--cli-run`, `--cli-start-learning`, `--cli-resume-learning`, `--cli-ir`,
+**既存（27）**: `--cli-run`(F), `--cli-start-learning`(F), `--cli-resume-learning`(F), `--cli-ir`,
 `--cli-device-type`, `--cli-buffer-samples`, `--cli-sample-rate-hz`, `--cli-phase`,
 `--cli-order`, `--cli-dither-bit-depth`, `--cli-noise-shaper`,
 `--cli-post-load-dither-bit-depth`, `--cli-post-load-delay-ms`,
@@ -379,7 +379,8 @@ PushResult pushBecameNonEmptyWithWriter(Writer&& writer) noexcept {
 `--cli-bypass-burst-count`, `--cli-bypass-burst-interval-ms`,
 `--cli-bypass-burst-value`, `--cli-intent-burst-count`,
 `--cli-intent-burst-interval-ms`, `--cli-target-ir-sec`, `--cli-debounce-ms`,
-`--cli-f1-hz`, `--cli-f2-hz`, `--cli-exit-ms`
+`--cli-f1-hz`, `--cli-f2-hz`, `--cli-learning-action`, `--cli-learning-mode`,
+`--cli-exit-ms`
 
 **新規（5）**:
 | オプション | 難易度 | 実装内容 |
@@ -425,14 +426,12 @@ PushResult pushBecameNonEmptyWithWriter(Writer&& writer) noexcept {
 > ただし `--cli-run` が指定されている場合にのみ `findValue("--cli-output-wav")` を評価する。
 > これはテストモードでのみ有効とする意図（単独使用で ConvoPeq が無音化するのを防止）。
 
-> **[v7.3.5 検証確定] 既存25 CLI の正確なカウント** (L16 関連):
+> **[v7.3.5/v7.3.6 検証確定] 既存 CLI の正確なカウント** (L16 関連, v7.3.6検証で修正):
 > `runCommandLineAutomation()` (MainWindow.cpp:331-960) で `findValue()` パターン処理される
-> オプションは正確に**25種類**（プラン通り）。`hasFlag()` で処理される3種
+> オプションは**24種類**（`--cli-learning-action`/`--cli-learning-mode` を含む）。`hasFlag()` で処理される3種
 > (`--cli-run`, `--cli-start-learning`, `--cli-resume-learning`) は findValue と
-> 重複せず、合計で **28種のCLIエントリ** が存在する。
-> ただし §2.5 の「25」は findValue 系のみカウントしたものであり、
-> hasFlag 系3種を含めると「28+5=33」だが、慣例として findValue 系でカウントするため
-> 「25+5=30」の表記を維持する（v7.3.3 J4 の6新規CLIパラメータは Phase 1 で追加）。
+> 重複せず、合計で **27種のCLIエントリ** が存在する（v7.3.6検証で確定）。
+> §2.5 では hasFlag 3種 + findValue 24種 = 既存27種 + 新規5種 = **全32種** と表記する。
 
 ---
 
@@ -559,7 +558,7 @@ static_assert(std::is_trivially_destructible_v<AudioBlock>,
 > | `sizeof(AudioBlock)` | **4120 byte** | double[256]×2 + int×4 + uint64_t + padding(4byte) |
 > | `alignof(AudioBlock)` | **8** | double のアラインメントに従う |
 >
-> - レイアウト: `L[0..2047]` → `R[0..2047]` → `numSamples[4096]` → `sampleRateHz/bitDepth/adaptiveCoeffBankIndex[4100-4108]` → `sessionId[4112]` → padding[4116-4119]
+> - レイアウト: `L[0..2047]` → `R[2048..4095]` → `numSamples[4096]`(4B) → `sampleRateHz[4100]`(4B) → `bitDepth[4104]`(4B) → `adaptiveCoeffBankIndex[4108]`(4B) → `sessionId[4112..4119]`(8B)。パディングなし（sizeof 4120 % alignof 8 = 0）。
 > - 上記3個の static_assert は全てパスする。`is_trivial_v` が false でも `DiagEvent` と同様に問題ない（`DiagEvent` は trivial だが、AudioBlock は trivially_copyable のみ要求）。
 > - **注意**: `sizeof(AudioBlock) == 4120` の固定値に依存するコードを書かないこと。メンバ追加時に変化する。
 
@@ -852,7 +851,7 @@ class GoldenReference(Protocol):
 | **TC-17** | **SMPTE IMD** | 歪み | 60Hz+7kHz 4:1 比率（IEC 60268-3）3秒 | IMD ≤ -80dB(Debug) / -90dB(Release) | ★★★★☆ |
 | **TC-18** | **CCIF IMD** | 歪み | 19kHz+20kHz 1:1 比率 3秒 | IMD ≤ -80dB(Debug) / -90dB(Release) | ★★★★☆ |
 | **TC-37** | **Numerical Transparency（32bit）** | 数値精度 | 1kHz正弦波 -0.1dBFS 3秒 | RMS誤差 ≤ **1 ULP** / Peak ≤ **2 ULP**（IEEE754単精度/コンパイラ最適化差許容）| ★★★★☆ |
-> **[v7.3.6 M11] TC-37 Double Path 除外条件**: TC-37 の入力振幅 `10^(-0.1/20) ≈ 0.9886` は Double Path の PeakLimiter 閾値 `kOutputHeadroom=0.891` (`DSPCoreDouble.cpp:L763`) を超える。Double Path (processOutputDouble) では PeakLimiter が常に動作域に入り、出力が制限を受けて歪む。**TC-37 は Float Path (processOutput) でのみ測定可能**。Double Precision 設定のテスト環境では TC-37 をスキップすること（または Float Path フォールバックを使用）。P2-PEQ-Only は OS=1x+Float Path のため問題なし。
+> **[v7.3.6 M11] TC-37 Double Path 除外条件**: TC-37 の入力振幅 `10^(-0.1/20) ≈ 0.9886` は Double Path の Hard Clamp 閾値 `kOutputHeadroom=0.891` (`DSPCoreDouble.cpp:L780`) を超える。さらに PeakLimiter はより厳しい閾値 `kPLThreshold=0.841` (L759) で動作するため、0.9886 は確実に PeakLimiter 常時動作域に入り出力が制限されて歪む。**TC-37 は Float Path (processOutput) でのみ測定可能**。Double Precision 設定のテスト環境では TC-37 をスキップすること（または Float Path フォールバックを使用）。P2-PEQ-Only は OS=1x+Float Path のため問題なし。
 | **TC-38** | **Long-run Stability（30分）** | 長期安定 | 40Hz正弦波 -6dBFS 30分 | NaN/Inf/DC異常なし / ドリフト ≤ 0.01dB | ★★★★☆ |
 | **TC-39** | **High-Freq THD Sweep** | 歪み | 100/1k/5k/10k/18k/20kHz 各-6dBFS 3秒 | THD+N 周波数特性グラフ、閾値 ≤ -80dB(Debug) / -100dB(Release) | ★★★★★ |
 | **TC-40** | **Dither Histogram** | ディザー | 無音 10秒（各dither設定） | 量子化誤差ヒストグラム：理論PDFとのKL Divergence ≤ 0.01 | ★★★☆☆ |

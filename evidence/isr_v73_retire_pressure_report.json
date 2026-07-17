@@ -1,0 +1,14 @@
+{
+  "schema": "isr_v73_retire_pressure_report_v1",
+  "violations": [],
+  "violationCount": 0,
+  "checks": [
+    "CI-RETIREPRESS-001",
+    "CI-RETIREPRESS-002",
+    "CI-RETIREPRESS-003",
+    "CI-RETIREPRESS-004",
+    "CI-RETIREPRESS-005",
+    "CI-RETIREPRESS-006"
+  ],
+  "generatedAt": "2026-07-18T00:04:57.7616761+09:00"
+}

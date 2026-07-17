@@ -7,7 +7,7 @@
 // Publication 完了後に NonRT で非同期的に呼ばれる。
 //
 // ★Phase-B: ISRRetireRouter 経由で EpochDomain に直接 enqueueRetire する。
-//   retireDSP() のラッパではなく、Router → EpochDomain へ直接委譲する。
+//   retireDSP()（削除済み R-2）のラッパではなく、Router → EpochDomain へ直接委譲する。
 class DSPLifetimeManager {
 public:
     explicit DSPLifetimeManager(AudioEngine& engine) noexcept
@@ -36,7 +36,7 @@ public:
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
     // Retire pipeline: DSPLifetimeManager → ISRRetireRouter → EpochDomain
-    // [work37 Phase 1.1] enqueueRetire の戻り値をチェックし、失敗時に tryReclaim + 再試行
+    // [Bug2 Phase1] enqueueWithRetry に委譲（リトライロジックは Router に集約）
     void retire(AudioEngine::DSPCore* dsp) noexcept
     {
         if (dsp == nullptr) return;
@@ -44,21 +44,12 @@ public:
         if (!engine_.retireDSPHandleForRuntime(dsp))
             return;
 
-        // 2. Route through ISRRetireRouter → EpochDomain
-        // ★ S-1: publishEpoch() → currentEpoch() に変更。retire が epoch を進めない。
+        // 2. Route through ISRRetireRouter（enqueueWithRetry が tryReclaim + 再試行を内包）
         const uint64_t epoch = router_->currentEpoch();
-        if (!router_->enqueueRetire(static_cast<void*>(dsp),
-                                    &AudioEngine::destroyDSPCoreNode,
-                                    epoch)) {
-            // ★ work37: 初回失敗 → tryReclaim で backlog 消化後に再試行
-            router_->tryReclaim();
-            if (!router_->enqueueRetire(static_cast<void*>(dsp),
-                                        &AudioEngine::destroyDSPCoreNode,
-                                        epoch)) {
-                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる（ベストエフォート）
-                return;
-            }
-        }
+        router_->enqueueWithRetry(static_cast<void*>(dsp),
+                                   &AudioEngine::destroyDSPCoreNode,
+                                   epoch,
+                                   DeletionEntryType::Generic);
 
         convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
                               static_cast<std::uint64_t>(1),

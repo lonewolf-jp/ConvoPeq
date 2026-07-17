@@ -39,7 +39,7 @@
 #include "AtomicAccess.h"  // convo::consumeAtomic
 
 // absNoLibm — 標準ライブラリ abs を経由せずビット操作で |x| を求める (RT-safe)
-inline double absNoLibm(double x) noexcept
+[[nodiscard]] constexpr inline double absNoLibm(double x) noexcept
 {
     auto bits = std::bit_cast<std::uint64_t>(x);
     bits &= 0x7FFFFFFFFFFFFFFFULL;
@@ -347,6 +347,7 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     freeTracked(accumImag,     allocSizes.accumImag);
     freeTracked(inputAccBuf,   allocSizes.inputAccBuf);
     freeTracked(tailOutputBuf, allocSizes.tailOutputBuf);
+    freeTracked(delayLineBuf,  allocSizes.delayLineBuf);   // ★ Bug#1 B13 delayLineBuf 追跡
     allocSizes = {};
 #else
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
@@ -387,7 +388,8 @@ MKLNonUniformConvolver::MKLNonUniformConvolver()
 {
     // MKL VML / CBLAS (applySpectrumFilter) のスレッド数を制限。
     // IPP は単一スレッド設計のため、この設定は MKL 依存部のみに影響する。
-    mkl_set_num_threads(1);
+    // ★ [work74 FIX-01] スレッドローカル版を使用（MKLRealTimeSetup と一貫性維持）
+    mkl_set_num_threads_local(1);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     liveCount.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -970,10 +972,12 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
 #endif
 
         if (!l.isImmediate)
+        {
             l.tailOutputBuf = static_cast<double*>(DIAG_MKL_MALLOC(l.partSize * sizeof(double), 64));
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);
+            l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);   // ★ Bug#7: isImmediate ガード内に移動
 #endif
+        }
 
         if (!l.irFreqDomain || !l.irFreqReal || !l.irFreqImag || !l.fdlBuf || !l.fdlReal || !l.fdlImag || !l.fftTimeBuf ||
             !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.accumReal || !l.accumImag || !l.inputAccBuf ||
@@ -1104,8 +1108,11 @@ l.allocSizes.tailOutputBuf = l.partSize * sizeof(double);
         if (prevLayerTotalSamples > 0) {
             l.outputDelaySamples = prevLayerTotalSamples;
             l.delayLineCapacity = ((prevLayerTotalSamples + l.partSize + m_maxBlockSize + 15) / 16) * 16;
-            l.delayLineBuf = static_cast<double*>(
-                mkl_malloc(static_cast<size_t>(l.delayLineCapacity) * sizeof(double), 64));
+            const size_t delayLineBytes = static_cast<size_t>(l.delayLineCapacity) * sizeof(double);
+            l.delayLineBuf = static_cast<double*>(DIAG_MKL_MALLOC(delayLineBytes, 64));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            l.allocSizes.delayLineBuf = delayLineBytes;
+#endif
             if (l.delayLineBuf == nullptr) {
                 releaseAllLayers();
                 return false;
@@ -1759,7 +1766,7 @@ void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamp
     const int first = std::min(numSamples, l.delayLineCapacity - static_cast<int>(readOffset));
     if (first > 0) {
         const double* src = l.delayLineBuf + readOffset;
-        if (std::abs(gain - 1.0) < 1.0e-12)
+        if (absNoLibm(gain - 1.0) < 1.0e-12)
             for (int i = 0; i < first; ++i) dst[i] += src[i];
         else
             for (int i = 0; i < first; ++i) dst[i] += src[i] * gain;
@@ -1767,7 +1774,7 @@ void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamp
     if (first < numSamples) {
         const double* src = l.delayLineBuf;
         const int second = numSamples - first;
-        if (std::abs(gain - 1.0) < 1.0e-12)
+        if (absNoLibm(gain - 1.0) < 1.0e-12)
             for (int i = 0; i < second; ++i) dst[first + i] += src[i];
         else
             for (int i = 0; i < second; ++i) dst[first + i] += src[i] * gain;

@@ -1,6 +1,8 @@
 //============================================================================
+#define _USE_MATH_DEFINES
 #include <JuceHeader.h>
 #include <immintrin.h>
+#include <cmath>
 
 #include "LoudnessMeter.h"
 
@@ -10,6 +12,10 @@ void LoudnessMeter::prepare(double sr, int maxBlockSize)
     sampleRate = sr;
     blockCounter = 0;
     preparedBlockSize = maxBlockSize;
+
+    // ★ [work74 FIX-02] サンプルレートに応じてK-weighting係数を再計算
+    updateCoefficients(sr);
+
     const int required = maxBlockSize * 2;
     if (required > filterWorkCapacity || !filterWorkBuffer)
     {
@@ -49,17 +55,17 @@ void LoudnessMeter::processBlock(const double* dataL, const double* dataR, int n
     // Stage 1: Pre-filter per channel
     for (int n = 0; n < numSamples; ++n)
     {
-        fl[n] = processKWeightingStage(kPreBiquad, preFilterState[0], dataL[n]);
+        fl[n] = processKWeightingStage(preFilterCoeffs, preFilterState[0], dataL[n]);
         fr[n] = (dataR != nullptr)
-            ? processKWeightingStage(kPreBiquad, preFilterState[1], dataR[n])
-            : processKWeightingStage(kPreBiquad, preFilterState[1], dataL[n]);
+            ? processKWeightingStage(preFilterCoeffs, preFilterState[1], dataR[n])
+            : processKWeightingStage(preFilterCoeffs, preFilterState[1], dataL[n]);
     }
 
     // Stage 2: RLB filter per channel
     for (int n = 0; n < numSamples; ++n)
     {
-        fl[n] = processKWeightingStage(kRlbBiquad, rlbFilterState[0], fl[n]);
-        fr[n] = processKWeightingStage(kRlbBiquad, rlbFilterState[1], fr[n]);
+        fl[n] = processKWeightingStage(rlbFilterCoeffs, rlbFilterState[0], fl[n]);
+        fr[n] = processKWeightingStage(rlbFilterCoeffs, rlbFilterState[1], fr[n]);
     }
 
     // Compute mean square + peak (processed signal)
@@ -128,4 +134,84 @@ void LoudnessMeter::processBlock(const double* dataL, const double* dataR, int n
     bp.peakLinear = peakLinear;
     bp.blockIndex = blockCounter++;
     if (ringBufferStorage) ringBufferStorage->ringBuffer.push(bp);
+}
+
+//============================================================================
+// ★ [work74 FIX-02] K-weighting フィルタ係数のサンプルレート依存計算
+//
+// ITU-R BS.1770-4 Annex B のアナログ伝達関数に基づき、
+// pre-warped bilinear transform でIIR係数をサンプルレート毎に計算する。
+//
+// 検証結果:
+//   Stage 1 (Pre-filter) は中心周波数 f₀=1500Hz, Q=1/√2, G=+4dB の
+//   標準ハイシェルフフィルタ (Audio EQ Cookbook) と判明。
+//   Stage 2 (RLB) は fc=38Hz, Q=0.50 の標準ハイパスフィルタ。
+//
+// 参考実装: libebur128 (MIT license)
+//   一次仕様: ITU-R BS.1770-4 Annex B
+//============================================================================
+void LoudnessMeter::updateCoefficients(double fs)
+{
+    if (fs <= 0.0)
+        return;
+
+    // ── Stage 2: RLB filter (High-pass, fc=38Hz, Q=0.50) ──
+    //   H(s) = s² / (s² + E·s + 1),  E = 1.99004745483398
+    //   → Audio EQ Cookbook 高域通過 (High-pass) 公式
+    {
+        const double w0 = 2.0 * M_PI * 38.0 / fs;
+        const double cosW0 = std::cos(w0);
+        const double sinW0 = std::sin(w0);
+        const double alpha = sinW0 / (2.0 * 0.50); // Q=0.50
+
+        // ★ 注意: High-pass は (1+cosΩ) を使用。Low-pass の (1-cosΩ) と混同しないこと。
+        const double b0 = (1.0 + cosW0) / 2.0;
+        const double b1 = -(1.0 + cosW0);
+        const double b2 = (1.0 + cosW0) / 2.0;
+        const double a0 = 1.0 + alpha;
+        const double a1 = -2.0 * cosW0;
+        const double a2 = 1.0 - alpha;
+
+        // a0=1 に正規化
+        // processKWeightingStage の DF1 形式: y = b'*x + ... - A1*y1 - A2*y2
+        // A1 = a1/a0, A2 = a2/a0 (a1,a2 は Cookbook 形式)
+        const double invA0 = 1.0 / a0;
+        rlbFilterCoeffs[0] = b0 * invA0; // b0'
+        rlbFilterCoeffs[1] = b1 * invA0; // b1'
+        rlbFilterCoeffs[2] = b2 * invA0; // b2'
+        rlbFilterCoeffs[3] = a1 * invA0; // A1 = a1/a0 (DF1 で -coeffs[3]*y1)
+        rlbFilterCoeffs[4] = a2 * invA0; // A2 = a2/a0 (DF1 で -coeffs[4]*y2)
+    }
+
+    // ── Stage 1: Pre-filter (High-shelf, f₀=1500Hz, Q=1/√2, G=+4dB) ──
+    //   BS.1770-4 Table 1 の48kHz係数を標準ハイシェルフbiquad公式で再現確認済み:
+    //     b0=1.535, b1=-2.692, b2=1.198, a1=-1.691, a2=0.732
+    //   → 任意 fs で Audio EQ Cookbook 高域シェルフ公式を使用
+    {
+        constexpr double kPreFreq = 1500.0;    // 中心周波数 [Hz] (BS.1770準拠)
+        constexpr double kPreGainDb = 4.0;       // 高域ゲイン [+dB]
+        constexpr double kPreQ = 0.7071067811865476; // 1/√2
+
+        const double w0 = 2.0 * M_PI * kPreFreq / fs;
+        const double cosW0 = std::cos(w0);
+        const double sinW0 = std::sin(w0);
+        const double A = std::pow(10.0, kPreGainDb / 40.0);
+        const double alpha = sinW0 / (2.0 * kPreQ);
+        const double sqrtA = std::sqrt(A);
+
+        // High-shelf 公式 (Audio EQ Cookbook)
+        const double b0 = A * ((A + 1.0) + (A - 1.0) * cosW0 + 2.0 * sqrtA * alpha);
+        const double b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosW0);
+        const double b2 = A * ((A + 1.0) + (A - 1.0) * cosW0 - 2.0 * sqrtA * alpha);
+        const double a0 = (A + 1.0) - (A - 1.0) * cosW0 + 2.0 * sqrtA * alpha;
+        const double a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosW0);
+        const double a2 = (A + 1.0) - (A - 1.0) * cosW0 - 2.0 * sqrtA * alpha;
+
+        const double invA0 = 1.0 / a0;
+        preFilterCoeffs[0] = b0 * invA0;
+        preFilterCoeffs[1] = b1 * invA0;
+        preFilterCoeffs[2] = b2 * invA0;
+        preFilterCoeffs[3] = a1 * invA0; // A1 = a1/a0 (DF1 で -coeffs[3]*y1)
+        preFilterCoeffs[4] = a2 * invA0; // A2 = a2/a0 (DF1 で -coeffs[4]*y2)
+    }
 }

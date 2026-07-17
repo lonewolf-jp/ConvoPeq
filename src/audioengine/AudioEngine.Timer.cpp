@@ -64,7 +64,10 @@ struct ScopedBlockTimer {
 #endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
 // ★ [work62] asyncSink: LogEntry + LockFreeRingBuffer + 非同期Logger
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas(64) による意図的なパディングを許容
 struct alignas(64) LogEntry {
+#pragma warning(pop)
     uint16_t length;
     char text[254];
 };

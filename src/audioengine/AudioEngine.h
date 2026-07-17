@@ -1922,13 +1922,13 @@ private:
             ~CacheMap()
             {
                 jassert(owner != nullptr);
-                // ★ B08: Shutdown 時は EBR を迂回し即時 delete (m_retireRouter は既に破棄されている)
+                // ★ R-1: Shutdown 時は EBR を迂回し即時 delete (m_retireRouter は既に破棄されている)
                 //    通常運用時 (キャッシュ世代交代) は従来通り EBR 経由
                 if (convo::consumeAtomic(owner->shutdownPhase, std::memory_order_acquire) >= AudioEngine::ShutdownPhase::Destroy) {
                     for (auto& entry : map)
                     {
                         if (entry.second != nullptr)
-                            static_cast<void>(entry.second->release(RetirePolicy::Immediate));
+                            static_cast<void>(entry.second->releaseDirect());
                     }
                 } else {
                     for (auto& entry : map)
@@ -1976,7 +1976,7 @@ public:
     // 状態管理
     //----------------------------------------------------------
     // active runtime DSP slot: 現行 DSP の非所有スロット。
-    //            実際の解放は retireDSP() → deferred delete / retire queue で行う。
+    //            実際の解放は retireDSPHandleForRuntime() → deferred delete / retire queue で行う。
     convo::NonOwningPtr<DSPCore> activeRuntimeDSPSlot { nullptr };
     // fading runtime DSP slot: フェード中 DSP の非所有スロット。
     //               寿命は publish/retire の順序に従い、active runtime slot と独立して非所有で管理する。
@@ -3908,50 +3908,27 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
 
     const uint64_t epoch = markRetireEpoch();
 
-    // [P0-5] 単一回試行 + drop. Router経由.
-    if (m_retireRouter->enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic) == convo::isr::RetireEnqueueResult::Success)
+    // [Bug2 Phase1] Router の enqueueWithRetry に委譲（リトライロジックは Router に集約）
+    auto result = m_retireRouter->enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
+    if (result == convo::isr::RetireEnqueueResult::Success)
     {
         runtimePublicationBridge_.setRetireBacklogCount(
             static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()));
         return convo::isr::RetireEnqueueResult::Success;
     }
 
-    // [P0-5] enqueue failure -> best-effort drain + telemetry.
+    // enqueueWithRetry 内でリトライ・tryReclaim・QueuePressure 通知は完結している。
+    // ここでは backlog 情報の更新と best-effort drain を行い、結果を呼び出し元に返す。
     drainDeferredRetireQueues(false);
     const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
-    return convo::isr::RetireEnqueueResult::QueuePressure;
+    return result;
 }
 
-inline void retireDSP(DSPCore* dsp) noexcept
-{
-    if (dsp == nullptr)
-        return;
-
-    // 退役の唯一の入口。
-    // ここでは「公開済みハンドルの解放」と「実体の deferred delete 予約」をまとめて行い、
-    // active runtime slot / fading runtime slot など複数の非所有スロットからの回収責務を集約する。
-    if (!retireDSPHandleForRuntime(dsp))
-        return;
-
-    convo::fetchAddAtomic(rtAuxMutable_.runtimeRetireCount,
-                         static_cast<std::uint64_t>(1),
-                         std::memory_order_acq_rel);
-    switch (enqueueDeferredDeleteNonRtWithResult(dsp, &AudioEngine::destroyDSPCoreNode))
-    {
-        case convo::isr::RetireEnqueueResult::Success:
-        case convo::isr::RetireEnqueueResult::QueuePressure:
-            return;
-        case convo::isr::RetireEnqueueResult::QueueFull:
-            convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchRuntimeQueueFullCount,
-                                  static_cast<std::uint64_t>(1),
-                                  std::memory_order_acq_rel);
-            return;
-        case convo::isr::RetireEnqueueResult::Shutdown:
-            return;
-    }
-}
+// ★ R-2: retireDSP() 削除 — 呼び出し元不在のデッドコード。
+//   DSP の退役は DSPLifetimeManager 経由に一本化済み。
+//   代わりに retireDSPHandleForRuntime() を直接使用すること。
 
 inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
 {

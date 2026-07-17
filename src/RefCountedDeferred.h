@@ -1,26 +1,19 @@
 #pragma once
 
-// [work21 Phase-D] RefCountedDeferred — Router-based retire only.
-// Old release(EpochDomain&) removed — use release(IEpochProvider&) instead.
+// ★ R-1: RefCountedDeferred — Router-based retire via IRetireRouter.
+//   release(IRetireRouter&): NonRT, リトライ込み（Router::retire 経由）
+//   releaseRT(IRetireRouter&): RT-safe, リトライなし（Router::retireRT 経由）。戻り値 bool
+//   releaseDirect(): Shutdown 専用。RetireRouter を経由せず即時 delete。
 //
-// [work37 Phase 1.3] enqueueRetire 戻り値チェック追加。
-//   canBlock() 判定により RT スレッドからは tryReclaim をスキップ。
-//
-// [work69 Phase B08] RetirePolicy による dispatch 追加。
-//   release(RetirePolicy::Immediate) は Shutdown 時に EBR を迂回する。
+// releaseDirect() 使用条件:
+//   AudioEngine::ShutdownPhase::Destroy 以上 (Shutdown 時のみ)
+//   Runtime publish 後の呼び出しは禁止 (EBR 迂回により Audio Thread 参照中破棄のリスク)
 
 #include <atomic>
 #include <memory>
-#include "core/IEpochProvider.h"
+#include "core/IRetireRouter.h"
 #include "DspNumericPolicy.h"
-
 #include "audioengine/AtomicAccess.h"
-
-// ★ B08: Retire policy — EBR 経由または即時 delete
-enum class RetirePolicy {
-    Epoch,      // 通常: EBR 経由 (IEpochProvider& が必要)
-    Immediate   // Shutdown: EBR を迂回し即時 delete
-};
 
 template <typename T>
 class RefCountedDeferred {
@@ -29,27 +22,26 @@ public:
         convo::fetchAddAtomic(refCount, 1, std::memory_order_acq_rel);
     }
 
-    // [work37 Phase 1.3] enqueueRetire 戻り値をチェック。RT から呼ばれ得るため、
-    //   canBlock() (Non-RT) の場合のみ tryReclaim 再試行を行う。
-    //   RT からの失敗は HealthMonitor overflowCount 監視に委ねる。
-    void release(convo::IEpochProvider& provider) {
+    // ★ R-1: NonRT release — Router::retire 経由（リトライ・QueuePressure 通知は Router 内部で完結）
+    void release(convo::IRetireRouter& router) {
         if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (!provider.enqueueRetire(
-                    static_cast<T*>(this),
-                    [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                    provider.currentEpoch())) {
-                // canBlock() が false (RT) なら tryReclaim 禁止
-                if (!convo::numeric_policy::isAudioThread()) {
-                    provider.tryReclaim();
-                    (void)provider.enqueueRetire(
-                        static_cast<T*>(this),
-                        [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                        provider.currentEpoch());
-                }
-                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる
-            }
+            router.retire(
+                static_cast<T*>(this),
+                [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); });
         }
+    }
+
+    // ★ R-1: RT-safe release — Router::retireRT 経由（単発 enqueue、リトライなし）
+    //   戻り値: true=成功/false=QueueFull
+    [[nodiscard]] bool releaseRT(convo::IRetireRouter& router) noexcept {
+        if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            return router.retireRT(
+                static_cast<T*>(this),
+                [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); });
+        }
+        return true; // Not the last ref, success by definition
     }
 
     // tryAddRef: オブジェクトがまだ有効な場合のみ参照カウントを増やす
@@ -66,15 +58,13 @@ public:
         return false;
     }
 
-    // ★ B08: Shutdown 専用 — RetireRouter を経由せず即時 delete
+    // ★ R-1: Shutdown 専用 — RetireRouter を経由せず即時 delete
     //    使用条件: AudioEngine::ShutdownPhase::Destroy 以上 (Shutdown 時のみ)
     //    Runtime publish 後の呼び出しは禁止 (EBR 迂回により Audio Thread 参照中破棄のリスク)
-    [[nodiscard]] bool release(RetirePolicy policy) noexcept {
+    [[nodiscard]] bool releaseDirect() noexcept {
         if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (policy == RetirePolicy::Immediate) {
-                delete static_cast<T*>(this);
-            }
+            delete static_cast<T*>(this);
             return true;
         }
         return false;

@@ -7,6 +7,8 @@
 #include "core/ThreadAffinityManager.h"
 
 #include <cmath>
+#include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
+#include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
 
 #include "audioengine/AtomicAccess.h"
 
@@ -72,6 +74,10 @@ bool ProgressiveUpgradeThread::checkAndCancel()
 
 void ProgressiveUpgradeThread::run()
 {
+    // ★ Bug#4: FTZ/DAZ 有効化（専用スレッド: 設定のみ、RAII 保存＋復元は不要）
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
     if (affinityManager != nullptr)
         affinityManager->applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 

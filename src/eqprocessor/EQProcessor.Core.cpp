@@ -47,6 +47,8 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
     //   正しい対策: スタック上に ISRRetireRouter を構築する。
     convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+
+    // [Bug2 Phase1] 初回試行: Coordinator 経由で Authority チェック + 初回 enqueue
     auto result = m_retireCoordinator->enqueueRetire(
         convo::isr::RetireAuthority::Granted,
         stackRouter,
@@ -54,18 +56,10 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     if (result == convo::isr::RetireEnqueueResult::Success)
         return true;
 
-    // [work37 Phase 1.4] 失敗: tryReclaim + 再試行（NonRT安全）
-    //   スタック上の stackRouter は tryReclaim で内部 EpochDomain を操作
-    stackRouter.tryReclaim();
-    result = m_retireCoordinator->enqueueRetire(
-        convo::isr::RetireAuthority::Granted,
-        stackRouter,
-        ptr, deleter, retireEpoch);
-    if (result == convo::isr::RetireEnqueueResult::Success)
-        return true;
-
-    // [work37] 再試行も失敗 → drop（HealthMonitor overflowCount 監視に委ねる）
-    return false;
+    // 初回失敗 → enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
+    //   Coordinator の Authority チェックは初回で済んでいるため、直接 Router に委譲
+    result = stackRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
+    return result == convo::isr::RetireEnqueueResult::Success;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.

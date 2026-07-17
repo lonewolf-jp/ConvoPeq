@@ -64,6 +64,7 @@ CLAUDE.md
 .venv/
 doc/BIGDATA/
 .browser4-cli/
+.browser4-cli/snapshot/
 
 # Coverage reports
 coverage/

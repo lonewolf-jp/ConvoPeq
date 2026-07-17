@@ -84,6 +84,7 @@ struct LayerAllocSizes {
     size_t accumImag    = 0;
     size_t inputAccBuf  = 0;
     size_t tailOutputBuf= 0;
+    size_t delayLineBuf = 0;   // ★ Bug#1 B13遅延補償リングバッファのサイズ追跡
 };
 
 /// NUC インスタンス単位の診断スナップショット（グローバル統計は含まない）。

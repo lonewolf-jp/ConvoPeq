@@ -1,4 +1,5 @@
 #include "IRDSP.h"
+#include "core/ScopedMXCSR.h"
 #include <algorithm>
 #include <future>
 #include <cstring>
@@ -43,6 +44,8 @@ juce::AudioBuffer<double> resampleIR(
 
     for (int ch = 0; ch < numCh; ++ch) {
         futures.emplace_back(std::async(std::launch::async, [&, ch]() {
+            // ★ Bug#4: std::async ワーカー — ThreadPool 実装依存のため RAII で保存＋復元
+            const convo::cpu::ScopedMXCSR mxcsr;
             try {
                 auto resampler = std::make_unique<r8b::CDSPResampler>(
                     inputSR, targetSR, inLength,

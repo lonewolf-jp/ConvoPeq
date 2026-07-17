@@ -38,6 +38,9 @@ public:
 
     void reset() noexcept;
 
+    /** サンプルレートに応じてK-weightingフィルタ係数を再計算（prepare内部で自動呼出） */
+    void updateCoefficients(double sampleRate);
+
     //--- RingBuffer (Audio Thread publish, Worker Thread consume) ---
     struct BlockPower {
         double meanSquare = 0.0; // チャンネル重み適用済み M/S
@@ -60,6 +63,11 @@ private:
 
     KWeightingState preFilterState[2];  // [channel]
     KWeightingState rlbFilterState[2];
+
+    // ★ [work74 FIX-02] サンプルレート依存係数（updateCoefficients で設定）
+    //   48kHz固定値 kPreBiquad / kRlbBiquad に代わり、インスタンスごとに保持する。
+    double preFilterCoeffs[5] = { 0 };
+    double rlbFilterCoeffs[5] = { 0 };
 
     double sampleRate = 0.0;
     uint64_t blockCounter = 0;
@@ -89,7 +97,13 @@ private:
     }
 };
 
-//--- K-weighting coefficients (48kHz, ITU-R BS.1770-4 Table 1) ---
+    //--- K-weighting coefficients (48kHz, ITU-R BS.1770-4 Table 1) ---
+    //   48kHz固定値として定義するが、updateCoefficients() で任意のサンプルレートに対応する。
+    //   ★ [work74 FIX-02] これらの定数は48kHzデフォルト値として保持し、
+    //     インスタンスメンバ preFilterCoeffs / rlbFilterCoeffs への初期値として使用する。
+    //
+    //   初期値設定: LoudnessMeter コンストラクタで static constexpr からコピーする。
+    //   （static constexpr 配列をそのままにすることで後方互換性を維持）
 // Stage 1: Pre-filter (High-shelf)
 static constexpr double kPreBiquad[5] = {
     1.535124859586970, -2.691696189406380, 1.198392810852850,
