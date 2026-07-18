@@ -105,6 +105,9 @@ public:
 
     // Message Thread / Timer から呼ばれる。
     uint32_t reclaim(uint64_t minReaderEpoch) {
+        // ★ kMaxScan / scanned は現在の実装ではループの上限として機能していない
+        //   （先頭が reclaim 不可の場合は即 break するため）。
+        //   将来 FIFO 逆転への先読みスキャンを再実装する場合に再利用可能。
         constexpr int kMaxScan = 1024;
         uint32_t deqPos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire); // acquire: 前回 dequeue の CAS release と HB し最新の dequeuePos を観測
         uint32_t scanPos = deqPos;
@@ -152,15 +155,9 @@ public:
                     scanned = 0;
                 }
             } else {
-                // ★ 最適化: 先頭エントリが削除不可の場合、後続も削除不可（FIFO順序）のため即座に脱出
-                if (!canDelete)
-                    break;
-                if (scanPos - deqPos > static_cast<uint32_t>(kMaxScan)) {
-                    scanPos = deqPos;
-                } else {
-                    ++scanPos;
-                }
-                ++scanned;
+                // ★ 先頭エントリが削除不可 → FIFO順序のため即座に脱出
+                //   後続エントリが reclaimable でも FIFO を破って削除することはできない。
+                break;
             }
         }
         return reclaimed;  // ★ A-1: 解放件数を返す

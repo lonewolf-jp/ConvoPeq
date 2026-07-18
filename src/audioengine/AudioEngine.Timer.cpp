@@ -453,13 +453,16 @@ void AudioEngine::timerCallback()
     }
 
     {
-        auto* currentRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
-        auto* fadingRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         const uint64_t revision = (runtimeWorld != nullptr) ? runtimeWorld->generation : static_cast<std::uint64_t>(0);
-        const uint64_t currentUuid = (currentRuntime != nullptr) ? currentRuntime->runtimeUuid : 0;
-        const uint64_t fadingUuid = (fadingRuntime != nullptr) ? fadingRuntime->runtimeUuid : 0;
-        const uint64_t transitionCurrentUuid = currentUuid;
-        const uint64_t transitionNextUuid = (fadingRuntime != nullptr) ? fadingRuntime->runtimeUuid : 0;
+        // ★ UAF 対策: RuntimeWorld（EBR 保護対象）から直接 uuid を読み取る。
+        //   DSPCore ポインタ経由の間接参照は、DSPCore が EBR 解放済みの場合に
+        //   Use-After-Free（0xC0000005）を引き起こす可能性がある。
+        //   runtimeUuid は DSPCore 構築時に一度設定される不変値であり、
+        //   RuntimeWorld の engine フィールドにコピー済みのため安全。
+        const uint64_t currentUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.currentRuntimeUuid : 0;
+        const uint64_t fadingUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.fadingRuntimeUuid : 0;
+        const uint64_t transitionCurrentUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.transitionCurrentRuntimeUuid : 0;
+        const uint64_t transitionNextUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.transitionNextRuntimeUuid : 0;
 
         if (revision != rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision
             || currentUuid != rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid
@@ -905,15 +908,35 @@ void AudioEngine::timerCallback()
         const uint64_t nucTotalF = convo::diag::totalFreedBytes();
         const uint32_t lostFree = convo::diag::lostFreeCount();
         const uint32_t curZeroAlloc = convo::diag::zeroAllocSizeCount();
-        static uint32_t lastZeroAlloc = 0;
-        const int32_t deltaZero = static_cast<int32_t>(curZeroAlloc) - static_cast<int32_t>(lastZeroAlloc);
-        lastZeroAlloc = curZeroAlloc;
+        const int32_t deltaZero = static_cast<int32_t>(curZeroAlloc) - static_cast<int32_t>(lastZeroAllocCount_);
+        lastZeroAllocCount_ = curZeroAlloc;
         auto osMem = getProcessMemoryInfo();
         const uint64_t retireBytes = m_retireRouter ? m_retireRouter->pendingRetireBytes() : 0;
         const uint32_t pendingCount = m_retireRouter ? m_retireRouter->pendingRetireCount() : 0;
         const uint32_t trackedPending = m_retireRouter ? m_retireRouter->trackedPendingEntries() : 0;
         const double trackedRatio = m_retireRouter ? m_retireRouter->trackedRatio() : 0.0;
         const uint64_t overflow = m_retireRouter ? m_retireRouter->overflowCount() : 0;
+        const int64_t deltaOverflow = static_cast<int64_t>(overflow) - static_cast<int64_t>(lastOverflowCount_);
+        lastOverflowCount_ = overflow;
+
+        // ★ Bug#2-a: RetireRouter 診断ログ（overflow / delta / queueUsage / epochGap）
+        if (overflow > 0 || deltaOverflow > 0) {
+            constexpr double kQueueCapacity = 4096.0;
+            const double queueUsage = 100.0 * static_cast<double>(pendingCount) / kQueueCapacity;
+            DBG("[RetireRouter] overflow=" << overflow << " delta=" << deltaOverflow
+                << " pending=" << pendingCount << " queueUsage=" << static_cast<int>(queueUsage) << "%"
+                << " trackedRatio=" << trackedRatio);
+        }
+        if (pendingCount > 0) {
+            const uint64_t currentEpoch = m_retireRouter ? m_retireRouter->currentEpoch() : 0;
+            const uint64_t minReaderEpoch = m_retireRouter ? m_retireRouter->minReaderEpoch() : 0;
+            if (currentEpoch > minReaderEpoch + 10) {
+                DBG("[RetireRouter] epochGap=" << (currentEpoch - minReaderEpoch)
+                    << " currentEpoch=" << currentEpoch << " minReaderEpoch=" << minReaderEpoch
+                    << " pending=" << pendingCount);
+            }
+        }
+
         const uint64_t reclaim = m_retireRouter ? m_retireRouter->reclaimAttemptCount() : 0;
         const uint32_t nucLive = convo::MKLNonUniformConvolver::liveCount.load(std::memory_order_relaxed);
         const uint32_t dspCoreLiveCount = AudioEngine::DSPCore::liveCount.load(std::memory_order_relaxed);
@@ -1116,9 +1139,6 @@ void AudioEngine::timerCallback()
     // ★ 計測ログ: Memory 定期ログ（1秒ごと・常時出力）+ PageFault Delta警告
     {
         static uint64_t lastMemLogUs = 0;
-        static uint64_t s_prevPageFaults = 0;
-        static double s_pfEwmaAvg = 0.0;
-        static int s_pfSampleCount = 0;
         static constexpr int kEwmaWarmupSamples = 10;
         static constexpr uint64_t kAbsoluteThreshold = 50000;
 
@@ -1132,17 +1152,17 @@ void AudioEngine::timerCallback()
             const auto seq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
 
             // Delta計算（初回は0）
-            const uint64_t pfDelta = (s_prevPageFaults > 0)
-                ? (memInfo.pageFaultCount - s_prevPageFaults) : 0;
-            s_prevPageFaults = memInfo.pageFaultCount;
+            const uint64_t pfDelta = (pageFaultPrev_ > 0)
+                ? (memInfo.pageFaultCount - pageFaultPrev_) : 0;
+            pageFaultPrev_ = memInfo.pageFaultCount;
 
             // ★【重要】PageFault警告判定はEWMA更新の前に行う
-            const double thresholdRel = (s_pfSampleCount >= kEwmaWarmupSamples)
-                ? std::max(1000.0, s_pfEwmaAvg * 5.0) : 0.0;
+            const double thresholdRel = (pfSampleCount_ >= kEwmaWarmupSamples)
+                ? std::max(1000.0, pfEwmaAvg_ * 5.0) : 0.0;
             const uint64_t threshold = std::max<uint64_t>(kAbsoluteThreshold,
                 static_cast<uint64_t>(thresholdRel));
             const bool warnAbsolute = (pfDelta > kAbsoluteThreshold);
-            const bool warnRelative = (s_pfSampleCount >= kEwmaWarmupSamples)
+            const bool warnRelative = (pfSampleCount_ >= kEwmaWarmupSamples)
                 && (pfDelta > static_cast<uint64_t>(thresholdRel));
 
             // ★ MEMログ（Seq+Delta+Pagefile付き）
@@ -1158,18 +1178,18 @@ void AudioEngine::timerCallback()
                 const auto warnSeq = convo::fetchAddAtomic(diagSequenceCounter(), uint64_t{1}, std::memory_order_acq_rel) + 1u;
                 diagLog(diagPrefix(gen) + " [Seq=" + juce::String(static_cast<juce::int64>(warnSeq))
                     + "] [WARN] PageFault surge: +" + juce::String(static_cast<juce::int64>(pfDelta))
-                    + " faults (EWMA=" + juce::String(s_pfEwmaAvg, 0)
+                    + " faults (EWMA=" + juce::String(pfEwmaAvg_, 0)
                     + ", threshold=" + juce::String(static_cast<juce::int64>(threshold)) + ")");
             }
 
             // ★ EWMA更新（警告判定の後）+ クリッピング
             const double clippedDelta = std::min<double>(static_cast<double>(pfDelta), 50000.0);
-            if (s_pfSampleCount < kEwmaWarmupSamples) {
-                s_pfEwmaAvg = (s_pfEwmaAvg * static_cast<double>(s_pfSampleCount) + clippedDelta)
-                    / static_cast<double>(s_pfSampleCount + 1);
-                ++s_pfSampleCount;
+            if (pfSampleCount_ < kEwmaWarmupSamples) {
+                pfEwmaAvg_ = (pfEwmaAvg_ * static_cast<double>(pfSampleCount_) + clippedDelta)
+                    / static_cast<double>(pfSampleCount_ + 1);
+                ++pfSampleCount_;
             } else {
-                s_pfEwmaAvg = 0.05 * clippedDelta + 0.95 * s_pfEwmaAvg;
+                pfEwmaAvg_ = 0.05 * clippedDelta + 0.95 * pfEwmaAvg_;
             }
 
             // ★ WS減少警告（absolute AND relative）

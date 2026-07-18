@@ -122,6 +122,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
 
     # ★ Phase3/5: Priority Integration Tests
+    # ★ Bug#5: DeferredDeletionQueue reclaim 自動実測テスト
+    #   MPMC epoch逆転測定・同時実行ストレステスト・基本機能検証
+    add_executable(DeferredDeletionQueueReclaimTests
+        src/tests/DeferredDeletionQueueReclaimTests.cpp
+    )
+    add_test(NAME DeferredDeletionQueueReclaimTests
+        COMMAND DeferredDeletionQueueReclaimTests)
+
     add_executable(PriorityIntegrationTests
         src/tests/PriorityIntegrationTests.cpp
         src/audioengine/ISRRetire.cpp              # RetireRuntime
@@ -163,6 +171,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(EQProcessorMaxGainTests PRIVATE cxx_std_20)
     target_compile_features(RebuildAdmissionRegressionTests PRIVATE cxx_std_20)
     target_compile_features(BuildInputSemanticContractTests PRIVATE cxx_std_20)
+    target_compile_features(DeferredDeletionQueueReclaimTests PRIVATE cxx_std_20)
     target_compile_features(PriorityIntegrationTests PRIVATE cxx_std_20)
     target_include_directories(ISRRuntimeIdentityTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -240,6 +249,12 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
     target_include_directories(BuildInputSemanticContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(DeferredDeletionQueueReclaimTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine

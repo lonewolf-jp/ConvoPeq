@@ -142,8 +142,10 @@ RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
 
-    if (router.enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic) != RetireEnqueueResult::Success)
-        return RetireEnqueueResult::QueueFull;
+    // ★ Bug#2-d: enqueueWithRetry に委譲（リトライロジックは Router に集約）
+    const auto result = router.enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
+    if (result != RetireEnqueueResult::Success)
+        return result;
 
     const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
     setRetireBacklogCount(backlog);

@@ -105,9 +105,6 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     }
 
-    if (state.hasProperty("oversamplingFactor"))
-        setOversamplingFactor(static_cast<int>(state.getProperty("oversamplingFactor")));
-
     if (state.hasProperty("oversamplingType"))
         setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
 
@@ -176,7 +173,8 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire), nullptr);
     state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire), nullptr);
     state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType, std::memory_order_acquire), nullptr);
-    state.setProperty("oversamplingFactor", convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire), nullptr);
+    // oversamplingFactor/oversamplingType はデバイス設定のためプリセットに保存しない
+    // （DeviceSettings::saveSettings が管理）
     state.setProperty("oversamplingType", (int)convo::consumeAtomic(oversamplingType, std::memory_order_acquire), nullptr);
 
     // NoiseShaperLearner Settings

@@ -1,0 +1,20 @@
+.sympath C:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug
+.symfix
+.logopen C:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\cdb_crash_output.txt
+.reload /f ConvoPeq.exe
+sxe -c "
+  .printf \"=== CRASH: Access Violation ===\\n\";
+  .printf \"Exception address: %p\\n\", @$ra;
+  .printf \"Faulting instruction: \";
+  ub @$ra L1;
+  .printf \"\\n=== Call Stack ===\\n\";
+  kn;
+  .printf \"\\n=== Examine pointer at fault ===\\n\";
+  .printf \"r14 value: %p\\n\", @r14;
+  !address @r14;
+  .printf \"\\n=== Memory dump at r14 ===\\n\";
+  db @r14 L40;
+  .printf \"\\n=== Exiting ===\\n\";
+  q;
+" av
+g

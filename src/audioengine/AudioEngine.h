@@ -2134,6 +2134,16 @@ public:
     std::atomic<uint32_t> callbackMaxUs_{0};    // 1秒間のcallback実行時間最大値(μs)
     std::atomic<uint32_t> intervalMaxUs_{0};    // 1秒間のcallback間隔最大値(μs) ★主指標
     std::atomic<uint32_t> callbackCount_{0};    // 1秒間のcallback実行回数(参考値)
+    // ★ Bug#2-a: 前回 Timer 観測時の overflowCount（deltaOverflow 算出用）
+    //   インスタンス固有の状態として保持。（static ローカル変数だと複数インスタンス間で共有）
+    uint64_t lastOverflowCount_{0};
+    // ★ v14.0: 前回 Timer 観測時の zeroAllocSizeCount（deltaZero 算出用、インスタンス固有状態）
+    uint32_t lastZeroAllocCount_{0};
+    // ★ Timer 診断: PageFault 差分計算用 前回値（インスタンス固有状態）
+    uint64_t pageFaultPrev_{0};
+    // ★ Timer 診断: PageFault EWMA 統計（インスタンス固有状態）
+    double pfEwmaAvg_{0.0};
+    int pfSampleCount_{0};
 
     // ---- Timer周期 ----
     // startTimer(100) で設定される。将来の周期変更に追従可能。

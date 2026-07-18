@@ -2,8 +2,8 @@
   "artifact": "runtime_budget_report.json",
   "schema": "runtime_budget_report_v1",
   "buildMode": "CI",
-  "generatedAtNs": 22046849775800,
-  "artifactTotalBytes": 42107,
+  "generatedAtNs": 37565768594900,
+  "artifactTotalBytes": 44384,
   "limits": {
     "closureTraversal": "O(N) bounded",
     "publishValidationLatency": "bounded",

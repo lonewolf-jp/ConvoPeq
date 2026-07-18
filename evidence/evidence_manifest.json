@@ -3,10 +3,20 @@
   "generationMode": "runtime",
   "runtimeRunId": "runtime-local",
   "runId": "runtime-local",
-  "buildMode": "Release",
-  "proofLevel": "off",
-  "generatedAtNs": 122552254999400,
+  "buildMode": "CI",
+  "proofLevel": "full",
+  "generatedAtNs": 37565762667200,
   "artifacts": [
-  ],
-  "minimalEvidence": true
+    "closure_graph.json",
+    "mutation_fault_trace.json",
+    "hb_graph_trace.json",
+    "hb_violation_report.json",
+    "retire_timeline.json",
+    "shutdown_trace.json",
+    "retire_latency_report.json",
+    "payload_tier_report.json",
+    "publication_failure_log.json",
+    "publication_progress_log.json",
+    "deferred_health.json"
+  ]
 }

@@ -204,6 +204,9 @@ private:
     void workerThreadMain(std::stop_token stopToken);
     void startEvaluationWorkers();
     void stopEvaluationWorkers() noexcept;
+    // ★ Bug#8: 停止シーケンス共通化（request_stop + notify + join）
+    //   workerState は変更しない。呼び出し側（stopLearning / デストラクタ）が管理する。
+    void shutdownWorkerThread() noexcept;
     void configureEvaluationContexts(double sampleRateHz) noexcept;
     void evaluationWorkerMain(int workerIndex, std::stop_token stopToken) noexcept;
     void runEvaluationJobsForWorker(int workerIndex,

@@ -79,23 +79,9 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
 
 NoiseShaperLearner::~NoiseShaperLearner()
 {
-    // Transition:
-    // Running/Starting -> Stopping
+    // ★ Bug#8: shutdownWorkerThread に一本化。デストラクタでは Idle に遷移しない。
     convo::publishAtomic(workerState, WorkerState::Stopping, std::memory_order_release);
-    convo::publishAtomic(stopRequested, true, std::memory_order_release);
-    {
-        const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
-        evaluationWorkersShouldExit = true;
-    }
-    evaluationDispatchCv.notify_all();
-    intervalCv_.notify_all();
-
-    if (workerThread.joinable())
-        workerThread.request_stop();
-
-    // Transition:
-    // Stopping -> Idle
-    convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
+    shutdownWorkerThread();
 }
 
 void NoiseShaperLearner::startLearning(bool resume)
@@ -113,12 +99,11 @@ void NoiseShaperLearner::startLearning(bool resume)
     }
 
     // 前回セッション残骸のクリーンアップ
+    // ★ Bug#8: stopLearning 内で join まで完結するため、個別の join は不要
     if (isRunning() || workerThread.joinable() || convo::consumeAtomic(workerState, std::memory_order_acquire) != WorkerState::Idle)
     {
         juce::Logger::writeToLog("[NoiseShaperLearner] startLearning: cleaning up previous session");
         stopLearning();
-        if (workerThread.joinable())
-            workerThread.join();
     }
 
     // 全フラグを明示リセット
@@ -189,23 +174,32 @@ void NoiseShaperLearner::startLearning(bool resume)
 
 void NoiseShaperLearner::stopLearning()
 {
-    // Transition:
-    // Running/Starting -> Stopping
+    // ★ Bug#8: shutdownWorkerThread に一本化。joinable 判定は内部で行う。
     convo::publishAtomic(workerState, WorkerState::Stopping, std::memory_order_release);
-    convo::publishAtomic(stopRequested, true, std::memory_order_release);
-    intervalCv_.notify_all();
-    stopEvaluationWorkers();
-    if (workerThread.joinable())
-        workerThread.request_stop();
+    shutdownWorkerThread();
 
-    // Transition:
-    // Stopping -> Idle
+    // ★ shutdownWorkerThread が joinable=false で即座に戻った場合も Stopping のまま残らないよう遷移
     convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
     convo::publishAtomic(pendingResume, false, std::memory_order_release);
     convo::publishAtomic(progress.status, Status::Idle, std::memory_order_release);
     convo::publishAtomic(errorMessage, nullptr, std::memory_order_release);
+}
 
+// ★ Bug#8: 停止シーケンス共通化ヘルパー
+void NoiseShaperLearner::shutdownWorkerThread() noexcept
+{
+    if (!workerThread.joinable())
+        return;  // 既に停止済み: 何もしない
+    // self-join 防止
+    jassert(std::this_thread::get_id() != workerThread.get_id());
+    if (std::this_thread::get_id() == workerThread.get_id())
+        std::terminate();
+    convo::publishAtomic(stopRequested, true, std::memory_order_release);
+    workerThread.request_stop();
+    // 全 Condition Variable を通知
     evaluationDispatchCv.notify_all();
+    intervalCv_.notify_all();
+    workerThread.join();
 }
 
 void NoiseShaperLearner::setLearningMode(LearningMode mode) noexcept
