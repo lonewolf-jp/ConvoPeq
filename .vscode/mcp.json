@@ -21,7 +21,11 @@
             "args": [
                 "mcp",
                 "serve"
-            ]
+            ],
+            "env": {
+                "HEADROOM_PROXY": "0",
+                "HEADROOM_PROXY_PORT": "0"
+            }
         }
     }
 }

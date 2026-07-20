@@ -3,6 +3,7 @@
 //============================================================================
 #include "DeviceSettings.h"
 #include "NoiseShaperLearningComponent.h"
+#include "OversamplingPolicy.h"
 #include <cmath>
 
 namespace
@@ -248,17 +249,8 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     addAndMakeVisible(oversamplingComboBox);
     oversamplingComboBox.addItem("Auto", 1);
 
-    const double sr = audioEngine.getSampleRate();
-
-    oversamplingComboBox.addItem("1x (None)", 2); // Always available
-    oversamplingComboBox.addItem("2x", 3);         // Always available
-
-    //Conditionally add 4x and 8x options based on sample rate
-    if (sr <= 192000)
-        oversamplingComboBox.addItem("4x", 4);
-
-    if (sr <= 96000)
-        oversamplingComboBox.addItem("8x", 5);
+    // ★ v14.28: OversamplingPolicy::maxAllowedFactor() に基づく表示
+    rebuildOversamplingComboBox();
 
     oversamplingComboBox.onChange = [this] {
         // 【パッチ5】重複する setOversamplingFactor 呼び出しを除去
@@ -426,15 +418,24 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     // デバイス変更を監視してビット深度リストを更新
     audioDeviceManager.addChangeListener(this);
 
-    // 初期値設定
-    const std::map<int, int> factorToId = {{0, 1}, {1, 2}, {2, 3}, {4, 4}, {8, 5}};
-    int currentFactor = audioEngine.getOversamplingFactor();
-    if (auto it = factorToId.find(currentFactor); it != factorToId.end())
+    // ★ v14.28: OversamplingPolicy に基づく初期値設定（Bug#6: ID 存在検証付き）
     {
-        oversamplingComboBox.setSelectedId(it->second, juce::dontSendNotification);
-    }
-    else {
-        oversamplingComboBox.setSelectedId(1, juce::dontSendNotification); // Default to Auto
+        const std::map<int, int> factorToId = {{0, 1}, {1, 2}, {2, 3}, {4, 4}, {8, 5}};
+        const int currentFactor = audioEngine.getOversamplingFactor();
+        int targetId = 1;  // default: Auto
+        if (auto it = factorToId.find(currentFactor); it != factorToId.end())
+        {
+            // ★ Bug#6: 要求 ID が ComboBox に存在するか確認
+            for (int i = 0; i < oversamplingComboBox.getNumItems(); ++i)
+            {
+                if (oversamplingComboBox.getItemId(i) == it->second)
+                {
+                    targetId = it->second;
+                    break;
+                }
+            }
+        }
+        oversamplingComboBox.setSelectedId(targetId, juce::dontSendNotification);
     }
 
     switch (audioEngine.getNoiseShaperType())
@@ -555,6 +556,27 @@ void DeviceSettings::resized()
     }
 }
 
+// ★ v14.28: Oversampling ComboBox 再構築（Bug#8: SR 変更時に ComboBox を再構築）
+void DeviceSettings::rebuildOversamplingComboBox()
+{
+    const double sr = audioEngine.getSampleRate();
+    const int prevId = oversamplingComboBox.getSelectedId();
+
+    oversamplingComboBox.clear(juce::dontSendNotification);
+    oversamplingComboBox.addItem("Auto", 1);
+    oversamplingComboBox.addItem("1x (None)", 2);
+    oversamplingComboBox.addItem("2x", 3);
+
+    const int maxF = convo::OversamplingPolicy::maxAllowedFactor(sr);
+    if (maxF >= 4) oversamplingComboBox.addItem("4x", 4);
+    if (maxF >= 8) oversamplingComboBox.addItem("8x", 5);
+
+    // 以前の選択を維持（ID が存在すれば）
+    oversamplingComboBox.setSelectedId(prevId, juce::dontSendNotification);
+    if (oversamplingComboBox.getSelectedId() != prevId)
+        oversamplingComboBox.setSelectedId(1, juce::dontSendNotification);  // fallback to Auto
+}
+
 void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     // ソースを判定して処理を分岐
@@ -569,6 +591,8 @@ void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
     {
         ensureUsableChannelSelection(audioDeviceManager);
         updateBitDepthList();
+        // ★ Bug#8: サンプルレート変更時に Oversampling ComboBox を再構築
+        rebuildOversamplingComboBox();
     }
 }
 

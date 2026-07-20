@@ -1,0 +1,31 @@
+--- a/src/audioengine/ISRRetireRouter.cpp
++++ b/src/audioengine/ISRRetireRouter.cpp
+@@ -100,6 +100,12 @@
+                                                     DeletionEntryType type) noexcept
+ {
+     assert(provider_ != nullptr);
++    // ★ FIX: ptr!=nullptr かつ deleter==nullptr は呼び出し側のバグ（本来解放すべき
++    //   オブジェクトを渡しているのにdeleterが無い＝サイレントリークになる）であり、
++    //   ptr==nullptr（何もすることがない、正当なno-op）とは区別すべきである。
++    //   RetireEnqueueResultに専用のエラー値がないため戻り値はSuccessのまま維持し
++    //   （Release挙動は不変）、Debugビルドでのみ検出できるようassertで区別する。
++    assert(!(ptr != nullptr && deleter == nullptr) && "enqueueRetire: valid ptr with null deleter will silently leak");
+     if (ptr == nullptr || deleter == nullptr)
+         return RetireEnqueueResult::Success;
+ 
+@@ -140,6 +146,7 @@
+ bool ISRRetireRouter::retireRT(void* ptr, void (*deleter)(void*)) noexcept
+ {
+     assert(provider_ != nullptr);
++    assert(!(ptr != nullptr && deleter == nullptr) && "retireRT: valid ptr with null deleter will silently leak");
+     if (ptr == nullptr || deleter == nullptr)
+         return true;
+     return provider_->enqueueRetire(ptr, deleter, provider_->currentEpoch());
+@@ -149,6 +156,7 @@
+ void ISRRetireRouter::retire(void* ptr, void (*deleter)(void*)) noexcept
+ {
+     assert(provider_ != nullptr);
++    assert(!(ptr != nullptr && deleter == nullptr) && "retire: valid ptr with null deleter will silently leak");
+     if (ptr == nullptr || deleter == nullptr)
+         return;
+     (void)enqueueWithRetry(ptr, deleter, provider_->currentEpoch(), DeletionEntryType::Generic);

@@ -288,6 +288,12 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
                 return !convolverStateGeneration.isCurrentGeneration(generation);
             });
 
+            if (prepared == nullptr)
+            {
+                juce::Logger::writeToLog("[DIAG_IR] loadIR: convertFile returned null for "
+                    + irFile.getFileName());
+            }
+
             if (prepared)
             {
                 prepared->originalFileName = irFile.getFileNameWithoutExtension();
@@ -303,19 +309,37 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     {
         startProgressiveUpgrade(irFile, sr, appliedFft, generation, targetKey);
     }
+    else
+    {
+        juce::Logger::writeToLog("[DIAG_IR] loadIR: no FFT applied (cacheManager="
+            + juce::String(static_cast<int>(cacheManager != nullptr))
+            + " irConverter=" + juce::String(static_cast<int>(irConverter != nullptr))
+            + " sr=" + juce::String(sr, 1) + ")");
+    }
 }
 
 void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
     if (!prepared)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: null payload");
         return;
+    }
 
     if (!convolverStateGeneration.isCurrentGeneration(prepared->generationId))
+    {
+        juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: generation mismatch payloadGen="
+            + juce::String(prepared->generationId));
         return;
+    }
 
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     if (sr > 0.0 && std::abs(prepared->sampleRate - sr) > 1e-6)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: sample rate mismatch sr="
+            + juce::String(sr, 1) + " preparedSr=" + juce::String(prepared->sampleRate, 1));
         return;
+    }
 
     JUCE_ASSERT_MESSAGE_THREAD;
 
@@ -413,10 +437,16 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
 
         if (!valid)
         {
+            const double peak = (prepared->timeDomainIR) ? prepared->timeDomainIR->getMagnitude(0, prepared->timeDomainIR->getNumSamples()) : 0.0;
             lastError = "Invalid IR (amplitude out of range or sudden level jump)";
+            juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: validation failed peak=" + juce::String(peak, 6));
             convo::publishAtomic(isLoading, false, std::memory_order_release); // release: timer/UI 側 acquire と HB
             return;
         }
+    }
+    else
+    {
+        juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: no timeDomainIR in payload");
     }
 
     // 1. UI 用状態の更新
@@ -479,7 +509,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     // loadIR() (RCU経路) では applyNewState() が呼ばれないため、
     // DSP側 rebuildAllIRsSynchronous() が参照する originalIR をここで保持する。
     if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
-        updateIRState(*(prepared->timeDomainIR), prepared->sampleRate, prepared->additionalAttenuationDb);
+        updateIRState(*(prepared->timeDomainIR), prepared->sampleRate, prepared->additionalAttenuationDb, prepared->irFreqPeakGainDb);
 
     // 3. RCU 状態の更新（★ 軽量化: partitionData/numPartitions/partitionSizeBytes はデッドコードのため除去）
 

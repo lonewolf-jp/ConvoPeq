@@ -119,11 +119,18 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     }
 
     // ★ v14.0: AnalysisPart — BuildAnalysis からコピー
+    // ★ v14.37: verifyBuildBundle で BuildAnalysis + BuildDiagnostics + OversamplingResult + Snapshot の整合性を一括検証
     {
         const auto& ana = req.buildAnalysis;
-        jassert(convo::verifyBuildAnalysisPair(ana, req.sealedSnapshot));
+        const auto& diag = req.buildDiagnostics;
+        const auto& osResult = req.oversamplingResult;
+        jassert(convo::verifyBuildBundle(ana, diag, osResult, req.sealedSnapshot));
+        jassert(convo::verifyDiagnostics(diag));
         spec.analysis.eqMaxGainDb = ana.eqMaxGainDb;
+        spec.analysis.eqMaxQ = ana.eqMaxQ;
+        spec.analysis.irFreqPeakGainDb = ana.irFreqPeakGainDb;
         spec.analysis.additionalAttenuationDb = ana.additionalAttenuationDb;
+        spec.analysis.analysisVersion = diag.analysisVersion;
     }
 
     // ★ v9.7 P7-A1: RetirePart — engine atomic から収集（sealedSnapshot には含まれないため）

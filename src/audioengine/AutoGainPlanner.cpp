@@ -7,71 +7,105 @@ AutoGainPlan AutoGainPlanner::plan(
     convo::ProcessingOrder processingOrder,
     bool eqBypassed,
     bool convBypassed,
-    float eqMaxGainDb,
-    float additionalAttenuationDb) noexcept
+    const PlannerInput& input) noexcept
+{
+    return plan(autoGainEnabled, processingOrder, eqBypassed, convBypassed, input, nullptr);
+}
+
+AutoGainPlan AutoGainPlanner::plan(
+    bool autoGainEnabled,
+    convo::ProcessingOrder processingOrder,
+    bool eqBypassed,
+    bool convBypassed,
+    const PlannerInput& input,
+    PlanDiagnostics* diagnostics) noexcept
 {
     AutoGainPlan result {};
-    if (!autoGainEnabled)
-        return result;  // 0.0/0.0/0.0（= 0dB/0dB/0dB → 線形 1.0/1.0/1.0）
+    PlanDiagnostics diagLocal {};
 
-    // ★ v14.0 Phase 8 Review: 両方バイパス時は透過（EQもConvも無効なら自動ゲインも無効）
+    if (diagnostics == nullptr)
+        diagnostics = &diagLocal;
+
+    if (!autoGainEnabled)
+    {
+        if (diagnostics) {
+            diagnostics->eqBoost = 0.0f;
+            diagnostics->convBoost = 0.0f;
+            diagnostics->qMargin = 0.0f;
+            diagnostics->clamped = false;
+        }
+        return result;  // 0.0/0.0/0.0（= 0dB/0dB/0dB → 線形 1.0/1.0/1.0）
+    }
+
     if (eqBypassed && convBypassed)
+    {
+        if (diagnostics) {
+            diagnostics->eqBoost = 0.0f;
+            diagnostics->convBoost = 0.0f;
+            diagnostics->qMargin = 0.0f;
+            diagnostics->clamped = false;
+        }
         return result;
+    }
+
+    // ★ v14.10: eqMaxGainDb は Builder 側で max(measured, upperBound) 済み
+    const float eqBoost   = std::max(0.0f, input.eqMaxGainDb);
+    const float convBoost = std::max(0.0f, input.irFreqPeakGainDb);
 
     float inputDb = 0.0f, trimDb = 0.0f;
+    float qMargin = 0.0f;
 
     if (!eqBypassed && convBypassed)
     {
         // PEQ only
-        inputDb = -std::max(0.0f, eqMaxGainDb - kMarginEqFirst);
-        inputDb -= estimateQSafetyMargin(eqMaxGainDb, processingOrder);
+        qMargin = EmpiricalSafetyMarginPolicy::evaluate(input.eqMaxGainDb, input.eqMaxQ);
+        inputDb = -std::max(0.0f, eqBoost - kMarginEqFirst) - qMargin;
     }
     else if (eqBypassed && !convBypassed)
     {
         // Conv only
-        inputDb = -std::max(0.0f, additionalAttenuationDb - kMarginConvFirst);
+        qMargin = 0.0f;
+        inputDb = -std::max(0.0f, convBoost - kMarginConvFirst);
     }
     else if (processingOrder == convo::ProcessingOrder::ConvolverThenEQ)
     {
-        // Conv→PEQ: trim 不適用, input 上限 -6dB
-        inputDb = -(std::max(0.0f, additionalAttenuationDb - kMarginConvFirst)
-                    + std::max(0.0f, eqMaxGainDb - kMarginInterStage));
-        inputDb = std::min(inputDb, kConvFirstInputCeiling);
+        // Conv→PEQ: 固定Ceiling廃止、マージンのみで保護
+        qMargin = EmpiricalSafetyMarginPolicy::evaluate(input.eqMaxGainDb, input.eqMaxQ);
+        inputDb = -(std::max(0.0f, convBoost - kMarginConvFirst)
+                  + std::max(0.0f, eqBoost - kMarginInterStage)
+                  + qMargin);
     }
     else
     {
         // PEQ→Conv: trim 適用（デフォルト: EQThenConvolver）
-        inputDb = -std::max(0.0f, eqMaxGainDb - kMarginEqFirst);
-        inputDb -= estimateQSafetyMargin(eqMaxGainDb, processingOrder);
-        trimDb = -std::max(0.0f, additionalAttenuationDb - kMarginInterStage);
+        qMargin = EmpiricalSafetyMarginPolicy::evaluate(input.eqMaxGainDb, input.eqMaxQ);
+        inputDb = -std::max(0.0f, eqBoost - kMarginEqFirst) - qMargin;
+        trimDb  = -std::max(0.0f, convBoost - kMarginInterStage);
     }
 
     // クランプ
-    result.inputHeadroomDb = juce::jlimit(kClampInputMin, kClampInputMax, inputDb);
-    result.convolverInputTrimDb = juce::jlimit(kClampTrimMin, kClampTrimMax, trimDb);
+    const float clampedInput = juce::jlimit(kClampInputMin, kClampInputMax, inputDb);
+    const float clampedTrim  = juce::jlimit(kClampTrimMin, kClampTrimMax, trimDb);
+    result.inputHeadroomDb = clampedInput;
+    result.convolverInputTrimDb = clampedTrim;
 
     // ネット 0dB 整合（クランプ後の実効値で makeup 計算）
-    const float makeupDb = -result.inputHeadroomDb - result.convolverInputTrimDb;
-    result.outputMakeupDb = juce::jlimit(kClampMakeupMin, kClampMakeupMax, makeupDb);
+    const float rawMakeupDb = -clampedInput - clampedTrim;
+    const float clampedMakeup = juce::jlimit(kClampMakeupMin, kClampMakeupMax, rawMakeupDb);
+    result.outputMakeupDb = clampedMakeup;
+
+    // ★ v14.36: PlanDiagnostics を設定
+    if (diagnostics) {
+        diagnostics->eqBoost   = eqBoost;
+        diagnostics->convBoost = convBoost;
+        diagnostics->qMargin   = qMargin;
+        diagnostics->inputClamped  = (clampedInput != inputDb);
+        diagnostics->trimClamped   = (clampedTrim != trimDb);
+        diagnostics->makeupClamped = (clampedMakeup != rawMakeupDb);
+        diagnostics->clamped = diagnostics->inputClamped
+                            || diagnostics->trimClamped
+                            || diagnostics->makeupClamped;
+    }
 
     return result;
-}
-
-float AutoGainPlanner::estimateQSafetyMargin(
-    float eqMaxGainDb, convo::ProcessingOrder /*processingOrder*/) noexcept
-{
-    // ★ v14.0 Phase 8 Review: eqMaxGainDb ≦ 0 なら QSurge = 0（不要な減衰防止）
-    if (eqMaxGainDb <= 0.0f)
-        return 0.0f;
-
-    // 式: Qsurge = min(6.0, 1.5 + peakingSurge)
-    // 係数 0.15, 6.0 は経験則ヒューリスティック（Phase 8 要較正）
-    constexpr float kQSurgeBase = 1.5f;
-    constexpr float kQSurgeCoeff = 0.15f;
-    constexpr float kQSurgeMax = 6.0f;
-    constexpr float kButterworthQ = 0.707f;
-
-    float peakingSurge = eqMaxGainDb * kQSurgeCoeff * (20.0f / kButterworthQ);  // worst-case Q=20
-
-    return std::min(kQSurgeMax, kQSurgeBase + peakingSurge);
 }

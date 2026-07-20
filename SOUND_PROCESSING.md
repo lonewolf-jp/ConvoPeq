@@ -667,7 +667,7 @@ Key atomics:
 | `DSPLifetimeManager::retire()` | Orchestrates retire via `ISRRetireRouter` |
 | `ISRRetireRouter::enqueueRetire()` | Queues retire to `EpochDomain` |
 
-### 9.7 ISR Runtime Governance (101 files in `src/audioengine/`)
+### 9.7 ISR Runtime Governance (107 files in `src/audioengine/`)
 
 The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DSP lifecycle, publication, crossfade, and health monitoring:
 

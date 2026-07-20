@@ -1,18 +1,16 @@
 {
   "schema": "hb_trace_v1",
-  "eventCount": 12,
+  "eventCount": 10,
   "events": [
-    {"ts": 37462864810000, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
-    {"ts": 37463001208900, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
-    {"ts": 37463007517300, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
-    {"ts": 37463483897300, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
-    {"ts": 37463488309400, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
-    {"ts": 37463708010000, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false},
-    {"ts": 37463713213600, "from": 200, "to": 300, "fromEpoch": 3, "toEpoch": 3, "mo": 4, "release": true, "acquire": true},
-    {"ts": 37471783627000, "from": 100, "to": 200, "fromEpoch": 5, "toEpoch": 5, "mo": 3, "release": true, "acquire": false},
-    {"ts": 37471788131600, "from": 200, "to": 300, "fromEpoch": 4, "toEpoch": 4, "mo": 4, "release": true, "acquire": true},
-    {"ts": 37473821050000, "from": 100, "to": 200, "fromEpoch": 7, "toEpoch": 7, "mo": 3, "release": true, "acquire": false},
-    {"ts": 37473826238500, "from": 200, "to": 300, "fromEpoch": 5, "toEpoch": 5, "mo": 4, "release": true, "acquire": true},
-    {"ts": 37503930598400, "from": 100, "to": 200, "fromEpoch": 8, "toEpoch": 8, "mo": 3, "release": true, "acquire": false}
+    {"ts": 1162695451900, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 1162839816700, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
+    {"ts": 1162843910000, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 1163270568300, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
+    {"ts": 1163275009100, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 1163627756300, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false},
+    {"ts": 1163631973000, "from": 200, "to": 300, "fromEpoch": 3, "toEpoch": 3, "mo": 4, "release": true, "acquire": true},
+    {"ts": 1164060509100, "from": 100, "to": 200, "fromEpoch": 5, "toEpoch": 5, "mo": 3, "release": true, "acquire": false},
+    {"ts": 1164065319200, "from": 200, "to": 300, "fromEpoch": 4, "toEpoch": 4, "mo": 4, "release": true, "acquire": true},
+    {"ts": 1164440643100, "from": 100, "to": 200, "fromEpoch": 6, "toEpoch": 6, "mo": 3, "release": true, "acquire": false}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":37504931889300}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":1165000082500}

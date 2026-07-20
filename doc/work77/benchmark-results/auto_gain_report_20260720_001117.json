@@ -1,0 +1,382 @@
+﻿{
+    "FailCount":  0,
+    "Timestamp":  "2026-07-20T00:11:17.1757271+09:00",
+    "SuccessCount":  22,
+    "TotalIRs":  22,
+    "Results":  [
+                    {
+                        "MaxProcTimeUs":  1310,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  81,
+                        "IrLen":  1024,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  541.84,
+                        "Label":  "dirac_k16",
+                        "TransferOk":  false,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_dirac_k16_wa4ezbts.0i2.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1111,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  74,
+                        "IrLen":  1024,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  515.824,
+                        "Label":  "dirac_k2",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_dirac_k2_w3rvkoqm.fop.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1182,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  77,
+                        "IrLen":  1024,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  484.494,
+                        "Label":  "dirac_k32",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_dirac_k32_o0r3xhjq.rrz.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1133,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  70,
+                        "IrLen":  1024,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  549.186,
+                        "Label":  "dirac_k4",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_dirac_k4_x1gjxise.sm0.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1710,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  74,
+                        "IrLen":  1024,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  571.743,
+                        "Label":  "dirac_k8",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_dirac_k8_jzhprs13.032.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1973,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  81,
+                        "IrLen":  88894,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  476.321,
+                        "Label":  "reverb_plate",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_reverb_plate_m54gtdhj.kmh.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1274,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  80,
+                        "IrLen":  88894,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  514.425,
+                        "Label":  "reverb_spring",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_reverb_spring_bingwtgp.u0p.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1200,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  79,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  548.127,
+                        "Label":  "linphase_bandpass_2k_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_linphase_bandpass_2k_12dB_px0ndmy0.yud.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1021,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  71,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  476.986,
+                        "Label":  "linphase_bandpass_500_6dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_linphase_bandpass_500_6dB_pvkcl2c1.3su.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1319,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  80,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  483.1,
+                        "Label":  "linphase_bandpass_5k_18dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_linphase_bandpass_5k_18dB_1khooece.vpo.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1022,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  77,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  461.896,
+                        "Label":  "linphase_brickwall_3k_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_linphase_brickwall_3k_12dB_htvbk3a0.exq.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1119,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  77,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  527.338,
+                        "Label":  "linphase_fullband_24dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_linphase_fullband_24dB_5q4sse5g.krs.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1046,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  68,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  500.515,
+                        "Label":  "minphase_bandpass_2k_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_minphase_bandpass_2k_12dB_l1uhuhhq.1il.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  933,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  72,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  503.319,
+                        "Label":  "minphase_bandpass_5k_18dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_minphase_bandpass_5k_18dB_jkylb3kb.smb.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1101,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  69,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  468.884,
+                        "Label":  "minphase_fullband_24dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_minphase_fullband_24dB_tmzsnrix.5kt.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1137,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  78,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  492.423,
+                        "Label":  "minphase_highshelf_8k_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_minphase_highshelf_8k_12dB_pm3nm3zw.1uo.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1163,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  73,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  471.945,
+                        "Label":  "minphase_lowshelf_200_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_minphase_lowshelf_200_12dB_5txtckny.dd5.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1455,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  77,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  549.273,
+                        "Label":  "mixedphase_chamber_4k_6dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_mixedphase_chamber_4k_6dB_2kzdo3uf.4ld.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1285,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  74,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  473.581,
+                        "Label":  "mixedphase_hall_500_18dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_mixedphase_hall_500_18dB_ut1jccan.jit.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  1176,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  73,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  501.603,
+                        "Label":  "mixedphase_plate_8k_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_mixedphase_plate_8k_12dB_vrrxfq30.ekz.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  976,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  76,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  490.237,
+                        "Label":  "mixedphase_room_2k_12dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_mixedphase_room_2k_12dB_j2i5xvpk.1sz.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    },
+                    {
+                        "MaxProcTimeUs":  901,
+                        "ClampCount":  0,
+                        "TotalCallbacks":  76,
+                        "IrLen":  9278,
+                        "RebuildCount":  2,
+                        "BoundValues":  [
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "AvgProcTimeUs":  459.697,
+                        "Label":  "mixedphase_stadium_200_24dB",
+                        "TransferOk":  true,
+                        "LogFile":  "C:\\VSC_Project\\ConvoPeq\\doc\\work77\\benchmark-results\\log_mixedphase_stadium_200_24dB_5tbouxy1.3t0.log",
+                        "PlanOutputMakeupDb":  null,
+                        "PlanInputHeadroomDb":  null
+                    }
+                ]
+}

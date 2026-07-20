@@ -689,7 +689,9 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
 void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
                                                            int generation,
                                                            const convo::RuntimeBuildSnapshot& sealedSnapshot,
-                                                           const convo::BuildAnalysis& buildAnalysis)
+                                                           const convo::BuildAnalysis& buildAnalysis,
+                                                           const convo::OversamplingResult& oversamplingResult,
+                                                           const convo::BuildDiagnostics& buildDiagnostics)
 {
     if (newDSP == nullptr)
         return;
@@ -702,6 +704,8 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.generation = generation;
     req.sealedSnapshot = sealedSnapshot;
     req.buildAnalysis = buildAnalysis;
+    req.oversamplingResult = oversamplingResult;
+    req.buildDiagnostics = buildDiagnostics;
 
     runtimeOrchestrator_->submitPublishRequest(req);
 

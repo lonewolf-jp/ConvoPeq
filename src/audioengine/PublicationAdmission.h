@@ -18,7 +18,9 @@ public:
         DSPHandle newDSP;
         int generation = 0;
         RuntimeBuildSnapshot sealedSnapshot;
-        BuildAnalysis buildAnalysis {};  // ★ v14.0: Auto Gain 解析値
+        BuildAnalysis buildAnalysis {};           // ★ v14.0: Auto Gain 解析値
+        OversamplingResult oversamplingResult {}; // ★ v14.38
+        BuildDiagnostics buildDiagnostics {};     // ★ v14.37
     };
 
     // ★ P1-6: Pressure レベル (Adaptive Backpressure)

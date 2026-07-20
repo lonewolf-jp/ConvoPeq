@@ -63,14 +63,25 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     //       setInputHeadroomDb 等の内部で呼ばれる applyDefaults を抑制し続ける。
     //       (旧実装では 4059 行目で false に戻していたが、B19 では安全のため全域カバー)
 
-    if (state.hasProperty("inputHeadroomDb"))
-        setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
+    // ★ Bug#3: Auto Gain 有効時は手動ゲイン値の復元をスキップ
+    //   （RuntimeBuilder が Rebuild 時に Auto Gain を再計算する）
+    //   ★ v14.41: 旧 Preset（autoGainStagingEnabled プロパティなし）との互換性:
+    //     プロパティが存在しない場合、強制的に手動ゲインを復元する（デフォルト Auto OFF 扱い）。
+    const bool autoGainEnabled = state.hasProperty("autoGainStagingEnabled")
+        ? static_cast<bool>(state.getProperty("autoGainStagingEnabled"))
+        : false;  // 旧 Preset: Auto Gain 無効として手動ゲインを復元
 
-    if (state.hasProperty("outputMakeupDb"))
-        setOutputMakeupDb(state.getProperty("outputMakeupDb"));
+    if (!autoGainEnabled)
+    {
+        if (state.hasProperty("inputHeadroomDb"))
+            setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
 
-    if (state.hasProperty("convolverInputTrimDb"))
-        setConvolverInputTrimDb(state.getProperty("convolverInputTrimDb"));
+        if (state.hasProperty("outputMakeupDb"))
+            setOutputMakeupDb(state.getProperty("outputMakeupDb"));
+
+        if (state.hasProperty("convolverInputTrimDb"))
+            setConvolverInputTrimDb(state.getProperty("convolverInputTrimDb"));
+    }
 
     if (state.hasProperty("ditherBitDepth"))
         setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
@@ -171,6 +182,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     state.setProperty("outputMakeupDb", convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire), nullptr);
     state.setProperty("analyzerSource", (int)convo::consumeAtomic(currentAnalyzerSource, std::memory_order_acquire), nullptr);
     state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire), nullptr);
+    state.setProperty("autoGainStagingEnabled", convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire), nullptr);
     state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire), nullptr);
     state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType, std::memory_order_acquire), nullptr);
     // oversamplingFactor/oversamplingType はデバイス設定のためプリセットに保存しない

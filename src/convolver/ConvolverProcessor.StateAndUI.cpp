@@ -396,7 +396,7 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     if (const IRState* otherState = other.acquireIRState())
     {
         if (otherState->irOwner)
-            updateIRState(otherState->irOwner, otherState->sampleRate);
+            updateIRState(otherState->irOwner, otherState->sampleRate, otherState->additionalAttenuationDb, otherState->irFreqPeakGainDb);
         releaseIRState(otherState);
     }
     {

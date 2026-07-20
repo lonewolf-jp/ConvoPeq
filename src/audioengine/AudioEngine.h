@@ -338,7 +338,8 @@ enum class DiagCategory : uint8_t {
     StereoConvTime = 7,   // STCONV_TIME
     CallbackArrival = 8,  // CB_ARRIVAL（work61: callback到着時刻）
     AnsSwitchTime = 9,    // ANS_SWITCH（work65: adaptive noise shaper bank switch）
-    Count                 // カテゴリ総数（センチネル、10）
+    AutoGainClamped = 10, // AUTO_GAIN_CLAMPED（v14: Auto Gain makeup clamp 発生）
+    Count                 // カテゴリ総数（センチネル、11）
 };
 
 // カテゴリ固有データ構造（POD, trivially copyable）
@@ -416,6 +417,15 @@ struct AnsSwitchData {
     uint64_t elapsedUs;       // バンク切替に要した時間 (μs)
 };
 
+// ★ v14.0: AutoGainClamped — Auto Gain の makeup クランプ発生時
+struct AutoGainClampedData {
+    float eqBoostDb;        // EQ 最大ブースト [dB]
+    float convBoostDb;      // IR 周波数ピークゲイン [dB]
+    float qMarginDb;        // 経験的安全マージン [dB]
+    float rawMakeupDb;      // クランプ前の makeup [dB]
+    float clampedMakeupDb;  // クランプ後の makeup [dB]
+};
+
 // ★ work61: CallbackArrival — callback到着時刻記録（20byte）
 struct CallbackArrivalData {
     uint64_t timestampUs;     // callback entry 時刻（getCurrentTimeUs）
@@ -441,6 +451,7 @@ struct DiagEvent {
         StereoConvTimeData stereoConvTime;
         CallbackArrivalData callbackArrival; // ★ work61
         AnsSwitchData ansSwitchTime;          // ★ [work65] ANS_SWITCH
+        AutoGainClampedData autoGainClamped;  // ★ v14.0: Auto Gain clamp
     } data;
 };
 
@@ -457,6 +468,7 @@ static_assert(alignof(DiagEvent) == alignof(uint64_t),
 static_assert(offsetof(DiagEvent, data) % alignof(uint64_t) == 0,
     "DiagEvent.data must be uint64_t-aligned for efficient union access");
 // ★ [work62] sizeof(DiagEvent) == 88 確定（static_assert で常時検証済み）
+// ★ v14.0: AutoGainClampedData 追加後も 88 byte 以内（5 floats = 20 byte、union 内に収まる）
 static constexpr size_t kDiagEventSizeMax = 88;
 static_assert(sizeof(DiagEvent) == kDiagEventSizeMax, "DiagEvent layout changed; review struct members");
 
@@ -1272,6 +1284,10 @@ public:
         if (current == enabled)
             return;
         convo::publishAtomic(autoGainStagingEnabled, enabled, std::memory_order_release);
+        // ★ Bug#4: Auto Gain 有効時は EQ AGC を無効化（二重ゲイン補正防止）
+        //   Engine → UI の直接依存を避けるため、パラメータ atomic を介して
+        //   Listener 経由で UI が自動反映される設計とする。
+        getEQProcessor().setAGCEnabled(!enabled);
         // ★ BUG-10: Auto OFF 時も rebuild が必要。ON/OFF 切り替えで ProcessingPart の
         //   手動値と AutoGainPlanner 計算値の選択が変わるため。
         submitRebuildIntent(convo::RebuildKind::Structural,
@@ -2323,7 +2339,7 @@ public:
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
-    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {});
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {});
     // acquire: requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
@@ -2439,7 +2455,9 @@ public:
         convo::BuildInput buildInput {};
         ConvolverProcessor::BuildSnapshot convolverBuildSnapshot {};
         convo::RuntimeBuildSnapshot runtimeBuildSnapshot {};
-        convo::BuildAnalysis buildAnalysis {};  // ★ v14.0
+        convo::BuildAnalysis buildAnalysis {};       // ★ v14.0
+        convo::OversamplingResult oversamplingResult {}; // ★ v14.38
+        convo::BuildDiagnostics buildDiagnostics {};     // ★ v14.37
         int generation = 0;
     };
     RebuildTask pendingTask;

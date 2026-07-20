@@ -65,6 +65,9 @@ CLAUDE.md
 doc/BIGDATA/
 .browser4-cli/
 .browser4-cli/snapshot/
+sampledata/real_irs/
+sampledata/synthetic/
+.commandcode
 
 # Coverage reports
 coverage/

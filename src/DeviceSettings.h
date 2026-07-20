@@ -53,6 +53,7 @@ private:
     void showAdaptiveLearningWindow();
     void showAdaptiveLearningWindowImpl();
     void updateNoiseShaperControls();
+    void rebuildOversamplingComboBox();  // ★ v14.28: OS ComboBox SR変更時再構築
 
     juce::AudioDeviceManager& audioDeviceManager;
     AudioEngine& audioEngine;

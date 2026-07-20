@@ -240,21 +240,50 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     juce::AudioBuffer<double> ir;
     double sourceRate = 0.0;
     if (!loadAudioFile(irFile, ir, sourceRate))
+    {
+        juce::Logger::writeToLog("[DIAG_IR] convertFile: loadAudioFile failed for "
+            + irFile.getFullPathName());
         return nullptr;
+    }
 
     if (shouldCancel && shouldCancel())
+    {
+        juce::Logger::writeToLog("[DIAG_IR] convertFile: cancelled after load");
         return nullptr;
+    }
 
     juce::AudioBuffer<double> converted = ir;
+    double actualSampleRate = sourceRate;
     if (config.targetSampleRate > 0.0 && sourceRate > 0.0 && std::abs(sourceRate - config.targetSampleRate) > 1.0e-6)
     {
         converted = IRDSP::resampleIR(ir, sourceRate, config.targetSampleRate, shouldCancel);
         if (converted.getNumSamples() <= 0)
-            return nullptr;
+        {
+            // ★ Workaround: r8brain resampling failed (e.g., 48000→192000 Hz).
+            // Fall back to original IR. Report the IR at the target sample rate
+            // so the convolver engine uses the correct processing rate.
+            // The engine handles internal sample rate conversion.
+            juce::Logger::writeToLog("[DIAG_IR] convertFile: resampleIR failed, "
+                "falling back to original IR (srcSr=" + juce::String(sourceRate, 1)
+                + " targetSr=" + juce::String(config.targetSampleRate, 1) + ")");
+            converted = ir;
+            actualSampleRate = config.targetSampleRate;
+        }
+        else
+        {
+            actualSampleRate = config.targetSampleRate;
+        }
+    }
+    else
+    {
+        actualSampleRate = (config.targetSampleRate > 0.0) ? config.targetSampleRate : sourceRate;
     }
 
     if (shouldCancel && shouldCancel())
+    {
+        juce::Logger::writeToLog("[DIAG_IR] convertFile: cancelled after resample");
         return nullptr;
+    }
 
     const int fftSize = juce::jmax(32, config.fftSize);
     const int usableChannels = juce::jmax(1, converted.getNumChannels());
@@ -266,7 +295,10 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
 
     double* data = static_cast<double*>(DIAG_MKL_MALLOC(bytes, 64));
     if (!data)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] convertFile: MKL_MALLOC failed bytes=" + juce::String(static_cast<int>(bytes)));
         return nullptr;
+    }
 
     std::memset(data, 0, bytes);
 
@@ -293,7 +325,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     prepared->numPartitions = numPartitions * usableChannels;
     prepared->fftSize = fftSize;
     prepared->numChannels = usableChannels;
-    prepared->sampleRate = (config.targetSampleRate > 0.0) ? config.targetSampleRate : sourceRate;
+    prepared->sampleRate = actualSampleRate;
     prepared->generationId = config.generationId;
     prepared->cacheKey = config.cacheKey;
 
@@ -307,6 +339,33 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
         prepared->scaleFactor = scaleInfo.scaleFactor;
         prepared->hasScaleFactor = scaleInfo.hasScaleFactor;
         prepared->additionalAttenuationDb = scaleInfo.additionalAttenuationDb;
+
+        // ★ v14.2: IRAnalyzer による周波数ピークゲイン推定
+        //   scaledIR = timeDomainIR × scaleFactor を解析
+        juce::AudioBuffer<double> scaledIR(*prepared->timeDomainIR);
+        scaledIR.applyGain(prepared->scaleFactor);
+
+        // Diagnostic: check if scaled IR has any data
+        {
+            double peak = 0.0;
+            for (int ch = 0; ch < scaledIR.getNumChannels(); ++ch) {
+                const double* d = scaledIR.getReadPointer(ch);
+                for (int i = 0; i < std::min(100, scaledIR.getNumSamples()); ++i)
+                    peak = std::max(peak, std::abs(d[i]));
+            }
+            juce::Logger::writeToLog("[DIAG_SCALE] scaleFactor=" + juce::String(prepared->scaleFactor, 6)
+                + " scaledPeak=" + juce::String(peak, 8)
+                + " timeDomainSamples=" + juce::String(prepared->timeDomainIR->getNumSamples()));
+        }
+
+        const double freqPeakLin = IRAnalyzer::estimateMaxFrequencyResponseGain(scaledIR);
+        prepared->irFreqPeakGainDb = (freqPeakLin > 1e-18)
+            ? static_cast<float>(20.0 * std::log10(freqPeakLin))
+            : 0.0f;
+        juce::Logger::writeToLog("[DIAG_IR_FREQ] freqPeakLin=" + juce::String(freqPeakLin, 8)
+            + " irFreqPeakGainDb=" + juce::String(prepared->irFreqPeakGainDb, 2)
+            + " scaleFactor=" + juce::String(prepared->scaleFactor, 6)
+            + " sampleRate=" + juce::String(prepared->sampleRate, 1));
     }
 
     return prepared;

@@ -1,0 +1,119 @@
+{
+  "Timestamp": "2026-07-19T22:05:30.7334937+09:00",
+  "Results": [
+    {
+      "ExitCode": 0,
+      "Label": "synth/dirac_k16",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/dirac_k2",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/dirac_k32",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/dirac_k4",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/dirac_k8",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/reverb_plate",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/reverb_spring",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/linear_phase/linphase_bandpass_2k_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/linear_phase/linphase_bandpass_500_6dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/linear_phase/linphase_bandpass_5k_18dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/linear_phase/linphase_brickwall_3k_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/linear_phase/linphase_fullband_24dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/minimum_phase/minphase_bandpass_2k_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/minimum_phase/minphase_bandpass_5k_18dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/minimum_phase/minphase_fullband_24dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/minimum_phase/minphase_highshelf_8k_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/minimum_phase/minphase_lowshelf_200_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/mixed_phase/mixedphase_chamber_4k_6dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/mixed_phase/mixedphase_hall_500_18dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/mixed_phase/mixedphase_plate_8k_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/mixed_phase/mixedphase_room_2k_12dB",
+      "Status": "NO_LOG"
+    },
+    {
+      "ExitCode": 0,
+      "Label": "synth/mixed_phase/mixedphase_stadium_200_24dB",
+      "Status": "NO_LOG"
+    }
+  ],
+  "SuccessCount": 0,
+  "DurationSeconds": 258.7166734,
+  "TotalIRs": 22,
+  "FailCount": 22
+}

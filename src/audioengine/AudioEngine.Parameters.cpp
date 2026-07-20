@@ -297,6 +297,10 @@ void AudioEngine::applyDefaultsForCurrentMode()
 {
     if (m_isRestoringState) return; // プリセットロード中はデフォルトリセットを抑制する
 
+    // ★ Bug#1: Auto Gain 有効時はデフォルト値による上書きを防止
+    if (convo::consumeAtomic(autoGainStagingEnabled, std::memory_order_acquire))
+        return;
+
     const bool eqBypassed  = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
     const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
     const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);

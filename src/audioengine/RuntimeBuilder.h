@@ -50,9 +50,13 @@ struct RuntimePublishSpecification {
     } processing;
 
     // ★ v14.0: AnalysisPart — DSP 解析値（BuildAnalysis からコピー）
+    //   ★ v14.37: eqMaxQ, irFreqPeakGainDb 追加。analysisVersion は Diagnostics からコピー。
     struct AnalysisPart {
         float eqMaxGainDb = 0.0f;
-        float additionalAttenuationDb = 0.0f;
+        float eqMaxQ = 0.0f;               // ★ v14.35: ブースト対象バンド中の最大Q値
+        float irFreqPeakGainDb = 0.0f;     // ★ v14.2: IR 周波数ピークゲイン
+        float additionalAttenuationDb = 0.0f; // 互換性維持
+        uint8_t analysisVersion = 2;        // ★ v14.24: BuildDiagnostics.analysisVersion からコピー
     } analysis;
 
     // ★ v9.5 P1: PublicationSnapshotPart — Publication 履歴情報のスナップショット。

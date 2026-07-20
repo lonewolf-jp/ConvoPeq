@@ -46,16 +46,16 @@ ConvoPeq is organized around four priorities:
 
 ---
 
-## 3. Source Directory Structure (`src/` — 246 files, ~2.78 MB)
+## 3. Source Directory Structure (`src/` — 277 files, ~3.17 MB)
 
 ```
 src/
-├── [77 root files]          — Top-level DSP + UI + Framework adapters
-├── audioengine/ (101 files) — ISR Runtime Governance + Orchestration + State Management
+├── [81 root files]          — Top-level DSP + UI + Framework adapters
+├── audioengine/ (107 files) — ISR Runtime Governance + Orchestration + State Management
 ├── core/         (37 files) — RCU Foundation: EpochDomain, SnapshotCoordinator, Store
 ├── convolver/    (10 files) — Convolver Split (8 TU) + Internal Helpers
 ├── eqprocessor/   ( 6 files) — EQ Split (5 TU) + EQProcessor.h
-└── tests/        (15 files) — CTest Regression Suite
+└── tests/        (21 files) — CTest Regression Suite
 ```
 
 ### 3.1 `src/` Root — Core DSP / UI / Entry Points
@@ -84,7 +84,7 @@ src/
 | `EQEditProcessor.{h,cpp}` | 4.2 KB | UI/worker-side EQ editing interface. |
 | `ConvolverState.{h,cpp}` / `IRConverter.{h,cpp}` / `IRDSP.{h,cpp}` | — | Convolver state serialization, IR normalization/preprocessing. |
 
-### 3.2 `src/audioengine/` — ISR Runtime Governance (101 files, ~1.19 MB)
+### 3.2 `src/audioengine/` — ISR Runtime Governance (107 files, ~1.27 MB)
 
 The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,600+ lines (207 KB).
 
@@ -221,7 +221,7 @@ Cross-cutting foundation delivered in phases (v13.0 redesign):
 | `CommandBuffer.h` | Non-blocking command dispatch. |
 | `FadeEngine.h` | Fade computation engine. |
 
-### 3.6 `src/tests/` — CTest Regression (15 files, ~153 KB)
+### 3.6 `src/tests/` — CTest Regression (21 files, ~315 KB)
 
 All tests registered via `add_test()` in CMakeLists.txt. Many are JUCE-independent.
 
@@ -664,7 +664,7 @@ Crossfade runtime state: `CrossfadeRuntime` tracks `LinearRamp` gain (exponentia
 | Option | Default | Description |
 |---|---|---|
 | `CONVOPEQ_ENABLE_CLANG_TIDY` | OFF | Build-time clang-tidy analysis |
-| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | CTest regression suite (15 tests) |
+| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | CTest regression suite (21 tests) |
 | `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` | OFF | Runtime diagnostic logging (XRUN/MEM/VERIFY) |
 | `ENABLE_ASAN` | OFF | AddressSanitizer (Debug only, forces /MDd) |
 | `CONVOPEQ_PGO_INSTRUMENT` | OFF | PGO instrumentation |

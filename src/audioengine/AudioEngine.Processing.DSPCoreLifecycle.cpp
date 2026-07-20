@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
+#include "OversamplingPolicy.h"
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 namespace {
@@ -110,23 +111,15 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     juce::Logger::writeToLog("[DSPCORE_PREPARE] sampleRate set: sr=" + juce::String(newSampleRate) + " spb=" + juce::String(samplesPerBlock));
 #endif
 
+    // ★ v14.30: OversamplingPolicy::resolve() を唯一の Authority として使用
     int targetFactor = 1;
-    if (manualOversamplingFactor > 0)
-        targetFactor = manualOversamplingFactor;
-    else
     {
-        if (newSampleRate >= 705600)      targetFactor = 1;
-        else if (newSampleRate >= 352800) targetFactor = 2;
-        else if (newSampleRate >= 176400) targetFactor = 4;
-        else if (newSampleRate >= 88200)  targetFactor = 8;
-        else                              targetFactor = 8;
+        convo::BuildInput osBuildInput{};
+        osBuildInput.sampleRate = newSampleRate;
+        osBuildInput.oversamplingFactor = manualOversamplingFactor;
+        const auto osResult = convo::OversamplingPolicy::resolve(osBuildInput);
+        targetFactor = osResult.supported ? osResult.resolvedOsFactor : 0;
     }
-
-    int maxFactor = 1;
-    if (newSampleRate <= 96000.0)       maxFactor = 8;
-    else if (newSampleRate <= 192000.0) maxFactor = 4;
-    else if (newSampleRate <= 384000.0) maxFactor = 2;
-    targetFactor = std::min(targetFactor, maxFactor);
 
     size_t factorLog2 = 0;
     if (targetFactor >= 8)      factorLog2 = 3;

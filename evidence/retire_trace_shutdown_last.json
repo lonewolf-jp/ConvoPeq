@@ -4,19 +4,21 @@
   "slots": [
     { "slot": 1, "lane": "reclaim", "lifecycle": "reclaimed" },
     { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 3, "lane": "reclaim", "lifecycle": "reclaimed" }
+    { "slot": 3, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 4, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 5, "lane": "reclaim", "lifecycle": "reclaimed" }
   ],
   "counts": {
-    "laneRTIntent": 3,
-    "laneCoordination": 3,
-    "laneEpoch": 3,
-    "laneReclaim": 3,
+    "laneRTIntent": 5,
+    "laneCoordination": 5,
+    "laneEpoch": 5,
+    "laneReclaim": 5,
     "laneQuarantine": 0,
     "lifecycleVisible": 0,
-    "lifecycleCompareEligible": 3,
-    "lifecycleTelemetryRetained": 3,
+    "lifecycleCompareEligible": 5,
+    "lifecycleTelemetryRetained": 5,
     "lifecycleReplayRetainedOptional": 0,
-    "lifecycleReclaimEligible": 3,
-    "lifecycleReclaimed": 3
+    "lifecycleReclaimEligible": 5,
+    "lifecycleReclaimed": 5
   }
 }

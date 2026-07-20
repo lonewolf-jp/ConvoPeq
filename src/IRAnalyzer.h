@@ -15,6 +15,15 @@
 */
 namespace IRAnalyzer
 {
+    // ★ v14.2: IRFinalAnalysis — IR 解析の最終結果
+    struct IRFinalAnalysis {
+        double freqPeakGainLin = 1.0;
+        double freqPeakGainDb  = 0.0;
+        double l1NormDb         = 0.0;
+        double peakDb           = 0.0;
+        double rmsDb            = 0.0;
+    };
+
     // ★ kMaxAnalysisWindow = 65536 上限。
     //   IR長がこれを超える場合、最初の kMaxAnalysisWindow sample のみ解析対象。
     //   将来 192kHz/384kHz 対応時は Policy 化を検討。

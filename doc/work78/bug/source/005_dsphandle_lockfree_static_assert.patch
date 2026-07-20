@@ -1,0 +1,17 @@
+--- a/src/audioengine/ISRDSPHandle.h
++++ b/src/audioengine/ISRDSPHandle.h
+@@ -158,8 +158,13 @@
+     void emitOwnershipTrace(const std::filesystem::path& outputPath) const;
+ 
+ private:
+     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
+     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
++    // ★ FIX: DSPRegistrySlot::generation の static_assert(is_always_lock_free) と
++    //   同様の検証が DSPHandle（16byte: uint32_t+padding+uint64_t）には無かった。
++    //   16byteアトミックはCMPXCHG16Bに依存するため、規約上のAVX2必須要件下では
++    //   実質問題ないはずだが、コンパイル時に明示検証し将来の環境変更を検知する。
++    static_assert(std::atomic<DSPHandle>::is_always_lock_free,
++        "atomic<DSPHandle> must be lock-free on x64/AVX2 target for ISR Runtime (RT thread reads activeRuntimeDSPHandle_)");
+ 
+     std::vector<CrossfadeRecord> crossfadeRecords_;

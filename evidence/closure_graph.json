@@ -1,12 +1,12 @@
 {
   "schema": "closure_graph_v1",
   "buildMode": "CI",
-  "timestamp_ns": 37503929510900,
+  "timestamp_ns": 1164439011400,
   "status": "valid",
-  "closureId": 8,
+  "closureId": 6,
   "nodeCount": 1,
   "edgeCount": 0,
   "descriptorCoverageComplete": true,
   "externalMutableDependencies": 0,
   "validationErrors": []
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":37504931889300}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":1165000082500}

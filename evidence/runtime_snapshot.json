@@ -1,7 +1,7 @@
 {
   "artifact": "runtime_snapshot.json",
   "buildMode": "CI",
-  "generatedAtNs": 37565771067200,
+  "generatedAtNs": 1170905944100,
   "summary": {
     "runtime": "minimal operational state",
     "retire": "summary only",

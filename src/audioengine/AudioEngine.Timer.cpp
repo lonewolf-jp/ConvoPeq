@@ -201,6 +201,13 @@ static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
         case DiagCategory::AnsSwitchTime:
             return diagPrefix(gen) + " [ANS_SWITCH] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
                 + " us=" + juce::String(static_cast<juce::int64>(event.data.ansSwitchTime.elapsedUs));
+        case DiagCategory::AutoGainClamped:
+            return diagPrefix(gen) + " [AUTO_GAIN_CLAMPED] cbIdx=" + juce::String(static_cast<juce::int64>(event.eventIndex))
+                + " eqBoost=" + juce::String(event.data.autoGainClamped.eqBoostDb, 1) + "dB"
+                + " convBoost=" + juce::String(event.data.autoGainClamped.convBoostDb, 1) + "dB"
+                + " qMargin=" + juce::String(event.data.autoGainClamped.qMarginDb, 2) + "dB"
+                + " rawMakeup=" + juce::String(event.data.autoGainClamped.rawMakeupDb, 1) + "dB"
+                + " clamped=" + juce::String(event.data.autoGainClamped.clampedMakeupDb, 1) + "dB";
         default:
             return diagPrefix(gen) + " [UNKNOWN] category=" + juce::String(static_cast<int>(event.category));
     }
@@ -210,7 +217,7 @@ static juce::String formatDiagEvent(const DiagEvent& event, uint64_t gen) {
 // formatDiagEvent が全カテゴリを網羅していることをコンパイル時検証
 // Count センチネルにより、末尾以外へのカテゴリ追加も検出可能
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-static_assert(static_cast<int>(DiagCategory::Count) == 10,
+static_assert(static_cast<int>(DiagCategory::Count) == 11,
     "DiagCategory enum changed: update formatDiagEvent() switch accordingly");
 #endif
 

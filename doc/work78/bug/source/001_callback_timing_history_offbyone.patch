@@ -1,0 +1,22 @@
+--- a/src/audioengine/AudioEngine.Processing.AudioBlock.cpp
++++ b/src/audioengine/AudioEngine.Processing.AudioBlock.cpp
+@@ -717,7 +717,7 @@
+             rtLocalState_.callbackTimingWriteCount,
+             uint64_t{1}, std::memory_order_relaxed);
+         const size_t idx = static_cast<size_t>(
+-            (wc - 1) % RTLocalState::kCallbackTimingSlots);
++            wc % RTLocalState::kCallbackTimingSlots);
+         auto& entry = rtLocalState_.callbackTimingHistory[idx];
+         entry.callbackIndex = thisCallbackIndex;
+         entry.processTimeUs = processTime;
+--- a/src/audioengine/AudioEngine.Processing.BlockDouble.cpp
++++ b/src/audioengine/AudioEngine.Processing.BlockDouble.cpp
+@@ -672,7 +672,7 @@
+             rtLocalState_.callbackTimingWriteCount,
+             uint64_t{1}, std::memory_order_relaxed);
+         const size_t idx = static_cast<size_t>(
+-            (wc - 1) % RTLocalState::kCallbackTimingSlots);
++            wc % RTLocalState::kCallbackTimingSlots);
+         auto& entry = rtLocalState_.callbackTimingHistory[idx];
+         entry.callbackIndex = thisCallbackIndex;
+         entry.processTimeUs = processTime;

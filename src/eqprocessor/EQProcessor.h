@@ -108,6 +108,7 @@ struct EQCoeffsBiquad
 #include "RefCountedDeferred.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "audioengine/RuntimeBuildTypes.h"
 
 //--------------------------------------------------------------
 // EQCoeffCache: 係数キャッシュ（RefCounted資源）
@@ -390,8 +391,40 @@ public:
 
     static EQCoeffsBiquad svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept;
 
-    // ★ v14.0: 推定最大ゲイン計算（Parallel 時は Serial 積近似）
-    [[nodiscard]] float computeEstimatedMaxGainDb(double sampleRate, int processingOrder) const;
+    //==============================================================================
+    // ★ v14.35: SampleOrigin — 評価点の origin（粗探索/適応サンプリングの区別）。デバッグ用
+    //==============================================================================
+    struct SampleOrigin {
+        enum Type : uint8_t { Unknown = 0, Coarse = 1, Adaptive = 2, Union = 3 };
+        Type type = Unknown;
+        int bandIndex = -1;        // ★ v14.39: バンドインデックス。Union 型の場合は -1
+        int sampleIndex = -1;      // ★ v14.42: 配列内インデックス（Coarse=0..599, Adaptive/Union=0..N-1）
+    };
+
+    //==============================================================================
+    // ★ v14.7: PeakInfo — ピーク情報（ゲイン、周波数、origin）
+    //==============================================================================
+    struct PeakInfo {
+        float gainDb = 0.0f;      // ゲイン（dB）
+        float freqHz = 0.0f;      // 当該ゲインが現れる周波数
+        SampleOrigin origin;       // 評価点の origin
+    };
+
+    //==============================================================================
+    // ★ v14.7: EQAnalysisResult — EQ 最大ゲイン推定の戻り値（二層構造）
+    //==============================================================================
+    struct EQAnalysisResult {
+        PeakInfo measured;               // 実測最大ピーク（粗探索＋放物線補間の最大値）
+        float measuredRawGainDb = 0.0f;  // ★ v14.47: 放物線補間前の measured 生値（dB）
+        PeakInfo upperBound;             // 安全側上界の最大値（Π(1+|Hi-1|) の dB 値）
+        float maxActiveQ = 0.0f;         // ブースト対象バンド（isBoosting()==true）中の最大Q値
+        convo::EqGainAlgorithm algorithm = convo::EqGainAlgorithm::TriangleProductV1;
+    };
+
+    // ★ v14.30: 複素応答を使用した推定最大ゲイン計算（旧 computeEstimatedMaxGainDb を置換）
+    //   processingRate = sr * resolvedOsFactor（呼出し側（Builder）の責務）
+    [[nodiscard]] EQAnalysisResult computeEstimatedMaxGainComplex(
+        const EQState& state, double processingRate) const;
 
     // Retire authority: set coordinator for unified retire path
     void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept

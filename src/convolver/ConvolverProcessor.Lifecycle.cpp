@@ -27,7 +27,7 @@ void ConvolverProcessor::releaseIRState(const IRState* /*state*/) const noexcept
     // IRState lifetime is managed by deferred retirement.
 }
 
-void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb)
+void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb, float irFreqPeakGainDb)
 {
     auto uniqueIR = std::make_unique<juce::AudioBuffer<double>>(newIR);
 
@@ -36,6 +36,7 @@ void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, d
     newState->ir = newState->irOwner.get();
     newState->sampleRate = newSR;
     newState->additionalAttenuationDb = additionalAttenuationDb;
+    newState->irFreqPeakGainDb = irFreqPeakGainDb;
     if (auto* provider = getRcuProvider(); provider != nullptr)
         newState->generation = provider->snapshotRcuEpoch();
     else

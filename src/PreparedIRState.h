@@ -22,6 +22,7 @@ struct PreparedIRState
     double scaleFactor = 1.0;
     bool hasScaleFactor = false;
     float additionalAttenuationDb = 0.0f;  // ★ v14.0: IRConverter clamp による追加減衰量 [dB]
+    float irFreqPeakGainDb = 0.0f;         // ★ v14.2: IRAnalyzer による周波数ピークゲイン [dB]
 
     PreparedIRState() = default;
 
@@ -38,13 +39,15 @@ struct PreparedIRState
                     timeDomainIR(std::move(other.timeDomainIR)),
                     scaleFactor(other.scaleFactor),
                     hasScaleFactor(other.hasScaleFactor),
-                    additionalAttenuationDb(other.additionalAttenuationDb)
+                    additionalAttenuationDb(other.additionalAttenuationDb),
+                    irFreqPeakGainDb(other.irFreqPeakGainDb)
     {
         other.partitionData = nullptr;
         other.partitionSizeBytes = 0;
                 other.scaleFactor = 1.0;
                 other.hasScaleFactor = false;
                 other.additionalAttenuationDb = 0.0f;
+                other.irFreqPeakGainDb = 0.0f;
     }
 
     PreparedIRState& operator=(PreparedIRState&& other) noexcept
@@ -67,12 +70,14 @@ struct PreparedIRState
             scaleFactor = other.scaleFactor;
             hasScaleFactor = other.hasScaleFactor;
             additionalAttenuationDb = other.additionalAttenuationDb;
+            irFreqPeakGainDb = other.irFreqPeakGainDb;
 
             other.partitionData = nullptr;
             other.partitionSizeBytes = 0;
             other.scaleFactor = 1.0;
             other.hasScaleFactor = false;
             other.additionalAttenuationDb = 0.0f;
+            other.irFreqPeakGainDb = 0.0f;
         }
 
         return *this;

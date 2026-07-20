@@ -316,15 +316,22 @@ RuntimeBuilder::buildRuntimePublishWorld(
         worldOwner->automation.convolverInputTrimGain = spec.processing.convolverInputTrimGain;
 
         // ★ v14.0: Auto Gain Staging — AutoGainPlanner でゲイン上書き（単一代入）
+        // ★ v14.14: PlannerInput DTO を使用（ISR 思想: Planner は解析アルゴリズムを知らない）
         if (spec.processing.autoGainStagingEnabled)
         {
+            const PlannerInput plannerInput{
+                spec.analysis.eqMaxGainDb,
+                spec.analysis.eqMaxQ,
+                spec.analysis.irFreqPeakGainDb
+            };
+            PlanDiagnostics planDiag{};
             const auto plan = AutoGainPlanner::plan(
                 true,
                 static_cast<convo::ProcessingOrder>(spec.processing.processingOrder),
                 spec.processing.eqBypassed,
                 spec.processing.convBypassed,
-                spec.analysis.eqMaxGainDb,
-                spec.analysis.additionalAttenuationDb);
+                plannerInput,
+                &planDiag);
 
             // dB → 線形変換（Builder の責務）
             worldOwner->automation.inputHeadroomGain =
@@ -333,6 +340,26 @@ RuntimeBuilder::buildRuntimePublishWorld(
                 juce::Decibels::decibelsToGain(static_cast<double>(plan.outputMakeupDb));
             worldOwner->automation.convolverInputTrimGain =
                 juce::Decibels::decibelsToGain(static_cast<double>(plan.convolverInputTrimDb));
+
+            // Log PlanDiagnostics for measurement (v14.47)
+            juce::Logger::writeToLog("[AUTO_GAIN_PLAN] eqMaxGainDb=" + juce::String(spec.analysis.eqMaxGainDb, 2)
+                + " eqMaxQ=" + juce::String(spec.analysis.eqMaxQ, 4)
+                + " irFreqPeakGainDb=" + juce::String(spec.analysis.irFreqPeakGainDb, 2)
+                + " qMargin=" + juce::String(planDiag.qMargin, 2)
+                + " eqBoost=" + juce::String(planDiag.eqBoost, 1)
+                + " convBoost=" + juce::String(planDiag.convBoost, 1)
+                + " inputHeadroomDb=" + juce::String(plan.inputHeadroomDb, 2)
+                + " outputMakeupDb=" + juce::String(plan.outputMakeupDb, 2)
+                + " convolverInputTrimDb=" + juce::String(plan.convolverInputTrimDb, 2)
+                + " clamped=" + (planDiag.clamped ? "yes" : "no"));
+
+            if (planDiag.clamped)
+            {
+                juce::Logger::writeToLog(juce::String("[AUTO_GAIN_CLAMP] inputClamped=")
+                    + (planDiag.inputClamped ? "yes" : "no")
+                    + " trimClamped=" + juce::String(planDiag.trimClamped ? "yes" : "no")
+                    + " makeupClamped=" + juce::String(planDiag.makeupClamped ? "yes" : "no"));
+            }
         }
 
         // ★ Resource/Timing は current DSPCore から取得（Specification の将来拡張対象）

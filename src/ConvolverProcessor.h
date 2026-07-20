@@ -1023,6 +1023,7 @@ private:
         double sampleRate = 0.0;
         uint64_t generation = 0;
         float additionalAttenuationDb = 0.0f;  // ★ v14.0: IRAnalyzer による追加減衰量 [dB]
+        float irFreqPeakGainDb = 0.0f;         // ★ v14.2: IRAnalyzer による周波数ピークゲイン [dB]
     };
     std::atomic<IRState*> currentIRState { nullptr };
     std::optional<std::reference_wrapper<AudioEngine>> rcuProvider;
@@ -1032,11 +1033,11 @@ private:
 
     [[nodiscard]] const IRState* acquireIRState() const noexcept;
     void releaseIRState(const IRState* state) const noexcept;
-    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb = 0.0f);
-    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR, float additionalAttenuationDb = 0.0f)
+    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb = 0.0f, float irFreqPeakGainDb = 0.0f);
+    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR, float additionalAttenuationDb = 0.0f, float irFreqPeakGainDb = 0.0f)
     {
         if (newIR)
-            updateIRState(*newIR, newSR, additionalAttenuationDb);
+            updateIRState(*newIR, newSR, additionalAttenuationDb, irFreqPeakGainDb);
     }
 
     // ★ v14.0: IRState から追加減衰量を読み取り
@@ -1045,6 +1046,13 @@ public:
     {
         auto* state = acquireIRState();
         return (state != nullptr) ? state->additionalAttenuationDb : 0.0f;
+    }
+
+    // ★ v14.2: IRState から周波数ピークゲインを読み取り
+    [[nodiscard]] float getIrFreqPeakGainDb() const noexcept
+    {
+        auto* state = acquireIRState();
+        return (state != nullptr) ? state->irFreqPeakGainDb : 0.0f;
     }
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
@@ -1058,7 +1066,7 @@ public: // Added for AudioEngine access
         {
             const int channels = srcState->ir->getNumChannels();
             const int length   = srcState->ir->getNumSamples();
-            updateIRState(*srcState->ir, srcState->sampleRate, srcState->additionalAttenuationDb);
+            updateIRState(*srcState->ir, srcState->sampleRate, srcState->additionalAttenuationDb, srcState->irFreqPeakGainDb);
             juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: IR transferred ch="
                 + juce::String(channels) + " len=" + juce::String(length)
                 + " sr=" + juce::String(srcState->sampleRate, 1));

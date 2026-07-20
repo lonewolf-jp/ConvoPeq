@@ -1,0 +1,314 @@
+﻿{
+    "Timestamp":  "2026-07-20T00:27:37.2202257+09:00",
+    "TotalIRs":  22,
+    "Results":  [
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "dirac_k16",
+                        "PlanClamped":  "yes",
+                        "IrLen":  1024,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "dirac_k2",
+                        "PlanClamped":  "yes",
+                        "IrLen":  1024,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "dirac_k32",
+                        "PlanClamped":  "yes",
+                        "IrLen":  1024,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "dirac_k4",
+                        "PlanClamped":  "yes",
+                        "IrLen":  1024,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "dirac_k8",
+                        "PlanClamped":  "yes",
+                        "IrLen":  1024,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "reverb_plate",
+                        "PlanClamped":  "yes",
+                        "IrLen":  88894,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "reverb_spring",
+                        "PlanClamped":  "yes",
+                        "IrLen":  88894,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "linphase_bandpass_2k_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "linphase_bandpass_500_6dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "linphase_bandpass_5k_18dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "linphase_brickwall_3k_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "linphase_fullband_24dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "minphase_bandpass_2k_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "minphase_bandpass_5k_18dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "minphase_fullband_24dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "minphase_highshelf_8k_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "minphase_lowshelf_200_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "mixedphase_chamber_4k_6dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "mixedphase_hall_500_18dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "mixedphase_plate_8k_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "mixedphase_room_2k_12dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    },
+                    {
+                        "BoundValues":  [
+                                            0,
+                                            0
+                                        ],
+                        "IrLoaded":  true,
+                        "TransferOk":  true,
+                        "PlanOutputMakeupDb":  12,
+                        "Label":  "mixedphase_stadium_200_24dB",
+                        "PlanClamped":  "yes",
+                        "IrLen":  9278,
+                        "PlanInputHeadroomDb":  -12.44,
+                        "ClampCount":  3
+                    }
+                ]
+}

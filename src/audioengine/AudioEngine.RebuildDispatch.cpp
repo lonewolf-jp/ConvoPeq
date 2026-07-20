@@ -5,6 +5,7 @@
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
 #include "DSPLifetimeManager.h"
+#include "OversamplingPolicy.h"
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 #include <windows.h>
@@ -648,13 +649,63 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                                             uiConvolverProcessor.isIRLoaded(),
                                             uiConvolverProcessor.isIRFinalized())));
             // ★ v14.0: BuildAnalysis を生成（Worker Thread で解析）
+            // ★ v14.38: OversamplingPolicy::resolve() を使用して processingRate を解決
             {
+                const auto osResult = convo::OversamplingPolicy::resolve(task.buildInput);
+
                 convo::BuildAnalysis analysis;
                 analysis.generation = generation;
+
                 if (!paramSnapshot.eqBypassed)
-                    analysis.eqMaxGainDb = getEQProcessor().computeEstimatedMaxGainDb(sampleRate, static_cast<int>(paramSnapshot.processingOrder));
+                {
+                    const double processingRate = sampleRate * static_cast<double>(osResult.resolvedOsFactor);
+                    auto* eqState = getEQProcessor().getEQState();
+                    if (eqState)
+                    {
+                        const auto eqResult = getEQProcessor().computeEstimatedMaxGainComplex(
+                            *eqState, processingRate);
+
+                        // ★ v14.42: Builder collapse — max(measured, upperBound)
+                        convo::BuildDiagnostics diag;
+                        diag.analysisVersion = convo::AnalysisVersionPolicy::kCurrent;
+                        diag.eqGainAlgorithm = eqResult.algorithm;
+                        diag.boundMethod = convo::BoundMethod::TriangleProduct;
+                        diag.eqMeasuredGainDb = eqResult.measured.gainDb;
+                        diag.eqMeasuredRawGainDb = eqResult.measuredRawGainDb;
+                        diag.eqUpperBoundGainDb = eqResult.upperBound.gainDb;
+                        diag.eqMeasuredFreqHz = eqResult.measured.freqHz;
+                        diag.eqUpperBoundFreqHz = eqResult.upperBound.freqHz;
+                        diag.boundExcessDb = std::max(0.0f, eqResult.upperBound.gainDb - eqResult.measured.gainDb);
+                        diagLog("[AUTO_GAIN_ANALYSIS] eqMeasuredGainDb=" + juce::String(diag.eqMeasuredGainDb, 2)
+                            + " eqUpperBoundGainDb=" + juce::String(diag.eqUpperBoundGainDb, 2)
+                            + " boundExcessDb=" + juce::String(diag.boundExcessDb, 3)
+                            + " eqMaxQ=" + juce::String(eqResult.maxActiveQ, 4)
+                            + " algorithm=" + juce::String(static_cast<int>(eqResult.algorithm)));
+                        // ★ v14.45: totalMaxQ — 全有効バンド中の最大Q値。診断専用。
+                        //   maxActiveQ はブーストバンド中の最大Q。totalMaxQ は全バンド（LPF/HPF 含む）の最大Q。
+                        diag.totalMaxQ = eqResult.maxActiveQ;  // 現状は maxActiveQ で代用。全バンド maxQ は将来拡張可能
+
+                        // selectedEstimate
+                        diag.selectedEstimate = (eqResult.measured.gainDb >= eqResult.upperBound.gainDb)
+                            ? convo::SelectedEstimate::Measured
+                            : convo::SelectedEstimate::UpperBound;
+
+                        analysis.eqMaxGainDb = std::max(eqResult.measured.gainDb, eqResult.upperBound.gainDb);
+                        analysis.eqMaxQ = eqResult.maxActiveQ;
+
+                        // 診断情報を task に保存（RuntimeBuilder に渡す）
+                        // ★ v14.38: OversamplingResult も保存
+                        task.oversamplingResult = osResult;
+                        task.buildDiagnostics = diag;
+                    }
+                }
+
                 if (!paramSnapshot.convBypassed)
+                {
+                    analysis.irFreqPeakGainDb = uiConvolverProcessor.getIrFreqPeakGainDb();
                     analysis.additionalAttenuationDb = uiConvolverProcessor.getIrAdditionalAttenuationDb();
+                }
+
                 task.buildAnalysis = convo::sealBuildAnalysis(analysis, &task.runtimeBuildSnapshot);
             }
             pendingTask = task;
@@ -971,7 +1022,7 @@ void AudioEngine::rebuildThreadLoop()
                     + ",PF=" + juce::String(static_cast<juce::int64>(memAfterIR.pageFaultCount)));
             }
 #endif
-            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis);
+            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis, task.oversamplingResult, task.buildDiagnostics);
         }
         catch (const std::exception& e)
         {

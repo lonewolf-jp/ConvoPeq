@@ -1,0 +1,76 @@
+--- a/src/IRAnalyzer.cpp
++++ b/src/IRAnalyzer.cpp
+@@ -1,5 +1,6 @@
+ #include "IRAnalyzer.h"
+ #include "DftiHandle.h"
++#include "AlignedAllocation.h"
+ #include <algorithm>
+ #include <numeric>
+ #include <cmath>
+@@ -10,6 +11,7 @@
+ double estimateMaxFrequencyResponseGain(
+     const juce::AudioBuffer<double>& ir) noexcept
+ {
++  try {
+     const int numSamples = ir.getNumSamples();
+     const int numChannels = ir.getNumChannels();
+     if (numSamples <= 0 || numChannels <= 0)
+@@ -26,7 +28,11 @@
+     const double pi = juce::MathConstants<double>::pi;
+     const double taperLen = kTukeyAlpha * static_cast<double>(fftSize - 1) * 0.5;
+ 
+-    auto tukeyWindow = std::make_unique<double[]>(static_cast<size_t>(fftSize));
++    // ★ FIX: std::make_unique<double[]> は operator new[] を使用するため、
++    //   Audio Thread以外でもMKL関連バッファにnew/make_uniqueを使用しない
++    //   というプロジェクト規約に反する。convo::makeAlignedArray に置換し、
++    //   64byteアライメント + mkl_malloc/mkl_free 経由の確保・解放に統一する。
++    auto tukeyWindow = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
+     for (int i = 0; i < fftSize; ++i)
+     {
+         const double t = static_cast<double>(i);
+@@ -66,10 +72,12 @@
+         const double* src = ir.getReadPointer(ch);
+ 
+         // 入力バッファ: 窓適用 + ゼロパディング
+-        auto in = std::make_unique<double[]>(static_cast<size_t>(fftSize));
++        auto in = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
+         for (int i = 0; i < copyLen; ++i)
+             in[i] = src[i] * tukeyWindow[i];
+         // 残りはゼロパディング（デフォルト値 0.0）
++        for (int i = copyLen; i < fftSize; ++i)
++            in[i] = 0.0;
+ 
+         // DFTI 記述子作成（実数→複素: 出力長 fftSize/2 + 1）
+         convo::ScopedDftiDescriptor dfti;
+@@ -84,7 +92,7 @@
+             continue;
+ 
+         // 出力: 複素数値 (実部, 虚部) のインターリーブ、長さ fftSize
+-        auto out = std::make_unique<double[]>(static_cast<size_t>(fftSize));
++        auto out = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
+         if (DftiComputeForward(dfti.handle, in.get(), out.get()) != DFTI_NO_ERROR)
+             continue;
+ 
+@@ -121,7 +129,7 @@
+         //   但し単一正弦波近似であるため、複雑スペクトルでは限界あり
+         {
+             // CCS で振幅配列を作り直す（簡易版: DC と Nyquist 除く中間 bin のみ）
+-            auto mags = std::make_unique<double[]>(static_cast<size_t>(numBins + 1));
++            auto mags = convo::makeAlignedArray<double>(static_cast<size_t>(numBins + 1));
+             mags[0] = std::abs(out[0]);
+             for (int b = 1; b < numBins; ++b)
+             {
+@@ -156,7 +164,12 @@
+     maxMagnitude /= windowMean;
+ 
+     return (maxMagnitude > 1e-18) ? maxMagnitude : 1.0;
++  } catch (...) {
++    // ★ FIX: makeAlignedArray/ScopedDftiDescriptor は理論上 std::bad_alloc を
++    //   投げ得るため、noexcept 関数からの意図しない std::terminate() を防止し、
++    //   本関数の既存の「異常時は安全側 1.0 を返す」契約を維持する。
++    return 1.0;
++  }
+ }
+ 
+ } // namespace IRAnalyzer
+-

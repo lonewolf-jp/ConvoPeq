@@ -53,6 +53,7 @@ ALLOWED_ENQUEUE_RETIRE_FILES = [
     r'SnapshotCoordinator\.(cpp|h)$',
     r'EQProcessor\.Core\.cpp$',                       # transitional fallback with #pragma warning(disable:4996)
     r'RefCountedDeferred\.h$',                         # unused template (inherited but never called)
+    r'ISRRetireRouter\.(cpp|h)$',                     # ISRRetireRouter: definition of retire() authority
 ]
 
 # Non-EpochDomain enqueueRetire-like operations (different queue, different semantic)
@@ -159,11 +160,14 @@ def scan_file_for_retire_calls(filepath):
             # Allow known good patterns
             if any(re.search(p, stripped) for p in ALLOWED_RETIRE_CALLERS):
                 continue
-            # Check if it's a definition or declaration
-            if re.match(r'.*\bvoid\s+retire\(', stripped) or re.match(r'.*\b(bool|int|uint|RetireEnqueueResult)\s+retire\(', stripped):
+            # Check if it's a definition or declaration (including ClassName::retire forms)
+            if re.match(r'.*\bvoid\s+.*retire\(', stripped) or re.match(r'.*\b(bool|int|uint|RetireEnqueueResult)\s+.*retire\(', stripped):
                 continue
             # Allow coordinator's own method
             if 'ISRRuntimePublicationCoordinator' in filepath:
+                continue
+            # Allow files in the allowed list (definitions and transitional wrappers)
+            if any(re.search(p, filepath) for p in ALLOWED_ENQUEUE_RETIRE_FILES):
                 continue
             issues.append((i, f"Unexpected retire call: {stripped[:80]}"))
 

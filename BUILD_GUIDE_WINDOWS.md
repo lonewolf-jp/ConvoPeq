@@ -1,6 +1,6 @@
 # ConvoPeq Build Guide (Windows 11 x64)
 
-This guide reflects the **current repository setup** — `build.bat`, `CMakeLists.txt` (v0.5.0), `CMakePresets.json`, and `.vscode/tasks.json` (22 tasks).
+This guide reflects the **current repository setup** — `build.bat`, `CMakeLists.txt` (v0.6.9), `CMakePresets.json`, and `.vscode/tasks.json` (22 tasks).
 
 **Project**: ConvoPeq v0.6.9 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20 · MSVC 19.44+ / icx 2026.0
@@ -61,12 +61,12 @@ ConvoPeq is a **Windows-only standalone application** (no plugin target).
 ```
 ConvoPeq/
 ├── build.bat                    # Primary build script
-├── CMakeLists.txt               # v0.5.0, 985 lines
+├── CMakeLists.txt               # v0.6.9, 1042 lines
 ├── CMakePresets.json            # 3 configure presets
 ├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.9), COMPANY, BUNDLE_ID
 ├── JUCE/                        # JUCE 8.0.12 (in-tree, required)
 ├── r8brain-free-src/            # IR resampler (optional, for 内蔵 FFT)
-├── src/                         # 246 source files
+├── src/                         # 277 source files
 ├── config/                      # Authority manifests
 ├── tools/                       # CodeGraph, CodeQL scripts
 ├── .vscode/
@@ -347,7 +347,7 @@ Result: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` (PGO-optimized)
 
 ## 11. CTest Regression Suite
 
-16 test executables are defined in CMakeLists.txt (enabled by default, `CONVOPEQ_ENABLE_ISR_TESTS=ON`).
+21 test executables are defined in CMakeLists.txt (enabled by default, `CONVOPEQ_ENABLE_ISR_TESTS=ON`).
 
 ### 11.1 Test List
 
@@ -636,8 +636,8 @@ ConvoPeq.exe sources (CMakeLists.txt target_sources):
   src/MainApplication.cpp
   src/MainWindow.cpp
   src/audioengine/
-    AudioEngine.*.cpp  (16 files — Lifecycle, Timer, Commit, Rebuild, etc.)
-    ISR*.cpp           (29 files — Closure, PayloadTier, HB, Retire, etc.)
+    AudioEngine.*.cpp  (15 files — Lifecycle, Timer, Commit, Rebuild, etc.)
+    ISR*.cpp           (31 files — Closure, PayloadTier, HB, Retire, etc.)
     Processing.*.cpp   (11 files — AudioBlock, BlockDouble, DSPCore*, etc.)
   src/convolver/
     ConvolverProcessor.*.cpp  (8 files — Lifecycle, Rebuild, LoaderThread, etc.)
@@ -652,7 +652,7 @@ ConvoPeq.exe sources (CMakeLists.txt target_sources):
   src/NoiseShaperLearner.cpp
   src/RuntimeBuilder.cpp
   src/AudioEngineProcessor.cpp
-  + 15 test executables in src/tests/
+  + 21 test executables in src/tests/
 ```
 
 ## Appendix B. Build Directory Structure

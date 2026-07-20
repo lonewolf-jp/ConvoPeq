@@ -1,0 +1,78 @@
+{
+  "Results": [
+    {
+      "ClampCount": 3,
+      "Label": "dirac_k16",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 1024
+    },
+    {
+      "ClampCount": 3,
+      "Label": "dirac_k2",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 1024
+    },
+    {
+      "ClampCount": 3,
+      "Label": "dirac_k32",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 1024
+    },
+    {
+      "ClampCount": 3,
+      "Label": "dirac_k4",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 1024
+    },
+    {
+      "ClampCount": 3,
+      "Label": "dirac_k8",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 1024
+    },
+    {
+      "ClampCount": 3,
+      "Label": "reverb_plate",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 88894
+    },
+    {
+      "ClampCount": 3,
+      "Label": "reverb_spring",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 88894
+    },
+    {
+      "ClampCount": 3,
+      "Label": "linphase_bandpass_2k_12dB",
+      "PlanInputHeadroomDb": -12.44,
+      "IrLoaded": true,
+      "PlanOutputMakeupDb": 12.0,
+      "PlanClamped": "yes",
+      "IrLen": 9278
+    }
+  ],
+  "TotalIRs": 22,
+  "Timestamp": "2026-07-20T00:25:32.8044955+09:00"
+}

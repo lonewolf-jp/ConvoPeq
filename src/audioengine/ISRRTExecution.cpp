@@ -92,7 +92,7 @@ FirewallToken RTCapabilityFirewall::enter() noexcept
     FirewallToken token{
         .threadId = std::this_thread::get_id(),
         .epochId = 0,
-        // .isValid 削除 (B14)
+        .isValid = true,
     };
 
     // ★ [work66-P2-3] sharedRtContextFlag は単なる状態フラグであり、

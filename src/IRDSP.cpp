@@ -29,7 +29,12 @@ juce::AudioBuffer<double> resampleIR(
                                       cfg.transBand, cfg.stopBandAtten, cfg.phase);
     const int maxOutLen = tempResampler.getMaxOutLen(inLength);
     if (maxOutLen <= 0)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] resampleIR: maxOutLen<=0 ("
+            + juce::String(maxOutLen) + ") inLen=" + juce::String(inLength)
+            + " srIn=" + juce::String(inputSR, 1) + " srOut=" + juce::String(targetSR, 1));
         return {};
+    }
 
     juce::AudioBuffer<double> resampled(inputIR.getNumChannels(), maxOutLen);
     resampled.clear();
@@ -77,6 +82,10 @@ juce::AudioBuffer<double> resampleIR(
                         const int toCopy = std::min(generated, maxOutLen - done);
                         std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
                         done += toCopy;
+                    } else {
+                        juce::Logger::writeToLog("[DIAG_IR] resampleIR: process() generated="
+                            + juce::String(generated) + " ch=" + juce::String(ch)
+                            + " inputProcessed=" + juce::String(inputProcessed));
                     }
                 }
 
@@ -104,16 +113,29 @@ juce::AudioBuffer<double> resampleIR(
     for (auto& f : futures) f.get();  // get(): 例外を確実に伝播
 
     if (anyChannelCancelled.load(std::memory_order_relaxed))
+    {
+        juce::Logger::writeToLog("[DIAG_IR] resampleIR: cancelled");
         return {};
+    }
 
     // 理論上は全チャンネル同一長となるが、安全のため maxDone を採用
     const int maxDone = *std::max_element(channelDone.begin(), channelDone.end());
     if (maxDone < 0)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] resampleIR: all channels failed (maxDone="
+            + juce::String(maxDone) + " numCh=" + juce::String(numCh) + ")");
         return {};
+    }
     if (maxDone < maxOutLen)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] resampleIR: trimmed to " + juce::String(maxDone)
+            + " (maxOutLen=" + juce::String(maxOutLen) + ")");
         resampled.setSize(numCh, maxDone, true, true, true);
+    }
     // maxDone == maxOutLen の場合はバッファサイズを維持
 
+    juce::Logger::writeToLog("[DIAG_IR] resampleIR: success ch=" + juce::String(numCh)
+        + " outLen=" + juce::String(maxDone));
     return resampled;
 }
 

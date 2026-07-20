@@ -1,0 +1,29 @@
+--- a/src/eqprocessor/EQProcessor.Processing.cpp
++++ b/src/eqprocessor/EQProcessor.Processing.cpp
+@@ -193,6 +193,12 @@
+         const __m128d two = _mm_set1_pd(2.0);
+         const __m128d cHigh = _mm_set1_pd(100.0);
+         const __m128d cLow  = _mm_set1_pd(-100.0);
++        // ★ FIX: processBand（スカラー版）と同じ「|output|>=1e15 も無効値として0扱い」
++        //   にするための閾値。従来はNaN/Infのみ判定しており、有限だが超巨大な値が
++        //   そのまま±100クランプに流れ込み、スカラー版（0.0）と異なる非常に大きな
++        //   （+40dBFS相当）出力になり得た。
++        const __m128d cHugeAbs = _mm_set1_pd(1.0e15);
++        const __m128d cAbsMask = _mm_set1_pd(-0.0);
+ 
+         [[maybe_unused]] constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+ 
+@@ -233,8 +239,12 @@
+             }
+ 
+             // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
++            // + |output|<1e15 チェック（processBandスカラー版と同一のセーフティ条件に統一）
+             const __m128d diff = _mm_sub_pd(output, output);
+-            const __m128d mask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
++            const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
++            const __m128d absOutput = _mm_andnot_pd(cAbsMask, output);
++            const __m128d rangeMask = _mm_cmplt_pd(absOutput, cHugeAbs);
++            const __m128d mask = _mm_and_pd(finiteMask, rangeMask);
+             output = _mm_and_pd(output, mask);
+ 
+             // クランプ (-100, +100) で発散防止

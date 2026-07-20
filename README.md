@@ -3,19 +3,18 @@
 
 ---
 
-## New in v0.6.9
+## New in v0.6.10
 
-- **ISR runtime governance overhaul** — The publication coordinator, retirement pipeline, and commit/shutdown state machine were significantly reworked: silent failures eliminated via `[[nodiscard]] PublishStageResult`, double validation removed, monotonic rollback and observe path hardened, and `FrozenRuntimeWorld` null-world gap closed.
-- **UI layout fixes across multiple panels** — The Audio Settings window received a 7-to-6 row compaction with `Audio Thread Priority` correctly aligned under `Oversampling`; the MainWindow's HCF/LCF filter buttons were resized to uniform 60 px width and given adequate vertical space (convolver panel height bumped from 280 px to 320 px) to prevent compression.
-- **Build and CI infrastructure expansion** — CMakeLists.txt saw major edits (~145 lines), new CI scripts were added (atomic dot-call scanning, authority/audit verification), `.gitignore` and `.markdownlintignore` were introduced, launch/task configurations refined, and a `build-icx/` Ninja preset directory was added.
-- **Comprehensive documentation rewrite** — `ARCHITECTURE.md`, `BUILD_GUIDE_WINDOWS.md`, and `SOUND_PROCESSING.md` were heavily revised (+987, +709, +1639 lines respectively); dozens of new design-plan documents under `doc/work49/` and `doc/work66/` (PDF layout specs) were added; the README was restructured with a properly terminated directory tree.
-- **Noise shaper refactoring and DSP hardening** — `Fixed15TapNoiseShaper`, `LatticeNoiseShaper`, and `FixedNoiseShaper` were restructured; the DSP core lifecycle null-world gap was closed, `RuntimeHealthMonitor` validation events were added, `CrossfadeAuthority` signatures updated, `ISRShutdown` lifecycle improved, and the test suite expanded by 445 lines.
-
+- Enhanced Auto-Gain Functionality: Automatic gain calculation logic based on processing order (EQ/Convolver standalone, Conv→EQ, EQ→Conv) was added, along with heuristic-based Q-surge margins and safety margin calculations. A new `AutoGainPlanner` class was introduced to design the input/output gain auto-adjustment algorithm as a purely functional planner, improving clamping ranges and net 0dB alignment.
+- Added Deferred Deletion Queue Reclaim Test: A dedicated 745-line test suite was added to verify the behavior of `DeferredDeletionQueue::reclaim()`. This suite comprehensively validates RCU mechanism safety, covering epoch progression, FIFO order guarantees, concurrent enqueue/reclaim operations, MPMC epoch correctness, and state invariants during reclamation.
+- Improved ISR Runtime Governance: Enhancements were made to the ISR (Intelligent State Reconstruction) publication adjuster, retirement router, and runtime builder. Capabilities for state transition monitoring, publication behavior verification, and graph consistency checks were expanded; additionally, bug fixes for `RuntimeWorldAuthorityProjection` and fade state management using `fadingRuntimeUuid` were implemented.
+- Enhanced Thread Affinity Management: The `ThreadAffinityManager` improved CPU affinity mask management for audio threads, adding support for the `AudioRealtime` thread type and dedicated mask settings introduced in "Work 64." Thread priority management on Windows was improved through MMCSS priority application capabilities and the `tryApplyMmcssForSelfManagedThread()` method.
+- Eliminated Real-Time Blockers in Audio Threads: Non-real-time operations within audio threads (such as `Logger::writeToLog()`, `std::hash`, and the `GetCurrentProcessorNumber()` syscall) were eliminated or conditionally compiled out. Issues involving CRT function calls and false sharing were resolved; furthermore, interrupt-free processing for real-time threads was ensured by making `ScopedNoDenormals` thread-local and enhancing the safety of atomic operations.
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
 ## Overview
 
-ConvoPeq v0.6.9 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
+ConvoPeq v0.6.10 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
 
 | Aspect | Detail |
 |--------|--------|
@@ -26,7 +25,7 @@ ConvoPeq v0.6.9 is built with JUCE 8.0.12 and is designed for low-latency, real-
 | SIMD / Math | **AVX2** + **Intel oneMKL** (sequential, static link) + **Intel IPP** |
 | Build System | **CMake 3.22+** + **Ninja Multi-Config** |
 | Language | **C++20** |
-| Source | **246 files** (~2.78 MB) across `src/` + 15 test files
+| Source | **277 files** (~3.17 MB) across `src/` + 21 test files
 
 ---
 
@@ -43,7 +42,7 @@ ConvoPeq v0.6.9 is built with JUCE 8.0.12 and is designed for low-latency, real-
 
 ### ISR Design & Audit Docs ([doc/work/](doc/work/))
 
-The `doc/work/` directory contains ~80+ ISR design documents covering the full ISR development lifecycle (Phases 0–4, Bridge Runtime, Rebuild Admission, EpochDomain migration, Shutdown State Machine, and formal compliance audits). Key entry points:
+The `doc/work/` directory contains ~82 ISR design documents covering the full ISR development lifecycle (Phases 0–4, Bridge Runtime, Rebuild Admission, EpochDomain migration, Shutdown State Machine, and formal compliance audits). Key entry points:
 
 - [doc/work/ISR_Rebuild_Admission_最終計画書_2026-05-23.md](doc/work/ISR_Rebuild_Admission_最終計画書_2026-05-23.md): 実装計画と受入基準（8章）
 - [doc/work/ISR_Rebuild_Admission_受入基準クローズログ_2026-05-23.md](doc/work/ISR_Rebuild_Admission_受入基準クローズログ_2026-05-23.md): 実測ログ付きのクローズ判定台帳
@@ -51,7 +50,7 @@ The `doc/work/` directory contains ~80+ ISR design documents covering the full I
 
 ### Companion Analysis
 
-- [doc/sourcecode_analysis_2026-07-03.md](doc/sourcecode_analysis_2026-07-03.md): Complete source code structure analysis (246 files, 25 sections, all data flows)
+- [doc/sourcecode_analysis_2026-07-03.md](doc/sourcecode_analysis_2026-07-03.md): Complete source code structure analysis (277 files, 25 sections, all data flows)
 
 ### Manuals ([manual/](manual/))
 
@@ -73,8 +72,8 @@ The `doc/work/` directory contains ~80+ ISR design documents covering the full I
 
 ```text
 ConvoPeq/
-├── src/                       # Main C++ source (246 files, ~2.78 MB)
-│   ├── audioengine/           # ISR runtime governance, AudioEngine split TU (101 files)
+├── src/                       # Main C++ source (277 files, ~3.17 MB)
+│   ├── audioengine/           # ISR runtime governance, AudioEngine split TU (107 files)
 │   │   ├── AudioEngine.Processing.*.cpp  # Audio thread core (DSPCore, Block, Latency)
 │   │   ├── AudioEngine.*.cpp            # Lifecycle, Timer, Commit, Rebuild, Retire
 │   │   └── ISR*.cpp                     # Closure, HB, Shutdown, Publication, Retire, etc.
@@ -86,10 +85,10 @@ ConvoPeq/
 │   │   ├── EpochDomain.h      # 64-slot named reader domain (26 KB)
 │   │   ├── RCUReader.h, SnapshotCoordinator, GlobalSnapshot, DeletionQueue
 │   │   └── FadeEngine.h, WorkerThread, Types, CommandBuffer
-│   └── tests/                 # CTest regression suite (15 files)
+│   └── tests/                 # CTest regression suite (21 files)
 ├── config/                    # JSON authority manifests (4 files)
 ├── tools/                     # CodeGraph, CodeQL, CI verification scripts
-├── doc/                       # Architecture work docs (~80+ ISR design files)
+├── doc/                       # Architecture work docs (~82 ISR design files)
 │   ├── work/                  # ISR design, audit, compliance
 │   └── sourcecode_analysis_2026-07-03.md  # Full source analysis
 ├── manual/                    # User manuals (EN/JP, 4 topics each)
@@ -99,12 +98,12 @@ ConvoPeq/
 ├── sampledata/                # Sample IR/EQ files
 ├── JUCE/                      # JUCE 8.0.12 framework source (in-tree)
 ├── r8brain-free-src/          # IR resampler (external dependency)
-├── CMakeLists.txt             # Build configuration (985 lines, v0.5.0)
+├── CMakeLists.txt             # Build configuration (1042 lines, v0.6.10)
 ├── CMakePresets.json          # 3 configure + 2 build presets
 ├── build.bat                  # Primary build script (MSVC + icx)
-├── ProjectMetadata.cmake      # App name, version (v0.6.9), company
+├── ProjectMetadata.cmake      # App name, version (v0.6.10), company
 ├── README.md                  # This file
-├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.9)
+├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.10)
 ├── SOUND_PROCESSING.md        # Complete signal processing guide
 ├── BUILD_GUIDE_WINDOWS.md     # Windows build instructions
 └── HOW_TO_USE.md              # Practical usage guide (REW + AutoEq)
@@ -150,7 +149,7 @@ ConvoPeq/
 - Persistent device settings (`device_settings.xml`)
 - `AsioBlacklist.h` for known broken ASIO drivers
 
-### ISR Runtime Governance (101 files in `src/audioengine/`)
+### ISR Runtime Governance (107 files in `src/audioengine/`)
 - **RCU + atomic** parameter handoff (`publishAtomic` / `consumeAtomic` primitives)
 - **EpochDomain** (64 named reader slots) + `RCUReader` RAII pattern
 - Publication choreography: `ISRRuntimePublicationCoordinator`, `PublicationAdmission`, `PublicationExecutor`
@@ -160,7 +159,7 @@ ConvoPeq/
 - Deferred garbage collection: `DeferredDeletionQueue`, `RefCountedDeferred`, `DeferredFreeThread`
 
 ### Build & Test Infrastructure
-- **CTest regression suite**: 16 test executables (ISR identity, publication coordinator, semantic validation, grace semantics, etc.)
+ - **CTest regression suite**: 21 test executables (ISR identity, publication coordinator, semantic validation, grace semantics, etc.)
 
 ---
 
@@ -357,7 +356,7 @@ For `CMakePresets.json` usage, VS Code task reference, CTest suite commands, and
 - PGO (Profile-Guided Optimization) is MSVC-only; not supported for icx
 - RNG ring buffer for dither is pre-filled by worker thread — no RNG generation on audio thread
 - All coefficients (EQ SVF, filter biquad, AGC tables, noise shaper) precomputed in message thread
-- 16 CTest regression tests available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
+ - 21 CTest regression tests available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
 - Do not modify external dependency trees directly:
   - `JUCE/`
   - `r8brain-free-src/`

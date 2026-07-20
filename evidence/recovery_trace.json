@@ -1,6 +1,6 @@
 {
   "artifact": "recovery_trace.json",
-  "generatedAtNs": 37565770159300,
+  "generatedAtNs": 1170905140700,
   "recoveryActions": [
     {"failure":"closure invalid", "action":"RejectPublish"},
     {"failure":"tier violation", "action":"RejectPublish"},

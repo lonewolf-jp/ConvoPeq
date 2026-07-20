@@ -384,13 +384,29 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-bypass-burst-value").isEmpty()
         || !findValue("--cli-intent-burst-count").isEmpty()
         || !findValue("--cli-intent-burst-interval-ms").isEmpty()
+        || hasFlag("--cli-rebuild")
+        || !findValue("--cli-eq-band").isEmpty()
+        || !findValue("--cli-eq-freq-hz").isEmpty()
+        || !findValue("--cli-eq-gain-db").isEmpty()
+        || !findValue("--cli-eq-q").isEmpty()
+        || !findValue("--cli-eq-type").isEmpty()
         || !findValue("--cli-target-ir-sec").isEmpty()
         || !findValue("--cli-debounce-ms").isEmpty()
         || !findValue("--cli-f1-hz").isEmpty()
         || !findValue("--cli-f2-hz").isEmpty()
         || !findValue("--cli-learning-action").isEmpty()
         || !findValue("--cli-learning-mode").isEmpty()
-        || !findValue("--cli-exit-ms").isEmpty();
+        || !findValue("--cli-exit-ms").isEmpty()
+        || !findValue("--cli-log-file").isEmpty();
+
+    // ★ v14.47: --cli-log-file <path> — 診断ログをファイルに出力
+    if (const auto logFileValue = findValue("--cli-log-file"); !logFileValue.isEmpty())
+    {
+        const auto logFile = juce::File::getCurrentWorkingDirectory().getChildFile(logFileValue);
+        auto fileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq CLI Log", 0);
+        juce::Logger::setCurrentLogger(fileLogger.release());
+        juce::Logger::writeToLog("[CLI] Log file: " + logFile.getFullPathName());
+    }
 
     if (!hasAutomationFlags)
     {
@@ -768,8 +784,23 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
 
         if (irFile.existsAsFile())
         {
-            audioEngine.requestConvolverPreset(irFile);
-            juce::Logger::writeToLog("[CLI] Loading IR: " + irFile.getFullPathName());
+            // Defer IR load to allow audio device to stabilize first
+            const int irLoadDelayMs = 200;
+            juce::Logger::writeToLog("[CLI] Deferred IR load: " + irFile.getFullPathName()
+                                     + " (delayMs=" + juce::String(irLoadDelayMs) + ")");
+            juce::Timer::callAfterDelay(irLoadDelayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), irFile]
+            {
+                if (safeThis == nullptr) return;
+                if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire)) return;
+
+                safeThis->audioEngine.requestConvolverPreset(irFile);
+                juce::Logger::writeToLog("[CLI] Loading IR: " + irFile.getFullPathName());
+
+                const bool irLoaded = safeThis->audioEngine.getConvolverProcessor().isIRLoaded();
+                const int irLen = safeThis->audioEngine.getConvolverProcessor().getIRLength();
+                juce::Logger::writeToLog("[CLI_IR] isIRLoaded=" + juce::String(static_cast<int>(irLoaded))
+                                         + " irLen=" + juce::String(irLen));
+            });
 
             int reloadCount = 0;
             if (const auto reloadCountValue = findValue("--cli-ir-reload-count"); !reloadCountValue.isEmpty())
@@ -941,6 +972,85 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         }
     }
 
+    // ★ v14.47+: --cli-eq-* — EQ band settings for auto gain staging measurement
+    {
+        int eqBand = 0;
+        float eqFreqHz = 1000.0f;
+        float eqGainDb = 12.0f;
+        float eqQ = 2.0f;
+        int eqType = 1; // Peaking
+
+        if (const auto eqBandValue = findValue("--cli-eq-band"); !eqBandValue.isEmpty())
+        {
+            int parsed = 0;
+            if (tryParseIntOption(eqBandValue, parsed))
+                eqBand = juce::jlimit(0, 19, parsed);
+        }
+        if (const auto eqFreqValue = findValue("--cli-eq-freq-hz"); !eqFreqValue.isEmpty())
+        {
+            float parsed = 0.0f;
+            if (tryParseFloatOption(eqFreqValue, parsed) && parsed > 0.0f)
+                eqFreqHz = parsed;
+        }
+        if (const auto eqGainValue = findValue("--cli-eq-gain-db"); !eqGainValue.isEmpty())
+        {
+            float parsed = 0.0f;
+            if (tryParseFloatOption(eqGainValue, parsed))
+                eqGainDb = parsed;
+        }
+        if (const auto eqQValue = findValue("--cli-eq-q"); !eqQValue.isEmpty())
+        {
+            float parsed = 0.0f;
+            if (tryParseFloatOption(eqQValue, parsed) && parsed > 0.0f)
+                eqQ = parsed;
+        }
+        if (const auto eqTypeValue = findValue("--cli-eq-type"); !eqTypeValue.isEmpty())
+        {
+            int parsed = 1;
+            if (tryParseIntOption(eqTypeValue, parsed))
+                eqType = juce::jlimit(0, 4, parsed);
+        }
+
+        if (!findValue("--cli-eq-gain-db").isEmpty() || !findValue("--cli-eq-freq-hz").isEmpty())
+        {
+            audioEngine.setEQBandEnabled(eqBand, true);
+            audioEngine.setEQBandFrequency(eqBand, eqFreqHz);
+            audioEngine.setEQBandGain(eqBand, eqGainDb);
+            audioEngine.setEQBandQ(eqBand, eqQ);
+            audioEngine.setEQBandType(eqBand, static_cast<EQBandType>(eqType));
+            juce::Logger::writeToLog("[CLI_EQ] band=" + juce::String(eqBand)
+                + " freq=" + juce::String(eqFreqHz, 1) + "Hz"
+                + " gain=" + juce::String(eqGainDb, 1) + "dB"
+                + " Q=" + juce::String(eqQ, 2)
+                + " type=" + juce::String(eqType));
+        }
+    }
+
+    // ★ v14.47+: --cli-rebuild — Force structural rebuild after IR load (bypasses telemetry suppression)
+    if (hasFlag("--cli-rebuild"))
+    {
+        // Must fire after deferred IR load (200ms) to include IR in rebuild
+        const int rebuildDelayMs = 500;
+        juce::Logger::writeToLog("[CLI] Scheduled forced structural rebuild (delayMs="
+                                 + juce::String(rebuildDelayMs) + ")");
+        juce::Timer::callAfterDelay(rebuildDelayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this)]
+        {
+            if (safeThis == nullptr)
+                return;
+
+            if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
+                return;
+
+            const bool irLoaded = safeThis->audioEngine.getConvolverProcessor().isIRLoaded();
+            const int irLen = safeThis->audioEngine.getConvolverProcessor().getIRLength();
+            juce::Logger::writeToLog("[CLI_REBUILD] isIRLoaded=" + juce::String(static_cast<int>(irLoaded))
+                                     + " irLen=" + juce::String(irLen));
+
+            safeThis->audioEngine.requestStructuredRebuildIntent(convo::RebuildKind::Structural);
+            juce::Logger::writeToLog("[CLI_REBUILD] Forced rebuild intent submitted");
+        });
+    }
+
     if (eqPanel != nullptr)
         eqPanel->updateAllControls();
     if (convolverPanel != nullptr)
@@ -951,9 +1061,24 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         int exitMs = 0;
         if (tryParseIntOption(exitValue, exitMs) && exitMs > 0)
         {
+            // ★ v14.47: Ensure minimum exit time when IR + rebuild are used
+            const bool hasIr = !findValue("--cli-ir").isEmpty();
+            const bool hasRebuild = !findValue("--cli-rebuild").isEmpty();
+            const int minExitMs = (hasIr || hasRebuild) ? 3000 : 1000;
+            if (exitMs < minExitMs)
+            {
+                juce::Logger::writeToLog("[CLI] Adjusted exit-ms from " + juce::String(exitMs)
+                    + " to minimum " + juce::String(minExitMs));
+                exitMs = minExitMs;
+            }
+
             juce::Logger::writeToLog("[CLI] Auto-exit scheduled in " + juce::String(exitMs) + "ms");
             juce::Timer::callAfterDelay(exitMs, [safeThis = juce::Component::SafePointer<MainWindow>(this)]
             {
+                // ★ v14.47: Flush log file before exit (P5 fix)
+                juce::Logger::writeToLog("[CLI] Auto-exit flush: shutting down");
+                juce::Logger::setCurrentLogger(nullptr);
+
                 if (safeThis != nullptr)
                 {
                     convo::publishAtomic(safeThis->cliAutomationCallbacksEnabled, false, std::memory_order_release);

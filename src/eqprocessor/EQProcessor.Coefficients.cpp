@@ -6,6 +6,13 @@
 // 参照: Vadim Zavalishin "The Art of VA Filter Design"
 //============================================================================
 #include "EQProcessor.h"
+#include "EQAnalysisMath.h"
+#include "EQAnalysisTypes.h"
+#include "BandHelper.h"
+#include "EQResponseSampler.h"
+#include "PeakEstimator.h"
+#include "UpperBoundEstimator.h"
+#include "AnalysisMerge.h"
 #include <cmath>
 #include <complex>
 #include <algorithm>
@@ -342,127 +349,52 @@ float EQProcessor::getMagnitudeSquared(const EQCoeffsBiquad& c, const std::compl
     return static_cast<float>(std::norm(num) / denNorm);
 }
 
-//============================================================================
-// 推定最大ゲイン計算（★ v14.0）
-//   Parallel 時は Serial 積 Π|Hi| で近似（数学的保証なし）
-//============================================================================
-float EQProcessor::computeEstimatedMaxGainDb(double sampleRate, [[maybe_unused]] int processingOrder) const
+// ★ v14.30: 複素応答を使用した推定最大ゲイン計算 V2
+//   processingRate = sr * resolvedOsFactor（呼出し側の責務）
+//==============================================================================
+EQProcessor::EQAnalysisResult EQProcessor::computeEstimatedMaxGainComplex(
+    const EQState& state, double processingRate) const
 {
-    if (sampleRate <= 0.0) return 0.0f;
+    EQAnalysisResult result{};
 
-    const double nyquist = sampleRate * 0.5;
-    if (nyquist <= 20.0) return 0.0f;
+    if (processingRate <= 0.0)
+        return result;
 
-    constexpr int kCoarsePoints = 300;
-    constexpr int kBandAdaptivePoints = 64;
-    constexpr double kBwMultiplier = 8.0;
+    // v14.47: 3-layer refactoring
+    const bool isParallel = (state.filterStructure == 1);
 
-    // 有効バンドの Biquad 係数を収集（ゲイン増大に寄与するバンドのみ）
-    struct BandScanInfo {
-        double freq = 0.0;
-        double q = 0.0;
-        EQCoeffsBiquad biquad {};
-    };
-    std::vector<BandScanInfo> activeBands;
+    auto bands = BandHelper::collectActiveBands(*this, state, processingRate);
+    if (bands.bands.empty())
+        return result;
 
-    auto* state = loadCurrentState(std::memory_order_acquire);
-    if (state == nullptr)
-        return 0.0f;
+    const EQResponseSampler sampler(processingRate, isParallel);
+    const auto coarseResult = sampler.runCoarse(bands);
+    const auto measCands = sampler.findMeasuredCandidates(bands);
+    const auto ubCands = sampler.findUpperBoundCandidates(bands, coarseResult.bandMaxDelta);
+    const auto adaptiveResult = sampler.runAdaptive(bands, measCands, ubCands, coarseResult);
 
-    for (int i = 0; i < NUM_BANDS; ++i)
-    {
-        if (!state->bands[i].enabled)
-            continue;
+    auto merged = mergeAndSort(coarseResult, adaptiveResult);
+    merged = deduplicate(merged);
+    renumber(merged);
 
-        const EQBandType type = state->bandTypes[i];
-        const float gain = state->bands[i].gain;
+    const auto measured = PeakEstimator::estimate(merged);
+    const auto upperBound = UpperBoundEstimator::estimateMax(merged);
 
-        // ゲイン増大に寄与するバンドのみ: Peaking(gain>0)/Shelf(gain≠0)/HPF/LPF
-        // Peaking(gain≤0)/Notch/AllPass は振幅増大なしのためスキップ
-        bool gainBoosting = false;
-        switch (type)
-        {
-            case EQBandType::Peaking:
-                gainBoosting = (gain > 0.0f);
-                break;
-            case EQBandType::LowShelf:
-            case EQBandType::HighShelf:
-            case EQBandType::LowPass:
-            case EQBandType::HighPass:
-                gainBoosting = true;
-                break;
-            default:
-                gainBoosting = false;  // Notch, AllPass, BandPass etc.
-                break;
-        }
+    const float totalGainDb = getTotalGain();
 
-        if (!gainBoosting)
-            continue;
+    result.measured.gainDb = measured.interpolatedDb + totalGainDb;
+    result.measured.freqHz = measured.interpolatedFreqHz;
+    result.measured.origin.type = EQProcessor::SampleOrigin::Adaptive;
+    result.measured.origin.sampleIndex = measured.rawSampleIndex;
+    result.measuredRawGainDb = measured.rawDb + totalGainDb;
+    result.upperBound.gainDb = upperBound.maxDb + totalGainDb;
+    result.upperBound.freqHz = upperBound.freqHz;
+    result.upperBound.origin.type = EQProcessor::SampleOrigin::Adaptive;
+    result.upperBound.origin.sampleIndex = upperBound.sampleIndex;
+    result.maxActiveQ = bands.maxActiveQ;
+    result.algorithm = convo::EqGainAlgorithm::TriangleProductV1;
 
-        const EQCoeffsSVF svf = calcSVFCoeffs(type, state->bands[i].frequency, gain, state->bands[i].q, sampleRate);
-        activeBands.push_back({ static_cast<double>(state->bands[i].frequency),
-                                static_cast<double>(state->bands[i].q),
-                                svfToDisplayBiquad(svf) });
-    }
-
-    if (activeBands.empty())
-        return 0.0f;
-
-    // 共通評価関数: 全 activeBands の Serial 積 Π|Hi| を計算
-    auto evaluateAt = [&](double freqHz) -> float {
-        double product = 1.0;
-        for (const auto& band : activeBands)
-        {
-            const float magSq = getMagnitudeSquared(band.biquad, static_cast<float>(freqHz), static_cast<float>(sampleRate));
-            product *= static_cast<double>(std::sqrt(static_cast<double>(magSq)));
-            if (product > 1e12) break; // 安全ガード
-        }
-        return static_cast<float>(product);
-    };
-
-    float maxLinearGain = 1.0f;
-
-    // ★ 第1段: 粗探索（対数分布 300点、20Hz〜Nyquist）
-    for (int i = 0; i < kCoarsePoints; ++i)
-    {
-        const double t = static_cast<double>(i) / static_cast<double>(kCoarsePoints - 1);
-        const double freq = 20.0 * std::pow(nyquist / 20.0, t);
-        maxLinearGain = std::max(maxLinearGain, evaluateAt(freq));
-    }
-
-    // ★ 第2段: Band 適応サンプリング（各有効 Band 中心周囲を Q 依存帯域幅で）
-    for (const auto& band : activeBands)
-    {
-        if (band.q <= 1e-12)
-            continue;
-
-        const double range = std::max(20.0, (band.freq / band.q) * kBwMultiplier);
-        // range が中心周波数の 50% を超える場合は全域カバーとみなしスキップ
-        if (range > band.freq * 0.5)
-            continue;
-
-        const double startFreq = std::max(20.0, band.freq - range * 0.5);
-        const double endFreq   = std::min(nyquist, band.freq + range * 0.5);
-        if (endFreq <= startFreq)
-            continue;
-
-        for (int j = 0; j < kBandAdaptivePoints; ++j)
-        {
-            const double freq = startFreq + (endFreq - startFreq) * static_cast<double>(j) / static_cast<double>(kBandAdaptivePoints - 1);
-            maxLinearGain = std::max(maxLinearGain, evaluateAt(freq));
-        }
-    }
-
-    // 20*log10 で dB 変換
-    if (maxLinearGain <= 1e-12f) return 0.0f;
-
-    // ★ Phase 8 Review: totalGainDb（Master Gain）を線形倍率で乗算
-    //   totalGainDb はポストEQマスターゲイン（DSP チェーンで別段階として適用）
-    const float totalGainLin = static_cast<float>(std::pow(10.0, static_cast<double>(state->totalGainDb) / 20.0));
-    const float combinedGain = maxLinearGain * totalGainLin;
-
-    const float gainDb = 20.0f * std::log10(combinedGain);
-    return (gainDb > 0.0f) ? gainDb : 0.0f;
+    return result;
 }
 
 //============================================================================

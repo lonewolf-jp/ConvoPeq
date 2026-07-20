@@ -1,5 +1,5 @@
 #============================================================================
-# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
+# CMakeLists.txt  ── v0.6.10 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
 # ビルド環境:
 #   - JUCE: 8.0.12
@@ -141,6 +141,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(GainStagingContractTests
         src/tests/GainStagingContractTests.cpp
     )
+    target_include_directories(GainStagingContractTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
     add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
 
     # ★ v14.0 Phase 8: EQ 応答計算の数学的契約テスト
@@ -149,7 +150,25 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(EQProcessorMaxGainTests
         src/tests/EQProcessorMaxGainTests.cpp
     )
+    target_include_directories(EQProcessorMaxGainTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
     add_test(NAME EQProcessorMaxGainTests COMMAND EQProcessorMaxGainTests)
+
+    # ★ v14.47: 3層リファクタリング 単体テスト
+    #   PeakEstimator / UpperBoundEstimator / AnalysisMerge / EQResponseSampler
+    #   JUCE/MKL に依存しない純粋数学テスト。
+    add_executable(EQAnalysisUnitTests
+        src/tests/EQAnalysisUnitTests.cpp
+    )
+    target_include_directories(EQAnalysisUnitTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+    add_test(NAME EQAnalysisUnitTests COMMAND EQAnalysisUnitTests)
+
+    # ★ Week2: boundExcessDb 分布測定ベンチマーク
+    #   JUCE/MKL に依存しない純粋数学ベンチマーク。
+    add_executable(EQBoundExcessBenchmark
+        src/tests/EQBoundExcessBenchmark.cpp
+    )
+    target_include_directories(EQBoundExcessBenchmark PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+    add_test(NAME EQBoundExcessBenchmark COMMAND EQBoundExcessBenchmark --quick)
 
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
@@ -169,6 +188,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(PartialPublicationRejectTests PRIVATE cxx_std_20)
     target_compile_features(GainStagingContractTests PRIVATE cxx_std_20)
     target_compile_features(EQProcessorMaxGainTests PRIVATE cxx_std_20)
+    target_compile_features(EQAnalysisUnitTests PRIVATE cxx_std_20)
+    target_compile_features(EQBoundExcessBenchmark PRIVATE cxx_std_20)
     target_compile_features(RebuildAdmissionRegressionTests PRIVATE cxx_std_20)
     target_compile_features(BuildInputSemanticContractTests PRIVATE cxx_std_20)
     target_compile_features(DeferredDeletionQueueReclaimTests PRIVATE cxx_std_20)
@@ -588,6 +609,10 @@ target_sources(ConvoPeq PRIVATE
     src/eqprocessor/EQProcessor.Coefficients.cpp
     src/eqprocessor/EQProcessor.Processing.cpp
     src/eqprocessor/EQProcessor.ProcessingCache.cpp
+    src/eqprocessor/PeakEstimator.cpp
+    src/eqprocessor/UpperBoundEstimator.cpp
+    src/eqprocessor/EQResponseSampler.cpp
+    src/eqprocessor/BandHelper.cpp
     src/EQEditProcessor.cpp
     src/ConvolverControlPanel.cpp
     src/EQControlPanel.cpp

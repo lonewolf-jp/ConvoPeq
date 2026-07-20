@@ -1,70 +1,22 @@
 {
   "schema": "world_lifecycle_audit_v1",
   "activeWorldCount": 1,
-  "publishedCount": 7,
-  "retiredCount": 6,
+  "publishedCount": 1,
+  "retiredCount": 0,
   "doubleRetireCount": 0,
-  "ringBufferSize": 7,
+  "ringBufferSize": 1,
   "ringBufferCapacity": 4096,
-  "lastRetiredWorldId": 7,
-  "lastRetireEpoch": 7,
-  "lastRetireTimestampUs": 37503935485,
+  "lastRetiredWorldId": 0,
+  "lastRetireEpoch": 0,
+  "lastRetireTimestampUs": 0,
   "recentRecords": [
     {
       "worldId": 1,
       "publishEpoch": 1,
       "retireEpoch": 0,
-      "publishTimestampUs": 37462863544,
+      "publishTimestampUs": 1162690887,
       "retireTimestampUs": 0,
       "correlationIdShort": 1
-    },
-    {
-      "worldId": 2,
-      "publishEpoch": 2,
-      "retireEpoch": 0,
-      "publishTimestampUs": 37462999804,
-      "retireTimestampUs": 0,
-      "correlationIdShort": 2
-    },
-    {
-      "worldId": 3,
-      "publishEpoch": 3,
-      "retireEpoch": 0,
-      "publishTimestampUs": 37463483041,
-      "retireTimestampUs": 0,
-      "correlationIdShort": 3
-    },
-    {
-      "worldId": 4,
-      "publishEpoch": 4,
-      "retireEpoch": 0,
-      "publishTimestampUs": 37463707205,
-      "retireTimestampUs": 0,
-      "correlationIdShort": 4
-    },
-    {
-      "worldId": 5,
-      "publishEpoch": 5,
-      "retireEpoch": 0,
-      "publishTimestampUs": 37471782679,
-      "retireTimestampUs": 0,
-      "correlationIdShort": 5
-    },
-    {
-      "worldId": 7,
-      "publishEpoch": 7,
-      "retireEpoch": 0,
-      "publishTimestampUs": 37473820063,
-      "retireTimestampUs": 0,
-      "correlationIdShort": 7
-    },
-    {
-      "worldId": 8,
-      "publishEpoch": 8,
-      "retireEpoch": 0,
-      "publishTimestampUs": 37503929797,
-      "retireTimestampUs": 0,
-      "correlationIdShort": 8
     }
   ]
 }
