@@ -330,7 +330,11 @@ private:
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
         const double q = _mm_cvtsd_f64(d);
-        return q * scale;
+        // ビット深度に応じた動的クランプ（16bit: ±32768, 24bit: ±8388608, 32bit: ±2147483648）
+        const double maxQ = invScale - 1.0;
+        const double minQ = -invScale;
+        const double clamped = std::clamp(q, minQ, maxQ);
+        return clamped * scale;
     }
 
     static constexpr std::array<double, 10> PRESET_SAMPLE_RATES = {

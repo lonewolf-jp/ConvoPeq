@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("EtwWaitTimeAnalyzer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a85255879f0f893b0a48a0eb73fbb16b890ba67e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ac1fdfa3a402906dec0c1b042b5f85fa76a02c7c")]
 [assembly: System.Reflection.AssemblyProductAttribute("EtwWaitTimeAnalyzer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("EtwWaitTimeAnalyzer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

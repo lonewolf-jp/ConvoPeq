@@ -703,9 +703,11 @@ void DeviceSettings::updateGainStagingDisplay()
 
     const double currentInput = static_cast<double>(audioEngine.getInputHeadroomDb());
     const double currentMakeup = static_cast<double>(audioEngine.getOutputMakeupDb());
-    if (std::abs(inputHeadroomEditor.getText().getDoubleValue() - currentInput) > 1.0e-6)
+    if (!inputHeadroomEditor.hasKeyboardFocus(false) &&
+        std::abs(inputHeadroomEditor.getText().getDoubleValue() - currentInput) > 1.0e-6)
         inputHeadroomEditor.setText(juce::String(currentInput, 1), juce::dontSendNotification);
-    if (std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
+    if (!outputMakeupEditor.hasKeyboardFocus(false) &&
+        std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
         outputMakeupEditor.setText(juce::String(currentMakeup, 1), juce::dontSendNotification);
 
     // ★ v14.0: Auto Gain Toggle 同期

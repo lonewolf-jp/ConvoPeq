@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-20 15:07:01
+> Generated: 2026-07-20 19:39:27
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -301,7 +301,7 @@
 
 ```
 #============================================================================
-# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
+# CMakeLists.txt  ── v0.6.10 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
 # ビルド環境:
 #   - JUCE: 8.0.12
@@ -1202,8 +1202,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # グローバルReleaseフラグ: /GL と /arch:AVX2 は含めない（ConvoPeq ターゲットに個別適用済み）
     # /GL → INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE で自動追加
     # /arch:AVX2 → target_compile_options(ConvoPeq PRIVATE /arch:AVX2) で追加
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi")
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
 
     # Debugフラグを明示設定（CMakeデフォルトに /utf-8 /bigobj /Zm400 を追加）
     # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
@@ -1276,8 +1276,8 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     )
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
-    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi")
-    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi")
+    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
+    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
     target_compile_options(ConvoPeq PRIVATE
         $<$<CONFIG:Release>:/Qipo>

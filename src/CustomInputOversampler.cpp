@@ -171,8 +171,11 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     // Unroll 4x to hide FMA latency (16 elements per main loop)
     for (; i <= n - 16; i += 16)
     {
-        _mm_prefetch(reinterpret_cast<const char*>(x + i + 64), _MM_HINT_T0);
-        _mm_prefetch(reinterpret_cast<const char*>(coeffs + i + 64), _MM_HINT_T0);
+        // Guard: prefetch only when within buffer bounds (safety fix, not performance optimization)
+        if (i + 64 < n) {
+            _mm_prefetch(reinterpret_cast<const char*>(x + i + 64), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(coeffs + i + 64), _MM_HINT_T0);
+        }
 
         acc0 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i),      _mm256_load_pd(coeffs + i),      acc0);
         acc1 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 4),  _mm256_load_pd(coeffs + i + 4),  acc1);

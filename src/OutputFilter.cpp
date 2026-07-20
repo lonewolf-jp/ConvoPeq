@@ -45,7 +45,8 @@ BiquadCoeff OutputFilter::makeLPF(double fc, double Q, double fs) noexcept
 
 BiquadCoeff OutputFilter::makeHPF(double fc, double Q, double fs) noexcept
 {
-    if (fc <= 0.0 || Q <= 0.0 || fs <= 0.0)
+    const double nyq = fs * 0.4999;
+    if (fc <= 0.0 || fc >= nyq || Q <= 0.0 || fs <= 0.0)
         return makeIdentity();
 
     const double w0    = 2.0 * juce::MathConstants<double>::pi * fc / fs;

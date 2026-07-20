@@ -85,7 +85,8 @@ static void applyClampProtection(IRConverter::ScaleFactorResult& result,
                                   double scale,
                                   const IRAnalysisResult& analysis,
                                   const juce::AudioBuffer<double>* currentIr,
-                                  double currentScale) noexcept
+                                  double currentScale,
+                                  const juce::AudioBuffer<double>& ir) noexcept
 {
     double peakAttenDb = 0.0, rmsAttenDb = 0.0, freqAttenDb = 0.0;
 
@@ -146,7 +147,7 @@ static void applyClampProtection(IRConverter::ScaleFactorResult& result,
         };
 
         const auto [currentPeak, currentRms] = computePeakAndRmsWithScale(*currentIr, currentScale);
-        const auto [newPeak, newRms] = computePeakAndRmsWithScale(*currentIr, result.scaleFactor);
+        const auto [newPeak, newRms] = computePeakAndRmsWithScale(ir, result.scaleFactor);
 
         const bool excessivePeakJump = currentPeak > 1.0e-9 && newPeak > currentPeak * 4.0 && newPeak > 0.5;
         const bool excessiveRmsJump = currentRms > 1.0e-9 && newRms > currentRms * 4.0 && newRms > 0.25;
@@ -189,7 +190,7 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
     const auto analysis = analyzeIR(ir, scale);
 
     // 第3段: 保護クランプ
-    applyClampProtection(result, scale, analysis, currentIr, currentScale);
+    applyClampProtection(result, scale, analysis, currentIr, currentScale, ir);
 
     return result;
 }
