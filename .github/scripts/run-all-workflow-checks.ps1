@@ -37,12 +37,12 @@ Write-Host "`n===== isr-authority-compliance.yml - Static checks ====="
 
 # P1 Phase1-B: Legacy PublicationIntent
 $legacyErrors = @()
-if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "struct PublicationIntent|struct PublicationLog" -Quiet) {
+if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "struct PublicationIntent|struct PublicationLog" -Quiet -ErrorAction SilentlyContinue) {
     $legacyErrors += "PublicationIntent/PublicationLog struct still exists"
 }
 $legacyFuncs = @("appendPublicationIntentForCommit", "drainPublicationLogForShutdown", "hasPublicationLogPending")
 foreach ($f in $legacyFuncs) {
-    if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "\b$f\s*\(" -Quiet) {
+    if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "\b$f\s*\(" -Quiet -ErrorAction SilentlyContinue) {
         $legacyErrors += "Legacy function $f still exists"
     }
 }
@@ -55,7 +55,7 @@ if ($legacyErrors.Count -gt 0) {
 }
 
 # P14: Partial publication
-if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "publish\(generation|publish\(dsp" -Quiet) {
+if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "publish\(generation|publish\(dsp" -Quiet -ErrorAction SilentlyContinue) {
     Write-Host "FAIL: P14 partial publication detected"
     $failed = $true
 } else {
@@ -64,7 +64,7 @@ if (Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "publish\(genera
 
 # P3: Direct EpochDomain::enqueueRetire (new code only - full scan as approximation)
 $epochErrors = @()
-$epochFiles = Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "EpochDomain.*enqueueRetire" -SimpleMatch
+$epochFiles = Select-String -Path "$PSScriptRoot\..\..\src\**\*" -Pattern "EpochDomain.*enqueueRetire" -SimpleMatch -ErrorAction SilentlyContinue
 foreach ($f in $epochFiles) {
     if ($f.Line -notmatch "Coordinator") {
         $epochErrors += "$($f.Filename):$($f.LineNumber) - $($f.Line.Trim())"

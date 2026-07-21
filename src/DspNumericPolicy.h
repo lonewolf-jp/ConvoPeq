@@ -218,6 +218,40 @@ inline float killDenormal(float x) noexcept
 #endif
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 全ての非有限値（NaN・±Inf）を 0.0 に置換するヘルパー関数
+// 前提: IEEE754 binary32/binary64
+// ─────────────────────────────────────────────────────────────────
+
+static_assert(std::numeric_limits<double>::is_iec559, "IEEE754 binary64 前提");
+static_assert(std::numeric_limits<float>::is_iec559, "IEEE754 binary32 前提");
+
+inline double replaceNonFiniteWithZero(double x) noexcept
+{
+#if JUCE_DEBUG || defined(_DEBUG)
+    // Debug: 全ての非有限値（NaN・±Inf）の発生をアサーションで検出
+    jassert(std::isfinite(x));
+#endif
+    constexpr uint64_t kExponentMask = 0x7FF0000000000000ULL;
+    const uint64_t bits = std::bit_cast<uint64_t>(x);
+    // IEEE754: 指数部が全て1の値は NaN または ±Inf のみ
+    //   指数部==all ones && 仮数部==0 → ±Inf
+    //   指数部==all ones && 仮数部!=0 → NaN (quiet/signaling)
+    const bool isNonFinite = (bits & kExponentMask) == kExponentMask;
+    return isNonFinite ? 0.0 : x;
+}
+
+inline float replaceNonFiniteWithZero(float x) noexcept
+{
+#if JUCE_DEBUG || defined(_DEBUG)
+    jassert(std::isfinite(x));
+#endif
+    constexpr uint32_t kExponentMask = 0x7F800000U;
+    const uint32_t bits = std::bit_cast<uint32_t>(x);
+    const bool isNonFinite = (bits & kExponentMask) == kExponentMask;
+    return isNonFinite ? 0.0f : x;
+}
+
 inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
 {
 #if defined(__AVX2__) || defined(_M_AVX2)

@@ -92,6 +92,12 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
 
 void RetireRuntime::emitRetireIntentRT(const RetireIntent& intent) noexcept
 {
+    // ★ Finding 9: 「RT」は RealTime thread safety を意味しない。
+    //   実装は emitRetireIntent() を素通しし、輻輳時に std::mutex をロックする。
+    //   現時点では呼び出し元は全て非 RT スレッドであることを確認済み。
+    //   将来 Audio Thread から呼び出す場合は、mutex を使わない別実装を用意すること。
+    //   将来リネーム予定: emitRetireIntentFromNonRT（バージョンアップ時に実施）
+    //   注: jassert(!isAudioThread()) は ISRRetire.cpp では JUCE ヘッダ未インクルードのため使用不可
     emitRetireIntent(intent);
 }
 

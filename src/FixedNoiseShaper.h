@@ -175,7 +175,9 @@ private:
 
         const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
         idx = (idx - 1 + ORDER) % ORDER;
-        channelErrors[static_cast<size_t>(idx)] = killDenormal(clampedError);
+        // ★ NaN 伝播防止: error が NaN の場合、clampedError も NaN になるため
+        //   channelErrors に格納する前にサニタイズが必要
+        channelErrors[static_cast<size_t>(idx)] = killDenormal(replaceNonFiniteWithZero(clampedError));
 
         return yq;
     }
@@ -268,6 +270,9 @@ private:
 
     inline double quantize(double v, Xoshiro256State& rng) const noexcept
     {
+        // ★ Bug A/B/D: 全ての非有限値（NaN・±Inf）を 0.0 に置換（入口）
+        v = replaceNonFiniteWithZero(v);
+
         const double minV = -1.0;
         const double maxV = 1.0 - (1.0 / invScale);
 
@@ -285,7 +290,9 @@ private:
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
         const double q = _mm_cvtsd_f64(d);
-        return q * scale;
+
+        // ★ Bug A/B/D: 全ての非有限値（NaN・±Inf）を 0.0 に置換（出口）
+        return replaceNonFiniteWithZero(q * scale);
     }
 
     static constexpr std::array<double, 10> PRESET_SAMPLE_RATES = {

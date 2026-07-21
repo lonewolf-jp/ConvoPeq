@@ -127,7 +127,12 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     int activeDelayCapacity = delayBufferCapacity;
 
     if (delayBuf[0] == nullptr || delayBuf[1] == nullptr || activeDelayCapacity < DELAY_BUFFER_SIZE)
+    {
+        // ★ Bug 2: delayBuffer が未確保の場合は無音を出力（stale data 防止）
+        for (int ch = 0; ch < procChannels; ++ch)
+            juce::FloatVectorOperations::clear(block.getChannelPointer(static_cast<size_t>(ch)), numSamples);
         return;
+    }
 
     const int algorithmLatency = conv.storedDirectHeadEnabled ? 0 : juce::jmax(0, conv.latency);
     const int irPeakLatency = juce::jmax(0, conv.irLatency);
@@ -152,9 +157,11 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     }
 
     // 2) 遅延した信号を出力へ戻す
+    // DELAY_BUFFER_MASK = 2^n - 1 であるため、`& DELAY_BUFFER_MASK` の結果は常に非負。
+    // したがって `if (readPos < 0)` は死コード。
     int readPos = (writePos - delaySamples) & DELAY_BUFFER_MASK;
-    if (readPos < 0)
-        readPos += DELAY_BUFFER_SIZE;
+    // if (readPos < 0)
+    //     readPos += DELAY_BUFFER_SIZE;
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
@@ -1146,14 +1153,18 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
     if (nucConvolvers[channel])
         nucConvolvers[channel]->checkGuards();
 #endif
-    if (channel < 0 || channel >= 2 || !nucConvolvers[channel])
+    // ★ bug3-3: numSamples <= 0 の防御チェック
+    if (channel < 0 || channel >= 2 || !nucConvolvers[channel] || numSamples <= 0)
     {
-        std::memset(out, 0, numSamples * sizeof(double));
+        if (numSamples > 0)
+            std::memset(out, 0, numSamples * sizeof(double));
         return;
     }
 
     nucConvolvers[channel]->Add(in, numSamples);
     const int got = nucConvolvers[channel]->Get(out, numSamples);
+    // ★ bug3-8: got >= 0 && got <= numSamples の防御チェック
+    jassert(got >= 0 && got <= numSamples);
     if (got < numSamples)
         std::memset(out + got, 0, (numSamples - got) * sizeof(double));
 }

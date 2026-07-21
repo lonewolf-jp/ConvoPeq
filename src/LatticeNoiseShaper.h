@@ -281,7 +281,9 @@ private:
         const double shapedInputClean = (inputSample * headroom) + feedback;
         const double quantized = quantize(shapedInputClean, rngState[channel]);
         const double error = quantized - shapedInputClean;
-        const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
+        // ★ NaN 伝播防止: error が NaN の場合、clampedError も NaN になるため
+        //   advanceState に渡す前にサニタイズが必要
+        const double clampedError = std::clamp(replaceNonFiniteWithZero(error), -2.0 * scale, 2.0 * scale);
         advanceState(channelState, clampedError, activeCoeffs);
         return quantized;
     }

@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-20 19:39:27
+> Generated: 2026-07-20 23:35:52
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -7532,8 +7532,11 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     // Unroll 4x to hide FMA latency (16 elements per main loop)
     for (; i <= n - 16; i += 16)
     {
-        _mm_prefetch(reinterpret_cast<const char*>(x + i + 64), _MM_HINT_T0);
-        _mm_prefetch(reinterpret_cast<const char*>(coeffs + i + 64), _MM_HINT_T0);
+        // Guard: prefetch only when within buffer bounds (safety fix, not performance optimization)
+        if (i + 64 < n) {
+            _mm_prefetch(reinterpret_cast<const char*>(x + i + 64), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(coeffs + i + 64), _MM_HINT_T0);
+        }
 
         acc0 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i),      _mm256_load_pd(coeffs + i),      acc0);
         acc1 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 4),  _mm256_load_pd(coeffs + i + 4),  acc1);
@@ -9490,9 +9493,11 @@ void DeviceSettings::updateGainStagingDisplay()
 
     const double currentInput = static_cast<double>(audioEngine.getInputHeadroomDb());
     const double currentMakeup = static_cast<double>(audioEngine.getOutputMakeupDb());
-    if (std::abs(inputHeadroomEditor.getText().getDoubleValue() - currentInput) > 1.0e-6)
+    if (!inputHeadroomEditor.hasKeyboardFocus(false) &&
+        std::abs(inputHeadroomEditor.getText().getDoubleValue() - currentInput) > 1.0e-6)
         inputHeadroomEditor.setText(juce::String(currentInput, 1), juce::dontSendNotification);
-    if (std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
+    if (!outputMakeupEditor.hasKeyboardFocus(false) &&
+        std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
         outputMakeupEditor.setText(juce::String(currentMakeup, 1), juce::dontSendNotification);
 
     // ★ v14.0: Auto Gain Toggle 同期
@@ -12205,7 +12210,11 @@ private:
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
         const double q = _mm_cvtsd_f64(d);
-        return q * scale;
+        // ビット深度に応じた動的クランプ（16bit: ±32768, 24bit: ±8388608, 32bit: ±2147483648）
+        const double maxQ = invScale - 1.0;
+        const double minQ = -invScale;
+        const double clamped = std::clamp(q, minQ, maxQ);
+        return clamped * scale;
     }
 
     static constexpr std::array<double, 10> PRESET_SAMPLE_RATES = {
@@ -13113,7 +13122,8 @@ static void applyClampProtection(IRConverter::ScaleFactorResult& result,
                                   double scale,
                                   const IRAnalysisResult& analysis,
                                   const juce::AudioBuffer<double>* currentIr,
-                                  double currentScale) noexcept
+                                  double currentScale,
+                                  const juce::AudioBuffer<double>& ir) noexcept
 {
     double peakAttenDb = 0.0, rmsAttenDb = 0.0, freqAttenDb = 0.0;
 
@@ -13174,7 +13184,7 @@ static void applyClampProtection(IRConverter::ScaleFactorResult& result,
         };
 
         const auto [currentPeak, currentRms] = computePeakAndRmsWithScale(*currentIr, currentScale);
-        const auto [newPeak, newRms] = computePeakAndRmsWithScale(*currentIr, result.scaleFactor);
+        const auto [newPeak, newRms] = computePeakAndRmsWithScale(ir, result.scaleFactor);
 
         const bool excessivePeakJump = currentPeak > 1.0e-9 && newPeak > currentPeak * 4.0 && newPeak > 0.5;
         const bool excessiveRmsJump = currentRms > 1.0e-9 && newRms > currentRms * 4.0 && newRms > 0.25;
@@ -13217,7 +13227,7 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
     const auto analysis = analyzeIR(ir, scale);
 
     // 第3段: 保護クランプ
-    applyClampProtection(result, scale, analysis, currentIr, currentScale);
+    applyClampProtection(result, scale, analysis, currentIr, currentScale, ir);
 
     return result;
 }
@@ -14020,7 +14030,12 @@ private:
 
         __m128d rounded = _mm_set_sd(value * invScale);
         rounded = _mm_round_sd(rounded, rounded, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-        return _mm_cvtsd_f64(rounded) * scale;
+        const double q = _mm_cvtsd_f64(rounded);
+        // ビット深度に応じた動的クランプ（16bit: ±32768, 24bit: ±8388608, 32bit: ±2147483648）
+        const double maxQ = invScale - 1.0;
+        const double minQ = -invScale;
+        const double clamped = std::clamp(q, minQ, maxQ);
+        return clamped * scale;
     }
 
     inline double computeFeedback(const std::array<double, kOrder>& channelState,
@@ -23155,7 +23170,8 @@ BiquadCoeff OutputFilter::makeLPF(double fc, double Q, double fs) noexcept
 
 BiquadCoeff OutputFilter::makeHPF(double fc, double Q, double fs) noexcept
 {
-    if (fc <= 0.0 || Q <= 0.0 || fs <= 0.0)
+    const double nyq = fs * 0.4999;
+    if (fc <= 0.0 || fc >= nyq || Q <= 0.0 || fs <= 0.0)
         return makeIdentity();
 
     const double w0    = 2.0 * juce::MathConstants<double>::pi * fc / fs;

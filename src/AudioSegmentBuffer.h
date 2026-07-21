@@ -25,6 +25,14 @@ public:
         if (left == nullptr || right == nullptr || numSamples <= 0)
             return;
 
+        // ★ Bug C: 境界チェック（drop 方針）
+        //   kCapacity を超える入力は契約違反。状態を変更せず return。
+        if (numSamples > kCapacity)
+        {
+            jassert(numSamples <= kCapacity);
+            return;
+        }
+
         // acquire: 直前の clear/pushBlock の release と HB し、有効な writePosition を取得。
         const int currentWritePos = convo::consumeAtomic(writePosition, std::memory_order_acquire);
         int first = std::min(numSamples, kCapacity - currentWritePos);

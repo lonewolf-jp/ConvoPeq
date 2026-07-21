@@ -717,15 +717,60 @@ private:
               const convo::FilterSpec* filterSpec = nullptr,
               ConvolverProcessor* ownerProcessor = nullptr)
         {
-            // Safety: Free existing data if init is called multiple times (Leak prevention)
+            // ============================================================
+            // ★ Bug H: Strong Exception Guarantee 実現
+            //   Phase 1: すべてローカル変数で初期化を実行（メンバー未更新）
+            //   Phase 2: 全成功後にのみメンバーを一括更新（commit）
+            // ============================================================
+
+            // Phase 1: ローカル変数で初期化
+            // ScopedAlignedArray は POD 配列用の RAII ラッパー
+            convo::ScopedAlignedArray<double> newIrL(irL);
+            convo::ScopedAlignedArray<double> newIrR(irR);
+
+            auto newNuc0 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
+            auto newNuc1 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
+
+            if (!newNuc0->SetImpulse(newIrL.get(), length, knownBlockSize, scale, enableDirectHead, filterSpec))
+            {
+                DBG("Convolver: init failed - SetImpulse ch0 failed");
+                return false;
+            }
+            if (!newNuc1->SetImpulse(newIrR.get(), length, knownBlockSize, scale, enableDirectHead, filterSpec))
+            {
+                DBG("Convolver: init failed - SetImpulse ch1 failed");
+                return false;
+            }
+
+            // ============================================================
+            // Phase 2: 全成功 — メンバーを一括更新（commit）
+            //
+            // ★ noexcept 根拠:
+            //   - destroyNUCConvolver: ~MKLNonUniformConvolver() (noexcept 前提) + mkl_free (C関数)
+            //   - ScopedAlignedArray::release: aligned_free (mkl_free wrapper, noexcept)
+            //   - std::move(unique_ptr): noexcept
+            //   - unique_ptr::release: noexcept
+            //   - メンバー代入: noexcept
+            // ============================================================
+
+            // getLatency は commit 前に取得（将来変更への耐性）
+            const int newLatency = newNuc0->getLatency();
+
+            // 既存リソースを解放
+            destroyNUCConvolver(nucConvolvers[0]);
+            destroyNUCConvolver(nucConvolvers[1]);
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
             if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
 
-            // Ownership transfer
-            irData[0] = irL;
-            irData[1] = irR;
+            // 一括コミット
+            irData[0] = newIrL.release();
+            irData[1] = newIrR.release();
+            nucConvolvers[0] = newNuc0.release();
+            nucConvolvers[1] = newNuc1.release();
+
             irDataLength = length;
             this->irLatency = peakDelay;
+            latency = newLatency;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             storedSampleRate = sr;
             storedKnownBlockSize = knownBlockSize;
@@ -738,41 +783,8 @@ private:
                 hasStoredFilterSpec = false;
             }
 
-            try
-            {
-                auto nuc0 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
-                auto nuc1 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
-
-                if (nuc0->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
-                    nuc1->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
-                {
-                    destroyNUCConvolver(nucConvolvers[0]);
-                    destroyNUCConvolver(nucConvolvers[1]);
-                    nucConvolvers[0] = nuc0.release();
-                    nucConvolvers[1] = nuc1.release();
-
-                    latency   = nucConvolvers[0]->getLatency();
-                    DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
-                    if (ownerProcessor != nullptr)
-                    {
-                    }
-                    return true;
-                }
-            }
-            catch (const std::bad_alloc&)
-            {
-                // Fall through to cleanup on memory allocation failure
-            }
-
-            // NUC セットアップ失敗 or メモリ確保失敗
-            destroyNUCConvolver(nucConvolvers[0]);
-            destroyNUCConvolver(nucConvolvers[1]);
-            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
-            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
-            irDataLength = 0;
-            latency = 0;
-            this->irLatency = 0;
-            return false;
+            DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
+            return true;
         }
 
         // Deep Copyを作成する。
@@ -838,6 +850,8 @@ private:
     // juce::dsp::DelayLine<double> delayLine; // Replaced with custom AVX2 ring buffer
     convo::ScopedAlignedPtr<double> delayBuffer[2]; // L/R separate buffers
     int delayBufferCapacity = 0;
+    // ★ bug3-6: API 契約: reset() は Audio Thread 停止後にのみ呼び出すこと。
+    //   Audio Thread 実行中に reset() を呼び出すとデータレースが発生する。
     int delayWritePos = 0;
     convo::LinearRamp latencySmoother;
     // [Issue 2 fix] latencySmoother のスレッドセーフティ向上のためのペンディングフラグ。

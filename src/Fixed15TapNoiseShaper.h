@@ -215,7 +215,7 @@ private:
         outError = error;
 
         const double clampedError = saturateAVX2(error, -2.0 * scale, 2.0 * scale);
-        const double denormalFreeError = killDenormal(clampedError);
+        const double denormalFreeError = killDenormal(replaceNonFiniteWithZero(clampedError));
         idx = (idx - 1 + ORDER) % ORDER;
         channelErrors[static_cast<size_t>(idx)] = denormalFreeError;
 
