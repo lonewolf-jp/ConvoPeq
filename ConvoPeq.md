@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-20 23:35:52
+> Generated: 2026-07-22 00:35:05
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -2891,6 +2891,14 @@ public:
     {
         if (left == nullptr || right == nullptr || numSamples <= 0)
             return;
+
+        // ★ Bug C: 境界チェック（drop 方針）
+        //   kCapacity を超える入力は契約違反。状態を変更せず return。
+        if (numSamples > kCapacity)
+        {
+            jassert(numSamples <= kCapacity);
+            return;
+        }
 
         // acquire: 直前の clear/pushBlock の release と HB し、有効な writePosition を取得。
         const int currentWritePos = convo::consumeAtomic(writePosition, std::memory_order_acquire);
@@ -6370,15 +6378,60 @@ private:
               const convo::FilterSpec* filterSpec = nullptr,
               ConvolverProcessor* ownerProcessor = nullptr)
         {
-            // Safety: Free existing data if init is called multiple times (Leak prevention)
+            // ============================================================
+            // ★ Bug H: Strong Exception Guarantee 実現
+            //   Phase 1: すべてローカル変数で初期化を実行（メンバー未更新）
+            //   Phase 2: 全成功後にのみメンバーを一括更新（commit）
+            // ============================================================
+
+            // Phase 1: ローカル変数で初期化
+            // ScopedAlignedArray は POD 配列用の RAII ラッパー
+            convo::ScopedAlignedArray<double> newIrL(irL);
+            convo::ScopedAlignedArray<double> newIrR(irR);
+
+            auto newNuc0 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
+            auto newNuc1 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
+
+            if (!newNuc0->SetImpulse(newIrL.get(), length, knownBlockSize, scale, enableDirectHead, filterSpec))
+            {
+                DBG("Convolver: init failed - SetImpulse ch0 failed");
+                return false;
+            }
+            if (!newNuc1->SetImpulse(newIrR.get(), length, knownBlockSize, scale, enableDirectHead, filterSpec))
+            {
+                DBG("Convolver: init failed - SetImpulse ch1 failed");
+                return false;
+            }
+
+            // ============================================================
+            // Phase 2: 全成功 — メンバーを一括更新（commit）
+            //
+            // ★ noexcept 根拠:
+            //   - destroyNUCConvolver: ~MKLNonUniformConvolver() (noexcept 前提) + mkl_free (C関数)
+            //   - ScopedAlignedArray::release: aligned_free (mkl_free wrapper, noexcept)
+            //   - std::move(unique_ptr): noexcept
+            //   - unique_ptr::release: noexcept
+            //   - メンバー代入: noexcept
+            // ============================================================
+
+            // getLatency は commit 前に取得（将来変更への耐性）
+            const int newLatency = newNuc0->getLatency();
+
+            // 既存リソースを解放
+            destroyNUCConvolver(nucConvolvers[0]);
+            destroyNUCConvolver(nucConvolvers[1]);
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
             if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
 
-            // Ownership transfer
-            irData[0] = irL;
-            irData[1] = irR;
+            // 一括コミット
+            irData[0] = newIrL.release();
+            irData[1] = newIrR.release();
+            nucConvolvers[0] = newNuc0.release();
+            nucConvolvers[1] = newNuc1.release();
+
             irDataLength = length;
             this->irLatency = peakDelay;
+            latency = newLatency;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             storedSampleRate = sr;
             storedKnownBlockSize = knownBlockSize;
@@ -6391,41 +6444,8 @@ private:
                 hasStoredFilterSpec = false;
             }
 
-            try
-            {
-                auto nuc0 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
-                auto nuc1 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
-
-                if (nuc0->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
-                    nuc1->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
-                {
-                    destroyNUCConvolver(nucConvolvers[0]);
-                    destroyNUCConvolver(nucConvolvers[1]);
-                    nucConvolvers[0] = nuc0.release();
-                    nucConvolvers[1] = nuc1.release();
-
-                    latency   = nucConvolvers[0]->getLatency();
-                    DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
-                    if (ownerProcessor != nullptr)
-                    {
-                    }
-                    return true;
-                }
-            }
-            catch (const std::bad_alloc&)
-            {
-                // Fall through to cleanup on memory allocation failure
-            }
-
-            // NUC セットアップ失敗 or メモリ確保失敗
-            destroyNUCConvolver(nucConvolvers[0]);
-            destroyNUCConvolver(nucConvolvers[1]);
-            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
-            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
-            irDataLength = 0;
-            latency = 0;
-            this->irLatency = 0;
-            return false;
+            DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
+            return true;
         }
 
         // Deep Copyを作成する。
@@ -6491,6 +6511,8 @@ private:
     // juce::dsp::DelayLine<double> delayLine; // Replaced with custom AVX2 ring buffer
     convo::ScopedAlignedPtr<double> delayBuffer[2]; // L/R separate buffers
     int delayBufferCapacity = 0;
+    // ★ bug3-6: API 契約: reset() は Audio Thread 停止後にのみ呼び出すこと。
+    //   Audio Thread 実行中に reset() を呼び出すとデータレースが発生する。
     int delayWritePos = 0;
     convo::LinearRamp latencySmoother;
     // [Issue 2 fix] latencySmoother のスレッドセーフティ向上のためのペンディングフラグ。
@@ -10756,6 +10778,40 @@ inline float killDenormal(float x) noexcept
 #endif
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 全ての非有限値（NaN・±Inf）を 0.0 に置換するヘルパー関数
+// 前提: IEEE754 binary32/binary64
+// ─────────────────────────────────────────────────────────────────
+
+static_assert(std::numeric_limits<double>::is_iec559, "IEEE754 binary64 前提");
+static_assert(std::numeric_limits<float>::is_iec559, "IEEE754 binary32 前提");
+
+inline double replaceNonFiniteWithZero(double x) noexcept
+{
+#if JUCE_DEBUG || defined(_DEBUG)
+    // Debug: 全ての非有限値（NaN・±Inf）の発生をアサーションで検出
+    jassert(std::isfinite(x));
+#endif
+    constexpr uint64_t kExponentMask = 0x7FF0000000000000ULL;
+    const uint64_t bits = std::bit_cast<uint64_t>(x);
+    // IEEE754: 指数部が全て1の値は NaN または ±Inf のみ
+    //   指数部==all ones && 仮数部==0 → ±Inf
+    //   指数部==all ones && 仮数部!=0 → NaN (quiet/signaling)
+    const bool isNonFinite = (bits & kExponentMask) == kExponentMask;
+    return isNonFinite ? 0.0 : x;
+}
+
+inline float replaceNonFiniteWithZero(float x) noexcept
+{
+#if JUCE_DEBUG || defined(_DEBUG)
+    jassert(std::isfinite(x));
+#endif
+    constexpr uint32_t kExponentMask = 0x7F800000U;
+    const uint32_t bits = std::bit_cast<uint32_t>(x);
+    const bool isNonFinite = (bits & kExponentMask) == kExponentMask;
+    return isNonFinite ? 0.0f : x;
+}
+
 inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
 {
 #if defined(__AVX2__) || defined(_M_AVX2)
@@ -12095,7 +12151,7 @@ private:
         outError = error;
 
         const double clampedError = saturateAVX2(error, -2.0 * scale, 2.0 * scale);
-        const double denormalFreeError = killDenormal(clampedError);
+        const double denormalFreeError = killDenormal(replaceNonFiniteWithZero(clampedError));
         idx = (idx - 1 + ORDER) % ORDER;
         channelErrors[static_cast<size_t>(idx)] = denormalFreeError;
 
@@ -12558,7 +12614,9 @@ private:
 
         const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
         idx = (idx - 1 + ORDER) % ORDER;
-        channelErrors[static_cast<size_t>(idx)] = killDenormal(clampedError);
+        // ★ NaN 伝播防止: error が NaN の場合、clampedError も NaN になるため
+        //   channelErrors に格納する前にサニタイズが必要
+        channelErrors[static_cast<size_t>(idx)] = killDenormal(replaceNonFiniteWithZero(clampedError));
 
         return yq;
     }
@@ -12651,6 +12709,9 @@ private:
 
     inline double quantize(double v, Xoshiro256State& rng) const noexcept
     {
+        // ★ Bug A/B/D: 全ての非有限値（NaN・±Inf）を 0.0 に置換（入口）
+        v = replaceNonFiniteWithZero(v);
+
         const double minV = -1.0;
         const double maxV = 1.0 - (1.0 / invScale);
 
@@ -12668,7 +12729,9 @@ private:
         __m128d d = _mm_set_sd(v * invScale);
         d = _mm_round_sd(d, d, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
         const double q = _mm_cvtsd_f64(d);
-        return q * scale;
+
+        // ★ Bug A/B/D: 全ての非有限値（NaN・±Inf）を 0.0 に置換（出口）
+        return replaceNonFiniteWithZero(q * scale);
     }
 
     static constexpr std::array<double, 10> PRESET_SAMPLE_RATES = {
@@ -14097,7 +14160,9 @@ private:
         const double shapedInputClean = (inputSample * headroom) + feedback;
         const double quantized = quantize(shapedInputClean, rngState[channel]);
         const double error = quantized - shapedInputClean;
-        const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
+        // ★ NaN 伝播防止: error が NaN の場合、clampedError も NaN になるため
+        //   advanceState に渡す前にサニタイズが必要
+        const double clampedError = std::clamp(replaceNonFiniteWithZero(error), -2.0 * scale, 2.0 * scale);
         advanceState(channelState, clampedError, activeCoeffs);
         return quantized;
     }
@@ -48254,6 +48319,12 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
 
 void RetireRuntime::emitRetireIntentRT(const RetireIntent& intent) noexcept
 {
+    // ★ Finding 9: 「RT」は RealTime thread safety を意味しない。
+    //   実装は emitRetireIntent() を素通しし、輻輳時に std::mutex をロックする。
+    //   現時点では呼び出し元は全て非 RT スレッドであることを確認済み。
+    //   将来 Audio Thread から呼び出す場合は、mutex を使わない別実装を用意すること。
+    //   将来リネーム予定: emitRetireIntentFromNonRT（バージョンアップ時に実施）
+    //   注: jassert(!isAudioThread()) は ISRRetire.cpp では JUCE ヘッダ未インクルードのため使用不可
     emitRetireIntent(intent);
 }
 
@@ -62023,7 +62094,12 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     int activeDelayCapacity = delayBufferCapacity;
 
     if (delayBuf[0] == nullptr || delayBuf[1] == nullptr || activeDelayCapacity < DELAY_BUFFER_SIZE)
+    {
+        // ★ Bug 2: delayBuffer が未確保の場合は無音を出力（stale data 防止）
+        for (int ch = 0; ch < procChannels; ++ch)
+            juce::FloatVectorOperations::clear(block.getChannelPointer(static_cast<size_t>(ch)), numSamples);
         return;
+    }
 
     const int algorithmLatency = conv.storedDirectHeadEnabled ? 0 : juce::jmax(0, conv.latency);
     const int irPeakLatency = juce::jmax(0, conv.irLatency);
@@ -62048,9 +62124,11 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     }
 
     // 2) 遅延した信号を出力へ戻す
+    // DELAY_BUFFER_MASK = 2^n - 1 であるため、`& DELAY_BUFFER_MASK` の結果は常に非負。
+    // したがって `if (readPos < 0)` は死コード。
     int readPos = (writePos - delaySamples) & DELAY_BUFFER_MASK;
-    if (readPos < 0)
-        readPos += DELAY_BUFFER_SIZE;
+    // if (readPos < 0)
+    //     readPos += DELAY_BUFFER_SIZE;
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
@@ -63042,14 +63120,18 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
     if (nucConvolvers[channel])
         nucConvolvers[channel]->checkGuards();
 #endif
-    if (channel < 0 || channel >= 2 || !nucConvolvers[channel])
+    // ★ bug3-3: numSamples <= 0 の防御チェック
+    if (channel < 0 || channel >= 2 || !nucConvolvers[channel] || numSamples <= 0)
     {
-        std::memset(out, 0, numSamples * sizeof(double));
+        if (numSamples > 0)
+            std::memset(out, 0, numSamples * sizeof(double));
         return;
     }
 
     nucConvolvers[channel]->Add(in, numSamples);
     const int got = nucConvolvers[channel]->Get(out, numSamples);
+    // ★ bug3-8: got >= 0 && got <= numSamples の防御チェック
+    jassert(got >= 0 && got <= numSamples);
     if (got < numSamples)
         std::memset(out + got, 0, (numSamples - got) * sizeof(double));
 }
