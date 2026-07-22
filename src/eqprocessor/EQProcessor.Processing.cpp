@@ -84,6 +84,22 @@ namespace
         return _mm_movemask_pd(validMask) == 0x3;
     }
 
+    // ── SSE2 ベクトル NaN/Inf 範囲チェック ──
+    // isFiniteAndAbsInRangeMask の __m128d ベクトル版。
+    // NaN/Inf または範囲外の要素は 0.0 に変換し、有効な要素はそのまま返す。
+    inline __m128d sanitizeFiniteInRangeV(
+        __m128d value, __m128d minAbsInclusive, __m128d maxAbsExclusive) noexcept
+    {
+        const __m128d diff = _mm_sub_pd(value, value);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+        const __m128d signMask = _mm_set1_pd(-0.0);
+        const __m128d absV = _mm_andnot_pd(signMask, value);
+        const __m128d geMinMask = _mm_cmpge_pd(absV, minAbsInclusive);
+        const __m128d ltMaxMask = _mm_cmplt_pd(absV, maxAbsExclusive);
+        const __m128d validMask = _mm_and_pd(finiteMask, _mm_and_pd(geMinMask, ltMaxMask));
+        return _mm_and_pd(value, validMask);
+    }
+
     // fastTanh（出力用）— ★ Bug3: 共通 Utility convo::dsp::fastTanh に委譲
     //   係数は現行の 27/9 を維持（DefaultFastTanhPolicy）。
     //   Padé 近似の変更（5次/6次）は別チケットで実施。
@@ -232,10 +248,15 @@ namespace
                                     _mm_mul_pd(fastTanhV128Output(output), vSat));
             }
 
-            // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
-            const __m128d diff = _mm_sub_pd(output, output);
-            const __m128d mask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-            output = _mm_and_pd(output, mask);
+            // NaN/Infチェック + 範囲クランプ (processBand と一貫性を保つ)
+            {
+                const __m128d vMinZero = _mm_setzero_pd();
+                const __m128d vMaxRange = _mm_set1_pd(1.0e15);
+                output = sanitizeFiniteInRangeV(output, vMinZero, vMaxRange);
+                // ★ state 変数 NaN/Inf ガード (processBand と同等)
+                ic1eq = sanitizeFiniteInRangeV(ic1eq, vMinZero, vMaxRange);
+                ic2eq = sanitizeFiniteInRangeV(ic2eq, vMinZero, vMaxRange);
+            }
 
             // クランプ (-100, +100) で発散防止
             output = _mm_min_pd(_mm_max_pd(output, cLow), cHigh);

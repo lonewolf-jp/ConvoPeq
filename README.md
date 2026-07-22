@@ -10,6 +10,7 @@
 - Improved ISR Runtime Governance: Enhancements were made to the ISR (Intelligent State Reconstruction) publication adjuster, retirement router, and runtime builder. Capabilities for state transition monitoring, publication behavior verification, and graph consistency checks were expanded; additionally, bug fixes for `RuntimeWorldAuthorityProjection` and fade state management using `fadingRuntimeUuid` were implemented.
 - Enhanced Thread Affinity Management: The `ThreadAffinityManager` improved CPU affinity mask management for audio threads, adding support for the `AudioRealtime` thread type and dedicated mask settings introduced in "Work 64." Thread priority management on Windows was improved through MMCSS priority application capabilities and the `tryApplyMmcssForSelfManagedThread()` method.
 - Eliminated Real-Time Blockers in Audio Threads: Non-real-time operations within audio threads (such as `Logger::writeToLog()`, `std::hash`, and the `GetCurrentProcessorNumber()` syscall) were eliminated or conditionally compiled out. Issues involving CRT function calls and false sharing were resolved; furthermore, interrupt-free processing for real-time threads was ensured by making `ScopedNoDenormals` thread-local and enhancing the safety of atomic operations.
+
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
 ## Overview
@@ -77,14 +78,18 @@ ConvoPeq/
 │   │   ├── AudioEngine.Processing.*.cpp  # Audio thread core (DSPCore, Block, Latency)
 │   │   ├── AudioEngine.*.cpp            # Lifecycle, Timer, Commit, Rebuild, Retire
 │   │   └── ISR*.cpp                     # Closure, HB, Shutdown, Publication, Retire, etc.
-│   ├── eqprocessor/           # 20-band EQ split TU (6 files)
-│   │   └── EQProcessor.{Core,Coefficients,Parameters,Processing,ProcessingCache}.cpp
+│   ├── eqprocessor/           # 20-band EQ split + Analysis Subsystem (17 files)
+│   │   ├── EQProcessor.{Core,Coefficients,Parameters,Processing,ProcessingCache}.cpp
+│   │   └── PeakEstimator, UpperBoundEstimator, EQResponseSampler, BandHelper,
+│   │        AnalysisMerge, EQAnalysisMath, EQAnalysisTypes (analysis subsystem)
 │   ├── convolver/             # Convolution split TU (10 files)
-│   │   └── ConvolverProcessor.{Lifecycle,Rebuild,LoaderThread,...,StateAndUI}.cpp
-│   ├── core/                  # RCU snapshot foundation (37 files)
+│   │   └── ConvolverProcessor.{Lifecycle,Rebuild,LoaderThread,LoadPipeline,
+│   │                           MixedPhase,ResampleAndFallback,StateAndUI,Internal}.cpp
+│   ├── core/                  # RCU snapshot foundation (40 files)
 │   │   ├── EpochDomain.h      # 64-slot named reader domain (26 KB)
-│   │   ├── RCUReader.h, SnapshotCoordinator, GlobalSnapshot, DeletionQueue
-│   │   └── FadeEngine.h, WorkerThread, Types, CommandBuffer
+│   │   ├── RCUReader.h, SnapshotCoordinator, GlobalSnapshot, DeletionQueue, FadeEngine
+│   │   ├── WorkerThread, Types, CommandBuffer, SnapshotSlotStore, SnapshotRetireManager
+│   │   └── IEpochProvider, IPublicationProvider, IRetireRouter (Provider pattern)
 │   └── tests/                 # CTest regression suite (21 files)
 ├── config/                    # JSON authority manifests (4 files)
 ├── tools/                     # CodeGraph, CodeQL, CI verification scripts
@@ -114,7 +119,7 @@ ConvoPeq/
 ## Key Features
 
 ### Core DSP
-- **20-band parametric EQ** (`EQProcessor`, split TU: 6 files in `src/eqprocessor/`)
+- **20-band parametric EQ** (`EQProcessor`, split TU: 17 files in `src/eqprocessor/` incl. analysis subsystem)
   - TPT (Topology-Preserving Transform) State Variable Filters per band
   - `EQBandType`: LowShelf / Peaking / HighShelf / LowPass / HighPass
   - `EQChannelMode`: Stereo / Left / Right / Mid / Side (M/S processing)
@@ -128,15 +133,15 @@ ConvoPeq/
   - IR loading on dedicated background `LoaderThread` — no audio thread blocking
   - RCU (Read-Copy-Update) pattern for glitch-free IR handoff
   - Legacy `MKLNonUniformConvolver.cpp` retained for backward compatibility
-- **Runtime-selectable processing order**: EQ→Convolver, Convolver→EQ, or **Mixed (parallel)**
+- **Runtime-selectable processing order**: EQ→Convolver or Convolver→EQ
 - **Input oversampling**: 2×/4×/8× via `CustomInputOversampler` (IIRLike / LinearPhase presets)
 - **Output conditioning**: `OutputFilter` (HCF/LCF conditional on final processor), musical soft clipping with `fastTanh` (AVX2 vectorized), makeup gain
 
 ### Noise Shaping & Dithering
 - **PsychoacousticDither**: 12th-order error-feedback (GUI: "9th-order"), MKL VSL RNG + TPDF, `kCoeffTable[6][3][12]` per sample rate and bit depth
 - **FixedNoiseShaper**: 4th-order error-feedback, psychoacoustically tuned coefficients
-- **Fixed15TapNoiseShaper**: 15th-order error-feedback
-- **Adaptive 9th-order** (`NoiseShaperLearner`, 68 KB): lattice-ladder noise shaper with CMA-ES optimization on a dedicated worker thread, RCU coefficient handoff, per-(sample rate, bit depth, mode) banks, converge in 10–80 minutes
+- **Fixed15TapNoiseShaper**: 16th-order error-feedback (class name "15Tap" for legacy consistency, ORDER = 16)
+- **Adaptive 9th-order** (`NoiseShaperLearner`, 68 KB): lattice-ladder noise shaper with CMA-ES optimization on a dedicated worker thread, RCU coefficient handoff, per-(sample rate, bit depth, mode) banks, 6 learning modes (Shortest–Ultra), converge in 5–160 minutes
 
 ### Analysis & Metering
 - **Real-time spectrum analyzer** with EQ overlay (`SpectrumAnalyzerComponent`, 52 KB)
@@ -194,13 +199,13 @@ Typical logical flow (exact sequence from `SOUND_PROCESSING.md`):
 
 ```
 Input → Headroom Gain → DC Block → Oversampling (optional) →
-[EQ ↔ Convolver] (order selectable, or Mixed parallel) →
+[EQ ↔ Convolver] (order selectable) →
 OutputFilter (HCF/LCF or HPF/LPF conditional) →
 Soft Clip (musical, fastTanh, AVX2) → Makeup Gain →
 Dither/Noise Shaping → Downsampling (if OS) → Output
 ```
 
-- **Order is runtime-selectable**: EQ→Convolver, Convolver→EQ, or **Mixed** (parallel processing, blended by α mix ratio).
+- **Order is runtime-selectable**: EQ→Convolver or Convolver→EQ.
 - Oversampling factor: 1×/2×/4×/8× (IIRLike or LinearPhase preset).
 - Input headroom gain and output makeup gain are AVX2-optimized, gain values pre-converted to linear in the message thread (no `std::pow` on audio thread).
 - Convolver input trim is applied only when processing order is **EQ→Convolver** and both processors are active.
@@ -221,7 +226,7 @@ Phase modes: **As-Is / Minimum / Mixed**. Mixed mode blends linear-phase (low fr
 
 ### 5) EQ Strategy
 
-`EQProcessor` (split TU, 6 files in `src/eqprocessor/`) applies per-band parametric filtering in real time:
+`EQProcessor` (split TU, 17 files in `src/eqprocessor/`) applies per-band parametric filtering in real time:
 
 - **20-band TPT (Topology-Preserving Transform) SVF** based on Vadim Zavalishin's "The Art of VA Filter Design" — smooth parameter modulation, low noise.
 - **RCU-based coefficient handoff**: UI/worker thread creates new `EQState` / `BandNode`, publishes via `publishAtomic(currentStateBits, ...)`. Audio thread loads via `loadCurrentState(acquire)`.

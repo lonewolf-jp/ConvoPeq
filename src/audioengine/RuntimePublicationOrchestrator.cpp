@@ -123,7 +123,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     {
         const auto& ana = req.buildAnalysis;
         const auto& diag = req.buildDiagnostics;
-        const auto& osResult = req.oversamplingResult;
+        [[maybe_unused]] const auto& osResult = req.oversamplingResult;
         jassert(convo::verifyBuildBundle(ana, diag, osResult, req.sealedSnapshot));
         jassert(convo::verifyDiagnostics(diag));
         spec.analysis.eqMaxGainDb = ana.eqMaxGainDb;

@@ -9,30 +9,30 @@
     "crossfadeOnly": false,
     "retirePathOnly": true
   },
-  "totalTransitions": 20,
+  "totalTransitions": 12,
   "laneCounters": {
-    "rtIntent": 5,
-    "coordination": 5,
-    "epoch": 5,
-    "reclaim": 5,
+    "rtIntent": 3,
+    "coordination": 3,
+    "epoch": 3,
+    "reclaim": 3,
     "quarantine": 0
   },
   "lifecycleCounters": {
     "visible": 0,
-    "compareEligible": 5,
-    "telemetryRetained": 5,
+    "compareEligible": 3,
+    "telemetryRetained": 3,
     "replayRetainedOptional": 0,
-    "reclaimEligible": 5,
-    "reclaimed": 5
+    "reclaimEligible": 3,
+    "reclaimed": 3
   },
   "lifecycleSample": [
     {"slot": 0, "state": "visible"},
     {"slot": 1, "state": "reclaimed"},
     {"slot": 2, "state": "reclaimed"},
     {"slot": 3, "state": "reclaimed"},
-    {"slot": 4, "state": "reclaimed"},
-    {"slot": 5, "state": "reclaimed"},
+    {"slot": 4, "state": "visible"},
+    {"slot": 5, "state": "visible"},
     {"slot": 6, "state": "visible"},
     {"slot": 7, "state": "visible"}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":1170896629600}
+}

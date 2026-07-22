@@ -654,52 +654,69 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        bool isRebuild,
                                        const juce::File& file,
                                        double scaleFactor,
-                                       std::unique_ptr<juce::AudioBuffer<double>> displayIR)
+                                       std::unique_ptr<juce::AudioBuffer<double>> displayIR,
+                                       bool async)
 {
-    // 元データの更新 (新規ロード時のみ)
-    if (!isRebuild)
+    // Phase 1: PendingCommit 作成（任意スレッド）
+    auto commit = std::make_unique<PendingCommit>();
+    commit->newEngine = newConv;
+    commit->targetLength = targetLength;
+    commit->sampleRate = loadedSR;
+    commit->scaleFactor = scaleFactor;
+    commit->isRebuild = isRebuild;
+    commit->irFile = file;
+    commit->loadedIR = std::move(loadedIR);
+    commit->displayIR = std::move(displayIR);
+
+    // Phase 2: Message Thread でコミット実行
+    // WeakReference は callAsync 後のオブジェクト破棄に対する最後の安全弁。
+    //安全性は forceCleanup() による LoaderThread 停止との組み合わせで成立。
+    auto* commitPtr = commit.release();
+
+    if (!async)
     {
-        updateIRState(loadedIR, loadedSR);
-        {
-            const juce::ScopedLock sl(irFileLock);
-            currentIrFile = file;
-        }
-        irName = file.getFileNameWithoutExtension();
-        convo::publishAtomic(currentIRScale, scaleFactor, std::memory_order_release);  // release: Loader/Rebuild 側 currentIRScale acquire と HB
+        // 同期パス: rebuildAllIRsSynchronous() 等、呼び出し元が同期完了を要求する場合
+        auto ownedCommit = std::unique_ptr<PendingCommit>(commitPtr);
+        executePendingCommit(std::move(ownedCommit));
+        return;
     }
 
-    // スナップショット更新 (表示用)
-    if (visualizationEnabled && displayIR)
-    {
-        createWaveformSnapshot(*displayIR);
-        createFrequencyResponseSnapshot(*displayIR, loadedSR);
-    }
+    // 非同期パス: callAsync で Message Thread にディスパッチ
+    // WeakReference は callAsync 後のオブジェクト破棄に対する最後の安全弁。
+    // 安全性は forceCleanup() による LoaderThread 停止との組み合わせで成立。
+    auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
 
-    switchEngineOnMessageThread(newConv);
-
-    convo::publishAtomic(irLength, targetLength, std::memory_order_release);       // release: UI 側 acquire と HB
-    convo::publishAtomic(currentSampleRate, loadedSR, std::memory_order_release);  // release: Runtime/Loader 側 acquire と HB
-
-    // FINAL COMMIT: フラグ確定後にレイテンシを1回だけ反映する。
-    convo::publishAtomic(irFinalized, true, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
-    refreshLatency();
-
-    convo::publishAtomic(isLoading, false, std::memory_order_release);    // release: timer/UI 側 acquire と HB
-    convo::publishAtomic(isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB
-    if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded()) // acq_rel: acquire で既存要求観測; release で false 公開
-    {
-        const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]()
+    const bool queued = juce::MessageManager::callAsync(
+        [weakThis, commitPtr]()
         {
+            auto ownedCommit = std::unique_ptr<PendingCommit>(commitPtr);
             if (auto* self = weakThis.get())
-                self->rebuildAllIRs();
+            {
+                try
+                {
+                    self->executePendingCommit(std::move(ownedCommit));
+                }
+                catch (...)
+                {
+                    // executePendingCommit は noexcept ではないが、JUCE の
+                    // メッセージループに例外を伝播すると std::terminate になる。
+                    // 例外時は ~PendingCommit (noexcept) で engine は安全に解放される。
+                    // Phase 4+ で例外が発生した場合、isLoading/isRebuilding が
+                    // true のまま残るのを防ぐため、明示的にリセットする。
+                    convo::publishAtomic(self->isLoading, false, std::memory_order_release);
+                    convo::publishAtomic(self->isRebuilding, false, std::memory_order_release);
+                    DBG("executePendingCommit exception — isLoading/isRebuilding reset to false");
+                }
+            }
+            // 破棄済みの場合: ~PendingCommit → releaseEngine() で自動解放
         });
 
-        if (!queued)
-            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release); // release: timer 側 acquire と HB
+    if (!queued)
+    {
+        // MessageManager シャットダウン中 — 同期的にクリーンアップ
+        auto ownedCommit = std::unique_ptr<PendingCommit>(commitPtr);
+        ownedCommit->releaseEngine();
     }
-    updateLatencyCache();
-    requestHostDisplayUpdate();
-    postCoalescedChangeNotification();
 }
 
 void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept
@@ -715,6 +732,68 @@ void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine)
         jassertfalse; // provider must be set before any engine switch
     if (oldEngine)
         retireStereoConvolver(oldEngine, 0);
+}
+
+// PendingCommit のコミット実行（Message Thread のみで呼び出し）
+void ConvolverProcessor::executePendingCommit(std::unique_ptr<PendingCommit> commit)
+{
+    if (!commit || !commit->newEngine) return;
+
+    // Phase 1: IR メタデータ更新
+    if (!commit->isRebuild)
+    {
+        updateIRState(commit->loadedIR, commit->sampleRate);
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = commit->irFile;
+            irName = commit->irFile.getFileNameWithoutExtension();  // irFileLock 内で irName を書き込み
+        }
+        convo::publishAtomic(currentIRScale, commit->scaleFactor, std::memory_order_release);
+    }
+
+    // Phase 2: 可視化スナップショット
+    // ★ 可視化は Engine に依存しない（IR データから直接計算するため）。
+    //   Engine swap 前に実行することで、swap 時間を短縮する。
+    if (visualizationEnabled && commit->displayIR && commit->displayIR->getNumSamples() > 0)
+    {
+        createWaveformSnapshot(*commit->displayIR);
+        createFrequencyResponseSnapshot(*commit->displayIR, commit->sampleRate);
+    }
+
+    // Phase 3: Engine swap（排他的）
+    // Precondition:  commit->newEngine != nullptr (checked at function entry)
+    //                switchEngineOnMessageThread() is noexcept (ConvolverProcessor.h:608)
+    // Postcondition: commit->newEngine has been consumed by exchangeActiveEngine()
+    //                and must no longer be accessed by caller.
+    switchEngineOnMessageThread(commit->newEngine);
+    commit->newEngine = nullptr;  // 所有権譲渡（Postcondition: consumed by exchangeActiveEngine）
+
+    // Phase 4: Publish（engine swap 完了後）
+    convo::publishAtomic(irLength, commit->targetLength, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, commit->sampleRate, std::memory_order_release);
+
+    // FINAL COMMIT
+    convo::publishAtomic(irFinalized, true, std::memory_order_release);
+    refreshLatency();
+
+    convo::publishAtomic(isLoading, false, std::memory_order_release);
+    convo::publishAtomic(isRebuilding, false, std::memory_order_release);
+
+    if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded())
+    {
+        const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]()
+        {
+            if (auto* self = weakThis.get())
+                self->rebuildAllIRs();
+        });
+        if (!queued)
+            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
+    }
+
+    // Phase 5: UI 通知
+    updateLatencyCache();
+    requestHostDisplayUpdate();
+    postCoalescedChangeNotification();
 }
 
 // applyNewState へのシンプルな転送。新しいコードからは commitNewConvolver を使用する。

@@ -77,6 +77,7 @@ public:
     {
         static_assert(std::is_trivially_destructible_v<T>,
                       "ScopedAlignedPtr only supports trivially destructible types (POD arrays)");
+        if (ptr == p) return;   // self-assignment guard: avoid Use-After-Free
         if (ptr)
         {
             aligned_free(ptr);

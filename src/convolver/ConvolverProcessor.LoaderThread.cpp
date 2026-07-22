@@ -365,7 +365,7 @@ void ConvolverProcessor::LoaderThread::runSynchronously()
         auto loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
         auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
         owner.applyNewState(conv, std::move(loadedIR), result.loadedSR, result.targetLength, isRebuild, file,
-                            result.scaleFactor, std::move(displayIR));
+                            result.scaleFactor, std::move(displayIR), /*async=*/false);
     }
     else
     {

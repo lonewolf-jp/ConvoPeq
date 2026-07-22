@@ -1,4 +1,4 @@
-# ConvoPeq Architecture (v0.6.9)
+# ConvoPeq Architecture (v0.6.10)
 
 This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL/IPP. It is intended for developers and contributors working on DSP, threading, state transitions, runtime governance, and ISR (Intelligent State Reconstruction) behavior.
 
@@ -52,10 +52,11 @@ ConvoPeq is organized around four priorities:
 src/
 ├── [81 root files]          — Top-level DSP + UI + Framework adapters
 ├── audioengine/ (107 files) — ISR Runtime Governance + Orchestration + State Management
-├── core/         (37 files) — RCU Foundation: EpochDomain, SnapshotCoordinator, Store
+├── core/         (40 files) — RCU Foundation: EpochDomain, SnapshotCoordinator, Store
 ├── convolver/    (10 files) — Convolver Split (8 TU) + Internal Helpers
-├── eqprocessor/   ( 6 files) — EQ Split (5 TU) + EQProcessor.h
-└── tests/        (21 files) — CTest Regression Suite
+├── eqprocessor/  (17 files) — EQ Split (5 TU) + EQProcessor.h + Analysis Subsystem + EQEditProcessor
+├── tests/        (21 files) — CTest Regression Suite
+└── dsp/math/     ( 1 file)  — FastTanhApprox.h (AVX2 tanh approximation)
 ```
 
 ### 3.1 `src/` Root — Core DSP / UI / Entry Points
@@ -72,17 +73,34 @@ src/
 | `CustomInputOversampler.{h,cpp}` | 33.5 KB | AVX2 multi-stage FIR/IIR oversampler (2x/4x/8x). IIRLike and LinearPhase presets. Corruption auto-detection and fallback. |
 | `OutputFilter.{h,cpp}` | 20.2 KB | Biquad-based output conditioning (HPF, LPF, HC, LC). All coefficients pre-computed at prepare time. |
 | `NoiseShaperLearner.{h,cpp}` | **68.4 KB** | CMA-ES-driven adaptive noise shaper learning (9th-order IIR). Largest TU in the project. |
+| `NoiseShaperLearnerTypes.h` | — | Learning mode, normalization level, error type enums. |
+| `PsychoacousticDither.{h,cpp}` | — | Ultra Mastering dither engine: Xoshiro256** RNG, TPDF dither, 12th-order noise shaper, quantization (16/24/32-bit). |
+| `FixedNoiseShaper.h` / `Fixed15TapNoiseShaper.h` / `LatticeNoiseShaper.h` | — | Fixed (4-tap / 15-tap) and adaptive lattice (9th-order AVX2) noise shapers. |
+| `TruePeakDetector.{h,cpp}` | — | 4x oversampled (2-stage) true peak measurement. AVX2-optimized. |
+| `LoudnessMeter.{h,cpp}` | — | ITU-R BS.1770 compliant loudness measurement. K-weighting pre-filter + RLB filter. |
+| `ProgressiveUpgradeThread.{h,cpp}` | — | Background progressive FFT size upgrade for convolution quality. |
+| `IRConverter.{h,cpp}` | — | Audio file → prepared IR state conversion. Configurable FFT/partition size, phase mode. |
+| `IRAnalyzer.{h,cpp}` | — | FFT-based IR analysis: peak gain estimation, Tukey window, Gaussian interpolation. |
+| `IRDSP.{h,cpp}` | — | High-quality IR resampling via r8brain library. |
+| `ConvolverState.{h,cpp}` | — | Lightweight convolver state metadata (stateId, generationId, sampleRate). Used by SafeStateSwapper. |
+| `CacheManager.{h,cpp}` / `MixedPhasePersistentCache.{h,cpp}` | — | IR disk cache management and mixed-phase persistent cache (LRU, SQLite-backed). |
+| `MKLRealTimeSetup.{h,cpp}` | — | MKL real-time configuration: FTZ/DAZ/VML mode, error callback suppression. |
+| `CpuFeatureCheck.{h,cpp}` | — | AVX2/FMA runtime CPU feature detection. |
+| `MklFftEvaluator.h` | — | MKL FFT evaluator for CMA-ES spectral analysis. |
+| `CpuFeatureCheck.{h,cpp}` / `GenerationManager.h` / `StateKey.h` / `DftiHandle.h` / `DiagnosticsConfig.h` / `InputBitDepthTransform.h` / `ConvolverRuntimeCompatTypes.h` / `PreparedIRState.h` / `AudioSegmentBuffer.h` / `RefCountedDeferred.h` / `UltraHighRateDCBlocker.h` / `AlignedAllocation.h` | — | Supporting utilities: CPU detection, generation counters, state keys, DFTI RAII, diagnostics, bit depth, aliases, IR state, audio buffer, ref-counting, DC blockers, aligned allocation. |
 | `EQControlPanel.{h,cpp}` | 26.0 KB | 20-band EQ user interface. |
+| `ConvolverControlPanel.{h,cpp}` | — | Convolver control panel: IR load, phase/tail mode, mix, HC/LC. |
+| `ConvolverSettingsComponent.{h,cpp}` | — | Advanced convolver settings panel. |
 | `SpectrumAnalyzerComponent.{h,cpp}` | 52.3 KB | Real-time FFT analyzer (MKL 4096-point). EQ overlay, peak hold, level meter bar rendering. |
+| `NoiseShaperLearningComponent.{h,cpp}` | — | Noise shaper learning UI (progress, error metrics). |
+| `MixedPhaseOptimizationComponent.{h,cpp}` | — | Mixed-phase optimization progress UI. |
 | `AllpassDesigner.{h,cpp}` | 26.8 KB | All-pass filter design for mixed-phase decomposition. CMA-ES / AdaGrad optimization. |
-| `CmaEsOptimizer{,.Dynamic}.{h,cpp}` | 7.7 KB | CMA-ES subspace optimizer. |
-| `AlignedAllocation.h` | 6.0 KB | 64-byte SIMD-aligned `aligned_malloc` + `ScopedAlignedPtr`. |
+| `CmaEsOptimizer.h` / `CmaEsOptimizerDynamic.{h,cpp}` | 7.7 KB | CMA-ES abstract optimizer and dynamic subspace optimizer. |
 | `DspNumericPolicy.h` | 13.5 KB | Single source of truth for DSP numeric constants and types. |
 | `LockFreeRingBuffer.h` / `LockFreeAudioRingBuffer.h` | 12 KB | SPSC lock-free ring buffers for audio-thread-safe intra-thread communication. |
 | `DeferredDeletionQueue.h` / `DeferredFreeThread.h` | 21 KB | Asynchronous object reclamation after RCU grace period. |
 | `SafeStateSwapper.h` | 19.7 KB | RAII state swap with ownership transfer. |
 | `EQEditProcessor.{h,cpp}` | 4.2 KB | UI/worker-side EQ editing interface. |
-| `ConvolverState.{h,cpp}` / `IRConverter.{h,cpp}` / `IRDSP.{h,cpp}` | — | Convolver state serialization, IR normalization/preprocessing. |
 
 ### 3.2 `src/audioengine/` — ISR Runtime Governance (107 files, ~1.27 MB)
 
@@ -179,7 +197,7 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,600+ lines (207 
 
 > Legacy monolithic `MKLNonUniformConvolver.cpp` (~65 KB) is kept compiled for backward compatibility, guarded by `#ifdef`.
 
-### 3.4 `src/eqprocessor/` — 20-Band EQ Split (6 files, ~163 KB)
+### 3.4 `src/eqprocessor/` — 20-Band EQ Split + Analysis Subsystem (17 files, ~163 KB)
 
 | File | Size | Responsibility |
 |---|---|---|
@@ -189,12 +207,19 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,600+ lines (207 
 | `.Parameters.cpp` | 12.7 KB | Parameter update (RCU via `uintptr_t` atomic handles). |
 | `.Processing.cpp` | **57.2 KB** | TPT SVF per-band processing (AVX2 FMA). Serial/Parallel structure, M/S mode, AGC, saturation. |
 | `.ProcessingCache.cpp` | 2.7 KB | `EQCoeffCache` management. |
+| `PeakEstimator.{h,cpp}` | — | Peak detection for EQ analysis. |
+| `UpperBoundEstimator.{h,cpp}` | — | Upper bound estimation for EQ bands. |
+| `EQResponseSampler.{h,cpp}` | — | Frequency response sampling (magnitude/phase). |
+| `AnalysisMerge.h` | — | Merges multiple analysis results. |
+| `BandHelper.{h,cpp}` | — | Band utility functions and helpers. |
+| `EQAnalysisMath.h` | — | Mathematical formulas for EQ analysis. |
+| `EQAnalysisTypes.h` | — | Analysis type definitions. |
 
-### 3.5 `src/core/` — RCU Foundation (37 files, ~118 KB)
+### 3.5 `src/core/` — RCU Foundation (40 files, ~118 KB)
 
 Cross-cutting foundation delivered in phases (v13.0 redesign):
 
-**Snapshot / RCU:**
+**Snapshot / RCU / Publication:**
 | File | Size | Role |
 |---|---|---|
 | `EpochDomain.h` | **26.0 KB** | 64 named reader slots, `globalEpoch` management, quiescent-state-based reader registration/tracking. |
@@ -202,14 +227,29 @@ Cross-cutting foundation delivered in phases (v13.0 redesign):
 | `SnapshotCoordinator.{h,cpp}` | 7.9 KB | Thread-safe snapshot publication and fade. |
 | `SnapshotFactory.{h,cpp}` | 5.9 KB | Snapshot creation and destruction. |
 | `SnapshotAssembler.{h,cpp}` | — | Snapshot assembly pipeline. |
+| `SnapshotSlotStore.h` | — | Slot-based atomic pointer storage for snapshot handles. |
+| `SnapshotRetireManager.h` | — | Manages retirement of old snapshots after RCU grace period. |
+| `SnapshotParams.h` | — | Parameter container for snapshot construction. |
+| `SnapshotFadeState.h` | — | Crossfade state tracking for snapshot transitions. |
+| `GlobalSnapshot.{h,cpp}` | — | Immutable snapshot base (DSP parameter container: EQ, gains, bypass, oversampling). |
 | `RuntimeStore.h` | — | Internal store for `RuntimePublicationCoordinator`. |
 | `RuntimeReaderContext.h` | — | Reader context (`ObserveChannel::Audio` / `Message` / `Publication`). |
+| `RuntimePublicationCoordinator.h` | — | Template coordinator for atomic world publication. |
 | `ObservedRuntime.h` | — | Observed runtime abstraction (token-based). |
-| `GlobalSnapshot.{h,cpp}` | — | Immutable snapshot base. |
 | `ObserveChannel.h` | — | Observation channel classification. |
 | `RebuildTypes.h` | — | Rebuild intent and classification types. |
 | `Types.h` / `TimeUtils.h` | — | Common types, time measurement harness. |
 | `EQParameters.h` | — | EQ parameter container. |
+| `ConvolverRuntimeCompatTypes.h` | — | Runtime-compatible convolver type aliases. |
+
+**Abstract Interfaces (Provider pattern):**
+| File | Role |
+|---|---|
+| `IEpochProvider.h` | Abstract epoch provider interface. |
+| `IPublicationProvider.h` | Abstract publication provider interface. |
+| `IReaderEpochProvider.h` | Abstract reader epoch provider. |
+| `IRetireProvider.h` | Abstract retire provider. |
+| `IRetireRouter.h` | Abstract retire router interface. |
 
 **Async Reclamation:**
 | File | Role |
@@ -218,8 +258,15 @@ Cross-cutting foundation delivered in phases (v13.0 redesign):
 | `DeferredRetireFallbackQueue.h` | Overflow fallback for RetireRouter. |
 | `WorkerThread.{h,cpp}` | Background snapshot worker thread. |
 | `ThreadAffinityManager.h` | Thread affinity policy management. |
+| `ThreadHash.h` | Thread hash computation utilities. |
 | `CommandBuffer.h` | Non-blocking command dispatch. |
 | `FadeEngine.h` | Fade computation engine. |
+
+**Diagnostics & Utilities:**
+| File | Role |
+|---|---|
+| `RetireBoundaryTelemetry.h` | Telemetry for retire boundary events. |
+| `ScopedMXCSR.h` | RAII MXCSR state saver/restorer (FTZ/DAZ masking). |
 
 ### 3.6 `src/tests/` — CTest Regression (21 files, ~315 KB)
 
@@ -718,7 +765,7 @@ The following directories are external dependencies and must be treated as **str
 
 ## 14. Architectural Summary (Current)
 
-ConvoPeq v0.6.9 uses a five-layer architecture:
+ConvoPeq v0.6.10 uses a five-layer architecture:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -735,13 +782,15 @@ ConvoPeq v0.6.9 uses a five-layer architecture:
 │  CrossfadeAuthority, RuntimeBuilder, Publication Pipeline        │
 ├────────────────────────────────────────────────────────────────┤
 │                        DSP Layer                                 │
-│  EQProcessor (20-band TPT SVF), ConvolverProcessor (MKL NUC),    │
-│  CustomInputOversampler (AVX2 FIR/IIR), OutputFilter (Biquad),   │
-│  NoiseShaperLearner (CMA-ES), PsychoacousticDither, TruePeak     │
+│  EQProcessor (20-band TPT SVF), ConvolverProcessor (MKL NUC),  │
+│  CustomInputOversampler (AVX2 FIR/IIR), OutputFilter (Biquad),  │
+│  NoiseShaperLearner (CMA-ES), PsychoacousticDither (TPDF),      │
+│  TruePeakDetector (4x OS), LoudnessMeter (BS.1770)              │
 ├────────────────────────────────────────────────────────────────┤
 │                       Core Layer                                 │
 │  EpochDomain (64-slot RCU), SnapshotCoordinator,                  │
-│  RuntimeStore, DeferredDeletionQueue, AlignedAllocation          │
+│  RuntimeStore, DeferredDeletionQueue, AlignedAllocation,          │
+│  IEpochProvider (Provider pattern), RetireBoundaryTelemetry       │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -757,7 +806,7 @@ Design focus:
 
 ---
 
-*Version: v0.6.9 (Updated 2026-07-05)*
+*Version: v0.6.10 (Updated 2026-07-22)*
 *Compiler: MSVC 19.44+ / Intel icx 2026.0*
 *Platform: Windows 11 x64*
 *JUCE: 8.0.12*

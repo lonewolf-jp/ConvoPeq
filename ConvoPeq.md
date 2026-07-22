@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-22 00:35:05
+> Generated: 2026-07-23 00:33:53
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1879,6 +1879,7 @@ public:
     {
         static_assert(std::is_trivially_destructible_v<T>,
                       "ScopedAlignedPtr only supports trivially destructible types (POD arrays)");
+        if (ptr == p) return;   // self-assignment guard: avoid Use-After-Free
         if (ptr)
         {
             aligned_free(ptr);
@@ -6044,7 +6045,11 @@ public:
     [[nodiscard]] bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
     // acquire: LoaderThread の release と HB し、最終化フラグを観測。
     [[nodiscard]] bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
-    [[nodiscard]] juce::String getIRName() const { return irName; }
+    [[nodiscard]] juce::String getIRName() const
+    {
+        const juce::ScopedLock sl(irFileLock);
+        return irName;
+    }
     // acquire: LoaderThread/applyComputedIR の release と HB し、IR長を取得。
     [[nodiscard]] int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     [[nodiscard]] juce::String getLastError() const { return lastError; }
@@ -6286,7 +6291,9 @@ private:
     void copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) const noexcept;
     void copySnapshotToPendingUnlocked(const BuildSnapshot& snapshot) noexcept;
 
-    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR);
+    struct PendingCommit;  // forward declaration (defined after StereoConvolver)
+    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR, bool async = true);
+    void executePendingCommit(std::unique_ptr<PendingCommit> commit);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
@@ -6487,6 +6494,31 @@ private:
 
         void reset();
         void process(int channel, const double* in, double* out, int numSamples);
+    };
+
+    // PendingCommit: applyNewState のコミット段階で保持するデータ。
+    // Data Holder としての責務のみを持ち、コミット実行は ConvolverProcessor 側が行う。
+    // ISR Runtime の Owner → Publish → Retire ライフサイクルと整合。
+    struct PendingCommit final
+    {
+        StereoConvolver* newEngine = nullptr;
+        std::unique_ptr<juce::AudioBuffer<double>> loadedIR;
+        std::unique_ptr<juce::AudioBuffer<double>> displayIR;
+        int targetLength = 0;
+        double sampleRate = 0.0;
+        double scaleFactor = 1.0;
+        bool isRebuild = false;
+        juce::File irFile;
+
+        void releaseEngine() noexcept
+        {
+            if (newEngine)
+            {
+                StereoConvolver::retireStereoConvolver(newEngine, nullptr);
+                newEngine = nullptr;
+            }
+        }
+        ~PendingCommit() noexcept { releaseEngine(); }
     };
 
     std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle
@@ -24941,6 +24973,13 @@ public:
 
     // -----------------------------------------------------------------------
     // swap()  ── 非 RT スレッド（Message Thread / Rebuild Thread）から呼ぶ
+    //
+    // ★ Single Writer Contract:
+    //   swap() は呼び出し側がシリアライズする必要がある。
+    //   ConvolverProcessor::updateConvolverState() では以下の2重保護を実装:
+    //     1. JUCE_ASSERT_MESSAGE_THREAD (debug build assertion)
+    //     2. compareExchangeAtomic(writerActive) (release build runtime guard)
+    //   本クラスは Single Writer 契約を内部で強制しない。
     //
     // 古い状態を retired キューに積み、新しい状態を atomic にセットする。
     //
@@ -56086,7 +56125,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     {
         const auto& ana = req.buildAnalysis;
         const auto& diag = req.buildDiagnostics;
-        const auto& osResult = req.oversamplingResult;
+        [[maybe_unused]] const auto& osResult = req.oversamplingResult;
         jassert(convo::verifyBuildBundle(ana, diag, osResult, req.sealedSnapshot));
         jassert(convo::verifyDiagnostics(diag));
         spec.analysis.eqMaxGainDb = ana.eqMaxGainDb;
@@ -59394,52 +59433,69 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        bool isRebuild,
                                        const juce::File& file,
                                        double scaleFactor,
-                                       std::unique_ptr<juce::AudioBuffer<double>> displayIR)
+                                       std::unique_ptr<juce::AudioBuffer<double>> displayIR,
+                                       bool async)
 {
-    // 元データの更新 (新規ロード時のみ)
-    if (!isRebuild)
+    // Phase 1: PendingCommit 作成（任意スレッド）
+    auto commit = std::make_unique<PendingCommit>();
+    commit->newEngine = newConv;
+    commit->targetLength = targetLength;
+    commit->sampleRate = loadedSR;
+    commit->scaleFactor = scaleFactor;
+    commit->isRebuild = isRebuild;
+    commit->irFile = file;
+    commit->loadedIR = std::move(loadedIR);
+    commit->displayIR = std::move(displayIR);
+
+    // Phase 2: Message Thread でコミット実行
+    // WeakReference は callAsync 後のオブジェクト破棄に対する最後の安全弁。
+    //安全性は forceCleanup() による LoaderThread 停止との組み合わせで成立。
+    auto* commitPtr = commit.release();
+
+    if (!async)
     {
-        updateIRState(loadedIR, loadedSR);
-        {
-            const juce::ScopedLock sl(irFileLock);
-            currentIrFile = file;
-        }
-        irName = file.getFileNameWithoutExtension();
-        convo::publishAtomic(currentIRScale, scaleFactor, std::memory_order_release);  // release: Loader/Rebuild 側 currentIRScale acquire と HB
+        // 同期パス: rebuildAllIRsSynchronous() 等、呼び出し元が同期完了を要求する場合
+        auto ownedCommit = std::unique_ptr<PendingCommit>(commitPtr);
+        executePendingCommit(std::move(ownedCommit));
+        return;
     }
 
-    // スナップショット更新 (表示用)
-    if (visualizationEnabled && displayIR)
-    {
-        createWaveformSnapshot(*displayIR);
-        createFrequencyResponseSnapshot(*displayIR, loadedSR);
-    }
+    // 非同期パス: callAsync で Message Thread にディスパッチ
+    // WeakReference は callAsync 後のオブジェクト破棄に対する最後の安全弁。
+    // 安全性は forceCleanup() による LoaderThread 停止との組み合わせで成立。
+    auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
 
-    switchEngineOnMessageThread(newConv);
-
-    convo::publishAtomic(irLength, targetLength, std::memory_order_release);       // release: UI 側 acquire と HB
-    convo::publishAtomic(currentSampleRate, loadedSR, std::memory_order_release);  // release: Runtime/Loader 側 acquire と HB
-
-    // FINAL COMMIT: フラグ確定後にレイテンシを1回だけ反映する。
-    convo::publishAtomic(irFinalized, true, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
-    refreshLatency();
-
-    convo::publishAtomic(isLoading, false, std::memory_order_release);    // release: timer/UI 側 acquire と HB
-    convo::publishAtomic(isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB
-    if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded()) // acq_rel: acquire で既存要求観測; release で false 公開
-    {
-        const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]()
+    const bool queued = juce::MessageManager::callAsync(
+        [weakThis, commitPtr]()
         {
+            auto ownedCommit = std::unique_ptr<PendingCommit>(commitPtr);
             if (auto* self = weakThis.get())
-                self->rebuildAllIRs();
+            {
+                try
+                {
+                    self->executePendingCommit(std::move(ownedCommit));
+                }
+                catch (...)
+                {
+                    // executePendingCommit は noexcept ではないが、JUCE の
+                    // メッセージループに例外を伝播すると std::terminate になる。
+                    // 例外時は ~PendingCommit (noexcept) で engine は安全に解放される。
+                    // Phase 4+ で例外が発生した場合、isLoading/isRebuilding が
+                    // true のまま残るのを防ぐため、明示的にリセットする。
+                    convo::publishAtomic(self->isLoading, false, std::memory_order_release);
+                    convo::publishAtomic(self->isRebuilding, false, std::memory_order_release);
+                    DBG("executePendingCommit exception — isLoading/isRebuilding reset to false");
+                }
+            }
+            // 破棄済みの場合: ~PendingCommit → releaseEngine() で自動解放
         });
 
-        if (!queued)
-            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release); // release: timer 側 acquire と HB
+    if (!queued)
+    {
+        // MessageManager シャットダウン中 — 同期的にクリーンアップ
+        auto ownedCommit = std::unique_ptr<PendingCommit>(commitPtr);
+        ownedCommit->releaseEngine();
     }
-    updateLatencyCache();
-    requestHostDisplayUpdate();
-    postCoalescedChangeNotification();
 }
 
 void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept
@@ -59455,6 +59511,68 @@ void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine)
         jassertfalse; // provider must be set before any engine switch
     if (oldEngine)
         retireStereoConvolver(oldEngine, 0);
+}
+
+// PendingCommit のコミット実行（Message Thread のみで呼び出し）
+void ConvolverProcessor::executePendingCommit(std::unique_ptr<PendingCommit> commit)
+{
+    if (!commit || !commit->newEngine) return;
+
+    // Phase 1: IR メタデータ更新
+    if (!commit->isRebuild)
+    {
+        updateIRState(commit->loadedIR, commit->sampleRate);
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = commit->irFile;
+            irName = commit->irFile.getFileNameWithoutExtension();  // irFileLock 内で irName を書き込み
+        }
+        convo::publishAtomic(currentIRScale, commit->scaleFactor, std::memory_order_release);
+    }
+
+    // Phase 2: 可視化スナップショット
+    // ★ 可視化は Engine に依存しない（IR データから直接計算するため）。
+    //   Engine swap 前に実行することで、swap 時間を短縮する。
+    if (visualizationEnabled && commit->displayIR && commit->displayIR->getNumSamples() > 0)
+    {
+        createWaveformSnapshot(*commit->displayIR);
+        createFrequencyResponseSnapshot(*commit->displayIR, commit->sampleRate);
+    }
+
+    // Phase 3: Engine swap（排他的）
+    // Precondition:  commit->newEngine != nullptr (checked at function entry)
+    //                switchEngineOnMessageThread() is noexcept (ConvolverProcessor.h:608)
+    // Postcondition: commit->newEngine has been consumed by exchangeActiveEngine()
+    //                and must no longer be accessed by caller.
+    switchEngineOnMessageThread(commit->newEngine);
+    commit->newEngine = nullptr;  // 所有権譲渡（Postcondition: consumed by exchangeActiveEngine）
+
+    // Phase 4: Publish（engine swap 完了後）
+    convo::publishAtomic(irLength, commit->targetLength, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, commit->sampleRate, std::memory_order_release);
+
+    // FINAL COMMIT
+    convo::publishAtomic(irFinalized, true, std::memory_order_release);
+    refreshLatency();
+
+    convo::publishAtomic(isLoading, false, std::memory_order_release);
+    convo::publishAtomic(isRebuilding, false, std::memory_order_release);
+
+    if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded())
+    {
+        const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]()
+        {
+            if (auto* self = weakThis.get())
+                self->rebuildAllIRs();
+        });
+        if (!queued)
+            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
+    }
+
+    // Phase 5: UI 通知
+    updateLatencyCache();
+    requestHostDisplayUpdate();
+    postCoalescedChangeNotification();
 }
 
 // applyNewState へのシンプルな転送。新しいコードからは commitNewConvolver を使用する。
@@ -59871,7 +59989,7 @@ void ConvolverProcessor::LoaderThread::runSynchronously()
         auto loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
         auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
         owner.applyNewState(conv, std::move(loadedIR), result.loadedSR, result.targetLength, isRebuild, file,
-                            result.scaleFactor, std::move(displayIR));
+                            result.scaleFactor, std::move(displayIR), /*async=*/false);
     }
     else
     {
@@ -63402,12 +63520,12 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
         copyPendingToSnapshotUnlocked(snapshot);
     }
 
-    snapshot.irName = irName;
     snapshot.irLength = convo::consumeAtomic(irLength, std::memory_order_acquire); // acquire: applyBuildSnapshot の publishAtomic release と HB
     snapshot.currentIRScale = convo::consumeAtomic(currentIRScale, std::memory_order_acquire); // acquire: applyBuildSnapshot の publishAtomic release と HB
     {
         const juce::ScopedLock sl(irFileLock);
         snapshot.irFile = currentIrFile;
+        snapshot.irName = irName;  // irFileLock 内で irName を読み取り
     }
     snapshot.fingerprint = computeBuildSnapshotFingerprint(snapshot);
     return snapshot;
@@ -63423,8 +63541,8 @@ void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
     {
         const juce::ScopedLock sl(irFileLock);
         currentIrFile = snapshot.irFile;
+        irName = snapshot.irName;  // irFileLock 内で irName を書き込み
     }
-    irName = snapshot.irName;
     convo::publishAtomic(irLength, snapshot.irLength, std::memory_order_release); // release: captureBuildSnapshot の acquire と HB
     convo::publishAtomic(currentIRScale, snapshot.currentIRScale, std::memory_order_release); // release: captureBuildSnapshot の acquire と HB
 
@@ -63544,13 +63662,11 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
             updateIRState(otherState->irOwner, otherState->sampleRate, otherState->additionalAttenuationDb, otherState->irFreqPeakGainDb);
         releaseIRState(otherState);
     }
-    {
-        const juce::ScopedLock sl(irFileLock);
-        currentIrFile = other.currentIrFile;
-    }
-    irName = other.irName;
-    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release); // acquire: other.captureBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
-    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release); // acquire: other.applyBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
+    // ★ currentIrFile / irName は captureBuildSnapshot → applyBuildSnapshot で
+    //   other.irFileLock / this->irFileLock を経由して同期済み。
+    //   二重コピーを避けるため、個別コピーは不要。
+    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release);
 
     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
     auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
@@ -70226,6 +70342,22 @@ namespace
         return _mm_movemask_pd(validMask) == 0x3;
     }
 
+    // ── SSE2 ベクトル NaN/Inf 範囲チェック ──
+    // isFiniteAndAbsInRangeMask の __m128d ベクトル版。
+    // NaN/Inf または範囲外の要素は 0.0 に変換し、有効な要素はそのまま返す。
+    inline __m128d sanitizeFiniteInRangeV(
+        __m128d value, __m128d minAbsInclusive, __m128d maxAbsExclusive) noexcept
+    {
+        const __m128d diff = _mm_sub_pd(value, value);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+        const __m128d signMask = _mm_set1_pd(-0.0);
+        const __m128d absV = _mm_andnot_pd(signMask, value);
+        const __m128d geMinMask = _mm_cmpge_pd(absV, minAbsInclusive);
+        const __m128d ltMaxMask = _mm_cmplt_pd(absV, maxAbsExclusive);
+        const __m128d validMask = _mm_and_pd(finiteMask, _mm_and_pd(geMinMask, ltMaxMask));
+        return _mm_and_pd(value, validMask);
+    }
+
     // fastTanh（出力用）— ★ Bug3: 共通 Utility convo::dsp::fastTanh に委譲
     //   係数は現行の 27/9 を維持（DefaultFastTanhPolicy）。
     //   Padé 近似の変更（5次/6次）は別チケットで実施。
@@ -70374,10 +70506,15 @@ namespace
                                     _mm_mul_pd(fastTanhV128Output(output), vSat));
             }
 
-            // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
-            const __m128d diff = _mm_sub_pd(output, output);
-            const __m128d mask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-            output = _mm_and_pd(output, mask);
+            // NaN/Infチェック + 範囲クランプ (processBand と一貫性を保つ)
+            {
+                const __m128d vMinZero = _mm_setzero_pd();
+                const __m128d vMaxRange = _mm_set1_pd(1.0e15);
+                output = sanitizeFiniteInRangeV(output, vMinZero, vMaxRange);
+                // ★ state 変数 NaN/Inf ガード (processBand と同等)
+                ic1eq = sanitizeFiniteInRangeV(ic1eq, vMinZero, vMaxRange);
+                ic2eq = sanitizeFiniteInRangeV(ic2eq, vMinZero, vMaxRange);
+            }
 
             // クランプ (-100, +100) で発散防止
             output = _mm_min_pd(_mm_max_pd(output, cLow), cHigh);

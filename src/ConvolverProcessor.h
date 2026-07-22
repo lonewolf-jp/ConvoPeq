@@ -383,7 +383,11 @@ public:
     [[nodiscard]] bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
     // acquire: LoaderThread の release と HB し、最終化フラグを観測。
     [[nodiscard]] bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
-    [[nodiscard]] juce::String getIRName() const { return irName; }
+    [[nodiscard]] juce::String getIRName() const
+    {
+        const juce::ScopedLock sl(irFileLock);
+        return irName;
+    }
     // acquire: LoaderThread/applyComputedIR の release と HB し、IR長を取得。
     [[nodiscard]] int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     [[nodiscard]] juce::String getLastError() const { return lastError; }
@@ -625,7 +629,9 @@ private:
     void copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) const noexcept;
     void copySnapshotToPendingUnlocked(const BuildSnapshot& snapshot) noexcept;
 
-    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR);
+    struct PendingCommit;  // forward declaration (defined after StereoConvolver)
+    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR, bool async = true);
+    void executePendingCommit(std::unique_ptr<PendingCommit> commit);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
@@ -826,6 +832,31 @@ private:
 
         void reset();
         void process(int channel, const double* in, double* out, int numSamples);
+    };
+
+    // PendingCommit: applyNewState のコミット段階で保持するデータ。
+    // Data Holder としての責務のみを持ち、コミット実行は ConvolverProcessor 側が行う。
+    // ISR Runtime の Owner → Publish → Retire ライフサイクルと整合。
+    struct PendingCommit final
+    {
+        StereoConvolver* newEngine = nullptr;
+        std::unique_ptr<juce::AudioBuffer<double>> loadedIR;
+        std::unique_ptr<juce::AudioBuffer<double>> displayIR;
+        int targetLength = 0;
+        double sampleRate = 0.0;
+        double scaleFactor = 1.0;
+        bool isRebuild = false;
+        juce::File irFile;
+
+        void releaseEngine() noexcept
+        {
+            if (newEngine)
+            {
+                StereoConvolver::retireStereoConvolver(newEngine, nullptr);
+                newEngine = nullptr;
+            }
+        }
+        ~PendingCommit() noexcept { releaseEngine(); }
     };
 
     std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle

@@ -84,6 +84,13 @@ public:
     // -----------------------------------------------------------------------
     // swap()  ── 非 RT スレッド（Message Thread / Rebuild Thread）から呼ぶ
     //
+    // ★ Single Writer Contract:
+    //   swap() は呼び出し側がシリアライズする必要がある。
+    //   ConvolverProcessor::updateConvolverState() では以下の2重保護を実装:
+    //     1. JUCE_ASSERT_MESSAGE_THREAD (debug build assertion)
+    //     2. compareExchangeAtomic(writerActive) (release build runtime guard)
+    //   本クラスは Single Writer 契約を内部で強制しない。
+    //
     // 古い状態を retired キューに積み、新しい状態を atomic にセットする。
     //
     // 2-step bump の意味:

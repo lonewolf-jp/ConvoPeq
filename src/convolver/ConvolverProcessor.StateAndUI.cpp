@@ -257,12 +257,12 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
         copyPendingToSnapshotUnlocked(snapshot);
     }
 
-    snapshot.irName = irName;
     snapshot.irLength = convo::consumeAtomic(irLength, std::memory_order_acquire); // acquire: applyBuildSnapshot の publishAtomic release と HB
     snapshot.currentIRScale = convo::consumeAtomic(currentIRScale, std::memory_order_acquire); // acquire: applyBuildSnapshot の publishAtomic release と HB
     {
         const juce::ScopedLock sl(irFileLock);
         snapshot.irFile = currentIrFile;
+        snapshot.irName = irName;  // irFileLock 内で irName を読み取り
     }
     snapshot.fingerprint = computeBuildSnapshotFingerprint(snapshot);
     return snapshot;
@@ -278,8 +278,8 @@ void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
     {
         const juce::ScopedLock sl(irFileLock);
         currentIrFile = snapshot.irFile;
+        irName = snapshot.irName;  // irFileLock 内で irName を書き込み
     }
-    irName = snapshot.irName;
     convo::publishAtomic(irLength, snapshot.irLength, std::memory_order_release); // release: captureBuildSnapshot の acquire と HB
     convo::publishAtomic(currentIRScale, snapshot.currentIRScale, std::memory_order_release); // release: captureBuildSnapshot の acquire と HB
 
@@ -399,13 +399,11 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
             updateIRState(otherState->irOwner, otherState->sampleRate, otherState->additionalAttenuationDb, otherState->irFreqPeakGainDb);
         releaseIRState(otherState);
     }
-    {
-        const juce::ScopedLock sl(irFileLock);
-        currentIrFile = other.currentIrFile;
-    }
-    irName = other.irName;
-    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release); // acquire: other.captureBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
-    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release); // acquire: other.applyBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
+    // ★ currentIrFile / irName は captureBuildSnapshot → applyBuildSnapshot で
+    //   other.irFileLock / this->irFileLock を経由して同期済み。
+    //   二重コピーを避けるため、個別コピーは不要。
+    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release);
 
     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
     auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
