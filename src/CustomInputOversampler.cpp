@@ -279,7 +279,7 @@ double CustomInputOversampler::dotProductDecimateAvx2(
 }
 #endif
 
-void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
+bool CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
 {
     clearStage(stage);
 
@@ -290,7 +290,8 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     stage.maxInputSamples = stageInputMax;
     stage.maxOutputSamples = stageInputMax * 2;
 
-    auto rawCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.taps));
+    auto rawCoeffs = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.taps));
+    if (!rawCoeffs) { clearStage(stage); return false; }
 
     const double beta = (attenuationDb > 50.0)
                       ? (0.1102 * (attenuationDb - 8.7))
@@ -342,13 +343,13 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     rawCoeffs[stage.centerTap] = 0.5;
 
     stage.convCount = (stage.taps - stage.convParity + 1) / 2;
-    stage.convCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
-    stage.convCoeffsReversed = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
+    stage.convCoeffs = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.convCount));
+    stage.convCoeffsReversed = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.convCount));
 
     if (!stage.convCoeffs || !stage.convCoeffsReversed)
     {
         clearStage(stage);
-        return;
+        return false;
     }
 
     for (int r = 0; r < stage.convCount; ++r)
@@ -370,11 +371,17 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
 
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        stage.upHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.upHistorySize));
-        stage.downHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.downHistorySize));
-        if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
-        if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
+        stage.upHistory[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.upHistorySize));
+        stage.downHistory[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.downHistorySize));
+        if (!stage.upHistory[ch] || !stage.downHistory[ch])
+        {
+            clearStage(stage);
+            return false;
+        }
+        juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+        juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
     }
+    return true;
 }
 
 bool CustomInputOversampler::prepareSingleStage(int taps, double attenDb, int stageInputMax) noexcept
@@ -384,11 +391,15 @@ bool CustomInputOversampler::prepareSingleStage(int taps, double attenDb, int st
     numStages = 1;
     maxInputBlockSize = stageInputMax;
     maxUpsampledBlockSize = stageInputMax * 2;
-    prepareStage(stages[0], taps, attenDb, stageInputMax);
+    if (!prepareStage(stages[0], taps, attenDb, stageInputMax))
+    {
+        release();
+        return false;
+    }
     workCapacity = maxUpsampledBlockSize;
     for (int ch = 0; ch < kMaxChannels; ++ch) {
-        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
-        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        workA[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
         if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
         if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
         blockChannels[ch] = workA[ch].get();
@@ -409,17 +420,26 @@ void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset
     int stageInputMax = maxInputBlockSize;
     for (int i = 0; i < numStages; ++i)
     {
-        prepareStage(stages[i], tapsForStage(i, activePreset), attenuationForStage(i, activePreset), stageInputMax);
+        if (!prepareStage(stages[i], tapsForStage(i, activePreset), attenuationForStage(i, activePreset), stageInputMax))
+        {
+            release();
+            return;
+        }
         stageInputMax *= 2;
     }
 
     workCapacity = juce::jmax(1, maxUpsampledBlockSize);
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
-        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
-        if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
-        if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
+        workA[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
+        if (!workA[ch] || !workB[ch])
+        {
+            release();
+            return;
+        }
+        juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
+        juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
         blockChannels[ch] = workA[ch].get();
     }
 }

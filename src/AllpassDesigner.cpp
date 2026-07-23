@@ -395,10 +395,16 @@ DesignResult AllpassDesigner::designWithCMAES(
                                      + " sigma=" + juce::String(optimizer.getSigma()));
         }
 
-        // 進捗コールバック
+        // 進捗コールバック（Message Thread にマーシャリング）
         if (progressCallback) {
             float progress = 0.2f + 0.6f * static_cast<float>(gen) / juce::jmax(1, config.cmaesMaxGenerations);
-            progressCallback(progress);
+            auto cb = progressCallback;
+            if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+            {
+                mm->callAsync([cb, progress]() {
+                    cb(progress);
+                });
+            }
         }
 
         // 早期終了条件：sigma が十分小さい、十分収束、または改善停滞
@@ -424,7 +430,15 @@ DesignResult AllpassDesigner::designWithCMAES(
     }
 
     if (progressCallback)
-        progressCallback(0.9f);
+    {
+        auto cb = progressCallback;
+        if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+        {
+            mm->callAsync([cb]() {
+                cb(0.9f);
+            });
+        }
+    }
 
     juce::Logger::writeToLog("CMA-ES optimization finished. Best fitness="
                              + juce::String(bestFitness)
@@ -490,7 +504,14 @@ bool AllpassDesigner::design(double sampleRate,
         }
 
         if (progressCallback) {
-            progressCallback(0.5f + 0.25f * static_cast<float>(sec + 1) / config.numSections);
+            float progress = 0.5f + 0.25f * static_cast<float>(sec + 1) / config.numSections;
+            auto cb = progressCallback;
+            if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+            {
+                mm->callAsync([cb, progress]() {
+                    cb(progress);
+                });
+            }
         }
     }
     return true;

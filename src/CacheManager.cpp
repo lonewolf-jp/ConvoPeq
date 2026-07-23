@@ -378,8 +378,18 @@ void CacheManager::save(uint64_t key, int fftSize, const PreparedIRState& state)
                        static_cast<size_t>(samples) * sizeof(double));
     }
     out->flush();
+    if (out->getStatus().failed())
+    {
+        out.reset();
+        temp.deleteFile();
+        return;
+    }
+    out.reset();
 
-    temp.moveFileTo(file);
+    if (!temp.moveFileTo(file))
+    {
+        temp.deleteFile();
+    }
     touch(key, fftSize);
 }
 

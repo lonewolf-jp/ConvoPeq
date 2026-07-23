@@ -376,7 +376,7 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
             }
             else
             {
-                lastError = "IR not found: " + f.getFileName();
+                setLastError("IR not found: " + f.getFileName());
                 postCoalescedChangeNotification();
             }
         }

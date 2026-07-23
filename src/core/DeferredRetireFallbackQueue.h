@@ -51,6 +51,7 @@ public:
             ++softLimitOverflowCount_;  // PolicyEngine 連携用
         estimatedBytes_ += entry.estimatedSize;
         queue_.push_back(entry);
+        totalPushCount_.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 

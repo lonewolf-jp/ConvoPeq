@@ -20,10 +20,10 @@ bool AudioEngineProcessor::producesMidi() const { return false; }
 bool AudioEngineProcessor::isMidiEffect() const { return false; }
 // D5: IR長のみの概算値。oversampling やフィルターによるテール延長は未反映。
 // C5: cachedTailLength を返す（Runtime Publish 時に更新。ValueTree 依存を断つ）
-// 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
+// 他スレッドから呼ばれる可能性があるため atomic を使用（relaxed: 依存データなし）
 double AudioEngineProcessor::getTailLengthSeconds() const
 {
-    return cachedTailLength;
+    return convo::consumeAtomic(cachedTailLength, std::memory_order_relaxed);
 }
 
 int AudioEngineProcessor::getNumPrograms() { return 1; }
@@ -43,11 +43,12 @@ void AudioEngineProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     if (convState.isValid())
     {
         const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
-        cachedTailLength = (std::isfinite(irLengthSec) && irLengthSec > 0.0) ? irLengthSec : 0.0;
+        const double newValue = (std::isfinite(irLengthSec) && irLengthSec > 0.0) ? irLengthSec : 0.0;
+        convo::publishAtomic(cachedTailLength, newValue, std::memory_order_relaxed);
     }
     else
     {
-        cachedTailLength = 0.0;
+        convo::publishAtomic(cachedTailLength, 0.0, std::memory_order_relaxed);
     }
 }
 

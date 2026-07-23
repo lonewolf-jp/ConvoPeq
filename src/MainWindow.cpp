@@ -1188,14 +1188,18 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
         // Active は Audio Thread 反映タイミング依存のため、直後に旧値へ戻ることがある。
         const bool eqBypassed = audioEngine.isEqBypassRequested();
         const bool convBypassed = audioEngine.isConvolverBypassRequested();
-        int modeId = 3; // Conv->Peq
-        if (!eqBypassed && convBypassed)
+        int modeId;
+        if (eqBypassed && convBypassed)
+            modeId = 5; // Bypass
+        else if (!eqBypassed && convBypassed)
             modeId = 2; // Peq
         else if (eqBypassed && !convBypassed)
             modeId = 1; // Conv
         else if (!eqBypassed && !convBypassed
               && audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::EQThenConvolver)
             modeId = 4; // Peq->Conv
+        else
+            modeId = 3; // Conv->Peq
         orderModeBox.setSelectedId(modeId, juce::dontSendNotification);
 
         // ソフトクリップとサチュレーション
@@ -1263,6 +1267,7 @@ void MainWindow::createUIComponents()
     orderModeBox.addItem("Peq", 2);
     orderModeBox.addItem("Conv->Peq", 3);
     orderModeBox.addItem("Peq->Conv", 4);
+    orderModeBox.addItem("Bypass", 5);
     orderModeBox.setJustificationType(juce::Justification::centred);
     orderModeBox.setTooltip("Processing mode");
     orderModeBox.setLookAndFeel (&orderModeLookAndFeel);
@@ -1350,27 +1355,33 @@ void MainWindow::createUIComponents()
 void MainWindow::orderModeBoxChanged()
 {
     const int mode = orderModeBox.getSelectedId();
-    if (mode == 1)
+    switch (mode)
     {
-        audioEngine.setConvolverBypassRequested(false);
-        audioEngine.setEqBypassRequested(true);
-    }
-    else if (mode == 2)
-    {
-        audioEngine.setConvolverBypassRequested(true);
-        audioEngine.setEqBypassRequested(false);
-    }
-    else if (mode == 3)
-    {
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
-        audioEngine.setConvolverBypassRequested(false);
-        audioEngine.setEqBypassRequested(false);
-    }
-    else if (mode == 4)
-    {
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
-        audioEngine.setConvolverBypassRequested(false);
-        audioEngine.setEqBypassRequested(false);
+        case 1: /* Conv */
+            audioEngine.setConvolverBypassRequested(false);
+            audioEngine.setEqBypassRequested(true);
+            break;
+        case 2: /* Peq */
+            audioEngine.setConvolverBypassRequested(true);
+            audioEngine.setEqBypassRequested(false);
+            break;
+        case 3: /* Conv->Peq */
+            audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
+            audioEngine.setConvolverBypassRequested(false);
+            audioEngine.setEqBypassRequested(false);
+            break;
+        case 4: /* Peq->Conv */
+            audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
+            audioEngine.setConvolverBypassRequested(false);
+            audioEngine.setEqBypassRequested(false);
+            break;
+        case 5: /* Bypass */
+            audioEngine.setConvolverBypassRequested(true);
+            audioEngine.setEqBypassRequested(true);
+            break;
+        default:
+            jassertfalse;
+            break;
     }
 
     if (eqPanel != nullptr)

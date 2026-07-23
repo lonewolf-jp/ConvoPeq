@@ -94,7 +94,7 @@ private:
     };
 
     void clearStage(Stage& stage) noexcept;
-    void prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax);
+    bool prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax);
 
     static double besselI0(double x) noexcept;
     static double dotProductAvx2(const double* x, const double* coeffs, int n) noexcept;

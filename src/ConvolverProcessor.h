@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <array>
 #include <functional>
@@ -390,7 +391,18 @@ public:
     }
     // acquire: LoaderThread/applyComputedIR の release と HB し、IR長を取得。
     [[nodiscard]] int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
-    [[nodiscard]] juce::String getLastError() const { return lastError; }
+    [[nodiscard]] juce::String getLastError() const {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        return lastError;
+    }
+    void setLastError(const juce::String& msg) {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        lastError = msg;
+    }
+    void clearLastError() {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        lastError.clear();
+    }
     // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
     [[nodiscard]] float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
     // acquire: setMixedPhaseState の release と HB し、混合フェーズ状態を取得。
@@ -869,6 +881,7 @@ private:
     std::deque<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };
     std::atomic<int> mixedPhaseState { 0 }; // 0=WaitingIR, 1=Optimizing, 2=Completed
+    mutable std::mutex lastErrorMutex_;
     juce::String lastError;
 
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };

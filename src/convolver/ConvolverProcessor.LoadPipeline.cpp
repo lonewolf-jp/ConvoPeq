@@ -45,7 +45,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
 
     convo::publishAtomic(isLoading, true, std::memory_order_release);   // release: timer/UI 側 isLoading acquire と HB
     convo::publishAtomic(irFinalized, false, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
-    lastError.clear(); // 新しいロード開始時にエラーをクリア
+    clearLastError(); // 新しいロード開始時にエラーをクリア
 
     // 既存のローダーを停止してゴミ箱へ退避 (即時resetによるブロックを回避)
     if (activeLoader)
@@ -438,7 +438,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
         if (!valid)
         {
             const double peak = (prepared->timeDomainIR) ? prepared->timeDomainIR->getMagnitude(0, prepared->timeDomainIR->getNumSamples()) : 0.0;
-            lastError = "Invalid IR (amplitude out of range or sudden level jump)";
+            setLastError("Invalid IR (amplitude out of range or sudden level jump)");
             juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: validation failed peak=" + juce::String(peak, 6));
             convo::publishAtomic(isLoading, false, std::memory_order_release); // release: timer/UI 側 acquire と HB
             return;
@@ -536,7 +536,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
-    lastError = error;
+    setLastError(error);
     convo::publishAtomic(irFinalized, isIRLoaded(), std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
     convo::publishAtomic(isLoading, false, std::memory_order_release);           // release: timer/UI 側 acquire と HB
     convo::publishAtomic(isRebuilding, false, std::memory_order_release);        // release: timer/load 経路 acquire と HB
