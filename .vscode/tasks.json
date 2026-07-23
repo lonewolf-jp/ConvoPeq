@@ -312,6 +312,36 @@
 			"group": "test"
 		},
 		{
+			"label": "Headroom Proxy: Status",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\start-headroom-proxy.ps1",
+				"-Status"
+			],
+			"problemMatcher": [],
+			"group": "none"
+		},
+		{
+			"label": "Headroom Proxy: Stop",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\start-headroom-proxy.ps1",
+				"-Stop"
+			],
+			"problemMatcher": [],
+			"group": "none"
+		},
+		{
 			"label": "Final Audit Build",
 			"type": "shell",
 			"command": "cmd.exe",

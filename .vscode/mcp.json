@@ -17,15 +17,7 @@
         },
         "headroom": {
             "type": "stdio",
-            "command": "C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\Scripts\\headroom.exe",
-            "args": [
-                "mcp",
-                "serve"
-            ],
-            "env": {
-                "HEADROOM_PROXY": "0",
-                "HEADROOM_PROXY_PORT": "0"
-            }
+            "command": "${workspaceFolder}\\tools\\headroom-with-proxy.cmd"
         }
     }
 }

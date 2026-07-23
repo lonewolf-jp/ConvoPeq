@@ -82,13 +82,13 @@ bool checkAVX2SupportAndWarn() noexcept
         return true;
 
     // 非対応 CPU: MessageBox でエラー表示
-    ::MessageBoxA(nullptr,
-        "ConvoPeq には AVX2 および FMA 命令に対応した CPU が必要です。\n"
-        "Intel Haswell (2013) 以降、または AMD Excavator (2015) 以降の\n"
-        "CPU が必要です。\n\n"
-        "この CPU ではアプリケーションがクラッシュする可能性があるため、\n"
-        "実行を中断します。",
-        "ConvoPeq - CPU 非対応",
+    ::MessageBoxW(nullptr,
+        L"ConvoPeq には AVX2 および FMA 命令に対応した CPU が必要です。\n"
+        L"Intel Haswell (2013) 以降、または AMD Excavator (2015) 以降の\n"
+        L"CPU が必要です。\n\n"
+        L"この CPU ではアプリケーションがクラッシュする可能性があるため、\n"
+        L"実行を中断します。",
+        L"ConvoPeq - CPU 非対応",
         MB_OK | MB_ICONERROR);
 
     return false;

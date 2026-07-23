@@ -49,7 +49,11 @@ juce::File MixedPhasePersistentCache::getCacheDirectory()
                    .getChildFile("ConvoPeq")
                    .getChildFile("MixedPhaseCache");
     if (!dir.exists())
-        dir.createDirectory();
+     {
+         auto result = dir.createDirectory();
+         if (!result.wasOk())
+             juce::Logger::writeToLog("Warning: Could not create cache directory");
+     }
     return dir;
 }
 
@@ -156,7 +160,11 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
                                    freqStartHz, freqEndHz, targetLength);
     const auto dir = file.getParentDirectory();
     if (!dir.exists())
-        dir.createDirectory();
+     {
+         auto result = dir.createDirectory();
+         if (!result.wasOk())
+             juce::Logger::writeToLog("Warning: Could not create cache directory");
+     }
 
     juce::TemporaryFile tempFile(file);
     {

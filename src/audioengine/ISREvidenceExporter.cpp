@@ -15,6 +15,9 @@
 namespace convo::isr {
 namespace {
 
+// R3: escapeJson の前方宣言（定義は匿名名前空間末尾）
+std::string escapeJson(std::string_view s);
+
 std::filesystem::path artifactRoot()
 {
     return std::filesystem::current_path() / "evidence";
@@ -120,9 +123,7 @@ std::string withRuntimeMetadata(std::string_view rawJson,
         metadata += ",\"provenance\":\"runtime\"";
     }
     if (!hasRunId) {
-        metadata += ",\"runId\":\"";
-        metadata += runId;
-        metadata += "\"";
+        metadata += ",\"runId\":\"" + escapeJson(runId) + "\"";
     }
     if (!hasGeneratedAtNs) {
         metadata += ",\"generatedAtNs\":";
@@ -169,7 +170,7 @@ std::string buildFailureLogJson(const TelemetryRecorder::TelemetrySnapshot& snap
         oss << "    {\"correlationId\":" << r.correlationIdShort
             << ",\"stage\":" << static_cast<int>(r.stage)
             << ",\"reason\":" << static_cast<int>(r.reason)
-            << ",\"origin\":\"" << (r.origin ? r.origin : "null")
+            << ",\"origin\":\"" << escapeJson(r.origin ? r.origin : "null")
             << "\",\"timestampUs\":" << r.timestampUs << "}";
     }
     oss << "\n  ],\n";
@@ -184,7 +185,7 @@ std::string buildFailureLogJson(const TelemetryRecorder::TelemetrySnapshot& snap
             << ",\"generation\":" << s.generation
             << ",\"stage\":" << static_cast<int>(s.stage)
             << ",\"reason\":" << static_cast<int>(s.reason)
-            << ",\"origin\":\"" << (s.origin ? s.origin : "null")
+            << ",\"origin\":\"" << escapeJson(s.origin ? s.origin : "null")
             << "\",\"readerCount\":" << s.activeReaderCount
             << ",\"timestampUs\":" << s.timestampUs << "}";
     }
@@ -242,6 +243,33 @@ std::string buildDeferredHealthJson(const TelemetryRecorder::TelemetrySnapshot& 
     return oss.str();
 }
 
+// R3: JSON仕様に従い0x00〜0x1Fの制御文字をすべてエスケープ
+std::string escapeJson(std::string_view s)
+{
+    std::string out;
+    out.reserve(s.size() + s.size() / 4);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot,
@@ -273,8 +301,8 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
         {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
         {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"ok\",\"violations\":[]}"},
         {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0}"},
-        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"generated\",\"phase\":0,\"verified\":true,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
-        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"generated\",\"withinThreshold\":true}"},
+        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"template\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
+        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"template\",\"withinThreshold\":false}"},
         {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
         {"publication_failure_log.json", failureLogJson.c_str()},
         {"publication_progress_log.json", progressLogJson.c_str()},
@@ -295,10 +323,10 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     std::string manifest = "{\n";
     manifest += "  \"schema\": \"evidence_manifest_v1\",\n";
     manifest += "  \"generationMode\": \"runtime\",\n";
-    manifest += "  \"runtimeRunId\": \"" + runId + "\",\n";
-    manifest += "  \"runId\": \"" + runId + "\",\n";
-    manifest += "  \"buildMode\": \"" + buildMode + "\",\n";
-    manifest += "  \"proofLevel\": \"" + proofLevel + "\",\n";
+    manifest += "  \"runtimeRunId\": \"" + escapeJson(runId) + "\",\n";
+    manifest += "  \"runId\": \"" + escapeJson(runId) + "\",\n";
+    manifest += "  \"buildMode\": \"" + escapeJson(buildMode) + "\",\n";
+    manifest += "  \"proofLevel\": \"" + escapeJson(proofLevel) + "\",\n";
     manifest += "  \"generatedAtNs\": " + std::to_string(generatedAtNs) + ",\n";
     manifest += "  \"artifacts\": [\n";
 

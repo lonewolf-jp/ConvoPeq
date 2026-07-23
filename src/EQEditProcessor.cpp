@@ -23,6 +23,9 @@ EQEditProcessor::EQEditProcessor(AudioEngine& engine)
 
 void EQEditProcessor::scheduleDebounce()
 {
+    // C3: scheduleDebounce() は Message Thread からのみ呼ぶこと（design constraint）
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     convo::publishAtomic(pendingSnapshot, true, std::memory_order_release);
     if (!isTimerRunning())
         startTimer(kDebounceMs);

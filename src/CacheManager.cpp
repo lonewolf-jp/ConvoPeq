@@ -106,7 +106,11 @@ juce::File CacheManager::getCacheDirectory() const
                    .getChildFile("ConvoPeq")
                    .getChildFile("IRCache");
     if (!dir.exists())
-        dir.createDirectory();
+     {
+         auto result = dir.createDirectory();
+         if (!result.wasOk())
+             juce::Logger::writeToLog("Warning: Could not create cache directory");
+     }
     return dir;
 }
 
@@ -419,7 +423,11 @@ void CacheManager::clear()
     const auto dir = getCacheDirectory();
     if (dir.exists())
         dir.deleteRecursively();
-    dir.createDirectory();
+    {
+        auto result = dir.createDirectory();
+        if (!result.wasOk())
+            juce::Logger::writeToLog("Warning: Could not recreate cache directory");
+    }
 
     std::lock_guard<std::mutex> lock(cacheMutex);
     cacheMap.clear();

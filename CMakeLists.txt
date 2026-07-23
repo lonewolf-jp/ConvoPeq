@@ -374,7 +374,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
     target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
     # BuildInputSemanticContractTests: 大規模ソース読み取りでスタックオーバーフローを防ぐため8MBに拡大
-    if(MSVC)
+    # B5: MSVC と IntelLLVM の両方で適用（clang-cl 互換）
+    if(MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(BuildInputSemanticContractTests PRIVATE /GS-)
         target_link_options(BuildInputSemanticContractTests PRIVATE "/STACK:8388608")
     endif()
@@ -823,6 +824,12 @@ option(CONVOPEQ_PGO_INSTRUMENT "PGO instrumentation build (1st pass: /GENPROFILE
 option(CONVOPEQ_PGO_USE        "PGO optimized build (2nd pass: /USEPROFILE)" OFF)
 set(CONVOPEQ_PGO_PGD "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/Release/ConvoPeq.pgd" CACHE FILEPATH "PGO .pgd file path (USE phase)")
 
+# B3: icx で PGO が要求された場合は警告
+if(CONVOPEQ_PGO_INSTRUMENT AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    message(WARNING "[PGO] PGO is currently supported only for MSVC. "
+                    "icx users: /Qprof-gen and /Qprof-use are available but not yet integrated.")
+endif()
+
 if(CONVOPEQ_PGO_INSTRUMENT)
     message(STATUS "[PGO] Instrumentation mode enabled (/GENPROFILE) ── .pgc/.pgdはartefacts/Release内")
     target_compile_options(ConvoPeq PRIVATE
@@ -886,6 +893,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(ConvoPeq PRIVATE
         /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
         /W4         # 警告レベル4 (高)
+        # B6: /wd4100 /wd4189 は JUCE/r8brain 対策。自前コードの警告も隠す可能性あり。
+        # 将来的に JUCE ライブラリターゲットと自前コードターゲットを分割して分離を検討。
         /wd4100     # C4100: 参照されないパラメーター (JUCE内部の警告を抑制)
         /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
         /MP1        # マルチプロセッサコンパイル有効化 (1コアに制限してメモリ使用量を最小化)
@@ -1002,6 +1011,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # icx の Debug フラグは MSVC と同一形式で動作
     # /Od(最適化無効), /Zi(PDB) は CMake デフォルトで設定されるため特別な分岐不要
 
+    # B2: icx Debug にも明示的に /MT を指定（デフォルトと同一だが明示性向上）
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CONFIG:Debug>:/MT>
+    )
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
 endif()
@@ -1133,4 +1146,5 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         PROPERTIES COMPILE_FLAGS "/O1"
     )
 endif()
-add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)
+# B4: アプリ本体がテストに依存する逆依存を解消。テスト集約ターゲットが存在する場合はそちらに付け替える
+# add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)

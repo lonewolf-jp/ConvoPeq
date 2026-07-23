@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-23 00:33:53
+> Generated: 2026-07-23 14:31:42
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -676,7 +676,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
     target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
     # BuildInputSemanticContractTests: 大規模ソース読み取りでスタックオーバーフローを防ぐため8MBに拡大
-    if(MSVC)
+    # B5: MSVC と IntelLLVM の両方で適用（clang-cl 互換）
+    if(MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(BuildInputSemanticContractTests PRIVATE /GS-)
         target_link_options(BuildInputSemanticContractTests PRIVATE "/STACK:8388608")
     endif()
@@ -1125,6 +1126,12 @@ option(CONVOPEQ_PGO_INSTRUMENT "PGO instrumentation build (1st pass: /GENPROFILE
 option(CONVOPEQ_PGO_USE        "PGO optimized build (2nd pass: /USEPROFILE)" OFF)
 set(CONVOPEQ_PGO_PGD "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/Release/ConvoPeq.pgd" CACHE FILEPATH "PGO .pgd file path (USE phase)")
 
+# B3: icx で PGO が要求された場合は警告
+if(CONVOPEQ_PGO_INSTRUMENT AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    message(WARNING "[PGO] PGO is currently supported only for MSVC. "
+                    "icx users: /Qprof-gen and /Qprof-use are available but not yet integrated.")
+endif()
+
 if(CONVOPEQ_PGO_INSTRUMENT)
     message(STATUS "[PGO] Instrumentation mode enabled (/GENPROFILE) ── .pgc/.pgdはartefacts/Release内")
     target_compile_options(ConvoPeq PRIVATE
@@ -1188,6 +1195,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(ConvoPeq PRIVATE
         /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
         /W4         # 警告レベル4 (高)
+        # B6: /wd4100 /wd4189 は JUCE/r8brain 対策。自前コードの警告も隠す可能性あり。
+        # 将来的に JUCE ライブラリターゲットと自前コードターゲットを分割して分離を検討。
         /wd4100     # C4100: 参照されないパラメーター (JUCE内部の警告を抑制)
         /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
         /MP1        # マルチプロセッサコンパイル有効化 (1コアに制限してメモリ使用量を最小化)
@@ -1304,6 +1313,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # icx の Debug フラグは MSVC と同一形式で動作
     # /Od(最適化無効), /Zi(PDB) は CMake デフォルトで設定されるため特別な分岐不要
 
+    # B2: icx Debug にも明示的に /MT を指定（デフォルトと同一だが明示性向上）
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CONFIG:Debug>:/MT>
+    )
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
 endif()
@@ -1435,7 +1448,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         PROPERTIES COMPILE_FLAGS "/O1"
     )
 endif()
-add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)
+# B4: アプリ本体がテストに依存する逆依存を解消。テスト集約ターゲットが存在する場合はそちらに付け替える
+# add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)
 
 ```
 
@@ -3079,7 +3093,11 @@ juce::File CacheManager::getCacheDirectory() const
                    .getChildFile("ConvoPeq")
                    .getChildFile("IRCache");
     if (!dir.exists())
-        dir.createDirectory();
+     {
+         auto result = dir.createDirectory();
+         if (!result.wasOk())
+             juce::Logger::writeToLog("Warning: Could not create cache directory");
+     }
     return dir;
 }
 
@@ -3392,7 +3410,11 @@ void CacheManager::clear()
     const auto dir = getCacheDirectory();
     if (dir.exists())
         dir.deleteRecursively();
-    dir.createDirectory();
+    {
+        auto result = dir.createDirectory();
+        if (!result.wasOk())
+            juce::Logger::writeToLog("Warning: Could not recreate cache directory");
+    }
 
     std::lock_guard<std::mutex> lock(cacheMutex);
     cacheMap.clear();
@@ -6733,6 +6755,8 @@ private:
         float irFreqPeakGainDb = 0.0f;         // ★ v14.2: IRAnalyzer による周波数ピークゲイン [dB]
     };
     std::atomic<IRState*> currentIRState { nullptr };
+    // C4: rcuProvider は所有権を持たない。AudioEngine が ConvolverProcessor より必ず長生きする設計が前提
+    // （ISR Runtime の Authority Single Source 思想に適合。weak_ptr 化は不要）
     std::optional<std::reference_wrapper<AudioEngine>> rcuProvider;
 
     [[nodiscard]] AudioEngine* getRcuProvider() noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
@@ -6766,7 +6790,7 @@ public:
 public: // Added for AudioEngine access
     // Thread-safe IR state transfer from source convolver (copies the AudioBuffer)
     // Must be called before rebuildAllIRsSynchronous() on this instance.
-    void transferIRStateFrom(const ConvolverProcessor& source) noexcept
+    void transferIRStateFrom(const ConvolverProcessor& source)
     {
         const IRState* srcState = source.acquireIRState();
         if (srcState && srcState->ir && srcState->ir->getNumSamples() > 0 && srcState->sampleRate > 0.0)
@@ -7372,13 +7396,13 @@ bool checkAVX2SupportAndWarn() noexcept
         return true;
 
     // 非対応 CPU: MessageBox でエラー表示
-    ::MessageBoxA(nullptr,
-        "ConvoPeq には AVX2 および FMA 命令に対応した CPU が必要です。\n"
-        "Intel Haswell (2013) 以降、または AMD Excavator (2015) 以降の\n"
-        "CPU が必要です。\n\n"
-        "この CPU ではアプリケーションがクラッシュする可能性があるため、\n"
-        "実行を中断します。",
-        "ConvoPeq - CPU 非対応",
+    ::MessageBoxW(nullptr,
+        L"ConvoPeq には AVX2 および FMA 命令に対応した CPU が必要です。\n"
+        L"Intel Haswell (2013) 以降、または AMD Excavator (2015) 以降の\n"
+        L"CPU が必要です。\n\n"
+        L"この CPU ではアプリケーションがクラッシュする可能性があるため、\n"
+        L"実行を中断します。",
+        L"ConvoPeq - CPU 非対応",
         MB_OK | MB_ICONERROR);
 
     return false;
@@ -9510,7 +9534,12 @@ void DeviceSettings::updateGainStagingDisplay()
     float makeupMaxDb = 12.0f;
     juce::String modeText;
 
-    if (convBypassed && !eqBypassed)
+    if (convBypassed && eqBypassed)
+    {
+        modeText = "Bypass";
+        inputMaxDb = 0.0f;
+    }
+    else if (convBypassed && !eqBypassed)
     {
         modeText = "PEQ only";
         inputMaxDb = 0.0f;
@@ -9632,7 +9661,11 @@ juce::File DeviceSettings::getSettingsFile()
                           .getChildFile ("ConvoPeq");
 
     if (! appDataDir.exists())
-        appDataDir.createDirectory();
+    {
+        auto result = appDataDir.createDirectory();
+        if (!result.wasOk())
+            juce::Logger::writeToLog("Warning: Could not create settings directory");
+    }
 
     return appDataDir.getChildFile ("device_settings.xml");
 }
@@ -9643,7 +9676,11 @@ juce::File DeviceSettings::getNoiseShaperStateFile()
                           .getChildFile ("ConvoPeq");
 
     if (! appDataDir.exists())
-        appDataDir.createDirectory();
+    {
+        auto result = appDataDir.createDirectory();
+        if (!result.wasOk())
+            juce::Logger::writeToLog("Warning: Could not create settings directory");
+    }
 
     return appDataDir.getChildFile ("noise_shaper_learn.xml");
 }
@@ -9651,9 +9688,11 @@ juce::File DeviceSettings::getNoiseShaperStateFile()
 namespace {
 juce::String doubleArrayToString(const double* arr, int size)
 {
+    if (arr == nullptr || size <= 0)
+        return {};
     juce::StringArray strArr;
     for (int i = 0; i < size; ++i)
-        strArr.add(juce::String(arr[i], 16));
+        strArr.add(juce::String(arr[i], 17));
     return strArr.joinIntoString(",");
 }
 
@@ -11756,6 +11795,9 @@ EQEditProcessor::EQEditProcessor(AudioEngine& engine)
 
 void EQEditProcessor::scheduleDebounce()
 {
+    // C3: scheduleDebounce() は Message Thread からのみ呼ぶこと（design constraint）
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     convo::publishAtomic(pendingSnapshot, true, std::memory_order_release);
     if (!isTimerRunning())
         startTimer(kDebounceMs);
@@ -11968,6 +12010,10 @@ private:
 ```
 //============================================================================
 #pragma once
+// D2: /fp:fast の影響を回避するため、DSP コアファイルで float_control を precise に指定
+#if defined(_MSC_VER)
+#pragma float_control(precise, on)
+#endif
 // Fixed15TapNoiseShaper.h
 // 15-tap error-feedback noise shaper (RT-safe, allocation-free in process)
 //============================================================================
@@ -13910,6 +13956,10 @@ namespace convo::input_transform
 
 ```
 #pragma once
+// D2: /fp:fast の影響を回避するため、DSP コアファイルで float_control を precise に指定
+#if defined(_MSC_VER)
+#pragma float_control(precise, on)
+#endif
 
 #include <JuceHeader.h>
 #include <array>
@@ -14866,6 +14916,11 @@ static constexpr double kRlbBiquad[5] = {
 //   cblas_dscal (MKL BLAS)  : IR スケーリング
 //
 //============================================================================
+// D2: /fp:fast の影響を回避するため、DSP コアファイルで float_control を precise に指定
+#if defined(_MSC_VER)
+#pragma float_control(precise, on)
+#endif
+
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
 #include "DiagnosticsConfig.h"  // ★ work70: DIAG_MKL_MALLOC, convo::diag, getProcessMemoryInfo
@@ -19445,7 +19500,11 @@ juce::File MixedPhasePersistentCache::getCacheDirectory()
                    .getChildFile("ConvoPeq")
                    .getChildFile("MixedPhaseCache");
     if (!dir.exists())
-        dir.createDirectory();
+     {
+         auto result = dir.createDirectory();
+         if (!result.wasOk())
+             juce::Logger::writeToLog("Warning: Could not create cache directory");
+     }
     return dir;
 }
 
@@ -19552,7 +19611,11 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
                                    freqStartHz, freqEndHz, targetLength);
     const auto dir = file.getParentDirectory();
     if (!dir.exists())
-        dir.createDirectory();
+     {
+         auto result = dir.createDirectory();
+         if (!result.wasOk())
+             juce::Logger::writeToLog("Warning: Could not create cache directory");
+     }
 
     juce::TemporaryFile tempFile(file);
     {
@@ -22139,7 +22202,12 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         lastSaveTime = now;
 
         const auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ConvoPeq");
-        if (!appDataDir.exists()) appDataDir.createDirectory();
+        if (!appDataDir.exists())
+        {
+            auto result = appDataDir.createDirectory();
+            if (!result.wasOk())
+                juce::Logger::writeToLog("Warning: Could not create noise shaper state directory");
+        }
         const auto stateFile = appDataDir.getChildFile("learned_state.xml");
         const auto filePath = stateFile.getFullPathName();
 
@@ -37982,11 +38050,16 @@ void AudioEngine::timerCallback()
         //   DSPCore ポインタ経由の間接参照は、DSPCore が EBR 解放済みの場合に
         //   Use-After-Free（0xC0000005）を引き起こす可能性がある。
         //   runtimeUuid は DSPCore 構築時に一度設定される不変値であり、
-        //   RuntimeWorld の engine フィールドにコピー済みのため安全。
-        const uint64_t currentUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.currentRuntimeUuid : 0;
-        const uint64_t fadingUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.fadingRuntimeUuid : 0;
-        const uint64_t transitionCurrentUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.transitionCurrentRuntimeUuid : 0;
-        const uint64_t transitionNextUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.transitionNextRuntimeUuid : 0;
+        //   RuntimeWorld の topology フィールドにコピー済みのため安全。
+        //   （EngineRuntime.currentRuntimeUuid 等は deprecated のため topology 側へ統一）
+        const auto currentUuid =
+            runtimeWorld ? runtimeWorld->topology.runtimeUuid : 0ULL;
+        const auto fadingUuid =
+            runtimeWorld ? runtimeWorld->topology.fadingRuntimeUuid : 0ULL;
+        // RuntimeBuilder の現在の実装では transition UUID は
+        // current/fading UUID と同じ値になる
+        const auto transitionCurrentUuid = currentUuid;
+        const auto transitionNextUuid    = fadingUuid;
 
         if (revision != rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision
             || currentUuid != rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid
@@ -43925,17 +43998,12 @@ const juce::String AudioEngineProcessor::getName() const
 bool AudioEngineProcessor::acceptsMidi() const { return false; }
 bool AudioEngineProcessor::producesMidi() const { return false; }
 bool AudioEngineProcessor::isMidiEffect() const { return false; }
+// D5: IR長のみの概算値。oversampling やフィルターによるテール延長は未反映。
+// C5: cachedTailLength を返す（Runtime Publish 時に更新。ValueTree 依存を断つ）
+// 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
 double AudioEngineProcessor::getTailLengthSeconds() const
 {
-    const auto convState = audioEngine.getConvolverStateTree();
-    if (!convState.isValid())
-        return 0.0;
-
-    const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
-    if (!std::isfinite(irLengthSec) || irLengthSec <= 0.0)
-        return 0.0;
-
-    return irLengthSec;
+    return cachedTailLength;
 }
 
 int AudioEngineProcessor::getNumPrograms() { return 1; }
@@ -43948,6 +44016,19 @@ void AudioEngineProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     audioEngine.prepareToPlay(samplesPerBlock, sampleRate);
     setLatencySamples(audioEngine.getTotalLatencySamples());
+
+    // C5: cachedTailLength を更新（Runtime Publish 時を Authority にする）
+    // prepareToPlay は IR 変更時に呼ばれるため、ここでキャッシュを更新
+    const auto convState = audioEngine.getConvolverStateTree();
+    if (convState.isValid())
+    {
+        const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
+        cachedTailLength = (std::isfinite(irLengthSec) && irLengthSec > 0.0) ? irLengthSec : 0.0;
+    }
+    else
+    {
+        cachedTailLength = 0.0;
+    }
 }
 
 void AudioEngineProcessor::releaseResources()
@@ -44088,6 +44169,10 @@ public:
 
 private:
     AudioEngine& audioEngine;
+    // C5: Runtime Publish 時に計算・更新するキャッシュされた tail length
+    // 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
+    // （将来の変更に備え、コメントで「Runtime Publish 時を Authority にする」を明記）
+    double cachedTailLength = 0.0;
 };
 
 
@@ -46367,6 +46452,9 @@ private:
 namespace convo::isr {
 namespace {
 
+// R3: escapeJson の前方宣言（定義は匿名名前空間末尾）
+std::string escapeJson(std::string_view s);
+
 std::filesystem::path artifactRoot()
 {
     return std::filesystem::current_path() / "evidence";
@@ -46472,9 +46560,7 @@ std::string withRuntimeMetadata(std::string_view rawJson,
         metadata += ",\"provenance\":\"runtime\"";
     }
     if (!hasRunId) {
-        metadata += ",\"runId\":\"";
-        metadata += runId;
-        metadata += "\"";
+        metadata += ",\"runId\":\"" + escapeJson(runId) + "\"";
     }
     if (!hasGeneratedAtNs) {
         metadata += ",\"generatedAtNs\":";
@@ -46521,7 +46607,7 @@ std::string buildFailureLogJson(const TelemetryRecorder::TelemetrySnapshot& snap
         oss << "    {\"correlationId\":" << r.correlationIdShort
             << ",\"stage\":" << static_cast<int>(r.stage)
             << ",\"reason\":" << static_cast<int>(r.reason)
-            << ",\"origin\":\"" << (r.origin ? r.origin : "null")
+            << ",\"origin\":\"" << escapeJson(r.origin ? r.origin : "null")
             << "\",\"timestampUs\":" << r.timestampUs << "}";
     }
     oss << "\n  ],\n";
@@ -46536,7 +46622,7 @@ std::string buildFailureLogJson(const TelemetryRecorder::TelemetrySnapshot& snap
             << ",\"generation\":" << s.generation
             << ",\"stage\":" << static_cast<int>(s.stage)
             << ",\"reason\":" << static_cast<int>(s.reason)
-            << ",\"origin\":\"" << (s.origin ? s.origin : "null")
+            << ",\"origin\":\"" << escapeJson(s.origin ? s.origin : "null")
             << "\",\"readerCount\":" << s.activeReaderCount
             << ",\"timestampUs\":" << s.timestampUs << "}";
     }
@@ -46594,6 +46680,33 @@ std::string buildDeferredHealthJson(const TelemetryRecorder::TelemetrySnapshot& 
     return oss.str();
 }
 
+// R3: JSON仕様に従い0x00〜0x1Fの制御文字をすべてエスケープ
+std::string escapeJson(std::string_view s)
+{
+    std::string out;
+    out.reserve(s.size() + s.size() / 4);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot,
@@ -46625,8 +46738,8 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
         {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
         {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"ok\",\"violations\":[]}"},
         {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0}"},
-        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"generated\",\"phase\":0,\"verified\":true,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
-        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"generated\",\"withinThreshold\":true}"},
+        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"template\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
+        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"template\",\"withinThreshold\":false}"},
         {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
         {"publication_failure_log.json", failureLogJson.c_str()},
         {"publication_progress_log.json", progressLogJson.c_str()},
@@ -46647,10 +46760,10 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     std::string manifest = "{\n";
     manifest += "  \"schema\": \"evidence_manifest_v1\",\n";
     manifest += "  \"generationMode\": \"runtime\",\n";
-    manifest += "  \"runtimeRunId\": \"" + runId + "\",\n";
-    manifest += "  \"runId\": \"" + runId + "\",\n";
-    manifest += "  \"buildMode\": \"" + buildMode + "\",\n";
-    manifest += "  \"proofLevel\": \"" + proofLevel + "\",\n";
+    manifest += "  \"runtimeRunId\": \"" + escapeJson(runId) + "\",\n";
+    manifest += "  \"runId\": \"" + escapeJson(runId) + "\",\n";
+    manifest += "  \"buildMode\": \"" + escapeJson(buildMode) + "\",\n";
+    manifest += "  \"proofLevel\": \"" + escapeJson(proofLevel) + "\",\n";
     manifest += "  \"generatedAtNs\": " + std::to_string(generatedAtNs) + ",\n";
     manifest += "  \"artifacts\": [\n";
 
@@ -58749,6 +58862,9 @@ void ConvolverProcessor::releaseResources()
 // ────────────────────────────────────────────────────────────────
 void ConvolverProcessor::reset()
 {
+    // H8: reset() は Audio Thread 停止後にのみ呼び出すこと（design constraint）
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     struct GlobalGuard {
         const ConvolverProcessor& cp;
         GlobalGuard(const ConvolverProcessor& cp_) : cp(cp_) { cp.enterGlobalReader(2); }
@@ -62083,6 +62199,11 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
 ### 📄 `src\convolver\ConvolverProcessor.Runtime.cpp`
 
 ```
+// D2: /fp:fast の影響を回避するため、DSP コアファイルで float_control を precise に指定
+#if defined(_MSC_VER)
+#pragma float_control(precise, on)
+#endif
+
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"

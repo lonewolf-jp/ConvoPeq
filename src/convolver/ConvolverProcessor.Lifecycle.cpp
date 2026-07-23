@@ -456,6 +456,9 @@ void ConvolverProcessor::releaseResources()
 // ────────────────────────────────────────────────────────────────
 void ConvolverProcessor::reset()
 {
+    // H8: reset() は Audio Thread 停止後にのみ呼び出すこと（design constraint）
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     struct GlobalGuard {
         const ConvolverProcessor& cp;
         GlobalGuard(const ConvolverProcessor& cp_) : cp(cp_) { cp.enterGlobalReader(2); }

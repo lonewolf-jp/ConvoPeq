@@ -465,11 +465,16 @@ void AudioEngine::timerCallback()
         //   DSPCore ポインタ経由の間接参照は、DSPCore が EBR 解放済みの場合に
         //   Use-After-Free（0xC0000005）を引き起こす可能性がある。
         //   runtimeUuid は DSPCore 構築時に一度設定される不変値であり、
-        //   RuntimeWorld の engine フィールドにコピー済みのため安全。
-        const uint64_t currentUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.currentRuntimeUuid : 0;
-        const uint64_t fadingUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.fadingRuntimeUuid : 0;
-        const uint64_t transitionCurrentUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.transitionCurrentRuntimeUuid : 0;
-        const uint64_t transitionNextUuid = (runtimeWorld != nullptr) ? runtimeWorld->engine.transitionNextRuntimeUuid : 0;
+        //   RuntimeWorld の topology フィールドにコピー済みのため安全。
+        //   （EngineRuntime.currentRuntimeUuid 等は deprecated のため topology 側へ統一）
+        const auto currentUuid =
+            runtimeWorld ? runtimeWorld->topology.runtimeUuid : 0ULL;
+        const auto fadingUuid =
+            runtimeWorld ? runtimeWorld->topology.fadingRuntimeUuid : 0ULL;
+        // RuntimeBuilder の現在の実装では transition UUID は
+        // current/fading UUID と同じ値になる
+        const auto transitionCurrentUuid = currentUuid;
+        const auto transitionNextUuid    = fadingUuid;
 
         if (revision != rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision
             || currentUuid != rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid

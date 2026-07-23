@@ -1457,7 +1457,12 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         lastSaveTime = now;
 
         const auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ConvoPeq");
-        if (!appDataDir.exists()) appDataDir.createDirectory();
+        if (!appDataDir.exists())
+        {
+            auto result = appDataDir.createDirectory();
+            if (!result.wasOk())
+                juce::Logger::writeToLog("Warning: Could not create noise shaper state directory");
+        }
         const auto stateFile = appDataDir.getChildFile("learned_state.xml");
         const auto filePath = stateFile.getFullPathName();
 

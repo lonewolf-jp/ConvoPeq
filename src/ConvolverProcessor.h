@@ -1071,6 +1071,8 @@ private:
         float irFreqPeakGainDb = 0.0f;         // ★ v14.2: IRAnalyzer による周波数ピークゲイン [dB]
     };
     std::atomic<IRState*> currentIRState { nullptr };
+    // C4: rcuProvider は所有権を持たない。AudioEngine が ConvolverProcessor より必ず長生きする設計が前提
+    // （ISR Runtime の Authority Single Source 思想に適合。weak_ptr 化は不要）
     std::optional<std::reference_wrapper<AudioEngine>> rcuProvider;
 
     [[nodiscard]] AudioEngine* getRcuProvider() noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
@@ -1104,7 +1106,7 @@ public:
 public: // Added for AudioEngine access
     // Thread-safe IR state transfer from source convolver (copies the AudioBuffer)
     // Must be called before rebuildAllIRsSynchronous() on this instance.
-    void transferIRStateFrom(const ConvolverProcessor& source) noexcept
+    void transferIRStateFrom(const ConvolverProcessor& source)
     {
         const IRState* srcState = source.acquireIRState();
         if (srcState && srcState->ir && srcState->ir->getNumSamples() > 0 && srcState->sampleRate > 0.0)

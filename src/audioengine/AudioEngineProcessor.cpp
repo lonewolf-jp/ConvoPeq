@@ -18,17 +18,12 @@ const juce::String AudioEngineProcessor::getName() const
 bool AudioEngineProcessor::acceptsMidi() const { return false; }
 bool AudioEngineProcessor::producesMidi() const { return false; }
 bool AudioEngineProcessor::isMidiEffect() const { return false; }
+// D5: IR長のみの概算値。oversampling やフィルターによるテール延長は未反映。
+// C5: cachedTailLength を返す（Runtime Publish 時に更新。ValueTree 依存を断つ）
+// 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
 double AudioEngineProcessor::getTailLengthSeconds() const
 {
-    const auto convState = audioEngine.getConvolverStateTree();
-    if (!convState.isValid())
-        return 0.0;
-
-    const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
-    if (!std::isfinite(irLengthSec) || irLengthSec <= 0.0)
-        return 0.0;
-
-    return irLengthSec;
+    return cachedTailLength;
 }
 
 int AudioEngineProcessor::getNumPrograms() { return 1; }
@@ -41,6 +36,19 @@ void AudioEngineProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     audioEngine.prepareToPlay(samplesPerBlock, sampleRate);
     setLatencySamples(audioEngine.getTotalLatencySamples());
+
+    // C5: cachedTailLength を更新（Runtime Publish 時を Authority にする）
+    // prepareToPlay は IR 変更時に呼ばれるため、ここでキャッシュを更新
+    const auto convState = audioEngine.getConvolverStateTree();
+    if (convState.isValid())
+    {
+        const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
+        cachedTailLength = (std::isfinite(irLengthSec) && irLengthSec > 0.0) ? irLengthSec : 0.0;
+    }
+    else
+    {
+        cachedTailLength = 0.0;
+    }
 }
 
 void AudioEngineProcessor::releaseResources()

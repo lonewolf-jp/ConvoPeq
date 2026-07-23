@@ -666,7 +666,12 @@ void DeviceSettings::updateGainStagingDisplay()
     float makeupMaxDb = 12.0f;
     juce::String modeText;
 
-    if (convBypassed && !eqBypassed)
+    if (convBypassed && eqBypassed)
+    {
+        modeText = "Bypass";
+        inputMaxDb = 0.0f;
+    }
+    else if (convBypassed && !eqBypassed)
     {
         modeText = "PEQ only";
         inputMaxDb = 0.0f;
@@ -788,7 +793,11 @@ juce::File DeviceSettings::getSettingsFile()
                           .getChildFile ("ConvoPeq");
 
     if (! appDataDir.exists())
-        appDataDir.createDirectory();
+    {
+        auto result = appDataDir.createDirectory();
+        if (!result.wasOk())
+            juce::Logger::writeToLog("Warning: Could not create settings directory");
+    }
 
     return appDataDir.getChildFile ("device_settings.xml");
 }
@@ -799,7 +808,11 @@ juce::File DeviceSettings::getNoiseShaperStateFile()
                           .getChildFile ("ConvoPeq");
 
     if (! appDataDir.exists())
-        appDataDir.createDirectory();
+    {
+        auto result = appDataDir.createDirectory();
+        if (!result.wasOk())
+            juce::Logger::writeToLog("Warning: Could not create settings directory");
+    }
 
     return appDataDir.getChildFile ("noise_shaper_learn.xml");
 }
@@ -807,9 +820,11 @@ juce::File DeviceSettings::getNoiseShaperStateFile()
 namespace {
 juce::String doubleArrayToString(const double* arr, int size)
 {
+    if (arr == nullptr || size <= 0)
+        return {};
     juce::StringArray strArr;
     for (int i = 0; i < size; ++i)
-        strArr.add(juce::String(arr[i], 16));
+        strArr.add(juce::String(arr[i], 17));
     return strArr.joinIntoString(",");
 }
 

@@ -1,3 +1,8 @@
+// D2: /fp:fast の影響を回避するため、DSP コアファイルで float_control を precise に指定
+#if defined(_MSC_VER)
+#pragma float_control(precise, on)
+#endif
+
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"

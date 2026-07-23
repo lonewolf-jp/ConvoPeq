@@ -39,5 +39,9 @@ public:
 
 private:
     AudioEngine& audioEngine;
+    // C5: Runtime Publish 時に計算・更新するキャッシュされた tail length
+    // 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
+    // （将来の変更に備え、コメントで「Runtime Publish 時を Authority にする」を明記）
+    double cachedTailLength = 0.0;
 };
 
