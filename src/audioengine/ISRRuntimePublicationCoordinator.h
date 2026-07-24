@@ -239,16 +239,4 @@ private:
     bool rejected_ = false;
 };
 
-class PublicationBuffer {
-public:
-    void enqueue(const void* world);
-    void retireOld();
-
-    [[nodiscard]] std::size_t size() noexcept;
-
-private:
-    std::vector<const void*> queued_;
-    std::mutex guard_;
-};
-
 } // namespace convo::isr

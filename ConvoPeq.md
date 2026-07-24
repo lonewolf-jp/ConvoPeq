@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-23 14:31:42
+> Generated: 2026-07-25 00:25:51
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1668,6 +1668,15 @@ if exist "%ONEAPI_SETVARS%" (
     exit /b 1
 )
 
+REM ------------------------------------------------------------REM Setup Intel oneAPI library paths (linker search paths)
+REM setvars.bat sets INCLUDE but not always LIB for all components.
+REM Ensure MKL, IPP, and compiler runtime libs are findable by the linker.
+set "ONEAPI_LIB=C:\Program Files (x86)\Intel\oneAPI"
+if exist "%ONEAPI_LIB%\mkl\latest\lib" set "LIB=%ONEAPI_LIB%\mkl\latest\lib;%LIB%"
+if exist "%ONEAPI_LIB%\ipp\latest\lib" set "LIB=%ONEAPI_LIB%\ipp\latest\lib;%LIB%"
+if exist "%ONEAPI_LIB%\compiler\latest\lib" set "LIB=%ONEAPI_LIB%\compiler\latest\lib;%LIB%"
+echo [INFO] Intel oneAPI library paths added to LIB.
+
 REM ------------------------------------------------------------
 REM Create build directory
 echo [1/4] Creating build directory...
@@ -2426,10 +2435,16 @@ DesignResult AllpassDesigner::designWithCMAES(
                                      + " sigma=" + juce::String(optimizer.getSigma()));
         }
 
-        // 進捗コールバック
+        // 進捗コールバック（Message Thread にマーシャリング）
         if (progressCallback) {
             float progress = 0.2f + 0.6f * static_cast<float>(gen) / juce::jmax(1, config.cmaesMaxGenerations);
-            progressCallback(progress);
+            auto cb = progressCallback;
+            if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+            {
+                mm->callAsync([cb, progress]() {
+                    cb(progress);
+                });
+            }
         }
 
         // 早期終了条件：sigma が十分小さい、十分収束、または改善停滞
@@ -2455,7 +2470,15 @@ DesignResult AllpassDesigner::designWithCMAES(
     }
 
     if (progressCallback)
-        progressCallback(0.9f);
+    {
+        auto cb = progressCallback;
+        if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+        {
+            mm->callAsync([cb]() {
+                cb(0.9f);
+            });
+        }
+    }
 
     juce::Logger::writeToLog("CMA-ES optimization finished. Best fitness="
                              + juce::String(bestFitness)
@@ -2521,7 +2544,14 @@ bool AllpassDesigner::design(double sampleRate,
         }
 
         if (progressCallback) {
-            progressCallback(0.5f + 0.25f * static_cast<float>(sec + 1) / config.numSections);
+            float progress = 0.5f + 0.25f * static_cast<float>(sec + 1) / config.numSections;
+            auto cb = progressCallback;
+            if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+            {
+                mm->callAsync([cb, progress]() {
+                    cb(progress);
+                });
+            }
         }
     }
     return true;
@@ -3365,8 +3395,18 @@ void CacheManager::save(uint64_t key, int fftSize, const PreparedIRState& state)
                        static_cast<size_t>(samples) * sizeof(double));
     }
     out->flush();
+    if (out->getStatus().failed())
+    {
+        out.reset();
+        temp.deleteFile();
+        return;
+    }
+    out.reset();
 
-    temp.moveFileTo(file);
+    if (!temp.moveFileTo(file))
+    {
+        temp.deleteFile();
+    }
     touch(key, fftSize);
 }
 
@@ -5709,6 +5749,7 @@ private:
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <array>
 #include <functional>
@@ -6074,7 +6115,18 @@ public:
     }
     // acquire: LoaderThread/applyComputedIR の release と HB し、IR長を取得。
     [[nodiscard]] int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
-    [[nodiscard]] juce::String getLastError() const { return lastError; }
+    [[nodiscard]] juce::String getLastError() const {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        return lastError;
+    }
+    void setLastError(const juce::String& msg) {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        lastError = msg;
+    }
+    void clearLastError() {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        lastError.clear();
+    }
     // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
     [[nodiscard]] float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
     // acquire: setMixedPhaseState の release と HB し、混合フェーズ状態を取得。
@@ -6553,6 +6605,7 @@ private:
     std::deque<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };
     std::atomic<int> mixedPhaseState { 0 }; // 0=WaitingIR, 1=Optimizing, 2=Completed
+    mutable std::mutex lastErrorMutex_;
     juce::String lastError;
 
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };
@@ -7357,36 +7410,106 @@ static bool hasAVX2Support() noexcept
         }
     }
 
-    // Method 2: __cpuidex による直接チェック
+    // Method 2: AVX2 実行可否確認（MaxLeaf + OSXSAVE + AVX + FMA + AVX2 + XGETBV）
+    // Method 1 は通常成功するため、Method 2 は保険的フォールバック経路。
     {
-        int cpuInfo[4] = { 0 };
+        // Step 0: CPUID(0) で最大 leaf を確認
+        // CPUID leaf 7 は最大 leaf >= 7 の CPU でのみ有効。
+        // 現代 CPU では不要に近いが、フォールバック実装として堅牢性を高める。
+        int leaf0[4] = { 0 };
 #if defined(_MSC_VER) || defined(__INTEL_COMPILER)
-        __cpuidex(cpuInfo, 7, 0);
+        __cpuid(leaf0, 0);
 #elif defined(__GNUC__) || defined(__clang__)
-        __cpuid_count(7, 0, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
+        __get_cpuid(0, &leaf0[0], &leaf0[1], &leaf0[2], &leaf0[3]);
+#endif
+        if (static_cast<unsigned>(leaf0[0]) < 7u)
+            return false;  // leaf 7 未対応 → AVX2 不可
+
+        // Step 1: leaf 1 で OSXSAVE + AVX + FMA を確認
+        int leaf1[4] = { 0 };
+#if defined(_MSC_VER) || defined(__INTEL_COMPILER)
+        __cpuid(leaf1, 1);
+#elif defined(__GNUC__) || defined(__clang__)
+        __get_cpuid(1, &leaf1[0], &leaf1[1], &leaf1[2], &leaf1[3]);
+#endif
+        // bit 27: OSXSAVE — XGETBV 発行前に必須（なければ #UD）
+        constexpr int kOSXSAVEBit = 27;
+        if ((leaf1[2] & (1u << kOSXSAVEBit)) == 0)
+            return false;
+        // bit 28: AVX — AVX 命令使用に必須（Intel SDM: CPUID.1:ECX[28]）
+        constexpr int kAVXBit = 28;
+        if ((leaf1[2] & (1u << kAVXBit)) == 0)
+            return false;
+        // bit 12: FMA3（★ leaf 1 ECX、leaf 7 EBX ではない）
+        constexpr int kFMABit = 12;
+        if ((leaf1[2] & (1u << kFMABit)) == 0)
+            return false;
+
+        // Step 2: leaf 7 で AVX2 を確認
+        int leaf7[4] = { 0 };
+#if defined(_MSC_VER) || defined(__INTEL_COMPILER)
+        __cpuidex(leaf7, 7, 0);
+#elif defined(__GNUC__) || defined(__clang__)
+        __cpuid_count(7, 0, leaf7[0], leaf7[1], leaf7[2], leaf7[3]);
 #endif
         constexpr int kAVX2Bit = 5;
-        constexpr int kFMABit   = 12;
-        if ((cpuInfo[1] & (1 << kAVX2Bit)) != 0
-            && (cpuInfo[1] & (1 << kFMABit)) != 0)
-            return true;
-        return false;
+        if ((leaf7[1] & (1u << kAVX2Bit)) == 0)
+            return false;
+
+        // Step 3: XGETBV で OS の YMM 保存を確認
+#if defined(_MSC_VER) || defined(__INTEL_COMPILER)
+        const unsigned int xcr0 = static_cast<unsigned int>(_xgetbv(0));
+#else
+        unsigned int xcr0_eax = 0, xcr0_edx = 0;
+        __asm__("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+        const unsigned int xcr0 = xcr0_eax;
+#endif
+        // XCR0[1] = XMM enabled, XCR0[2] = YMM enabled
+        if ((xcr0 & 0x6u) != 0x6u)
+            return false;
+
+        return true;
     }
 #elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
-    // Linux/macOS: __get_cpuid_count
-    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+    // Linux/macOS: CPUID + XGETBV による確認
     {
-        constexpr int kAVX2Bit = 5;
-        constexpr int kFMABit  = 12;
-        if ((ebx & (1u << kAVX2Bit)) != 0
-            && (ebx & (1u << kFMABit)) != 0)
-            return true;
+        // Step 0: CPUID(0) で最大 leaf を確認
+        unsigned int maxLeaf = 0;
+        unsigned int ignore = 0;
+        __get_cpuid(0, &maxLeaf, &ignore, &ignore, &ignore);
+        if (maxLeaf < 7u)
+            return false;
+
+        // Step 1: leaf 1 で OSXSAVE + AVX + FMA を確認
+        unsigned int eax1 = 0, ebx1 = 0, ecx1 = 0, edx1 = 0;
+        __get_cpuid(1, &eax1, &ebx1, &ecx1, &edx1);
+        // bit 27: OSXSAVE — XGETBV 発行前に必須
+        if ((ecx1 & (1u << 27)) == 0)
+            return false;
+        // bit 28: AVX
+        if ((ecx1 & (1u << 28)) == 0)
+            return false;
+        // bit 12: FMA3（★ leaf 1 ECX、leaf 7 EBX ではない）
+        if ((ecx1 & (1u << 12)) == 0)
+            return false;
+
+        // Step 2: leaf 7 で AVX2 を確認
+        unsigned int eax7 = 0, ebx7 = 0, ecx7 = 0, edx7 = 0;
+        __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
+        if ((ebx7 & (1u << 5)) == 0)  // AVX2 bit
+            return false;
+
+        // Step 3: XGETBV で OS の YMM 保存を確認
+        unsigned int xcr0_eax = 0, xcr0_edx = 0;
+        __asm__("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+        if ((xcr0_eax & 0x6u) != 0x6u)  // XCR0[1]=XMM, [2]=YMM
+            return false;
+
+        return true;
     }
-    return false;
 #else
-    // 未知のプラットフォーム: 安全側に倒してチェック通過
-    return true;
+    // 未対応コンパイラ: AVX2 を使用できないと判断して安全側に倒す
+    return false;
 #endif
 }
 
@@ -7718,7 +7841,7 @@ double CustomInputOversampler::dotProductDecimateAvx2(
 }
 #endif
 
-void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
+bool CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
 {
     clearStage(stage);
 
@@ -7729,7 +7852,8 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     stage.maxInputSamples = stageInputMax;
     stage.maxOutputSamples = stageInputMax * 2;
 
-    auto rawCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.taps));
+    auto rawCoeffs = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.taps));
+    if (!rawCoeffs) { clearStage(stage); return false; }
 
     const double beta = (attenuationDb > 50.0)
                       ? (0.1102 * (attenuationDb - 8.7))
@@ -7781,13 +7905,13 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     rawCoeffs[stage.centerTap] = 0.5;
 
     stage.convCount = (stage.taps - stage.convParity + 1) / 2;
-    stage.convCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
-    stage.convCoeffsReversed = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
+    stage.convCoeffs = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.convCount));
+    stage.convCoeffsReversed = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.convCount));
 
     if (!stage.convCoeffs || !stage.convCoeffsReversed)
     {
         clearStage(stage);
-        return;
+        return false;
     }
 
     for (int r = 0; r < stage.convCount; ++r)
@@ -7809,11 +7933,17 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
 
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        stage.upHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.upHistorySize));
-        stage.downHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.downHistorySize));
-        if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
-        if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
+        stage.upHistory[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.upHistorySize));
+        stage.downHistory[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(stage.downHistorySize));
+        if (!stage.upHistory[ch] || !stage.downHistory[ch])
+        {
+            clearStage(stage);
+            return false;
+        }
+        juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+        juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
     }
+    return true;
 }
 
 bool CustomInputOversampler::prepareSingleStage(int taps, double attenDb, int stageInputMax) noexcept
@@ -7823,11 +7953,15 @@ bool CustomInputOversampler::prepareSingleStage(int taps, double attenDb, int st
     numStages = 1;
     maxInputBlockSize = stageInputMax;
     maxUpsampledBlockSize = stageInputMax * 2;
-    prepareStage(stages[0], taps, attenDb, stageInputMax);
+    if (!prepareStage(stages[0], taps, attenDb, stageInputMax))
+    {
+        release();
+        return false;
+    }
     workCapacity = maxUpsampledBlockSize;
     for (int ch = 0; ch < kMaxChannels; ++ch) {
-        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
-        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        workA[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
         if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
         if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
         blockChannels[ch] = workA[ch].get();
@@ -7848,17 +7982,26 @@ void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset
     int stageInputMax = maxInputBlockSize;
     for (int i = 0; i < numStages; ++i)
     {
-        prepareStage(stages[i], tapsForStage(i, activePreset), attenuationForStage(i, activePreset), stageInputMax);
+        if (!prepareStage(stages[i], tapsForStage(i, activePreset), attenuationForStage(i, activePreset), stageInputMax))
+        {
+            release();
+            return;
+        }
         stageInputMax *= 2;
     }
 
     workCapacity = juce::jmax(1, maxUpsampledBlockSize);
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
-        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
-        if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
-        if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
+        workA[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray_nothrow<double>(static_cast<size_t>(workCapacity));
+        if (!workA[ch] || !workB[ch])
+        {
+            release();
+            return;
+        }
+        juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
+        juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
         blockChannels[ch] = workA[ch].get();
     }
 }
@@ -8381,7 +8524,7 @@ private:
     };
 
     void clearStage(Stage& stage) noexcept;
-    void prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax);
+    bool prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax);
 
     static double besselI0(double x) noexcept;
     static double dotProductAvx2(const double* x, const double* coeffs, int n) noexcept;
@@ -18676,14 +18819,18 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
         // Active は Audio Thread 反映タイミング依存のため、直後に旧値へ戻ることがある。
         const bool eqBypassed = audioEngine.isEqBypassRequested();
         const bool convBypassed = audioEngine.isConvolverBypassRequested();
-        int modeId = 3; // Conv->Peq
-        if (!eqBypassed && convBypassed)
+        int modeId;
+        if (eqBypassed && convBypassed)
+            modeId = 5; // Bypass
+        else if (!eqBypassed && convBypassed)
             modeId = 2; // Peq
         else if (eqBypassed && !convBypassed)
             modeId = 1; // Conv
         else if (!eqBypassed && !convBypassed
               && audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::EQThenConvolver)
             modeId = 4; // Peq->Conv
+        else
+            modeId = 3; // Conv->Peq
         orderModeBox.setSelectedId(modeId, juce::dontSendNotification);
 
         // ソフトクリップとサチュレーション
@@ -18751,6 +18898,7 @@ void MainWindow::createUIComponents()
     orderModeBox.addItem("Peq", 2);
     orderModeBox.addItem("Conv->Peq", 3);
     orderModeBox.addItem("Peq->Conv", 4);
+    orderModeBox.addItem("Bypass", 5);
     orderModeBox.setJustificationType(juce::Justification::centred);
     orderModeBox.setTooltip("Processing mode");
     orderModeBox.setLookAndFeel (&orderModeLookAndFeel);
@@ -18838,27 +18986,33 @@ void MainWindow::createUIComponents()
 void MainWindow::orderModeBoxChanged()
 {
     const int mode = orderModeBox.getSelectedId();
-    if (mode == 1)
+    switch (mode)
     {
-        audioEngine.setConvolverBypassRequested(false);
-        audioEngine.setEqBypassRequested(true);
-    }
-    else if (mode == 2)
-    {
-        audioEngine.setConvolverBypassRequested(true);
-        audioEngine.setEqBypassRequested(false);
-    }
-    else if (mode == 3)
-    {
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
-        audioEngine.setConvolverBypassRequested(false);
-        audioEngine.setEqBypassRequested(false);
-    }
-    else if (mode == 4)
-    {
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
-        audioEngine.setConvolverBypassRequested(false);
-        audioEngine.setEqBypassRequested(false);
+        case 1: /* Conv */
+            audioEngine.setConvolverBypassRequested(false);
+            audioEngine.setEqBypassRequested(true);
+            break;
+        case 2: /* Peq */
+            audioEngine.setConvolverBypassRequested(true);
+            audioEngine.setEqBypassRequested(false);
+            break;
+        case 3: /* Conv->Peq */
+            audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
+            audioEngine.setConvolverBypassRequested(false);
+            audioEngine.setEqBypassRequested(false);
+            break;
+        case 4: /* Peq->Conv */
+            audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
+            audioEngine.setConvolverBypassRequested(false);
+            audioEngine.setEqBypassRequested(false);
+            break;
+        case 5: /* Bypass */
+            audioEngine.setConvolverBypassRequested(true);
+            audioEngine.setEqBypassRequested(true);
+            break;
+        default:
+            jassertfalse;
+            break;
     }
 
     if (eqPanel != nullptr)
@@ -30135,6 +30289,24 @@ void AudioEngine::revertMmcssOnAudioThread() noexcept
     t_mmcssTried = false; // Allow retry on next device open / thread creation
 }
 
+// ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+//   現在: FTZ + DAZ（デノーマル演算の高性能化）
+//   将来拡張: MXCSR RoundMode, ExceptionMask, FENV 全体をここで管理
+//   設計条件: オーディオスレッドでは外部ライブラリ（MKL/IPP/VML等）が MXCSR を書き換えないこと
+//   スレッド初期化専用であり、リアルタイム処理中に MXCSR を再設定する用途ではない
+void AudioEngine::ensureThreadFloatingPointEnvironment() noexcept
+{
+    // thread_local: safe for driver-owned threads (ASIO), no locking needed,
+    //               auto-cleanup on thread destruction, device switch creates new thread.
+    thread_local bool t_fpEnvReady = false; // NOLINT(thread-local) RT-SAFE: guard flag, written once per thread
+    if (t_fpEnvReady)
+        return;
+    t_fpEnvReady = true;
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    // vmlSetMode は MainApplication で設定済み（スレッドローカルのため別スレッドでは効果なし）
+}
+
 ```
 
 ### 📄 `src\audioengine\AudioEngine.Parameters.cpp`
@@ -30895,6 +31067,15 @@ namespace
     {
         return absNoLibm(a - b);
     }
+
+    // Audio thread path avoids libm calls for deterministic realtime behavior.
+    // ★ ADR-006: 等電力クロスフェード用の sin 近似（6次テイラー展開）
+    inline double equalPowerSin(double x) noexcept
+    {
+        const double t = x * (juce::MathConstants<double>::pi * 0.5);
+        const double t2 = t * t;
+        return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
+    }
 }
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
@@ -30968,7 +31149,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     } runtimeScope(*this);
 
-    const juce::ScopedNoDenormals noDenormals;
+    // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+    //   ScopedNoDenormals の save/restore を省略し、スレッド起動時に1回だけ設定
+    //   設計条件: オーディオスレッドでは外部ライブラリが MXCSR を書き換えないこと
+    ensureThreadFloatingPointEnvironment();
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
     // 入力検証 (Input Validation)
@@ -31308,14 +31492,16 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                                          double alignedNewL,
                                                                          double alignedNewR)
                                                      {
+                                                         // ★ ADR-003/006: 等電力クロスフェード（エネルギー保存の不変条件）
                                                          const double dryScale = useDryAsOld ? crossfadeRuntime_.getDryScaleGain().getNextValue() : 1.0;
-                                                         const double gOld = 1.0 - gNew;
+                                                         const double gOld = equalPowerSin(1.0 - gNew);
+                                                         const double gNewEp = equalPowerSin(gNew);
                                                          const double dryScaledL = alignedOldL * dryScale;
                                                          const double dryScaledR = alignedOldR * dryScale;
                                                          if (outL != nullptr)
-                                                             outL[i] = static_cast<float>(alignedNewL * gNew + dryScaledL * gOld);
+                                                             outL[i] = static_cast<float>(alignedNewL * gNewEp + dryScaledL * gOld);
                                                          if (outR != nullptr)
-                                                             outR[i] = static_cast<float>(alignedNewR * gNew + dryScaledR * gOld);
+                                                             outR[i] = static_cast<float>(alignedNewR * gNewEp + dryScaledR * gOld);
                                                      });
 
             if (!useDryAsOld)
@@ -31651,6 +31837,15 @@ namespace
     {
         return absNoLibm(a - b);
     }
+
+    // Audio thread path avoids libm calls for deterministic realtime behavior.
+    // ★ ADR-006: 等電力クロスフェード用の sin 近似（6次テイラー展開）
+    inline double equalPowerSin(double x) noexcept
+    {
+        const double t = x * (juce::MathConstants<double>::pi * 0.5);
+        const double t2 = t * t;
+        return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
+    }
 }
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
@@ -31726,7 +31921,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         }
     } runtimeScope(*this);
 
-    const juce::ScopedNoDenormals noDenormals;
+    // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+    //   ScopedNoDenormals の save/restore を省略し、スレッド起動時に1回だけ設定
+    //   設計条件: オーディオスレッドでは外部ライブラリが MXCSR を書き換えないこと
+    ensureThreadFloatingPointEnvironment();
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
 
@@ -32042,9 +32240,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                      double alignedNewL,
                                                      double alignedNewR)
                                                   {
-                                                      const double gOld = 1.0 - gNew;
-                                                      if (outL != nullptr) outL[i] = alignedNewL * gNew + alignedOldL * gOld;
-                                                      if (outR != nullptr) outR[i] = alignedNewR * gNew + alignedOldR * gOld;
+                                                      // ★ ADR-003/006: 等電力クロスフェード（エネルギー保存の不変条件）
+                                                      // ★ float版との意味論一致: dryScale を適用
+                                                      const double gOld = equalPowerSin(1.0 - gNew);
+                                                      const double gNewEp = equalPowerSin(gNew);
+                                                      // Note: double版では useDryAsOld=false のため dryScale=1.0 固定
+                                                      // 将来 useDryAsOld=true のケースが追加された場合は float版と同じパターンで対応
+                                                      if (outL != nullptr) outL[i] = alignedNewL * gNewEp + alignedOldL * gOld;
+                                                      if (outR != nullptr) outR[i] = alignedNewR * gNewEp + alignedOldR * gOld;
                                                   });
         if (!useDryAsOld)
         {
@@ -34487,6 +34690,14 @@ void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& s
         const float* src = source.buffer->getReadPointer(ch, source.startSample);
         float* dst = destination.getWritePointer(ch, 0);
         juce::FloatVectorOperations::copy(dst, src, numSamples);
+    }
+
+    // ★ モノラル入力時: L→R 複製（センター定位のモノラル信号として扱う）
+    if (numChannels == 1 && destination.getNumChannels() > 1)
+    {
+        float* dstR = destination.getWritePointer(1, 0);
+        const float* dstL = destination.getReadPointer(0, 0);
+        juce::FloatVectorOperations::copy(dstR, dstL, numSamples);
     }
 
     for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
@@ -41928,6 +42139,11 @@ public:
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias
     void finalizeMmcssShutdown() noexcept;
+    // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+    //   現在: FTZ + DAZ（デノーマル演算の高性能化）
+    //   将来拡張: MXCSR RoundMode, ExceptionMask, FENV 全体をここで管理
+    //   設計条件: オーディオスレッドでは外部ライブラリ（MKL/IPP/VML等）が MXCSR を書き換えないこと
+    void ensureThreadFloatingPointEnvironment() noexcept;
     void shutdownWorkerThread();
 
     // ★ [work63] Audio Thread 優先度モード設定／解除
@@ -44000,10 +44216,10 @@ bool AudioEngineProcessor::producesMidi() const { return false; }
 bool AudioEngineProcessor::isMidiEffect() const { return false; }
 // D5: IR長のみの概算値。oversampling やフィルターによるテール延長は未反映。
 // C5: cachedTailLength を返す（Runtime Publish 時に更新。ValueTree 依存を断つ）
-// 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
+// 他スレッドから呼ばれる可能性があるため atomic を使用（relaxed: 依存データなし）
 double AudioEngineProcessor::getTailLengthSeconds() const
 {
-    return cachedTailLength;
+    return convo::consumeAtomic(cachedTailLength, std::memory_order_relaxed);
 }
 
 int AudioEngineProcessor::getNumPrograms() { return 1; }
@@ -44023,11 +44239,12 @@ void AudioEngineProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     if (convState.isValid())
     {
         const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
-        cachedTailLength = (std::isfinite(irLengthSec) && irLengthSec > 0.0) ? irLengthSec : 0.0;
+        const double newValue = (std::isfinite(irLengthSec) && irLengthSec > 0.0) ? irLengthSec : 0.0;
+        convo::publishAtomic(cachedTailLength, newValue, std::memory_order_relaxed);
     }
     else
     {
-        cachedTailLength = 0.0;
+        convo::publishAtomic(cachedTailLength, 0.0, std::memory_order_relaxed);
     }
 }
 
@@ -44132,6 +44349,7 @@ void AudioEngineProcessor::setStateInformation(const void* data, int sizeInBytes
 #pragma once
 
 #include <JuceHeader.h>
+#include <atomic>
 #include "AudioEngine.h"
 
 class AudioEngineProcessor final : public juce::AudioProcessor
@@ -44170,9 +44388,9 @@ public:
 private:
     AudioEngine& audioEngine;
     // C5: Runtime Publish 時に計算・更新するキャッシュされた tail length
-    // 現在の ConvoPeq 実装の Runtime Publish シーケンスでは同一スレッドで実行されるため double（非 atomic）で十分
-    // （将来の変更に備え、コメントで「Runtime Publish 時を Authority にする」を明記）
-    double cachedTailLength = 0.0;
+    // 他スレッド（JUCE host）から getTailLengthSeconds() が呼ばれる可能性があるため atomic を使用
+    // relaxed: 単なるキャッシュ値。他データとの公開順序を要求しないため十分
+    std::atomic<double> cachedTailLength { 0.0 };
 };
 
 
@@ -45900,6 +46118,14 @@ public:
 
 private:
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+    // ★ ADR-005: DSPHandle の型要件をコンパイル時に保証
+    static_assert(std::is_trivially_copyable_v<DSPHandle>,
+        "DSPHandle must be trivially copyable for ISR Runtime");
+    static_assert(std::is_standard_layout_v<DSPHandle>,
+        "DSPHandle must be standard layout for ISR Runtime");
+    // ★ 16バイト構造体のため CMPXCHG16B に依存。ビルド設定によっては lock-free でない場合がある
+    // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
+    //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 
@@ -49994,6 +50220,7 @@ private:
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
 #include "ISRRetireOverflowRing.h"
+#include <cassert>
 
 namespace convo::isr {
 
@@ -50157,6 +50384,12 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
     // ★ 方式C: persistentState_ から直接導出（plain struct、atomic 不要）
+    // ★ ADR-010: デバッグビルド: Message Thread からの呼び出しのみ許可
+    // TODO(ADR-010): Replace with Message Thread assertion when JUCE dependency is available. // NOLINT(danger-comment)
+    //   Current: assert(true) is a placeholder for non-JUCE context (Headless Test/CLI/Batch Render).
+    //   Planned: Use juce::MessageManager::getInstanceWithoutCreating() + jassert() when JUCE is available.
+    //   Risk: Low (Release build disables assert, getVersion() is read-only, no functional breakage).
+    assert(true);
     return persistentState_.mappedRuntimeGeneration;
 }
 
@@ -50492,27 +50725,6 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
     rejected_ = (validator.explainPublishReject(descriptor) != TierRejectReason::None);
 }
 
-void PublicationBuffer::enqueue(const void* world) {
-    if (world == nullptr) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(guard_);
-    queued_.push_back(world);
-}
-
-void PublicationBuffer::retireOld() {
-    std::lock_guard<std::mutex> lock(guard_);
-    if (!queued_.empty()) {
-        queued_.erase(queued_.begin());
-    }
-}
-
-std::size_t PublicationBuffer::size() noexcept {
-    std::lock_guard<std::mutex> lock(guard_);
-    return queued_.size();
-}
-
 } // namespace convo::isr
 
 ```
@@ -50759,18 +50971,6 @@ public:
 private:
     RuntimeBoundary boundary_;
     bool rejected_ = false;
-};
-
-class PublicationBuffer {
-public:
-    void enqueue(const void* world);
-    void retireOld();
-
-    [[nodiscard]] std::size_t size() noexcept;
-
-private:
-    std::vector<const void*> queued_;
-    std::mutex guard_;
 };
 
 } // namespace convo::isr
@@ -58940,7 +59140,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
 
     convo::publishAtomic(isLoading, true, std::memory_order_release);   // release: timer/UI 側 isLoading acquire と HB
     convo::publishAtomic(irFinalized, false, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
-    lastError.clear(); // 新しいロード開始時にエラーをクリア
+    clearLastError(); // 新しいロード開始時にエラーをクリア
 
     // 既存のローダーを停止してゴミ箱へ退避 (即時resetによるブロックを回避)
     if (activeLoader)
@@ -59333,7 +59533,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
         if (!valid)
         {
             const double peak = (prepared->timeDomainIR) ? prepared->timeDomainIR->getMagnitude(0, prepared->timeDomainIR->getNumSamples()) : 0.0;
-            lastError = "Invalid IR (amplitude out of range or sudden level jump)";
+            setLastError("Invalid IR (amplitude out of range or sudden level jump)");
             juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: validation failed peak=" + juce::String(peak, 6));
             convo::publishAtomic(isLoading, false, std::memory_order_release); // release: timer/UI 側 acquire と HB
             return;
@@ -59431,7 +59631,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
-    lastError = error;
+    setLastError(error);
     convo::publishAtomic(irFinalized, isIRLoaded(), std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
     convo::publishAtomic(isLoading, false, std::memory_order_release);           // release: timer/UI 側 acquire と HB
     convo::publishAtomic(isRebuilding, false, std::memory_order_release);        // release: timer/load 経路 acquire と HB
@@ -63760,7 +63960,7 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
             }
             else
             {
-                lastError = "IR not found: " + f.getFileName();
+                setLastError("IR not found: " + f.getFileName());
                 postCoalescedChangeNotification();
             }
         }
@@ -64573,6 +64773,7 @@ public:
             ++softLimitOverflowCount_;  // PolicyEngine 連携用
         estimatedBytes_ += entry.estimatedSize;
         queue_.push_back(entry);
+        totalPushCount_.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 

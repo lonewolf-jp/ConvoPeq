@@ -13,6 +13,15 @@ namespace
     {
         return absNoLibm(a - b);
     }
+
+    // Audio thread path avoids libm calls for deterministic realtime behavior.
+    // ★ ADR-006: 等電力クロスフェード用の sin 近似（6次テイラー展開）
+    inline double equalPowerSin(double x) noexcept
+    {
+        const double t = x * (juce::MathConstants<double>::pi * 0.5);
+        const double t2 = t * t;
+        return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
+    }
 }
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
@@ -88,7 +97,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         }
     } runtimeScope(*this);
 
-    const juce::ScopedNoDenormals noDenormals;
+    // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+    //   ScopedNoDenormals の save/restore を省略し、スレッド起動時に1回だけ設定
+    //   設計条件: オーディオスレッドでは外部ライブラリが MXCSR を書き換えないこと
+    ensureThreadFloatingPointEnvironment();
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
 
@@ -404,9 +416,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                      double alignedNewL,
                                                      double alignedNewR)
                                                   {
-                                                      const double gOld = 1.0 - gNew;
-                                                      if (outL != nullptr) outL[i] = alignedNewL * gNew + alignedOldL * gOld;
-                                                      if (outR != nullptr) outR[i] = alignedNewR * gNew + alignedOldR * gOld;
+                                                      // ★ ADR-003/006: 等電力クロスフェード（エネルギー保存の不変条件）
+                                                      // ★ float版との意味論一致: dryScale を適用
+                                                      const double gOld = equalPowerSin(1.0 - gNew);
+                                                      const double gNewEp = equalPowerSin(gNew);
+                                                      // Note: double版では useDryAsOld=false のため dryScale=1.0 固定
+                                                      // 将来 useDryAsOld=true のケースが追加された場合は float版と同じパターンで対応
+                                                      if (outL != nullptr) outL[i] = alignedNewL * gNewEp + alignedOldL * gOld;
+                                                      if (outR != nullptr) outR[i] = alignedNewR * gNewEp + alignedOldR * gOld;
                                                   });
         if (!useDryAsOld)
         {

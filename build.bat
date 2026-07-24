@@ -210,6 +210,15 @@ if exist "%ONEAPI_SETVARS%" (
     exit /b 1
 )
 
+REM ------------------------------------------------------------REM Setup Intel oneAPI library paths (linker search paths)
+REM setvars.bat sets INCLUDE but not always LIB for all components.
+REM Ensure MKL, IPP, and compiler runtime libs are findable by the linker.
+set "ONEAPI_LIB=C:\Program Files (x86)\Intel\oneAPI"
+if exist "%ONEAPI_LIB%\mkl\latest\lib" set "LIB=%ONEAPI_LIB%\mkl\latest\lib;%LIB%"
+if exist "%ONEAPI_LIB%\ipp\latest\lib" set "LIB=%ONEAPI_LIB%\ipp\latest\lib;%LIB%"
+if exist "%ONEAPI_LIB%\compiler\latest\lib" set "LIB=%ONEAPI_LIB%\compiler\latest\lib;%LIB%"
+echo [INFO] Intel oneAPI library paths added to LIB.
+
 REM ------------------------------------------------------------
 REM Create build directory
 echo [1/4] Creating build directory...

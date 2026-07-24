@@ -159,6 +159,14 @@ public:
 
 private:
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+    // ★ ADR-005: DSPHandle の型要件をコンパイル時に保証
+    static_assert(std::is_trivially_copyable_v<DSPHandle>,
+        "DSPHandle must be trivially copyable for ISR Runtime");
+    static_assert(std::is_standard_layout_v<DSPHandle>,
+        "DSPHandle must be standard layout for ISR Runtime");
+    // ★ 16バイト構造体のため CMPXCHG16B に依存。ビルド設定によっては lock-free でない場合がある
+    // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
+    //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 

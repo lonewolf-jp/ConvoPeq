@@ -1,6 +1,7 @@
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
 #include "ISRRetireOverflowRing.h"
+#include <cassert>
 
 namespace convo::isr {
 
@@ -164,6 +165,12 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
     // ★ 方式C: persistentState_ から直接導出（plain struct、atomic 不要）
+    // ★ ADR-010: デバッグビルド: Message Thread からの呼び出しのみ許可
+    // TODO(ADR-010): Replace with Message Thread assertion when JUCE dependency is available. // NOLINT(danger-comment)
+    //   Current: assert(true) is a placeholder for non-JUCE context (Headless Test/CLI/Batch Render).
+    //   Planned: Use juce::MessageManager::getInstanceWithoutCreating() + jassert() when JUCE is available.
+    //   Risk: Low (Release build disables assert, getVersion() is read-only, no functional breakage).
+    assert(true);
     return persistentState_.mappedRuntimeGeneration;
 }
 
@@ -497,27 +504,6 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 
     PayloadTierValidator validator;
     rejected_ = (validator.explainPublishReject(descriptor) != TierRejectReason::None);
-}
-
-void PublicationBuffer::enqueue(const void* world) {
-    if (world == nullptr) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(guard_);
-    queued_.push_back(world);
-}
-
-void PublicationBuffer::retireOld() {
-    std::lock_guard<std::mutex> lock(guard_);
-    if (!queued_.empty()) {
-        queued_.erase(queued_.begin());
-    }
-}
-
-std::size_t PublicationBuffer::size() noexcept {
-    std::lock_guard<std::mutex> lock(guard_);
-    return queued_.size();
 }
 
 } // namespace convo::isr

@@ -2378,6 +2378,11 @@ public:
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias
     void finalizeMmcssShutdown() noexcept;
+    // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+    //   現在: FTZ + DAZ（デノーマル演算の高性能化）
+    //   将来拡張: MXCSR RoundMode, ExceptionMask, FENV 全体をここで管理
+    //   設計条件: オーディオスレッドでは外部ライブラリ（MKL/IPP/VML等）が MXCSR を書き換えないこと
+    void ensureThreadFloatingPointEnvironment() noexcept;
     void shutdownWorkerThread();
 
     // ★ [work63] Audio Thread 優先度モード設定／解除

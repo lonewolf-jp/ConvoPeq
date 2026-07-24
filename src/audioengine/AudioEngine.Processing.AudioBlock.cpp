@@ -13,6 +13,15 @@ namespace
     {
         return absNoLibm(a - b);
     }
+
+    // Audio thread path avoids libm calls for deterministic realtime behavior.
+    // ★ ADR-006: 等電力クロスフェード用の sin 近似（6次テイラー展開）
+    inline double equalPowerSin(double x) noexcept
+    {
+        const double t = x * (juce::MathConstants<double>::pi * 0.5);
+        const double t2 = t * t;
+        return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
+    }
 }
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
@@ -86,7 +95,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     } runtimeScope(*this);
 
-    const juce::ScopedNoDenormals noDenormals;
+    // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+    //   ScopedNoDenormals の save/restore を省略し、スレッド起動時に1回だけ設定
+    //   設計条件: オーディオスレッドでは外部ライブラリが MXCSR を書き換えないこと
+    ensureThreadFloatingPointEnvironment();
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
     // 入力検証 (Input Validation)
@@ -426,14 +438,16 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                                          double alignedNewL,
                                                                          double alignedNewR)
                                                      {
+                                                         // ★ ADR-003/006: 等電力クロスフェード（エネルギー保存の不変条件）
                                                          const double dryScale = useDryAsOld ? crossfadeRuntime_.getDryScaleGain().getNextValue() : 1.0;
-                                                         const double gOld = 1.0 - gNew;
+                                                         const double gOld = equalPowerSin(1.0 - gNew);
+                                                         const double gNewEp = equalPowerSin(gNew);
                                                          const double dryScaledL = alignedOldL * dryScale;
                                                          const double dryScaledR = alignedOldR * dryScale;
                                                          if (outL != nullptr)
-                                                             outL[i] = static_cast<float>(alignedNewL * gNew + dryScaledL * gOld);
+                                                             outL[i] = static_cast<float>(alignedNewL * gNewEp + dryScaledL * gOld);
                                                          if (outR != nullptr)
-                                                             outR[i] = static_cast<float>(alignedNewR * gNew + dryScaledR * gOld);
+                                                             outR[i] = static_cast<float>(alignedNewR * gNewEp + dryScaledR * gOld);
                                                      });
 
             if (!useDryAsOld)

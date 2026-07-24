@@ -210,3 +210,21 @@ void AudioEngine::revertMmcssOnAudioThread() noexcept
     }
     t_mmcssTried = false; // Allow retry on next device open / thread creation
 }
+
+// ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）
+//   現在: FTZ + DAZ（デノーマル演算の高性能化）
+//   将来拡張: MXCSR RoundMode, ExceptionMask, FENV 全体をここで管理
+//   設計条件: オーディオスレッドでは外部ライブラリ（MKL/IPP/VML等）が MXCSR を書き換えないこと
+//   スレッド初期化専用であり、リアルタイム処理中に MXCSR を再設定する用途ではない
+void AudioEngine::ensureThreadFloatingPointEnvironment() noexcept
+{
+    // thread_local: safe for driver-owned threads (ASIO), no locking needed,
+    //               auto-cleanup on thread destruction, device switch creates new thread.
+    thread_local bool t_fpEnvReady = false; // NOLINT(thread-local) RT-SAFE: guard flag, written once per thread
+    if (t_fpEnvReady)
+        return;
+    t_fpEnvReady = true;
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    // vmlSetMode は MainApplication で設定済み（スレッドローカルのため別スレッドでは効果なし）
+}

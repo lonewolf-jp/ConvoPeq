@@ -24,6 +24,14 @@ void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& s
         juce::FloatVectorOperations::copy(dst, src, numSamples);
     }
 
+    // ★ モノラル入力時: L→R 複製（センター定位のモノラル信号として扱う）
+    if (numChannels == 1 && destination.getNumChannels() > 1)
+    {
+        float* dstR = destination.getWritePointer(1, 0);
+        const float* dstL = destination.getReadPointer(0, 0);
+        juce::FloatVectorOperations::copy(dstR, dstL, numSamples);
+    }
+
     for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
         destination.clear(ch, 0, numSamples);
 
