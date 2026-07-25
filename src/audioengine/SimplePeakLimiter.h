@@ -48,21 +48,24 @@ public:
             const double absR = hasR ? std::abs(dataR[i]) : absL;
             const double peak = juce::jmax(absL, absR);
 
+            // clipStart が負になる極端なパラメータでも 0 除算を防止
+            const double safePeak = juce::jmax(peak, 1.0e-12);
+
             // 必要なゲインリダクションを計算 (soft knee)
             double desiredGain = 1.0;
-            if (peak > clipStart)
+            if (safePeak > clipStart)
             {
-                if (peak <= thresholdLinear)
+                if (safePeak <= thresholdLinear)
                 {
                     // Knee 領域: 3次スプライン補間
-                    const double t = (peak - clipStart) / kneeLinear;
+                    const double t = (safePeak - clipStart) / kneeLinear;
                     const double kneeShape = t * t * (3.0 - 2.0 * t);
-                    desiredGain = 1.0 - (1.0 - thresholdLinear / peak) * kneeShape;
+                    desiredGain = 1.0 - (1.0 - thresholdLinear / safePeak) * kneeShape;
                 }
                 else
                 {
                     // リミッティング領域: threshold / peak
-                    desiredGain = thresholdLinear / peak;
+                    desiredGain = thresholdLinear / safePeak;
                 }
             }
 

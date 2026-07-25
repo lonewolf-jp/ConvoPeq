@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -772,8 +773,8 @@ private:
             }
             // std::isfinite の代わりにビット演算で有限値判定（libm 呼出回避）
             {
-                union { double d; uint64_t u; } v { maxDb };
-                if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+                const auto bits = std::bit_cast<uint64_t>(maxDb);
+                if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
                 {
                     maskingEnergy[static_cast<size_t>(i)] = athThresholdPower[static_cast<size_t>(i)];
                     continue;

@@ -354,6 +354,24 @@
 				"$msCompile"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Fix VS Code C/C++ DevTools Duplicate",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\fix-vscode-cpp-devtools-duplicate.ps1",
+				"-Force"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"clear": true,
+				"showReuseMessage": false
+			}
 		}
 	]
 }

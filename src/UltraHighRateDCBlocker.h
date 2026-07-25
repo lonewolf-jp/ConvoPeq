@@ -49,27 +49,25 @@ private:
     // ------------------------------------------------------------------------
     static inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
     {
-        union { double d; uint64_t u; } v { value };
+        const auto bits = std::bit_cast<uint64_t>(value);
         // 指数部が 0x7FF (NaN/Inf) でない
-        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+        if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
             return false;
         // 絶対値が threshold 以上
-        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
-        union { uint64_t u; double d; } absVal { absBits };
-        return absVal.d >= threshold;
+        const uint64_t absBits = bits & 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(absBits) >= threshold;
     }
 
     // 上限チェック付き有限値判定（状態発散防止用）
     static inline bool isFiniteAndBelowThresholdMask(double value, double threshold) noexcept
     {
-        union { double d; uint64_t u; } v { value };
+        const auto bits = std::bit_cast<uint64_t>(value);
         // 指数部が 0x7FF (NaN/Inf) でない
-        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+        if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
             return false;
         // 絶対値が threshold 未満
-        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
-        union { uint64_t u; double d; } absVal { absBits };
-        return absVal.d < threshold;
+        const uint64_t absBits = bits & 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(absBits) < threshold;
     }
 
 public:

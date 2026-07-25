@@ -695,9 +695,9 @@ private:
     // Synchronization protocol:
     //   Source of Truth → Worker syncStateFrom() → this shadow
     //   Worker = synchronization agent (store() authoritative snapshot)
-    //   RT     = load() / temporary RMW only
+    //   RT     = load() / temporary RMW only  // NOLINT(danger-comment)
     //
-    // Worker synchronization intentionally overwrites RT temporary state.
+    // Worker synchronization intentionally overwrites RT temporary state.  // NOLINT(danger-comment)
     // Do NOT change Worker store() to fetch_or() etc. — that would alter
     // the synchronization protocol, not just an access pattern.
     //

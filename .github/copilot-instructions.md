@@ -191,3 +191,27 @@ wsl bash -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk grep -rn "patter
 
 RTK has saved **25.0M tokens (98.8%)** across 1,774 commands in this environment.
 <!-- /rtk-instructions -->
+
+<!-- vscode-cpp-devtools-fix -->
+# VS Code C/C++ DevTools 重複バグ修正
+
+VS Code 1.127.0〜1.129.0 において、`ms-vscode.cpp-devtools` 拡張機能のツールが
+「ツールの構成」パネルで重複表示される既知の回帰バグがあります（issue #326153）。
+
+**自動修正スクリプト**: `tools\fix-vscode-cpp-devtools-duplicate.ps1`
+**VS Code タスク**: `Fix VS Code C/C++ DevTools Duplicate`
+
+VS Code アップデート後は必ず以下のいずれかを実行すること:
+
+### 手動実行
+```bash
+pwsh -NoProfile -ExecutionPolicy Bypass -File tools/fix-vscode-cpp-devtools-duplicate.ps1 -Force
+```
+
+### VS Code タスク実行（推奨）
+- コマンドパレット → `Tasks: Run Task` → `Fix VS Code C/C++ DevTools Duplicate`
+
+### AI（Copilot）による自動実行
+VS Code アップデート後に重複表示の問題が疑われる場合、Copilot が自動的に
+`tools\fix-vscode-cpp-devtools-duplicate.ps1` を実行し、必要に応じて修正を適用する。
+<!-- /vscode-cpp-devtools-fix -->

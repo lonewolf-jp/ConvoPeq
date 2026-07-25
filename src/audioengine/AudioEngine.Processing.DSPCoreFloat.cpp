@@ -10,8 +10,8 @@
 
 inline bool isFiniteNoLibm(double x) noexcept
 {
-    union { double d; uint64_t u; } v { x };
-    return ((v.u >> 52) & 0x7FFu) != 0x7FFu;
+    const auto bits = std::bit_cast<uint64_t>(x);
+    return ((bits >> 52) & 0x7FFu) != 0x7FFu;
 }
 
 inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept

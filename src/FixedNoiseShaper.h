@@ -8,6 +8,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <immintrin.h>
@@ -225,9 +226,9 @@ private:
 
     inline double absNoLibm(double x) const noexcept
     {
-        union { double d; uint64_t u; } v { x };
-        v.u &= 0x7fffffffffffffffULL;
-        return v.d;
+        auto bits = std::bit_cast<uint64_t>(x);
+        bits &= 0x7fffffffffffffffULL;
+        return std::bit_cast<double>(bits);
     }
 
     inline double get(const std::array<double, ORDER>& buffer, int idx, int k) const noexcept

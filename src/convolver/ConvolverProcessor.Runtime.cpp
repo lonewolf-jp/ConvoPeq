@@ -1169,9 +1169,14 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
     nucConvolvers[channel]->Add(in, numSamples);
     const int got = nucConvolvers[channel]->Get(out, numSamples);
     // ★ bug3-8: got >= 0 && got <= numSamples の防御チェック
-    jassert(got >= 0 && got <= numSamples);
+    if (got < 0)
+    {
+        std::memset(out, 0, static_cast<size_t>(numSamples) * sizeof(double));
+        return;
+    }
+    jassert(got <= numSamples);
     if (got < numSamples)
-        std::memset(out + got, 0, (numSamples - got) * sizeof(double));
+        std::memset(out + got, 0, static_cast<size_t>(numSamples - got) * sizeof(double));
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME

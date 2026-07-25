@@ -242,9 +242,9 @@ set "CMAKE_CONFIG_ATTEMPT=0"
 set /a CMAKE_CONFIG_ATTEMPT+=1
 echo [2/4] Configuring CMake... (attempt !CMAKE_CONFIG_ATTEMPT!)
 if "!COMPILER_MODE!"=="msvc" (
-    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS% %CMAKE_EXTRA_FLAGS%
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_EXPORT_COMPILE_COMMANDS=ON %CMAKE_PGO_FLAGS% %CMAKE_EXTRA_FLAGS%
 ) else (
-    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx %CMAKE_EXTRA_FLAGS%
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON %CMAKE_EXTRA_FLAGS%
 )
 if not errorlevel 1 goto configure_cmake_ok
 
@@ -261,6 +261,18 @@ timeout /t 2 >nul
 goto configure_cmake
 
 :configure_cmake_ok
+
+REM ------------------------------------------------------------
+REM Copy compile_commands.json to project root for clangd/serena LSP
+if exist "%BUILD_DIR%\compile_commands.json" (
+    copy /y "%BUILD_DIR%\compile_commands.json" "%~dp0compile_commands.json" >nul
+    echo [INFO] compile_commands.json copied to project root for clangd.
+)
+REM Convert icx/MSVC-specific flags to clangd-compatible ones
+if exist "%~dp0compile_commands.json" if exist "%~dp0tools\fix_compile_commands_for_clangd.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\fix_compile_commands_for_clangd.ps1" -InputFile "%~dp0compile_commands.json"
+    echo [INFO] compile_commands.json flags converted for clangd.
+)
 
 REM ------------------------------------------------------------
 REM Clean stale RC output: JUCE generates RC during CMake configure
