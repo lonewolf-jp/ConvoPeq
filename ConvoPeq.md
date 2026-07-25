@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-25 00:25:51
+> Generated: 2026-07-25 15:56:29
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1072,6 +1072,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     endif()
     if(EXISTS "${_INTEL_COMPILER_ROOT}")
         target_link_directories(ConvoPeq PRIVATE "${_INTEL_COMPILER_ROOT}")
+        # ★ テストターゲットにも反映
+        if(TARGET MTNUPCMeasurement)
+            target_link_directories(MTNUPCMeasurement PRIVATE "${_INTEL_COMPILER_ROOT}")
+        endif()
         message(STATUS "icx: Intel compiler runtime lib dir = ${_INTEL_COMPILER_ROOT}")
     else()
         message(WARNING "icx: Intel compiler runtime lib dir not found. Link may fail with LNK1104 (libircmt.lib).")
@@ -1301,6 +1305,12 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # AVX2 フラグ（全コンフィグで有効化）
     target_compile_options(ConvoPeq PRIVATE /QxCORE-AVX2)
 
+    # icx -mvzeroupper: AVX→legacy SSE 境界に vzeroupper を自動挿入
+    # CXX 翻訳単位のみに限定（Cコンパイラには不要）
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-mvzeroupper>
+    )
+
     # JUCE の NOMINMAX 再定義警告・未使用コマンドライン引数警告を抑制
     target_compile_options(ConvoPeq PRIVATE
         -Wno-unused-command-line-argument
@@ -1338,6 +1348,12 @@ if(ENABLE_ASAN)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
         target_link_options(ConvoPeq PRIVATE -fsanitize=address)
+        # icx でも動的 CRT に切り替え（ENABLE_ASAN 時のみ）
+        # 注意: 通常時は静的CRT（/MT）のまま。ASan は動的CRT（/MD）が必須。
+        # 既存の target_compile_options に /MT が残っていないことを確認すること。
+        # set_property だけでは不十分で、compile_options 側の /MT が優先される場合がある。
+        set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
+            "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     endif()
 endif()
 
@@ -1405,22 +1421,22 @@ if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
 
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set(CLANG_TIDY_CMD
-            "${CLANG_TIDY_EXECUTABLE};
-             -p=${CMAKE_BINARY_DIR};
-             --extra-arg-before=--driver-mode=cl;
-             --extra-arg=/EHsc;
-             --extra-arg=-fexceptions;
-             --extra-arg=-D_HAS_EXCEPTIONS=1;
-             --header-filter=.*/src/.*"
+            "${CLANG_TIDY_EXECUTABLE}"
+            "-p=${CMAKE_BINARY_DIR}"
+            "--extra-arg-before=--driver-mode=cl"
+            "--extra-arg=/EHsc"
+            "--extra-arg=-fexceptions"
+            "--extra-arg=-D_HAS_EXCEPTIONS=1"
+            "--header-filter=.*/src/.*"
         )
     else()
         set(CLANG_TIDY_CMD
-            "${CLANG_TIDY_EXECUTABLE};
-             -p=${CMAKE_BINARY_DIR};
-             --extra-arg=/EHsc;
-             --extra-arg=-fexceptions;
-             --extra-arg=-D_HAS_EXCEPTIONS=1;
-             --header-filter=.*/src/.*"
+            "${CLANG_TIDY_EXECUTABLE}"
+            "-p=${CMAKE_BINARY_DIR}"
+            "--extra-arg=/EHsc"
+            "--extra-arg=-fexceptions"
+            "--extra-arg=-D_HAS_EXCEPTIONS=1"
+            "--header-filter=.*/src/.*"
         )
     endif()
 
@@ -1467,10 +1483,12 @@ REM
 REM Usage:
 REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [-DVAR]
 REM
-REM   -DVAR : CMake definition (cmd.exe strips =VALUE, so =ON is
-REM           auto-appended). Examples:
+REM   -DVAR[=VALUE] : CMake definition (SHIFT解析方式対応、引用符不要).
+REM           Examples:
 REM             build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 REM             build.bat Debug icx -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+REM             build.bat Release "-DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=OFF"
+REM   Note: CMAKE_EXTRA_FLAGS に ! を含めることは非推奨（DelayedExpansionとの競合）。
 REM ============================================================================
 
 echo ==========================================
@@ -1489,22 +1507,25 @@ set "NO_PAUSE=0"
 set "COMPILER_MODE=msvc"
 set "CMAKE_EXTRA_FLAGS="
 
-for %%A in (%*) do (
-    set "arg=%%~A"
-    if "!arg:~0,2!"=="-D" (
-        REM cmd.exe strips =VALUE, so append =ON.
-        set "CMAKE_EXTRA_FLAGS=!CMAKE_EXTRA_FLAGS! !arg!=ON"
-        echo [INFO] Extra CMake define: !arg!=ON
-    )
-    if /i "%%~A"=="Debug" set "BUILD_CONFIG=Debug"
-    if /i "%%~A"=="Release" set "BUILD_CONFIG=Release"
-    if /i "%%~A"=="clean" set "DO_CLEAN=1"
-    if /i "%%~A"=="nopause" set "NO_PAUSE=1"
-    if /i "%%~A"=="pgo-gen" set "PGO_MODE=pgo-gen"
-    if /i "%%~A"=="pgo-use" set "PGO_MODE=pgo-use"
-    if /i "%%~A"=="icx"   set "COMPILER_MODE=icx"
-    if /i "%%~A"=="icpx"  set "COMPILER_MODE=icpx"
+:argloop
+if "%1"=="" goto :argend
+set "arg=%1"
+if /I "%arg:~0,2%"=="-D" (
+    set "CMAKE_EXTRA_FLAGS=!CMAKE_EXTRA_FLAGS! %arg%"
+    echo [INFO] Extra CMake define: %arg%
+) else (
+    if /i "%arg%"=="Debug" set "BUILD_CONFIG=Debug"
+    if /i "%arg%"=="Release" set "BUILD_CONFIG=Release"
+    if /i "%arg%"=="clean" set "DO_CLEAN=1"
+    if /i "%arg%"=="nopause" set "NO_PAUSE=1"
+    if /i "%arg%"=="pgo-gen" set "PGO_MODE=pgo-gen"
+    if /i "%arg%"=="pgo-use" set "PGO_MODE=pgo-use"
+    if /i "%arg%"=="icx"   set "COMPILER_MODE=icx"
+    if /i "%arg%"=="icpx"  set "COMPILER_MODE=icpx"
 )
+shift
+goto :argloop
+:argend
 
 REM PGO用CMakeフラグ 括弧ネスト最小化・パーサー干渉完全排除
 set "CMAKE_PGO_FLAGS=-DCONVOPEQ_PGO_INSTRUMENT=OFF -DCONVOPEQ_PGO_USE=OFF"
@@ -1831,6 +1852,7 @@ goto :eof
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <cstring>  // std::memset (makeAlignedArrayZero)
 
 #include <mkl.h>
 #include "DiagnosticsConfig.h"
@@ -1970,6 +1992,20 @@ inline ScopedAlignedArray<T> makeAlignedArray(size_t count) {
     return ScopedAlignedArray<T>(ptr);
 }
 
+// ★ [work85 T9] ゼロ初期化版（スタック配列代替・学習データ向け）
+template <typename T>
+inline ScopedAlignedArray<T> makeAlignedArrayZero(size_t count)
+{
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "makeAlignedArrayZero requires trivially copyable type");
+    static_assert(std::is_trivially_destructible_v<T>,
+                  "Aligned array only supports trivially destructible types");
+    T* ptr = static_cast<T*>(aligned_malloc(count * sizeof(T), 64));
+    if (!ptr) throw std::bad_alloc();
+    std::memset(ptr, 0, count * sizeof(T));
+    return ScopedAlignedArray<T>(ptr);
+}
+
 // ★ [P1-3] 非スロー版の配列ファクトリ（失敗時は nullptr 内包の ScopedAlignedArray を返す）
 template <typename T>
 inline ScopedAlignedArray<T> makeAlignedArray_nothrow(size_t count) noexcept {
@@ -2071,8 +2107,9 @@ std::vector<double> buildFrequencyCandidates(double sampleRate)
 {
     constexpr int kCandidateCount = 18;
     constexpr double kMinCandidateHz = 20.0;
+    constexpr double kMaxAllpassFrequencyHz = 20000.0;
     const double maxCandidateHz = std::max(kMinCandidateHz,
-        std::min(0.45 * sampleRate, 0.499 * sampleRate));
+        std::min(kMaxAllpassFrequencyHz, 0.499 * sampleRate));
 
     std::vector<double> candidates;
     candidates.reserve(kCandidateCount);
@@ -2098,8 +2135,9 @@ std::vector<double> buildFrequencyCandidates(double sampleRate)
 
 double clampOptimizationFrequency(double sampleRate, double value) noexcept
 {
+    constexpr double kMaxAllpassFrequencyHz = 20000.0;
     const double maxCandidateHz = std::max(20.0,
-        std::min(0.45 * sampleRate, 0.499 * sampleRate));
+        std::min(kMaxAllpassFrequencyHz, 0.499 * sampleRate));
     return std::clamp(value, 20.0, maxCandidateHz);
 }
 
@@ -14459,21 +14497,21 @@ public:
         return capacity - getAvailableSamples();
     }
 
-    void push(const juce::dsp::AudioBlock<const double>& block) noexcept
+    [[nodiscard]] int push(const juce::dsp::AudioBlock<const double>& block) noexcept
     {
         if (capacity <= 0 || numChannels <= 0)
-            return;
+            return 0;
 
         const int samplesToWriteRequested = static_cast<int>(block.getNumSamples());
         const int channelsToWrite = juce::jmin(numChannels, static_cast<int>(block.getNumChannels()));
         if (samplesToWriteRequested <= 0 || channelsToWrite <= 0)
-            return;
+            return 0;
 
         const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire); // acquire: 前回 push の writeIndex release と HB (ラップアラウンド安全確認)
         const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);   // acquire: popMixToMono/skip の readIndex release と HB (空きスロット数計算)
         const int free = capacity - static_cast<int>(write - read);
         if (free <= 0)
-            return;
+            return 0;
 
         const int samplesToWrite = juce::jmin(samplesToWriteRequested, free);
         const int start = static_cast<int>(write % static_cast<uint64_t>(capacity));
@@ -14505,6 +14543,7 @@ public:
         }
 
         convo::publishAtomic(writeIndex, write + static_cast<uint64_t>(samplesToWrite), std::memory_order_release); // release: popMixToMono/getAvailableSamples の acquire と HB し書き込み完了を公開
+        return samplesToWrite;
     }
 
     int popMixToMono(float* destination, int requestedSamples) noexcept
@@ -14772,6 +14811,8 @@ void LoudnessMeter::processBlock(const double* dataL, const double* dataR, int n
         vPeakR = _mm256_max_pd(vPeakR, _mm256_andnot_pd(vSignMask, vR));
     }
     // Reduce
+    // AVX→legacy SSE 遷移: YMMレジスタをクリアしてからSSE水平加算へ
+    _mm256_zeroupper();
     __m128d loL = _mm256_castpd256_pd128(vSumL);
     __m128d hiL = _mm256_extractf128_pd(vSumL, 1);
     __m128d sumL128 = _mm_add_pd(loL, hiL);
@@ -22077,11 +22118,20 @@ int NoiseShaperLearner::buildTrainingSegments() noexcept
     for (int i = 0; i < kNumLevels; ++i)
         levelBucketCounts[i] = 0;
 
-    double recentLeft[kRecentSampleRequest] = {};
-    double recentRight[kRecentSampleRequest] = {};
+    // ★ ヒープ確保（スタック544KB→解放）. T9 (A05) の makeAlignedArrayZero を使用
+    convo::ScopedAlignedArray<double> recentLeft;
+    convo::ScopedAlignedArray<double> recentRight;
+    try {
+        recentLeft = convo::makeAlignedArrayZero<double>(kRecentSampleRequest);
+        recentRight = convo::makeAlignedArrayZero<double>(kRecentSampleRequest);
+    } catch (const std::bad_alloc&) {
+        juce::Logger::writeToLog("[DIAG] buildTrainingSegments: bad_alloc, "
+            "training skipped");
+        return 0;
+    }
 
     const int maxRequired = kRecentSampleRequest;
-    const int copiedSamples = segmentBuffer.copyLatest(recentLeft, recentRight, maxRequired);
+    const int copiedSamples = segmentBuffer.copyLatest(recentLeft.get(), recentRight.get(), maxRequired);
 
     if (copiedSamples < AudioSegment::kLength)
         return 0;
@@ -22461,13 +22511,22 @@ struct AudioBlock;
 template <typename T, size_t Capacity>
 class LockFreeRingBuffer;
 
-struct AudioSegment
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas による意図的なパディングの警告を抑制
+#endif
+struct alignas(64) AudioSegment
 {
     static constexpr int kLength = MklFftEvaluator::kFftLength;
     double left[kLength] = {};
     double right[kLength] = {};
     std::array<double, MklFftEvaluator::kSpectrumBins> maskingThresholds {};
 };
+static_assert(alignof(AudioSegment) == 64, "AudioSegment must be 64-byte aligned");
+static_assert(sizeof(AudioSegment) % 64 == 0, "AudioSegment size must be a multiple of 64 to prevent false sharing");
+#ifdef _MSC_VER
+#pragma warning(pop) // C4324 suppression scope end
+#endif
 
 enum class SpectralType {
     Broadband,
@@ -27215,6 +27274,8 @@ double TruePeakDetector::dotProductAvx2(const double* __restrict x,
     acc0 = _mm256_add_pd(acc0, acc1);
     acc2 = _mm256_add_pd(acc2, acc3);
     acc0 = _mm256_add_pd(acc0, acc2);
+    // AVX→legacy SSE 遷移: YMMレジスタをクリアしてからSSE水平加算へ
+    _mm256_zeroupper();
     __m128d vLo = _mm256_castpd256_pd128(acc0);
     __m128d vHi = _mm256_extractf128_pd(acc0, 1);
     __m128d vSum = _mm_add_pd(vLo, vHi);
@@ -33291,6 +33352,9 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
     applyFixedLatencyDelay(dataL, dataR, numSamples);
 
+    // AVX→legacy SSE 境界: _mm256_zeroupper() を配置
+    _mm256_zeroupper();
+
     juce::FloatVectorOperations::copy(buffer.getWritePointer(0, 0), dataL, numSamples);
     if (numChannels > 1 && dataR != nullptr)
         juce::FloatVectorOperations::copy(buffer.getWritePointer(1, 0), dataR, numSamples);
@@ -33975,7 +34039,11 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
 void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                                       LockFreeAudioRingBuffer& analyzerFifo) const noexcept
 {
-    analyzerFifo.push(block);
+    if (analyzerFifo.push(block) != static_cast<int>(block.getNumSamples()))
+    {
+        // ★ XRUN: FIFO 満杯で一部または全部のサンプルが書き込めなかった
+        //   現状は無視（解析品質が低下するのみで音声出力には影響しない）
+    }
 }
 
 float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
@@ -38911,6 +38979,9 @@ void AudioEngine::timerCallback()
             }
         }
     }
+
+    // ★ RTTraceRelay drain: リングバッファ消費（lock-free、~50ms周期）
+    rtTraceRelay_.drain();
 
     // UI用プロセッサのクリーンアップ
     uiEqEditor.cleanup();
@@ -45643,7 +45714,30 @@ void ClosureGraphWalker::emitClosureArtifact(const PayloadClosureDescriptor& clo
     file << "  \"externalMutableDependencies\": " << closure.externalMutableDependencies << ",\n";
     file << "  \"validationErrors\": [";
     if (!valid) {
-        file << "\"" << std::string(validationError) << "\"";
+        // JSON仕様(RFC 8259)に基づき全制御文字をエスケープ
+        file << "\"";
+        for (char c : validationError) {
+            switch (c) {
+                case '"':  file << "\\\""; break;
+                case '\\': file << "\\\\"; break;
+                case '\b': file << "\\b";  break;
+                case '\f': file << "\\f";  break;
+                case '\n': file << "\\n";  break;
+                case '\r': file << "\\r";  break;
+                case '\t': file << "\\t";  break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20) {
+                        char buf[16];
+                        snprintf(buf, sizeof(buf), "\\u%04x",
+                            static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                        file << buf;
+                    } else {
+                        file << c;
+                    }
+                    break;
+            }
+        }
+        file << "\"";
     }
     file << "]\n";
     file << "}\n";
@@ -45692,6 +45786,16 @@ namespace isr {
 
 DSPHandleRuntime::DSPHandleRuntime()
 {
+    // Runtime初期化時に atomic<DSPHandle> のロックフリー性を一度だけ検証
+    static const bool isLockFree = []{
+        std::atomic<DSPHandle> test{ DSPHandle::null() };
+        const bool ok = test.is_lock_free();
+        // Debugビルドでロックフリー性を保証（Releaseはコンパイラ信頼）
+        assert(ok && "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
+        return ok;
+    }();
+    (void)isLockFree; // unused in Release
+
     for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
         convo::publishAtomic(registry_[i].generation, 0u, std::memory_order_relaxed);
         registry_[i].instance = nullptr;
@@ -46123,7 +46227,9 @@ private:
         "DSPHandle must be trivially copyable for ISR Runtime");
     static_assert(std::is_standard_layout_v<DSPHandle>,
         "DSPHandle must be standard layout for ISR Runtime");
-    // ★ 16バイト構造体のため CMPXCHG16B に依存。ビルド設定によっては lock-free でない場合がある
+    // ★ 16バイト構造体のため CMPXCHG16B に依存。x64+AVX2(Haswell以降)前提。
+    //    icx では is_always_lock_free がコンパイル時保証されないため、
+    //    Runtime初期化時に is_lock_free() で検証する（#define NDEBUG 時は省略）。
     // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
     //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
@@ -51810,51 +51916,6 @@ void ShutdownRuntime::markFailed(ShutdownBlockingReason reason) noexcept
     convo::publishAtomic(phase_, ShutdownPhase::Failed, std::memory_order_release);
 }
 
-void ShutdownRuntime::advancePhase() noexcept
-{
-    const ShutdownPhase current = convo::consumeAtomic(phase_, std::memory_order_acquire);
-
-    // ★ P1-1: terminal 状態からは advance しない
-    if (isTerminalPhase(current))
-        return;
-
-    ShutdownPhase next = current;
-    switch (current) {
-        case ShutdownPhase::Running:
-            next = ShutdownPhase::AudioStopped;
-            break;
-        case ShutdownPhase::AudioStopped:
-            next = ShutdownPhase::ObserverDrained;
-            break;
-        case ShutdownPhase::ObserverDrained:
-            next = ShutdownPhase::RetireClosed;
-            break;
-        case ShutdownPhase::RetireClosed:
-            next = ShutdownPhase::EpochSettled;
-            break;
-        case ShutdownPhase::EpochSettled:
-            next = ShutdownPhase::ReclaimComplete;
-            break;
-        case ShutdownPhase::ReclaimComplete:
-            // ★ C-2: CONVOPEQ_EMERGENCY_DRAIN 有効時のみ EmergencyDrain を経由
-            next = ShutdownPhase::VerifyDrained;
-            break;
-        case ShutdownPhase::EmergencyDrain:        // ★ C-2
-            next = ShutdownPhase::VerifyDrained;
-            break;
-        case ShutdownPhase::VerifyDrained:
-            next = ShutdownPhase::ShutdownComplete;
-            break;
-        case ShutdownPhase::TimedOut:
-        case ShutdownPhase::Failed:
-        case ShutdownPhase::ShutdownComplete:
-        default:
-            return;
-    }
-
-    (void)transitionTo(next);
-}
-
 bool ShutdownRuntime::transitionTo(ShutdownPhase target) noexcept
 {
     const auto current = convo::consumeAtomic(phase_, std::memory_order_acquire);
@@ -52253,8 +52314,6 @@ public:
     // ★ P1-1: TimedOut/Failed 上書き前の最終フェーズを取得（障害解析用）
     ShutdownPhase getLastNonTerminalPhase() const noexcept;
 
-    // NonRT: advance shutdown phase
-    void advancePhase() noexcept;
     bool transitionTo(ShutdownPhase target) noexcept;
 
     // RT: check if shutdown in progress
@@ -54192,6 +54251,8 @@ void RuntimeHealthMonitor::tick() noexcept {
             exitCond.blocker = CriticalExitBlocker::PendingRetireExceeded;
         else if (!retireAgeHealthy)
             exitCond.blocker = CriticalExitBlocker::RetireAgeExceeded;
+        else if (!readerHealthy)
+            exitCond.blocker = CriticalExitBlocker::ActiveReaderRemaining;
         exitCond.allMonitorsNormal = exitCond.allMonitorsNormal && metricsHealthy;
 
         // 条件4: 安定60秒継続
@@ -55277,7 +55338,8 @@ enum class CriticalExitBlocker : uint8_t {
     RecoveryRunning,
     StableDurationInsufficient,
     PendingRetireExceeded,
-    RetireAgeExceeded
+    RetireAgeExceeded,
+    ActiveReaderRemaining      // ★ [work85 T3] Reader残留によるCritical出口ブロック
 };
 
 // [work39 Phase 7] CriticalExitCondition — Critical 出口評価構造体
@@ -55667,6 +55729,9 @@ bool RuntimePolicyEngine::canExecute(RecoveryAction action) const noexcept
         return false;
     const auto& entry = m_cooldowns[idx];
     const uint64_t nowUs = getNowUs();
+    // unsigned underflow ガード: lastExecutedUs > nowUs の場合はクールダウン未完了とみなす
+    if (nowUs < entry.lastExecutedUs)
+        return false;
     return (nowUs - entry.lastExecutedUs) >= entry.cooldownUs;
 }
 
@@ -59659,10 +59724,9 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    // 【Leak Fix】LoaderThreadの異常蓄積防止
-    // スレッドが終了しない場合でも、一定数を超えたら強制削除してメモリを解放する。
-    // [FIX] detached thread はプロセス終了時に未定義動作を引き起こすため、
-    //       同期的なチェックと削除に切り替える。
+    // 【Leak Fix】LoaderThreadの異常蓄積防止（安全策）
+    // 終了済みスレッドの削除を促進する。強制削除は行わない（stopThreadによる
+    // 中断リスクを回避するため）。スレッドが終了しない限りエントリは残る。
     if (loaderTrashBin.size() > 2)
     {
         for (auto it = loaderTrashBin.begin(); it != loaderTrashBin.end() && loaderTrashBin.size() > 2; )
@@ -59991,7 +60055,7 @@ void ConvolverProcessor::LoaderThread::run()
         const juce::Thread& t;
         bool success = false;
         ~FlagResetter() {
-            if (!success && !t.threadShouldExit()) {
+            if (!success) {  // ← 修正: threadShouldExit 条件を削除
                 auto wp = weakP;
                 const bool queued = juce::MessageManager::callAsync([wp] {
                     if (auto* o = wp.get()) {
@@ -60004,8 +60068,12 @@ void ConvolverProcessor::LoaderThread::run()
                 {
                     if (auto* o = wp.get())
                     {
-                        convo::publishAtomic(o->isLoading, false, std::memory_order_release); // release: timer/UI の isLoading acquire と HB（callAsync 失敗時）
-                        convo::publishAtomic(o->isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB（callAsync 失敗時）
+                        // callAsync 失敗 = MessageManager が利用できない状態（未初期化/終了中/Shutdown中）。
+                        // atomic 状態のみ整合性を維持する（次回ロード時のフラグ競合防止）。
+                        // UI コンポーネント状態は更新されない可能性があるが、これは仕様であり、
+                        // Shutdown 完了後の再初期化で UI 状態はリセットされる。
+                        convo::publishAtomic(o->isLoading, false, std::memory_order_release);
+                        convo::publishAtomic(o->isRebuilding, false, std::memory_order_release);
                     }
                 }
             }
@@ -69520,6 +69588,25 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
         m_epochDomain.publishEpoch();
     }
 }
+// ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放
+//   Runtime 停止シーケンス完了後（Audio Thread 停止 + Coordinator 停止）にのみ使用すること。
+//   本質条件は「Audio停止かつCoordinator停止」であり、通常時の retireEQStateDeferred とは
+//   経路を完全に分離している。
+void EQProcessor::retireImmediateDuringShutdown(EQState* state) noexcept
+{
+    if (state == nullptr)
+        return;
+    // ★ 命名で Shutdown 限定を明示。jassert(!isAudioThread()) 等は呼出元で保証すること。
+    delete state;
+}
+
+void EQProcessor::retireImmediateDuringShutdown(BandNode* node) noexcept
+{
+    if (node == nullptr)
+        return;
+    delete node;
+}
+
 // [work37 Phase 1.4] bool 返しに変更。全呼び出し元で (void) キャストして既存動作を維持。
 bool EQProcessor::retireEQStateDeferred(EQState* state) noexcept
 {
@@ -72436,6 +72523,9 @@ private:
     // [work37 Phase 1.4] 戻り値 bool に変更 (enqueueDeferredDeleteWithFallback 結果を伝播)
     bool retireEQStateDeferred(EQState* state) noexcept;
     bool retireBandNodeDeferred(BandNode* node) noexcept;
+    // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放（Runtime 停止完了後のみ）
+    void retireImmediateDuringShutdown(EQState* state) noexcept;
+    void retireImmediateDuringShutdown(BandNode* node) noexcept;
     // [P1-14] 保留中の advanceEpoch を一括実行
     void flushPendingEpochAdvance() noexcept;
 

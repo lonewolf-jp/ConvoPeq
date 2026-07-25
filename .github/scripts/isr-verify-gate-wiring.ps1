@@ -887,7 +887,7 @@ if (-not (Test-Path $phase4GenerationDriftScriptPath)) {
 $phase4GenerationDriftScriptText = Get-Content -LiteralPath $phase4GenerationDriftScriptPath -Raw -Encoding UTF8
 $phase4GenerationDriftNeedsEvidenceContracts =
 $phase4GenerationDriftScriptText.Contains('phase4_generation_drift_report.json') -and
-$phase4GenerationDriftScriptText.Contains('phase4_generation_drift_report_v1') -and
+($phase4GenerationDriftScriptText -match 'phase4_generation_drift_report_v\d+') -and
 $phase4GenerationDriftScriptText.Contains('requiredFiles') -and
 $phase4GenerationDriftScriptText.Contains('violations')
 if (-not $phase4GenerationDriftNeedsEvidenceContracts) {

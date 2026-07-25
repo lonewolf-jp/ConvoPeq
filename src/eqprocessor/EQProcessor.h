@@ -477,6 +477,9 @@ private:
     // [work37 Phase 1.4] 戻り値 bool に変更 (enqueueDeferredDeleteWithFallback 結果を伝播)
     bool retireEQStateDeferred(EQState* state) noexcept;
     bool retireBandNodeDeferred(BandNode* node) noexcept;
+    // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放（Runtime 停止完了後のみ）
+    void retireImmediateDuringShutdown(EQState* state) noexcept;
+    void retireImmediateDuringShutdown(BandNode* node) noexcept;
     // [P1-14] 保留中の advanceEpoch を一括実行
     void flushPendingEpochAdvance() noexcept;
 

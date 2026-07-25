@@ -104,51 +104,6 @@ void ShutdownRuntime::markFailed(ShutdownBlockingReason reason) noexcept
     convo::publishAtomic(phase_, ShutdownPhase::Failed, std::memory_order_release);
 }
 
-void ShutdownRuntime::advancePhase() noexcept
-{
-    const ShutdownPhase current = convo::consumeAtomic(phase_, std::memory_order_acquire);
-
-    // ★ P1-1: terminal 状態からは advance しない
-    if (isTerminalPhase(current))
-        return;
-
-    ShutdownPhase next = current;
-    switch (current) {
-        case ShutdownPhase::Running:
-            next = ShutdownPhase::AudioStopped;
-            break;
-        case ShutdownPhase::AudioStopped:
-            next = ShutdownPhase::ObserverDrained;
-            break;
-        case ShutdownPhase::ObserverDrained:
-            next = ShutdownPhase::RetireClosed;
-            break;
-        case ShutdownPhase::RetireClosed:
-            next = ShutdownPhase::EpochSettled;
-            break;
-        case ShutdownPhase::EpochSettled:
-            next = ShutdownPhase::ReclaimComplete;
-            break;
-        case ShutdownPhase::ReclaimComplete:
-            // ★ C-2: CONVOPEQ_EMERGENCY_DRAIN 有効時のみ EmergencyDrain を経由
-            next = ShutdownPhase::VerifyDrained;
-            break;
-        case ShutdownPhase::EmergencyDrain:        // ★ C-2
-            next = ShutdownPhase::VerifyDrained;
-            break;
-        case ShutdownPhase::VerifyDrained:
-            next = ShutdownPhase::ShutdownComplete;
-            break;
-        case ShutdownPhase::TimedOut:
-        case ShutdownPhase::Failed:
-        case ShutdownPhase::ShutdownComplete:
-        default:
-            return;
-    }
-
-    (void)transitionTo(next);
-}
-
 bool ShutdownRuntime::transitionTo(ShutdownPhase target) noexcept
 {
     const auto current = convo::consumeAtomic(phase_, std::memory_order_acquire);

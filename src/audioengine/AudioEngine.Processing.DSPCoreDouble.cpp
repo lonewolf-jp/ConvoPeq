@@ -738,6 +738,9 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
     applyFixedLatencyDelay(dataL, dataR, numSamples);
 
+    // AVX→legacy SSE 境界: _mm256_zeroupper() を配置
+    _mm256_zeroupper();
+
     juce::FloatVectorOperations::copy(buffer.getWritePointer(0, 0), dataL, numSamples);
     if (numChannels > 1 && dataR != nullptr)
         juce::FloatVectorOperations::copy(buffer.getWritePointer(1, 0), dataR, numSamples);

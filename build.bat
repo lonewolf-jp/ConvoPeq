@@ -9,10 +9,12 @@ REM
 REM Usage:
 REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [-DVAR]
 REM
-REM   -DVAR : CMake definition (cmd.exe strips =VALUE, so =ON is
-REM           auto-appended). Examples:
+REM   -DVAR[=VALUE] : CMake definition (SHIFT解析方式対応、引用符不要).
+REM           Examples:
 REM             build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 REM             build.bat Debug icx -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+REM             build.bat Release "-DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=OFF"
+REM   Note: CMAKE_EXTRA_FLAGS に ! を含めることは非推奨（DelayedExpansionとの競合）。
 REM ============================================================================
 
 echo ==========================================
@@ -31,22 +33,25 @@ set "NO_PAUSE=0"
 set "COMPILER_MODE=msvc"
 set "CMAKE_EXTRA_FLAGS="
 
-for %%A in (%*) do (
-    set "arg=%%~A"
-    if "!arg:~0,2!"=="-D" (
-        REM cmd.exe strips =VALUE, so append =ON.
-        set "CMAKE_EXTRA_FLAGS=!CMAKE_EXTRA_FLAGS! !arg!=ON"
-        echo [INFO] Extra CMake define: !arg!=ON
-    )
-    if /i "%%~A"=="Debug" set "BUILD_CONFIG=Debug"
-    if /i "%%~A"=="Release" set "BUILD_CONFIG=Release"
-    if /i "%%~A"=="clean" set "DO_CLEAN=1"
-    if /i "%%~A"=="nopause" set "NO_PAUSE=1"
-    if /i "%%~A"=="pgo-gen" set "PGO_MODE=pgo-gen"
-    if /i "%%~A"=="pgo-use" set "PGO_MODE=pgo-use"
-    if /i "%%~A"=="icx"   set "COMPILER_MODE=icx"
-    if /i "%%~A"=="icpx"  set "COMPILER_MODE=icpx"
+:argloop
+if "%1"=="" goto :argend
+set "arg=%1"
+if /I "%arg:~0,2%"=="-D" (
+    set "CMAKE_EXTRA_FLAGS=!CMAKE_EXTRA_FLAGS! %arg%"
+    echo [INFO] Extra CMake define: %arg%
+) else (
+    if /i "%arg%"=="Debug" set "BUILD_CONFIG=Debug"
+    if /i "%arg%"=="Release" set "BUILD_CONFIG=Release"
+    if /i "%arg%"=="clean" set "DO_CLEAN=1"
+    if /i "%arg%"=="nopause" set "NO_PAUSE=1"
+    if /i "%arg%"=="pgo-gen" set "PGO_MODE=pgo-gen"
+    if /i "%arg%"=="pgo-use" set "PGO_MODE=pgo-use"
+    if /i "%arg%"=="icx"   set "COMPILER_MODE=icx"
+    if /i "%arg%"=="icpx"  set "COMPILER_MODE=icpx"
 )
+shift
+goto :argloop
+:argend
 
 REM PGO用CMakeフラグ 括弧ネスト最小化・パーサー干渉完全排除
 set "CMAKE_PGO_FLAGS=-DCONVOPEQ_PGO_INSTRUMENT=OFF -DCONVOPEQ_PGO_USE=OFF"

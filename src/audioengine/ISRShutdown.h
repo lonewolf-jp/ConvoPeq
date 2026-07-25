@@ -171,8 +171,6 @@ public:
     // ★ P1-1: TimedOut/Failed 上書き前の最終フェーズを取得（障害解析用）
     ShutdownPhase getLastNonTerminalPhase() const noexcept;
 
-    // NonRT: advance shutdown phase
-    void advancePhase() noexcept;
     bool transitionTo(ShutdownPhase target) noexcept;
 
     // RT: check if shutdown in progress

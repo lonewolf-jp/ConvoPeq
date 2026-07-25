@@ -1178,11 +1178,20 @@ int NoiseShaperLearner::buildTrainingSegments() noexcept
     for (int i = 0; i < kNumLevels; ++i)
         levelBucketCounts[i] = 0;
 
-    double recentLeft[kRecentSampleRequest] = {};
-    double recentRight[kRecentSampleRequest] = {};
+    // ★ ヒープ確保（スタック544KB→解放）. T9 (A05) の makeAlignedArrayZero を使用
+    convo::ScopedAlignedArray<double> recentLeft;
+    convo::ScopedAlignedArray<double> recentRight;
+    try {
+        recentLeft = convo::makeAlignedArrayZero<double>(kRecentSampleRequest);
+        recentRight = convo::makeAlignedArrayZero<double>(kRecentSampleRequest);
+    } catch (const std::bad_alloc&) {
+        juce::Logger::writeToLog("[DIAG] buildTrainingSegments: bad_alloc, "
+            "training skipped");
+        return 0;
+    }
 
     const int maxRequired = kRecentSampleRequest;
-    const int copiedSamples = segmentBuffer.copyLatest(recentLeft, recentRight, maxRequired);
+    const int copiedSamples = segmentBuffer.copyLatest(recentLeft.get(), recentRight.get(), maxRequired);
 
     if (copiedSamples < AudioSegment::kLength)
         return 0;

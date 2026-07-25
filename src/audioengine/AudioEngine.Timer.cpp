@@ -1116,6 +1116,9 @@ void AudioEngine::timerCallback()
         }
     }
 
+    // ★ RTTraceRelay drain: リングバッファ消費（lock-free、~50ms周期）
+    rtTraceRelay_.drain();
+
     // UI用プロセッサのクリーンアップ
     uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();

@@ -51,7 +51,7 @@ void ConvolverProcessor::LoaderThread::run()
         const juce::Thread& t;
         bool success = false;
         ~FlagResetter() {
-            if (!success && !t.threadShouldExit()) {
+            if (!success) {  // ← 修正: threadShouldExit 条件を削除
                 auto wp = weakP;
                 const bool queued = juce::MessageManager::callAsync([wp] {
                     if (auto* o = wp.get()) {
@@ -64,8 +64,12 @@ void ConvolverProcessor::LoaderThread::run()
                 {
                     if (auto* o = wp.get())
                     {
-                        convo::publishAtomic(o->isLoading, false, std::memory_order_release); // release: timer/UI の isLoading acquire と HB（callAsync 失敗時）
-                        convo::publishAtomic(o->isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB（callAsync 失敗時）
+                        // callAsync 失敗 = MessageManager が利用できない状態（未初期化/終了中/Shutdown中）。
+                        // atomic 状態のみ整合性を維持する（次回ロード時のフラグ競合防止）。
+                        // UI コンポーネント状態は更新されない可能性があるが、これは仕様であり、
+                        // Shutdown 完了後の再初期化で UI 状態はリセットされる。
+                        convo::publishAtomic(o->isLoading, false, std::memory_order_release);
+                        convo::publishAtomic(o->isRebuilding, false, std::memory_order_release);
                     }
                 }
             }

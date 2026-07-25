@@ -6,6 +6,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <cstring>  // std::memset (makeAlignedArrayZero)
 
 #include <mkl.h>
 #include "DiagnosticsConfig.h"
@@ -142,6 +143,20 @@ inline ScopedAlignedArray<T> makeAlignedArray(size_t count) {
                   "Aligned array only supports trivially destructible types");
     T* ptr = static_cast<T*>(aligned_malloc(count * sizeof(T), 64));
     if (!ptr) throw std::bad_alloc();
+    return ScopedAlignedArray<T>(ptr);
+}
+
+// ★ [work85 T9] ゼロ初期化版（スタック配列代替・学習データ向け）
+template <typename T>
+inline ScopedAlignedArray<T> makeAlignedArrayZero(size_t count)
+{
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "makeAlignedArrayZero requires trivially copyable type");
+    static_assert(std::is_trivially_destructible_v<T>,
+                  "Aligned array only supports trivially destructible types");
+    T* ptr = static_cast<T*>(aligned_malloc(count * sizeof(T), 64));
+    if (!ptr) throw std::bad_alloc();
+    std::memset(ptr, 0, count * sizeof(T));
     return ScopedAlignedArray<T>(ptr);
 }
 

@@ -89,6 +89,8 @@ void LoudnessMeter::processBlock(const double* dataL, const double* dataR, int n
         vPeakR = _mm256_max_pd(vPeakR, _mm256_andnot_pd(vSignMask, vR));
     }
     // Reduce
+    // AVX→legacy SSE 遷移: YMMレジスタをクリアしてからSSE水平加算へ
+    _mm256_zeroupper();
     __m128d loL = _mm256_castpd256_pd128(vSumL);
     __m128d hiL = _mm256_extractf128_pd(vSumL, 1);
     __m128d sumL128 = _mm_add_pd(loL, hiL);

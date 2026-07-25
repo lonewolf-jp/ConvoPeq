@@ -45,21 +45,21 @@ public:
         return capacity - getAvailableSamples();
     }
 
-    void push(const juce::dsp::AudioBlock<const double>& block) noexcept
+    [[nodiscard]] int push(const juce::dsp::AudioBlock<const double>& block) noexcept
     {
         if (capacity <= 0 || numChannels <= 0)
-            return;
+            return 0;
 
         const int samplesToWriteRequested = static_cast<int>(block.getNumSamples());
         const int channelsToWrite = juce::jmin(numChannels, static_cast<int>(block.getNumChannels()));
         if (samplesToWriteRequested <= 0 || channelsToWrite <= 0)
-            return;
+            return 0;
 
         const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire); // acquire: 前回 push の writeIndex release と HB (ラップアラウンド安全確認)
         const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);   // acquire: popMixToMono/skip の readIndex release と HB (空きスロット数計算)
         const int free = capacity - static_cast<int>(write - read);
         if (free <= 0)
-            return;
+            return 0;
 
         const int samplesToWrite = juce::jmin(samplesToWriteRequested, free);
         const int start = static_cast<int>(write % static_cast<uint64_t>(capacity));
@@ -91,6 +91,7 @@ public:
         }
 
         convo::publishAtomic(writeIndex, write + static_cast<uint64_t>(samplesToWrite), std::memory_order_release); // release: popMixToMono/getAvailableSamples の acquire と HB し書き込み完了を公開
+        return samplesToWrite;
     }
 
     int popMixToMono(float* destination, int requestedSamples) noexcept

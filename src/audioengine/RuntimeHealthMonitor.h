@@ -86,7 +86,8 @@ enum class CriticalExitBlocker : uint8_t {
     RecoveryRunning,
     StableDurationInsufficient,
     PendingRetireExceeded,
-    RetireAgeExceeded
+    RetireAgeExceeded,
+    ActiveReaderRemaining      // ★ [work85 T3] Reader残留によるCritical出口ブロック
 };
 
 // [work39 Phase 7] CriticalExitCondition — Critical 出口評価構造体

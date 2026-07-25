@@ -564,10 +564,9 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    // 【Leak Fix】LoaderThreadの異常蓄積防止
-    // スレッドが終了しない場合でも、一定数を超えたら強制削除してメモリを解放する。
-    // [FIX] detached thread はプロセス終了時に未定義動作を引き起こすため、
-    //       同期的なチェックと削除に切り替える。
+    // 【Leak Fix】LoaderThreadの異常蓄積防止（安全策）
+    // 終了済みスレッドの削除を促進する。強制削除は行わない（stopThreadによる
+    // 中断リスクを回避するため）。スレッドが終了しない限りエントリは残る。
     if (loaderTrashBin.size() > 2)
     {
         for (auto it = loaderTrashBin.begin(); it != loaderTrashBin.end() && loaderTrashBin.size() > 2; )

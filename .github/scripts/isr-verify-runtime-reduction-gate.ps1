@@ -8,6 +8,7 @@ if (-not (Test-Path $audioRoot)) {
 }
 
 $allowedRuntimeClasses = @(
+    "CrossfadeRuntime",
     "DebugRuntime",
     "DSPHandleRuntime",
     "CrossfadeAuthorityRuntime",

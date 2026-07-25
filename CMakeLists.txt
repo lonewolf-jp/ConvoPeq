@@ -770,6 +770,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     endif()
     if(EXISTS "${_INTEL_COMPILER_ROOT}")
         target_link_directories(ConvoPeq PRIVATE "${_INTEL_COMPILER_ROOT}")
+        # ★ テストターゲットにも反映
+        if(TARGET MTNUPCMeasurement)
+            target_link_directories(MTNUPCMeasurement PRIVATE "${_INTEL_COMPILER_ROOT}")
+        endif()
         message(STATUS "icx: Intel compiler runtime lib dir = ${_INTEL_COMPILER_ROOT}")
     else()
         message(WARNING "icx: Intel compiler runtime lib dir not found. Link may fail with LNK1104 (libircmt.lib).")
@@ -999,6 +1003,12 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # AVX2 フラグ（全コンフィグで有効化）
     target_compile_options(ConvoPeq PRIVATE /QxCORE-AVX2)
 
+    # icx -mvzeroupper: AVX→legacy SSE 境界に vzeroupper を自動挿入
+    # CXX 翻訳単位のみに限定（Cコンパイラには不要）
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-mvzeroupper>
+    )
+
     # JUCE の NOMINMAX 再定義警告・未使用コマンドライン引数警告を抑制
     target_compile_options(ConvoPeq PRIVATE
         -Wno-unused-command-line-argument
@@ -1036,6 +1046,12 @@ if(ENABLE_ASAN)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
         target_link_options(ConvoPeq PRIVATE -fsanitize=address)
+        # icx でも動的 CRT に切り替え（ENABLE_ASAN 時のみ）
+        # 注意: 通常時は静的CRT（/MT）のまま。ASan は動的CRT（/MD）が必須。
+        # 既存の target_compile_options に /MT が残っていないことを確認すること。
+        # set_property だけでは不十分で、compile_options 側の /MT が優先される場合がある。
+        set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
+            "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     endif()
 endif()
 
@@ -1103,22 +1119,22 @@ if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
 
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set(CLANG_TIDY_CMD
-            "${CLANG_TIDY_EXECUTABLE};
-             -p=${CMAKE_BINARY_DIR};
-             --extra-arg-before=--driver-mode=cl;
-             --extra-arg=/EHsc;
-             --extra-arg=-fexceptions;
-             --extra-arg=-D_HAS_EXCEPTIONS=1;
-             --header-filter=.*/src/.*"
+            "${CLANG_TIDY_EXECUTABLE}"
+            "-p=${CMAKE_BINARY_DIR}"
+            "--extra-arg-before=--driver-mode=cl"
+            "--extra-arg=/EHsc"
+            "--extra-arg=-fexceptions"
+            "--extra-arg=-D_HAS_EXCEPTIONS=1"
+            "--header-filter=.*/src/.*"
         )
     else()
         set(CLANG_TIDY_CMD
-            "${CLANG_TIDY_EXECUTABLE};
-             -p=${CMAKE_BINARY_DIR};
-             --extra-arg=/EHsc;
-             --extra-arg=-fexceptions;
-             --extra-arg=-D_HAS_EXCEPTIONS=1;
-             --header-filter=.*/src/.*"
+            "${CLANG_TIDY_EXECUTABLE}"
+            "-p=${CMAKE_BINARY_DIR}"
+            "--extra-arg=/EHsc"
+            "--extra-arg=-fexceptions"
+            "--extra-arg=-D_HAS_EXCEPTIONS=1"
+            "--header-filter=.*/src/.*"
         )
     endif()
 

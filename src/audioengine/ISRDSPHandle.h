@@ -164,7 +164,9 @@ private:
         "DSPHandle must be trivially copyable for ISR Runtime");
     static_assert(std::is_standard_layout_v<DSPHandle>,
         "DSPHandle must be standard layout for ISR Runtime");
-    // ★ 16バイト構造体のため CMPXCHG16B に依存。ビルド設定によっては lock-free でない場合がある
+    // ★ 16バイト構造体のため CMPXCHG16B に依存。x64+AVX2(Haswell以降)前提。
+    //    icx では is_always_lock_free がコンパイル時保証されないため、
+    //    Runtime初期化時に is_lock_free() で検証する（#define NDEBUG 時は省略）。
     // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
     //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };

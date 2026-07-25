@@ -177,6 +177,8 @@ double TruePeakDetector::dotProductAvx2(const double* __restrict x,
     acc0 = _mm256_add_pd(acc0, acc1);
     acc2 = _mm256_add_pd(acc2, acc3);
     acc0 = _mm256_add_pd(acc0, acc2);
+    // AVX→legacy SSE 遷移: YMMレジスタをクリアしてからSSE水平加算へ
+    _mm256_zeroupper();
     __m128d vLo = _mm256_castpd256_pd128(acc0);
     __m128d vHi = _mm256_extractf128_pd(acc0, 1);
     __m128d vSum = _mm_add_pd(vLo, vHi);

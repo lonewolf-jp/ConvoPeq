@@ -31,8 +31,9 @@ std::vector<double> buildFrequencyCandidates(double sampleRate)
 {
     constexpr int kCandidateCount = 18;
     constexpr double kMinCandidateHz = 20.0;
+    constexpr double kMaxAllpassFrequencyHz = 20000.0;
     const double maxCandidateHz = std::max(kMinCandidateHz,
-        std::min(0.45 * sampleRate, 0.499 * sampleRate));
+        std::min(kMaxAllpassFrequencyHz, 0.499 * sampleRate));
 
     std::vector<double> candidates;
     candidates.reserve(kCandidateCount);
@@ -58,8 +59,9 @@ std::vector<double> buildFrequencyCandidates(double sampleRate)
 
 double clampOptimizationFrequency(double sampleRate, double value) noexcept
 {
+    constexpr double kMaxAllpassFrequencyHz = 20000.0;
     const double maxCandidateHz = std::max(20.0,
-        std::min(0.45 * sampleRate, 0.499 * sampleRate));
+        std::min(kMaxAllpassFrequencyHz, 0.499 * sampleRate));
     return std::clamp(value, 20.0, maxCandidateHz);
 }
 

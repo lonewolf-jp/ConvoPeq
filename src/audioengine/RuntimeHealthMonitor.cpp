@@ -255,6 +255,8 @@ void RuntimeHealthMonitor::tick() noexcept {
             exitCond.blocker = CriticalExitBlocker::PendingRetireExceeded;
         else if (!retireAgeHealthy)
             exitCond.blocker = CriticalExitBlocker::RetireAgeExceeded;
+        else if (!readerHealthy)
+            exitCond.blocker = CriticalExitBlocker::ActiveReaderRemaining;
         exitCond.allMonitorsNormal = exitCond.allMonitorsNormal && metricsHealthy;
 
         // 条件4: 安定60秒継続

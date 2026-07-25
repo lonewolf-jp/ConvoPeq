@@ -24,13 +24,22 @@ struct AudioBlock;
 template <typename T, size_t Capacity>
 class LockFreeRingBuffer;
 
-struct AudioSegment
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas による意図的なパディングの警告を抑制
+#endif
+struct alignas(64) AudioSegment
 {
     static constexpr int kLength = MklFftEvaluator::kFftLength;
     double left[kLength] = {};
     double right[kLength] = {};
     std::array<double, MklFftEvaluator::kSpectrumBins> maskingThresholds {};
 };
+static_assert(alignof(AudioSegment) == 64, "AudioSegment must be 64-byte aligned");
+static_assert(sizeof(AudioSegment) % 64 == 0, "AudioSegment size must be a multiple of 64 to prevent false sharing");
+#ifdef _MSC_VER
+#pragma warning(pop) // C4324 suppression scope end
+#endif
 
 enum class SpectralType {
     Broadband,

@@ -33,6 +33,9 @@ bool RuntimePolicyEngine::canExecute(RecoveryAction action) const noexcept
         return false;
     const auto& entry = m_cooldowns[idx];
     const uint64_t nowUs = getNowUs();
+    // unsigned underflow ガード: lastExecutedUs > nowUs の場合はクールダウン未完了とみなす
+    if (nowUs < entry.lastExecutedUs)
+        return false;
     return (nowUs - entry.lastExecutedUs) >= entry.cooldownUs;
 }
 

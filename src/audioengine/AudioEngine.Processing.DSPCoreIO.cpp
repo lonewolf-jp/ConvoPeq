@@ -193,7 +193,11 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
 void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                                       LockFreeAudioRingBuffer& analyzerFifo) const noexcept
 {
-    analyzerFifo.push(block);
+    if (analyzerFifo.push(block) != static_cast<int>(block.getNumSamples()))
+    {
+        // ★ XRUN: FIFO 満杯で一部または全部のサンプルが書き込めなかった
+        //   現状は無視（解析品質が低下するのみで音声出力には影響しない）
+    }
 }
 
 float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,

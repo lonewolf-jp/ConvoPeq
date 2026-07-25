@@ -76,7 +76,30 @@ void ClosureGraphWalker::emitClosureArtifact(const PayloadClosureDescriptor& clo
     file << "  \"externalMutableDependencies\": " << closure.externalMutableDependencies << ",\n";
     file << "  \"validationErrors\": [";
     if (!valid) {
-        file << "\"" << std::string(validationError) << "\"";
+        // JSON仕様(RFC 8259)に基づき全制御文字をエスケープ
+        file << "\"";
+        for (char c : validationError) {
+            switch (c) {
+                case '"':  file << "\\\""; break;
+                case '\\': file << "\\\\"; break;
+                case '\b': file << "\\b";  break;
+                case '\f': file << "\\f";  break;
+                case '\n': file << "\\n";  break;
+                case '\r': file << "\\r";  break;
+                case '\t': file << "\\t";  break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20) {
+                        char buf[16];
+                        snprintf(buf, sizeof(buf), "\\u%04x",
+                            static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                        file << buf;
+                    } else {
+                        file << c;
+                    }
+                    break;
+            }
+        }
+        file << "\"";
     }
     file << "]\n";
     file << "}\n";

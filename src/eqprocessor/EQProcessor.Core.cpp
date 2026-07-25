@@ -70,6 +70,25 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
         m_epochDomain.publishEpoch();
     }
 }
+// ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放
+//   Runtime 停止シーケンス完了後（Audio Thread 停止 + Coordinator 停止）にのみ使用すること。
+//   本質条件は「Audio停止かつCoordinator停止」であり、通常時の retireEQStateDeferred とは
+//   経路を完全に分離している。
+void EQProcessor::retireImmediateDuringShutdown(EQState* state) noexcept
+{
+    if (state == nullptr)
+        return;
+    // ★ 命名で Shutdown 限定を明示。jassert(!isAudioThread()) 等は呼出元で保証すること。
+    delete state;
+}
+
+void EQProcessor::retireImmediateDuringShutdown(BandNode* node) noexcept
+{
+    if (node == nullptr)
+        return;
+    delete node;
+}
+
 // [work37 Phase 1.4] bool 返しに変更。全呼び出し元で (void) キャストして既存動作を維持。
 bool EQProcessor::retireEQStateDeferred(EQState* state) noexcept
 {

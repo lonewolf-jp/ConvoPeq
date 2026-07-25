@@ -9,6 +9,16 @@ namespace isr {
 
 DSPHandleRuntime::DSPHandleRuntime()
 {
+    // Runtime初期化時に atomic<DSPHandle> のロックフリー性を一度だけ検証
+    static const bool isLockFree = []{
+        std::atomic<DSPHandle> test{ DSPHandle::null() };
+        const bool ok = test.is_lock_free();
+        // Debugビルドでロックフリー性を保証（Releaseはコンパイラ信頼）
+        assert(ok && "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
+        return ok;
+    }();
+    (void)isLockFree; // unused in Release
+
     for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
         convo::publishAtomic(registry_[i].generation, 0u, std::memory_order_relaxed);
         registry_[i].instance = nullptr;
