@@ -1,0 +1,12 @@
+﻿{
+    "schema":  "publication_failure_taxonomy_report_v1",
+    "generatedAt":  "2026-07-25T20:38:23.8192274+09:00",
+    "schemaPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
+    "coordinatorHeaderPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.h",
+    "coordinatorCppPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
+    "semanticUnitTestPath":  "C:\\VSC_Project\\ConvoPeq\\src\\tests\\ISRSemanticValidationTests.cpp",
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

@@ -1,0 +1,8 @@
+﻿{
+    "schema":  "isr_partial_semantic_update_prohibition_evidence_v1",
+    "generatedAt":  "2026-07-25T20:38:24.0787468+09:00",
+    "violations":  [
+                       "runPublicationPrecheckNonRt body extraction failed"
+                   ],
+    "ready":  false
+}

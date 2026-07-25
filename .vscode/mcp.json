@@ -18,6 +18,13 @@
         "headroom": {
             "type": "stdio",
             "command": "${workspaceFolder}\\tools\\headroom-with-proxy.cmd"
+        },
+        "aidex": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"
+            ]
         }
     }
 }

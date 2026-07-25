@@ -271,7 +271,7 @@ void EQProcessor::reset()
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
     convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の agcResetSerial acquire と HB
-    rtDeferredBandResetMask = 0;
+    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
 
@@ -589,13 +589,13 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     smoothTotalGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain<double>(static_cast<double>(clonedState->totalGainDb)));
 
-    rtBypassedShadow = syncedBypassed;
-    rtActiveStructureShadow = syncedStructure;
-    rtAgcCurrentGainShadow = syncedAgcCurrentGain;
-    rtAgcEnvInputShadow = syncedAgcEnvInput;
-    rtAgcEnvOutputShadow = syncedAgcEnvOutput;
+    rtBypassedShadow.store(syncedBypassed, std::memory_order_relaxed);
+    rtActiveStructureShadow.store(syncedStructure, std::memory_order_relaxed);
+    rtAgcCurrentGainShadow.store(syncedAgcCurrentGain, std::memory_order_relaxed);
+    rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
+    rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
 
-    rtDeferredBandResetMask = syncedBandResetMask;
+    rtDeferredBandResetMask.store(syncedBandResetMask, std::memory_order_relaxed);
     rtSeenBandResetSerial = syncedBandResetSerial;
     rtSeenAgcResetSerial = syncedAgcResetSerial;
 
@@ -652,13 +652,13 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     smoothTotalGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain<double>(static_cast<double>(syncedTotalGainDb)));
 
-    rtBypassedShadow = syncedBypassed;
-    rtActiveStructureShadow = syncedStructure;
-    rtAgcCurrentGainShadow = syncedAgcCurrentGain;
-    rtAgcEnvInputShadow = syncedAgcEnvInput;
-    rtAgcEnvOutputShadow = syncedAgcEnvOutput;
+    rtBypassedShadow.store(syncedBypassed, std::memory_order_relaxed);
+    rtActiveStructureShadow.store(syncedStructure, std::memory_order_relaxed);
+    rtAgcCurrentGainShadow.store(syncedAgcCurrentGain, std::memory_order_relaxed);
+    rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
+    rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
 
-    rtDeferredBandResetMask = syncedBandResetMask;
+    rtDeferredBandResetMask.store(syncedBandResetMask, std::memory_order_relaxed);
     rtSeenBandResetSerial = syncedBandResetSerial;
     rtSeenAgcResetSerial = syncedAgcResetSerial;
 
@@ -781,7 +781,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
     convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);   // release: Processing.cpp の agcResetSerial acquire と HB
-    rtDeferredBandResetMask = 0;
+    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
     convo::publishAtomic(activeStructure,

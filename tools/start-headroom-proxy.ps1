@@ -6,76 +6,64 @@ param(
 $headroomExe = "$PSScriptRoot\..\.venv\Scripts\headroom.exe"
 $pidFile = "$env:TEMP\headroom-proxy.pid"
 $logFile = "$env:TEMP\headroom-proxy.log"
+$proxyArgs = @(
+    "proxy", "--port", "8787", "--host", "127.0.0.1",
+    "--mode", "token",
+    "--target-ratio", "0.40",
+    "--memory",
+    "--intercept-tool-results",
+    "--rpm", "200",
+    "--tpm", "500000",
+    "--keepalive-expiry", "30",
+    "--protect-tool-results", "Bash,WebFetch,Read"
+)
 
 function Start-Proxy {
-    # Clean up any previous orphaned proxy
     Stop-Proxy
-
-    Write-Host "Starting Headroom proxy..."
-    
+    Write-Host "Starting Headroom proxy (target-ratio=0.40, memory=enabled)..."
     $proc = Start-Process -FilePath $headroomExe `
-        -ArgumentList "proxy", "--port", "8787", "--host", "127.0.0.1" `
-        -WindowStyle Hidden -PassThru -RedirectStandardOutput $logFile -RedirectStandardError "${logFile}.err"
-    
+        -ArgumentList $proxyArgs `
+        -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $logFile -RedirectStandardError "${logFile}.err"
     $proc.Id | Out-File -FilePath $pidFile -Encoding ascii
-    
-    # Wait for proxy to be ready
-    Start-Sleep -Seconds 4
-    
-    # Verify it's running
-    $running = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
-    if ($running) {
-        Write-Host "Headroom proxy started (PID: $($proc.Id))"
-        return $true
+    $ready = $false
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 2
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:8787/health" -UseBasicParsing -TimeoutSec 2
+            $ready = $true; break
+        } catch {}
+    }
+    if ($ready) {
+        Write-Host "Headroom proxy started (PID: $($proc.Id), target-ratio: 0.40)"
     } else {
-        Write-Host "ERROR: Headroom proxy failed to start"
-        return $false
+        Write-Host "ERROR: Headroom proxy failed to start" -ForegroundColor Red
     }
 }
 
 function Stop-Proxy {
     if (Test-Path $pidFile) {
-        $pid = Get-Content $pidFile -Raw | ForEach-Object { $_ -replace '\D', '' }
-        if ($pid) {
-            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-            if ($proc) {
-                $proc.Kill()
-                Write-Host "Headroom proxy (PID: $pid) stopped"
-            }
+        $hpId = Get-Content $pidFile -Raw | ForEach-Object { $_ -replace '\D', '' }
+        if ($hpId) {
+            $proc = Get-Process -Id $hpId -ErrorAction SilentlyContinue
+            if ($proc) { $proc.Kill(); Write-Host "Headroom proxy (PID: $hpId) stopped" }
         }
         Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     }
-    
-    # Also kill any other headroom proxy processes
-    Get-Process -Name "headroom" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -match "proxy"
-    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name "headroom" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 function Get-Status {
-    $running = $false
-    $pId = $null
-    
-    if (Test-Path $pidFile) {
-        $pId = Get-Content $pidFile -Raw | ForEach-Object { $_ -replace '\D', '' }
-        if ($pId) {
-            $proc = Get-Process -Id $pId -ErrorAction SilentlyContinue
-            if ($proc) { $running = $true }
-        }
-    }
-    
-    if ($running) {
-        Write-Host "Headroom proxy is RUNNING (PID: $pId)"
-    } else {
+    try {
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8787/health" -UseBasicParsing -TimeoutSec 3
+        $c = $r.Content | ConvertFrom-Json
+        Write-Host "Headroom proxy is RUNNING (target-ratio: $($c.config.target_ratio))"
+        Write-Host "Memory: $($c.checks.memory.status), PID: $($c.pid)"
+    } catch {
         Write-Host "Headroom proxy is NOT running"
     }
 }
 
-# Main dispatch
-if ($Stop) {
-    Stop-Proxy
-} elseif ($Status) {
-    Get-Status
-} else {
-    Start-Proxy
-}
+if ($Stop) { Stop-Proxy }
+elseif ($Status) { Get-Status }
+else { Start-Proxy }

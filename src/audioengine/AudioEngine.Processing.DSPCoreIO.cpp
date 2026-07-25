@@ -277,7 +277,7 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
     }
 
     if (expandMono)
-        std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
+        std::memcpy(alignedR.get(), alignedL.get(), static_cast<size_t>(numSamples) * sizeof(double)); // [work87 P2-1] size_t
 
     sanitizeFiniteChunk(alignedL.get(), numSamples);
     sanitizeFiniteChunk(alignedR.get(), numSamples);

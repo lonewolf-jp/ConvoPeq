@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-25 15:56:29
+> Generated: 2026-07-25 23:38:21
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -3017,9 +3017,10 @@ public:
         if (outLeft == nullptr || outRight == nullptr || requestedSamples <= 0)
             return 0;
 
-        // acquire: pushBlock の release と HB し、最新の totalSamples/writePosition を取得。
-        const int currentTotal = convo::consumeAtomic(totalSamples, std::memory_order_acquire);
+        // acquire: pushBlock の release と HB し、最新の writePosition/totalSamples を取得。
+        // [work87 P1-0] Writerのrelease順序(writePosition→totalSamples)と一致させる
         const int currentWritePos = convo::consumeAtomic(writePosition, std::memory_order_acquire);
+        const int currentTotal = convo::consumeAtomic(totalSamples, std::memory_order_acquire);
 
         const int availableSamples = std::min(requestedSamples,
             currentTotal >= kCapacity ? kCapacity : currentTotal);
@@ -7430,7 +7431,7 @@ static bool hasAVX2Support() noexcept
 #if defined(_WIN32)
     // Method 1: IsProcessorFeaturePresent (kernel32.dll, Windows 8.1+)
 #ifndef PF_AVX2_INSTRUCTIONS_AVAILABLE
-#define PF_AVX2_INSTRUCTIONS_AVAILABLE 10
+#define PF_AVX2_INSTRUCTIONS_AVAILABLE 40  // [work87 P1-1] 正値 (10=SSE2 は誤り)
 #endif
     {
         const auto kernel32 = ::GetModuleHandleW(L"kernel32.dll");
@@ -8228,9 +8229,12 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     //     AVX2 パスの実最低アクセスは index 0 となる（prepareStage の +6 マージン保証）。
     //     globalMinConvIdx >= 0 はスカラー経路の安全条件として十分であり、
     //     +6 マージンは prepareStage 側で historyDownKeep に組み込まれている。
+    // [work87 P1-2] loadStride2 は ptr[-6] までアクセスするため明示的に考慮
+    static constexpr int kLoadStride2Offset = 6;
     const int globalMinConvIdx = keep - stage.convParity - ((stage.convCount - 1) << 1);
     const int globalMaxConvIdx = baseMax - stage.convParity;
-    const bool convTapOk = (globalMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
+    const int avxMinConvIdx = globalMinConvIdx - kLoadStride2Offset;
+    const bool convTapOk = (avxMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
 
     if (!centerTapOk || !convTapOk || stage.convCount <= 0)
     {
@@ -9036,7 +9040,7 @@ private:
 
     SafeStateSwapper&     swapperRef;
     ThreadAffinityManager* affinityManager;
-    std::atomic<bool>     running;
+    std::atomic<bool>     running{false}; // [work87 P2-5]
     std::thread           thread;
 };
 
@@ -11901,6 +11905,8 @@ private:
 
     // 周波数範囲の定数 (20バンド)
     struct FreqRange { float minHz; float maxHz; };
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQControlPanel)
+
     static constexpr FreqRange FREQ_RANGES[EQProcessor::NUM_BANDS] = {
         { 20.0f, 20000.0f },   // Band 0
         { 20.0f, 20000.0f },   // Band 1
@@ -16730,7 +16736,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
     if (!convo::consumeAtomic(m_ready, std::memory_order_acquire) || numSamples <= 0)
     {
         if (output && numSamples > 0)
-            memset(output, 0, numSamples * sizeof(double));
+            memset(output, 0, static_cast<size_t>(numSamples) * sizeof(double)); // [work87 P2-1] size_t
         return 0;
     }
 
@@ -27040,6 +27046,8 @@ private:
     static constexpr double EQ_UPDATE_INTERVAL_SEC = 0.10;
 
     double lastTime = 0.0;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectrumAnalyzerComponent)
 };
 
 ```
@@ -34123,7 +34131,7 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
     }
 
     if (expandMono)
-        std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
+        std::memcpy(alignedR.get(), alignedL.get(), static_cast<size_t>(numSamples) * sizeof(double)); // [work87 P2-1] size_t
 
     sanitizeFiniteChunk(alignedL.get(), numSamples);
     sanitizeFiniteChunk(alignedR.get(), numSamples);
@@ -39991,7 +39999,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         return convo::aligned_make_unique<RuntimeState>(token);
     }
 
-    // AuthorityClass::Diagnostic (trace/correlation only, must not drive runtime branching)
+    // AuthorityClass::Authoritative (ISR: worldId identifies specific RuntimeWorld builds, must be Authoritative)
     std::uint64_t worldId = 0;
     // AuthorityClass::Derived
     convo::EngineRuntime engine {};
@@ -40082,7 +40090,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     }};
 
     static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 21> kRuntimeAuthorityInventory {{
-        {"worldId", convo::isr::RuntimeAuthorityClass::Diagnostic},
+        {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative}, // ISR: worldId identifies specific RuntimeWorld builds
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
         {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},
@@ -51048,7 +51056,7 @@ private:
     std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
-    std::atomic<bool> swapPending_;
+    std::atomic<bool> swapPending_{false}; // [work87 P2-5]
     std::atomic<CoordinatorState> state_;
     std::atomic<std::uint64_t> retireAuthorityCount_;
     std::atomic<std::uint64_t> overflowMaxAgeUs_{500'000};  // ★ Phase5: 500ms デフォルト
@@ -63631,7 +63639,7 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
     if (channel < 0 || channel >= 2 || !nucConvolvers[channel] || numSamples <= 0)
     {
         if (numSamples > 0)
-            std::memset(out, 0, numSamples * sizeof(double));
+            std::memset(out, 0, static_cast<size_t>(numSamples) * sizeof(double)); // [work87 P2-1] size_t
         return;
     }
 
@@ -69789,7 +69797,7 @@ void EQProcessor::reset()
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
     convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の agcResetSerial acquire と HB
-    rtDeferredBandResetMask = 0;
+    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
 
@@ -70107,13 +70115,13 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     smoothTotalGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain<double>(static_cast<double>(clonedState->totalGainDb)));
 
-    rtBypassedShadow = syncedBypassed;
-    rtActiveStructureShadow = syncedStructure;
-    rtAgcCurrentGainShadow = syncedAgcCurrentGain;
-    rtAgcEnvInputShadow = syncedAgcEnvInput;
-    rtAgcEnvOutputShadow = syncedAgcEnvOutput;
+    rtBypassedShadow.store(syncedBypassed, std::memory_order_relaxed);
+    rtActiveStructureShadow.store(syncedStructure, std::memory_order_relaxed);
+    rtAgcCurrentGainShadow.store(syncedAgcCurrentGain, std::memory_order_relaxed);
+    rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
+    rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
 
-    rtDeferredBandResetMask = syncedBandResetMask;
+    rtDeferredBandResetMask.store(syncedBandResetMask, std::memory_order_relaxed);
     rtSeenBandResetSerial = syncedBandResetSerial;
     rtSeenAgcResetSerial = syncedAgcResetSerial;
 
@@ -70170,13 +70178,13 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     smoothTotalGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain<double>(static_cast<double>(syncedTotalGainDb)));
 
-    rtBypassedShadow = syncedBypassed;
-    rtActiveStructureShadow = syncedStructure;
-    rtAgcCurrentGainShadow = syncedAgcCurrentGain;
-    rtAgcEnvInputShadow = syncedAgcEnvInput;
-    rtAgcEnvOutputShadow = syncedAgcEnvOutput;
+    rtBypassedShadow.store(syncedBypassed, std::memory_order_relaxed);
+    rtActiveStructureShadow.store(syncedStructure, std::memory_order_relaxed);
+    rtAgcCurrentGainShadow.store(syncedAgcCurrentGain, std::memory_order_relaxed);
+    rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
+    rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
 
-    rtDeferredBandResetMask = syncedBandResetMask;
+    rtDeferredBandResetMask.store(syncedBandResetMask, std::memory_order_relaxed);
     rtSeenBandResetSerial = syncedBandResetSerial;
     rtSeenAgcResetSerial = syncedAgcResetSerial;
 
@@ -70299,7 +70307,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
     convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);   // release: Processing.cpp の agcResetSerial acquire と HB
-    rtDeferredBandResetMask = 0;
+    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
     convo::publishAtomic(activeStructure,
@@ -71079,9 +71087,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    double envIn = rtAgcEnvInputShadow;
-    double envOut = rtAgcEnvOutputShadow;
-    double currentGain = rtAgcCurrentGainShadow;
+    double envIn = rtAgcEnvInputShadow.load(std::memory_order_relaxed);
+    double envOut = rtAgcEnvOutputShadow.load(std::memory_order_relaxed);
+    double currentGain = rtAgcCurrentGainShadow.load(std::memory_order_relaxed);
     if (!isFiniteNoLibm(envIn))  envIn = 0.0;
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
     if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
@@ -71098,9 +71106,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const double targetGain = calculateAGCGain(envIn, envOut);
     const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
 
-    rtAgcEnvInputShadow = envIn;
-    rtAgcEnvOutputShadow = envOut;
-    rtAgcCurrentGainShadow = nextGain;
+    rtAgcEnvInputShadow.store(envIn, std::memory_order_relaxed);
+    rtAgcEnvOutputShadow.store(envOut, std::memory_order_relaxed);
+    rtAgcCurrentGainShadow.store(nextGain, std::memory_order_relaxed);
 
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
     for (int ch = 0; ch < numChannels; ++ch)
@@ -71161,7 +71169,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 設定するまで有効であり、その間に process() が呼ばれることはない（H-01）。
     const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
     auto* activeBypassRamp = &bypassFadeGain;
-    bool effectiveBypass = rtBypassedShadow;
+    bool effectiveBypass = rtBypassedShadow.load(std::memory_order_relaxed);
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
     const double currentBypassTarget = activeBypassRamp->getTargetValue();
@@ -71169,11 +71177,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         if (!requestedBypass && effectiveBypass)
         {
-            rtDeferredBandResetMask |= 0xFFFFFFFFu;
-            rtBypassedShadow = false;
+            rtDeferredBandResetMask.fetch_or(0xFFFFFFFFu, std::memory_order_relaxed);
+            rtBypassedShadow.store(false, std::memory_order_relaxed);
         }
         activeBypassRamp->setTargetValue(targetBypassFade);
-        effectiveBypass = rtBypassedShadow;
+        effectiveBypass = rtBypassedShadow.load(std::memory_order_relaxed);
     }
 
     const bool bypassTransitionActive = activeBypassRamp->isSmoothing();
@@ -71181,7 +71189,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // フェードアウト完了時に bypassed を true にする
     if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
     {
-        rtBypassedShadow = true;
+        rtBypassedShadow.store(true, std::memory_order_relaxed);
         effectiveBypass = true;
     }
 
@@ -71250,9 +71258,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        rtAgcCurrentGainShadow = 1.0;
-        rtAgcEnvInputShadow = 0.0;
-        rtAgcEnvOutputShadow = 0.0;
+        rtAgcCurrentGainShadow.store(1.0, std::memory_order_relaxed);
+        rtAgcEnvInputShadow.store(0.0, std::memory_order_relaxed);
+        rtAgcEnvOutputShadow.store(0.0, std::memory_order_relaxed);
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
@@ -71260,16 +71268,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
         rtSeenBandResetSerial = bandResetSerialNow;
-        rtDeferredBandResetMask |= bandResetMaskFromPacked(bandResetPackedNow);
+        rtDeferredBandResetMask.fetch_or(bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
     }
 
-    uint32_t mask = rtDeferredBandResetMask;
-    rtDeferredBandResetMask = 0;
+    uint32_t mask = rtDeferredBandResetMask.exchange(0, std::memory_order_relaxed);
     if (mask != 0)
     {
         if (!canSafelyResetState)
         {
-            rtDeferredBandResetMask |= mask;
+            rtDeferredBandResetMask.fetch_or(mask, std::memory_order_relaxed);
         }
         // 最適化: 全バンドリセットの場合は memset で一括クリア
         else if (mask == 0xFFFFFFFF)
@@ -71528,7 +71535,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     };
 
-    auto activeMode = rtActiveStructureShadow;
+    auto activeMode = rtActiveStructureShadow.load(std::memory_order_relaxed);
     auto requestedMode = (stateSnapshot != nullptr)
         ? static_cast<FilterStructure>(stateSnapshot->filterStructure)
         : activeMode;
@@ -71584,14 +71591,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 blockR[n] = oldR[n] * wOld + newR[n] * wNew;
         }
 
-        rtActiveStructureShadow = requestedMode;
+        rtActiveStructureShadow.store(requestedMode, std::memory_order_relaxed);
     }
     else
     {
         if (requestedMode != activeMode)
         {
             activeMode = requestedMode;
-            rtActiveStructureShadow = activeMode;
+            rtActiveStructureShadow.store(activeMode, std::memory_order_relaxed);
         }
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
@@ -71673,9 +71680,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (!smoothingAfterBlend)
         {
             if (requestedBypass)
-                rtBypassedShadow = true;
+                rtBypassedShadow.store(true, std::memory_order_relaxed);
             else
-                rtBypassedShadow = false;
+                rtBypassedShadow.store(false, std::memory_order_relaxed);
         }
     }
 }
@@ -71684,7 +71691,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                           const convo::EQParameters& eqParams,
                           const EQCoeffCache* coeffCache)
 {
-    const bool effectiveBypassed = rtBypassedShadow;
+    const bool effectiveBypassed = rtBypassedShadow.load(std::memory_order_relaxed);
     const bool bypassSmoothing = bypassFadeGain.isSmoothing();
 
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
@@ -71735,9 +71742,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        rtAgcCurrentGainShadow = 1.0;
-        rtAgcEnvInputShadow = 0.0;
-        rtAgcEnvOutputShadow = 0.0;
+        rtAgcCurrentGainShadow.store(1.0, std::memory_order_relaxed);
+        rtAgcEnvInputShadow.store(0.0, std::memory_order_relaxed);
+        rtAgcEnvOutputShadow.store(0.0, std::memory_order_relaxed);
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
@@ -71745,11 +71752,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
         rtSeenBandResetSerial = bandResetSerialNow;
-        rtDeferredBandResetMask |= bandResetMaskFromPacked(bandResetPackedNow);
+        rtDeferredBandResetMask.fetch_or(bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
     }
 
-    uint32_t mask = rtDeferredBandResetMask;
-    rtDeferredBandResetMask = 0;
+    uint32_t mask = rtDeferredBandResetMask.exchange(0, std::memory_order_relaxed);
     if (mask != 0)
     {
         if (isAudioBlockSilent(block, numChannels, numSamples))
@@ -71772,7 +71778,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         }
         else
         {
-            rtDeferredBandResetMask |= mask;
+            rtDeferredBandResetMask.fetch_or(mask, std::memory_order_relaxed);
         }
     }
 
@@ -72734,14 +72740,34 @@ private:
     std::atomic<FilterStructure> requestedStructure { FilterStructure::Serial };
     std::atomic<FilterStructure> activeStructure { FilterStructure::Serial };
 
-    // Audio Thread専用のローカル状態。process() 内でのみ更新し、
-    // 他スレッドへの publish を伴わない。
-    double rtAgcCurrentGainShadow = 1.0;
-    double rtAgcEnvInputShadow = 0.0;
-    double rtAgcEnvOutputShadow = 0.0;
-    bool rtBypassedShadow = false;
-    FilterStructure rtActiveStructureShadow { FilterStructure::Serial };
-    std::uint32_t rtDeferredBandResetMask = 0;
+    // ---- RT Shadow values (transient copies of authoritative state) ----
+    //
+    // These values must never become independent sources of truth.
+    //
+    // Synchronization protocol:
+    //   Source of Truth → Worker syncStateFrom() → this shadow
+    //   Worker = synchronization agent (store() authoritative snapshot)
+    //   RT     = load() / temporary RMW only
+    //
+    // Worker synchronization intentionally overwrites RT temporary state.
+    // Do NOT change Worker store() to fetch_or() etc. — that would alter
+    // the synchronization protocol, not just an access pattern.
+    //
+    // Individual atomicization (memory_order_relaxed) suffices because
+    // each value is semantically independent — no cross-value snapshot
+    // consistency is required.
+    // [work87 P0-1] Data Race fix.
+    // -----------------------------------------------------------------
+    std::atomic<double> rtAgcCurrentGainShadow { 1.0 };
+    std::atomic<double> rtAgcEnvInputShadow { 0.0 };
+    std::atomic<double> rtAgcEnvOutputShadow { 0.0 };
+    std::atomic<bool> rtBypassedShadow { false };
+    std::atomic<FilterStructure> rtActiveStructureShadow { FilterStructure::Serial };
+    // Source of Truth for band reset requests is bandResetPacked (CAS-accumulated).
+    // Worker copies the complete accumulated snapshot from bandResetPacked.
+    // RT may temporarily accumulate during processing via fetch_or() —
+    // those transient bits are overwritten by next Worker sync by design.
+    std::atomic<std::uint32_t> rtDeferredBandResetMask { 0 };
     std::uint64_t rtSeenBandResetSerial = 0;
     std::uint64_t rtSeenAgcResetSerial = 0;
 

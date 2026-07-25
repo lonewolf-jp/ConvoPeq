@@ -688,14 +688,34 @@ private:
     std::atomic<FilterStructure> requestedStructure { FilterStructure::Serial };
     std::atomic<FilterStructure> activeStructure { FilterStructure::Serial };
 
-    // Audio Thread専用のローカル状態。process() 内でのみ更新し、
-    // 他スレッドへの publish を伴わない。
-    double rtAgcCurrentGainShadow = 1.0;
-    double rtAgcEnvInputShadow = 0.0;
-    double rtAgcEnvOutputShadow = 0.0;
-    bool rtBypassedShadow = false;
-    FilterStructure rtActiveStructureShadow { FilterStructure::Serial };
-    std::uint32_t rtDeferredBandResetMask = 0;
+    // ---- RT Shadow values (transient copies of authoritative state) ----
+    //
+    // These values must never become independent sources of truth.
+    //
+    // Synchronization protocol:
+    //   Source of Truth → Worker syncStateFrom() → this shadow
+    //   Worker = synchronization agent (store() authoritative snapshot)
+    //   RT     = load() / temporary RMW only
+    //
+    // Worker synchronization intentionally overwrites RT temporary state.
+    // Do NOT change Worker store() to fetch_or() etc. — that would alter
+    // the synchronization protocol, not just an access pattern.
+    //
+    // Individual atomicization (memory_order_relaxed) suffices because
+    // each value is semantically independent — no cross-value snapshot
+    // consistency is required.
+    // [work87 P0-1] Data Race fix.
+    // -----------------------------------------------------------------
+    std::atomic<double> rtAgcCurrentGainShadow { 1.0 };
+    std::atomic<double> rtAgcEnvInputShadow { 0.0 };
+    std::atomic<double> rtAgcEnvOutputShadow { 0.0 };
+    std::atomic<bool> rtBypassedShadow { false };
+    std::atomic<FilterStructure> rtActiveStructureShadow { FilterStructure::Serial };
+    // Source of Truth for band reset requests is bandResetPacked (CAS-accumulated).
+    // Worker copies the complete accumulated snapshot from bandResetPacked.
+    // RT may temporarily accumulate during processing via fetch_or() —
+    // those transient bits are overwritten by next Worker sync by design.
+    std::atomic<std::uint32_t> rtDeferredBandResetMask { 0 };
     std::uint64_t rtSeenBandResetSerial = 0;
     std::uint64_t rtSeenAgcResetSerial = 0;
 

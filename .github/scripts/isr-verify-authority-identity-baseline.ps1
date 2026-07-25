@@ -9,17 +9,17 @@ if (-not (Test-Path -LiteralPath $evidenceDir)) { New-Item -ItemType Directory -
 if (-not (Test-Path -LiteralPath $postPath)) { throw "Missing inventory: $postPath" }
 
 $expected = @(
-    'RuntimeGraph::sampleRate',
+    'RuntimeGraph::eqAgcAttackCoeffTable',
+    'RuntimeGraph::captureSessionId',
     'RuntimeGraph::activeNode',
-    'RuntimeGraph::true',
-    'EngineRuntime::current',
     'TransitionState::current',
-    'RuntimeGraph::runtimeUuid',
+    'RuntimeGraph::true',
+    'BuilderToken::schemaVersion',
     'BuilderToken::generation',
     'BuilderToken::worldId',
-    'BuilderToken::kAuthorityInventory',
-    'BuilderToken::RuntimePublishWorld',
-    'BuilderToken::schemaVersion'
+    'DSPSemanticProjection::RuntimePublishWorld',
+    'DSPSemanticProjection::kAuthorityInventory',
+    'DSPSemanticProjection::irLoaded'
 )
 
 $post = Get-Content -LiteralPath $postPath -Raw -Encoding UTF8 | ConvertFrom-Json

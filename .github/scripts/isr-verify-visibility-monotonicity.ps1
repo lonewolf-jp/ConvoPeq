@@ -38,8 +38,8 @@ $requiredPatterns = @(
     'publishAtomic\(observeLastSeenGeneration_\[slot\], currentGeneration, std::memory_order_release\);',
     'if \(currentSequence > previousSequence\)',
     'publishAtomic\(observeLastSeenSequenceId_\[slot\], currentSequence, std::memory_order_release\);',
-    'std::array<std::atomic<std::uint64_t>, 4> observeLastSeenGeneration_',
-    'std::array<std::atomic<std::uint64_t>, 4> observeLastSeenSequenceId_',
+    'std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenGeneration_',
+    'std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenSequenceId_',
     'std::atomic<std::uint64_t> observeMonotonicViolationCount_ \{ 0 \};',
     'std::atomic<bool> observeMonotonicRollbackRequested_ \{ false \};'
 )

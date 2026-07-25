@@ -1,0 +1,15 @@
+﻿{
+    "schema":  "isr_self_contained_world_evidence_v1",
+    "generatedAt":  "2026-07-25T20:38:23.7490990+09:00",
+    "violations":  [
+
+                   ],
+    "findings":  {
+                     "schemaHeaderFound":  true,
+                     "audioEngineFound":  true,
+                     "violationCount":  0,
+                     "timerFound":  true,
+                     "coordHeaderFound":  true
+                 },
+    "ready":  true
+}

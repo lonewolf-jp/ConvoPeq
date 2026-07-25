@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "workflow_dispatch_input_policy_report_v1",
-    "generatedAt":  "2026-07-06T17:42:02.9374056+09:00",
+    "generatedAt":  "2026-07-25T20:38:23.4084052+09:00",
     "workflowPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
     "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-workflow-dispatch-input-policy.json",
     "inputStatus":  [

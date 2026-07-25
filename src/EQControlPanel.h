@@ -89,6 +89,8 @@ private:
 
     // 周波数範囲の定数 (20バンド)
     struct FreqRange { float minHz; float maxHz; };
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQControlPanel)
+
     static constexpr FreqRange FREQ_RANGES[EQProcessor::NUM_BANDS] = {
         { 20.0f, 20000.0f },   // Band 0
         { 20.0f, 20000.0f },   // Band 1

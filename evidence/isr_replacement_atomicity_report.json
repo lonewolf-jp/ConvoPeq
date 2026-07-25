@@ -1,0 +1,8 @@
+﻿{
+    "schema":  "isr_replacement_atomicity_evidence_v1",
+    "generatedAt":  "2026-07-25T20:38:24.2228660+09:00",
+    "violations":  [
+                       "AudioEngine.Commit.cpp missing world activation call (setActiveRuntimeDSP/executeCommit)"
+                   ],
+    "ready":  false
+}

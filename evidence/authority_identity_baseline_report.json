@@ -1,0 +1,41 @@
+﻿{
+    "schema":  "authority_identity_baseline_report_v1",
+    "generatedAt":  "2026-07-25T20:38:23.6840170+09:00",
+    "expected":  [
+                     "RuntimeGraph::eqAgcAttackCoeffTable",
+                     "RuntimeGraph::captureSessionId",
+                     "RuntimeGraph::activeNode",
+                     "TransitionState::current",
+                     "RuntimeGraph::true",
+                     "BuilderToken::schemaVersion",
+                     "BuilderToken::generation",
+                     "BuilderToken::worldId",
+                     "DSPSemanticProjection::RuntimePublishWorld",
+                     "DSPSemanticProjection::kAuthorityInventory",
+                     "DSPSemanticProjection::irLoaded"
+                 ],
+    "actual":  [
+                   "RuntimeGraph::eqAgcAttackCoeffTable",
+                   "RuntimeGraph::captureSessionId",
+                   "RuntimeGraph::activeNode",
+                   "TransitionState::current",
+                   "TransitionState::current",
+                   "RuntimeGraph::true",
+                   "BuilderToken::schemaVersion",
+                   "BuilderToken::generation",
+                   "BuilderToken::worldId",
+                   "DSPSemanticProjection::RuntimePublishWorld",
+                   "DSPSemanticProjection::kAuthorityInventory",
+                   "DSPSemanticProjection::irLoaded"
+               ],
+    "missing":  [
+
+                ],
+    "unexpected":  [
+
+                   ],
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

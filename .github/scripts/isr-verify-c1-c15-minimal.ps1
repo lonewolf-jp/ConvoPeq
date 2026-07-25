@@ -81,12 +81,14 @@ $publishStateEvidence = "publishStateAll=$publishStateAll publishStateDecl=$publ
 $results.Add((New-CheckResult -Id 'C1' -Description 'publishState removed after ISR Bridge migration' -Status $publishStateStatus -Evidence $publishStateEvidence)) | Out-Null
 $results.Add((New-CheckResult -Id 'C14' -Description 'publishState() removed after ISR Bridge migration (PRT)' -Status $publishStateStatus -Evidence $publishStateEvidence)) | Out-Null
 
-# C2/C3: legacy publication symbols removed
+# C2: commitRuntimePublication is the sole publication authority (ISR design)
+# Practical Stable ISR: commitRuntimePublication is the singular Authority entry point for RuntimeWorld publication.
+# It should exist and be used (>0). C3: retireRuntimePublication should be 0 (removed).
 $c2Count = Count-RegexMatches -Files $files -Pattern '\bcommitRuntimePublication\s*\('
 $c3Count = Count-RegexMatches -Files $files -Pattern '\bretireRuntimePublication\s*\('
-$c2Status = if ($c2Count -eq 0) { 'pass' } else { 'fail' }
+$c2Status = if ($c2Count -gt 0) { 'pass' } else { 'fail' }
 $c3Status = if ($c3Count -eq 0) { 'pass' } else { 'fail' }
-$results.Add((New-CheckResult -Id 'C2' -Description 'commitRuntimePublication removed/non-used' -Status $c2Status -Evidence "count=$c2Count")) | Out-Null
+$results.Add((New-CheckResult -Id 'C2' -Description 'commitRuntimePublication is sole publication authority (Practical Stable ISR)' -Status $c2Status -Evidence "count=$c2Count")) | Out-Null
 $results.Add((New-CheckResult -Id 'C3' -Description 'retireRuntimePublication removed/non-used' -Status $c3Status -Evidence "count=$c3Count")) | Out-Null
 
 # C4: AudioEngine authority legacy ops removed from legacy path

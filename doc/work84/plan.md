@@ -132,7 +132,7 @@ check_circular_includes:  python3 tools/check_circular_includes.py src/ → 0 �
 check_mutable_world:      grep -rn " mutable " src/audioengine/FrozenRuntimeWorld.h 2>/dev/null | wc -l → 0
 # ★ 注: RuntimeWorld は独立したファイルではなく RuntimePublishWorld (=RuntimeState) として AudioEngine.h に定義。
 #   mutable が存在する箇所は FrozenRuntimeWorld.h のみ CI で監視する。
-check_coordinator_atomic: grep -rn "std::atomic" src/ --include="*.h" | grep -v "RuntimeCoordinator|RuntimePublicationCoordinator" | wc -l → 現状件数（622）を記録。Phase 5A 後に新規追加禁止
+check_coordinator_atomic: grep -rn "std::atomic" src/ --include="*.h" | grep -v "RuntimeCoordinator|RuntimePublicationCoordinator" | wc -l → 現状件数（629）を記録。Phase 5A 後に新規追加禁止
 ```
 
 **受け入れ条件**:
@@ -522,11 +522,19 @@ enum class AuthorityKind {
 #   現状は「可視化」として有効。「設計保証」には不十分。
 
 grep -r "publishAndSwap" src/ --include="*.cpp" | grep -v "RuntimeCoordinator" → 0
-grep -rn "publishAndSwap|retireIntent|delete" src/ --include="*.cpp" \
-  | grep -v "RuntimeCoordinator|DeletionWorker|EpochDomain" → 0  // Authority 漏れ検出
+# ★ 注意: retireIntent は \bretireIntent\b（単語境界）が必要。
+#   emitRetireIntent / dequeuePendingRetireIntents / acknowledgeRetireCoordination は
+#   設計上正当な関数名だが、単純部分一致で誤検出するため除外パターンを追加。
+grep -rn "publishAndSwap\|\bretireIntent\b\|\bdelete\b" src/ --include="*.cpp" \
+  | grep -v "RuntimeCoordinator\|DeletionWorker\|EpochDomain\|emitRetireIntent\|dequeuePendingRetireIntents\|acknowledgeRetireCoordination\|enqueueDeferredDelete\|deleteEQStatePtr\|deleteBandNodePtr\|=\s*delete\b" → 0  // Authority 漏れ検出
+# ★ 注意: \bdelete\b は C++ の演算子 delete や deleteXxx 関数名にも一致する。
+#   上記除外パターンで ISR 以外の delete を除去しているが、新規追加時は注意。
 ```
 
 **注意**: SnapshotCoordinator は RT 層の Fade 擔当。**削除対象ではない**。
+ただし SnapshotCoordinator::retireCurrentAndTarget() および enqueueWithRetry() は
+直接 IEpochProvider::enqueueRetire() を呼んでいるため、Retire Initiation Authority を持つ。
+Phase 5B では SnapshotCoordinator の Retire 経路も Coordinator 経由への移行を検討する。
 
 **★ レビュー反映: 監視対象 API は実装変更に応じて更新する**
 上記の grep パターンは暫定。実装のリネームや API 変更に応じて更新が必要。
@@ -537,7 +545,15 @@ grep -rn "publishAndSwap|retireIntent|delete" src/ --include="*.cpp" \
 
 **目的**: Retire 決定権を Coordinator に一元化。
 
-**CIゲート**: `grep -r "retireIntent" src/ | grep -v "RuntimeCoordinator" → 0`
+**注意**: SnapshotCoordinator が `retireCurrentAndTarget()` および `enqueueWithRetry()` を介して
+直接 `IEpochProvider::enqueueRetire()` を呼んでいる。これにより SnapshotCoordinator は
+Retire Initiation Authority を持つ。Phase 5B では以下の移行を検討する:
+- SnapshotCoordinator の Retire 判断（いつ・どの Snapshot を retire するか）を
+  RuntimeCoordinator の Decision 経由にする
+- 実行 (=EpochDomain への enqueue) は SnapshotCoordinator 自身が行う権限を残す
+  （RT 層 Fade 完了直後に同期的に retire する設計上、Coordinator 往復が XRUN リスクになるため）
+
+**CIゲート**: `grep -r "\bretireIntent\b" src/ | grep -v "RuntimeCoordinator\|SnapshotCoordinator" → 0`
 
 ---
 
@@ -759,8 +775,8 @@ using Generation [[deprecated("Phase 13 完了後に LogicalGeneration へ一括
 // - 禁止: `FaultInject`, `FaultInjector`, `InjectFailure`, `InjectFault` 等の別名
 ```
 | ADR-009 | 循環依存ゼロ | 0 | `python3 tools/check_circular_includes.py src/ → 0 サイクル` | 確定 | include-what-you-use |
-| ADR-010 | Coordinator 外部 Authority 関連 atomic 現状記録 → Phase 5A 後新規追加禁止 | 0 | Phase 0: `grep -rn "std::atomic" src/ --include="*.h" \| grep -v "RuntimeCoordinator\|RuntimePublicationCoordinator" \| wc -l → 現状件数（622）記録。Phase 5A 後: 新規追加禁止 | **暫定→確定** | clang-tidy |
-| ADR-011 | Authority 漏れ検出 | 5A | `grep -rn "publishAndSwap\|retireIntent\|delete" src/ --include="*.cpp" \| grep -v "RuntimeCoordinator\|DeletionWorker\|EpochDomain" \| wc -l → 0` | **暫定** | AST ベース Authority チェック |
+| ADR-010 | Coordinator 外部 Authority 関連 atomic 現状記録 → Phase 5A 後新規追加禁止 | 0 | Phase 0: `grep -rn "std::atomic" src/ --include="*.h" \| grep -v "RuntimeCoordinator\|RuntimePublicationCoordinator" \| wc -l → 現状件数（629）記録。Phase 5A 後: 新規追加禁止 | **暫定→確定** | clang-tidy |
+| ADR-011 | Authority 漏れ検出 | 5A | `grep -rn "publishAndSwap\|\bretireIntent\b\|\bdelete\b" src/ --include="*.cpp" \| grep -v "RuntimeCoordinator\|DeletionWorker\|EpochDomain\|emitRetireIntent\|dequeuePendingRetireIntents\|acknowledgeRetireCoordination\|enqueueDeferredDelete\|deleteEQStatePtr\|deleteBandNodePtr\|=\s*delete\b" \| wc -l → 0` | **暫定** | AST ベース Authority チェック |
 
 ---
 
@@ -802,7 +818,7 @@ using Generation [[deprecated("Phase 13 完了後に LogicalGeneration へ一括
 
 ## U-4: Coordinator 外部 atomic の管理方針
 
-**現状**: Coordinator 外部の std::atomic は約 622 箇所（AudioEngine.h 内 235箇所含む）。数値目標は撤廃し、現状記録 + 新規追加禁止に変更。
+**現状**: Coordinator 外部の std::atomic は約 629 箇所（AudioEngine.h 内 235箇所含む）。数値目標は撤廃し、現状記録 + 新規追加禁止に変更。
 
 **決定**: 数値目標ではなく、以下の管理指標に変更する。
 - **Phase 0〜5A**: grep ベースで現状を可視化（段階的削減）
@@ -854,9 +870,9 @@ using Generation [[deprecated("Phase 13 完了後に LogicalGeneration へ一括
 ```
 AudioEngine.h 4429行 / 4000→3000目標 ❌
 class/struct 624定義（AudioEngine.h 59 / 50目標）
-AuthorityClass:: 74件 / publishWorld 38件
+AuthorityClass:: 70件 / publishWorld 30件
 AudioEngine.h atomic 235箇所（retire 24 / crossfade+latency 17 / publication 12 / generation 6 / other 170）
-MemoryOrder 2313件（acquire 1075 / release 754 / acq_rel 253 / relaxed 233）
+MemoryOrder 2358件（acquire 1074 / release 754 / acq_rel 253 / relaxed 277）
 std::mutex 32件（AudioEngine.h 10件）
 AudioEngine.h include 72（53プロジェクト + 19システム）
 Complexity>20 8件（calcEQResponseCurve 47 / loadFromTextFile 47 / emitShutdownTrace 40 / 他5）
@@ -871,7 +887,7 @@ TODO/FIXME 1件（ISRShutdown 関連のみ） ✅
 |---|---|---|
 | RuntimeStore.h | ✅ | Token必須は未実装 |
 | EpochDomain.h | ✅ | 64 readers（**src/core/**） |
-| DeletionQueue.h | ✅ | Vyukov MPMC 4096（**src/core/**） |
+| DeletionQueue.h | ✅ | Custom MPMC 4096（**src/core/**） |
 | CommandBuffer.h | ✅ | SPSC 1024（**src/core/**） |
 | RuntimePublicationCoordinator.h | ✅ | 既存（**src/core/**） |
 | SnapshotCoordinator.h | ✅ | RT層 Fade 擔当（削除しない）（**src/core/**） |
@@ -899,7 +915,7 @@ TODO/FIXME 1件（ISRShutdown 関連のみ） ✅
 | ADR | 条件 | 判定 |
 |---|---|---|
 | ADR-001 | publishAndSwap → Coordinator 限定 | ✅ PASS |
-| ADR-002 | RuntimeWorld 配下 mutable 禁止 | ❌ FAIL（全 4 箇所。RuntimeWorld 配下は 0 件） |
+| ADR-002 | RuntimeWorld 配下 mutable 禁止 | ⚠ 全 4 箇所（RuntimeWorld 配下は 0 件、CIゲートは PASS） |
 | ADR-003 | RuntimeGraph.h <250行 | ✅ PASS |
 | ADR-004 | generation 単独比較禁止 | ⚠ NOT_VERIFIED |
 | ADR-005 | friend class 削除 | ❌ FAIL（13 箇所） |
@@ -1051,7 +1067,7 @@ ISRDebugRuntime に実装済み。追加作業不要。
 Phase 0 で正式検証。→ U-3 参照。
 
 ### E-7: Coordinator 外部 atomic 数
-約 622 箇所（2026-07-25 実測）。数値目標は根拠が薄弱。→ U-4 参照。管理指標に変更。
+約 629 箇所（2026-07-25 実測）。数値目標は根拠が薄弱。→ U-4 参照。管理指標に変更。
 
 ### E-8: Transaction の World 依存（★ 新規・レビュー反映）
 Transaction は `PublishCandidate` を保持する設計に変更。World を直接保持しない。→ U-5 参照。

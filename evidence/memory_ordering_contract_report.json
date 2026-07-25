@@ -1,0 +1,11 @@
+﻿{
+    "schema":  "memory_ordering_contract_report_v1",
+    "generatedAt":  "2026-07-25T20:38:23.8690606+09:00",
+    "commitPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+    "threadingPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Threading.cpp",
+    "coordinatorPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

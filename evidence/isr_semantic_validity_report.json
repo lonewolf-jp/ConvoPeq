@@ -1,0 +1,8 @@
+﻿{
+    "schema":  "isr_semantic_validity_evidence_v1",
+    "generatedAt":  "2026-07-25T20:38:24.1060198+09:00",
+    "violations":  [
+                       "runPublicationPrecheckNonRt body extraction failed for semantic validity verification"
+                   ],
+    "ready":  false
+}

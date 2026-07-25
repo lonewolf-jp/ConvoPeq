@@ -628,9 +628,12 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     //     AVX2 パスの実最低アクセスは index 0 となる（prepareStage の +6 マージン保証）。
     //     globalMinConvIdx >= 0 はスカラー経路の安全条件として十分であり、
     //     +6 マージンは prepareStage 側で historyDownKeep に組み込まれている。
+    // [work87 P1-2] loadStride2 は ptr[-6] までアクセスするため明示的に考慮
+    static constexpr int kLoadStride2Offset = 6;
     const int globalMinConvIdx = keep - stage.convParity - ((stage.convCount - 1) << 1);
     const int globalMaxConvIdx = baseMax - stage.convParity;
-    const bool convTapOk = (globalMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
+    const int avxMinConvIdx = globalMinConvIdx - kLoadStride2Offset;
+    const bool convTapOk = (avxMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
 
     if (!centerTapOk || !convTapOk || stage.convCount <= 0)
     {

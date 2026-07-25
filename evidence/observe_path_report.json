@@ -1,0 +1,13 @@
+﻿{
+    "schema":  "observe_path_report_v1",
+    "generatedAt":  "2026-07-25T20:38:23.9095159+09:00",
+    "targets":  [
+                    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.AudioBlock.cpp",
+                    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.BlockDouble.cpp"
+                ],
+    "violations":  [
+                       "ObservePathVerifier: runtimeWorld read-view bridge missing in C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.AudioBlock.cpp",
+                       "ObservePathVerifier: runtimeWorld read-view bridge missing in C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.BlockDouble.cpp"
+                   ],
+    "ready":  false
+}

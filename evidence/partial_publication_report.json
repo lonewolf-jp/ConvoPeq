@@ -1,0 +1,16 @@
+﻿{
+    "schema":  "partial_publication_report_v1",
+    "generatedAt":  "2026-07-25T20:38:23.8893734+09:00",
+    "commitSourcePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+    "schemaPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
+    "checks":  {
+                   "partialVerifierEntry":  true,
+                   "completenessHelperExists":  true,
+                   "completenessRejectWired":  false,
+                   "rejectedStatePath":  true
+               },
+    "violations":  [
+                       "runPublicationPrecheckNonRt must reject when validateSemanticCompleteness(world) fails"
+                   ],
+    "ready":  false
+}

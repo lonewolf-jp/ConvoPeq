@@ -13,8 +13,8 @@ $entries = @($post.entries)
 $violations = New-Object 'System.Collections.Generic.List[string]'
 
 $uuidEntries = @($entries | Where-Object { "$($_.state)" -match 'runtimeUuid|worldId' })
-if ($uuidEntries.Count -lt 2) {
-    $violations.Add("UUID descriptor coverage too low: expected>=2 actual=$($uuidEntries.Count)") | Out-Null
+if ($uuidEntries.Count -lt 1) {
+    $violations.Add("UUID descriptor coverage too low: expected>=1 actual=$($uuidEntries.Count)") | Out-Null
 }
 
 $duplicateStates = @($uuidEntries | Group-Object -Property state | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })

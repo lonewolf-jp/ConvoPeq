@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "runtime_coordinator_state_machine_report_v1",
-    "generatedAt":  "2026-07-06T17:42:00.7524013+09:00",
+    "generatedAt":  "2026-07-25T20:38:21.2484908+09:00",
     "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.h",
     "sourcePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
     "requiredStates":  [

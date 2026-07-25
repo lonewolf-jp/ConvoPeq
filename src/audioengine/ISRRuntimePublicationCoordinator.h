@@ -208,7 +208,7 @@ private:
     std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
-    std::atomic<bool> swapPending_;
+    std::atomic<bool> swapPending_{false}; // [work87 P2-5]
     std::atomic<CoordinatorState> state_;
     std::atomic<std::uint64_t> retireAuthorityCount_;
     std::atomic<std::uint64_t> overflowMaxAgeUs_{500'000};  // ★ Phase5: 500ms デフォルト

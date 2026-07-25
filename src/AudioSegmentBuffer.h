@@ -67,9 +67,10 @@ public:
         if (outLeft == nullptr || outRight == nullptr || requestedSamples <= 0)
             return 0;
 
-        // acquire: pushBlock の release と HB し、最新の totalSamples/writePosition を取得。
-        const int currentTotal = convo::consumeAtomic(totalSamples, std::memory_order_acquire);
+        // acquire: pushBlock の release と HB し、最新の writePosition/totalSamples を取得。
+        // [work87 P1-0] Writerのrelease順序(writePosition→totalSamples)と一致させる
         const int currentWritePos = convo::consumeAtomic(writePosition, std::memory_order_acquire);
+        const int currentTotal = convo::consumeAtomic(totalSamples, std::memory_order_acquire);
 
         const int availableSamples = std::min(requestedSamples,
             currentTotal >= kCapacity ? kCapacity : currentTotal);

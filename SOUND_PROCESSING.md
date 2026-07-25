@@ -116,7 +116,7 @@ Input conditioning is the first DSP stage after buffer alignment. It prepares th
 
 ### 3.1 Overview
 
-Oversampling increases the internal sample rate (2×, 4×, or 8×) to reduce aliasing in subsequent DSP stages (particularly the EQ and convolution). It is implemented in `CustomInputOversampler`.
+Oversampling increases the internal sample rate (2×, 4×, or 8×) to reduce aliasing in subsequent DSP stages (particularly the EQ and convolution). It is implemented in `CustomInputOversampler`. The maximum oversampling factor is determined by `OversamplingPolicy` (`src/audioengine/OversamplingPolicy.h`, v14.27), which resolves the allowed factor per sample rate.
 
 ### 3.2 Structure & Initialization
 
@@ -195,20 +195,20 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 **Source**: `src/eqprocessor/` (17 files, split TU implementation)
 
 | File | Size | Role |
-|------|------|------|
-| `EQProcessor.h` | 32.3 KB | Class definition, types, RCU handle |
-| `EQProcessor.Core.cpp` | 42.4 KB | Core processing logic, M/S, AGC |
-| `EQProcessor.Coefficients.cpp` | 19.3 KB | TPT SVF & biquad coefficient calculation |
-| `EQProcessor.Parameters.cpp` | 12.7 KB | Parameter getters/setters |
-| `EQProcessor.Processing.cpp` | 57.2 KB | **Largest TU** — AVX2 FMA TPT SVF processing |
+|---|---|---|
+| `EQProcessor.h` | 35.2 KB | Class definition, types, RCU handle |
+| `EQProcessor.Core.cpp` | 42.5 KB | Core processing logic, M/S, AGC |
+| `EQProcessor.Coefficients.cpp` | 20.5 KB | TPT SVF & biquad coefficient calculation |
+| `EQProcessor.Parameters.cpp` | 12.4 KB | Parameter getters/setters |
+| `EQProcessor.Processing.cpp` | **57.4 KB** — Largest TU | AVX2 FMA TPT SVF processing |
 | `EQProcessor.ProcessingCache.cpp` | 2.7 KB | EQCoeffCache management |
-| `PeakEstimator.{h,cpp}` | — | Peak detection for EQ analysis |
-| `UpperBoundEstimator.{h,cpp}` | — | Upper bound estimation for EQ bands |
-| `EQResponseSampler.{h,cpp}` | — | Frequency response sampling (magnitude/phase) |
-| `AnalysisMerge.h` | — | Merges multiple analysis results |
-| `BandHelper.{h,cpp}` | — | Band utility functions and helpers |
-| `EQAnalysisMath.h` | — | Mathematical formulas for EQ analysis |
-| `EQAnalysisTypes.h` | — | Analysis type definitions |
+| `PeakEstimator.{h,cpp}` | 5.6 KB | Peak detection for EQ analysis |
+| `UpperBoundEstimator.{h,cpp}` | 1.4 KB | Upper bound estimation for EQ bands |
+| `EQResponseSampler.{h,cpp}` | 9.8 KB | Frequency response sampling (magnitude/phase) |
+| `AnalysisMerge.h` | 2.8 KB | Merges multiple analysis results |
+| `BandHelper.{h,cpp}` | 2.5 KB | Band utility functions and helpers |
+| `EQAnalysisMath.h` | 4.1 KB | Mathematical formulas for EQ analysis |
+| `EQAnalysisTypes.h` | 4.7 KB | Analysis type definitions |
 
 **Band configuration**:
 - `NUM_BANDS = 20` (bands 0–19 with default frequencies from 25 Hz to 19.5 kHz)
@@ -270,20 +270,20 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 
 **Source**: `src/convolver/` (10 files, split TU implementation)
 
-| File | Role |
-|------|------|
-| `ConvolverProcessor.Internal.h` | Helpers: `unwrapPhaseRadians`, `nextPow2`, `resampleIR`, `convertToMinimumPhase` |
-| `ConvolverProcessor.Lifecycle.cpp` | Lifecycle, RCU integration, `ChangeBroadcaster` |
-| `ConvolverProcessor.Rebuild.cpp` | Rebuild decision, debouncing (`REBUILD_DEBOUNCE_DEFAULT_MS`) |
-| `ConvolverProcessor.LoaderThread.cpp` + `LoaderThreadInline.h` | Background IR loading, progress tracking |
-| `ConvolverProcessor.LoadPipeline.cpp` | Pipeline processing, IR validation |
-| `ConvolverProcessor.MixedPhase.cpp` | Phase modes, mixed-phase transition |
-| `ConvolverProcessor.ResampleAndFallback.cpp` | r8brain resampling, hard fallback |
-| `ConvolverProcessor.Runtime.cpp` | **Audio thread** — partitioned FFT convolution via MKL NUC |
-| `ConvolverProcessor.StateAndUI.cpp` | Preset management, UI state |
-| `ConvolverProcessor.h` (at `src/` root, 1180 lines) | Public API, `BuildSnapshot`, `PhaseMode`, `ResamplingPhaseMode` |
+| File | Size | Role |
+|---|---|---|
+| `ConvolverProcessor.Internal.h` | 5.4 KB | Helpers: `unwrapPhaseRadians`, `nextPow2`, `resampleIR`, `convertToMinimumPhase` |
+| `ConvolverProcessor.Lifecycle.cpp` | 22.7 KB | Lifecycle, RCU integration, `ChangeBroadcaster` |
+| `ConvolverProcessor.Rebuild.cpp` | 12.5 KB | Rebuild decision, debouncing (`REBUILD_DEBOUNCE_DEFAULT_MS`) |
+| `ConvolverProcessor.LoaderThread.cpp` + `LoaderThreadInline.h` (3.5 KB) | 32.6 KB | Background IR loading, progress tracking |
+| `ConvolverProcessor.LoadPipeline.cpp` | 36.6 KB | Pipeline processing, IR validation |
+| `ConvolverProcessor.MixedPhase.cpp` | 38.0 KB | Phase modes, mixed-phase transition |
+| `ConvolverProcessor.ResampleAndFallback.cpp` | 17.6 KB | r8brain resampling, hard fallback |
+| `ConvolverProcessor.Runtime.cpp` | 47.9 KB | **Audio thread** — partitioned FFT convolution via MKL NUC |
+| `ConvolverProcessor.StateAndUI.cpp` | 46.5 KB | Preset management, UI state |
+| `ConvolverProcessor.h` (at `src/` root, 1127 lines) | 63.5 KB | Public API, `BuildSnapshot`, `PhaseMode`, `ResamplingPhaseMode` |
 
-The **legacy monolithic** `MKLNonUniformConvolver.cpp` (~65 KB) is retained under `#ifdef` for backward compatibility.
+The **legacy monolithic** `MKLNonUniformConvolver.cpp` (~80 KB, 1597 lines) is retained under `#ifdef` for backward compatibility.
 
 **Algorithm** — Intel MKL Non-Uniform Partitioned Convolution (NUC):
 - Partitions the impulse response into non-uniform blocks (shorter blocks near the start for low-latency, longer blocks toward the tail for efficiency).
@@ -479,7 +479,7 @@ Despite the GUI label "9th-order", the actual order is **NS_ORDER = 12** (12-tap
 
 **Source**: `src/FixedNoiseShaper.h`
 
-- **4th-order error-feedback** noise shaper.
+- **4th-order error-feedback** noise shaper (ORDER = 4).
 - Coefficients: psychoacoustically tuned, sum to 1.0 for stability (e.g., `{0.46, 0.28, 0.17, 0.09}`).
 - TPDF dither added before quantization.
 - All state 64-byte aligned, pre-allocated.
@@ -498,7 +498,7 @@ Despite the GUI label "9th-order", the actual order is **NS_ORDER = 12** (12-tap
 
 ### 6.4 AdaptiveNoiseShaper — NoiseShaperLearner (GUI: "9th-order adaptive")
 
-**Source**: `src/NoiseShaperLearner.h/cpp` (68.4 KB — largest source file in the project)
+**Source**: `src/NoiseShaperLearner.h/cpp` (80.9 KB combined)
 
 **Structure** — Lattice (ladder) filter:
 - Order = 9 (`LatticeNoiseShaper::kOrder`).
@@ -573,7 +573,7 @@ If oversampling was enabled, `CustomInputOversampler::processDown()` is called a
 
 ### 8.3 Spectrum Analyzer — UI Component
 
-**Source**: `src/SpectrumAnalyzerComponent.h/cpp` (52.3 KB)
+**Source**: `src/SpectrumAnalyzerComponent.h/cpp` (60.2 KB total)
 
 - FFT-based spectrum display.
 - EQ response curve overlay.
@@ -589,7 +589,7 @@ If oversampling was enabled, `CustomInputOversampler::processDown()` is called a
 ConvoPeq enforces these rules on every audio callback without exception:
 
 | Prohibition | Rationale |
-|-------------|-----------|
+|---|---|
 | No `malloc`, `new`, `std::vector::resize`, `unique_ptr` | Memory allocation may trigger OS lock or page fault |
 | No `std::mutex`, `std::condition_variable`, or any blocking lock | May block indefinitely, causing audio dropout |
 | No `std::log`, `std::exp`, `std::pow`, `std::sin`, `std::cos` (libm calls) | Variable-time execution; may trigger denormal flush |
@@ -620,16 +620,16 @@ Key atomics:
 
 ### 9.3 RCU (Read-Copy-Update) Pattern
 
-- **EpochDomain** (`src/core/EpochDomain.h`, 26 KB): manages named reader slots and a global epoch counter.
+- **EpochDomain** (`src/core/EpochDomain.h`, 25.4 KB): manages named reader slots and a global epoch counter.
 - **RCUReader** (`src/core/RCUReader.h`): RAII reader — enters epoch on construction, exits on destruction.
 - **Publication flow**: message thread creates new object → `publishCurrentState()` → audio thread `loadCurrentState(acquire)` → old object retired via `enqueueRetire()`.
-- **Retire pipeline**: `DSPLifetimeManager → ISRRetireRouter → EpochDomain →DeletionQueue`.
+- **Retire pipeline**: `DSPLifetimeManager → ISRRetireRouter → EpochDomain → DeletionQueue`.
 - Old objects are not deleted immediately — they are deferred until all in-flight readers exit the epoch.
 
 ### 9.4 Lock-Free Inter-Thread Communication
 
 | Communication | Mechanism |
-|---------------|-----------|
+|---|---|
 | UI parameter updates | `std::atomic` publish/consume |
 | Analyzer data (audio → UI) | `LockFreeRingBuffer<SPSC>` |
 | Loudness/TruePeak data (audio → UI) | `LockFreeRingBuffer<SPSC>` |
@@ -651,7 +651,7 @@ Key atomics:
 ### 9.6 Asynchronous Garbage Collection
 
 | Mechanism | Path |
-|-----------|------|
+|---|---|
 | `DeferredDeletionQueue` | Thread-safe queue of delete requests |
 | `RefCountedDeferred` | Reference-counted deferred delete |
 | `DeferredFreeThread` | Dedicated background thread for actual deallocation |
@@ -665,7 +665,7 @@ Key atomics:
 The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DSP lifecycle, publication, crossfade, and health monitoring:
 
 | Component | File | Role |
-|-----------|------|------|
+|---|---|---|
 | `ISRLifecycle` | `ISRLifecycle.h/cpp` | Lifecycle state machine |
 | `ISRRTExecution` | `ISRRTExecution.h/cpp` | Real-time execution contract & firewall |
 | `ISRRuntimePublicationCoordinator` | `ISRRuntimePublicationCoordinator.h/cpp` | Publication choreography |
@@ -689,7 +689,6 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `RuntimePublicationOrchestrator` | `RuntimePublicationOrchestrator.h/cpp` | Publish orchestration |
 | `RuntimePublicationValidator` | `RuntimePublicationValidator.h/cpp` | Validation pipeline |
 | `RuntimePublicationState` | `RuntimePublicationState.h` | Publication state owner + ledger |
-| `RuntimePublisher` | `RuntimePublisher.h/cpp` | Publish executor |
 | `PublicationAdmission` | `PublicationAdmission.h/cpp` | Admission evaluation |
 | `PublicationExecutor` | `PublicationExecutor.h/cpp` | Publication commit/dispatch |
 | `RuntimeBuilder` | `RuntimeBuilder.h/cpp` | Only entity that constructs RuntimeState |
@@ -704,6 +703,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `WorldLifecycleAudit` | `WorldLifecycleAudit.h/cpp` | World lifecycle audit trail |
 | `TelemetryRecorder` | `TelemetryRecorder.h/cpp` | Telemetry recording |
 | `AutoGainPlanner` | `AutoGainPlanner.h/cpp` | Auto-gain staging |
+| `OversamplingPolicy` | `OversamplingPolicy.h` | Oversampling factor resolution per sample rate |
 | `SnapshotCoordinator` | `SnapshotCoordinator.h/cpp` | Snapshot management |
 | `SnapshotFactory` | `SnapshotFactory.h/cpp` | Snapshot creation |
 | `CommandBuffer` | `CommandBuffer.h` | Debounced snapshot worker |
@@ -734,6 +734,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
         ▼
 [Oversampling — CustomInputOversampler::processUp]
         (if enabled: 2×/4×/8× FIR, AVX2/FMA, Kaiser windowed sinc)
+        (max factor resolved by OversamplingPolicy per sample rate)
         ▼
 [Main DSP Chain]
         │
@@ -782,7 +783,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
         │
         ├── FixedNoiseShaper: 4th-order error-feedback, psychoacoustic coeffs
         │
-        ├── Fixed15TapNoiseShaper: 15th-order error-feedback
+        ├── Fixed15TapNoiseShaper: 16th-order error-feedback (ORDER=16)
         │
         └── AdaptiveNoiseShaper (NoiseShaperLearner)
               LatticeNoiseShaper (9th-order, kOrder=9)
@@ -814,7 +815,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 ## 11. Key DSP Numeric Constants
 
 | Constant | Value | Location |
-|----------|-------|----------|
+|---|---|---|
 | `NUM_BANDS` | 20 | `EQProcessor.h` |
 | `kFilterChannels` | 4 (L/R/Mid/Side) | `EQProcessor.h` |
 | `NS_ORDER` | 12 | `PsychoacousticDither.h` |
@@ -833,9 +834,9 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `TruePeakDetector::kDefaultTaps` | 63 | `TruePeakDetector.h` |
 | `MklFftEvaluator::kFftLength` | 4096 | `MklFftEvaluator.h` |
 | `MklFftEvaluator::kSpectrumBins` | 2049 | `MklFftEvaluator.h` |
-| `AudioSegment::kLength` | 4096 | `NoiseShaperLearner.h` |
-| `RNG_RING_SIZE` | 65,536 | `PsychoacousticDither.h` |
-| `kDenormThresholdAudioState` | `~1e-300` | `DspNumericPolicy.h` |
+| `AudioSegment::kLength` | 4096 (= `MklFftEvaluator::kFftLength`) | `NoiseShaperLearner.h` |
+| `RNG_RING_SIZE` | 65,536 (1u << 16) | `PsychoacousticDither.h` |
+| `kDenormThresholdAudioState` | `1.0e-20` | `DspNumericPolicy.h` |
 
 ---
 
@@ -844,7 +845,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 ### Core DSP Source Files
 
 | File | Description |
-|------|-------------|
+|---|---|
 | `src/audioengine/AudioEngineProcessor.{h,cpp}` | JUCE AudioProcessor entry, float/double dispatch |
 | `src/audioengine/AudioEngine.Processing.BlockDouble.cpp` | Audio thread entry, lifecycle/firewall tokens |
 | `src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp` | DSPCore, softClipBlockAVX2, scaleBlockFallback, fastTanh |
@@ -856,11 +857,13 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `src/audioengine/AudioEngine.Processing.Snapshot.cpp` | Snapshot creation |
 | `src/audioengine/AudioEngine.Processing.DSPCoreLifecycle.cpp` | DSP core lifecycle |
 | `src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp` | I/O helpers |
+| `src/audioengine/AudioEngine.Processing.DSPCoreFloat.cpp` | DSP core (float path) |
+| `src/audioengine/OversamplingPolicy.h` | Oversampling factor resolution per sample rate |
 | `src/eqprocessor/EQProcessor.h` | EQ class definition, 20-band, TPT SVF, RCU |
 | `src/eqprocessor/EQProcessor.Core.cpp` | Core EQ logic, M/S, AGC |
 | `src/eqprocessor/EQProcessor.Coefficients.cpp` | TPT SVF + RBJ biquad coefficient computation |
 | `src/eqprocessor/EQProcessor.Parameters.cpp` | Parameter getters/setters |
-| `src/eqprocessor/EQProcessor.Processing.cpp` | TPT SVF processing, AVX2 FMA (largest TU) |
+| `src/eqprocessor/EQProcessor.Processing.cpp` | TPT SVF processing, AVX2 FMA (largest EQ TU) |
 | `src/eqprocessor/EQProcessor.ProcessingCache.cpp` | EQCoeffCache management |
 | `src/eqprocessor/PeakEstimator.{h,cpp}` | Peak detection for EQ analysis |
 | `src/eqprocessor/UpperBoundEstimator.{h,cpp}` | Upper bound estimation |
@@ -885,7 +888,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `src/FixedNoiseShaper.h` | 4th-order fixed noise shaper |
 | `src/Fixed15TapNoiseShaper.h` | 16th-order (ORDER=16, name legacy "15Tap") fixed noise shaper |
 | `src/LatticeNoiseShaper.h` | Lattice noise shaper structure (9th-order) |
-| `src/NoiseShaperLearner.{h,cpp}` | CMA-ES adaptive learning (largest TU) |
+| `src/NoiseShaperLearner.{h,cpp}` | CMA-ES adaptive learning (TU combines ~80.9 KB) |
 | `src/NoiseShaperLearnerTypes.h` | Learning mode, status, progress types |
 | `src/LoudnessMeter.{h,cpp}` | ITU-R BS.1770-4/5 K-weighting |
 | `src/TruePeakDetector.h` | 4× OS true peak, 63-tap FIR |
@@ -894,10 +897,10 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `src/ConvolverControlPanel.{h,cpp}` | Convolver control panel |
 | `src/ConvolverSettingsComponent.{h,cpp}` | Advanced convolver settings |
 | `src/MixedPhaseOptimizationComponent.{h,cpp}` | Mixed-phase progress UI |
-| `src/MKLNonUniformConvolver.{h,cpp}` | Legacy MKL NUC (backward compat) |
+| `src/MKLNonUniformConvolver.{h,cpp}` | Legacy MKL NUC (backward compat, ~80 KB) |
 | `src/AlignedAllocation.h` | 64-byte aligned `malloc`/`free` |
 | `src/LockFreeRingBuffer.h` | SPSC lock-free ring buffer |
-| `src/DspNumericPolicy.h` | Numeric constants, denorm thresholds |
+| `src/DspNumericPolicy.h` | Numeric constants, denorm thresholds (kDenormThresholdAudioState=1.0e-20) |
 | `src/audioengine/DSPLifetimeManager.h` | DSP lifecycle orchestration |
 | `src/audioengine/CrossfadeAuthority.{h,cpp}` | Crossfade governance (Authority) |
 | `src/audioengine/CrossfadeRuntime.h` | Crossfade runtime state |
@@ -932,6 +935,7 @@ The ISR (Interrupt Service Routine-inspired) runtime governance layer manages DS
 | `src/audioengine/WorldLifecycleAudit.{h,cpp}` | World lifecycle audit trail |
 | `src/audioengine/TelemetryRecorder.{h,cpp}` | Telemetry recording |
 | `src/audioengine/AutoGainPlanner.{h,cpp}` | Auto-gain staging |
+| `src/audioengine/OversamplingPolicy.h` | Max oversampling factor per sample rate |
 | `src/audioengine/DSPTransition.h` | DSP transition handling |
 | `src/audioengine/AtomicAccess.h` | Atomic primitives (`publishAtomic`, etc.) |
 | `src/core/EpochDomain.h` | RCU epoch domain (64 reader slots) |

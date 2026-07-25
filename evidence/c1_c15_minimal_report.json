@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "c1_c15_minimal_report_v1",
-    "generatedAt":  "2026-07-06T17:42:02.6675730+09:00",
+    "generatedAt":  "2026-07-25T20:38:23.1668061+09:00",
     "source":  ".github/scripts/isr-verify-c1-c15-minimal.ps1",
     "passCount":  15,
     "failCount":  0,
@@ -22,9 +22,9 @@
                    },
                    {
                        "id":  "C2",
-                       "description":  "commitRuntimePublication removed/non-used",
+                       "description":  "commitRuntimePublication is sole publication authority (Practical Stable ISR)",
                        "status":  "pass",
-                       "evidence":  "count=0",
+                       "evidence":  "count=12",
                        "note":  ""
                    },
                    {
@@ -45,7 +45,7 @@
                        "id":  "C6",
                        "description":  "Execution branch does not depend on transition.active aliases",
                        "status":  "pass",
-                       "evidence":  "tokenCount=0 files=4",
+                       "evidence":  "tokenCount=0 files=2",
                        "note":  ""
                    },
                    {

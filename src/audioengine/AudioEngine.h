@@ -159,7 +159,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         return convo::aligned_make_unique<RuntimeState>(token);
     }
 
-    // AuthorityClass::Diagnostic (trace/correlation only, must not drive runtime branching)
+    // AuthorityClass::Authoritative (ISR: worldId identifies specific RuntimeWorld builds, must be Authoritative)
     std::uint64_t worldId = 0;
     // AuthorityClass::Derived
     convo::EngineRuntime engine {};
@@ -250,7 +250,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     }};
 
     static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 21> kRuntimeAuthorityInventory {{
-        {"worldId", convo::isr::RuntimeAuthorityClass::Diagnostic},
+        {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative}, // ISR: worldId identifies specific RuntimeWorld builds
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
         {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},

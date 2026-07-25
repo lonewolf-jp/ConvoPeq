@@ -25,7 +25,7 @@ static bool hasAVX2Support() noexcept
 #if defined(_WIN32)
     // Method 1: IsProcessorFeaturePresent (kernel32.dll, Windows 8.1+)
 #ifndef PF_AVX2_INSTRUCTIONS_AVAILABLE
-#define PF_AVX2_INSTRUCTIONS_AVAILABLE 10
+#define PF_AVX2_INSTRUCTIONS_AVAILABLE 40  // [work87 P1-1] 正値 (10=SSE2 は誤り)
 #endif
     {
         const auto kernel32 = ::GetModuleHandleW(L"kernel32.dll");

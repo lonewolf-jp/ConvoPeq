@@ -1660,7 +1660,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
     if (!convo::consumeAtomic(m_ready, std::memory_order_acquire) || numSamples <= 0)
     {
         if (output && numSamples > 0)
-            memset(output, 0, numSamples * sizeof(double));
+            memset(output, 0, static_cast<size_t>(numSamples) * sizeof(double)); // [work87 P2-1] size_t
         return 0;
     }
 

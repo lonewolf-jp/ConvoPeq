@@ -1162,7 +1162,7 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
     if (channel < 0 || channel >= 2 || !nucConvolvers[channel] || numSamples <= 0)
     {
         if (numSamples > 0)
-            std::memset(out, 0, numSamples * sizeof(double));
+            std::memset(out, 0, static_cast<size_t>(numSamples) * sizeof(double)); // [work87 P2-1] size_t
         return;
     }
 

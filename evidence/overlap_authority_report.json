@@ -1,0 +1,11 @@
+﻿{
+    "schema":  "overlap_authority_report_v1",
+    "generatedAt":  "2026-07-25T20:38:24.0269283+09:00",
+    "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+    "audioBlockPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.AudioBlock.cpp",
+    "blockDoublePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.BlockDouble.cpp",
+    "violations":  [
+
+                   ],
+    "ready":  true
+}

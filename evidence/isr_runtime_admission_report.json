@@ -1,0 +1,9 @@
+﻿{
+    "schema":  "isr_runtime_admission_evidence_v1",
+    "generatedAt":  "2026-07-25T20:38:24.1309912+09:00",
+    "violations":  [
+                       "Stage-3 admission: acceptsRuntimePublication() gate absent from precheck",
+                       "Could not detect all four admission stages in precheck body"
+                   ],
+    "ready":  false
+}

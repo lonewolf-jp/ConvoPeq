@@ -177,7 +177,7 @@ private:
 
     SafeStateSwapper&     swapperRef;
     ThreadAffinityManager* affinityManager;
-    std::atomic<bool>     running;
+    std::atomic<bool>     running{false}; // [work87 P2-5]
     std::thread           thread;
 };
 
