@@ -1991,30 +1991,26 @@ public:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    // active runtime DSP slot: 現行 DSP の非所有スロット。
+    // active runtime DSP slot: 現行 DSP のアトミックスロット。
     //            実際の解放は retireDSPHandleForRuntime() → deferred delete / retire queue で行う。
-    convo::NonOwningPtr<DSPCore> activeRuntimeDSPSlot { nullptr };
-    // fading runtime DSP slot: フェード中 DSP の非所有スロット。
+    std::atomic<DSPCore*> activeRuntimeDSPSlot{nullptr};
+    // fading runtime DSP slot: フェード中 DSP のアトミックスロット。
     //               寿命は publish/retire の順序に従い、active runtime slot と独立して非所有で管理する。
-    convo::NonOwningPtr<DSPCore> fadingRuntimeDSPSlot { nullptr };
+    std::atomic<DSPCore*> fadingRuntimeDSPSlot{nullptr};
 
     inline DSPCore* exchangeFadingRuntimeDSP(DSPCore* value) noexcept
     {
-
-
-        DSPCore* previous = fadingRuntimeDSPSlot.get();
-        fadingRuntimeDSPSlot.operator=(value);
-        return previous;
+        return convo::exchangeAtomic(fadingRuntimeDSPSlot, value, std::memory_order_acq_rel);
     }
 
     [[nodiscard]] inline DSPCore* getActiveRuntimeDSP() const noexcept
     {
-        return activeRuntimeDSPSlot.get();
+        return convo::consumeAtomic(activeRuntimeDSPSlot, std::memory_order_acquire);
     }
 
     inline void setActiveRuntimeDSP(DSPCore* value) noexcept
     {
-        activeRuntimeDSPSlot = value;
+        convo::publishAtomic(activeRuntimeDSPSlot, value, std::memory_order_release);
     }
 
     [[nodiscard]] inline bool hasActiveRuntimeDSP() const noexcept
@@ -2024,9 +2020,7 @@ public:
 
     inline DSPCore* releaseActiveRuntimeDSP() noexcept
     {
-        DSPCore* activeRaw = getActiveRuntimeDSP();
-        setActiveRuntimeDSP(nullptr);
-        return activeRaw;
+        return convo::exchangeAtomic(activeRuntimeDSPSlot, nullptr, std::memory_order_acq_rel);
     }
 
     struct RuntimeReadHandle

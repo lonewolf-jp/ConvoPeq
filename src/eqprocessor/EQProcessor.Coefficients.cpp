@@ -72,7 +72,8 @@ void EQProcessor::updateBandNode(int band)
     // L5 fix: retire old node BEFORE advanceEpoch so epoch N is captured (not N+1).
     if (oldNode)
     {
-        (void)retireBandNodeDeferred(oldNode);
+        if (!retireBandNodeDeferred(oldNode))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }

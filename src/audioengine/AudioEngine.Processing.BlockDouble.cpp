@@ -569,7 +569,11 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             XRunEvent ev;
             ev.timestampTicks = convo::getCurrentTimeUs();
             ev.generation = static_cast<int>(currentGen);
-            xRunBuffer.push(ev);
+            if (!xRunBuffer.push(ev))
+            {
+                convo::fetchAddAtomic(rtAuxMutable_.xRunDropCount,
+                    uint64_t{1}, std::memory_order_relaxed);
+            }
         }
     }
 

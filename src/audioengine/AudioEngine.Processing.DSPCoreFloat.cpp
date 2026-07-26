@@ -119,6 +119,10 @@ inline void applyGainRamp(float* __restrict data, int numSamples,
     float g = startGain + gainStep * static_cast<float>(i);
     for (; i < numSamples; ++i, g += gainStep)
         data[i] *= g;
+
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
 }
 
 inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
@@ -133,6 +137,10 @@ inline void scaleBlockFallback(double* data, int numSamples, double gain) noexce
     }
     for (; i < numSamples; ++i)
         data[i] *= gain;
+
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
 }
 
 inline double fastTanh(double x) noexcept

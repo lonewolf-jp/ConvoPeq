@@ -133,8 +133,9 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         if (overflowStart != 0) {
             const auto now = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
-            const uint64_t overflowDurationMs = (now - overflowStart) / 1000;
-            chronicByDuration = (overflowDurationMs > 5000);  // >5秒
+            // ナノ秒→ミリ秒変換: /1000 はマイクロ秒になるため /1'000'000 を使用
+            const uint64_t overflowDurationMs = (now - overflowStart) / 1'000'000;
+            chronicByDuration = (overflowDurationMs > 5000);  // 5000ms = 5秒
         }
 
         // overflowWindowCounter による頻度追跡

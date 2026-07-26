@@ -265,8 +265,14 @@ public:
     [[nodiscard]] bool isBypassed() { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
     // acquire: LoaderThread/executeCommit の publishNewConvolverState release と HB し、有効な state を取得。
     [[nodiscard]] const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); } // acquire: publishNewConvolverState の release と HB
-    void enterStateReader(int /*readerIndex*/) const noexcept {}
-    void exitStateReader(int /*readerIndex*/) const noexcept {}
+    void enterStateReader(int readerIndex) const noexcept
+    {
+        rcuSwapper.enterReader(readerIndex);
+    }
+    void exitStateReader(int readerIndex) const noexcept
+    {
+        rcuSwapper.exitReader(readerIndex);
+    }
 
     void enterGlobalReader(int /*readerIndex*/) const noexcept;
     void exitGlobalReader(int /*readerIndex*/) const noexcept;
@@ -818,8 +824,8 @@ private:
                     auto l = convo::makeAlignedArray<double>(static_cast<size_t>(irDataLength));
                     auto r = convo::makeAlignedArray<double>(static_cast<size_t>(irDataLength));
 
-                    std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
-                    std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
+                    std::memcpy(l.get(), irData[0], static_cast<size_t>(irDataLength) * sizeof(double));
+                    std::memcpy(r.get(), irData[1], static_cast<size_t>(irDataLength) * sizeof(double));
 
                     if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedKnownBlockSize, callQuantumSamples, storedScale, storedDirectHeadEnabled, hasStoredFilterSpec ? &storedFilterSpec : nullptr))
                         return nullptr;

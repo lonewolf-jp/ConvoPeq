@@ -94,8 +94,8 @@ public:
     // 古い状態を retired キューに積み、新しい状態を atomic にセットする。
     //
     // 2-step bump の意味:
-    //   epoch1 = bump 前のエポック（旧データが有効だった時代を表す）
-    //   retired エントリには epoch1 を記録し、reclaim 条件との整合性を確保する。
+    //   epoch1 = bump 前のエポック, epoch2 = bump#2 後の値（swap 後の保護境界）
+    //   retired エントリには epoch2 を記録し、bump ウィンドウ中の reader を保護する。
     //   newEpoch は単調増加の継続保証のために進める。
     //
     // @param newState  新しい状態（所有権を移譲。nullptr も可: 状態クリア用）
@@ -104,7 +104,8 @@ public:
     {
         // 2-step bump（単調性確保 + 観測ズレの吸収）
         const uint64_t epoch1   = convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: acquire で直前の swap の acq_rel と HB; release で getSafeEpoch/enterReader の acquire と HB
-        /* newEpoch = */ convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: 2-step bump 後半。単調性確保 + getSafeEpoch 観測側の acquire と HB
+        const uint64_t epoch2 = convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: 2-step bump 後半。単調性確保 + getSafeEpoch 観測側の acquire と HB
+        (void)epoch1; // epoch1 is kept for documentation/symmetry; epoch2 is used for retire boundary
 
         ConvolverState* oldState = convo::exchangeAtomic(activeState, newState, std::memory_order_acq_rel); // acq_rel: acquire で直前の swap の activeState release と HB; release で getState の acquire と HB
         if (oldState == nullptr) return;
@@ -117,15 +118,16 @@ public:
         {
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
-            fallbackQueue.push({oldState, epoch1});
+            fallbackQueue.push({oldState, epoch2});
             // Coordinator fallback backlog notification is handled externally
             // via SafeStateSwapper::getPendingRetiredCount() polling
             return;
         }
 
         convo::publishAtomic(retiredBuffer[t].state, oldState, std::memory_order_release);  // release: tryReclaim の state acquire と HB し旧状態ポインタを公知
-        // epoch1 を記録: 「このデータが有効だった時代の直前エポック」
-        convo::publishAtomic(retiredBuffer[t].epoch, epoch1, std::memory_order_release);    // release: tryReclaim の epoch acquire と HB
+        // retired エントリには swap 後の保護境界を記録する。
+        // bump ウィンドウ中に oldState を観測した reader を保護するため epoch2 を使う。
+        convo::publishAtomic(retiredBuffer[t].epoch, epoch2, std::memory_order_release);    // release: tryReclaim の epoch acquire と HB
         convo::publishAtomic(tail, next, std::memory_order_release);                        // release: tryReclaim の tail acquire と HB しエントリ追加完了を公知
     }
 
@@ -137,7 +139,7 @@ public:
     //
     // @param readerIndex  0 ～ kMaxReaders-1 の固定インデックス
     // -----------------------------------------------------------------------
-    void enterReader(int readerIndex) noexcept
+    void enterReader(int readerIndex) const noexcept
     {
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
@@ -159,7 +161,7 @@ public:
     //
     // @param readerIndex  enterReader() に渡したのと同じインデックス
     // -----------------------------------------------------------------------
-    void exitReader(int readerIndex) noexcept
+    void exitReader(int readerIndex) const noexcept
     {
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
@@ -365,7 +367,9 @@ private:
     std::atomic<uint64_t> globalEpoch {0};
 
     // Reader ごとのエポック追跡（kIdleEpoch = 非参加）
-    std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {};
+    // mutable: enterReader/exitReader は const メソッドとして提供（RCUの論理的状態不変）
+    // mutable: enterReader/exitReader は const メソッドとして提供（RCUの論理的状態不変）
+    mutable std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {}; // NOLINT(thread-local) RT-SAFE: std::atomic<uint64_t> は POD-like でデストラクタなし。
 
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
     std::mutex                                 fallbackMutex;

@@ -17,7 +17,8 @@
         },
         "headroom": {
             "type": "stdio",
-            "command": "${workspaceFolder}\\tools\\headroom-with-proxy.cmd"
+            "command": "${workspaceFolder}\\tools\\headroom-mcp.cmd",
+            "description": "headroom_compress / headroom_retrieve / headroom_stats (MCP only, no proxy)"
         },
         "aidex": {
             "type": "stdio",

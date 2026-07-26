@@ -504,6 +504,20 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         }
     }
 
+    // AVX→legacy SSE 境界: _mm256_zeroupper() を配置
+    _mm256_zeroupper();
+
+    // truePeak検出（BS.1770-4/5準拠）
+    truePeakDetector.processBlock(dataL, dataR, numSamples);
+
+    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
+    loudnessMeter.processBlock(dataL, dataR, numSamples);
+
+    // ★ [P1-1] Simple Peak Limiter: Hard Clamp (Safety Net) の前段で動作
+    constexpr double kPLThreshold = 0.8413951287507587;  // -1.5dBFS
+    constexpr double kPLKnee = 0.108748;
+    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
+
     applyFixedLatencyDelay(dataL, dataR, numSamples);
 
     for (int i = 0; i < numSamples; ++i)

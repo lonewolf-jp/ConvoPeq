@@ -53,7 +53,8 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
                 bool dropped = true;
                 if (overflowRing_ != nullptr) {
                     RetireOverflowEntry entry{localIntent, static_cast<uint64_t>(
-                        std::chrono::steady_clock::now().time_since_epoch().count()), 0};
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count()), 0};
                     if (overflowRing_->tryPush(entry)) {
                         convo::fetchAddAtomic(quarantineRescuedCount_, uint64_t{1}, std::memory_order_release);
                         dropped = false;

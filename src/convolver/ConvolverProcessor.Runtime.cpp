@@ -385,9 +385,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - wPos);
             int samplesSecond = numSamples - samplesFirst;
 
-            std::memcpy(buf + wPos, src, samplesFirst * sizeof(double));
+            std::memcpy(buf + wPos, src, static_cast<size_t>(samplesFirst) * sizeof(double));
             if (samplesSecond > 0)
-                std::memcpy(buf, src + samplesFirst, samplesSecond * sizeof(double));
+                std::memcpy(buf, src + samplesFirst, static_cast<size_t>(samplesSecond) * sizeof(double));
         }
 
         if (activeCrossfadeGain.isSmoothing())
@@ -479,6 +479,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         sum = _mm256_fmadd_pd(p3, vw3, sum);
                         _mm256_storeu_pd(dst + i, sum);
                     }
+                    _mm256_zeroupper();
 #endif
                     for (; i < samplesToRead; ++i)
                         dst[i] = w0 * s[i - 1] + w1 * s[i] + w2 * s[i + 1] + w3 * s[i + 2];
@@ -529,6 +530,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                                                            _mm256_mul_pd(vOld, _mm256_sub_pd(vOne, vFade)));
                         _mm256_storeu_pd(newSamples + i, vOut);
                     }
+                    _mm256_zeroupper();
                     for (; i < activeDelayCrossfadeSamples; ++i)
                         newSamples[i] = newSamples[i] * fadeInRamp[i] + oldSamples[i] * (1.0 - fadeInRamp[i]);
 #else
@@ -621,6 +623,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWG), _mm256_mul_pd(vDry, vDG));
             _mm256_storeu_pd(dst + i, vOut);
         }
+        _mm256_zeroupper();
         for (; i < n; ++i)
             dst[i] = wet[i] * wetGain[i] + dry[i] * dryGain[i];
 #else
@@ -644,6 +647,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWG), _mm256_mul_pd(vDry, vDG));
             _mm256_storeu_pd(dst + i, vOut);
         }
+        _mm256_zeroupper();
         for (; i < n; ++i)
             dst[i] = wet[i] * wetG + dry[i] * dryG;
 #else

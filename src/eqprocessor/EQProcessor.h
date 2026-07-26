@@ -470,6 +470,8 @@ private:
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
     convo::RCUReader rcuReader { m_epochDomain };
+    // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
+    std::atomic<uint64_t> m_retireDropCount{0};
 
     bool enqueueDeferredDeleteWithFallback(void* ptr,
                                            void (*deleter)(void*),

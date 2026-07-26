@@ -628,6 +628,9 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             stepTrimmed.applyGainRamp(ch, copySamples - fadeSamples, fadeSamples, 1.0, 0.0);
     }
 
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
     return true;
 }
 

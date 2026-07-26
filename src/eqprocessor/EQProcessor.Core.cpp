@@ -134,12 +134,15 @@ EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel)) // acq_rel: acquire で先行 exchangeCurrentState/publishCurrentState と HB; release で後続観測者と HB
-        (void)retireEQStateDeferred(oldState);
+        if (!retireEQStateDeferred(oldState))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
 
     for (auto& nodeBits : bandNodeBits) {
         const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release); // release: デストラクタ後の観測者に対して null 書き込みを公知。acquire 不要 — デストラクタは排他的所有権を持つ
-        if (auto* n = fromBandNodeBits(bits))
-            (void)retireBandNodeDeferred(n);
+        if (auto* n = fromBandNodeBits(bits)) {
+            if (!retireBandNodeDeferred(n))
+                convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
+        }
     }
 
     for (auto& node : activeBandNodes) {
@@ -231,7 +234,7 @@ void EQProcessor::resetToDefaults()
     auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState) {
-        (void)retireEQStateDeferred(oldState);
+        if (!retireEQStateDeferred(oldState))            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -567,7 +570,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     if (oldState)
     {
-        (void)retireEQStateDeferred(oldState);
+        if (!retireEQStateDeferred(oldState))            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -620,7 +623,8 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     activeBandNodes[bandIndex] = newNode;
 
     if (oldNode)
-        (void)retireBandNodeDeferred(oldNode);
+        if (!retireBandNodeDeferred(oldNode))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
 
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -801,8 +805,10 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             {
                 auto newNode = createBandNode(i, *loopState);
                 auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
-                if (oldNode)
-                    (void)retireBandNodeDeferred(oldNode);
+                if (oldNode) {
+                    if (!retireBandNodeDeferred(oldNode))
+                        convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
+                }
                 activeBandNodes[i] = newNode;
             }
         }

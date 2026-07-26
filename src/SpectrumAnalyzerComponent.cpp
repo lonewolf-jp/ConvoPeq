@@ -489,6 +489,7 @@ void SpectrumAnalyzerComponent::timerCallback()
                 ? juce::Decibels::gainToDecibels(magnitude)
                 : FFT_DISPLAY_MIN_DB;
         }
+        _mm256_zeroupper();
 #else
         for (int i = 0; i < numBins; ++i)
         {

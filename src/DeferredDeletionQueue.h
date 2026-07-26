@@ -77,7 +77,8 @@ public:
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
             uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire); // acquire: dequeue の seq release と HB しスロット解放を観測
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+            // kQueueSize(=4096) ≪ INT32_MAX により int32_t 減算で安全。
+            int32_t diff = static_cast<int32_t>(static_cast<uint32_t>(seq - pos));
 
             if (diff == 0) {
                 if (convo::compareExchangeAtomic(enqueuePos,
@@ -117,7 +118,7 @@ public:
         while (scanned < kMaxScan) {
             auto& seq_atom = sequences[scanPos & kMask];
             const uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire); // acquire: enqueue の seq release と HB しエントリ書き込み完了を観測
-            const intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(scanPos + 1);
+            const int32_t diff = static_cast<int32_t>(static_cast<uint32_t>(seq - (scanPos + 1)));
 
             if (diff != 0) {
                 break; // Empty
@@ -169,7 +170,7 @@ public:
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
             uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire); // acquire: enqueue の seq release と HB しエントリ書き込み完了を確認
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            int32_t diff = static_cast<int32_t>(static_cast<uint32_t>(seq - (pos + 1)));
 
             if (diff == 0) {
                 auto& entry = ringBuffer[pos & kMask];

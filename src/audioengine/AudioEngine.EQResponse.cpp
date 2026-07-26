@@ -250,4 +250,8 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         for (int k = 0; k < numPoints; ++k)
             if (!std::isfinite(outMagnitudesR[k])) outMagnitudesR[k] = 1.0f;
     }
+
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
 }

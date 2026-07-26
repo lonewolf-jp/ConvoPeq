@@ -255,6 +255,7 @@ inline void accumulateSplitComplex(const double* srcAReal,
         _mm256_storeu_pd(dstImag + k, di);
     }
 
+    _mm256_zeroupper();
     for (; k < complexSize; ++k)
     {
         dstReal[k] += srcAReal[k] * srcBReal[k] - srcAImag[k] * srcBImag[k];
@@ -1027,14 +1028,14 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
 
         for (int p = 0; p < l.numParts; ++p)
         {
-            memset(tempTime, 0, l.fftSize * sizeof(double));
+            memset(tempTime, 0, static_cast<size_t>(l.fftSize) * sizeof(double));
 
             if (p < l.numPartsIR)
             {
                 const int copyStart = p * l.partSize;
                 const int copyLen   = std::min(l.partSize, irRemain - copyStart);
                 if (copyLen > 0)
-                    memcpy(tempTime, irSrc + copyStart, copyLen * sizeof(double));
+                    memcpy(tempTime, irSrc + copyStart, static_cast<size_t>(copyLen) * sizeof(double));
             }
 
             // [v2.1] Forward FFT: real → CCS
@@ -1042,7 +1043,7 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
             ippsFFTFwd_RToCCS_64f(tempTime, tempFreq, l.fftSpec, l.fftWorkBuf);
 
             // [Mem-Fix] irFreqDomain は 1 パーティション分のスクラッチのため、オフセット0(先頭)へ書き込む。
-            memcpy(l.irFreqDomain, tempFreq, l.complexSize * 2 * sizeof(double));
+            memcpy(l.irFreqDomain, tempFreq, static_cast<size_t>(l.complexSize) * 2 * sizeof(double));
 
             if (scale != 1.0)
                 cblas_dscal(l.complexSize * 2, scale, l.irFreqDomain, 1);
@@ -1077,16 +1078,16 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
                     // irFreqReal swap (SoA)
                     double* realF = l.irFreqReal + static_cast<size_t>(pf) * l.complexSize;
                     double* realB = l.irFreqReal + static_cast<size_t>(pb) * l.complexSize;
-                    memcpy(swapSoA, realF, l.complexSize * sizeof(double));
-                    memcpy(realF,   realB, l.complexSize * sizeof(double));
-                    memcpy(realB,   swapSoA, l.complexSize * sizeof(double));
+                    memcpy(swapSoA, realF, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(realF,   realB, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(realB,   swapSoA, static_cast<size_t>(l.complexSize) * sizeof(double));
 
                     // irFreqImag swap (SoA)
                     double* imagF = l.irFreqImag + static_cast<size_t>(pf) * l.complexSize;
                     double* imagB = l.irFreqImag + static_cast<size_t>(pb) * l.complexSize;
-                    memcpy(swapSoA, imagF, l.complexSize * sizeof(double));
-                    memcpy(imagF,   imagB, l.complexSize * sizeof(double));
-                    memcpy(imagB,   swapSoA, l.complexSize * sizeof(double));
+                    memcpy(swapSoA, imagF, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(imagF,   imagB, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(imagB,   swapSoA, static_cast<size_t>(l.complexSize) * sizeof(double));
                 }
             }
             if (swapSoA) mkl_free(swapSoA);
@@ -1153,7 +1154,7 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         return false;
     }
 
-    memset(m_ringBuf, 0, finalSize * sizeof(double));
+    memset(m_ringBuf, 0, static_cast<size_t>(finalSize) * sizeof(double));
     m_ringSize  = finalSize;
     m_ringMask  = finalSize - 1;
     m_ringWrite = 0;
@@ -1381,7 +1382,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 
     // [最適化2] Linearized ring buffer: mirror write
     double* mirrorFDLSlot = l.fdlBuf + l.partStride;
-    memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
+    memcpy(mirrorFDLSlot, currentFDLSlot, static_cast<size_t>(l.partStride) * sizeof(double));
 
     const int mirrorIndex = l.fdlIndex + l.numParts;
     deinterleaveComplex(mirrorFDLSlot,
@@ -1414,7 +1415,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
         accumulateSplitComplex(srcARe, srcAIm, srcBRe, srcBIm, l.accumReal, l.accumImag, l.complexSize);
     }
 
-    memset(l.accumBuf, 0, l.partStride * sizeof(double));
+    memset(l.accumBuf, 0, static_cast<size_t>(l.partStride) * sizeof(double));
     interleaveComplex(l.accumReal, l.accumImag, l.accumBuf, l.complexSize);
 
     // ── 4. Backward FFT ──
@@ -1425,6 +1426,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
         v = killDenormalV(v);
         _mm256_store_pd(&l.accumBuf[k], v);
     }
+    _mm256_zeroupper();
 #else
     for (int k = 0; k < l.partStride; ++k)
         l.accumBuf[k] = killDenormal(l.accumBuf[k]);
@@ -1485,7 +1487,7 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
     const int toRead = std::min(n, m_ringAvail);
     if (toRead == 0)
     {
-        if (dst) memset(dst, 0, n * sizeof(double));
+        if (dst) memset(dst, 0, static_cast<size_t>(n) * sizeof(double));
         return 0;
     }
 
@@ -1498,7 +1500,7 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
             juce::FloatVectorOperations::copy(dst + first, m_ringBuf, toRead - first);
 
         if (toRead < n)
-            memset(dst + toRead, 0, (n - toRead) * sizeof(double));
+            memset(dst + toRead, 0, static_cast<size_t>(n - toRead) * sizeof(double));
     }
 
     m_ringRead  = (m_ringRead + toRead) & m_ringMask;
@@ -1535,9 +1537,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
         {
             const int toFill = std::min(numSamples - consumed, l.partSize - l.inputPos);
             if (input)
-                memcpy(l.inputAccBuf + l.inputPos, input + consumed, toFill * sizeof(double));
+                memcpy(l.inputAccBuf + l.inputPos, input + consumed, static_cast<size_t>(toFill) * sizeof(double));
             else
-                memset(l.inputAccBuf + l.inputPos, 0, toFill * sizeof(double));
+                memset(l.inputAccBuf + l.inputPos, 0, static_cast<size_t>(toFill) * sizeof(double));
             l.inputPos += toFill;
             consumed   += toFill;
 
@@ -1625,7 +1627,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
             l.nextPart = endPart;
 
-            memset(l.accumBuf, 0, l.partStride * sizeof(double));
+            memset(l.accumBuf, 0, static_cast<size_t>(l.partStride) * sizeof(double));
             interleaveComplex(l.accumReal, l.accumImag, l.accumBuf, l.complexSize);
 
             // ── 全パーティション累積完了 → IFFT → tailOutputBuf へコピー ──
@@ -1634,7 +1636,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 // [v2.1] Backward FFT: CCS → real (Audio Thread 内で再初期化禁止の制約はIPPも同様)
                 ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
 
-                memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, l.partSize * sizeof(double));
+                memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, static_cast<size_t>(l.partSize) * sizeof(double));
                 l.tailOutputPos = 0;
 
                 // ★ B13: 遅延補償リングバッファに書き込み
@@ -1683,6 +1685,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
             else
                 _mm256_storeu_pd(dst + i, _mm256_add_pd(a, b));
         }
+        _mm256_zeroupper();
         for (; i < n; ++i)
             dst[i] += src[i];
 #else

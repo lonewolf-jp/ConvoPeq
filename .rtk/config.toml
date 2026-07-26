@@ -1,0 +1,46 @@
+# ConvoPeq プロジェクトローカル RTK 設定
+# このファイルは `rtk trust` で有効化
+schema_version = 1
+
+[display]
+# プロジェクトの特性に合わせた表示設定
+emoji = true
+max_width = 160  # C++の長い型シグネチャに対応
+
+[filters]
+# ConvoPeqのビルド/C++コードに特化したフィルター
+ignore_dirs = [
+    ".git",
+    "build",
+    "build-icx",
+    "JUCE",
+    "r8brain-free-src",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "vendor",
+    ".aidex",
+    "storage",
+    "evidence",
+    "sampledata",
+]
+ignore_files = [
+    "*.lock",
+    "*.min.js",
+    "*.min.css",
+    "*.exe",
+    "*.obj",
+    "*.lib",
+    "*.pdb",
+    "*.ilk",
+    "*.exp",
+]
+
+[limits]
+# C++プロジェクトに適した制限値
+grep_max_results = 300
+grep_max_per_file = 30
+status_max_files = 30
+status_max_untracked = 10
+passthrough_max_chars = 1000  # より積極的な圧縮

@@ -245,8 +245,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
                 auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
                 auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
-                std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
-                std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
+                std::memcpy(irL.get(), conv->irData[0], static_cast<size_t>(conv->irDataLength) * sizeof(double));
+                std::memcpy(irR.get(), conv->irData[1], static_cast<size_t>(conv->irDataLength) * sizeof(double));
 
                 convo::FilterSpec tailSpec;
                 tailSpec.sampleRate = sampleRate;

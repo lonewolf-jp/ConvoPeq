@@ -330,6 +330,10 @@ namespace
         // スカラー残余
         double gain = startGain + static_cast<double>(i) * increment;
         for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+
+#if defined(__AVX2__)
+        _mm256_zeroupper();
+#endif
     }
 }
 

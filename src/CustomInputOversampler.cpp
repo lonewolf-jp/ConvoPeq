@@ -198,6 +198,11 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     vSum = _mm_hadd_pd(vSum, vSum);
     double sum = _mm_cvtsd_f64(vSum);
 
+    // AVX→legacy SSE 境界
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
+
     // Scalar remainder
     for (; i < n; ++i)
         sum += x[i] * coeffs[i];
