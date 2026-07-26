@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-25 23:38:21
+> Generated: 2026-07-26 15:53:54
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -271,6 +271,7 @@
         │   ├── PeakEstimator.h
         │   ├── UpperBoundEstimator.cpp
         │   └── UpperBoundEstimator.h
+        ├── nul
         └── tests/
             ├── BuildInputSemanticContractTests.cpp
             ├── CrossfadeExecutorLocalContractTests.cpp
@@ -1716,9 +1717,9 @@ set "CMAKE_CONFIG_ATTEMPT=0"
 set /a CMAKE_CONFIG_ATTEMPT+=1
 echo [2/4] Configuring CMake... (attempt !CMAKE_CONFIG_ATTEMPT!)
 if "!COMPILER_MODE!"=="msvc" (
-    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS% %CMAKE_EXTRA_FLAGS%
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_EXPORT_COMPILE_COMMANDS=ON %CMAKE_PGO_FLAGS% %CMAKE_EXTRA_FLAGS%
 ) else (
-    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx %CMAKE_EXTRA_FLAGS%
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON %CMAKE_EXTRA_FLAGS%
 )
 if not errorlevel 1 goto configure_cmake_ok
 
@@ -1735,6 +1736,18 @@ timeout /t 2 >nul
 goto configure_cmake
 
 :configure_cmake_ok
+
+REM ------------------------------------------------------------
+REM Copy compile_commands.json to project root for clangd/serena LSP
+if exist "%BUILD_DIR%\compile_commands.json" (
+    copy /y "%BUILD_DIR%\compile_commands.json" "%~dp0compile_commands.json" >nul
+    echo [INFO] compile_commands.json copied to project root for clangd.
+)
+REM Convert icx/MSVC-specific flags to clangd-compatible ones
+if exist "%~dp0compile_commands.json" if exist "%~dp0tools\fix_compile_commands_for_clangd.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\fix_compile_commands_for_clangd.ps1" -InputFile "%~dp0compile_commands.json"
+    echo [INFO] compile_commands.json flags converted for clangd.
+)
 
 REM ------------------------------------------------------------
 REM Clean stale RC output: JUCE generates RC during CMake configure
@@ -6028,8 +6041,14 @@ public:
     [[nodiscard]] bool isBypassed() { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
     // acquire: LoaderThread/executeCommit の publishNewConvolverState release と HB し、有効な state を取得。
     [[nodiscard]] const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); } // acquire: publishNewConvolverState の release と HB
-    void enterStateReader(int /*readerIndex*/) const noexcept {}
-    void exitStateReader(int /*readerIndex*/) const noexcept {}
+    void enterStateReader(int readerIndex) const noexcept
+    {
+        rcuSwapper.enterReader(readerIndex);
+    }
+    void exitStateReader(int readerIndex) const noexcept
+    {
+        rcuSwapper.exitReader(readerIndex);
+    }
 
     void enterGlobalReader(int /*readerIndex*/) const noexcept;
     void exitGlobalReader(int /*readerIndex*/) const noexcept;
@@ -6581,8 +6600,8 @@ private:
                     auto l = convo::makeAlignedArray<double>(static_cast<size_t>(irDataLength));
                     auto r = convo::makeAlignedArray<double>(static_cast<size_t>(irDataLength));
 
-                    std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
-                    std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
+                    std::memcpy(l.get(), irData[0], static_cast<size_t>(irDataLength) * sizeof(double));
+                    std::memcpy(r.get(), irData[1], static_cast<size_t>(irDataLength) * sizeof(double));
 
                     if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedKnownBlockSize, callQuantumSamples, storedScale, storedDirectHeadEnabled, hasStoredFilterSpec ? &storedFilterSpec : nullptr))
                         return nullptr;
@@ -7799,6 +7818,11 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     vSum = _mm_hadd_pd(vSum, vSum);
     double sum = _mm_cvtsd_f64(vSum);
 
+    // AVX→legacy SSE 境界
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
+
     // Scalar remainder
     for (; i < n; ++i)
         sum += x[i] * coeffs[i];
@@ -8698,7 +8722,8 @@ public:
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
             uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire); // acquire: dequeue の seq release と HB しスロット解放を観測
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+            // kQueueSize(=4096) ≪ INT32_MAX により int32_t 減算で安全。
+            int32_t diff = static_cast<int32_t>(static_cast<uint32_t>(seq - pos));
 
             if (diff == 0) {
                 if (convo::compareExchangeAtomic(enqueuePos,
@@ -8738,7 +8763,7 @@ public:
         while (scanned < kMaxScan) {
             auto& seq_atom = sequences[scanPos & kMask];
             const uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire); // acquire: enqueue の seq release と HB しエントリ書き込み完了を観測
-            const intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(scanPos + 1);
+            const int32_t diff = static_cast<int32_t>(static_cast<uint32_t>(seq - (scanPos + 1)));
 
             if (diff != 0) {
                 break; // Empty
@@ -8790,7 +8815,7 @@ public:
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
             uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire); // acquire: enqueue の seq release と HB しエントリ書き込み完了を確認
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            int32_t diff = static_cast<int32_t>(static_cast<uint32_t>(seq - (pos + 1)));
 
             if (diff == 0) {
                 auto& entry = ringBuffer[pos & kMask];
@@ -12712,6 +12737,7 @@ private:
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <immintrin.h>
@@ -12929,9 +12955,9 @@ private:
 
     inline double absNoLibm(double x) const noexcept
     {
-        union { double d; uint64_t u; } v { x };
-        v.u &= 0x7fffffffffffffffULL;
-        return v.d;
+        auto bits = std::bit_cast<uint64_t>(x);
+        bits &= 0x7fffffffffffffffULL;
+        return std::bit_cast<double>(bits);
     }
 
     inline double get(const std::array<double, ORDER>& buffer, int idx, int k) const noexcept
@@ -15331,6 +15357,7 @@ inline void accumulateSplitComplex(const double* srcAReal,
         _mm256_storeu_pd(dstImag + k, di);
     }
 
+    _mm256_zeroupper();
     for (; k < complexSize; ++k)
     {
         dstReal[k] += srcAReal[k] * srcBReal[k] - srcAImag[k] * srcBImag[k];
@@ -16103,14 +16130,14 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
 
         for (int p = 0; p < l.numParts; ++p)
         {
-            memset(tempTime, 0, l.fftSize * sizeof(double));
+            memset(tempTime, 0, static_cast<size_t>(l.fftSize) * sizeof(double));
 
             if (p < l.numPartsIR)
             {
                 const int copyStart = p * l.partSize;
                 const int copyLen   = std::min(l.partSize, irRemain - copyStart);
                 if (copyLen > 0)
-                    memcpy(tempTime, irSrc + copyStart, copyLen * sizeof(double));
+                    memcpy(tempTime, irSrc + copyStart, static_cast<size_t>(copyLen) * sizeof(double));
             }
 
             // [v2.1] Forward FFT: real → CCS
@@ -16118,7 +16145,7 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
             ippsFFTFwd_RToCCS_64f(tempTime, tempFreq, l.fftSpec, l.fftWorkBuf);
 
             // [Mem-Fix] irFreqDomain は 1 パーティション分のスクラッチのため、オフセット0(先頭)へ書き込む。
-            memcpy(l.irFreqDomain, tempFreq, l.complexSize * 2 * sizeof(double));
+            memcpy(l.irFreqDomain, tempFreq, static_cast<size_t>(l.complexSize) * 2 * sizeof(double));
 
             if (scale != 1.0)
                 cblas_dscal(l.complexSize * 2, scale, l.irFreqDomain, 1);
@@ -16153,16 +16180,16 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
                     // irFreqReal swap (SoA)
                     double* realF = l.irFreqReal + static_cast<size_t>(pf) * l.complexSize;
                     double* realB = l.irFreqReal + static_cast<size_t>(pb) * l.complexSize;
-                    memcpy(swapSoA, realF, l.complexSize * sizeof(double));
-                    memcpy(realF,   realB, l.complexSize * sizeof(double));
-                    memcpy(realB,   swapSoA, l.complexSize * sizeof(double));
+                    memcpy(swapSoA, realF, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(realF,   realB, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(realB,   swapSoA, static_cast<size_t>(l.complexSize) * sizeof(double));
 
                     // irFreqImag swap (SoA)
                     double* imagF = l.irFreqImag + static_cast<size_t>(pf) * l.complexSize;
                     double* imagB = l.irFreqImag + static_cast<size_t>(pb) * l.complexSize;
-                    memcpy(swapSoA, imagF, l.complexSize * sizeof(double));
-                    memcpy(imagF,   imagB, l.complexSize * sizeof(double));
-                    memcpy(imagB,   swapSoA, l.complexSize * sizeof(double));
+                    memcpy(swapSoA, imagF, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(imagF,   imagB, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memcpy(imagB,   swapSoA, static_cast<size_t>(l.complexSize) * sizeof(double));
                 }
             }
             if (swapSoA) mkl_free(swapSoA);
@@ -16229,7 +16256,7 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         return false;
     }
 
-    memset(m_ringBuf, 0, finalSize * sizeof(double));
+    memset(m_ringBuf, 0, static_cast<size_t>(finalSize) * sizeof(double));
     m_ringSize  = finalSize;
     m_ringMask  = finalSize - 1;
     m_ringWrite = 0;
@@ -16457,7 +16484,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 
     // [最適化2] Linearized ring buffer: mirror write
     double* mirrorFDLSlot = l.fdlBuf + l.partStride;
-    memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
+    memcpy(mirrorFDLSlot, currentFDLSlot, static_cast<size_t>(l.partStride) * sizeof(double));
 
     const int mirrorIndex = l.fdlIndex + l.numParts;
     deinterleaveComplex(mirrorFDLSlot,
@@ -16490,7 +16517,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
         accumulateSplitComplex(srcARe, srcAIm, srcBRe, srcBIm, l.accumReal, l.accumImag, l.complexSize);
     }
 
-    memset(l.accumBuf, 0, l.partStride * sizeof(double));
+    memset(l.accumBuf, 0, static_cast<size_t>(l.partStride) * sizeof(double));
     interleaveComplex(l.accumReal, l.accumImag, l.accumBuf, l.complexSize);
 
     // ── 4. Backward FFT ──
@@ -16501,6 +16528,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
         v = killDenormalV(v);
         _mm256_store_pd(&l.accumBuf[k], v);
     }
+    _mm256_zeroupper();
 #else
     for (int k = 0; k < l.partStride; ++k)
         l.accumBuf[k] = killDenormal(l.accumBuf[k]);
@@ -16561,7 +16589,7 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
     const int toRead = std::min(n, m_ringAvail);
     if (toRead == 0)
     {
-        if (dst) memset(dst, 0, n * sizeof(double));
+        if (dst) memset(dst, 0, static_cast<size_t>(n) * sizeof(double));
         return 0;
     }
 
@@ -16574,7 +16602,7 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
             juce::FloatVectorOperations::copy(dst + first, m_ringBuf, toRead - first);
 
         if (toRead < n)
-            memset(dst + toRead, 0, (n - toRead) * sizeof(double));
+            memset(dst + toRead, 0, static_cast<size_t>(n - toRead) * sizeof(double));
     }
 
     m_ringRead  = (m_ringRead + toRead) & m_ringMask;
@@ -16611,9 +16639,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
         {
             const int toFill = std::min(numSamples - consumed, l.partSize - l.inputPos);
             if (input)
-                memcpy(l.inputAccBuf + l.inputPos, input + consumed, toFill * sizeof(double));
+                memcpy(l.inputAccBuf + l.inputPos, input + consumed, static_cast<size_t>(toFill) * sizeof(double));
             else
-                memset(l.inputAccBuf + l.inputPos, 0, toFill * sizeof(double));
+                memset(l.inputAccBuf + l.inputPos, 0, static_cast<size_t>(toFill) * sizeof(double));
             l.inputPos += toFill;
             consumed   += toFill;
 
@@ -16701,7 +16729,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
             l.nextPart = endPart;
 
-            memset(l.accumBuf, 0, l.partStride * sizeof(double));
+            memset(l.accumBuf, 0, static_cast<size_t>(l.partStride) * sizeof(double));
             interleaveComplex(l.accumReal, l.accumImag, l.accumBuf, l.complexSize);
 
             // ── 全パーティション累積完了 → IFFT → tailOutputBuf へコピー ──
@@ -16710,7 +16738,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 // [v2.1] Backward FFT: CCS → real (Audio Thread 内で再初期化禁止の制約はIPPも同様)
                 ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
 
-                memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, l.partSize * sizeof(double));
+                memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, static_cast<size_t>(l.partSize) * sizeof(double));
                 l.tailOutputPos = 0;
 
                 // ★ B13: 遅延補償リングバッファに書き込み
@@ -16759,6 +16787,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
             else
                 _mm256_storeu_pd(dst + i, _mm256_add_pd(a, b));
         }
+        _mm256_zeroupper();
         for (; i < n; ++i)
             dst[i] += src[i];
 #else
@@ -20114,6 +20143,7 @@ private:
 #include <JuceHeader.h>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -20883,8 +20913,8 @@ private:
             }
             // std::isfinite の代わりにビット演算で有限値判定（libm 呼出回避）
             {
-                union { double d; uint64_t u; } v { maxDb };
-                if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+                const auto bits = std::bit_cast<uint64_t>(maxDb);
+                if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
                 {
                     maskingEnergy[static_cast<size_t>(i)] = athThresholdPower[static_cast<size_t>(i)];
                     continue;
@@ -25271,8 +25301,8 @@ public:
     // 古い状態を retired キューに積み、新しい状態を atomic にセットする。
     //
     // 2-step bump の意味:
-    //   epoch1 = bump 前のエポック（旧データが有効だった時代を表す）
-    //   retired エントリには epoch1 を記録し、reclaim 条件との整合性を確保する。
+    //   epoch1 = bump 前のエポック, epoch2 = bump#2 後の値（swap 後の保護境界）
+    //   retired エントリには epoch2 を記録し、bump ウィンドウ中の reader を保護する。
     //   newEpoch は単調増加の継続保証のために進める。
     //
     // @param newState  新しい状態（所有権を移譲。nullptr も可: 状態クリア用）
@@ -25281,7 +25311,8 @@ public:
     {
         // 2-step bump（単調性確保 + 観測ズレの吸収）
         const uint64_t epoch1   = convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: acquire で直前の swap の acq_rel と HB; release で getSafeEpoch/enterReader の acquire と HB
-        /* newEpoch = */ convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: 2-step bump 後半。単調性確保 + getSafeEpoch 観測側の acquire と HB
+        const uint64_t epoch2 = convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: 2-step bump 後半。単調性確保 + getSafeEpoch 観測側の acquire と HB
+        (void)epoch1; // epoch1 is kept for documentation/symmetry; epoch2 is used for retire boundary
 
         ConvolverState* oldState = convo::exchangeAtomic(activeState, newState, std::memory_order_acq_rel); // acq_rel: acquire で直前の swap の activeState release と HB; release で getState の acquire と HB
         if (oldState == nullptr) return;
@@ -25294,15 +25325,16 @@ public:
         {
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
-            fallbackQueue.push({oldState, epoch1});
+            fallbackQueue.push({oldState, epoch2});
             // Coordinator fallback backlog notification is handled externally
             // via SafeStateSwapper::getPendingRetiredCount() polling
             return;
         }
 
         convo::publishAtomic(retiredBuffer[t].state, oldState, std::memory_order_release);  // release: tryReclaim の state acquire と HB し旧状態ポインタを公知
-        // epoch1 を記録: 「このデータが有効だった時代の直前エポック」
-        convo::publishAtomic(retiredBuffer[t].epoch, epoch1, std::memory_order_release);    // release: tryReclaim の epoch acquire と HB
+        // retired エントリには swap 後の保護境界を記録する。
+        // bump ウィンドウ中に oldState を観測した reader を保護するため epoch2 を使う。
+        convo::publishAtomic(retiredBuffer[t].epoch, epoch2, std::memory_order_release);    // release: tryReclaim の epoch acquire と HB
         convo::publishAtomic(tail, next, std::memory_order_release);                        // release: tryReclaim の tail acquire と HB しエントリ追加完了を公知
     }
 
@@ -25314,7 +25346,7 @@ public:
     //
     // @param readerIndex  0 ～ kMaxReaders-1 の固定インデックス
     // -----------------------------------------------------------------------
-    void enterReader(int readerIndex) noexcept
+    void enterReader(int readerIndex) const noexcept
     {
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
@@ -25336,7 +25368,7 @@ public:
     //
     // @param readerIndex  enterReader() に渡したのと同じインデックス
     // -----------------------------------------------------------------------
-    void exitReader(int readerIndex) noexcept
+    void exitReader(int readerIndex) const noexcept
     {
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
@@ -25542,7 +25574,9 @@ private:
     std::atomic<uint64_t> globalEpoch {0};
 
     // Reader ごとのエポック追跡（kIdleEpoch = 非参加）
-    std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {};
+    // mutable: enterReader/exitReader は const メソッドとして提供（RCUの論理的状態不変）
+    // mutable: enterReader/exitReader は const メソッドとして提供（RCUの論理的状態不変）
+    mutable std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {}; // NOLINT(thread-local) RT-SAFE: std::atomic<uint64_t> は POD-like でデストラクタなし。
 
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
     std::mutex                                 fallbackMutex;
@@ -26055,6 +26089,7 @@ void SpectrumAnalyzerComponent::timerCallback()
                 ? juce::Decibels::gainToDecibels(magnitude)
                 : FFT_DISPLAY_MIN_DB;
         }
+        _mm256_zeroupper();
 #else
         for (int i = 0; i < numBins; ++i)
         {
@@ -27552,27 +27587,25 @@ private:
     // ------------------------------------------------------------------------
     static inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
     {
-        union { double d; uint64_t u; } v { value };
+        const auto bits = std::bit_cast<uint64_t>(value);
         // 指数部が 0x7FF (NaN/Inf) でない
-        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+        if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
             return false;
         // 絶対値が threshold 以上
-        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
-        union { uint64_t u; double d; } absVal { absBits };
-        return absVal.d >= threshold;
+        const uint64_t absBits = bits & 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(absBits) >= threshold;
     }
 
     // 上限チェック付き有限値判定（状態発散防止用）
     static inline bool isFiniteAndBelowThresholdMask(double value, double threshold) noexcept
     {
-        union { double d; uint64_t u; } v { value };
+        const auto bits = std::bit_cast<uint64_t>(value);
         // 指数部が 0x7FF (NaN/Inf) でない
-        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+        if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
             return false;
         // 絶対値が threshold 未満
-        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
-        union { uint64_t u; double d; } absVal { absBits };
-        return absVal.d < threshold;
+        const uint64_t absBits = bits & 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(absBits) < threshold;
     }
 
 public:
@@ -27749,6 +27782,12 @@ dcBlocker.process(channelData, numSamples);
 ※ 実測値は CPU アーキテクチャ・コンパイラ最適化・メモリ帯域に依存します。
 ※ 2 段化による位相改善効果：20Hz で約 2.9°→2.3°（約 20% 低減）
 */
+
+```
+
+### 📄 `src\nul`
+
+```
 
 ```
 
@@ -29298,6 +29337,10 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         for (int k = 0; k < numPoints; ++k)
             if (!std::isfinite(outMagnitudesR[k])) outMagnitudesR[k] = 1.0f;
     }
+
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
 }
 
 ```
@@ -31725,7 +31768,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             XRunEvent ev;
             ev.timestampTicks = convo::getCurrentTimeUs();
             ev.generation = static_cast<int>(currentGen);
-            xRunBuffer.push(ev);
+            if (!xRunBuffer.push(ev))
+            {
+                convo::fetchAddAtomic(rtAuxMutable_.xRunDropCount,
+                    uint64_t{1}, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -32462,7 +32509,11 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             XRunEvent ev;
             ev.timestampTicks = convo::getCurrentTimeUs();
             ev.generation = static_cast<int>(currentGen);
-            xRunBuffer.push(ev);
+            if (!xRunBuffer.push(ev))
+            {
+                convo::fetchAddAtomic(rtAuxMutable_.xRunDropCount,
+                    uint64_t{1}, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -32681,8 +32732,8 @@ namespace
 {
 inline bool isFiniteNoLibm(double x) noexcept
 {
-    union { double d; uint64_t u; } v { x };
-    return ((v.u >> 52) & 0x7FFu) != 0x7FFu;
+    const auto bits = std::bit_cast<uint64_t>(x);
+    return ((bits >> 52) & 0x7FFu) != 0x7FFu;
 }
 
 inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
@@ -33388,8 +33439,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
 inline bool isFiniteNoLibm(double x) noexcept
 {
-    union { double d; uint64_t u; } v { x };
-    return ((v.u >> 52) & 0x7FFu) != 0x7FFu;
+    const auto bits = std::bit_cast<uint64_t>(x);
+    return ((bits >> 52) & 0x7FFu) != 0x7FFu;
 }
 
 inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
@@ -33497,6 +33548,10 @@ inline void applyGainRamp(float* __restrict data, int numSamples,
     float g = startGain + gainStep * static_cast<float>(i);
     for (; i < numSamples; ++i, g += gainStep)
         data[i] *= g;
+
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
 }
 
 inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
@@ -33511,6 +33566,10 @@ inline void scaleBlockFallback(double* data, int numSamples, double gain) noexce
     }
     for (; i < numSamples; ++i)
         data[i] *= gain;
+
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
 }
 
 inline double fastTanh(double x) noexcept
@@ -33862,8 +33921,8 @@ namespace
 {
 inline bool isFiniteNoLibm(double x) noexcept
 {
-    union { double d; uint64_t u; } v { x };
-    return ((v.u >> 52) & 0x7FFu) != 0x7FFu;
+    const auto bits = std::bit_cast<uint64_t>(x);
+    return ((bits >> 52) & 0x7FFu) != 0x7FFu;
 }
 
 inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
@@ -34357,6 +34416,20 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             }
         }
     }
+
+    // AVX→legacy SSE 境界: _mm256_zeroupper() を配置
+    _mm256_zeroupper();
+
+    // truePeak検出（BS.1770-4/5準拠）
+    truePeakDetector.processBlock(dataL, dataR, numSamples);
+
+    // LUFSブロック平均電力（BS.1770-4/5 + EBU R128）
+    loudnessMeter.processBlock(dataL, dataR, numSamples);
+
+    // ★ [P1-1] Simple Peak Limiter: Hard Clamp (Safety Net) の前段で動作
+    constexpr double kPLThreshold = 0.8413951287507587;  // -1.5dBFS
+    constexpr double kPLKnee = 0.108748;
+    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
 
     applyFixedLatencyDelay(dataL, dataR, numSamples);
 
@@ -37091,8 +37164,9 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         if (overflowStart != 0) {
             const auto now = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
-            const uint64_t overflowDurationMs = (now - overflowStart) / 1000;
-            chronicByDuration = (overflowDurationMs > 5000);  // >5秒
+            // ナノ秒→ミリ秒変換: /1000 はマイクロ秒になるため /1'000'000 を使用
+            const uint64_t overflowDurationMs = (now - overflowStart) / 1'000'000;
+            chronicByDuration = (overflowDurationMs > 5000);  // 5000ms = 5秒
         }
 
         // overflowWindowCounter による頻度追跡
@@ -41831,30 +41905,26 @@ public:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    // active runtime DSP slot: 現行 DSP の非所有スロット。
+    // active runtime DSP slot: 現行 DSP のアトミックスロット。
     //            実際の解放は retireDSPHandleForRuntime() → deferred delete / retire queue で行う。
-    convo::NonOwningPtr<DSPCore> activeRuntimeDSPSlot { nullptr };
-    // fading runtime DSP slot: フェード中 DSP の非所有スロット。
+    std::atomic<DSPCore*> activeRuntimeDSPSlot{nullptr};
+    // fading runtime DSP slot: フェード中 DSP のアトミックスロット。
     //               寿命は publish/retire の順序に従い、active runtime slot と独立して非所有で管理する。
-    convo::NonOwningPtr<DSPCore> fadingRuntimeDSPSlot { nullptr };
+    std::atomic<DSPCore*> fadingRuntimeDSPSlot{nullptr};
 
     inline DSPCore* exchangeFadingRuntimeDSP(DSPCore* value) noexcept
     {
-
-
-        DSPCore* previous = fadingRuntimeDSPSlot.get();
-        fadingRuntimeDSPSlot.operator=(value);
-        return previous;
+        return convo::exchangeAtomic(fadingRuntimeDSPSlot, value, std::memory_order_acq_rel);
     }
 
     [[nodiscard]] inline DSPCore* getActiveRuntimeDSP() const noexcept
     {
-        return activeRuntimeDSPSlot.get();
+        return convo::consumeAtomic(activeRuntimeDSPSlot, std::memory_order_acquire);
     }
 
     inline void setActiveRuntimeDSP(DSPCore* value) noexcept
     {
-        activeRuntimeDSPSlot = value;
+        convo::publishAtomic(activeRuntimeDSPSlot, value, std::memory_order_release);
     }
 
     [[nodiscard]] inline bool hasActiveRuntimeDSP() const noexcept
@@ -41864,9 +41934,7 @@ public:
 
     inline DSPCore* releaseActiveRuntimeDSP() noexcept
     {
-        DSPCore* activeRaw = getActiveRuntimeDSP();
-        setActiveRuntimeDSP(nullptr);
-        return activeRaw;
+        return convo::exchangeAtomic(activeRuntimeDSPSlot, nullptr, std::memory_order_acq_rel);
     }
 
     struct RuntimeReadHandle
@@ -48772,7 +48840,8 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
                 bool dropped = true;
                 if (overflowRing_ != nullptr) {
                     RetireOverflowEntry entry{localIntent, static_cast<uint64_t>(
-                        std::chrono::steady_clock::now().time_since_epoch().count()), 0};
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count()), 0};
                     if (overflowRing_->tryPush(entry)) {
                         convo::fetchAddAtomic(quarantineRescuedCount_, uint64_t{1}, std::memory_order_release);
                         dropped = false;
@@ -57849,21 +57918,24 @@ public:
             const double absR = hasR ? std::abs(dataR[i]) : absL;
             const double peak = juce::jmax(absL, absR);
 
+            // clipStart が負になる極端なパラメータでも 0 除算を防止
+            const double safePeak = juce::jmax(peak, 1.0e-12);
+
             // 必要なゲインリダクションを計算 (soft knee)
             double desiredGain = 1.0;
-            if (peak > clipStart)
+            if (safePeak > clipStart)
             {
-                if (peak <= thresholdLinear)
+                if (safePeak <= thresholdLinear)
                 {
                     // Knee 領域: 3次スプライン補間
-                    const double t = (peak - clipStart) / kneeLinear;
+                    const double t = (safePeak - clipStart) / kneeLinear;
                     const double kneeShape = t * t * (3.0 - 2.0 * t);
-                    desiredGain = 1.0 - (1.0 - thresholdLinear / peak) * kneeShape;
+                    desiredGain = 1.0 - (1.0 - thresholdLinear / safePeak) * kneeShape;
                 }
                 else
                 {
                     // リミッティング領域: threshold / peak
-                    desiredGain = thresholdLinear / peak;
+                    desiredGain = thresholdLinear / safePeak;
                 }
             }
 
@@ -58924,8 +58996,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
                 auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
                 auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
-                std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
-                std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
+                std::memcpy(irL.get(), conv->irData[0], static_cast<size_t>(conv->irDataLength) * sizeof(double));
+                std::memcpy(irR.get(), conv->irData[1], static_cast<size_t>(conv->irDataLength) * sizeof(double));
 
                 convo::FilterSpec tailSpec;
                 tailSpec.sampleRate = sampleRate;
@@ -60640,6 +60712,9 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             stepTrimmed.applyGainRamp(ch, copySamples - fadeSamples, fadeSamples, 1.0, 0.0);
     }
 
+#if defined(__AVX2__)
+    _mm256_zeroupper();
+#endif
     return true;
 }
 
@@ -62862,9 +62937,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - wPos);
             int samplesSecond = numSamples - samplesFirst;
 
-            std::memcpy(buf + wPos, src, samplesFirst * sizeof(double));
+            std::memcpy(buf + wPos, src, static_cast<size_t>(samplesFirst) * sizeof(double));
             if (samplesSecond > 0)
-                std::memcpy(buf, src + samplesFirst, samplesSecond * sizeof(double));
+                std::memcpy(buf, src + samplesFirst, static_cast<size_t>(samplesSecond) * sizeof(double));
         }
 
         if (activeCrossfadeGain.isSmoothing())
@@ -62956,6 +63031,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         sum = _mm256_fmadd_pd(p3, vw3, sum);
                         _mm256_storeu_pd(dst + i, sum);
                     }
+                    _mm256_zeroupper();
 #endif
                     for (; i < samplesToRead; ++i)
                         dst[i] = w0 * s[i - 1] + w1 * s[i] + w2 * s[i + 1] + w3 * s[i + 2];
@@ -63006,6 +63082,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                                                            _mm256_mul_pd(vOld, _mm256_sub_pd(vOne, vFade)));
                         _mm256_storeu_pd(newSamples + i, vOut);
                     }
+                    _mm256_zeroupper();
                     for (; i < activeDelayCrossfadeSamples; ++i)
                         newSamples[i] = newSamples[i] * fadeInRamp[i] + oldSamples[i] * (1.0 - fadeInRamp[i]);
 #else
@@ -63098,6 +63175,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWG), _mm256_mul_pd(vDry, vDG));
             _mm256_storeu_pd(dst + i, vOut);
         }
+        _mm256_zeroupper();
         for (; i < n; ++i)
             dst[i] = wet[i] * wetGain[i] + dry[i] * dryGain[i];
 #else
@@ -63121,6 +63199,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWG), _mm256_mul_pd(vDry, vDG));
             _mm256_storeu_pd(dst + i, vOut);
         }
+        _mm256_zeroupper();
         for (; i < n; ++i)
             dst[i] = wet[i] * wetG + dry[i] * dryG;
 #else
@@ -63646,9 +63725,14 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
     nucConvolvers[channel]->Add(in, numSamples);
     const int got = nucConvolvers[channel]->Get(out, numSamples);
     // ★ bug3-8: got >= 0 && got <= numSamples の防御チェック
-    jassert(got >= 0 && got <= numSamples);
+    if (got < 0)
+    {
+        std::memset(out, 0, static_cast<size_t>(numSamples) * sizeof(double));
+        return;
+    }
+    jassert(got <= numSamples);
     if (got < numSamples)
-        std::memset(out + got, 0, (numSamples - got) * sizeof(double));
+        std::memset(out + got, 0, static_cast<size_t>(numSamples - got) * sizeof(double));
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME
@@ -68975,7 +69059,8 @@ void EQProcessor::updateBandNode(int band)
     // L5 fix: retire old node BEFORE advanceEpoch so epoch N is captured (not N+1).
     if (oldNode)
     {
-        (void)retireBandNodeDeferred(oldNode);
+        if (!retireBandNodeDeferred(oldNode))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -69660,12 +69745,15 @@ EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel)) // acq_rel: acquire で先行 exchangeCurrentState/publishCurrentState と HB; release で後続観測者と HB
-        (void)retireEQStateDeferred(oldState);
+        if (!retireEQStateDeferred(oldState))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
 
     for (auto& nodeBits : bandNodeBits) {
         const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release); // release: デストラクタ後の観測者に対して null 書き込みを公知。acquire 不要 — デストラクタは排他的所有権を持つ
-        if (auto* n = fromBandNodeBits(bits))
-            (void)retireBandNodeDeferred(n);
+        if (auto* n = fromBandNodeBits(bits)) {
+            if (!retireBandNodeDeferred(n))
+                convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
+        }
     }
 
     for (auto& node : activeBandNodes) {
@@ -69757,7 +69845,7 @@ void EQProcessor::resetToDefaults()
     auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState) {
-        (void)retireEQStateDeferred(oldState);
+        if (!retireEQStateDeferred(oldState))            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -70093,7 +70181,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     if (oldState)
     {
-        (void)retireEQStateDeferred(oldState);
+        if (!retireEQStateDeferred(oldState))            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -70146,7 +70234,8 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     activeBandNodes[bandIndex] = newNode;
 
     if (oldNode)
-        (void)retireBandNodeDeferred(oldNode);
+        if (!retireBandNodeDeferred(oldNode))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
 
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -70327,8 +70416,10 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             {
                 auto newNode = createBandNode(i, *loopState);
                 auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
-                if (oldNode)
-                    (void)retireBandNodeDeferred(oldNode);
+                if (oldNode) {
+                    if (!retireBandNodeDeferred(oldNode))
+                        convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
+                }
                 activeBandNodes[i] = newNode;
             }
         }
@@ -70408,7 +70499,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
 ### 📄 `src\eqprocessor\EQProcessor.Parameters.cpp`
 
 ```
-﻿//============================================================================
+//============================================================================
 // EQProcessor.Parameters.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // パラメータセッター・ゲッター
@@ -70436,7 +70527,8 @@ void EQProcessor::setBandFrequency(int band, float freq)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -70455,7 +70547,8 @@ void EQProcessor::setBandGain(int band, float gainDb)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -70474,7 +70567,8 @@ void EQProcessor::setBandQ(int band, float q)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -70497,7 +70591,8 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -70521,7 +70616,8 @@ void EQProcessor::setTotalGain(float gainDb)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -70541,7 +70637,8 @@ void EQProcessor::setAGCEnabled(bool enabled)
         newState->agcEnabled = enabled;
         auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
-            (void)retireEQStateDeferred(prev);
+            if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 
@@ -70574,7 +70671,8 @@ void EQProcessor::setBandType(int band, EQBandType type)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -70596,7 +70694,8 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        (void)retireEQStateDeferred(prev);
+        if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -70621,7 +70720,8 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         newState->nonlinearSaturation = clamped;
         auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
-            (void)retireEQStateDeferred(prev);
+            if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
@@ -70655,7 +70755,8 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
         auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
-            (void)retireEQStateDeferred(prev);
+            if (!retireEQStateDeferred(prev))
+            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
@@ -71005,6 +71106,10 @@ namespace
         // スカラー残余
         double gain = startGain + static_cast<double>(i) * increment;
         for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+
+#if defined(__AVX2__)
+        _mm256_zeroupper();
+#endif
     }
 }
 
@@ -72522,6 +72627,8 @@ private:
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
     convo::RCUReader rcuReader { m_epochDomain };
+    // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
+    std::atomic<uint64_t> m_retireDropCount{0};
 
     bool enqueueDeferredDeleteWithFallback(void* ptr,
                                            void (*deleter)(void*),
@@ -72747,9 +72854,9 @@ private:
     // Synchronization protocol:
     //   Source of Truth → Worker syncStateFrom() → this shadow
     //   Worker = synchronization agent (store() authoritative snapshot)
-    //   RT     = load() / temporary RMW only
+    //   RT     = load() / temporary RMW only  // NOLINT(danger-comment)
     //
-    // Worker synchronization intentionally overwrites RT temporary state.
+    // Worker synchronization intentionally overwrites RT temporary state.  // NOLINT(danger-comment)
     // Do NOT change Worker store() to fetch_or() etc. — that would alter
     // the synchronization protocol, not just an access pattern.
     //
