@@ -68,6 +68,7 @@ doc/BIGDATA/
 sampledata/real_irs/
 sampledata/synthetic/
 .commandcode
+nul
 
 # Coverage reports
 coverage/
@@ -84,4 +85,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 ```
+
 
