@@ -318,6 +318,25 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     }
 }
 
+// ★ applyComputedIR() 専用 RAII Guard。
+//   isLoading は UI 表示用の状態フラグであり、この Guard のスコープで管理する。
+//   この Guard より前の return 経路（null, generation mismatch）では isLoading は変化しない。
+class ApplyComputedIRLoadingGuard final {
+    std::atomic<bool>& isLoading_;
+public:
+    explicit ApplyComputedIRLoadingGuard(std::atomic<bool>& flag) noexcept
+        : isLoading_(flag)
+    {
+        convo::publishAtomic(isLoading_, true, std::memory_order_release);
+    }
+    ~ApplyComputedIRLoadingGuard() noexcept
+    {
+        convo::publishAtomic(isLoading_, false, std::memory_order_release);
+    }
+    ApplyComputedIRLoadingGuard(const ApplyComputedIRLoadingGuard&) = delete;
+    ApplyComputedIRLoadingGuard& operator=(const ApplyComputedIRLoadingGuard&) = delete;
+};
+
 void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
     if (!prepared)
@@ -333,6 +352,11 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
         return;
     }
 
+    // ★ ここから Loading 開始。以降 return しても Guard のデストラクタが isLoading=false を保証
+    //   IMPORTANT: applyComputedIR() 内では isLoading を直接変更しないこと。
+    //   isLoading の true/false はこの Guard のスコープのみが責務を持つ。
+    ApplyComputedIRLoadingGuard guard(isLoading);
+
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     if (sr > 0.0 && std::abs(prepared->sampleRate - sr) > 1e-6)
     {
@@ -344,7 +368,7 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     JUCE_ASSERT_MESSAGE_THREAD;
 
     // scaleFactor 適用（timeDomainIR はコピーしてから適用し、共有元を保護）
-    if (prepared->hasScaleFactor && prepared->scaleFactor != 1.0)
+    if (prepared->hasScaleFactor && std::abs(prepared->scaleFactor - 1.0) > 1e-12)
     {
         const double sf = prepared->scaleFactor;
 
@@ -613,11 +637,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
             spec.tailL1L2Multiplier = buildSnapshot.tailL1L2Multiplier;
         }
 
-        if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
+        double* irLRaw = irL.get();
+        double* irRRaw = irR.get();
+        if (newConv->init(irLRaw, irRRaw, length, sr, peakDelay,
                   knownBlockSize, preferredCallSize, scaleFactor,
                   getExperimentalDirectHeadEnabled(),
                   &spec, this))
         {
+            irL.release();
+            irR.release();
             jassert(newConv->areNUCDescriptorsCommitted());
             // ★ [P0-3] Release 安全ガード: descriptor 未コミットでも処理継続
             if (!newConv->areNUCDescriptorsCommitted()) [[unlikely]]

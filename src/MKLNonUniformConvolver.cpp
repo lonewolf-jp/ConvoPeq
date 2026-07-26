@@ -71,6 +71,16 @@
 namespace convo
 {
 
+// ★ FFT エラー時に出力バッファをゼロクリア（Fail Closed）。
+static void clearFFTOutputOnError(double* buffer, size_t count,
+                                  [[maybe_unused]] IppStatus status = ippStsNoErr,
+                                  [[maybe_unused]] int stage = 0) noexcept
+{
+    if (buffer != nullptr)
+        std::memset(buffer, 0, count * sizeof(double));
+    // TODO(RuntimeHealth): Record FFT failure info for diagnosable metrics.
+}
+
 #if JUCE_DEBUG
 std::atomic<int> MKLNonUniformConvolver::debugWarmupGuardCountStorage_ { 0 };
 
@@ -1040,12 +1050,14 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
 
             // [v2.1] Forward FFT: real → CCS
             // IPP CCS 出力: [re0,im0,re1,im1,...] ← MKL DFTI_COMPLEX_COMPLEX と同一レイアウト
-            ippsFFTFwd_RToCCS_64f(tempTime, tempFreq, l.fftSpec, l.fftWorkBuf);
+            IppStatus fftStatus = ippsFFTFwd_RToCCS_64f(tempTime, tempFreq, l.fftSpec, l.fftWorkBuf);
+            if (fftStatus != ippStsNoErr)
+                clearFFTOutputOnError(tempFreq, static_cast<size_t>(l.complexSize) * 2, fftStatus, 1);
 
             // [Mem-Fix] irFreqDomain は 1 パーティション分のスクラッチのため、オフセット0(先頭)へ書き込む。
             memcpy(l.irFreqDomain, tempFreq, static_cast<size_t>(l.complexSize) * 2 * sizeof(double));
 
-            if (scale != 1.0)
+            if (std::abs(scale - 1.0) > 1e-12)
                 cblas_dscal(l.complexSize * 2, scale, l.irFreqDomain, 1);
 
             deinterleaveComplex(l.irFreqDomain,
@@ -1057,7 +1069,9 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         // Backward FFT のウォームアップ
         // Audio Thread での初回実行時の遅延 (IPP テーブル生成等) を事前消化する。
         // [v2.1] IFFT: CCS → real (IPP_FFT_DIV_INV_BY_N により 1/N 正規化済み)
-        ippsFFTInv_CCSToR_64f(tempFreq, tempTime, l.fftSpec, l.fftWorkBuf);
+        IppStatus status = ippsFFTInv_CCSToR_64f(tempFreq, tempTime, l.fftSpec, l.fftWorkBuf);
+        if (status != ippStsNoErr)
+            clearFFTOutputOnError(tempTime, l.fftSize, status, 2);
         convo::publishAtomic(l.warmupCompleted, true, std::memory_order_release);
 
         mkl_free(tempTime);
@@ -1373,7 +1387,9 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     // [Mem-Fix] fdlBuf は使い捨てスクラッチ (current=offset0 / mirror=offset partStride)。
     // 永続履歴は fdlReal/fdlImag (SoA) 側にのみ保持する。
     double* currentFDLSlot = l.fdlBuf;
-    ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
+    IppStatus fftStatus3 = ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
+    if (fftStatus3 != ippStsNoErr)
+        clearFFTOutputOnError(currentFDLSlot, static_cast<size_t>(l.complexSize) * 2, fftStatus3, 3);
 
     deinterleaveComplex(currentFDLSlot,
                         l.fdlReal + static_cast<size_t>(l.fdlIndex) * l.complexSize,
@@ -1433,7 +1449,9 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 #endif
     // [v2.1] ippsFFTInv_CCSToR_64f: CCS → real
     // IPP_FFT_DIV_INV_BY_N により 1/N 正規化自動適用 (旧 DFTI_BACKWARD_SCALE と等価)
-    ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
+    IppStatus fftStatus4 = ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
+    if (fftStatus4 != ippStsNoErr)
+        clearFFTOutputOnError(l.fftOutBuf, l.fftSize, fftStatus4, 4);
 
     // ── 5. Overlap-Save: 有効出力をリングへ書き込み ──
     ringWrite(l.fftOutBuf + l.partSize, l.partSize);
@@ -1567,7 +1585,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     // [v2.1] L1/L2 Forward FFT: real → CCS
                     // [Mem-Fix] fdlBuf は使い捨てスクラッチ (current=offset0 / mirror=offset partStride)。
                     double* currentFDLSlot = l.fdlBuf;
-                    ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
+                    IppStatus status = ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
+                    if (status != ippStsNoErr)
+                        clearFFTOutputOnError(currentFDLSlot, static_cast<size_t>(l.complexSize) * 2, status, 5);
 
                     deinterleaveComplex(currentFDLSlot,
                                         l.fdlReal + static_cast<size_t>(l.fdlIndex) * l.complexSize,
@@ -1634,7 +1654,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
             if (l.nextPart >= l.numPartsIR)
             {
                 // [v2.1] Backward FFT: CCS → real (Audio Thread 内で再初期化禁止の制約はIPPも同様)
-                ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
+                IppStatus status = ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
+                if (status != ippStsNoErr)
+                    clearFFTOutputOnError(l.fftOutBuf, l.fftSize, status, 6);
 
                 memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, static_cast<size_t>(l.partSize) * sizeof(double));
                 l.tailOutputPos = 0;

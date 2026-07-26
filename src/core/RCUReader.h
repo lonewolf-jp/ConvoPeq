@@ -207,6 +207,12 @@ public:
         return *this;
     }
 
+    // ★ C-7: RCU enter 成功の確認
+    [[nodiscard]] bool rootEnterSucceeded() const noexcept
+    {
+        return reader != nullptr && reader->rootEnterSucceeded();
+    }
+
 private:
     RCUReader* reader = nullptr;
 };

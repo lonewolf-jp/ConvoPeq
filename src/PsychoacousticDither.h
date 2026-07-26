@@ -101,6 +101,8 @@ public:
 
     PsychoacousticDither(const PsychoacousticDither &) = delete;
     PsychoacousticDither & operator=(const PsychoacousticDither &) = delete;
+    PsychoacousticDither(PsychoacousticDither &&) noexcept = delete;
+    PsychoacousticDither & operator=(PsychoacousticDither &&) noexcept = delete;
 
 private:
 

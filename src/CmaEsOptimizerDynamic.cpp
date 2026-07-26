@@ -201,6 +201,6 @@ void CmaEsOptimizerDynamic::deserializeFrom(const double* inMean, const double* 
             covariance[matrixIndex(c, r, dim)] = inCov[idx];
             ++idx;
         }
-    sigma = inSigma;
+    sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax);
 }
 

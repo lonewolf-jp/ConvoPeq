@@ -26,7 +26,7 @@ public:
     void setParams(const Params& p) noexcept { params = p; }
     void setSeed(uint64_t seed) { rng.seed(static_cast<std::mt19937::result_type>(seed)); }
     /** 初期σを外部から設定する（initFromParcor() の後に呼ぶこと） */
-    void setSigma(double s) noexcept { sigma = s; }
+    void setSigma(double s) noexcept { sigma = std::clamp(s, params.sigmaMin, params.sigmaMax); }
     void initFromParcor(const double* initialMean);
     void sample(std::vector<std::vector<double>>& candidates);
     void update(const std::vector<std::vector<double>>& candidates,
@@ -47,5 +47,5 @@ private:
 
     void resetIdentityCovariance();
     void computeCholesky(std::vector<double>& lowerTriangular) const;
-    static double sanitize(double x) { return (std::abs(x) < 1e-15) ? 0.0 : x; }
+    static double sanitize(double x) { return (!std::isfinite(x) || std::abs(x) < 1e-15) ? 0.0 : x; }
 };

@@ -5,6 +5,7 @@
 #include "SnapshotCoordinator.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "audioengine/ISRAuthorityClass.h"
 #include "SnapshotFactory.h"
 
 namespace convo {
@@ -34,7 +35,10 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 	if (oldTarget) {
 		const uint64_t retireEpoch = m_epochProvider->currentEpoch();
 		// [work37 Phase 1.2] enqueueWithRetry を使用（startFade は NonRT Timer からのみ）
-		enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
+		const auto result = enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
+		if (!result) {
+			// ★ Future: RuntimeHealthMonitor へ通知
+		}
 	}
 
 	m_fade.start(fadeSamples);
@@ -85,8 +89,13 @@ void SnapshotCoordinator::completeFade() noexcept
 	const uint64_t retireEpoch = m_epochProvider->publishEpoch();
 	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel);
 	if (old)
+	{
 		// [work37 Phase 1.2] enqueueWithRetry を使用（completeFade は NonRT）
-		enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
+		const auto result = enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
+		if (!result) {
+			// ★ Future: RuntimeHealthMonitor へ通知
+		}
+	}
 
 	m_fade.resetToIdle();
 }

@@ -2003,6 +2003,17 @@ public:
         return convo::exchangeAtomic(fadingRuntimeDSPSlot, value, std::memory_order_acq_rel);
     }
 
+    // ★ B-1: CAS-only fading slot ownership claim.
+    //   exchange() 不要 — CAS 成功時点で slot = desired となり所有権確定。
+    //   呼び出し元が唯一の fading slot 所有者となる（DSP 全体の所有権ではない）。
+    inline bool claimFadingRuntimeDSP(DSPCore* desired) noexcept
+    {
+        DSPCore* expected = nullptr;
+        return convo::compareExchangeAtomic(fadingRuntimeDSPSlot, expected, desired,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire);
+    }
+
     [[nodiscard]] inline DSPCore* getActiveRuntimeDSP() const noexcept
     {
         return convo::consumeAtomic(activeRuntimeDSPSlot, std::memory_order_acquire);
@@ -3698,11 +3709,10 @@ public:
                                               const convo::GlobalSnapshot*& snapshotFrom,
                                               const convo::GlobalSnapshot*& snapshotTo) noexcept
     {
-        juce::ignoreUnused(numSamples);
-        snapshotAlpha = 1.0f;
-        snapshotFrom = nullptr;
-        snapshotTo = nullptr;
-        return false;
+        // B-3: advanceFade + updateFade（SnapshotFade と Crossfade は別機構）
+        // advanceFade はこの関数内でのみ呼ぶ（二重進行防止）
+        m_coordinator.advanceFade(numSamples);
+        return m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
     }
 
     inline void armCrossfadeIfPending(bool hasFading,

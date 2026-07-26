@@ -407,7 +407,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                                   preparedCrossfade.latencyDelayOld,
                                                                   preparedCrossfade.latencyDelayNew,
                                                                   preparedCrossfade.latencyResetPending,
-                                                  [](double* outL,
+                                                  [this, useDryAsOld](double* outL,
                                                      double* outR,
                                                      int i,
                                                      double gNew,
@@ -417,13 +417,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                      double alignedNewR)
                                                   {
                                                       // ★ ADR-003/006: 等電力クロスフェード（エネルギー保存の不変条件）
-                                                      // ★ float版との意味論一致: dryScale を適用
+                                                      // ★ BUG-033/C-1: float版と同様に useDryAsOld 時に dryScale を適用
+                                                      const double dryScale = useDryAsOld ? crossfadeRuntime_.getDryScaleGain().getNextValue() : 1.0;
                                                       const double gOld = equalPowerSin(1.0 - gNew);
                                                       const double gNewEp = equalPowerSin(gNew);
-                                                      // Note: double版では useDryAsOld=false のため dryScale=1.0 固定
-                                                      // 将来 useDryAsOld=true のケースが追加された場合は float版と同じパターンで対応
-                                                      if (outL != nullptr) outL[i] = alignedNewL * gNewEp + alignedOldL * gOld;
-                                                      if (outR != nullptr) outR[i] = alignedNewR * gNewEp + alignedOldR * gOld;
+                                                      const double dryScaledL = alignedOldL * dryScale;
+                                                      const double dryScaledR = alignedOldR * dryScale;
+                                                      if (outL != nullptr) outL[i] = static_cast<double>(alignedNewL * gNewEp + dryScaledL * gOld);
+                                                      if (outR != nullptr) outR[i] = static_cast<double>(alignedNewR * gNewEp + dryScaledR * gOld);
                                                   });
         if (!useDryAsOld)
         {

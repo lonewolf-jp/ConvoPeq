@@ -59,8 +59,15 @@ public:
                 if (health == convo::ISRHealthState::Critical) {
                     lifetime.activate(newDSP);
                     if (oldDSP != nullptr) {
+                        // ★ Temporary: exchangeFadingRuntimeDSP (A-6 fix).
+                        //   Will be removed after B-1 CAS-only claimFadingRuntimeDSP().
+                        auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);
                         engine_.crossfadeRuntime_.complete();
                         lifetime.retire(oldDSP);
+                        if (prevRaw != oldDSP) {
+                            if (prevRaw != nullptr)
+                                lifetime.retire(prevRaw);
+                        }
                         // ★ enqueueHealthEvent で非同期投入（層の逆流＋同期実行防止）
                         const uint64_t abortCount = engine_.crossfadeRuntime_.incrementEmergencyAbortCount();
                         engine_.enqueueHealthEvent(convo::HealthEvent{convo::getCurrentTimeUs(),
@@ -88,15 +95,13 @@ public:
                 engine_.dspHandleRuntime_.beginCrossfade(oldHandle, newHandle, xfadeId);
             }
 
-            // exchangeFadingRuntimeDSP + retire
-            auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);
-            if (auto* prev = (reinterpret_cast<uintptr_t>(prevRaw) == (~static_cast<uintptr_t>(0)))
-                             ? nullptr : prevRaw)
-            {
-                if (prev != oldDSP) {
-                    // 異なる DSP が fading に入っていた場合も retire
-                    lifetime.retire(prev);
-                }
+            // ★ B-1: CAS-only fading slot claim.
+            //   exchangeFadingRuntimeDSP の代わりに claimFadingRuntimeDSP を使用。
+            //   CAS 成功時点で slot = oldDSP となり、exchange() は不要。
+            //   prevRaw を取得する必要がない（CAS が nullptr→oldDSP の直接遷移を保証）。
+            if (!engine_.claimFadingRuntimeDSP(oldDSP)) {
+                // CAS 失敗 → 別の遷移が既にスロットを占有。oldDSP を直接 retire。
+                lifetime.retire(oldDSP);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -122,13 +127,16 @@ public:
         if (currentAfterFade == nullptr)
             return;
 
-        auto* doneRaw = engine_.exchangeFadingRuntimeDSP(nullptr);
-        if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw) == (~static_cast<uintptr_t>(0)))
-                         ? nullptr : doneRaw)
+        // ★ B-1: CAS-based fading slot clear
+        AudioEngine::DSPCore* current = convo::consumeAtomic(engine_.fadingRuntimeDSPSlot, std::memory_order_acquire);
+        if (current != nullptr
+            && convo::compareExchangeAtomic(engine_.fadingRuntimeDSPSlot, current,
+                                         static_cast<AudioEngine::DSPCore*>(nullptr),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
         {
-            // retire old fading DSP
             DSPLifetimeManager lifetime(engine_);
-            lifetime.retire(done);
+            lifetime.retire(current);
         }
 
         engine_.crossfadeRuntime_.setDryHoldSamples(0);

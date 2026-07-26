@@ -89,10 +89,15 @@ public:
         return &crossfadeEventDropCount_;
     }
 
-    // complete: クロスフェード完了時 (timer から)
+    // complete: 通常のクロスフェード完了時。pending_ を false に戻し、
+    // stale フラグ (useDryAsOld_, firstIrDryPending_, firstIrDryDone_) をクリア。
+    // シャットダウン時は reset() を使用すること。
     void complete() noexcept
     {
         convo::publishAtomic(pending_, false, std::memory_order_release);
+        convo::publishAtomic(useDryAsOld_, false, std::memory_order_release);
+        convo::publishAtomic(firstIrDryPending_, false, std::memory_order_release);
+        convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, 0.030, std::memory_order_release);
         convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
     }

@@ -14,6 +14,7 @@
 #include "SnapshotSlotStore.h"
 #include "IEpochProvider.h"
 #include "SnapshotFactory.h"
+#include "audioengine/ISRAuthorityClass.h"
 
 namespace convo {
 
@@ -80,7 +81,16 @@ public:
             SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
         };
 
-        resetFadeStateAndRetireTarget();
+        // ★ C-2: switchImmediate は Non-RT → enqueueWithRetry でリトライ対応
+        GlobalSnapshot* oldTarget = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
+        if (oldTarget) {
+            const uint64_t retireEpoch = m_epochProvider->currentEpoch();
+            const auto result = enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
+            if (!result) {
+                // ★ Future: RuntimeHealthMonitor へ通知
+            }
+        }
+        m_fade.resetToIdle();
         // release: 新スナップを公開し、observeCurrentRuntime/updateFade の acquire と HB 。
         //          旧ポインタ回収は release で十分（publishNew と同一 NonRT スレッドから呼ぶ前提）。
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
@@ -118,6 +128,9 @@ public:
         outTarget = m_slots.loadTarget(std::memory_order_acquire);
         if (outTarget == nullptr)
         {
+            // ★ D-3: target==null → completeFade が並行実行された可能性。state を再確認。
+            if (m_fade.state() == FadeState::Idle)
+                return false;  // 別スレッドが既に fade を完了させた
             resetFadeStateAndRetireTarget();
             outAlpha = 1.0f;
             outTarget = nullptr;
@@ -136,6 +149,12 @@ public:
     bool isFading() const noexcept
     {
         return m_fade.isFading();
+    }
+
+    // ★ B-4: 現在有効な GlobalSnapshot を取得（Immutable、acquire 保証）
+    [[nodiscard]] const GlobalSnapshot* getCurrentSnapshot() const noexcept
+    {
+        return m_slots.loadCurrent(std::memory_order_acquire);
     }
 
 private:

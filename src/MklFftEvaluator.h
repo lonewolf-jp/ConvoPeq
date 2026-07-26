@@ -135,6 +135,11 @@ public:
         if (spectrumRight != nullptr) convo::aligned_free(spectrumRight);
     }
 
+    MklFftEvaluator(const MklFftEvaluator&) = delete;
+    MklFftEvaluator& operator=(const MklFftEvaluator&) = delete;
+    MklFftEvaluator(MklFftEvaluator&&) = delete;
+    MklFftEvaluator& operator=(MklFftEvaluator&&) = delete;
+
     void configureForSampleRate(double sampleRateHz) noexcept
     {
         const double safeSampleRateHz = std::max(1.0, sampleRateHz);

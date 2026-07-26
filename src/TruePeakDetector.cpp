@@ -99,8 +99,8 @@ double TruePeakDetector::processBlock(const double* dataL, const double* dataR, 
         return 0.0;
 
     double* work = upsampleBuffer.get();
-    const int up1Samples = numSamples * 2;
-    const int up2Samples = numSamples * 4;
+    const size_t up1Samples = static_cast<size_t>(numSamples) * 2;
+    const size_t up2Samples = static_cast<size_t>(numSamples) * 4;
 
     // オフセット: work 領域のレイアウト
     //   [ Stage0 L | Stage0 R | Stage1 L | Stage1 R ]

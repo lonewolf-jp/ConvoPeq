@@ -130,8 +130,16 @@ AudioEngine::~AudioEngine()
         }
         setActiveRuntimeDSP(nullptr);
         {
-            auto* const fadingRaw = exchangeFadingRuntimeDSP(nullptr);
-            fadingToRelease = (reinterpret_cast<uintptr_t>(fadingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : fadingRaw;
+            // ★ B-1: CAS-based fading slot clear
+            DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
+            if (current != nullptr
+                && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current,
+                                                 static_cast<DSPCore*>(nullptr),
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+                fadingToRelease = current;
+            else
+                fadingToRelease = nullptr;
         }
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",

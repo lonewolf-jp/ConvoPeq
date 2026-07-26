@@ -437,7 +437,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
         if (!state.convBypassed)
         {
-            if (state.convolverInputTrimGain != 1.0)
+            if (std::abs(state.convolverInputTrimGain - 1.0) > 1e-12)
             {
                 for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
                 {

@@ -879,6 +879,8 @@ private:
 
     std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle
     std::atomic<bool> isLoading { false };
+    // ★ B-6: Loader validity generation。ConvolverProcessor 破棄時に fetch_add で increment。
+    std::atomic<uint64_t> loaderGeneration_ { 0 };
     std::atomic<bool> isRebuilding { false };
     std::atomic<bool> irFinalized { false };
     std::atomic<bool> useIncrementalRebuild { false };

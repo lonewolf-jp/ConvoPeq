@@ -877,11 +877,18 @@ void AudioEngine::timerCallback()
             }
         }
 
-        auto* const doneRaw1 = exchangeFadingRuntimeDSP(nullptr);
-        if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw1) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw1)
+        // ★ B-1: CAS-based fading slot clear (replaces exchangeFadingRuntimeDSP)
         {
-            DSPLifetimeManager lifetimeMgr(*this);
-            lifetimeMgr.retire(done);
+            DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
+            if (current != nullptr
+                && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current,
+                                                 static_cast<DSPCore*>(nullptr),
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+            {
+                DSPLifetimeManager lifetimeMgr(*this);
+                lifetimeMgr.retire(current);
+            }
         }
         crossfadeRuntime_.complete();
         crossfadeRuntime_.setStartDelayBlocks(0);
@@ -999,11 +1006,16 @@ void AudioEngine::timerCallback()
 
     if (!m_coordinator.isFading())
     {
-        auto* const doneRaw2 = exchangeFadingRuntimeDSP(nullptr);
-        if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw2) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw2)
+        // ★ B-1: CAS-based fading slot clear
+        DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
+        if (current != nullptr
+            && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current,
+                                             static_cast<DSPCore*>(nullptr),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
         {
             DSPLifetimeManager lifetimeMgr(*this);
-            lifetimeMgr.retire(done);
+            lifetimeMgr.retire(current);
         }
     }
 
@@ -1551,12 +1563,16 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         diagLog("[HEALTH] Crossfade timeout detected, initiating recovery");
 
         // 1. 滞留中の fading DSP を強制退役
-        auto* doneRaw = exchangeFadingRuntimeDSP(nullptr);
-        if (doneRaw != nullptr
-            && reinterpret_cast<uintptr_t>(doneRaw) != (~static_cast<uintptr_t>(0)))
+        // ★ B-1: CAS-based fading slot clear
+        DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
+        if (current != nullptr
+            && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current,
+                                             static_cast<DSPCore*>(nullptr),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(*this);
-            lifetime.retire(doneRaw);
+            lifetime.retire(current);
         }
 
         // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得

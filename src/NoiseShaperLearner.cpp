@@ -640,11 +640,11 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
             sharedMappedPopulation = std::move(newBuf);
         }
 
-        alignas(64) double tanhBuffer[totalCoeffs] = {};
+        auto tanhBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(totalCoeffs));
         const auto* population = candidatePopulationMatrix();
         vdTanh(totalCoeffs,
                reinterpret_cast<const double*>(population),
-               tanhBuffer);
+               tanhBuffer.get());
 
         const double safetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
         for (int i = 0; i < totalCoeffs; ++i)
@@ -1163,7 +1163,7 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
         segmentBuffer.pushBlock(block.L, block.R, block.numSamples);
         const int playbackSampleRateHz = (session.sampleRateHz > 0)
             ? session.sampleRateHz
-            : ((block.sampleRateHz > 0) ? block.sampleRateHz : 1);
+            : ((block.sampleRateHz > 0) ? block.sampleRateHz : 48000);
         accumulatedPlaybackSeconds += static_cast<double>(block.numSamples)
             / static_cast<double>(playbackSampleRateHz);
         ++stats.acceptedBlocks;

@@ -102,6 +102,10 @@ ConvolverProcessor::ConvolverProcessor()
 // ────────────────────────────────────────────────────────────────
 ConvolverProcessor::~ConvolverProcessor()
 {
+    // ★ B-6: Generation を進めて全 LoaderThread を無効化（Loader は次回起動時に終了）。
+    //   Generation は Owner validity のみ。Thread join は別責務。
+    convo::fetchAddAtomic(loaderGeneration_, 1, std::memory_order_acq_rel);
+
     stopUpgradeThread();
     stopTimer();
     forceCleanup();
@@ -139,6 +143,13 @@ ConvolverProcessor::~ConvolverProcessor()
 // ────────────────────────────────────────────────────────────────
 void ConvolverProcessor::timerCallback()
 {
+    // ★ C-6: RCU reader guard — engine ポインタの有効性を保護
+    struct GlobalGuard {
+        const ConvolverProcessor& cp;
+        GlobalGuard(const ConvolverProcessor& cp_) : cp(cp_) { cp.enterGlobalReader(3); }
+        ~GlobalGuard() { cp.exitGlobalReader(3); }
+    } guard(*this);
+
     const int currentClampCount = convo::consumeAtomic(latencyClampCounter(), std::memory_order_acquire); // acquire: Runtime 側 fetchAddAtomic acq_rel と HB
     if (currentClampCount != lastReportedClampCount_)
     {

@@ -837,7 +837,9 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
         {
             double* dst = outputBlock.getChannelPointer(ch);
             const double* src = upsampledBlock.getChannelPointer(ch);
-            std::memcpy(dst, src, static_cast<size_t>(targetSamples) * sizeof(double));
+const size_t copySamples = std::min(static_cast<size_t>(targetSamples),
+                                            static_cast<size_t>(upsampledBlock.getNumSamples()));
+        std::memcpy(dst, src, copySamples * sizeof(double));
         }
         return;
     }

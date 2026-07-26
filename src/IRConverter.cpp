@@ -260,15 +260,14 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
         converted = IRDSP::resampleIR(ir, sourceRate, config.targetSampleRate, shouldCancel);
         if (converted.getNumSamples() <= 0)
         {
-            // ★ Workaround: r8brain resampling failed (e.g., 48000→192000 Hz).
-            // Fall back to original IR. Report the IR at the target sample rate
-            // so the convolver engine uses the correct processing rate.
-            // The engine handles internal sample rate conversion.
+            // ★ r8brain resample failed. IR data is at sourceRate, so label it
+            //   accordingly. Previously this mislabeled as targetSampleRate,
+            //   corrupting downstream frequency analysis.
             juce::Logger::writeToLog("[DIAG_IR] convertFile: resampleIR failed, "
                 "falling back to original IR (srcSr=" + juce::String(sourceRate, 1)
                 + " targetSr=" + juce::String(config.targetSampleRate, 1) + ")");
             converted = ir;
-            actualSampleRate = config.targetSampleRate;
+            actualSampleRate = sourceRate;
         }
         else
         {
@@ -393,7 +392,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertToHighRes(const juce::File&
 //==============================================================================
 double IRConverter::estimateMaxFrequencyResponseGain(
     const juce::AudioBuffer<double>& ir,
-    double /*sampleRate*/) noexcept
+    double /*sampleRate - future use for frequency weighting*/) noexcept
 {
     return IRAnalyzer::estimateMaxFrequencyResponseGain(ir);
 }

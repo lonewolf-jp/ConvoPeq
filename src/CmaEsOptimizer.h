@@ -40,6 +40,11 @@ public:
         convo::aligned_free(covariance);
     }
 
+    CmaEsOptimizer(const CmaEsOptimizer&) = delete;
+    CmaEsOptimizer& operator=(const CmaEsOptimizer&) = delete;
+    CmaEsOptimizer(CmaEsOptimizer&&) = delete;
+    CmaEsOptimizer& operator=(CmaEsOptimizer&&) = delete;
+
     void setParams(const Params& p) noexcept
     {
         params = p;
@@ -76,7 +81,7 @@ public:
     {
         std::copy(inMean9, inMean9 + kDim, mean);
         deserializeCovUpperTriangle(inCov45);
-        sigma = inSigma;
+        sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax);
     }
 
     void setMean(const double* inMean) noexcept
@@ -200,7 +205,7 @@ public:
 private:
     static inline double sanitize(double x) noexcept
     {
-        return (std::abs(x) < 1e-15) ? 0.0 : x;
+        return (!std::isfinite(x) || std::abs(x) < 1e-15) ? 0.0 : x;
     }
 
     static double parcorToUnconstrained(double value) noexcept

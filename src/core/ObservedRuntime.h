@@ -45,6 +45,9 @@ struct ObservedRuntime
         if (ownerThreadId != std::this_thread::get_id())
             return nullptr;
 #endif
+        // ★ C-7: Release ビルドでも RCU enter 成功を確認
+        if (!guard.rootEnterSucceeded())
+            return nullptr;
         return ptr;
     }
 

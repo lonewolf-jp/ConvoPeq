@@ -71,7 +71,7 @@ private:
     static constexpr float MIN_DB       = -80.0f;
 
     // ── FFT設定 ──
-    static constexpr float FFT_MAGNITUDE_SCALE = 4.0f / NUM_FFT_POINTS;
+    static constexpr float FFT_MAGNITUDE_SCALE = 2.0f / NUM_FFT_POINTS;
     static constexpr float FFT_DISPLAY_MIN_DB = -100.0f;
     static constexpr float FFT_DISPLAY_MIN_MAG = 1e-9f;
 

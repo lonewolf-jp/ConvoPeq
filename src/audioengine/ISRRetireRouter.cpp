@@ -151,7 +151,10 @@ void ISRRetireRouter::retire(void* ptr, void (*deleter)(void*)) noexcept
     assert(provider_ != nullptr);
     if (ptr == nullptr || deleter == nullptr)
         return;
-    (void)enqueueWithRetry(ptr, deleter, provider_->currentEpoch(), DeletionEntryType::Generic);
+    const auto result = enqueueWithRetry(ptr, deleter, provider_->currentEpoch(), DeletionEntryType::Generic);
+    if (result != RetireEnqueueResult::Success) {
+        // ★ Future: RuntimeHealthMonitor へ通知
+    }
 }
 
 // ★ Bug2 Phase1: リトライロジックを Router に集約。呼び出し元はリトライループ不要。

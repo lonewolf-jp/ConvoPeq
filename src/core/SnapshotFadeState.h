@@ -36,12 +36,18 @@ public:
         convo::publishAtomic(remainingSamples_, fadeSamples, std::memory_order_release);
         convo::publishAtomic(alpha_, 0.0, std::memory_order_release);
         convo::publishAtomic(state_, FadeState::FadingIn, std::memory_order_release);
+        // ★ B-5: ABA generation は最後に publish（Version が payload より先行しないよう順序固定）
+        convo::publishAtomic(fadeGeneration_, fadeGeneration_.load(std::memory_order_relaxed) + 1,
+                             std::memory_order_release);
     }
 
     void advance(int numSamples) noexcept
     {
         if (state() != FadeState::FadingIn)
             return;
+
+        // ★ B-5: advance() 開始時の ABA generation を保存
+        const uint64_t genAtStart = convo::consumeAtomic(fadeGeneration_, std::memory_order_acquire);
 
         const int remaining = remainingCount();
         if (remaining <= 0)
@@ -57,6 +63,15 @@ public:
 
         // release: tryComplete/advance 次回の acquire と HB し最新残量を公開。
         convo::publishAtomic(remainingSamples_, newRemaining, std::memory_order_release);
+
+        // ★ state 再確認（resetToIdle 競合対策）
+        if (state() != FadeState::FadingIn)
+            return;
+
+        // ★ ABA generation 再確認（startFade で increment されたら不一致）
+        if (genAtStart != convo::consumeAtomic(fadeGeneration_, std::memory_order_acquire))
+            return;
+
         const int total = totalCount();
         if (total > 0)
         {
@@ -125,6 +140,8 @@ private:
     std::atomic<FadeState> state_ { FadeState::Idle };
     std::atomic<int> totalSamples_ { 0 };
     std::atomic<int> remainingSamples_ { 0 };
+    // ★ B-5: ABA detection generation（startFade で increment、advance で比較）
+    std::atomic<uint64_t> fadeGeneration_ { 0 };
 };
 
 } // namespace convo

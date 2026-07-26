@@ -35,6 +35,9 @@ ConvolverProcessor::LoaderThread::~LoaderThread()
 
 void ConvolverProcessor::LoaderThread::run()
 {
+    // ★ B-6: Generation check is pending implementation in the load loop.
+    //   See REPAIR_PLAN section B-6 for the complete pattern.
+
     if (auto* provider = owner.getRcuProvider(); provider != nullptr)
         provider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
@@ -145,6 +148,10 @@ ConvolverProcessor::LoaderThread::LoadResult ConvolverProcessor::LoaderThread::p
 
 int ConvolverProcessor::LoaderThread::estimatePeakLatencySamples(const juce::AudioBuffer<double>& trimmed, int targetLength) const
 {
+    // ★ C-5: targetLength <= 0 で jlimit(0, -1, val) → UB の防止
+    if (targetLength <= 0)
+        return 0;
+
     int irPeakLatency = 0;
     if (trimmed.getNumChannels() > 0)
     {
