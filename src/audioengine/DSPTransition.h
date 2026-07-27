@@ -99,9 +99,14 @@ public:
             //   exchangeFadingRuntimeDSP の代わりに claimFadingRuntimeDSP を使用。
             //   CAS 成功時点で slot = oldDSP となり、exchange() は不要。
             //   prevRaw を取得する必要がない（CAS が nullptr→oldDSP の直接遷移を保証）。
-            if (!engine_.claimFadingRuntimeDSP(oldDSP)) {
+            const bool claimed = engine_.claimFadingRuntimeDSP(oldDSP);
+            if (!claimed) {
                 // CAS 失敗 → 別の遷移が既にスロットを占有。oldDSP を直接 retire。
                 lifetime.retire(oldDSP);
+            } else {
+                // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
+                const auto epoch = engine_.currentPublicationEpoch();
+                engine_.storeReceipt(oldDSP, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -136,7 +141,7 @@ public:
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(engine_);
-            lifetime.retire(current);
+            engine_.retirePublishedDSP(current, lifetime);
         }
 
         engine_.crossfadeRuntime_.setDryHoldSamples(0);

@@ -887,7 +887,7 @@ void AudioEngine::timerCallback()
                                                  std::memory_order_acquire))
             {
                 DSPLifetimeManager lifetimeMgr(*this);
-                lifetimeMgr.retire(current);
+                retirePublishedDSP(current, lifetimeMgr);
             }
         }
         crossfadeRuntime_.complete();
@@ -1015,7 +1015,7 @@ void AudioEngine::timerCallback()
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetimeMgr(*this);
-            lifetimeMgr.retire(current);
+            retirePublishedDSP(current, lifetimeMgr);
         }
     }
 
@@ -1572,7 +1572,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(*this);
-            lifetime.retire(current);
+            retirePublishedDSP(current, lifetime);
         }
 
         // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得
@@ -1726,6 +1726,77 @@ bool AudioEngine::tryReserveProbeBudget() noexcept
         return true;
     }
     return false;
+}
+// ★ HW-1: retirePublishedDSP — publication epoch を伝搬する retire パス
+//
+// ★ Retire の3分類:
+//   [Normal Retire] 一致 (current == receipt->dsp):
+//     receipt->publicationEpoch を伝搬 → HW-1 の目的達成
+//
+//   [Fallback Retire] receipt なし (receiptReady_ == false):
+//     router_->currentEpoch() を使用。
+//     shutdown/initial state 等の正常な理由で receipt がない場合。
+//     異常ではないが、HW-1 の目的は達成しない。
+//
+//   [Emergency Retire] 不一致/fatal:
+//     router_->currentEpoch() を使用。
+//     receipt は存在するが current に対応しない（異常状態）。
+//     HW-1 の目的は達成しない。リーク防止の安全側フォールバック。
+//     publicationEpoch の流用は行わない（Semantic Single Source）。
+//
+// ★ Invariant: Publication Metadata Propagation は Normal Retire のみが対象。
+//   Fallback Retire および Emergency Retire は意図的に metadata 伝搬を行わない。
+//
+// ★ [ADR-2026-07-28] CAS 完了後の mismatch 処理:
+//   Caller（Timer）が既に CAS で fadingRuntimeDSPSlot をクリアした後に呼ばれる。
+//   したがって、mismatch 時に「退役延期（再試行可能）」は成立しない
+//   （slot が空なので次回 CAS で current を再取得できない）。
+//   よって全パスで current を必ず retire する。
+//
+// ★ 診断カウンタ (relaxed): normalRetireCount_, fallbackRetireCount_, emergencyRetireCount_
+void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept
+{
+    if (!receiptReady_.load(std::memory_order_acquire)) {
+        // ★ Fallback Retire: receipt なし → runtimeEpoch（正常範囲）
+        fallbackRetireCount_.fetch_add(1, std::memory_order_relaxed);
+        lifetimeMgr.retire(current, 0);
+        return;
+    }
+    if (fatal_.load(std::memory_order_relaxed)) {
+        // ★ Emergency Retire: fatal → runtimeEpoch（pendingReceipt_ は診断用に保持）
+        emergencyRetireCount_.fetch_add(1, std::memory_order_relaxed);
+        lifetimeMgr.retire(current, 0);
+        return;
+    }
+
+    assert(pendingReceipt_.has_value()
+        && "retirePublishedDSP: receiptReady_ true but pendingReceipt_ empty");
+
+    uint64_t epoch = 0;
+    if (current == pendingReceipt_->dsp) {
+        // ★ Normal Retire: 一致 → publicationEpoch を伝搬（HW-1 目的達成）
+        epoch = pendingReceipt_->publicationEpoch;
+        normalRetireCount_.fetch_add(1, std::memory_order_relaxed);
+        mismatchCount_.store(0, std::memory_order_relaxed);
+        pendingReceipt_.reset();
+        receiptReady_.store(false, std::memory_order_relaxed);
+    } else {
+        // ★ Emergency Retire: 不一致（current != receipt->dsp）
+        //   receipt->publicationEpoch は current に対応しないため使用不可。
+        //   runtimeEpoch（router_->currentEpoch()）で退役。
+        //   receipt は保持（次回 Normal Retire 時に再利用可能）。
+        emergencyRetireCount_.fetch_add(1, std::memory_order_relaxed);
+        uint32_t cnt = mismatchCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (cnt >= kMaxMismatch) {
+            fatal_.store(true, std::memory_order_relaxed);
+            assert(false && "retirePublishedDSP: Fatal — persistent mismatch");
+        }
+        lifetimeMgr.retire(current, 0);
+        return;
+    }
+    // epoch > 0 → overload 経由で publicationEpoch を伝搬（Normal Retire）
+    // epoch=0 → LifetimeManager 内部で router_->currentEpoch() を使用
+    lifetimeMgr.retire(current, epoch);
 }
 
 // [work39 Phase 6] Suppression Probe — commit or rollback

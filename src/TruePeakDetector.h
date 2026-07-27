@@ -72,6 +72,6 @@ private:
     static double dotProductAvx2(const double* x, const double* coeffs, int n) noexcept;
 
     void interpolateStage(const Stage& stage,
-                          const double* input, int inputSamples,
+                          const double* input, size_t inputSamples,
                           double* output, int channel) noexcept;
 };

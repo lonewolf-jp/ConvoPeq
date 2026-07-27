@@ -59,6 +59,10 @@ public:
     [[nodiscard]] std::uint64_t retireAuthorityCount() const noexcept;
     const void* getCurrent() const noexcept;
     std::uint64_t getVersion() const noexcept;
+    // ★ HW-1: 最新の publicationEpoch を取得（storeReceipt 用）
+    [[nodiscard]] PublicationEpoch currentPublicationEpoch() const noexcept {
+        return persistentState_.publicationEpoch;
+    }
     void setRetireBacklogCount(std::uint64_t count) noexcept;
     void setPublicationBacklogCount(std::uint64_t count) noexcept;
     void setPendingIntentCount(std::uint64_t count) noexcept;

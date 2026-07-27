@@ -105,10 +105,10 @@ double TruePeakDetector::processBlock(const double* dataL, const double* dataR, 
     // オフセット: work 領域のレイアウト
     //   [ Stage0 L | Stage0 R | Stage1 L | Stage1 R ]
     //   Stage0 は zero-offset、それ以外は up1Samples/up2Samples に依存する runtime 値
-    constexpr int kStage0LOffset = 0;
-    const int   kStage0ROffset = up1Samples;
-    const int   kStage1LOffset = up1Samples * 2;
-    const int   kStage1ROffset = up1Samples * 2 + up2Samples;
+    constexpr size_t kStage0LOffset = 0;
+    const size_t     kStage0ROffset = up1Samples;
+    const size_t     kStage1LOffset = up1Samples * 2;
+    const size_t     kStage1ROffset = up1Samples * 2 + up2Samples;
 
     // Stage 0: 1x -> 2x (L)
     interpolateStage(stages[0], dataL, numSamples, work + kStage0LOffset, 0);
@@ -123,8 +123,8 @@ double TruePeakDetector::processBlock(const double* dataL, const double* dataR, 
     interpolateStage(stages[1], work + kStage0ROffset, up1Samples, work + kStage1ROffset, 1);  // R
 
     // Peak scan: L/R 別領域で独立実行
-    double peakL = scanPeak(work + kStage1LOffset, up2Samples);
-    double peakR = scanPeak(work + kStage1ROffset, up2Samples);
+    double peakL = scanPeak(work + kStage1LOffset, static_cast<int>(up2Samples));
+    double peakR = scanPeak(work + kStage1ROffset, static_cast<int>(up2Samples));
     double peak = std::max(peakL, peakR);
 
     // ピークホールド（指数平滑）
@@ -282,7 +282,7 @@ void TruePeakDetector::prepareStage(Stage& stage, int taps, double attenuationDb
 }
 
 void TruePeakDetector::interpolateStage(const Stage& stage,
-                                        const double* input, int inputSamples,
+                                        const double* input, size_t inputSamples,
                                         double* output, int channel) noexcept
 {
     auto* history = stage.upHistory[channel].get();
@@ -298,9 +298,11 @@ void TruePeakDetector::interpolateStage(const Stage& stage,
     std::memmove(history, history + inputSamples, static_cast<size_t>(histLen) * sizeof(double));
     std::memcpy(history + histLen, input, static_cast<size_t>(inputSamples) * sizeof(double));
 
-    for (int n = 0; n < inputSamples; ++n)
+    for (size_t n = 0; n < inputSamples; ++n)
     {
-        const double* base = history + histLen + n - centerDelay;
+        // ptrdiff_t で signed 演算し size_t の wrap-around を防止
+        const auto baseIdx = static_cast<ptrdiff_t>(histLen) + static_cast<ptrdiff_t>(n) - static_cast<ptrdiff_t>(centerDelay);
+        const double* base = history + baseIdx;
         const double even = base[0] * cCoeff + dotProductAvx2(base - convParity, stage.convCoeffsReversed.get(), convCnt);
         const double odd  = base[1] * cCoeff + dotProductAvx2(base - 1 + convParity, stage.convCoeffsReversed.get(), convCnt);
         output[n * 2]     = even;

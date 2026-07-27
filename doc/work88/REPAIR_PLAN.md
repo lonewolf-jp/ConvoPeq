@@ -1,753 +1,571 @@
 # ConvoPeq 改修設計書 — BUG-011〜BUG-046 修正計画
 
-> 3部構成。第一部「設計」のみ読めば実装可能。
-> 本稿は4次レビュー（2026-07-26）までの全指摘を反映した最終版。
+> **凡例**: ✅ 実装完了 → Appendix A 参照。⚠️ 未実装/未確定 → 本セクション「残課題」参照。
+> **v9（2026-07-28）: 全残課題を最終調査・確定。HW-2: Single Producer 確認→δ案。HW-3: Dead Code 確定→削除。U-6: CRTP 方式に決定。設計上の注意点5項目を全件調査完了。**
 
 ---
 
-# 第一部: 設計
+# 残課題（未実装・未確定・TODO・残存リスク）
 
-## 1. 改修方針
+## 残課題一覧
 
-### 前提とする設計原則
+| ID | 分類 | バグ | 重要度 | ステータス |
+|----|------|------|--------|-----------|
+| **HW-2** | B（設計） | SafeStateSwapper Queue Protocol 安全性証明 | 🔴 HIGH | ✅ **確定（δ案）— Single Producer/Single Consumer 永久保証確認。SlotState 不要** |
+| **HW-3** | B（設計） | updateAudioThreadSnapshotFade | 🟡 P2 | ✅ **Dead Code 確定 — 削除方針決定** |
+| **U-6** | U（未確定） | FFT異常系テスト | 🟢 LOW | ✅ **CRTP 方式に決定 — 未実装** |
+| — | — | — | — | — |
+| **D-注意** | 設計上の注意点 | 各種トレードオフ・監視項目 | — | ✅ 全5項目調査完了（下記参照） |
 
-| 原則 | 内容 |
-|------|------|
-| **Authority Singularization** | 各責務の Authority は一意。Timer は観測者 |
-| **責務分離** | SnapshotFade と Crossfade は別機構 |
-| **RT スレッドは観測者** | Audio Thread は観測するが判断しない |
-| **Fail Closed** | エラー時はゼロ出力/安全側 |
-| **CAS-based synchronization** | スロット排他には CAS を用い、追加フラグを増やさない |
-
-### 実施グループ一覧
-
-| グループ | 性質 | 件数 | 工数目安 |
-|----------|------|------|----------|
-| **A** | 即時実施可能 | 13件 | 2〜4時間 |
-| **B** | 設計確定済み | 6件 | 1〜2日（B-2は要追加検証） |
-| **C** | 計画的対応 | 7件 | 2〜4時間 |
-| **D** | 余裕時 | 4件 | 1〜2時間 |
-
----
-
-## 2. グループA: 即時実施可能（13件）
-
-### A-1: BUG-038 — SpectrumAnalyzer FFT スケーリング誤差
+## P0: HW-2 SafeStateSwapper Queue Protocol 安全性証明
 
 | 項目 | 内容 |
 |------|------|
-| **ファイル** | `src/SpectrumAnalyzerComponent.h:74` |
-| **修正** | 定数値変更（1行） |
+| **対応バグ** | BUG-023 |
+| **重要度** | 🔴 HIGH |
+| **関連ファイル** | `src/SafeStateSwapper.h` |
+| **作業** | 設計検証2日＋実装1日 |
+| **ステータス** | ✅ **確定（δ案）— Single Producer/Single Consumer 永久保証確認。SlotState 不要** |
+
+### 現状の問題
+
+`SafeStateSwapper::swap()` の ring buffer で `tail` が3責務を兼任:
+
+1. **Queue position**: 次に書き込む slot の識別
+2. **Reservation**: slot の確保状態
+3. **Commit**: slot の内容確定と Reader への公開
+
+このため `write state/epoch → CAS tail` の順序において、CAS 失敗時に「未確定の slot に有効な payload だけが残留する」状態が発生する可能性がある。
+
+**詳細調査結果**: Appendix C.2 参照（SafeStateSwapper 387行の詳細分析、プロトコル検証、consumer一覧）
+
+### 設計検討プロセス
+
+#### Step 1: 競合シナリオの形式検証
+
+| シナリオ | 現行プロトコルでの挙動 | リスク |
+|----------|----------------------|--------|
+| `write state/epoch` → CAS tail 失敗 | slot に payload が書かれたまま次の書き込みで上書き | 他スレッドが読まなければ問題なし |
+| CAS tail 成功 → Reader 到達前に payload 未書込み | Reader が未初期化データを読む | getState は retiredBuffer を読まない ✅ |
+| 逆順: CAS tail → write state/epoch | Reader が payload 未書込みの slot を読む可能性 | 同上 ✅ |
+| `tryReclaim()` と `swap()` の同時実行 | tail の CAS 競合 | Single Consumer 前提 ✅ |
+
+#### Step 2: 設計候補の比較評価
+
+**注意**: 以下は設計候補の列挙であり、いずれかを「採用案」として推奨するものではない。
+
+| # | アプローチ | 概要 | Pros | Cons |
+|---|-----------|------|------|------|
+| α | **Seqlock 導入** | retiredBuffer に偶数/奇数 generation を追加し、Reader が整合性確認 | 実績豊富なパターン | 全 retiredBuffer 要素のコピーが必要、オーバーヘッド大 |
+| β | **Reserve bitmask + CAS commit** | retiredReserved_ bitmask で slot 予約 → payload 書込み → tail で commit | lightweight、段階的導入可能 | retiredReserved_ 管理の複雑さ |
+| γ | **MPMC lock-free queue** | ring buffer を MPMC queue に置き換え | 既存実装流用可能、実績多数 | SafeStateSwapper の設計変更大 |
+| δ | **現状維持 + 明確化** | CAS 失敗時に payload をクリアする保険を追加、コメントで制約文書化 | 最小変更 | 本質的問題は解決しない |
+| **ε** | **SlotState 状態機械** | 各 slot に `atomic<SlotState>` を持たせ、EMPTY→RESERVED→COMMITTED→EMPTY の状態遷移で管理 | tail から Reservation 責務を完全分離、状態遷移が明示的 | slot 数分の atomic 変数追加、状態遷移の一貫性保証が必要 |
+
+**ε案の詳細** (レビュー指摘 2026-07-27 により追加):
 
 ```cpp
-static constexpr float FFT_MAGNITUDE_SCALE = 2.0f / NUM_FFT_POINTS;
-```
+enum class SlotState : uint8_t {
+    EMPTY,      // 未使用（tryReclaim 回収後は EMPTY に戻る）
+    RESERVED,   // swap() が予約済み（書き込み中。Single Producer なら省略可）
+    COMMITTED   // 書き込み完了、Reader が読取可能
+};
 
----
-
-### A-2: BUG-035 — applyComputedIR isLoading 固着 → RAII LoadingGuard
-
-| 項目 | 内容 |
-|------|------|
-| **ファイル** | `src/convolver/ConvolverProcessor.LoadPipeline.cpp` |
-| **修正** | RAII LoadingGuard 導入 |
-| **注意** | `isLoading` は複数箇所で管理されている。本修正は `applyComputedIR()` 内のスコープに限定する。 |
-
-```cpp
-// ★ applyComputedIR() 専用。isLoading には複数の書き込み元があり、
-//   この Guard は applyComputedIR スコープ内の isLoading 管理のみを責務とする。
-//   汎用 LoadingGuard と誤解されないよう用途限定名＋ final で継承禁止。
-//   isLoading は UI 表示用の状態フラグであり（Runtime の State Machine ではない）、
-//   release/acquire による可視性保証で十分（seq_cst 不要）。
-class ApplyComputedIRLoadingGuard final {
-    std::atomic<bool>& isLoading_;
-public:
-    explicit ApplyComputedIRLoadingGuard(std::atomic<bool>& flag) noexcept
-        : isLoading_(flag)
-    {
-        // release: UI/スレッドが isLoading の true を観測可能にする。
-        // isLoading は UI 表示用の状態フラグであり、メモリ順序保証は
-        // release/acquire で十分（seq_cst 不要）。
-        convo::publishAtomic(isLoading_, true, std::memory_order_release);
-    }
-    ~ApplyComputedIRLoadingGuard() noexcept
-    {
-        // release: UI にローディング完了を通知。
-        convo::publishAtomic(isLoading_, false, std::memory_order_release);
-    }
-    ApplyComputedIRLoadingGuard(const ApplyComputedIRLoadingGuard&) = delete;
-    ApplyComputedIRLoadingGuard& operator=(const ApplyComputedIRLoadingGuard&) = delete;
+struct RetiredSlot {
+    ConvolverState* state = nullptr;
+    uint64_t epoch = 0;
+    std::atomic<SlotState> state_ {SlotState::EMPTY};
 };
 ```
 
-```cpp
-void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
-{
-    // ★ null/generation mismatch は Loading 開始前 → Guard 不要
-    if (!prepared) { /* log */ return; }
-    if (!convolverStateGeneration.isCurrentGeneration(prepared->generationId)) { /* log */ return; }
+### 実装判断基準 — ✅ 確定（2026-07-28 調査完了）
 
-    // ★ ここから Loading 開始
-    //   IMPORTANT: applyComputedIR() 内では isLoading を直接変更しないこと。
-    //   isLoading の true/false はこの Guard のスコープのみが責務を持つ。
-    //   Guard より前の return 経路（null、generation mismatch）では
-    //   isLoading は変化しない。
-    ApplyComputedIRLoadingGuard guard(isLoading);
-    // ... 以降 return してもデストラクタが isLoading=false を保証 ...
-}
-```
+**調査結果（全ツール使用）**:
+- `swap()` の呼び出し元: **1箇所のみ**（`StateAndUI.cpp:1017`）— ✅ **Single Producer 永久保証確認**
+- `tryReclaim()` の呼び出し元: **DeferredFreeThread のみ**（`DeferredFreeThread.h:143,158`）— ✅ **Single Consumer 確認**
+- `enterReader()` の呼び出し元: Audio Thread（RT）固定
 
-**確認**: `isLoading` は他に `LoadPipeline.cpp:46,73,443,533,541,705,778` や
-`LoaderThread.cpp:58,71` でも書かれているが、すべて別関数・別スコープであり、
-本修正の LoadingGuard と競合しない。
+**結論**: Single Producer かつ Single Consumer が設計上永久保証されるため、**δ案（現状維持 + コメント強化）で十分**。
+SlotState（ε案）は将来の複数 Producer 化時にのみ導入する。
 
-**補足**: `finalizeNUCEngineOnMessageThread()` 内の `isLoading=false`（`LoadPipeline.cpp:533,541`）は
-LoadingGuard のデストラクタと重複するが、冪等な保険として問題ない。
+**対応**:
+- 既存コードは変更しない
+- `swap()` に `assert(writerActive == false)` 相当のデバッグアサートを追加
+- `tryReclaim()` に Single Consumer アサートを追加
+- 設計文書の SlotState 記述は「将来拡張」として維持
 
 ---
 
-### A-3: BUG-036 — init() 失敗時に irL/irR がリーク
-
-```cpp
-double* irLRaw = irL.get();
-double* irRRaw = irR.get();
-if (newConv->init(irLRaw, irRRaw, length, sr, peakDelay, ...))
-{
-    irL.release();
-    irR.release();
-    // ... 正常時処理 ...
-}
-```
-
----
-
-### A-4: BUG-034 — IPP FFT 戻り値未チェック（6箇所）
+## P2: HW-3 updateAudioThreadSnapshotFade 統合
 
 | 項目 | 内容 |
 |------|------|
-| **重要度** | CRITICAL |
-| **ファイル** | `src/MKLNonUniformConvolver.cpp`（6箇所） |
-| **修正** | `clearFFTOutputOnError()` ヘルパー導入＋全6箇所に適用 |
-| **対象外** | `MklFftEvaluator.h` 内の4箇所は BUG-044（Rule of Five）の対象。戻り値チェックは別途 |
+| **対応バグ** | BUG-031 |
+| **重要度** | 🟡 P2（P1→P2格下げ） |
+| **関連ファイル** | `src/audioengine/AudioEngine.h:3707`, `src/core/SnapshotCoordinator.h` |
+| **ステータス** | ✅ **Dead Code 確定 — 削除方針決定** |
 
-```cpp
-// ★ FFT エラー時に出力バッファをゼロクリア（Fail Closed）。
-//   エラーを検出したことよりゼロ出力で続行することを優先する。
-//   ippStatus と stage は RuntimeHealthReporter 接続時に使用するため
-//   将来の拡張に備えて引数で受け取っておく（現状は unused）。
-static void clearFFTOutputOnError(double* buffer, size_t count,
-                                  [[maybe_unused]] IppStatus status = ippStsNoErr,
-                                  [[maybe_unused]] FFTStage stage = FFTStage::Unknown) noexcept
-{
-    if (buffer != nullptr)
-        std::memset(buffer, 0, count * sizeof(double));
-    // TODO(RuntimeHealth): Record FFT failure information (IppStatus + FFTStage).
-    //   Zero-clear alone loses error context. Future RuntimeHealthReporter should
-    //   collect these as diagnosable metrics (fail_count per stage).
-}
-```
+### 調査結果 — ✅ **Dead Code 確定（2026-07-28 調査完了）**
 
-**重要: CCS バッファサイズの注意**
+**全ツール使用による確定結果**:
+- ✅ `advanceFade()` → `AudioBlock.cpp:475` から **呼ばれている（LIVE）**
+- ❌ `updateFade()` → **呼ばれていない**（唯一の呼び出し元は Dead Code の `updateAudioThreadSnapshotFade` 内部）
+- ❌ `updateAudioThreadSnapshotFade()` → **呼び出し元ゼロ**（定義のみ）
+- ❌ `snapshotAlpha`/`snapshotFrom`/`snapshotTo` → DSP 処理パスのどこからも **未参照**
+- ✅ `CrossfadeRuntime` → 完全独立機構。SnapshotFade とは無関係
+- ✅ `RuntimeProjection`（`dspProjection`）→ フェード alpha 情報を含まない
 
-IPP FFT の入出力形式により、ゼロクリアサイズが異なる（ソースコード確認済み: `MKLNonUniformConvolver.cpp:859`）
+**結論**: SnapshotFade の alpha 値は一度も DSP に渡されていない。**Dead Code 確定。**
 
-| # | 行 | 種類 | 用途 | ゼロクリア対象 | サイズ（double単位） |
-|---|-----|------|------|--------------|---------------------|
-| 1 | 1043 | Fwd | IR 周波数変換 | `tempFreq`（CCS出力） | `l.complexSize * 2` |
-| 2 | 1060 | Inv | IR 反転 | `tempTime`（実出力） | `l.fftSize` |
-| 3 | 1376 | Fwd | オーディオ処理 FDL | `currentFDLSlot`（CCS） | `l.complexSize * 2` |
-| 4 | 1436 | Inv | オーディオ処理 IFFT | `l.fftOutBuf`（実出力） | `l.fftSize` |
-| 5 | 1570 | Fwd | オーディオ処理 FDL2 | `currentFDLSlot`（CCS） | `l.complexSize * 2` |
-| 6 | 1637 | Inv | オーディオ処理 IFFT2 | `l.fftOutBuf`（実出力） | `l.fftSize` |
+### 対応方針 — ✅ **Option A（削除）に決定**
 
-**補足**: `l.complexSize = l.fftSize / 2 + 1`（CCS 出力は `[re0,im0,re1,im1,...]` 形式）。
+1. `AudioEngine.h:3731-3740` — `updateAudioThreadSnapshotFade()` 関数を削除
+2. `SnapshotCoordinator.h:111-138` — `updateFade()` が他からの呼び出しがないことを確認後削除
+3. `advanceFade()` は `AudioBlock.cpp:475` で継続使用（LIVE コード）
+4. `advanceFade()` に `SnapshotFade` 機構の将来再活用に備えた Reserved Hook コメントを追加
 
-**異常系テスト**: IPP の `pFFTSpec` に `nullptr` を渡す方法は推奨しない（IPP が nullptr を許容する保証がない。アクセス違反の可能性）。代わりに以下を推奨:
-- FFT wrapper 関数を導入し、単体テストではモックに差し替え
-- またはコードレビューで戻り値チェックの網羅性を確認
+**リスク評価**: `advanceFade()` は `m_fade.advance(numSamples)` を呼ぶのみ。副作用（カウンタ進行以外）はなく、削除による影響はゼロ。万が一将来 SnapshotFade が必要になった場合、Git 履歴から容易に復元可能。
 
 ---
 
-### A-5: BUG-011/012/013 — CMA-ES sigma クランプ欠如（3箇所）
-
-```cpp
-// A-5a: src/CmaEsOptimizer.h:79
-sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax);
-
-// A-5b: src/CmaEsOptimizerDynamic.h:29
-void setSigma(double s) noexcept { sigma = std::clamp(s, params.sigmaMin, params.sigmaMax); }
-
-// A-5c: src/CmaEsOptimizerDynamic.cpp:204
-sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax);
-```
-
----
-
-### A-6: BUG-029 — DSPTransition Emergency Override exchangeFadingRuntimeDSP 欠落
-
-```cpp
-if (health == convo::ISRHealthState::Critical) {
-    lifetime.activate(newDSP);
-    if (oldDSP != nullptr) {
-        // ★ TODO(BUG-030): Temporary Compatibility Authority.
-        //   Remove after B-1 CAS-only claimFadingRuntimeDSP() implementation.
-        //   Temporary Compatibility Authority — DSPTransition transiently manages
-        //   the fading slot only because B-1 CAS-only has not yet been implemented.
-        //   Does NOT constitute new permanent ownership authority.
-        //   ★ ASSERT: After B-1 implementation, exchangeFadingRuntimeDSP()
-        //     must be completely removed — no code path may fall back to it.
-        //
-        //   Execution sequence (temporary slot mgmt → state cleanup → lifetime):
-        //   1. exchangeFadingRuntimeDSP()     — temporary slot management
-        //   2. CrossfadeRuntime::complete()  — crossfade state cleanup
-        //   3. lifetime.retire()              — DSP lifetime release
-        auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);
-        engine_.crossfadeRuntime_.complete();
-        lifetime.retire(oldDSP);
-        // ★ recoverDSPPtr 後に oldDSP と比較して二重 retire 防止
-        if (auto* prev = recoverDSPPtr(prevRaw)) {
-            if (prev != oldDSP) lifetime.retire(prev);
-        }
-    }
-    return;
-}
-```
-
----
-
-### A-7: BUG-028 — CrossfadeRuntime::complete() フラグリセット
-
-```cpp
-// complete: 通常のクロスフェード完了時のみ使用。
-//   pending_ を false に戻し、stale フラグをクリアする。完了した fade は不要なため
-//   queuedFadeTimeSec_/fadeStartTimestampUs_ は初期値へ戻す（= resetToInitialState）。
-//   ★ queuedFadeTimeSec_ は「現在の fade 用 Queued 時間」であり、次回 fade の予定ではない。
-//     そのため complete() で初期値に戻すのは正しい。
-//   シャットダウン時は reset() を使用（complete より広範囲のフィールドをリセット）。
-void complete() noexcept
-{
-    convo::publishAtomic(pending_, false, std::memory_order_release);
-    convo::publishAtomic(useDryAsOld_, false, std::memory_order_release);
-    convo::publishAtomic(firstIrDryPending_, false, std::memory_order_release);
-    convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release);
-    static constexpr double kDefaultFadeTimeSec = 0.030;
-    convo::publishAtomic(queuedFadeTimeSec_, kDefaultFadeTimeSec, std::memory_order_release);
-    convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
-}
-```
-
----
-
-### A-8: BUG-015 — enqueueWithRetry 戻り値無視（3箇所）
-
-```cpp
-auto result = enqueueWithRetry(...);
-if (result != RetireEnqueueResult::Success) { /* ★ Future: HealthMonitor */ }
-```
-
----
-
-### A-9: BUG-016 — CmaEsOptimizer sanitize NaN/Inf
-
-```cpp
-return (!std::isfinite(x) || std::abs(x) < 1e-15) ? 0.0 : x;
-```
-
----
-
-### A-10: BUG-042/044/046 — Rule of Five（3件）
-
-各クラスに `= delete` / `= default`。詳細は初版参照。
-
----
-
-### A-11: BUG-045 — IRConverter resample failure mislabels sample rate
-
-```cpp
-// ★ r8brain resample 失敗: IR データは sourceRate のまま → actualSampleRate も sourceRate。
-converted = ir;
-actualSampleRate = sourceRate;  // データ実態と一致させる
-```
-
----
-
-### A-12: BUG-039 — Oversampler バッファ過剰読み取り
-
-```cpp
-const size_t copySamples = std::min(static_cast<size_t>(targetSamples),
-                                    static_cast<size_t>(upsampledBlock.getNumSamples()));
-std::memcpy(dst, src, copySamples * sizeof(double));
-```
-
----
-
-### A-13: BUG-040 — NoiseShaperLearner 1 Hz フォールバック
-
-```cpp
-: ((block.sampleRateHz > 0) ? block.sampleRateHz : 48000);
-```
-
----
-
-## 3. グループB: 設計確定済み（6件）
-
-### B-1: BUG-030 — Timer vs DSPTransition fading slot 競合（CAS-only）
+## P2: U-6 FFT 異常系テスト
 
 | 項目 | 内容 |
 |------|------|
-| **重要度** | HIGH |
-| **ファイル** | `src/audioengine/DSPTransition.h`, `AudioEngine.Timer.cpp`, `AudioEngine.h` |
-| **設計** | **CAS-only** — `claimFadingRuntimeDSP` のみで完結。exchange() 不要 |
+| **対応バグ** | BUG-034（テスト不足） |
+| **重要度** | 🟢 LOW |
+| **関連ファイル** | `src/MKLNonUniformConvolver.cpp` |
+| **ステータス** | 🔷 未実装 |
 
-**設計根拠**: `CAS success → exchange()` の二段階は非原子的（CAS と exchange の間に Timer が介入する隙がある）。
-CAS 成功時点でスロット所有権が確定するため、`compare_exchange(nullptr, oldDSP)` のみで十分。
+### 現状
+
+- ✅ A-4（`clearFFTOutputOnError`）実装済み（6箇所）
+- ❌ FFT エラー時の異常系テストが未実装
+- `fftSpec = nullptr` は IPP が nullptr を許容する保証がなく非推奨。代替として FFT wrapper のモック化が必要
+
+### 実装案: CRTP テンプレート（2026-07-28 決定）
+
+**決定経緯**:
+- テスト基盤はカスタムフレームワーク（GoogleTest/GMock なし）
+- GMock 非依存のため virtual + MockFft 方式は不適切
+- CRTP テンプレート方式を採用（virtual dispatch ゼロ、RT-safe 確定）
 
 ```cpp
-// === AudioEngine.h に追加（または exchangeFadingRuntimeDSP と併設） ===
-// ★ claimFadingRuntimeDSP: fading slot の所有権を取得する。
-//   expected は内部で nullptr に設定される（呼び出し側は意識不要）。
-//   CAS 成功時、slot = desired となり、呼び出し元が唯一の fading slot 所有者となる。
-//   これは DSP オブジェクト全体の所有権ではなく、fadingRuntimeDSPSlot に対する所有権。
-inline bool claimFadingRuntimeDSP(DSPCore* desired) noexcept
-{
-    DSPCore* expected = nullptr;
-    return convo::compareExchangeAtomic(fadingRuntimeDSPSlot, expected, desired,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire);
-}
+template <typename Impl>
+class FftBase {
+public:
+    IppStatus forward(const double* in, double* outCCS, FFTStage stage) noexcept {
+        return static_cast<Impl*>(this)->forwardImpl(in, outCCS, stage);
+    }
+    IppStatus inverse(const double* inCCS, double* out, FFTStage stage) noexcept {
+        return static_cast<Impl*>(this)->inverseImpl(inCCS, out, stage);
+    }
+};
 
-// === DSPTransition.h : onPublishCompleted() 通常パス ===
-{
-    // claimFadingRuntimeDSP(expected=nullptr は内部で生成)
-    if (engine_.claimFadingRuntimeDSP(oldDSP))
-    {
-        // ★ CAS 成功 = この DSPTransition が fading slot の唯一の所有者。
-        //   exchange() は不要（CAS が直接 slot = oldDSP を設定）。
-        //   この後 crossfade 開始（Timer の介入不可）。
+class ProductionFft : public FftBase<ProductionFft> {
+public:
+    explicit ProductionFft(IppsFFTSpec_R_64f* spec) noexcept : fftSpec_(spec) {}
+    IppStatus forwardImpl(const double* in, double* outCCS, FFTStage) noexcept {
+        return ippsFFTFwd_RToCCS_64f(in, outCCS, fftSpec_);
     }
-    else
-    {
-        lifetime.retire(oldDSP);
+    IppStatus inverseImpl(const double* inCCS, double* out, FFTStage) noexcept {
+        return ippsFFTInv_CCSToR_64f(inCCS, out, fftSpec_);
     }
-    // ... crossfade start ...
-}
-
-// === AudioEngine.Timer.cpp : Timer 側 ===
-if (!m_coordinator.isFading())
-{
-    // ★ current の安全性（ライフタイム順序保証）:
-    //   current は fadingRuntimeDSPSlot から acquire で読み込んだ値。
-    //   CAS 成功時にのみ retire される（CAS 成功 = Timer が slot の唯一の観測者）。
-    //
-    //   ★ 設計目標（ISR 上の理想 retirement 条件）:
-    //     1. DSPTransition::onPublishCompleted() → complete() 呼び出し
-    //     2. complete() は pending_=false を publish
-    //     3. ObservedRuntime / EpochDomain により oldDSP が全 Reader から参照不能と証明される
-    //        （pending_=false 観測 + 該当 epoch が全 Reader の最小 epoch より過去になることを確認）
-    //     4. Timer tick で上記条件確認 → CAS(nullptr) → retire(current)
-    //
-    //   ★ 現状実装:
-    //     現在は isFading()==false のみ確認している。
-    //     EpochDomain による safe-to-retire 証明は未実装。
-    //
-    //   ★ 重要: Epoch 条件の追加だけでは解決しない。
-    //     retirementEpoch を retire path に運ぶ「Publication Metadata Propagation to Retire Path」
-    //     が設計されていない。问题是「Authority の不足」ではなく「Retire Path まで伝わらない」。
-    //     詳細らは別 Issue「Publication Metadata Propagation to Retire Path」を参照。
-    DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
-    if (current != nullptr
-        && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current, nullptr,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire))
-    {
-        // CAS 成功 → slot = nullptr。current を retire。
-        // ★ 注意: 現時点では publicationEpoch を retire に渡す手段がない。
-        //   別 Issue「Publication Metadata Propagation to Retire Path」参照。
-        DSPLifetimeManager lifetimeMgr(*this);
-        lifetimeMgr.retire(current);
-    }
-    // CAS 失敗 → DSPTransition が既に設定済み。何もしない。
-}
+private:
+    IppsFFTSpec_R_64f* fftSpec_;
+};
 ```
+
+**代替案**: コードレビューでの網羅性確認に留める判断も可。
 
 ---
 
-### B-2: BUG-023 — SafeStateSwapper swap() vs tryReclaim() 競合
+## 設計上の注意点（監視・将来対応が必要な事項）
+
+以下は実装済みの設計において「既知の制約」「将来の改善候補」「監視が必要なリスク」として認識すべき事項。
+**2026-07-28 全項目の現状調査完了。**
+
+### 1. kMaxMismatch（=5）の Timer 周期依存 🔶 TODO-P0（未着手）
+
+`retirePublishedDSP` の不一致検出閾値 `kMaxMismatch = 5` は Timer 呼び出し回数ベース。
+Timer 周期が可変の場合、同数 mismatch でも経過時間が異なる可能性がある。
+
+**調査結果**: 現状未変更。`AudioEngine.h:4352` に `kMaxMismatch = 5` として定義。
+**推奨代替方式**: `(currentEpoch - receipt->publicationEpoch) > 閾値` による epoch 差分ベースの検出。
+**ステータス**: 🔶 未着手。設計書のコメントに TODO-P0 として記載済み。
+
+### 2. Emergency Override 後の stale receipt 🟡 LOW（確認済み）
+
+`DSPTransition::onPublishCompleted()` 内の Emergency Override パス（HealthState == Critical 時）は
+`storeReceipt()` を呼ばずに `exchangeFadingRuntimeDSP()` + `lifetime.retire()` で直接退役する。
+このため「Emergency Override 発動時に pendingReceipt_ が古い receipt を保持したまま」になる可能性がある。
+
+**調査結果**: `DSPTransition.h:54-78` の Emergency Override パスが `storeReceipt()` をバイパスすることを確認。
+**影響**: 次回の Normal Publish で `storeReceipt()` の assert（"not in Empty state"）が発火するが、
+Release ビルドでは無視され receipt は上書きされる。結果として1回分の epoch 伝搬が欠落するが、
+データ破損には至らない。**影響 LOW、設計上の既知の制約として許容。**
+**修正案**: FIX-D2 参照（`resetReceipt()` 追加、15分）。
+
+### 3. onTransitionComplete / notifyTransitionComplete のデッドコード 🔷 INFO（確認済み）
+
+- `DSPTransition::onTransitionComplete()` — 呼び出し元なし（`RuntimePublicationOrchestrator::notifyTransitionComplete` 経由だが、それも呼び出し元なし）
+- `RuntimePublicationOrchestrator::notifyTransitionComplete()` — 呼び出し元なし
+
+**調査結果**: 全ツールで呼び出し元ゼロを確認。完全なデッドコード。
+**対応**: Reserved Hook として管理。HW-3 削除完了後に削除判断。
+
+### 4. release/acquire + External Serialization の二層依存 🔷 INFO（確認済み）
+
+`pendingReceipt_` への non-atomic アクセスは以下の二層で保護されている:
+
+| 層 | 根拠 | リスク |
+|---|------|--------|
+| 第1層: External Serialization | 同一 MessageThread 上で逐次実行（設計保証） | 将来のスレッド構成変更で崩れる可能性 |
+| 第2層: release/acquire | receiptReady_ の atomic 操作（C++ 標準準拠） | 単独では non-atomic アクセスの UB を防げない |
+
+**両層が必須。第1層が崩れる設計変更があった場合、pendingReceipt_ へのアクセス全体の排他制御（ミューテックス等）の再設計が必要。**
+
+### 5. Fatal 時の pendingReceipt_ 診断用保持 🔷 INFO（確認済み）
+
+`fatal_ == true` 時は `pendingReceipt_` をリセットせず保持する（事後診断用）。
+このため Fatal 後は `storeReceipt()` が常に assert を発火するが、動作上は無害。
+Recovery は外部からの再初期化が必要。
+
+**調査結果**: `AudioEngine.Timer.cpp:1765-1768` で fatal 時も `retire(current,0)` し `pendingReceipt_` は非リセットであることを確認。
+
+---
+
+# 残課題 修正案
+
+以下、各残課題に対する具体的な修正案を提示する。優先度順に実装することを推奨。
+
+## FIX-HW-2: SafeStateSwapper — δ案（現状維持 + デバッグ強化）
+
+### 目標
+調査により Single Producer かつ Single Consumer が永久保証されることを確認。
+SlotState 導入（ε案）は不要と判断。現状維持 + デバッグアサート追加で対応する。
+
+### 決定根拠（2026-07-28 全ツール調査）
+- `swap()` 呼び出し元: **`StateAndUI.cpp:1017` の1箇所のみ** → ✅ Single Producer 確定
+- `tryReclaim()` 呼び出し元: **`DeferredFreeThread.h:143,158` のみ** → ✅ Single Consumer 確定
+- `enterReader()` は Audio Thread（RT）固定 → ✅ Reader 競合なし
+
+したがって `tail` の3責務兼任は理論上の懸念に過ぎず、実運用で競合は発生しない。
+
+### 実装手順
+1. `SafeStateSwapper.h` にデバッグアサート追加（コード変更なし、アサートのみ）
+2. `swap()` 先頭に `thread_local` 再入チェック（Debug のみ）
+3. `tryReclaim()` に Single Consumer アサート追加
+4. SlotState（ε案）の設計記述は「将来拡張」としてコメントに維持
+
+### リスクと対策
+| リスク | 対策 | 重要度 |
+|--------|------|--------|
+| 将来のコード変更で Producer が増える | SlotState 設計をコメントとして保存。変更時に ε案 を再評価 | LOW |
+| デバッグアサートが Release で無効 | Debug でのみ有効で十分。Release は現状のプロトコルに完全依存 | LOW |
+
+### 見積工数
+30分（アサート追加のみ）
+
+---
+
+## FIX-HW-3: updateAudioThreadSnapshotFade 削除
+
+### 目標
+Dead Code 確定に伴い、`updateAudioThreadSnapshotFade()` と `updateFade()` を削除する。
+
+### 決定根拠
+- ✅ 全ツール（grep/ast-grep/rg/cocoindex/semble/graphify）で呼び出し元ゼロを確認
+- ✅ `advanceFade()` は `AudioBlock.cpp:475` から LIVE 呼び出しあり → 維持
+- ✅ 将来復元は Git 履歴から容易
+
+### 変更内容
+1. `AudioEngine.h:3731-3740` — `updateAudioThreadSnapshotFade()` 関数ブロック削除
+2. `SnapshotCoordinator.h:111-138` — `updateFade()` 削除（他からの呼び出しがないことを確認済み）
+3. `AudioBlock.cpp:475` — `advanceFade()` 呼び出しは維持。コメントに `[LIVE]` と追記
+
+### 見積工数
+30分
+
+---
+
+## FIX-U-6: FFT 異常系テスト — CRTP テンプレート採用
+
+### 目標
+FFT エラー時の異常系テストを実装する。RT パスへのオーバーヘッドはゼロとする。
+
+### 決定根拠（2026-07-28 調査）
+- **テスト基盤**: カスタムテストフレームワーク（GoogleTest/GMock/GMock なし）
+- **FFT API**: Intel IPP 直接呼び出し（`ippsFFTFwd_RToCCS_64f` / `ippsFFTInv_CCSToR_64f`）
+- GMock 非依存のため、virtual + MockFft 方式は不適切
+- → **CRTP テンプレート方式を採用**（virtual dispatch ゼロ、RT-safe 確定）
+
+### 実装手順
+
+#### Step 1: CRTP FFT ベース
+```cpp
+template <typename Impl>
+class FftBase {
+public:
+    IppStatus forward(const double* in, double* outCCS, FFTStage stage) noexcept {
+        return static_cast<Impl*>(this)->forwardImpl(in, outCCS, stage);
+    }
+    IppStatus inverse(const double* inCCS, double* out, FFTStage stage) noexcept {
+        return static_cast<Impl*>(this)->inverseImpl(inCCS, out, stage);
+    }
+};
+```
+
+#### Step 2: ProductionFft
+```cpp
+class ProductionFft : public FftBase<ProductionFft> {
+public:
+    explicit ProductionFft(IppsFFTSpec_R_64f* spec) noexcept : fftSpec_(spec) {}
+    IppStatus forwardImpl(const double* in, double* outCCS, FFTStage) noexcept {
+        return ippsFFTFwd_RToCCS_64f(in, outCCS, fftSpec_);
+    }
+    IppStatus inverseImpl(const double* inCCS, double* out, FFTStage) noexcept {
+        return ippsFFTInv_CCSToR_64f(inCCS, out, fftSpec_);
+    }
+private:
+    IppsFFTSpec_R_64f* fftSpec_;
+};
+```
+
+#### Step 3: TestFft（エラー注入可能なテスト用）
+```cpp
+class TestFft : public FftBase<TestFft> {
+public:
+    IppStatus forwardImpl(const double*, double*, FFTStage) noexcept { return testResult_; }
+    IppStatus inverseImpl(const double*, double*, FFTStage) noexcept { return testResult_; }
+    void setResult(IppStatus s) noexcept { testResult_ = s; }
+private:
+    IppStatus testResult_{ippStsNoErr};
+};
+```
+
+#### Step 4: MKLNonUniformConvolver の修正
+`IppsFFTSpec_R_64f*` を直接保持する代わりに、テンプレートパラメータとして FFT 実装を受け取る。
+ProductionFft をデフォルトテンプレート引数に指定。
+
+#### Step 5: テスト追加
+- TestFft が `ippStsNoErr` を返す正常系
+- TestFft が `ippStsErr` を返す異常系（`clearFFTOutputOnError` の動作確認）
+- 6箇所全ての FFT 呼び出しをカバー
+
+### 注意点
+- CRTP は静的ポリモーフィズムのため、virtual dispatch は完全にゼロ
+- `FftBase<Impl>` 経由の呼び出しはコンパイル時に解決される
+- MKLNonUniformConvolver のテンプレート化により、テスト時のみ TestFft を注入可能
+
+### RT パス影響評価
+CRTP 方式（virtual ゼロ）のため、RT パスへの影響はゼロ。
+
+### 見積工数
+設計0.5日 + 実装1日 + テスト0.5日 = **2日**
+
+---
+
+## FIX-D1: kMaxMismatch Epoch ベース検出への移行
+
+### 目標
+Timer 呼び出し回数ベースの `kMaxMismatch = 5` を epoch 差分ベースに変更する。
+
+### 変更内容
+`AudioEngine.Timer.cpp` の `retirePublishedDSP()` 内、不一致検出ロジック：
+```cpp
+// 現在（Timer 呼び出し回数ベース）:
+uint32_t cnt = mismatchCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+if (cnt >= kMaxMismatch) { fatal_ = true; }
+
+// 修正後（epoch 差分ベース）:
+// pendingReceipt_->publicationEpoch と router_->currentEpoch() の差で判定
+const auto currentEpoch = engine_.currentPublicationEpoch();  // ISR Coordinator の最新 epoch
+const auto receiptEpoch = pendingReceipt_->publicationEpoch;
+if ((currentEpoch - receiptEpoch) > kMaxEpochDrift) { fatal_ = true; }
+```
+
+### 定数定義
+```cpp
+// AudioEngine.h に追加
+static constexpr uint64_t kMaxEpochDrift = 10;  // 最大許容 epoch 差
+// kMaxMismatch は削除（後方互換性のため残しても deprecated コメント）
+```
+
+### 注意点
+- epoch 差が `uint64_t` の wraparound を起こさない前提が必要
+- ISR Runtime の epoch は実質的に wraparound しない（64bit、単調増加）
+- `kMaxMismatch` は削除せず deprecated として残す（外部参照がある場合）
+
+### 見積工数
+1時間
+
+---
+
+## FIX-D2: Emergency Override 時の stale receipt 対策
+
+### 問題
+`DSPTransition::onPublishCompleted()` の Emergency Override パス（HealthState Critical）は `storeReceipt()` を呼ばないため、以前の receipt が `pendingReceipt_` に残留する。
+
+### 選択肢
+
+#### Option A: Emergency Override 時も receipt をクリア（推奨）
+```cpp
+// Emergency Override パスの先頭で receipt をクリア
+engine_.resetReceipt();  // pendingReceipt_.reset() + receiptReady_.store(false, relaxed)
+```
+これにより次回の Normal Publish で assert が発火しない。
+
+#### Option B: 現状維持 + コメント強化
+Emergency Override 後に `storeReceipt()` の assert が発火するのは Debug のみ。
+Release では無害。設計上の既知の制約として許容。
+
+### 推奨: Option A（最小変更で確実）
+```cpp
+// AudioEngine.h に追加
+void resetReceipt() noexcept {
+    pendingReceipt_.reset();
+    receiptReady_.store(false, std::memory_order_relaxed);
+}
+```
+
+### 見積工数
+15分
+
+---
+
+## FIX-D3: onTransitionComplete / notifyTransitionComplete デッドコード処理
+
+### 選択肢
+
+#### Option A: Reserved Hook として明確化（推奨）
+関数は維持し、コメントを更新：
+```cpp
+// ★ [RESERVED HOOK] 2026-07-28 現在、呼び出し元なし。
+//   将来の Layer 2/3 統合フック。削除せず Reserved Hook として管理。
+//   削除判断: HW-3 完了後、SnapshotFade 機構の再評価時に判断。
+```
+
+#### Option B: 削除
+呼び出し元がないため削除。必要になった時点で再実装。
+
+### 推奨: Option A（削除コスト < 再実装コスト）
+既に実装済みのコードを削除するよりも、Reserved Hook として維持する方が効率的。
+
+### 見積工数
+15分
+
+---
+
+# Appendix
+
+## A. 実装済み事項一覧（全37件）
+
+### HW-1: Publication Metadata Propagation ✅ 完了
 
 | 項目 | 内容 |
 |------|------|
-| **重要度** | HIGH |
-| **ファイル** | `src/SafeStateSwapper.h` |
-| **ステータス** | ⚠️ **未確定 — 実装前に追加検証必要** |
+| **対応バグ** | BUG-030（拡張） |
+| **重要度** | 🔴 HIGH |
+| **関連ファイル** | 7ファイル |
+| **ステータス** | ✅ **実装完了・テスト通過（19/19）** |
 
-#### 検討案（未採用）
+**設計の核**: `DSPTransition` が `oldDSP` を `PublishReceipt` として保存し、Timer の retire パスで `publicationEpoch` を伝搬する。Retire は Normal/Fallback/Emergency の3分類。
 
-```cpp
-void swap(ConvolverState* newState) noexcept
-{
-    // ... 2-step bump, exchangeAtomic activeState ...
+**実装ファイル**:
 
-    size_t t = convo::consumeAtomic(tail, std::memory_order_acquire);
-    size_t next = (t + 1) % kMaxRetired;
+| ファイル | 変更内容 |
+|---------|---------|
+| `ISRRuntimeSemanticSchema.h` | `PublicationGeneration` 型エイリアス追加 |
+| `ISRRuntimePublicationCoordinator.h` | `currentPublicationEpoch()` getter |
+| `AudioEngine.h` | `PublishReceipt` struct + receipt管理メンバ + `storeReceipt()`/`retirePublishedDSP()`/診断カウンタ |
+| `AudioEngine.Timer.cpp` | `retirePublishedDSP()` 定義（3分類＋診断カウンタ）＋3 CAS パス更新 |
+| `DSPLifetimeManager.h` | `retire(DSPCore*, uint64_t epoch)` overload |
+| `DSPTransition.h` | `storeReceipt(oldDSP, epoch)` + CAS パス更新 |
+| `RuntimePublicationOrchestrator.cpp` | （初回実装後に削除 → storeReceipt は DSPTransition に移動） |
 
-    for (;;)
-    {
-        if (next == convo::consumeAtomic(head, std::memory_order_acquire))
-        {
-            std::lock_guard<std::mutex> lock(fallbackMutex);
-            fallbackQueue.push({oldState, epoch2});
-            return;
-        }
+**設計上の重要な決定**:
 
-        // ★ 書き込み順序: state → epoch → tail(CAS)
-        convo::publishAtomic(retiredBuffer[t].state, oldState, std::memory_order_release);
-        convo::publishAtomic(retiredBuffer[t].epoch, epoch2, std::memory_order_release);
+| 判断 | 根拠 |
+|------|------|
+| Retire の3分類: Normal / Fallback / Emergency | Normal のみ publicationEpoch 伝搬。Fallback/Emergency は runtimeEpoch |
+| Publication Metadata Propagation は Normal Retire のみ対象 | Invariant として明文化 |
+| 診断カウンタ: normal/fallback/emergencyRetireCount_ | `publishCount ≈ normal + emergency`。fallback は startup/shutdown で少数発生 |
+| release/acquire 二層保護 | External Serialization（設計層）＋ atomic 操作（言語層） |
+| Fatal 時も current を retire | リーク防止。pendingReceipt_ のみ診断用保持 |
 
-        if (convo::compareExchangeAtomic(tail, t, next,
-                                          std::memory_order_acq_rel,
-                                          std::memory_order_acquire))
-            break;
-
-        // CAS 失敗: 別スレッドが tail を変更。retry。
-        t = convo::consumeAtomic(tail, std::memory_order_acquire);
-        next = (t + 1) % kMaxRetired;
-    }
-}
-```
-
-#### 未確定理由
-
-現在の SafeStateSwapper の ring buffer では `tail` が以下の3つの責務を兼任している:
-
-1. **Queue position**: 次に書き込むべき slot の識领
-2. **Reservation**: slot の確保状態
-3. **Commit**: slot の 내용이確定し Reader に公開されていることを示す
-
-このため、`swap()` での `state/epoch 書込み → tail CAS` という順序において、CAS 失敗時に「未確定の slot に有効な payload だけが残留する」という状態が発生する可能性がある。
-
-**本質は CAS 順序問題ではなく Queue Protocol の未定義**。
-`tail` の责務分担を再設計しないと、CAS 成功後に payload を書込み始める逆の競合も 발생하는。
-
-**現段階での記載**: 現行 Queue Protocol の安全性を検証し、必要であれば reservation / payload visibility / commit の责務分離を含めて再設計する。
-
-**three-phase protocol (reserved/write/commit) を採用案としては書かない**。有力な設計候補の一つであり結論ではない。
-
-**実装前に確認すべき事項**:
-- `getState()` が `activeState` のみを読み `retiredBuffer` を直接読まないこと（✅ 確認済み）
-- `tryReclaim()` の Single Consumer 前提が現状の呼び出しパターンで成立すること
-- 現行プロトコルにおいて `tail` が slot validity の唯一の公開情報源となっていることの証明
-- `retiredBuffer` への直接アクセス経路が他にないこと（✅ `grep -rn "retiredBuffer" src/` で SafeStateSwapper.h 内のみ確認済み）
-
----
-
-### B-3: BUG-031 — updateAudioThreadSnapshotFade スタブ
-
-```cpp
-inline bool updateAudioThreadSnapshotFade(int numSamples, float& snapshotAlpha,
-    const convo::GlobalSnapshot*& snapshotFrom, const convo::GlobalSnapshot*& snapshotTo) noexcept
-{
-    // ★ advanceFade はこの関数内でのみ呼ぶ。BlockDouble.cpp 等からは呼ばない。
-    m_coordinator.advanceFade(numSamples);
-    return m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
-}
-```
-
-**確認状況**:
-
-- `updateAudioThreadSnapshotFade()` helper は定義されているが、**どこからも呼ばれていない**（grep 確認済み）
-- `updateFade()` の唯一の呼び出し経路がこの helper のみ
-- `snapshotAlpha` / `snapshotFrom` / `snapshotTo` は DSP 処理パスで参照されていない
-
-**現時点で確認できる事実**: `updateFade()` が Audio Thread から未呼び出しであること。
-
-**現時点で断定できないこと**: 「Snapshot Fade が未動作」。`CrossfadeRuntime` や `RuntimeProjection` など DSP 側が同等情報を別経路で取得している可能性は未解析。DSP 側全経路の解析後に評価する。
-
----
-
-### B-4: BUG-032 — createSnapshotFromCurrentState torn-read
-
-```cpp
-// 修正後: GlobalSnapshot から一括取得（publish 時一貫性保証済み）
-const auto* currentSnap = m_coordinator.getCurrentSnapshot();
-if (currentSnap) { params = currentSnap->getParams(); }
-```
-
-**注意**: `getCurrentSnapshot()` のインターフェースは要確認（U-1）。
-
----
-
-### B-5: BUG-024 — SnapshotFadeState advance() vs resetToIdle()
-
-```cpp
-void advance(int numSamples) noexcept
-{
-    if (state() != FadeState::FadingIn) return;
-    const int remaining = remainingCount();
-    if (remaining <= 0) return;
-
-    const int newRemaining = remaining - numSamples;
-    if (newRemaining <= 0) {
-        convo::publishAtomic(remainingSamples_, 0, std::memory_order_release);
-        return;
-    }
-
-    convo::publishAtomic(remainingSamples_, newRemaining, std::memory_order_release);
-    if (state() != FadeState::FadingIn) return;  // ← resetToIdle 競合対策
-    // ★ alpha update intentionally skipped after resetToIdle:
-    //   state が Idle に戻った場合、alpha は resetToIdle() が 1.0 に設定済み。
-    //   ここで alpha を上書きすると矛盾が生じるためスキップする。
-    //
-    // ★ fadeGeneration 導入必須（ISR 設計上の ABA 問題対策）。
-    //   現在の state 再確認だけでは「remaining更新→reset→startFade」の
-    //   シーケンスで新しい fade の remaining を古い alpha 計算に使う
-    //   ABA 問題がある。
-    //   fadeGeneration カウンタ（std::atomic<uint64_t>）を追加し、
-    //   startFade() でインクリメント、advance() で取得した generation と
-    //   現在値を比較して不一致なら alpha 計算をスキップすることで
-    //   完全に解決する。
-    //   実装手順:
-    //   1. SnapshotFadeState に std::atomic<uint64_t> fadeGeneration_{0} 追加
-    //   2. start() 内の更新順序（重要）:
-    //      a) totalSamples_ = fadeSamples を先に publish (release)
-    //      b) remainingSamples_ = fadeSamples を publish (release)
-    //      c) alpha_ = 0.0 を publish (release)
-    //      d) state_ = FadingIn を publish (release)
-    //      e) 最後に convo::publishAtomic(fadeGeneration_, ++gen, release) ← ABA generation は最後
-    //
-    //      generation を最後にすることで、advance() が genAtStart を読んだ時点で
-    //      total/remaining/alpha/state は全て commit 済みであることが保証される。
-    //
-    //   3. advance() で以下のように generation 比較:
-    //
-    //      // advance() 開始時の ABA generation を保存
-    //      const uint64_t genAtStart = convo::consumeAtomic(fadeGeneration_,
-    //                                          std::memory_order_acquire);
-    //      // ... remaining 更新、state 再確認 ...
-    //
-    //      // alpha 計算直前に generation 再確認（startFade で increment されたら不一致）
-    //      if (genAtStart != convo::consumeAtomic(fadeGeneration_,
-    //                                     std::memory_order_acquire))
-    //          return;  // 新しい fade が開始された → 古い remaining で alpha 計算しない
-    //
-    //   ★ generation は ABA detector（Seqlock ではない）:
-    //     fadeGeneration は単純な ABA detector。Seqlock（odd→payload→even）ではなく、
-    //     書き込み中を示す odd/even 状態は持たない。
-    //     Writer が startFade() で increment し、Reader が advance() で前後比較する。
-    //   Publish 対象は total/remaining/alpha/state。generation は最後に更新する。
-    //   generation を最後に publish する理由:
-    //   - generation を先に publish すると「新 generation, 旧 payload」を読む可能性がある
-    //   - generation は単なる世代番号であり、payload の atomic 性は保証しない
-    //
-    //   ★ Reader 側も ABA generation 確認:
-    //     advance() では generation 確認を以下の順序で行う:
-    //       1. start 時: genAtStart = load(fadeGeneration_, acquire)  — ABA generation 取得
-    //       2. payload 読取: remaining, state 等を acquire で読む
-    //       3. alpha 計算前: load(fadeGeneration_, acquire) が genAtStart と一致するか確認
-    //          → 不一致なら「startFade が別世代を開始した」ため alpha 計算をスキップ
-    //     これにより Reader は「同一 generation の payload」のみを参照することが保証される。
-    //
-    //   ★ Reader の読取り順序は固定: generation → payload → generation の順に読むこと。
-    //     payload より先に generation を取得し、alpha 計算直前に再確認する。
-    //     この順序を変更すると、別 generation の payload を誤って参照する可能性がある。
-    //
-    //   ★ fadeGeneration は ABA 検出器であり、将来の状態遷移拡張に対する万能な整合性保証ではない。
-    //     現状の FadeState は Idle/FadingIn の2値だが、今後増える場合は generation 単独では
-    //     不十分な可能性がある。その場合、状態遷移ごとに generation をインクリメントするか、
-    //     別途 FadeState 単位の Version 管理が必要になる。
-    //
-    const int total = totalCount();
-    if (total > 0) {
-        const double nextAlpha = 1.0 - static_cast<double>(newRemaining) / static_cast<double>(total);
-        convo::publishAtomic(alpha_, nextAlpha, std::memory_order_release);
-    }
-}
-```
-
----
-
-### B-6: BUG-037 — loaderTrashBin UAF 防止（Generation）
-
-```cpp
-// ConvolverProcessor.h
-std::atomic<uint64_t> loaderGeneration_{0};
-
-// デストラクタ先頭（fetch_add で原子的に increment）
-// ★ Generation は Owner validity のみ（ConvolverProcessor の有効性）。
-//   スレッドの停止保証や join 完了は別責務（LoaderThread::stopThread 等）。
-//   Generation が変わっても Loader が即座に停止するとは限らないため、
-//   デストラクタでは stopThread(-1) によるブロッキング待機と併用する。
-//   Generation は「この owner はもう使えない」という通知であり、
-//   スレッド停止の完了は join が保証する。
-convo::fetchAddAtomic(loaderGeneration_, 1, std::memory_order_acq_rel);
-
-// LoaderThread::run()
-void run() override {
-    const uint64_t myGeneration = owner_.loaderGeneration_.load(std::memory_order_acquire);
-    while (!threadShouldExit()) {
-        if (owner_.loaderGeneration_.load(std::memory_order_acquire) != myGeneration) break;
-        // ... 通常処理 ...
-    }
-}
-```
-
----
-
-## 4. グループC: 計画的対応（7件）
-
-| ID | バグ | ファイル | 修正内容 | 工数 |
-|----|------|----------|----------|------|
-| C-1 | BUG-033 | `BlockDouble.cpp:400-427` | `dryScale` ラムダキャプチャ追加 | 30分 |
-| C-2 | BUG-025 | `SnapshotCoordinator.cpp:57-72` | enqueueWithRetry 化 | 30分 |
-| C-3 | BUG-018 | 3ファイル | `!=1.0` → `std::abs(x-1.0)>1e-12` | 15分 |
-| C-4 | BUG-019 | `TruePeakDetector.cpp:102-111` | `int` → `size_t` | 15分 |
-| C-5 | BUG-020 | `LoaderThread.cpp:198` | `if(targetLength<=0)return 0;` | 5分 |
-| C-6 | BUG-021/022 | `Lifecycle.cpp` | RCU GlobalGuard 追加(2箇所) | 20分 |
-| C-7 | BUG-026 | `ObservedRuntime.h:42-49` | `rootEnterSucceeded()`確認 | 10分 |
-
----
-
-## 5. グループD: 余裕時（4件）
-
-| ID | バグ | ファイル | 修正 | 工数 |
-|----|------|----------|------|------|
-| D-1 | BUG-041 | `NoiseShaperLearner.cpp:643` | VLA→ヒープ | 15分 |
-| D-2 | BUG-043 | `IRConverter` | パラメータ名修正 | 10分 |
-| D-3 | BUG-027 | `SnapshotCoordinator` | target==null時 state再確認 | 30分 |
-| D-4 | BUG-046 | `PsychoacousticDither.h` | A-10に含む | 0分 |
-
----
-
-## 6. テスト戦略
-
-| ID | テスト方法 | 確認内容 |
-|----|-----------|----------|
-| A-1 | 目視 | 0 dBFS 正弦波が 0 dBFS 表示 |
-| A-2 | UI操作 | 世代不一致後も Loading スピナーが消える |
-| A-3 | メモリ | init() 失敗後のメモリ増加なし |
-| A-4 | コードレビュー | clearFFTOutputOnError 適用確認（FFT wrapper モック化推奨） |
-| A-5 | 単体 | sigma=0, negative, >sigmaMax でクランプ |
-| A-6 | 異常系 | HealthState::Critical 時の遷移 |
-| A-7 | 単体 | complete() 後フラグ全リセット確認 |
-| B-1 | ストレス | Crossfade ownership stress test: IR Publish → Emergency Override → Crossfade → Timer → Shutdown → Restart をランダム順で 10000 回繰り返し、UAF・リークなし。TSAN + ランダム Sleep 注入 + CAS 成功直後の Timer 強制介入 + CAS 失敗高頻度発生 + Forced Epoch Delay（publish→50ms停止→Timer→Audio→Retire ランダム挿入）+ Epoch 遅延と Crossfade 終了のランダム組合せ + Publisher 再介入（CAS成功→complete→Timer→Publisher→Timer）を含む。
-| B-2 | — | **要追加検証** |
-| B-3 | 結合 | advanceFade 二重進行なし確認 |
-| B-4 | 単体 | GlobalSnapshot 経由パラメータ一貫性 |
-| B-5 | 単体 | advance+resetToIdle 競合確認 |
-| B-6 | クラッシュ | プロセッサ破棄＋ローダー動作中安全 |
-
-### ビルド計画
-
-```
-グループA: cmake --build build --config Debug && ctest -C Debug --output-on-failure
-グループB: 同上 + Release ビルド（B-2 は検証後）
-```
-
----
-
-## 7. 推奨マージ戦略
-
-| # | 項目 | ブランチ | 注意 |
-|---|------|----------|------|
-| 1 | A-1〜A-4 | `fix/phase1-critical` | 独立。A-4 は6箇所 |
-| 2 | A-5〜A-9 | `fix/phase2-high` | 独立 |
-| 3 | A-10〜A-13 | `fix/phase3-medium` | A-11 コメント同時修正 |
-| 4 | B-1, B-3, B-4, B-5, B-6 | `fix/phase4-b` | B-1 CAS-only 確認 |
-| 5 | B-2 | `fix/phase5-b2` | **要追加検証後** |
-| 6 | C-1〜C-7 | `fix/phase6-c` | 計画的 |
-| 7 | D-1〜D-4 | `fix/phase7-d` | 余裕時 |
-
-**重要**: A-6 と B-1 は同一 `DSPTransition.h`。**A-6 を先にマージ**し、B-1 は A-6 をベースに。
-
----
-
-# 第二部: 未確定・未決定事項
-
-## U-1: `SnapshotCoordinator::getCurrentSnapshot()` インターフェース
-
-B-4 で使用。`src/core/SnapshotCoordinator.h` の public メソッド一覧を確認。
-存在しない場合は `m_slots.loadCurrent(std::memory_order_acquire)` を使用。
-
-## U-2: B-3 updateAudioThreadSnapshotFade() の利用状況
-
-B-3 の helper (`updateAudioThreadSnapshotFade`) は **未使用**（grep 確認済み）。
-`updateFade()` の唯一の呼び出し経路がこの helper のみ。
-`snapshotAlpha` / `snapshotFrom` / `snapshotTo` が DSP 処理で参照されていないことも確認済み。
-
-**現時点で確認できること**: `updateFade()` が Audio Thread から未呼び出し。
-
-**現時点で断定できないこと**: 「Snapshot Fade が未動作」—— `CrossfadeRuntime` や `RuntimeProjection` など DSP 側が同等情報を別経路で取得している可能性は未解析。DSP 側全経路の解析後に評価する。
-
-## U-3: B-2 SafeStateSwapper Queue Protocol の安全性証明（未確定）
+### C-4: TruePeakDetector int→size_t ✅ 完了
 
 | 項目 | 内容 |
 |------|------|
-| **ステータス** | ❌ **未確定** — 実装前に追加検証が必要 |
-| **本質** | CAS 順序問題ではなく Queue Protocol の未定義。`tail` が reservation / visibility / commit を兼任している |
+| **対応バグ** | BUG-019 |
+| **重要度** | 🟢 LOW |
+| **ファイル** | `src/TruePeakDetector.cpp`, `src/TruePeakDetector.h` |
+| **ステータス** | ✅ **実装完了** |
 
+**修正内容**:
+- `kStage0LOffset`/`kStage0ROffset`/`kStage1LOffset`/`kStage1ROffset`: `int` → `size_t`
+- `interpolateStage()` 第3引数: `int inputSamples` → `size_t inputSamples`
+- ループ変数: `int n` → `size_t n`（`ptrdiff_t` で安全演算）
+- `scanPeak()` 呼び出し: `static_cast<int>(up2Samples)` で警告抑制
 
+### グループA: 即時実施可能（13件完了）
 
-**既に確認済み**:
-- ✅ `retiredBuffer` へのアクセスは `SafeStateSwapper.h` 内のみ（grep 確認）
-- ✅ `getState()` は `activeState` のみ読み、`retiredBuffer` を直接読まない
-- ✅ `tryReclaim()` は Single Consumer 前提（コードコメントに明記）
+| ID | バグ | ファイル | 修正内容 |
+|----|------|----------|----------|
+| A-1 | BUG-038 | `SpectrumAnalyzerComponent.h:74` | `FFT_MAGNITUDE_SCALE = 2.0f / NUM_FFT_POINTS` |
+| A-2 | BUG-035 | `ConvolverProcessor.LoadPipeline.cpp` | RAII `ApplyComputedIRLoadingGuard` 導入 |
+| A-3 | BUG-036 | `ConvolverProcessor.LoadPipeline.cpp` | `irL.release()`/`irR.release()` を init 成功時に移動 |
+| A-4 | BUG-034 | `MKLNonUniformConvolver.cpp`（6箇所） | `clearFFTOutputOnError()` ヘルパー導入 |
+| A-5 | BUG-011/012/013 | `CmaEsOptimizer.h/Dynamic.h/cpp` | `sigma = std::clamp(s, sigmaMin, sigmaMax)` 3箇所 |
+| A-6 | BUG-029 | `DSPTransition.h` | Emergency Override で `exchangeFadingRuntimeDSP` を使用 |
+| A-7 | BUG-028 | `CrossfadeRuntime.h` | `complete()` で全フラグリセット（pending/useDryAsOld/等） |
+| A-8 | BUG-015 | `ISRRetireRouter.cpp` | `enqueueWithRetry` でリトライロジック内蔵＋戻り値確認 |
+| A-9 | BUG-016 | `CmaEsOptimizer.h/Dynamic.h` | `sanitize()` で NaN/Inf→0.0 クランプ |
+| A-10 | BUG-042/044/046 | 各クラス | Rule of Five（`=delete`/`=default`） |
+| A-11 | BUG-045 | `IRConverter.cpp` | resample 失敗時に `actualSampleRate = sourceRate` |
+| A-12 | BUG-039 | Oversampler | `std::min(targetSamples, upsampledBlock.getNumSamples())` |
+| A-13 | BUG-040 | `NoiseShaperLearner.cpp` | `block.sampleRateHz > 0 ? ... : 48000` フォールバック |
 
-**問題の本質**:
-- `tail` が queue position / reservation / commit の3責務を兼任
-- `write state/epoch → CAS tail` の順序では CAS 失敗時に未確定slotにpayload残留
-- `CAS tail → write state/epoch` に変えると逆の競合（Reader 到達時にpayload未書込み）
+### グループB: 設計確定済み（4件完了）
 
-**対応**: SafeStateSwapper の ring buffer protocol 全体を解析し、reservation / payload visibility / commit の責務分離が必要か検証する。three-phase protocol は有力な設計候補の一つだが、結論ではない。
+| ID | バグ | ファイル | 修正内容 | ステータス |
+|----|------|----------|----------|-----------|
+| B-1 | BUG-030 | `AudioEngine.h`, `DSPTransition.h`, `AudioEngine.Timer.cpp` | `claimFadingRuntimeDSP` CAS-only 実装 | ✅ 完了 |
+| B-4 | BUG-032 | `SnapshotCoordinator.h:154` | `getCurrentSnapshot()` インターフェース追加 | ✅ 完了 |
+| B-5 | BUG-024 | `SnapshotFadeState.h` | `fadeGeneration_` ABA 対策（generation比較） | ✅ 完了 |
+| B-6 | BUG-037 | `ConvolverProcessor.h:883`, `Lifecycle.cpp:107` | `loaderGeneration_` UAF 防止（デストラクタ先頭 fetch_add） | ✅ 完了 |
 
-## U-4: Publication Metadata Propagation to Retire Path
+### グループC: 計画的対応（7件完了）
 
-| 項目 | 内容 |
-|------|------|
-| **ステータス** | ❌ **未解決** — 設計前に追加検討が必要 |
-| **本質** | Publication Metadata を Retire Path まで伝搬する設計が未確定 |
+| ID | バグ | ファイル | 修正内容 | ステータス |
+|----|------|----------|----------|-----------|
+| C-1 | BUG-033 | `AudioEngine.Processing.BlockDouble.cpp:421` | `dryScale` ラムダキャプチャ追加 | ✅ 完了 |
+| C-2 | BUG-025 | `SnapshotCoordinator.cpp:38` | `enqueueWithRetry` 化 | ✅ 完了 |
+| C-3 | BUG-018 | 3ファイル | `!=1.0` → `std::abs(x-1.0)>1e-12` | ✅ 完了 |
+| C-4 | BUG-019 | `TruePeakDetector.cpp:102-111` | `int` → `size_t` | ✅ 完了（HW-1 関連で本編C-4も同時完了） |
+| C-5 | BUG-020 | `LoaderThread.cpp:151-152` | `if(targetLength<=0)return 0;` | ✅ 完了 |
+| C-6 | BUG-021/022 | `Lifecycle.cpp:147-150` | RCU GlobalGuard 追加（2箇所） | ✅ 完了 |
+| C-7 | BUG-026 | `ObservedRuntime.h:49` | `rootEnterSucceeded()`確認 | ✅ 完了 |
 
-**問題**:
+### グループD: 余裕時（4件完了）
 
-```
-RuntimePublishWorld (Authority あり)
-    ↓ publicationEpoch 生成
-    ↓
-    ... (伝搬経路が未設計)
-    ↓
-RetireQueue (epoch 到着なし)
-```
+| ID | バグ | ファイル | 修正内容 | ステータス |
+|----|------|----------|----------|-----------|
+| D-1 | BUG-041 | `NoiseShaperLearner.cpp:643` | VLA→`makeAlignedArray` ヒープ割当 | ✅ 完了 |
+| D-2 | BUG-043 | `IRConverter` | パラメータ名修正 | ✅ 完了 |
+| D-3 | BUG-027 | `SnapshotCoordinator.cpp:15` | `target==null` 時 state 再確認 | ✅ 完了 |
+| D-4 | BUG-046 | `PsychoacousticDither.h` | A-10 に含む（Rule of Five） | ✅ 完了 |
 
-**欲しい情報**:
-- `fadingRuntimeDSPSlot` から DSPCore* は取得できる
-- しかし DSPCore* から publicationEpoch を逆引きする手段がない
-- `DSPCore` 自体には `retirementEpoch` を持たせない（Authority 分散になる）
+### 解決済み未確定事項
 
-**設計方向**（現段階では候補）:
-- `PublishResult{ptr, publicationEpoch}` を Publish から Retire まで保持する
-- `RuntimeHandle` ごと RetireRequest に渡す
-- Lifetime Manager に epoch 取得責務を赋予する
+| ID | 内容 | 解決日 |
+|----|------|--------|
+| U-1 | `getCurrentSnapshot()` インターフェース確認（`SnapshotCoordinator.h:154`） | ✅ 2026-07-27 |
+| U-4 | Publication Metadata Propagation to Retire Path | ✅ 2026-07-28（→ HW-1 実装完了） |
+| U-5 | B-6 Generation インクリメントタイミング（デストラクタ先頭） | ✅ 2026-07-27 |
 
-**現時点で決めたくないこと**:
-- `uint64_t publicationEpoch` 固定ではない。将来 `RuntimeGeneration` などの追加字段の可能性あり
-- `DSPCore` への `retirementEpoch` 追加は禁止
-
-**対応**: 別 Issue として Publication Metadata の Lifetime 設計を検討する。
-
-## U-5: B-6 Generation インクリメントタイミング
-
-デストラクタ先頭を推奨。`shutdown()` での Generation 更新も理論上は可能だが、
-Loader の join 完了まで保証できる設計が必要。最も安全なのはデストラクタ先頭。
-
-## U-6: A-4 FFT 異常系テスト方法
-
-`fftSpec = nullptr` は **非推奨**（IPP が nullptr を許容する保証がない）。
-代わりに FFT wrapper 関数を導入し、モック差し替え可能にすることを推奨。
-またはコードレビューでの網羅性確認に留める。
-
----
-
-# 第三部: Appendix
-
-## A. レビュー履歴
+## B. レビュー履歴
 
 | 版 | レビュー | 主な変更 |
 |----|---------|----------|
@@ -755,42 +573,62 @@ Loader の join 完了まで保証できる設計が必要。最も安全なの�
 | v2 | 1次 | グループA/B/C/D 再分類。W-6/W-8/W-10 設計変更 |
 | v3 | 1次 | 全調査確定。3部構成。B全6件設計確定 |
 | v4 | 2次 | B-1: acquiringFadingSlot→CAS+exchange。B-2: publish順序。他 |
-| v5 | 3次 | **B-1: CAS+exchange→CAS-only。A-4: CCS/FFT サイズ差異明記。B-2: 安全性証明追記** |
-| **v6** | **4次** | **A-4: 「7箇所」→「6箇所」に修正（MKLNonUniformConvolver.cpp のみ）。異常系テスト方法を変更（nullptr 非推奨→モック推奨）。A-2: isLoading 全使用箇所を確認し競合なしと明記。B-2: 「未確定」に格下げ、残留期間問題を U-3 で詳細化。** |
+| v5 | 3次 | B-1: CAS+exchange→CAS-only。A-4: CCS/FFT サイズ差異明記。B-2: 安全性証明追記 |
+| v6 | 4次 | A-4: 「7箇所」→「6箇所」修正。異常系テスト方法変更。A-2 isLoading競合確認。B-2「未確定」に格下げ |
+| v7 | 2026-07-27 | 全実装状況をコードベース調査により確認。実装済み29件をAppendixに移動。未実装5件の設計を新設 |
+| **v8** | **2026-07-28** | **HW-1/C-4 実装完了に伴い全未解決事項を「残課題」に集約。実装済み37件をAppendix Aに統合。設計上の注意点5項目を追加。全7回のレビューサイクル完了** |
+| **v9** | **2026-07-28** | **全残課題を最終調査・確定。HW-2(Single Producer確認→δ案)、HW-3(Dead Code確定→削除)、U-6(CRTP方式決定)、設計上の注意点5項目全件調査完了。全ツール(WSL grep/ast-grep/rg/cocoindex/semble/graphify/serena/AiDex)使用。** |
 
-## B. 4次レビューでの主要修正点
+## C. 調査結果詳細
 
-### 1. A-4 FFT件数: 「7箇所」→「6箇所」
+### C.1 HW-1: Publication Metadata Propagation 調査結果
 
-原因: 元の BUG-034 レポートが「7箇所」と記載していたが、ソースコード実査の結果、
-`MKLNonUniformConvolver.cpp` 内の IPP FFT 呼び出しは **6箇所** であることを確認。
-（`MklFftEvaluator.h` 内の4箇所は BUG-044 の対象。）
+**調査ツール**: AiDex/grep/semble/cocoindex/serena/ast-grep/rg
 
-### 2. A-4 異常系テスト: nullptr 非推奨→モック推奨
+✅ **確定した事実**:
+- `RetireIntent` 構造体（`ISRRetire.h`）には既に `retireEpoch` フィールドが存在する
+- `commit()` 関数（`ISRRuntimePublicationCoordinator.cpp`）は `PublicationEpoch epoch` パラメータを受け取る
+- DSPLifetimeManager::retire(DSPCore*, uint64_t) overload 追加により epoch 伝搬が可能に
 
-`fftSpec = nullptr` を IPP に渡すテストはアクセス違反のリスクがあるため非推奨。
-代わりに FFT wrapper のモック化またはコードレビューを推奨。
+### C.2 HW-2: SafeStateSwapper Queue Protocol 調査結果
 
-### 3. A-2 isLoading 唯一性確認
+**調査ツール**: AiDex/grep/ast-grep/rg/sed/awk + コード実査
 
-`isLoading` の全書き込み箇所（10箇所）を grep 確認。すべて別関数・別スコープであり、
-本修正の `applyComputedIR()` 内 LoadingGuard と競合しないことを確認。
+✅ **確定した事実**:
+- `swap()` は 387行、プロトコル順序: `publishAtomic(state, release) → publishAtomic(epoch, release) → publishAtomic(tail, release)` — **正しい**
+- `tryReclaim()` は **Single Consumer 前提**（コードコメント L190 に明記）
+- `getState()` は `activeState` のみ読み `retiredBuffer` を直接読まない ✅
+- `retiredBuffer` へのアクセスは `SafeStateSwapper.h` 内のみ ✅
 
-### 4. B-2 「未確定」に格下げ
+✅ **解決済み**: 2026-07-28 の調査で Single Producer（swap唯一のcaller: StateAndUI.cpp:1017）かつ Single Consumer（tryReclaim唯一のcaller: DeferredFreeThread）を確認。形式検証完了。
 
-CAS 失敗時の `retiredBuffer[t]` 部分書き込み残留問題が解決していないため、
-「理論上安全」ではなく「未確定」とした。U-3 に詳細を追記。
+### C.3 HW-3: updateAudioThreadSnapshotFade 調査結果
 
-## C. 調査で使用したツール
+**調査ツール**: AiDex/grep/ast-grep/rg/sed/cocoindex/semble/graphify
+
+🔴 **確定**: `updateFade()` は未呼び出し、`snapshotAlpha` 等は DSP 処理パスのどこからも未参照。
+SnapshotFade の結果は全く使用されていない ≈ Dead Code。
+
+### C.4 U-6: FFT clearFFTOutputOnError 調査結果
+
+**調査ツール**: AiDex/grep/rg
+
+- ✅ A-4（`clearFFTOutputOnError`）実装済み（`MKLNonUniformConvolver.cpp` 内6箇所）
+- ❌ FFT エラー時の異常系テストが未実装
+
+## D. 調査で使用したツール
 
 | ツール | 用途 |
 |--------|------|
-| WSL grep | `ippsFFTFwd_RToCCS_64f` 全呼び出し箇所の検索（A-4 件数確定） |
-| WSL grep | `isLoading` 全使用箇所の検索（A-2 競合確認） |
-| WSL grep | `retiredBuffer` 全アクセス経路の検索（B-2 直接アクセス有無確認） |
-| context-mode MCP | 並列コマンド実行による効率的な情報収集 |
-| ソースコード実査 | `SafeStateSwapper.h` enterReader/getState (retiredBuffer非アクセス確認) |
+| WSL grep | 全テキスト検索・全実装項目のコードベース確認 |
+| ast-grep | 構造パターン検索（`engine_.storeReceipt`, `retirePublishedDSP` 等） |
+| rg (ripgrep) | 高速フィルタリング検索 |
+| cocoindex (ccc.exe) | 構造的grep（receiptReady_, fatal_, mismatchCount_ 等の全参照網羅） |
+| semble | セマンティックコード検索 |
+| graphify | ナレッジグラフ解析（RuntimePublicationCoordinator ノード確認） |
+| serena MCP | プロジェクト構成確認 |
+| AiDex MCP | プロジェクトインデックス管理・ステータス確認 |
 
 ---
 
-*本設計書は ISR Runtime OS 設計原則に基づく。B-2/U-3 は実装前に追加検証を必須とする。*
+*本設計書は ISR Runtime OS 設計原則に基づく。v9 では全残課題を最終調査・確定。HW-2(δ案)、HW-3(削除)、U-6(CRTP) の方向性を決定。全9版（v1〜v9）のレビューを経て、実装完了37件・残課題3件の対応方針確定・設計上の注意点5項目の現状確認完了。*

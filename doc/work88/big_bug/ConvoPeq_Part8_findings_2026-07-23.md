@@ -263,12 +263,46 @@ work37/work39タグの膨大な閉ループ自己回復システム（Retire Sta
 
 一方、`EQProcessor.Processing.cpp:70931`に存在する**真のMid/Side（ステレオch）処理**（`canProcessMonoMidSide`/`msWork`）については、対応する専用テストケースも、ゲイン推定コード（`BandHelper::collectActiveBands`）内の専用ロジックも見当たりませんでした。前回session由来の「M/S最大ゲイン計算の位相関係」という記述が、(a) 今回テストで確認された「Parallel構成」を指していたのであれば**解決済み**、(b) 真のMid/Sideステレオエンコードにおけるゲイン推定を指していたのであれば**引き続き未対応**、のいずれであるかは、参照元の`gain_design_spec.md`（本セッションのソース添付には含まれていません）を直接確認しない限り確定できません。次回セッションで`gain_design_spec.md`原文の該当箇所を確認できれば、この曖昧さを解消できます。
 
-**副次的な発見**: `CrossfadeExecutorLocalContractTests.cpp`を確認したところ、このテストは実行時の音声的振る舞い（等電力かどうか等）を検証するものではなく、`AudioEngine.Commit.cpp`/`Timer.cpp`/`h`ファイルを**テキストとして読み込み、特定の関数名文字列（`consumeCrossfadePreparedSnapshot`等）の出現有無をチェックする「アーキテクチャ契約テスト」**でした。したがって本テストの合格は、No.9（クロスフェード線形/等電力不整合）の存在と一切矛盾しません——単に検証対象が異なるだけです。逆に言えば、**クロスフェードのゲインカーブが等電力かどうかを検証する数値テストは現状存在しない**ことが確認でき、No.9のような回帰がCIで検出されない理由の説明にもなります。同種の「ソースコードをテキストとして読み検証する契約テスト」（`BuildInputSemanticContractTests.cpp`等、同様の命名パターンのファイルが複数存在）は、テスト名から「実行時契約」を連想しやすいため、レビュー時に注意が必要です。
+**副次的な発見**: `CrossfadeExecutorLocalContractTests.cpp`を確認したところ、このテストは実行時の音声的振る舞い（等電力かどうか等）を検証するものではなく、`AudioEngine.Commit.cpp`/`Timer.cpp`/`h`ファイルを**テキストとして読み込み、特定の関数名文字列（`consumeCrossfadePreparedSnapshot`等）の出現有無をチェックする「アーキテクチャ契約テスト」**でした。したがって本テストの合格は、No.9（クロスフェード線形/等電力不整合）の存在と一切矛盾しません——単に検証対象が異なるだけです。逆に言えば、**クロスフェードのゲインカーブが等電力かどうかを検証する数値テストは現状存在しない**ことが確認でき、No.9のような回帰がCIで検出されない理由の説明にもなります。
+
+**さらに重要な発見**：`GainStagingContractTests.cpp`のファイル冒頭コメントには「本テストは`AutoGainPlanner.cpp`をリンクせず、リファレンス実装でロジックを検証する」と明記されています。実際、テストファイル自身の中に`AutoGainPlanner.h`と「同一」とコメントされた定数群と、`plan()`のロジックを独立に再実装した`refPlan()`関数を持ち、**その自己完結した再実装を検証する**方式でした（JUCE依存を排除し独立コンパイルを可能にするための意図的設計）。
+
+これは`CrossfadeExecutorLocalContractTests.cpp`（テキストパターン照合）とは方式が異なりますが、根底の特性は同じです：**このテストが100%パスしても、それは「テスト自身が持つ参照実装が自己無矛盾である」ことの証明に留まり、実際の`AutoGainPlanner.cpp`本体が同じロジックを実装し続けているかは検証しません**。本セッションで`AutoGainPlanner.cpp`の`plan()`実装を直接確認した際は本テストの`refPlan()`と一致するロジックであることを確認できましたが、これは「現時点で一致している」ことの確認に過ぎず、将来どちらか一方のみが変更されればテストは全て緑のまま本体側にバグが混入し得ます。
+
+**補足確認**：`RetireGraceSemanticsTests.cpp`は対照的に`#include "audioengine/ISRRetire.h"`等で実際の本番ヘッダ（`convo::isr::RetireIntent`/`RetirePriority`）を直接インクルードしており、完全な「参照実装」方式ではありませんでした。ただし、検証対象の比較関数（優先度ソートのcomparator）自体は「// dequeuePendingRetireIntents と同じ comparator」という注記付きで**テスト内にロジックを再度手書き**しており、実際の`dequeuePendingRetireIntents`内部の比較関数を直接呼び出して検証しているわけではありませんでした。したがって、テストごとに「型は本番のものを使うが、検証対象のロジック自体は再実装」という中間的なパターンも存在することが分かりました。
+
+**追加確認（健全性の裏付け）**：`CMakeLists.txt`を確認したところ、`src/tests/`配下の主要20テスト実行ファイルは全て`add_executable`+`add_test`（CTest登録）で正しくビルド・CI実行対象に組み込まれていることを確認しました。「テストファイルが存在するだけでCIには含まれていない」という懸念は該当せず、むしろ`HeadlessAudioPathVerification`（実バイナリをヘッドレス起動し実際のオーディオコールバック発生を検証するPowerShellスクリプト）のようなEnd-to-Endスモークテストも整備されています。前述の「リファレンス実装/非リンク」という設計上の特性と、「CIへの統合自体は適切に行われている」という運用面の健全性は、別軸の話として区別して理解する必要があります。次回セッションで残りのテストファイルを確認する際は、各テストが「実装を実際にリンク・呼び出しているか」を最初に確認することを推奨します。
 
 ---
 
-- 未着手のまま次回へ: `src/tests/*`のうち`BuildInputSemanticContractTests.cpp`以下17ファイルの残り（今回は2ファイルのみ）、`ConvolverProcessor.StateAndUI.cpp`の`getState()/setState()`本体（今回は同期ヘルパーのみ確認）
+## T. No.25: `getState()`/`setState()`で`nucHCMode`/`nucLCMode`が永続化されていない（確定バグ・パッチ提示済み）
 
-## 本セッション最終ステータス
+### 現象
+
+`ConvolverProcessor.StateAndUI.cpp`の`getState()`（63465-63511行）は、テール整形に関する設定（`tailMode`・`tailStartSec`・`tailStrength`・`tailL1L2Multiplier`等）を`juce::ValueTree`へ保存しますが、**同じくpendingOverrideのメンバーである`nucHCMode`（テールのハイカットフィルターモード）と`nucLCMode`（ローカットフィルターモード）だけが保存対象から漏れています**。対応する`setState()`（63552行以降）にも`"nucHCMode"`/`"nucLCMode"`プロパティの読み込みが存在しません。
+
+全ソースを横断検索した結果、`nucHCMode`/`nucLCMode`はビルドスナップショット経由の実処理（`tailSpec.hcMode`等、58547行・59385行・59882行）、`pendingOverride`↔`snapshot`間の同期（`copyPendingToSnapshotUnlocked`/`copySnapshotToPendingUnlocked`、63405-63406行・63457-63462行）、構造ハッシュ計算（63318-63319行・64124-64125行）では正しく扱われている一方、`getState()`/`setState()`（ValueTreeへのセッション/プリセット永続化）だけがこの2フィールドを完全に欠いていることを確認しました。
+
+### 影響
+
+ユーザーがテールのハイカット/ローカットフィルターモードをデフォルト（`HCMode::Natural`/`LCMode::Natural`）以外に変更し、プロジェクト/プリセットを保存して再度開いた場合（あるいはアプリを再起動した場合）、この2つの設定だけがサイレントにデフォルト値へ戻ります。他のテール関連設定（tailMode等）は正しく保存・復元されるため、ユーザーから見ると「一部の設定だけ保存されない」という気づきにくい不具合になります。
+
+### パッチ
+
+`patch_25_getstate_nucmode_persistence.diff`を参照。`getState()`側は既存の`pendingOverrideLock`スコープ内で他フィールドと同様にまとめて読み取り、`setState()`側は既存の公開セッター`ConvolverProcessor::setNUCFilterModes(HCMode, LCMode)`（クランプ・変更通知ロジックを内包）をそのまま呼び出す形にしており、新規ロジックの追加は最小限に抑えています。
+
+## U. `ISRHB.h/cpp`・`ISRSealedObject.h`の確認：問題なし
+
+**`ISRSealedObject.h`**：CRTPベースの`SealedObject<Derived>`は、Publish時に`seal()`/`freeze()`で変更禁止状態にし、`assertMutable()`で違反を検知して`std::abort()`する設計です。ロジックは単純かつ健全で、問題は見つかりませんでした。
+
+**`ISRHB.h/cpp`**：Happens-Before関係を記録・検証するCI/デバッグ用フレームワークです。`HBTraceRuntime::recordEdge()`が内部で`std::lock_guard<std::mutex>`を使用しているため、これがRTスレッドから呼ばれていないか重点的に確認しました。`recordHBEdge()`（`DebugRuntime`の公開ラッパー）の実際の呼び出し箇所は全コードベース中3箇所のみで、いずれも確認できました：
+
+- 28167行：`runtimePublicationBridge_.commit(..., RuntimeBoundary::NonRTWorld, ...)`の直前（NonRT publish経路）
+- 28220行：`AudioEngine::onRuntimeRetiredNonRt()`内、`ASSERT_NON_RT_THREAD();`で保護
+- 35390行：`releaseResources()`内（既にNonRT確定済み、Part7 §D参照）
+
+3箇所とも確認済みNonRTスレッドであり、`recordEdge()`内のmutex使用に伴う問題はありません。No.19（RTTraceRelay）やNo.22（DSPQuarantineManager）とは異なり、`HBTraceRuntime`は実際に結線・使用されている点も確認できました。
+
+---
 
 未確証のまま持ち越していた`NoiseShaperLearner`のRT結線経路も解決したため、本セッション開始時点で挙げた「未調査の高優先エリア」5項目（ISRRuntimePublicationCoordinator/ISRRetire/EQProcessor.Coefficients/DSPCoreFloat・IO・ToBuffer/ConvolverProcessor・core RCU）は全て着手・検証済みとなりました。残るのは、本セッション中に新たに視野に入った周辺領域（`src/tests/*`との突き合わせ、`getState()/setState()`本体）のみです。

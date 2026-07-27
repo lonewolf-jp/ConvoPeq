@@ -1857,3 +1857,1248 @@ std::copy(inMean, inMean + dim, mean.begin());
 10. MKL を使う DSP 実装全体
 
 必要であれば、次はこれらを **GitHub Issue 形式** または **修正パッチ案付き** で、さらに詳細なバグリストに整理できます。
+
+
+
+
+以下は、これまでのバグ候補報告と `coding_rule_jp.txt` の制約を踏まえた、**ConvoPeq 改修計画書**です。  
+実運用向けに、優先順位・フェーズ・受入基準・検証方法まで含めて整理しています。
+
+---
+
+# ConvoPeq 改修計画書
+
+## 1. 文書情報
+
+| 項目 | 内容 |
+|---|---|
+| 対象プロダクト | ConvoPeq |
+| 対象プラットフォーム | Windows 11 x64 |
+| 必須 CPU 機能 | AVX2 |
+| コンパイラ | MSVC v143 / Intel icx |
+| C++ 規格 | C++20 |
+| Framework | JUCE 8.0.12 |
+| 依存ライブラリ | Intel oneAPI MKL, r8brain-free-src |
+| 計画の目的 | リアルタイム安全性、クラッシュ耐性、DSP 正確性、並行性、ビルド健全性の確保 |
+| 優先度の基準 | P0: 即時 / P1: 短期 / P2: 中期 |
+
+---
+
+## 2. 背景
+
+これまでの静的解析・AST 断片解析により、以下の系統の問題が確認または強く疑われています。
+
+1. Audio thread 内のリアルタイム非安全処理
+   - MMCSS 設定
+   - `Logger`
+   - `String`
+   - `mkl_malloc`
+   - `vector`
+   - `mutex`
+
+2. AVX2 / SIMD 処理の安全性・正確性
+   - aligned store によるクラッシュ可能性
+   - gain ramp の要素順誤り
+   - NaN / Inf 伝播
+
+3. ライフタイム管理
+   - `MessageManager::callAsync` の dangling 可能性
+   - RCU reader の exit 漏れ
+   - shutdown 中の UAF 可能性
+   - retire 失敗時のリーク可能性
+
+4. 並行性
+   - atomic memory order 不備
+   - fade state race
+   - debug counter / diagnostic field の競合
+
+5. 状態管理・堅牢性
+   - state 復元時の finite 検証不足
+   - cache ファイル破損耐性不足
+   - 時間単位計算の誤り
+   - 不正プリセット耐性不足
+
+6. ビルド設定
+   - x64 判定不備
+   - PGO リンクオプション不足
+   - IntelLLVM / MSVC 条件分岐の甘さ
+
+これらは、音声途切れ、クラッシュ、未定義動作、DSP 破損、シャットダウンハングに直結するため、段階的に改修します。
+
+---
+
+## 3. 基本方針
+
+### 3.1 最優先原則
+
+`coding_rule_jp.txt` を最上位制約とします。
+
+特に以下は絶対条件とします。
+
+- Audio thread 内で待つ可能性のある処理をしない
+- Audio thread 内でメモリ確保・解放をしない
+- Audio thread 内で `MessageManager` にアクセスしない
+- Audio thread 内で MMCSS 設定をしない
+- Audio thread 内でファイル I/O、ログ出力、コンソール出力をしない
+- MKL メモリは 64-byte alignment とし、Non-RT のみで確保する
+- RT ⇄ Non-RT の大きなデータ受け渡しは SPSC FIFO を使う
+- 状態監視は lock-free snapshot / pull 型にする
+- SEH は使用しない
+- JUCE / r8brain フォルダは編集しない
+- JUCE 公式サンプルにない過剰な安定化機構を新規に増やしすぎない
+
+### 3.2 改修方針
+
+改修は「機能追加」ではなく、**既存設計の安全性完成**を目的とします。
+
+したがって、以下を原則とします。
+
+- 既存の ISR / RCU / retire / publication 機構は維持しつつ、欠陥を修正する
+- 新規の複雑な機構は極力追加しない
+- どうしても必要な場合のみ、固定長・lock-free・bounded な最小機構を追加する
+- 診断機能は RT 安全な trace ring へ置換する
+- 検証可能な形（AST / sanitizer / stress test）で完了判定する
+
+---
+
+## 4. 優先度定義
+
+| 優先度 | 意味 | 対応期限 |
+|---|---|---|
+| P0 | クラッシュ、UAF、RT 規約違反、DSP 破損、データ破壊に直結 | 即時 |
+| P1 | 不安定化、競合、機能不良、メモリリーク、状態不一致 | 短期 |
+| P2 | 堅牢性、保守性、ビルド健全性、パフォーマンス | 中期 |
+
+---
+
+# 5. 改修フェーズ全体像
+
+| Phase | 名称 | 目的 | 期間目安 |
+|---|---|---|---|
+| Phase 0 | 現状確定と計測基盤 | バグ再現・静的解析ゲート構築 | 2〜3日 |
+| Phase 1 | RT 安全性の確保 | Audio thread 内の規約違反をゼロにする | 1〜2週 |
+| Phase 2 | ライフタイムと並行性の安定化 | UAF / race / leak を潰す | 1〜2週 |
+| Phase 3 | DSP 正確性と状態堅牢性 | NaN / 状態破損 / 不正入力耐性 | 1週 |
+| Phase 4 | ビルドと静的解析ゲート | 再発防止・CI 統合 | 3〜5日 |
+| Phase 5 | 総合検証とソークテスト | 実機・長時間・異常系検証 | 1〜2週 |
+
+---
+
+# 6. Phase 0：現状確定と計測基盤
+
+## 6.1 目的
+
+改修前に、以下を確定させます。
+
+- どの関数が Audio thread から到達可能か
+- どの禁止 API が RT 経路に存在するか
+- どのファイルが P0 バグを含むか
+- どのテストが再現性を持つか
+
+## 6.2 作業項目
+
+### 6.2.1 Audio thread 入口の確定
+
+以下を RT 入口として定義します。
+
+```text
+AudioEngine::getNextAudioBlock()
+AudioEngineProcessor::processBlock()
+ConvolverProcessor::process()
+EQProcessor::processBlock()
+MKLNonUniformConvolver::Add()
+MKLNonUniformConvolver::Get()
+LatticeNoiseShaper::processStereoBlock()
+```
+
+### 6.2.2 禁止 API の callgraph 抽出
+
+以下を禁止 API として抽出します。
+
+```text
+AvSetMmThreadCharacteristicsW
+AvSetMmThreadPriority
+AvRevertMmThreadCharacteristics
+juce::Logger::writeToLog
+DBG
+mkl_malloc
+mkl_free
+_aligned_malloc
+_aligned_free
+std::vector::push_back
+std::vector::resize
+std::vector::emplace_back
+std::mutex::lock
+std::condition_variable::wait
+MessageManager::callAsync
+fopen
+fwrite
+CreateFileW
+WriteFile
+std::exp
+std::log
+std::pow
+std::sin
+std::cos
+std::lround
+std::round
+```
+
+### 6.2.3 ビルドマトリクス作成
+
+以下を CI に追加します。
+
+| 構成 | 目的 |
+|---|---|
+| Debug x64 MSVC | 基本動作 |
+| Release x64 MSVC | 実機相当 |
+| Release x64 MSVC + ASan | メモリ破壊検出 |
+| Release x64 MSVC + UBSan 相当 | 未定義動作検出 |
+| Release x64 clang-cl ASan | 別コンパイラ検証 |
+| Release x64 PGO instrument | PGO 生成確認 |
+| Release x64 PGO use | PGO 適用確認 |
+| IntelLLVM Release | icx 互換確認 |
+
+### 6.2.4 静的解析ゲート導入
+
+以下を導入します。
+
+- AST / callgraph ベースの RT 禁止 API 検出
+- `_mm256_store_pd` / `_mm256_load_pd` の使用箇所一覧
+- `steady_clock::count()` の直接除算検出
+- `state.getProperty()` の finite check 欠如検出
+- `MessageManager::callAsync([this]` パターン検出
+
+## 6.3 Phase 0 受入基準
+
+- RT 入口から禁止 API への到達リストが作成されている
+- P0 項目ごとに該当ファイルと関数が特定されている
+- ASan / Release / Debug のビルドが通る
+- 静的解析スクリプトが実行可能である
+
+---
+
+# 7. Phase 1：RT 安全性の確保（P0）
+
+## 7.1 目標
+
+Audio thread 内から、規約違反 API を **0 件** にします。
+
+---
+
+## 7.2 改修項目 1：MMCSS 登録/解除の Audio thread 呼び出し撤去
+
+### 問題
+
+`AudioEngine.Mmcss.cpp` に、Audio thread 内で MMCSS 登録/解除を行う設計が見られます。
+
+```cpp
+::AvSetMmThreadCharacteristicsW(...)
+::AvSetMmThreadPriority(...)
+::AvRevertMmThreadCharacteristics(...)
+```
+
+これは `coding_rule_jp.txt` の「Audio thread 内で MMCSS 設定禁止」に抵触します。
+
+### 改修方針
+
+原則として、自前 MMCSS 登録を Audio thread から撤去します。
+
+#### 選択肢
+
+1. JUCE / ASIO ドライバの MMCSS 管理に任せる  
+2. どうしても必要な場合は、規約例外として正式承認を得たうえで、RT 影響を実測する
+
+ただし、規約を厳守する場合は **選択肢 1** を採用します。
+
+### 実装方針
+
+- `registerMmcssOnAudioThread()` 系を無効化
+- `revertMmcssOnAudioThread()` を Audio callback から呼ばない
+- MMCSS 状態は diagnostic 専用に残す
+- 必要なら Non-RT 初期化時に「ドライバ MMCSS 有無」を観測するだけにする
+
+### 受入基準
+
+- Audio thread callgraph から以下が消える
+  - `AvSetMmThreadCharacteristicsW`
+  - `AvSetMmThreadPriority`
+  - `AvRevertMmThreadCharacteristics`
+- ASIO / WASAPI / DirectSound で dropout が増加しない
+- 長時間再生で安定する
+
+---
+
+## 7.3 改修項目 2：RT 経路の `diagLog` / `Logger` / `DBG` 撤去
+
+### 問題
+
+`diagLog()` は以下を含みます。
+
+```cpp
+DBG(message);
+juce::Logger::writeToLog(message);
+```
+
+これが RT 経路から呼ばれると規約違反です。
+
+### 改修方針
+
+RT 経路では一切の文字列ログを禁止し、固定長 trace ring に置換します。
+
+### 設計例
+
+```cpp
+struct RtTraceEvent
+{
+    uint64_t timestampUs;
+    uint32_t eventId;
+    uint32_t payload0;
+    uint32_t payload1;
+};
+```
+
+```cpp
+class RtTraceRing
+{
+public:
+    void push(RtTraceEvent event) noexcept;
+    bool pop(RtTraceEvent& out) noexcept;
+
+private:
+    static constexpr size_t kCapacity = 1024;
+    std::array<RtTraceEvent, kCapacity> buffer_;
+    std::atomic<size_t> writeIndex_{0};
+    std::atomic<size_t> readIndex_{0};
+};
+```
+
+Non-RT タイマーが `pop()` してログ出力します。
+
+### 受入基準
+
+- RT callgraph に `Logger::writeToLog` がない
+- RT callgraph に `DBG` がない
+- RT 内で `juce::String` を構築していない
+- `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` ON でも RT 違反が発生しない
+
+---
+
+## 7.4 改修項目 3：RT 経路での `mkl_malloc` / `mkl_free` 排除
+
+### 問題
+
+`MKLNonUniformConvolver` 内で、実行時に `mkl_malloc` している可能性があります。
+
+```cpp
+mkl_malloc(...)
+```
+
+これは Audio thread では禁止です。
+
+### 改修方針
+
+MKL バッファはすべて以下で事前確保します。
+
+- `prepareToPlay()`
+- IR ロード完了時
+- convolver rebuild 完了時
+- Non-RT builder 内
+
+Audio thread では以下のみ許可します。
+
+- capacity 確認
+- 既存バッファ使用
+- 不足時の安全スキップ
+- atomic fault flag 設定
+
+### 実装方針
+
+```cpp
+if (requiredSize > reusableGainCapacity_)
+{
+    faultFlags_.store(Fault::GainBufferTooSmall, std::memory_order_release);
+    return;
+}
+```
+
+### 受入基準
+
+- RT callgraph に `mkl_malloc` がない
+- RT callgraph に `mkl_free` がない
+- MKL バッファ不足時にクラッシュしない
+- fault flag が Non-RT で観測できる
+
+---
+
+## 7.5 改修項目 4：AVX2 aligned store の安全化
+
+### 問題
+
+`convertFloatToDoubleHighQuality()` に `_mm256_store_pd` が見えます。
+
+```cpp
+_mm256_store_pd(dst + i, _mm256_cvtps_pd(lo));
+```
+
+`dst` の 32-byte alignment が保証されていない場合、クラッシュします。
+
+### 改修方針
+
+原則として unaligned store にします。
+
+```cpp
+_mm256_storeu_pd(dst + i, _mm256_cvtps_pd(lo));
+_mm256_storeu_pd(dst + i + 4, _mm256_cvtps_pd(hi));
+```
+
+### 例外条件
+
+以下を満たす場合のみ aligned store を許可します。
+
+- `alignas(32)` 付きバッファである
+- allocator が 32-byte alignment を保証する
+- 呼び出し側で static/dynamic assert する
+
+### 受入基準
+
+- misaligned buffer テストでクラッシュしない
+- `_mm256_store_pd` 使用箇所が whitelist のみである
+- ASan で問題なし
+
+---
+
+## 7.6 改修項目 5：AVX2 gain ramp の要素順修正
+
+### 問題
+
+以下は要素順が逆である可能性が高いです。
+
+```cpp
+const __m256d vGain = _mm256_setr_pd(startGain + 3.0 * increment,
+                                     startGain + 2.0 * increment,
+                                     startGain + increment,
+                                     startGain);
+```
+
+### 改修方針
+
+```cpp
+const __m256d vGain = _mm256_setr_pd(startGain,
+                                     startGain + increment,
+                                     startGain + 2.0 * increment,
+                                     startGain + 3.0 * increment);
+```
+
+### 受入基準
+
+- スカラー実装とサンプル順が一致する
+- ランプが単調増加/減少する
+- クロスフェード境界でクリックノイズが発生しない
+
+---
+
+## 7.7 改修項目 6：NaN / Inf 伝播防止
+
+### 対象
+
+- `LatticeNoiseShaper::quantize()`
+- `LatticeNoiseShaper::processSample()`
+- Biquad SIMD state
+- AGC
+- soft clip
+- input transform
+
+### 改修方針
+
+以下を徹底します。
+
+1. 入力サニタイズ
+2. 内部状態サニタイズ
+3. 出力サニタイズ
+
+### 具体例
+
+```cpp
+inline double replaceNonFiniteWithZero(double x) noexcept
+{
+    return std::isfinite(x) ? x : 0.0;
+}
+```
+
+ただし RT では libm 回避のため、既存の `isFiniteNoLibm` 系を使用します。
+
+### NoiseShaper 出力保護
+
+```cpp
+const double safeQuantized = replaceNonFiniteWithZero(quantized);
+return safeQuantized;
+```
+
+### Biquad state 保護
+
+NaN と denormal を同時に潰します。
+
+```cpp
+// NaN mask
+__m128d nan_w1 = _mm_cmpneq_pd(new_w1, new_w1);
+__m128d nan_w2 = _mm_cmpneq_pd(new_w2, new_w2);
+
+// denormal mask
+__m128d small_w1 = _mm_cmplt_pd(abs_w1, threshold);
+__m128d small_w2 = _mm_cmplt_pd(abs_w2, threshold);
+
+__m128d invalid_w1 = _mm_or_pd(nan_w1, small_w1);
+__m128d invalid_w2 = _mm_or_pd(nan_w2, small_w2);
+
+new_w1 = _mm_andnot_pd(invalid_w1, new_w1);
+new_w2 = _mm_andnot_pd(invalid_w2, new_w2);
+```
+
+### 受入基準
+
+- NaN 入力に対して出力が finite である
+- Inf 入力に対して出力が finite である
+- 長時間無音後に NaN 化しない
+- EQ 高共振時に発散しても安全に clamp される
+
+---
+
+## 7.8 改修項目 7：RT 内 `vector` / `mutex` / `String` の排除
+
+### 対象
+
+- `ISRDSPQuarantine::auditLog_`
+- `ISRDSPHandle::crossfadeRecords`
+- `EQCacheManager`
+- retire fallback
+- diagnostic log
+
+### 改修方針
+
+RT 側では以下のみ使用します。
+
+- fixed-size array
+- lock-free ring
+- atomic flag
+- preallocated pool
+
+mutex / vector / String は Non-RT 専用へ移動します。
+
+### 受入基準
+
+- RT callgraph に `std::mutex::lock` がない
+- RT callgraph に `std::vector::push_back` がない
+- RT callgraph に `juce::String` 構築がない
+
+---
+
+# 8. Phase 2：ライフタイムと並行性の安定化（P0/P1）
+
+## 8.1 目標
+
+UAF、leak、race、shutdown hang を除去します。
+
+---
+
+## 8.2 改修項目 8：`MessageManager::callAsync` の lifetime 安全化
+
+### 問題
+
+`[this]` キャプチャは use-after-free の可能性があります。
+
+### 改修方針
+
+JUCE の `WeakReference` または `SafePointer` を使用します。
+
+```cpp
+MessageManager::callAsync([safe = WeakReference<MainWindow>(this)]
+{
+    if (safe == nullptr)
+        return;
+
+    safe->doSomething();
+});
+```
+
+### 受入基準
+
+- 起動直後終了でクラッシュしない
+- 非同期処理中にウィンドウを閉じてもクラッシュしない
+- ASan で UAF が出ない
+
+---
+
+## 8.3 改修項目 9：RCU reader の RAII 化
+
+### 問題
+
+`enterRcuReader()` / `exitRcuReader()` が手動対応の場合、exit 漏れが起き得ます。
+
+### 改修方針
+
+```cpp
+class ScopedRcuReader
+{
+public:
+    explicit ScopedRcuReader(AudioEngine& e) : engine_(e)
+    {
+        engine_.enterRcuReader();
+    }
+
+    ~ScopedRcuReader()
+    {
+        engine_.exitRcuReader();
+    }
+
+    ScopedRcuReader(const ScopedRcuReader&) = delete;
+    ScopedRcuReader& operator=(const ScopedRcuReader&) = delete;
+
+private:
+    AudioEngine& engine_;
+};
+```
+
+### 受入基準
+
+- early return 経路で exit 漏れがない
+- retire が停滞しない
+- shutdown がハングしない
+
+---
+
+## 8.4 改修項目 10：shutdown drain 完了条件の厳格化
+
+### 問題
+
+`markShutdownComplete()` が早期に呼ばれると UAF になります。
+
+### 改修方針
+
+完了条件を以下にします。
+
+```cpp
+bool canCompleteShutdown() const noexcept
+{
+    return activeCallbackCount_ == 0
+        && rcuReaderCount_ == 0
+        && fadingDspCount_ == 0
+        && deferredPublishCount_ == 0
+        && retireQueueEmpty_;
+}
+```
+
+`markShutdownComplete()` は CAS で一度だけ。
+
+### 受入基準
+
+- shutdown 中に IR 変更してもクラッシュしない
+- shutdown 中に device close してもクラッシュしない
+- 高速 start/stop でハングしない
+
+---
+
+## 8.5 改修項目 11：retire enqueue 失敗時のリーク防止
+
+### 問題
+
+`enqueueWithRetry()` 失敗時に旧スナップショットが leak する可能性があります。
+
+### 改修方針
+
+失敗時は以下を行います。
+
+1. health monitor へ通知
+2. quarantine queue へ隔離
+3. Non-RT で強制 reclaim
+4. UI へ degraded 通知
+
+### 受入基準
+
+- retire queue pressure 時にメモリが増え続けない
+- fault が observable である
+- 高負荷 publish stress で leak しない
+
+---
+
+## 8.6 改修項目 12：fade state race の解消
+
+### 問題
+
+`FadeIn::advance()` と `resetToIdle()` が競合すると `remainingSamples_` が壊れる可能性があります。
+
+### 改修方針
+
+推奨：
+
+- fade 状態は Audio thread 単一所有者にする
+- reset 要求は atomic flag で送り、Audio thread 内で reset する
+
+```cpp
+fadeResetRequested_.store(true, std::memory_order_release);
+```
+
+Audio thread：
+
+```cpp
+if (fadeResetRequested_.exchange(false, std::memory_order_acq_rel))
+    resetFadeInternal();
+```
+
+### 受入基準
+
+- fade 中 bypass 連打で状態が壊れない
+- fade 中 IR 変更でクラッシュしない
+- remainingSamples が Idle 中に非ゼロのまま残らない
+
+---
+
+## 8.7 改修項目 13：atomic memory order の統一
+
+### 方針
+
+Runtime world publish は以下を基本とします。
+
+```cpp
+store(newPtr, std::memory_order_release);
+load(std::memory_order_acquire);
+```
+
+counter / flag は用途により以下を使います。
+
+| 用途 | memory order |
+|---|---|
+| publish pointer | release / acquire |
+| simple flag | release / acquire |
+| diagnostic counter | relaxed 可 |
+| shutdown state | acq_rel / seq_cst |
+| sequence counter | release / acquire |
+
+### 受入基準
+
+- TSan で data race が出ない
+- publish 直後の reader が初期化済みオブジェクトを観測する
+
+---
+
+# 9. Phase 3：DSP 正確性と状態堅牢性（P1）
+
+## 9.1 改修項目 14：`processAGC()` のガード強化
+
+### 改修内容
+
+```cpp
+if (numSamples <= 0 || numChannels <= 0)
+    return;
+```
+
+また、`currentGain` が更新されていることを確認します。
+
+### 受入基準
+
+- `numSamples = 0` でクラッシュしない
+- AGC gain が意図通り追従する
+
+---
+
+## 9.2 改修項目 15：soft clip の knee 0 除算対策
+
+### 改修内容
+
+```cpp
+constexpr double kMinKnee = 1e-6;
+const double safeKnee = std::max(knee, kMinKnee);
+```
+
+### 受入基準
+
+- knee = 0 で NaN にならない
+- saturation amount 最小/最大で出力が finite
+
+---
+
+## 9.3 改修項目 16：state 復元時の finite 検証
+
+### 対象
+
+- adaptive noise shaper coefficients
+- EQ parameters
+- convolver parameters
+- oversampling factor
+- processing order
+
+### 改修方針
+
+```cpp
+const double value = static_cast<double>(state.getProperty(propertyName));
+
+if (!isFiniteNoLibm(value))
+    return false;
+
+if (value < minValue || value > maxValue)
+    return false;
+```
+
+### 受入基準
+
+- NaN を含む state を読み込んでもクラッシュしない
+- 不正 enum を読み込んでも拒否される
+- release ビルドでも最低限の検証が有効
+
+---
+
+## 9.4 改修項目 17：キャッシュファイル破損耐性
+
+### 改修内容
+
+`MixedPhasePersistentCache::load()` に検証を追加します。
+
+```cpp
+constexpr int kMaxSections = 4096;
+
+if (numSec < 0 || numSec > kMaxSections)
+    return false;
+```
+
+### 受入基準
+
+- 破損キャッシュで OOM しない
+- 破損キャッシュを無視して再構築できる
+
+---
+
+## 9.5 改修項目 18：時間単位計算の修正
+
+### 問題
+
+```cpp
+steady_clock::now().time_since_epoch().count() / 1000
+```
+
+は単位誤りの可能性があります。
+
+### 改修方針
+
+```cpp
+const auto durationMs =
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startTime
+    ).count();
+```
+
+### 受入基準
+
+- 5 秒超過判定が正しい
+- 30 秒窓の overflow rate が正しい
+
+---
+
+## 9.6 改修項目 19：`nextPow2()` の整数オーバーフロー対策
+
+### 改修方針
+
+```cpp
+inline int nextPow2(int x) noexcept
+{
+    if (x <= 1)
+        return 1;
+
+    constexpr int kMaxPow2 = 1 << 30;
+
+    if (x >= kMaxPow2)
+        return kMaxPow2;
+
+    uint32_t v = static_cast<uint32_t>(x - 1);
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+
+    return static_cast<int>(v + 1);
+}
+```
+
+### 受入基準
+
+- 巨大値で負の FFT size にならない
+- INT_MAX 近傍で UB にならない
+
+---
+
+## 9.7 改修項目 20：rebuild intent の重複送信整理
+
+### 問題
+
+`setOversamplingFactor()` 等で `submitRebuildIntent()` が二重送信されている可能性があります。
+
+### 改修方針
+
+- 1 パラメータ変更につき 1 intent を原則化
+- 複数条件が必要な場合は intent を集約
+- telemetry の重複を排除
+
+### 受入基準
+
+- 1 操作で過剰 rebuild が発生しない
+- telemetry が読みやすい
+- CPU 負荷が安定する
+
+---
+
+# 10. Phase 4：ビルドと静的解析ゲート
+
+## 10.1 改修項目 21：x64 / AVX2 / FMA 判定強化
+
+### CMake
+
+```cmake
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "ConvoPeq requires 64-bit.")
+endif()
+
+if(WIN32 AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+  message(FATAL_ERROR "ConvoPeq requires Windows x64/AMD64.")
+endif()
+```
+
+### C++
+
+```cpp
+#if !defined(_M_X64) && !defined(__x86_64__)
+#error ConvoPeq requires x86-64
+#endif
+```
+
+### Runtime
+
+- AVX
+- AVX2
+- FMA
+- OS XSAVE
+
+を確認します。
+
+### 受入基準
+
+- ARM64 Windows で configure が失敗する
+- AVX2 非対応 CPU で起動前に明確なエラーが出る
+
+---
+
+## 10.2 改修項目 22：PGO 設定の修正
+
+### 改修内容
+
+```cmake
+if(CONVOPEQ_PGO_INSTRUMENT AND CONVOPEQ_PGO_USE)
+  message(FATAL_ERROR "PGO instrument and use are mutually exclusive.")
+endif()
+
+if(CONVOPEQ_PGO_INSTRUMENT)
+  target_compile_options(ConvoPeq PRIVATE /GENPROFILE)
+  target_link_options(ConvoPeq PRIVATE /GENPROFILE)
+endif()
+
+if(CONVOPEQ_PGO_USE)
+  target_compile_options(ConvoPeq PRIVATE /USEPROFILE)
+  target_link_options(ConvoPeq PRIVATE /USEPROFILE)
+endif()
+```
+
+### 受入基準
+
+- instrument build で .pgc が出る
+- use build で .pgd を使用できる
+- 両方 ON で configure が失敗する
+
+---
+
+## 10.3 改修項目 23：IntelLLVM / MKL リンク整合性
+
+### 改修内容
+
+- `/Qmkl:sequential` を使うなら link option も揃える
+- MKL を使わないテストには付与しない
+- MSVC PGO と icx の混在を警告する
+
+### 受入基準
+
+- IntelLLVM build がリンクできる
+- MKL 依存テストが実行できる
+
+---
+
+## 10.4 改修項目 24：静的解析ゲートの CI 統合
+
+### 必須ゲート
+
+| ゲート | 合格条件 |
+|---|---|
+| RT forbidden callgraph | 0 件 |
+| aligned AVX store audit | whitelist のみ |
+| MessageManager raw this capture | 0 件 |
+| state getProperty finite check | 必須 |
+| steady_clock count division | 0 件 |
+| mkl_malloc in RT | 0 件 |
+| Logger in RT | 0 件 |
+| mutex in RT | 0 件 |
+
+---
+
+# 11. Phase 5：総合検証計画
+
+## 11.1 単体テスト
+
+### DSP
+
+- NaN 入力
+- Inf 入力
+- denormal 入力
+- 無音 10 分
+- 大振幅入力
+- sine sweep
+- impulse response 比較
+- scalar / AVX2 比較
+
+### 並行性
+
+- SPSC FIFO stress
+- retire queue stress
+- publish / read stress
+- shutdown during publish
+- fade during bypass
+- rebuild during IR load
+
+### State
+
+- 破損 XML
+- NaN property
+- 巨大 property
+- 不正 enum
+- 旧バージョン state
+
+---
+
+## 11.2 Sanitizer テスト
+
+| テスト | 期待結果 |
+|---|---|
+| ASan | error 0 |
+| UBSan | error 0 |
+| TSan 相当 | data race 0 |
+| heap stress | leak 0 |
+
+---
+
+## 11.3 リアルタイム stress
+
+### 条件
+
+- 44.1k / 48k / 88.2k / 96k / 176.4k / 192k
+- block size 32 / 64 / 128 / 256 / 512 / 1024
+- EQ 全バンド active
+- convolver 長尺 IR
+- soft clip ON
+- noise shaper ON
+- oversampling ON
+- UI 高速更新
+- IR 連続変更
+- preset 連続変更
+
+### 合格基準
+
+- 音声途切れが閾値以下
+- xrun count が増加しない
+- メモリが増え続けない
+- shutdown が正常
+
+---
+
+## 11.4 デバイス検証
+
+| デバイス種別 | 確認項目 |
+|---|---|
+| WASAPI shared | 起動/停止 |
+| WASAPI exclusive | sample rate 切替 |
+| ASIO | 低レイテンシ |
+| DirectSound | fallback |
+| 仮想オーディオ | 異常チャンネル構成 |
+| Bluetooth | 高遅延 / 切断 |
+
+---
+
+# 12. ロールバック計画
+
+## 12.1 基本方針
+
+各改修項目は独立 branch で管理し、以下を可能にします。
+
+- 項目単位 revert
+- phase 単位 revert
+- release tag からの即時 rollback
+
+## 12.2 必須運用
+
+- main は常に green
+- P0 改修は feature flag で隔離可能にする
+- RT 安全機構は compile-time switch を持つ
+
+例：
+
+```cpp
+#define CONVOPEQ_RT_SAFE_TRACE 1
+#define CONVOPEQ_ENABLE_CUSTOM_MMCSS 0
+```
+
+---
+
+# 13. スケジュール例
+
+## 13.1 短期集中プラン
+
+| 週 | 実施内容 |
+|---|---|
+| 1週目 | Phase 0 + Phase 1 前半 |
+| 2週目 | Phase 1 後半 + Phase 2 前半 |
+| 3週目 | Phase 2 後半 + Phase 3 |
+| 4週目 | Phase 4 + Phase 5 |
+
+## 13.2 推奨マイルストーン
+
+| Milestone | 内容 | 出口基準 |
+|---|---|---|
+| M1 | RT 安全 | RT 禁止 API 0 件 |
+| M2 | lifetime 安定 | ASan UAF 0 |
+| M3 | DSP 健全 | NaN/Inf 出力 0 |
+| M4 | CI gate | 静的解析 gate 合格 |
+| M5 | release candidate | 24 時間 soak 合格 |
+
+---
+
+# 14. 責任分担案
+
+| 役割 | 担当範囲 |
+|---|---|
+| RT safety owner | Audio thread callgraph、MMCSS、Logger、MKL RT 排除 |
+| Concurrency owner | RCU、retire、fade、atomic、shutdown |
+| DSP owner | SIMD、NaN、AGC、noise shaper、biquad |
+| Build owner | CMake、PGO、IntelLLVM、CI |
+| QA owner | sanitizer、stress、device matrix、soak |
+
+---
+
+# 15. 完了の定義（Definition of Done）
+
+以下をすべて満たすこと。
+
+## 15.1 静的解析
+
+- Audio thread から禁止 API への到達が 0 件
+- `_mm256_store_pd` / `_mm256_load_pd` が whitelist のみ
+- `MessageManager::callAsync([this]` が 0 件
+- state load に finite check あり
+- time count の直接除算が 0 件
+
+## 15.2 動的検証
+
+- ASan clean
+- UBSan clean
+- TSan 相当 clean
+- 24 時間 soak clean
+- NaN/Inf input test clean
+- shutdown stress clean
+
+## 15.3 実機検証
+
+- ASIO 低レイテンシで安定
+- WASAPI exclusive で安定
+- sample rate 切替で安定
+- IR 連続変更で安定
+- UI 高負荷で安定
+
+## 15.4 規約適合
+
+- SEH 不使用
+- JUCE / r8brain 無変更
+- MKL memory 64-byte alignment
+- RT 内メモリ確保なし
+- RT 内メモリ解放なし
+- 状態監視は lock-free / pull 型
+
+---
+
+# 16. 今後の再発防止ルール
+
+## 16.1 コードレビュー必須項目
+
+以下はレビューで必ず確認します。
+
+- Audio thread 内に禁止 API がないか
+- `callAsync` で raw `this` をキャプチャしていないか
+- `vector` / `String` / `Logger` が RT にないか
+- AVX aligned intrinsic の前提が正しいか
+- atomic memory order が適切か
+- state load に finite check があるか
+- shutdown / retire の完了条件が正しいか
+
+## 16.2 新規診断機能の制約
+
+新規診断機能は以下を満たす場合のみ追加できます。
+
+- RT 側は固定長 ring への書き込みのみ
+- 文字列化は Non-RT のみ
+- UI 表示は pull 型
+- 表示加工は UI 側で実施
+- 最新性より独立性を優先
+
+---
+
+# 17. 最初の着手順序
+
+実務上、最初に取り組むべきは以下です。
+
+## 最優先バッチ A
+
+1. MMCSS Audio thread 呼び出しの無効化
+2. RT 経路の `Logger` / `DBG` / `String` 排除
+3. RT 経路の `mkl_malloc` 排除
+4. `_mm256_store_pd` を `_mm256_storeu_pd` へ修正
+5. AVX2 gain ramp の `_mm256_setr_pd` 修正
+6. NoiseShaper / Biquad の NaN 出力保護
+
+## 次のバッチ B
+
+7. `MessageManager::callAsync` weak 化
+8. RCU reader RAII 化
+9. shutdown drain 条件厳格化
+10. retire 失敗時の quarantine
+
+## その後のバッチ C
+
+11. state finite validation
+12. cache load validation
+13. time unit 修正
+14. CMake x64/PGO 修正
+15. CI 静的解析ゲート統合
+
+---
+
+# 18. 結論
+
+本計画の核心は、**Audio thread の規約適合を最優先で完了させること**です。
+
+特に以下は、機能改善より先に行うべきです。
+
+- MMCSS 撤去
+- RT ログ撤去
+- RT MKL 確保撤去
+- AVX2 alignment 修正
+- AVX2 gain ramp 修正
+- NaN 伝播防止
+- RCU / shutdown / retire のライフタイム修正
+
+これらを完了させることで、ConvoPeq は「高機能だが不安定」な状態から、  
+「リアルタイムオーディオ製品として安定した状態」へ移行できます。
+
+必要であれば次は、この改修計画書をさらに落とし込んだ、**P0 限定の詳細設計書兼修正パッチ仕様書**を作成できます。

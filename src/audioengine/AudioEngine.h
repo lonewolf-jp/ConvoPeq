@@ -96,6 +96,7 @@ struct CoeffSet {
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
 namespace convo::isr { class ISRRetireRouter; }
+class DSPLifetimeManager;
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRRuntimeIdentityGenerators.h"
 #include "ISRPayloadTier.h"
@@ -1122,6 +1123,29 @@ public:
     uint64_t advanceRetireEpoch() noexcept;
     [[nodiscard]] bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
     [[nodiscard]] uint32_t activeEpochObserverCount() const noexcept;
+
+    // ★ HW-1: 最新の publicationEpoch を ISR Coordinator から取得
+    [[nodiscard]] convo::isr::PublicationEpoch currentPublicationEpoch() const noexcept {
+        return runtimePublicationBridge_.currentPublicationEpoch();
+    }
+
+    // ── HW-1: Publication Metadata Propagation ──
+    // storeReceipt: DSPTransition から publication epoch を預かる。
+    // ★ 状態遷移: [empty] → [has_receipt]
+    // ★ 同期: pendingReceipt_ 書込み → receiptReady_.store(true, release)
+    void storeReceipt(DSPCore* dsp, convo::isr::PublicationEpoch epoch) noexcept {
+        if (fatal_.load(std::memory_order_relaxed) || receiptReady_.load(std::memory_order_relaxed)) {
+            assert(false && "storeReceipt: not in Empty state");
+            return;
+        }
+        pendingReceipt_.emplace(PublishReceipt{dsp, epoch, 0});
+        receiptReady_.store(true, std::memory_order_release);
+    }
+
+    // retirePublishedDSP: Timer CAS retire パスで呼ばれる。
+    // pendingReceipt_ から epoch を取り出し、DSPLifetimeManager 経由で retire に伝搬する。
+    // Precondition: current は fadingRuntimeDSPSlot の CAS 成功で取得済み。
+    void retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept;
 
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
     [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
@@ -4305,6 +4329,33 @@ public:
 
     // ===================== ISR Phase 1-9: Core Runtimes =====================
     convo::isr::RuntimePublicationCoordinator runtimePublicationBridge_;
+
+    // ── HW-1: Publication Metadata Propagation ──
+    // PublishReceipt: Publication 時に発行される DSP + Epoch の組。
+    // Timer の CAS retire パスで epoch を伝搬するために使用される。
+    struct PublishReceipt {
+        DSPCore* dsp{nullptr};
+        convo::isr::PublicationEpoch publicationEpoch{0};
+        convo::isr::PublicationGeneration generation{0};
+    };
+    static_assert(std::is_nothrow_move_assignable_v<PublishReceipt>,
+        "PublishReceipt must be nothrow move assignable");
+
+    // ★ Semantic State: optional が Receipt 有無の唯一の状態（単一情報源）
+    std::optional<PublishReceipt> pendingReceipt_;
+    // ★ Synchronization primitive only（状態ではない）
+    std::atomic<bool> receiptReady_{false};
+    // ★ Fatal: Coordinator ライフサイクル状態
+    std::atomic<bool> fatal_{false};
+    // ★ 不一致カウンタ
+    std::atomic<uint32_t> mismatchCount_{0};
+    static constexpr uint32_t kMaxMismatch = 5;
+
+    // ★ Retire 分類診断カウンタ（増加のみ。relaxed で十分）
+    std::atomic<uint64_t> normalRetireCount_{0};      // Normal Retire: receipt 一致
+    std::atomic<uint64_t> fallbackRetireCount_{0};    // Fallback Retire: receipt なし
+    std::atomic<uint64_t> emergencyRetireCount_{0};   // Emergency Retire: 不一致/fatal
+
     convo::isr::DSPQuarantineManager dspQuarantineManager_;
     convo::isr::ClosureGraphWalker closureGraphWalker_;
     convo::isr::DebugRuntime debugRuntime_;

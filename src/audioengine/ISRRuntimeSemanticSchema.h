@@ -195,6 +195,7 @@ template <std::size_t InventoryN, std::size_t DescriptorN>
 
 using PublicationSequenceId = std::uint64_t;
 using PublicationEpoch = std::uint64_t;
+using PublicationGeneration = std::uint64_t;
 
 struct GenerationSemantic
 {

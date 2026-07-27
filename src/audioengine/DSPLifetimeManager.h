@@ -61,6 +61,30 @@ public:
         convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
     }
 
+    // ★ HW-1: retire overload — publicationEpoch を外部から指定可能
+    //   epoch > 0 → 指定 epoch を使用（router_->currentEpoch() は使わない）
+    //   epoch=0 → 元の overload に fallback
+    void retire(AudioEngine::DSPCore* dsp, uint64_t publicationEpoch) noexcept
+    {
+        if (dsp == nullptr) return;
+        if (!engine_.retireDSPHandleForRuntime(dsp))
+            return;
+
+        const uint64_t epoch = (publicationEpoch > 0) ? publicationEpoch : router_->currentEpoch();
+        router_->enqueueWithRetry(static_cast<void*>(dsp),
+                                   &AudioEngine::destroyDSPCoreNode,
+                                   epoch,
+                                   DeletionEntryType::Generic);
+
+        convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
+                              static_cast<std::uint64_t>(1),
+                              std::memory_order_acq_rel);
+
+        const uint64_t committedGen = convo::consumeAtomic(
+            engine_.lastCommittedRuntimeGeneration_, std::memory_order_acquire);
+        convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
+    }
+
     void retireDeferred() noexcept
     {
         // deferred queue drain: handled by AudioEngine threading
