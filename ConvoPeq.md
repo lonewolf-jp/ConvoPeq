@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-28 01:13:16
+> Generated: 2026-07-29 00:11:18
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -2963,10 +2963,13 @@ private:
 ```
 #pragma once
 
-#include <JuceHeader.h>
 #include <algorithm>
+#include <memory>
+#include <malloc.h>  // _aligned_malloc, _aligned_free
 
+#include <JuceHeader.h>
 #include "audioengine/AtomicAccess.h"
+#include "AlignedAllocation.h"
 
 class AudioSegmentBuffer
 {
@@ -2974,6 +2977,39 @@ public:
     static constexpr int kMaxSeconds = 5;
     static constexpr int kMaxSampleRate = 768000;
     static constexpr int kCapacity = kMaxSeconds * kMaxSampleRate;
+    static constexpr size_t kAlignment = 64;  // SIMD 対応 alignment
+
+    // ★ ISR: Memory Authority は Builder / MemoryPool が持つ
+    //   v11: 暫定的に factory + unique_ptr
+    //   将来: RuntimeBuilder::allocateSegmentBuffer() → MemoryPool から取得
+    // ★ Contract: create() は NonRT（Builder/MessageThread）のみから呼び出し可能。
+    //   RT（Audio Thread）内での呼び出しは禁止。
+    // ★ Strong exception guarantee: success=fully initialized, failure=no allocation remains
+    [[nodiscard]] static std::unique_ptr<AudioSegmentBuffer> create()
+    {
+        // aligned allocation on heap（RT-safe: 事前確保）
+        auto* left = static_cast<double*>(_aligned_malloc(
+            kCapacity * sizeof(double), kAlignment));
+        auto* right = static_cast<double*>(_aligned_malloc(
+            kCapacity * sizeof(double), kAlignment));
+        if (!left || !right)
+        {
+            _aligned_free(left);
+            _aligned_free(right);
+            return nullptr;  // Fail-Closed
+        }
+        // ScopedAlignedPtr に所有権移譲
+        auto buf = std::unique_ptr<AudioSegmentBuffer>(new AudioSegmentBuffer());
+        buf->leftSamples_.reset(left);
+        buf->rightSamples_.reset(right);
+        return buf;
+    }
+
+    // Rule of Five: コピー・ムーブ禁止（巨大バッファ保護）
+    AudioSegmentBuffer(const AudioSegmentBuffer&) = delete;
+    AudioSegmentBuffer& operator=(const AudioSegmentBuffer&) = delete;
+    AudioSegmentBuffer(AudioSegmentBuffer&&) = delete;
+    AudioSegmentBuffer& operator=(AudioSegmentBuffer&&) = delete;
 
     void clear() noexcept
     {
@@ -2999,14 +3035,14 @@ public:
         // acquire: 直前の clear/pushBlock の release と HB し、有効な writePosition を取得。
         const int currentWritePos = convo::consumeAtomic(writePosition, std::memory_order_acquire);
         int first = std::min(numSamples, kCapacity - currentWritePos);
-        juce::FloatVectorOperations::copy(leftSamples + currentWritePos, left, first);
-        juce::FloatVectorOperations::copy(rightSamples + currentWritePos, right, first);
+        juce::FloatVectorOperations::copy(leftSamples_.get() + currentWritePos, left, first);
+        juce::FloatVectorOperations::copy(rightSamples_.get() + currentWritePos, right, first);
 
         if (first < numSamples)
         {
             int second = numSamples - first;
-            juce::FloatVectorOperations::copy(leftSamples, left + first, second);
-            juce::FloatVectorOperations::copy(rightSamples, right + first, second);
+            juce::FloatVectorOperations::copy(leftSamples_.get(), left + first, second);
+            juce::FloatVectorOperations::copy(rightSamples_.get(), right + first, second);
             // release: 更新後の writePosition を読み取りスレッドに可視化。
             convo::publishAtomic(writePosition, second, std::memory_order_release);
         }
@@ -3042,8 +3078,8 @@ public:
         for (int i = 0; i < availableSamples; ++i)
         {
             const int sourceIndex = (start + i) % kCapacity;
-            outLeft[i] = leftSamples[sourceIndex];
-            outRight[i] = rightSamples[sourceIndex];
+            outLeft[i] = leftSamples_.get()[sourceIndex];
+            outRight[i] = rightSamples_.get()[sourceIndex];
         }
 
         return availableSamples;
@@ -3055,12 +3091,20 @@ public:
         return convo::consumeAtomic(totalSamples, std::memory_order_acquire);
     }
 
+    ~AudioSegmentBuffer() = default;  // unique_ptr からの破棄を許可
+
 private:
-    double leftSamples[kCapacity] = {};
-    double rightSamples[kCapacity] = {};
+    AudioSegmentBuffer() = default;  // Factory create() のみ生成可能
+
+    convo::ScopedAlignedPtr<double> leftSamples_;   // heap, 64-byte aligned
+    convo::ScopedAlignedPtr<double> rightSamples_;  // heap, 64-byte aligned
     std::atomic<int> writePosition { 0 };
     std::atomic<int> totalSamples { 0 };
 };
+
+// サイズ static_assert（ヒープ化確認）
+static_assert(sizeof(AudioSegmentBuffer) < 1024,
+    "AudioSegmentBuffer must be heap allocated — stack allocation prohibited");
 
 ```
 
@@ -9062,8 +9106,13 @@ private:
                 const size_t pendingRetired = swapperRef.getPendingRetiredCount();
                 if (pendingRetired >= kPendingRetiredWarnThreshold)
                 {
-                    juce::Logger::writeToLog("[DIAG] DeferredFreeThread backlog pending="
-                                             + juce::String(static_cast<juce::int64>(pendingRetired)));
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastLogTime_ >= kLogInterval)
+                    {
+                        lastLogTime_ = now;
+                        juce::Logger::writeToLog("[DIAG] DeferredFreeThread backlog pending="
+                                                 + juce::String(static_cast<juce::int64>(pendingRetired)));
+                    }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
@@ -9071,6 +9120,10 @@ private:
                 std::this_thread::yield();
         }
     }
+
+    // ★ ADD-3: Logger rate limit（5秒間隔）
+    std::chrono::steady_clock::time_point lastLogTime_{};
+    static constexpr auto kLogInterval = std::chrono::seconds(5);
 
     SafeStateSwapper&     swapperRef;
     ThreadAffinityManager* affinityManager;
@@ -15188,7 +15241,7 @@ static void clearFFTOutputOnError(double* buffer, size_t count,
 {
     if (buffer != nullptr)
         std::memset(buffer, 0, count * sizeof(double));
-    // TODO(RuntimeHealth): Record FFT failure info for diagnosable metrics.
+    // ★ work75: Record FFT failure info for diagnosable metrics (RuntimeHealth integration future).
 }
 
 #if JUCE_DEBUG
@@ -21076,6 +21129,16 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     candidatePopulation = std::move(populationBuffer);
     candidateFitness = std::move(fitnessBuffer);
 
+    // ★ P0-3: AudioSegmentBuffer をヒープに確保（Factory経由）
+    segmentBuffer = AudioSegmentBuffer::create();
+    if (!segmentBuffer)
+    {
+        DBG_LOG("[NoiseShaperLearner] failed to allocate AudioSegmentBuffer");
+        convo::publishAtomic(errorMessage, "Failed to allocate AudioSegmentBuffer", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
+        return;
+    }
+
     for (auto& c : bestCoefficients)
         convo::publishAtomic(c, 0.0, std::memory_order_release);
 
@@ -21144,7 +21207,7 @@ void NoiseShaperLearner::startLearning(bool resume)
     convo::publishAtomic(progress.currentPhase, 1, std::memory_order_release);
     accumulatedPlaybackSeconds = 0.0;
     currentPhase = 1;
-    segmentBuffer.clear();
+    if (segmentBuffer) segmentBuffer->clear();
     convo::publishAtomic(historyCount, 0, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(historyMutex);
@@ -21775,7 +21838,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
             // 評価に必要なセグメントが溜まるまで待機
-            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest
+            while (segmentBuffer && segmentBuffer->getNumAvailableSamples() < kRecentSampleRequest
                    && !convo::consumeAtomic(stopRequested, std::memory_order_acquire)
                    && !stopToken.stop_requested())
             {
@@ -21927,7 +21990,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                         + " dropSession=" + juce::String(cumulativeDrainStats.droppedBySession)
                         + " dropSampleRate=" + juce::String(cumulativeDrainStats.droppedBySampleRate)
                         + " dropBank=" + juce::String(cumulativeDrainStats.droppedByBank)
-                        + " bufferedSamples=" + juce::String(segmentBuffer.getNumAvailableSamples())
+                        + " bufferedSamples=" + juce::String(segmentBuffer ? segmentBuffer->getNumAvailableSamples() : -1)
                         + " sessionId=" + juce::String(static_cast<juce::int64>(activeSession.sessionId))
                         + " sampleRateHz=" + juce::String(activeSession.sampleRateHz)
                         + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex)
@@ -22062,7 +22125,7 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
 
 void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, bool resume) noexcept
 {
-    segmentBuffer.clear();
+    if (segmentBuffer) segmentBuffer->clear();
 
     if (!resume)
     {
@@ -22171,7 +22234,7 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
             continue;
         }
 
-        segmentBuffer.pushBlock(block.L, block.R, block.numSamples);
+        if (segmentBuffer) segmentBuffer->pushBlock(block.L, block.R, block.numSamples);
         const int playbackSampleRateHz = (session.sampleRateHz > 0)
             ? session.sampleRateHz
             : ((block.sampleRateHz > 0) ? block.sampleRateHz : 48000);
@@ -22202,7 +22265,7 @@ int NoiseShaperLearner::buildTrainingSegments() noexcept
     }
 
     const int maxRequired = kRecentSampleRequest;
-    const int copiedSamples = segmentBuffer.copyLatest(recentLeft.get(), recentRight.get(), maxRequired);
+    const int copiedSamples = segmentBuffer ? segmentBuffer->copyLatest(recentLeft.get(), recentRight.get(), maxRequired) : 0;
 
     if (copiedSamples < AudioSegment::kLength)
         return 0;
@@ -22833,7 +22896,7 @@ private:
 
     std::array<State, 6> savedStates {};
 
-    AudioSegmentBuffer segmentBuffer;
+    std::unique_ptr<AudioSegmentBuffer> segmentBuffer;  // ★ P0-3: ヒープ専用化
     CmaEsOptimizer optimizer;
     std::array<EvaluationWorkerSlot, kMaxParallelEvaluators> evaluationWorkers {};
     int activeEvaluationWorkerCount = 1;
@@ -25362,7 +25425,16 @@ public:
         {
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
-            fallbackQueue.push({oldState, epoch2});
+            if (fallbackQueue.size() >= kMaxFallback)
+            {
+                // ★ ADD-1: overflow → quarantine（UAFよりleak優先）
+                fallbackOverflowCount_.fetch_add(1, std::memory_order_relaxed);
+                // Coordinator fallback overflow notification
+            }
+            else
+            {
+                fallbackQueue.push({oldState, epoch2});
+            }
             // Coordinator fallback backlog notification is handled externally
             // via SafeStateSwapper::getPendingRetiredCount() polling
             return;
@@ -25427,6 +25499,77 @@ public:
         return convo::consumeAtomic(activeState, std::memory_order_acquire); // acquire: swap の exchangeAtomic acq_rel と HB し最新アクティブ状態を観測
     }
 
+    // リングバッファの slot 判定結果（HEAD-6 参照）
+    enum class ReclaimResult
+    {
+        EmptyQueue,  // head==tail。リング空。advanceHead しない。
+        SkipNull,    // state==nullptr && epoch==0。advanceHead して次へ。
+        Reclaimed,   // slot 正常に reclaim。呼び出し元が ptr を取得して advanceHead。
+        Blocked      // epoch>=minReaderEpoch または Invariant Violation。head 停止。
+    };
+
+    // -----------------------------------------------------------------------
+    // advanceHead()  ── head 更新の唯一の関数（HEAD-4/5）
+    //
+    // ★ HEAD-4: advanceHead() は head ポインタのみを進める。slot 内容は変更しない。
+    // ★ HEAD-5: advanceHead() は release store で head を publish する唯一の関数。
+    //
+    // 同期規則: next → publishAtomic(head, next) → h = next
+    //
+    // @param h  現在の head 値（参照、呼び出し後に次位置に更新される）
+    // -----------------------------------------------------------------------
+    void advanceHead(size_t& h) noexcept
+    {
+        const size_t next = (h + 1) % kMaxRetired;
+        convo::publishAtomic(head, next, std::memory_order_release);
+        h = next;
+    }
+
+    // -----------------------------------------------------------------------
+    // tryReclaimSlot()  ── 単一 slot の判定（HEAD-6）
+    //
+    // ★ HEAD-6: tryReclaimSlot() shall not modify head, tail, or any atomic index.
+    //            Only slot.state may be modified (cleared on reclaim).
+    //            headIndex は値渡し（head 非変更を型で表現）。
+    //
+    // @param headIndex      現在の head 位置（値渡し）
+    // @param minReaderEpoch 安全な epoch 閾値
+    // @param[out] outPtr    取得したポインタ（Reclaimed 時のみ有効）
+    // @return スロット状態
+    // -----------------------------------------------------------------------
+    ReclaimResult tryReclaimSlot(size_t headIndex, uint64_t minReaderEpoch,
+                                 ConvolverState*& outPtr) noexcept
+    {
+        const uint64_t entryEpoch = convo::consumeAtomic(
+            retiredBuffer[headIndex].epoch, std::memory_order_acquire);
+        outPtr = convo::consumeAtomic(
+            retiredBuffer[headIndex].state, std::memory_order_acquire);
+
+        // Invariant: (state==nullptr) == (epoch==0)
+        if ((outPtr == nullptr) != (entryEpoch == 0))
+        {
+            // HealthEvent 発火は slot 単位で once-per-slot
+            jassert(false);
+            return ReclaimResult::Blocked;
+        }
+
+        // Null slot
+        if (outPtr == nullptr && entryEpoch == 0)
+            return ReclaimResult::SkipNull;
+
+        // Reclaim 可能
+        if (isOlder(entryEpoch, minReaderEpoch))
+        {
+            // state をクリアしてから ptr を返す（二重取得防止）
+            convo::publishAtomic(retiredBuffer[headIndex].state, nullptr,
+                                 std::memory_order_release);
+            return ReclaimResult::Reclaimed;
+        }
+
+        // Reclaim 不可
+        return ReclaimResult::Blocked;
+    }
+
     // -----------------------------------------------------------------------
     // tryReclaim()  ── Deferred Free Thread / Message Thread から呼ぶ
     //
@@ -25458,7 +25601,9 @@ public:
         }
 #endif
 
-        // フォールバックキューを先に確認（優先度付きキューなので最古エポックから）
+        // ★ Option A: tail に書き込まない。head 専用化（INV-NO-TAIL-WRITE-IN-RECLAIM）
+
+        // 1. フォールバックキューを先に確認
         {
             std::lock_guard<std::mutex> lock(fallbackMutex);
             if (!fallbackQueue.empty())
@@ -25475,42 +25620,33 @@ public:
             }
         }
 
-        // リングバッファを確認
-        const size_t h = convo::consumeAtomic(head, std::memory_order_acquire);                          // acquire: 前回の head release と HB
-        if (h == convo::consumeAtomic(tail, std::memory_order_acquire)) return nullptr;                  // acquire: swap の tail release と HB しエントリ存在確認
+        // 2. リングバッファを確認（bounded null slot skip）
+        size_t h = convo::consumeAtomic(head, std::memory_order_acquire);
+        if (h == convo::consumeAtomic(tail, std::memory_order_acquire))
+            return nullptr;  // EmptyQueue
 
-        // tail(acquire) により、それ以前の epoch/state の release store は可視
-        const uint64_t entryEpoch = convo::consumeAtomic(retiredBuffer[h].epoch, std::memory_order_acquire); // acquire: swap の epoch release と HB
-        // 注意: atomic_thread_fence(acquire) は不要。tail.load との同期で十分。
-        if (isOlder(entryEpoch, minReaderEpoch))
+        for (size_t i = 0; i < kMaxRetired; ++i)
         {
-            ConvolverState* ptr = convo::consumeAtomic(retiredBuffer[h].state, std::memory_order_acquire); // acquire: swap の state release と HB し旧状態ポインタを取得
-            if (ptr != nullptr)
+            ConvolverState* ptr = nullptr;
+            const auto result = tryReclaimSlot(h, minReaderEpoch, ptr);
+
+            if (result == ReclaimResult::Reclaimed)
             {
-                // state を nullptr にクリアしてから head を進める（二重取得防止）
-                convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release); // release: 次回 tryReclaim の state acquire と HB し二重取得防止
-                convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);    // release: swap の head acquire と HB しスロット解放を公知
+                advanceHead(h);
                 return ptr;
             }
 
-            // 削除不可: head を進めて tail 側へ回転する
-            convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release); // release: swap の head acquire と HB しスロット移動を公知
+            if (result == ReclaimResult::SkipNull)
+            {
+                advanceHead(h);
+                if (h == convo::consumeAtomic(tail, std::memory_order_acquire))
+                    return nullptr;
+                continue;
+            }
 
-            const size_t t = convo::consumeAtomic(tail, std::memory_order_acquire); // acquire: swap の tail release と HB し最新 tail を観測
-            const size_t nextTail = (t + 1) % kMaxRetired;
-            if (nextTail == convo::consumeAtomic(head, std::memory_order_acquire)) // acquire: 最新 head を観測してバッファ溢れ判定
-            {
-                std::lock_guard<std::mutex> lock(fallbackMutex);
-                fallbackQueue.push({ptr, entryEpoch});
-            }
-            else
-            {
-                convo::publishAtomic(retiredBuffer[t].state, ptr, std::memory_order_release);         // release: 次回 tryReclaim の state acquire と HB
-                convo::publishAtomic(retiredBuffer[t].epoch, entryEpoch, std::memory_order_release);  // release: 次回 tryReclaim の epoch acquire と HB
-                convo::publishAtomic(tail, nextTail, std::memory_order_release);                      // release: swap/tryReclaim の tail acquire と HB しエントリ追加完了を公知
-            }
-            convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release); // release: 次回 tryReclaim の state acquire と HB しスロットクリアを公知
-            return nullptr;
+            // Blocked (epoch >= minReaderEpoch または Invariant Violation)
+            // ★ tail へ回転しない
+            break;
         }
 
         return nullptr;
@@ -25616,8 +25752,10 @@ private:
     mutable std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {}; // NOLINT(thread-local) RT-SAFE: std::atomic<uint64_t> は POD-like でデストラクタなし。
 
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
+    static constexpr size_t kMaxFallback = 1024;  // ★ ADD-1: bounded（暫定値、kHealthThreshold 以上）
     std::mutex                                 fallbackMutex;
     std::priority_queue<FallbackEntry>         fallbackQueue;
+    std::atomic<uint64_t>                      fallbackOverflowCount_{0}; // ★ ADD-1: diagnostic only（relaxed）
 
     // Retire authority coordinator reference
     convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
@@ -39758,7 +39896,7 @@ bool AudioEngine::tryReserveProbeBudget() noexcept
 // ★ 診断カウンタ (relaxed): normalRetireCount_, fallbackRetireCount_, emergencyRetireCount_
 void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept
 {
-    if (!receiptReady_.load(std::memory_order_acquire)) {
+    if (!convo::consumeAtomic(receiptReady_, std::memory_order_acquire)) {
         // ★ Fallback Retire: receipt なし → runtimeEpoch（正常範囲）
         fallbackRetireCount_.fetch_add(1, std::memory_order_relaxed);
         lifetimeMgr.retire(current, 0);
@@ -39786,12 +39924,22 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         // ★ Emergency Retire: 不一致（current != receipt->dsp）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
         //   runtimeEpoch（router_->currentEpoch()）で退役。
-        //   receipt は保持（次回 Normal Retire 時に再利用可能）。
+        // ★ P1-2: receipt の handle を quarantine（retire 義務移転）
+        if (!pendingReceipt_->handle.isNull()) {
+            dspHandleRuntime_.quarantine(pendingReceipt_->handle);
+            dspQuarantineManager_.quarantineHandle(
+                pendingReceipt_->handle.slot,
+                pendingReceipt_->handle.generation,
+                convo::isr::QuarantineReason::PublishViolation);
+        }
+        // receipt は保持（次回 Normal Retire 時に再利用可能）。
+        // ★ FIX-D1: epoch 差分ベース検出（旧: mismatchCount 回数ベース）
         emergencyRetireCount_.fetch_add(1, std::memory_order_relaxed);
-        uint32_t cnt = mismatchCount_.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (cnt >= kMaxMismatch) {
+        const auto currentEpoch = currentPublicationEpoch();
+        const auto receiptEpoch = pendingReceipt_->publicationEpoch;
+        if (publicationEpochDistance(currentEpoch, receiptEpoch) > kMaxEpochDrift) {
             fatal_.store(true, std::memory_order_relaxed);
-            assert(false && "retirePublishedDSP: Fatal — persistent mismatch");
+            assert(false && "retirePublishedDSP: Fatal — epoch drift exceeded");
         }
         lifetimeMgr.retire(current, 0);
         return;
@@ -41186,17 +41334,24 @@ public:
         return runtimePublicationBridge_.currentPublicationEpoch();
     }
 
+    // ★ FIX-D1: 順序付き epoch 差分（ordered difference）。事前条件: a >= b。
+    static uint64_t publicationEpochDistance(uint64_t a, uint64_t b) noexcept {
+        return (a >= b) ? (a - b) : 0;  // a<b は事前条件違反（epoch 単調増加）
+    }
+
     // ── HW-1: Publication Metadata Propagation ──
     // storeReceipt: DSPTransition から publication epoch を預かる。
     // ★ 状態遷移: [empty] → [has_receipt]
     // ★ 同期: pendingReceipt_ 書込み → receiptReady_.store(true, release)
-    void storeReceipt(DSPCore* dsp, convo::isr::PublicationEpoch epoch) noexcept {
+    // ★ P1-2: PublishReceipt に DSPHandle を保持（逆引き回避）
+    void storeReceipt(DSPCore* dsp, convo::isr::DSPHandle handle,
+                      convo::isr::PublicationEpoch epoch) noexcept {
         if (fatal_.load(std::memory_order_relaxed) || receiptReady_.load(std::memory_order_relaxed)) {
             assert(false && "storeReceipt: not in Empty state");
             return;
         }
-        pendingReceipt_.emplace(PublishReceipt{dsp, epoch, 0});
-        receiptReady_.store(true, std::memory_order_release);
+        pendingReceipt_.emplace(PublishReceipt{dsp, handle, epoch, 0});
+        convo::publishAtomic(receiptReady_, true, std::memory_order_release);
     }
 
     // retirePublishedDSP: Timer CAS retire パスで呼ばれる。
@@ -43785,16 +43940,10 @@ public:
         };
     }
 
-    inline bool updateAudioThreadSnapshotFade(int numSamples,
-                                              float& snapshotAlpha,
-                                              const convo::GlobalSnapshot*& snapshotFrom,
-                                              const convo::GlobalSnapshot*& snapshotTo) noexcept
-    {
-        // B-3: advanceFade + updateFade（SnapshotFade と Crossfade は別機構）
-        // advanceFade はこの関数内でのみ呼ぶ（二重進行防止）
-        m_coordinator.advanceFade(numSamples);
-        return m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
-    }
+    // ★ [DELETED] 2026-07-28: updateAudioThreadSnapshotFade は Dead Code のため削除。
+    //   advanceFade は AudioBlock.cpp:475 で継続使用中（LIVE）。
+    //   updateFade は削除対象（呼び出し元なし）。
+    //   必要時は Git 履歴から復元可能。
 
     inline void armCrossfadeIfPending(bool hasFading,
                                       bool& useDryAsOld,
@@ -44391,7 +44540,8 @@ public:
     // PublishReceipt: Publication 時に発行される DSP + Epoch の組。
     // Timer の CAS retire パスで epoch を伝搬するために使用される。
     struct PublishReceipt {
-        DSPCore* dsp{nullptr};
+        DSPCore* dsp{nullptr};  // ★ P1-2: retirePublishedDSP 比較用（移行完了後 DSPHandle に一本化）
+        convo::isr::DSPHandle handle{};  // ★ P1-2: quarantine 用 Handle
         convo::isr::PublicationEpoch publicationEpoch{0};
         convo::isr::PublicationGeneration generation{0};
     };
@@ -44406,7 +44556,8 @@ public:
     std::atomic<bool> fatal_{false};
     // ★ 不一致カウンタ
     std::atomic<uint32_t> mismatchCount_{0};
-    static constexpr uint32_t kMaxMismatch = 5;
+    static constexpr uint32_t kMaxMismatch = 5;  // ★ FIX-D1: deprecated → kMaxEpochDrift へ移行
+    static constexpr uint64_t kMaxEpochDrift = 10;  // ★ FIX-D1: epoch 差分ベース閾値
 
     // ★ Retire 分類診断カウンタ（増加のみ。relaxed で十分）
     std::atomic<uint64_t> normalRetireCount_{0};      // Normal Retire: receipt 一致
@@ -45530,7 +45681,9 @@ public:
             } else {
                 // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
                 const auto epoch = engine_.currentPublicationEpoch();
-                engine_.storeReceipt(oldDSP, epoch);
+                // ★ P1-2: DSPHandle を取得（quarantine 用）。getFadingRuntimeDSPHandle が該当 Handle を返す。
+                const auto oldHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
+                engine_.storeReceipt(oldDSP, oldHandle, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -67501,40 +67654,7 @@ public:
         m_epochProvider->tryReclaim();
     }
 
-    bool updateFade(float& outAlpha,
-                    const GlobalSnapshot*& outCurrent,
-                    const GlobalSnapshot*& outTarget) noexcept
-    {
-        // acquire: SnapshotFadeState::start/resetToIdle の release と HB してフェード状態を観測。
-        const FadeState state = m_fade.state();
-        if (state == FadeState::Idle)
-        {
-            outAlpha = 1.0f;
-            // acquire: switchImmediate/publishNew release と HB し、最新スナップを観測。
-            outCurrent = m_slots.loadCurrent(std::memory_order_acquire);
-            outTarget = nullptr;
-            return false;
-        }
-
-        // acquire ×2: m_current/m_target の release と HB し、フェード中の両スナップを観測。
-        outCurrent = m_slots.loadCurrent(std::memory_order_acquire);
-        outTarget = m_slots.loadTarget(std::memory_order_acquire);
-        if (outTarget == nullptr)
-        {
-            // ★ D-3: target==null → completeFade が並行実行された可能性。state を再確認。
-            if (m_fade.state() == FadeState::Idle)
-                return false;  // 別スレッドが既に fade を完了させた
-            resetFadeStateAndRetireTarget();
-            outAlpha = 1.0f;
-            outTarget = nullptr;
-            return false;
-        }
-
-        // acquire: advanceFade/reset/complete の alpha release と HB し最新アルファ値を観測。
-        const double alpha = m_fade.alpha();
-        outAlpha = equalPowerSinApprox(static_cast<float>(alpha));
-        return true;
-    }
+    // ★ [DELETED] 2026-07-28: updateFade は Dead Code のため削除（呼び出し元なし）。
 
     void advanceFade(int numSamples) noexcept;
     bool tryCompleteFade() noexcept;

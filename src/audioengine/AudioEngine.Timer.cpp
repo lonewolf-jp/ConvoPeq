@@ -1756,7 +1756,7 @@ bool AudioEngine::tryReserveProbeBudget() noexcept
 // ★ 診断カウンタ (relaxed): normalRetireCount_, fallbackRetireCount_, emergencyRetireCount_
 void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept
 {
-    if (!receiptReady_.load(std::memory_order_acquire)) {
+    if (!convo::consumeAtomic(receiptReady_, std::memory_order_acquire)) {
         // ★ Fallback Retire: receipt なし → runtimeEpoch（正常範囲）
         fallbackRetireCount_.fetch_add(1, std::memory_order_relaxed);
         lifetimeMgr.retire(current, 0);
@@ -1784,12 +1784,22 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         // ★ Emergency Retire: 不一致（current != receipt->dsp）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
         //   runtimeEpoch（router_->currentEpoch()）で退役。
-        //   receipt は保持（次回 Normal Retire 時に再利用可能）。
+        // ★ P1-2: receipt の handle を quarantine（retire 義務移転）
+        if (!pendingReceipt_->handle.isNull()) {
+            dspHandleRuntime_.quarantine(pendingReceipt_->handle);
+            dspQuarantineManager_.quarantineHandle(
+                pendingReceipt_->handle.slot,
+                pendingReceipt_->handle.generation,
+                convo::isr::QuarantineReason::PublishViolation);
+        }
+        // receipt は保持（次回 Normal Retire 時に再利用可能）。
+        // ★ FIX-D1: epoch 差分ベース検出（旧: mismatchCount 回数ベース）
         emergencyRetireCount_.fetch_add(1, std::memory_order_relaxed);
-        uint32_t cnt = mismatchCount_.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (cnt >= kMaxMismatch) {
+        const auto currentEpoch = currentPublicationEpoch();
+        const auto receiptEpoch = pendingReceipt_->publicationEpoch;
+        if (publicationEpochDistance(currentEpoch, receiptEpoch) > kMaxEpochDrift) {
             fatal_.store(true, std::memory_order_relaxed);
-            assert(false && "retirePublishedDSP: Fatal — persistent mismatch");
+            assert(false && "retirePublishedDSP: Fatal — epoch drift exceeded");
         }
         lifetimeMgr.retire(current, 0);
         return;

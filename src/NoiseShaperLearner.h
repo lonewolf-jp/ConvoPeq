@@ -275,7 +275,7 @@ private:
 
     std::array<State, 6> savedStates {};
 
-    AudioSegmentBuffer segmentBuffer;
+    std::unique_ptr<AudioSegmentBuffer> segmentBuffer;  // ★ P0-3: ヒープ専用化
     CmaEsOptimizer optimizer;
     std::array<EvaluationWorkerSlot, kMaxParallelEvaluators> evaluationWorkers {};
     int activeEvaluationWorkerCount = 1;

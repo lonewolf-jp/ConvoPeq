@@ -1129,17 +1129,24 @@ public:
         return runtimePublicationBridge_.currentPublicationEpoch();
     }
 
+    // ★ FIX-D1: 順序付き epoch 差分（ordered difference）。事前条件: a >= b。
+    static uint64_t publicationEpochDistance(uint64_t a, uint64_t b) noexcept {
+        return (a >= b) ? (a - b) : 0;  // a<b は事前条件違反（epoch 単調増加）
+    }
+
     // ── HW-1: Publication Metadata Propagation ──
     // storeReceipt: DSPTransition から publication epoch を預かる。
     // ★ 状態遷移: [empty] → [has_receipt]
     // ★ 同期: pendingReceipt_ 書込み → receiptReady_.store(true, release)
-    void storeReceipt(DSPCore* dsp, convo::isr::PublicationEpoch epoch) noexcept {
+    // ★ P1-2: PublishReceipt に DSPHandle を保持（逆引き回避）
+    void storeReceipt(DSPCore* dsp, convo::isr::DSPHandle handle,
+                      convo::isr::PublicationEpoch epoch) noexcept {
         if (fatal_.load(std::memory_order_relaxed) || receiptReady_.load(std::memory_order_relaxed)) {
             assert(false && "storeReceipt: not in Empty state");
             return;
         }
-        pendingReceipt_.emplace(PublishReceipt{dsp, epoch, 0});
-        receiptReady_.store(true, std::memory_order_release);
+        pendingReceipt_.emplace(PublishReceipt{dsp, handle, epoch, 0});
+        convo::publishAtomic(receiptReady_, true, std::memory_order_release);
     }
 
     // retirePublishedDSP: Timer CAS retire パスで呼ばれる。
@@ -3728,16 +3735,10 @@ public:
         };
     }
 
-    inline bool updateAudioThreadSnapshotFade(int numSamples,
-                                              float& snapshotAlpha,
-                                              const convo::GlobalSnapshot*& snapshotFrom,
-                                              const convo::GlobalSnapshot*& snapshotTo) noexcept
-    {
-        // B-3: advanceFade + updateFade（SnapshotFade と Crossfade は別機構）
-        // advanceFade はこの関数内でのみ呼ぶ（二重進行防止）
-        m_coordinator.advanceFade(numSamples);
-        return m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
-    }
+    // ★ [DELETED] 2026-07-28: updateAudioThreadSnapshotFade は Dead Code のため削除。
+    //   advanceFade は AudioBlock.cpp:475 で継続使用中（LIVE）。
+    //   updateFade は削除対象（呼び出し元なし）。
+    //   必要時は Git 履歴から復元可能。
 
     inline void armCrossfadeIfPending(bool hasFading,
                                       bool& useDryAsOld,
@@ -4334,7 +4335,8 @@ public:
     // PublishReceipt: Publication 時に発行される DSP + Epoch の組。
     // Timer の CAS retire パスで epoch を伝搬するために使用される。
     struct PublishReceipt {
-        DSPCore* dsp{nullptr};
+        DSPCore* dsp{nullptr};  // ★ P1-2: retirePublishedDSP 比較用（移行完了後 DSPHandle に一本化）
+        convo::isr::DSPHandle handle{};  // ★ P1-2: quarantine 用 Handle
         convo::isr::PublicationEpoch publicationEpoch{0};
         convo::isr::PublicationGeneration generation{0};
     };
@@ -4349,7 +4351,8 @@ public:
     std::atomic<bool> fatal_{false};
     // ★ 不一致カウンタ
     std::atomic<uint32_t> mismatchCount_{0};
-    static constexpr uint32_t kMaxMismatch = 5;
+    static constexpr uint32_t kMaxMismatch = 5;  // ★ FIX-D1: deprecated → kMaxEpochDrift へ移行
+    static constexpr uint64_t kMaxEpochDrift = 10;  // ★ FIX-D1: epoch 差分ベース閾値
 
     // ★ Retire 分類診断カウンタ（増加のみ。relaxed で十分）
     std::atomic<uint64_t> normalRetireCount_{0};      // Normal Retire: receipt 一致

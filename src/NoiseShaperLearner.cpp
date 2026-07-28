@@ -65,6 +65,16 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     candidatePopulation = std::move(populationBuffer);
     candidateFitness = std::move(fitnessBuffer);
 
+    // ★ P0-3: AudioSegmentBuffer をヒープに確保（Factory経由）
+    segmentBuffer = AudioSegmentBuffer::create();
+    if (!segmentBuffer)
+    {
+        DBG_LOG("[NoiseShaperLearner] failed to allocate AudioSegmentBuffer");
+        convo::publishAtomic(errorMessage, "Failed to allocate AudioSegmentBuffer", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
+        return;
+    }
+
     for (auto& c : bestCoefficients)
         convo::publishAtomic(c, 0.0, std::memory_order_release);
 
@@ -133,7 +143,7 @@ void NoiseShaperLearner::startLearning(bool resume)
     convo::publishAtomic(progress.currentPhase, 1, std::memory_order_release);
     accumulatedPlaybackSeconds = 0.0;
     currentPhase = 1;
-    segmentBuffer.clear();
+    if (segmentBuffer) segmentBuffer->clear();
     convo::publishAtomic(historyCount, 0, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(historyMutex);
@@ -764,7 +774,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
             // 評価に必要なセグメントが溜まるまで待機
-            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest
+            while (segmentBuffer && segmentBuffer->getNumAvailableSamples() < kRecentSampleRequest
                    && !convo::consumeAtomic(stopRequested, std::memory_order_acquire)
                    && !stopToken.stop_requested())
             {
@@ -916,7 +926,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                         + " dropSession=" + juce::String(cumulativeDrainStats.droppedBySession)
                         + " dropSampleRate=" + juce::String(cumulativeDrainStats.droppedBySampleRate)
                         + " dropBank=" + juce::String(cumulativeDrainStats.droppedByBank)
-                        + " bufferedSamples=" + juce::String(segmentBuffer.getNumAvailableSamples())
+                        + " bufferedSamples=" + juce::String(segmentBuffer ? segmentBuffer->getNumAvailableSamples() : -1)
                         + " sessionId=" + juce::String(static_cast<juce::int64>(activeSession.sessionId))
                         + " sampleRateHz=" + juce::String(activeSession.sampleRateHz)
                         + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex)
@@ -1051,7 +1061,7 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
 
 void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, bool resume) noexcept
 {
-    segmentBuffer.clear();
+    if (segmentBuffer) segmentBuffer->clear();
 
     if (!resume)
     {
@@ -1160,7 +1170,7 @@ NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const Sessi
             continue;
         }
 
-        segmentBuffer.pushBlock(block.L, block.R, block.numSamples);
+        if (segmentBuffer) segmentBuffer->pushBlock(block.L, block.R, block.numSamples);
         const int playbackSampleRateHz = (session.sampleRateHz > 0)
             ? session.sampleRateHz
             : ((block.sampleRateHz > 0) ? block.sampleRateHz : 48000);
@@ -1191,7 +1201,7 @@ int NoiseShaperLearner::buildTrainingSegments() noexcept
     }
 
     const int maxRequired = kRecentSampleRequest;
-    const int copiedSamples = segmentBuffer.copyLatest(recentLeft.get(), recentRight.get(), maxRequired);
+    const int copiedSamples = segmentBuffer ? segmentBuffer->copyLatest(recentLeft.get(), recentRight.get(), maxRequired) : 0;
 
     if (copiedSamples < AudioSegment::kLength)
         return 0;

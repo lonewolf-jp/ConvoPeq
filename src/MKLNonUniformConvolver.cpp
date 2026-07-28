@@ -78,7 +78,7 @@ static void clearFFTOutputOnError(double* buffer, size_t count,
 {
     if (buffer != nullptr)
         std::memset(buffer, 0, count * sizeof(double));
-    // TODO(RuntimeHealth): Record FFT failure info for diagnosable metrics.
+    // ★ work75: Record FFT failure info for diagnosable metrics (RuntimeHealth integration future).
 }
 
 #if JUCE_DEBUG

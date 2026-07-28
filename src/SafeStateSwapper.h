@@ -118,7 +118,16 @@ public:
         {
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
-            fallbackQueue.push({oldState, epoch2});
+            if (fallbackQueue.size() >= kMaxFallback)
+            {
+                // ★ ADD-1: overflow → quarantine（UAFよりleak優先）
+                fallbackOverflowCount_.fetch_add(1, std::memory_order_relaxed);
+                // Coordinator fallback overflow notification
+            }
+            else
+            {
+                fallbackQueue.push({oldState, epoch2});
+            }
             // Coordinator fallback backlog notification is handled externally
             // via SafeStateSwapper::getPendingRetiredCount() polling
             return;
@@ -183,6 +192,77 @@ public:
         return convo::consumeAtomic(activeState, std::memory_order_acquire); // acquire: swap の exchangeAtomic acq_rel と HB し最新アクティブ状態を観測
     }
 
+    // リングバッファの slot 判定結果（HEAD-6 参照）
+    enum class ReclaimResult
+    {
+        EmptyQueue,  // head==tail。リング空。advanceHead しない。
+        SkipNull,    // state==nullptr && epoch==0。advanceHead して次へ。
+        Reclaimed,   // slot 正常に reclaim。呼び出し元が ptr を取得して advanceHead。
+        Blocked      // epoch>=minReaderEpoch または Invariant Violation。head 停止。
+    };
+
+    // -----------------------------------------------------------------------
+    // advanceHead()  ── head 更新の唯一の関数（HEAD-4/5）
+    //
+    // ★ HEAD-4: advanceHead() は head ポインタのみを進める。slot 内容は変更しない。
+    // ★ HEAD-5: advanceHead() は release store で head を publish する唯一の関数。
+    //
+    // 同期規則: next → publishAtomic(head, next) → h = next
+    //
+    // @param h  現在の head 値（参照、呼び出し後に次位置に更新される）
+    // -----------------------------------------------------------------------
+    void advanceHead(size_t& h) noexcept
+    {
+        const size_t next = (h + 1) % kMaxRetired;
+        convo::publishAtomic(head, next, std::memory_order_release);
+        h = next;
+    }
+
+    // -----------------------------------------------------------------------
+    // tryReclaimSlot()  ── 単一 slot の判定（HEAD-6）
+    //
+    // ★ HEAD-6: tryReclaimSlot() shall not modify head, tail, or any atomic index.
+    //            Only slot.state may be modified (cleared on reclaim).
+    //            headIndex は値渡し（head 非変更を型で表現）。
+    //
+    // @param headIndex      現在の head 位置（値渡し）
+    // @param minReaderEpoch 安全な epoch 閾値
+    // @param[out] outPtr    取得したポインタ（Reclaimed 時のみ有効）
+    // @return スロット状態
+    // -----------------------------------------------------------------------
+    ReclaimResult tryReclaimSlot(size_t headIndex, uint64_t minReaderEpoch,
+                                 ConvolverState*& outPtr) noexcept
+    {
+        const uint64_t entryEpoch = convo::consumeAtomic(
+            retiredBuffer[headIndex].epoch, std::memory_order_acquire);
+        outPtr = convo::consumeAtomic(
+            retiredBuffer[headIndex].state, std::memory_order_acquire);
+
+        // Invariant: (state==nullptr) == (epoch==0)
+        if ((outPtr == nullptr) != (entryEpoch == 0))
+        {
+            // HealthEvent 発火は slot 単位で once-per-slot
+            jassert(false);
+            return ReclaimResult::Blocked;
+        }
+
+        // Null slot
+        if (outPtr == nullptr && entryEpoch == 0)
+            return ReclaimResult::SkipNull;
+
+        // Reclaim 可能
+        if (isOlder(entryEpoch, minReaderEpoch))
+        {
+            // state をクリアしてから ptr を返す（二重取得防止）
+            convo::publishAtomic(retiredBuffer[headIndex].state, nullptr,
+                                 std::memory_order_release);
+            return ReclaimResult::Reclaimed;
+        }
+
+        // Reclaim 不可
+        return ReclaimResult::Blocked;
+    }
+
     // -----------------------------------------------------------------------
     // tryReclaim()  ── Deferred Free Thread / Message Thread から呼ぶ
     //
@@ -214,7 +294,9 @@ public:
         }
 #endif
 
-        // フォールバックキューを先に確認（優先度付きキューなので最古エポックから）
+        // ★ Option A: tail に書き込まない。head 専用化（INV-NO-TAIL-WRITE-IN-RECLAIM）
+
+        // 1. フォールバックキューを先に確認
         {
             std::lock_guard<std::mutex> lock(fallbackMutex);
             if (!fallbackQueue.empty())
@@ -231,42 +313,33 @@ public:
             }
         }
 
-        // リングバッファを確認
-        const size_t h = convo::consumeAtomic(head, std::memory_order_acquire);                          // acquire: 前回の head release と HB
-        if (h == convo::consumeAtomic(tail, std::memory_order_acquire)) return nullptr;                  // acquire: swap の tail release と HB しエントリ存在確認
+        // 2. リングバッファを確認（bounded null slot skip）
+        size_t h = convo::consumeAtomic(head, std::memory_order_acquire);
+        if (h == convo::consumeAtomic(tail, std::memory_order_acquire))
+            return nullptr;  // EmptyQueue
 
-        // tail(acquire) により、それ以前の epoch/state の release store は可視
-        const uint64_t entryEpoch = convo::consumeAtomic(retiredBuffer[h].epoch, std::memory_order_acquire); // acquire: swap の epoch release と HB
-        // 注意: atomic_thread_fence(acquire) は不要。tail.load との同期で十分。
-        if (isOlder(entryEpoch, minReaderEpoch))
+        for (size_t i = 0; i < kMaxRetired; ++i)
         {
-            ConvolverState* ptr = convo::consumeAtomic(retiredBuffer[h].state, std::memory_order_acquire); // acquire: swap の state release と HB し旧状態ポインタを取得
-            if (ptr != nullptr)
+            ConvolverState* ptr = nullptr;
+            const auto result = tryReclaimSlot(h, minReaderEpoch, ptr);
+
+            if (result == ReclaimResult::Reclaimed)
             {
-                // state を nullptr にクリアしてから head を進める（二重取得防止）
-                convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release); // release: 次回 tryReclaim の state acquire と HB し二重取得防止
-                convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);    // release: swap の head acquire と HB しスロット解放を公知
+                advanceHead(h);
                 return ptr;
             }
 
-            // 削除不可: head を進めて tail 側へ回転する
-            convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release); // release: swap の head acquire と HB しスロット移動を公知
+            if (result == ReclaimResult::SkipNull)
+            {
+                advanceHead(h);
+                if (h == convo::consumeAtomic(tail, std::memory_order_acquire))
+                    return nullptr;
+                continue;
+            }
 
-            const size_t t = convo::consumeAtomic(tail, std::memory_order_acquire); // acquire: swap の tail release と HB し最新 tail を観測
-            const size_t nextTail = (t + 1) % kMaxRetired;
-            if (nextTail == convo::consumeAtomic(head, std::memory_order_acquire)) // acquire: 最新 head を観測してバッファ溢れ判定
-            {
-                std::lock_guard<std::mutex> lock(fallbackMutex);
-                fallbackQueue.push({ptr, entryEpoch});
-            }
-            else
-            {
-                convo::publishAtomic(retiredBuffer[t].state, ptr, std::memory_order_release);         // release: 次回 tryReclaim の state acquire と HB
-                convo::publishAtomic(retiredBuffer[t].epoch, entryEpoch, std::memory_order_release);  // release: 次回 tryReclaim の epoch acquire と HB
-                convo::publishAtomic(tail, nextTail, std::memory_order_release);                      // release: swap/tryReclaim の tail acquire と HB しエントリ追加完了を公知
-            }
-            convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release); // release: 次回 tryReclaim の state acquire と HB しスロットクリアを公知
-            return nullptr;
+            // Blocked (epoch >= minReaderEpoch または Invariant Violation)
+            // ★ tail へ回転しない
+            break;
         }
 
         return nullptr;
@@ -372,8 +445,10 @@ private:
     mutable std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {}; // NOLINT(thread-local) RT-SAFE: std::atomic<uint64_t> は POD-like でデストラクタなし。
 
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
+    static constexpr size_t kMaxFallback = 1024;  // ★ ADD-1: bounded（暫定値、kHealthThreshold 以上）
     std::mutex                                 fallbackMutex;
     std::priority_queue<FallbackEntry>         fallbackQueue;
+    std::atomic<uint64_t>                      fallbackOverflowCount_{0}; // ★ ADD-1: diagnostic only（relaxed）
 
     // Retire authority coordinator reference
     convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};

@@ -165,8 +165,13 @@ private:
                 const size_t pendingRetired = swapperRef.getPendingRetiredCount();
                 if (pendingRetired >= kPendingRetiredWarnThreshold)
                 {
-                    juce::Logger::writeToLog("[DIAG] DeferredFreeThread backlog pending="
-                                             + juce::String(static_cast<juce::int64>(pendingRetired)));
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastLogTime_ >= kLogInterval)
+                    {
+                        lastLogTime_ = now;
+                        juce::Logger::writeToLog("[DIAG] DeferredFreeThread backlog pending="
+                                                 + juce::String(static_cast<juce::int64>(pendingRetired)));
+                    }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
@@ -174,6 +179,10 @@ private:
                 std::this_thread::yield();
         }
     }
+
+    // ★ ADD-3: Logger rate limit（5秒間隔）
+    std::chrono::steady_clock::time_point lastLogTime_{};
+    static constexpr auto kLogInterval = std::chrono::seconds(5);
 
     SafeStateSwapper&     swapperRef;
     ThreadAffinityManager* affinityManager;

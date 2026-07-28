@@ -106,7 +106,9 @@ public:
             } else {
                 // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
                 const auto epoch = engine_.currentPublicationEpoch();
-                engine_.storeReceipt(oldDSP, epoch);
+                // ★ P1-2: DSPHandle を取得（quarantine 用）。getFadingRuntimeDSPHandle が該当 Handle を返す。
+                const auto oldHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
+                engine_.storeReceipt(oldDSP, oldHandle, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)

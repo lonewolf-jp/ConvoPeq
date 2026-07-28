@@ -108,40 +108,7 @@ public:
         m_epochProvider->tryReclaim();
     }
 
-    bool updateFade(float& outAlpha,
-                    const GlobalSnapshot*& outCurrent,
-                    const GlobalSnapshot*& outTarget) noexcept
-    {
-        // acquire: SnapshotFadeState::start/resetToIdle の release と HB してフェード状態を観測。
-        const FadeState state = m_fade.state();
-        if (state == FadeState::Idle)
-        {
-            outAlpha = 1.0f;
-            // acquire: switchImmediate/publishNew release と HB し、最新スナップを観測。
-            outCurrent = m_slots.loadCurrent(std::memory_order_acquire);
-            outTarget = nullptr;
-            return false;
-        }
-
-        // acquire ×2: m_current/m_target の release と HB し、フェード中の両スナップを観測。
-        outCurrent = m_slots.loadCurrent(std::memory_order_acquire);
-        outTarget = m_slots.loadTarget(std::memory_order_acquire);
-        if (outTarget == nullptr)
-        {
-            // ★ D-3: target==null → completeFade が並行実行された可能性。state を再確認。
-            if (m_fade.state() == FadeState::Idle)
-                return false;  // 別スレッドが既に fade を完了させた
-            resetFadeStateAndRetireTarget();
-            outAlpha = 1.0f;
-            outTarget = nullptr;
-            return false;
-        }
-
-        // acquire: advanceFade/reset/complete の alpha release と HB し最新アルファ値を観測。
-        const double alpha = m_fade.alpha();
-        outAlpha = equalPowerSinApprox(static_cast<float>(alpha));
-        return true;
-    }
+    // ★ [DELETED] 2026-07-28: updateFade は Dead Code のため削除（呼び出し元なし）。
 
     void advanceFade(int numSamples) noexcept;
     bool tryCompleteFade() noexcept;
