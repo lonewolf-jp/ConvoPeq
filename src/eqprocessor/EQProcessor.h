@@ -105,22 +105,18 @@ struct EQCoeffsBiquad
     double a0 = 1.0, a1 = 0.0, a2 = 0.0;
 };
 
-#include "RefCountedDeferred.h"
-
 #include "audioengine/AtomicAccess.h"
 #include "audioengine/RuntimeBuildTypes.h"
 
 //--------------------------------------------------------------
-// EQCoeffCache: 係数キャッシュ（RefCounted資源）
-// v2.3 Phase 1 新規追加
+// EQCoeffCache: 係数キャッシュ（DSPHandle管理）
+// v20.2.6: RefCountedDeferred → DSPHandleRuntime 移行 (P0-2)
 //
 // 複数のスナップショット間で同一EQパラメータの係数を共有し、
 // CPU/メモリ効率を向上させる不変キャッシュ
+// ライフサイクル管理は DSPHandleRuntime が担当する。
 //--------------------------------------------------------------
-#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
-#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
-
-struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
+struct alignas(64) EQCoeffCache
 {
     EQCoeffsSVF coeffs[20];              // SVF係数 (20バンド)
     bool bandActive[20] = {};            // バンド有効フラグ
@@ -134,12 +130,10 @@ struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
     uint64_t generation = 0;             // 世代番号
 
     EQCoeffCache() = default;
-    ~EQCoeffCache();
+    ~EQCoeffCache() = default;
     EQCoeffCache(const EQCoeffCache&) = delete;
     EQCoeffCache& operator=(const EQCoeffCache&) = delete;
 };
-
-#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
 //--------------------------------------------------------------
 // EQプロセッサークラス

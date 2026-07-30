@@ -506,4 +506,41 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
     rejected_ = (validator.explainPublishReject(descriptor) != TierRejectReason::None);
 }
 
+//==============================================================================
+// ★ P0-4C: ISR Intent 発行インターフェース実装
+//==============================================================================
+
+void RuntimePublicationCoordinator::emitObserveIntent() noexcept
+{
+    // ★ P0-4A: Observe Intent — 現在は Timer から直接 retirePublishedDSP が呼ばれている。
+    //   将来、この Intent をキューイングして Coordinator Loop が処理する設計に変更予定。
+    //   現状はバックログカウンタのみ更新（呼び出し側の Timer は依然直接 retirePublishedDSP を呼ぶ）。
+    setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+}
+
+void RuntimePublicationCoordinator::emitQuarantineIntent(
+    const DSPHandle& handle,
+    QuarantineReason reason,
+    uint64_t contextEpoch) noexcept
+{
+    (void)handle;
+    (void)reason;
+    (void)contextEpoch;
+    // ★ P0-5: Quarantine Intent — Coordinator 経由の quarantine 要求。
+    //   現在は AudioEngine が直接 dspHandleRuntime_.quarantine() を呼んでいる。
+    //   将来、QuarantineService を介して単一 Authority で処理する設計に変更予定。
+    //   現状はプレースホルダ。
+    setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
+}
+
+void RuntimePublicationCoordinator::requestReclaim(const DSPHandle& handle) noexcept
+{
+    (void)handle;
+    // ★ P0-4B: Reclaim Request — Coordinator 専用の reclaim 要求。
+    //   現在は DSPHandleRuntime::reclaim() が直接呼ばれている。
+    //   将来、Coordinator が epoch 安全確認後に reclaim を実行する設計に変更予定。
+    //   現状はプレースホルダ。
+    setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
+}
+
 } // namespace convo::isr

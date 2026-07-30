@@ -17,6 +17,23 @@
 ・外部からの入力、外部への出力以外のすべてのデータ処理は、64bit doubleで行ってください。ただし、スペアナの演算についてはfloatでかまいません。
 ・データアクセス規則に基づいてデータアクセスを実装してください。
 ・状態マシンおよびその周辺部は＜状態監視（モニタリング）技術設計指針＞に基づいて実装してください。
+
+========== 例外登録簿（MMCSS-EX） ==========
+# 概要: Audio Thread 内での MMCSS API 呼び出しは coding rule で禁止されているが、
+#       ASIO thread entry をフックできない場合のみ例外として許可する。
+# 根拠: ADD-2 (REPAIR_PLAN.md v20.2.5)
+# 承認日: 2026-07-29
+
+| # | 機能 | ファイル | 行 | 理由 | 承認日 |
+|---|------|---------|----|------|-------|
+| 1 | `AvRevertMmThreadCharacteristics` | `AudioEngine.Mmcss.cpp` | 201-208 | ASIO thread entry 非フック可能時のみ例外許可。`thread_local` ガードにより一度だけ実行 | 2026-07-29 |
+
+MMCSS-EX-1: Audio Thread 内での MMCSS API 呼び出しは、ASIO thread entry を
+            フックできない場合のみ例外として許可する。
+MMCSS-EX-2: 呼び出しは thread_local guard により一度だけとする。
+MMCSS-EX-3: RT 内で log しない（#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS でガード済み）。
+MMCSS-EX-4: 失敗しても音声を止めない。
+MMCSS-EX-5: 例外登録簿に記載する。
 ・INTEL oneAPI MKL(one MKL)を使用する箇所はメモリは64byteアライメントとし、メモリ確保が必要になった場合は、Audio Threadではなく、prepareToPlay()などのメッセージスレッドからのみ呼び出すようにしてください。
 ・デノーマル対策をしっかり行ってください。
 ・デストラクタの設置漏れがないよう注意してください。

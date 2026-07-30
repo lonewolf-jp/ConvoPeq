@@ -17,6 +17,10 @@
 
 namespace convo::isr {
 
+// ★ P0-4C: 前方宣言（完全定義は ISRDSPHandle.h / ISRDSPQuarantine.h）
+struct DSPHandle;
+enum class QuarantineReason : int;
+
 enum class PublishAuthority : uint8_t { Granted = 1 };
 enum class RetireAuthority : uint8_t { Granted = 1 };
 enum class ShutdownAuthority : uint8_t { Granted = 1 };
@@ -89,6 +93,26 @@ public:
     void markTransitionCommitted() noexcept;
     void requestShutdown() noexcept;
     void markShutdownComplete() noexcept;
+
+    // ── ★ P0-4C: ISR Intent 発行インターフェース ──
+    //   OBSERVE-1: Timer → emitObserveIntent → Coordinator が retirePublishedDSP を起動
+    //   QSVC-2:    Coordinator は QuarantineService を介さず直接 quarantine を呼ばない
+    //   DELETE-1:  reclaim() は Coordinator 専用。外部からの直接呼び出し禁止。
+
+    /// Observe Intent: Timer から定期観測要求を発行する。
+    /// Coordinator は Intent Queue に追加し、非同期に処理する。
+    /// OBSERVE-1〜8 に従い、Timer はこのメソッドのみを呼び出す。
+    void emitObserveIntent() noexcept;
+
+    /// Quarantine Intent: 指定された DSPHandle を quarantine する要求を発行する。
+    /// QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行する。
+    void emitQuarantineIntent(const DSPHandle& handle,
+                              QuarantineReason reason,
+                              uint64_t contextEpoch = 0) noexcept;
+
+    /// Reclaim Request: 指定された DSPHandle の reclaim を要求する。
+    /// DELETE-2〜7: Coordinator は epoch 安全確認後、reclaim を実行する。
+    void requestReclaim(const DSPHandle& handle) noexcept;
 
     // ── ★ Phase 5: OverflowRing 統合管理 ──
 

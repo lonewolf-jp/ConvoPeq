@@ -1809,6 +1809,31 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
     lifetimeMgr.retire(current, epoch);
 }
 
+//==============================================================================
+// resetReceipt  ── P1-2: pendingReceipt_ を安全に解放
+//
+// ISR: stale/emergency 時は quarantine Intent を発行してから解放する。
+// 将来 P0-4 で Coordinator::emitQuarantineIntent() 経由に変更予定。
+//==============================================================================
+void AudioEngine::resetReceipt() noexcept
+{
+    if (!pendingReceipt_.has_value())
+        return;
+
+    // stale/emergency 時は retain 義務を quarantine へ移転
+    if (!pendingReceipt_->handle.isNull())
+    {
+        dspHandleRuntime_.quarantine(pendingReceipt_->handle);
+        dspQuarantineManager_.quarantineHandle(
+            pendingReceipt_->handle.slot,
+            pendingReceipt_->handle.generation,
+            convo::isr::QuarantineReason::ReceiptReset);
+    }
+
+    pendingReceipt_.reset();
+    receiptReady_.store(false, std::memory_order_relaxed);
+}
+
 // [work39 Phase 6] Suppression Probe — commit or rollback
 void AudioEngine::commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter) noexcept
 {

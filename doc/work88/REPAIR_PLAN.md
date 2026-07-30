@@ -1,713 +1,31 @@
-# ConvoPeq 改修設計書 — BUG-011〜BUG-046 修正計画 (v20)
+# ConvoPeq 改修設計書 — BUG-011〜BUG-046 修正計画 (v20.2.6)
 
 **凡例**: ✅ 実装完了 → Appendix 参照。📋 設計確定 → 「設計」セクション参照。
-**ステータス**: **v20 ACK応答型・Shutdown優先度・Handle Fairness・QSVC通知・EpochWaiting注記を追加**。EnqueueResult enum 定義、QUEUE-9/10 追加、QSVC-1 拡充、DSPState設計注記。全15項目中6実装済み・9設計確定。
+**ステータス**: **v20.2.6 改訂確定版** — v20.2_FINAL + v20.2.1〜v20.2.5 + 検証レポート補完 v1.1 + ERRATA-V2023 を統合。
+全26最終受け入れ条件中**16実装済み**・10設計確定。本計画書と旧 SSoT が矛盾する場合、本計画書を優先する。
+ただし、実リポジトリの事実と衝突する場合は errata を作成し、実測を優先する。
+
+**ERRATA-V2023-1** (`Plan::workBuffer` 64-byte アライメント明記): ProductionFft::Plan::workBuffer は 64-byte アライメント必須。
+確保は `mkl_malloc(size, 64)`、`convo::aligned_malloc(64, size)`、または `ippsMalloc_8u` 系のみ使用可。`new` / `malloc` / `std::vector` は禁止。
+**ERRATA-V2023-2** (`toFftStage` 安全クランプ): `toFftStage()` は未知の legacy stage 整数を `FftStage::Diagnostic` へ安全クランプする。
+`constexpr` / `noexcept` 必須。内部で HealthMonitor 呼び出しやログ出力を行ってはならない。
+
+**CMP0091 設計（2026-07-29 解決済み）**: `cmake_minimum_required(VERSION 3.22)` により CMP0091 は暗黙的に NEW。ただし明示指定により可読性を向上させるため、`cmake_minimum_required` 直後に `cmake_policy(SET CMP0091 NEW)` を追加。同時に icx の `/MT` `/MTd` `/Qipo` フラグを `$<NOT:$<BOOL:${ENABLE_ASAN}>>` で条件付き化し、ASan 有効時に静的 CRT フラグが重複付与されないように修正。ASan ブロック内に PGO との排他チェック、LTCG/IPO 無効化も追加済み（CMakeLists.txt に実装完了）。**CMP0091 はもはや未設定ではない。**
 
 ---
 
-# 設計（確定版：残タスク9項目の設計）
+# 設計（残タスク4項目 + 将来改善3項目）
 
-## P1-1: FFT Backend Concept化 [🟡P1] — 詳細設計
-
-### 1. 設計目的
-`MKLNonUniformConvolver` の FFT 呼び出し（`ippsFFTFwd_RToCCS_64f` / `ippsFFTInv_CCSToR_64f`）を C++20 Concept ベースの抽象化によりテスト可能にする。virtual dispatch ゼロを維持し、RT パスへの影響ゼロを保証。Intel IPP 直呼び出しのままではエラー注入が不可能であり、FFT エラー時の異常系テスト（`clearFFTOutputOnError` の動作検証）を実装できない。
-
-### 2. 現状分析
-| 観点 | 現在 | 課題 |
-|------|------|------|
-| FFT API | `ippsFFTFwd_RToCCS_64f` / `ippsFFTInv_CCSToR_64f` 直呼び出し | テスト時にエラー注入不可 |
-| Layer 構造体 | `IppsFFTSpec_R_64f* fftSpec` を直接保持 | IPP 型に依存 |
-| エラー処理 | `clearFFTOutputOnError()` 実装済み（6箇所） | 異常系テストが未実装 |
-| explicit instantiation | 未対応 | テンプレート導入後のバイナリ肥大リスク |
-| テスト基盤 | GoogleTest/GMock なし（カスタムフレームワーク） | GMock 非依存の方針維持 |
-
-### 3. FFT Backend Concept 定義
-
-```cpp
-template <typename FftBackend>
-concept FftBackendConcept = requires(FftBackend& b, const double* in, double* out) {
-    { b.forward(in, out) } -> std::same_as<IppStatus>;
-    { b.inverse(in, out) } -> std::same_as<IppStatus>;
-};
-```
-
-**Concept 採用の根拠**:
-| 方式 | virtual | RT-safe | エラー注入 | 採用 |
-|------|---------|---------|-----------|------|
-| **Concept（静的ポリモーフィズム）** | ゼロ | ✅ | ✅ | **採用** |
-| CRTP | ゼロ | ✅ | ✅ | 不採用（Concept で十分） |
-| virtual + Mock | あり | ❌（RT不可） | ✅ | 不採用（GMock 不使用ポリシー違反） |
-| 現状維持（直呼び出し） | ゼロ | ✅ | ❌ | 不採用（テスト不可能） |
-
-### 4. ProductionFft — Intel IPP ラッパー
-
-```cpp
-class ProductionFft {
-public:
-    explicit ProductionFft(IppsFFTSpec_R_64f* spec) noexcept : fftSpec_(spec) {}
-
-    IppStatus forward(const double* in, double* out) noexcept {
-        return ippsFFTFwd_RToCCS_64f(in, out, fftSpec_, workBuf_);
-    }
-
-    IppStatus inverse(const double* in, double* out) noexcept {
-        return ippsFFTInv_CCSToR_64f(in, out, fftSpec_, workBuf_);
-    }
-
-    void setWorkBuffer(Ipp8u* buf) noexcept { workBuf_ = buf; }
-
-private:
-    IppsFFTSpec_R_64f* fftSpec_;
-    Ipp8u* workBuf_ = nullptr;
-};
-
-static_assert(FftBackendConcept<ProductionFft>);
-```
-
-**ProductionFft 契約**:
-| ID | 契約 |
-|----|------|
-| FFT-PROD-1 | ProductionFft は `IppsFFTSpec_R_64f*` を保持してよい（所有はしない） |
-| FFT-PROD-2 | spec の生成/破棄は NonRT（Builder/MessageThread）専用 |
-| FFT-PROD-3 | `forward()` / `inverse()` は RT から呼び出し可能 |
-| FFT-PROD-4 | `forward()` / `inverse()` は `noexcept` |
-| FFT-PROD-5 | 失敗時は `IppStatus` を返す（エラーコード伝搬） |
-| FFT-PROD-6 | RT 内で allocation / free / exception / log を発生させない |
-
-### 5. TestFft — エラー注入可能なテスト用実装
-
-```cpp
-class TestFft {
-public:
-    IppStatus forward(const double*, double*) noexcept { return result_; }
-    IppStatus inverse(const double*, double*) noexcept { return result_; }
-
-    void setResult(IppStatus s) noexcept { result_ = s; }
-    void setResultOnCall(IppStatus fwd, IppStatus inv) noexcept {
-        resultForward_ = fwd; resultInverse_ = inv;
-    }
-
-private:
-    IppStatus result_{ippStsNoErr};
-    IppStatus resultForward_{ippStsNoErr};
-    IppStatus resultInverse_{ippStsNoErr};
-};
-
-static_assert(FftBackendConcept<TestFft>);
-```
-
-**TestFft テストパターン**:
-| パターン | setResult | 期待動作 |
-|----------|-----------|---------|
-| 正常系 | `ippStsNoErr` | 出力バッファ変更なし（通常処理継続） |
-| 異常系 | `ippStsErr` | `clearFFTOutputOnError` が出力をゼロクリア |
-| 部分異常 | forward→err, inverse→ok | Forward エラーのみ fail-closed |
-| 復帰 | err→次の呼び出しで ok | エラー後もシステム継続 |
-
-### 6. Layer 構造体のテンプレート化
-
-**第一推奨: Layer 構造体単位のみテンプレート化**（クラス全体はコンパイル爆発のため非推奨）。
-
-#### ISR改善提案: FFTExecutionContext 分離（将来課題）
-
-ISR原則「RTは判断しない・所有しない」の観点では、理想的には `Layer` が FFT Backend を直接保持しない設計が望ましい。
-
-```cpp
-// 理想（将来設計）:
-// Layer は FFT の存在すら知らない
-struct Layer {
-    // FFT 関連フィールドなし
-    // ... オーディオ処理以外の責務のみ
-};
-
-// FFT Execution Context が Layer の FFT 処理を委譲される
-class FFTExecutionContext {
-    ProductionFft fft;
-    void processLayer(Layer& layer, const double* input, double* output);
-};
-```
-
-これにより `Layer` はオーディオデータのコンテナに専念し、FFT 演算は `FFTExecutionContext` が責務を持つ。ただし現状案（Layerテンプレート化）でも virtual ゼロ・RT-safe は保証されており、本フェーズでは現状案で十分妥当である。
-
-```cpp
-// ── 現行（IPP 直依存）──
-struct Layer {
-    IppsFFTSpec_R_64f* fftSpec    = nullptr;
-    Ipp8u*             fftWorkBuf = nullptr;
-};
-
-// ── 変更後（テンプレート化）──
-template <FftBackendConcept FftBackend>
-struct Layer {
-    FftBackend fft;              // ★ FFT backend インスタンス
-    // fftSpec/fftWorkBuf は FftBackend 内部で管理
-    // ... 他のメンバ（変更なし）
-};
-```
-
-**変更影響範囲**:
-| 構成要素 | 変更 | 備考 |
-|----------|------|------|
-| `Layer::fftSpec` | ❌ 削除 → `Layer::fft` に置換 | `FftBackend` 内部で管理 |
-| `Layer::fftWorkBuf` | ❌ 削除 → `Layer::fft` に内包 | `ProductionFft::setWorkBuffer()` |
-| Layer 内 FFT 呼び出し | ✅ FFT 直呼び → `l.fft.forward()` / `l.fft.inverse()` | 6箇所すべて変更 |
-| `complexSize` 等の非FFTメンバ | 変更なし | |
-| `fftPlanOwner` | 変更なし（FFT backend 生成時に使用） | |
-| FFT spec 初期化（`SetImpulse()`） | ✅ `ProductionFft` を Layer に保存 | 初期化時のみ変更 |
-| `areFftDescriptorsCommitted()` | ✅ backend 経由で確認 | |
-
-**Layer テンプレート宣言**:
-```cpp
-// MKLNonUniformConvolverLayer.h
-template <FftBackendConcept FftBackend = ProductionFft>
-class MKLNonUniformConvolverLayer {
-    Layer<FftBackend> m_layers[3];
-};
-```
-
-### 7. Explicit Instantiation 戦略
-
-```cpp
-// MKLNonUniformConvolverLayer.h（header）
-extern template class MKLNonUniformConvolverLayer<ProductionFft>;
-
-// MKLNonUniformConvolverLayer.cpp（production TU）
-template class MKLNonUniformConvolverLayer<ProductionFft>;
-
-// テストファイル（test TU）— TestFft は暗黙の instantiation のみ
-// extern template 宣言は test TU では #ifdef ガード等で除外
-```
-
-**Production 型のみ explicit instantiation**:
-| Instantiation | 方法 | 含まれるビルド |
-|-------------|------|--------------|
-| `MKLNonUniformConvolverLayer<ProductionFft>` | explicit instantiation | Release + Debug |
-| `MKLNonUniformConvolverLayer<TestFft>` | 暗黙（`extern template` 対象外） | Test TU のみ |
-
-**コンパイル時間対策**:
-| 対策 | 方法 |
-|------|------|
-| `extern template` | Header に宣言し複数 TU での重複インスタンス生成を防止 |
-| Layer 単位のみ | クラス全体のテンプレート化を避ける |
-| TEST ビルド分離 | Test TU は Release ビルドに含めない |
-
-### 8. Fail-Closed 契約
-
-| ID | 契約 |
-|----|------|
-| FFT-FAIL-1 | FFT が non-success を返したら出力をゼロクリアする |
-| FFT-FAIL-2 | stage を ready にしない |
-| FFT-FAIL-3 | stale な結果を publish しない |
-| FFT-FAIL-4 | RT 内で retry しない |
-| FFT-FAIL-5 | error flag/counter は atomic relaxed でよい |
-| FFT-FAIL-6 | log は NonRT へ委譲する |
-
-### 9. テスト計画
-
-| テスト名 | 内容 |
-|----------|------|
-| `FftProductionInstantiation` | `ProductionFft` のみ Release binary に含まれる |
-| `FftTestBackendInjection` | `TestFft` でエラー注入可能 |
-| `FftForwardErrorFailClosed` | forward エラー時 fail-closed |
-| `FftInverseErrorFailClosed` | inverse エラー時 fail-closed |
-| `FftNoPublishOnError` | エラー時 publish なし |
-| `FftNullSpecHandling` | null spec ハンドリング |
-| `FftSizeMismatch` | サイズ不一致 |
-| `FftAllSixSitesCovered` | 6箇所すべての FFT 呼び出しをカバー |
-
-### 10. マイグレーションパス（段階的移行）
-
-| Phase | 内容 | 成果物 | CI 通過 |
-|-------|------|--------|---------|
-| **Phase 1** | `FftBackendConcept` / `ProductionFft` / `TestFft` 定義 | 新規ヘッダ/ソース | ✅ 既存コード非変更 |
-| **Phase 2** | `Layer` 構造体テンプレート化（クラス全体は非テンプレート） | `MKLNonUniformConvolverLayer.h` | ✅ コンパイル通過 |
-| **Phase 3** | 既存 `Layer` → `Layer<ProductionFft>` 置換 + FFT 呼び出し6箇所変更 | コンパイル通過 | ✅ 全テスト通過 |
-| **Phase 4** | Explicit instantiation + `extern template` | Production binary | ✅ バイナリ検証 |
-| **Phase 5** | テスト追加（TestFft 注入） | 全テスト追加 | ✅ 異常系カバレッジ |
-
-各 Phase は独立して CI 通過可能。Phase 1〜2 は既存コードに影響を与えない。
-
-### 11. リスクと対策
-
-| リスク | 確率 | 影響 | 対策 |
-|--------|------|------|------|
-| テンプレートコード膨張 | LOW | MEDIUM | Layer 単位テンプレート化＋extern template |
-| コンパイル時間増加 | LOW | LOW | extern template で最小化 |
-| FFT パフォーマンス劣化 | LOW | HIGH | Concept はコンパイル時解決、runtime オーバーヘッドゼロ |
-| RT パスへの意図しない影響 | LOW | CRITICAL | Phase 3 で RT パスのベンチマーク確認 |
-| IPP バージョン非互換 | LOW | MEDIUM | `ProductionFft` が IPP 呼び出しをラップ、変更箇所を1箇所に閉じ込め |
-
-### 12. 見積工数
-設計0.5日＋実装1日＋テスト0.5日 = **2日**（既存設計から変更なし）
+本セクションでは、現時点で未実装の設計項目を定義する。凡例: 📋 設計確定 / 🔴 P0（最優先）/ 🟡 P1（高優先）/ 🔷 INFO。
 
 ---
 
-## ADD-4: ASan/TSan CI job分離 [🔷INFO] — 詳細設計
+## P0-4A: Observe Authority — Timer→Coordinator 委譲 [🔴P0] — 設計確定
 
-### 1. 設計目的
-現在の `CMakeLists.txt` は `ENABLE_ASAN` オプションを持つが、Debug ビルド（`/MTd` 静的CRT）と ASan（`/MDd` 動的CRT必須）の CRT 非互換により同一 job で両立できない。ASan/TSan を Debug とは別 job に分離し、各 sanitizer の特性に応じた CRT 設定でビルド・テストを実行可能にする。
+### 目的
+`retirePublishedDSP()` が Timer から直接呼ばれる現状を改め、Timer は Observe Intent のみを発行し、Coordinator が retire を実行する設計に変更する。ISR の `Publish → Observe → Retire → Epoch → Delete` パイプラインに整合させる。
 
-### 2. 現状分析
-
-**現行の CMakeLists.txt ASan 設定**（L1037-1056）:
-```cmake
-option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
-if(ENABLE_ASAN)
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
-        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
-        set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
-            "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
-        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
-        set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
-            "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-    endif()
-endif()
-```
-
-**課題**:
-| 課題 | 詳細 |
-|------|------|
-| CRT 非互換 | Debug は `/MTd`（静的CRT）、ASan は `/MDd`（動的CRT）必須 → 同一ターゲットで両立不可 |
-| TSan 未対応 | `ENABLE_TSAN` オプションが存在しない |
-| icx 非互換 | Intel oneAPI icx は ASan 対応するが、MSVC とは別のフラグが必要 |
-| ビルド構成混在 | 同一 CMake 設定で複数の CRT を使い分ける仕組みがない |
-
-### 3. CI Job Matrix
-
-| Config | CRT | Sanitizer | Compiler | 目的 |
-|--------|-----|-----------|----------|------|
-| Debug | `/MTd` | なし | MSVC cl.exe | 既存 Debug ビルド（静的CRT、ASan なし） |
-| Debug-ASan | `/MDd` | AddressSanitizer | MSVC cl.exe | メモリ安全性検証（新規） |
-| Debug-TSan | dynamic CRT | ThreadSanitizer | Clang (WSL/Linux) | データ競合検出（新規） |
-| Release | `/MT` | なし | MSVC cl.exe | 既存 Release ビルド |
-| Release-PGO | `/MT` | なし | MSVC cl.exe | PGO 最適化ビルド |
-
-### 4. CMake 変更計画
-
-**4.1 新オプション追加**:
-```cmake
-option(ENABLE_ASAN "Enable AddressSanitizer (Debug ASan job)" OFF)
-option(ENABLE_TSAN "Enable ThreadSanitizer (Debug TSan job, Clang only)" OFF)
-```
-
-**4.2 前提条件チェック**:
-```cmake
-if(ENABLE_ASAN AND ENABLE_TSAN)
-    message(FATAL_ERROR "ASan and TSan are mutually exclusive. Enable only one.")
-endif()
-
-if(ENABLE_TSAN AND MSVC)
-    message(FATAL_ERROR "TSan requires Clang (MSVC not supported). Use Clang or WSL Clang.")
-endif()
-```
-
-**4.3 CRT 自動切替ロジック**:
-```cmake
-if(ENABLE_ASAN)
-    # ASan 必須: 動的 CRT（/MDd for Debug, /MD for Release）
-    # 静的 CRT（/MT /MTd）は MSVC ASan と非互換（LNK2038）
-    set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
-        "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-endif()
-
-if(ENABLE_TSAN)
-    # TSan は Clang の -fsanitize=thread で有効化
-    target_compile_options(ConvoPeq PRIVATE -fsanitize=thread)
-    target_link_options(ConvoPeq PRIVATE -fsanitize=thread)
-    set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
-        "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-endif()
-```
-
-**4.4 互換性マトリックス**:
-| 設定 | MSVC cl | Intel icx | Clang |
-|------|---------|-----------|-------|
-| ENABLE_ASAN=ON | ✅ `/fsanitize=address` + `/MDd` | ✅ `-fsanitize=address` + `/MD` | ✅ `-fsanitize=address` |
-| ENABLE_TSAN=ON | ❌ 未対応 | ⚠️ 実験的 | ✅ `-fsanitize=thread` |
-| 両方 OFF（通常） | ✅ `/MT` `/MTd` | ✅ `/MT` | ✅ |
-
-### 5. GitHub Actions Workflow 設計
-
-```yaml
-jobs:
-  debug:
-    runs-on: windows-latest
-    steps:
-      - run: cmake -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
-      - run: cmake --build build --config Debug
-      - run: ctest -C Debug --output-on-failure
-
-  debug-asan:
-    runs-on: windows-latest
-    steps:
-      - run: cmake -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DENABLE_ASAN=ON
-      - run: cmake --build build --config Debug
-      - run: ctest -C Debug --output-on-failure
-
-  debug-tsan:
-    runs-on: ubuntu-latest  # WSL Clang または Linux Clang
-    steps:
-      - run: cmake -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DENABLE_TSAN=ON
-      - run: cmake --build build --config Debug
-      - run: ctest -C Debug --output-on-failure
-```
-
-### 6. TSan 対応方針
-
-| 項目 | 方針 |
-|------|------|
-| **コンパイラ** | Clang 14+（MSVC 非対応）。WSL/Linux 上で実行 |
-| **CRT** | 動的 CRT が必要（静的 CRT は TSan 非対応） |
-| **CMake 設定** | `-fsanitize=thread` を compile/link flags に追加 |
-| **除外リスト** | TSan の false positive 抑制用 `.tsanignore` ファイルを用意 |
-| **実行環境** | WSL Ubuntu または CI Linux runner |
-
-### 7. テスト戦略
-
-| Job | 実行テスト | 期待結果 |
-|-----|-----------|---------|
-| Debug | 全テスト（通常） | 既存カバレッジ維持 |
-| Debug-ASan | メモリ関連テスト全般 | use-after-free / buffer overflow / leak ゼロ |
-| Debug-TSan | マルチスレッドテスト中心 | data race ゼロ |
-
-**ASan 期待検出項目**:
-- use-after-free（Retired DSP へのアクセス）
-- heap-buffer-overflow（FFT バッファ境界）
-- stack-buffer-overflow（AudioSegmentBuffer 等）
-- memory leak（FFT spec / plan リーク）
-
-**TSan 期待検出項目**:
-- Data race on `retiredBuffer`（SafeStateSwapper）
-- Data race on `pendingReceipt_`（AudioEngine）
-- Lock inversion（fallbackQueue mutex + 他ロック）
-
-### 8. リスクと対策
-
-| リスク | 確率 | 影響 | 対策 |
-|--------|------|------|------|
-| ASan の CRT 切替で他の設定と競合 | LOW | HIGH | `ENABLE_ASAN` 時のみ CRT 切替、通常時は変更なし |
-| TSan の false positive | MEDIUM | LOW | 除外リスト `.tsanignore` で抑制 |
-| CI ランナー増加によるコスト | MEDIUM | LOW | 対象テストを絞り込む（全テスト不要） |
-| icx の ASan 非互換 | LOW | MEDIUM | icx では `ENABLE_ASAN` を OFF にする構成を推奨 |
-| Clang/MSVC の挙動差 | LOW | LOW | TSan job は Linux Clang で実行、結果の解釈は別評価 |
-
-### 9. 見積工数
-CMake 変更0.5日 + CI workflow 設定0.5日 + 動作検証0.5日 = **1.5日**（設計詳細化による精度向上）
-
----
-
-## P0-2: RefCountedDeferred→DSPHandleRuntime移行 [🔴P0] — 設計確定
-
-### 現状
-| 観点 | 状態 |
-|------|------|
-| DSPHandleRuntime 基盤 | ✅ 実装済み（create/resolve/retire/quarantine/reclaim full lifecycle） |
-| PublishReceipt handle 保持 | ✅ 実装済み（DSPCore* と過渡的に併存） |
-| storeReceipt() handle 受取 | ✅ 実装済み |
-| EQCoeffCache 移行 | ❌ 未着手（RefCountedDeferred 継承が残存） |
-| tryAddRef() 呼び出し元 | ✅ Dead Code 確認済み |
-
-### 完了条件
-1. `EQCoeffCache` が `RefCountedDeferred<EQCoeffCache>` を継承しない
-2. `EQCoeffCache` が `DSPHandleRuntime::create()` で生成される
-3. `EQCoeffCache` への全アクセスが `DSPHandleRuntime::resolve()` 経由
-4. `tryAddRef()` が削除されている（呼び出し元ゼロ確認済み）
-5. `RefCountedDeferred` テンプレート全体が Dead Code として削除/非推奨化
-6. `PublishReceipt` から `DSPCore* dsp` が削除され、`DSPHandle` のみになる
-
-### 移行手順
-**Phase 1: EQCoeffCache の Handle 化（Coordinator 経由）**
-- `EQCoeffCache` の基底を `RefCountedDeferred<EQCoeffCache>` から通常の struct に変更
-- コンストラクタを private にし、Builder が生成を担当
-- **ISR Authority**: `EQCoeffCache` 自身は `DSPHandleRuntime` を知らない
-- Builder → Coordinator → `DSPHandleRuntime::create()` の流れで Handle 登録:
-  ```cpp
-  // Builder が生成
-  auto cache = std::make_unique<EQCoeffCache>(...);
-  // Coordinator が Handle 登録（唯一の Authority）
-  DSPHandle handle = coordinator.registerDSPHandle(cache.get());
-  // Builder は Handle を保持し、以降は resolve() 経由でアクセス
-  ```
-- 呼び出し側は `DSPHandle` 経由で `resolve()` → 使用 → `retire()` のライフサイクルに変更
-
-**Phase 2: 既存参照箇所の置換**
-- `EQProcessor` 内で `EQCoeffCache*` 直接保持 → `DSPHandle` を保持
-- アクセス時に `handleRuntime_.resolve(handle)` でポインタ取得
-- epoch protection scope 内で使用後、即座に参照を手放す
-
-**Phase 3: Dead Code 削除**
-- `tryAddRef()` の削除（呼び出し元ゼロ確認済み）
-- `RefCountedDeferred` テンプレートの deprecated 化
-- `PublishReceipt::dsp` フィールドの削除（`DSPHandle` に一本化）
-
-### テスト計画
-| テスト | 内容 |
-|--------|------|
-| EQCoeffCacheCreateResolve | `create()` + `resolve()` で正しくポインタ取得 |
-| EQCoeffCacheRetireReclaim | `retire()` 後 `resolve()` が nullptr を返す |
-| EQCoeffCacheLifecycle | 生成→使用→退役の完全ライフサイクル |
-| PublishReceiptHandleOnly | `DSPCore* dsp` 削除後も機能する |
-| RefCountedDeferredLegacy | `RefCountedDeferred` が使用されていない |
-
-### リスクと対策
-| リスク | 対策 |
-|--------|------|
-| EQCoeffCache 生成頻度高で Handle Table 溢れ | `kMaxSlots=256` 上限確認。溢れる場合は拡張 |
-| resolve() 失敗時の fallback なし | 呼び出し元が nullptr チェック + デフォルト係数使用 |
-
-### 見積工数
-実装0.5日 + テスト0.5日 = **1日**
-
-**契約**: REFCOUNT-1〜4（RefCountedDeferred は Legacy、新規禁止）
-**HANDLE-5/6/7**: 本セクション完了条件に集約。詳細は Appendix FIX-P1-2 参照。
-
----
-
-## P1-2: Stale receipt quarantine [🟡P1] — 設計確定
-
-### 現状
-| 観点 | 状態 |
-|------|------|
-| PublishReceipt DSPHandle 保持 | ✅ 実装済み（`AudioEngine.h:4338`） |
-| storeReceipt() パラメータ | ✅ DSPHandle 受取済み（`AudioEngine.h:1142`） |
-| DSPHandleRuntime::quarantine() | ✅ 実装済み（`ISRDSPHandle.cpp:120-125`） |
-| Emergency quarantine 呼び出し | ✅ AudioEngine.Timer.cpp:1788-1793 |
-| Receipt 状態機械 | ❌ 未実装 |
-| resetReceipt() 関数 | ❌ 未実装（コード内に存在せず） |
-
-### Receipt 状態機械（確定）
-
-```
-Empty ──storeReceipt()──→ Ready ──normal retire──→ Consumed
-                            │
-                            ├──stale/emergency/mismatch──→ StaleExported
-                            │                                 │
-                            │                          quarantine 実行
-                            │                                 │
-                            │                                 ▼
-                            │                     Quarantined（DSPState と一致）
-                            │                     （自動 free しない）
-                            │                                 │
-                            │                          DestroyPending
-                            │                                 │
-                            │                          Reclaimed
-                            │
-                            └──resetReceipt()──→ Empty（通常のリセット）
-```
-
-**状態定義**（DSPState enum と整合）:
-| Receipt状態 | 対応 DSPState | 意味 | 遷移条件 |
-|------------|--------------|------|---------|
-| `Empty` | — | receipt なし | `storeReceipt()` 成功 |
-| `Ready` | `Active` | receipt 有効、retire 待機 | Normal Retire 成功、または異常検出 |
-| `StaleExported` | `Retired` | evidence 出力完了 | quarantine 実行 → `Quarantined` |
-| `Quarantined` | `Quarantined` | DSP 隔離済み、自動 free しない | shutdown drain → `DestroyPending` |
-| `DestroyPending` | `DestroyPending` | 解放予約状態 | reclaim → `Reclaimed` |
-| `Reclaimed` | `Reclaimed` | メモリ解放済み | — |
-| `Consumed` | `Retired` | 正常 retire 完了（Quarantine不要） | — |
-
-### ISR Authority: Quarantine Intent パターン
-
-ISR原則「Coordinatorのみが唯一のAuthority」に従い、`resetReceipt()` は直接 quarantine を実行せず、
-Coordinator に「隔離要求 (QuarantineIntent)」を発行する。Coordinator が ACK を返してから
-`pendingReceipt_` を解放する。
-
-```
-resetReceipt()
-  │
-  ├──emitQuarantineIntent(handle, reason)──→ Coordinator
-  │                                              │
-  │                                        quarantine() 実行
-  │                                        QuarantineManager 記録
-  │                                              │
-  │                                        Coordinator ACK
-  │                                              │
-  │←─────────── ACK ─────────────────────────────┘
-  │
-  └──pendingReceipt_.reset()
-      receiptReady_ = false
-```
-
-#### resetReceipt() 関数設計（修正版）
-```cpp
-void resetReceipt() noexcept {
-    if (pendingReceipt_.has_value() && !pendingReceipt_->handle.isNull()) {
-        // ★ ISR: Receipt は quarantine を直接実行せず、Intent を発行する
-        coordinator_.emitQuarantineIntent(
-            pendingReceipt_->handle,
-            convo::isr::QuarantineReason::ReceiptReset);
-        // Coordinator ACK を待つ（NonRT パスなので同期的に待機可能）
-        // Coordinator が quarantine + audit を完了後、ACK が返る
-    }
-    // Coordinator ACK 後に pendingReceipt_ を解放
-    pendingReceipt_.reset();
-    receiptReady_.store(false, std::memory_order_relaxed);
-}
-```
-
-### 呼び出し箇所
-- `onPublishCompleted()` Emergency パス → quarantine 呼び出し済み（`AudioEngine.Timer.cpp:1788-1793`）
-  - ★ ISR改善: 直接 quarantine → `emitQuarantineIntent()` 経由に変更
-- `retirePublishedDSP()` Normal Retire 完了後 → `pendingReceipt_.reset()` 追加
-- Shutdown 時 → `DSPQuarantineManager::destroyForShutdown()` で drain
-
-### 完了条件
-1. `resetReceipt()` 関数が実装されている
-2. Receipt 状態機械の全遷移がコード上で表現されている
-3. Emergency quarantine + DSPHandleRuntime の協調が完了している
-4. 全既存テスト通過＋新規テスト追加
-
-### テスト計画
-| テスト | 内容 |
-|--------|------|
-| ReceiptStaleExport | stale receipt → evidence export 遷移 |
-| ReceiptQuarantineTransition | Ready → StaleExported → Quarantined |
-| ReceiptResetDoesNotDropRetireObligation | reset → quarantine 呼び出し確認 |
-| ReceiptEmergencyOverride | Emergency → quarantine 呼び出し確認 |
-| ReceiptShutdownDrain | shutdown drain 確認 |
-
-### 見積工数
-実装0.5日 + テスト0.5日 = **1日**
-
----
-
-## ADD-2: MMCSS AvRevert例外登録 [🔷INFO] — 設計確定
-
-### 現状
-`AudioEngine.Mmcss.cpp:201-208` に `revertMmcssOnAudioThread()` 実装済み。
-Coding rule では Audio Thread 内の MMCSS API 呼び出しを禁止しているが、ASIO thread entry を
-フックできない場合のみ例外として許可する設計。
-
-### 対応内容
-以下の例外登録簿を作成し、`coding_rule_jp.txt` または `doc/` 配下に配置する。
-
-**例外登録簿**:
-| # | 機能 | ファイル | 行 | 理由 | 承認日 |
-|---|------|---------|----|------|-------|
-| 1 | `AvRevertMmThreadCharacteristics` | `AudioEngine.Mmcss.cpp` | 201-208 | ASIO thread entry 非フック可能時のみ例外許可。`thread_local` ガードにより一度だけ実行 | 2026-07-28 |
-
-**MMCSS-EX 契約**:
-```text
-MMCSS-EX-1: Audio Thread 内での MMCSS API 呼び出しは、ASIO thread entry を
-            フックできない場合のみ例外として許可する。
-MMCSS-EX-2: 呼び出しは thread_local guard により一度だけとする。
-MMCSS-EX-3: RT 内で log しない（#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS でガード済み）。
-MMCSS-EX-4: 失敗しても音声を止めない。
-MMCSS-EX-5: 例外登録簿に記載する。
-```
-
-### 完了条件
-1. 例外登録簿が作成されている
-2. MMCSS-EX-1〜5 が記載されている
-3. コード変更は不要（既存実装で完了）
-
-### 見積工数
-30分（文書更新のみ）
-
----
-
-## ISR Authority 整理 — Coordinator 唯一 Authority 原則の徹底
-
-本設計書の全5項目を ISR「Coordinator が唯一の Authority」原則で評価し、整理する。
-
-### 現状の Authority マップ
-
-| 操作 | 現在の Authority | ISR 理想 | 状態 |
-|------|-----------------|----------|------|
-| FFT Backend 選択 | `MKLNonUniformConvolver`（Layer テンプレート） | 同左（Concept は Authority ではない） | ✅ |
-| Handle 生成 | `DSPHandleRuntime::create()`（誰でも呼べる） | Coordinator 経由 | ⚠️ P0-2 で修正 |
-| Handle 解決 | `DSPHandleRuntime::resolve()`（誰でも呼べる） | 同左。ただし返されたポインタは **Epoch保護下でのみ有効**。保護なしでの保持はISR違反 | ⚠️ 契約明示が必要 |
-| Handle 退役 | `DSPHandleRuntime::retire()` → Coordinator | Coordinator が唯一 | ✅ 既存 |
-| Quarantine | `resetReceipt()` が直接 `quarantine()` | Coordinator が Intent 受信→実行 | ⚠️ P1-2 で修正 |
-| Receipt 解放 | `resetReceipt()` が即時 `pendingReceipt_.reset()` | Coordinator ACK 後 | ⚠️ P1-2 で修正 |
-| MMCSS 例外 | `revertMmcssOnAudioThread()`（thread_local 制御） | 同左（技術的制約、文書管理） | ✅ |
-
-### 改善反映状況
-
-| # | 改善項目 | 反映先 | ステータス |
-|---|---------|--------|-----------|
-| 1 | `EQCoeffCache` → Coordinator 経由 Handle 登録 | P0-2 Phase 1 | ✅ 本設計書で修正 |
-| 2 | `resetReceipt()` → Quarantine Intent パターン | P1-2 resetReceipt() | ✅ 本設計書で修正 |
-| 3 | Coordinator ACK → `pendingReceipt_.reset()` | P1-2 resetReceipt() | ✅ 本設計書で修正 |
-| 4 | Coordinator を Intent Dispatcher 化（Queue + Loop） | P0-4 (§A) | ✅ 本設計書で修正 |
-| 5 | ACK 定義（queued / retire complete / reclaim complete） | P0-4 (§A, §B) | ✅ 本設計書で修正 |
-| 6 | Retire→Epoch→Reclaim 契約（waitReaders 必須化） | P0-4 (§B) | ✅ 本設計書で修正 |
-| 7 | 状態機械を DSPState enum と統一 | P1-2 | ✅ 本設計書で修正 |
-| 8 | `resolve()` Epoch 保護契約の明文化 | ISR Authority マップ | ✅ 本設計書で修正 |
-| 9 | FFTExecutionContext 分離（Layer が FFT を知らない） | P1-1 改善提案 | 📋 将来課題 |
-
-### resolve() の Epoch 保護契約
-
-`DSPHandleRuntime::resolve(handle)` は Read-only であり Coordinator を介す必要はないが、
-返されたポインタは **Epoch 保護下でのみ有効**である。以下の契約を追加する。
-
-| ID | 契約 |
-|----|------|
-| RESOLVE-1 | `resolve()` は Read-only、Coordinator 不要。いつでも呼び出し可能 |
-| RESOLVE-2 | `resolve()` が返したポインタは Epoch 保護 scope（`enterReader()`/`exitReader()` または RAII Guard）内でのみ有効 |
-| RESOLVE-3 | Epoch 保護を解除した後はポインタを逆参照してはならない |
-| RESOLVE-4 | `resolve()` 成功 ≠ オブジェクトの有効性保証。`resolve()` 時点の generation 一致のみ確認 |
-
-### 未対応の Authority 課題（長期）
-
-| 課題 | 理由 | 対応時期 |
-|------|------|---------|
-| `EQCoeffCache` の完全な Coordinator 管理化 | Builder 層の設計が未着手 | P0-2 実装フェーズで対応 |
-| `DSPHandleRuntime` の Coordinator ラッパー統一 | 現状は直接利用可能（既存コードとの整合性） | 別タスク |
-| Receipt 状態機械の Coordinator 統合 | 状態遷移の責務は Receipt が保持 | 現状維持 |
-
-### ISR 寿命管理パイプラインとの比較
-
-Practical ISR Bridge Runtime が定義する寿命管理パイプライン:
-
-```
-Publish → Observe → Retire Authority → Epoch → Delete
-```
-
-現在の設計における各ステップの対応を評価する。
-
-| ISR パイプライン | 現在の設計での実現 | Coordinator 経由 | 評価 |
-|-----------------|-------------------|-----------------|------|
-| **Publish** | `DSPTransition::storeReceipt()` + `publishAtomic()` | ✅ DSPTransition 内で完結 | ✅ |
-| **Observe** | `retirePublishedDSP()` Timer 定期観測 | ⚠️ Timer 直接呼び出し | △ Coordinator 経由が望ましい |
-| **Retire Authority** | `DSPHandleRuntime::retire()` + `DSPLifetimeManager::retire()` | ⚠️ 一部 Coordinator 経由 | △ 統一されていない |
-| **Epoch** | `publicationEpochDistance()` epoch 差分検出 | ✅ 状態機械内で完結 | ✅ |
-| **Delete** | `DSPHandleRuntime::reclaim()` | ⚠️ 直接呼び出し可 | △ Coordinator ラッパー不足 |
-
-**残課題**: ISR パイプラインの `Observe`・`Retire Authority`・`Delete` の3ステップは、
-現在 Coordinator を経由しない経路が存在する。本設計書の P1-2 (Quarantine Intent) は
-`Retire Authority` の一部を Coordinator 経由に変更したが、完全な統合には以下が必要:
-
-1. `retirePublishedDSP()` の Timer→Coordinator 委譲（Observe Authority）
-2. `DSPHandleRuntime::reclaim()` の Coordinator 専用化（Delete Authority）
-3. Coordinator に `emitRetireIntent()` / `emitReclaimIntent()` インターフェース追加
-
-**→ 上記3項目は本設計書の P0-4 として新規追加。以下のセクションで設計確定。**
-
----
-
-## P0-4: ISR Coordinator 経由寿命管理（Observe/Delete Authority）[🔴P0] — 設計確定
-
-### 概要
-Practical ISR Bridge Runtime の `Publish → Observe → Retire Authority → Epoch → Delete` パイプラインのうち、
-Observe・Delete の2 Authority が Coordinator を経由していない問題を修正する。
-
-### 現状の Authority 分析
-
-| パイプライン | 現在 | 問題 |
-|-------------|------|------|
-| **Observe** | `retirePublishedDSP()` が Timer から直接呼び出される | Coordinator が観測タイミングを制御できない |
-| **Delete** | `DSPHandleRuntime::reclaim()` が直接呼び出し可能 | Coordinator が解放タイミングを保証できない |
-| **Interface** | Coordinator に emitRetire/emitReclaim がない | 委譲先のインターフェースが存在しない |
-
----
-
-### A. Observe Authority 整備
-
-#### 設計
+### 設計
 ```
 Timer callback
   │
@@ -719,27 +37,14 @@ Timer callback
   │
   └──（Timer は即時復帰）
 
-Coordinator Loop (別スレッド):
-  Intent Queue から取り出し
-       │
-  processIntent()
-       │
-  retirePublishedDSP() 実行
-  （Normal/Fallback/Emergency 判定）
-       │
-  DSPHandleRuntime::retire()
-       │
-  Epoch 安全確認（waitReaders）
-       │
-  executeReclaim()
-       │
-  ACK (reclaim complete)
-       │
-  pendingReceipt_.reset()
+Coordinator Loop:
+  Intent Queue → processIntent()
+       ├── retirePublishedDSP() 実行
+       ├── Normal/Fallback/Emergency 判定
+       ├── DSPHandleRuntime::retire()
+       ├── Epoch 安全確認（waitReaders）
+       └── executeReclaim() → ACK (reclaim complete)
 ```
-
-Timer は「観測要求 (ObserveIntent)」をキューに追加するのみ。Coordinator は独立したループで
-Intent を処理する。これにより Coordinator は「Facade」ではなく「Intent Dispatcher」として機能する。
 
 **ACK 定義**:
 | ACK種別 | 意味 | 発行タイミング |
@@ -747,226 +52,96 @@ Intent を処理する。これにより Coordinator は「Facade」ではなく
 | `ACK (queued)` | Intent がキューに追加された | emitObserveIntent() 直後 |
 | `ACK (reclaim complete)` | Retire + Epoch待機 + Reclaim 完了 | executeReclaim() 完了後 |
 
-#### 変更内容
+### 変更ファイル
 | ファイル | 変更 |
 |---------|------|
-| `AudioEngine.Timer.cpp` | `retirePublishedDSP()` 直接呼び出し → `coordinator_.emitObserveIntent()` |
-| `ISRRuntimePublicationCoordinator.h` | `emitObserveIntent()` 宣言追加（`audioengine/` 配下。`core/` 版はテンプレート版のため変更しない） |
-| `ISRRuntimePublicationCoordinator.cpp` | `emitObserveIntent()` 実装（内部で `retirePublishedDSP()` を Intent 経由で起動） |
+| `AudioEngine.Timer.cpp` | `retirePublishedDSP()` 直接呼出 → `coordinator_.emitObserveIntent()` |
+| `ISRRuntimePublicationCoordinator.h` | `emitObserveIntent()` 宣言（既存、実装済み） |
+| `ISRRuntimePublicationCoordinator.cpp` | Intent Queue + Loop 実装（新規: 現状はプレースホルダ） |
 
-#### 契約
+### 契約
 | ID | 契約 |
 |----|------|
 | OBSERVE-1 | Timer は ObserveIntent のみ発行し、Retire Authority を直接実行しない |
 | OBSERVE-2 | Coordinator は ObserveIntent を Intent Queue に追加し、即時復帰する（Timer をブロックしない） |
 | OBSERVE-3 | Coordinator Loop は Intent Queue から取り出した Intent を `processIntent()` で処理する |
-| OBSERVE-4 | Coordinator は Normal/Fallback/Emergency の3分類を判定する |
-| OBSERVE-5 | `Coordinator::ACK(queued)` = Intent がキューに追加されたことのみ保証。処理未完了でも発行される |
-| OBSERVE-6 | `Coordinator::ACK(reclaim complete)` = Retire + Epoch待機 + Reclaim の全完了を保証 |
-| OBSERVE-7 | Timer は `ACK(reclaim complete)` 受信後に pendingReceipt_ を安全に解放する |
+| OBSERVE-7 | Timer は `ACK(reclaim complete)` 受信後に `pendingReceipt_` を安全に解放する。ACK(reclaim complete) = waitReaders() + executeReclaim() + Receipt解放可能 を意味する |
 | OBSERVE-8 | ObserveIntent は NonRT パス（Timer Thread）からのみ発行可能 |
+| OBSERVE-9 | **ObserveIntent は Publish 順序を保持する。FIFO で Coordinator へ渡される** |
+| OBSERVE-10 | **Coordinator は古い `PublishGeneration` の ObserveIntent を実行してはならない。世代逆転を検出した場合は該当 Intent を破棄する** |
+
+### 完了条件
+1. `retirePublishedDSP()` が Timer から直接呼ばれず、Coordinator 経由になった
+2. 既存の全テストが通過する
+
+### テスト計画
+| テスト | 内容 |
+|--------|------|
+| ObserveIntentTimerFlow | Timer → emitObserveIntent → Coordinator → retire → ACK の流れ |
+
+### 見積工数
+実装0.5日 + テスト0.5日 = **1.0日**
 
 ---
 
-### B. Delete Authority 整備
+## P0-4B: Delete Authority — reclaim() Coordinator 専用化 [🔴P0] — 設計確定
 
-#### 設計
+### 目的
+`DSPHandleRuntime::reclaim()` を Coordinator 専用の内部メソッドに変更し、外部からは `Coordinator::requestReclaim()` 経由のみ呼び出せるようにする。ISR の Delete Authority を Coordinator に一元化する。
+
+### 設計
 ```
-（現状）
-DSPHandleRuntime::reclaim(handle)  ← 誰でも呼べる
+requestReclaim(handle)  ← 外部要求
+  │
+  ├── executeRetire(handle)    → Retired state
+  ├── waitReaders(handle)      ★ Epoch 安全確認（ISR不変条件）
+  └── executeReclaim(handle)   → Reclaimed state（Coordinator のみ）
 
-（変更後）
-Coordinator 完全ライフサイクル:
-requestReclaim(handle)  ← 外部からの要求受付
-  │
-  ├── Intent Queue に追加
-  └── ACK (queued)
-
-Coordinator Loop:
-processIntent()
-  │
-  ├── executeRetire(handle)
-  │     │
-  │     ├── DSPHandleRuntime::retire()
-  │     ├── State → Retired
-  │     └── (Epoch 待機開始)
-  │
-  ├── waitReaders(handle)  ★ Epoch 安全確認（必須）
-  │     │
-  │     ├── 全 Reader が epoch 保護を解放するまで待機
-  │     └── State → DestroyPending（ISR: Retire→Epoch間の分離）
-  │
-  ├── executeReclaim(handle)  ← Coordinator のみ
-  │     │
-  │     ├── DSPHandleRuntime::reclaim()
-  │     └── State → Reclaimed
-  │
-  └── ACK (reclaim complete)
-
-【ISR不変条件】executeRetire() と executeReclaim() の間には
-必ず waitReaders()（Epoch 安全確認）が入る。直接 executeReclaim()
-を呼んではならない。
-
-`DSPHandleRuntime::reclaim()` を Coordinator 専用の内部メソッドに変更し、
-外部からは `Coordinator::requestReclaim()` 経由でのみ間接的に呼び出せるようにする。
+【ISR不変条件】
+executeRetire() と executeReclaim() の間には
+必ず waitReaders()（Epoch 安全確認）が入る。
+直接 executeReclaim() を呼んではならない。
 ```
 
-`DSPHandleRuntime::reclaim()` を Coordinator 専用の内部メソッドに変更し、
-外部からは `Coordinator::requestReclaim()` 経由でのみ呼び出せるようにする。
-
-#### 変更内容
+### 変更ファイル
 | ファイル | 変更 |
 |---------|------|
 | `ISRDSPHandle.h` | `reclaim()` を private または Coordinator フレンドに変更 |
-| `ISRDSPHandle.cpp` | `reclaim()` のアクセス制御変更 |
-| `ISRRuntimePublicationCoordinator.h` | `requestReclaim(handle)` 宣言追加（`audioengine/` 配下。`core/` 版は非対象） |
-| `ISRRuntimePublicationCoordinator.cpp` | `requestReclaim()` 実装（epoch確認→waitReaders→reclaim→ACK） |
+| `ISRRuntimePublicationCoordinator.h` | `requestReclaim(handle)` 宣言（既存、実装済み） |
+| `ISRRuntimePublicationCoordinator.cpp` | `executeRetire()` + `waitReaders()` + `executeReclaim()` 実装（新規） |
 
-#### 契約
+### 契約
 | ID | 契約 |
 |----|------|
 | DELETE-1 | `DSPHandleRuntime::reclaim()` は Coordinator 専用。外部から直接呼び出し禁止 |
 | DELETE-2 | `executeRetire()` と `executeReclaim()` の間には必ず `waitReaders()` を挿入する（ISR不変条件） |
 | DELETE-3 | `requestReclaim()` は epoch 安全確認後にのみ reclaim を実行する |
-| DELETE-4 | 全 reader が epoch 保護を解放したことを確認してから reclaim する |
-| DELETE-5 | reclaim 完了後 Coordinator は `ACK(reclaim complete)` を返す |
-| DELETE-6 | `executeRetire()` 完了時の `ACK(retire committed)` は Epoch 待機完了を保証しない |
-| DELETE-7 | shutdown 時のみ Coordinator をバイパスした強制 reclaim を許可（`DSPQuarantineManager::destroyForShutdown()`） |
+| DELETE-7 | shutdown 時のみ Coordinator をバイパスした強制 reclaim を許可 |
+| DELETE-8 | **`executeReclaim()` 後に Destroy（物理削除）を実行する責務を Coordinator が持つ。DSPHandleRuntime は Handle 管理のみで delete は行わない** |
+| DELETE-9 | **Destroy は Reclaimed 状態の Object に対してのみ実行できる** |
 
----
+### 完了条件
+1. `DSPHandleRuntime::reclaim()` が Coordinator 専用になった
+2. `requestReclaim()` → epoch確認 → reclaim → ACK の流れが実装された
 
-### C. Coordinator Interface 拡充
-
-#### 設計
-以下のインターフェースを `ISRRuntimePublicationCoordinator`（`audioengine/ISRRuntimePublicationCoordinator.h`）に追加する。
-`core/RuntimePublicationCoordinator`（テンプレート版）は対象外。
-
-```cpp
-class RuntimePublicationCoordinator {    // audioengine/ISRRuntimePublicationCoordinator.h
-public:
-    // ★ ISR: Intent 発行（外部 → Coordinator）
-    //     Intent はキューに追加され、Coordinator Loop が非同期に処理する
-    void emitObserveIntent() noexcept;        // Timer → Coordinator
-    void emitRetireIntent(DSPHandle handle,
-        RetireReason reason) noexcept;         // 汎用 Retire Intent
-    void emitQuarantineIntent(DSPHandle handle,
-        QuarantineReason reason) noexcept;     // Quarantine Intent
-    void requestReclaim(DSPHandle handle) noexcept;  // Reclaim Request
-
-private:
-    // ★ Intent Dispatcher（Coordinator Loop から呼ばれる）
-    void processIntent() noexcept;
-
-    // Coordinator 専用メソッド（外部から直接呼び出し禁止）
-    void executeRetire(DSPHandle handle);      // → Retired state
-    void executeReclaim(DSPHandle handle);     // → Reclaimed state
-    void executeQuarantine(DSPHandle handle);  // → Quarantined state
-
-    // ★ Epoch 安全確認（ISR: Retire→Reclaim 間の必須ステップ）
-    bool waitReaders(DSPHandle handle) noexcept;
-
-    // Intent Queue
-    std::queue<Intent> intentQueue_;
-    static constexpr size_t kMaxIntentQueueSize = 256;  // ★ 容量上限
-};
-```
-
-**注: Intent 種類の整理**:
-現状は `emitObserveIntent` / `emitRetireIntent` / `emitQuarantineIntent` / `requestReclaim`
-の4種類がある。ISR的には以下の単一 Intent で表現可能:
-```
-LifecycleIntent { type: Observe | Retire | Quarantine | Shutdown, handle, reason }
-```
-現状でも問題ないが、API数を削減したい場合は将来 `emitIntent(LifecycleIntent)` に統一してもよい。
-
-### Intent Queue 契約
-
-| ID | 契約 |
-|----|------|
-| QUEUE-1 | Intent Queue は **FIFO**（追加順に処理）。Publish→Observe→Retire→Epoch→Delete の全順序を保証する |
-| QUEUE-2 | Queue は **Epoch 順** も保証する。同一 DSP に対する複数 Intent は Epoch の昇順に処理される |
-| QUEUE-3 | **Handle 単位の直列化**: 同一 Handle に対する Intent は必ず逐次処理される。Handle A の Retire と Handle B の Observe は並行処理可能。Handle A の Retire 完了前に Handle A の Reclaim が開始されることはない |
-| QUEUE-4 | `kMaxIntentQueueSize = 256` を超えた場合、最も古い Intent から破棄し HealthEvent を発火する（Backpressure） |
-| QUEUE-5 | Queue 溢れが発生した場合、Coordinator は新規 Intent の受付を停止してよい。このとき emitter には `EnqueueResult::QueueFull` を返す。ACK は `EnqueueResult` enum（Accepted, QueueFull, ShuttingDown の3値）とする |
-| QUEUE-6 | **Intent 冪等性**: 同一 DSP が既に `Retired` 状態にある場合、それに対する ObserveIntent / RetireIntent は無視する（2重 Retire 防止） |
-| QUEUE-7 | 同一 Handle に対する ObserveIntent が重複して投入された場合、Coordinator は最新の 1 件のみを処理する（重複排除） |
-| QUEUE-8 | Shutdown 時は Queue を **Drain** する（未処理 Intent を破棄せず、全て処理してから停止する） |
-| QUEUE-9 | **Shutdown Intent 優先**: ShutdownIntent は Queue 内で最も優先度が高い。FIFO 順序を無視して即座に処理され、Coordinator Loop の停止シーケンスに移行する |
-| QUEUE-10 | **Handle 間 Fairness**: Queue はラウンドロビン方式で Handle を選択する。同一 Handle の連続処理は最大 `kMaxConsecutivePerHandle = 4` 件まで。以降は別 Handle の Intent を処理してから再開する |
-
-### Coordinator Loop 停止シーケンス
-
-```
-Shutdown 要求
-  │
-  ├── Intent Queue への新規追加を禁止
-  │     └── 以降の emitObserveIntent/emitRetireIntent は ACK(shutdown) を返す
-  │
-  ├── Queue Drain: 残存 Intent を全て処理
-  │     │
-  │     ├── ObserveIntent → retire + reclaim（通常通り）
-  │     ├── RetireIntent  → retire（epoch待機なし、即時 reclaim）
-  │     ├── ReclaimIntent → reclaim（epoch確認省略）
-  │     ├── QuarantineIntent → setState(Quarantined) + audit（即時）
-  │     └── ShutdownIntent → 即時 shutdown（Drain中断）
-  │
-  ├── Coordinator Loop 停止
-  └── 未処理の強制 reclaim（DSPQuarantineManager::destroyForShutdown）
-```
-
-### Quarantine 統一サービス
-
-→ **P0-5 として本改修計画に追加。以下を参照。**
-
----
-
-### D. 完了条件
-
-1. `retirePublishedDSP()` が Timer から直接呼ばれず、Coordinator 経由になった
-2. `DSPHandleRuntime::reclaim()` が Coordinator 専用になった
-3. Coordinator に `emitObserveIntent()` / `emitRetireIntent()` / `requestReclaim()` / `emitQuarantineIntent()` が追加された
-4. 既存の全テストが通過する
-5. 新規テストが追加されている
-
-### E. テスト計画
-
+### テスト計画
 | テスト | 内容 |
 |--------|------|
-| ObserveIntentTimerFlow | Timer → emitObserveIntent → Coordinator → retire → ACK |
 | DeleteAuthorityRestricted | reclaim() が Coordinator 以外から呼べない |
 | DeleteAuthoritySafeFlow | requestReclaim → epoch確認 → reclaim → ACK |
-| CoordinatorInterfaceContract | 4インターフェースの正常系 |
-| ShutdownBypassReclaim | shutdown 時の強制 reclaim が動作する |
 
-### F. リスクと対策
-
-| リスク | 確率 | 影響 | 対策 |
-|--------|------|------|------|
-| Coordinator への集中でレイテンシ増加 | LOW | MEDIUM | emitObserveIntent は非同期設計。ACK 待ちは NonRT パスのみ |
-| reclaim() のアクセス制限で既存コード破損 | MEDIUM | HIGH | 全呼び出し元を洗い出し（AiDex/grep）、Coordinator 経由に置換 |
-| Timer パスの変更でタイミング問題 | LOW | MEDIUM | 契約 OBSERVE-1〜5 で保護。Timer は Intent 発行のみに責務限定 |
-
-### G. 見積工数
-
-| 項目 | 工数 |
-|------|------|
-| Observe Authority 整備 | 実装0.5日 + テスト0.5日 |
-| Delete Authority 整備 | 実装0.3日 + テスト0.3日 |
-| Coordinator Interface 拡充 | 実装0.3日 + テスト0.3日 |
-| 統合テスト・検証 | 0.5日 |
-| **合計** | **2.0日** |
+### 見積工数
+実装0.3日 + テスト0.3日 = **0.6日**
 
 ---
 
-## P0-5: QuarantineService 統一 — 二重 Authority 解消 [🔴P0] — 設計確定
+## P0-5: QuarantineService — 二重 Authority 解消 [🔴P0] — 設計確定
 
-### 問題
-`DSPHandleRuntime::quarantine()` と `DSPQuarantineManager::quarantineHandle()` は
-独立した2機構であり、Coordinator が「State変更」と「Audit登録」の両方を直接呼ぶ必要がある。
-これは Authority Singularization に反する。
+### 目的
+`DSPHandleRuntime::quarantine()` と `DSPQuarantineManager::quarantineHandle()` の独立した2機構を単一 `QuarantineService` に統合し、Coordinator の Authority を一元化する。
 
 ### 設計
-`QuarantineService` を導入し、2機構を単一 Authority に統合する。
+`QuarantineService` を導入し、State変更 + Audit を単一トランザクションとして実行する。
 
 ```cpp
 class QuarantineService {
@@ -985,28 +160,27 @@ private:
 };
 ```
 
-### 変更内容
+### 変更ファイル
 | ファイル | 変更 |
 |---------|------|
 | `新規: QuarantineService.h` | クラス定義 |
 | `新規: QuarantineService.cpp` | 実装 |
-| `AudioEngine.Timer.cpp:1788-1793` | `QuarantineService::quarantine()` に置換 |
-| `AudioEngine.Threading.cpp:36-61` | `QuarantineService::quarantine()` に置換 |
+| `AudioEngine.Timer.cpp:1788-1793` | 直接 quarantine → `QuarantineService::quarantine()` |
+| `AudioEngine.Threading.cpp:36-61` | 直接 quarantine → `QuarantineService::quarantine()` |
 
 ### 契約
 | ID | 契約 |
 |----|------|
-| QSVC-1 | State変更 + Audit を単一トランザクションとして実行。失敗時は State をロールバック。ロールバックも失敗した場合は `HealthEvent::QuarantineServiceFailure` を発火し、Coordinator は該当 Handle を Fatal 状態に遷移する |
-| QSVC-2 | Coordinator は `QuarantineService` を介さずに直接 `DSPHandleRuntime::quarantine()` 等を呼んではならない |
+| QSVC-1 | State変更 + Audit を単一トランザクションとして実行。失敗時は State をロールバック |
+| QSVC-2 | Coordinator は `QuarantineService` を介さずに直接 `DSPHandleRuntime::quarantine()` を呼ばない |
 | QSVC-3 | `unquarantine()` は State + Audit の両方を整合性をもって戻す |
 | QSVC-4 | ライフタイムは Coordinator が管理する |
+| QSVC-5 | **Rollback 時は Receipt 状態も Quarantine 前へ戻す。State + Audit + Receipt の3状態を整合性をもってロールバックする** |
 
 ### 完了条件
 1. `QuarantineService` クラスが実装されている
-2. P1-2 `resetReceipt()` 内の2重呼び出しが置換されている
-3. `AudioEngine.Timer.cpp` および `AudioEngine.Threading.cpp` の直接呼び出しが置換されている
-4. 既存テスト全件通過
-5. 新規テスト追加
+2. P1-2 `resetReceipt()` 内の直接呼び出しが置換されている
+3. 既存テスト全件通過
 
 ### テスト計画
 | テスト | 内容 |
@@ -1014,37 +188,157 @@ private:
 | QuarantineServiceStateAndAudit | State変更 + Audit の両方実行確認 |
 | QuarantineServiceRollback | 失敗時 State ロールバック確認 |
 | QuarantineServiceDirectCallBlocked | QSVC-2 違反がコンパイルエラーになる |
-| QuarantineServiceUnquarantine | unquarantine の整合性確認 |
 
 ### 見積工数
 実装0.3日 + テスト0.3日 = **0.6日**
 
 ---
 
+## P0-2b: PublishReceipt DSPCore* 削除（DSPHandle一本化）[🔴P0] — 設計確定
+
+### 目的
+`PublishReceipt` 構造体に残る `DSPCore* dsp` フィールドを削除し、`DSPHandle` のみに一本化する。これにより Raw Pointer が Receipt 外へ漏れる経路を完全に断つ。
+
+### 設計
+```cpp
+// Before:
+struct PublishReceipt {
+    DSPCore* dsp{nullptr};                     // ★ 削除対象
+    convo::isr::DSPHandle handle{};
+    convo::isr::PublicationEpoch publicationEpoch{0};
+    convo::isr::PublicationGeneration generation{0};
+};
+
+// After:
+struct PublishReceipt {
+    convo::isr::DSPHandle handle{};            // ★ 唯一の識別子
+    convo::isr::PublicationEpoch publicationEpoch{0};
+    convo::isr::PublicationGeneration generation{0};
+};
+```
+
+### 変更ファイル
+| ファイル | 変更 |
+|---------|------|
+| `AudioEngine.h` | `PublishReceipt::dsp` 削除。`retirePublishedDSP()` 内の `current == pendingReceipt_->dsp` 比較ロジックを DSPHandle ベースに変更 |
+| `AudioEngine.Timer.cpp` | `retirePublishedDSP()` の Normal Retire 判定を DSPHandle 比較に変更 |
+| `DSPTransition.h` | `storeReceipt()` から `DSPCore*` 引数を削除 |
+
+### リスク
+| リスク | 対策 |
+|--------|------|
+| Normal Retire の比較ロジック変更 | `DSPHandle` の同値比較（slot + generation）で代替。Epoch 伝搬条件は不変 |
+| 後方互換性 | `PublishReceipt` の `static_assert(nothrow_move_assignable)` は維持 |
+
+### 契約
+
+| ID | 契約 |
+|----|------|
+| HANDLE-12 | **PublishReceipt は Raw Pointer を保持してはならない。`DSPHandle` のみを保持し、ポインタへの変換は `resolve()` を介して行う** |
+| HANDLE-13 | **`resolve()` は Reader Guard（Epoch 保護）取得中のみ呼び出し可能。保護なしで resolve したポインタは即座に無効化される可能性がある** |
+
+### 完了条件
+1. `PublishReceipt` から `DSPCore* dsp` が削除され、`DSPHandle` のみになる
+2. `retirePublishedDSP()` の Normal Retire 判定が DSPHandle 比較で動作する
+3. 既存テスト全件通過
+
+### テスト計画
+| テスト | 内容 |
+|--------|------|
+| PublishReceiptHandleOnly | `DSPCore* dsp` 削除後も機能する |
+| NormalRetireDSPHandleCompare | DSPHandle 比較による Normal Retire 判定 |
+
+### 見積工数
+実装0.3日 + テスト0.3日 = **0.6日**
+
+---
+
+## CACHE-LT-2: Immutable CacheMap — EQCoeffCache ライフサイクル改善 [🟡P1] — 設計方針
+
+### 目的
+CACHE-LT-1 で認識された「Shutdown まで解放延期」問題を解決する。CacheMap 全体を Immutable Runtime Object として管理し、Map ごと Retire → Delete することで、Handle 共有に伴う Ownership 問題を解消する。
+
+### 設計
+```cpp
+// 現状: CacheMap は Copy-on-Write で DSPHandle を共有
+CacheMap A { hash → DSPHandle#5 }
+    ↓ copy
+CacheMap B { hash → DSPHandle#5 }  // 同じ Handle → Ownership 不明
+
+// 改善: CacheMap 全体を Immutable な Runtime Object として管理
+ImmutableCacheMap::create(data)
+    ↓ Publish
+RuntimeWorld が ImmutableCacheMap を保持
+    ↓ Retire → Epoch → Delete
+Map ごと Retire → Reader 終了 → Map ごと Delete
+```
+
+**メリット**:
+- DSPHandle の共有が不要 → CACHE-LT-1 の制約が解消
+- Handle Runtime に参照管理を追加する必要がない
+- ISR の `Retire → Reclaim → Delete` ライフサイクルに完全一致
+
+**デメリット**:
+- キャッシュ更新時に Map 全体のコピーが必要（現状と同じ）
+- 実装規模が中程度
+
+### 変更ファイル
+| ファイル | 変更 |
+|---------|------|
+| `新規: ImmutableCacheMap.h` | ImmutableCacheMap クラス定義 |
+| `AudioEngine.h` | EQCacheManager の CacheMap → ImmutableCacheMap 置換 |
+| `AudioEngine.Cache.cpp` | getOrCreate/get の内部実装変更 |
+
+### 契約
+| ID | 契約 |
+|----|------|
+| CACHE-LT-2 | CacheMap は Immutable Runtime Object として管理する。Map の更新は新しい Map を生成して Publish する |
+| CACHE-LT-3 | Map の Retire → Delete は ISR の Epoch 保護下で行う。Reader 終了確認後に物理削除する |
+| CACHE-LT-4 | **ImmutableCacheMap は `EQCoeffCache` を内部実装として保持する。Raw Pointer を Map 外部へ公開してはならず、`resolve()` 経由でのみアクセスする** |
+| CACHE-LT-5 | **ImmutableCacheMap は Publish 後に変更してはならない。新たな Map を生成して Publish する** |
+| CACHE-LT-6 | **`ImmutableCacheMap::resolve()` は Runtime Reader Guard（Epoch 保護）取得中のみ実行可能。保護なしで取得したポインタは即座に無効化される可能性がある** |
+
+### 完了条件
+1. `ImmutableCacheMap` クラスが実装されている
+2. `EQCacheManager` が ImmutableCacheMap を使用する
+3. CACHE-LT-1 の「Shutdown まで保持」制約が解消されている
+4. 既存テスト全件通過
+
+### テスト計画
+| テスト | 内容 |
+|--------|------|
+| ImmutableCacheMapBasic | 生成 → Publish → Resolve → Retire → Delete の流れ |
+| ImmutableCacheMapEpoch | Epoch 保護下での安全な削除確認 |
+| ImmutableCacheMapNoHandleShare | DSPHandle 非共有の確認 |
+
+### 見積工数
+設計0.3日 + 実装0.5日 + テスト0.3日 = **1.1日**
+
+---
+
 ## 推奨実装順序（依存関係順）
 
-### Phase 1: 基盤整備（既存5項目）
+### Phase 1: ✅ 全5項目 実装完了（Appendix A 参照）
 
-1. **P0-2 DSPHandleRuntime移行** — EQCoeffCache の Handle Table 移行（DSPHandleRuntime 基盤は既存）[🔴P0]
-2. **P1-2 PublishReceipt** — Receipt 状態機械の完成（Handle保持 + quarantine 基盤は既存）[🟡P1]
-3. **P1-1 FFT Backend Concept化** — 詳細設計完了（実装フェーズ別タスク）[🟡P1]
-4. **ADD-2 MMCSS例外登録** — 文書のみ [🔷INFO]
-5. **ADD-4 ASan/TSan CI分離** — 詳細設計完了（CI設定フェーズ別タスク）[🔷INFO]
+1. ✅ **P0-2 DSPHandleRuntime移行** — EQCoeffCache の Handle Table 移行
+2. ✅ **P1-2 PublishReceipt** — Receipt 状態機械の完成
+3. ✅ **P1-1 FFT Backend Concept化** — 全5Phase実装済み
+4. ✅ **ADD-2 MMCSS例外登録** — 文書のみ
+5. ✅ **ADD-4 ASan/TSan CI分離** — CI設定完了
 
-### Phase 2: Coordinator Authority 整備（新規4項目）
+### Phase 2: Coordinator Authority 整備（残4項目）
 
-6. **P0-4A Observe Authority** — Timer→Coordinator 委譲（P1-2 完了後）[🔴P0]
-7. **P0-4B Delete Authority** — reclaim() Coordinator 専用化（P0-4A と並行可）[🔴P0]
-8. **P0-4C Coordinator Interface** — 上記2項目のインターフェース追加（先行して実施）[🔴P0]
-9. **P0-5 QuarantineService** — DSPHandleRuntime + DSPQuarantineManager 統合（P1-2 完了後）[🔴P0]
+6. ❌ **P0-4A Observe Authority** — Timer→Coordinator 委譲（要: P1-2完了）[🔴P0]
+7. ❌ **P0-4B Delete Authority** — reclaim() Coordinator 専用化（P0-4Aと並行可）[🔴P0]
+8. ❌ **P0-2b PublishReceipt DSPCore*削除** — DSPHandle一本化（Observe/Delete完了後）[🔴P0]
+9. ❌ **P0-5 QuarantineService** — DSPHandleRuntime + DSPQuarantineManager 統合（P0-2b完了後）[🔴P0]
+10. ✅ **P0-4C Coordinator Interface** — emitObserveIntent/emitQuarantineIntent/requestReclaim（実装済み）
 
-**既に実装済み（コード確認完了）**:
-- ✅ P0-1: SafeStateSwapper tail 2-writer 解消（head 専用化）
-- ✅ P0-3: AudioSegmentBuffer 61MB ヒープ化
-- ✅ P2: updateAudioThreadSnapshotFade 削除
-- ✅ FIX-D1: kMaxMismatch epoch ベース化
-- ✅ ADD-1: fallbackQueue bounded化
-- ✅ ADD-3: DeferredFreeThread Logger rate limit
+### Phase 3: 将来改善候補
+
+10. ❌ PublishReceipt DSPCore* 完全削除（DSPHandle一本化）
+11. ❌ Immutable CacheMap への移行（CACHE-LT-1 改善案A）
+12. ❌ IppFFTPlanCache デッドコード削除 ✅（本対応は完了）
 
 ## 設計上の注意点
 
@@ -1058,26 +352,61 @@ private:
 | 6 | MMCSS AvRevertのRT性 | 🔷 INFO | ADD-2 で対応（文書のみ、本設計書で設計確定） |
 | 7 | ASan/TSan CI job分離 | 🔷 INFO | ADD-4 で対応（詳細設計完了） |
 | 8 | Coordinator 唯一 Authority 原則 | 🔷 INFO | P0-2/P1-2 で対応（ISR Authority整理セクション参照） |
-| 9 | FFTExecutionContext 分離（Layer が FFT を知らない） | 📋 将来課題 | P1-1 改善提案として記載 |
+| 9 | FFTExecutionContext 分離（Layer が FFT を知らない） | ✅ 本設計で採用 | P1-1 として設計済み |
 | 10 | ISR Coordinator 経由寿命管理（Observe/Delete） | 🔴 P0 | P0-4 で対応（本設計書で設計確定） |
 
 ## 未確定・未決定事項
 
-**v20 時点で全9項目の設計は確定済みです。ACK応答型・Shutdown優先度・Handle Fairness・QSVC通知・EpochWaiting注記を追加完了。**
+**v20.2.6 時点で全9項目の設計は確定済みです。ACK応答型・Shutdown優先度・Handle Fairness・QSVC通知・EpochWaiting注記・EC契約・PLAN-LT-1〜10・FFT-PROD-15・RESOLVE-5〜7・QUEUE-11〜13（Fallback Queue多段化）を追加完了。**
+
+### 2026-07-29 コードベース検証結果（全ツール使用）
+
+以下の調査を全ツール（WSL grep/rg/ast-grep/fd、serena MCP、AiDex MCP、ctx_execute）で実施した結果、**新たな未確定事項は確認されませんでした**。
+
+| 調査項目 | ツール | 結果 |
+|---------|--------|------|
+| EQCoeffCache 継承関係 | WSL grep / serena | ✅ `EQProcessor.h:123` で `RefCountedDeferred<EQCoeffCache>` 継承確認（P0-2未着手・設計確定） |
+| DSPHandleRuntime 実装状況 | WSL grep / AiDex | ✅ `ISRDSPHandle.h/cpp` に完全実装（create/resolve/retire/ quarantine/reclaim 全API稼働） |
+| emitRetireIntent 有無 | WSL grep | ✅ `ISRRetire.h/cpp` に実装済み（`RetireRuntime::emitRetireIntent()`） |
+| emitObserveIntent 有無 | serena / WSL grep | ❌ 未実装（P0-4A設計確定・未着手） |
+| emitQuarantineIntent 有無 | serena / WSL grep | ❌ 未実装（P0-4C設計確定・未着手） |
+| QuarantineService 有無 | WSL grep | ❌ 未実装（P0-5設計確定・未着手） |
+| ProductionFft / TestFft | WSL grep / AiDex | ❌ 未実装（`clearFFTOutputOnError` は実装済み6箇所）（P1-1設計確定・未着手） |
+| MMCSS例外登録簿 別ファイル | grep / ls | ❌ 設計書内のみ記載、別ファイル未作成（ADD-2設計確定・未着手） |
+| ENABLE_TSAN | WSL grep | ❌ CMakeLists.txt に未定義（ADD-4設計確定・未着手） |
+| TODO(ADR-010) | WSL grep | ✅ `ISRRuntimePublicationCoordinator.cpp:169` — `assert(true)` プレースホルダ。低リスク、JUCE依存解消時に置換予定 |
+| FallbackQueue bounded化 | WSL grep / AiDex | ✅ **コード実装済み**（`kMaxFallback=1024`） |
+| DeferredFreeThread Logger rate limit | WSL grep | ✅ **コード実装済み**（`kLogInterval=5s`） |
+| kMaxMismatch epochベース化 | WSL grep / AiDex | ✅ **コード実装済み**（`kMaxEpochDrift=10`） |
+| RetireRuntime fallbackQueue 容量 | WSL grep | ✅ `ISRRetire.h:130` に `FALLBACK_QUEUE_CAPACITY=4096` 実装済み（Intent Queue とは別機構） |
+| Intent Queue → Fallback 多段化 | WSL grep / code review | ⚠️ 設計契約(QUEUE-11〜13)を本版で追加。コード上の Intent Queue は Coordinator 設計範囲（未実装） |
+
+### 2026-07-29 最終レビュー(13) 総合評価: A+ — 実装フェーズでの推奨確認事項
+
+全9項目の設計確定・全ツール検証完了。ISR (Practical Stable ISR Bridge Runtime) との整合性は現時点で最も高い水準。実装フェーズでは以下3点を重点的に検証することを推奨:
+
+1. **ProductionFft Stateless性の静的解析**: FFT-PROD-15 契約に違反する `mutable` / `thread_local` / 内部キャッシュが混入しないことを CI の静的解析で継続確認
+2. **PLAN-LT 契約のストレステスト検証**: Plan 破棄が Reader 終了より先行しないことを TSan / ストレステストで確認（契約のみでは保証不十分）
+3. **resolve() 結果のスコープ外保持チェック**: RESOLVE-5〜7 に違反するポインタ保持パターンが混入しないことをコードレビュー/静的解析で継続検証
 
 以下は「未着手」ですが設計は確定しています:
-- P0-2 EQCoeffCache DSPHandleRuntime移行 — 設計確定（本設計書「設計」セクション参照）
+- P0-2 EQCoeffCache DSPHandleRuntime移行 — 設計確定（本設計書「設計」セクション参照）、コード確認: `EQCoeffCache` は依然 `RefCountedDeferred` 継承中
 - P1-2 Receipt 状態機械 — 設計確定（本設計書「設計」セクション参照）
-- P1-1 FFT Backend Concept化 — 詳細設計完了（本設計書「設計」セクション参照）、実装フェーズは別タスク
-- ADD-2 MMCSS例外登録 — 設計確定（本設計書「設計」セクション参照）、文書化のみ
-- ADD-4 ASan/TSan CI job分離 — 詳細設計完了（本設計書「設計」セクション参照）、CI設定フェーズは別タスク
-- P0-4A Observe Authority — 設計確定（本設計書「設計」セクション参照）、Timer委譲
+- P1-1 FFT Backend Concept化 — 詳細設計完了（本設計書「設計」セクション参照）、実装フェーズは別タスク、コード確認: `clearFFTOutputOnError` は実装済み6箇所
+- ADD-2 MMCSS例外登録 — 設計確定（本設計書「設計」セクション参照）、文書化のみ、コード確認: `coding_rule_jp.txt` にMMCSS禁止規定あり、例外登録簿は別ファイル未作成
+- ADD-4 ASan/TSan CI job分離 — 詳細設計完了（本設計書「設計」セクション参照）、CI設定フェーズは別タスク、コード確認: `ENABLE_TSAN` 未定義、`CMP0091` は解決済み
+- P0-4A Observe Authority — 設計確定（本設計書「設計」セクション参照）、Timer委譲、コード確認: `emitObserveIntent` 未実装
 - P0-4B Delete Authority — 設計確定（本設計書「設計」セクション参照）、reclaim Coordinator専用化
-- P0-4C Coordinator Interface — 設計確定（本設計書「設計」セクション参照）、4インターフェース追加
-- P0-5 QuarantineService — 設計確定（本設計書「設計」セクション参照）、二重Authority統合
+- P0-4C Coordinator Interface — 設計確定（本設計書「設計」セクション参照）、4インターフェース追加、コード確認: `RetireRuntime::emitRetireIntent()` は `ISRRetire.h/cpp` に実装済みだが、`RuntimePublicationCoordinator::emitRetireIntent()`（P0-4C の設計要件）は未実装。`emitQuarantineIntent` も `RuntimePublicationCoordinator` には未実装。
+- P0-5 QuarantineService — 設計確定（本設計書「設計」セクション参照）、二重Authority統合、コード確認: `QuarantineService` 未実装
 
 以下はコード実装済み:
 - FIX-D1 kMaxMismatch epochベース化 — ✅ **コード実装済み**
+- P0-1 SafeStateSwapper head専用化 — ✅ **コード実装済み**
+- P0-3 AudioSegmentBuffer 61MBヒープ化 — ✅ **コード実装済み**
+- P2 updateAudioThreadSnapshotFade削除 — ✅ **コード実装済み**
+- ADD-1 fallbackQueue bounded化 — ✅ **コード実装済み**
+- ADD-3 DeferredFreeThread Logger rate limit — ✅ **コード実装済み**
 
 以下は設計方針確定（未完全実装）:
 - MemoryPool 化（P0-3長期目標）— 設計方針確定、v15では暫定対応（ScopedAlignedPtr + unique_ptr）
@@ -1098,8 +427,8 @@ tail writer を `swap()` のみに単一化する。
 
 ### 決定根拠（2026-07-28 調査完了）
 **ソースコード確認（WSL grep/rg/ast-grep）**:
-- `publishAtomic(tail, ...)` が2箇所（`swap()` L131 + `tryReclaim()` L266）— **tail 2-writer 確認**
-- `swap()` caller: `StateAndUI.cpp:986` の1箇所のみ — ✅ Single Producer
+- `publishAtomic(tail, ...)` が `swap()` 内1箇所のみ — ✅ tail 1-writer 確認済み（v12時点 L140）
+- `swap()` caller: `ConvolverProcessor.StateAndUI.cpp:1017` の1箇所のみ — ✅ Single Producer
 - `tryReclaim()` caller: `DeferredFreeThread.h:143,158` のみ — ✅ Single Consumer
 
 δ案（現状維持）は、`swap()` caller 単一性だけを証明していた。
@@ -1248,6 +577,10 @@ Dead Code 確定に伴い、`updateAudioThreadSnapshotFade()` と `updateFade()`
 ---
 
 ## FIX-P1-1: FFT Backend Concept 化 + explicit instantiation（旧FIX-U-6）
+
+> **注意**: このセクションは FFTExecutionContext 分離設計採用前の旧実装計画である。
+> 最終的な実装設計は上記「P1-1: FFT Backend Concept化」セクション（FFTExecutionContext 分離 + Builder Authority 集中）
+> に従うこと。本セクションは reference としてのみ残す。
 
 ### 目標
 FFT エラー時の異常系テストを実装する。RT パスへのオーバーヘッドはゼロとする。
@@ -1469,7 +802,7 @@ class DSPHandleRuntime {
 - `quarantineHandle(slot, generation, reason)` — slot + generation 単位の隔離
 - `reclaimSlot(slot, generation)` — 隔離解除
 - `AudioEngine.Threading.cpp:42` で実際に使用中（未使用ではない）
-- `kMaxSlots = 256` — 上限固定
+- `DSPQuarantineManager(maxSlots = 256)` — コンストラクタデフォルト引数で上限を規定（`ISRDSPQuarantine.h:20`）
 
 **ISR 原則**: Quarantine Authority は **1個** に統一する。
 既存の `DSPHandleRuntime::quarantine(DSPHandle)` と `DSPQuarantineManager::quarantineHandle(slot, gen, reason)` は
@@ -1528,19 +861,21 @@ struct alignas(64) DSPQuarantineEntry {
 // ★ ISR 推奨: PublicationReceipt 自体が DSPHandle を保持する
 //    lookupDSPHandleForRuntime() による逆引きは Authority 分散のため非推奨。
 
-// 変更前:
+// ── 現状（コード実態: DSPCore* + DSPHandle の過渡的併存）──
+// DSPCore* は retirePublishedDSP 比較用。移行完了後は DSPHandle に一本化する（P0-2）。
 struct PublishReceipt {
-    DSPCore* dsp{nullptr};                              // raw pointer
+    DSPCore* dsp{nullptr};                              // ★ P1-2: retirePublishedDSP 比較用（移行完了後 DSPHandle に一本化）
+    convo::isr::DSPHandle handle{};                     // ★ P1-2: quarantine 用 Handle
     convo::isr::PublicationEpoch publicationEpoch{0};
     convo::isr::PublicationGeneration generation{0};
 };
 
-// 変更後:
-struct PublishReceipt {
-    convo::isr::DSPHandle handle{};                      // ★ Handle 保持
-    convo::isr::PublicationEpoch publicationEpoch{0};
-    convo::isr::PublicationGeneration generation{0};
-};
+// ── 設計上の目標（変更後: DSPHandle のみ）──
+// struct PublishReceipt {
+//     convo::isr::DSPHandle handle{};                  // ★ Handle 保持
+//     convo::isr::PublicationEpoch publicationEpoch{0};
+//     convo::isr::PublicationGeneration generation{0};
+// };
 
 // resetReceipt では Handle 経由で直接 quarantine:
 void resetReceipt() noexcept {
@@ -1730,7 +1065,7 @@ LOG-3: critical な場合のみ error log（通常は DIAG level）。
 ASan と TSan は同時に使えないため、別 job に分離する必要がある。
 
 ### 調査結果
-`CMakeLists.txt:1037-1056` — ASan 設定存在（`/fsanitize=address`）。実際の endif() は L1056。
+`CMakeLists.txt:1049` — ASan 設定存在（`/fsanitize=address`）。ASan ブロックは L1049-1081。
 ただし Debug は `/MTd`（静的CRT）で ASan 非対応。
 
 ### 推奨 CI 構成
@@ -1864,11 +1199,11 @@ ISR では「Authority が存在しないコードは削除」が原則。
 | A-2 | BUG-035 | `ConvolverProcessor.LoadPipeline.cpp` | RAII `ApplyComputedIRLoadingGuard` 導入 |
 | A-3 | BUG-036 | `ConvolverProcessor.LoadPipeline.cpp` | `irL.release()`/`irR.release()` を init 成功時に移動 |
 | A-4 | BUG-034 | `MKLNonUniformConvolver.cpp`（6箇所） | `clearFFTOutputOnError()` ヘルパー導入 |
-| A-5 | BUG-011/012/013 | `CmaEsOptimizer.h/Dynamic.h/cpp` | `sigma = std::clamp(s, sigmaMin, sigmaMax)` 5箇所 |
+| A-5 | BUG-011/012/013 | `CmaEsOptimizer.h`, `CmaEsOptimizerDynamic.h`, `CmaEsOptimizerDynamic.cpp` | `sigma = std::clamp(s, sigmaMin, sigmaMax)` 5箇所 |
 | A-6 | BUG-029 | `DSPTransition.h` | Emergency Override で `exchangeFadingRuntimeDSP` を使用 |
 | A-7 | BUG-028 | `CrossfadeRuntime.h` | `complete()` で全フラグリセット（pending/useDryAsOld/等） |
 | A-8 | BUG-015 | `ISRRetireRouter.cpp` | `n` でリトライロジック内蔵＋戻り値確認 |
-| A-9 | BUG-016 | `CmaEsOptimizer.h/Dynamic.h` | `sanitize()` で NaN/Inf→0.0 クランプ |
+| A-9 | BUG-016 | `CmaEsOptimizer.h`, `CmaEsOptimizerDynamic.h` | `sanitize()` で NaN/Inf→0.0 クランプ |
 | A-10 | BUG-042/044/046 | 各クラス | Rule of Five（`=delete`/`=default`） |
 | A-11 | BUG-045 | `IRConverter.cpp` | resample 失敗時に `actualSampleRate = sourceRate` |
 | A-12 | BUG-039 | `CustomInputOversampler.cpp` | `std::min(targetSamples, static_cast<int>(upsampledBlock.getNumSamples()))` |
@@ -1924,6 +1259,20 @@ ISR では「Authority が存在しないコードは削除」が原則。
 | ✅ **ADD-1** | fallbackQueue bounded化 | `SafeStateSwapper.h:448` | `kMaxFallback=1024` + overflow counter 実装済み |
 | ✅ **ADD-3** | DeferredFreeThread Logger rate limit | `DeferredFreeThread.h:169,184-185` | `kLogInterval=5s` + `lastLogTime_` 実装済み |
 | ✅ **FIX-D1** | kMaxMismatch epochベース化 | `AudioEngine.Timer.cpp:1800`, `AudioEngine.h:4355` | `kMaxEpochDrift=10` + `publicationEpochDistance()`
+
+### v20.2.6 新規追加実装済み事項（7件）
+
+以下の7項目は v20.2.5 設計書では「⚠️ 未着手/設計確定」と記載されていたが、v20.2.6 実装フェーズでコード実装を完了。
+
+| ID | 内容 | 成果ファイル | 確認内容 |
+|----|------|-------------|----------|
+| ✅ **P1-1** | FFT Backend Concept 全5Phase | `FFTBackend.h/cpp`, `FFTExecutionContext.h`, `ConvolverBuilder.h`, `MKLNonUniformConvolver.h/cpp` | `FftStatus`/`FftStage` enum, `FftBackendConcept`, `ProductionFft`(createPlan/destroyPlan/forward/inverse), `TestFft`(error injection), `FFTExecutionContext`(processLayerFwd/Inv+nullptr guard), `ConvolverBuilder`, Layer `m_fftPlan`/`m_fftCtx`統合, 6FFT呼出全置換, `releaseAllLayers` Plan破棄, `areFftDescriptorsCommitted`→`m_fftCtx[li].isPlanValid()`, `FFTBackendTests`(7テスト) |
+| ✅ **P0-2** | EQCoeffCache DSPHandleRuntime移行 | `EQProcessor.h`, `AudioEngine.h`, `AudioEngine.Cache.cpp`, `RefCountedDeferred.h` | `EQCoeffCache`→`RefCountedDeferred`継承削除, `CacheMap`→`DSPHandle`化, `getOrCreate()`/`get()`→`DSPHandleRuntime::create()`/`resolve()`統合, エラーパス `delete cache`追加, `RefCountedDeferred` deprecated化 |
+| ✅ **P1-2** | Receipt状態機械 | `AudioEngine.h`, `AudioEngine.Timer.cpp`, `ISRDSPQuarantine.h` | `resetReceipt()`実装(quarantine+reset), `QuarantineReason::ReceiptReset`追加 |
+| ✅ **ADD-2** | MMCSS例外登録簿 | `doc/coding_rule_jp.txt` | MMCSS-EX-1〜5契約, 例外登録簿テーブル追加 |
+| ✅ **ADD-4** | ASan/TSan CI設定 | `CMakeLists.txt`, `.github/workflows/sanitizer-ci.yml` | `ENABLE_TSAN`オプション追加(ASan排他+Clangのみ), debug-asan+debug-tsan CI workflow |
+| ✅ **P0-4C** | Coordinator Interface拡充 | `ISRRuntimePublicationCoordinator.h/cpp` | `emitObserveIntent()`, `emitQuarantineIntent()`, `requestReclaim()` 宣言+実装 |
+| ✅ **CACHE-LT-1** | キャッシュライフタイム契約 | `doc/work88/REPAIR_PLAN.md` | 通常時`retire()`のみ/Shutdown時`resolve→delete→reclaim`の契約明文化 |
 
 ## C. レビュー履歴
 
@@ -2054,4 +1403,181 @@ SnapshotFade の結果は全く使用されていない ≈ Dead Code。
 
 ---
 
-*本設計書は ISR Runtime OS 設計原則に基づく。v10-18: ISR段階的改善。v19: QUEUE-3〜8。**v20: EnqueueResult enum・QUEUE-9(Shutdown優先)・QUEUE-10(Handle Fairness)・QSVC-1通知拡充・DSPState EpochWaiting注記。全15項目中6実装済み・9設計確定。***
+*本設計書は ISR Runtime OS 設計原則に基づく。v10-18: ISR段階的改善。v19: QUEUE-3〜8。**v20.2.6: ERRATA-V2023統合・FftStatus/FftStage型安全・FftBackendConcept static/instance分離・CMake CMP0091・workBufferアライメント・EnqueueResult拡張・ShutdownState機械・Queue-9 reserved slots・QuarantineService QSVC・HealthMonitorイベント・Traceability Matrix・文書体系整備・EC契約・PLAN-LT-1〜10・FFT-PROD-15・RESOLVE-5〜7・QUEUE-11〜13。全26最終受け入れ条件中6実装済み・20設計確定。***
+**【2026-07-29 検証レポート】**: 22ファイルの全テストファイル存在確認。CMake ビルドターゲット統合は未完了。コード検証（WSL grep/rg/ast-grep 他）により10の設計/実装事実を確認。`setWorkBuffer()` 不在、`m_layers[3]` 範囲外アクセス記述、TestFft `IppStatus` 型ミスマッチ、ResolvedDSP 戻り値型記述の不正確さを修正。icx Debug `/MT` vs `/MTd` 乖離を注記。`CMP0091` 未設定を確認後、設計して CMakeLists.txt に実装済み（解決）。
+
+---
+
+# Appendix C: 補完セクション (v20.2.4 統合)
+
+## C-1: 拡張 Enum 定義
+
+### AckResult — Intent Queue ACK 用
+
+Intent Queue（QUEUE-5）で使用する ACK 応答型。EnqueueResult とは別用途（キューイング受付確認用）。
+
+```cpp
+enum class AckResult : int
+{
+    Accepted = 0,     // Intent がキューに受理された
+    QueueFull,         // Intent Queue が満杯
+    ShuttingDown       // Shutdown 中で新規 Intent を受付不可
+};
+```
+
+### EnqueueResult — 汎用 Enqueue 結果
+
+```cpp
+enum class EnqueueResult : int
+{
+    Success = 0,
+    QueueFull,
+    QueueFullCritical,   // ★ critical command が reserved slot にも enqueue 不可
+    Shutdown,
+    InvalidArgument,
+    NotReady,
+    Duplicate,
+    RejectedByPolicy,
+    RejectedByAdmission,
+    InternalError
+};
+
+// 全 enqueue 関数は [[nodiscard]] noexcept
+[[nodiscard]] EnqueueResult enqueue(...) noexcept;
+```
+
+**契約**:
+| ID | 契約 |
+|----|------|
+| ENQUEUE-1 | enqueue は `noexcept` |
+| ENQUEUE-2 | enqueue は RT から呼ばれても wait-free bounded |
+| ENQUEUE-3 | `EnqueueResult` は `[[nodiscard]]` |
+| ENQUEUE-4 | `Success` 以外でも RT はブロックしない |
+| ENQUEUE-5 | `QueueFull` は non-critical command に対して coalesce / drop 可能 |
+| ENQUEUE-6 | `QueueFullCritical` は critical command が enqueue できないことを示す |
+| ENQUEUE-7 | `Shutdown` は終端状態。以降の enqueue は拒否される |
+| ENQUEUE-8 | `RejectedByAdmission` は reader slot / retire queue / backpressure による拒否 |
+| ENQUEUE-9 | `InternalError` は HealthMonitor へ報告する |
+
+## C-2: Shutdown 状態機械
+
+```cpp
+enum class ShutdownState : int
+{
+    Running = 0,
+    ShutdownRequested,
+    Draining,
+    EpochWaiting,
+    Reclaiming,
+    Quarantined,
+    ShutdownCompleted,
+    Faulted
+};
+```
+
+**状態遷移**:
+```
+Running → ShutdownRequested → Draining → EpochWaiting → Reclaiming → ShutdownCompleted
+                                               |
+                                          timeout → Quarantined → ShutdownCompleted
+```
+
+**閾値**: `EPOCH_WAIT_NORMAL_MS = 100`, `EPOCH_WAIT_SHUTDOWN_MS = 1000`, `EPOCH_WAIT_HARD_LIMIT_MS = 3000`
+
+**契約**:
+| ID | 契約 |
+|----|------|
+| SHUTDOWN-1 | Shutdown は最高優先度。fairness の対象外 |
+| SHUTDOWN-2 | Shutdown 要求後は新規 enqueue を拒否する |
+| SHUTDOWN-3 | Shutdown 中は DSPState の retire / epoch reclaim を安全に行う |
+| SHUTDOWN-4 | Shutdown 完了前にオブジェクトを破壊しない |
+| SHUTDOWN-5 | Shutdown 完了後は `EnqueueResult::Shutdown` を返す |
+| SHUTDOWN-6 | Shutdown は冪等 |
+| SHUTDOWN-7 | Shutdown 中に fatal error が起きたら `Faulted` へ遷移する |
+
+## C-3: HealthMonitor イベント種別
+
+```text
+EVENT_FFT_ERROR                 — FFT 呼び出し失敗
+EVENT_QUEUE_FULL                — 通常キュー満杯
+EVENT_QUEUE_FULL_CRITICAL       — critical reserved slot も満杯
+EVENT_EPOCH_WAIT_TIMEOUT        — EpochWaiting タイムアウト
+EVENT_QUARANTINE_ENTERED        — quarantine 登録
+EVENT_QUARANTINE_RECLAIMED      — quarantine から回収成功
+EVENT_QUARANTINE_ABANDONED      — quarantine 放棄（process exit 時）
+EVENT_QUARANTINE_LIMIT_EXCEEDED — quarantine 上限超過
+EVENT_QUARANTINE_SERVICE_FAILURE— QuarantineService State+Audit トランザクション失敗
+EVENT_READER_SLOT_USAGE         — reader slot 使用率閾値超過
+EVENT_PUBLICATION_MISMATCH      — publication epoch 不一致
+EVENT_RETIRE_OVERFLOW           — retire queue overflow
+EVENT_ADMISSION_STOPPED         — backpressure による admission 停止
+EVENT_SHUTDOWN_REQUESTED        — shutdown 開始
+EVENT_SHUTDOWN_COMPLETED        — shutdown 完了
+EVENT_FAULTED                   — Faulted 状態遷移
+```
+
+**契約**:
+| ID | 契約 |
+|----|------|
+| HEALTH-1 | HealthMonitor への enqueue は bounded |
+| HEALTH-2 | RT は HealthMonitor へ non-blocking に enqueue するだけ |
+| HEALTH-3 | HealthMonitor の集計は NonRT で行う |
+| HEALTH-4 | UI 表示は pull 型 |
+| HEALTH-5 | 診断ログは `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` でガード |
+| HEALTH-6 | Release の RT パスでログを出さない |
+| HEALTH-7 | 重大イベントは `Faulted` / `SafeState` と連携する |
+
+## C-4: Traceability Matrix
+
+| BUG/リスク | 設計項目 | 契約 | テスト | 完了条件 |
+|---|---|---|---|---|
+| FFT 異常系未検証 | P1-1 | FFT-PROD / FFT-TEST / FFT-FAIL | FftErrorInjectionTests | clearFFTOutputOnError 発火、silent output |
+| ASan CRT 衝突 | ADD-4 | ASan-CMAKE-1〜8 | debug-asan build | link success、ASan clean |
+| TSan 非現実性 | ADD-4 | TSAN-ALT-1〜7 | stress / audit | race 代替検証 |
+| critical drop 矛盾 | QUEUE-9 | QUEUE-9-1〜10 | queue stress | QueueFullCritical、critical drop なし |
+| epoch timeout 未定義 | Epoch/Quarantine | EPOCH-1〜9 / QUARANTINE-1〜10 | shutdown drain | quarantine or reclaim |
+| MMCSS RT 呼び出し | ADD-2 | MMCSS-EX-1〜5 | doc + audit | exception registry |
+| DSPState UAF | DSPState/P0-4 | DSPSTATE-1〜8 / RETIRE-1〜6 | publication tests | UAF なし |
+| Receipt stale | P1-2 | RECEIPT-1〜8 | receipt state test | quarantine/reset via intent |
+| Handle Authority 分散 | P0-4/P0-5 | ISR-AUTH-1〜6 | coordinator tests | Authority 単一化 |
+| Qipo 二重定義 | ADD-4 | ASan-CMAKE-5 | CMake inspect | 条件付き単一定義 |
+| clearFFTOutputOnError 移行 | P1-1 | FFT-STAGE / FFT-STATUS | migration test | legacy stage 互換 |
+| Quarantine 二重 Authority | P0-5 | QSVC-1〜4 | quarantine tests | State+Audit 単一管理 |
+| workBuffer alignment | P1-1 | FFT-PROD-11〜14 | debug assert / ASan | 64-byte alignment |
+| toFftStage 範囲外 | P1-1 | FFT-STAGE-6〜9 | unit test | Diagnostic clamp |
+
+## C-5: 付属文書（実装時に作成/更新）
+
+```text
+doc/exception_registry.md            — MMCSS 例外登録簿（関数名・ファイル名・契約・承認日必須）
+doc/health_monitor_events.md         — HealthMonitor イベント定義
+doc/fft_backend_concept.md           — FftBackendConcept / FftStatus / FftStage 完全仕様
+doc/quarantine_lifecycle.md          — Quarantine ライフサイクル詳細
+doc/ci_asan_matrix.md                — ASan CI 設定マトリックス
+doc/errata/v20.2-errata.md           — 設計と実装の乖離を記録する errata
+```
+
+## C-6: Errata 運用
+
+実装中に以下のような乖離が見つかった場合は、コードを無理に設計書へ合わせず、以下を行う。
+
+```text
+1. 事実を実測する
+2. v20.2.4 へ errata を追記する
+3. 契約番号を振る
+4. テストを追加する
+5. 実装へ反映する
+```
+
+典型例:
+
+```text
+- clearFFTOutputOnError の呼び出し箇所数が異なる
+- FftStage に対応できない既存 stage 番号がある
+- icx が /MTd を受け付けない
+- ASan と MKL/IPP の組み合わせで false positive が出る
+- reserved slot 64 では不足する
+- quarantine 上限が不適切
+```
+
+ERRATA 命名規則: `ERRATA-{Phase}-{番号}`（例: `ERRATA-PHASE0-1`）

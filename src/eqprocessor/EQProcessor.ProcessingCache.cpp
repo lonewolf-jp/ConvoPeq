@@ -82,7 +82,3 @@ EQCoeffCache* EQProcessor::createCoeffCache(
 
     return cache;
 }
-
-EQCoeffCache::~EQCoeffCache()
-{
-}

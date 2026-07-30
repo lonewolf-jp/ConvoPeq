@@ -17,6 +17,13 @@
 
 cmake_minimum_required(VERSION 3.22)
 
+# CMP0091: MSVC_RUNTIME_LIBRARY プロパティを有効化
+# CMake 3.9+ で導入。cmake_minimum_required(VERSION 3.22) により暗黙的に NEW だが、
+# 明示指定により可読性・メンテナンス性を向上させる。
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
+
 # Load project metadata from dedicated file
 include(ProjectMetadata.cmake)
 
@@ -161,6 +168,17 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
     target_include_directories(EQAnalysisUnitTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
     add_test(NAME EQAnalysisUnitTests COMMAND EQAnalysisUnitTests)
+
+    # ★ P1-1 Phase5: FFT Backend Concept + ProductionFft + TestFft テスト
+    add_executable(FFTBackendTests
+        src/tests/FFTBackendTests.cpp
+        src/FFTBackend.cpp
+        src/FFTExecutionContext.cpp
+    )
+    target_include_directories(FFTBackendTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(FFTBackendTests PRIVATE IPP::ippcore IPP::ipps)
+    target_compile_features(FFTBackendTests PRIVATE cxx_std_20)
+    add_test(NAME FFTBackendTests COMMAND FFTBackendTests)
 
     # ★ Week2: boundExcessDb 分布測定ベンチマーク
     #   JUCE/MKL に依存しない純粋数学ベンチマーク。
@@ -472,6 +490,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_sources(MTNUPCMeasurement PRIVATE
         src/tests/MT-NUPC-Measurement.cpp
         src/MKLNonUniformConvolver.cpp
+        # P1-1: FFT Backend Concept + ProductionFft + FFTExecutionContext
+        src/FFTBackend.cpp
+        src/FFTExecutionContext.cpp
     )
     target_include_directories(MTNUPCMeasurement PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -605,6 +626,9 @@ target_sources(ConvoPeq PRIVATE
     src/ConvolverState.cpp
     # Legacy monolithic (kept for backward compat, functions guarded by #if)
     src/MKLNonUniformConvolver.cpp
+    # P1-1: FFT Backend Concept + ProductionFft + TestFft
+    src/FFTBackend.cpp
+    src/FFTExecutionContext.cpp
     src/eqprocessor/EQProcessor.Core.cpp
     src/eqprocessor/EQProcessor.Parameters.cpp
     src/eqprocessor/EQProcessor.Coefficients.cpp
@@ -982,22 +1006,25 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     #     xilink.exe は icx では非推奨（Intel移行ガイド）。
     # 注: 下記の string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため削除済
     # icx Release: CMake規定の-MDを/MTで上書き（静的CRT+静的MKLリンク）
+    # ASan 有効時は動的CRT（/MD）が必要なため、/MT を付与しない。
     target_compile_options(ConvoPeq PRIVATE
-        $<$<CONFIG:Release>:/MT>
+        $<$<AND:$<CONFIG:Release>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/MT>
     )
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
     set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
     set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
+    # ASan 有効時は Qipo を無効化（ASan と LTO は非互換）
     target_compile_options(ConvoPeq PRIVATE
-        $<$<CONFIG:Release>:/Qipo>
+        $<$<AND:$<CONFIG:Release>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/Qipo>
     )
 
     # icx リンカーフラグ: /Qipo はリンク時に自動で -fuse-ld=lld を追加
     # /DEBUG, /OPT:REF, /OPT:ICF は target_link_options で設定（MSVCに漏洩しない）
+    # ASan 有効時は Qipo 無効
     target_link_options(ConvoPeq PRIVATE
-        $<$<AND:$<CXX_COMPILER_ID:IntelLLVM>,$<CONFIG:Release>>:/DEBUG /Qipo>
+        $<$<AND:$<CXX_COMPILER_ID:IntelLLVM>,$<CONFIG:Release>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/DEBUG /Qipo>
     )
 
     # AVX2 フラグ（全コンフィグで有効化）
@@ -1022,8 +1049,9 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /Od(最適化無効), /Zi(PDB) は CMake デフォルトで設定されるため特別な分岐不要
 
     # B2: icx Debug にも明示的に /MT を指定（デフォルトと同一だが明示性向上）
+    # ASan 有効時は動的CRT（/MDd）が必要なため、/MT を付与しない。
     target_compile_options(ConvoPeq PRIVATE
-        $<$<CONFIG:Debug>:/MT>
+        $<$<AND:$<CONFIG:Debug>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/MT>
     )
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
@@ -1037,8 +1065,21 @@ endif()
 # 従って ENABLE_ASAN=ON 時は CRT を DLL リンクに切り替える。
 option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
 if(ENABLE_ASAN)
+    # ASan と PGO は同時有効化不可
+    if(CONVOPEQ_PGO_INSTRUMENT OR CONVOPEQ_PGO_USE)
+        message(FATAL_ERROR "ENABLE_ASAN cannot be combined with PGO. "
+                            "Disable PGO before enabling ASan.")
+    endif()
+
+    # ASan 時は LTCG / IPO / Qipo を無効化
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+    # ASan 時は /RTC1 を除去（/RTC1 と ASan は非互換）
+    # target_compile_options(... /RTC1-) で除去することで、
+    # CMAKE_CXX_FLAGS_DEBUG のグローバル変更による他ターゲットへの影響を防止する。
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
+        target_compile_options(ConvoPeq PRIVATE /RTC1- /fsanitize=address)
         target_link_options(ConvoPeq PRIVATE /fsanitize=address)
         # MSVC ASan requires dynamic CRT (/MDd) — override static CRT
         set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
@@ -1053,6 +1094,37 @@ if(ENABLE_ASAN)
         set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
             "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     endif()
+endif()
+
+#------------------------------------------------------------
+# ENABLE_TSAN: ThreadSanitizer (Clang only, MSVC未対応)
+#------------------------------------------------------------
+option(ENABLE_TSAN "Enable ThreadSanitizer (Clang only)" OFF)
+
+if(ENABLE_TSAN AND ENABLE_ASAN)
+    message(FATAL_ERROR "ENABLE_TSAN and ENABLE_ASAN are mutually exclusive."
+                        "Enable only one sanitizer at a time.")
+endif()
+
+if(ENABLE_TSAN AND MSVC)
+    message(FATAL_ERROR "ENABLE_TSAN requires Clang (MSVC not supported)."
+                        "Use Clang on Linux/WSL or enable ASan instead.")
+endif()
+
+if(ENABLE_TSAN)
+    # TSan は動的 CRT が必須（静的 CRT とは非互換）
+    set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
+    target_compile_options(ConvoPeq PRIVATE -fsanitize=thread)
+    target_link_options(ConvoPeq PRIVATE -fsanitize=thread)
+
+    # TSan と LTCG/IPO は非互換
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+
+    message(STATUS "ENABLE_TSAN=ON: ThreadSanitizer enabled (Clang only)")
 endif()
 
 #------------------------------------------------------------

@@ -1,15 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-namespace {
-void retireEQCache(AudioEngine& owner, EQCoeffCache* cache)
-{
-    if (cache == nullptr)
-        return;
-
-    owner.enqueueDeferredDeleteNonRt(cache, [](void* p) { delete static_cast<EQCoeffCache*>(p); });
-}
-}
 
 AudioEngine::EQCacheManager::EQCacheManager(AudioEngine& ownerIn) noexcept
     : owner(ownerIn)
@@ -55,6 +46,8 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
                                                        int maxBlockSize,
                                                        uint64_t generation)
 {
+    using convo::isr::DSPHandle;
+
     const uint64_t hash = EQProcessor::computeParamsHash(params);
     const CacheMap* currentMap = loadMap();
     if (currentMap == nullptr)
@@ -62,17 +55,24 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     auto it = currentMap->map.find(hash);
     if (it != currentMap->map.end())
-        return it->second;
+    {
+        // ★ P0-2: DSPHandle → resolve() でポインタ取得
+        const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+        return static_cast<EQCoeffCache*>(resolved.instance);
+    }
 
+    // ★ P0-2: キャッシュミス — 新規作成
     EQCoeffCache* cache = EQProcessor::createCoeffCache(params, sampleRate, maxBlockSize, generation);
     if (cache == nullptr)
         return nullptr;
 
-    auto cacheDeleter = [this](EQCoeffCache* p) noexcept
+    // ★ P0-2: DSPHandleRuntime に登録
+    const DSPHandle handle = owner.dspHandleRuntime_.create(cache);
+    if (handle.isNull())
     {
-        retireEQCache(owner, p);
-    };
-    std::unique_ptr<EQCoeffCache, decltype(cacheDeleter)> cacheHolder(cache, cacheDeleter);
+        delete cache;
+        return nullptr;
+    }
 
     std::lock_guard<std::mutex> lock(writeMutex);
 
@@ -82,7 +82,8 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     currentMap = loadMap();
     if (currentMap == nullptr)
     {
-        retireEQCache(owner, cache);
+        delete cache;
+        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
 
@@ -90,28 +91,35 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        // cacheHolder が新規作成分を安全に回収する
-        return it->second;
+        delete cache;
+        owner.dspHandleRuntime_.retire(handle);
+        const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+        return static_cast<EQCoeffCache*>(resolved.instance);
     }
 
     std::unique_ptr<CacheMap> newMap;
     try
     {
         newMap = std::make_unique<CacheMap>(*currentMap);
-        newMap->map.emplace(hash, cacheHolder.get());
+        newMap->map.emplace(hash, handle);
     }
     catch (const std::bad_alloc&)
     {
+        delete cache;
+        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
     catch (...)
     {
+        delete cache;
+        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
 
     storeNewMap(newMap.release());
 
-    return cacheHolder.release();
+    const auto resolved = owner.dspHandleRuntime_.resolve(handle);
+    return static_cast<EQCoeffCache*>(resolved.instance);
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
@@ -121,7 +129,12 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
         return nullptr;
 
     const auto it = currentMap->map.find(hash);
-    return (it != currentMap->map.end()) ? it->second : nullptr;
+    if (it == currentMap->map.end())
+        return nullptr;
+
+    // ★ P0-2: DSPHandle → resolve() でポインタ取得
+    const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+    return static_cast<EQCoeffCache*>(resolved.instance);
 }
 
 [[nodiscard]] bool AudioEngine::EQCacheManager::containsNonRt(uint64_t hash) noexcept
@@ -134,12 +147,6 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
         return false;
 
     return currentMap->map.find(hash) != currentMap->map.end();
-}
-
-void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
-{
-    if (cache != nullptr)
-    retireEQCache(owner, cache);
 }
 
 AudioEngine::EQCacheManager::~EQCacheManager()

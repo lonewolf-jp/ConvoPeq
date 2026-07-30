@@ -1154,6 +1154,12 @@ public:
     // Precondition: current は fadingRuntimeDSPSlot の CAS 成功で取得済み。
     void retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept;
 
+    // ★ P1-2: resetReceipt — pendingReceipt_ を安全に解放する。
+    //   Normal Retire: receipt 一致後、リセット。
+    //   Emergency/Stale: quarantine Intent を発行後、リセット。
+    //   ISR: Coordinator の ACK を待ってから pendingReceipt_ を解放する。
+    void resetReceipt() noexcept;
+
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
     [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
         return m_healthMonitor.getHealthStateRef();
@@ -1940,10 +1946,12 @@ private:
                                   uint64_t generation);
         EQCoeffCache* get(uint64_t hash) noexcept;
         [[nodiscard]] bool containsNonRt(uint64_t hash) noexcept;
-        void releaseCache(EQCoeffCache* cache) noexcept;
         ~EQCacheManager();
 
     private:
+        // ★ P0-2: DSPHandle ベースのキャッシュマップ
+        //   RefCountedDeferred → DSPHandleRuntime 移行。
+        //   マップは DSPHandle を保持し、resolve() でポインタ取得する。
         struct CacheMap
         {
             explicit CacheMap(AudioEngine& ownerIn) noexcept
@@ -1951,43 +1959,41 @@ private:
             {
             }
 
+            // ★ P0-2: コピーコンストラクタ — DSPHandle はコピー可能（addRef 不要）
             CacheMap(const CacheMap& other)
-                : owner(other.owner)
+                : owner(other.owner), map(other.map)
             {
-                for (const auto& entry : other.map)
-                {
-                    if (entry.second != nullptr)
-                    {
-                        // EBR: Using RefCountedDeferred for cache objects as they are shared
-                        entry.second->addRef();
-                    }
-
-                    map.emplace(entry.first, entry.second);
-                }
             }
 
+            // ★ P0-2: デストラクタ。
+            //   通常パス: retire のみ（コピー先マップが参照中のため delete 不可）。
+            //   Shutdown: resolve → delete → reclaim（全マップ同時破棄のため安全）。
             ~CacheMap()
             {
                 jassert(owner != nullptr);
-                // ★ R-1: Shutdown 時は EBR を迂回し即時 delete (m_retireRouter は既に破棄されている)
-                //    通常運用時 (キャッシュ世代交代) は従来通り EBR 経由
-                if (convo::consumeAtomic(owner->shutdownPhase, std::memory_order_acquire) >= AudioEngine::ShutdownPhase::Destroy) {
+                auto& rt = owner->dspHandleRuntime_;
+                if (convo::consumeAtomic(owner->shutdownPhase, std::memory_order_acquire)
+                    >= AudioEngine::ShutdownPhase::Destroy) {
                     for (auto& entry : map)
                     {
-                        if (entry.second != nullptr)
-                            static_cast<void>(entry.second->releaseDirect());
+                        if (!entry.second.isNull())
+                        {
+                            const auto resolved = rt.resolve(entry.second);
+                            delete static_cast<EQCoeffCache*>(resolved.instance);
+                            rt.reclaim(entry.second);
+                        }
                     }
                 } else {
                     for (auto& entry : map)
                     {
-                        if (entry.second != nullptr)
-                            entry.second->release(*owner->m_retireRouter);
+                        if (!entry.second.isNull())
+                            rt.retire(entry.second);
                     }
                 }
             }
 
             AudioEngine* owner = nullptr;
-            std::unordered_map<uint64_t, EQCoeffCache*> map;
+            std::unordered_map<uint64_t, convo::isr::DSPHandle> map;
         };
 
         const CacheMap* loadMap() noexcept

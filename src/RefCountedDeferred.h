@@ -1,6 +1,9 @@
 #pragma once
 
 // ★ R-1: RefCountedDeferred — Router-based retire via IRetireRouter.
+//   ★ P0-2: DEPRECATED. EQCoeffCache は DSPHandleRuntime に移行済み。
+//   新規コードでの使用禁止。唯一の利用者 (EQCoeffCache) が移行完了したため、
+//   将来のクリーンアップで削除予定。
 //   release(IRetireRouter&): NonRT, リトライ込み（Router::retire 経由）
 //   releaseRT(IRetireRouter&): RT-safe, リトライなし（Router::retireRT 経由）。戻り値 bool
 //   releaseDirect(): Shutdown 専用。RetireRouter を経由せず即時 delete。

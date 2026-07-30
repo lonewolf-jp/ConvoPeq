@@ -52,8 +52,8 @@
 #include <functional>
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
 #include "OutputFilter.h" // convo::HCMode, convo::LCMode
-
 #include "audioengine/AtomicAccess.h"
+#include "FFTExecutionContext.h"  // ★ P1-1: FFTExecutionContext 分離
 
 #ifdef _DEBUG
 #define NUC_DEBUG_GUARDS 1
@@ -61,8 +61,6 @@
 
 namespace convo
 {
-
-struct IppFFTPlan;
 
 //==============================================================================
 // ★ work70: LayerAllocSizes — レイヤーの全 MKL バッファサイズ
@@ -299,22 +297,6 @@ private:
         int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン
         bool isImmediate  = false; // true = L0 (Add() 内で即時処理, リングを使用)
 
-        // ── IPP FFT ──
-        // [v2.1] MKL DFTI_DESCRIPTOR_HANDLE から Intel IPP へ換装。
-        //
-        // fftSpec    : ippsFFTInit_R_64f が管理する共有プラン内スペック。
-        //              Audio Thread からは Read-Only で参照 (スレッドセーフ)。
-        // fftPlanOwner: サイズ単位キャッシュへの非所有参照。
-        // fftWorkBuf : 各 FFT 計算呼び出しが使用するスクラッチバッファ。
-        //              ippsFFTGetSize_R_64f が sizeWork > 0 を返した場合のみ確保。
-        //              sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)。
-        //              ★ Audio Thread での確保を防ぐため SetImpulse() で事前確保済み。
-        //                 nullptr かつ sizeWork==0 の場合のみ IPP に nullptr を渡してよい。
-        std::optional<std::reference_wrapper<const IppFFTPlan>> fftPlanOwner; ///< FFT plan 参照 (サイズ単位キャッシュ)
-        IppsFFTSpec_R_64f* fftSpec    = nullptr; ///< IPP FFT スペック (共有 plan 内を指す)
-        Ipp8u*             fftWorkBuf = nullptr; ///< FFT スクラッチ (sizeWork==0なら nullptr)
-        bool               descriptorCommitted = false; ///< IPP 初期化成功フラグ
-
         // ── IR 周波数領域 (Message Thread で確保・プリコンピュート) ──
         // [Mem-Fix] irFreqDomain は 1 パーティション分の使い捨てスクラッチ（FFT出力→deinterleave中継のみ）。
         // ★ 本番系の実データ本体 (Audio Thread が読む唯一の表現) は irFreqReal/irFreqImag (SoA) 側。
@@ -411,6 +393,16 @@ private:
     static constexpr int kL1MaxParts = 64;
 
     Layer m_layers[kNumLayers];
+    // ★ P1-1: FFTExecutionContext per layer (取代 fftSpec/fftWorkBuf)
+    //   SetImpulse() で Plan を生成し、FFTExecutionContext を初期化する。
+    //   EC-1: ExecutionContext は Plan を所有しない（参照のみ、所有は Builder/本文）。
+    //   PLAN-LT-5: m_fftPlan は m_fftCtx より長く生存すること。
+    ProductionFft::Plan m_fftPlan[3] {};         // Plan storage (3 layers max)
+    FFTExecutionContext  m_fftCtx[3] {
+        FFTExecutionContext(m_fftPlan[0]),
+        FFTExecutionContext(m_fftPlan[1]),
+        FFTExecutionContext(m_fftPlan[2])
+    };
     int   m_numActiveLayers = 0;
     int   m_latency         = 0;
 

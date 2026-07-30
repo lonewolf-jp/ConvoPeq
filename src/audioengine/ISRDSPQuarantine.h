@@ -15,6 +15,7 @@ enum class QuarantineReason {
     CrossfadeViolation,
     ShutdownViolation,
     RetireDeferralTimeout,
+    ReceiptReset,        // ★ P1-2: pendingReceipt_ reset → quarantine
     Unknown
 };
 

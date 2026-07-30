@@ -96,92 +96,6 @@ std::atomic<uint32_t> MKLNonUniformConvolver::liveCount { 0 };
 std::atomic<uint64_t> MKLNonUniformConvolver::globalDiagSeq { 0 };
 #endif
 
-struct IppFFTPlan
-{
-    int order = 0;
-    int fftSize = 0;
-    int sizeWork = 0;
-    IppsFFTSpec_R_64f* fftSpec = nullptr;
-    Ipp8u* fftSpecBuf = nullptr;
-
-    ~IppFFTPlan()
-    {
-        if (fftSpecBuf)
-            ippsFree(fftSpecBuf);
-    }
-};
-
-class IppFFTPlanCache
-{
-public:
-    static const IppFFTPlan* getOrCreate(int order)
-    {
-        ASSERT_NON_RT_THREAD();
-        std::lock_guard<std::mutex> lock(getMutex());
-        auto& cache = getCache();
-        const auto it = cache.find(order);
-        if (it != cache.end())
-            return it->second.get();
-
-        auto plan = createPlan(order);
-        if (!plan)
-            return nullptr;
-
-        auto* ptr = plan.get();
-        cache.emplace(order, std::move(plan));
-        return ptr;
-    }
-
-private:
-    static std::unordered_map<int, std::unique_ptr<IppFFTPlan>> cacheStorage_;
-    static std::mutex cacheMutex_;
-
-    static std::unordered_map<int, std::unique_ptr<IppFFTPlan>>& getCache()
-    {
-        return cacheStorage_;
-    }
-
-    static std::mutex& getMutex()
-    {
-        return cacheMutex_;
-    }
-
-    static std::unique_ptr<IppFFTPlan> createPlan(int order)
-    {
-        int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
-        const IppStatus getSt = ippsFFTGetSize_R_64f(
-            order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
-            &sizeSpec, &sizeInit, &sizeWork);
-        if (getSt != ippStsNoErr)
-            return nullptr;
-
-        std::unique_ptr<IppFFTPlan> plan = std::make_unique<IppFFTPlan>();
-        plan->order = order;
-        plan->fftSize = 1 << order;
-        plan->sizeWork = sizeWork;
-
-        plan->fftSpecBuf = ippsMalloc_8u(sizeSpec);
-        if (!plan->fftSpecBuf)
-            return nullptr;
-
-        Ipp8u* initBuf = (sizeInit > 0) ? ippsMalloc_8u(sizeInit) : nullptr;
-        const IppStatus initSt = ippsFFTInit_R_64f(
-            &plan->fftSpec, order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
-            plan->fftSpecBuf, initBuf);
-
-        if (initBuf)
-            ippsFree(initBuf);
-
-        if (initSt != ippStsNoErr || plan->fftSpec == nullptr)
-            return nullptr;
-
-        return plan;
-    }
-};
-
-std::unordered_map<int, std::unique_ptr<IppFFTPlan>> IppFFTPlanCache::cacheStorage_{};
-std::mutex IppFFTPlanCache::cacheMutex_{};
-
 namespace
 {
 // [Mem-Fix] 本プロジェクトは AVX2 必須環境 (x64 / Intel or AMD64, AVX2 保証) のため、
@@ -336,17 +250,9 @@ void logIrRelease(
 //==============================================================================
 void MKLNonUniformConvolver::Layer::freeAll() noexcept
 {
-    // [v2.2] FFT plan はサイズ単位の共有キャッシュ管理。
-    // レイヤー側は所有権のみ解放し、スペック実体はキャッシュ側で保持する。
-    fftPlanOwner.reset();
-    fftSpec = nullptr;
-    if (fftWorkBuf)
-    {
-        ippsFree(fftWorkBuf);
-        fftWorkBuf = nullptr;
-    }
-    descriptorCommitted = false;
-
+    // [v2.2] FFT plan は ProductionFft::Plan により管理 (P1-1)。
+    // freeAll は Layer のデータバッファのみ解放する。
+    // Plan の破棄は releaseAllLayers() が行う。
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ work70: freeTracked を使用（allocSizes からサイズ取得）
     freeTracked(irFreqDomain,  allocSizes.irFreqDomain);
@@ -606,6 +512,12 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
 
     for (int i = 0; i < kNumLayers; ++i)
         m_layers[i].freeAll();
+    // ★ P1-1: ProductionFft Plan を破棄 (PLAN-LT-5)
+    for (int i = 0; i < kNumLayers; ++i)
+    {
+        if (m_fftPlan[i].isValid())
+            ProductionFft::destroyPlan(m_fftPlan[i]);
+    }
     m_numActiveLayers = 0;
     m_latency         = 0;
 
@@ -859,7 +771,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
             continue;
 
         Layer& l = m_layers[m_numActiveLayers];
-        l.descriptorCommitted = false;
         convo::publishAtomic(l.warmupCompleted, false, std::memory_order_release);
 
         l.partSize    = cfgs[li].partSize;
@@ -873,57 +784,25 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         l.numParts   = juce::nextPowerOfTwo(l.numPartsIR);
         l.fdlMask    = l.numParts - 1;
 
-        // ── IPP FFT スペック初期化 (Message Thread で事前確保) ──
-        //
-        // [v2.1] MKL DFTI_DESCRIPTOR_HANDLE の代替。
-        // fftSize = 2 * partSize は常に 2 の冪なので FFT (DFT より高速) を使用可能。
-        // IPP_FFT_DIV_INV_BY_N: IFFT 時に 1/N 正規化を自動適用
-        //   (旧: DftiSetValue(DFTI_BACKWARD_SCALE, 1.0/fftSize) と等価)
-        // ippAlgHintFast: 速度優先 (精度を一切犠牲にしない範囲でのヒント)
+        // ── ★ P1-1: ProductionFft Plan 生成 (IppFFTPlanCache → ProductionFft) ──
+        // FFT-PROD-2: Plan 生成は NonRT (SetImpulse) 専用。
+        // PLAN-LT-10: setPlan() は NonRT のみ。
         {
-            // fftSize = 2^order を求める (fftSize は必ず 2 の冪)
-            int order = 0;
-            {
-                int tmp = l.fftSize;
-                while (tmp > 1) { tmp >>= 1; ++order; }
-            }
-
-            if (const IppFFTPlan* plan = IppFFTPlanCache::getOrCreate(order); plan != nullptr)
-                l.fftPlanOwner = std::cref(*plan);
-            else
-                l.fftPlanOwner.reset();
-
-            if (!l.fftPlanOwner.has_value() || l.fftPlanOwner->get().fftSpec == nullptr)
+            auto plan = ProductionFft::createPlan(l.fftSize);
+            if (!plan.isValid())
             {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                juce::Logger::writeToLog("MKLNonUniformConvolver: FFT plan cache creation failed for layer "
-                                         + juce::String(li) + " (order=" + juce::String(order) + ")");
+                juce::Logger::writeToLog("MKLNonUniformConvolver: ProductionFft::createPlan failed for layer "
+                                         + juce::String(li) + " (fftSize=" + juce::String(l.fftSize) + ")");
 #endif
                 releaseAllLayers();
                 return false;
             }
-
-            l.fftSpec = l.fftPlanOwner->get().fftSpec;
-
-            // ワークバッファ確保 (Audio Thread での動的確保を防ぐため事前確保)
-            // sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)
-            // sizeWork > 0 かつ確保失敗 → リアルタイム安全でないため初期化失敗とする
-            if (l.fftPlanOwner->get().sizeWork > 0)
-            {
-                l.fftWorkBuf = ippsMalloc_8u(l.fftPlanOwner->get().sizeWork);
-                if (!l.fftWorkBuf)
-                {
+            m_fftPlan[li] = std::move(plan);
+            m_fftCtx[li].setPlan(m_fftPlan[li]);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                    juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(l.fftPlanOwner->get().sizeWork)
-                                             + ") failed for layer " + juce::String(li));
+            assertWorkBufferAlignment(m_fftPlan[li]);
 #endif
-                    releaseAllLayers();
-                    return false;
-                }
-            }
-            // else: sizeWork == 0 → l.fftWorkBuf は nullptr のまま (正常)
-
-            l.descriptorCommitted = true;
         }
 
         // ── バッファ確保 (すべて mkl_malloc 64byte アライン) ──
@@ -1048,11 +927,10 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
                     memcpy(tempTime, irSrc + copyStart, static_cast<size_t>(copyLen) * sizeof(double));
             }
 
-            // [v2.1] Forward FFT: real → CCS
-            // IPP CCS 出力: [re0,im0,re1,im1,...] ← MKL DFTI_COMPLEX_COMPLEX と同一レイアウト
-            IppStatus fftStatus = ippsFFTFwd_RToCCS_64f(tempTime, tempFreq, l.fftSpec, l.fftWorkBuf);
-            if (fftStatus != ippStsNoErr)
-                clearFFTOutputOnError(tempFreq, static_cast<size_t>(l.complexSize) * 2, fftStatus, 1);
+            // [v2.1] Forward FFT: real → CCS (via FFTExecutionContext)
+            const auto fftStatusResult = m_fftCtx[m_numActiveLayers].forwardRealToCCS(tempTime, tempFreq);
+            if (fftStatusResult != FftStatus::Ok)
+                clearFFTOutputOnError(tempFreq, static_cast<size_t>(l.complexSize) * 2, ippStsErr, 1);
 
             // [Mem-Fix] irFreqDomain は 1 パーティション分のスクラッチのため、オフセット0(先頭)へ書き込む。
             memcpy(l.irFreqDomain, tempFreq, static_cast<size_t>(l.complexSize) * 2 * sizeof(double));
@@ -1066,12 +944,10 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
                         l.complexSize);
         }
 
-        // Backward FFT のウォームアップ
-        // Audio Thread での初回実行時の遅延 (IPP テーブル生成等) を事前消化する。
-        // [v2.1] IFFT: CCS → real (IPP_FFT_DIV_INV_BY_N により 1/N 正規化済み)
-        IppStatus status = ippsFFTInv_CCSToR_64f(tempFreq, tempTime, l.fftSpec, l.fftWorkBuf);
-        if (status != ippStsNoErr)
-            clearFFTOutputOnError(tempTime, l.fftSize, status, 2);
+        // Backward FFT のウォームアップ (via FFTExecutionContext)
+        const auto warmupResult = m_fftCtx[m_numActiveLayers].inverseCCSToR(tempFreq, tempTime);
+        if (warmupResult != FftStatus::Ok)
+            clearFFTOutputOnError(tempTime, l.fftSize, ippStsErr, 2);
         convo::publishAtomic(l.warmupCompleted, true, std::memory_order_release);
 
         mkl_free(tempTime);
@@ -1278,9 +1154,8 @@ bool MKLNonUniformConvolver::areFftDescriptorsCommitted() const noexcept
 
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
-        const Layer& l = m_layers[li];
-        // [v2.1] fftHandle → fftSpec
-        if (l.fftSpec == nullptr || !l.descriptorCommitted)
+        // ★ P1-1: FFTExecutionContext::isPlanValid() で判定
+        if (!m_fftCtx[li].isPlanValid())
             return false;
     }
 
@@ -1381,15 +1256,15 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
     juce::FloatVectorOperations::copy(l.prevInputBuf, l.inputAccBuf, l.partSize);
 
-    // ── 2. Forward FFT ──
-    // [v2.1] ippsFFTFwd_RToCCS_64f: real → CCS interleaved complex
-    // CCS 出力形式: [re0,im0,re1,im1,...] ← 既存 AVX2 複素乗算と完全互換
-    // [Mem-Fix] fdlBuf は使い捨てスクラッチ (current=offset0 / mirror=offset partStride)。
-    // 永続履歴は fdlReal/fdlImag (SoA) 側にのみ保持する。
+    // ★ P1-1: 層インデックスを特定し FFTExecutionContext を使用
+    const int layerIndex = static_cast<int>(&l - m_layers);
+    jassert(layerIndex >= 0 && layerIndex < kNumLayers);
+
+    // ── 2. Forward FFT (via FFTExecutionContext) ──
     double* currentFDLSlot = l.fdlBuf;
-    IppStatus fftStatus3 = ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
-    if (fftStatus3 != ippStsNoErr)
-        clearFFTOutputOnError(currentFDLSlot, static_cast<size_t>(l.complexSize) * 2, fftStatus3, 3);
+    const auto fwdResult = m_fftCtx[layerIndex].processLayerFwd(l.fftTimeBuf, currentFDLSlot);
+    if (fwdResult != FftStatus::Ok)
+        clearFFTOutputOnError(currentFDLSlot, static_cast<size_t>(l.complexSize) * 2, ippStsErr, 3);
 
     deinterleaveComplex(currentFDLSlot,
                         l.fdlReal + static_cast<size_t>(l.fdlIndex) * l.complexSize,
@@ -1447,11 +1322,10 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     for (int k = 0; k < l.partStride; ++k)
         l.accumBuf[k] = killDenormal(l.accumBuf[k]);
 #endif
-    // [v2.1] ippsFFTInv_CCSToR_64f: CCS → real
-    // IPP_FFT_DIV_INV_BY_N により 1/N 正規化自動適用 (旧 DFTI_BACKWARD_SCALE と等価)
-    IppStatus fftStatus4 = ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
-    if (fftStatus4 != ippStsNoErr)
-        clearFFTOutputOnError(l.fftOutBuf, l.fftSize, fftStatus4, 4);
+    // ★ P1-1: Backward FFT (via FFTExecutionContext)
+    const auto invResult = m_fftCtx[layerIndex].processLayerInv(l.accumBuf, l.fftOutBuf);
+    if (invResult != FftStatus::Ok)
+        clearFFTOutputOnError(l.fftOutBuf, l.fftSize, ippStsErr, 4);
 
     // ── 5. Overlap-Save: 有効出力をリングへ書き込み ──
     ringWrite(l.fftOutBuf + l.partSize, l.partSize);
@@ -1582,12 +1456,11 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
                     juce::FloatVectorOperations::copy(l.prevInputBuf, l.inputAccBuf, l.partSize);
 
-                    // [v2.1] L1/L2 Forward FFT: real → CCS
-                    // [Mem-Fix] fdlBuf は使い捨てスクラッチ (current=offset0 / mirror=offset partStride)。
+                    // ★ P1-1: Forward FFT (via FFTExecutionContext)
                     double* currentFDLSlot = l.fdlBuf;
-                    IppStatus status = ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
-                    if (status != ippStsNoErr)
-                        clearFFTOutputOnError(currentFDLSlot, static_cast<size_t>(l.complexSize) * 2, status, 5);
+                    const auto fwdResult = m_fftCtx[li].processLayerFwd(l.fftTimeBuf, currentFDLSlot);
+                    if (fwdResult != FftStatus::Ok)
+                        clearFFTOutputOnError(currentFDLSlot, static_cast<size_t>(l.complexSize) * 2, ippStsErr, 5);
 
                     deinterleaveComplex(currentFDLSlot,
                                         l.fdlReal + static_cast<size_t>(l.fdlIndex) * l.complexSize,
@@ -1653,10 +1526,10 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
             // ── 全パーティション累積完了 → IFFT → tailOutputBuf へコピー ──
             if (l.nextPart >= l.numPartsIR)
             {
-                // [v2.1] Backward FFT: CCS → real (Audio Thread 内で再初期化禁止の制約はIPPも同様)
-                IppStatus status = ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
-                if (status != ippStsNoErr)
-                    clearFFTOutputOnError(l.fftOutBuf, l.fftSize, status, 6);
+                // ★ P1-1: Backward FFT (via FFTExecutionContext)
+                const auto invResult = m_fftCtx[li].processLayerInv(l.accumBuf, l.fftOutBuf);
+                if (invResult != FftStatus::Ok)
+                    clearFFTOutputOnError(l.fftOutBuf, l.fftSize, ippStsErr, 6);
 
                 memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, static_cast<size_t>(l.partSize) * sizeof(double));
                 l.tailOutputPos = 0;
