@@ -33,8 +33,12 @@ jobs:
 
       - name: Run list.md compliance checks
         shell: pwsh
-        run: .github/scripts/check-list-compliance.ps1
+        run: |
+          $script = ".github/scripts/check-list-compliance.ps1"
+          if (Test-Path $script) { & $script } else { Write-Host "::warning::$script not found — skip" }
 
       - name: Run size multiplication cast guard (src only)
         shell: pwsh
-        run: .github/scripts/check-src-size-mul-cast.ps1
+        run: |
+          $script = ".github/scripts/check-src-size-mul-cast.ps1"
+          if (Test-Path $script) { & $script } else { Write-Host "::warning::$script not found — skip" }

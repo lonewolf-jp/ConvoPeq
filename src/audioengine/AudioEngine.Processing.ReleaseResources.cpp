@@ -398,12 +398,12 @@ void AudioEngine::releaseResources()
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
-        dspHandleRuntime_.reclaim(activeHandle);
+        dspHandleRuntime_.shutdownReclaim(activeHandle);
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
-        dspHandleRuntime_.reclaim(fadingHandle);
+        dspHandleRuntime_.shutdownReclaim(fadingHandle);
     }
 
     diagLog("[DIAG] releaseResources: before ui processor release");

@@ -106,9 +106,9 @@ public:
             } else {
                 // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
                 const auto epoch = engine_.currentPublicationEpoch();
-                // ★ P1-2: DSPHandle を取得（quarantine 用）。getFadingRuntimeDSPHandle が該当 Handle を返す。
+                // ★ P0-2b: DSPHandle のみを保存（DSPCore* は削除）
                 const auto oldHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
-                engine_.storeReceipt(oldDSP, oldHandle, epoch);
+                engine_.storeReceipt(oldHandle, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -143,7 +143,11 @@ public:
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(engine_);
-            engine_.retirePublishedDSP(current, lifetime);
+            // ★ ISR: Observer — Intent Queue push のみ
+            //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
+            const auto fadingHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
+            if (!fadingHandle.isNull())
+                engine_.runtimePublicationBridge_.emitObserveIntent(fadingHandle);
         }
 
         engine_.crossfadeRuntime_.setDryHoldSamples(0);

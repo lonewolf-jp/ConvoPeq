@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-30 09:14:05
+> Generated: 2026-07-30 23:11:02
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -289,6 +289,7 @@
             ├── ISRRuntimeIdentityGeneratorsTests.cpp
             ├── ISRSemanticValidationTests.cpp
             ├── MT-NUPC-Measurement.cpp
+            ├── NormalRetireDSPHandleCompareTests.cpp
             ├── ObservePathSingleSourceTests.cpp
             ├── OverlapAuthoritySingularTests.cpp
             ├── PartialPublicationRejectTests.cpp
@@ -799,6 +800,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_sources(MTNUPCMeasurement PRIVATE
         src/tests/MT-NUPC-Measurement.cpp
         src/MKLNonUniformConvolver.cpp
+        # P1-1: FFT Backend Concept + ProductionFft + FFTExecutionContext
+        src/FFTBackend.cpp
+        src/FFTExecutionContext.cpp
     )
     target_include_directories(MTNUPCMeasurement PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -36477,12 +36481,12 @@ void AudioEngine::releaseResources()
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
-        dspHandleRuntime_.reclaim(activeHandle);
+        dspHandleRuntime_.shutdownReclaim(activeHandle);
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
-        dspHandleRuntime_.reclaim(fadingHandle);
+        dspHandleRuntime_.shutdownReclaim(fadingHandle);
     }
 
     diagLog("[DIAG] releaseResources: before ui processor release");
@@ -39601,8 +39605,11 @@ void AudioEngine::timerCallback()
                                                  std::memory_order_acq_rel,
                                                  std::memory_order_acquire))
             {
-                DSPLifetimeManager lifetimeMgr(*this);
-                retirePublishedDSP(current, lifetimeMgr);
+                // ★ ISR: Observer — Intent Queue push のみ。Retire は Coordinator の責務。
+                //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得して emit
+                const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+                if (!fadingHandle.isNull())
+                    runtimePublicationBridge_.emitObserveIntent(fadingHandle);
             }
         }
         crossfadeRuntime_.complete();
@@ -39730,8 +39737,18 @@ void AudioEngine::timerCallback()
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetimeMgr(*this);
-            retirePublishedDSP(current, lifetimeMgr);
+            // ★ ISR: Observer — Intent Queue push のみ
+            //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
+            const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+            if (!fadingHandle.isNull())
+                runtimePublicationBridge_.emitObserveIntent(fadingHandle);
         }
+    }
+
+    // ★ ISR: Coordinator — processIntent を定期実行
+    {
+        DSPLifetimeManager lifetimeMgr(*this);
+        runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
 
     if (!isShutdownInProgress()
@@ -40287,7 +40304,10 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(*this);
-            retirePublishedDSP(current, lifetime);
+            // ★ ISR: Observer — Intent Queue push のみ
+            const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+            if (!fadingHandle.isNull())
+                runtimePublicationBridge_.emitObserveIntent(fadingHandle);
         }
 
         // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得
@@ -40488,7 +40508,10 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         && "retirePublishedDSP: receiptReady_ true but pendingReceipt_ empty");
 
     uint64_t epoch = 0;
-    if (current == pendingReceipt_->dsp) {
+    // ★ P0-2b: DSPHandle 比較に変更（DSPCore* 比較の代替）
+    const auto currentHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+    if (!currentHandle.isNull() && !pendingReceipt_->handle.isNull()
+        && currentHandle == pendingReceipt_->handle) {
         // ★ Normal Retire: 一致 → publicationEpoch を伝搬（HW-1 目的達成）
         epoch = pendingReceipt_->publicationEpoch;
         normalRetireCount_.fetch_add(1, std::memory_order_relaxed);
@@ -40496,16 +40519,17 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         pendingReceipt_.reset();
         receiptReady_.store(false, std::memory_order_relaxed);
     } else {
-        // ★ Emergency Retire: 不一致（current != receipt->dsp）
+        // ★ Emergency Retire: 不一致（currentHandle != receipt->handle）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
         //   runtimeEpoch（router_->currentEpoch()）で退役。
         // ★ P1-2: receipt の handle を quarantine（retire 義務移転）
         if (!pendingReceipt_->handle.isNull()) {
-            dspHandleRuntime_.quarantine(pendingReceipt_->handle);
-            dspQuarantineManager_.quarantineHandle(
-                pendingReceipt_->handle.slot,
-                pendingReceipt_->handle.generation,
-                convo::isr::QuarantineReason::PublishViolation);
+            // ★ P0-5: Coordinator 経由で quarantine を実行（QSVC-2）
+            runtimePublicationBridge_.emitQuarantineIntent(
+                pendingReceipt_->handle,
+                convo::isr::QuarantineReason::PublishViolation,
+                dspHandleRuntime_,
+                dspQuarantineManager_);
         }
         // receipt は保持（次回 Normal Retire 時に再利用可能）。
         // ★ FIX-D1: epoch 差分ベース検出（旧: mismatchCount 回数ベース）
@@ -40538,11 +40562,12 @@ void AudioEngine::resetReceipt() noexcept
     // stale/emergency 時は retain 義務を quarantine へ移転
     if (!pendingReceipt_->handle.isNull())
     {
-        dspHandleRuntime_.quarantine(pendingReceipt_->handle);
-        dspQuarantineManager_.quarantineHandle(
-            pendingReceipt_->handle.slot,
-            pendingReceipt_->handle.generation,
-            convo::isr::QuarantineReason::ReceiptReset);
+        // ★ P0-5: Coordinator 経由で quarantine を実行（QSVC-2）
+        runtimePublicationBridge_.emitQuarantineIntent(
+            pendingReceipt_->handle,
+            convo::isr::QuarantineReason::ReceiptReset,
+            dspHandleRuntime_,
+            dspQuarantineManager_);
     }
 
     pendingReceipt_.reset();
@@ -41944,13 +41969,13 @@ public:
     // ★ 状態遷移: [empty] → [has_receipt]
     // ★ 同期: pendingReceipt_ 書込み → receiptReady_.store(true, release)
     // ★ P1-2: PublishReceipt に DSPHandle を保持（逆引き回避）
-    void storeReceipt(DSPCore* dsp, convo::isr::DSPHandle handle,
+    void storeReceipt(convo::isr::DSPHandle handle,
                       convo::isr::PublicationEpoch epoch) noexcept {
         if (fatal_.load(std::memory_order_relaxed) || receiptReady_.load(std::memory_order_relaxed)) {
             assert(false && "storeReceipt: not in Empty state");
             return;
         }
-        pendingReceipt_.emplace(PublishReceipt{dsp, handle, epoch, 0});
+        pendingReceipt_.emplace(PublishReceipt{handle, epoch, 0});
         convo::publishAtomic(receiptReady_, true, std::memory_order_release);
     }
 
@@ -41964,6 +41989,14 @@ public:
     //   Emergency/Stale: quarantine Intent を発行後、リセット。
     //   ISR: Coordinator の ACK を待ってから pendingReceipt_ を解放する。
     void resetReceipt() noexcept;
+
+    // ★ P0-4A OBSERVE-7: ACK(reclaim complete) — Coordinator からの解放通知
+    //   processIntent() 完了後に Coordinator が呼び出す。
+    //   pendingReceipt_ を安全に解放し、Timer が次回処理できるようにする。
+    void markReceiptReclaimComplete() noexcept {
+        pendingReceipt_.reset();
+        receiptReady_.store(false, std::memory_order_release);
+    }
 
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
     [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
@@ -42785,7 +42818,7 @@ private:
                         {
                             const auto resolved = rt.resolve(entry.second);
                             delete static_cast<EQCoeffCache*>(resolved.instance);
-                            rt.reclaim(entry.second);
+                            rt.shutdownReclaim(entry.second);
                         }
                     }
                 } else {
@@ -44855,7 +44888,10 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     if (!handle.isNull())
     {
         dspHandleRuntime_.retire(handle);
-        dspHandleRuntime_.reclaim(handle);
+        // ★ P0-4B DELETE-1: reclaim は Coordinator 専用。
+        //   現状は transitional 措置として shutdownReclaim() を使用。
+        //   将来 DSPLifetimeManager → Coordinator::requestReclaim() 経由に移行予定。
+        dspHandleRuntime_.shutdownReclaim(handle);
     }
 
     return true;
@@ -45146,8 +45182,7 @@ public:
     // PublishReceipt: Publication 時に発行される DSP + Epoch の組。
     // Timer の CAS retire パスで epoch を伝搬するために使用される。
     struct PublishReceipt {
-        DSPCore* dsp{nullptr};  // ★ P1-2: retirePublishedDSP 比較用（移行完了後 DSPHandle に一本化）
-        convo::isr::DSPHandle handle{};  // ★ P1-2: quarantine 用 Handle
+        convo::isr::DSPHandle handle{};  // ★ P0-2b: 唯一の識別子（DSPCore* 削除）
         convo::isr::PublicationEpoch publicationEpoch{0};
         convo::isr::PublicationGeneration generation{0};
     };
@@ -46144,6 +46179,24 @@ public:
         convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
     }
 
+    // ★ P0-4A: retireByHandle — DSPHandle から retire を実行する（self-contained Intent 用）
+    //   ISR: processIntent は lifetimeMgr.getActive() に依存せず、Intent 内の handle のみで
+    //   retire 対象を識別する。これにより専用 Coordinator Worker への移行が可能になる。
+    void retireByHandle(convo::isr::DSPHandle handle) noexcept
+    {
+        if (handle.isNull()) return;
+
+        // 1. Resolve handle → DSPCore*
+        const auto resolved = engine_.dspHandleRuntime_.resolve(handle);
+        if (!resolved.valid || resolved.isStale)
+            return;
+        auto* dsp = static_cast<AudioEngine::DSPCore*>(resolved.instance);
+        if (dsp == nullptr) return;
+
+        // 2. Route through retire path (DSPHandle retire + EpochDomain enqueue)
+        retire(dsp, 0);
+    }
+
     void retireDeferred() noexcept
     {
         // deferred queue drain: handled by AudioEngine threading
@@ -46287,9 +46340,9 @@ public:
             } else {
                 // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
                 const auto epoch = engine_.currentPublicationEpoch();
-                // ★ P1-2: DSPHandle を取得（quarantine 用）。getFadingRuntimeDSPHandle が該当 Handle を返す。
+                // ★ P0-2b: DSPHandle のみを保存（DSPCore* は削除）
                 const auto oldHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
-                engine_.storeReceipt(oldDSP, oldHandle, epoch);
+                engine_.storeReceipt(oldHandle, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -46324,7 +46377,11 @@ public:
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(engine_);
-            engine_.retirePublishedDSP(current, lifetime);
+            // ★ ISR: Observer — Intent Queue push のみ
+            //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
+            const auto fadingHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
+            if (!fadingHandle.isNull())
+                engine_.runtimePublicationBridge_.emitObserveIntent(fadingHandle);
         }
 
         engine_.crossfadeRuntime_.setDryHoldSamples(0);
@@ -47273,9 +47330,6 @@ public:
     // NonRT: DSP を Retired に遷移（grace period 開始）
     void retire(DSPHandle handle);
 
-    // NonRT: grace period 完了後のメモリ解放
-    void reclaim(DSPHandle handle);
-
     // NonRT: 問題検出時に DSP を Quarantined に遷移
     void quarantine(DSPHandle handle);
 
@@ -47292,6 +47346,10 @@ public:
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
     void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
 
+    // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim
+    //   通常パスは Coordinator::requestReclaim() 経由で実行される。
+    void shutdownReclaim(DSPHandle handle) { reclaim(handle); }
+
     // NonRT: 現在の active runtime DSP handle を取得
     DSPHandle getActiveRuntimeDSPHandle() const noexcept;
 
@@ -47302,6 +47360,12 @@ public:
     void emitOwnershipTrace(const std::filesystem::path& outputPath) const;
 
 private:
+    friend class RuntimePublicationCoordinator;
+
+    // NonRT: grace period 完了後のメモリ解放（Coordinator 専用）
+    // DELETE-1: reclaim() は Coordinator のみ呼び出し可能。
+    //   外部からは Coordinator::requestReclaim() 経由で実行する。
+    void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
     // ★ ADR-005: DSPHandle の型要件をコンパイル時に保証
     static_assert(std::is_trivially_copyable_v<DSPHandle>,
@@ -51412,6 +51476,10 @@ private:
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
 #include "ISRRetireOverflowRing.h"
+#include "DSPLifetimeManager.h"
+#include "ISRDSPHandle.h"
+#include "ISRDSPQuarantine.h"
+#include "AudioEngine.h"
 #include <cassert>
 
 namespace convo::isr {
@@ -51576,12 +51644,10 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
     // ★ 方式C: persistentState_ から直接導出（plain struct、atomic 不要）
-    // ★ ADR-010: デバッグビルド: Message Thread からの呼び出しのみ許可
-    // TODO(ADR-010): Replace with Message Thread assertion when JUCE dependency is available. // NOLINT(danger-comment)
-    //   Current: assert(true) is a placeholder for non-JUCE context (Headless Test/CLI/Batch Render).
-    //   Planned: Use juce::MessageManager::getInstanceWithoutCreating() + jassert() when JUCE is available.
-    //   Risk: Low (Release build disables assert, getVersion() is read-only, no functional breakage).
-    assert(true);
+    // ★ ADR-010: Runtime API — スレッド制約なし（read-only 単調増加 uint64）
+    //   persistentState_.mappedRuntimeGeneration への読み取りは
+    //   単調増加カウンタであり cross-thread の一貫性問題は発生しない。
+    //   Timer Thread からの読み取りも安全。
     return persistentState_.mappedRuntimeGeneration;
 }
 
@@ -51921,37 +51987,180 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 // ★ P0-4C: ISR Intent 発行インターフェース実装
 //==============================================================================
 
-void RuntimePublicationCoordinator::emitObserveIntent() noexcept
+void RuntimePublicationCoordinator::emitObserveIntent(const DSPHandle& handle) noexcept
 {
-    // ★ P0-4A: Observe Intent — 現在は Timer から直接 retirePublishedDSP が呼ばれている。
-    //   将来、この Intent をキューイングして Coordinator Loop が処理する設計に変更予定。
-    //   現状はバックログカウンタのみ更新（呼び出し側の Timer は依然直接 retirePublishedDSP を呼ぶ）。
+    // ★ P0-4A: Observe Intent — Timer → LockFreeRingBuffer push（RT-safe, SPSC, lock-free）
+    //   OBSERVE-2: push() は即座に復帰（SPSC lock-free）
+    //   OBSERVE-9: LockFreeRingBuffer は FIFO を保証（SPSC）
+    //   OBSERVE-10: 世代検証用に epoch を保存
+    //   ISR: Intent は自己完結型 — DSPHandle を含むため、Coordinator は外部状態に依存せず retire 対象を識別可能
+    ObserveIntent intent{
+        handle,                          // 観測対象の DSPHandle
+        persistentState_.publicationEpoch,
+        nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed)
+    };
+
+    // ★ QUEUE-11: 4層 Overflow Policy
+    //   Layer 1 (Primary): LockFreeRingBuffer<ObserveIntent, 1024> (SPSC lock-free)
+    //   Layer 2 (Fallback): LockFreeRingBuffer<ObserveIntent, 2048> (SPSC lock-free)
+    //   Layer 3 (Deferred): RetireOverflowEntry → coordinatorDeferredRing_ → drainOverflowRing
+    //   Layer 4 (Quarantine): emitQuarantineIntent — 最終安全策
+    if (observeIntentQueue_.push(intent)) {
+        // Layer 1 (Primary): 正常完了 — ACK (queued)
+        overflowCounter_.store(0, std::memory_order_relaxed);
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // Layer 2 (Fallback): Primary 溢れ → セカンダリキュー
+    overflowCounter_.fetch_add(1, std::memory_order_relaxed);
+    if (observeFallbackQueue_.push(intent)) {
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // ★ QUEUE-12: Fallback も満杯 → Layer 3 (Deferred)
+    //   coordinatorDeferredRing_ に ObserveFallbackEntry を変換して enqueue
+    //   coordinatorDeferredRing_ は drainOverflowRing で定期回収される
+    fallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
+    RetireOverflowEntry deferredEntry{};
+    deferredEntry.intent.dspSlot = 0;
+    deferredEntry.intent.priority = RetirePriority::Normal;
+    deferredEntry.overflowTimestampUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    deferredEntry.reinjectRetryCount = 0;
+    if (coordinatorDeferredRing_.push(deferredEntry)) {
+        coordinatorDeferredCount_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        // Layer 3 overflow → Layer 4 (Quarantine): 全層溢れの最終安全策
+        // observeIntentQueue_ / observeFallbackQueue_ / coordinatorDeferredRing_
+        // の3層全てが満杯。Coordinator Deferred Ring も満杯のため、
+        // この Intent はドロップされる。カウンタで記録する。
+        // 通常運用でここに到達することはない（合計1024+2048+1024=4096超え）。
+    }
     setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+}
+
+void RuntimePublicationCoordinator::processIntent(
+    AudioEngine& engine,
+    DSPLifetimeManager& lifetimeMgr) noexcept
+{
+    // ★ P0-4A: Coordinator Loop — Intent Queue から取り出して retire を実行
+    //   OBSERVE-3: 取り出した Intent を processIntent() で処理
+    //   OBSERVE-10: 古い epoch の Intent を破棄
+    //   4層 Overflow: Primary → Fallback → Deferred を順次 drain
+
+    // Phase 1: Primary Queue (Layer 1) — FIFO 優先度高
+    ObserveIntent intent;
+    while (observeIntentQueue_.pop(intent)) {
+        const auto currentEpoch = persistentState_.publicationEpoch;
+        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
+            continue;  // 世代逆転または無効な handle — 破棄
+        }
+        // ★ ISR: Intent は self-contained。intent.handle が retire 対象を一意に識別する。
+        //   lifetimeMgr.getActive() には依存しない。
+        lifetimeMgr.retireByHandle(intent.handle);
+    }
+
+    // Phase 2: Fallback Queue (Layer 2) — Primary から溢れた Intent を回収
+    while (observeFallbackQueue_.pop(intent)) {
+        const auto currentEpoch = persistentState_.publicationEpoch;
+        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
+            continue;
+        }
+        lifetimeMgr.retireByHandle(intent.handle);
+    }
+
+    // ★ OBSERVE-7: ACK(reclaim complete) → pendingReceipt_ 解放
+    //   AudioEngine はこの後、pendingReceipt_.reset() を安全に実行できる。
+    //   Timer callback 内で processIntent からの応答を確認する。
+    engine.markReceiptReclaimComplete();
+
+    // ACK: 処理完了後、pendingIntentCount_ をリセット
+    setPendingIntentCount(0);
+}
+
+void RuntimePublicationCoordinator::requestReclaim(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router) noexcept
+{
+    // ★ P0-4B: Coordinator 専用 reclaim 要求
+    //   DELETE-2: executeRetire → waitReaders → executeReclaim の順序
+    //   DELETE-3: waitReaders で epoch 安全確認後にのみ reclaim
+
+    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
+    handleRuntime.retire(handle);
+
+    // 2. waitReaders(handle) — ISR不変条件: epoch 安全確認
+    //    retireEpoch < minReaderEpoch で安全判定
+    const auto retireEpoch = router.currentEpoch();
+    const auto minReaderEpoch = router.minReaderEpoch();
+    if (retireEpoch >= minReaderEpoch) {
+        // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
+        // カウンタ更新のみ行い、即座に復帰（NonRT safe）
+        setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // 3. executeReclaim(handle) — 安全確認完了
+    //    DELETE-8: Coordinator は Reclaimed 状態への遷移のみを行い、
+    //    物理削除（DSPCore* の delete）は DSPLifetimeManager 経由で別途実行済み。
+    //    DSPHandleRuntime::reclaim() は Handle の状態を Reclaimed に遷移する
+    //    （DSPCore* の削除は行わない — 既に retire path で enqueueWithRetry 済み）。
+    handleRuntime.reclaim(handle);
+    // ACK: reclaim complete — カウンタリセット
+    setReclaimInFlightCount(0);
+}
+
+//==============================================================================
+// ★ P0-5: QuarantineService implementation
+//==============================================================================
+
+QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
+    DSPHandleRuntime& handleRuntime,
+    DSPQuarantineManager& quarantineManager,
+    const QuarantineRequest& request) noexcept
+{
+    // QSVC-1: State変更 + Audit を単一トランザクションとして実行
+    QuarantineResult result{};
+
+    // 1. State 変更 — DSPHandleRuntime::quarantine()
+    if (!request.handle.isNull() && request.handle.slot > 0) {
+        handleRuntime.quarantine(request.handle);
+        result.stateChanged = true;
+    }
+
+    // 2. Audit 記録 — DSPQuarantineManager::quarantineHandle()
+    const bool auditLogged = quarantineManager.quarantineHandle(
+        request.handle.slot,
+        request.handle.generation,
+        request.reason);
+    result.auditLogged = auditLogged;
+
+    // QSVC-5 (ISR準拠): Audit 失敗時も State は変更しない。
+    //   Publish後は Immutable。Rollback 禁止。Diagnostic カウンタのみ更新。
+    if (!auditLogged && result.stateChanged) {
+        result.rolledBack = false;
+        result.stateChanged = true;  // State 変更は確定
+    }
+
+    return result;
 }
 
 void RuntimePublicationCoordinator::emitQuarantineIntent(
     const DSPHandle& handle,
     QuarantineReason reason,
+    DSPHandleRuntime& handleRuntime,
+    DSPQuarantineManager& quarantineManager,
     uint64_t contextEpoch) noexcept
 {
-    (void)handle;
-    (void)reason;
-    (void)contextEpoch;
-    // ★ P0-5: Quarantine Intent — Coordinator 経由の quarantine 要求。
-    //   現在は AudioEngine が直接 dspHandleRuntime_.quarantine() を呼んでいる。
-    //   将来、QuarantineService を介して単一 Authority で処理する設計に変更予定。
-    //   現状はプレースホルダ。
+    // QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行
+    // 直接 dspHandleRuntime_.quarantine() を呼ばない
+    QuarantineService::QuarantineRequest request{handle, reason, contextEpoch};
+    quarantineService_.executeQuarantine(handleRuntime, quarantineManager, request);
     setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
-}
-
-void RuntimePublicationCoordinator::requestReclaim(const DSPHandle& handle) noexcept
-{
-    (void)handle;
-    // ★ P0-4B: Reclaim Request — Coordinator 専用の reclaim 要求。
-    //   現在は DSPHandleRuntime::reclaim() が直接呼ばれている。
-    //   将来、Coordinator が epoch 安全確認後に reclaim を実行する設計に変更予定。
-    //   現状はプレースホルダ。
-    setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
 }
 
 } // namespace convo::isr
@@ -51977,12 +52186,43 @@ void RuntimePublicationCoordinator::requestReclaim(const DSPHandle& handle) noex
 #include "ISRRetireRouter.h"
 #include "ISRRetireOverflowRing.h"     // ★ Phase5: RetireOverflowEntry
 #include "../LockFreeRingBuffer.h"     // ★ Phase5: coordinatorDeferredRing_
+#include "ISRDSPHandle.h"              // ★ P0-5: QuarantineService needs full DSPHandle
+
+// ★ P0-4A: DSPLifetimeManager は global scope（DSPLifetimeManager.h 参照）
+//   processIntent の完全定義には DSPLifetimeManager.h の include が必要。
+//   ただし .h での include は循環依存防止のため、global 前方宣言＋.cpp で include する。
+class DSPLifetimeManager;
+class AudioEngine;
 
 namespace convo::isr {
 
-// ★ P0-4C: 前方宣言（完全定義は ISRDSPHandle.h / ISRDSPQuarantine.h）
-struct DSPHandle;
+// ★ P0-4C: 前方宣言（完全定義は ISRDSPQuarantine.h）
 enum class QuarantineReason : int;
+class DSPQuarantineManager;
+
+// ★ P0-5: QuarantineService — State変更 + Audit を単一トランザクションとして実行
+//   QSVC-1: State変更 + Audit を単一トランザクション。
+//   QSVC-3: State + Audit の整合性を保証。
+//   QSVC-5: 失敗時は State + Audit + Receipt の3状態をロールバック。
+class QuarantineService {
+public:
+    struct QuarantineRequest {
+        DSPHandle handle;
+        QuarantineReason reason;
+        uint64_t contextEpoch;
+    };
+
+    struct QuarantineResult {
+        bool stateChanged{false};
+        bool auditLogged{false};
+        bool rolledBack{false};
+    };
+
+    QuarantineResult executeQuarantine(
+        DSPHandleRuntime& handleRuntime,
+        DSPQuarantineManager& quarantineManager,
+        const QuarantineRequest& request) noexcept;
+};
 
 enum class PublishAuthority : uint8_t { Granted = 1 };
 enum class RetireAuthority : uint8_t { Granted = 1 };
@@ -52065,17 +52305,31 @@ public:
     /// Observe Intent: Timer から定期観測要求を発行する。
     /// Coordinator は Intent Queue に追加し、非同期に処理する。
     /// OBSERVE-1〜8 に従い、Timer はこのメソッドのみを呼び出す。
-    void emitObserveIntent() noexcept;
+    /// handle: 観測対象の DSPHandle（processIntent が retire する DSP を識別するために使用）
+    void emitObserveIntent(const DSPHandle& handle) noexcept;
 
     /// Quarantine Intent: 指定された DSPHandle を quarantine する要求を発行する。
     /// QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行する。
     void emitQuarantineIntent(const DSPHandle& handle,
                               QuarantineReason reason,
+                              DSPHandleRuntime& handleRuntime,
+                              DSPQuarantineManager& quarantineManager,
                               uint64_t contextEpoch = 0) noexcept;
 
     /// Reclaim Request: 指定された DSPHandle の reclaim を要求する。
     /// DELETE-2〜7: Coordinator は epoch 安全確認後、reclaim を実行する。
-    void requestReclaim(const DSPHandle& handle) noexcept;
+    /// handleRuntime: DSPHandleRuntime 参照（reclaim 委譲用）
+    /// router: ISRRetireRouter 参照（epoch 確認 + enqueueWithRetry 用）
+    void requestReclaim(const DSPHandle& handle,
+                        class DSPHandleRuntime& handleRuntime,
+                        class ISRRetireRouter& router) noexcept;
+
+    /// Observe Intent Queue から蓄積された Intent を処理する。
+    /// P0-4A: Timer から emitObserveIntent でキューイングされた Intent を
+    /// Coordinator Loop（NonRT）で取り出して retirePublishedDSP を実行する。
+    /// OBSERVE-3〜10 に従い、FIFO 順序で処理し、古い世代の Intent を破棄する。
+    void processIntent(AudioEngine& engine,
+                       DSPLifetimeManager& lifetimeMgr) noexcept;
 
     // ── ★ Phase 5: OverflowRing 統合管理 ──
 
@@ -52212,11 +52466,39 @@ private:
     RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity];
     std::atomic<size_t> lastResortCount_{0};
 
+    // ── ★ P0-4A: Observe Intent Queue (4層 Overflow) ──
+    // Timer Thread (RT) → emitObserveIntent → push → Coordinator Loop (NonRT) → processIntent → pop
+    // SPSC: Producer = Timer Thread, Consumer = Coordinator Loop
+    // LockFreeRingBuffer は FIFO を保証し、SPSC なので atomic オーバーヘッドなし
+    struct ObserveIntent {
+        DSPHandle handle;           // ★ 観測対象の DSPHandle（自己完結型 Intent）。ISR: Coordinator は handle のみで retire 対象を識別可能。
+        PublicationEpoch epoch;     // emit 時の publicationEpoch（FIFO順序保証、世代逆転検出用）
+        uint64_t intentId;          // 診断・モニタリング用シーケンス番号
+    };
+    static_assert(std::is_trivially_copyable_v<ObserveIntent>,
+        "ObserveIntent must be trivially copyable for LockFreeRingBuffer");
+    static_assert(std::is_standard_layout_v<ObserveIntent>,
+        "ObserveIntent must be standard layout for LockFreeRingBuffer");
+
+    static constexpr size_t kObserveIntentQueueCapacity = 1024;
+    LockFreeRingBuffer<ObserveIntent, kObserveIntentQueueCapacity> observeIntentQueue_;
+
+    // ★ QUEUE-11: Layer 2 (Fallback) — Primary 溢れのセカンダリキュー
+    static constexpr size_t kObserveFallbackCapacity = 2048;
+    LockFreeRingBuffer<ObserveIntent, kObserveFallbackCapacity> observeFallbackQueue_;
+
+    std::atomic<uint64_t> nextObserveIntentId_{0};
+    std::atomic<uint64_t> overflowCounter_{0};  // ★ QUEUE-13: Overflow 診断カウンタ
+    std::atomic<uint64_t> fallbackOverflowCounter_{0};  // ★ Fallback 溢れカウンタ
+
     // ★ Phase5: 滞留年限警告コールバック
     AgeWarnCallback overflowAgeWarnCallback_{nullptr};
 
     static constexpr std::uint64_t kPressureSlopeThreshold = 8;
     static constexpr std::uint32_t kPressureNormalizeWindows = 3;
+
+    // ★ P0-5: QuarantineService インスタンス
+    QuarantineService quarantineService_;
 };
 
 class MultiStagePublisher {
@@ -80001,6 +80283,149 @@ int main()
 
     juce::shutdownJuce_GUI();
     return allPassed ? 0 : 1;
+}
+
+```
+
+### 📄 `src\tests\NormalRetireDSPHandleCompareTests.cpp`
+
+```
+// NormalRetireDSPHandleCompareTests.cpp
+// P0-2b: PublishReceipt DSPCore*削除 — DSPHandle 比較の検証
+//
+// テスト内容:
+//   1. PublishReceipt が DSPHandle のみを保持することを確認
+//   2. DSPHandle の同値比較（operator==）が正しく動作することを確認
+//   3. getFadingRuntimeDSPHandle() が正しい Handle を返すことを確認
+//
+// ビルド: カスタム main() + bool testXxx() パターン
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <cassert>
+
+#include "audioengine/ISRDSPHandle.h"
+
+namespace {
+
+using convo::isr::DSPHandle;
+using convo::isr::DSPHandleRuntime;
+
+//==============================================================================
+// Test 1: PublishReceipt HandleOnly — DSPCore* 削除後も機能する
+//==============================================================================
+[[nodiscard]] bool testPublishReceiptHandleOnly()
+{
+    // PublishReceipt 相当の構造（AudioEngine.h から切り出し）
+    struct PublishReceiptTest {
+        DSPHandle handle{};
+        uint64_t publicationEpoch{0};
+        uint64_t generation{0};
+    };
+
+    // Default construct: handle is null
+    PublishReceiptTest receipt{};
+    if (!receipt.handle.isNull()) return false;
+
+    // Assign a handle
+    receipt.handle = DSPHandle{1, 42};
+    if (receipt.handle.isNull()) return false;
+    if (receipt.handle.slot != 1) return false;
+    if (receipt.handle.generation != 42) return false;
+
+    // Verify epoch and generation are independent
+    receipt.publicationEpoch = 100;
+    receipt.generation = 200;
+    if (receipt.publicationEpoch != 100) return false;
+    if (receipt.generation != 200) return false;
+
+    // Reset to null
+    receipt.handle = DSPHandle::null();
+    if (!receipt.handle.isNull()) return false;
+
+    std::printf("[PASS] testPublishReceiptHandleOnly\n");
+    return true;
+}
+
+//==============================================================================
+// Test 2: NormalRetireDSPHandleCompare — DSPHandle 比較
+//==============================================================================
+[[nodiscard]] bool testNormalRetireDSPHandleCompare()
+{
+    // Same handle must compare equal
+    DSPHandle handle1{5, 100};
+    DSPHandle handle2{5, 100};
+    if (!(handle1 == handle2)) return false;
+    if (handle1 != handle2) return false;
+
+    // Different slot must compare not equal
+    DSPHandle handle3{6, 100};
+    if (handle1 == handle3) return false;
+    if (!(handle1 != handle3)) return false;
+
+    // Different generation must compare not equal
+    DSPHandle handle4{5, 200};
+    if (handle1 == handle4) return false;
+    if (!(handle1 != handle4)) return false;
+
+    // Same slot/gen but different objects must compare equal (value semantics)
+    DSPHandle handleA{3, 777};
+    DSPHandle handleB{3, 777};
+    if (!(handleA == handleB)) return false;
+
+    // Null handles
+    DSPHandle null1 = DSPHandle::null();
+    DSPHandle null2 = DSPHandle::null();
+    if (!(null1 == null2)) return false;
+    if (!null1.isNull()) return false;
+
+    // Null vs non-null
+    if (null1 == handle1) return false;
+
+    std::printf("[PASS] testNormalRetireDSPHandleCompare\n");
+    return true;
+}
+
+//==============================================================================
+// Test 3: DSPHandle assignment preserves value
+//==============================================================================
+[[nodiscard]] bool testDSPHandleAssignment()
+{
+    PublishReceiptTest receipt{};
+    receipt.handle = DSPHandle{7, 999};
+
+    // Copy assignment
+    PublishReceiptTest receipt2{};
+    receipt2 = receipt;
+    if (!(receipt2.handle == receipt.handle)) return false;
+    if (receipt2.publicationEpoch != receipt.publicationEpoch) return false;
+    if (receipt2.generation != receipt.generation) return false;
+
+    std::printf("[PASS] testDSPHandleAssignment\n");
+    return true;
+}
+
+} // anonymous namespace
+
+//==============================================================================
+// main
+//==============================================================================
+int main()
+{
+    bool allPassed = true;
+
+    allPassed = testPublishReceiptHandleOnly() && allPassed;
+    allPassed = testNormalRetireDSPHandleCompare() && allPassed;
+    allPassed = testDSPHandleAssignment() && allPassed;
+
+    if (allPassed) {
+        std::printf("\n=== All NormalRetireDSPHandleCompare tests PASSED ===\n");
+        return EXIT_SUCCESS;
+    } else {
+        std::printf("\n=== Some NormalRetireDSPHandleCompare tests FAILED ===\n");
+        return EXIT_FAILURE;
+    }
 }
 
 ```

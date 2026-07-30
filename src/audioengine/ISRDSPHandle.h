@@ -129,9 +129,6 @@ public:
     // NonRT: DSP を Retired に遷移（grace period 開始）
     void retire(DSPHandle handle);
 
-    // NonRT: grace period 完了後のメモリ解放
-    void reclaim(DSPHandle handle);
-
     // NonRT: 問題検出時に DSP を Quarantined に遷移
     void quarantine(DSPHandle handle);
 
@@ -148,6 +145,10 @@ public:
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
     void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
 
+    // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim
+    //   通常パスは Coordinator::requestReclaim() 経由で実行される。
+    void shutdownReclaim(DSPHandle handle) { reclaim(handle); }
+
     // NonRT: 現在の active runtime DSP handle を取得
     DSPHandle getActiveRuntimeDSPHandle() const noexcept;
 
@@ -158,6 +159,12 @@ public:
     void emitOwnershipTrace(const std::filesystem::path& outputPath) const;
 
 private:
+    friend class RuntimePublicationCoordinator;
+
+    // NonRT: grace period 完了後のメモリ解放（Coordinator 専用）
+    // DELETE-1: reclaim() は Coordinator のみ呼び出し可能。
+    //   外部からは Coordinator::requestReclaim() 経由で実行する。
+    void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
     // ★ ADR-005: DSPHandle の型要件をコンパイル時に保証
     static_assert(std::is_trivially_copyable_v<DSPHandle>,

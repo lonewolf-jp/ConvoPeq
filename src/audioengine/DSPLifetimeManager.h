@@ -85,6 +85,24 @@ public:
         convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
     }
 
+    // ★ P0-4A: retireByHandle — DSPHandle から retire を実行する（self-contained Intent 用）
+    //   ISR: processIntent は lifetimeMgr.getActive() に依存せず、Intent 内の handle のみで
+    //   retire 対象を識別する。これにより専用 Coordinator Worker への移行が可能になる。
+    void retireByHandle(convo::isr::DSPHandle handle) noexcept
+    {
+        if (handle.isNull()) return;
+
+        // 1. Resolve handle → DSPCore*
+        const auto resolved = engine_.dspHandleRuntime_.resolve(handle);
+        if (!resolved.valid || resolved.isStale)
+            return;
+        auto* dsp = static_cast<AudioEngine::DSPCore*>(resolved.instance);
+        if (dsp == nullptr) return;
+
+        // 2. Route through retire path (DSPHandle retire + EpochDomain enqueue)
+        retire(dsp, 0);
+    }
+
     void retireDeferred() noexcept
     {
         // deferred queue drain: handled by AudioEngine threading

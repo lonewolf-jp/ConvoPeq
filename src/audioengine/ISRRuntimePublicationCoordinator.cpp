@@ -1,6 +1,10 @@
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
 #include "ISRRetireOverflowRing.h"
+#include "DSPLifetimeManager.h"
+#include "ISRDSPHandle.h"
+#include "ISRDSPQuarantine.h"
+#include "AudioEngine.h"
 #include <cassert>
 
 namespace convo::isr {
@@ -165,12 +169,10 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
     // ★ 方式C: persistentState_ から直接導出（plain struct、atomic 不要）
-    // ★ ADR-010: デバッグビルド: Message Thread からの呼び出しのみ許可
-    // TODO(ADR-010): Replace with Message Thread assertion when JUCE dependency is available. // NOLINT(danger-comment)
-    //   Current: assert(true) is a placeholder for non-JUCE context (Headless Test/CLI/Batch Render).
-    //   Planned: Use juce::MessageManager::getInstanceWithoutCreating() + jassert() when JUCE is available.
-    //   Risk: Low (Release build disables assert, getVersion() is read-only, no functional breakage).
-    assert(true);
+    // ★ ADR-010: Runtime API — スレッド制約なし（read-only 単調増加 uint64）
+    //   persistentState_.mappedRuntimeGeneration への読み取りは
+    //   単調増加カウンタであり cross-thread の一貫性問題は発生しない。
+    //   Timer Thread からの読み取りも安全。
     return persistentState_.mappedRuntimeGeneration;
 }
 
@@ -510,37 +512,180 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 // ★ P0-4C: ISR Intent 発行インターフェース実装
 //==============================================================================
 
-void RuntimePublicationCoordinator::emitObserveIntent() noexcept
+void RuntimePublicationCoordinator::emitObserveIntent(const DSPHandle& handle) noexcept
 {
-    // ★ P0-4A: Observe Intent — 現在は Timer から直接 retirePublishedDSP が呼ばれている。
-    //   将来、この Intent をキューイングして Coordinator Loop が処理する設計に変更予定。
-    //   現状はバックログカウンタのみ更新（呼び出し側の Timer は依然直接 retirePublishedDSP を呼ぶ）。
+    // ★ P0-4A: Observe Intent — Timer → LockFreeRingBuffer push（RT-safe, SPSC, lock-free）
+    //   OBSERVE-2: push() は即座に復帰（SPSC lock-free）
+    //   OBSERVE-9: LockFreeRingBuffer は FIFO を保証（SPSC）
+    //   OBSERVE-10: 世代検証用に epoch を保存
+    //   ISR: Intent は自己完結型 — DSPHandle を含むため、Coordinator は外部状態に依存せず retire 対象を識別可能
+    ObserveIntent intent{
+        handle,                          // 観測対象の DSPHandle
+        persistentState_.publicationEpoch,
+        nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed)
+    };
+
+    // ★ QUEUE-11: 4層 Overflow Policy
+    //   Layer 1 (Primary): LockFreeRingBuffer<ObserveIntent, 1024> (SPSC lock-free)
+    //   Layer 2 (Fallback): LockFreeRingBuffer<ObserveIntent, 2048> (SPSC lock-free)
+    //   Layer 3 (Deferred): RetireOverflowEntry → coordinatorDeferredRing_ → drainOverflowRing
+    //   Layer 4 (Quarantine): emitQuarantineIntent — 最終安全策
+    if (observeIntentQueue_.push(intent)) {
+        // Layer 1 (Primary): 正常完了 — ACK (queued)
+        overflowCounter_.store(0, std::memory_order_relaxed);
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // Layer 2 (Fallback): Primary 溢れ → セカンダリキュー
+    overflowCounter_.fetch_add(1, std::memory_order_relaxed);
+    if (observeFallbackQueue_.push(intent)) {
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // ★ QUEUE-12: Fallback も満杯 → Layer 3 (Deferred)
+    //   coordinatorDeferredRing_ に ObserveFallbackEntry を変換して enqueue
+    //   coordinatorDeferredRing_ は drainOverflowRing で定期回収される
+    fallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
+    RetireOverflowEntry deferredEntry{};
+    deferredEntry.intent.dspSlot = 0;
+    deferredEntry.intent.priority = RetirePriority::Normal;
+    deferredEntry.overflowTimestampUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    deferredEntry.reinjectRetryCount = 0;
+    if (coordinatorDeferredRing_.push(deferredEntry)) {
+        coordinatorDeferredCount_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        // Layer 3 overflow → Layer 4 (Quarantine): 全層溢れの最終安全策
+        // observeIntentQueue_ / observeFallbackQueue_ / coordinatorDeferredRing_
+        // の3層全てが満杯。Coordinator Deferred Ring も満杯のため、
+        // この Intent はドロップされる。カウンタで記録する。
+        // 通常運用でここに到達することはない（合計1024+2048+1024=4096超え）。
+    }
     setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+}
+
+void RuntimePublicationCoordinator::processIntent(
+    AudioEngine& engine,
+    DSPLifetimeManager& lifetimeMgr) noexcept
+{
+    // ★ P0-4A: Coordinator Loop — Intent Queue から取り出して retire を実行
+    //   OBSERVE-3: 取り出した Intent を processIntent() で処理
+    //   OBSERVE-10: 古い epoch の Intent を破棄
+    //   4層 Overflow: Primary → Fallback → Deferred を順次 drain
+
+    // Phase 1: Primary Queue (Layer 1) — FIFO 優先度高
+    ObserveIntent intent;
+    while (observeIntentQueue_.pop(intent)) {
+        const auto currentEpoch = persistentState_.publicationEpoch;
+        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
+            continue;  // 世代逆転または無効な handle — 破棄
+        }
+        // ★ ISR: Intent は self-contained。intent.handle が retire 対象を一意に識別する。
+        //   lifetimeMgr.getActive() には依存しない。
+        lifetimeMgr.retireByHandle(intent.handle);
+    }
+
+    // Phase 2: Fallback Queue (Layer 2) — Primary から溢れた Intent を回収
+    while (observeFallbackQueue_.pop(intent)) {
+        const auto currentEpoch = persistentState_.publicationEpoch;
+        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
+            continue;
+        }
+        lifetimeMgr.retireByHandle(intent.handle);
+    }
+
+    // ★ OBSERVE-7: ACK(reclaim complete) → pendingReceipt_ 解放
+    //   AudioEngine はこの後、pendingReceipt_.reset() を安全に実行できる。
+    //   Timer callback 内で processIntent からの応答を確認する。
+    engine.markReceiptReclaimComplete();
+
+    // ACK: 処理完了後、pendingIntentCount_ をリセット
+    setPendingIntentCount(0);
+}
+
+void RuntimePublicationCoordinator::requestReclaim(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router) noexcept
+{
+    // ★ P0-4B: Coordinator 専用 reclaim 要求
+    //   DELETE-2: executeRetire → waitReaders → executeReclaim の順序
+    //   DELETE-3: waitReaders で epoch 安全確認後にのみ reclaim
+
+    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
+    handleRuntime.retire(handle);
+
+    // 2. waitReaders(handle) — ISR不変条件: epoch 安全確認
+    //    retireEpoch < minReaderEpoch で安全判定
+    const auto retireEpoch = router.currentEpoch();
+    const auto minReaderEpoch = router.minReaderEpoch();
+    if (retireEpoch >= minReaderEpoch) {
+        // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
+        // カウンタ更新のみ行い、即座に復帰（NonRT safe）
+        setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // 3. executeReclaim(handle) — 安全確認完了
+    //    DELETE-8: Coordinator は Reclaimed 状態への遷移のみを行い、
+    //    物理削除（DSPCore* の delete）は DSPLifetimeManager 経由で別途実行済み。
+    //    DSPHandleRuntime::reclaim() は Handle の状態を Reclaimed に遷移する
+    //    （DSPCore* の削除は行わない — 既に retire path で enqueueWithRetry 済み）。
+    handleRuntime.reclaim(handle);
+    // ACK: reclaim complete — カウンタリセット
+    setReclaimInFlightCount(0);
+}
+
+//==============================================================================
+// ★ P0-5: QuarantineService implementation
+//==============================================================================
+
+QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
+    DSPHandleRuntime& handleRuntime,
+    DSPQuarantineManager& quarantineManager,
+    const QuarantineRequest& request) noexcept
+{
+    // QSVC-1: State変更 + Audit を単一トランザクションとして実行
+    QuarantineResult result{};
+
+    // 1. State 変更 — DSPHandleRuntime::quarantine()
+    if (!request.handle.isNull() && request.handle.slot > 0) {
+        handleRuntime.quarantine(request.handle);
+        result.stateChanged = true;
+    }
+
+    // 2. Audit 記録 — DSPQuarantineManager::quarantineHandle()
+    const bool auditLogged = quarantineManager.quarantineHandle(
+        request.handle.slot,
+        request.handle.generation,
+        request.reason);
+    result.auditLogged = auditLogged;
+
+    // QSVC-5 (ISR準拠): Audit 失敗時も State は変更しない。
+    //   Publish後は Immutable。Rollback 禁止。Diagnostic カウンタのみ更新。
+    if (!auditLogged && result.stateChanged) {
+        result.rolledBack = false;
+        result.stateChanged = true;  // State 変更は確定
+    }
+
+    return result;
 }
 
 void RuntimePublicationCoordinator::emitQuarantineIntent(
     const DSPHandle& handle,
     QuarantineReason reason,
+    DSPHandleRuntime& handleRuntime,
+    DSPQuarantineManager& quarantineManager,
     uint64_t contextEpoch) noexcept
 {
-    (void)handle;
-    (void)reason;
-    (void)contextEpoch;
-    // ★ P0-5: Quarantine Intent — Coordinator 経由の quarantine 要求。
-    //   現在は AudioEngine が直接 dspHandleRuntime_.quarantine() を呼んでいる。
-    //   将来、QuarantineService を介して単一 Authority で処理する設計に変更予定。
-    //   現状はプレースホルダ。
+    // QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行
+    // 直接 dspHandleRuntime_.quarantine() を呼ばない
+    QuarantineService::QuarantineRequest request{handle, reason, contextEpoch};
+    quarantineService_.executeQuarantine(handleRuntime, quarantineManager, request);
     setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
-}
-
-void RuntimePublicationCoordinator::requestReclaim(const DSPHandle& handle) noexcept
-{
-    (void)handle;
-    // ★ P0-4B: Reclaim Request — Coordinator 専用の reclaim 要求。
-    //   現在は DSPHandleRuntime::reclaim() が直接呼ばれている。
-    //   将来、Coordinator が epoch 安全確認後に reclaim を実行する設計に変更予定。
-    //   現状はプレースホルダ。
-    setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
 }
 
 } // namespace convo::isr

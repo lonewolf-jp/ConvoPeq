@@ -101,10 +101,17 @@ jobs:
       - name: Build and test (best-effort)
         if: steps.check_deps.outputs.skip != 'true'
         run: |
-          # TSan 対応テストのみビルド・実行。失敗しても graceful skip。
-          cmake --build ${{ env.BUILD_DIR }} --config Debug --target ISRRetireTests 2>/dev/null && \
-          ctest --test-dir ${{ env.BUILD_DIR }} -C Debug -R "ISRRetire" --output-on-failure 2>/dev/null || \
-          echo "[TSan] Build/test skipped — MKL/IPP dependent targets not available on Linux"
+          # Practical Stable ISR: MKL/IPP 非依存の ISR テストのみを対象とする。
+          # configure が失敗していたら graceful skip。
+          if [ ! -f "${{ env.BUILD_DIR }}/build.ninja" ]; then
+            echo "[TSan] Skipped (no build configured — MKL/IPP not available on Linux)"
+            exit 0
+          fi
+          # 利用可能な ISR テストをビルド
+          cmake --build "${{ env.BUILD_DIR }}" --config Debug --target ISRSemanticValidationTests 2>/dev/null || \
+          { echo "[TSan] Build failed (expected without MKL)"; exit 0; }
+          ctest --test-dir "${{ env.BUILD_DIR }}" -C Debug --output-on-failure 2>/dev/null || \
+          echo "[TSan] No TSan-compatible tests executed"
 
       - name: Report TSan status
         if: always()

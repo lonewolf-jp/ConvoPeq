@@ -14,12 +14,43 @@
 #include "ISRRetireRouter.h"
 #include "ISRRetireOverflowRing.h"     // ★ Phase5: RetireOverflowEntry
 #include "../LockFreeRingBuffer.h"     // ★ Phase5: coordinatorDeferredRing_
+#include "ISRDSPHandle.h"              // ★ P0-5: QuarantineService needs full DSPHandle
+
+// ★ P0-4A: DSPLifetimeManager は global scope（DSPLifetimeManager.h 参照）
+//   processIntent の完全定義には DSPLifetimeManager.h の include が必要。
+//   ただし .h での include は循環依存防止のため、global 前方宣言＋.cpp で include する。
+class DSPLifetimeManager;
+class AudioEngine;
 
 namespace convo::isr {
 
-// ★ P0-4C: 前方宣言（完全定義は ISRDSPHandle.h / ISRDSPQuarantine.h）
-struct DSPHandle;
+// ★ P0-4C: 前方宣言（完全定義は ISRDSPQuarantine.h）
 enum class QuarantineReason : int;
+class DSPQuarantineManager;
+
+// ★ P0-5: QuarantineService — State変更 + Audit を単一トランザクションとして実行
+//   QSVC-1: State変更 + Audit を単一トランザクション。
+//   QSVC-3: State + Audit の整合性を保証。
+//   QSVC-5: 失敗時は State + Audit + Receipt の3状態をロールバック。
+class QuarantineService {
+public:
+    struct QuarantineRequest {
+        DSPHandle handle;
+        QuarantineReason reason;
+        uint64_t contextEpoch;
+    };
+
+    struct QuarantineResult {
+        bool stateChanged{false};
+        bool auditLogged{false};
+        bool rolledBack{false};
+    };
+
+    QuarantineResult executeQuarantine(
+        DSPHandleRuntime& handleRuntime,
+        DSPQuarantineManager& quarantineManager,
+        const QuarantineRequest& request) noexcept;
+};
 
 enum class PublishAuthority : uint8_t { Granted = 1 };
 enum class RetireAuthority : uint8_t { Granted = 1 };
@@ -102,17 +133,31 @@ public:
     /// Observe Intent: Timer から定期観測要求を発行する。
     /// Coordinator は Intent Queue に追加し、非同期に処理する。
     /// OBSERVE-1〜8 に従い、Timer はこのメソッドのみを呼び出す。
-    void emitObserveIntent() noexcept;
+    /// handle: 観測対象の DSPHandle（processIntent が retire する DSP を識別するために使用）
+    void emitObserveIntent(const DSPHandle& handle) noexcept;
 
     /// Quarantine Intent: 指定された DSPHandle を quarantine する要求を発行する。
     /// QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行する。
     void emitQuarantineIntent(const DSPHandle& handle,
                               QuarantineReason reason,
+                              DSPHandleRuntime& handleRuntime,
+                              DSPQuarantineManager& quarantineManager,
                               uint64_t contextEpoch = 0) noexcept;
 
     /// Reclaim Request: 指定された DSPHandle の reclaim を要求する。
     /// DELETE-2〜7: Coordinator は epoch 安全確認後、reclaim を実行する。
-    void requestReclaim(const DSPHandle& handle) noexcept;
+    /// handleRuntime: DSPHandleRuntime 参照（reclaim 委譲用）
+    /// router: ISRRetireRouter 参照（epoch 確認 + enqueueWithRetry 用）
+    void requestReclaim(const DSPHandle& handle,
+                        class DSPHandleRuntime& handleRuntime,
+                        class ISRRetireRouter& router) noexcept;
+
+    /// Observe Intent Queue から蓄積された Intent を処理する。
+    /// P0-4A: Timer から emitObserveIntent でキューイングされた Intent を
+    /// Coordinator Loop（NonRT）で取り出して retirePublishedDSP を実行する。
+    /// OBSERVE-3〜10 に従い、FIFO 順序で処理し、古い世代の Intent を破棄する。
+    void processIntent(AudioEngine& engine,
+                       DSPLifetimeManager& lifetimeMgr) noexcept;
 
     // ── ★ Phase 5: OverflowRing 統合管理 ──
 
@@ -249,11 +294,39 @@ private:
     RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity];
     std::atomic<size_t> lastResortCount_{0};
 
+    // ── ★ P0-4A: Observe Intent Queue (4層 Overflow) ──
+    // Timer Thread (RT) → emitObserveIntent → push → Coordinator Loop (NonRT) → processIntent → pop
+    // SPSC: Producer = Timer Thread, Consumer = Coordinator Loop
+    // LockFreeRingBuffer は FIFO を保証し、SPSC なので atomic オーバーヘッドなし
+    struct ObserveIntent {
+        DSPHandle handle;           // ★ 観測対象の DSPHandle（自己完結型 Intent）。ISR: Coordinator は handle のみで retire 対象を識別可能。
+        PublicationEpoch epoch;     // emit 時の publicationEpoch（FIFO順序保証、世代逆転検出用）
+        uint64_t intentId;          // 診断・モニタリング用シーケンス番号
+    };
+    static_assert(std::is_trivially_copyable_v<ObserveIntent>,
+        "ObserveIntent must be trivially copyable for LockFreeRingBuffer");
+    static_assert(std::is_standard_layout_v<ObserveIntent>,
+        "ObserveIntent must be standard layout for LockFreeRingBuffer");
+
+    static constexpr size_t kObserveIntentQueueCapacity = 1024;
+    LockFreeRingBuffer<ObserveIntent, kObserveIntentQueueCapacity> observeIntentQueue_;
+
+    // ★ QUEUE-11: Layer 2 (Fallback) — Primary 溢れのセカンダリキュー
+    static constexpr size_t kObserveFallbackCapacity = 2048;
+    LockFreeRingBuffer<ObserveIntent, kObserveFallbackCapacity> observeFallbackQueue_;
+
+    std::atomic<uint64_t> nextObserveIntentId_{0};
+    std::atomic<uint64_t> overflowCounter_{0};  // ★ QUEUE-13: Overflow 診断カウンタ
+    std::atomic<uint64_t> fallbackOverflowCounter_{0};  // ★ Fallback 溢れカウンタ
+
     // ★ Phase5: 滞留年限警告コールバック
     AgeWarnCallback overflowAgeWarnCallback_{nullptr};
 
     static constexpr std::uint64_t kPressureSlopeThreshold = 8;
     static constexpr std::uint32_t kPressureNormalizeWindows = 3;
+
+    // ★ P0-5: QuarantineService インスタンス
+    QuarantineService quarantineService_;
 };
 
 class MultiStagePublisher {

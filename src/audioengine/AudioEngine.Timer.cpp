@@ -886,8 +886,11 @@ void AudioEngine::timerCallback()
                                                  std::memory_order_acq_rel,
                                                  std::memory_order_acquire))
             {
-                DSPLifetimeManager lifetimeMgr(*this);
-                retirePublishedDSP(current, lifetimeMgr);
+                // ★ ISR: Observer — Intent Queue push のみ。Retire は Coordinator の責務。
+                //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得して emit
+                const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+                if (!fadingHandle.isNull())
+                    runtimePublicationBridge_.emitObserveIntent(fadingHandle);
             }
         }
         crossfadeRuntime_.complete();
@@ -1015,8 +1018,18 @@ void AudioEngine::timerCallback()
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetimeMgr(*this);
-            retirePublishedDSP(current, lifetimeMgr);
+            // ★ ISR: Observer — Intent Queue push のみ
+            //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
+            const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+            if (!fadingHandle.isNull())
+                runtimePublicationBridge_.emitObserveIntent(fadingHandle);
         }
+    }
+
+    // ★ ISR: Coordinator — processIntent を定期実行
+    {
+        DSPLifetimeManager lifetimeMgr(*this);
+        runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
 
     if (!isShutdownInProgress()
@@ -1572,7 +1585,10 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
                                              std::memory_order_acquire))
         {
             DSPLifetimeManager lifetime(*this);
-            retirePublishedDSP(current, lifetime);
+            // ★ ISR: Observer — Intent Queue push のみ
+            const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+            if (!fadingHandle.isNull())
+                runtimePublicationBridge_.emitObserveIntent(fadingHandle);
         }
 
         // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得
@@ -1773,7 +1789,10 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         && "retirePublishedDSP: receiptReady_ true but pendingReceipt_ empty");
 
     uint64_t epoch = 0;
-    if (current == pendingReceipt_->dsp) {
+    // ★ P0-2b: DSPHandle 比較に変更（DSPCore* 比較の代替）
+    const auto currentHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+    if (!currentHandle.isNull() && !pendingReceipt_->handle.isNull()
+        && currentHandle == pendingReceipt_->handle) {
         // ★ Normal Retire: 一致 → publicationEpoch を伝搬（HW-1 目的達成）
         epoch = pendingReceipt_->publicationEpoch;
         normalRetireCount_.fetch_add(1, std::memory_order_relaxed);
@@ -1781,16 +1800,17 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         pendingReceipt_.reset();
         receiptReady_.store(false, std::memory_order_relaxed);
     } else {
-        // ★ Emergency Retire: 不一致（current != receipt->dsp）
+        // ★ Emergency Retire: 不一致（currentHandle != receipt->handle）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
         //   runtimeEpoch（router_->currentEpoch()）で退役。
         // ★ P1-2: receipt の handle を quarantine（retire 義務移転）
         if (!pendingReceipt_->handle.isNull()) {
-            dspHandleRuntime_.quarantine(pendingReceipt_->handle);
-            dspQuarantineManager_.quarantineHandle(
-                pendingReceipt_->handle.slot,
-                pendingReceipt_->handle.generation,
-                convo::isr::QuarantineReason::PublishViolation);
+            // ★ P0-5: Coordinator 経由で quarantine を実行（QSVC-2）
+            runtimePublicationBridge_.emitQuarantineIntent(
+                pendingReceipt_->handle,
+                convo::isr::QuarantineReason::PublishViolation,
+                dspHandleRuntime_,
+                dspQuarantineManager_);
         }
         // receipt は保持（次回 Normal Retire 時に再利用可能）。
         // ★ FIX-D1: epoch 差分ベース検出（旧: mismatchCount 回数ベース）
@@ -1823,11 +1843,12 @@ void AudioEngine::resetReceipt() noexcept
     // stale/emergency 時は retain 義務を quarantine へ移転
     if (!pendingReceipt_->handle.isNull())
     {
-        dspHandleRuntime_.quarantine(pendingReceipt_->handle);
-        dspQuarantineManager_.quarantineHandle(
-            pendingReceipt_->handle.slot,
-            pendingReceipt_->handle.generation,
-            convo::isr::QuarantineReason::ReceiptReset);
+        // ★ P0-5: Coordinator 経由で quarantine を実行（QSVC-2）
+        runtimePublicationBridge_.emitQuarantineIntent(
+            pendingReceipt_->handle,
+            convo::isr::QuarantineReason::ReceiptReset,
+            dspHandleRuntime_,
+            dspQuarantineManager_);
     }
 
     pendingReceipt_.reset();

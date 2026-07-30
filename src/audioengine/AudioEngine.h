@@ -1139,13 +1139,13 @@ public:
     // ★ 状態遷移: [empty] → [has_receipt]
     // ★ 同期: pendingReceipt_ 書込み → receiptReady_.store(true, release)
     // ★ P1-2: PublishReceipt に DSPHandle を保持（逆引き回避）
-    void storeReceipt(DSPCore* dsp, convo::isr::DSPHandle handle,
+    void storeReceipt(convo::isr::DSPHandle handle,
                       convo::isr::PublicationEpoch epoch) noexcept {
         if (fatal_.load(std::memory_order_relaxed) || receiptReady_.load(std::memory_order_relaxed)) {
             assert(false && "storeReceipt: not in Empty state");
             return;
         }
-        pendingReceipt_.emplace(PublishReceipt{dsp, handle, epoch, 0});
+        pendingReceipt_.emplace(PublishReceipt{handle, epoch, 0});
         convo::publishAtomic(receiptReady_, true, std::memory_order_release);
     }
 
@@ -1159,6 +1159,14 @@ public:
     //   Emergency/Stale: quarantine Intent を発行後、リセット。
     //   ISR: Coordinator の ACK を待ってから pendingReceipt_ を解放する。
     void resetReceipt() noexcept;
+
+    // ★ P0-4A OBSERVE-7: ACK(reclaim complete) — Coordinator からの解放通知
+    //   processIntent() 完了後に Coordinator が呼び出す。
+    //   pendingReceipt_ を安全に解放し、Timer が次回処理できるようにする。
+    void markReceiptReclaimComplete() noexcept {
+        pendingReceipt_.reset();
+        receiptReady_.store(false, std::memory_order_release);
+    }
 
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
     [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
@@ -1980,7 +1988,7 @@ private:
                         {
                             const auto resolved = rt.resolve(entry.second);
                             delete static_cast<EQCoeffCache*>(resolved.instance);
-                            rt.reclaim(entry.second);
+                            rt.shutdownReclaim(entry.second);
                         }
                     }
                 } else {
@@ -4050,7 +4058,10 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     if (!handle.isNull())
     {
         dspHandleRuntime_.retire(handle);
-        dspHandleRuntime_.reclaim(handle);
+        // ★ P0-4B DELETE-1: reclaim は Coordinator 専用。
+        //   現状は transitional 措置として shutdownReclaim() を使用。
+        //   将来 DSPLifetimeManager → Coordinator::requestReclaim() 経由に移行予定。
+        dspHandleRuntime_.shutdownReclaim(handle);
     }
 
     return true;
@@ -4341,8 +4352,7 @@ public:
     // PublishReceipt: Publication 時に発行される DSP + Epoch の組。
     // Timer の CAS retire パスで epoch を伝搬するために使用される。
     struct PublishReceipt {
-        DSPCore* dsp{nullptr};  // ★ P1-2: retirePublishedDSP 比較用（移行完了後 DSPHandle に一本化）
-        convo::isr::DSPHandle handle{};  // ★ P1-2: quarantine 用 Handle
+        convo::isr::DSPHandle handle{};  // ★ P0-2b: 唯一の識別子（DSPCore* 削除）
         convo::isr::PublicationEpoch publicationEpoch{0};
         convo::isr::PublicationGeneration generation{0};
     };
