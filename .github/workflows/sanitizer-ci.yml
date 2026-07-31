@@ -35,6 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # ★ ASan-CMAKE-4 修正（2026-07-31）: windows-latest には Intel oneAPI が未インストールのため、
+      #   CMakeLists.txt:833 の find_package(MKL REQUIRED CONFIG ...) が configure 時に失敗する。
+      #   oneAPI をセットアップして MKLROOT を設定することで解決する。
+      #   （ConvoPeq は MKL 必須依存のため、MKL 無しでは debug-asan ジョブは成立しない）
+      - name: Set up Intel oneAPI (MKL)
+        uses: intel/setup-intel-oneapi@v2
+        with:
+          components: mkl
+          version: "2026.0"
+
       - name: Configure CMake with ASan
         shell: pwsh
         run: |

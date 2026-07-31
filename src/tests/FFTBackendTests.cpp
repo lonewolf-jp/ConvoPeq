@@ -156,8 +156,10 @@ using convo::FFTExecutionContext;
 
     // Create context with reference — must accept
     FFTExecutionContext ctx(prodPlan);
-    if (ctx.hasPlan()) return false;  // prodPlan default is invalid → plan_ set but isValid false
-    // Actually plan_ is set to &prodPlan so hasPlan() returns true
+    // plan_ is set to &prodPlan so hasPlan() returns true
+    if (!ctx.hasPlan()) return false;
+    // prodPlan default is invalid → isPlanValid() must be false
+    if (ctx.isPlanValid()) return false;
 
     // setPlan with jassert guard — in test mode this would assert
     // For testing: create a context without plan, then set

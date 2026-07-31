@@ -279,11 +279,19 @@ namespace {
 
 int main()
 {
-    if (!testRuntimeWorldAuthorityProjectionContract())
-        throw std::runtime_error("runtime world authority projection contract failed");
+    try {
+        if (!testRuntimeWorldAuthorityProjectionContract())
+            throw std::runtime_error("runtime world authority projection contract failed");
 
-    if (!testRuntimeReadHandleOpaqueContract())
-        throw std::runtime_error("runtime read handle opaque contract failed");
+        if (!testRuntimeReadHandleOpaqueContract())
+            throw std::runtime_error("runtime read handle opaque contract failed");
 
-    return 0;
+        std::printf("[PASS] RuntimeWorldAuthorityProjectionTests\n");
+        return 0;
+    }
+    catch (const std::exception& e)
+    {
+        std::printf("[FAIL] %s\n", e.what());
+        return 1;
+    }
 }

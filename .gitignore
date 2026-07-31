@@ -13,6 +13,8 @@
 # CMake build directories
 build/
 build-icx/
+build-asan-msvc/
+build-asan-check/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt

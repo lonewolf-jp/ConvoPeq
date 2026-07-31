@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-07-30 23:11:02
+> Generated: 2026-07-31 20:22:46
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -136,6 +136,7 @@
         │   ├── CrossfadeAuthority.cpp
         │   ├── CrossfadeAuthority.h
         │   ├── CrossfadeRuntime.h
+        │   ├── DSPLifetimeManager.cpp
         │   ├── DSPLifetimeManager.h
         │   ├── DSPTransition.h
         │   ├── FrozenRuntimeWorld.cpp
@@ -172,6 +173,7 @@
         │   ├── ISRRuntimeIdentityGenerators.h
         │   ├── ISRRuntimePublicationCoordinator.cpp
         │   ├── ISRRuntimePublicationCoordinator.h
+        │   ├── ISRRuntimePublicationCoordinator_ProcessIntent.cpp
         │   ├── ISRRuntimeSemanticSchema.h
         │   ├── ISRSealedObject.h
         │   ├── ISRShutdown.cpp
@@ -276,7 +278,6 @@
         │   ├── PeakEstimator.h
         │   ├── UpperBoundEstimator.cpp
         │   └── UpperBoundEstimator.h
-        ├── nul
         └── tests/
             ├── BuildInputSemanticContractTests.cpp
             ├── CrossfadeExecutorLocalContractTests.cpp
@@ -389,17 +390,48 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/RuntimePublicationCoordinatorTests.cpp
     )
 
+    # ISRSemanticValidationTests は ISR セマンティクス検証用。
+    # RuntimePublicationCoordinator を直接使用するため .cpp を含める。
+    # JUCE/MKL/r8brain の include path が必要（AudioEngine.h 経由の依存）。
     add_executable(ISRSemanticValidationTests
         src/tests/ISRSemanticValidationTests.cpp
         src/audioengine/ISRClosure.cpp
         src/audioengine/ISRPayloadTier.cpp
         src/audioengine/ISRRetireRouter.cpp
-        src/audioengine/ISRRetire.cpp               # ★ Phase5: coordinator が RetireRuntime を参照
+        src/audioengine/ISRRetire.cpp
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
     )
+    target_include_directories(ISRSemanticValidationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(ISRSemanticValidationTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(ISRSemanticValidationTests PRIVATE juce::juce_core r8brain)
+    # JuceHeader.h の生成を ISRSemanticValidationTests より先に行う
+    add_dependencies(ISRSemanticValidationTests ConvoPeq)
 
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
+    )
+
+    # P0-2b: PublishReceipt DSPCore*削除 — DSPHandle 比較の検証
+    # DSPHandleRuntime::getFadingRuntimeDSPHandle() の動作検証のため
+    # ISRDSPHandle.cpp を同一ターゲットでコンパイルする。
+    add_executable(NormalRetireDSPHandleCompareTests
+        src/tests/NormalRetireDSPHandleCompareTests.cpp
+        src/audioengine/ISRDSPHandle.cpp
     )
 
     add_executable(RuntimeSemanticSchemaValidationTests
@@ -451,6 +483,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/PriorityIntegrationTests.cpp
         src/audioengine/ISRRetire.cpp              # RetireRuntime
     )
+    target_compile_options(PriorityIntegrationTests PRIVATE /EHsc)
 
     # ★ v14.0 Phase 8: Auto Gain Staging 契約テスト
     #   AutoGainPlanner::plan() の4パターン × Auto On/Off を検証（リファレンス実装）。
@@ -488,6 +521,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_include_directories(FFTBackendTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(FFTBackendTests PRIVATE IPP::ippcore IPP::ipps)
     target_compile_features(FFTBackendTests PRIVATE cxx_std_20)
+    target_compile_options(FFTBackendTests PRIVATE /EHsc)
     add_test(NAME FFTBackendTests COMMAND FFTBackendTests)
 
     # ★ Week2: boundExcessDb 分布測定ベンチマーク
@@ -500,13 +534,18 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
+        target_link_libraries(ISRSemanticValidationTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+        # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackend.cpp が AlignedAllocation.h
+        #   (mkl_malloc/mkl_free) を使用するため MKL::MKL をリンク（include も propagate される）
+        target_link_libraries(FFTBackendTests PRIVATE MKL::MKL)
     endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
     target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
+    target_compile_features(NormalRetireDSPHandleCompareTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
     target_compile_features(ObservePathSingleSourceTests PRIVATE cxx_std_20)
     target_compile_features(OverlapAuthoritySingularTests PRIVATE cxx_std_20)
@@ -540,6 +579,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
     )
     target_include_directories(RetireGraceSemanticsTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -548,6 +589,12 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
         ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
         ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(NormalRetireDSPHandleCompareTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
     target_include_directories(RuntimeSemanticSchemaValidationTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -619,6 +666,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
+    add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
     add_test(NAME OverlapAuthoritySingular COMMAND OverlapAuthoritySingularTests)
@@ -639,6 +687,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
+        target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
         target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
         target_compile_options(ObservePathSingleSourceTests PRIVATE /utf-8)
         target_compile_options(OverlapAuthoritySingularTests PRIVATE /utf-8)
@@ -655,6 +704,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(WIN32)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
                      ISRSemanticValidationTests RetireGraceSemanticsTests
+                     NormalRetireDSPHandleCompareTests
                      RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
                      OverlapAuthoritySingularTests ShadowCompareContractTests
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
@@ -674,6 +724,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(OverlapAuthoritySingularTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -691,7 +742,19 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
     target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
     target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+    # ISRSemanticValidationTests は juce_core.cpp をコンパイルするため、
+    # コマンドライン NOMINMAX=1 と JUCE の #define NOMINMAX（空）の衝突警告を抑制する。
+    # （ConvoPeq 本体と同様の対応。CMakeLists.txt 参照）
+    # ★ ASan-CMAKE-4 修正（2026-07-31）: これらの -Wno-* は Clang 系（icx）専用であり、
+    #   MSVC cl では D8021（無効なコマンドライン引数）になる。Clang/icx 系のみに限定する。
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|IntelLLVM")
+        target_compile_options(ISRSemanticValidationTests PRIVATE
+            -Wno-unused-command-line-argument
+            -Wno-macro-redefined
+        )
+    endif()
     target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+    target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /EHsc)
     target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
     target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
     target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
@@ -886,11 +949,13 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRRetireRouter.cpp
                 src/audioengine/ISRShutdown.cpp
                 src/audioengine/ISRRuntimePublicationCoordinator.cpp
+                src/audioengine/ISRRuntimePublicationCoordinator_ProcessIntent.cpp
                 src/audioengine/RuntimePublicationValidator.cpp
                 src/audioengine/CrossfadeAuthority.cpp
                 src/audioengine/PublicationAdmission.cpp
                 src/audioengine/PublicationExecutor.cpp
                 src/audioengine/RuntimePublicationOrchestrator.cpp
+                src/audioengine/DSPLifetimeManager.cpp
                 src/audioengine/TelemetryRecorder.cpp
                 src/audioengine/ISRDSPQuarantine.cpp
                 src/audioengine/ISRClosureGraphWalker.cpp
@@ -1069,6 +1134,12 @@ if(DEFINED ENV{MKLROOT})
     target_include_directories(ConvoPeq SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     if(TARGET MTNUPCMeasurement)
         target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    endif()
+    # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackendTests は src/FFTBackend.cpp を含み、
+    #   同ファイルが AlignedAllocation.h → mkl.h を include するため MKL include が必要。
+    #   追加しないと MSVC ビルドで C1083 (mkl.h not found) になる（実ビルド検証済み）。
+    if(TARGET FFTBackendTests)
+        target_include_directories(FFTBackendTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
 endif()
 
@@ -12923,6 +12994,11 @@ public:
         plan_ = &plan;
     }
 
+    /// Clear the Plan reference (NonRT teardown phase only, PLAN-LT-10).
+    /// Enables a subsequent Builder-phase setPlan() on the same context,
+    /// e.g. when a re-prepare rebuilds plans (MKLNonUniformConvolver).
+    void clearPlan() noexcept { plan_ = nullptr; }
+
     // Non-copyable, movable (move preserves pointer).
     FFTExecutionContext(const FFTExecutionContext&) = delete;
     FFTExecutionContext& operator=(const FFTExecutionContext&) = delete;
@@ -16384,6 +16460,7 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
     {
         if (m_fftPlan[i].isValid())
             ProductionFft::destroyPlan(m_fftPlan[i]);
+        m_fftCtx[i].clearPlan();  // 再 setPlan を可能にする (PLAN-LT-10)
     }
     m_numActiveLayers = 0;
     m_latency         = 0;
@@ -28531,12 +28608,6 @@ dcBlocker.process(channelData, numSamples);
 ※ 実測値は CPU アーキテクチャ・コンパイラ最適化・メモリ帯域に依存します。
 ※ 2 段化による位相改善効果：20Hz で約 2.9°→2.3°（約 20% 低減）
 */
-
-```
-
-### 📄 `src\nul`
-
-```
 
 ```
 
@@ -44308,6 +44379,7 @@ private:
     friend class convo::isr::RuntimePublicationOrchestrator;
     friend class convo::isr::PublicationExecutor;
     friend class convo::isr::DSPTransition;
+    friend class DSPLifetimeManager;
 
     // ★ work70: RegistrationContext — commitRuntimePublication の registration コンテキスト。
     //   dsp != nullptr: commitRuntimePublication が新規登録
@@ -46089,142 +46161,165 @@ private:
 
 ```
 
+### 📄 `src\audioengine\DSPLifetimeManager.cpp`
+
+```
+#include "DSPLifetimeManager.h"
+#include "AudioEngine.h"
+
+DSPLifetimeManager::DSPLifetimeManager(AudioEngine& engine) noexcept
+    : engine_(engine)
+    , router_(engine_.m_retireRouter.get())
+{
+}
+
+DSPLifetimeManager::DSPLifetimeManager(AudioEngine& engine, convo::isr::ISRRetireRouter* router) noexcept
+    : engine_(engine)
+    , router_(router)
+{
+}
+
+void DSPLifetimeManager::activate(void* dsp) noexcept
+{
+    if (dsp == nullptr)
+        return;
+    engine_.registerDSPHandleForRuntime(static_cast<AudioEngine::DSPCore*>(dsp));
+}
+
+void DSPLifetimeManager::beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to, convo::isr::CrossfadeId id) noexcept
+{
+    juce::ignoreUnused(from, to, id);
+}
+
+void DSPLifetimeManager::retire(void* dsp) noexcept
+{
+    retire(dsp, 0);
+}
+
+void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
+{
+    if (dsp == nullptr)
+        return;
+
+    const bool retired = engine_.retireDSPHandleForRuntime(static_cast<AudioEngine::DSPCore*>(dsp));
+    if (!retired)
+        return;
+
+    if (router_ == nullptr)
+        return;
+
+    const auto epoch = (publicationEpoch > 0)
+        ? publicationEpoch
+        : router_->currentEpoch();
+
+    const auto result = router_->enqueueWithRetry(
+        dsp, &AudioEngine::destroyDSPCoreNode,
+        epoch,
+        DeletionEntryType::Generic);
+    juce::ignoreUnused(result);
+
+    convo::fetchAddAtomic(currentRetiringGeneration_,
+        static_cast<uint64_t>(1),
+        std::memory_order_acq_rel);
+}
+
+void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull())
+        return;
+
+    AudioEngine::DSPCore* toDelete = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock(engine_.runtimeDSPHandleMapMutex_);
+        for (auto it = engine_.runtimeDSPHandleMap_.begin();
+             it != engine_.runtimeDSPHandleMap_.end(); ++it)
+        {
+            if (it->second == handle)
+            {
+                toDelete = it->first;
+                engine_.runtimeDSPHandleMap_.erase(it);
+                break;
+            }
+        }
+    }
+
+    if (toDelete == nullptr)
+        return;
+
+    engine_.dspHandleRuntime_.retire(handle);
+
+    if (router_ == nullptr)
+        return;
+
+    const auto epoch = router_->currentEpoch();
+    const auto result = router_->enqueueWithRetry(
+        toDelete, &AudioEngine::destroyDSPCoreNode,
+        epoch,
+        DeletionEntryType::Generic);
+    juce::ignoreUnused(result);
+
+    convo::fetchAddAtomic(currentRetiringGeneration_,
+        static_cast<uint64_t>(1),
+        std::memory_order_acq_rel);
+}
+
+void DSPLifetimeManager::retireDeferred() noexcept
+{
+    convo::consumeAtomic(currentRetiringGeneration_, std::memory_order_acquire);
+}
+
+void* DSPLifetimeManager::getActive() const noexcept
+{
+    return engine_.getActiveRuntimeDSP();
+}
+
+void DSPLifetimeManager::destroyRolledBackDSP(void* dsp) noexcept
+{
+    if (dsp == nullptr)
+        return;
+    AudioEngine::destroyDSPCoreNode(dsp);
+    convo::fetchAddAtomic(currentRetiringGeneration_,
+        static_cast<uint64_t>(1),
+        std::memory_order_acq_rel);
+}
+
+[[nodiscard]] uint64_t DSPLifetimeManager::retiringGeneration() const noexcept
+{
+    return convo::consumeAtomic(currentRetiringGeneration_,
+                                std::memory_order_acquire);
+}
+
+```
+
 ### 📄 `src\audioengine\DSPLifetimeManager.h`
 
 ```
 #pragma once
 
-#include "AudioEngine.h"
 #include "ISRRetireRouter.h"
 
-// DSPLifetimeManager: DSP の activation / crossfade / retire を一元管理する。
-// Publication 完了後に NonRT で非同期的に呼ばれる。
-//
-// ★Phase-B: ISRRetireRouter 経由で EpochDomain に直接 enqueueRetire する。
-//   retireDSP()（削除済み R-2）のラッパではなく、Router → EpochDomain へ直接委譲する。
+class AudioEngine;
+
 class DSPLifetimeManager {
 public:
-    explicit DSPLifetimeManager(AudioEngine& engine) noexcept
-        : engine_(engine), router_(engine.m_retireRouter.get()) {}
+    explicit DSPLifetimeManager(AudioEngine& engine) noexcept;
+    explicit DSPLifetimeManager(AudioEngine& engine, convo::isr::ISRRetireRouter* router) noexcept;
 
-    explicit DSPLifetimeManager(AudioEngine& engine, convo::isr::ISRRetireRouter* router) noexcept
-        : engine_(engine), router_(router) {}
-
-    // Authority: DSPLifetimeManager (Lifecycle Authority)
-    // ★ work70-FIX: activate — DSPCore* + DSPHandle 両方を活性化する。
-    //   Authority: DSPLifetimeManager (DSPCore* lifecycle) + DSPHandleRuntime (Handle lifecycle)
-    //   が、activeRuntimeDSPHandle_ の更新は commitRuntimePublication() が唯一のAuthority。
-    //   ここでは DSPCore* の setActiveRuntimeDSP のみ行い、Handle の activate は行わない。
-    //   [設計決定]: activeRuntimeDSPHandle_ は commitRuntimePublication() 内の publish 成功後にのみ更新。
-    void activate(AudioEngine::DSPCore* dsp) noexcept
-    {
-        if (dsp == nullptr) return;
-        engine_.setActiveRuntimeDSP(dsp);
-    }
-
-    // Authority: CrossfadeAuthorityRuntime（id は Authority から注入）
-    void beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to, convo::isr::CrossfadeId id) noexcept
-    {
-        engine_.dspHandleRuntime_.beginCrossfade(from, to, id);
-    }
-
-    // Authority: DSPLifetimeManager (Lifecycle Authority)
-    // Retire pipeline: DSPLifetimeManager → ISRRetireRouter → EpochDomain
-    // [Bug2 Phase1] enqueueWithRetry に委譲（リトライロジックは Router に集約）
-    void retire(AudioEngine::DSPCore* dsp) noexcept
-    {
-        if (dsp == nullptr) return;
-        // 1. Release DSP handle (must happen before enqueue)
-        if (!engine_.retireDSPHandleForRuntime(dsp))
-            return;
-
-        // 2. Route through ISRRetireRouter（enqueueWithRetry が tryReclaim + 再試行を内包）
-        const uint64_t epoch = router_->currentEpoch();
-        router_->enqueueWithRetry(static_cast<void*>(dsp),
-                                   &AudioEngine::destroyDSPCoreNode,
-                                   epoch,
-                                   DeletionEntryType::Generic);
-
-        convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
-                              static_cast<std::uint64_t>(1),
-                              std::memory_order_acq_rel);
-
-        // ★ work70 P1-c: 最新の retire 対象世代を記録（MEM_SNAP の retiringGeneration 用）
-        const uint64_t committedGen = convo::consumeAtomic(
-            engine_.lastCommittedRuntimeGeneration_, std::memory_order_acquire);
-        convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
-    }
-
-    // ★ HW-1: retire overload — publicationEpoch を外部から指定可能
-    //   epoch > 0 → 指定 epoch を使用（router_->currentEpoch() は使わない）
-    //   epoch=0 → 元の overload に fallback
-    void retire(AudioEngine::DSPCore* dsp, uint64_t publicationEpoch) noexcept
-    {
-        if (dsp == nullptr) return;
-        if (!engine_.retireDSPHandleForRuntime(dsp))
-            return;
-
-        const uint64_t epoch = (publicationEpoch > 0) ? publicationEpoch : router_->currentEpoch();
-        router_->enqueueWithRetry(static_cast<void*>(dsp),
-                                   &AudioEngine::destroyDSPCoreNode,
-                                   epoch,
-                                   DeletionEntryType::Generic);
-
-        convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
-                              static_cast<std::uint64_t>(1),
-                              std::memory_order_acq_rel);
-
-        const uint64_t committedGen = convo::consumeAtomic(
-            engine_.lastCommittedRuntimeGeneration_, std::memory_order_acquire);
-        convo::publishAtomic(currentRetiringGeneration_, committedGen, std::memory_order_release);
-    }
-
-    // ★ P0-4A: retireByHandle — DSPHandle から retire を実行する（self-contained Intent 用）
-    //   ISR: processIntent は lifetimeMgr.getActive() に依存せず、Intent 内の handle のみで
-    //   retire 対象を識別する。これにより専用 Coordinator Worker への移行が可能になる。
-    void retireByHandle(convo::isr::DSPHandle handle) noexcept
-    {
-        if (handle.isNull()) return;
-
-        // 1. Resolve handle → DSPCore*
-        const auto resolved = engine_.dspHandleRuntime_.resolve(handle);
-        if (!resolved.valid || resolved.isStale)
-            return;
-        auto* dsp = static_cast<AudioEngine::DSPCore*>(resolved.instance);
-        if (dsp == nullptr) return;
-
-        // 2. Route through retire path (DSPHandle retire + EpochDomain enqueue)
-        retire(dsp, 0);
-    }
-
-    void retireDeferred() noexcept
-    {
-        // deferred queue drain: handled by AudioEngine threading
-    }
-
-    AudioEngine::DSPCore* getActive() const noexcept { return engine_.getActiveRuntimeDSP(); }
-
-    // ★ work70 Phase2: destroyRolledBackDSP — EBR を経由しない特殊破棄ルート。
-    //   「Publication Authority から返却された未公開オブジェクト（Never Published Object）」
-    //   のみを対象とし、EBR epoch 保護は不要（publish されたことのない DSPCore は
-    //   Audio Thread から到達不能なため）。
-    //   事前条件: Handle は既に rollback 済み（Reclaimed）。
-    //   post-condition: DSPCore のメモリが解放される。
-    void destroyRolledBackDSP(AudioEngine::DSPCore* dsp) noexcept
-    {
-        if (dsp == nullptr) return;
-        engine_.destroyDSPCoreNode(dsp);
-    }
-
-    // ★ work70 P1-c: MEM_SNAP の retiringGeneration 用（DSPLifetimeManager が唯一の Authority）
-    [[nodiscard]] uint64_t retiringGeneration() const noexcept {
-        return convo::consumeAtomic(currentRetiringGeneration_, std::memory_order_acquire);
-    }
+    void activate(void* dsp) noexcept;
+    void beginCrossfade(convo::isr::DSPHandle from, convo::isr::DSPHandle to, convo::isr::CrossfadeId id) noexcept;
+    void retire(void* dsp) noexcept;
+    void retire(void* dsp, uint64_t publicationEpoch) noexcept;
+    void retireByHandle(convo::isr::DSPHandle handle) noexcept;
+    void retireDeferred() noexcept;
+    void* getActive() const noexcept;
+    void destroyRolledBackDSP(void* dsp) noexcept;
+    [[nodiscard]] uint64_t retiringGeneration() const noexcept;
 
 private:
     AudioEngine& engine_;
     convo::isr::ISRRetireRouter* router_;
-    std::atomic<uint64_t> currentRetiringGeneration_{0};  // ★ work70 P1-c: retire 対象世代
+    std::atomic<uint64_t> currentRetiringGeneration_{0};
 };
 
 ```
@@ -46928,8 +47023,16 @@ DSPHandleRuntime::DSPHandleRuntime()
     static const bool isLockFree = []{
         std::atomic<DSPHandle> test{ DSPHandle::null() };
         const bool ok = test.is_lock_free();
-        // Debugビルドでロックフリー性を保証（Releaseはコンパイラ信頼）
+        // MSVC では 16バイト atomic の is_lock_free()/is_always_lock_free() が
+        // false を返す（STL の保宅的判定）。実際は InterlockedCompareExchange128
+        // (CMPXCHG16B) で lock-free に動作するため、MSVC ではアサートを回避する。
+        // Clang/GCC x64 では alignas(16) により is_lock_free()==true が保証される。
+        // see ISRDSPHandle.h:174-182 (ADR-005)。
+#if defined(_MSC_VER)
+        (void)ok;
+#else
         assert(ok && "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
+#endif
         return ok;
     }();
     (void)isLockFree; // unused in Release
@@ -47217,8 +47320,13 @@ namespace isr {
 
 /**
  * DSP スロット + 世代による handle（ABA 防止）
+ *
+ * alignas(16): 16バイト構造体のため atomic<DSPHandle> が CMPXCHG16B を
+ * 使用するには 16バイトアライメントが必要。MSVC では 8アラインのまま
+ * だと is_lock_free() が false になり Debug ビルドの assert が失敗する。
+ * （ISRDSPHandle.cpp:12-20 / ISRDSPHandle.h:174-177 参照）
  */
-struct DSPHandle
+struct alignas(16) DSPHandle
 {
     uint32_t slot;        // レジストリスロット番号
     uint64_t generation;  // ★ B-1: 64bit化（世代番号）
@@ -47373,8 +47481,10 @@ private:
     static_assert(std::is_standard_layout_v<DSPHandle>,
         "DSPHandle must be standard layout for ISR Runtime");
     // ★ 16バイト構造体のため CMPXCHG16B に依存。x64+AVX2(Haswell以降)前提。
-    //    icx では is_always_lock_free がコンパイル時保証されないため、
-    //    Runtime初期化時に is_lock_free() で検証する（#define NDEBUG 時は省略）。
+    //    alignas(16) により atomic<DSPHandle> は 16バイトアラインされ、
+    //    MSVC Debug でも is_lock_free() == true が保証される。
+    //    （is_always_lock_free は MSVC ではコンパイル時保証されないため
+    //     Runtime初期化時の is_lock_free() 検証は残す — ISRDSPHandle.cpp:12-20）
     // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
     //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
@@ -50685,10 +50795,11 @@ uint64_t ISRRetireRouter::reclaimSuccessCount() const noexcept
 
 // ISR P1-19: 公開APIに EpochDomain 型を露出しない。
 // コンストラクタは IEpochProvider& を受け取り、内部でダウンキャストする。
-#include "DeferredDeletionQueue.h" // DeletionEntryType
+#include "../DeferredDeletionQueue.h" // DeletionEntryType
 #include "core/IEpochProvider.h"
 #include "core/IRetireRouter.h"
 #include "ISRAuthorityClass.h"
+#include "ISRDSPHandle.h"
 
 namespace convo {
 namespace isr {
@@ -51476,10 +51587,8 @@ private:
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
 #include "ISRRetireOverflowRing.h"
-#include "DSPLifetimeManager.h"
 #include "ISRDSPHandle.h"
 #include "ISRDSPQuarantine.h"
-#include "AudioEngine.h"
 #include <cassert>
 
 namespace convo::isr {
@@ -52042,45 +52151,6 @@ void RuntimePublicationCoordinator::emitObserveIntent(const DSPHandle& handle) n
     setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
 }
 
-void RuntimePublicationCoordinator::processIntent(
-    AudioEngine& engine,
-    DSPLifetimeManager& lifetimeMgr) noexcept
-{
-    // ★ P0-4A: Coordinator Loop — Intent Queue から取り出して retire を実行
-    //   OBSERVE-3: 取り出した Intent を processIntent() で処理
-    //   OBSERVE-10: 古い epoch の Intent を破棄
-    //   4層 Overflow: Primary → Fallback → Deferred を順次 drain
-
-    // Phase 1: Primary Queue (Layer 1) — FIFO 優先度高
-    ObserveIntent intent;
-    while (observeIntentQueue_.pop(intent)) {
-        const auto currentEpoch = persistentState_.publicationEpoch;
-        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
-            continue;  // 世代逆転または無効な handle — 破棄
-        }
-        // ★ ISR: Intent は self-contained。intent.handle が retire 対象を一意に識別する。
-        //   lifetimeMgr.getActive() には依存しない。
-        lifetimeMgr.retireByHandle(intent.handle);
-    }
-
-    // Phase 2: Fallback Queue (Layer 2) — Primary から溢れた Intent を回収
-    while (observeFallbackQueue_.pop(intent)) {
-        const auto currentEpoch = persistentState_.publicationEpoch;
-        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
-            continue;
-        }
-        lifetimeMgr.retireByHandle(intent.handle);
-    }
-
-    // ★ OBSERVE-7: ACK(reclaim complete) → pendingReceipt_ 解放
-    //   AudioEngine はこの後、pendingReceipt_.reset() を安全に実行できる。
-    //   Timer callback 内で processIntent からの応答を確認する。
-    engine.markReceiptReclaimComplete();
-
-    // ACK: 処理完了後、pendingIntentCount_ をリセット
-    setPendingIntentCount(0);
-}
-
 void RuntimePublicationCoordinator::requestReclaim(
     const DSPHandle& handle,
     DSPHandleRuntime& handleRuntime,
@@ -52511,6 +52581,45 @@ private:
     RuntimeBoundary boundary_;
     bool rejected_ = false;
 };
+
+} // namespace convo::isr
+
+```
+
+### 📄 `src\audioengine\ISRRuntimePublicationCoordinator_ProcessIntent.cpp`
+
+```
+#include "ISRRuntimePublicationCoordinator.h"
+#include "DSPLifetimeManager.h"
+#include "AudioEngine.h"
+
+namespace convo::isr {
+
+void RuntimePublicationCoordinator::processIntent(
+    AudioEngine& engine,
+    DSPLifetimeManager& lifetimeMgr) noexcept
+{
+    ObserveIntent intent;
+    while (observeIntentQueue_.pop(intent)) {
+        const auto currentEpoch = persistentState_.publicationEpoch;
+        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
+            continue;
+        }
+        lifetimeMgr.retireByHandle(intent.handle);
+    }
+
+    while (observeFallbackQueue_.pop(intent)) {
+        const auto currentEpoch = persistentState_.publicationEpoch;
+        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
+            continue;
+        }
+        lifetimeMgr.retireByHandle(intent.handle);
+    }
+
+    engine.markReceiptReclaimComplete();
+
+    setPendingIntentCount(0);
+}
 
 } // namespace convo::isr
 
@@ -78992,8 +79101,10 @@ using convo::FFTExecutionContext;
 
     // Create context with reference — must accept
     FFTExecutionContext ctx(prodPlan);
-    if (ctx.hasPlan()) return false;  // prodPlan default is invalid → plan_ set but isValid false
-    // Actually plan_ is set to &prodPlan so hasPlan() returns true
+    // plan_ is set to &prodPlan so hasPlan() returns true
+    if (!ctx.hasPlan()) return false;
+    // prodPlan default is invalid → isPlanValid() must be false
+    if (ctx.isPlanValid()) return false;
 
     // setPlan with jassert guard — in test mode this would assert
     // For testing: create a context without plan, then set
@@ -80299,6 +80410,7 @@ int main()
 //   3. getFadingRuntimeDSPHandle() が正しい Handle を返すことを確認
 //
 // ビルド: カスタム main() + bool testXxx() パターン
+// リンク: ISRDSPHandle.cpp を同一ターゲットでコンパイル（CMakeLists.txt 参照）
 
 #include <cstdio>
 #include <cstdlib>
@@ -80312,18 +80424,18 @@ namespace {
 using convo::isr::DSPHandle;
 using convo::isr::DSPHandleRuntime;
 
+// PublishReceipt 相当の構造（AudioEngine.h から切り出し）
+struct PublishReceiptTest {
+    DSPHandle handle{};
+    uint64_t publicationEpoch{0};
+    uint64_t generation{0};
+};
+
 //==============================================================================
 // Test 1: PublishReceipt HandleOnly — DSPCore* 削除後も機能する
 //==============================================================================
 [[nodiscard]] bool testPublishReceiptHandleOnly()
 {
-    // PublishReceipt 相当の構造（AudioEngine.h から切り出し）
-    struct PublishReceiptTest {
-        DSPHandle handle{};
-        uint64_t publicationEpoch{0};
-        uint64_t generation{0};
-    };
-
     // Default construct: handle is null
     PublishReceiptTest receipt{};
     if (!receipt.handle.isNull()) return false;
@@ -80406,6 +80518,49 @@ using convo::isr::DSPHandleRuntime;
     return true;
 }
 
+//==============================================================================
+// Test 4: getFadingRuntimeDSPHandle — crossfade 中の fading handle 検証
+//   P0-2b: fadingRuntimeDSPHandle_ は store(publishAtomic) で書かれ、
+//   beginCrossfade で from を保持、activate/endCrossfade で null にリセットされる。
+//==============================================================================
+[[nodiscard]] bool testFadingRuntimeDSPHandle()
+{
+    DSPHandleRuntime runtime;
+
+    // Initial: no active/fading handle
+    if (!runtime.getActiveRuntimeDSPHandle().isNull()) return false;
+    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+
+    // Create two DSP instances
+    void* instanceA = reinterpret_cast<void*>(0x1000);
+    void* instanceB = reinterpret_cast<void*>(0x2000);
+    DSPHandle from = runtime.create(instanceA);
+    DSPHandle to = runtime.create(instanceB);
+    if (from.isNull() || to.isNull()) return false;
+    if (from == to) return false;
+
+    // beginCrossfade: fading handle は from を返す
+    runtime.beginCrossfade(from, to, 1);
+    if (!(runtime.getFadingRuntimeDSPHandle() == from)) return false;
+
+    // activate: fading が null にリセット、active は to
+    runtime.activate(to);
+    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+    if (!(runtime.getActiveRuntimeDSPHandle() == to)) return false;
+
+    // 再度 crossfade 開始 → 再び from を返す
+    runtime.beginCrossfade(from, to, 2);
+    if (!(runtime.getFadingRuntimeDSPHandle() == from)) return false;
+
+    // endCrossfade: fading が null にリセット、active は to
+    runtime.endCrossfade(2);
+    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+    if (!(runtime.getActiveRuntimeDSPHandle() == to)) return false;
+
+    std::printf("[PASS] testFadingRuntimeDSPHandle\n");
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -80418,6 +80573,7 @@ int main()
     allPassed = testPublishReceiptHandleOnly() && allPassed;
     allPassed = testNormalRetireDSPHandleCompare() && allPassed;
     allPassed = testDSPHandleAssignment() && allPassed;
+    allPassed = testFadingRuntimeDSPHandle() && allPassed;
 
     if (allPassed) {
         std::printf("\n=== All NormalRetireDSPHandleCompare tests PASSED ===\n");
@@ -81173,7 +81329,6 @@ int main()
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <stdexcept>
 #include <vector>
 #include <algorithm>
 
@@ -81340,26 +81495,28 @@ using convo::isr::RetireRuntime;
 
 int main()
 {
-    try
-    {
-        if (!testEscalateAllRetiresToCritical())
-            throw std::runtime_error("escalate all retires to critical failed");
-
-        if (!testEscalateAllRetiresPartial())
-            throw std::runtime_error("escalate all retires partial failed");
-
-        if (!testQuarantineTriggersHighPriority())
-            throw std::runtime_error("quarantine triggers high priority failed");
-
-        if (!testShutdownEscalation())
-            throw std::runtime_error("shutdown escalation failed");
-
-        if (!testPriorityBacklogBreakdown())
-            throw std::runtime_error("priority backlog breakdown failed");
+    if (!testEscalateAllRetiresToCritical()) {
+        std::fprintf(stderr, "FAIL: escalate all retires to critical failed\n");
+        return 1;
     }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "FAIL: %s\n", e.what());
+
+    if (!testEscalateAllRetiresPartial()) {
+        std::fprintf(stderr, "FAIL: escalate all retires partial failed\n");
+        return 1;
+    }
+
+    if (!testQuarantineTriggersHighPriority()) {
+        std::fprintf(stderr, "FAIL: quarantine triggers high priority failed\n");
+        return 1;
+    }
+
+    if (!testShutdownEscalation()) {
+        std::fprintf(stderr, "FAIL: shutdown escalation failed\n");
+        return 1;
+    }
+
+    if (!testPriorityBacklogBreakdown()) {
+        std::fprintf(stderr, "FAIL: priority backlog breakdown failed\n");
         return 1;
     }
 
@@ -83610,13 +83767,21 @@ namespace {
 
 int main()
 {
-    if (!testRuntimeWorldAuthorityProjectionContract())
-        throw std::runtime_error("runtime world authority projection contract failed");
+    try {
+        if (!testRuntimeWorldAuthorityProjectionContract())
+            throw std::runtime_error("runtime world authority projection contract failed");
 
-    if (!testRuntimeReadHandleOpaqueContract())
-        throw std::runtime_error("runtime read handle opaque contract failed");
+        if (!testRuntimeReadHandleOpaqueContract())
+            throw std::runtime_error("runtime read handle opaque contract failed");
 
-    return 0;
+        std::printf("[PASS] RuntimeWorldAuthorityProjectionTests\n");
+        return 0;
+    }
+    catch (const std::exception& e)
+    {
+        std::printf("[FAIL] %s\n", e.what());
+        return 1;
+    }
 }
 
 ```

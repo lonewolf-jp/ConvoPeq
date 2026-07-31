@@ -3478,6 +3478,7 @@ private:
     friend class convo::isr::RuntimePublicationOrchestrator;
     friend class convo::isr::PublicationExecutor;
     friend class convo::isr::DSPTransition;
+    friend class DSPLifetimeManager;
 
     // ★ work70: RegistrationContext — commitRuntimePublication の registration コンテキスト。
     //   dsp != nullptr: commitRuntimePublication が新規登録

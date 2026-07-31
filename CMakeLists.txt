@@ -79,17 +79,48 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/RuntimePublicationCoordinatorTests.cpp
     )
 
+    # ISRSemanticValidationTests は ISR セマンティクス検証用。
+    # RuntimePublicationCoordinator を直接使用するため .cpp を含める。
+    # JUCE/MKL/r8brain の include path が必要（AudioEngine.h 経由の依存）。
     add_executable(ISRSemanticValidationTests
         src/tests/ISRSemanticValidationTests.cpp
         src/audioengine/ISRClosure.cpp
         src/audioengine/ISRPayloadTier.cpp
         src/audioengine/ISRRetireRouter.cpp
-        src/audioengine/ISRRetire.cpp               # ★ Phase5: coordinator が RetireRuntime を参照
+        src/audioengine/ISRRetire.cpp
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
     )
+    target_include_directories(ISRSemanticValidationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(ISRSemanticValidationTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(ISRSemanticValidationTests PRIVATE juce::juce_core r8brain)
+    # JuceHeader.h の生成を ISRSemanticValidationTests より先に行う
+    add_dependencies(ISRSemanticValidationTests ConvoPeq)
 
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
+    )
+
+    # P0-2b: PublishReceipt DSPCore*削除 — DSPHandle 比較の検証
+    # DSPHandleRuntime::getFadingRuntimeDSPHandle() の動作検証のため
+    # ISRDSPHandle.cpp を同一ターゲットでコンパイルする。
+    add_executable(NormalRetireDSPHandleCompareTests
+        src/tests/NormalRetireDSPHandleCompareTests.cpp
+        src/audioengine/ISRDSPHandle.cpp
     )
 
     add_executable(RuntimeSemanticSchemaValidationTests
@@ -141,6 +172,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/PriorityIntegrationTests.cpp
         src/audioengine/ISRRetire.cpp              # RetireRuntime
     )
+    target_compile_options(PriorityIntegrationTests PRIVATE /EHsc)
 
     # ★ v14.0 Phase 8: Auto Gain Staging 契約テスト
     #   AutoGainPlanner::plan() の4パターン × Auto On/Off を検証（リファレンス実装）。
@@ -178,6 +210,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_include_directories(FFTBackendTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(FFTBackendTests PRIVATE IPP::ippcore IPP::ipps)
     target_compile_features(FFTBackendTests PRIVATE cxx_std_20)
+    target_compile_options(FFTBackendTests PRIVATE /EHsc)
     add_test(NAME FFTBackendTests COMMAND FFTBackendTests)
 
     # ★ Week2: boundExcessDb 分布測定ベンチマーク
@@ -190,13 +223,18 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
+        target_link_libraries(ISRSemanticValidationTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+        # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackend.cpp が AlignedAllocation.h
+        #   (mkl_malloc/mkl_free) を使用するため MKL::MKL をリンク（include も propagate される）
+        target_link_libraries(FFTBackendTests PRIVATE MKL::MKL)
     endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
     target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
+    target_compile_features(NormalRetireDSPHandleCompareTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
     target_compile_features(ObservePathSingleSourceTests PRIVATE cxx_std_20)
     target_compile_features(OverlapAuthoritySingularTests PRIVATE cxx_std_20)
@@ -230,6 +268,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
     )
     target_include_directories(RetireGraceSemanticsTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -238,6 +278,12 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
         ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
         ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(NormalRetireDSPHandleCompareTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
     target_include_directories(RuntimeSemanticSchemaValidationTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -309,6 +355,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
+    add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
     add_test(NAME OverlapAuthoritySingular COMMAND OverlapAuthoritySingularTests)
@@ -329,6 +376,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
+        target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
         target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
         target_compile_options(ObservePathSingleSourceTests PRIVATE /utf-8)
         target_compile_options(OverlapAuthoritySingularTests PRIVATE /utf-8)
@@ -345,6 +393,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(WIN32)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
                      ISRSemanticValidationTests RetireGraceSemanticsTests
+                     NormalRetireDSPHandleCompareTests
                      RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
                      OverlapAuthoritySingularTests ShadowCompareContractTests
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
@@ -364,6 +413,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(OverlapAuthoritySingularTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -381,7 +431,19 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
     target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
     target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+    # ISRSemanticValidationTests は juce_core.cpp をコンパイルするため、
+    # コマンドライン NOMINMAX=1 と JUCE の #define NOMINMAX（空）の衝突警告を抑制する。
+    # （ConvoPeq 本体と同様の対応。CMakeLists.txt 参照）
+    # ★ ASan-CMAKE-4 修正（2026-07-31）: これらの -Wno-* は Clang 系（icx）専用であり、
+    #   MSVC cl では D8021（無効なコマンドライン引数）になる。Clang/icx 系のみに限定する。
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|IntelLLVM")
+        target_compile_options(ISRSemanticValidationTests PRIVATE
+            -Wno-unused-command-line-argument
+            -Wno-macro-redefined
+        )
+    endif()
     target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+    target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /EHsc)
     target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
     target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
     target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
@@ -576,11 +638,13 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRRetireRouter.cpp
                 src/audioengine/ISRShutdown.cpp
                 src/audioengine/ISRRuntimePublicationCoordinator.cpp
+                src/audioengine/ISRRuntimePublicationCoordinator_ProcessIntent.cpp
                 src/audioengine/RuntimePublicationValidator.cpp
                 src/audioengine/CrossfadeAuthority.cpp
                 src/audioengine/PublicationAdmission.cpp
                 src/audioengine/PublicationExecutor.cpp
                 src/audioengine/RuntimePublicationOrchestrator.cpp
+                src/audioengine/DSPLifetimeManager.cpp
                 src/audioengine/TelemetryRecorder.cpp
                 src/audioengine/ISRDSPQuarantine.cpp
                 src/audioengine/ISRClosureGraphWalker.cpp
@@ -759,6 +823,12 @@ if(DEFINED ENV{MKLROOT})
     target_include_directories(ConvoPeq SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     if(TARGET MTNUPCMeasurement)
         target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    endif()
+    # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackendTests は src/FFTBackend.cpp を含み、
+    #   同ファイルが AlignedAllocation.h → mkl.h を include するため MKL include が必要。
+    #   追加しないと MSVC ビルドで C1083 (mkl.h not found) になる（実ビルド検証済み）。
+    if(TARGET FFTBackendTests)
+        target_include_directories(FFTBackendTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
 endif()
 

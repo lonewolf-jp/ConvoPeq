@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <stdexcept>
 #include <vector>
 #include <algorithm>
 
@@ -178,26 +177,28 @@ using convo::isr::RetireRuntime;
 
 int main()
 {
-    try
-    {
-        if (!testEscalateAllRetiresToCritical())
-            throw std::runtime_error("escalate all retires to critical failed");
-
-        if (!testEscalateAllRetiresPartial())
-            throw std::runtime_error("escalate all retires partial failed");
-
-        if (!testQuarantineTriggersHighPriority())
-            throw std::runtime_error("quarantine triggers high priority failed");
-
-        if (!testShutdownEscalation())
-            throw std::runtime_error("shutdown escalation failed");
-
-        if (!testPriorityBacklogBreakdown())
-            throw std::runtime_error("priority backlog breakdown failed");
+    if (!testEscalateAllRetiresToCritical()) {
+        std::fprintf(stderr, "FAIL: escalate all retires to critical failed\n");
+        return 1;
     }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "FAIL: %s\n", e.what());
+
+    if (!testEscalateAllRetiresPartial()) {
+        std::fprintf(stderr, "FAIL: escalate all retires partial failed\n");
+        return 1;
+    }
+
+    if (!testQuarantineTriggersHighPriority()) {
+        std::fprintf(stderr, "FAIL: quarantine triggers high priority failed\n");
+        return 1;
+    }
+
+    if (!testShutdownEscalation()) {
+        std::fprintf(stderr, "FAIL: shutdown escalation failed\n");
+        return 1;
+    }
+
+    if (!testPriorityBacklogBreakdown()) {
+        std::fprintf(stderr, "FAIL: priority backlog breakdown failed\n");
         return 1;
     }
 

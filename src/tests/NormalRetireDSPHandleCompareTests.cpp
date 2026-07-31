@@ -7,6 +7,7 @@
 //   3. getFadingRuntimeDSPHandle() が正しい Handle を返すことを確認
 //
 // ビルド: カスタム main() + bool testXxx() パターン
+// リンク: ISRDSPHandle.cpp を同一ターゲットでコンパイル（CMakeLists.txt 参照）
 
 #include <cstdio>
 #include <cstdlib>
@@ -20,18 +21,18 @@ namespace {
 using convo::isr::DSPHandle;
 using convo::isr::DSPHandleRuntime;
 
+// PublishReceipt 相当の構造（AudioEngine.h から切り出し）
+struct PublishReceiptTest {
+    DSPHandle handle{};
+    uint64_t publicationEpoch{0};
+    uint64_t generation{0};
+};
+
 //==============================================================================
 // Test 1: PublishReceipt HandleOnly — DSPCore* 削除後も機能する
 //==============================================================================
 [[nodiscard]] bool testPublishReceiptHandleOnly()
 {
-    // PublishReceipt 相当の構造（AudioEngine.h から切り出し）
-    struct PublishReceiptTest {
-        DSPHandle handle{};
-        uint64_t publicationEpoch{0};
-        uint64_t generation{0};
-    };
-
     // Default construct: handle is null
     PublishReceiptTest receipt{};
     if (!receipt.handle.isNull()) return false;
@@ -114,6 +115,49 @@ using convo::isr::DSPHandleRuntime;
     return true;
 }
 
+//==============================================================================
+// Test 4: getFadingRuntimeDSPHandle — crossfade 中の fading handle 検証
+//   P0-2b: fadingRuntimeDSPHandle_ は store(publishAtomic) で書かれ、
+//   beginCrossfade で from を保持、activate/endCrossfade で null にリセットされる。
+//==============================================================================
+[[nodiscard]] bool testFadingRuntimeDSPHandle()
+{
+    DSPHandleRuntime runtime;
+
+    // Initial: no active/fading handle
+    if (!runtime.getActiveRuntimeDSPHandle().isNull()) return false;
+    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+
+    // Create two DSP instances
+    void* instanceA = reinterpret_cast<void*>(0x1000);
+    void* instanceB = reinterpret_cast<void*>(0x2000);
+    DSPHandle from = runtime.create(instanceA);
+    DSPHandle to = runtime.create(instanceB);
+    if (from.isNull() || to.isNull()) return false;
+    if (from == to) return false;
+
+    // beginCrossfade: fading handle は from を返す
+    runtime.beginCrossfade(from, to, 1);
+    if (!(runtime.getFadingRuntimeDSPHandle() == from)) return false;
+
+    // activate: fading が null にリセット、active は to
+    runtime.activate(to);
+    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+    if (!(runtime.getActiveRuntimeDSPHandle() == to)) return false;
+
+    // 再度 crossfade 開始 → 再び from を返す
+    runtime.beginCrossfade(from, to, 2);
+    if (!(runtime.getFadingRuntimeDSPHandle() == from)) return false;
+
+    // endCrossfade: fading が null にリセット、active は to
+    runtime.endCrossfade(2);
+    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+    if (!(runtime.getActiveRuntimeDSPHandle() == to)) return false;
+
+    std::printf("[PASS] testFadingRuntimeDSPHandle\n");
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -126,6 +170,7 @@ int main()
     allPassed = testPublishReceiptHandleOnly() && allPassed;
     allPassed = testNormalRetireDSPHandleCompare() && allPassed;
     allPassed = testDSPHandleAssignment() && allPassed;
+    allPassed = testFadingRuntimeDSPHandle() && allPassed;
 
     if (allPassed) {
         std::printf("\n=== All NormalRetireDSPHandleCompare tests PASSED ===\n");

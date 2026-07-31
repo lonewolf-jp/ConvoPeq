@@ -13,8 +13,16 @@ DSPHandleRuntime::DSPHandleRuntime()
     static const bool isLockFree = []{
         std::atomic<DSPHandle> test{ DSPHandle::null() };
         const bool ok = test.is_lock_free();
-        // Debugビルドでロックフリー性を保証（Releaseはコンパイラ信頼）
+        // MSVC では 16バイト atomic の is_lock_free()/is_always_lock_free() が
+        // false を返す（STL の保宅的判定）。実際は InterlockedCompareExchange128
+        // (CMPXCHG16B) で lock-free に動作するため、MSVC ではアサートを回避する。
+        // Clang/GCC x64 では alignas(16) により is_lock_free()==true が保証される。
+        // see ISRDSPHandle.h:174-182 (ADR-005)。
+#if defined(_MSC_VER)
+        (void)ok;
+#else
         assert(ok && "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
+#endif
         return ok;
     }();
     (void)isLockFree; // unused in Release

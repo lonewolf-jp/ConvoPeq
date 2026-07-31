@@ -16,8 +16,13 @@ namespace isr {
 
 /**
  * DSP スロット + 世代による handle（ABA 防止）
+ *
+ * alignas(16): 16バイト構造体のため atomic<DSPHandle> が CMPXCHG16B を
+ * 使用するには 16バイトアライメントが必要。MSVC では 8アラインのまま
+ * だと is_lock_free() が false になり Debug ビルドの assert が失敗する。
+ * （ISRDSPHandle.cpp:12-20 / ISRDSPHandle.h:174-177 参照）
  */
-struct DSPHandle
+struct alignas(16) DSPHandle
 {
     uint32_t slot;        // レジストリスロット番号
     uint64_t generation;  // ★ B-1: 64bit化（世代番号）
@@ -172,8 +177,10 @@ private:
     static_assert(std::is_standard_layout_v<DSPHandle>,
         "DSPHandle must be standard layout for ISR Runtime");
     // ★ 16バイト構造体のため CMPXCHG16B に依存。x64+AVX2(Haswell以降)前提。
-    //    icx では is_always_lock_free がコンパイル時保証されないため、
-    //    Runtime初期化時に is_lock_free() で検証する（#define NDEBUG 時は省略）。
+    //    alignas(16) により atomic<DSPHandle> は 16バイトアラインされ、
+    //    MSVC Debug でも is_lock_free() == true が保証される。
+    //    （is_always_lock_free は MSVC ではコンパイル時保証されないため
+    //     Runtime初期化時の is_lock_free() 検証は残す — ISRDSPHandle.cpp:12-20）
     // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
     //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };

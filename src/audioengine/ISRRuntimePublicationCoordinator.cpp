@@ -1,10 +1,8 @@
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
 #include "ISRRetireOverflowRing.h"
-#include "DSPLifetimeManager.h"
 #include "ISRDSPHandle.h"
 #include "ISRDSPQuarantine.h"
-#include "AudioEngine.h"
 #include <cassert>
 
 namespace convo::isr {
@@ -565,45 +563,6 @@ void RuntimePublicationCoordinator::emitObserveIntent(const DSPHandle& handle) n
         // 通常運用でここに到達することはない（合計1024+2048+1024=4096超え）。
     }
     setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
-}
-
-void RuntimePublicationCoordinator::processIntent(
-    AudioEngine& engine,
-    DSPLifetimeManager& lifetimeMgr) noexcept
-{
-    // ★ P0-4A: Coordinator Loop — Intent Queue から取り出して retire を実行
-    //   OBSERVE-3: 取り出した Intent を processIntent() で処理
-    //   OBSERVE-10: 古い epoch の Intent を破棄
-    //   4層 Overflow: Primary → Fallback → Deferred を順次 drain
-
-    // Phase 1: Primary Queue (Layer 1) — FIFO 優先度高
-    ObserveIntent intent;
-    while (observeIntentQueue_.pop(intent)) {
-        const auto currentEpoch = persistentState_.publicationEpoch;
-        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
-            continue;  // 世代逆転または無効な handle — 破棄
-        }
-        // ★ ISR: Intent は self-contained。intent.handle が retire 対象を一意に識別する。
-        //   lifetimeMgr.getActive() には依存しない。
-        lifetimeMgr.retireByHandle(intent.handle);
-    }
-
-    // Phase 2: Fallback Queue (Layer 2) — Primary から溢れた Intent を回収
-    while (observeFallbackQueue_.pop(intent)) {
-        const auto currentEpoch = persistentState_.publicationEpoch;
-        if (intent.epoch < currentEpoch || intent.handle.isNull()) {
-            continue;
-        }
-        lifetimeMgr.retireByHandle(intent.handle);
-    }
-
-    // ★ OBSERVE-7: ACK(reclaim complete) → pendingReceipt_ 解放
-    //   AudioEngine はこの後、pendingReceipt_.reset() を安全に実行できる。
-    //   Timer callback 内で processIntent からの応答を確認する。
-    engine.markReceiptReclaimComplete();
-
-    // ACK: 処理完了後、pendingIntentCount_ をリセット
-    setPendingIntentCount(0);
 }
 
 void RuntimePublicationCoordinator::requestReclaim(

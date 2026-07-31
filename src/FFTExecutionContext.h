@@ -58,6 +58,11 @@ public:
         plan_ = &plan;
     }
 
+    /// Clear the Plan reference (NonRT teardown phase only, PLAN-LT-10).
+    /// Enables a subsequent Builder-phase setPlan() on the same context,
+    /// e.g. when a re-prepare rebuilds plans (MKLNonUniformConvolver).
+    void clearPlan() noexcept { plan_ = nullptr; }
+
     // Non-copyable, movable (move preserves pointer).
     FFTExecutionContext(const FFTExecutionContext&) = delete;
     FFTExecutionContext& operator=(const FFTExecutionContext&) = delete;

@@ -7,10 +7,11 @@
 
 // ISR P1-19: 公開APIに EpochDomain 型を露出しない。
 // コンストラクタは IEpochProvider& を受け取り、内部でダウンキャストする。
-#include "DeferredDeletionQueue.h" // DeletionEntryType
+#include "../DeferredDeletionQueue.h" // DeletionEntryType
 #include "core/IEpochProvider.h"
 #include "core/IRetireRouter.h"
 #include "ISRAuthorityClass.h"
+#include "ISRDSPHandle.h"
 
 namespace convo {
 namespace isr {

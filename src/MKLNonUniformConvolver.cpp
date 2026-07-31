@@ -517,6 +517,7 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
     {
         if (m_fftPlan[i].isValid())
             ProductionFft::destroyPlan(m_fftPlan[i]);
+        m_fftCtx[i].clearPlan();  // 再 setPlan を可能にする (PLAN-LT-10)
     }
     m_numActiveLayers = 0;
     m_latency         = 0;
