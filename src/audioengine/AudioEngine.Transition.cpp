@@ -18,12 +18,13 @@ bool AudioEngine::publishIdleWorldOnly(
         return false;
 
     // Idle world 発行 — 呼び出し側ですべての前準備を完了している前提
-    auto coordinator = makeRuntimePublicationCoordinator();
     auto worldBuilder = convo::RuntimeBuilder(*this);
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(
         currentAfterFade, nullptr, idlePolicy, 0.0, false);
-    const auto pubResult = commitRuntimePublication(coordinator, std::move(worldOwner),
-                             RegistrationContext::needsRegistration(currentAfterFade));
+    // ★ B4: idle publish (#6) — oldHandle は null 固定
+    const auto pubResult = commitRuntimePublication(std::move(worldOwner),
+                             RegistrationContext::needsRegistration(currentAfterFade),
+                             convo::isr::DSPHandle::null());
     juce::ignoreUnused(pubResult);
     return true;
 }

@@ -81,13 +81,13 @@
 
 [[nodiscard]] bool testGracePeriodCompletionRules()
 {
-    if (!convo::isr::RetireRuntimeEx::isGracePeriodCompleted(100, 101, 1))
+    if (!convo::isr::EpochControl::isGracePeriodCompleted(100, 101, 1))
         return false;
 
-    if (!convo::isr::RetireRuntimeEx::isGracePeriodCompleted(100, 100, 0))
+    if (!convo::isr::EpochControl::isGracePeriodCompleted(100, 100, 0))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::isGracePeriodCompleted(100, 100, 1))
+    if (convo::isr::EpochControl::isGracePeriodCompleted(100, 100, 1))
         return false;
 
     return true;
@@ -95,16 +95,16 @@
 
 [[nodiscard]] bool testRetirePendingToFreeRules()
 {
-    if (!convo::isr::RetireRuntimeEx::canTransitionRetirePendingToFree(true, true, true))
+    if (!convo::isr::EpochControl::canTransitionRetirePendingToFree(true, true, true))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::canTransitionRetirePendingToFree(false, true, true))
+    if (convo::isr::EpochControl::canTransitionRetirePendingToFree(false, true, true))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::canTransitionRetirePendingToFree(true, false, true))
+    if (convo::isr::EpochControl::canTransitionRetirePendingToFree(true, false, true))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::canTransitionRetirePendingToFree(true, true, false))
+    if (convo::isr::EpochControl::canTransitionRetirePendingToFree(true, true, false))
         return false;
 
     return true;
@@ -112,13 +112,13 @@
 
 [[nodiscard]] bool testRetireStarvationDualThresholdRules()
 {
-    if (!convo::isr::RetireRuntimeEx::hasExceededDeferralThresholds(101, 10.0, 100, 5000.0))
+    if (!convo::isr::EpochControl::hasExceededDeferralThresholds(101, 10.0, 100, 5000.0))
         return false;
 
-    if (!convo::isr::RetireRuntimeEx::hasExceededDeferralThresholds(10, 5001.0, 100, 5000.0))
+    if (!convo::isr::EpochControl::hasExceededDeferralThresholds(10, 5001.0, 100, 5000.0))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::hasExceededDeferralThresholds(100, 5000.0, 100, 5000.0))
+    if (convo::isr::EpochControl::hasExceededDeferralThresholds(100, 5000.0, 100, 5000.0))
         return false;
 
     return true;
@@ -126,16 +126,16 @@
 
 [[nodiscard]] bool testRetireEscalationSafetyRules()
 {
-    if (!convo::isr::RetireRuntimeEx::canReclaimAfterEscalation(true, true, true))
+    if (!convo::isr::EpochControl::canReclaimAfterEscalation(true, true, true))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::canReclaimAfterEscalation(false, true, true))
+    if (convo::isr::EpochControl::canReclaimAfterEscalation(false, true, true))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::canReclaimAfterEscalation(true, false, true))
+    if (convo::isr::EpochControl::canReclaimAfterEscalation(true, false, true))
         return false;
 
-    if (convo::isr::RetireRuntimeEx::canReclaimAfterEscalation(true, true, false))
+    if (convo::isr::EpochControl::canReclaimAfterEscalation(true, true, false))
         return false;
 
     return true;

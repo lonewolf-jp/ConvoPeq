@@ -54,6 +54,7 @@ ALLOWED_ENQUEUE_RETIRE_FILES = [
     r'EQProcessor\.Core\.cpp$',                       # transitional fallback with #pragma warning(disable:4996)
     r'RefCountedDeferred\.h$',                         # unused template (inherited but never called)
     r'ISRRetireRouter\.(cpp|h)$',                     # ISRRetireRouter: definition of retire() authority
+    r'DSPLifetimeManager\.(cpp|h)$',                  # DSPLifetimeManager: retire() authority impl (routes via ISRRetireRouter)
 ]
 
 # Non-EpochDomain enqueueRetire-like operations (different queue, different semantic)
@@ -113,6 +114,10 @@ def scan_file_for_direct_enqueue_retire(filepath):
                 continue
             # Allow runtimePublicationBridge_.enqueueRetire (ISR coordinator = single authority)
             if re.search(r'runtimePublicationBridge_\.enqueueRetire\(', stripped):
+                continue
+            # Allow worldAuthority_.lifetime().enqueueRetire (AudioEngine reaches the ISR epoch
+            # control only via the single-authorized lifetime() accessor — HANDLER-1 boundary)
+            if re.search(r'worldAuthority_\.lifetime\(\)\.enqueueRetire\(', stripped):
                 continue
             # Allow #pragma warning disable around the call
             if '#pragma warning' in filepath or any(p in filepath for p in ['pragma']):

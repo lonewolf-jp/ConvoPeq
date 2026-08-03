@@ -36,9 +36,9 @@ enum class RetireLifecycleState : std::uint32_t {
     Reclaimed
 };
 
-class RetireRuntimeEx {
+class EpochControl {
 public:
-    RetireRuntimeEx();
+    EpochControl();
     void emitIntent(std::uint32_t slot, std::uint64_t generation);  // ★ B-1: 64bit化
     void enqueueRetire(std::uint32_t slot);
     void settleEpoch(std::uint32_t slot);

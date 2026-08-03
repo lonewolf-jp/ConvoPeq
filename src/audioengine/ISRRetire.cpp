@@ -9,7 +9,7 @@
 namespace convo {
 namespace isr {
 
-void RetireRuntime::initQueue() noexcept
+void LifetimeState::initQueue() noexcept
 {
     for (size_t i = 0; i < RETIRE_INTENT_QUEUE_SIZE; ++i) {
         convo::publishAtomic(slots_[i].sequence,
@@ -20,7 +20,7 @@ void RetireRuntime::initQueue() noexcept
     convo::publishAtomic(dequeuePos_, uint64_t{0}, std::memory_order_relaxed);
 }
 
-void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
+void LifetimeState::emitRetireIntent(const RetireIntent& intent) noexcept
 {
     // ★ Step 1: MPSC Queue に slot を予約 (Vyukov protocol)
     const uint64_t ticket = convo::fetchAddAtomic(enqueueTicket_, 1, std::memory_order_acq_rel);
@@ -91,7 +91,7 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
     convo::publishAtomic(slots_[idx].sequence, ticket + 1, std::memory_order_release);
 }
 
-void RetireRuntime::emitRetireIntentRT(const RetireIntent& intent) noexcept
+void LifetimeState::emitRetireIntentRT(const RetireIntent& intent) noexcept
 {
     // ★ Finding 9: 「RT」は RealTime thread safety を意味しない。
     //   実装は emitRetireIntent() を素通しし、輻輳時に std::mutex をロックする。
@@ -102,7 +102,7 @@ void RetireRuntime::emitRetireIntentRT(const RetireIntent& intent) noexcept
     emitRetireIntent(intent);
 }
 
-bool RetireRuntime::dequeueOne(RetireIntent& out) noexcept
+bool LifetimeState::dequeueOne(RetireIntent& out) noexcept
 {
     for (;;) {
         const uint64_t pos = convo::consumeAtomic(dequeuePos_, std::memory_order_relaxed);
@@ -130,7 +130,7 @@ bool RetireRuntime::dequeueOne(RetireIntent& out) noexcept
     }
 }
 
-bool RetireRuntime::dequeueFallback(RetireIntent& out) noexcept
+bool LifetimeState::dequeueFallback(RetireIntent& out) noexcept
 {
     std::lock_guard<std::mutex> lock(fallbackMutex_);
     const size_t count = convo::consumeAtomic(fallbackCount_, std::memory_order_relaxed);
@@ -141,7 +141,7 @@ bool RetireRuntime::dequeueFallback(RetireIntent& out) noexcept
     return true;
 }
 
-std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
+std::vector<RetireIntent> LifetimeState::dequeuePendingRetireIntents() noexcept
 {
     std::vector<RetireIntent> result;
     result.reserve(128);
@@ -179,7 +179,7 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
     return result;
 }
 
-std::uint64_t RetireRuntime::pendingIntentCount() const noexcept
+std::uint64_t LifetimeState::pendingIntentCount() const noexcept
 {
     const uint64_t enqueued = convo::consumeAtomic(enqueueTicket_, std::memory_order_acquire);
     const uint64_t consumed = convo::consumeAtomic(dequeuePos_, std::memory_order_acquire);
@@ -188,17 +188,17 @@ std::uint64_t RetireRuntime::pendingIntentCount() const noexcept
     return mainPending + fbPending;
 }
 
-std::uint64_t RetireRuntime::overflowCount() const noexcept
+std::uint64_t LifetimeState::overflowCount() const noexcept
 {
     return convo::consumeAtomic(overflowCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RetireRuntime::droppedIntentCount() const noexcept
+std::uint64_t LifetimeState::droppedIntentCount() const noexcept
 {
     return convo::consumeAtomic(droppedIntentCount_, std::memory_order_acquire);
 }
 
-void RetireRuntime::acknowledgeRetireCoordination(const RetireIntent& intent)
+void LifetimeState::acknowledgeRetireCoordination(const RetireIntent& intent)
 {
     const auto idx = static_cast<std::size_t>(intent.dspSlot % RETIRE_INTENT_QUEUE_SIZE);
     convo::publishAtomic(acknowledgeGeneration_[idx], intent.generation, std::memory_order_release);
@@ -206,38 +206,38 @@ void RetireRuntime::acknowledgeRetireCoordination(const RetireIntent& intent)
 }
 
 // ★ C-1: overflow 継続時間追跡 getter
-std::uint64_t RetireRuntime::overflowStartTimestamp() const noexcept
+std::uint64_t LifetimeState::overflowStartTimestamp() const noexcept
 {
     return convo::consumeAtomic(overflowStartTimestamp_, std::memory_order_acquire);
 }
 
-std::uint64_t RetireRuntime::lastOverflowTicks() const noexcept
+std::uint64_t LifetimeState::lastOverflowTicks() const noexcept
 {
     return convo::consumeAtomic(lastOverflowTicks_, std::memory_order_acquire);
 }
 
-std::uint64_t RetireRuntime::overflowWindowCounter() const noexcept
+std::uint64_t LifetimeState::overflowWindowCounter() const noexcept
 {
     return convo::consumeAtomic(overflowWindowCounter_, std::memory_order_acquire);
 }
 
-std::uint64_t RetireRuntime::lastOverflowWindowCount() const noexcept
+std::uint64_t LifetimeState::lastOverflowWindowCount() const noexcept
 {
     return convo::consumeAtomic(lastOverflowWindowCount_, std::memory_order_acquire);
 }
 
 // ★ P1: Fallback queue metrics
-std::size_t RetireRuntime::fallbackOccupancy() const noexcept
+std::size_t LifetimeState::fallbackOccupancy() const noexcept
 {
     return convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
 }
 
-std::size_t RetireRuntime::fallbackHighWatermark() const noexcept
+std::size_t LifetimeState::fallbackHighWatermark() const noexcept
 {
     return convo::consumeAtomic(fallbackQueuePeak_, std::memory_order_acquire);
 }
 
-std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
+std::uint64_t LifetimeState::fallbackOverflowCount() const noexcept
 {
     return convo::consumeAtomic(fallbackOverflowCount_, std::memory_order_acquire);
 }
@@ -246,7 +246,7 @@ std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
 //   Shutdown/AudioStopped 後は Audio Thread が動作していないため、
 //   MPSC queue + fallback queue の走査は安全。
 //   ※ isValid/priority は std::atomic ではないが、Shutdown中は単一スレッドアクセス。
-void RetireRuntime::escalateAllRetires(RetirePriority minPriority) noexcept
+void LifetimeState::escalateAllRetires(RetirePriority minPriority) noexcept
 {
     // Vyukov MPSC slots: 全スロットを走査
     for (size_t i = 0; i < RETIRE_INTENT_QUEUE_SIZE; ++i)

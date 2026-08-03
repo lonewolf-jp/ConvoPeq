@@ -273,6 +273,10 @@ if exist "%~dp0compile_commands.json" if exist "%~dp0tools\fix_compile_commands_
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\fix_compile_commands_for_clangd.ps1" -InputFile "%~dp0compile_commands.json"
     echo [INFO] compile_commands.json flags converted for clangd.
 )
+REM Ensure compile_commands.json has no UTF-8 BOM (clangd fails to parse it otherwise).
+if exist "%~dp0compile_commands.json" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%~dp0compile_commands.json'; $t=[System.IO.File]::ReadAllText($p); if ($t.StartsWith([char]0xFEFF)) { $t=$t.Substring(1) }; $u=New-Object System.Text.UTF8Encoding($false); [System.IO.File]::WriteAllText($p,$t,$u); '[INFO] compile_commands.json BOM removed, if present.'"
+)
 
 REM ------------------------------------------------------------
 REM Clean stale RC output: JUCE generates RC during CMake configure

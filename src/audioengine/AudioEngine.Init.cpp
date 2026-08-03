@@ -44,12 +44,14 @@ void AudioEngine::initialize()
 
     // Bootstrap World: publish BEFORE submitting rebuild intent, so that
     // the rebuild worker always finds a non-null runtimeWorld when building.
+    // ★ B4-a3: Bootstrap は同期例外。initialize() の Bootstrap publish は CoordinatorLoop
+    //   起動（startCoordinatorLoop）より前で、非同期 enqueue + 完了通知待ちは待機対象が
+    //   存在せずデッドロックするため、直接 coordinator.publishWorld() で同期 publish する。
     {
         convo::RuntimeBuilder bootstrapBuilder(*this);
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
         auto coordinator = makeRuntimePublicationCoordinator();
-        const auto result = commitRuntimePublication(coordinator, std::move(bootstrapWorld),
-                                 RegistrationContext::none());
+        const auto result = coordinator.publishWorld(std::move(bootstrapWorld));
         juce::ignoreUnused(result);
     }
 
@@ -83,6 +85,7 @@ void AudioEngine::initialize()
     // - ガベージコレクション
     startTimer(100);
     timerPeriodMs_ = 100;
+    startCoordinatorLoop();  // ★ FUTURE-9: Dedicated Coordinator Worker starts ISR cadence
 
     // ★ [work64] ThreadAffinityManager 初期化（動的計算）
     {

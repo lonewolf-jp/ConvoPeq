@@ -42,3 +42,60 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
     // ★ HealthState は Policy に入れない — Orchestrator または DSPTransition が判断する
     return p;
 }
+
+// ★ B4: Producer 共通の Decision snapshot 生成（Decision + Handle を一括生成）。
+//   oldHandle == null（idle publish #4/#5/#6）は crossfade 判定をスキップし old DSP retire 意図なし。
+//   Rebuild (#7) のみ current active DSP handle を渡す（old DSP を retire する意図）。
+//   判定ロジックは Orchestrator の 3-step (evaluate → null fallback → Critical 抑制) と同一。
+[[nodiscard]] convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
+    const RuntimePublishWorld* newWorld,
+    const convo::isr::DSPHandle& newHandle,
+    const convo::isr::DSPHandle& oldHandle) const noexcept
+{
+    convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot snapshot;
+    snapshot.newHandle = newHandle;
+    snapshot.oldHandle = oldHandle;
+
+    if (newWorld == nullptr || oldHandle.isNull())
+    {
+        snapshot.needsCrossfade = false;
+        snapshot.fadeTimeSec = 0.0;
+        snapshot.oldHasIR = false;
+        snapshot.newHasIR = (newWorld != nullptr) ? newWorld->dspProjection.irLoaded : false;
+        return snapshot;
+    }
+
+    const auto* oldWorld = observePublishedWorld();
+    if (oldWorld == nullptr)
+    {
+        snapshot.needsCrossfade = false;
+        snapshot.fadeTimeSec = 0.0;
+        snapshot.oldHasIR = false;
+        snapshot.newHasIR = newWorld->dspProjection.irLoaded;
+    }
+    else
+    {
+        convo::isr::CrossfadeAuthority crossfade;
+        const auto decision = crossfade.evaluate(*oldWorld, *newWorld, makeCrossfadePolicy());
+        snapshot.needsCrossfade = decision.needsCrossfade;
+        snapshot.oldHasIR = decision.oldHasIR;
+        snapshot.newHasIR = decision.newHasIR;
+        snapshot.fadeTimeSec = decision.fadeTimeSec;
+    }
+
+    // HealthState Critical 時は crossfade を強制抑制（Orchestrator Step 2b と同じ）
+    if (snapshot.needsCrossfade)
+    {
+        auto ref = getHealthStateRef();
+        if (ref != nullptr)
+        {
+            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+            if (health == convo::ISRHealthState::Critical)
+            {
+                snapshot.needsCrossfade = false;
+                snapshot.fadeTimeSec = 0.0;
+            }
+        }
+    }
+    return snapshot;
+}

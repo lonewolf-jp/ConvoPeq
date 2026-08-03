@@ -4,6 +4,7 @@
 #include "ISRDSPHandle.h"
 #include "ISRDSPQuarantine.h"
 #include <cassert>
+#include "AudioEngine.h"  // FUTURE-4: RuntimeState (downcast currentWorld_)
 
 namespace convo::isr {
 
@@ -25,7 +26,7 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     , state_(CoordinatorState::Bootstrapping)
     , retireAuthorityCount_(0)
 {
-    // ★ persistentState_{} は zero-initialize（メンバ初期化子 =0 により保証）
+    // ★ FUTURE-4: persistentState_ removed — metadata derived from currentWorld_ (RuntimeState::publication)
 }
 
 bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
@@ -83,27 +84,31 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
         return;
     }
 
-    // ★ 方式C: 単一 struct 読取 → 3フィールド論理一貫
-    const auto prev = persistentState_;
+    // ★ FUTURE-4: prev metadata derived from currentWorld_ (RuntimeState::publication), not persistentState_
+    const auto prevWorld = static_cast<const RuntimeState*>(
+        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    const auto prevSeqId = prevWorld ? prevWorld->publication.sequenceId : PublicationSequenceId{0};
+    const auto prevEpoch  = prevWorld ? prevWorld->publication.epoch : PublicationEpoch{0};
+    const auto prevGen    = prevWorld ? prevWorld->publication.mappedRuntimeGeneration : std::uint64_t{0};
 
-    if (!PersistentStateBlock::isMonotonic(prev,
-            static_cast<std::uint64_t>(sequenceId),
-            static_cast<std::uint64_t>(epoch),
-            mappedGeneration)) {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-        return;
+    const bool hasPrevious = prevSeqId != 0 || prevEpoch != 0 || prevGen != 0;
+    if (hasPrevious) {
+        if (!(static_cast<std::uint64_t>(sequenceId) > static_cast<std::uint64_t>(prevSeqId)
+              && static_cast<std::uint64_t>(epoch) > static_cast<std::uint64_t>(prevEpoch)
+              && mappedGeneration > prevGen)) {
+            convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+            return;
+        }
     }
 
     convo::publishAtomic(state_, CoordinatorState::Publishing, std::memory_order_release);
     convo::publishAtomic(swapPending_, true, std::memory_order_release);
 
-    // ★ plain struct: 単一代入（atomic store 不要）
-    persistentState_ = PersistentStateBlock{
-        static_cast<std::uint64_t>(sequenceId),
-        static_cast<std::uint64_t>(epoch),
-        mappedGeneration
-    };
-
+    // ★ FUTURE-4 (publish-time freeze): bake incoming publication semantics onto newWorld,
+    //   replacing the former persistentState_ cache; Reader derives metadata via currentWorld_->publication.
+    auto* pubWorld = const_cast<RuntimeState*>(static_cast<const RuntimeState*>(newWorld));
+    pubWorld->publication = PublicationSemantic{sequenceId, epoch,
+        static_cast<PublicationGeneration>(mappedGeneration), prevSeqId};
     convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(swapPending_, false, std::memory_order_release);
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
@@ -166,12 +171,25 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 }
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
-    // ★ 方式C: persistentState_ から直接導出（plain struct、atomic 不要）
-    // ★ ADR-010: Runtime API — スレッド制約なし（read-only 単調増加 uint64）
-    //   persistentState_.mappedRuntimeGeneration への読み取りは
-    //   単調増加カウンタであり cross-thread の一貫性問題は発生しない。
-    //   Timer Thread からの読み取りも安全。
-    return persistentState_.mappedRuntimeGeneration;
+    // ★ FUTURE-4: derive from currentWorld_ (RuntimeState::publication.mappedRuntimeGeneration)
+    const auto world = static_cast<const RuntimeState*>(
+        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    return world ? world->publication.mappedRuntimeGeneration : std::uint64_t{0};
+}
+
+PublicationEpoch RuntimePublicationCoordinator::currentPublicationEpoch() const noexcept {
+    // ★ FUTURE-4: latest publicationEpoch derived from currentWorld_ (RuntimeState::publication.epoch)
+    const auto world = static_cast<const RuntimeState*>(
+        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    return world ? world->publication.epoch : PublicationEpoch{0};
+}
+
+// ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId).
+//   Read-only Authority accessor — RuntimeWorldAuthority::sequence() delegates here.
+PublicationSequenceId RuntimePublicationCoordinator::currentPublicationSequenceId() const noexcept {
+    const auto world = static_cast<const RuntimeState*>(
+        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    return world ? world->publication.sequenceId : PublicationSequenceId{0};
 }
 
 void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
@@ -240,7 +258,7 @@ std::uint64_t RuntimePublicationCoordinator::getOverflowMaxAgeUs() const noexcep
 
 RuntimePublicationCoordinator::OverflowDrainResult
 RuntimePublicationCoordinator::drainOverflowRing(
-    RetireOverflowRing& overflowRing, RetireRuntime& retireRuntime, bool unlimited) noexcept
+    RetireOverflowRing& overflowRing, LifetimeState& retireRuntime, bool unlimited) noexcept
 {
     return overflowScheduler_.drainOverflowRing(overflowRing, retireRuntime, unlimited);
 }
@@ -259,7 +277,7 @@ size_t RuntimePublicationCoordinator::deferredRingOccupancy() const noexcept {
 
 RuntimePublicationCoordinator::OverflowDrainResult
 RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
-    RetireOverflowRing& overflowRing, RetireRuntime& retireRuntime, bool unlimited) noexcept
+    RetireOverflowRing& overflowRing, LifetimeState& retireRuntime, bool unlimited) noexcept
 {
     OverflowDrainResult result;
     constexpr uint32_t kDefaultBudget = 64;
@@ -489,8 +507,8 @@ void RuntimePublicationCoordinator::PriorityScheduler::setOverflowAgeWarnCallbac
 }
 
 void RuntimePublicationCoordinator::PriorityScheduler::escalateAllRetires(RetirePriority minPriority) noexcept {
-    // ★ Phase5: Coordinator の escalateAllRetires は RetireRuntime に委譲
-    //   実装は AudioEngine.Processing.ReleaseResources.cpp の retireRuntime_.escalateAllRetires() が担当
+    // ★ Phase5: Coordinator の escalateAllRetires は LifetimeState に委譲
+    //   実装は AudioEngine.Processing.ReleaseResources.cpp の worldAuthority_.lifetime().escalateAllRetires() が担当
     //   本メソッドは Coordinator の公開APIとしての将来拡張用プレースホルダ
     (void)minPriority;
 }
@@ -510,57 +528,52 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 // ★ P0-4C: ISR Intent 発行インターフェース実装
 //==============================================================================
 
-void RuntimePublicationCoordinator::emitObserveIntent(const DSPHandle& handle) noexcept
+void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexcept
 {
     // ★ P0-4A: Observe Intent — Timer → LockFreeRingBuffer push（RT-safe, SPSC, lock-free）
     //   OBSERVE-2: push() は即座に復帰（SPSC lock-free）
     //   OBSERVE-9: LockFreeRingBuffer は FIFO を保証（SPSC）
     //   OBSERVE-10: 世代検証用に epoch を保存
     //   ISR: Intent は自己完結型 — DSPHandle を含むため、Coordinator は外部状態に依存せず retire 対象を識別可能
+    const auto world = static_cast<const RuntimeState*>(
+        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
+
     ObserveIntent intent{
         handle,                          // 観測対象の DSPHandle
-        persistentState_.publicationEpoch,
+        currentEpoch,                    // ★ FUTURE-4: derived from currentWorld_ (RuntimeState::publication)
         nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed)
     };
 
-    // ★ QUEUE-11: 4層 Overflow Policy
+        // ★ QUEUE-11/FUTURE-8: 4層 Overflow Policy（Observe は Retire 系 ring と分離）
     //   Layer 1 (Primary): LockFreeRingBuffer<ObserveIntent, 1024> (SPSC lock-free)
     //   Layer 2 (Fallback): LockFreeRingBuffer<ObserveIntent, 2048> (SPSC lock-free)
-    //   Layer 3 (Deferred): RetireOverflowEntry → coordinatorDeferredRing_ → drainOverflowRing
-    //   Layer 4 (Quarantine): emitQuarantineIntent — 最終安全策
+    //   Layer 3 (Deferred): observeDeferredRing_ (ObserveIntent 専用) → drainObserveDeferred（QUEUE-16）
+    //   Layer 4 (Quarantine): submitQuarantine — 最終安全策
     if (observeIntentQueue_.push(intent)) {
         // Layer 1 (Primary): 正常完了 — ACK (queued)
-        overflowCounter_.store(0, std::memory_order_relaxed);
+        observeOverflowCounter_.store(0, std::memory_order_relaxed);
         setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
     // Layer 2 (Fallback): Primary 溢れ → セカンダリキュー
-    overflowCounter_.fetch_add(1, std::memory_order_relaxed);
+    observeOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
     if (observeFallbackQueue_.push(intent)) {
         setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
-    // ★ QUEUE-12: Fallback も満杯 → Layer 3 (Deferred)
-    //   coordinatorDeferredRing_ に ObserveFallbackEntry を変換して enqueue
-    //   coordinatorDeferredRing_ は drainOverflowRing で定期回収される
-    fallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
-    RetireOverflowEntry deferredEntry{};
-    deferredEntry.intent.dspSlot = 0;
-    deferredEntry.intent.priority = RetirePriority::Normal;
-    deferredEntry.overflowTimestampUs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-    deferredEntry.reinjectRetryCount = 0;
-    if (coordinatorDeferredRing_.push(deferredEntry)) {
-        coordinatorDeferredCount_.fetch_add(1, std::memory_order_relaxed);
+    // ★ QUEUE-12/FUTURE-8: Fallback 溢れ → Layer 3 (Observe 専用 Deferred Ring)
+    //   ObserveIntent をそのまま格納（RetireOverflowEntry 変換廃止 — handle を保持）。
+    //   回御は processIntent() の drainObserveDeferred() が担う（Retire drain と分離, QUEUE-16）。
+    observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
+    if (observeDeferredRing_.push(intent)) {
+        // transport-only: 回御は Coordinator Phase (processIntent)
     } else {
-        // Layer 3 overflow → Layer 4 (Quarantine): 全層溢れの最終安全策
-        // observeIntentQueue_ / observeFallbackQueue_ / coordinatorDeferredRing_
-        // の3層全てが満杯。Coordinator Deferred Ring も満杯のため、
-        // この Intent はドロップされる。カウンタで記録する。
-        // 通常運用でここに到達することはない（合計1024+2048+1024=4096超え）。
+        // Layer 3 overflow → Layer 4 (Quarantine): 全層溢れ最終安全策
+        //   observeIntentQueue_ / observeFallbackQueue_ / observeDeferredRing_ が満村。
+        //   この Intent はドロップされる。通常運用で到達しない（1024+2048+1024=4096超え）。
     }
     setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
 }
@@ -623,28 +636,68 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
         request.reason);
     result.auditLogged = auditLogged;
 
-    // QSVC-5 (ISR準拠): Audit 失敗時も State は変更しない。
-    //   Publish後は Immutable。Rollback 禁止。Diagnostic カウンタのみ更新。
-    if (!auditLogged && result.stateChanged) {
-        result.rolledBack = false;
-        result.stateChanged = true;  // State 変更は確定
-    }
+    // ★ FUTURE-3/QSVC-5: Audit 失敗時も State は変更しない。Publish後は Immutable。Rollback 廃止。
+    //   Diagnostic カウンタのみ更新。（stateChanged は既に確定。rolledBack は削除 ── New World Publish が復旧担う。）
 
     return result;
 }
 
-void RuntimePublicationCoordinator::emitQuarantineIntent(
+// ★ FUTURE-3: Coordinator は Recovery Request enqueue のみ。Rollback ではない — New World の Immutable Publish が復旧担う。
+//   Builder → Validate → Publish は Builder Loop が popRecoveryRequest() で消費（Admission 判定なし）。
+//   transport-only: saturate 時は drop。Decision Authority を持たない。
+void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle) noexcept
+{
+    const auto world = static_cast<const RuntimeState*>(
+        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
+
+    RecoveryIntent intent{
+        quarantinedHandle,
+        currentEpoch,
+        nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed)
+    };
+
+    recoveryIntentQueue_.push(intent);   // transport-only enqueue
+    setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+}
+
+std::optional<RuntimePublicationCoordinator::RecoveryIntent>
+RuntimePublicationCoordinator::popRecoveryRequest() noexcept
+{
+    RecoveryIntent intent{};
+    if (!recoveryIntentQueue_.pop(intent))
+        return std::nullopt;              // transport-only pop: empty は Builder 消費の前提
+    setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) - 1);
+    return intent;
+}
+
+void RuntimePublicationCoordinator::submitQuarantine(
     const DSPHandle& handle,
     QuarantineReason reason,
     DSPHandleRuntime& handleRuntime,
     DSPQuarantineManager& quarantineManager,
     uint64_t contextEpoch) noexcept
 {
-    // QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行
-    // 直接 dspHandleRuntime_.quarantine() を呼ばない
-    QuarantineService::QuarantineRequest request{handle, reason, contextEpoch};
-    quarantineService_.executeQuarantine(handleRuntime, quarantineManager, request);
-    setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
+    // ★ A3 Step 4: sync → async. submitQuarantine no longer executes directly;
+    //   it enqueues a Quarantine Intent onto the common intentQueue_.
+    //   QSVC-2: Execution delegated to QuarantineService via QuarantineIntentHandler
+    //   (kDispatchTable) in processIntent — Coordinator retains Decision Authority over enqueue only.
+    //   (handleRuntime/quarantineManager params retained for API stability; the handler
+    //    re-sources them through HandlerContext.engine. Step 6 removes these redundant params.)
+    (void)handleRuntime;
+    (void)quarantineManager;
+
+    const std::uint64_t seqId = nextIntentId_.fetch_add(1, std::memory_order_relaxed);
+    RuntimePublicationCoordinator::Intent intent{};
+    intent.type = RuntimePublicationCoordinator::IntentType::Quarantine;
+    intent.payload.quarantine = RuntimePublicationCoordinator::QuarantinePayload{handle, reason, contextEpoch};
+    intent.sequenceId = seqId;
+
+    if (intentQueue_.push(intent)) {
+        setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+    }
+    // transport-only: intentQueue_ overflow is handled by the FUTURE-10 unified Overflow Policy (drop at saturate).
 }
 
 } // namespace convo::isr

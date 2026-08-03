@@ -171,18 +171,25 @@ private:
     //   外部からは Coordinator::requestReclaim() 経由で実行する。
     void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
-    // ★ ADR-005: DSPHandle の型要件をコンパイル時に保証
+    // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
+    //   DSPHandle is a 16-byte POD; std::atomic<DSPHandle> must be lock-free,
+    //   which on x64 requires 16-byte alignment (CMPXCHG16B, Haswell+ / AVX2).
+    //   x64 ABI is assumed throughout ISR (no 32-bit build target).
     static_assert(std::is_trivially_copyable_v<DSPHandle>,
         "DSPHandle must be trivially copyable for ISR Runtime");
     static_assert(std::is_standard_layout_v<DSPHandle>,
         "DSPHandle must be standard layout for ISR Runtime");
-    // ★ 16バイト構造体のため CMPXCHG16B に依存。x64+AVX2(Haswell以降)前提。
-    //    alignas(16) により atomic<DSPHandle> は 16バイトアラインされ、
-    //    MSVC Debug でも is_lock_free() == true が保証される。
-    //    （is_always_lock_free は MSVC ではコンパイル時保証されないため
-    //     Runtime初期化時の is_lock_free() 検証は残す — ISRDSPHandle.cpp:12-20）
-    // static_assert(std::atomic<DSPHandle>::is_always_lock_free,
-    //     "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
+    static_assert(alignof(DSPHandle) >= 16,
+        "DSPHandle must be alignas(16) so atomic<DSPHandle> uses CMPXCHG16B on x64");
+#if !defined(_MSC_VER)
+    // Clang/GCC x64: alignas(16) guarantees lock-free atomics — enforce at compile time.
+    static_assert(std::atomic<DSPHandle>::is_always_lock_free,
+        "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
+#else
+    // MSVC x64 (Debug/Release): the STL does not guarantee is_always_lock_free at
+    //   compile time, so it is verified at runtime in DSPHandleRuntime's ctor
+    //   (ISRDSPHandle.cpp:12-27) on BOTH configurations.
+#endif
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 

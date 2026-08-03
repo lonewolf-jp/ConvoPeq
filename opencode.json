@@ -5,7 +5,7 @@
   "mcp": {
     "serena": {
       "type": "local",
-      "command": ["serena", "start-mcp-server", "--project", "C:\\VSC_Project\\ConvoPeq", "--transport", "stdio"],
+      "command": ["C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\Scripts\\serena.exe", "start-mcp-server", "--project", "C:\\VSC_Project\\ConvoPeq", "--transport", "stdio"],
       "enabled": true
     },
     "headroom": {

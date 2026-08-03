@@ -13,7 +13,7 @@ namespace isr {
 //
 // ■ 完了条件に含めるもの
 //   pendingPublication  — RuntimePublicationCoordinator の publication backlog
-//   pendingRetire       — RetireRuntime に未処理の retire intent
+//   pendingRetire       — LifetimeState に未処理の retire intent
 //   activeCrossfadeCount — 進行中のクロスフェード（0 or 1）
 //   deferredPublish     — 未投入の deferred publish
 //   routerPendingRetire — ISRRetireRouter 滞留 item 数

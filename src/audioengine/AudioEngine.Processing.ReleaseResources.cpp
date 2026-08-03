@@ -163,15 +163,16 @@ void AudioEngine::releaseResources()
 
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
-            auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(nullptr,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
                                                                      0.0,
                                                                      false);
-            const auto pubResult = commitRuntimePublication(coordinator, std::move(worldOwner),
-                                     RegistrationContext::none());
+            // ★ B4: idle publish (#4) — 登録なし・oldHandle は null 固定
+            const auto pubResult = commitRuntimePublication(std::move(worldOwner),
+                                     RegistrationContext::none(),
+                                     convo::isr::DSPHandle::null());
             juce::ignoreUnused(pubResult);
         }
 
@@ -183,6 +184,7 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: before stopRebuildThread");
     setShutdownPhase(ShutdownPhase::StopWorkers, "releaseResources");
+    shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker before drains
     stopRebuildThread();
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ObserverDrained);
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
@@ -195,7 +197,7 @@ void AudioEngine::releaseResources()
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
     // ★ Phase5: Shutdown 時、全保留Intentを Critical に昇格（優先度ベースの早期回収）
-    retireRuntime_.escalateAllRetires(convo::isr::RetirePriority::Critical);
+    worldAuthority_.lifetime().escalateAllRetires(convo::isr::RetirePriority::Critical);
 
     // ★ Practical-7: Graceful Drain Phase（最大5秒間のポーリング待機 + OverflowRing 再注入）
     {
@@ -213,10 +215,10 @@ void AudioEngine::releaseResources()
             {
                 uint32_t reinjectBudget = kMaxReinjectPerCycle;
                 convo::isr::RetireOverflowEntry entry;
-                while (reinjectBudget > 0 && retireRuntime_.getOverflowRing()
-                       && retireRuntime_.getOverflowRing()->pop(entry))
+                while (reinjectBudget > 0 && worldAuthority_.lifetime().getOverflowRing()
+                       && worldAuthority_.lifetime().getOverflowRing()->pop(entry))
                 {
-                    retireRuntime_.emitRetireIntent(entry.intent);
+                    worldAuthority_.lifetime().emitRetireIntent(entry.intent);
                     --reinjectBudget;
                 }
             }
@@ -228,8 +230,8 @@ void AudioEngine::releaseResources()
 
             // ★ Phase2: 各ループで coordinator の QuarantineResidentCount を更新
             {
-                const auto ringResident = retireRuntime_.getOverflowRing()
-                    ? retireRuntime_.getOverflowRing()->residentCount() : size_t{0};
+                const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
+                    ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
                 const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
                 runtimePublicationBridge_.setQuarantineResidentCount(
                     static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
@@ -249,12 +251,12 @@ void AudioEngine::releaseResources()
             m_retireRouter->publishEpoch();
 
             // b. OverflowRing 全件Drain（unlimited）
-            if (retireRuntime_.getOverflowRing())
+            if (worldAuthority_.lifetime().getOverflowRing())
             {
                 convo::isr::RetireOverflowEntry entry;
-                while (retireRuntime_.getOverflowRing()->pop(entry))
+                while (worldAuthority_.lifetime().getOverflowRing()->pop(entry))
                 {
-                    retireRuntime_.emitRetireIntent(entry.intent);
+                    worldAuthority_.lifetime().emitRetireIntent(entry.intent);
                 }
             }
 
@@ -280,8 +282,8 @@ void AudioEngine::releaseResources()
         else
         {
             // ★ Phase2: タイムアウト前に完了した場合も coordinator カウントを最終更新
-            const auto ringResident = retireRuntime_.getOverflowRing()
-                ? retireRuntime_.getOverflowRing()->residentCount() : size_t{0};
+            const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
+                ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
             runtimePublicationBridge_.setQuarantineResidentCount(
                 static_cast<std::uint64_t>(ringResident));
         }
@@ -375,7 +377,7 @@ void AudioEngine::releaseResources()
                     //   destroyForShutdown が quarantine フラグ確認を済ませているため安全
                     dspHandleRuntime_.destroyQuarantineSlot(slot, 0);
                     // 系統③: レーン解放 + quarantineResidentCount--
-                    retireRuntimeEx_.reclaim(slot);
+                    worldAuthority_.lifetime().reclaim(slot);
                 }
             }
 
@@ -483,7 +485,7 @@ void AudioEngine::releaseResources()
                 " (observation only)");
         if (traceSafe) {
             const auto evidenceRoot = std::filesystem::current_path() / "evidence";
-            retireRuntimeEx_.emitRetireTrace(evidenceRoot / "retire_trace_shutdown_last.json");
+            worldAuthority_.lifetime().emitRetireTrace(evidenceRoot / "retire_trace_shutdown_last.json");
         }
     }
     if (audit.quarantineResident > 0) {

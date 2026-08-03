@@ -379,7 +379,7 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
         || monotonicViolated
         || world.publication.sequenceId <= world.publication.previousSequenceId)
     {
-        retireRuntimeEx_.requestRollback();
+        worldAuthority_.lifetime().requestRollback();
     }
 
     debugRuntime_.recordHBEdge(100u,
@@ -459,10 +459,10 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.generation = generation;
     intent.retireEpoch = static_cast<std::uint64_t>(world->generation);
 
-    retireRuntime_.emitRetireIntentRT(intent);
-    runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
-    runtimePublicationBridge_.setRetireBacklogCount(retireRuntime_.pendingIntentCount());
-    const auto pendingIntents = retireRuntime_.dequeuePendingRetireIntents();
+    worldAuthority_.lifetime().emitRetireIntentRT(intent);
+    runtimePublicationBridge_.setPendingIntentCount(worldAuthority_.lifetime().pendingIntentCount());
+    runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
+    const auto pendingIntents = worldAuthority_.lifetime().dequeuePendingRetireIntents();
     convo::publishAtomic(pendingRetireGenerationCount_, static_cast<std::uint64_t>(pendingIntents.size()), std::memory_order_release);
 
     const auto updateMinMetric = [](std::atomic<std::uint64_t>& dst, std::uint64_t value) noexcept
@@ -540,7 +540,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
             + juce::String(world->execution.transitionActive ? 1 : 0)
             + " topology.fadingRuntimeUuid="
             + juce::String(static_cast<juce::int64>(world->topology.fadingRuntimeUuid)));
-        retireRuntimeEx_.requestRollback();
+        worldAuthority_.lifetime().requestRollback();
     }
 
     const bool hasAnyPendingTransition = (world->topology.fadingRuntimeUuid != 0) || !pendingIntents.empty();
@@ -553,7 +553,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         const auto pendingGeneration = static_cast<std::uint64_t>(pending.generation);
         const auto maxObservedGeneration = convo::consumeAtomic(youngestObservedGeneration_, std::memory_order_acquire);
         const auto callbackActiveCount = convo::consumeAtomic(rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire);
-        const bool graceCompleted = retireRuntimeEx_.isGracePeriodCompleted(pendingGeneration,
+        const bool graceCompleted = worldAuthority_.lifetime().isGracePeriodCompleted(pendingGeneration,
                                              maxObservedGeneration,
                                              callbackActiveCount);
         const bool pendingIntentOwned = (pending.dspSlot != UINT32_MAX);
@@ -562,16 +562,16 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         const std::uint64_t retireDeferralEpochs = (maxObservedGeneration > pendingGeneration)
             ? (maxObservedGeneration - pendingGeneration)
             : 0u;
-        const bool exceededDeferralThresholds = retireRuntimeEx_.hasExceededDeferralThresholds(retireDeferralEpochs,
+        const bool exceededDeferralThresholds = worldAuthority_.lifetime().hasExceededDeferralThresholds(retireDeferralEpochs,
                                                                                                 oldestPendingAgeMs,
                                                                                                 maxRetireDeferralEpochs,
                                                                                                 maxRetireWallClockMs);
 
         const auto pendingSlot = static_cast<std::uint32_t>(pending.dspSlot & 0xFFu);
-        retireRuntime_.acknowledgeRetireCoordination(pending);
-        retireRuntimeEx_.emitIntent(pendingSlot, pending.generation);
-        retireRuntimeEx_.enqueueRetire(pendingSlot);
-        retireRuntimeEx_.settleEpoch(pendingSlot);
+        worldAuthority_.lifetime().acknowledgeRetireCoordination(pending);
+        worldAuthority_.lifetime().emitIntent(pendingSlot, pending.generation);
+        worldAuthority_.lifetime().enqueueRetire(pendingSlot);
+        worldAuthority_.lifetime().settleEpoch(pendingSlot);
         if (exceededDeferralThresholds)
         {
             convo::fetchAddAtomic(retireEscalationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
@@ -580,18 +580,18 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
             const bool noReader = graceCompleted;
             const bool noExecutorReference = authoritativeOwnershipReleased;
             const bool noPendingTransition = !hasAnyPendingTransition;
-            if (retireRuntimeEx_.canReclaimAfterEscalation(noReader,
+            if (worldAuthority_.lifetime().canReclaimAfterEscalation(noReader,
                                                            noExecutorReference,
                                                            noPendingTransition))
             {
-                retireRuntimeEx_.reclaim(pendingSlot);
+                worldAuthority_.lifetime().reclaim(pendingSlot);
             }
         }
-        else if (retireRuntimeEx_.canTransitionRetirePendingToFree(graceCompleted,
+        else if (worldAuthority_.lifetime().canTransitionRetirePendingToFree(graceCompleted,
                                                                     pendingIntentOwned,
                                                                     authoritativeOwnershipReleased))
         {
-            retireRuntimeEx_.reclaim(pendingSlot);
+            worldAuthority_.lifetime().reclaim(pendingSlot);
         }
         else
         {
@@ -602,8 +602,8 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     convo::fetchAddAtomic(retiredWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     updateMinMetric(oldestRetiredGeneration_, world->generation);
 
-    runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
-    runtimePublicationBridge_.setRetireBacklogCount(retireRuntime_.pendingIntentCount());
+    runtimePublicationBridge_.setPendingIntentCount(worldAuthority_.lifetime().pendingIntentCount());
+    runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
     emitEvidenceTickNonRt(false);
 
     // ★★★ PR1: Quarantineスロット再評価 — 前回Case Cで隔離されたスロットの解放条件を再確認
@@ -616,11 +616,11 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         for (uint32_t qslot = 0; qslot < convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS; ++qslot) {
             if (!dspQuarantineManager_.isActive(qslot))
                 continue;
-            if (retireRuntimeEx_.laneOf(qslot) != convo::isr::RetireLane::Quarantine)
+            if (worldAuthority_.lifetime().laneOf(qslot) != convo::isr::RetireLane::Quarantine)
                 continue;
 
             // 条件: Grace完了（このworldより新しい世代が観測されている、またはコールバック停止）
-            const bool graceCompleted = retireRuntimeEx_.isGracePeriodCompleted(
+            const bool graceCompleted = worldAuthority_.lifetime().isGracePeriodCompleted(
                 static_cast<uint64_t>(world->generation),
                 maxObservedGeneration,
                 callbackActiveCount);
@@ -628,7 +628,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                 continue;
 
             // 3系統解放（quarantineSlot の逆順）
-            retireRuntimeEx_.reclaim(qslot);                          // 系統③: レーン解放
+            worldAuthority_.lifetime().reclaim(qslot);                          // 系統③: レーン解放
             dspHandleRuntime_.destroyQuarantineSlot(qslot, 0);         // 系統①: Reclaimedに遷移
             dspQuarantineManager_.reclaimSlot(qslot, 0);              // 系統②: フラグ解放
         }
@@ -679,7 +679,7 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
         std::filesystem::remove(tmpPath, ec);
     }
 
-    retireRuntimeEx_.emitRetireTimeline(evidenceRoot / "retire_timeline.json");
+    worldAuthority_.lifetime().emitRetireTimeline(evidenceRoot / "retire_timeline.json");
     evidenceExporter_.exportEvidence();
     worldLifecycleAudit_.tryDumpPeriodic();
 }

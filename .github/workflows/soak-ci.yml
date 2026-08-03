@@ -1,0 +1,81 @@
+# Soak CI — 長時間/高負荷の耐久検証（手動トリガーのみ）
+#
+# Work91 §7-7: AudioEngineHarness の soak シナリオ（S1/S2b/S3/S4/S5）を
+# workflow_dispatch で手動実行する。
+#
+# 設計方針（doc/work91/soak-test-design.md §6）:
+# - push ごとの CI には載せない（実行時間が長いため）。
+# - 手動（Actions タブの "Run workflow"）からのみ実行する。
+# - inputs.scenario で単一シナリオ or 全シナリオを選択可能。
+# - 将来安定してきたら schedule (cron) で夜間実行に移行検討。
+#
+# 実行対象:
+#   build/Release/AudioEngineHarness.exe --soak [--scenario=<name>]
+#   scenario: all / s1 / s2b / s3 / s4 / s5
+
+name: Soak CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "実行するシナリオ（all / s1 / s2b / s3 / s4 / s5）"
+        type: choice
+        default: "all"
+        options:
+          - all
+          - s1
+          - s2b
+          - s3
+          - s4
+          - s5
+
+env:
+  BUILD_DIR: ${{ github.workspace }}/build
+
+jobs:
+  soak:
+    name: "Soak (${{ github.event.inputs.scenario || 'all' }})"
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # ConvoPeq は MKL/IPP 必須依存のため Intel oneAPI をセットアップ
+      - name: Set up Intel oneAPI (MKL + IPP)
+        uses: intel/setup-intel-oneapi@v2
+        with:
+          components: mkl,ipp
+          version: "2026.0"
+
+      - name: Configure CMake (Release)
+        shell: pwsh
+        run: |
+          cmake -B ${{ env.BUILD_DIR }} `
+            -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCONVOPEQ_ENABLE_ISR_TESTS=ON
+
+      - name: Build AudioEngineHarness (Release)
+        run: cmake --build ${{ env.BUILD_DIR }} --config Release --target AudioEngineHarness -j 1
+
+      - name: Run Soak scenarios
+        shell: pwsh
+        run: |
+          $scenario = "${{ github.event.inputs.scenario }}"
+          if ([string]::IsNullOrEmpty($scenario)) { $scenario = "all" }
+          $exe = Join-Path ${{ env.BUILD_DIR }} "Release\AudioEngineHarness.exe"
+          & $exe --soak "--scenario=$scenario"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Soak scenario '$scenario' FAILED (exit=$LASTEXITCODE)"
+            exit 1
+          }
+
+      - name: Report soak results
+        if: always()
+        run: |
+          echo "## Soak results (${{ github.event.inputs.scenario || 'all' }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Platform: windows-latest (MSVC), Release /MD" >> $GITHUB_STEP_SUMMARY
+          echo "- Command: AudioEngineHarness --soak --scenario=${{ github.event.inputs.scenario || 'all' }}" >> $GITHUB_STEP_SUMMARY

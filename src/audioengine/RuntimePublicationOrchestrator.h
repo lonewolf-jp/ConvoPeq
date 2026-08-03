@@ -53,6 +53,17 @@ public:
     // Returns: Admission::Decision (Accepted: 全処理完了 / Deferred: 保留 / Rejected*: 却下)
     [[nodiscard]] PublicationAdmission::Decision trySubmit(const PublicationAdmission::PublishRequest& req) noexcept;
 
+    // ★ (a) Completion layer — ISR post-commit notifier.
+    //   Single seam for "publish committed"; the ISR PublishExecutor routes here
+    //   (NOT via IntentHandlerContext), keeping intent handlers HANDLER-1 (pure).
+    //   Audio-thread trySubmit retains its inline completion (unchanged).
+    void onPublishCommitted(PublicationSequenceId seqId) noexcept;
+
+    // ★ A3 Step 5-3: access to the stateless publish-completion facade (ADR-D2), owned by
+    //   the orchestrator (audio-thread world-publish path). Bound into IntentHandlerContext
+    //   by processIntent so the ISR publish execution tail can drive activate/crossfade/retire.
+    [[nodiscard]] DSPTransition& transition() noexcept { return transition_; }
+
     // submitPublishRequest: publish 要求を処理する (deferred は自動 enqueue)。
     void submitPublishRequest(const PublicationAdmission::PublishRequest& req) noexcept;
 

@@ -1,1 +1,38 @@
-﻿{"rollbackReady":true,"totalTransitions":4,"runId":"f27449cc072a4f4185b2392da5595453","provenance":"seed","epochMode":"shared","lifecycleCounters":{"visible":1,"replayRetainedOptional":0,"telemetryRetained":1,"compareEligible":1,"reclaimed":1,"reclaimEligible":1},"generatedAtNs":1784979500604000000,"rollbackMode":"shared","lifecycleSample":[{"slot":0,"state":"reclaimed"},{"slot":1,"state":"visible"}],"schema":"retire_timeline_v2","rollbackFlags":{"crossfadeOnly":false,"publicationOnly":false,"global":true,"retirePathOnly":true},"laneCounters":{"quarantine":0,"epoch":1,"rtIntent":1,"reclaim":1,"coordination":1}}
+{
+  "schema": "retire_timeline_v2",
+  "epochMode": "shared",
+  "rollbackMode": "shared",
+  "rollbackReady": true,
+  "rollbackFlags": {
+    "global": true,
+    "publicationOnly": false,
+    "crossfadeOnly": false,
+    "retirePathOnly": true
+  },
+  "totalTransitions": 949687,
+  "laneCounters": {
+    "rtIntent": 190303,
+    "coordination": 190303,
+    "epoch": 190303,
+    "reclaim": 190303,
+    "quarantine": 188475
+  },
+  "lifecycleCounters": {
+    "visible": 190047,
+    "compareEligible": 190303,
+    "telemetryRetained": 190303,
+    "replayRetainedOptional": 188475,
+    "reclaimEligible": 190303,
+    "reclaimed": 190303
+  },
+  "lifecycleSample": [
+    {"slot": 0, "state": "reclaimed"},
+    {"slot": 1, "state": "reclaimed"},
+    {"slot": 2, "state": "reclaimed"},
+    {"slot": 3, "state": "reclaimed"},
+    {"slot": 4, "state": "reclaimed"},
+    {"slot": 5, "state": "reclaimed"},
+    {"slot": 6, "state": "reclaimed"},
+    {"slot": 7, "state": "reclaimed"}
+  ]
+}

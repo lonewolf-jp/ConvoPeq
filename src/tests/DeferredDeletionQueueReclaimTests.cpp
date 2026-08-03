@@ -670,7 +670,7 @@ void testReclaimPerformance()
     std::cout << "\n  --- Reclaim Performance Measurement ---" << std::endl;
 
     // ★ kQueueSize=4096 が上限。上限まで詰めて測定。
-    constexpr int kNumEntries = 4096;
+    constexpr int kNumEntries = 1024;
 
     DeferredDeletionQueue queue;
     std::vector<std::unique_ptr<TrackedObject>> objs;

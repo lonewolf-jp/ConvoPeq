@@ -8,7 +8,8 @@ namespace convo::isr {
 PublishResult PublicationExecutor::publish(
     AudioEngine& engine,
     convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
-    convo::isr::DSPHandle existingHandle) noexcept
+    convo::isr::DSPHandle existingHandle,
+    convo::isr::DSPHandle oldHandle) noexcept
 {
     if (!frozen)
         return PublishResult::PublishFailed;
@@ -24,17 +25,21 @@ PublishResult PublicationExecutor::publish(
     if (rawState == nullptr)
         return PublishResult::PublishFailed;
 
+    // ★ B4-a4: PendingPublishRegistry への register は commitRuntimePublication (async facade)
+    //   が行うため、ここでは行わない（二重登録防止）。sealed snapshot (5-1/5-2) は
+    //   facade の enqueue 後も executePublish の immutable fallback として機能する。
+
     // publishWorld前にworld情報を保存（publishWorld後にrawStateは無効になる可能性あり）
     const uint64_t worldGen = rawState->generation;
     const uint64_t worldId = rawState->worldId;
 
     auto stateOwner = convo::aligned_unique_ptr<RuntimeState>(rawState);
 
-    // ★ work70 P1-a: publishWorld 直接呼び出し → commitRuntimePublication トランザクション
-    auto coordinator = engine.makeRuntimePublicationCoordinator();
+    // ★ work70 P1-a: commitRuntimePublication トランザクション（★ B4: async facade 経由）
     const auto result = engine.commitRuntimePublication(
-        coordinator, std::move(stateOwner),
-        AudioEngine::RegistrationContext::alreadyRegistered(existingHandle));
+        std::move(stateOwner),
+        AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
+        oldHandle);
 
     const uint64_t publishEndUs = convo::getCurrentTimeUs();
 

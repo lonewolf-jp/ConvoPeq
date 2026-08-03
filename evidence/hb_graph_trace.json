@@ -1,1 +1,8 @@
-﻿{"runId":"f27449cc072a4f4185b2392da5595453","provenance":"seed","events":[{"toEpoch":10,"to":2,"release":true,"mo":3,"acquire":true,"fromEpoch":10,"from":1,"ts":1784979500604000001},{"toEpoch":11,"to":3,"release":true,"mo":2,"acquire":false,"fromEpoch":10,"from":2,"ts":1784979500604000002},{"toEpoch":11,"to":4,"release":false,"mo":1,"acquire":true,"fromEpoch":11,"from":3,"ts":1784979500604000003},{"toEpoch":12,"to":5,"release":true,"mo":3,"acquire":true,"fromEpoch":11,"from":4,"ts":1784979500604000004}],"schema":"hb_trace_v1","eventCount":4,"generatedAtNs":1784979500604000000}
+{
+  "schema": "hb_trace_v1",
+  "eventCount": 2,
+  "events": [
+    {"ts": 48801241669300, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 48801330634700, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false}
+  ]
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":48803624857200}

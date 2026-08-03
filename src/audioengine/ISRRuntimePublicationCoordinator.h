@@ -3,6 +3,7 @@
 #include <memory>
 #include <cstdint>
 #include <type_traits>
+#include <optional>  // ★ FUTURE-3: popRecoveryRequest() return type
 #include "ISRClosure.h"
 #include "ISRPayloadTier.h"
 #include "ISRSealedObject.h"
@@ -40,11 +41,11 @@ public:
         uint64_t contextEpoch;
     };
 
-    struct QuarantineResult {
-        bool stateChanged{false};
-        bool auditLogged{false};
-        bool rolledBack{false};
-    };
+     struct QuarantineResult {
+         bool stateChanged{false};
+         bool auditLogged{false};
+         // ★ FUTURE-3/QSVC-5: rolledBack 削除。Audit 失敗→State 不変（Publish後は Immutable）。Rollback 禁止。
+     };
 
     QuarantineResult executeQuarantine(
         DSPHandleRuntime& handleRuntime,
@@ -94,10 +95,10 @@ public:
     [[nodiscard]] std::uint64_t retireAuthorityCount() const noexcept;
     const void* getCurrent() const noexcept;
     std::uint64_t getVersion() const noexcept;
-    // ★ HW-1: 最新の publicationEpoch を取得（storeReceipt 用）
-    [[nodiscard]] PublicationEpoch currentPublicationEpoch() const noexcept {
-        return persistentState_.publicationEpoch;
-    }
+    // ★ FUTURE-4: latest publicationEpoch derived from currentWorld_ (RuntimeState::publication.epoch)
+    [[nodiscard]] PublicationEpoch currentPublicationEpoch() const noexcept;
+    // ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId) — read-only Authority access.
+    [[nodiscard]] PublicationSequenceId currentPublicationSequenceId() const noexcept;
     void setRetireBacklogCount(std::uint64_t count) noexcept;
     void setPublicationBacklogCount(std::uint64_t count) noexcept;
     void setPendingIntentCount(std::uint64_t count) noexcept;
@@ -126,7 +127,7 @@ public:
     void markShutdownComplete() noexcept;
 
     // ── ★ P0-4C: ISR Intent 発行インターフェース ──
-    //   OBSERVE-1: Timer → emitObserveIntent → Coordinator が retirePublishedDSP を起動
+    //   OBSERVE-1: Timer → submitObserve → Coordinator が retirePublishedDSP を起動
     //   QSVC-2:    Coordinator は QuarantineService を介さず直接 quarantine を呼ばない
     //   DELETE-1:  reclaim() は Coordinator 専用。外部からの直接呼び出し禁止。
 
@@ -134,15 +135,110 @@ public:
     /// Coordinator は Intent Queue に追加し、非同期に処理する。
     /// OBSERVE-1〜8 に従い、Timer はこのメソッドのみを呼び出す。
     /// handle: 観測対象の DSPHandle（processIntent が retire する DSP を識別するために使用）
-    void emitObserveIntent(const DSPHandle& handle) noexcept;
+    void submitObserve(const DSPHandle& handle) noexcept;
 
     /// Quarantine Intent: 指定された DSPHandle を quarantine する要求を発行する。
     /// QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行する。
-    void emitQuarantineIntent(const DSPHandle& handle,
-                              QuarantineReason reason,
-                              DSPHandleRuntime& handleRuntime,
-                              DSPQuarantineManager& quarantineManager,
-                              uint64_t contextEpoch = 0) noexcept;
+     void submitQuarantine(const DSPHandle& handle,
+                               QuarantineReason reason,
+                               DSPHandleRuntime& handleRuntime,
+                               DSPQuarantineManager& quarantineManager,
+                               uint64_t contextEpoch = 0) noexcept;
+
+     // ── ★ FUTURE-3: Recovery Intent (transport-only payload) ──
+     //   submitRecoveryRequest() は enqueue のみ。pop は Builder Loop (FUTURE-10 共通 Intent Queue へ移行)。
+     //   Decision Authority を持たない: push/pop 以外の意味なし（復旧 World build は Builder 側）。
+     struct RecoveryIntent {
+         DSPHandle handle;            // recovery 対象（quarantined DSPHandle）
+         PublicationEpoch epoch;      // emit 時の publicationEpoch（FIFO/epoch 検証用）
+         uint64_t intentId;           // 診断・モニタリング用シーケンス番号
+     };
+     static_assert(std::is_trivially_copyable_v<RecoveryIntent>,
+         "RecoveryIntent must be trivially copyable for LockFreeRingBuffer");
+     static_assert(std::is_standard_layout_v<RecoveryIntent>,
+         "RecoveryIntent must be standard layout for LockFreeRingBuffer");
+
+     /// Recovery Intent: Quarantined DSPHandle の復旧要求を発行する。
+     /// FUTURE-3/QSVC-5: rollback 廃止。New RuntimeWorld の Immutable Publish で復旧。
+     /// Coordinator は Request enqueue のみ。Admission 判定は行わない（純粋発行関数）。
+     void submitRecoveryRequest(const DSPHandle& quarantinedHandle) noexcept;
+
+     /// Recovery Intent を Builder Loop へ引き渡す (1件 pop, transport-only)。
+     /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。
+    [[nodiscard]] std::optional<RecoveryIntent> popRecoveryRequest() noexcept;
+
+    // ── ★ FUTURE-10: 共通 Intent 型（種別別 Queue → 単一 intentQueue_） ──
+    //   QUEUE-21: tagged-union variant。std::variant は trivially copyable 非保証のため不可。
+    enum class IntentType : std::uint8_t {
+        Observe,
+        Publish,
+        Recovery,
+        Quarantine
+    };
+    static constexpr size_t kIntentTypeCount = 4;
+
+    struct ObservePayload  { DSPHandle handle; PublicationEpoch epoch; };
+    // ★ A3 Step 5-3: Decision Snapshot — audio-thread-computed publish-completion transition
+    //   data. POD (trivially copyable) so Intent stays LockFreeRingBuffer-transportable.
+    //   Decoupled from CrossfadeAuthority::Decision (which would create a
+    //   Coordinator<-CrossfadeAuthority<-AudioEngine<-WorldAuthority<-Coordinator include cycle);
+    //   ISR publish-executor reconstructs the typed Decision from this at execution (Option A).
+    struct PublishDecisionSnapshot {
+        bool needsCrossfade;
+        bool oldHasIR;
+        bool newHasIR;
+        double fadeTimeSec;
+        DSPHandle newHandle;
+        DSPHandle oldHandle;
+    };
+    static_assert(std::is_trivially_copyable_v<PublishDecisionSnapshot>,
+        "PublishDecisionSnapshot must be trivially copyable for LockFreeRingBuffer transport");
+    static_assert(std::is_standard_layout_v<PublishDecisionSnapshot>,
+        "PublishDecisionSnapshot must be standard layout for LockFreeRingBuffer transport");
+
+    struct PublishPayload  {
+        DSPHandle handle;                       // (retained; 5-2 migrates newWorld from sealedSnapshot)
+        const void* newWorld;                    // ★ A3 Step 5-1: sealed RuntimeBuildSnapshot world (fixed at enqueue; HANDLER-1 read-only)
+        std::uint64_t version;                   // ★ A3 Step 5-1: publish version (fixed at enqueue)
+        PublicationEpoch epoch;                  // ★ A3 Step 5-1: currentPublicationEpoch at enqueue (HANDLER-1: do not re-read)
+        std::uint64_t mappedGeneration;          // ★ A3 Step 5-1: mapped generation (fixed at enqueue)
+        RuntimeBoundary boundary;                // ★ A3 Step 5-1: publish boundary (fixed at enqueue)
+        PublishDecisionSnapshot decision;        // ★ A3 Step 5-3: Decision Snapshot (HANDLER-1 read-only, fixed at enqueue)
+    };
+    struct RecoveryPayload { DSPHandle quarantinedHandle; };
+    struct QuarantinePayload { DSPHandle handle; QuarantineReason reason; uint64_t contextEpoch; };
+
+    struct Intent {
+        IntentType type;
+        union {
+            ObservePayload    observe;
+            PublishPayload    publish;
+            RecoveryPayload   recovery;
+            QuarantinePayload quarantine;
+        } payload;
+        std::uint64_t sequenceId;
+    };
+    static_assert(std::is_trivially_copyable_v<Intent>,
+        "Intent must be trivially copyable for LockFreeRingBuffer (QUEUE-21)");
+    static_assert(std::is_standard_layout_v<Intent>,
+        "Intent must be standard layout for LockFreeRingBuffer (QUEUE-21)");
+
+    // ── ★ B3: Publish Intent enqueue (single gen site). ──
+    //   Sole route that pushes an IntentType::Publish onto intentQueue_ (RETRY: FUTURE-10
+    //   common queue). Producer = Non-RT publish thread (commitRuntimePublication), consumer
+    //   = ISR Coordinator Loop (processIntent → PublishExecutor::executePublish).
+    //   The caller (AudioEngine) has ALREADY transferred the immutable world ownership into
+    //   RuntimeWorldAuthority.ownerChannel_ (key = publication seq/epoch/mappedGen); this
+    //   Intent carries only the transport payload (Pointer + build-time metadata + decision),
+    //   so the ISR coordinator stays ignorant of RuntimeState (no circular include).
+    //   Returns false (without touching the queue) if the queue is full — caller then
+    //   reclaims the outstanding Owner via RuntimeWorldAuthority::ownerChannel().take(key).
+    [[nodiscard]] bool enqueuePublicationIntent(const Intent& intent) noexcept
+    {
+        Intent prepared = intent;
+        prepared.type = IntentType::Publish;
+        return intentQueue_.push(prepared);
+    }
 
     /// Reclaim Request: 指定された DSPHandle の reclaim を要求する。
     /// DELETE-2〜7: Coordinator は epoch 安全確認後、reclaim を実行する。
@@ -153,7 +249,7 @@ public:
                         class ISRRetireRouter& router) noexcept;
 
     /// Observe Intent Queue から蓄積された Intent を処理する。
-    /// P0-4A: Timer から emitObserveIntent でキューイングされた Intent を
+    /// P0-4A: Timer から submitObserve でキューイングされた Intent を
     /// Coordinator Loop（NonRT）で取り出して retirePublishedDSP を実行する。
     /// OBSERVE-3〜10 に従い、FIFO 順序で処理し、古い世代の Intent を破棄する。
     void processIntent(AudioEngine& engine,
@@ -174,7 +270,7 @@ public:
     //   retireRuntime.emitRetireIntent() で再注入
     [[nodiscard]] OverflowDrainResult drainOverflowRing(
         class RetireOverflowRing& overflowRing,
-        class RetireRuntime& retireRuntime,
+        class LifetimeState& retireRuntime,
         bool unlimited = false) noexcept;
 
     // ★ 滞留年限警告コールバック
@@ -192,13 +288,16 @@ private:
     //   各 scheduler は coordinator_ 参照を保持し、親クラスのプライベートメンバにアクセス
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+    // ★ FUTURE-8/QUEUE-16: Observe Deferred Ring 回御（Retire drain と分離）。
+    void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept;
+
     class OverflowScheduler {
         RuntimePublicationCoordinator& coordinator_;
     public:
         explicit OverflowScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
         [[nodiscard]] OverflowDrainResult drainOverflowRing(
             class RetireOverflowRing& overflowRing,
-            class RetireRuntime& retireRuntime,
+            class LifetimeState& retireRuntime,
             bool unlimited) noexcept;
         [[nodiscard]] size_t deferredRingOccupancy() const noexcept;
     };
@@ -232,43 +331,8 @@ private:
         InvalidPayloadTier
     };
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // 方式C（採用）: PersistentStateBlock (plain struct)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // 全アクセスが MessageThread 閉域であるため、atomic ではなく plain struct で十分。
-    struct PersistentStateBlock {
-        std::uint64_t publicationSequenceId = 0;
-        std::uint64_t publicationEpoch      = 0;
-        std::uint64_t mappedRuntimeGeneration = 0;
-
-        [[nodiscard]] static bool isMonotonic(
-            const PersistentStateBlock& prev,
-            std::uint64_t nextSeqId,
-            std::uint64_t nextEpoch,
-            std::uint64_t nextGen) noexcept
-        {
-            const bool hasPrevious = prev.publicationSequenceId != 0
-                || prev.publicationEpoch != 0
-                || prev.mappedRuntimeGeneration != 0;
-            if (!hasPrevious)
-                return true;
-            return nextSeqId > prev.publicationSequenceId
-                && nextEpoch > prev.publicationEpoch
-                && nextGen > prev.mappedRuntimeGeneration;
-        }
-    };
-
-    static_assert(std::is_standard_layout_v<PersistentStateBlock>,
-        "PersistentStateBlock must be standard-layout");
-    static_assert(std::is_trivially_copyable_v<PersistentStateBlock>,
-        "PersistentStateBlock must remain trivially copyable");
-    static_assert(sizeof(PersistentStateBlock) == sizeof(std::uint64_t) * 3,
-        "PersistentStateBlock must be exactly 3 uint64_t without padding");
-
-    // ★ 3個別 atomic に代わり、plain struct で3フィールドを論理一貫管理
-    // IMPORTANT: persistentState_ is MessageThread-only.
-    //   Any cross-thread access requires conversion to std::atomic<PersistentStateBlock>.
-    PersistentStateBlock persistentState_{};
+    // ★ FUTURE-4: persistentState_ removed — metadata (epoch/sequenceId/mappedRuntimeGeneration)
+    //   is derived from currentWorld_ (RuntimeState::publication) at read time.
 
     std::atomic<const void*> currentWorld_;
     std::atomic<RejectCode> lastRejectCode_;
@@ -295,7 +359,7 @@ private:
     std::atomic<size_t> lastResortCount_{0};
 
     // ── ★ P0-4A: Observe Intent Queue (4層 Overflow) ──
-    // Timer Thread (RT) → emitObserveIntent → push → Coordinator Loop (NonRT) → processIntent → pop
+    // Timer Thread (RT) → submitObserve → push → Coordinator Loop (NonRT) → processIntent → pop
     // SPSC: Producer = Timer Thread, Consumer = Coordinator Loop
     // LockFreeRingBuffer は FIFO を保証し、SPSC なので atomic オーバーヘッドなし
     struct ObserveIntent {
@@ -316,8 +380,24 @@ private:
     LockFreeRingBuffer<ObserveIntent, kObserveFallbackCapacity> observeFallbackQueue_;
 
     std::atomic<uint64_t> nextObserveIntentId_{0};
-    std::atomic<uint64_t> overflowCounter_{0};  // ★ QUEUE-13: Overflow 診断カウンタ
-    std::atomic<uint64_t> fallbackOverflowCounter_{0};  // ★ Fallback 溢れカウンタ
+    // ★ FUTURE-8/QUEUE-13: Overflow カウンタを種別別に分離（Observe / Retire）。
+    std::atomic<uint64_t> observeOverflowCounter_{0};           // Observe: Layer1→3 溢れ診断
+    std::atomic<uint64_t> observeFallbackOverflowCounter_{0};   // Observe: Fallback 溢れ診断
+
+    // ── ★ FUTURE-8/QUEUE-15: Observe Intent 専用 Deferred Ring ──
+    //   Retire 系 coordinatorDeferredRing_ と分離。ObserveIntent をそのまま格納（handle 保持）。
+    static constexpr size_t kObserveDeferredRingCapacity = 1024;
+    LockFreeRingBuffer<ObserveIntent, kObserveDeferredRingCapacity> observeDeferredRing_;
+
+     // ── ★ FUTURE-3: Recovery Intent Queue (transport-only SPSC) ──
+    static constexpr size_t kRecoveryIntentQueueCapacity = 256;
+    LockFreeRingBuffer<RecoveryIntent, kRecoveryIntentQueueCapacity> recoveryIntentQueue_;
+    std::atomic<uint64_t> nextRecoveryIntentId_{0};
+
+    // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
+    static constexpr size_t kIntentQueueCapacity = 4096;
+    LockFreeRingBuffer<Intent, kIntentQueueCapacity> intentQueue_;
+    std::atomic<uint64_t> nextIntentId_{0};
 
     // ★ Phase5: 滞留年限警告コールバック
     AgeWarnCallback overflowAgeWarnCallback_{nullptr};

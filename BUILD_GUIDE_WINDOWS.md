@@ -281,7 +281,12 @@ IPP is **optional** (quiet find). If found:
 
 ## 9. AddressSanitizer (ASan)
 
-ASan is **Debug-only** and requires **dynamic CRT** (`/MDd`).
+ASan requires **dynamic CRT** and a CRT-consistent ASan runtime DLL.
+
+| CRT | Required ASan runtime DLL |
+|-----|--------------------------|
+| `/MDd` (Debug) | `clang_rt.asan_dbg_dynamic-*.dll` |
+| `/MD` (RelWithDebInfo / Release) | `clang_rt.asan_dynamic-*.dll` |
 
 ```cmd
 build.bat Debug asan=on
@@ -295,10 +300,17 @@ cmake -S . -B build -DENABLE_ASAN=ON ...
 
 | Compiler | ASan Effect |
 |----------|------------|
-| MSVC | `/fsanitize=address` + dynamic CRT override (`/MDd` for Debug) |
+| MSVC | `/fsanitize=address` + dynamic CRT override (Debug → `/MDd`, others → `/MD`) |
 | icx | `-fsanitize=address` |
 
-**Important**: Static CRT (`/MTd`) combined with MSVC ASan causes `LNK2038` mismatch error. The build system automatically switches to `/MDd` when ASan is enabled.
+**Important**:
+- Static CRT (`/MTd`) combined with MSVC ASan causes `LNK2038` mismatch error. The build system automatically switches to dynamic CRT when ASan is enabled.
+- **CRT must match the ASan runtime DLL.** `/MDd` requires `clang_rt.asan_dbg_dynamic-*.dll`; if only the release DLL (`clang_rt.asan_dynamic-*.dll`) is deployed, `/MDd` binaries hang or abort with `bad-free` inside the CRT. **Recommended ASan verification flow: build the test/harness targets in `RelWithDebInfo` config** (`/MD`, matches the deployed release ASan DLL):
+  ```cmd
+  cmake --build build_asan --config RelWithDebInfo --target <TestTarget>
+  ```
+  Copy `clang_rt.asan_dynamic-x86_64.dll` next to the resulting `.exe` (the DLL is not auto-copied). Run with `ASAN_OPTIONS=detect_leaks=0` to suppress LSan (which is not fully functional on Windows).
+- `/RTC1` is incompatible with ASan and with `/O2`. The build system strips it via `$<$<CONFIG:Debug>:/RTC1->` (note: MSVC cl parses `/RTC1-` as `/RTC1`, so it must only be emitted in Debug where the global `CMAKE_CXX_FLAGS_DEBUG` adds `/RTC1`).
 
 ---
 

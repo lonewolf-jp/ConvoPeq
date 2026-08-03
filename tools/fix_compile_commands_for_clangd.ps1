@@ -30,5 +30,9 @@ foreach ($entry in $json) {
     if ($orig -ne $cmd) { $count++ }
 }
 
-$json | ConvertTo-Json -Depth 10 | Set-Content $OutputFile -Encoding UTF8
+# NOTE: Windows PowerShell 5.1's -Encoding UTF8 writes a BOM, which breaks
+# clangd's compile_commands.json parsing. Write UTF-8 without BOM explicitly.
+$text = $json | ConvertTo-Json -Depth 10
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($OutputFile, $text, $utf8NoBom)
 Write-Output "Fixed $count entries. Written to $OutputFile"

@@ -249,7 +249,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     auto frozen = convo::aligned_make_unique<convo::FrozenRuntimeWorld>(
         convo::aligned_unique_ptr<RuntimeState>(
             const_cast<RuntimeState*>(worldOwner.release())));
-    auto result = executor_.publish(engine_, std::move(frozen), req.newDSP);
+    // ★ B4: oldHandle = current active DSP handle を渡し、Rebuild (#7) の retire 意図を伝搬する。
+    auto result = executor_.publish(engine_, std::move(frozen), req.newDSP, oldHandle);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
             + juce::String(req.generation)
@@ -280,17 +281,26 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Published, nowUs);
 
-    // ---- Phase 3: Publish 成功確認後に DSP Lifetime 操作 ----
-    // ★ activate は publish 成功後にのみ実行する。
-    //    (publish 失敗時は activeDSP を書き換えず、不整合を防止)
-    transition_.onPublishCompleted(newDSPResolved, oldDSP, cfDecision, lifetime_);
-
-    // ---- Phase 4: Epoch advance ----
-    // advanceRetireEpoch は publish 後に epoch を進める。
-    // AudioEngine::advanceRetireEpoch() は retire queue の drain を行う。
-    engine_.advanceRetireEpoch();
+    // ★ B4-a4: publish 成功後の activate/crossfade/retire と epoch advance は
+    //   ISR PublishExecutor::executePublish の Execution tail（onPublishCompleted →
+    //   advanceRetireEpoch → onPublishCommitted）に一本化された。
+    //   executor_.publish（async facade）は完了通知（notifyPublishReceipt）を受けてから
+    //   return するため、ここで再実行すると二重実行になる。削除:
+    //     transition_.onPublishCompleted(newDSPResolved, oldDSP, cfDecision, lifetime_);
+    //     engine_.advanceRetireEpoch();
 
     return PublicationAdmission::Decision::Accepted;
+}
+
+void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId seqId) noexcept {
+    // ★ (a) Completion layer — ISR post-commit notification (not via IntentHandlerContext).
+    //   Invoked from the ISR PublishExecutor once authority.commit() succeeds; records the
+    //   committed sequence + progress timestamp so the P1-6 stall observer tracks ISR commits.
+    //   Audio-thread trySubmit keeps its own inline completion path.
+    convo::publishAtomic(m_lastObservedSequence, seqId, std::memory_order_release);
+    convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
+    // ★ B3/C2: per-receipt completion — Producer はこの seqId で自分の publish 完了を待てるようになる。
+    engine_.notifyPublishReceipt(seqId);
 }
 
 void RuntimePublicationOrchestrator::submitPublishRequest(

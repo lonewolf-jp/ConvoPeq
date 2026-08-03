@@ -70,7 +70,7 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
 
-    const std::uint64_t quarantineResident = retireRuntimeEx_.getQuarantineResidentCount();
+    const std::uint64_t quarantineResident = worldAuthority_.lifetime().getQuarantineResidentCount();
     convo::publishAtomic(quarantineResident_, quarantineResident, std::memory_order_release);
 
     const auto computeBackpressureScales = [this, retireDepth, quarantineResident]() noexcept
@@ -121,14 +121,14 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     // ★ C-1.3: overflow→throttle 結合（overflow 継続時間 + 頻度の二重判定）
     {
-        const uint64_t droppedTotal = retireRuntime_.droppedIntentCount();
+        const uint64_t droppedTotal = worldAuthority_.lifetime().droppedIntentCount();
         const uint64_t prevDropped = convo::exchangeAtomic(prevDroppedSnapshot_,
             droppedTotal, std::memory_order_acq_rel);
         const uint64_t droppedDelta = (droppedTotal > prevDropped)
             ? (droppedTotal - prevDropped) : 0;
 
         // overflowStartTimestamp による継続時間追跡
-        const uint64_t overflowStart = retireRuntime_.overflowStartTimestamp();
+        const uint64_t overflowStart = worldAuthority_.lifetime().overflowStartTimestamp();
         bool chronicByDuration = false;
         if (overflowStart != 0) {
             const auto now = static_cast<uint64_t>(
@@ -139,7 +139,7 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         }
 
         // overflowWindowCounter による頻度追跡
-        const uint64_t windowOverflows = retireRuntime_.overflowWindowCounter();
+        const uint64_t windowOverflows = worldAuthority_.lifetime().overflowWindowCounter();
         constexpr uint64_t kWindowDurationSec = 30;
         const double overflowRate = (kWindowDurationSec > 0)
             ? static_cast<double>(windowOverflows) / kWindowDurationSec : 0.0;

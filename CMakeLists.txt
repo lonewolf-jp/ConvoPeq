@@ -88,6 +88,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRPayloadTier.cpp
         src/audioengine/ISRRetireRouter.cpp
         src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp     # ★ A2: EpochControl (ctor referenced via LifetimeState)
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
         src/audioengine/ISRDSPHandle.cpp
         src/audioengine/ISRDSPQuarantine.cpp
@@ -107,13 +108,65 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         "$ENV{IPPROOT}/include"
         ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
     )
-    target_link_libraries(ISRSemanticValidationTests PRIVATE juce::juce_core r8brain)
+    target_link_libraries(ISRSemanticValidationTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
     # JuceHeader.h の生成を ISRSemanticValidationTests より先に行う
     add_dependencies(ISRSemanticValidationTests ConvoPeq)
 
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
     )
+
+    # ★ Work91: ISRSoakTests — ヘッドレスデータ構造耐久（publish を含まない）。
+    #   publish 系は AudioEngineHarness 側に配置する原則（doc/work91/soak-test-design.md §2.2）。
+    #   ISRSemanticValidationTests と同じ include/link パターン（RuntimePublicationCoordinator
+    #   を直接使用するため .cpp を含める）。
+    add_executable(ISRSoakTests
+        src/tests/ISRSoakTests.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp     # ★ A2: EpochControl (ctor referenced via LifetimeState)
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(ISRSoakTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(ISRSoakTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(ISRSoakTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(ISRSoakTests ConvoPeq)
+    target_compile_features(ISRSoakTests PRIVATE cxx_std_20)
+    target_compile_options(ISRSoakTests PRIVATE /EHsc /utf-8)
+
+    add_test(NAME ISRSoakTests COMMAND ISRSoakTests)
+
+    # ★ B2: OwnerChannel unit tests (OwnerChannel.h is JUCE-independent; tests sole-
+    #   ownership transfer, single-take, key isolation, no-overwrite, no-leak under SPSC).
+    add_executable(OwnerChannelTests
+        src/tests/OwnerChannelTests.cpp
+    )
+    target_compile_features(OwnerChannelTests PRIVATE cxx_std_20)
+    target_compile_options(OwnerChannelTests PRIVATE /EHsc /utf-8)
+    target_include_directories(OwnerChannelTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    add_test(NAME OwnerChannel COMMAND OwnerChannelTests)
 
     # P0-2b: PublishReceipt DSPCore*削除 — DSPHandle 比較の検証
     # DSPHandleRuntime::getFadingRuntimeDSPHandle() の動作検証のため
@@ -171,8 +224,24 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(PriorityIntegrationTests
         src/tests/PriorityIntegrationTests.cpp
         src/audioengine/ISRRetire.cpp              # RetireRuntime
+        src/audioengine/ISRRetireRuntimeEx.cpp     # A2: EpochControl (ctor referenced via LifetimeState)
     )
     target_compile_options(PriorityIntegrationTests PRIVATE /EHsc)
+    # ★ A2: ISRRetireRuntimeEx.cpp pulls JuceHeader.h (via DspNumericPolicy.h) → add the JUCE include
+    #   path + juce module link, mirroring ISRSemanticValidationTests (L95-110).
+    target_include_directories(PriorityIntegrationTests PRIVATE
+        "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode"
+        "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules"
+    )
+    target_link_libraries(PriorityIntegrationTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    # ★ A2: ISRRetireRuntimeEx.cpp pulls JuceHeader.h (via DspNumericPolicy.h) → needs the JUCE include
+    #   path + juce module link, mirroring ISRSemanticValidationTests. ConvoPeq dependency generates JuceHeader.h.
+    target_include_directories(PriorityIntegrationTests PRIVATE
+        "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode"
+        "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules"
+    )
+    add_dependencies(PriorityIntegrationTests ConvoPeq)
+    target_link_libraries(PriorityIntegrationTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
 
     # ★ v14.0 Phase 8: Auto Gain Staging 契約テスト
     #   AutoGainPlanner::plan() の4パターン × Auto On/Off を検証（リファレンス実装）。
@@ -228,6 +297,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackend.cpp が AlignedAllocation.h
         #   (mkl_malloc/mkl_free) を使用するため MKL::MKL をリンク（include も propagate される）
         target_link_libraries(FFTBackendTests PRIVATE MKL::MKL)
+        # ★ Work91: ISRSoakTests も AlignedAllocation.h (mkl_malloc/mkl_free) を使用するため
+        #   MKL::MKL をリンク（RuntimeState::createForBuilder が aligned_make_unique を呼ぶ）。
+        target_link_libraries(ISRSoakTests PRIVATE MKL::MKL)
     endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
@@ -387,6 +459,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(RebuildAdmissionRegressionTests PRIVATE /utf-8)
         target_compile_options(BuildInputSemanticContractTests PRIVATE /utf-8)
         target_compile_options(PriorityIntegrationTests PRIVATE /utf-8)
+        target_compile_options(ISRSoakTests PRIVATE /utf-8)
     endif()
 
     # テストターゲットに Windows プラットフォーム定義を追加（Debug ビルドでも標準ヘッダーが正しく include されるよう確保）
@@ -398,7 +471,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
                      OverlapAuthoritySingularTests ShadowCompareContractTests
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
                      PartialPublicationRejectTests RebuildAdmissionRegressionTests
-                     BuildInputSemanticContractTests PriorityIntegrationTests)
+                     BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests)
             target_compile_definitions(${tgt} PRIVATE
                 _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
             )
@@ -605,7 +678,7 @@ endif()
 #------------------------------------------------------------
 # ソースファイル
 #------------------------------------------------------------
-target_sources(ConvoPeq PRIVATE
+set(CONVOPEQ_ALL_SOURCES
     src/MainApplication.cpp
     src/MainWindow.cpp
     src/audioengine/AudioEngine.RebuildDispatch.cpp
@@ -645,6 +718,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/PublicationExecutor.cpp
                 src/audioengine/RuntimePublicationOrchestrator.cpp
                 src/audioengine/DSPLifetimeManager.cpp
+                src/audioengine/ISRCoordinatorLoop.cpp  # ★ FUTURE-9: Dedicated Coordinator Worker
                 src/audioengine/TelemetryRecorder.cpp
                 src/audioengine/ISRDSPQuarantine.cpp
                 src/audioengine/ISRClosureGraphWalker.cpp
@@ -751,6 +825,8 @@ target_sources(ConvoPeq PRIVATE
     # ★ [P0-1] AVX2 ランタイムチェック
     src/CpuFeatureCheck.cpp
 )
+
+target_sources(ConvoPeq PRIVATE ${CONVOPEQ_ALL_SOURCES})
 
 #------------------------------------------------------------
 # リンクとコンパイル定義
@@ -1146,10 +1222,11 @@ if(ENABLE_ASAN)
     set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
     set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
     # ASan 時は /RTC1 を除去（/RTC1 と ASan は非互換）
-    # target_compile_options(... /RTC1-) で除去することで、
-    # CMAKE_CXX_FLAGS_DEBUG のグローバル変更による他ターゲットへの影響を防止する。
+    # /RTC1- は MSVC cl では /RTC1 として解釈されるため、Debug 構成の
+    # CMAKE_CXX_FLAGS_DEBUG 由来の /RTC1 のみ除去対象とする
+    # （RelWithDebInfo は /O2 のため /RTC1 と共存不能、/RTC1 自体を持たない）。
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(ConvoPeq PRIVATE /RTC1- /fsanitize=address)
+        target_compile_options(ConvoPeq PRIVATE $<$<CONFIG:Debug>:/RTC1-> /fsanitize=address)
         target_link_options(ConvoPeq PRIVATE /fsanitize=address)
         # MSVC ASan requires dynamic CRT (/MDd) — override static CRT
         set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
@@ -1306,3 +1383,148 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 endif()
 # B4: アプリ本体がテストに依存する逆依存を解消。テスト集約ターゲットが存在する場合はそちらに付け替える
 # add_dependencies(ConvoPeq GainStagingContractTests EQProcessorMaxGainTests)
+
+#------------------------------------------------------------
+# B4 IntegrationTest Harness: real AudioEngine (no GUI)
+#------------------------------------------------------------
+# B4 残課題 #1: 実 AudioEngine を起動し publish パイプライン
+#   (commitRuntimePublication facade → OwnerChannel → IntentQueue → CoordinatorLoop →
+#    executePublish → RuntimeStore swap → onPublishCommitted → receipt) を実スレッドで通す
+#   統合テスト。GUI (MainApplication/MainWindow) を除外し、AudioEngine 本体ソースを
+#   コンパイルするスタンドアロン exe とする。
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    set(CONVOPEQ_HARNESS_EXCLUDED_SOURCES
+        src/MainApplication.cpp
+        src/MainWindow.cpp
+    )
+    set(CONVOPEQ_HARNESS_SOURCES)
+    foreach(_src ${CONVOPEQ_ALL_SOURCES})
+        list(FIND CONVOPEQ_HARNESS_EXCLUDED_SOURCES "${_src}" _excluded_idx)
+        if(_excluded_idx EQUAL -1)
+            list(APPEND CONVOPEQ_HARNESS_SOURCES "${_src}")
+        endif()
+    endforeach()
+
+    add_executable(AudioEngineHarness
+        src/tests/AudioEngineHarness/AudioEngineHarness.cpp
+        src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp
+        src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
+        ${CONVOPEQ_HARNESS_SOURCES}
+    )
+    target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)
+    target_compile_options(AudioEngineHarness PRIVATE /EHsc /utf-8)
+    # ★ AVX2: DSPCoreDouble.cpp の fastTanhV256 が __AVX2__/__FMA__ ガード付きのため必須
+    #   （ConvoPeq ターゲットと同一フラグ: MSVC → /arch:AVX2, IntelLLVM → /QxCORE-AVX2）
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioEngineHarness PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioEngineHarness PRIVATE /QxCORE-AVX2)
+    endif()
+    target_compile_definitions(AudioEngineHarness PRIVATE
+        CONVOPEQ_STANDALONE_ONLY=1
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RESAMPLE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
+        $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+        JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
+        JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
+        JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
+        JUCE_USE_SSE_INTRINSICS=1
+        JUCE_USE_SIMD=1
+        $<$<PLATFORM_ID:Windows>:
+            _UNICODE
+            UNICODE
+            NOMINMAX
+            JUCE_ASIO=1
+            _CRT_SECURE_NO_WARNINGS
+        >
+    )
+    target_include_directories(AudioEngineHarness PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+    )
+    target_include_directories(AudioEngineHarness SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules")
+    if(DEFINED ENV{MKLROOT})
+        target_include_directories(AudioEngineHarness SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    endif()
+    if(DEFINED ENV{IPPROOT})
+        target_include_directories(AudioEngineHarness SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    endif()
+    target_link_libraries(AudioEngineHarness PRIVATE
+        juce::juce_audio_utils
+        juce::juce_audio_devices
+        juce::juce_audio_basics
+        juce::juce_dsp
+        juce::juce_gui_extra
+        juce::juce_gui_basics
+        juce::juce_core
+        r8brain
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_link_libraries(AudioEngineHarness PRIVATE MKL::MKL)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioEngineHarness PRIVATE /Qmkl:sequential)
+    endif()
+    # ★ IPP: ProductionFft::createPlan / NoiseShaperLearner が ippsMalloc_8u・ippsFFT* を参照
+    #   （ConvoPeq 本体と同一: 930行 find_package(IPP) → IPP::ippcore IPP::ipps）
+    if(IPP_FOUND)
+        target_link_libraries(AudioEngineHarness PRIVATE IPP::ippcore IPP::ipps)
+    endif()
+    # JuceHeader.h 生成順序: ConvoPeq (juce_add_gui_app) が生成するため依存させる
+    add_dependencies(AudioEngineHarness ConvoPeq)
+    add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
+endif()
+
+#------------------------------------------------------------
+# ENABLE_ASAN: テスト/ハーネス ターゲットにも ASan を適用
+#   ConvoPeq 本体は既存の ENABLE_ASAN ブロックで処理済み（動的 CRT /MDd に切替）。
+#   テスト/ハーネスは CMake デフォルトの動的 CRT（/MDd）のため /fsanitize=address
+#   をそのまま付加できる。/RTC1 は ASan と非互換のため除去する。
+#------------------------------------------------------------
+if(ENABLE_ASAN)
+    set(CONVOPEQ_ASAN_TEST_TARGETS
+        ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
+        ISRSemanticValidationTests RetireGraceSemanticsTests
+        OwnerChannelTests NormalRetireDSPHandleCompareTests
+        RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
+        OverlapAuthoritySingularTests ShadowCompareContractTests
+        CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
+        PartialPublicationRejectTests RebuildAdmissionRegressionTests
+        BuildInputSemanticContractTests DeferredDeletionQueueReclaimTests
+        PriorityIntegrationTests GainStagingContractTests EQProcessorMaxGainTests
+        EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
+        AudioEngineHarness ISRSoakTests)
+    foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
+        if(TARGET ${tgt})
+            if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+                # /RTC1- は MSVC cl では /RTC1 として解釈される（D8016）。Debug 構成の
+                # CMAKE_CXX_FLAGS_DEBUG 由来の /RTC1 のみ除去対象とする。
+                # /utf-8: コメントの日本語が Shift-JIS 誤解釈でパース崩れを起こすため
+                # （RelWithDebInfo の CMAKE_CXX_FLAGS には /utf-8 が無い）。
+                target_compile_options(${tgt} PRIVATE $<$<CONFIG:Debug>:/RTC1-> /utf-8 /fsanitize=address)
+                target_link_options(${tgt} PRIVATE /fsanitize=address)
+                # MSVC ASan は CRT と一致したランタイム DLL を要求する:
+                #   /MDd (Debug)          -> clang_rt.asan_dbg_dynamic-*.dll
+                #   /MD  (RelWithDebInfo) -> clang_rt.asan_dynamic-*.dll
+                # 展開は release 版 DLL で統一しているため、ASan 実行は RelWithDebInfo
+                # (/MD) を標準とする。Debug をビルドする場合も CRT を一致させる。
+                set_property(TARGET ${tgt} PROPERTY MSVC_RUNTIME_LIBRARY_DEBUG "MultiThreadedDebugDLL")
+                set_property(TARGET ${tgt} PROPERTY MSVC_RUNTIME_LIBRARY_RELWITHDEBINFO "MultiThreadedDLL")
+                set_property(TARGET ${tgt} PROPERTY MSVC_RUNTIME_LIBRARY_RELEASE "MultiThreadedDLL")
+            elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+                target_compile_options(${tgt} PRIVATE -fsanitize=address)
+                target_link_options(${tgt} PRIVATE -fsanitize=address)
+            endif()
+        endif()
+    endforeach()
+endif()

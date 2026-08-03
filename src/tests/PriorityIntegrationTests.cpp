@@ -21,13 +21,13 @@ namespace {
 
 using convo::isr::RetireIntent;
 using convo::isr::RetirePriority;
-using convo::isr::RetireRuntime;
+using convo::isr::LifetimeState;
 
 // ── ★ Phase5: escalateAllRetires — Critical昇格検証 ──
 
 [[nodiscard]] bool testEscalateAllRetiresToCritical()
 {
-    RetireRuntime runtime;
+    LifetimeState runtime;
 
     // 3つのIntentを投入（すべて Normal 優先度）
     runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Normal});
@@ -54,7 +54,7 @@ using convo::isr::RetireRuntime;
 
 [[nodiscard]] bool testEscalateAllRetiresPartial()
 {
-    RetireRuntime runtime;
+    LifetimeState runtime;
 
     runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Low});
     runtime.emitRetireIntent({2, 200, 2000, RetirePriority::Normal});
@@ -82,7 +82,7 @@ using convo::isr::RetireRuntime;
 
 [[nodiscard]] bool testQuarantineTriggersHighPriority()
 {
-    RetireRuntime runtime;
+    LifetimeState runtime;
 
     // ★ Phase3: Reader が quarantine された状況を模擬
     //   → Coordinator が quarantine 成功後、High優先度で retire intent を発行
@@ -113,7 +113,7 @@ using convo::isr::RetireRuntime;
 
 [[nodiscard]] bool testShutdownEscalation()
 {
-    RetireRuntime runtime;
+    LifetimeState runtime;
 
     // 様々な優先度の intent を投入
     runtime.emitRetireIntent({1, 100, 3000, RetirePriority::Low});
@@ -147,7 +147,7 @@ using convo::isr::RetireRuntime;
 
 [[nodiscard]] bool testPriorityBacklogBreakdown()
 {
-    RetireRuntime runtime;
+    LifetimeState runtime;
 
     // 各優先度1つずつ
     runtime.emitRetireIntent({1, 100, 1000, RetirePriority::Critical});

@@ -225,7 +225,40 @@ CI-1 の ASan Debug ビルド green 化過程で ctest 3テスト失敗を発見
 
 ---
 
-## FUTURE-3: QuarantineService — submitRecoveryRequest (Rollback廃止) [🔧 今回実装] — 📋 設計確定
+## 実装チェックリスト (Implementation Checklist)
+
+> 管理対象: FUTURE-3〜10 + Shutdown Pipeline。実装順序は `## 実装順序`（:1330）の依存関係表に準じる（ISR 完成系を優先，Storage Policy FUTURE-5/6 を最後）。
+> 進捗は各行のチェックボックス `[x]` で管理する。**すべての前提 (a)(b)(c) は CI-1 で green 確認済み**（2026-07-31: build 78/78 ✅, ctest 23/23 ✅）。
+> 凡例: `☐` 未着手 / `🔄` 進行中 / `✅` 完了 / `🚫` 見送り(理由記載)
+
+| #% | 実装項目 | 詳細タスク / 完了条件 | ステータス | 参照 |
+|----|----------|----------------------|------|------|
+| 1 | **FUTURE-4: Metadata Snapshot** | `persistentState_` 削除 → `consumeAtomic(currentWorld_)` 1回で epoch+generation+sequence 取得 | ✅ | :379 / :541-577 |
+| 1.1 | FUTURE-4 | `PersistentStateBlock` (h:271) 削除 | ✅ | :571 |
+| 1.2 | FUTURE-4 | `currentPublicationEpoch()`/`getVersion()` を `consumeAtomic(currentWorld_)` 経由に変更 | ✅ | :544 |
+| 1.3 | FUTURE-4 | publish-time freeze: `commit()` が `newWorld->publication` を bake（Builder 事前設定と idempotent）. `finalizeMetadata()` は未分離（REPAIR_PLAN METADATA-4 理想と逸脱、Publisher freeze point として許容） | ✅ | :545 |
+| 1.4 | FUTURE-4 | `#if ISR_METADATA_TRANSITION` DebugOnly cache — **見送り**: transitional cache を経ず end-state 直接（METADATA-6 物理撤去を即座に満たす） | 🚫 | :546 |
+| 1.5 | FUTURE-4 | `rg persistentState_` 0 code ref (comment のみ) / `currentPublicationEpoch_`/`currentPublicationSequenceId_` 未導入 | ✅ | :547,576 |
+| 1.6 | FUTURE-4 | MetadataSnapshot 4テストを `ISRSemanticValidationTests` へ統合（MetaSnapshotTests.cpp は CMake/JUCE-coupling 回避で統合） | ✅ | :550-567 |
+| 1.7 | FUTURE-4 | `git diff --check` CRLF 警告のみ / ctest 23/23 ✅ | ✅ | :577 |
+| 2 | **FUTURE-3: submitRecoveryRequest** | rollback 廃止, Recovery を New World Publish 経路 | ✅ | :228 |
+| 2.1 | FUTURE-3 / QSVC-5 | `result.rolledBack` 削除（QuarantineResult h + cpp 唯一の writer）| ✅ | :234 |
+| 2.2 | FUTURE-3 | `submitRecoveryRequest(const DSPHandle&)` + `popRecoveryRequest()` 実装 + Coordinator 宣言 + `RecoveryIntent`/`recoveryIntentQueue_` | ✅ | :236-237 |
+| 2.3 | FUTURE-3 | Recovery Request transport (enqueue→pop 1-hop) 完了。Builder→Validate→Publish recovery-world build は AudioEngine/Builder Loop レイヤ（FUTURE-10 Intent Queue 統合後に接続） — 未着手 | 🔄 | :274 |
+| 3 | **FUTURE-7: submitQuarantine / submitObserve rename** | `emitQuarantineIntent`→`submitQuarantine`, `emitObserveIntent`→`submitObserve` (API + Timer.cpp/DSPTransition.h 呼出し + コメント) 統一 | ✅ | :758 |
+| 4 | **FUTURE-8: Observe Deferred Ring 分離** | ObserveIntent overflow を retire 系 ring から分離（observeDeferredRing_ + drainObserveDeferred + overflow カウンタ種別別） | ✅ | :894 |
+| 5 | **FUTURE-9: Dedicated Coordinator Worker** | Scheduling Authority を Timer→Coordinator へ移す。BUG-052（hasDeferred_ → atomic）✅ 完了。Dedicated Coordinator Worker Thread + step-5 re-submit wiring を今回実装（FUTURE-10 より先に実装、2026-08-01 review決定 C）。audio-thread ライフサイクルは NonRT Worker へのリネームのみ（MessageThread→Worker、同一 NonRT 安全 invariants 維持） | 🔧 | :980 |
+| 6 | **FUTURE-10: 共通 Intent Queue 一本化** | `Intent {type,handle,epoch,sequenceId}` tagged-union + `kDispatchTable` Dispatcher (`handleObserve/Recovery/Publish/Quarantine`) | ☐ | :1093 |
+| 6.1 | FUTURE-10 | `kDispatchTable` 1:1 Routing + `static_assert(DispatcherHasNoDecision)` | ☐ | :1576-1579 |
+| 6.2 | FUTURE-10 | Handler = Executor のみ (Decision/World 書き換え禁止, HANDLER-1) | ☐ | :1578 |
+| 7 | **Shutdown Pipeline 検証** | SHUTDOWN-1〜7 と共通 Intent Queue の 1:1 対応確認 (No Active Builder 含む) | ☐ | :1277 |
+| 8 | **FUTURE-5: MemoryPool化** | `registry_` → `registryPool_`, dynamic 確保, RT-bounded, 非-RT 確保禁止 | ☐ | :581 |
+| 9 | **FUTURE-6: Handle Table 完全移行** | `runtimeDSPHandleMap_` → `HandleTable` (forward O(1) hash + reverse O(1) dense array) | ☐ | :672 |
+| -- | **最終確認** | `git diff --check` クリーン + 全テスト 23/23 PASS | ☐ | :1350 |
+
+---
+
+
 
 ### 実装内容
 
@@ -1131,19 +1164,40 @@ struct Intent {
 //   ★ std::variant は trivially copyable を保証しないため不可（LockFreeRingBuffer 要件）。
 //     素の union + tag による tagged union で両立させる（QUEUE-21）。
 
+// ★ FUTURE-10/HANDLER-2（2026-08-01 レビュー決定）: Execution dependencies を明示的に注入する HandlerContext。
+//   Service Locator（AudioEngine 経由 getRuntime()/getQuarantine()）ではなく、Coordinator が構築し
+//   Handler へ一方向注入する。Authority 境界を明示的に維持し、将来 Metrics/Logger/Diagnostics 追加で
+//   processIntent シグネチャを変更せずに済む。Context は Runtime Snapshot ではなく Execution Context。
+struct HandlerContext {
+    AudioEngine& engine;
+    DSPLifetimeManager& lifetime;
+    DSPHandleRuntime& runtime;
+    QuarantineService& quarantine;      // ★ A(2026-08-01): Handler→Service→Domain。DSPQuarantineManager は Service 背後の Domain。handleQuarantine は ctx.quarantine.execute(ctx.runtime, request) を呼ぶ。
+};
+
 // Queue: 単一
 LockFreeRingBuffer<Intent, kIntentQueueCapacity> intentQueue_;
 // ★ INTENT-1（12回目レビュー反映）: enqueue 後の Intent は const として扱われ、絶対に変更されない。
 //    push は値コピー（tagged-union が trivially copyable のため安全）、pop は const 参照で Handler へ渡す。
 
 // ★ 登録型 Dispatcher（QUEUE-22 / DISPATCH-1）: switch(type) を肥大化させない。Pure Routing（Decision なし）。
-using IntentHandler = void (Coordinator::*)(const Intent&) noexcept;   // const Intent&: 投入後不変（INTENT-1）
+// ★ FUTURE-10/HANDLER-1/QUEUE-22: Handler = Execution のみ（World 書き換え / Decision 禁止）。
+//   Coordinator は Routing のみ。dispatch() → Handler → 専用コンポーネントへ委譲。
+void handleObserve(const Intent& intent, HandlerContext& ctx) noexcept;           // → ctx.lifetime.retireByHandle
+void handlePublish(const Intent& intent, HandlerContext& ctx) noexcept;            // → ctx.engine 経由 commit/publishAtomic
+void handleRecovery(const Intent& intent, HandlerContext& ctx) noexcept;            // → enqueue（Builder Loop が pop）
+void handleQuarantine(const Intent& intent, HandlerContext& ctx) noexcept;          // → ctx.quarantine.execute（QuarantineService）
+// ★ QUEUE-22 / DISPATCH-1 / HANDLER-2（2026-08-01 レビュー決定）: Pure Routing Dispatcher。switch(type) 肥太化を防ぐ。
+//   IntentHandler は (const Intent&, HandlerContext&) を受け取る — Dependency は HandlerContext で明示的注入（Service Locator 回避）。
+using IntentHandler = void (RuntimePublicationCoordinator::*)(const Intent&, HandlerContext&) noexcept;
 static constexpr std::array<IntentHandler, kIntentTypeCount> kDispatchTable = {
-    &Coordinator::handleObserve,     // Observe    → ObserveProcessor   （HANDLER-1: Execution のみ）
-    &Coordinator::handlePublish,     // Publish    → PublishProcessor   （HANDLER-1: Execution のみ）
-    &Coordinator::handleRecovery,    // Recovery   → RecoveryProcessor  （HANDLER-1: Execution のみ）
-    &Coordinator::handleQuarantine,  // Quarantine → QuarantineProcessor
+    &RuntimePublicationCoordinator::handleObserve,     // Observe    → ObserveProcessor   （HANDLER-1: Execution のみ）
+    &RuntimePublicationCoordinator::handlePublish,     // Publish    → PublishProcessor   （HANDLER-1: Execution のみ）
+    &RuntimePublicationCoordinator::handleRecovery,    // Recovery   → RecoveryProcessor  （HANDLER-1: Execution のみ）
+    &RuntimePublicationCoordinator::handleQuarantine,  // Quarantine → QuarantineProcessor
 };
+static_assert(kDispatchTable.size() == kIntentTypeCount, "QUEUE-22/DISPATCH-1: kDispatchTable must be a 1:1 total mapping over IntentType (Pure Routing, DispatcherHasNoDecision)");
+// ★ DISPATCH-1 追加: type → Handler の 1:1 onto をコンパイル時検証（Dispatcher が Decision を持たないこと保証）。
 // 新規 IntentType 追加時: enum 追加 + Payload 追加 + kDispatchTable に 1 行登録 のみ。
 // switch の肥大化なし。FIFO（QUEUE-17）と Routing の責務を維持する。
 ```
@@ -1182,9 +1236,42 @@ static constexpr std::array<IntentHandler, kIntentTypeCount> kDispatchTable = {
 | SPSC 前提の維持。RT-safe。 | 統合に伴うリファクタリングコスト。 |
 | ISR 最終形として最も自然。 | 現行の種別別 Queue 実装からの移行作業。 |
 
+### 2026-08-01 レビュー決定（Authority 境界固定 — 再変更不可）
+
+FUTURE-10 は Authority 分離フェーズ。3 点を最終確定:
+
+1. **Handler plumbing = 依存明示注入（HANDLER-2）**: `HandlerContext{engine,lifetime,runtime,quarantine}` を `processIntent(const Intent&, HandlerContext&)` へ受け渡す。`AudioEngine` は Facade とする — Service Locator 化しない。Coordinator が HandlerContext を構築し Handler へ一方向注入。呼び出し元は `AudioEngine.Timer.cpp:1032` **1箇所のみ**（影響域限小）。
+2. **Overflow = Intent種別非依存統一**: `enqueue(intent)` → Primary → Fallback → Deferred → Drop を **1 実装**。Queue は `Intent` だけ知る（種別不問）。FUTURE-8 Observe 専用 Deferred Ring は `OverflowPolicy` 実装として吸収。
+3. **Quarantine = Coordinator Routing のみ**: `submitQuarantine()` は Intent enqueue。`processIntent` → `handleQuarantine(ctx)` → `DSPQuarantineManager`（State: `DSPHandleRuntime::quarantine` / Audit: `quarantineManager.quarantineHandle`）。QSVC-2 は「Coordinator 経由到達」で満たす（Coordinator 自身は quarantine state を触らない）。**Authority 分離**: Coordinator=routing / Handler=execution / DSPQuarantineManager=quarantine-state。
+
+#### 追加確定（2026-08-01 レビュー — A/B/C）
+
+- **A（QuarantineService 維持）**: `HandlerContext.quarantine` は `DSPQuarantineManager&` ではなく **`QuarantineService&`**。`handleQuarantine(ctx)` は `ctx.quarantine.execute(ctx.runtime, request)` を呼び、Service が State（`DSPHandleRuntime::quarantine`）+ Audit（`DSPQuarantineManager::quarantineHandle`）を単一トランザクションで実行する（Handler → Service → Domain）。HandlerContext フィールドを `QuarantineService&` へ変更済み。
+- **B（IntentOverflowPolicy 分離）**: `RetireOverflowScheduler`（Epoch-aware）と `IntentOverflowPolicy`（FIFO: Primary → Fallback → Deferred → Drop）を**別実装**とする。Transport(Queue)は統一しても Policy は Intent 種別ごとに異なる意味（Epoch vs FIFO）を持つため。
+- **C（順序）**: FUTURE-9（Dedicated Coordinator Worker / Scheduling Authority 確立） → FUTURE-10（HandlerContext + kDispatchTable + 共通 Queue）。Worker が完成して初めて Handler群を最終形で実装できる。
+- **ISR Authority 構造（完成形)**: `RT → Intent Queue（Transport Authority） → Coordinator Worker（Scheduling Authority） → kDispatchTable（Routing） → Handler（Execution） → Domain Service（QuarantineService） → DSP`。
+
+#### 未実装インベントリ（棚卸し 2026-08-01 — 現コード 2026-08-01 時点）
+
+| 項目 | 現コード | 設計 / レビュー決定 | ステータス |
+|------|------|----------------|------|
+| `kDispatchTable` / `handle*` 宣言 | `ISRRuntimePublicationCoordinator.h:168-196` に `IntentType`/`Intent`/`intentQueue_`/`nextIntentId_` (`.h:355`) 追加済（Phase A, build 63/64 ✅）。`handle*`/`kDispatchTable` は**ソース未実装**（REPAIR_PLAN 設計のみ） | QUEUE-22/HANDLER-1 | 未実装 |
+| `processIntent` routing | Observeのみ (`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:7-33`: `observeIntentQueue_`+`observeFallbackQueue_`+`drainObserveDeferred`)。Recovery/Quarantine/Publishは未経由 | FUTURE-10 統合 (`kDispatchTable[type](intent,ctx)`) | 未実装 |
+| `submitQuarantine` | **同期** (`QuarantineService::executeQuarantine` 直接呼び, `ISRRuntimePublicationCoordinator.cpp:676`) | enqueue + `handleQuarantine` 委譲 | 未実装（決定済） |
+| Intent overflow (4層) | 未実装。現 Overflow は Retire 専用 (`OverflowScheduler`, `coordinatorDeferredRing_`/`.h:310`, `lastResortQueue_`/`.h:313`, `OverflowDrainResult`/`.h:215`) | QUEUE-19 (種別非依存) | 未実装 |
+| `QuarantineService` 配置 | `ISRRuntimePublicationCoordinator.cpp:610-635` 実装済（State `DSPHandleRuntime::quarantine`+Audit `DSPQuarantineManager::quarantineHandle`）。`HandlerContext.quarantine = QuarantineService&` なので `handleQuarantine` へ**inlineまたはService背後** | HANDLER-2 | 解決済（2026-08-01 A 確定: keep QuarantineService as Handler backend。Handler→Service→Domain。handleQuarantine(ctx) → ctx.quarantine.execute(ctx.runtime, request)） |
+| 旧 Queue 同居 | `observeIntentQueue_`/`.h:331`, `observeFallbackQueue_`/`.h:334`(`kObserveFallbackCapacity`)`, `observeDeferredRing_`/`.h:345`, `recoveryIntentQueue_`/`.h:349`(kRecoveryIntentQueueCapacity256) 仍存在 | FUTURE-10 で `intentQueue_`(`.h:353`,4096)へ統合置換 | 未実装 |
+
+#### スタブ参照の不一致（棚卸し済み 2026-08-01）
+
+- REPAIR_PLAN 内の行参照 `.h:311`/`.h:315`/`.cpp:527-531` 等は **stale**（FUTURE-7/8 の追記で行がずれ）。現コード: `kObserveIntentQueueCapacity` `.h:330`, `observeFallbackQueue_`/`.h:334`, `observeDeferredRing_`/`.h:345`, `kIntentQueueCapacity`/`.h:353`, `nextIntentId_`/`.h:355`。
+- doc:852-908/1244/1254/1256 の `emitQuarantineIntent()`/`emitObserveIntent()` は FUTURE-7 で `submitQuarantine()`/`submitObserve()` に改名済み（現コード `AudioEngine.Timer.cpp:1809,1847` は `submitQuarantine`）。
+- `submitQuarantine` 呼び出し: `AudioEngine.Timer.cpp:1809,1847`（両点で `dspQuarantineManager_` を既に渡しているため、HandlerContext plumbing は既存引数の再利用で済む）。
+
 ### 完了条件
 
 1. 全 Intent（Observe / Publish / Recovery / Quarantine）が単一 `intentQueue_` を経由する
+
 2. `processIntent()` が `intent.type` で Routing し、各ハンドラへ委譲する
 3. 4層 Overflow が種別非依存で動作する
 4. 新規 Intent 種別の追加が種別別 Queue の新設を伴わない（共通 Queue への追加のみ）

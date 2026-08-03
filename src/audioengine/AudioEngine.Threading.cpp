@@ -5,6 +5,8 @@
 #include "RuntimeDrainAudit.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "ISRRetireOverflowRing.h"         // ★ Phase1: RetireOverflowRing 完全型
+#include "DSPLifetimeManager.h"            // ★ FUTURE-9: runCoordinatorPhase
+#include "ISRCoordinatorLoop.h"            // ★ FUTURE-9: coordinatorLoop_ complete type
 
 //==============================================================================
 // [P0-15] AudioEngine.Threading.cpp — 3PR分割済み.
@@ -59,7 +61,7 @@ bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
 
     // Step 3: Projection 更新（truth を反映）
     dspHandleRuntime_.quarantineSlot(slot);
-    retireRuntimeEx_.quarantine(slot);
+    worldAuthority_.lifetime().quarantine(slot);
 
     return true;
 }
@@ -74,7 +76,7 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
 
     return convo::isr::RuntimeDrainAudit{
         .pendingPublication = runtimePublicationBridge_.getPublicationBacklogCount(),
-        .pendingRetire = retireRuntime_.pendingIntentCount(),
+        .pendingRetire = worldAuthority_.lifetime().pendingIntentCount(),
         .activeCrossfadeCount = crossfadeRuntime_.isPending() ? 1u : 0u,
         .routerPendingRetire = static_cast<uint64_t>(m_retireRouter->pendingRetireCount())
             + convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),  // ★ P1-9: ring+fallback 合計
@@ -104,8 +106,8 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .overflowCount = m_retireRouter
             ? m_retireRouter->overflowCount() : 0,
         // ★ Phase2: OverflowRing 滞留数
-        .overflowRingResident = retireRuntime_.getOverflowRing()
-            ? retireRuntime_.getOverflowRing()->residentCount() : 0
+        .overflowRingResident = worldAuthority_.lifetime().getOverflowRing()
+            ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : 0
     };
 }
 
@@ -123,8 +125,8 @@ bool AudioEngine::isFullyDrained() noexcept
 
     // ★ Phase2: OverflowRing + DSPQuarantine の滞留数で quarantineResidentCount を設定
     {
-        const auto ringResident = retireRuntime_.getOverflowRing()
-            ? retireRuntime_.getOverflowRing()->residentCount() : size_t{0};
+        const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
+            ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
         const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
         runtimePublicationBridge_.setQuarantineResidentCount(
             static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
@@ -170,4 +172,62 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
 void AudioEngine::processDeferredReleases()
 {
     drainDeferredRetireQueues(false);
+}
+
+//==============================================================================
+// ★ FUTURE-9: Dedicated Coordinator Worker — Scheduling Authority lifecycle.
+//   The periodic Coordinator cadence (processIntent / overflow drain / deferred
+//   resubmit) is relocated here from AudioEngine::timerCallback so the
+//   MessageThread Timer becomes observe-only (submitObserve). The worker is a
+//   plain juce::Thread (NonRT); the ISR invariants below are unchanged:
+//     • runtimePublicationBridge_.processIntent / drainOverflowRing operate on
+//       lock-free queues + atomic counters (safe off-MessageThread).
+//     • Deferred resubmit is MessageManager-free: runtimeOrchestrator_
+//       submitPublishRequest / consumeDeferredRequest (atomic hasDeferred_).
+//==============================================================================
+void AudioEngine::startCoordinatorLoop() noexcept
+{
+    jassert(coordinatorLoop_ == nullptr);
+    coordinatorLoop_ = std::make_unique<convo::isr::CoordinatorLoop>(*this);
+    coordinatorLoop_->startLoop();
+}
+
+void AudioEngine::shutdownCoordinatorLoop() noexcept
+{
+    if (coordinatorLoop_)
+    {
+        coordinatorLoop_->stopLoop();
+        coordinatorLoop_.reset();
+    }
+}
+
+void AudioEngine::runCoordinatorPhase() noexcept
+{
+    // ★ ISR: Coordinator — processIntent (relocated from AudioEngine::timerCallback)
+    {
+        DSPLifetimeManager lifetimeMgr(*this);
+        runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
+    }
+
+    // [PR-3] Deferred publish resubmit (relocated from timerCallback).
+    //   MF-free: the worker drains the orchestrator's deferred slot and re-submits
+    //   directly (no triggerAsyncUpdate / MessageManager hop).
+    if (!isShutdownInProgress()
+        && runtimeOrchestrator_ != nullptr
+        && runtimeOrchestrator_->hasDeferredRequest())
+    {
+        if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
+            runtimeOrchestrator_->submitPublishRequest(*req);
+    }
+
+    // ★ Phase1: OverflowRing drain (relocated from timerCallback).
+    {
+        if (worldAuthority_.lifetime().getOverflowRing())
+        {
+            const auto drainResult = runtimePublicationBridge_.drainOverflowRing(
+                *worldAuthority_.lifetime().getOverflowRing(), worldAuthority_.lifetime(), false);
+            if (drainResult.reinjectedCount > 0)
+                m_retireRouter->tryReclaim();
+        }
+    }
 }

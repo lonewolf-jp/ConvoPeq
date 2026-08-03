@@ -53,6 +53,7 @@ struct CoeffSet {
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
 #include <immintrin.h>
 
 #include "AlignedAllocation.h"
@@ -95,7 +96,9 @@ struct CoeffSet {
 #include "ISRAuthorityClass.h"
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
-namespace convo::isr { class ISRRetireRouter; }
+    namespace convo::isr { class ISRRetireRouter; }
+    namespace convo::isr { class PublishExecutor; }
+#include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
 class DSPLifetimeManager;
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRRuntimeIdentityGenerators.h"
@@ -103,6 +106,7 @@ class DSPLifetimeManager;
 #include "ISRRetire.h"
 #include "ISRShutdown.h"
 #include "ISRRuntimePublicationCoordinator.h"
+#include "ISRRuntimeWorldAuthority.h"  // ★ A-1/A2: RuntimeWorldAuthority owning Publication + Lifetime state
 #include "ISRDSPQuarantine.h"
 #include "ISRClosureGraphWalker.h"
 #include "ISRDebugRuntime.h"
@@ -139,9 +143,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
 #pragma warning(disable : 4996) // [[deprecated]] EngineRuntime — transitional, verifier-enforced
     struct BuilderToken
     {
-    private:
-        friend class AudioEngine;
-        friend class convo::RuntimeBuilder;
+        // ★ FUTURE-4 (test-only): ctor exposed so RuntimeState::createForTest() can mint a token.
         constexpr BuilderToken() noexcept = default;
     };
 
@@ -158,6 +160,11 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     [[nodiscard]] static convo::aligned_unique_ptr<RuntimeState> createForBuilder(BuilderToken token) noexcept
     {
         return convo::aligned_make_unique<RuntimeState>(token);
+    }
+    // ★ FUTURE-4 (test-only): construct a RuntimeState without a live AudioEngine/Builder.
+    [[nodiscard]] static std::unique_ptr<RuntimeState> createForTest() noexcept
+    {
+        return std::make_unique<RuntimeState>(BuilderToken{});
     }
 
     // AuthorityClass::Authoritative (ISR: worldId identifies specific RuntimeWorld builds, must be Authoritative)
@@ -1165,7 +1172,7 @@ public:
     //   pendingReceipt_ を安全に解放し、Timer が次回処理できるようにする。
     void markReceiptReclaimComplete() noexcept {
         pendingReceipt_.reset();
-        receiptReady_.store(false, std::memory_order_release);
+        convo::publishAtomic(receiptReady_, false, std::memory_order_release);
     }
 
     // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
@@ -1175,8 +1182,19 @@ public:
 
     // ★ Phase-2: NonRT(MessageThread) → Policy 生成時に acquire で読み取り
     //   書き込み元: prepareToPlay() (MessageThread) :: release
-    //   実装は AudioEngine.Orchestrator.cpp (CrossfadeAuthority.h 完全型が必要)
+    //   実装は AudioEngine.Publication.cpp (CrossfadeAuthority.h 完全型が必要)
     [[nodiscard]] convo::isr::CrossfadePolicy makeCrossfadePolicy() const noexcept;
+
+    // ★ B4: Producer 共通の Decision snapshot 生成（Decision + Handle を一括生成）。
+    //   oldHandle が null の Producer（idle publish #4/#5/#6）は crossfade 判定をスキップし、
+    //   old DSP retire 意図なしとして固定する。Rebuild (#7) のみ current active DSP handle を渡す
+    //   （old DSP を retire する意図を表現）。判定ロジックは Orchestrator の 3-step
+    //   (evaluate → null fallback → HealthState Critical 抑制) と同一。
+    //   実装は AudioEngine.Publication.cpp（CrossfadeAuthority.h 完全型が必要）。
+    [[nodiscard]] convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
+        const RuntimePublishWorld* newWorld,
+        const convo::isr::DSPHandle& newHandle,
+        const convo::isr::DSPHandle& oldHandle) const noexcept;
 
     // ★ Phase-2.5: DSPTransition 等から HealthEvent を非同期投入
     //   DSPTransition は Non-RT スレッドで動作するため、onHealthEvent を直接呼び出しても安全。
@@ -1995,7 +2013,7 @@ private:
                     for (auto& entry : map)
                     {
                         if (!entry.second.isNull())
-                            rt.retire(entry.second);
+                            owner->dspHandleRuntime_.retire(entry.second);
                     }
                 }
             }
@@ -3356,7 +3374,7 @@ public:
     }
     // ★ P1-6/8: Retire pending intent の公開
     [[nodiscard]] uint64_t getRetirePendingIntentCount() const noexcept {
-        return retireRuntime_.pendingIntentCount();
+        return worldAuthority_.lifetime().pendingIntentCount();
     }
 
     //=== End RuntimePublicationCoordinator NonRT helper API ===//
@@ -3477,13 +3495,17 @@ private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
     friend class convo::isr::PublicationExecutor;
+    friend class convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
     friend class DSPLifetimeManager;
 
-    // ★ work70: RegistrationContext — commitRuntimePublication の registration コンテキスト。
+    // ★ B4: RegistrationContext は公開 API commitRuntimePublication() のパラメータ型。
+    //   ハーネス/Producer が直接利用できるよう public セクションに置く。
+    //   work70: RegistrationContext — commitRuntimePublication の registration コンテキスト。
     //   dsp != nullptr: commitRuntimePublication が新規登録
     //   handle != null (dsp==nullptr): 呼び出し元が事前登録済み
     //   両方 null: 登録不要（Bootstrap world / Hard reset）
+public:
     struct RegistrationContext {
         DSPCore* dsp = nullptr;
         convo::isr::DSPHandle handle;
@@ -3493,6 +3515,8 @@ private:
         static RegistrationContext none() noexcept { return { nullptr, convo::isr::DSPHandle::null() }; }
     };
 
+private:
+
     // ★ work70: ScopeExit — RAII によるスコープ終了処理
     template <typename F>
     struct ScopeExit {
@@ -3500,6 +3524,42 @@ private:
         ~ScopeExit() { f(); }
     };
     template <typename F> ScopeExit(F) -> ScopeExit<F>;
+
+    // ★ B3/C2: per-receipt publish completion — Producer は自分の seqId の完了のみを待つ（キュー全体 drain ではない）。
+    //   complete() は executePublish 成功時の onPublishCommitted から呼ばれる。waitFor() は B4 で Producer が使用。
+    //   executePublish は intentQueue_ を FIFO で処理するため seqId は単調増加で完了する（順序性前提）。
+    struct PublishReceiptWaiter {
+        void complete(convo::isr::PublicationSequenceId seqId) noexcept
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (seqId > lastCompleted_) { lastCompleted_ = seqId; }
+            }
+            cv_.notify_all();
+        }
+
+        [[nodiscard]] bool waitFor(convo::isr::PublicationSequenceId seqId, int timeoutMs) noexcept
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            const auto deadline = std::chrono::steady_clock::now()
+                + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
+            cv_.wait_until(lock, deadline, [&] { return seqId <= lastCompleted_; });
+            return seqId <= lastCompleted_;
+        }
+
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        convo::isr::PublicationSequenceId lastCompleted_ = 0;
+    };
+
+    PublishReceiptWaiter publishReceiptWaiter_;
+
+    void notifyPublishReceipt(convo::isr::PublicationSequenceId seqId) noexcept { publishReceiptWaiter_.complete(seqId); }
+
+    [[nodiscard]] bool waitForPublishReceipt(convo::isr::PublicationSequenceId seqId, int timeoutMs) noexcept
+    {
+        return publishReceiptWaiter_.waitFor(seqId, timeoutMs);
+    }
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
@@ -4121,18 +4181,24 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     return true;
 }
 
-// ★ work70: commitRuntimePublication — publish の唯一の入口。
-//   register → publish → 失敗時 rollback のトランザクションを保証する。
+// ★ B4: commitRuntimePublication — Producer が唯一利用する publish の入口（async facade）。
+//   register → PendingPublishRegistry → OwnerChannel transfer → ISR Intent enqueue →
+//   完了通知待ち の非同期 publish を実行する。publish の実行（authority.commit + store swap）
+//   は CoordinatorLoop 上の PublishExecutor::executePublish が行い、完了は
+//   onPublishCommitted → notifyPublishReceipt で通知される。
+//   ★ B4: activate 責務は executePublish の Execution tail（DSPTransition::
+//   onPublishCompleted → lifetime.activate）に一本化されたため、ここでは activate しない
+//   （二重 activate 防止）。Bootstrap は CoordinatorLoop 起動前の同期例外（B4-a3）。
+//   oldHandle: Producer ごとの retire 意図。idle publish (#4/#5/#6) は null 固定。
+//   Rebuild (#7) のみ current active DSP handle を渡す（makePublishDecisionSnapshot 参照）。
 //   ★ SCOPE_EXIT は rollbackHandle を参照キャプチャする（コピーではない）。
-//   commit point 到達後は rollbackHandle = DSPHandle::null() で無効化し、
-//   SCOPE_EXIT による rollback を防止する。
-//   work72候補: Extract transaction logic into PublicationTransaction class.
-// ★ v8.3: const RuntimePublishWorld を受け入れる — INV-11 コンパイル時保証
 [[nodiscard]] inline PublishCommitResult commitRuntimePublication(
-    RuntimePublicationCoordinator& coordinator,
     convo::aligned_unique_ptr<const RuntimePublishWorld> world,
-    const RegistrationContext& regCtx) noexcept
+    const RegistrationContext& regCtx,
+    const convo::isr::DSPHandle& oldHandle) noexcept
 {
+    static constexpr int kPublishReceiptWaitTimeoutMs = 250;  // CoordinatorLoop 1ms 周期 ≫ 十分
+
     convo::isr::DSPHandle rollbackHandle;
     ScopeExit guard { [&]() noexcept {
         if (!rollbackHandle.isNull())
@@ -4151,23 +4217,65 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     {
         rollbackHandle = regCtx.handle;
     }
-    const auto stage = coordinator.publishWorld(std::move(world));
-    if (PublishStageResultTraits::isCommitted(stage))
+
+    const auto* newWorld = world.get();
+    if (newWorld == nullptr)
+        return { convo::PublishStageResult::Failed };
+
+    const auto seqId = newWorld->publication.sequenceId;
+    if (seqId == 0)
+        return { convo::PublishStageResult::Failed };
+    const auto epoch = static_cast<std::uint32_t>(newWorld->publication.epoch);
+    const auto mappedGen = static_cast<std::uint64_t>(newWorld->publication.mappedRuntimeGeneration);
+
+    // B4: Decision + Handle を Producer 共通ヘルパーで生成（oldHandle = Producer ごとの retire 意図）
+    const auto decision = makePublishDecisionSnapshot(newWorld, rollbackHandle, oldHandle);
+
+    // 1. async enqueue→commit gap を PendingPublishRegistry で埋める（lookup の fallback）
+    worldAuthority_.registry().registerPublish(seqId, static_cast<const void*>(newWorld));
+
+    // 2. immutable world の所有権を OwnerChannel へ移譲（key = seq/epoch/mappedGen）。
+    //    enqueue 成功時点で所有権は移譲済み — 以降 executePublish が take→commit する。
+    if (!worldAuthority_.ownerChannel().enqueue(
+            convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen }, std::move(world)))
     {
-        // ★ work70-FIX: publish 成功時に DSPHandle を Activate する。
-        if (!rollbackHandle.isNull())
-            dspHandleRuntime_.activate(rollbackHandle);
-        rollbackHandle = convo::isr::DSPHandle::null();
-        return { stage, OwnershipDisposition::Transferred };
+        worldAuthority_.registry().unregister(seqId);
+        return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
     }
 
-    // publish 失敗。rollbackHandle.isNull() == false ならロールバックが残っている
-    // （ScopeExit が未実行）。rollbackHandle.isNull() == true なら既に無効化 or 不要。
-    // OwnershipDisposition で呼び出し元に通知:
-    //   CallerDestroy → 呼び出し元が destroyRolledBackDSP で破棄
-    //   None → 破棄不要（Bootstrap等）
-    const bool needsDestroy = !rollbackHandle.isNull() && (regCtx.dsp != nullptr || !regCtx.handle.isNull());
-    return { stage, needsDestroy ? OwnershipDisposition::CallerDestroy : OwnershipDisposition::None };
+    // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
+    convo::isr::RuntimePublicationCoordinator::Intent intent;
+    intent.type = convo::isr::RuntimePublicationCoordinator::IntentType::Publish;
+    intent.sequenceId = seqId;
+    intent.payload.publish.handle = rollbackHandle;
+    intent.payload.publish.newWorld = static_cast<const void*>(newWorld);
+    intent.payload.publish.version = static_cast<std::uint64_t>(seqId);
+    intent.payload.publish.epoch = newWorld->publication.epoch;
+    intent.payload.publish.mappedGeneration = mappedGen;
+    intent.payload.publish.boundary = convo::isr::RuntimeBoundary::NonRTWorld;
+    intent.payload.publish.decision = decision;
+    if (!runtimePublicationBridge_.enqueuePublicationIntent(intent))
+    {
+        // キュー full: 移譲した Owner を取り戻し、registry をクリアして rollback に委ねる。
+        (void)worldAuthority_.ownerChannel().take(
+            convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
+        worldAuthority_.registry().unregister(seqId);
+        return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+    }
+
+    // 4. 完了通知を待つ（executePublish → orchestrator.onPublishCommitted → notifyPublishReceipt）。
+    //    タイムアウトしても所有権は移譲済み（executePublish が後続で commit する）ため
+    //    Transferred 扱い — 呼び出し元は world/DSP を破棄してはならない。
+    if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
+    {
+        juce::Logger::writeToLog("[DIAG] commitRuntimePublication: receipt timeout seq="
+            + juce::String(static_cast<juce::int64>(seqId)));
+    }
+
+    // 5. activate/retire は executePublish の Execution tail が実行するため、
+    //    rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
+    rollbackHandle = convo::isr::DSPHandle::null();
+    return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
 }
 
 //==============================================================================
@@ -4252,6 +4360,15 @@ public:
     // ==================================================================
     convo::CommandBuffer m_commandBuffer;
     convo::WorkerThread m_workerThread;
+    // ★ FUTURE-9: Dedicated Coordinator Worker (NonRT). Replaces the Timer-driven
+    //   processIntent / drainOverflowRing / deferred-resubmit cadence with a
+    //   dedicated Worker so Scheduling Authority = Coordinator. nullptr until
+    //   startCoordinatorLoop(); joined at shutdown via shutdownCoordinatorLoop().
+    friend class convo::isr::CoordinatorLoop;
+    void startCoordinatorLoop() noexcept;
+    void shutdownCoordinatorLoop() noexcept;
+    void runCoordinatorPhase() noexcept;
+    std::unique_ptr<convo::isr::CoordinatorLoop> coordinatorLoop_;
     std::mutex rebuildAdmissionIntentMutex_;
     RebuildAdmissionIntentState rebuildAdmissionPendingIntent_ {};
 
@@ -4348,6 +4465,8 @@ public:
 
     // ===================== ISR Phase 1-9: Core Runtimes =====================
     convo::isr::RuntimePublicationCoordinator runtimePublicationBridge_;
+    // ★ A-1/A2: RuntimeWorldAuthority — single owner of Publication + Lifetime (formerly Retire) state.
+    convo::isr::RuntimeWorldAuthority worldAuthority_;
 
     // ── HW-1: Publication Metadata Propagation ──
     // PublishReceipt: Publication 時に発行される DSP + Epoch の組。
@@ -4379,8 +4498,8 @@ public:
     convo::isr::DSPQuarantineManager dspQuarantineManager_;
     convo::isr::ClosureGraphWalker closureGraphWalker_;
     convo::isr::DebugRuntime debugRuntime_;
-    convo::isr::RetireRuntime retireRuntime_;
-    convo::isr::RetireRuntimeEx retireRuntimeEx_;
+    // ★ A2: retireRuntime_ / retireRuntimeEx_ moved into RuntimeWorldAuthority::lifetime_
+    //   (sole owner). AudioEngine reaches them only via worldAuthority_.lifetime().
     convo::isr::ShutdownRuntime shutdownRuntime_;
     convo::isr::EvidenceExporter evidenceExporter_;
     convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
@@ -4419,6 +4538,14 @@ public:
         mutable std::mutex runtimeDSPHandleMapMutex_;
         std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
         // ==================================================================
+    public:
+        // ★ A3 Step 4: QuarantineIntentHandler sources DSPHandleRuntime / DSPQuarantineManager
+        //   through HandlerContext.engine (Step-4-scoped boundary). Step 6 removes Engine dependency.
+        convo::isr::DSPHandleRuntime& dspHandleRuntime() noexcept { return dspHandleRuntime_; }
+        convo::isr::DSPQuarantineManager& dspQuarantineManager() noexcept { return dspQuarantineManager_; }
+        // ★ A3 Step 5-2: PublishExecutor reaches the sole commit() Authority (HANDLER-1: no bypass).
+        convo::isr::RuntimeWorldAuthority& worldAuthority() noexcept { return worldAuthority_; }
+        const convo::isr::RuntimeWorldAuthority& worldAuthority() const noexcept { return worldAuthority_; }
 
 };
 

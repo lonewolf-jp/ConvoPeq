@@ -4,8 +4,15 @@
 # ASan-CMAKE-1〜8 に基づく設定。
 # ASan job は Release 性能ゲートに使用しない（ASan-CMAKE-8）。
 #
+# ★ ASan 構成 (2026-08-03 改定): MSVC ASan は CRT と一致した ASan ランタイム DLL が必須。
+#   - /MDd (Debug) は clang_rt.asan_dbg_dynamic-*.dll、/MD は clang_rt.asan_dynamic-*.dll。
+#   - 旧構成 (Debug /MDd) は CRT 不一致で DDDQ testReclaimPerformance() がハングしたため、
+#     標準構成を **RelWithDebInfo (/MD)** に統一する（CMakeLists.txt の
+#     MSVC_RUNTIME_LIBRARY per-config 設定と連動）。
+#   - 実行前に clang_rt.asan_dynamic-x86_64.dll をテスト exe と同じディレクトリへ展開する。
+#
 # Practical Stable 設計:
-# - ASan: Windows MSVC で完全実行。静的CRT→動的CRT切替でASan互換。
+# - ASan: Windows MSVC で完全実行（RelWithDebInfo + /MD）。動的CRT切替でASan互換。
 # - TSan: Linux Clang で best-effort 実行。MKL/IPP 非依存のテストのみ対象。
 #         環境不足時は graceful skip（PR ブロックしない）。
 
@@ -22,13 +29,18 @@ env:
 
 jobs:
   #-----------------------------------------------------------
-  # Debug-ASan: Windows MSVC, AddressSanitizer
-  # MSVC ASan requires dynamic CRT (/MDd), which conflicts with
-  # the static CRT (/MTd) used in normal Debug builds.
-  # This job is therefore separate from the regular Debug job.
+  # RelWithDebInfo-ASan: Windows MSVC, AddressSanitizer
+  # MSVC ASan requires dynamic CRT (/MD), which conflicts with
+  # the static CRT (/MT) used in normal Release builds.
+  # This job is therefore separate from the regular Release job.
+  #
+  # ★ 2026-08-03: Debug (/MDd) → RelWithDebInfo (/MD) に変更。
+  #   /MDd は clang_rt.asan_dbg_dynamic-*.dll を要求するが、展開しているのは
+  #   clang_rt.asan_dynamic-*.dll (release) のため CRT 不一致でハングしていた。
+  #   RelWithDebInfo (/MD) は展開済み release DLL と一致し、ASan 実行が安定する。
   #-----------------------------------------------------------
-  debug-asan:
-    name: "Debug ASan (MSVC)"
+  relwithdebinfo-asan:
+    name: "RelWithDebInfo ASan (MSVC, /MD)"
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -38,7 +50,7 @@ jobs:
       # ★ ASan-CMAKE-4 修正（2026-07-31）: windows-latest には Intel oneAPI が未インストールのため、
       #   CMakeLists.txt:833 の find_package(MKL REQUIRED CONFIG ...) が configure 時に失敗する。
       #   oneAPI をセットアップして MKLROOT を設定することで解決する。
-      #   （ConvoPeq は MKL 必須依存のため、MKL 無しでは debug-asan ジョブは成立しない）
+      #   （ConvoPeq は MKL 必須依存のため、MKL 無しでは asan ジョブは成立しない）
       - name: Set up Intel oneAPI (MKL)
         uses: intel/setup-intel-oneapi@v2
         with:
@@ -54,11 +66,28 @@ jobs:
             -DCMAKE_CXX_COMPILER=cl `
             -DENABLE_ASAN=ON
 
-      - name: Build (Debug)
-        run: cmake --build ${{ env.BUILD_DIR }} --config Debug
+      - name: Build (RelWithDebInfo)
+        run: cmake --build ${{ env.BUILD_DIR }} --config RelWithDebInfo
+
+      # ★ ASan-CMAKE-9: MSVC は ASan ランタイム DLL をテスト exe へ自動コピーしないため、
+      #   clang_rt.asan_dynamic-x86_64.dll を手動で展開する（/MD 構成と一致）。
+      #   DLL は MSVC ツールチェーンの bin\Hostx64\x64 配下にある。
+      - name: Deploy ASan runtime DLL
+        shell: pwsh
+        run: |
+          $asanDll = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $asanDll) {
+            Write-Error "ASan runtime DLL (clang_rt.asan_dynamic-x86_64.dll) not found in MSVC toolchain"
+            exit 1
+          }
+          $targetDir = Join-Path ${{ env.BUILD_DIR }} "RelWithDebInfo"
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          Copy-Item -LiteralPath $asanDll.FullName -Destination (Join-Path $targetDir "clang_rt.asan_dynamic-x86_64.dll") -Force
+          Write-Host "Deployed ASan DLL from $($asanDll.FullName)"
 
       - name: Run tests with ASan
-        run: ctest --test-dir ${{ env.BUILD_DIR }} -C Debug --output-on-failure
+        run: ctest --test-dir ${{ env.BUILD_DIR }} -C RelWithDebInfo --output-on-failure
         env:
           ASAN_OPTIONS: "halt_on_error=1:abort_on_error=1:detect_leaks=0"
 

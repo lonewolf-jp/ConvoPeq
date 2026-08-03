@@ -8,6 +8,7 @@
 
 #include "AtomicAccess.h"
 #include "ISRAuthorityClass.h"  // RetirePriority
+#include "ISRRetireRuntimeEx.h"  // ★ A2: EpochControl (owned by LifetimeState)
 
 namespace convo {
 namespace isr {
@@ -48,7 +49,7 @@ struct RetireSlot {
 /**
  * Retire runtime
  */
-class RetireRuntime
+class LifetimeState
 {
 public:
     // Generic helper used internally / non-RT paths.
@@ -106,9 +107,41 @@ public:
         return mainPending + fbPending;
     }
 
+    // ★ A2: EpochControl delegation — thin Authority API.
+    //   LifetimeState owns EpochControl privately; AudioEngine / ISR Handler reach
+    //   epoch control only via RuntimeWorldAuthority::lifetime() (HANDLER-1 boundary).
+    void reclaim(std::uint32_t slot) { epochControl_.reclaim(slot); }
+    void emitRetireTrace(const std::filesystem::path& outputPath) const noexcept { epochControl_.emitRetireTrace(outputPath); }
+    void requestRollback() noexcept { epochControl_.requestRollback(); }
+    [[nodiscard]] bool isGracePeriodCompleted(std::uint64_t worldGeneration,
+                                               std::uint64_t maxObservedGeneration,
+                                               std::uint32_t audioCallbackActiveCount) const noexcept
+    { return epochControl_.isGracePeriodCompleted(worldGeneration, maxObservedGeneration, audioCallbackActiveCount); }
+    [[nodiscard]] bool hasExceededDeferralThresholds(std::uint64_t retireDeferralEpochs,
+                                                      double retireDeferralWallClockMs,
+                                                      std::uint64_t maxRetireDeferralEpochs,
+                                                      double maxRetireWallClockMs) const noexcept
+    { return epochControl_.hasExceededDeferralThresholds(retireDeferralEpochs, retireDeferralWallClockMs, maxRetireDeferralEpochs, maxRetireWallClockMs); }
+    void emitIntent(std::uint32_t slot, std::uint64_t generation) { epochControl_.emitIntent(slot, generation); }
+    void enqueueRetire(std::uint32_t slot) { epochControl_.enqueueRetire(slot); }
+    void settleEpoch(std::uint32_t slot) { epochControl_.settleEpoch(slot); }
+    [[nodiscard]] bool canReclaimAfterEscalation(bool noReader, bool noExecutorReference, bool noPendingTransition) const noexcept
+    { return epochControl_.canReclaimAfterEscalation(noReader, noExecutorReference, noPendingTransition); }
+    [[nodiscard]] bool canTransitionRetirePendingToFree(bool graceCompleted,
+                                                        bool pendingIntentOwned,
+                                                        bool authoritativeOwnershipReleased) const noexcept
+    { return epochControl_.canTransitionRetirePendingToFree(graceCompleted, pendingIntentOwned, authoritativeOwnershipReleased); }
+    [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept { return epochControl_.laneOf(slot); }
+    [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept { return epochControl_.getQuarantineResidentCount(); }
+    void quarantine(std::uint32_t slot) { epochControl_.quarantine(slot); }
+    [[nodiscard]] bool canRollback() const noexcept { return epochControl_.canRollback(); }
+    void setRollbackMode(EpochMode mode) noexcept { epochControl_.setRollbackMode(mode); }
+    void emitRetireTimeline(const std::filesystem::path& outputPath) const { epochControl_.emitRetireTimeline(outputPath); }
+
 private:
     // ★ Phase 1: OverflowRing（純粋保存ストア、Coordinator管理）
     RetireOverflowRing* overflowRing_ = nullptr;
+    EpochControl epochControl_;
 
     // ★ B14: Vyukov MPSC Queue
     //    Producer: fetch_add(ticket) → slot.sequence で spin → payload 書き込み → sequence++

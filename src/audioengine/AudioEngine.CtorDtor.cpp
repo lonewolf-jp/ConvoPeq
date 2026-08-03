@@ -25,6 +25,7 @@ AudioEngine::AudioEngine()
     , m_coordinator(m_epochDomain)
 #pragma warning(pop)
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
+    , worldAuthority_(runtimePublicationBridge_)
 {
     // ★ engineInstanceId 初期化 (全局一意)
     engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter
@@ -82,7 +83,7 @@ AudioEngine::AudioEngine()
     runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
 
     // ★ B14: Vyukov MPSC Retire Queue 初期化
-    retireRuntime_.initQueue();
+    worldAuthority_.lifetime().initQueue();
 }
 
 AudioEngine::~AudioEngine()
@@ -103,6 +104,7 @@ AudioEngine::~AudioEngine()
 
     setShutdownPhase(ShutdownPhase::StopWorkers, "~AudioEngine");
     // releaseResources が未実行の異常系でも worker 終了を保証する。
+    shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker (defensive)
     stopRebuildThread();
 
     // まず rebuild thread 側へ終了を通知し、pending task を破棄して

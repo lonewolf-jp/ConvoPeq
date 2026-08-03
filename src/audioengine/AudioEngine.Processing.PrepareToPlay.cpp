@@ -144,15 +144,16 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
 
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
-            auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentForPublish,
                                                                      fadingForPublish,
                                                                      policy,
                                                                      fadeTimeSec,
                                                                      transitionActive);
-            const auto pubResult1 = commitRuntimePublication(coordinator, std::move(worldOwner),
-                                     RegistrationContext::needsRegistration(currentForPublish));
+            // ★ B4: idle publish (#2) — oldHandle は null 固定（old DSP retire 意図なし）
+            const auto pubResult1 = commitRuntimePublication(std::move(worldOwner),
+                                     RegistrationContext::needsRegistration(currentForPublish),
+                                     convo::isr::DSPHandle::null());
             juce::ignoreUnused(pubResult1);
         }
     }
@@ -265,15 +266,16 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
-            auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
                                                                      0.0,
                                                                      false);
-            const auto pubResult2 = commitRuntimePublication(coordinator, std::move(worldOwner),
-                                     RegistrationContext::needsRegistration(getActiveRuntimeDSP()));
+            // ★ B4: idle publish (#3) — oldHandle は null 固定
+            const auto pubResult2 = commitRuntimePublication(std::move(worldOwner),
+                                     RegistrationContext::needsRegistration(getActiveRuntimeDSP()),
+                                     convo::isr::DSPHandle::null());
             juce::ignoreUnused(pubResult2);
         }
     }

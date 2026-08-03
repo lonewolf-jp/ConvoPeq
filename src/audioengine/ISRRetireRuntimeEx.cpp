@@ -136,7 +136,7 @@ void transitionLifecycle(std::array<std::atomic<std::uint32_t>, N>& states,
 }
 } // namespace
 
-RetireRuntimeEx::RetireRuntimeEx()
+EpochControl::EpochControl()
 {
     for (auto& lane : laneBySlot_) {
         convo::publishAtomic(lane, toRaw(RetireLane::RTIntent), std::memory_order_relaxed);
@@ -169,7 +169,7 @@ RetireRuntimeEx::RetireRuntimeEx()
     convo::publishAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
 }
 
-void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint64_t generation) {
+void EpochControl::emitIntent(std::uint32_t slot, std::uint64_t generation) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
@@ -181,7 +181,7 @@ void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint64_t generation) {
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
 
-void RetireRuntimeEx::enqueueRetire(std::uint32_t slot) {
+void EpochControl::enqueueRetire(std::uint32_t slot) {
     ASSERT_NON_RT_THREAD();
     if (slot >= laneBySlot_.size()) {
         return;
@@ -192,7 +192,7 @@ void RetireRuntimeEx::enqueueRetire(std::uint32_t slot) {
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
 
-void RetireRuntimeEx::settleEpoch(std::uint32_t slot) {
+void EpochControl::settleEpoch(std::uint32_t slot) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
@@ -202,7 +202,7 @@ void RetireRuntimeEx::settleEpoch(std::uint32_t slot) {
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
 
-void RetireRuntimeEx::reclaim(std::uint32_t slot) {
+void EpochControl::reclaim(std::uint32_t slot) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
@@ -220,7 +220,7 @@ void RetireRuntimeEx::reclaim(std::uint32_t slot) {
     }
 }
 
-void RetireRuntimeEx::quarantine(std::uint32_t slot) {
+void EpochControl::quarantine(std::uint32_t slot) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
@@ -233,23 +233,23 @@ void RetireRuntimeEx::quarantine(std::uint32_t slot) {
         convo::fetchAddAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
 
-void RetireRuntimeEx::setEpochMode(EpochMode mode) noexcept {
+void EpochControl::setEpochMode(EpochMode mode) noexcept {
     convo::publishAtomic(epochModeRaw_, static_cast<std::uint32_t>(mode), std::memory_order_release);
 }
 
-EpochMode RetireRuntimeEx::getEpochMode() const noexcept {
+EpochMode EpochControl::getEpochMode() const noexcept {
     return epochModeFromRaw(convo::consumeAtomic(epochModeRaw_, std::memory_order_acquire));
 }
 
-void RetireRuntimeEx::setRollbackMode(EpochMode mode) noexcept {
+void EpochControl::setRollbackMode(EpochMode mode) noexcept {
     convo::publishAtomic(rollbackModeRaw_, toRaw(mode), std::memory_order_release);
 }
 
-EpochMode RetireRuntimeEx::getRollbackMode() const noexcept {
+EpochMode EpochControl::getRollbackMode() const noexcept {
     return epochModeFromRaw(convo::consumeAtomic(rollbackModeRaw_, std::memory_order_acquire));
 }
 
-void RetireRuntimeEx::setRollbackFlags(bool globalEnabled,
+void EpochControl::setRollbackFlags(bool globalEnabled,
                                        bool publicationOnlyEnabled,
                                        bool crossfadeOnlyEnabled,
                                        bool retirePathOnlyEnabled) noexcept
@@ -261,7 +261,7 @@ void RetireRuntimeEx::setRollbackFlags(bool globalEnabled,
     convo::publishAtomic(rollbackReady_, (globalEnabled && retirePathOnlyEnabled), std::memory_order_release);
 }
 
-RollbackFlagDescriptor RetireRuntimeEx::describeRollbackFlags() const noexcept
+RollbackFlagDescriptor EpochControl::describeRollbackFlags() const noexcept
 {
     return RollbackFlagDescriptor{
         .globalEnabled = convo::consumeAtomic(rollbackGlobalEnabled_, std::memory_order_acquire),
@@ -271,13 +271,13 @@ RollbackFlagDescriptor RetireRuntimeEx::describeRollbackFlags() const noexcept
     };
 }
 
-bool RetireRuntimeEx::canRollback() const noexcept {
+bool EpochControl::canRollback() const noexcept {
     return convo::consumeAtomic(rollbackReady_, std::memory_order_acquire)
         && convo::consumeAtomic(rollbackGlobalEnabled_, std::memory_order_acquire)
         && convo::consumeAtomic(rollbackRetirePathOnlyEnabled_, std::memory_order_acquire);
 }
 
-void RetireRuntimeEx::requestRollback() noexcept {
+void EpochControl::requestRollback() noexcept {
     if (!canRollback()) {
         return;
     }
@@ -285,7 +285,7 @@ void RetireRuntimeEx::requestRollback() noexcept {
     setEpochMode(getRollbackMode());
 }
 
-EpochStrategyDescriptor RetireRuntimeEx::describeEpochStrategy() const noexcept {
+EpochStrategyDescriptor EpochControl::describeEpochStrategy() const noexcept {
     return EpochStrategyDescriptor{
         .activeMode = getEpochMode(),
         .rollbackMode = getRollbackMode(),
@@ -293,11 +293,11 @@ EpochStrategyDescriptor RetireRuntimeEx::describeEpochStrategy() const noexcept 
     };
 }
 
-std::uint64_t RetireRuntimeEx::getQuarantineResidentCount() const noexcept {
+std::uint64_t EpochControl::getQuarantineResidentCount() const noexcept {
     return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
 }
 
-RetireLifecycleState RetireRuntimeEx::lifecycleStateOf(std::uint32_t slot) const noexcept {
+RetireLifecycleState EpochControl::lifecycleStateOf(std::uint32_t slot) const noexcept {
     if (slot >= lifecycleStateBySlot_.size()) {
         return RetireLifecycleState::Visible;
     }
@@ -305,14 +305,14 @@ RetireLifecycleState RetireRuntimeEx::lifecycleStateOf(std::uint32_t slot) const
     return lifecycleFromRaw(convo::consumeAtomic(lifecycleStateBySlot_[slot], std::memory_order_acquire));
 }
 
-RetireLane RetireRuntimeEx::laneOf(std::uint32_t slot) const noexcept {
+RetireLane EpochControl::laneOf(std::uint32_t slot) const noexcept {
     if (slot >= laneBySlot_.size()) {
         return RetireLane::Quarantine;
     }
     return fromRaw(convo::consumeAtomic(laneBySlot_[slot], std::memory_order_acquire));
 }
 
-convo::RetireBoundaryTelemetry RetireRuntimeEx::snapshotBoundaryTelemetry() const noexcept
+convo::RetireBoundaryTelemetry EpochControl::snapshotBoundaryTelemetry() const noexcept
 {
     return convo::RetireBoundaryTelemetry {
         .pendingBacklog = convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Coordination)], std::memory_order_acquire),
@@ -322,7 +322,7 @@ convo::RetireBoundaryTelemetry RetireRuntimeEx::snapshotBoundaryTelemetry() cons
     };
 }
 
-void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath) const {
+void EpochControl::emitRetireTimeline(const std::filesystem::path& outputPath) const {
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);
 
@@ -376,7 +376,7 @@ void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath
 }
 
 // ★ B-2.1: emitRetireTrace — 全 slot の現在状態を JSON 出力
-void RetireRuntimeEx::emitRetireTrace(const std::filesystem::path& outputPath) const noexcept
+void EpochControl::emitRetireTrace(const std::filesystem::path& outputPath) const noexcept
 {
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);

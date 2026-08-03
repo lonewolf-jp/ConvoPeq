@@ -890,7 +890,7 @@ void AudioEngine::timerCallback()
                 //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得して emit
                 const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
                 if (!fadingHandle.isNull())
-                    runtimePublicationBridge_.emitObserveIntent(fadingHandle);
+                    runtimePublicationBridge_.submitObserve(fadingHandle);
             }
         }
         crossfadeRuntime_.complete();
@@ -905,15 +905,16 @@ void AudioEngine::timerCallback()
         if (currentAfterFade != nullptr)
         {
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
-            auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::SmoothOnly,
                                                                      0.0,
                                                                      false);
-            const auto pubResultTimer = commitRuntimePublication(coordinator, std::move(worldOwner),
-                                     RegistrationContext::needsRegistration(currentAfterFade));
+            // ★ B4: idle publish (#5) — oldHandle は null 固定
+            const auto pubResultTimer = commitRuntimePublication(std::move(worldOwner),
+                                     RegistrationContext::needsRegistration(currentAfterFade),
+                                     convo::isr::DSPHandle::null());
             juce::ignoreUnused(pubResultTimer);
         }
 
@@ -1022,24 +1023,11 @@ void AudioEngine::timerCallback()
             //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
             const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
             if (!fadingHandle.isNull())
-                runtimePublicationBridge_.emitObserveIntent(fadingHandle);
+                runtimePublicationBridge_.submitObserve(fadingHandle);
         }
     }
 
-    // ★ ISR: Coordinator — processIntent を定期実行
-    {
-        DSPLifetimeManager lifetimeMgr(*this);
-        runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
-    }
 
-    if (!isShutdownInProgress()
-        && !hasFading
-        && !hasPendingCrossfade)
-    {
-        // [PR-3] Deferred commits via Orchestrator
-        if (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest())
-            triggerAsyncUpdate();
-    }
 
     // 内部プロセッサのクリーンアップを実行する。
     if (auto* dsp = currentDspForRuntime)
@@ -1126,20 +1114,6 @@ void AudioEngine::timerCallback()
         m_healthMonitor.tick();
     }
 
-    // ★ Phase1: OverflowRing 定期 drain — Coordinator 経由で一元管理
-    //   50ms周期のtimerCallbackごとにdrainOverflowRingを呼出
-    //   Coordinator が retry/age/deferred を管理
-    {
-        if (retireRuntime_.getOverflowRing())
-        {
-            const auto drainResult = runtimePublicationBridge_.drainOverflowRing(
-                *retireRuntime_.getOverflowRing(), retireRuntime_, false);
-            if (drainResult.reinjectedCount > 0)
-            {
-                m_retireRouter->tryReclaim();
-            }
-        }
-    }
 
     // ★ RTTraceRelay drain: リングバッファ消費（lock-free、~50ms周期）
     rtTraceRelay_.drain();
@@ -1588,7 +1562,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
             // ★ ISR: Observer — Intent Queue push のみ
             const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
             if (!fadingHandle.isNull())
-                runtimePublicationBridge_.emitObserveIntent(fadingHandle);
+                runtimePublicationBridge_.submitObserve(fadingHandle);
         }
 
         // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得
@@ -1647,7 +1621,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
             highIntent.retireEpoch = m_retireRouter->currentEpoch();
             // isValid 廃止 (B14: dspSlot!=UINT32_MAX で有効識別)
             highIntent.priority = convo::isr::RetirePriority::High;
-            retireRuntime_.emitRetireIntent(highIntent);
+            worldAuthority_.lifetime().emitRetireIntent(highIntent);
             diagLog("[PHASE5] High priority retire emitted for slot="
                 + juce::String(static_cast<int>(event.slot)));
         }
@@ -1682,9 +1656,9 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
         {
             // [work39 Phase 1] Epoch Recovery + Learner Rollback + Idle World
             // Step1: Epoch Recovery
-            if (retireRuntimeEx_.canRollback()) {
-                retireRuntimeEx_.setRollbackMode(convo::isr::EpochMode::Split);
-                retireRuntimeEx_.requestRollback();
+            if (worldAuthority_.lifetime().canRollback()) {
+                worldAuthority_.lifetime().setRollbackMode(convo::isr::EpochMode::Split);
+                worldAuthority_.lifetime().requestRollback();
                 ++m_restoreGeneration_;
             }
             // 強制回復（Recover との差別化: 二重実行でも安全）
@@ -1806,7 +1780,7 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         // ★ P1-2: receipt の handle を quarantine（retire 義務移転）
         if (!pendingReceipt_->handle.isNull()) {
             // ★ P0-5: Coordinator 経由で quarantine を実行（QSVC-2）
-            runtimePublicationBridge_.emitQuarantineIntent(
+            runtimePublicationBridge_.submitQuarantine(
                 pendingReceipt_->handle,
                 convo::isr::QuarantineReason::PublishViolation,
                 dspHandleRuntime_,
@@ -1833,7 +1807,7 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
 // resetReceipt  ── P1-2: pendingReceipt_ を安全に解放
 //
 // ISR: stale/emergency 時は quarantine Intent を発行してから解放する。
-// 将来 P0-4 で Coordinator::emitQuarantineIntent() 経由に変更予定。
+// 将来 P0-4 で Coordinator::submitQuarantine() 経由に変更予定。
 //==============================================================================
 void AudioEngine::resetReceipt() noexcept
 {
@@ -1844,7 +1818,7 @@ void AudioEngine::resetReceipt() noexcept
     if (!pendingReceipt_->handle.isNull())
     {
         // ★ P0-5: Coordinator 経由で quarantine を実行（QSVC-2）
-        runtimePublicationBridge_.emitQuarantineIntent(
+        runtimePublicationBridge_.submitQuarantine(
             pendingReceipt_->handle,
             convo::isr::QuarantineReason::ReceiptReset,
             dspHandleRuntime_,

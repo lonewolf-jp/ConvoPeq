@@ -509,6 +509,10 @@ foreach ($file in $sourceFiles) {
             #
             # 5. makeEngineRuntimeState bridge: RuntimeBuilder.cpp
             #    const DSPCore* → DSPCore* for engine utility call.
+            #
+            # 6. ISR publish-time freeze:      audioengine/ISRRuntimePublicationCoordinator.cpp
+            #    commit() bakes PublicationSemantic onto newWorld (sealed as const,
+            #    FUTURE-4) — the freeze is the final one-time mutation before publish.
             $allowedConstCastPath = $relativeSourcePath -replace '\\', '/'
             $allowedConstCastPatterns = @(
                 '^src/core/RuntimePublicationCoordinator\.h$'
@@ -516,6 +520,7 @@ foreach ($file in $sourceFiles) {
                 '^src/audioengine/RuntimeBuilder\.h$'
                 '^src/audioengine/RuntimeBuilder\.cpp$'
                 '^src/AlignedAllocation\.h$'
+                '^src/audioengine/ISRRuntimePublicationCoordinator\.(cpp|h)$'
             )
             $isAllowed = $false
             foreach ($pattern in $allowedConstCastPatterns) {

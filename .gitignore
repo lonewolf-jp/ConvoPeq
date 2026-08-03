@@ -13,6 +13,7 @@
 # CMake build directories
 build/
 build-icx/
+build_asan/
 build-asan-msvc/
 build-asan-check/
 cmake-build-*/
@@ -21,6 +22,11 @@ CMakeCache.txt
 Makefile
 cmake_install.cmake
 compile_commands.json
+
+# Tools build artifacts
+tools/**/obj/
+tools/**/bin/
+tools/**/*.exe
 
 # Dependencies
 vendor/
