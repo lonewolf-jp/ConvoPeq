@@ -518,14 +518,23 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     constexpr double kPLKnee = 0.108748;
     peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
 
+    // BUG-064: clamp BEFORE applyFixedLatencyDelay to match double path ordering,
+    // guaranteeing the delay buffer only stores clamped values in [-kOutputHeadroom, kOutputHeadroom].
+    for (int i = 0; i < numSamples; ++i)
+        dataL[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]));
+
+    if (dataR)
+        for (int i = 0; i < numSamples; ++i)
+            dataR[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]));
+
     applyFixedLatencyDelay(dataL, dataR, numSamples);
 
     for (int i = 0; i < numSamples; ++i)
-        dstL[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]));
+        dstL[i] = static_cast<float>(dataL[i]);
 
     if (dstR)
         for (int i = 0; i < numSamples; ++i)
-            dstR[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]));
+            dstR[i] = static_cast<float>(dataR[i]);
 
     for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
         buffer->clear(ch, startSample, numSamples);

@@ -11,6 +11,16 @@ PublishResult PublicationExecutor::publish(
     convo::isr::DSPHandle existingHandle,
     convo::isr::DSPHandle oldHandle) noexcept
 {
+    return publishImpl(engine, std::move(frozen), existingHandle, oldHandle, /*waitForReceipt=*/true);
+}
+
+PublishResult PublicationExecutor::publishImpl(
+    AudioEngine& engine,
+    convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
+    convo::isr::DSPHandle existingHandle,
+    convo::isr::DSPHandle oldHandle,
+    bool waitForReceipt) noexcept
+{
     if (!frozen)
         return PublishResult::PublishFailed;
 
@@ -36,10 +46,18 @@ PublishResult PublicationExecutor::publish(
     auto stateOwner = convo::aligned_unique_ptr<RuntimeState>(rawState);
 
     // ★ work70 P1-a: commitRuntimePublication トランザクション（★ B4: async facade 経由）
-    const auto result = engine.commitRuntimePublication(
-        std::move(stateOwner),
-        AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
-        oldHandle);
+    // ★ CoordinatorLoop 上の deferred resubmit は waitForReceipt=false（fire-and-forget）:
+    //   receipt は同スレッドの processIntent でしか配送されないため、同期 wait は自己待ち
+    //   （最大250msストール）になる。enqueue 済み + 所有権移譲済みなので次 tick で commit される。
+    const auto result = waitForReceipt
+        ? engine.commitRuntimePublication(
+            std::move(stateOwner),
+            AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
+            oldHandle)
+        : engine.enqueueRuntimePublicationFireAndForget(
+            std::move(stateOwner),
+            AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
+            oldHandle);
 
     const uint64_t publishEndUs = convo::getCurrentTimeUs();
 

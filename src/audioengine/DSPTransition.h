@@ -48,6 +48,7 @@ public:
     // ★ activate は publish 成功後にのみ実行
     void onPublishCompleted(AudioEngine::DSPCore* newDSP,
                             AudioEngine::DSPCore* oldDSP,
+                            convo::isr::DSPHandle oldHandle,
                             const CrossfadeAuthority::Decision& decision,
                             DSPLifetimeManager& lifetime) noexcept
     {
@@ -85,7 +86,9 @@ public:
 
         // 2. Crossfade または Retire
         if (decision.needsCrossfade && oldDSP != nullptr) {
-            auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();
+            // ★ BUG-054: oldHandle は呼び出し側（enqueue 時に resolve 済みの真の old DSP handle）を
+            //   使用する。getActiveRuntimeDSPHandle() は commitRuntimePublication の activate 後に
+            //   呼ばれるため NEW DSP の handle を返し、old==new の同一 crossfade を登録していた。
             auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
 
             if (!oldHandle.isNull() && !newHandle.isNull()) {
@@ -107,8 +110,9 @@ public:
                 // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
                 const auto epoch = engine_.currentPublicationEpoch();
                 // ★ P0-2b: DSPHandle のみを保存（DSPCore* は削除）
-                const auto oldHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
-                engine_.storeReceipt(oldHandle, epoch);
+                // ★ BUG-054: 内側変数を fadingHandle に改名（oldHandle は引数と衝突しない）
+                const auto fadingHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
+                engine_.storeReceipt(fadingHandle, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -124,11 +128,13 @@ public:
         }
     }
 
-    // notifyTransitionComplete: クロスフェード完了時の処理
-    // Timer から呼ばれる (代替: Coordinator::notifyTransitionComplete)
-    // ★ A-4 注: 現在は Coordinator::notifyTransitionComplete 経由でのみ到達する
-    //   将来統合フック。Publish Helper Adoption (Phase 1) により publish ブロックを
-    //   publishIdleWorldOnly() に置換済み。
+    // onTransitionComplete: クロスフェード完了時の処理
+    // ★ 注: Coordinator::notifyTransitionComplete は削除済み (ADR-C4)。
+    //   本関数も現在呼び出し元ゼロの legacy 実装。
+    //   publish ブロックは publishIdleWorldOnly() に置換済みで、実際のクロスフェード
+    //   完了経路は Timer が publishIdleWorldOnly() を直接呼ぶ。
+    //   残存する fading スロットクリア / crossfade snapshot 更新は Layer 2/3 統合時に
+    //   整理予定 (設計知見は ADR-C4 に移管済み)。
     void onTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept
     {
         if (currentAfterFade == nullptr)

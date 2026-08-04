@@ -74,6 +74,7 @@ struct PublishExecutor {
         ctx.transition.onPublishCompleted(
             newResolved.valid ? static_cast<AudioEngine::DSPCore*>(newResolved.instance) : nullptr,
             oldResolved.valid ? static_cast<AudioEngine::DSPCore*>(oldResolved.instance) : nullptr,
+            p.decision.oldHandle,
             decision,
             lifetimeMgr);
         ctx.engine.advanceRetireEpoch();

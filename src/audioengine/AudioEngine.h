@@ -2522,6 +2522,12 @@ public:
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     bool hasPendingTask = false;
+    // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が deferred publish を RebuildThread へ
+    //   ハンドオフするためのイベント駆動フラグ。hasPendingTask と同じ rebuildMutex で保護する
+    //   （atomic にはしない）。CoordinatorLoop が 1ms tick ごとに set + notify_one、RebuildThread が
+    //   起床時にクリアし、consumeDeferredRequest → submitPublishRequest（同期）を実行する。
+    //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
+    bool publishRetryReady = false;
 
     struct RebuildTask {
         DSPCore* currentDSP = nullptr;
@@ -4191,14 +4197,19 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 //   （二重 activate 防止）。Bootstrap は CoordinatorLoop 起動前の同期例外（B4-a3）。
 //   oldHandle: Producer ごとの retire 意図。idle publish (#4/#5/#6) は null 固定。
 //   Rebuild (#7) のみ current active DSP handle を渡す（makePublishDecisionSnapshot 参照）。
-//   ★ SCOPE_EXIT は rollbackHandle を参照キャプチャする（コピーではない）。
-[[nodiscard]] inline PublishCommitResult commitRuntimePublication(
+// ★ SCOPE_EXIT は rollbackHandle を参照キャプチャする（コピーではない）。
+// 内部コア: register → registry → OwnerChannel transfer → ISR Intent enqueue までを実行し、
+// receipt は待たない（fire-and-forget）。CoordinatorLoop 上の deferred resubmit 専用。
+// ★ 呼び出しスレッドが CoordinatorLoop 自身である場合、receipt は同スレッドの
+//   processIntent でしか配送されないため、同期 wait は自己待ち（最大250msストール）になる。
+//   → enqueue で所有権は既に移譲済みであり、次 tick で executePublish が commit するので、
+//     ここでは wait しない。成功時 { Success, Transferred }（共有ロジックを
+//     commitRuntimePublication と共通化）。
+[[nodiscard]] inline PublishCommitResult enqueueRuntimePublicationFireAndForget(
     convo::aligned_unique_ptr<const RuntimePublishWorld> world,
     const RegistrationContext& regCtx,
     const convo::isr::DSPHandle& oldHandle) noexcept
 {
-    static constexpr int kPublishReceiptWaitTimeoutMs = 250;  // CoordinatorLoop 1ms 周期 ≫ 十分
-
     convo::isr::DSPHandle rollbackHandle;
     ScopeExit guard { [&]() noexcept {
         if (!rollbackHandle.isNull())
@@ -4263,19 +4274,42 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
         return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
     }
 
+    // fire-and-forget: wait しない。所有権は移譲済み（executePublish が後続で commit する）。
+    // rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
+    rollbackHandle = convo::isr::DSPHandle::null();
+    return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
+}
+
+    // ★ 同期ラッパ: enqueueRuntimePublicationFireAndForget を実行した上で receipt を待つ。
+    //   非-Coordinator スレッド（RebuildThread 等）からの Producer 呼び出し用。
+    //   コア呼び出しは fire-and-forget で return するため、ここで wait するだけ。
+[[nodiscard]] inline PublishCommitResult commitRuntimePublication(
+    convo::aligned_unique_ptr<const RuntimePublishWorld> world,
+    const RegistrationContext& regCtx,
+    const convo::isr::DSPHandle& oldHandle) noexcept
+{
+    static constexpr int kPublishReceiptWaitTimeoutMs = 250;  // CoordinatorLoop 1ms 周期 ≫ 十分
+
+    // コア（fire-and-forget）で enqueue まで実行。成功時は seqId を receipt wait に使用する。
+    //   world はコアへの std::move 前に sequenceId を先読みする。
+    const auto* preWorld = world.get();
+    const auto seqId = (preWorld != nullptr) ? preWorld->publication.sequenceId : 0;
+
+    auto result = enqueueRuntimePublicationFireAndForget(std::move(world), regCtx, oldHandle);
+
     // 4. 完了通知を待つ（executePublish → orchestrator.onPublishCommitted → notifyPublishReceipt）。
     //    タイムアウトしても所有権は移譲済み（executePublish が後続で commit する）ため
     //    Transferred 扱い — 呼び出し元は world/DSP を破棄してはならない。
-    if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
+    if (PublishStageResultTraits::isCommitted(result.stage) && seqId != 0)
     {
-        juce::Logger::writeToLog("[DIAG] commitRuntimePublication: receipt timeout seq="
-            + juce::String(static_cast<juce::int64>(seqId)));
+        if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
+        {
+            juce::Logger::writeToLog("[DIAG] commitRuntimePublication: receipt timeout seq="
+                + juce::String(static_cast<juce::int64>(seqId)));
+        }
     }
 
-    // 5. activate/retire は executePublish の Execution tail が実行するため、
-    //    rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
-    rollbackHandle = convo::isr::DSPHandle::null();
-    return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
+    return result;
 }
 
 //==============================================================================

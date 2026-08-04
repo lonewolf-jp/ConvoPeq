@@ -214,9 +214,13 @@ void EpochControl::reclaim(std::uint32_t slot) {
     transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::Reclaimed);
     if (previousLane == RetireLane::Quarantine)
     {
-        const auto resident = convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
-        if (resident > 0)
-            convo::fetchSubAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        // BUG-060: TOCTOU 排除 — check-then-act ではなく fetchSub 単一アトミック + 回復
+        const auto previous = convo::fetchSubAtomic(
+            quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        if (previous == 0) {
+            // 減らしすぎた（既に 0）ので元に戻す（UINT64_MAX ラップ防止）
+            convo::fetchAddAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        }
     }
 }
 

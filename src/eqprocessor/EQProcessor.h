@@ -236,7 +236,9 @@ public:
     //----------------------------------------------------------
     // v2.3 EQCoeffCache 生成インターフェース
     //----------------------------------------------------------
-    static uint64_t computeParamsHash(const convo::EQParameters& params) noexcept;
+    static uint64_t computeParamsHash(const convo::EQParameters& params,
+                                      double sampleRate,
+                                      int maxBlockSize) noexcept;
     static EQCoeffCache* createCoeffCache(
         const convo::EQParameters& eqParams,
         double sampleRate,

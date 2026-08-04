@@ -209,15 +209,23 @@ void AudioEngine::runCoordinatorPhase() noexcept
         runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
 
-    // [PR-3] Deferred publish resubmit (relocated from timerCallback).
-    //   MF-free: the worker drains the orchestrator's deferred slot and re-submits
-    //   directly (no triggerAsyncUpdate / MessageManager hop).
+    // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
+    //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。
+    //     deferred がある場合、publishRetryReady フラグを立てて RebuildThread を起床させるだけ。
+    //     RebuildThread が consumeDeferredRequest() → submitPublishRequest()（同期）を実行する
+    //     （Builder 責務は RebuildThread に一元化）。
+    //   ★ ビジーループ防止: predicate に hasDeferredRequest() を直接入れず、フラグ駆動にする。
+    //     Deferred が継続しても RebuildThread は休眠し、Coordinator が次 1ms tick で再通知するまで
+    //     再試行しない。これにより crossfade 終了まで CPU スピンすることはない。
     if (!isShutdownInProgress()
         && runtimeOrchestrator_ != nullptr
         && runtimeOrchestrator_->hasDeferredRequest())
     {
-        if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
-            runtimeOrchestrator_->submitPublishRequest(*req);
+        {
+            std::lock_guard<std::mutex> lock(rebuildMutex);
+            publishRetryReady = true;
+        }
+        rebuildCV.notify_one();
     }
 
     // ★ Phase1: OverflowRing drain (relocated from timerCallback).

@@ -273,7 +273,7 @@ void EQProcessor::reset()
     }
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
-    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の agcResetSerial acquire と HB
+    convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
     rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
@@ -784,7 +784,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
-    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);   // release: Processing.cpp の agcResetSerial acquire と HB
+    convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
     rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;

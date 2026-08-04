@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <optional>
+#include <mutex>
 
 namespace convo::isr {
 
@@ -60,6 +61,9 @@ public:
     // ★ PR1/PR2: バッチcompaction用（public）
     void compactAuditLog() noexcept;
 
+    // ★ BUG-061: ロック保持済みで compaction 実行（public API との二重ロック防止）
+    void compactAuditLogLocked() noexcept;
+
     // ★ PR1: 外部からループ範囲として使用
     static constexpr size_t kMaxSlots = 256;
 
@@ -75,6 +79,10 @@ private:
         uint32_t slot;
         bool resolved;  // true=隔離解除済み
     };
+
+    // ★ BUG-061: auditLog_ は複数 NonRT スレッド（Timer / Message）から
+    //   同時アクセスされるため、全アクセスを mutex で保護する
+    mutable std::mutex auditMutex_;
     std::vector<Entry> auditLog_;
 };
 

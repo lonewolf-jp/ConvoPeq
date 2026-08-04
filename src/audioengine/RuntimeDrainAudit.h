@@ -79,7 +79,8 @@ struct RuntimeDrainAudit {
             && pendingRetire == 0
             && activeCrossfadeCount == 0
             && deferredPublish == 0
-            && routerPendingRetire == 0;  // ★ B-1: 追加 (コメント「完了条件に含めるもの」との整合)
+            && routerPendingRetire == 0  // ★ B-1: 追加 (コメント「完了条件に含めるもの」との整合)
+            && overflowRingResident == 0;  // ★ BUG: overflowRingResident (Drain 完了判定用) が欠落
     }
 
     // ★ B-1: World Consistency 診断（Diagnostic 限定、Shutdown Authority にはしない）

@@ -126,9 +126,8 @@ AudioEngine::~AudioEngine()
         // active runtime slot / fading runtime slot はここでスロットを切り離すだけにして、
         // 実体の解放は retireDSPHandleForRuntime() → deferred delete / epoch drain に寄せる。
         {
-            constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
-            DSPCore* activeRaw = getActiveRuntimeDSP();
-            activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == kInvalidAllOnes) ? nullptr : activeRaw;
+            // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
+            activeToRelease = getActiveRuntimeDSP();
         }
         setActiveRuntimeDSP(nullptr);
         {
@@ -161,6 +160,7 @@ AudioEngine::~AudioEngine()
             }
 
             hasPendingTask = false;
+            publishRetryReady = false;
         }
     }
 

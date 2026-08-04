@@ -5,6 +5,7 @@
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
 #include "DSPLifetimeManager.h"
+#include "RuntimePublicationOrchestrator.h"  // ★ ISR: deferred publish consume/submit (Builder role)
 #include "OversamplingPolicy.h"
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -802,15 +803,24 @@ void AudioEngine::rebuildThreadLoop()
         try
         {
             RebuildTask task;
+            bool doDeferredPublish = false;  // ★ CoordinatorLoop からの deferred publish ハンドオフ
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
-                rebuildCV.wait(lock, [this] { return hasPendingTask || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire); });
+                // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が publishRetryReady を立てた時に
+                //   起床する。hasDeferredRequest() は predicate に入れない（Deferred 継続中ビジーループ防止）。
+                //   RebuildThread は「rebuild タスク」と「deferred publish ハンドオフ」の2種を待つ。
+                rebuildCV.wait(lock, [this] {
+                    return hasPendingTask
+                        || publishRetryReady
+                        || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
+                });
 
                 if (convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire)) break;
                 if (isShutdownInProgress())
                 {
                     hasPendingTask = false;
                     pendingTask.currentDSP = nullptr;
+                    publishRetryReady = false;
                     break;
                 }
 
@@ -819,7 +829,22 @@ void AudioEngine::rebuildThreadLoop()
                 pendingTask.currentDSP = nullptr;
 
                 hasPendingTask = false;
+                // ★ deferred publish ハンドオフを消費（ビジーループ防止のため先にクリア）
+                doDeferredPublish = publishRetryReady;
+                publishRetryReady = false;
                 convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(0), std::memory_order_release);
+            }
+
+            // ★ ISR Builder/Coordinator 分離: CoordinatorLoop からの deferred publish ハンドオフ。
+            //   Builder（RebuildThread）が consume → submit（同期）を実行する。
+            //   - consumeDeferredRequest() は hasDeferred_ を false に、submit が再 Deferred なら
+            //     enqueueDeferred で hasDeferred_ を true に戻す（→ 次 1ms tick で Coordinator が再通知）。
+            //   - submitPublishRequest は同期（receipt は CoordinatorLoop の processIntent が配送する
+            //     ため自己待ちにならない）。
+            if (doDeferredPublish && runtimeOrchestrator_ != nullptr)
+            {
+                if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
+                    runtimeOrchestrator_->submitPublishRequest(*req);
             }
 
             struct DSPGuard

@@ -48,7 +48,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 {
     using convo::isr::DSPHandle;
 
-    const uint64_t hash = EQProcessor::computeParamsHash(params);
+    // ★ BUG-047: computeParamsHash に sampleRate/maxBlockSize を含めて、
+    //            sampleRate 変更時に古い係数キャッシュがヒットしないようにする。
+    const uint64_t hash = EQProcessor::computeParamsHash(params, sampleRate, maxBlockSize);
     const CacheMap* currentMap = loadMap();
     if (currentMap == nullptr)
         return nullptr;

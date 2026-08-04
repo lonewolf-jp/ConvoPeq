@@ -218,10 +218,9 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         if (world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
             return rejectWithEvidence("invalid_fading_topology_identity");
     }
-    else if (world.topology.fadingRuntimeUuid != 0)
-    {
-        return rejectWithEvidence("unexpected_fading_uuid_without_flag");
-    }
+    // ★ BUG-055: else if (fadingRuntimeUuid != 0) は到達不能のデッドコード。
+    //   外側 if が !0 をチェックしており、else 側は常に ==0。hasFadingRuntime フラグ
+    //   削除時の機械的置換の残骸。削除する。
 
     // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
     const bool hasTransitionNext = (world.topology.fadingRuntimeUuid != 0);

@@ -1772,7 +1772,9 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         normalRetireCount_.fetch_add(1, std::memory_order_relaxed);
         mismatchCount_.store(0, std::memory_order_relaxed);
         pendingReceipt_.reset();
-        receiptReady_.store(false, std::memory_order_relaxed);
+        // ★ BUG: relaxed→release（markReceiptReclaimComplete と整合。次の storeReceipt と
+        //   pendingReceipt_ を正しく同期させるため）
+        receiptReady_.store(false, std::memory_order_release);
     } else {
         // ★ Emergency Retire: 不一致（currentHandle != receipt->handle）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
@@ -1826,7 +1828,8 @@ void AudioEngine::resetReceipt() noexcept
     }
 
     pendingReceipt_.reset();
-    receiptReady_.store(false, std::memory_order_relaxed);
+    // ★ BUG: relaxed→release（markReceiptReclaimComplete と整合）
+    receiptReady_.store(false, std::memory_order_release);
 }
 
 // [work39 Phase 6] Suppression Probe — commit or rollback

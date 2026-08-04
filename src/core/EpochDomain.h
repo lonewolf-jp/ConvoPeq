@@ -109,23 +109,24 @@ public:
             return;
 
         auto& slot = readers[static_cast<size_t>(readerIndex)];
-        // acq_rel: 取得側 acquire で直前の exitReader release を観測し、
-        //          放出側 release で後続の epoch load が depth > 0 可視後に行われることを保証。
+        // ★ BUG-050: epoch を depth++ より前に store して HB ギャップを除去する。
+        //   getMinReaderEpoch が depth>0 を観測した時点（depth acquire）で、
+        //   [B'] epoch store（depth++ より前）が release→acquire チェーンで必ず可視化される。
+        const uint64_t epoch = currentEpoch();
+        convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
+
+        // release: 後続の epoch load が depth > 0 可視後に行われることを保証。
         const uint32_t previousDepth = convo::fetchAddAtomic(slot.depth,
                                                               static_cast<uint32_t>(1),
                                                               std::memory_order_acq_rel);
         if (previousDepth > 0)
-            return;
+            return;  // ネスト: epoch は active Reader を反映済み（>= 外側 epoch）で安全。再設定不要。
 
         // ★ Practical-8: 初回 enter 時に滞留開始時刻を記録
         const uint64_t nowUs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
         convo::publishAtomic(slot.residencyStartTimestampUs, nowUs, std::memory_order_release);
-
-        const uint64_t epoch = currentEpoch();
-        // release: epoch を publish することで reclaimers が slot.epoch の safe-below 判定に使用可能となる。
-        convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
     }
 
     [[deprecated("Use RCUReader::exit() instead. See refactoring_plan.md P1-18.")]]
@@ -157,14 +158,17 @@ public:
 
         // ★ Phase 3: pendingQuarantine が設定されていた場合、今 quarantine を確定する。
         //   この Reader は exit 後も quarantined フラグにより getMinReaderEpoch から除外される。
+        // ★ BUG-049: CAS で 0x02(pending)→0x01(quarantined) へ原子的に昇格。
+        //   plain store だと別 Coordinator が pending を再設定した際に競合するため。
         const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
         if ((flags & ReaderSlot::kPendingQuarantineFlag) != 0)
         {
-            // release: quarantined フラグを設定し、pending をクリア。
-            //   Coordinator が acquire でこの書き込みを観測する。
-            convo::publishAtomic(slot.quarantineFlags,
-                                 static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
-                                 std::memory_order_release);
+            uint8_t expected = static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag);
+            convo::compareExchangeAtomic(slot.quarantineFlags,
+                                         expected,
+                                         static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire);
         }
     }
 
@@ -252,6 +256,11 @@ public:
     // ★ stuck Reader を quarantined にマーク（killしない）
     //   depth==0: 即座quarantine → true
     //   depth>0: pendingQuarantine設定 → exitReader時にquarantine → false (deferred)
+    // ★ BUG-049: 即座隔離と遅延隔離の並行 store 競合を CAS で排除。
+    //   従来は plain store で 0x02(pending) と 0x01(quarantined) が競合し、
+    //   depth==0 なのに pending が生存 → verifyReaderInvariants assert 発火。
+    //   CAS を使うことで flags は 0x00→0x02(pending のみ) / 0x00→0x01 / 0x02→0x01(/昇格) の
+    //   原子的遷移のみ許し、0x03(quarantined|pending) を生成しない。
     [[nodiscard]] bool quarantineReader(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
@@ -264,19 +273,39 @@ public:
         if (d == 0)
         {
             // 即座 quarantine: 深度0 → 他スレッドが参照していない
-            // release: Coordinator が設定した quarantined フラグを
-            //   getMinReaderEpoch が acquire で観測可能にする。
-            convo::publishAtomic(slot.quarantineFlags,
-                                 static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
-                                 std::memory_order_release);
-            return true;
+            // ★ 競合を許容しないため CAS を使用。
+            //   ① pending(0x02) が別 Coordinator によって設定されていた → quarantined(0x01) へ昇格
+            uint8_t expected = static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag);
+            if (convo::compareExchangeAtomic(slot.quarantineFlags,
+                                             expected,
+                                             static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
+                return true;
+            //   ② 未設定(0x00) からの即座 quarantine
+            expected = static_cast<uint8_t>(0);
+            if (convo::compareExchangeAtomic(slot.quarantineFlags,
+                                             expected,
+                                             static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
+                return true;
+            //   ③ 既に quarantined/その他 → 隔離は達成済み
+            return false;
         }
 
         // depth > 0: 遅延隔離 — exitReader で depth==0 になった時点で quarantine 確定
-        // release: pending フラグを exitReader が acquire で観測可能にする。
-        convo::publishAtomic(slot.quarantineFlags,
-                             static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag),
-                             std::memory_order_release);
+        // ★ 既に quarantined なら遅延設定は不要。
+        const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+        if ((flags & ReaderSlot::kQuarantinedFlag) != 0)
+            return false;
+        // 未設定(0x00) からのみ pending(0x02) を CAS で設定（0x03 生成を防止）。
+        uint8_t expectPending = static_cast<uint8_t>(0);
+        convo::compareExchangeAtomic(slot.quarantineFlags,
+                                     expectPending,
+                                     static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag),
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire);
         return false;
     }
 
@@ -408,11 +437,17 @@ public:
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
 
-        for (int i = 0; i < kMaxReaders; ++i) {
-            const auto& slot = readers[i];
+        // ★ BUG-048: 単一ループの break-on-first を、深刻度の高い順の 3 パス評価に変更。
+        //   従来は readerIndex 昇順で「最初に見つかった」Reader を報告し、
+        //   より深刻な Chronic が index の大きい Reader に居ると見逃され得た。
+        //   パス順序: Pass3 Chronic → Pass2 Warning → Pass1 EpochGap。
+        auto buildReaderInfo = [&](int i, int severity) -> bool {
+            if (i < 0 || i >= kMaxReaders)
+                return false;
+            const auto& slot = readers[static_cast<size_t>(i)];
             const uint64_t readerEpoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
             if (readerEpoch == kInactiveEpoch)
-                continue;
+                return false;
 
             const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed);
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
@@ -421,52 +456,50 @@ public:
             const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
             const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
 
-            // [work37] 条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
-            if (depth > 0 && residencyUs > kChronicResidencyUs && info.pendingRetireCount > 0) {
-                info.readerIndex = i;
-                info.readerEpoch = readerEpoch;
-                info.enterCount = ec;
-                info.isStuck = true;
-                info.isChronic = true;
-                info.residencyTimeUs = residencyUs;
-                // [work37 9.42] ReaderSlot の所有者情報をコピー
-                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
-                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
-                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
-                break;
-            }
-
-            // [work37] 条件3: depth > 0 AND residency > 10秒 AND pendingRetire > 0 → Warning Stuck
-            if (depth > 0 && residencyUs > kWarningResidencyUs && info.pendingRetireCount > 0) {
-                info.readerIndex = i;
-                info.readerEpoch = readerEpoch;
-                info.enterCount = ec;
-                info.isStuck = true;
-                info.residencyTimeUs = residencyUs;
-                info.isChronic = false;
-                // [work37 9.42] ReaderSlot の所有者情報をコピー
-                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
-                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
-                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
-                break;
-            }
-
-            // 複合判定: epoch差 AND residency
-            if (depth > 0 && readerEpoch < info.currentEpoch) {
-                const uint64_t epochGap = info.currentEpoch - readerEpoch;
-                // [work37] 条件1: epoch差 > threshold AND residency > 1秒
-                if (epochGap > stuckThreshold && residencyUs > kResidencyStuckUs) {
-                    info.readerIndex = i;
-                    info.readerEpoch = readerEpoch;
-                    info.enterCount = ec;
-                    info.isStuck = true;
-                    info.residencyTimeUs = residencyUs;
-                    // [work37 9.42] ReaderSlot の所有者情報をコピー
-                    std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
-                    info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
-                    info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+            bool matched = false;
+            switch (severity) {
+                case 3:  // [work37] 条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
+                    matched = (depth > 0 && residencyUs > kChronicResidencyUs && info.pendingRetireCount > 0);
+                    if (matched)
+                        info.isChronic = true;
                     break;
-                }
+                case 2:  // [work37] 条件3: residency > 10秒 AND pendingRetire > 0 → Warning Stuck
+                    matched = (depth > 0 && residencyUs > kWarningResidencyUs && info.pendingRetireCount > 0);
+                    if (matched)
+                        info.isChronic = false;
+                    break;
+                case 1:  // [work37] 条件1: epoch差 > threshold AND residency > 1秒
+                    if (depth > 0 && readerEpoch < info.currentEpoch) {
+                        const uint64_t epochGap = info.currentEpoch - readerEpoch;
+                        matched = (epochGap > stuckThreshold && residencyUs > kResidencyStuckUs);
+                    }
+                    if (matched)
+                        info.isChronic = false;
+                    break;
+                default:
+                    break;
+            }
+            if (!matched)
+                return false;
+
+            info.readerIndex = i;
+            info.readerEpoch = readerEpoch;
+            info.enterCount = ec;
+            info.isStuck = true;
+            info.residencyTimeUs = residencyUs;
+            // [work37 9.42] + BUG-063: ownerThreadId を先に acquire し、非0時のみ ownerTag をコピー
+            info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+            if (info.ownerThreadId != 0) {
+                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+            }
+            return true;
+        };
+
+        for (int pass = 3; pass >= 1; --pass) {
+            for (int i = 0; i < kMaxReaders; ++i) {
+                if (buildReaderInfo(i, pass))
+                    return info;
             }
         }
         return info;

@@ -21,7 +21,9 @@ inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
 
 }
 
-uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexcept
+uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params,
+                                        double sampleRate,
+                                        int maxBlockSize) noexcept
 {
     uint64_t hash = 0;
 
@@ -41,6 +43,13 @@ uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexc
     hash = hashCombine(hash, floatToCanonicalBits(params.nonlinearSaturation));
     hash = hashCombine(hash, static_cast<uint64_t>(params.filterStructure));
 
+    // ★ BUG-047: 係数は sampleRate/maxBlockSize に強く依存するためハッシュに含める。
+    //   含めないと sampleRate 変更時に古い係数のキャッシュがヒットして誤った周波数特性になる。
+    uint64_t srBits;
+    std::memcpy(&srBits, &sampleRate, sizeof(sampleRate));
+    hash = hashCombine(hash, srBits);
+    hash = hashCombine(hash, static_cast<uint64_t>(static_cast<uint32_t>(maxBlockSize)));
+
     return hash;
 }
 
@@ -53,7 +62,7 @@ EQCoeffCache* EQProcessor::createCoeffCache(
     auto* cache = new (std::nothrow) EQCoeffCache();
     if (cache == nullptr) return nullptr;
 
-    cache->paramsHash = computeParamsHash(eqParams);
+    cache->paramsHash = computeParamsHash(eqParams, sampleRate, maxBlockSize);
     cache->sampleRate = sampleRate;
     cache->maxBlockSize = maxBlockSize;
     cache->generation = generation;

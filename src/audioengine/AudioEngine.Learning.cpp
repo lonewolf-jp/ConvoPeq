@@ -52,11 +52,15 @@ void AudioEngine::stopNoiseShaperLearning()
         DBG("[AudioEngine] stopNoiseShaperLearning: command queue overflow");
     }
 
-    if (noiseShaperLearner)
-    {
-        juce::Logger::writeToLog("[AudioEngine] stopNoiseShaperLearning: calling learner->stopLearning()");
-        noiseShaperLearner->stopLearning();
-    }
+    // ★ BUG-053: 直接の stopLearning() 呼び出しを削除（キュー経由に一本化）。
+    //   従来は enqueue(Stop) 後、直接 stopLearning() を呼び、さらに
+    //   processLearningCommands → enqueueLearnerDispatch(Stop) →
+    //   processDeferredLearningActions で 2 回目の stopLearning() が実行されていた。
+    //   現行 NoiseShaperLearner::stopLearning() は joinable ガードで冪等だが、
+    //   二重呼び出しは冪等性に依存する不要なリスク。Queue 経由のみに集約する。
+    //   ※ Timer (AudioEngine.Timer.cpp:823-824) が processLearningCommands →
+    //      processDeferredLearningActions を毎回 drain するため停止は確実に到達する。
+    //      noiseShaperLearner->stopLearning(); ← 削除
 
     convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
 }

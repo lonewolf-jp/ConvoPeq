@@ -25,6 +25,7 @@ const char* reasonToString(ShutdownBlockingReason reason) noexcept {
         case ShutdownBlockingReason::QuarantineResident: return "QuarantineResident";
         case ShutdownBlockingReason::RouterPendingRetire: return "RouterPendingRetire";
         case ShutdownBlockingReason::ReaderActive: return "ReaderActive";
+        case ShutdownBlockingReason::ActiveBuilder: return "ActiveBuilder";
         case ShutdownBlockingReason::Unknown: return "Unknown";
     }
     return "Unknown";

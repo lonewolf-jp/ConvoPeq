@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-04 12:36:04
+> Generated: 2026-08-05 01:03:36
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -29135,7 +29135,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 {
     using convo::isr::DSPHandle;
 
-    const uint64_t hash = EQProcessor::computeParamsHash(params);
+    // ★ BUG-047: computeParamsHash に sampleRate/maxBlockSize を含めて、
+    //            sampleRate 変更時に古い係数キャッシュがヒットしないようにする。
+    const uint64_t hash = EQProcessor::computeParamsHash(params, sampleRate, maxBlockSize);
     const CacheMap* currentMap = loadMap();
     if (currentMap == nullptr)
         return nullptr;
@@ -29474,10 +29476,9 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         if (world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
             return rejectWithEvidence("invalid_fading_topology_identity");
     }
-    else if (world.topology.fadingRuntimeUuid != 0)
-    {
-        return rejectWithEvidence("unexpected_fading_uuid_without_flag");
-    }
+    // ★ BUG-055: else if (fadingRuntimeUuid != 0) は到達不能のデッドコード。
+    //   外側 if が !0 をチェックしており、else 側は常に ==0。hasFadingRuntime フラグ
+    //   削除時の機械的置換の残骸。削除する。
 
     // ★ v8.3: hasFadingRuntime 削除 — fadingRuntimeUuid から導出
     const bool hasTransitionNext = (world.topology.fadingRuntimeUuid != 0);
@@ -30111,9 +30112,8 @@ AudioEngine::~AudioEngine()
         // active runtime slot / fading runtime slot はここでスロットを切り離すだけにして、
         // 実体の解放は retireDSPHandleForRuntime() → deferred delete / epoch drain に寄せる。
         {
-            constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
-            DSPCore* activeRaw = getActiveRuntimeDSP();
-            activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == kInvalidAllOnes) ? nullptr : activeRaw;
+            // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
+            activeToRelease = getActiveRuntimeDSP();
         }
         setActiveRuntimeDSP(nullptr);
         {
@@ -30146,6 +30146,7 @@ AudioEngine::~AudioEngine()
             }
 
             hasPendingTask = false;
+            publishRetryReady = false;
         }
     }
 
@@ -30766,11 +30767,15 @@ void AudioEngine::stopNoiseShaperLearning()
         DBG("[AudioEngine] stopNoiseShaperLearning: command queue overflow");
     }
 
-    if (noiseShaperLearner)
-    {
-        juce::Logger::writeToLog("[AudioEngine] stopNoiseShaperLearning: calling learner->stopLearning()");
-        noiseShaperLearner->stopLearning();
-    }
+    // ★ BUG-053: 直接の stopLearning() 呼び出しを削除（キュー経由に一本化）。
+    //   従来は enqueue(Stop) 後、直接 stopLearning() を呼び、さらに
+    //   processLearningCommands → enqueueLearnerDispatch(Stop) →
+    //   processDeferredLearningActions で 2 回目の stopLearning() が実行されていた。
+    //   現行 NoiseShaperLearner::stopLearning() は joinable ガードで冪等だが、
+    //   二重呼び出しは冪等性に依存する不要なリスク。Queue 経由のみに集約する。
+    //   ※ Timer (AudioEngine.Timer.cpp:823-824) が processLearningCommands →
+    //      processDeferredLearningActions を毎回 drain するため停止は確実に到達する。
+    //      noiseShaperLearner->stopLearning(); ← 削除
 
     convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
 }
@@ -35589,14 +35594,23 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     constexpr double kPLKnee = 0.108748;
     peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
 
+    // BUG-064: clamp BEFORE applyFixedLatencyDelay to match double path ordering,
+    // guaranteeing the delay buffer only stores clamped values in [-kOutputHeadroom, kOutputHeadroom].
+    for (int i = 0; i < numSamples; ++i)
+        dataL[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]));
+
+    if (dataR)
+        for (int i = 0; i < numSamples; ++i)
+            dataR[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]));
+
     applyFixedLatencyDelay(dataL, dataR, numSamples);
 
     for (int i = 0; i < numSamples; ++i)
-        dstL[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]));
+        dstL[i] = static_cast<float>(dataL[i]);
 
     if (dstR)
         for (int i = 0; i < numSamples; ++i)
-            dstR[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]));
+            dstR[i] = static_cast<float>(dataR[i]);
 
     for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
         buffer->clear(ch, startSample, numSamples);
@@ -36246,6 +36260,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             std::lock_guard<std::mutex> lock(rebuildMutex);
             convo::publishAtomic(rebuildThreadShouldExit, false, std::memory_order_release);
             hasPendingTask = false;
+            publishRetryReady = false;
             pendingTask = RebuildTask{};
         }
         rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
@@ -36611,8 +36626,9 @@ void AudioEngine::releaseResources()
 
         convo::fetchAddAtomic(rebuildRequestGeneration, 1, std::memory_order_acq_rel);
         {
-            auto* const activeRaw = getActiveRuntimeDSP();
-            activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : activeRaw;
+            // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
+            //   死んだ再解釈チェックを除去。
+            activeToRelease = getActiveRuntimeDSP();
         }
         setActiveRuntimeDSP(nullptr);
 
@@ -36633,10 +36649,11 @@ void AudioEngine::releaseResources()
 
         if (hasPendingTask)
         {
-            auto* const pendingRaw = pendingTask.currentDSP;
-            pendingCurrentToRelease = (reinterpret_cast<uintptr_t>(pendingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : pendingRaw;
+            // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
+            pendingCurrentToRelease = pendingTask.currentDSP;
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
+            publishRetryReady = false;
         }
 
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
@@ -36909,9 +36926,11 @@ void AudioEngine::releaseResources()
     if (timedOut) {
         // ★ A-3: VerifyDrained で Reader 異常を検出 → markTimedOut に ReaderActive を伝達
         auto audit = collectDrainAudit();
-        auto reason = audit.stuckReaderCount > 0
-            ? convo::isr::ShutdownBlockingReason::ReaderActive
-            : convo::isr::ShutdownBlockingReason::Unknown;
+        auto reason = convo::isr::ShutdownBlockingReason::Unknown;
+        if (audit.stuckReaderCount > 0)
+            reason = convo::isr::ShutdownBlockingReason::ReaderActive;
+        else if (convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire))
+            reason = convo::isr::ShutdownBlockingReason::ActiveBuilder;   // ★ SHUTDOWN-7: Builder が Build Session 進行中
         shutdownRuntime_.markTimedOut(reason);
     }
 
@@ -37218,6 +37237,7 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
 #include "DSPLifetimeManager.h"
+#include "RuntimePublicationOrchestrator.h"  // ★ ISR: deferred publish consume/submit (Builder role)
 #include "OversamplingPolicy.h"
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -38015,15 +38035,24 @@ void AudioEngine::rebuildThreadLoop()
         try
         {
             RebuildTask task;
+            bool doDeferredPublish = false;  // ★ CoordinatorLoop からの deferred publish ハンドオフ
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
-                rebuildCV.wait(lock, [this] { return hasPendingTask || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire); });
+                // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が publishRetryReady を立てた時に
+                //   起床する。hasDeferredRequest() は predicate に入れない（Deferred 継続中ビジーループ防止）。
+                //   RebuildThread は「rebuild タスク」と「deferred publish ハンドオフ」の2種を待つ。
+                rebuildCV.wait(lock, [this] {
+                    return hasPendingTask
+                        || publishRetryReady
+                        || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
+                });
 
                 if (convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire)) break;
                 if (isShutdownInProgress())
                 {
                     hasPendingTask = false;
                     pendingTask.currentDSP = nullptr;
+                    publishRetryReady = false;
                     break;
                 }
 
@@ -38032,7 +38061,22 @@ void AudioEngine::rebuildThreadLoop()
                 pendingTask.currentDSP = nullptr;
 
                 hasPendingTask = false;
+                // ★ deferred publish ハンドオフを消費（ビジーループ防止のため先にクリア）
+                doDeferredPublish = publishRetryReady;
+                publishRetryReady = false;
                 convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(0), std::memory_order_release);
+            }
+
+            // ★ ISR Builder/Coordinator 分離: CoordinatorLoop からの deferred publish ハンドオフ。
+            //   Builder（RebuildThread）が consume → submit（同期）を実行する。
+            //   - consumeDeferredRequest() は hasDeferred_ を false に、submit が再 Deferred なら
+            //     enqueueDeferred で hasDeferred_ を true に戻す（→ 次 1ms tick で Coordinator が再通知）。
+            //   - submitPublishRequest は同期（receipt は CoordinatorLoop の processIntent が配送する
+            //     ため自己待ちにならない）。
+            if (doDeferredPublish && runtimeOrchestrator_ != nullptr)
+            {
+                if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
+                    runtimeOrchestrator_->submitPublishRequest(*req);
             }
 
             struct DSPGuard
@@ -39203,15 +39247,23 @@ void AudioEngine::runCoordinatorPhase() noexcept
         runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
 
-    // [PR-3] Deferred publish resubmit (relocated from timerCallback).
-    //   MF-free: the worker drains the orchestrator's deferred slot and re-submits
-    //   directly (no triggerAsyncUpdate / MessageManager hop).
+    // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
+    //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。
+    //     deferred がある場合、publishRetryReady フラグを立てて RebuildThread を起床させるだけ。
+    //     RebuildThread が consumeDeferredRequest() → submitPublishRequest()（同期）を実行する
+    //     （Builder 責務は RebuildThread に一元化）。
+    //   ★ ビジーループ防止: predicate に hasDeferredRequest() を直接入れず、フラグ駆動にする。
+    //     Deferred が継続しても RebuildThread は休眠し、Coordinator が次 1ms tick で再通知するまで
+    //     再試行しない。これにより crossfade 終了まで CPU スピンすることはない。
     if (!isShutdownInProgress()
         && runtimeOrchestrator_ != nullptr
         && runtimeOrchestrator_->hasDeferredRequest())
     {
-        if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
-            runtimeOrchestrator_->submitPublishRequest(*req);
+        {
+            std::lock_guard<std::mutex> lock(rebuildMutex);
+            publishRetryReady = true;
+        }
+        rebuildCV.notify_one();
     }
 
     // ★ Phase1: OverflowRing drain (relocated from timerCallback).
@@ -41005,7 +41057,9 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         normalRetireCount_.fetch_add(1, std::memory_order_relaxed);
         mismatchCount_.store(0, std::memory_order_relaxed);
         pendingReceipt_.reset();
-        receiptReady_.store(false, std::memory_order_relaxed);
+        // ★ BUG: relaxed→release（markReceiptReclaimComplete と整合。次の storeReceipt と
+        //   pendingReceipt_ を正しく同期させるため）
+        receiptReady_.store(false, std::memory_order_release);
     } else {
         // ★ Emergency Retire: 不一致（currentHandle != receipt->handle）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
@@ -41059,7 +41113,8 @@ void AudioEngine::resetReceipt() noexcept
     }
 
     pendingReceipt_.reset();
-    receiptReady_.store(false, std::memory_order_relaxed);
+    // ★ BUG: relaxed→release（markReceiptReclaimComplete と整合）
+    receiptReady_.store(false, std::memory_order_release);
 }
 
 // [work39 Phase 6] Suppression Probe — commit or rollback
@@ -43841,6 +43896,12 @@ public:
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     bool hasPendingTask = false;
+    // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が deferred publish を RebuildThread へ
+    //   ハンドオフするためのイベント駆動フラグ。hasPendingTask と同じ rebuildMutex で保護する
+    //   （atomic にはしない）。CoordinatorLoop が 1ms tick ごとに set + notify_one、RebuildThread が
+    //   起床時にクリアし、consumeDeferredRequest → submitPublishRequest（同期）を実行する。
+    //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
+    bool publishRetryReady = false;
 
     struct RebuildTask {
         DSPCore* currentDSP = nullptr;
@@ -45510,14 +45571,19 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 //   （二重 activate 防止）。Bootstrap は CoordinatorLoop 起動前の同期例外（B4-a3）。
 //   oldHandle: Producer ごとの retire 意図。idle publish (#4/#5/#6) は null 固定。
 //   Rebuild (#7) のみ current active DSP handle を渡す（makePublishDecisionSnapshot 参照）。
-//   ★ SCOPE_EXIT は rollbackHandle を参照キャプチャする（コピーではない）。
-[[nodiscard]] inline PublishCommitResult commitRuntimePublication(
+// ★ SCOPE_EXIT は rollbackHandle を参照キャプチャする（コピーではない）。
+// 内部コア: register → registry → OwnerChannel transfer → ISR Intent enqueue までを実行し、
+// receipt は待たない（fire-and-forget）。CoordinatorLoop 上の deferred resubmit 専用。
+// ★ 呼び出しスレッドが CoordinatorLoop 自身である場合、receipt は同スレッドの
+//   processIntent でしか配送されないため、同期 wait は自己待ち（最大250msストール）になる。
+//   → enqueue で所有権は既に移譲済みであり、次 tick で executePublish が commit するので、
+//     ここでは wait しない。成功時 { Success, Transferred }（共有ロジックを
+//     commitRuntimePublication と共通化）。
+[[nodiscard]] inline PublishCommitResult enqueueRuntimePublicationFireAndForget(
     convo::aligned_unique_ptr<const RuntimePublishWorld> world,
     const RegistrationContext& regCtx,
     const convo::isr::DSPHandle& oldHandle) noexcept
 {
-    static constexpr int kPublishReceiptWaitTimeoutMs = 250;  // CoordinatorLoop 1ms 周期 ≫ 十分
-
     convo::isr::DSPHandle rollbackHandle;
     ScopeExit guard { [&]() noexcept {
         if (!rollbackHandle.isNull())
@@ -45582,19 +45648,42 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
         return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
     }
 
+    // fire-and-forget: wait しない。所有権は移譲済み（executePublish が後続で commit する）。
+    // rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
+    rollbackHandle = convo::isr::DSPHandle::null();
+    return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
+}
+
+    // ★ 同期ラッパ: enqueueRuntimePublicationFireAndForget を実行した上で receipt を待つ。
+    //   非-Coordinator スレッド（RebuildThread 等）からの Producer 呼び出し用。
+    //   コア呼び出しは fire-and-forget で return するため、ここで wait するだけ。
+[[nodiscard]] inline PublishCommitResult commitRuntimePublication(
+    convo::aligned_unique_ptr<const RuntimePublishWorld> world,
+    const RegistrationContext& regCtx,
+    const convo::isr::DSPHandle& oldHandle) noexcept
+{
+    static constexpr int kPublishReceiptWaitTimeoutMs = 250;  // CoordinatorLoop 1ms 周期 ≫ 十分
+
+    // コア（fire-and-forget）で enqueue まで実行。成功時は seqId を receipt wait に使用する。
+    //   world はコアへの std::move 前に sequenceId を先読みする。
+    const auto* preWorld = world.get();
+    const auto seqId = (preWorld != nullptr) ? preWorld->publication.sequenceId : 0;
+
+    auto result = enqueueRuntimePublicationFireAndForget(std::move(world), regCtx, oldHandle);
+
     // 4. 完了通知を待つ（executePublish → orchestrator.onPublishCommitted → notifyPublishReceipt）。
     //    タイムアウトしても所有権は移譲済み（executePublish が後続で commit する）ため
     //    Transferred 扱い — 呼び出し元は world/DSP を破棄してはならない。
-    if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
+    if (PublishStageResultTraits::isCommitted(result.stage) && seqId != 0)
     {
-        juce::Logger::writeToLog("[DIAG] commitRuntimePublication: receipt timeout seq="
-            + juce::String(static_cast<juce::int64>(seqId)));
+        if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
+        {
+            juce::Logger::writeToLog("[DIAG] commitRuntimePublication: receipt timeout seq="
+                + juce::String(static_cast<juce::int64>(seqId)));
+        }
     }
 
-    // 5. activate/retire は executePublish の Execution tail が実行するため、
-    //    rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
-    rollbackHandle = convo::isr::DSPHandle::null();
-    return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
+    return result;
 }
 
 //==============================================================================
@@ -46922,6 +47011,7 @@ public:
     // ★ activate は publish 成功後にのみ実行
     void onPublishCompleted(AudioEngine::DSPCore* newDSP,
                             AudioEngine::DSPCore* oldDSP,
+                            convo::isr::DSPHandle oldHandle,
                             const CrossfadeAuthority::Decision& decision,
                             DSPLifetimeManager& lifetime) noexcept
     {
@@ -46959,7 +47049,9 @@ public:
 
         // 2. Crossfade または Retire
         if (decision.needsCrossfade && oldDSP != nullptr) {
-            auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();
+            // ★ BUG-054: oldHandle は呼び出し側（enqueue 時に resolve 済みの真の old DSP handle）を
+            //   使用する。getActiveRuntimeDSPHandle() は commitRuntimePublication の activate 後に
+            //   呼ばれるため NEW DSP の handle を返し、old==new の同一 crossfade を登録していた。
             auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
 
             if (!oldHandle.isNull() && !newHandle.isNull()) {
@@ -46981,8 +47073,9 @@ public:
                 // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
                 const auto epoch = engine_.currentPublicationEpoch();
                 // ★ P0-2b: DSPHandle のみを保存（DSPCore* は削除）
-                const auto oldHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
-                engine_.storeReceipt(oldHandle, epoch);
+                // ★ BUG-054: 内側変数を fadingHandle に改名（oldHandle は引数と衝突しない）
+                const auto fadingHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
+                engine_.storeReceipt(fadingHandle, epoch);
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
@@ -46998,11 +47091,13 @@ public:
         }
     }
 
-    // notifyTransitionComplete: クロスフェード完了時の処理
-    // Timer から呼ばれる (代替: Coordinator::notifyTransitionComplete)
-    // ★ A-4 注: 現在は Coordinator::notifyTransitionComplete 経由でのみ到達する
-    //   将来統合フック。Publish Helper Adoption (Phase 1) により publish ブロックを
-    //   publishIdleWorldOnly() に置換済み。
+    // onTransitionComplete: クロスフェード完了時の処理
+    // ★ 注: Coordinator::notifyTransitionComplete は削除済み (ADR-C4)。
+    //   本関数も現在呼び出し元ゼロの legacy 実装。
+    //   publish ブロックは publishIdleWorldOnly() に置換済みで、実際のクロスフェード
+    //   完了経路は Timer が publishIdleWorldOnly() を直接呼ぶ。
+    //   残存する fading スロットクリア / crossfade snapshot 更新は Layer 2/3 統合時に
+    //   整理予定 (設計知見は ADR-C4 に移管済み)。
     void onTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept
     {
         if (currentAfterFade == nullptr)
@@ -48212,13 +48307,17 @@ bool DSPQuarantineManager::quarantineHandle(uint32_t slot, uint64_t generation,
     // NonRT側: 監査記録
     const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    auditLog_.push_back(Entry{
-        .timestampUs = static_cast<uint64_t>(now),
-        .generation = generation,
-        .reason = reason,
-        .slot = slot,
-        .resolved = false
-    });
+    // ★ BUG-061: push_back も vector 再確保を伴うため mutex 保護
+    {
+        std::lock_guard<std::mutex> lock(auditMutex_);
+        auditLog_.push_back(Entry{
+            .timestampUs = static_cast<uint64_t>(now),
+            .generation = generation,
+            .reason = reason,
+            .slot = slot,
+            .resolved = false
+        });
+    }
     return true;
 }
 
@@ -48231,28 +48330,34 @@ void DSPQuarantineManager::reclaimSlot(uint32_t slot, uint64_t generation)
     // ★ PR1: generation==0 の場合は generation チェックをスキップ
     //   （再評価ループでは正確な generation を保持していないため）
     bool found = false;
-    for (auto& entry : auditLog_) {
-        if (entry.slot == slot && !entry.resolved) {
-            if (generation != 0 && entry.generation != generation) {
-                // generation が異なる → 新しい隔離情報を誤って消さない
-                return;
+    {
+        std::lock_guard<std::mutex> lock(auditMutex_);
+        for (auto& entry : auditLog_) {
+            if (entry.slot == slot && !entry.resolved) {
+                if (generation != 0 && entry.generation != generation) {
+                    // generation が異なる → 新しい隔離情報を誤って消さない
+                    return;
+                }
+                entry.resolved = true;
+                found = true;
+                break;
             }
-            entry.resolved = true;
-            found = true;
-            break;
         }
+        if (found)
+            compactAuditLogLocked();
     }
+
     if (!found)
         return;
 
     // RT側: active フラグ解除
     convo::publishAtomic(quarantineActiveFlags_[slot], false, std::memory_order_release);
-
-    compactAuditLog();
 }
 
 std::optional<QuarantineEntry> DSPQuarantineManager::getEntry(uint32_t slot) const
 {
+    // ★ BUG-061: 読み取りは書き込み（erase/compact）と同時実行され得るため mutex 保護
+    std::lock_guard<std::mutex> lock(auditMutex_);
     // ★ 最新の未解決エントリを検索（追記専用 vector の末尾からスキャン）
     for (auto it = auditLog_.rbegin(); it != auditLog_.rend(); ++it) {
         if (it->slot == slot && !it->resolved) {
@@ -48285,6 +48390,8 @@ uint64_t DSPQuarantineManager::getMaxEntryAgeSec() const noexcept
     const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     uint64_t maxAge = 0;
+    // ★ BUG-061: 読み取りも mutex 保護
+    std::lock_guard<std::mutex> lock(auditMutex_);
     for (const auto& entry : auditLog_) {
         if (!entry.resolved && now > static_cast<int64_t>(entry.timestampUs)) {
             uint64_t ageSec = static_cast<uint64_t>(
@@ -48309,18 +48416,21 @@ bool DSPQuarantineManager::destroyForShutdown(uint32_t slot)
     convo::publishAtomic(quarantineActiveFlags_[slot], false, std::memory_order_release);
 
     // NonRT側: 未解決エントリを resolved に
-    for (auto& entry : auditLog_) {
-        if (entry.slot == slot && !entry.resolved) {
-            entry.resolved = true;
-            break;
+    {
+        std::lock_guard<std::mutex> lock(auditMutex_);
+        for (auto& entry : auditLog_) {
+            if (entry.slot == slot && !entry.resolved) {
+                entry.resolved = true;
+                break;
+            }
         }
+        compactAuditLogLocked();
     }
-
-    compactAuditLog();
     return true;
 }
 
-void DSPQuarantineManager::compactAuditLog() noexcept
+// ★ BUG-061: ロック保持済み呼び出し用（public compactAuditLog との二重ロック防止）
+void DSPQuarantineManager::compactAuditLogLocked() noexcept
 {
     // ★ compaction: resolved エントリが一定数超えた場合のみ
     constexpr size_t kCompactThreshold = 1024;
@@ -48334,6 +48444,13 @@ void DSPQuarantineManager::compactAuditLog() noexcept
     }
     if (it != auditLog_.begin())
         auditLog_.erase(auditLog_.begin(), it);
+}
+
+void DSPQuarantineManager::compactAuditLog() noexcept
+{
+    // ★ BUG-061: 外部（ReleaseResources shutdown 時など）から呼ばれる場合も mutex 保護
+    std::lock_guard<std::mutex> lock(auditMutex_);
+    compactAuditLogLocked();
 }
 
 // ★ PR1: quarantineActiveFlags_[] の確認（residentCount と同パターン）
@@ -48357,6 +48474,7 @@ bool DSPQuarantineManager::isActive(uint32_t slot) const noexcept
 #include <array>
 #include <atomic>
 #include <optional>
+#include <mutex>
 
 namespace convo::isr {
 
@@ -48413,6 +48531,9 @@ public:
     // ★ PR1/PR2: バッチcompaction用（public）
     void compactAuditLog() noexcept;
 
+    // ★ BUG-061: ロック保持済みで compaction 実行（public API との二重ロック防止）
+    void compactAuditLogLocked() noexcept;
+
     // ★ PR1: 外部からループ範囲として使用
     static constexpr size_t kMaxSlots = 256;
 
@@ -48428,6 +48549,10 @@ private:
         uint32_t slot;
         bool resolved;  // true=隔離解除済み
     };
+
+    // ★ BUG-061: auditLog_ は複数 NonRT スレッド（Timer / Message）から
+    //   同時アクセスされるため、全アクセスを mutex で保護する
+    mutable std::mutex auditMutex_;
     std::vector<Entry> auditLog_;
 };
 
@@ -49708,6 +49833,29 @@ constexpr const IntentHandler* kDispatchTable[RuntimePublicationCoordinator::kIn
 static_assert(std::size(kDispatchTable) == RuntimePublicationCoordinator::kIntentTypeCount,
     "QUEUE-22/DISPATCH-1: kDispatchTable must be a 1:1 total mapping over IntentType "
     "(pure routing; Dispatcher has no decision)");
+
+// ★ BUG-FIX: DispatcherHasNoDecision — HANDLER-1 契約のコンパイル時強制。
+//   既存 static_assert は dispatch table の 1:1 サイズのみを検証しており、
+//   「ハンドラ自身が decision/policy 状態を持たない」ことは未検証だった。
+//   handlers は polymorphic singleton（vptr を持つ）ため std::is_empty_v と
+//   std::is_trivially_default_constructible_v は使えない（vptr が非静的データメンバとして
+//   扱われ、trivial 性が失われる）。そこで「sizeof(T) == sizeof(void*)（vptr のみ）＋
+//   default-constructible」を以て「非静的データメンバなし＝状態なし」と判定する。
+//   ハンドラに decision/policy フィールドを追加すると sizeof が増え、この assert が失敗する。
+template <typename T>
+struct HandlerIsStateless : std::bool_constant<
+    std::is_polymorphic_v<T>
+    && sizeof(T) == sizeof(void*)
+    && std::is_default_constructible_v<T>> {};
+
+inline constexpr bool DispatcherHasNoDecision =
+    HandlerIsStateless<ObserveIntentHandler>::value
+    && HandlerIsStateless<PublishIntentHandler>::value
+    && HandlerIsStateless<RecoveryIntentHandler>::value
+    && HandlerIsStateless<QuarantineIntentHandler>::value;
+static_assert(DispatcherHasNoDecision,
+    "HANDLER-1: intent handlers must be stateless singletons — adding decision/policy "
+    "state violates the Dispatcher-has-no-decision contract");
 
 } // namespace convo::isr
 
@@ -51945,9 +52093,13 @@ void EpochControl::reclaim(std::uint32_t slot) {
     transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::Reclaimed);
     if (previousLane == RetireLane::Quarantine)
     {
-        const auto resident = convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
-        if (resident > 0)
-            convo::fetchSubAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        // BUG-060: TOCTOU 排除 — check-then-act ではなく fetchSub 単一アトミック + 回復
+        const auto previous = convo::fetchSubAtomic(
+            quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        if (previous == 0) {
+            // 減らしすぎた（既に 0）ので元に戻す（UINT64_MAX ラップ防止）
+            convo::fetchAddAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        }
     }
 }
 
@@ -54349,6 +54501,7 @@ const char* reasonToString(ShutdownBlockingReason reason) noexcept {
         case ShutdownBlockingReason::QuarantineResident: return "QuarantineResident";
         case ShutdownBlockingReason::RouterPendingRetire: return "RouterPendingRetire";
         case ShutdownBlockingReason::ReaderActive: return "ReaderActive";
+        case ShutdownBlockingReason::ActiveBuilder: return "ActiveBuilder";
         case ShutdownBlockingReason::Unknown: return "Unknown";
     }
     return "Unknown";
@@ -54708,6 +54861,7 @@ enum class ShutdownBlockingReason : uint8_t
     QuarantineResident,
     RouterPendingRetire,
     ReaderActive,
+    ActiveBuilder,   // ★ SHUTDOWN-7: Builder が Build Session 進行中（Shutdown 完了条件）
     Unknown
 };
 
@@ -55256,6 +55410,16 @@ PublishResult PublicationExecutor::publish(
     convo::isr::DSPHandle existingHandle,
     convo::isr::DSPHandle oldHandle) noexcept
 {
+    return publishImpl(engine, std::move(frozen), existingHandle, oldHandle, /*waitForReceipt=*/true);
+}
+
+PublishResult PublicationExecutor::publishImpl(
+    AudioEngine& engine,
+    convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
+    convo::isr::DSPHandle existingHandle,
+    convo::isr::DSPHandle oldHandle,
+    bool waitForReceipt) noexcept
+{
     if (!frozen)
         return PublishResult::PublishFailed;
 
@@ -55281,10 +55445,18 @@ PublishResult PublicationExecutor::publish(
     auto stateOwner = convo::aligned_unique_ptr<RuntimeState>(rawState);
 
     // ★ work70 P1-a: commitRuntimePublication トランザクション（★ B4: async facade 経由）
-    const auto result = engine.commitRuntimePublication(
-        std::move(stateOwner),
-        AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
-        oldHandle);
+    // ★ CoordinatorLoop 上の deferred resubmit は waitForReceipt=false（fire-and-forget）:
+    //   receipt は同スレッドの processIntent でしか配送されないため、同期 wait は自己待ち
+    //   （最大250msストール）になる。enqueue 済み + 所有権移譲済みなので次 tick で commit される。
+    const auto result = waitForReceipt
+        ? engine.commitRuntimePublication(
+            std::move(stateOwner),
+            AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
+            oldHandle)
+        : engine.enqueueRuntimePublicationFireAndForget(
+            std::move(stateOwner),
+            AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
+            oldHandle);
 
     const uint64_t publishEndUs = convo::getCurrentTimeUs();
 
@@ -55371,6 +55543,15 @@ public:
         convo::isr::DSPHandle oldHandle) noexcept;
 
     void advanceEpoch() noexcept {}
+
+private:
+    // publish / publishFireAndForget の共通実装。
+    [[nodiscard]] PublishResult publishImpl(
+        AudioEngine& engine,
+        convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
+        convo::isr::DSPHandle existingHandle,
+        convo::isr::DSPHandle oldHandle,
+        bool waitForReceipt) noexcept;
 };
 
 } // namespace convo::isr
@@ -56516,7 +56697,8 @@ struct RuntimeDrainAudit {
             && pendingRetire == 0
             && activeCrossfadeCount == 0
             && deferredPublish == 0
-            && routerPendingRetire == 0;  // ★ B-1: 追加 (コメント「完了条件に含めるもの」との整合)
+            && routerPendingRetire == 0  // ★ B-1: 追加 (コメント「完了条件に含めるもの」との整合)
+            && overflowRingResident == 0;  // ★ BUG: overflowRingResident (Drain 完了判定用) が欠落
     }
 
     // ★ B-1: World Consistency 診断（Diagnostic 限定、Shutdown Authority にはしない）
@@ -57172,7 +57354,14 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
 void RuntimeHealthMonitor::checkCrossfadeTimeout() noexcept
 {
     if (!m_crossfadeRuntime) return;
-    if (!m_crossfadeRuntime->isPending()) return;
+    if (!m_crossfadeRuntime->isPending()) {
+        // ★ BUG-056: クロスフェード完了 → Normal 復帰（Error/Warning の貼り付き防止）
+        //   isPending()==false は crossfade 完了（or 未開始）を意味する。
+        //   emitOnTransition は current==new なら何もせず、Normal 遷移時はイベント非発火で state のみ更新。
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Normal,
+            HealthEvent::Severity::Info, EVENT_CROSSFADE_TIMEOUT, 0);
+        return;
+    }
 
     uint64_t ageUs = m_crossfadeRuntime->getFadeAgeUs();
     if (ageUs > kCrossfadeTimeoutUs) {
@@ -57194,6 +57383,10 @@ void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
     } else if (delta >= kCrossfadeEventDropWarningDelta) {
         emitOnTransition(m_prevCrossfadeDropState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_CROSSFADE_EVENT_DROP, delta);
+    } else {
+        // ★ BUG-056: drop 解消 → Normal 復帰（Error/Warning の貼り付き防止）
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Normal,
+            HealthEvent::Severity::Info, EVENT_CROSSFADE_EVENT_DROP, 0);
     }
 
     m_lastObservedDropCount = current;
@@ -57439,7 +57632,7 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
             emitOnTransition(m_prevOverflowRateState, desiredState,
                 desiredState == MonitorState::Error
                     ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
-                desiredState == MonitorState::Error ? EVENT_RETIRE_STALL : EVENT_RETIRE_STALL_WARNING,
+                desiredState == MonitorState::Error ? EVENT_OVERFLOW_RATE_CRITICAL : EVENT_OVERFLOW_RATE_WARNING,
                 ratePerSec);
         }
         else
@@ -57462,7 +57655,7 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
                 m_overflowRateStableSinceUs = 0;
                 emitOnTransition(m_prevOverflowRateState, desiredState,
                     HealthEvent::Severity::Info,
-                    EVENT_RETIRE_STALL_WARNING,
+                    EVENT_OVERFLOW_RATE_WARNING,
                     ratePerSec);
             }
         }
@@ -57481,7 +57674,7 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
                 m_overflowRateStableSinceUs = 0;
                 emitOnTransition(m_prevOverflowRateState, MonitorState::Normal,
                     HealthEvent::Severity::Info,
-                    EVENT_RETIRE_STALL_WARNING,
+                    EVENT_OVERFLOW_RATE_WARNING,
                     ratePerSec);
             }
         }
@@ -57523,6 +57716,11 @@ void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
         } else if (maxAgeUs > kRetireAgeWarningUs) {
             emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
                 HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
+                maxAgeUs / 1000);
+        } else {
+            // ★ BUG-062: uint64_t 版にも正常復帰イベントを追加（double 版と整合）
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Normal,
+                HealthEvent::Severity::Info, EVENT_RETIRE_AGE_NORMAL,
                 maxAgeUs / 1000);
         }
     }
@@ -57576,18 +57774,32 @@ void RuntimeHealthMonitor::checkConfigurationDivergence() noexcept
 
 // [work37 Phase 7.1] World Consistency 監視
 //   RuntimeDrainAudit::verifyWorldConsistency() から Broken を検出 → PolicyEngine 通知
+//   ★ BUG-058: 専用 state フィールド m_prevWorldConsistencyState_ と専用 event code を使用
 void RuntimeHealthMonitor::checkWorldConsistency() noexcept
 {
     if (!m_worldConsistencyCheck_)
         return;
     const auto consistencyState = m_worldConsistencyCheck_();
     // 0=Consistent, 1=Suspicious, 2=Broken
+    MonitorState desiredState;
     if (consistencyState >= 2) {
-        // Broken → Critical 相当の HealthEvent 発行
-        emitOnTransition(m_prevConfigDivergenceState_, MonitorState::Error,
-            HealthEvent::Severity::Error, 5001,
-            static_cast<uint64_t>(consistencyState));
+        desiredState = MonitorState::Error;   // Broken → Critical 相当
+    } else if (consistencyState == 1) {
+        desiredState = MonitorState::Warning; // Suspicious → Warning
+    } else {
+        desiredState = MonitorState::Normal;  // Consistent
     }
+
+    emitOnTransition(m_prevWorldConsistencyState_, desiredState,
+        desiredState == MonitorState::Error
+            ? HealthEvent::Severity::Error
+            : (desiredState == MonitorState::Warning ? HealthEvent::Severity::Warning
+                                                     : HealthEvent::Severity::Info),
+        desiredState == MonitorState::Error
+            ? EVENT_WORLD_CONSISTENCY_BROKEN
+            : (desiredState == MonitorState::Warning ? EVENT_WORLD_CONSISTENCY_SUSPICIOUS
+                                                     : EVENT_WORLD_CONSISTENCY_NORMAL),
+        static_cast<uint64_t>(consistencyState));
 }
 
 // [work37 Phase 9.7] Snapshot Starvation 監視
@@ -57821,7 +58033,15 @@ void RuntimeHealthMonitor::reset() noexcept
 {
     convo::publishAtomic(m_healthState_, ISRHealthState::Healthy,
                          std::memory_order_release);
-    // m_prevRetireState 等は維持 — 初期化すると次回監視で Warning が再通知される
+    // ★ BUG-059: 全 MonitorState を Normal に統一リセット（クリーンスタート）
+    //   従来は一部のみリセットし残りは「維持」で不整合だった。
+    //   実在する異常は次回 tick で再検出・再通知されるため、維持の必要はない。
+    m_prevRetireState = MonitorState::Normal;
+    m_prevPublicationState = MonitorState::Normal;
+    m_prevCrossfadeDropState = MonitorState::Normal;    // ★ BUG-056
+    m_prevReaderSlotState = MonitorState::Normal;       // ★ Practical-4
+    m_prevOverflowRateState = MonitorState::Normal;     // ★ Practical-3
+    m_prevRetireAgeState = MonitorState::Normal;        // ★ Practical-5
     m_lastObservedDropCount = 0;
     m_lastStuckEvidenceUs = 0;
     // [work37 Phase 4.1] PolicyEngine もリセット
@@ -57838,8 +58058,10 @@ void RuntimeHealthMonitor::reset() noexcept
     m_structuralDeployStartUs_ = 0;
     m_prevStructuralDeployState_ = MonitorState::Normal;
     m_prevSuppressionDurationState_ = MonitorState::Normal;
+    m_prevWorldConsistencyState_ = MonitorState::Normal;  // ★ BUG-058
     m_progressFreezeStartUs_ = 0;
     m_prevProgressFreezeState_ = MonitorState::Normal;
+    m_prevConfigDriftState_ = MonitorState::Normal;       // ★ BUG-059 追補
     m_lastObservedPubSeq_ = 0;
     m_lastObservedRetireTs_ = 0;
     // [work39] 新規フィールドのリセット
@@ -57955,6 +58177,13 @@ static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95
 static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
 static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
+// ★ BUG-057: Overflow Rate 専用イベントコード（従来 EVENT_RETIRE_STALL を誤用）
+static constexpr uint32_t EVENT_OVERFLOW_RATE_WARNING  = 1012;
+static constexpr uint32_t EVENT_OVERFLOW_RATE_CRITICAL = 1013;
+// ★ BUG-058: World Consistency 専用イベントコード（従来 5001=LEARNER_BACKPRESSURE を誤用）
+static constexpr uint32_t EVENT_WORLD_CONSISTENCY_NORMAL      = 7000;
+static constexpr uint32_t EVENT_WORLD_CONSISTENCY_SUSPICIOUS = 7001;
+static constexpr uint32_t EVENT_WORLD_CONSISTENCY_BROKEN     = 7002;
 // ★ Phase-1.5: Validator Telemetry
 static constexpr uint32_t EVENT_VALIDATION_SEMANTIC_FAILURE     = 6000;
 static constexpr uint32_t EVENT_VALIDATION_TOPOLOGY_FAILURE   = 6001;
@@ -58260,6 +58489,7 @@ private:
 
     // [work37 Phase 7.1] World Consistency 監視
     WorldConsistencyCheck m_worldConsistencyCheck_;
+    MonitorState m_prevWorldConsistencyState_{MonitorState::Normal};  // ★ BUG-058: 専用state
 
     // [work37 Phase 9.7] Snapshot Starvation 追跡
     MonitorState m_prevSnapshotStarvationState_{MonitorState::Normal};
@@ -59060,6 +59290,12 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
+    return trySubmitImpl(req);
+}
+
+PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
+    const PublicationAdmission::PublishRequest& req) noexcept
+{
     // ---- Phase 1: Admission ----
     // ★ evaluate() は必須。バイパス禁止。
     const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
@@ -59276,6 +59512,10 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         convo::aligned_unique_ptr<RuntimeState>(
             const_cast<RuntimeState*>(worldOwner.release())));
     // ★ B4: oldHandle = current active DSP handle を渡し、Rebuild (#7) の retire 意図を伝搬する。
+    // ★ CoordinatorLoop 上の deferred resubmit（waitForReceipt=false）では fire-and-forget
+    //   publish を使用: receipt は同スレッドの processIntent でしか配送されないため、
+    //   同期 wait は自己待ち（最大250msストール）になる。enqueue 済み + 所有権移譲済みなので
+    //   次 tick で executePublish が commit する。
     auto result = executor_.publish(engine_, std::move(frozen), req.newDSP, oldHandle);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
@@ -59332,7 +59572,7 @@ void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId se
 void RuntimePublicationOrchestrator::submitPublishRequest(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
-    auto decision = trySubmit(req);
+    auto decision = trySubmitImpl(req);
     const auto nowUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -59372,12 +59612,12 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     }
 }
 
-// ★ C-2.2: enqueueDeferred — global sequence スナップショットを記録
+// enqueueDeferred — global sequence スナップショットを記録
 void RuntimePublicationOrchestrator::enqueueDeferred(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
     // 上書きカウント
-    if (hasDeferred_)
+    if (hasDeferred_.load(std::memory_order_acquire))
         convo::fetchAddAtomic(deferredOverwriteCount_, uint64_t{1},
             std::memory_order_release);
 
@@ -59405,7 +59645,7 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         .lastDiscardReason = DiscardReason::None,
         .enqueueTimestampUs = now
     };
-    hasDeferred_ = true;
+hasDeferred_.store(true, std::memory_order_release);
 
     // ★ v19: DeferredHealth 記録
     DeferredHealth dh;
@@ -59416,78 +59656,6 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     telemetryRecorder_.recordDeferredHealth(dh);
 }
 
-// ★ C-2.3: notifyTransitionComplete — stale discard 実装
-//   ⚠️ 現状では呼び出し元が存在しないが、設計上の統合ポイントとして
-//   責務定義を保持する（将来の Layer 2/3 統合フック）。
-//   A-4 で publishIdleWorldOnly() を別途定義したが、本関数は以下4責務を
-//   持つため、完全な統合には notifyTransitionComplete の再設計が必要:
-//   1. Transition Completion: transition_.onTransitionComplete(currentAfterFade)
-//   2. Shutdown Guard: isShutdownInProgress() 時 deferred キャンセル
-//   3. Stale Discard: Generation Guard + Publication Sequence Guard
-//   4. Deferred Publish Submit: 有効な deferred を submitPublishRequest
-void RuntimePublicationOrchestrator::notifyTransitionComplete(
-    AudioEngine::DSPCore* currentAfterFade) noexcept
-{
-    if (currentAfterFade == nullptr)
-        return;
-
-    transition_.onTransitionComplete(currentAfterFade);
-
-    // ★ A-2.2: shutdown 中は deferred 再投入をキャンセル（残留タスク防止）
-    if (engine_.isShutdownInProgress()) {
-        if (hasDeferred_) {
-            if (deferredSlot_.has_value())
-                deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-        }
-        return;
-    }
-
-    // ★ C-2.3: stale discard（二重検査: generation + publication sequence）
-    // [work37 Phase 6] TTL 超過チェックを追加
-    if (hasDeferred_ && deferredSlot_.has_value())
-    {
-        auto& deferred = *deferredSlot_;
-
-        // [work37 Phase 6] TTL 超過チェック（最優先）
-        const uint64_t nowUs = convo::getCurrentTimeUs();
-        if (deferred.enqueueTimestampUs != 0
-            && (nowUs - deferred.enqueueTimestampUs) > kDeferredPublishTTLUs) {
-            deferred.lastDiscardReason = DiscardReason::Expired;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-            return;
-        }
-
-        // 1. generation 検査
-        const int currentGen = convo::consumeAtomic(
-            engine_.rebuildRequestGeneration, std::memory_order_acquire);
-        if (deferred.guard.generation != 0ull
-            && deferred.guard.generation != static_cast<uint64_t>(currentGen)) {
-            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-            return;
-        }
-
-        // 2. publication sequence 検査
-        const auto currentPubSeq = engine_.getLastCommittedPublicationSequence();
-        if (deferred.guard.sequence < currentPubSeq) {
-            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-            return;
-        }
-
-        // 有効な deferred → submit
-        auto req = deferred.request;
-        deferredSlot_.reset();
-        hasDeferred_ = false;
-        submitPublishRequest(req);
-    }
-}
-
 // ★ C-2.2: shutdown 時に deferred publish を強制消去
 void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 {
@@ -59495,11 +59663,11 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    if (hasDeferred_) {
+    if (hasDeferred_.load(std::memory_order_acquire)) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
         deferredSlot_.reset();
-        hasDeferred_ = false;
+        hasDeferred_.store(false, std::memory_order_release);
     }
 
     // ★ v19: DeferredHealth 記録
@@ -59614,6 +59782,15 @@ public:
     // Returns: Admission::Decision (Accepted: 全処理完了 / Deferred: 保留 / Rejected*: 却下)
     [[nodiscard]] PublicationAdmission::Decision trySubmit(const PublicationAdmission::PublishRequest& req) noexcept;
 
+    // trySubmitImpl: trySubmit / submitPublishRequest の共通実装。
+    //   常に同期 publish。"submitPublishRequest() = Admission → Accepted なら同期 Publish" で
+    //   API 意味論を一本化する。fire-and-forget (waitForReceipt=false) 経路は Coordinator が
+    //   Builder を兼ねることによる自己待ちを招いたため削除。deferred resubmit は
+    //   Coordinator が RebuildThread へハンドオフし、RebuildThread が同期 submitPublishRequest を
+    //   実行する（receipt は CoordinatorLoop の processIntent が配送するため自己待ちにならない）。
+    [[nodiscard]] PublicationAdmission::Decision trySubmitImpl(
+        const PublicationAdmission::PublishRequest& req) noexcept;
+
     // ★ (a) Completion layer — ISR post-commit notifier.
     //   Single seam for "publish committed"; the ISR PublishExecutor routes here
     //   (NOT via IntentHandlerContext), keeping intent handlers HANDLER-1 (pure).
@@ -59626,19 +59803,16 @@ public:
     [[nodiscard]] DSPTransition& transition() noexcept { return transition_; }
 
     // submitPublishRequest: publish 要求を処理する (deferred は自動 enqueue)。
+    //   常に同期。deferred resubmit は RebuildThread が本 API を呼ぶことで実行される。
     void submitPublishRequest(const PublicationAdmission::PublishRequest& req) noexcept;
 
-    // notifyTransitionComplete: クロスフェード完了時の処理 (Timer から呼ばれる)
-    // 完了後に deferred publish request があれば自動的に再試行する。
-    void notifyTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept;
-
     // hasDeferredRequest / consumeDeferredRequest: 保留中の publish 要求確認と消費
-    [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_; }
+    [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_.load(std::memory_order_acquire); }
     [[nodiscard]] std::optional<PublicationAdmission::PublishRequest> consumeDeferredRequest() noexcept
     {
-        if (!hasDeferred_)
+        if (!hasDeferred_.load(std::memory_order_acquire))
             return std::nullopt;
-        hasDeferred_ = false;
+        hasDeferred_.store(false, std::memory_order_release);
         return deferredSlot_ ? std::optional(deferredSlot_->request) : std::nullopt;
     }
 
@@ -59714,7 +59888,7 @@ private:
     std::atomic<uint64_t> m_lastProgressTimestampUs {0};
     // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
     std::optional<DeferredPublishSlot> deferredSlot_;
-    bool hasDeferred_ = false;
+    std::atomic<bool> hasDeferred_{false};
 
     // ★ C-2.1: 監査カウンタ
     std::atomic<uint64_t> deferredOverwriteCount_{0};
@@ -60361,6 +60535,7 @@ struct PublishExecutor {
         ctx.transition.onPublishCompleted(
             newResolved.valid ? static_cast<AudioEngine::DSPCore*>(newResolved.instance) : nullptr,
             oldResolved.valid ? static_cast<AudioEngine::DSPCore*>(oldResolved.instance) : nullptr,
+            p.decision.oldHandle,
             decision,
             lifetimeMgr);
         ctx.engine.advanceRetireEpoch();
@@ -68153,23 +68328,24 @@ public:
             return;
 
         auto& slot = readers[static_cast<size_t>(readerIndex)];
-        // acq_rel: 取得側 acquire で直前の exitReader release を観測し、
-        //          放出側 release で後続の epoch load が depth > 0 可視後に行われることを保証。
+        // ★ BUG-050: epoch を depth++ より前に store して HB ギャップを除去する。
+        //   getMinReaderEpoch が depth>0 を観測した時点（depth acquire）で、
+        //   [B'] epoch store（depth++ より前）が release→acquire チェーンで必ず可視化される。
+        const uint64_t epoch = currentEpoch();
+        convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
+
+        // release: 後続の epoch load が depth > 0 可視後に行われることを保証。
         const uint32_t previousDepth = convo::fetchAddAtomic(slot.depth,
                                                               static_cast<uint32_t>(1),
                                                               std::memory_order_acq_rel);
         if (previousDepth > 0)
-            return;
+            return;  // ネスト: epoch は active Reader を反映済み（>= 外側 epoch）で安全。再設定不要。
 
         // ★ Practical-8: 初回 enter 時に滞留開始時刻を記録
         const uint64_t nowUs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
         convo::publishAtomic(slot.residencyStartTimestampUs, nowUs, std::memory_order_release);
-
-        const uint64_t epoch = currentEpoch();
-        // release: epoch を publish することで reclaimers が slot.epoch の safe-below 判定に使用可能となる。
-        convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
     }
 
     [[deprecated("Use RCUReader::exit() instead. See refactoring_plan.md P1-18.")]]
@@ -68201,14 +68377,17 @@ public:
 
         // ★ Phase 3: pendingQuarantine が設定されていた場合、今 quarantine を確定する。
         //   この Reader は exit 後も quarantined フラグにより getMinReaderEpoch から除外される。
+        // ★ BUG-049: CAS で 0x02(pending)→0x01(quarantined) へ原子的に昇格。
+        //   plain store だと別 Coordinator が pending を再設定した際に競合するため。
         const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
         if ((flags & ReaderSlot::kPendingQuarantineFlag) != 0)
         {
-            // release: quarantined フラグを設定し、pending をクリア。
-            //   Coordinator が acquire でこの書き込みを観測する。
-            convo::publishAtomic(slot.quarantineFlags,
-                                 static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
-                                 std::memory_order_release);
+            uint8_t expected = static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag);
+            convo::compareExchangeAtomic(slot.quarantineFlags,
+                                         expected,
+                                         static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire);
         }
     }
 
@@ -68296,6 +68475,11 @@ public:
     // ★ stuck Reader を quarantined にマーク（killしない）
     //   depth==0: 即座quarantine → true
     //   depth>0: pendingQuarantine設定 → exitReader時にquarantine → false (deferred)
+    // ★ BUG-049: 即座隔離と遅延隔離の並行 store 競合を CAS で排除。
+    //   従来は plain store で 0x02(pending) と 0x01(quarantined) が競合し、
+    //   depth==0 なのに pending が生存 → verifyReaderInvariants assert 発火。
+    //   CAS を使うことで flags は 0x00→0x02(pending のみ) / 0x00→0x01 / 0x02→0x01(/昇格) の
+    //   原子的遷移のみ許し、0x03(quarantined|pending) を生成しない。
     [[nodiscard]] bool quarantineReader(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
@@ -68308,19 +68492,39 @@ public:
         if (d == 0)
         {
             // 即座 quarantine: 深度0 → 他スレッドが参照していない
-            // release: Coordinator が設定した quarantined フラグを
-            //   getMinReaderEpoch が acquire で観測可能にする。
-            convo::publishAtomic(slot.quarantineFlags,
-                                 static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
-                                 std::memory_order_release);
-            return true;
+            // ★ 競合を許容しないため CAS を使用。
+            //   ① pending(0x02) が別 Coordinator によって設定されていた → quarantined(0x01) へ昇格
+            uint8_t expected = static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag);
+            if (convo::compareExchangeAtomic(slot.quarantineFlags,
+                                             expected,
+                                             static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
+                return true;
+            //   ② 未設定(0x00) からの即座 quarantine
+            expected = static_cast<uint8_t>(0);
+            if (convo::compareExchangeAtomic(slot.quarantineFlags,
+                                             expected,
+                                             static_cast<uint8_t>(ReaderSlot::kQuarantinedFlag),
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
+                return true;
+            //   ③ 既に quarantined/その他 → 隔離は達成済み
+            return false;
         }
 
         // depth > 0: 遅延隔離 — exitReader で depth==0 になった時点で quarantine 確定
-        // release: pending フラグを exitReader が acquire で観測可能にする。
-        convo::publishAtomic(slot.quarantineFlags,
-                             static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag),
-                             std::memory_order_release);
+        // ★ 既に quarantined なら遅延設定は不要。
+        const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+        if ((flags & ReaderSlot::kQuarantinedFlag) != 0)
+            return false;
+        // 未設定(0x00) からのみ pending(0x02) を CAS で設定（0x03 生成を防止）。
+        uint8_t expectPending = static_cast<uint8_t>(0);
+        convo::compareExchangeAtomic(slot.quarantineFlags,
+                                     expectPending,
+                                     static_cast<uint8_t>(ReaderSlot::kPendingQuarantineFlag),
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire);
         return false;
     }
 
@@ -68452,11 +68656,17 @@ public:
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
 
-        for (int i = 0; i < kMaxReaders; ++i) {
-            const auto& slot = readers[i];
+        // ★ BUG-048: 単一ループの break-on-first を、深刻度の高い順の 3 パス評価に変更。
+        //   従来は readerIndex 昇順で「最初に見つかった」Reader を報告し、
+        //   より深刻な Chronic が index の大きい Reader に居ると見逃され得た。
+        //   パス順序: Pass3 Chronic → Pass2 Warning → Pass1 EpochGap。
+        auto buildReaderInfo = [&](int i, int severity) -> bool {
+            if (i < 0 || i >= kMaxReaders)
+                return false;
+            const auto& slot = readers[static_cast<size_t>(i)];
             const uint64_t readerEpoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
             if (readerEpoch == kInactiveEpoch)
-                continue;
+                return false;
 
             const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed);
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
@@ -68465,52 +68675,50 @@ public:
             const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
             const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
 
-            // [work37] 条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
-            if (depth > 0 && residencyUs > kChronicResidencyUs && info.pendingRetireCount > 0) {
-                info.readerIndex = i;
-                info.readerEpoch = readerEpoch;
-                info.enterCount = ec;
-                info.isStuck = true;
-                info.isChronic = true;
-                info.residencyTimeUs = residencyUs;
-                // [work37 9.42] ReaderSlot の所有者情報をコピー
-                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
-                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
-                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
-                break;
-            }
-
-            // [work37] 条件3: depth > 0 AND residency > 10秒 AND pendingRetire > 0 → Warning Stuck
-            if (depth > 0 && residencyUs > kWarningResidencyUs && info.pendingRetireCount > 0) {
-                info.readerIndex = i;
-                info.readerEpoch = readerEpoch;
-                info.enterCount = ec;
-                info.isStuck = true;
-                info.residencyTimeUs = residencyUs;
-                info.isChronic = false;
-                // [work37 9.42] ReaderSlot の所有者情報をコピー
-                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
-                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
-                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
-                break;
-            }
-
-            // 複合判定: epoch差 AND residency
-            if (depth > 0 && readerEpoch < info.currentEpoch) {
-                const uint64_t epochGap = info.currentEpoch - readerEpoch;
-                // [work37] 条件1: epoch差 > threshold AND residency > 1秒
-                if (epochGap > stuckThreshold && residencyUs > kResidencyStuckUs) {
-                    info.readerIndex = i;
-                    info.readerEpoch = readerEpoch;
-                    info.enterCount = ec;
-                    info.isStuck = true;
-                    info.residencyTimeUs = residencyUs;
-                    // [work37 9.42] ReaderSlot の所有者情報をコピー
-                    std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
-                    info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
-                    info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+            bool matched = false;
+            switch (severity) {
+                case 3:  // [work37] 条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
+                    matched = (depth > 0 && residencyUs > kChronicResidencyUs && info.pendingRetireCount > 0);
+                    if (matched)
+                        info.isChronic = true;
                     break;
-                }
+                case 2:  // [work37] 条件3: residency > 10秒 AND pendingRetire > 0 → Warning Stuck
+                    matched = (depth > 0 && residencyUs > kWarningResidencyUs && info.pendingRetireCount > 0);
+                    if (matched)
+                        info.isChronic = false;
+                    break;
+                case 1:  // [work37] 条件1: epoch差 > threshold AND residency > 1秒
+                    if (depth > 0 && readerEpoch < info.currentEpoch) {
+                        const uint64_t epochGap = info.currentEpoch - readerEpoch;
+                        matched = (epochGap > stuckThreshold && residencyUs > kResidencyStuckUs);
+                    }
+                    if (matched)
+                        info.isChronic = false;
+                    break;
+                default:
+                    break;
+            }
+            if (!matched)
+                return false;
+
+            info.readerIndex = i;
+            info.readerEpoch = readerEpoch;
+            info.enterCount = ec;
+            info.isStuck = true;
+            info.residencyTimeUs = residencyUs;
+            // [work37 9.42] + BUG-063: ownerThreadId を先に acquire し、非0時のみ ownerTag をコピー
+            info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+            if (info.ownerThreadId != 0) {
+                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+            }
+            return true;
+        };
+
+        for (int pass = 3; pass >= 1; --pass) {
+            for (int i = 0; i < kMaxReaders; ++i) {
+                if (buildReaderInfo(i, pass))
+                    return info;
             }
         }
         return info;
@@ -72797,7 +73005,7 @@ void EQProcessor::reset()
     }
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
-    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の agcResetSerial acquire と HB
+    convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
     rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
@@ -73308,7 +73516,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
     convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
-    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);   // release: Processing.cpp の agcResetSerial acquire と HB
+    convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
     rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
@@ -74997,7 +75205,9 @@ inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
 
 }
 
-uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexcept
+uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params,
+                                        double sampleRate,
+                                        int maxBlockSize) noexcept
 {
     uint64_t hash = 0;
 
@@ -75017,6 +75227,13 @@ uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexc
     hash = hashCombine(hash, floatToCanonicalBits(params.nonlinearSaturation));
     hash = hashCombine(hash, static_cast<uint64_t>(params.filterStructure));
 
+    // ★ BUG-047: 係数は sampleRate/maxBlockSize に強く依存するためハッシュに含める。
+    //   含めないと sampleRate 変更時に古い係数のキャッシュがヒットして誤った周波数特性になる。
+    uint64_t srBits;
+    std::memcpy(&srBits, &sampleRate, sizeof(sampleRate));
+    hash = hashCombine(hash, srBits);
+    hash = hashCombine(hash, static_cast<uint64_t>(static_cast<uint32_t>(maxBlockSize)));
+
     return hash;
 }
 
@@ -75029,7 +75246,7 @@ EQCoeffCache* EQProcessor::createCoeffCache(
     auto* cache = new (std::nothrow) EQCoeffCache();
     if (cache == nullptr) return nullptr;
 
-    cache->paramsHash = computeParamsHash(eqParams);
+    cache->paramsHash = computeParamsHash(eqParams, sampleRate, maxBlockSize);
     cache->sampleRate = sampleRate;
     cache->maxBlockSize = maxBlockSize;
     cache->generation = generation;
@@ -75302,7 +75519,9 @@ public:
     //----------------------------------------------------------
     // v2.3 EQCoeffCache 生成インターフェース
     //----------------------------------------------------------
-    static uint64_t computeParamsHash(const convo::EQParameters& params) noexcept;
+    static uint64_t computeParamsHash(const convo::EQParameters& params,
+                                      double sampleRate,
+                                      int maxBlockSize) noexcept;
     static EQCoeffCache* createCoeffCache(
         const convo::EQParameters& eqParams,
         double sampleRate,

@@ -79,6 +79,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             std::lock_guard<std::mutex> lock(rebuildMutex);
             convo::publishAtomic(rebuildThreadShouldExit, false, std::memory_order_release);
             hasPendingTask = false;
+            publishRetryReady = false;
             pendingTask = RebuildTask{};
         }
         rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);

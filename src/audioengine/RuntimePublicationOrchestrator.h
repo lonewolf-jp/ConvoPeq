@@ -53,6 +53,15 @@ public:
     // Returns: Admission::Decision (Accepted: 全処理完了 / Deferred: 保留 / Rejected*: 却下)
     [[nodiscard]] PublicationAdmission::Decision trySubmit(const PublicationAdmission::PublishRequest& req) noexcept;
 
+    // trySubmitImpl: trySubmit / submitPublishRequest の共通実装。
+    //   常に同期 publish。"submitPublishRequest() = Admission → Accepted なら同期 Publish" で
+    //   API 意味論を一本化する。fire-and-forget (waitForReceipt=false) 経路は Coordinator が
+    //   Builder を兼ねることによる自己待ちを招いたため削除。deferred resubmit は
+    //   Coordinator が RebuildThread へハンドオフし、RebuildThread が同期 submitPublishRequest を
+    //   実行する（receipt は CoordinatorLoop の processIntent が配送するため自己待ちにならない）。
+    [[nodiscard]] PublicationAdmission::Decision trySubmitImpl(
+        const PublicationAdmission::PublishRequest& req) noexcept;
+
     // ★ (a) Completion layer — ISR post-commit notifier.
     //   Single seam for "publish committed"; the ISR PublishExecutor routes here
     //   (NOT via IntentHandlerContext), keeping intent handlers HANDLER-1 (pure).
@@ -65,19 +74,16 @@ public:
     [[nodiscard]] DSPTransition& transition() noexcept { return transition_; }
 
     // submitPublishRequest: publish 要求を処理する (deferred は自動 enqueue)。
+    //   常に同期。deferred resubmit は RebuildThread が本 API を呼ぶことで実行される。
     void submitPublishRequest(const PublicationAdmission::PublishRequest& req) noexcept;
 
-    // notifyTransitionComplete: クロスフェード完了時の処理 (Timer から呼ばれる)
-    // 完了後に deferred publish request があれば自動的に再試行する。
-    void notifyTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept;
-
     // hasDeferredRequest / consumeDeferredRequest: 保留中の publish 要求確認と消費
-    [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_; }
+    [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_.load(std::memory_order_acquire); }
     [[nodiscard]] std::optional<PublicationAdmission::PublishRequest> consumeDeferredRequest() noexcept
     {
-        if (!hasDeferred_)
+        if (!hasDeferred_.load(std::memory_order_acquire))
             return std::nullopt;
-        hasDeferred_ = false;
+        hasDeferred_.store(false, std::memory_order_release);
         return deferredSlot_ ? std::optional(deferredSlot_->request) : std::nullopt;
     }
 
@@ -153,7 +159,7 @@ private:
     std::atomic<uint64_t> m_lastProgressTimestampUs {0};
     // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
     std::optional<DeferredPublishSlot> deferredSlot_;
-    bool hasDeferred_ = false;
+    std::atomic<bool> hasDeferred_{false};
 
     // ★ C-2.1: 監査カウンタ
     std::atomic<uint64_t> deferredOverwriteCount_{0};

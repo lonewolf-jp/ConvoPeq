@@ -65,4 +65,27 @@ static_assert(std::size(kDispatchTable) == RuntimePublicationCoordinator::kInten
     "QUEUE-22/DISPATCH-1: kDispatchTable must be a 1:1 total mapping over IntentType "
     "(pure routing; Dispatcher has no decision)");
 
+// ★ BUG-FIX: DispatcherHasNoDecision — HANDLER-1 契約のコンパイル時強制。
+//   既存 static_assert は dispatch table の 1:1 サイズのみを検証しており、
+//   「ハンドラ自身が decision/policy 状態を持たない」ことは未検証だった。
+//   handlers は polymorphic singleton（vptr を持つ）ため std::is_empty_v と
+//   std::is_trivially_default_constructible_v は使えない（vptr が非静的データメンバとして
+//   扱われ、trivial 性が失われる）。そこで「sizeof(T) == sizeof(void*)（vptr のみ）＋
+//   default-constructible」を以て「非静的データメンバなし＝状態なし」と判定する。
+//   ハンドラに decision/policy フィールドを追加すると sizeof が増え、この assert が失敗する。
+template <typename T>
+struct HandlerIsStateless : std::bool_constant<
+    std::is_polymorphic_v<T>
+    && sizeof(T) == sizeof(void*)
+    && std::is_default_constructible_v<T>> {};
+
+inline constexpr bool DispatcherHasNoDecision =
+    HandlerIsStateless<ObserveIntentHandler>::value
+    && HandlerIsStateless<PublishIntentHandler>::value
+    && HandlerIsStateless<RecoveryIntentHandler>::value
+    && HandlerIsStateless<QuarantineIntentHandler>::value;
+static_assert(DispatcherHasNoDecision,
+    "HANDLER-1: intent handlers must be stateless singletons — adding decision/policy "
+    "state violates the Dispatcher-has-no-decision contract");
+
 } // namespace convo::isr

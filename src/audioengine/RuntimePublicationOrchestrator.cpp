@@ -34,6 +34,12 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
+    return trySubmitImpl(req);
+}
+
+PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
+    const PublicationAdmission::PublishRequest& req) noexcept
+{
     // ---- Phase 1: Admission ----
     // ★ evaluate() は必須。バイパス禁止。
     const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
@@ -250,6 +256,10 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         convo::aligned_unique_ptr<RuntimeState>(
             const_cast<RuntimeState*>(worldOwner.release())));
     // ★ B4: oldHandle = current active DSP handle を渡し、Rebuild (#7) の retire 意図を伝搬する。
+    // ★ CoordinatorLoop 上の deferred resubmit（waitForReceipt=false）では fire-and-forget
+    //   publish を使用: receipt は同スレッドの processIntent でしか配送されないため、
+    //   同期 wait は自己待ち（最大250msストール）になる。enqueue 済み + 所有権移譲済みなので
+    //   次 tick で executePublish が commit する。
     auto result = executor_.publish(engine_, std::move(frozen), req.newDSP, oldHandle);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
@@ -306,7 +316,7 @@ void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId se
 void RuntimePublicationOrchestrator::submitPublishRequest(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
-    auto decision = trySubmit(req);
+    auto decision = trySubmitImpl(req);
     const auto nowUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -346,12 +356,12 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     }
 }
 
-// ★ C-2.2: enqueueDeferred — global sequence スナップショットを記録
+// enqueueDeferred — global sequence スナップショットを記録
 void RuntimePublicationOrchestrator::enqueueDeferred(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
     // 上書きカウント
-    if (hasDeferred_)
+    if (hasDeferred_.load(std::memory_order_acquire))
         convo::fetchAddAtomic(deferredOverwriteCount_, uint64_t{1},
             std::memory_order_release);
 
@@ -379,7 +389,7 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         .lastDiscardReason = DiscardReason::None,
         .enqueueTimestampUs = now
     };
-    hasDeferred_ = true;
+hasDeferred_.store(true, std::memory_order_release);
 
     // ★ v19: DeferredHealth 記録
     DeferredHealth dh;
@@ -390,78 +400,6 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     telemetryRecorder_.recordDeferredHealth(dh);
 }
 
-// ★ C-2.3: notifyTransitionComplete — stale discard 実装
-//   ⚠️ 現状では呼び出し元が存在しないが、設計上の統合ポイントとして
-//   責務定義を保持する（将来の Layer 2/3 統合フック）。
-//   A-4 で publishIdleWorldOnly() を別途定義したが、本関数は以下4責務を
-//   持つため、完全な統合には notifyTransitionComplete の再設計が必要:
-//   1. Transition Completion: transition_.onTransitionComplete(currentAfterFade)
-//   2. Shutdown Guard: isShutdownInProgress() 時 deferred キャンセル
-//   3. Stale Discard: Generation Guard + Publication Sequence Guard
-//   4. Deferred Publish Submit: 有効な deferred を submitPublishRequest
-void RuntimePublicationOrchestrator::notifyTransitionComplete(
-    AudioEngine::DSPCore* currentAfterFade) noexcept
-{
-    if (currentAfterFade == nullptr)
-        return;
-
-    transition_.onTransitionComplete(currentAfterFade);
-
-    // ★ A-2.2: shutdown 中は deferred 再投入をキャンセル（残留タスク防止）
-    if (engine_.isShutdownInProgress()) {
-        if (hasDeferred_) {
-            if (deferredSlot_.has_value())
-                deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-        }
-        return;
-    }
-
-    // ★ C-2.3: stale discard（二重検査: generation + publication sequence）
-    // [work37 Phase 6] TTL 超過チェックを追加
-    if (hasDeferred_ && deferredSlot_.has_value())
-    {
-        auto& deferred = *deferredSlot_;
-
-        // [work37 Phase 6] TTL 超過チェック（最優先）
-        const uint64_t nowUs = convo::getCurrentTimeUs();
-        if (deferred.enqueueTimestampUs != 0
-            && (nowUs - deferred.enqueueTimestampUs) > kDeferredPublishTTLUs) {
-            deferred.lastDiscardReason = DiscardReason::Expired;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-            return;
-        }
-
-        // 1. generation 検査
-        const int currentGen = convo::consumeAtomic(
-            engine_.rebuildRequestGeneration, std::memory_order_acquire);
-        if (deferred.guard.generation != 0ull
-            && deferred.guard.generation != static_cast<uint64_t>(currentGen)) {
-            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-            return;
-        }
-
-        // 2. publication sequence 検査
-        const auto currentPubSeq = engine_.getLastCommittedPublicationSequence();
-        if (deferred.guard.sequence < currentPubSeq) {
-            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
-            deferredSlot_.reset();
-            hasDeferred_ = false;
-            return;
-        }
-
-        // 有効な deferred → submit
-        auto req = deferred.request;
-        deferredSlot_.reset();
-        hasDeferred_ = false;
-        submitPublishRequest(req);
-    }
-}
-
 // ★ C-2.2: shutdown 時に deferred publish を強制消去
 void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 {
@@ -469,11 +407,11 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    if (hasDeferred_) {
+    if (hasDeferred_.load(std::memory_order_acquire)) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
         deferredSlot_.reset();
-        hasDeferred_ = false;
+        hasDeferred_.store(false, std::memory_order_release);
     }
 
     // ★ v19: DeferredHealth 記録

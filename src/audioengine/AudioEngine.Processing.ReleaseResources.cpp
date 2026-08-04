@@ -133,8 +133,9 @@ void AudioEngine::releaseResources()
 
         convo::fetchAddAtomic(rebuildRequestGeneration, 1, std::memory_order_acq_rel);
         {
-            auto* const activeRaw = getActiveRuntimeDSP();
-            activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : activeRaw;
+            // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
+            //   死んだ再解釈チェックを除去。
+            activeToRelease = getActiveRuntimeDSP();
         }
         setActiveRuntimeDSP(nullptr);
 
@@ -155,10 +156,11 @@ void AudioEngine::releaseResources()
 
         if (hasPendingTask)
         {
-            auto* const pendingRaw = pendingTask.currentDSP;
-            pendingCurrentToRelease = (reinterpret_cast<uintptr_t>(pendingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : pendingRaw;
+            // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
+            pendingCurrentToRelease = pendingTask.currentDSP;
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
+            publishRetryReady = false;
         }
 
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
@@ -431,9 +433,11 @@ void AudioEngine::releaseResources()
     if (timedOut) {
         // ★ A-3: VerifyDrained で Reader 異常を検出 → markTimedOut に ReaderActive を伝達
         auto audit = collectDrainAudit();
-        auto reason = audit.stuckReaderCount > 0
-            ? convo::isr::ShutdownBlockingReason::ReaderActive
-            : convo::isr::ShutdownBlockingReason::Unknown;
+        auto reason = convo::isr::ShutdownBlockingReason::Unknown;
+        if (audit.stuckReaderCount > 0)
+            reason = convo::isr::ShutdownBlockingReason::ReaderActive;
+        else if (convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire))
+            reason = convo::isr::ShutdownBlockingReason::ActiveBuilder;   // ★ SHUTDOWN-7: Builder が Build Session 進行中
         shutdownRuntime_.markTimedOut(reason);
     }
 

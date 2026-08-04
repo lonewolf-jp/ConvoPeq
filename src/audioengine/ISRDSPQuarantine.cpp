@@ -32,13 +32,17 @@ bool DSPQuarantineManager::quarantineHandle(uint32_t slot, uint64_t generation,
     // NonRT側: 監査記録
     const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    auditLog_.push_back(Entry{
-        .timestampUs = static_cast<uint64_t>(now),
-        .generation = generation,
-        .reason = reason,
-        .slot = slot,
-        .resolved = false
-    });
+    // ★ BUG-061: push_back も vector 再確保を伴うため mutex 保護
+    {
+        std::lock_guard<std::mutex> lock(auditMutex_);
+        auditLog_.push_back(Entry{
+            .timestampUs = static_cast<uint64_t>(now),
+            .generation = generation,
+            .reason = reason,
+            .slot = slot,
+            .resolved = false
+        });
+    }
     return true;
 }
 
@@ -51,28 +55,34 @@ void DSPQuarantineManager::reclaimSlot(uint32_t slot, uint64_t generation)
     // ★ PR1: generation==0 の場合は generation チェックをスキップ
     //   （再評価ループでは正確な generation を保持していないため）
     bool found = false;
-    for (auto& entry : auditLog_) {
-        if (entry.slot == slot && !entry.resolved) {
-            if (generation != 0 && entry.generation != generation) {
-                // generation が異なる → 新しい隔離情報を誤って消さない
-                return;
+    {
+        std::lock_guard<std::mutex> lock(auditMutex_);
+        for (auto& entry : auditLog_) {
+            if (entry.slot == slot && !entry.resolved) {
+                if (generation != 0 && entry.generation != generation) {
+                    // generation が異なる → 新しい隔離情報を誤って消さない
+                    return;
+                }
+                entry.resolved = true;
+                found = true;
+                break;
             }
-            entry.resolved = true;
-            found = true;
-            break;
         }
+        if (found)
+            compactAuditLogLocked();
     }
+
     if (!found)
         return;
 
     // RT側: active フラグ解除
     convo::publishAtomic(quarantineActiveFlags_[slot], false, std::memory_order_release);
-
-    compactAuditLog();
 }
 
 std::optional<QuarantineEntry> DSPQuarantineManager::getEntry(uint32_t slot) const
 {
+    // ★ BUG-061: 読み取りは書き込み（erase/compact）と同時実行され得るため mutex 保護
+    std::lock_guard<std::mutex> lock(auditMutex_);
     // ★ 最新の未解決エントリを検索（追記専用 vector の末尾からスキャン）
     for (auto it = auditLog_.rbegin(); it != auditLog_.rend(); ++it) {
         if (it->slot == slot && !it->resolved) {
@@ -105,6 +115,8 @@ uint64_t DSPQuarantineManager::getMaxEntryAgeSec() const noexcept
     const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     uint64_t maxAge = 0;
+    // ★ BUG-061: 読み取りも mutex 保護
+    std::lock_guard<std::mutex> lock(auditMutex_);
     for (const auto& entry : auditLog_) {
         if (!entry.resolved && now > static_cast<int64_t>(entry.timestampUs)) {
             uint64_t ageSec = static_cast<uint64_t>(
@@ -129,18 +141,21 @@ bool DSPQuarantineManager::destroyForShutdown(uint32_t slot)
     convo::publishAtomic(quarantineActiveFlags_[slot], false, std::memory_order_release);
 
     // NonRT側: 未解決エントリを resolved に
-    for (auto& entry : auditLog_) {
-        if (entry.slot == slot && !entry.resolved) {
-            entry.resolved = true;
-            break;
+    {
+        std::lock_guard<std::mutex> lock(auditMutex_);
+        for (auto& entry : auditLog_) {
+            if (entry.slot == slot && !entry.resolved) {
+                entry.resolved = true;
+                break;
+            }
         }
+        compactAuditLogLocked();
     }
-
-    compactAuditLog();
     return true;
 }
 
-void DSPQuarantineManager::compactAuditLog() noexcept
+// ★ BUG-061: ロック保持済み呼び出し用（public compactAuditLog との二重ロック防止）
+void DSPQuarantineManager::compactAuditLogLocked() noexcept
 {
     // ★ compaction: resolved エントリが一定数超えた場合のみ
     constexpr size_t kCompactThreshold = 1024;
@@ -154,6 +169,13 @@ void DSPQuarantineManager::compactAuditLog() noexcept
     }
     if (it != auditLog_.begin())
         auditLog_.erase(auditLog_.begin(), it);
+}
+
+void DSPQuarantineManager::compactAuditLog() noexcept
+{
+    // ★ BUG-061: 外部（ReleaseResources shutdown 時など）から呼ばれる場合も mutex 保護
+    std::lock_guard<std::mutex> lock(auditMutex_);
+    compactAuditLogLocked();
 }
 
 // ★ PR1: quarantineActiveFlags_[] の確認（residentCount と同パターン）

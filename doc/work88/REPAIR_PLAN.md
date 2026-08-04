@@ -26,7 +26,7 @@
 - **① 暫定 cache の Authority 化防止（コードレベル保証）**: FUTURE-4 の過渡的措置を `#if ISR_METADATA_TRANSITION` ガード付き **DebugOnly（診断用途限定）** に変更。移行完了時にコンパイル単位で削除されることを保証（擬似 Authority 化リスクを排除）。
 - **② Quarantine 語彙統一**: `submit` = enqueue（純粋な Intent 発行）、`execute` = 同期実行と定義。**`submitQuarantine()` = enqueue のみ**を最終形として採用（`submitRecoveryRequest()` と一致）。現行の同期実行は FUTURE-7 の Intent Queue 化までの暫定実装と位置づけ。
 - **③ 共通 Intent Queue 一本化**: 種別別 Queue を単一 `LockFreeRingBuffer<Intent>` へ統合する**FUTURE-10 を新設・設計確定（最終形）**。`Intent { type, handle, epoch, sequenceId }` の定義と QUEUE-17〜19 契約を追加。FUTURE-3 の統合検討注記を「最終形として採用」に昇格。
-- **④ Coordinator は Intent Routing に専念**: 実コード検証により `processIntent()`（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp`）は既に retire 詳細を `DSPLifetimeManager::retireByHandle()` へ委譲しており、指摘を**満たしている**ことを確認。FUTURE-9 実装ステップに検証結果と P0-4A の「retire を実行」の解釈を追記。
+- **④ Coordinator は Intent Routing に専念**: 実コード検証により `processIntent()`（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp`）は既に retire 詳細を `DSPLifetimeManager::rretireByHandle()` へ委譲しており、指摘を**満たしている**ことを確認。FUTURE-9 実装ステップに検証結果と P0-4A の「retire を実行」の解釈を追記。
 
 **5回目レビュー反映 (2026-07-31)**: REPAIR_PLAN(35) 追加レビュー（総合 4.6/5、到達可能 4.8〜4.9/5）の妥当な指摘を反映済み:
 - **RECOVERY-7 追加**: Builder 側で同一 DSPHandle の Pending Recovery を Build 前に統合（coalescing）する契約を追加。Queue の Decision ではなく **Builder 側の Intent Merge** である旨を明記（QUEUE は Transport のみ、RECOVERY-3 と矛盾しない）。
@@ -247,7 +247,7 @@ CI-1 の ASan Debug ビルド green 化過程で ctest 3テスト失敗を発見
 | 2.3 | FUTURE-3 | Recovery Request transport (enqueue→pop 1-hop) 完了。Builder→Validate→Publish recovery-world build は AudioEngine/Builder Loop レイヤ（FUTURE-10 Intent Queue 統合後に接続） — 未着手 | 🔄 | :274 |
 | 3 | **FUTURE-7: submitQuarantine / submitObserve rename** | `emitQuarantineIntent`→`submitQuarantine`, `emitObserveIntent`→`submitObserve` (API + Timer.cpp/DSPTransition.h 呼出し + コメント) 統一 | ✅ | :758 |
 | 4 | **FUTURE-8: Observe Deferred Ring 分離** | ObserveIntent overflow を retire 系 ring から分離（observeDeferredRing_ + drainObserveDeferred + overflow カウンタ種別別） | ✅ | :894 |
-| 5 | **FUTURE-9: Dedicated Coordinator Worker** | Scheduling Authority を Timer→Coordinator へ移す。BUG-052（hasDeferred_ → atomic）✅ 完了。Dedicated Coordinator Worker Thread + step-5 re-submit wiring を今回実装（FUTURE-10 より先に実装、2026-08-01 review決定 C）。audio-thread ライフサイクルは NonRT Worker へのリネームのみ（MessageThread→Worker、同一 NonRT 安全 invariants 維持） | 🔧 | :980 |
+| 5 | **FUTURE-9: Dedicated Coordinator Worker** | Scheduling Authority を Timer→Coordinator へ移す。**BUG-052（hasDeferred_ → atomic）未完了 — `hasDeferred_` は依然 `bool` (`.h:156`)。データ競合が実現中**。CoordinatorLoop + step-5 re-submit wiring は実装済み (ProcessIntent.cpp:41-45) | ⚠️ | :980 |
 | 6 | **FUTURE-10: 共通 Intent Queue 一本化** | `Intent {type,handle,epoch,sequenceId}` tagged-union + `kDispatchTable` Dispatcher (`handleObserve/Recovery/Publish/Quarantine`) | ☐ | :1093 |
 | 6.1 | FUTURE-10 | `kDispatchTable` 1:1 Routing + `static_assert(DispatcherHasNoDecision)` | ☐ | :1576-1579 |
 | 6.2 | FUTURE-10 | Handler = Executor のみ (Decision/World 書き換え禁止, HANDLER-1) | ☐ | :1578 |
@@ -968,7 +968,7 @@ P0-4A の Intent Queue Overflow Policy の Deferred 層で共用している `co
 2. **overflow 経路を分離**: `ISRRuntimePublicationCoordinator.cpp:549-555` の `deferredEntry{}` 変換（`intent.dspSlot = 0` による **handle 情報の破棄**）を廃止し、ObserveIntent をそのまま `observeDeferredRing_` に格納
 3. **drain ルーチンを分離**: `processIntent()` 内で `observeDeferredRing_` の drain（Observe 用）と `coordinatorDeferredRing_` の drain（Retire 用）を別関数に分割（QUEUE-16）
 4. **overflow カウンタを種別別に**: `overflowCounter_` / `fallbackOverflowCounter_` を Observe 用と Retire 用に分離
-5. **回収時の retire 対象特定**: drain で回収した ObserveIntent の `handle` をそのまま `retireByHandle(intent.handle)` に渡す（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25` と同じ経路）
+5. **回収時の retire 対象特定**: drain で回収した ObserveIntent の `handle` をそのまま `rretireByHandle(intent.handle)` に渡す（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25` と同じ経路）
 6. **検証**: overflow 強制テスト（Queue 容量を小さくして発火）で handle 情報が保持されることを確認
 
 ### 変更ファイル（🔧 今回実装）
@@ -977,7 +977,7 @@ P0-4A の Intent Queue Overflow Policy の Deferred 層で共用している `co
 |---------|---------|
 | `ISRRuntimePublicationCoordinator.h` | `observeDeferredRing_` メンバ追加。Observe / Retire 別の overflow カウンタ宣言。 |
 | `ISRRuntimePublicationCoordinator.cpp` | `:549-555` の deferredEntry 変換を廃止し ObserveIntent 直接格納に変更。drain ルーチンを種別別に分離。 |
-| `ISRRuntimePublicationCoordinator_ProcessIntent.cpp` | `observeDeferredRing_` の drain → `retireByHandle()` 経路を追加。 |
+| `ISRRuntimePublicationCoordinator_ProcessIntent.cpp` | `observeDeferredRing_` の drain → `rretireByHandle()` 経路を追加。 |
 | テスト | `tests/DeferredRingTests.cpp`（下記） |
 
 ### テスト計画（🔧 今回実装）
@@ -1010,7 +1010,7 @@ TEST(OverflowCountersPerType) {
 
 ---
 
-## FUTURE-9: Dedicated Coordinator Worker 移行 [🔧 今回実装] — 📋 設計確定
+## FUTURE-9: Dedicated Coordinator Worker 移行 [🔧 今回実装] — ⚠️ **hasDeferred_ atomic 化未完了 (BUG-052 再発)**
 
 ### 目的
 
@@ -1040,14 +1040,14 @@ P0-4A の「Timer callback 内で `processIntent()` を呼ぶ暫定実装」か�
 
 1. Timer callback から `processIntent()` 呼び出しを削除
 2. `CoordinatorLoop`（MessageThread の定期タスクまたは専用 Worker）を新設
-3. `processIntent()` の呼び出し元を Loop に変更（ObserveIntent は自己完結型のため**インターフェース変更ゼロ** — `ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25` の `lifetimeMgr.retireByHandle(intent.handle)` は既に外部状態に依存しない。ただし `processIntent()` 自体は世代逆転検出のため `persistentState_.publicationEpoch` を参照する（同 `:13,21`）が、呼び出し元の変更のみで完了する）
+3. `processIntent()` の呼び出し元を Loop に変更（ObserveIntent は自己完結型のため**インターフェース変更ゼロ** — `ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25` の `lifetimeMgr.rretireByHandle(intent.handle)` は既に外部状態に依存しない。ただし `processIntent()` 自体は世代逆転検出のため `persistentState_.publicationEpoch` を参照する（同 `:13,21`）が、呼び出し元の変更のみで完了する）
 4. P0-4A 完了条件 1〜3 が引き続き成立することを確認
 
 > **Coordinator は Intent Routing に専念（2026-07-31 反映・実コード検証済み）**: 実コードの委譲構造を検証した結果、Coordinator は retire/reclaim の実行詳細を一切保持しない。具体的には:
 >
 > | 経路 | 委譲先 | 実コード |
 > |------|--------|---------|
-> | Observe Intent 処理 | `DSPLifetimeManager::retireByHandle()` | `ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25` |
+> | Observe Intent 処理 | `DSPLifetimeManager::rretireByHandle()` | `ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25` |
 > | Reclaim 要求 | `DSPHandleRuntime::retire()` → `ISRRetireRouter::currentEpoch()/minReaderEpoch()` で epoch 安全確認 → `DSPHandleRuntime::reclaim()` | `ISRRuntimePublicationCoordinator.cpp:568-599` |
 >
 > `requestReclaim()`（`.cpp:568-599`）は DELETE-2/3 に従い (1) `handleRuntime.retire()` 委譲 → (2) `router.currentEpoch()/minReaderEpoch()` で安全確認 → (3) `handleRuntime.reclaim()` 遷移のみを行い、物理削除（`DSPCore*` delete）は DSPLifetimeManager 経由で別途実行する。これはレビュー④の指摘「Coordinator は Intent Routing に専念し、Retire 詳細（epoch 安全確認含む）は専用コンポーネント（ISRRetireRouter / DSPLifetimeManager）へ委譲」を**既に満たしている**。P0-4A の「Coordinator は retire を実行」という記述は「Retire の Routing（Intent → Router 委譲）」を意味し、実行そのものを意味しない点を明記する。
@@ -1075,6 +1075,7 @@ P0-4A の「Timer callback 内で `processIntent()` を呼ぶ暫定実装」か�
 3. **Scheduling Authority の移管**: Timer は「Observe 発行」のみの責務となり、Coordinator の処理スケジューリングは CoordinatorLoop に一元化（Authority 分離の完成）
 4. **シャットダウン連携**: `isShutdownInProgress()`（Timer.cpp:1035）と同じ条件を CoordinatorLoop にも適用し、停止時に残存 Intent を安全に消化
 5. **Deferred Publish 再提出経路の接続（8回目レビュー後・調査確定）**: 現状 `consumeDeferredRequest()`（`RuntimePublicationOrchestrator.h:65`）はデッドコードであり、`enqueueDeferred()` で保存された publish 要求が**再提出される経路が存在しない**。FUTURE-9 の CoordinatorLoop 実装時に、**Timer の `hasDeferredRequest()` 検知（`AudioEngine.Timer.cpp:1040`）→ `consumeDeferredRequest()` → `submitPublishRequest()` の再提出ループ**を接続する。`hasDeferred_` は `std::atomic<bool>` に変更し、データ競合（`doc/work89/BUG-052.md` 記載）を解消する。これにより SHUTDOWN-2/4（Drain Intent / Advance Epoch）の「deferred の完全消化」契約が成立する
+> **⚠ コード照合による訂正 (2026-08-04)**: 上記ステップ5の 「hasDeferred_ を std::atomic<bool> に変更」 は **実装されていない** (BUG-052 再発)。RuntimePublicationOrchestrator.h:156 では ool hasDeferred_ = false; のままであり、CoordinatorLoop から consumeDeferredRequest() が呼ばれるようになったため、データ競合が実現中。詳細は「コード照合結果 (2026-08-04)」セクション2を参照。
 6. **P0-4A 完了条件 1〜3 の回帰確認**: processIntent の移設後も retire/reclaim タイミングが変わらないことを統合テストで確認
 7. **優先順位の検討**: CoordinatorLoop は FUTURE-10（共通 Intent Queue）実装後の Routing 主体になるため、**FUTURE-9 は FUTURE-10 の直前に実装**する（共通 Queue の消費主体として CoordinatorLoop が機能する）
 8. **`processIntent()` の Routing 専用化（10回目レビュー②反映・2026-07-31 確認済み）**: Coordinator の `processIntent()` は **Routing のみ**を行い、各 Intent 種別の処理詳細は専用 Handler（`RetireHandler` / `RecoveryHandler` / `PublishHandler` / `ObserveHandler`）へ委譲する。これは QUEUE-22 の `kDispatchTable[type]` 登録方式で**既に設計確定済み**であり、FUTURE-10 実装で `switch(type)` は完全に排除される。レビューが提案する `Dispatcher → RetireHandler / RecoveryHandler / PublishHandler` の分割構造と等価である
@@ -1085,7 +1086,7 @@ P0-4A の「Timer callback 内で `processIntent()` を呼ぶ暫定実装」か�
 |---------|---------|
 | `AudioEngine.Timer.cpp` | `:1029-1033` の `processIntent()` 呼び出しを削除。`emitObserveIntent()` のみに純化。deferred publish 再提出ループの接続。 |
 | `ISRRuntimePublicationCoordinator.h/.cpp` | `CoordinatorLoop` のための公開 API（`processIntent()` の定期実行インターフェース）を整備。 |
-| `RuntimePublicationOrchestrator.h/.cpp` | `hasDeferred_` を `std::atomic<bool>` 化（BUG-052 解消）。`consumeDeferredRequest()` の再提出経路接続。 |
+| `RuntimePublicationOrchestrator.h/.cpp` | ⚠️ **hasDeferred_ を std::atomic<bool> 化は未実施 (BUG-052 再発)** -- `bool hasDeferred_ = false` (`.h:156`) のまま。`consumeDeferredRequest()` の再提出経路は接続済み (CoordinatorLoop run() at AudioEngine.Threading.cpp:217-221) が、atomic 化はされていないためクロススレッドデータ競合が実現中。 |
 | 該当スレッド管理（MessageThread / Worker） | 定期タスク登録、または専用 Worker の起動・停止。シャットダウン連携。 |
 
 ### テスト計画（🔧 今回実装）
@@ -1106,7 +1107,9 @@ TEST(DeferredPublishResubmitted) {
     // hasDeferredRequest → consumeDeferredRequest → submitPublishRequest の経路を検証
 }
 TEST(HasDeferredAtomic) {
-    // hasDeferred_ が std::atomic<bool> でデータ競合がない（BUG-052 解消）
+    // ⚠ コード照合 (2026-08-04): hasDeferred_ は依然 bool (std::atomic ではない)。
+    // このテストは FAIL する可能性あり。FUTURE-9 完了条件4 未達 --
+    // TODO: hasDeferred_ を std::atomic<bool> に変更してから有効化
 }
 TEST(RetireTimingPreserved) {
     // processIntent 移設後も retire/reclaim タイミングが従来と同等（P0-4A 回帰）
@@ -1123,7 +1126,7 @@ TEST(RetireTimingPreserved) {
 
 ---
 
-## FUTURE-10: 共通 Intent Queue 一本化 [🔧 今回実装] — 📋 設計確定（最終形）
+## FUTURE-10: 共通 Intent Queue 一本化 [🔧 今回実装] — ⚠️ **部分実装 (50%)**（最終形設計確定）
 
 ### 目的
 
@@ -1183,7 +1186,7 @@ LockFreeRingBuffer<Intent, kIntentQueueCapacity> intentQueue_;
 // ★ 登録型 Dispatcher（QUEUE-22 / DISPATCH-1）: switch(type) を肥大化させない。Pure Routing（Decision なし）。
 // ★ FUTURE-10/HANDLER-1/QUEUE-22: Handler = Execution のみ（World 書き換え / Decision 禁止）。
 //   Coordinator は Routing のみ。dispatch() → Handler → 専用コンポーネントへ委譲。
-void handleObserve(const Intent& intent, HandlerContext& ctx) noexcept;           // → ctx.lifetime.retireByHandle
+void handleObserve(const Intent& intent, HandlerContext& ctx) noexcept;           // → ctx.lifetime.rretireByHandle
 void handlePublish(const Intent& intent, HandlerContext& ctx) noexcept;            // → ctx.engine 経由 commit/publishAtomic
 void handleRecovery(const Intent& intent, HandlerContext& ctx) noexcept;            // → enqueue（Builder Loop が pop）
 void handleQuarantine(const Intent& intent, HandlerContext& ctx) noexcept;          // → ctx.quarantine.execute（QuarantineService）
@@ -1222,7 +1225,7 @@ static_assert(kDispatchTable.size() == kIntentTypeCount, "QUEUE-22/DISPATCH-1: k
 | QUEUE-21 | **Intent Payload は tagged-union variant で定義する（レビュー⑧反映）**: `Intent` のペイロードを種別別 struct の素の union で保持し、`type` タグで判別する。`std::variant` は trivially copyable を保証しないため LockFreeRingBuffer 制約を満たせない。**tagged union であれば trivially copyable + standard layout を維持**でき、新規 Intent 種別の追加は「enum 追加 + Payload struct 追加」のみで済む（Intent 本体のフィールド追加が不要になる）。 |
 | QUEUE-22 | **Dispatcher は Handler 登録方式（dispatch table）で実装する（レビュー⑧⑨反映）**: `switch(type)` や `if` 連鎖の肥大化を防ぐため、`IntentType` ごとのハンドラ登録配列 `kDispatchTable[]` を用意し、`processIntent()` は `kDispatchTable[type]` へ委譲する。**各エントリは専用 Handler（`ObserveHandler` / `RecoveryHandler` / `PublishHandler` / `QuarantineHandler`）への委譲**であり、Coordinator 本体にハンドラ実装を置かない（Handler 登録方式・レビュー⑨反映）。新規 Intent 種別の追加は**テーブルへの登録 1 行 + 専用 Handler 実装**で完了し、`processIntent()` 本体の変更を伴わない。`static_assert(kDispatchTable.size() == kIntentTypeCount)` で登録漏れをコンパイル時に検出する。 |
 | DISPATCH-1 | **Dispatcher は Routing のみ（Decision 禁止）（11回目レビュー③反映・12回目レビューで Pure Routing を絶対条件化）**: Dispatcher（`kDispatchTable[type]`）は Intent を **種別に応じて対応する Handler へ転送（Routing）するのみ**であり、**Decision（優先度付け・破棄・並べ替え・取捨選択）・Priority・Merge・Retry を一切持たない**。ISR の `Transport → Dispatch → Handler` の流れにおいて、Dispatch 自身は Decision を持たない（Decision は Handler 以降の各 Authority のみが行う）。Dispatcher が「どの Intent を先に処理するか」「どの Intent を無視するか」を判断することは禁止される（それは QoS 判断であり QUEUE-20/QUEUE-23 に委ねる）。**Dispatcher の Coordinator 化防止（12回目レビュー①反映）**: Handler が増加しても Dispatcher 内に `if` / `priority` / `retry` / `merge` が入り込まないよう、**Dispatcher = Pure Routing を絶対条件**とし、実装時に `static_assert(DispatcherHasNoDecision)`（例: `kDispatchTable[type]` が「type から Handler への一意写像」であること 1:1 を static_assert し、Dispatcher が状態を持たないこと・ループ内で Routing 以外の分岐を持たないことを検証）で保証する。Routing 以外のロジックを Dispatcher に置かない。 |
-| HANDLER-1 | **各 Handler は Execution のみ（Policy / Authority を持たない）（12回目レビュー③・最終評価3・REPAIR_PLAN(34)提案①④反映）**: `ObserveHandler` / `RecoveryHandler` / `PublishHandler` / `QuarantineHandler` は **Executor（実行）のみ**を担当し、**Decision / Policy / Priority 判断を持たない**。Decision は **Builder / Validator / Policy 層のみ**が行う（ISR の「Handler = Executor、Decision = Builder / Validator / Policy」）。**副作用境界（REPAIR_PLAN(34) 提案④反映）**: Handler は **RuntimeWorld を書き換えない**。Handler が実行できるのは (1) 既存 RuntimeWorld への委譲（`retireByHandle` 等の既存 API 呼び出し）、(2) 新規 Intent の submit（`submitObserve()` 等）、(3) 診断情報の記録のみであり、(4) `publishAtomic(currentWorld_, ...)` による World 更新を直接実行しない（World 更新は RuntimeBuilder のみが行う）。これにより Authority が RuntimeBuilder へ限定される。Handler の追加時は「Decision を持たない」「World を書き換えない」ことをコードレビュー + 設計契約で検証する。 |
+| HANDLER-1 | **各 Handler は Execution のみ（Policy / Authority を持たない）（12回目レビュー③・最終評価3・REPAIR_PLAN(34)提案①④反映）**: `ObserveHandler` / `RecoveryHandler` / `PublishHandler` / `QuarantineHandler` は **Executor（実行）のみ**を担当し、**Decision / Policy / Priority 判断を持たない**。Decision は **Builder / Validator / Policy 層のみ**が行う（ISR の「Handler = Executor、Decision = Builder / Validator / Policy」）。**副作用境界（REPAIR_PLAN(34) 提案④反映）**: Handler は **RuntimeWorld を書き換えない**。Handler が実行できるのは (1) 既存 RuntimeWorld への委譲（`rretireByHandle` 等の既存 API 呼び出し）、(2) 新規 Intent の submit（`submitObserve()` 等）、(3) 診断情報の記録のみであり、(4) `publishAtomic(currentWorld_, ...)` による World 更新を直接実行しない（World 更新は RuntimeBuilder のみが行う）。これにより Authority が RuntimeBuilder へ限定される。Handler の追加時は「Decision を持たない」「World を書き換えない」ことをコードレビュー + 設計契約で検証する。 |
 | INTENT-1 | **Intent は投入後不変（enqueue 後変更禁止）（REPAIR_PLAN(34) 提案③反映）**: 共通 Intent Queue に投入された `Intent` は**絶対に変更してはならない**。`enqueue` 以降、Intent は const として扱われ、Dispatcher / Handler / CoordinatorLoop のいずれも Intent の内容（`type` / `payload`）を書き換えない。**実装契約**: (1) `LockFreeRingBuffer<Intent>` は push 時に Intent を値コピーする（ポインタ共有・参照共有をしない）、(2) pop された Intent は const 参照で Handler へ渡す、(3) Handler が Intent を書き換えたい場合は**新規 Intent を submit する**（既存 Intent の変更ではなく新しい Intent の発行）、(4) tagged-union（QUEUE-21）が trivially copyable であるため値コピーは安全。これにより「Queue 内の Intent が途中で書き換えられる」ことが構造的に排除され、ISR の「Intent は未来に処理される要求」という意味論が保たれる。 |
 | QUEUE-23 | **共通 Intent Queue は到着順 FIFO を維持し、優先制御は Dispatcher 以降でのみ行う（11回目レビュー②反映・12回目レビューで Coordinator Worker 側の Scheduling を強調）**: 共通 Intent Queue（`intentQueue_`）は **到着順 strict FIFO** を契約として固定する（QUEUE-17 の FIFO 保証を強化）。**Priority FIFO は採用しない**。Publish / Observe / Recovery / Quarantine は意味が異なる Intent だが、Queue は種別を問わず到着順で保持し、優先制御（もし将来必要になれば）は **Dispatcher 以降の段（Handler / CoordinatorLoop の処理ループ）でのみ**行う。これにより「Queue が Decision する」ことを構造的に排除する（QUEUE-20 の QoS 検討と整合）。実装契約: (1) `intentQueue_` は push 順に pop される（LockFreeRingBuffer の FIFO 保証をそのまま維持）、(2) Queue には種別優先度・期限・並べ替えロジックを持たない、(3) 優先度が必要な場合は CoordinatorLoop が「FIFO を保ったまま scan で優先 Intent を先に取り出す」方式（QUEUE-20）のみ許容する。**処理順序の決定権（12回目レビュー⑤反映）**: 大量 Observe による Publish 遅延等の課題は、Queue ではなく **Coordinator Worker（FUTURE-9）側が「どの Intent をどの順序で処理するか」を決定**することで解決する（ISR の `Queue = FIFO → Handler 側で Scheduling` 設計）。**Queue 自体の FIFO は常に保持され、処理順序の変更は消費側（CoordinatorLoop）でのみ行う**ことを強調する。これにより「Queue を並べ替えて優先処理する」誤実装を防ぐ。 |
 
@@ -1255,17 +1258,19 @@ FUTURE-10 は Authority 分離フェーズ。3 点を最終確定:
 
 | 項目 | 現コード | 設計 / レビュー決定 | ステータス |
 |------|------|----------------|------|
-| `kDispatchTable` / `handle*` 宣言 | `ISRRuntimePublicationCoordinator.h:168-196` に `IntentType`/`Intent`/`intentQueue_`/`nextIntentId_` (`.h:355`) 追加済（Phase A, build 63/64 ✅）。`handle*`/`kDispatchTable` は**ソース未実装**（REPAIR_PLAN 設計のみ） | QUEUE-22/HANDLER-1 | 未実装 |
-| `processIntent` routing | Observeのみ (`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:7-33`: `observeIntentQueue_`+`observeFallbackQueue_`+`drainObserveDeferred`)。Recovery/Quarantine/Publishは未経由 | FUTURE-10 統合 (`kDispatchTable[type](intent,ctx)`) | 未実装 |
-| `submitQuarantine` | **同期** (`QuarantineService::executeQuarantine` 直接呼び, `ISRRuntimePublicationCoordinator.cpp:676`) | enqueue + `handleQuarantine` 委譲 | 未実装（決定済） |
-| Intent overflow (4層) | 未実装。現 Overflow は Retire 専用 (`OverflowScheduler`, `coordinatorDeferredRing_`/`.h:310`, `lastResortQueue_`/`.h:313`, `OverflowDrainResult`/`.h:215`) | QUEUE-19 (種別非依存) | 未実装 |
-| `QuarantineService` 配置 | `ISRRuntimePublicationCoordinator.cpp:610-635` 実装済（State `DSPHandleRuntime::quarantine`+Audit `DSPQuarantineManager::quarantineHandle`）。`HandlerContext.quarantine = QuarantineService&` なので `handleQuarantine` へ**inlineまたはService背後** | HANDLER-2 | 解決済（2026-08-01 A 確定: keep QuarantineService as Handler backend。Handler→Service→Domain。handleQuarantine(ctx) → ctx.quarantine.execute(ctx.runtime, request)） |
-| 旧 Queue 同居 | `observeIntentQueue_`/`.h:331`, `observeFallbackQueue_`/`.h:334`(`kObserveFallbackCapacity`)`, `observeDeferredRing_`/`.h:345`, `recoveryIntentQueue_`/`.h:349`(kRecoveryIntentQueueCapacity256) 仍存在 | FUTURE-10 で `intentQueue_`(`.h:353`,4096)へ統合置換 | 未実装 |
+| `kDispatchTable` / `handle*` 宣言 | ✅ `ISRIntentDispatcher.h:58-63` に `kDispatchTable` 実装済み。4ハンドラ (ObserveIntentHandler/`PublishIntentHandler`/`RecoveryIntentHandler`/`QuarantineIntentHandler`) は `ISRIntentDispatcher.h:37-48`、`handle*` の実装は `ISRRuntimePublicationCoordinator_ProcessIntent.cpp:67-96` にて。`static_assert` はサイズ 1:1 チェックのみ (`DispatcherHasNoDecision` は未実装) | QUEUE-22/HANDLER-1 | ✅ **実装済み** (DoD #6 達) |
+| processIntent routing | ✅ Observe (dedicated rings → kDispatchTable[Observe] → 
+retireByHandle) + Publish/Quarantine (intentQueue_ → kDispatchTable[type] → handler)。Recovery は 
+recoveryIntentQueue_ から popRecoveryRequest() で消費 (ProcessIntent.cpp:44-45)。 Observe/Recovery は中実装中 (ProcessIntent.cpp:41-42 コメント確認) | FUTURE-10 統合 | ⚠️ **部分実装** (DoD #4/#7 未達) |
+| `submitQuarantine` | ✅ **async (enqueue)** — `ISRRuntimePublicationCoordinator.cpp:674` で `intentQueue_.push(Intent{Quarantine, ...})` (`.cpp:681-682` コメントで確認: enqueues a Quarantine Intent onto the common intentQueue_)。`QuarantineIntentHandler::handle` (ProcessIntent.cpp:75-88) が `QuarantineService::executeQuarantine` を委譲 | enqueue + `handleQuarantine` 委譲 | ✅ **実装完了** |
+| Intent overflow (4層) | ⚠️ Observe 専用 4層 (Primary 1024→Fallback 2048→Deferred Ring→Quarantine) は submitObserve/.cpp:548-552 で実装済み。OverflowScheduler/OverflowDrainResult/.h:215 存在確認済み。**BUT**: Publish/Quarantine は intentQueue_ (capacity 4096, .h:399) で 1層のみ | QUEUE-19 | ⚠️ **部分実装** (Observe 専用) |
+| `QuarantineService` 配置 | ✅ `QuarantineService::executeQuarantine` + `DSPQuarantineManager::quarantineHandle` 実装済み。`IntentHandlerContext::quarantine = QuarantineService&` (`ISRIntentDispatcher.h:24`)。`QuarantineIntentHandler::handle` (ProcessIntent.cpp:75-88) → `ctx.quarantine.executeQuarantine(...)` | HANDLER-2 | ✅ **解決済み** |
+| 旧 Queue 同居 | ⚠️ `observeIntentQueue_`(`.h:376`)/`observeFallbackQueue_`(`.h:377`)/`observeDeferredRing_`(`.h:389`) は Observe 専用。`recoveryIntentQueue_`(`.h:394`) は Recovery 専用。`intentQueue_`(`.h:399`, 4096) は Publish/Quarantine のみ。**Observe/Recovery の共通 Queue 統合は未実装** | FUTURE-10 | ⚠️ **未実装** (Observe/Recovery のみ) |
 
 #### スタブ参照の不一致（棚卸し済み 2026-08-01）
 
 - REPAIR_PLAN 内の行参照 `.h:311`/`.h:315`/`.cpp:527-531` 等は **stale**（FUTURE-7/8 の追記で行がずれ）。現コード: `kObserveIntentQueueCapacity` `.h:330`, `observeFallbackQueue_`/`.h:334`, `observeDeferredRing_`/`.h:345`, `kIntentQueueCapacity`/`.h:353`, `nextIntentId_`/`.h:355`。
-- doc:852-908/1244/1254/1256 の `emitQuarantineIntent()`/`emitObserveIntent()` は FUTURE-7 で `submitQuarantine()`/`submitObserve()` に改名済み（現コード `AudioEngine.Timer.cpp:1809,1847` は `submitQuarantine`）。
+- doc:852-908/1244/1254/1256 の `emitQuarantineIntent()`/`emitObserveIntent()` は FUTURE-7 で `submitQuarantine()`/`submitObserve()` に改名済み（現コード `ISRRuntimePublicationCoordinator.cpp:674,531`）。**棚卯テーブルの行参照も全面的に STALE**: `.h:331`→`.h:376`, `.h:334`→`.h:377`, `.h:345`→`.h:389`, `.h:349`→`.h:394`, `.h:353`→`.h:399`, `.h:355`→`nextObserveIntentId_` (名称変更) など。
 - `submitQuarantine` 呼び出し: `AudioEngine.Timer.cpp:1809,1847`（両点で `dspQuarantineManager_` を既に渡しているため、HandlerContext plumbing は既存引数の再利用で済む）。
 
 ### 完了条件
@@ -1289,12 +1294,12 @@ FUTURE-10 は Authority 分離フェーズ。3 点を最終確定:
    ```
    processIntent()
      └── pop → (this->*kDispatchTable[intent.type])(intent)   ← テーブル参照のみ（switch なし）
-           ├── handleObserve    → ObserveProcessor    (retireByHandle 委譲)
+           ├── handleObserve    → ObserveProcessor    (rretireByHandle 委譲)
            ├── handlePublish    → PublishProcessor    (commit/publishAtomic 委譲)
            ├── handleRecovery   → RecoveryProcessor   (Builder Loop 経由)
            └── handleQuarantine → QuarantineProcessor (executeQuarantine 委譲)
    ```
-   これにより Intent 種別が増えても `processIntent()` 自体は肥大化せず、**新規種別の追加は enum + Payload + テーブル登録 1 行**で完了する（QUEUE-22）。実コード現状: `ISRRuntimePublicationCoordinator_ProcessIntent.cpp`（34行）は Observe 2層（Primary + Fallback）の pop → `retireByHandle` のみ。共通 Intent 化時に dispatch table 方式へ再構成する（QUEUE-18）
+   これにより Intent 種別が増えても `processIntent()` 自体は肥大化せず、**新規種別の追加は enum + Payload + テーブル登録 1 行**で完了する（QUEUE-22）。実コード現状: `ISRRuntimePublicationCoordinator_ProcessIntent.cpp`（34行）は Observe 2層（Primary + Fallback）の pop → `rretireByHandle` のみ。共通 Intent 化時に dispatch table 方式へ再構成する（QUEUE-18）
 4. **4層 Overflow を一般化**: Primary → Fallback → Deferred → Drop を種別非依存に（QUEUE-19）。FUTURE-8 の Observe 専用 Deferred Ring は共通 Intent 用 Deferred Ring に吸収
 5. **FUTURE-3/7 との統合**: `submitRecoveryRequest()` / `submitQuarantine()` は `intentQueue_.enqueue(Intent{Recovery/Quarantine, ...})` に直結（FUTURE-3/7 実装時にこの形で作成）
 6. **容量検証**: 全 Intent 種別のピーク流量を合算し、`kIntentQueueCapacity` の妥当性を負荷テストで確認
@@ -1547,7 +1552,7 @@ struct ObserveIntent {
 };
 ```
 
-> **Note**: ObserveIntent は DSPHandle を保持する**自己完結型（self-contained）Intent** である。コード実装でも `processIntent()` は `retireByHandle(intent.handle)` を使用しており（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25`）、`lifetimeMgr.getActive()` には依存していない。Coordinator は Intent 内の `handle` のみで retire 対象を一意に識別できる。これにより、将来の専用 Coordinator Worker への移行がコード変更なく実現可能。`intentId` は診断・モニタリング用途に限定される。
+> **Note**: ObserveIntent は DSPHandle を保持する**自己完結型（self-contained）Intent** である。コード実装でも `processIntent()` は `rretireByHandle(intent.handle)` を使用しており（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:17,25`）、`lifetimeMgr.getActive()` には依存していない。Coordinator は Intent 内の `handle` のみで retire 対象を一意に識別できる。これにより、将来の専用 Coordinator Worker への移行がコード変更なく実現可能。`intentId` は診断・モニタリング用途に限定される。
 >
 > **実コード検証（2026-07-31）**: レビューにて「ObserveIntent に `DSPHandle` が設定されていないスニペットがある」との指摘があったが、実コードでは **`handle` は正しく設定されている**ことを確認済み。`emitObserveIntent()`（`ISRRuntimePublicationCoordinator.cpp:520-524`）は `ObserveIntent intent{ handle, persistentState_.publicationEpoch, nextObserveIntentId_.fetch_add(...) }` と 3 フィールドすべてを初期化しており、構造体定義（`.h:301-305`）も `handle / epoch / intentId` の3フィールド構成。レビューが参照したスニペットは古い記述であり、P0-4A の自己完結型 Intent 前提は実コードで成立している。
 >
@@ -1678,7 +1683,7 @@ observeIntentQueue_.push({intent})
 | QUEUE-12 | Fallback Queue と Quarantine 発行は RT-safe（lock-free or atomic increment） |
 | QUEUE-13 | Overflow 発生時は診断カウンタ（`overflowCounter_` / `fallbackOverflowCounter_`）を atomic increment する |
 | QUEUE-14 | Overflow 発生を Coordinator が診断可能なイベントとして扱えるよう、HealthMonitor へ非同期通知する（将来対応） |
-| QUEUE-15 | **Drop は最終状態にしない（2026-07-31 反映）**: Drop すると ObserveIntent が消え、対応 DSPHandle が Retire されない危険がある。Drop カウンタが閾値（例: 100回）を超えた場合、Coordinator は全 DSPHandle を再走査し、未 Retire の Handle を新規 ObserveIntent として再発行する。**Repair Pass としての位置付け（レビュー⑥反映）**: 本再走査は Observe の代替ではなく **Coordinator Health Check 起点の Repair Scan** である。ISR では「Observe 失敗 → Scan」ではなく「**Coordinator Health Check → Repair Scan**」とし、健全性維持の修復パスとして扱う（命名も `RepairScan` とする）。これは ISR を壊さない Health Recovery であり、`Coordinator → RetireRouter → Epoch` の通常経路に復帰させる。**例外経路の明文化（レビュー⑧反映）**: Repair Scan は**正常時の通常経路（`Timer → submitObserve → intentQueue_ → processIntent → retireByHandle`）ではない**。Repair Scan は **`Health Monitor → 異常検出（overflow 閾値超過） → 再同期（Repair Intent 生成）`** の**例外時のみ起動する修復経路**であり、通常経路が正常に機能している間は決して起動しない。設計上も Repair Scan の存在は通常経路の代替を意味せず、通常経路の健全性を損なわない（Scan 起動条件は overflow 閾値のみ）。**Diagnostic 化（レビュー⑦反映）**: Repair Scan 自身は**常に Diagnostic（走査結果の報告）に留まり、実行は行わない**。修復（未 Retire の再発行）は Repair Scan が直接実行するのではなく、**走査で検出した未 Retire Handle を `submitObserve()` で Repair Intent として enqueue し、Coordinator の通常経路（`processIntent` → `retireByHandle`）経由で実行**する。これにより Repair Scan 自身が Authority になることがなく（Scan が直接 World を書き換えない）、修復実行は常に Coordinator の Intent 経路を通過する。**実コード対応（2026-07-31 検証）**: 既存の `RuntimeHealthMonitor`（`RuntimeHealthMonitor.h:124`、Pull型監視エンジン）が `AudioEngine.Timer.cpp:1126` で tick され、`overflowCounter_` の読み取りに利用できる。Repair Scan の実行主体は Coordinator（`processIntent` 内の専用パス）とし、HealthMonitor は検知・通知（`onHealthEvent`）のみ行う（RuntimeHealthMonitor は Decision しない）。 |
+| QUEUE-15 | **Drop は最終状態にしない（2026-07-31 反映）**: Drop すると ObserveIntent が消え、対応 DSPHandle が Retire されない危険がある。Drop カウンタが閾値（例: 100回）を超えた場合、Coordinator は全 DSPHandle を再走査し、未 Retire の Handle を新規 ObserveIntent として再発行する。**Repair Pass としての位置付け（レビュー⑥反映）**: 本再走査は Observe の代替ではなく **Coordinator Health Check 起点の Repair Scan** である。ISR では「Observe 失敗 → Scan」ではなく「**Coordinator Health Check → Repair Scan**」とし、健全性維持の修復パスとして扱う（命名も `RepairScan` とする）。これは ISR を壊さない Health Recovery であり、`Coordinator → RetireRouter → Epoch` の通常経路に復帰させる。**例外経路の明文化（レビュー⑧反映）**: Repair Scan は**正常時の通常経路（`Timer → submitObserve → intentQueue_ → processIntent → rretireByHandle`）ではない**。Repair Scan は **`Health Monitor → 異常検出（overflow 閾値超過） → 再同期（Repair Intent 生成）`** の**例外時のみ起動する修復経路**であり、通常経路が正常に機能している間は決して起動しない。設計上も Repair Scan の存在は通常経路の代替を意味せず、通常経路の健全性を損なわない（Scan 起動条件は overflow 閾値のみ）。**Diagnostic 化（レビュー⑦反映）**: Repair Scan 自身は**常に Diagnostic（走査結果の報告）に留まり、実行は行わない**。修復（未 Retire の再発行）は Repair Scan が直接実行するのではなく、**走査で検出した未 Retire Handle を `submitObserve()` で Repair Intent として enqueue し、Coordinator の通常経路（`processIntent` → `rretireByHandle`）経由で実行**する。これにより Repair Scan 自身が Authority になることがなく（Scan が直接 World を書き換えない）、修復実行は常に Coordinator の Intent 経路を通過する。**実コード対応（2026-07-31 検証）**: 既存の `RuntimeHealthMonitor`（`RuntimeHealthMonitor.h:124`、Pull型監視エンジン）が `AudioEngine.Timer.cpp:1126` で tick され、`overflowCounter_` の読み取りに利用できる。Repair Scan の実行主体は Coordinator（`processIntent` 内の専用パス）とし、HealthMonitor は検知・通知（`onHealthEvent`）のみ行う（RuntimeHealthMonitor は Decision しない）。 |
 | MAINTENANCE-1 | **Repair Scan は Maintenance Layer として独立させる（9回目レビュー⑤反映）**: Repair Scan（`RepairScan`）は **Observer / Monitor / HealthMonitor のいずれでもない、独立した保守作業層（Maintenance Layer）**に属する。責務分離は `Health Monitor（検知）→ Repair Scan（走査・診断）→ Coordinator（実行）` の3段階で、それぞれが独立した関心を持つ: **Health Monitor** は異常の検知のみ（`onHealthEvent`）、**Repair Scan** は走査・診断のみ（未 Retire Handle の列挙と Repair Intent 生成）、**Coordinator** は実行のみ（`processIntent` 経由の Retire）。Repair Scan はオブザーバブルなヘルスチェックの副産物ではなく、**意図的に起動される保守作業**であり、その起動契機・頻度・対象は Monitor 層のそれとは独立に設計・計測される。実装上は独立したクラス（例: `DSPMaintenanceScan`）として実装し、Coordinator のメンバ関数や HealthMonitor のサブステップに埋め込まない。**Repair Scan は RuntimeWorld Snapshot のみを見る（11回目レビュー④反映）**: Repair Scan の走査対象は **`consumeAtomic(currentWorld_)` で取得した Immutable RuntimeWorld Snapshot（const 参照）のみ**であり、mutable な内部構造（Builder の PendingMap・Coordinator の過渡状態等）や実体 DSP の可変領域を直接見ない。これは ISR の「RuntimeWorld が唯一の Authority」原則と整合する。Repair Scan が出力するのは「Snapshot 上の未 Retire Handle の列挙」であり、これが `submitObserve()` による Repair Intent 生成の入力となる。**Repair Scan は Observation の範囲に限定（12回目レビュー④・最終評価4反映）**: Repair Scan 自身も **Observation である**。その終端は必ず **`submitObserve()`（Repair Intent の生成・enqueue）** であり、**`retire()` / `delete()` / World 更新を直接実行しない**。Repair → submitObserve() →（Coordinator 経由）→ Retire → Epoch → Delete の通常経路のみを通過する。これにより Repair Scan が「直接 retire する Maintenance Authority」に化けることを防ぎ、ISR の一方向経路（`Intent → Coordinator → Retire → Epoch → Delete`）が常に維持される。 |
 
 ### 完了条件
@@ -1733,7 +1738,7 @@ TEST(ObserveIntentGenerationReversal) {
 - **共通 Intent Queue の FIFO** → 現状の `LockFreeRingBuffer<ObserveIntent, 1024>`（`ISRRuntimePublicationCoordinator.h:311`）は FIFO 保証を実装済み。FUTURE-10 の `LockFreeRingBuffer<Intent>` も同一の FIFO 保証を維持し、QUEUE-23（到着順 strict FIFO）が成立する（Priority FIFO は不採用）ことを確認。
 **12回目レビュー後・追加調査（2026-07-31）**: REPAIR_PLAN(32) 2nd（Handlers 一覧・Pure Routing 絶対条件・RAII 終了保証）+ REPAIR_PLAN(34)（HANDLER-1 / INTENT-1 / Handler 副作用境界）の指摘に関連する未確定事項を実コードで調査・確定済み:
 - **INTENT-1（投入後不変）の実現可否** → `LockFreeRingBuffer` の `push(const T&)`（`src/LockFreeRingBuffer.h:33-42`）は**値コピーでバッファへ格納**（`buffer[w & MASK] = item`）、`pop(T&)`（同 `:54-67`）は**コピーアウト**。両方向とも参照の保持・共有がなく、T の trivially copyable（QUEUE-21 の tagged-union は static_assert で保証）が前提。**投入後の Intent が Queue 内部・消費側のいずれでも書き換えられない構造であり、INTENT-1 が成立**することを確認。Handler には pop でコピーされた const 参照（`const Intent&`）のみが渡る。
-- **HANDLER-1（Handler = Execution のみ）の実現可否** → 既存の Intent 処理は `processIntent()` 単一 → `retireByHandle`（`ISRRuntimePublicationCoordinator.cpp`）/ `requestReclaim`（同 `:568-599`）へ委譲し、Coordinator 自身が retire 詳細・Decision を保持しない既存構造（5回目調査で確認済み）と整合。FUTURE-10 で `kDispatchTable[type]`（1:1 一意写像）を導入しても Handler は**既存 API 委譲・新規 Intent submit・診断記録のみ**に留められ、World 書き換え（`publishAtomic` 直接実行）を Handler に持たせない契約（HANDLER-1）が実装可能であることを確認。
+- **HANDLER-1（Handler = Execution のみ）の実現可否** → 既存の Intent 処理は `processIntent()` 単一 → `rretireByHandle`（`ISRRuntimePublicationCoordinator.cpp`）/ `requestReclaim`（同 `:568-599`）へ委譲し、Coordinator 自身が retire 詳細・Decision を保持しない既存構造（5回目調査で確認済み）と整合。FUTURE-10 で `kDispatchTable[type]`（1:1 一意写像）を導入しても Handler は**既存 API 委譲・新規 Intent submit・診断記録のみ**に留められ、World 書き換え（`publishAtomic` 直接実行）を Handler に持たせない契約（HANDLER-1）が実装可能であることを確認。
 - **DISPATCH-1（Pure Routing）の検証手段** → `static_assert(DispatcherHasNoDecision)` の検証は (1) `kDispatchTable` が `IntentType` から Handler への**一意写像（1:1・重複なし）**であること、(2) Dispatcher（`processIntent()`）が可変状態（`Intent` 以外のメンバ変数）を参照しないこと、の2点をコンパイル時に検証する設計とする。Dispatcher 自体が状態を持つ構造は現行の `processIntent()`（`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:7-31`、二重 pop + 世代逆転検出のみ）と整合し、追加可能であることを確認。**注意（2026-07-31 実コード検証）**: `processIntent()` は世代逆転検出のため `persistentState_.publicationEpoch` を参照する（同 `:13,21`）。これは「Decision を持たない」こととは両立する（読み取り専用の state 参照）が、**FUTURE-4 で Metadata Snapshot 統合により `consumeAtomic(currentWorld_)` 経由の読み取りへ置換する**ことで、Dispatcher の状態参照をさらに削減できる。
 - **BUILDER-STATE RAII 化の影響範囲** → Builder は非同期 rebuild ワーカー（`rebuildThreadShouldExit` / `rebuildWorkerRunning`）で **noexcept バウンド**（`processIntent` も `noexcept`）のため、例外は Build 内の検証・診断関数（`ImmutableWorldVerifier` 等）から来る可能性に限定される。RAII `BuildSession` は例外安全性テスト（`BuildSessionRAIIExceptionSafety`）で検証し、`noexcept` 境界では早期 return・キャンセル経路がデストラクタで必ず PendingMap を破棄することを保証する。
 
@@ -1927,7 +1932,7 @@ TEST(ObserveIntentGenerationReversal) {
 | EQCoeffCache 継承関係 | WSL grep / serena | ✅ P0-2 完了。`EQProcessor.h:119` の `EQCoeffCache` は素の struct（`RefCountedDeferred` 継承は削除済み）。`DSPHandleRuntime` 管理に移行。 |
 | DSPHandleRuntime 実装状況 | WSL grep / AiDex | ✅ `ISRDSPHandle.h/cpp` に完全実装（create/resolve/retire/quarantine/reclaim 全API稼働） |
 | emitRetireIntent 有無 | WSL grep | ✅ `ISRRetire.h/cpp` に実装済み |
-| emitObserveIntent 有無 | WSL grep / semble | ✅ Queue push + DSPHandle 実装済み。processIntent は retireByHandle で自己完結動作。P0-4A 完了。 |
+| emitObserveIntent 有無 | WSL grep / semble | ✅ Queue push + DSPHandle 実装済み。processIntent は rretireByHandle で自己完結動作。P0-4A 完了。 |
 | emitQuarantineIntent 有無 | WSL grep / semble | ✅ QuarantineService 経由で実装済み（P0-5完了） |
 | QuarantineService 有無 | WSL grep / semble | ✅ 実装済み（P0-5完了） |
 | ProductionFft / TestFft | WSL grep / AiDex / semble | ✅ P1-1 実装完了 |
@@ -2045,6 +2050,350 @@ doc/quarantine_lifecycle.md          — Quarantine ライフサイクル詳細
 doc/ci_asan_matrix.md                — ASan CI 設定マトリックス
 doc/errata/v20.2-errata.md           — 設計と実装の乖離を記録する errata
 ```
+
+
+---
+
+## コード照合結果 (2026-08-04) — REPAIR_PLAN vs 実際のコード
+
+> **調査方法**: AiDex 検索 + serena ツール + WSL (rg/fdfind/ast-grep) + semble + cocoindex (ccc) + graphify のハイブリッド調査。serena MCP サーバーはタイムアウトのため直接アクセス不可。コードコメント内の「A3 Step」「B3/A1」「n (n=5)」等の Phase アノテーションを通じて実装フェーズを確認。**2026-07-31 に最終レビューを終えた本設計書に対し、2026-07-30〜2026-08-04 の4回のコミット（e30dbb3 / 60d74e7 / 8e4447b / 8bd75c0 / 75c0453 / 39b1abc）で3,744行の追加・536行の削除が行われた**。本設計書のステータスマーカーは実際のコードより大幅に遅れている。
+
+### 1. FUTURE ステータスの実際 — ドキュメントとコードの乖離
+
+| FUTURE | ドキュメントステータス | 実際のコードステータス | 乖離 |
+|--------|---------------------|---------------------|------|
+| **FUTURE-3** | 🔧 今回実装 (ステップ 3-5 in-progress) | ✅ **完全実装済み** — `submitRecoveryRequest()`(`.cpp:648`)/`popRecoveryRequest()`(`.cpp:664`) 実装完了。`recoveryIntentQueue_` (LockFreeRingBuffer) に enqueue のみ (Admission 判定なし)。`QuarantineResult.rolledBack` フィールド削除完了 (`.h:44-48`) | ドキュメントは「🔧」だがコードは「✅」 |
+| **FUTURE-4** | 🔧 今回実装 (過渡的 atomic cache あり) | ✅ **完全実装済み (cache スキップ)** — `persistentState_` 完全削除 (`.cpp:29,87,108` / `.h:334`)。`currentPublicationEpoch()`(`.h:99`)は `currentWorld_->publication.epoch` から直接派生。`#if ISR_METADATA_TRANSITION` ガードは**存在しない** (rg ヒット0件)。`[[deprecated]]` は付与されていない | ドキュメントは「過渡的措置あり」だがコードは「end-state 直接」 |
+| **FUTURE-7** | 🔧 今回実装 | ✅ **完全実装 + 改善** — `submitObserve()`(`.h:137`/`.cpp:531`)、`submitQuarantine()`(`.h:141`/`.cpp:674`) 実装完了。`submitQuarantine` は**同期ではなく async** — `intentQueue_.push(intent)` へ enqueue (`.cpp:681-682`コメント参照)。`emitObserveIntent()`/`emitQuarantineIntent()` は完全に削除 | ドキュメントは「同期」だがコードは「async Intent Queue」 |
+| **FUTURE-8** | 🔧 今回実装 | ✅ **完全実装済み** — `observeDeferredRing_`(`.h:389`)、`drainObserveDeferred()`(ProcessIntent.cpp:55-64) 実装完了。`ObserveDeferredEntry` 型は廃止 (QUEUE-16コメント参照) | 一致 |
+| **FUTURE-9** | 🔧 今回実装 (hasDeferred_ atomic 化 完了) | ⚠️ **部分実装 + 重大バグ** — `CoordinatorLoop`(`ISRCoordinatorLoop.h/.cpp`)実装完了。Timer callback から `processIntent()` 削除完了 (`AudioEngine.Threading.cpp:209`)。**BUT: `hasDeferred_` は `bool` のまま (`/RuntimePublicationOrchestrator.h:156`) — `std::atomic<bool>` ではない** | **ドキュメントは「✅ atomic 化完了」だがコードは「未修正」** |
+| **FUTURE-10** | 📋 設計確定 / 未実装 | ⚠️ **部分実装 (50%)** — `Intent`型/`.h:210-224`、`IntentType`/`.h:172`、`intentQueue_`/`.h:399`、`kDispatchTable`/ISRIntentDispatcher.h:58-63、`IntentHandlerContext`/ISRIntentDispatcher.h:21-26、4ハンドラ/ISRIntentDispatcher.h:37-48 すべて実装済み。**BUT: Observe/Recovery は依然専用 Queue** (`observeIntentQueue_`/`.h:376`, `recoveryIntentQueue_`/`.h:394`)。共通 `intentQueue_` は Publish/Quarantine のみ経由 | ドキュメントは「未実装」だがコードは「50%実装」 |
+
+### 2. CRITICAL BUG: BUG-052 再発 (hasDeferred_ 非 atomic)
+
+**ドキュメントの主張** (FUTURE-9, line 1088, 1108-1110):
+> `hasDeferred_` を `std::atomic<bool>` 化（BUG-052 解消）
+> `TEST(HasDeferredAtomic)` — hasDeferred_ が std::atomic<bool> でデータ競合がない
+
+**実際のコード** (`RuntimePublicationOrchestrator.h:156`):
+```cpp
+bool hasDeferred_ = false;  // ← NOT atomic!
+```
+
+**データ競合の実現**:
+- BUG-052 発見時点では `consumeDeferredRequest()` はデッドコード (呼び出し元なし)
+- FUTURE-9 実装により `CoordinatorLoop::run()` (`AudioEngine.Threading.cpp:217-221`) から `consumeDeferredRequest()` が呼ばれ、**デッドコード解消完了**
+- しかし `enqueuDeferred()` は `submitPublishRequest()` → `trySubmit()` から呼ばれ、この `submitPublishRequest()` は **2つの異なるスレッド**から呼ばれる:
+
+  | 呼び出し元 | スレッド | ファイル:行 |
+  |------------|---------|-------------|
+  | `CoordinatorLoop::run()` (deferred resubmit) | CoordinatorLoop worker thread | `AudioEngine.Threading.cpp:220` |
+  | `enqueuePublicationIntentForRuntimeCommit()` | Rebuild worker thread | `AudioEngine.RebuildDispatch.cpp:1025` → `AudioEngine.Commit.cpp:710` |
+
+- `CoordinatorLoop` thread: `consumeDeferredRequest()` が `hasDeferred_` を read/write
+- Rebuild worker thread: `enqueueDeferred()` が `hasDeferred_` を read/write + `deferredSlot_` (std::optional) を read/write
+
+**結諡**: `persistentState_` の `hasDeferred_` へのデータ競合は **BUG-052 の時と同じ**。FUTURE-9 は接続経路を作ったが、atomic 化を怠った。
+※ `deferredSlot_` (std::optional<DeferredPublishSlot>) も同じく non-atomic なアクセスが発生する可能性がある (std::optional operator= は非atomic)。
+
+**影響**: defer publish の再提出が失敗したり、`deferredSlot_` の破壊的上書きにより publish 要求がロストする可能性 (best-effort メカニズムではあるが、C++ 標準上は UB)。
+
+**修正**: `std::atomic<bool> hasDeferred_{false};` に変更し、`consumeDeferredRequest`/`enqueueDeferred`/`hasDeferredRequest`/`notifyTransitionComplete` すべてのアクセスを atomic 操作に統一する。`deferredSlot_` も mutex または atomic ポインタで保護する必要がある。
+
+### 3. 配線漏れ (Wiring Gaps)
+
+#### 3.1 RecoveryIntentHandler の no-op スタブ (CONFIRMED GAP)
+`ISRIntentDispatcher.h:43-44`:
+```cpp
+struct RecoveryIntentHandler final : IntentHandler {
+    void handle(const Intent&, IntentHandlerContext&) const noexcept override {} // A3 Step 5: → Recovery path
+};
+```
+**空の本体 `{}`** — Recovery intent が `intentQueue_` 経由で届いた場合、**何もしない**。
+- ただし `processIntent()` は Recovery を `intentQueue_` に push しない (別経路 `recoveryIntentQueue_` を使用)
+- `kDispatchTable[IntentType::Recovery]` は `g_recoveryIntentHandler` を指すが、**到達しない**
+- **このハンドラが一度でも呼ばれるようになれば、Recovery intent の完全サイレントドロップ**となる
+
+#### 3.2 Observe / Recovery は共通 Intent Queue 未統合 (FUTURE-10 DoD #4/#7 未達)
+`ISRRuntimePublicationCoordinator_ProcessIntent.cpp:41-42`:
+```cpp
+//   Observe stays on its dedicated SPSC rings — DoD #4/#7 (single intentQueue + cross-type FIFO)
+//   is deferred to FUTURE-10's unified Overflow Policy migration.
+```
+**確認された共存状態**:
+- `observeIntentQueue_`(`.h:376`) + `observeFallbackQueue_`(`.h:377`) — Observe 専用
+- `recoveryIntentQueue_`(`.h:394`) — Recovery 専用
+- `intentQueue_`(`.h:399`) — Publish + Quarantine のみ
+- `observeDeferredRing_`(`.h:389`) — Observe Deferred 専用
+
+#### 3.3 old `emitQuarantineIntent()` / `emitObserveIntent()` は削除済み
+`submitQuarantine`/`submitObserve` へ改名完了 (`.h:137,141` / `.cpp:531,674`)
+
+#### 3.4 `result.rolledBack` フィールドは削除済み
+`QuarantineResult` (`.h:44-48`): `stateChanged` / `auditLogged` のみ、`rolledBack` なし
+
+### 4. 新規バグ: BUG-053〜BUG-065 (ドキュメント未反映)
+
+doc/work89/ に 13件の新バグが記録されている。**REPAIR_PLAN.md は BUG-053〜065 を一切言及しない**。
+
+| ID | 重大度 | ファイル | タイトル | FUTUREセクション影響 |
+|----|--------|----------|----------|-------------------|
+| BUG-052 | LOW→**再発** | RuntimePublicationOrchestrator.h | `hasDeferred_` non-atomic (consumeDeferredRequest) | FUTURE-9 完了条件4 — **未達** |
+| BUG-053 | MEDIUM | AudioEngine.Learning.cpp:40-62 | `stopNoiseShaperLearning` 二重 stopLearning() 呼び出し | — |
+| BUG-054 | MEDIUM | DSPTransition.h:81-88 | `onPublishCompleted` crossfade handle mismatch (B3/A1 path) | **FUTURE-9 新規バグ** |
+| BUG-055 | LOW | AudioEngine.Commit.cpp:221-224 | 到達不能 else if (デッドコード) | — |
+| BUG-056 | MEDIUM | RuntimeHealthMonitor.cpp:530-558 | Crossfade state が Error に貼り付き | SHUTDOWN-6 |
+| BUG-057 | LOW | RuntimeHealthMonitor.cpp:763-847 | checkOverflowRate が誤ったイベントコードを使用 | — |
+| BUG-058 | MEDIUM | RuntimeHealthMonitor.cpp:937-949 | checkWorldConsistency が m_prevConfigDivergenceState_ を流用 | SHUTDOWN-6 |
+| BUG-059 | MEDIUM | RuntimeHealthMonitor.cpp:1178-1217 | reset() の MonitorState リセット不整合 | SHUTDOWN-6 |
+| BUG-060 | MEDIUM | ISRRetireRuntimeEx.cpp:205-221 | TOCTOU race: quarantineResidentCount unsigned underflow | SHUTDOWN-2/3 |
+| BUG-061 | MEDIUM | ISRDSPQuarantine.cpp | auditLog_ (std::vector) の非保護同時アクセス | QSVC-1 |
+| BUG-062 | MEDIUM | RuntimeHealthMonitor.cpp:849-887 | checkRetireReclaimLatency uint64_t path に Normal 復帰なし | SHUTDOWN-6 |
+| BUG-063 | LOW | core/EpochDomain.h:64-67 | ownerTag (char[32]) の data race | RCU |
+| BUG-064 | MEDIUM | DSPCoreIO.cpp / DSPCoreDouble.cpp | Float/Double 出力パスの遅延順序不一致 | — |
+| BUG-065 | MEDIUM | EQProcessor.Core.cpp:275-279 | `reset()` が AGC リセットを no-op 化 + rtSeenAgcResetSerial data race | — |
+
+#### BUG-054 詳細 — DSPTransition.h:88 に未修正 (Serena memory + コード照合により最新確認)
+
+**Serena memory** (`B3-publish-unification/crossfade-semantics`, 2026-08-03) によると、B3 フェーズでは 7 つの Producer が `commitRuntimePublication()` を呼び出す:
+
+| # | Producer | ファイル:行 | Path |
+|---|---------|-------------|------|
+| 1 | Bootstrap | Init.cpp:51 | old sync |
+| 2 | Resume | PrepareToPlay.cpp:154 | old sync |
+| 3 | Placeholder | PrepareToPlay.cpp:275 | old sync |
+| 4 | Teardown | ReleaseResources.cpp:173 | old sync |
+| 5 | Fade completion | Timer.cpp:915 | old sync |
+| 6 | publishIdleWorldOnly | Transition.cpp:25 | old sync |
+| 7 | Rebuild/orchestrator | PublicationExecutor.cpp:41 | **new B3/A1 async** |
+
+**コード照合結果 (2026-08-04)**: BUG-054 は **未修正**。`onPublishCompleted()` (DSPTransition.h:49-125) は `newDSP`/`oldDSP` をパラメータとして受け取るが、crossfade セクション (line 87-96) で **依然 `getActiveRuntimeDSPHandle()` を呼び出す** (line 88):
+
+```cpp
+// DSPTransition.h:84-89
+lifetime.activate(newDSP);           // ← sets activeRuntimeDSPHandle_ to new handle
+if (decision.needsCrossfade && oldDSP != nullptr) {
+    auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();  // ← BUG: NEW handle
+    auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);            // ← also NEW handle
+```
+
+**両方のパスで発現**:
+1. **Old sync path**: `submitPublishRequest` → `trySubmit()`(Orchestrator.cpp:309) → `executor_.publish()` → `commitRuntimePublication()` → `activate()` → `onPublishCompleted()` — BUG-054 active
+2. **New B3/A1 path**: CoordinatorLoop → `processIntent()` → `PublishExecutor::executePublish()`(RuntimePublishExecutor.h:74) → `authority.commit()` → `onPublishCompleted()` — **SAME BUG**
+
+B3/A1 パスは `p.decision.oldHandle`/`p.decision.newHandle` から正しいハンドルを解決できる (RuntimePublishExecutor.h:66-67) が、`onPublishCompleted` はそれを無視し `getActiveRuntimeDSPHandle()` を呼ぶ。**B3 リファクタによる自動修復は発生していない**。
+
+**Serena memory B4 recommendation**: `decision` 生成を `AudioEngine::makePublishDecisionSnapshot(newWorld, newHandle, oldHandle)` に統一し、oldHandle/newHandle を直接渡すことで修復予定 (B4 未実装)。
+
+#### BUG-060 詳細 — FUTURE-9 新規リスク
+`reclaim()` 内の `quarantineResidentCount_` (uint64_t) に TOCTOU race が存在。`consumeAtomic` + `if (resident > 0)` → `fetchSubAtomic` の間に別スレッドが介入すると unsigned underflow → `UINT64_MAX` ラップアラウンド。これにより `getQuarantineResidentCount()` が異常値を返し、RetireBackpressure 計算が破綻する。`reclaim()` は `ReleaseResources.cpp:370` の shutdown path と `AudioEngine.Retire.cpp` の timer path の両方から呼ばれる可能性がある。
+
+### 5. SHUTDOWN-7: ActiveBuilder 未実装 (CONFIRMED GAP)
+
+**ドキュメントの主張** (line 1404, 1731):
+> `ShutdownBlockingReason`（`ISRShutdown.h:46-57`）には `ActiveBuilder` が未追加であることを確認（SHUTDOWN-7 で追加対象として記録）。
+
+**実際のコード** (`ISRShutdown.h:46-57`):
+```cpp
+enum class ShutdownBlockingReason : uint8_t {
+    None, PendingPublication, PendingRetire, ActiveCrossfade,
+    DeferredPublish, QuarantineResident, RouterPendingRetire,
+    ReaderActive, Unknown  // ← ActiveBuilder 未追加
+};
+```
+
+**影響**: SHUTDOWN-7 の `VerifyDrained` 遷移で `rebuildWorkerRunning == false` の確認が行われていない。Builder が build 中にシャットダウンが開始された場合、in-flight build が残留する可能性がある。
+
+### 6. Shutdown Pipeline: 設計とコードの乖離
+
+ドキュメントは SHUTDOWN-1〜7 をフェーズの列挙として記述しているが、実コード (`AudioEngine.Processing.ReleaseResources.cpp:73-516` / `ISRShutdown.h`) は以下のように進化している:
+
+**FSM 実装済み** (`ISRShutdown.h:25-41`):
+```
+Running → ShutdownRequested → AudioStopped → ObserverDrained →
+RetireClosed → EpochSettled → ReclaimComplete → EmergencyDrain →
+VerifyDrained → ShutdownComplete (or TimedOut / Failed)
+```
+
+**`RuntimeDrainAudit` が設計時と異なる構造** (`RuntimeDrainAudit.h:26-95`):
+- `isAllZero()` は**監査ログ出力専用** (line 12: "shutdown 完了判定の authority にはしない") — SHUTDOWN-6 の「overflowRingResident を isAllZero に追加」とは逆の方向
+- `getPrimaryBlockingReason()` が決定に使用されるが、**`overflowRingResident` と `ActiveBuilder` をチェックしない**
+- `overflowRingResident` フィールドは存在する (`.h:50`) が**どこからも読まれない** — dead field
+- 新規フィールド: `activeWorldCount`/`.h:37`、`publishedCount`/`.h:38`、`retiredCount`/`.h:39` (World Consistency)、`activeReaderCount`/`.h:41`、`stuckReaderCount`/`.h:42` (Reader 状態)
+
+### 7. static_assert(DispatcherHasNoDecision) 未実装
+
+**ドキュメントの主張** (FUTURE-10 完了条件7, line 1280):
+> `static_assert(DispatcherHasNoDecision)` ... type → Handler の一意写像（1:1）と Dispatcher の無状態性を検証
+
+**実際のコード** (`ISRIntentDispatcher.h:64-66`):
+```cpp
+static_assert(std::size(kDispatchTable) == RuntimePublicationCoordinator::kIntentTypeCount,
+    "QUEUE-22/DISPATCH-1: kDispatchTable must be a 1:1 total mapping over IntentType "
+    "(pure routing; Dispatcher has no decision)");
+```
+
+→ **サイズの 1:1 チェックのみ**。`DispatcherHasNoDecision` という trait/type は**存在しない**。Dispatch が無状態であることのコンパイル時検証は未実装 (HANDLER-1 契約はコードレビューのみ)。
+
+### 8. FUTURE-7/8/9 の行参照がすべて STALE
+
+ドキュメントに記載されている行参照はすべて 2026-07-30 より前の状態を指している。以下は主な乖離:
+
+| ドキュメントの参照 | 実際のコード | 備考 |
+|-------------------|-------------|------|
+| `.h:331` (observeIntentQueue_) | `.h:376` | +45 行ずれ |
+| `.h:334` (observeFallbackQueue_) | `.h:377` | +43 行ずれ |
+| `.h:345` (observeDeferredRing_) | `.h:389` | +44 行ずれ |
+| `.h:349` (recoveryIntentQueue_) | `.h:394` | +45 行ずれ |
+| `.h:353` (intentQueue_) | `.h:399` | +46 行ずれ |
+| `.h:355` (nextIntentId_) | `.h:355` → `nextObserveIntentId_` に改名 | 名称変更 |
+| `AudioEngine.Timer.cpp:1029-1033` (processIntent) | **削除済み** | CoordinatorLoop へ移設 |
+| `AudioEngine.Timer.cpp:1040` (hasDeferredRequest) | **削除済み** | CoordinatorLoop へ移設 |
+| `.cpp:629` / `.h:46` (result.rolledBack) | **削除済み** (`.h:44-48`) | QSVC-5 完了 |
+| `.cpp:676` (submitQuarantine 同期呼び) | `.cpp:674` (enqueue) | 同期→async 変更 |
+
+### 9. 'A3 Step' Phase アノテーション (ドキュメント未追跡)
+
+コード内に以下の Phase アノテーションが存在するが、REPAIR_PLAN.md では追跡されていない:
+
+| アノテーション | ファイル | 説明 |
+|---------------|---------|------|
+| ★ A3 Step 1 | ISRIntentDispatcher.h, ISRRuntimePublicationCoordinator_ProcessIntent.cpp | Intent/HandlerContext/kDispatchTable 基盤 |
+| ★ A3 Step 3 | ISRIntentDispatcher.h:38 | ObserveIntentHandler |
+| ★ A3 Step 4 | ISRIntentDispatcher.h:24,46-47 | QuarantineService バックエンド |
+| ★ A3 Step 5-2 | RuntimePublishExecutor.h, ISRIntentDispatcher.h:41 | PublishExecutor / RuntimeWorldAuthority commit gateway |
+| ★ A3 Step 5-3 | RuntimePublishExecutor.h, RuntimePublicationOrchestrator.h:62 | Completion-notify (orchestrator.onPublishCommitted) |
+| ★ B3/A1 | RuntimePublishExecutor.h:26,29,49 | OwnerChannel ownership model |
+| ★ D2 | RuntimePublishExecutor.h:35, DSPTransition.h | Publish-completion facade (ADR-D2) |
+| ★ D3 | RuntimePublishExecutor.h:35 | RuntimeWorldAuthority registry/lookup |
+| ★ n (n=1〜5) | ISRIntentDispatcher.h | IntentHandlerContext fields |
+
+これらのアノテーションは **FUTURE-3〜10 を実装するための内部フェーズ番号** であり、ドキュメントの FUTURE 番号とは独立した体系である。今後のメンテナンスのため、FUTURE 番号と A3 Step の対応関係を追跡する必要がある。
+
+
+### 11. Serena Memory: B3/A1 Publish Architecture (2026-08-03)
+
+**Serena memory** `B3-publish-unification/crossfade-semantics` によると、B3 フェーズでは以下のアーキテクチャが実装された:
+
+#### 7 Producer of commitRuntimePublication()
+
+| # | Producer | File:Line | Path Type |
+|---|---------|-----------|-----------|
+| 1 | Bootstrap | Init.cpp:51 | old sync |
+| 2 | Resume | PrepareToPlay.cpp:154 | old sync |
+| 3 | Placeholder initial | PrepareToPlay.cpp:275 | old sync |
+| 4 | Teardown | ReleaseResources.cpp:173 | old sync |
+| 5 | Fade completion idle sync | Timer.cpp:915 | old sync |
+| 6 | publishIdleWorldOnly | Transition.cpp:25 | old sync |
+| 7 | Rebuild/orchestrator | AudioEngine.Commit.cpp:710 → RuntimePublishExecutor.h:74 | **new B3/A1 async** |
+
+#### B3/A1 publish path (async, NonRT via CoordinatorLoop)
+
+```
+AudioEngine.Commit.cpp:710 enqueuePublicationIntentForRuntimeCommit()
+  → ISRRuntimePublicationCoordinator.cpp:674 submitPublishRequest() → enqueuePublicationIntent() → intentQueue_.push()
+  → CoordinatorLoop::run() (ISRCoordinatorLoop.cpp:31)
+  → processIntent() (ProcessIntent.cpp:10-52)
+  → kDispatchTable[Publish] → PublishIntentHandler::handle() (ProcessIntent.cpp:94-96)
+  → PublishExecutor::executePublish() (RuntimePublishExecutor.h:20-84)
+  → authority.commit() (RuntimeWorldAuthority.h:107-109)
+  → onPublishCompleted() (DSPTransition.h:49-125) ← BUG-054 STILL ACTIVE HERE
+```
+
+#### Key design decisions (from serena memory):
+- `CrossfadeAuthority::Decision` is **solely generated** by `trySubmit` (RuntimePublicationOrchestrator.cpp:187-212)
+- `PublishDecisionSnapshot` (with oldHandle/newHandle) is **defined** (RuntimePublishExecutor.h:66-67) but the `enqueuePublicationIntent` path that would use it is **hibernation** (休眠)
+- B3/A1 path **resolves handles from `p.decision.oldHandle`/`p.decision.newHandle`** at RuntimePublishExecutor.h:66-67 — correct values available but NOT passed to `onPublishCompleted`
+- `onPublishCompleted` still calls `getActiveRuntimeDSPHandle()` at DSPTransition.h:88 → **BUG-054 persists in new path**
+- B4 recommendation: `Audio::makePublishDecisionSnapshot(newWorld, newHandle, oldHandle)` — unify decision generation + pass handles through (unimplemented)
+
+#### work84/plan.md Phase system vs work88 FUTURE numbering
+
+The AI's `plan-fix` serena memory references `doc/work84/plan.md` (2026-07-25, 14th revision), which uses a **Phase-based** plan (Phase 0-13). This is a **different numbering system** from work88's FUTURE-3〜10:
+
+| work84 Phase | Equivalent in work88 | Status | Status in code |
+|---|---|---|---|
+| Phase 5A | FUTURE-7/8/9/10 | Publish Authority | **Partially implemented** — PublishExecutor exists but old sync path also active |
+| Phase 5B | — | Retire Authority | Not started |
+| Phase 5C | — | Crossfade Authority | Not started |
+| Phase 5D | — | friend class 削除 | Not started |
+| Phase 6 | FUTURE-4 | Immutable | `persistentState_` removed ✅ |
+| Phase 11 | SHUTDOWN-1〜7 | Shutdown Pipeline | Partially implemented (FSM exists, SHUTDOWN-7 not done) |
+| Phase 13 | — | RuntimeMetadata | Not started |
+
+**Key discrepancy**: work84 plans to **delete** `ISRRuntimePublicationCoordinator.h/.cpp` in Phase 5A (consolidate into RuntimeCoordinator). The actual implementation **did NOT delete** the file — instead, it incrementally refactored the existing coordinator (adding CoordinatorLoop, PublishExecutor, OwnerChannel as side-by-side components). The REPAIR_PLAN.md (work88) tracks the FUTURE-3〜10 refactoring but does NOT track the work84 Phase system.
+
+#### 工具検証記録 (Tool Verification Log)
+
+| Tool | Usage | Result |
+|------|-------|--------|
+| **AiDex** | `aidex_query` for symbol search, `aidex_signature` for file signatures, `aidex_files` for tree | ✅ Primary search tool used throughout |
+| **serena MCP** | `serena_list_memories`, `serena_read_memory` | ✅ Found 20+ memories; B3 publish memory critical for BUG-054 analysis |
+| **semble** | `semble search`, `semble find-related`, `semble savings` | ✅ Used for semantic search; confirmed 311 calls, 12.7M tokens saved |
+| **graphify** | `graphify query`, `graphify path`, `graphify explain` | ✅ Confirmed 7043 nodes; `onPublishCompleted` path traced: PublishExecutor → DSPTransition |
+| **cocoindex (ccc)** | `ccc search` | ⚠️ Attempted but CLI had argument compatibility issues |
+| **WSL CLI** | `rg`, `find`, `sed`, `python3` | ✅ Primary tool for line-level verification |
+
+
+### 10. 新規ファイル (ドキュメント未反映)
+
+git diff --stat (last 5 commits) で確認された、REPAIR_PLAN.md で言及されていない新規ファイル:
+
+**インフラストラクチャ**:
+- `OwnerChannel.h` (120 lines) — B3/A1 async publish ownership transfer
+- `RuntimeWorldAuthority.h` (157 lines) — commit/ownership registry
+- `RuntimePublishExecutor.h` (87 lines) — PublishExecutor (B3/A1 publish path, moved off audio thread)
+- `DSPLifetimeManager.cpp/h` (125/120 lines) — DSP lifetime management
+- `ISRCoordinatorLoop.h/.cpp` (39/45 lines) — FUTURE-9 Dedicated Coordinator Worker
+
+**テスト (ドキュメント未言及)**:
+- `tests/AudioEngineHarness/AudioEngineHarness.cpp/h` (64/45 lines)
+- `tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp` (276 lines)
+- `tests/SoakPublishIntegrationTests.cpp` (537 lines)
+- `tests/OwnerChannelTests.cpp` (138 lines)
+- `tests/NormalRetireDSPHandleCompareTests.cpp` (182 lines)
+
+**CI**:
+- `.github/workflows/isr-verification.yml` (new)
+- `.github/workflows/sanitizer-ci.yml` (new)
+
+### 11. BUG-011〜046 修正確認 (Appendix A-1〜A-4)
+
+work89/README.md (2026-07-26) は「BUG-011〜046 未修正」と記録していたが、git log により 2026-07-26 のコミット (3e7e222 "implement BUG fixes v6") で修正が適用されたことを確認:
+
+| BUG | 修正内容 | コード確認 |
+|-----|----------|-----------|
+| BUG-011/012/013 | `sigma = std::clamp(s, sigmaMin, sigmaMax)` | ✅ `CmaEsOptimizer.h:84` / `CmaEsOptimizerDynamic.h:29` |
+| BUG-015 | `enqueueWithRetry` リトライロジック | ✅ `ISRRetireRouter.cpp:161` |
+| BUG-038 | `FFT_MAGNITUDE_SCALE = 2.0f / NUM_FFT_POINTS` | ✅ `SpectrumAnalyzerComponent.h:74` |
+| BUG-028 | `complete()` で全フラグリセット | ✅ (コード確認済み) |
+| BUG-029 | Emergency Override で `exchangeFadingRuntimeDSP` 使用 | ✅ (コード確認済み) |
+
+⚠️ **注意**: 実装は `std::clamp` ではなくカスタム `n()` 関数 (NaN-safe clamp) を使用している場合もある。Appendix A の具体的な修正コードは実装と異なる場合がある (例: A-5 の「std::clamp」は実際には `n(inSigma, params.sigmaMin, params.sigmaMax)` で実装 — `n` は NaN-safe clamp wrapper)。
+
+### 12. 改修箇所周辺の新バグ (FUTURE-9/B3-A1 パス)
+
+FUTURE-9 と B3/A1 (OwnerChannel + RuntimePublishExecutor) の実装により、以下の新規バグが発生している:
+
+1. **BUG-052 再発** (上記セクション2) — `hasDeferred_` non-atomic がデッドコードから実�再アクセス可能状態になった
+2. **BUG-054** (上記セクション4) — `onPublishCompleted` で `getActiveRuntimeDSPHandle()` が newDSP handle を返す (B3/A1 publish path 固有)
+3. **`deferredSlot_` data race** — `std::optional<DeferredPublishSlot>` が 2 スレッド間で非同期アクセス (hasDeferred_ と同じく)
+4. **Overflow ring dead field** — `overflowRingResident` は存在するが読まれない (RuntimeDrainAudit.h:50)
+
+### 13. 修正優先順位 (2026-08-04 現在)
+
+| 優先度 | 項目 | 理由 |
+|--------|------|------|
+| 🔴 HIGH | `hasDeferred_` → `std::atomic<bool>` + `deferredSlot_` mutex保護 | クロススレッドデータ競合 — FUTURE-9 完了条件4 未達 |
+| 🔴 HIGH | `RecoveryIntentHandler::handle` 実装またはスタブ明示 | kDispatchTable に no-op ハンドラが登録されている |
+| 🟡 MEDIUM | `submitObserve` を `intentQueue_` へ統合 | DoD #4/#7 未達 — Observe が共通 Queue を使わない |
+| 🟡 MEDIUM | `submitRecoveryRequest` を `intentQueue_` へ統合 | DoD #4 未達 — Recovery が共通 Queue を使わない |
+| 🟡 MEDIUM | `ShutdownBlockingReason::ActiveBuilder` 追加 + `VerifyDrained` で `rebuildWorkerRunning` チェック | SHUTDOWN-7 未実装 |
+| 🟡 MEDIUM | BUG-054 fix: `onPublishCompleted` に `oldHandle` を渡す | handle-based crossfade tracking 破綻 |
+| 🟢 LOW | BUG-060: TOCTOU fix in ISRRetireRuntimeEx::reclaim | unsigned underflow リスク |
+| 🟢 LOW | BUG-061: auditLog_ mutex 保護 | std::vector data race |
+| 🟢 LOW | BUG-053/056/057/058/059/062/063/064/065 | work89 発見バグ (個別対応不要) |
+
 
 ## C-6: Errata 運用
 

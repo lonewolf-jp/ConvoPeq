@@ -36,6 +36,15 @@ public:
         convo::isr::DSPHandle oldHandle) noexcept;
 
     void advanceEpoch() noexcept {}
+
+private:
+    // publish / publishFireAndForget の共通実装。
+    [[nodiscard]] PublishResult publishImpl(
+        AudioEngine& engine,
+        convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
+        convo::isr::DSPHandle existingHandle,
+        convo::isr::DSPHandle oldHandle,
+        bool waitForReceipt) noexcept;
 };
 
 } // namespace convo::isr

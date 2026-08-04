@@ -53,6 +53,7 @@ enum class ShutdownBlockingReason : uint8_t
     QuarantineResident,
     RouterPendingRetire,
     ReaderActive,
+    ActiveBuilder,   // ★ SHUTDOWN-7: Builder が Build Session 進行中（Shutdown 完了条件）
     Unknown
 };
 

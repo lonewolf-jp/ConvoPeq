@@ -57,6 +57,13 @@ static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95
 static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
 static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
+// ★ BUG-057: Overflow Rate 専用イベントコード（従来 EVENT_RETIRE_STALL を誤用）
+static constexpr uint32_t EVENT_OVERFLOW_RATE_WARNING  = 1012;
+static constexpr uint32_t EVENT_OVERFLOW_RATE_CRITICAL = 1013;
+// ★ BUG-058: World Consistency 専用イベントコード（従来 5001=LEARNER_BACKPRESSURE を誤用）
+static constexpr uint32_t EVENT_WORLD_CONSISTENCY_NORMAL      = 7000;
+static constexpr uint32_t EVENT_WORLD_CONSISTENCY_SUSPICIOUS = 7001;
+static constexpr uint32_t EVENT_WORLD_CONSISTENCY_BROKEN     = 7002;
 // ★ Phase-1.5: Validator Telemetry
 static constexpr uint32_t EVENT_VALIDATION_SEMANTIC_FAILURE     = 6000;
 static constexpr uint32_t EVENT_VALIDATION_TOPOLOGY_FAILURE   = 6001;
@@ -362,6 +369,7 @@ private:
 
     // [work37 Phase 7.1] World Consistency 監視
     WorldConsistencyCheck m_worldConsistencyCheck_;
+    MonitorState m_prevWorldConsistencyState_{MonitorState::Normal};  // ★ BUG-058: 専用state
 
     // [work37 Phase 9.7] Snapshot Starvation 追跡
     MonitorState m_prevSnapshotStarvationState_{MonitorState::Normal};

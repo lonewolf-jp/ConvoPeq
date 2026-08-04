@@ -530,7 +530,14 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
 void RuntimeHealthMonitor::checkCrossfadeTimeout() noexcept
 {
     if (!m_crossfadeRuntime) return;
-    if (!m_crossfadeRuntime->isPending()) return;
+    if (!m_crossfadeRuntime->isPending()) {
+        // ★ BUG-056: クロスフェード完了 → Normal 復帰（Error/Warning の貼り付き防止）
+        //   isPending()==false は crossfade 完了（or 未開始）を意味する。
+        //   emitOnTransition は current==new なら何もせず、Normal 遷移時はイベント非発火で state のみ更新。
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Normal,
+            HealthEvent::Severity::Info, EVENT_CROSSFADE_TIMEOUT, 0);
+        return;
+    }
 
     uint64_t ageUs = m_crossfadeRuntime->getFadeAgeUs();
     if (ageUs > kCrossfadeTimeoutUs) {
@@ -552,6 +559,10 @@ void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
     } else if (delta >= kCrossfadeEventDropWarningDelta) {
         emitOnTransition(m_prevCrossfadeDropState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_CROSSFADE_EVENT_DROP, delta);
+    } else {
+        // ★ BUG-056: drop 解消 → Normal 復帰（Error/Warning の貼り付き防止）
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Normal,
+            HealthEvent::Severity::Info, EVENT_CROSSFADE_EVENT_DROP, 0);
     }
 
     m_lastObservedDropCount = current;
@@ -797,7 +808,7 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
             emitOnTransition(m_prevOverflowRateState, desiredState,
                 desiredState == MonitorState::Error
                     ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
-                desiredState == MonitorState::Error ? EVENT_RETIRE_STALL : EVENT_RETIRE_STALL_WARNING,
+                desiredState == MonitorState::Error ? EVENT_OVERFLOW_RATE_CRITICAL : EVENT_OVERFLOW_RATE_WARNING,
                 ratePerSec);
         }
         else
@@ -820,7 +831,7 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
                 m_overflowRateStableSinceUs = 0;
                 emitOnTransition(m_prevOverflowRateState, desiredState,
                     HealthEvent::Severity::Info,
-                    EVENT_RETIRE_STALL_WARNING,
+                    EVENT_OVERFLOW_RATE_WARNING,
                     ratePerSec);
             }
         }
@@ -839,7 +850,7 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
                 m_overflowRateStableSinceUs = 0;
                 emitOnTransition(m_prevOverflowRateState, MonitorState::Normal,
                     HealthEvent::Severity::Info,
-                    EVENT_RETIRE_STALL_WARNING,
+                    EVENT_OVERFLOW_RATE_WARNING,
                     ratePerSec);
             }
         }
@@ -881,6 +892,11 @@ void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
         } else if (maxAgeUs > kRetireAgeWarningUs) {
             emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
                 HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
+                maxAgeUs / 1000);
+        } else {
+            // ★ BUG-062: uint64_t 版にも正常復帰イベントを追加（double 版と整合）
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Normal,
+                HealthEvent::Severity::Info, EVENT_RETIRE_AGE_NORMAL,
                 maxAgeUs / 1000);
         }
     }
@@ -934,18 +950,32 @@ void RuntimeHealthMonitor::checkConfigurationDivergence() noexcept
 
 // [work37 Phase 7.1] World Consistency 監視
 //   RuntimeDrainAudit::verifyWorldConsistency() から Broken を検出 → PolicyEngine 通知
+//   ★ BUG-058: 専用 state フィールド m_prevWorldConsistencyState_ と専用 event code を使用
 void RuntimeHealthMonitor::checkWorldConsistency() noexcept
 {
     if (!m_worldConsistencyCheck_)
         return;
     const auto consistencyState = m_worldConsistencyCheck_();
     // 0=Consistent, 1=Suspicious, 2=Broken
+    MonitorState desiredState;
     if (consistencyState >= 2) {
-        // Broken → Critical 相当の HealthEvent 発行
-        emitOnTransition(m_prevConfigDivergenceState_, MonitorState::Error,
-            HealthEvent::Severity::Error, 5001,
-            static_cast<uint64_t>(consistencyState));
+        desiredState = MonitorState::Error;   // Broken → Critical 相当
+    } else if (consistencyState == 1) {
+        desiredState = MonitorState::Warning; // Suspicious → Warning
+    } else {
+        desiredState = MonitorState::Normal;  // Consistent
     }
+
+    emitOnTransition(m_prevWorldConsistencyState_, desiredState,
+        desiredState == MonitorState::Error
+            ? HealthEvent::Severity::Error
+            : (desiredState == MonitorState::Warning ? HealthEvent::Severity::Warning
+                                                     : HealthEvent::Severity::Info),
+        desiredState == MonitorState::Error
+            ? EVENT_WORLD_CONSISTENCY_BROKEN
+            : (desiredState == MonitorState::Warning ? EVENT_WORLD_CONSISTENCY_SUSPICIOUS
+                                                     : EVENT_WORLD_CONSISTENCY_NORMAL),
+        static_cast<uint64_t>(consistencyState));
 }
 
 // [work37 Phase 9.7] Snapshot Starvation 監視
@@ -1179,7 +1209,15 @@ void RuntimeHealthMonitor::reset() noexcept
 {
     convo::publishAtomic(m_healthState_, ISRHealthState::Healthy,
                          std::memory_order_release);
-    // m_prevRetireState 等は維持 — 初期化すると次回監視で Warning が再通知される
+    // ★ BUG-059: 全 MonitorState を Normal に統一リセット（クリーンスタート）
+    //   従来は一部のみリセットし残りは「維持」で不整合だった。
+    //   実在する異常は次回 tick で再検出・再通知されるため、維持の必要はない。
+    m_prevRetireState = MonitorState::Normal;
+    m_prevPublicationState = MonitorState::Normal;
+    m_prevCrossfadeDropState = MonitorState::Normal;    // ★ BUG-056
+    m_prevReaderSlotState = MonitorState::Normal;       // ★ Practical-4
+    m_prevOverflowRateState = MonitorState::Normal;     // ★ Practical-3
+    m_prevRetireAgeState = MonitorState::Normal;        // ★ Practical-5
     m_lastObservedDropCount = 0;
     m_lastStuckEvidenceUs = 0;
     // [work37 Phase 4.1] PolicyEngine もリセット
@@ -1196,8 +1234,10 @@ void RuntimeHealthMonitor::reset() noexcept
     m_structuralDeployStartUs_ = 0;
     m_prevStructuralDeployState_ = MonitorState::Normal;
     m_prevSuppressionDurationState_ = MonitorState::Normal;
+    m_prevWorldConsistencyState_ = MonitorState::Normal;  // ★ BUG-058
     m_progressFreezeStartUs_ = 0;
     m_prevProgressFreezeState_ = MonitorState::Normal;
+    m_prevConfigDriftState_ = MonitorState::Normal;       // ★ BUG-059 追補
     m_lastObservedPubSeq_ = 0;
     m_lastObservedRetireTs_ = 0;
     // [work39] 新規フィールドのリセット
