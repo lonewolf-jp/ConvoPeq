@@ -915,17 +915,34 @@ set(MKL_LINK static)
 set(MKL_THREADING sequential)
 set(MKL_INTERFACE_FULL intel_lp64)
 
-# MKL リンク方式はコンパイラに応じて分岐
-# MSVC: CMake Config 経由（従来方式）
-# icx: /Qmkl:sequential でコンパイラが自動リンク
+# MKL リンク方式: コンパイラに応じて分岐。work71/72 で optional 化。
+#   - option(CONVOPEQ_REQUIRE_MKL) : MSVC ビルドで MKL を必須にするか
+#   - icx : /Qmkl:sequential でコンパイラが自動リンク（MKL は常に利用可能）
+#   - システムアロケータ（_aligned_malloc 等）へフォールバック可能
+option(CONVOPEQ_REQUIRE_MKL "Require Intel MKL for MSVC builds (uses system aligned allocator when OFF)" ON)
+set(CONVOPEQ_HAS_MKL OFF)
+
 if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
-    target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+    if(CONVOPEQ_REQUIRE_MKL)
+        find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+        target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+        set(CONVOPEQ_HAS_MKL ON)
+        message(STATUS "MKL: found via CMake Config, MKL::MKL linked (CONVOPEQ_REQUIRE_MKL=ON)")
+    else()
+        find_package(MKL CONFIG QUIET COMPONENTS intel_lp64 sequential)
+        if(MKL_FOUND)
+            target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+            set(CONVOPEQ_HAS_MKL ON)
+            message(STATUS "MKL: found (CONVOPEQ_REQUIRE_MKL=OFF but MKL present), MKL::MKL linked")
+        else()
+            message(STATUS "MKL: not found, CONVOPEQ_REQUIRE_MKL=OFF → system aligned allocator (work72)")
+        endif()
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # icx: /Qmkl:sequential でコンパイラがMKLを自動リンク
     # Windows では static link がデフォルト、/MT と一貫性あり
-    # コンパイル時オプションとして指定し、リンカ指令をオブジェクトファイルに埋め込む
     target_compile_options(ConvoPeq PRIVATE /Qmkl:sequential)
+    set(CONVOPEQ_HAS_MKL ON)
     # icx: Intel コンパイラランタイム (libircmt.lib / libmmd.lib) のパスを明示
     # icx がリンカとして呼ばれる際に Intel ランタイムを見つけられるようにする。
     # 典型的なパス: compiler\2026.0\lib\ (oneAPI 2026.0)
@@ -951,8 +968,14 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     unset(_INTEL_COMPILER_ROOT)
 endif()
 
-message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
-target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+# ★ work72: JUCE_DSP_USE_INTEL_MKL は MKL が実際に利用可能な場合のみ定義
+#   OFF 時は DiagnosticsConfig.h がシステムアロケータへフォールバックする。
+if(CONVOPEQ_HAS_MKL)
+    message(STATUS "JUCE_DSP_USE_INTEL_MKL=1 → MKL allocator (mkl_malloc/mkl_free)")
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+else()
+    message(STATUS "JUCE_DSP_USE_INTEL_MKL undefined → system aligned allocator (work72)")
+endif()
 
 #------------------------------------------------------------
 # Intel IPP Configuration

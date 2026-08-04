@@ -97,7 +97,7 @@ struct CoeffSet {
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
     namespace convo::isr { class ISRRetireRouter; }
-    namespace convo::isr { class PublishExecutor; }
+    namespace convo::isr { struct PublishExecutor; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
 class DSPLifetimeManager;
 #include "ISRRuntimeSemanticSchema.h"
@@ -3495,7 +3495,7 @@ private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
     friend class convo::isr::PublicationExecutor;
-    friend class convo::isr::PublishExecutor;
+    friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
     friend class DSPLifetimeManager;
 

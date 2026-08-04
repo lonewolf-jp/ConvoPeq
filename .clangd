@@ -3,6 +3,8 @@ CompileFlags:
   Add:
     - "/I"
     - "C:/Program Files (x86)/Intel/oneAPI/mkl/latest/include"
+    - "-D"
+    - "JUCE_DSP_USE_INTEL_MKL"
     - "/I"
     - "C:/Program Files (x86)/Intel/oneAPI/ipp/2026.0/include"
     - "/I"

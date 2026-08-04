@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-03 23:28:36
+> Generated: 2026-08-04 12:36:04
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1240,17 +1240,34 @@ set(MKL_LINK static)
 set(MKL_THREADING sequential)
 set(MKL_INTERFACE_FULL intel_lp64)
 
-# MKL リンク方式はコンパイラに応じて分岐
-# MSVC: CMake Config 経由（従来方式）
-# icx: /Qmkl:sequential でコンパイラが自動リンク
+# MKL リンク方式: コンパイラに応じて分岐。work71/72 で optional 化。
+#   - option(CONVOPEQ_REQUIRE_MKL) : MSVC ビルドで MKL を必須にするか
+#   - icx : /Qmkl:sequential でコンパイラが自動リンク（MKL は常に利用可能）
+#   - システムアロケータ（_aligned_malloc 等）へフォールバック可能
+option(CONVOPEQ_REQUIRE_MKL "Require Intel MKL for MSVC builds (uses system aligned allocator when OFF)" ON)
+set(CONVOPEQ_HAS_MKL OFF)
+
 if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
-    target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+    if(CONVOPEQ_REQUIRE_MKL)
+        find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+        target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+        set(CONVOPEQ_HAS_MKL ON)
+        message(STATUS "MKL: found via CMake Config, MKL::MKL linked (CONVOPEQ_REQUIRE_MKL=ON)")
+    else()
+        find_package(MKL CONFIG QUIET COMPONENTS intel_lp64 sequential)
+        if(MKL_FOUND)
+            target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+            set(CONVOPEQ_HAS_MKL ON)
+            message(STATUS "MKL: found (CONVOPEQ_REQUIRE_MKL=OFF but MKL present), MKL::MKL linked")
+        else()
+            message(STATUS "MKL: not found, CONVOPEQ_REQUIRE_MKL=OFF → system aligned allocator (work72)")
+        endif()
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # icx: /Qmkl:sequential でコンパイラがMKLを自動リンク
     # Windows では static link がデフォルト、/MT と一貫性あり
-    # コンパイル時オプションとして指定し、リンカ指令をオブジェクトファイルに埋め込む
     target_compile_options(ConvoPeq PRIVATE /Qmkl:sequential)
+    set(CONVOPEQ_HAS_MKL ON)
     # icx: Intel コンパイラランタイム (libircmt.lib / libmmd.lib) のパスを明示
     # icx がリンカとして呼ばれる際に Intel ランタイムを見つけられるようにする。
     # 典型的なパス: compiler\2026.0\lib\ (oneAPI 2026.0)
@@ -1276,8 +1293,14 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     unset(_INTEL_COMPILER_ROOT)
 endif()
 
-message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
-target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+# ★ work72: JUCE_DSP_USE_INTEL_MKL は MKL が実際に利用可能な場合のみ定義
+#   OFF 時は DiagnosticsConfig.h がシステムアロケータへフォールバックする。
+if(CONVOPEQ_HAS_MKL)
+    message(STATUS "JUCE_DSP_USE_INTEL_MKL=1 → MKL allocator (mkl_malloc/mkl_free)")
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+else()
+    message(STATUS "JUCE_DSP_USE_INTEL_MKL undefined → system aligned allocator (work72)")
+endif()
 
 #------------------------------------------------------------
 # Intel IPP Configuration
@@ -2257,7 +2280,10 @@ goto :eof
 #include <utility>
 #include <cstring>  // std::memset (makeAlignedArrayZero)
 
-#include <mkl.h>
+// ★ work72: DiagnosticsConfig.h が CONVOPEQ_ALIGNED_MALLOC / CONVOPEQ_ALIGNED_FREE
+//   抽象化レイヤーを提供。mkl.h は DiagnosticsConfig.h で JUCE_DSP_USE_INTEL_MKL
+//   ガード下に条件インクルードされるため、AlignedAllocation.h 自体は MKL ヘッダーに
+//   依存しない。
 #include "DiagnosticsConfig.h"
 
 namespace convo {
@@ -2282,10 +2308,9 @@ inline void* aligned_malloc_nothrow(size_t size, size_t alignment) noexcept
 
 inline void aligned_free(void* ptr) noexcept {
     if (ptr != nullptr) {
-        // ★ v8.3: 解放側は mkl_free 直接呼び出し（DIAG_MKL_FREE は size 引数が必要）。
-        //   allocation tracking は DIAG_MKL_MALLOC 側で行うため、解放トラッキングは
-        //   省略する（allocatedBytes は aligned 領域で単調増加傾向を示す）。
-        mkl_free(ptr);
+        // ★ v8.3: 解放側は抽象化レイヤーを使用（CONVOPEQ_ALIGNED_FREE）。
+        //   work72: JUCE_DSP_USE_INTEL_MKL 定義時は mkl_free、未定義時は_system_aligned_free
+        CONVOPEQ_ALIGNED_FREE(ptr);
     }
 }
 
@@ -11139,6 +11164,57 @@ struct ScopedDftiDescriptor
 
 #include <cstdint>
 #include <atomic>
+#include <cstddef>
+#include <cstdlib>
+
+#if defined(_WIN32)
+    #include <malloc.h>  // _aligned_malloc / _aligned_free
+#endif
+
+// ============================================================================
+// AlignedAllocator abstraction — work72
+// JUCE_DSP_USE_INTEL_MKL が定義されている場合は MKL allocator (mkl_malloc/mkl_free)
+// 定義されていない場合はシステム allocator (_aligned_malloc/_aligned_free on Windows)
+// ============================================================================
+
+namespace convo {
+
+// ---- System aligned allocator ----
+// Windows: _aligned_malloc / _aligned_free (CRT)
+// POSIX :  posix_memalign / free
+inline void* system_aligned_malloc(std::size_t size, std::size_t alignment) noexcept
+{
+#if defined(_WIN32)
+    return _aligned_malloc(size, alignment);
+#else
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, alignment, size) != 0)
+        return nullptr;
+    return ptr;
+#endif
+}
+
+inline void system_aligned_free(void* ptr) noexcept
+{
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
+
+} // namespace convo
+
+// ---- Unified interface ----
+// JUCE_DSP_USE_INTEL_MKL が定義されていれば MKL を使用、そうでなければ System allocator
+#if defined(JUCE_DSP_USE_INTEL_MKL)
+    #include <mkl.h>
+    #define CONVOPEQ_ALIGNED_MALLOC(size, align) mkl_malloc((size), (align))
+    #define CONVOPEQ_ALIGNED_FREE(ptr)           mkl_free(ptr)
+#else
+    #define CONVOPEQ_ALIGNED_MALLOC(size, align) convo::system_aligned_malloc((size), (align))
+    #define CONVOPEQ_ALIGNED_FREE(ptr)           convo::system_aligned_free(ptr)
+#endif
 
 // ============================================================================
 // Runtime診断ログの一括制御マクロ
@@ -11185,8 +11261,9 @@ struct ScopedDftiDescriptor
         convo::diag::diagMklFree((ptr), (size), __FILE__, __LINE__, __func__)
   #endif
 #else
-  #define DIAG_MKL_MALLOC(size, align) mkl_malloc((size), (align))
-  #define DIAG_MKL_FREE(ptr, size)     mkl_free(ptr)
+  // ★ work72: MKL-free ビルドでは抽象化レイヤーを使用
+  #define DIAG_MKL_MALLOC(size, align) CONVOPEQ_ALIGNED_MALLOC((size), (align))
+  #define DIAG_MKL_FREE(ptr, size)     CONVOPEQ_ALIGNED_FREE(ptr)
 #endif
 
 // ============================================================================
@@ -11244,7 +11321,7 @@ namespace convo::diag {
 
 inline void* diagMklMalloc(size_t size, int alignment) noexcept
 {
-    void* ptr = mkl_malloc(size, alignment);
+    void* ptr = CONVOPEQ_ALIGNED_MALLOC(size, alignment);
     if (ptr)
     {
         const uint64_t bytes = static_cast<uint64_t>(size);
@@ -11261,7 +11338,7 @@ inline void diagMklFree(void* ptr, size_t size,
 {
     if (ptr)
     {
-        mkl_free(ptr);
+        CONVOPEQ_ALIGNED_FREE(ptr);
         if (size > 0)
         {
             mklStats().allocatedBytes.fetch_sub(static_cast<uint64_t>(size), std::memory_order_relaxed);
@@ -11334,9 +11411,9 @@ inline void freeTracked(T*& p, size_t size) noexcept
         else
         {
             // size==0 → allocSizes 保存漏れ。zeroAllocSizeCount のみ増加。
-            // lostFreeCount は増やさない（diagMklFree(size==0) のみ）。
+            // lostFreeCount は増やさない（diagMklFree(size==0) の責務）。
             convo::diag::mklStats().zeroAllocSizeCount.fetch_add(1, std::memory_order_relaxed);
-            mkl_free(p);
+            CONVOPEQ_ALIGNED_FREE(p);
         }
         p = nullptr;
     }
@@ -41339,7 +41416,7 @@ struct CoeffSet {
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
     namespace convo::isr { class ISRRetireRouter; }
-    namespace convo::isr { class PublishExecutor; }
+    namespace convo::isr { struct PublishExecutor; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
 class DSPLifetimeManager;
 #include "ISRRuntimeSemanticSchema.h"
@@ -44737,7 +44814,7 @@ private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
     friend class convo::isr::PublicationExecutor;
-    friend class convo::isr::PublishExecutor;
+    friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
     friend class DSPLifetimeManager;
 

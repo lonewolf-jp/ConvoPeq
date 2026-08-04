@@ -8,7 +8,10 @@
 #include <utility>
 #include <cstring>  // std::memset (makeAlignedArrayZero)
 
-#include <mkl.h>
+// ★ work72: DiagnosticsConfig.h が CONVOPEQ_ALIGNED_MALLOC / CONVOPEQ_ALIGNED_FREE
+//   抽象化レイヤーを提供。mkl.h は DiagnosticsConfig.h で JUCE_DSP_USE_INTEL_MKL
+//   ガード下に条件インクルードされるため、AlignedAllocation.h 自体は MKL ヘッダーに
+//   依存しない。
 #include "DiagnosticsConfig.h"
 
 namespace convo {
@@ -33,10 +36,9 @@ inline void* aligned_malloc_nothrow(size_t size, size_t alignment) noexcept
 
 inline void aligned_free(void* ptr) noexcept {
     if (ptr != nullptr) {
-        // ★ v8.3: 解放側は mkl_free 直接呼び出し（DIAG_MKL_FREE は size 引数が必要）。
-        //   allocation tracking は DIAG_MKL_MALLOC 側で行うため、解放トラッキングは
-        //   省略する（allocatedBytes は aligned 領域で単調増加傾向を示す）。
-        mkl_free(ptr);
+        // ★ v8.3: 解放側は抽象化レイヤーを使用（CONVOPEQ_ALIGNED_FREE）。
+        //   work72: JUCE_DSP_USE_INTEL_MKL 定義時は mkl_free、未定義時は_system_aligned_free
+        CONVOPEQ_ALIGNED_FREE(ptr);
     }
 }
 

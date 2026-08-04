@@ -2,6 +2,57 @@
 
 #include <cstdint>
 #include <atomic>
+#include <cstddef>
+#include <cstdlib>
+
+#if defined(_WIN32)
+    #include <malloc.h>  // _aligned_malloc / _aligned_free
+#endif
+
+// ============================================================================
+// AlignedAllocator abstraction — work72
+// JUCE_DSP_USE_INTEL_MKL が定義されている場合は MKL allocator (mkl_malloc/mkl_free)
+// 定義されていない場合はシステム allocator (_aligned_malloc/_aligned_free on Windows)
+// ============================================================================
+
+namespace convo {
+
+// ---- System aligned allocator ----
+// Windows: _aligned_malloc / _aligned_free (CRT)
+// POSIX :  posix_memalign / free
+inline void* system_aligned_malloc(std::size_t size, std::size_t alignment) noexcept
+{
+#if defined(_WIN32)
+    return _aligned_malloc(size, alignment);
+#else
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, alignment, size) != 0)
+        return nullptr;
+    return ptr;
+#endif
+}
+
+inline void system_aligned_free(void* ptr) noexcept
+{
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
+
+} // namespace convo
+
+// ---- Unified interface ----
+// JUCE_DSP_USE_INTEL_MKL が定義されていれば MKL を使用、そうでなければ System allocator
+#if defined(JUCE_DSP_USE_INTEL_MKL)
+    #include <mkl.h>
+    #define CONVOPEQ_ALIGNED_MALLOC(size, align) mkl_malloc((size), (align))
+    #define CONVOPEQ_ALIGNED_FREE(ptr)           mkl_free(ptr)
+#else
+    #define CONVOPEQ_ALIGNED_MALLOC(size, align) convo::system_aligned_malloc((size), (align))
+    #define CONVOPEQ_ALIGNED_FREE(ptr)           convo::system_aligned_free(ptr)
+#endif
 
 // ============================================================================
 // Runtime診断ログの一括制御マクロ
@@ -48,8 +99,9 @@
         convo::diag::diagMklFree((ptr), (size), __FILE__, __LINE__, __func__)
   #endif
 #else
-  #define DIAG_MKL_MALLOC(size, align) mkl_malloc((size), (align))
-  #define DIAG_MKL_FREE(ptr, size)     mkl_free(ptr)
+  // ★ work72: MKL-free ビルドでは抽象化レイヤーを使用
+  #define DIAG_MKL_MALLOC(size, align) CONVOPEQ_ALIGNED_MALLOC((size), (align))
+  #define DIAG_MKL_FREE(ptr, size)     CONVOPEQ_ALIGNED_FREE(ptr)
 #endif
 
 // ============================================================================
@@ -107,7 +159,7 @@ namespace convo::diag {
 
 inline void* diagMklMalloc(size_t size, int alignment) noexcept
 {
-    void* ptr = mkl_malloc(size, alignment);
+    void* ptr = CONVOPEQ_ALIGNED_MALLOC(size, alignment);
     if (ptr)
     {
         const uint64_t bytes = static_cast<uint64_t>(size);
@@ -124,7 +176,7 @@ inline void diagMklFree(void* ptr, size_t size,
 {
     if (ptr)
     {
-        mkl_free(ptr);
+        CONVOPEQ_ALIGNED_FREE(ptr);
         if (size > 0)
         {
             mklStats().allocatedBytes.fetch_sub(static_cast<uint64_t>(size), std::memory_order_relaxed);
@@ -197,9 +249,9 @@ inline void freeTracked(T*& p, size_t size) noexcept
         else
         {
             // size==0 → allocSizes 保存漏れ。zeroAllocSizeCount のみ増加。
-            // lostFreeCount は増やさない（diagMklFree(size==0) のみ）。
+            // lostFreeCount は増やさない（diagMklFree(size==0) の責務）。
             convo::diag::mklStats().zeroAllocSizeCount.fetch_add(1, std::memory_order_relaxed);
-            mkl_free(p);
+            CONVOPEQ_ALIGNED_FREE(p);
         }
         p = nullptr;
     }
