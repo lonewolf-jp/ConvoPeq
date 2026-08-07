@@ -383,8 +383,16 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     deferredSlot_ = DeferredPublishSlot{
         .request = req,
         .guard = DeferredGuard{
-            .generation = static_cast<uint64_t>(req.generation),
+            .generation = req.generation,  // int のまま格納（第13回 D-13 ⑤: uint64_t への
+                                            // static_cast を廃止・型統一）
             .sequence = engine_.getLastCommittedPublicationSequence()
+        },
+        // ★ Phase-1: enqueue-time immutable snapshot（View.metadata() の参照先）。
+        //   guard{generation,sequence} + enqueueTimestampUs から構築。design-D4 A-3/D-13.6 反映。
+        .metadata = PublicationAdmission::DeferredPublishMetadata{
+            .generation = req.generation,
+            .sequence = engine_.getLastCommittedPublicationSequence(),
+            .enqueueTimestampUs = now
         },
         .lastDiscardReason = DiscardReason::None,
         .enqueueTimestampUs = now
@@ -421,6 +429,109 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
     dh.lastDiscardReason = DiscardReason::ShutdownDiscard;
     dh.lastDiscardTimestampUs = nowUs;
     telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ Phase-1: peekDeferred — consumeDeferredRequest の後継（View 借用）。hasDeferred_ 非反転。
+//   Single Thread Owner（RebuildThread）契約の jassert 付き（ADR-C4:100-105）。
+std::optional<DeferredPublishView> RuntimePublicationOrchestrator::peekDeferred() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    if (!hasDeferred_.load(std::memory_order_acquire) || !deferredSlot_.has_value())
+        return std::nullopt;
+    return DeferredPublishView(*this, *deferredSlot_);
+}
+
+// ★ Phase-1: evaluateDeferred 用の Observation Snapshot 構築 (engine-state → POD)。
+//   Policy はこれを直参照しない。5値: currentGeneration / lastSequence / shutdown / nowUs / ttlUs。
+PublicationAdmission::DeferredAdmissionSnapshot
+RuntimePublicationOrchestrator::buildDeferredAdmissionSnapshot() const noexcept
+{
+    return PublicationAdmission::DeferredAdmissionSnapshot{
+        .currentGeneration = engine_.currentBuildGeneration(),
+        .lastSequence = engine_.getLastCommittedPublicationSequence(),
+        .shutdown = engine_.isShutdownInProgress(),
+        .nowUs = convo::getCurrentTimeUs(),
+        .ttlUs = kDeferredPublishTTLUs
+    };
+}
+
+// ★ Phase-1: finishView — ownership Release の唯一口（design-D4 §1488 / §139-140）。
+//   DeferredPublishView.consume()/discard() が owner_->finishView() を呼ぶ。
+//   slot reset + hasDeferred_ flip + DeferredHealth telemetry を一括実行。
+void RuntimePublicationOrchestrator::finishView() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    DiscardReason reason = DiscardReason::None;
+    uint64_t discardTs = 0;
+    if (deferredSlot_.has_value()) {
+        reason = deferredSlot_->lastDiscardReason;
+        if (reason != DiscardReason::None)
+            discardTs = convo::getCurrentTimeUs();
+    }
+    deferredSlot_.reset();
+    hasDeferred_.store(false, std::memory_order_release);
+
+    DeferredHealth dh;
+    dh.deferredCount = 0;
+    dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+    dh.lastDiscardReason = reason;
+    dh.lastDiscardTimestampUs = discardTs;
+    telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ Phase-1: DeferredPublishView 実装（out-of-line。Orchestrator 定義完結後 = .cpp 内）。
+//   consume/discard は owner_->finishView() を終端で呼ぶ（design-D4 §107/§134/§1488）。
+PublicationAdmission::PublishRequest DeferredPublishView::consume() noexcept
+{
+    jassert(state_ == State::Valid && slot_ != nullptr);
+    state_ = State::Consumed;
+    auto req = std::move(slot_->request);  // finishView の slot reset 前に move-out（req は view 外生存）
+    owner_->finishView();                  // ownership release（slot reset / hasDeferred_ flip / telemetry）
+    return req;
+}
+
+void DeferredPublishView::discard(DiscardReason reason) noexcept
+{
+    jassert(state_ == State::Valid && slot_ != nullptr);
+    slot_->lastDiscardReason = reason;
+    state_ = State::Discarded;
+    owner_->finishView();
+}
+
+// ★ Phase-1: processDeferredAdmission — RebuildThread 専用の atomic flow
+//   (peek → evaluateDeferred → consume/discard → finishView → submitPublishRequest)。
+//   design-D4 D-13 ④ / ADR-C4 §113。consume/discard は owner_->finishView() を内蔵し
+//   ownership releaseを行うため、本関数は呼出のみ。Ready なら submitPublishRequest で
+//   resubmit；必要なら再 enqueue（hasDeferred_=true）される。
+//   （旧: RebuildDispatch.cpp:846 'consumeDeferredRequest → submitPublishRequest'。
+//    AudioEngine.h:2528-2529 の consumeDeferredRequest → processDeferredAdmission 一本化済み）
+void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    if (!hasDeferred_.load(std::memory_order_acquire))
+        return;
+
+    auto view = peekDeferred();
+    if (!view.has_value())
+        return;
+
+    auto result = admission_.evaluateDeferred(view->metadata(),
+                                             buildDeferredAdmissionSnapshot());
+    switch (result.decision) {
+        case PublicationAdmission::DeferredDecision::Ready: {
+            // consume は owner_->finishView() を呼んで ownership release を完結する。
+            auto req = view->consume();      // move-out + finishView()
+            view.reset();                    // borrow 解除（slot は Orchestrator が reset 済み）
+            submitPublishRequest(req);       // resubmit（再 enqueue は submitPublishRequest 内で）
+            break;
+        }
+        case PublicationAdmission::DeferredDecision::Discard: {
+            // discard は lastDiscardReason 記録 + owner_->finishView() で ownership release。
+            view->discard(result.discardReason);
+            view.reset();
+            break;
+        }
+    }
 }
 
 // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間

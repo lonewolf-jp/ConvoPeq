@@ -79,6 +79,37 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/RuntimePublicationCoordinatorTests.cpp
     )
 
+    # ★ Phase-2: Admission Policy unit test (pure Policy — evaluateDeferred() only)。
+    #   PublicationAdmission.cpp → AudioEngine.h → JuceHeader.h は CONVOPEQ_HAS_MKL を
+    #   継承するため、ISRSemanticValidationTests と同一パターンで mkl インクルードパスを
+    #   追加 + MKL::MKL をリンク（DiagnosticsConfig.h の mkl.h 解決 + mkl_malloc シンボル）。
+    add_executable(PublicationAdmissionTests
+        src/tests/PublicationAdmissionTests.cpp
+        src/audioengine/PublicationAdmission.cpp
+        src/tests/PublicationAdmissionTestRuntimeStubs.cpp
+    )
+    target_include_directories(PublicationAdmissionTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(PublicationAdmissionTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(PublicationAdmissionTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    target_compile_definitions(PublicationAdmissionTests PRIVATE _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_features(PublicationAdmissionTests PRIVATE cxx_std_20)
+    target_compile_options(PublicationAdmissionTests PRIVATE /utf-8)
+    add_dependencies(PublicationAdmissionTests ConvoPeq)
+    add_test(NAME PublicationAdmissionTests COMMAND PublicationAdmissionTests)
+
     # ISRSemanticValidationTests は ISR セマンティクス検証用。
     # RuntimePublicationCoordinator を直接使用するため .cpp を含める。
     # JUCE/MKL/r8brain の include path が必要（AudioEngine.h 経由の依存）。
@@ -290,7 +321,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_include_directories(EQBoundExcessBenchmark PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
     add_test(NAME EQBoundExcessBenchmark COMMAND EQBoundExcessBenchmark --quick)
 
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    if(CONVOPEQ_HAS_MKL AND MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(ISRSemanticValidationTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
@@ -300,6 +331,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         # ★ Work91: ISRSoakTests も AlignedAllocation.h (mkl_malloc/mkl_free) を使用するため
         #   MKL::MKL をリンク（RuntimeState::createForBuilder が aligned_make_unique を呼ぶ）。
         target_link_libraries(ISRSoakTests PRIVATE MKL::MKL)
+        # ★ Phase-2: PublicationAdmission.cpp → AudioEngine.h → JuceHeader.h に
+        #   CONVOPEQ_HAS_MKL 定義を継承するため、mkl.h + mkl シンボルを解決する。
+        #   ISRSemanticValidationTests と同一パターン。
+        target_link_libraries(PublicationAdmissionTests PRIVATE MKL::MKL)
     endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
@@ -1432,6 +1467,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/AudioEngineHarness.cpp
         src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
+        src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
+        src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)
@@ -1445,6 +1482,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     endif()
     target_compile_definitions(AudioEngineHarness PRIVATE
         CONVOPEQ_STANDALONE_ONLY=1
+        CONVOPEQ_UNIT_TESTS=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1

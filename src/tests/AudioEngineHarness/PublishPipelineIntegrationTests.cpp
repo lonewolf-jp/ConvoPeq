@@ -32,6 +32,12 @@ namespace convo_soak {
 bool runSoakScenarios(bool full, const char* scenario);
 }
 
+// DeferredFlowIntegrationTests.cpp (ADR-C4 / design-D4)
+int runDeferredFlowIntegrationTests();
+
+// DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
+int runDeferredPublishViewStateMachineTests();
+
 namespace {
 
 bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
@@ -270,6 +276,12 @@ int main(int argc, char* argv[])
         std::fprintf(stderr, "FAIL: testTeardownPublish\n");
         return 1;
     }
+
+    if (runDeferredFlowIntegrationTests() != 0)
+        return 1;
+
+    if (runDeferredPublishViewStateMachineTests() != 0)
+        return 1;
 
     std::printf("AudioEngineHarness: all publish pipeline tests PASS\n");
     return 0;

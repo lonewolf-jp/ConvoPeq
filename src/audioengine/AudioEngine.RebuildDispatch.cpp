@@ -837,14 +837,17 @@ void AudioEngine::rebuildThreadLoop()
 
             // ★ ISR Builder/Coordinator 分離: CoordinatorLoop からの deferred publish ハンドオフ。
             //   Builder（RebuildThread）が consume → submit（同期）を実行する。
-            //   - consumeDeferredRequest() は hasDeferred_ を false に、submit が再 Deferred なら
+            //   - processDeferredAdmission() は hasDeferred_ を false に（View.consume/discard → owner_->finishView()）、submit が再 Deferred なら
             //     enqueueDeferred で hasDeferred_ を true に戻す（→ 次 1ms tick で Coordinator が再通知）。
             //   - submitPublishRequest は同期（receipt は CoordinatorLoop の processIntent が配送する
             //     ため自己待ちにならない）。
             if (doDeferredPublish && runtimeOrchestrator_ != nullptr)
             {
-                if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
-                    runtimeOrchestrator_->submitPublishRequest(*req);
+                // ★ Phase-1: Atomic Admission flow (design-D4 D-13 ④ / ADR-C4:113)。
+                //   processDeferredAdmission() へ一本化（peek → evaluateDeferred →
+                //   consume/discard → finishView → submitPublishRequest）。
+                //   submitPublishRequest は必要なら再 enqueue（hasDeferred_=true）。
+                runtimeOrchestrator_->processDeferredAdmission();
             }
 
             struct DSPGuard

@@ -96,6 +96,7 @@ struct CoeffSet {
 #include "ISRAuthorityClass.h"
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
+namespace convo::isr { class PublicationAdmission; }
     namespace convo::isr { class ISRRetireRouter; }
     namespace convo::isr { struct PublishExecutor; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
@@ -1593,6 +1594,14 @@ public:
     {
         return consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire);
     }
+    // ★ Phase-1: Single Thread Owner 契約の実行時検証アクセサ (design-D4 D-13.6 (1)・ADR-C4:100-105)。
+    //   Deferred Publish の peek/consume/discard は RebuildThread 専用。Coordinator/
+    //   Timer/Recovery-worker が呼ぶと hasDeferred_(atomic)→deferredSlot_(non-atomic)
+    //   の handshake が崩壊する。rebuildThread_（設計書仮名）は実際はこの std::thread メンバ
+    //   の id に由来する。jassert(std::this_thread::get_id() == engine_.rebuildThreadId())。
+    [[nodiscard]] std::thread::id rebuildThreadId() const noexcept { return rebuildThread.get_id(); }
+    // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
+    [[nodiscard]] int currentBuildGeneration() const noexcept { return consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
 
     [[nodiscard]] RuntimeBackpressureTelemetry getRuntimeBackpressureTelemetry() const noexcept
     {
@@ -2525,7 +2534,8 @@ public:
     // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が deferred publish を RebuildThread へ
     //   ハンドオフするためのイベント駆動フラグ。hasPendingTask と同じ rebuildMutex で保護する
     //   （atomic にはしない）。CoordinatorLoop が 1ms tick ごとに set + notify_one、RebuildThread が
-    //   起床時にクリアし、consumeDeferredRequest → submitPublishRequest（同期）を実行する。
+    //   起床時にクリアし、processDeferredAdmission()（peek → evaluateDeferred →
+    //   consume/discard → releaseSlot → submitPublishRequest）を実行する。
     //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
     bool publishRetryReady = false;
 
@@ -3500,6 +3510,24 @@ public:
 private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
+#if defined(CONVOPEQ_UNIT_TESTS)
+    // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
+    friend class DeferredPublicationTestAccess;
+    // テストビルドでのみ evaluate()（PublicationAdmission）が
+    // testFadingRuntimePresent() に到達できるようにする（Production ビルドでは
+    // この friend 宣言・メンバ・評価分岐がすべて存在せず、バイナリ無変更）。
+    friend class convo::isr::PublicationAdmission;
+    // テスト専用 precondition override（Option-2 hook）:
+    //   DeferredFadingActive の前提「published world に fading runtime が存在」を
+    //   決定論的に作る。Production の Decision 判定ロジック（if hasFading →
+    //   DeferredFadingActive）は一切変更しない。Production ビルドではこの
+    //   メンバと評価分岐は両方ともコンパイルされず、バイナリは無変更。
+    std::atomic<bool> testFadingRuntimePresent_ { false };
+    [[nodiscard]] bool testFadingRuntimePresent() const noexcept
+    {
+        return testFadingRuntimePresent_.load(std::memory_order_acquire);
+    }
+#endif
     friend class convo::isr::PublicationExecutor;
     friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;

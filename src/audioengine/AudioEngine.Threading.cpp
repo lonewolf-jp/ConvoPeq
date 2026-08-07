@@ -183,7 +183,7 @@ void AudioEngine::processDeferredReleases()
 //     • runtimePublicationBridge_.processIntent / drainOverflowRing operate on
 //       lock-free queues + atomic counters (safe off-MessageThread).
 //     • Deferred resubmit is MessageManager-free: runtimeOrchestrator_
-//       submitPublishRequest / consumeDeferredRequest (atomic hasDeferred_).
+    //       submitPublishRequest / processDeferredAdmission (atomic hasDeferred_).
 //==============================================================================
 void AudioEngine::startCoordinatorLoop() noexcept
 {
@@ -212,7 +212,7 @@ void AudioEngine::runCoordinatorPhase() noexcept
     // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
     //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。
     //     deferred がある場合、publishRetryReady フラグを立てて RebuildThread を起床させるだけ。
-    //     RebuildThread が consumeDeferredRequest() → submitPublishRequest()（同期）を実行する
+    //     RebuildThread が processDeferredAdmission() を実行する（peek → evaluate → consume/discard → finishView → submitPublishRequest）
     //     （Builder 責務は RebuildThread に一元化）。
     //   ★ ビジーループ防止: predicate に hasDeferredRequest() を直接入れず、フラグ駆動にする。
     //     Deferred が継続しても RebuildThread は休眠し、Coordinator が次 1ms tick で再通知するまで
