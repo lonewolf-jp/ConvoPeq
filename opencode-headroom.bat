@@ -10,7 +10,9 @@ REM === Headroom Proxy Auto-Start (single-instance, guard on LISTENING only) ===
 netstat -ano 2>nul | findstr /r ":8787.*LISTENING" >nul
 if %ERRORLEVEL% EQU 0 goto :proxy_up
 echo [headroom] Starting proxy on port 8787...
-start /B "" "%~dp0.venv\Scripts\headroom.exe" proxy --port 8787
+REM Pin cwd to this bat's dir (ConvoPeq) so .headroom lands in a writable spot,
+REM matching the Startup headroom-proxy.bat config (token mode, 0.40 ratio).
+start /B "" /D "%~dp0" "%~dp0.venv\Scripts\headroom.exe" proxy --port 8787 --host 127.0.0.1 --mode token --target-ratio 0.40 --memory --intercept-tool-results --rpm 200 --tpm 500000 --keepalive-expiry 30 --protect-tool-results Bash,WebFetch,Read --no-telemetry
 timeout /t 3 /nobreak >nul
 :proxy_up
 

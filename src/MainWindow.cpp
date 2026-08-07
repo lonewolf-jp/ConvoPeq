@@ -1533,10 +1533,11 @@ void MainWindow::timerCallback()
     if (cliAutomationTelemetryLoggingEnabled)
         return;
 
+    const bool hasActiveDsp = audioEngine.hasActiveRuntimeDSP();
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;
     const double sr = audioEngine.getSampleRate();
-    const bool latencySrValid = (sr > 0.0);
+    const bool latencySrValid = hasActiveDsp && (sr > 0.0);
     const int latencyMsX10 = latencySrValid
         ? static_cast<int>(std::lround((static_cast<double>(latencySamples) * 10000.0) / sr))
         : 0;
@@ -1558,7 +1559,9 @@ void MainWindow::timerCallback()
         }
         else
         {
-            latencyText = "Lat: -- ms (" + juce::String(latencySamples) + " smp)";
+            latencyText = hasActiveDsp
+                ? "Lat: -- ms (" + juce::String(latencySamples) + " smp)"
+                : "Lat: -- ms";
         }
 
         latencyLabel.setText(latencyText, juce::dontSendNotification);

@@ -1,8 +1,12 @@
 {
   "schema": "hb_trace_v1",
-  "eventCount": 2,
+  "eventCount": 6,
   "events": [
-    {"ts": 48801241669300, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
-    {"ts": 48801330634700, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false}
+    {"ts": 160226881333600, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 160226983142800, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
+    {"ts": 160226987421100, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 160227042482000, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
+    {"ts": 160227047502800, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 160227124730100, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":48803624857200}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":160229429613900}

@@ -4,7 +4,7 @@ import json
 import time
 
 proc = subprocess.Popen(
-    [r'C:\Users\user\AppData\Roaming\Python\Python314\Scripts\headroom.exe', 'mcp', 'serve'],
+    [r'C:\VSC_Project\ConvoPeq\.venv\Scripts\headroom.exe', 'mcp', 'serve'],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE

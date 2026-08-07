@@ -81,6 +81,8 @@ using CrossfadeId = uint32_t;
 /**
  * crossfade 記録
  */
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324を抑制 - struct padding due to alignment
 struct CrossfadeRecord
 {
     CrossfadeId id;
@@ -89,6 +91,7 @@ struct CrossfadeRecord
     uint64_t    startEpoch;
     bool        active;
 };
+#pragma warning(pop)
 
 /**
  * レジストリスロット内部構造

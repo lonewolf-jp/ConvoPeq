@@ -134,95 +134,29 @@ if "%DO_CLEAN%"=="1" (
 )
 
 REM ------------------------------------------------------------
-REM Setup MSVC environment (skipped for icx mode)
-if not "!COMPILER_MODE!"=="msvc" goto setup_msvc_skip
-set "VCVARS_PATH="
-set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-set "VS_INSTALL_PATH="
-
-if exist "%VSWHERE_PATH%" (
-    echo [INFO] Detecting Visual Studio via vswhere...
-    for /f "delims=" %%I in ('"%VSWHERE_PATH%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul') do (
-        set "VS_INSTALL_PATH=%%I"
-    )
-
-    if defined VS_INSTALL_PATH (
-        set "VCVARS_PATH=!VS_INSTALL_PATH!\VC\Auxiliary\Build\vcvarsall.bat"
-    )
-)
-
-REM Fallback: common hard-coded locations (when vswhere is unavailable)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\17\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\17\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Professional\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\17\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Community\VC\Auxiliary\Build\vcvarsall.bat"
-)
-
-if defined VCVARS_PATH (
-    echo [INFO] Found vcvarsall.bat. Executing...
-    echo [INFO]   !VCVARS_PATH!
-    call "!VCVARS_PATH!" x64
-    @echo off
-    if errorlevel 1 (
-        echo [ERROR] Failed to initialize MSVC environment.
-        call :maybe_pause
-        exit /b 1
-    )
-    echo [INFO] MSVC environment initialized.
-) else (
-    echo [ERROR] vcvarsall.bat not found.
-    echo [ERROR] Checked via vswhere and common Visual Studio install paths.
-    echo [HINT] Install Visual Studio C++ workload, or ensure vswhere exists at:
-    echo [HINT]   !VSWHERE_PATH!
-    call :maybe_pause
-    exit /b 1
-)
-
-goto setup_oneapi
-:setup_msvc_skip
-echo [INFO] icx mode: MSVC vcvarsall.bat skipped (icx auto-detects Windows SDK).
-:setup_oneapi
-REM ------------------------------------------------------------
-REM Setup Intel oneAPI environment (required for both MSVC and icx)
+REM Setup environment for icx mode
 set "ONEAPI_SETVARS=C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
-if exist "%ONEAPI_SETVARS%" (
-    echo [INFO] Found Intel oneAPI setvars.bat. Executing...
-    call "%ONEAPI_SETVARS%" intel64
-    @echo off
-    if errorlevel 1 (
-        echo [ERROR] Failed to initialize Intel oneAPI environment.
-        call :maybe_pause
-        exit /b 1
-    )
-    echo [INFO] Intel oneAPI environment initialized.
-) else (
-    echo [ERROR] Intel oneAPI MKL not found!
-    echo Please install Intel oneAPI Base Toolkit.
+set "ONEAPI_LIB=C:\Program Files (x86)\Intel\oneAPI"
+if not "!COMPILER_MODE!"=="icx" goto setup_done
+
+echo [INFO] icx mode: MSVC vcvarsall.bat skipped (icx auto-detects Windows SDK).
+echo [INFO] Initializing Intel oneAPI environment...
+call "%ONEAPI_SETVARS%" intel64
+if errorlevel 1 (
+    echo [ERROR] Failed to initialize Intel oneAPI environment.
     call :maybe_pause
     exit /b 1
 )
-
-REM ------------------------------------------------------------REM Setup Intel oneAPI library paths (linker search paths)
-REM setvars.bat sets INCLUDE but not always LIB for all components.
-REM Ensure MKL, IPP, and compiler runtime libs are findable by the linker.
 set "ONEAPI_LIB=C:\Program Files (x86)\Intel\oneAPI"
-if exist "%ONEAPI_LIB%\mkl\latest\lib" set "LIB=%ONEAPI_LIB%\mkl\latest\lib;%LIB%"
-if exist "%ONEAPI_LIB%\ipp\latest\lib" set "LIB=%ONEAPI_LIB%\ipp\latest\lib;%LIB%"
-if exist "%ONEAPI_LIB%\compiler\latest\lib" set "LIB=%ONEAPI_LIB%\compiler\latest\lib;%LIB%"
-echo [INFO] Intel oneAPI library paths added to LIB.
+set "MKLROOT=%ONEAPI_LIB%\mkl\latest"
+set "IPPROOT=%ONEAPI_LIB%\ipp\latest"
+set "ONEAPI_ROOT=%ONEAPI_LIB%"
+if exist "!ONEAPI_LIB!\mkl\latest\lib" set "LIB=!ONEAPI_LIB!\mkl\latest\lib;!LIB!"
+if exist "!ONEAPI_LIB!\ipp\latest\lib" set "LIB=!ONEAPI_LIB!\ipp\latest\lib;!LIB!"
+if exist "!ONEAPI_LIB!\compiler\latest\lib" set "LIB=!ONEAPI_LIB!\compiler\latest\lib;!LIB!"
+echo [INFO] Intel oneAPI environment initialized.
+
+:setup_done
 
 REM ------------------------------------------------------------
 REM Create build directory
@@ -378,5 +312,18 @@ goto :eof
 if "%NO_PAUSE%"=="1" goto :eof
 pause
 goto :eof
+
+:setup_oneapi_done
+for /f "usebackq tokens=1,* delims==" %%A in ("%ONEAPI_ENV_TMP%") do (
+    if /i "%%A"=="PATH" set "PATH=%%B;!PATH!"
+    if /i "%%A"=="INCLUDE" set "INCLUDE=%%B;!INCLUDE!"
+    if /i "%%A"=="LIB" set "LIB=%%B;!LIB!"
+    if /i "%%A"=="ICX_HOME" set "ICX_HOME=%%B"
+    if /i "%%A"=="MKLROOT" set "MKLROOT=%%B"
+    if /i "%%A"=="IPPROOT" set "IPPROOT=%%B"
+    if /i "%%A"=="ONEAPI_ROOT" set "ONEAPI_ROOT=%%B"
+)
+del /q "%ONEAPI_ENV_TMP%" 2>nul
+exit /b 0
 
 

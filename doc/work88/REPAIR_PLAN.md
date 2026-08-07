@@ -2357,19 +2357,80 @@ git diff --stat (last 5 commits) で確認された、REPAIR_PLAN.md で言及�
 - `.github/workflows/isr-verification.yml` (new)
 - `.github/workflows/sanitizer-ci.yml` (new)
 
-### 11. BUG-011〜046 修正確認 (Appendix A-1〜A-4)
+### 11. BUG-011〜046 修正確認 (Appendix A-1〜A-4) — 2026-08-06 深検証版
 
-work89/README.md (2026-07-26) は「BUG-011〜046 未修正」と記録していたが、git log により 2026-07-26 のコミット (3e7e222 "implement BUG fixes v6") で修正が適用されたことを確認:
+work89/README.md (2026-07-26) は「BUG-011〜046 未修正」と記録していたが、git log により 2026-07-26 のコミット (3e7e222 "implement BUG fixes v6") で修正が適用されたことを確認。**2026-08-06 付きで全35件の Bug レポートファイルに対し、ソースコード照合検証を完了**（検証方法: AiDex grep + serena + WSL rg + Read + Web リサーチ）。以下は検証結果の最終版。⚠️ 前バージョン（work89 README）の BUG-015/BUG-028 ステータスは**検証不備**による誤記 → **訂正済み**。
 
-| BUG | 修正内容 | コード確認 |
-|-----|----------|-----------|
-| BUG-011/012/013 | `sigma = std::clamp(s, sigmaMin, sigmaMax)` | ✅ `CmaEsOptimizer.h:84` / `CmaEsOptimizerDynamic.h:29` |
-| BUG-015 | `enqueueWithRetry` リトライロジック | ✅ `ISRRetireRouter.cpp:161` |
-| BUG-038 | `FFT_MAGNITUDE_SCALE = 2.0f / NUM_FFT_POINTS` | ✅ `SpectrumAnalyzerComponent.h:74` |
-| BUG-028 | `complete()` で全フラグリセット | ✅ (コード確認済み) |
-| BUG-029 | Emergency Override で `exchangeFadingRuntimeDSP` 使用 | ✅ (コード確認済み) |
+#### 11-1. 修正済み (✅ FIXED — 31件)
 
-⚠️ **注意**: 実装は `std::clamp` ではなくカスタム `n()` 関数 (NaN-safe clamp) を使用している場合もある。Appendix A の具体的な修正コードは実装と異なる場合がある (例: A-5 の「std::clamp」は実際には `n(inSigma, params.sigmaMin, params.sigmaMax)` で実装 — `n` は NaN-safe clamp wrapper)。
+| BUG | 修正内容 | コード確認箇所 |
+|-----|----------|---------------|
+| 011 | `std::clamp(inSigma, 1e-6, 1e6)` | `CmaEsOptimizer.h:84` |
+| 012 | `setSigma` clamps | `CmaEsOptimizerDynamic.h:29` |
+| 013 | `deserializeFrom` clamps | `CmaEsOptimizerDynamic.cpp:204` |
+| 016 | `!std::isfinite(x)` NaN/Inf guards | `CmaEsOptimizer.h:208, Dynamic.h:50` |
+| 018 | FP eq epsilon comparison `> 1e-12` | `LoadPipeline.cpp:371` |
+| 019 | `static_cast<size_t>` | `TruePeakDetector.cpp:102` |
+| 020 | `targetLength <= 0` guard | `LoaderThread.cpp:152` |
+| 021 | `timerCallback` RCU guard | `Timer.cpp:372` (`RuntimeReaderContext` + read handle) |
+| 022 | `prepareToPlay` RCU guard | `PrepareToPlay.cpp:135` (`RuntimeReaderContext` + read handle) |
+| 023 | SafeStateSwapper move-path 削除 (Option A) | `SafeStateSwapper.h:297` — `// ★ Option A: tail に書き込まない` |
+| 024 | `SnapshotFadeState` 全フィールド atomic + ABA gen | `SnapshotFadeState.h` — `advance()`/`start()`/`resetToIdle()`/`tryComplete()` 全 atomic acquire/release |
+| 025 | `switchImmediate` が `resetFadeStateAndRetireTarget` を削除し `enqueueWithRetry` 直接使用 | `SnapshotCoordinator.h:84-101` — `switchImmediate` は `exchangeTarget` + `enqueueWithRetry` 直接呼び出し。`resetFadeStateAndRetireTarget()` (cpp:61) は 0 caller (dead code) |
+| 026 | `ObservedRuntime::get()` で `rootEnterSucceeded()` チェック | `ObservedRuntime.h:49` — `if (!guard.rootEnterSucceeded()) return nullptr;` |
+| 027 | `completeFade()`/`updateFade()` race — `updateFade` は dead code として削除済み。`m_fade` は全 atomic。Timer path は `tryCompleteFade()` (cpp:52) → `completeFade()` (cpp:61) | `SnapshotCoordinator.h:111` — `updateFade` DELETED. `SnapshotCoordinator.cpp:47-57` — `advanceFade`/`tryCompleteFade`. `SnapshotFadeState.h` — atomic state machine |
+| 029 | Emergency Override で `exchangeFadingRuntimeDSP(oldDSP)` を呼ぶ | `DSPTransition.h:65` — `auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);` |
+| 030 | Timer の `exchangeFadingRuntimeDSP(nullptr)` → CAS-based clear に置換 | `Timer.cpp:880-895` — CAS-based; `claimFadingRuntimeDSP` at `AudioEngine.h:2072-2078` |
+| 031 | `updateAudioThreadSnapshotFade` stub 削除 | `SnapshotCoordinator.h:111` — DELETED. `advanceFade` が counter を処理 |
+| 032 | torn read 防止 — RCU guards + atomic everywhere | `Timer.cpp:372`, `PrepareToPlay.cpp:135`, `AudioBlock.cpp:408` — RCUReaderGuard |
+| 033 | BlockDouble dryScale path | `BlockDouble.cpp:421-427` |
+| 034 | 全 DFTI 呼び出しで return code チェック (`!= DFTI_NO_ERROR`) | `MixedPhase.cpp:180-186,278,568,761,811,854`; `ResampleAndFallback.cpp:355-451`; `StateAndUI.cpp:627-643`; `SpectrumAnalyzerComponent.cpp:249-255,451` |
+| 035 | `ApplyComputedIRLoadingGuard` RAII + try/catch | `LoadPipeline.cpp:321-338,358,722-736` |
+| 036 | `irL`/`irR` release leak on init failure | `LoadPipeline.cpp:640-648` — `.get()`/`.release()` success-only |
+| 037 | `loaderTrashBin` UAF — 全アクセスが Message Thread のみ | `LoadPipeline.cpp:54,575`; `StateAndUI.cpp:974` — すべて NonRT |
+| 038 | `FFT_MAGNITUDE_SCALE = 2.0f / NUM_FFT_POINTS` | `SpectrumAnalyzerComponent.h:74` |
+| 039 | oversampler overread — `std::min(targetSamples, upsampledBlock.getNumSamples())` | `CustomInputOversampler.cpp:840-841` |
+| 040 | NSL playback-time fallback = 48000 (not 1.0) | `NoiseShaperLearner.cpp:1174-1176` |
+| 041 | VLA → `makeAlignedArray<double>` (heap) | `NoiseShaperLearner.cpp:645-657` |
+| 042 | CmaEsOptimizer Rule of Five (`= delete`) | `CmaEsOptimizer.h:43-46` |
+| 043 | IRConverter `actualSampleRate = sourceRate` | `IRConverter.cpp:270` |
+| 044 | MklFftEvaluator Rule of Five (`= delete`) | `MklFftEvaluator.h:138-141` |
+| 045 | IRConverter resample failure → fallback to sourceRate | `IRConverter.cpp:260-275` |
+| 046 | PsychoacousticDither Rule of Five (`= delete`) | `PsychoacousticDither.h:102-105` |
+
+#### 11-2. 部分修正済み (🟡 PARTIAL — 2件)
+
+| BUG | 現状 | 未対応箇所 |
+|-----|------|-----------|
+| 015 | `enqueueWithRetry` の戻り値を **2つの関数**でチェック: `SnapshotCoordinator::enqueueWithRetry`(static, `bool`) と `ISRRetireRouter::enqueueWithRetry`(member, `RetireEnqueueResult`) | (1) `SnapshotCoordinator.h:100` (switchImmediate oldSnap) — `enqueueWithRetry` 戻り値**未チェック**<br>(2) `SnapshotCoordinator.h:158,160` (retireCurrentAndTarget) — 同じく未チェック<br>(3) `DSPLifetimeManager.cpp:49,90` — `juce::ignoreUnused(result)` で破棄 (ISRRetireRouter::enqueueWithRetry 版)<br>(4) `ISRRetireRouter.cpp:154` — 戻り値チェック済みだが failure handler が `// ★ Future` TODO のみ<br>(5) `SnapshotCoordinator.cpp:38,94` — 戻り値チェック済みだが failure handler が TODO のみ<br><br>**重要:** ISRRetireRouter::enqueueWithRetry は内部で tryReclaim+2回リトライを実施済み。Category B サイトの修正は「直接 delete」のみで十分 (追加リトライ不要)。SnapshotCoordinator::enqueueWithRetry も内部で tryReclaim+1回リトライ済み。Category A サイトの修正は tryReclaim+retry+directDelete の 3-tier でもよいが、冗長。 |
+| 027 | `updateFade()` は削除済み (dead code, BUG-031)。`SnapshotFadeState` は全 atomic。`completeFade` は `exchangeTarget`/`exchangeCurrent` + `enqueueWithRetry` 使用 | `BUG-015` と同一 Issue。Bug Report の race シナリオ (completeFade vs updateFade) は `updateFade` 削除により解消。remaining issue: `completeFade` (cpp:94) failure handler が TODO のみ |
+
+#### 11-3. 未修正 (🔴 STILL OPEN — 2件)
+
+| BUG | Issue | 修正対象ファイル |
+|-----|-------|-----------------|
+| 014 | `juce::String currentDeviceTypeName_` CoW データ競合 — Message Thread が書き込み、Audio Thread (AudioEngine.Mmcss.cpp:55, AudioEngine.Processing.AudioBlock.cpp:442) が読み取り。`juce::String` は CoW 使用で内部ポインタ非アトミック。C++ メモリモデル上のデータ競合（UB）。x86-64 ではポインタ粒度の atomicity により実質的 UAF は稀だが、ARM 等では発現可能。修正: `std::atomic<const char*>` + `strstr` (MSVC: `new char[]`/`delete[]`, `strdup` は POSIX のみ) + `getAudioDeviceTypeName()` 削除 (0 callers) + デストラクタ cleanup | `src/audioengine/AudioEngine.h:2347-2355`, `src/audioengine/AudioEngine.Mmcss.cpp:50-64`, `src/audioengine/AudioEngine.CtorDtor.cpp:89` |
+| 028 | `CrossfadeRuntime::start()` (h:38-51) と `complete()` (h:95-103) が `dryScaleTarget_` と `dryScaleGain_` (LinearRamp) をリセットしない。`start()` は `firstIrDryDone_` も未リセット。`reset()` は全リセット済みだが `start()`/`complete()` 未対応。RT で stale dryScale が永続し `AudioEngine.Processing.BlockDouble.cpp:421` の `getDryScaleGain().getNextValue()` に影響。Timer path では `AudioEngine.Timer.cpp:894-895` で `setStartDelayBlocks(0)` + `setDryHoldSamples(0)` の回避策あり (complete() の不足分を手動补正) が、DSPTransition.h:66,126 の complete() 呼び出しでは未対応。`setDryScaleTarget()` は 0 caller (latent)。 | `src/audioengine/CrossfadeRuntime.h:38-51, 95-103` |
+
+#### 11-4. 未確認 (❓ MISSING — 1件)
+
+| BUG | 状況 |
+|-----|------|
+| 017 | `doc/work88/mini_bugs_unchecked/BUG-017.md` **ファイルが存在しない** (ディレクトリは BUG-011 → BUG-018 で飛びあり) |
+
+#### 11-5. 検証時の技術的注記
+
+- **juce::String CoW (BUG-014)**: JUCE の `String::operator=` は `noexcept`（非ロック）で、内部ポインタの swap + 非アトミック ref count 操作を行う。JUCE 公式ソース (GitHub juce-framework/JUCE `modules/juce_core/text/juce_String.h`) のクラスドキュメント: "reference-counted internal representation" — スレッドセーフではない。`containsIgnoreCase()` は const だが `const auto&` + 内部バッファポインタ読み取りで CoW detach 機会を伴う。
+- **BUG-025**: `resetFadeStateAndRetireTarget` は 0 caller。`switchImmediate` は既に `enqueueWithRetry` で直接 retire するようリファクタ済み。Bug Report の「リークシナリオ」はコードパス消失により解消。
+- **BUG-023**: `src/SafeStateSwapper.h` は `src/ConvolverRuntimeCompatAliases.h:4` と `src/DeferredFreeThread.h:22` で still used。move-path は `tryReclaim()` から削除済み (line 297: Option A — "tail に書き込まない")。
+- **BUG-030**: B-1 CAS-based approach は `src/audioengine/AudioEngine.Timer.cpp:880-895` で実装済み。`claimFadingRuntimeDSP` (AudioEngine.h:2072) は CAS. 両 path NonRT (Message Thread) なのでシリアライズされている。
+
+#### 11-6. ⚠️ 前バージョン訂正 (work89/README.md の誤記)
+
+| BUG | work89 記載 | 正しいステータス | 理由 |
+|-----|-------------|----------------|------|
+| BUG-015 | ✅ FIXED (`src/audioengine/ISRRetireRouter.cpp:154`) | 🟡 PARTIAL | **2つの enqueueWithRetry 関数**: (A) `SnapshotCoordinator::enqueueWithRetry` (static, bool): cpp:38,94, h:88 で戻り値チェック済みだが failure handler は TODO のみ; h:100,158,160 は未チェック. (B) `ISRRetireRouter::enqueueWithRetry` (member, RetireEnqueueResult): ISRRetireRouter.cpp:154 では戻り値チェック済みだが failure handler は TODO のみ; DSPLifetimeManager.cpp:49,90 は `juce::ignoreUnused(result)` で破棄. Category B は内部で tryReclaim+2回リトライ済みなので direct delete のみで十分. |
+| BUG-028 | ✅ FIXED (`complete()` で全フラグリセット) | 🔴 STILL OPEN | `useDryAsOld_`/`firstIrDryPending_`/`firstIrDryDone_` は `complete()` で reset 済み (h:98-100); `dryScaleTarget_`/`dryScaleGain_`/`startDelayBlocks_`/`dryHoldSamples_` は `start()` も `complete()` も未リセット (ただし Timer path で手動回避あり). `firstIrDryDone_` は `start()` にも未リセット. |
 
 ### 12. 改修箇所周辺の新バグ (FUTURE-9/B3-A1 パス)
 
@@ -2380,7 +2441,18 @@ FUTURE-9 と B3/A1 (OwnerChannel + RuntimePublishExecutor) の実装により、
 3. **`deferredSlot_` data race** — `std::optional<DeferredPublishSlot>` が 2 スレッド間で非同期アクセス (hasDeferred_ と同じく)
 4. **Overflow ring dead field** — `overflowRingResident` は存在するが読まれない (RuntimeDrainAudit.h:50)
 
-### 13. 修正優先順位 (2026-08-04 現在)
+### 13. 修正優先順位 (2026-08-06 現在)
+
+#### 13-1. BUG-011〜046 修正残り (🔴 4件)
+
+| 優先度 | BUG | 修正内容 | 対象ファイル |
+|--------|-----|----------|---------------|
+| 🔴 P0 | BUG-014 | `juce::String currentDeviceTypeName_` CoW race → `std::atomic<const char*>` + `strstr` comparison (MSVC: `new char[]`/`delete[]`); remove `getAudioDeviceTypeName()` (0 callers); add cleanup in `~AudioEngine` | `src/audioengine/AudioEngine.h:2347-2355`, `src/audioengine/AudioEngine.Mmcss.cpp:50-64`, `src/audioengine/AudioEngine.CtorDtor.cpp:89` |
+| 🟡 P1 | BUG-015 | **2つの enqueueWithRetry**: (A) `SnapshotCoordinator::enqueueWithRetry`(static, bool): h:100,158,160 未チェック → capture + directDelete; cpp:38,94,h:88 の TODO → recovery 追加. (B) `ISRRetireRouter::enqueueWithRetry`(member, RetireEnqueueResult): ISRRetireRouter.cpp:154 TODO のみ → directDelete; DSPLifetimeManager.cpp:49,90 の `ignoreUnused` → directDelete (追加リトライ不要 — 内部で tryReclaim+2回済み) | `src/core/SnapshotCoordinator.h:100,158,160`, `src/core/SnapshotCoordinator.cpp:38,94`, `src/audioengine/ISRRetireRouter.cpp:154`, `src/audioengine/DSPLifetimeManager.cpp:49,90` |
+| 🟡 P1 | BUG-027 | BUG-015 と同一 Issue (Category A, `completeFade` at cpp:94).`updateFade()` は削除済み (BUG-031) — race シナリオは解消済み。TODO failure handler のみ残存。 | `src/core/SnapshotCoordinator.cpp:94` |
+| 🟡 P1 | BUG-028 | `CrossfadeRuntime::start()`/`complete()` に `dryScaleTarget_` / `dryScaleGain_` / `firstIrDryDone_` / `startDelayBlocks_` / `dryHoldSamples_` リセットを追加 | `src/audioengine/CrossfadeRuntime.h:38-51, 95-103` |
+
+#### 13-2. FUTURE-9/B3-A1 新規バグ + その他 (優先度維持)
 
 | 優先度 | 項目 | 理由 |
 |--------|------|------|
@@ -2393,6 +2465,26 @@ FUTURE-9 と B3/A1 (OwnerChannel + RuntimePublishExecutor) の実装により、
 | 🟢 LOW | BUG-060: TOCTOU fix in ISRRetireRuntimeEx::reclaim | unsigned underflow リスク |
 | 🟢 LOW | BUG-061: auditLog_ mutex 保護 | std::vector data race |
 | 🟢 LOW | BUG-053/056/057/058/059/062/063/064/065 | work89 発見バグ (個別対応不要) |
+
+#### 13-3. 実装順序 (BUG-011-046 の修正残り)
+
+```
+1. BUG-028 (P1) — `src/audioengine/CrossfadeRuntime.h` 5行追加 (dryScaleTarget_/dryScaleGain_/firstIrDryDone_ reset)
+   → 最も低リスク: atomic publish のみ追加、RT 影響なし
+   → `src/audioengine/AudioEngine.Processing.BlockDouble.cpp:421` / `src/audioengine/AudioEngine.h:2897` で dryScale が正しく初期化される
+
+2. BUG-015 + BUG-027 (P1) — enqueueWithRetry failure recovery
+   → h:100: capture + directDelete (switchImmediate oldSnap, Category A)
+   → h:158,160: capture + directDelete (retireCurrentAndTarget, Category A)
+   → cpp:38,94,h:88: TODO failure handler → directDelete
+   → ISRRetireRouter.cpp:154: TODO → directDelete (Category B: no extra retry)
+   → DSPLifetimeManager.cpp:49,90: remove ignoreUnused + directDelete (Category B: no extra retry)
+
+3. BUG-014 (P0) — juce::String → atomic const char*
+   → `AudioEngine.h:2347-2355` でメンバ型変更 (`new char[]`/`delete[]`, MSVC-compatible, `strdup` is POSIX-only) + `getAudioDeviceTypeName()` 削除 (0 callers)
+   → `AudioEngine.Mmcss.cpp:50-64` で `containsIgnoreCase` → `strstr` に置換
+   → `AudioEngine.CtorDtor.cpp:89` でデストラクタに `delete[]` クリーンアップ付加
+```
 
 
 ## C-6: Errata 運用

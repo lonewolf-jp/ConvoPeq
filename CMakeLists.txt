@@ -335,6 +335,15 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         #   CONVOPEQ_HAS_MKL 定義を継承するため、mkl.h + mkl シンボルを解決する。
         #   ISRSemanticValidationTests と同一パターン。
         target_link_libraries(PublicationAdmissionTests PRIVATE MKL::MKL)
+        # ★ DiagnosticsConfig.h は JUCE_DSP_USE_INTEL_MKL 定義에 따라 mkl.h 를 include する。
+        #   ConvoPeq の PRIVATE 정의は 테스트 타깃에 상속되지 않으므로、
+        #   여기서 직접 정의 + MKLROOT/include를 명시적으로 추가して mkl.h 解決을 보장する。
+        target_compile_definitions(ISRSemanticValidationTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_compile_definitions(ISRSoakTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_compile_definitions(PublicationAdmissionTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_include_directories(ISRSemanticValidationTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+        target_include_directories(ISRSoakTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+        target_include_directories(PublicationAdmissionTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
@@ -621,6 +630,18 @@ if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
             endif()
         endforeach()
     endif()
+endif()
+
+#------------------------------------------------------------
+# icx(Clang-cl) 전역 경고 억제
+# NOMINMAX 재정의(-Wmacro-redefined) 및 UNUSED-COMMAND-LINE-ARGUMENT
+# 경고는 JUCE 모듈(native header)과 충돌하므로 전역적으로 억제
+#------------------------------------------------------------
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|IntelLLVM")
+    add_compile_options(
+        -Wno-macro-redefined
+        -Wno-unused-command-line-argument
+    )
 endif()
 
 #------------------------------------------------------------

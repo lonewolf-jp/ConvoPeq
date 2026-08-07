@@ -8,6 +8,11 @@
       "command": ["C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\Scripts\\serena.exe", "start-mcp-server", "--project", "C:\\VSC_Project\\ConvoPeq", "--transport", "stdio"],
       "enabled": true
     },
+    "context-mode": {
+      "type": "local",
+      "command": ["context-mode"],
+      "enabled": true
+    },
     "headroom": {
       "type": "local",
       "command": [".venv\\Scripts\\headroom.exe", "mcp", "serve"],

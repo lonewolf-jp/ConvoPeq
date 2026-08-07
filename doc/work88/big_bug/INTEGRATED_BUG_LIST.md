@@ -1,9 +1,9 @@
 # ConvoPeq 統合バグリスト (改訂版)
 
 **作成日**: 2026-07-30
-**最終更新**: 2026-07-30
+**最終更新**: 2026-08-07
 **対象**: ConvoPeq (Windows 11 x64, AVX2, MSVC/icx, JUCE 8.0.12, MKL/IPP)
-**調査元**: `bug_meta_ai.md`, `bug_qwen.md`, `ConvoPeq_Part8_findings_2026-07-23.md`, `ConvoPeq_バグレポート_2026-07-30.md`
+**調査元**: `bug_meta_ai.md`, `bug_qwen.md`, `ConvoPeq_Part8_findings_2026-07-23.md`, `ConvoPeq_バグレポート_2026-07-30.md`, `REPAIR_PLAN3.md`
 **検証方法**: ソースコード grep / AiDex インデックス検索 / 実ファイル閲覧 / cppcheck ログ照合
 
 ---
@@ -71,6 +71,7 @@ _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
 `convertFloatToDoubleHighQuality(const float* src, double* dst, ...)` は `dst` の 32-byte アライメントを契約で保証しない。現在の呼び出し元 (`alignedL.get()`, `tempAligned`) は偶然アライドだが、将来の呼び出しで非アライドな `double*` が渡ると #GP 例外で即落ちる。
 
 **影響**: プロセス全体クラッシュ。
+**追加調査**: `_mm256_store_pd` は他に `TruePeakDetector.cpp:85`, `EQProcessor.Processing.cpp:37`, `MKLNonUniformConvolver.cpp:1319, 1580` にも存在する。これらの呼び出しサイトもアライメント契約を検証する必要がある。
 
 **修正**: `_mm256_storeu_pd` に変更するか、`[[expects]]` で契約を明示する。
 
@@ -87,6 +88,7 @@ _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
 - `DSPCoreDouble.cpp` は正しく `convo::dsp::fastTanh<convo::dsp::SoftClipPadéPolicy>` を使用している (行 127, 191)。
 - `DSPCoreFloat.cpp` と `DSPCoreIO.cpp` は**同一係数を持つ独自の `inline double fastTanh(double x)`** を複製している (行 146, 76)。
 - 3箇所の係数は現時点では一致しているが、将来 `SoftClipPadéPolicy` の係数をチューニングした場合、Float 入出力経路と Double 入出力経路でサチュレーションカーブが乖離する保守上のリスク。
+- **追加調査**: `FastTanhApprox.h:28` に `DefaultFastTanhPolicy` が存在する (27/9 の Padé近似)。`EQProcessor.Processing.cpp:104` は `fastTanh<>()` (デフォルトポリシー) を使用。DSPCoreFloat/IO は `SoftClipPadéPolicy` (10395/1260/21 係数) と一致するポリシーを使用すべき。
 
 **修正**: `DSPCoreFloat.cpp` / `DSPCoreIO.cpp` の独自 `fastTanh()` を削除し、`#include "dsp/math/FastTanhApprox.h"` から `convo::dsp::fastTanh<convo::dsp::SoftClipPadeApproxPolicy>` を使用する。
 
@@ -96,7 +98,7 @@ _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
 
 **出典**: `bug_qwen.md` バグC
 
-**ファイル**: `src/audioengine/AudioEngine.h:1059` (宣言), `src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp:341` (定義)
+**ファイル**: `src/audioengine/AudioEngine.h:1066` (宣言), `src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp:341` (定義)
 
 **現象**: `AudioEngine::DSPCore::musicalSoftClip()` は宣言・定義されているが、コードベース全体を検索しても**どこからも呼び出されていない**。実際の処理は各ファイルのファイルローカルな `musicalSoftClipScalar()` が直接呼ばれている。
 
@@ -122,9 +124,9 @@ _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
 
 **出元**: `bug_meta_ai.md` H-2
 
-**ファイル**: `src/audioengine/ISRRetire.cpp:44, 135, 265`, `src/audioengine/ISRRetire.h:136`
+**ファイル**: `src/audioengine/ISRRetire.cpp:44, 135, 265`, `src/audioengine/ISRRetire.h:169`
 
-**現象**: `emitRetireIntent` は RT 安全を謢うが、輻輳時に `std::lock_guard<std::mutex> fallbackMutex_` を取得する (行 44, 135, 265)。`fallbackMutex_` は `ISRRetire.h:136` で宣言されている。将来 Audio Thread から呼ばれると優先度逆転でオーディオドロップ。
+**現象**: `emitRetireIntent` は RT 安全を謢うが、輻輳時に `std::lock_guard<std::mutex> fallbackMutex_` を取得する (行 44, 135, 265)。`fallbackMutex_` は `ISRRetire.h:169` で宣言されている。将来 Audio Thread から呼ばれると優先度逆転でオーディオドロップ。
 
 **修正**: RT パスは mutex なしの `overflowRing` のみに退避、Non-RT 側で fallback へ移動する2段階化。
 
@@ -136,21 +138,40 @@ _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
 
 **ファイル**: `src/convolver/ConvolverProcessor.LoaderThread.cpp:463`
 
-**現象**: `tempFloatBuffer(numChannels, static_cast<int>(fileLength))` で `fileLength` は `MAX 2,147,483,647` まで許可。ステレオで8GB確保試行。
+**現象**: `tempFloatBuffer(numChannels, static_cast<int>(fileLength))` で `fileLength` は `MAX 2,147,483,647` まで許可。ステレオで `2 * 2B * 4bytes ≈ 16GB` の確保試行。`MAX_FILE_LENGTH` ガード (LoaderThread.cpp:450, ResampleAndFallback.cpp:293) は整数オーバーフローを防止するがメモリ容量制限はしない。
 
 **修正**: ストリーミング読み込み: 256kブロック毎に `convertFloatToDoubleHighQuality` へ流す。
 
 ---
 
+
 ### 1-9. `MKLNonUniformConvolver.cpp` の int/size_t 混在 (High) — ✅ Confirmed
 
 **出元**: `bug_meta_ai.md` H-4
 
-**ファイル**: `src/MKLNonUniformConvolver.cpp:842, 846, 854`
+**ファイル**: `src/MKLNonUniformConvolver.cpp:843, 847, 853` (診断用: 843, 847; 実際のアロケーション: 853)
 
 **現象**: `l.fftSize * sizeof(double)` が `int * size_t`。`fftSize` は `int` だが、極端な IR (5秒@768kHz=3.8M, partSize 262k → fftSize 524k) でも収まるが、将来 `kL0MaxParts` 拡張で int 溢れの可能性。
 
-**修正**: `static_cast<size_t>(l.fftSize) * sizeof(double)` に統一する。
+**修正**: `l.fftSize` を `int` から `int64_t` に変更し、`static_cast<size_t>(l.fftSize) * sizeof(double)` に統一する。`static_cast<size_t>` のみでは `fftSize` が `int` で溢れた時点で既に不正値になっているため、型そのものの変更が必要。
+
+---
+
+### 1-10. `m_pendingIRChange` フラグの公開前クリアによる IR 変更要求消失 (High) — ✅ Confirmed
+
+**出元**: `bug_qwen.md` バグC3
+
+**ファイル**: `src/audioengine/AudioEngine.Snapshot.cpp:95`
+
+**現象**:
+```cpp
+const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
+```
+`m_pendingIRChange` は `AudioEngine.h:1449` の `setIRChangeFlag()` で `true` が公開される。スナップショット構築中に `exchangeAtomic(..., false, ...)` により**公開完了前**にフラグがクリアされる。`SnapshotFactory::createImpl()` が `nullptr` を返す (ハッシュ一致 + 等価判定) 場合、IR変更要求は**永久に失われる** (再試行機構なし)。呼び出し場所: `AudioEngine.Timer.cpp:770` で `consumeAtomic` 読取。
+
+**影響**: IR変更フラグがセットされた状態でスナップショットが等価判定を通過した場合、IR変更がサイレントに無視される。
+
+**修正**: `createImpl` の結果に応じてクリアタイミングを分岐、または `m_pendingIRChange` のクリアを公開完了後 (NonRT) に遅延する。
 
 ---
 
@@ -246,11 +267,11 @@ for (double delta = 1e-15; delta < 1e-6; delta *= 10.0)
 
 **出元**: `ConvoPeq_Part8_findings_2026-07-23.md` No.20
 
-**ファイル**: `src/audioengine/ISRDSPHandle.h:170–173`, `src/audioengine/ISRDSPHandle.cpp:12–20`
+**ファイル**: `src/audioengine/ISRDSPHandle.h:184–186`, `src/audioengine/ISRDSPHandle.cpp:13–19`
 
 **現象**:
-- `ISRDSPHandle.h:170-171` で `static_assert(std::atomic<DSPHandle>::is_always_lock_free, ...)` はコメントアウトされている (icx ではコンパイル時保証されないため)。
-- 代わりに `ISRDSPHandle.cpp:13-19` でランタイム `assert(ok && ...)` が使用されているが、これは `#define NDEBUG` 時 (Releaseビルド) に無視される。
+- `ISRDSPHandle.h:186` で `static_assert(std::atomic<DSPHandle>::is_always_lock_free, ...)` は `#if !defined(_MSC_VER)` ガード下にあり、非 MSVC コンパイラでは**アクティブ**である。MSVC/icx では `#else` 分岐でコメントアウトされる。
+- MSVC/icx では `#else` 分岐で `ISRDSPHandle.cpp:13-19` がランタイム `assert(ok && ...)` を使用するが、これは `#define NDEBUG` 時 (Releaseビルド) に無視される。
 - `activeRuntimeDSPHandle_` と `fadingRuntimeDSPHandle_` (16バイト構造体) は `CMPXCHG16B` に依存する。x64+AVX2では通常ロックフリーだが、Releaseビルドで非ロックフリー実装にフォールバックした場合、RTスレッドでのパフォーマンス低下やデッドロックのリスク。
 
 **修正**: `static_assert` を復活させるか、Releaseビルドでもランタイムチェックを維持する (例: `if (!isLockFree) std::abort()`)。
@@ -303,13 +324,13 @@ const uint32_t callbackUs = static_cast<uint32_t>(std::min<uint64_t>(callbackUs6
 ```cpp
 setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
 ```
-`NoiseShaperType` は `Psychoacoustic=0, Fixed4Tap=1, Fixed15Tap=2, Adaptive9thOrder=3` (Types.h:23)。state ファイルが壊れていると範囲外の enum 値をキャストして渡す可能性。`AudioEngine.Parameters.cpp:116` には `hasIntRange("noiseShaperType", 0, 3)` のバリデーションが存在するが、`StateIO.cpp:90` では使用されていない。
+`NoiseShaperType` は `Psychoacoustic=0, Fixed4Tap=1, Adaptive9thOrder=2, Fixed15Tap=3` (Types.h:23)。state ファイルが壊れていると範囲外の enum 値をキャストして渡す可能性。`AudioEngine.Parameters.cpp:116` には `hasIntRange("noiseShaperType", 0, 3)` のバリデーションが存在するが、`StateIO.cpp:90` では使用されていない。
 
 **修正**: 範囲チェックを追加:
 ```cpp
 const int value = static_cast<int>(state.getProperty("noiseShaperType"));
 if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) && 
-    value <= static_cast<int>(NoiseShaperType::Adaptive9thOrder))
+    value <= static_cast<int>(NoiseShaperType::Fixed15Tap))
     setNoiseShaperType(static_cast<NoiseShaperType>(value));
 ```
 
@@ -377,15 +398,15 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 
 ---
 
-### 3-6. `SnapshotFactory.cpp` の NaN ハッシュ不一致 (Medium) — ✅ Confirmed
+### 3-6. `core/SnapshotFactory.cpp` の NaN ハッシュ不一致 (Medium) — ✅ Confirmed
 
 **出元**: `bug_meta_ai.md` M-3
 
-**ファイル**: `src/SnapshotFactory.cpp`
+**ファイル**: `src/core/SnapshotFactory.cpp`
 
-**現象**: `-0.0f` と `0.0f` は同一視するが、NaNのペイロード違いは別ハッシュ。`areSnapshotsEquivalent` は epsilon比較で同値と判定するが、ハッシュ不一致で常に新規 `GlobalSnapshot` を `new` し、RCUに流す無駄な生成。
+**現象**: `-0.0f` と `0.0f` は `hashCombineFloat()` で `bits &= 0x7FFFFFFF` により同一視されるが、NaNのペイロード違いは別ハッシュ。`areSnapshotsEquivalent()` は epsilon比較 (`std::abs(a - b) > epsilon`) を使用するが、**NaN と任意の値の差は NaN になり `NaN > epsilon` は `false` となる**ため、NaN が混入したフィールドは「不一致」を検出できず等価と判定されてしまう。ハッシュ不一致により無駄な `GlobalSnapshot` 生成が発生する可能性。
 
-**検証詳細**: `hashCombineFloat()` (行 36–43) は `bits &= 0x7FFFFFFF` で `-0.0f` と `0.0f` を同一視しているが、NaN のペイロードビット (signaling/payload NaN) はマスクしない。一方 `areSnapshotsEquivalent()` (行 46–97) は `std::abs(a - b) > epsilon` の浮動小数点比較で、NaN と任意の値の差は `> epsilon` になるため **NaN が混入した状態では「不一致」と判定される**。つまりハッシュ不一致以前に、NaN が混入すると `areSnapshotsEquivalent` も `false` を返すため、常に新規 `GlobalSnapshot` が生成される。**影響**: NaN 混入が起きていない通常運用では問題なし。NaN がパラメータに混入した場合、ハッシュ不一致の前に `areSnapshotsEquivalent` が `false` を返すため、実害の出る箇所は同じ。
+**検証詳細**: `hashCombineFloat()` (行 36–43) は `bits &= 0x7FFFFFFF` で `-0.0f` と `0.0f` を同一視しているが、NaN のペイロードビット (signaling/payload NaN) はマスクしない。一方 `areSnapshotsEquivalent()` (行 46–97) は `std::abs(a - b) > epsilon` の浮動小数点比較を使用する。**NaN と任意の値の差は NaN になり、`NaN > epsilon` は常に `false` となる**。したがって NaN が混入したフィールドは `areSnapshotsEquivalent` において**「不一致」を検出できず**、NaN を任意の値と等価と判定してしまう (逆にハッシュ不一致が先に判定される場合もある)。**影響**: ハッシュ不一致から新規 `GlobalSnapshot` が生成される (通常運用では影響なし)。ハッシュ一致 + NaN ペイロード一致 → `areSnapshotsEquivalent` が `true` を返し、別の内部状態のスナップショットを「等価」と誤判定する可能性 (極めて稀)。NaN を正しく検出するには `std::isnan()` チェックを追加すべき。
 
 ---
 
@@ -413,6 +434,36 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 
 ---
 
+### 3-9. CMakeLists.txt Release ビルドの `/fp:fast` による浮動小数点精度低下 (Medium) — ✅ Confirmed
+
+**出元**: `bug_qwen.md` バグH20
+
+**ファイル**: `CMakeLists.txt:1143, 1219`
+
+**現象**:
+```cmake
+set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
+set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
+```
+`/fp:fast` は浮動小数点演算の再結合や特殊値(NaN/Inf)の最適化を許容する。DSPコード (特にコンボルバー、フィルタ係数計算) でこれにより数値精度が低下し、ノイズや歪みが発生する可能性。`/fp:precise` にするか、対象ターゲットのみ `/fp:fast` を適用すべき。
+
+**修正**: `set(CMAKE_CXX_FLAGS_RELEASE ...)` から `/fp:fast` を削除し、`target_compile_options(ConvoPeq PRIVATE /fp:precise)` または特定ファイルのみ許容。
+
+
+### 3-10. CMakeLists.txt Release ビルドの `/QxCORE-AVX2` による AMD CPU 非互換性 (Medium) — ✅ Confirmed
+
+**出元**: `bug_qwen.md` バグH21
+
+**ファイル**: `CMakeLists.txt:1219`
+
+**現象**:
+```cmake
+set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
+```
+`/QxCORE-AVX2` は **Intel CPU専用**の命令生成フラグ。AMD Ryzen (AVX2対応) でも `VPCOMPRESSD` 等の命令が異なるため、Intel CPUで生成されたバイナリが AMD で実行時にクラッシュする可能性。`ConvoPeq` ターゲット (行 1235) では `/arch:AVX2` (標準的) が既に設定されているが、グローバル `CMAKE_CXX_FLAGS_RELEASE` への `/QxCORE-AVX2` はすべてのターゲットに影響する。
+
+**修正**: `set(CMAKE_CXX_FLAGS_RELEASE ...)` から `/QxCORE-AVX2` を削除し、Intel向け最適化はターゲット固有に適用する。
+
 ## 4. 拒否 / 修正済み (Rejected / Fixed)
 
 | # | 指摘内容 | 判定理由 | ステータス |
@@ -425,13 +476,14 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 | R-6 | EQ 係数完全未検証 | `EQProcessor.Coefficients.cpp:84` に `validateAndClampParameters()` が存在する | ❌ Rejected |
 | R-7 | MessageBox 文字列破損 | `rg -n "ConvoPeq - CPU 非対応" src` で**0件ヒット**。Markdown破損と判定 | ❌ Rejected |
 | R-8 | `#pragma warning(push)` に対応する `pop` なし | `LockFreeRingBuffer.h:92` に `#pragma warning(pop)` が存在する | ❌ Rejected |
-| R-9 | `CMAKE_CXX_FLAGS_RELEASE` 全局上書き | `target_compile_options` (ターゲット固有) が使用されている | ❌ Rejected |
+| R-9 | `CMAKE_CXX_FLAGS_RELEASE` 全局上書き | CMakeLists.txt:1143 と :1219 で `set(CMAKE_CXX_FLAGS_RELEASE ...)` が明示的にグローバル設定されている。`target_compile_options` (ターゲット固有) も使用されているが、グローバル上書きにより**すべてのターゲット**に `/fp:fast` や `/QxCORE-AVX2` が適用される | ✅ Confirmed |
 | R-10 | CMA-ES メンバ型矛盾 (`double* mean` vs `mean.begin()`) | `CmaEsOptimizer.h:243` と `CmaEsOptimizerDynamic.cpp:132` は**異なるクラス** (`CmaEsOptimizer` vs `CmaEsOptimizerDynamic`)。`CmaEsOptimizerDynamic::mean` は `std::vector<double>` (同ファイル.h:41) であり `mean.begin()` は有効。Markdown結合による誤認と判定 | ❌ Rejected |
 | R-11 | RTTraceRelay 未結線 (Part 8 No.19) | `AudioEngine.Processing.AudioBlock.cpp:304` で `rtTraceRelay_.enqueue()` が呼ばれ、`AudioEngine.Timer.cpp:1132` で `rtTraceRelay_.drain()` が呼ばれている。結線済み | ❌ Rejected |
 | R-12 | DSPQuarantineManager 未使用 (Part 8 No.22) | `AudioEngine.Commit.cpp:617, 633`、`AudioEngine.Processing.ReleaseResources.cpp:233, 365, 373, 383, 385`、`AudioEngine.Threading.cpp:42, 85, 88, 128`、`AudioEngine.Timer.cpp:1790, 1827` で広範囲に使用されている | ❌ Rejected |
 | R-13 | ShutdownRuntime::advancePhase() デッドコード (Part 8 No.21) | `grep -n "advancePhase" src` で**0件ヒット**。メソッドは既に削除されている | ❌ Rejected |
 | R-14 | IR resample キャンセル不足 (N3) | `IRDSP.cpp:68, 93` で `if (shouldExit && shouldExit())` のチェックが存在する。キャンセル機構は実装済み | ❌ Rejected |
 | R-15 | audioCallbackActiveCount uint32 overflow (N9) | `AudioEngine.h:1618` の `audioCallbackActiveCount` は**同時アクティブなコールバック数**を表す (increment/decrement ペア)。42億同時コールバックという物理的不可能な状況でしか overflow しない | ❌ Rejected |
+| R-16 | `/fp:fast` Release ビルド浮動小数点不正確性 | CMakeLists.txt:1143,1219 で `/fp:fast` が `CMAKE_CXX_FLAGS_RELEASE` に含まれている。DSPコードの数値精度低下リスク。 | ✅ Confirmed |
 
 ---
 
@@ -449,6 +501,7 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 | **P1** | 2-6 (RCUReader ハッシュ衝突) | メモリリーク |
 | **P1** | 2-7 (`atomic<DSPHandle>` ロックフリー検証不足) | RTパフォーマンス低下 |
 | **P1** | 1-4 (fastTanh 複製) | 保守リスク |
+| **P1** | 1-10 (m_pendingIRChange early clear) | IR 変更要求消失 |
 | **P1** | 2-9 (uint64 underflow) | タイミング誤測 |
 | **P1** | 2-10 (enum キャスト検証欠如) | 不正状態復元 |
 | **P2** | 2-1 (非ASCII識別子) | ツール互換性 |
@@ -457,7 +510,8 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 | **P2** | 2-4 (strict-aliasing) | 移植性 |
 | **P2** | 2-5 (LockFreeRingBuffer size) | データ競合 |
 | **P2** | 2-8 (cleanup 強制削除未実装) | メモリ蓄積 |
-| **P3** | 3-1～3-8 (その他) | 将来の拡張性/品質 |
+| **P3** | 3-1～3-10 (その他) | 将来の拡張性/品質 |
+| **P3** | R-9 (CMAKE_CXX_FLAGS_RELEASE グローバル上書き) | /fp:fast + /QxCORE-AVX2 が全ターゲットに適用 |
 | **P3** | 1-5 (musicalSoftClip デッドコード) | コードクリーン |
 
 ---
@@ -481,7 +535,12 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 | grep | `rg -n "dspQuarantineManager_" src` | 15箇所で使用確認 |
 | grep | `rg -n "advancePhase" src` | 0件 (削除済み) |
 | grep | `rg -n "double\* mean\|mean\.begin\(\)" src` | `CmaEsOptimizer.h:243` と `CmaEsOptimizerDynamic.cpp:132` は異なるクラス |
-| grep | `rg -n "is_always_lock_free\|atomic<DSPHandle>" src` | `ISRDSPHandle.h:170` で `static_assert` コメントアウト確認 |
+| grep | `rg -n "is_always_lock_free\|atomic<DSPHandle>" src` | `ISRDSPHandle.h:186` で `#if !defined(_MSC_VER)` ガード下 static_assert 確認 (MSVC では `#else` でコメントアウト) |
+| grep | `rg -n "m_pendingIRChange" src/audioengine/AudioEngine.Snapshot.cpp` | `Snapshot.cpp:95` で `exchangeAtomic(..., false, ...)` 確認 — 公開前クリア |
+| grep | `rg -n "fp:fast" CMakeLists.txt` | `CMakeLists.txt:1143,1219` で `/fp:fast` 確認 |
+| grep | `rg -n "QxCORE-AVX2" CMakeLists.txt` | `CMakeLists.txt:1219` で Intel専用フラグ確認 |
+| grep | `rg -n "enum class NoiseShaperType" src/core/Types.h` | `Types.h:25-30` で `Adaptive9thOrder=2, Fixed15Tap=3` 確認 |
+| grep | `rg -n "set(CMAKE_CXX_FLAGS_RELEASE" CMakeLists.txt` | 2箇所でグローバルフラグ上書き確認 (R-9) |
 | grep | `rg -n "observeUs - matchedPublishEndUs\|nowUs - cbStartUs" src` | `AudioBlock.cpp:624,630,664` で uint64 減算確認 |
 | grep | `rg -n "NoiseShaperType\)(int)" src` | `StateIO.cpp:90` で検証なしキャスト確認 |
 | grep | `rg -n "kStateLimit\|clampStateSIMD" src` | `LatticeNoiseShaper.h:152-170` で state clamp 確認 |
@@ -493,18 +552,528 @@ if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
 
 ---
 
-## 7. 未調査領域 (今後の調査候補)
+
+### 1-8. `ConvolverProcessor.LoaderThread.cpp` の OOM リスク
+
+**Root Cause**: `tempFloatBuffer(numChannels, static_cast<int>(fileLength))` (LoaderThread.cpp:463) で `fileLength` は `MAX_FILE_LENGTH = 2147483647` (INT32_MAX) まで許可。ステレオ float で最大約 16GB の確保を試みる。`MAX_FILE_LENGTH` ガード (同ファイル:450, ResampleAndFallback.cpp:293) は整数オーバーフローを防止するがメモリ容量制限はしない。
+
+**Fix Approach**: ストリーミング読み込み — 256kサンプルブロック毎に `convertFloatToDoubleHighQuality` へ流す。
+```cpp
+constexpr int64_t STREAMING_CHUNK = 256 * 1024;
+for (int64_t offset = 0; offset < fileLength; offset += STREAMING_CHUNK) {
+    const int64_t chunk = std::min(STREAMING_CHUNK, fileLength - offset);
+}
+```
+
+**Testing**: 2GB を超える巨大 IR ファイルでメモリ使用量が一定範囲内に収まることを確認。
+
+**Risk**: High — 読み込みロジックの大幅変更。
+
+---
+
+### 1-9. `MKLNonUniformConvolver.cpp` の int/size_t 混在
+
+**Root Cause**: `l.fftSize * sizeof(double)` が `int * size_t` (MKLNonUniformConvolver.cpp:843, 847, 853, 855)。C++ の昇格規則により `int` が `size_t` に変換されるが、将来的に `fftSize` が `INT_MAX` を超える場合、`int` 自体のオーバーフロー。
+
+**Fix Approach**: `fftSize` を `int64_t` に変更し、`static_cast<size_t>()` を明示。
+
+**Testing**: 5秒@768kHz (fftSize 524288) でメモリ割り当てサイズが正しいことを確認。
+
+**Risk**: Low — 型の昇格による安全性向上。
+
+---
+
+### 1-10. `m_pendingIRChange` フラグの公開前クリア
+
+**Root Cause**: `AudioEngine.Snapshot.cpp:95` で `exchangeAtomic(m_pendingIRChange, false, ...)` がスナップショット構築開始時にフラグをクリア。`SnapshotFactory::createImpl()` が `nullptr` を返す場合、IR変更要求は永久に失われる。
+
+**Fix Approach**: クリアタイミングを公開完了後 (NonRT) に遅延。
+```cpp
+const bool pendingIrChange = convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire);
+// publish 成功後:
+if (publishSuccess) convo::publishAtomic(m_pendingIRChange, false, std::memory_order_release);
+```
+
+**Testing**: IR変更後スナップショットが等価判定を通過した場合でも IR変更が再試行されることを確認。
+
+**Risk**: Medium — フラグライフサイクルの変更。
+
+---
+
+### 2-1. 非ASCII文字を含む識別子 `SoftClipPadéPolicy`
+
+**Root Cause**: `FastTanhApprox.h:63` の `struct SoftClipPadéPolicy` は U+00E9 ('é') を含む。cppcheck の構文解析器をクラッシュさせる。
+
+**Fix Approach**: `SoftClipPadéPolicy` → `SoftClipPadeApproxPolicy` にリネーム。
+
+**Testing**: cppcheck が正常に解析できることを確認。
+
+**Risk**: Low — リネームのみ。
+
+---
+
+### 2-2. 入力側 DC ブロッカーの NaN/Inf スクラブ非対称
+
+**Root Cause**: 入力側は DC ブロッカー処理の前にのみ `sanitizeFiniteChunk()` が存在する (DSPCoreIO.cpp:231-232, 282-283)。後にはない。出力側は DC ブロッカー処理後に完全なスクラブが存在する (ConvolverProcessor.Runtime.cpp:722)。
+
+**Fix Approach**: 入力側 DC ブロッカー呼び出し直後に `sanitizeFiniteChunk()` を追加。
+
+**Testing**: NaN/Inf 入力を DC ブロッカーに通した後、出力に NaN/Inf が残らないことを確認。
+
+**Risk**: Low — データ完全性向上。
+
+---
+
+### 2-3. ユニットテストの矛盾条件
+
+**Root Cause**: `EQProcessorMaxGainTests.cpp:355-358` で `for (delta < 1e-6)` と `if (delta > 1e-6)` は同時に真になり得ない (cppcheck: `oppositeInnerCondition`)。`logBound` は常に 0.0。
+
+**Fix Approach**: 内側の `if (delta > 1e-6)` 条件を削除。
+
+**Testing**: テストが `logBound > 0` を検証するようになることを確認。
+
+**Risk**: Low — テスト修正。
+
+---
+
+### 2-4. `CacheManager.cpp` の strict-aliasing 違反
+
+**Root Cause**: `CacheManager.cpp:267` で `const uint8_t*` を `reinterpret_cast<const double*>` で読み替え。規格上の UB。
+
+**Fix Approach**: バイトオフセット計算 + `memcpy` のみ。
+```cpp
+double val;
+std::memcpy(&val, raw + byteOffset, sizeof(double));
+```
+
+**Testing**: strict-aliasing 警告なしでビルドできることを確認。
+
+**Risk**: Low — メモリ安全性向上。
+
+---
+
+### 2-5. `LockFreeRingBuffer::size()` のデータ競合
+
+**Root Cause**: `LockFreeRingBuffer.h:76-81` の `size()` は `writeIndex` と `readIndex` を別々に `acquire` で読み取り。SPSC なので実害は稀だが、`getAvailableSamples()` が負や巨大値を返す可能性。
+
+**Fix Approach**: 読み取り順序を固定し、負の結果をクランプ。
+```cpp
+size_t size() const noexcept {
+    const auto w = writeIndex.load(std::memory_order_acquire);
+    const auto r = readIndex.load(std::memory_order_acquire);
+    return (w >= r) ? (w - r) : 0;
+}
+```
+
+**Testing**: SPSC ストレステストで `size()` が負にならないことを確認。
+
+**Risk**: Low — 防衛的プログラミング。
+
+---
+
+### 2-6. `RCUReader::enter()` のハッシュ衝突リスク
+
+**Root Cause**: `RCUReader.h:51, 152` と `ThreadHash.h:9` で `cachedThreadHash()` (=`std::hash<std::thread::id>`) を使用。ハッシュ衝突時に2スレッドが同一オーナーと誤認。
+
+**Fix Approach**: `thread_local uint64_t` で単調増加 ID を採番。
+```cpp
+thread_local uint64_t threadInstanceId = []() {
+    static std::atomic<uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}();
+```
+
+**Testing**: 100+ スレッドでハッシュ衝突がないことを確認。
+
+**Risk**: Low — thread_local カウンタの追加。
+
+---
+
+### 2-7. `std::atomic<DSPHandle>` のロックフリー性検証不足
+
+**Root Cause**: `ISRDSPHandle.h:186` で `static_assert` は `#if !defined(_MSC_VER)` ガード下で非 MSVC コンパイラではアクティブ。MSVC/icx では `#else` 分岐でコメントアウトされ、`ISRDSPHandle.cpp:13-19` でランタイム `assert` を使用するが、Releaseビルド (NDEBUG) では無視される。
+
+**Fix Approach**: `if (!isLockFree) std::abort()` パターンで Release ビルドでも検証を維持。
+```cpp
+if (!ok) std::abort();
+```
+
+**Testing**: Releaseビルドで非ロックフリー環境で abort することを確認。
+
+**Risk**: Low — abort パターンの導入。
+
+---
+
+### 2-8. `ConvolverProcessor::cleanup()` の「強制削除」未実装
+
+**Root Cause**: `ConvolverProcessor.LoadPipeline.cpp:571-604` の `cleanup()` は2つのループを持つが、両方とも `waitForThreadToExit(0)` で即座にチェック。`forceCleanup()` (StateAndUI.cpp:965) は `stopThread(500)` を呼ぶが `cleanup()` は呼ばれない。
+
+**Fix Approach**: `cleanup()` にタイムアウト付き強制終了を追加。
+```cpp
+(*it)->stopThread(timeoutMs);
+if ((*it)->waitForThreadToExit(0)) { it = loaderTrashBin.erase(it); }
+```
+
+**Testing**: スレッドが終了しない場合に `stopThread` が呼ばれることを確認。
+
+**Risk**: Medium — スレッド終了ロジックの変更。
+
+---
+
+### 2-9. タイミング計算の uint64 underflow
+
+**Root Cause**: `AudioEngine.Processing.AudioBlock.cpp:624,630,664` と `BlockDouble.cpp:586,591,623` で `uint64_t` 減算がアンダーフロー。`nowUs - cbStartUs` が負の結果を `uint64_t` として巨大値に。
+
+**Fix Approach**: saturating subtraction。
+```cpp
+const uint64_t callbackUs64 = (nowUs >= cbStartUs) ? (nowUs - cbStartUs) : 0;
+const uint32_t callbackUs = static_cast<uint32_t>(std::min<uint64_t>(callbackUs64, UINT32_MAX));
+```
+
+**Testing**: タイミング逆転シナリオで巨大値が出力されないことを確認。
+
+**Risk**: Low — 防衛的計算。
+
+---
+
+### 2-10. `NoiseShaperType` enum キャストの検証欠如
+
+**Root Cause**: `AudioEngine.StateIO.cpp:90` で `setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"))` — 範囲チェックなし。enum は `Psychacoustic=0, Fixed4Tap=1, Adaptive9thOrder=2, Fixed15Tap=3` (Types.h:25-30)。
+
+**Fix Approach**: 範囲チェックを追加 (upper bound は `Fixed15Tap` = 3)。
+```cpp
+const int value = static_cast<int>(state.getProperty("noiseShaperType"));
+if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
+    value <= static_cast<int>(NoiseShaperType::Fixed15Tap))
+    setNoiseShaperType(static_cast<NoiseShaperType>(value));
+```
+
+**Testing**: 範囲外値 (4, -1) でクラッシュしないことを確認。
+
+**Risk**: Low — 入力検証追加。
+
+---
+
+### 3-1. `AudioSegmentBuffer.h` のリングラップ時データ竅突
+
+**Root Cause**: `AudioSegmentBuffer.h:50-123` の `pushBlock()` は ring wrap 時に2回の `FloatVectorOperations::copy()` を行う。`copyLatest()` が ring wrap 直後に 2ndチャンク書き込み中の領域を読み取る可能性 (non-atomic `double*`)。SPSC で緩和されている。
+
+**Fix Approach**: ダブルバッファリングまたはバージョンカウンタで整合性保証。
+
+**Testing**: TSan で ring wrap 時にデータ競合がないことを確認。
+
+**Risk**: Medium — データ構造の変更。
+
+---
+
+### 3-2. `DeferredDeletionQueue.h` の kMaxScan デッドコード
+
+**Root Cause**: `DeferredDeletionQueue.h:120` の `reclaim()` は `scanPos == deqPos` かん `canDelete` の時のみ進み、先頭が削除不可の場合即 `break`。`scanned < kMaxScan` は実質1回で終了。将来の先読み拡張の備え。
+
+**Fix Approach**: 現状維持。コメントを明確にするか、将来の拡張に備えて kMaxScan を文書化。
+
+**Testing**: 既存テスト通過を確認 (変更なし)。
+
+**Risk**: N/A — デッドコードだが安全。
+
+---
+
+### 3-3. `AlignedAllocation.h` の例外 RT 伝播
+
+**Root Cause**: `AlignedAllocation.h:19-25` の `aligned_malloc` が `throw std::bad_alloc()`。`aligned_malloc_nothrow()` (line 29-32) が存在するが、RT パスでの使用保証が不十分。
+
+**Fix Approach**: RT パスで `aligned_malloc_nothrow` を使用するか、事前割当の徹底。
+
+**Testing**: RT パスで bad_alloc が RT に伝播しないことを確認。
+
+**Risk**: Medium — メモリ管理の統一。
+
+---
+
+### 3-4. `MKLNonUniformConvolver.cpp` のアライメント判定競合
+
+**Root Cause**: `MKLNonUniformConvolver.cpp:1571-1581` では `aligned` フラグを関数入口で1回計算。`dst` は `l.accumBuf` (64-byte アライン), `src` は `l.fftTimeBuf` (64-byte アライン) なので `aligned` は常に `true`。`mkl_malloc` が非アラインを返すケースは実運用では起こらない。
+
+**Fix Approach**: 入口でのポインタ検証アサートを追加。
+
+**Testing**: 非アラインドポインタを検出できることを確認。
+
+**Risk**: Low — アサート追加のみ。
+
+---
+
+### 3-5. `CacheManager.cpp` の `volatile sink`
+
+**Root Cause**: `CacheManager.cpp:203, 241` で `volatile uint8_t sink` を使用。MSVC では volatile がメモリバリアにならない。C++20 では非推奨。
+
+**Fix Approach**: `std::atomic_signal_fence(std::memory_order_seq_cst)` への置き換え。
+
+**Testing**: ページウォームアップが機能することを確認。
+
+**Risk**: Low — 最適化抑止パターンの更新。
+
+---
+
+### 3-6. `core/SnapshotFactory.cpp` の NaN ハッシュ不一致
+
+**Root Cause**: `hashCombineFloat()` (行 36-43) は `bits &= 0x7FFFFFFF` で `-0.0f` と `0.0f` を同一視するが、NaN のペイロードビットはマスクしない。`areSnapshotsEquivalent()` (行 46-97) は `std::abs(a - b) > epsilon` 比較を使用する。**NaN と任意の値の差は NaN になり、`NaN > epsilon` は `false` となる**。NaN が混入したフィールドは `areSnapshotsEquivalent` において「不一致」を検出できず、NaN を任意の値と等価と判定してしまう。
+
+**Fix Approach**: `areSnapshotsEquivalent` に `std::isnan()` チェックを追加。
+```cpp
+if (std::isnan(params.saturationAmount) || std::isnan(snapshot.saturationAmount))
+    return false;
+```
+
+**Testing**: NaN 入力で `areSnapshotsEquivalent` が `false` を返すことを確認。
+
+**Risk**: Low — NaN ハンドリング追加。
+
+---
+
+### 3-7. `SpectrumAnalyzerComponent.cpp` の `alignas` ループ内配置
+
+**Root Cause**: `SpectrumAnalyzerComponent.cpp:474` でループ内に `alignas(64) float mags[8]` が宣言されている。MSVC では毎回スタックを64-byte アラインする。`_mm256_store_ps` は 32-byte アラインで十分。
+
+**Fix Approach**: ループ外へ移動し、`alignas(32)` に変更。
+
+**Testing**: 出力が変わらないことを確認。
+
+**Risk**: Low — パフォーマンス最適化。
+
+---
+
+### 3-8. `ConvolverProcessor.h` の `cachedLatency` 例外安全性
+
+**Root Cause**: `ConvolverProcessor.h:927` の `cachedLatency` は `std::atomic<LatencySnapshot*>`。コピーコンストラクタと `operator=` は `delete` されている (h:927 近辺)。`std::atomic` のコピー代入は `delete` されたため安全。`new LatencySnapshot()` が `std::bad_alloc` を投げる場合は OOM。
+
+**Fix Approach**: `aligned_make_unique` 使用を検討。現状維持も可。
+
+**Testing**: 既存テスト通過を確認 (変更なし)。
+
+**Risk**: N/A — 安全確認済み。
+
+---
+
+### 3-9. CMakeLists.txt の `/fp:fast`
+
+**Root Cause**: `CMakeLists.txt:1143, 1219` で `set(CMAKE_CXX_FLAGS_RELEASE ...)` に `/fp:fast` が含まれている。浮動小数点再結合と NaN/Inf 最適化により DSP 数値精度が低下。
+
+**Fix Approach**: `CMAKE_CXX_FLAGS_RELEASE` から `/fp:fast` を削除し、`target_compile_options(ConvoPeq PRIVATE /fp:precise)` を追加。
+
+**Testing**: `/fp:precise` ビルドで既存テストの数値結果が変わらないことを確認。
+
+**Risk**: Low — コンパイラフラグ変更。
+
+---
+
+### 3-10. CMakeLists.txt の `/QxCORE-AVX2`
+
+**Root Cause**: `CMakeLists.txt:1219` で `set(CMAKE_CXX_FLAGS_RELEASE ...)` に `/QxCORE-AVX2` が含まれている。Intel CPU専用。AMD Ryzen でクラッシュ。`ConvoPeq` ターゲット (line 1235) では `/arch:AVX2` が設定済み。
+
+**Fix Approach**: `CMAKE_CXX_FLAGS_RELEASE` から `/QxCORE-AVX2` を削除。Intel向け最適化はターゲット固有に適用。
+```cmake
+set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /Gy /Zi /utf-8")
+```
+
+**Testing**: AMD CPU でビルドしたバイナリが実行できることを確認。
+
+**Risk**: Low — フラグ分離。
+
+---
+
+### R-9. `CMAKE_CXX_FLAGS_RELEASE` 全局上書き
+
+**Root Cause**: `CMakeLists.txt:1143` と `:1219` で `set(CMAKE_CXX_FLAGS_RELEASE ...)` が明示的にグローバル設定されている。これにより**すべてのターゲット**に `/fp:fast`, `/QxCORE-AVX2`, `/O2` or `/O3` が適用される。`target_compile_options(ConvoPeq PRIVATE /arch:AVX2)` も使用されているが、グローバル上書きによりターゲット固有の設定が部分的に無効化される可能性。
+
+**Fix Approach**: `CMAKE_CXX_FLAGS_RELEASE` をデフォルトに戻し (または最小限に)、すべての最適化フラグを `target_compile_options` でターゲット固有に指定。
+```cmake
+# Remove: set(CMAKE_CXX_FLAGS_RELEASE "...")
+# Use per-target:
+target_compile_options(ConvoPeq PRIVATE /O2 /Ob2 /DNDEBUG /arch:AVX2 /Gy /Zi)
+```
+
+**Testing**: すべてのターゲットが期待通りのフラグでビルドされることを確認。
+
+**Risk**: Medium — ビルド設定の大幅変更。
+
+---
+
+
+---
+
+## 7. 詳細修正設計 (Detailed Fix Design)
+
+以下は各バグに対する詳細設計。Root Cause分析、修正アプローチ、コードパターン、テスト方針、リスク評価を含む。
+
+### 1-1. `nucHCMode` / `nucLCMode` がセッション永続化から欠落
+
+**Root Cause**: `ConvolverProcessor::getState()` (StateAndUI.cpp:202) は `juce::ValueTree` にテイル関連プロパティを `setProperty()` で書き出すが、`nucHCMode`/`nucLCMode` を追加していない。`setState()` (行 289) も同様。これらのフィールドは実行時には `pendingOverride`/`snapshot` 間で同期されており (行 142-143, 194-199, 830-831)、ハッシュ計算にも含まれている (行 861-862)。
+
+**Fix Approach**:
+```cpp
+// getState() に追加 (StateAndUI.cpp:242 付近)
+v.setProperty("nucHCMode", static_cast<int>(snapshot.nucHCMode), nullptr);
+v.setProperty("nucLCMode", static_cast<int>(snapshot.nucLCMode), nullptr);
+
+// setState() に追加 (StateAndUI.cpp:362 付近)
+if (v.hasProperty("nucHCMode") && v.hasProperty("nucLCMode")) {
+    const int hcVal = static_cast<int>(v.getProperty("nucHCMode"));
+    const int lcVal = static_cast<int>(v.getProperty("nucLCMode"));
+    const auto hc = juce::jlimit(static_cast<int>(convo::HCMode::Sharp),
+                                 static_cast<int>(convo::HCMode::Natural), hcVal);
+    const auto lc = juce::jlimit(static_cast<int>(convo::LCMode::Natural),
+                                 static_cast<int>(convo::LCMode::Sharp), lcVal);
+    setNUCFilterModes(static_cast<convo::HCMode>(hc),
+                      static_cast<convo::LCMode>(lc));
+}
+```
+
+**Testing**: 保存→再読込後に `getNucHCMode()` / `getNucLCMode()` が元値と一致することを確認。
+
+**Risk**: Low — pure addition, no logic change.
+
+---
+
+### 1-2. `coordinatorDeferredRing_` / `lastResortQueue_` がプロデューサー不在のデッドコード
+
+**Root Cause**: `coordinatorDeferredRing_` (容量 1024 の LockFreeRingBuffer) は `.pop()` でのみ消費される (ISRRuntimePublicationCoordinator.cpp:330)。push/producer がコードベース全体に**存在しない**。`lastResortQueue_` (容量 4096 の生配列) は drain 関数内でのみ read/compaction が行われる (行 355, 371, 374)。new entry の追加は**存在しない**。`coordinatorDeferredCount_` は `fetchSub`/`consume` でのみ使用される (行 336, 340, 463)。`lastResortCount_` は `{0}` 初期化後増加しない。コンストラクタは `lastResortQueue_` の値初期化を行わない (生配列のため未初期化のまま)。
+
+**Fix Approach**:
+1. `lastResortQueue_` の値初期化: `RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity]{};`
+2. producer 実装の検討: `emitRetireIntent` overflow 時に `lastResortQueue_` への enqueue を追加
+3. デッドコード削除: producer を実装しない場合、`coordinatorDeferredRing_` と `lastResortQueue_` を削除
+
+**Testing**:
+- TSan で `coordinatorDeferredRing_` / `lastResortQueue_` への同時アクセスなしを確認
+- drain 関数で `lastResortCount_ == 0` の場合即 return を確認
+
+**Risk**: Medium — producer 追加は複雑な同期ロジックが必要。
+
+---
+
+### 1-3. `_mm256_store_pd` のアライメント保証なし
+
+**Root Cause**: `convertFloatToDoubleHighQuality()` (InputBitDepthTransform.h:108) は `double* dst` の 32-byte アライメントを保証しない。`_mm256_store_pd` は 32-byte アライメントが必要。現在の呼び出し元は偶然アライドだが将来の変更で非アライドになる可能性。
+
+**Additional sites**: `_mm256_store_pd` は他に `TruePeakDetector.cpp:85`, `EQProcessor.Processing.cpp:37`, `MKLNonUniformConvolver.cpp:1319, 1580` にも存在する。Bug 3-4 で MKLNonUniformConvolver のアライメントチェックがあるが、他の3サイトは未検証。
+
+**Fix Approach**:
+```cpp
+// Option A: アンアライドストア (最も安全)
+_mm256_storeu_pd(dst + i, _mm256_cvtps_pd(lo));
+_mm256_storeu_pd(dst + i + 4, _mm256_cvtps_pd(hi));
+
+// Option B: 契約の明示 (C++20 preconditions)
+[[expects: reinterpret_cast<uintptr_t>(dst) % 32 == 0]]
+```
+
+**Testing**: 非アライドバッファを渡して #GP が発生しないことを確認 (AddressSanitizer + 非アライド割り当て)。
+
+**Risk**: Low — `_mm256_storeu_pd` はわずかに遅いが安全。
+
+---
+
+### 1-4. `fastTanh` の3箇所独立複製
+
+**Root Cause**: `FastTanhApprox.h:101-107` にテンプレート版 `fastTanh<Policy>` が存在する (default `DefaultFastTanhPolicy`)。`SoftClipPadéPolicy` (line 63) は 10395/1260/21 係数。`DSPCoreDouble.cpp:127,191` は `SoftClipPadéPolicy` を使用。`DSPCoreFloat.cpp:146` と `DSPCoreIO.cpp:76` は独自の `inline double fastTanh(double x)` を複製。`EQProcessor.Processing.cpp:104` は `fastTanh<>()` (デフォルトポリシー) を使用。
+
+**Fix Approach**:
+1. `FastTanhApprox.h:63` の `SoftClipPadéPolicy` を `SoftClipPadeApproxPolicy` にリネーム
+2. `DSPCoreFloat.cpp` / `DSPCoreIO.cpp` の独自 `fastTanh` を削除
+3. `#include "dsp/math/FastTanhApprox.h"` を追加
+4. 呼び出しを `convo::dsp::fastTanh<convo::dsp::SoftClipPadeApproxPolicy>(...)` に変更
+
+```cpp
+// DSPCoreFloat.cpp:186 / DSPCoreIO.cpp:116 — Before:
+const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
+// After:
+const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadeApproxPolicy>((abs_x - threshold) / knee);
+```
+
+**Testing**: Float パスと Double パスのサチュレーション出力が一致することを確認 (最大許容差 1e-12)。
+
+**Risk**: Medium — 係数の不一致により既存のサウンドが変化する可能性。
+
+---
+
+### 1-5. `musicalSoftClip` が未使用のデッドコード
+
+**Root Cause**: `AudioEngine::DSPCore::musicalSoftClip()` (h:1066, DSPCoreIO.cpp:341-343) は宣言・定義されているが、コードベース全体で**呼び出されない**。実際の処理はファイルローカルな `musicalSoftClipScalar()` が使用されている (DSPCoreFloat.cpp:165,186, DSPCoreDouble.cpp:107,117, DSPCoreIO.cpp:95,116)。
+
+**Fix Approach**: クラスメソッド `musicalSoftClip()` を削除するか、実際に呼び出し側に結線する。DSPCoreDouble.cpp:217 では `musicalSoftClipScalar` が直接呼ばれており、クラスメソッド版は冗長。
+
+**Testing**: クラスメソッド削除後、ビルド成功 + 既存テスト通過を確認。
+
+**Risk**: Low — デッドコード削除。
+
+---
+
+### 1-6. IPP FFT 戻り値無視
+
+**Root Cause**: `MklFftEvaluator.h:270-271, 425-426` で `ippsFFTFwd_RToCCS_64f()` の戻り値 (`IppStatus`) を無視。IPP 初期化失敗や不正な `fftSpec` 時に無効なデータが残る。`FFTBackend.cpp:130,146` は既に戻り値をキャプチャ済み (修正済み)。`MklFftEvaluator.h:78-92` の `ippsFFTInit_R_64f` は戻り値をチェック済み `[Bug 2 fix]` コメント付き。MKL DFT 関数 (`DftiComputeForward` 等) は全て `!= DFTI_NO_ERROR` チェック済み。
+
+**Fix Approach**:
+```cpp
+// Line 270-271 Before:
+ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+// After:
+IppStatus st1 = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+IppStatus st2 = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+if (st1 != ippStsNoErr || st2 != ippStsNoErr) {
+    DBG("MklFftEvaluator: ippsFFTFwd_RToCCS_64f failed (st1=" + juce::String(static_cast<int>(st1)) + ", st2=" + juce::String(static_cast<int>(st2)) + ")");
+    return nullptr;
+}
+```
+
+**Testing**: 無効な fftSpec でエラーが正しく検出されることを確認。
+
+**Risk**: Low — エラーハンドリング追加。
+
+---
+
+### 1-7. `ISRRetire.cpp` での Mutex 使用
+
+**Root Cause**: `emitRetireIntentRT()` (ISRRetire.cpp:94) は RT から呼ばれる可能性があるが、内部で `emitRetireIntent()` (line 102) を呼び出し、`fallbackMutex_` (h:169) を取得する (line 44, 135, 265)。RT スレッドでの mutex 取得は優先度逆転でオーディオドロップを引き起こす。コードコメント (line 97) は「実装は emitRetireIntent() を素通しし、輻輳時に std::mutex をロックする」と自認している。
+
+**Fix Approach**:
+1. RT パス (`emitRetireIntentRT`) は `overflowRing_` のみに退避 (mutex なしロックフリー)
+2. Non-RT パス (`emitRetireIntent`) は `overflowRing_` から drain し、必要時のみ `fallbackMutex_` を取得
+3. `emitRetireIntentRT` が `fallbackMutex_` にアクセスしないことを保証
+
+```cpp
+// emitRetireIntentRT — RT path, no mutex
+void LifetimeState::emitRetireIntentRT(const RetireIntent& intent) noexcept {
+    if (overflowRing_ != nullptr && overflowRing_->tryPush(encodeIntent(intent))) {
+        return;
+    }
+    overflowDroppedCount_.fetch_add(1, std::memory_order_relaxed);
+    // RT パス: mutex 取得を絶対回避
+}
+```
+
+**Testing**: RT スレッドから `emitRetireIntentRT` を連続呼出しし、mutex が取得されないことを確認 (TSan)。
+
+**Risk**: High — RT パスの設計変更。
+
+---
+
+
+## 8. 未調査領域 (今後の調査候補)
 
 | 領域 | 理由 |
 |---|---|
-| `ConvolverProcessor.LoadPipeline.cpp` (867行) | 本体ロジック未精査 |
-| `ConvolverProcessor.MixedPhase.cpp` (869行) | 本体ロジック未精査 |
-| `ConvolverProcessor.ResampleAndFallback.cpp` (474行) | 本体ロジック未精査 |
+| `ConvolverProcessor.LoadPipeline.cpp` (867行) | **部分調査済み**: Bug 1-8 で `cleanup()`/`waitForThreadToExit` を確認。Bug 1-6 で `DftiCreateDescriptor` チェック済み |
+| `ConvolverProcessor.MixedPhase.cpp` (869行) | **部分調査済み**: Bug 1-6 で `DftiCreateDescriptor`/`DftiComputeForward` のエラードリブを確認 (line 180, 278, 761, 811, 812) |
+| `ConvolverProcessor.ResampleAndFallback.cpp` (474行) | **部分調査済み**: Bug 1-8 で `MAX_FILE_LENGTH` ガード確認 (line 293)。Bug 1-6 で `DftiComputeForward` チェック済み (line 395, 433) |
 | `ConvolverProcessor.Rebuild.cpp` | 未着手 |
-| `ConvolverProcessor.Lifecycle.cpp` | 未着手 |
-| `src/core/EpochDomain.h` (543行) | 内容未精査 |
-| `src/core/ThreadAffinityManager.h` (293行) | 内容未精査 |
-| `NoiseShaperLearner.cpp` CMA-ES本体 | 未着手 |
-| `MKLNonUniformConvolver.cpp` FDL/NUPC本体 | 未着手 |
-| `EQProcessor::reset()` RT到達可能性 | 前回から持ち越し |
-| `AudioEngine.Mmcss.cpp` MMCSS RT影響 | N10として部分確認済み (Low/Medium) |
+| `ConvolverProcessor.Lifecycle.cpp` | **調査済み**: Bug 1-1 で `nucHCMode`/`nucLCMode` 使用箇所確認 (line 265-266) |
+| `src/core/EpochDomain.h` (543行) | 未着手 |
+| `src/core/ThreadAffinityManager.h` (293行) | 未着手 |
+| `NoiseShaperLearner.cpp` CMA-ES本体 | **部分調査済み**: Bug R-10 で `CmaEsOptimizer` vs `CmaEsOptimizerDynamic` のクラス分離を確認 |
+| `MKLNonUniformConvolver.cpp` FDL/NUPC本体 | **部分調査済み**: Bug 1-9 で `fftSize * sizeof(double)` 検証 (line 843, 847)。Bug 3-4 でアライメントチェック確認 (line 1571-1581)。`_mm256_store_pd` at line 1319, 1580 も確認 |
+| `EqProcessor::reset()` RT到達可能性 | 前回から持ち越し |
+| `AudioEngine.Mmcss.cpp` MMCSS RT影響 | **調査済み**: N10 として部分確認 (thread_local HANDLE, no destructor, single init per thread) |
+| `SnapshotCoordinator.h` | **調査済み**: REPAIR_PLAN3.md BUG-015 (SafeStateSwapper パターン) |
+| `SRSnapshotFadeState.h` | **調査済み**: REPAIR_PLAN3.md BUG-024 |
+| `ObservedRuntime.h` | **調査済み**: REPAIR_PLAN3.md BUG-026 |

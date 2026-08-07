@@ -125,10 +125,33 @@ else()
     endif()
 
     # Looks like we're bootstrapping, reinvoke CMake
+    # Use a single-config Ninja generator for the helper tools build to avoid
+    # issues with Ninja Multi-Config in nested configure. The juceaide tools
+    # are host-only and do not need multi-config support.
+    # ★ FIX: VSジェネレータの場合は元のジェネレータを保持し、
+    # PASSTHROUGH_ARGSから -G 指定を除去して競合を回避
+    if(CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
+        set(_JUCEAIDE_GENERATOR "Ninja")
+    elseif(CMAKE_GENERATOR MATCHES "Visual Studio")
+        # VSジェネレータでは元のジェネレータを保持（Ninjaは利用不可）
+        set(_JUCEAIDE_GENERATOR "${CMAKE_GENERATOR}")
+    else()
+        set(_JUCEAIDE_GENERATOR "${CMAKE_GENERATOR}")
+    endif()
+
+    # PASSTHROUGH_ARGS からジェネレータ関連引数を除去（競合防止）
+    set(_clean_args "")
+    foreach(arg ${PASSTHROUGH_ARGS})
+        if(NOT arg MATCHES "^-G$" AND NOT arg MATCHES "^-G")
+            list(APPEND _clean_args "${arg}")
+        endif()
+    endforeach()
+    set(PASSTHROUGH_ARGS ${_clean_args})
+
     execute_process(COMMAND "${CMAKE_COMMAND}"
             "."
             "-B${JUCE_BINARY_DIR}/tools"
-            "-G${CMAKE_GENERATOR}"
+            "-G${_JUCEAIDE_GENERATOR}"
             "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
             "-DCMAKE_CONFIGURATION_TYPES=Custom"
             "-DCMAKE_BUILD_TYPE=Custom"

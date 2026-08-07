@@ -76,6 +76,8 @@ doc/BIGDATA/
 sampledata/real_irs/
 sampledata/synthetic/
 .commandcode
+.freebuff/
+build-msvc/
 nul
 
 # Coverage reports

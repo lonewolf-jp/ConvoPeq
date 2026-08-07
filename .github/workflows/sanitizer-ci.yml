@@ -48,14 +48,28 @@ jobs:
       - uses: actions/checkout@v5
 
       # ★ ASan-CMAKE-4 修正（2026-07-31）: windows-latest には Intel oneAPI が未インストールのため、
-      #   CMakeLists.txt:833 の find_package(MKL REQUIRED CONFIG ...) が configure 時に失敗する。
+      #   CMakeLists.txt の find_package(MKL REQUIRED CONFIG ...) が configure 時に失敗する。
       #   oneAPI をセットアップして MKLROOT を設定することで解決する。
       #   （ConvoPeq は MKL 必須依存のため、MKL 無しでは asan ジョブは成立しない）
-      - name: Set up Intel oneAPI (MKL)
-        uses: intel/setup-intel-oneapi@v2
-        with:
-          components: mkl
-          version: "2026.0"
+      # ★ 2026-08-06: intel/setup-intel-oneapi アクションは deprecated/リポジトリ削除されたため
+      #   Chocolatey で Intel oneAPI Base Kit (MKL 含む) をインストールし、
+      #   setvars.bat で環境変数を設定する。
+      - name: Install Intel oneAPI Base Kit (MKL)
+        shell: pwsh
+        run: |
+          choco install intel-oneapi-basekit -y --no-progress --no-color
+
+      - name: Initialize Intel oneAPI environment
+        shell: pwsh
+        run: |
+          $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
+          if (Test-Path "$oneapiRoot\setvars.bat") {
+            cmd /c """$oneapiRoot\setvars.bat"" intel64 && set" | ForEach-Object {
+              if ($_ -match "^(.*?)=(.*)$") {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+              }
+            }
+          }
 
       - name: Configure CMake with ASan
         shell: pwsh

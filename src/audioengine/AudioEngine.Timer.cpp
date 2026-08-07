@@ -621,7 +621,9 @@ void AudioEngine::timerCallback()
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     auto* currentDspForRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     auto* fadingDspForRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+#endif
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
@@ -823,13 +825,13 @@ void AudioEngine::timerCallback()
     processLearningCommands();
     processDeferredLearningActions();
 
-    const bool hasFading = (fadingDspForRuntime != nullptr);
-    const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle)
-        || shouldUseDryAsOldInWorld(runtimeReadHandle);
-
     // ★ XFADE start 検出: crossfadeRuntime_ が非pending→pendingに遷移した瞬間を記録
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
+        const bool hasFading = (fadingDspForRuntime != nullptr);
+        const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle)
+            || shouldUseDryAsOldInWorld(runtimeReadHandle);
+
         static bool s_prevPending = false;
         const bool nowPending = crossfadeRuntime_.isPending();
         if (nowPending && !s_prevPending) {

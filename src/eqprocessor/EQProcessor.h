@@ -116,6 +116,8 @@ struct EQCoeffsBiquad
 // CPU/メモリ効率を向上させる不変キャッシュ
 // ライフサイクル管理は DSPHandleRuntime が担当する。
 //--------------------------------------------------------------
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324を抑制 - struct padding due to alignment
 struct alignas(64) EQCoeffCache
 {
     EQCoeffsSVF coeffs[20];              // SVF係数 (20バンド)
@@ -134,6 +136,7 @@ struct alignas(64) EQCoeffCache
     EQCoeffCache(const EQCoeffCache&) = delete;
     EQCoeffCache& operator=(const EQCoeffCache&) = delete;
 };
+#pragma warning(pop)
 
 //--------------------------------------------------------------
 // EQプロセッサークラス

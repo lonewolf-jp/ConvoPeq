@@ -225,6 +225,7 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     case ShutdownBlockingReason::QuarantineResident: reasonName = "QuarantineResident"; break;
     case ShutdownBlockingReason::RouterPendingRetire: reasonName = "RouterPendingRetire"; break;
     case ShutdownBlockingReason::ReaderActive: reasonName = "ReaderActive"; break;
+    case ShutdownBlockingReason::ActiveBuilder: reasonName = "ActiveBuilder"; break;  // ★ SHUTDOWN-7
     case ShutdownBlockingReason::Unknown: reasonName = "Unknown"; break;
     }
 

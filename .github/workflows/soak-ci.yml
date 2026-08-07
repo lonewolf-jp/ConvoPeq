@@ -43,11 +43,25 @@ jobs:
       - uses: actions/checkout@v5
 
       # ConvoPeq は MKL/IPP 必須依存のため Intel oneAPI をセットアップ
-      - name: Set up Intel oneAPI (MKL + IPP)
-        uses: intel/setup-intel-oneapi@v2
-        with:
-          components: mkl,ipp
-          version: "2026.0"
+      # ★ 2026-08-06: intel/setup-intel-oneapi アクションは deprecated/リポジトリ削除されたため
+      #   Chocolatey で Intel oneAPI Base Kit (MKL+IPP 含む) をインストールし、
+      #   setvars.bat で環境変数を設定する。
+      - name: Install Intel oneAPI Base Kit (MKL + IPP)
+        shell: pwsh
+        run: |
+          choco install intel-oneapi-basekit -y --no-progress --no-color
+
+      - name: Initialize Intel oneAPI environment
+        shell: pwsh
+        run: |
+          $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
+          if (Test-Path "$oneapiRoot\setvars.bat") {
+            cmd /c """$oneapiRoot\setvars.bat"" intel64 && set" | ForEach-Object {
+              if ($_ -match "^(.*?)=(.*)$") {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+              }
+            }
+          }
 
       - name: Configure CMake (Release)
         shell: pwsh

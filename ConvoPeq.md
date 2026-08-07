@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-05 01:03:36
+> Generated: 2026-08-07 23:56:03
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -289,6 +289,9 @@
             ├── AudioEngineHarness/
             │   ├── AudioEngineHarness.cpp
             │   ├── AudioEngineHarness.h
+            │   ├── DeferredFlowIntegrationTests.cpp
+            │   ├── DeferredPublicationTestAccess.h
+            │   ├── DeferredPublishViewStateMachineTests.cpp
             │   ├── PublishPipelineIntegrationTests.cpp
             │   └── SoakPublishIntegrationTests.cpp
             ├── BuildInputSemanticContractTests.cpp
@@ -309,6 +312,8 @@
             ├── OwnerChannelTests.cpp
             ├── PartialPublicationRejectTests.cpp
             ├── PriorityIntegrationTests.cpp
+            ├── PublicationAdmissionTestRuntimeStubs.cpp
+            ├── PublicationAdmissionTests.cpp
             ├── PublicationValidatorIsolationTests.cpp
             ├── RebuildAdmissionRegressionTests.cpp
             ├── RetireGraceSemanticsTests.cpp
@@ -403,6 +408,37 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(RuntimePublicationCoordinatorTests
         src/tests/RuntimePublicationCoordinatorTests.cpp
     )
+
+    # ★ Phase-2: Admission Policy unit test (pure Policy — evaluateDeferred() only)。
+    #   PublicationAdmission.cpp → AudioEngine.h → JuceHeader.h は CONVOPEQ_HAS_MKL を
+    #   継承するため、ISRSemanticValidationTests と同一パターンで mkl インクルードパスを
+    #   追加 + MKL::MKL をリンク（DiagnosticsConfig.h の mkl.h 解決 + mkl_malloc シンボル）。
+    add_executable(PublicationAdmissionTests
+        src/tests/PublicationAdmissionTests.cpp
+        src/audioengine/PublicationAdmission.cpp
+        src/tests/PublicationAdmissionTestRuntimeStubs.cpp
+    )
+    target_include_directories(PublicationAdmissionTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(PublicationAdmissionTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(PublicationAdmissionTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    target_compile_definitions(PublicationAdmissionTests PRIVATE _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_features(PublicationAdmissionTests PRIVATE cxx_std_20)
+    target_compile_options(PublicationAdmissionTests PRIVATE /utf-8)
+    add_dependencies(PublicationAdmissionTests ConvoPeq)
+    add_test(NAME PublicationAdmissionTests COMMAND PublicationAdmissionTests)
 
     # ISRSemanticValidationTests は ISR セマンティクス検証用。
     # RuntimePublicationCoordinator を直接使用するため .cpp を含める。
@@ -615,7 +651,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_include_directories(EQBoundExcessBenchmark PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
     add_test(NAME EQBoundExcessBenchmark COMMAND EQBoundExcessBenchmark --quick)
 
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    if(CONVOPEQ_HAS_MKL AND MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(ISRSemanticValidationTests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
@@ -625,6 +661,19 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         # ★ Work91: ISRSoakTests も AlignedAllocation.h (mkl_malloc/mkl_free) を使用するため
         #   MKL::MKL をリンク（RuntimeState::createForBuilder が aligned_make_unique を呼ぶ）。
         target_link_libraries(ISRSoakTests PRIVATE MKL::MKL)
+        # ★ Phase-2: PublicationAdmission.cpp → AudioEngine.h → JuceHeader.h に
+        #   CONVOPEQ_HAS_MKL 定義を継承するため、mkl.h + mkl シンボルを解決する。
+        #   ISRSemanticValidationTests と同一パターン。
+        target_link_libraries(PublicationAdmissionTests PRIVATE MKL::MKL)
+        # ★ DiagnosticsConfig.h は JUCE_DSP_USE_INTEL_MKL 定義에 따라 mkl.h 를 include する。
+        #   ConvoPeq の PRIVATE 정의は 테스트 타깃에 상속되지 않으므로、
+        #   여기서 직접 정의 + MKLROOT/include를 명시적으로 추가して mkl.h 解決을 보장する。
+        target_compile_definitions(ISRSemanticValidationTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_compile_definitions(ISRSoakTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_compile_definitions(PublicationAdmissionTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_include_directories(ISRSemanticValidationTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+        target_include_directories(ISRSoakTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+        target_include_directories(PublicationAdmissionTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
@@ -911,6 +960,18 @@ if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
             endif()
         endforeach()
     endif()
+endif()
+
+#------------------------------------------------------------
+# icx(Clang-cl) 전역 경고 억제
+# NOMINMAX 재정의(-Wmacro-redefined) 및 UNUSED-COMMAND-LINE-ARGUMENT
+# 경고는 JUCE 모듈(native header)과 충돌하므로 전역적으로 억제
+#------------------------------------------------------------
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|IntelLLVM")
+    add_compile_options(
+        -Wno-macro-redefined
+        -Wno-unused-command-line-argument
+    )
 endif()
 
 #------------------------------------------------------------
@@ -1757,6 +1818,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/AudioEngineHarness.cpp
         src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
+        src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
+        src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)
@@ -1770,6 +1833,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     endif()
     target_compile_definitions(AudioEngineHarness PRIVATE
         CONVOPEQ_STANDALONE_ONLY=1
+        CONVOPEQ_UNIT_TESTS=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
@@ -2018,95 +2082,29 @@ if "%DO_CLEAN%"=="1" (
 )
 
 REM ------------------------------------------------------------
-REM Setup MSVC environment (skipped for icx mode)
-if not "!COMPILER_MODE!"=="msvc" goto setup_msvc_skip
-set "VCVARS_PATH="
-set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-set "VS_INSTALL_PATH="
-
-if exist "%VSWHERE_PATH%" (
-    echo [INFO] Detecting Visual Studio via vswhere...
-    for /f "delims=" %%I in ('"%VSWHERE_PATH%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul') do (
-        set "VS_INSTALL_PATH=%%I"
-    )
-
-    if defined VS_INSTALL_PATH (
-        set "VCVARS_PATH=!VS_INSTALL_PATH!\VC\Auxiliary\Build\vcvarsall.bat"
-    )
-)
-
-REM Fallback: common hard-coded locations (when vswhere is unavailable)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\17\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\17\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Professional\VC\Auxiliary\Build\vcvarsall.bat"
-)
-if not defined VCVARS_PATH (
-    if exist "C:\Program Files\Microsoft Visual Studio\17\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Community\VC\Auxiliary\Build\vcvarsall.bat"
-)
-
-if defined VCVARS_PATH (
-    echo [INFO] Found vcvarsall.bat. Executing...
-    echo [INFO]   !VCVARS_PATH!
-    call "!VCVARS_PATH!" x64
-    @echo off
-    if errorlevel 1 (
-        echo [ERROR] Failed to initialize MSVC environment.
-        call :maybe_pause
-        exit /b 1
-    )
-    echo [INFO] MSVC environment initialized.
-) else (
-    echo [ERROR] vcvarsall.bat not found.
-    echo [ERROR] Checked via vswhere and common Visual Studio install paths.
-    echo [HINT] Install Visual Studio C++ workload, or ensure vswhere exists at:
-    echo [HINT]   !VSWHERE_PATH!
-    call :maybe_pause
-    exit /b 1
-)
-
-goto setup_oneapi
-:setup_msvc_skip
-echo [INFO] icx mode: MSVC vcvarsall.bat skipped (icx auto-detects Windows SDK).
-:setup_oneapi
-REM ------------------------------------------------------------
-REM Setup Intel oneAPI environment (required for both MSVC and icx)
+REM Setup environment for icx mode
 set "ONEAPI_SETVARS=C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
-if exist "%ONEAPI_SETVARS%" (
-    echo [INFO] Found Intel oneAPI setvars.bat. Executing...
-    call "%ONEAPI_SETVARS%" intel64
-    @echo off
-    if errorlevel 1 (
-        echo [ERROR] Failed to initialize Intel oneAPI environment.
-        call :maybe_pause
-        exit /b 1
-    )
-    echo [INFO] Intel oneAPI environment initialized.
-) else (
-    echo [ERROR] Intel oneAPI MKL not found!
-    echo Please install Intel oneAPI Base Toolkit.
+set "ONEAPI_LIB=C:\Program Files (x86)\Intel\oneAPI"
+if not "!COMPILER_MODE!"=="icx" goto setup_done
+
+echo [INFO] icx mode: MSVC vcvarsall.bat skipped (icx auto-detects Windows SDK).
+echo [INFO] Initializing Intel oneAPI environment...
+call "%ONEAPI_SETVARS%" intel64
+if errorlevel 1 (
+    echo [ERROR] Failed to initialize Intel oneAPI environment.
     call :maybe_pause
     exit /b 1
 )
-
-REM ------------------------------------------------------------REM Setup Intel oneAPI library paths (linker search paths)
-REM setvars.bat sets INCLUDE but not always LIB for all components.
-REM Ensure MKL, IPP, and compiler runtime libs are findable by the linker.
 set "ONEAPI_LIB=C:\Program Files (x86)\Intel\oneAPI"
-if exist "%ONEAPI_LIB%\mkl\latest\lib" set "LIB=%ONEAPI_LIB%\mkl\latest\lib;%LIB%"
-if exist "%ONEAPI_LIB%\ipp\latest\lib" set "LIB=%ONEAPI_LIB%\ipp\latest\lib;%LIB%"
-if exist "%ONEAPI_LIB%\compiler\latest\lib" set "LIB=%ONEAPI_LIB%\compiler\latest\lib;%LIB%"
-echo [INFO] Intel oneAPI library paths added to LIB.
+set "MKLROOT=%ONEAPI_LIB%\mkl\latest"
+set "IPPROOT=%ONEAPI_LIB%\ipp\latest"
+set "ONEAPI_ROOT=%ONEAPI_LIB%"
+if exist "!ONEAPI_LIB!\mkl\latest\lib" set "LIB=!ONEAPI_LIB!\mkl\latest\lib;!LIB!"
+if exist "!ONEAPI_LIB!\ipp\latest\lib" set "LIB=!ONEAPI_LIB!\ipp\latest\lib;!LIB!"
+if exist "!ONEAPI_LIB!\compiler\latest\lib" set "LIB=!ONEAPI_LIB!\compiler\latest\lib;!LIB!"
+echo [INFO] Intel oneAPI environment initialized.
+
+:setup_done
 
 REM ------------------------------------------------------------
 REM Create build directory
@@ -2262,6 +2260,19 @@ goto :eof
 if "%NO_PAUSE%"=="1" goto :eof
 pause
 goto :eof
+
+:setup_oneapi_done
+for /f "usebackq tokens=1,* delims==" %%A in ("%ONEAPI_ENV_TMP%") do (
+    if /i "%%A"=="PATH" set "PATH=%%B;!PATH!"
+    if /i "%%A"=="INCLUDE" set "INCLUDE=%%B;!INCLUDE!"
+    if /i "%%A"=="LIB" set "LIB=%%B;!LIB!"
+    if /i "%%A"=="ICX_HOME" set "ICX_HOME=%%B"
+    if /i "%%A"=="MKLROOT" set "MKLROOT=%%B"
+    if /i "%%A"=="IPPROOT" set "IPPROOT=%%B"
+    if /i "%%A"=="ONEAPI_ROOT" set "ONEAPI_ROOT=%%B"
+)
+del /q "%ONEAPI_ENV_TMP%" 2>nul
+exit /b 0
 
 
 
@@ -20286,10 +20297,11 @@ void MainWindow::timerCallback()
     if (cliAutomationTelemetryLoggingEnabled)
         return;
 
+    const bool hasActiveDsp = audioEngine.hasActiveRuntimeDSP();
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;
     const double sr = audioEngine.getSampleRate();
-    const bool latencySrValid = (sr > 0.0);
+    const bool latencySrValid = hasActiveDsp && (sr > 0.0);
     const int latencyMsX10 = latencySrValid
         ? static_cast<int>(std::lround((static_cast<double>(latencySamples) * 10000.0) / sr))
         : 0;
@@ -20311,7 +20323,9 @@ void MainWindow::timerCallback()
         }
         else
         {
-            latencyText = "Lat: -- ms (" + juce::String(latencySamples) + " smp)";
+            latencyText = hasActiveDsp
+                ? "Lat: -- ms (" + juce::String(latencySamples) + " smp)"
+                : "Lat: -- ms";
         }
 
         latencyLabel.setText(latencyText, juce::dontSendNotification);
@@ -38069,14 +38083,17 @@ void AudioEngine::rebuildThreadLoop()
 
             // ★ ISR Builder/Coordinator 分離: CoordinatorLoop からの deferred publish ハンドオフ。
             //   Builder（RebuildThread）が consume → submit（同期）を実行する。
-            //   - consumeDeferredRequest() は hasDeferred_ を false に、submit が再 Deferred なら
+            //   - processDeferredAdmission() は hasDeferred_ を false に（View.consume/discard → owner_->finishView()）、submit が再 Deferred なら
             //     enqueueDeferred で hasDeferred_ を true に戻す（→ 次 1ms tick で Coordinator が再通知）。
             //   - submitPublishRequest は同期（receipt は CoordinatorLoop の processIntent が配送する
             //     ため自己待ちにならない）。
             if (doDeferredPublish && runtimeOrchestrator_ != nullptr)
             {
-                if (const auto req = runtimeOrchestrator_->consumeDeferredRequest())
-                    runtimeOrchestrator_->submitPublishRequest(*req);
+                // ★ Phase-1: Atomic Admission flow (design-D4 D-13 ④ / ADR-C4:113)。
+                //   processDeferredAdmission() へ一本化（peek → evaluateDeferred →
+                //   consume/discard → finishView → submitPublishRequest）。
+                //   submitPublishRequest は必要なら再 enqueue（hasDeferred_=true）。
+                runtimeOrchestrator_->processDeferredAdmission();
             }
 
             struct DSPGuard
@@ -39221,7 +39238,7 @@ void AudioEngine::processDeferredReleases()
 //     • runtimePublicationBridge_.processIntent / drainOverflowRing operate on
 //       lock-free queues + atomic counters (safe off-MessageThread).
 //     • Deferred resubmit is MessageManager-free: runtimeOrchestrator_
-//       submitPublishRequest / consumeDeferredRequest (atomic hasDeferred_).
+    //       submitPublishRequest / processDeferredAdmission (atomic hasDeferred_).
 //==============================================================================
 void AudioEngine::startCoordinatorLoop() noexcept
 {
@@ -39250,7 +39267,7 @@ void AudioEngine::runCoordinatorPhase() noexcept
     // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
     //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。
     //     deferred がある場合、publishRetryReady フラグを立てて RebuildThread を起床させるだけ。
-    //     RebuildThread が consumeDeferredRequest() → submitPublishRequest()（同期）を実行する
+    //     RebuildThread が processDeferredAdmission() を実行する（peek → evaluate → consume/discard → finishView → submitPublishRequest）
     //     （Builder 責務は RebuildThread に一元化）。
     //   ★ ビジーループ防止: predicate に hasDeferredRequest() を直接入れず、フラグ駆動にする。
     //     Deferred が継続しても RebuildThread は休眠し、Coordinator が次 1ms tick で再通知するまで
@@ -39906,7 +39923,9 @@ void AudioEngine::timerCallback()
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     auto* currentDspForRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     auto* fadingDspForRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+#endif
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
@@ -40108,13 +40127,13 @@ void AudioEngine::timerCallback()
     processLearningCommands();
     processDeferredLearningActions();
 
-    const bool hasFading = (fadingDspForRuntime != nullptr);
-    const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle)
-        || shouldUseDryAsOldInWorld(runtimeReadHandle);
-
     // ★ XFADE start 検出: crossfadeRuntime_ が非pending→pendingに遷移した瞬間を記録
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
+        const bool hasFading = (fadingDspForRuntime != nullptr);
+        const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle)
+            || shouldUseDryAsOldInWorld(runtimeReadHandle);
+
         static bool s_prevPending = false;
         const bool nowPending = crossfadeRuntime_.isPending();
         if (nowPending && !s_prevPending) {
@@ -41470,6 +41489,7 @@ struct CoeffSet {
 #include "ISRAuthorityClass.h"
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
+namespace convo::isr { class PublicationAdmission; }
     namespace convo::isr { class ISRRetireRouter; }
     namespace convo::isr { struct PublishExecutor; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
@@ -42967,6 +42987,14 @@ public:
     {
         return consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire);
     }
+    // ★ Phase-1: Single Thread Owner 契約の実行時検証アクセサ (design-D4 D-13.6 (1)・ADR-C4:100-105)。
+    //   Deferred Publish の peek/consume/discard は RebuildThread 専用。Coordinator/
+    //   Timer/Recovery-worker が呼ぶと hasDeferred_(atomic)→deferredSlot_(non-atomic)
+    //   の handshake が崩壊する。rebuildThread_（設計書仮名）は実際はこの std::thread メンバ
+    //   の id に由来する。jassert(std::this_thread::get_id() == engine_.rebuildThreadId())。
+    [[nodiscard]] std::thread::id rebuildThreadId() const noexcept { return rebuildThread.get_id(); }
+    // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
+    [[nodiscard]] int currentBuildGeneration() const noexcept { return consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
 
     [[nodiscard]] RuntimeBackpressureTelemetry getRuntimeBackpressureTelemetry() const noexcept
     {
@@ -43899,7 +43927,8 @@ public:
     // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が deferred publish を RebuildThread へ
     //   ハンドオフするためのイベント駆動フラグ。hasPendingTask と同じ rebuildMutex で保護する
     //   （atomic にはしない）。CoordinatorLoop が 1ms tick ごとに set + notify_one、RebuildThread が
-    //   起床時にクリアし、consumeDeferredRequest → submitPublishRequest（同期）を実行する。
+    //   起床時にクリアし、processDeferredAdmission()（peek → evaluateDeferred →
+    //   consume/discard → releaseSlot → submitPublishRequest）を実行する。
     //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
     bool publishRetryReady = false;
 
@@ -44874,6 +44903,24 @@ public:
 private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
+#if defined(CONVOPEQ_UNIT_TESTS)
+    // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
+    friend class DeferredPublicationTestAccess;
+    // テストビルドでのみ evaluate()（PublicationAdmission）が
+    // testFadingRuntimePresent() に到達できるようにする（Production ビルドでは
+    // この friend 宣言・メンバ・評価分岐がすべて存在せず、バイナリ無変更）。
+    friend class convo::isr::PublicationAdmission;
+    // テスト専用 precondition override（Option-2 hook）:
+    //   DeferredFadingActive の前提「published world に fading runtime が存在」を
+    //   決定論的に作る。Production の Decision 判定ロジック（if hasFading →
+    //   DeferredFadingActive）は一切変更しない。Production ビルドではこの
+    //   メンバと評価分岐は両方ともコンパイルされず、バイナリは無変更。
+    std::atomic<bool> testFadingRuntimePresent_ { false };
+    [[nodiscard]] bool testFadingRuntimePresent() const noexcept
+    {
+        return testFadingRuntimePresent_.load(std::memory_order_acquire);
+    }
+#endif
     friend class convo::isr::PublicationExecutor;
     friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
@@ -48121,6 +48168,8 @@ using CrossfadeId = uint32_t;
 /**
  * crossfade 記録
  */
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324を抑制 - struct padding due to alignment
 struct CrossfadeRecord
 {
     CrossfadeId id;
@@ -48129,6 +48178,7 @@ struct CrossfadeRecord
     uint64_t    startEpoch;
     bool        active;
 };
+#pragma warning(pop)
 
 /**
  * レジストリスロット内部構造
@@ -54701,6 +54751,7 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     case ShutdownBlockingReason::QuarantineResident: reasonName = "QuarantineResident"; break;
     case ShutdownBlockingReason::RouterPendingRetire: reasonName = "RouterPendingRetire"; break;
     case ShutdownBlockingReason::ReaderActive: reasonName = "ReaderActive"; break;
+    case ShutdownBlockingReason::ActiveBuilder: reasonName = "ActiveBuilder"; break;  // ★ SHUTDOWN-7
     case ShutdownBlockingReason::Unknown: reasonName = "Unknown"; break;
     }
 
@@ -55311,12 +55362,46 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
     }
 
     // 5. Fading active check → defer
-    const bool hasFading = engine.hasFadingRuntimeInWorld(
-        engine.makeRuntimeReadHandle(ctx));
+    const bool hasFading =
+#if defined(CONVOPEQ_UNIT_TESTS)
+        engine.testFadingRuntimePresent() ||
+#endif
+        engine.hasFadingRuntimeInWorld(
+            engine.makeRuntimeReadHandle(ctx));
     if (hasFading)
         return Decision::DeferredFadingActive;
 
     return Decision::Accepted;
+}
+
+// ★ Phase-1: evaluateDeferred — Deferred publish の stale-discard を判定する。
+//   design-D4 A-4 / D-9 / ADR-C4:41,64。Admission は **Decision のみ返す**
+//   （ADR-C4 §Consequences: Admission = Decision only; View = Store mutation）。
+//   Engine 参照を取らず、DeferredAdmissionSnapshot の5値のみで判定する。
+//   判定順序: Shutdown → TTL → Generation → Sequence（design-D4 判定順序の根拠）。
+//   （shutdown の強制消去は Orchestrator::clearDeferredForShutdown の補完。）
+PublicationAdmission::DeferredAdmissionResult
+PublicationAdmission::evaluateDeferred(const DeferredPublishMetadata& m,
+                                       const DeferredAdmissionSnapshot& ctx) const noexcept
+{
+    // 0) Shutdown — 終了中は一切 publish しない（ADR-C4:64 snapshot の shutdown フィールド利用）。
+    if (ctx.shutdown)
+        return {DeferredDecision::Discard, DiscardReason::ShutdownDiscard};
+
+    // 1) TTL (stale) — 30s 超過で破棄。ageUs は evaluate 時点 (ctx.nowUs) にて算出。
+    const uint64_t ageUs = ctx.nowUs - m.enqueueTimestampUs;
+    if (ageUs > ctx.ttlUs)
+        return {DeferredDecision::Discard, DiscardReason::StaleDiscard};  // ★ work37: Expired を別 enum 化可能
+
+    // 2) Generation — rebuild 時代が違う → Snapshot 失効（int 比較で -Wsign-compare 回避済み）。
+    if (m.generation != ctx.currentGeneration)
+        return {DeferredDecision::Discard, DiscardReason::StaleDiscard};
+
+    // 3) Sequence — Publish済みSnapshotより古い → Reject（ISR-WORLD-001: 履歴の後戻り禁止）。
+    if (m.sequence < ctx.lastSequence)
+        return {DeferredDecision::Discard, DiscardReason::StaleDiscard};
+
+    return {DeferredDecision::Ready, DiscardReason::None};
 }
 
 } // namespace convo::isr
@@ -55332,6 +55417,8 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
 #include "ISRDSPHandle.h"
 #include "core/RuntimeReaderContext.h"
 #include "RuntimeHealthMonitor.h"  // ★ P1-B: ISRHealthState
+#include "RuntimePublicationState.h"   // ★ Phase-1: DiscardReason
+#include "ISRRuntimeSemanticSchema.h"  // ★ Phase-1: PublicationSequenceId
 
 class AudioEngine;  // forward declaration (circular dep avoid)
 
@@ -55381,6 +55468,51 @@ public:
     [[nodiscard]] Decision evaluate(const PublishRequest& req,
                                     AudioEngine& engine,
                                     const convo::RuntimeReaderContext& ctx) const noexcept;
+
+    // ★ Phase-1: Deferred stale-discard Admission (design-D4 D-13 / ADR-C4)。
+    //   追加方針: Admission は「判定のみ」を返す (ADR design principle)。Store 変更は
+    //   DeferredPublishView が行う。これらは additive（既存呼び出しゼロ）のため
+    //   コンパイル安全。実装は PublicationAdmission.cpp で行う (Phase-1 3a)。
+    //   ※ 実装前に JUCE CMakeビルドで可視性を確認すること。
+    enum class DeferredDecision {
+        Ready,    // 有効 → view.consume() へ進む
+        Discard,  // 破棄 → view.discard(reason) へ（理由は evaluateDeferred が返す）
+        // ★ Ready / Discard の2値のみ（RetryLater は利用経路ゼロ・YAGNI のため見送り。
+        //   将来 Queue 多段化等で必要になった時点で追加。→ Appendix B-2）
+    };
+
+    // 判定結果: 動作指令 + 破棄理由（Discard 時のみ discardReason が有効）。
+    //   ★ 責務分離: この struct は「判定」のみ。Store 変更は View が行う
+    //   （ADR principle: Admission = Decision only; View = Store mutation;
+    //    ADR-C4 §Consequences）。Admission は Storage Authority を持たない。
+    struct DeferredAdmissionResult {
+        DeferredDecision decision{DeferredDecision::Discard};  // 明示的に設定される（初期値は Discard）
+        DiscardReason discardReason{DiscardReason::None};  // decision==Discard のとき有効
+    };
+
+    // enqueue 時点の immutable metadata（DeferredPublishSlot に格納・Snapshot 化）。
+    struct DeferredPublishMetadata {
+        int generation{0};
+        PublicationSequenceId sequence{0};
+        uint64_t enqueueTimestampUs{0};
+    };
+
+    // evaluate 時点の Observation Snapshot（Engine を直参照せず POD のみ受渡）。
+    //   ※ ttlUs は将来的 PolicyTTLUs（ADR-C4:85）への拡張口。現在は Orchestrator が
+    //     kDeferredPublishTTLUs を詰める。Admission はこれを読んで TTL 判定する。
+    struct DeferredAdmissionSnapshot {
+        int currentGeneration{0};
+        PublicationSequenceId lastSequence{0};
+        bool shutdown{false};
+        uint64_t nowUs{0};
+        uint64_t ttlUs{0};
+    };
+
+    // evaluateDeferred: Deferred publish の stale-discard を判定する。
+    //   Engine 参照を取らず（AudioEngine& 不要）、DeferredAdmissionSnapshot のみで判定。
+    //   Decision のみ返し、Store は一切変更しない（view.consume/discard は caller が行う）。
+    [[nodiscard]] DeferredAdmissionResult evaluateDeferred(const DeferredPublishMetadata& metadata,
+                                                           const DeferredAdmissionSnapshot& ctx) const noexcept;
 
     // Deferred Queue は PublicationAdmission から RuntimePublicationOrchestrator へ移設済み (PR-7)。
     // Admission は publish 可否判定のみ責務とする。
@@ -59639,8 +59771,16 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     deferredSlot_ = DeferredPublishSlot{
         .request = req,
         .guard = DeferredGuard{
-            .generation = static_cast<uint64_t>(req.generation),
+            .generation = req.generation,  // int のまま格納（第13回 D-13 ⑤: uint64_t への
+                                            // static_cast を廃止・型統一）
             .sequence = engine_.getLastCommittedPublicationSequence()
+        },
+        // ★ Phase-1: enqueue-time immutable snapshot（View.metadata() の参照先）。
+        //   guard{generation,sequence} + enqueueTimestampUs から構築。design-D4 A-3/D-13.6 反映。
+        .metadata = PublicationAdmission::DeferredPublishMetadata{
+            .generation = req.generation,
+            .sequence = engine_.getLastCommittedPublicationSequence(),
+            .enqueueTimestampUs = now
         },
         .lastDiscardReason = DiscardReason::None,
         .enqueueTimestampUs = now
@@ -59677,6 +59817,109 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
     dh.lastDiscardReason = DiscardReason::ShutdownDiscard;
     dh.lastDiscardTimestampUs = nowUs;
     telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ Phase-1: peekDeferred — consumeDeferredRequest の後継（View 借用）。hasDeferred_ 非反転。
+//   Single Thread Owner（RebuildThread）契約の jassert 付き（ADR-C4:100-105）。
+std::optional<DeferredPublishView> RuntimePublicationOrchestrator::peekDeferred() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    if (!hasDeferred_.load(std::memory_order_acquire) || !deferredSlot_.has_value())
+        return std::nullopt;
+    return DeferredPublishView(*this, *deferredSlot_);
+}
+
+// ★ Phase-1: evaluateDeferred 用の Observation Snapshot 構築 (engine-state → POD)。
+//   Policy はこれを直参照しない。5値: currentGeneration / lastSequence / shutdown / nowUs / ttlUs。
+PublicationAdmission::DeferredAdmissionSnapshot
+RuntimePublicationOrchestrator::buildDeferredAdmissionSnapshot() const noexcept
+{
+    return PublicationAdmission::DeferredAdmissionSnapshot{
+        .currentGeneration = engine_.currentBuildGeneration(),
+        .lastSequence = engine_.getLastCommittedPublicationSequence(),
+        .shutdown = engine_.isShutdownInProgress(),
+        .nowUs = convo::getCurrentTimeUs(),
+        .ttlUs = kDeferredPublishTTLUs
+    };
+}
+
+// ★ Phase-1: finishView — ownership Release の唯一口（design-D4 §1488 / §139-140）。
+//   DeferredPublishView.consume()/discard() が owner_->finishView() を呼ぶ。
+//   slot reset + hasDeferred_ flip + DeferredHealth telemetry を一括実行。
+void RuntimePublicationOrchestrator::finishView() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    DiscardReason reason = DiscardReason::None;
+    uint64_t discardTs = 0;
+    if (deferredSlot_.has_value()) {
+        reason = deferredSlot_->lastDiscardReason;
+        if (reason != DiscardReason::None)
+            discardTs = convo::getCurrentTimeUs();
+    }
+    deferredSlot_.reset();
+    hasDeferred_.store(false, std::memory_order_release);
+
+    DeferredHealth dh;
+    dh.deferredCount = 0;
+    dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+    dh.lastDiscardReason = reason;
+    dh.lastDiscardTimestampUs = discardTs;
+    telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ Phase-1: DeferredPublishView 実装（out-of-line。Orchestrator 定義完結後 = .cpp 内）。
+//   consume/discard は owner_->finishView() を終端で呼ぶ（design-D4 §107/§134/§1488）。
+PublicationAdmission::PublishRequest DeferredPublishView::consume() noexcept
+{
+    jassert(state_ == State::Valid && slot_ != nullptr);
+    state_ = State::Consumed;
+    auto req = std::move(slot_->request);  // finishView の slot reset 前に move-out（req は view 外生存）
+    owner_->finishView();                  // ownership release（slot reset / hasDeferred_ flip / telemetry）
+    return req;
+}
+
+void DeferredPublishView::discard(DiscardReason reason) noexcept
+{
+    jassert(state_ == State::Valid && slot_ != nullptr);
+    slot_->lastDiscardReason = reason;
+    state_ = State::Discarded;
+    owner_->finishView();
+}
+
+// ★ Phase-1: processDeferredAdmission — RebuildThread 専用の atomic flow
+//   (peek → evaluateDeferred → consume/discard → finishView → submitPublishRequest)。
+//   design-D4 D-13 ④ / ADR-C4 §113。consume/discard は owner_->finishView() を内蔵し
+//   ownership releaseを行うため、本関数は呼出のみ。Ready なら submitPublishRequest で
+//   resubmit；必要なら再 enqueue（hasDeferred_=true）される。
+//   （旧: RebuildDispatch.cpp:846 'consumeDeferredRequest → submitPublishRequest'。
+//    AudioEngine.h:2528-2529 の consumeDeferredRequest → processDeferredAdmission 一本化済み）
+void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    if (!hasDeferred_.load(std::memory_order_acquire))
+        return;
+
+    auto view = peekDeferred();
+    if (!view.has_value())
+        return;
+
+    auto result = admission_.evaluateDeferred(view->metadata(),
+                                             buildDeferredAdmissionSnapshot());
+    switch (result.decision) {
+        case PublicationAdmission::DeferredDecision::Ready: {
+            // consume は owner_->finishView() を呼んで ownership release を完結する。
+            auto req = view->consume();      // move-out + finishView()
+            view.reset();                    // borrow 解除（slot は Orchestrator が reset 済み）
+            submitPublishRequest(req);       // resubmit（再 enqueue は submitPublishRequest 内で）
+            break;
+        }
+        case PublicationAdmission::DeferredDecision::Discard: {
+            // discard は lastDiscardReason 記録 + owner_->finishView() で ownership release。
+            view->discard(result.discardReason);
+            view.reset();
+            break;
+        }
+    }
 }
 
 // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
@@ -59732,6 +59975,7 @@ void RuntimePublicationOrchestrator::publishHealthSnapshot(uint64_t externalRecl
 #include <atomic>
 #include <cstdint>
 #include <optional>
+#include <thread>  // ★ Phase-1: std::this_thread::get_id() Single Thread Owner スレッドガード
 #include "RuntimePublicationState.h"
 #include "TelemetryRecorder.h"
 #include "PublicationAdmission.h"
@@ -59743,12 +59987,15 @@ void RuntimePublicationOrchestrator::publishHealthSnapshot(uint64_t externalRecl
 #include "core/TimeUtils.h"
 
 class AudioEngine;
+class RuntimePublicationOrchestrator;
 
 namespace convo::isr {
 
 // ★ C-2.1: DeferredGuard — stale discard 用のガード情報
 struct DeferredGuard {
-    uint64_t generation;
+    int generation;        // req.generation と同型（int）。uint64_t だった旧型は ISR A-4
+                          // 比較 (m.generation != ctx.currentGeneration) で -Wsign-compare
+                          // を誘発したため統一（第13回レビュー反映・D-13 ⑤）。
     PublicationSequenceId sequence;
 };
 
@@ -59756,8 +60003,80 @@ struct DeferredGuard {
 struct DeferredPublishSlot {
     PublicationAdmission::PublishRequest request;
     DeferredGuard guard;
+    PublicationAdmission::DeferredPublishMetadata metadata{};  // ★ Phase-1: enqueue-time immutable snapshot (View.metadata() の参照先)
     DiscardReason lastDiscardReason{DiscardReason::None};
     uint64_t enqueueTimestampUs{0};
+};
+// ★ Phase-1: DeferredPublishView — move-only Protocol View over a DeferredPublishSlot。
+//   Single Thread Owner（RebuildThread）契約下でのみ peek/evaluate/consume/discard が成立。
+//   slot 寿命は Orchestrator（deferredSlot_）が保証するため、View は借用ポインタのみ保持。
+//   ★ 責務分離 (ADR-C4 §Consequences / design-D4 §134 / §1488):
+//     Admission は Decision（+discardReason）のみ返す・Store 触らない。
+//     Store mutation は View の consume()/discard() が行うが、ownership Release
+//     （deferredSlot_.reset() / hasDeferred_ flip / telemetry）は View が
+//     owner_->finishView() へ委譲する（Owner が Owner を管理する = Authority Singularization）。
+//     state_ 遷移は View が保持；所有権解除は Orchestrator::finishView() が行う。
+//   ★ finishView() は Orchestrator の公開 API。View は owner_ バックポインタで到達する
+//     （design-D4 §107/§134/§1488）。consume/discard/dtor は終端で owner_->finishView() を呼ぶ。
+//   ★ 実装は RuntimePublicationOrchestrator.cpp で out-of-line 定義（owner_->finishView() の呼出のため、
+//     Orchestrator クラス定義完結後 = .cpp 内）。
+class DeferredPublishView {
+public:
+    enum class State : uint8_t { Valid, Consumed, Discarded, MovedFrom };
+
+    DeferredPublishView() noexcept = default;
+    DeferredPublishView(RuntimePublicationOrchestrator& owner, DeferredPublishSlot& slot) noexcept
+        : owner_(&owner), slot_(&slot), state_(State::Valid) {}
+
+    DeferredPublishView(const DeferredPublishView&) = delete;
+    DeferredPublishView& operator=(const DeferredPublishView&) = delete;
+    DeferredPublishView(DeferredPublishView&& o) noexcept
+        : owner_(o.owner_), slot_(o.slot_), state_(o.state_) {
+        o.owner_ = nullptr; o.slot_ = nullptr; o.state_ = State::MovedFrom;
+    }
+    DeferredPublishView& operator=(DeferredPublishView&& o) noexcept {
+        if (this != &o) {
+            if (slot_ != nullptr && state_ == State::Valid)
+                jassertfalse;  // peek→evaluate→consume/discard 未完了のまま上書き = バグ
+            owner_ = o.owner_; slot_ = o.slot_; state_ = o.state_;
+            o.owner_ = nullptr; o.slot_ = nullptr; o.state_ = State::MovedFrom;
+        }
+        return *this;
+    }
+
+    ~DeferredPublishView() {
+        // ADR-C4 §107: 暗黙 discard しない。Valid のまま破棄 = peek-only 欠陥 → fail-fast。
+        // （design-D4 §111 の「re-peek」方針は本 ADR で fail-fast へ更新済み）。
+        if (slot_ != nullptr && state_ == State::Valid)
+            jassertfalse;
+    }
+
+    [[nodiscard]] State state() const noexcept { return state_; }
+    [[nodiscard]] bool isValid() const noexcept { return state_ == State::Valid; }
+
+    // Admission へ渡す immutable metadata（slot.metadata の const 参照）。
+    // const& 安全は: (a) View が slot 寿命を保証 (Single Thread Owner) +
+    // (b) consume/discard 後の呼び出し禁止 (state_ ガード) + (c) slot 非変更契約
+    //   （ADR-C4 90-95「将来スレッドモデルが変わる場合は値返し」）。
+    [[nodiscard]] const PublicationAdmission::DeferredPublishMetadata& metadata() const noexcept {
+        jassert(state_ == State::Valid);
+        return slot_->metadata;
+    }
+
+    // consume: request を move-out し state_ を State::Consumed へ遷移。
+    //   終端で owner_->finishView() を呼び、ownership release（slot reset / hasDeferred_ flip /
+    //   telemetry）を Orchestrator が一括実行する（design-D4 §106/§134/§426-427）。
+    //   move-out は finishView の slot reset 前に行う（req は view 外で生存）。
+    [[nodiscard]] PublicationAdmission::PublishRequest consume() noexcept;
+
+    // discard: Admission が決定した DiscardReason を記録し state_ を State::Discarded へ遷移。
+    //   終端で owner_->finishView() を呼び ownership release を行う（ADR principle: Admission = reason 決定のみ）。
+    void discard(DiscardReason reason) noexcept;
+
+private:
+    RuntimePublicationOrchestrator* owner_{nullptr};
+    DeferredPublishSlot* slot_{nullptr};
+    State state_{State::MovedFrom};
 };
 
 // RuntimePublicationOrchestrator: AudioEngine レベルの publish オーケストレーション。
@@ -59806,15 +60125,26 @@ public:
     //   常に同期。deferred resubmit は RebuildThread が本 API を呼ぶことで実行される。
     void submitPublishRequest(const PublicationAdmission::PublishRequest& req) noexcept;
 
-    // hasDeferredRequest / consumeDeferredRequest: 保留中の publish 要求確認と消費
+    // hasDeferredRequest: 保留中 publish 要求確認 (DrainAudit / RuntimeHealth / Stall 用)。
     [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_.load(std::memory_order_acquire); }
-    [[nodiscard]] std::optional<PublicationAdmission::PublishRequest> consumeDeferredRequest() noexcept
-    {
-        if (!hasDeferred_.load(std::memory_order_acquire))
-            return std::nullopt;
-        hasDeferred_.store(false, std::memory_order_release);
-        return deferredSlot_ ? std::optional(deferredSlot_->request) : std::nullopt;
-    }
+
+    // ★ Phase-1: peekDeferred — consumeDeferredRequest の後継 (View 経由のみ)（design-D4 D-13 ①）。
+    //   hasDeferred_ は反転しない（peek only）。実際の ownership release は
+    //   DeferredPublishView.consume()/discard() 内の owner_->finishView() が担う。
+    //   Single Thread Owner（RebuildThread）契約の jassert 付き (ADR-C4:100-105)。
+    [[nodiscard]] std::optional<DeferredPublishView> peekDeferred() noexcept;
+
+    // ★ Phase-1: finishView — ownership Release の唯一口（design-D4 §1488 / §139-140）。
+    //   DeferredPublishView.consume()/discard() が owner_->finishView() を呼ぶ。
+    //   slot reset + hasDeferred_ flip + DeferredHealth telemetry を一括実行。
+    void finishView() noexcept;
+
+    // ★ Phase-1: processDeferredAdmission — RebuildThread 専用の atomic flow
+    //   (design-D4 D-13 ④ / ADR-C4:113)。peek → evaluateDeferred → consume/discard →
+    //   releaseSlot → (Ready なら submitPublishRequest；再 Deferred は submitPublishRequest
+    //   が自動 enqueue)。AudioEngine.h:2528-2529 の
+    //   'consumeDeferredRequest → submitPublishRequest' を一本化。
+    void processDeferredAdmission() noexcept;
 
     // ★ C-2.2: shutdown 時に deferred publish を強制消去
     void clearDeferredForShutdown() noexcept;
@@ -59895,6 +60225,9 @@ private:
     std::atomic<uint64_t> maxDeferredAgeMs_{0};
 
     void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
+
+    // ★ Phase-1 private helpers (Single Thread Owner / RebuildThread 前提)
+    [[nodiscard]] PublicationAdmission::DeferredAdmissionSnapshot buildDeferredAdmissionSnapshot() const noexcept;
 
     AudioEngine& engine_;
 
@@ -75399,6 +75732,8 @@ struct EQCoeffsBiquad
 // CPU/メモリ効率を向上させる不変キャッシュ
 // ライフサイクル管理は DSPHandleRuntime が担当する。
 //--------------------------------------------------------------
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324を抑制 - struct padding due to alignment
 struct alignas(64) EQCoeffCache
 {
     EQCoeffsSVF coeffs[20];              // SVF係数 (20バンド)
@@ -75417,6 +75752,7 @@ struct alignas(64) EQCoeffCache
     EQCoeffCache(const EQCoeffCache&) = delete;
     EQCoeffCache& operator=(const EQCoeffCache&) = delete;
 };
+#pragma warning(pop)
 
 //--------------------------------------------------------------
 // EQプロセッサークラス
@@ -83844,6 +84180,194 @@ int main()
 
 ```
 
+### 📄 `src\tests\PublicationAdmissionTestRuntimeStubs.cpp`
+
+```
+#include "ISRShutdown.h"
+#include "AudioEngine.h"
+
+namespace convo {
+namespace isr {
+bool ShutdownRuntime::isShutdownInProgress() const noexcept { return false; }
+}
+}
+
+void AudioEngine::debugAssertAudioThread() const {}
+void AudioEngine::debugAssertNotAudioThread() const {}
+
+```
+
+### 📄 `src\tests\PublicationAdmissionTests.cpp`
+
+```
+//==============================================================================
+// PublicationAdmissionTests.cpp
+//
+// Admission Policy Unit Test (Phase-2, post Phase-1 atomic refactor).
+//
+// ■ テスト対象: PublicationAdmission::evaluateDeferred()  (src/audioengine/PublicationAdmission.cpp)
+// ■ 性質: Admission = Decisionのみ / Engine直参照なし / DeferredAdmissionSnapshotの5値のみ
+//   → ISR Pure-Policy: 入力を入れれば出力が決まる（副作用なし、スレッド不問）。
+//
+// ■ 判定順序 (design-D4 A-4 / D-9 / ADR-C4:41,64):
+//     Shutdown → TTL → Generation → Sequence
+//   Decision = Ready | Discard の2値。破棄理由は DiscardReason で区別する
+//   （StaleDiscard: TTL/Generation/Sequence, ShutdownDiscard: shutdown）。
+//
+// ■ 注意 (design-V1.1): TTL超過は現在 Expired ではなく StaleDiscard を返す
+//   （実装: PublicationAdmission.cpp:76「★work37: Expired を別enum化可能」）。
+//   本テストは実装を仕様として固定する（将来 Expired 化する場合は本テストも更新）。
+//
+// ■ ビルド (CMakeLists.txt へ追加):
+//     add_executable(PublicationAdmissionTests src/tests/PublicationAdmissionTests.cpp)
+//     target_include_directories(PublicationAdmissionTests PRIVATE
+//         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src
+//         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+//     target_compile_features(PublicationAdmissionTests PRIVATE cxx_std_20)
+//     add_test(NAME PublicationAdmissionTests COMMAND PublicationAdmissionTests)
+//   (admission_.evaluateDeferred は .cpp で定義されるため、リンクには
+//    PublicationAdmission.cpp（JUCE/r8brain ツールチェーン）が必要。)
+//
+//==============================================================================
+
+#include "PublicationAdmission.h"   // PublicationAdmission, DeferredAdmissionResult, DeferredDecision, DiscardReason, DeferredPublishMetadata, DeferredAdmissionSnapshot
+
+#include <cstdint>
+#include <iostream>
+
+namespace {
+
+using Decision     = convo::isr::PublicationAdmission::DeferredDecision;
+using Reason       = convo::isr::DiscardReason;
+using Metadata     = convo::isr::PublicationAdmission::DeferredPublishMetadata;
+using Snapshot     = convo::isr::PublicationAdmission::DeferredAdmissionSnapshot;
+using Result       = convo::isr::PublicationAdmission::DeferredAdmissionResult;
+using SeqId        = convo::isr::PublicationSequenceId;
+
+// ---- helpers ----
+inline Metadata md(int generation, SeqId sequence, uint64_t enqueueUs) {
+    return Metadata{ .generation = generation, .sequence = sequence, .enqueueTimestampUs = enqueueUs };
+}
+inline Snapshot snap(int currentGeneration, SeqId lastSequence, bool shutdown, uint64_t nowUs, uint64_t ttlUs) {
+    return Snapshot{ .currentGeneration = currentGeneration, .lastSequence = lastSequence,
+                     .shutdown = shutdown, .nowUs = nowUs, .ttlUs = ttlUs };
+}
+
+#define CHECK_EQ(actual, expected, label) \
+    if (!((actual) == (expected))) { \
+        std::cerr << "FAIL: " << (label) << " (line " << __LINE__ << ")\n"; return false; }
+
+// 1) Shutdown — 終了中は一切 publish しない（TTL/Generation/Sequence より優先）。
+[[nodiscard]] bool caseShutdown() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{5}, 1000),
+        snap(1, SeqId{5}, /*shutdown*/true, 999'999'999u, 30'000'000u));
+    CHECK_EQ(r.decision,        Decision::Discard,   "shutdown: decision");
+    CHECK_EQ(r.discardReason,   Reason::ShutdownDiscard, "shutdown: reason");
+    return true;
+}
+
+// 2) Shutdown + TTL-overdue が同時 → Shutdown が優先される（順序保証）。
+[[nodiscard]] bool caseShutdownOverTtl() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{5}, 1'000u),                // enqueueUs 1ms ago
+        snap(1, SeqId{5}, true, 31'000'000u, 30'000'000u));  // age 30s > ttl 30s だが shutdown 優先
+    CHECK_EQ(r.discardReason, Reason::ShutdownDiscard, "shutdown>TTL: reason (shutdown priority)");
+    return true;
+}
+
+// 3) TTL over (stale) — ageUs > ttlUs → Discard/StaleDiscard。
+[[nodiscard]] bool caseTtlExpired() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{5}, 1'000u),
+        snap(1, SeqId{5}, false, 31'000'000u, 30'000'000u));  // age 30s > ttl
+    CHECK_EQ(r.decision,      Decision::Discard,    "ttl: decision");
+    CHECK_EQ(r.discardReason, Reason::StaleDiscard, "ttl: reason");
+    return true;
+}
+
+// 4) Generation mismatch — rebuild 時代が違う → Discard/StaleDiscard。
+[[nodiscard]] bool caseStaleGeneration() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(7, SeqId{5}, 1'000u),                       // enqueued in gen 7
+        snap(9, SeqId{5}, false, 2'000u, 30'000'000u)); // current gen 9
+    CHECK_EQ(r.discardReason, Reason::StaleDiscard, "generation: reason");
+    return true;
+}
+
+// 5) Sequence stale — lastSequence より古い → Discard/StaleDiscard (history no-rewind)。
+[[nodiscard]] bool caseStaleSequence() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{3}, 1'000u),                       // enqueued at seq 3
+        snap(1, SeqId{8}, false, 2'000u, 30'000'000u)); // last committed seq 8
+    CHECK_EQ(r.discardReason, Reason::StaleDiscard, "sequence: reason");
+    return true;
+}
+
+// 6) 全条件正常 → Ready/None。
+[[nodiscard]] bool caseAllNormal() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{5}, 1'000u),
+        snap(1, SeqId{5}, false, 1'500u, 30'000'000u));  // gen ok, seq not older, age 0.5s < ttl
+    CHECK_EQ(r.decision,      Decision::Ready,    "normal: decision");
+    CHECK_EQ(r.discardReason, Reason::None,     "normal: reason");
+    return true;
+}
+
+// 7) boundary: ageUs == ttlUs（not > ttlUs）→ Ready。
+[[nodiscard]] bool caseTtlBoundaryExact() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{5}, 1'000u),
+        snap(1, SeqId{5}, false, 30'000'001u, 30'000'000u)); // age exactly == ttl
+    CHECK_EQ(r.decision, Decision::Ready, "ttl boundary: ==ttl → Ready");
+    return true;
+}
+
+// 8) boundary: sequence == lastSequence → Ready（history no-rewind は < なので == は許容）。
+[[nodiscard]] bool caseSequenceBoundaryEqual() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(1, SeqId{8}, 1'000u),
+        snap(1, SeqId{8}, false, 1'500u, 30'000'000u));
+    CHECK_EQ(r.decision, Decision::Ready, "seq boundary: ==lastSequence → Ready");
+    return true;
+}
+
+// 9) Shutdown は TTL/Generation/Sequence の全条件でも優先される（順序保証の総合検証）。
+//    shutdown=true かつ gen mismatch かつ seq stale かつ ttl over の場合でも
+//    → Discard / ShutdownDiscard（他の理由は問わない）。
+[[nodiscard]] bool caseShutdownOverridesAllStale() {
+    const auto r = convo::isr::PublicationAdmission{}.evaluateDeferred(
+        md(7, SeqId{3}, 1'000u),                          // gen mismatch + seq stale
+        snap(9, SeqId{8}, true, 31'000'000u, 30'000'000u)); // shutdown + ttl over
+    CHECK_EQ(r.decision,      Decision::Discard,       "shutdown-over-all: decision");
+    CHECK_EQ(r.discardReason,  Reason::ShutdownDiscard, "shutdown-over-all: reason (shutdown priority over TTL/Gen/Seq)");
+    return true;
+}
+
+} // namespace
+
+int main() {
+    int failures = 0;
+    auto run = [&](const char* name, bool (*fn)()) {
+        if (fn()) { std::cout << "PASS " << name << "\n"; }
+        else { std::cerr << "FAIL " << name << "\n"; ++failures; }
+    };
+    run("shutdown",                caseShutdown);
+    run("shutdown_over_ttl",       caseShutdownOverTtl);
+    run("ttl_expired",             caseTtlExpired);
+    run("stale_generation",        caseStaleGeneration);
+    run("stale_sequence",          caseStaleSequence);
+    run("all_normal",              caseAllNormal);
+    run("ttl_boundary_exact",      caseTtlBoundaryExact);
+    run("sequence_boundary_equal", caseSequenceBoundaryEqual);
+    run("shutdown_overrides_all_stale", caseShutdownOverridesAllStale);
+
+    std::cout << (failures ? "FAILED" : "ALL PASSED") << " (" << (9 - failures) << "/9)\n";
+    return failures ? 1 : 0;
+}
+
+```
+
 ### 📄 `src\tests\PublicationValidatorIsolationTests.cpp`
 
 ```
@@ -86279,6 +86803,421 @@ private:
 
 ```
 
+### 📄 `src\tests\AudioEngineHarness\DeferredFlowIntegrationTests.cpp`
+
+```
+// DeferredFlowIntegrationTests.cpp
+// View/Orchestrator deferred-flow integration test（ADR-C4 / design-D4）。
+//
+// 検証対象: submitPublishRequest が deferred 自動 enqueue し、RebuildThread が
+//   consume → finishView → submit し直す Ready 経路の終端状態。
+//   Orchestrator は AudioEngine の private メンバ（friend 限定）のため、
+//   テスト専用 Friend Test Access（DeferredPublicationTestAccess）を経由して観測する。
+//
+// 方針:
+//   - 直接 peek/consume/discard は RebuildThread 専有（jassert 付き）のため
+//     テストスレッドからは呼ばない。エンジンの実経路（requestRebuild →
+//     submitPublishRequest → CoordinatorLoop → executePublish）を駆動し、
+//     未ガードの atomic 観測 API（hasDeferredRequest / getPublicationBacklogCount /
+//     deferredOverwriteCount）で Ready 経路の終端状態（slot drain）を証明する。
+//   - MovedFrom / copy 禁止は型レベル（static_assert）で証明する。
+//   - デストラクタ fail-fast（Valid のまま View 破棄 → jassert）は
+//     RuntimePublicationOrchestrator.cpp のデストラクタ実装（jassert）により
+//     コード検査で担保（テストスレッドからはスレッド専有 jassert に阻まれて到達不能）。
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <functional>
+#include <chrono>
+#include <thread>
+#include <type_traits>
+
+#include "AudioEngineHarness.h"
+#include "DeferredPublicationTestAccess.h"
+#include "audioengine/RuntimePublicationState.h"
+
+// ── 型レベル証明: DeferredPublishView は move-only（Phase-1 再整列の実体）──
+static_assert(!std::is_copy_constructible_v<convo::isr::DeferredPublishView>,
+              "DeferredPublishView must be move-only (Phase-1)");
+static_assert(!std::is_copy_assignable_v<convo::isr::DeferredPublishView>,
+              "DeferredPublishView must be move-only (Phase-1)");
+static_assert(std::is_move_constructible_v<convo::isr::DeferredPublishView>,
+              "DeferredPublishView must be move-constructible (Phase-1)");
+static_assert(std::is_move_assignable_v<convo::isr::DeferredPublishView>,
+              "DeferredPublishView must be move-assignable (Phase-1)");
+
+namespace {
+
+bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeoutSec);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (pred())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+// ── 1. Deferred → Ready → Drain の全状態遷移（決定論的証明）──
+//   ADR-C4: enqueueDeferred → peekDeferred → consume → finishView → submit。
+//   前提条件フック（testFadingRuntimePresent）で DeferredFadingActive を決定論的に
+//   発生させ、実 rebuild → RebuildThread の実 submitPublishRequest を deferred に落とす。
+//   検証: [Deferred → hasDeferred==true] → [前提解除 → Ready → consume → finishView
+//   → hasDeferred==false] → [resubmit publish 完了（seq 前進）]。
+bool testDeferredReadyPathDrainsSlot()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+
+    const auto* w0 = e.observePublishedWorld();
+    const unsigned long long baseSeq = w0 ? static_cast<unsigned long long>(w0->publication.sequenceId) : 0ULL;
+
+    // 前提条件: fading runtime 存在 → submit は DeferredFadingActive で deferred に入る
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+
+    // 実 rebuild → RebuildThread が実 request で submitPublishRequest を呼ぶ → deferred enqueue
+    e.requestRebuild(convo::RebuildKind::Structural);
+
+    // [Deferred → hasDeferred==true]: 決定論的に到達する
+    const bool sawDeferred = waitUntil(45.0, [&] { return orch.hasDeferredRequest(); });
+    if (!sawDeferred)
+    {
+        std::fprintf(stderr, "FAIL: Deferred state not reached (hasDeferredRequest stayed false)\n");
+        return false;
+    }
+
+    // 前提条件解除 → 次 tick の processDeferredAdmission が Ready → consume → finishView → resubmit
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+
+    // [Ready → consume → finishView → hasDeferred==false]: slot drain（Ownership 解放）
+    const bool drained = waitUntil(30.0, [&] {
+        return !orch.hasDeferredRequest() && orch.getPublicationBacklogCount() == 0;
+    });
+    if (!drained)
+    {
+        std::fprintf(stderr, "FAIL: not drained (hasDeferred=%d backlog=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     static_cast<unsigned long long>(orch.getPublicationBacklogCount()));
+        return false;
+    }
+
+    // consume で取り出した request が resubmit され publish 完了（seq 前進）
+    const bool progressed = waitUntil(30.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > baseSeq;
+    });
+    if (!progressed)
+    {
+        std::fprintf(stderr, "FAIL: deferred resubmit did not publish (base seq=%llu)\n",
+                     static_cast<unsigned long long>(baseSeq));
+        return false;
+    }
+
+    std::printf("INFO: Deferred->hasDeferred==true->Ready->consume->finishView->drain proved\n");
+    return true;
+}
+
+// ── 2. Deferred サイクル後の backlog 完全排出 ──
+//   前提条件フックで 2 回の deferred サイクルを回し、終端で slot と backlog が
+//   完全に排出されること（Slot/Ownership リークなし）を検証する。
+bool testDeferredBacklogDrainsCompletely()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+
+    for (int cycle = 0; cycle < 2; ++cycle)
+    {
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+        e.requestRebuild(convo::RebuildKind::Structural);
+
+        if (!waitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+        {
+            std::fprintf(stderr, "FAIL: cycle %d did not defer\n", cycle);
+            return false;
+        }
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+
+        if (!waitUntil(30.0, [&] {
+                return !orch.hasDeferredRequest() && orch.getPublicationBacklogCount() == 0;
+            }))
+        {
+            std::fprintf(stderr, "FAIL: cycle %d not drained (backlog=%llu)\n", cycle,
+                         static_cast<unsigned long long>(orch.getPublicationBacklogCount()));
+            return false;
+        }
+    }
+
+    std::printf("INFO: 2x deferred cycles drained (no slot/ownership leak)\n");
+    return true;
+}
+
+} // namespace
+
+// main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
+int runDeferredFlowIntegrationTests()
+{
+    if (!testDeferredReadyPathDrainsSlot())
+    {
+        std::fprintf(stderr, "FAIL: testDeferredReadyPathDrainsSlot\n");
+        return 1;
+    }
+    if (!testDeferredBacklogDrainsCompletely())
+    {
+        std::fprintf(stderr, "FAIL: testDeferredBacklogDrainsCompletely\n");
+        return 1;
+    }
+    std::printf("DeferredFlowIntegrationTests: PASS\n");
+    return 0;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\DeferredPublicationTestAccess.h`
+
+```
+// DeferredPublicationTestAccess.h
+// AudioEngineHarness 統合テスト専用の Friend Test Access。
+//
+// AudioEngine は private メンバ（runtimeOrchestrator_ / testFadingRuntimePresent_）を
+// 持つため、テストから Orchestrator へ到達するには friend 宣言（AudioEngine.h:3515）
+// が必要。本クラスは DeferredFlowIntegrationTests / DeferredPublishViewStateMachineTests
+// の双方から共有する（グローバル名前空間・AudioEngine.h:122 の前方宣言に合わせる）。
+//
+// ★ Testing Principle（第13回レビュー反映・design-D4 修正）:
+//   RebuildThread ownership（jassert ガード付き）を強制するオブジェクト
+//   （DeferredPublishView / RuntimePublicationOrchestrator の deferred 系）は
+//   AudioEngineHarness 上の Integration Test で検証する。
+//   Standalone 単体テスト（main() + add_executable/add_test）は純粋 Policy
+//   （PublicationAdmission::evaluateDeferred 等）にのみ予約する。
+
+#pragma once
+
+#include "audioengine/AudioEngine.h"
+#include "audioengine/RuntimePublicationOrchestrator.h"
+
+class DeferredPublicationTestAccess final
+{
+public:
+    static convo::isr::RuntimePublicationOrchestrator& orchestrator(AudioEngine& e) noexcept
+    {
+        return *e.runtimeOrchestrator_;
+    }
+
+    // Option-2 hook: DeferredFadingActive の「前提条件」（published world に
+    // fading runtime が存在）を決定論的に作る。Production の Decision 判定
+    // ロジックは一切変更しない（PublicationAdmission.cpp evaluate の
+    // if (hasFading) → DeferredFadingActive 分岐はそのまま）。
+    static void setFadingRuntimePresent(AudioEngine& e, bool on) noexcept
+    {
+        e.testFadingRuntimePresent_.store(on, std::memory_order_release);
+    }
+};
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\DeferredPublishViewStateMachineTests.cpp`
+
+```
+// DeferredPublishViewStateMachineTests.cpp
+// design-D4 不変条件 8（状態遷移表・design-D4:101-127）の自動検証。
+// AudioEngineHarness 上の Integration Test（第13回レビュー反映・design-D4 修正）。
+//
+// ★ 位置づけ（standalone ではなく AudioEngineHarness 統合）:
+//   DeferredPublishView は RuntimePublicationOrchestrator&（→ AudioEngine&）を要求する
+//   Authority チェーン（View → finishView → Orchestrator → AudioEngine）の一部であり、
+//   単独オブジェクトとしてテストできない。また peek/consume/discard/finishView には
+//   jassert(thread == rebuildThreadId()) のスレッドガードがある。したがって:
+//     - RebuildThread 専有の遷移（peek→Valid / consume→Consumed+Released /
+//       discard→Discarded+Released）は実経路（requestRebuild → CoordinatorLoop →
+//       RebuildThread.processDeferredAdmission）を駆動する
+//       DeferredFlowIntegrationTests.cpp が実行時検証する（本ファイルは重複しない）。
+//     - 本ファイルは View の型レベル契約と、テストスレッドから到達可能な状態機械
+//       （default ctor → MovedFrom / move 系 / metadata const& / fail-fast 行の
+//       コード検査マッピング）を集中検証する。
+//   ★ Testing Principle（ADR-C4 追記・第13回反映）:
+//     RebuildThread ownership を強制するオブジェクトは AudioEngineHarness 上で検証する。
+//     Standalone main() 単体テスト（add_executable/add_test）は純粋 Policy
+//     （PublicationAdmissionTests = evaluateDeferred）のみに予約する。
+//
+// ■ 状態遷移表（design-D4:103-119）の検証マッピング:
+//   | 行 | 遷移 | 検証方法 |
+//   |----|------|---------|
+//   | Released→Valid | peekDeferred | DeferredFlow（実経路・hasDeferred 反転観測） |
+//   | Valid→Consumed+Released | consume | DeferredFlow（実経路・slot drain 観測） |
+//   | Valid→Discarded+Released | discard | DeferredFlow（実経路・slot drain 観測） |
+//   | Valid→Valid（metadata） | metadata const& | 本ファイル（直接構築・参照同一性） |
+//   | Valid→MovedFrom（move ctor） | move ctor | 本ファイル（static_assert + 実行時） |
+//   | Valid→（move 代入） | move assign | 本ファイル（static_assert + 実行時） |
+//   | Valid→dtor | fail-fast | コード検査（dtor の jassertfalse・本ヘッダで明示） |
+//   | Consumed/Discarded/MovedFrom→API | 契約違反 | コード検査（metadata/consume/discard の jassert） |
+//   | MovedFrom→dtor | OK | 本ファイル（default/move 後の MovedFrom 破棄が通ること） |
+//
+// ■ 制約の明文化（design-D4 §111 / ADR-C4:115）:
+//   Valid 状態の View は fail-fast デストラクタ（jassert(state_==Valid)）のため、
+//   テストスレッドからは破棄できない（consume/discard は RebuildThread 専有）。
+//   よって「Valid 行の観測」は heap 上にリークして行う（意図的・tiny 単一オブジェクト・
+//   プロセス終了時に OS 回収）。これは fail-fast 対象のテストで標準的な手法であり、
+//   リーク検出器（ASan/LSan）対象の通常ビルドでは JUCE jassert が Debug 限定のため
+//   リークもプロセス生存期間に限られる。
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <type_traits>
+
+#include "AudioEngineHarness.h"
+#include "DeferredPublicationTestAccess.h"
+#include "audioengine/RuntimePublicationOrchestrator.h"
+#include "audioengine/RuntimePublicationState.h"
+
+namespace {
+
+using convo::isr::DeferredPublishView;
+using convo::isr::DeferredPublishSlot;
+using convo::isr::DiscardReason;
+using ViewState = DeferredPublishView::State;
+
+#define CHECK(cond, label) \
+    if (!(cond)) { \
+        std::fprintf(stderr, "FAIL: %s (line %d)\n", (label), __LINE__); \
+        return false; \
+    }
+
+// ── 型レベル契約: copy 禁止 / move-only（遷移表「Valid → move ctor / move 代入」の
+//    静的根拠。Consumed/Discarded/MovedFrom 後の copy は型として不可能）。 ──
+static_assert(!std::is_copy_constructible_v<DeferredPublishView>,
+              "DeferredPublishView must be move-only (design-D4 §89 / ADR-C4)");
+static_assert(!std::is_copy_assignable_v<DeferredPublishView>,
+              "DeferredPublishView must be move-only (design-D4 §89 / ADR-C4)");
+static_assert(std::is_move_constructible_v<DeferredPublishView>,
+              "DeferredPublishView must be move-constructible");
+static_assert(std::is_move_assignable_v<DeferredPublishView>,
+              "DeferredPublishView must be move-assignable");
+
+// ── 1. default ctor → MovedFrom（遷移表「MovedFrom」行・破棄は OK） ──
+bool testDefaultViewIsMovedFrom()
+{
+    DeferredPublishView v;
+    CHECK(v.state() == ViewState::MovedFrom, "default ctor: state == MovedFrom");
+    CHECK(!v.isValid(), "default ctor: isValid() == false");
+    // MovedFrom は slot_ == nullptr のため破棄は fail-fast を踏まない（表「MovedFrom→dtor OK」）。
+    return true;
+}
+
+// ── 2. MovedFrom ↔ move 系: 自己代入ガード / move ctor / move 代入 ──
+bool testMovedFromMoveSemantics()
+{
+    // 自己代入は this != &other で no-op（Orchestrator.h:66）。
+    DeferredPublishView a;
+    a = std::move(a);
+    CHECK(a.state() == ViewState::MovedFrom, "self move-assign: no-op (still MovedFrom)");
+    CHECK(!a.isValid(), "self move-assign: still invalid");
+
+    // move ctor: source は MovedFrom のまま、dest も MovedFrom（slot なし転送）。
+    DeferredPublishView b;
+    DeferredPublishView c(std::move(b));
+    CHECK(c.state() == ViewState::MovedFrom, "move ctor (default→default): dest MovedFrom");
+    CHECK(!c.isValid(), "move ctor (default→default): dest invalid");
+    CHECK(b.state() == ViewState::MovedFrom, "move ctor: source remains MovedFrom");
+
+    // move 代入: 同様に MovedFrom 状態を転送。
+    DeferredPublishView d;
+    DeferredPublishView e;
+    e = std::move(d);
+    CHECK(e.state() == ViewState::MovedFrom, "move assign (default→default): dest MovedFrom");
+    CHECK(!e.isValid(), "move assign (default→default): dest invalid");
+    return true;
+}
+
+// ── 3. Valid 行の観測（metadata const& 同一性 / state / isValid） ──
+//    Valid View は fail-fast デストラクタのためテストスレッドから破棄不可 →
+//    heap リークで観測（制約の明文化参照）。ローカル slot を参照先に使うのは、
+//    View の state_ / metadata() アクセサの検証が目的であり、consume/discard/
+//    finishView（RebuildThread 専有）は呼ばないため安全。
+bool testValidViewObservation()
+{
+    // 実 AudioEngine + 実 Orchestrator を要求（Authority チェーンの実在証明）。
+    // 本テストは View の state_ / metadata() アクセサのみを観測し、consume/discard/
+    // finishView（RebuildThread 専有）は呼ばないため、スレッド起動（start）は不要。
+    AudioEngineHarness h;
+    auto& orch = DeferredPublicationTestAccess::orchestrator(h.engine());
+    (void)orch;
+
+    // heap リーク（意図的）: Valid 状態の View は test thread から破棄できない。
+    auto* slot = new DeferredPublishSlot();
+    slot->metadata.generation = 7;
+    slot->metadata.sequence = convo::isr::PublicationSequenceId{42};
+    slot->metadata.enqueueTimestampUs = 1234;
+
+    auto* view = new DeferredPublishView(orch, *slot);
+    CHECK(view->state() == ViewState::Valid, "(owner,slot) ctor: state == Valid");
+    CHECK(view->isValid(), "(owner,slot) ctor: isValid() == true");
+
+    // metadata() は slot の immutable snapshot への const 参照（design-D4 §89-96）。
+    CHECK(&view->metadata() == &slot->metadata, "metadata(): const& identity to slot.metadata");
+    CHECK(view->metadata().generation == 7, "metadata(): generation preserved");
+    CHECK(view->metadata().sequence == convo::isr::PublicationSequenceId{42}, "metadata(): sequence preserved");
+    CHECK(view->metadata().enqueueTimestampUs == 1234, "metadata(): enqueueTimestampUs preserved");
+
+    // move ctor: source → MovedFrom / dest → Valid（遷移表「Valid→move ctor」行）。
+    auto* moved = new DeferredPublishView(std::move(*view));
+    CHECK(view->state() == ViewState::MovedFrom, "move ctor: source -> MovedFrom");
+    CHECK(!view->isValid(), "move ctor: source !isValid()");
+    CHECK(moved->state() == ViewState::Valid, "move ctor: dest -> Valid");
+    CHECK(moved->isValid(), "move ctor: dest isValid()");
+    CHECK(&moved->metadata() == &slot->metadata, "move ctor: dest metadata identity preserved");
+
+    // move 代入（dest が MovedFrom のとき）: dest → Valid / source → MovedFrom。
+    //   ※ dest が Valid のままの move 代入は契約違反（Orchestrator.h:68 jassertfalse）=
+    //   コード検査で担保（本テストは実行しない）。
+    DeferredPublishView sink;   // default → MovedFrom
+    sink = std::move(*moved);
+    CHECK(moved->state() == ViewState::MovedFrom, "move assign: source -> MovedFrom");
+    CHECK(sink.state() == ViewState::Valid, "move assign: dest -> Valid");
+    CHECK(sink.isValid(), "move assign: dest isValid()");
+    CHECK(&sink.metadata() == &slot->metadata, "move assign: dest metadata identity preserved");
+
+    // ※ sink / moved / view / slot は意図的にリーク（制約の明文化参照）。
+    return true;
+}
+
+} // namespace
+
+// main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
+int runDeferredPublishViewStateMachineTests()
+{
+    if (!testDefaultViewIsMovedFrom())
+    {
+        std::fprintf(stderr, "FAIL: testDefaultViewIsMovedFrom\n");
+        return 1;
+    }
+    if (!testMovedFromMoveSemantics())
+    {
+        std::fprintf(stderr, "FAIL: testMovedFromMoveSemantics\n");
+        return 1;
+    }
+    if (!testValidViewObservation())
+    {
+        std::fprintf(stderr, "FAIL: testValidViewObservation\n");
+        return 1;
+    }
+    std::printf("DeferredPublishViewStateMachineTests: PASS\n");
+    return 0;
+}
+
+```
+
 ### 📄 `src\tests\AudioEngineHarness\PublishPipelineIntegrationTests.cpp`
 
 ```
@@ -86315,6 +87254,12 @@ private:
 namespace convo_soak {
 bool runSoakScenarios(bool full, const char* scenario);
 }
+
+// DeferredFlowIntegrationTests.cpp (ADR-C4 / design-D4)
+int runDeferredFlowIntegrationTests();
+
+// DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
+int runDeferredPublishViewStateMachineTests();
 
 namespace {
 
@@ -86554,6 +87499,12 @@ int main(int argc, char* argv[])
         std::fprintf(stderr, "FAIL: testTeardownPublish\n");
         return 1;
     }
+
+    if (runDeferredFlowIntegrationTests() != 0)
+        return 1;
+
+    if (runDeferredPublishViewStateMachineTests() != 0)
+        return 1;
 
     std::printf("AudioEngineHarness: all publish pipeline tests PASS\n");
     return 0;

@@ -126,7 +126,8 @@ jobs:
           $env:CMAKE_PREFIX_PATH = "$oneapiRoot;$oneapiRoot\mkl\latest\lib\cmake\mkl;$oneapiRoot\ipp\latest\lib\cmake\ipp"
           cmake -S . -B build -G "Ninja Multi-Config" `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            -DCONVO_CI_BUILD=ON
+            -DCONVO_CI_BUILD=ON `
+            -DCONVOPEQ_REQUIRE_MKL=OFF
 
       - name: Build ISR tests
         shell: pwsh
