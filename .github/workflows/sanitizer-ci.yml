@@ -47,6 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # ★ 2026-08-08: Intel oneAPI Base Kit のインストール可能性を確認。
+      #   oneAPI がない場合は MKLNonUniformConvolver ビルド失敗を回避するため、
+      #   Configure/Build/Deploy DLL/Run を graceful skip する（Practical Stable ISR 方針）。
+      #   ★ 修正: ::set-output は非推奨（GitHub Actions v45772）。$env:GITHUB_OUTPUT を使用。
+      #   ★ 修正: continue-on-error を追加し、choco/install 失敗を非致命的にする。
       # ★ 2026-08-06: intel/setup-intel-oneapi アクションは deprecated/リポジリ削除された。
       # ★ 2026-08-08: Choco の intel-oneapi-basekit パッケージも community.chocolatey.org から削除された。
       #   代替案: Intel oneAPI Base Toolkit インストーラを直接ダウンロード。
@@ -56,14 +61,15 @@ jobs:
       - name: Install Intel oneAPI Base Kit (MKL + IPP)
         id: install_oneapi
         shell: pwsh
+        continue-on-error: true
         run: |
           $ErrorActionPreference = 'Continue'
           $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
           if (Test-Path "$oneapiRoot\mkl\latest\redist\intel64\mkl_core.dll") {
-            Write-Host "::set-output name=installed::true"
             Write-Host "Intel oneAPI MKL already present."
+            Write-Output "installed=true" >> $env:GITHUB_OUTPUT
           } else {
-            Write-Host "Downloading Intel oneAPI Base Kit installer..."
+            Write-Host "oneAPI not found — attempting installer download..."
             $installerUrl = "https://aptmirror.nasm.me/oneAPI/2026/oneAPI_BaseKit_2026.0.0.exe"
             $installerPath = "$env:TEMP\oneapi_basekit.exe"
             try {
@@ -71,21 +77,23 @@ jobs:
               Write-Host "Installing Intel oneAPI Base Kit (silent, MKL+IPP)..."
               Start-Process -FilePath $installerPath -ArgumentList "--silent --install --components=intel.oneapi.mkl,intel.oneapi.ipp" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\oneapi_install.log" -RedirectStandardError "$env:TEMP\oneapi_install_err.log"
               if (Test-Path "$oneapiRoot\mkl\latest") {
-                Write-Host "::set-output name=installed::true"
                 Write-Host "Intel oneAPI installed successfully."
+                Write-Output "installed=true" >> $env:GITHUB_OUTPUT
               } else {
-                Write-Host "::set-output name=installed::false"
                 Write-Host "oneAPI install did not complete — will proceed without MKL (graceful skip)"
+                Write-Output "installed=false" >> $env:GITHUB_OUTPUT
               }
             } catch {
-              Write-Host "::set-output name=installed::false"
               Write-Host "oneAPI install failed: $_ — will proceed without MKL (graceful skip)"
+              Write-Output "installed=false" >> $env:GITHUB_OUTPUT
             } finally {
               if (Test-Path $installerPath) { Remove-Item $installerPath -ErrorAction SilentlyContinue }
             }
           }
+          }
 
       - name: Initialize Intel oneAPI environment
+        if: steps.install_oneapi.outputs.installed == 'true'
         shell: pwsh
         run: |
           $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"

@@ -53,16 +53,28 @@ jobs:
       - name: Install Intel oneAPI Base Kit (MKL + IPP)
         id: install_oneapi
         shell: pwsh
+        continue-on-error: true
         run: |
-          choco install intel-oneapi-basekit -y --no-progress --no-color
+          $ErrorActionPreference = 'Continue'
           $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
           if (Test-Path "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake") {
             Write-Output "installed=true" >> $env:GITHUB_OUTPUT
+            Write-Host "Intel oneAPI MKL already present."
+            exit 0
+          }
+          # Choco でのインストールを試行（失敗しても非致命的: graceful skip）
+          Write-Host "oneAPI not found — attempting choco install..."
+          choco install intel-oneapi-basekit -y --no-progress --no-color 2>&1 | Out-Null
+          if (Test-Path "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake") {
+            Write-Output "installed=true" >> $env:GITHUB_OUTPUT
+            Write-Host "Intel oneAPI MKL installed successfully via choco."
           } else {
             Write-Output "installed=false" >> $env:GITHUB_OUTPUT
+            Write-Host "oneAPI install did not complete — will proceed without MKL (graceful skip)"
           }
 
       - name: Initialize Intel oneAPI environment
+        if: steps.install_oneapi.outputs.installed == 'true'
         shell: pwsh
         run: |
           $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"

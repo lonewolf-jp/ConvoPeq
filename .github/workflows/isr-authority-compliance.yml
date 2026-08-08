@@ -55,14 +55,38 @@ jobs:
           }
 
       # P3: 新規コードのみエラー（EpochDomain::enqueueRetire 直接呼び出し）
+      # ★ Practical Stable ISR: push イベントでは github.base_ref が空になるため、
+      #   origin/xxx...HEAD が失敗（shallow checkout）。events を確認し安全にフォールバックする。
       - name: Static AuthorityViolation - Direct EpochRetire (new code only)
         shell: pwsh
         run: |
-          $diff = git diff origin/${{ github.base_ref || 'main' }}...HEAD -- src/ 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::Cannot compare with base branch - check skipped"
+          $ErrorActionPreference = 'Continue'
+          $diff = $null
+
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $baseRef = "${{ github.base_ref }}"
+            if ([string]::IsNullOrWhiteSpace($baseRef)) { $baseRef = 'main' }
+            Write-Host "PR event: comparing origin/$baseRef...HEAD"
+            $diff = git diff "origin/$baseRef...HEAD" -- src/ 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::git diff origin/$baseRef...HEAD failed - check skipped (shallow checkout?)"
+              $diff = $null
+            }
+          } else {
+            # push/schedule/manual: compare against HEAD~1...HEAD
+            Write-Host "Non-PR event ($env:GITHUB_EVENT_NAME): comparing HEAD~1...HEAD"
+            $diff = git diff HEAD~1...HEAD -- src/ 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::git diff HEAD~1...HEAD failed - check skipped"
+              $diff = $null
+            }
+          }
+
+          if (-not $diff) {
+            Write-Host "::warning::No diff available - direct enqueueRetire check skipped"
             exit 0
           }
+
           $violations = $diff | Select-String -Pattern "^\+\s*.*EpochDomain.*enqueueRetire" | Where-Object { $_ -notmatch "Coordinator" }
           if ($violations) {
             Write-Host "::error::New code uses direct enqueueRetire (must use Coordinator::enqueueRetire instead)"
