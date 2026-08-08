@@ -475,6 +475,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 
 void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
 {
+    // publish-only: Audio Thread は atomic 直読（AudioEngine.Timer.cpp:1058/1089）のため rebuild 不要。
     convo::publishAtomic(fixedNoiseLogIntervalMs, juce::jlimit(250, 10000, intervalMs), std::memory_order_release);
 }
 
@@ -485,6 +486,7 @@ void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
 
 void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
 {
+    // publish-only: Audio Thread は atomic 直読（AudioEngine.Timer.cpp:1054/1085）のため rebuild 不要。
     convo::publishAtomic(fixedNoiseWindowSamples, juce::jlimit(256, 262144, windowSamples), std::memory_order_release);
 }
 
@@ -507,6 +509,7 @@ void AudioEngine::setSoftClipEnabled(bool enabled)
 
 void AudioEngine::setAudioThreadPriorityMode(bool useMmcss)
 {
+    // publish-only: 消費側は atomic 直読（AudioEngine.Mmcss.cpp:89 / AudioEngine.Timer.cpp:244/317/347）のため rebuild 不要。
     convo::publishAtomic(useMmcssPriority, useMmcss, std::memory_order_release);
 }
 
@@ -638,7 +641,8 @@ void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 {
     convo::publishAtomic(convHCFilterMode, mode, std::memory_order_release);
     // [Mem-Fix] NUC SoA (irFreqReal/irFreqImag) を再適用するため、uiConvolverProcessor を再構築する。
-    // DSPCore::convolver は次回 requestRebuild 時に syncStateFrom + rebuildAllIRsSynchronous で追従する。
+    // DSPCore::convolver は次回 requestRebuild 時に captureBuildSnapshot → applyBuildSnapshot + transferIRStateFrom
+    // → rebuildAllIRsSynchronous で追従する (旧 syncStateFrom 方式は撤去済み。詳細は doc/work89/INTEGRATED-BUG-LIST.md §12)。
     uiConvolverProcessor.setNUCFilterModes(
         convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),
         convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
@@ -652,7 +656,9 @@ void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 void AudioEngine::setConvLCFilterMode(convo::LCMode mode) noexcept
 {
     convo::publishAtomic(convLCFilterMode, mode, std::memory_order_release);
-    // HC と組み合わせて NUC を再構築
+    // [Mem-Fix] NUC SoA (irFreqReal/irFreqImag) を再適用するため、uiConvolverProcessor を再構築する。
+    // DSPCore::convolver は次回 requestRebuild 時に captureBuildSnapshot → applyBuildSnapshot + transferIRStateFrom
+    // → rebuildAllIRsSynchronous で追従する (旧 syncStateFrom 方式は撤去済み。詳細は doc/work89/INTEGRATED-BUG-LIST.md §12)。
     uiConvolverProcessor.setNUCFilterModes(
         convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),
         convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));

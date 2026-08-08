@@ -7,6 +7,7 @@
 #include "DSPLifetimeManager.h"
 #include "../NoiseShaperLearner.h"
 #include "core/TimeUtils.h"  // ★ Work39: Restore Learner Rollback 用
+#include "AtomicAccess.h"
 #include <string>
 #include <mutex>
 
@@ -1776,7 +1777,7 @@ void AudioEngine::retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifet
         pendingReceipt_.reset();
         // ★ BUG: relaxed→release（markReceiptReclaimComplete と整合。次の storeReceipt と
         //   pendingReceipt_ を正しく同期させるため）
-        receiptReady_.store(false, std::memory_order_release);
+        convo::publishAtomic(receiptReady_, false, std::memory_order_release);
     } else {
         // ★ Emergency Retire: 不一致（currentHandle != receipt->handle）
         //   receipt->publicationEpoch は current に対応しないため使用不可。
@@ -1831,7 +1832,7 @@ void AudioEngine::resetReceipt() noexcept
 
     pendingReceipt_.reset();
     // ★ BUG: relaxed→release（markReceiptReclaimComplete と整合）
-    receiptReady_.store(false, std::memory_order_release);
+    convo::publishAtomic(receiptReady_, false, std::memory_order_release);
 }
 
 // [work39 Phase 6] Suppression Probe — commit or rollback

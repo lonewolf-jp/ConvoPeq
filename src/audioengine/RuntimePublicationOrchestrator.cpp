@@ -361,7 +361,7 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
     // 上書きカウント
-    if (hasDeferred_.load(std::memory_order_acquire))
+    if (convo::consumeAtomic(hasDeferred_, std::memory_order_acquire))
         convo::fetchAddAtomic(deferredOverwriteCount_, uint64_t{1},
             std::memory_order_release);
 
@@ -397,7 +397,7 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         .lastDiscardReason = DiscardReason::None,
         .enqueueTimestampUs = now
     };
-hasDeferred_.store(true, std::memory_order_release);
+    convo::publishAtomic(hasDeferred_, true, std::memory_order_release);
 
     // ★ v19: DeferredHealth 記録
     DeferredHealth dh;
@@ -415,11 +415,11 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    if (hasDeferred_.load(std::memory_order_acquire)) {
+    if (convo::consumeAtomic(hasDeferred_, std::memory_order_acquire)) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
         deferredSlot_.reset();
-        hasDeferred_.store(false, std::memory_order_release);
+        convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
     }
 
     // ★ v19: DeferredHealth 記録
@@ -436,7 +436,7 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 std::optional<DeferredPublishView> RuntimePublicationOrchestrator::peekDeferred() noexcept
 {
     jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
-    if (!hasDeferred_.load(std::memory_order_acquire) || !deferredSlot_.has_value())
+    if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire) || !deferredSlot_.has_value())
         return std::nullopt;
     return DeferredPublishView(*this, *deferredSlot_);
 }
@@ -469,7 +469,7 @@ void RuntimePublicationOrchestrator::finishView() noexcept
             discardTs = convo::getCurrentTimeUs();
     }
     deferredSlot_.reset();
-    hasDeferred_.store(false, std::memory_order_release);
+    convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
 
     DeferredHealth dh;
     dh.deferredCount = 0;
@@ -508,7 +508,7 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
 void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
 {
     jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
-    if (!hasDeferred_.load(std::memory_order_acquire))
+    if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire))
         return;
 
     auto view = peekDeferred();

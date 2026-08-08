@@ -58,6 +58,71 @@ if(DEFINED ENV{CONVO_CI_BUILD})
 endif()
 
 #------------------------------------------------------------
+# Intel MKL / IPP Detection (must run BEFORE test target link logic)
+# ★ Fix: CONVOPEQ_HAS_MKL / IPP_FOUND must be set before any target_link_libraries
+#   references MKL::MKL / IPP::ippcore, because CMake evaluates if() immediately.
+#   ConvoPeq target doesn't exist yet at this point, so linking is deferred
+#   to the post-target section below.
+#------------------------------------------------------------
+set(MKL_LINK static)
+set(MKL_THREADING sequential)
+set(MKL_INTERFACE_FULL intel_lp64)
+
+option(CONVOPEQ_REQUIRE_MKL "Require Intel MKL for MSVC builds (uses system aligned allocator when OFF)" ON)
+set(CONVOPEQ_HAS_MKL OFF)
+
+if(DEFINED ENV{MKLROOT})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{MKLROOT}")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{MKLROOT}/lib/cmake/mkl")
+endif()
+
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    if(CONVOPEQ_REQUIRE_MKL)
+        find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+        set(CONVOPEQ_HAS_MKL ON)
+        message(STATUS "MKL: found via CMake Config, will link MKL::MKL (CONVOPEQ_REQUIRE_MKL=ON)")
+    else()
+        find_package(MKL CONFIG QUIET COMPONENTS intel_lp64 sequential)
+        if(MKL_FOUND)
+            set(CONVOPEQ_HAS_MKL ON)
+            message(STATUS "MKL: found (CONVOPEQ_REQUIRE_MKL=OFF but MKL present)")
+        else()
+            message(STATUS "MKL: not found, CONVOPEQ_REQUIRE_MKL=OFF → system aligned allocator (work72)")
+        endif()
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    # icx: /Qmkl:sequential でコンパイラがMKLを自動リンク
+    set(CONVOPEQ_HAS_MKL ON)
+    # icx: Intel コンパイラランタイム (libircmt.lib / libmmd.lib) のパスを明示
+    set(_INTEL_COMPILER_ROOT "")
+    if(DEFINED ENV{ONEAPI_ROOT})
+        set(_INTEL_COMPILER_ROOT "$ENV{ONEAPI_ROOT}/compiler/latest/lib")
+    endif()
+    if(NOT _INTEL_COMPILER_ROOT OR NOT EXISTS "${_INTEL_COMPILER_ROOT}")
+        set(_INTEL_COMPILER_ROOT "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib")
+    endif()
+    # ★ Defer ConvoPeq link directories + /Qmkl to after target creation
+    set(CONVOPEQ_INTEL_RT_LIB_DIR "${_INTEL_COMPILER_ROOT}")
+    unset(_INTEL_COMPILER_ROOT)
+endif()
+
+#------------------------------------------------------------
+# Intel IPP Detection (also moved before test targets)
+#------------------------------------------------------------
+set(IPP_LINK static)
+set(IPP_THREADING sequential)
+if(DEFINED ENV{IPPROOT})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}/lib/cmake/ipp")
+endif()
+find_package(IPP QUIET CONFIG COMPONENTS ippcore ipps)
+if(IPP_FOUND)
+    message(STATUS "Intel IPP found.")
+else()
+    message(STATUS "Intel IPP not found - skipping (CI build or no IPP SDK).")
+endif()
+
+#------------------------------------------------------------
 # ISR Runtime Regression Tests (minimal CTest)
 #------------------------------------------------------------
 option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
@@ -308,7 +373,11 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/FFTExecutionContext.cpp
     )
     target_include_directories(FFTBackendTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(FFTBackendTests PRIVATE IPP::ippcore IPP::ipps)
+    # ★ Guard IPP link: IPP::ippcore/IPP::ipps only exist if find_package(IPP) succeeded.
+    #   CI runners without Intel oneAPI will have IPP_FOUND=FALSE → skip linking gracefully.
+    if(IPP_FOUND)
+        target_link_libraries(FFTBackendTests PRIVATE IPP::ippcore IPP::ipps)
+    endif()
     target_compile_features(FFTBackendTests PRIVATE cxx_std_20)
     target_compile_options(FFTBackendTests PRIVATE /EHsc)
     add_test(NAME FFTBackendTests COMMAND FFTBackendTests)
@@ -579,7 +648,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 
     # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
     # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
-    #  リンク指示を .obj に埋め込む。ConvoPeq 本体は CMakeLists.txt 上部で既に設定済み）
+    #  リンク指示を .obj に埋め込む。ConvoPeq 本体は post-target MKL config セクションで設定済み）
     if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /Qmkl:sequential)
         target_compile_options(PartialPublicationRejectTests PRIVATE /Qmkl:sequential)
@@ -699,11 +768,15 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
     target_compile_definitions(MTNUPCMeasurement PRIVATE
         JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
-        JUCE_DSP_USE_INTEL_MKL=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
         JUCE_USE_SIMD=1
     )
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_link_libraries(MTNUPCMeasurement PRIVATE MKL::MKL)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(MTNUPCMeasurement PRIVATE MKL::MKL)
+        else()
+            message(STATUS "MTNUPCMeasurement: CONVOPEQ_HAS_MKL=OFF → skipping MKL link (system aligned allocator)")
+        endif()
         target_compile_options(MTNUPCMeasurement PRIVATE /arch:AVX2)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(MTNUPCMeasurement PRIVATE /QxCORE-AVX2 /Qmkl:sequential
@@ -942,9 +1015,11 @@ target_include_directories(ConvoPeq PRIVATE
 )
 
 #------------------------------------------------------------
-# Intel MKL Configuration
+# Intel MKL Configuration (post-target: linking + include paths)
+# ★ Detection was moved above (before test target definitions) so CONVOPEQ_HAS_MKL
+#   is available for guard clauses in the ISR test block.
 #------------------------------------------------------------
-# MKLROOT環境変数が設定されている場合、検索パスに追加して検出率を向上させる
+# MKLROOT env var search path addition (for find_package fallback)
 if(DEFINED ENV{MKLROOT})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{MKLROOT}")
     list(APPEND CMAKE_PREFIX_PATH "$ENV{MKLROOT}/lib/cmake/mkl")
@@ -958,62 +1033,27 @@ if(DEFINED ENV{MKLROOT})
     endif()
     # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackendTests は src/FFTBackend.cpp を含み、
     #   同ファイルが AlignedAllocation.h → mkl.h を include するため MKL include が必要。
-    #   追加しないと MSVC ビルドで C1083 (mkl.h not found) になる（実ビルド検証済み）。
     if(TARGET FFTBackendTests)
         target_include_directories(FFTBackendTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
 endif()
 
-# スタティックリンクとシーケンシャル実行を指定してDLL依存を排除
-# MKL_THREADING=sequential: OpenMPなどのスレッドライブラリに依存しない、シングルスレッド版のMKLをリンクします。
-#                           リアルタイムオーディオ処理の安定性確保に不可欠です。
-set(MKL_LINK static)
-set(MKL_THREADING sequential)
-set(MKL_INTERFACE_FULL intel_lp64)
-
-# MKL リンク方式: コンパイラに応じて分岐。work71/72 で optional 化。
-#   - option(CONVOPEQ_REQUIRE_MKL) : MSVC ビルドで MKL を必須にするか
-#   - icx : /Qmkl:sequential でコンパイラが自動リンク（MKL は常に利用可能）
-#   - システムアロケータ（_aligned_malloc 等）へフォールバック可能
-option(CONVOPEQ_REQUIRE_MKL "Require Intel MKL for MSVC builds (uses system aligned allocator when OFF)" ON)
-set(CONVOPEQ_HAS_MKL OFF)
-
+# Link MKL to ConvoPeq main target (detection already set CONVOPEQ_HAS_MKL above).
+# ★ Note: find_package already called in the detection block above. Linking is deferred to here
+#   because ConvoPeq target wasn't defined during detection.
 if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    if(CONVOPEQ_REQUIRE_MKL)
-        find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+    if(CONVOPEQ_HAS_MKL)
         target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
-        set(CONVOPEQ_HAS_MKL ON)
-        message(STATUS "MKL: found via CMake Config, MKL::MKL linked (CONVOPEQ_REQUIRE_MKL=ON)")
-    else()
-        find_package(MKL CONFIG QUIET COMPONENTS intel_lp64 sequential)
-        if(MKL_FOUND)
-            target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
-            set(CONVOPEQ_HAS_MKL ON)
-            message(STATUS "MKL: found (CONVOPEQ_REQUIRE_MKL=OFF but MKL present), MKL::MKL linked")
-        else()
-            message(STATUS "MKL: not found, CONVOPEQ_REQUIRE_MKL=OFF → system aligned allocator (work72)")
-        endif()
     endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    # icx: /Qmkl:sequential でコンパイラがMKLを自動リンク
-    # Windows では static link がデフォルト、/MT と一貫性あり
     target_compile_options(ConvoPeq PRIVATE /Qmkl:sequential)
-    set(CONVOPEQ_HAS_MKL ON)
-    # icx: Intel コンパイラランタイム (libircmt.lib / libmmd.lib) のパスを明示
-    # icx がリンカとして呼ばれる際に Intel ランタイムを見つけられるようにする。
-    # 典型的なパス: compiler\2026.0\lib\ (oneAPI 2026.0)
-    # ONEAPI_ROOT は oneAPI setvars.bat で設定される環境変数
-    set(_INTEL_COMPILER_ROOT "")
     if(DEFINED ENV{ONEAPI_ROOT})
         set(_INTEL_COMPILER_ROOT "$ENV{ONEAPI_ROOT}/compiler/latest/lib")
-    endif()
-    if(NOT _INTEL_COMPILER_ROOT OR NOT EXISTS "${_INTEL_COMPILER_ROOT}")
-        # フォールバック: ProgramFiles(x86) から検出
+    else()
         set(_INTEL_COMPILER_ROOT "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib")
     endif()
     if(EXISTS "${_INTEL_COMPILER_ROOT}")
         target_link_directories(ConvoPeq PRIVATE "${_INTEL_COMPILER_ROOT}")
-        # ★ テストターゲットにも反映
         if(TARGET MTNUPCMeasurement)
             target_link_directories(MTNUPCMeasurement PRIVATE "${_INTEL_COMPILER_ROOT}")
         endif()
@@ -1025,8 +1065,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 endif()
 
 # ★ work72: JUCE_DSP_USE_INTEL_MKL は MKL が実際に利用可能な場合のみ定義
-#   OFF 時は DiagnosticsConfig.h がシステムアロケータへフォールバックする。
 if(CONVOPEQ_HAS_MKL)
+    if(TARGET ConvoPeq)
+        target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+    endif()
     message(STATUS "JUCE_DSP_USE_INTEL_MKL=1 → MKL allocator (mkl_malloc/mkl_free)")
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 else()
@@ -1045,9 +1087,6 @@ if(DEFINED ENV{IPPROOT})
     endif()
 endif()
 
-set(IPP_LINK static)
-set(IPP_THREADING sequential)
-find_package(IPP QUIET CONFIG COMPONENTS ippcore ipps)
 if(IPP_FOUND)
     message(STATUS "Intel IPP found.")
     target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
@@ -1057,10 +1096,6 @@ if(IPP_FOUND)
 else()
     message(STATUS "Intel IPP not found - skipping (CI build or no IPP SDK).")
 endif()
-# 注意: R8B_IPP=1 は使用しない。
-# r8brain の CDSPRealFFT.h が期待する IPP API (IppsFFTSpec_R_64f 等) は
-# Intel IPP 2022.3 以降のバージョンと非互換のため、r8brain には内蔵 FFT を使用する。
-# ConvoPeq 本体は IPP::ippcore / IPP::ipps を MKL 補完用にリンクする。
 
 #------------------------------------------------------------
 # JUCEヘッダー自動生成 (JuceHeader.h)
@@ -1552,8 +1587,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         juce::juce_core
         r8brain
     )
+    # ★ ASan-CMAKE-4 fix: Guard MKL/IPP links — only link when actually found.
+    #   CI runners without Intel oneAPI have CONVOPEQ_HAS_MKL=OFF → skip linking gracefully.
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_link_libraries(AudioEngineHarness PRIVATE MKL::MKL)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(AudioEngineHarness PRIVATE MKL::MKL)
+        else()
+            message(STATUS "AudioEngineHarness: CONVOPEQ_HAS_MKL=OFF → skipping MKL link (system aligned allocator)")
+        endif()
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(AudioEngineHarness PRIVATE /Qmkl:sequential)
     endif()

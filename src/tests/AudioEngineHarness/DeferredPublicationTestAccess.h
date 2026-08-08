@@ -17,6 +17,7 @@
 
 #include "audioengine/AudioEngine.h"
 #include "audioengine/RuntimePublicationOrchestrator.h"
+#include "audioengine/AtomicAccess.h"
 
 class DeferredPublicationTestAccess final
 {
@@ -32,6 +33,6 @@ public:
     // if (hasFading) → DeferredFadingActive 分岐はそのまま）。
     static void setFadingRuntimePresent(AudioEngine& e, bool on) noexcept
     {
-        e.testFadingRuntimePresent_.store(on, std::memory_order_release);
+        convo::publishAtomic(e.testFadingRuntimePresent_, on, std::memory_order_release);
     }
 };

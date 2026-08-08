@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <thread>  // ★ Phase-1: std::this_thread::get_id() Single Thread Owner スレッドガード
+#include "AtomicAccess.h"
 #include "RuntimePublicationState.h"
 #include "TelemetryRecorder.h"
 #include "PublicationAdmission.h"
@@ -154,7 +155,7 @@ public:
     void submitPublishRequest(const PublicationAdmission::PublishRequest& req) noexcept;
 
     // hasDeferredRequest: 保留中 publish 要求確認 (DrainAudit / RuntimeHealth / Stall 用)。
-    [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool hasDeferredRequest() const noexcept { return convo::consumeAtomic(hasDeferred_, std::memory_order_acquire); }
 
     // ★ Phase-1: peekDeferred — consumeDeferredRequest の後継 (View 経由のみ)（design-D4 D-13 ①）。
     //   hasDeferred_ は反転しない（peek only）。実際の ownership release は

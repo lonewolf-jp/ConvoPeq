@@ -5,7 +5,7 @@
   "mcp": {
     "serena": {
       "type": "local",
-      "command": ["C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\Scripts\\serena.exe", "start-mcp-server", "--project", "C:\\VSC_Project\\ConvoPeq", "--transport", "stdio"],
+      "command": ["C:/Users/user/AppData/Roaming/Python/Python314/Scripts/serena.exe", "start-mcp-server", "--project", "C:/VSC_Project/ConvoPeq", "--transport", "stdio", "--mode", "editing", "--add-mode", "interactive", "--add-mode", "onboarding"],
       "enabled": true
     },
     "context-mode": {
@@ -15,7 +15,7 @@
     },
     "headroom": {
       "type": "local",
-      "command": [".venv\\Scripts\\headroom.exe", "mcp", "serve"],
+      "command": [".venv/Scripts/headroom.exe", "mcp", "serve"],
       "enabled": true
     },
     "aidex": {

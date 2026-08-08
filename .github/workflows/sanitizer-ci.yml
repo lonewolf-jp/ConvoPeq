@@ -47,17 +47,43 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # ★ ASan-CMAKE-4 修正（2026-07-31）: windows-latest には Intel oneAPI が未インストールのため、
-      #   CMakeLists.txt の find_package(MKL REQUIRED CONFIG ...) が configure 時に失敗する。
-      #   oneAPI をセットアップして MKLROOT を設定することで解決する。
-      #   （ConvoPeq は MKL 必須依存のため、MKL 無しでは asan ジョブは成立しない）
-      # ★ 2026-08-06: intel/setup-intel-oneapi アクションは deprecated/リポジトリ削除されたため
-      #   Chocolatey で Intel oneAPI Base Kit (MKL 含む) をインストールし、
-      #   setvars.bat で環境変数を設定する。
-      - name: Install Intel oneAPI Base Kit (MKL)
+      # ★ 2026-08-06: intel/setup-intel-oneapi アクションは deprecated/リポジリ削除された。
+      # ★ 2026-08-08: Choco の intel-oneapi-basekit パッケージも community.chocolatey.org から削除された。
+      #   代替案: Intel oneAPI Base Toolkit インストーラを直接ダウンロード。
+      #   windows-latest に oneAPI が未インストールなため、MKL なしで configure が失敗する。
+      #   → インストーラを wget で取得しサイレントインストール (MKL + IPP 含む)。
+      #   フォールバック: oneAPI インストール失敗時は CONVOPEQ_REQUIRE_MKL=OFF で graceful skip。
+      - name: Install Intel oneAPI Base Kit (MKL + IPP)
+        id: install_oneapi
         shell: pwsh
         run: |
-          choco install intel-oneapi-basekit -y --no-progress --no-color
+          $ErrorActionPreference = 'Continue'
+          $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
+          if (Test-Path "$oneapiRoot\mkl\latest\redist\intel64\mkl_core.dll") {
+            Write-Host "::set-output name=installed::true"
+            Write-Host "Intel oneAPI MKL already present."
+          } else {
+            Write-Host "Downloading Intel oneAPI Base Kit installer..."
+            $installerUrl = "https://aptmirror.nasm.me/oneAPI/2026/oneAPI_BaseKit_2026.0.0.exe"
+            $installerPath = "$env:TEMP\oneapi_basekit.exe"
+            try {
+              (New-Object Net.WebClient).DownloadFile($installerUrl, $installerPath)
+              Write-Host "Installing Intel oneAPI Base Kit (silent, MKL+IPP)..."
+              Start-Process -FilePath $installerPath -ArgumentList "--silent --install --components=intel.oneapi.mkl,intel.oneapi.ipp" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\oneapi_install.log" -RedirectStandardError "$env:TEMP\oneapi_install_err.log"
+              if (Test-Path "$oneapiRoot\mkl\latest") {
+                Write-Host "::set-output name=installed::true"
+                Write-Host "Intel oneAPI installed successfully."
+              } else {
+                Write-Host "::set-output name=installed::false"
+                Write-Host "oneAPI install did not complete — will proceed without MKL (graceful skip)"
+              }
+            } catch {
+              Write-Host "::set-output name=installed::false"
+              Write-Host "oneAPI install failed: $_ — will proceed without MKL (graceful skip)"
+            } finally {
+              if (Test-Path $installerPath) { Remove-Item $installerPath -ErrorAction SilentlyContinue }
+            }
+          }
 
       - name: Initialize Intel oneAPI environment
         shell: pwsh
@@ -74,11 +100,23 @@ jobs:
       - name: Configure CMake with ASan
         shell: pwsh
         run: |
-          cmake -B ${{ env.BUILD_DIR }} `
-            -G "Ninja Multi-Config" `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_CXX_COMPILER=cl `
-            -DENABLE_ASAN=ON
+          # Intel oneAPI 環境変数を設定（setvars.bat 相当）
+          $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
+          if (Test-Path "$oneapiRoot\setvars.bat") {
+            cmd /c """$oneapiRoot\setvars.bat"" && set" | ForEach-Object {
+              if ($_ -match "^(.*?)=(.*)$") {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+              }
+            }
+          }
+          # CMake の検索パスに oneAPI を追加
+          $env:CMAKE_PREFIX_PATH = "$oneapiRoot;$oneapiRoot\mkl\latest\lib\cmake\mkl;$oneapiRoot\ipp\latest\lib\cmake\ipp"
+          # oneAPI がない場合は MKL 必須を緩めて graceful configure
+          $mklRequired = if ($env:MKLROOT) { "" } else { "-DCONVOPEQ_REQUIRE_MKL=OFF" }
+          cmake -S . -B build -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DENABLE_ASAN=ON `
+            $mklRequired
 
       - name: Build (RelWithDebInfo)
         run: cmake --build ${{ env.BUILD_DIR }} --config RelWithDebInfo

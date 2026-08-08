@@ -386,6 +386,10 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
     }
 }
 
+// [DEAD CODE] 呼び出し元ゼロ (§11 調査確定)。AudioEngine 側は captureBuildSnapshot → applyBuildSnapshot
+// + transferIRStateFrom → rebuildAllIRsSynchronous に置換済み (Parameters.cpp:641 コメント参照)。
+// 活性化時は本関数自体が snapshot/apply のラッパであるため代替機構は不要だが、
+// 再導入の際は dead_code_callers_verifier.py の監視対象であることに注意。
 void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
 {
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());

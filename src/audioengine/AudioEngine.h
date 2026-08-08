@@ -3525,7 +3525,7 @@ private:
     std::atomic<bool> testFadingRuntimePresent_ { false };
     [[nodiscard]] bool testFadingRuntimePresent() const noexcept
     {
-        return testFadingRuntimePresent_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(testFadingRuntimePresent_, std::memory_order_acquire);
     }
 #endif
     friend class convo::isr::PublicationExecutor;

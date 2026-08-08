@@ -495,6 +495,8 @@ public:
     [[nodiscard]] bool isIncrementalRebuildEnabled() const noexcept;
     void invalidatePendingLoads();
 
+    // [DEAD CODE] 呼び出し元ゼロ (§11 調査確定)。AudioEngine 側は captureBuildSnapshot → applyBuildSnapshot
+    // + transferIRStateFrom → rebuildAllIRsSynchronous に置換済み。
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
 
