@@ -17,6 +17,12 @@
 #include "audioengine/ISRAuthorityClass.h"
 
 namespace convo {
+namespace isr {
+class ISRRetireRouter;  // ★ BUG-015/027 (work88): 前方宣言 — 退避ストアへの移送先（Router API 経由）
+}
+}
+
+namespace convo {
 
 // P0-1 ObserveToken formalization:
 // - SnapshotCoordinator は observe enter/exit をトークン化して返す責務のみを持つ。
@@ -87,7 +93,8 @@ public:
             const uint64_t retireEpoch = m_epochProvider->currentEpoch();
             const auto result = enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
             if (!result) {
-                // ★ Future: RuntimeHealthMonitor へ通知
+                // ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない — RT 参照中の UAF 排除）
+                quarantineRetireSink(oldTarget, snapshotDeleter, retireEpoch, "switchImmediate:queueFull");
             }
         }
         m_fade.resetToIdle();
@@ -97,7 +104,8 @@ public:
         if (oldSnap) {
             uint64_t newEpoch = m_epochProvider->publishEpoch();
             // [work37 Phase 1.2] enqueueWithRetry を使用（switchImmediate は NonRT）
-            enqueueWithRetry(*m_epochProvider, oldSnap, snapshotDeleter, newEpoch);
+            if (!enqueueWithRetry(*m_epochProvider, oldSnap, snapshotDeleter, newEpoch))
+                quarantineRetireSink(oldSnap, snapshotDeleter, newEpoch, "switchImmediate:queueFull");
         }
     }
 
@@ -107,7 +115,6 @@ public:
     void reclaim(uint64_t) noexcept {
         m_epochProvider->tryReclaim();
     }
-
     // ★ [DELETED] 2026-07-28: updateFade は Dead Code のため削除（呼び出し元なし）。
 
     void advanceFade(int numSamples) noexcept;
@@ -124,9 +131,19 @@ public:
         return m_slots.loadCurrent(std::memory_order_acquire);
     }
 
+    // ★ BUG-015/027: 退避ストアへの移送先 Router（AudioEngine.CtorDtor.cpp で setRetireSink 設定）
+    void setRetireSink(convo::isr::ISRRetireRouter* sink) noexcept { m_retireSink = sink; }
+
 private:
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
+
+    // ★ BUG-015/027 (work88): enqueueWithRetry 失敗時の退避移送（Category A — SnapshotCoordinator）。
+    //   五次レビュー §5: SnapshotCoordinator は退避ストアを直接保持しない。
+    //   Router API（quarantineRetire）経由で Router 内部の RetireQuarantineStore へ移送する。
+    //   directDelete は禁止（RT 参照中の UAF 排除）。実装は .cpp（ISRRetireRouter 完全型を隠蔽）。
+    void quarantineRetireSink(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                              const char* reason) noexcept;
 
     // [work37 Phase 1.2] IEpochProvider::enqueueRetire + tryReclaim 再試行の static ヘルパー。
     //   条件: Non-RT スレッドからのみ呼び出し可能。
@@ -155,12 +172,20 @@ private:
 
         const uint64_t retireEpoch = m_epochProvider->publishEpoch();
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
-        if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
+        if (snap) {
+            if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+                quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
+        }
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
-        if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
+        if (snap) {
+            if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+                quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
+        }
     }
 
     IEpochProvider* m_epochProvider;
+    // ★ BUG-015/027: Router 内部の RetireQuarantineStore への移送先（nullptr 可 — 未設定時はリークのみ・UAF なし）
+    convo::isr::ISRRetireRouter* m_retireSink = nullptr;
     SnapshotSlotStore m_slots;
     SnapshotFadeState m_fade;
     // ★ P1-3: 二段構えのフラグ。finalizeShutdown() で true、~SnapshotCoordinator で確認

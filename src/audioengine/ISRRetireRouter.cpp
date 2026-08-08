@@ -181,14 +181,73 @@ RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
 
     // 3. 全リトライ失敗 → QueuePressure。Router 内部で RuntimeHealthMonitor へ通知する。
     //    （呼び出し側はこの戻り値をもとに動作。PolicyEngine へは HealthMonitor 経由。）
+    //    ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）。
+    //      queue full は RT 参照中の可能性が高いため、即時解放は UAF を生む。
+    //      RetireQuarantineStore で安全保持し、epoch 安全到達後に定期 drain で解放する。
+    //      Shutdown 結果はシャットダウン経路（drainAllQuarantineStore）が処理するため移送しない。
+    if (result == RetireEnqueueResult::QueuePressure || result == RetireEnqueueResult::QueueFull)
+    {
+        const bool stored = m_retireQuarantine.quarantine(
+            ptr, deleter, epoch, type, "enqueueWithRetry:QueuePressure",
+            /*publicationSequenceId=*/0, /*generation=*/0);
+        if (!stored)
+        {
+            // ★ 三次レビュー: store full 時に delete は絶対しない（UAF 構造的排除）。
+            //   capacity exhaustion は health escalation（AudioEngine 側の
+            //   quarantineOverflowCount 監視）で先行検知する。ここでは EBR 破綻として
+            //   assert で異常を検出する（Release ではリーク検出は overflowCount 監視に委ねる）。
+            assert(false && "RetireQuarantineStore capacity exhaustion - EBR 破綻の可能性");
+        }
+    }
     //    ★ Future: runtimeHealth_->notifyQueuePressure(QueuePressureInfo{...});
-    return RetireEnqueueResult::QueuePressure;
+    return result;
 }
 
 void ISRRetireRouter::tryReclaim() noexcept
 {
     assert(provider_ != nullptr);
     provider_->tryReclaim();
+    // ★ BUG-015/027 (work88): tryReclaim 直後に退避ストアを drain（epoch 安全到達分のみ deleter 実行）
+    drainQuarantineStore();
+}
+
+// ★ BUG-015/027 (work88): 退避ストアを drain。
+//   epoch 比較は EpochDomain::isOlder と同一セマンティクス（wraparound 安全）を
+//   インライン実装（ISR P1-19: EpochDomain 完全型を .h に露出しない）。
+void ISRRetireRouter::drainQuarantineStore() noexcept
+{
+    const uint64_t minReader = minReaderEpoch();
+    m_retireQuarantine.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
+        return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
+    });
+}
+
+// ★ BUG-015/027 (work88): Router API — 退避ストアへの移送（directDelete しない）。
+//   store full 時は deleter を実行せず false を返す（UAF 構造的排除）。
+//   capacity exhaustion は health escalation（AudioEngine 側が quarantineResidentCount /
+//   quarantineOverflowCount を監視）で先行検知する。
+bool ISRRetireRouter::quarantineRetire(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                                       DeletionEntryType type, const char* reason,
+                                       uint64_t publicationSequenceId, uint64_t generation) noexcept
+{
+    return m_retireQuarantine.quarantine(ptr, deleter, epoch, type, reason,
+                                         publicationSequenceId, generation);
+}
+
+std::size_t ISRRetireRouter::quarantineResidentCount() const noexcept
+{
+    return m_retireQuarantine.residentCount();
+}
+
+std::uint64_t ISRRetireRouter::quarantineOverflowCount() const noexcept
+{
+    return m_retireQuarantine.overflowCount();
+}
+
+// ★ BUG-015/027: shutdown 時 — Audio Thread 停止後のみ全強制解放（drainAllUnsafe と同契約）
+void ISRRetireRouter::drainAllQuarantineStore() noexcept
+{
+    m_retireQuarantine.drainAllUnsafe();
 }
 
 uint32_t ISRRetireRouter::pendingRetireCount() const noexcept
@@ -203,6 +262,8 @@ void ISRRetireRouter::drainAll() noexcept
     // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
     provider_->drainAll();
+    // ★ BUG-015/027: shutdown 時は退避ストアも全強制解放（Audio Thread 停止後）
+    drainAllQuarantineStore();
 }
 
 // ★ A-2: EBR Queue Visibility 統計委譲

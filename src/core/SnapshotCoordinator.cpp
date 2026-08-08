@@ -4,11 +4,30 @@
 
 #include "SnapshotCoordinator.h"
 
+#include <cassert>  // ★ BUG-015/027 (work88): store full 検出用
+
 #include "audioengine/AtomicAccess.h"
 #include "audioengine/ISRAuthorityClass.h"
+#include "audioengine/ISRRetireRouter.h"  // ★ BUG-015/027 (work88): quarantineRetire 経由の退避移送
 #include "SnapshotFactory.h"
 
 namespace convo {
+
+// ★ BUG-015/027 (work88): enqueueWithRetry 失敗時の退避移送（Category A — SnapshotCoordinator）。
+//   五次レビュー §5: SnapshotCoordinator は退避ストアを直接保持しない。
+//   Router API（quarantineRetire）経由で Router 内部の RetireQuarantineStore へ移送する。
+//   directDelete は禁止（RT 参照中の UAF 排除）。store full 時も deleter を実行しない
+//   （capacity exhaustion は health escalation で先行検知 — ここでは jassert で異常検出）。
+void SnapshotCoordinator::quarantineRetireSink(void* ptr, void (*deleter)(void*),
+                                               uint64_t epoch, const char* reason) noexcept
+{
+    if (m_retireSink == nullptr || ptr == nullptr || deleter == nullptr)
+        return;
+    const bool stored = m_retireSink->quarantineRetire(
+        ptr, deleter, epoch, DeletionEntryType::Generic, reason);
+    if (!stored)
+        assert(false && "RetireQuarantineStore capacity exhaustion - EBR 破綻の可能性");
+}
 
 void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noexcept
 {
@@ -37,7 +56,8 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 		// [work37 Phase 1.2] enqueueWithRetry を使用（startFade は NonRT Timer からのみ）
 		const auto result = enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
 		if (!result) {
-			// ★ Future: RuntimeHealthMonitor へ通知
+			// ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）
+			quarantineRetireSink(oldTarget, snapshotDeleter, retireEpoch, "startFade:queueFull");
 		}
 	}
 
@@ -93,7 +113,8 @@ void SnapshotCoordinator::completeFade() noexcept
 		// [work37 Phase 1.2] enqueueWithRetry を使用（completeFade は NonRT）
 		const auto result = enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
 		if (!result) {
-			// ★ Future: RuntimeHealthMonitor へ通知
+			// ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）
+			quarantineRetireSink(old, snapshotDeleter, retireEpoch, "completeFade:queueFull");
 		}
 	}
 

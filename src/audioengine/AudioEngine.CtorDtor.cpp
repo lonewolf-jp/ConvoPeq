@@ -32,6 +32,9 @@ AudioEngine::AudioEngine()
 
     // [work21] ISRRetireRouter初期化
     m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);
+    // ★ BUG-015/027 (work88): SnapshotCoordinator の退避移送先を Router に接続
+    //   （Category A — Router API 経由で RetireQuarantineStore へ移送。直接保持はしない）
+    m_coordinator.setRetireSink(m_retireRouter.get());
     // [PR-1.5] RuntimePublicationOrchestrator 初期化 (engineInstanceId を注入)
     runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this, engineInstanceId_);
 

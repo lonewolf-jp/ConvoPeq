@@ -50,6 +50,11 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         dsp, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+    // ★ BUG-015/027 (work88): enqueue 失敗（QueuePressure/QueueFull）は enqueueWithRetry
+    //   内部で RetireQuarantineStore へ移送済み（directDelete しない — RT 参照中の UAF 排除）。
+    //   Shutdown はシャットダウン経路が処理。二重移送（double-quarantine → double-free）を
+    //   避けるため、ここでは追加の quarantineRetire を呼ばない。滞留監視は
+    //   AudioEngine 側の quarantineResidentCount / quarantineOverflowCount で行う。
     juce::ignoreUnused(result);
 
     convo::fetchAddAtomic(currentRetiringGeneration_,
@@ -91,6 +96,8 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
         toDelete, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+    // ★ BUG-015/027 (work88): 同上 — enqueueWithRetry 内部で退避ストアへ移送済み。
+    //   二重移送を避けるため追加処置なし（directDelete 禁止）。
     juce::ignoreUnused(result);
 
     convo::fetchAddAtomic(currentRetiringGeneration_,

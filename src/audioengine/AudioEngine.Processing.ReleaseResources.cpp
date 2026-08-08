@@ -366,6 +366,16 @@ void AudioEngine::releaseResources()
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
         m_retireRouter->unquarantineAllReaders();
 
+        // ★ BUG-015/027 (work88): RetireQuarantineStore の全強制解放（Audio Thread 停止後 — drainAllUnsafe 契約）
+        //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
+        const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
+        if (quarantinedRetireResident > 0) {
+            diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
+                    + juce::String(static_cast<int64>(quarantinedRetireResident))
+                    + " -- performing shutdown drain");
+            m_retireRouter->drainAllQuarantineStore();
+        }
+
         const auto residentBefore = dspQuarantineManager_.residentCount();
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="

@@ -1605,10 +1605,14 @@ public:
 
     [[nodiscard]] RuntimeBackpressureTelemetry getRuntimeBackpressureTelemetry() const noexcept
     {
+        // ★ BUG-015/027 (work88): quarantineResident に RetireQuarantineStore 滞留を統合。
+        //   退避ストアの high watermark 監視（backpressure テレメトリ）を維持する。
+        const auto retireQuarantineResident = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
         return {
             consumeAtomic(retireQueueDepth_, std::memory_order_acquire),
             consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),
-            consumeAtomic(quarantineResident_, std::memory_order_acquire),
+            (consumeAtomic(quarantineResident_, std::memory_order_acquire) + retireQuarantineResident),
             static_cast<std::uint64_t>(0), // publicationBacklog_ removed in Phase1-B
             consumeAtomic(rebuildBacklog_, std::memory_order_acquire),
             consumeAtomic(saturationEnterCount_, std::memory_order_acquire),

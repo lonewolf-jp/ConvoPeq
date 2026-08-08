@@ -12,6 +12,7 @@
 #include "core/IRetireRouter.h"
 #include "ISRAuthorityClass.h"
 #include "ISRDSPHandle.h"
+#include "RetireQuarantineStore.h"   // ★ BUG-015/027 (work88): retire enqueue 失敗時の退避ストア
 
 namespace convo {
 namespace isr {
@@ -108,6 +109,23 @@ public:
     uint32_t pendingRetireCount() const noexcept override;
     void drainAll() noexcept override;
 
+    // ★ BUG-015/027 (work88): Router API — 退避ストアへの移送（directDelete しない）。
+    //   Retire authority は 1 個のまま（本 Router 配下に Queue と QuarantineStore を単一配置）。
+    //   SnapshotCoordinator / DSPLifetimeManager はこの API 経由でのみ退避ストアに移送し、
+    //   ストアを直接保持しない（五次レビュー §5 — Authority Singularization）。
+    //   戻り値 false = store full（呼出し元は deleter を実行してはならない。
+    //   health escalation で容量枯渇を先行検知する）。
+    bool quarantineRetire(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                          DeletionEntryType type, const char* reason,
+                          uint64_t publicationSequenceId = 0, uint64_t generation = 0) noexcept;
+
+    // ★ BUG-015/027: 退避ストア滞留件数（backpressure テレメトリ / high watermark 監視用）
+    [[nodiscard]] std::size_t quarantineResidentCount() const noexcept;
+    // ★ BUG-015/027: store full で quarantine が拒否された回数（EBR 破綻診断用）
+    [[nodiscard]] std::uint64_t quarantineOverflowCount() const noexcept;
+    // ★ BUG-015/027: shutdown 時 — Audio Thread 停止後のみ全強制解放
+    void drainAllQuarantineStore() noexcept;
+
     // ★ Practical-3: Overflow レート監視用カウンター
     [[nodiscard]] uint64_t overflowCount() const noexcept {
         return convo::consumeAtomic(m_overflowCount_, std::memory_order_acquire);
@@ -170,9 +188,14 @@ public:
     }
 
 private:
+    // ★ BUG-015/027: tryReclaim 直後に退避ストアを drain（epoch 安全到達分のみ deleter 実行）
+    void drainQuarantineStore() noexcept;
+
     convo::IEpochProvider* provider_ = nullptr;
     std::atomic<uint64_t> m_overflowCount_{0};
     std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0};
+    // ★ BUG-015/027: retire enqueue 失敗時の退避ストア（Router Policy lane 配下に単一配置）
+    RetireQuarantineStore m_retireQuarantine;
     // ★ work70: 診断用カウンタ
     std::atomic<uint64_t> m_pendingRetireBytes_{0};
     std::atomic<uint32_t> m_trackedPendingEntries_{0};
