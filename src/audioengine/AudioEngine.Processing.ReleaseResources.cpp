@@ -437,6 +437,13 @@ void AudioEngine::releaseResources()
     runtimePublicationCoordinator.requestShutdownClearNonRt();
     runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
 
+    // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
+    //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
+    //   stopRebuildThread(:190, join で Builder 完全終了) → waitForDrain(:430)。
+    //   waitForDrain 時点で Builder（rebuildThreadIsRunning）は必ず false のはず。
+    //   jassert で契約破れ（順序変更・追加経路）を即時検出する。
+    jassert(!convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire));
+
     const bool drainedWithinBudget = waitForDrain(2000, 2);
     const bool timedOut = !drainedWithinBudget;
 
