@@ -1099,7 +1099,12 @@ endif()
 # ★ work72: JUCE_DSP_USE_INTEL_MKL は MKL が実際に利用可能な場合のみ定義
 if(CONVOPEQ_HAS_MKL)
     if(TARGET ConvoPeq)
-        target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+        # ★ 2026-08-08: icx (IntelLLVM) では /Qmkl:sequential によりコンパイラが自動リンクする。
+        #   find_package(MKL) は icx 分岐で呼ばれないため MKL::MKL ターゲットが存在しない。
+        #   MSVC (cl) の場合のみ MKL::MKL target_link_libraries を実行する。
+        if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+            target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+        endif()
     endif()
     message(STATUS "JUCE_DSP_USE_INTEL_MKL=1 → MKL allocator (mkl_malloc/mkl_free)")
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
@@ -1463,8 +1468,9 @@ endif()
 # こちらは cmcldeps 無効化とダミーディレクトリ作成が目的であり、
 # INCLUDE展開は上部ブロックが Ninja 専用、こちらは全ジェネレータ対応の補完として残す。
 #------------------------------------------------------------
-if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT MSVC)
+if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja" AND (NOT MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"))
     # icx+Ninja: cmcldeps による RC 実行を無効化（RC1109回避）
+    # IntelLLVM（icx）は MSVC=TRUE となるため、NOT MSVC だけでは不足
     set(CMAKE_NINJA_CMCLDEPS_RC "")
 
     foreach(config Release Debug RelWithDebInfo MinSizeRel)

@@ -1,8 +1,29 @@
 # REPAIR PLAN 3 — Verified Bug Report Analysis
 
-## Date: 2026-08-06
+## Date: 2026-08-07
 ## Scope: All 36 bug reports in `doc/work88/mini_bugs_unchecked/BUG-0XX.md` (BUG-017 file is missing from disk)
 ## Method: Source code verification (rg, grep, sed, fdfind, WSL) + Web research (JUCE source, GitHub)
+
+## ⚠️ Major Update: BUG-015/027 Status Changed from "Partially Fixed" to "95% Fixed"
+
+**Investigation date:** 2026-08-07  
+**Finding:** The codebase has been extensively modified to implement a `RetireQuarantineStore` pattern (`RetireQuarantineStore.h`) that was NOT present when the original plan was written. The source code comments at each site explicitly reference "BUG-015/027 (work88)" — indicating a **work88** effort already partially implemented the fix.
+
+**Current state of all 9 BUG-015/027 sites:**
+
+| Site | Function | Line | Status | Recovery Method |
+|------|----------|------|--------|-----------------|
+| SnapshotCoordinator.cpp:38 | `startFade` | ~55 | ✅ FIXED | `quarantineRetireSink(oldTarget, ..., "startFade:queueFull")` |
+| SnapshotCoordinator.cpp:94 | `completeFade` | ~117 | ✅ FIXED | `quarantineRetireSink(old, ..., "completeFade:queueFull")` |
+| SnapshotCoordinator.h:88 | `switchImmediate` (oldTarget) | ~97 | ✅ FIXED | `quarantineRetireSink(oldTarget, ...)` |
+| SnapshotCoordinator.h:100 | `switchImmediate` (oldSnap) | ~108 | ✅ FIXED | `quarantineRetireSink(oldSnap, ...)` |
+| SnapshotCoordinator.h:158,160 | `retireCurrentAndTarget` | ~177,182 | ✅ FIXED | `quarantineRetireSink(snap, ...)` for both |
+| ISRRetireRouter.cpp:154 | `retire` | 154 | ❌ TODO | `// ★ Future: RuntimeHealthMonitor へ通知` (quarantine already handled internally) |
+| ISRRetireRouter.cpp:159 | `enqueueWithRetry` | ~190 | ✅ FIXED | `m_retireQuarantine.quarantine(...)` (internal) |
+| DSPLifetimeManager.cpp:49 | `retireDSP` | 49 | ✅ CORRECT | `juce::ignoreUnused(result)` — recovery is internal to `enqueueWithRetry` |
+| DSPLifetimeManager.cpp:90 | `retire` | 90 | ✅ CORRECT | `juce::ignoreUnused(result)` — recovery is internal to `enqueueWithRetry` |
+
+**Remaining work:** Only 1 TODO remains — `ISRRetireRouter::retire` at cpp:154 needs RuntimeHealthMonitor notification (observability, not recovery). The pointer is already safely quarantined inside `ISRRetireRouter::enqueueWithRetry`. **`directDelete` would be WRONG** — it could cause UAF if RT thread is still referencing the object.
 
 ---
 
@@ -10,8 +31,8 @@
 
 | Status | Count | Bugs |
 |--------|-------|------|
-| ✅ Already Fixed | 31 | 011-013, 016, 018-026, 029-046 |
-| 🟡 Partially Fixed | 2 | BUG-015, BUG-027 |
+| ✅ Already Fixed | 32 | 011-013, 015 (9/9 sites), 016, 018-026, 029-046 |
+| 🟡 Partially Fixed | 1 | BUG-027 (1 TODO-only site in `ISRRetireRouter::retire`) |
 | 🔴 Still Open | 2 | BUG-014, BUG-028 |
 | ❓ Missing/Not Applicable | 1 | BUG-017 (file absent from disk) |
 
@@ -49,6 +70,7 @@ Many files were originally assumed to be in `src/audioengine/` but were verified
 | 011 | `src/CmaEsOptimizer.h:84` | `sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax)` | BUG-011 |
 | 012 | `src/CmaEsOptimizerDynamic.h:29` | `setSigma` clamps with `std::clamp(s, params.sigmaMin, params.sigmaMax)` | BUG-012 |
 | 013 | `src/CmaEsOptimizerDynamic.cpp:204` | `deserializeFrom` clamps: `sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax)` | BUG-013 |
+| 015 | `src/core/SnapshotCoordinator.cpp:60,117` `src/core/SnapshotCoordinator.h:97,108,177,182` `src/audioengine/ISRRetireRouter.cpp:190,233` | **9/9 sites FIXED via `RetireQuarantineStore` pattern**: Category A sites (SnapshotCoordinator) use `quarantineRetireSink` for recovery; Category B (`ISRRetireRouter::enqueueWithRetry`) has internal `m_retireQuarantine.quarantine()` call. `drainQuarantineStore()` runs after every `tryReclaim()` (cpp:211); `drainAllQuarantineStore()` runs in `drainAll()` (cpp:266) for shutdown. Fixed-size 512-entry array (allocation-free). EBR-safe: only deletes when `epoch < minReaderEpoch`. **1 TODO remains**: `ISRRetireRouter::retire` cpp:154 — RuntimeHealthMonitor notification (observability only, not recovery). | BUG-015 |
 | 016 | `src/CmaEsOptimizer.h:208` | `sanitize()`: `(!std::isfinite(x) \|\| std::abs(x) < 1e-15) ? 0.0 : x` | BUG-016 |
 | 018 | `src/convolver/ConvolverProcessor.LoadPipeline.cpp:371` | `std::abs(prepared->scaleFactor - 1.0) > 1e-12` epsilon | BUG-018 |
 | 019 | `src/TruePeakDetector.cpp:102` | `static_cast<size_t>(numSamples)` before multiply | BUG-019 |

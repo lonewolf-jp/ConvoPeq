@@ -237,7 +237,7 @@ public:
         //   コンストラクタで先頭 variant（observe）を値初期化する（全 variant は trivially
         //   copyable のため、payload は割当時に正しく初期化される）。
         Intent() noexcept
-            : type(IntentType::Observe), sequenceId(0), payload(ObservePayload{})
+            : type(IntentType::Observe), payload(ObservePayload{}), sequenceId(0)
         {
         }
         IntentType type;

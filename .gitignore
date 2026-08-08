@@ -16,6 +16,8 @@ build-icx/
 build_asan/
 build-asan-msvc/
 build-asan-check/
+build-ci-check/
+build-ci-nomkl/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
