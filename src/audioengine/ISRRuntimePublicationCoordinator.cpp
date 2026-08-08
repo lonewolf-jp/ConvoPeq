@@ -701,8 +701,23 @@ void RuntimePublicationCoordinator::submitQuarantine(
     if (intentQueue_.push(intent)) {
         setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
         setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+        return;
     }
-    // transport-only: intentQueue_ overflow is handled by the FUTURE-10 unified Overflow Policy (drop at saturate).
+
+    // ★ work88 (FUTURE-10 / 三次レビュー policy 表): Quarantine intent の drop は禁止。
+    //   quarantine 検出は安全要件（bad DSP のアクセス禁止）であり、drop されると
+    //   quarantined DSP が永久に retire されず RT からアクセス不能なメモリが残存する。
+    //   intentQueue_ full 時は Quarantine 専用 fallback ring へ退避（drop しない）。
+    if (quarantineFallbackQueue_.push(intent)) {
+        setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+        return;
+    }
+
+    // fallback も full → 絶対に静かに破棄しない。drop カウンタを増やして診断に残す。
+    //   （AudioEngine 側の HealthMonitor が quarantineFallbackDropCount を監視し、
+    //    ISRHealthState::Critical 昇格 / controlled shutdown を駆動する。）
+    convo::fetchAddAtomic(quarantineFallbackDropCount_, uint64_t{1}, std::memory_order_release);
 }
 
 } // namespace convo::isr

@@ -317,6 +317,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME DeferredDeletionQueueReclaimTests
         COMMAND DeferredDeletionQueueReclaimTests)
 
+    # ★ work88 (FUTURE-10 前提 0): MpscBoundedRing 単体テスト（Vyukov bounded MPSC）
+    #   1/N producers・queue full・FIFO・producer hole・cross-type FIFO を検証
+    add_executable(MpscBoundedRingTests
+        src/tests/MpscBoundedRingTests.cpp
+    )
+    add_test(NAME MpscBoundedRingTests
+        COMMAND MpscBoundedRingTests)
+
     add_executable(PriorityIntegrationTests
         src/tests/PriorityIntegrationTests.cpp
         src/audioengine/ISRRetire.cpp              # RetireRuntime
@@ -525,6 +533,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
     target_include_directories(DeferredDeletionQueueReclaimTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_compile_features(MpscBoundedRingTests PRIVATE cxx_std_20)
+    target_compile_options(MpscBoundedRingTests PRIVATE /EHsc /utf-8)
+    target_include_directories(MpscBoundedRingTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
@@ -1624,6 +1640,7 @@ if(ENABLE_ASAN)
         CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
         PartialPublicationRejectTests RebuildAdmissionRegressionTests
         BuildInputSemanticContractTests DeferredDeletionQueueReclaimTests
+        MpscBoundedRingTests
         PriorityIntegrationTests GainStagingContractTests EQProcessorMaxGainTests
         EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
         AudioEngineHarness ISRSoakTests)

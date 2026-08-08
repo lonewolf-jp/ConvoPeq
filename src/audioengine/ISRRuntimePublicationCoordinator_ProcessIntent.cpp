@@ -41,6 +41,11 @@ void RuntimePublicationCoordinator::processIntent(
     //   Observe stays on its dedicated SPSC rings — DoD #4/#7 (single intentQueue + cross-type FIFO)
     //   is deferred to FUTURE-10's unified Overflow Policy migration.
     Intent commonIntent;
+    // ★ work88 (FUTURE-10): Quarantine 専用 fallback ring の drain（drop 禁止の退避先）。
+    //   quarantine は安全要件（bad DSP のアクセス禁止）のため、intentQueue_ より先に処理する。
+    while (quarantineFallbackQueue_.pop(commonIntent))
+        kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
+    // メイン intentQueue_（MpscBoundedRing — MPSC 化済み）
     while (intentQueue_.pop(commonIntent))
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
 

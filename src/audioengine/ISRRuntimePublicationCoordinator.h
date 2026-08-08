@@ -15,6 +15,7 @@
 #include "ISRRetireRouter.h"
 #include "ISRRetireOverflowRing.h"     // ★ Phase5: RetireOverflowEntry
 #include "../LockFreeRingBuffer.h"     // ★ Phase5: coordinatorDeferredRing_
+#include "../MpscBoundedRing.h"        // ★ FUTURE-10 (work88): intentQueue_ の MPSC 化 (Vyukov bounded)
 #include "ISRDSPHandle.h"              // ★ P0-5: QuarantineService needs full DSPHandle
 #include "RuntimeBuildTypes.h"          // ★ FUTURE-3 (work88): RuntimeBuildSnapshot (RecoveryIntent::buildSource 値コピー)
 
@@ -118,6 +119,12 @@ public:
     [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;  // ★ Phase2
+    // ★ work88 (FUTURE-10): Quarantine fallback ring の drop 回数（静かに破棄しない証跡）。
+    //   AudioEngine 側 HealthMonitor が監視し ISRHealthState::Critical 昇格を駆動する。
+    [[nodiscard]] std::uint64_t quarantineFallbackDropCount() const noexcept
+    {
+        return convo::consumeAtomic(quarantineFallbackDropCount_, std::memory_order_acquire);
+    }
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
     [[nodiscard]] bool isFullyDrained() const noexcept;
@@ -410,9 +417,21 @@ private:
     std::atomic<uint64_t> nextRecoveryIntentId_{0};
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
+    //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。
+    //   intentQueue_ は既に複数 Producer（Builder/Rebuild スレッド・Timer・CoordinatorLoop
+    //   deferred resubmit）から push される MPSC 実態だった（潜在競合）。Vyukov bounded で
+    //   CAS 予約（reservation order = seqId order）→ payload 書込み → seq release を保証。
     static constexpr size_t kIntentQueueCapacity = 4096;
-    LockFreeRingBuffer<Intent, kIntentQueueCapacity> intentQueue_;
+    MpscBoundedRing<Intent, kIntentQueueCapacity> intentQueue_;
     std::atomic<uint64_t> nextIntentId_{0};
+
+    // ── ★ FUTURE-10 (work88): Quarantine 専用 fallback ring（三次レビュー policy 表）──
+    //   Quarantine intent の drop は安全要件違反（bad DSP が使用可能なまま残る）。
+    //   intentQueue_ full 時はここへ退避。それも full なら HealthEvent / Critical へ昇格
+    //   （drop カウンタを増やしつつ決して静かに破棄しない）。
+    static constexpr size_t kQuarantineFallbackCapacity = 1024;
+    MpscBoundedRing<Intent, kQuarantineFallbackCapacity> quarantineFallbackQueue_;
+    std::atomic<uint64_t> quarantineFallbackDropCount_{0};
 
     // ★ Phase5: 滞留年限警告コールバック
     AgeWarnCallback overflowAgeWarnCallback_{nullptr};
