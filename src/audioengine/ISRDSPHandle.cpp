@@ -124,14 +124,23 @@ void DSPHandleRuntime::retire(DSPHandle handle)
 
 void DSPHandleRuntime::reclaim(DSPHandle handle)
 {
-    if (!handle.isNull() && handle.slot < MAX_DSP_SLOTS) {
-        registry_[handle.slot].instance = nullptr;
-        convo::publishAtomic(registry_[handle.slot].state, DSPState::Reclaimed, std::memory_order_release);
-        // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
-        std::lock_guard<std::mutex> lock(freeListMutex_);
-        if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
-            freeSlots_[freeSize_++] = handle.slot;
-    }
+    if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS)
+        return;
+    std::lock_guard<std::mutex> lock(freeListMutex_);
+    auto& reg = registry_[handle.slot];
+    // ★ 監査指摘 (work88): stale handle 検出（generation 不一致なら slot は別世代で再利用中 —
+    //   誤って新規 DSP の slot を Reclaimed 化しない）。FUTURE-5 generation タグの完全化。
+    if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != handle.generation)
+        return;
+    // ★ 監査指摘 (work88): 二重 reclaim 防止（既に Reclaimed → free list へ重複 push せず、
+    //   同一 slot の二重割当（double-allocation）を構造的に排除）。
+    if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
+        return;
+    reg.instance = nullptr;
+    convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
+    // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
+    if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+        freeSlots_[freeSize_++] = handle.slot;
 }
 
 void DSPHandleRuntime::quarantine(DSPHandle handle)
@@ -228,6 +237,12 @@ void DSPHandleRuntime::destroyQuarantineSlot(
     registry_[slot].instance = nullptr;
     convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
                          std::memory_order_release);
+    // ★ 監査指摘 (work88): Reclaimed 化した quarantine slot を free list へ戻す（スロットリーク防止）。
+    //   destroyQuarantineSlot は state==Quarantined を確認済みのため二重 push は起きない
+    //   （reclaim() 側の state ガードとも整合）。
+    std::lock_guard<std::mutex> lock(freeListMutex_);
+    if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+        freeSlots_[freeSize_++] = slot;
 }
 
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept

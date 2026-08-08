@@ -75,7 +75,13 @@ public:
 
         std::lock_guard<std::mutex> lock(mtx_);
         if (size_ >= kMaxQuarantinedEntries)
+        {
+            // ★ 監査指摘 (work88): capacity exhaustion を overflowCount_ に記録（これまで
+            //   未インクリメントで telemetry が 0 のままだった）。EBR 破綻の診断・HealthEvent
+            //   昇格の根拠になる。deleter は絶対に実行しない（UAF 構造的排除）。
+            ++overflowCount_;
             return false;  // store full — caller must NOT delete
+        }
 
         entries_[size_] = QuarantinedEntry{
             ptr, deleter, epoch, type,

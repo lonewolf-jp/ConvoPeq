@@ -325,6 +325,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME MpscBoundedRingTests
         COMMAND MpscBoundedRingTests)
 
+    # ★ work88 (FUTURE-6 監査): DSPHandleTable 単体テスト（open addressing + tombstone）
+    #   erase 後のクラスタ断絶リグレッション防止（find が後続エントリを探し続けること）
+    add_executable(DSPHandleTableTests
+        src/tests/DSPHandleTableTests.cpp
+    )
+    add_test(NAME DSPHandleTableTests
+        COMMAND DSPHandleTableTests)
+
     add_executable(PriorityIntegrationTests
         src/tests/PriorityIntegrationTests.cpp
         src/audioengine/ISRRetire.cpp              # RetireRuntime
@@ -541,6 +549,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(MpscBoundedRingTests PRIVATE cxx_std_20)
     target_compile_options(MpscBoundedRingTests PRIVATE /EHsc /utf-8)
     target_include_directories(MpscBoundedRingTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_compile_features(DSPHandleTableTests PRIVATE cxx_std_20)
+    target_compile_options(DSPHandleTableTests PRIVATE /EHsc /utf-8)
+    target_include_directories(DSPHandleTableTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
@@ -1640,7 +1656,7 @@ if(ENABLE_ASAN)
         CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
         PartialPublicationRejectTests RebuildAdmissionRegressionTests
         BuildInputSemanticContractTests DeferredDeletionQueueReclaimTests
-        MpscBoundedRingTests
+        MpscBoundedRingTests DSPHandleTableTests
         PriorityIntegrationTests GainStagingContractTests EQProcessorMaxGainTests
         EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
         AudioEngineHarness ISRSoakTests)

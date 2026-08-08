@@ -40,10 +40,14 @@ public:
     struct Entry {
         void* key = nullptr;
         DSPHandle value;
-        bool occupied = false;
+        bool occupied = false;  // slot に内容（live または tombstone）がある
+        bool deleted = false;   // ★ 監査指摘 (work88): tombstone（erase 済み。find は探索を継続）
     };
 
-    // 前方検索: key → DSPHandle（見つかれば out に設定して true）
+    // 前方検索: key → DSPHandle（見つかれば out に設定して true）。
+    //   トゥームストーン（deleted）は飛ばして探索を継続し、真の空（!occupied）で終了。
+    //   ★ 監査指摘 (work88): erase を tombstone 化しないと open addressing のクラスタ断絶が
+    //     起き、同じバケットの後続エントリを find できなくなる（重複登録の原因）。
     [[nodiscard]] bool find(void* key, DSPHandle& out) const noexcept
     {
         if (key == nullptr)
@@ -52,8 +56,8 @@ public:
         for (std::uint32_t i = 0; i < kCapacity; ++i) {
             const auto& e = entries_[(idx + i) & kMask];
             if (!e.occupied)
-                return false;  // 空 slot 到達 = 存在しない
-            if (e.key == key) {
+                return false;  // 真の空 slot 到達 = クラスタ終端 = 存在しない
+            if (!e.deleted && e.key == key) {
                 out = e.value;
                 return true;
             }
@@ -61,30 +65,45 @@ public:
         return false;
     }
 
-    // 前方挿入（既存 key は value 更新）
+    // 前方挿入（既存 live key は value 更新。トゥームストーンは再利用）。
     bool insert(void* key, const DSPHandle& value) noexcept
     {
         if (key == nullptr)
             return false;
         std::uint32_t idx = hashKey(key);
+        std::int64_t firstAvail = -1;  // 最初の再利用可能 slot（tombstone または真の空）
         for (std::uint32_t i = 0; i < kCapacity; ++i) {
-            auto& e = entries_[(idx + i) & kMask];
+            const auto& e = entries_[(idx + i) & kMask];
             if (!e.occupied) {
-                e.key = key;
-                e.value = value;
-                e.occupied = true;
-                ++count_;
-                return true;
+                if (firstAvail < 0)
+                    firstAvail = static_cast<std::int64_t>(i);
+                break;  // クラスタ終端
+            }
+            if (e.deleted) {
+                if (firstAvail < 0)
+                    firstAvail = static_cast<std::int64_t>(i);
+                continue;
             }
             if (e.key == key) {
-                e.value = value;
+                // 既存 live エントリの更新（同じ key は同一 DSP とみなす）
+                auto& live = const_cast<Entry&>(e);
+                live.value = value;
                 return true;
             }
         }
-        return false;  // full（容量枯渇 — 通常到達しない）
+        if (firstAvail < 0)
+            return false;  // full（容量枯渇 — 通常到達しない）
+
+        auto& slot = entries_[(idx + static_cast<std::uint32_t>(firstAvail)) & kMask];
+        slot.key = key;
+        slot.value = value;
+        slot.occupied = true;
+        slot.deleted = false;
+        ++count_;
+        return true;
     }
 
-    // 前方削除（key → erase）
+    // 前方削除（key → erase。トゥームストーン化する）。
     bool erase(void* key) noexcept
     {
         if (key == nullptr)
@@ -93,11 +112,11 @@ public:
         for (std::uint32_t i = 0; i < kCapacity; ++i) {
             auto& e = entries_[(idx + i) & kMask];
             if (!e.occupied)
-                return false;
-            if (e.key == key) {
-                e.occupied = false;
+                return false;  // 真の空 = 存在しない
+            if (!e.deleted && e.key == key) {
                 e.key = nullptr;
                 e.value = DSPHandle{};
+                e.deleted = true;  // トゥームストーン（occupied は維持 → クラスタ断絶なし）
                 --count_;
                 return true;
             }
@@ -113,11 +132,11 @@ public:
         if (handle.isNull())
             return false;
         for (auto& e : entries_) {
-            if (e.occupied && e.value == handle) {
+            if (e.occupied && !e.deleted && e.value == handle) {
                 outKey = e.key;
-                e.occupied = false;
                 e.key = nullptr;
                 e.value = DSPHandle{};
+                e.deleted = true;  // トゥームストーン化（クラスタ断絶防止）
                 --count_;
                 return true;
             }

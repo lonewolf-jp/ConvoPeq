@@ -812,6 +812,7 @@ void AudioEngine::rebuildThreadLoop()
                 rebuildCV.wait(lock, [this] {
                     return hasPendingTask
                         || publishRetryReady
+                        || recoveryPending  // ★ 監査指摘 (work88): Recovery Intent 到着で起床
                         || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
                 });
 
@@ -894,10 +895,15 @@ void AudioEngine::rebuildThreadLoop()
             //   輸送する（IR data は内包しない）。IR 実体は runtimeBuilder.build() が
             //   engine.getConvolverProcessor()（現在の UI processor）から transferIRStateFrom で転送する。
             //   Recovery は Builder Work Queue 分離のため Dispatcher 経由で再 enqueue されない（循環構造的排除）。
-            //   NOTE: 起床は Phase 7（RecoveryIntentHandler が Builder へ通知）で配線する。現時点では
-            //   rebuildThread が起床済みのタイミングで recoveryIntentQueue_ を消費する。
+            //   NOTE: 起床は recoveryPending フラグ（submitRecoveryIntent が set + notify）で配線済み。
+            //   消費開始時に recoveryPending をクリアし、処理中に到着した新規 Recovery は
+            //   submitRecoveryIntent が再度 set して次サイクルで処理される（lost-wakeup 防止）。
             if (!convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire))
             {
+                {
+                    std::lock_guard<std::mutex> lock(rebuildMutex);
+                    recoveryPending = false;
+                }
                 const auto isRecoveryAborted = [&] {
                     return convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
                 };

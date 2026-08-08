@@ -2558,6 +2558,12 @@ public:
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     bool hasPendingTask = false;
+    // ★ 監査指摘 (work88): Recovery Intent を Builder Work Queue に投入したことを rebuild
+    //   スレッドへ通知するフラグ（hasPendingTask と同じ rebuildMutex で保護）。
+    //   RecoveryIntentHandler → submitRecoveryIntent が set + notify、rebuild スレッドが
+    //   Recovery 処理開始時にクリアする。これがないとアイドル時に Recovery が処理されない
+    //   （配線漏れ解消）。
+    bool recoveryPending = false;
     // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が deferred publish を RebuildThread へ
     //   ハンドオフするためのイベント駆動フラグ。hasPendingTask と同じ rebuildMutex で保護する
     //   （atomic にはしない）。CoordinatorLoop が 1ms tick ごとに set + notify_one、RebuildThread が
@@ -3901,7 +3907,14 @@ public:
             dspCrossfadeArmed_RT = true;
             dspCrossfadeStartDelayBlocks_RT = prepared.startDelayBlocks;
 
-            // C1-2: activate のみ Audio Thread で実行 (reset/setCurrentAndTargetValue は Message Thread 側)
+            // ★ BUG-028 fix (work88 監査): start() から gain_.setCurrentAndTargetValue(0.0) を
+            //   削除したため、新規クロスフェード arm 時に gain_.current を 0 へリセットする機構が
+            //   失われていた（Init/PrepareToPlay で current=1.0 のまま → setTargetValue(1.0) が
+            //   no-op → isSmoothing()=false → canCrossfade=false → 等電力クロスフェード不発）。
+            //   ここで RT スレッドから applyImmediateValueRT(0.0)（RT 専用・current/target/step/
+            //   remaining を 0 に）を呼び、続いて setTargetValue(1.0) で 0→1 ランプを開始する。
+            //   これにより RT-only LinearRamp ownership（INV-2）を維持したままフェードが復旧する。
+            crossfadeRuntime_.getGain().applyImmediateValueRT(0.0);  // RT-safe reset（BUG-028 arm 時）
             crossfadeRuntime_.getGain().setTargetValue(1.0);
 
             if (firstLoadDryPending)
@@ -4195,6 +4208,14 @@ inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
                                  const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
     runtimePublicationBridge_.submitRecoveryRequest(quarantinedHandle, buildSource);
+    // ★ 監査指摘 (work88): Recovery を Builder Work Queue に投入後、rebuild スレッドを起床させる。
+    //   recoveryIntentQueue_ への push は rebuildCV を起こさないため、アイドル時に Recovery が
+    //   処理されない配線漏れを解消（RecoveryIntentHandler からの enqueue-only 経路）。
+    {
+        std::lock_guard<std::mutex> lock(rebuildMutex);
+        recoveryPending = true;
+    }
+    rebuildCV.notify_all();
 }
 
 // ★ work70-FIX: lookupDSPHandleForRuntime — DSPCore* → DSPHandle 逆引き（const）
