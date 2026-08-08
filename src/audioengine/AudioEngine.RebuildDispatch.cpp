@@ -887,6 +887,75 @@ void AudioEngine::rebuildThreadLoop()
             convo::RuntimeBuilder runtimeBuilder(*this);
             // ★ S-2: HealthState 参照を RuntimeBuilder に設定
 
+            // ★ FUTURE-3 (work88): Recovery build 消費 — Builder Work Queue (recoveryIntentQueue_) を pop。
+            //   Recovery = quarantined DSP を除外した現在の authoritative configuration の再構築
+            //   （RECOVERY-SEMANTIC-001 / INV-4。過去 World の rollback ではない）。
+            //   buildSource（RuntimeBuildSnapshot 値コピー）は build 入力の metadata/fingerprint を
+            //   輸送する（IR data は内包しない）。IR 実体は runtimeBuilder.build() が
+            //   engine.getConvolverProcessor()（現在の UI processor）から transferIRStateFrom で転送する。
+            //   Recovery は Builder Work Queue 分離のため Dispatcher 経由で再 enqueue されない（循環構造的排除）。
+            //   NOTE: 起床は Phase 7（RecoveryIntentHandler が Builder へ通知）で配線する。現時点では
+            //   rebuildThread が起床済みのタイミングで recoveryIntentQueue_ を消費する。
+            if (!convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire))
+            {
+                const auto isRecoveryAborted = [&] {
+                    return convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
+                };
+
+                while (auto recovery = runtimePublicationBridge_.popRecoveryRequest())
+                {
+                    const auto& qHandle = recovery->handle;
+                    // RECOVERY-6: 消費時点で quarantinedHandle の実在性を検証（無効ハンドルは無視）。
+                    //   resolve() は Quarantined/Reclaimed を {nullptr,false,false} で拒否するため、
+                    //   build 入力は payload 内 buildSource の値コピーから引当（epoch 逆引き不要）。
+                    if (qHandle.isNull() || !recovery->buildSource.sealed)
+                        continue;
+
+                    // 案 i (五次レビュー): convolverBuildSnapshot は build 時に現在の
+                    //   uiConvolverProcessor から取得（BuildSnapshot は juce::File/String を含み
+                    //   POD でないため RecoveryIntent に内包しない）。
+                    auto convolverSnapshot = uiConvolverProcessor.captureBuildSnapshot();
+
+                    convo::BuildResult recoveryResult = runtimeBuilder.build(
+                        recovery->buildSource.buildInput, convolverSnapshot);
+                    if (recoveryResult.runtime == nullptr)
+                    {
+                        diagLog("[DIAG] rebuildThreadLoop: recovery build failed error="
+                            + juce::String(convo::toString(recoveryResult.error)));
+                        continue;
+                    }
+                    dspGuard.ptr = recoveryResult.runtime;
+                    auto* recoveryDSP = recoveryResult.runtime;
+
+                    if (recoveryDSP->convolverRt().getIRLength() > 0)
+                        recoveryDSP->convolverRt().rebuildAllIRsSynchronous(isRecoveryAborted);
+
+                    const auto recoveryWarmup = runtimeBuilder.validateWarmup(*recoveryDSP);
+                    if (recoveryWarmup != convo::BuildError::None)
+                    {
+                        diagLog("[DIAG] rebuildThreadLoop: recovery warmup failed error="
+                            + juce::String(convo::toString(recoveryWarmup)));
+                        continue;
+                    }
+
+                    recoveryDSP->convolverRt().refreshLatency();
+                    recoveryDSP->ramps().fadeInSamplesLeft = DSPCore::FADE_IN_SAMPLES;
+
+                    // publish（通常経路と同一 — Immutable Publish で新 World 公開）。
+                    //   quarantined DSP は active/fading slot から除去済みのため、新 World には
+                    //   含まれない（spec 除外は暗黙的に成立 — RECOVERY-2 と整合）。
+                    DSPCore* dspToCommit = dspGuard.ptr;
+                    dspGuard.ptr = nullptr;
+                    // generation は現在の rebuildRequestGeneration を使用（isRebuildObsolete 誤判定回避）。
+                    const int recoveryGeneration =
+                        convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire);
+                    auto recoverySnapshot = recovery->buildSource;
+                    recoverySnapshot.generation = recoveryGeneration;
+                    recoverySnapshot.sealed = true;
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                }
+            }
+
             // Helper to check obsolescence
             const auto isObsolete = [&] {
                 return isRebuildObsolete(task.generation) || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);

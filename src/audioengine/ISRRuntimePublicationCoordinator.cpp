@@ -645,7 +645,11 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 // ★ FUTURE-3: Coordinator は Recovery Request enqueue のみ。Rollback ではない — New World の Immutable Publish が復旧担う。
 //   Builder → Validate → Publish は Builder Loop が popRecoveryRequest() で消費（Admission 判定なし）。
 //   transport-only: saturate 時は drop。Decision Authority を持たない。
-void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle) noexcept
+// ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を payload に内包。
+//   quarantinedHandle だけでは resolve() 不能（ISRDSPHandle.cpp:69）なため、build 入力は
+//   値コピーした snapshot から引当する（epoch 逆引き不要 — lifetime を構造的に解決）。
+void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+                                                          const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
@@ -654,7 +658,8 @@ void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quara
     RecoveryIntent intent{
         quarantinedHandle,
         currentEpoch,
-        nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed)
+        nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed),
+        buildSource
     };
 
     recoveryIntentQueue_.push(intent);   // transport-only enqueue

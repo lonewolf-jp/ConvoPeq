@@ -16,6 +16,7 @@
 #include "ISRRetireOverflowRing.h"     // ★ Phase5: RetireOverflowEntry
 #include "../LockFreeRingBuffer.h"     // ★ Phase5: coordinatorDeferredRing_
 #include "ISRDSPHandle.h"              // ★ P0-5: QuarantineService needs full DSPHandle
+#include "RuntimeBuildTypes.h"          // ★ FUTURE-3 (work88): RuntimeBuildSnapshot (RecoveryIntent::buildSource 値コピー)
 
 // ★ P0-4A: DSPLifetimeManager は global scope（DSPLifetimeManager.h 参照）
 //   processIntent の完全定義には DSPLifetimeManager.h の include が必要。
@@ -152,16 +153,30 @@ public:
          DSPHandle handle;            // recovery 対象（quarantined DSPHandle）
          PublicationEpoch epoch;      // emit 時の publicationEpoch（FIFO/epoch 検証用）
          uint64_t intentId;           // 診断・モニタリング用シーケンス番号
+         // ★ FUTURE-3 (work88): build spec を値コピーで内包（POD、trivially copyable）。
+         //   quarantinedHandle 単独では resolve() 不能（ISRDSPHandle.cpp:69）なため、build 入力は
+         //   値コピーした snapshot から引当する（epoch 逆引き不要 — lifetime を構造的に解決）。
+         //   IR data は内包しない（四次実測: RuntimeBuildSnapshot に IR AudioBuffer は無い）。
+         //   IR 実体は build 時に transferIRStateFrom(engine.getConvolverProcessor()) で現在値取得
+         //   （Recovery semantic = quarantined 除外した現在のユーザー構成の再構築）。
+         //   ConvolverProcessor::BuildSnapshot は juce::File/String を含み POD でないため内包しない
+         //   （五次レビュー案 i — build 時に uiConvolverProcessor.captureBuildSnapshot() から取得）。
+         convo::RuntimeBuildSnapshot buildSource;
      };
      static_assert(std::is_trivially_copyable_v<RecoveryIntent>,
          "RecoveryIntent must be trivially copyable for LockFreeRingBuffer");
      static_assert(std::is_standard_layout_v<RecoveryIntent>,
          "RecoveryIntent must be standard layout for LockFreeRingBuffer");
+     static_assert(std::is_trivially_copyable_v<convo::RuntimeBuildSnapshot>,
+         "FUTURE-3: RuntimeBuildSnapshot must be trivially copyable to embed in RecoveryIntent");
 
      /// Recovery Intent: Quarantined DSPHandle の復旧要求を発行する。
      /// FUTURE-3/QSVC-5: rollback 廃止。New RuntimeWorld の Immutable Publish で復旧。
      /// Coordinator は Request enqueue のみ。Admission 判定は行わない（純粋発行関数）。
-     void submitRecoveryRequest(const DSPHandle& quarantinedHandle) noexcept;
+     /// ★ FUTURE-3 (work88): buildSource は build 入力の metadata/fingerprint を値コピーで運ぶ
+     ///   （Recovery semantic = quarantined 除外した現在の authoritative configuration の再構築）。
+     void submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+                                const convo::RuntimeBuildSnapshot& buildSource) noexcept;
 
      /// Recovery Intent を Builder Loop へ引き渡す (1件 pop, transport-only)。
      /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。

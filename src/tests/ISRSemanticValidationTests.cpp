@@ -592,7 +592,11 @@ namespace {
 {
     convo::isr::RuntimePublicationCoordinator coordinator;
     const auto handle = convo::isr::DSPHandle::null();
-    coordinator.submitRecoveryRequest(handle);   // enqueue（Admission 判定なし）
+    // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を引数に追加。
+    //   quarantinedHandle 単独では resolve 不能なため、build 入力は値コピーで引当する。
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;  // 1-hop 輸送テストのため sealed 済み snapshot を渡す
+    coordinator.submitRecoveryRequest(handle, buildSource);   // enqueue（Admission 判定なし）
     if (!coordinator.popRecoveryRequest().has_value())
         return false;                            // Builder pop path
     if (coordinator.popRecoveryRequest().has_value())
