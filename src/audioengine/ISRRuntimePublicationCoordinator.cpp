@@ -664,7 +664,12 @@ RuntimePublicationCoordinator::popRecoveryRequest() noexcept
     RecoveryIntent intent{};
     if (!recoveryIntentQueue_.pop(intent))
         return std::nullopt;              // transport-only pop: empty は Builder 消費の前提
-    setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) - 1);
+    // ★ 監査指摘 (work88): processIntent が pendingIntentCount を 0 にリセットした後に pop が
+    //   減算すると uint64 underflow（巨大値）→ isFullyDrained の pendingIntentCount==0 が false
+    //   になりシャットダウンがハングし得る。0 未満へは減算しないガードを追加。
+    const auto cur = pendingIntentCount_.load(std::memory_order_relaxed);
+    if (cur > 0)
+        setPendingIntentCount(cur - 1);
     return intent;
 }
 

@@ -941,6 +941,16 @@ void AudioEngine::rebuildThreadLoop()
                     {
                         diagLog("[DIAG] rebuildThreadLoop: recovery warmup failed error="
                             + juce::String(convo::toString(recoveryWarmup)));
+                        // ★ 監査指摘 (work88): 未コミットの recovery DSP を破棄してから continue。
+                        //   このままでは dspGuard.ptr が次の recovery 反復（または主タスク）の
+                        //   dspGuard.ptr = ... で上書きされ、未コミット DSP が二度と解放されず
+                        //   リークする。未登録（publish されていない）DSPCore は EBR 保護不要のため
+                        //   直接破棄する（DSPGuard デストラクタと同契約）。
+                        if (dspGuard.ptr != nullptr)
+                        {
+                            AudioEngine::destroyDSPCoreNode(dspGuard.ptr);
+                            dspGuard.ptr = nullptr;
+                        }
                         continue;
                     }
 
