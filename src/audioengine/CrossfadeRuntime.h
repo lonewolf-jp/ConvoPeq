@@ -38,7 +38,12 @@ public:
     void start(double fadeTimeSec, double sampleRate) noexcept
     {
         gain_.reset(sampleRate, std::max(0.001, fadeTimeSec));
-        gain_.setCurrentAndTargetValue(0.0);
+        // ★ BUG-028 fix (work88): gain_.setCurrentAndTargetValue(0.0) を削除。
+        //   start() は NonRT（DSPTransition::onPublishCompleted / publish 完了経路）から呼ばれ、
+        //   RT が getGain().getNextValue()/isSmoothing() を読んでいる最中の current/target/step/remaining
+        //   書き換えはデータレース（LinearRamp は非 atomic）。fade-in は RT 側
+        //   armCrossfadeIfPending（AudioEngine.h:3878）の setTargetValue(1.0) で駆動する。
+        //   gain_.reset() のみ維持（totalSteps のみ設定 — prepareToPlay 相当）。
         convo::publishAtomic(pending_, true, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, fadeTimeSec, std::memory_order_release);
         convo::publishAtomic(useDryAsOld_, false, std::memory_order_release);
@@ -47,6 +52,10 @@ public:
         convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
         // ★ P1-C: 開始タイムスタンプ記録（Practical-2 Timeout監視用）
         convo::publishAtomic(fadeStartTimestampUs_, getCurrentTimeUs(), std::memory_order_release);
+        // ★ P1 hardening (BUG-028 五次レビュー §8): block-boundary semantic consistency の anchor。
+        //   start()/complete() の複数 atomic publish が「一貫した batch」として消費されることを
+        //   generation の変化で検出可能にする。
+        bumpCrossfadeGeneration();
         // activeCrossfadeId_ は触らない — CrossfadeAuthorityRuntime の権威
     }
 
@@ -94,12 +103,24 @@ public:
     // シャットダウン時は reset() を使用すること。
     void complete() noexcept
     {
+        // ★ BUG-028 fix (work88): dryScaleTarget_/startDelayBlocks_/dryHoldSamples_ の
+        //   atomic publish を追加。従来 stale フラグのみ reset しており、complete 後の
+        //   dryScaleGain_ が stale target を保持し得た（五次レビュー §8 指摘）。
+        //   reset() と同一の初期値に戻す。
+        convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
+        convo::publishAtomic(startDelayBlocks_, 0, std::memory_order_release);
+        convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
         convo::publishAtomic(pending_, false, std::memory_order_release);
         convo::publishAtomic(useDryAsOld_, false, std::memory_order_release);
         convo::publishAtomic(firstIrDryPending_, false, std::memory_order_release);
         convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, 0.030, std::memory_order_release);
         convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
+        // ★ P1 hardening (BUG-028 五次レビュー §8): block-boundary consistency anchor。
+        bumpCrossfadeGeneration();
+        // ★ 五次レビュー §8: dryScaleGain_.setCurrentAndTargetValue(1.0) は追加しない
+        //   （NonRT→LinearRamp race 回避）。順序 invariant: complete()（NonRT, atomic batch
+        //   publish）→ AudioThread が次回 getDryScaleGain().getNextValue()（RT）で状態を消費。
     }
 
     // reset: shutdown/releaseResources 時
@@ -138,6 +159,12 @@ public:
         { return convo::consumeAtomic(queuedFadeTimeSec_, std::memory_order_acquire); }
     [[nodiscard]] double getDryScaleTarget() const noexcept
         { return convo::consumeAtomic(dryScaleTarget_, std::memory_order_acquire); }
+    // ★ P1 hardening (BUG-028 五次レビュー §8): block-boundary semantic consistency anchor。
+    //   start()/complete() で increment。RT は block boundary で変化を検知し、複数の atomic
+    //   publish（pending_/useDryAsOld_/dryScaleTarget_ 等）が一貫した batch として消費されたことを
+    //   確認できる。monotonic increase（単調増加）が invariant。
+    [[nodiscard]] uint64_t getCrossfadeGeneration() const noexcept
+        { return convo::consumeAtomic(crossfadeGeneration_, std::memory_order_acquire); }
     [[nodiscard]] convo::LinearRamp& getGain() noexcept { return gain_; }
     [[nodiscard]] const convo::LinearRamp& getGain() const noexcept { return gain_; }
     [[nodiscard]] convo::LinearRamp& getDryScaleGain() noexcept { return dryScaleGain_; }
@@ -161,6 +188,14 @@ public:
         { return convo::fetchAddAtomic(m_emergencyAbortCount_, 1u, std::memory_order_acq_rel) + 1; }
 
 private:
+    // ★ P1 hardening (BUG-028 五次レビュー §8): crossfade batch 完了 anchor。
+    //   start()/complete() の末尾で increment して publish（release）。
+    void bumpCrossfadeGeneration() noexcept
+    {
+        const auto next = convo::consumeAtomic(crossfadeGeneration_, std::memory_order_relaxed) + 1;
+        convo::publishAtomic(crossfadeGeneration_, next, std::memory_order_release);
+    }
+
     std::atomic<bool> pending_{ false };
     std::atomic<bool> useDryAsOld_{ false };
     std::atomic<bool> firstIrDryPending_{ false };
@@ -169,6 +204,9 @@ private:
     std::atomic<int> dryHoldSamples_{ 0 };
     std::atomic<double> queuedFadeTimeSec_{ 0.030 };
     std::atomic<double> dryScaleTarget_{ 1.0 };
+    // ★ P1 hardening (BUG-028 五次レビュー §8): block-boundary consistency anchor。
+    //   start()/complete() の atomic batch publish の完了を表す単調増加カウンタ。
+    std::atomic<uint64_t> crossfadeGeneration_{ 0 };
     convo::LinearRamp gain_;
     convo::LinearRamp dryScaleGain_;
     // ★ P1-C: SPSC 完了イベントキュー（AudioThread → Timer）
