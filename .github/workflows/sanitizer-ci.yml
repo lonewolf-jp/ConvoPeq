@@ -97,7 +97,17 @@ jobs:
             }
           }
 
+      # ★ 2026-08-08: MSVC コマンドライン環境をセットアップ（cl.exe を PATH に追加）。
+      #   GitHub Actions windows runner では cl は既定で PATH に無いため、このステップがないと
+      #   -DCMAKE_CXX_COMPILER=cl の CMake configure が "cl is not a full path" で失敗する。
+      #   ilammy/msvc-dev-cmd@v1 は環境を $GITHUB_ENV 経由で後続ステップへ永続化する。
+      - name: Set up MSVC command line environment (cl)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Configure CMake with ASan
+        if: steps.install_oneapi.outputs.installed == 'true'
         shell: pwsh
         run: |
           # Intel oneAPI 環境変数を設定（setvars.bat 相当）
@@ -119,12 +129,14 @@ jobs:
             $mklRequired
 
       - name: Build (RelWithDebInfo)
+        if: steps.install_oneapi.outputs.installed == 'true'
         run: cmake --build ${{ env.BUILD_DIR }} --config RelWithDebInfo
 
       # ★ ASan-CMAKE-9: MSVC は ASan ランタイム DLL をテスト exe へ自動コピーしないため、
       #   clang_rt.asan_dynamic-x86_64.dll を手動で展開する（/MD 構成と一致）。
       #   DLL は MSVC ツールチェーンの bin\Hostx64\x64 配下にある。
       - name: Deploy ASan runtime DLL
+        if: steps.install_oneapi.outputs.installed == 'true'
         shell: pwsh
         run: |
           $asanDll = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue |
@@ -139,9 +151,19 @@ jobs:
           Write-Host "Deployed ASan DLL from $($asanDll.FullName)"
 
       - name: Run tests with ASan
+        if: steps.install_oneapi.outputs.installed == 'true'
         run: ctest --test-dir ${{ env.BUILD_DIR }} -C RelWithDebInfo --output-on-failure
         env:
           ASAN_OPTIONS: "halt_on_error=1:abort_on_error=1:detect_leaks=0"
+
+      - name: Report ASan skip (oneAPI unavailable)
+        if: steps.install_oneapi.outputs.installed != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "## ASan relwithdebinfo-asan job skipped" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- Reason: Intel oneAPI not available on this runner." >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- MKLNonUniformConvolver requires mkl.h/ipp.h (Intel oneAPI)." >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- Configure with oneAPI installed to run ASan checks." >> $env:GITHUB_STEP_SUMMARY
 
   #-----------------------------------------------------------
   # Debug-TSan: Linux Clang, best-effort ThreadSanitizer

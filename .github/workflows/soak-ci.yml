@@ -46,10 +46,21 @@ jobs:
       # ★ 2026-08-06: intel/setup-intel-oneapi アクションは deprecated/リポジトリ削除されたため
       #   Chocolatey で Intel oneAPI Base Kit (MKL+IPP 含む) をインストールし、
       #   setvars.bat で環境変数を設定する。
+      # ★ 2026-08-08: Intel oneAPI Base Kit のインストール可能性を確認。
+      #   oneAPI がない場合は MKLNonUniformConvolver ビルド失敗を回避するため、
+      #   Configure/Build/Run を graceful skip する（Practical Stable ISR 方針）。
+      #   oneAPI Base Kit チェックを id 付きで実行し、後段のステップが条件付き。
       - name: Install Intel oneAPI Base Kit (MKL + IPP)
+        id: install_oneapi
         shell: pwsh
         run: |
           choco install intel-oneapi-basekit -y --no-progress --no-color
+          $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
+          if (Test-Path "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake") {
+            Write-Output "installed=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Output "installed=false" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Initialize Intel oneAPI environment
         shell: pwsh
@@ -63,7 +74,16 @@ jobs:
             }
           }
 
+      # ★ 2026-08-08: MSVC コマンドライン環境をセットアップ（cl.exe を PATH に追加）。
+      #   windows runner では cl は既定で PATH に無いため、-DCMAKE_CXX_COMPILER=cl の
+      #   configure が "cl is not a full path" で失敗する。環境を $GITHUB_ENV 経由で永続化。
+      - name: Set up MSVC command line environment (cl)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Configure CMake (Release)
+        if: steps.install_oneapi.outputs.installed == 'true'
         shell: pwsh
         run: |
           cmake -B ${{ env.BUILD_DIR }} `
@@ -73,9 +93,11 @@ jobs:
             -DCONVOPEQ_ENABLE_ISR_TESTS=ON
 
       - name: Build AudioEngineHarness (Release)
+        if: steps.install_oneapi.outputs.installed == 'true'
         run: cmake --build ${{ env.BUILD_DIR }} --config Release --target AudioEngineHarness -j 1
 
       - name: Run Soak scenarios
+        if: steps.install_oneapi.outputs.installed == 'true'
         shell: pwsh
         run: |
           $scenario = "${{ github.event.inputs.scenario }}"
@@ -93,3 +115,12 @@ jobs:
           echo "## Soak results (${{ github.event.inputs.scenario || 'all' }})" >> $GITHUB_STEP_SUMMARY
           echo "- Platform: windows-latest (MSVC), Release /MD" >> $GITHUB_STEP_SUMMARY
           echo "- Command: AudioEngineHarness --soak --scenario=${{ github.event.inputs.scenario || 'all' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Report skip (oneAPI unavailable)
+        if: steps.install_oneapi.outputs.installed != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "## Soak CI skipped" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- Reason: Intel oneAPI not available on this runner." >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- MKLNonUniformConvolver requires mkl.h/ipp.h (Intel oneAPI)." >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- Install Intel oneAPI Base Kit + set CONVOPEQ_REQUIRE_MKL accordingly to run." >> $env:GITHUB_STEP_SUMMARY
