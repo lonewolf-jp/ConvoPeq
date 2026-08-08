@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include <filesystem>
+#include <mutex>  // ★ FUTURE-5 (work88): フリーリスト保護用
 
 namespace convo {
 namespace isr {
@@ -174,6 +175,13 @@ private:
     //   外部からは Coordinator::requestReclaim() 経由で実行する。
     void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+    // ★ FUTURE-5 (work88): O(1) 確保用フリーリスト（slot 1..255 をスタック管理。slot 0 は
+    //   null handle 表現のため使用しない — 既存 create() の線形スキャン開始位置と同一契約）。
+    //   create() はフリーリスト pop（O(1)）、reclaim/rollbackRegistration は push（O(1)）。
+    //   全操作は NonRT（registerDSPHandleForRuntime / Coordinator reclaim）のため mutex 保護で十分。
+    mutable std::mutex freeListMutex_;
+    std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
+    uint32_t freeSize_ = 0;
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
     //   DSPHandle is a 16-byte POD; std::atomic<DSPHandle> must be lock-free,
     //   which on x64 requires 16-byte alignment (CMPXCHG16B, Haswell+ / AVX2).

@@ -32,25 +32,30 @@ DSPHandleRuntime::DSPHandleRuntime()
         registry_[i].instance = nullptr;
         convo::publishAtomic(registry_[i].state, DSPState::Reclaimed, std::memory_order_relaxed);
     }
+
+    // ★ FUTURE-5 (work88): フリーリスト初期化（slot 1..255。slot 0 は null handle 表現のため除外）
+    freeSize_ = 0;
+    for (uint32_t slot = 1; slot < MAX_DSP_SLOTS; ++slot)
+        freeSlots_[freeSize_++] = slot;
 }
 
 DSPHandleRuntime::~DSPHandleRuntime() = default;
 
 DSPHandle DSPHandleRuntime::create(void* dspInstance)
 {
-    for (size_t slot = 1; slot < MAX_DSP_SLOTS; ++slot) {
-        auto& reg = registry_[slot];
-        if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed) {
-            const auto gen = convo::consumeAtomic(reg.generation, std::memory_order_acquire) + 1u;
-            reg.instance = dspInstance;
-            convo::publishAtomic(reg.generation, gen, std::memory_order_release);
-            convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
-            return DSPHandle{ static_cast<uint32_t>(slot), gen };
-        }
+    // ★ FUTURE-5 (work88): 線形スキャン → フリーリスト pop（O(1) 確保）
+    std::lock_guard<std::mutex> lock(freeListMutex_);
+    if (freeSize_ == 0) {
+        assert(false && "DSP registry exhausted");
+        return DSPHandle::null();
     }
-
-    assert(false && "DSP registry exhausted");
-    return DSPHandle::null();
+    const uint32_t slot = freeSlots_[--freeSize_];
+    auto& reg = registry_[slot];
+    const auto gen = convo::consumeAtomic(reg.generation, std::memory_order_acquire) + 1u;
+    reg.instance = dspInstance;
+    convo::publishAtomic(reg.generation, gen, std::memory_order_release);
+    convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
+    return DSPHandle{ slot, gen };
 }
 
 ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
@@ -122,6 +127,10 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
     if (!handle.isNull() && handle.slot < MAX_DSP_SLOTS) {
         registry_[handle.slot].instance = nullptr;
         convo::publishAtomic(registry_[handle.slot].state, DSPState::Reclaimed, std::memory_order_release);
+        // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
+        std::lock_guard<std::mutex> lock(freeListMutex_);
+        if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+            freeSlots_[freeSize_++] = handle.slot;
     }
 }
 
@@ -138,9 +147,16 @@ bool DSPHandleRuntime::rollbackRegistration(DSPHandle handle) noexcept
     auto& reg = registry_[handle.slot];
     DSPState expected = DSPState::Constructing;
     // state のみ CAS（instance は不変）。create() が上書きするため不要。
-    return convo::compareExchangeAtomic(reg.state, expected, DSPState::Reclaimed,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_acquire);
+    const bool ok = convo::compareExchangeAtomic(reg.state, expected, DSPState::Reclaimed,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire);
+    // ★ FUTURE-5 (work88): ロールバック成功（Reclaimed 化）時は slot をフリーリストへ戻す
+    if (ok) {
+        std::lock_guard<std::mutex> lock(freeListMutex_);
+        if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+            freeSlots_[freeSize_++] = handle.slot;
+    }
+    return ok;
 }
 
 // ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない

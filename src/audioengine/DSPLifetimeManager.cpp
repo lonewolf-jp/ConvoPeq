@@ -71,16 +71,11 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
 
     {
         std::lock_guard<std::mutex> lock(engine_.runtimeDSPHandleMapMutex_);
-        for (auto it = engine_.runtimeDSPHandleMap_.begin();
-             it != engine_.runtimeDSPHandleMap_.end(); ++it)
-        {
-            if (it->second == handle)
-            {
-                toDelete = it->first;
-                engine_.runtimeDSPHandleMap_.erase(it);
-                break;
-            }
-        }
+        // ★ FUTURE-6 (work88): unordered_map 線形走査 → DSPHandleTable::findAndEraseByHandle
+        //   （value 一致 + key 取得 + erase を一括。O(n)・固定 512 上限）
+        void* rawKey = nullptr;
+        if (engine_.runtimeDSPHandleMap_.findAndEraseByHandle(handle, rawKey))
+            toDelete = static_cast<AudioEngine::DSPCore*>(rawKey);
     }
 
     if (toDelete == nullptr)

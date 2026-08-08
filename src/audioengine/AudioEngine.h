@@ -92,6 +92,7 @@ struct CoeffSet {
 #include "ISRLifecycle.h"
 #include "ISRRTExecution.h"
 #include "ISRDSPHandle.h"
+#include "DSPHandleTable.h"   // ★ FUTURE-6 (work88): DSPCore* → DSPHandle O(1) 前方ハッシュテーブル
 #include "ISRClosure.h"
 #include "ISRAuthorityClass.h"
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
@@ -4134,12 +4135,12 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
 
     std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
 
-    auto it = runtimeDSPHandleMap_.find(dsp);
-    if (it != runtimeDSPHandleMap_.end())
-        return it->second;
+    convo::isr::DSPHandle existing;
+    if (runtimeDSPHandleMap_.find(dsp, existing))
+        return existing;
 
     const auto handle = dspHandleRuntime_.create(dsp);
-    runtimeDSPHandleMap_.emplace(dsp, handle);
+    runtimeDSPHandleMap_.insert(dsp, handle);
     return handle;
 }
 
@@ -4170,12 +4171,11 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
         return false;
 
     std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
-    const auto it = runtimeDSPHandleMap_.find(dsp);
-    if (it == runtimeDSPHandleMap_.end())
+    convo::isr::DSPHandle handle;
+    if (!runtimeDSPHandleMap_.find(dsp, handle))
         return false;
 
-    const auto handle = it->second;
-    runtimeDSPHandleMap_.erase(it);
+    runtimeDSPHandleMap_.erase(dsp);
     if (!handle.isNull())
     {
         dspHandleRuntime_.retire(handle);
@@ -4207,27 +4207,21 @@ private:
 {
     if (dsp == nullptr) return {};
     std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
-    const auto it = runtimeDSPHandleMap_.find(dsp);
-    if (it == runtimeDSPHandleMap_.end()) return {};
-    return it->second;
+    convo::isr::DSPHandle handle;
+    if (!runtimeDSPHandleMap_.find(dsp, handle)) return {};
+    return handle;
 }
 #endif
 
 public:
-// ★ work70: eraseByHandle — Handle による Map erase 内部ヘルパー（HandleRegistry 移行準備）
-//   現状 O(n) linear scan（MAX_DSP_SLOTS=256 のため問題なし）。
-//   将来: HandleRegistry reverse map → O(1)。
+// ★ work70: eraseByHandle — Handle による Map erase 内部ヘルパー（HandleRegistry 移行完了）
+//   ★ FUTURE-6 (work88): DSPHandleTable::findAndEraseByHandle に委譲（固定 512 テーブルの O(n) 走査。
+//   呼出し元は rollback パスのみで MAX_DSP_SLOTS=256 のため実質ボトルネックなし）。
 [[nodiscard]] inline bool eraseByHandle(convo::isr::DSPHandle handle) noexcept
 {
     std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
-    for (auto it = runtimeDSPHandleMap_.begin(); it != runtimeDSPHandleMap_.end(); ++it)
-    {
-        if (it->second == handle)
-        {
-            runtimeDSPHandleMap_.erase(it);
-            return true;
-        }
-    }
+    void* unused = nullptr;
+    static_cast<void>(runtimeDSPHandleMap_.findAndEraseByHandle(handle, unused));
     // Map に存在しなくても CAS 成功済みのため rollback は成功（INV-4/INV-7 対象外）
     return true;
 }
@@ -4633,7 +4627,9 @@ public:
         convo::isr::DSPHandleRuntime dspHandleRuntime_;
         convo::isr::CrossfadeAuthorityRuntime crossfadeAuthorityRuntime_;
         mutable std::mutex runtimeDSPHandleMapMutex_;
-        std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
+        // ★ FUTURE-6 (work88): std::unordered_map → DSPHandleTable（固定容量 open addressing,
+        //   O(1) 前方 find/insert/erase。ヒープ確保なし）
+        convo::isr::DSPHandleTable runtimeDSPHandleMap_;
         // ==================================================================
     public:
         // ★ A3 Step 4: QuarantineIntentHandler sources DSPHandleRuntime / DSPQuarantineManager
