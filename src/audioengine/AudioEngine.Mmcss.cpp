@@ -48,19 +48,13 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
 // ── Public ──
 
 // Determine MMCSS policy based on current audio backend device type.
-// Uses the cached currentDeviceTypeName_ (set via setAudioDeviceTypeName from Message Thread).
+// BUG-014 (work88): enum は setter（AudioEngine.h）で atomic publish 済み。
+//   ここでは 1 byte atomic acquire load のみ（RT 安全 — juce::String CoW race なし）。
 // Called from both Message Thread (prepareToPlay) and Audio Thread (callback).
 // Device type is immutable during a session → safe to call from either thread.
 [[nodiscard]] AudioEngine::MmcssPolicy AudioEngine::getCurrentMmcssPolicy() const noexcept
 {
-    const auto& type = currentDeviceTypeName_;
-    if (type.containsIgnoreCase("WASAPI") || type.containsIgnoreCase("Windows Audio"))
-        return MmcssPolicy::JuceManaged;
-    if (type.containsIgnoreCase("ASIO"))
-        return MmcssPolicy::SelfManagedProAudio;
-    if (type.containsIgnoreCase("DirectSound"))
-        return MmcssPolicy::SelfManagedPlayback;
-    return MmcssPolicy::None;
+    return convo::consumeAtomic(currentMmcssPolicy_, std::memory_order_acquire);
 }
 
 // Try to register the calling (audio) thread with MMCSS once.

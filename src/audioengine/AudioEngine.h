@@ -2335,25 +2335,47 @@ public:
     //   ASIO (enum SelfManagedProAudio): Driver may or may not manage → Host recovers.
     //   DirectSound(enum SelfManagedPlayback): Host manages → Playback/HIGH.
     //   See AudioEngine.Mmcss.cpp for implementation.
+    //
+    // ★ BUG-014 (work88): enum の atomic 化 — juce::String CoW race を構造的に排除。
+    //   RT パスが保持するのは MmcssPolicy enum（trivially copyable, 1 byte atomic load）のみ。
+    //   文字列比較は NonRT の setter 内で完結する（ポインタ寿命・CoW 参照カウント問題が消える）。
     enum class MmcssPolicy : uint8_t {
         JuceManaged,           // WASAPI — JUCE has Authority
         SelfManagedProAudio,   // ASIO — Driver has Authority, Host recovers
         SelfManagedPlayback,   // DirectSound — Host manages
         None                   // Unknown / other
     };
+    // std::atomic<enum> の lock-free 性は enum が trivially copyable であることに依存（BUG-014 五次レビュー）。
+    static_assert(std::is_trivially_copyable_v<MmcssPolicy>,
+        "BUG-014: MmcssPolicy must be trivially copyable (plain enum class : uint8_t).");
+    static_assert(std::atomic<MmcssPolicy>::is_always_lock_free,
+        "BUG-014: MmcssPolicy must be lock-free (trivially copyable enum). RT path does a plain atomic load.");
 
-    // ★ [work70 v9.11] 現在のオーディオデバイスの種類名（例: "WASAPI", "ASIO", "DirectSound"）。
+    // ★ [work70 v9.11] 現在の MMCSS ポリシー（Message Thread が publish、Audio/Message Thread が load）。
     //    setAudioDeviceTypeName() 経由で Message Thread からのみ書き込む（通常セッション開始時に1度だけ）。
-    //    getCurrentMmcssPolicy() はこの値に基づき MmcssPolicy を返す。
-    void setAudioDeviceTypeName(const juce::String& type) noexcept { currentDeviceTypeName_ = type; }
-    [[nodiscard]] const juce::String& getAudioDeviceTypeName() const noexcept { return currentDeviceTypeName_; }
+    //    BUG-014: 文字列を保持せず、setter 内で enum 変換して atomic publish する（RT は atomic load のみ）。
+    void setAudioDeviceTypeName(const juce::String& type) noexcept
+    {
+        // BUG-014: NonRT thread contract の文明化（AudioEngine.Init.cpp:146 / RebuildDispatch.cpp:510 と同型）
+        jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+        MmcssPolicy p = MmcssPolicy::None;
+        if (type.containsIgnoreCase("WASAPI") || type.containsIgnoreCase("Windows Audio"))
+            p = MmcssPolicy::JuceManaged;
+        else if (type.containsIgnoreCase("ASIO"))
+            p = MmcssPolicy::SelfManagedProAudio;
+        else if (type.containsIgnoreCase("DirectSound"))
+            p = MmcssPolicy::SelfManagedPlayback;
+        convo::publishAtomic(currentMmcssPolicy_, p, std::memory_order_release);
+    }
 
     // ★ [work70 v9.11] MMCSS shutdown flag — Message Thread → Audio Thread notification.
     //    Message Thread sets flag, Audio Thread performs actual AvRevert.
     alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
 
-    // デバイス種類名キャッシュ（Message Thread からのみ書き込み、Audio Thread から読み取り）
-    juce::String currentDeviceTypeName_;
+    // ★ BUG-014: MMCSS ポリシー atomic キャッシュ（Message Thread が publish、Audio Thread が acquire load）。
+    //    alignas(64) で他ホット atomic（mmcssShutdownRequested 等）とキャッシュライン分離（既存パターン踏襲）。
+    alignas(64) std::atomic<MmcssPolicy> currentMmcssPolicy_{MmcssPolicy::None};
 
     //    savedProcessPriorityClass: NativeRT復元用（プロセス単位APIのため任意スレッドからアクセス可）
     DWORD savedProcessPriorityClass = HIGH_PRIORITY_CLASS;
