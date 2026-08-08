@@ -84,6 +84,8 @@ void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId 
     convo::publishAtomic(registry_[from.slot].state, DSPState::CrossfadingOut, std::memory_order_release);
     convo::publishAtomic(registry_[to.slot].state, DSPState::CrossfadingIn, std::memory_order_release);
 
+    // ★ 監査指摘 (work88): push_back と Timer 側の endCrossfade/isSlotInCrossfade 走査の競合を防ぐ
+    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
     crossfadeRecords_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     convo::publishAtomic(fadingRuntimeDSPHandle_, from, std::memory_order_release);
 }
@@ -101,6 +103,8 @@ void DSPHandleRuntime::activate(DSPHandle handle)
 
 void DSPHandleRuntime::endCrossfade(CrossfadeId id)
 {
+    // ★ 監査指摘 (work88): beginCrossfade（CoordinatorLoop）との並行アクセスを防ぐため lock。
+    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
     for (auto& record : crossfadeRecords_) {
         if (record.id != id || !record.active) {
             continue;
@@ -180,6 +184,8 @@ void DSPHandleRuntime::quarantineSlot(uint32_t slot) noexcept
 // ★ A-1.5: slot が crossfade に関与しているか確認
 bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
 {
+    // ★ 監査指摘 (work88): beginCrossfade との並行アクセスを防ぐため lock。
+    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
     for (const auto& record : crossfadeRecords_) {
         if (record.active &&
             (record.fromHandle.slot == slot || record.toHandle.slot == slot))
@@ -280,12 +286,16 @@ CrossfadeAuthorityRuntime::~CrossfadeAuthorityRuntime() = default;
 CrossfadeId CrossfadeAuthorityRuntime::registerCrossfade(DSPHandle from, DSPHandle to)
 {
     const auto id = convo::fetchAddAtomic(nextId_, 1u, std::memory_order_acq_rel);
+    // ★ 監査指摘 (work88): push_back による再確保と Timer 側の走査の競合を防ぐため lock。
+    std::lock_guard<std::mutex> lock(recordsMutex_);
     records_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     return id;
 }
 
 void CrossfadeAuthorityRuntime::unregisterCrossfade(CrossfadeId id)
 {
+    // ★ 監査指摘 (work88): register（CoordinatorLoop）との並行アクセスを防ぐため lock。
+    std::lock_guard<std::mutex> lock(recordsMutex_);
     for (auto& record : records_) {
         if (record.id == id) {
             record.active = false;
@@ -296,6 +306,8 @@ void CrossfadeAuthorityRuntime::unregisterCrossfade(CrossfadeId id)
 
 std::vector<CrossfadeRecord> CrossfadeAuthorityRuntime::getActiveCrossfades() const noexcept
 {
+    // ★ 監査指摘 (work88): register との並行アクセスを防ぐため lock（コピーは lock 内）。
+    std::lock_guard<std::mutex> lock(recordsMutex_);
     std::vector<CrossfadeRecord> result;
     for (const auto& record : records_) {
         if (record.active) {
@@ -307,6 +319,8 @@ std::vector<CrossfadeRecord> CrossfadeAuthorityRuntime::getActiveCrossfades() co
 
 bool CrossfadeAuthorityRuntime::hasCrossfadeInvolving(DSPHandle handle) const noexcept
 {
+    // ★ 監査指摘 (work88): 同様に lock（現時点で呼出し元ゼロだが契約として保護）。
+    std::lock_guard<std::mutex> lock(recordsMutex_);
     for (const auto& record : records_) {
         if (record.active && (record.fromHandle == handle || record.toHandle == handle)) {
             return true;

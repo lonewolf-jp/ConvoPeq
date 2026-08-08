@@ -204,6 +204,10 @@ private:
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 
+    // ★ 監査指摘 (work88): beginCrossfade（CoordinatorLoop の push_back）と endCrossfade /
+    //   isSlotInCrossfade（Timer 等の走査）が別スレッドから crossfadeRecords_ を操作するため
+    //   mutex で保護する（全アクセス NonRT のため RT 影響なし）。
+    mutable std::mutex crossfadeRecordsMutex_;
     std::vector<CrossfadeRecord> crossfadeRecords_;
 
     DSPState getSlotState(uint32_t slot) const noexcept;
@@ -232,6 +236,10 @@ public:
     bool hasCrossfadeInvolving(DSPHandle handle) const noexcept;
 
 private:
+    // ★ 監査指摘 (work88): registerCrossfade（CoordinatorLoop）と unregisterCrossfade /
+    //   getActiveCrossfades（Timer）が別スレッドから records_ を操作するため、mutex で保護する。
+    //   全アクセスは NonRT（CoordinatorLoop / Timer）のため RT 影響なし。
+    mutable std::mutex recordsMutex_;
     std::vector<CrossfadeRecord> records_;
     std::atomic<CrossfadeId> nextId_{1};
 };
