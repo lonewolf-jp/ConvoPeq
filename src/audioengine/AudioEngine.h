@@ -4188,6 +4188,15 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     return true;
 }
 
+// ★ work88 (FUTURE-10 / Phase 7): RecoveryIntentHandler からの Builder Work Queue enqueue。
+//   enqueue-only（HANDLER-1: Decision/World 書換禁止）。循環防止: intentQueue_ へは返さない
+//   （pop 元と異なる recoveryIntentQueue_ へ書く）。buildSource は値コピーで運ぶ。
+inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
+                                 const convo::RuntimeBuildSnapshot& buildSource) noexcept
+{
+    runtimePublicationBridge_.submitRecoveryRequest(quarantinedHandle, buildSource);
+}
+
 // ★ work70-FIX: lookupDSPHandleForRuntime — DSPCore* → DSPHandle 逆引き（const）
 //   使用制限: DIAG ログ出力専用。Production コードでは参照禁止。
 //   ★ work70-v5.44: private に変更。呼び出し元は DSPGuard DIAG jassert のみ。

@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstring>  // ★ work88 (Phase 7): Intent default ctor の union ゼロ初期化 (std::memset)
 #include <memory>
 #include <cstdint>
 #include <type_traits>
@@ -227,10 +228,18 @@ public:
         RuntimeBoundary boundary;                // ★ A3 Step 5-1: publish boundary (fixed at enqueue)
         PublishDecisionSnapshot decision;        // ★ A3 Step 5-3: Decision Snapshot (HANDLER-1 read-only, fixed at enqueue)
     };
-    struct RecoveryPayload { DSPHandle quarantinedHandle; };
+    struct RecoveryPayload { DSPHandle quarantinedHandle; convo::RuntimeBuildSnapshot buildSource; };
     struct QuarantinePayload { DSPHandle handle; QuarantineReason reason; uint64_t contextEpoch; };
 
     struct Intent {
+        // ★ work88 (FUTURE-10 / Phase 7): RecoveryPayload が RuntimeBuildSnapshot（NSDMI 付き）
+        //   を含むため union のデフォルトコンストラクタは削除される。明示的なデフォルト
+        //   コンストラクタで先頭 variant（observe）を値初期化する（全 variant は trivially
+        //   copyable のため、payload は割当時に正しく初期化される）。
+        Intent() noexcept
+            : type(IntentType::Observe), sequenceId(0), payload(ObservePayload{})
+        {
+        }
         IntentType type;
         union {
             ObservePayload    observe;

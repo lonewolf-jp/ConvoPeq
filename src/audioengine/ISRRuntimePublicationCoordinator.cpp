@@ -530,52 +530,44 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 
 void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexcept
 {
-    // ★ P0-4A: Observe Intent — Timer → LockFreeRingBuffer push（RT-safe, SPSC, lock-free）
-    //   OBSERVE-2: push() は即座に復帰（SPSC lock-free）
-    //   OBSERVE-9: LockFreeRingBuffer は FIFO を保証（SPSC）
+    // ★ P0-4A: Observe Intent — Timer → enqueue（RT-safe, lock-free）
+    //   OBSERVE-2: push() は即座に復帰（lock-free）
+    //   OBSERVE-9: FIFO を保証（共通 intentQueue_ = MpscBoundedRing, reservation order）
     //   OBSERVE-10: 世代検証用に epoch を保存
     //   ISR: Intent は自己完結型 — DSPHandle を含むため、Coordinator は外部状態に依存せず retire 対象を識別可能
+    //
+    // ★ work88 (FUTURE-10 / Phase 7): Observe 統合 — 共通 intentQueue_ (MPSC) を primary に。
+    //   cross-type FIFO で Publish/Quarantine と同じキューを共有（ObserveIntentHandler が
+    //   kDispatchTable 経由で処理）。SPSC 専用リング（observeIntentQueue_/observeFallbackQueue_）
+    //   への複数 Producer 依存を排除（MPSC 実態の潜在競合を構造的に解消）。
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
+    const auto intentId = nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed);
 
-    ObserveIntent intent{
-        handle,                          // 観測対象の DSPHandle
-        currentEpoch,                    // ★ FUTURE-4: derived from currentWorld_ (RuntimeState::publication)
-        nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed)
-    };
-
-        // ★ QUEUE-11/FUTURE-8: 4層 Overflow Policy（Observe は Retire 系 ring と分離）
-    //   Layer 1 (Primary): LockFreeRingBuffer<ObserveIntent, 1024> (SPSC lock-free)
-    //   Layer 2 (Fallback): LockFreeRingBuffer<ObserveIntent, 2048> (SPSC lock-free)
-    //   Layer 3 (Deferred): observeDeferredRing_ (ObserveIntent 専用) → drainObserveDeferred（QUEUE-16）
-    //   Layer 4 (Quarantine): submitQuarantine — 最終安全策
-    if (observeIntentQueue_.push(intent)) {
-        // Layer 1 (Primary): 正常完了 — ACK (queued)
-        observeOverflowCounter_.store(0, std::memory_order_relaxed);
+    RuntimePublicationCoordinator::Intent intent{};
+    intent.type = RuntimePublicationCoordinator::IntentType::Observe;
+    intent.payload.observe = RuntimePublicationCoordinator::ObservePayload{handle, currentEpoch};
+    intent.sequenceId = intentId;
+    if (intentQueue_.push(intent)) {
         setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
-    // Layer 2 (Fallback): Primary 溢れ → セカンダリキュー
+    // intentQueue_ full → observeDeferredRing_（FUTURE-8 overflow 専用）へ退避。
+    //   回御は processIntent の drainObserveDeferred（QUEUE-16）。
     observeOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
-    if (observeFallbackQueue_.push(intent)) {
+    ObserveIntent fallbackIntent{ handle, currentEpoch, intentId };
+    if (observeDeferredRing_.push(fallbackIntent)) {
         setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
-    // ★ QUEUE-12/FUTURE-8: Fallback 溢れ → Layer 3 (Observe 専用 Deferred Ring)
-    //   ObserveIntent をそのまま格納（RetireOverflowEntry 変換廃止 — handle を保持）。
-    //   回御は processIntent() の drainObserveDeferred() が担う（Retire drain と分離, QUEUE-16）。
+    // 全層溢れ（intentQueue_ + deferred ring）→ drop カウンタ。
+    //   Observe は観測情報のため後発 Observe で補完可能（三次レビュー policy 表:
+    //   Observe は条件付き drop / coalesce 可）。Publish/Quarantine とは異なり
+    //   state transition の喪失ではないため許容。
     observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
-    if (observeDeferredRing_.push(intent)) {
-        // transport-only: 回御は Coordinator Phase (processIntent)
-    } else {
-        // Layer 3 overflow → Layer 4 (Quarantine): 全層溢れ最終安全策
-        //   observeIntentQueue_ / observeFallbackQueue_ / observeDeferredRing_ が満村。
-        //   この Intent はドロップされる。通常運用で到達しない（1024+2048+1024=4096超え）。
-    }
-    setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
 }
 
 void RuntimePublicationCoordinator::requestReclaim(

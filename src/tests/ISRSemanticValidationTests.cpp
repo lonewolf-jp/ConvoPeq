@@ -18,7 +18,8 @@ namespace {
 
 [[nodiscard]] bool testInvalidClosureRejected()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     convo::isr::PayloadClosureDescriptor invalid {};
     invalid.closureId = 0; // invalid by contract
@@ -40,7 +41,8 @@ namespace {
 
 [[nodiscard]] bool testInvalidTierRejected()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     convo::isr::PayloadClosureDescriptor closure {};
     closure.closureId = 1;
@@ -73,7 +75,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorCommitAndMonotonicityContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -123,7 +126,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectEpochRollbackContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -156,7 +160,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectMappedGenerationRollbackOnEpochAdvance()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -189,7 +194,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectEpochReuseContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -222,7 +228,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectMappedGenerationReuseContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -255,7 +262,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectWraparoundContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -302,7 +310,8 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorDrainAndShutdownContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     int world = 1;
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
@@ -334,7 +343,8 @@ namespace {
 
 [[nodiscard]] bool testShutdownCompleteFailsWhenNotDrained()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     int world = 1;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -364,7 +374,8 @@ namespace {
 
 [[nodiscard]] bool testPressureStateNormalizationContract()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     int world = 1;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -401,7 +412,8 @@ namespace {
 
 [[nodiscard]] bool testShutdownCompleteFailsWhenSwapPending()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     int world = 1;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -434,7 +446,8 @@ namespace {
 // 同一 generation での activationEpoch 単独変更は禁止。
 [[nodiscard]] bool testP4SameGenerationEpochChangeRejected()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -474,7 +487,8 @@ namespace {
 // 副作用（callback, telemetry）は reject 経路では発生しない。
 [[nodiscard]] bool testP20RejectPreservesWorldState()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -515,7 +529,8 @@ namespace {
 //   consistent epoch + generation + sequence via RuntimeState::publication.
 [[nodiscard]] bool testMetadataSnapshotConsistentAcrossReaders()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
@@ -531,7 +546,8 @@ namespace {
 
 [[nodiscard]] bool testMetadataSnapshotRejectsEpochRollback()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -553,7 +569,8 @@ namespace {
 
 [[nodiscard]] bool testMetadataSnapshotSequenceAdvancesWithEpoch()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     auto w1 = RuntimeState::createForTest();
     auto w2 = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -574,7 +591,8 @@ namespace {
 // METADATA-6: no transitional cache symbol; reader is pure world snapshot.
 [[nodiscard]] bool testMetadataSnapshotNoTransitionalCacheSymbol()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
@@ -590,7 +608,8 @@ namespace {
 //   submitRecoveryRequest() -> popRecoveryRequest() 1-hop 輸送。Builder Loop が復旧 World を build。
 [[nodiscard]] bool testRecoveryRequestEnqueueAndPop()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     const auto handle = convo::isr::DSPHandle::null();
     // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を引数に追加。
     //   quarantinedHandle 単独では resolve 不能なため、build 入力は値コピーで引当する。
@@ -608,7 +627,8 @@ namespace {
 //   1024+2048+1024 満村 → drop。enqueue path crash なし + pending count 連動を検証。
 [[nodiscard]] bool testObserveOverflowEnqueuePath()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
     const auto handle = convo::isr::DSPHandle::null();
     constexpr int N = 4100;  // 1024(L1) + 2048(L2) + 1024(L3) + drop
     for (int i = 0; i < N; ++i)
@@ -643,7 +663,8 @@ namespace {
 //   and the queue still holds exactly capacity items (recoverable by drain).
 [[nodiscard]] bool testPublishIntentQueueFullBackpressure()
 {
-    convo::isr::RuntimePublicationCoordinator coordinator;
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
 
     constexpr size_t kCapacity = 4096;      // kIntentQueueCapacity (FUTURE-10 common queue)
     convo::isr::RuntimePublicationCoordinator::Intent intent{};

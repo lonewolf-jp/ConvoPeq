@@ -41,7 +41,9 @@ struct PublishIntentHandler final : IntentHandler {
     void handle(const Intent& intent, IntentHandlerContext& ctx) const noexcept override; // A3 Step 5-2: → PublishExecutor
 };
 struct RecoveryIntentHandler final : IntentHandler {
-    void handle(const Intent&, IntentHandlerContext&) const noexcept override {} // A3 Step 5: → Recovery path
+    // ★ work88 (FUTURE-10 / Phase 7): enqueue-only — Builder Work Queue 転送。
+    //   実装は ISRRuntimePublicationCoordinator_ProcessIntent.cpp（他の Handler と同型）。
+    void handle(const Intent& intent, IntentHandlerContext& ctx) const noexcept override;
 };
 struct QuarantineIntentHandler final : IntentHandler {
     void handle(const Intent& intent, IntentHandlerContext& ctx) const noexcept override; // A3 Step 4: → QuarantineService
