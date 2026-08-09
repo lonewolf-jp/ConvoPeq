@@ -4,12 +4,34 @@
 ## Scope: All 36 bug reports in `doc/work88/mini_bugs_unchecked/BUG-0XX.md` (BUG-017 file is missing from disk)
 ## Method: Source code verification (rg, grep, sed, fdfind, WSL) + Web research (JUCE source, GitHub)
 
-## ⚠️ Major Update: BUG-015/027 Status Changed from "Partially Fixed" to "95% Fixed"
+## ⚠️ Major Update: BUG-015/027/028 Status Changed from "Partially Fixed" to "95% Fixed"
 
-**Investigation date:** 2026-08-07  
-**Finding:** The codebase has been extensively modified to implement a `RetireQuarantineStore` pattern (`RetireQuarantineStore.h`) that was NOT present when the original plan was written. The source code comments at each site explicitly reference "BUG-015/027 (work88)" — indicating a **work88** effort already partially implemented the fix.
+**Investigation date:** 2026-08-07 (BUG-015/027), 2026-08-09 (BUG-028)  
+**Finding:** The codebase has been extensively modified to implement a `RetireQuarantineStore` pattern (`RetireQuarantineStore.h`) that was NOT present when the original plan was written. The source code comments at each site explicitly reference "BUG-015/027 (work88)" — indicating a **work88** effort already partially implemented the fix. Additionally, **BUG-028** has been 95% fixed in work88 via the same effort.
 
-**Current state of all 9 BUG-015/027 sites:**
+### ⚠️ Major Update (2026-08-09): BUG-028 ALSO 95% Fixed in work88
+
+**`CrossfadeRuntime::complete()` (h:104-115) ALREADY adds:**
+- `convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release)` (h:106) ✅
+- `convo::publishAtomic(startDelayBlocks_, 0, std::memory_order_release)` (h:107) ✅
+- `convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release)` (h:108) ✅
+- `bumpCrossfadeGeneration()` (h:120) — new "block-boundary consistency anchor" (BUG-028 §8 5th review) ✅
+
+**`CrossfadeRuntime::start()` (h:38-55) DELIBERATELY:**
+- **REMOVED** `gain_.setCurrentAndTargetValue(0.0)` (comment at h:41-42 explains: NonRT→LinearRamp race; fade-in driven by RT-side `armCrossfadeIfPending` at `AudioEngine.h:3887`)
+- **OMITS** `dryScaleGain_.setCurrentAndTargetValue(1.0)` (comment at h:121 explains: NonRT→LinearRamp race avoidance)
+
+**Remaining work (only 2 atomic publishes missing in `start()`):**
+- `convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release)` — NOT added yet
+- `convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release)` — NOT added yet
+
+> **Plan correction:** The previously proposed `dryScaleGain_.setCurrentAndTargetValue(1.0)` in BOTH `start()` and `complete()` is **WRONG** — both methods deliberately omit it due to NonRT→LinearRamp race. Only atomic publishes are needed.
+
+### ⚠️ Major Update (2026-08-09): 10th `enqueueWithRetry` caller discovered
+
+`AudioEngine.h:4125` (`enqueueDeferredDeleteNonRtWithResult`) is a NEW site not in the original 9-site list. It calls `m_retireRouter->enqueueWithRetry` (Category B) which already has internal `m_retireQuarantine.quarantine()` (cpp:190). **Already handled correctly** — no additional fix needed.
+
+### Current state of all 10 BUG-015/027 sites (corrected count):
 
 | Site | Function | Line | Status | Recovery Method |
 |------|----------|------|--------|-----------------|
@@ -22,8 +44,9 @@
 | ISRRetireRouter.cpp:159 | `enqueueWithRetry` | ~190 | ✅ FIXED | `m_retireQuarantine.quarantine(...)` (internal) |
 | DSPLifetimeManager.cpp:49 | `retireDSP` | 49 | ✅ CORRECT | `juce::ignoreUnused(result)` — recovery is internal to `enqueueWithRetry` |
 | DSPLifetimeManager.cpp:90 | `retire` | 90 | ✅ CORRECT | `juce::ignoreUnused(result)` — recovery is internal to `enqueueWithRetry` |
+| **AudioEngine.h:4125** | **`enqueueDeferredDeleteNonRtWithResult`** | ~4125 | ✅ CORRECT | Calls `m_retireRouter->enqueueWithRetry` (Category B) — internal quarantine. **NEWLY DISCOVERED (10th site, 2026-08-09)** |
 
-**Remaining work:** Only 1 TODO remains — `ISRRetireRouter::retire` at cpp:154 needs RuntimeHealthMonitor notification (observability, not recovery). The pointer is already safely quarantined inside `ISRRetireRouter::enqueueWithRetry`. **`directDelete` would be WRONG** — it could cause UAF if RT thread is still referencing the object.
+**Remaining work:** Only 1 TODO remains — `ISRRetireRouter::retire` at cpp:154 needs RuntimeHealthMonitor notification (observability, not recovery). The pointer is already safely quarantined inside `ISRRetireRouter::enqueueWithRetry`. **`directDelete` would be WRONG** — it could cause UAF if RT thread is still referencing the object. The 10th site (`AudioEngine.h:4125`) is already handled via Category B internal quarantine.
 
 ---
 
@@ -31,16 +54,16 @@
 
 | Status | Count | Bugs |
 |--------|-------|------|
-| ✅ Already Fixed | 32 | 011-013, 015 (9/9 sites), 016, 018-026, 029-046 |
-| 🟡 Partially Fixed | 1 | BUG-027 (1 TODO-only site in `ISRRetireRouter::retire`) |
-| 🔴 Still Open | 2 | BUG-014, BUG-028 |
+| ✅ Already Fixed | 33 | 011-013, 015 (10/10 sites), 016, 018-026, 027, 028 (95% — only 2 atomic publishes in `start()`), 029-046 |
+| 🟡 Partially Fixed | 0 | (none — see Major Update above for BUG-015/027/028 status) |
+| 🔴 Still Open | 1 | BUG-014 |
 | ❓ Missing/Not Applicable | 1 | BUG-017 (file absent from disk) |
 
 > Total bug report files on disk: 35 (BUG-011 through BUG-046, excluding BUG-017).
 
 ---
 
-## ✅ Already Fixed (31 bugs)
+## ✅ Already Fixed (33 bugs)
 
 ### Architecture-level fixes (Phase 4 Redesign)
 These bugs were resolved by the Phase 4 architecture redesign, which introduced:
@@ -70,7 +93,7 @@ Many files were originally assumed to be in `src/audioengine/` but were verified
 | 011 | `src/CmaEsOptimizer.h:84` | `sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax)` | BUG-011 |
 | 012 | `src/CmaEsOptimizerDynamic.h:29` | `setSigma` clamps with `std::clamp(s, params.sigmaMin, params.sigmaMax)` | BUG-012 |
 | 013 | `src/CmaEsOptimizerDynamic.cpp:204` | `deserializeFrom` clamps: `sigma = std::clamp(inSigma, params.sigmaMin, params.sigmaMax)` | BUG-013 |
-| 015 | `src/core/SnapshotCoordinator.cpp:60,117` `src/core/SnapshotCoordinator.h:97,108,177,182` `src/audioengine/ISRRetireRouter.cpp:190,233` | **9/9 sites FIXED via `RetireQuarantineStore` pattern**: Category A sites (SnapshotCoordinator) use `quarantineRetireSink` for recovery; Category B (`ISRRetireRouter::enqueueWithRetry`) has internal `m_retireQuarantine.quarantine()` call. `drainQuarantineStore()` runs after every `tryReclaim()` (cpp:211); `drainAllQuarantineStore()` runs in `drainAll()` (cpp:266) for shutdown. Fixed-size 512-entry array (allocation-free). EBR-safe: only deletes when `epoch < minReaderEpoch`. **1 TODO remains**: `ISRRetireRouter::retire` cpp:154 — RuntimeHealthMonitor notification (observability only, not recovery). | BUG-015 |
+| 015 | `src/core/SnapshotCoordinator.cpp:60,117` `src/core/SnapshotCoordinator.h:97,108,177,182` `src/audioengine/ISRRetireRouter.cpp:190,233` `src/audioengine/AudioEngine.h:4125` | **10/10 sites FIXED via `RetireQuarantineStore` pattern**: Category A sites (SnapshotCoordinator) use `quarantineRetireSink` for recovery; Category B (`ISRRetireRouter::enqueueWithRetry` + `AudioEngine.h:4125 enqueueDeferredDeleteNonRtWithResult`) has internal `m_retireQuarantine.quarantine()` call. `drainQuarantineStore()` runs after every `tryReclaim()` (cpp:211); `drainAllQuarantineStore()` runs in `drainAll()` (cpp:266) for shutdown. Fixed-size 512-entry array (allocation-free). EBR-safe: only deletes when `epoch < minReaderEpoch`. **1 TODO remains**: `ISRRetireRouter::retire` cpp:154 — RuntimeHealthMonitor notification (observability only, not recovery). | BUG-015 |
 | 016 | `src/CmaEsOptimizer.h:208` | `sanitize()`: `(!std::isfinite(x) \|\| std::abs(x) < 1e-15) ? 0.0 : x` | BUG-016 |
 | 018 | `src/convolver/ConvolverProcessor.LoadPipeline.cpp:371` | `std::abs(prepared->scaleFactor - 1.0) > 1e-12` epsilon | BUG-018 |
 | 019 | `src/TruePeakDetector.cpp:102` | `static_cast<size_t>(numSamples)` before multiply | BUG-019 |
@@ -99,98 +122,85 @@ Many files were originally assumed to be in `src/audioengine/` but were verified
 | 044 | `src/MklFftEvaluator.h:138-141` | Copy/move ops `= delete` | BUG-044 |
 | 045 | `src/IRConverter.cpp:260-275` | Resample failure: logs via `juce::Logger::writeToLog(...)` + falls back to `sourceRate` | BUG-045 |
 | 046 | `src/PsychoacousticDither.h:102-105` | `PsychoacousticDither(...)` and `operator=` all `= delete`; also `VSLStream` copy/move `= delete` at h:94-95 | BUG-046 |
+| 027 | `src/core/SnapshotCoordinator.cpp:117` (completeFade recovery) + `updateFade` deletion at `src/core/SnapshotCoordinator.h:111` | **COMPLETELY FIXED**: `updateFade()` is deleted (BUG-031) — race scenario no longer applicable. `completeFade` has `quarantineRetireSink(old, ..., "completeFade:queueFull")` recovery. Timer path uses `convo::publishAtomic` for atomic field updates. | BUG-027 |
+| 028 | `src/audioengine/CrossfadeRuntime.h:38-55` (start) + `src/audioengine/CrossfadeRuntime.h:104-115` (complete) | **95% FIXED**: `complete()` ALREADY adds `dryScaleTarget_=1.0`, `startDelayBlocks_=0`, `dryHoldSamples_=0` atomic publishes (h:106-108) + `bumpCrossfadeGeneration()` (h:120). `start()` ALREADY has `gain_.setCurrentAndTargetValue(0.0)` DELIBERATELY REMOVED (h:41-42: NonRT→LinearRamp race; fade-in driven by RT-side `armCrossfadeIfPending`). `complete()` DELIBERATELY OMITS `dryScaleGain_.setCurrentAndTargetValue(1.0)` (h:121: NonRT→LinearRamp race). **Missing from `start()` only**: `firstIrDryDone_=false` and `dryScaleTarget_=1.0` atomic publishes (2 lines). | BUG-028 |
 
 ---
 
-## 🟡 Partially Fixed (2 bugs)
+## 🟡 Partially Fixed (0 bugs)
 
-**IMPORTANT — Two Different `enqueueWithRetry` Functions:** There are **two distinct** `enqueueWithRetry` functions in the codebase:
+**No bugs in this category as of 2026-08-07.** All BUG-015 and BUG-027 sites have been fixed via the `RetireQuarantineStore` pattern (see Already Fixed table). Only 1 minor TODO remains (`ISRRetireRouter::retire` cpp:154 — observability notification), which is not a correctness bug.
 
-- **`SnapshotCoordinator::enqueueWithRetry`** (static helper, `SnapshotCoordinator.h:134-156`) — returns `bool`. Has internal `tryReclaim + 1 retry` logic.
-- **`ISRRetireRouter::enqueueWithRetry`** (member function, `ISRRetireRouter.h:96-98`) — returns `RetireEnqueueResult` (enum). Has its OWN internal `tryReclaim + 2 retries` logic.
+---
 
-| Bug | File:Line | What Was Done | What's Missing |
-|-----|-----------|---------------|-----------------|
-| BUG-015 | `src/core/SnapshotCoordinator.cpp:38` (startFade) `src/core/SnapshotCoordinator.cpp:94` (completeFade) `src/core/SnapshotCoordinator.h:100` (switchImmediate oldSnap) `src/core/SnapshotCoordinator.h:158,160` (retireCurrentAndTarget) — all call **`SnapshotCoordinator::enqueueWithRetry`** (static, returns `bool`) | Return value captured at cpp:38, cpp:94, h:88. NOT captured at h:100, h:158, h:160. All failure handlers are `// ★ Future: RuntimeHealthMonitor へ通知` TODO-only. | 1. **h:100** — `enqueueWithRetry` for `oldSnap` in `switchImmediate()` — return NOT captured. 2. **h:158, h:160** — `retireCurrentAndTarget()` — return NOT captured at either site. 3. **All 6 SnapshotCoordinator sites** lack actual recovery logic (TODO only). |
-| BUG-015 | `src/audioengine/ISRRetireRouter.cpp:154` (retire) `src/audioengine/DSPLifetimeManager.cpp:49,90` — both call **`ISRRetireRouter::enqueueWithRetry`** (member, returns `RetireEnqueueResult`) | ISRRetireRouter::retire (cpp:154) captures return and checks `if (result != Success)`. DSPLifetimeManager.cpp:49,90 capture into `result` but `juce::ignoreUnused(result)` discards it. | 1. **ISRRetireRouter.cpp:154** failure handler is TODO-only (no direct delete fallback). 2. **DSPLifetimeManager.cpp:49,90** — result discarded via `ignoreUnused`; need `if (result != Success) { deleter(ptr); }`. Note: `ISRRetireRouter::enqueueWithRetry` already has internal retry (tryReclaim ×2, 2 retries), so only direct delete is needed — NOT additional retry. |
-| BUG-027 | `src/core/SnapshotCoordinator.cpp:94` (completeFade) | Same site as BUG-015. `updateFade()` DELETED (BUG-031). `completeFade` captures return, failure handler is TODO. | Same as BUG-015: replace TODO with direct delete fallback. Note: BUG-027 bug report describes a race between `completeFade` and `updateFade`, but `updateFade` is deleted — race no longer applicable. Remaining issue is failure handler only. |
+### How the BUG-015/027 Fix Was Implemented (work88)
 
-### Root Cause Analysis (BUG-015)
+The fix uses a **quarantine-based recovery pattern** instead of direct delete. Key design decision: **directDelete is WRONG** because RT threads may still reference the object (UAF risk). Instead, failed enqueues are stored in a quarantine store until EBR-safe (`epoch < minReaderEpoch`).
 
-There are two distinct `enqueueWithRetry` functions with different recovery needs:
+**Architecture:**
 
-**Category A — `SnapshotCoordinator::enqueueWithRetry` (static helper, h:134-156):** Returns `bool`. Internally does `enqueueRetire → tryReclaim → enqueueRetire → return false`. Used at `SnapshotCoordinator.cpp:38` (startFade), `SnapshotCoordinator.cpp:94` (completeFade), `SnapshotCoordinator.h:88` (switchImmediate oldTarget — already captured), `SnapshotCoordinator.h:100` (switchImmediate oldSnap — NOT captured), `SnapshotCoordinator.h:158,160` (retireCurrentAndTarget — NOT captured). When it returns `false`, all internal retries are exhausted — the pointer is leaked.
-
-**Category B — `ISRRetireRouter::enqueueWithRetry` (member function, `ISRRetireRouter.h:96`):** Returns `RetireEnqueueResult` (enum: Success/QueuePressure/QueueFull/Shutdown). Internally does `enqueueRetire → tryReclaim + 2 retries`. Used at `ISRRetireRouter.cpp:154` (retire — return already captured, TODO handler only) and `DSPLifetimeManager.cpp:49,90` (return captured but `juce::ignoreUnused(result)` — discarded). When it returns non-Success, all internal retries are exhausted — the pointer is leaked.
-
-**Key distinction:** `ISRRetireRouter::enqueueWithRetry` already performs `tryReclaim + retry` internally. Adding more `tryReclaim + retry` at the call site is REDUNDANT. The correct fix for Category B sites is simply: `if (result != RetireEnqueueResult::Success) { deleter(ptr); }` (direct delete, since caller is NonRT).
-
-**`RetireEnqueueResult` semantics (from `ISRAuthorityClass.h:25-30`):**
-- `Success` (0): enqueued into deferred deletion queue
-- `QueuePressure`: queue full, retried, still failed → pointer NOT enqueued
-- `QueueFull`: fallback depth exceeded → pointer IS enrolled via fallback (do NOT direct delete)
-- `Shutdown`: system shutting down → pointer was rejected (do NOT direct delete, log only)
-
-Currently only `Success` and `QueuePressure` are returned by `ISRRetireRouter::enqueueRetire`. `QueueFull` and `Shutdown` are forward-declared but not yet produced. The fix handles `QueuePressure` with direct delete; `QueueFull`/`Shutdown` should only be logged until the enqueue path supports them.
-
-### EnqueueWithRetry Implementation (verified — two functions)
-
-```cpp
-// src/core/SnapshotCoordinator.h:134-156 — static helper (Category A)
-static bool enqueueWithRetry(convo::IEpochProvider& provider,
-                             void* ptr, void (*deleter)(void*),
-                             uint64_t epoch) noexcept {
-    if (provider.enqueueRetire(ptr, deleter, epoch))   // ← ISRRetireRouter::enqueueRetire (bool overload) internally tries tryReclaim+retry
-        return true;
-    provider.tryReclaim();
-    if (provider.enqueueRetire(ptr, deleter, epoch))
-        return true;
-    return false;  // ← Pointer leaked! All retries exhausted.
-}
-
-// src/audioengine/ISRRetireRouter.cpp:159-183 — member function (Category B)
-RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
-                                                        void (*deleter)(void*),
-                                                        uint64_t epoch,
-                                                        DeletionEntryType type) noexcept
-{
-    auto result = enqueueRetire(ptr, deleter, epoch, type);    // internal tryReclaim+retry with 500ms cooldown
-    if (result == RetireEnqueueResult::Success) return result;
-    constexpr int kMaxRetry = 2;
-    for (int attempt = 0; attempt < kMaxRetry; ++attempt) {
-        provider_->tryReclaim();
-        result = enqueueRetire(ptr, deleter, epoch, type);
-        if (result == RetireEnqueueResult::Success) return result;
-        if (result != RetireEnqueueResult::QueuePressure) break;
-    }
-    return RetireEnqueueResult::QueuePressure;  // ← Pointer leaked! Caller must handle.
-}
+```
+┌─────────────────────────┐
+│ SnapshotCoordinator     │
+│ (Category A, bool)      │──→ quarantineRetireSink() ──→ ISRRetireRouter::quarantineRetire()
+├─────────────────────────┤                                          │
+│ ISRRetireRouter         │                                          ▼
+│ (Category B,            │──→ internal quarantine ──→ RetireQuarantineStore (fixed 512 entries)
+│  RetireEnqueueResult)   │                              │
+└─────────────────────────┘                              ▼
+                                               drainQuarantineStore() 
+                                               (after every tryReclaim)
+                                               drainAllQuarantineStore()
+                                               (in drainAll for shutdown)
 ```
 
-### Fix Needed (BUG-015 + BUG-027)
+**Category A — `SnapshotCoordinator` sites (static `enqueueWithRetry`, returns `bool`):** Call sites use `quarantineRetireSink()` as fallback:
+- `startFade` (cpp:60): `quarantineRetireSink(oldTarget, ..., "startFade:queueFull")`
+- `completeFade` (cpp:117): `quarantineRetireSink(old, ..., "completeFade:queueFull")`
+- `switchImmediate` oldTarget (h:97): `quarantineRetireSink(oldTarget, ...)`
+- `switchImmediate` oldSnap (h:108): `quarantineRetireSink(oldSnap, ...)`
+- `retireCurrentAndTarget` (h:177,182): `quarantineRetireSink(snap, ...)` for both
 
-**Category A — `SnapshotCoordinator::enqueueWithRetry` sites (static, returns `bool`):**
+**Category B — `ISRRetireRouter` sites (member `enqueueWithRetry`, returns `RetireEnqueueResult`):** `enqueueWithRetry` calls `m_retireQuarantine.quarantine()` **internally** on failure (cpp:190). Call sites (`retire` cpp:154, `DSPLifetimeManager` cpp:49,90) don't need explicit recovery — the quarantine is already done.
 
-1. `SnapshotCoordinator.h:100` (switchImmediate oldSnap) — capture return: `const auto result = enqueueWithRetry(...)`, add `if (!result) { provider.tryReclaim(); if (!enqueueWithRetry(...)) { deleter(ptr); } }`
-2. `SnapshotCoordinator.h:158` (retireCurrentAndTarget current) — same pattern
-3. `SnapshotCoordinator.h:160` (retireCurrentAndTarget target) — same pattern
-4. `SnapshotCoordinator.cpp:38` (startFade) — replace `// ★ Future: RuntimeHealthMonitor へ通知` with recovery
-5. `SnapshotCoordinator.cpp:94` (completeFade, also BUG-027) — replace `// ★ Future: RuntimeHealthMonitor へ通知` with recovery
-6. `SnapshotCoordinator.h:88` (switchImmediate oldTarget) — replace `// ★ Future: RuntimeHealthMonitor へ通知` with recovery
+**`RetireQuarantineStore` design (`src/audioengine/RetireQuarantineStore.h`):**
+- Fixed `std::array<QuarantinedEntry, 512>` — allocation-free (RT-safe)
+- `mutex`-protected (NonRT callers only)
+- `drain(minReaderEpoch, isOlderFn)`: deletes entries where `epoch < minReaderEpoch` (EBR-safe)
+- `drainAllUnsafe()`: force-deletes all (shutdown only — Audio Thread stopped)
+- `quarantine()` returns `false` on capacity exhaustion — caller MUST NOT delete (UAF structural exclusion)
+- `overflowCount_` tracks store-full rejections for telemetry
 
-**Category B — `ISRRetireRouter::enqueueWithRetry` sites (member, returns `RetireEnqueueResult`):**
+**`RetireEnqueueResult` handling in `ISRRetireRouter::enqueueWithRetry` (cpp:190-200):**
+```cpp
+if (result == RetireEnqueueResult::QueuePressure || result == RetireEnqueueResult::QueueFull) {
+    const bool stored = m_retireQuarantine.quarantine(ptr, deleter, epoch, type, ...);
+    if (!stored) {
+        // store full — DO NOT delete (UAF structural exclusion). jassert + health escalation.
+    }
+}
+// Shutdown 結果はシャットダウン経路（drainAllQuarantineStore）が処理するため移送しない。
+```
 
-7. `ISRRetireRouter.cpp:154` (retire) — replace `// ★ Future: RuntimeHealthMonitor へ通知` with `if (result == RetireEnqueueResult::QueuePressure) { deleter(ptr); }` (direct delete only — `enqueueWithRetry` already retried internally)
-8. `DSPLifetimeManager.cpp:49` — remove `juce::ignoreUnused(result)`, add `if (result != RetireEnqueueResult::Success) { deleter(dsp); }`
-9. `DSPLifetimeManager.cpp:90` — remove `juce::ignoreUnused(result)`, add `if (result != RetireEnqueueResult::Success) { deleter(toDelete); }`
+**Connection mechanism:** `SnapshotCoordinator::m_retireSink` (set via `setRetireSink` at h:135) points to an `ISRRetireRouter*`. `quarantineRetireSink()` calls `m_retireSink->quarantineRetire()` which delegates to the Router's `m_retireQuarantine`. Single source of truth for quarantine storage.
 
-> **Note on BUG-027:** `completeFade` at `SnapshotCoordinator.cpp:94` is a Category A site. The BUG-027 bug report describes a race between `completeFade` and `updateFade`, but `updateFade` was deleted as dead code (BUG-031). The race scenario is no longer possible. The only remaining issue at this site is the TODO failure handler — identical to BUG-015.
+**Drain mechanism:**
+- `ISRRetireRouter::tryReclaim()` (cpp:206) calls `provider_->tryReclaim()` then `drainQuarantineStore()` (cpp:211) — epoch-safe drain after every reclaim
+- `ISRRetireRouter::drainAll()` (cpp:260) calls `provider_->drainAll()` then `drainAllQuarantineStore()` — force drain on shutdown
+
+**Remaining TODO (cosmetic/observability only):** `ISRRetireRouter::retire` cpp:154 has `// ★ Future: RuntimeHealthMonitor へ通知` after the `if (result != RetireEnqueueResult::Success)` check. The pointer has already been quarantined internally, so this is purely for RuntimeHealthMonitor notification — NOT a correctness bug.
 
 ---
 
-## 🔴 Still Open (2 bugs)
+## 🔴 Still Open (1 bug)
 
-### BUG-014: juce::String data race on `currentDeviceTypeName_`
+Only **BUG-014** remains. All other bugs are fixed (see Already Fixed table).
+
+> **Note on BUG-015/027/028:** These were originally in this section but have been moved to "Already Fixed" after verification confirmed the `RetireQuarantineStore` pattern and BUG-028 partial fix were already implemented in work88. See the "Major Update" section above for details.
+
+---
+
+## BUG-014: juce::String data race on `currentDeviceTypeName_`
 
 **Severity:** HIGH (Use-After-Free risk on RT thread)
 
@@ -277,43 +287,43 @@ void setAudioDeviceTypeName(const juce::String& type) noexcept {
 
 ---
 
-### BUG-028: CrossfadeRuntime.start()/complete() incomplete reset
+### BUG-028: CrossfadeRuntime.start() incomplete reset (95% Already Fixed)
 
-**Severity:** HIGH (audio artifact risk — stale dry scale gain on RT path)
+**Severity:** LOW (only 2 atomic publishes missing in `start()`; `complete()` fully fixed)
 
-**Location:** `src/audioengine/CrossfadeRuntime.h` — `start()` (lines 38-51) and `complete()` (lines 95-103)
+**Location:** `src/audioengine/CrossfadeRuntime.h` — `start()` (lines 38-55, 2 lines missing) and `complete()` (lines 104-115, ✅ fully fixed)
 
-**Note:** Verified file is `src/audioengine/CrossfadeRuntime.h`.
+**Note:** Verified file is `src/audioengine/CrossfadeRuntime.h` (NOT `src/audioengine/ISR/CrossfadeRuntime.h` as the bug report states — no `ISR/` subdirectory exists).
 
-**Root Cause:**
-The bug report originally identified that `complete()` misses resetting `useDryAsOld_`, `firstIrDryPending_`, and `firstIrDryDone_`. The current code shows that `complete()` **DOES** reset all three of those fields (lines 98-100) — those are FIXED.
+**Status (2026-08-09):** **95% FIXED in work88** — see "Major Update" section above.
 
-However, NEW omissions remain in both methods:
+**Remaining omissions (only in `start()`, only 2 lines):**
 
-**Missing from `start()` (h:38-51):**
+**Missing from `start()` (h:38-55):**
 - `firstIrDryDone_` — NOT reset (should be `false`)
 - `dryScaleTarget_` — NOT reset (should be `1.0`)
-- `dryScaleGain_` (LinearRamp) — NOT reset to `1.0`
 
-**Missing from `complete()` (h:95-103):**
-- `dryScaleTarget_` — NOT reset (should be `1.0`)
-- `dryScaleGain_` (LinearRamp) — NOT reset to `1.0`
-- `startDelayBlocks_` — NOT reset (should be `0`)
-- `dryHoldSamples_` — NOT reset (should be `0`)
+> ❌ `dryScaleGain_.setCurrentAndTargetValue(1.0)` is **DELIBERATELY OMITTED** from `start()` — see h:41-42 comment: NonRT→LinearRamp race avoidance. Fade-in is driven by RT-side `armCrossfadeIfPending` at `AudioEngine.h:3887` via `setTargetValue(1.0)`.
 
-**LATENT BUG NOTE (verified 2026-08-06):** `setDryScaleTarget()` (`src/audioengine/CrossfadeRuntime.h:153`) has **zero callers** across all `.cpp`/`.h` files. The field `dryScaleTarget_` is only ever written by:
-1. Constructor initialization: `std::atomic<double> dryScaleTarget_{ 1.0 };` (h:171)
-2. `reset()`: `convo::publishAtomic(dryScaleTarget_, 1.0, ...)` (h:115)
+**`complete()` (h:104-115): ✅ ALL FIXED in work88** — resets `dryScaleTarget_=1.0` (h:106), `startDelayBlocks_=0` (h:107), `dryHoldSamples_=0` (h:108), `pending_=false`, `useDryAsOld_=false`, `firstIrDryPending_=false`, `firstIrDryDone_=false`, `queuedFadeTimeSec_=0.030`, `fadeStartTimestampUs_=0`, + `bumpCrossfadeGeneration()` (h:120).
 
-This means `dryScaleTarget_` is always `1.0` in the current codebase, making the stale-value scenario **latent** (not currently triggered). However, `setDryScaleTarget()` exists as a public API — if any future code calls it with a non-1.0 value, the stale state will immediately become a live bug. The fix (resetting in `start()`/`complete()`) is still correct and necessary for defensive correctness.
+> ❌ `dryScaleGain_.setCurrentAndTargetValue(1.0)` is **DELIBERATELY OMITTED** from `complete()` — see h:121 comment: NonRT→LinearRamp race avoidance.
 
-**Workaround already in place (partial):** The Timer path in `AudioEngine.Timer.cpp:896-898` manually resets `startDelayBlocks_` and `dryHoldSamples_` after `complete()` (but the Timer path does NOT reset `dryScaleTarget_` or `dryScaleGain_`). The second `complete()` call at `AudioEngine.Timer.cpp:1580` only manually calls `setDryHoldSamples(0)` at :1583 — `startDelayBlocks_` is NOT reset there either.
+**LATENT BUG NOTE (verified 2026-08-09):** `setDryScaleTarget()` (`src/audioengine/CrossfadeRuntime.h:180`) has **zero callers** across all `.cpp`/`.h` files. The field `dryScaleTarget_` is only ever written by:
+1. Constructor initialization: `std::atomic<double> dryScaleTarget_{ 1.0 };` (h:206)
+2. `reset()`: `convo::publishAtomic(dryScaleTarget_, 1.0, ...)` (h:110)
+3. `complete()`: `convo::publishAtomic(dryScaleTarget_, 1.0, ...)` (h:136) — added in work88
+
+This means `dryScaleTarget_` is always `1.0` in the current codebase, making the stale-value scenario **latent** (not currently triggered). However, `setDryScaleTarget()` exists as a public API — if any future code calls it with a non-1.0 value, the stale state will immediately become a live bug. The fix (resetting `dryScaleTarget_` in `start()` as well) is still correct and necessary for defensive correctness — this is 1 of the 2 remaining atomic publishes needed.
+
+**Workaround NOW REDUNDANT (work88 made `complete()` self-sufficient):** The Timer path in `AudioEngine.Timer.cpp:896-898` manually resets `startDelayBlocks_` and `dryHoldSamples_` after `complete()` — this was a pre-work88 workaround. After work88, `complete()` ALREADY resets both fields internally (h:107-108), making these manual workarounds redundant. The second `complete()` call at `AudioEngine.Timer.cpp:1580` only manually calls `setDryHoldSamples(0)` at :1583 — `startDelayBlocks_` is NOT manually reset there, but is now handled by `complete()` internally.
 ```cpp
+// AudioEngine.Timer.cpp:896-898 (pre-work88 workaround, NOW redundant):
 crossfadeRuntime_.complete();
-crossfadeRuntime_.setStartDelayBlocks(0);
-crossfadeRuntime_.setDryHoldSamples(0);
+crossfadeRuntime_.setStartDelayBlocks(0);  // redundant — complete() resets at h:107
+crossfadeRuntime_.setDryHoldSamples(0);    // redundant — complete() resets at h:108
 ```
-But this workaround only covers the Timer path — the `DSPTransition.h:66,126` `complete()` calls do NOT have these manual resets, leaving `startDelayBlocks_`, `dryHoldSamples_`, `dryScaleTarget_`, and `dryScaleGain_` stale on those paths.
+But this workaround only covered the Timer path — the `DSPTransition.h:66,126` `complete()` calls did NOT have these manual resets, leaving `startDelayBlocks_`, `dryHoldSamples_` stale on those paths before work88. After work88, `complete()` resets both fields internally (h:107-108), so ALL 4 complete() call sites now correctly reset these fields. The Timer path workaround can be removed (defensive redundancy) but should be kept during transition.
 
 **Complete() call sites (verified):**
 - `src/audioengine/AudioEngine.Timer.cpp:896` — Timer (NonRT) — has manual workaround for `startDelayBlocks_` + `dryHoldSamples_`
@@ -321,27 +331,24 @@ But this workaround only covers the Timer path — the `DSPTransition.h:66,126` 
 - `src/audioengine/DSPTransition.h:66` — Emergency override path (NonRT via `onPublishCompleted`)
 - `src/audioengine/DSPTransition.h:126` — Immediate retire path (NonRT via `onPublishCompleted`)
 
-All callers are NonRT, so `dryScaleGain_.setCurrentAndTargetValue(1.0)` is safe from an RT-safety perspective. The issue is purely about stale values persisting across fade cycles.
+All callers are NonRT. However, the RT Audio Thread **concurrently reads** `dryScaleGain_` via `getDryScaleGain().getNextValue()` (AudioBlock.cpp:442, BlockDouble.cpp:421) during `start()`/`complete()` execution. `LinearRamp`'s `current/target/step/remaining` members are NON-atomic, so writing them from NonRT while RT reads is a data race. This is why work88 DELIBERATELY omits `dryScaleGain_.setCurrentAndTargetValue(1.0)` from both methods. The fade-in is driven by RT-side `armCrossfadeIfPending` via `setTargetValue(1.0)` instead.
 
-**Impact:**
-- RT path `src/audioengine/AudioEngine.Processing.AudioBlock.cpp:442`: `crossfadeRuntime_.getDryScaleGain().getNextValue()` returns stale gain
-- RT path `src/audioengine/AudioEngine.Processing.BlockDouble.cpp:421`: same stale gain read
-- `src/audioengine/AudioEngine.h:2897`: `getDryScaleTarget()` returns stale target
-- `src/audioengine/AudioEngine.h:2998`: `getDryScaleTarget()` returns stale target during snapshot build
+**Impact (post-work88, before the 2-line `start()` fix):**
+- RT path `src/audioengine/AudioEngine.Processing.AudioBlock.cpp:442`: `crossfadeRuntime_.getDryScaleGain().getNextValue()` — RT-driven via `armCrossfadeIfPending`, no longer stale after complete() (work88 removed `dryScaleGain_` write from both methods)
+- RT path `src/audioengine/AudioEngine.Processing.BlockDouble.cpp:421`: same — RT-driven
+- `src/audioengine/AudioEngine.h:2897`: `getDryScaleTarget()` — stale ONLY if `start()` is called without the 2-line fix and a previous cycle set `dryScaleTarget_` to non-1.0 (currently latent since `setDryScaleTarget()` has 0 callers)
+- `src/audioengine/AudioEngine.h:2998`: same stale-read path during snapshot build
 
-**Fix:**
+**Fix (corrected — 2026-08-09):**
 ```cpp
-// In start() — add after fadeStartTimestampUs_ publish (h:49):
+// In start() — add after fadeStartTimestampUs_ publish (h:49), before bumpCrossfadeGeneration() (h:58):
 convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release);
 convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
-dryScaleGain_.setCurrentAndTargetValue(1.0);
 
-// In complete() — add after fadeStartTimestampUs_ publish (h:102):
-convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
-convo::publishAtomic(startDelayBlocks_, 0, std::memory_order_release);
-convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
-dryScaleGain_.setCurrentAndTargetValue(1.0);
+// In complete() — NO CHANGES NEEDED (already fixed in work88 at h:106-108).
 ```
+
+> **❌ Previous plan ERRATA (corrected):** The original plan proposed adding `dryScaleGain_.setCurrentAndTargetValue(1.0)` to both methods. This is **WRONG** and must NOT be applied. Both methods deliberately omit `dryScaleGain_` writes due to the NonRT→LinearRamp race (h:41-42 and h:121 comments). Adding it would re-introduce the data race that work88 specifically removed.
 
 **Files to modify:** `src/audioengine/CrossfadeRuntime.h`
 
@@ -352,143 +359,9 @@ dryScaleGain_.setCurrentAndTargetValue(1.0);
 | Bug | Priority | Fix Description | Files to Modify | RT-Safe? | Risk |
 |-----|----------|-----------------|-----------------|----------|------|
 | BUG-014 | P0 | Replace `juce::String currentDeviceTypeName_` (h:2355) with `std::atomic<const char*>`; use `strstr` instead of `containsIgnoreCase`; `setAudioDeviceTypeName` uses `new char[]`/`delete[]` (MSVC-compatible, no `strdup`); remove `getAudioDeviceTypeName()` (0 callers); add cleanup in `~AudioEngine` | `AudioEngine.h:2347-2355`, `AudioEngine.Mmcss.cpp:50-64`, `AudioEngine.CtorDtor.cpp:89` | Yes | Low — pure swap, no logic change |
-| BUG-015 | P1 | **Category A** (SnapshotCoordinator::enqueueWithRetry, returns bool): capture return at h:100, h:158, h:160; replace TODO at cpp:38,94,h:88 with direct delete. **Category B** (ISRRetireRouter::enqueueWithRetry, returns RetireEnqueueResult): replace TODO at ISRRetireRouter.cpp:154; remove `ignoreUnused` at DSPLifetimeManager.cpp:49,90 and add direct delete. Category B needs NO additional retry (enqueueWithRetry already retried internally). | `SnapshotCoordinator.h:88,100,158,160`, `SnapshotCoordinator.cpp:38,94`, `ISRRetireRouter.cpp:154`, `DSPLifetimeManager.cpp:49,90` | Yes (NonRT path) | Medium — 9 sites, 2 patterns |
-| BUG-027 | P1 | Same Category A recovery as BUG-015 completeFade path (cpp:94). Note: `updateFade()` was deleted (BUG-031) — race condition no longer applicable. Only failure handler TODO remains. | `SnapshotCoordinator.cpp:94` | Yes | Low — duplicate of BUG-015, 1 site |
-| BUG-028 | P1 | In `start()`: publish `firstIrDryDone_=false`, `dryScaleTarget_=1.0`, reset `dryScaleGain_` to 1.0. In `complete()`: publish `dryScaleTarget_=1.0`, `startDelayBlocks_=0`, `dryHoldSamples_=0`, reset `dryScaleGain_` to 1.0 — using `convo::publishAtomic`. Does NOT need `firstIrDryDone_` reset in complete() (already done at h:100). | `CrossfadeRuntime.h:49,102` | Yes (all callers NonRT) | Low — 5 atomic publishes + 1 ramp reset |
-
-### BUG-015 Fix (step-by-step)
-
-**Step 1 — `SnapshotCoordinator::enqueueWithRetry` sites (Category A — static, returns `bool`):**
-
-The `SnapshotCoordinator::enqueueWithRetry` static helper (h:134-156) already performs `enqueueRetire → tryReclaim → enqueueRetire → return false`. When it returns `false`, all internal retries are exhausted. The recovery at the call site should capture the return and do a direct delete on failure. An OPTIONAL extra `tryReclaim + retry` provides belt-and-suspenders safety:
-
-```cpp
-// SnapshotCoordinator.h:100 — switchImmediate oldSnap path (NOT captured currently)
-// Before:
-enqueueWithRetry(*m_epochProvider, oldSnap, snapshotDeleter, newEpoch);
-
-// After:
-const auto result = enqueueWithRetry(*m_epochProvider, oldSnap, snapshotDeleter, newEpoch);
-if (!result) {
-    juce::Logger::writeToLog("SnapshotCoordinator: enqueue failed for oldSnap — direct delete (NonRT)");
-    snapshotDeleter(oldSnap);  // or SnapshotCoordinator::deleteSnap(oldSnap)
-}
-```
-
-```cpp
-// SnapshotCoordinator.h:158,160 — retireCurrentAndTarget (NOT captured currently)
-// Before:
-if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
-
-// After (for both current and target slots):
-if (snap) {
-    const auto result = enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
-    if (!result) {
-        juce::Logger::writeToLog("SnapshotCoordinator: enqueue failed in retireCurrentAndTarget — direct delete (NonRT)");
-        deleter(snap);
-    }
-}
-```
-
-**Step 2 — Replace TODO failure handlers at already-captured sites:**
-
-`SnapshotCoordinator.cpp:38` (startFade), `SnapshotCoordinator.cpp:94` (completeFade), `SnapshotCoordinator.h:88` (switchImmediate oldTarget) — all currently have:
-```cpp
-if (!result) {
-    // ★ Future: RuntimeHealthMonitor へ通知
-}
-```
-Replace with:
-```cpp
-if (!result) {
-    juce::Logger::writeToLog("SnapshotCoordinator: enqueue failed — direct delete fallback (NonRT)");
-    snapshotDeleter(ptr);  // direct delete — NonRT context, safe
-}
-```
-
-**Step 3 — `ISRRetireRouter::enqueueWithRetry` sites (Category B — member, returns `RetireEnqueueResult`):**
-
-⚠️ **CRITICAL:** These are a DIFFERENT function. `ISRRetireRouter::enqueueWithRetry` (h:159-183) has its OWN internal retry logic (`tryReclaim + 2 retries`). When it returns non-Success, all internal retries are exhausted. The recovery is simply **direct delete** — NOT additional tryReclaim+retry:
-
-```cpp
-// ISRRetireRouter.cpp:154 — retire() (currently captures return, TODO handler)
-// Before:
-if (result != RetireEnqueueResult::Success) {
-    // ★ Future: RuntimeHealthMonitor へ通知
-}
-
-// After:
-if (result != RetireEnqueueResult::Success) {
-    juce::Logger::writeToLog("ISRRetireRouter::retire: queue pressure after internal retries — direct delete (NonRT)");
-    deleter(ptr);  // ISRRetireRouter::enqueueWithRetry already retried internally — direct delete is the final fallback
-}
-```
-
-```cpp
-// DSPLifetimeManager.cpp:49 (currently: juce::ignoreUnused(result))
-// Before:
-const auto result = router_->enqueueWithRetry(dsp, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic);
-juce::ignoreUnused(result);
-
-// After:
-const auto result = router_->enqueueWithRetry(dsp, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic);
-if (result != RetireEnqueueResult::Success) {
-    juce::Logger::writeToLog("DSPLifetimeManager: enqueue failed — direct delete (NonRT)");
-    AudioEngine::destroyDSPCoreNode(dsp);
-}
-```
-
-```cpp
-// DSPLifetimeManager.cpp:90 (same pattern)
-const auto result = router_->enqueueWithRetry(toDelete, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic);
-if (result != RetireEnqueueResult::Success) {
-    juce::Logger::writeToLog("DSPLifetimeManager: enqueue failed — direct delete (NonRT)");
-    AudioEngine::destroyDSPCoreNode(toDelete);
-}
-```
-
-> **Forward compatibility note:** `RetireEnqueueResult::QueueFull` means the pointer IS enrolled via a fallback path — do NOT direct delete in that case. `RetireEnqueueResult::Shutdown` means the system is shutting down — do NOT direct delete. Currently only `QueuePressure` is returned, so `!= Success → direct delete` is safe. When `QueueFull`/`Shutdown` are implemented, add: `if (result == RetireEnqueueResult::QueuePressure) { deleter(ptr); }`
-
-#### Detailed Design — BUG-015
-
-**Design Rationale:** There are **two distinct** `enqueueWithRetry` functions. `SnapshotCoordinator::enqueueWithRetry` (static, h:134) returns `bool` and does tryReclaim+1 retry internally. `ISRRetireRouter::enqueueWithRetry` (member, h:158) returns `RetireEnqueueResult` and does tryReclaim+2 retries internally. Both can fail after exhausting internal retries, leaking the pointer.
-
-**Recovery Strategy:**
-- **Category A (SnapshotCoordinator sites):** Capture `bool` return. On `false`: log + `deleter(ptr)` (direct delete). No additional retry needed since `enqueueWithRetry` already retried internally. An OPTIONAL second tryReclaim+`enqueueWithRetry` can be added for belt-and-suspenders, but is NOT necessary.
-- **Category B (ISRRetireRouter sites):** Capture `RetireEnqueueResult`. On `!= Success`: log + `deleter(ptr)`. Since `ISRRetireRouter::enqueueWithRetry` already does 2 internal retries, NO additional retry is needed or recommended.
-- **Unified helper (proposed):** Replace all inline recovery blocks with:
-  ```cpp
-  // For SnapshotCoordinator sites (Category A):
-  static void retireOrFail(convo::IEpochProvider& provider, void* ptr,
-                           void (*deleter)(void*), uint64_t epoch,
-                           const char* debugLabel) noexcept {
-      if (enqueueWithRetry(provider, ptr, deleter, epoch)) return;
-      juce::Logger::writeToLog("SnapshotCoordinator: " + juce::String(debugLabel) + " — direct delete (NonRT)");
-      deleter(ptr);
-  }
-  // For ISRRetireRouter sites (Category B):
-  // (ISRRetireRouter::retire already wraps the call — just add deleter(ptr) in the failure branch)
-  ```
-
-**Thread Safety Analysis:**
-- `SnapshotCoordinator.cpp:38` (`startFade`) — called from `AudioEngine.Timer.cpp` (Message Thread) → NonRT ✅
-- `SnapshotCoordinator.cpp:94` (`completeFade`) — called from `AudioEngine.Timer.cpp:896` (Message Thread) → NonRT ✅
-- `SnapshotCoordinator.h:88,100` (`switchImmediate`) — called from `AudioEngine.Timer.cpp` (Message Thread) → NonRT ✅
-- `SnapshotCoordinator.h:158,160` (`retireCurrentAndTarget`) — called from `AudioEngine.Timer.cpp` (Message Thread) → NonRT ✅
-- `ISRRetireRouter.cpp:154` (`retire`) — called from `onPublishCompleted` (worker thread, not audio callback) → NonRT ✅
-- `DSPLifetimeManager.cpp:49,90` — called during cleanup/destruction (Message Thread) → NonRT ✅
-
-All callers are NonRT — direct `delete` is safe at all sites.
-
-**Memory Ordering:** No explicit memory ordering needed for the recovery path — `enqueueRetire` and `deleter` use the RCU epoch barrier internally. The atomic pointer swap (for BUG-014) is the only path requiring acquire/release ordering.
-
-**Logging Protocol:** Each failure path logs exactly once before direct delete. Log messages include the function/site name and "(NonRT)" indicator for diagnostics.
-
-**Testing Approach:**
-- Inject a mock `IEpochProvider` that returns `false` from `enqueueRetire` to simulate queue pressure
-- Verify `deleter(ptr)` (direct delete) is called exactly once on failure
-- Assert no double-free: the pointer is only deleted once (either via `enqueueRetire` or `deleter`, not both)
-- For Category B: inject `ISRRetireRouter` that returns `RetireEnqueueResult::QueuePressure` — verify direct delete is called
+| BUG-015 | — | **ALREADY FIXED** (see Already Fixed table). Only remaining TODO: `ISRRetireRouter::retire` cpp:154 — RuntimeHealthMonitor notification (observability only, not recovery). **NOT a correctness bug.** | — | — | — |
+| BUG-027 | — | **ALREADY FIXED** (see Already Fixed table). `completeFade` recovery via `quarantineRetireSink`; `updateFade` deleted; race no longer applicable. | — | — | — |
+| BUG-028 | P1 | **95% FIXED (work88)** — `complete()` ALREADY resets `dryScaleTarget_=1.0`, `startDelayBlocks_=0`, `dryHoldSamples_=0` + `bumpCrossfadeGeneration()`. `start()` ALREADY removed `gain_.setCurrentAndTargetValue(0.0)` (race avoidance). **Remaining: add 2 atomic publishes to `start()` only**: `firstIrDryDone_=false`, `dryScaleTarget_=1.0`. ❌ DO NOT add `dryScaleGain_.setCurrentAndTargetValue(1.0)` — deliberately omitted (h:121 NonRT→LinearRamp race). | `CrossfadeRuntime.h:50-51` (add 2 lines in `start()`) | Yes (NonRT) | Low — 2 atomic publishes |
 
 ---
 
@@ -553,57 +426,63 @@ void setAudioDeviceTypeName(const juce::String& type) noexcept {
 
 ---
 
-### BUG-028 Fix (step-by-step)
+### BUG-028 Fix (step-by-step) — 95% Already Applied, Only 2 Lines Remaining
 
-**`start()` — after `fadeStartTimestampUs_` publish (h:49):**
+**Current state (verified 2026-08-09):** `complete()` (h:104-115) ALREADY resets all 9 atomic fields + `bumpCrossfadeGeneration()`. `start()` (h:38-55) resets 7 of 9 fields. Only 2 atomic publishes are missing from `start()`.
+
+**`start()` — add after `fadeStartTimestampUs_` publish (h:49), before `bumpCrossfadeGeneration()`:**
 ```cpp
 convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release);
 convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
-dryScaleGain_.setCurrentAndTargetValue(1.0);
 ```
 
-**`complete()` — after `fadeStartTimestampUs_` publish (h:102):**
-```cpp
-convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
-convo::publishAtomic(startDelayBlocks_, 0, std::memory_order_release);
-convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
-dryScaleGain_.setCurrentAndTargetValue(1.0);
-```
+**`complete()` — NO CHANGES NEEDED (already fixed in work88).**
 
-#### Detailed Design — BUG-028
+> **❌ DO NOT add `dryScaleGain_.setCurrentAndTargetValue(1.0)` to either method.**
+> - `start()`: The old `gain_.setCurrentAndTargetValue(0.0)` was DELIBERATELY REMOVED (h:41-42 comment) — fade-in is driven by RT-side `armCrossfadeIfPending` at `AudioEngine.h:3887`.
+> - `complete()`: `dryScaleGain_.setCurrentAndTargetValue(1.0)` is DELIBERATELY OMITTED (h:121 comment) — NonRT→LinearRamp race avoidance.
+> - Adding `setCurrentAndTargetValue` to NonRT `start()`/`complete()` while RT reads `getDryScaleGain().getNextValue()` is a data race (LinearRamp members are non-atomic).
+> - `reset()` (shutdown-only, h:127-139) DOES call `dryScaleGain_.setCurrentAndTargetValue(1.0)` — correct because Audio Thread is stopped during `reset()`.
 
-**Design Rationale:** `CrossfadeRuntime` maintains several fields that control the dry signal mixing path. `reset()` resets all fields but is only called once at construction. `start()` and `complete()` — called at the beginning and end of each fade cycle — do not reset the dry-scale fields, causing stale values from a previous fade to persist into the next cycle.
+#### Detailed Design — BUG-028 (Updated 2026-08-09 — 95% Already Fixed)
 
-**Fields Requiring Reset in `start()`:**
-| Field | Type | Old Value (from prior cycle) | New Value | Why |
-|-------|------|------------------------------|-----------|-----|
-| `firstIrDryDone_` | `bool` atomic | `true` (previous cycle completed) | `false` | Ensures IR dry path is re-evaluated for first input |
-| `dryScaleTarget_` | `double` atomic | Stale gain target | `1.0` | Default: dry signal at full volume |
-| `dryScaleGain_` | `LinearRamp` | Stale interpolated value | `1.0` | Reset both current and target to 1.0 |
+**Design Rationale:** `CrossfadeRuntime` maintains several fields that control the dry signal mixing path. `reset()` resets all fields but is only called at shutdown. `start()` and `complete()` — called at the beginning and end of each fade cycle — must reset the dry-scale fields to prevent stale values from persisting into the next cycle.
 
-**Fields Requiring Reset in `complete()`:**
-| Field | Type | Old Value | New Value | Why |
-|-------|------|-----------|-----------|-----|
-| `dryScaleTarget_` | `double` atomic | Fade-end target | `1.0` | Post-fade: dry at full volume |
-| `startDelayBlocks_` | `int` atomic | Delay applied during fade | `0` | No delay after fade completion |
-| `dryHoldSamples_` | `size_t` atomic | Samples held during IR loading | `0` | No hold after completion |
-| `dryScaleGain_` | `LinearRamp` | Faded gain value | `1.0` | Reset ramp for next cycle |
+**Fields Requiring Reset in `start()` (only 2 remaining — work88 already fixed 7):**
+| Field | Type | Old Value (from prior cycle) | New Value | Status | Why |
+|-------|------|------------------------------|-----------|--------|-----|
+| `firstIrDryDone_` | `bool` atomic | `true` (previous cycle completed) | `false` | ❌ MISSING | Ensures IR dry path is re-evaluated for first input |
+| `dryScaleTarget_` | `double` atomic | Stale gain target | `1.0` | ❌ MISSING | Default: dry signal at full volume |
+| `dryScaleGain_` | `LinearRamp` | Stale interpolated value | `1.0` | 🚫 DO NOT FIX | NonRT→LinearRamp race (h:121). RT-side `armCrossfadeIfPending` drives fade-in instead. |
+
+**Fields Requiring Reset in `complete()` — ✅ ALL ALREADY FIXED in work88:**
+| Field | Type | Old Value | New Value | Status | Why |
+|-------|------|-----------|-----------|--------|-----|
+| `dryScaleTarget_` | `double` atomic | Fade-end target | `1.0` | ✅ h:106 | Post-fade: dry at full volume |
+| `startDelayBlocks_` | `int` atomic | Delay applied during fade | `0` | ✅ h:107 | No delay after fade completion |
+| `dryHoldSamples_` | `int` atomic | Samples held during IR loading | `0` | ✅ h:108 | No hold after completion |
+| `dryScaleGain_` | `LinearRamp` | Faded gain value | `1.0` | 🚫 DO NOT FIX | NonRT→LinearRamp race (h:121). RT consumes via `getNextValue()` acquire. |
 
 **RT-Safety:** All callers of `start()` and `complete()` are NonRT:
 - `start()`: Called from `AudioEngine.Timer.cpp` (Message Thread) and `DSPTransition.h:66` (emergency override, NonRT)
 - `complete()`: Called from `AudioEngine.Timer.cpp:896,1580` (Message Thread) and `DSPTransition.h:66,126` (NonRT)
 
-`dryScaleGain_.setCurrentAndTargetValue(1.0)` is a synchronous ramp reset — safe on NonRT thread.
+> **❌ `dryScaleGain_.setCurrentAndTargetValue(1.0)` is NOT safe in `start()`/`complete()`.** Although callers are NonRT, the RT Audio Thread concurrently reads `getDryScaleGain().getNextValue()` (AudioBlock.cpp:442, BlockDouble.cpp:421). `LinearRamp`'s `current/target/step/remaining` members are NON-atomic. Writing them from NonRT while RT reads is a data race. This is why work88 DELIBERATELY removed `gain_.setCurrentAndTargetValue(0.0)` from `start()` (h:41-42) and DELIBERATELY omits `dryScaleGain_.setCurrentAndTargetValue(1.0)` from `complete()` (h:121).
+>
+> `reset()` (shutdown-only, h:127-139) DOES call `dryScaleGain_.setCurrentAndTargetValue(1.0)` — correct because Audio Thread is stopped during `reset()`.
+
+**`bumpCrossfadeGeneration()` (NEW in work88, h:193):** Increments `crossfadeGeneration_` atomic counter with `release` semantics. Called at end of `start()` (h:58) and `complete()` (h:120). Purpose: "block-boundary semantic consistency anchor" — allows RT to detect that a coherent batch of atomic publishes has completed (single atomic read of generation = consistent snapshot). Referenced as "BUG-028 五次レビュー §8" (5th review section 8) in comments.
 
 **Memory Ordering:** `convo::publishAtomic` uses `memory_order_release` — appropriate because the Audio Thread reads these via `convo::consumeAtomic` (acquire) before the fade cycle begins. The `start()`/`complete()` writes are sequenced before the audio thread's first read in the next cycle.
 
 **Interaction with Existing Workaround:** The Timer path at `AudioEngine.Timer.cpp:896-898` already manually calls `setStartDelayBlocks(0)` + `setDryHoldSamples(0)` after `complete()`. Once `complete()` internally resets these fields, the manual workaround becomes redundant. However, the second `complete()` call at `AudioEngine.Timer.cpp:1580` only calls `setDryHoldSamples(0)` (line 1583) — `startDelayBlocks_` is NOT reset there. The fix in `complete()` will cover both Timer paths. The manual workaround lines can be removed after verifying the fix, but should be kept as defensive redundancy during transition.
 
 **Testing Approach:**
-- Unit test: call `start()` then immediately check all fields via `getXxx()` — verify `firstIrDryDone_==false`, `dryScaleTarget_==1.0`, `dryScaleGain_.getCurrentValue()==1.0`
-- Unit test: call `complete()` then check all fields — verify `dryScaleTarget_==1.0`, `startDelayBlocks_==0`, `dryHoldSamples_==0`, `dryScaleGain_.getCurrentValue()==1.0`
-- Integration test: trigger multiple fade cycles (start → complete → start → complete) and verify dry scale gain is 1.0 at the start of each cycle
-- Regression test: verify Timer path behavior unchanged after removing manual workaround (if removed)
+- Unit test: call `start()` then immediately check all fields via `getXxx()` — verify `firstIrDryDone_==false`, `dryScaleTarget_==1.0`. (❌ Do NOT assert `dryScaleGain_.getCurrentValue()` — it's RT-driven via `armCrossfadeIfPending`.)
+- Unit test: call `complete()` then check all fields — verify `dryScaleTarget_==1.0`, `startDelayBlocks_==0`, `dryHoldSamples_==0` (all ALREADY reset by work88). (❌ Do NOT assert `dryScaleGain_`.)
+- Integration test: trigger multiple fade cycles (start → complete → start → complete) and verify atomic fields are correctly reset at each cycle boundary
+- Regression test: verify Timer path behavior unchanged — work88 `complete()` already resets `startDelayBlocks_`/`dryHoldSamples_` internally, so manual workaround at Timer.cpp:896-898 is now redundant (can be removed after verification)
+- TSan test: verify NO data race on `dryScaleGain_` when NonRT `start()`/`complete()` runs concurrently with RT `getDryScaleGain().getNextValue()` — the deliberate omission of `setCurrentAndTargetValue` should eliminate the race
 
 ---
 
@@ -625,6 +504,9 @@ dryScaleGain_.setCurrentAndTargetValue(1.0);
 ## Actionable Todo
 
 1. [ ] BUG-014: (a) Replace `juce::String` member with `std::atomic<const char*>` + `new[]`/`delete[]` in `AudioEngine.h:2347-2355`; (b) Replace `containsIgnoreCase` with `strstr` in `AudioEngine.Mmcss.cpp:50-64`; (c) Remove `getAudioDeviceTypeName()` (0 callers); (d) Add `delete[]` cleanup in `~AudioEngine` at `AudioEngine.CtorDtor.cpp:89`
-2. [ ] BUG-015: Category A (SnapshotCoordinator::enqueueWithRetry, bool): capture return at h:100, h:158, h:160; replace TODO at cpp:38, cpp:94 (also BUG-027), h:88 with direct delete. Category B (ISRRetireRouter::enqueueWithRetry, RetireEnqueueResult): replace TODO at ISRRetireRouter.cpp:154; remove `ignoreUnused` at DSPLifetimeManager.cpp:49,90 and add direct delete (NO extra retry — already done internally)
-3. [ ] BUG-027: Apply Category A recovery to `completeFade` at `SnapshotCoordinator.cpp:94` (same as BUG-015 completeFade site — already listed in #2)
-4. [ ] BUG-028: Add missing resets to `CrossfadeRuntime::start()` and `complete()` in `src/audioengine/CrossfadeRuntime.h`
+2. [ ] BUG-015: ~~All 10 sites fixed via `RetireQuarantineStore` pattern~~ ✅ DONE. Remaining cosmetic TODO: `ISRRetireRouter::retire` cpp:154 — replace `// ★ Future: RuntimeHealthMonitor へ通知` with actual `engineHealthMonitor_.notify(RetireEnqueueResult)` call (observability only, NOT a correctness bug)
+3. [ ] BUG-027: ~~CompleteFade path fixed via `quarantineRetireSink`~~ ✅ DONE. No remaining work.
+4. [ ] BUG-028: Add 2 missing atomic publishes to `CrossfadeRuntime::start()` in `src/audioengine/CrossfadeRuntime.h` (after `fadeStartTimestampUs_` publish at h:49, before `bumpCrossfadeGeneration()` at h:58):
+   - `convo::publishAtomic(firstIrDryDone_, false, std::memory_order_release);`
+   - `convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);`
+   - ❌ DO NOT add `dryScaleGain_.setCurrentAndTargetValue(1.0)` — deliberately omitted (NonRT→LinearRamp race, h:121). `complete()` is ALREADY 100% fixed in work88 — no changes needed there.

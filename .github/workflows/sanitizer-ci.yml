@@ -90,7 +90,6 @@ jobs:
               if (Test-Path $installerPath) { Remove-Item $installerPath -ErrorAction SilentlyContinue }
             }
           }
-          }
 
       - name: Initialize Intel oneAPI environment
         if: steps.install_oneapi.outputs.installed == 'true'

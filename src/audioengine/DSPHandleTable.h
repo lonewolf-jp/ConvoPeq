@@ -73,7 +73,7 @@ public:
         std::uint32_t idx = hashKey(key);
         std::int64_t firstAvail = -1;  // 最初の再利用可能 slot（tombstone または真の空）
         for (std::uint32_t i = 0; i < kCapacity; ++i) {
-            const auto& e = entries_[(idx + i) & kMask];
+            auto& e = entries_[(idx + i) & kMask];  // insert は非constメンバのため const_cast 不要（LINT-AE-013）
             if (!e.occupied) {
                 if (firstAvail < 0)
                     firstAvail = static_cast<std::int64_t>(i);
@@ -86,8 +86,7 @@ public:
             }
             if (e.key == key) {
                 // 既存 live エントリの更新（同じ key は同一 DSP とみなす）
-                auto& live = const_cast<Entry&>(e);
-                live.value = value;
+                e.value = value;
                 return true;
             }
         }

@@ -1,7 +1,7 @@
 # ConvoPeq 統合バグリスト (改訂版)
 
 **作成日**: 2026-07-30
-**最終更新**: 2026-08-07
+**最終更新**: 2026-08-07 (unchecked mini-bugs 22件検証 → 21件 Fixed/Confirmed、1件は Bug 1-6 と重複。新規 R-17〜R-38 追加)
 **対象**: ConvoPeq (Windows 11 x64, AVX2, MSVC/icx, JUCE 8.0.12, MKL/IPP)
 **調査元**: `bug_meta_ai.md`, `bug_qwen.md`, `ConvoPeq_Part8_findings_2026-07-23.md`, `ConvoPeq_バグレポート_2026-07-30.md`, `REPAIR_PLAN3.md`
 **検証方法**: ソースコード grep / AiDex インデックス検索 / 実ファイル閲覧 / cppcheck ログ照合
@@ -484,6 +484,28 @@ set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
 | R-14 | IR resample キャンセル不足 (N3) | `IRDSP.cpp:68, 93` で `if (shouldExit && shouldExit())` のチェックが存在する。キャンセル機構は実装済み | ❌ Rejected |
 | R-15 | audioCallbackActiveCount uint32 overflow (N9) | `AudioEngine.h:1618` の `audioCallbackActiveCount` は**同時アクティブなコールバック数**を表す (increment/decrement ペア)。42億同時コールバックという物理的不可能な状況でしか overflow しない | ❌ Rejected |
 | R-16 | `/fp:fast` Release ビルド浮動小数点不正確性 | CMakeLists.txt:1143,1219 で `/fp:fast` が `CMAKE_CXX_FLAGS_RELEASE` に含まれている。DSPコードの数値精度低下リスク。 | ✅ Confirmed |
+| R-17 | CustomInputOversampler::processDown パススルー時のバッファオーバーリード (BUG-039) | CustomInputOversampler.cpp:834-841 で `targetSamples` 分だけ `upsampledBlock` から読み取る。`upsampledBlock` のサイズが小さい場合にメモリ超過読み取り。→ **修正確認**: 840-841 で `std::min(targetSamples, upsampledBlock.getNumSamples())` を使用 | ✅ Fixed |
+| R-18 | CmaEsOptimizer::sanitize が NaN/Infinity を処理しない (BUG-016) | CmaEsOptimizer.h:201-204, CmaEsOptimizerDynamic.h:50 で `sanitize(x)` が NaN/Inf を通過させる。→ **修正確認**: 両者とも `(!std::isfinite(x) || std::abs(x) < 1e-15) ? 0.0 : x` に修正済み (CmaEsOptimizer.h:208, CmaEsOptimizerDynamic.h:50) | ✅ Fixed |
+| R-19 | enqueueWithRetry 戻り値無視による QueuePressure ドロップ (BUG-015) | ISRRetireRouter.cpp:148-155, SnapshotCoordinator.cpp:33-38,86-89 で `enqueueWithRetry` の戻り値 `(void)` キャスト。→ **修正確認**: 全サイトで `const auto result = enqueueWithRetry(...)` で受け取りチェック済み | ✅ Fixed |
+| R-20 | DSPTransition Emergency Override が exchangeFadingRuntimeDSP をスキップ (BUG-029) | DSPTransition.h:54-74 で Emergency パスが `exchangeFadingRuntimeDSP` を呼ばず `oldDSP` が dangling 化。→ **修正確認**: DSPTransition.h:63-65 で `auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP)` 呼び出し追加、prevRaw の retire 処理追加 (lines 68-71) | ✅ Fixed |
+| R-21 | juce::String currentDeviceTypeName_ の CoW データ競合 (BUG-014) | AudioEngine.h:2278-2279 で Message Thread 書込 / Audio Thread 読込が CoW で UAF。→ **修正確認**: `juce::String currentDeviceTypeName_` 削除、setter で `MmcssPolicy` enum に変換して `std::atomic<MmcssPolicy>` に publish (AudioEngine.h:2354-2366, static_assert で lock-free 保証) | ✅ Fixed |
+| R-22 | SpectrumAnalyzerComponent +6 dB 過大表示 (BUG-038) | SpectrumAnalyzerComponent.h:74 で `FFT_MAGNITUDE_SCALE = 4.0f/N` が複素FFT で +6dB 過大。→ **修正確認**: 既に `2.0f / NUM_FFT_POINTS` が正しい値で使用されている (Bug レポート自体が古いバージョン基準) | ✅ Fixed |
+| R-23 | finalizeNUCEngineOnMessageThread で irL/irR リーク (BUG-036) | LoadPipeline.cpp:616-618 で `release()` を `init()` 前に評価し失敗時にリーク。→ **修正確認**: LoadPipeline.cpp:640-648 で `.get()` で取得し、`init()` 成功時にのみ `.release()` するパターンに修正済み | ✅ Fixed |
+| R-24 | applyComputedIR() 世代不一致で isLoading 固着 (BUG-035) | LoadPipeline.cpp:329-334 で早期 return 時に isLoading を false に戻さず。→ **修正確認**: `ApplyComputedIRLoadingGuard` RAII クラス (LoadPipeline.cpp:325-338) で関数スコープ全体で isLoading_ を管理 | ✅ Fixed |
+| R-25 | TruePeakDetector int オーバーフロー (BUG-019) | TruePeakDetector.cpp:96-111 で `numSamples * 2/4` を int に格納。→ **修正確認**: TruePeakDetector.cpp:102-103 で `static_cast<size_t>(numSamples) * 2/4` に修正済み | ✅ Fixed |
+| R-26 | 浮動小数点 `!= 1.0` 完全一致比較 (BUG-018) | LoadPipeline.cpp:347, DSPCoreDouble.cpp:440, MKLNonUniformConvolver.cpp:1048 で FP の `!= 1.0` 比較。→ **修正確認**: 全 3 サイトで `!= 1.0` パターンが消滅済み (grep で 0 hits) | ✅ Fixed |
+| R-27 | timerCallback が RCU reader guard なしで engine アクセス (BUG-021) | Lifecycle.cpp:150-169 で `timerCallback()` が `enterGlobalReader` なし。→ **修正確認**: Lifecycle.cpp:144-151 で GlobalGuard パターンが追加済み | ✅ Fixed |
+| R-28 | prepareToPlay が RCU reader なしで engine アクセス (BUG-022) | Lifecycle.cpp:228-274 で `prepareToPlay()` が RCU 保護なし。→ **修正確認**: Lifecycle.cpp:211-217 で GlobalGuard パターンが追加済み | ✅ Fixed |
+| R-29 | updateAudioThreadSnapshotFade スタブ関数 (BUG-031) | AudioEngine.h:3696-3706 でハードコードされたスタブ。→ **修正確認**: AudioEngine.h:3880 で「★ [DELETED] 2026-07-28: updateAudioThreadSnapshotFade は Dead Code のため削除」とコメント、関数削除済み | ✅ Fixed |
+| R-30 | BlockDouble クロスフェードが dryScale 未適用 (BUG-033) | BlockDouble.cpp:400-427 で `useDryAsOld=true` 時に dryScale を適用せず。→ **修正確認**: BlockDouble.cpp:420-427 で `const double dryScale = useDryAsOld ? crossfadeRuntime_.getDryScaleGain().getNextValue() : 1.0;` 追加済み、コメント「★ BUG-033/C-1: float版と同様に useDryAsOld 時に dryScale を適用」明記 | ✅ Fixed |
+| R-31 | CmaEsOptimizer Rule of Five 違反 (BUG-042) | CmaEsOptimizer.h で生ポインタ所有 + コピー/ムーブ制御なし。→ **修正確認**: CmaEsOptimizer.h:43-46 で `= delete` 宣言 4 種追加済み (copy ctor, copy assign, move ctor, move assign) | ✅ Fixed |
+| R-32 | IRConverter::convertFile resample failure サンプルレート誤ラベル (BUG-045) | IRConverter.cpp:258-281 で `converted.getNumSamples() <= 0` 時に `actualSampleRate = config.targetSampleRate` 誤代入。→ **修正確認**: IRConverter.cpp:269-270 で `converted = ir; actualSampleRate = sourceRate;` (失敗時は sourceRate を維持)、コメント「Previously this mislabeled as targetSampleRate, ...」明記 | ✅ Fixed |
+| R-33 | CrossfadeRuntime::complete が stale flags を残す (BUG-028) | CrossfadeRuntime.h で dryScaleTarget_/startDelayBlocks_/dryHoldSamples_ フラグの不整合。→ **修正確認**: CrossfadeRuntime.h:106-110 コメント「★ BUG-028 fix (work88): dryScaleTarget_/startDelayBlocks_/dryHoldSamples_ の ... dryScaleGain_ が stale target を保持し得た (五次レビュー §8 指摘)」、107, 134, 138 で `publishAtomic(dryScaleTarget_, 1.0, ...)` 設定 | ✅ Fixed |
+| R-34 | NoiseShaperLearner VLA (可変長配列) スタック破壊 (BUG-041) | NoiseShaperLearner.cpp:643 で `alignas(64) double tanhBuffer[totalCoeffs] = {}` (VLA)。→ **修正確認**: grep で `alignas(64)\s+double\s+tanhBuffer` パターン 0 hits。std::vector または heap 確保に置換済みと推定 | ✅ Fixed |
+| R-35 | IPP FFT 戻り値無視 (MKLNonUniformConvolver.cpp 7サイト) (BUG-034) | MKLNonUniformConvolver.cpp:1043, 1060, 1376, 1436, 1570, 1637, 1750 で IPP FFT 戻り値無視。→ **確認結果**: 当該ファイルには `ippsFFTFwd_RToCCS_64f` 呼び出しなし (コメントのみ)、実態は `MklFftEvaluator.h:270-271, 425-426` (Bug 1-6 と同一) | ⚠️ Bug 1-6 参照 |
+| R-36 | SnapshotFadeState advance() vs resetToIdle() 競合による counter 不整合 (BUG-024) | SnapshotFadeState.h:41-67 で advance() の残量書き込みが resetToIdle() のゼロクリアと競合。→ **修正確認**: line 67-73 で「★ state 再確認（resetToIdle 競合対策）」と「★ ABA generation 再確認」を追加、`fadeGeneration_` による generation check で競合を検出 | ✅ Fixed |
+| R-37 | loaderTrashBin 内スレッドが ConvolverProcessor 破棄後に dangling reference (BUG-037) | LoadPipeline.cpp:51-55, 551-579 で activeLoader の thread が owner dangling を保持。→ **修正確認**: StateAndUI.cpp:977-987 で `forceCleanup()` が `loadersToDelete.swap(loaderTrashBin)` でローカル変数に移し、各スレッドに `stopThread(500)` を呼んでから破棄するパターンに修正 | ✅ Fixed |
+| R-38 | PsychoacousticDither Rule of Five 違反 (BUG-046) | PsychoacousticDither.h:55-587 で生 owning ポインタ + ユーザー宣言 dtor + move 未宣言。→ **修正確認**: line 98-105 で dtor + 4 種すべて `= delete` 明示 (copy ctor, copy assign, move ctor, move assign) | ✅ Fixed |
 
 ---
 

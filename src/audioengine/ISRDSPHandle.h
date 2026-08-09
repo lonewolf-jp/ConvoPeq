@@ -6,6 +6,7 @@
 #include <vector>
 #include <filesystem>
 #include <mutex>  // ★ FUTURE-5 (work88): フリーリスト保護用
+#include "AtomicAccess.h"  // ★ work88 (Phase 3): isRetired の atomic 状態参照用（consumeAtomic）
 
 namespace convo {
 namespace isr {
@@ -147,6 +148,17 @@ public:
 
     // ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
     void quarantineSlot(uint32_t slot) noexcept;
+
+    // ★ work88 (Phase 3): handle が Retired 状態か確認（保留 reclaim の再試行ガード用）。
+    //   quarantineSlot が後から Quarantined に遷移した handle を requestReclaim が
+    //   Retired に上書きしないようにする。Retired のままの場合のみ reclaim 対象とする。
+    [[nodiscard]] bool isRetired(DSPHandle handle) const noexcept
+    {
+        if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS)
+            return false;
+        return convo::consumeAtomic(registry_[handle.slot].state, std::memory_order_acquire)
+            == DSPState::Retired;
+    }
 
     // ★ A-1.5: slot が crossfade に関与しているか確認
     bool isSlotInCrossfade(uint32_t slot) const noexcept;

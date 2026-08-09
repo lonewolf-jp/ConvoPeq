@@ -1542,6 +1542,8 @@ public:
         std::uint64_t retireQueueDepth = 0;
         std::uint64_t fallbackQueueDepth = 0;
         std::uint64_t quarantineResident = 0;
+        std::uint64_t quarantineFallbackDropCount = 0;  // ★ work88: Quarantine intent 全層溢れ drop 数（Critical 昇格の根拠）
+        std::uint64_t recoveryIntentDropCount = 0;  // ★ work88 (六次レビュー): Recovery Intent push 失敗 drop 数（Critical 昇格の根拠）
         std::uint64_t publicationBacklog = 0; // Phase1-B: kept for ABI compat (always 0)
         std::uint64_t rebuildBacklog = 0;
         std::uint64_t saturationEnterCount = 0;
@@ -1614,6 +1616,8 @@ public:
             consumeAtomic(retireQueueDepth_, std::memory_order_acquire),
             consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),
             (consumeAtomic(quarantineResident_, std::memory_order_acquire) + retireQuarantineResident),
+            runtimePublicationBridge_.quarantineFallbackDropCount(),
+            runtimePublicationBridge_.recoveryIntentDropCount(),
             static_cast<std::uint64_t>(0), // publicationBacklog_ removed in Phase1-B
             consumeAtomic(rebuildBacklog_, std::memory_order_acquire),
             consumeAtomic(saturationEnterCount_, std::memory_order_acquire),
@@ -4191,14 +4195,66 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
     runtimeDSPHandleMap_.erase(dsp);
     if (!handle.isNull())
     {
-        dspHandleRuntime_.retire(handle);
         // ★ P0-4B DELETE-1: reclaim は Coordinator 専用。
-        //   現状は transitional 措置として shutdownReclaim() を使用。
-        //   将来 DSPLifetimeManager → Coordinator::requestReclaim() 経由に移行予定。
-        dspHandleRuntime_.shutdownReclaim(handle);
+        //   work88 (Phase 3): shutdownReclaim transitional 措置を撤廃し、
+        //   Coordinator::requestReclaim（retire → waitReaders(epoch 安全確認) → reclaim）
+        //   に一本化。DELETE-2/3 の順序契約（epoch 安全確認後のみ reclaim）を守る。
+        //   DSPCore* の物理削除は呼び出し元（DSPLifetimeManager::retire / retireByHandle）が
+        //   enqueueWithRetry で行う（失敗時は RetireQuarantineStore へ移送済み — 二重移送なし）。
+        //
+        //   requestReclaim は RT Reader が古い epoch を参照中の間、reclaim を遅延する
+        //   （reclaimInFlightCount_ を増やして即時復帰）。単発呼び出しでは再試行されないため、
+        //   epoch 安全でない場合（reclaim が保留された場合）は pendingReclaimHandles_ に登録し、
+        //   drainDeferredRetireQueues で再試行する（slot リーク防止）。
+        //   retire を先に行うことで、遅延中も handle は Retired 状態（resolve() は
+        //   Retired でも instance を返す = RT が参照済みなら安全）となる。
+        dspHandleRuntime_.retire(handle);
+        requestReclaimHandle(handle);
     }
 
     return true;
+}
+
+// ★ work88 (Phase 3): handle の epoch 安全確認付き reclaim（requestReclaim 一本化ヘルパー）。
+//   retireDSPHandleForRuntime と DSPLifetimeManager::retireByHandle（Observe 経路）の両方から
+//   呼ばれる共通ロジック。DELETE-2/3 の順序契約（epoch 安全確認後のみ reclaim）を守る。
+//   - epoch 安全（currentEpoch() < minReaderEpoch()）: requestReclaim が retire → reclaim を即時実行
+//   - epoch 不安全: Retired のまま保留リストへ登録 → drainDeferredRetireQueues で再試行（slot リーク防止）
+//   注意: 呼び出し元は handle を Retired に遷移済みであること（requestReclaim は retire を冪等実行、
+//   保留時は呼び出し元が retire 済みでないと Retired に遷移しないため）。
+//   ★ work88 (六次レビュー — TOCTOU 修正): requestReclaim は内部で epoch 再確認するため、
+//   事前チェック後に epoch が進むと false を返す。false 時は保留リストへ再登録する。
+inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull())
+        return;
+    const auto retireEpoch = m_retireRouter->currentEpoch();
+    const auto minReaderEpoch = m_retireRouter->minReaderEpoch();
+    if (retireEpoch < minReaderEpoch)
+    {
+        // epoch 安全: requestReclaim が retire → waitReaders → reclaim を即時実行する。
+        //   内部再確認で unsafe になった場合は false → 保留リストへ再登録（slot リーク防止）。
+        if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+        {
+            std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+            pendingReclaimHandles_.push_back(handle);
+        }
+    }
+    else
+    {
+        // epoch 不安全: RT が古い epoch を参照中 → 保留し drainDeferredRetireQueues で再試行。
+        std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+        pendingReclaimHandles_.push_back(handle);
+    }
+}
+
+// ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
+//   quarantine 検出時に Recovery buildSource として使う「現在の publish 構成 snapshot」を返す。
+//   QuarantineIntentHandler がこの値を submitRecoveryIntent へ渡す（Recovery = 現在の構成の再 build）。
+[[nodiscard]] inline convo::RuntimeBuildSnapshot getCurrentBuildSnapshotForRecovery() const noexcept
+{
+    std::lock_guard<std::mutex> lock(currentBuildSnapshotMutex_);
+    return currentBuildSnapshot_;
 }
 
 // ★ work88 (FUTURE-10 / Phase 7): RecoveryIntentHandler からの Builder Work Queue enqueue。
@@ -4534,8 +4590,29 @@ public:
     std::atomic<uint64_t> suppressionStartUs_ { 0 };
     std::atomic<bool> retireProtectiveModeActive_ { false };
     std::atomic<std::uint64_t> prevDroppedSnapshot_ { 0 };
+    std::atomic<std::uint64_t> prevQuarantineFallbackDropSnapshot_ { 0 };  // ★ work88: Quarantine fallback drop 監視（前回 snapshot）
+    std::atomic<std::uint64_t> prevRecoveryIntentDropSnapshot_ { 0 };  // ★ work88 (六次レビュー): Recovery Intent drop 監視（前回 snapshot）
     std::atomic<std::uint64_t> retireEscalationCount_ { 0 };
     std::atomic<std::uint64_t> retireProtectiveModeEnterCount_ { 0 };
+
+    // ★ work88 (Phase 3): requestReclaim が epoch 安全でない場合の保留 reclaim handle。
+    //   requestReclaim は RT Reader が古い epoch を参照中の間、reclaim を遅延する。
+    //   この遅延は次ブロックサイクルで解消するが、単発呼び出しでは再試行されないため、
+    //   保留リストに登録し、drainDeferredRetireQueues（定期的に minReaderEpoch が進んだ後に
+    //   実行）で再試行する。これにより slot リークを防ぐ（DELETED-2/3 の epoch 契約は維持）。
+    //   スレッド安全性: retireDSPHandleForRuntime（複数スレッド）と drainDeferredRetireQueues
+    //   （Timer）からアクセスされるため mutex で保護。
+    std::vector<convo::isr::DSPHandle> pendingReclaimHandles_;
+    mutable std::mutex pendingReclaimHandlesMutex_;
+
+    // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
+    //   quarantine 検出時に Recovery を発行するため、現在 publish された構成の snapshot を保持。
+    //   enqueuePublicationIntentForRuntimeCommit が sealedSnapshot を受け取る時点で更新し、
+    //   QuarantineIntentHandler が submitRecoveryIntent(handle, currentBuildSnapshot_) を呼ぶ。
+    //   Recovery semantic = 現在のユーザー構成を再 build + quarantined 除外（計画書:608-610）。
+    //   アクセスは NonRT（publish / quarantine / coordinator）のみ → mutex 保護で十分。
+    convo::RuntimeBuildSnapshot currentBuildSnapshot_{};
+    mutable std::mutex currentBuildSnapshotMutex_;
     std::atomic<std::uint64_t> maxRetireDeferralEpochs_ { 256 };
     std::atomic<double> maxRetireWallClockMs_ { 5000.0 };
     std::atomic<double> reclaimLatency_ { 0.0 };

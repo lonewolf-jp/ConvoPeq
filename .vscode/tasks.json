@@ -372,6 +372,21 @@
 				"clear": true,
 				"showReuseMessage": false
 			}
+		},
+		{
+			"label": "Apply solidlsp bash-LS Patch",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"${workspaceFolder}\\tools\\apply-solidlsp-bash-ls-patch.py",
+				"--check"
+			],
+			"group": "none",
+			"problemMatcher": [],
+			"presentation": {
+				"clear": true,
+				"showReuseMessage": false
+			}
 		}
 	]
 }

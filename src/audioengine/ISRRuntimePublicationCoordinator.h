@@ -126,6 +126,12 @@ public:
     {
         return convo::consumeAtomic(quarantineFallbackDropCount_, std::memory_order_acquire);
     }
+    // ★ work88 (六次レビュー — INV-5): Recovery Intent push 失敗（queue full）時の drop 回数。
+    //   AudioEngine 側 HealthMonitor が監視し ISRHealthState 昇格を駆動する（静かな破棄を禁止）。
+    [[nodiscard]] std::uint64_t recoveryIntentDropCount() const noexcept
+    {
+        return convo::consumeAtomic(recoveryIntentDropCount_, std::memory_order_acquire);
+    }
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
     [[nodiscard]] bool isFullyDrained() const noexcept;
@@ -275,9 +281,15 @@ public:
     /// DELETE-2〜7: Coordinator は epoch 安全確認後、reclaim を実行する。
     /// handleRuntime: DSPHandleRuntime 参照（reclaim 委譲用）
     /// router: ISRRetireRouter 参照（epoch 確認 + enqueueWithRetry 用）
-    void requestReclaim(const DSPHandle& handle,
-                        class DSPHandleRuntime& handleRuntime,
-                        class ISRRetireRouter& router) noexcept;
+    /// 戻り値: true = reclaim 完了（epoch 安全確認済み）。false = Reader がアクティブで
+    ///   遅延（呼出し元は handle を再試行リストへ戻すこと — slot リーク防止）。
+    /// ★ work88 (六次レビュー — TOCTOU 修正): 呼出し元（requestReclaimHandle /
+    ///   drainDeferredRetireQueues）は epoch 事前チェック後に本メソッドを呼ぶが、
+    ///   本メソッド内部でも epoch 再確認するため、事前チェックと内部チェックの間に
+    ///   epoch が進むと false が返る。戻り値で遅延を通知し、呼出し元が再試行登録する。
+    [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
+                                     class DSPHandleRuntime& handleRuntime,
+                                     class ISRRetireRouter& router) noexcept;
 
     /// Observe Intent Queue から蓄積された Intent を処理する。
     /// P0-4A: Timer から submitObserve でキューイングされた Intent を
@@ -403,12 +415,9 @@ private:
     static_assert(std::is_standard_layout_v<ObserveIntent>,
         "ObserveIntent must be standard layout for LockFreeRingBuffer");
 
-    static constexpr size_t kObserveIntentQueueCapacity = 1024;
-    LockFreeRingBuffer<ObserveIntent, kObserveIntentQueueCapacity> observeIntentQueue_;
-
-    // ★ QUEUE-11: Layer 2 (Fallback) — Primary 溢れのセカンダリキュー
-    static constexpr size_t kObserveFallbackCapacity = 2048;
-    LockFreeRingBuffer<ObserveIntent, kObserveFallbackCapacity> observeFallbackQueue_;
+    // ★ work88 (FUTURE-10 / Phase 7): 旧 SPSC 専用リング（observeIntentQueue_/observeFallbackQueue_）は
+    //   削除済み — submitObserve は共通 intentQueue_ (MpscBoundedRing) に push するようになったため、
+    //   push も pop もされないデッドコードだった。overflow 退避先は observeDeferredRing_ のみ（後続）。
 
     std::atomic<uint64_t> nextObserveIntentId_{0};
     // ★ FUTURE-8/QUEUE-13: Overflow カウンタを種別別に分離（Observe / Retire）。
@@ -424,6 +433,9 @@ private:
     static constexpr size_t kRecoveryIntentQueueCapacity = 256;
     LockFreeRingBuffer<RecoveryIntent, kRecoveryIntentQueueCapacity> recoveryIntentQueue_;
     std::atomic<uint64_t> nextRecoveryIntentId_{0};
+    // ★ work88 (六次レビュー — INV-5): Recovery Intent push 失敗（queue full）時の drop 記録。
+    //   getter（recoveryIntentDropCount()）は public セクションに定義。
+    std::atomic<uint64_t> recoveryIntentDropCount_{0};
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。

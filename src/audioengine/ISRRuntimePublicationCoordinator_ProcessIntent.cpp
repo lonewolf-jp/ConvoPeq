@@ -79,10 +79,28 @@ void QuarantineIntentHandler::handle(const Intent& intent, IntentHandlerContext&
     };
     // QSVC-2: executeQuarantine is the sole State+Audit mutation path;
     //   Coordinator (NonRT) drives it — never bypassed from the handler side.
-    ctx.quarantine.executeQuarantine(
+    const auto qResult = ctx.quarantine.executeQuarantine(
         ctx.engine.dspHandleRuntime(),
         ctx.engine.dspQuarantineManager(),
         request);
+
+    // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
+    //   quarantine 実行後に Recovery Intent を発行する（Recovery = quarantined 除外した
+    //   現在の構成の再 build — INV-4 / RECOVERY-SEMANTIC-001。過去 World の rollback ではない）。
+    //   buildSource は現在 publish された構成の snapshot（enqueuePublicationIntentForRuntimeCommit が
+    //   保持する currentBuildSnapshot_）を引当 — quarantined DSP の過去 spec は不要（四次実測:608-610）。
+    //   発行経路: submitRecoveryIntent → submitRecoveryRequest → recoveryIntentQueue_（Builder Work Queue）→
+    //   Builder Loop が popRecoveryRequest で消費（RebuildDispatch.cpp:911）。
+    //   注意: RecoveryIntentHandler（intentQueue_ 経由）は将来の拡張用に残すが、本経路が primary。
+    //   ★ work88 (六次レビュー追記): quarantine が失敗した場合（stateChanged==false、例: 既に隔離済み
+    //   または handle 無効）は Recovery を発行しない。失敗 quarantine に対する Recovery は
+    //   quarantined されていない DSP の無意味な世界再構築を引き起こす（HANDLER-1: 判定は
+    //   QuarantineService が唯一行う — ハンドラは結果を尊重する）。
+    if (qResult.stateChanged && !request.handle.isNull())
+    {
+        const auto buildSource = ctx.engine.getCurrentBuildSnapshotForRecovery();
+        ctx.engine.submitRecoveryIntent(request.handle, buildSource);
+    }
 }
 
 // ★ A3 Step 5-2: PublishIntentHandler — Execution only (HANDLER-1). Calls PublishExecutor
@@ -100,6 +118,11 @@ void PublishIntentHandler::handle(const Intent& intent, IntentHandlerContext& ct
 //   HANDLER-1: Decision/World 書換禁止 — submitRecoveryRequest（push のみ）を呼ぶ。
 //   循環排除: pop 元（intentQueue_）とは異なるキュー（recoveryIntentQueue_）に書くため
 //   Dispatcher のループに再流入しない。
+//   ★ work88 (六次レビュー — ドキュメントと実装の乖離修正):
+//     Recovery 発行の primary 経路は QuarantineIntentHandler が直接 submitRecoveryIntent を呼ぶ
+//     （intentQueue_ を経由しない）。本 Handler は「Recovery Intent を intentQueue_ に push する」
+//     将来の拡張経路に備えた転送ハンドラであり、現状は誰も intentQueue_ に Recovery Intent を
+//     push しないため dead code（二重発行なし）。
 void RecoveryIntentHandler::handle(const Intent& intent, IntentHandlerContext& ctx) const noexcept
 {
     const auto& p = intent.payload.recovery;

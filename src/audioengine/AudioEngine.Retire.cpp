@@ -51,6 +51,50 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     m_coordinator.reclaim(m_retireRouter->getMinReaderEpoch());
     runtimePublicationBridge_.setReclaimInFlightCount(0);
 
+    // ★ work88 (Phase 3): 保留中 reclaim の再試行。
+    //   requestReclaim が RT Reader の古い epoch 参照により遅延した handle を、
+    //   minReaderEpoch が進んだ後に再試行する（slot リーク防止）。
+    //   retireDSPHandleForRuntime が epoch 安全でない場合に pendingReclaimHandles_ へ登録した。
+    {
+        // 登録は複数スレッド（retireDSPHandleForRuntime）から行われるため、まず排他して抽出。
+        std::vector<convo::isr::DSPHandle> pending;
+        {
+            std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+            pending.swap(pendingReclaimHandles_);
+        }
+        for (const auto& handle : pending)
+        {
+            // requestReclaim は retire（冪等）+ epoch 確認 + reclaim を実行。
+            //   epoch がまだ安全でない場合は再び保留される（次の drain で再試行）。
+            //
+            //   ★ work88: quarantineSlot 経路（AudioEngine.Threading.cpp:59）が retire 直後に
+            //   state を Quarantined に遷移するため、保留中の handle が後から隔離された場合、
+            //   requestReclaim の retire() が Quarantined を Retired に上書きしてしまう。
+            //   これを防ぐため、現在の state が Retired のままの場合のみ reclaim する
+            //   （Quarantined/Reclaimed は quarantine lifecycle / 他経路が所有 — 二重管理防止）。
+            if (dspHandleRuntime_.isRetired(handle))
+            {
+                const auto retireEpoch = m_retireRouter->currentEpoch();
+                const auto minReaderEpoch = m_retireRouter->minReaderEpoch();
+                if (retireEpoch < minReaderEpoch)
+                {
+                    // requestReclaim は内部で epoch 再確認する。事前チェック後に epoch が
+                    // 進み unsafe になった場合、false が返る → 保留リストへ再登録（TOCTOU 対策）。
+                    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+                    {
+                        std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+                        pendingReclaimHandles_.push_back(handle);
+                    }
+                }
+                else
+                {
+                    std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+                    pendingReclaimHandles_.push_back(handle);
+                }
+            }
+        }
+    }
+
     const std::uint64_t fallbackDepth = 0;
     const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
 
@@ -127,6 +171,30 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         const uint64_t droppedDelta = (droppedTotal > prevDropped)
             ? (droppedTotal - prevDropped) : 0;
 
+        // ★ work88 (BUG-015/027 配線漏れ解消): Quarantine fallback も full で drop された場合、
+        //   安全要件違反（bad DSP の quarantine 遅延 → RT からアクセス不能な DSP が残存）の
+        //   重大シグナルとして backpressure 昇格へ統合する。
+        //   quarantineFallbackDropCount は Intent Queue + Quarantine 専用 fallback ring の
+        //   両方が full になった場合のみ increment される（ISRRuntimePublicationCoordinator.cpp:717）。
+        //   drop が一度でも発生したら Critical 昇格へ（RuntimeHealthMonitor が
+        //   injectBackpressureSignal 経由で PolicyEngine 評価 → 停止判断）。
+        const uint64_t quarantineFallbackDrop = runtimePublicationBridge_.quarantineFallbackDropCount();
+        const uint64_t prevQDrop = convo::exchangeAtomic(prevQuarantineFallbackDropSnapshot_,
+            quarantineFallbackDrop, std::memory_order_acq_rel);
+        const uint64_t qDropDelta = (quarantineFallbackDrop > prevQDrop)
+            ? (quarantineFallbackDrop - prevQDrop) : 0;
+
+        // ★ work88 (六次レビュー — INV-5): Recovery Intent push 失敗（queue full）の drop 記録。
+        //   recoveryIntentDropCount は recoveryIntentQueue_（Builder Work Queue）が full のときのみ
+        //   increment される（ISRRuntimePublicationCoordinator.cpp — submitRecoveryRequest）。
+        //   Recovery は quarantined DSP の復旧であり、drop されると quarantine されたまま復旧しない
+        //   （安全要件違反と同等）ため、Critical 相当として backpressure 昇格へ統合する。
+        const uint64_t recoveryDrop = runtimePublicationBridge_.recoveryIntentDropCount();
+        const uint64_t prevRecoveryDrop = convo::exchangeAtomic(prevRecoveryIntentDropSnapshot_,
+            recoveryDrop, std::memory_order_acq_rel);
+        const uint64_t recoveryDropDelta = (recoveryDrop > prevRecoveryDrop)
+            ? (recoveryDrop - prevRecoveryDrop) : 0;
+
         // overflowStartTimestamp による継続時間追跡
         const uint64_t overflowStart = worldAuthority_.lifetime().overflowStartTimestamp();
         bool chronicByDuration = false;
@@ -147,8 +215,12 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         const bool chronicByFrequency = (overflowRate > kOverflowRateThreshold);
 
         const bool overflowActive = (droppedDelta > 0);
+        const bool quarantineDropActive = (qDropDelta > 0);  // ★ work88: Quarantine drop は即 Critical 相当
+        const bool recoveryDropActive = (recoveryDropDelta > 0);  // ★ work88 (六次レビュー): Recovery drop も Critical 相当
         const int overflowLevel = (overflowActive || chronicByDuration || chronicByFrequency) ? 3 : 0;
-        const int effectiveLevel = std::max(retirePressureLevel, overflowLevel);
+        // ★ work88: quarantine/recovery drop は安全要件違反のため Critical 扱い（retirePressureLevel と独立）
+        const int effectiveLevel = std::max(retirePressureLevel,
+            (quarantineDropActive || recoveryDropActive) ? 3 : overflowLevel);
 
         // effectiveLevel に基づいてフラグ設定
         convo::publishAtomic(retirePressurePublicationThrottleActive_,

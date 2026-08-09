@@ -570,7 +570,7 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void RuntimePublicationCoordinator::requestReclaim(
+bool RuntimePublicationCoordinator::requestReclaim(
     const DSPHandle& handle,
     DSPHandleRuntime& handleRuntime,
     ISRRetireRouter& router) noexcept
@@ -590,7 +590,10 @@ void RuntimePublicationCoordinator::requestReclaim(
         // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
         // カウンタ更新のみ行い、即座に復帰（NonRT safe）
         setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
-        return;
+        // ★ work88 (六次レビュー — TOCTOU 修正): 呼出し元へ「遅延」を通知。
+        //   呼出し元（requestReclaimHandle / drainDeferredRetireQueues）が handle を
+        //   再試行リストへ戻す（slot リーク防止）。
+        return false;
     }
 
     // 3. executeReclaim(handle) — 安全確認完了
@@ -601,6 +604,7 @@ void RuntimePublicationCoordinator::requestReclaim(
     handleRuntime.reclaim(handle);
     // ACK: reclaim complete — カウンタリセット
     setReclaimInFlightCount(0);
+    return true;
 }
 
 //==============================================================================
@@ -654,8 +658,18 @@ void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quara
         buildSource
     };
 
-    recoveryIntentQueue_.push(intent);   // transport-only enqueue
-    setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止):
+    //   recoveryIntentQueue_ は SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）。
+    //   push 失敗（full = Builder が遅延）は Recovery Intent の drop を意味し、INV-5 違反。
+    //   drop された場合、pendingIntentCount_ を増やさない（pop 時 -1 と整合し、shutdown の
+    //   isFullyDrained が false のままハングするのを防ぐ）。drop は診断カウンタに記録。
+    if (recoveryIntentQueue_.push(intent)) {
+        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
+    } else {
+        // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
+        //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
+        convo::fetchAddAtomic(recoveryIntentDropCount_, uint64_t{1}, std::memory_order_release);
+    }
 }
 
 std::optional<RuntimePublicationCoordinator::RecoveryIntent>

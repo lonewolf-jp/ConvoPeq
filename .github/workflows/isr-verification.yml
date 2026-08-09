@@ -285,7 +285,7 @@ jobs:
             param([string]$Raw, [string]$Name)
             $v = 0
             if (-not [int]::TryParse($Raw, [ref]$v) -or $v -lt 0) {
-              Write-Host "::warning::Invalid value for $Name: '$Raw' — defaulting to 0"
+              Write-Host "::warning::Invalid value for ${Name}: '$Raw' — defaulting to 0"
               return 0
             }
             return $v

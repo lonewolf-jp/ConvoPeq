@@ -98,35 +98,59 @@ public:
     void drain(uint64_t minReaderEpoch,
                const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
     {
-        std::lock_guard<std::mutex> lock(mtx_);
-        std::size_t w = 0;
-        for (std::size_t r = 0; r < size_; ++r) {
-            auto& e = entries_[r];
-            if (e.ptr != nullptr && e.deleter != nullptr
-                && isOlderFn(e.epoch, minReaderEpoch))
-            {
-                e.deleter(e.ptr);  // epoch 安全到達後のみ deleter 実行（EBR 安全削除）
-                e = QuarantinedEntry{};
-            } else {
-                if (w != r)
-                    entries_[w] = e;
-                ++w;
+        // ★ work88 監査指摘: deleter を mutex 保持中に呼ばない（三次レビュー契約）。
+        //   lock 内で safe エントリを抽出 → unlock 後に deleter 実行。
+        //   deleter が再entrant（別の quarantine/retire を呼ぶ）でもデッドロックしない。
+        void* pendingPtrs[kMaxQuarantinedEntries]{};
+        void (*pendingDeleters[kMaxQuarantinedEntries])(void*) = {};
+        std::size_t pendingCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            std::size_t w = 0;
+            for (std::size_t r = 0; r < size_; ++r) {
+                auto& e = entries_[r];
+                if (e.ptr != nullptr && e.deleter != nullptr
+                    && isOlderFn(e.epoch, minReaderEpoch))
+                {
+                    // epoch 安全到達後のみ deleter 対象として抽出（EBR 安全削除）
+                    pendingPtrs[pendingCount] = e.ptr;
+                    pendingDeleters[pendingCount] = e.deleter;
+                    ++pendingCount;
+                    e = QuarantinedEntry{};
+                } else {
+                    if (w != r)
+                        entries_[w] = e;
+                    ++w;
+                }
             }
+            size_ = w;
         }
-        size_ = w;
+        // unlock 後に deleter 実行（reentrancy / deadlock 回避）
+        for (std::size_t i = 0; i < pendingCount; ++i)
+            pendingDeleters[i](pendingPtrs[i]);
     }
 
     // Shutdown 専用: 全強制解放（Audio Thread 停止後 — destroyForShutdown と同契約）
     void drainAllUnsafe() noexcept
     {
-        std::lock_guard<std::mutex> lock(mtx_);
-        for (std::size_t i = 0; i < size_; ++i) {
-            auto& e = entries_[i];
-            if (e.ptr != nullptr && e.deleter != nullptr)
-                e.deleter(e.ptr);
-            e = QuarantinedEntry{};
+        void* pendingPtrs[kMaxQuarantinedEntries]{};
+        void (*pendingDeleters[kMaxQuarantinedEntries])(void*) = {};
+        std::size_t pendingCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            for (std::size_t i = 0; i < size_; ++i) {
+                auto& e = entries_[i];
+                if (e.ptr != nullptr && e.deleter != nullptr) {
+                    pendingPtrs[pendingCount] = e.ptr;
+                    pendingDeleters[pendingCount] = e.deleter;
+                    ++pendingCount;
+                }
+                e = QuarantinedEntry{};
+            }
+            size_ = 0;
         }
-        size_ = 0;
+        for (std::size_t i = 0; i < pendingCount; ++i)
+            pendingDeleters[i](pendingPtrs[i]);
     }
 
     // 滞留件数（backpressure テレメトリ / high watermark 監視用）

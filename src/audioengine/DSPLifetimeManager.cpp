@@ -81,7 +81,13 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
     if (toDelete == nullptr)
         return;
 
+    // ★ work88 (Phase 3): retire → epoch 安全確認 → reclaim を一本化。
+    //   requestReclaimHandle は epoch 安全なら requestReclaim（retire→waitReaders→reclaim）、
+    //   epoch 不安全なら pendingReclaimHandles_ に保留し drainDeferredRetireQueues で再試行する。
+    //   （Observe 経路の handle が Reclaimed にならず slot が枯渇する既存問題を修正 —
+    //    Retired のままの slot は再利用されないため。）
     engine_.dspHandleRuntime_.retire(handle);
+    engine_.requestReclaimHandle(handle);
 
     if (router_ == nullptr)
         return;

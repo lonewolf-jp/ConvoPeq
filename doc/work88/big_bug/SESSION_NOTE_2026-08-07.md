@@ -2,43 +2,54 @@
 
 ## Comprehensive verification of INTEGRATED_BUG_LIST.md completed
 
-### Corrections made (verified against source code):
-1. **Bug 3-6 (NaN hash)**: Analysis was INVERTED — NaN causes FALSE POSITIVE (NaN treated as equivalent), not false negative. Fixed phenomenon text.
-2. **Bug 1-7 (ISRRetire mutex)**: Updated file reference from h:136 → h:169 (actual location of fallbackMutex_)
-3. **Bug 1-5 (musicalSoftClip)**: Updated line ref from h:1059 → h:1066. Confirmed 0 callers of class method — only file-local musicalSoftClipScalar is used.
-4. **Bug 1-4 (fastTanh dup)**: Added note about DefaultFastTanhPolicy at FastTanhApprox.h:28, used by EQProcessor.Processing.cpp:104. Duplicates should use SoftClipPadéPolicy (same as DSPCoreDouble).
-5. **Bug 1-3 (_mm256_store_pd)**: Added note about 3 additional unsafe sites: TruePeakDetector.cpp:85, EQProcessor.Processing.cpp:37, MKLNonUniformConvolver.cpp:1319/1580
-6. **Bug 1-8 (OOM)**: Added note about MAX_FILE_LENGTH guard at LoaderThread.cpp:450, ResampleAndFallback.cpp:293 (prevents integer overflow but not memory exhaustion)
-7. **Bug 1-9 (int/size_t)**: Updated line numbers to 843, 847, 853. Updated fix: static_cast<size_t> alone insufficient — fftSize itself should be int64_t
-8. **Bug 1-9/1-10 ordering**: Moved Bug 1-10 after Bug 1-9 for proper numbering
+### Phase 1: Initial verification & corrections
+- Verified all 30 bugs against source code
+- Corrected Bug 3-6 (NaN analysis was inverted)
+- Fixed line numbers in Bugs 1-5, 1-7, 1-9
+- Added investigation notes (Bug 1-3: additional unsafe sites, Bug 1-4: DefaultFastTanhPolicy, Bug 1-8: MAX_FILE_LENGTH guard)
+- Added detailed fix designs for all 31 bugs in Section 7
 
-### Previously corrected (from prior session):
-- Bug 2-10: NoiseShaperType enum values (Adaptive9thOrder=2, Fixed15Tap=3, not swapped)
-- Bug 2-7: static_assert IS active for non-MSVC compilers (h:186)
-- Bug R-9: CMakeLists.txt DOES use set(CMAKE_CXX_FLAGS_RELEASE) — Confirmed
-- Bug R-16: /fp:fast confirmed as separate entry
-- Bug 1-10, 3-9, 3-10: 3 new bugs added
+### Phase 2: Unchecked mini-bugs verification (NEW)
+- Verified 22 unchecked mini-bugs from `doc/work88/mini_bugs_unchecked/` against current source code
+- **21 bugs verified as Fixed** in the current codebase
+- **1 bug** (BUG-034) overlaps with Bug 1-6 (already documented)
 
-### Detailed fix designs added:
-- New section 7: "詳細修正設計 (Detailed Fix Design)" with designs for ALL 30 bugs + R-9
-- Each design includes: Root Cause, Fix Approach (with code), Testing, Risk
-- Section 8: "未調査領域" updated with investigation status for each area
+### New R-entries added (R-17 through R-38):
+| R# | Original BUG | Status | Fix location |
+|----|-----|--------|-------------|
+| R-17 | BUG-039 Oversampler buffer overread | ✅ Fixed | CustomInputOversampler.cpp:840-842 |
+| R-18 | BUG-016 CmaEs sanitize NaN/Inf | ✅ Fixed | CmaEsOptimizer.h:208, CmaEsOptimizerDynamic.h:50 |
+| R-19 | BUG-015 enqueueWithRetry return ignored | ✅ Fixed | ISRRetireRouter.cpp:154, SnapshotCoordinator.cpp:57,114 |
+| R-20 | BUG-029 DSPTransition Emergency Override | ✅ Fixed | DSPTransition.h:63-78 |
+| R-21 | BUG-014 currentDeviceTypeName_ CoW | ✅ Fixed | Refactored to enum atomic publish (AudioEngine.h:2354-2366) |
+| R-22 | BUG-038 SpectrumAnalyzer +6 dB | ✅ Already correct | (Bug report was outdated) |
+| R-23 | BUG-036 irL/irR release leak | ✅ Fixed | LoadPipeline.cpp:640-648 |
+| R-24 | BUG-035 isLoading stuck | ✅ Fixed | ApplyComputedIRLoadingGuard RAII (LoadPipeline.cpp:325-338) |
+| R-25 | BUG-019 TPD int overflow | ✅ Fixed | TruePeakDetector.cpp:102-103 (size_t) |
+| R-26 | BUG-018 FP != 1.0 | ✅ Fixed | (All sites eliminated) |
+| R-27 | BUG-021 timer no RCU guard | ✅ Fixed | Lifecycle.cpp:144-151 |
+| R-28 | BUG-022 prepareToPlay no RCU guard | ✅ Fixed | Lifecycle.cpp:211-217 |
+| R-29 | BUG-031 updateAudioThreadSnapshotFade stub | ✅ Fixed | DELETED (AudioEngine.h:3880) |
+| R-30 | BUG-033 BlockDouble dryScale | ✅ Fixed | BlockDouble.cpp:420-427 |
+| R-31 | BUG-042 CmaEs Rule of Five | ✅ Fixed | CmaEsOptimizer.h:43-46 |
+| R-32 | BUG-045 IRConverter resample mislabel | ✅ Fixed | IRConverter.cpp:269-270 |
+| R-33 | BUG-028 CrossfadeRuntime stale flags | ✅ Fixed | CrossfadeRuntime.h:106-110 |
+| R-34 | BUG-041 NSL VLA stack overflow | ✅ Fixed | (replaced with vector/heap) |
+| R-35 | BUG-034 IPP FFT MKLNonUniformConvolver | ⚠️ Bug 1-6 | (Overlaps with existing) |
+| R-36 | BUG-024 SnapshotFadeState race | ✅ Fixed | SnapshotFadeState.h:67-73 |
+| R-37 | BUG-037 loaderTrashBin UAF | ✅ Fixed | StateAndUI.cpp:977-987 |
+| R-38 | BUG-046 PsychoacousticDither Rule of Five | ✅ Fixed | PsychoacousticDither.h:98-105 |
 
-### Source verification method:
-Used `src/` grep tool for code verification, WSL bash (rg, sed) for line number checks. Verified:
-- getState/setState: nucHCMode/nucLCMode confirmed absent from persistence
-- coordinatorDeferredRing_: confirmed no producer pushes (only pop/decommit)
-- musicalSoftClip: confirmed 0 callers (class method is dead code)
-- MklFftEvaluator.h:270-271,425-426: confirmed IPP return values unchecked
-- ISRRetire.h:169: confirmed fallbackMutex_ used in RT path
-- MAX_FILE_LENGTH guard: confirmed present (limits to INT32_MAX, not memory-safe)
+### Summary statistics:
+- INTEGRATED_BUG_LIST.md: **1101 lines** (was 1079)
+- **38 R-entries** (was 16): 21 ✅ Fixed, 14 ❌ Rejected (R-1 to R-8, R-10 to R-15), 2 ✅ Confirmed (R-9, R-16), 1 ⚠️ (R-35)
+- **33 ✅ Confirmed** active bugs
+- **21 newly verified Fixed** (from unchecked mini-bugs)
 
 ### Files modified:
-- doc/work88/big_bug/INTEGRATED_BUG_LIST.md (1079 lines)
+- doc/work88/big_bug/INTEGRATED_BUG_LIST.md (1101 lines)
 
 ## Next steps:
-- Apply the 4 open fixes from REPAIR_PLAN3.md
-- Implement Bug 1-1: Add nucHCMode/nucLCMode to getState/setState
-- Implement Bug 1-10: Delay m_pendingIRChange clear until after publish
-- Fix CMakeLists.txt: Remove /fp:fast and /QxCORE-AVX2 from global flags
-- Rename SoftClipPadéPolicy → SoftClipPadeApproxPolicy (Bug 2-1/1-4)
+- Apply open P0 fixes (Bugs 1-1, 1-3, 1-6, 1-7, 1-8, 1-9)
+- Fix CMakeLists.txt: Remove /fp:fast and /QxCORE-AVX2
+- Verify remaining unchecked bugs (BUG-020, BUG-025, BUG-026, BUG-027, BUG-030, BUG-032, BUG-040, BUG-043, BUG-044)

@@ -695,6 +695,16 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     if (newDSP == nullptr)
         return;
 
+    // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
+    //   quarantine 検出時の Recovery buildSource 引当用に、最新の publish 構成 snapshot を保持。
+    //   publish 成功/失敗に関わらず「最新の build 要求」として記録（Recovery semantic =
+    //   現在のユーザー構成を再 build + quarantined 除外。失敗時は Recovery build も失敗し、
+    //   次回 publish 成功で復旧する — 正常動作）。
+    {
+        std::lock_guard<std::mutex> lock(currentBuildSnapshotMutex_);
+        currentBuildSnapshot_ = sealedSnapshot;
+    }
+
     // Phase2: commit 時に DSPHandle を事前登録する
     auto handle = registerDSPHandleForRuntime(newDSP);
 

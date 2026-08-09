@@ -133,7 +133,7 @@ bool testMultiProducerNoLoss()
     for (int p = 0; p < kProducers; ++p)
     {
         producers.emplace_back([&ring, &start, p] {
-            while (!start.load(std::memory_order_acquire)) {}
+            while (!start.load(std::memory_order_acquire)) {} // NOLINT(atomic-dot-call): テスト用 thread-start ゲート（acquire）。ISR publication 領域外の汎用同期のため helper 不使用
             for (int i = 0; i < kPerProducer; ++i)
             {
                 // 連続 push が full で失敗しないこと（容量は十分）
@@ -144,7 +144,7 @@ bool testMultiProducerNoLoss()
         });
     }
 
-    start.store(true, std::memory_order_release);
+    start.store(true, std::memory_order_release); // NOLINT(atomic-dot-call): テスト用 thread-start ゲート（release）。ISR publication 領域外の汎用同期のため helper 不使用
     for (auto& t : producers) t.join();
 
     // Consumer が全エントリを回収
