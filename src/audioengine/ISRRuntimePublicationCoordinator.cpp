@@ -472,7 +472,22 @@ bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const no
         return false;
     }
 
-    return convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
+    // ★ work88 (P2-4 §1.2): transport キュー空判定を追加。
+    //   pendingIntentCount_ == 0 だけでは「Intent が transport に残存するがカウンタ不一致」の
+    //   ケース（カウンタと実体の乖離）を検出できない。以下の 4 キューが空であることを直接確認する:
+    //   - intentQueue_             : Observe/Publish/Quarantine（MPSC, reservation order）
+    //   - observeDeferredRing_     : Observe overflow（SPSC）
+    //   - quarantineFallbackQueue_ : Quarantine fallback（MPSC）
+    //   - recoveryIntentQueue_     : Recovery（Builder Work Queue, SPSC）
+    //   ★ phase-gated: 本判定は「admission closed + producer join」後にのみ authoritative。
+    //     coordinator state が ShuttingDown へ遷移した後（producer が全て閉じた後）に
+    //     isFullyDrained が呼ばれる前提。進行中 producer が居る最中はキューが空でも
+    //     新たな Intent が到着し得るため、単独では drain 完了を保証しない。
+    return coordinator_.intentQueue_.sizeApprox() == 0
+        && coordinator_.observeDeferredRing_.size() == 0
+        && coordinator_.quarantineFallbackQueue_.sizeApprox() == 0
+        && coordinator_.recoveryIntentQueue_.size() == 0
+        && convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
@@ -549,8 +564,14 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     intent.type = RuntimePublicationCoordinator::IntentType::Observe;
     intent.payload.observe = RuntimePublicationCoordinator::ObservePayload{handle, currentEpoch};
     intent.sequenceId = intentId;
+
+    // ★ work88 (P2-1 §1.1.3): reservation-before-push 化。
+    //   push 前に pendingIntentCount_ を fetchAdd（enqueue reservation）。全層 push 失敗
+    //   （drop）時は fetchSub で rollback し、カウンタは不変のまま drop を観測可能にする。
+    //   予約は consumer（processIntent / drainObserveDeferred）の pop 成功時に fetchSub で
+    //   消費される（pop 成功数 == push 成功数 の不変条件が構造的に保証される）。
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (intentQueue_.push(intent)) {
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
@@ -559,14 +580,16 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     observeOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
     ObserveIntent fallbackIntent{ handle, currentEpoch, intentId };
     if (observeDeferredRing_.push(fallbackIntent)) {
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
-    // 全層溢れ（intentQueue_ + deferred ring）→ drop カウンタ。
+    // 全層溢れ（intentQueue_ + deferred ring）→ reservation rollback + drop カウンタ。
     //   Observe は観測情報のため後発 Observe で補完可能（三次レビュー policy 表:
     //   Observe は条件付き drop / coalesce 可）。Publish/Quarantine とは異なり
     //   state transition の喪失ではないため許容。
+    //   reservation を fetchSub で相殺（pendingIntentCount_ は増えない — shutdown の
+    //   isFullyDrained が永久に false になるのを防ぐ）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -647,6 +670,21 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
                                                           const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
+    // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
+    //   requestShutdown()（CoordinatorState::ShuttingDown）確定後は Recovery を enqueue しない。
+    //   CoordinatorLoop::run() の先頭 shutdown check は phase execution と atomic ではなく、
+    //   in-flight runCoordinatorPhase 中に shutdown が発生しても、submit 側のこの gate が
+    //   Recovery admission の最終 linearization point になる（Admission/Notify authority は
+    //   Coordinator、shutdown boundary は Recovery admission が担当 — Authority Singularization）。
+    //   閉鎖後の submit は silent loss ではなく ShutdownDiscard として観測可能に記録する（INV-5）。
+    //   本 gate は reservation（pendingIntentCount_ fetchAdd）より前で評価するため、閉鎖後は
+    //   counter に触れない（counter == actual residency の不変条件を維持 — dash §1.1.6）。
+    if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
+    {
+        convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+        return;
+    }
+
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
@@ -658,18 +696,23 @@ void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quara
         buildSource
     };
 
-    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止):
+    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push):
     //   recoveryIntentQueue_ は SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）。
     //   push 失敗（full = Builder が遅延）は Recovery Intent の drop を意味し、INV-5 違反。
-    //   drop された場合、pendingIntentCount_ を増やさない（pop 時 -1 と整合し、shutdown の
-    //   isFullyDrained が false のままハングするのを防ぐ）。drop は診断カウンタに記録。
+    //   drop は診断カウンタに記録する（INV-5-1: drop 時は pendingIntentCount_ 不変）。
+    //   reservation-before-push: push 前に fetchAdd → push 失敗時は fetchSub で rollback。
+    //   これにより pop 成功時 fetchSub（popRecoveryRequest）と整合し、shutdown の
+    //   isFullyDrained が永久に false になるのを防ぐ。
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
-    } else {
-        // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
-        //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
-        convo::fetchAddAtomic(recoveryIntentDropCount_, uint64_t{1}, std::memory_order_release);
+        return;
     }
+
+    // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
+    //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
+    //   reservation を fetchSub で相消し（pendingIntentCount_ は不変）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
 }
 
 std::optional<RuntimePublicationCoordinator::RecoveryIntent>
@@ -678,13 +721,29 @@ RuntimePublicationCoordinator::popRecoveryRequest() noexcept
     RecoveryIntent intent{};
     if (!recoveryIntentQueue_.pop(intent))
         return std::nullopt;              // transport-only pop: empty は Builder 消費の前提
-    // ★ 監査指摘 (work88): processIntent が pendingIntentCount を 0 にリセットした後に pop が
-    //   減算すると uint64 underflow（巨大値）→ isFullyDrained の pendingIntentCount==0 が false
-    //   になりシャットダウンがハングし得る。0 未満へは減算しないガードを追加。
-    const auto cur = pendingIntentCount_.load(std::memory_order_relaxed);
-    if (cur > 0)
-        setPendingIntentCount(cur - 1);
+    // ★ work88 (P2-1 §1.1.4): cur>0 ガードを削除し、pop 成功時に fetchSub。
+    //   四次レビュー: ガードはカウンタ不整合を silently hide するため危険（underflow を
+    //   隠蔽して isFullyDrained のハングを潜在化させていた）。
+    //   push 側（submitRecoveryRequest）は reservation-before-push で先に fetchAdd するため、
+    //   pop 成功時は必ず対応する reservation が存在し underflow しない（不変条件）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     return intent;
+}
+
+// ★ work88 (P2-4 監査補正 — Step C: shutdown 時の Recovery 明示 discard)。
+//   Builder 停止後に recoveryIntentQueue_ に残留する Recovery を ShutdownDiscard として明示破棄する
+//   （silent loss 禁止 — INV-5）。popRecoveryRequest() が reservation（pendingIntentCount_）を
+//   fetchSub するため counter は整合し、isFullyDrained の queue-empty + counter==0 が正しく成立する。
+//   discard 数は recoveryShutdownDiscardCount_ に記録（queue full による drop とは区別 — §8.1）。
+//   単なる drain-on-exit（pop して捨てるだけ）ではなく、discard を観測可能な lifecycle として
+//   enqueue → pending → shutdown closes admission → discard → pending count release → discard telemetry
+//   を構成する（dash §8.1 ShutdownDiscard）。
+void RuntimePublicationCoordinator::discardRecoveryRequestsOnShutdown() noexcept
+{
+    while (popRecoveryRequest())
+    {
+        convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+    }
 }
 
 void RuntimePublicationCoordinator::submitQuarantine(
@@ -709,9 +768,13 @@ void RuntimePublicationCoordinator::submitQuarantine(
     intent.payload.quarantine = RuntimePublicationCoordinator::QuarantinePayload{handle, reason, contextEpoch};
     intent.sequenceId = seqId;
 
+    // ★ work88 (P2-1 §1.1.3): pendingIntentCount_ のみ reservation-before-push 化。
+    //   quarantineResidentCount_ は本改修の対象外（P3 で分離 — 別カウンタとして独立管理）。
+    //   push 前に pendingIntentCount_ を fetchAdd。全段 push 失敗時は fetchSub で rollback
+    //   （quarantineResidentCount_ は不変のまま drop カウンタのみ記録）。
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (intentQueue_.push(intent)) {
         setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
@@ -721,14 +784,15 @@ void RuntimePublicationCoordinator::submitQuarantine(
     //   intentQueue_ full 時は Quarantine 専用 fallback ring へ退避（drop しない）。
     if (quarantineFallbackQueue_.push(intent)) {
         setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
     // fallback も full → 絶対に静かに破棄しない。drop カウンタを増やして診断に残す。
     //   （AudioEngine 側の HealthMonitor が quarantineFallbackDropCount を監視し、
     //    ISRHealthState::Critical 昇格 / controlled shutdown を駆動する。）
-    convo::fetchAddAtomic(quarantineFallbackDropCount_, uint64_t{1}, std::memory_order_release);
+    //   reservation を fetchSub で相殺（pendingIntentCount_ は不変）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(quarantineFallbackDropCount_, std::uint64_t{1}, std::memory_order_release);
 }
 
 } // namespace convo::isr

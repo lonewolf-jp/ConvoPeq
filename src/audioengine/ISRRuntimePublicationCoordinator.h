@@ -132,6 +132,14 @@ public:
     {
         return convo::consumeAtomic(recoveryIntentDropCount_, std::memory_order_acquire);
     }
+    // ★ work88 (P2-4 監査補正 — Step B/C): shutdown 時（AdmissionClosed）に Recovery を
+    //   意図的に破棄した回数（ShutdownDiscard）。queue full による drop（recoveryIntentDropCount）
+    //   とは区別する — dash §8.1 の X1 telemetry 分離方針（Recovery lost ≠ ShutdownDiscard）。
+    //   正常 shutdown 動作のため Critical 昇格対象外（getter 公開で観測可能に留める）。
+    [[nodiscard]] std::uint64_t recoveryShutdownDiscardCount() const noexcept
+    {
+        return convo::consumeAtomic(recoveryShutdownDiscardCount_, std::memory_order_acquire);
+    }
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
     [[nodiscard]] bool isFullyDrained() const noexcept;
@@ -196,8 +204,13 @@ public:
      /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。
     [[nodiscard]] std::optional<RecoveryIntent> popRecoveryRequest() noexcept;
 
-    // ── ★ FUTURE-10: 共通 Intent 型（種別別 Queue → 単一 intentQueue_） ──
-    //   QUEUE-21: tagged-union variant。std::variant は trivially copyable 非保証のため不可。
+    // ★ work88 (P2-4 監査補正 — Step C): shutdown 時（Builder 停止後）に recoveryIntentQueue_
+    //   の残留 Recovery を ShutdownDiscard として明示破棄する。popRecoveryRequest() が
+    //   pendingIntentCount_ を fetchSub するため counter は整合し、P2-4 の queue-empty
+    //   判定（isFullyDrained）を正しく成立させる（queue observation を維持したまま残留を解消）。
+    //   呼び出し元: stopRebuildThread()（Builder join 後）。Producer（CoordinatorLoop）は
+    //   shutdownCoordinatorLoop() で join 済みのため決定的。
+    void discardRecoveryRequestsOnShutdown() noexcept;
     enum class IntentType : std::uint8_t {
         Observe,
         Publish,
@@ -381,6 +394,17 @@ private:
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
+    // ★ work88 (P2-1 §1.1.1): pendingIntentCount_ は「Intent transport residency + producer
+    //   enqueue reservation」を追跡する。
+    //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）
+    //   - 非対象: Publish と RetireIntent（混入禁止 — P2-1 §1.1.5）。Publish は
+    //     enqueuePublicationIntent が reservation を取らない。RetireIntent は
+    //     retireBacklogCount_（setRetireBacklogCount）が担当する。
+    //   - 増分: producer 側 enqueue 成功時（reservation-before-push で push 前に fetchAdd）
+    //   - 減分: consumer 側 pop 成功時（processIntent / drainObserveDeferred /
+    //     popRecoveryRequest で fetchSub）
+    //   - 絶対値上書き（setPendingIntentCount）は本カウンタに対して禁止。AudioEngine.Commit /
+    //     Threading からの RetireIntent 混入を排除するため。
     std::atomic<std::uint64_t> pendingIntentCount_;
     std::atomic<std::uint64_t> fallbackBacklogCount_;
     std::atomic<std::uint64_t> reclaimInFlightCount_;
@@ -436,6 +460,9 @@ private:
     // ★ work88 (六次レビュー — INV-5): Recovery Intent push 失敗（queue full）時の drop 記録。
     //   getter（recoveryIntentDropCount()）は public セクションに定義。
     std::atomic<uint64_t> recoveryIntentDropCount_{0};
+    // ★ work88 (P2-4 監査補正 — Step B/C): shutdown 時（AdmissionClosed）に Recovery を
+    //   意図的に破棄した回数（ShutdownDiscard）。drop（queue full）とは区別 — dash §8.1。
+    std::atomic<uint64_t> recoveryShutdownDiscardCount_{0};
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。

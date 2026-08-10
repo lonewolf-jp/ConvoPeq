@@ -208,6 +208,38 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # JuceHeader.h の生成を ISRSemanticValidationTests より先に行う
     add_dependencies(ISRSemanticValidationTests ConvoPeq)
 
+    # ★ work88 (P2-2): INV-3 / INV-5 不変条件テスト（RuntimePublicationCoordinator 直接使用）
+    #   ISRSemanticValidationTests と同一パターンで ISR*.cpp を同一ターゲットに同梱する。
+    add_executable(invariant_INV3_INV5Tests
+        src/tests/invariant_INV3_INV5.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp     # ★ A2: EpochControl (ctor referenced via LifetimeState)
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(invariant_INV3_INV5Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(invariant_INV3_INV5Tests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(invariant_INV3_INV5Tests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    # JuceHeader.h の生成を invariant_INV3_INV5Tests より先に行う
+    add_dependencies(invariant_INV3_INV5Tests ConvoPeq)
+
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
     )
@@ -322,6 +354,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(MpscBoundedRingTests
         src/tests/MpscBoundedRingTests.cpp
     )
+    # ★ work88 (P2-3): producer-hole 再現テスト（CONVO_TESTING フック）を有効化。
+    #   本番ターゲットには定義しない（ヘッダのフックは CONVO_TESTING 時のみコンパイルされる）。
+    target_compile_definitions(MpscBoundedRingTests PRIVATE CONVO_TESTING=1)
     add_test(NAME MpscBoundedRingTests
         COMMAND MpscBoundedRingTests)
 
@@ -409,6 +444,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(CONVOPEQ_HAS_MKL AND MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(ISRSemanticValidationTests PRIVATE MKL::MKL)
+        target_link_libraries(invariant_INV3_INV5Tests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
         # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackend.cpp が AlignedAllocation.h
         #   (mkl_malloc/mkl_free) を使用するため MKL::MKL をリンク（include も propagate される）
@@ -424,9 +460,11 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         #   ConvoPeq の PRIVATE 정의は 테스트 타깃에 상속되지 않으므로、
         #   여기서 직접 정의 + MKLROOT/include를 명시적으로 추가して mkl.h 解決을 보장する。
         target_compile_definitions(ISRSemanticValidationTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_compile_definitions(invariant_INV3_INV5Tests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
         target_compile_definitions(ISRSoakTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
         target_compile_definitions(PublicationAdmissionTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
         target_include_directories(ISRSemanticValidationTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+        target_include_directories(invariant_INV3_INV5Tests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
         target_include_directories(ISRSoakTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
         target_include_directories(PublicationAdmissionTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
@@ -434,6 +472,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
+    target_compile_features(invariant_INV3_INV5Tests PRIVATE cxx_std_20)
     target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
     target_compile_features(NormalRetireDSPHandleCompareTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
@@ -571,6 +610,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ISRRuntimeIdentityGenerators COMMAND ISRRuntimeIdentityTests)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
+    add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
@@ -592,6 +632,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
+        target_compile_options(invariant_INV3_INV5Tests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
         target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
         target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
@@ -610,7 +651,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # テストターゲットに Windows プラットフォーム定義を追加（Debug ビルドでも標準ヘッダーが正しく include されるよう確保）
     if(WIN32)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
-                     ISRSemanticValidationTests RetireGraceSemanticsTests
+                     ISRSemanticValidationTests invariant_INV3_INV5Tests
+                     RetireGraceSemanticsTests
                      NormalRetireDSPHandleCompareTests
                      RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
                      OverlapAuthoritySingularTests ShadowCompareContractTests
@@ -630,6 +672,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(ISRRuntimeIdentityTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -649,6 +692,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
     target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
     target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+    target_compile_options(invariant_INV3_INV5Tests PRIVATE /EHsc)
     # ISRSemanticValidationTests は juce_core.cpp をコンパイルするため、
     # コマンドライン NOMINMAX=1 と JUCE の #define NOMINMAX（空）の衝突警告を抑制する。
     # （ConvoPeq 本体と同様の対応。CMakeLists.txt 参照）

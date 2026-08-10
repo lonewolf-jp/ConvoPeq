@@ -1,7 +1,7 @@
 # ConvoPeq 統合バグリスト (改訂版)
 
 **作成日**: 2026-07-30
-**最終更新**: 2026-08-07 (unchecked mini-bugs 22件検証 → 21件 Fixed/Confirmed、1件は Bug 1-6 と重複。新規 R-17〜R-38 追加)
+**最終更新**: 2026-08-09 (unchecked mini-bugs 22件検証 → 21件 Fixed/Confirmed、1件は Bug 1-6 と重複。新規 R-17〜R-38 追加。§9-15〜§9-32 で二〜十六次レビュー反映: P2-1〜P2-4 GO・X5 GO・X1/X2/X3/X6 条件付き GO・X4 NO-GO。X1-X6 新設 counter の宣言位置を確定)
 **対象**: ConvoPeq (Windows 11 x64, AVX2, MSVC/icx, JUCE 8.0.12, MKL/IPP)
 **調査元**: `bug_meta_ai.md`, `bug_qwen.md`, `ConvoPeq_Part8_findings_2026-07-23.md`, `ConvoPeq_バグレポート_2026-07-30.md`, `REPAIR_PLAN3.md`
 **検証方法**: ソースコード grep / AiDex インデックス検索 / 実ファイル閲覧 / cppcheck ログ照合
@@ -1099,3 +1099,831 @@ void LifetimeState::emitRetireIntentRT(const RetireIntent& intent) noexcept {
 | `SnapshotCoordinator.h` | **調査済み**: REPAIR_PLAN3.md BUG-015 (SafeStateSwapper パターン) |
 | `SRSnapshotFadeState.h` | **調査済み**: REPAIR_PLAN3.md BUG-024 |
 | `ObservedRuntime.h` | **調査済み**: REPAIR_PLAN3.md BUG-026 |
+
+---
+
+## 9. 六次レビュー追加（2026-08-09）— REPAIR_PLAN2-dash の残課題反映
+
+### 9-1. 🔴 `submitRecoveryRequest` push 失敗の INV-5 違反 — ✅ 修正済み
+
+**ファイル**: `src/audioengine/ISRRuntimePublicationCoordinator.cpp:643-669`
+**状態**: ✅ 修正済み（2026-08-08）
+**詳細**: `recoveryIntentQueue_`（SPSC, 256）が full のとき push 失敗を無視 → Recovery drop + `pendingIntentCount_` 不整合（shutdown ハング）。push 戻り値チェック + `recoveryIntentDropCount_` 記録 + backpressure 統合で修正。**詳細改修設計は REPAIR_PLAN2-dash.md に反映済み（修正済みのため dash からは削除済み）**。
+
+### 9-2. 🟡 per-type admission policy の統一機構未実装 — **P3 に降格（レビュー指摘）**
+
+**ファイル**: `ISRRuntimePublicationCoordinator.h` / `.cpp`（`submitObserve` / `submitQuarantine` / `submitRecoveryRequest` / `enqueuePublicationIntent`）
+**状態**: ⚠️ 機能的には計画書を満たすが統一機構なし → **P3 アーキテクチャ整理（バグではない）**
+**詳細改修設計**: REPAIR_PLAN2-dash.md 1.1 — `IntentAdmissionPolicy` ヘルパー導入。**★ レビュー指摘（2026-08-09）**: 「統一」は表層的（`actionFor` は決定のみ共通化。副作用 = ownerChannel 回収 / Critical 昇格 / drop カウンタは type 固有のまま）。既存バグを修正しないため **P2 対象外**。
+**★ 実装照合の注意**: `Recovery` の overflow は `recoveryIntentQueue_` に **fallback ring がない**ため `DropWithCounter`（drop カウンタ + Critical 昇格）が正しい。`FallbackRing` は `Quarantine` のみ。
+**対応 Phase**: P3（Phase 5）。
+
+### 9-3. 🟡 MpscBoundedRing producer hole と cross-type FIFO — **PopStatus 案は撤回 + test seam 必要（二次レビュー）**
+
+**ファイル**: `src/MpscBoundedRing.h` / `ISRRuntimePublicationCoordinator_ProcessIntent.cpp`
+**状態**: ⚠️ 許容範囲（遅延 1ms 未満）。**★ 一次レビュー（2026-08-09）**: Empty と producer hole は **sequence protocol では区別不能**（`sequences_[i]=i` 初期値と、producer が CAS 予約後未 publication の状態で `diff` が同一値になる）。`PopStatus` の導入は**設計不成立**のため**撤回**。
+**详细改修設計**: REPAIR_PLAN2-dash.md 1.2 — **`PopStatus` を追加せず、現行 `bool pop()` 契約（false = empty または unpublished reservation）を明文化**。cross-type FIFO は「FIFO-preserving backpressure / head-of-line blocking」（順序逆転なし）。
+**🔴 二次レビュー（2026-08-09）— test seam 必須**: 現行 `push()` は CAS → payload → publication を**一つの呼び出しに内包**しているため、「CAS 成功後・publication 前に別スレッドを停止する」テストポイントが公開 API にない。テスト実装には **CONVO_TESTING フック**（`#ifdef CONVO_TESTING` で有効化、本番ビルドでは消滅）が必要。テスト4本: ①予約→遅延→pop false→publish→pop true ②A 予約・B 先 publish で B を消費しない ③空キュー連続 pop false ④payload publication ordering（memory-order invariant）。
+**対応 Phase**: Phase 6（テスト追加 + CONVO_TESTING フックのみ・本番コード変更なし）。
+
+### 9-4. 🔴 setPendingIntentCount(0) と pendingIntentCount_ の線形化点 — **二次レビューで全面再設計**
+
+**ファイル**: `ISRRuntimePublicationCoordinator_ProcessIntent.cpp:43` / `AudioEngine.Threading.cpp:117` / `ReleaseResources.cpp`
+**状態**: ⚠️ 既存設計の問題
+**详细改修設計**: REPAIR_PLAN2-dash.md 1.3 — **二次レビュー最重要指摘**:
+- **`fetch_add after push` は underflow する**: 「push 成功 → fetch_add が pop より先」という保証がない（queue の publication と counter の RMW は別同期変数）。`P: push → C: pop → C: fetch_sub → P: fetch_add` の順序で count が UINT64_MAX へ underflow する
+- **正しい設計 = residency reservation → push → failure rollback**: `fetch_add(1)` を push **前**に置き、push 失敗時のみ `fetch_sub(1)` で rollback。fallback 経路（observeDeferredRing_ / quarantineFallbackQueue_）成功時は reservation を維持
+- **意味論を確定**: `pendingIntentCount_` = **Observe + Quarantine + Recovery の residency**（Publish は含まない — `publicationBacklogCount_` 側）。`enqueuePublicationIntent`（ISRRuntimePublicationCoordinator.h:273-278）は pendingIntentCount_ を更新しない
+- **🔴 現行矛盾を解消**: `AudioEngine::isFullyDrained()`（Threading.cpp:117）は `setPendingIntentCount(hasDeferredCommit ? 1u : 0u)` で **Publish の deferred commit を pendingIntentCount_ に混入**している。この上書きを廃止
+- `isFullyDrained` は **queue emptiness を source of truth**（admission closed 後に限定）。`fetch_sub` は skip（epoch-FIFO）も減算対象に含める（9-14 参照）
+- ISR/RT: `static_assert(std::atomic<uint64_t>::is_always_lock_free)` + cache-line bouncing 注意（診断 counter として扱い RT 主要制御変数にしない）
+**対応 Phase**: Phase 6。
+
+### 9-5. 🟡 Recovery の coalesce（マージ）が未実装 — **P3 に降格（レビュー指摘）**
+
+**ファイル**: `ISRRuntimePublicationCoordinator.cpp`（`submitRecoveryRequest`）
+**状態**: ⚠️ 計画書:860 との乖離 → **P3 最適化（drop セマンティクス確立後）**
+**详细改修設計**: REPAIR_PLAN2-dash.md 1.4 — `lastRecoveryHandle_` tracking による coalesce（`LockFreeRingBuffer` に走査 API を追加せず、最新1件 tracking で**連続する同一 handle** をマージ）。**★ レビュー指摘（2026-08-09）**: tracking 方式は A→B→A の再登場をマージしない（「保留中 Recovery を1件に」の計画書要件を満たさない）。coalesce セマンティクス（世代・buildSource の採用ルール）未確定。**重複 push 自体は正しい動作（FIFO・drop 禁止遵守）でバグではない**ため P2 から降格。
+**対応 Phase**: P3（Phase 5）。
+
+### 9-6. 🟡 テストカバレッジ欠落（INV-3/INV-5）— **レビュー承認（実装可）**
+
+**ファイル**: `src/tests/invariant_INV3_INV5.cpp`（新規）/ `CMakeLists.txt`
+**状態**: ⚠️ `invariant_*.cpp` 形式のテスト未存在 → **レビュー承認**
+**詳細改修設計**: REPAIR_PLAN2-dash.md 1.5 — retire 順序 / pendingReclaim 再試行 / Recovery 発行 / recoveryIntentDropCount の回帰テスト。**★ 一次レビュー（2026-08-09）**: ABA / state-ownership テスト（Quarantined → requestReclaim が Retired に上書きしない、isRetired ガード）を明記。既存 INV-3-1 に含む。
+**🔴 二次レビュー（2026-08-09）— INV-5 を「silent loss 禁止」に再定義**: 現行コードは「★ INV-5: Recovery drop 禁止」（:661）とコメントしながら full 時に `recoveryIntentDropCount_++` + telemetry する semantic mismatch。INV-5 = **Recovery request loss must never be silent**（Normal: enqueue success → Builder consumes / Saturation: enqueue failure → recoveryIntentDropCount++ + Critical health / Forbidden: no telemetry・pendingIntentCount++・false success）。真に drop 絶対禁止なら bounded 256 SPSC ring 自体の再設計が必要（単なる P2 修正ではない）。
+**対応 Phase**: Phase 6。
+
+### 9-7. 🟡 shutdown 時の pendingReclaimHandles_ エッジケース — **force reclaim 案は撤回（レビュー指摘）**
+
+**ファイル**: `AudioEngine.CtorDtor.cpp:185-224`
+**状態**: ⚠️ 異常系のみ（stuck Reader 時）
+**详细改修設計**: REPAIR_PLAN2-dash.md 1.6 — **force reclaim を実装しない**。**★ 一次レビュー（2026-08-09）**: `activeReaderCount()==0` ≠ 当該 handle の reclaim 安全性（EBR 判定は `retireEpoch < minReaderEpoch`）。旧案の `pendingReclaimHandles_.clear()` 無条件実行は requestReclaim false 時に **handle loss（leak）** になる。stuck reader は強制削除ではなく **reclaim 失敗として Faulted で可視化**。正常 reclaim パイプライン（reader 停止 → epoch settle → 再試行）を最後まで通す。
+**🔴 二次レビュー（2026-08-09）— Faulted ≠ memory safety 保証**: Faulted は「正常 shutdown invariant を満たせなかった」という診断状態であり、メモリ安全性の保証ではない。テストでは **Faulted 遷移 + pendingReclaimHandles_ を無条件 clear しない + 未 reclaim handle を再利用可能状態に戻さない**まで確認する。
+**対応 Phase**: Phase 6（テスト固定のみ・コード変更なし）。
+
+### 9-8. 🟡 2つの ShutdownPhase enum の非1:1対応 — **レビュー承認（実装可）**
+
+**ファイル**: `AudioEngine.h:2521`（AudioEngine::ShutdownPhase, int）と `ISRShutdown.h:25`（convo::isr::ShutdownPhase, uint8_t）
+**状態**: ⚠️ 既存問題。**★ 実装照合: 非1:1** — `StopWorkers` が isr の3フェーズ（ObserverDrained → RetireClosed → EpochSettled）を駆動。`StopAudio` は isr を直接遷移させない。
+**详细改修設計**: REPAIR_PLAN2-dash.md 2.1 — 遷移シーケンス（順序）を invariant テストで固定（`switch` 網羅では検出不可）。
+**対応 Phase**: Phase 6。
+
+### 9-9. 🟡 BlockDouble の finalizeCrossfadeMixPath(..., false) で dryScaleGain_ 未リセット — **レビュー承認（対象外）**
+
+**ファイル**: `AudioEngine.Processing.BlockDouble.cpp:434`（false）/ `AudioBlock.cpp:458`（true）
+**状态**: ⚠️ 事前存在の差異（work88 対象外）
+**详细改修設計**: REPAIR_PLAN2-dash.md 2.4 — Phase 6（soak）で BUG-028 の RT-only ownership 契約との整合確認。
+**対応 Phase**: Phase 6。
+
+### 9-10. 🟡 PublishReceiptWaiter の high-water mark（厳密な per-seqId FIFO ではない）— **レビュー承認（現状維持）**
+
+**ファイル**: `AudioEngine.h:3607`
+**状態**: ⚠️ 設計上許容（SPSC 前提）
+**详细改修設計**: REPAIR_PLAN2-dash.md 2.2 — MPSC 化（Phase 5）後に per-seqId FIFO へ拡張。
+**対応 Phase**: Phase 5（MPSC 化時）。
+
+### 9-11. 🟡 bootstrap publishWorld 失敗の ignoreUnused — **レビュー承認（診断のみ）**
+
+**ファイル**: `AudioEngine.Init.cpp:55`
+**状态**: ⚠️ 軽微なロバストネス事項
+**详细改修設計**: REPAIR_PLAN2-dash.md 2.5 — `jassert` 追加（Debug のみ）。
+**対応 Phase**: Phase 9。
+
+### 9-12. 残余リスク（R1/R4/R5/R6）
+
+- **R1**: `recoveryIntentQueue_` は SPSC（:434）。将来 Timer 等から直接呼ぶ場合は MPSC 化が必要（Phase 5 将来拡張）
+- **R4**: retire 順序逆転は quarantine fallback で UAF/リーク排除。runtime 経路は `requestReclaimHandle` 化済み。`shutdownReclaim` の全廃（大規模リファクタ）は保留
+- **R5**: bootstrap ignoreUnused null world リスク — 軽微
+- **R6**: BlockDouble finalizeCrossfadeMixPath(false) — Phase 6 確認
+- **（解決済みで dash から削除）**: R2（observe デッドメンバ削除済み）、R3（Recovery 経路接続済み）
+
+### 9-13. 🟡 ビルド環境メモ（2026-08-09）
+
+- **`build-icx-old-broken` ディレクトリ（後始末待ち）**: `build-icx` ディレクトリが WSL/Windows FS 競合で破損（`.obj` がアクセス拒否で削除不能）したため、`build-icx-old-broken` にリネームした。**後始末**: 管理者権限で `icacls` / `takeown` 後に削除するか、OS 再起動後に削除を試行する。新しい `build-icx` は正常にビルド成功（ConvoPeq.exe 48.5MB / AudioEngineHarness.exe 12.6MB / テスト群）。
+- **`AudioEngine.Processing.AudioBlock.cpp` の一時 FAILED**: フルクリーン後の初回ビルド（build-warn3.log:299/407）で一時的に FAILED したが、リトライで成功。git 上未変更（recent fixes と無関係）で、原因はビルドディレクトリ破損（WSL/Windows FS 競合）と判断。**対応**: 次回クリーンビルドで再現しないことを確認（Phase 1 完了条件の一部）。
+- **`build-warn.log` / `build-warn2.log` / `build-warn3.log` / `build-verbose.log` / `run-icx-warn*.bat` / `run-icx-warn*.ps1` / `icx-cmd*.txt`**: ビルド検証中に生成した一時ファイル。**後始末**: 確認後に削除推奨（`doc/work88/big_bug/` 以外のルートに残存）。
+
+### 9-14. 🟡 REPAIR_PLAN2-dash.md 妥当性検証で確定した事項（2026-08-09 追加）
+
+**検証方法**: REPAIR_PLAN2-dash.md の各改修設計を実コード照合（MpscBoundedRing.h / ISRRuntimePublicationCoordinator.cpp / ProcessIntent.cpp / ISRDSPHandle.h / ReleaseResources.cpp）で検証。
+
+- **🔴🔴 MpscBoundedRing の `diff` 符号解釈 — 旧確定は誤り（2026-08-09 レビューで撤回）**: 旧記述は「`diff < 0` = producer hole、`diff > 0` = empty」と確定していたが**誤り**。**Empty と producer hole は `diff` が同一値になり区別不能**（初期状態 `sequences_[i]=i` と、producer が CAS 予約後未 publication の状態は同じ観測値）。例: `dequeuePos=0, sequences_[0]=0` のとき、空キューでも producer hole でも `diff = 0 - 1 = -1`。**→ `PopStatus` 導入は設計不成立（9-3 参照）**。push 側の `diff = seq - pos`（Full 判定）と pop 側の `diff = seq - (pos+1)` のオフセット違いは正しいが、pop 側の符号だけで Empty/hole を判別するのは不可。
+- **🟡 Observe の2経路 pop と epoch-FIFO skip**: `submitObserve` は `intentQueue_` と `observeDeferredRing_` の両方で `pendingIntentCount + 1`。`ObserveIntentHandler`（ProcessIntent.cpp:65）と `drainObserveDeferred`（:52）は epoch-FIFO skip 時に intent を pop 済みとして扱う。**`fetch_sub` 方式（dash §1.1）では skip も減算対象に含める必要がある**。
+- **🔴🔴 pendingIntentCount_ は3系統が混在（2026-08-09 実コード調査で確定）**: `pendingIntentCount_` への書き込み元は5箇所あり、**3つの異なる意味論**が競合している: ①intent 系 residency（submitObserve:553,562 / submitQuarantine:714,724 / submitRecoveryRequest:667 の `load()+1`、popRecoveryRequest:686 の `load()-1`、processIntent:43 の `0`）②**Publish 系**（isFullyDrained Threading.cpp:117 の `hasDeferredCommit ? 1 : 0`）③**RetireIntent 系**（Commit.cpp:462,604 の `lifetime().pendingIntentCount()` — retireBacklogCount_ と同値）。特に Commit.cpp の RetireIntent 混入は二次レビューで未指摘の新発見。**本改修で ②③ の混入を廃止し、①に一本化**。加えて Coordinator 側 `quarantineResidentCount_`（:713,723 +1）は pop 側減算が存在せず isFullyDrained の実測値上書き（Threading.cpp:131）に依存 — **Quarantine pop 時に -1 を追加**（RetireRuntimeEx 側 EpochControl::quarantineResidentCount_ とは別系統。こちらは Epoch ドメインの物理滞留数で reclaim 時 fetch_sub）。
+- **🔴🔴🔴 isFullyDrained は全カウンタを実測値に上書き（2026-08-09 三次レビューで確定）**: `AudioEngine::isFullyDrained()`（Threading.cpp:114-136）は pendingIntentCount だけでなく **publicationBacklog / fallbackBacklog / retireBacklog / deferredRetire / quarantineResident の全カウンタを「その瞬間の実測値」で上書き**してから `runtimePublicationBridge_.isFullyDrained()` を呼ぶ。`retireBacklogCount_` も enqueueRetire（:136-160）で load→store 非RMW。**カウンタの増減は isFullyDrained 呼び出し時に消去される**。→ **三次レビュー設計判断**: 混入廃止（Publish/RetireIntent）と hard reset 廃止のみを本改修で実施。isFullyDrained の他の実測上書きは「drain 判定の正しさ」を担保している面があり現状維持 + queue emptiness で補強（実測上書きの全廃は別タスク）（dash §1.1/§1.2 に反映）。
+- **🔴🔴🔴 全 producer は NonRT（2026-08-09 三次レビューで確定）**: submitObserve（DSPTransition.h:156 / AudioEngine.Timer.cpp:896,1029,1568）、submitQuarantine（Timer.cpp:1788,1826）、submitRecoveryRequest（AudioEngine.h:4277）、enqueuePublicationIntent（AudioEngine.h:4413）— **全て Timer/Transition/Commit（NonRT）**。CoordinatorLoop 周期 = 1ms（kIntervalMs=1, ISRCoordinatorLoop.h:32）。**二次レビューの「RT producer が high-frequency fetch_add で cache-line bouncing」懸念は現状の実コードでは成立しない**（将来の RT enqueue 設計のみ注意）（dash §1.1 に反映）。
+- **🟡 force reclaim の既存フォールバック**: `~AudioEngine`（CtorDtor.cpp:194-221）は既に **Graceful Drain ポーリング（最大 5000ms, publishEpoch + tryReclaim）** を実装。**「force しない正常 reclaim 促進」は既にコードで実践済み**（dash A-2.2 に反映）。
+- **🟡 Recovery coalesce は SPSC 単一 Producer 前提**: `submitRecoveryRequest` は CoordinatorLoop 単一スレッドからのみ呼ばれるため、`lastRecoveryHandle_` は plain メンバで十分（`std::atomic` 不要、MPSC 化（R1）時に atomic + CAS へ変更）。`DSPHandle::operator==`（slot + generation）で coalesce 判定。**ただし 9-5 のとおり P3 に降格（連続同一 handle のみ・A→B→A 不可）**（dash A-1.2 に反映）。
+- **🟡 dual ShutdownPhase は非1:1対応**: `AudioEngine::ShutdownPhase`（**6値**, AudioEngine.h:2521 `enum class:int`）と `isr::ShutdownPhase`（11値, ISRShutdown.h:25）は非1:1。`StopWorkers` が isr の3フェーズ（ObserverDrained → RetireClosed → EpochSettled）を駆動し、`StopAudio` は isr を直接遷移させない（ReleaseResources.cpp:73-537 実測）。**遷移シーケンス（順序）で invariant 検証する必要がある**（`switch` 網羅では検出不可）（dash A-3.1 に反映）。**三次レビューで行番号・値数を修正（旧記述の7値は誤り）**。
+
+**対応 Phase**: Phase 6（dash §1.1 residency accounting 再設計 / §1.4 テスト / §1.3 test hook + テスト / §1.2 isFullyDrained queue emptiness / A-3.1 dual ShutdownPhase）。
+
+### 9-15. 🟡 REPAIR_PLAN2-dash.md 二次レビュー総括（2026-08-09 追加）
+
+**レビュー対象**: REPAIR_PLAN2-dash.md の P2 残課題・改修設計
+**レビュー日**: 2026-08-09（一次・二次）
+
+| 項目 | 二次レビュー判定 | 反映 |
+|------|-------------|------|
+| 9-2 per-type admission 統一 | 妥当だが「統一」は表層的。バグではない | **P3 に降格** |
+| 9-3 PopStatus 導入 | **設計不成立**（Empty と producer hole は diff 同一値） | **撤回**。テスト固定のみ |
+| 9-3 producer hole テスト | **現行 API では hole を生成不能**（push が reservation→payload→publication を内包） | **CONVO_TESTING test hook 必須**。テスト4本 |
+| 9-4 pendingIntentCount | **fetch_add-after-push は underflow**（queue publication と counter RMW は別同期変数） | **residency reservation → push → rollback に再設計** |
+| 9-4 意味論 | **pendingIntentCount_ は Publish を含まない**（Publish は publicationBacklogCount_） | **意味論修正** + isFullyDrained の Publish 混入上書き（Threading.cpp:117）廃止 |
+| 9-4 queue emptiness | 正しいが **admission closed 後に限定** | **shutdown 順序 invariant 化** |
+| 9-4 ISR/RT | RMW は lock-free だが cache-line bouncing 注意 | **is_always_lock_free 確認 + 診断 counter 扱い** |
+| 9-5 Recovery coalesce | 連続同一 handle のみ。**連続 coalesce も今は入れない** | **P3 に降格** + latest-wins 等の仕様確定を先送り |
+| 9-6 テストカバレッジ | 妥当（ABA/state-ownership テスト明記）。**INV-5 は silent loss 禁止に再定義** | **承認** |
+| 9-7 force reclaim | **採用不可**（activeReaderCount==0 ≠ reclaim 安全。clear() は loss） | **撤回**。Faulted ≠ memory safety 保証を明記 |
+| 9-8〜9-11（2.x 系） | 妥当（2.2 は reorder を許す admission/deferred 設計が本質） | **承認** |
+| 9-14 diff 符号解釈 | **旧確定は誤り**（Empty/hole 区別不能） | **撤回・修正** |
+
+**最終実装対象（P2）**: 9-4（residency accounting 再設計）+ 9-6（テスト）+ 9-3（test hook + テスト）+ isFullyDrained queue emptiness（admission closed 後）。**その他は P3 または撤回**。
+
+### 9-16. 🟡 REPAIR_PLAN2-dash.md 三次レビュー総括（2026-08-09 別視点検証）
+
+**レビュー観点**: dash の行番号・実装可能性・既存コードとの整合・ISR/RT 前提の実在性を**別視点**から実コードで検証。
+
+| # | 検証項目 | 検証結果（実コード照合） | dash 反映（新構成） |
+|---|---------|------------------------|----------|
+| T1 | MpscBoundedRing seq 遷移・diff 解釈 | sequences_[i]=i(:54) → push pos+1(:81) → pop pos+Capacity(:109)。diff(:103) は !=0 で false。empty と producer hole の区別不能・正常動作で diff>0 発生せず — **§1.3 の分析は正確** | 修正不要 |
+| T2 | processIntent の行番号 | quarantineFallbackQueue_(:32) → intentQueue_(:36) → drainObserveDeferred(:39) → setPendingIntentCount(0)(:43) — **dash の記述は正確** | 修正不要 |
+| T3 | pendingIntentCount_ の書き込み元 | 5箇所3系統（intent系/Publish系/RetireIntent系）— **§1.1 の 3系統混在は実在** | 修正不要 |
+| T4 | **isFullyDrained は全カウンタ実測上書き** | Threading.cpp:117-131 は pendingIntentCount 以外も publicationBacklog/fallbackBacklog/retireBacklog/deferredRetire/quarantineResident を**全て実測値で上書き**。retireBacklogCount_ も load→store 非RMW（:136-160） | **§1.1/§1.2 に反映**（混入廃止のみ、他は現状維持 + queue emptiness 補強） |
+| T5 | **producer は全て NonRT** | submitObserve（DSPTransition.h:156 / Timer.cpp:896,1029,1568）、submitQuarantine（Timer.cpp:1788,1826）、submitRecoveryRequest（AudioEngine.h:4277）、enqueuePublicationIntent（AudioEngine.h:4413）— 全て NonRT。CoordinatorLoop 周期 = 1ms | **§1.1 の ISR/RT 注意を明記**（RT 経路の bouncing 懸念は現状不成立） |
+| T6 | force reclaim の既存フォールバック | Graceful Drain ポーリング（最大 5000ms, publishEpoch+tryReclaim）が既存（CtorDtor.cpp:200-217） | **§3.2 に追記** |
+| T7 | ShutdownPhase | AudioEngine.h:2521（6値, enum class:int）/ ISRShutdown.h:25。遷移シーケンス（ReleaseResources.cpp:73-537）は dash 記述と完全一致 | **行番号 2510→2521・7値→6値 修正**（§4.1） |
+| T8 | bootstrap / R4 行番号 | Init.cpp:54-55、AudioEngine.h:2027、ReleaseResources.cpp:415,420 — 正確 | 修正不要 |
+| T9 | recoveryIntentQueue_ 型 | LockFreeRingBuffer<RecoveryIntent, 256>（ISRRuntimePublicationCoordinator.h:433-434）SPSC — 正確 | 修正不要 |
+
+**三次レビュー総合判定**: dash の技術的根拠は約 90% 正確。修正を要したのは **T4（全カウンタ上書きの追記）・T5（RT 経路の不存在）・T7（ShutdownPhase 行番号）** の3点。**最終実装対象は不変**: §1.1（residency accounting 再設計）+ §1.4（テスト）+ §1.3（test hook + テスト）+ §1.2（isFullyDrained queue emptiness）。
+
+### 9-17. 🟡 REPAIR_PLAN2-dash.md 四次レビュー総括（2026-08-09 ISR/MPSC/shutdown 観点）
+
+**レビュー観点**: ISR（Immutable Snapshot Runtime）・MPSC/SPSC メモリモデル・shutdown/drain・ownership/lifetime の観点から改修案を検証。最新ソースで確認した事実: `ShutdownScheduler::isFullyDrained()` は7カウンタのみ、`AudioEngine::isFullyDrained()` は pendingIntentCount_/publicationBacklogCount_ を hasDeferredCommit で上書き、`publicationSequenceCounter_`（AudioEngine.h:2189）は fetchAddAtomic で seqId 割当、`shutdownReclaim` は ReleaseResources.cpp:415,420 に残存、`dspQuarantineManager_.residentCount()` は quarantine lane の実在 DSP 数。
+
+| # | 検証項目 | 四次レビュー判定 | dash 反映 |
+|---|---------|----------------|----------|
+| F1 | P2-1 reservation→push→rollback | **GO**（基本原理は正しい） | §1.1 維持 |
+| F2 | load→store lost update 廃止 | **GO**（必須） | §1.1 維持 |
+| F3 | push後 fetch_add の underflow 回避 | **GO**（reservation-before-publish が正しい） | §1.1 維持 |
+| F4 | fallback reservation 維持 | **GO** | §1.1 維持 |
+| F5 | setPendingIntentCount(0) 廃止 | **GO**（必須） | §1.1 維持 |
+| F6 | Publish/Retire の混入廃止 | **GO** | §1.1 維持 |
+| F7 | **quarantineResidentCount_ を pop で減算** | **NO-GO**（別の意味のカウンタ — 実際の quarantine lane DSP 数） | **§1.1.5 で削除**（P3 で別カウンタ化） |
+| F8 | **publicationBacklogCount_ = Publish residency** | **NO-GO**（現コードでは hasDeferredCommit 由来） | **§1.1.5 で修正**（publicationIntentResidencyCount_ 新設は P3） |
+| F9 | queue emptiness を drain 判定に追加 | **GO**（ただし consumption 禁止・shutdown ordering 条件付き） | §1.2 修正 |
+| F10 | MPSC producer-hole 契約明文化 | **GO** | §1.3 維持 |
+| F11 | PopStatus 導入撤回 | **GO** | §3.1 維持 |
+| F12 | producer-hole test hook | **GO with modification**（2スレッド必須） | §1.3.2 修正 |
+| F13 | INV-3 test | **GO** | §1.4 維持 |
+| F14 | INV-5 silent-loss test | **GO**（Critical は HealthMonitor 経由で検証） | §1.4.3 修正 |
+| F15 | IntentAdmissionPolicy | **P3としてGO**（staged admission に要修正） | §2.1 修正（AdmissionStep） |
+| F16 | **Recovery coalesce** | **NO-GO**（正当な Recovery を永久抑制するバグ） | **§2.2 全面修正**（削除・代替3案） |
+| F17 | force reclaim を実装しない | **GO**（EBR上正しい） | §3.2 維持 |
+| F18 | Faulted と reclaim safety の分離 | **GO**（重要） | §3.2 維持 |
+| F19 | ShutdownPhase 対応表 | **GO**（正常系だけでは不十分） | §4.1 修正（Normal/Timeout/Emergency） |
+| F20 | PublishReceiptWaiter 現状維持 | **CONDITIONAL**（seq 完了順序の証明が必要） | §4.2 修正（completion monotonicity） |
+| F21 | LinearRamp 文書化 | **GO** | §4.3 維持 |
+| F22 | BlockDouble false | **GO**（実測前に変更しない） | §4.4 維持 |
+| F23 | bootstrap jassert | **GO**（Success 判定確認済み） | §4.5 維持 |
+| F24 | memory_order（relaxed） | **GO**（counter は numeric accounting）だが **convo wrapper に統一** | §1.1.2 修正（fetchAddAtomic/fetchSubAtomic） |
+| F25 | fetch_sub の cur>0 ガード削除 | **GO**（reservation invariant 成立後。ガードは不整合を隠す） | §1.1.6 修正 |
+| F26 | shutdownReclaim 残存 | **確認**（二系統の認識。P2 で統合しない判断は正しい） | §3.2 追記 |
+
+**四次レビュー総合判定**: **部分採用 / 一部 NO-GO**。
+- **GO**: P2-1 residency accounting（要 convo wrapper 統一・cur>0 ガード削除）、P2-4 queue emptiness（要 shutdown ordering）、P2-3 producer-hole test（要 2スレッド化）、P2-2 INV-3/INV-5、force reclaim 撤回、ShutdownPhase 対応表
+- **NO-GO（修正必須）**: ①quarantineResidentCount_ の pop 減算（別の意味のカウンタ）、②publicationBacklogCount_ = Publish residency（現コードと不一致）、③Recovery coalesce（silent loss バグ）
+- **CONDITIONAL**: PublishReceiptWaiter（completion seq monotonicity の証明が必要）
+
+**ISR 上の優先順位（四次レビュー推奨）**: ①pendingIntentCount_ の正確な residency accounting → ②queue emptiness を shutdown source of truth へ追加 → ③shutdown producer 停止順序を固定 → ④MPSC hole test → ⑤INV-3/INV-5 → ⑥Admission Policy 整理 → ⑦Recovery coalesce（別設計）。
+
+### 9-18. 🟡 REPAIR_PLAN2-dash.md 五次レビュー総括（2026-08-09 実装可能性・API 実在性検証）
+
+**レビュー観点**: これまでのレビューが検証していない「実装可能性・API 実在性・既存テストとの整合」を実コードで検証。
+
+| # | 検証項目 | 検証結果（実コード照合） | dash 反映 |
+|---|---------|------------------------|----------|
+| V1 | convo::fetchAddAtomic/fetchSubAtomic の存在 | AtomicAccess.h:91,100 に定義。`std::atomic<T>&, U, memory_order = acq_rel` | §1.1.2 で memory_order 扱い確定 |
+| V2 | queue emptiness の API 実在 | MpscBoundedRing::sizeApprox()（:115）/ LockFreeRingBuffer::size()（:76）とも消費なし | §1.2.2 で4キュー×API 確定 |
+| V3 | **2つの RuntimePublicationCoordinator** | convo::isr（Intent, ISRRuntimePublicationCoordinator.h:68）と convo::（Publish, core/RuntimePublicationCoordinator.h:24）は別クラス。本設計は前者。core 側は publishWorld のみ | §1.2 に実装場所（ShutdownScheduler::isFullyDrained）追記 |
+| V4 | PublishStageResult の値 | core/RuntimePublicationCoordinator.h:15-19 で **Success/Rejected/Failed 3値** | §4.5 で3値・result != Success 追記 |
+| V5 | 既存 testProducerHoleDoesNotJumpAhead | 既存（MpscBoundedRingTests.cpp:238）だが真の hole 生成なし。命名衝突注意 | §1.3.3 で命名確定 |
+| V6 | 既存テストのスレッド使用 | <thread> 使用（:44）・並行 push 実装済み | §1.3.3 で2スレッド統合性確認 |
+| V7 | requestReclaim の依存 | DSPHandleRuntime&/ISRRetireRouter& 依存。pendingReclaimHandles_ は AudioEngine.h:4616 | §1.4.2 で INV-3 スタブ要件追記 |
+| V8 | test hook 挿入位置 | push() の CAS 成功直後・entries_ 書込み前に #ifdef ブロック | §1.3.2 で確定 |
+| V9 | isFullyDrained 返り値 !hasDeferredCommit | Threading.cpp:135。上書き廃止後も維持 | §1.1.5 で返り値維持追記 |
+| V10 | submitObserve の2段階 fallback | intentQueue_ → observeDeferredRing_。reservation は fallback 成功時維持 | §1.1.6 と整合 |
+
+**五次レビュー総合判定**: 改修設計は**実装可能**。API 実在性を全て確認。修正5点: V3（Coordinator 区別）/ V4（PublishStageResult 3値）/ V5（既存テスト衝突）/ V7（INV-3 スタブ）/ V8（test hook 挿入位置）。**設計の中心（P2-1 residency accounting）は変更なしで GO**。
+
+### 9-19. 🟡 REPAIR_PLAN2-dash.md 六次レビュー総括（2026-08-09 最終整合）
+
+**レビュー観点**: `REPAIR_PLAN2-dash.md` と `Practical Stable ISR Bridge Runtime.md` を突き合わせ、ISR/RCU/MPSC/shutdown の観点から最終整合を検証。実コード確認: `isRetired()` ガード（ISRDSPHandle.h:155）が INV-3 の ABA 防止に対応、`recoveryIntentDropCount` が RuntimeBackpressureTelemetry（AudioEngine.h:1546）で HealthMonitor 入力、`shutdownReclaim`（ISRDSPHandle.h:171）が二系統の一翼。
+
+| # | 検証項目 | 六次レビュー判定 | dash 反映 |
+|---|---------|----------------|----------|
+| S1 | P2-1 residency accounting | **GO** | §1.1 維持 |
+| S2 | **invariant「push完了後 == actual」は強すぎる** | **修正必要**（Producer が push() から戻った時点で Consumer が既に pop 済みの可能性） | **§1.1.2 で修正**（基本不変条件 = counter >= actual、== は quiescent point のみ） |
+| S3 | P2-4 queue emptiness | **GO** | §1.2 維持 |
+| S4 | **queue emptiness は shutdown ordering が必須** | **コード上の invariant として固定** | **§1.2 でコード invariant 化を追記** |
+| S5 | P2-3 producer-hole test | **GO** | §1.3 維持 |
+| S6 | P2-2 INV-3 / INV-5 | **GO** | §1.4 維持 |
+| S7 | **INV-5: drop == memory corruption と定義しない** | **修正推奨**（runtime safety と functional recovery を分離） | **§1.4.3 で追記**（「Recovery Intent の silent loss 禁止」と再定義） |
+| S8 | quarantineResidentCount_ | **GO**（意味論が異なる） | §1.1.5 NO-GO 維持 |
+| S9 | publicationBacklogCount_ | **GO**（現コードと不一致） | §1.1.5 NO-GO 維持 |
+| S10 | Recovery coalesce 撤回 | **GO** | §2.2 NO-GO 維持 |
+| S11 | force reclaim 撤回 | **GO**（EBR/RCU safety を破壊） | §3.2 NO-GO 維持 |
+| S12 | shutdownReclaim 残存は別問題 | **妥当**（二系統。P2 に混ぜない） | §3.2 追記済み |
+| S13 | PublishReceiptWaiter | **CONDITIONAL**（P2 counter bug とは別問題のため今は触らない） | §4.2 維持 |
+| S14 | ShutdownPhase 強化 | **GO（P3）** | §4.1 維持 |
+| S15 | IntentAdmissionPolicy 統一 | **GO（P3）** | §2.1 P3 維持 |
+| S16 | producer は全て NonRT | **確認**（cache-line contention は RT deadline を直接侵害しない） | §1.1 維持 |
+| S17 | memory_order relaxed vs acq_rel | **wrapper default（acq_rel）に統一支持** | §1.1.2 反映済み |
+
+**六次レビュー総合判定**: **P2-1 / P2-2 / P2-3 / P2-4 は実装 GO**。実装開始前に2点を明文化:
+- **A. `pendingIntentCount_` の基本 invariant は `counter >= actual residency`。`==` は producer quiescence 後に限定**
+- **B. queue emptiness は `AdmissionClosed → producer停止/join → queue観測` の順序保証を前提条件**
+
+dash の設計は Practical Stable ISR Bridge Runtime の原則（RT は待たない・所有しない・判断しない / Retire は Epoch を通る / Shutdown は完全 Drain / Overflow は silent loss にしない / Authority を一箇所に集約）と整合し、現行 ConvoPeq に安全に適用できる。
+
+### 9-20. 🟡 REPAIR_PLAN2-dash.md 七次レビュー総括（2026-08-09 実装詳細の完全性）
+
+**レビュー観点**: 実装直前の「実装詳細の完全性」を検証 — reservation→push→rollback の全 call site 網羅、RT 経路の最終確認、CONVO_TESTING の実装影響、staged admission と dispatch の整合、INV-5 の drop テスト方法。
+
+| # | 検証項目 | 検証結果（実コード照合） | dash 反映 |
+|---|---------|------------------------|----------|
+| W1 | setPendingIntentCount 全 call site | :553,562（Observe）:667（Recovery）:714,724（Quarantine）の +1 / :686（popRecoveryRequest）の -1 / processIntent の 0 / Threading:117・Commit:462,604 の上書き | 修正不要 |
+| W2 | **intentQueue_ に Publish 混在 → pop 時 fetchSub の非対称** | intentQueue_ は Observe/Publish/Recovery/Quarantine の4種混在（:201-206）。Publish は pendingIntentCount_ 対象外のため、**Publish pop で fetchSub(1) すると非対称 -1**（過小評価 → isFullyDrained が見逃し） | **§1.1.6 で「Publish pop は fetchSub 対象外」を追記（重大発見）** |
+| W3 | RT 経路の最終確認 | processBlockDouble（BlockDouble.cpp:27）内に submitXxx / setPendingIntentCount なし。全 producer は NonRT 確定 | 修正不要 |
+| W4 | waitForDrain 時点の Coordinator/Builder 停止 | ReleaseResources.cpp:189（shutdownCoordinatorLoop）:190（stopRebuildThread）→ :447（waitForDrain）。両方停止済み | **§1.2 で shutdown ordering の実コード照合を追記** |
+| W5 | queue emptiness と pendingIntentCount_ の独立判定 | intentQueue_ は Publish 含む全4種。queue emptiness は Publish 残留も捕捉 | **§1.2 で独立判定を追記** |
+| W6 | CONVO_TESTING のメモリレイアウト | MpscBoundedRing は alignas(64) の cache-line 分離。フック用 atomic は #ifdef で消滅 → production レイアウト不変 | **§1.3.2 で private 末尾配置を追記** |
+| W7 | staged admission と dispatch 整合 | kDispatchTable は4種 1:1 網羅 + static_assert（ISRIntentDispatcher.h:58-68） | 修正不要 |
+| W8 | INV-5 の drop テスト方法 | 既存 testRecoveryRequestEnqueueAndPop（ISRSemanticValidationTests.cpp:608）は 1-hop 輸送検証済み。INV-5 は 256 回 submit → full → 257 回目 drop を検証 | **§1.4.2 で drop テスト方法を追記** |
+| W9 | processIntent の3キュー drain | quarantineFallbackQueue_(:32) → intentQueue_(:36) → drainObserveDeferred(:39)。Publish pop 除外を追加 | §1.1.6 で反映 |
+
+**七次レビュー総合判定**: 実装詳細はほぼ完全。修正5点: W2（Publish pop の fetchSub 非対称 — 重大発見）/ W4（shutdown ordering 実コード照合）/ W5（queue emptiness の独立判定）/ W6（CONVO_TESTING レイアウト）/ W8（INV-5 drop テスト方法）。**P2-1/P2-2/P2-3/P2-4 は引き続き実装 GO**。
+
+### 9-21. 🟡 REPAIR_PLAN2-dash.md 八次レビュー総括（2026-08-09 コード責務・実装完了条件）
+
+**レビュー観点**: `ConvoPeq(20260809-022629).md` を基準実装として、コード上の責務・スレッドモデル・ISR/RCU・MPSC・shutdown/lifetime の観点から再検証。`Practical Stable ISR Bridge Runtime.md` も照合。
+
+**実装完了条件（八次 §25 — 3点の絶対条件）**:
+| # | 絶対条件 | 崩すと |
+|---|---------|--------|
+| C1 | `pendingIntentCount_ == actual residency` を**常時要求しない**（基本 invariant は `counter >= actual residency`。`==` は producer quiescence 後のみ） | 並行中の counter 不整合を誤検出 |
+| C2 | **Publish pop では decrement しない**（intentQueue_ に Publish 混在のため） | 非対称 -1 → isFullyDrained が見逃し |
+| C3 | **queue emptiness は producer quiescence 後のみ authoritative**（AdmissionClosed + all producers joined をコードで assert / phase guard） | 通常動作中の誤った drain 判定 |
+
+**追加要求**: 条件A（reservation counter は `queue residency + producer-side enqueue reservation` であって「成功した push の数」ではない。コードコメント・テスト名・設計資料で同一に）・条件B（fallback 含めて「1 intent = 1 reservation」）・PublishReceiptWaiter は Producer serialization が seqId monotonicity を保証することをテスト固定（今すぐ API 変更不要）・shutdown lifetime contract を将来タスクとして明文化。
+
+**実コード検証**: `PublishReceiptWaiter::complete`（AudioEngine.h:3604-3614）は mutex 保護の high-water mark。seqId は `fetchAddAtomic(publicationSequenceCounter_, 1)`（:3412）で割当。コメント「executePublish は intentQueue_ を FIFO で処理するため seqId は単調増加で完了する（順序性前提）」（:3605）。
+
+**八次レビュー総合判定**: **実装着手可能（概ね90%以上の設計精度）**。P2-1〜P2-4 は GO。実装完了条件として C1/C2/C3 をコードとテストの双方で固定。ISR 整合性: residency と semantic state の分離 / reservation-before-publication / Publish を pendingIntentCount から除外 / queue emptiness を shutdown 後の transport-level source of truth に / EBR/Retire authority を迂回しない — いずれも Practical Stable ISR Bridge Runtime と整合。
+
+### 9-22. 🟡 REPAIR_PLAN2-dash.md 九次レビュー総括（2026-08-09 残課題の明確化）
+
+**レビュー観点**: `ConvoPeq(20260809-022629).md` を基準コードとして、`REPAIR_PLAN2-dash(2)`（八次反映版）と `Practical Stable ISR Bridge Runtime.md` を突き合わせて検証。
+
+**総合判定**: **「P2-1〜P2-4 は実装 GO。ただし REPAIR_PLAN2-dash(2) を『完全修正版』とは扱わない」**。
+
+**実装完了条件（九次 §21 — 4条件）**: 条件1（pendingIntentCount_ = queue residency + producer-side enqueue reservation、successful push count ではない）・条件2（1 Intent = 1 reservation）・条件3（Publish pop は pending counter を触らない）・条件4（queue empty は AdmissionClosed + all producers joined + Coordinator stopped + Builder stopped の後だけ drain 判定に使う）。
+
+**残課題6件（九次 §23 — P2 後検証対象・優先度高）**:
+| # | 残課題 | 検証優先度 |
+|---|--------|-----------|
+| X1 | **Recovery Intent の full-drop そのもの**（現状は drop + Critical telemetry。AudioEngine.Retire.cpp:192-196, :223。「Recovery 保証」ではない） | **最優先**（Recovery 保証に直結） |
+| X2 | **Publish completion sequence monotonicity の実装保証** | **高**（Shutdown/Receipt correctness に直結） |
+| X3 | shutdownReclaim の二系統 | 中（別タスク） |
+| X4 | RuntimePublicationCoordinator の authority 二重化（**二段階: X4-A rename / X4-B ownership topology 変更**） | 中（Authority Singularization・INV-X4-1〜5） |
+| X5 | Publish Intent residency の専用 counter 未導入 | 中（P3） |
+| X6 | quarantine intent residency と quarantine resident の semantic 分離 | 中（P3） |
+
+**X1 の検証（実コード）**: recoveryIntentQueue_（SPSC, 256）が full で drop + `recoveryIntentDropCount_++`（ISRRuntimePublicationCoordinator.cpp:671）→ HealthMonitor が delta 監視し Critical 昇格（AudioEngine.Retire.cpp:192-196, :223）。INV-5 は「drop を正しく記録できるか」の検証であり「絶対 drop しない」保証ではない。将来的には Recovery 専用の durable admission state（primary queue → retry/coalescing state → Critical failure only when recovery guarantee itself is impossible）が望ましい。
+
+**評価**: load/store counter → residency accounting / push→increment → reservation→push→rollback / counter only → counter + actual queue occupancy / Recovery coalesce → NO-GO / Publish pop → pending counter から除外 / queue emptiness → producer quiescence 後のみ authority。RT/audio callback に新しい lock・allocation・ownership・decision path を導入するものではなく ISR の境界を悪化させない。
+
+**推奨実装順序**: counter semantics → Publish pop exclusion → reservation → consumer decrement + hard reset 全廃 → queue emptiness → shutdown phase assertion → producer-hole test → INV-3/INV-5 → seqId monotonicity test → Recovery drop 別タスク。
+
+### 9-23. 🟡 REPAIR_PLAN2-dash.md 十次レビュー総括（2026-08-09 具体的コード変更の実行可能性）
+
+**レビュー観点**: 実装直前の「具体的コード変更が実装コードの構造と整合するか」を検証 — reservation→push→rollback の観測カウンタとの関係、quarantineResidentCount_ の現行維持、fetchSub 挿入位置、SPSC/private アクセス。
+
+| # | 検証項目 | 検証結果（実コード照合） | dash 反映 |
+|---|---------|------------------------|----------|
+| U1 | `observeOverflowCounter_`（:559）の扱い | 「intentQueue_ full → observeDeferredRing_ 退避」の観測カウンタ。reservation とは独立に既存位置（primary push 失敗直後）へ維持。診断カウンタとして residency に含めない | **§1.1.6 で追記** |
+| U2 | `submitQuarantine` の `quarantineResidentCount_` +1（:713,723）の現行維持 | reservation は pendingIntentCount_ のみ。quarantineResidentCount_ の +1 は既存の意味論（実在 DSP 数の近似）を維持するため push 成功時（primary または fallback）に既存どおり実行。P3 で quarantineIntentResidencyCount_ に分離 | **§1.1.6 で追記** |
+| U3 | fetchSub の挿入位置（pop 成功直後・skip 前） | drainObserveDeferred（ProcessIntent.cpp:50-55）は pop 成功直後・epoch-FIFO skip 判定前に fetchSub。ObserveIntentHandler（intentQueue_ 経由）は processIntent の while ループで fetchSub 済み（ハンドラ内では fetchSub しない）→ 二重計上防止 | **§1.1.6 で追記** |
+| U4 | Recovery reservation のスレッド | submitRecoveryIntent（AudioEngine.h:4274）は QuarantineIntentHandler（ProcessIntent.cpp:102）から呼ばれ CoordinatorLoop 内。popRecoveryRequest（Builder Loop）との SPSC 契約維持 | 修正不要 |
+| U5 | ShutdownScheduler の private queue アクセス | ShutdownScheduler は RuntimePublicationCoordinator の nested class。C++ では nested class は外側の private メンバにアクセス可能 | 修正不要 |
+| U6 | submitRecoveryRequest の SPSC | recoveryIntentQueue_ は SPSC（Producer=CoordinatorLoop 単一）。reservation は CoordinatorLoop 内で行われ競合なし | §1.1.3 正確 |
+
+**十次レビュー総合判定**: 実装コードとの整合は**完全**。修正3点: U1（observeOverflowCounter_ の位置維持）/ U2（quarantineResidentCount_ の現行維持）/ U3（fetchSub 挿入位置・二重計上防止）。**P2-1〜P2-4 は実装 GO**。
+
+### 9-24. 🟡 REPAIR_PLAN2-dash.md 十一次レビュー総括（2026-08-09 残課題 X1-X6 の詳細設計）
+
+**レビュー観点**: `REPAIR_PLAN2-dash(3)`（十次反映版）を最新案として、`ConvoPeq(20260809-022629).md` と `Practical Stable ISR Bridge Runtime.md` を突き合わせて検証。
+
+**総合判定**: **P2-1〜P2-4 は実装 GO。ただし「ISR Runtime 全体を完全に健全化する改修案ではない」**。残課題 X1〜X6 は個別バグ修正ではなく、ISR の「唯一の Authority / Intent residency / Publish completion / shutdown-reclaim」の意味論を最終的に閉じるための設計。
+
+**acceptance criteria 3条件（十一次 §21）**:
+- C1: pendingIntentCount_ の意味をコード上で固定（Observe + Quarantine + Recovery の queue residency + producer-side enqueue reservations。Publish / Retire / Quarantine resident excluded）
+- C2: queue emptiness は phase-gated（AdmissionClosed + all producers joined + Coordinator stopped + Builder stopped を assert）
+- C3: Recovery full-drop を「成功扱い」にしない（drop を Health/diagnostic layer まで伝播。将来は Accepted / Queued / Dropped を区別）
+
+**X1-X6 詳細設計（dash §6）**:
+| # | 対象 | 設計方針 | 不変条件 |
+|---|------|---------|---------|
+| X1 | Recovery Durable Admission | durable Pending state + retry/coalesce（queue 拡張は NO-GO） | INV-X1-1〜4 |
+| X2 | Publish completion monotonicity | CAS による monotonic watermark | INV-X2-1〜4 |
+| X3 | shutdownReclaim 二系統 | Reclaim Authority は一つ、Safety Precondition が二種類（RuntimeEBR / ShutdownQuiescent） | phase assertion |
+| X4 | authority 二重化 | **二段階: X4-A（IntentCoordinator / RuntimePublishAuthority に明示命名・分離）+ X4-B（RuntimeStore ownership topology 変更・RuntimeWorldAuthority を write authority に）**。クラス統合 NO-GO | Authority matrix / INV-X4-1〜5 |
+| X5 | Publish residency 専用 counter | publicationIntentResidencyCount_ 新設（deferred と分離） | INV-X5-1 |
+| X6 | Quarantine Intent/Resident 分離 | **4 semantic 分離: intentQueue_（intent）/ quarantineFallbackQueue_（ring・実体確定）/ DSPQuarantineManager（resident）/ RetireQuarantineStore（retireQuarantine）** | 状態遷移 / INV-X6-4 |
+
+**実コード検証**: PublishExecutor::executePublish（RuntimePublishExecutor.h:19-20）sole gateway / getCurrentBuildSnapshotForRecovery()（AudioEngine.h:4265）/ onPublishCommitted（RuntimePublishExecutor.h:84 → Orchestrator.h:146）/ quarantineResidentCount_ は ISRRetireRuntimeEx（:219,222,237）と Coordinator（:713,723）の2系統。
+
+**RT 安全性**: RT allocation / delete / mutex / wait / World mutation / publish decision / ownership transfer / crossfade decision / Epoch bypass は全て「追加なし」→ ISR 境界を悪化させない。
+
+**実装順序**: X5/X6 → X2 → X4 → X1 → X3（X1 の設計自体は先に決める）。
+
+**中心原則**: **Queue residency / deferred state / committed state / resident object / reclaimable object を、それぞれ別の semantic state として扱う**。
+
+### 9-25. 🟡 REPAIR_PLAN2-dash.md 十二次レビュー総括（2026-08-09 X1-X6 の具体的コード挿入位置）
+
+**レビュー観点**: §6 の X1-X6 詳細設計が、実装コードのどこに挿入されるか（具体的コード挿入位置）と、P2 実装（§1.1-1.4）と競合しないかを検証。
+
+| # | 検証項目 | 検証結果（実コード照合） | dash 反映 |
+|---|---------|------------------------|----------|
+| V11 | X3: 既存呼び出し元への影響 | requestReclaim（AudioEngine.h:4248, AudioEngine.Retire.cpp:83）→ RuntimeEBR / shutdownReclaim（AudioEngine.h:2027, ReleaseResources.cpp:415,420）→ ShutdownQuiescent。requestReclaim を reclaim(ReclaimMode) に拡張、shutdownReclaim（ISRDSPHandle.h:171）廃止 | **§6.3 追記** |
+| V12 | X5: enqueuePublicationIntent は inline | enqueuePublicationIntent（ISRRuntimePublicationCoordinator.h:273-278）は inline で push のみ。X5 はここに reservation→push→rollback | **§6.5 追記** |
+| V13 | X6: submitQuarantine の挿入位置 | submitQuarantine（:690-732）に quarantineIntentResidencyCount_ 追加。quarantineResidentCount_ +1（:713,723）は X6 で撤去 | **§6.6 追記** |
+| V14 | X1: submitRecoveryRequest の durable state | submitRecoveryRequest（:647-673）の push 失敗時に durable Pending state へ保持。pendingRecoveryAdmission_ 追加 | **§6.1 追記** |
+| V15 | X2: PublishReceiptWaiter との統合 | complete（AudioEngine.h:3604-3614）を monotonic watermark + CAS に変更 | **§6.2 追記** |
+| V16 | X4: 型エイリアスと使用箇所 | convo::RuntimePublicationCoordinator（core）は AudioEngine.h:3509 の using / convo::isr:: は7ファイルで使用 | **§6.4 追記** |
+
+**十二次レビュー総合判定**: X1-X6 の詳細設計は実装可能で、挿入位置は全て実コードと整合。修正6点（V11-V16）を dash §6 に追記。**P2-1〜P2-4 は実装 GO。X1-X6 は P2 後の独立タスクとして実施（P2 と競合しない）**。
+
+### 9-26. 🟡 X1-X6 詳細設計の精緻化（2026-08-09 実コード調査）
+
+**調査観点**: X1〜X6 の実装対象コードを詳細に調査し、各 X の詳細設計を実装可能なレベルまで精緻化した。
+
+| # | 対象 | 実コード調査結果 | dash §6 反映 |
+|---|------|----------------|-------------|
+| R1 | X1: Builder 消費ループ | popRecoveryRequest は RebuildDispatch.cpp:911 の while で消費。recoveryPending（AudioEngine.h:2581,4283）で lost-wakeup 防止 | **§6.1 で Builder durable state 消費を追記** |
+| R2 | X2: 3箇所の同期変数 | m_lastObservedSequence（Orchestrator.h:246）と PublishReceiptWaiter::lastCompleted_（AudioEngine.h:3634）の2箇所の watermark + waitFor cv | **§6.2 で3箇所変更を追記** |
+| R3 | X3: requestReclaim の epoch 判定 | requestReclaim（:573-608）: retireEpoch < minReaderEpoch 判定（:589）。reclaim は private（ISRDSPHandle.h:188）+ friend Coordinator | **§6.3 で reclaim(ReclaimMode) 設計を追記** |
+| R4 | X4: core Coordinator 一時生成 | PublishExecutor（RuntimePublishExecutor.h:63-66）で makeRuntimePublicationCoordinator().publishWorld() 一時生成 | **§6.4 で追記** |
+| R5 | X5: processIntent の type 分岐 | processIntent（:36）で Publish は publicationIntentResidencyCount_-- / 他は pendingIntentCount_-- に分岐 | **§6.5 で追記** |
+| R6 | X6: quarantineResidentCount_ の source of truth | DSPQuarantineManager::residentCount()（ISRDSPQuarantine.h:50）が唯一の source of truth | **§6.6 で追記** |
+
+**精緻化の結果**: X1-X6 は全て実装可能な詳細設計に到達。特に X1（Builder durable state 消費）、X2（3箇所の同期変数）、X3（reclaim(ReclaimMode) のシグネチャ）、X6（residentCount source of truth）は実装時にそのまま利用できる精度。テスト計画（§6.8）も既存テストの拡張位置を確定。
+
+### 9-27. 🟡 REPAIR_PLAN2-dash.md 十四次レビュー総括（2026-08-09 P2 GO・X1-X6 要修正）
+
+**レビュー観点**: `ConvoPeq(20260809-022629).md` を基準コードとして、`REPAIR_PLAN2-dash(4)` を ISR/Audio Thread 境界・Immutable Snapshot Runtime・Authority Singularization・ownership/lifetime/reclaim・queue residency と semantic state の分離・shutdown 安全性・publication/completion ordering まで含めて評価。
+
+**総合判定**: **P2-1〜P2-4 は GO。X1〜X6 は「このまま実装してよい完成設計」とするのは NO-GO**。
+
+| X | 判定 | 必須修正 |
+|---|------|---------|
+| X1 Recovery | 🟡 | single slot をやめ、Recovery generation / durable state に再設計。reservation を push 前 |
+| X2 Completion | 🔴 最優先 | watermark と per-request receipt を分離。wraparound semantics を決定 |
+| X3 Reclaim | 🟡 | shutdown precondition を retire 前に評価。reader re-entry 不可まで保証 |
+| X4 Authority | 🟡 | rename は有効。RuntimeWorldAuthority → RuntimeStore write path を実際に一本化 |
+| X5 Publish residency | 🟢 | そのまま採用可能 |
+| X6 Quarantine | 🟡 | Intent/Ring/Resident を3分離。quarantineResidentCount_ の意味を再定義 |
+
+**dash §6 反映**: X2 は「completion を何と定義するか」から再設計（contiguous completion 前提で store で十分・sparse は将来・wraparound は案A・INV-X2-5 sole completion writer）。X1 は `PendingRecoveryAdmission`（pending/recoveryGeneration/buildSource）に再設計・reservation を push 前。X3 は precondition を retire 前に評価・reader re-entry impossible 追加。X4 は RuntimeStore の friend Owner（core/RuntimeStore.h:81）構造を確認し RuntimeWorldAuthority を publication authority surface に。X5 は GO 承認。X6 は quarantineIntentResidencyCount_/quarantineRingResidencyCount_/quarantineResidentCount_ の3分離。
+
+**実コード検証（十四次）**: PublishReceiptWaiter::waitFor（AudioEngine.h:3628）は `seqId <= lastCompleted_` の contiguous completion 前提。PublishExecutor が sole gateway のため現行は正しい。RuntimeStore<World, Owner>（core/RuntimeStore.h:12-83）は friend Owner（:81）のみ acquireWriteAccess 可、WriteAccess は move-only（:21-28）。core Coordinator が Owner（:34）。
+
+**最優先修正**: 1. X2（completion watermark と receipt の完全分離）2. X1（single-slot 再設計）3. X1（reservation を push 前）4. X6（3分離）5. X3（precondition を retire 前）6. X4（write authority 実体一本化）。
+
+### 9-28. 🟡 X1-X6 追加調査による詳細設計の精緻化（2026-08-09）
+
+**調査観点**: X1-X6 の設計根拠となる実装コードをさらに深く調査し、未確定事項を確定。
+
+| # | 対象 | 追加調査結果 | dash §6 反映 |
+|---|------|-------------|-------------|
+| T1 | X1: recoveryGeneration の実体 | rebuildRequestGeneration（AudioEngine.h:2423）は requestRebuild（RebuildDispatch.cpp:643）で ++。isRebuildObsolete（:2464）。Builder の Recovery 消費（:965-967）で recoveryGeneration を取得 | **§6.1 に追記**（coalesce は generation 単位） |
+| T2 | X2: Committed と Completion の区別 | lastCommittedPublicationSequence_（AudioEngine.h:2191, Commit.cpp:398）は Committed。PublishReceiptWaiter::lastCompleted_（:3634）は Completion。2つを分離し INV-X2-2 を明示 | **§6.2 に追記** |
+| T3 | X3: reader re-entry impossible の API | ISRRetireRouter（:71-74）: registerReaderThread / reserveReaderThread / enterReader / exitReader / activeReaderCount（:67）/ minReaderEpoch（:75） | **§6.3 に追記**（isQuiescent は readerRegistrationClosed を含む） |
+| T4 | X4: RuntimeStore の Owner 実体 | RuntimeStore<World, Owner>（core/RuntimeStore.h:12）は friend Owner（:81）のみ acquireWriteAccess（:83）。core Coordinator が Owner（:34） | §6.4 反映済み |
+| T5 | X5: seqId 割当 | reserveRuntimePublicationIdentity（AudioEngine.h:3406-3414）で fetchAddAtomic + 1 | §6.5 反映済み |
+
+**確定結果**: X1 の coalesce は rebuildRequestGeneration 単位（T1）、X2 は Committed（lastCommittedPublicationSequence_）と Completion（lastCompleted_）の2 sequence を分離（T2）、X3 の isQuiescent は readerRegistrationClosed を含む（T3）。全て実装時に利用可能な精度に確定。
+
+### 9-29. 🟡 REPAIR_PLAN2-dash.md 十五次レビュー総括（2026-08-09 P2/X5 GO・X1-X6 条件付き GO）
+
+**レビュー観点**: `ConvoPeq(20260809-022629).md` を基準コードとして、`REPAIR_PLAN2-dash(5)` を ISR/Immutable Snapshot Runtime/Authority Singularization/ownership・lifetime/shutdown/completion ordering の観点から再検証。
+
+**総合判定**: **P2 = GO、X5 = GO。X1/X2/X3/X4/X6 = 設計方向 GO、実装は条件反映後 GO**。dash(5) は dash(4) までの問題点をかなり正確に潰している。**過去レビュー由来の記述が一部残っており、最新版の結論と旧版の記述が同一文書内で混在**（実装時は A-2.14 以降の記述を正とする）。
+
+| X | 判定 | 実装条件 |
+|---|------|---------|
+| X1 Recovery | 🟡 条件付き GO | pendingIntentCount_ と durable Recovery admission の semantic boundary を明文化（transport residency と recoveryAdmissionPending_ を分離） |
+| X2 Completion | 🔴 最優先 | 4層の sequence 分離（publicationSequenceCounter_ / lastCommittedPublicationSequence_ / lastCompletedSequence_ / per-request receipt）+ completion is FIFO を architectural invariant に |
+| X3 Reclaim | 🟡 条件付き GO | readerRegistrationClosed + all producers stopped + Audio stopped まで shutdown precondition |
+| X4 Authority | 🟡 条件付き GO | rename は GO。最終目標は RuntimeWorldAuthority を actual RuntimeStore write authority に |
+| X5 Publish residency | 🟢 GO | そのまま採用可能 |
+| X6 Quarantine | 🟡 条件付き GO | 3 semantic 厳密固定。quarantineResidentCount_ に aggregate 値を絶対に入れない |
+
+**dash §6 への反映**: X1 は pendingIntentCount_ を transport residency に限定し recoveryAdmissionPending_ を独立（push 失敗時は pendingIntentCount_ から rollback し切替）。X2 は4層の sequence 分離。X6 は3 semantic 厳密固定。実装順序は X1 を X4 より先に（X1/X2 は correctness の根幹）。
+
+**acceptance criteria**: INV-X1〜INV-X6 をコードレベル不変条件として固定 + X1/X2/X3 は正常系だけでなく queue-full / out-of-order / shutdown race / reader re-entry の adversarial test を必須。
+
+### 9-30. 🟡 X1-X6 追加調査による更なる詳細設計の精緻化（2026-08-09）
+
+**調査観点**: X1-X6 の実装対象コードの正確な構造（EpochDomain / RCUReader / RuntimeWorldAuthority / waitForPublishReceipt 呼び出し元）を深く調査し、実装詳細を確定。
+
+| # | 対象 | 追加調査結果 | dash §6 反映 |
+|---|------|-------------|-------------|
+| U1 | X3: reader 登録の実体 | EpochDomain::kMaxReaders = 64（core/EpochDomain.h:22）。registerReaderThread（:45-65）は slot を CAS 確保。RCUReader::enter（core/RCUReader.h:65）→ acquireThreadSlot → registerReaderThread。audioThreadRcuReader（AudioEngine.h:4529）が Audio callback（BlockDouble.cpp:151）で enter/exit | **§6.3 に追記**（readerRegistrationClosed は EpochDomain の shutdown フラグで実現） |
+| U2 | X1: submitRecoveryIntent の起床統合 | submitRecoveryIntent（AudioEngine.h:4274-4287）: submitRecoveryRequest → recoveryPending = true（:4283）→ rebuildCV.notify_all()（:4286）。recoveryAdmissionPending_ は submitRecoveryRequest 内で set し、起床は既存 recoveryPending が担保 | **§6.1 に追記** |
+| U3 | X4: RuntimeWorldAuthority の commit 委譲 | RuntimeWorldAuthority（RuntimeWorldAuthority.h:78-123）は coordinator_（core Coordinator&）参照に commit を委譲（:112）。X4 最終形は coordinator_ を RuntimeStore::WriteAccess に置換（Owner 変更は大規模リファクタ） | **§6.4 に追記** |
+| U4 | X2: per-request receipt の呼び出し元 | waitForPublishReceipt(seqId, timeout) は commitRuntimePublication（AudioEngine.h:4450）で呼ばれる。seqId は Producer 自身の割当。タイムアウトしても Transferred 扱い | **§6.2 に追記** |
+
+**確定結果**: X3 の readerRegistrationClosed は EpochDomain の shutdown フラグで registerReaderThread が失敗することを保証（U1）。X1 の recoveryAdmissionPending_ は submitRecoveryIntent の既存起床経路（recoveryPending + rebuildCV）と統合（U2）。X4 は coordinator_ 参照の WriteAccess 置換（U3）。X2 の per-request receipt は commitRuntimePublication:4450 を対象（U4）。全て実装時に利用可能な精度に確定。
+
+### 9-31. 🟡 REPAIR_PLAN2-dash.md 十六次レビュー総括（2026-08-09 最終設計レビュー・X4 NO-GO）
+
+**レビュー観点**: `ConvoPeq(20260809-022629).md` を基準コードとして、`REPAIR_PLAN2-dash(6)` を ISR/RCU・ownership/lifetime・publication ordering・queue residency・shutdown・Authority Singularization の観点から検証。
+
+**総合判定**: **P2-1〜P2-4 は GO。X1/X2/X3/X6 は条件付き GO。X4 は現状 NO-GO（rename だけでなく RuntimeStore ownership topology の再設計が必要）**。
+
+| X | 判定 | 実装条件 |
+|---|------|---------|
+| X1 Recovery | 🟠 条件付き GO | reservation / coalesce state machine を確定。1 logical Recovery admission = exactly one reservation（INV-X1-5）。durable admission を queue residency と二重計上しない（INV-X1-6） |
+| X2 Completion | 🟠 条件付き GO / 最優先 | FIFO completion invariant を実装契約として強制（INV-X2-6: completion order == publication sequence order） |
+| X3 Reclaim | 🟠 条件付き GO | readerRegistrationClosed を shutdown state machine に統合（INV-X3-4） |
+| X4 Authority | 🔴 現状 NO-GO | RuntimeStore ownership topology を再設計（INV-X4-3: publishAndSwap は RuntimeWorldAuthority-owned WriteAccess のみ） |
+| X5 Publish residency | 🟢 GO | そのまま採用可能 |
+| X6 Quarantine | 🟠 条件付き GO | Ring/Intent/Resident/RetireQuarantine を4分離（INV-X6-4） |
+
+**追加 INV**: INV-X1-5 / INV-X1-6 / INV-X2-6 / INV-X3-4 / INV-X4-3 / INV-X6-4（dash §6 に反映）。
+
+**実コード検証**: RetireQuarantineStore（RetireQuarantineStore.h:60, kMaxQuarantinedEntries=512）が retire 対象の quarantine 退避を管理（:69 quarantine / :77 drain / :157 residentCount）。RuntimeWorldAuthority は coordinator_ 参照に commit 委譲（:112）し、本当の Store owner ではない。
+
+**最終評価**: dash(6) は「完成設計」ではなく「実装直前の最終設計レビュー版」。核心は **Intent → Admission → Transport Residency → Execution → Committed → Completed → Resident → Retired → Reclaimable → Deleted** の semantic state machine を一つずつ別の状態として閉じること。現時点では X1 と X4 の state machine 境界がまだ完全には閉じていない。
+
+### 9-32. 🟡 X1-X6 新設 counter の宣言位置確定（2026-08-09）
+
+**調査観点**: X1〜X6 の新設 counter / durable state の**宣言位置**（どのクラスのメンバとして追加するか）を、実装対象クラスのメンバ構造から確定。
+
+| # | 対象 | 宣言位置 | dash §6 反映 |
+|---|------|---------|-------------|
+| D1 | X5: publicationIntentResidencyCount_ | ISRRuntimePublicationCoordinator.h:383（publicationBacklogCount_ の隣） | §6.5 に追記 |
+| D2 | X6: quarantineIntentResidencyCount_ / quarantineRingResidencyCount_ | ISRRuntimePublicationCoordinator.h:388（quarantineResidentCount_ の隣） | §6.6 に追記 |
+| D3 | X6: retireQuarantineResidentCount_ | **新 counter は追加しない**（十八次別視点3）。RetireQuarantineStore の既存 size_（:175）/ residentCount()（:157）を source of truth に。isFullyDrained は retireQuarantineStore().residentCount()==0 を評価 | §6.6 に追記 |
+| D4 | X1: PendingRecoveryAdmission / recoveryAdmissionPending_ | ISRRuntimePublicationCoordinator.h:437（recoveryIntentDropCount_ の隣） | §6.1 に追記 |
+
+**確定結果**: X5 の publicationIntentResidencyCount_ は publicationBacklogCount_（:383）の隣（Publish 系 counter 集約）。X6 の intent/ring counter は quarantineResidentCount_（:388）の隣、retireQuarantineResidentCount_ は RetireQuarantineStore 側。X1 の PendingRecoveryAdmission は plain 構造体（SPSC のため atomic 不要）、recoveryAdmissionPending_ は atomic<bool>（isFullyDrained が NonRT から読むため）。全て実装時の宣言位置が確定。
+
+### 9-33. 🟡 X1-X6 詳細設計の実コード精緻化（2026-08-09 十八次調査）
+
+**調査観点**: X1〜X6 の詳細設計を、実装対象コードの正確な実装（関数シグネチャ・挿入位置・counter 更新箇所・テスト対象）と突き合わせて精緻化。未確定事項を確定。
+
+**確定事項**（dash A-2.21 / §6 に反映済み）:
+1. **X1 矛盾解消**: 「push 失敗時に pendingIntentCount_ rollback しない（reservation 維持）」の旧記述を、十五次 §14 の最新判断（rollback + recoveryAdmissionPending_ 切替）に統一
+2. **X1 PendingRecoveryAdmission に handle/epoch/intentId 追加**（RecoveryIntent :166-179 と一致）。消費時 RebuildDispatch.cpp:917 の isNull 検証に必要
+3. **X1 takePendingRecoveryAdmission 実装確定**: SPSC で競合なし。durable 化済みのため pendingIntentCount_ を触らない。Builder 消費ループ（RebuildDispatch.cpp:911 後）に追記
+4. **X2 PublishReceiptWaiter::complete() 検証**: mutex ガード付き `if (seqId > lastCompleted_)`。contiguous completion 前提で案1（最小変更・mutex 維持）確定。m_lastObservedSequence と lastCompleted_ の同期をテスト対象に
+5. **X3 readerRegistrationClosed 実装確定**: EpochDomain に registrationClosed_ atomic<bool> + closeReaderRegistration()。registerReaderThread/reserveReaderThread 冒頭で拒否。「kMaxReaders 全消費」案は NO-GO。既存 reader は exit まで動作継続
+6. **X5 fallback queue に Publish が入らないことを確定**: quarantineFallbackQueue_ は Quarantine 専用。publicationIntentResidencyCount_ 減算は intentQueue_ ループ（:36-37）のみ
+7. **X6 submitQuarantine の intent/ring counter 移動確定**: fallback 移動時は intent-- → ring++（同時に 1 にならない）。pop 減算は processIntent の while ループで一元管理（handler は純 routing）
+8. **Publish intent は pendingIntentCount_ に含まれない**（ISRSoakTests.cpp:70 コメント確認）
+
+**結果**: X1〜X6 は実装可能な精度に到達。残る未確定事項なし（保留は dash §6.9 / A-2.20 の将来タスクとして明記）。
+
+### 9-34. 🟡 X1-X6 別視点調査（スレッド所有権・外部 setter 干渉・メモリオーダリング）（2026-08-09 十八次・別視点）
+
+**調査観点**: 前回の関数シグネチャ・挿入位置に加え、スレッド所有権・外部 setter との干渉・メモリオーダリング・isFullyDrained 実装・RCUReader 経路の別視点から検証。
+
+**確定事項**（dash A-2.22 / §6 に反映済み）:
+1. **外部 setter 干渉（最重要）**: `AudioEngine::isFullyDrained()`（Threading.cpp:114-136）が Coordinator counter を外部 setter で強制上書き:
+   - `setPendingIntentCount(hasDeferredCommit ? 1u : 0u)`（:117）— X1（recoveryAdmissionPending_）/ X6（quarantineIntentResidencyCount_）と衝突
+   - `setQuarantineResidentCount(ringResident + dspQuarantineResident)`（:131）— X6 の分離と矛盾
+   - **X1〜X6 実装時は外部上書きを廃止**し、Coordinator 内部で純粋 accounting（§6.7）
+2. **X2 complete() の thread 所有権**: CoordinatorLoop::run（ISRCoordinatorLoop.cpp:31-43）の単一スレッド。waitFor は Producer スレッド。mutex は cv 同期に必要。shutdown 中は complete が来ない → waitFor は timeout で Transferred
+3. **X3 の2つの ShutdownPhase enum**: AudioEngine（:2521-2530）と ISRShutdown（:25-41）。CloseReaderRegistration は既存列挙に無い → StopAudio 完了時の副作用として registrationClosed_ を set（enum 変更最小化）
+4. **X4 friend 関係**: PublishExecutor（friend struct :3580）は runtimeStore 直接アクセス → X4-B で worldAuthority() 経由に置換。WriteAccess の friend Owner 変更は PublishExecutor に影響しない
+5. **メモリオーダリング**: fetchAdd/fetchSub は default acq_rel（AtomicAccess.h:91-105）。X5/X6 の新設 counter も acq_rel 明示。Producer/Consumer の2スレッド間 RMW で race なし
+6. **X6 residentCount() 実装**: DSPQuarantineManager::residentCount()（ISRDSPQuarantine.cpp:103-111）は quarantineActiveFlags_ 走査。X6 は走査を維持（新 atomic 追加しない）、isFullyDrained は NonRT で直接読む（kMaxSlots=256 許容）
+
+**結果**: 別視点からも X1〜X6 の詳細設計が確定。**外部 setter 干渉は X1/X6 実装時の必須対応**。残る未確定事項なし。
+
+### 9-35. 🟡 X1-X6 共通パス・テスト基盤調査（2026-08-09 十八次・別視点2）
+
+**調査観点**: Publish の共通 enqueue 経路（enqueuePublicationIntentForRuntimeCommit → submitPublishRequest）、deferred 再 enqueue、observeDeferredRing_ の counter 管理、テスト基盤（CMakeLists・既存テスト配置）から検証。
+
+**確定事項**（dash A-2.23 / §6 に反映済み）:
+1. **X5 の Publish intent 全 enqueue 経路（3経路）**: 経路1（RebuildThread・通常 rebuild）/ 経路2（Builder Loop・Recovery publish）/ 経路3（RebuildThread・deferred 再 enqueue）がすべて `enqueuePublicationIntent`（:273）に集約。X5 の counter は単一箇所 reservation で二重計上なし。`enqueuePublicationIntentForRuntimeCommit`（:688）は直接 push しない
+2. **X1 と X5 の相互作用**: Recovery publish（RebuildDispatch.cpp:971 → 経路2）も X5 の counter を +1。X1 の durable admission と X5 は独立。Recovery build 中の「build gap」はどちらの counter にも含まれない
+3. **observeDeferredRing_ の pendingIntentCount_ 減算（P2 接続点）**: submitObserve（:561-562）は deferred ring にも +1 するが drainObserveDeferred（ProcessIntent.cpp:47-56）は減算しない。現状は setPendingIntentCount(0)（:43）で整合。**P2 で setPendingIntentCount(0) 廃止時は drainObserveDeferred の pop でも -1 必要**
+4. **テスト基盤**: ISRSemanticValidationTests / ISRSoakTests / RuntimeWorldAuthorityProjectionTests が CMakeLists 登録済み。X1/X3/X5/X6 はヘッドレスで直接テスト可。X2 の PublishReceiptWaiter は AudioEngine private メンバのため AudioEngineHarness で統合テスト
+5. **X4 静的検査コマンド確定**: `rg -n "publishAndSwap\(" src/` / `rg -n "\.commit\((PublishAuthority|Granted)" src/audioengine/` / `rg -n "RuntimeStore<RuntimePublishWorld" src/`
+
+**結果**: 共通パス・テスト基盤の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-36. 🟡 X1-X6 実装詳細・Producer 前提・reclaim 管理調査（2026-08-09 十八次・別視点3）
+
+**調査観点**: RetireQuarantineStore 実装・shutdownReclaim 呼び出し元・requestReclaim 内部・sequence 採番スレッド・submitRecoveryRequest Producer 前提を実コードで検証。
+
+**確定事項**（dash A-2.24 / §6 に反映済み）:
+1. **X6 retireQuarantineResidentCount_ は新 counter 不要（設計変更）**: RetireQuarantineStore は既に `size_`（:175, mutex 保護）+ `residentCount()`（:157-161）を持つ。quarantine() で ++size_ / drain() で size_=w / drainAllUnsafe() で size_=0。**既存 residentCount() を source of truth にする**（2重 source の不整合リスク回避）。isFullyDrained は `retireQuarantineStore().residentCount() == 0` を評価
+2. **X1 lost-wakeup 整合**: Builder は recoveryPending クリア（:905）後に popRecoveryRequest（:911）→ takePendingRecoveryAdmission。消費中に新規 durable 化があれば recoveryPending 再 set + notify で次サイクル再消費。recoveryAdmissionPending_ が真実
+3. **X3 shutdownReclaim 呼び出し元の順序**: CacheMap::~CacheMap は delete 先（:2026）→ shutdownReclaim（:2027）。ReleaseResources は retire（:414,419）→ shutdownReclaim（:415,420）。X3 移行時も順序維持（再 retire は冪等）
+4. **X3 reclaimInFlightCount_ 管理**: +1（:592）は遅延 / 0（:606）は完了の簡略設計。ShutdownQuiescent は epoch 判定スキップのためカウンタを呼ばない
+5. **X2 sequence 採番スレッド**: reserveRuntimePublicationIdentity（:3407）は RuntimeBuilder.cpp:81,183（RebuildThread）で呼ばれる。採番→commit が同一スレッドで Producer serialization 成立
+6. **X1 Producer 単一スレッド前提の完全確認**: submitRecoveryRequest の呼び出し元は 1 箇所（AudioEngine.h:4277）。RecoveryIntentHandler（ProcessIntent.cpp:126-132）は dead code。Producer = CoordinatorLoop 単一スレッド
+
+**結果**: X6 の retireQuarantineResidentCount_ を既存 residentCount() 使用に変更。X1 Producer 前提・X3 reclaim 管理・X2 採番スレッドを完全確定。残る未確定事項なし。
+
+### 9-37. 🟡 十九次レビュー反映（X4-B の currentWorld_ 意味論修正・実装着手可能 GO）（2026-08-09）
+
+**レビュー観点**: dash(8) の X4 を実装可能性・ownership/lifetime・publication ordering・RCU/ISR・Authority Singularization・shutdown の観点から再検証。
+
+**総合判定**: **X4-A = GO。X4-B = 条件付き GO（修正3点で実装着手可能）**。
+
+**主要指摘**:
+1. **`currentWorld_` は metadata cache でなく第二の publication/read surface**: `commit()`（:109-112）が pubWorld->publication を書込み currentWorld_ を更新。getCurrent/getVersion/currentPublicationEpoch/currentPublicationSequenceId は currentWorld_ から導出
+2. **`getCurrent()` を `consumeWorldHandle(runtimeStore)` の置換先にすることは NO-GO**: 別の atomic source（currentWorld_ vs RuntimeStore::current）
+3. **`publish()` を「一つの atomic publication」と定義しない**: semantic transaction の唯一の execution boundary のみ
+4. **X4/X2 境界**: commit-before-swap ordering は X4 / completion monotonicity は X2
+
+**反映**（dash A-2.25 / §6.4-X4 に反映済み）:
+- **INV-X4-6 / INV-X4-7 追加**（dual-pointer consistency / 独立 source 禁止）
+- **RuntimeWorldAuthority の move/copy 禁止**（static_assert）
+- **Bootstrap/shutdown は lifecycle-controlled publish**（sole physical publish gateway = RuntimeWorldAuthority）
+- **Test 7 → commit-before-swap ordering / Test 9（dual-pointer consistency）/ Test 10（INV-X4-7）追加**（8本→10本）
+- **実装順序 X4-0〜X4-10 → X4-0〜X4-11**（X4-7 publish() 導入独立・X4-9 全 direct caller 排除）
+
+**優先修正3点**（getCurrent ≠ consumeWorldHandle 明文化 / commit-before-publishAndSwap invariant / dual-pointer consistency test）を反映し、**X4-B は実装着手可能な GO**。
+
+**次回の実装手順**: 設計固定（X2/X1/X4/X3 invariant・INV-X4-1〜7 含む）→ P2-1〜P2-4 → X5 → X6 → X2 → X1 → X4（X4-A→X4-B）→ X3。
+
+### 9-38. 🟡 X1-X6 deferred 経路・OwnerChannel・LifetimeState・overflow ring 調査（2026-08-09 十八次・別視点4）
+
+**調査観点**: deferred publish 経路の詳細・OwnerChannel 実装・LifetimeState::pendingIntentCount と X5/X6 の関係・overflow ring と X6 の関係・deferred と X2 completion の整合。
+
+**確定事項**（dash A-2.26 / §6 に反映済み）:
+1. **OwnerChannel は SPSC**（OwnerChannel.h:38-118）: enqueue = Non-RT 単一 / take = ISR 単一。capacity 256。key = (sequenceId, epoch, mappedGeneration)。enqueue は key 重複 reject / take は single-transfer drain。**owner.get() は non-owning / std::move(owner) のみ transfer**（X4 Test 8 の根拠）
+2. **LifetimeState::pendingIntentCount() は retire intent の pending 数**（ISRRetire.cpp:182-189: enqueueTicket_ - dequeuePos_ + fallbackCount_）。Commit.cpp:462,604 が Coordinator pendingIntentCount_ に混入。**X5/X6 の transport counter と完全に別 semantic**。setRetireBacklogCount への同値設定は妥当
+3. **deferred は単一スロット**（Orchestrator.cpp:360-409: deferredSlot_ + hasDeferred_）。deferredPublicationCount は 0/1 のみ
+4. **overflow ring は retire 系**（RetireOverflowRing / coordinatorDeferredRing_ / lastResortQueue_）: X6 の quarantineRingResidencyCount_ と独立。drainOverflowRing の再注入は LifetimeState 側
+5. **deferred publish と contiguous completion**（REPAIR_PLAN2.md:914）: deferred は単一スロット（上書き）。INV-X2-6 は「deferred 非発生時」前提と明示。cancel された古い seqId の receipt は来ず waitFor はタイムアウト（250ms）で Transferred
+6. **recoveryIntentQueue_ の SPSC 確認**（:434, 256）: Producer=CoordinatorLoop / Consumer=Builder Loop。X1 と整合
+
+**結果**: deferred・OwnerChannel・LifetimeState・overflow ring の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-39. 🟡 二十次レビュー反映（X4-B の Store ownership・publish() 責務・INV-X4-8・Test 定義修正）（2026-08-09）
+
+**レビュー観点**: X4 詳細改修計画（十七次〜十九次反映版）を `ConvoPeq(20260809-022629).md` と `Practical Stable ISR Bridge Runtime.md` を基準に再検証。
+
+**総合判定**: X4-A/X4-B 分離と「RuntimeWorldAuthority を物理 write authority にする」方針は妥当。**「Authority が Store を所有」と「AudioEngine の中で安全に所有」は別問題**。必須修正4点を反映すれば実装 GO。
+
+**反映**（dash A-2.27 / §6.4-X4 に反映済み）:
+1. **Store ownership / constructor 確定**: コンストラクタは外部 Store を受け取らず、Authority 自身が Store identity を形成（`runtimeStore_()` + `writeAccess_(runtimeStore_.acquireWriteAccess())`）
+2. **publish() の責務限定**: 現行 publishWorld（:100-141）は seal/validate/swap/didPublish/willRetire/retire まで担う。publish() は「validate + commit + release + swap + return oldWorld」に限定。didPublish/willRetire/retire は PublishExecutor → completion → LifetimeState へ委譲
+3. **read API 新設**: getCurrent()（ISR metadata source）と分離し、physical RuntimeStore read 専用 API（observePublishedWorld / acquireReadToken / consumeWorldHandle(ReadToken)）を Authority に新設
+4. **Test 7 は commit-before-swap ordering**（X2 側は completion monotonicity と分離）
+5. **INV-X4-8 追加**（source-role separation）: currentWorld_ = metadata observation alias / RuntimeStore::current = physical publication source。delete/retire/unique_ptr/shared_ptr 変換を禁止
+6. **INV-X4-6 の identity 構成要素確定**: sequenceId + publicationEpoch + mappedGeneration（version/boundary は metadata）
+7. **Test 3 厳密化**: `RuntimeStore<RuntimePublishWorld, ...>::WriteAccess` まで追う。allowed = RuntimeWorldAuthority / forbidden = RuntimeIntentCoordinator, PublishExecutor, RuntimePublishAuthority, AudioEngine, Builder, DSPTransition
+8. **Test 6 修正**: write-capable Store のみ禁止。read-only Store reference（const RuntimeStore&）は read API が保持してよい
+9. **RuntimePublishAuthority は WriteAccess を所有してはいけない**（二階層化禁止・INV-X4-3 強化）
+10. **Bootstrap/shutdown clear は publish() と統合しない**（clearPublishedRuntimeSnapshotsNonRt は別 API。shutdown semantic は X3）
+11. **実装順序を X4-B-0〜X4-B-11 に細分化**（rollback point 多数確保）
+
+**最終評価**: 4点反映後、**X4-B = 実装 GO**。X4 の目的は「physical write capability を RuntimeWorldAuthority に一意化すること」と固定（currentWorld_ / RuntimeStore::current の二重性自体は X4 で解消しない）。
+
+**次回の実装手順**: 設計固定（X2/X1/X4/X3 invariant・INV-X4-1〜8 含む）→ P2-1〜P2-4 → X5 → X6 → X2 → X1 → X4（X4-A→X4-B-0〜B-11）→ X3。
+
+### 9-40. 🟡 X1-X6 キュー基盤・generation・free list・複数 Producer 調査（2026-08-09 十八次・別視点5）
+
+**調査観点**: X5/X6 の core である intentQueue_ の基盤（MpscBoundedRing）の内部構造・producer hole・RuntimeBuildSnapshot の generation・X2 receipt の複数 Producer・X3 reclaim の free list ロックを実コードで検証。
+
+**確定事項**（dash A-2.28 / §6 に反映済み）:
+1. **MpscBoundedRing の producer hole と X5/X6 counter の整合**: push は reservation（CAS :76）→ payload 書込み（:80）→ seq release（:81）の2段階。**push は publication 完了後に return** するため producer hole は push 内で完結。X5 の fetchAdd 先行設計（counter +1 → push → 失敗 rollback）は、producer hole 中に counter が一瞬過大になるが push の return 後は必ず収束
+2. **RuntimeBuildSnapshot.generation と X1 recoveryGeneration**: buildSource.generation は消費時（RebuildDispatch.cpp:968-969）に現在の rebuildRequestGeneration で上書き。**coalesce の generation 判定は PendingRecoveryAdmission.recoveryGeneration を使う**（buildSource.generation ではない）
+3. **X2 waitFor の複数 Producer（5箇所）**: PrepareToPlay.cpp:155,277 / ReleaseResources.cpp:175 / Timer.cpp:918 / Transition.cpp:25 / PublicationExecutor.cpp:53。mutex は複数 Producer 間の cv 同期にも必要
+4. **X3 reclaim() の freeListMutex_ ロック**: reclaim()（ISRDSPHandle.cpp:129-148）は freeListMutex_（:133）をロックし freeSlots_ 返却（:146-147）。両モードとも同一の reclaim() を使用。RT からは呼ばない
+5. **kDispatchTable の 1:1 mapping 確認**（ISRIntentDispatcher.h:60-65）: QuarantineIntentHandler は intentQueue_ と quarantineFallbackQueue_ の両方から dispatch（ProcessIntent.cpp:32-33 + :36-37）
+
+**結果**: キュー基盤・generation・free list・複数 Producer の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-41. 🟡 二十一次レビュー反映（X4-B の型・constructor・member declaration 固定 + CRTP コンパイル検証）（2026-08-09）
+
+**レビュー観点**: X4 計画を `ConvoPeq(20260809-022629).md` を基準に照合。**X4-A = GO / X4-B = 設計として GO 寄り**。実装開始前に4点（member declaration order / RuntimeStore の template dependency / publish() ownership transfer / Bootstrap・shutdown clear の初期化破棄順序）を実コードで固定する必要あり。
+
+**反映**（dash A-2.29 / §6.4-X4-B に反映済み）:
+1. **① member declaration order**: runtimeStore_ → writeAccess_ → ownerChannel_ → lifetime_ → registry_（WriteAccess が生きている間に Store が破棄されない）
+2. **② CRTP 的 template 依存の実コンパイル検証（g++ -std=c++20）**:
+   - `RuntimeStore<World, Self>` の CRTP は既存実績あり（RuntimePublicationCoordinator.h:34）
+   - `friend Owner`（:81）は incomplete type でも動作 / `static_assert(is_class_v<Owner>)`（:16）は incomplete でも well-formed
+   - **`Store::Owner` はコンパイル不可**（RuntimeStore に using Owner が無い）→ **`using OwnerType = Owner` を追加**すれば Test 1 が成立（COMPILE_OK / RUN_OK 検証済み）
+   - member としての WriteAccess は Store の complete type が必要（RuntimeWorldAuthority.h が core/RuntimeStore.h を include）。RuntimeState は forward decl で十分
+   - 循環依存なし（RuntimeStore.h は AtomicAccess.h のみ include）
+3. **③ publish() の ownership transfer（失敗経路・null経路）**: null owner → Failed / validate 失敗 → Rejected / null→null swap → Failed。null 公開は shutdown clear（clearPublishedRuntimeSnapshotsNonRt）が担当
+4. **④ Bootstrap / shutdown clear の初期化・破棄順序**: ctor（runtimeStore_ + writeAccess_ acquire）→ Bootstrap publish → shutdown clear → CoordinatorLoop join → worldAuthority_ 破棄（writeAccess_ → runtimeStore_ 逆順）
+
+**結論**: X4-B の CRTP 懸念（incomplete-type / header include / nested WriteAccess）は全て解消済み。**X4-B は設計 GO・実装開始可能**。`RuntimeStore.h` への `using OwnerType = Owner` 追加が唯一の前提追加。
+
+### 9-42. 🟡 X1-X6 shutdown 順序・保留再試行・shutdown 相互作用調査（2026-08-09 十八次・別視点6）
+
+**調査観点**: shutdown シーケンスの実コード詳細（releaseResources / ~AudioEngine の2系統）・X3 の pendingReclaimHandles_ 再試行機構・shutdown と X1/X5/X6 の相互作用を実コードで検証。
+
+**確定事項**（dash A-2.30 / §6 に反映済み）:
+1. **X3 CloseReaderRegistration 挿入位置（2系統）**: 系統1 releaseResources（:34-404）・系統2 ~AudioEngine（CtorDtor.cpp:92-231）。**両系統とも graceful drain（activeReaderCount==0 待ち）の前に closeReaderRegistration() を呼ぶ**（DrainRetire フェーズ開始前）
+2. **X3 drainDeferredRetireQueues の保留再試行機構**（Retire.cpp:41-114）: setReclaimInFlightCount(1)→tryReclaim→reclaim→setReclaimInFlightCount(0) + pendingReclaimHandles_ 抽出→isRetired ガード（:75）→epoch 確認（:79）→requestReclaim（:83）→失敗時再登録。**X3 の reclaim(RuntimeEBR) はこの機構を維持**
+3. **X1 shutdown 中の durable admission 破棄**: Builder 消費ループ（:901）は shutdown 中スキップ。**requestShutdown() 時に recoveryAdmissionPending_ = false + pendingRecoveryAdmission_ クリア**（isFullyDrained の `recoveryAdmissionPending == false` を成立）
+4. **X6 shutdown 時 quarantine counter 自然収束**: destroyForShutdown（:387）→ destroyQuarantineSlot（:390）→ lifetime().reclaim（:392）。quarantineResidentCount_ は 0 / RetireQuarantineStore::residentCount() は drainAllUnsafe（:376）で 0
+5. **X5 shutdown 時 counter 収束**: CoordinatorLoop は isShutdownInProgress() が false の間 processIntent を続行し intentQueue_ を drain。join 後残留は isFullyDrained が false（正常）
+
+**結果**: shutdown 順序・保留再試行・shutdown 相互作用の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-43. 🟡 二十二次レビュー反映（X4-B の commit ownership・Test 9 identity 限定・RuntimePublishAuthority 一切所有禁止）（2026-08-09）
+
+**レビュー観点**: 6.4-X4 詳細改修計画を `ConvoPeq.md` を基準に一次レビュー。**X4-A/X4-B 分離・RuntimeStore 物理 ownership 移動・getCurrent() 非流用は妥当**。実装前に必須修正3点。
+
+**反映**（dash A-2.31 / §6.4-X4-B に反映済み）:
+1. **commit 二重化の危険（必須修正1）**: 現行 PublishExecutor（RuntimePublishExecutor.h:42-57）は既に authority.commit() を実行。**案A（publish() が transaction boundary）を採用**: PublishExecutor から authority.commit() を完全削除し、publish() 内部（validate → commit → owner.release() → publishAndSwap() → return previous）に内包
+2. **Test 9 は identity equality に限定（必須修正2）**: pointer equality（currentWorld_.load() == runtimeStore.current.load()）を要求しない。PublicationIdentity（sequenceId + publicationEpoch + mappedGeneration）の一致のみ検証
+3. **RuntimePublishAuthority は一切所有しない（必須修正3）**: Store / WriteAccess / publishAndSwap 直接呼 / 代替 authority / Store に対する write capability を一切所有しない。**production code から RuntimePublishAuthority::create() 自体を削除**（factory が Store を生成できると INV-X4-3/X4-5 を破る）
+4. **Test 6 の write-capable 条件厳密化**: `RuntimeStore<RuntimePublishWorld, Owner>` の write-capable instance について `Owner == RuntimeWorldAuthority` を要求
+5. **旧記述削除**: 「getCurrent() が consumeWorldHandle() の置換先になり得る」は既に削除済み（NO-GO 規範のみ維持）
+
+**最終評価**: 設計方針 GO。必須修正3点を反映した dash(8) は **X4-B 実装着手可能**。
+
+### 9-44. 🟡 X1-X6 read path・epoch 判定・rebuild 相互作用調査（2026-08-09 十八次・別視点7）
+
+**調査観点**: X3 の core（EpochDomain の getMinReaderEpoch / tryReclaim / detectStuckReaders）、X1 の isRebuildObsolete と通常 rebuild の相互作用、X2/X4 の read path（makeRuntimeReadHandle / observePublishedWorld）、X3 の ISRRetireRouter 経由の reader 登録を実コードで検証。
+
+**確定事項**（dash A-2.32 / §6 に反映済み）:
+1. **X3 getMinReaderEpoch（:199-233）**: quarantined Reader は safe-epoch 計算から除外（:211-215）/ depth==0 は除外（:220-221）/ 最小 epoch を取る。X3 の reclaim 判定の核心。readerRegistrationClosed で新規登録を封じれば minReaderEpoch が新規 reader で下がらない
+2. **X3 tryReclaim（:371-381）+ detectStuckReaders（:426-470）**: tryReclaim = deferredDeletionQueue.reclaim(getMinReaderEpoch())。detectStuckReaders は3パス評価（Chronic→Warning→EpochGap）で stuck Reader 検出 → quarantine → getMinReaderEpoch から除外
+3. **X3 ISRRetireRouter 経由の readerRegistrationClosed 伝播**: ISRRetireRouter::registerReaderThread（:71）は EpochDomain に委譲。**EpochDomain::registrationClosed_ 設定で router / RCUReader 経由の全登録が自動的に封じられる**。audioThreadRcuReader は EpochDomain を直接 provider に持つ
+4. **X1 通常 rebuild と Recovery の相互作用**: isObsolete（:976-978）は build 前（:980）と build 後（:1011）の2箇所。Recovery 消費は通常 rebuild の前に実行され isObsolete チェックの対象外。Recovery は recoveryGeneration = currentRebuildRequestGeneration（:966-967）で暗黙的に最新化
+5. **X4 makeRuntimeReadHandle の read path（:3099-3139）**: acquireReadToken(runtimeStore) + consumeWorldHandle（:3116-3117）+ 単調性監視（:3128-3135）。X4-B-9 の置換対象は read token 2箇所、単調性監視は AudioEngine 側で維持。呼び出し元多数
+6. **X1 isRebuildObsolete（:2464）**: generation != currentRebuildRequestGeneration の単純不一致判定
+
+**結果**: read path・epoch 判定・rebuild 相互作用の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-45. 🟡 二十三次レビュー反映（RecoveryAdmissionClosed・X2 timeout semantics・X4 swap failure・Phase 0・必須 Acceptance Criteria）（2026-08-09）
+
+**レビュー観点**: 最新ソース `ConvoPeq(20260809-022629).md` を基準に、dash の最新版設計（X1〜X6 / X4-A・X4-B）を `Practical Stable ISR Bridge Runtime.md` の設計原則と照合。
+
+**総合判定**: **P2-1〜P2-4 = 実装GO / X5 = 実装GO / X1/X2/X3/X6 = invariant 固定後実装GO / X4 = 設計GO（段階実装必須）**。
+
+**新規反映**（dash A-2.33 / §6 に反映済み）:
+1. **X1 RecoveryAdmissionClosed（§4.3）**: `recoveryAdmissionPending_` だけでは不十分。`AdmissionClosed + RecoveryAdmissionClosed + BuilderStopped` を shutdown state machine に含める（build gap 中の isFullyDrained 早期 true 防止）
+2. **X2 timeout semantics（§6.1）**: `timeout ≠ publish failure`。timeout を failure と誤解して rollback すると double ownership / double publish。lifecycle を `Allocated → Transferred → Committed → Completed` として固定
+3. **X4 swap failure（§20）**: `swap failure is architecturally impossible / handled` を acceptance criterion に。publishAndSwap は単一原子 exchange で失敗しない。null→null swap は異常（validate で事前検出）
+4. **Phase 0（§22）**: invariant/specification freeze を最優先。実装順序を Phase 0〜Phase 7 に明確化（X4 は X2/X1/X3 の意味確定後に触る）
+5. **必須 Acceptance Criteria 表（§23）**: X1-5/X1-6/X2-6/X3-4×2/X4-3/X4（3項目）/X5/X6（2項目）を architectural test に必須化
+
+**最終評価**: 改修案は採用可能。**X1/X2/X3/X4/X6 の invariant をコード化・テスト化してから実装する**という条件付き GO。
+
+**次回の実装手順**: Phase 0（invariant/specification freeze）→ P2-1〜P2-4 → X5 → X6 → X2 → X1 → X4（X4-A→X4-B-0〜B-11）→ X3 → 統合 shutdown/soak。
+
+### 9-46. 🟡 X1-X6 Bridge 型・物理削除・StateOwner ledger・buildSource 供給調査（2026-08-09 十八次・別視点8）
+
+**調査観点**: X4 の core Coordinator の Bridge 型（RuntimePublicationBridge）、X3 の DSPLifetimeManager 物理削除（enqueueWithRetry / destroyRolledBackDSP）、X2 の StateOwner ledger、X1 の currentBuildSnapshot_ 供給を実コードで検証。
+
+**確定事項**（dash A-2.34 / §6 に反映済み）:
+1. **X4 RuntimePublicationBridge（:3446-3500）**: validate / didPublish / willRetire / retire を担う。**X4-B 後も Bridge は残る**（didPublish/willRetire/retire を PublishExecutor の Execution tail から呼ぶ）。publish() は validate に Bridge を使うが、didPublish/willRetire/retire は publish() の外。Bridge は AudioEngine 側に残る
+2. **X3 reclaim と物理削除の分離**: 物理削除（DSPCore* delete）は retire path の enqueueWithRetry（DSPLifetimeManager.cpp:49, destroyDSPCoreNode を deferred delete）が担当。reclaim は slot 遷移 + free list 返却のみ。X3 の reclaim は物理削除を含まない
+3. **X2 StateOwner ledger**: onSubmitted/onBuilt/onValidated/onPublished/onRetired/onReclaimed 等を記録。**X2 の completion watermark と独立**（診断 ledger）。onPublished は trySubmitImpl で記録、onPublishCommitted とは別タイミング
+4. **X1 currentBuildSnapshot_ 供給**: enqueuePublicationIntentForRuntimeCommit が sealedSnapshot 受領時に更新（Commit.cpp:704-705）。初期状態 sealed=false の Recovery は Builder の :917 チェックで skip（正しい動作）。X1 の durable admission は sealed=false を入れる前に検証すべき
+
+**結果**: Bridge 型・物理削除・StateOwner ledger・buildSource 供給の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-47. 🟡 二十四次レビュー反映（isFullyDrained measurement predicate・pendingIntentCount_ 命名・X4 dual-pointer 暫定正常状態）（2026-08-09）
+
+**レビュー観点**: 情報源 `ConvoPeq(20260809-022629).md` を基準コードとして再参照し、dash(10) を ISR/Immutable Snapshot Runtime/RCU/ownership/lifetime/publication ordering/shutdown の観点から検証。
+
+**総合判定**: **P2-1〜P2-4 = GO / X5 = GO / X1/X2/X3/X6 = 条件付きGO / X4-A = GO / X4-B = GO（段階実装）**。一括実装 = NO-GO。Phase 0 の invariant freeze を実施してから P2→X5→X6→X2→X1→X4→X3 の順に実装（条件付き承認）。
+
+**新規反映3点**（dash A-2.35 / §6 に反映済み）:
+1. **isFullyDrained() を単独の truth source にしない**: `ShutdownPhase + ProducerQuiescence + AdmissionClosed + RecoveryAdmissionClosed + BuilderStopped + isFullyDrained()` を組み合わせる。**isFullyDrained() は measurement predicate であり shutdown authority そのものではない**（§6.7）
+2. **pendingIntentCount_ の命名・コメント固定**: Observe+Quarantine+Recovery の queue residency + producer reservation（Publish と RetireIntent 除外）。将来は transportIntentResidency_ 等への改名を検討。コードコメントで「This counter excludes Publish and RetireIntent.」を固定（§1.1）
+3. **X4 dual-pointer を「暫定正常状態」として明示**: `X4-B: write authority singularization / Future: read-source singularization` と分離。publish transaction 完了後 INV-X4-6（同一 PublicationIdentity）を保証するため正常動作として許容（§6.4-X4-B）
+
+**最終評価**: dash(10) は改修方向として妥当。**「設計方針として採用可能。Phase 0 の invariant freeze を実施してから P2→X5→X6→X2→X1→X4→X3 の順に実装する」という条件付き承認**。
+
+**次回の実装手順**: Phase 0（invariant/specification freeze）→ P2-1〜P2-4 → X5 → X6 → X2 → X1 → X4（X4-A→X4-B-0〜B-11）→ X3 → 統合 shutdown/soak。
+
+### 9-48. 🟡 X1-X6 receipt 状態・テスト基盤・admission 判定調査（2026-08-09 十八次・別視点9）
+
+**調査観点**: X2 の pendingReceipt_ / markReceiptReclaimComplete の関係、X1 の既存テスト基盤（testRecoveryRequestEnqueueAndPop）、X5 の PublicationAdmission::evaluate（admission 判定と counter の関係）を実コードで検証。
+
+**確定事項**（dash A-2.36 / §6 に反映済み）:
+1. **X2 pendingReceipt_ と PublishReceiptWaiter の区別**: AudioEngine に2種類の receipt が存在。receipt #1 `pendingReceipt_`（:4683）= Timer の retire 用（storeReceipt:1157 / resetReceipt:1176 / retirePublishedDSP:Timer.cpp:1774 / markReceiptReclaimComplete:ProcessIntent.cpp:41）。**X2 の completion watermark と無関係**。receipt #2 `PublishReceiptWaiter`（:3613-3635）= X2 の completion watermark（onPublishCommitted → notifyPublishReceipt → complete()）。**X2 の設計は receipt #2 のみを対象**
+2. **X1 testRecoveryRequestEnqueueAndPop（:609-624）**: `submitRecoveryRequest → popRecoveryRequest` の 1-hop transport のみ検証（buildSource.sealed=true、2回目 pop が null = 1-hop 保証）。**X1 の拡張は queue full → durable 化 → takePendingRecoveryAdmission の流れを追加**
+3. **X5 admission 判定と counter**: PublicationAdmission::evaluate（:6-61）は5段階の admission（Shutdown/Generation/HealthState/Pressure/Fading→Deferred）。**X5 の counter は admission Accepted 後の enqueue で増加**。Rejected/Deferred は counter に影響しない。Deferred は単一スロット（再 enqueue 時に counter +1）
+
+**結果**: receipt 状態・テスト基盤・admission 判定の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-49. 🟡 X1-X6 ReaderSlot 構造・destroyForShutdown・intentId 採番・IR 転送調査（2026-08-09 十八次・別視点10）
+
+**調査観点**: X3 の ReaderSlot 構造（EpochDomain.h:531-547）、X6 の DSPQuarantineManager::destroyForShutdown（ISRDSPQuarantine.cpp:130-155）、X1 の nextRecoveryIntentId_ 採番（ISRRuntimePublicationCoordinator.cpp:657）と RuntimeBuilder の IR 転送（RuntimeBuilder.cpp:447）を実コードで検証。
+
+**確定事項**（dash A-2.37 / §6 に反映済み）:
+1. **X3 ReaderSlot 構造（:531-547）**: epoch / depth / enterCount / residencyStartTimestampUs / ownerThreadId / ownerTag / quarantineFlags（0x01 quarantined / 0x02 pending）。**closeReaderRegistration() は新規登録のみ拒否し、既存 ReaderSlot は解放しない**（exitReader で epoch = kInactiveEpoch に戻るのみ）。graceful drain は activeReaderCount()==0（全 slot depth==0）を待つ。quarantineFlags(0x01) の Reader は getMinReaderEpoch から除外。X3 の isQuiescent = readerRegistrationClosed AND activeReaderCount == 0
+2. **X6 destroyForShutdown（:130-155）**: quarantineActiveFlags_[slot] を false（:141）→ auditLog の未解決エントリを resolved に（:146-151）→ compactAuditLogLocked（:152）。**quarantineResidentCount_（= residentCount() の走査）が自然に 0 へ**。X6 の新たな shutdown 処理は不要
+3. **X1 nextRecoveryIntentId_ 採番と IR 転送**: nextRecoveryIntentId_（:435, atomic）は submitRecoveryRequest（:657）で fetch_add(1, relaxed)。**durable 化後も採番は継続**。IR 転送（RuntimeBuilder.cpp:447 transferIRStateFrom(engine.getConvolverProcessor())）は build 時に現在の UI processor から取得。**buildSource は IR データを内包しない**（metadata/fingerprint のみ）ため durable admission は軽量。coalesce 後も IR 実体は build 時に転送されるため stale IR の懸念なし
+
+**結果**: ReaderSlot 構造・destroyForShutdown・intentId 採番・IR 転送の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-50. 🟡 二十五次レビュー反映（INV-ISR-01〜07・X1 ShutdownDiscard・X3 意味論先行固定・最終判定）（2026-08-09）
+
+**レビュー観点**: `ConvoPeq(20260809-022629).md` を基準コードとして、REPAIR_PLAN2-dash を L1〜L4（C++/Thread Safety → Queue/Counter/State Machine → ISR/RCU/Lifetime → Architectural Authority Singularization）の4層で検証。
+
+**総合判定**: **P2-1〜P2-4 = GO（そのまま実装してよい）/ X1/X2/X6 = 条件付きGO / X3 = GO / X4 = GO（段階実装）/ X5 = GO**。Recovery coalesce / force reclaim = NO-GO（撤回が正しい）。一括実装 = NO-GO。
+
+**新規反映**（dash A-2.38 / §6 に反映済み）:
+1. **INV-ISR-01〜07（§23・最上位 ISR 不変条件）**: INV-ISR-01（isFullyDrained 完全条件）/ 02（pendingIntentCount_ = residency+reservation）/ 03（semantic 混同禁止）/ 04（ShutdownQuiescent は readerRegistrationClosed 必須）/ 05（committed ≠ completed）/ 06（currentWorld_ は non-owning）/ 07（dual pointer identity consistency 検証可能）— §6 冒頭に追加
+2. **X1 shutdown discard を「ShutdownDiscard」として明示（§8.1）**: `Recovery lost` と `ShutdownDiscard` を同じ意味にしない。Running 中の queue full → durable pending = loss ではない（INV-5 保証が機能）。Shutdown 中の durable pending → explicit lifecycle discard。**Telemetry 上で2つを分ける**
+3. **X3 の意味論を X4 より先に固定（§22）**: Lifetime correctness（X3）を先に固定してから Publication authority topology（X4）を変更。X3 の意味論（INV-X3-4 / INV-ISR-04）は Phase 0 で X4 より先に固定
+4. **X2 の「CAS 化すれば安全」は誤り**: completion semantic が重要（既に INV-X2-6 で固定済み）
+
+**残余リスク（§14）**: X4-B 完了後も currentWorld_ / RuntimeStore::current の dual publication/read surface は残る。X4-B 完了 = publication write authority の Singularization（read-source singularization は Future）。
+
+**最終評価**: **「P2-1〜P2-4 は実装GO。X1〜X6 は設計として概ね正しいが、段階実装が必要。特に X3 の lifetime closure と X4 の dual publication surface を最終的な ISR Architecture Review で再確認すること」**。
+
+**次回の実装手順**: Phase 0（invariant/specification freeze・INV-ISR-01〜07 含む）→ P2-1〜P2-4 → X5 → X6 → X2 → X1 → X4（X4-A→X4-B-0〜B-11）→ X3 → 統合 shutdown/soak。
+
+### 9-51. 🟡 X1-X6 cv 動作・retire 実装・BuildError 種類調査（2026-08-09 十八次・別視点11）
+
+**調査観点**: X2 の PublishReceiptWaiter の cv 動作詳細、X3 の ISRRetireRouter::retire 実装、X1 の RuntimeBuilder::build の BuildError 種類、X4 の read API 現状を実コードで検証。
+
+**確定事項**（dash A-2.39 / §6 に反映済み）:
+1. **X2 cv 動作（:3613-3635）**: complete は mutex 下で lastCompleted_ 更新 → cv_.notify_all()。waitFor は `cv_.wait_until(lock, deadline, [&]{ return seqId <= lastCompleted_; })`。**wait_until は predicate 付きのため lost wakeup 安全**（notify 前に waitFor が始まっても即復帰）。deadline 到達後 predicate が false なら false
+2. **X3 ISRRetireRouter::retire（:149-158）**: enqueueWithRetry(ptr, deleter, currentEpoch(), Generic) に委譲。enqueueWithRetry（:161-179）は通常 enqueue → 失敗時 tryReclaim → enqueue を最大2回リトライ。QueuePressure 以外（Shutdown 等）は即時終了。**reclaim と retire は独立**（X3 は reclaim 側のみ変更）
+3. **X1 BuildError 種類（:55-71）**: InvalidInput/ResourceUnavailable/MKLFailure/ConvolverFailure/PrepareFailure/WarmupFailed/InternalError。**一時的 failure は次サイクルで自然に再試行**、永続的 failure は drop 相当。**X1 の新たな retry ループは不要**
+4. **X4 read API 現状**: RuntimeWorldAuthority に read API は未実装。現状は全て RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore) を直接呼ぶ。**X4-B-9 で専用 read API に置換**
+
+**結果**: cv 動作・retire 実装・BuildError 種類の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-52. 🟡 X1-X6 Execution tail・compactAuditLog・DeferredDeletionQueue reclaim 調査（2026-08-09 十八次・別視点12）
+
+**調査観点**: X2 の DSPTransition（publish-completion の execution tail）、X6 の compactAuditLogLocked（ISRDSPQuarantine.cpp:158-172）、X3 の DeferredDeletionQueue::reclaim（DeferredDeletionQueue.h:108-119）を実コードで検証。
+
+**確定事項**（dash A-2.40 / §6 に反映済み）:
+1. **X4 Execution tail の3構成要素**: tail-1 `ctx.transition.onPublishCompleted(...)`（DSPTransition.h:49-90）= DSP activate/crossfade/retire（Crossfade Registration Authority・registerCrossfade は DSPTransition のみ）。tail-2 `advanceRetireEpoch()` = EBR。tail-3 `onPublishCommitted(seqId)` = X2 の completion。**tail-1 と tail-3 は独立**。X4-B の publish() は tail を含まない
+2. **X6 compactAuditLogLocked（:158-172）**: kCompactThreshold = 1024（:161）、resolved エントリが1024超えた場合のみ compaction。先頭の resolved 連続を削除（:167-171）。auditLog_ は vector。X6 の新規介入は不要
+3. **X3 DeferredDeletionQueue::reclaim（:108-119）**: isOlder(entry.epoch, minReaderEpoch) のエントリのみ deleter 実行。**FIFO 前提**（先頭が不安全なら break）。isOlder（:399-402）= static_cast<int64_t>(a-b) < 0（wraparound 対応）。X3 の reclaim は slot 遷移、物理削除は DeferredDeletionQueue::reclaim が epoch 安全に実行。ShutdownQuiescent では全 Retire が安全判定
+
+**結果**: Execution tail・compactAuditLog・DeferredDeletionQueue reclaim の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-53. 🟡 X1-X6 通常 rebuild 後半・quarantineReader・crossfade decision 調査（2026-08-09 十八次・別視点13）
+
+**調査観点**: X1 の通常 rebuild 後半処理（RebuildDispatch.cpp:1024-1138）、X3 の quarantineReader / unquarantineAllReaders / verifyReaderInvariants（EpochDomain.h:264-367）、X2 の trySubmitImpl の crossfade decision と deferred の関係を実コードで検証。
+
+**確定事項**（dash A-2.41 / §6 に反映済み）:
+1. **X1 通常 rebuild 後半**: IR rebuild（:1039, rebuildAllIRsSynchronous）→ Warmup（:1051, validateWarmup + retryable 判定 :1054）→ refreshLatency + fadeIn（:1085,1088）→ 投影値更新（:1104-1115）→ Commit（:1138, enqueuePublicationIntentForRuntimeCommit）。**通常 rebuild と Recovery は同一 commit 関数（:1138 vs :971）**。X1 の Recovery 消費はこの後半の前に実行
+2. **X3 quarantineReader / unquarantineAllReaders / verifyReaderInvariants**: quarantineReader（:264-311, depth==0 即座 quarantine / depth>0 pending→exitReader で昇格）。unquarantineAllReaders（:313-321, 全 slot flags 0 に）。verifyReaderInvariants（:338-367）。**X3 の readerRegistrationClosed は quarantine と独立**（quarantine は stuck 解除、registrationClosed は新規登録封鎖）
+3. **X2 trySubmitImpl の crossfade decision と deferred**: cfDecision = CrossfadeAuthority::evaluate（:193-206）→ needsCrossfade なら transitionActive（:221-227）→ executor_.publish（:263）。**crossfade decision は Deferred の発生源**（hasFadingRuntimeInWorld → DeferredFadingActive → deferredSlot_ 退避）。**deferred 中は新 publish の completion は発生しない**（re-enqueue 後）
+
+**結果**: 通常 rebuild 後半・quarantineReader・crossfade decision の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-54. 🟡 二十六次レビュー反映（X1 lease 方式・X3 INV-X3-5・X4 INV-X4-A/B/C）（2026-08-10）
+
+**レビュー観点**: `REPAIR_PLAN2-dash(20260810-002710)` を最新版として、`ConvoPeq.md` の最新ソースコードと照合して再評価。前回版よりかなり完成度が上がり、**X4-B は条件を満たせば実装GO できる設計に到達**。ただし実装前に修正すべき重要論点2つ。
+
+**総合判定**: **P2-1〜P2-4 = GO / X5 = GO / X6 = 条件付きGO / X2 = 条件付きGO / X3 = 条件付きGO / X4-B = GO（strict acceptance criteria）/ X1 = 修正後GO**。
+
+**必須修正2点・強く推奨1点**（dash A-2.42 / §6 に反映済み）:
+1. **X1 の Pending/Building 矛盾（必須修正1・§9-13）**: `takePendingRecoveryAdmission()` が state クリア（destructive dequeue）なのに build 失敗で「Pending 維持」という矛盾。**take を lease（state transition）に変更**: PendingRecoveryAdmission に `State` enum（NoAdmission/DurablePending/Building）を追加。take は DurablePending → Building へ遷移（クリアしない）。build 失敗（transient）は Building → DurablePending へ戻す。obsolete は Discarded。build success は PublishTransport。**INV-X1-1（exactly one durable state）が lease 方式で常に成立**
+2. **X3 の reclaimInFlightCount_ 近似 counter（必須修正2・§16-17）**: `reclaimInFlightCount_ == 0` だけで shutdown drain を判定しない。**INV-X3-5 を追加**: ShutdownQuiescent completion requires `pendingReclaimHandles_.empty() AND reclaimInFlight == 0`。`pendingReclaimHandles_`（:4616, mutex 保護）が reclaim pending の実際の source of truth。isFullyDrained に pendingReclaimHandles.empty() を追加
+3. **X4 の INV-X4-A/B/C（強く推奨・§29）**: `currentWorld_ = observation-only` / `RuntimeStore::current = sole physical RuntimeWorld source` / `No RT API may derive RuntimeWorld ownership/lifetime from currentWorld_`。**Audio Thread は currentWorld_ を RuntimeWorld 取得元として使わない**
+
+**最終判定**: **「設計の骨格は妥当で、P2 と X5 は実装開始可能。X4-B も今回の修正で実装GO まで到達。ただし X1 の Pending/Building 状態矛盾と X3 の pending reclaim accounting は、ISR shutdown correctness に直接関係するため、実装着手前に必ず修正する」**。
+
+**次回の実装手順**: Phase 0（invariant/specification freeze・INV-ISR-01〜07 / INV-X3-5 / INV-X4-A〜C 含む）→ P2-1〜P2-4 → X5 → X6 → X2 → X1（lease 方式）→ X4（X4-A→X4-B-0〜B-11）→ X3 → 統合 shutdown/soak。
+
+### 9-55. 🟡 X1-X6 epoch 取得元・queue capacity・enterReader 詳細・kMaxSlots 調査（2026-08-10 十八次・別視点14）
+
+**調査観点**: X1 の submitRecoveryRequest の epoch 取得（currentWorld_ 由来）、X5/X6 の全 transport queue capacity、X3 の enterReader/exitReader 詳細、X6 の kMaxSlots を実コードで検証。
+
+**確定事項**（dash A-2.43 / §6 に反映済み）:
+1. **X1 epoch 取得元（:650-652）**: submitRecoveryRequest は `consumeAtomic(currentWorld_)` → `world->publication.epoch` で epoch 取得。**PendingRecoveryAdmission.epoch は currentWorld_ から取得**。X4 の INV-X4-A/C との整合: NonRT（CoordinatorLoop）から currentWorld_ を metadata observation（epoch 取得）として使用するのは正当
+2. **X6 queue capacity**: intentQueue_ = 4096（MPSC）/ quarantineFallbackQueue_ = 1024 / recoveryIntentQueue_ = 256（SPSC）/ observeDeferredRing_ = 1024。各 X の対象 queue と capacity が確定
+3. **X3 enterReader / exitReader**: enterReader（:106-130）は epoch を depth++ より先に store（BUG-050）→ depth++。ネスト時は epoch 再設定なし。exitReader（:133-168）は depth-- → 0 で epoch = kInactiveEpoch → pending quarantine（0x02）昇格（CAS）。**enter/exit は registrationClosed の影響を受けない**（既存 Reader の enter/exit は shutdown 中も継続可能）
+4. **X6 kMaxSlots = 256**（ISRDSPQuarantine.h:36）: residentCount() の走査は 256 要素（NonRT で許容）。QuarantineReason::ReceiptReset は X2 の receipt #1 と関係。X6 の設計で kMaxSlots 変更は不要
+
+**結果**: epoch 取得元・queue capacity・enterReader 詳細・kMaxSlots の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+### 9-56. 🟡 X1-X6 evaluateDeferred・QueuePressure 移送・read API 置換対象調査（2026-08-10 十八次・別視点15）
+
+**調査観点**: X2 の evaluateDeferred の stale-discard 判定（PublicationAdmission.cpp:69-91）、X3 の enqueueWithRetry の QueuePressure 移送（ISRRetireRouter.cpp:182-203）、X4 の read API 置換対象一覧を実コードで検証。
+
+**確定事項**（dash A-2.44 / §6 に反映済み）:
+1. **X2 evaluateDeferred（:69-91）**: 1. Shutdown → Discard（ShutdownDiscard）/ 2. TTL（30s）超過 → Discard（StaleDiscard）/ 3. Generation 不一致 → Discard（StaleDiscard）/ 4. Sequence 後戻り → Discard（StaleDiscard）→ Ready。**deferred の cancel 条件が確定**。StaleDiscard された deferred の seqId は re-enqueue されない → completion は発生しない（INV-X2-6 の deferred 例外と整合）
+2. **X3 enqueueWithRetry の QueuePressure 移送（:182-203）**: QueuePressure/QueueFull 時は m_retireQuarantine.quarantine（:190-192）で RetireQuarantineStore へ移送。**queue full は RT 参照中の可能性が高いため即時解放は UAF**。store full 時は delete を絶対しない（:195-199）。Future: runtimeHealth_->notifyQueuePressure（:202）
+3. **X4 read API 置換対象**: RuntimeWorldAuthority に read API は未実装（X4-B-9 で新設）。現状は RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore) 等を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 等）。**X4-B-9 は worldAuthority().readAPI() に一括置換**（getCurrent() は置換先にしない）。単調性監視は AudioEngine 側で維持
+
+**結果**: evaluateDeferred・QueuePressure 移送・read API 置換対象の観点からも X1〜X6 が確定。残る未確定事項なし。

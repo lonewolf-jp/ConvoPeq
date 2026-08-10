@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-09 09:15:23
+> Generated: 2026-08-10 14:57:02
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -325,7 +325,8 @@
             ├── RuntimePublicationCoordinatorTests.cpp
             ├── RuntimeSemanticSchemaValidationTests.cpp
             ├── RuntimeWorldAuthorityProjectionTests.cpp
-            └── ShadowCompareContractTests.cpp
+            ├── ShadowCompareContractTests.cpp
+            └── invariant_INV3_INV5.cpp
 ```
 
 ## 📄 Source Code Contents
@@ -543,6 +544,38 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # JuceHeader.h の生成を ISRSemanticValidationTests より先に行う
     add_dependencies(ISRSemanticValidationTests ConvoPeq)
 
+    # ★ work88 (P2-2): INV-3 / INV-5 不変条件テスト（RuntimePublicationCoordinator 直接使用）
+    #   ISRSemanticValidationTests と同一パターンで ISR*.cpp を同一ターゲットに同梱する。
+    add_executable(invariant_INV3_INV5Tests
+        src/tests/invariant_INV3_INV5.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp     # ★ A2: EpochControl (ctor referenced via LifetimeState)
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(invariant_INV3_INV5Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(invariant_INV3_INV5Tests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(invariant_INV3_INV5Tests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    # JuceHeader.h の生成を invariant_INV3_INV5Tests より先に行う
+    add_dependencies(invariant_INV3_INV5Tests ConvoPeq)
+
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
     )
@@ -657,6 +690,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(MpscBoundedRingTests
         src/tests/MpscBoundedRingTests.cpp
     )
+    # ★ work88 (P2-3): producer-hole 再現テスト（CONVO_TESTING フック）を有効化。
+    #   本番ターゲットには定義しない（ヘッダのフックは CONVO_TESTING 時のみコンパイルされる）。
+    target_compile_definitions(MpscBoundedRingTests PRIVATE CONVO_TESTING=1)
     add_test(NAME MpscBoundedRingTests
         COMMAND MpscBoundedRingTests)
 
@@ -744,6 +780,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(CONVOPEQ_HAS_MKL AND MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
         target_link_libraries(ISRSemanticValidationTests PRIVATE MKL::MKL)
+        target_link_libraries(invariant_INV3_INV5Tests PRIVATE MKL::MKL)
         target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
         # ★ ASan-CMAKE-4 修正（2026-07-31）: FFTBackend.cpp が AlignedAllocation.h
         #   (mkl_malloc/mkl_free) を使用するため MKL::MKL をリンク（include も propagate される）
@@ -759,9 +796,11 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         #   ConvoPeq の PRIVATE 정의は 테스트 타깃에 상속되지 않으므로、
         #   여기서 직접 정의 + MKLROOT/include를 명시적으로 추가して mkl.h 解決을 보장する。
         target_compile_definitions(ISRSemanticValidationTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+        target_compile_definitions(invariant_INV3_INV5Tests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
         target_compile_definitions(ISRSoakTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
         target_compile_definitions(PublicationAdmissionTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
         target_include_directories(ISRSemanticValidationTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+        target_include_directories(invariant_INV3_INV5Tests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
         target_include_directories(ISRSoakTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
         target_include_directories(PublicationAdmissionTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     endif()
@@ -769,6 +808,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
+    target_compile_features(invariant_INV3_INV5Tests PRIVATE cxx_std_20)
     target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
     target_compile_features(NormalRetireDSPHandleCompareTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
@@ -906,6 +946,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ISRRuntimeIdentityGenerators COMMAND ISRRuntimeIdentityTests)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
+    add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
@@ -927,6 +968,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
+        target_compile_options(invariant_INV3_INV5Tests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
         target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
         target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
@@ -945,7 +987,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # テストターゲットに Windows プラットフォーム定義を追加（Debug ビルドでも標準ヘッダーが正しく include されるよう確保）
     if(WIN32)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
-                     ISRSemanticValidationTests RetireGraceSemanticsTests
+                     ISRSemanticValidationTests invariant_INV3_INV5Tests
+                     RetireGraceSemanticsTests
                      NormalRetireDSPHandleCompareTests
                      RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
                      OverlapAuthoritySingularTests ShadowCompareContractTests
@@ -965,6 +1008,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(ISRRuntimeIdentityTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -984,6 +1028,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
     target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
     target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+    target_compile_options(invariant_INV3_INV5Tests PRIVATE /EHsc)
     # ISRSemanticValidationTests は juce_core.cpp をコンパイルするため、
     # コマンドライン NOMINMAX=1 と JUCE の #define NOMINMAX（空）の衝突警告を抑制する。
     # （ConvoPeq 本体と同様の対応。CMakeLists.txt 参照）
@@ -20384,7 +20429,10 @@ void MainWindow::timerCallback()
     if (cliAutomationTelemetryLoggingEnabled)
         return;
 
-    const bool hasActiveDsp = audioEngine.hasActiveRuntimeDSP();
+    // ISR Bridge Runtime: アクティブ判定は published runtime world の current DSP を基準とし、
+    // placeholder スロット（getActiveRuntimeDSP）もフォールバックとして併用する。
+    const bool hasActiveDsp = audioEngine.hasPublishedRuntimeDSP()
+        || audioEngine.hasActiveRuntimeDSP();
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;
     const double sr = audioEngine.getSampleRate();
@@ -22159,9 +22207,15 @@ private:
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <thread>
 #include <type_traits>
 
 #include "audioengine/AtomicAccess.h"
+
+#ifdef CONVO_TESTING
+#  define CONVO_MPSC_TEST_HOOKS
+#endif
 
 #ifdef _MSC_VER
 #  pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -22205,6 +22259,19 @@ public:
                                                  std::memory_order_acq_rel,  // 成功時 acq_rel
                                                  std::memory_order_acquire)) // 失敗時 acquire: 最新 enqueuePos を再観測
                 {
+#ifdef CONVO_TESTING
+                    // ★ work88 (P2-3): producer-hole 再現フック — payload 書込み前に一時停止。
+                    //   testHoleBlockPos_ と一致する reservation 位置のみ、testHoleGate_ が
+                    //   true になるまで待機（デフォルト UINT32_MAX = pass-through、既存テストは
+                    //   非活性）。これにより「reservation 済み・未公開（producer hole）」状態を
+                    //   deterministic に作り、consumer が未書き込み slot を跨がないことを検証する。
+                    if (convo::consumeAtomic(testHoleBlockPos_, std::memory_order_acquire) == pos)
+                    {
+                        convo::publishAtomic(testHoleReady_, true, std::memory_order_release);
+                        while (!convo::consumeAtomic(testHoleGate_, std::memory_order_acquire))
+                            std::this_thread::yield();  // testReleaseHole() 待ち
+                    }
+#endif
                     entries_[pos & kMask] = item;  // payload 書込み（publication）
                     convo::publishAtomic(seq_atom, static_cast<uint32_t>(pos + 1), std::memory_order_release);
                     return true;
@@ -22256,11 +22323,62 @@ public:
             convo::publishAtomic(sequences_[i], static_cast<uint32_t>(i), std::memory_order_release);
     }
 
+#ifdef CONVO_MPSC_TEST_HOOKS
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ★ work88 (P2-3): producer-hole 再現テスト API（CONVO_TESTING 定義時のみ）。
+    //   位置ベース: testHoleBlockPos_ と一致する reservation 位置の push が、payload
+    //   書込み前に testHoleGate_ が true になるまで待機する。デフォルト
+    //   (UINT32_MAX = kNoBlock) では pass-through のため、本番/既存テストには無影響。
+    //   使用例: ① testResetHole() + testSetHoleBlock(0) を producer 起動前に設定
+    //           ② testHoleBlocked() で hook 到達（= reservation 済み・未公開）を待機
+    //           ③ pop が false（producer hole）であることを検証
+    //           ④ testReleaseHole() で payload 公開を許可 → pop が true に
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    static constexpr uint32_t kNoBlock = (std::numeric_limits<uint32_t>::max)();
+
+    /** reservation 位置 pos を producer-hole としてブロックする（producer 起動前に設定すること）。 */
+    void testSetHoleBlock(uint32_t blockPos) noexcept
+    {
+        convo::publishAtomic(testHoleBlockPos_, blockPos, std::memory_order_release);
+    }
+
+    /** ブロック位置を解除（以降の push は pass-through）。 */
+    void testClearHoleBlock() noexcept
+    {
+        convo::publishAtomic(testHoleBlockPos_, kNoBlock, std::memory_order_release);
+    }
+
+    /** ブロック中の producer の payload 書込みを許可する（publication order を解放）。 */
+    void testReleaseHole() noexcept
+    {
+        convo::publishAtomic(testHoleGate_, true, std::memory_order_release);
+    }
+
+    /** フック状態を初期化（新規テストごとに呼ぶこと）。 */
+    void testResetHole() noexcept
+    {
+        convo::publishAtomic(testHoleReady_, false, std::memory_order_release);
+        convo::publishAtomic(testHoleGate_, false, std::memory_order_release);
+    }
+
+    /** producer が hole でブロック中（reservation 済み・payload 未公開）か。 */
+    [[nodiscard]] bool testHoleBlocked() const noexcept
+    {
+        return convo::consumeAtomic(testHoleReady_, std::memory_order_acquire);
+    }
+#endif // CONVO_MPSC_TEST_HOOKS
+
 private:
     alignas(64) std::atomic<uint32_t> sequences_[Capacity];
     alignas(64) T entries_[Capacity];
     alignas(64) std::atomic<uint32_t> enqueuePos_{0};
     alignas(64) std::atomic<uint32_t> dequeuePos_{0};
+#ifdef CONVO_MPSC_TEST_HOOKS
+    // ★ work88 (P2-3): producer-hole テストフック用メンバ（CONVO_TESTING 定義時のみ存在）。
+    alignas(64) std::atomic<bool> testHoleReady_{false};      // producer が hook に到達した通知
+    alignas(64) std::atomic<bool> testHoleGate_{false};       // payload 書込み許可ゲート
+    alignas(64) std::atomic<uint32_t> testHoleBlockPos_{kNoBlock};  // ブロック対象 reservation 位置
+#endif
 };
 
 #ifdef _MSC_VER
@@ -29964,7 +30082,10 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.retireEpoch = static_cast<std::uint64_t>(world->generation);
 
     worldAuthority_.lifetime().emitRetireIntentRT(intent);
-    runtimePublicationBridge_.setPendingIntentCount(worldAuthority_.lifetime().pendingIntentCount());
+    // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止。
+    //   pendingIntentCount_ は Observe/Quarantine/Recovery の transport residency 専用
+    //   （reservation ベースで Coordinator 内部が維持）。RetireIntent 滞留は
+    //   retireBacklogCount_（setRetireBacklogCount）が担当する。
     runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
     const auto pendingIntents = worldAuthority_.lifetime().dequeuePendingRetireIntents();
     convo::publishAtomic(pendingRetireGenerationCount_, static_cast<std::uint64_t>(pendingIntents.size()), std::memory_order_release);
@@ -30106,7 +30227,8 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     convo::fetchAddAtomic(retiredWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     updateMinMetric(oldestRetiredGeneration_, world->generation);
 
-    runtimePublicationBridge_.setPendingIntentCount(worldAuthority_.lifetime().pendingIntentCount());
+    // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止（同上）。
+    //   RetireIntent 滞留は retireBacklogCount_（setRetireBacklogCount）が担当。
     runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
     emitEvidenceTickNonRt(false);
 
@@ -36376,7 +36498,20 @@ namespace
 {
     LatencyBreakdown breakdown;
 
-    auto* dsp = getActiveRuntimeDSP();
+    // ★ ISR Bridge Runtime（602b04a4 回帰修正）:
+    //   アクティブDSPは RuntimePublishWorld が唯一の情報源。RT 処理パス
+    //   （AudioBlock/BlockDouble/Snapshot の resolveActiveRuntimeDSPFromRuntimeWorldOnly）と
+    //   同じ解決を行う。レガシー getActiveRuntimeDSP()（activeRuntimeDSPSlot）は placeholder
+    //   専用で通常動作では null のため、これを単独で使うと UI のレイテンシー表示が
+    //   "Lat: -- ms" になる（PDC の setLatencySamples も 0 になる）。
+    //   ワールド未公開時のみ placeholder slot へフォールバックする。
+    const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+    const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+    auto* dsp = (publishedWorld != nullptr)
+        ? static_cast<DSPCore*>(publishedWorld->engine.current)
+        : nullptr;
+    if (dsp == nullptr)
+        dsp = getActiveRuntimeDSP();  // placeholder フォールバック
     if (dsp == nullptr)
         return breakdown;
 
@@ -38290,6 +38425,14 @@ void AudioEngine::stopRebuildThread()
     if (rebuildThread.joinable())
         rebuildThread.join();
 
+    // ★ work88 (P2-4 監査補正 — Step C): shutdown 時に recoveryIntentQueue_ の残留 Recovery を
+    //   明示 discard（ShutdownDiscard — silent loss 禁止 INV-5）。Builder join 後であり、
+    //   Producer（CoordinatorLoop）は shutdownCoordinatorLoop() で join 済みのため決定的に
+    //   残留を回収できる。popRecoveryRequest() が pendingIntentCount_ を fetchSub するため
+    //   counter は整合し、waitForDrain の isFullyDrained（P2-4 queue-empty + counter==0）が
+    //   正しく成立する（shutdown 時の 2 秒 drain timeout 誤検知を解消）。
+    runtimePublicationBridge_.discardRecoveryRequestsOnShutdown();
+
 }
 
 
@@ -39589,8 +39732,12 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
 bool AudioEngine::isFullyDrained() noexcept
 {
     const bool hasDeferredCommit = (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest());
-    runtimePublicationBridge_.setPendingIntentCount(hasDeferredCommit ? 1u : 0u);
-    runtimePublicationBridge_.setPublicationBacklogCount(hasDeferredCommit ? 1u : 0u);
+    // ★ work88 (P2-1 §1.1.5): setPendingIntentCount / setPublicationBacklogCount の絶対値上書きは廃止。
+    //   pendingIntentCount_ は reservation ベース（push 成功 fetchAdd / pop 成功 fetchSub）で
+    //   正確に維持され、ここでの hasDeferredCommit 混入は RetireIntent を誤って pending に
+    //   計上していた（混入の温床）。publicationBacklogCount_ も同様に Coordinator 内部で
+    //   実測維持される。
+    //   戻り値の !hasDeferredCommit は維持（deferred commit が残っている間は drain 完了としない）。
 
     const std::uint64_t fallbackDepth = convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire);
     const std::uint64_t retireDepth = convo::consumeAtomic(retireQueueDepth_, std::memory_order_acquire);
@@ -43924,6 +44071,17 @@ public:
         return getActiveRuntimeDSP() != nullptr;
     }
 
+    // ★ ISR Bridge Runtime: published runtime world に current DSP が存在するか。
+    //   getActiveRuntimeDSP()（activeRuntimeDSPSlot）は placeholder 専用のレガシースロットで
+    //   通常動作（runtime world 公開後）では null のため、UI/レイテンシー表示はこちらを
+    //   情報源にする（RT 処理パスと同じ runtime world 解決）。
+    [[nodiscard]] inline bool hasPublishedRuntimeDSP() const noexcept
+    {
+        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        return (world != nullptr) && (world->engine.current != nullptr);
+    }
+
     inline DSPCore* releaseActiveRuntimeDSP() noexcept
     {
         return convo::exchangeAtomic(activeRuntimeDSPSlot, nullptr, std::memory_order_acq_rel);
@@ -47508,7 +47666,7 @@ public:
         std::uint32_t idx = hashKey(key);
         std::int64_t firstAvail = -1;  // 最初の再利用可能 slot（tombstone または真の空）
         for (std::uint32_t i = 0; i < kCapacity; ++i) {
-            const auto& e = entries_[(idx + i) & kMask];
+            auto& e = entries_[(idx + i) & kMask];  // insert は非constメンバのため const_cast 不要（LINT-AE-013）
             if (!e.occupied) {
                 if (firstAvail < 0)
                     firstAvail = static_cast<std::int64_t>(i);
@@ -47521,8 +47679,7 @@ public:
             }
             if (e.key == key) {
                 // 既存 live エントリの更新（同じ key は同一 DSP とみなす）
-                auto& live = const_cast<Entry&>(e);
-                live.value = value;
+                e.value = value;
                 return true;
             }
         }
@@ -53948,7 +54105,22 @@ bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const no
         return false;
     }
 
-    return convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
+    // ★ work88 (P2-4 §1.2): transport キュー空判定を追加。
+    //   pendingIntentCount_ == 0 だけでは「Intent が transport に残存するがカウンタ不一致」の
+    //   ケース（カウンタと実体の乖離）を検出できない。以下の 4 キューが空であることを直接確認する:
+    //   - intentQueue_             : Observe/Publish/Quarantine（MPSC, reservation order）
+    //   - observeDeferredRing_     : Observe overflow（SPSC）
+    //   - quarantineFallbackQueue_ : Quarantine fallback（MPSC）
+    //   - recoveryIntentQueue_     : Recovery（Builder Work Queue, SPSC）
+    //   ★ phase-gated: 本判定は「admission closed + producer join」後にのみ authoritative。
+    //     coordinator state が ShuttingDown へ遷移した後（producer が全て閉じた後）に
+    //     isFullyDrained が呼ばれる前提。進行中 producer が居る最中はキューが空でも
+    //     新たな Intent が到着し得るため、単独では drain 完了を保証しない。
+    return coordinator_.intentQueue_.sizeApprox() == 0
+        && coordinator_.observeDeferredRing_.size() == 0
+        && coordinator_.quarantineFallbackQueue_.sizeApprox() == 0
+        && coordinator_.recoveryIntentQueue_.size() == 0
+        && convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
@@ -54025,8 +54197,14 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     intent.type = RuntimePublicationCoordinator::IntentType::Observe;
     intent.payload.observe = RuntimePublicationCoordinator::ObservePayload{handle, currentEpoch};
     intent.sequenceId = intentId;
+
+    // ★ work88 (P2-1 §1.1.3): reservation-before-push 化。
+    //   push 前に pendingIntentCount_ を fetchAdd（enqueue reservation）。全層 push 失敗
+    //   （drop）時は fetchSub で rollback し、カウンタは不変のまま drop を観測可能にする。
+    //   予約は consumer（processIntent / drainObserveDeferred）の pop 成功時に fetchSub で
+    //   消費される（pop 成功数 == push 成功数 の不変条件が構造的に保証される）。
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (intentQueue_.push(intent)) {
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
@@ -54035,14 +54213,16 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     observeOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
     ObserveIntent fallbackIntent{ handle, currentEpoch, intentId };
     if (observeDeferredRing_.push(fallbackIntent)) {
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
-    // 全層溢れ（intentQueue_ + deferred ring）→ drop カウンタ。
+    // 全層溢れ（intentQueue_ + deferred ring）→ reservation rollback + drop カウンタ。
     //   Observe は観測情報のため後発 Observe で補完可能（三次レビュー policy 表:
     //   Observe は条件付き drop / coalesce 可）。Publish/Quarantine とは異なり
     //   state transition の喪失ではないため許容。
+    //   reservation を fetchSub で相殺（pendingIntentCount_ は増えない — shutdown の
+    //   isFullyDrained が永久に false になるのを防ぐ）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -54123,6 +54303,21 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
                                                           const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
+    // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
+    //   requestShutdown()（CoordinatorState::ShuttingDown）確定後は Recovery を enqueue しない。
+    //   CoordinatorLoop::run() の先頭 shutdown check は phase execution と atomic ではなく、
+    //   in-flight runCoordinatorPhase 中に shutdown が発生しても、submit 側のこの gate が
+    //   Recovery admission の最終 linearization point になる（Admission/Notify authority は
+    //   Coordinator、shutdown boundary は Recovery admission が担当 — Authority Singularization）。
+    //   閉鎖後の submit は silent loss ではなく ShutdownDiscard として観測可能に記録する（INV-5）。
+    //   本 gate は reservation（pendingIntentCount_ fetchAdd）より前で評価するため、閉鎖後は
+    //   counter に触れない（counter == actual residency の不変条件を維持 — dash §1.1.6）。
+    if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
+    {
+        convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+        return;
+    }
+
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
@@ -54134,18 +54329,23 @@ void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quara
         buildSource
     };
 
-    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止):
+    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push):
     //   recoveryIntentQueue_ は SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）。
     //   push 失敗（full = Builder が遅延）は Recovery Intent の drop を意味し、INV-5 違反。
-    //   drop された場合、pendingIntentCount_ を増やさない（pop 時 -1 と整合し、shutdown の
-    //   isFullyDrained が false のままハングするのを防ぐ）。drop は診断カウンタに記録。
+    //   drop は診断カウンタに記録する（INV-5-1: drop 時は pendingIntentCount_ 不変）。
+    //   reservation-before-push: push 前に fetchAdd → push 失敗時は fetchSub で rollback。
+    //   これにより pop 成功時 fetchSub（popRecoveryRequest）と整合し、shutdown の
+    //   isFullyDrained が永久に false になるのを防ぐ。
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
-    } else {
-        // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
-        //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
-        convo::fetchAddAtomic(recoveryIntentDropCount_, uint64_t{1}, std::memory_order_release);
+        return;
     }
+
+    // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
+    //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
+    //   reservation を fetchSub で相消し（pendingIntentCount_ は不変）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
 }
 
 std::optional<RuntimePublicationCoordinator::RecoveryIntent>
@@ -54154,13 +54354,29 @@ RuntimePublicationCoordinator::popRecoveryRequest() noexcept
     RecoveryIntent intent{};
     if (!recoveryIntentQueue_.pop(intent))
         return std::nullopt;              // transport-only pop: empty は Builder 消費の前提
-    // ★ 監査指摘 (work88): processIntent が pendingIntentCount を 0 にリセットした後に pop が
-    //   減算すると uint64 underflow（巨大値）→ isFullyDrained の pendingIntentCount==0 が false
-    //   になりシャットダウンがハングし得る。0 未満へは減算しないガードを追加。
-    const auto cur = pendingIntentCount_.load(std::memory_order_relaxed);
-    if (cur > 0)
-        setPendingIntentCount(cur - 1);
+    // ★ work88 (P2-1 §1.1.4): cur>0 ガードを削除し、pop 成功時に fetchSub。
+    //   四次レビュー: ガードはカウンタ不整合を silently hide するため危険（underflow を
+    //   隠蔽して isFullyDrained のハングを潜在化させていた）。
+    //   push 側（submitRecoveryRequest）は reservation-before-push で先に fetchAdd するため、
+    //   pop 成功時は必ず対応する reservation が存在し underflow しない（不変条件）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     return intent;
+}
+
+// ★ work88 (P2-4 監査補正 — Step C: shutdown 時の Recovery 明示 discard)。
+//   Builder 停止後に recoveryIntentQueue_ に残留する Recovery を ShutdownDiscard として明示破棄する
+//   （silent loss 禁止 — INV-5）。popRecoveryRequest() が reservation（pendingIntentCount_）を
+//   fetchSub するため counter は整合し、isFullyDrained の queue-empty + counter==0 が正しく成立する。
+//   discard 数は recoveryShutdownDiscardCount_ に記録（queue full による drop とは区別 — §8.1）。
+//   単なる drain-on-exit（pop して捨てるだけ）ではなく、discard を観測可能な lifecycle として
+//   enqueue → pending → shutdown closes admission → discard → pending count release → discard telemetry
+//   を構成する（dash §8.1 ShutdownDiscard）。
+void RuntimePublicationCoordinator::discardRecoveryRequestsOnShutdown() noexcept
+{
+    while (popRecoveryRequest())
+    {
+        convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+    }
 }
 
 void RuntimePublicationCoordinator::submitQuarantine(
@@ -54185,9 +54401,13 @@ void RuntimePublicationCoordinator::submitQuarantine(
     intent.payload.quarantine = RuntimePublicationCoordinator::QuarantinePayload{handle, reason, contextEpoch};
     intent.sequenceId = seqId;
 
+    // ★ work88 (P2-1 §1.1.3): pendingIntentCount_ のみ reservation-before-push 化。
+    //   quarantineResidentCount_ は本改修の対象外（P3 で分離 — 別カウンタとして独立管理）。
+    //   push 前に pendingIntentCount_ を fetchAdd。全段 push 失敗時は fetchSub で rollback
+    //   （quarantineResidentCount_ は不変のまま drop カウンタのみ記録）。
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (intentQueue_.push(intent)) {
         setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
@@ -54197,14 +54417,15 @@ void RuntimePublicationCoordinator::submitQuarantine(
     //   intentQueue_ full 時は Quarantine 専用 fallback ring へ退避（drop しない）。
     if (quarantineFallbackQueue_.push(intent)) {
         setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
-        setPendingIntentCount(pendingIntentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
     // fallback も full → 絶対に静かに破棄しない。drop カウンタを増やして診断に残す。
     //   （AudioEngine 側の HealthMonitor が quarantineFallbackDropCount を監視し、
     //    ISRHealthState::Critical 昇格 / controlled shutdown を駆動する。）
-    convo::fetchAddAtomic(quarantineFallbackDropCount_, uint64_t{1}, std::memory_order_release);
+    //   reservation を fetchSub で相殺（pendingIntentCount_ は不変）。
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(quarantineFallbackDropCount_, std::uint64_t{1}, std::memory_order_release);
 }
 
 } // namespace convo::isr
@@ -54348,6 +54569,14 @@ public:
     {
         return convo::consumeAtomic(recoveryIntentDropCount_, std::memory_order_acquire);
     }
+    // ★ work88 (P2-4 監査補正 — Step B/C): shutdown 時（AdmissionClosed）に Recovery を
+    //   意図的に破棄した回数（ShutdownDiscard）。queue full による drop（recoveryIntentDropCount）
+    //   とは区別する — dash §8.1 の X1 telemetry 分離方針（Recovery lost ≠ ShutdownDiscard）。
+    //   正常 shutdown 動作のため Critical 昇格対象外（getter 公開で観測可能に留める）。
+    [[nodiscard]] std::uint64_t recoveryShutdownDiscardCount() const noexcept
+    {
+        return convo::consumeAtomic(recoveryShutdownDiscardCount_, std::memory_order_acquire);
+    }
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
     [[nodiscard]] bool isFullyDrained() const noexcept;
@@ -54412,8 +54641,13 @@ public:
      /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。
     [[nodiscard]] std::optional<RecoveryIntent> popRecoveryRequest() noexcept;
 
-    // ── ★ FUTURE-10: 共通 Intent 型（種別別 Queue → 単一 intentQueue_） ──
-    //   QUEUE-21: tagged-union variant。std::variant は trivially copyable 非保証のため不可。
+    // ★ work88 (P2-4 監査補正 — Step C): shutdown 時（Builder 停止後）に recoveryIntentQueue_
+    //   の残留 Recovery を ShutdownDiscard として明示破棄する。popRecoveryRequest() が
+    //   pendingIntentCount_ を fetchSub するため counter は整合し、P2-4 の queue-empty
+    //   判定（isFullyDrained）を正しく成立させる（queue observation を維持したまま残留を解消）。
+    //   呼び出し元: stopRebuildThread()（Builder join 後）。Producer（CoordinatorLoop）は
+    //   shutdownCoordinatorLoop() で join 済みのため決定的。
+    void discardRecoveryRequestsOnShutdown() noexcept;
     enum class IntentType : std::uint8_t {
         Observe,
         Publish,
@@ -54597,6 +54831,17 @@ private:
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
+    // ★ work88 (P2-1 §1.1.1): pendingIntentCount_ は「Intent transport residency + producer
+    //   enqueue reservation」を追跡する。
+    //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）
+    //   - 非対象: Publish と RetireIntent（混入禁止 — P2-1 §1.1.5）。Publish は
+    //     enqueuePublicationIntent が reservation を取らない。RetireIntent は
+    //     retireBacklogCount_（setRetireBacklogCount）が担当する。
+    //   - 増分: producer 側 enqueue 成功時（reservation-before-push で push 前に fetchAdd）
+    //   - 減分: consumer 側 pop 成功時（processIntent / drainObserveDeferred /
+    //     popRecoveryRequest で fetchSub）
+    //   - 絶対値上書き（setPendingIntentCount）は本カウンタに対して禁止。AudioEngine.Commit /
+    //     Threading からの RetireIntent 混入を排除するため。
     std::atomic<std::uint64_t> pendingIntentCount_;
     std::atomic<std::uint64_t> fallbackBacklogCount_;
     std::atomic<std::uint64_t> reclaimInFlightCount_;
@@ -54652,6 +54897,9 @@ private:
     // ★ work88 (六次レビュー — INV-5): Recovery Intent push 失敗（queue full）時の drop 記録。
     //   getter（recoveryIntentDropCount()）は public セクションに定義。
     std::atomic<uint64_t> recoveryIntentDropCount_{0};
+    // ★ work88 (P2-4 監査補正 — Step B/C): shutdown 時（AdmissionClosed）に Recovery を
+    //   意図的に破棄した回数（ShutdownDiscard）。drop（queue full）とは区別 — dash §8.1。
+    std::atomic<uint64_t> recoveryShutdownDiscardCount_{0};
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。
@@ -54729,18 +54977,32 @@ void RuntimePublicationCoordinator::processIntent(
     Intent commonIntent;
     // ★ work88 (FUTURE-10): Quarantine 専用 fallback ring の drain（drop 禁止の退避先）。
     //   quarantine は安全要件（bad DSP のアクセス禁止）のため、intentQueue_ より先に処理する。
-    while (quarantineFallbackQueue_.pop(commonIntent))
+    // ★ work88 (P2-1 §1.1.2): pop 成功で reservation を消費（fetchSub）。
+    //   quarantineFallbackQueue_ には Quarantine Intent のみ格納される（submitQuarantine が
+    //   reservation-before-push で fetchAdd 済み）ため無条件 fetchSub。
+    while (quarantineFallbackQueue_.pop(commonIntent)) {
+        convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
+    }
     // メイン intentQueue_（MpscBoundedRing — MPSC 化済み。Observe/Publish/Quarantine/Recovery を
     //   cross-type FIFO で処理。Recovery は Handler が enqueue-only で Builder Work Queue へ転送）
-    while (intentQueue_.pop(commonIntent))
+    // ★ work88 (P2-1 §1.1.2): Publish を除く Intent（Observe/Quarantine）の pop 成功で
+    //   reservation を消費（fetchSub）。Publish は pendingIntentCount_ に計上されない
+    //   （enqueuePublicationIntent は reservation を取らない — P2-1 §1.1.1）ため fetchSub しない。
+    while (intentQueue_.pop(commonIntent)) {
+        if (commonIntent.type != IntentType::Publish)
+            convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
+    }
 
     drainObserveDeferred(lifetimeMgr);  // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）
 
     engine.markReceiptReclaimComplete();
 
-    setPendingIntentCount(0);
+    // ★ work88 (P2-1 §1.1.2): setPendingIntentCount(0) による絶対値リセットは廃止。
+    //   pendingIntentCount_ は reservation ベースの正確な残数として維持される
+    //   （push 成功時 fetchAdd / pop 成功時 fetchSub）。絶対値リセットは RetireIntent 混入
+    //   （AudioEngine.Commit / Threading の setPendingIntentCount 上書き — §1.1.5）の温床だった。
 }
 
 // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）。
@@ -54748,6 +55010,10 @@ void RuntimePublicationCoordinator::drainObserveDeferred(DSPLifetimeManager& lif
 {
     ObserveIntent deferred{};
     while (observeDeferredRing_.pop(deferred)) {
+        // ★ work88 (P2-1 §1.1.2): pop 成功直後・skip 判定前に reservation を消費（fetchSub）。
+        //   古い世代 / null handle で skip される場合も、enqueue 済み（reservation 済み）の
+        //   Intent は pop で消費されたため fetchSub する（pop 成功数 == push 成功数の不変条件）。
+        convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
         const auto currentEpoch = currentPublicationEpoch();
         if (deferred.epoch < currentEpoch || deferred.handle.isNull())
             continue;
@@ -84619,7 +84885,7 @@ bool testMultiProducerNoLoss()
     for (int p = 0; p < kProducers; ++p)
     {
         producers.emplace_back([&ring, &start, p] {
-            while (!start.load(std::memory_order_acquire)) {}
+            while (!start.load(std::memory_order_acquire)) {} // NOLINT(atomic-dot-call): テスト用 thread-start ゲート（acquire）。ISR publication 領域外の汎用同期のため helper 不使用
             for (int i = 0; i < kPerProducer; ++i)
             {
                 // 連続 push が full で失敗しないこと（容量は十分）
@@ -84630,7 +84896,7 @@ bool testMultiProducerNoLoss()
         });
     }
 
-    start.store(true, std::memory_order_release);
+    start.store(true, std::memory_order_release); // NOLINT(atomic-dot-call): テスト用 thread-start ゲート（release）。ISR publication 領域外の汎用同期のため helper 不使用
     for (auto& t : producers) t.join();
 
     // Consumer が全エントリを回収
@@ -84740,6 +85006,121 @@ bool testProducerHoleDoesNotJumpAhead()
     return !ring.pop(e);
 }
 
+//==============================================================================
+// ★ work88 (P2-3) — CONVO_TESTING フックを使った deterministic producer-hole 検証
+//   MpscBoundedRing.h の testSetHoleBlock / testHoleBlocked / testReleaseHole により
+//   「reservation 済み・payload 未公開」の hole を 2 スレッドで再現する。
+//==============================================================================
+
+// ① producer hole 中は pop == false → release 後に pop == true（payload intact）
+bool testProducerHoleWithDelayedPublication()
+{
+    MpscBoundedRing<Entry, 16> ring;
+    ring.testResetHole();
+    ring.testSetHoleBlock(0);  // producer 起動前に position 0 をブロック
+
+    std::thread producer([&ring] {
+        ring.push(Entry{1u, 0, 0});  // position 0 → hook で待機（reservation 済み・未公開）
+    });
+
+    // producer が hook に到達するまで待機（= enqueuePos が 1、payload 未公開）
+    while (!ring.testHoleBlocked())
+        std::this_thread::yield();
+
+    // producer hole 中: consumer は未書き込み slot を読めない（false）
+    Entry e;
+    const bool emptyWhileHole = !ring.pop(e);
+
+    // release → payload 公開 → pop が成功し payload intact
+    ring.testReleaseHole();
+    producer.join();
+
+    const bool poppedAfterRelease = ring.pop(e) && e.seq == 1u;
+    const bool emptyAfter = !ring.pop(e);
+
+    ring.testClearHoleBlock();
+    return emptyWhileHole && poppedAfterRelease && emptyAfter;
+}
+
+// ② A が hole 中に B を publish → consumer は B を先読みしない → A publish 後に A→B 順序
+bool testProducerHoleFifoOrder()
+{
+    MpscBoundedRing<Entry, 16> ring;
+    ring.testResetHole();
+    ring.testSetHoleBlock(0);  // position 0 (A) をブロック
+
+    std::thread producerA([&ring] {
+        ring.push(Entry{1u, 0, 0});  // position 0 → hook で待機
+    });
+    while (!ring.testHoleBlocked())
+        std::this_thread::yield();
+
+    // B は position 1 を予約 → 即時公開（ブロック対象外）
+    const bool bPushed = ring.push(Entry{2u, 0, 0});
+
+    // A の hole が先頭にある間、consumer は B を読まない（予約順を飛ばさない）
+    Entry e;
+    const bool noBWhileHole = !ring.pop(e);
+
+    // A 公開 → A → B の予約順で pop できる
+    ring.testReleaseHole();
+    producerA.join();
+
+    Entry e2;
+    const bool orderOk = ring.pop(e2) && e2.seq == 1u && ring.pop(e2) && e2.seq == 2u;
+    const bool emptyAfter = !ring.pop(e2);
+
+    ring.testClearHoleBlock();
+    return bPushed && noBWhileHole && orderOk && emptyAfter;
+}
+
+// ③ 空キュー pop == false（初期状態 + 全消費後）
+bool testEmptyQueuePopFalse()
+{
+    MpscBoundedRing<Entry, 8> ring;
+    Entry e;
+
+    // 初期状態（空）: pop は false
+    if (ring.pop(e))
+        return false;
+
+    // push → pop で全消費後: 再び false
+    ring.push(Entry{7u, 0, 0});
+    if (!ring.pop(e) || e.seq != 7u)
+        return false;
+    return !ring.pop(e);
+}
+
+// ④ payload publication ordering — 複数フィールド payload が torn で観測されない
+bool testPayloadPublicationOrdering()
+{
+    MpscBoundedRing<Entry, 16> ring;
+    ring.testResetHole();
+    ring.testSetHoleBlock(0);
+
+    std::thread producer([&ring] {
+        ring.push(Entry{0xDEADBEEF1234ull, 7u, 3u});  // 複数フィールド payload → position 0 で待機
+    });
+    while (!ring.testHoleBlocked())
+        std::this_thread::yield();
+
+    // hole 中: 部分的（torn）payload は観測されない（pop が false）
+    Entry e;
+    const bool noTornWhileHole = !ring.pop(e);
+
+    // 公開後: 全フィールドが intact
+    ring.testReleaseHole();
+    producer.join();
+
+    const bool payloadIntact = ring.pop(e)
+        && e.seq == 0xDEADBEEF1234ull
+        && e.producer == 7u
+        && e.kind == 3u;
+
+    ring.testClearHoleBlock();
+    return noTornWhileHole && payloadIntact;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -84755,6 +85136,10 @@ int main()
     checkTrue("pop order = reservation order", testPopOrderIsReservationOrder());
     checkTrue("cross-type FIFO", testCrossTypeFifo());
     checkTrue("producer hole does not jump ahead", testProducerHoleDoesNotJumpAhead());
+    checkTrue("P2-3: producer hole delayed publication", testProducerHoleWithDelayedPublication());
+    checkTrue("P2-3: producer hole FIFO order", testProducerHoleFifoOrder());
+    checkTrue("P2-3: empty queue pop false", testEmptyQueuePopFalse());
+    checkTrue("P2-3: payload publication ordering", testPayloadPublicationOrdering());
 
     std::cout << "==========================================" << std::endl;
     std::cout << "Tests: " << g_testCount << ", Failures: " << g_failCount << std::endl;
@@ -88536,6 +88921,371 @@ int main()
     if (!testShadowCompareEquivalenceContract())
         throw std::runtime_error("shadow compare contract failed");
 
+    return 0;
+}
+
+```
+
+### 📄 `src\tests\invariant_INV3_INV5.cpp`
+
+```
+//==============================================================================
+// invariant_INV3_INV5.cpp — work88 (P2-2) ISR 不変条件テスト
+//
+// 検証対象（REPAIR_PLAN2-dash.md §1.4 / P2-2）:
+//   INV-3: requestReclaim の retire → epoch 安全確認 → reclaim 順序
+//     INV-3-1: retire → epoch 安全（retireEpoch < minReaderEpoch）→ reclaim 完了（true）
+//               → handle は Retired ではなくなる（Reclaimed 遷移）
+//     INV-3-2: epoch 非安全（retireEpoch >= minReaderEpoch）→ false（遅延通知）
+//               → retire は実行済み・reclaim 未実行（isRetired == true）
+//               → epoch 安全化後の再試行で reclaim 完了（TOCTOU 修正: 呼出し元が
+//                 handle を再試行リストへ戻す契約の裏付け）
+//   INV-5: Recovery Intent の drop 禁止 / 状態遷移ゲート
+//     INV-5-1: submitRecoveryRequest を 256 回（kRecoveryIntentQueueCapacity）で full
+//               → 257 回目は drop カウンタ増 + pendingIntentCount 不変（INV-5 計上整合）
+//               → popRecoveryRequest で reservation 消費（pop 成功数 == push 成功数）
+//     INV-5-2: QuarantineIntentHandler が依存する QuarantineService::executeQuarantine の
+//               stateChanged 判定（HANDLER-1 precondition）:
+//               - 無効 handle → stateChanged == false（Recovery 非発行）
+//               - 有効 handle → stateChanged == true（Recovery 発行条件を満たす）
+//               ※ ハンドラ本体は AudioEngine 完全型が必要なため、本テストはハンドラが
+//                 尊重する唯一の判定源（QuarantineService）の契約を検証する。
+//     INV-5-3 (P2-4 監査補正 — Step B): requestShutdown()（AdmissionClosed）後の
+//               submitRecoveryRequest は enqueue されず、ShutdownDiscard として記録
+//               （recoveryShutdownDiscardCount+1）。pendingIntentCount は不変（reservation 前 gate）。
+//     INV-5-4 (P2-4 監査補正 — Step C): discardRecoveryRequestsOnShutdown() が残留 Recovery を
+//               明示 discard（ShutdownDiscard）。queue empty + pending 0 + discard カウント増。
+//
+// ビルド: CMakeLists.txt の ISRSemanticValidationTests と同一パターンで
+//   invariant_INV3_INV5Tests を定義する（ISR*.cpp を同一ターゲットでコンパイル）。
+//==============================================================================
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <stdexcept>
+
+#include "audioengine/AtomicAccess.h"     // convo::publishAtomic / consumeAtomic
+#include "core/IEpochProvider.h"          // TestEpochProvider の基底
+#include "audioengine/ISRRetireRouter.h"  // requestReclaim の router 引数
+#include "audioengine/ISRRuntimePublicationCoordinator.h"  // テスト対象 Coordinator
+#include "audioengine/ISRDSPHandle.h"     // DSPHandleRuntime / DSPHandle
+#include "audioengine/ISRDSPQuarantine.h" // DSPQuarantineManager / QuarantineReason
+
+namespace convo::isr {
+namespace {
+
+//==============================================================================
+// ★ P2-2: 制御可能な IEpochProvider スタブ
+//   ISRRetireRouter::currentEpoch() / minReaderEpoch() は provider へ委譲されるため、
+//   このスタブの値を切り替えて INV-3 の安全（retireEpoch < minReaderEpoch）/
+//   非安全（retireEpoch >= minReaderEpoch）判定を deterministic に検証する。
+//==============================================================================
+class TestEpochProvider : public convo::IEpochProvider
+{
+public:
+    void setCurrentEpoch(std::uint64_t v) noexcept
+    {
+        convo::publishAtomic(current_, v, std::memory_order_release);
+    }
+    void setMinReaderEpoch(std::uint64_t v) noexcept
+    {
+        convo::publishAtomic(minReader_, v, std::memory_order_release);
+    }
+
+    // ── IReaderEpochProvider ──
+    int registerReaderThread() noexcept override { return 0; }
+    bool reserveReaderThread(int) noexcept override { return true; }
+    void enterReader(int) noexcept override {}
+    void exitReader(int) noexcept override {}
+    std::uint64_t currentEpoch() const noexcept override
+    {
+        return convo::consumeAtomic(current_, std::memory_order_acquire);
+    }
+    std::uint32_t activeReaderCount() const noexcept override { return 0; }
+    int readerCapacity() const noexcept override { return 1; }
+    std::uint64_t getMinReaderEpoch() const noexcept override
+    {
+        return convo::consumeAtomic(minReader_, std::memory_order_acquire);
+    }
+
+    // ── IPublicationProvider ──
+    std::uint64_t publishEpoch() noexcept override
+    {
+        return convo::consumeAtomic(current_, std::memory_order_acquire);
+    }
+
+    // ── IRetireProvider ──
+    bool enqueueRetire(void*, void (*)(void*), std::uint64_t) noexcept override { return true; }
+    void tryReclaim() noexcept override {}
+    std::uint32_t pendingRetireCount() const noexcept override { return 0; }
+    void drainAll() noexcept override {}
+
+private:
+    std::atomic<std::uint64_t> current_{0};
+    std::atomic<std::uint64_t> minReader_{0};
+};
+
+//==============================================================================
+// INV-3-1: retire → epoch 安全 → reclaim の順序
+//==============================================================================
+[[nodiscard]] bool testInv3_1RetireEpochSafeReclaim()
+{
+    DSPHandleRuntime handleRuntime;
+    TestEpochProvider provider;
+    provider.setCurrentEpoch(5);      // retireEpoch = 5
+    provider.setMinReaderEpoch(10);   // 5 < 10 → epoch 安全
+    ISRRetireRouter router(provider);
+
+    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    // 有効な DSP handle を作成（Active 状態）
+    int dspInstance = 0;
+    const auto handle = handleRuntime.create(&dspInstance);
+    if (handle.isNull())
+        return false;
+
+    // requestReclaim: retire → epoch 安全確認 → reclaim が完了し true が返る
+    if (!coordinator.requestReclaim(handle, handleRuntime, router))
+        return false;
+
+    // reclaim 完了後: state は Retired ではなくなる（Reclaimed 遷移）
+    if (handleRuntime.isRetired(handle))
+        return false;
+
+    // reclaim-in-flight は 0 にリセット済み
+    if (coordinator.getReclaimInFlightCount() != 0)
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+// INV-3-2: epoch 非安全 → 遅延（false）→ epoch 安全化後の再試行で reclaim
+//   TOCTOU 修正: 呼出し元は false 時に handle を再試行リストへ戻す
+//   （slot リーク防止）。本テストはその契約（遅延通知 + 再試行成功）を検証する。
+//==============================================================================
+[[nodiscard]] bool testInv3_2ReclaimDeferredThenSucceeds()
+{
+    DSPHandleRuntime handleRuntime;
+    TestEpochProvider provider;
+    ISRRetireRouter router(provider);
+
+    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    int dspInstance = 0;
+    const auto handle = handleRuntime.create(&dspInstance);
+    if (handle.isNull())
+        return false;
+
+    // epoch 非安全: retireEpoch(10) >= minReaderEpoch(10) → reclaim を遅延
+    provider.setCurrentEpoch(10);
+    provider.setMinReaderEpoch(10);
+    if (coordinator.requestReclaim(handle, handleRuntime, router))
+        return false;                          // 遅延が通知されるべき（false）
+
+    // retire は実行済み（Retired に遷移）だが reclaim は未実行
+    if (!handleRuntime.isRetired(handle))
+        return false;
+
+    // 遅延中は reclaim-in-flight が 1（pending として管理）
+    if (coordinator.getReclaimInFlightCount() != 1)
+        return false;
+
+    // 呼出し元は handle を再試行リストへ戻す（TOCTOU 修正）。epoch が安全になった後、
+    // 再試行 → reclaim 完了（true）
+    provider.setMinReaderEpoch(20);            // 10 < 20 → epoch 安全
+    if (!coordinator.requestReclaim(handle, handleRuntime, router))
+        return false;
+
+    // reclaim 完了: in-flight は 0、handle は Retired ではなくなる
+    if (coordinator.getReclaimInFlightCount() != 0)
+        return false;
+    if (handleRuntime.isRetired(handle))
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+// INV-5-1: submitRecoveryRequest full（256）→ 257 回目 drop + pendingIntentCount 不変
+//==============================================================================
+[[nodiscard]] bool testInv5_1RecoveryFullDrop()
+{
+    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    const auto handle = DSPHandle::null();
+    convo::RuntimeBuildSnapshot buildSource{};
+
+    constexpr int kCapacity = 256;   // kRecoveryIntentQueueCapacity
+    for (int i = 0; i < kCapacity; ++i)
+        coordinator.submitRecoveryRequest(handle, buildSource);
+
+    // full 直前: pendingIntentCount == 容量、drop なし
+    if (coordinator.getPendingIntentCount() != static_cast<std::uint64_t>(kCapacity))
+        return false;
+    if (coordinator.recoveryIntentDropCount() != 0)
+        return false;
+
+    // 257 回目: full → drop カウンタ増 + pendingIntentCount 不変（INV-5: drop 計上整合）
+    coordinator.submitRecoveryRequest(handle, buildSource);
+    if (coordinator.recoveryIntentDropCount() != 1)
+        return false;
+    if (coordinator.getPendingIntentCount() != static_cast<std::uint64_t>(kCapacity))
+        return false;
+
+    // pop 成功で reservation を消費 → 1 件減る（pop 成功数 == push 成功数の不変条件）
+    if (!coordinator.popRecoveryRequest().has_value())
+        return false;
+    if (coordinator.getPendingIntentCount() != static_cast<std::uint64_t>(kCapacity - 1))
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+// INV-5-2: QuarantineIntentHandler が依存する executeQuarantine の stateChanged 判定
+//   （無効 handle → false = Recovery 非発行 / 有効 handle → true = Recovery 発行）
+//==============================================================================
+[[nodiscard]] bool testInv5_2QuarantineStateChangedGate()
+{
+    DSPHandleRuntime handleRuntime;
+    DSPQuarantineManager quarantineManager;
+    QuarantineService service;
+
+    int dspInstance = 0;
+    const auto validHandle = handleRuntime.create(&dspInstance);
+    if (validHandle.isNull())
+        return false;
+
+    // 無効 handle（null）→ stateChanged == false（Recovery は発行されない）
+    {
+        const QuarantineService::QuarantineRequest nullReq{
+            DSPHandle::null(), QuarantineReason::Unknown, 0
+        };
+        const auto nullResult = service.executeQuarantine(handleRuntime, quarantineManager, nullReq);
+        if (nullResult.stateChanged)
+            return false;   // 無効 handle で stateChanged にしてはならない
+    }
+
+    // 有効 handle → stateChanged == true（Recovery 発行条件を満たす）
+    {
+        const QuarantineService::QuarantineRequest validReq{
+            validHandle, QuarantineReason::Unknown, 1
+        };
+        const auto validResult = service.executeQuarantine(handleRuntime, quarantineManager, validReq);
+        if (!validResult.stateChanged)
+            return false;
+    }
+
+    return true;
+}
+
+//==============================================================================
+// INV-5-3: requestShutdown()（AdmissionClosed）後の submit → ShutdownDiscard
+//   P2-4 監査補正 (Step B): Coordinator in-flight phase 中に shutdown が発生しても、
+//   submit 側 gate が Recovery admission の最終 linearization point になることを検証。
+//==============================================================================
+[[nodiscard]] bool testInv5_3SubmitAfterShutdownDiscards()
+{
+    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    // shutdown 前に 1 件 enqueue（正常系）
+    convo::RuntimeBuildSnapshot buildSource{};
+    coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource);
+    if (coordinator.getPendingIntentCount() != 1)
+        return false;
+
+    // shutdown 確定（AdmissionClosed — requestShutdown が state=ShuttingDown を確定）
+    coordinator.requestShutdown();
+    if (coordinator.getState()
+        != RuntimePublicationCoordinator::CoordinatorState::ShuttingDown)
+        return false;
+
+    // shutdown 後の submit → enqueue されず ShutdownDiscard として記録
+    coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource);
+    if (coordinator.recoveryShutdownDiscardCount() != 1)
+        return false;
+    if (coordinator.recoveryIntentDropCount() != 0)
+        return false;                        // drop（queue full）とは区別
+    if (coordinator.getPendingIntentCount() != 1)
+        return false;                        // pending 不変（reservation 前 gate）
+
+    // queue には shutdown 前の 1 件のみ → pop で 1 件消費 → pending 0
+    if (!coordinator.popRecoveryRequest().has_value())
+        return false;
+    if (coordinator.getPendingIntentCount() != 0)
+        return false;
+    if (coordinator.popRecoveryRequest().has_value())
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+// INV-5-4: discardRecoveryRequestsOnShutdown() による残留の明示 discard
+//   P2-4 監査補正 (Step C): Builder 停止後に残留する Recovery を ShutdownDiscard として
+//   明示破棄する（silent loss 禁止）。popRecoveryRequest が fetchSub するため counter 整合。
+//==============================================================================
+[[nodiscard]] bool testInv5_4DiscardResidualOnShutdown()
+{
+    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    // 残留 3 件を enqueue（shutdown 前に submit された想定）
+    convo::RuntimeBuildSnapshot buildSource{};
+    for (int i = 0; i < 3; ++i)
+        coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource);
+    if (coordinator.getPendingIntentCount() != 3)
+        return false;
+
+    // Builder 停止相当 → 明示 discard
+    coordinator.discardRecoveryRequestsOnShutdown();
+    if (coordinator.recoveryShutdownDiscardCount() != 3)
+        return false;
+    if (coordinator.getPendingIntentCount() != 0)
+        return false;
+    if (coordinator.popRecoveryRequest().has_value())
+        return false;                        // queue empty
+
+    return true;
+}
+
+} // anonymous namespace
+} // namespace convo::isr
+
+//==============================================================================
+// main
+//==============================================================================
+int main()
+{
+    try
+    {
+        if (!convo::isr::testInv3_1RetireEpochSafeReclaim())
+            throw std::runtime_error("INV-3-1: retire → epoch safe → reclaim 順序違反");
+        if (!convo::isr::testInv3_2ReclaimDeferredThenSucceeds())
+            throw std::runtime_error("INV-3-2: epoch 非安全 → pending 再登録（TOCTOU）違反");
+        if (!convo::isr::testInv5_1RecoveryFullDrop())
+            throw std::runtime_error("INV-5-1: Recovery full → drop + pendingIntentCount 不変 違反");
+        if (!convo::isr::testInv5_2QuarantineStateChangedGate())
+            throw std::runtime_error("INV-5-2: Quarantine stateChanged ゲート違反");
+        if (!convo::isr::testInv5_3SubmitAfterShutdownDiscards())
+            throw std::runtime_error("INV-5-3: shutdown 後 submit → ShutdownDiscard 違反");
+        if (!convo::isr::testInv5_4DiscardResidualOnShutdown())
+            throw std::runtime_error("INV-5-4: 残留 Recovery の明示 discard 違反");
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "FAIL: %s\n", e.what());
+        return 1;
+    }
+
+    std::printf("invariant_INV3_INV5Tests: ALL TESTS PASSED\n");
     return 0;
 }
 

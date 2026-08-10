@@ -81,7 +81,20 @@ namespace
 {
     LatencyBreakdown breakdown;
 
-    auto* dsp = getActiveRuntimeDSP();
+    // ★ ISR Bridge Runtime（602b04a4 回帰修正）:
+    //   アクティブDSPは RuntimePublishWorld が唯一の情報源。RT 処理パス
+    //   （AudioBlock/BlockDouble/Snapshot の resolveActiveRuntimeDSPFromRuntimeWorldOnly）と
+    //   同じ解決を行う。レガシー getActiveRuntimeDSP()（activeRuntimeDSPSlot）は placeholder
+    //   専用で通常動作では null のため、これを単独で使うと UI のレイテンシー表示が
+    //   "Lat: -- ms" になる（PDC の setLatencySamples も 0 になる）。
+    //   ワールド未公開時のみ placeholder slot へフォールバックする。
+    const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+    const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+    auto* dsp = (publishedWorld != nullptr)
+        ? static_cast<DSPCore*>(publishedWorld->engine.current)
+        : nullptr;
+    if (dsp == nullptr)
+        dsp = getActiveRuntimeDSP();  // placeholder フォールバック
     if (dsp == nullptr)
         return breakdown;
 

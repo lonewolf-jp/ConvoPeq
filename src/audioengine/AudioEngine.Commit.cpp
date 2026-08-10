@@ -459,7 +459,10 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.retireEpoch = static_cast<std::uint64_t>(world->generation);
 
     worldAuthority_.lifetime().emitRetireIntentRT(intent);
-    runtimePublicationBridge_.setPendingIntentCount(worldAuthority_.lifetime().pendingIntentCount());
+    // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止。
+    //   pendingIntentCount_ は Observe/Quarantine/Recovery の transport residency 専用
+    //   （reservation ベースで Coordinator 内部が維持）。RetireIntent 滞留は
+    //   retireBacklogCount_（setRetireBacklogCount）が担当する。
     runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
     const auto pendingIntents = worldAuthority_.lifetime().dequeuePendingRetireIntents();
     convo::publishAtomic(pendingRetireGenerationCount_, static_cast<std::uint64_t>(pendingIntents.size()), std::memory_order_release);
@@ -601,7 +604,8 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     convo::fetchAddAtomic(retiredWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     updateMinMetric(oldestRetiredGeneration_, world->generation);
 
-    runtimePublicationBridge_.setPendingIntentCount(worldAuthority_.lifetime().pendingIntentCount());
+    // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止（同上）。
+    //   RetireIntent 滞留は retireBacklogCount_（setRetireBacklogCount）が担当。
     runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
     emitEvidenceTickNonRt(false);
 

@@ -1533,7 +1533,10 @@ void MainWindow::timerCallback()
     if (cliAutomationTelemetryLoggingEnabled)
         return;
 
-    const bool hasActiveDsp = audioEngine.hasActiveRuntimeDSP();
+    // ISR Bridge Runtime: アクティブ判定は published runtime world の current DSP を基準とし、
+    // placeholder スロット（getActiveRuntimeDSP）もフォールバックとして併用する。
+    const bool hasActiveDsp = audioEngine.hasPublishedRuntimeDSP()
+        || audioEngine.hasActiveRuntimeDSP();
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;
     const double sr = audioEngine.getSampleRate();

@@ -31,9 +31,15 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <thread>
 #include <type_traits>
 
 #include "audioengine/AtomicAccess.h"
+
+#ifdef CONVO_TESTING
+#  define CONVO_MPSC_TEST_HOOKS
+#endif
 
 #ifdef _MSC_VER
 #  pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -77,6 +83,19 @@ public:
                                                  std::memory_order_acq_rel,  // 成功時 acq_rel
                                                  std::memory_order_acquire)) // 失敗時 acquire: 最新 enqueuePos を再観測
                 {
+#ifdef CONVO_TESTING
+                    // ★ work88 (P2-3): producer-hole 再現フック — payload 書込み前に一時停止。
+                    //   testHoleBlockPos_ と一致する reservation 位置のみ、testHoleGate_ が
+                    //   true になるまで待機（デフォルト UINT32_MAX = pass-through、既存テストは
+                    //   非活性）。これにより「reservation 済み・未公開（producer hole）」状態を
+                    //   deterministic に作り、consumer が未書き込み slot を跨がないことを検証する。
+                    if (convo::consumeAtomic(testHoleBlockPos_, std::memory_order_acquire) == pos)
+                    {
+                        convo::publishAtomic(testHoleReady_, true, std::memory_order_release);
+                        while (!convo::consumeAtomic(testHoleGate_, std::memory_order_acquire))
+                            std::this_thread::yield();  // testReleaseHole() 待ち
+                    }
+#endif
                     entries_[pos & kMask] = item;  // payload 書込み（publication）
                     convo::publishAtomic(seq_atom, static_cast<uint32_t>(pos + 1), std::memory_order_release);
                     return true;
@@ -128,11 +147,62 @@ public:
             convo::publishAtomic(sequences_[i], static_cast<uint32_t>(i), std::memory_order_release);
     }
 
+#ifdef CONVO_MPSC_TEST_HOOKS
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ★ work88 (P2-3): producer-hole 再現テスト API（CONVO_TESTING 定義時のみ）。
+    //   位置ベース: testHoleBlockPos_ と一致する reservation 位置の push が、payload
+    //   書込み前に testHoleGate_ が true になるまで待機する。デフォルト
+    //   (UINT32_MAX = kNoBlock) では pass-through のため、本番/既存テストには無影響。
+    //   使用例: ① testResetHole() + testSetHoleBlock(0) を producer 起動前に設定
+    //           ② testHoleBlocked() で hook 到達（= reservation 済み・未公開）を待機
+    //           ③ pop が false（producer hole）であることを検証
+    //           ④ testReleaseHole() で payload 公開を許可 → pop が true に
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    static constexpr uint32_t kNoBlock = (std::numeric_limits<uint32_t>::max)();
+
+    /** reservation 位置 pos を producer-hole としてブロックする（producer 起動前に設定すること）。 */
+    void testSetHoleBlock(uint32_t blockPos) noexcept
+    {
+        convo::publishAtomic(testHoleBlockPos_, blockPos, std::memory_order_release);
+    }
+
+    /** ブロック位置を解除（以降の push は pass-through）。 */
+    void testClearHoleBlock() noexcept
+    {
+        convo::publishAtomic(testHoleBlockPos_, kNoBlock, std::memory_order_release);
+    }
+
+    /** ブロック中の producer の payload 書込みを許可する（publication order を解放）。 */
+    void testReleaseHole() noexcept
+    {
+        convo::publishAtomic(testHoleGate_, true, std::memory_order_release);
+    }
+
+    /** フック状態を初期化（新規テストごとに呼ぶこと）。 */
+    void testResetHole() noexcept
+    {
+        convo::publishAtomic(testHoleReady_, false, std::memory_order_release);
+        convo::publishAtomic(testHoleGate_, false, std::memory_order_release);
+    }
+
+    /** producer が hole でブロック中（reservation 済み・payload 未公開）か。 */
+    [[nodiscard]] bool testHoleBlocked() const noexcept
+    {
+        return convo::consumeAtomic(testHoleReady_, std::memory_order_acquire);
+    }
+#endif // CONVO_MPSC_TEST_HOOKS
+
 private:
     alignas(64) std::atomic<uint32_t> sequences_[Capacity];
     alignas(64) T entries_[Capacity];
     alignas(64) std::atomic<uint32_t> enqueuePos_{0};
     alignas(64) std::atomic<uint32_t> dequeuePos_{0};
+#ifdef CONVO_MPSC_TEST_HOOKS
+    // ★ work88 (P2-3): producer-hole テストフック用メンバ（CONVO_TESTING 定義時のみ存在）。
+    alignas(64) std::atomic<bool> testHoleReady_{false};      // producer が hook に到達した通知
+    alignas(64) std::atomic<bool> testHoleGate_{false};       // payload 書込み許可ゲート
+    alignas(64) std::atomic<uint32_t> testHoleBlockPos_{kNoBlock};  // ブロック対象 reservation 位置
+#endif
 };
 
 #ifdef _MSC_VER

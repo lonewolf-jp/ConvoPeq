@@ -114,8 +114,12 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
 bool AudioEngine::isFullyDrained() noexcept
 {
     const bool hasDeferredCommit = (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest());
-    runtimePublicationBridge_.setPendingIntentCount(hasDeferredCommit ? 1u : 0u);
-    runtimePublicationBridge_.setPublicationBacklogCount(hasDeferredCommit ? 1u : 0u);
+    // ★ work88 (P2-1 §1.1.5): setPendingIntentCount / setPublicationBacklogCount の絶対値上書きは廃止。
+    //   pendingIntentCount_ は reservation ベース（push 成功 fetchAdd / pop 成功 fetchSub）で
+    //   正確に維持され、ここでの hasDeferredCommit 混入は RetireIntent を誤って pending に
+    //   計上していた（混入の温床）。publicationBacklogCount_ も同様に Coordinator 内部で
+    //   実測維持される。
+    //   戻り値の !hasDeferredCommit は維持（deferred commit が残っている間は drain 完了としない）。
 
     const std::uint64_t fallbackDepth = convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire);
     const std::uint64_t retireDepth = convo::consumeAtomic(retireQueueDepth_, std::memory_order_acquire);

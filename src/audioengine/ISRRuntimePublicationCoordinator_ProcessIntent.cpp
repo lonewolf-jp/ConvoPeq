@@ -29,18 +29,32 @@ void RuntimePublicationCoordinator::processIntent(
     Intent commonIntent;
     // ★ work88 (FUTURE-10): Quarantine 専用 fallback ring の drain（drop 禁止の退避先）。
     //   quarantine は安全要件（bad DSP のアクセス禁止）のため、intentQueue_ より先に処理する。
-    while (quarantineFallbackQueue_.pop(commonIntent))
+    // ★ work88 (P2-1 §1.1.2): pop 成功で reservation を消費（fetchSub）。
+    //   quarantineFallbackQueue_ には Quarantine Intent のみ格納される（submitQuarantine が
+    //   reservation-before-push で fetchAdd 済み）ため無条件 fetchSub。
+    while (quarantineFallbackQueue_.pop(commonIntent)) {
+        convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
+    }
     // メイン intentQueue_（MpscBoundedRing — MPSC 化済み。Observe/Publish/Quarantine/Recovery を
     //   cross-type FIFO で処理。Recovery は Handler が enqueue-only で Builder Work Queue へ転送）
-    while (intentQueue_.pop(commonIntent))
+    // ★ work88 (P2-1 §1.1.2): Publish を除く Intent（Observe/Quarantine）の pop 成功で
+    //   reservation を消費（fetchSub）。Publish は pendingIntentCount_ に計上されない
+    //   （enqueuePublicationIntent は reservation を取らない — P2-1 §1.1.1）ため fetchSub しない。
+    while (intentQueue_.pop(commonIntent)) {
+        if (commonIntent.type != IntentType::Publish)
+            convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
+    }
 
     drainObserveDeferred(lifetimeMgr);  // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）
 
     engine.markReceiptReclaimComplete();
 
-    setPendingIntentCount(0);
+    // ★ work88 (P2-1 §1.1.2): setPendingIntentCount(0) による絶対値リセットは廃止。
+    //   pendingIntentCount_ は reservation ベースの正確な残数として維持される
+    //   （push 成功時 fetchAdd / pop 成功時 fetchSub）。絶対値リセットは RetireIntent 混入
+    //   （AudioEngine.Commit / Threading の setPendingIntentCount 上書き — §1.1.5）の温床だった。
 }
 
 // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）。
@@ -48,6 +62,10 @@ void RuntimePublicationCoordinator::drainObserveDeferred(DSPLifetimeManager& lif
 {
     ObserveIntent deferred{};
     while (observeDeferredRing_.pop(deferred)) {
+        // ★ work88 (P2-1 §1.1.2): pop 成功直後・skip 判定前に reservation を消費（fetchSub）。
+        //   古い世代 / null handle で skip される場合も、enqueue 済み（reservation 済み）の
+        //   Intent は pop で消費されたため fetchSub する（pop 成功数 == push 成功数の不変条件）。
+        convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
         const auto currentEpoch = currentPublicationEpoch();
         if (deferred.epoch < currentEpoch || deferred.handle.isNull())
             continue;

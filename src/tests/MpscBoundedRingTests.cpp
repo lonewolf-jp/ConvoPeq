@@ -254,6 +254,121 @@ bool testProducerHoleDoesNotJumpAhead()
     return !ring.pop(e);
 }
 
+//==============================================================================
+// ★ work88 (P2-3) — CONVO_TESTING フックを使った deterministic producer-hole 検証
+//   MpscBoundedRing.h の testSetHoleBlock / testHoleBlocked / testReleaseHole により
+//   「reservation 済み・payload 未公開」の hole を 2 スレッドで再現する。
+//==============================================================================
+
+// ① producer hole 中は pop == false → release 後に pop == true（payload intact）
+bool testProducerHoleWithDelayedPublication()
+{
+    MpscBoundedRing<Entry, 16> ring;
+    ring.testResetHole();
+    ring.testSetHoleBlock(0);  // producer 起動前に position 0 をブロック
+
+    std::thread producer([&ring] {
+        ring.push(Entry{1u, 0, 0});  // position 0 → hook で待機（reservation 済み・未公開）
+    });
+
+    // producer が hook に到達するまで待機（= enqueuePos が 1、payload 未公開）
+    while (!ring.testHoleBlocked())
+        std::this_thread::yield();
+
+    // producer hole 中: consumer は未書き込み slot を読めない（false）
+    Entry e;
+    const bool emptyWhileHole = !ring.pop(e);
+
+    // release → payload 公開 → pop が成功し payload intact
+    ring.testReleaseHole();
+    producer.join();
+
+    const bool poppedAfterRelease = ring.pop(e) && e.seq == 1u;
+    const bool emptyAfter = !ring.pop(e);
+
+    ring.testClearHoleBlock();
+    return emptyWhileHole && poppedAfterRelease && emptyAfter;
+}
+
+// ② A が hole 中に B を publish → consumer は B を先読みしない → A publish 後に A→B 順序
+bool testProducerHoleFifoOrder()
+{
+    MpscBoundedRing<Entry, 16> ring;
+    ring.testResetHole();
+    ring.testSetHoleBlock(0);  // position 0 (A) をブロック
+
+    std::thread producerA([&ring] {
+        ring.push(Entry{1u, 0, 0});  // position 0 → hook で待機
+    });
+    while (!ring.testHoleBlocked())
+        std::this_thread::yield();
+
+    // B は position 1 を予約 → 即時公開（ブロック対象外）
+    const bool bPushed = ring.push(Entry{2u, 0, 0});
+
+    // A の hole が先頭にある間、consumer は B を読まない（予約順を飛ばさない）
+    Entry e;
+    const bool noBWhileHole = !ring.pop(e);
+
+    // A 公開 → A → B の予約順で pop できる
+    ring.testReleaseHole();
+    producerA.join();
+
+    Entry e2;
+    const bool orderOk = ring.pop(e2) && e2.seq == 1u && ring.pop(e2) && e2.seq == 2u;
+    const bool emptyAfter = !ring.pop(e2);
+
+    ring.testClearHoleBlock();
+    return bPushed && noBWhileHole && orderOk && emptyAfter;
+}
+
+// ③ 空キュー pop == false（初期状態 + 全消費後）
+bool testEmptyQueuePopFalse()
+{
+    MpscBoundedRing<Entry, 8> ring;
+    Entry e;
+
+    // 初期状態（空）: pop は false
+    if (ring.pop(e))
+        return false;
+
+    // push → pop で全消費後: 再び false
+    ring.push(Entry{7u, 0, 0});
+    if (!ring.pop(e) || e.seq != 7u)
+        return false;
+    return !ring.pop(e);
+}
+
+// ④ payload publication ordering — 複数フィールド payload が torn で観測されない
+bool testPayloadPublicationOrdering()
+{
+    MpscBoundedRing<Entry, 16> ring;
+    ring.testResetHole();
+    ring.testSetHoleBlock(0);
+
+    std::thread producer([&ring] {
+        ring.push(Entry{0xDEADBEEF1234ull, 7u, 3u});  // 複数フィールド payload → position 0 で待機
+    });
+    while (!ring.testHoleBlocked())
+        std::this_thread::yield();
+
+    // hole 中: 部分的（torn）payload は観測されない（pop が false）
+    Entry e;
+    const bool noTornWhileHole = !ring.pop(e);
+
+    // 公開後: 全フィールドが intact
+    ring.testReleaseHole();
+    producer.join();
+
+    const bool payloadIntact = ring.pop(e)
+        && e.seq == 0xDEADBEEF1234ull
+        && e.producer == 7u
+        && e.kind == 3u;
+
+    ring.testClearHoleBlock();
+    return noTornWhileHole && payloadIntact;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -269,6 +384,10 @@ int main()
     checkTrue("pop order = reservation order", testPopOrderIsReservationOrder());
     checkTrue("cross-type FIFO", testCrossTypeFifo());
     checkTrue("producer hole does not jump ahead", testProducerHoleDoesNotJumpAhead());
+    checkTrue("P2-3: producer hole delayed publication", testProducerHoleWithDelayedPublication());
+    checkTrue("P2-3: producer hole FIFO order", testProducerHoleFifoOrder());
+    checkTrue("P2-3: empty queue pop false", testEmptyQueuePopFalse());
+    checkTrue("P2-3: payload publication ordering", testPayloadPublicationOrdering());
 
     std::cout << "==========================================" << std::endl;
     std::cout << "Tests: " << g_testCount << ", Failures: " << g_failCount << std::endl;

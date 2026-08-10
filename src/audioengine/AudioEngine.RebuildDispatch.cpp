@@ -781,6 +781,14 @@ void AudioEngine::stopRebuildThread()
     if (rebuildThread.joinable())
         rebuildThread.join();
 
+    // ★ work88 (P2-4 監査補正 — Step C): shutdown 時に recoveryIntentQueue_ の残留 Recovery を
+    //   明示 discard（ShutdownDiscard — silent loss 禁止 INV-5）。Builder join 後であり、
+    //   Producer（CoordinatorLoop）は shutdownCoordinatorLoop() で join 済みのため決定的に
+    //   残留を回収できる。popRecoveryRequest() が pendingIntentCount_ を fetchSub するため
+    //   counter は整合し、waitForDrain の isFullyDrained（P2-4 queue-empty + counter==0）が
+    //   正しく成立する（shutdown 時の 2 秒 drain timeout 誤検知を解消）。
+    runtimePublicationBridge_.discardRecoveryRequestsOnShutdown();
+
 }
 
 

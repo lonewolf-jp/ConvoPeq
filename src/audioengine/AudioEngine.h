@@ -2110,6 +2110,17 @@ public:
         return getActiveRuntimeDSP() != nullptr;
     }
 
+    // ★ ISR Bridge Runtime: published runtime world に current DSP が存在するか。
+    //   getActiveRuntimeDSP()（activeRuntimeDSPSlot）は placeholder 専用のレガシースロットで
+    //   通常動作（runtime world 公開後）では null のため、UI/レイテンシー表示はこちらを
+    //   情報源にする（RT 処理パスと同じ runtime world 解決）。
+    [[nodiscard]] inline bool hasPublishedRuntimeDSP() const noexcept
+    {
+        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        return (world != nullptr) && (world->engine.current != nullptr);
+    }
+
     inline DSPCore* releaseActiveRuntimeDSP() noexcept
     {
         return convo::exchangeAtomic(activeRuntimeDSPSlot, nullptr, std::memory_order_acq_rel);
