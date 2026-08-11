@@ -1,7 +1,7 @@
 # ConvoPeq 統合バグリスト (改訂版)
 
 **作成日**: 2026-07-30
-**最終更新**: 2026-08-09 (unchecked mini-bugs 22件検証 → 21件 Fixed/Confirmed、1件は Bug 1-6 と重複。新規 R-17〜R-38 追加。§9-15〜§9-32 で二〜十六次レビュー反映: P2-1〜P2-4 GO・X5 GO・X1/X2/X3/X6 条件付き GO・X4 NO-GO。X1-X6 新設 counter の宣言位置を確定)
+**最終更新**: 2026-08-11（§10 別視点調査追加: 未調査領域の確定・Rebuild.cpp 別視点調査（R-新規A〜E）・各バグの現状再確認・CMake フラグ前回変更反映）
 **対象**: ConvoPeq (Windows 11 x64, AVX2, MSVC/icx, JUCE 8.0.12, MKL/IPP)
 **調査元**: `bug_meta_ai.md`, `bug_qwen.md`, `ConvoPeq_Part8_findings_2026-07-23.md`, `ConvoPeq_バグレポート_2026-07-30.md`, `REPAIR_PLAN3.md`
 **検証方法**: ソースコード grep / AiDex インデックス検索 / 実ファイル閲覧 / cppcheck ログ照合
@@ -329,7 +329,7 @@ setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
 **修正**: 範囲チェックを追加:
 ```cpp
 const int value = static_cast<int>(state.getProperty("noiseShaperType"));
-if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) && 
+if (value >= static_cast<int>(NoiseShaperType::Psychoacoustic) &&
     value <= static_cast<int>(NoiseShaperType::Fixed15Tap))
     setNoiseShaperType(static_cast<NoiseShaperType>(value));
 ```
@@ -1927,3 +1927,136 @@ dash の設計は Practical Stable ISR Bridge Runtime の原則（RT は待た�
 3. **X4 read API 置換対象**: RuntimeWorldAuthority に read API は未実装（X4-B-9 で新設）。現状は RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore) 等を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 等）。**X4-B-9 は worldAuthority().readAPI() に一括置換**（getCurrent() は置換先にしない）。単調性監視は AudioEngine 側で維持
 
 **結果**: evaluateDeferred・QueuePressure 移送・read API 置換対象の観点からも X1〜X6 が確定。残る未確定事項なし。
+
+---
+
+## 10. 別視点調査（2026-08-11）— 未調査領域・未確定事項の確定
+
+**調査観点**: セクション 8「未調査領域」の未着手項目と、各バグの未確定設計判断（producer 実装 / デッドコード削除 / CMake フラグ）を、スレッド所有権・メモリオーダリング・例外安全性・RT 到達可能性の別視点から再調査・確定。
+
+**使用ツール**: AiDex（411ファイル/6054 methods インデックス）、cocoindex (ccc)、semble、graphify、WSL rg/sed/awk、serena
+
+### 10-1. セクション 8 の未着手項目 — 確定結果
+
+| 未調査領域 | 確定結果 | 根拠 |
+|---|---|---|
+| `src/core/ThreadAffinityManager.h`（293行） | **問題なし（調査完了・確定）** | CPU affinity 管理は起動時 1 回の `initialize()` / `detectCoreTopology()` のみ。`applyCurrentThreadPolicy()` の `AudioRealtime` は MMCSS に委譲し SetThreadPriority を呼ばない（二重適用防止）。`std::countr_zero`（C++20）、防御的チェック（Mask!=0 / GroupCount==1 / physicalCoreCount 整合）済み。**RT スレッドからは呼ばれない**（AudioThread affinity は Timer.cpp の applyMmcssPriority が担当） |
+| `EqProcessor::reset()` RT到達可能性 | **デッドコード化を確定**（前回から持ち越しの確定） | `doc/work89/INTEGRATED-BUG-LIST.md` 8.2 で全数確認済み: `DSPCore::reset()`（DSPCoreLifecycle.cpp:335）の呼び出し元ゼロ、`EQProcessor::reset()`（EQProcessor.Core.cpp:259）の呼び出し元ゼロ（grep 全ソース + git 履歴 + テスト）。UI リセットは全て `resetToDefaults()`（EQProcessor.Core.cpp:206）経由で、rt シャドウ変数に触れない安全パターン。**`EQProcessor::reset()` は実質デッドコード** |
+| `ConvolverProcessor.Rebuild.cpp` | 調査完了（10-2 参照） | 別視点調査の結果を 10-2 に記載 |
+| `src/core/EpochDomain.h` | 部分調査済み → 確定 | 9-49（ReaderSlot 構造）/ 9-53（quarantineReader）/ 9-55（enterReader/exitReader 詳細）で確定済み |
+
+### 10-2. `ConvolverProcessor.Rebuild.cpp` の別視点調査
+
+**ファイル概要**: `rebuildAllIRs()` / `postCoalescedChangeNotification()` / `rebuildAllIRsSynchronous()` / `runIncrementalBuildStep()` / `runIncrementalFinalizeStep()` / `setUseIncrementalRebuild()` / `invalidatePendingLoads()` を含む（全 296 行）。
+
+**実行経路の事前整理（最重要の構造的事実）**:
+
+| 関数 | 行 | 実行スレッド | 呼び出し元 | 状態 |
+|---|---|---|---|---|
+| `rebuildAllIRs()` | 13 | Message Thread | `executePendingCommit` 内の callAsync（LoadPipeline.cpp:814） | **LIVE** |
+| `postCoalescedChangeNotification()` | 21 | 任意（内部で callAsync） | 多数（Runtime/StateAndUI/LoadPipeline） | **LIVE** |
+| `rebuildAllIRsSynchronous()` | 44 | Rebuild Thread | `rebuildThreadLoop` 3箇所（RebuildDispatch.cpp:953/1031/1131） | **LIVE** |
+| `IncrementalRebuildJob::reset()` | 110 | — | `setUseIncrementalRebuild`/`invalidatePendingLoads`/`rebuildAllIRsSynchronous` 経由 | **呼ばれるが実質 no-op** |
+| `runIncrementalBuildStep()` | 136 | — | **呼び出し元ゼロ** | **DEAD** |
+| `runIncrementalFinalizeStep()` | 237 | — | **呼び出し元ゼロ** | **DEAD** |
+| `setUseIncrementalRebuild()` | 279 | — | **呼び出し元ゼロ** | **DEAD** |
+| `isIncrementalRebuildEnabled()` | 286 | — | **呼び出し元ゼロ** | **DEAD** |
+| `invalidatePendingLoads()` | 291 | Message Thread | PrepareToPlay.cpp:287 | **LIVE（だが no-op）** |
+
+**最重要の構造的事実**: `rebuildJob` はソースコード上**どこにも確保されていない**（`rebuildJob = std::make_unique<IncrementalRebuildJob>()` は src 配下にゼロ件）。`beginIncrementalRebuild` / `advanceIncrementalRebuild` / `resetIncrementalRebuild` はヘッダ（ConvolverProcessor.h:491-493）に**宣言のみで未定義**。したがって **incremental rebuild サブシステム全体は完全に休眠状態**。
+
+**別視点分析**:
+1. **スレッド所有権**: `rebuildAllIRsSynchronous()` は Rebuild Thread 専用（M-1 コメント明記・3 呼び出し元は全て rebuildThreadLoop）。`rebuildAllIRs()` は Message Thread 専用。`rebuildJob` は**非 atomic のプレーンなメンバ**（ConvolverProcessor.h:889）で、仮に incremental を有効化すると `invalidatePendingLoads`（Message Thread）と Rebuild Thread のアクセスが**データ競合**（現状は rebuildJob==null で良性）
+2. **データ競合**: `changeNotificationPending` の `exchangeAtomic(acq_rel)` → `publishAtomic(release)` は HB を正しく構成。`currentSampleRate` / `currentBufferSize` / `currentIRScale` / `isLoading` の acquire/release 対応は全て整合的。**競合なし**
+3. **例外安全性**: `rebuildAllIRsSynchronous` は noexcept でない。例外は `rebuildThreadLoop` の try/catch（RebuildDispatch.cpp:819-1237）で捕捉され**クラッシュしないがリソースを失う**形態（P3-1 参照）
+4. **リソースリーク**: `acquireIRState()` / `releaseIRState()` のペアリングは正しい（二重解放なし、遅延 retire 方式）。`runIncrementalBuildStep` の `retireStereoConvolver`（L219）は `retired` フラグで二重 retire 防止済み。**ただし `IncrementalRebuildJob::reset()`（L114-115）は `~StereoConvolver() + aligned_free` で直接破棄し NUC エンジンをリーク**（R-新規A）
+5. **WeakReference / ライフタイム**: `postCoalescedChangeNotification` の `weakThis` と callAsync 失敗時の `publishAtomic(pending,false)` 復帰は正しい（lost notification レースは正常動作時なし）。`executePendingCommit` の `weakThis`（LoadPipeline.cpp:719）も破棄後安全
+6. **IncrementalRebuildJob 状態機械**: `Stage::Prepared` / `FinalizingPrepare` を生成するコードが存在しない（`runIncrementalBuildStep` は Building と FinalizingApply のみ遷移）。`advanceIncrementalRebuild` 未定義のため駆動ループなし（R-新規B）
+
+**確定**: 実行経路（rebuild / 通知）は堅牢で、データ競合・通知消失・二重解放は検出されず。**主要な問題は「休眠中の incremental rebuild サブシステムの設計未完」**（R-新規A/B）と「実行経路上の例外時リーク」（R-新規C、OOM 限定）。**`invalidatePendingLoads` が live 呼び出しされている点に注意**（現状 no-op だが、将来 `rebuildJob` を確保・有効化する際は `reset()` のリーク修正と排他アクセスが必須）。
+
+#### 10-2-1. 新規バグ（R-新規A〜E）— 別視点調査で確定
+
+| 提案ID | 重要度 | ステータス | 内容 |
+|---|---|---|---|
+| **R-新規A** | Medium (P2) | ✅ Confirmed（潜伏） | `IncrementalRebuildJob::reset()`（Rebuild.cpp:110-134）が `pendingConv` を `~StereoConvolver() + aligned_free` で直接破棄 → **NUC エンジンリーク**。`StereoConvolver` デストラクタは空（NUC 解放は `destroyStereoConvolver()` に実装）。正しくは `retireStereoConvolver(pendingConv, 0)`。現状はデッドコード経路のため未発火（Debug ビルドでは `~StereoConvolver` 内の `jassert(nucConvolvers[0]==nullptr)` も発火） |
+| **R-新規B** | Medium (P2) | ✅ Confirmed | **Incremental rebuild 一式が未接続**: `rebuildJob` 未確保・`beginIncrementalRebuild`/`advanceIncrementalRebuild`/`resetIncrementalRebuild` は宣言のみ未定義（将来のリンクエラー要因）・`runIncrementalBuildStep`/`runIncrementalFinalizeStep`/`setUseIncrementalRebuild`/`isIncrementalRebuildEnabled` は呼び出し元ゼロ・Stage 状態機械は `Prepared`/`FinalizingPrepare` 未生成で不完全。Rebuild.cpp:136-296 / ConvolverProcessor.h:491-493,579-587 |
+| **R-新規C** | Low (P3) | ✅ Confirmed | `rebuildAllIRsSynchronous`→`runSynchronously`→`applyNewState(async=false)` で **bad_alloc 時に新エンジンがリーク**（例外は rebuildThreadLoop に握り潰されサイレント、OOM 時のみ）。Rebuild.cpp:93 / LoaderThread.cpp:367-383 / LoadPipeline.cpp:680 |
+| **R-新規D** | Low (P3) | ✅ Confirmed（コメント不整合） | `executePendingCommit` の「Message Thread のみ」契約コメントが **Rebuild Thread からの同期実行**（`applyNewState(async=false)`）と不一致。機能バグなし・文書修正推奨。LoadPipeline.cpp:766 |
+| **R-新規E** | Info | ✅ Confirmed（確定事項） | `setUseIncrementalRebuild` の「常に false」過去バグは修正済み（L281 で enable を正しく使用）。`postCoalescedChangeNotification` の合体パターン・atomic 整合・IRState ペアリングは問題なし（監査結果として記録） |
+
+**修正方針**（R-新規A〜E）:
+- **R-新規A**: `IncrementalRebuildJob::reset()` の `pendingConv` 破棄を `retireStereoConvolver(pendingConv, 0)` に変更（二重 retire フラグの `retired` exchange と整合）。`reset()` は noexcept のまま維持
+- **R-新規B**: incremental rebuild を「現状は休眠（将来拡張）」と明示するコメントを ConvolverProcessor.h:491-493 に追加。`beginIncrementalRebuild` 等の未定義関数は、削除するか「将来実装予約」コメントを付与（**呼び出し元ゼロなので削除も可**。削除しない場合は未定義のまま放置せず、`[[noreturn]]` か `jassertfalse` のスタブを置いてリンクエラーを防ぐ）
+- **R-新規C**: `runSynchronously`（LoaderThread.cpp:367-383）の `applyNewState` / `make_unique` を try/catch で包み、失敗時に `conv` を `retireStereoConvolver` する（OOM 時のサイレントリーク防止）
+- **R-新規D**: `executePendingCommit`（LoadPipeline.cpp:766）のコメントを「Message Thread または Rebuild Thread（applyNewState async=false の同期経路）から呼ばれる。内部は全てスレッド安全」に修正
+- **R-新規E**: 監査結果として記録（変更不要）
+
+**リスク**: R-新規A/B はデッドコード経路のため現状実害なし（将来の有効化時に顕在化）。R-新規C は OOM 時のみ。**対応は R-新規A（4行）と R-新規D（コメント）が低コストで即実施可、R-新規B/C は設計判断**。
+
+### 10-3. 各バグの現状再確認（別視点）
+
+#### 10-3-1. Bug 1-2 `coordinatorDeferredRing_` / `lastResortQueue_` デッドコード — 方針確定
+
+**現状再確認（2026-08-11）**: `coordinatorDeferredRing_`（:515）/ `lastResortQueue_`（:518）/ `coordinatorDeferredCount_`（:516）/ `lastResortCount_`（:519）は依然として消費のみ（drainOverflowRing の pop / compaction のみ）で push/producer なし。
+
+**別視点の確定**（REPAIR_PLAN2-dash.md:4798 で設計方針確認）:
+- X6 の設計で **overflow ring（RetireOverflowRing / coordinatorDeferredRing_ / lastResortQueue_）は retire intent の overflow 用**であり、X6 では設計変更なし（producer 追加なし）
+- `drainOverflowRing` の再注入は LifetimeState 側（`emitRetireIntent`）で Coordinator の `pendingIntentCount_` と独立
+
+**確定方針**:
+1. **`lastResortQueue_` の値初期化（`RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity]{};`）は安全に実施可** — UB の芽（未初期化配列）を除去
+2. **producer は実装しない**（X6 設計方針と整合）— `coordinatorDeferredRing_` / `lastResortQueue_` は「retire intent overflow 用の将来予約領域」として維持し、コードコメントで到達不能であることを明示
+3. **削除はしない**（drainOverflowRing のロジックと X1-X6 の将来設計に依存するため）
+
+#### 10-3-2. Bug 1-5 `musicalSoftClip` デッドコード — 削除方針確定
+
+**現状再確認（2026-08-11）**: `AudioEngine::DSPCore::musicalSoftClip()`（AudioEngine.h:1068 宣言 / DSPCoreIO.cpp:341 定義）は呼び出しゼロ。実際の処理は各ファイルローカル `musicalSoftClipScalar()`（DSPCoreIO.cpp:95 / DSPCoreFloat.cpp:165 / DSPCoreDouble.cpp:107）が使用。
+
+**確定方針**: **クラスメソッド `musicalSoftClip()` を削除**（ローカル関数 `musicalSoftClipScalar` が全パスで使用済みのため、削除してもビルド・挙動に影響なし）。将来 Double パスと Float パスのサチュレーション統一（Bug 1-4 の fastTanh 統合）を行う際に、`musicalSoftClipScalar` 自体も `dsp/math/` への共通化を検討。
+
+#### 10-3-3. Bug 2-8 `cleanup()` の「強制削除」未実装 — 役割分担確定
+
+**現状再確認（2026-08-11）**: `cleanup()`（LoadPipeline.cpp:571）は「終了したスレッドのみ削除（`waitForThreadToExit(0)` は非ブロック）」。`forceCleanup()`（StateAndUI.cpp:969）は `loader->stopThread(500)` で強制停止。コメント「強制削除は行わない（stopThreadによる...）」明記。
+
+**確定**: **現状の役割分担は意図どおり正常**。`cleanup()` は破棄時（デストラクタ経由）の安全な回収、`forceCleanup()` は明示的な強制停止（R-37 の loaderTrashBin dangling 修正と連動）。**Bug 2-8 の「cleanup() にタイムアウト付き強制終了を追加」は不要**（二重停止のリスクを回避するため、現状維持が正しい）。
+
+#### 10-3-4. Bug 3-3 `AlignedAllocation.h` の例外 RT 伝播 — 現状確定
+
+**現状再確認（2026-08-11）**: `aligned_malloc`（throw bad_alloc）/ `aligned_malloc_nothrow`（nullptr 返却、noexcept）の 2 系統。`makeAlignedArray` / `ScopedAlignedPtr` の使用箇所は全て Non-RT（StateAndUI.cpp:612/656/657 = UI、ResampleAndFallback.cpp = LoaderThread、Lifecycle.cpp:360 = prepareToPlay、EQProcessor.h メンバ = prepareToPlay で事前確保）。**RT パス（AudioEngine.Processing.*.cpp の process）には `aligned_malloc` / `new` / `setSize` は存在しない**（事前割当制）。
+
+**確定**: **RT パスで例外伝播は発生しない**（事前割当制が徹底済み）。`aligned_malloc_nothrow` は RT 用の安全 API として提供済み。将来の RT パス変更時の契約として「RT パスでは aligned_malloc_nothrow のみ使用」をコメントで明示することを推奨（対応不要のまま維持可）。
+
+#### 10-3-5. Bug 3-8 `cachedLatency` 例外安全性 — 現状確定
+
+**現状再確認（2026-08-11）**: `cachedLatency` は `src/ConvolverProcessor.h` に `std::atomic<LatencySnapshot*>` メンバ（現行名は `n`）。`updateLatencyCache()` が `new LatencySnapshot()` → `exchangeAtomic(n, newSnap, acq_rel)` で公開（StateAndUI.cpp）。消費側は `consumeAtomic(n, acquire)`。
+
+**確定**: **現状維持で安全**（3-8 の「現状維持も可」に確定）。`new LatencySnapshot()` の bad_alloc は Non-RT（UI/Message Thread）で発生し、公開前なので RT に影響しない。`std::atomic` のコピー delete により二重解放リスクなし。
+
+#### 10-3-6. R-9 / 3-9 / 3-10 CMake フラグ — 前回変更を反映し残課題を確定
+
+**前回変更（2026-08-11 Release icx ビルド修正）**: icx 版 `CMAKE_CXX_FLAGS_RELEASE` を `/O3` → `/O2` に変更（JUCE 巨大ファイルで LLVM out of memory 回避）。MSVC 版は既に `/O2`（L1283）。
+
+**残課題の確定**:
+- **3-9 `/fp:fast`**: 依然 `CMAKE_CXX_FLAGS_RELEASE` に残存（L1283 MSVC / L1360 icx）。DSP 数値精度の観点で **`target_compile_options` への移行を推奨**（グローバル `/fp:fast` を削除し、DSP 専用ターゲットに `/fp:fast`、それ以外は `/fp:precise`）。**ただし icx では `/fp:fast` がデフォルトかつ性能上の要件**（コメント明記）のため、**現状維持（グローバル /fp:fast）も許容**
+- **3-10 `/QxCORE-AVX2`**: icx 版のみ。Intel CPU 専用フラグ。AMD 非互換の観点で **`CMAKE_CXX_FLAGS_RELEASE` から除去し、`target_compile_options` に移行することを推奨**（RuntimeBuilder 等の AVX2 依存コードは `__AVX2__` マクロでガード済みか確認が必要）
+- **R-9 CMAKE_CXX_FLAGS_RELEASE グローバル上書き**: `/fp:fast` と `/QxCORE-AVX2` が全ターゲットに適用される構造は依然残存。**3-9/3-10 のターゲット固有化が完了すれば R-9 も解消**（段階的対応）
+
+### 10-4. 別視点調査の総括
+
+| 項目 | 確定内容 | 対応 |
+|---|---|---|
+| ThreadAffinityManager.h | 問題なし | 対応不要 |
+| EqProcessor::reset() / DSPCore::reset() | デッドコード（work89 8.2 確定） | BUG-065 は案 A（rt シャドウ書込削除）で将来安全化 |
+| ConvolverProcessor.Rebuild.cpp | 実行経路は堅牢（競合・通知消失・二重解放なし）。**incremental rebuild サブシステムは休眠状態**（R-新規A〜E 参照） | R-新規A（リーク修正 4行）+ R-新規D（コメント修正）は即実施可。R-新規B/C は設計判断 |
+| R-新規A IncrementalRebuildJob::reset() リーク | `~StereoConvolver()+aligned_free` で NUC エンジンリーク（潜伏） | `retireStereoConvolver(pendingConv, 0)` に変更 |
+| R-新規B Incremental rebuild 未接続 | `rebuildJob` 未確保・`beginIncrementalRebuild` 等は宣言のみ未定義 | 削除 or 将来予約コメント + スタブ化 |
+| R-新規C 例外時リーク（OOM） | `applyNewState` / `make_unique` の bad_alloc で新エンジンリーク | try/catch + `retireStereoConvolver` |
+| R-新規D executePendingCommit コメント不整合 | 「Message Thread のみ」が Rebuild Thread 実行と不一致 | コメント修正 |
+| R-新規E setUseIncrementalRebuild 過去バグ | 修正済み（enable を正しく使用） | 監査記録のみ |
+| Bug 1-2 coordinatorDeferredRing_ / lastResortQueue_ | producer 実装せず、値初期化のみ | `lastResortQueue_` に `{}` 初期化 |
+| Bug 1-5 musicalSoftClip | デッドコード削除を確定 | クラスメソッド削除 |
+| Bug 2-8 cleanup 強制削除 | 役割分担は正常（現状維持） | 対応不要 |
+| Bug 3-3 AlignedAllocation 例外 | RT パスで確保なし（事前割当制） | コメント明示のみ |
+| Bug 3-8 cachedLatency | 現状維持で安全 | 対応不要 |
+| R-9 / 3-9 / 3-10 CMake フラグ | /O3→/O2 変更反映。/fp:fast・/QxCORE-AVX2 のターゲット固有化は残課題 | 段階的対応（推奨） |

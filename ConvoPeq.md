@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-11 16:39:47
+> Generated: 2026-08-11 18:37:23
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1671,7 +1671,8 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
 
     # Release 最適化フラグ: Intel 第4世代Core(Haswell, 2013〜)以降に極限最適化
-    # /O3: ループ自動ベクトル化・アグレッシブインライン展開
+    # /O2: 標準最適化（2026-08-11: /O3 は JUCE 巨大ファイル（juce_gui_basics 等）で
+    #   LLVM ERROR: out of memory を引き起こすため /O2 に変更。AVX2 + fp:fast で性能は維持）
     # /QxCORE-AVX2: Haswell以降のAVX2+FMA必須、Intel専用コード生成
     # /fp:fast: 高速浮動小数点（icx デフォルト）。明示的なデノーマル対策により
     #   微小信号の消失リスクを排除しつつ、最高の演算性能を実現。
@@ -1680,7 +1681,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /Zi: PDBデバッグ情報
     # 注: /fp:precise + /Qimf-arch-consistency:true は icx 2026.0 でメモリ枯渇
     #     (LLVM ERROR: out of memory) を引き起こすため使用しない。
-    #     /Oi /Ot は /O3 指定時のデフォルトと同一のため明示指定不要。
+    #     /Oi /Ot は /O2 指定時のデフォルトと同一のため明示指定不要。
     #     /Qdiag-disable は ICX で非サポート（Intel移行ガイド）。
     #     xilink.exe は icx では非推奨（Intel移行ガイド）。
     # 注: 下記の string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため削除済
@@ -1692,8 +1693,8 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
     # ★ work88 (Phase 7): /EHsc を追加（Release の JUCE C1189 回避 — icx 側も同様）
-    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
-    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
     # ASan 有効時は Qipo を無効化（ASan と LTO は非互換）
     target_compile_options(ConvoPeq PRIVATE
@@ -40149,10 +40150,10 @@ struct ScopedBlockTimer {
 #pragma warning(push)
 #pragma warning(disable : 4324) // C4324: alignas(64) による意図的なパディングを許容
 struct alignas(64) LogEntry {
-#pragma warning(pop)
     uint16_t length;
     char text[254];
 };
+#pragma warning(pop)
 static_assert(std::is_trivially_copyable_v<LogEntry>,
     "LogEntry must be trivially copyable for LockFreeRingBuffer");
 static_assert(sizeof(LogEntry) == 256, "LogEntry size mismatch");
@@ -44207,6 +44208,7 @@ private:
                                 entry.second, rt, *owner->m_retireRouter,
                                 owner->m_epochDomain.readerRegistrationClosed());
                             jassert(reclaimed);
+                            juce::ignoreUnused(reclaimed);   // Release(NDEBUG) で jassert 消滅時の未使用警告対策
                         }
                     }
                 } else {
@@ -49314,6 +49316,8 @@ namespace isr {
  * だと is_lock_free() が false になり Debug ビルドの assert が失敗する。
  * （ISRDSPHandle.cpp:12-20 / ISRDSPHandle.h:174-177 参照）
  */
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas(16) による意図的なパディングを許容
 struct alignas(16) DSPHandle
 {
     uint32_t slot;        // レジストリスロット番号
@@ -49339,6 +49343,7 @@ struct alignas(16) DSPHandle
         return !(*this == other);
     }
 };
+#pragma warning(pop)
 
 /**
  * DSP 生命周期状態

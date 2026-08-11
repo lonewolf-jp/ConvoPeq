@@ -84,8 +84,8 @@ REPLACEMENTS = [
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 )
-
-# Per-platform archive metadata:''',
+# Per-platform archive metadata: tar.xz on POSIX (extracts to shellcheck-v<ver>/shellcheck),
+# zip on Windows (extracts to shellcheck.exe at archive root).''',
         "new": '''_SHELLCHECK_ALLOWED_HOSTS = (
     "github.com",
     "objects.githubusercontent.com",
@@ -97,7 +97,8 @@ REPLACEMENTS = [
 # r8brain-free-src), which are not shell and would otherwise trigger spurious parse errors.
 # This can be overridden per-project via Serena's `ls_specific_settings` (key `bash.globPattern`).
 DEFAULT_BASH_GLOB_PATTERN = "**/*@(.sh|.bash|.command)"
-# Per-platform archive metadata:''',
+# Per-platform archive metadata: tar.xz on POSIX (extracts to shellcheck-v<ver>/shellcheck),
+# zip on Windows (extracts to shellcheck.exe at archive root).''',
     },
     {
         "name": "add _managed_shellcheck_path + _build_bashide_config helpers",

@@ -58,6 +58,14 @@ vendor/
 steering/
 storage/
 .github/tmp/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Debug / scratch output (large temporary files - never commit)
+tools/debug-*.txt
+tools/reorg-out.txt
 .vs/
 JUCE/
 !JUCE/extras/

@@ -521,6 +521,14 @@ foreach ($file in $sourceFiles) {
                 '^src/audioengine/RuntimeBuilder\.cpp$'
                 '^src/AlignedAllocation\.h$'
                 '^src/audioengine/ISRRuntimePublicationCoordinator\.(cpp|h)$'
+                # ★ work88 (X4-B): RuntimeWorldAuthority が sole physical publish gateway 化で
+                #   正当な const_cast が発生する箇所。
+                #   - RuntimePublishExecutor.h: publish 前 seal（immutable 化、PR-5）
+                #   - RuntimeWorldAuthority.h: physical store swap の所有権移行（INV-X4-3）
+                #   - AudioEngine.Init.cpp: bootstrap publish の seal / rejected world 所有権移行（X4-B-6）
+                '^src/audioengine/RuntimePublishExecutor\.h$'
+                '^src/audioengine/RuntimeWorldAuthority\.h$'
+                '^src/audioengine/AudioEngine\.Init\.cpp$'
             )
             $isAllowed = $false
             foreach ($pattern in $allowedConstCastPatterns) {

@@ -1,0 +1,58 @@
+蜈・ 685 陦・竊・譁ｰ: 702 陦・
+=== 譁ｰ讒矩縺ｮ隕句・縺・===
+1: # ConvoPeq 邨ｱ蜷医ヰ繧ｰ謾ｹ菫ｮ險育判譖ｸ (INTEGRATED_BUG_FIX)
+14: # 險ｭ險・窶・譛牙柑繝舌げ縺ｮ謾ｹ菫ｮ險ｭ險・
+16: ## 1. 讎りｦ・
+18: ### 1.1 謾ｹ菫ｮ蟇ｾ雎｡縺ｮ蛻・｡・
+26: ### 1.2 蜆ｪ蜈亥ｺｦ・亥挨隕也せ隱ｿ譟ｻ縺ｧ邊ｾ邱ｻ蛹厄ｼ・
+43: ## 2. 謾ｹ菫ｮ蟇ｾ雎｡繝舌げ荳隕ｧ・域怏蜉ｹ繝ｻ譛ｪ菫ｮ豁｣・・
+45: ### 2.1 蜊ｳ譎よ隼菫ｮ・亥ｮ滓命遒ｺ螳夲ｼ・
+65: ### 2.2 險ｭ險亥愛譁ｭ・郁ｦ∫ｲｾ譟ｻ・・
+87: ## 3. 隧ｳ邏ｰ謾ｹ菫ｮ險ｭ險・
+88: ### 3-1. Bug 1-1 `nucHCMode` / `nucLCMode` 縺後そ繝・す繝ｧ繝ｳ豌ｸ邯壼喧縺九ｉ谺關ｽ・・igh / P0・・
+114: ### 3-2. Bug 1-2 `coordinatorDeferredRing_` / `lastResortQueue_` 繝・ャ繝峨さ繝ｼ
+131: ### 3-3. Bug 1-3 `_mm256_store_pd` 繧｢繝ｩ繧､繝｡繝ｳ繝井ｿ晁ｨｼ縺ｪ縺暦ｼ・ritical / P0・・
+156: ### 3-4. Bug 1-4 `fastTanh` 3邂・園迢ｬ遶玖､・｣ｽ・・edium / P1・・
+177: ### 3-5. Bug 1-5 `musicalSoftClip` 繝・ャ繝峨さ繝ｼ繝会ｼ・ow / P2・・
+190: ### 3-6. Bug 1-6 IPP FFT 謌ｻ繧雁､辟｡隕厄ｼ・edium / P0・・
+209: ### 3-7. Bug 1-7 ISRRetire Mutex・・igh / P0 竊・**P2 縺ｫ荳区婿菫ｮ豁｣**・・
+227: ### 3-8. Bug 1-8 LoaderThread OOM・・igh / P0・・
+257: ### 3-9. Bug 1-9 MKLNonUniformConvolver int/size_t 豺ｷ蝨ｨ・・igh / P0 竊・**險ｭ險・
+279: ### 3-10. Bug 1-10 `m_pendingIRChange` 蜈ｬ髢句燕繧ｯ繝ｪ繧｢・・igh / P1 竊・**迴ｾ迥ｶ險倩ｼ峨・謚陦鍋噪隱､繧・
+302: ### 3-11. Bug 2-1 髱暸SCII隴伜挨蟄・`SoftClipPadﾃｩPolicy`・・ow / P2・・
+312: ### 3-12. Bug 2-2 蜈･蜉・DC 繝悶Ο繝・き繝ｼ NaN/Inf 髱槫ｯｾ遘ｰ・・ow / P2・・
+320: ### 3-13. Bug 2-3 繝ｦ繝九ャ繝医ユ繧ｹ繝医・遏帷崟譚｡莉ｶ・・ow / P2・・
+328: ### 3-14. Bug 2-4 CacheManager strict-aliasing 驕募渚・・ow / P2・・
+340: ### 3-15. Bug 2-5 LockFreeRingBuffer::size() 繝・・繧ｿ遶ｶ蜷茨ｼ・edium / P2・・
+355: ### 3-16. Bug 2-6 RCUReader 繝上ャ繧ｷ繝･陦晉ｪ・ｼ・igh / P1 竊・**蜑肴署荳肴・遶九・severity 荳区婿**・・
+378: ### 3-17. Bug 2-7 atomic<DSPHandle> 繝ｭ繝・け繝輔Μ繝ｼ讀懆ｨｼ荳崎ｶｳ・・edium / P1・・
+397: ### 3-19. Bug 2-9 繧ｿ繧､繝溘Φ繧ｰ險育ｮ・uint64 underflow・・edium / P1・・
+409: ### 3-20. Bug 2-10 NoiseShaperType enum 繧ｭ繝｣繧ｹ繝域､懆ｨｼ谺螯ゑｼ・edium / P1・・
+423: ### 3-24. Bug 3-4 MKL 繧｢繝ｩ繧､繝｡繝ｳ繝亥愛螳夂ｫｶ蜷茨ｼ・edium / P3・・
+435: ### 3-25. Bug 3-5 CacheManager volatile sink・・edium / P3・・
+446: ### 3-26. Bug 3-6 SnapshotFactory NaN 繝上ャ繧ｷ繝･荳堺ｸ閾ｴ・・edium / P3 竊・**荳｡髱｢蟇ｾ蠢懊′蠢・ｦ・
+471: ### 3-27. Bug 3-7 SpectrumAnalyzer alignas 繝ｫ繝ｼ繝怜・驟咲ｽｮ・・ow / P3・・
+479: ### 3-29. Bug 3-9 /fp:fast 邊ｾ蠎ｦ菴惹ｸ具ｼ・edium / P3・俄・險ｭ險亥愛譁ｭ 竊・**螳滓命遒ｺ螳壹・ConvoPeq 蛟・
+491: # CMAKE_CXX_FLAGS_RELEASE 縺九ｉ /fp:fast 繧帝勁蜴ｻ縺励，onvoPeq 繧ｿ繝ｼ繧ｲ繝・ヨ縺ｮ縺ｿ縺ｫ驕ｩ逕ｨ
+502: ### 3-30. Bug 3-10 /QxCORE-AVX2 AMD 髱樔ｺ呈鋤・・edium / P3・俄・險ｭ險亥愛譁ｭ 竊・**螳滓命遒ｺ螳壹・MS
+513: # icx: CMAKE_CXX_FLAGS_RELEASE・・1360・峨°繧・/QxCORE-AVX2 繧帝勁蜴ｻ
+515: # 蛟句挨驕ｩ逕ｨ縺ｯ譌｢蟄倥・ :1376・・onvoPeq・・ :1623・・arness・・ :858・・TNU・峨〒邯ｭ謖・
+522: ### 3-31. R-9 CMAKE_CXX_FLAGS_RELEASE 繧ｰ繝ｭ繝ｼ繝舌Ν荳頑嶌縺搾ｼ・edium / P3・俄・險ｭ險亥愛譁ｭ 竊・**
+535: # Remove: set(CMAKE_CXX_FLAGS_RELEASE "/O2 ... /fp:fast ... /QxCORE-AV
+536: # Use per-target:
+541: ### 3-32. R-譁ｰ隕就 IncrementalRebuildJob::reset() NUC 繝ｪ繝ｼ繧ｯ・・2・俄・螳滓命遒ｺ螳・
+556: ### 3-33. R-譁ｰ隕州 Incremental rebuild 譛ｪ謗･邯夲ｼ・2・俄・險ｭ險亥愛譁ｭ
+565: ### 3-34. R-譁ｰ隕修 bad_alloc 譎ゅΜ繝ｼ繧ｯ・・3・俄・險ｭ險亥愛譁ｭ
+572: ### 3-35. R-譁ｰ隕愁 executePendingCommit 繧ｳ繝｡繝ｳ繝井ｸ肴紛蜷茨ｼ・3・俄・螳滓命遒ｺ螳・
+583: # Appendix 窶・迴ｾ迥ｶ邯ｭ謖√・逶｣譟ｻ險倬鹸
+587: ### 2.3 迴ｾ迥ｶ邯ｭ謖・ｼ按ｧ10 遒ｺ螳夲ｼ・
+600: ## A. 迴ｾ迥ｶ邯ｭ謖√・逶｣譟ｻ險倬鹸繝舌げ縺ｮ險ｭ險・
+602: ### 3-18. Bug 2-8 cleanup() 蠑ｷ蛻ｶ蜑企勁譛ｪ螳溯｣・窶・**迴ｾ迥ｶ邯ｭ謖・ｼ按ｧ10 遒ｺ螳夲ｼ・*
+606: ### 3-21. Bug 3-1 AudioSegmentBuffer 繝ｪ繝ｳ繧ｰ繝ｩ繝・・遶ｶ蜷茨ｼ・igh / P3 竊・**蜑肴署荳肴・遶九・髦ｲ蠕｡逧・ｼｷ
+625: ### 3-22. Bug 3-2 DeferredDeletionQueue kMaxScan 窶・**迴ｾ迥ｶ邯ｭ謖・ｼ按ｧ10 遒ｺ螳夲ｼ・*
+629: ### 3-23. Bug 3-3 AlignedAllocation 萓句､・RT 莨晄眺 窶・**迴ｾ迥ｶ邯ｭ謖・ｼ按ｧ10 遒ｺ螳夲ｼ・*
+633: ### 3-28. Bug 3-8 cachedLatency 萓句､門ｮ牙・諤ｧ 窶・**迴ｾ迥ｶ邯ｭ謖・ｼ按ｧ10 遒ｺ螳夲ｼ・*
+637: ### 3-36. R-譁ｰ隕拾 setUseIncrementalRebuild 驕主悉繝舌げ 窶・**逶｣譟ｻ險倬鹸縺ｮ縺ｿ・按ｧ10 遒ｺ螳夲ｼ・*
+643: ## 4. 螳溯｣・・ｺ・
+678: ## 5. 讀懆ｨｼ險育判
+695: ## 6. 螳滓命荳翫・豕ｨ諢・
