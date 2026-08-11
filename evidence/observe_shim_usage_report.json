@@ -1,0 +1,13 @@
+{
+  "schema": "observe_shim_usage_report_v1",
+  "generatedAt": "2026-08-11T16:16:39.7830761+09:00",
+  "allowlistPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-observe-shim-allowlist.json",
+  "allowlistOwner": "audioengine-runtime-bridge",
+  "allowlistIssue": "BRIDGE-OBSERVE-GOV-001",
+  "allowlistExpiry": "2026-09-30",
+  "ruleCount": 1,
+  "totalMatches": 0,
+  "blockedMatches": 0,
+  "policyViolations": [],
+  "blocked": []
+}

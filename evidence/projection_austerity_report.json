@@ -1,0 +1,17 @@
+{
+  "triggerAuditReady": true,
+  "forbiddenPatterns": [
+    "cachedResolvedRouting",
+    "cachedEffectiveTopology",
+    "cachedTransitionInfo"
+  ],
+  "violations": [],
+  "triggerAuditReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "schema": "projection_austerity_report_v1",
+  "audioRoot": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine",
+  "runtimeExecutionViewUsageCount": 0,
+  "totalMatches": 0,
+  "ready": true,
+  "matches": [],
+  "generatedAt": "2026-08-11T16:16:41.1254462+09:00"
+}

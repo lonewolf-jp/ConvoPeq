@@ -53,7 +53,7 @@
 #include "DftiHandle.h"
 
 class AudioEngine;
-namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class RuntimeIntentCoordinator; }
 class CacheManager;
 class ProgressiveUpgradeThread;
 
@@ -212,7 +212,7 @@ public:
     ~ConvolverProcessor();
 
     void setRcuProvider(AudioEngine& engine) noexcept { rcuProvider = engine; }
-    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    void setRetireCoordinator(convo::isr::RuntimeIntentCoordinator* coordinator) noexcept
     {
         rcuSwapper.setRetireCoordinator(coordinator);
     }

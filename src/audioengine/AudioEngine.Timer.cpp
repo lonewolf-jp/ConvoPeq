@@ -68,10 +68,10 @@ struct ScopedBlockTimer {
 #pragma warning(push)
 #pragma warning(disable : 4324) // C4324: alignas(64) による意図的なパディングを許容
 struct alignas(64) LogEntry {
-#pragma warning(pop)
     uint16_t length;
     char text[254];
 };
+#pragma warning(pop)
 static_assert(std::is_trivially_copyable_v<LogEntry>,
     "LogEntry must be trivially copyable for LockFreeRingBuffer");
 static_assert(sizeof(LogEntry) == 256, "LogEntry size mismatch");

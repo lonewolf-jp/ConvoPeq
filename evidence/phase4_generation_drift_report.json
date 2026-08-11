@@ -1,14 +1,12 @@
-﻿{
-    "schema":  "phase4_generation_drift_report_v2",
-    "generatedAt":  "2026-07-25T20:38:23.2466014+09:00",
-    "audioRoot":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine",
-    "requiredFiles":  {
-                          "dspHandleCpp":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRDSPHandle.cpp",
-                          "dspTransition":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\DSPTransition.h",
-                          "timerCpp":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Timer.cpp",
-                          "audioHeader":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h"
-                      },
-    "violations":  [
-
-                   ]
+{
+  "schema": "phase4_generation_drift_report_v2",
+  "generatedAt": "2026-08-11T16:16:29.5508164+09:00",
+  "audioRoot": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine",
+  "requiredFiles": {
+    "dspHandleCpp": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRDSPHandle.cpp",
+    "dspTransition": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\DSPTransition.h",
+    "timerCpp": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Timer.cpp",
+    "audioHeader": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h"
+  },
+  "violations": []
 }

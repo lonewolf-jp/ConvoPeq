@@ -1,0 +1,27 @@
+{
+  "schema": "trigger_cleanup_completion_report_v1",
+  "generatedAt": "2026-08-11T16:16:43.2137320+09:00",
+  "triggerAuditReport": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "deferredRegistryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+  "deferredRegistryEntryCount": 0,
+  "sourceRoot": "C:\\VSC_Project\\ConvoPeq\\src",
+  "referenceConsistency": {
+    "triggerAuditReport": {
+      "expected": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+      "actual": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+      "satisfied": true
+    },
+    "deferredRegistryPath": {
+      "expected": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+      "actual": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+      "satisfied": true
+    },
+    "sourceRoot": {
+      "expected": "C:\\VSC_Project\\ConvoPeq\\src",
+      "actual": "C:\\VSC_Project\\ConvoPeq\\src",
+      "satisfied": true
+    }
+  },
+  "cleanupCompleted": true,
+  "violations": []
+}

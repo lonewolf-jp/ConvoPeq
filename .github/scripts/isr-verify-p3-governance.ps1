@@ -25,17 +25,17 @@ function Assert-NotMatch([string]$text, [string]$pattern, [string]$message) {
 # R13: publish graph immutable facade checks
 $audioEngineHeaderPath = Join-Path $audioRoot "AudioEngine.h"
 $audioEngineHeader = Read-Text $audioEngineHeaderPath
-$runtimeStateMatch = [regex]::Match(
-    $audioEngineHeader,
-    'struct\s+RuntimeState\s*:[\s\S]*?\{([\s\S]*?)\};\s*\r?\n\s*using\s+RuntimePublishWorld',
-    [System.Text.RegularExpressions.RegexOptions]::Multiline)
-
-if (-not $runtimeStateMatch.Success) {
+# ★ 2026-08-11: RuntimeState はネスト構造体（BuilderToken 等）を含むため、
+#   非貪欲正規表現では最初の };（ネスト終端）で止まってしまう。
+#   IndexOf で「struct RuntimeState」から「using RuntimePublishWorld」までを抽出する。
+$runtimeStateStart = $audioEngineHeader.IndexOf('struct RuntimeState')
+$usingRuntimePublishWorldIdx = $audioEngineHeader.IndexOf('using RuntimePublishWorld', $runtimeStateStart)
+if ($runtimeStateStart -lt 0 -or $usingRuntimePublishWorldIdx -lt 0) {
     throw "R13 gate: RuntimeState block not found in AudioEngine.h"
 }
-
-$runtimeStateBody = $runtimeStateMatch.Groups[1].Value
-Assert-NotMatch $runtimeStateBody '\bmutable\b' 'R13 gate: RuntimeState must not contain mutable members'
+$runtimeStateBody = $audioEngineHeader.Substring($runtimeStateStart, $usingRuntimePublishWorldIdx - $runtimeStateStart)
+# ★ 2026-08-11: mutable は設計コメントにも現れるため、メンバ宣言（行頭 mutable <ident>）に限定。
+Assert-NotMatch $runtimeStateBody '(?m)^\s*mutable\s+\w+' 'R13 gate: RuntimeState must not contain mutable members'
 Assert-NotMatch $runtimeStateBody 'std::mutex|std::shared_ptr|std::atomic\s*<' 'R13 gate: RuntimeState must not contain mutex/shared_ptr/atomic'
 Assert-NotMatch $runtimeStateBody 'lazy|Lazy|init\s*\(' 'R13 gate: RuntimeState must not include lazy-init patterns'
 
@@ -91,7 +91,8 @@ Assert-Match $timerCpp 'crossfadeAuthorityRuntime_\.unregisterCrossfade\s*\(' 'R
 # R14: retire-intent API naming consistency
 $commitCppPath = Join-Path $audioRoot "AudioEngine.Commit.cpp"
 $commitCpp = Read-Text $commitCppPath
-Assert-Match $commitCpp 'retireRuntime_\.emitRetireIntentRT\s*\(' 'R14 gate: retire intent RT API naming consistency missing'
-Assert-NotMatch $commitCpp 'retireRuntime_\.emitRetireIntent\s*\(' 'R14 gate: non-RT retire intent API usage detected in commit path'
+# ★ 2026-08-11: emitRetireIntentRT は LifetimeState（worldAuthority_.lifetime()）経由に変更
+Assert-Match $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntentRT\s*\(' 'R14 gate: retire intent RT API naming consistency missing'
+Assert-NotMatch $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntent\s*\(' 'R14 gate: non-RT retire intent API usage detected in commit path'
 
 Write-Host '[PASS] P3 governance gates (R13/R14/R19/R20/R21/R23)'

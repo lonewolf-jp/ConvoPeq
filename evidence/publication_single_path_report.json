@@ -1,0 +1,37 @@
+{
+  "schema": "publication_single_path_report_v1",
+  "generatedAt": "2026-08-11T16:16:31.0187508+09:00",
+  "files": {
+    "inventoryScript": "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-generate-authority-inventory.ps1",
+    "coordinatorHeader": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.h",
+    "coordinatorSource": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
+    "commitSource": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp"
+  },
+  "checks": {
+    "publicationPathContract": true,
+    "commitDeclarationCount": 2,
+    "commitDefinitionCount": 2,
+    "commitRuntimePublicationCount": 0,
+    "bridgeCommitCallCount": 1,
+    "publishCommitPathCount": 1,
+    "frozenPrecheck": true,
+    "sealedPrecheck": true,
+    "forbiddenPostPublishMutationPatterns": [
+      "const_cast\\s*<\\s*RuntimePublishWorld\\s*\\*\\s*>",
+      "world\\s*\\.\\s*unseal\\s*\\(",
+      "world\\s*\\.\\s*seal\\s*\\(",
+      "world\\s*\\.\\s*sealRecursively\\s*\\(",
+      "world\\s*\\.\\s*freeze\\s*\\(",
+      "world\\s*\\.\\s*assertMutable\\s*\\("
+    ],
+    "runtimeStoreDirectAccessHits": [],
+    "forbiddenApiScan": [
+      "publishGraph",
+      "publishTransition",
+      "publishSnapshot",
+      "publishFade"
+    ]
+  },
+  "violations": [],
+  "ready": true
+}

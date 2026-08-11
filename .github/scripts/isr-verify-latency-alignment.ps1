@@ -46,8 +46,10 @@ if ($prepareText -match 'latencyDelayOld_RT\s*=|latencyDelayNew_RT\s*=') {
     $violations.Add('AudioEngine.Processing.PrepareToPlay.cpp must not directly assign latencyDelay*_RT')
 }
 
-if ($commitText -notmatch 'publishLatencyDelayAtomics\(') {
-    $violations.Add('AudioEngine.Commit.cpp must call publishLatencyDelayAtomics()')
+# ★ 2026-08-11: latency は Init/PrepareToPlay で設定され、Commit では変更しない。
+#   world.latency 経由で RT スレッドに伝搬（RuntimePublicationOrchestrator が engine_ atomics を読む）。
+if ($initText -notmatch 'publishLatencyDelayAtomics\(' -and $prepareText -notmatch 'publishLatencyDelayAtomics\(') {
+    $violations.Add('AudioEngine.Init.cpp or PrepareToPlay.cpp must call publishLatencyDelayAtomics()')
 }
 if ($commitText -match 'publishAtomic\(latencyDelayOld,|publishAtomic\(latencyDelayNew,') {
     $violations.Add('AudioEngine.Commit.cpp must not directly publish latencyDelay atomics')

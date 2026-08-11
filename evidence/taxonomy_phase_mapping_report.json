@@ -1,0 +1,11 @@
+{
+  "schema": "taxonomy_phase_mapping_report_v1",
+  "generatedAt": "2026-08-11T16:17:40.6120799+09:00",
+  "sourceDocument": "C:\\VSC_Project\\ConvoPeq\\doc\\work5\\Practical_Stable_ISR_Runtime_詳細設計_v1_2.md",
+  "checks": {
+    "mappingRows": true,
+    "actionRules": true
+  },
+  "violations": [],
+  "ready": true
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "enforcement_source_purity_report_v1",
+  "generatedAt": "2026-08-11T16:16:41.5680029+09:00",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-enforcement-source-policy.json",
+  "triggerAuditReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "allowedRawRegexFields": [],
+  "allowedUnknownFields": [],
+  "rawRegexViolationCount": 0,
+  "unknownViolationCount": 0,
+  "rawRegexViolations": [],
+  "unknownViolations": [],
+  "details": [
+    {
+      "field": "activeDspMetricSource",
+      "source": "symbolBlockedMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "fadingOutDspMetricSource",
+      "source": "triggerAstEffectiveMatches",
+      "classification": "advanced"
+    },
+    {
+      "field": "retireFacadeMetricSource",
+      "source": "symbolBlockedMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "retireFacadeRuntimeExecutionMetricSource",
+      "source": "symbolTotalMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "runtimeExecutionViewMetricSource",
+      "source": "symbolBlockedMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "legacyDirectObserveMetricSource",
+      "source": "observeShimBlockedMatches",
+      "classification": "advanced"
+    }
+  ]
+}

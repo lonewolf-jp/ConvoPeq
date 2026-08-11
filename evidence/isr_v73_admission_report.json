@@ -1,0 +1,23 @@
+{
+  "schema": "isr_v73_admission_report_v1",
+  "generatedAt": "2026-08-11T16:17:38.1193496+09:00",
+  "mode": "fail",
+  "checks": [
+    "CI-ADMISSION-001",
+    "CI-ADMISSION-002",
+    "CI-ADMISSION-003",
+    "CI-ADMISSION-004",
+    "CI-ADMISSION-005",
+    "CI-ADMISSION-006",
+    "CI-ADMISSION-007",
+    "CI-ADMISSION-008",
+    "CI-ADMISSION-009",
+    "CI-ADMISSION-010",
+    "CI-ADMISSION-011",
+    "CI-ADMISSION-012",
+    "CI-ADMISSION-013",
+    "CI-ADMISSION-014"
+  ],
+  "violationCount": 0,
+  "violations": []
+}

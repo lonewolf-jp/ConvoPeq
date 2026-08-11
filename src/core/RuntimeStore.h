@@ -15,6 +15,11 @@ class RuntimeStore final
 public:
     static_assert(std::is_class_v<Owner>, "RuntimeStore Owner must be a class type");
 
+    // ★ work88 (X4-B §6.4 / 二十一次レビュー): Owner 型の公開エイリアス。
+    //   `Store::Owner` はコンパイル不可（RuntimeStore に using Owner が無かった）のため、
+    //   Test 1（static_assert(is_same_v<Store::OwnerType, RuntimeWorldAuthority>)）用に追加。
+    using OwnerType = Owner;
+
     class WriteAccess final
     {
     public:

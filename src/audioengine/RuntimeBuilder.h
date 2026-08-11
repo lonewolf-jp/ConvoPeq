@@ -130,7 +130,7 @@ public:
     // ★ v8.3: const RuntimePublishWorld を返す — INV-11 のコンパイル時保証
     //   buildRuntimePublishWorld() 完了後は World を変更してはならない。
     //   内部で Coordinator が sealRecursively() を呼ぶ必要があるため、
-    //   RuntimePublicationCoordinator が const_unique_ptr を受け入れる。
+    //   RuntimeIntentCoordinator が const_unique_ptr を受け入れる。
     [[nodiscard]] convo::aligned_unique_ptr<const RuntimePublishWorld>
     buildRuntimePublishWorld(
         const convo::RuntimeBuildSnapshot* sealedSnapshot,
@@ -197,7 +197,7 @@ public:
 
     // Bootstrap World: 初期化時に初回 publish する最小限の RuntimePublishWorld を生成する。
     // 全てのデフォルト値で初期化され、AudioEngine::initialize() 実行直後に
-    // RuntimePublicationCoordinator::publishWorld() で公開される。
+    // RuntimeIntentCoordinator::publishWorld() で公開される。
     // これにより publishRuntimeStateNonRt が初回コール時に world==nullptr の
     // fallback を必要としなくなる。
     [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>

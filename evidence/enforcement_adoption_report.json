@@ -1,0 +1,41 @@
+{
+  "schema": "enforcement_adoption_report_v1",
+  "generatedAt": "2026-08-11T16:16:41.5274974+09:00",
+  "triggerAuditReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-enforcement-adoption-policy.json",
+  "tier": "standard",
+  "minAdvancedCoverageRatio": 0.8,
+  "totalTrackedSources": 5,
+  "advancedSourceCount": 5,
+  "rawRegexSourceCount": 0,
+  "unknownSourceCount": 0,
+  "advancedCoverageRatio": 1.0,
+  "withinTarget": true,
+  "details": [
+    {
+      "field": "activeDspMetricSource",
+      "source": "symbolBlockedMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "fadingOutDspMetricSource",
+      "source": "triggerAstEffectiveMatches",
+      "classification": "advanced"
+    },
+    {
+      "field": "retireFacadeMetricSource",
+      "source": "symbolBlockedMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "runtimeExecutionViewMetricSource",
+      "source": "symbolBlockedMatchesRefreshed",
+      "classification": "advanced"
+    },
+    {
+      "field": "legacyDirectObserveMetricSource",
+      "source": "observeShimBlockedMatches",
+      "classification": "advanced"
+    }
+  ]
+}

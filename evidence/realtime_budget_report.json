@@ -1,0 +1,8 @@
+{
+  "schema": "realtime_budget_report_v1",
+  "generatedAt": "2026-08-11T16:17:55.8032704+09:00",
+  "observedPublishMs": 0,
+  "maxPublishMs": 200,
+  "violations": [],
+  "ready": true
+}

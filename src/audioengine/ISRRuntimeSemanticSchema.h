@@ -21,7 +21,7 @@ enum class SemanticCategory : std::uint8_t
 
 enum class OwnershipClass : std::uint8_t
 {
-    RuntimePublicationCoordinator = 0,
+    RuntimeIntentCoordinator = 0,
     RuntimeWorld,
     RuntimeGraph,
     PublicationSemantic,

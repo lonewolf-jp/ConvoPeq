@@ -1,0 +1,8 @@
+{
+  "schema": "semantic_closure_allowlist_report_v1",
+  "generatedAt": "2026-08-11T16:17:55.5240374+09:00",
+  "contractPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\semantic_closure_allowed_external_inputs.md",
+  "commitPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+  "violations": [],
+  "ready": true
+}

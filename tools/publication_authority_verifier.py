@@ -34,8 +34,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_REGISTRY = os.path.join(REPO_ROOT, "config", "pub_boundary_registry.json")
 
 # Files that are allowed to call publishAndSwap (coordinator internals)
+# ★ work88 (X4-B §6.4): RuntimeStore::publishAndSwap は RuntimeWorldAuthority-owned WriteAccess のみ
+#   （INV-X4-3）。RuntimeWorldAuthority.h（publish / clearPublishedRuntimeSnapshotsNonRt）と
+#   core の RuntimePublicationCoordinator.h（テスト用抽象の publishWorld）が唯一の caller。
 ALLOWED_PUBLISH_AND_SWAP_FILES = [
     r'RuntimePublicationCoordinator\.h$',
+    r'RuntimeWorldAuthority\.h$',
 ]
 
 # Allowed publication-related function patterns
@@ -48,7 +52,11 @@ ALLOWED_PUBLICATION_PATTERNS = [
     r'startImmediateSmoothTransition',                   # lambda calling coordinator.publishWorld()
     r'publishHardResetForCurrentDSP',                    # lambda calling coordinator.publishWorld()
     r'buildRuntimePublishWorld\(',                       # builder, not publication authority
-    r'makeRuntimePublicationCoordinator\(',               # factory, not publication authority
+    r'makeRuntimePublishAuthority\(',               # factory, not publication authority
+    r'worldAuthority_\.publish\(',                  # ★ X4-B: RuntimeWorldAuthority sole physical publish gateway
+    r'worldAuthority\(\)\.publish\(',              # ★ X4-B: via accessor
+    r'authority\.publish\(',                        # ★ X4-B: PublishExecutor → authority.publish
+    r'RuntimeWorldAuthority::publish',               # ★ X4-B: definition
     r'PublicationExecutor::publish\(',                   # executor delegated by orchestrator
     r'executor_\.publish\(',                              # orchestrator delegates to executor
     r'EpochDomain::publish\(',                           # epoch counter bump, NOT world publication
@@ -140,7 +148,8 @@ def scan_file_for_publication_authority(filepath, registry_entries=None):
                     break
 
             # Skip declarations/definitions (with optional [[attributes]])
-            if re.match(r'.*(\[\[\w+\]\]\s+)?\b(void|bool|int|uint|RetireEnqueueResult|uint64_t|PublishResult)\s+publish', stripped):
+            # ★ X4-B: RuntimeState* publish(...) 定義もスキップ（RuntimeWorldAuthority::publish）
+            if re.match(r'.*(\[\[\w+\]\]\s+)?\b(void|bool|int|uint|RetireEnqueueResult|uint64_t|PublishResult|RuntimeState\*)\s+publish', stripped):
                 is_allowed = True
 
             if not is_allowed:

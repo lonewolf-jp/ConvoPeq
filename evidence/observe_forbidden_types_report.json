@@ -1,21 +1,21 @@
-﻿{
-    "schema":  "observe_forbidden_types_report_v1",
-    "generatedAt":  "2026-07-25T20:38:23.9938814+09:00",
-    "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
-    "targets":  [
-                    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.AudioBlock.cpp",
-                    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.BlockDouble.cpp",
-                    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Timer.cpp"
-                ],
-    "forbiddenTypePatterns":  [
-                                  "RuntimeGraph\\s*\\*",
-                                  "RuntimeBuildSnapshot\\s*\\*",
-                                  "PublicationIntent\\s*\\*",
-                                  "TransitionState\\s*\\*"
-                              ],
-    "violations":  [
-                       "RuntimeReadView definition missing",
-                       "RuntimePublishView definition missing"
-                   ],
-    "ready":  false
+{
+  "schema": "observe_forbidden_types_report_v1",
+  "generatedAt": "2026-08-11T16:16:30.2663690+09:00",
+  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+  "targets": [
+    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.AudioBlock.cpp",
+    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.BlockDouble.cpp",
+    "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Timer.cpp"
+  ],
+  "forbiddenTypePatterns": [
+    "RuntimeGraph\\s*\\*",
+    "RuntimeBuildSnapshot\\s*\\*",
+    "PublicationIntent\\s*\\*",
+    "TransitionState\\s*\\*"
+  ],
+  "violations": [
+    "RuntimeReadView definition missing",
+    "RuntimePublishView definition missing"
+  ],
+  "ready": false
 }

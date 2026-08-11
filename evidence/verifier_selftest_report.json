@@ -1,0 +1,14 @@
+{
+  "schema": "verifier_selftest_report_v1",
+  "generatedAt": "2026-08-11T16:17:40.8532842+09:00",
+  "required": [
+    ".github/scripts/isr-run-tiered-verification.ps1",
+    ".github/scripts/isr-verify-verifier-execution-layers.ps1",
+    ".github/scripts/isr-verify-governance-registries.ps1",
+    ".github/scripts/isr-verify-shadow-compare-contract.ps1",
+    ".github/scripts/isr-verify-shadow-compare-cadence.ps1"
+  ],
+  "scannedCount": 163,
+  "violations": [],
+  "ready": true
+}

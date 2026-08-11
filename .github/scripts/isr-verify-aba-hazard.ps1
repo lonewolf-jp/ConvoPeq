@@ -63,12 +63,14 @@ foreach ($pattern in $builderPatterns) {
 # - targetWorldIdU64 / lastEnqueuedTargetWorldId (PublicationIntent 系)
 # - publicationIntentRequestIdCounter_
 
+# ★ 2026-08-11: FUTURE-4 で persistentState_ / PersistentStateBlock::isMonotonic を廃止し、
+#   currentWorld_ から prev metadata を取得し、インラインで monotonic 比較を行う実装に合わせて修正。
 $coordinatorPatterns = @(
-    'PersistentStateBlock::isMonotonic\(prev,',
-    'nextSeqId > prev\.publicationSequenceId',
-    'nextEpoch > prev\.publicationEpoch',
-    'nextGen > prev\.mappedRuntimeGeneration',
-    'persistentState_\s*=\s*PersistentStateBlock\{'
+    'const auto prevWorld = static_cast<const RuntimeState\*>\s*\(',
+    'static_cast<std::uint64_t>\(sequenceId\) > static_cast<std::uint64_t>\(prevSeqId\)',
+    'static_cast<std::uint64_t>\(epoch\) > static_cast<std::uint64_t>\(prevEpoch\)',
+    'mappedGeneration > prevGen',
+    'pubWorld->publication = PublicationSemantic\{'
 )
 
 foreach ($pattern in $coordinatorPatterns) {

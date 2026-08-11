@@ -14,6 +14,14 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "Internal execution primitive implementation and funnel delegation",
                 "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/tests/AudioEngineHarness/DeferredFlowIntegrationTests\\.cpp$",
+                "lineRegex": "requestRebuild\\s*\\(",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "Integration test exercising the engine rebuild path (requestRebuild → rebuild dispatch)",
+                "expiry": "2027-12-31"
             }
         ],
         "requiredAdmissionGatePatterns": [
@@ -92,6 +100,14 @@
             "owner": "audio-runtime",
             "issue": "BRIDGE-ISR-AI-GOV-001",
             "rationale": "Retire pressure local severity variable name; not an execution semantic authority token",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/tests/(PriorityIntegrationTests|RetireGraceSemanticsTests)\\.cpp$",
+            "lineRegex": "\\bcritical\\b",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Test-local variable name / diagnostic string; not an execution semantic authority token",
             "expiry": "2027-12-31"
         }
     ],
@@ -263,6 +279,38 @@
             "issue": "BRIDGE-ISR-AI-GOV-001",
             "rationale": "EQProcessor deferred delete fallback residency queue",
             "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/ISRRetireOverflowRing\\.h$",
+            "lineRegex": "LockFreeRingBuffer<RetireOverflowEntry,\\s*kRingCapacity>\\s+ring_",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Retire overflow ring residency container (single ring, Phase 5)",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.h$",
+            "lineRegex": "LockFreeRingBuffer<RetireOverflowEntry,\\s*kCoordinatorDeferredRingCapacity>\\s+coordinatorDeferredRing_",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Coordinator deferred ring residency container",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.h$",
+            "lineRegex": "LockFreeRingBuffer<ObserveIntent,\\s*kObserveDeferredRingCapacity>\\s+observeDeferredRing_",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Observe deferred ring residency container",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.h$",
+            "lineRegex": "LockFreeRingBuffer<RecoveryIntent,\\s*kRecoveryIntentQueueCapacity>\\s+recoveryIntentQueue_",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Recovery intent queue residency container (transport-only SPSC)",
+            "expiry": "2027-12-31"
         }
     ],
     "residencyBoundednessContracts": [
@@ -421,7 +469,7 @@
         "requiredDrainAuthorityApplications": [
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
-                "lineRegex": "return.*isFullyDrained\\(\\)",
+                "lineRegex": "runtimePublicationBridge_\\.isFullyDrained\\(\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "Single drain authority delegation must remain rooted in coordinator bridge",
@@ -537,7 +585,7 @@
             },
             {
                 "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
-                "lineRegex": "bool RuntimePublicationCoordinator::isFullyDrained\\(\\) const noexcept",
+                "lineRegex": "bool RuntimeIntentCoordinator::isFullyDrained\\(\\) const noexcept",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "coordinator authoritative drain predicate definition is allowed",
@@ -549,6 +597,30 @@
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "coordinator shutdown completion check may call authoritative drain predicate",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
+                "lineRegex": "return shutdownScheduler_\\.isFullyDrained\\(\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "coordinator drain predicate delegates to ShutdownScheduler (single authority)",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
+                "lineRegex": "ShutdownScheduler::isFullyDrained\\(\\) const noexcept",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "ShutdownScheduler authoritative drain predicate definition is allowed",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "lineRegex": "runtimePublicationBridge_\\.isFullyDrained\\(\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "AudioEngine drain SSOT wrapper delegates through coordinator bridge",
                 "expiry": "2027-12-31"
             }
         ],
@@ -585,15 +657,15 @@
             }
         ],
         "requiredReclaimPrioritizationPatterns": [
-            "queued_\\.erase\\(queued_\\.begin\\(\\)\\)"
+            "RuntimeIntentCoordinator::reclaim\\("
         ],
         "requiredReclaimPrioritizationApplications": [
             {
                 "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
-                "lineRegex": "queued_\\.erase\\(queued_\\.begin\\(\\)\\)",
+                "lineRegex": "RuntimeIntentCoordinator::reclaim\\(",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "publication buffer retirement must reclaim oldest queued entry first",
+                "rationale": "reclaim prioritization is enforced through the single Reclaim Authority entry point (FIFO retire order)",
                 "expiry": "2027-12-31"
             }
         ]
@@ -620,7 +692,7 @@
         ],
         "requiredCrossfadeAuthorityApplications": [
             {
-                "pathRegex": "^src/audioengine/(AudioEngine\\.Commit\\.cpp|AudioEngine\\.Init\\.cpp|AudioEngine\\.Processing\\.PrepareToPlay\\.cpp|AudioEngine\\.Processing\\.ReleaseResources\\.cpp|AudioEngine\\.Timer\\.cpp)$",
+                "pathRegex": "^src/audioengine/(AudioEngine\\.h|AudioEngine\\.Commit\\.cpp|AudioEngine\\.Init\\.cpp|AudioEngine\\.Processing\\.PrepareToPlay\\.cpp|AudioEngine\\.Processing\\.ReleaseResources\\.cpp|AudioEngine\\.Timer\\.cpp)$",
                 "lineRegex": "convo::publishAtomic\\((activeCrossfadeId_|crossfadePreparedSnapshotIndex_)",
                 "owner": "crossfade-authority",
                 "issue": "BRIDGE-ISR-AI-GOV-001",

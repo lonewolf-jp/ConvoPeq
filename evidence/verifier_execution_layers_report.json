@@ -1,16 +1,14 @@
-﻿{
-    "schema":  "verifier_execution_layers_report_v1",
-    "generatedAt":  "2026-07-25T20:38:21.1060706+09:00",
-    "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-verifier-execution-layers.json",
-    "compileTimeHeader":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
-    "unitTests":  [
-                      "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RuntimeSemanticSchemaValidationTests.cpp",
-                      "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RetireGraceSemanticsTests.cpp"
-                  ],
-    "tierRunner":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
-    "verifierCount":  37,
-    "violations":  [
-
-                   ],
-    "ready":  true
+{
+  "schema": "verifier_execution_layers_report_v1",
+  "generatedAt": "2026-08-11T16:16:26.3821006+09:00",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-verifier-execution-layers.json",
+  "compileTimeHeader": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
+  "unitTests": [
+    "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RuntimeSemanticSchemaValidationTests.cpp",
+    "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RetireGraceSemanticsTests.cpp"
+  ],
+  "tierRunner": "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
+  "verifierCount": 37,
+  "violations": [],
+  "ready": true
 }

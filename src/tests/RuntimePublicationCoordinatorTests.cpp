@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <memory>
+#include <type_traits>
 
 #include "core/RuntimePublicationCoordinator.h"
 #include "AlignedAllocation.h"
@@ -67,9 +68,17 @@ private:
     std::uint64_t retiredCount_ = 0;
 };
 
+// ★ work88 (X4-B §6.4 Test 1 / 二十一次レビュー): Authority owns Store — compile-time invariant.
+//   RuntimeStore::OwnerType（RuntimeStore.h に追加した公開エイリアス）が write-capable Owner と一致する。
+//   現状（X4-B 前）: Owner = convo::RuntimePublishAuthority（一時生成 factory が唯一の store-swap）。
+//   X4-B 目標: Owner = RuntimeWorldAuthority（RuntimeWorldAuthority が Store を物理所有 — INV-X4-3）。
+using X4BTestCoordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
+static_assert(std::is_same_v<X4BTestCoordinator::Store::OwnerType, X4BTestCoordinator>,
+    "X4-B Test 1: RuntimeStore::OwnerType must equal the write-capable Owner");
+
 [[nodiscard]] bool testRejectRepublishAndRollback()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -125,7 +134,7 @@ private:
 
 [[nodiscard]] bool testClearRequiresShutdownRequest()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -159,10 +168,10 @@ private:
 int main()
 {
     if (!testRejectRepublishAndRollback())
-        throw std::runtime_error("RuntimePublicationCoordinator rejection contract failed");
+        throw std::runtime_error("RuntimeIntentCoordinator rejection contract failed");
 
     if (!testClearRequiresShutdownRequest())
-        throw std::runtime_error("RuntimePublicationCoordinator shutdown clear contract failed");
+        throw std::runtime_error("RuntimeIntentCoordinator shutdown clear contract failed");
 
     return 0;
 }

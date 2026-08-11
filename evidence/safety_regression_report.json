@@ -1,0 +1,70 @@
+{
+  "schema": "safety_regression_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.4937157+09:00",
+  "baselinePath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-safety-regression-baseline.json",
+  "baseline": {
+    "schema": "isr_safety_regression_baseline_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-SAFETY-BASELINE-001",
+    "rationale": "baseline values for SafetyPass comparison during ISR runtime migration",
+    "expiry": "2026-09-30",
+    "metrics": {
+      "xrunDelta": 0,
+      "staleObserveCount": 0,
+      "retireBacklogSlope": 0,
+      "worldLeakCount": 0,
+      "publicationLatencyP99Ratio": 1
+    }
+  },
+  "currentMetrics": {
+    "xrunDelta": 0,
+    "staleObserveCount": 0.0,
+    "retireBacklogSlope": 0.0,
+    "worldLeakCount": 0.0,
+    "publicationLatencyP99Ratio": 1
+  },
+  "checks": {
+    "xrun": true,
+    "staleObserve": true,
+    "retireBacklogSlope": true,
+    "worldLeak": true,
+    "publicationLatencyP99": true
+  },
+  "publicationLatencyPolicy": {
+    "baseline": 1.0,
+    "multiplier": 1.05,
+    "threshold": 1.05
+  },
+  "noiseAllowancePolicy": {
+    "maxFailedMetrics": 1,
+    "maxRelativeDrift": 1.03,
+    "requiredRemeasureRuns": 3,
+    "medianAcceptance": "median<=baseline*1.03",
+    "applied": false,
+    "accepted": false,
+    "details": null
+  },
+  "taxonomyWindowPolicy": {
+    "classD": {
+      "metric": "retireBacklogSlope",
+      "failOnConsecutiveWindows": 2,
+      "previousStreak": 0,
+      "currentStreak": 0,
+      "rawMetricPass": true,
+      "effectiveMetricPass": true,
+      "failClosed": false
+    },
+    "classE": {
+      "metric": "worldLeakCount",
+      "failOnConsecutiveWindows": 2,
+      "previousStreak": 0,
+      "currentStreak": 0,
+      "rawMetricPass": true,
+      "effectiveMetricPass": true,
+      "failClosed": false
+    }
+  },
+  "safetyPass": true,
+  "warnings": [],
+  "violations": []
+}

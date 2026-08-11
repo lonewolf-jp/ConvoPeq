@@ -1,0 +1,10 @@
+{
+  "schema": "aba_hazard_report_v1",
+  "generatedAt": "2026-08-11T16:17:55.8697358+09:00",
+  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+  "builderPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\RuntimeBuilder.cpp",
+  "commitPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+  "coordinatorPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
+  "violations": [],
+  "ready": true
+}

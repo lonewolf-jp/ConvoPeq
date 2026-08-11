@@ -1,0 +1,7 @@
+{
+  "schema": "crossfade_observable_state_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.3861731+09:00",
+  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+  "initPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Init.cpp",
+  "violations": []
+}

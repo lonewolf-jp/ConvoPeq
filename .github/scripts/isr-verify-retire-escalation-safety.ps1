@@ -17,8 +17,8 @@ if(-not(Test-Path -LiteralPath $commitPath)){
         'hasExceededDeferralThresholds\(',
         'fetchAddAtomic\(retireEscalationCount_',
         'quarantineSlot\(',
-        'retireRuntimeEx_\.canReclaimAfterEscalation\(',
-        'retireRuntimeEx_\.reclaim\('
+        'worldAuthority_\.lifetime\(\)\.canReclaimAfterEscalation\(',
+        'worldAuthority_\.lifetime\(\)\.reclaim\('
     )
 
     foreach ($pattern in $requiredPatterns) {
@@ -30,7 +30,7 @@ if(-not(Test-Path -LiteralPath $commitPath)){
     $exceededIndex = $s.IndexOf('if (exceededDeferralThresholds)', [System.StringComparison]::Ordinal)
     $countIndex = $s.IndexOf('fetchAddAtomic(retireEscalationCount_', [System.StringComparison]::Ordinal)
     $quarantineIndex = $s.IndexOf('quarantineSlot(', [System.StringComparison]::Ordinal)
-    $canReclaimAfterEscalationIndex = $s.IndexOf('retireRuntimeEx_.canReclaimAfterEscalation(', [System.StringComparison]::Ordinal)
+    $canReclaimAfterEscalationIndex = $s.IndexOf('worldAuthority_.lifetime().canReclaimAfterEscalation(', [System.StringComparison]::Ordinal)
 
     if ($exceededIndex -lt 0) {
         $violations.Add('Retire escalation branch not found: if (exceededDeferralThresholds)')|Out-Null

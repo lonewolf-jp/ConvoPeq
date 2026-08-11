@@ -8,9 +8,19 @@
             "category": "publication_coordinator"
         },
         {
-            "name": "convo::RuntimeStore<World,Coordinator>::WriteAccess::publishAndSwap",
+            "name": "convo::RuntimeStore<World,Owner>::WriteAccess::publishAndSwap",
             "file": "src/core/RuntimeStore.h",
             "category": "store_write_access"
+        },
+        {
+            "name": "convo::isr::RuntimeWorldAuthority::publish",
+            "file": "src/audioengine/RuntimeWorldAuthority.h",
+            "category": "publication_authority"
+        },
+        {
+            "name": "convo::isr::RuntimeWorldAuthority::clearPublishedRuntimeSnapshotsNonRt",
+            "file": "src/audioengine/RuntimeWorldAuthority.h",
+            "category": "shutdown_clear"
         },
         {
             "name": "convo::RuntimePublicationCoordinator<World,Handle,Bridge>::clearPublishedRuntimeSnapshotsNonRt",

@@ -1,0 +1,41 @@
+{
+  "schema": "design_docs_coverage_report_v1",
+  "generatedAt": "2026-08-11T16:17:40.4185365+09:00",
+  "documents": [
+    {
+      "role": "base-plan-v2_3",
+      "path": "C:\\VSC_Project\\ConvoPeq\\doc\\work6\\base_plan.md",
+      "exists": true,
+      "matchedTokens": [
+        "Single Authoritative Runtime Semantic Source",
+        "PublicationEpoch",
+        "RuntimeSemanticHash"
+      ],
+      "missingTokens": []
+    },
+    {
+      "role": "governance-v1_2",
+      "path": "C:\\VSC_Project\\ConvoPeq\\doc\\work6\\ai_governance_v1_2.md",
+      "exists": true,
+      "matchedTokens": [
+        "Single Authoritative Runtime Principle",
+        "Publication Bypass",
+        "Fail-Closed Verifier"
+      ],
+      "missingTokens": []
+    },
+    {
+      "role": "detailed-design-v1_6",
+      "path": "C:\\VSC_Project\\ConvoPeq\\doc\\work6\\detailed_design_isr_bridge_runtime_v1_6.md",
+      "exists": true,
+      "matchedTokens": [
+        "RuntimeSemanticSchema",
+        "Publication Architecture v1.6",
+        "Retire / Reclaim Economics v1.6"
+      ],
+      "missingTokens": []
+    }
+  ],
+  "violations": [],
+  "ready": true
+}

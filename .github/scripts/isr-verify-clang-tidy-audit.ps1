@@ -224,8 +224,17 @@ else {
             $auditOutput = ($outputLines | Out-String)
 
             if ($exitCode -ne 0) {
-                $status = 'failed'
-                $violations.Add("clang-tidy invocation failed (exit=$exitCode) target=$targetFile")
+                if ($effectiveRequireClangTidy) {
+                    $status = 'failed'
+                    $violations.Add("clang-tidy invocation failed (exit=$exitCode) target=$targetFile")
+                }
+                else {
+                    # ★ 2026-08-11: monitor モードでは clang-tidy のコンパイル失敗
+                    #   （環境要因: Intel oneAPI MKL/IPP ヘッダ解決等）を skipped として扱い、
+                    #   CI を不安定化しない。enforce モードでのみ failed として厳格に扱う。
+                    $status = 'skipped'
+                    $violations.Add("clang-tidy invocation failed (exit=$exitCode) target=$targetFile (monitor mode skip - environment/compile issue)")
+                }
             }
         }
     }

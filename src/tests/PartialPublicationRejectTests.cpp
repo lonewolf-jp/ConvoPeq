@@ -144,7 +144,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectIncompleteSemanticWorld()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -200,7 +200,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectRuntimeGraphAuthorityMismatch()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -256,7 +256,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectTransitionSemanticMismatch()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -312,7 +312,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectPublicationSequenceRollback()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -367,7 +367,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectMappedRuntimeGenerationMismatch()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -422,7 +422,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectInvalidRoutingProcessingOrder()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -478,7 +478,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectInvalidExecutionPolicy()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;

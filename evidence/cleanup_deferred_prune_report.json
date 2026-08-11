@@ -1,0 +1,26 @@
+{
+  "schema": "cleanup_deferred_prune_report_v1",
+  "generatedAt": "2026-08-11T16:16:41.1925121+09:00",
+  "apply": false,
+  "triggerReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "deferredRegistryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-prune-policy.json",
+  "policy": {
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-CLEANUP-PRUNE-POLICY-001",
+    "expiry": "2026-09-30",
+    "readyRule": {
+      "comparator": "actual_lte_target_max",
+      "requirePolicyEvaluationNotExpired": true,
+      "requireFiniteValues": true,
+      "issue": "BRIDGE-CLEANUP-PRUNE-RULE-001"
+    }
+  },
+  "readyCount": 0,
+  "blockedCount": 0,
+  "prunedCount": 0,
+  "remainingCount": 0,
+  "readyEntries": [],
+  "blockedEntries": [],
+  "violations": []
+}

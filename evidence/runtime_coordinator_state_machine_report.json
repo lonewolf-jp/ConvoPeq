@@ -1,19 +1,17 @@
-﻿{
-    "schema":  "runtime_coordinator_state_machine_report_v1",
-    "generatedAt":  "2026-07-25T20:38:21.2484908+09:00",
-    "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.h",
-    "sourcePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
-    "requiredStates":  [
-                           "Bootstrapping",
-                           "Ready",
-                           "Publishing",
-                           "Transitioning",
-                           "Pressure",
-                           "ShuttingDown",
-                           "Faulted"
-                       ],
-    "violations":  [
-
-                   ],
-    "ready":  true
+{
+  "schema": "runtime_coordinator_state_machine_report_v1",
+  "generatedAt": "2026-08-11T16:16:26.5066677+09:00",
+  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.h",
+  "sourcePath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.cpp",
+  "requiredStates": [
+    "Bootstrapping",
+    "Ready",
+    "Publishing",
+    "Transitioning",
+    "Pressure",
+    "ShuttingDown",
+    "Faulted"
+  ],
+  "violations": [],
+  "ready": true
 }

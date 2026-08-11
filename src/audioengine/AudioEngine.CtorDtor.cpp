@@ -192,6 +192,10 @@ AudioEngine::~AudioEngine()
     // ★ Practical-7: Graceful Drain Phase — pendingRetireCount が 0 になるまでポーリング待機
     //   最大 5 秒間のみ待機し、タイムアウト時は強制 drain にフォールバック。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
+    // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): CloseReaderRegistration（系統2 — ~AudioEngine）。
+    //   releaseResources 未実行の異常系 shutdown でも、graceful drain 前に reader 新規登録を封じる
+    //   （0 に達した後の再登録を構造的に排除）。登録済み slot の enter/exit は継続可能。
+    m_epochDomain.closeReaderRegistration();
     {
         constexpr int kGracefulDrainMaxMs = 5000;
         constexpr int kGracefulDrainPollMs = 10;
@@ -216,9 +220,15 @@ AudioEngine::~AudioEngine()
         }
     }
 
-    auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
-    runtimePublicationCoordinator.requestShutdownClearNonRt();
-    runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
+    // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
+    //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。詳細は ReleaseResources 側に同様。
+    worldAuthority_.requestShutdownClearNonRt();
+    auto* clearedWorld = worldAuthority_.clearPublishedRuntimeSnapshotsNonRt();
+    if (clearedWorld != nullptr)
+    {
+        RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
+        clearBridge.retireRuntimePublishWorldNonRt(clearedWorld, true);
+    }
     drainDeferredRetireQueues(true);
     m_epochDomain.drainAll();
     runtimePublicationBridge_.markShutdownComplete();

@@ -20,7 +20,7 @@ function Get-StructBody {
         [string]$StructName
     )
 
-    $pattern = [regex]::Escape("struct $StructName") + '\s*\{(?<body>.*?)\n\s*\};'
+    $pattern = [regex]::Escape("struct $StructName") + '\s*(?:#pragma[^\n]*\n\s*)*\{(?<body>.*?)\n\s*\};'
     $match = [regex]::Match($Source, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)
     if (-not $match.Success) {
         throw "Unable to locate struct body: $StructName"

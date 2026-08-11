@@ -34,7 +34,7 @@
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
-namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class RuntimeIntentCoordinator; }
 namespace convo::isr { class ISRRetireRouter; }
 
 //--------------------------------------------------------------
@@ -426,7 +426,7 @@ public:
         const EQState& state, double processingRate) const;
 
     // Retire authority: set coordinator for unified retire path
-    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    void setRetireCoordinator(convo::isr::RuntimeIntentCoordinator* coordinator) noexcept
     {
         m_retireCoordinator = coordinator;
     }
@@ -463,7 +463,7 @@ private:
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
-    convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
+    convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
     // [work21] ISRRetireRouter: unified retire API (Phase-C)
     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle

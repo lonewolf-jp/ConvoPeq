@@ -1,7 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <type_traits>
-#include "ISRRuntimePublicationCoordinator.h"  // Intent/IntentType/kIntentTypeCount (public nested types of RuntimePublicationCoordinator)
+#include "ISRRuntimePublicationCoordinator.h"  // Intent/IntentType/kIntentTypeCount (public nested types of RuntimeIntentCoordinator)
 
 class AudioEngine;
 class DSPLifetimeManager;
@@ -11,9 +11,9 @@ namespace convo::isr {
 class DSPQuarantineManager; // ★ A3: pulled in Step 4 (Quarantine handler)
 class DSPTransition;              // ★ A3 Step 5-3: stateless publish-completion facade (ADR-D2)
 
-// ★ A3 Step 1: aliases for the Intent-type family (public nested members of RuntimePublicationCoordinator).
-using Intent     = RuntimePublicationCoordinator::Intent;
-using IntentType = RuntimePublicationCoordinator::IntentType;
+// ★ A3 Step 1: aliases for the Intent-type family (public nested members of RuntimeIntentCoordinator).
+using Intent     = RuntimeIntentCoordinator::Intent;
+using IntentType = RuntimeIntentCoordinator::IntentType;
 
 // ★ A3 Step 1: sole execution context for intent handlers (HANDLER-1).
 // Coordinator hands this to the DispatchTable; handlers hold NO decision/policy
@@ -57,13 +57,13 @@ constexpr QuarantineIntentHandler g_quarantineIntentHandler{};
 // ★ A3 Step 1: constexpr 1:1 total mapping IntentType -> IntentHandler (DISPATCH-1).
 // Indexing by static_cast<std::size_t>(intent.type); the static_assert guarantees
 // a new IntentType cannot be silently dropped from the table.
-constexpr const IntentHandler* kDispatchTable[RuntimePublicationCoordinator::kIntentTypeCount] = {
+constexpr const IntentHandler* kDispatchTable[RuntimeIntentCoordinator::kIntentTypeCount] = {
     &g_observeIntentHandler,   // IntentType::Observe   (0)
     &g_publishIntentHandler,   // IntentType::Publish   (1)
     &g_recoveryIntentHandler,  // IntentType::Recovery  (2)
     &g_quarantineIntentHandler // IntentType::Quarantine(3)
 };
-static_assert(std::size(kDispatchTable) == RuntimePublicationCoordinator::kIntentTypeCount,
+static_assert(std::size(kDispatchTable) == RuntimeIntentCoordinator::kIntentTypeCount,
     "QUEUE-22/DISPATCH-1: kDispatchTable must be a 1:1 total mapping over IntentType "
     "(pure routing; Dispatcher has no decision)");
 

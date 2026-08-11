@@ -1278,8 +1278,10 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # グローバルReleaseフラグ: /GL と /arch:AVX2 は含めない（ConvoPeq ターゲットに個別適用済み）
     # /GL → INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE で自動追加
     # /arch:AVX2 → target_compile_options(ConvoPeq PRIVATE /arch:AVX2) で追加
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
+    # ★ work88 (Phase 7): /EHsc を追加 — 欠落すると JUCE が「exceptions 無効」で C1189 エラー
+    #   （Debug の CMAKE_CXX_FLAGS_DEBUG には /EHsc があり、Release だけ欠落していた既存バグ）
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
 
     # Debugフラグを明示設定（CMakeデフォルトに /utf-8 /bigobj /Zm400 を追加）
     # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
@@ -1333,7 +1335,8 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
 
     # Release 最適化フラグ: Intel 第4世代Core(Haswell, 2013〜)以降に極限最適化
-    # /O3: ループ自動ベクトル化・アグレッシブインライン展開
+    # /O2: 標準最適化（2026-08-11: /O3 は JUCE 巨大ファイル（juce_gui_basics 等）で
+    #   LLVM ERROR: out of memory を引き起こすため /O2 に変更。AVX2 + fp:fast で性能は維持）
     # /QxCORE-AVX2: Haswell以降のAVX2+FMA必須、Intel専用コード生成
     # /fp:fast: 高速浮動小数点（icx デフォルト）。明示的なデノーマル対策により
     #   微小信号の消失リスクを排除しつつ、最高の演算性能を実現。
@@ -1342,7 +1345,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /Zi: PDBデバッグ情報
     # 注: /fp:precise + /Qimf-arch-consistency:true は icx 2026.0 でメモリ枯渇
     #     (LLVM ERROR: out of memory) を引き起こすため使用しない。
-    #     /Oi /Ot は /O3 指定時のデフォルトと同一のため明示指定不要。
+    #     /Oi /Ot は /O2 指定時のデフォルトと同一のため明示指定不要。
     #     /Qdiag-disable は ICX で非サポート（Intel移行ガイド）。
     #     xilink.exe は icx では非推奨（Intel移行ガイド）。
     # 注: 下記の string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため削除済
@@ -1353,8 +1356,9 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     )
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
-    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
-    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
+    # ★ work88 (Phase 7): /EHsc を追加（Release の JUCE C1189 回避 — icx 側も同様）
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
     # ASan 有効時は Qipo を無効化（ASan と LTO は非互換）
     target_compile_options(ConvoPeq PRIVATE

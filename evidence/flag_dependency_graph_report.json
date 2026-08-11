@@ -1,0 +1,12 @@
+{
+  "schema": "flag_dependency_graph_report_v1",
+  "generatedAt": "2026-08-11T16:16:41.6565351+09:00",
+  "graphPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-flag-dependency-graph.json",
+  "matrixPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-rollback-compatibility-matrix.json",
+  "nodeCount": 4,
+  "edgeCount": 3,
+  "globalFlag": "ISR_ROLLBACK_GLOBAL",
+  "hasCycle": false,
+  "cycleCandidates": [],
+  "violations": []
+}

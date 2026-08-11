@@ -7,10 +7,10 @@
     "rules": [
         {
             "symbol": "activeDSP",
-            "pathRegex": "^$",
+            "pathRegex": "^src/audioengine/(AudioEngine\\.Timer\\.cpp|RuntimeBuilder\\.(h|cpp)|RuntimePublicationOrchestrator\\.cpp|DSPTransition\\.h)$",
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-SYMBOL-011",
-            "rationale": "symbol-level zero-regression guardrail for legacy activeDSP token without any allowlisted path",
+            "rationale": "activeDSP token permitted only in verified legitimate sites: getActiveRuntimeDSP() accessor result (AudioEngine.Timer.cpp) and RuntimePublishSpecification topology member (RuntimeBuilder/RuntimePublicationOrchestrator). Symbol-level zero-regression still enforced for any new path.",
             "expiry": "2026-08-31"
         },
         {

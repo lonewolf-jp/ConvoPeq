@@ -29,7 +29,7 @@ foreach ($stateName in $requiredStates) {
 }
 
 if (-not [regex]::IsMatch($cppText, 'state_\(CoordinatorState::Bootstrapping\)')) {
-    $violations.Add('RuntimePublicationCoordinator ctor must initialize state to Bootstrapping')
+    $violations.Add('RuntimeIntentCoordinator ctor must initialize state to Bootstrapping')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorld \|\| newWorld == nullptr\)\s*\{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
@@ -38,13 +38,14 @@ if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorl
 
 if (-not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::Publishing') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(swapPending_, true') -or
-    -not [regex]::IsMatch($cppText, 'persistentState_\s*=\s*PersistentStateBlock\{') -or
+    -not [regex]::IsMatch($cppText, 'pubWorld->publication = PublicationSemantic\{') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(swapPending_, false') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::Ready')) {
     $violations.Add('commit must implement Publishing -> swapPending(true) -> metadata publish -> swapPending(false) -> Ready sequence')
 }
 
-if (-not [regex]::IsMatch($headerText + "`n" + $cppText, 'PersistentStateBlock::isMonotonic\(')) {
+if (-not [regex]::IsMatch($cppText, 'static_cast<std::uint64_t>\(sequenceId\) > static_cast<std::uint64_t>\(prevSeqId\)') -or
+    -not [regex]::IsMatch($cppText, 'mappedGeneration > prevGen')) {
     $violations.Add('commit must enforce monotonic sequence (non-increasing sequenceId => Faulted)')
 }
 
@@ -67,31 +68,31 @@ if (-not [regex]::IsMatch($cppText, 'if \(state == CoordinatorState::Pressure \|
     $violations.Add('setRetireBacklogCount must restore Ready when pressure is normalized and swap is not pending')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionStart\(\) noexcept \{[\s\S]*?CoordinatorState::Transitioning')) {
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markTransitionStart\(\) noexcept \{[\s\S]*?CoordinatorState::Transitioning')) {
     $violations.Add('markTransitionStart must transition state to Transitioning')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionStart\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::Ready\) \{\s*return;\s*\}')) {
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markTransitionStart\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::Ready\) \{\s*return;\s*\}')) {
     $violations.Add('markTransitionStart must reject requests when current coordinator state is not Ready')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionCommitted\(\) noexcept \{[\s\S]*?if \(!isSwapPending\(\)\) \{[\s\S]*?CoordinatorState::Ready')) {
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markTransitionCommitted\(\) noexcept \{[\s\S]*?if \(!isSwapPending\(\)\) \{[\s\S]*?CoordinatorState::Ready')) {
     $violations.Add('markTransitionCommitted must transition to Ready when swap is not pending')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionCommitted\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::Transitioning\) \{\s*return;\s*\}')) {
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markTransitionCommitted\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::Transitioning\) \{\s*return;\s*\}')) {
     $violations.Add('markTransitionCommitted must reject requests when current coordinator state is not Transitioning')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::requestShutdown\(\) noexcept \{') -or
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::requestShutdown\(\) noexcept \{') -or
     (-not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::ShuttingDown') -and
      -not [regex]::IsMatch($cppText, 'ShutdownScheduler::requestShutdown\(\) noexcept \{\s*convo::publishAtomic\(coordinator_\.state_, CoordinatorState::ShuttingDown'))) {
     $violations.Add('requestShutdown must transition state to ShuttingDown (directly or via ShutdownScheduler)')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markShutdownComplete\(\) noexcept \{') -or
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markShutdownComplete\(\) noexcept \{') -or
     (-not [regex]::IsMatch($cppText, 'ShutdownScheduler::markShutdownComplete\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(coordinator_\.state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::ShuttingDown\) \{\s*return;\s*\}') -and
-     -not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markShutdownComplete\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::ShuttingDown\) \{\s*return;\s*\}'))) {
+     -not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markShutdownComplete\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::ShuttingDown\) \{\s*return;\s*\}'))) {
     $violations.Add('markShutdownComplete must reject requests when current coordinator state is not ShuttingDown (directly or via ShutdownScheduler)')
 }
 

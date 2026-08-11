@@ -1,0 +1,11 @@
+{
+  "schema": "latency_alignment_report_v2",
+  "generatedAt": "2026-08-11T16:16:42.3678056+09:00",
+  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+  "initPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Init.cpp",
+  "preparePath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.PrepareToPlay.cpp",
+  "commitPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+  "hasLegacyRuntimeGraphSync": false,
+  "hasPreparedSnapshotSync": true,
+  "violations": []
+}

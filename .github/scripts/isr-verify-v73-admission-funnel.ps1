@@ -690,6 +690,13 @@ foreach ($allow in @($policy.requestRebuildDirectCall.allowlist)) {
         continue
     }
 
+    # ★ 2026-08-11: テストファイル（src/tests/）は本番の admission gate の対象外
+    #   （統合テストが rebuild 経路を直接呼ぶ正当な使用）。カバレッジ検証から除外する。
+    #   注: pathRegex は先頭にリテラル ^ を含むため、-match ではなく Contains で判定する。
+    if ($allowPathRegex.Contains('^src/tests/')) {
+        continue
+    }
+
     $covered = $false
     foreach ($requiredApp in @($policy.requestRebuildDirectCall.requiredAdmissionGateApplications)) {
         $requiredPathRegex = "$($requiredApp.pathRegex)"

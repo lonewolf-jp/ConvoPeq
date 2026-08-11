@@ -46,13 +46,48 @@ void AudioEngine::initialize()
     // the rebuild worker always finds a non-null runtimeWorld when building.
     // ★ B4-a3: Bootstrap は同期例外。initialize() の Bootstrap publish は CoordinatorLoop
     //   起動（startCoordinatorLoop）より前で、非同期 enqueue + 完了通知待ちは待機対象が
-    //   存在せずデッドロックするため、直接 coordinator.publishWorld() で同期 publish する。
+    //   存在せずデッドロックするため、worldAuthority_.publish() で同期 publish する
+    //   （X4-B 後は RuntimeWorldAuthority が sole physical publish gateway — INV-X4-2）。
     {
         convo::RuntimeBuilder bootstrapBuilder(*this);
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
-        auto coordinator = makeRuntimePublicationCoordinator();
-        const auto result = coordinator.publishWorld(std::move(bootstrapWorld));
-        juce::ignoreUnused(result);
+        // ★ work88 (X4-B §6.4 / X4-B-6): Bootstrap publish を RuntimeWorldAuthority 経由に一本化
+        //   （sole physical publish gateway — INV-X4-2）。一時生成 makeRuntimePublishAuthority() は
+        //   X4-B-8 で廃止。createBootstrapWorld は自前 freeze 済みのため seal は冪等。
+        //   validate / didPublish / willRetire / retire は Bridge（従来 publishWorld 内部）で実行。
+        const_cast<RuntimePublishWorld*>(bootstrapWorld.get())->sealRecursively();
+        RuntimePublicationBridge bootstrapBridge{ *this, runtimePublicationValidator_ };
+        if (!bootstrapBridge.validatePublicationNonRt(*bootstrapWorld))
+        {
+            // ★ work88 (§4.5 / R5): bootstrap world が Rejected の場合の Debug 早期診断。
+            //   旧 publishWorld は PublishStageResult::Rejected/Failed を返した（dash §4.5）。
+            //   X4-B 後は validate 失敗（Rejected 相当）でこの分岐に入る — Debug のみ検出。
+            jassertfalse;
+            auto* rejectedWorld = const_cast<RuntimePublishWorld*>(bootstrapWorld.release());
+            bootstrapBridge.retireRuntimePublishWorldNonRt(rejectedWorld, false);
+        }
+        else
+        {
+            const auto* bootstrapWorldPtr = bootstrapWorld.get();
+            bool committed = false;
+            auto* oldWorld = worldAuthority_.publish(std::move(bootstrapWorld),
+                convo::isr::RuntimeWorldAuthority::PublishMetadata{
+                    convo::isr::RuntimeBoundary::NonRTWorld,
+                    bootstrapWorldPtr->generation,
+                    bootstrapWorldPtr->publication.sequenceId,
+                    bootstrapWorldPtr->publication.epoch,
+                    bootstrapWorldPtr->publication.mappedRuntimeGeneration },
+                &committed);
+            // ★ work88（監査軽微指摘2）: publish() 成功時のみ didPublish/willRetire/retire。
+            //   Bootstrap は validate 済みのため通常失敗しないが、失敗時は world が publish() 内で
+            //   破棄されるため *bootstrapWorldPtr を deref しない（dangling deref 防止）。
+            if (committed)
+            {
+                bootstrapBridge.didPublishRuntimeNonRt(*bootstrapWorldPtr);
+                bootstrapBridge.willRetireRuntimeNonRt(oldWorld);
+                bootstrapBridge.retireRuntimePublishWorldNonRt(oldWorld, false);
+            }
+        }
     }
 
     // Now submit rebuild intent — the worker will find a valid Bootstrap World.

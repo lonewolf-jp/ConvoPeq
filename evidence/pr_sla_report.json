@@ -1,0 +1,101 @@
+{
+  "schema": "pr_sla_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.5971827+09:00",
+  "declaredClass": "Class-A",
+  "declaredClassSource": "explicit-argument",
+  "tier": "standard",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-pr-sla-policy.json",
+  "policy": {
+    "schema": "isr_pr_sla_policy_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-PR-SLA-001",
+    "rationale": "Tier × PR SLA mapping for ISR runtime migration governance",
+    "releaseRequiresExhaustive": true,
+    "expiry": "2026-09-30",
+    "classes": [
+      {
+        "id": "Class-S",
+        "minimumTier": "smoke",
+        "deadlineBusinessDays": 1,
+        "runtimeCodeChangeZeroRequired": true,
+        "inventoryDiffStructuralInvariantRequired": true,
+        "requiredNotes": [
+          "runtime code change zero"
+        ]
+      },
+      {
+        "id": "Class-A",
+        "minimumTier": "standard",
+        "deadlineBusinessDays": 2,
+        "runtimeCodeChangeZeroRequired": false,
+        "inventoryDiffStructuralInvariantRequired": false,
+        "requiredNotes": []
+      },
+      {
+        "id": "Class-B",
+        "minimumTier": "exhaustive",
+        "deadlineBusinessDays": 0,
+        "runtimeCodeChangeZeroRequired": false,
+        "inventoryDiffStructuralInvariantRequired": false,
+        "requiredNotes": [
+          "soak medium 24h"
+        ]
+      },
+      {
+        "id": "Class-C",
+        "minimumTier": "exhaustive",
+        "deadlineBusinessDays": 0,
+        "runtimeCodeChangeZeroRequired": false,
+        "inventoryDiffStructuralInvariantRequired": false,
+        "requiredNotes": [
+          "soak long 72h"
+        ]
+      },
+      {
+        "id": "Class-D",
+        "minimumTier": "exhaustive",
+        "deadlineBusinessDays": 0,
+        "runtimeCodeChangeZeroRequired": false,
+        "inventoryDiffStructuralInvariantRequired": false,
+        "requiredNotes": [
+          "soak extreme 1week",
+          "break-glass approval",
+          "rollback plan required"
+        ]
+      }
+    ]
+  },
+  "releaseRequiresExhaustive": true,
+  "releaseWindow": false,
+  "gitRef": null,
+  "breakglassReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\breakglass_overrides_report.json",
+  "breakglassActiveEntries": 0,
+  "breakglassReportReady": true,
+  "safetyRegressionReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\safety_regression_report.json",
+  "safetyPass": true,
+  "authorityInventoryReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\authority_inventory_report.json",
+  "inventoryDiffReportPath": "C:\\VSC_Project\\ConvoPeq\\storage\\isr_inventory\\inventory_diff_report.json",
+  "soakMinutes": 0,
+  "runtimeCodeChangeZero": true,
+  "runtimeCodeChangeZeroConfidence": "inventory-fallback",
+  "runtimeCodeChangeSignal": {
+    "detectionReady": false,
+    "detectionMode": "none",
+    "runtimeChangedFiles": [],
+    "totalChangedFiles": 0,
+    "detail": null
+  },
+  "requiredNotes": [],
+  "openedAt": null,
+  "openedAtSource": "none",
+  "eventHeadSha": null,
+  "currentHeadSha": "465fb744483a7506044dd869a7cb364942b05d0a",
+  "staleEvaluation": false,
+  "now": "2026-08-11T16:16:42.5432842+09:00",
+  "deadlineAt": null,
+  "needsRevalidation": false,
+  "labelSuggestions": [],
+  "diagnostics": [],
+  "violations": [],
+  "ready": true
+}

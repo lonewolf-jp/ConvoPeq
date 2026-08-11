@@ -1,0 +1,18 @@
+{
+  "schema": "facade_bypass_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.3509871+09:00",
+  "triggerAuditReport": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "helperCreateMatches": [
+    {
+      "path": "src/audioengine/AudioEngine.Init.cpp",
+      "value": "worldAuthority_.publish("
+    },
+    {
+      "path": "src/audioengine/AudioEngine.Init.cpp",
+      "value": "worldAuthority_.publish("
+    }
+  ],
+  "directCreateMatches": null,
+  "directMemberMatches": null,
+  "violations": []
+}

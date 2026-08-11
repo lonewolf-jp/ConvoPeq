@@ -64,7 +64,7 @@ function Find-Matches {
     return $foundEntries.ToArray()
 }
 
-$helperCreateMatches = Find-Matches -Pattern 'RuntimePublicationCoordinatorFactory::create\('
+$publishGatewayMatches = Find-Matches -Pattern 'worldAuthority_\.publish\('
 $directCreateMatches = Find-Matches -Pattern 'RuntimePublicationCoordinator::create\('
 $directMemberMatches = Find-Matches -Pattern 'runtimePublicationCoordinator_\.'
 
@@ -76,13 +76,16 @@ if ($triggerAuditSchema -ne 'trigger_audit_report_v1') {
 
 $violations = New-Object System.Collections.Generic.List[string]
 
-if ($helperCreateMatches.Count -lt 1) {
-    $violations.Add('Expected at least one helper create call inside AudioEngine.h')
+# ★ 2026-08-11: X4-B で RuntimeWorldAuthority::publish() が sole physical publish gateway
+#   （INV-X4-2）。Factory::create 経由の helper は廃止されたため、publish ゲートウェイの
+#   存在を検証する。
+if ($publishGatewayMatches.Count -lt 1) {
+    $violations.Add('Expected at least one publish gateway call (worldAuthority_.publish) inside AudioEngine')
 }
 
-foreach ($entry in $helperCreateMatches) {
-    if (($entry.path -replace '\\', '/') -ne 'src/audioengine/AudioEngine.h') {
-        $violations.Add("Helper create call must live in src/audioengine/AudioEngine.h, found $($entry.path)")
+foreach ($entry in $publishGatewayMatches) {
+    if (($entry.path -replace '\\', '/') -notmatch '^src/audioengine/AudioEngine\.(Init|CtorDtor|Commit|RebuildDispatch|ReleaseResources)\.cpp$') {
+        $violations.Add("Publish gateway call must live in AudioEngine implementation, found $($entry.path)")
     }
 }
 
@@ -116,7 +119,7 @@ $report = [ordered]@{
     schema = 'facade_bypass_report_v1'
     generatedAt = (Get-Date -Format 'o')
     triggerAuditReport = $triggerAuditReportPath
-    helperCreateMatches = $helperCreateMatches
+    helperCreateMatches = $publishGatewayMatches
     directCreateMatches = $directCreateMatches
     directMemberMatches = $directMemberMatches
     violations = $violations

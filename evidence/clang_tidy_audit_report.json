@@ -1,0 +1,33 @@
+{
+  "schema": "clang_tidy_audit_report_v1",
+  "generatedAt": "2026-08-11T16:17:37.2030919+09:00",
+  "tier": "standard",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-clang-tidy-audit-policy.json",
+  "policyMode": "monitor",
+  "enforceByTier": false,
+  "requireClangTidy": false,
+  "effectiveRequireClangTidy": false,
+  "registryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-clang-tidy-rule-registry.json",
+  "compileCommandsPath": "C:\\VSC_Project\\ConvoPeq\\build\\compile_commands.json",
+  "status": "skipped",
+  "checkCount": 7,
+  "checks": [
+    "bugprone-use-after-move",
+    "bugprone-branch-clone",
+    "clang-analyzer-core.CallAndMessage",
+    "clang-analyzer-core.NullDereference",
+    "clang-analyzer-cplusplus.NewDelete",
+    "clang-analyzer-cplusplus.NewDeleteLeaks",
+    "clang-analyzer-unix.Malloc"
+  ],
+  "clangTidyPath": "C:\\Program Files\\LLVM\\bin\\clang-tidy.exe",
+  "clangTidyCandidates": [
+    "C:\\Program Files\\LLVM\\bin\\clang-tidy.exe",
+    "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\Llvm\\x64\\bin\\clang-tidy.exe"
+  ],
+  "targetFile": "C:/VSC_Project/ConvoPeq/src/audioengine/PublicationAdmission.cpp",
+  "violations": [
+    "clang-tidy invocation failed (exit=1) target=C:/VSC_Project/ConvoPeq/src/audioengine/PublicationAdmission.cpp (monitor mode skip - environment/compile issue)"
+  ],
+  "outputPreview": "[1/1] (1/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (2/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (3/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (4/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (5/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (6/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (7/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (8/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\n[1/1] (9/9) Processing file C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nError while processing C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\PublicationAdmission.cpp.\r\nC:\\VSC_Project\\ConvoPeq\\src\\MKLNonUniformConvolver.h:48:10: error: 'ipp.h' file not found [clang-diagnostic-error]\r\n   48 | #include <ipp.h>       // IppsFFTSpec_R_64f (MKL DFTI 縺ｮ莉｣譖ｿ)\r\n      |          ^~~~~~~\r\n"
+}

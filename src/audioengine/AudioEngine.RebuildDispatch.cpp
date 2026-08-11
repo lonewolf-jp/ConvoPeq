@@ -789,6 +789,14 @@ void AudioEngine::stopRebuildThread()
     //   正しく成立する（shutdown 時の 2 秒 drain timeout 誤検知を解消）。
     runtimePublicationBridge_.discardRecoveryRequestsOnShutdown();
 
+    // ★ work88 (X1 §6.1 — RecoveryAdmissionClosed): durable Recovery admission も明示 discard。
+    //   Builder join 後に durable state（PendingRecoveryAdmission）を破棄し、
+    //   recoveryAdmissionPending_ = false とする（INV-X1-1 / isFullyDrained の !recoveryAdmissionPending）。
+    //   shutdown 中は publish/commit が実行されないため、durable admission を保持しても意味がない
+    //   （§6.1 case B）。discard は ShutdownDiscard として recoveryShutdownDiscardCount_ に記録
+    //   （INV-5 — silent loss ではなく意図的な lifecycle discard — dash §8.1）。
+    runtimePublicationBridge_.discardPendingRecoveryAdmission();
+
 }
 
 
@@ -977,6 +985,82 @@ void AudioEngine::rebuildThreadLoop()
                     recoverySnapshot.generation = recoveryGeneration;
                     recoverySnapshot.sealed = true;
                     enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                }
+
+                // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission の残余を消費。
+                //   recoveryIntentQueue_（transport）には無いが durable state（PendingRecoveryAdmission）
+                //   に存在する Recovery を処理する（INV-X1-2: queue full ≠ Recovery lost）。
+                //   takePendingRecoveryAdmission() は DurablePending → Building の lease（クリアしない）。
+                //   build 成功 → settle(false) でクリア / transient failure → settle(true) で
+                //   Building → DurablePending へ戻す（retry を構造的に保証 — 二十六次レビュー必須修正1）。
+                //   lost-wakeup: durable 消費中に新規 Recovery が来ても submitRecoveryIntent が
+                //   recoveryPending を再 set + notify するため次サイクルで再処理される（既存機構）。
+                // ★ work88（監査軽微指摘4）: 永続 build/warmup failure による rebuild スレッドの
+                //   スピン防止 — 連続 transient failure が上限を超えたら break して次サイクルへ
+                //   委譲。durable admission は settle(true) 済みで DurablePending に残るため失われない
+                //   （次回 rebuild wake / 新規 Recovery で再処理）。Discard（settle(false)）と成功は
+                //   カウントしない。
+                constexpr int kMaxRecoveryConsecutiveFailures = 4;
+                int recoveryConsecutiveFailures = 0;
+                while (auto recovery = runtimePublicationBridge_.takePendingRecoveryAdmission())
+                {
+                    const auto& qHandle = recovery->handle;
+                    // RECOVERY-6: 消費時点で quarantinedHandle の実在性を検証（無効 → Discarded）
+                    if (qHandle.isNull() || !recovery->buildSource.sealed)
+                    {
+                        runtimePublicationBridge_.settlePendingRecoveryAdmission(false);
+                        continue;
+                    }
+                    auto convolverSnapshot = uiConvolverProcessor.captureBuildSnapshot();
+                    convo::BuildResult recoveryResult = runtimeBuilder.build(
+                        recovery->buildSource.buildInput, convolverSnapshot);
+                    if (recoveryResult.runtime == nullptr)
+                    {
+                        diagLog("[DIAG] rebuildThreadLoop: durable recovery build failed error="
+                            + juce::String(convo::toString(recoveryResult.error)));
+                        // transient failure → DurablePending へ戻す（次サイクルで再 take — retry）
+                        runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
+                        if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
+                            break;
+                        continue;
+                    }
+                    dspGuard.ptr = recoveryResult.runtime;
+                    auto* recoveryDSP = recoveryResult.runtime;
+                    if (recoveryDSP->convolverRt().getIRLength() > 0)
+                        recoveryDSP->convolverRt().rebuildAllIRsSynchronous(isRecoveryAborted);
+                    const auto recoveryWarmup = runtimeBuilder.validateWarmup(*recoveryDSP);
+                    if (recoveryWarmup != convo::BuildError::None)
+                    {
+                        diagLog("[DIAG] rebuildThreadLoop: durable recovery warmup failed error="
+                            + juce::String(convo::toString(recoveryWarmup)));
+                        // ★ 監査指摘 (work88): 未コミット DSP を破棄してから retry。
+                        if (dspGuard.ptr != nullptr)
+                        {
+                            AudioEngine::destroyDSPCoreNode(dspGuard.ptr);
+                            dspGuard.ptr = nullptr;
+                        }
+                        // transient failure → DurablePending へ戻す（retry）
+                        runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
+                        if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
+                            break;
+                        continue;
+                    }
+                    recoveryDSP->convolverRt().refreshLatency();
+                    recoveryDSP->ramps().fadeInSamplesLeft = DSPCore::FADE_IN_SAMPLES;
+                    DSPCore* dspToCommit = dspGuard.ptr;
+                    dspGuard.ptr = nullptr;
+                    // generation は現在の rebuildRequestGeneration（isRebuildObsolete 誤判定回避）
+                    const int recoveryGeneration =
+                        convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire);
+                    auto recoverySnapshot = recovery->buildSource;
+                    recoverySnapshot.generation = recoveryGeneration;
+                    recoverySnapshot.sealed = true;
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                    // build success → durable admission をクリア（NoAdmission + recoveryAdmissionPending_ = false）
+                    runtimePublicationBridge_.settlePendingRecoveryAdmission(false);
+                    recoveryConsecutiveFailures = 0;   // ★ 監査軽微指摘4: 成功で連続失敗カウンタをリセット
                 }
             }
 

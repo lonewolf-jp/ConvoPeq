@@ -15,15 +15,26 @@ if (-not (Test-Path $buildRoot)) {
     throw "Build directory not found: $buildRoot"
 }
 
-$candidates = Get-ChildItem -Path $buildRoot -Recurse -File -ErrorAction SilentlyContinue |
-Where-Object { $_.Name -like 'ConvoPeq*.exe' } |
-Sort-Object LastWriteTimeUtc -Descending
+$allCandidates = Get-ChildItem -Path $buildRoot -Recurse -File -ErrorAction SilentlyContinue |
+Where-Object { $_.Name -like 'ConvoPeq*.exe' }
 
-if ($null -eq $candidates -or $candidates.Count -eq 0) {
+if ($null -eq $allCandidates -or $allCandidates.Count -eq 0) {
     throw "No runnable ConvoPeq executable found under build/. strict runtime evidence mode requires executable output."
 }
 
-$exe = $candidates[0].FullName
+# ★ work88（潜在指摘対処）: runtime evidence モードは full proof（Debug/CI ビルド）前提のため、
+#   Debug ビルドの exe を優先選択する。Release exe（exportEvidence の isRelease 分岐 →
+#   minimalEvidence = manifest のみ生成）が選ばれると artifact が生成されず、
+#   isr-verify-evidence-provenance.ps1 の runtime モード検証が "Artifact not found" で FAIL する。
+#   パスに '\Debug\'（または '/Debug/'）を含む exe を優先し、なければ最新の exe にフォールバック
+#   （Release のみの場合は警告を出しつつ進行 — minimalEvidence の制約を明示）。
+$debugCandidates = $allCandidates | Where-Object { $_.FullName -match '[\\/]Debug[\\/]' }
+if ($debugCandidates) {
+    $exe = ($debugCandidates | Sort-Object LastWriteTimeUtc -Descending)[0].FullName
+} else {
+    $exe = ($allCandidates | Sort-Object LastWriteTimeUtc -Descending)[0].FullName
+    Write-Host "[WARN] No Debug build of ConvoPeq found under build/. Using latest executable: $exe (Release builds emit minimalEvidence = manifest only, which may fail the artifact provenance gate)."
+}
 Write-Host "[INFO] Strict runtime evidence mode: launching $exe"
 
 $process = Start-Process -FilePath $exe -ArgumentList "--verify-runtime-evidence" -PassThru -WindowStyle Hidden

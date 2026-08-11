@@ -45,7 +45,7 @@
 
 #include "audioengine/AtomicAccess.h"
 
-namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class RuntimeIntentCoordinator; }
 
 namespace convo {
 class SafeStateSwapper
@@ -76,7 +76,7 @@ public:
     SafeStateSwapper& operator=(SafeStateSwapper&&)      = delete;
 
     // Retire authority: set coordinator for unified retire tracking
-    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    void setRetireCoordinator(convo::isr::RuntimeIntentCoordinator* coordinator) noexcept
     {
         m_retireCoordinator = coordinator;
     }
@@ -451,7 +451,7 @@ private:
     std::atomic<uint64_t>                      fallbackOverflowCount_{0}; // ★ ADD-1: diagnostic only（relaxed）
 
     // Retire authority coordinator reference
-    convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
+    convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
 
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
     std::thread::id reclaimThreadIdDebug {};

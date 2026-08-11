@@ -1,0 +1,19 @@
+{
+  "schema": "clang_tidy_readiness_report_v1",
+  "generatedAt": "2026-08-11T16:16:43.5248409+09:00",
+  "registryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-clang-tidy-rule-registry.json",
+  "clangTidyPath": "C:\\VSC_Project\\ConvoPeq\\.clang-tidy",
+  "cmakePath": "C:\\VSC_Project\\ConvoPeq\\CMakeLists.txt",
+  "requiredCheckCount": 7,
+  "detectedCheckCount": 7,
+  "detectedChecks": [
+    "bugprone-use-after-move",
+    "bugprone-branch-clone",
+    "clang-analyzer-core.CallAndMessage",
+    "clang-analyzer-core.NullDereference",
+    "clang-analyzer-cplusplus.NewDelete",
+    "clang-analyzer-cplusplus.NewDeleteLeaks",
+    "clang-analyzer-unix.Malloc"
+  ],
+  "violations": []
+}

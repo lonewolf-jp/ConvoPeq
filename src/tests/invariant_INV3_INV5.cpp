@@ -36,6 +36,7 @@
 #include <stdexcept>
 
 #include "audioengine/AtomicAccess.h"     // convo::publishAtomic / consumeAtomic
+#include "core/EpochDomain.h"             // ★ work88 (X3 §6.3 / INV-X3-4): 実 EpochDomain の readerRegistrationClosed 検証
 #include "core/IEpochProvider.h"          // TestEpochProvider の基底
 #include "audioengine/ISRRetireRouter.h"  // requestReclaim の router 引数
 #include "audioengine/ISRRuntimePublicationCoordinator.h"  // テスト対象 Coordinator
@@ -62,6 +63,11 @@ public:
     {
         convo::publishAtomic(minReader_, v, std::memory_order_release);
     }
+    // ★ work88 (X3-R4 Phase 3): readersZero precondition 検証用に active reader 数を設定可能に
+    void setActiveReaderCount(std::uint32_t v) noexcept
+    {
+        convo::publishAtomic(activeReaders_, v, std::memory_order_release);
+    }
 
     // ── IReaderEpochProvider ──
     int registerReaderThread() noexcept override { return 0; }
@@ -72,7 +78,10 @@ public:
     {
         return convo::consumeAtomic(current_, std::memory_order_acquire);
     }
-    std::uint32_t activeReaderCount() const noexcept override { return 0; }
+    std::uint32_t activeReaderCount() const noexcept override
+    {
+        return convo::consumeAtomic(activeReaders_, std::memory_order_acquire);
+    }
     int readerCapacity() const noexcept override { return 1; }
     std::uint64_t getMinReaderEpoch() const noexcept override
     {
@@ -94,6 +103,7 @@ public:
 private:
     std::atomic<std::uint64_t> current_{0};
     std::atomic<std::uint64_t> minReader_{0};
+    std::atomic<std::uint32_t> activeReaders_{0};   // ★ X3-R4 Phase 3: readersZero 検証用
 };
 
 //==============================================================================
@@ -107,7 +117,7 @@ private:
     provider.setMinReaderEpoch(10);   // 5 < 10 → epoch 安全
     ISRRetireRouter router(provider);
 
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     // 有効な DSP handle を作成（Active 状態）
@@ -142,7 +152,7 @@ private:
     TestEpochProvider provider;
     ISRRetireRouter router(provider);
 
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     int dspInstance = 0;
@@ -180,11 +190,65 @@ private:
 }
 
 //==============================================================================
+// ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): reclaim(ShutdownQuiescent) の precondition テスト。
+//   - readerRegistrationClosed == false → reclaim forbidden（retire も実行しない → false）
+//   - readerRegistrationClosed == true → reclaim allowed（true・Reclaimed 遷移）
+//   precondition は retire 前に評価（十四次指摘）されることを直接検証する。
+//==============================================================================
+[[nodiscard]] bool testInvX3_4ReclaimModeQuiescent()
+{
+    DSPHandleRuntime handleRuntime;
+    TestEpochProvider provider;
+    ISRRetireRouter router(provider);
+
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    int dspInstance = 0;
+    const auto handle = handleRuntime.create(&dspInstance);
+    if (handle.isNull())
+        return false;
+
+    // ShutdownQuiescent + readerRegistrationClosed == false → NO reclaim（precondition 前評価）
+    if (coordinator.reclaim(RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                            handle, handleRuntime, router,
+                            /*readerRegistrationClosed=*/false))
+        return false;
+    // retire が実行されていないこと（precondition が retire 前に評価される — 十四次指摘）
+    if (handleRuntime.isRetired(handle))
+        return false;
+
+    // ★ X3-R4 Phase 3: readerRegistrationClosed == true でも active reader が残っている（readersZero 不成立）
+    //   → NO reclaim（INV-X3-4 の完全 precondition: registration closed AND readers zero）
+    provider.setActiveReaderCount(1);
+    if (coordinator.reclaim(RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                            handle, handleRuntime, router,
+                            /*readerRegistrationClosed=*/true))
+        return false;
+    if (handleRuntime.isRetired(handle))
+        return false;
+
+    // readersZero 成立後 → reclaim allowed
+    provider.setActiveReaderCount(0);
+    if (!coordinator.reclaim(RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                             handle, handleRuntime, router,
+                             /*readerRegistrationClosed=*/true))
+        return false;
+    // Reclaimed 遷移（Retired ではなくなる）
+    if (handleRuntime.isRetired(handle))
+        return false;
+    if (coordinator.getReclaimInFlightCount() != 0)
+        return false;
+
+    return true;
+}
+
+//==============================================================================
 // INV-5-1: submitRecoveryRequest full（256）→ 257 回目 drop + pendingIntentCount 不変
 //==============================================================================
 [[nodiscard]] bool testInv5_1RecoveryFullDrop()
 {
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     const auto handle = DSPHandle::null();
@@ -261,7 +325,7 @@ private:
 //==============================================================================
 [[nodiscard]] bool testInv5_3SubmitAfterShutdownDiscards()
 {
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     // shutdown 前に 1 件 enqueue（正常系）
@@ -273,7 +337,7 @@ private:
     // shutdown 確定（AdmissionClosed — requestShutdown が state=ShuttingDown を確定）
     coordinator.requestShutdown();
     if (coordinator.getState()
-        != RuntimePublicationCoordinator::CoordinatorState::ShuttingDown)
+        != RuntimeIntentCoordinator::CoordinatorState::ShuttingDown)
         return false;
 
     // shutdown 後の submit → enqueue されず ShutdownDiscard として記録
@@ -303,7 +367,7 @@ private:
 //==============================================================================
 [[nodiscard]] bool testInv5_4DiscardResidualOnShutdown()
 {
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     // 残留 3 件を enqueue（shutdown 前に submit された想定）
@@ -321,6 +385,35 @@ private:
         return false;
     if (coordinator.popRecoveryRequest().has_value())
         return false;                        // queue empty
+
+    return true;
+}
+
+// ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): readerRegistrationClosed テスト。
+//   実 convo::EpochDomain で: closeReaderRegistration() 前に registerReaderThread() が成功し、
+//   後には必ず -1（失敗）を返す。reserveReaderThread() も同様に false。
+//   readerRegistrationClosed() が true を返す。登録済み slot の enter/exit は継続可能
+//   （新規登録のみを拒否 — 十八次別視点14）は、enterReader が deprecated のため
+//   本テストでは登録封鎖の決定性のみを検証する。
+[[nodiscard]] bool testInvX3_4ReaderRegistrationClosed()
+{
+    convo::EpochDomain domain;
+
+    // close 前: 登録成功
+    const int idx = domain.registerReaderThread("X3Test");
+    if (idx < 0 || idx >= convo::EpochDomain::kMaxReaders)
+        return false;
+
+    // closeReaderRegistration 後: 新規登録は必ず失敗（INV-X3-4）
+    domain.closeReaderRegistration();
+    if (domain.registerReaderThread("X3Test2") != -1)
+        return false;
+    if (domain.reserveReaderThread(0))
+        return false;
+
+    // readerRegistrationClosed() が true
+    if (!domain.readerRegistrationClosed())
+        return false;
 
     return true;
 }
@@ -347,6 +440,10 @@ int main()
             throw std::runtime_error("INV-5-3: shutdown 後 submit → ShutdownDiscard 違反");
         if (!convo::isr::testInv5_4DiscardResidualOnShutdown())
             throw std::runtime_error("INV-5-4: 残留 Recovery の明示 discard 違反");
+        if (!convo::isr::testInvX3_4ReaderRegistrationClosed())
+            throw std::runtime_error("INV-X3-4: reader registration closure 違反");
+        if (!convo::isr::testInvX3_4ReclaimModeQuiescent())
+            throw std::runtime_error("INV-X3-4: ShutdownQuiescent reclaim precondition 違反");
     }
     catch (const std::exception& e)
     {

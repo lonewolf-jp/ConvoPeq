@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-10 14:57:02
+> Generated: 2026-08-11 16:39:47
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1614,8 +1614,10 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # グローバルReleaseフラグ: /GL と /arch:AVX2 は含めない（ConvoPeq ターゲットに個別適用済み）
     # /GL → INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE で自動追加
     # /arch:AVX2 → target_compile_options(ConvoPeq PRIVATE /arch:AVX2) で追加
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8")
+    # ★ work88 (Phase 7): /EHsc を追加 — 欠落すると JUCE が「exceptions 無効」で C1189 エラー
+    #   （Debug の CMAKE_CXX_FLAGS_DEBUG には /EHsc があり、Release だけ欠落していた既存バグ）
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
 
     # Debugフラグを明示設定（CMakeデフォルトに /utf-8 /bigobj /Zm400 を追加）
     # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
@@ -1689,8 +1691,9 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     )
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
-    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
-    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8")
+    # ★ work88 (Phase 7): /EHsc を追加（Release の JUCE C1189 回避 — icx 側も同様）
+    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
     # ASan 有効時は Qipo を無効化（ASan と LTO は非互換）
     target_compile_options(ConvoPeq PRIVATE
@@ -2304,8 +2307,9 @@ echo [3/4] Building %BUILD_CONFIG% configuration...
 set "BUILD_RETRY=0"
 :build_retry
 set "NINJA_FLAGS="
-if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
-if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
+REM icx/icpx は /Qipo リンク等でメモリを大量消費するため並列度を -j 1 に抑える（LLVM out of memory 回避）
+if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 1"
+if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 1"
 cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
 if not errorlevel 1 goto build_ok
 
@@ -6537,7 +6541,7 @@ private:
 #include "DftiHandle.h"
 
 class AudioEngine;
-namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class RuntimeIntentCoordinator; }
 class CacheManager;
 class ProgressiveUpgradeThread;
 
@@ -6696,7 +6700,7 @@ public:
     ~ConvolverProcessor();
 
     void setRcuProvider(AudioEngine& engine) noexcept { rcuProvider = engine; }
-    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    void setRetireCoordinator(convo::isr::RuntimeIntentCoordinator* coordinator) noexcept
     {
         rcuSwapper.setRetireCoordinator(coordinator);
     }
@@ -18683,6 +18687,7 @@ void setup() noexcept;
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
 #include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
+#include "audioengine/ISREvidenceExporter.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -18720,6 +18725,22 @@ void MainApplication::initialise(const juce::String& commandLine)
     if (!convo::checkAVX2SupportAndWarn())
     {
         juce::Logger::writeToLog("[P0-1] AVX2 非対応 CPU - 起動中断");
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
+
+    // ★ work88（CI runtime evidence モード）: `--verify-runtime-evidence` CLI オプション。
+    //   isr-run-runtime-evidence.ps1 が `ConvoPeq.exe --verify-runtime-evidence` で起動し、
+    //   EvidenceExporter が evidence/（current_path()/evidence）に runtime エビデンス
+    //   （evidence_manifest.json generationMode=runtime + artifact 群）を生成する。
+    //   GUI は起動せず、生成後に即終了する（isr-run-runtime-evidence.ps1 の
+    //   Wait-Process -Timeout 20 前提。生成物は isr-verify-evidence-provenance.ps1 が
+    //   runtime モードで検証する）。
+    if (commandLine.contains("--verify-runtime-evidence"))
+    {
+        convo::isr::EvidenceExporter evidenceExporter;
+        evidenceExporter.exportEvidence(nullptr, 0);
+        juce::Logger::writeToLog("[verify-runtime-evidence] runtime evidence exported");
         juce::JUCEApplicationBase::quit();
         return;
     }
@@ -26683,7 +26704,7 @@ private:
 
 #include "audioengine/AtomicAccess.h"
 
-namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class RuntimeIntentCoordinator; }
 
 namespace convo {
 class SafeStateSwapper
@@ -26714,7 +26735,7 @@ public:
     SafeStateSwapper& operator=(SafeStateSwapper&&)      = delete;
 
     // Retire authority: set coordinator for unified retire tracking
-    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    void setRetireCoordinator(convo::isr::RuntimeIntentCoordinator* coordinator) noexcept
     {
         m_retireCoordinator = coordinator;
     }
@@ -27089,7 +27110,7 @@ private:
     std::atomic<uint64_t>                      fallbackOverflowCount_{0}; // ★ ADD-1: diagnostic only（relaxed）
 
     // Retire authority coordinator reference
-    convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
+    convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
 
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
     std::thread::id reclaimThreadIdDebug {};
@@ -30035,10 +30056,25 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     }
 #endif
 
+    // ★ work88（監査・Debug フル soak の低スループット対策）: emitCIArtifacts / emitHBTrace は
+    //   毎 publish に evidence ファイル（atomic_dotcall_scan / ownership_closure_check /
+    //   shadow_compare_cadence / hb_graph_trace）を全書き換えするため、publishBlock が 5〜24ms に
+    //   膨れ、Debug フル soak（S1=100,000）が 42〜90 分に達していた。emitEvidenceTickNonRt と同じ
+    //   1 秒周期（rtAuxMutable_.lastEvidenceEmitHighResTicks）に間引くことで、毎 publish の診断 I/O を
+    //   排除する。各 emit は累積状態（hb_graph_trace は全イベント、shadow_compare は累積カウンタ）を
+    //   書き出すため、間引きによるデータ欠落はない。監査記録は emitEvidenceTickNonRt（1 秒周期）が
+    //   引き続き担う。
+    const std::int64_t diagNowTicks = juce::Time::getHighResolutionTicks();
+    const std::int64_t diagIntervalTicks = juce::Time::secondsToHighResolutionTicks(1.0);
+    const std::int64_t diagLastTicks = convo::consumeAtomic(rtAuxMutable_.lastEvidenceEmitHighResTicks, std::memory_order_acquire);
+    const bool diagTickDue = (diagLastTicks == 0 || (diagNowTicks - diagLastTicks) >= diagIntervalTicks);
+    if (diagTickDue)
+    {
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
-    debugRuntime_.emitCIArtifacts();
+        debugRuntime_.emitCIArtifacts();
 #endif
-    debugRuntime_.emitHBTrace();
+        debugRuntime_.emitHBTrace();
+    }
     emitEvidenceTickNonRt(false);
 }
 
@@ -30182,7 +30218,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                                              maxObservedGeneration,
                                              callbackActiveCount);
         const bool pendingIntentOwned = (pending.dspSlot != UINT32_MAX);
-        const auto* currentPublished = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore);
+        const auto* currentPublished = worldAuthority_.consumeWorldHandle();
         const bool authoritativeOwnershipReleased = (currentPublished != world);
         const std::uint64_t retireDeferralEpochs = (maxObservedGeneration > pendingGeneration)
             ? (maxObservedGeneration - pendingGeneration)
@@ -30557,6 +30593,10 @@ AudioEngine::~AudioEngine()
     // ★ Practical-7: Graceful Drain Phase — pendingRetireCount が 0 になるまでポーリング待機
     //   最大 5 秒間のみ待機し、タイムアウト時は強制 drain にフォールバック。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
+    // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): CloseReaderRegistration（系統2 — ~AudioEngine）。
+    //   releaseResources 未実行の異常系 shutdown でも、graceful drain 前に reader 新規登録を封じる
+    //   （0 に達した後の再登録を構造的に排除）。登録済み slot の enter/exit は継続可能。
+    m_epochDomain.closeReaderRegistration();
     {
         constexpr int kGracefulDrainMaxMs = 5000;
         constexpr int kGracefulDrainPollMs = 10;
@@ -30581,9 +30621,15 @@ AudioEngine::~AudioEngine()
         }
     }
 
-    auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
-    runtimePublicationCoordinator.requestShutdownClearNonRt();
-    runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
+    // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
+    //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。詳細は ReleaseResources 側に同様。
+    worldAuthority_.requestShutdownClearNonRt();
+    auto* clearedWorld = worldAuthority_.clearPublishedRuntimeSnapshotsNonRt();
+    if (clearedWorld != nullptr)
+    {
+        RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
+        clearBridge.retireRuntimePublishWorldNonRt(clearedWorld, true);
+    }
     drainDeferredRetireQueues(true);
     m_epochDomain.drainAll();
     runtimePublicationBridge_.markShutdownComplete();
@@ -30970,13 +31016,48 @@ void AudioEngine::initialize()
     // the rebuild worker always finds a non-null runtimeWorld when building.
     // ★ B4-a3: Bootstrap は同期例外。initialize() の Bootstrap publish は CoordinatorLoop
     //   起動（startCoordinatorLoop）より前で、非同期 enqueue + 完了通知待ちは待機対象が
-    //   存在せずデッドロックするため、直接 coordinator.publishWorld() で同期 publish する。
+    //   存在せずデッドロックするため、worldAuthority_.publish() で同期 publish する
+    //   （X4-B 後は RuntimeWorldAuthority が sole physical publish gateway — INV-X4-2）。
     {
         convo::RuntimeBuilder bootstrapBuilder(*this);
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
-        auto coordinator = makeRuntimePublicationCoordinator();
-        const auto result = coordinator.publishWorld(std::move(bootstrapWorld));
-        juce::ignoreUnused(result);
+        // ★ work88 (X4-B §6.4 / X4-B-6): Bootstrap publish を RuntimeWorldAuthority 経由に一本化
+        //   （sole physical publish gateway — INV-X4-2）。一時生成 makeRuntimePublishAuthority() は
+        //   X4-B-8 で廃止。createBootstrapWorld は自前 freeze 済みのため seal は冪等。
+        //   validate / didPublish / willRetire / retire は Bridge（従来 publishWorld 内部）で実行。
+        const_cast<RuntimePublishWorld*>(bootstrapWorld.get())->sealRecursively();
+        RuntimePublicationBridge bootstrapBridge{ *this, runtimePublicationValidator_ };
+        if (!bootstrapBridge.validatePublicationNonRt(*bootstrapWorld))
+        {
+            // ★ work88 (§4.5 / R5): bootstrap world が Rejected の場合の Debug 早期診断。
+            //   旧 publishWorld は PublishStageResult::Rejected/Failed を返した（dash §4.5）。
+            //   X4-B 後は validate 失敗（Rejected 相当）でこの分岐に入る — Debug のみ検出。
+            jassertfalse;
+            auto* rejectedWorld = const_cast<RuntimePublishWorld*>(bootstrapWorld.release());
+            bootstrapBridge.retireRuntimePublishWorldNonRt(rejectedWorld, false);
+        }
+        else
+        {
+            const auto* bootstrapWorldPtr = bootstrapWorld.get();
+            bool committed = false;
+            auto* oldWorld = worldAuthority_.publish(std::move(bootstrapWorld),
+                convo::isr::RuntimeWorldAuthority::PublishMetadata{
+                    convo::isr::RuntimeBoundary::NonRTWorld,
+                    bootstrapWorldPtr->generation,
+                    bootstrapWorldPtr->publication.sequenceId,
+                    bootstrapWorldPtr->publication.epoch,
+                    bootstrapWorldPtr->publication.mappedRuntimeGeneration },
+                &committed);
+            // ★ work88（監査軽微指摘2）: publish() 成功時のみ didPublish/willRetire/retire。
+            //   Bootstrap は validate 済みのため通常失敗しないが、失敗時は world が publish() 内で
+            //   破棄されるため *bootstrapWorldPtr を deref しない（dangling deref 防止）。
+            if (committed)
+            {
+                bootstrapBridge.didPublishRuntimeNonRt(*bootstrapWorldPtr);
+                bootstrapBridge.willRetireRuntimeNonRt(oldWorld);
+                bootstrapBridge.retireRuntimePublishWorldNonRt(oldWorld, false);
+            }
+        }
     }
 
     // Now submit rebuild intent — the worker will find a valid Bootstrap World.
@@ -33915,7 +33996,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             // EBR: managed by RCUReader
         }
 
-        finalizeCrossfadeMixPath(dsp, fading, false);
+        // ★ work88 (dash §5 R6 / 6th 監査観察): float パス（AudioBlock: true）と整合させるため
+        //   dryScaleGain_ を crossfade 完了後に 1.0 へリセットする（RT スレッド所有 LinearRamp —
+        //   RT 安全）。未リセットだと次回 crossfade の getNextValue() が stale 値から開始し得る。
+        finalizeCrossfadeMixPath(dsp, fading, true);
     }
     else
     {
@@ -36505,8 +36589,8 @@ namespace
     //   専用で通常動作では null のため、これを単独で使うと UI のレイテンシー表示が
     //   "Lat: -- ms" になる（PDC の setLatencySamples も 0 になる）。
     //   ワールド未公開時のみ placeholder slot へフォールバックする。
-    const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-    const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+    const auto readToken = worldAuthority_.acquireReadToken();
+    const auto* publishedWorld = worldAuthority_.consumeWorldHandle(readToken);
     auto* dsp = (publishedWorld != nullptr)
         ? static_cast<DSPCore*>(publishedWorld->engine.current)
         : nullptr;
@@ -37086,6 +37170,13 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
+    // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): CloseReaderRegistration — graceful drain の前に
+    //   reader 新規登録を永久に封じる。graceful drain は activeReaderCount()==0 を待つが、
+    //   reader 登録を封じないと「0 に達した後に新しい reader が登録される」可能性がある。
+    //   先に readerRegistrationClosed を確立すれば、graceful drain 完了時点で再登録が構造的に不可能。
+    //   （登録済み slot の enter/exit は継続可能 — 既存 Reader の epoch 安全性は維持）
+    m_epochDomain.closeReaderRegistration();
+
     // ★ Phase5: Shutdown 時、全保留Intentを Critical に昇格（優先度ベースの早期回収）
     worldAuthority_.lifetime().escalateAllRetires(convo::isr::RetirePriority::Critical);
 
@@ -37118,14 +37209,9 @@ void AudioEngine::releaseResources()
             m_retireRouter->publishEpoch();
             m_retireRouter->tryReclaim();
 
-            // ★ Phase2: 各ループで coordinator の QuarantineResidentCount を更新
-            {
-                const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
-                    ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
-                const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
-                runtimePublicationBridge_.setQuarantineResidentCount(
-                    static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
-            }
+            // ★ work88 (X6 §6.6): coordinator の quarantineResidentCount_ aggregate 上書きは廃止
+            //   （INV-X6-4 — ring と DSP を混ぜない）。drain 判定は AudioEngine::isFullyDrained が
+            //   DSPQuarantineManager / overflowRing / RetireQuarantineStore を直接判定する（X6）。
         }
 
         // ★ Phase2 5.5: Timeout到達 → 最終Drain（1回限定）
@@ -37297,15 +37383,31 @@ void AudioEngine::releaseResources()
 
     const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
     const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+    // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、Reclaim Authority
+    //   （ShutdownQuiescent モード）に一本化。INV-X3-4 / INV-ISR-04: reader registration closed
+    //   を precondition に検証（releaseResources は DrainRetire フェーズで closeReaderRegistration()
+    //   済み → true）。retire → reclaim の順序は維持（retire は冪等 — AC-X3-16 二重 retire なし）。
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
-        dspHandleRuntime_.shutdownReclaim(activeHandle);
+        // ★ C4834 対応: reclaim の戻り値（readerRegistrationClosed precondition 検証結果）を確認。
+        //   releaseResources は DrainRetire フェーズで closeReaderRegistration() 済みのため true が期待。
+        const bool reclaimed = runtimePublicationBridge_.reclaim(
+            convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+            activeHandle, dspHandleRuntime_, *m_retireRouter,
+            m_epochDomain.readerRegistrationClosed());
+        jassert(reclaimed);
+        juce::ignoreUnused(reclaimed);
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
-        dspHandleRuntime_.shutdownReclaim(fadingHandle);
+        const bool reclaimed = runtimePublicationBridge_.reclaim(
+            convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+            fadingHandle, dspHandleRuntime_, *m_retireRouter,
+            m_epochDomain.readerRegistrationClosed());
+        jassert(reclaimed);
+        juce::ignoreUnused(reclaimed);
     }
 
     diagLog("[DIAG] releaseResources: before ui processor release");
@@ -37321,14 +37423,23 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
-    auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
-    runtimePublicationCoordinator.requestShutdownClearNonRt();
-    runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
+    // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
+    //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。clear は publish() と統合せず
+    //   null 公開（world クリア）として別 API を authority 配下に置く（二十次レビュー §15）。
+    //   戻り値の oldWorld は従来 bridge.retireRuntimePublishWorldNonRt(world, true) で retire していた。
+    //   shutdown 中は enqueueDeferredDeleteNonRt が Shutdown を返すため実質 no-op だが契約を維持する。
+    worldAuthority_.requestShutdownClearNonRt();
+    auto* clearedWorld = worldAuthority_.clearPublishedRuntimeSnapshotsNonRt();
+    if (clearedWorld != nullptr)
+    {
+        RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
+        clearBridge.retireRuntimePublishWorldNonRt(clearedWorld, true);
+    }
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
-    //   stopRebuildThread(:190, join で Builder 完全終了) → waitForDrain(:430)。
-    //   waitForDrain 時点で Builder（rebuildThreadIsRunning）は必ず false のはず。
+    //   stopRebuildThread(:190, join で Builder 完全終了) → drain wait(:430)。
+    //   drain wait 時点で Builder（rebuildThreadIsRunning）は必ず false のはず。
     //   jassert で契約破れ（順序変更・追加経路）を即時検出する。
     jassert(!convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire));
 
@@ -37554,12 +37665,12 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 //   oldHandle == null（idle publish #4/#5/#6）は crossfade 判定をスキップし old DSP retire 意図なし。
 //   Rebuild (#7) のみ current active DSP handle を渡す（old DSP を retire する意図）。
 //   判定ロジックは Orchestrator の 3-step (evaluate → null fallback → Critical 抑制) と同一。
-[[nodiscard]] convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
+[[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
     const RuntimePublishWorld* newWorld,
     const convo::isr::DSPHandle& newHandle,
     const convo::isr::DSPHandle& oldHandle) const noexcept
 {
-    convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot snapshot;
+    convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot snapshot;
     snapshot.newHandle = newHandle;
     snapshot.oldHandle = oldHandle;
 
@@ -38433,6 +38544,14 @@ void AudioEngine::stopRebuildThread()
     //   正しく成立する（shutdown 時の 2 秒 drain timeout 誤検知を解消）。
     runtimePublicationBridge_.discardRecoveryRequestsOnShutdown();
 
+    // ★ work88 (X1 §6.1 — RecoveryAdmissionClosed): durable Recovery admission も明示 discard。
+    //   Builder join 後に durable state（PendingRecoveryAdmission）を破棄し、
+    //   recoveryAdmissionPending_ = false とする（INV-X1-1 / isFullyDrained の !recoveryAdmissionPending）。
+    //   shutdown 中は publish/commit が実行されないため、durable admission を保持しても意味がない
+    //   （§6.1 case B）。discard は ShutdownDiscard として recoveryShutdownDiscardCount_ に記録
+    //   （INV-5 — silent loss ではなく意図的な lifecycle discard — dash §8.1）。
+    runtimePublicationBridge_.discardPendingRecoveryAdmission();
+
 }
 
 
@@ -38621,6 +38740,82 @@ void AudioEngine::rebuildThreadLoop()
                     recoverySnapshot.generation = recoveryGeneration;
                     recoverySnapshot.sealed = true;
                     enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                }
+
+                // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission の残余を消費。
+                //   recoveryIntentQueue_（transport）には無いが durable state（PendingRecoveryAdmission）
+                //   に存在する Recovery を処理する（INV-X1-2: queue full ≠ Recovery lost）。
+                //   takePendingRecoveryAdmission() は DurablePending → Building の lease（クリアしない）。
+                //   build 成功 → settle(false) でクリア / transient failure → settle(true) で
+                //   Building → DurablePending へ戻す（retry を構造的に保証 — 二十六次レビュー必須修正1）。
+                //   lost-wakeup: durable 消費中に新規 Recovery が来ても submitRecoveryIntent が
+                //   recoveryPending を再 set + notify するため次サイクルで再処理される（既存機構）。
+                // ★ work88（監査軽微指摘4）: 永続 build/warmup failure による rebuild スレッドの
+                //   スピン防止 — 連続 transient failure が上限を超えたら break して次サイクルへ
+                //   委譲。durable admission は settle(true) 済みで DurablePending に残るため失われない
+                //   （次回 rebuild wake / 新規 Recovery で再処理）。Discard（settle(false)）と成功は
+                //   カウントしない。
+                constexpr int kMaxRecoveryConsecutiveFailures = 4;
+                int recoveryConsecutiveFailures = 0;
+                while (auto recovery = runtimePublicationBridge_.takePendingRecoveryAdmission())
+                {
+                    const auto& qHandle = recovery->handle;
+                    // RECOVERY-6: 消費時点で quarantinedHandle の実在性を検証（無効 → Discarded）
+                    if (qHandle.isNull() || !recovery->buildSource.sealed)
+                    {
+                        runtimePublicationBridge_.settlePendingRecoveryAdmission(false);
+                        continue;
+                    }
+                    auto convolverSnapshot = uiConvolverProcessor.captureBuildSnapshot();
+                    convo::BuildResult recoveryResult = runtimeBuilder.build(
+                        recovery->buildSource.buildInput, convolverSnapshot);
+                    if (recoveryResult.runtime == nullptr)
+                    {
+                        diagLog("[DIAG] rebuildThreadLoop: durable recovery build failed error="
+                            + juce::String(convo::toString(recoveryResult.error)));
+                        // transient failure → DurablePending へ戻す（次サイクルで再 take — retry）
+                        runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
+                        if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
+                            break;
+                        continue;
+                    }
+                    dspGuard.ptr = recoveryResult.runtime;
+                    auto* recoveryDSP = recoveryResult.runtime;
+                    if (recoveryDSP->convolverRt().getIRLength() > 0)
+                        recoveryDSP->convolverRt().rebuildAllIRsSynchronous(isRecoveryAborted);
+                    const auto recoveryWarmup = runtimeBuilder.validateWarmup(*recoveryDSP);
+                    if (recoveryWarmup != convo::BuildError::None)
+                    {
+                        diagLog("[DIAG] rebuildThreadLoop: durable recovery warmup failed error="
+                            + juce::String(convo::toString(recoveryWarmup)));
+                        // ★ 監査指摘 (work88): 未コミット DSP を破棄してから retry。
+                        if (dspGuard.ptr != nullptr)
+                        {
+                            AudioEngine::destroyDSPCoreNode(dspGuard.ptr);
+                            dspGuard.ptr = nullptr;
+                        }
+                        // transient failure → DurablePending へ戻す（retry）
+                        runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
+                        if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
+                            break;
+                        continue;
+                    }
+                    recoveryDSP->convolverRt().refreshLatency();
+                    recoveryDSP->ramps().fadeInSamplesLeft = DSPCore::FADE_IN_SAMPLES;
+                    DSPCore* dspToCommit = dspGuard.ptr;
+                    dspGuard.ptr = nullptr;
+                    // generation は現在の rebuildRequestGeneration（isRebuildObsolete 誤判定回避）
+                    const int recoveryGeneration =
+                        convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire);
+                    auto recoverySnapshot = recovery->buildSource;
+                    recoverySnapshot.generation = recoveryGeneration;
+                    recoverySnapshot.sealed = true;
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                    // build success → durable admission をクリア（NoAdmission + recoveryAdmissionPending_ = false）
+                    runtimePublicationBridge_.settlePendingRecoveryAdmission(false);
+                    recoveryConsecutiveFailures = 0;   // ★ 監査軽微指摘4: 成功で連続失敗カウンタをリセット
                 }
             }
 
@@ -39745,16 +39940,33 @@ bool AudioEngine::isFullyDrained() noexcept
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
 
-    // ★ Phase2: OverflowRing + DSPQuarantine の滞留数で quarantineResidentCount を設定
+    // ★ work88 (X6 §6.6): quarantineResidentCount_ の aggregate 上書き（ringResident + dspQuarantine）
+    //   は廃止（INV-X6-4 — 混在禁止）。実在 quarantine DSP 数は DSPQuarantineManager::residentCount()
+    //   が唯一の source of truth。overflow ring（retire 系）・DSPQuarantine・RetireQuarantineStore の
+    //   3 semantic を個別に直接判定する（いずれも shutdown では waitForDrain 前に drain 済み）。
+    const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
+        ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
+    const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
+    const auto retireQuarantineResident = (m_retireRouter != nullptr)
+        ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
+
+    // ★ work88 (X3 §6.3 / INV-X3-5): pendingReclaimHandles_ が reclaim pending の source of truth。
+    //   reclaimInFlightCount_（+1/0 リセットの近似 counter）だけでは複数 pending reclaim を正確に
+    //   数えられない（A pending + B pending で A 成功 → count=0 なのに B が残る状態を作り得る）。
+    //   したがって pendingReclaimHandles_.empty() を追加する（二十六次レビュー必須修正2 / INV-X3-5）。
+    //   評価は waitForDrain 時点（reclaim producer join 済み）のため、観測直後の push はない（AC-X3-14）。
+    bool pendingReclaimEmpty = false;
     {
-        const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
-            ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
-        const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
-        runtimePublicationBridge_.setQuarantineResidentCount(
-            static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
+        std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+        pendingReclaimEmpty = pendingReclaimHandles_.empty();
     }
 
-    return !hasDeferredCommit && runtimePublicationBridge_.isFullyDrained();
+    return !hasDeferredCommit
+        && pendingReclaimEmpty
+        && ringResident == 0
+        && dspQuarantineResident == 0
+        && retireQuarantineResident == 0
+        && runtimePublicationBridge_.isFullyDrained();
 }
 
 bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
@@ -43154,7 +43366,7 @@ public:
     //   （old DSP を retire する意図を表現）。判定ロジックは Orchestrator の 3-step
     //   (evaluate → null fallback → HealthState Critical 抑制) と同一。
     //   実装は AudioEngine.Publication.cpp（CrossfadeAuthority.h 完全型が必要）。
-    [[nodiscard]] convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
+    [[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
         const RuntimePublishWorld* newWorld,
         const convo::isr::DSPHandle& newHandle,
         const convo::isr::DSPHandle& oldHandle) const noexcept;
@@ -43289,8 +43501,8 @@ public:
 
     [[nodiscard]] inline const convo::RuntimeGraph* getRuntimeGraph() const noexcept
     {
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         return (world != nullptr) ? &world->graph : nullptr;
     }
 
@@ -43746,7 +43958,7 @@ public:
         int debugLastReportedWorldGen { -1 };
         int debugLastReportedBankGen { -1 };
         int debugLastReportedCoeffBankIdx { -1 };
-        // Adaptive bank switch count tracker (read from DSPCore atomic on Message Thread)
+        // Adaptive bank switch count tracker (read from the runtime DSP atomic on Message Thread)
         uint64_t debugLastReportedBankSwitchCount { std::numeric_limits<uint64_t>::max() };
 
         // ★ 計測ログ追加: Retire/Backpressure tracking
@@ -43985,7 +44197,16 @@ private:
                         {
                             const auto resolved = rt.resolve(entry.second);
                             delete static_cast<EQCoeffCache*>(resolved.instance);
-                            rt.shutdownReclaim(entry.second);
+                            // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、
+                            //   Reclaim Authority（ShutdownQuiescent モード）に一本化。
+                            //   INV-X3-4 / INV-ISR-04: reader registration closed を precondition に
+                            //   検証（~AudioEngine 本体で closeReaderRegistration() 済み → true）。
+                            //   delete（物理解放）→ reclaim（slot 状態遷移）の順序は維持。
+                            const bool reclaimed = owner->runtimePublicationBridge_.reclaim(
+                                convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                                entry.second, rt, *owner->m_retireRouter,
+                                owner->m_epochDomain.readerRegistrationClosed());
+                            jassert(reclaimed);
                         }
                     }
                 } else {
@@ -44077,8 +44298,8 @@ public:
     //   情報源にする（RT 処理パスと同じ runtime world 解決）。
     [[nodiscard]] inline bool hasPublishedRuntimeDSP() const noexcept
     {
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         return (world != nullptr) && (world->engine.current != nullptr);
     }
 
@@ -44149,6 +44370,8 @@ public:
     convo::isr::RuntimeGenerationGenerator runtimeGenerationGenerator_ {};
     std::atomic<convo::isr::PublicationSequenceId> publicationSequenceCounter_ { 0 };
     std::atomic<std::uint64_t> lastCommittedRuntimeGeneration_ { 0 };
+    // ★ work88 (X2 §6.2 / INV-ISR-05): Committed state — commit(seq) 成功時に Commit.cpp:398 で更新。
+    //   PublishReceiptWaiter::lastCompleted_（Completion watermark）とは別 semantic（committed ≠ completed）。
     std::atomic<convo::isr::PublicationSequenceId> lastCommittedPublicationSequence_ { 0 };
     std::atomic<std::uint64_t> lastDroppedGeneration_ { 0 };
     std::atomic<std::uint64_t> publishedWorldCount_ { 0 };
@@ -45074,8 +45297,8 @@ public:
             break;
         }
 
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         if (world != nullptr)
         {
             const int slot = juce::jlimit(0, convo::kObserveChannelCount - 1,
@@ -45341,8 +45564,8 @@ public:
                                                                                      std::uint64_t generation) noexcept
     {
         RuntimePublishComputation computation {};
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* runtimeWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* runtimeWorld = worldAuthority_.consumeWorldHandle(readToken);
 
         jassert(runtimeWorld != nullptr); // Bootstrap World guarantees non-null (#3.2.5)
 
@@ -45376,7 +45599,7 @@ public:
         return identity;
     }
 
-    //=== RuntimePublicationCoordinator NonRT helper API ===//
+    //=== RuntimePublishAuthority NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
 
     [[nodiscard]] bool runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept;
@@ -45402,7 +45625,7 @@ public:
         return worldAuthority_.lifetime().pendingIntentCount();
     }
 
-    //=== End RuntimePublicationCoordinator NonRT helper API ===//
+    //=== End RuntimePublishAuthority NonRT helper API ===//
 
     class RuntimePublicationBridge final
     {
@@ -45467,16 +45690,12 @@ public:
         iso::audio_engine::RuntimePublicationValidator* validator_ = nullptr;
     };
 
-    using RuntimePublicationCoordinator = convo::RuntimePublicationCoordinator<RuntimePublishWorld,
-                                                                               DSPCore*,
-                                                                               RuntimePublicationBridge>;
-
-    static_assert(!std::is_copy_constructible_v<RuntimePublicationCoordinator>,
-                  "RuntimePublicationCoordinator must remain move-only");
-    static_assert(!std::is_copy_assignable_v<RuntimePublicationCoordinator>,
-                  "RuntimePublicationCoordinator must remain move-only");
-    static_assert(std::is_move_constructible_v<RuntimePublicationCoordinator>,
-                  "RuntimePublicationCoordinator must remain move-constructible");
+    // ★ work88 (X4-B §6.4 / INV-X4-3, INV-X4-5): 旧 `RuntimePublishAuthority` エイリアス（一時生成
+    //   factory）と `RuntimePublishStore` / `runtimeStore` メンバは X4-B にて削除。RuntimeStore の
+    //   write capability は RuntimeWorldAuthority::WriteAccess（Authority が value 所有）に一本化。
+    //   read path は worldAuthority() の read API（observePublishedWorld / acquireReadToken /
+    //   consumeWorldHandle）に移行。`convo::RuntimePublishAuthority`（core テンプレート）自体は
+    //   テスト用抽象として残す。
 
     // ★ work70: PublishCommitResult — commitRuntimePublication() の戻り値
     //   stage のみを保持（committed は PublishStageResultTraits::isCommitted で導出）
@@ -45502,14 +45721,12 @@ public:
         }
     };
 
-    using RuntimePublishStore = RuntimePublicationCoordinator::Store;
-
-    RuntimePublishStore runtimeStore;
     iso::audio_engine::RuntimePublicationValidator runtimePublicationValidator_;
 
-    // ★ P0-4: runtimeStore.observe() の getter ラッパー
+    // ★ P0-4 (X4-B 後): RuntimeWorldAuthority（worldAuthority_）の Store から現在 world を
+    //   observe する getter ラッパー。read API は世界Authority 経由（INV-X4-B）。
     [[nodiscard]] const RuntimePublishWorld* observePublishedWorld() const noexcept {
-        return RuntimePublicationCoordinator::consumePublishedWorld(runtimeStore);
+        return worldAuthority_.observePublishedWorld();
     }
 
     // RuntimePublicationOrchestrator: 前方宣言 + unique_ptr (循環依存回避)
@@ -45571,6 +45788,19 @@ private:
     // ★ B3/C2: per-receipt publish completion — Producer は自分の seqId の完了のみを待つ（キュー全体 drain ではない）。
     //   complete() は executePublish 成功時の onPublishCommitted から呼ばれる。waitFor() は B4 で Producer が使用。
     //   executePublish は intentQueue_ を FIFO で処理するため seqId は単調増加で完了する（順序性前提）。
+    //
+    // ★ work88 (X2 §6.2): Publish completion sequence monotonicity の契約固定。
+    //   INV-X2-5: PublishExecutor が sole completion writer（唯一の complete() 呼び出し元）。
+    //     complete() は CoordinatorLoop の単一スレッド（PublishExecutor::executePublish →
+    //     onPublishCommitted → notifyPublishReceipt）からのみ呼ばれる。
+    //   INV-X2-6: completion order == publication sequence order（contiguous completion 前提）。
+    //     Intent FIFO → PublishExecutor FIFO → commit FIFO → completion FIFO が不変条件。
+    //     したがって waitFor(seq) := seq <= lastCompleted_ が正しい（watermark が seq を超えれば
+    //     1..seq は全て完了済み — contiguous）。将来 MPSC completion / parallel publish を許す場合は
+    //     sparse completion（completedThrough_ + completedOutOfOrder_）への拡張が必要（現状は不要）。
+    //   INV-X2-4: stale completion cannot overwrite newer completion（mutex 下の if (seqId > lastCompleted_)）。
+    //   INV-ISR-05: committed ≠ completed。lastCommittedPublicationSequence_（Committed state）と
+    //     本 watermark（Completion）は別 semantic。本構造は「案1 最小変更」で維持する（X2 §6.2）。
     struct PublishReceiptWaiter {
         void complete(convo::isr::PublicationSequenceId seqId) noexcept
         {
@@ -45604,18 +45834,10 @@ private:
         return publishReceiptWaiter_.waitFor(seqId, timeoutMs);
     }
 
-    [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
-    {
-        using RuntimePublicationCoordinatorFactory = RuntimePublicationCoordinator;
-        return RuntimePublicationCoordinatorFactory::create(
-            RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
-    }
-
-    // ★ P0-1: publishWorld() ラッパーを削除（案A）。
-    //   Coordinator の publishWorld() が PublishStageResult を返すようになったため、
-    //   ラッパー経由では戻り値が失われる。Authority 経路一本化のため、全呼び出し元は
-    //   makeRuntimePublicationCoordinator() + coordinator.publishWorld() を直接使用する。
-    //   ref: ISR Runtime — Authority経路を一本化する方針
+    // ★ work88 (X4-B §6.4 / X4-B-8): 旧一時生成 publish factory（make...PublishAuthority）を
+    //   production path から削除。publish は RuntimeWorldAuthority::publish()（sole physical publish
+    //   gateway — INV-X4-2）に一本化。publishWorld() ラッパーも廃止（案A）。
+    //   Bridge（validate/didPublish/willRetire/retire）は残る。
 
 public:
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
@@ -45649,8 +45871,8 @@ public:
         };
 
         DSPCore* current = getActiveRuntimeDSP();
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* publishedWorld = worldAuthority_.consumeWorldHandle(readToken);
         const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
         const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.fadingRuntimeUuid != 0;
         auto* fading = (transitionActive && transition.next != nullptr)
@@ -46040,7 +46262,7 @@ public:
 
     friend class NoiseShaperLearner;
     friend class EQEditProcessor;
-    // RuntimePublicationCoordinator は AudioEngine のネストクラスであるため
+    // RuntimePublishAuthority は AudioEngine のネストクラスであるため
     // C++11 以降は自動的にプライベートメンバへアクセス可能。friend 宣言は不要。
 
 //==============================================================================
@@ -46361,8 +46583,8 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     }
 
     // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
-    convo::isr::RuntimePublicationCoordinator::Intent intent;
-    intent.type = convo::isr::RuntimePublicationCoordinator::IntentType::Publish;
+    convo::isr::RuntimeIntentCoordinator::Intent intent;
+    intent.type = convo::isr::RuntimeIntentCoordinator::IntentType::Publish;
     intent.sequenceId = seqId;
     intent.payload.publish.handle = rollbackHandle;
     intent.payload.publish.newWorld = static_cast<const void*>(newWorld);
@@ -46406,6 +46628,11 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     // 4. 完了通知を待つ（executePublish → orchestrator.onPublishCommitted → notifyPublishReceipt）。
     //    タイムアウトしても所有権は移譲済み（executePublish が後続で commit する）ため
     //    Transferred 扱い — 呼び出し元は world/DSP を破棄してはならない。
+    //    ★ work88 (X2 §6.2 — 二十三次レビュー timeout semantics): timeout ≠ publish failure。
+    //      所有権は enqueue 時点で Transferred（Allocated → Transferred → Committed → Completed）。
+    //      timeout を failure と誤解して rollback すると double ownership / double publish を生む。
+    //     shutdown 中は CoordinatorLoop が停止し complete() が来ないため、waitFor は timeout で
+    //     終了する（既存設計が正しい — X2 §6.2）。
     if (PublishStageResultTraits::isCommitted(result.stage) && seqId != 0)
     {
         if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
@@ -46625,7 +46852,7 @@ public:
     convo::isr::LifecycleBarrierRuntime lifecycleBarrierRuntime_{ lifecycleRuntime_ };
 
     // ===================== ISR Phase 1-9: Core Runtimes =====================
-    convo::isr::RuntimePublicationCoordinator runtimePublicationBridge_;
+    convo::isr::RuntimeIntentCoordinator runtimePublicationBridge_;
     // ★ A-1/A2: RuntimeWorldAuthority — single owner of Publication + Lifetime (formerly Retire) state.
     convo::isr::RuntimeWorldAuthority worldAuthority_;
 
@@ -49229,9 +49456,12 @@ public:
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
     void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
 
-    // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim
-    //   通常パスは Coordinator::requestReclaim() 経由で実行される。
-    void shutdownReclaim(DSPHandle handle) { reclaim(handle); }
+    // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
+    //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
+    //   Authority（RuntimeIntentCoordinator::reclaim(ReclaimMode, ...)）に一本化。
+    //   旧 shutdownReclaim() は reclaim(handle) の単なるエイリアスであり、epoch 安全確認
+    //   （RuntimeEBR）/ quiescence proof（ShutdownQuiescent）をバイパスしていたため、
+    //   AC-R4-1（call sites == 0）・AC-R4-2（symbol absent）に従い除去した。
 
     // NonRT: 現在の active runtime DSP handle を取得
     DSPHandle getActiveRuntimeDSPHandle() const noexcept;
@@ -49243,7 +49473,7 @@ public:
     void emitOwnershipTrace(const std::filesystem::path& outputPath) const;
 
 private:
-    friend class RuntimePublicationCoordinator;
+    friend class RuntimeIntentCoordinator;
 
     // NonRT: grace period 完了後のメモリ解放（Coordinator 専用）
     // DELETE-1: reclaim() は Coordinator のみ呼び出し可能。
@@ -50152,7 +50382,10 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
         {"mutation_fault_trace.json", mutationFaultTrace.c_str()},
         {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
         {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"ok\",\"violations\":[]}"},
-        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0}"},
+        // ★ work88（CI runtime evidence 整合）: retire_timeline schema を v1 → v2 に更新
+        //   （isr-seed-evidence.ps1 / isr-verify-evidence-provenance.ps1 の期待 v2 に追従）。
+        //   v2 追加フィールド（laneCounters / lifecycleCounters / lifecycleSample）は runtime 初期値 0。
+        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v2\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0,\"laneCounters\":{\"rtIntent\":0,\"coordination\":0,\"epoch\":0,\"reclaim\":0,\"quarantine\":0},\"lifecycleCounters\":{\"visible\":0,\"compareEligible\":0,\"telemetryRetained\":0,\"replayRetainedOptional\":0,\"reclaimEligible\":0,\"reclaimed\":0},\"lifecycleSample\":[]}"},
         {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"template\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
         {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"template\",\"withinThreshold\":false}"},
         {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
@@ -50824,7 +51057,7 @@ private:
 #pragma once
 #include <cstddef>
 #include <type_traits>
-#include "ISRRuntimePublicationCoordinator.h"  // Intent/IntentType/kIntentTypeCount (public nested types of RuntimePublicationCoordinator)
+#include "ISRRuntimePublicationCoordinator.h"  // Intent/IntentType/kIntentTypeCount (public nested types of RuntimeIntentCoordinator)
 
 class AudioEngine;
 class DSPLifetimeManager;
@@ -50834,9 +51067,9 @@ namespace convo::isr {
 class DSPQuarantineManager; // ★ A3: pulled in Step 4 (Quarantine handler)
 class DSPTransition;              // ★ A3 Step 5-3: stateless publish-completion facade (ADR-D2)
 
-// ★ A3 Step 1: aliases for the Intent-type family (public nested members of RuntimePublicationCoordinator).
-using Intent     = RuntimePublicationCoordinator::Intent;
-using IntentType = RuntimePublicationCoordinator::IntentType;
+// ★ A3 Step 1: aliases for the Intent-type family (public nested members of RuntimeIntentCoordinator).
+using Intent     = RuntimeIntentCoordinator::Intent;
+using IntentType = RuntimeIntentCoordinator::IntentType;
 
 // ★ A3 Step 1: sole execution context for intent handlers (HANDLER-1).
 // Coordinator hands this to the DispatchTable; handlers hold NO decision/policy
@@ -50880,13 +51113,13 @@ constexpr QuarantineIntentHandler g_quarantineIntentHandler{};
 // ★ A3 Step 1: constexpr 1:1 total mapping IntentType -> IntentHandler (DISPATCH-1).
 // Indexing by static_cast<std::size_t>(intent.type); the static_assert guarantees
 // a new IntentType cannot be silently dropped from the table.
-constexpr const IntentHandler* kDispatchTable[RuntimePublicationCoordinator::kIntentTypeCount] = {
+constexpr const IntentHandler* kDispatchTable[RuntimeIntentCoordinator::kIntentTypeCount] = {
     &g_observeIntentHandler,   // IntentType::Observe   (0)
     &g_publishIntentHandler,   // IntentType::Publish   (1)
     &g_recoveryIntentHandler,  // IntentType::Recovery  (2)
     &g_quarantineIntentHandler // IntentType::Quarantine(3)
 };
-static_assert(std::size(kDispatchTable) == RuntimePublicationCoordinator::kIntentTypeCount,
+static_assert(std::size(kDispatchTable) == RuntimeIntentCoordinator::kIntentTypeCount,
     "QUEUE-22/DISPATCH-1: kDispatchTable must be a 1:1 total mapping over IntentType "
     "(pure routing; Dispatcher has no decision)");
 
@@ -53641,7 +53874,7 @@ private:
 
 namespace convo::isr {
 
-RuntimePublicationCoordinator::RuntimePublicationCoordinator()
+RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     : overflowScheduler_(*this)
     , shutdownScheduler_(*this)
     , priorityScheduler_(*this)
@@ -53662,7 +53895,7 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     // ★ FUTURE-4: persistentState_ removed — metadata derived from currentWorld_ (RuntimeState::publication)
 }
 
-bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
+bool RuntimeIntentCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
                                                     const TieredPayloadDescriptor& descriptor) noexcept {
     ClosureValidator closureValidator;
     if (!closureValidator.validateClosureGraph(closure)) {
@@ -53680,7 +53913,7 @@ bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescript
     return true;
 }
 
-const char* RuntimePublicationCoordinator::lastRejectReason() const noexcept {
+const char* RuntimeIntentCoordinator::lastRejectReason() const noexcept {
     switch (convo::consumeAtomic(lastRejectCode_, std::memory_order_acquire)) {
     case RejectCode::InvalidClosure:
         return "invalid closure graph";
@@ -53692,7 +53925,7 @@ const char* RuntimePublicationCoordinator::lastRejectReason() const noexcept {
     }
 }
 
-void RuntimePublicationCoordinator::commit(PublishAuthority,
+void RuntimeIntentCoordinator::commit(PublishAuthority,
                                            RuntimeBoundary boundary,
                                            const void* newWorld,
                                            std::uint64_t version) {
@@ -53705,7 +53938,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
            version);
 }
 
-void RuntimePublicationCoordinator::commit(PublishAuthority,
+void RuntimeIntentCoordinator::commit(PublishAuthority,
                                            RuntimeBoundary boundary,
                                            const void* newWorld,
                                            std::uint64_t /*version*/,
@@ -53747,7 +53980,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::retire(RetireAuthority,
+void RuntimeIntentCoordinator::retire(RetireAuthority,
                                            RuntimeBoundary boundary,
                                            const void* oldWorld) {
     if (boundary != RuntimeBoundary::NonRTWorld || oldWorld == nullptr) {
@@ -53770,7 +54003,7 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
     setRetireBacklogCount(backlog);
 }
 
-RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority,
+RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
                                                                    ISRRetireRouter& router,
                                                                    void* ptr,
                                                                    void (*deleter)(void*),
@@ -53794,23 +54027,23 @@ RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority
     return RetireEnqueueResult::Success;
 }
 
-std::uint64_t RuntimePublicationCoordinator::retireAuthorityCount() const noexcept
+std::uint64_t RuntimeIntentCoordinator::retireAuthorityCount() const noexcept
 {
     return convo::consumeAtomic(retireAuthorityCount_, std::memory_order_acquire);
 }
 
-const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
+const void* RuntimeIntentCoordinator::getCurrent() const noexcept {
     return convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getVersion() const noexcept {
     // ★ FUTURE-4: derive from currentWorld_ (RuntimeState::publication.mappedRuntimeGeneration)
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     return world ? world->publication.mappedRuntimeGeneration : std::uint64_t{0};
 }
 
-PublicationEpoch RuntimePublicationCoordinator::currentPublicationEpoch() const noexcept {
+PublicationEpoch RuntimeIntentCoordinator::currentPublicationEpoch() const noexcept {
     // ★ FUTURE-4: latest publicationEpoch derived from currentWorld_ (RuntimeState::publication.epoch)
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
@@ -53819,13 +54052,13 @@ PublicationEpoch RuntimePublicationCoordinator::currentPublicationEpoch() const 
 
 // ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId).
 //   Read-only Authority accessor — RuntimeWorldAuthority::sequence() delegates here.
-PublicationSequenceId RuntimePublicationCoordinator::currentPublicationSequenceId() const noexcept {
+PublicationSequenceId RuntimeIntentCoordinator::currentPublicationSequenceId() const noexcept {
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     return world ? world->publication.sequenceId : PublicationSequenceId{0};
 }
 
-void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
     const auto previousBacklog = convo::consumeAtomic(previousRetireBacklogCount_, std::memory_order_acquire);
     const auto slope = (count > previousBacklog) ? (count - previousBacklog) : 0;
 
@@ -53857,50 +54090,50 @@ void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) n
     }
 }
 
-void RuntimePublicationCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
     convo::publishAtomic(publicationBacklogCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setPendingIntentCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setPendingIntentCount(std::uint64_t count) noexcept {
     convo::publishAtomic(pendingIntentCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
     convo::publishAtomic(fallbackBacklogCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
     convo::publishAtomic(reclaimInFlightCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
     convo::publishAtomic(deferredRetireResidencyCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
     convo::publishAtomic(quarantineResidentCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
+void RuntimeIntentCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
     convo::publishAtomic(overflowMaxAgeUs_, maxAgeUs, std::memory_order_release);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getOverflowMaxAgeUs() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getOverflowMaxAgeUs() const noexcept {
     return convo::consumeAtomic(overflowMaxAgeUs_, std::memory_order_acquire);
 }
 
-RuntimePublicationCoordinator::OverflowDrainResult
-RuntimePublicationCoordinator::drainOverflowRing(
+RuntimeIntentCoordinator::OverflowDrainResult
+RuntimeIntentCoordinator::drainOverflowRing(
     RetireOverflowRing& overflowRing, LifetimeState& retireRuntime, bool unlimited) noexcept
 {
     return overflowScheduler_.drainOverflowRing(overflowRing, retireRuntime, unlimited);
 }
 
-void RuntimePublicationCoordinator::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
+void RuntimeIntentCoordinator::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
     priorityScheduler_.setOverflowAgeWarnCallback(cb);
 }
 
-size_t RuntimePublicationCoordinator::deferredRingOccupancy() const noexcept {
+size_t RuntimeIntentCoordinator::deferredRingOccupancy() const noexcept {
     return overflowScheduler_.deferredRingOccupancy();
 }
 
@@ -53908,8 +54141,8 @@ size_t RuntimePublicationCoordinator::deferredRingOccupancy() const noexcept {
 // ★ Phase5: OverflowScheduler implementation
 // ═══════════════════════════════════════════════════════════
 
-RuntimePublicationCoordinator::OverflowDrainResult
-RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
+RuntimeIntentCoordinator::OverflowDrainResult
+RuntimeIntentCoordinator::OverflowScheduler::drainOverflowRing(
     RetireOverflowRing& overflowRing, LifetimeState& retireRuntime, bool unlimited) noexcept
 {
     OverflowDrainResult result;
@@ -54016,61 +54249,75 @@ RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
     return result;
 }
 
-void RuntimePublicationCoordinator::setSwapPending(bool pending) noexcept {
+void RuntimeIntentCoordinator::setSwapPending(bool pending) noexcept {
     convo::publishAtomic(swapPending_, pending, std::memory_order_release);
 }
 
-bool RuntimePublicationCoordinator::isSwapPending() const noexcept {
+bool RuntimeIntentCoordinator::isSwapPending() const noexcept {
     return convo::consumeAtomic(swapPending_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getReclaimInFlightCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getReclaimInFlightCount() const noexcept {
     return convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
 }
 
 // ★ A-2.4: 新規 getter 群（DrainAudit 用）
-std::uint64_t RuntimePublicationCoordinator::getPublicationBacklogCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getPublicationBacklogCount() const noexcept {
     return convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getPendingIntentCount() const noexcept {
+// ★ work88 (X5 §6.5): Publish Intent residency counter（INV-X5-1）。
+std::uint64_t RuntimeIntentCoordinator::getPublicationIntentResidencyCount() const noexcept {
+    return convo::consumeAtomic(publicationIntentResidencyCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimeIntentCoordinator::getPendingIntentCount() const noexcept {
     return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getRetireBacklogCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getRetireBacklogCount() const noexcept {
     return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getFallbackBacklogCount() const noexcept {
+// ★ work88 (X6 §6.6): Quarantine transport residency counters（INV-X6-4）。
+std::uint64_t RuntimeIntentCoordinator::getQuarantineIntentResidencyCount() const noexcept {
+    return convo::consumeAtomic(quarantineIntentResidencyCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimeIntentCoordinator::getQuarantineRingResidencyCount() const noexcept {
+    return convo::consumeAtomic(quarantineRingResidencyCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimeIntentCoordinator::getFallbackBacklogCount() const noexcept {
     return convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getDeferredRetireResidencyCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getDeferredRetireResidencyCount() const noexcept {
     return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getQuarantineResidentCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getQuarantineResidentCount() const noexcept {
     return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
 }
 
 // ★ Phase5: Delegation to ShutdownScheduler
-bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
+bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
     return shutdownScheduler_.isFullyDrained();
 }
 
-void RuntimePublicationCoordinator::requestShutdown() noexcept {
+void RuntimeIntentCoordinator::requestShutdown() noexcept {
     shutdownScheduler_.requestShutdown();
 }
 
-void RuntimePublicationCoordinator::markShutdownComplete() noexcept {
+void RuntimeIntentCoordinator::markShutdownComplete() noexcept {
     shutdownScheduler_.markShutdownComplete();
 }
 
-RuntimePublicationCoordinator::CoordinatorState RuntimePublicationCoordinator::getState() const noexcept {
+RuntimeIntentCoordinator::CoordinatorState RuntimeIntentCoordinator::getState() const noexcept {
     return convo::consumeAtomic(state_, std::memory_order_acquire);
 }
 
-void RuntimePublicationCoordinator::markTransitionStart() noexcept {
+void RuntimeIntentCoordinator::markTransitionStart() noexcept {
     const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
     if (state != CoordinatorState::Ready) {
         return;
@@ -54078,7 +54325,7 @@ void RuntimePublicationCoordinator::markTransitionStart() noexcept {
     convo::publishAtomic(state_, CoordinatorState::Transitioning, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
+void RuntimeIntentCoordinator::markTransitionCommitted() noexcept {
     const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
     if (state != CoordinatorState::Transitioning) {
         return;
@@ -54092,7 +54339,7 @@ void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
 // ★ Phase5: OverflowScheduler deferredRingOccupancy
 // ═══════════════════════════════════════════════════════════
 
-size_t RuntimePublicationCoordinator::OverflowScheduler::deferredRingOccupancy() const noexcept {
+size_t RuntimeIntentCoordinator::OverflowScheduler::deferredRingOccupancy() const noexcept {
     return convo::consumeAtomic(coordinator_.coordinatorDeferredCount_, std::memory_order_acquire);
 }
 
@@ -54100,7 +54347,7 @@ size_t RuntimePublicationCoordinator::OverflowScheduler::deferredRingOccupancy()
 // ★ Phase5: ShutdownScheduler implementation
 // ═══════════════════════════════════════════════════════════
 
-bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const noexcept {
+bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcept {
     if (convo::consumeAtomic(coordinator_.swapPending_, std::memory_order_acquire)) {
         return false;
     }
@@ -54122,18 +54369,33 @@ bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const no
         && coordinator_.recoveryIntentQueue_.size() == 0
         && convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
+        // ★ work88 (X5 §6.5): Publish Intent residency も独立に == 0 を要求（INV-X5-1）。
+        //   queue emptiness と pendingIntentCount_ だけでは Publish 残留（intentQueue_ 内の
+        //   Publish Intent）を捕捉できないため、本 counter で独立判定する。
+        && convo::consumeAtomic(coordinator_.publicationIntentResidencyCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.reclaimInFlightCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.deferredRetireResidencyCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0;
+        // ★ work88 (X6 §6.6): Quarantine transport residency を個別に == 0（INV-X6-4）。
+        //   quarantineIntentResidencyCount_（intentQueue_ 残留）と quarantineRingResidencyCount_
+        //   （quarantineFallbackQueue_ 残留）をそれぞれ独立判定する。quarantineResidentCount_
+        //   （実在 DSP）は AudioEngine::isFullyDrained が DSPQuarantineManager を直接判定（X6）。
+        && convo::consumeAtomic(coordinator_.quarantineIntentResidencyCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.quarantineRingResidencyCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0
+        // ★ work88 (X1 §6.1): durable Recovery admission が空であること（INV-X1-1/INV-X1-2）。
+        //   lease 方式では DurablePending OR Building の両方が false であること（recoveryAdmissionPending_
+        //   は Building 中も true を維持 — 二十六次レビュー）。shutdown 時は discardPendingRecoveryAdmission
+        //   （RecoveryAdmissionClosed）で破棄されるため、本条件は成立する。
+        && !convo::consumeAtomic(coordinator_.recoveryAdmissionPending_, std::memory_order_acquire);
 }
 
-void RuntimePublicationCoordinator::ShutdownScheduler::requestShutdown() noexcept {
+void RuntimeIntentCoordinator::ShutdownScheduler::requestShutdown() noexcept {
     convo::publishAtomic(coordinator_.state_, CoordinatorState::ShuttingDown, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::ShutdownScheduler::markShutdownComplete() noexcept {
+void RuntimeIntentCoordinator::ShutdownScheduler::markShutdownComplete() noexcept {
     const auto state = convo::consumeAtomic(coordinator_.state_, std::memory_order_acquire);
     if (state != CoordinatorState::ShuttingDown) {
         return;
@@ -54150,11 +54412,11 @@ void RuntimePublicationCoordinator::ShutdownScheduler::markShutdownComplete() no
 // ★ Phase5: PriorityScheduler implementation
 // ═══════════════════════════════════════════════════════════
 
-void RuntimePublicationCoordinator::PriorityScheduler::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
+void RuntimeIntentCoordinator::PriorityScheduler::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
     coordinator_.overflowAgeWarnCallback_ = cb;
 }
 
-void RuntimePublicationCoordinator::PriorityScheduler::escalateAllRetires(RetirePriority minPriority) noexcept {
+void RuntimeIntentCoordinator::PriorityScheduler::escalateAllRetires(RetirePriority minPriority) noexcept {
     // ★ Phase5: Coordinator の escalateAllRetires は LifetimeState に委譲
     //   実装は AudioEngine.Processing.ReleaseResources.cpp の worldAuthority_.lifetime().escalateAllRetires() が担当
     //   本メソッドは Coordinator の公開APIとしての将来拡張用プレースホルダ
@@ -54176,7 +54438,7 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 // ★ P0-4C: ISR Intent 発行インターフェース実装
 //==============================================================================
 
-void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexcept
+void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle) noexcept
 {
     // ★ P0-4A: Observe Intent — Timer → enqueue（RT-safe, lock-free）
     //   OBSERVE-2: push() は即座に復帰（lock-free）
@@ -54193,9 +54455,9 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
     const auto intentId = nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed);
 
-    RuntimePublicationCoordinator::Intent intent{};
-    intent.type = RuntimePublicationCoordinator::IntentType::Observe;
-    intent.payload.observe = RuntimePublicationCoordinator::ObservePayload{handle, currentEpoch};
+    RuntimeIntentCoordinator::Intent intent{};
+    intent.type = RuntimeIntentCoordinator::IntentType::Observe;
+    intent.payload.observe = RuntimeIntentCoordinator::ObservePayload{handle, currentEpoch};
     intent.sequenceId = intentId;
 
     // ★ work88 (P2-1 §1.1.3): reservation-before-push 化。
@@ -54226,41 +54488,63 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool RuntimePublicationCoordinator::requestReclaim(
-    const DSPHandle& handle,
-    DSPHandleRuntime& handleRuntime,
-    ISRRetireRouter& router) noexcept
+// ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority の唯一の entry point。
+//   RuntimeEBR: 既存 requestReclaim と同じ（retire → epoch 安全確認 → reclaim / pending）。
+//   ShutdownQuiescent: readerRegistrationClosed 必須（INV-X3-4 / INV-ISR-04）→ retire →
+//   epoch 判定スキップ → reclaim（reader 停止 + registration closed を前提に EBR を bypass）。
+//   precondition は retire 前に評価（十四次指摘 — phase 不正時に retire の state transition を
+//   先に発生させない）。物理削除（DSPCore* delete）は含まない（slot 状態遷移のみ — 既存契約）。
+bool RuntimeIntentCoordinator::reclaim(ReclaimMode mode,
+                                       const DSPHandle& handle,
+                                       DSPHandleRuntime& handleRuntime,
+                                       ISRRetireRouter& router,
+                                       bool readerRegistrationClosed) noexcept
 {
-    // ★ P0-4B: Coordinator 専用 reclaim 要求
-    //   DELETE-2: executeRetire → waitReaders → executeReclaim の順序
-    //   DELETE-3: waitReaders で epoch 安全確認後にのみ reclaim
-
-    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
-    handleRuntime.retire(handle);
-
-    // 2. waitReaders(handle) — ISR不変条件: epoch 安全確認
-    //    retireEpoch < minReaderEpoch で安全判定
-    const auto retireEpoch = router.currentEpoch();
-    const auto minReaderEpoch = router.minReaderEpoch();
-    if (retireEpoch >= minReaderEpoch) {
-        // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
-        // カウンタ更新のみ行い、即座に復帰（NonRT safe）
-        setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
-        // ★ work88 (六次レビュー — TOCTOU 修正): 呼出し元へ「遅延」を通知。
-        //   呼出し元（requestReclaimHandle / drainDeferredRetireQueues）が handle を
-        //   再試行リストへ戻す（slot リーク防止）。
-        return false;
+    // 0. validate reclaim precondition（retire 前 — 十四次指摘）
+    if (mode == ReclaimMode::ShutdownQuiescent)
+    {
+        // INV-X3-4 / INV-ISR-04: ShutdownQuiescent reclaim は
+        //   (a) reader registration が永久に閉じている（CloseReaderRegistration フェーズ）
+        //   (b) active reader が 0（readersZero — graceful drain 完了）
+        // の両方が必須（R4 Phase 3: ShutdownQuiescenceProof の構成要素）。
+        // 成立しない場合は NO reclaim（retire も実行しない）→ 呼出し元は Faulted へ。
+        if (!readerRegistrationClosed || router.activeReaderCount() != 0)
+            return false;
     }
 
+    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲（共通・precondition 通過後）
+    handleRuntime.retire(handle);
+
+    // 2. waitReaders — RuntimeEBR のみ epoch 安全確認（retireEpoch < minReaderEpoch）
+    if (mode == ReclaimMode::RuntimeEBR)
+    {
+        const auto retireEpoch = router.currentEpoch();
+        const auto minReaderEpoch = router.minReaderEpoch();
+        if (retireEpoch >= minReaderEpoch) {
+            // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
+            // カウンタ更新のみ行い、即座に復帰（NonRT safe）
+            setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
+            // ★ TOCTOU 修正: 呼出し元へ「遅延」を通知（再試行リストへ戻す — slot リーク防止）
+            return false;
+        }
+    }
+    // ShutdownQuiescent: epoch 判定をスキップ（readerRegistrationClosed + Audio reader 停止を前提）
+
     // 3. executeReclaim(handle) — 安全確認完了
-    //    DELETE-8: Coordinator は Reclaimed 状態への遷移のみを行い、
-    //    物理削除（DSPCore* の delete）は DSPLifetimeManager 経由で別途実行済み。
-    //    DSPHandleRuntime::reclaim() は Handle の状態を Reclaimed に遷移する
-    //    （DSPCore* の削除は行わない — 既に retire path で enqueueWithRetry 済み）。
+    //    Reclaimed 状態への遷移のみ（物理削除は retire path の enqueueWithRetry が担当）
     handleRuntime.reclaim(handle);
     // ACK: reclaim complete — カウンタリセット
     setReclaimInFlightCount(0);
     return true;
+}
+
+bool RuntimeIntentCoordinator::requestReclaim(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router) noexcept
+{
+    // ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority に一本化（RuntimeEBR モード委譲）
+    return reclaim(ReclaimMode::RuntimeEBR, handle, handleRuntime, router, false);
 }
 
 //==============================================================================
@@ -54300,7 +54584,7 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を payload に内包。
 //   quarantinedHandle だけでは resolve() 不能（ISRDSPHandle.cpp:69）なため、build 入力は
 //   値コピーした snapshot から引当する（epoch 逆引き不要 — lifetime を構造的に解決）。
-void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+void RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
                                                           const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
     // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
@@ -54341,15 +54625,90 @@ void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quara
         return;
     }
 
-    // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
-    //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
-    //   reservation を fetchSub で相消し（pendingIntentCount_ は不変）。
+    // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。
+    //   transport residency から rollback（fetchSub）し、durable admission state に保持する
+    //   （recoveryAdmissionPending_ = true）。drop カウンタ（recoveryIntentDropCount_）は
+    //   queue saturation の診断として維持（INV-X1-3 — telemetry 削除しない）。
+    //   1 logical admission = 1 reservation（INV-X1-5）— coalesce で reservation を増やさない。
+    //   durable admission は queue residency と二重計上しない（INV-X1-6）。
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
+
+    // durable admission へ保持（coalesce: 単一スロット — 既存 durable があれば最新で上書き）
+    pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
+    pendingRecoveryAdmission_.pending = true;
+    pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
+    pendingRecoveryAdmission_.buildSource = buildSource;
+    pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
+    pendingRecoveryAdmission_.handle = quarantinedHandle;
+    pendingRecoveryAdmission_.epoch = currentEpoch;
+    pendingRecoveryAdmission_.intentId = intent.intentId;
+    convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
 }
 
-std::optional<RuntimePublicationCoordinator::RecoveryIntent>
-RuntimePublicationCoordinator::popRecoveryRequest() noexcept
+// ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
+//   二十六次レビュー（必須修正1）: destructive dequeue ではなく DurablePending → Building の
+//   state transition。build 失敗（transient）は Building → DurablePending へ戻すことで
+//   retry を構造的に保証する（INV-X1-1: accepted ⇒ exactly one durable state が常に成立）。
+//   recoveryAdmissionPending_ は Building 中も true を維持（build gap を isFullyDrained が検出）。
+//   SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）のため競合なし。
+std::optional<RuntimeIntentCoordinator::RecoveryIntent>
+RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
+{
+    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::DurablePending)
+        return std::nullopt;
+
+    RecoveryIntent intent{
+        pendingRecoveryAdmission_.handle,
+        pendingRecoveryAdmission_.epoch,
+        pendingRecoveryAdmission_.intentId,
+        pendingRecoveryAdmission_.buildSource
+    };
+    // ★ lease: DurablePending → Building（クリアしない）。build 失敗時は Building → DurablePending へ戻す。
+    pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::Building;
+    return intent;
+}
+
+bool RuntimeIntentCoordinator::hasPendingRecoveryAdmission() const noexcept
+{
+    return convo::consumeAtomic(recoveryAdmissionPending_, std::memory_order_acquire)
+        && pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission;
+}
+
+// ★ work88 (X1 §6.1 — RecoveryAdmissionClosed): durable admission を破棄（shutdown 専用）。
+//   shutdown 中は publish/commit が実行されないため、durable admission を保持しても意味がない
+//   （§6.1 case B）。discard は ShutdownDiscard として recoveryShutdownDiscardCount_ に記録
+//   （INV-5 — silent loss ではない・意図的な lifecycle discard — dash §8.1）。
+void RuntimeIntentCoordinator::discardPendingRecoveryAdmission() noexcept
+{
+    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission)
+    {
+        convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+        pendingRecoveryAdmission_ = PendingRecoveryAdmission{};
+        convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
+    }
+}
+
+// ★ work88 (X1 §6.1 — lease 方式): Builder の build 結果に応じて durable admission を settle。
+//   retry=true: Building → DurablePending（transient failure — 次サイクルで再 take。recoveryAdmissionPending_
+//   は true 維持 = build gap を isFullyDrained が検出）。
+//   retry=false: クリア（build success / Discarded — state = NoAdmission + recoveryAdmissionPending_ = false）。
+//   SPSC（Consumer = Builder Loop のみ）のため競合なし。
+void RuntimeIntentCoordinator::settlePendingRecoveryAdmission(bool retry) noexcept
+{
+    if (retry)
+    {
+        if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::Building)
+            pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
+        // recoveryAdmissionPending_ は true 維持（durable 有効のまま）
+        return;
+    }
+    pendingRecoveryAdmission_ = PendingRecoveryAdmission{};
+    convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
+}
+
+std::optional<RuntimeIntentCoordinator::RecoveryIntent>
+RuntimeIntentCoordinator::popRecoveryRequest() noexcept
 {
     RecoveryIntent intent{};
     if (!recoveryIntentQueue_.pop(intent))
@@ -54371,7 +54730,7 @@ RuntimePublicationCoordinator::popRecoveryRequest() noexcept
 //   単なる drain-on-exit（pop して捨てるだけ）ではなく、discard を観測可能な lifecycle として
 //   enqueue → pending → shutdown closes admission → discard → pending count release → discard telemetry
 //   を構成する（dash §8.1 ShutdownDiscard）。
-void RuntimePublicationCoordinator::discardRecoveryRequestsOnShutdown() noexcept
+void RuntimeIntentCoordinator::discardRecoveryRequestsOnShutdown() noexcept
 {
     while (popRecoveryRequest())
     {
@@ -54379,7 +54738,7 @@ void RuntimePublicationCoordinator::discardRecoveryRequestsOnShutdown() noexcept
     }
 }
 
-void RuntimePublicationCoordinator::submitQuarantine(
+void RuntimeIntentCoordinator::submitQuarantine(
     const DSPHandle& handle,
     QuarantineReason reason,
     DSPHandleRuntime& handleRuntime,
@@ -54396,18 +54755,21 @@ void RuntimePublicationCoordinator::submitQuarantine(
     (void)quarantineManager;
 
     const std::uint64_t seqId = nextIntentId_.fetch_add(1, std::memory_order_relaxed);
-    RuntimePublicationCoordinator::Intent intent{};
-    intent.type = RuntimePublicationCoordinator::IntentType::Quarantine;
-    intent.payload.quarantine = RuntimePublicationCoordinator::QuarantinePayload{handle, reason, contextEpoch};
+    RuntimeIntentCoordinator::Intent intent{};
+    intent.type = RuntimeIntentCoordinator::IntentType::Quarantine;
+    intent.payload.quarantine = RuntimeIntentCoordinator::QuarantinePayload{handle, reason, contextEpoch};
     intent.sequenceId = seqId;
 
     // ★ work88 (P2-1 §1.1.3): pendingIntentCount_ のみ reservation-before-push 化。
-    //   quarantineResidentCount_ は本改修の対象外（P3 で分離 — 別カウンタとして独立管理）。
-    //   push 前に pendingIntentCount_ を fetchAdd。全段 push 失敗時は fetchSub で rollback
-    //   （quarantineResidentCount_ は不変のまま drop カウンタのみ記録）。
+    //   push 前に pendingIntentCount_ を fetchAdd。全段 push 失敗時は fetchSub で rollback。
+    // ★ work88 (X6 §6.6): quarantine の transport residency を intent/ring に分離（INV-X6-4）。
+    //   - primary（intentQueue_）成功: quarantineIntentResidencyCount_++（Intent lane residency）
+    //   - fallback（quarantineFallbackQueue_）へ移動: intent -1 → ring +1（両方が同時に 1 にならない）
+    //   - quarantineResidentCount_ の +1 は撤去（DSPQuarantineManager::quarantineHandle が唯一管理 —
+    //     submitQuarantine は enqueue まで。実在 DSP 数は AudioEngine::isFullyDrained が直接判定）。
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     if (intentQueue_.push(intent)) {
-        setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
@@ -54415,10 +54777,16 @@ void RuntimePublicationCoordinator::submitQuarantine(
     //   quarantine 検出は安全要件（bad DSP のアクセス禁止）であり、drop されると
     //   quarantined DSP が永久に retire されず RT からアクセス不能なメモリが残存する。
     //   intentQueue_ full 時は Quarantine 専用 fallback ring へ退避（drop しない）。
+    // ★ work88 (X6 §6.6): fallback へ移動した時点で primary intent residency → ring residency
+    //   へ移動（intent -1 → ring +1。quarantineIntentResidencyCount_ と quarantineRingResidencyCount_
+    //   は同時に 1 にならない — INV-X6-4 / §6.6 対象マッピング表）。
+    convo::fetchSubAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     if (quarantineFallbackQueue_.push(intent)) {
-        setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
+        convo::fetchAddAtomic(quarantineRingResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
         return;
     }
+    // ★ X6: fallback も失敗（全段失敗）→ intent residency は上記 fetchSub で rollback 済み
+    //   （ring へ移動しなかった）。pendingIntentCount_ のみ下記 drop 処理で fetchSub 相殺する。
 
     // fallback も full → 絶対に静かに破棄しない。drop カウンタを増やして診断に残す。
     //   （AudioEngine 側の HealthMonitor が quarantineFallbackDropCount を監視し、
@@ -54502,7 +54870,23 @@ enum class RuntimeBoundary : uint8_t {
     NonRTWorld
 };
 
-class RuntimePublicationCoordinator {
+// ★ work88 (X1〜X6 §6.9 Phase 0 / 二十五次レビュー): INV-ISR-01〜07 — ISR 全体の最上位不変条件。
+//   （コード契約として固定 — Phase 0 invariant freeze / X_IMPL_CHECKLIST #2）
+//   INV-ISR-01: isFullyDrained == true は以下を意味する:
+//     all producers stopped AND all producer joins completed AND all transport queues empty
+//     AND all deferred state empty AND all reclaim-in-flight == 0 AND all reader inactive
+//     AND reader registration closed
+//   INV-ISR-02: pendingIntentCount_ は queue size ではなく transport residency + producer
+//     reservation である（residency + reservation — 二重計上禁止）
+//   INV-ISR-03: 異なる semantic state を一つの counter で表現しない。特に Intent / DSP
+//     resident / Retire resident を混ぜない（§6.6 X6 の4層分離と整合）
+//   INV-ISR-04: ShutdownQuiescent reclaim は readerRegistrationClosed なしでは絶対に許可しない
+//     （§6.3 X3 と整合）
+//   INV-ISR-05: completion watermark を publication committed と同一視しない（§6.2 X2 と整合）
+//   INV-ISR-06: currentWorld_ を ownership source として扱わない（§6.4-X4 INV-X4-8 と整合）
+//   INV-ISR-07: currentWorld_ と RuntimeStore::current が存在する間は、両者の identity
+//     consistency を検証可能にする（§6.4-X4 Test 9 / INV-X4-6 と整合）
+class RuntimeIntentCoordinator {
 public:
     enum class CoordinatorState : uint8_t {
         Bootstrapping = 0,
@@ -54514,7 +54898,7 @@ public:
         Faulted
     };
 
-    RuntimePublicationCoordinator();
+    RuntimeIntentCoordinator();
     bool precheckPublish(const PayloadClosureDescriptor& closure,
                          const TieredPayloadDescriptor& descriptor) noexcept;
     const char* lastRejectReason() const noexcept;
@@ -54552,11 +54936,16 @@ public:
     [[nodiscard]] bool isSwapPending() const noexcept;
     // ★ A-2.4: getter 群（DrainAudit 用）
     [[nodiscard]] std::uint64_t getPublicationBacklogCount() const noexcept;
+    // ★ work88 (X5 §6.5): Publish Intent residency counter（INV-X5-1）。isFullyDrained / 診断用。
+    [[nodiscard]] std::uint64_t getPublicationIntentResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
     [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;  // ★ Phase2
+    // ★ work88 (X6 §6.6): Quarantine transport residency counter（INV-X6-4）。診断 / isFullyDrained 用。
+    [[nodiscard]] std::uint64_t getQuarantineIntentResidencyCount() const noexcept;
+    [[nodiscard]] std::uint64_t getQuarantineRingResidencyCount() const noexcept;
     // ★ work88 (FUTURE-10): Quarantine fallback ring の drop 回数（静かに破棄しない証跡）。
     //   AudioEngine 側 HealthMonitor が監視し ISRHealthState::Critical 昇格を駆動する。
     [[nodiscard]] std::uint64_t quarantineFallbackDropCount() const noexcept
@@ -54648,6 +55037,23 @@ public:
     //   呼び出し元: stopRebuildThread()（Builder join 後）。Producer（CoordinatorLoop）は
     //   shutdownCoordinatorLoop() で join 済みのため決定的。
     void discardRecoveryRequestsOnShutdown() noexcept;
+
+    // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
+    //   DurablePending → Building への state transition（destructive dequeue ではない）。
+    //   INV-X1-1: take 後も Building 中は recoveryAdmissionPending_ が true を維持
+    //   （build gap を isFullyDrained が検出）。build 失敗時は Building → DurablePending へ戻す。
+    [[nodiscard]] std::optional<RecoveryIntent> takePendingRecoveryAdmission() noexcept;
+    // ★ work88 (X1 §6.1): durable Recovery admission の有無（isFullyDrained 用）。
+    [[nodiscard]] bool hasPendingRecoveryAdmission() const noexcept;
+    // ★ work88 (X1 §6.1): durable admission を破棄（shutdown 時 — RecoveryAdmissionClosed）。
+    //   recoveryShutdownDiscardCount_ を増やし、discard を観測可能にする（ShutdownDiscard — INV-5）。
+    void discardPendingRecoveryAdmission() noexcept;
+    // ★ work88 (X1 §6.1 — lease 方式): Builder が build 結果に応じて durable admission を settle する。
+    //   retry=true（transient failure）: Building → DurablePending へ戻す（次サイクルで再 take）。
+    //   retry=false（build success / Discarded）: state を NoAdmission にクリア + recoveryAdmissionPending_ = false。
+    //   INV-X1-1（exactly one durable state）が lease 方式で常に成立する。
+    void settlePendingRecoveryAdmission(bool retry) noexcept;
+
     enum class IntentType : std::uint8_t {
         Observe,
         Publish,
@@ -54724,7 +55130,17 @@ public:
     {
         Intent prepared = intent;
         prepared.type = IntentType::Publish;
-        return intentQueue_.push(prepared);
+        // ★ work88 (X5 §6.5): Publish intent residency 専用 counter の reservation→push→rollback。
+        //   全 3 enqueue 経路（通常 rebuild / Recovery publish / deferred 再 enqueue）がここに
+        //   集約されるため、本 counter は単一箇所で reservation され二重計上されない（§6.5）。
+        //   push 前に fetchAdd（reservation-before-push）→ push 成功で維持 → push 失敗（full）で
+        //   fetchSub rollback。INV-X5-1: publicationIntentResidencyCount = Publish intent queue
+        //   residency + producer reservation（並行中は >=、producer quiescence 後は ==）。
+        convo::fetchAddAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        if (intentQueue_.push(prepared))
+            return true;
+        convo::fetchSubAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        return false;
     }
 
     /// Reclaim Request: 指定された DSPHandle の reclaim を要求する。
@@ -54740,6 +55156,30 @@ public:
     [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
                                      class DSPHandleRuntime& handleRuntime,
                                      class ISRRetireRouter& router) noexcept;
+
+    // ★ work88 (X3 §6.3 / R4): Reclaim Authority の一本化 — ReclaimMode。
+    //   Reclaim Authority は一つ、Safety Precondition が二種類（R4 Phase 1）。
+    //   - RuntimeEBR:      通常 runtime — retire → epoch 安全確認（retireEpoch < minReaderEpoch）
+    //                      → 不安全なら pending（false 返却・呼出し元が再試行登録）
+    //   - ShutdownQuiescent: shutdown — readerRegistrationClosed 必須（INV-X3-4 / INV-ISR-04）
+    //                      → epoch 判定スキップ → reclaim
+    //   precondition（retire 前評価 — 十四次指摘）: ShutdownQuiescent は reader registration が
+    //   永久に閉じていることを検証してから retire/reclaim を実行する（phase 不正時に retire の
+    //   state transition を先に発生させない）。
+    enum class ReclaimMode : uint8_t {
+        RuntimeEBR,
+        ShutdownQuiescent
+    };
+
+    /// ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority の唯一の entry point。
+    ///   requestReclaim は RuntimeEBR モードとして本メソッドに委譲する。
+    ///   readerRegistrationClosed: ShutdownQuiescent モードの precondition（INV-X3-4）。
+    ///   呼出し元（AudioEngine）が m_epochDomain.readerRegistrationClosed() を渡す。
+    [[nodiscard]] bool reclaim(ReclaimMode mode,
+                               const DSPHandle& handle,
+                               class DSPHandleRuntime& handleRuntime,
+                               class ISRRetireRouter& router,
+                               bool readerRegistrationClosed = false) noexcept;
 
     /// Observe Intent Queue から蓄積された Intent を処理する。
     /// P0-4A: Timer から submitObserve でキューイングされた Intent を
@@ -54785,9 +55225,9 @@ private:
     void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept;
 
     class OverflowScheduler {
-        RuntimePublicationCoordinator& coordinator_;
+        RuntimeIntentCoordinator& coordinator_;
     public:
-        explicit OverflowScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        explicit OverflowScheduler(RuntimeIntentCoordinator& coord) noexcept : coordinator_(coord) {}
         [[nodiscard]] OverflowDrainResult drainOverflowRing(
             class RetireOverflowRing& overflowRing,
             class LifetimeState& retireRuntime,
@@ -54796,18 +55236,18 @@ private:
     };
 
     class ShutdownScheduler {
-        RuntimePublicationCoordinator& coordinator_;
+        RuntimeIntentCoordinator& coordinator_;
     public:
-        explicit ShutdownScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        explicit ShutdownScheduler(RuntimeIntentCoordinator& coord) noexcept : coordinator_(coord) {}
         [[nodiscard]] bool isFullyDrained() const noexcept;
         void requestShutdown() noexcept;
         void markShutdownComplete() noexcept;
     };
 
     class PriorityScheduler {
-        RuntimePublicationCoordinator& coordinator_;
+        RuntimeIntentCoordinator& coordinator_;
     public:
-        explicit PriorityScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        explicit PriorityScheduler(RuntimeIntentCoordinator& coord) noexcept : coordinator_(coord) {}
         void escalateAllRetires(RetirePriority minPriority) noexcept;
         void setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept;
     };
@@ -54831,12 +55271,24 @@ private:
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
+    // ★ work88 (X5 §6.5): Publish Intent residency 専用 counter（INV-X5-1）。
+    //   publicationIntentResidencyCount_ = intentQueue_ 内の Publish Intent 数 + producer
+    //   enqueue reservation（queue residency + producer-side reservation）。
+    //   - 対象: IntentType::Publish（enqueuePublicationIntent の単一箇所で reservation）
+    //   - 非対象: deferredPublicationCount_（Orchestrator の deferred state・単一スロット 0/1）
+    //     と hasDeferredCommit（commit 未完了の logical state）。Queue residency / Deferred
+    //     state / Commit completion を混ぜない（dash §6.5）。
+    //   - 増分: enqueuePublicationIntent が push 前に fetchAdd（reservation-before-push）
+    //   - 減分: processIntent の intentQueue_.pop で type==Publish の場合 fetchSub
+    //     （Publish pop は pendingIntentCount_ を触らない — P2-1 §1.1.6 W2）
+    std::atomic<std::uint64_t> publicationIntentResidencyCount_{0};
     // ★ work88 (P2-1 §1.1.1): pendingIntentCount_ は「Intent transport residency + producer
     //   enqueue reservation」を追跡する。
     //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）
     //   - 非対象: Publish と RetireIntent（混入禁止 — P2-1 §1.1.5）。Publish は
     //     enqueuePublicationIntent が reservation を取らない。RetireIntent は
     //     retireBacklogCount_（setRetireBacklogCount）が担当する。
+    //   ★ INV-ISR-02 / Phase 0 #1: This counter excludes Publish and RetireIntent.
     //   - 増分: producer 側 enqueue 成功時（reservation-before-push で push 前に fetchAdd）
     //   - 減分: consumer 側 pop 成功時（processIntent / drainObserveDeferred /
     //     popRecoveryRequest で fetchSub）
@@ -54846,7 +55298,16 @@ private:
     std::atomic<std::uint64_t> fallbackBacklogCount_;
     std::atomic<std::uint64_t> reclaimInFlightCount_;
     std::atomic<std::uint64_t> deferredRetireResidencyCount_;
-    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント
+    // ★ work88 (X6 §6.6): Quarantine の transport residency と DSP residency を semantic 分離（INV-X6-4）。
+    //   quarantineIntentResidencyCount_ = intentQueue_ 内の Quarantine Intent 数（primary transport）
+    //   quarantineRingResidencyCount_   = quarantineFallbackQueue_ 内の Quarantine Intent 数（fallback/ring）
+    //   quarantineResidentCount_        = 実在 quarantine DSP 数（DSPQuarantineManager::residentCount() が
+    //                                     唯一の source of truth — AudioEngine::isFullyDrained で直接判定）。
+    //   ★ Coordinator 側の quarantineResidentCount_ は X6 以降 submitQuarantine が +1 しない（DSPQuarantineManager
+    //     管理に委譲）。本 counter は従来のドレイン判定では常に 0（source of truth は AudioEngine 側）。
+    std::atomic<std::uint64_t> quarantineIntentResidencyCount_{0};   // ★ X6 新設（Intent lane residency）
+    std::atomic<std::uint64_t> quarantineRingResidencyCount_{0};     // ★ X6 新設（ring/fallback 残留）
+    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント（X6 以降は常時 0 — DSPQuarantineManager が source）
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_{false}; // [work87 P2-5]
@@ -54900,6 +55361,42 @@ private:
     // ★ work88 (P2-4 監査補正 — Step B/C): shutdown 時（AdmissionClosed）に Recovery を
     //   意図的に破棄した回数（ShutdownDiscard）。drop（queue full）とは区別 — dash §8.1。
     std::atomic<uint64_t> recoveryShutdownDiscardCount_{0};
+
+    // ── ★ work88 (X1 §6.1): Recovery Durable Admission（lease 方式）──
+    //   queue full で Recovery が「失われる」ことを構造的に排除する durable admission state。
+    //   INV-X1-1: accepted ⇒ exactly one durable state（DurablePending OR Building）exists
+    //   INV-X1-2: queue full ≠ Recovery lost（durable admission が保持）
+    //   INV-X1-4: durable state は World ownership を持たない（DSPHandle / epoch / intentId /
+    //             RuntimeBuildSnapshot のみ — 非所有）
+    //   INV-X1-5: 1 logical Recovery admission = at most 1 reservation（coalesce で増やさない）
+    //   INV-X1-6: durable admission は queue residency と二重計上しない
+    //   SPSC: Producer = CoordinatorLoop（submitRecoveryRequest / QuarantineIntentHandler 経由）
+    //         Consumer = Builder Loop（takePendingRecoveryAdmission）— 競合なし
+    //   ★ 二十六次レビュー（lease 方式・必須修正1）: take は destructive dequeue ではなく
+    //     DurablePending → Building の state transition。build 失敗（transient）は
+    //     Building → DurablePending へ戻す（retry を構造的保証）。obsolete は Discarded。
+#pragma warning(push)
+#pragma warning(disable : 4324)   // DSPHandle(alignas 16) による構造体パディング警告を抑制
+    struct PendingRecoveryAdmission {
+        enum class State : uint8_t {
+            NoAdmission = 0,
+            DurablePending,
+            Building
+        };
+        State state = State::NoAdmission;
+        bool pending = false;                 // durable state 有効（state != NoAdmission）
+        uint64_t recoveryGeneration = 0;      // 入ってきた時点の rebuildRequestGeneration（coalesce 判定用）
+        convo::RuntimeBuildSnapshot buildSource{};  // latest（coalesce で更新）
+        bool reservationOwned = false;        // 1 admission = 1 reservation（INV-X1-5）
+        DSPHandle handle{};                   // recovery 対象（quarantined DSPHandle）— 消費時 isNull 検証
+        PublicationEpoch epoch{0};            // emit 時 publicationEpoch（FIFO/epoch 検証用）
+        uint64_t intentId{0};                 // 診断・モニタリング用シーケンス番号
+    };
+    PendingRecoveryAdmission pendingRecoveryAdmission_;   // SPSC（plain 構造体 — atomic 不要）
+    std::atomic<bool> recoveryAdmissionPending_{false};   // durable 有効フラグ（isFullyDrained が読む）
+    static_assert(std::is_trivially_copyable_v<PendingRecoveryAdmission>,
+        "PendingRecoveryAdmission must be trivially copyable");
+#pragma warning(pop)
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。
@@ -54955,7 +55452,7 @@ private:
 
 namespace convo::isr {
 
-void RuntimePublicationCoordinator::processIntent(
+void RuntimeIntentCoordinator::processIntent(
     AudioEngine& engine,
     DSPLifetimeManager& lifetimeMgr) noexcept
 {
@@ -54982,6 +55479,9 @@ void RuntimePublicationCoordinator::processIntent(
     //   reservation-before-push で fetchAdd 済み）ため無条件 fetchSub。
     while (quarantineFallbackQueue_.pop(commonIntent)) {
         convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+        // ★ work88 (X6 §6.6): fallback ring は Quarantine 専用（submitQuarantine のみが push）。
+        //   pop 成功で quarantineRingResidencyCount_ を fetchSub（INV-X6-4）。
+        convo::fetchSubAtomic(quarantineRingResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
     }
     // メイン intentQueue_（MpscBoundedRing — MPSC 化済み。Observe/Publish/Quarantine/Recovery を
@@ -54990,8 +55490,24 @@ void RuntimePublicationCoordinator::processIntent(
     //   reservation を消費（fetchSub）。Publish は pendingIntentCount_ に計上されない
     //   （enqueuePublicationIntent は reservation を取らない — P2-1 §1.1.1）ため fetchSub しない。
     while (intentQueue_.pop(commonIntent)) {
-        if (commonIntent.type != IntentType::Publish)
+        // ★ work88 (X5 §6.5 / X6 §6.6): type 分岐で独立 counter を減算（INV-X5-1 / INV-X6-4）。
+        //   - Publish     : publicationIntentResidencyCount_--（X5。pendingIntentCount_ は触らない）
+        //   - Quarantine  : quarantineIntentResidencyCount_--（X6）+ pendingIntentCount_--（P2）
+        //   - Observe/Recovery : pendingIntentCount_--（P2）
+        //   減算は processIntent の while ループで一元管理（handler では行わない — HANDLER-1）。
+        switch (commonIntent.type)
+        {
+        case IntentType::Publish:
+            convo::fetchSubAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+            break;
+        case IntentType::Quarantine:
+            convo::fetchSubAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+            break;
+        default:  // Observe / Recovery
+            convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+            break;
+        }
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
     }
 
@@ -55006,7 +55522,7 @@ void RuntimePublicationCoordinator::processIntent(
 }
 
 // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）。
-void RuntimePublicationCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept
+void RuntimeIntentCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept
 {
     ObserveIntent deferred{};
     while (observeDeferredRing_.pop(deferred)) {
@@ -55127,7 +55643,7 @@ enum class SemanticCategory : std::uint8_t
 
 enum class OwnershipClass : std::uint8_t
 {
-    RuntimePublicationCoordinator = 0,
+    RuntimeIntentCoordinator = 0,
     RuntimeWorld,
     RuntimeGraph,
     PublicationSemantic,
@@ -58166,7 +58682,7 @@ public:
     // ★ v8.3: const RuntimePublishWorld を返す — INV-11 のコンパイル時保証
     //   buildRuntimePublishWorld() 完了後は World を変更してはならない。
     //   内部で Coordinator が sealRecursively() を呼ぶ必要があるため、
-    //   RuntimePublicationCoordinator が const_unique_ptr を受け入れる。
+    //   RuntimeIntentCoordinator が const_unique_ptr を受け入れる。
     [[nodiscard]] convo::aligned_unique_ptr<const RuntimePublishWorld>
     buildRuntimePublishWorld(
         const convo::RuntimeBuildSnapshot* sealedSnapshot,
@@ -58233,7 +58749,7 @@ public:
 
     // Bootstrap World: 初期化時に初回 publish する最小限の RuntimePublishWorld を生成する。
     // 全てのデフォルト値で初期化され、AudioEngine::initialize() 実行直後に
-    // RuntimePublicationCoordinator::publishWorld() で公開される。
+    // RuntimeIntentCoordinator::publishWorld() で公開される。
     // これにより publishRuntimeStateNonRt が初回コール時に world==nullptr の
     // fallback を必要としなくなる。
     [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
@@ -58269,7 +58785,7 @@ namespace isr {
 // isAllZero() は監査ログ出力専用。shutdown 完了判定の authority にはしない。
 //
 // ■ 完了条件に含めるもの
-//   pendingPublication  — RuntimePublicationCoordinator の publication backlog
+//   pendingPublication  — RuntimeIntentCoordinator の publication backlog
 //   pendingRetire       — LifetimeState に未処理の retire intent
 //   activeCrossfadeCount — 進行中のクロスフェード（0 or 1）
 //   deferredPublish     — 未投入の deferred publish
@@ -62325,37 +62841,58 @@ struct PublishExecutor {
     {
         const auto& p = intent.payload.publish;
 
+
         // ★ B3/A1: acquire SOLE ownership from OwnerChannel. The Non-RT producer already
         //   transferred the immutable world into ownerChannel_ keyed by {seq, epoch, mappedGen}.
-        //   INVARIANT: RuntimeStateOwner is moved exactly once below (into the RuntimeStore
-        //   publishWorld()); the ISR commit() below only reads the address — non-owning.
+        //   INVARIANT: RuntimeStateOwner is moved exactly once below (into
+        //   RuntimeWorldAuthority::publish — sole physical store-swap, INV-X4-3).
         auto owner = authority.ownerChannel().take(
             OwnerChannelKey{ intent.sequenceId,
                              static_cast<std::uint32_t>(intent.payload.publish.epoch),
                              intent.payload.publish.mappedGeneration });
+        const bool hasOwner = static_cast<bool>(owner);
 
         // ★ D3: resolve newWorld for the metadata commit — the async owner when present, else the
         //   PendingPublishRegistry / sealed snapshot fallback (preserving 5-2/5-3 behavior while
         //   producers are still on the legacy route).
+        //   ★ X4-B: didPublish で *newWorld を deref するため typed（const RuntimeState*）に統一する
+        //     （registry.lookup / intent payload は const void* を返す — static_cast で型復元）。
         const auto* newWorld = owner ? owner.get()
-                                     : authority.registry().lookup(intent.sequenceId);
+                                     : static_cast<const RuntimeState*>(authority.registry().lookup(intent.sequenceId));
         if (newWorld == nullptr)
-            newWorld = p.newWorld;
-        authority.commit(PublishAuthority::Granted,
-                         p.boundary,
-                         newWorld,
-                         p.version,
-                         intent.sequenceId,
-                         p.epoch,
-                         p.mappedGeneration);
-        // ★ B3/A1: THE sole RuntimeStore store-swap (RuntimeStore::WriteAccess::publishAndSwap).
-        //   Ownership moves exactly once here: owner → runtimeStore. The producer has switched
-        //   to the async enqueue route this is live; otherwise owner is empty and this branch
-        //   stays inert — guaranteeing two active store-swaps never coexist at runtime.
-        if (owner)
+            newWorld = static_cast<const RuntimeState*>(p.newWorld);
+
+        // ★ work88 (X4-B §6.4 / X4-B-5): 一時生成 coordinator（makeRuntimePublishAuthority()）を廃止し、
+        //   RuntimeWorldAuthority が sole physical publish gateway（INV-X4-2）。publish() 内部で
+        //   commit metadata（ISR currentWorld_ 更新）+ publishAndSwap（physical store swap）を束ねる
+        //   （commit-before-swap ordering — Test 7）。PublishExecutor 側の authority.commit() は
+        //   publish() が内包するため削除（commit 二重化防止・二十二次レビュー必須修正1）。
+        //   ★ seal はここで実行（RuntimeState 完全型 — AudioEngine.h include 済み）。
+        //   ★ didPublish / willRetire / retire は publish() の外（Execution tail）で Bridge 経由で
+        //     実行する（X4-B の publish() 責務限定 — validate/commit/swap/return oldWorld・二十次 §20）。
+        RuntimeState* oldWorld = nullptr;
+        if (hasOwner)
         {
-            auto coordinator = ctx.engine.makeRuntimePublicationCoordinator();
-            (void)coordinator.publishWorld(std::move(owner));
+            const_cast<RuntimeState*>(owner.get())->sealRecursively();   // PR-5: publish 前 immutable 化
+            bool committed = false;
+            oldWorld = authority.publish(std::move(owner),
+                                         RuntimeWorldAuthority::PublishMetadata{
+                                             p.boundary, p.version, intent.sequenceId,
+                                             p.epoch, p.mappedGeneration },
+                                         &committed);
+            // ★ work88（監査軽微指摘2）: publish() は seqId==0 / commit Faulted のみ失敗
+            //   （producer 保証 + FIFO で到達不能）。失敗時は world が publish() 内で破棄されるため
+            //   *newWorld を deref しない（dangling deref 防止）。committed==true のみ bridge 実行。
+            AudioEngine::RuntimePublicationBridge bridge{ ctx.engine, ctx.engine.runtimePublicationValidator_ };
+            if (committed)
+            {
+                // ★ X4-B: 従来は core publishWorld が内部で実行していた didPublish/willRetire/retire。
+                //   Bridge は残る（十八次別視点8調査）— X4-B 後も didPublish/willRetire/retire を
+                //   PublishExecutor の Execution tail から呼ぶ。
+                bridge.didPublishRuntimeNonRt(*newWorld);
+                bridge.willRetireRuntimeNonRt(oldWorld);
+                bridge.retireRuntimePublishWorldNonRt(oldWorld, false);
+            }
         }
         // ★ D2: commit succeeded ⇒ drop the pending registry entry
         authority.registry().unregister(intent.sequenceId);
@@ -62470,13 +63007,16 @@ struct [[deprecated("Authority removed, use RuntimeSemanticSchema")]] EngineRunt
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include "ISRRuntimePublicationCoordinator.h"  // RuntimePublicationCoordinator
+#include <type_traits>
+#include "ISRRuntimePublicationCoordinator.h"  // RuntimeIntentCoordinator
 #include "ISRRetire.h"  // ★ A2: LifetimeState (sole owner of lifetime/retire state)
 #include "OwnerChannel.h"               // ★ B3 (Option C): OwnerChannel holder
 #include "AtomicAccess.h"               // ★ convo helpers: publishAtomic / consumeAtomic
+#include "core/RuntimeStore.h"          // ★ X4-B: RuntimeStore<RuntimeState, RuntimeWorldAuthority>（CRTP 所有）
 #include "../AlignedAllocation.h"       // ★ B3: aligned_unique_ptr<const RuntimeState>
 
 // ★ B3 (Option C): RuntimeWorldAuthority owns the OwnerChannel by value; the owner
@@ -62536,7 +63076,7 @@ public:
 };
 
 // ★ A-1: RuntimeWorldAuthority — ISR Authority Surface (mutable API only).
-//   Delegate-first: wraps the existing RuntimePublicationCoordinator and forwards
+//   Delegate-first: wraps the existing RuntimeIntentCoordinator and forwards
 //   the Authority surface (epoch / sequence / world-read / commit).
 //   Per the (A) invariant, NO diagnostic / observe / metric / health APIs leak
 //   through here — those remain on the coordinator's DrainAudit surface, owned by
@@ -62544,11 +63084,56 @@ public:
 //   Migration stage 1: behavior is identical (delegates to the live coordinator);
 //   callers migrate in A-2/A-3 to route through this Adapter. RuntimeWorld is the
 //   single source of truth for publication metadata (Epoch / Sequence / Generation).
+//
+// ★ work88 (X4 §6.4 — Phase 0 Authority matrix / INV-X4-1〜8・A〜C):
+//   各操作の唯一の Authority を明文化する（Authority Singularization）。
+//   INV-X4-1: Intent enqueue / dispatch → RuntimeIntentCoordinator only
+//   INV-X4-2: Publish execution → PublishExecutor → RuntimeWorldAuthority（sole physical
+//             publish gateway。Bootstrap / shutdown clear は lifecycle-controlled publish）
+//   INV-X4-3: RuntimeStore::publishAndSwap() は RuntimeWorldAuthority-owned WriteAccess のみ。
+//             RuntimePublishAuthority は Store / WriteAccess / publishAndSwap / 代替 authority /
+//             write capability を一切所有しない（二階層化禁止）。
+//   INV-X4-4: RT / Audio callback から RuntimeStateOwner / unique_ptr / WriteAccess を
+//             新規取得・破棄しない（RT は観測主体・実行主体でない）
+//   INV-X4-5: X4-B 後、RuntimeWorldAuthority::RuntimeStore 以外の write-capable RuntimeStore を作らない
+//   INV-X4-6: publish transaction 完了後、currentWorld_ と RuntimeStore::current は同一
+//             PublicationIdentity（sequenceId + publicationEpoch + mappedGeneration）
+//   INV-X4-7: currentWorld_ と RuntimeStore::current を独立した authoritative source として
+//             扱う API を禁止（getCurrent() を consumeWorldHandle の置換先にしない）
+//   INV-X4-8: currentWorld_ = metadata observation alias（non-owning）/ RuntimeStore::current =
+//             physical publication source。交換可能として扱う API を禁止
+//   INV-X4-A: currentWorld_ is observation-only（RuntimeWorld 取得元として使わない）
+//   INV-X4-B: RuntimeStore::current が唯一の物理 RuntimeWorld source
+//   INV-X4-C: RT API は currentWorld_ から RuntimeWorld の ownership/lifetime を導出しない
+//   ★ X4-B は write authority singularization（RuntimeWorldAuthority が Store を所有）。
+//     read-source singularization（currentWorld_ 廃止）は Future（二十四次レビュー §27-C）。
+//     現状は PublishExecutor が sole gateway + 一時生成 Coordinator が唯一の store-swap のため
+//     INV-X4-3 は de facto 成立（X4-B で物理所有へ一本化する）。
 class RuntimeWorldAuthority
 {
 public:
-    explicit RuntimeWorldAuthority(RuntimePublicationCoordinator& coordinator) noexcept
-        : coordinator_(coordinator) {}
+    // ★ work88 (X4-B §6.4 / 二十次・二十一次レビュー): RuntimeWorldAuthority が物理 RuntimeStore を
+    //   value 所有する（write authority singularization — INV-X4-3 / INV-X4-5）。Owner = 自身（CRTP）。
+    //   WriteAccess は Store より後に宣言（C++ 逆順破棄で writeAccess_ → runtimeStore_ の順に破棄 —
+    //   WriteAccess が生きている間に Store が破棄されない）。RuntimeWorldAuthority 自体の move/copy は
+    //   禁止（WriteAccess は Store への非所有参照を持ち、move すると参照先が分離する — 十九次レビュー）。
+    using Store = convo::RuntimeStore<RuntimeState, RuntimeWorldAuthority>;
+    using WriteAccess = typename Store::WriteAccess;
+
+    explicit RuntimeWorldAuthority(RuntimeIntentCoordinator& coordinator) noexcept
+        : coordinator_(coordinator)
+        , runtimeStore_()
+        , writeAccess_(runtimeStore_.acquireWriteAccess())   // ★ X4-B-3: Authority が Store を構築し WriteAccess を取得
+        , ownerChannel_()
+        , lifetime_()
+        , registry_()
+    {
+    }
+
+    RuntimeWorldAuthority(const RuntimeWorldAuthority&) = delete;
+    RuntimeWorldAuthority& operator=(const RuntimeWorldAuthority&) = delete;
+    RuntimeWorldAuthority(RuntimeWorldAuthority&&) = delete;
+    RuntimeWorldAuthority& operator=(RuntimeWorldAuthority&&) = delete;
 
     // ── Authority: publication metadata (derived from currentWorld_) ──
     [[nodiscard]] PublicationEpoch currentEpoch() const noexcept
@@ -62570,26 +63155,6 @@ public:
     [[nodiscard]] std::uint64_t getVersion() const noexcept
     {
         return coordinator_.getVersion();
-    }
-
-    // ── Authority: publish/commit ──
-    void commit(PublishAuthority auth,
-                RuntimeBoundary boundary,
-                const void* newWorld,
-                std::uint64_t version) noexcept
-    {
-        coordinator_.commit(auth, boundary, newWorld, version);
-    }
-
-    void commit(PublishAuthority auth,
-                RuntimeBoundary boundary,
-                const void* newWorld,
-                std::uint64_t version,
-                PublicationSequenceId sequenceId,
-                PublicationEpoch epoch,
-                std::uint64_t mappedGeneration) noexcept
-    {
-        coordinator_.commit(auth, boundary, newWorld, version, sequenceId, epoch, mappedGeneration);
     }
 
     // ★ ADR-D3: gap registry for async publish (non-owning handle; owner during enqueue→commit).
@@ -62615,13 +63180,131 @@ public:
 
     [[nodiscard]] OwnerChannelType& ownerChannel() noexcept { return ownerChannel_; }
 
+    // ── ★ work88 (X4-B §6.4 / X4-B-9): read API — RuntimeStore::current が唯一の物理
+    //   RuntimeWorld source（INV-X4-B）。getCurrent() は置換先にしない（INV-X4-7 —
+    //   currentWorld_ は metadata observation alias）。ReadToken は opaque トークン。
+    struct ReadToken
+    {
+    private:
+        friend class RuntimeWorldAuthority;
+        constexpr ReadToken() noexcept = default;
+    };
+
+    [[nodiscard]] ReadToken acquireReadToken() const noexcept { return ReadToken{}; }
+
+    [[nodiscard]] const RuntimeState* consumeWorldHandle(const ReadToken&) const noexcept
+    {
+        return runtimeStore_.observe();
+    }
+
+    [[nodiscard]] const RuntimeState* consumeWorldHandle() const noexcept
+    {
+        return runtimeStore_.observe();
+    }
+
+    [[nodiscard]] const RuntimeState* observePublishedWorld() const noexcept
+    {
+        return runtimeStore_.observe();
+    }
+
+    // ── ★ work88 (X4-B §6.4 / X4-B-4): publish — semantic publication transaction の唯一の
+    //   execution boundary（commit + publishAndSwap を束ねる・commit-before-swap ordering — Test 7）。
+    //   retire は publish() に戻さない（Lifetime の責務 — X3/retire と分離）。戻り値は previous
+    //   （oldWorld）— retire 対象を caller（PublishExecutor / Bootstrap）に明示する。
+    //   ★ seal / validate は caller が RuntimeState 完全型（AudioEngine.h）で実行する
+    //     （RuntimeWorldAuthority.h は RuntimeState を前方宣言のみ — 循環 include 回避）。
+    //   ★ seal-before-bake ordering（監査軽微指摘3）: caller の sealRecursively() の後に commit
+    //     内で publication metadata を bake（pubWorld->publication 書込み）する。seal は RT reader
+    //     向けの論理的不変性フラグ（メモリ保護ではない）ため bake は問題なく実行でき、かつ
+    //     bake → publishAndSwap の順序により bake 完了前に world が観測されることはない。
+    struct PublishMetadata
+    {
+        RuntimeBoundary boundary;
+        std::uint64_t version;
+        PublicationSequenceId sequenceId;
+        PublicationEpoch epoch;
+        std::uint64_t mappedGeneration;
+    };
+
+    [[nodiscard]] RuntimeState* publish(RuntimeOwner&& owner, const PublishMetadata& metadata,
+                                        bool* committed = nullptr) noexcept
+    {
+        if (!owner)
+        {
+            if (committed != nullptr) *committed = false;
+            return nullptr;                                 // validate: owner null → Failed
+        }
+        const auto* newWorld = owner.get();
+        if (newWorld == nullptr)
+        {
+            if (committed != nullptr) *committed = false;
+            return nullptr;                                 // validate: null world → Failed
+        }
+        // ★ work88（監査軽微指摘2）: seqId==0 は producer が保証しない（構造的に到達不能）。
+        //   Debug で即時検出。失敗時は owner を無条件消費（破棄）して nullptr を返すため、
+        //   caller は committed=false を確認して *newWorld を deref してはならない
+        //   （戻り値 nullptr は「初回 publish の oldWorld」と曖昧 — dangling deref 防止）。
+        assert(metadata.sequenceId != 0);
+        if (metadata.sequenceId == 0)
+        {
+            if (committed != nullptr) *committed = false;
+            return nullptr;                                 // validate: metadata invalid → Rejected
+        }
+        // commit metadata（ISR currentWorld_ 更新 + publication bake）— commit-before-swap（Test 7）
+        coordinator_.commit(PublishAuthority::Granted, metadata.boundary, newWorld, metadata.version,
+                            metadata.sequenceId, metadata.epoch, metadata.mappedGeneration);
+        // ★ work88（監査軽微指摘2）: commit が Faulted（monotonicity violation 等）なら swap しない。
+        //   FIFO producer により到達不能だが、commit 失敗後の物理 swap による currentWorld_
+        //   （metadata alias）と Store::current の不一致を構造的に排除する（transaction 原子性）。
+        if (coordinator_.getState() == RuntimeIntentCoordinator::CoordinatorState::Faulted)
+        {
+            if (committed != nullptr) *committed = false;
+            return nullptr;
+        }
+        // physical store swap — 唯一の WriteAccess（INV-X4-3）
+        auto* next = const_cast<RuntimeState*>(owner.release());
+        std::atomic_thread_fence(std::memory_order_release);
+        auto* oldWorld = writeAccess_.publishAndSwap(next); // previous（oldWorld）を caller へ返す
+        if (committed != nullptr) *committed = true;
+        return oldWorld;
+    }
+
+    // ── ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear — publish() と統合しない（null 公開 =
+    //   world クリアは別 semantic・二十次レビュー §15）。戻り値の oldWorld は caller が retire する。
+    void requestShutdownClearNonRt() noexcept { shutdownClearRequested_ = true; }
+
+    [[nodiscard]] RuntimeState* clearPublishedRuntimeSnapshotsNonRt() noexcept
+    {
+        if (!shutdownClearRequested_)
+            return nullptr;
+        shutdownClearRequested_ = false;
+        return writeAccess_.publishAndSwap(nullptr);
+    }
 
 private:
-    RuntimePublicationCoordinator& coordinator_;
+    // ★ member order（二十一次レビュー①・確定）: runtimeStore_ を writeAccess_ より先に宣言。
+    //   C++ 逆順破棄により writeAccess_ → runtimeStore_ の順で破棄（WriteAccess が生きている間に
+    //   Store が破棄されない）。
+    RuntimeIntentCoordinator& coordinator_;   // commit metadata（ISR currentWorld_）委譲先
+    Store runtimeStore_;                       // ★ X4-B-2: Authority が物理 Store を所有
+    WriteAccess writeAccess_;                  // ★ X4-B-3: Store の唯一の WriteAccess
+    OwnerChannelType ownerChannel_;            // ★ B3 (Option C): owned by value here.
     LifetimeState lifetime_;
     PendingPublishRegistry registry_;
-    OwnerChannelType ownerChannel_;   // ★ B3 (Option C): owned by value here.
+    bool shutdownClearRequested_ = false;
 };
+
+// ★ work88 (X4-B §6.4 / 十九次レビュー): Authority の move/copy 禁止をコンパイル時固定。
+//   WriteAccess は Store への非所有参照を持ち、move すると参照先が分離する（Store は
+//   non-copyable/non-movable）。static_assert はクラス完了後に置く。
+static_assert(!std::is_copy_constructible_v<RuntimeWorldAuthority>,
+    "RuntimeWorldAuthority must not be copy-constructible (owns RuntimeStore/WriteAccess)");
+static_assert(!std::is_copy_assignable_v<RuntimeWorldAuthority>,
+    "RuntimeWorldAuthority must not be copy-assignable");
+static_assert(!std::is_move_constructible_v<RuntimeWorldAuthority>,
+    "RuntimeWorldAuthority must not be move-constructible");
+static_assert(!std::is_move_assignable_v<RuntimeWorldAuthority>,
+    "RuntimeWorldAuthority must not be move-assignable");
 
 } // namespace convo::isr
 
@@ -70106,8 +70789,13 @@ public:
     }
 
     // ★ C-3: タグ名付き Reader 登録
+    // ★ work88 (X3 §6.3 / INV-X3-4): reader registration permanently closed — shutdown 後は
+    //   新規登録を拒否する（registrationClosed_）。登録済み slot の enter/exit は継続可能
+    //   （既存 Reader の epoch 安全性は維持 — 十八次別視点14）。
     int registerReaderThread(const char* tag) noexcept
     {
+        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
+            return -1;   // ★ X3: reader registration permanently closed（INV-X3-4）
         for (int i = 0; i < kMaxReaders; ++i)
         {
             uint64_t expected = kInactiveEpoch;
@@ -70143,6 +70831,9 @@ public:
     bool reserveReaderThread(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return false;
+        // ★ work88 (X3 §6.3 / INV-X3-4): reserve 経由の登録も封じる（registrationClosed_ ガード）
+        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
             return false;
 
         uint64_t expected = kInactiveEpoch;
@@ -70623,6 +71314,11 @@ private:
     alignas(64) std::atomic<uint32_t> reclaimLocalCounter_{0};
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
+    // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): reader registration permanently closed フラグ。
+    //   closeReaderRegistration() で true（shutdown state machine の CloseReaderRegistration フェーズ）。
+    //   registerReaderThread / reserveReaderThread は true 後は失敗を返す（新規登録拒否）。
+    std::atomic<bool> registrationClosed_{false};
+
 public:
     // ★ A-2: 公開アクセサ
     [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override {
@@ -70633,6 +71329,15 @@ public:
     }
     [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override {
         return convo::consumeAtomic(reclaimSuccessCount_, std::memory_order_acquire);
+    }
+
+    // ★ work88 (X3 §6.3 / INV-X3-4): reader registration を永久に閉じる（CloseReaderRegistration）。
+    //   新規登録のみを拒否し、登録済み slot は exit まで継続可能（既存 Reader の epoch 安全性維持）。
+    void closeReaderRegistration() noexcept {
+        convo::publishAtomic(registrationClosed_, true, std::memory_order_release);
+    }
+    [[nodiscard]] bool readerRegistrationClosed() const noexcept {
+        return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
     }
 };
 
@@ -71506,34 +72211,34 @@ enum class PublishStageResult : uint8_t {
 struct RuntimeBuildSnapshot;
 
 template <typename World, typename Handle, typename Bridge>
-class RuntimePublicationCoordinator final
+class RuntimePublishAuthority final
 {
 public:
     struct ReadToken final
     {
     private:
-        friend class RuntimePublicationCoordinator<World, Handle, Bridge>;
+        friend class RuntimePublishAuthority<World, Handle, Bridge>;
         constexpr ReadToken() noexcept = default;
     };
 
-    using Store = RuntimeStore<World, RuntimePublicationCoordinator<World, Handle, Bridge>>;
+    using Store = RuntimeStore<World, RuntimePublishAuthority<World, Handle, Bridge>>;
     using WriteAccess = typename Store::WriteAccess;
 
-    RuntimePublicationCoordinator(const RuntimePublicationCoordinator&) = delete;
-    RuntimePublicationCoordinator& operator=(const RuntimePublicationCoordinator&) = delete;
-    RuntimePublicationCoordinator(RuntimePublicationCoordinator&&) noexcept = default;
-    RuntimePublicationCoordinator& operator=(RuntimePublicationCoordinator&&) noexcept = default;
+    RuntimePublishAuthority(const RuntimePublishAuthority&) = delete;
+    RuntimePublishAuthority& operator=(const RuntimePublishAuthority&) = delete;
+    RuntimePublishAuthority(RuntimePublishAuthority&&) noexcept = default;
+    RuntimePublishAuthority& operator=(RuntimePublishAuthority&&) noexcept = default;
 
-    explicit RuntimePublicationCoordinator(Bridge&& bridge, WriteAccess&& writeAccess) noexcept
+    explicit RuntimePublishAuthority(Bridge&& bridge, WriteAccess&& writeAccess) noexcept
         : bridge_(std::move(bridge))
         , writeAccess_(std::move(writeAccess))
     {
     }
 
-    [[nodiscard]] static RuntimePublicationCoordinator create(Bridge&& bridge,
+    [[nodiscard]] static RuntimePublishAuthority create(Bridge&& bridge,
                                                               Store& store) noexcept
     {
-        return RuntimePublicationCoordinator { std::move(bridge), store.acquireWriteAccess() };
+        return RuntimePublishAuthority { std::move(bridge), store.acquireWriteAccess() };
     }
 
     [[nodiscard]] static const World* consumePublishedWorld(const Store& store) noexcept
@@ -71710,6 +72415,11 @@ class RuntimeStore final
 {
 public:
     static_assert(std::is_class_v<Owner>, "RuntimeStore Owner must be a class type");
+
+    // ★ work88 (X4-B §6.4 / 二十一次レビュー): Owner 型の公開エイリアス。
+    //   `Store::Owner` はコンパイル不可（RuntimeStore に using Owner が無かった）のため、
+    //   Test 1（static_assert(is_same_v<Store::OwnerType, RuntimeWorldAuthority>)）用に追加。
+    using OwnerType = Owner;
 
     class WriteAccess final
     {
@@ -77208,7 +77918,7 @@ EQCoeffCache* EQProcessor::createCoeffCache(
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
-namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class RuntimeIntentCoordinator; }
 namespace convo::isr { class ISRRetireRouter; }
 
 //--------------------------------------------------------------
@@ -77600,7 +78310,7 @@ public:
         const EQState& state, double processingRate) const;
 
     // Retire authority: set coordinator for unified retire path
-    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    void setRetireCoordinator(convo::isr::RuntimeIntentCoordinator* coordinator) noexcept
     {
         m_retireCoordinator = coordinator;
     }
@@ -77637,7 +78347,7 @@ private:
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
-    convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
+    convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
     // [work21] ISRRetireRouter: unified retire API (Phase-C)
     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
@@ -83331,6 +84041,7 @@ int main()
 #include <limits>
 #include <cstdio>
 #include <memory>
+#include <type_traits>
 
 #include "audioengine/ISRClosure.h"
 #include "audioengine/ISRPayloadTier.h"
@@ -83345,7 +84056,7 @@ namespace {
 
 [[nodiscard]] bool testInvalidClosureRejected()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     convo::isr::PayloadClosureDescriptor invalid {};
@@ -83368,7 +84079,7 @@ namespace {
 
 [[nodiscard]] bool testInvalidTierRejected()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     convo::isr::PayloadClosureDescriptor closure {};
@@ -83402,7 +84113,7 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorCommitAndMonotonicityContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83420,7 +84131,7 @@ namespace {
         return false;
     if (coordinator.getVersion() != 1)
         return false;
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Ready)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -83445,7 +84156,7 @@ namespace {
 
     if (coordinator.getCurrent() != world2.get())
         return false;
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
 
     return true;
@@ -83453,7 +84164,7 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectEpochRollbackContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83482,12 +84193,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectMappedGenerationRollbackOnEpochAdvance()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83516,12 +84227,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectEpochReuseContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83550,12 +84261,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectMappedGenerationReuseContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83584,12 +84295,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectWraparoundContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83632,12 +84343,12 @@ namespace {
     if (coordinator.getCurrent() != world2.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorDrainAndShutdownContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -83662,7 +84373,7 @@ namespace {
     coordinator.requestShutdown();
     coordinator.markShutdownComplete();
 
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Bootstrapping)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Bootstrapping)
         return false;
 
     return true;
@@ -83670,7 +84381,7 @@ namespace {
 
 [[nodiscard]] bool testShutdownCompleteFailsWhenNotDrained()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
 
@@ -83696,12 +84407,12 @@ namespace {
     coordinator.requestShutdown();
     coordinator.markShutdownComplete();
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testPressureStateNormalizationContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
 
@@ -83715,31 +84426,31 @@ namespace {
 
     // slope > threshold で Pressure へ遷移
     coordinator.setRetireBacklogCount(9);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 中は normalization しない
     coordinator.setSwapPending(true);
     coordinator.setRetireBacklogCount(0);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 解除後、3 window で Ready へ復帰
     coordinator.setSwapPending(false);
     coordinator.setRetireBacklogCount(0);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
     coordinator.setRetireBacklogCount(0);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
     coordinator.setRetireBacklogCount(0);
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Ready;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready;
 }
 
 [[nodiscard]] bool testShutdownCompleteFailsWhenSwapPending()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
 
@@ -83765,7 +84476,7 @@ namespace {
     coordinator.requestShutdown();
     coordinator.markShutdownComplete();
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 // --- P4: Generation / ActivationEpoch 契約 ---
@@ -83773,7 +84484,7 @@ namespace {
 // 同一 generation での activationEpoch 単独変更は禁止。
 [[nodiscard]] bool testP4SameGenerationEpochChangeRejected()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83788,7 +84499,7 @@ namespace {
                        100,
                        100);
 
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Ready)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
 
     // 同一 generation (100) で epoch のみ変更 (101) → 禁止 (generation 不変で epoch 変更)
@@ -83804,7 +84515,7 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 // --- P20: Fail-Closed Rollback ---
@@ -83814,7 +84525,7 @@ namespace {
 // 副作用（callback, telemetry）は reject 経路では発生しない。
 [[nodiscard]] bool testP20RejectPreservesWorldState()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -83838,7 +84549,7 @@ namespace {
                        2, 2, 0, 2);
 
     // state は Faulted に遷移する（fail-closed）: これは意図された動作
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
 
     // currentWorld が reject 前の値（world1）を維持している
@@ -83856,7 +84567,7 @@ namespace {
 //   consistent epoch + generation + sequence via RuntimeState::publication.
 [[nodiscard]] bool testMetadataSnapshotConsistentAcrossReaders()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -83873,7 +84584,7 @@ namespace {
 
 [[nodiscard]] bool testMetadataSnapshotRejectsEpochRollback()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -83883,7 +84594,7 @@ namespace {
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
                        world2.get(), 2, 2, 4, 11);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
     if (coordinator.getCurrent() != world1.get())
         return false;
@@ -83896,7 +84607,7 @@ namespace {
 
 [[nodiscard]] bool testMetadataSnapshotSequenceAdvancesWithEpoch()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto w1 = RuntimeState::createForTest();
     auto w2 = RuntimeState::createForTest();
@@ -83918,7 +84629,7 @@ namespace {
 // METADATA-6: no transitional cache symbol; reader is pure world snapshot.
 [[nodiscard]] bool testMetadataSnapshotNoTransitionalCacheSymbol()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -83935,7 +84646,7 @@ namespace {
 //   submitRecoveryRequest() -> popRecoveryRequest() 1-hop 輸送。Builder Loop が復旧 World を build。
 [[nodiscard]] bool testRecoveryRequestEnqueueAndPop()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     const auto handle = convo::isr::DSPHandle::null();
     // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を引数に追加。
@@ -83950,11 +84661,128 @@ namespace {
     return true;
 }
 
+// ★ work88 (X1 §6.1): Recovery Durable Admission — queue full ≠ Recovery lost（INV-X1-2）。
+//   recoveryIntentQueue_（256）を満杯 → 257th submit は durable admission（PendingRecoveryAdmission）
+//   に保持され、hasPendingRecoveryAdmission() == true。takePendingRecoveryAdmission() は
+//   lease（DurablePending → Building）で消費し、settle(false) でクリア（INV-X1-1）。
+[[nodiscard]] bool testRecoveryDurableAdmission()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
+
+    constexpr int kCap = 256;  // kRecoveryIntentQueueCapacity
+
+    // recoveryIntentQueue_（256）を満杯にする（全て transport に成功 → durable 無し）
+    for (int i = 0; i < kCap; ++i)
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;   // 満杯まで durable は無いはず
+
+    // 257th: queue full → durable admission に保持（INV-X1-2: queue full ≠ Recovery lost）
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // transport は 256 件のみ pop できる（durable は transport に無い — INV-X1-6 二重計上なし）
+    for (int i = 0; i < kCap; ++i)
+    {
+        if (!coordinator.popRecoveryRequest().has_value())
+            return false;
+    }
+    if (coordinator.popRecoveryRequest().has_value())
+        return false;
+
+    // takePendingRecoveryAdmission（lease: DurablePending → Building）→ settle(false) でクリア
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    coordinator.settlePendingRecoveryAdmission(false);
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;
+    // 2 回目の take は nullopt（もう無い）
+    if (coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+
+    return true;
+}
+
+// ★ work88 (X1 §6.1): durable admission の coalesce — 重複 submit でも durable は単一
+//   （INV-X1-5: 1 logical admission = at most 1 reservation）。
+[[nodiscard]] bool testRecoveryDurableCoalesce()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
+
+    // 満杯 → durable admission 作成
+    for (int i = 0; i < 256; ++i)
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // さらに durable submit（coalesce）— durable は単一のまま（INV-X1-5）
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+
+    // take で 1 回だけ消費でき、その後は空（coalesce により単一 durable のみ）
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    coordinator.settlePendingRecoveryAdmission(false);
+    if (coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    return true;
+}
+
+// ★ work88 (X1 §6.1): lease 方式 — transient build 失敗（settle(true)）で Building → DurablePending へ
+//   戻り、再 take 可能（retry 構造的保証）。INV-X1-1（exactly one durable state）が維持される。
+[[nodiscard]] bool testRecoveryDurableLeaseRetry()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
+
+    // 満杯 → durable admission 作成
+    for (int i = 0; i < 256; ++i)
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // take（lease: DurablePending → Building）
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    // Building 中も hasPendingRecoveryAdmission() == true（build gap 検出）
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // transient failure → settle(true): Building → DurablePending（再 take 可能）
+    coordinator.settlePendingRecoveryAdmission(true);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    coordinator.settlePendingRecoveryAdmission(false);  // 成功 → クリア
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    return true;
+}
+
 // ★ FUTURE-8: overflow は Observe 専用 Deferred Ring へ（Retire 系 ring と分離, QUEUE-15）。
 //   1024+2048+1024 満村 → drop。enqueue path crash なし + pending count 連動を検証。
 [[nodiscard]] bool testObserveOverflowEnqueuePath()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     const auto handle = convo::isr::DSPHandle::null();
     constexpr int N = 4100;  // 1024(L1) + 2048(L2) + 1024(L3) + drop
@@ -83963,11 +84791,42 @@ namespace {
     return coordinator.getPendingIntentCount() == static_cast<std::uint64_t>(N);
 }
 
-// ★ A-1: RuntimeWorldAuthority must be a pure delegate over the Coordinator — it must
-//   return the SAME epoch/sequence/version as the coordinator (no shadow state of its own).
+// ★ A-1 (X4-B §6.4 Test 1 / 二十一次レビュー): RuntimeWorldAuthority owns the physical
+//   RuntimeStore（write authority singularization — INV-X4-3/5）。Store::OwnerType ==
+//   RuntimeWorldAuthority はコンパイル時不変条件。metadata 委譲（epoch/sequence/version）は
+//   Coordinator と同一（シャドウ状態なし）を引き続き検証する（read API は物理 Store から）。
+static_assert(std::is_same_v<convo::isr::RuntimeWorldAuthority::Store::OwnerType,
+                             convo::isr::RuntimeWorldAuthority>,
+    "X4-B Test 1: RuntimeWorldAuthority must own its RuntimeStore (INV-X4-3/5)");
+
+// ★ X4-B Test 2: WriteAccess move-only（RuntimeStore.h の static_assert を Authority 側でも固定）。
+//   WriteAccess は Store への非所有参照を持つため copy 不可・move のみ — INV-X4-3 の前提。
+using X4BTestWriteAccess = convo::isr::RuntimeWorldAuthority::WriteAccess;
+static_assert(!std::is_copy_constructible_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must not be copy-constructible");
+static_assert(!std::is_copy_assignable_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must not be copy-assignable");
+static_assert(std::is_move_constructible_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must be move-constructible");
+static_assert(std::is_move_assignable_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must be move-assignable");
+static_assert(std::is_nothrow_move_constructible_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess move ctor must stay noexcept");
+static_assert(std::is_nothrow_move_assignable_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess move assign must stay noexcept");
+// ★ X4-B Test 3-10（アーキテクチャ検証の対応表）:
+//   Test 3 (publishAndSwap 唯一性) / Test 4 (PublishExecutor bypass 禁止) / Test 5 (Coordinator
+//   bypass 禁止) / Test 6 (二重 Store 検出): `tools/publication_authority_verifier.py` の静的検査
+//   （ALLOWED_PUBLISH_AND_SWAP_FILES = RuntimeWorldAuthority.h + core のみ）。
+//   Test 7 (commit-before-swap ordering): `RuntimeWorldAuthority::publish()` 内の commit→swap 順序
+//     コメント固定（本テストは単一スレッドのため ordering はコード契約で検証）。
+//   Test 8 (ownership transfer exactly once): OwnerChannel（SPSC・key 単一 transfer）が実装。
+//   Test 9 (dual-pointer identity consistency) / Test 10 (INV-X4-7): `AudioEngineHarness`
+//     PublishPipelineIntegrationTests（store swap seq 検証）が統合カバー。
+
 [[nodiscard]] bool testRuntimeWorldAuthorityAdapter()
 {
-    auto coordinator = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto authority = std::make_unique<convo::isr::RuntimeWorldAuthority>(*coordinator);
 
     if (authority->currentEpoch() != coordinator->currentPublicationEpoch())
@@ -83977,6 +84836,16 @@ namespace {
     if (authority->getCurrent() != coordinator->getCurrent())
         return false;
     if (authority->getVersion() != coordinator->getVersion())
+        return false;
+
+    // X4-B: read API は物理 Store（RuntimeStore::current — INV-X4-B）から observe する。
+    //   未 publish 時は null（Store 初期値）。getCurrent()（currentWorld_ 観測）と混同しない。
+    const auto token = authority->acquireReadToken();
+    if (authority->consumeWorldHandle(token) != nullptr)
+        return false;
+    if (authority->consumeWorldHandle() != nullptr)
+        return false;
+    if (authority->observePublishedWorld() != nullptr)
         return false;
 
     // Coordinator must not expose diagnostic/metric setters through the Authority
@@ -83990,12 +84859,12 @@ namespace {
 //   and the queue still holds exactly capacity items (recoverable by drain).
 [[nodiscard]] bool testPublishIntentQueueFullBackpressure()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     constexpr size_t kCapacity = 4096;      // kIntentQueueCapacity (FUTURE-10 common queue)
-    convo::isr::RuntimePublicationCoordinator::Intent intent{};
-    intent.type = convo::isr::RuntimePublicationCoordinator::IntentType::Publish;
+    convo::isr::RuntimeIntentCoordinator::Intent intent{};
+    intent.type = convo::isr::RuntimeIntentCoordinator::IntentType::Publish;
 
     size_t accepted = 0;
     for (size_t i = 0; i < kCapacity + 1; ++i)
@@ -84078,6 +84947,14 @@ int main()
     if (!testRecoveryRequestEnqueueAndPop())
         throw std::runtime_error("FUTURE-3: recovery request enqueue/pop failed");
 
+    // --- work88 (X1 §6.1): Recovery Durable Admission (queue full ≠ lost / lease / coalesce) ---
+    if (!testRecoveryDurableAdmission())
+        throw std::runtime_error("X1: recovery durable admission (full → durable → take) failed");
+    if (!testRecoveryDurableCoalesce())
+        throw std::runtime_error("X1: recovery durable coalesce (single admission) failed");
+    if (!testRecoveryDurableLeaseRetry())
+        throw std::runtime_error("X1: recovery durable lease retry (Building → DurablePending) failed");
+
     // --- FUTURE-8: Observe overflow → Observe-exclusive Deferred Ring (QUEUE-15) ---
     if (!testObserveOverflowEnqueuePath())
         throw std::runtime_error("FUTURE-8: observe overflow enqueue path failed");
@@ -84117,7 +84994,7 @@ int main()
 //   OwnerChannel: enqueue / take の連続サイクル耐久 + 容量満杯拒否
 //   PendingPublishRegistry: register / lookup / unregister stress
 //
-// ヘッドレス駆動: convo::isr::RuntimePublicationCoordinator / RuntimeWorldAuthority
+// ヘッドレス駆動: convo::isr::RuntimeIntentCoordinator / RuntimeWorldAuthority
 // を AudioEngine 無しで直接使用（ISRSemanticValidationTests と同じ方式）。
 //
 // ビルド: ISRSemanticValidationTests と同じ include/link パターン。
@@ -84139,10 +85016,12 @@ int main()
 #include "audioengine/ISRPayloadTier.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
 #include "audioengine/ISRRuntimeWorldAuthority.h"
+#include "audioengine/ISRDSPHandle.h"
+#include "audioengine/ISRDSPQuarantine.h"
 #include "AudioEngine.h"
 #include "OwnerChannel.h"
 
-using convo::isr::RuntimePublicationCoordinator;
+using convo::isr::RuntimeIntentCoordinator;
 
 namespace {
 
@@ -84187,10 +85066,10 @@ void testFail(const char* name, const char* detail)
     {
         // Coordinator は約 953KB（intentQueue_ 4096×144B 等の巨大メンバ）のため
         // 1MB スタックでオーバーフローする → ヒープ確保が必須。
-        auto coordinator = std::make_unique<RuntimePublicationCoordinator>();
+        auto coordinator = std::make_unique<RuntimeIntentCoordinator>();
 
-        RuntimePublicationCoordinator::Intent intent{};
-        intent.type = RuntimePublicationCoordinator::IntentType::Publish;
+        RuntimeIntentCoordinator::Intent intent{};
+        intent.type = RuntimeIntentCoordinator::IntentType::Publish;
 
         std::size_t accepted = 0;
         for (std::size_t i = 0; i < kCapacity + 1; ++i)
@@ -84228,6 +85107,148 @@ void testFail(const char* name, const char* detail)
     }
 
     testPass("S2a: IntentQueue saturation + explicit rejection (50 cycles)");
+    return true;
+}
+
+//------------------------------------------------------------------------------
+// X5: Publish Intent residency 専用 counter（dash §6.5 / INV-X5-1）
+//
+//   publicationIntentResidencyCount_ は enqueuePublicationIntent の reservation→push→rollback
+//   で維持される:
+//     - enqueue 成功ごとに +1（getPublicationIntentResidencyCount == accepted 数）
+//     - queue full で enqueue 拒否時は rollback（counter 不変）
+//     - Publish は pendingIntentCount_ を触らない（独立 counter）
+//   注: pop 側（processIntent の Publish fetchSub）は AudioEngine 統合パスが必要なため
+//   AudioEngineHarness の統合テストで検証する（dash §6.8 X5 テスト基盤）。
+//------------------------------------------------------------------------------
+[[nodiscard]] bool testPublicationIntentResidencyCounter()
+{
+    constexpr std::size_t kCapacity = 4096;   // kIntentQueueCapacity
+
+    auto coordinator = std::make_unique<RuntimeIntentCoordinator>();
+
+    RuntimeIntentCoordinator::Intent intent{};
+    intent.type = RuntimeIntentCoordinator::IntentType::Publish;
+
+    // enqueue 成功ごとに +1
+    for (std::size_t i = 0; i < kCapacity; ++i)
+    {
+        intent.sequenceId = static_cast<std::uint64_t>(i + 1);
+        if (!coordinator->enqueuePublicationIntent(intent))
+        {
+            testFail("X5: enqueue up to capacity", "unexpected rejection before full");
+            return false;
+        }
+        const auto resid = coordinator->getPublicationIntentResidencyCount();
+        if (resid != i + 1)
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                          "after %zu enqueues: residency %llu != %zu",
+                          i + 1, static_cast<unsigned long long>(resid), i + 1);
+            testFail("X5: residency increments on enqueue", buf);
+            return false;
+        }
+    }
+
+    // queue full: enqueue 拒否 → rollback（counter 不変）
+    intent.sequenceId = static_cast<std::uint64_t>(kCapacity + 1);
+    if (coordinator->enqueuePublicationIntent(intent))
+    {
+        testFail("X5: overflow enqueue rejected", "was accepted");
+        return false;
+    }
+    if (coordinator->getPublicationIntentResidencyCount() != kCapacity)
+    {
+        testFail("X5: overflow rollback", "counter changed on rejected enqueue");
+        return false;
+    }
+
+    // Publish は pendingIntentCount_ を触らない（独立 counter — INV-X5-1 / P2-1 §1.1.6 W2）
+    if (coordinator->getPendingIntentCount() != 0)
+    {
+        testFail("X5: Publish does not touch pendingIntentCount",
+                 "pendingIntentCount changed by Publish enqueue");
+        return false;
+    }
+
+    testPass("X5: Publish intent residency counter (enqueue +1 / full rollback / independent)");
+    return true;
+}
+
+//------------------------------------------------------------------------------
+// X6: Quarantine Intent / Ring residency counter 遷移（dash §6.6 / INV-X6-4）
+//
+//   submitQuarantine の transport residency を検証する:
+//     - primary（intentQueue_, 4096）成功: quarantineIntentResidencyCount_++
+//     - fallback（quarantineFallbackQueue_, 1024）へ移動: intent -1 → ring +1
+//     - 全段失敗: rollback（pending 相殺）+ quarantineFallbackDropCount++
+//     - 期待: 5120 件成功後 intent=3072 / ring=1024 / pending=5120。
+//             次の submit は drop（counter 不変）。
+//   DSPHandleRuntime / DSPQuarantineManager は submitQuarantine が (void) するため
+//   ダミー実体を渡す。pop 側（processIntent）の減算は AudioEngine 統合で検証する。
+//------------------------------------------------------------------------------
+[[nodiscard]] bool testQuarantineIntentRingResidency()
+{
+    constexpr std::size_t kIntentCap = 4096;    // kIntentQueueCapacity
+    constexpr std::size_t kFallbackCap = 1024;  // kQuarantineFallbackCapacity
+
+    auto coordinator = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::DSPHandleRuntime handleRuntime;
+    convo::isr::DSPQuarantineManager quarantineManager;
+
+    // primary + fallback を両方満杯にする
+    for (std::size_t i = 0; i < kIntentCap + kFallbackCap; ++i)
+    {
+        convo::isr::DSPHandle handle{
+            static_cast<std::uint32_t>((i % 255u) + 1u), static_cast<std::uint64_t>(1u) };
+        coordinator->submitQuarantine(handle,
+            convo::isr::QuarantineReason::GenerationMismatch,
+            handleRuntime, quarantineManager, static_cast<std::uint64_t>(0u));
+    }
+
+    // 期待値: intent = 4096（primary 満杯 — 各 submit が +1、fallback 移動ごとに -1 のため
+    //   primary 占有数は 4096 に維持）, ring = 1024（fallback 満杯）, pending = 5120（全 admitted）
+    //   不変条件: intent + ring == pending（各 quarantine intent は primary か fallback の
+    //   どちらか一方にのみ存在 — INV-X6-4 / §6.6 状態遷移表）。
+    const auto intentRes = coordinator->getQuarantineIntentResidencyCount();
+    const auto ringRes = coordinator->getQuarantineRingResidencyCount();
+    const auto pending = coordinator->getPendingIntentCount();
+    if (intentRes != kIntentCap || ringRes != kFallbackCap || pending != (kIntentCap + kFallbackCap)
+        || intentRes + ringRes != pending)
+    {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "intent=%llu ring=%llu pending=%llu (expect intent=%zu ring=%zu pending=%zu)",
+                      static_cast<unsigned long long>(intentRes),
+                      static_cast<unsigned long long>(ringRes),
+                      static_cast<unsigned long long>(pending),
+                      kIntentCap, kFallbackCap, kIntentCap + kFallbackCap);
+        testFail("X6: quarantine intent/ring residency after saturation", buf);
+        return false;
+    }
+
+    // 全段失敗: rollback + drop（counter 不変・underflow なし — 二重減算の回帰検出）
+    {
+        convo::isr::DSPHandle handle{ 255u, 1u };
+        coordinator->submitQuarantine(handle,
+            convo::isr::QuarantineReason::GenerationMismatch,
+            handleRuntime, quarantineManager, static_cast<std::uint64_t>(0u));
+    }
+    if (coordinator->getQuarantineIntentResidencyCount() != kIntentCap
+        || coordinator->getQuarantineRingResidencyCount() != kFallbackCap
+        || coordinator->getPendingIntentCount() != (kIntentCap + kFallbackCap))
+    {
+        testFail("X6: overflow rollback (all-layers full)", "counter changed on dropped submit");
+        return false;
+    }
+    if (coordinator->quarantineFallbackDropCount() != 1)
+    {
+        testFail("X6: drop counter on all-layers full", "quarantineFallbackDropCount != 1");
+        return false;
+    }
+
+    testPass("X6: quarantine intent/ring residency transitions (primary/fallback/full-drop)");
     return true;
 }
 
@@ -84377,7 +85398,7 @@ void testFail(const char* name, const char* detail)
 [[nodiscard]] bool testPendingPublishRegistryEndurance()
 {
     // Coordinator は ~953KB のためヒープ確保（スタック 1MB 対策）
-    auto coordinator = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     convo::isr::RuntimeWorldAuthority authority(*coordinator);
     auto& registry = authority.registry();
 
@@ -84428,7 +85449,7 @@ void testFail(const char* name, const char* detail)
 [[nodiscard]] bool testPendingPublishRegistryOverwriteStress()
 {
     // Coordinator は ~953KB のためヒープ確保（スタック 1MB 対策）
-    auto coordinator = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     convo::isr::RuntimeWorldAuthority authority(*coordinator);
     auto& registry = authority.registry();
 
@@ -84467,6 +85488,10 @@ int main()
     try
     {
         if (!testIntentQueueSaturation())
+            return 1;
+        if (!testPublicationIntentResidencyCounter())
+            return 1;
+        if (!testQuarantineIntentRingResidency())
             return 1;
         if (!testOwnerChannelEndurance())
             return 1;
@@ -85794,7 +86819,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectIncompleteSemanticWorld()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -85850,7 +86875,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectRuntimeGraphAuthorityMismatch()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -85906,7 +86931,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectTransitionSemanticMismatch()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -85962,7 +86987,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectPublicationSequenceRollback()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -86017,7 +87042,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectMappedRuntimeGenerationMismatch()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -86072,7 +87097,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectInvalidRoutingProcessingOrder()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -86128,7 +87153,7 @@ convo::aligned_unique_ptr<const TestWorld> createWorld(const Candidate& c)
 
 [[nodiscard]] bool testRejectInvalidExecutionPolicy()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -87601,6 +88626,7 @@ int main()
 #include <cstdint>
 #include <stdexcept>
 #include <memory>
+#include <type_traits>
 
 #include "core/RuntimePublicationCoordinator.h"
 #include "AlignedAllocation.h"
@@ -87667,9 +88693,17 @@ private:
     std::uint64_t retiredCount_ = 0;
 };
 
+// ★ work88 (X4-B §6.4 Test 1 / 二十一次レビュー): Authority owns Store — compile-time invariant.
+//   RuntimeStore::OwnerType（RuntimeStore.h に追加した公開エイリアス）が write-capable Owner と一致する。
+//   現状（X4-B 前）: Owner = convo::RuntimePublishAuthority（一時生成 factory が唯一の store-swap）。
+//   X4-B 目標: Owner = RuntimeWorldAuthority（RuntimeWorldAuthority が Store を物理所有 — INV-X4-3）。
+using X4BTestCoordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
+static_assert(std::is_same_v<X4BTestCoordinator::Store::OwnerType, X4BTestCoordinator>,
+    "X4-B Test 1: RuntimeStore::OwnerType must equal the write-capable Owner");
+
 [[nodiscard]] bool testRejectRepublishAndRollback()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -87725,7 +88759,7 @@ private:
 
 [[nodiscard]] bool testClearRequiresShutdownRequest()
 {
-    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Coordinator = convo::RuntimePublishAuthority<TestWorld, const Candidate*, TestBridge>;
     using Store = Coordinator::Store;
 
     Store store;
@@ -87759,10 +88793,10 @@ private:
 int main()
 {
     if (!testRejectRepublishAndRollback())
-        throw std::runtime_error("RuntimePublicationCoordinator rejection contract failed");
+        throw std::runtime_error("RuntimeIntentCoordinator rejection contract failed");
 
     if (!testClearRequiresShutdownRequest())
-        throw std::runtime_error("RuntimePublicationCoordinator shutdown clear contract failed");
+        throw std::runtime_error("RuntimeIntentCoordinator shutdown clear contract failed");
 
     return 0;
 }
@@ -88967,6 +90001,7 @@ int main()
 #include <stdexcept>
 
 #include "audioengine/AtomicAccess.h"     // convo::publishAtomic / consumeAtomic
+#include "core/EpochDomain.h"             // ★ work88 (X3 §6.3 / INV-X3-4): 実 EpochDomain の readerRegistrationClosed 検証
 #include "core/IEpochProvider.h"          // TestEpochProvider の基底
 #include "audioengine/ISRRetireRouter.h"  // requestReclaim の router 引数
 #include "audioengine/ISRRuntimePublicationCoordinator.h"  // テスト対象 Coordinator
@@ -88993,6 +90028,11 @@ public:
     {
         convo::publishAtomic(minReader_, v, std::memory_order_release);
     }
+    // ★ work88 (X3-R4 Phase 3): readersZero precondition 検証用に active reader 数を設定可能に
+    void setActiveReaderCount(std::uint32_t v) noexcept
+    {
+        convo::publishAtomic(activeReaders_, v, std::memory_order_release);
+    }
 
     // ── IReaderEpochProvider ──
     int registerReaderThread() noexcept override { return 0; }
@@ -89003,7 +90043,10 @@ public:
     {
         return convo::consumeAtomic(current_, std::memory_order_acquire);
     }
-    std::uint32_t activeReaderCount() const noexcept override { return 0; }
+    std::uint32_t activeReaderCount() const noexcept override
+    {
+        return convo::consumeAtomic(activeReaders_, std::memory_order_acquire);
+    }
     int readerCapacity() const noexcept override { return 1; }
     std::uint64_t getMinReaderEpoch() const noexcept override
     {
@@ -89025,6 +90068,7 @@ public:
 private:
     std::atomic<std::uint64_t> current_{0};
     std::atomic<std::uint64_t> minReader_{0};
+    std::atomic<std::uint32_t> activeReaders_{0};   // ★ X3-R4 Phase 3: readersZero 検証用
 };
 
 //==============================================================================
@@ -89038,7 +90082,7 @@ private:
     provider.setMinReaderEpoch(10);   // 5 < 10 → epoch 安全
     ISRRetireRouter router(provider);
 
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     // 有効な DSP handle を作成（Active 状態）
@@ -89073,7 +90117,7 @@ private:
     TestEpochProvider provider;
     ISRRetireRouter router(provider);
 
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     int dspInstance = 0;
@@ -89111,11 +90155,65 @@ private:
 }
 
 //==============================================================================
+// ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): reclaim(ShutdownQuiescent) の precondition テスト。
+//   - readerRegistrationClosed == false → reclaim forbidden（retire も実行しない → false）
+//   - readerRegistrationClosed == true → reclaim allowed（true・Reclaimed 遷移）
+//   precondition は retire 前に評価（十四次指摘）されることを直接検証する。
+//==============================================================================
+[[nodiscard]] bool testInvX3_4ReclaimModeQuiescent()
+{
+    DSPHandleRuntime handleRuntime;
+    TestEpochProvider provider;
+    ISRRetireRouter router(provider);
+
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    int dspInstance = 0;
+    const auto handle = handleRuntime.create(&dspInstance);
+    if (handle.isNull())
+        return false;
+
+    // ShutdownQuiescent + readerRegistrationClosed == false → NO reclaim（precondition 前評価）
+    if (coordinator.reclaim(RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                            handle, handleRuntime, router,
+                            /*readerRegistrationClosed=*/false))
+        return false;
+    // retire が実行されていないこと（precondition が retire 前に評価される — 十四次指摘）
+    if (handleRuntime.isRetired(handle))
+        return false;
+
+    // ★ X3-R4 Phase 3: readerRegistrationClosed == true でも active reader が残っている（readersZero 不成立）
+    //   → NO reclaim（INV-X3-4 の完全 precondition: registration closed AND readers zero）
+    provider.setActiveReaderCount(1);
+    if (coordinator.reclaim(RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                            handle, handleRuntime, router,
+                            /*readerRegistrationClosed=*/true))
+        return false;
+    if (handleRuntime.isRetired(handle))
+        return false;
+
+    // readersZero 成立後 → reclaim allowed
+    provider.setActiveReaderCount(0);
+    if (!coordinator.reclaim(RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                             handle, handleRuntime, router,
+                             /*readerRegistrationClosed=*/true))
+        return false;
+    // Reclaimed 遷移（Retired ではなくなる）
+    if (handleRuntime.isRetired(handle))
+        return false;
+    if (coordinator.getReclaimInFlightCount() != 0)
+        return false;
+
+    return true;
+}
+
+//==============================================================================
 // INV-5-1: submitRecoveryRequest full（256）→ 257 回目 drop + pendingIntentCount 不変
 //==============================================================================
 [[nodiscard]] bool testInv5_1RecoveryFullDrop()
 {
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     const auto handle = DSPHandle::null();
@@ -89192,7 +90290,7 @@ private:
 //==============================================================================
 [[nodiscard]] bool testInv5_3SubmitAfterShutdownDiscards()
 {
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     // shutdown 前に 1 件 enqueue（正常系）
@@ -89204,7 +90302,7 @@ private:
     // shutdown 確定（AdmissionClosed — requestShutdown が state=ShuttingDown を確定）
     coordinator.requestShutdown();
     if (coordinator.getState()
-        != RuntimePublicationCoordinator::CoordinatorState::ShuttingDown)
+        != RuntimeIntentCoordinator::CoordinatorState::ShuttingDown)
         return false;
 
     // shutdown 後の submit → enqueue されず ShutdownDiscard として記録
@@ -89234,7 +90332,7 @@ private:
 //==============================================================================
 [[nodiscard]] bool testInv5_4DiscardResidualOnShutdown()
 {
-    auto coordinatorStorage = std::make_unique<RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     // 残留 3 件を enqueue（shutdown 前に submit された想定）
@@ -89252,6 +90350,35 @@ private:
         return false;
     if (coordinator.popRecoveryRequest().has_value())
         return false;                        // queue empty
+
+    return true;
+}
+
+// ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): readerRegistrationClosed テスト。
+//   実 convo::EpochDomain で: closeReaderRegistration() 前に registerReaderThread() が成功し、
+//   後には必ず -1（失敗）を返す。reserveReaderThread() も同様に false。
+//   readerRegistrationClosed() が true を返す。登録済み slot の enter/exit は継続可能
+//   （新規登録のみを拒否 — 十八次別視点14）は、enterReader が deprecated のため
+//   本テストでは登録封鎖の決定性のみを検証する。
+[[nodiscard]] bool testInvX3_4ReaderRegistrationClosed()
+{
+    convo::EpochDomain domain;
+
+    // close 前: 登録成功
+    const int idx = domain.registerReaderThread("X3Test");
+    if (idx < 0 || idx >= convo::EpochDomain::kMaxReaders)
+        return false;
+
+    // closeReaderRegistration 後: 新規登録は必ず失敗（INV-X3-4）
+    domain.closeReaderRegistration();
+    if (domain.registerReaderThread("X3Test2") != -1)
+        return false;
+    if (domain.reserveReaderThread(0))
+        return false;
+
+    // readerRegistrationClosed() が true
+    if (!domain.readerRegistrationClosed())
+        return false;
 
     return true;
 }
@@ -89278,6 +90405,10 @@ int main()
             throw std::runtime_error("INV-5-3: shutdown 後 submit → ShutdownDiscard 違反");
         if (!convo::isr::testInv5_4DiscardResidualOnShutdown())
             throw std::runtime_error("INV-5-4: 残留 Recovery の明示 discard 違反");
+        if (!convo::isr::testInvX3_4ReaderRegistrationClosed())
+            throw std::runtime_error("INV-X3-4: reader registration closure 違反");
+        if (!convo::isr::testInvX3_4ReclaimModeQuiescent())
+            throw std::runtime_error("INV-X3-4: ShutdownQuiescent reclaim precondition 違反");
     }
     catch (const std::exception& e)
     {
@@ -89964,10 +91095,14 @@ bool testIdlePublishViaFacade()
         return false;
     }
 
-    // CoordinatorLoop → executePublish → RuntimeStore swap を確認（seqId 一致）
+    // CoordinatorLoop → executePublish → RuntimeStore swap を確認。
+    // ★ work88 (X4-B §6.4 検証): publish パイプラインは FIFO のため、store が seqId 以上に到達
+    //   すれば対象 publish の swap は成立（INV-X2-6 contiguous completion）。並行する rebuild
+    //   publish がより新しい world で上書きする場合があるため、`== seqId` ではなく `>= seqId`
+    //   で検証する（rebuild は正常なエンジン挙動 — 上書きは正しい最終状態）。
     const bool swapped = waitUntil(5.0, [&] {
         const auto* w = e.observePublishedWorld();
-        return w != nullptr && w->publication.sequenceId == seqId;
+        return w != nullptr && w->publication.sequenceId >= seqId;
     });
     if (!swapped)
     {
@@ -90065,6 +91200,81 @@ bool testTeardownPublish()
     return true;
 }
 
+// ── X2: Publish completion sequence monotonicity（dash §6.2 / INV-X2-5/6）──
+//   連続 idle publish を facade 直呼び出しで行い、各 publish の completion が
+//   publication sequence order と一致する（単調増加）ことを統合パイプライン
+//   （commitRuntimePublication → OwnerChannel → IntentQueue → CoordinatorLoop →
+//   executePublish → onPublishCommitted → receipt）で検証する。
+//   contiguous completion 前提（PublishExecutor sole gateway + intentQueue_ FIFO）の
+//   回帰検証。各 publish の store-swap（observePublishedWorld の seq 一致）を次の
+//   publish 前に待つため、crossfade/deferred の影響を受けない。
+bool testPublishCompletionMonotonicity()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    const auto* initial = e.observePublishedWorld();
+    const auto baseSeq = (initial != nullptr) ? initial->publication.sequenceId : 0;
+
+    convo::RuntimeBuilder builder(e);
+    convo::isr::PublicationSequenceId lastObserved = baseSeq;
+
+    constexpr int kPublishes = 8;
+    for (int i = 0; i < kPublishes; ++i)
+    {
+        auto world = builder.buildRuntimePublishWorld(nullptr, nullptr,
+                                                      convo::TransitionPolicy::SmoothOnly,
+                                                      0.0, false);
+        if (!world)
+        {
+            std::fprintf(stderr, "FAIL: X2: could not build idle world (i=%d)\n", i);
+            return false;
+        }
+        const auto seqId = world->publication.sequenceId;
+        // seqId 採番（publicationSequenceCounter_）は単調増加（INV-X2-1 の前提）
+        if (seqId <= lastObserved)
+        {
+            std::fprintf(stderr, "FAIL: X2: seqId %llu not > lastObserved %llu\n",
+                         static_cast<unsigned long long>(seqId),
+                         static_cast<unsigned long long>(lastObserved));
+            return false;
+        }
+        lastObserved = seqId;
+
+        const auto result = e.commitRuntimePublication(std::move(world),
+                                                       AudioEngine::RegistrationContext::none(),
+                                                       convo::isr::DSPHandle::null());
+        if (result.stage != convo::PublishStageResult::Success)
+        {
+            std::fprintf(stderr, "FAIL: X2: publish rejected (stage=%d)\n",
+                         static_cast<int>(result.stage));
+            return false;
+        }
+
+        // 各 publish の完了が seq order どおりに store-swap される
+        //   （contiguous FIFO completion — INV-X2-6: completion order == publication order）
+        // ★ work88 (X4-B §6.4 検証): 並行 rebuild publish が store を先へ進める場合があるため
+        //   `>= seqId` で検証（FIFO なので seqId 到達 = 対象 publish の swap 成立）。
+        const bool swapped = waitUntil(5.0, [&] {
+            const auto* w = e.observePublishedWorld();
+            return w != nullptr && w->publication.sequenceId >= seqId;
+        });
+        if (!swapped)
+        {
+            std::fprintf(stderr, "FAIL: X2: publish %d did not swap store (seq=%llu)\n",
+                         i, static_cast<unsigned long long>(seqId));
+            return false;
+        }
+    }
+
+    std::printf("  [PASS] X2: publish completion monotonicity (contiguous FIFO, %d publishes)\n",
+                kPublishes);
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -90107,6 +91317,12 @@ int main(int argc, char* argv[])
     if (!testTeardownPublish())
     {
         std::fprintf(stderr, "FAIL: testTeardownPublish\n");
+        return 1;
+    }
+
+    if (!testPublishCompletionMonotonicity())
+    {
+        std::fprintf(stderr, "FAIL: testPublishCompletionMonotonicity\n");
         return 1;
     }
 

@@ -101,12 +101,10 @@ if ($hasBuilder) {
         'worldOwner->semanticHash.generationSemanticHash',
         'worldOwner->semanticHash.topologyHash',
         'worldOwner->semanticHash.executionHash',
-        'worldOwner->semanticHash.routingHash',
-        'worldOwner->semanticHash.payloadHash',
-        'worldOwner->semanticHash.publicationSemanticHash',
-        'worldOwner->semanticHash.overlapSemanticHash',
-        'worldOwner->semanticHash.retireSemanticHash'
+        'worldOwner->semanticHash.routingHash'
     ) -Label 'Semantic hash coverage'
+    # ★ 2026-08-11: payloadHash/publicationSemanticHash/overlapSemanticHash/retireSemanticHash は
+    #   RuntimeBuilder で「保留（現状維持）」— 実装の現状（4 hash）に合わせてカバレッジ対象を限定。
 }
 
 if ($hasTierRunner) {

@@ -66,8 +66,11 @@ if ($dspHandleCppText -notmatch 'void DSPHandleRuntime::quarantine\(') {
     throw 'DSPHandleRuntime quarantine path missing.'
 }
 
-if ($releaseResourcesText -notmatch 'dspHandleRuntime_\.reclaim\(') {
-    throw 'Shutdown reclaim path must route through DSPHandleRuntime::reclaim.'
+# ★ 2026-08-11: R4 Phase 7（DELETE-7）で旧 shutdownReclaim バイパスを削除し、
+#   Reclaim Authority（RuntimeIntentCoordinator::reclaim(ShutdownQuiescent)）に一本化。
+#   ReleaseResources は RuntimePublicationBridge（Coordinator）経由で reclaim を実行する。
+if ($releaseResourcesText -notmatch 'runtimePublicationBridge_\.reclaim\(') {
+    throw 'Shutdown reclaim path must route through the Coordinator Reclaim Authority (runtimePublicationBridge_.reclaim).'
 }
 
 $hasHandleRuntimeObservePath = ($audioEngineCppText -match 'dspHandleRuntime_\.resolve\(')
@@ -80,8 +83,12 @@ if (-not $hasHandleRuntimeObservePath -and -not $hasRuntimeWorldObservePath) {
     throw 'AudioEngine processing path must observe runtime DSP via DSPHandleRuntime or RuntimeWorld read path.'
 }
 
-if ($audioEngineCppText -notmatch 'dspHandleRuntime_\.reclaim\(' -and $audioEngineText -notmatch 'dspHandleRuntime_\.reclaim\(') {
-    throw 'AudioEngine must keep reclaim routed through DSPHandleRuntime.'
+# ★ 2026-08-11: reclaim は Coordinator Reclaim Authority に一本化（requestReclaim / reclaim）。
+#   AudioEngine.h は requestReclaimHandle → runtimePublicationBridge_.requestReclaim 経由で実行する。
+if ($audioEngineCppText -notmatch 'runtimePublicationBridge_\.requestReclaim\(' -and
+    $audioEngineText -notmatch 'runtimePublicationBridge_\.requestReclaim\(' -and
+    $audioEngineText -notmatch 'runtimePublicationBridge_\.reclaim\(') {
+    throw 'AudioEngine must keep reclaim routed through the Coordinator Reclaim Authority (runtimePublicationBridge_).'
 }
 
 Write-Host '[PASS] R3 DSP handle allocator policy verified'

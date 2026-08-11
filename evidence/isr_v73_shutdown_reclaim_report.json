@@ -1,0 +1,27 @@
+{
+  "schema": "isr_v73_shutdown_reclaim_report_v1",
+  "generatedAt": "2026-08-11T16:17:38.8403902+09:00",
+  "mode": "fail",
+  "checks": [
+    "CI-SHUTDOWN-001",
+    "CI-SHUTDOWN-002",
+    "CI-SHUTDOWN-003",
+    "CI-SHUTDOWN-004",
+    "CI-SHUTDOWN-005",
+    "CI-SHUTDOWN-006",
+    "CI-SHUTDOWN-007",
+    "CI-SHUTDOWN-008",
+    "CI-SHUTDOWN-009",
+    "CI-SHUTDOWN-010",
+    "CI-SHUTDOWN-011",
+    "CI-SHUTDOWN-012",
+    "CI-SHUTDOWN-013",
+    "CI-SHUTDOWN-014",
+    "CI-SHUTDOWN-015",
+    "CI-RECLAIM-001",
+    "CI-RECLAIM-002",
+    "CI-RECLAIM-003"
+  ],
+  "violationCount": 0,
+  "violations": []
+}

@@ -7,7 +7,7 @@
 
 namespace convo::isr {
 
-void RuntimePublicationCoordinator::processIntent(
+void RuntimeIntentCoordinator::processIntent(
     AudioEngine& engine,
     DSPLifetimeManager& lifetimeMgr) noexcept
 {
@@ -34,6 +34,9 @@ void RuntimePublicationCoordinator::processIntent(
     //   reservation-before-push で fetchAdd 済み）ため無条件 fetchSub。
     while (quarantineFallbackQueue_.pop(commonIntent)) {
         convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+        // ★ work88 (X6 §6.6): fallback ring は Quarantine 専用（submitQuarantine のみが push）。
+        //   pop 成功で quarantineRingResidencyCount_ を fetchSub（INV-X6-4）。
+        convo::fetchSubAtomic(quarantineRingResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
     }
     // メイン intentQueue_（MpscBoundedRing — MPSC 化済み。Observe/Publish/Quarantine/Recovery を
@@ -42,8 +45,24 @@ void RuntimePublicationCoordinator::processIntent(
     //   reservation を消費（fetchSub）。Publish は pendingIntentCount_ に計上されない
     //   （enqueuePublicationIntent は reservation を取らない — P2-1 §1.1.1）ため fetchSub しない。
     while (intentQueue_.pop(commonIntent)) {
-        if (commonIntent.type != IntentType::Publish)
+        // ★ work88 (X5 §6.5 / X6 §6.6): type 分岐で独立 counter を減算（INV-X5-1 / INV-X6-4）。
+        //   - Publish     : publicationIntentResidencyCount_--（X5。pendingIntentCount_ は触らない）
+        //   - Quarantine  : quarantineIntentResidencyCount_--（X6）+ pendingIntentCount_--（P2）
+        //   - Observe/Recovery : pendingIntentCount_--（P2）
+        //   減算は processIntent の while ループで一元管理（handler では行わない — HANDLER-1）。
+        switch (commonIntent.type)
+        {
+        case IntentType::Publish:
+            convo::fetchSubAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+            break;
+        case IntentType::Quarantine:
+            convo::fetchSubAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+            break;
+        default:  // Observe / Recovery
+            convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+            break;
+        }
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
     }
 
@@ -58,7 +77,7 @@ void RuntimePublicationCoordinator::processIntent(
 }
 
 // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）。
-void RuntimePublicationCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept
+void RuntimeIntentCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept
 {
     ObserveIntent deferred{};
     while (observeDeferredRing_.pop(deferred)) {

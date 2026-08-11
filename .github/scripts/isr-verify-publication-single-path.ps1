@@ -33,20 +33,20 @@ if (-not $inventoryScript.Contains("publication_path = 'publish(RuntimeWorld*)'"
 
 $headerCommitCount = ([regex]::Matches($coordinatorHeader, 'void\s+commit\s*\(')).Count
 if ($headerCommitCount -ne 2) {
-    $violations.Add("RuntimePublicationCoordinator commit declaration count mismatch: expected=2 actual=$headerCommitCount")
+    $violations.Add("RuntimeIntentCoordinator commit declaration count mismatch: expected=2 actual=$headerCommitCount")
 }
 
-$sourceCommitCount = ([regex]::Matches($coordinatorSource, 'RuntimePublicationCoordinator::commit\s*\(')).Count
+$sourceCommitCount = ([regex]::Matches($coordinatorSource, 'RuntimeIntentCoordinator::commit\s*\(')).Count
 if ($sourceCommitCount -ne 2) {
-    $violations.Add("RuntimePublicationCoordinator commit definition count mismatch: expected=2 actual=$sourceCommitCount")
+    $violations.Add("RuntimeIntentCoordinator commit definition count mismatch: expected=2 actual=$sourceCommitCount")
 }
 
 if (-not [regex]::IsMatch($coordinatorHeader, 'void\s+commit\s*\(\s*PublishAuthority\s*,\s*RuntimeBoundary\s+boundary\s*,\s*const\s+void\*\s+newWorld\s*,\s*std::uint64_t\s+version\s*\)')) {
-    $violations.Add('RuntimePublicationCoordinator header missing commit(authority, boundary, world, version) signature')
+    $violations.Add('RuntimeIntentCoordinator header missing commit(authority, boundary, world, version) signature')
 }
 
 if (-not [regex]::IsMatch($coordinatorHeader, 'void\s+commit\s*\(\s*PublishAuthority\s*,\s*RuntimeBoundary\s+boundary\s*,\s*const\s+void\*\s+newWorld\s*,\s*std::uint64_t\s+version\s*,\s*PublicationSequenceId\s+sequenceId\s*,\s*PublicationEpoch\s+epoch\s*,\s*std::uint64_t\s+mappedGeneration\s*\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
-    $violations.Add('RuntimePublicationCoordinator header missing semantic commit(authority, boundary, world, version, sequenceId, epoch, mappedGeneration) signature')
+    $violations.Add('RuntimeIntentCoordinator header missing semantic commit(authority, boundary, world, version, sequenceId, epoch, mappedGeneration) signature')
 }
 
 $commitRuntimePublicationCount = ([regex]::Matches($commitSource, 'commitRuntimePublication\(world\)')).Count

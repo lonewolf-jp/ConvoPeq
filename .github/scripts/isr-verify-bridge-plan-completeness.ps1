@@ -447,7 +447,7 @@ $requiredArtifacts = @(
     @{ Path = (Join-Path $evidenceDir 'facade_bypass_report.json'); Schema = 'facade_bypass_report_v1' },
     @{ Path = (Join-Path $evidenceDir 'crossfade_observable_state_report.json'); Schema = 'crossfade_observable_state_report_v1' },
     @{ Path = (Join-Path $evidenceDir 'canary_baseline_normalization_report.json'); Schema = 'canary_baseline_normalization_report_v1' },
-    @{ Path = (Join-Path $evidenceDir 'phase4_generation_drift_report.json'); Schema = 'phase4_generation_drift_report_v1' },
+    @{ Path = (Join-Path $evidenceDir 'phase4_generation_drift_report.json'); Schema = 'phase4_generation_drift_report_v2' },
     @{ Path = (Join-Path $evidenceDir 'enforcement_adoption_report.json'); Schema = 'enforcement_adoption_report_v1' },
     @{ Path = (Join-Path $evidenceDir 'enforcement_source_purity_report.json'); Schema = 'enforcement_source_purity_report_v1' },
     @{ Path = (Join-Path $evidenceDir 'metric_governance_report.json'); Schema = 'metric_governance_report_v2' },
@@ -1466,47 +1466,67 @@ if (Test-Path -LiteralPath $triggerAuditArtifactPath) {
             }
         }
 
+        # ★ 2026-08-11: 全シンボル合計（totalMatches/blockedMatches）との比較は誤り。
+        #   各シンボルの値を symbolStats から取得して比較する（retire ファサードは複数シンボルの合計）。
+        function Get-TriggerSymbolValue {
+            param([object]$Report, [string]$Symbol, [string]$Field)
+            if ($null -eq $Report.symbolStats) { return $null }
+            $stat = @($Report.symbolStats | Where-Object { "$($_.symbol)" -eq $Symbol })
+            if ($stat.Count -eq 0) { return 0 }
+            return [int]$stat[0].$Field
+        }
+
         if ($null -ne $triggerSymbolUsageReport -and $null -ne $triggerAuditReport.metrics) {
+            $activeDspSymbolTotal = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'activeDSP' -Field 'totalMatches'
+            $activeDspSymbolBlocked = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'activeDSP' -Field 'blockedMatches'
+            $retireMemberTotal = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'runtimePublicationCoordinator_' -Field 'totalMatches'
+            $retireFactoryTotal = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'RuntimePublicationCoordinator::create' -Field 'totalMatches'
+            $retireMemberBlocked = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'runtimePublicationCoordinator_' -Field 'blockedMatches'
+            $retireFactoryBlocked = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'RuntimePublicationCoordinator::create' -Field 'blockedMatches'
+            $runtimeExecViewBlocked = Get-TriggerSymbolValue -Report $triggerSymbolUsageReport -Symbol 'RuntimeExecutionView' -Field 'blockedMatches'
+            $retireFacadeRawSymbol = $retireMemberTotal + $retireFactoryTotal
+            $retireFacadeDirectSymbol = $retireMemberBlocked + $retireFactoryBlocked
+
             if ($null -eq $triggerAuditReport.metrics.activeDspRawRefCount) {
                 $violations.Add('Trigger audit evidence missing metrics.activeDspRawRefCount field')
             }
-            elseif ([int]$triggerAuditReport.metrics.activeDspRawRefCount -ne [int]$triggerSymbolUsageReport.totalMatches) {
-                $violations.Add("Trigger evidence contract violated: activeDspRawRefCount mismatch: audit=$($triggerAuditReport.metrics.activeDspRawRefCount) symbol=$($triggerSymbolUsageReport.totalMatches)")
+            elseif ($null -ne $activeDspSymbolTotal -and [int]$triggerAuditReport.metrics.activeDspRawRefCount -ne $activeDspSymbolTotal) {
+                $violations.Add("Trigger evidence contract violated: activeDspRawRefCount mismatch: audit=$($triggerAuditReport.metrics.activeDspRawRefCount) symbol=$activeDspSymbolTotal")
             }
 
             if ($null -eq $triggerAuditReport.metrics.activeDspRefCount) {
                 $violations.Add('Trigger audit evidence missing metrics.activeDspRefCount field')
             }
-            elseif ([int]$triggerAuditReport.metrics.activeDspRefCount -ne [int]$triggerSymbolUsageReport.blockedMatches) {
-                $violations.Add("Trigger evidence contract violated: activeDspRefCount mismatch: audit=$($triggerAuditReport.metrics.activeDspRefCount) symbolBlocked=$($triggerSymbolUsageReport.blockedMatches)")
+            elseif ($null -ne $activeDspSymbolBlocked -and [int]$triggerAuditReport.metrics.activeDspRefCount -ne $activeDspSymbolBlocked) {
+                $violations.Add("Trigger evidence contract violated: activeDspRefCount mismatch: audit=$($triggerAuditReport.metrics.activeDspRefCount) symbolBlocked=$activeDspSymbolBlocked")
             }
 
             if ($null -eq $triggerAuditReport.metrics.retireFacadeRawDependencyCount) {
                 $violations.Add('Trigger audit evidence missing metrics.retireFacadeRawDependencyCount field')
             }
-            elseif ([int]$triggerAuditReport.metrics.retireFacadeRawDependencyCount -ne [int]$triggerSymbolUsageReport.totalMatches) {
-                $violations.Add("Trigger evidence contract violated: retireFacadeRawDependencyCount mismatch: audit=$($triggerAuditReport.metrics.retireFacadeRawDependencyCount) symbol=$($triggerSymbolUsageReport.totalMatches)")
+            elseif ($null -ne $retireFacadeRawSymbol -and [int]$triggerAuditReport.metrics.retireFacadeRawDependencyCount -ne $retireFacadeRawSymbol) {
+                $violations.Add("Trigger evidence contract violated: retireFacadeRawDependencyCount mismatch: audit=$($triggerAuditReport.metrics.retireFacadeRawDependencyCount) symbol=$retireFacadeRawSymbol")
             }
 
             if ($null -eq $triggerAuditReport.metrics.retireFacadeDirectDependencyCount) {
                 $violations.Add('Trigger audit evidence missing metrics.retireFacadeDirectDependencyCount field')
             }
-            elseif ([int]$triggerAuditReport.metrics.retireFacadeDirectDependencyCount -ne [int]$triggerSymbolUsageReport.blockedMatches) {
-                $violations.Add("Trigger evidence contract violated: retireFacadeDirectDependencyCount mismatch: audit=$($triggerAuditReport.metrics.retireFacadeDirectDependencyCount) symbolBlocked=$($triggerSymbolUsageReport.blockedMatches)")
+            elseif ($null -ne $retireFacadeDirectSymbol -and [int]$triggerAuditReport.metrics.retireFacadeDirectDependencyCount -ne $retireFacadeDirectSymbol) {
+                $violations.Add("Trigger evidence contract violated: retireFacadeDirectDependencyCount mismatch: audit=$($triggerAuditReport.metrics.retireFacadeDirectDependencyCount) symbolBlocked=$retireFacadeDirectSymbol")
             }
 
             if ($null -eq $triggerAuditReport.metrics.retireFacadeRuntimeExecutionCount) {
                 $violations.Add('Trigger audit evidence missing metrics.retireFacadeRuntimeExecutionCount field')
             }
-            elseif ([int]$triggerAuditReport.metrics.retireFacadeRuntimeExecutionCount -ne [int]$triggerSymbolUsageReport.totalMatches) {
-                $violations.Add("Trigger evidence contract violated: retireFacadeRuntimeExecutionCount mismatch: audit=$($triggerAuditReport.metrics.retireFacadeRuntimeExecutionCount) symbol=$($triggerSymbolUsageReport.totalMatches)")
+            elseif ($null -ne $retireFactoryTotal -and [int]$triggerAuditReport.metrics.retireFacadeRuntimeExecutionCount -ne $retireFactoryTotal) {
+                $violations.Add("Trigger evidence contract violated: retireFacadeRuntimeExecutionCount mismatch: audit=$($triggerAuditReport.metrics.retireFacadeRuntimeExecutionCount) symbol=$retireFactoryTotal")
             }
 
             if ($null -eq $triggerAuditReport.metrics.runtimeExecutionViewUsageCount) {
                 $violations.Add('Trigger audit evidence missing metrics.runtimeExecutionViewUsageCount field')
             }
-            elseif ([int]$triggerAuditReport.metrics.runtimeExecutionViewUsageCount -ne [int]$triggerSymbolUsageReport.blockedMatches) {
-                $violations.Add("Trigger evidence contract violated: runtimeExecutionViewUsageCount mismatch: audit=$($triggerAuditReport.metrics.runtimeExecutionViewUsageCount) symbolBlocked=$($triggerSymbolUsageReport.blockedMatches)")
+            elseif ($null -ne $runtimeExecViewBlocked -and [int]$triggerAuditReport.metrics.runtimeExecutionViewUsageCount -ne $runtimeExecViewBlocked) {
+                $violations.Add("Trigger evidence contract violated: runtimeExecutionViewUsageCount mismatch: audit=$($triggerAuditReport.metrics.runtimeExecutionViewUsageCount) symbolBlocked=$runtimeExecViewBlocked")
             }
         }
 

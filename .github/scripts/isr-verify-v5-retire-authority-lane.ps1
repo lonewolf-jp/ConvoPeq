@@ -44,8 +44,8 @@ if ($coordinatorHeaderText -notmatch 'void retire\(RetireAuthority,\s*RuntimeBou
     throw 'RuntimePublicationCoordinator::retire signature must require RetireAuthority capability.'
 }
 
-if ($coordinatorCppText -notmatch 'void RuntimePublicationCoordinator::retire\(RetireAuthority,') {
-    throw 'RuntimePublicationCoordinator::retire implementation missing RetireAuthority-typed entrypoint.'
+if ($coordinatorCppText -notmatch 'void RuntimeIntentCoordinator::retire\(RetireAuthority,') {
+    throw 'RuntimeIntentCoordinator::retire implementation missing RetireAuthority-typed entrypoint.'
 }
 
 if ($audioEngineCommitText -notmatch 'runtimePublicationCoordinator_\.retire\(convo::isr::RetireAuthority::Granted,' `

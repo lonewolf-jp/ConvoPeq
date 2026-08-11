@@ -1,0 +1,50 @@
+{
+  "schema": "semantic_reachability_report_v2",
+  "generatedAt": "2026-08-11T16:17:40.7355607+09:00",
+  "inputs": {
+    "contractPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtime_semantic_reachability.md",
+    "testPath": "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RuntimeSemanticSchemaValidationTests.cpp",
+    "dispatchPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.RebuildDispatch.cpp",
+    "builderPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\RuntimeBuilder.cpp",
+    "tierRunnerPath": "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1"
+  },
+  "coverage": {
+    "contract": {
+      "label": "Reachability contract",
+      "required": 5,
+      "found": 5,
+      "coverage": 100.0,
+      "missing": []
+    },
+    "unitTest": {
+      "label": "Reachability unit test",
+      "required": 4,
+      "found": 4,
+      "coverage": 100.0,
+      "missing": []
+    },
+    "triggerPath": {
+      "label": "Trigger path coverage",
+      "required": 6,
+      "found": 6,
+      "coverage": 100.0,
+      "missing": []
+    },
+    "semanticHash": {
+      "label": "Semantic hash coverage",
+      "required": 4,
+      "found": 4,
+      "coverage": 100.0,
+      "missing": []
+    },
+    "tierWiring": {
+      "label": "Tier wiring coverage",
+      "required": 1,
+      "found": 1,
+      "coverage": 100.0,
+      "missing": []
+    }
+  },
+  "violations": [],
+  "ready": true
+}

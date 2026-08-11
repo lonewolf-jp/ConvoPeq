@@ -412,10 +412,25 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     }
 #endif
 
+    // ★ work88（監査・Debug フル soak の低スループット対策）: emitCIArtifacts / emitHBTrace は
+    //   毎 publish に evidence ファイル（atomic_dotcall_scan / ownership_closure_check /
+    //   shadow_compare_cadence / hb_graph_trace）を全書き換えするため、publishBlock が 5〜24ms に
+    //   膨れ、Debug フル soak（S1=100,000）が 42〜90 分に達していた。emitEvidenceTickNonRt と同じ
+    //   1 秒周期（rtAuxMutable_.lastEvidenceEmitHighResTicks）に間引くことで、毎 publish の診断 I/O を
+    //   排除する。各 emit は累積状態（hb_graph_trace は全イベント、shadow_compare は累積カウンタ）を
+    //   書き出すため、間引きによるデータ欠落はない。監査記録は emitEvidenceTickNonRt（1 秒周期）が
+    //   引き続き担う。
+    const std::int64_t diagNowTicks = juce::Time::getHighResolutionTicks();
+    const std::int64_t diagIntervalTicks = juce::Time::secondsToHighResolutionTicks(1.0);
+    const std::int64_t diagLastTicks = convo::consumeAtomic(rtAuxMutable_.lastEvidenceEmitHighResTicks, std::memory_order_acquire);
+    const bool diagTickDue = (diagLastTicks == 0 || (diagNowTicks - diagLastTicks) >= diagIntervalTicks);
+    if (diagTickDue)
+    {
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
-    debugRuntime_.emitCIArtifacts();
+        debugRuntime_.emitCIArtifacts();
 #endif
-    debugRuntime_.emitHBTrace();
+        debugRuntime_.emitHBTrace();
+    }
     emitEvidenceTickNonRt(false);
 }
 
@@ -559,7 +574,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                                              maxObservedGeneration,
                                              callbackActiveCount);
         const bool pendingIntentOwned = (pending.dspSlot != UINT32_MAX);
-        const auto* currentPublished = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore);
+        const auto* currentPublished = worldAuthority_.consumeWorldHandle();
         const bool authoritativeOwnershipReleased = (currentPublished != world);
         const std::uint64_t retireDeferralEpochs = (maxObservedGeneration > pendingGeneration)
             ? (maxObservedGeneration - pendingGeneration)

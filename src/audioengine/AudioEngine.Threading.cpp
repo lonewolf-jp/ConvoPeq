@@ -127,16 +127,33 @@ bool AudioEngine::isFullyDrained() noexcept
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
 
-    // ★ Phase2: OverflowRing + DSPQuarantine の滞留数で quarantineResidentCount を設定
+    // ★ work88 (X6 §6.6): quarantineResidentCount_ の aggregate 上書き（ringResident + dspQuarantine）
+    //   は廃止（INV-X6-4 — 混在禁止）。実在 quarantine DSP 数は DSPQuarantineManager::residentCount()
+    //   が唯一の source of truth。overflow ring（retire 系）・DSPQuarantine・RetireQuarantineStore の
+    //   3 semantic を個別に直接判定する（いずれも shutdown では waitForDrain 前に drain 済み）。
+    const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
+        ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
+    const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
+    const auto retireQuarantineResident = (m_retireRouter != nullptr)
+        ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
+
+    // ★ work88 (X3 §6.3 / INV-X3-5): pendingReclaimHandles_ が reclaim pending の source of truth。
+    //   reclaimInFlightCount_（+1/0 リセットの近似 counter）だけでは複数 pending reclaim を正確に
+    //   数えられない（A pending + B pending で A 成功 → count=0 なのに B が残る状態を作り得る）。
+    //   したがって pendingReclaimHandles_.empty() を追加する（二十六次レビュー必須修正2 / INV-X3-5）。
+    //   評価は waitForDrain 時点（reclaim producer join 済み）のため、観測直後の push はない（AC-X3-14）。
+    bool pendingReclaimEmpty = false;
     {
-        const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
-            ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
-        const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
-        runtimePublicationBridge_.setQuarantineResidentCount(
-            static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
+        std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
+        pendingReclaimEmpty = pendingReclaimHandles_.empty();
     }
 
-    return !hasDeferredCommit && runtimePublicationBridge_.isFullyDrained();
+    return !hasDeferredCommit
+        && pendingReclaimEmpty
+        && ringResident == 0
+        && dspQuarantineResident == 0
+        && retireQuarantineResident == 0
+        && runtimePublicationBridge_.isFullyDrained();
 }
 
 bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept

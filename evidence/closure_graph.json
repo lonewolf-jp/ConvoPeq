@@ -1,12 +1,1 @@
-{
-  "schema": "closure_graph_v1",
-  "buildMode": "CI",
-  "timestamp_ns": 160227123363700,
-  "status": "valid",
-  "closureId": 4,
-  "nodeCount": 1,
-  "edgeCount": 0,
-  "descriptorCoverageComplete": true,
-  "externalMutableDependencies": 0,
-  "validationErrors": []
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":160229429613900}
+{"status":"generated","runId":"396bb012f4274b5a8e7c0ead56a9793a","descriptorCoverageComplete":true,"provenance":"seed","generatedAtNs":1786432585928000000,"externalMutableDependencies":0,"schema":"closure_graph_v1"}

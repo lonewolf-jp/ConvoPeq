@@ -17,7 +17,8 @@ $checks = [ordered]@{
     publishWorldBuilderExists = $false
     publishLifecycleWrapperExists = $false
     retireLifecycleWrapperExists = $false
-    coordinatorFactoryExists = $false
+    authorityPublishExists = $false                 # ★ X4-B: RuntimeWorldAuthority::publish（sole gateway）
+    noRuntimePublishAuthorityFactory = $false       # ★ X4-B: makeRuntimePublishAuthority() は削除必須
     noRtPublicationFactoryCall = $false
 }
 
@@ -42,15 +43,33 @@ else {
     }
     else { $violations += 'Publication ownership contract missing: onRuntimeRetiredNonRt()/willRetireRuntimeNonRt()' }
 
-    if ([regex]::IsMatch($headerText, '\bmakeRuntimePublicationCoordinator\s*\(')) { $checks.coordinatorFactoryExists = $true }
-    else { $violations += 'Publication ownership contract missing: makeRuntimePublicationCoordinator()' }
+    # ★ work88 (X4-B §6.4 / X4-B-8): makeRuntimePublishAuthority() は production から削除済み
+    #   （一時生成 factory が write-capable RuntimeStore を作る構造 — INV-X4-3/5 違反のため）。
+    #   publish は RuntimeWorldAuthority::publish（sole physical publish gateway — INV-X4-2）に一本化。
+    if ([regex]::IsMatch($headerText, '\bmakeRuntimePublishAuthority\s*\(')) {
+        $violations += 'X4-B violation: makeRuntimePublishAuthority() must be removed (temporary factory creates write-capable Store — INV-X4-3/5)'
+    }
+    else { $checks.noRuntimePublishAuthorityFactory = $true }
+
+    # RuntimeWorldAuthority::publish（sole physical publish gateway — INV-X4-2）の存在を、
+    # authority ヘッダ（定義本体）で検証する。
+    $authorityHeader = Join-Path $repoRoot 'src\audioengine\RuntimeWorldAuthority.h'
+    if (Test-Path -LiteralPath $authorityHeader) {
+        $authText = Get-Content -LiteralPath $authorityHeader -Raw -Encoding UTF8
+        if ([regex]::IsMatch($authText, '\bRuntimeState\s*\*\s+publish\s*\(') -or
+            [regex]::IsMatch($authText, 'Store::WriteAccess')) {
+            $checks.authorityPublishExists = $true
+        }
+        else { $violations += 'Publication ownership contract missing: RuntimeWorldAuthority::publish (sole physical publish gateway)' }
+    }
+    else { $violations += "Missing authority header: $authorityHeader" }
 }
 
 $rtFiles = @(
 )
 
 $forbiddenRtPatterns = @(
-    'makeRuntimePublicationCoordinator\s*\(',
+    'makeRuntimePublishAuthority\s*\(',
     'commitRuntimePublication\s*\(',
     'retireRuntimePublication\s*\(',
     'onRuntimePublishedNonRt\s*\(',

@@ -20,6 +20,7 @@
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
 #include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
+#include "audioengine/ISREvidenceExporter.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -57,6 +58,22 @@ void MainApplication::initialise(const juce::String& commandLine)
     if (!convo::checkAVX2SupportAndWarn())
     {
         juce::Logger::writeToLog("[P0-1] AVX2 非対応 CPU - 起動中断");
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
+
+    // ★ work88（CI runtime evidence モード）: `--verify-runtime-evidence` CLI オプション。
+    //   isr-run-runtime-evidence.ps1 が `ConvoPeq.exe --verify-runtime-evidence` で起動し、
+    //   EvidenceExporter が evidence/（current_path()/evidence）に runtime エビデンス
+    //   （evidence_manifest.json generationMode=runtime + artifact 群）を生成する。
+    //   GUI は起動せず、生成後に即終了する（isr-run-runtime-evidence.ps1 の
+    //   Wait-Process -Timeout 20 前提。生成物は isr-verify-evidence-provenance.ps1 が
+    //   runtime モードで検証する）。
+    if (commandLine.contains("--verify-runtime-evidence"))
+    {
+        convo::isr::EvidenceExporter evidenceExporter;
+        evidenceExporter.exportEvidence(nullptr, 0);
+        juce::Logger::writeToLog("[verify-runtime-evidence] runtime evidence exported");
         juce::JUCEApplicationBase::quit();
         return;
     }

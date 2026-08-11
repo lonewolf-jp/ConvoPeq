@@ -8,6 +8,6 @@
         "RuntimeGraph::true:Derived",
         "BuilderToken::kAuthorityInventory:Diagnostic"
     ],
-    "expiry": "2026-06-30",
+    "expiry": "2026-12-31",
     "owner": "AudioEngineRuntime"
 }

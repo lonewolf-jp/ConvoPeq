@@ -1,0 +1,46 @@
+{
+  "schema": "rollback_compatibility_report_v1",
+  "generatedAt": "2026-08-11T16:16:41.6911594+09:00",
+  "matrixPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-rollback-compatibility-matrix.json",
+  "matrixOwner": "audioengine-runtime-bridge",
+  "matrixIssue": "BRIDGE-ROLLBACK-GOV-001",
+  "matrixExpiry": "2026-09-30",
+  "globalFlag": "ISR_ROLLBACK_GLOBAL",
+  "subsystemFlagCount": 3,
+  "scenarioCount": 3,
+  "metricActionCoverage": {
+    "ISR_ROLLBACK_PUBLICATION_ONLY": 1,
+    "ISR_ROLLBACK_CROSSFADE_ONLY": 1,
+    "ISR_ROLLBACK_RETIRE_PATH_ONLY": 1
+  },
+  "scenarios": [
+    {
+      "scenario": "publication-regression",
+      "requiredFlags": [
+        "ISR_ROLLBACK_GLOBAL",
+        "ISR_ROLLBACK_PUBLICATION_ONLY"
+      ],
+      "expired": false,
+      "missingFlags": []
+    },
+    {
+      "scenario": "crossfade-click-pop",
+      "requiredFlags": [
+        "ISR_ROLLBACK_GLOBAL",
+        "ISR_ROLLBACK_CROSSFADE_ONLY"
+      ],
+      "expired": false,
+      "missingFlags": []
+    },
+    {
+      "scenario": "retire-latency-spike",
+      "requiredFlags": [
+        "ISR_ROLLBACK_GLOBAL",
+        "ISR_ROLLBACK_RETIRE_PATH_ONLY"
+      ],
+      "expired": false,
+      "missingFlags": []
+    }
+  ],
+  "violations": []
+}

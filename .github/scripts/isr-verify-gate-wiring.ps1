@@ -949,7 +949,7 @@ $publicationSinglePathNeedsContracts =
 $publicationSinglePathScriptText.Contains('publication_single_path_report.json') -and
 $publicationSinglePathScriptText.Contains('publication_single_path_report_v1') -and
 $publicationSinglePathScriptText.Contains("publication_path = 'publish(RuntimeWorld*)'") -and
-$publicationSinglePathScriptText.Contains('RuntimePublicationCoordinator::commit') -and
+$publicationSinglePathScriptText.Contains('RuntimeIntentCoordinator::commit') -and
 $publicationSinglePathScriptText.Contains('Forbidden field-level publication API detected:')
 if (-not $publicationSinglePathNeedsContracts) {
     throw 'Publication single-path gate missing required contract checks'

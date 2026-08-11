@@ -1,0 +1,518 @@
+{
+  "schema": "bridge_plan_completeness_report_v1",
+  "generatedAt": "2026-08-11T16:16:43.5059321+09:00",
+  "planPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work\\bridge_runtime_migration_plan.md",
+  "bridgePolicyPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work\\ISR_Bridge_Runtime_AI_暴走防止規約.md",
+  "tierRunnerPath": "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
+  "scriptOrder": {
+    "backlogResidualIndex": 11985,
+    "triggerSymbolUsageIndex": 9697,
+    "observeShimUsageIndex": 9757,
+    "triggerAstIndex": 9874,
+    "triggerAuditIndex": 9925,
+    "cleanupPruneIndex": 10091,
+    "cleanupDeferredVerifyIndex": 10398,
+    "phase4DriftIndex": 8598,
+    "enforcementAdoptionIndex": 10208,
+    "enforcementSourcePurityIndex": 10268,
+    "rollbackMatrixIndex": 10515,
+    "facadeBypassIndex": 11258,
+    "canaryNormalizationIndex": 11434,
+    "metricGovernanceIndex": 10570,
+    "flagDependencyIndex": 10454,
+    "cleanupReadinessIndex": 10333,
+    "ownershipMigrationIndex": 11731,
+    "cleanupCompletionIndex": 11919,
+    "bridgeCompletenessIndex": 12051,
+    "backlogBeforeBridgeCompleteness": true
+  },
+  "backlogResidualForwarding": {
+    "enforceNoSpecFixedForwarded": true
+  },
+  "executionOrderSequence": {
+    "sorted": true,
+    "items": [
+      {
+        "item": "ObserveToken formalization（極小）",
+        "index": 5739
+      },
+      {
+        "item": "RTLocalState + RTAuxMutable 分離",
+        "index": 5773
+      },
+      {
+        "item": "新規legacy参照禁止（CI）",
+        "index": 5807
+      },
+      {
+        "item": "callback中snapshot固定 + IR-E",
+        "index": 5827
+      },
+      {
+        "item": "grep/lint enforcement",
+        "index": 5857
+      },
+      {
+        "item": "clang-tidy/symbol enforcement",
+        "index": 5882
+      },
+      {
+        "item": "retire facade + bypass CI + execution metrics",
+        "index": 5915
+      },
+      {
+        "item": "crossfade専用移行（latency分離含む）",
+        "index": 5964
+      },
+      {
+        "item": "rollback hierarchy + matrix",
+        "index": 5994
+      },
+      {
+        "item": "validator tiering + SLA",
+        "index": 6026
+      },
+      {
+        "item": "trigger達成項目のcleanup",
+        "index": 6054
+      }
+    ]
+  },
+  "completionDefinitionStatus": {
+    "bridgeRuntimeControllable": {
+      "clause": "bridge runtime が制御不能化しない",
+      "satisfied": true,
+      "reason": "Trigger policy violations are zero, runtime view usage is converged, and ownership transfer is complete.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyViolations:completion_bridge_controllable_policy",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.runtimeExecutionViewUsageCount:completion_bridge_controllable_runtime_view",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\ownership_migration_report.json:allStepsSatisfied:completion_bridge_controllable_ownership"
+      ]
+    },
+    "ciDeviationDetectable": {
+      "clause": "CIで逸脱を機械検知できる",
+      "satisfied": true,
+      "reason": "Tier runner wiring and generated evidence artifacts confirm CI-detectable deviation contracts.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1:scriptsToRun:completion_ci_detectable_tier_runner",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:schema:completion_ci_detectable_trigger_schema",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\bridge_plan_completeness_report.json:schema:completion_ci_detectable_completeness_schema"
+      ]
+    },
+    "rollbackSubsystemGranularity": {
+      "clause": "rollback が subsystem 粒度で機能する",
+      "satisfied": true,
+      "reason": "Rollback compatibility matrix shows no violations, missing flags, or expired scenarios.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json:violations:completion_rollback_violations",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json:scenarios.missingFlags:completion_rollback_missing_flags",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json:scenarios.expired:completion_rollback_expired"
+      ]
+    },
+    "deferredTriggerConvergence": {
+      "clause": "deferred が trigger 駆動で確実に縮退する",
+      "satisfied": true,
+      "reason": "Trigger readiness/completion and spec-fixed backlog residual are all converged to zero.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_readiness_report.json:readyCount:completion_deferred_ready",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_completion_report.json:deferredRegistryEntryCount:completion_deferred_registry_count",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\backlog_specfixed_residual_report.json:specFixedResidualCount:completion_deferred_specfixed"
+      ]
+    },
+    "noMajorIncidentIncrease": {
+      "clause": "主要事故（UAF/RT blocking/partial visibility/stale access）が実運用で増加しない",
+      "satisfied": true,
+      "reason": "Canary normalization/metric strict-mode and trigger policy evidence show no major incident increase indicators.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\canary_baseline_normalization_report.json:violations:completion_incident_canary_violations",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\metric_governance_report.json:normalizationPolicy.strictModeRequireAllMetrics:completion_incident_metric_strict",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyViolations:completion_incident_policy_violations"
+      ]
+    }
+  },
+  "phaseEvidenceChronology": {
+    "phase0": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+      "generatedAt": "2026-08-11T16:16:40.0000000",
+      "runId": "",
+      "parseOk": true
+    },
+    "phase1": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_readiness_report.json",
+      "generatedAt": "2026-08-11T16:16:41.0000000",
+      "runId": "",
+      "parseOk": true
+    },
+    "phase2": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_adoption_report.json",
+      "generatedAt": "2026-08-11T16:16:41.0000000",
+      "runId": "",
+      "parseOk": true
+    },
+    "phase3": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\facade_bypass_report.json",
+      "generatedAt": "2026-08-11T16:16:42.0000000",
+      "runId": "",
+      "parseOk": true
+    },
+    "phase4": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\phase4_generation_drift_report.json",
+      "generatedAt": "2026-08-11T16:16:29.0000000",
+      "runId": "",
+      "parseOk": true
+    },
+    "phase5": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json",
+      "generatedAt": "2026-08-11T16:16:41.0000000",
+      "runId": "",
+      "parseOk": true
+    },
+    "phase6": {
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_completion_report.json",
+      "generatedAt": "2026-08-11T16:16:43.0000000",
+      "runId": "",
+      "parseOk": true
+    }
+  },
+  "cleanupReferenceConsistency": {
+    "backlogPath": {
+      "expected": "C:\\VSC_Project\\ConvoPeq\\doc\\work\\ISR_Completeness_Risk_Backlog.md",
+      "actual": "C:\\VSC_Project\\ConvoPeq\\doc\\work\\ISR_Completeness_Risk_Backlog.md",
+      "satisfied": true
+    },
+    "deferredRegistryPath": {
+      "expected": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+      "actual": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+      "satisfied": true
+    },
+    "sourceRoot": {
+      "expected": "C:\\VSC_Project\\ConvoPeq\\src",
+      "actual": "C:\\VSC_Project\\ConvoPeq\\src",
+      "satisfied": true
+    }
+  },
+  "evidenceFreshness": {
+    "windowMinutes": 1440,
+    "requiredArtifacts": [
+      "trigger_symbol_usage_report.json",
+      "observe_shim_usage_report.json",
+      "trigger_ast_report.json",
+      "validator_tiering_report.json",
+      "trigger_cleanup_completion_report.json",
+      "backlog_specfixed_residual_report.json",
+      "canary_baseline_normalization_report.json",
+      "trigger_audit_report.json",
+      "metric_governance_report.json",
+      "flag_dependency_graph_report.json",
+      "enforcement_adoption_report.json",
+      "enforcement_source_purity_report.json",
+      "trigger_cleanup_readiness_report.json",
+      "cleanup_deferred_prune_report.json",
+      "cleanup_deferred_report.json",
+      "ownership_migration_report.json"
+    ]
+  },
+  "requiredScriptCount": 24,
+  "phaseCompletionMatrix": {
+    "phase0": {
+      "title": "統制基盤の先行導入",
+      "satisfied": true,
+      "checks": [
+        "trigger_audit.activeDspRefCount=0",
+        "trigger_audit.runtimeExecutionViewUsageCount=0",
+        "trigger_audit.policyViolations=0"
+      ],
+      "reason": "Phase 0 controls are satisfied by trigger audit zero-metrics and zero policy violations.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.activeDspRefCount:phase0_active_dsp",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.runtimeExecutionViewUsageCount:phase0_runtime_view",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyViolations:phase0_policy_violations"
+      ]
+    },
+    "phase1": {
+      "title": "計測可能トリガー化",
+      "satisfied": true,
+      "checks": [
+        "trigger_audit.policyEvaluations exists",
+        "trigger_cleanup_readiness.readyCount=0",
+        "trigger_cleanup_readiness.blockedCount=0"
+      ],
+      "reason": "Phase 1 trigger readiness is confirmed by policy evaluations and cleanup readiness counts.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyEvaluations:phase1_policy_evaluations",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_readiness_report.json:readyCount:phase1_ready_count",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_readiness_report.json:blockedCount:phase1_blocked_count"
+      ]
+    },
+    "phase2": {
+      "title": "enforcement 高度化（grep→AST）",
+      "satisfied": true,
+      "checks": [
+        "enforcement_adoption.withinTarget=true",
+        "advancedCoverageRatio>=minAdvancedCoverageRatio",
+        "enforcement_source_purity violations=0"
+      ],
+      "reason": "Phase 2 enforcement upgrade is confirmed by adoption target and purity zero-violation evidence.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_adoption_report.json:withinTarget:phase2_within_target",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_adoption_report.json:advancedCoverageRatio:phase2_coverage_ratio",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_source_purity_report.json:rawRegexViolationCount:phase2_raw_regex",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_source_purity_report.json:unknownViolationCount:phase2_unknown_violations"
+      ]
+    },
+    "phase3": {
+      "title": "facade 統制",
+      "satisfied": true,
+      "checks": [
+        "trigger_audit.retireFacadeDirectDependencyCount=0",
+        "trigger_audit.retireFacadeRuntimeExecutionCount=0",
+        "facade_bypass.violations=0"
+      ],
+      "reason": "Phase 3 facade control is satisfied by zero direct/runtime dependency metrics and facade bypass violations.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.retireFacadeDirectDependencyCount:phase3_direct_dependency",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.retireFacadeRuntimeExecutionCount:phase3_runtime_execution",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\facade_bypass_report.json:violations:phase3_facade_violations"
+      ]
+    },
+    "phase4": {
+      "title": "crossfade 専用移行",
+      "satisfied": true,
+      "checks": [
+        "canary_baseline_normalization.violations=0",
+        "phase4_generation_drift.violations=0"
+      ],
+      "reason": "Phase 4 crossfade migration is satisfied by canary normalization and generation drift zero-violation evidence.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\canary_baseline_normalization_report.json:violations:phase4_canary_violations",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\phase4_generation_drift_report.json:violations:phase4_generation_drift"
+      ]
+    },
+    "phase5": {
+      "title": "rollback hierarchy 導入",
+      "satisfied": true,
+      "checks": [
+        "rollback_compatibility.violations=0",
+        "rollback scenarios missingFlags=0",
+        "rollback scenarios expired=false"
+      ],
+      "reason": "Phase 5 rollback hierarchy is satisfied by rollback compatibility evidence with no missing flags/expired scenarios.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json:violations:phase5_rollback_violations",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json:scenarios.missingFlags:phase5_missing_flags",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json:scenarios.expired:phase5_expired"
+      ]
+    },
+    "phase6": {
+      "title": "cleanup（trigger達成後）",
+      "satisfied": true,
+      "checks": [
+        "trigger_cleanup_completion.cleanupCompleted=true",
+        "trigger_cleanup_completion.deferredRegistryEntryCount=0",
+        "backlog_specfixed_residual.specFixedResidualCount=0"
+      ],
+      "reason": "Phase 6 cleanup is satisfied by cleanup completion and backlog residual zero evidence.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_completion_report.json:cleanupCompleted:phase6_cleanup_completed",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_completion_report.json:deferredRegistryEntryCount:phase6_deferred_count",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\backlog_specfixed_residual_report.json:specFixedResidualCount:phase6_backlog_residual"
+      ]
+    }
+  },
+  "artifactStatus": [
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_symbol_usage_report.json",
+      "expectedSchema": "trigger_symbol_usage_report_v1",
+      "exists": true,
+      "actualSchema": "trigger_symbol_usage_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\observe_shim_usage_report.json",
+      "expectedSchema": "observe_shim_usage_report_v1",
+      "exists": true,
+      "actualSchema": "observe_shim_usage_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_ast_report.json",
+      "expectedSchema": "trigger_ast_report_v1",
+      "exists": true,
+      "actualSchema": "trigger_ast_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+      "expectedSchema": "trigger_audit_report_v1",
+      "exists": true,
+      "actualSchema": "trigger_audit_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\validator_tiering_report.json",
+      "expectedSchema": "validator_tiering_report_v3",
+      "exists": true,
+      "actualSchema": "validator_tiering_report_v3"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\policy_top_level_governance_report.json",
+      "expectedSchema": "policy_top_level_governance_report_v2",
+      "exists": true,
+      "actualSchema": "policy_top_level_governance_report_v2"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\workflow_dispatch_input_policy_report.json",
+      "expectedSchema": "workflow_dispatch_input_policy_report_v1",
+      "exists": true,
+      "actualSchema": "workflow_dispatch_input_policy_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\close_policy_8_1_report.json",
+      "expectedSchema": "close_policy_8_1_report_v1",
+      "exists": true,
+      "actualSchema": "close_policy_8_1_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\close_policy_8_1_workflow_input_contract_report.json",
+      "expectedSchema": "close_policy_8_1_workflow_input_contract_report_v1",
+      "exists": true,
+      "actualSchema": "close_policy_8_1_workflow_input_contract_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\close_policy_8_1_workflow_input_coherence_report.json",
+      "expectedSchema": "close_policy_8_1_workflow_input_coherence_report_v1",
+      "exists": true,
+      "actualSchema": "close_policy_8_1_workflow_input_coherence_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\facade_bypass_report.json",
+      "expectedSchema": "facade_bypass_report_v1",
+      "exists": true,
+      "actualSchema": "facade_bypass_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\crossfade_observable_state_report.json",
+      "expectedSchema": "crossfade_observable_state_report_v1",
+      "exists": true,
+      "actualSchema": "crossfade_observable_state_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\canary_baseline_normalization_report.json",
+      "expectedSchema": "canary_baseline_normalization_report_v1",
+      "exists": true,
+      "actualSchema": "canary_baseline_normalization_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\phase4_generation_drift_report.json",
+      "expectedSchema": "phase4_generation_drift_report_v2",
+      "exists": true,
+      "actualSchema": "phase4_generation_drift_report_v2"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_adoption_report.json",
+      "expectedSchema": "enforcement_adoption_report_v1",
+      "exists": true,
+      "actualSchema": "enforcement_adoption_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_source_purity_report.json",
+      "expectedSchema": "enforcement_source_purity_report_v1",
+      "exists": true,
+      "actualSchema": "enforcement_source_purity_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\metric_governance_report.json",
+      "expectedSchema": "metric_governance_report_v2",
+      "exists": true,
+      "actualSchema": "metric_governance_report_v2"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\flag_dependency_graph_report.json",
+      "expectedSchema": "flag_dependency_graph_report_v1",
+      "exists": true,
+      "actualSchema": "flag_dependency_graph_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json",
+      "expectedSchema": "rollback_compatibility_report_v1",
+      "exists": true,
+      "actualSchema": "rollback_compatibility_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_readiness_report.json",
+      "expectedSchema": "trigger_cleanup_readiness_report_v1",
+      "exists": true,
+      "actualSchema": "trigger_cleanup_readiness_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\cleanup_deferred_prune_report.json",
+      "expectedSchema": "cleanup_deferred_prune_report_v1",
+      "exists": true,
+      "actualSchema": "cleanup_deferred_prune_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\cleanup_deferred_report.json",
+      "expectedSchema": "cleanup_deferred_report_v1",
+      "exists": true,
+      "actualSchema": "cleanup_deferred_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\ownership_migration_report.json",
+      "expectedSchema": "ownership_migration_report_v2",
+      "exists": true,
+      "actualSchema": "ownership_migration_report_v2"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_completion_report.json",
+      "expectedSchema": "trigger_cleanup_completion_report_v1",
+      "exists": true,
+      "actualSchema": "trigger_cleanup_completion_report_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\backlog_specfixed_residual_report.json",
+      "expectedSchema": "backlog_specfixed_residual_report_v1",
+      "exists": true,
+      "actualSchema": "backlog_specfixed_residual_report_v1"
+    }
+  ],
+  "policyStatus": [
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-8_1-close-policy.json",
+      "expectedSchema": "isr_8_1_close_policy_v1",
+      "exists": true,
+      "actualSchema": "isr_8_1_close_policy_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-validator-tiering-policy.json",
+      "expectedSchema": "isr_validator_tiering_policy_v1",
+      "exists": true,
+      "actualSchema": "isr_validator_tiering_policy_v1"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-workflow-dispatch-input-policy.json",
+      "expectedSchema": "isr_workflow_dispatch_input_policy_v1",
+      "exists": true,
+      "actualSchema": "isr_workflow_dispatch_input_policy_v1"
+    }
+  ],
+  "allowlistStatus": [
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-trigger-symbol-allowlist.json",
+      "expectedSchema": "trigger_symbol_allowlist_v1",
+      "exists": true,
+      "actualSchema": "trigger_symbol_allowlist_v1",
+      "expiry": "2026-09-30T00:00:00.0000000"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-observe-shim-allowlist.json",
+      "expectedSchema": "observe_shim_allowlist_v1",
+      "exists": true,
+      "actualSchema": "observe_shim_allowlist_v1",
+      "expiry": "2026-09-30T00:00:00.0000000"
+    },
+    {
+      "path": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+      "expectedSchema": "cleanup_deferred_registry_v1",
+      "exists": true,
+      "actualSchema": "cleanup_deferred_registry_v1",
+      "expiry": "2026-09-30T00:00:00.0000000"
+    }
+  ],
+  "violations": []
+}

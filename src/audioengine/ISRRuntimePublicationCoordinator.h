@@ -65,7 +65,23 @@ enum class RuntimeBoundary : uint8_t {
     NonRTWorld
 };
 
-class RuntimePublicationCoordinator {
+// ★ work88 (X1〜X6 §6.9 Phase 0 / 二十五次レビュー): INV-ISR-01〜07 — ISR 全体の最上位不変条件。
+//   （コード契約として固定 — Phase 0 invariant freeze / X_IMPL_CHECKLIST #2）
+//   INV-ISR-01: isFullyDrained == true は以下を意味する:
+//     all producers stopped AND all producer joins completed AND all transport queues empty
+//     AND all deferred state empty AND all reclaim-in-flight == 0 AND all reader inactive
+//     AND reader registration closed
+//   INV-ISR-02: pendingIntentCount_ は queue size ではなく transport residency + producer
+//     reservation である（residency + reservation — 二重計上禁止）
+//   INV-ISR-03: 異なる semantic state を一つの counter で表現しない。特に Intent / DSP
+//     resident / Retire resident を混ぜない（§6.6 X6 の4層分離と整合）
+//   INV-ISR-04: ShutdownQuiescent reclaim は readerRegistrationClosed なしでは絶対に許可しない
+//     （§6.3 X3 と整合）
+//   INV-ISR-05: completion watermark を publication committed と同一視しない（§6.2 X2 と整合）
+//   INV-ISR-06: currentWorld_ を ownership source として扱わない（§6.4-X4 INV-X4-8 と整合）
+//   INV-ISR-07: currentWorld_ と RuntimeStore::current が存在する間は、両者の identity
+//     consistency を検証可能にする（§6.4-X4 Test 9 / INV-X4-6 と整合）
+class RuntimeIntentCoordinator {
 public:
     enum class CoordinatorState : uint8_t {
         Bootstrapping = 0,
@@ -77,7 +93,7 @@ public:
         Faulted
     };
 
-    RuntimePublicationCoordinator();
+    RuntimeIntentCoordinator();
     bool precheckPublish(const PayloadClosureDescriptor& closure,
                          const TieredPayloadDescriptor& descriptor) noexcept;
     const char* lastRejectReason() const noexcept;
@@ -115,11 +131,16 @@ public:
     [[nodiscard]] bool isSwapPending() const noexcept;
     // ★ A-2.4: getter 群（DrainAudit 用）
     [[nodiscard]] std::uint64_t getPublicationBacklogCount() const noexcept;
+    // ★ work88 (X5 §6.5): Publish Intent residency counter（INV-X5-1）。isFullyDrained / 診断用。
+    [[nodiscard]] std::uint64_t getPublicationIntentResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
     [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
     [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;  // ★ Phase2
+    // ★ work88 (X6 §6.6): Quarantine transport residency counter（INV-X6-4）。診断 / isFullyDrained 用。
+    [[nodiscard]] std::uint64_t getQuarantineIntentResidencyCount() const noexcept;
+    [[nodiscard]] std::uint64_t getQuarantineRingResidencyCount() const noexcept;
     // ★ work88 (FUTURE-10): Quarantine fallback ring の drop 回数（静かに破棄しない証跡）。
     //   AudioEngine 側 HealthMonitor が監視し ISRHealthState::Critical 昇格を駆動する。
     [[nodiscard]] std::uint64_t quarantineFallbackDropCount() const noexcept
@@ -211,6 +232,23 @@ public:
     //   呼び出し元: stopRebuildThread()（Builder join 後）。Producer（CoordinatorLoop）は
     //   shutdownCoordinatorLoop() で join 済みのため決定的。
     void discardRecoveryRequestsOnShutdown() noexcept;
+
+    // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
+    //   DurablePending → Building への state transition（destructive dequeue ではない）。
+    //   INV-X1-1: take 後も Building 中は recoveryAdmissionPending_ が true を維持
+    //   （build gap を isFullyDrained が検出）。build 失敗時は Building → DurablePending へ戻す。
+    [[nodiscard]] std::optional<RecoveryIntent> takePendingRecoveryAdmission() noexcept;
+    // ★ work88 (X1 §6.1): durable Recovery admission の有無（isFullyDrained 用）。
+    [[nodiscard]] bool hasPendingRecoveryAdmission() const noexcept;
+    // ★ work88 (X1 §6.1): durable admission を破棄（shutdown 時 — RecoveryAdmissionClosed）。
+    //   recoveryShutdownDiscardCount_ を増やし、discard を観測可能にする（ShutdownDiscard — INV-5）。
+    void discardPendingRecoveryAdmission() noexcept;
+    // ★ work88 (X1 §6.1 — lease 方式): Builder が build 結果に応じて durable admission を settle する。
+    //   retry=true（transient failure）: Building → DurablePending へ戻す（次サイクルで再 take）。
+    //   retry=false（build success / Discarded）: state を NoAdmission にクリア + recoveryAdmissionPending_ = false。
+    //   INV-X1-1（exactly one durable state）が lease 方式で常に成立する。
+    void settlePendingRecoveryAdmission(bool retry) noexcept;
+
     enum class IntentType : std::uint8_t {
         Observe,
         Publish,
@@ -287,7 +325,17 @@ public:
     {
         Intent prepared = intent;
         prepared.type = IntentType::Publish;
-        return intentQueue_.push(prepared);
+        // ★ work88 (X5 §6.5): Publish intent residency 専用 counter の reservation→push→rollback。
+        //   全 3 enqueue 経路（通常 rebuild / Recovery publish / deferred 再 enqueue）がここに
+        //   集約されるため、本 counter は単一箇所で reservation され二重計上されない（§6.5）。
+        //   push 前に fetchAdd（reservation-before-push）→ push 成功で維持 → push 失敗（full）で
+        //   fetchSub rollback。INV-X5-1: publicationIntentResidencyCount = Publish intent queue
+        //   residency + producer reservation（並行中は >=、producer quiescence 後は ==）。
+        convo::fetchAddAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        if (intentQueue_.push(prepared))
+            return true;
+        convo::fetchSubAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        return false;
     }
 
     /// Reclaim Request: 指定された DSPHandle の reclaim を要求する。
@@ -303,6 +351,30 @@ public:
     [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
                                      class DSPHandleRuntime& handleRuntime,
                                      class ISRRetireRouter& router) noexcept;
+
+    // ★ work88 (X3 §6.3 / R4): Reclaim Authority の一本化 — ReclaimMode。
+    //   Reclaim Authority は一つ、Safety Precondition が二種類（R4 Phase 1）。
+    //   - RuntimeEBR:      通常 runtime — retire → epoch 安全確認（retireEpoch < minReaderEpoch）
+    //                      → 不安全なら pending（false 返却・呼出し元が再試行登録）
+    //   - ShutdownQuiescent: shutdown — readerRegistrationClosed 必須（INV-X3-4 / INV-ISR-04）
+    //                      → epoch 判定スキップ → reclaim
+    //   precondition（retire 前評価 — 十四次指摘）: ShutdownQuiescent は reader registration が
+    //   永久に閉じていることを検証してから retire/reclaim を実行する（phase 不正時に retire の
+    //   state transition を先に発生させない）。
+    enum class ReclaimMode : uint8_t {
+        RuntimeEBR,
+        ShutdownQuiescent
+    };
+
+    /// ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority の唯一の entry point。
+    ///   requestReclaim は RuntimeEBR モードとして本メソッドに委譲する。
+    ///   readerRegistrationClosed: ShutdownQuiescent モードの precondition（INV-X3-4）。
+    ///   呼出し元（AudioEngine）が m_epochDomain.readerRegistrationClosed() を渡す。
+    [[nodiscard]] bool reclaim(ReclaimMode mode,
+                               const DSPHandle& handle,
+                               class DSPHandleRuntime& handleRuntime,
+                               class ISRRetireRouter& router,
+                               bool readerRegistrationClosed = false) noexcept;
 
     /// Observe Intent Queue から蓄積された Intent を処理する。
     /// P0-4A: Timer から submitObserve でキューイングされた Intent を
@@ -348,9 +420,9 @@ private:
     void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept;
 
     class OverflowScheduler {
-        RuntimePublicationCoordinator& coordinator_;
+        RuntimeIntentCoordinator& coordinator_;
     public:
-        explicit OverflowScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        explicit OverflowScheduler(RuntimeIntentCoordinator& coord) noexcept : coordinator_(coord) {}
         [[nodiscard]] OverflowDrainResult drainOverflowRing(
             class RetireOverflowRing& overflowRing,
             class LifetimeState& retireRuntime,
@@ -359,18 +431,18 @@ private:
     };
 
     class ShutdownScheduler {
-        RuntimePublicationCoordinator& coordinator_;
+        RuntimeIntentCoordinator& coordinator_;
     public:
-        explicit ShutdownScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        explicit ShutdownScheduler(RuntimeIntentCoordinator& coord) noexcept : coordinator_(coord) {}
         [[nodiscard]] bool isFullyDrained() const noexcept;
         void requestShutdown() noexcept;
         void markShutdownComplete() noexcept;
     };
 
     class PriorityScheduler {
-        RuntimePublicationCoordinator& coordinator_;
+        RuntimeIntentCoordinator& coordinator_;
     public:
-        explicit PriorityScheduler(RuntimePublicationCoordinator& coord) noexcept : coordinator_(coord) {}
+        explicit PriorityScheduler(RuntimeIntentCoordinator& coord) noexcept : coordinator_(coord) {}
         void escalateAllRetires(RetirePriority minPriority) noexcept;
         void setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept;
     };
@@ -394,12 +466,24 @@ private:
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
+    // ★ work88 (X5 §6.5): Publish Intent residency 専用 counter（INV-X5-1）。
+    //   publicationIntentResidencyCount_ = intentQueue_ 内の Publish Intent 数 + producer
+    //   enqueue reservation（queue residency + producer-side reservation）。
+    //   - 対象: IntentType::Publish（enqueuePublicationIntent の単一箇所で reservation）
+    //   - 非対象: deferredPublicationCount_（Orchestrator の deferred state・単一スロット 0/1）
+    //     と hasDeferredCommit（commit 未完了の logical state）。Queue residency / Deferred
+    //     state / Commit completion を混ぜない（dash §6.5）。
+    //   - 増分: enqueuePublicationIntent が push 前に fetchAdd（reservation-before-push）
+    //   - 減分: processIntent の intentQueue_.pop で type==Publish の場合 fetchSub
+    //     （Publish pop は pendingIntentCount_ を触らない — P2-1 §1.1.6 W2）
+    std::atomic<std::uint64_t> publicationIntentResidencyCount_{0};
     // ★ work88 (P2-1 §1.1.1): pendingIntentCount_ は「Intent transport residency + producer
     //   enqueue reservation」を追跡する。
     //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）
     //   - 非対象: Publish と RetireIntent（混入禁止 — P2-1 §1.1.5）。Publish は
     //     enqueuePublicationIntent が reservation を取らない。RetireIntent は
     //     retireBacklogCount_（setRetireBacklogCount）が担当する。
+    //   ★ INV-ISR-02 / Phase 0 #1: This counter excludes Publish and RetireIntent.
     //   - 増分: producer 側 enqueue 成功時（reservation-before-push で push 前に fetchAdd）
     //   - 減分: consumer 側 pop 成功時（processIntent / drainObserveDeferred /
     //     popRecoveryRequest で fetchSub）
@@ -409,7 +493,16 @@ private:
     std::atomic<std::uint64_t> fallbackBacklogCount_;
     std::atomic<std::uint64_t> reclaimInFlightCount_;
     std::atomic<std::uint64_t> deferredRetireResidencyCount_;
-    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント
+    // ★ work88 (X6 §6.6): Quarantine の transport residency と DSP residency を semantic 分離（INV-X6-4）。
+    //   quarantineIntentResidencyCount_ = intentQueue_ 内の Quarantine Intent 数（primary transport）
+    //   quarantineRingResidencyCount_   = quarantineFallbackQueue_ 内の Quarantine Intent 数（fallback/ring）
+    //   quarantineResidentCount_        = 実在 quarantine DSP 数（DSPQuarantineManager::residentCount() が
+    //                                     唯一の source of truth — AudioEngine::isFullyDrained で直接判定）。
+    //   ★ Coordinator 側の quarantineResidentCount_ は X6 以降 submitQuarantine が +1 しない（DSPQuarantineManager
+    //     管理に委譲）。本 counter は従来のドレイン判定では常に 0（source of truth は AudioEngine 側）。
+    std::atomic<std::uint64_t> quarantineIntentResidencyCount_{0};   // ★ X6 新設（Intent lane residency）
+    std::atomic<std::uint64_t> quarantineRingResidencyCount_{0};     // ★ X6 新設（ring/fallback 残留）
+    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント（X6 以降は常時 0 — DSPQuarantineManager が source）
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_{false}; // [work87 P2-5]
@@ -463,6 +556,42 @@ private:
     // ★ work88 (P2-4 監査補正 — Step B/C): shutdown 時（AdmissionClosed）に Recovery を
     //   意図的に破棄した回数（ShutdownDiscard）。drop（queue full）とは区別 — dash §8.1。
     std::atomic<uint64_t> recoveryShutdownDiscardCount_{0};
+
+    // ── ★ work88 (X1 §6.1): Recovery Durable Admission（lease 方式）──
+    //   queue full で Recovery が「失われる」ことを構造的に排除する durable admission state。
+    //   INV-X1-1: accepted ⇒ exactly one durable state（DurablePending OR Building）exists
+    //   INV-X1-2: queue full ≠ Recovery lost（durable admission が保持）
+    //   INV-X1-4: durable state は World ownership を持たない（DSPHandle / epoch / intentId /
+    //             RuntimeBuildSnapshot のみ — 非所有）
+    //   INV-X1-5: 1 logical Recovery admission = at most 1 reservation（coalesce で増やさない）
+    //   INV-X1-6: durable admission は queue residency と二重計上しない
+    //   SPSC: Producer = CoordinatorLoop（submitRecoveryRequest / QuarantineIntentHandler 経由）
+    //         Consumer = Builder Loop（takePendingRecoveryAdmission）— 競合なし
+    //   ★ 二十六次レビュー（lease 方式・必須修正1）: take は destructive dequeue ではなく
+    //     DurablePending → Building の state transition。build 失敗（transient）は
+    //     Building → DurablePending へ戻す（retry を構造的保証）。obsolete は Discarded。
+#pragma warning(push)
+#pragma warning(disable : 4324)   // DSPHandle(alignas 16) による構造体パディング警告を抑制
+    struct PendingRecoveryAdmission {
+        enum class State : uint8_t {
+            NoAdmission = 0,
+            DurablePending,
+            Building
+        };
+        State state = State::NoAdmission;
+        bool pending = false;                 // durable state 有効（state != NoAdmission）
+        uint64_t recoveryGeneration = 0;      // 入ってきた時点の rebuildRequestGeneration（coalesce 判定用）
+        convo::RuntimeBuildSnapshot buildSource{};  // latest（coalesce で更新）
+        bool reservationOwned = false;        // 1 admission = 1 reservation（INV-X1-5）
+        DSPHandle handle{};                   // recovery 対象（quarantined DSPHandle）— 消費時 isNull 検証
+        PublicationEpoch epoch{0};            // emit 時 publicationEpoch（FIFO/epoch 検証用）
+        uint64_t intentId{0};                 // 診断・モニタリング用シーケンス番号
+    };
+    PendingRecoveryAdmission pendingRecoveryAdmission_;   // SPSC（plain 構造体 — atomic 不要）
+    std::atomic<bool> recoveryAdmissionPending_{false};   // durable 有効フラグ（isFullyDrained が読む）
+    static_assert(std::is_trivially_copyable_v<PendingRecoveryAdmission>,
+        "PendingRecoveryAdmission must be trivially copyable");
+#pragma warning(pop)
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。

@@ -1,0 +1,59 @@
+{
+  "schema": "canary_baseline_normalization_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.4205023+09:00",
+  "strictEvidence": false,
+  "registryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-metric-governance.json",
+  "metricGovernanceReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\metric_governance_report.json",
+  "normalizationPolicy": {
+    "enabled": true,
+    "baselineWindowMinutes": 10,
+    "cpuThermalOsNormalization": true,
+    "bucketBy": "cpuModel_osBuild_powerProfile",
+    "strictModeRequireAllMetrics": true,
+    "issue": "BRIDGE-METRIC-NORM-001"
+  },
+  "metrics": [
+    {
+      "id": "xrunDelta",
+      "blocking": "yes",
+      "normalization": "baselineWindowNormalized",
+      "normalizationApplied": true,
+      "evidenceFound": true,
+      "evidencePath": "C:\\VSC_Project\\ConvoPeq\\evidence\\rebuild_admission_8_1_metrics_report.json",
+      "evidenceSchema": "rebuild_admission_8_1_metrics_report_v1",
+      "evidenceSummary": "status=skipped reason=log_not_found readyToClose8_1=False"
+    },
+    {
+      "id": "callbackJitter",
+      "blocking": "yes",
+      "normalization": "baselineWindowNormalized",
+      "normalizationApplied": true,
+      "evidenceFound": true,
+      "evidencePath": "C:\\VSC_Project\\ConvoPeq\\evidence\\runtime_budget_report.json",
+      "evidenceSchema": "runtime_budget_report_v1",
+      "evidenceSummary": "provenance=seed"
+    },
+    {
+      "id": "retireLatency",
+      "blocking": "yes",
+      "normalization": "baselineWindowNormalized",
+      "normalizationApplied": true,
+      "evidenceFound": true,
+      "evidencePath": "C:\\VSC_Project\\ConvoPeq\\evidence\\retire_latency_report.json",
+      "evidenceSchema": "retire_latency_report_v1",
+      "evidenceSummary": "withinThreshold=True"
+    },
+    {
+      "id": "crossfadePeak",
+      "blocking": "no",
+      "normalization": "baselineWindowNormalized",
+      "normalizationApplied": true,
+      "evidenceFound": true,
+      "evidencePath": "C:\\VSC_Project\\ConvoPeq\\evidence\\crossfade_observable_state_report.json",
+      "evidenceSchema": "crossfade_observable_state_report_v1",
+      "evidenceSummary": "violations=0"
+    }
+  ],
+  "warnings": [],
+  "violations": []
+}

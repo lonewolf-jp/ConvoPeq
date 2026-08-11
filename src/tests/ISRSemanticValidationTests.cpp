@@ -4,6 +4,7 @@
 #include <limits>
 #include <cstdio>
 #include <memory>
+#include <type_traits>
 
 #include "audioengine/ISRClosure.h"
 #include "audioengine/ISRPayloadTier.h"
@@ -18,7 +19,7 @@ namespace {
 
 [[nodiscard]] bool testInvalidClosureRejected()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     convo::isr::PayloadClosureDescriptor invalid {};
@@ -41,7 +42,7 @@ namespace {
 
 [[nodiscard]] bool testInvalidTierRejected()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     convo::isr::PayloadClosureDescriptor closure {};
@@ -75,7 +76,7 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorCommitAndMonotonicityContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -93,7 +94,7 @@ namespace {
         return false;
     if (coordinator.getVersion() != 1)
         return false;
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Ready)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -118,7 +119,7 @@ namespace {
 
     if (coordinator.getCurrent() != world2.get())
         return false;
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
 
     return true;
@@ -126,7 +127,7 @@ namespace {
 
 [[nodiscard]] bool testCoordinatorRejectEpochRollbackContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -155,12 +156,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectMappedGenerationRollbackOnEpochAdvance()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -189,12 +190,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectEpochReuseContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -223,12 +224,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectMappedGenerationReuseContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -257,12 +258,12 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectWraparoundContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -305,12 +306,12 @@ namespace {
     if (coordinator.getCurrent() != world2.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorDrainAndShutdownContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -335,7 +336,7 @@ namespace {
     coordinator.requestShutdown();
     coordinator.markShutdownComplete();
 
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Bootstrapping)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Bootstrapping)
         return false;
 
     return true;
@@ -343,7 +344,7 @@ namespace {
 
 [[nodiscard]] bool testShutdownCompleteFailsWhenNotDrained()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
 
@@ -369,12 +370,12 @@ namespace {
     coordinator.requestShutdown();
     coordinator.markShutdownComplete();
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testPressureStateNormalizationContract()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
 
@@ -388,31 +389,31 @@ namespace {
 
     // slope > threshold で Pressure へ遷移
     coordinator.setRetireBacklogCount(9);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 中は normalization しない
     coordinator.setSwapPending(true);
     coordinator.setRetireBacklogCount(0);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 解除後、3 window で Ready へ復帰
     coordinator.setSwapPending(false);
     coordinator.setRetireBacklogCount(0);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
     coordinator.setRetireBacklogCount(0);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Pressure)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
     coordinator.setRetireBacklogCount(0);
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Ready;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready;
 }
 
 [[nodiscard]] bool testShutdownCompleteFailsWhenSwapPending()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     int world = 1;
 
@@ -438,7 +439,7 @@ namespace {
     coordinator.requestShutdown();
     coordinator.markShutdownComplete();
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 // --- P4: Generation / ActivationEpoch 契約 ---
@@ -446,7 +447,7 @@ namespace {
 // 同一 generation での activationEpoch 単独変更は禁止。
 [[nodiscard]] bool testP4SameGenerationEpochChangeRejected()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -461,7 +462,7 @@ namespace {
                        100,
                        100);
 
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Ready)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
 
     // 同一 generation (100) で epoch のみ変更 (101) → 禁止 (generation 不変で epoch 変更)
@@ -477,7 +478,7 @@ namespace {
     if (coordinator.getCurrent() != world1.get())
         return false;
 
-    return coordinator.getState() == convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted;
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 // --- P20: Fail-Closed Rollback ---
@@ -487,7 +488,7 @@ namespace {
 // 副作用（callback, telemetry）は reject 経路では発生しない。
 [[nodiscard]] bool testP20RejectPreservesWorldState()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     auto world1 = RuntimeState::createForTest();
@@ -511,7 +512,7 @@ namespace {
                        2, 2, 0, 2);
 
     // state は Faulted に遷移する（fail-closed）: これは意図された動作
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
 
     // currentWorld が reject 前の値（world1）を維持している
@@ -529,7 +530,7 @@ namespace {
 //   consistent epoch + generation + sequence via RuntimeState::publication.
 [[nodiscard]] bool testMetadataSnapshotConsistentAcrossReaders()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -546,7 +547,7 @@ namespace {
 
 [[nodiscard]] bool testMetadataSnapshotRejectsEpochRollback()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto world1 = RuntimeState::createForTest();
     auto world2 = RuntimeState::createForTest();
@@ -556,7 +557,7 @@ namespace {
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
                        world2.get(), 2, 2, 4, 11);
-    if (coordinator.getState() != convo::isr::RuntimePublicationCoordinator::CoordinatorState::Faulted)
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
     if (coordinator.getCurrent() != world1.get())
         return false;
@@ -569,7 +570,7 @@ namespace {
 
 [[nodiscard]] bool testMetadataSnapshotSequenceAdvancesWithEpoch()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto w1 = RuntimeState::createForTest();
     auto w2 = RuntimeState::createForTest();
@@ -591,7 +592,7 @@ namespace {
 // METADATA-6: no transitional cache symbol; reader is pure world snapshot.
 [[nodiscard]] bool testMetadataSnapshotNoTransitionalCacheSymbol()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -608,7 +609,7 @@ namespace {
 //   submitRecoveryRequest() -> popRecoveryRequest() 1-hop 輸送。Builder Loop が復旧 World を build。
 [[nodiscard]] bool testRecoveryRequestEnqueueAndPop()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     const auto handle = convo::isr::DSPHandle::null();
     // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を引数に追加。
@@ -623,11 +624,128 @@ namespace {
     return true;
 }
 
+// ★ work88 (X1 §6.1): Recovery Durable Admission — queue full ≠ Recovery lost（INV-X1-2）。
+//   recoveryIntentQueue_（256）を満杯 → 257th submit は durable admission（PendingRecoveryAdmission）
+//   に保持され、hasPendingRecoveryAdmission() == true。takePendingRecoveryAdmission() は
+//   lease（DurablePending → Building）で消費し、settle(false) でクリア（INV-X1-1）。
+[[nodiscard]] bool testRecoveryDurableAdmission()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
+
+    constexpr int kCap = 256;  // kRecoveryIntentQueueCapacity
+
+    // recoveryIntentQueue_（256）を満杯にする（全て transport に成功 → durable 無し）
+    for (int i = 0; i < kCap; ++i)
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;   // 満杯まで durable は無いはず
+
+    // 257th: queue full → durable admission に保持（INV-X1-2: queue full ≠ Recovery lost）
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // transport は 256 件のみ pop できる（durable は transport に無い — INV-X1-6 二重計上なし）
+    for (int i = 0; i < kCap; ++i)
+    {
+        if (!coordinator.popRecoveryRequest().has_value())
+            return false;
+    }
+    if (coordinator.popRecoveryRequest().has_value())
+        return false;
+
+    // takePendingRecoveryAdmission（lease: DurablePending → Building）→ settle(false) でクリア
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    coordinator.settlePendingRecoveryAdmission(false);
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;
+    // 2 回目の take は nullopt（もう無い）
+    if (coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+
+    return true;
+}
+
+// ★ work88 (X1 §6.1): durable admission の coalesce — 重複 submit でも durable は単一
+//   （INV-X1-5: 1 logical admission = at most 1 reservation）。
+[[nodiscard]] bool testRecoveryDurableCoalesce()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
+
+    // 満杯 → durable admission 作成
+    for (int i = 0; i < 256; ++i)
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // さらに durable submit（coalesce）— durable は単一のまま（INV-X1-5）
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+
+    // take で 1 回だけ消費でき、その後は空（coalesce により単一 durable のみ）
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    coordinator.settlePendingRecoveryAdmission(false);
+    if (coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    return true;
+}
+
+// ★ work88 (X1 §6.1): lease 方式 — transient build 失敗（settle(true)）で Building → DurablePending へ
+//   戻り、再 take 可能（retry 構造的保証）。INV-X1-1（exactly one durable state）が維持される。
+[[nodiscard]] bool testRecoveryDurableLeaseRetry()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
+
+    // 満杯 → durable admission 作成
+    for (int i = 0; i < 256; ++i)
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // take（lease: DurablePending → Building）
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    // Building 中も hasPendingRecoveryAdmission() == true（build gap 検出）
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    // transient failure → settle(true): Building → DurablePending（再 take 可能）
+    coordinator.settlePendingRecoveryAdmission(true);
+    if (!coordinator.hasPendingRecoveryAdmission())
+        return false;
+    if (!coordinator.takePendingRecoveryAdmission().has_value())
+        return false;
+    coordinator.settlePendingRecoveryAdmission(false);  // 成功 → クリア
+    if (coordinator.hasPendingRecoveryAdmission())
+        return false;
+
+    return true;
+}
+
 // ★ FUTURE-8: overflow は Observe 専用 Deferred Ring へ（Retire 系 ring と分離, QUEUE-15）。
 //   1024+2048+1024 満村 → drop。enqueue path crash なし + pending count 連動を検証。
 [[nodiscard]] bool testObserveOverflowEnqueuePath()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
     const auto handle = convo::isr::DSPHandle::null();
     constexpr int N = 4100;  // 1024(L1) + 2048(L2) + 1024(L3) + drop
@@ -636,11 +754,42 @@ namespace {
     return coordinator.getPendingIntentCount() == static_cast<std::uint64_t>(N);
 }
 
-// ★ A-1: RuntimeWorldAuthority must be a pure delegate over the Coordinator — it must
-//   return the SAME epoch/sequence/version as the coordinator (no shadow state of its own).
+// ★ A-1 (X4-B §6.4 Test 1 / 二十一次レビュー): RuntimeWorldAuthority owns the physical
+//   RuntimeStore（write authority singularization — INV-X4-3/5）。Store::OwnerType ==
+//   RuntimeWorldAuthority はコンパイル時不変条件。metadata 委譲（epoch/sequence/version）は
+//   Coordinator と同一（シャドウ状態なし）を引き続き検証する（read API は物理 Store から）。
+static_assert(std::is_same_v<convo::isr::RuntimeWorldAuthority::Store::OwnerType,
+                             convo::isr::RuntimeWorldAuthority>,
+    "X4-B Test 1: RuntimeWorldAuthority must own its RuntimeStore (INV-X4-3/5)");
+
+// ★ X4-B Test 2: WriteAccess move-only（RuntimeStore.h の static_assert を Authority 側でも固定）。
+//   WriteAccess は Store への非所有参照を持つため copy 不可・move のみ — INV-X4-3 の前提。
+using X4BTestWriteAccess = convo::isr::RuntimeWorldAuthority::WriteAccess;
+static_assert(!std::is_copy_constructible_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must not be copy-constructible");
+static_assert(!std::is_copy_assignable_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must not be copy-assignable");
+static_assert(std::is_move_constructible_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must be move-constructible");
+static_assert(std::is_move_assignable_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess must be move-assignable");
+static_assert(std::is_nothrow_move_constructible_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess move ctor must stay noexcept");
+static_assert(std::is_nothrow_move_assignable_v<X4BTestWriteAccess>,
+    "X4-B Test 2: WriteAccess move assign must stay noexcept");
+// ★ X4-B Test 3-10（アーキテクチャ検証の対応表）:
+//   Test 3 (publishAndSwap 唯一性) / Test 4 (PublishExecutor bypass 禁止) / Test 5 (Coordinator
+//   bypass 禁止) / Test 6 (二重 Store 検出): `tools/publication_authority_verifier.py` の静的検査
+//   （ALLOWED_PUBLISH_AND_SWAP_FILES = RuntimeWorldAuthority.h + core のみ）。
+//   Test 7 (commit-before-swap ordering): `RuntimeWorldAuthority::publish()` 内の commit→swap 順序
+//     コメント固定（本テストは単一スレッドのため ordering はコード契約で検証）。
+//   Test 8 (ownership transfer exactly once): OwnerChannel（SPSC・key 単一 transfer）が実装。
+//   Test 9 (dual-pointer identity consistency) / Test 10 (INV-X4-7): `AudioEngineHarness`
+//     PublishPipelineIntegrationTests（store swap seq 検証）が統合カバー。
+
 [[nodiscard]] bool testRuntimeWorldAuthorityAdapter()
 {
-    auto coordinator = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto authority = std::make_unique<convo::isr::RuntimeWorldAuthority>(*coordinator);
 
     if (authority->currentEpoch() != coordinator->currentPublicationEpoch())
@@ -650,6 +799,16 @@ namespace {
     if (authority->getCurrent() != coordinator->getCurrent())
         return false;
     if (authority->getVersion() != coordinator->getVersion())
+        return false;
+
+    // X4-B: read API は物理 Store（RuntimeStore::current — INV-X4-B）から observe する。
+    //   未 publish 時は null（Store 初期値）。getCurrent()（currentWorld_ 観測）と混同しない。
+    const auto token = authority->acquireReadToken();
+    if (authority->consumeWorldHandle(token) != nullptr)
+        return false;
+    if (authority->consumeWorldHandle() != nullptr)
+        return false;
+    if (authority->observePublishedWorld() != nullptr)
         return false;
 
     // Coordinator must not expose diagnostic/metric setters through the Authority
@@ -663,12 +822,12 @@ namespace {
 //   and the queue still holds exactly capacity items (recoverable by drain).
 [[nodiscard]] bool testPublishIntentQueueFullBackpressure()
 {
-    auto coordinatorStorage = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto& coordinator = *coordinatorStorage;
 
     constexpr size_t kCapacity = 4096;      // kIntentQueueCapacity (FUTURE-10 common queue)
-    convo::isr::RuntimePublicationCoordinator::Intent intent{};
-    intent.type = convo::isr::RuntimePublicationCoordinator::IntentType::Publish;
+    convo::isr::RuntimeIntentCoordinator::Intent intent{};
+    intent.type = convo::isr::RuntimeIntentCoordinator::IntentType::Publish;
 
     size_t accepted = 0;
     for (size_t i = 0; i < kCapacity + 1; ++i)
@@ -750,6 +909,14 @@ int main()
     // --- FUTURE-3: submitRecoveryRequest transport contract (enqueue → pop 1-hop) ---
     if (!testRecoveryRequestEnqueueAndPop())
         throw std::runtime_error("FUTURE-3: recovery request enqueue/pop failed");
+
+    // --- work88 (X1 §6.1): Recovery Durable Admission (queue full ≠ lost / lease / coalesce) ---
+    if (!testRecoveryDurableAdmission())
+        throw std::runtime_error("X1: recovery durable admission (full → durable → take) failed");
+    if (!testRecoveryDurableCoalesce())
+        throw std::runtime_error("X1: recovery durable coalesce (single admission) failed");
+    if (!testRecoveryDurableLeaseRetry())
+        throw std::runtime_error("X1: recovery durable lease retry (Building → DurablePending) failed");
 
     // --- FUTURE-8: Observe overflow → Observe-exclusive Deferred Ring (QUEUE-15) ---
     if (!testObserveOverflowEnqueuePath())

@@ -1,0 +1,279 @@
+{
+  "schema": "policy_top_level_governance_report_v2",
+  "generatedAt": "2026-08-11T16:16:41.8859366+09:00",
+  "policyGlob": ".github/isr-*.json",
+  "policyCount": 24,
+  "requiredFields": [
+    "owner",
+    "issue",
+    "rationale",
+    "expiry"
+  ],
+  "policies": [
+    {
+      "path": ".github/isr-8_1-close-policy.json",
+      "schema": "isr_8_1_close_policy_v1",
+      "owner": "runtime-governance",
+      "issue": "BRIDGE-8_1-CLOSE-POLICY",
+      "rationale": "8.1 close evidence collection and enforcement parameters must be policy-driven and fail-closed.",
+      "expiry": "2026-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-ai-governance-policy.json",
+      "schema": "isr_ai_governance_policy_v1",
+      "owner": "audio-runtime",
+      "issue": "BRIDGE-ISR-AI-GOV-001",
+      "rationale": "Enforce v7.3 single-authority and boundedness contracts with phased CI adoption",
+      "expiry": "2027-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-authority-growth-allowlist.json",
+      "schema": "isr_authority_growth_allowlist_v1",
+      "owner": "AudioEngineRuntime",
+      "issue": "work10-authority-growth-allowlist-2026-05",
+      "rationale": "Transitional authority inventory drift allowance during RuntimeGraph/BuilderToken governance alignment.",
+      "expiry": "2026-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-breakglass-overrides.json",
+      "schema": "isr_breakglass_overrides_v1",
+      "owner": "audio-runtime",
+      "issue": "BRIDGE-ISR-BREAKGLASS-001",
+      "rationale": "Auditable and time-bounded BreakGlassOverride registry for temporary runtime exceptions",
+      "expiry": "2027-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-clang-tidy-audit-policy.json",
+      "schema": "clang_tidy_audit_policy_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-CLANGTIDY-002",
+      "rationale": "Govern clang-tidy audit enforce timing without hard-coding script behavior",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-clang-tidy-rule-registry.json",
+      "schema": "clang_tidy_rule_registry_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-CLANGTIDY-001",
+      "rationale": "Phase2-2 enforcement migration requires reproducible clang-tidy readiness and minimum check coverage",
+      "expiry": "2026-08-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-cleanup-deferred.json",
+      "schema": "cleanup_deferred_registry_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-CLEANUP-GOV-001",
+      "rationale": "top-level lifecycle governance for deferred cleanup policy",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-cleanup-prune-policy.json",
+      "schema": "cleanup_prune_policy_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-CLEANUP-PRUNE-POLICY-001",
+      "rationale": "Externalize cleanup deferred prune ready/blocked rules into a machine-verifiable policy.",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-contract-registry.json",
+      "schema": "isr_contract_registry_v1",
+      "owner": "audioengine-isr",
+      "issue": "ISR-GOV-REGISTRY-CONTRACTS",
+      "rationale": "single source of truth for contract ownership and phase mapping",
+      "expiry": "2099-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-enforcement-adoption-policy.json",
+      "schema": "isr_enforcement_adoption_policy_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-ENFORCE-ADOPTION-001",
+      "rationale": "Keep advanced enforcement migration ratio policy-driven and tier-aware",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-enforcement-source-policy.json",
+      "schema": "isr_enforcement_source_policy_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-ENFORCE-SOURCE-001",
+      "rationale": "Prevent regression from advanced source metrics back to rawRegex in trigger audit",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-flag-dependency-graph.json",
+      "schema": "flag_dependency_graph_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-FLAGGRAPH-001",
+      "rationale": "Prevent rollback flag interaction hell by validating acyclic dependencies and matrix alignment",
+      "expiry": "2026-08-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-legacy-temporary.json",
+      "schema": "isr_legacy_temporary_manifest_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "ISR-LEGACY-TEMP-001",
+      "rationale": "manifest for LegacyTemporary state tracking with phase/deadline governance",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-metric-governance.json",
+      "schema": "metric_governance_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-METRIC-GOV-001",
+      "rationale": "top-level lifecycle governance for metric policy",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-observe-shim-allowlist.json",
+      "schema": "observe_shim_allowlist_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-OBSERVE-GOV-001",
+      "rationale": "top-level lifecycle governance for observe shim allowlist",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-pr-sla-policy.json",
+      "schema": "isr_pr_sla_policy_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-PR-SLA-001",
+      "rationale": "Tier × PR SLA mapping for ISR runtime migration governance",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-rollback-compatibility-matrix.json",
+      "schema": "rollback_compatibility_matrix_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-ROLLBACK-GOV-001",
+      "rationale": "top-level lifecycle governance for rollback compatibility policy",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-safety-regression-baseline.json",
+      "schema": "isr_safety_regression_baseline_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-SAFETY-BASELINE-001",
+      "rationale": "baseline values for SafetyPass comparison during ISR runtime migration",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-trigger-policy.json",
+      "schema": "trigger_policy_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-TRIGGER-GOV-001",
+      "rationale": "top-level lifecycle governance for trigger policy",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-trigger-symbol-allowlist.json",
+      "schema": "trigger_symbol_allowlist_v1",
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-SYMBOL-GOV-001",
+      "rationale": "enforce top-level lifecycle governance for symbol allowlist policy",
+      "expiry": "2026-09-30",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-validator-tiering-policy.json",
+      "schema": "isr_validator_tiering_policy_v1",
+      "owner": "@lonewolf-jp",
+      "issue": "bridge-runtime-validator-tiering-sla",
+      "rationale": "Machine-verifiable validator tiering and SLA contract for bridge runtime migration operations.",
+      "expiry": "2027-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-verifier-execution-layers.json",
+      "schema": "isr_verifier_execution_layers_v1",
+      "owner": "audioengine-isr",
+      "issue": "ISR-GOV-EXECUTION-LAYERS-37-VERIFIERS",
+      "rationale": "Execution-layer contract wiring for 37 required verifier definitions (compile-time/unit/integration/soak/gate tier).",
+      "expiry": "2027-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-verifier-registry.json",
+      "schema": "isr_verifier_registry_v1",
+      "owner": "audioengine-isr",
+      "issue": "ISR-GOV-REGISTRY-VERIFIERS",
+      "rationale": "single source of truth for verifier tier wiring and dependency DAG",
+      "expiry": "2099-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    },
+    {
+      "path": ".github/isr-workflow-dispatch-input-policy.json",
+      "schema": "isr_workflow_dispatch_input_policy_v1",
+      "owner": "@lonewolf-jp",
+      "issue": "bridge-runtime-workflow-dispatch-input-contract",
+      "rationale": "Fail-closed contract for non-8.1 workflow_dispatch inputs in ISR verification workflow.",
+      "expiry": "2027-12-31",
+      "expiryValid": true,
+      "expired": false,
+      "missingFields": []
+    }
+  ],
+  "violations": []
+}

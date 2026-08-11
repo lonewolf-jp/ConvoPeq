@@ -1,0 +1,12 @@
+{
+  "schema": "safety_failure_window_history_v1",
+  "generatedAt": "2026-08-11T16:16:42.4937487+09:00",
+  "streaks": {
+    "classDBacklogDivergence": 0,
+    "classERetentionLeak": 0
+  },
+  "latest": {
+    "retireBacklogSlope": 0.0,
+    "worldLeakCount": 0.0
+  }
+}

@@ -8,7 +8,7 @@
 
 namespace convo::isr {
 
-RuntimePublicationCoordinator::RuntimePublicationCoordinator()
+RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     : overflowScheduler_(*this)
     , shutdownScheduler_(*this)
     , priorityScheduler_(*this)
@@ -29,7 +29,7 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     // ★ FUTURE-4: persistentState_ removed — metadata derived from currentWorld_ (RuntimeState::publication)
 }
 
-bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
+bool RuntimeIntentCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
                                                     const TieredPayloadDescriptor& descriptor) noexcept {
     ClosureValidator closureValidator;
     if (!closureValidator.validateClosureGraph(closure)) {
@@ -47,7 +47,7 @@ bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescript
     return true;
 }
 
-const char* RuntimePublicationCoordinator::lastRejectReason() const noexcept {
+const char* RuntimeIntentCoordinator::lastRejectReason() const noexcept {
     switch (convo::consumeAtomic(lastRejectCode_, std::memory_order_acquire)) {
     case RejectCode::InvalidClosure:
         return "invalid closure graph";
@@ -59,7 +59,7 @@ const char* RuntimePublicationCoordinator::lastRejectReason() const noexcept {
     }
 }
 
-void RuntimePublicationCoordinator::commit(PublishAuthority,
+void RuntimeIntentCoordinator::commit(PublishAuthority,
                                            RuntimeBoundary boundary,
                                            const void* newWorld,
                                            std::uint64_t version) {
@@ -72,7 +72,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
            version);
 }
 
-void RuntimePublicationCoordinator::commit(PublishAuthority,
+void RuntimeIntentCoordinator::commit(PublishAuthority,
                                            RuntimeBoundary boundary,
                                            const void* newWorld,
                                            std::uint64_t /*version*/,
@@ -114,7 +114,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::retire(RetireAuthority,
+void RuntimeIntentCoordinator::retire(RetireAuthority,
                                            RuntimeBoundary boundary,
                                            const void* oldWorld) {
     if (boundary != RuntimeBoundary::NonRTWorld || oldWorld == nullptr) {
@@ -137,7 +137,7 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
     setRetireBacklogCount(backlog);
 }
 
-RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority,
+RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
                                                                    ISRRetireRouter& router,
                                                                    void* ptr,
                                                                    void (*deleter)(void*),
@@ -161,23 +161,23 @@ RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority
     return RetireEnqueueResult::Success;
 }
 
-std::uint64_t RuntimePublicationCoordinator::retireAuthorityCount() const noexcept
+std::uint64_t RuntimeIntentCoordinator::retireAuthorityCount() const noexcept
 {
     return convo::consumeAtomic(retireAuthorityCount_, std::memory_order_acquire);
 }
 
-const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
+const void* RuntimeIntentCoordinator::getCurrent() const noexcept {
     return convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getVersion() const noexcept {
     // ★ FUTURE-4: derive from currentWorld_ (RuntimeState::publication.mappedRuntimeGeneration)
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     return world ? world->publication.mappedRuntimeGeneration : std::uint64_t{0};
 }
 
-PublicationEpoch RuntimePublicationCoordinator::currentPublicationEpoch() const noexcept {
+PublicationEpoch RuntimeIntentCoordinator::currentPublicationEpoch() const noexcept {
     // ★ FUTURE-4: latest publicationEpoch derived from currentWorld_ (RuntimeState::publication.epoch)
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
@@ -186,13 +186,13 @@ PublicationEpoch RuntimePublicationCoordinator::currentPublicationEpoch() const 
 
 // ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId).
 //   Read-only Authority accessor — RuntimeWorldAuthority::sequence() delegates here.
-PublicationSequenceId RuntimePublicationCoordinator::currentPublicationSequenceId() const noexcept {
+PublicationSequenceId RuntimeIntentCoordinator::currentPublicationSequenceId() const noexcept {
     const auto world = static_cast<const RuntimeState*>(
         convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
     return world ? world->publication.sequenceId : PublicationSequenceId{0};
 }
 
-void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
     const auto previousBacklog = convo::consumeAtomic(previousRetireBacklogCount_, std::memory_order_acquire);
     const auto slope = (count > previousBacklog) ? (count - previousBacklog) : 0;
 
@@ -224,50 +224,50 @@ void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) n
     }
 }
 
-void RuntimePublicationCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
     convo::publishAtomic(publicationBacklogCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setPendingIntentCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setPendingIntentCount(std::uint64_t count) noexcept {
     convo::publishAtomic(pendingIntentCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
     convo::publishAtomic(fallbackBacklogCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
     convo::publishAtomic(reclaimInFlightCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
     convo::publishAtomic(deferredRetireResidencyCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
+void RuntimeIntentCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
     convo::publishAtomic(quarantineResidentCount_, count, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
+void RuntimeIntentCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
     convo::publishAtomic(overflowMaxAgeUs_, maxAgeUs, std::memory_order_release);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getOverflowMaxAgeUs() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getOverflowMaxAgeUs() const noexcept {
     return convo::consumeAtomic(overflowMaxAgeUs_, std::memory_order_acquire);
 }
 
-RuntimePublicationCoordinator::OverflowDrainResult
-RuntimePublicationCoordinator::drainOverflowRing(
+RuntimeIntentCoordinator::OverflowDrainResult
+RuntimeIntentCoordinator::drainOverflowRing(
     RetireOverflowRing& overflowRing, LifetimeState& retireRuntime, bool unlimited) noexcept
 {
     return overflowScheduler_.drainOverflowRing(overflowRing, retireRuntime, unlimited);
 }
 
-void RuntimePublicationCoordinator::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
+void RuntimeIntentCoordinator::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
     priorityScheduler_.setOverflowAgeWarnCallback(cb);
 }
 
-size_t RuntimePublicationCoordinator::deferredRingOccupancy() const noexcept {
+size_t RuntimeIntentCoordinator::deferredRingOccupancy() const noexcept {
     return overflowScheduler_.deferredRingOccupancy();
 }
 
@@ -275,8 +275,8 @@ size_t RuntimePublicationCoordinator::deferredRingOccupancy() const noexcept {
 // ★ Phase5: OverflowScheduler implementation
 // ═══════════════════════════════════════════════════════════
 
-RuntimePublicationCoordinator::OverflowDrainResult
-RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
+RuntimeIntentCoordinator::OverflowDrainResult
+RuntimeIntentCoordinator::OverflowScheduler::drainOverflowRing(
     RetireOverflowRing& overflowRing, LifetimeState& retireRuntime, bool unlimited) noexcept
 {
     OverflowDrainResult result;
@@ -383,61 +383,75 @@ RuntimePublicationCoordinator::OverflowScheduler::drainOverflowRing(
     return result;
 }
 
-void RuntimePublicationCoordinator::setSwapPending(bool pending) noexcept {
+void RuntimeIntentCoordinator::setSwapPending(bool pending) noexcept {
     convo::publishAtomic(swapPending_, pending, std::memory_order_release);
 }
 
-bool RuntimePublicationCoordinator::isSwapPending() const noexcept {
+bool RuntimeIntentCoordinator::isSwapPending() const noexcept {
     return convo::consumeAtomic(swapPending_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getReclaimInFlightCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getReclaimInFlightCount() const noexcept {
     return convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
 }
 
 // ★ A-2.4: 新規 getter 群（DrainAudit 用）
-std::uint64_t RuntimePublicationCoordinator::getPublicationBacklogCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getPublicationBacklogCount() const noexcept {
     return convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getPendingIntentCount() const noexcept {
+// ★ work88 (X5 §6.5): Publish Intent residency counter（INV-X5-1）。
+std::uint64_t RuntimeIntentCoordinator::getPublicationIntentResidencyCount() const noexcept {
+    return convo::consumeAtomic(publicationIntentResidencyCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimeIntentCoordinator::getPendingIntentCount() const noexcept {
     return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getRetireBacklogCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getRetireBacklogCount() const noexcept {
     return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getFallbackBacklogCount() const noexcept {
+// ★ work88 (X6 §6.6): Quarantine transport residency counters（INV-X6-4）。
+std::uint64_t RuntimeIntentCoordinator::getQuarantineIntentResidencyCount() const noexcept {
+    return convo::consumeAtomic(quarantineIntentResidencyCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimeIntentCoordinator::getQuarantineRingResidencyCount() const noexcept {
+    return convo::consumeAtomic(quarantineRingResidencyCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimeIntentCoordinator::getFallbackBacklogCount() const noexcept {
     return convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getDeferredRetireResidencyCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getDeferredRetireResidencyCount() const noexcept {
     return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimePublicationCoordinator::getQuarantineResidentCount() const noexcept {
+std::uint64_t RuntimeIntentCoordinator::getQuarantineResidentCount() const noexcept {
     return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
 }
 
 // ★ Phase5: Delegation to ShutdownScheduler
-bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
+bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
     return shutdownScheduler_.isFullyDrained();
 }
 
-void RuntimePublicationCoordinator::requestShutdown() noexcept {
+void RuntimeIntentCoordinator::requestShutdown() noexcept {
     shutdownScheduler_.requestShutdown();
 }
 
-void RuntimePublicationCoordinator::markShutdownComplete() noexcept {
+void RuntimeIntentCoordinator::markShutdownComplete() noexcept {
     shutdownScheduler_.markShutdownComplete();
 }
 
-RuntimePublicationCoordinator::CoordinatorState RuntimePublicationCoordinator::getState() const noexcept {
+RuntimeIntentCoordinator::CoordinatorState RuntimeIntentCoordinator::getState() const noexcept {
     return convo::consumeAtomic(state_, std::memory_order_acquire);
 }
 
-void RuntimePublicationCoordinator::markTransitionStart() noexcept {
+void RuntimeIntentCoordinator::markTransitionStart() noexcept {
     const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
     if (state != CoordinatorState::Ready) {
         return;
@@ -445,7 +459,7 @@ void RuntimePublicationCoordinator::markTransitionStart() noexcept {
     convo::publishAtomic(state_, CoordinatorState::Transitioning, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
+void RuntimeIntentCoordinator::markTransitionCommitted() noexcept {
     const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
     if (state != CoordinatorState::Transitioning) {
         return;
@@ -459,7 +473,7 @@ void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
 // ★ Phase5: OverflowScheduler deferredRingOccupancy
 // ═══════════════════════════════════════════════════════════
 
-size_t RuntimePublicationCoordinator::OverflowScheduler::deferredRingOccupancy() const noexcept {
+size_t RuntimeIntentCoordinator::OverflowScheduler::deferredRingOccupancy() const noexcept {
     return convo::consumeAtomic(coordinator_.coordinatorDeferredCount_, std::memory_order_acquire);
 }
 
@@ -467,7 +481,7 @@ size_t RuntimePublicationCoordinator::OverflowScheduler::deferredRingOccupancy()
 // ★ Phase5: ShutdownScheduler implementation
 // ═══════════════════════════════════════════════════════════
 
-bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const noexcept {
+bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcept {
     if (convo::consumeAtomic(coordinator_.swapPending_, std::memory_order_acquire)) {
         return false;
     }
@@ -489,18 +503,33 @@ bool RuntimePublicationCoordinator::ShutdownScheduler::isFullyDrained() const no
         && coordinator_.recoveryIntentQueue_.size() == 0
         && convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
+        // ★ work88 (X5 §6.5): Publish Intent residency も独立に == 0 を要求（INV-X5-1）。
+        //   queue emptiness と pendingIntentCount_ だけでは Publish 残留（intentQueue_ 内の
+        //   Publish Intent）を捕捉できないため、本 counter で独立判定する。
+        && convo::consumeAtomic(coordinator_.publicationIntentResidencyCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.reclaimInFlightCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.deferredRetireResidencyCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0;
+        // ★ work88 (X6 §6.6): Quarantine transport residency を個別に == 0（INV-X6-4）。
+        //   quarantineIntentResidencyCount_（intentQueue_ 残留）と quarantineRingResidencyCount_
+        //   （quarantineFallbackQueue_ 残留）をそれぞれ独立判定する。quarantineResidentCount_
+        //   （実在 DSP）は AudioEngine::isFullyDrained が DSPQuarantineManager を直接判定（X6）。
+        && convo::consumeAtomic(coordinator_.quarantineIntentResidencyCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.quarantineRingResidencyCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0
+        // ★ work88 (X1 §6.1): durable Recovery admission が空であること（INV-X1-1/INV-X1-2）。
+        //   lease 方式では DurablePending OR Building の両方が false であること（recoveryAdmissionPending_
+        //   は Building 中も true を維持 — 二十六次レビュー）。shutdown 時は discardPendingRecoveryAdmission
+        //   （RecoveryAdmissionClosed）で破棄されるため、本条件は成立する。
+        && !convo::consumeAtomic(coordinator_.recoveryAdmissionPending_, std::memory_order_acquire);
 }
 
-void RuntimePublicationCoordinator::ShutdownScheduler::requestShutdown() noexcept {
+void RuntimeIntentCoordinator::ShutdownScheduler::requestShutdown() noexcept {
     convo::publishAtomic(coordinator_.state_, CoordinatorState::ShuttingDown, std::memory_order_release);
 }
 
-void RuntimePublicationCoordinator::ShutdownScheduler::markShutdownComplete() noexcept {
+void RuntimeIntentCoordinator::ShutdownScheduler::markShutdownComplete() noexcept {
     const auto state = convo::consumeAtomic(coordinator_.state_, std::memory_order_acquire);
     if (state != CoordinatorState::ShuttingDown) {
         return;
@@ -517,11 +546,11 @@ void RuntimePublicationCoordinator::ShutdownScheduler::markShutdownComplete() no
 // ★ Phase5: PriorityScheduler implementation
 // ═══════════════════════════════════════════════════════════
 
-void RuntimePublicationCoordinator::PriorityScheduler::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
+void RuntimeIntentCoordinator::PriorityScheduler::setOverflowAgeWarnCallback(AgeWarnCallback cb) noexcept {
     coordinator_.overflowAgeWarnCallback_ = cb;
 }
 
-void RuntimePublicationCoordinator::PriorityScheduler::escalateAllRetires(RetirePriority minPriority) noexcept {
+void RuntimeIntentCoordinator::PriorityScheduler::escalateAllRetires(RetirePriority minPriority) noexcept {
     // ★ Phase5: Coordinator の escalateAllRetires は LifetimeState に委譲
     //   実装は AudioEngine.Processing.ReleaseResources.cpp の worldAuthority_.lifetime().escalateAllRetires() が担当
     //   本メソッドは Coordinator の公開APIとしての将来拡張用プレースホルダ
@@ -543,7 +572,7 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 // ★ P0-4C: ISR Intent 発行インターフェース実装
 //==============================================================================
 
-void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexcept
+void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle) noexcept
 {
     // ★ P0-4A: Observe Intent — Timer → enqueue（RT-safe, lock-free）
     //   OBSERVE-2: push() は即座に復帰（lock-free）
@@ -560,9 +589,9 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
     const auto intentId = nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed);
 
-    RuntimePublicationCoordinator::Intent intent{};
-    intent.type = RuntimePublicationCoordinator::IntentType::Observe;
-    intent.payload.observe = RuntimePublicationCoordinator::ObservePayload{handle, currentEpoch};
+    RuntimeIntentCoordinator::Intent intent{};
+    intent.type = RuntimeIntentCoordinator::IntentType::Observe;
+    intent.payload.observe = RuntimeIntentCoordinator::ObservePayload{handle, currentEpoch};
     intent.sequenceId = intentId;
 
     // ★ work88 (P2-1 §1.1.3): reservation-before-push 化。
@@ -593,41 +622,63 @@ void RuntimePublicationCoordinator::submitObserve(const DSPHandle& handle) noexc
     observeFallbackOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool RuntimePublicationCoordinator::requestReclaim(
-    const DSPHandle& handle,
-    DSPHandleRuntime& handleRuntime,
-    ISRRetireRouter& router) noexcept
+// ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority の唯一の entry point。
+//   RuntimeEBR: 既存 requestReclaim と同じ（retire → epoch 安全確認 → reclaim / pending）。
+//   ShutdownQuiescent: readerRegistrationClosed 必須（INV-X3-4 / INV-ISR-04）→ retire →
+//   epoch 判定スキップ → reclaim（reader 停止 + registration closed を前提に EBR を bypass）。
+//   precondition は retire 前に評価（十四次指摘 — phase 不正時に retire の state transition を
+//   先に発生させない）。物理削除（DSPCore* delete）は含まない（slot 状態遷移のみ — 既存契約）。
+bool RuntimeIntentCoordinator::reclaim(ReclaimMode mode,
+                                       const DSPHandle& handle,
+                                       DSPHandleRuntime& handleRuntime,
+                                       ISRRetireRouter& router,
+                                       bool readerRegistrationClosed) noexcept
 {
-    // ★ P0-4B: Coordinator 専用 reclaim 要求
-    //   DELETE-2: executeRetire → waitReaders → executeReclaim の順序
-    //   DELETE-3: waitReaders で epoch 安全確認後にのみ reclaim
-
-    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
-    handleRuntime.retire(handle);
-
-    // 2. waitReaders(handle) — ISR不変条件: epoch 安全確認
-    //    retireEpoch < minReaderEpoch で安全判定
-    const auto retireEpoch = router.currentEpoch();
-    const auto minReaderEpoch = router.minReaderEpoch();
-    if (retireEpoch >= minReaderEpoch) {
-        // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
-        // カウンタ更新のみ行い、即座に復帰（NonRT safe）
-        setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
-        // ★ work88 (六次レビュー — TOCTOU 修正): 呼出し元へ「遅延」を通知。
-        //   呼出し元（requestReclaimHandle / drainDeferredRetireQueues）が handle を
-        //   再試行リストへ戻す（slot リーク防止）。
-        return false;
+    // 0. validate reclaim precondition（retire 前 — 十四次指摘）
+    if (mode == ReclaimMode::ShutdownQuiescent)
+    {
+        // INV-X3-4 / INV-ISR-04: ShutdownQuiescent reclaim は
+        //   (a) reader registration が永久に閉じている（CloseReaderRegistration フェーズ）
+        //   (b) active reader が 0（readersZero — graceful drain 完了）
+        // の両方が必須（R4 Phase 3: ShutdownQuiescenceProof の構成要素）。
+        // 成立しない場合は NO reclaim（retire も実行しない）→ 呼出し元は Faulted へ。
+        if (!readerRegistrationClosed || router.activeReaderCount() != 0)
+            return false;
     }
 
+    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲（共通・precondition 通過後）
+    handleRuntime.retire(handle);
+
+    // 2. waitReaders — RuntimeEBR のみ epoch 安全確認（retireEpoch < minReaderEpoch）
+    if (mode == ReclaimMode::RuntimeEBR)
+    {
+        const auto retireEpoch = router.currentEpoch();
+        const auto minReaderEpoch = router.minReaderEpoch();
+        if (retireEpoch >= minReaderEpoch) {
+            // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
+            // カウンタ更新のみ行い、即座に復帰（NonRT safe）
+            setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
+            // ★ TOCTOU 修正: 呼出し元へ「遅延」を通知（再試行リストへ戻す — slot リーク防止）
+            return false;
+        }
+    }
+    // ShutdownQuiescent: epoch 判定をスキップ（readerRegistrationClosed + Audio reader 停止を前提）
+
     // 3. executeReclaim(handle) — 安全確認完了
-    //    DELETE-8: Coordinator は Reclaimed 状態への遷移のみを行い、
-    //    物理削除（DSPCore* の delete）は DSPLifetimeManager 経由で別途実行済み。
-    //    DSPHandleRuntime::reclaim() は Handle の状態を Reclaimed に遷移する
-    //    （DSPCore* の削除は行わない — 既に retire path で enqueueWithRetry 済み）。
+    //    Reclaimed 状態への遷移のみ（物理削除は retire path の enqueueWithRetry が担当）
     handleRuntime.reclaim(handle);
     // ACK: reclaim complete — カウンタリセット
     setReclaimInFlightCount(0);
     return true;
+}
+
+bool RuntimeIntentCoordinator::requestReclaim(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router) noexcept
+{
+    // ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority に一本化（RuntimeEBR モード委譲）
+    return reclaim(ReclaimMode::RuntimeEBR, handle, handleRuntime, router, false);
 }
 
 //==============================================================================
@@ -667,7 +718,7 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を payload に内包。
 //   quarantinedHandle だけでは resolve() 不能（ISRDSPHandle.cpp:69）なため、build 入力は
 //   値コピーした snapshot から引当する（epoch 逆引き不要 — lifetime を構造的に解決）。
-void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+void RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
                                                           const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
     // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
@@ -708,15 +759,90 @@ void RuntimePublicationCoordinator::submitRecoveryRequest(const DSPHandle& quara
         return;
     }
 
-    // ★ drop 記録 — Recovery Intent が失われるため Critical 相当の診断。静かに破棄しない。
-    //   HealthMonitor が RecoveryDrop を監視し、再発時は ISRHealthState 昇格を駆動する。
-    //   reservation を fetchSub で相消し（pendingIntentCount_ は不変）。
+    // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。
+    //   transport residency から rollback（fetchSub）し、durable admission state に保持する
+    //   （recoveryAdmissionPending_ = true）。drop カウンタ（recoveryIntentDropCount_）は
+    //   queue saturation の診断として維持（INV-X1-3 — telemetry 削除しない）。
+    //   1 logical admission = 1 reservation（INV-X1-5）— coalesce で reservation を増やさない。
+    //   durable admission は queue residency と二重計上しない（INV-X1-6）。
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
+
+    // durable admission へ保持（coalesce: 単一スロット — 既存 durable があれば最新で上書き）
+    pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
+    pendingRecoveryAdmission_.pending = true;
+    pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
+    pendingRecoveryAdmission_.buildSource = buildSource;
+    pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
+    pendingRecoveryAdmission_.handle = quarantinedHandle;
+    pendingRecoveryAdmission_.epoch = currentEpoch;
+    pendingRecoveryAdmission_.intentId = intent.intentId;
+    convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
 }
 
-std::optional<RuntimePublicationCoordinator::RecoveryIntent>
-RuntimePublicationCoordinator::popRecoveryRequest() noexcept
+// ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
+//   二十六次レビュー（必須修正1）: destructive dequeue ではなく DurablePending → Building の
+//   state transition。build 失敗（transient）は Building → DurablePending へ戻すことで
+//   retry を構造的に保証する（INV-X1-1: accepted ⇒ exactly one durable state が常に成立）。
+//   recoveryAdmissionPending_ は Building 中も true を維持（build gap を isFullyDrained が検出）。
+//   SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）のため競合なし。
+std::optional<RuntimeIntentCoordinator::RecoveryIntent>
+RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
+{
+    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::DurablePending)
+        return std::nullopt;
+
+    RecoveryIntent intent{
+        pendingRecoveryAdmission_.handle,
+        pendingRecoveryAdmission_.epoch,
+        pendingRecoveryAdmission_.intentId,
+        pendingRecoveryAdmission_.buildSource
+    };
+    // ★ lease: DurablePending → Building（クリアしない）。build 失敗時は Building → DurablePending へ戻す。
+    pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::Building;
+    return intent;
+}
+
+bool RuntimeIntentCoordinator::hasPendingRecoveryAdmission() const noexcept
+{
+    return convo::consumeAtomic(recoveryAdmissionPending_, std::memory_order_acquire)
+        && pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission;
+}
+
+// ★ work88 (X1 §6.1 — RecoveryAdmissionClosed): durable admission を破棄（shutdown 専用）。
+//   shutdown 中は publish/commit が実行されないため、durable admission を保持しても意味がない
+//   （§6.1 case B）。discard は ShutdownDiscard として recoveryShutdownDiscardCount_ に記録
+//   （INV-5 — silent loss ではない・意図的な lifecycle discard — dash §8.1）。
+void RuntimeIntentCoordinator::discardPendingRecoveryAdmission() noexcept
+{
+    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission)
+    {
+        convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+        pendingRecoveryAdmission_ = PendingRecoveryAdmission{};
+        convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
+    }
+}
+
+// ★ work88 (X1 §6.1 — lease 方式): Builder の build 結果に応じて durable admission を settle。
+//   retry=true: Building → DurablePending（transient failure — 次サイクルで再 take。recoveryAdmissionPending_
+//   は true 維持 = build gap を isFullyDrained が検出）。
+//   retry=false: クリア（build success / Discarded — state = NoAdmission + recoveryAdmissionPending_ = false）。
+//   SPSC（Consumer = Builder Loop のみ）のため競合なし。
+void RuntimeIntentCoordinator::settlePendingRecoveryAdmission(bool retry) noexcept
+{
+    if (retry)
+    {
+        if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::Building)
+            pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
+        // recoveryAdmissionPending_ は true 維持（durable 有効のまま）
+        return;
+    }
+    pendingRecoveryAdmission_ = PendingRecoveryAdmission{};
+    convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
+}
+
+std::optional<RuntimeIntentCoordinator::RecoveryIntent>
+RuntimeIntentCoordinator::popRecoveryRequest() noexcept
 {
     RecoveryIntent intent{};
     if (!recoveryIntentQueue_.pop(intent))
@@ -738,7 +864,7 @@ RuntimePublicationCoordinator::popRecoveryRequest() noexcept
 //   単なる drain-on-exit（pop して捨てるだけ）ではなく、discard を観測可能な lifecycle として
 //   enqueue → pending → shutdown closes admission → discard → pending count release → discard telemetry
 //   を構成する（dash §8.1 ShutdownDiscard）。
-void RuntimePublicationCoordinator::discardRecoveryRequestsOnShutdown() noexcept
+void RuntimeIntentCoordinator::discardRecoveryRequestsOnShutdown() noexcept
 {
     while (popRecoveryRequest())
     {
@@ -746,7 +872,7 @@ void RuntimePublicationCoordinator::discardRecoveryRequestsOnShutdown() noexcept
     }
 }
 
-void RuntimePublicationCoordinator::submitQuarantine(
+void RuntimeIntentCoordinator::submitQuarantine(
     const DSPHandle& handle,
     QuarantineReason reason,
     DSPHandleRuntime& handleRuntime,
@@ -763,18 +889,21 @@ void RuntimePublicationCoordinator::submitQuarantine(
     (void)quarantineManager;
 
     const std::uint64_t seqId = nextIntentId_.fetch_add(1, std::memory_order_relaxed);
-    RuntimePublicationCoordinator::Intent intent{};
-    intent.type = RuntimePublicationCoordinator::IntentType::Quarantine;
-    intent.payload.quarantine = RuntimePublicationCoordinator::QuarantinePayload{handle, reason, contextEpoch};
+    RuntimeIntentCoordinator::Intent intent{};
+    intent.type = RuntimeIntentCoordinator::IntentType::Quarantine;
+    intent.payload.quarantine = RuntimeIntentCoordinator::QuarantinePayload{handle, reason, contextEpoch};
     intent.sequenceId = seqId;
 
     // ★ work88 (P2-1 §1.1.3): pendingIntentCount_ のみ reservation-before-push 化。
-    //   quarantineResidentCount_ は本改修の対象外（P3 で分離 — 別カウンタとして独立管理）。
-    //   push 前に pendingIntentCount_ を fetchAdd。全段 push 失敗時は fetchSub で rollback
-    //   （quarantineResidentCount_ は不変のまま drop カウンタのみ記録）。
+    //   push 前に pendingIntentCount_ を fetchAdd。全段 push 失敗時は fetchSub で rollback。
+    // ★ work88 (X6 §6.6): quarantine の transport residency を intent/ring に分離（INV-X6-4）。
+    //   - primary（intentQueue_）成功: quarantineIntentResidencyCount_++（Intent lane residency）
+    //   - fallback（quarantineFallbackQueue_）へ移動: intent -1 → ring +1（両方が同時に 1 にならない）
+    //   - quarantineResidentCount_ の +1 は撤去（DSPQuarantineManager::quarantineHandle が唯一管理 —
+    //     submitQuarantine は enqueue まで。実在 DSP 数は AudioEngine::isFullyDrained が直接判定）。
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     if (intentQueue_.push(intent)) {
-        setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
         return;
     }
 
@@ -782,10 +911,16 @@ void RuntimePublicationCoordinator::submitQuarantine(
     //   quarantine 検出は安全要件（bad DSP のアクセス禁止）であり、drop されると
     //   quarantined DSP が永久に retire されず RT からアクセス不能なメモリが残存する。
     //   intentQueue_ full 時は Quarantine 専用 fallback ring へ退避（drop しない）。
+    // ★ work88 (X6 §6.6): fallback へ移動した時点で primary intent residency → ring residency
+    //   へ移動（intent -1 → ring +1。quarantineIntentResidencyCount_ と quarantineRingResidencyCount_
+    //   は同時に 1 にならない — INV-X6-4 / §6.6 対象マッピング表）。
+    convo::fetchSubAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     if (quarantineFallbackQueue_.push(intent)) {
-        setQuarantineResidentCount(quarantineResidentCount_.load(std::memory_order_relaxed) + 1);
+        convo::fetchAddAtomic(quarantineRingResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
         return;
     }
+    // ★ X6: fallback も失敗（全段失敗）→ intent residency は上記 fetchSub で rollback 済み
+    //   （ring へ移動しなかった）。pendingIntentCount_ のみ下記 drop 処理で fetchSub 相殺する。
 
     // fallback も full → 絶対に静かに破棄しない。drop カウンタを増やして診断に残す。
     //   （AudioEngine 側の HealthMonitor が quarantineFallbackDropCount を監視し、

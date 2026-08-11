@@ -1,0 +1,10 @@
+{
+  "promotableResidualCount": 0,
+  "specFixedResidualCount": 0,
+  "schema": "backlog_specfixed_residual_report_v1",
+  "backlogPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work\\ISR_Completeness_Risk_Backlog.md",
+  "residual": [],
+  "enforceNoSpecFixed": true,
+  "totalRStatusCount": 25,
+  "generatedAt": "2026-08-11T16:16:43.2435112+09:00"
+}

@@ -1,0 +1,76 @@
+{
+  "schema": "trigger_symbol_usage_report_v1",
+  "generatedAt": "2026-08-11T16:16:38.8312768+09:00",
+  "allowlistPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-trigger-symbol-allowlist.json",
+  "totalMatches": 8,
+  "blockedMatches": 0,
+  "symbolStats": [
+    {
+      "symbol": "activeDSP",
+      "totalMatches": 8,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "activeDSP_",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "exchangeFadingOutDSP",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "fadingDSP_",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "getActiveDSP",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "getFadingDSP",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "getRuntimeExecutionViewForAudioThread",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "getRuntimeExecutionViewForControlThread",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "resolveActiveDSPFromRuntimeWorldOnly",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "resolveFadingDSPFromRuntimeWorldOnly",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "RuntimeExecutionView",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "runtimePublicationCoordinator_",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    },
+    {
+      "symbol": "RuntimePublicationCoordinator::create",
+      "totalMatches": 0,
+      "blockedMatches": 0
+    }
+  ],
+  "policyViolations": [],
+  "blocked": []
+}

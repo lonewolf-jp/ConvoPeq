@@ -1,0 +1,76 @@
+{
+  "schema": "ownership_migration_report_v2",
+  "generatedAt": "2026-08-11T16:16:42.6653141+09:00",
+  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+  "lifecyclePath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.DSPCoreLifecycle.cpp",
+  "triggerAuditReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "authorityTransferSequence": {
+    "newAuthorityIntroduced": true,
+    "readPathCutoverVerified": true,
+    "writePathCutoverVerified": true,
+    "metricsConfirmed": true,
+    "triggerConfirmed": true,
+    "legacyAuthorityRemoved": true
+  },
+  "allStepsSatisfied": true,
+  "stepDiagnostics": [
+    {
+      "step": "newAuthorityIntroduced",
+      "satisfied": true,
+      "reason": "ConvolverRuntimeState::prepare introduces owner-scoped authority for RCU provider.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h:682:prepare_owner_signature",
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h:686:set_rcu_provider_owner"
+      ]
+    },
+    {
+      "step": "readPathCutoverVerified",
+      "satisfied": true,
+      "reason": "Read path no longer forwards through legacy ownerEngine accessors.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h:unmatched:legacy_publish_forwarder",
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h:unmatched:legacy_enter_forwarder",
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h:unmatched:legacy_exit_forwarder"
+      ]
+    },
+    {
+      "step": "writePathCutoverVerified",
+      "satisfied": true,
+      "reason": "Write path uses owner pass-through and does not persist legacy owner pointer.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.DSPCoreLifecycle.cpp:196:prepare_pass_owner",
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.DSPCoreLifecycle.cpp:unmatched:legacy_owner_assignment"
+      ]
+    },
+    {
+      "step": "legacyAuthorityRemoved",
+      "satisfied": true,
+      "reason": "Legacy owner authority artifacts are absent from header and lifecycle implementation.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h:unmatched:legacy_owner_member",
+        "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.DSPCoreLifecycle.cpp:unmatched:legacy_owner_symbol"
+      ]
+    },
+    {
+      "step": "metricsConfirmed",
+      "satisfied": true,
+      "reason": "Trigger audit metrics required for authority transfer are present and zeroed.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.activeDspRefCount:metric_active_dsp_ref",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.fadingOutDspWriteCount:metric_fading_write",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:metrics.runtimeExecutionViewUsageCount:metric_runtime_view"
+      ]
+    },
+    {
+      "step": "triggerConfirmed",
+      "satisfied": true,
+      "reason": "Trigger policy evaluations are present, unexpired, and within allowed maxima.",
+      "evidenceLocators": [
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyViolations:policy_violations",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyEvaluations.runtimeExecutionViewConvergence:policy_runtime_view",
+        "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json:policyEvaluations.fadingOutDspDeletionStart:policy_fading_write"
+      ]
+    }
+  ],
+  "violations": []
+}

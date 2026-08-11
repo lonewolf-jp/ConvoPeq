@@ -21,34 +21,34 @@ enum class PublishStageResult : uint8_t {
 struct RuntimeBuildSnapshot;
 
 template <typename World, typename Handle, typename Bridge>
-class RuntimePublicationCoordinator final
+class RuntimePublishAuthority final
 {
 public:
     struct ReadToken final
     {
     private:
-        friend class RuntimePublicationCoordinator<World, Handle, Bridge>;
+        friend class RuntimePublishAuthority<World, Handle, Bridge>;
         constexpr ReadToken() noexcept = default;
     };
 
-    using Store = RuntimeStore<World, RuntimePublicationCoordinator<World, Handle, Bridge>>;
+    using Store = RuntimeStore<World, RuntimePublishAuthority<World, Handle, Bridge>>;
     using WriteAccess = typename Store::WriteAccess;
 
-    RuntimePublicationCoordinator(const RuntimePublicationCoordinator&) = delete;
-    RuntimePublicationCoordinator& operator=(const RuntimePublicationCoordinator&) = delete;
-    RuntimePublicationCoordinator(RuntimePublicationCoordinator&&) noexcept = default;
-    RuntimePublicationCoordinator& operator=(RuntimePublicationCoordinator&&) noexcept = default;
+    RuntimePublishAuthority(const RuntimePublishAuthority&) = delete;
+    RuntimePublishAuthority& operator=(const RuntimePublishAuthority&) = delete;
+    RuntimePublishAuthority(RuntimePublishAuthority&&) noexcept = default;
+    RuntimePublishAuthority& operator=(RuntimePublishAuthority&&) noexcept = default;
 
-    explicit RuntimePublicationCoordinator(Bridge&& bridge, WriteAccess&& writeAccess) noexcept
+    explicit RuntimePublishAuthority(Bridge&& bridge, WriteAccess&& writeAccess) noexcept
         : bridge_(std::move(bridge))
         , writeAccess_(std::move(writeAccess))
     {
     }
 
-    [[nodiscard]] static RuntimePublicationCoordinator create(Bridge&& bridge,
+    [[nodiscard]] static RuntimePublishAuthority create(Bridge&& bridge,
                                                               Store& store) noexcept
     {
-        return RuntimePublicationCoordinator { std::move(bridge), store.acquireWriteAccess() };
+        return RuntimePublishAuthority { std::move(bridge), store.acquireWriteAccess() };
     }
 
     [[nodiscard]] static const World* consumePublishedWorld(const Store& store) noexcept

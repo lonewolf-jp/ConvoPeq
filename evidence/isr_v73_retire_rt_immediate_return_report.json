@@ -1,0 +1,11 @@
+{
+  "violations": [],
+  "generatedAt": "2026-08-11T16:17:38.1585915+09:00",
+  "violationCount": 0,
+  "schema": "isr_v73_retire_rt_immediate_return_report_v1",
+  "checks": [
+    "CI-RETIRE-RT-001",
+    "CI-RETIRE-RT-002",
+    "CI-RETIRE-RT-003"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "patterns": [
+    "runtimeGraph\\s*->",
+    "runtimeGraph\\s*->",
+    "\\bgetRuntimeGraph\\s*\\(",
+    "\\b(?:convo::)?consumeAtomic\\s*\\(\\s*currentSampleRate\\b"
+  ],
+  "totalHits": 0,
+  "violations": [],
+  "generatedAt": "2026-08-11T16:17:40.6359495+09:00",
+  "ready": true,
+  "sourceRoot": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine",
+  "schema": "engine_projection_collapse_report_v1",
+  "hits": []
+}

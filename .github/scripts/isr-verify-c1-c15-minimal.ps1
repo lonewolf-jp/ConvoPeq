@@ -99,8 +99,8 @@ $c4LegacyCommitNewDsp = Count-RegexMatches -Files $files -Pattern '\bcommitNewDS
 $c4BridgeCommit = Count-RegexMatches -Files $files -Pattern 'runtimePublicationBridge_\.commit\s*\('
 $c4BridgeRetire = Count-RegexMatches -Files $files -Pattern 'runtimePublicationBridge_\.retire\s*\('
 $c4ForbiddenAudioEngineOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commit|publish|retire|build|activate)\w*\s*\('
-# ISR Bridge 正規関数を除外（commitOrRollbackProbe, publishIdleWorldOnly）
-$c4IsrBridgeOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commitOrRollbackProbe|publishIdleWorldOnly)\s*\('
+# ISR Bridge 正規関数を除外（commitOrRollbackProbe, publishIdleWorldOnly, retirePublishedDSP）
+$c4IsrBridgeOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commitOrRollbackProbe|publishIdleWorldOnly|retirePublishedDSP)\s*\('
 $c4ForbiddenAudioEngineOps = [Math]::Max(0, $c4ForbiddenAudioEngineOps - $c4IsrBridgeOps)
 $c4Status = if ($c4LegacyCommit -eq 0 -and $c4LegacyExecute -eq 0 -and $c4LegacyCommitNewDsp -eq 0 -and $c4BridgeCommit -ge 1 -and $c4BridgeRetire -ge 1 -and $c4ForbiddenAudioEngineOps -eq 0) { 'pass' } else { 'fail' }
 $c4Evidence = "legacyPrepareCommit=$c4LegacyCommit legacyExecuteCommit=$c4LegacyExecute legacyCommitNewDSP=$c4LegacyCommitNewDsp bridgeCommit=$c4BridgeCommit bridgeRetire=$c4BridgeRetire forbiddenAudioEngineOps=$c4ForbiddenAudioEngineOps"

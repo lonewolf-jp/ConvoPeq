@@ -1,0 +1,76 @@
+{
+  "violations": [],
+  "generatedAt": "2026-08-11T16:17:40.8981281+09:00",
+  "schema": "pr_required_artifacts_report_v1",
+  "artifacts": [
+    {
+      "key": "authorityInventory",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\authority_inventory_report.json",
+      "exists": true,
+      "schema": "authority_inventory_report_v1"
+    },
+    {
+      "key": "inventoryDiff",
+      "path": "C:\\VSC_Project\\ConvoPeq\\storage\\isr_inventory\\inventory_diff_report.json",
+      "exists": true,
+      "schema": "authority_inventory_diff_report_v1"
+    },
+    {
+      "key": "safetyRegression",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\safety_regression_report.json",
+      "exists": true,
+      "schema": "safety_regression_report_v1"
+    },
+    {
+      "key": "prSla",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\pr_sla_report.json",
+      "exists": true,
+      "schema": "pr_sla_report_v1"
+    },
+    {
+      "key": "validatorTiering",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\validator_tiering_report.json",
+      "exists": true,
+      "schema": "validator_tiering_report_v3"
+    },
+    {
+      "key": "documentationScope",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\documentation_scope_rule_report.json",
+      "exists": true,
+      "schema": "documentation_scope_rule_report_v1"
+    },
+    {
+      "key": "designDocsCoverage",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\design_docs_coverage_report.json",
+      "exists": true,
+      "schema": "design_docs_coverage_report_v1"
+    },
+    {
+      "key": "runtimeCoordinatorStateMachine",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\runtime_coordinator_state_machine_report.json",
+      "exists": true,
+      "schema": "runtime_coordinator_state_machine_report_v1"
+    },
+    {
+      "key": "taxonomyPhaseMapping",
+      "path": "C:\\VSC_Project\\ConvoPeq\\evidence\\taxonomy_phase_mapping_report.json",
+      "exists": true,
+      "schema": "taxonomy_phase_mapping_report_v1"
+    },
+    {
+      "key": "topologyDiffDocument",
+      "path": "C:\\VSC_Project\\ConvoPeq\\doc\\work5\\Practical_Stable_ISR_Runtime_topology_diff_2026-05-29.md",
+      "exists": true,
+      "schema": null
+    }
+  ],
+  "checks": {
+    "documentationScopeReady": true,
+    "safetyPassTable": true,
+    "taxonomyPhaseMappingReady": true,
+    "designDocsCoverageReady": true,
+    "verificationImpact": true,
+    "runtimeCoordinatorStateMachineReady": true,
+    "authorityImpactAnalysis": true
+  }
+}

@@ -47,12 +47,12 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 //   oldHandle == null（idle publish #4/#5/#6）は crossfade 判定をスキップし old DSP retire 意図なし。
 //   Rebuild (#7) のみ current active DSP handle を渡す（old DSP を retire する意図）。
 //   判定ロジックは Orchestrator の 3-step (evaluate → null fallback → Critical 抑制) と同一。
-[[nodiscard]] convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
+[[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
     const RuntimePublishWorld* newWorld,
     const convo::isr::DSPHandle& newHandle,
     const convo::isr::DSPHandle& oldHandle) const noexcept
 {
-    convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot snapshot;
+    convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot snapshot;
     snapshot.newHandle = newHandle;
     snapshot.oldHandle = oldHandle;
 

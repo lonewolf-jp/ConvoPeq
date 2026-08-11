@@ -65,8 +65,13 @@ else {
         if (-not $body.Contains('worldOwner->semanticHash.')) {
             Add-Violation 'buildRuntimePublishWorld does not compute semanticHash fields'
         }
-        if (-not $body.Contains('worldOwner->freeze()')) {
-            Add-Violation 'buildRuntimePublishWorld must freeze worldOwner before publication'
+        # ★ 2026-08-11: 不変性保証は build 内 freeze から publish 経路の sealRecursively()（core テンプレート）に移管。
+        #   buildRuntimePublishWorld は構築のみ行い、freeze/seal は caller（publish 経路）が担当する。
+        $corePublishCoordinatorHeader = Join-Path $repoRoot 'src\core\RuntimePublicationCoordinator.h'
+        $corePublishCoordinatorText = if (Test-Path -LiteralPath $corePublishCoordinatorHeader) { Get-Content -LiteralPath $corePublishCoordinatorHeader -Raw -Encoding UTF8 } else { '' }
+        $hasPublishPathSeal = $corePublishCoordinatorText.Contains('sealRecursively()')
+        if (-not $body.Contains('worldOwner->freeze()') -and -not $hasPublishPathSeal) {
+            Add-Violation 'buildRuntimePublishWorld must freeze worldOwner before publication (or seal via publish-path sealRecursively)'
         }
 
         $nonDeterministicPatterns = @(

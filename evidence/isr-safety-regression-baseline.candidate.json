@@ -1,0 +1,15 @@
+{
+  "schema": "isr_safety_regression_baseline_v1",
+  "owner": "audioengine-runtime-bridge",
+  "issue": "BRIDGE-SAFETY-BASELINE-001",
+  "rationale": "captured from latest verified evidence snapshot for SafetyPass baseline comparison",
+  "expiry": "2026-09-30",
+  "capturedAt": "2026-08-11T16:16:42.4395685+09:00",
+  "metrics": {
+    "xrunDelta": 0,
+    "staleObserveCount": 0.0,
+    "retireBacklogSlope": 0.0,
+    "worldLeakCount": 0.0,
+    "publicationLatencyP99Ratio": 1
+  }
+}

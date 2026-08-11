@@ -1,8 +1,6 @@
-﻿{
-    "schema":  "governance_consistency_report_v1",
-    "generatedAt":  "2026-07-25T20:38:20.9708068+09:00",
-    "violations":  [
-
-                   ],
-    "ready":  true
+{
+  "schema": "governance_consistency_report_v1",
+  "generatedAt": "2026-08-11T16:16:26.2198395+09:00",
+  "violations": [],
+  "ready": true
 }

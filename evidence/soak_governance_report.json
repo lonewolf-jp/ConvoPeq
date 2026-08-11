@@ -1,0 +1,18 @@
+{
+  "schema": "soak_governance_report_v1",
+  "generatedAt": "2026-08-11T16:17:40.6680670+09:00",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-pr-sla-policy.json",
+  "tierRunnerPath": "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
+  "workflowPath": "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
+  "checks": {
+    "policyExists": true,
+    "policySchemaOk": true,
+    "requiredSoakNotesPresent": true,
+    "tierRunnerForwardsSoakMinutes": true,
+    "workflowDispatchHasSoakInput": true,
+    "workflowForwardsSoakMinutes": true,
+    "workflowScheduleHasSoakDefaults": true
+  },
+  "violations": [],
+  "ready": true
+}

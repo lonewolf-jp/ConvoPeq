@@ -12,9 +12,9 @@ $coordinatorHeader = Join-Path $RepoRoot "src/core/RuntimePublicationCoordinator
 $orchestratorHeader = Join-Path $RepoRoot "src/audioengine/RuntimePublicationOrchestrator.h"
 
 # --- 1. Coordinator direct usage warning ---
-Write-Host "`n[1/3] makeRuntimePublicationCoordinator() direct usage:" -ForegroundColor Yellow
+Write-Host "`n[1/3] makeRuntimePublishAuthority() direct usage:" -ForegroundColor Yellow
 $coordCalls = Select-String -Path "$RepoRoot\src\**\*.h", "$RepoRoot\src\**\*.cpp" `
-    -Pattern 'makeRuntimePublicationCoordinator(' `
+    -Pattern 'makeRuntimePublishAuthority(' `
     -SimpleMatch `
     -ErrorAction SilentlyContinue | `
     Where-Object { $_.Path -notlike "*\JUCE\*" -and $_.Path -notlike "*\r8brain-free-src\*" }
@@ -57,7 +57,14 @@ $allowedFriends = @(
     'DSPTransition',
     'NoiseShaperLearner',
     'EQEditProcessor',
-    'RuntimePublicationCoordinator'
+    'RuntimePublicationCoordinator',
+    # ★ work88 (X4-A/B): core テンプレート改名（RuntimePublicationCoordinator → RuntimePublishAuthority）
+    'RuntimePublishAuthority',
+    # ★ work88 (P1-7 / work70 / FUTURE-9): 既存の正当な friend（P2 以前から存在）
+    'PublicationAdmission',
+    'DeferredPublicationTestAccess',
+    'DSPLifetimeManager',
+    'CoordinatorLoop'
 )
 
 $engineFriendLines = Select-String -Path $engineHeader -Pattern 'friend class' -ErrorAction SilentlyContinue

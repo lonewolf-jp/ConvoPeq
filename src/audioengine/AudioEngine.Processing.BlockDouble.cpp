@@ -431,7 +431,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             // EBR: managed by RCUReader
         }
 
-        finalizeCrossfadeMixPath(dsp, fading, false);
+        // ★ work88 (dash §5 R6 / 6th 監査観察): float パス（AudioBlock: true）と整合させるため
+        //   dryScaleGain_ を crossfade 完了後に 1.0 へリセットする（RT スレッド所有 LinearRamp —
+        //   RT 安全）。未リセットだと次回 crossfade の getNextValue() が stale 値から開始し得る。
+        finalizeCrossfadeMixPath(dsp, fading, true);
     }
     else
     {

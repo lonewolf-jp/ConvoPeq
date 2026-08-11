@@ -1,0 +1,10 @@
+{
+  "schema": "shadow_compare_contract_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.0055981+09:00",
+  "contractRegistryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-contract-registry.json",
+  "schemaHeaderPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
+  "commitPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
+  "debugRuntimePath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRDebugRuntime.cpp",
+  "violations": [],
+  "ready": true
+}

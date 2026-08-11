@@ -1,0 +1,14 @@
+{
+  "schema": "evidence_hierarchy_report_v1",
+  "generatedAt": "2026-08-11T16:16:42.6323401+09:00",
+  "manifestPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\evidence_manifest.json",
+  "safetyReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\safety_regression_report.json",
+  "prSlaReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\pr_sla_report.json",
+  "hierarchy": {
+    "staticEvidenceReady": true,
+    "soakEvidenceReady": true,
+    "operationalEvidenceReady": true
+  },
+  "violations": [],
+  "ready": true
+}

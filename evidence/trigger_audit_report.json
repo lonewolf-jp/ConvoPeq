@@ -1,0 +1,93 @@
+{
+  "schema": "trigger_audit_report_v1",
+  "generatedAt": "2026-08-11T16:16:40.8124695+09:00",
+  "enforce": true,
+  "astEvidenceRequired": false,
+  "policyMode": "enforce",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-trigger-policy.json",
+  "activeDspMetricSource": "symbolBlockedMatchesRefreshed",
+  "retireFacadeMetricSource": "symbolBlockedMatchesRefreshed",
+  "retireFacadeRuntimeExecutionMetricSource": "symbolTotalMatchesRefreshed",
+  "runtimeExecutionViewMetricSource": "symbolBlockedMatchesRefreshed",
+  "fadingOutDspMetricSource": "triggerAstEffectiveMatches",
+  "legacyDirectObserveMetricSource": "observeShimBlockedMatches",
+  "metrics": {
+    "activeDspRefCount": 0,
+    "activeDspRawRefCount": 8,
+    "fadingOutDspWriteCount": 0,
+    "retireFacadeDirectDependencyCount": 0,
+    "retireFacadeRawDependencyCount": 0,
+    "retireFacadeRuntimeExecutionCount": 0,
+    "runtimeExecutionViewUsageCount": 0,
+    "legacyDirectObserveUsageCount": 0,
+    "legacyDirectObserveRawCount": 0
+  },
+  "policyEvaluations": [
+    {
+      "id": "activeDspDeletionStart",
+      "metric": "activeDspRefCount",
+      "actual": 0.0,
+      "targetMax": 0.0,
+      "allowedMax": 0.0,
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-TRIGGER-001",
+      "expiry": "2026-08-31",
+      "expired": false
+    },
+    {
+      "id": "fadingOutDspDeletionStart",
+      "metric": "fadingOutDspWriteCount",
+      "actual": 0.0,
+      "targetMax": 0.0,
+      "allowedMax": 0.0,
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-TRIGGER-002",
+      "expiry": "2026-08-31",
+      "expired": false
+    },
+    {
+      "id": "retireFacadeRemovalStart",
+      "metric": "retireFacadeDirectDependencyCount",
+      "actual": 0.0,
+      "targetMax": 0.0,
+      "allowedMax": 0.0,
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-TRIGGER-003",
+      "expiry": "2026-08-31",
+      "expired": false
+    },
+    {
+      "id": "observeShimRemovalStart",
+      "metric": "legacyDirectObserveUsageCount",
+      "actual": 0.0,
+      "targetMax": 0.0,
+      "allowedMax": 0.0,
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-TRIGGER-004",
+      "expiry": "2026-08-31",
+      "expired": false
+    },
+    {
+      "id": "runtimeExecutionViewConvergence",
+      "metric": "runtimeExecutionViewUsageCount",
+      "actual": 0.0,
+      "targetMax": 0.0,
+      "allowedMax": 0.0,
+      "owner": "audioengine-runtime-bridge",
+      "issue": "BRIDGE-TRIGGER-005",
+      "expiry": "2026-08-31",
+      "expired": false
+    }
+  ],
+  "policyViolations": [],
+  "triggerTargets": {
+    "activeDspDeletionStart": 0,
+    "fadingOutDspDeletionStart": 0,
+    "retireFacadeRemovalStart": 0,
+    "runtimeExecutionViewConvergence": 0,
+    "observeShimRemovalStart": {
+      "runtimeExecutionViewUsageCountMaximum": 0,
+      "legacyDirectObserveUsageCountMaximum": 0
+    }
+  }
+}

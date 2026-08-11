@@ -1,0 +1,62 @@
+{
+  "schema": "validator_tiering_report_v3",
+  "generatedAt": "2026-08-11T16:16:42.9964594+09:00",
+  "tierRunnerPath": "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
+  "workflowPath": "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
+  "planPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work\\bridge_runtime_migration_plan.md",
+  "policyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-validator-tiering-policy.json",
+  "policy": {
+    "schema": "isr_validator_tiering_policy_v1",
+    "owner": "@lonewolf-jp",
+    "issue": "bridge-runtime-validator-tiering-sla",
+    "rationale": "Machine-verifiable validator tiering and SLA contract for bridge runtime migration operations.",
+    "expiry": "2027-12-31",
+    "tiers": {
+      "smoke": "pr",
+      "standard": "nightly",
+      "exhaustive": "weekly"
+    },
+    "workflowSchedule": {
+      "nightlyCron": "0 18 * * *",
+      "weeklyCron": "0 19 * * 0",
+      "nightlyTier": "standard",
+      "weeklyTier": "exhaustive"
+    },
+    "slaHours": {
+      "hbViolation": 24,
+      "payloadMismatch": 72
+    },
+    "warningTierAdoption": {
+      "owner": "@lonewolf-jp",
+      "issue": "bridge-runtime-warning-tier-adoption",
+      "adoptionDeadline": "2026-06-30",
+      "scope": "Warning-class verifier onboarding into CI schedule",
+      "targetTier": "standard"
+    }
+  },
+  "slaFreshness": [
+    {
+      "key": "hbViolation",
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\hb_violation_report.json",
+      "expectedSchema": "hb_violation_report_v1",
+      "present": true,
+      "generatedAtUtc": "2026-08-11T07:16:25.9280000Z",
+      "ageHours": 0.0,
+      "maxAgeHours": 24,
+      "withinSla": true
+    },
+    {
+      "key": "payloadMismatch",
+      "artifactPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\payload_tier_report.json",
+      "expectedSchema": "payload_tier_report_v1",
+      "present": true,
+      "generatedAtUtc": "2026-08-11T07:16:25.9280000Z",
+      "ageHours": 0.0,
+      "maxAgeHours": 72,
+      "withinSla": true
+    }
+  ],
+  "sourceRoot": "C:\\VSC_Project\\ConvoPeq\\src",
+  "scannedSourceFileCount": 310,
+  "violations": []
+}

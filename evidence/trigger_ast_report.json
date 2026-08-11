@@ -1,0 +1,13 @@
+{
+  "schema": "trigger_ast_report_v1",
+  "generatedAt": "2026-08-11T16:16:40.4478480+09:00",
+  "required": false,
+  "available": true,
+  "tool": "ast-grep.exe",
+  "commandOk": true,
+  "fadingOutDspWriteMatches": 0,
+  "fadingOutDspWriteFallbackMatches": 0,
+  "fadingOutDspWriteEffectiveMatches": 0,
+  "fadingOutDspWriteEffectiveSource": "astOrFallbackMax",
+  "note": "AST scan completed"
+}

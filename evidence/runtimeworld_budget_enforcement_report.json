@@ -1,0 +1,9 @@
+{
+  "schema": "runtimeworld_budget_enforcement_report_v1",
+  "generatedAt": "2026-08-11T16:17:55.7631210+09:00",
+  "inventoryPath": "C:\\VSC_Project\\ConvoPeq\\storage\\isr_inventory\\post_authority_inventory.json",
+  "authorityCount": 12,
+  "maxAuthorityCount": 32,
+  "violations": [],
+  "ready": true
+}

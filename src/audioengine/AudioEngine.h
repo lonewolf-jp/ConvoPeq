@@ -1193,7 +1193,7 @@ public:
     //   （old DSP を retire する意図を表現）。判定ロジックは Orchestrator の 3-step
     //   (evaluate → null fallback → HealthState Critical 抑制) と同一。
     //   実装は AudioEngine.Publication.cpp（CrossfadeAuthority.h 完全型が必要）。
-    [[nodiscard]] convo::isr::RuntimePublicationCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
+    [[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
         const RuntimePublishWorld* newWorld,
         const convo::isr::DSPHandle& newHandle,
         const convo::isr::DSPHandle& oldHandle) const noexcept;
@@ -1328,8 +1328,8 @@ public:
 
     [[nodiscard]] inline const convo::RuntimeGraph* getRuntimeGraph() const noexcept
     {
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         return (world != nullptr) ? &world->graph : nullptr;
     }
 
@@ -1785,7 +1785,7 @@ public:
         int debugLastReportedWorldGen { -1 };
         int debugLastReportedBankGen { -1 };
         int debugLastReportedCoeffBankIdx { -1 };
-        // Adaptive bank switch count tracker (read from DSPCore atomic on Message Thread)
+        // Adaptive bank switch count tracker (read from the runtime DSP atomic on Message Thread)
         uint64_t debugLastReportedBankSwitchCount { std::numeric_limits<uint64_t>::max() };
 
         // ★ 計測ログ追加: Retire/Backpressure tracking
@@ -2024,7 +2024,17 @@ private:
                         {
                             const auto resolved = rt.resolve(entry.second);
                             delete static_cast<EQCoeffCache*>(resolved.instance);
-                            rt.shutdownReclaim(entry.second);
+                            // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、
+                            //   Reclaim Authority（ShutdownQuiescent モード）に一本化。
+                            //   INV-X3-4 / INV-ISR-04: reader registration closed を precondition に
+                            //   検証（~AudioEngine 本体で closeReaderRegistration() 済み → true）。
+                            //   delete（物理解放）→ reclaim（slot 状態遷移）の順序は維持。
+                            const bool reclaimed = owner->runtimePublicationBridge_.reclaim(
+                                convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+                                entry.second, rt, *owner->m_retireRouter,
+                                owner->m_epochDomain.readerRegistrationClosed());
+                            jassert(reclaimed);
+                            juce::ignoreUnused(reclaimed);   // Release(NDEBUG) で jassert 消滅時の未使用警告対策
                         }
                     }
                 } else {
@@ -2116,8 +2126,8 @@ public:
     //   情報源にする（RT 処理パスと同じ runtime world 解決）。
     [[nodiscard]] inline bool hasPublishedRuntimeDSP() const noexcept
     {
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         return (world != nullptr) && (world->engine.current != nullptr);
     }
 
@@ -2188,6 +2198,8 @@ public:
     convo::isr::RuntimeGenerationGenerator runtimeGenerationGenerator_ {};
     std::atomic<convo::isr::PublicationSequenceId> publicationSequenceCounter_ { 0 };
     std::atomic<std::uint64_t> lastCommittedRuntimeGeneration_ { 0 };
+    // ★ work88 (X2 §6.2 / INV-ISR-05): Committed state — commit(seq) 成功時に Commit.cpp:398 で更新。
+    //   PublishReceiptWaiter::lastCompleted_（Completion watermark）とは別 semantic（committed ≠ completed）。
     std::atomic<convo::isr::PublicationSequenceId> lastCommittedPublicationSequence_ { 0 };
     std::atomic<std::uint64_t> lastDroppedGeneration_ { 0 };
     std::atomic<std::uint64_t> publishedWorldCount_ { 0 };
@@ -3113,8 +3125,8 @@ public:
             break;
         }
 
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         if (world != nullptr)
         {
             const int slot = juce::jlimit(0, convo::kObserveChannelCount - 1,
@@ -3380,8 +3392,8 @@ public:
                                                                                      std::uint64_t generation) noexcept
     {
         RuntimePublishComputation computation {};
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* runtimeWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* runtimeWorld = worldAuthority_.consumeWorldHandle(readToken);
 
         jassert(runtimeWorld != nullptr); // Bootstrap World guarantees non-null (#3.2.5)
 
@@ -3415,7 +3427,7 @@ public:
         return identity;
     }
 
-    //=== RuntimePublicationCoordinator NonRT helper API ===//
+    //=== RuntimePublishAuthority NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
 
     [[nodiscard]] bool runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept;
@@ -3441,7 +3453,7 @@ public:
         return worldAuthority_.lifetime().pendingIntentCount();
     }
 
-    //=== End RuntimePublicationCoordinator NonRT helper API ===//
+    //=== End RuntimePublishAuthority NonRT helper API ===//
 
     class RuntimePublicationBridge final
     {
@@ -3506,16 +3518,12 @@ public:
         iso::audio_engine::RuntimePublicationValidator* validator_ = nullptr;
     };
 
-    using RuntimePublicationCoordinator = convo::RuntimePublicationCoordinator<RuntimePublishWorld,
-                                                                               DSPCore*,
-                                                                               RuntimePublicationBridge>;
-
-    static_assert(!std::is_copy_constructible_v<RuntimePublicationCoordinator>,
-                  "RuntimePublicationCoordinator must remain move-only");
-    static_assert(!std::is_copy_assignable_v<RuntimePublicationCoordinator>,
-                  "RuntimePublicationCoordinator must remain move-only");
-    static_assert(std::is_move_constructible_v<RuntimePublicationCoordinator>,
-                  "RuntimePublicationCoordinator must remain move-constructible");
+    // ★ work88 (X4-B §6.4 / INV-X4-3, INV-X4-5): 旧 `RuntimePublishAuthority` エイリアス（一時生成
+    //   factory）と `RuntimePublishStore` / `runtimeStore` メンバは X4-B にて削除。RuntimeStore の
+    //   write capability は RuntimeWorldAuthority::WriteAccess（Authority が value 所有）に一本化。
+    //   read path は worldAuthority() の read API（observePublishedWorld / acquireReadToken /
+    //   consumeWorldHandle）に移行。`convo::RuntimePublishAuthority`（core テンプレート）自体は
+    //   テスト用抽象として残す。
 
     // ★ work70: PublishCommitResult — commitRuntimePublication() の戻り値
     //   stage のみを保持（committed は PublishStageResultTraits::isCommitted で導出）
@@ -3541,14 +3549,12 @@ public:
         }
     };
 
-    using RuntimePublishStore = RuntimePublicationCoordinator::Store;
-
-    RuntimePublishStore runtimeStore;
     iso::audio_engine::RuntimePublicationValidator runtimePublicationValidator_;
 
-    // ★ P0-4: runtimeStore.observe() の getter ラッパー
+    // ★ P0-4 (X4-B 後): RuntimeWorldAuthority（worldAuthority_）の Store から現在 world を
+    //   observe する getter ラッパー。read API は世界Authority 経由（INV-X4-B）。
     [[nodiscard]] const RuntimePublishWorld* observePublishedWorld() const noexcept {
-        return RuntimePublicationCoordinator::consumePublishedWorld(runtimeStore);
+        return worldAuthority_.observePublishedWorld();
     }
 
     // RuntimePublicationOrchestrator: 前方宣言 + unique_ptr (循環依存回避)
@@ -3610,6 +3616,19 @@ private:
     // ★ B3/C2: per-receipt publish completion — Producer は自分の seqId の完了のみを待つ（キュー全体 drain ではない）。
     //   complete() は executePublish 成功時の onPublishCommitted から呼ばれる。waitFor() は B4 で Producer が使用。
     //   executePublish は intentQueue_ を FIFO で処理するため seqId は単調増加で完了する（順序性前提）。
+    //
+    // ★ work88 (X2 §6.2): Publish completion sequence monotonicity の契約固定。
+    //   INV-X2-5: PublishExecutor が sole completion writer（唯一の complete() 呼び出し元）。
+    //     complete() は CoordinatorLoop の単一スレッド（PublishExecutor::executePublish →
+    //     onPublishCommitted → notifyPublishReceipt）からのみ呼ばれる。
+    //   INV-X2-6: completion order == publication sequence order（contiguous completion 前提）。
+    //     Intent FIFO → PublishExecutor FIFO → commit FIFO → completion FIFO が不変条件。
+    //     したがって waitFor(seq) := seq <= lastCompleted_ が正しい（watermark が seq を超えれば
+    //     1..seq は全て完了済み — contiguous）。将来 MPSC completion / parallel publish を許す場合は
+    //     sparse completion（completedThrough_ + completedOutOfOrder_）への拡張が必要（現状は不要）。
+    //   INV-X2-4: stale completion cannot overwrite newer completion（mutex 下の if (seqId > lastCompleted_)）。
+    //   INV-ISR-05: committed ≠ completed。lastCommittedPublicationSequence_（Committed state）と
+    //     本 watermark（Completion）は別 semantic。本構造は「案1 最小変更」で維持する（X2 §6.2）。
     struct PublishReceiptWaiter {
         void complete(convo::isr::PublicationSequenceId seqId) noexcept
         {
@@ -3643,18 +3662,10 @@ private:
         return publishReceiptWaiter_.waitFor(seqId, timeoutMs);
     }
 
-    [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
-    {
-        using RuntimePublicationCoordinatorFactory = RuntimePublicationCoordinator;
-        return RuntimePublicationCoordinatorFactory::create(
-            RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
-    }
-
-    // ★ P0-1: publishWorld() ラッパーを削除（案A）。
-    //   Coordinator の publishWorld() が PublishStageResult を返すようになったため、
-    //   ラッパー経由では戻り値が失われる。Authority 経路一本化のため、全呼び出し元は
-    //   makeRuntimePublicationCoordinator() + coordinator.publishWorld() を直接使用する。
-    //   ref: ISR Runtime — Authority経路を一本化する方針
+    // ★ work88 (X4-B §6.4 / X4-B-8): 旧一時生成 publish factory（make...PublishAuthority）を
+    //   production path から削除。publish は RuntimeWorldAuthority::publish()（sole physical publish
+    //   gateway — INV-X4-2）に一本化。publishWorld() ラッパーも廃止（案A）。
+    //   Bridge（validate/didPublish/willRetire/retire）は残る。
 
 public:
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
@@ -3688,8 +3699,8 @@ public:
         };
 
         DSPCore* current = getActiveRuntimeDSP();
-        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-        const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* publishedWorld = worldAuthority_.consumeWorldHandle(readToken);
         const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
         const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.fadingRuntimeUuid != 0;
         auto* fading = (transitionActive && transition.next != nullptr)
@@ -4079,7 +4090,7 @@ public:
 
     friend class NoiseShaperLearner;
     friend class EQEditProcessor;
-    // RuntimePublicationCoordinator は AudioEngine のネストクラスであるため
+    // RuntimePublishAuthority は AudioEngine のネストクラスであるため
     // C++11 以降は自動的にプライベートメンバへアクセス可能。friend 宣言は不要。
 
 //==============================================================================
@@ -4400,8 +4411,8 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     }
 
     // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
-    convo::isr::RuntimePublicationCoordinator::Intent intent;
-    intent.type = convo::isr::RuntimePublicationCoordinator::IntentType::Publish;
+    convo::isr::RuntimeIntentCoordinator::Intent intent;
+    intent.type = convo::isr::RuntimeIntentCoordinator::IntentType::Publish;
     intent.sequenceId = seqId;
     intent.payload.publish.handle = rollbackHandle;
     intent.payload.publish.newWorld = static_cast<const void*>(newWorld);
@@ -4445,6 +4456,11 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     // 4. 完了通知を待つ（executePublish → orchestrator.onPublishCommitted → notifyPublishReceipt）。
     //    タイムアウトしても所有権は移譲済み（executePublish が後続で commit する）ため
     //    Transferred 扱い — 呼び出し元は world/DSP を破棄してはならない。
+    //    ★ work88 (X2 §6.2 — 二十三次レビュー timeout semantics): timeout ≠ publish failure。
+    //      所有権は enqueue 時点で Transferred（Allocated → Transferred → Committed → Completed）。
+    //      timeout を failure と誤解して rollback すると double ownership / double publish を生む。
+    //     shutdown 中は CoordinatorLoop が停止し complete() が来ないため、waitFor は timeout で
+    //     終了する（既存設計が正しい — X2 §6.2）。
     if (PublishStageResultTraits::isCommitted(result.stage) && seqId != 0)
     {
         if (!waitForPublishReceipt(seqId, kPublishReceiptWaitTimeoutMs))
@@ -4664,7 +4680,7 @@ public:
     convo::isr::LifecycleBarrierRuntime lifecycleBarrierRuntime_{ lifecycleRuntime_ };
 
     // ===================== ISR Phase 1-9: Core Runtimes =====================
-    convo::isr::RuntimePublicationCoordinator runtimePublicationBridge_;
+    convo::isr::RuntimeIntentCoordinator runtimePublicationBridge_;
     // ★ A-1/A2: RuntimeWorldAuthority — single owner of Publication + Lifetime (formerly Retire) state.
     convo::isr::RuntimeWorldAuthority worldAuthority_;
 

@@ -249,6 +249,14 @@ jobs:
 
           $tier = "${{ inputs.verificationTier || 'standard' }}"
 
+          # ★ スケジュールイベント時は cron から tier を解決（nightly=standard / weekly=exhaustive）
+          if ("${{ github.event.schedule }}" -eq '0 18 * * *') { $tier = 'standard' }
+          if ("${{ github.event.schedule }}" -eq '0 19 * * 0') { $tier = 'exhaustive' }
+          if ('${{ github.event.schedule }}' -ne '' -and "${{ github.event.schedule }}" -ne '0 18 * * *' -and "${{ github.event.schedule }}" -ne '0 19 * * 0') {
+            throw "Unknown workflow schedule cron: '${{ github.event.schedule }}'"
+          }
+          Write-Host "[INFO] resolved verification tier: $tier (schedule='${{ github.event.schedule }}')"
+
           $validatorTieringPolicyPath = Join-Path $repoRoot '.github\isr-validator-tiering-policy.json'
           $workflowDispatchInputPolicyPath = Join-Path $repoRoot '.github\isr-workflow-dispatch-input-policy.json'
           if (Test-Path $validatorTieringPolicyPath) {
@@ -292,9 +300,23 @@ jobs:
           }
           $ErrorActionPreference = 'Stop'
           $tier = "${{ inputs.verificationTier || 'standard' }}"
+          # ★ スケジュールイベント時は cron から tier を解決（nightly=standard / weekly=exhaustive）
+          if ("${{ github.event.schedule }}" -eq '0 18 * * *') { $tier = 'standard' }
+          if ("${{ github.event.schedule }}" -eq '0 19 * * 0') { $tier = 'exhaustive' }
+          if ('${{ github.event.schedule }}' -ne '' -and "${{ github.event.schedule }}" -ne '0 18 * * *' -and "${{ github.event.schedule }}" -ne '0 19 * * 0') {
+            throw "Unknown workflow schedule cron: '${{ github.event.schedule }}'"
+          }
+          Write-Host "[INFO] resolved verification tier: $tier (schedule='${{ github.event.schedule }}')"
+          # ★ スケジュールイベント時は soak デフォルトを設定（nightly=1440, weekly=10080）し SoakMinutes へ転送
+          $workflowDispatchSoakMinutes = 0
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -or "${{ github.event_name }}" -eq 'schedule') {
+            if ("${{ github.event.schedule }}" -eq '0 18 * * *') { $workflowDispatchSoakMinutes = 1440 }
+            if ("${{ github.event.schedule }}" -eq '0 19 * * 0') { $workflowDispatchSoakMinutes = 10080 }
+          }
           $invokeArgs = @('-Tier', $tier)
           $declaredClass = "${{ inputs.declaredPrClass || 'Class-A' }}"
           $soakMin = "${{ inputs.soakMinutes || '0' }}"
+          if ($workflowDispatchSoakMinutes -gt 0) { $soakMin = [string]$workflowDispatchSoakMinutes }
           $invokeArgs += '-DeclaredClass'; $invokeArgs += $declaredClass
           $soakMinutes = Resolve-NonNegativeInt -Raw $soakMin -Name 'soakMinutes'
           $invokeArgs += '-SoakMinutes'; $invokeArgs += $soakMinutes

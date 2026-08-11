@@ -93,7 +93,7 @@ foreach ($rule in $allowlist.rules | Select-Object -Property symbol -Unique) {
 
         foreach ($line in Get-Content -LiteralPath $file.FullName -Encoding UTF8) {
             $lineNo++
-            if ($line -match $pattern) {
+            if ($line -cmatch $pattern) {
                 $isAllowed = $false
                 foreach ($allowedRule in $activeRules) {
                     if ("$($allowedRule.symbol)" -eq $symbol -and $relativePath -match "$($allowedRule.pathRegex)") {

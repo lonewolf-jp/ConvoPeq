@@ -1,0 +1,12 @@
+{
+  "schema": "verifier_integrity_governance_report_v1",
+  "generatedAt": "2026-08-11T16:17:55.4348136+09:00",
+  "verifierCount": 163,
+  "requiredScripts": [
+    "isr-run-tiered-verification.ps1",
+    "isr-verify-governance-registries.ps1",
+    "isr-verify-verifier-selftest.ps1"
+  ],
+  "violations": [],
+  "ready": true
+}

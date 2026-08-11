@@ -43,15 +43,19 @@ else {
     }
 }
 
-# Check that AudioEngine.h uses RuntimePublicationCoordinator read contract
-# (observeWorldHandle OR acquireReadToken+consumeWorldHandle) for RT observe.
+# Check that AudioEngine.h uses RuntimeWorldAuthority read contract
+# (observeWorldHandle OR acquireReadToken+consumeWorldHandle OR observePublishedWorld)
+# for RT observe.
+# ★ work88 (X4-B §6.4 / X4-B-9): read API は RuntimePublicationCoordinator → RuntimeWorldAuthority
+#   （worldAuthority_）に移行。RuntimeStore::current が唯一の物理 RuntimeWorld source（INV-X4-B）。
 $audioEngineHeader = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
 if (Test-Path -LiteralPath $audioEngineHeader) {
     $aeContent = Get-Content -LiteralPath $audioEngineHeader -Raw
     $usesObserveWorldHandle = $aeContent.Contains('observeWorldHandle')
-    $usesTokenConsumeContract = $aeContent.Contains('RuntimePublicationCoordinator::acquireReadToken') -and $aeContent.Contains('RuntimePublicationCoordinator::consumeWorldHandle')
-    if (-not $usesObserveWorldHandle -and -not $usesTokenConsumeContract) {
-        Add-Violation 'AudioEngine.h does not use RuntimePublicationCoordinator read contract for world observation'
+    $usesTokenConsumeContract = $aeContent.Contains('worldAuthority_.acquireReadToken') -and $aeContent.Contains('worldAuthority_.consumeWorldHandle')
+    $usesObservePublishedWorld = $aeContent.Contains('worldAuthority_.observePublishedWorld')
+    if (-not $usesObserveWorldHandle -and -not $usesTokenConsumeContract -and -not $usesObservePublishedWorld) {
+        Add-Violation 'AudioEngine.h does not use RuntimeWorldAuthority read contract for world observation'
     }
 }
 

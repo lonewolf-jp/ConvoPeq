@@ -1,0 +1,16 @@
+{
+  "schema": "trigger_cleanup_readiness_report_v1",
+  "generatedAt": "2026-08-11T16:16:41.5909864+09:00",
+  "enforceCleanupOnReady": true,
+  "triggerReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+  "deferredRegistryPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
+  "triggerPolicyPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-trigger-policy.json",
+  "deferredRegistryOwner": "audioengine-runtime-bridge",
+  "deferredRegistryIssue": "BRIDGE-CLEANUP-GOV-001",
+  "deferredRegistryExpiry": "2026-09-30",
+  "readyCount": 0,
+  "blockedCount": 0,
+  "ready": [],
+  "blocked": [],
+  "violations": []
+}

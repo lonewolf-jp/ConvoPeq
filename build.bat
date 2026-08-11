@@ -226,8 +226,9 @@ echo [3/4] Building %BUILD_CONFIG% configuration...
 set "BUILD_RETRY=0"
 :build_retry
 set "NINJA_FLAGS="
-if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
-if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
+REM icx/icpx は /Qipo リンク等でメモリを大量消費するため並列度を -j 1 に抑える（LLVM out of memory 回避）
+if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 1"
+if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 1"
 cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
 if not errorlevel 1 goto build_ok
 

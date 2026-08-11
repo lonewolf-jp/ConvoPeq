@@ -985,7 +985,7 @@ BlockDouble.cpp:434 は `finalizeCrossfadeMixPath(dsp, fading, false)`、AudioBl
 
 ### 4.5 bootstrap publishWorld 失敗の ignoreUnused（旧 A-3.5）— **四次レビュー承認（診断のみ）**
 
-> **★ 実コード照合確定（2026-08-10）**: `PublishStageResult` は 3 値（Success / Rejected / Failed — RuntimePublicationCoordinator.h:14-19）を確認。`AudioEngine.Init.cpp:53-56` は `juce::ignoreUnused(result)` のまま（jassert 未実装）。下記 jassert 追加案を**確定**（実装は別途）。
+> **★ 実コード照合確定（2026-08-10）**: `PublishStageResult` は 3 値（Success / Rejected / Failed — RuntimePublicationCoordinator.h:14-19）を確認。`AudioEngine.Init.cpp:53-56` は `juce::ignoreUnused(result)` のまま（jassert 未実装）。下記 jassert 追加案を**確定**（実装は別途）。**★ 2026-08-11 実装済み: X4-B 後は `worldAuthority_.publish()` 一本化。bootstrap の validate 失敗分岐に `jassertfalse` を実装（AudioEngine.Init.cpp）。**
 
 Init.cpp:55 `juce::ignoreUnused(result)`。`coordinator.publishWorld` は `PublishStageResult` を返す（AudioEngine.h:3654-3656 に「Coordinator の publishWorld() が PublishStageResult を返す」と明記）。四次レビューで `PublishStageResult::Success` を正常完了値として確認済み。失敗時の早期診断として Debug 用 `jassert` を追加:
 
@@ -1058,15 +1058,15 @@ C3: Recovery full-drop を「成功扱い」にしない
 
 ## 6. 残課題 X1〜X6 の詳細設計（十一次レビュー反映）
 
-> **★ 実コード照合確定（2026-08-10・第三者別視点監査 + 追加調査）**: X1〜X6 は全て「設計確定済み・実装未着手」（X5 は実装 GO / X1〜X4,X6 は条件付き GO）。実コード照合で主要点を確定:
+> **★ 実コード照合確定（2026-08-10・第三者別視点監査 + 追加調査）**: X1〜X6 は全て「設計確定済み・実装未着手」**（★ 2026-08-11: 全 X1〜X6 実装済み — X_IMPL_CHECKLIST.md で検証）**（X5 は実装 GO / X1〜X4,X6 は条件付き GO）。実コード照合で主要点を確定:
 >
 > - **X1**: recoveryGeneration = rebuildRequestGeneration（AudioEngine.h:2423, RebuildDispatch.cpp:643 で増加 / :973-977 で消費時現在値）。**Step A/B/C（Recovery shutdown admission closure + ShutdownDiscard）を 2026-08-10 に最小限先行実装済み**（§1.2 監査補正 — X1 の shutdown semantics の前倒し）
 > - **X2**: PublishReceiptWaiter（AudioEngine.h:3613-3635）の mutex+cv+monotonic watermark を確認。単一 completion writer（PublishExecutor sole gateway + intentQueue_ FIFO）→ CAS 不要。2 箇所 watermark（m_lastObservedSequence:246 / lastCompleted_:3634）同期
 > - **X3**: shutdownReclaim 呼び出し元 3 箇所（AudioEngine.h:2027 CacheMap::dtor / ReleaseResources.cpp:415,420）+ requestReclaim 呼び出し元（AudioEngine.h:4248 / Retire.cpp:83）を確認。**INV-X3-5**: pendingReclaimHandles_（:4616）を source of truth
-> - **X4**: read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は **RuntimeWorldAuthority.h に未実装**（X4-B-9 で新設予定）。現行 read path は `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` 直接呼び（AudioEngine.h:1331/2119/3116/3383/3691 等）
+> - **X4**: read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は **RuntimeWorldAuthority.h に未実装**（X4-B-9 で新設予定）。現行 read path は `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` 直接呼び（AudioEngine.h:1331/2119/3116/3383/3691 等）。**★ 2026-08-11 実装済み: X4-B-9 完了 — observePublishedWorld / acquireReadToken / consumeWorldHandle は RuntimeWorldAuthority.h に存在し、全 read path は worldAuthority_ 経由に移行。**
 > - **X5**: `enqueuePublicationIntent`（ISRRuntimePublicationCoordinator.h:286 — dash 記載 :273 と行番号差）に reservation→push→rollback。全 3 経路（通常 rebuild / Recovery publish / deferred 再 enqueue）が**単一箇所に集約** → reservation は :286 のみで完結
 > - **X6**: `quarantineResidentCount_` の実測上書き（AudioEngine.Threading.cpp:131）を確認。3 層分離（Intent / Ring / Resident）で aggregate 混入を解消
-> - **§4.5**: `PublishStageResult` は 3 値（Success / Rejected / Failed — RuntimePublicationCoordinator.h:14-19）。bootstrap jassert 追加案を**確定**（実装は別途）
+> - **§4.5**: `PublishStageResult` は 3 値（Success / Rejected / Failed — RuntimePublicationCoordinator.h:14-19）。bootstrap jassert 追加案を**確定**（実装は別途）。**★ 2026-08-11 実装済み（bootstrap validate 失敗分岐に `jassertfalse` を実装）。**
 > - **§5 R4**: shutdownReclaim 全廃は **2026-08-10 に R4 詳細設計（§6.3 末尾・Phase 0-7）として確定**（X3 実装時に R4-0〜R4-12 で実施）。**R5**: §4.5 の jassert 追加で確定
 
 > **★ 最上位 state transition table（2026-08-10・外部レビュー §24 反映 — Phase 0 で invariant として固定）**:
@@ -1955,7 +1955,7 @@ Producer 側:
 ### 6.3 X3 — shutdownReclaim 二系統の統合（P2 優先）
 
 > **★ 実コード照合確定（2026-08-10）**: shutdownReclaim 呼び出し元 3 箇所（AudioEngine.h:2027 CacheMap::dtor / ReleaseResources.cpp:415,420）+ requestReclaim 呼び出し元（AudioEngine.h:4248 / Retire.cpp:83）を確認。2 つの ShutdownPhase enum（AudioEngine:2521-2530 / ISRShutdown:25-41）の整合はテストで固定。**INV-X3-5**: pendingReclaimHandles_（:4616）を reclaim pending の source of truth にし、isFullyDrained に pendingReclaimHandles.empty() を追加。closeReaderRegistration は `setShutdownPhase(StopAudio)` 完了時に set（enum 変更なし）。
-> **★ 別視点調査追記（2026-08-10）— readerRegistrationClosed の実装対象を実コードで確認**: 実装対象は **`src/core/EpochDomain.h`**（dash :2233-2267 に実装詳細済み）。実コード確認: `registerReaderThread`（:44-60）と `reserveReaderThread`（:79-103）は**両方とも registrationClosed_ ガード未実装**（X3 で導入）。ISRRetireRouter（:71 委譲）・RCUReader（acquireThreadSlot）経由の登録も EpochDomain 委譲で自動的に封じられる（dash :2266-2271 済み）。
+> **★ 別視点調査追記（2026-08-10）— readerRegistrationClosed の実装対象を実コードで確認**: 実装対象は **`src/core/EpochDomain.h`**（dash :2233-2267 に実装詳細済み）。実コード確認: `registerReaderThread`（:44-60）と `reserveReaderThread`（:79-103）は**両方とも registrationClosed_ ガード未実装（★ 2026-08-11 実装済み: EpochDomain.h に registrationClosed_ / closeReaderRegistration() / readerRegistrationClosed() を実装）**（X3 で導入）。ISRRetireRouter（:71 委譲）・RCUReader（acquireThreadSlot）経由の登録も EpochDomain 委譲で自動的に封じられる（dash :2266-2271 済み）。
 
 **現状**: runtime（requestReclaim → epoch safety）と shutdown（shutdownReclaim → reader 停止後）の二系統。**無理に一本化しない**。
 
@@ -2553,7 +2553,7 @@ Running → StopAccepting → AdmissionClosed → CoordinatorStopping → Coordi
 
 ### 6.4 X4 — RuntimePublicationCoordinator authority 二重化（P1 優先・構造的に最重要）
 
-> **★ 実コード照合確定（2026-08-10）**: read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は **RuntimeWorldAuthority.h に未実装**（X4-B-9 で新設予定）。現行 read path は `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 等）。publishAndSwap は RuntimeWorldAuthority-owned WriteAccess のみ（INV-X4-3）。X4-A（rename）/ X4-B（ownership topology）の二段階実装（X4-0〜X4-11）。
+> **★ 実コード照合確定（2026-08-10）**: read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は **RuntimeWorldAuthority.h に未実装**（X4-B-9 で新設予定）。現行 read path は `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 等）。publishAndSwap は RuntimeWorldAuthority-owned WriteAccess のみ（INV-X4-3）。X4-A（rename）/ X4-B（ownership topology）の二段階実装（X4-0〜X4-11）。**★ 2026-08-11 実装済み: X4-B 完了（read API は worldAuthority_ 経由に移行済み）。**
 > **★ 別視点調査追記（2026-08-10）— X4-B の実装対象を実コード確認**: `using RuntimePublicationCoordinator`（AudioEngine.h:3509）/ `using RuntimePublishStore`（:3544）/ `makeRuntimePublicationCoordinator()`（:3646 inline factory）/ `RuntimePublishExecutor.h:55`（`auto coordinator = ctx.engine.makeRuntimePublicationCoordinator()` 一時生成 → `publishWorld` — X4-B で削除）。X4-A の rename 対象（:3509 エイリアス + 7 ファイルの型参照）と X4-B-9 の read API 置換対象（:2702 一覧）の実コード裏付け。
 > **★ 別視点調査追記2（2026-08-10）— WriteAccess の実コード照合**: `RuntimeStore::WriteAccess`（RuntimeStore.h:18）/ `publishAndSwap`（:35）/ `acquireWriteAccess`（:83）を確認。**INV-X4-3**（publishAndSwap は RuntimeWorldAuthority-owned WriteAccess のみ）の実装対象を裏付け。X4-B で WriteAccess を RuntimeWorldAuthority が move-only 保持（core Coordinator は publishWorld の一時生成をやめる — :3646 / RuntimePublishExecutor.h:55 削除）。
 > **★ 別視点調査追記3（2026-08-10）— authority topology test の既存実装を確認**: `tools/publication_authority_verifier.py` が存在し、`RuntimeStore::publishAndSwap bypass detected` を検出（**INV-X4-3 の architectural test が既にツール化済み**）。`ALLOWED_PUBLISH_AND_SWAP_FILES` で許可ファイルを管理。X4-B 実装時はこの verifier を拡張・維持する（Test 3 / AC-X4-3 の静的検査の基盤）。
@@ -2851,7 +2851,7 @@ public:
 ```
 - **`getCurrent()` = ISR metadata source** / **`observePublishedWorld()` 等 = physical published world source** を**型/API レベルで分離**
 - これは **INV-X4-7 / INV-X4-8 を強く**する（source-role separation を API 契約として固定）
-- **🔴🔴🔴 十八次別視点15調査（2026-08-10）— X4-B-9 の read API 置換対象を確定（実コード検証）**: `RuntimeWorldAuthority.h` には read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は**未実装**（X4-B-9 で新設予定）。現状の read path は全て `RuntimePublicationCoordinator` の static 関数を直接呼ぶ:
+- **🔴🔴🔴 十八次別視点15調査（2026-08-10）— X4-B-9 の read API 置換対象を確定（実コード検証）**: `RuntimeWorldAuthority.h` には read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は**未実装**（X4-B-9 で新設予定）。現状の read path は全て `RuntimePublicationCoordinator` の static 関数を直接呼ぶ:（★ 2026-08-11 実装済み: X4-B-9 で専用 read API に置換済み）
   ```
   RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)        → RuntimeWorldAuthority::consumeWorldHandle(ReadToken)
   RuntimePublicationCoordinator::acquireReadToken(runtimeStore)          → RuntimeWorldAuthority::acquireReadToken()
@@ -5053,7 +5053,7 @@ C3: Recovery full-drop を「成功扱い」にしない（drop を Health/diagn
 
 ### A-2.39 X1-X6 cv 動作・retire 実装・BuildError 種類調査（2026-08-09 十八次・別視点11）
 
-**調査観点**: X2 の PublishReceiptWaiter の cv 動作詳細（AudioEngine.h:3613-3635）、X3 の ISRRetireRouter::retire 実装（ISRRetireRouter.cpp:149-179）、X1 の RuntimeBuilder::build の BuildError 種類（RuntimeBuilder.cpp:55-71）、X4 の read API 現状（RuntimeWorldAuthority に read API 未実装）を実コードで検証。
+**調査観点**: X2 の PublishReceiptWaiter の cv 動作詳細（AudioEngine.h:3613-3635）、X3 の ISRRetireRouter::retire 実装（ISRRetireRouter.cpp:149-179）、X1 の RuntimeBuilder::build の BuildError 種類（RuntimeBuilder.cpp:55-71）、X4 の read API 現状（★ 2026-08-11: X4 read API 実装済み）（RuntimeWorldAuthority に read API 未実装）を実コードで検証。
 
 **確定事項（§6 に反映済み）**:
 
@@ -5062,7 +5062,7 @@ C3: Recovery full-drop を「成功扱い」にしない（drop を Health/diagn
 | 1 | X2 | **cv 動作の詳細（PublishReceiptWaiter :3613-3635）**: complete（:3614-3621）は mutex 下で lastCompleted_ 更新 → cv_.notify_all()（:3620）。waitFor（:3623-3630）は `cv_.wait_until(lock, deadline, [&]{ return seqId <= lastCompleted_; })`（:3628）。**wait_until は predicate 付きのため、notify 前に waitFor が始まっても即復帰**（lost wakeup 安全）。deadline 到達後 predicate が false なら false（:3629）。X2 の案1はこの構造を維持 | §6.2 |
 | 2 | X3 | **ISRRetireRouter::retire の実装詳細（:149-158）**: `enqueueWithRetry(ptr, deleter, provider_->currentEpoch(), Generic)` に委譲。enqueueWithRetry（:161-179）は通常 enqueue（:167）→ 失敗時 tryReclaim → enqueue を最大2回リトライ（:172-178）。QueuePressure 以外（Shutdown 等）は即時終了（:178）。**reclaim（slot 遷移）と retire（物理削除予約）は独立**。X3 は reclaim 側のみ変更し、retire の enqueueWithRetry リトライ機構は不変 | §6.3 |
 | 3 | X1 | **BuildError 種類と再試行方針（RuntimeBuilder.cpp:55-71）**: InvalidInput / ResourceUnavailable / MKLFailure / ConvolverFailure / PrepareFailure / WarmupFailed / InternalError。**一時的 failure（ResourceUnavailable/MKLFailure/PrepareFailure）は次サイクルで自然に再試行**（新たな quarantine → submitRecoveryIntent）。永続的 failure（InvalidInput/InternalError）は drop 相当（INV-X1-2/INV-X1-3）。**X1 の新たな retry ループは不要**（retry は新たな Recovery 要求で自然発生） | §6.1 |
-| 4 | X4 | **read API の現状**: `RuntimeWorldAuthority.h` には read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は**未実装**。現状の read path は全て `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 等）。**X4-B-9 で新設予定の専用 read API に置換**（§6.4-X4-A で design 済み） | §6.4-X4-B |
+| 4 | X4 | **read API の現状**: `RuntimeWorldAuthority.h` には read API（observePublishedWorld / acquireReadToken / consumeWorldHandle）は**未実装**。現状の read path は全て `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 等）。**X4-B-9 で新設予定の専用 read API に置換（★ 2026-08-11 実装済み）**（§6.4-X4-A で design 済み） | §6.4-X4-B |
 
 **結果**: cv 動作・retire 実装・BuildError 種類の観点からも X1〜X6 が確定。X2 の wait_until は lost wakeup 安全、X3 の retire は enqueueWithRetry リトライ機構を維持、X1 の build 失敗は一時的/永続で扱いが分かれる、X4 の read API は X4-B-9 で新設。残る未確定事項なし。
 
@@ -5139,7 +5139,7 @@ C3: Recovery full-drop を「成功扱い」にしない（drop を Health/diagn
 
 ### A-2.44 X1-X6 evaluateDeferred・QueuePressure 移送・read API 置換対象調査（2026-08-10 十八次・別視点15）
 
-**調査観点**: X2 の evaluateDeferred の stale-discard 判定（PublicationAdmission.cpp:69-91）、X3 の enqueueWithRetry の QueuePressure 移送（ISRRetireRouter.cpp:182-203）、X4 の read API 置換対象一覧（RuntimeWorldAuthority に read API 未実装）を実コードで検証。
+**調査観点**: X2 の evaluateDeferred の stale-discard 判定（PublicationAdmission.cpp:69-91）、X3 の enqueueWithRetry の QueuePressure 移送（ISRRetireRouter.cpp:182-203）、X4 の read API 置換対象一覧（RuntimeWorldAuthority に read API 未実装）を実コードで検証。**（★ 2026-08-11: X4 read API 置換実装済み）**
 
 **確定事項（§6 に反映済み）**:
 
@@ -5147,7 +5147,7 @@ C3: Recovery full-drop を「成功扱い」にしない（drop を Health/diagn
 |---|------|---------|---------|
 | 1 | X2 | **evaluateDeferred の stale-discard 判定（:69-91）**: 1. Shutdown（:74-75）→ Discard（ShutdownDiscard）/ 2. TTL 超過（:78-80, 30s）→ Discard（StaleDiscard）/ 3. Generation 不一致（:83-84）→ Discard（StaleDiscard）/ 4. Sequence 後戻り（:87-88）→ Discard（StaleDiscard）→ それ以外 Ready（:90）。**deferred の cancel 条件が確定**（ShutdownDiscard / StaleDiscard の3種類）。StaleDiscard された deferred の seqId は re-enqueue されない → **completion は発生しない**（INV-X2-6 の deferred 例外と整合） | §6.2 |
 | 2 | X3 | **enqueueWithRetry の QueuePressure 移送（:182-203）**: QueuePressure/QueueFull 時は `m_retireQuarantine.quarantine(ptr, deleter, epoch, type, "enqueueWithRetry:QueuePressure")`（:190-192）で RetireQuarantineStore へ移送。**queue full は RT 参照中の可能性が高いため即時解放は UAF**。store full 時は delete を絶対しない（:195-199, assert + health escalation 監視）。Future: runtimeHealth_->notifyQueuePressure（:202）。X3 の reclaim はこれに影響しない | §6.3 |
-| 3 | X4 | **read API 置換対象一覧**: RuntimeWorldAuthority に read API は未実装（X4-B-9 で新設）。現状は `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` / acquireReadToken / consumePublishedWorld を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 / Commit.cpp:559 / Latency.cpp:91 / observePublishedWorld :3550 経由）。**X4-B-9 はこれらを worldAuthority().readAPI() に一括置換**（getCurrent() は置換先にしない）。単調性監視は AudioEngine 側で維持 | §6.4-X4-B |
+| 3 | X4 | **read API 置換対象一覧**: RuntimeWorldAuthority に read API は未実装（X4-B-9 で新設）。現状は `RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore)` / acquireReadToken / consumePublishedWorld を直接呼ぶ（AudioEngine.h:1331/2119/3116/3383/3691 / Commit.cpp:559 / Latency.cpp:91 / observePublishedWorld :3550 経由）。**X4-B-9 はこれらを worldAuthority().readAPI() に一括置換**（getCurrent() は置換先にしない）。単調性監視は AudioEngine 側で維持 | §6.4-X4-B（★ 2026-08-11 実装済み） |
 
 **結果**: evaluateDeferred・QueuePressure 移送・read API 置換対象の観点からも X1〜X6 が確定。X2 の deferred cancel 条件（ShutdownDiscard/StaleDiscard）、X3 の QueuePressure 時の RetireQuarantineStore 移送、X4 の read API 置換対象一覧を確定。残る未確定事項なし。
 

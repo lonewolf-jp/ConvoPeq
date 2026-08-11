@@ -88,8 +88,8 @@ namespace
     //   専用で通常動作では null のため、これを単独で使うと UI のレイテンシー表示が
     //   "Lat: -- ms" になる（PDC の setLatencySamples も 0 になる）。
     //   ワールド未公開時のみ placeholder slot へフォールバックする。
-    const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
-    const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+    const auto readToken = worldAuthority_.acquireReadToken();
+    const auto* publishedWorld = worldAuthority_.consumeWorldHandle(readToken);
     auto* dsp = (publishedWorld != nullptr)
         ? static_cast<DSPCore*>(publishedWorld->engine.current)
         : nullptr;

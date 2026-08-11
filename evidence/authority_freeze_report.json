@@ -1,11 +1,9 @@
-﻿{
-    "schema":  "authority_freeze_report_v1",
-    "generatedAt":  "2026-07-25T20:38:23.6409315+09:00",
-    "total":  12,
-    "legacyCount":  0,
-    "invalidClassCount":  0,
-    "violations":  [
-
-                   ],
-    "ready":  true
+{
+  "schema": "authority_freeze_report_v1",
+  "generatedAt": "2026-08-11T16:16:29.9191129+09:00",
+  "total": 12,
+  "legacyCount": 0,
+  "invalidClassCount": 0,
+  "violations": [],
+  "ready": true
 }

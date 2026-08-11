@@ -12,7 +12,7 @@ namespace isr {
 // isAllZero() は監査ログ出力専用。shutdown 完了判定の authority にはしない。
 //
 // ■ 完了条件に含めるもの
-//   pendingPublication  — RuntimePublicationCoordinator の publication backlog
+//   pendingPublication  — RuntimeIntentCoordinator の publication backlog
 //   pendingRetire       — LifetimeState に未処理の retire intent
 //   activeCrossfadeCount — 進行中のクロスフェード（0 or 1）
 //   deferredPublish     — 未投入の deferred publish

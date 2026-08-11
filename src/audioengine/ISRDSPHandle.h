@@ -24,6 +24,8 @@ namespace isr {
  * だと is_lock_free() が false になり Debug ビルドの assert が失敗する。
  * （ISRDSPHandle.cpp:12-20 / ISRDSPHandle.h:174-177 参照）
  */
+#pragma warning(push)
+#pragma warning(disable : 4324) // C4324: alignas(16) による意図的なパディングを許容
 struct alignas(16) DSPHandle
 {
     uint32_t slot;        // レジストリスロット番号
@@ -49,6 +51,7 @@ struct alignas(16) DSPHandle
         return !(*this == other);
     }
 };
+#pragma warning(pop)
 
 /**
  * DSP 生命周期状態
@@ -166,9 +169,12 @@ public:
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
     void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
 
-    // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim
-    //   通常パスは Coordinator::requestReclaim() 経由で実行される。
-    void shutdownReclaim(DSPHandle handle) { reclaim(handle); }
+    // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
+    //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
+    //   Authority（RuntimeIntentCoordinator::reclaim(ReclaimMode, ...)）に一本化。
+    //   旧 shutdownReclaim() は reclaim(handle) の単なるエイリアスであり、epoch 安全確認
+    //   （RuntimeEBR）/ quiescence proof（ShutdownQuiescent）をバイパスしていたため、
+    //   AC-R4-1（call sites == 0）・AC-R4-2（symbol absent）に従い除去した。
 
     // NonRT: 現在の active runtime DSP handle を取得
     DSPHandle getActiveRuntimeDSPHandle() const noexcept;
@@ -180,7 +186,7 @@ public:
     void emitOwnershipTrace(const std::filesystem::path& outputPath) const;
 
 private:
-    friend class RuntimePublicationCoordinator;
+    friend class RuntimeIntentCoordinator;
 
     // NonRT: grace period 完了後のメモリ解放（Coordinator 専用）
     // DELETE-1: reclaim() は Coordinator のみ呼び出し可能。

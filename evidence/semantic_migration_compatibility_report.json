@@ -1,0 +1,10 @@
+{
+  "generatedAt": "2026-08-11T16:16:42.6894409+09:00",
+  "rollbackReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json",
+  "violations": [],
+  "ownershipReportPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\ownership_migration_report.json",
+  "rollbackReady": true,
+  "ownershipReady": true,
+  "schema": "semantic_migration_compatibility_report_v1",
+  "ready": true
+}

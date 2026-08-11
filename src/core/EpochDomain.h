@@ -42,8 +42,13 @@ public:
     }
 
     // ★ C-3: タグ名付き Reader 登録
+    // ★ work88 (X3 §6.3 / INV-X3-4): reader registration permanently closed — shutdown 後は
+    //   新規登録を拒否する（registrationClosed_）。登録済み slot の enter/exit は継続可能
+    //   （既存 Reader の epoch 安全性は維持 — 十八次別視点14）。
     int registerReaderThread(const char* tag) noexcept
     {
+        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
+            return -1;   // ★ X3: reader registration permanently closed（INV-X3-4）
         for (int i = 0; i < kMaxReaders; ++i)
         {
             uint64_t expected = kInactiveEpoch;
@@ -79,6 +84,9 @@ public:
     bool reserveReaderThread(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return false;
+        // ★ work88 (X3 §6.3 / INV-X3-4): reserve 経由の登録も封じる（registrationClosed_ ガード）
+        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
             return false;
 
         uint64_t expected = kInactiveEpoch;
@@ -559,6 +567,11 @@ private:
     alignas(64) std::atomic<uint32_t> reclaimLocalCounter_{0};
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
+    // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): reader registration permanently closed フラグ。
+    //   closeReaderRegistration() で true（shutdown state machine の CloseReaderRegistration フェーズ）。
+    //   registerReaderThread / reserveReaderThread は true 後は失敗を返す（新規登録拒否）。
+    std::atomic<bool> registrationClosed_{false};
+
 public:
     // ★ A-2: 公開アクセサ
     [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override {
@@ -569,6 +582,15 @@ public:
     }
     [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override {
         return convo::consumeAtomic(reclaimSuccessCount_, std::memory_order_acquire);
+    }
+
+    // ★ work88 (X3 §6.3 / INV-X3-4): reader registration を永久に閉じる（CloseReaderRegistration）。
+    //   新規登録のみを拒否し、登録済み slot は exit まで継続可能（既存 Reader の epoch 安全性維持）。
+    void closeReaderRegistration() noexcept {
+        convo::publishAtomic(registrationClosed_, true, std::memory_order_release);
+    }
+    [[nodiscard]] bool readerRegistrationClosed() const noexcept {
+        return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
     }
 };
 

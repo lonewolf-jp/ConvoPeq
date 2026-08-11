@@ -11,7 +11,7 @@
 //   OwnerChannel: enqueue / take の連続サイクル耐久 + 容量満杯拒否
 //   PendingPublishRegistry: register / lookup / unregister stress
 //
-// ヘッドレス駆動: convo::isr::RuntimePublicationCoordinator / RuntimeWorldAuthority
+// ヘッドレス駆動: convo::isr::RuntimeIntentCoordinator / RuntimeWorldAuthority
 // を AudioEngine 無しで直接使用（ISRSemanticValidationTests と同じ方式）。
 //
 // ビルド: ISRSemanticValidationTests と同じ include/link パターン。
@@ -33,10 +33,12 @@
 #include "audioengine/ISRPayloadTier.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
 #include "audioengine/ISRRuntimeWorldAuthority.h"
+#include "audioengine/ISRDSPHandle.h"
+#include "audioengine/ISRDSPQuarantine.h"
 #include "AudioEngine.h"
 #include "OwnerChannel.h"
 
-using convo::isr::RuntimePublicationCoordinator;
+using convo::isr::RuntimeIntentCoordinator;
 
 namespace {
 
@@ -81,10 +83,10 @@ void testFail(const char* name, const char* detail)
     {
         // Coordinator は約 953KB（intentQueue_ 4096×144B 等の巨大メンバ）のため
         // 1MB スタックでオーバーフローする → ヒープ確保が必須。
-        auto coordinator = std::make_unique<RuntimePublicationCoordinator>();
+        auto coordinator = std::make_unique<RuntimeIntentCoordinator>();
 
-        RuntimePublicationCoordinator::Intent intent{};
-        intent.type = RuntimePublicationCoordinator::IntentType::Publish;
+        RuntimeIntentCoordinator::Intent intent{};
+        intent.type = RuntimeIntentCoordinator::IntentType::Publish;
 
         std::size_t accepted = 0;
         for (std::size_t i = 0; i < kCapacity + 1; ++i)
@@ -122,6 +124,148 @@ void testFail(const char* name, const char* detail)
     }
 
     testPass("S2a: IntentQueue saturation + explicit rejection (50 cycles)");
+    return true;
+}
+
+//------------------------------------------------------------------------------
+// X5: Publish Intent residency 専用 counter（dash §6.5 / INV-X5-1）
+//
+//   publicationIntentResidencyCount_ は enqueuePublicationIntent の reservation→push→rollback
+//   で維持される:
+//     - enqueue 成功ごとに +1（getPublicationIntentResidencyCount == accepted 数）
+//     - queue full で enqueue 拒否時は rollback（counter 不変）
+//     - Publish は pendingIntentCount_ を触らない（独立 counter）
+//   注: pop 側（processIntent の Publish fetchSub）は AudioEngine 統合パスが必要なため
+//   AudioEngineHarness の統合テストで検証する（dash §6.8 X5 テスト基盤）。
+//------------------------------------------------------------------------------
+[[nodiscard]] bool testPublicationIntentResidencyCounter()
+{
+    constexpr std::size_t kCapacity = 4096;   // kIntentQueueCapacity
+
+    auto coordinator = std::make_unique<RuntimeIntentCoordinator>();
+
+    RuntimeIntentCoordinator::Intent intent{};
+    intent.type = RuntimeIntentCoordinator::IntentType::Publish;
+
+    // enqueue 成功ごとに +1
+    for (std::size_t i = 0; i < kCapacity; ++i)
+    {
+        intent.sequenceId = static_cast<std::uint64_t>(i + 1);
+        if (!coordinator->enqueuePublicationIntent(intent))
+        {
+            testFail("X5: enqueue up to capacity", "unexpected rejection before full");
+            return false;
+        }
+        const auto resid = coordinator->getPublicationIntentResidencyCount();
+        if (resid != i + 1)
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                          "after %zu enqueues: residency %llu != %zu",
+                          i + 1, static_cast<unsigned long long>(resid), i + 1);
+            testFail("X5: residency increments on enqueue", buf);
+            return false;
+        }
+    }
+
+    // queue full: enqueue 拒否 → rollback（counter 不変）
+    intent.sequenceId = static_cast<std::uint64_t>(kCapacity + 1);
+    if (coordinator->enqueuePublicationIntent(intent))
+    {
+        testFail("X5: overflow enqueue rejected", "was accepted");
+        return false;
+    }
+    if (coordinator->getPublicationIntentResidencyCount() != kCapacity)
+    {
+        testFail("X5: overflow rollback", "counter changed on rejected enqueue");
+        return false;
+    }
+
+    // Publish は pendingIntentCount_ を触らない（独立 counter — INV-X5-1 / P2-1 §1.1.6 W2）
+    if (coordinator->getPendingIntentCount() != 0)
+    {
+        testFail("X5: Publish does not touch pendingIntentCount",
+                 "pendingIntentCount changed by Publish enqueue");
+        return false;
+    }
+
+    testPass("X5: Publish intent residency counter (enqueue +1 / full rollback / independent)");
+    return true;
+}
+
+//------------------------------------------------------------------------------
+// X6: Quarantine Intent / Ring residency counter 遷移（dash §6.6 / INV-X6-4）
+//
+//   submitQuarantine の transport residency を検証する:
+//     - primary（intentQueue_, 4096）成功: quarantineIntentResidencyCount_++
+//     - fallback（quarantineFallbackQueue_, 1024）へ移動: intent -1 → ring +1
+//     - 全段失敗: rollback（pending 相殺）+ quarantineFallbackDropCount++
+//     - 期待: 5120 件成功後 intent=3072 / ring=1024 / pending=5120。
+//             次の submit は drop（counter 不変）。
+//   DSPHandleRuntime / DSPQuarantineManager は submitQuarantine が (void) するため
+//   ダミー実体を渡す。pop 側（processIntent）の減算は AudioEngine 統合で検証する。
+//------------------------------------------------------------------------------
+[[nodiscard]] bool testQuarantineIntentRingResidency()
+{
+    constexpr std::size_t kIntentCap = 4096;    // kIntentQueueCapacity
+    constexpr std::size_t kFallbackCap = 1024;  // kQuarantineFallbackCapacity
+
+    auto coordinator = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::DSPHandleRuntime handleRuntime;
+    convo::isr::DSPQuarantineManager quarantineManager;
+
+    // primary + fallback を両方満杯にする
+    for (std::size_t i = 0; i < kIntentCap + kFallbackCap; ++i)
+    {
+        convo::isr::DSPHandle handle{
+            static_cast<std::uint32_t>((i % 255u) + 1u), static_cast<std::uint64_t>(1u) };
+        coordinator->submitQuarantine(handle,
+            convo::isr::QuarantineReason::GenerationMismatch,
+            handleRuntime, quarantineManager, static_cast<std::uint64_t>(0u));
+    }
+
+    // 期待値: intent = 4096（primary 満杯 — 各 submit が +1、fallback 移動ごとに -1 のため
+    //   primary 占有数は 4096 に維持）, ring = 1024（fallback 満杯）, pending = 5120（全 admitted）
+    //   不変条件: intent + ring == pending（各 quarantine intent は primary か fallback の
+    //   どちらか一方にのみ存在 — INV-X6-4 / §6.6 状態遷移表）。
+    const auto intentRes = coordinator->getQuarantineIntentResidencyCount();
+    const auto ringRes = coordinator->getQuarantineRingResidencyCount();
+    const auto pending = coordinator->getPendingIntentCount();
+    if (intentRes != kIntentCap || ringRes != kFallbackCap || pending != (kIntentCap + kFallbackCap)
+        || intentRes + ringRes != pending)
+    {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "intent=%llu ring=%llu pending=%llu (expect intent=%zu ring=%zu pending=%zu)",
+                      static_cast<unsigned long long>(intentRes),
+                      static_cast<unsigned long long>(ringRes),
+                      static_cast<unsigned long long>(pending),
+                      kIntentCap, kFallbackCap, kIntentCap + kFallbackCap);
+        testFail("X6: quarantine intent/ring residency after saturation", buf);
+        return false;
+    }
+
+    // 全段失敗: rollback + drop（counter 不変・underflow なし — 二重減算の回帰検出）
+    {
+        convo::isr::DSPHandle handle{ 255u, 1u };
+        coordinator->submitQuarantine(handle,
+            convo::isr::QuarantineReason::GenerationMismatch,
+            handleRuntime, quarantineManager, static_cast<std::uint64_t>(0u));
+    }
+    if (coordinator->getQuarantineIntentResidencyCount() != kIntentCap
+        || coordinator->getQuarantineRingResidencyCount() != kFallbackCap
+        || coordinator->getPendingIntentCount() != (kIntentCap + kFallbackCap))
+    {
+        testFail("X6: overflow rollback (all-layers full)", "counter changed on dropped submit");
+        return false;
+    }
+    if (coordinator->quarantineFallbackDropCount() != 1)
+    {
+        testFail("X6: drop counter on all-layers full", "quarantineFallbackDropCount != 1");
+        return false;
+    }
+
+    testPass("X6: quarantine intent/ring residency transitions (primary/fallback/full-drop)");
     return true;
 }
 
@@ -271,7 +415,7 @@ void testFail(const char* name, const char* detail)
 [[nodiscard]] bool testPendingPublishRegistryEndurance()
 {
     // Coordinator は ~953KB のためヒープ確保（スタック 1MB 対策）
-    auto coordinator = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     convo::isr::RuntimeWorldAuthority authority(*coordinator);
     auto& registry = authority.registry();
 
@@ -322,7 +466,7 @@ void testFail(const char* name, const char* detail)
 [[nodiscard]] bool testPendingPublishRegistryOverwriteStress()
 {
     // Coordinator は ~953KB のためヒープ確保（スタック 1MB 対策）
-    auto coordinator = std::make_unique<convo::isr::RuntimePublicationCoordinator>();
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     convo::isr::RuntimeWorldAuthority authority(*coordinator);
     auto& registry = authority.registry();
 
@@ -361,6 +505,10 @@ int main()
     try
     {
         if (!testIntentQueueSaturation())
+            return 1;
+        if (!testPublicationIntentResidencyCounter())
+            return 1;
+        if (!testQuarantineIntentRingResidency())
             return 1;
         if (!testOwnerChannelEndurance())
             return 1;

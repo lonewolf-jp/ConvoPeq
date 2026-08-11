@@ -54,29 +54,32 @@ if (-not [regex]::IsMatch($retireText, 'publishAtomic\(retirePressureAdmissionSt
     $violations.Add('AudioEngine.Retire.cpp must publish retire admission strict gate with memory_order_release') | Out-Null
 }
 
+# ★ 2026-08-11: FUTURE-4 で persistentState_ キャッシュを廃止し、currentWorld_ から prev metadata を取得
 if (-not [regex]::IsMatch($coordinatorText,
-    'const auto prev = persistentState_;')) {
-    $violations.Add('ISRRuntimePublicationCoordinator.cpp must read persistentState_ before monotonic checks') | Out-Null
+    'const auto prevWorld = static_cast<const RuntimeState\*>\(')) {
+    $violations.Add('ISRRuntimePublicationCoordinator.cpp must read prev metadata from currentWorld_ before monotonic checks') | Out-Null
 }
 
+# ★ 2026-08-11: FUTURE-4 で metadata は currentWorld_ に bake（persistentState_ 廃止）
 if (-not [regex]::IsMatch($coordinatorText,
-    'persistentState_\s*=\s*PersistentStateBlock\{')) {
-    $violations.Add('ISRRuntimePublicationCoordinator.cpp must assign persistentState_ after monotonic checks') | Out-Null
+    'pubWorld->publication = PublicationSemantic\{')) {
+    $violations.Add('ISRRuntimePublicationCoordinator.cpp must bake publication semantics onto currentWorld_ after monotonic checks') | Out-Null
 }
 
 # isMonotonic 冁E��実裁E�E監査�E�Eeturn false への改悪を防止�E�E
 # isMonotonic はヘッダのインライン定義なので combinedCoordinatorText を使用
-if (-not [regex]::IsMatch($combinedCoordinatorText,
-    'nextSeqId > prev\.publicationSequenceId')) {
-    $violations.Add('isMonotonic(): sequenceId strict monotonic contract violated') | Out-Null
+# ★ 2026-08-11: isMonotonic メソッドは廃止し、commit() 内でインライン比較（FUTURE-4）
+if (-not [regex]::IsMatch($coordinatorText,
+    'static_cast<std::uint64_t>\(sequenceId\) > static_cast<std::uint64_t>\(prevSeqId\)')) {
+    $violations.Add('commit(): sequenceId strict monotonic contract violated') | Out-Null
 }
-if (-not [regex]::IsMatch($combinedCoordinatorText,
-    'nextEpoch > prev\.publicationEpoch')) {
-    $violations.Add('isMonotonic(): epoch strict monotonic contract violated') | Out-Null
+if (-not [regex]::IsMatch($coordinatorText,
+    'static_cast<std::uint64_t>\(epoch\) > static_cast<std::uint64_t>\(prevEpoch\)')) {
+    $violations.Add('commit(): epoch strict monotonic contract violated') | Out-Null
 }
-if (-not [regex]::IsMatch($combinedCoordinatorText,
-    'nextGen > prev\.mappedRuntimeGeneration')) {
-    $violations.Add('isMonotonic(): mappedGeneration strict monotonic contract violated') | Out-Null
+if (-not [regex]::IsMatch($coordinatorText,
+    'mappedGeneration > prevGen')) {
+    $violations.Add('commit(): mappedGeneration strict monotonic contract violated') | Out-Null
 }
 
 $report = [ordered]@{

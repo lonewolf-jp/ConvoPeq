@@ -198,6 +198,13 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
+    // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): CloseReaderRegistration — graceful drain の前に
+    //   reader 新規登録を永久に封じる。graceful drain は activeReaderCount()==0 を待つが、
+    //   reader 登録を封じないと「0 に達した後に新しい reader が登録される」可能性がある。
+    //   先に readerRegistrationClosed を確立すれば、graceful drain 完了時点で再登録が構造的に不可能。
+    //   （登録済み slot の enter/exit は継続可能 — 既存 Reader の epoch 安全性は維持）
+    m_epochDomain.closeReaderRegistration();
+
     // ★ Phase5: Shutdown 時、全保留Intentを Critical に昇格（優先度ベースの早期回収）
     worldAuthority_.lifetime().escalateAllRetires(convo::isr::RetirePriority::Critical);
 
@@ -230,14 +237,9 @@ void AudioEngine::releaseResources()
             m_retireRouter->publishEpoch();
             m_retireRouter->tryReclaim();
 
-            // ★ Phase2: 各ループで coordinator の QuarantineResidentCount を更新
-            {
-                const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
-                    ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
-                const auto dspQuarantineResident = dspQuarantineManager_.residentCount();
-                runtimePublicationBridge_.setQuarantineResidentCount(
-                    static_cast<std::uint64_t>(ringResident + dspQuarantineResident));
-            }
+            // ★ work88 (X6 §6.6): coordinator の quarantineResidentCount_ aggregate 上書きは廃止
+            //   （INV-X6-4 — ring と DSP を混ぜない）。drain 判定は AudioEngine::isFullyDrained が
+            //   DSPQuarantineManager / overflowRing / RetireQuarantineStore を直接判定する（X6）。
         }
 
         // ★ Phase2 5.5: Timeout到達 → 最終Drain（1回限定）
@@ -409,15 +411,31 @@ void AudioEngine::releaseResources()
 
     const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
     const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+    // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、Reclaim Authority
+    //   （ShutdownQuiescent モード）に一本化。INV-X3-4 / INV-ISR-04: reader registration closed
+    //   を precondition に検証（releaseResources は DrainRetire フェーズで closeReaderRegistration()
+    //   済み → true）。retire → reclaim の順序は維持（retire は冪等 — AC-X3-16 二重 retire なし）。
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
-        dspHandleRuntime_.shutdownReclaim(activeHandle);
+        // ★ C4834 対応: reclaim の戻り値（readerRegistrationClosed precondition 検証結果）を確認。
+        //   releaseResources は DrainRetire フェーズで closeReaderRegistration() 済みのため true が期待。
+        const bool reclaimed = runtimePublicationBridge_.reclaim(
+            convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+            activeHandle, dspHandleRuntime_, *m_retireRouter,
+            m_epochDomain.readerRegistrationClosed());
+        jassert(reclaimed);
+        juce::ignoreUnused(reclaimed);
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
-        dspHandleRuntime_.shutdownReclaim(fadingHandle);
+        const bool reclaimed = runtimePublicationBridge_.reclaim(
+            convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
+            fadingHandle, dspHandleRuntime_, *m_retireRouter,
+            m_epochDomain.readerRegistrationClosed());
+        jassert(reclaimed);
+        juce::ignoreUnused(reclaimed);
     }
 
     diagLog("[DIAG] releaseResources: before ui processor release");
@@ -433,14 +451,23 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
-    auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
-    runtimePublicationCoordinator.requestShutdownClearNonRt();
-    runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
+    // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
+    //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。clear は publish() と統合せず
+    //   null 公開（world クリア）として別 API を authority 配下に置く（二十次レビュー §15）。
+    //   戻り値の oldWorld は従来 bridge.retireRuntimePublishWorldNonRt(world, true) で retire していた。
+    //   shutdown 中は enqueueDeferredDeleteNonRt が Shutdown を返すため実質 no-op だが契約を維持する。
+    worldAuthority_.requestShutdownClearNonRt();
+    auto* clearedWorld = worldAuthority_.clearPublishedRuntimeSnapshotsNonRt();
+    if (clearedWorld != nullptr)
+    {
+        RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
+        clearBridge.retireRuntimePublishWorldNonRt(clearedWorld, true);
+    }
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
-    //   stopRebuildThread(:190, join で Builder 完全終了) → waitForDrain(:430)。
-    //   waitForDrain 時点で Builder（rebuildThreadIsRunning）は必ず false のはず。
+    //   stopRebuildThread(:190, join で Builder 完全終了) → drain wait(:430)。
+    //   drain wait 時点で Builder（rebuildThreadIsRunning）は必ず false のはず。
     //   jassert で契約破れ（順序変更・追加経路）を即時検出する。
     jassert(!convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire));
 

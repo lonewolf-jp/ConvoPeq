@@ -15,13 +15,14 @@ else {
         'if \(world\.publication\.previousSequenceId >= world\.publication\.sequenceId\)',
         'if \(lastCommittedGeneration != 0 && world\.generation <= lastCommittedGeneration\)',
         'if \(lastCommittedSequence != 0 && world\.publication\.sequenceId <= lastCommittedSequence\)',
-        'if \(targetWorldIdU64 <= lastEnqueuedTargetWorldId\)',
-        'publishAtomic\(lastEnqueuedPublicationTargetWorldId_',
         'onRuntimePublishedNonRt\(const RuntimePublishWorld& world\)',
         'runtimePublicationBridge_\.commit\(',
         'publishAtomic\(lastCommittedRuntimeGeneration_',
         'publishAtomic\(lastCommittedPublicationSequence_'
     )
+    # ★ 2026-08-11: targetWorldIdU64 / lastEnqueuedPublicationTargetWorldId_ の重複チェックは
+    #   generation / sequenceId の単調性チェック（lastCommittedGeneration_ / lastCommittedPublicationSequence_）
+    #   に置き換えられている（worldId は generation から導出）。実装の atomicity 契約に合わせて対象外。
 
     foreach ($pattern in $requiredPatterns) {
         if ($s -notmatch $pattern) {

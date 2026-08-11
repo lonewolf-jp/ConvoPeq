@@ -1,0 +1,65 @@
+{
+  "schema": "documentation_scope_rule_report_v1",
+  "generatedAt": "2026-08-11T16:17:40.5976846+09:00",
+  "documents": [
+    {
+      "role": "plan-v3_1",
+      "glob": "Practical_Stable_ISR_Runtime_*_v3_1.md",
+      "path": "doc/work5/Practical_Stable_ISR_Runtime_基本計画書_v3_1.md",
+      "exists": true,
+      "missingTokens": []
+    },
+    {
+      "role": "governance-v1_1",
+      "glob": "ISR_Runtime_*_v1_1.md",
+      "path": "doc/work5/ISR_Runtime_実装統治規約_v1_1.md",
+      "exists": true,
+      "missingTokens": []
+    },
+    {
+      "role": "design-v1_2",
+      "glob": "Practical_Stable_ISR_Runtime_*_v1_2.md",
+      "path": "doc/work5/Practical_Stable_ISR_Runtime_詳細設計_v1_2.md",
+      "exists": true,
+      "missingTokens": []
+    },
+    {
+      "role": "tasks-v1_0",
+      "glob": "Practical_Stable_ISR_Runtime_*_v1_0.md",
+      "path": "doc/work5/Practical_Stable_ISR_Runtime_フェーズ別実装タスク分解_v1_0.md",
+      "exists": true,
+      "missingTokens": []
+    },
+    {
+      "role": "topology-diff",
+      "glob": "Practical_Stable_ISR_Runtime_topology_diff_*.md",
+      "path": "doc/work5/Practical_Stable_ISR_Runtime_topology_diff_2026-05-29.md",
+      "exists": true,
+      "missingTokens": []
+    }
+  ],
+  "artifacts": [
+    {
+      "role": "inventory-current",
+      "path": "storage/isr_inventory/current_authority_inventory.json",
+      "exists": true
+    },
+    {
+      "role": "inventory-post",
+      "path": "storage/isr_inventory/post_authority_inventory.json",
+      "exists": true
+    },
+    {
+      "role": "inventory-diff",
+      "path": "storage/isr_inventory/inventory_diff_report.json",
+      "exists": true
+    },
+    {
+      "role": "inventory-report",
+      "path": "evidence/authority_inventory_report.json",
+      "exists": true
+    }
+  ],
+  "violations": [],
+  "ready": true
+}
