@@ -115,6 +115,77 @@ enum class BuildError {
     InternalError
 };
 
+// ── ★ dash2 §1.8 (Phase D — H.11.2 / §1.8.5.2): retryability の分類分離 ──
+//   BuildError は failure 原因のみを表し、retryability は caller が推測していた（8/14 レビュー指摘）。
+//   FailureClassification + RetryDisposition を分離し、retry 方針を型で表現する。
+//   ⚠️ 本分類は「デフォルト分類」であり、固定 lookup table ではない（第四者レビュー §21）。
+//   実装は BuildError + BuildContext → FailureClassification → RetryDisposition の順で解決する
+//   （BuildContext は将来拡張。現行はデフォルト表のみ — §1.8.12 未解決課題）。
+enum class FailureClassification : uint8_t {
+    Permanent,       // retry 無意味（InvalidInput）
+    Transient,       // retry 有効（ResourceUnavailable / WarmupFailed）
+    Infrastructure,  // retry 有効・環境依存（ConvolverFailure / PrepareFailure）
+    Fatal            // retry 無意味・異常終了（InternalError / MKLFailure）
+};
+
+enum class RetryDisposition : uint8_t {
+    NoRetry,         // retry 禁止（Permanent / Fatal）
+    RetryBackoff,    // exponential backoff 付き retry（Transient / Infrastructure）
+    RetryImmediate   // immediate retry（WarmupFailed 等 latency-sensitive）
+};
+
+struct BuildOutcome {
+    BuildError error = BuildError::None;
+    FailureClassification classification = FailureClassification::Fatal;
+    RetryDisposition retry = RetryDisposition::NoRetry;
+};
+
+// ★ §1.8.10.3: constexpr descriptor table（static_assert でなく table で網羅性を担保）
+//   BuildError → (Classification, RetryDisposition) のデフォルト分類。
+//   本 table は enum 順序と同期する（static_assert で件数検証）。
+constexpr BuildOutcome kBuildErrorDefaultTable[] = {
+    /* None */              { BuildError::None,              FailureClassification::Permanent,      RetryDisposition::NoRetry },
+    /* InvalidInput */      { BuildError::InvalidInput,      FailureClassification::Permanent,      RetryDisposition::NoRetry },
+    /* ResourceUnavailable */{ BuildError::ResourceUnavailable, FailureClassification::Transient,   RetryDisposition::RetryBackoff },
+    /* MKLFailure */        { BuildError::MKLFailure,        FailureClassification::Fatal,          RetryDisposition::NoRetry },
+    /* ConvolverFailure */  { BuildError::ConvolverFailure,  FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
+    /* PrepareFailure */    { BuildError::PrepareFailure,    FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
+    /* WarmupFailed */      { BuildError::WarmupFailed,      FailureClassification::Transient,      RetryDisposition::RetryImmediate },
+    /* InternalError */     { BuildError::InternalError,     FailureClassification::Fatal,          RetryDisposition::NoRetry },
+};
+static_assert(sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome)
+                  == static_cast<size_t>(BuildError::InternalError) + 1,
+              "kBuildErrorDefaultTable must cover all BuildError values");
+
+// ★ §1.8.10.3 / 第十八者 #6: toString は descriptor table から生成（switch 重複を排除）。
+//   BuildError → 文字列。網羅性は kBuildErrorDefaultTable と同一サイズで検証。
+constexpr const char* kBuildErrorNames[] = {
+    "None", "InvalidInput", "ResourceUnavailable", "MKLFailure",
+    "ConvolverFailure", "PrepareFailure", "WarmupFailed", "InternalError"
+};
+static_assert(sizeof(kBuildErrorNames) / sizeof(const char*)
+                  == static_cast<size_t>(BuildError::InternalError) + 1,
+              "kBuildErrorNames must cover all BuildError values");
+
+// ★ §1.8.5.2 / H.11.2: BuildError → デフォルト分類の解決。
+//   将来的に BuildContext（一時的 resource exhaustion / persistent config）で上書きする。
+[[nodiscard]] inline BuildOutcome classifyBuildError(BuildError error) noexcept
+{
+    const auto idx = static_cast<size_t>(error);
+    if (idx >= sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome))
+        return { BuildError::InternalError, FailureClassification::Fatal, RetryDisposition::NoRetry };
+    return kBuildErrorDefaultTable[idx];
+}
+
+// ★ §1.8.10.3: toString の table ベース実装（inline — 網羅性 static_assert 済み）。
+[[nodiscard]] inline const char* classifyBuildErrorToString(BuildError error) noexcept
+{
+    const auto idx = static_cast<size_t>(error);
+    if (idx >= sizeof(kBuildErrorNames) / sizeof(const char*))
+        return "Unknown";
+    return kBuildErrorNames[idx];
+}
+
 struct BuildResult {
     AudioEngine::DSPCore* runtime = nullptr;
     BuildError error = BuildError::None;

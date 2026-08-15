@@ -357,7 +357,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 const double currentVal = activeMixSmoother.getCurrentValue();
                 const double targetVal = activeMixSmoother.getTargetValue();
-                activeMixSmoother.reset(sampleRate, static_cast<double>(newTime));
+                activeMixSmoother.resetRT(sampleRate, static_cast<double>(newTime));
                 activeMixSmoother.applyImmediateValueRT(currentVal);
                 activeMixSmoother.setTargetValue(targetVal);
             }

@@ -189,6 +189,10 @@ public:
     // [work21] IEpochProvider::publishEpoch — inline advance to avoid deprecated call
     uint64_t publishEpoch() noexcept override
     {
+        // ★ dash2 §2.2 (G19): epoch 前進と同期して epochGeneration_ をインクリメント。
+        //   ShutdownRuntimeIdentity::epochGeneration の実供給源（T10 / Permit ABA 防止）。
+        (void)convo::fetchAddAtomic(epochGeneration_, static_cast<uint64_t>(1),
+                                    std::memory_order_acq_rel);
         return convo::fetchAddAtomic(globalEpoch,
                                      static_cast<uint64_t>(1),
                                      std::memory_order_acq_rel);
@@ -572,6 +576,17 @@ private:
     //   registerReaderThread / reserveReaderThread は true 後は失敗を返す（新規登録拒否）。
     std::atomic<bool> registrationClosed_{false};
 
+    // ── ★ dash2 §2.2 (Phase A2 — G19/G20): generation 実供給源 ──
+    //   ShutdownRuntimeIdentity の epochGeneration / readerRegistrationGeneration を束縛する
+    //   generation 値。型フィールドの存在だけでなく、authority（EpochDomain）からの実供給・
+    //   検証経路を成立させる（H.11.11.9.3 G-D1〜D4）。
+    //   - epochGeneration_: publishEpoch() ごとにインクリメント（epoch 前進と同期）
+    //   - readerRegistrationGeneration_: closeReaderRegistration() ごとにインクリメント
+    //     （registration 状態の世代 — 再オープンは存在しないため単調増加）
+    //   ［生成は EpochDomain のみ。ShutdownRuntime は getter 経由で観測し Proof/Permit に束縛］
+    std::atomic<uint64_t> epochGeneration_{0};
+    std::atomic<uint64_t> readerRegistrationGeneration_{0};
+
 public:
     // ★ A-2: 公開アクセサ
     [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override {
@@ -588,9 +603,23 @@ public:
     //   新規登録のみを拒否し、登録済み slot は exit まで継続可能（既存 Reader の epoch 安全性維持）。
     void closeReaderRegistration() noexcept {
         convo::publishAtomic(registrationClosed_, true, std::memory_order_release);
+        // ★ dash2 §2.2 (G20): registration 状態の世代をインクリメント。
+        //   ShutdownRuntimeIdentity::readerRegistrationGeneration の実供給源。
+        //   registrationClosed_ の publish 後（release）に increment するため、
+        //   acquire で読む側は「閉じた後の世代」を観測する（INV-LIFE-6 / T10）。
+        (void)convo::fetchAddAtomic(readerRegistrationGeneration_, static_cast<uint64_t>(1),
+                                    std::memory_order_acq_rel);
     }
     [[nodiscard]] bool readerRegistrationClosed() const noexcept {
         return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
+    }
+
+    // ★ dash2 §2.2 (G19/G20): generation 公開アクセサ（ShutdownRuntime / Proof 生成用）。
+    [[nodiscard]] uint64_t epochGeneration() const noexcept {
+        return convo::consumeAtomic(epochGeneration_, std::memory_order_acquire);
+    }
+    [[nodiscard]] uint64_t readerRegistrationGeneration() const noexcept {
+        return convo::consumeAtomic(readerRegistrationGeneration_, std::memory_order_acquire);
     }
 };
 

@@ -2022,17 +2022,23 @@ private:
                     {
                         if (!entry.second.isNull())
                         {
-                            const auto resolved = rt.resolve(entry.second);
-                            delete static_cast<EQCoeffCache*>(resolved.instance);
                             // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、
                             //   Reclaim Authority（ShutdownQuiescent モード）に一本化。
-                            //   INV-X3-4 / INV-ISR-04: reader registration closed を precondition に
-                            //   検証（~AudioEngine 本体で closeReaderRegistration() 済み → true）。
-                            //   delete（物理解放）→ reclaim（slot 状態遷移）の順序は維持。
-                            const bool reclaimed = owner->runtimePublicationBridge_.reclaim(
-                                convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
-                                entry.second, rt, *owner->m_retireRouter,
-                                owner->m_epochDomain.readerRegistrationClosed());
+                            // ★ dash2 §2.2 (Phase A2 — Step 10/13): caller-side shutdown 判断を撤去し、
+                            //   tryShutdownQuiescentReclaim（ShutdownRuntime が Proof → Permit →
+                            //   reclaimShutdownQuiescent）に委譲（AC-2）。
+                            // ★ Step 13 (destruction ordering): H.11.11.9.4 の blocker 対応。
+                            //   旧実装は「delete EQCoeffCache → reclaim(slot)」の順序で、reclaim 失敗時に
+                            //   object 消滅 + handle 未回収の状態を作り得た。本実装は reclaim（slot 状態遷移）
+                            //   を先に成功させ、成功時のみ EQCoeffCache を物理解放する（ReclaimStarted →
+                            //   physical destruction → ReclaimCompleted の順序に整合）。
+                            const bool reclaimed = owner->tryShutdownQuiescentReclaim(entry.second);
+                            if (reclaimed)
+                            {
+                                const auto resolved = rt.resolve(entry.second);
+                                if (resolved.instance != nullptr)
+                                    delete static_cast<EQCoeffCache*>(resolved.instance);
+                            }
                             jassert(reclaimed);
                             juce::ignoreUnused(reclaimed);   // Release(NDEBUG) で jassert 消滅時の未使用警告対策
                         }
@@ -4149,8 +4155,9 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
     auto result = m_retireRouter->enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
     if (result == convo::isr::RetireEnqueueResult::Success)
     {
-        runtimePublicationBridge_.setRetireBacklogCount(
-            static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()));
+        // ★ dash2 §1.4 (B0-7): setRetireBacklogCount による Coordinator へのスナップショット
+        //   上書きを撤去。retire バックログは AudioEngine::isFullyDrained（Layer 1）が
+        //   m_retireRouter->pendingRetireCount() を直接参照して判定する（dash2 §1.4 設計方針）。
         return convo::isr::RetireEnqueueResult::Success;
     }
 
@@ -4159,7 +4166,7 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
     drainDeferredRetireQueues(false);
     const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
-    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
+    // ★ dash2 §1.4 (B0-7): setRetireBacklogCount 上書きを撤去（上記コメント参照）。
     return result;
 }
 
@@ -4259,20 +4266,70 @@ inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
         if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
         {
             std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-            pendingReclaimHandles_.push_back(handle);
+            // ★ dash2 §2.2 (G14): ReclaimIdentity（handle + retireSequence）として登録。
+            //   retireSequence は deterministic ordering（INV-FIFO-1 secondary）。
+            pendingReclaimHandles_.push_back(
+                convo::isr::ReclaimIdentity{ handle, retireEpoch });
         }
     }
     else
     {
         // epoch 不安全: RT が古い epoch を参照中 → 保留し drainDeferredRetireQueues で再試行。
         std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-        pendingReclaimHandles_.push_back(handle);
+        // ★ dash2 §2.2 (G14): ReclaimIdentity として登録（上記コメント参照）。
+        pendingReclaimHandles_.push_back(
+            convo::isr::ReclaimIdentity{ handle, retireEpoch });
     }
 }
 
+// ★ dash2 §2.2 (Phase A2 — Step 12): Shutdown 時の Proof → Permit → reclaim 供給ヘルパー。
+//   CacheMap / ReleaseResources は「caller-side shutdown 判断」を自身から撤去し（AC-2）、
+//   本ヘルパーに handle を渡すだけで、ShutdownRuntime が Proof 生成 → Permit 発行 →
+//   reclaimShutdownQuiescent（Permit consume）を一括実行する（H.11.11.9.4: CacheMap は対象を
+//   ReclaimAuthority へ渡すだけ）。
+//   - Proof 生成: Q0〜Q7 を観測値から検証（tryMakeQuiescenceProof）
+//   - Permit 発行: tryMakeReclaimPermit（Proof.identity 束縛）
+//   - reclaim: reclaimShutdownQuiescent（Permit consume — single-use）
+//   - 戻り値: reclaim 成功時 true（Permit 消費済み）。Proof 不成立 / Permit なし / 二重使用は false。
+//   ［NonRT のみ。AC-ISR-1: Audio Thread からは呼ばない］
+inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull())
+        return false;
+
+    // Q0〜Q7 の観測値（EpochDomain / RetireRouter / ShutdownRuntime から収集）
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
+    obs.admissionReservationsZero = true;   // Q0: admission reservations は producer join 後 0
+    obs.allProducersJoined = true;          // Q2: shutdown 確定 + producer join 完了
+    obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
+    obs.activeReadersZero = (m_retireRouter != nullptr)
+        ? (m_retireRouter->activeReaderCount() == 0) : true;                  // Q4
+    obs.epochSettled = true;                // Q5: EpochQuiescenceEvidence（shutdown 確定後）
+    obs.postStopEnqueueZero = true;         // Q6: postStopEnqueue == 0（shutdown 確定後）
+    obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();                 // Q7
+    obs.epochGeneration = m_epochDomain.epochGeneration();                    // G19
+    obs.readerRegistrationGeneration = m_epochDomain.readerRegistrationGeneration();  // G20
+
+    auto proof = shutdownRuntime_.tryMakeQuiescenceProof(obs);
+    if (!proof.has_value() || !proof->valid())
+        return false;
+
+    auto permit = shutdownRuntime_.tryMakeReclaimPermit(*proof);
+    if (!permit.has_value())
+        return false;
+
+    // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): AudioEngine は identity を bind しない。
+    //   binding authority は ShutdownRuntime のみ（tryMakeQuiescenceProof 内で ReclaimAuthority の
+    //   bindShutdownIdentity を呼ぶ — friend 経由）。ReclaimAuthority の wiring も constructor 固定注入
+    //   （setReclaimAuthority 廃止）— AudioEngine は transport only（Permit を渡すだけ）。
+    //   ReclaimAuthority が自身の shutdown identity と permit.identity を照合する
+    //   （reclaimShutdownQuiescent 内部で cross-runtime / stale reject）。
+    return runtimePublicationBridge_.reclaimShutdownQuiescent(
+        handle, dspHandleRuntime_, *m_retireRouter, std::move(*permit));
+}
+
 // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
-//   quarantine 検出時に Recovery buildSource として使う「現在の publish 構成 snapshot」を返す。
-//   QuarantineIntentHandler がこの値を submitRecoveryIntent へ渡す（Recovery = 現在の構成の再 build）。
+//   quarantine 検出時に Recovery buildSource として使う「現在の publish 構成 snapshot」を返す。//   QuarantineIntentHandler がこの値を submitRecoveryIntent へ渡す（Recovery = 現在の構成の再 build）。
 [[nodiscard]] inline convo::RuntimeBuildSnapshot getCurrentBuildSnapshotForRecovery() const noexcept
 {
     std::lock_guard<std::mutex> lock(currentBuildSnapshotMutex_);
@@ -4629,7 +4686,11 @@ public:
     //   実行）で再試行する。これにより slot リークを防ぐ（DELETED-2/3 の epoch 契約は維持）。
     //   スレッド安全性: retireDSPHandleForRuntime（複数スレッド）と drainDeferredRetireQueues
     //   （Timer）からアクセスされるため mutex で保護。
-    std::vector<convo::isr::DSPHandle> pendingReclaimHandles_;
+    // ★ dash2 §2.2 (Phase A2 — G14): DSPHandle → ReclaimIdentity（handle + retireSequence）に昇格。
+    //   reclaim obligation の identity を実体 authority として確立（H.11.11.6）。
+    //   empty() は isFullyDrained（Layer 1）の reclaim completion 判定に使用（INV-X3-5）。
+    //   ［ReclaimIdentity は NonRT ReclaimAuthority 専用（AC-ISR-1 / 第七者 #12）］
+    std::vector<convo::isr::ReclaimIdentity> pendingReclaimHandles_;
     mutable std::mutex pendingReclaimHandlesMutex_;
 
     // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):

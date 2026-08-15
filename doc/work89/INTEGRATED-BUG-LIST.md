@@ -4,6 +4,8 @@
 - **対象**: `doc/work89/bugs/` 内の全バグファイル（BUG-047 〜 BUG-065、重複1ファイル含む）
 - **検証方法**: 各バグの報告内容（該当ファイル・行番号・症状・コード断片）を **現在のソースコード** と 1:1 で照合。ソース上の `★ BUG-XXX` 修正コメントと実際のコード変更を確認。
 - **検証日時点のソース**: 主要対象ファイルは 2026-07-30 〜 2026-08-05 に更新済み（バグ発見日 2026-07-26 より後）
+- **再検証（2026-08-12）**: HEAD 3198acc にて別視点調査（§15）を実施。全 19 バグの「修正済み」判定を再確認し、一部の不正確な記述（§3 BUG-048/049/054、§5、§8.1、§14）を修正した。**行番号は §15.2 の表を正とする。**
+- **再検証第2パス（2026-08-12）**: serena / AiDex MCP を stdio JSON-RPC で実使用（§16）、類推探索・文献検証を実施。§15 の結論に変更なし。N-1（Emergency Override の exchange）は work88 BUG-029 の意図的設計であることを確定し、CAS-only 化の推奨を撤回。未完了事項はゼロに確定。
 
 ---
 
@@ -17,7 +19,7 @@
 | 未修正（ソースで確認） | 0 | — |
 | 残存リスク（注意事項） | 1 | BUG-065 の一部（`rtSeenAgcResetSerial` 直接書き込み） |
 
-> **最重要所見**: バグレポート（2026-07-26 作成）後に全 19 バグが修正され、各修正箇所に `★ BUG-XXX` コメントが残されている。README 記載の「work88 全バグ (BUG-011〜BUG-046) は修正されていない」という記述は work89 バグには適用されない。**現行コードに未修正バグはゼロ**。
+> **最重要所見**: バグレポート（2026-07-26 作成）後に全 19 バグが修正され、各修正箇所に `★ BUG-XXX` コメントが残されている（※ BUG-060/063/064/065 は ★ なし表記、N-9 参照）。README 記載の「work88 全バグ (BUG-011〜BUG-046) は修正されていない」という記述は work89 バグには適用されない。**現行コードに未修正バグはゼロ**。
 
 ---
 
@@ -25,7 +27,7 @@
 
 | ID | タイトル | 報告時重大度 | 修正状態 | 修正内容（ソース確認） |
 |----|---------|------------|---------|----------------------|
-| **BUG-047** | EQCoeffCache::computeParamsHash に sampleRate 不足 | **HIGH** | ✅ 修正済み | `computeParamsHash(params, sampleRate, maxBlockSize)` に signature 拡張＋ハッシュへ `srBits`/`maxBlockSize` を組込（EQProcessor.ProcessingCache.cpp:24-49、EQProcessor.h:242-244）。`getOrCreate` 側も新 signature で呼出（AudioEngine.Cache.cpp:53） |
+| **BUG-047** | EQCoeffCache::computeParamsHash に sampleRate 不足 | **HIGH** | ✅ 修正済み | `computeParamsHash(params, sampleRate, maxBlockSize)` に signature 拡張＋ハッシュへ `srBits`/`maxBlockSize` を組込（EQProcessor.ProcessingCache.cpp:23-50【★ :46】、EQProcessor.h:242-244）。`getOrCreate` 側も新 signature で呼出（AudioEngine.Cache.cpp:51） |
 | **BUG-048** | detectStuckReaders が最初の一致で break し重度 Stuck を見逃す | LOW | ✅ 修正済み | 単一ループ break-on-first を **3パス評価**（Pass3 Chronic → Pass2 Warning → Pass1 EpochGap）に変更（EpochDomain.h:440-509）。加えて residencyTime を実時間ベースに改善（P4.5） |
 | **BUG-049** | quarantineFlags への並行 store 競合（即時 vs 遅延隔離） | MEDIUM | ✅ 修正済み | plain store を **CAS** に変更（0x00→0x02 / 0x00→0x01 / 0x02→0x01 の原子的遷移のみ許容、0x03 生成防止）（EpochDomain.h:255-285 ほか） |
 | **BUG-050** | enterReader の HB 順序（epoch store が depth++ の後） | MEDIUM | ✅ 修正済み | **epoch を depth++ より前に store** して HB ギャップを除去（EpochDomain.h:107-115）。`enterReader` 自体は `[[deprecated]]`（RCUReader 移行推奨） |
@@ -61,13 +63,13 @@
 ### BUG-048 — detectStuckReaders 最初の一致で break 【LOW → 修正済み】
 
 - **報告**: 条件優先順位を実装しているが最初の一致で break し、重度 Chronic Stuck を見逃す。
-- **検証（修正後）**: `EpochDomain.h:440-509` に `★ BUG-048` コメント。`for (int pass = 3; pass >= 1; --pass)` の 3 パス構造（Pass3=Chronic >30s、Pass2=Warning >10s、Pass1=EpochGap）に変更。各パス内で `buildReaderInfo(i, severity)` を走査し、最初に合致した Reader を返す。
+- **検証（修正後）**: `EpochDomain.h:434-512`（detectStuckReaders）に `★ BUG-048` コメント（:448）。`for (int pass = 3; pass >= 1; --pass)` の 3 パス構造（Pass3=Chronic、Pass2=Warning、Pass1=EpochGap）に変更。各パス内で `buildReaderInfo(i, severity)` を走査し、最初に合致した Reader を返す。**※ 2026-08-12 再検証: Pass3/Pass2 の合致条件には `info.pendingRetireCount > 0` の AND 条件が含まれる**（:461/:466。pendingRetire==0 の間は Pass1（EpochGap）のみが検出可能）。
 - **判定**: 修正完了（修正案 A 相当）。さらに residency を steady_clock 実時間ベースに改善（P4.5）。
 
 ### BUG-049 — quarantineFlags 並行 store 競合 【MEDIUM → 修正済み】
 
 - **報告**: 2 Coordinator が 0x02(pending) と 0x01(quarantined) を競合 store → pending & depth==0 の不変条件違反、Debug assert 発火。
-- **検証（修正後）**: `EpochDomain.h:255-285` に `★ BUG-049` コメント。即座隔離は CAS（`expected = kPendingQuarantineFlag` または 0 からの昇格）、depth>0 時は pending を OR。`0x00→0x02 / 0x00→0x01 / 0x02→0x01` のみ許容し 0x03 を生成しない。
+- **検証（修正後）**: `EpochDomain.h:255-316`（quarantineReader）に `★ BUG-049` コメント（:267、exitReader 内の昇格 CAS は :169）。即座隔離は CAS（`expected = kPendingQuarantineFlag` または 0 からの昇格）、depth>0 時は **CAS で 0x00→0x02 のみ設定**（:308-315。OR ではない — 既に quarantined(0x01) なら何もしない）。`0x00→0x02 / 0x00→0x01 / 0x02→0x01` のみ許容し 0x03 を生成しない。
 - **判定**: 修正完了（修正案 A 相当）。
 
 ### BUG-050 — enterReader の HB 順序 【MEDIUM → 修正済み】
@@ -99,7 +101,8 @@
 ### BUG-054 — onPublishCompleted の crossfade handle 不一致 【MEDIUM → 修正済み】
 
 - **報告**: `getActiveRuntimeDSPHandle()` が activate 後は newDSP を返し、crossfade が newDSP→newDSP として登録される。
-- **検証（修正後）**: `DSPTransition.h:89-114` に `★ BUG-054` コメント。**enqueue 時に resolve 済みの真の oldHandle を引数で受渡し**、`registerDSPHandleForRuntime(newDSP)` のみで newHandle を取得。内側変数は `fadingHandle` に改名。fading slot は CAS-only `claimFadingRuntimeDSP(oldDSP)` に刷新（exchange 廃止）。
+- **検証（修正後）**: `DSPTransition.h:89-114` に `★ BUG-054` コメント。**enqueue 時に resolve 済みの真の oldHandle を引数で受渡し**、`registerDSPHandleForRuntime(newDSP)` のみで newHandle を取得。内側変数は `fadingHandle` に改名。fading slot は CAS-only `claimFadingRuntimeDSP(oldDSP)` に刷新。
+  - **※ 2026-08-12 再検証で訂正（「exchange 廃止」は不正確）**: `exchangeFadingRuntimeDSP()` は **AudioEngine.h:2092 に残存**し、**Emergency Override パス（DSPTransition.h:63-65）で使用継続**（`// ★ Temporary: exchangeFadingRuntimeDSP (A-6 fix). Will be removed after B-1 CAS-only claimFadingRuntimeDSP().` コメント付き）。通常 crossfade / Timer / shutdown の fading slot クリアは全て CAS-based に刷新済み（Timer.cpp:1018 / DSPTransition.h:139 / CtorDtor.cpp:136 / ReleaseResources.cpp:140）。→ 未完了事項 N-1 として §15.3 に記録。
 - **判定**: 修正完了（修正案 A 相当）。
 
 ### BUG-055 — 到達不能な else if 【LOW → 修正済み】
@@ -183,11 +186,12 @@
 
 - 各修正の**動作検証（テスト/ビルド）**は本調査の範囲外。修正コメントとコード差分で「修正実装の存在」を確認した。
 - work88 バグ（BUG-011〜BUG-046）は本リストの対象外（README 参照）。
-- 修正の入ったコミットは 2026-07-30 〜 2026-08-05 のコミット群に含まれる（`★ BUG-XXX` コメントは現行 HEAD に残存）。
+- 修正の入ったコミットは 2026-07-30 〜 2026-08-05 のコミット群に含まれる（`★ BUG-XXX` コメントは現行 HEAD に残存）。**※ 2026-08-12 再検証で特定: 全 19 バグの修正＋★ コメントは単一コミット `444c2f3`（2026-08-05）で一括導入**（`git log -S 'BUG-0XX' -- src/` で全数確認）。
+- **※ 2026-08-12 追記（ビルド検証）**: `tools/build-check.log`（2026-08-11 16:15）で **Debug 構成 166/166 ターゲットのビルド成功**を確認（AudioEngineHarness.exe・各テスト exe 含む）。HEAD（3198acc）の src/ はビルド時点（c8ca439）から変更なしのため、現行ソースはコンパイル検証済み。
 
 ## 6. 結論
 
-1. **doc/work89/bugs/ の全 19 ユニークバグは、現行ソース上で全て修正済み**（各修正箇所に `★ BUG-XXX` コメントが残存、2026-08-08 時点の HEAD で確認）。
+1. **doc/work89/bugs/ の全 19 ユニークバグは、現行ソース上で全て修正済み**（各修正箇所に `★ BUG-XXX` コメントが残存、2026-08-08 時点の HEAD で確認）。※ 表記注: BUG-060/063/064/065 の 4 件はコメントが「BUG-XXX」（★ なし）表記（N-9）。修正実装の有無に影響なし。
 2. 修正パターンの内訳:
    - **設計再構築（2）**: BUG-052（DeferredPublishView 化）、BUG-051（CAS ベース fading slot 化と併せて刷新）
    - **原子性修正（3）**: BUG-049（CAS）、BUG-060（fetchSub+回復）、BUG-065（fetchAdd increment）
@@ -364,10 +368,10 @@ convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory
 
 ```
 EQProcessor::prepareToPlay()  [eqState->prepare() → ref().prepareToPlay()]
-  ▲ DSPCore::prepare()  (AudioEngine.Processing.DSPCoreLifecycle.cpp:200, 255)
+  ▲ DSPCore::prepare()  (定義: AudioEngine.Processing.DSPCoreLifecycle.cpp:72。:200/:255 は内部の convolverState/eqState->prepare() 呼び出し)
   │   ┌─ 経路 A: AudioEngine::prepareToPlay() (JUCE prepareToPlay) → placeholderDSP->prepare() (PrepareToPlay.cpp:245)
   │   └─ 経路 B: RuntimeBuilder::build() (RuntimeBuilder.cpp:448) → runtime->prepare()
-  │            ▲ AudioEngine::rebuildThreadLoop() (RebuildDispatch.cpp:910)
+  │            ▲ AudioEngine::rebuildThreadLoop() (定義: RebuildDispatch.cpp:804。RuntimeBuilder::build() 使用は :905 付近)
   │              ▲ rebuildThread 専用スレッド (AudioEngine.Init.cpp:33 / PrepareToPlay.cpp:85 で std::thread 起動)
 ```
 
@@ -665,9 +669,9 @@ EQControlPanel.cpp:433 (Reset ボタン) → engine.resetEQToDefaults()
 | `AudioEngine::DSPCore::reset()` | AudioEngine.h:867（**public**） | DSPCoreLifecycle.cpp:335 | **ゼロ**（`->reset()` / `.reset()` 全数検索で DSPCore インスタンスへの呼び出しなし） | **デッドコード確定** |
 | `EQProcessor::reset()` | EQProcessor.h:259（**public**） | Core.cpp:259 | **ゼロ**（唯一の経路 DSPCore::reset() → eqState->resetForRuntime() が未呼び出し） | **デッドコード確定** |
 | `EQProcessor::syncStateFrom()` | EQProcessor.h:356（**public**） | Core.cpp:561 | **ゼロ**（AudioEngine 側・テスト・tools すべてで 0 件） | **デッドコード確定** |
-| `EQProcessor::syncGlobalStateFrom()` | EQProcessor.h:359（**public** | Core.cpp:624 | **ゼロ** | **デッドコード確定** |
+| `EQProcessor::syncGlobalStateFrom()` | EQProcessor.h:359（**public**） | Core.cpp:635 | **ゼロ** | **デッドコード確定** |
 | `EQProcessor::syncBandNodeFrom()` | EQProcessor.h:358（**public**） | Core.cpp:610 | **ゼロ**（§10 調査で併せて判明） | **デッドコード確定** |
-| `ConvolverProcessor::syncStateFrom()` | ConvolverProcessor.h:499 | StateAndUI.cpp:389 | **ゼロ**（AudioEngine.Parameters.cpp:641 のコメントは「次回 rebuild 時に追従」と記載するが、**実装は applyBuildSnapshot + transferIRStateFrom（RuntimeBuilder.cpp:445-447）に置換済み**） | **デッドコード確定（コメントと実装が乖離）** |
+| `ConvolverProcessor::syncStateFrom()` | ConvolverProcessor.h:501（DEAD CODE 注記 :498） | StateAndUI.cpp:393（DEAD CODE 注記 :389） | **ゼロ**（AudioEngine.Parameters.cpp:641 のコメントは「次回 rebuild 時に追従」と記載するが、**実装は applyBuildSnapshot + transferIRStateFrom（RuntimeBuilder.cpp:445-447）に置換済み**） | **デッドコード確定（コメントと実装は §12 で修正済み）** |
 
 **補足（git 履歴）**:
 - `git log -G ".syncStateFrom("` は過去コミット（e208c26 分割等）で sync 呼び出しが存在した痕跡を示すが、現行 HEAD では全て削除/置換済み（06ad145「bug.md all fixed.」等で撤去）。
@@ -919,29 +923,31 @@ setEqLPFFilterMode(mode)  (:669)
 
 ```
 UI ボタン (EQControlPanel.cpp:208/223/238)
-  → setEqLPFFilterMode(mode)            [AudioEngine.Parameters.cpp:669] publishAtomic のみ
+  → setEqLPFFilterMode(mode)            [AudioEngine.Parameters.cpp:672] publishAtomic のみ
   → 次オーディオブロック:
       getNextAudioBlock (AudioBlock.cpp:344) / processBlockDouble (BlockDouble.cpp:296)
-      → captureAudioThreadParameterSnapshot(runtimeWorld)   [AudioEngine.h:3750]
-          └─ :3795  snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode)  ← ★ per-block atomic 直読
-      → buildAudioThreadProcessingState (AudioEngine.h:3807)
-          └─ :3833  .eqLPFMode = snapshot.eqLPFMode
+      → captureAudioThreadParameterSnapshot(runtimeWorld)   [AudioEngine.h:3809]
+          └─ :3854  snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode)  ← ★ per-block atomic 直読（GlobalSnapshot 版は :3792）
+      → buildAudioThreadProcessingState (AudioEngine.h)
+          └─ :3892  .eqLPFMode = snapshot.eqLPFMode
       → DSPCore::process (DSPCoreFloat.cpp:361 / DSPCoreDouble.cpp:461)
           └─ outputFilter.process(block, convIsLast, hc, lc, state.eqLPFMode)
       → OutputFilter::process (OutputFilter.cpp:199)
           └─ lpCoeff[lpIdx][0/1] テーブル参照（prepare で全モード事前計算済み）
 ```
 
-**§13 が誤った理由**: §13 の調査は「AudioEngine.h:3733/3795 の `consumeAtomic` は rebuild 時の captureBuildSnapshot 由来」と想定したが、**:3795 は Audio Thread が毎ブロック呼ぶ `captureAudioThreadParameterSnapshot`（world 版）の実装**であり、`eqLPFMode` は world の有無に関わらず**無条件で** atomic 直読される（routing/automation 由来の他フィールドとは異なり、eqLPFMode は atomic が真実源）。
+**§13 が誤った理由**: §13 の調査は「AudioEngine.h:3792/3854 の `consumeAtomic` は rebuild 時の captureBuildSnapshot 由来」と想定したが、**:3854 は Audio Thread が毎ブロック呼ぶ `captureAudioThreadParameterSnapshot`（world 版）の実装**であり、`eqLPFMode` は world の有無に関わらず**無条件で** atomic 直読される（routing/automation 由来の他フィールドとは異なり、eqLPFMode は atomic が真実源）。
 
 **なぜ HC/LC と非対称か**: `convHCFilterMode` / `convLCFilterMode` も同じ関数で atomic 直読され OutputFilter 係数は即時切替するが、HC/LC には **NUC SoA（irFreqReal/irFreqImag）の再適用**という convolver 内部の構造変更が伴うため、[Mem-Fix] の rebuild が必要。**EQ LPF は OutputFilter の lpCoeff テーブル参照のみ**で、NUC 相当の内部状態がないため、rebuild 不要が正しい設計。
 
 ### 14.2 レベル 1: 静的検証（grep で経路を証明、ビルド不要）
 
 ```bash
-# ① per-block atomic 直読の存在（AudioEngine.h:3795）
+# ① per-block atomic 直読の存在
 grep -n "eqLPFMode = consumeAtomic" src/audioengine/AudioEngine.h
-#   期待: 2 箇所（:3733 GlobalSnapshot 版 / :3795 RuntimePublishWorld 版）
+#   期待: 2 箇所 — 2026-08-12 時点の実測は :3792（GlobalSnapshot 版 captureAudioThreadParameterSnapshot）/
+#          :3854（RuntimePublishWorld 版）。§14 執筆時の :3733/:3795 は行番号ドリフト
+#          （capture 関数定義 :3775/:3809、buildAudioThreadProcessingState の .eqLPFMode 代入 :3892）
 
 # ② Audio Thread が毎ブロック captureAudioThreadParameterSnapshot を呼ぶこと
 rg -n "captureAudioThreadParameterSnapshot\\(runtimeWorld" src/audioengine/AudioEngine.Processing.AudioBlock.cpp src/audioengine/AudioEngine.Processing.BlockDouble.cpp
@@ -1054,3 +1060,153 @@ const double rmsSoft = h.getOutputRms();
 - 直読箇所の行番号は grep で照合済み（Timer.cpp:1054/1058/1085/1089/244/317/347、Mmcss.cpp:89）。
 - コメントのみの変更のためビルド・テスト不要。
 - **注**: §13 案 A（setEqLPFFilterMode への submitRebuildIntent 追加）と案 B（同コメント）は §14 の結論により**実施しない**（publish-only が正しい設計）。
+
+---
+
+## §15 再検証（別視点調査）結果（追記: 2026-08-12）
+
+> ユーザー依頼「ソースコードを別の視点から可能な限り詳細に調査・検証し、不適切な個所は修正」への対応として、
+> 本リスト全章（§1〜§14）の主張を **現行ソース（HEAD 3198acc, 2026-08-12）** と 1:1 で再照合した。
+> **結論: 全 19 バグの「修正済み」判定は全て妥当**。同時に、不正確な記述の修正（§3/§5/§8.1/§14 に反映済み）、
+> 未確定事項の確定、新規所見を以下に記録する。
+
+### 15.1 検証方法と使用ツール
+
+| ツール | 用途 | 本検証での実績 |
+|--------|------|---------------|
+| WSL rg / sed / awk / fd / fzf / ag | テキスト検索・行番号照合 | `★ BUG-0XX` 全マーカーの所在、各修正位置、呼び出し元ゼロ（デッドコード）の全数確認 |
+| WSL ast-grep | AST 構造検索 | `fetchAddAtomic(agcResetSerial, ...)` の全出現（Core.cpp:276/:787 が BUG-065 修正箇所）を構造一致で確認 |
+| cocoindex code（`ccc.exe`） | セマンティック検索 | fading slot の CAS 化をクロス確認（Timer.cpp:1018 / DSPTransition.h:139 / CtorDtor.cpp:136 / ReleaseResources.cpp:140） |
+| semble（`semble.exe`） | セマンティック検索 | 同上の結果を独立確認（DSPTransition.h / Timer.cpp / AudioEngine.h をヒット） |
+| graphify（`graphify.exe`） | ナレッジグラフ | `EQProcessor::reset()` ノード（Core.cpp:259, degree 3）と接続（loadCurrentState/storeTotalGainDb）を確認 |
+| serena / AiDex MCP | コード検索 | **本セッションには MCP アクセスが無く、CLI は MCP サーバー起動のみで検索結果を返さない**（aidex は "AiDex MCP server started" 出力のみ）。コード検索は rg / ast-grep / ccc / semble / graphify で代替し、rg の全数検索で網羅性を担保 |
+| git log（-S / --stat） | 履歴検証 | 修正導入コミット 444c2f3 の特定、e208c26 / 8c9af92 / 06ad145 の存在確認、resetForRuntime 導入コミットの確認 |
+| ビルド検証 | コンパイル確認 | `tools/build-check.log`（2026-08-11 16:15）: **Debug 構成 166/166 ターゲット成功**。HEAD の src/ はビルド時点（c8ca439）から変更なし |
+
+### 15.2 全 19 バグの再照合結果（2026-08-12 時点の行番号つき）
+
+| ID | 確認位置（現行ソース） | 修正内容の再確認 | 判定 |
+|----|----------------------|----------------|------|
+| BUG-047 | EQProcessor.h:242 / ProcessingCache.cpp:23-50（★ :46）/ AudioEngine.Cache.cpp:51 | signature 拡張＋srBits/maxBlockSize を hashCombine。`getOrCreate` は新 signature で呼出 | ✅ |
+| BUG-048 | EpochDomain.h:434-512（★ :448） | 3 パス評価。※ Chronic/Warning は `pendingRetireCount>0` が AND 条件（:461/:466、N-2） | ✅ |
+| BUG-049 | EpochDomain.h:255-316（★ :267、exitReader :169） | CAS 遷移のみ（0x00→0x02 / 0x00→0x01 / 0x02→0x01）。0x03 生成なし | ✅ |
+| BUG-050 | EpochDomain.h:107-132（★ :120） | epoch 先行 store（release）→ depth++（acq_rel）。ネスト時は return | ✅ |
+| BUG-051 | CtorDtor.cpp:132 / ReleaseResources.cpp:136,159 | sentinel `(uintptr_t)-1` チェック削除（残存はコメントのみ） | ✅ |
+| BUG-052 | RuntimePublicationOrchestrator.h:47-112, 158-167 | DeferredPublishView（move-only・finishView 委譲）＋ `consumeAtomic(hasDeferred_)`。consumeDeferredRequest はコメントのみ残存 | ✅ |
+| BUG-053 | AudioEngine.Learning.cpp:55-63 | 直接 `stopLearning()` 削除（キュー経由に一本化）。stopLearning は joinable ガードで冪等（NoiseShaperLearner.cpp:185-195） | ✅ |
+| BUG-054 | DSPTransition.h:89-114 | oldHandle 引数化・fadingHandle 改名・CAS claim（**※ N-1: Emergency Override パスの exchange は残存**） | ✅ |
+| BUG-055 | AudioEngine.Commit.cpp:221-223 | 到達不能 else if 削除。後続 `hasTransitionNext` 導出は正常 | ✅ |
+| BUG-056 | RuntimeHealthMonitor.cpp:534-537, 563-567, 1217 | Normal 復帰パス追加（isPending()==false / delta<warning）+ reset() で Normal 化 | ✅ |
+| BUG-057 | RuntimeHealthMonitor.h:60-61 | EVENT_OVERFLOW_RATE_WARNING=1012 / CRITICAL=1013 新設（.cpp:811/834/853 で使用） | ✅ |
+| BUG-058 | RuntimeHealthMonitor.h:63, 372 / .cpp:953-987 | 専用 state（m_prevWorldConsistencyState_）＋ event code 7000/7001/7002。3 状態遷移 | ✅ |
+| BUG-059 | RuntimeHealthMonitor.cpp:1209-1249 | 全 MonitorState を Normal 統一リセット | ✅ |
+| BUG-060 | ISRRetireRuntimeEx.cpp:209-224, 236-238 | fetchSub 単一アトミック＋previous==0 回復。quarantine 側は previousLane!=Quarantine 時のみ fetchAdd。laneOf/quarantineResidentCount_ は atomic | ✅ |
+| BUG-061 | ISRDSPQuarantine.cpp:35,84,118,157,176 / .h:64,83 | mutex 全アクセス保護。ロック保持済み internal 版（compactAuditLogLocked）と public 版を分離 | ✅ |
+| BUG-062 | RuntimeHealthMonitor.cpp:897-901 | uint64_t 版にも EVENT_RETIRE_AGE_NORMAL 復帰パス（double 版と整合） | ✅ |
+| BUG-063 | EpochDomain.h:74-76, 498-505, 546 | `ownerThreadId`（std::atomic<uint64_t>）を acquire 読取、非 0 時のみ ownerTag コピー。register は CAS 排他下で release publish | ✅ |
+| BUG-064 | DSPCoreIO.cpp:521-527（double 版 DSPCoreDouble.cpp:733-739 と同一順序） | float パスを clamp→delay に統一（delay buffer には clamp 済み値のみ） | ✅ |
+| BUG-065 | EQProcessor.Core.cpp:276, 787（reset / prepareToPlay） | `fetchAddAtomic(agcResetSerial, 1)`（increment）。**rt シャドウ書込 3 行は残存**（§7 案 A 未適用 — D-1） | ✅ |
+
+### 15.3 新規所見（本検証で判明した不正確・未確定事項）
+
+**N-1: `exchangeFadingRuntimeDSP` は「廃止」されておらず、Emergency Override パスに残存**（§3 BUG-054 の記述を修正済み）
+
+- 定義: AudioEngine.h:2092。**呼び出し元は DSPTransition.h:63-65 の Emergency Override パスのみ**（`// ★ Temporary: exchangeFadingRuntimeDSP (A-6 fix). Will be removed after B-1 CAS-only claimFadingRuntimeDSP().` コメント付き）。
+- 通常の crossfade / Timer / shutdown の fading slot クリアは全て CAS-based（Timer.cpp:1018 / DSPTransition.h:139 / CtorDtor.cpp:136 / ReleaseResources.cpp:140 / `claimFadingRuntimeDSP` AudioEngine.h:2100）。
+- **※ 2026-08-12 第2パスで訂正（「CAS-only 化が望ましい」は誤り）**: serena MCP 検索と git 履歴（`doc/work88/REPAIR_PLAN.md:1862/2383`、`doc/work88/big_bug/INTEGRATED_BUG_LIST.md:489 R-20`）により、**この exchange は work88 BUG-029 修正で意図的に追加された設計**であることを確認。Emergency Override は「fading slot が既に別 DSP を保持していても新 DSP を displace し、戻り値 `prevRaw`（旧占有者）を retire する」必要があり、`exchange`（任意値 swap）はその displacement セマンティクスを単一原子操作で実現する。**`claimFadingRuntimeDSP`（CAS nullptr→oldDSP）に置換すると占有中は CAS 失敗となり、prevRaw の取得・retire ができず BUG-029 が再発する**ため、置換してはならない。
+- したがって本項は「未完了事項」ではなく、**「work88 BUG-029 の正しい修正が残存している状態」**。`★ Temporary` コメントは「B-1 CAS-only 化完了後に撤去予定」という将来の設計意図の注記であり、現状のまま正しい。**残存リスクなし**（sentinel 問題は既に解消済み）。
+
+**N-2: BUG-048 の Chronic/Warning 条件には `pendingRetireCount > 0` が含まれる**（§3 の記述を修正済み）
+
+- EpochDomain.h:461（Chronic）/ :466（Warning）。§3 の「Pass3=Chronic >30s、Pass2=Warning >10s」は条件の一部を省略しており、**pendingRetire==0 の期間は Pass1（EpochGap）のみが検出可能**。
+
+**N-3: BUG-049 の「depth>0 時は pending を OR」は不正確**（§3 の記述を修正済み）
+
+- 実装は CAS（0x00→0x02）であり OR ではない（EpochDomain.h:308-315）。「0x03 を生成しない」という結論は正しい。
+
+**N-4: 全 19 バグの修正は単一コミット 444c2f3（2026-08-05）で一括導入**
+
+- `git log -S 'BUG-0XX' -- src/` の全数確認で、全マーカーが commit 444c2f3（2026-08-05, 34 ファイル, +1569/−519）で追加されたことを確認。§5 の「2026-07-30〜08-05 のコミット群」は範囲として正しいが、単一コミットに特定可能。
+
+**N-5: ビルド検証（§5 の制約の一部解消）**
+
+- `tools/build-check.log`（2026-08-11 16:15）: Debug 構成 **166/166 ターゲット成功**（AudioEngineHarness.exe・各テスト exe 含む）。HEAD（3198acc）の src/ はビルド時点（c8ca439）から変更なしのため、**現行ソースはコンパイル検証済み**。
+
+**N-6: 行番号ドリフト**（§7〜§14 の参照行番号の一部）
+
+- 最大: §14.2 ① `eqLPFMode` consumeAtomic — doc 記載 :3733/:3795 → 実際 **:3792/:3854**（capture 関数定義 :3775/:3809、`.eqLPFMode` 代入 :3892）。**機能主張（publish-only で即時反映）は変わらず正しい**（§14.1 の結論は維持）。
+- その他: `DSPCore::prepare()` 定義は DSPCoreLifecycle.cpp:72（:200/:255 は内部の eqState->prepare() 呼び出し）、`rebuildThreadLoop()` 定義は RebuildDispatch.cpp:804（RuntimeBuilder::build() 使用は :905 付近）、`setEqLPFFilterMode` は Parameters.cpp:672、`ConvolverProcessor::syncStateFrom` 定義は StateAndUI.cpp:393（DEAD CODE 注記 :389）、publish-only 注記は Parameters.cpp:478/489/512 等。**§15.2 の表を正とする**。
+
+**N-7: serena / AiDex MCP — 第1パスでは使用不可だったが、第2パスで stdio JSON-RPC により実使用に成功**
+
+- **第1パス（§15 執筆時）**: MCP アクセスが無く、CLI はサーバー起動のみで検索結果を返さなかった。
+- **第2パス（2026-08-12）**: `tools/mcp_query.py` / `tools/mcp_list_tools.py`（本セッションで作成）により、MCP stdio サーバーへ JSON-RPC（initialize → tools/call）で直接アクセスし、以下を実行・確認した。
+  - **serena**: `activate_project(ConvoPeq)` → `search_for_pattern("exchangeFadingRuntimeDSP")`。work88 の BUG-029 修正記録（REPAIR_PLAN.md / big_bug/INTEGRATED_BUG_LIST.md R-20）をヒットさせ、N-1 の訂正根拠を取得。memories 一覧（task/consolidate-bug-list 等）も取得。
+  - **AiDex**: `aidex_query`（既存インデックス .aidex/index.db を使用）で `fetchAddAtomic`（197 件）、`agcResetSerial`（Core.cpp:276/279/787/790 ほか）、`ownerThreadId`（EpochDomain.h:74/498-500/546）、`m_prevWorldConsistencyState_`（RuntimeHealthMonitor.cpp:953/969/1237, .h:372）を取得。**doc の行番号主張（BUG-058/063/065）と完全一致**。
+- インデックス整備: AiDex は .aidex/index.db が既存で使用可能（整備済み）。serena は .serena/ が既存（プロジェクト登録済み）。
+
+**N-8: 類推探索（同種バグの他箇所）— バグなしを確認**
+
+| 探索対象 | BUG-XXX との対応 | 結果 |
+|---------|-----------------|------|
+| 他キャッシュのハッシュ: `CacheManager::computeKey`（convolver IR キャッシュ） | BUG-047（sampleRate 欠落） | **srBits を hash に含む**（CacheManager.cpp:95-98、fftSize/phaseMode/partitionSize と併せて）。同種バグなし |
+| `fetchSubAtomic` 全 18 使用箇所 | BUG-060（TOCTOU underflow） | RefCountedDeferred（==1 チェック）、EpochDomain/DspNumericPolicy（depth）、WorldLifecycleAudit.h:51（prev==0 アサート＋fetchAdd 補正）、ProcessIntent.cpp:30-95（reservation 不変条件、work88 で絶対値リセット廃止済み）。**同種 underflow なし** |
+| `getMinReaderEpoch` の quarantine 除外 | BUG-049（不変条件） | EpochDomain.h:207-241 で quarantined reader を safe-epoch 計算から除外（depth==0 の防衛的アサート付き）。設計と整合 |
+| §13.3 setter 分類の全数再検証 | §13（rebuild 追従） | カテゴリ A 12 件（直接 submitRebuildIntent、setEqBypassRequested :153 含む）/ B 8 件（uiConvolverProcessor 経由）/ C 3 件（publish-only）。**分類は全て正しい** |
+| `checkRetireReclaimLatency` の 2 パス | BUG-062（uint64 版 Normal 復帰） | double 版（:864-883、Work38 済み）＋ uint64 版（:884-901、★ BUG-062 済み）の両方が Normal 復帰パスを持つ。**記述は正確** |
+
+**N-9: `★ BUG-XXX` マーカー表記の不整合（表記のみ・内容影響なし）**
+
+- 19 バグ中 15 件は `★ BUG-XXX` 表記だが、**BUG-060 / BUG-063 / BUG-064 / BUG-065 の 4 件はコメントが「BUG-XXX」（★ なし）**（ISRRetireRuntimeEx.cpp:217 / EpochDomain.h:498 / DSPCoreIO.cpp:521 / EQProcessor.Core.cpp:276,787）。
+- §1/§2/§6 の「全バグに `★ BUG-XXX` コメントが残存」という記述は厳密には 15/19 のみ ★ 付き。**表記揺れであり修正実装の有無に影響しない**（4 件はコード変更そのものが存在）。
+
+### 15.4 未確定事項の確定結果（要調査・棚卸し・保留 → 確定）
+
+| 項目 | 保留時の内容 | 確定結果（2026-08-12） |
+|------|------------|----------------------|
+| D-1 | §7 BUG-065 改修（案 A/B/C の選択） | **案 A（rt シャドウ書込の全廃 + bandResetPacked serial 前進クリア）を確定・推奨**。根拠: (a) `EQProcessor::reset()` はデッドコード（§8.2 再確認: 呼び出し元ゼロ）、(b) `prepareToPlay()` は Rebuild Thread 経由で実動するが新規 DSPCore への publish 前呼び出しに限定（§8.1）、(c) 案 A は `resetToDefaults()`（Core.cpp:206-255）の既存安全パターンと完全一致、(d) Audio Thread 側（Processing.cpp:586-593 / 1070-1077）は無変更で済む。**実装はソース変更を伴うため別作業として実施**（本 doc 更新は調査・確定記録のみ。§7.8 の手順・§7.7 の検証計画を適用）。 |
+| D-2 | §10 AGC atomic 3 つ（agcCurrentGain/agcEnvInput/agcEnvOutput）の削除 | **案 A（削除）を確定・推奨**。前提の再検証: atomic 3 つは Audio Thread から読まれない（processAGC は rtAgc*Shadow のみ使用 — Processing.cpp:419-421/438-440。atomic 参照は係数 agcAttack/Release/SmoothCoeff の 3 つのみ :369-371）。削除時は §10.4-3 の参照ゼロ確認（grep）を実施。**実装は別作業**（D-1 と同一ファイルのため併せて実施推奨）。 |
+| D-3 | §11 デッドコード 6 関数の整理（削除 or 予約コメント化） | **「監視（verifier）下で維持」を確定**。`tools/dead_code_callers_verifier.py` は実装済みで **再実行 [PASS]**（2026-08-12 確認）。関数削除（§11 案 A）は `DSPCore::reset()` の子リセット（ramps/histories 等）が将来の DSPCore 再利用で必要になり得るため即時削除せず、監視下で維持。`[[deprecated]]` 化（案 B）は任意・低優先。削除の実施判断は work89 完了後に再評価。 |
+| D-4 | §14 レベル 2 統合テスト（runEqLpfModePropagationTests） | **未実装であることを確認**（src/tests/ に該当テストなし）。レベル 1 静的検証は本セッションで全 5 項目を再実施し **PASS**（① eqLPFMode 直読 :3792/:3854、② capture 呼出 AudioBlock.cpp:344 / BlockDouble.cpp:296、③ `.eqLPFMode` 代入 :3892、④ state.eqLPFMode DSPCoreFloat.cpp:361 / DSPCoreDouble.cpp:461、⑤ lpCoeff 事前計算 OutputFilter.cpp:107-117）。レベル 2/3 は別途実施（§14.3/14.4 の手順どおり）。 |
+| D-5 | §4 重複ファイル（BUG-047-EQ...md）の扱い | **相互リンク化を推奨（管理判断）**。削除せず、重複である旨の相互参照を追加する運用を確定（bug ファイル自体の変更は本 doc のスコープ外）。 |
+| D-6 | §12.7 / §13.7「適用済み」の検証 | **適用済みであることを実査確認**。Parameters.cpp:640-661（HC/LC 追従コメント）、ConvolverProcessor.StateAndUI.cpp:389-393 / ConvolverProcessor.h:498-501（DEAD CODE 注記）、Parameters.cpp:478/489/512（publish-only 注記）。`dead_code_callers_verifier.py` [PASS]。 |
+
+### 15.5 結論（2026-08-12）
+
+1. **§1〜§6 の核心的結論は全て妥当**: 全 19 ユニークバグは現行ソース上で修正済みであり、`★ BUG-XXX` コメントは HEAD（3198acc）に残存する。未修正バグゼロの主張は維持される（※ N-9: 4 件は ★ なし表記）。
+2. **修正した不正確な記述は 6 箇所**: §2 BUG-047（行番号）、§3 BUG-048（条件省略）、§3 BUG-049（OR 誤記）、§3 BUG-054（exchange 廃止誤記）、§5（コミット特定・ビルド検証）、§8.1 / §14（行番号ドリフト）。
+3. **未完了事項は実質ゼロ**: 第1パスで唯一の未完了事項とした N-1（Emergency Override の exchange 残存）は、第2パスで **work88 BUG-029 の意図的な修正設計（displacement セマンティクス）** であることを確定し、CAS-only 化の推奨を撤回した（N-1 参照）。
+4. **未確定事項 D-1〜D-6 は全て確定**し、§15.4 の表に反映した。ソース変更を伴う D-1 / D-2 は「実施手順確定・実装は別作業」とした。
+
+---
+
+## §16 第2パス再検証（MCP ツール実使用・類推探索）結果（追記: 2026-08-12）
+
+> ユーザー再依頼に対応し、第2パスとして (a) serena / AiDex MCP の実使用、(b) 未検証だった doc 主張の追加検証、(c) 同種バグの類推探索、(d) 技術前提の文献検証を実施した。
+> **結論: §15 の検証結果に変更なし。新たなバグ・不正確な記述は 0 件。**
+
+### 16.1 serena / AiDex MCP の実使用（N-7 更新）
+
+- `tools/mcp_query.py` / `tools/mcp_list_tools.py`（本セッションで新規作成）により、MCP stdio サーバーを JSON-RPC で直接駆動。
+- **serena**: `activate_project` → `search_for_pattern`。work88 BUG-029 修正記録を取得し、N-1 の訂正根拠となった。
+- **AiDex**: `aidex_query`（既存インデックス使用）で BUG-058/063/065 関連行を取得し、doc の行番号主張と完全一致を確認。
+- 補足: 本セッションのエージェントツールセットには MCP ツール（serena/AiDex）への直接アクセスが無いため、stdio JSON-RPC ブリッジで代替した（手法の詳細は tools/ のヘルパーに記載）。
+
+### 16.2 追加検証結果
+
+1. **§13.3 分類表の全数再検証（N-8）**: カテゴリ A 12 件・B 8 件・C 3 件を全数確認。`setEqBypassRequested`（:153）・`setConvolverBypassRequested`（:164）は直接 `submitRebuildIntent` 呼び出し（A 分類どおり）。カテゴリ C の 3 setter（:476/:487/:510）は publish-only で `// publish-only:` 注記付き（§13.7 適用済み）。**分類は全て正しい**。
+2. **BUG-062 の 2 パス確認**: `checkRetireReclaimLatency`（RuntimeHealthMonitor.cpp:861）は double 版（:864-883、Work38）と uint64 版（:884-901、★ BUG-062）の両方が Normal 復帰パスを持つ。doc の「uint64_t 版にも復帰イベント追加」は正確。
+3. **getMinReaderEpoch の quarantine 除外（BUG-049 整合）**: EpochDomain.h:207-241 で quarantined reader を safe-epoch 計算から除外（`continue`）し、防衛的 assert（depth==0）を保持。BUG-049 の「quarantined ⇒ depth==0」不変条件と整合。
+4. **類推探索（N-8）**: CacheManager::computeKey は srBits を hash に含む（BUG-047 同種なし）、fetchSubAtomic 全 18 箇所は underflow ガード済み（BUG-060 同種なし）、sentinel `(uintptr_t)-1` はソースに残存なし（コメントのみ、BUG-051 同種なし）。
+
+### 16.3 技術前提の文献検証
+
+- **JUCE prepareToPlay スレッド契約（§8.1 の前提）**: JUCE 公式ドキュメント（docs.juce.com, `juce::AudioProcessor::prepareToPlay`）で「Called before playback starts, to let the processor prepare itself」を確認。ConvoPeq ソースの PrepareToPlay.cpp:219 に「JUCE 契約上 prepareToPlay 実行中は Audio Thread callback が走らないため、ここでの状態公開は安全」というコメントが実在し、doc §8.1 経路 A の前提と一致。
+- **BUG-050 のメモリ順序（release/acquire + RMW）**: enterReader の「epoch store（release）→ depth fetchAdd（acq_rel）」は、getMinReaderEpoch 側の「depth load（acquire）→ epoch load（acquire）」と release-acquire synchronizes-with を形成し、`depth>0` 観測後の epoch load が先行する epoch store を必ず観測する（C++ 標準メモリモデル上で正当）。ネスト enter（previousDepth>0 で return）でも外側の epoch store が release チェーンで可視。doc §3 BUG-050 の記述は正しい。
+
+### 16.4 第2パスの結論
+
+1. 第1パス（§15）の検証結果・修正内容に**変更を要する新事実は無し**。
+2. **N-1 のみ訂正**: Emergency Override の exchange は work88 BUG-029 の意図的設計であり、「CAS-only 化が望ましい」とする第1パスの推奨を撤回（N-1 に反映済み）。
+3. 未完了事項・要調査事項は**ゼロ**に確定。D-1〜D-6 の「実装は別作業」判断は維持。
+4. 使用ツール: serena / AiDex MCP（stdio JSON-RPC）、WSL rg/ast-grep/fd/fzf/ag/sed/awk、ccc / semble / graphify、git log、web 検索（JUCE ドキュメント）。

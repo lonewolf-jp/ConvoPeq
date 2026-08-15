@@ -45,25 +45,39 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
 
-    runtimePublicationBridge_.setReclaimInFlightCount(1);
+    // ★ dash2 §1.4 (B0-5): setReclaimInFlightCount(1/0) → onReclaimBegin()/onReclaimEnd()。
+    //   reclaim 実行中のフラグ計数を semantic event（fetch_add/fetch_sub 対）で行う。
+    runtimePublicationBridge_.onReclaimBegin();
     m_retireRouter->tryReclaim();
     // [P1-21] epoch-free API: minReaderEpoch を直接渡す
     m_coordinator.reclaim(m_retireRouter->getMinReaderEpoch());
-    runtimePublicationBridge_.setReclaimInFlightCount(0);
+    runtimePublicationBridge_.onReclaimEnd();
 
     // ★ work88 (Phase 3): 保留中 reclaim の再試行。
     //   requestReclaim が RT Reader の古い epoch 参照により遅延した handle を、
     //   minReaderEpoch が進んだ後に再試行する（slot リーク防止）。
     //   retireDSPHandleForRuntime が epoch 安全でない場合に pendingReclaimHandles_ へ登録した。
+    //
+    // ★ dash2 §2.1 (Phase C — R4 retire 順序, INV 明文化):
+    //   INV-EPOCH-1: retire 済み handle の reclaim 可否は retireEpoch と minReaderEpoch の
+    //                 比較のみで決定する（下記の retireEpoch < minReaderEpoch 判定）。
+    //   INV-EPOCH-2: reader が grace period 内に居る限り reclaim 禁止（retire 順序とは無関係）。
+    //   INV-FIFO-1:  pendingReclaimHandles_ の処理順序は epoch 順を目指す（optimization /
+    //                determinism / telemetry の property）。memory safety ではない —
+    //                FIFO 順序逆転があっても INV-EPOCH-1/2 が保たれていれば UAF は発生しない。
+    //   （RCU 整合性: ISO C++ P0279R1 — retire/reclaim の安全性は read-side critical section と
+    //     grace period の関係で決まり、単なるキュー処理順序ではない。）
     {
         // 登録は複数スレッド（retireDSPHandleForRuntime）から行われるため、まず排他して抽出。
-        std::vector<convo::isr::DSPHandle> pending;
+        // ★ dash2 §2.2 (G14): pendingReclaimHandles_ は ReclaimIdentity（handle + retireSequence）。
+        std::vector<convo::isr::ReclaimIdentity> pending;
         {
             std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
             pending.swap(pendingReclaimHandles_);
         }
-        for (const auto& handle : pending)
+        for (const auto& identity : pending)
         {
+            const auto& handle = identity.handle;
             // requestReclaim は retire（冪等）+ epoch 確認 + reclaim を実行。
             //   epoch がまだ安全でない場合は再び保留される（次の drain で再試行）。
             //
@@ -83,13 +97,17 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
                     if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
                     {
                         std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-                        pendingReclaimHandles_.push_back(handle);
+                        // ★ dash2 §2.2 (G14): ReclaimIdentity として再登録。
+                        pendingReclaimHandles_.push_back(
+                            convo::isr::ReclaimIdentity{ handle, retireEpoch });
                     }
                 }
                 else
                 {
                     std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-                    pendingReclaimHandles_.push_back(handle);
+                    // ★ dash2 §2.2 (G14): ReclaimIdentity として再登録。
+                    pendingReclaimHandles_.push_back(
+                        convo::isr::ReclaimIdentity{ handle, retireEpoch });
                 }
             }
         }
@@ -110,9 +128,10 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
                 break;
         }
     }
-    runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
-    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
-    runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
+    // ★ dash2 §1.4 (B0-5): Coordinator へのスナップショット setter 上書きを撤去。
+    //   retire/fallback/deferred バックログは AudioEngine::isFullyDrained（Layer 1）が
+    //   m_retireRouter->pendingRetireCount() / ringResident / quarantine 各 resident を
+    //   直接参照して判定する（dash2 §1.4 設計方針 — isFullyDrained は実測値を直接判定）。
 
     const std::uint64_t quarantineResident = worldAuthority_.lifetime().getQuarantineResidentCount();
     convo::publishAtomic(quarantineResident_, quarantineResident, std::memory_order_release);
@@ -313,10 +332,11 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
             if (withinWindow && boostCount < kEmergencyReclaimBoostMaxCount && intervalReady)
             {
-                runtimePublicationBridge_.setReclaimInFlightCount(1);
+                // ★ dash2 §1.4 (B0-5): setReclaimInFlightCount(1/0) → onReclaimBegin()/onReclaimEnd()。
+                runtimePublicationBridge_.onReclaimBegin();
                 m_retireRouter->tryReclaim();
                 m_coordinator.reclaim(m_retireRouter->getMinReaderEpoch());
-                runtimePublicationBridge_.setReclaimInFlightCount(0);
+                runtimePublicationBridge_.onReclaimEnd();
 
                 convo::publishAtomic(emergencyReclaimLastBoostTicks_, nowTicks, std::memory_order_release);
                 convo::fetchAddAtomic(emergencyReclaimBoostCount_, 1, std::memory_order_acq_rel);

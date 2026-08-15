@@ -3,6 +3,7 @@
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 #include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
 #include "core/TimeUtils.h"  // ★ A-2: getCurrentTimeUs
+#include "ISRRuntimePublicationCoordinator.h"  // ★ dash2 §2.2 (Step 14): RuntimeIntentCoordinator 完全型（bindShutdownIdentity 呼び出し用）
 
 #include <filesystem>
 #include <fstream>
@@ -11,7 +12,21 @@
 namespace convo {
 namespace isr {
 
-ShutdownRuntime::ShutdownRuntime() = default;
+// ★ dash2 §2.2 (Phase A2 — AUTH-09/13): グローバルなインスタンス ID カウンタ。
+//   ShutdownRuntime ごとに一意の engineInstanceId を割り当て、cross-runtime confusion を防ぐ。
+namespace {
+std::atomic<uint64_t> g_shutdownRuntimeInstanceCounter{0};
+}
+
+// ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization 完了) ──
+//   ReclaimAuthority（RuntimeIntentCoordinator）を constructor で固定注入する。
+//   ［AudioEngine は composition root として constructor initializer で依存を渡すのみ。
+//     setReclaimAuthority 等の public mutator は廃止 — association は immutable（reference member）］
+ShutdownRuntime::ShutdownRuntime(RuntimeIntentCoordinator& reclaimAuthority) noexcept
+    : engineInstanceId_(g_shutdownRuntimeInstanceCounter.fetch_add(1, std::memory_order_relaxed) + 1)
+    , reclaimAuthority_(reclaimAuthority)
+{
+}
 ShutdownRuntime::~ShutdownRuntime() = default;
 
 // ★ A-2: reasonToString 実装
@@ -321,6 +336,120 @@ void ShutdownRuntime::markLateCallback() noexcept
 void ShutdownRuntime::markPostStopEnqueue() noexcept
 {
     (void)convo::fetchAddAtomic(sh6PostStopEnqueueCount_, uint32_t{1}, std::memory_order_acq_rel);
+}
+
+// ── ★ dash2 §2.2 (Phase A2 — G10/G13/G19/G20, H.11.11.3 Q0〜Q7) ──
+//   Proof 生成 API。全 Q 条件を observation（AudioEngine が authority から収集）と
+//   内部 FSM（AdmissionState / postStopEnqueue）から検証する。
+//   ⚠️ 簡易生成（if (isFullyDrained()) return ...）は A2-G05 により禁止。
+//   ［不変条件: INV-LIFE-3/4 — Proof / Permit は ShutdownRuntime のみ生成可能］
+//   ［G19/G20: epochGeneration / readerRegistrationGeneration を identity に束縛 —
+//     EpochDomain からの実供給（EpochDomain.h publishEpoch/closeReaderRegistration）を
+//     AudioEngine が observation に詰めて渡す。型フィールドの存在だけでなく実データフローを確立］
+std::optional<ShutdownQuiescenceProof>
+ShutdownRuntime::tryMakeQuiescenceProof(const QuiescenceObservation& observation) noexcept
+{
+    // Q0〜Q7 を個別に観測（Q1/Q6 は ShutdownRuntime 内部、その他は observation）
+    const bool q0 = observation.admissionReservationsZero;
+    const bool q1 = (admissionState() == AdmissionState::Closed);
+    const bool q2 = observation.allProducersJoined;
+    const bool q3 = observation.readerRegistrationClosed;
+    const bool q4 = observation.activeReadersZero;
+    const bool q5 = observation.epochSettled;
+    const bool q6 = observation.postStopEnqueueZero;
+    const bool q7 = observation.noResurrection;
+
+    // 全 Q 成立時のみ Proof 生成（quiescence 証明 — new obligation なし）
+    if (!(q0 && q1 && q2 && q3 && q4 && q5 && q6 && q7))
+        return std::nullopt;
+
+    // ★ G17〜G20: shutdownGeneration + epoch/readerReg generation を identity に束縛。
+    //   Shutdown N の Permit を Shutdown N+1 で使えないようにする（T10 / Permit ABA）。
+    //   ★ dash2 §2.2 (Step 14 — Race B 修正): generation は closeAdmission()（shutdown 開始）で
+    //   確定し、ここでは現在値をそのまま使う（fetch_add しない）。Proof 生成ごとに generation が
+    //   進むと同一 shutdown 内の複数 reclaim で identity が不安定になり、正規の Permit まで
+    //   stale 扱いになるため（H.11.11.9.3 Step 11 linearization と整合）。
+    //   ★ dash2 §2.2 (AUTH-09/13): engineInstanceId も束縛（cross-runtime confusion 防止）。
+    ShutdownRuntimeIdentity id;
+    id.engineInstanceId = engineInstanceId_;
+    id.generation = convo::consumeAtomic(shutdownGeneration_, std::memory_order_acquire);
+    id.epochGeneration = observation.epochGeneration;
+    id.readerRegistrationGeneration = observation.readerRegistrationGeneration;
+
+    // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): binding authority は本クラス（ShutdownRuntime）。
+    //   AudioEngine は bind に関与しない。ReclaimAuthority は friend なので bindShutdownIdentity を呼ぶ。
+    //   ［reclaimAuthority_ は reference member（constructor 固定注入 — 型レベルで null 不可・
+    //     optional wiring / runtime reconfiguration 不在）。Unbound → Bound(N) → 固定
+    //     （再 bind は Coordinator 側で無視）］
+    reclaimAuthority_.bindShutdownIdentity(id);
+
+    ShutdownQuiescenceProof proof(id);
+    proof.valid_ = true;
+    proof.qAdmissionReservationsZero_ = q0;
+    proof.qAdmissionClosed_ = q1;
+    proof.qAllProducersJoined_ = q2;
+    proof.qReaderRegClosed_ = q3;
+    proof.qActiveReadersZero_ = q4;
+    proof.qEpochSettled_ = q5;
+    proof.qPostStopEnqueueZero_ = q6;
+    proof.qNoResurrection_ = q7;
+    return proof;
+}
+
+std::optional<ReclaimPermit> ShutdownRuntime::tryMakeReclaimPermit(
+    const ShutdownQuiescenceProof& proof) noexcept
+{
+    // ★ dash2 §2.2 (G17〜G21): Proof.identity と同一 identity で Permit を発行（INV-LIFE-5/6）。
+    //   - Proof が valid でない場合は nullopt（簡易生成防止）
+    //   - Permit の consume() CAS が stale reject（G21）/ single-use（INV-LIFE-7 / T9）を担う
+    //   - identity 束縛により Shutdown N の Permit が Shutdown N+1 で使えない（G18〜G20 / T10）
+    if (!proof.valid())
+        return std::nullopt;
+
+    ReclaimPermit permit(proof.identity());
+    return permit;
+}
+
+// ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM 実装 ──
+//   Open→Closing→Closed の不可逆遷移（INV-LIFE-9: Closed→Open 禁止）。
+void ShutdownRuntime::closeAdmission() noexcept
+{
+    AdmissionState expected = AdmissionState::Open;
+    // Open のときのみ Closing へ（CAS で不可逆遷移を原子的に）
+    if (convo::compareExchangeAtomic(admissionState_, expected, AdmissionState::Closing,
+                                     std::memory_order_acq_rel, std::memory_order_acquire))
+    {
+        // ★ dash2 §2.2 (Step 14 — Race B / T10): shutdown transaction 開始を確定（generation 前進）。
+        //   Proof 生成はこの確定済み generation を使うため、同一 shutdown 内の複数 reclaim で
+        //   identity が安定し、Shutdown N+1 の begin で stale になる（H.11.11.9.3 Step 11）。
+        //   ［Open→Closing 遷移成功時のみ increment — 二重開始防止（INV-LIFE-6）］
+        (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
+                                    std::memory_order_acq_rel);
+    }
+}
+
+uint64_t ShutdownRuntime::currentShutdownGeneration() const noexcept
+{
+    return convo::consumeAtomic(shutdownGeneration_, std::memory_order_acquire);
+}
+
+void ShutdownRuntime::joinProducers() noexcept
+{
+    AdmissionState expected = AdmissionState::Closing;
+    // Closing のときのみ Closed へ（producer join 完了を通知 — 不可逆）
+    convo::compareExchangeAtomic(admissionState_, expected, AdmissionState::Closed,
+                                 std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+bool ShutdownRuntime::isAdmissionOpen() const noexcept
+{
+    // Open のみ許可。Closing / Closed / Faulted では enqueue 拒否。
+    return convo::consumeAtomic(admissionState_, std::memory_order_acquire) == AdmissionState::Open;
+}
+
+AdmissionState ShutdownRuntime::admissionState() const noexcept
+{
+    return convo::consumeAtomic(admissionState_, std::memory_order_acquire);
 }
 
 }  // namespace isr

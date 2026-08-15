@@ -1,1 +1,38 @@
-{"lifecycleSample":[{"state":"reclaimed","slot":0},{"state":"visible","slot":1}],"generatedAtNs":1786432585928000000,"runId":"396bb012f4274b5a8e7c0ead56a9793a","provenance":"seed","laneCounters":{"coordination":1,"quarantine":0,"rtIntent":1,"reclaim":1,"epoch":1},"schema":"retire_timeline_v2","lifecycleCounters":{"reclaimed":1,"reclaimEligible":1,"replayRetainedOptional":0,"telemetryRetained":1,"visible":1,"compareEligible":1},"rollbackReady":true,"totalTransitions":4,"rollbackMode":"shared","epochMode":"shared","rollbackFlags":{"crossfadeOnly":false,"publicationOnly":false,"retirePathOnly":true,"global":true}}
+{
+  "schema": "retire_timeline_v2",
+  "epochMode": "shared",
+  "rollbackMode": "shared",
+  "rollbackReady": true,
+  "rollbackFlags": {
+    "global": true,
+    "publicationOnly": false,
+    "crossfadeOnly": false,
+    "retirePathOnly": true
+  },
+  "totalTransitions": 14,
+  "laneCounters": {
+    "rtIntent": 3,
+    "coordination": 3,
+    "epoch": 3,
+    "reclaim": 3,
+    "quarantine": 2
+  },
+  "lifecycleCounters": {
+    "visible": 0,
+    "compareEligible": 3,
+    "telemetryRetained": 3,
+    "replayRetainedOptional": 2,
+    "reclaimEligible": 3,
+    "reclaimed": 3
+  },
+  "lifecycleSample": [
+    {"slot": 0, "state": "visible"},
+    {"slot": 1, "state": "reclaimed"},
+    {"slot": 2, "state": "reclaimed"},
+    {"slot": 3, "state": "reclaimed"},
+    {"slot": 4, "state": "visible"},
+    {"slot": 5, "state": "visible"},
+    {"slot": 6, "state": "visible"},
+    {"slot": 7, "state": "visible"}
+  ]
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":9973394962600}

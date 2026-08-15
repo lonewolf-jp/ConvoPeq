@@ -476,9 +476,10 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     worldAuthority_.lifetime().emitRetireIntentRT(intent);
     // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止。
     //   pendingIntentCount_ は Observe/Quarantine/Recovery の transport residency 専用
-    //   （reservation ベースで Coordinator 内部が維持）。RetireIntent 滞留は
-    //   retireBacklogCount_（setRetireBacklogCount）が担当する。
-    runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
+    //   （reservation ベースで Coordinator 内部が維持）。
+    // ★ dash2 §1.4 (B0): setRetireBacklogCount による Coordinator へのスナップショット上書きを撤去。
+    //   RetireIntent 滞留（lifetime().pendingIntentCount()）は AudioEngine::isFullyDrained（Layer 1）が
+    //   直接参照して判定する（dash2 §1.4 設計方針 — isFullyDrained は実測値を直接判定）。
     const auto pendingIntents = worldAuthority_.lifetime().dequeuePendingRetireIntents();
     convo::publishAtomic(pendingRetireGenerationCount_, static_cast<std::uint64_t>(pendingIntents.size()), std::memory_order_release);
 
@@ -620,8 +621,8 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     updateMinMetric(oldestRetiredGeneration_, world->generation);
 
     // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止（同上）。
-    //   RetireIntent 滞留は retireBacklogCount_（setRetireBacklogCount）が担当。
-    runtimePublicationBridge_.setRetireBacklogCount(worldAuthority_.lifetime().pendingIntentCount());
+    // ★ dash2 §1.4 (B0): setRetireBacklogCount による Coordinator へのスナップショット上書きを撤去。
+    //   RetireIntent 滞留は Layer 1（AudioEngine::isFullyDrained）が実測で判定する。
     emitEvidenceTickNonRt(false);
 
     // ★★★ PR1: Quarantineスロット再評価 — 前回Case Cで隔離されたスロットの解放条件を再確認

@@ -1090,9 +1090,18 @@ void AudioEngine::rebuildThreadLoop()
 
             if (buildResult.runtime == nullptr)
             {
+                // ★ dash2 §1.8 (Phase D — 1.8.8.2 return-code 配線): build() の戻り値 error を
+                //   FailureClassification / RetryDisposition に分類（H.11.2）。
+                //   catch-based アプローチは不採用（1.8.8.1 — work32 Step 3 破棄）。
+                //   ［現行: 分類をログに記録。retry 方針の実適用（backoff 等）は D-5
+                //     RetryBackoffPolicy tuning と併せて将来拡張 — 1.8.9 実装手順］
+                const auto outcome = convo::classifyBuildError(buildResult.error);
                 diagLog("[DIAG] rebuildThreadLoop: RuntimeBuilder build failed generation="
                         + juce::String(task.generation)
                         + " error=" + juce::String(convo::toString(buildResult.error))
+                        + " classification="
+                        + juce::String(static_cast<int>(outcome.classification))
+                        + " retry=" + juce::String(static_cast<int>(outcome.retry))
                         + " source=task-snapshot");
                 continue;
             }

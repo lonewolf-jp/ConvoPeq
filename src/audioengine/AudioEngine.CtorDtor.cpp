@@ -26,6 +26,7 @@ AudioEngine::AudioEngine()
 #pragma warning(pop)
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
     , worldAuthority_(runtimePublicationBridge_)
+    , shutdownRuntime_(runtimePublicationBridge_)  // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): constructor 固定注入（setReclaimAuthority 廃止 — immutable association）
 {
     // ★ engineInstanceId 初期化 (全局一意)
     engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter

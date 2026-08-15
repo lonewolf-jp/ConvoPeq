@@ -286,10 +286,10 @@ void AudioEngine::releaseResources()
         else
         {
             // ★ Phase2: タイムアウト前に完了した場合も coordinator カウントを最終更新
-            const auto ringResident = worldAuthority_.lifetime().getOverflowRing()
-                ? worldAuthority_.lifetime().getOverflowRing()->residentCount() : size_t{0};
-            runtimePublicationBridge_.setQuarantineResidentCount(
-                static_cast<std::uint64_t>(ringResident));
+            // ★ dash2 §1.4 (B0-6): setQuarantineResidentCount（ringResident → quarantine カウンタへの
+            //   domain mixing）を撤去。overflow ring resident（retire 系）を quarantine カウンタに
+            //   混ぜるのは INV-X6-4 違反。実在 quarantine DSP 数は Layer 1（AudioEngine::isFullyDrained）
+            //   が DSPQuarantineManager::residentCount() を直接判定する（dash2 §1.4 設計方針）。
         }
     }
 
@@ -412,28 +412,24 @@ void AudioEngine::releaseResources()
     const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
     const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
     // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、Reclaim Authority
-    //   （ShutdownQuiescent モード）に一本化。INV-X3-4 / INV-ISR-04: reader registration closed
-    //   を precondition に検証（releaseResources は DrainRetire フェーズで closeReaderRegistration()
-    //   済み → true）。retire → reclaim の順序は維持（retire は冪等 — AC-X3-16 二重 retire なし）。
+    //   （ShutdownQuiescent モード）に一本化。retire → reclaim の順序は維持（retire は冪等 —
+    //   AC-X3-16 二重 retire なし）。
+    // ★ dash2 §2.2 (Phase A2 — Step 11): caller-side shutdown 判断（readerRegistrationClosed()）
+    //   を撤去し、tryShutdownQuiescentReclaim（ShutdownRuntime が Proof → Permit → reclaim）に
+    //   委譲（AC-2: caller-side shutdown 判断 0 件）。retire は事前実行（冪等 — 既存契約）。
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
-        // ★ C4834 対応: reclaim の戻り値（readerRegistrationClosed precondition 検証結果）を確認。
-        //   releaseResources は DrainRetire フェーズで closeReaderRegistration() 済みのため true が期待。
-        const bool reclaimed = runtimePublicationBridge_.reclaim(
-            convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
-            activeHandle, dspHandleRuntime_, *m_retireRouter,
-            m_epochDomain.readerRegistrationClosed());
+        // ★ C4834 対応: reclaim の戻り値（Proof/Permit 認可結果）を確認。
+        //   releaseResources は DrainRetire フェーズで quiescence 成立済みのため true が期待。
+        const bool reclaimed = tryShutdownQuiescentReclaim(activeHandle);
         jassert(reclaimed);
         juce::ignoreUnused(reclaimed);
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
-        const bool reclaimed = runtimePublicationBridge_.reclaim(
-            convo::isr::RuntimeIntentCoordinator::ReclaimMode::ShutdownQuiescent,
-            fadingHandle, dspHandleRuntime_, *m_retireRouter,
-            m_epochDomain.readerRegistrationClosed());
+        const bool reclaimed = tryShutdownQuiescentReclaim(fadingHandle);
         jassert(reclaimed);
         juce::ignoreUnused(reclaimed);
     }

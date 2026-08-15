@@ -121,11 +121,16 @@ bool AudioEngine::isFullyDrained() noexcept
     //   実測維持される。
     //   戻り値の !hasDeferredCommit は維持（deferred commit が残っている間は drain 完了としない）。
 
-    const std::uint64_t fallbackDepth = convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire);
-    const std::uint64_t retireDepth = convo::consumeAtomic(retireQueueDepth_, std::memory_order_acquire);
-    runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
-    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
-    runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
+    // ★ dash2 §1.4 (B0-4): external setter（setFallbackBacklogCount / setRetireBacklogCount /
+    //   setDeferredRetireResidencyCount）による Coordinator への絶対値上書きを廃止。
+    //   retire バックログは router の実測値（pendingRetireCount）を Layer 1 で直接判定する。
+    //   RetireIntent 滞留（lifetime().pendingIntentCount() — Commit が emit する RetireIntent）も
+    //   実測で直接判定する（旧 setRetireBacklogCount スナップショットが担っていた契約を Layer 1 で維持）。
+    //   fallback / deferred retire は Layer 2（Coordinator）の queue emptiness + 内部
+    //   semantic カウンタが担当（dash2 §1.4 設計方針 — isFullyDrained は実測値を直接判定）。
+    const std::uint64_t retireDepth = (m_retireRouter != nullptr)
+        ? static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()) : 0u;
+    const std::uint64_t lifetimeRetireIntentPending = worldAuthority_.lifetime().pendingIntentCount();
 
     // ★ work88 (X6 §6.6): quarantineResidentCount_ の aggregate 上書き（ringResident + dspQuarantine）
     //   は廃止（INV-X6-4 — 混在禁止）。実在 quarantine DSP 数は DSPQuarantineManager::residentCount()
@@ -150,6 +155,8 @@ bool AudioEngine::isFullyDrained() noexcept
 
     return !hasDeferredCommit
         && pendingReclaimEmpty
+        && retireDepth == 0
+        && lifetimeRetireIntentPending == 0
         && ringResident == 0
         && dspQuarantineResident == 0
         && retireQuarantineResident == 0

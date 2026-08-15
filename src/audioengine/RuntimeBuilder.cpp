@@ -52,27 +52,9 @@ namespace {
 
 const char* toString(BuildError error) noexcept
 {
-    switch (error)
-    {
-        case BuildError::None:
-            return "None";
-        case BuildError::InvalidInput:
-            return "InvalidInput";
-        case BuildError::ResourceUnavailable:
-            return "ResourceUnavailable";
-        case BuildError::MKLFailure:
-            return "MKLFailure";
-        case BuildError::ConvolverFailure:
-            return "ConvolverFailure";
-        case BuildError::PrepareFailure:
-            return "PrepareFailure";
-        case BuildError::WarmupFailed:
-            return "WarmupFailed";
-        case BuildError::InternalError:
-            return "InternalError";
-    }
-
-    return "Unknown";
+    // ★ dash2 §1.8 (Phase D): descriptor table（kBuildErrorNames）から生成 — §1.8.10.3。
+    //   網羅性は header の static_assert で検証済み（switch 重複を排除）。
+    return classifyBuildErrorToString(error);
 }
 
 convo::aligned_unique_ptr<RuntimePublishWorld>

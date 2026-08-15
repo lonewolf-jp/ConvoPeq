@@ -4,8 +4,10 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>  // ★ dash2 §2.2 (Phase A1): tryMakeQuiescenceProof の返り値
 #include "AtomicAccess.h"  // ★ A-2/A-3: convo::consumeAtomic / publishAtomic
 #include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
+#include "ISRLifetimeProof.h"   // ★ dash2 §2.2 (Phase A1): ShutdownQuiescenceProof / ReclaimPermit / ShutdownRuntimeIdentity
 
 namespace convo {
 
@@ -13,6 +15,11 @@ namespace convo {
 enum class ISRHealthState : uint8_t;
 
 namespace isr {
+
+// ★ dash2 §2.2 (Phase A2 — Step 14): ReclaimAuthority の前方宣言。
+//   ShutdownRuntime コンストラクタ（constructor 固定注入）/ Proof 生成時の bindShutdownIdentity に使用。
+//   完全定義は ISRRuntimePublicationCoordinator.h（friend 宣言は Coordinator 側）。
+class RuntimeIntentCoordinator;
 
 /**
  * ISR 10層 Architecture Layer 8: Shutdown FSM
@@ -145,6 +152,25 @@ struct ShutdownResult {
 };
 
 /**
+ * ★ dash2 §2.5 (H.11.4): AdmissionState 4-state FSM
+ *   - Open:    新規 enqueue 許可
+ *   - Closing: closeAdmission() 呼出し済み / producer join 中
+ *   - Closed:  producer join 完了 / 新規 enqueue 拒否（不可逆）
+ *   - Faulted: underflow 等の異常
+ *   遷移: Open→Closing→Closed（✅）、Closed→Open（❌ 禁止 — resurrection 防止 INV-LIFE-9）、
+ *         任意→Faulted（✅ underflow/overflow）。
+ *   ［実装は Phase B3。production の 4 admission 経路 gate は本 FSM と
+ *     CoordinatorState::ShuttingDown / isShutdownInProgress() を併用して統一する］
+ */
+enum class AdmissionState : uint8_t
+{
+    Open = 0,
+    Closing,
+    Closed,
+    Faulted
+};
+
+/**
  * Shutdown runtime FSM
  */
 // ★ A-2: reasonToString — 独立関数として抽出
@@ -153,7 +179,11 @@ struct ShutdownResult {
 class ShutdownRuntime
 {
 public:
-    ShutdownRuntime();
+    // ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization 完了):
+    //   ReclaimAuthority（RuntimeIntentCoordinator）を constructor で固定注入する。
+    //   ［AudioEngine は composition root として constructor initializer で依存を渡すのみ。
+    //     setReclaimAuthority 等の public mutator は廃止 — association は immutable］
+    explicit ShutdownRuntime(class RuntimeIntentCoordinator& reclaimAuthority) noexcept;
     ~ShutdownRuntime();
 
     // Initiate shutdown sequence
@@ -201,6 +231,83 @@ public:
     void markLateCallback() noexcept;
     void markPostStopEnqueue() noexcept;
 
+    // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
+    //   shutdown identity の binding authority は ShutdownRuntime（本クラス）のみ。
+    //   AudioEngine は identity を bind しない（transport only）。
+    //   ReclaimAuthority（RuntimeIntentCoordinator）は friend なので bindShutdownIdentity を呼べる。
+    //   ［コメントと実装の責務境界を一致: setShutdownIdentity は AudioEngine から廃止し、
+    //     ShutdownRuntime → ReclaimAuthority の単一 lifetime authority 経路に収束］
+
+    // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): setReclaimAuthority は廃止。
+    //   ReclaimAuthority の wiring は public mutator ではなく constructor 固定注入で行う
+    //   （上記コンストラクタ参照）— 外部 caller による wiring 権限は構造的に存在しない。
+
+    // ── ★ dash2 §2.2 (Phase A1 — H.11.17.5 15-Step, type only) ──
+    //   ShutdownQuiescenceProof / ReclaimPermit は「型のみ・production 未接続」。
+    //   production reclaim への接続は Phase A2（15-Step 7-15 / A2-G01〜G23 PASS）で行う。
+    //   本メソッド群は ShutdownRuntime のみが生成する（INV-LIFE-3/4 / AC-X3-11）。
+
+    // ── ★ dash2 §2.2 (Phase A2 — G10/G13/G19/G20): Quiescence 観測値 ──
+    //   tryMakeQuiescenceProof が authority から取得・検証する観測値の束（H.11.11.3 Q0〜Q7）。
+    //   ShutdownRuntime は EpochDomain を直接参照できないため、AudioEngine（EpochDomain 所有者）が
+    //   proof 生成時に本構造体へ実測値を詰めて渡す（authority singularization — 観測は AudioEngine、
+    //   検証・Proof 生成は ShutdownRuntime の責務分離）。
+    struct QuiescenceObservation {
+        // Q0: OutstandingAdmissionReservations == 0（第九者必須修正2 — close vs enqueue race を閉じる）
+        bool admissionReservationsZero{false};
+        // Q2: AllProducersJoined（requestShutdown 確定 + producer join 完了）
+        bool allProducersJoined{false};
+        // Q3: ReaderRegistrationClosed（EpochDomain::readerRegistrationClosed()）
+        bool readerRegistrationClosed{false};
+        // Q4: ActiveReaders == 0（ISRRetireRouter::activeReaderCount() == 0）
+        bool activeReadersZero{false};
+        // Q5: EpochSettled（EpochQuiescenceEvidence — H.11.13.3）
+        bool epochSettled{false};
+        // Q6: postStopEnqueueCount == 0（ShutdownRuntime 内部 sh6PostStopEnqueueCount_）
+        bool postStopEnqueueZero{false};
+        // Q7: NoResurrection（AdmissionState == Closed 固定）
+        bool noResurrection{false};
+        // ★ G19: epochGeneration（EpochDomain::epochGeneration()）
+        uint64_t epochGeneration{0};
+        // ★ G20: readerRegistrationGeneration（EpochDomain::readerRegistrationGeneration()）
+        uint64_t readerRegistrationGeneration{0};
+    };
+
+    // Step 4 (拡張): Proof 生成 API（Q0〜Q7 全条件を observation から検証）。
+    //   ⚠️ 簡易生成（if (isFullyDrained()) return Proof{};）は禁止（A2-G05）。
+    //   全 Q 条件成立時のみ valid な Proof を返す（identity は shutdownGeneration + epoch/readerReg
+    //   generation を束縛 — G17〜G20）。production 未接続（Phase A2 Step 9-15 で接続）。
+    [[nodiscard]] std::optional<ShutdownQuiescenceProof>
+    tryMakeQuiescenceProof(const QuiescenceObservation& observation) noexcept;
+
+    // Step 3/5: ReclaimPermit 生成（Proof.identity と同一 identity で発行 — INV-LIFE-5/6）。
+    //   Proof が valid でない場合は nullopt（簡易生成防止）。type only では未使用。
+    [[nodiscard]] std::optional<ReclaimPermit> tryMakeReclaimPermit(const ShutdownQuiescenceProof&) noexcept;
+
+    // ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM ──
+    //   4 経路（Publication/Recovery/Build/Retire）の admission gate を本 FSM で統一する。
+    //   - closeAdmission(): Open→Closing 遷移（requestShutdown 時に呼ばれる前提）
+    //   - joinProducers():  Closing→Closed 遷移（producer join 完了後に呼ぶ — 不可逆）
+    //   - isAdmissionOpen(): Open 判定（enqueue gate 用）
+    //   - admissionState(): 現在状態（診断用）
+    //   Closed→Open は存在しない（INV-LIFE-9 no-resurrection）。
+    void closeAdmission() noexcept;
+    void joinProducers() noexcept;
+    [[nodiscard]] bool isAdmissionOpen() const noexcept;
+    [[nodiscard]] AdmissionState admissionState() const noexcept;
+
+    // ★ dash2 §2.2 (Phase A2 — Step 14 / Race B / T10): 現在の shutdown transaction generation。
+    //   closeAdmission()（shutdown 開始）で確定し、その shutdown 中は固定。
+    //   ReclaimPermit.identity().generation との照合（stale Permit 拒否 — AC-5）に使用。
+    //   ［generation は Proof 生成ごとではなく shutdown transaction ごとに進む — 同一 shutdown 内の
+    //     複数 reclaim で identity が安定する（H.11.11.9.3 Step 11 linearization と整合）］
+    [[nodiscard]] uint64_t currentShutdownGeneration() const noexcept;
+
+    // ★ dash2 §2.2 (Phase A2 — Step 14 / AUTH-09/13): Runtime インスタンス一意 ID。
+    //   ShutdownRuntimeIdentity::engineInstanceId に束縛し、cross-runtime confusion
+    //   （Runtime A/B の generation=1 が同一に見える問題）を防ぐ。
+    [[nodiscard]] uint64_t engineInstanceId() const noexcept { return engineInstanceId_; }
+
 private:
     // ★ A-2: シャットダウン開始時刻
     uint64_t shutdownStartUs_{0};
@@ -223,6 +330,27 @@ private:
     std::atomic<uint32_t> sh6PostStopEnqueueCount_{0};
     // ★ P2-B: Shutdown 完了阻害要因（markTimedOut/Failed 時に保存）
     std::atomic<ShutdownBlockingReason> blockingReason_{ShutdownBlockingReason::None};
+
+    // ── ★ dash2 §2.2 (Phase A1 — type only) ──
+    //   シャットダウン回数（単調増加）。ShutdownRuntimeIdentity の generation 源。
+    //   tryMakeQuiescenceProof / tryMakeReclaimPermit の実装（Phase A2）で使用。
+    std::atomic<uint64_t> shutdownGeneration_{0};
+
+    // ── ★ dash2 §2.2 (Phase A2 — AUTH-09/13): Runtime インスタンス一意 ID。
+    //   コンストラクタで g_shutdownRuntimeInstanceCounter から割り当てる。
+    //   ShutdownRuntimeIdentity::engineInstanceId に束縛（cross-runtime confusion 防止）。
+    uint64_t engineInstanceId_{0};
+
+    // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization 完了) ──
+    //   ReclaimAuthority への reference member（constructor 固定注入 — 型レベルで null 不可・
+    //   書き換え API 非存在・optional wiring / runtime reconfiguration 不在）。
+    //   ShutdownRuntime が Proof 生成成功時に bindShutdownIdentity を呼ぶ（friend 経由）。
+    //   ［AudioEngine は composition root として constructor initializer で依存を渡すのみ］
+    class RuntimeIntentCoordinator& reclaimAuthority_;
+
+    // ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM ──
+    //   Open→Closing→Closed の不可逆遷移。Closed→Open 禁止（INV-LIFE-9）。
+    std::atomic<AdmissionState> admissionState_{AdmissionState::Open};
 };
 
 }  // namespace isr

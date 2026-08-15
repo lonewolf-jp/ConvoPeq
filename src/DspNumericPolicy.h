@@ -331,8 +331,23 @@ struct LinearRamp
     void reset(double sampleRate, double timeSec) noexcept
     {
         ASSERT_NON_RT_THREAD();
+        totalSteps = computeTotalSteps(sampleRate, timeSec);
+    }
+
+    /// Audio Thread から呼ぶ RT-safe 版 reset。ランプ長を再計算するのみ。
+    ///   reset() と同一の totalSteps 更新ロジックだが ASSERT_NON_RT_THREAD を持たない。
+    ///   smoothingTimeChangePendingGen ハンドシェイク経由で reset() が RT スレッドへ
+    ///   悍行していた問題（§1.3-B）を解消する。割り当て/仮想関数なしの純演算のみ。
+    void resetRT(double sampleRate, double timeSec) noexcept
+    {
+        ASSERT_AUDIO_THREAD();
+        totalSteps = computeTotalSteps(sampleRate, timeSec);
+    }
+
+    static constexpr int computeTotalSteps(double sampleRate, double timeSec) noexcept
+    {
         const int steps = static_cast<int>(sampleRate * timeSec + 0.5);
-        totalSteps = (steps > 0) ? steps : 1;
+        return (steps > 0) ? steps : 1;
     }
 
     /// current と target を同じ値に設定し、ランプを無効化する。

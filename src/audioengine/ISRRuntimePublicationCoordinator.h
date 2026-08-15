@@ -118,13 +118,33 @@ public:
     [[nodiscard]] PublicationEpoch currentPublicationEpoch() const noexcept;
     // ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId) — read-only Authority access.
     [[nodiscard]] PublicationSequenceId currentPublicationSequenceId() const noexcept;
-    void setRetireBacklogCount(std::uint64_t count) noexcept;
-    void setPublicationBacklogCount(std::uint64_t count) noexcept;
-    void setPendingIntentCount(std::uint64_t count) noexcept;
-    void setFallbackBacklogCount(std::uint64_t count) noexcept;
-    void setReclaimInFlightCount(std::uint64_t count) noexcept;
-    void setDeferredRetireResidencyCount(std::uint64_t count) noexcept;
-    void setQuarantineResidentCount(std::uint64_t count) noexcept;  // ★ Phase2
+
+    // ── dash2 §1.4 (REPAIR_PLAN2-dash2): semantic event accounting ──
+    //   外部 setter（setRetireBacklogCount 等）の廃止に伴い、Coordinator は自身のカウンタを
+    //   semantic event API で原子的に維持する（fetch_add/fetch_sub・underflow ガード付き）。
+    //   呼び出し元（AudioEngine）は setter で絶対値を上書きせず、本イベントで増減のみを通知する。
+    //   ⚠️ isFullyDrained の retire/fallback/deferred 判定は AudioEngine 側（Layer 1）が
+    //   実測値（m_retireRouter->pendingRetireCount() 等）を直接判定する（dash2 §1.4 設計方針）。
+    //   ［本 API は NonRT-thread からのみ呼び出すこと（AC-ISR-1）］
+    void onRetireAccepted() noexcept;      // retire backlog +1（atomic fetch_add + pressure 更新）
+    void onRetireConsumed() noexcept;      // retire backlog -1（underflow ガード付き fetch_sub）
+    void onFallbackAccepted() noexcept;    // fallback backlog +1
+    void onFallbackConsumed() noexcept;    // fallback backlog -1（underflow ガード付き）
+    void onDeferredRetireAccepted() noexcept;  // deferred retire residency +1
+    void onDeferredRetireConsumed() noexcept;  // deferred retire residency -1（underflow ガード付き）
+    void onReclaimBegin() noexcept;        // reclaim in-flight +1
+    void onReclaimEnd() noexcept;          // reclaim in-flight -1（underflow ガード付き）
+
+    // ⚠️ 旧 setter API 群 — dash2 §1.4 により production からの呼び出しは全廃。
+    //   残存するのはテスト初期化リセット（P2 教訓: テストでのリセットは許可）のみ。
+    //   production からの絶対値上書きは禁止（コンパイル時参照 = 0 を維持すること）。
+    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY
+    void setPublicationBacklogCount(std::uint64_t count) noexcept;   // TEST-ONLY（dead counter）
+    void setPendingIntentCount(std::uint64_t count) noexcept;        // TEST-ONLY
+    void setFallbackBacklogCount(std::uint64_t count) noexcept;      // TEST-ONLY
+    void setReclaimInFlightCount(std::uint64_t count) noexcept;      // TEST-ONLY
+    void setDeferredRetireResidencyCount(std::uint64_t count) noexcept; // TEST-ONLY
+    void setQuarantineResidentCount(std::uint64_t count) noexcept;   // TEST-ONLY（★ Phase2）
     void escalateAllRetires(RetirePriority minPriority) noexcept;    // ★ Phase5: 全RetireIntent の優先度を底上げ
     void setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept;       // ★ Phase5: OverflowRing 滞留年限警告しきい値
     void setSwapPending(bool pending) noexcept;
@@ -323,6 +343,17 @@ public:
     //   reclaims the outstanding Owner via RuntimeWorldAuthority::ownerChannel().take(key).
     [[nodiscard]] bool enqueuePublicationIntent(const Intent& intent) noexcept
     {
+        // ★ dash2 §2.5 (Phase B3 — Path B admission gate): shutdown 確定後は Publish Intent を
+        //   enqueue しない。CoordinatorState::ShuttingDown が requestShutdown() で確定するため、
+        //   本 gate が Path B（enqueuePublicationIntent）の最終 linearization point になる
+        //   （Path C: submitRecoveryRequest の gate と同型 — H.11.6 Commit 6）。
+        //   閉鎖後の enqueue は拒否（false 返却）— 呼出し元は Owner を reclaim する。
+        //   ［注: 呼出し元（commitRuntimePublication）は通常 CoordinatorState::ShuttingDown 確定前
+        //   に呼ばれ、シャットダウン中の publish は isShutdownInProgress() で事前に遮断される。
+        //   本 gate は defense-in-depth としての二次防衛。］
+        if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
+            return false;
+
         Intent prepared = intent;
         prepared.type = IntentType::Publish;
         // ★ work88 (X5 §6.5): Publish intent residency 専用 counter の reservation→push→rollback。
@@ -356,25 +387,40 @@ public:
     //   Reclaim Authority は一つ、Safety Precondition が二種類（R4 Phase 1）。
     //   - RuntimeEBR:      通常 runtime — retire → epoch 安全確認（retireEpoch < minReaderEpoch）
     //                      → 不安全なら pending（false 返却・呼出し元が再試行登録）
-    //   - ShutdownQuiescent: shutdown — readerRegistrationClosed 必須（INV-X3-4 / INV-ISR-04）
-    //                      → epoch 判定スキップ → reclaim
-    //   precondition（retire 前評価 — 十四次指摘）: ShutdownQuiescent は reader registration が
-    //   永久に閉じていることを検証してから retire/reclaim を実行する（phase 不正時に retire の
-    //   state transition を先に発生させない）。
-    enum class ReclaimMode : uint8_t {
-        RuntimeEBR,
-        ShutdownQuiescent
-    };
+    // ── ★ dash2 §2.2 (Phase A2 — H.11.17.5 15-Step 7-9, 分離 API) ──
+    //   Mode 分岐を消し、Capability 型で経路を区別する（H.11.11.5）。
+    //   ⚠️ Step 9: 旧 bool reclaim API（reclaim(ReclaimMode, ..., bool)）は削除済み（AC-1:
+    //   reclaim(..., bool) production 0 件）。残存コードはコンパイル不能（compile guard）。
+    //   - reclaimNormal(): RuntimeEBR / 通常経路（production 接続 — requestReclaim を内部委譲）
+    //   - reclaimShutdownQuiescent(): ShutdownQuiescent。ReclaimPermit 必須（consume で認可）。
 
-    /// ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority の唯一の entry point。
-    ///   requestReclaim は RuntimeEBR モードとして本メソッドに委譲する。
-    ///   readerRegistrationClosed: ShutdownQuiescent モードの precondition（INV-X3-4）。
-    ///   呼出し元（AudioEngine）が m_epochDomain.readerRegistrationClosed() を渡す。
-    [[nodiscard]] bool reclaim(ReclaimMode mode,
-                               const DSPHandle& handle,
-                               class DSPHandleRuntime& handleRuntime,
-                               class ISRRetireRouter& router,
-                               bool readerRegistrationClosed = false) noexcept;
+    /// RuntimeEBR（通常 runtime）reclaim。requestReclaim と同じ（retire → epoch 安全確認）。
+    [[nodiscard]] bool reclaimNormal(
+        const DSPHandle& handle,
+        class DSPHandleRuntime& handleRuntime,
+        class ISRRetireRouter& router) noexcept;
+
+    // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
+    //   ReclaimAuthority（本 Coordinator）が現在の shutdown transaction identity を保持する。
+    //   ［不変条件: INV-LIFE-4/6 — ReclaimPermit は ShutdownRuntime のみ生成し、ReclaimAuthority は
+    //     自身が管理する shutdown identity と一致する Permit のみ消費］
+    //   ★ binding authority は ShutdownRuntime のみ（friend）。AudioEngine は identity を bind できない
+    //   （setShutdownIdentity を公開しない — bindShutdownIdentity は private + friend）。
+    [[nodiscard]] bool shutdownIdentityBound() const noexcept;
+    [[nodiscard]] const ShutdownRuntimeIdentity& currentShutdownIdentity() const noexcept;
+
+    /// ShutdownQuiescent reclaim。ReclaimPermit を consume して認可する（single-use）。
+    ///   - Permit.identity は shutdown transaction に束縛（INV-LIFE-5/6）
+    ///   - ★ authority validation: permit.identity() == currentShutdownIdentity() を本メソッド内部で
+    ///     検証（provenance / freshness）。不一致（cross-runtime / stale）は reject。
+    ///   - permit.consume() 成功時のみ reclaim 実行（二重 reclaim 構造的防止 — INV-LIFE-7 / T9）
+    ///   - bool readerRegistrationClosed の代替（Permit が quiescence を証明）
+    ///   ［caller は identity check を行わない — 本メソッドが単一の ReclaimAuthority 認可点］
+    [[nodiscard]] bool reclaimShutdownQuiescent(
+        const DSPHandle& handle,
+        class DSPHandleRuntime& handleRuntime,
+        class ISRRetireRouter& router,
+        ReclaimPermit&& permit) noexcept;
 
     /// Observe Intent Queue から蓄積された Intent を処理する。
     /// P0-4A: Timer から submitObserve でキューイングされた Intent を
@@ -409,6 +455,16 @@ public:
     [[nodiscard]] size_t deferredRingOccupancy() const noexcept;
 
 private:
+    // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
+    //   shutdown identity の binding authority は ShutdownRuntime のみ（friend）。
+    //   AudioEngine からは bind 不能（setShutdownIdentity 公開 API は廃止）。
+    //   ［不変条件: Unbound → Bound(N) → 固定。任意の caller による再 bind は禁止（INV-LIFE-4/6）］
+    friend class ShutdownRuntime;
+
+    // ★ dash2 §2.2: ShutdownRuntime が shutdown transaction 確定時に bind する（friend のみ）。
+    //   bind は一度だけ（Unbound → Bound）。既に Bound 済みなら無視（任意再 bind 禁止）。
+    void bindShutdownIdentity(ShutdownRuntimeIdentity identity) noexcept;
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ★ Phase5: 内部スケジューラ — 3 scheduler inner classes
     //   RuntimePublicationCoordinator（公開API）は各 scheduler へ委譲
@@ -418,6 +474,11 @@ private:
 
     // ★ FUTURE-8/QUEUE-16: Observe Deferred Ring 回御（Retire drain と分離）。
     void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept;
+
+    // ── dash2 §1.4: retire backlog 変更時の pressure slope 検出 + 状態遷移 ──
+    //   setRetireBacklogCount（TEST-ONLY）と onRetireAccepted（production semantic event）が
+    //   共通で使用する。count は更新後の絶対値。slope = count - previous で Pressure 遷移を判定。
+    void noteRetireBacklogChanged(std::uint64_t count) noexcept;
 
     class OverflowScheduler {
         RuntimeIntentCoordinator& coordinator_;
@@ -509,6 +570,15 @@ private:
     std::atomic<CoordinatorState> state_;
     std::atomic<std::uint64_t> retireAuthorityCount_;
     std::atomic<std::uint64_t> overflowMaxAgeUs_{500'000};  // ★ Phase5: 500ms デフォルト
+
+    // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
+    //   ReclaimAuthority が管理する現在の shutdown transaction identity。
+    //   ShutdownRuntime が Proof 生成時に bind し、reclaimShutdownQuiescent 内部で permit.identity
+    //   と照合する（cross-runtime / stale Permit reject — AUTH-09/13 / AC-5）。
+    //   ［NonRT のみ設定・照合。コンストラクタ初期化は std::mutex 不要（Single-writer:
+    //     ShutdownRuntime が shutdown 開始時に一度だけ bind）］
+    std::atomic<bool> shutdownIdentityBound_{false};
+    ShutdownRuntimeIdentity currentShutdownIdentity_{};
 
     // ★ Phase5: Overflow Ring / Deferred 管理メンバ
     static constexpr size_t kCoordinatorDeferredRingCapacity = 1024;

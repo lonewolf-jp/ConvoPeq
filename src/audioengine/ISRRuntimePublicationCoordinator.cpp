@@ -133,8 +133,14 @@ void RuntimeIntentCoordinator::retire(RetireAuthority,
                                      std::memory_order_acquire);
     }
 
-    const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
-    setRetireBacklogCount(backlog);
+    // ★ dash2 §1.4 (B0-3): 本メソッドは world-retire 時に AudioEngine.Commit.cpp:461 から呼ばれる。
+    //   retireBacklogCount_ はここで増加させない — 元コードは Commit.cpp:481 の setRetireBacklogCount
+    //   （lifetime pendingIntentCount スナップショット）で上書きされており、external setter 撤去後は
+    //   retireBacklogCount_ が commit ごとに無制限増加して Layer 2 の isFullyDrained（retireBacklogCount_==0）
+    //   がシャットダウンで失敗する回帰を防ぐ。retire バックログの実測判定は Layer 1
+    //   （AudioEngine::isFullyDrained）が m_retireRouter->pendingRetireCount() と
+    //   worldAuthority_.lifetime().pendingIntentCount() を直接参照する（dash2 §1.4 設計方針）。
+    //   retireAuthorityCount_ はここで維持される（呼び出し回数の Authority 計数）。
 }
 
 RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
@@ -155,8 +161,10 @@ RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
     if (result != RetireEnqueueResult::Success)
         return result;
 
-    const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
-    setRetireBacklogCount(backlog);
+    // ★ dash2 §1.4 (B0-3): 非原子的 load+setRetireBacklogCount RMW を semantic event に置換。
+    //   （本メソッドは production で未使用 — 将来の retire 経路用。retireBacklogCount_ は
+    //   onRetireConsumed と対で維持される。Layer 1 が実測で drain 判定するため authoritative ではない。）
+    onRetireAccepted();
 
     return RetireEnqueueResult::Success;
 }
@@ -192,11 +200,81 @@ PublicationSequenceId RuntimeIntentCoordinator::currentPublicationSequenceId() c
     return world ? world->publication.sequenceId : PublicationSequenceId{0};
 }
 
-void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
+// ── dash2 §1.4: semantic event accounting ──
+//   production は setter（絶対値上書き）ではなく本イベントで原子的に増減を通知する。
+//   underflow ガード: fetch_sub 前に old > 0 を検証（0 で fetch_sub すると UINT64_MAX ラップ）。
+//   違反時は Faulted → Proof 生成不能へ遷移（dash2 §1.4 第三者的レビュー反映 3）。
+void RuntimeIntentCoordinator::onRetireAccepted() noexcept {
+    // fetch_add 後（= 更新後の絶対値）を noteRetireBacklogChanged に渡し、pressure slope 検出を共通化。
+    const auto newCount = convo::fetchAddAtomic(retireBacklogCount_,
+                                                std::uint64_t{1},
+                                                std::memory_order_acq_rel) + std::uint64_t{1};
+    noteRetireBacklogChanged(newCount);
+}
+
+void RuntimeIntentCoordinator::onRetireConsumed() noexcept {
+    const auto old = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+    if (old > 0) {
+        convo::fetchSubAtomic(retireBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    } else {
+        // underflow 違反（consume と fetch_sub の間の race では old==0 でも他 writer が先に
+        // 書いている可能性があるため、ここでは Faulted 化のみ行う。実害のある負方向超過は
+        // fetch_sub 前に old>0 検証で防止済み）。
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+    }
+}
+
+void RuntimeIntentCoordinator::onFallbackAccepted() noexcept {
+    convo::fetchAddAtomic(fallbackBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+}
+
+void RuntimeIntentCoordinator::onFallbackConsumed() noexcept {
+    const auto old = convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
+    if (old > 0) {
+        convo::fetchSubAtomic(fallbackBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    } else {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+    }
+}
+
+void RuntimeIntentCoordinator::onDeferredRetireAccepted() noexcept {
+    convo::fetchAddAtomic(deferredRetireResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+}
+
+void RuntimeIntentCoordinator::onDeferredRetireConsumed() noexcept {
+    const auto old = convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
+    if (old > 0) {
+        convo::fetchSubAtomic(deferredRetireResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    } else {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+    }
+}
+
+void RuntimeIntentCoordinator::onReclaimBegin() noexcept {
+    convo::fetchAddAtomic(reclaimInFlightCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+}
+
+// ★ dash2 §2.2 (A2-G02): onReclaimEnd は「deferred 保留の解消」。
+//   reclaimInFlightCount_ の意味論 = 保留中（deferred）の reclaim 数。
+//   - defer（epoch unsafe）→ onReclaimBegin（+1）
+//   - 成功 → onReclaimEnd（-1）
+//   ⚠️ 他カウンタ（retire/fallback/deferred）の Consumed と異なり、count==0 で Faulted に
+//   しない。単発成功（defer なし → count 0 のまま成功）は正当な正常系（INV-3-1）であり、
+//   0 で fetch_sub すると UINT64_MAX ラップになるため、old>0 検証で no-op に留める。
+//   （reclaimInFlightCount_ は isFullyDrained の ==0 判定に使われる近似カウンタであり、
+//     正確な identity 管理は pendingReclaimHandles_ / ReclaimIdentity set が担当 — INV-X3-5）
+void RuntimeIntentCoordinator::onReclaimEnd() noexcept {
+    const auto old = convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
+    if (old > 0) {
+        convo::fetchSubAtomic(reclaimInFlightCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    }
+    // else: 単発成功（defer なし）— 正常系。no-op（Faulted にしない）
+}
+
+void RuntimeIntentCoordinator::noteRetireBacklogChanged(std::uint64_t count) noexcept {
     const auto previousBacklog = convo::consumeAtomic(previousRetireBacklogCount_, std::memory_order_acquire);
     const auto slope = (count > previousBacklog) ? (count - previousBacklog) : 0;
 
-    convo::publishAtomic(retireBacklogCount_, count, std::memory_order_release);
     convo::publishAtomic(previousRetireBacklogCount_, count, std::memory_order_release);
 
     if (slope > kPressureSlopeThreshold) {
@@ -222,6 +300,12 @@ void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexce
             convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
         }
     }
+}
+
+// ⚠️ TEST-ONLY（dash2 §1.4）: production からの絶対値上書きは禁止。テスト初期化リセットのみ。
+void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(retireBacklogCount_, count, std::memory_order_release);
+    noteRetireBacklogChanged(count);
 }
 
 void RuntimeIntentCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
@@ -623,62 +707,122 @@ void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle) noexcept
 }
 
 // ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority の唯一の entry point。
-//   RuntimeEBR: 既存 requestReclaim と同じ（retire → epoch 安全確認 → reclaim / pending）。
-//   ShutdownQuiescent: readerRegistrationClosed 必須（INV-X3-4 / INV-ISR-04）→ retire →
-//   epoch 判定スキップ → reclaim（reader 停止 + registration closed を前提に EBR を bypass）。
-//   precondition は retire 前に評価（十四次指摘 — phase 不正時に retire の state transition を
-//   先に発生させない）。物理削除（DSPCore* delete）は含まない（slot 状態遷移のみ — 既存契約）。
-bool RuntimeIntentCoordinator::reclaim(ReclaimMode mode,
-                                       const DSPHandle& handle,
-                                       DSPHandleRuntime& handleRuntime,
-                                       ISRRetireRouter& router,
-                                       bool readerRegistrationClosed) noexcept
-{
-    // 0. validate reclaim precondition（retire 前 — 十四次指摘）
-    if (mode == ReclaimMode::ShutdownQuiescent)
-    {
-        // INV-X3-4 / INV-ISR-04: ShutdownQuiescent reclaim は
-        //   (a) reader registration が永久に閉じている（CloseReaderRegistration フェーズ）
-        //   (b) active reader が 0（readersZero — graceful drain 完了）
-        // の両方が必須（R4 Phase 3: ShutdownQuiescenceProof の構成要素）。
-        // 成立しない場合は NO reclaim（retire も実行しない）→ 呼出し元は Faulted へ。
-        if (!readerRegistrationClosed || router.activeReaderCount() != 0)
-            return false;
-    }
-
-    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲（共通・precondition 通過後）
-    handleRuntime.retire(handle);
-
-    // 2. waitReaders — RuntimeEBR のみ epoch 安全確認（retireEpoch < minReaderEpoch）
-    if (mode == ReclaimMode::RuntimeEBR)
-    {
-        const auto retireEpoch = router.currentEpoch();
-        const auto minReaderEpoch = router.minReaderEpoch();
-        if (retireEpoch >= minReaderEpoch) {
-            // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
-            // カウンタ更新のみ行い、即座に復帰（NonRT safe）
-            setReclaimInFlightCount(reclaimInFlightCount_.load(std::memory_order_relaxed) + 1);
-            // ★ TOCTOU 修正: 呼出し元へ「遅延」を通知（再試行リストへ戻す — slot リーク防止）
-            return false;
-        }
-    }
-    // ShutdownQuiescent: epoch 判定をスキップ（readerRegistrationClosed + Audio reader 停止を前提）
-
-    // 3. executeReclaim(handle) — 安全確認完了
-    //    Reclaimed 状態への遷移のみ（物理削除は retire path の enqueueWithRetry が担当）
-    handleRuntime.reclaim(handle);
-    // ACK: reclaim complete — カウンタリセット
-    setReclaimInFlightCount(0);
-    return true;
-}
-
+//   ⚠️ dash2 §2.2 (Phase A2 — Step 9): 旧 bool reclaim API は削除（compile guard）。
+//   Mode 分岐を消し、reclaimNormal（RuntimeEBR）/ reclaimShutdownQuiescent（ShutdownQuiescent）
+//   の Capability 型で経路を区別する（H.11.11.5 / AC-1）。物理削除（DSPCore* delete）は
+//   含まない（slot 状態遷移のみ — 既存契約）。
+//
+// ★ dash2 §2.2 (Phase A2): reclaimInFlightCount_ の維持を semantic event に一本化（A2-G01/G02）。
+//   - deferred（epoch unsafe）時: onReclaimBegin() → +1（保留中としてカウント）
+//   - その後の成功時: onReclaimEnd() → -1（保留解消）
+//   - deferred なしの単発成功: カウンタに触れない（0 のまま — INV-3-1 と整合）
+//   - begin/end は「deferred → 成功」のライフサイクルで対になるため、単発成功の count==0 で
+//     onReclaimEnd を呼ぶ underflow→Faulted 回帰は発生しない（前回実装の是正）。
 bool RuntimeIntentCoordinator::requestReclaim(
     const DSPHandle& handle,
     DSPHandleRuntime& handleRuntime,
     ISRRetireRouter& router) noexcept
 {
     // ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority に一本化（RuntimeEBR モード委譲）
-    return reclaim(ReclaimMode::RuntimeEBR, handle, handleRuntime, router, false);
+    // ★ dash2 §2.2 (Phase A2 Step 7): reclaimNormal（分離 API）へ委譲。
+    return reclaimNormal(handle, handleRuntime, router);
+}
+
+// ── ★ dash2 §2.2 (Phase A2 — H.11.17.5 15-Step 7-9): 分離 API 実装 ──
+
+// RuntimeEBR（通常 runtime）reclaim。旧 reclaim(RuntimeEBR, ...) のロジックを直接実装。
+//   retire → epoch 安全確認（retireEpoch < minReaderEpoch）→ reclaim / pending。
+//   precondition は retire 前に評価（十四次指摘 — phase 不正時に retire の state transition を
+//   先に発生させない）。
+bool RuntimeIntentCoordinator::reclaimNormal(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router) noexcept
+{
+    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
+    handleRuntime.retire(handle);
+
+    // 2. waitReaders — epoch 安全確認（retireEpoch < minReaderEpoch）
+    const auto retireEpoch = router.currentEpoch();
+    const auto minReaderEpoch = router.minReaderEpoch();
+    if (retireEpoch >= minReaderEpoch) {
+        // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
+        // カウンタ更新のみ行い、即座に復帰（NonRT safe）
+        // ★ dash2 §2.2 (A2-G02): deferred 分を onReclaimBegin で +1（保留中としてカウント）。
+        //   旧 setReclaimInFlightCount(load+1) の絶対値上書きを廃止（G01/G02）。
+        onReclaimBegin();
+        // ★ TOCTOU 修正: 呼出し元へ「遅延」を通知（再試行リストへ戻す — slot リーク防止）
+        return false;
+    }
+
+    // 3. executeReclaim(handle) — 安全確認完了
+    //    Reclaimed 状態への遷移のみ（物理削除は retire path の enqueueWithRetry が担当）
+    handleRuntime.reclaim(handle);
+    // ACK: reclaim complete — deferred 保留の解消（onReclaimEnd で -1）。
+    //   ★ dash2 §2.2 (A2-G02): deferred なしの単発成功ではここに来ても保留はない。
+    //     onReclaimEnd は old>0 ガード付き（count==0 で underflow しない）— Faulted 化なし。
+    onReclaimEnd();
+    return true;
+}
+
+// ShutdownQuiescent reclaim。ReclaimPermit を consume して認可する（single-use）。
+//   - permit.consume() が false（既に Consumed）なら二重 reclaim → 認可しない（INV-LIFE-7 / T9）
+//   - Permit は ShutdownRuntime のみ生成（INV-LIFE-4）— caller は manufacture 不可
+//   - Permit が quiescence（reader registration closed + readers zero + epoch settled +
+//     postStopEnqueue == 0 + no-resurrection）を証明済みのため、bool readerRegistrationClosed は
+//     不要（旧 bool API の代替 — AC-2: caller-side shutdown 判断 0 件）
+//   - ［Step 12: ShutdownRuntime が tryMakeReclaimPermit で供給］
+// ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
+//   ReclaimAuthority の shutdown identity 管理。bind は ShutdownRuntime（friend）のみ。
+//   ［Unbound → Bound(N) → 固定。既に Bound 済みなら再 bind は無視（任意再 bind 禁止 — INV-LIFE-4/6）］
+void RuntimeIntentCoordinator::bindShutdownIdentity(ShutdownRuntimeIdentity identity) noexcept
+{
+    if (shutdownIdentityBound())
+        return;                         // 既に Bound — 再 bind 禁止（authority 境界の強固化）
+    currentShutdownIdentity_ = identity;
+    convo::publishAtomic(shutdownIdentityBound_, true, std::memory_order_release);
+}
+
+bool RuntimeIntentCoordinator::shutdownIdentityBound() const noexcept
+{
+    return convo::consumeAtomic(shutdownIdentityBound_, std::memory_order_acquire);
+}
+
+const ShutdownRuntimeIdentity& RuntimeIntentCoordinator::currentShutdownIdentity() const noexcept
+{
+    return currentShutdownIdentity_;
+}
+
+bool RuntimeIntentCoordinator::reclaimShutdownQuiescent(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router,
+    ReclaimPermit&& permit) noexcept
+{
+    // ★ dash2 §2.2 (Step 14 — Authority Singularization): ReclaimAuthority が単一の認可点。
+    //   caller（AudioEngine）は identity check を行わない。本メソッドが以下の順序で認可する:
+    //   1. identity validation: permit.identity() == currentShutdownIdentity()
+    //      （cross-runtime: engineInstanceId 不一致 / stale: generation 不一致 — AUTH-09/13 / AC-5）
+    //   2. single-use capability consumption: permit.consume()
+    //   3. physical reclaim（slot 状態遷移）
+    //   ［不変条件: INV-LIFE-4/6 — Permit は ShutdownRuntime のみ生成し、ReclaimAuthority が
+    //     自身の shutdown identity と一致する Permit のみ消費する］
+    if (!shutdownIdentityBound())
+        return false;                       // identity 未 bind（shutdown 未開始）→ reject
+    if (!(permit.identity() == currentShutdownIdentity_))
+        return false;                       // identity 不一致（cross-runtime / stale）→ reject
+    if (!permit.consume())
+        return false;                       // 二重使用（INV-LIFE-7 / T9）
+
+    // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
+    handleRuntime.retire(handle);
+
+    // 2. epoch 判定スキップ（Permit が quiescence = reader registration closed + readers zero を
+    //    証明済みのため EBR を bypass — ShutdownQuiescent セマンティクス）
+
+    // 3. executeReclaim(handle) — 安全確認完了（Reclaimed 状態遷移のみ）
+    handleRuntime.reclaim(handle);
+    return true;
 }
 
 //==============================================================================

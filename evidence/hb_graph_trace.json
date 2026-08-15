@@ -1,1 +1,7 @@
-{"generatedAtNs":1786432585928000000,"runId":"396bb012f4274b5a8e7c0ead56a9793a","eventCount":4,"provenance":"seed","schema":"hb_trace_v1","events":[{"release":true,"ts":1786432585928000001,"mo":3,"to":2,"fromEpoch":10,"toEpoch":10,"from":1,"acquire":true},{"release":true,"ts":1786432585928000002,"mo":2,"to":3,"fromEpoch":10,"toEpoch":11,"from":2,"acquire":false},{"release":false,"ts":1786432585928000003,"mo":1,"to":4,"fromEpoch":11,"toEpoch":11,"from":3,"acquire":true},{"release":true,"ts":1786432585928000004,"mo":3,"to":5,"fromEpoch":11,"toEpoch":12,"from":4,"acquire":true}]}
+{
+  "schema": "hb_trace_v1",
+  "eventCount": 1,
+  "events": [
+    {"ts": 9970738359900, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false}
+  ]
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":9970749502200}

@@ -1,1 +1,79 @@
-{"verified":true,"sh1_callbackCount":0,"sh2_activeCrossfade":0,"phase":0,"runId":"396bb012f4274b5a8e7c0ead56a9793a","provenance":"seed","sh4_observerCount":0,"schema":"shutdown_trace_v1","sh3_pendingRetire":0,"sh5_lateCallbackCount":0,"generatedAtNs":1786432585928000000,"sh6_postStopEnqueueCount":0}
+{
+  "schema": "shutdown_trace_v4",
+  "phase": 10,
+  "phaseName": "ShutdownComplete",
+  "healthState": 0,
+  "healthStateName": "Healthy",
+  "blockingReason": "Unknown",
+  "blockingReasonCode": 9,
+  "transitionViolations": 0,
+  "sh1_callbackCount": 0,
+  "sh2_activeCrossfade": 0,
+  "sh3_pendingRetire": 1,
+  "sh4_observerCount": 0,
+  "sh5_lateCallbackCount": 0,
+  "sh6_postStopEnqueueCount": 0,
+  "blockingReasonStats": [
+    {
+      "reason": "None",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "PendingPublication",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "PendingRetire",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ActiveCrossfade",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "DeferredPublish",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "QuarantineResident",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "RouterPendingRetire",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ReaderActive",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ActiveBuilder",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "Unknown",
+      "count": 1,
+      "maxDurationUs": 9973379816,
+      "firstSeenUs": 9973379816
+    }
+  ],
+  "verified": false
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":9973394962600}

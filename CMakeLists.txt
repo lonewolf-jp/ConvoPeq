@@ -220,6 +220,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
         src/audioengine/ISRDSPHandle.cpp
         src/audioengine/ISRDSPQuarantine.cpp
+        src/audioengine/ISRShutdown.cpp            # ★ dash2 §2.2 (A2-G): ShutdownRuntime の Proof/Permit 生成
     )
     target_include_directories(invariant_INV3_INV5Tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
