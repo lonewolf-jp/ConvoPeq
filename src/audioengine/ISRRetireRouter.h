@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cassert>
 #include <functional>
+#include <vector>
 
 // ISR P1-19: 公開APIに EpochDomain 型を露出しない。
 // コンストラクタは IEpochProvider& を受け取り、内部でダウンキャストする。
@@ -31,6 +32,85 @@ enum class RetireState : uint8_t
 class DSPRetirePolicy;
 class SnapshotRetirePolicy;
 class DeferredRetirePolicy;
+class WorldRetirementReferenceObserver;   // ★ T1 (D98): reference observer（non-owning 参照のみ・前方宣言）
+
+/**
+ * TerminalReclaimAuthority — Final ownership authority when all bounded stores
+ * are exhausted (DeferredDeletionQueue + RetireQuarantineStore + EmergencyQ).
+ *
+ * Ownership contract:
+ *   - enqueueWithRetry() transfers ptr to this authority ONLY when all stores + EmergencyQ are full.
+ *   - If epoch is safe (isOlder(world_epoch, minReaderEpoch) == false), deleter
+ *     executes immediately (synchronous destruction in Non-RT context).
+ *   - If epoch is unsafe, the entry is retained in the internal pending list.
+ *   - drain() attempts to reclaim epoch-safe entries (called from tryReclaim).
+ *   - drainAll() force-releases all entries (called during shutdown, audio thread stopped).
+ *
+ * ★ P-4 (15-P-4): The pending list is GROWABLE (std::vector). This guarantees the
+ *   authority ALWAYS accepts an entry — there is NO "store full" failure path.
+ *   Rationale: all callers are Non-RT (verified in 15-P-4-0), so heap allocation
+ *   is acceptable. This eliminates the EBR-failure leak: "全 store full / epoch
+ *   unsafe" can never leave ptr unowned, because this authority always takes
+ *   ownership and waits for the epoch to become safe (drain()).
+ *
+ * This class is NOT used for shutdown-only paths. Shutdown uses
+ * ShutdownReclaimAuthority (see AudioEngine.h drainAll / shutdown path).
+ *
+ * ISR P1-19 conformance: epoch provider is injected, no EpochDomain exposure.
+ */
+class TerminalReclaimAuthority {
+public:
+    struct Entry {
+        void* ptr = nullptr;
+        void (*deleter)(void*) = nullptr;
+        uint64_t epoch = 0;
+        DeletionEntryType type = DeletionEntryType::Generic;
+        const char* reason = nullptr;
+    };
+
+    // Store an entry. Called when all bounded stores + EmergencyQ are full.
+    // ★ P-4: ALWAYS returns true (growable store) — ownership always transfers.
+    bool store(void* ptr, void (*deleter)(void*), uint64_t epoch,
+               DeletionEntryType type, const char* reason) noexcept;
+
+    // Drain epoch-safe entries. Executes deleter for entries where isOlder(entry.epoch, minReaderEpoch) == true.
+    // isOlderFn: EpochDomain::isOlder(a, b) == static_cast<int64_t>(a - b) < 0
+    void drain(uint64_t minReaderEpoch,
+               const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
+
+    // Drain ALL entries unconditionally (shutdown only — audio thread must be stopped).
+    void drainAll() noexcept;
+
+    // Try to reclaim epoch-safe entries and, if any are safe, destroy immediately.
+    // Returns true if at least one entry was reclaimed.
+    bool tryReclaim(uint64_t minReaderEpoch,
+                    const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
+
+    [[nodiscard]] std::size_t residentCount() const noexcept;
+    [[nodiscard]] std::uint64_t reclaimCount() const noexcept {
+        return convo::consumeAtomic(reclaimCount_, std::memory_order_acquire);
+    }
+
+    // ★ P-4: Record a World reclaim (synchronous destruction path in ISRRetireRouter).
+    //   Increments reclaimCount_ and notifies the reference observer (non-owning).
+    void recordWorldReclaim() noexcept {
+        ++reclaimCount_;
+        if (referenceObserver_ != nullptr)
+            referenceObserver_->onRelease();
+    }
+
+    void setReferenceObserver(WorldRetirementReferenceObserver* observer) noexcept {
+        referenceObserver_ = observer;
+    }
+
+private:
+    // ★ P-4: Growable store (std::vector) — Non-RT only, heap allocation acceptable.
+    //   Guarantees store() ALWAYS succeeds → no EBR-failure leak path.
+    std::vector<Entry> entries_;
+    mutable std::mutex mtx_;  // Non-RT only — std::mutex acceptable
+    std::atomic<std::uint64_t> reclaimCount_{0};
+    WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // non-owning
+};
 
 /**
  * ISRRetireRouter — Thin stateless dispatcher for retire operations.
@@ -53,7 +133,8 @@ class ISRRetireRouter : public convo::IEpochProvider,
                         public convo::IRetireRouter
 {
 public:
-    explicit ISRRetireRouter(convo::IEpochProvider& provider) noexcept;
+    explicit ISRRetireRouter(convo::IEpochProvider& provider,
+                             convo::isr::WorldRetirementReferenceObserver* referenceObserver = nullptr) noexcept;
 
     ISRRetireRouter(const ISRRetireRouter&) = delete;
     ISRRetireRouter& operator=(const ISRRetireRouter&) = delete;
@@ -123,6 +204,9 @@ public:
     [[nodiscard]] std::size_t quarantineResidentCount() const noexcept;
     // ★ BUG-015/027: store full で quarantine が拒否された回数（EBR 破綻診断用）
     [[nodiscard]] std::uint64_t quarantineOverflowCount() const noexcept;
+    // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・primary + quarantine 合算）。
+    //   release observation（案 B）の一次情報源。sampler（Non-RT）が読み取る（D83.2 責務分離）。
+    [[nodiscard]] std::uint64_t worldReclaimCount() const noexcept;
     // ★ BUG-015/027: shutdown 時 — Audio Thread 停止後のみ全強制解放
     void drainAllQuarantineStore() noexcept;
 
@@ -187,15 +271,56 @@ public:
         return convo::consumeAtomic(m_trackedPendingEntries_, std::memory_order_acquire);
     }
 
+    // ★ P-4: EmergencyQuarantineStore API — D+Q full 時の第3退避層
+    //   戻り値 false = store full（TerminalReclaimAuthority への移送を示す）
+    bool emergencyQuarantine(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                             DeletionEntryType type, const char* reason,
+                             uint64_t publicationSequenceId = 0, uint64_t generation = 0) noexcept;
+
+    // ★ P-4: EmergencyQuarantineStore 滞留件数
+    [[nodiscard]] std::size_t emergencyQuarantineResidentCount() const noexcept;
+
+    // ★ P-4: TerminalReclaimAuthority API — 最終退避層
+    //   epoch safe かつ Non-RT なら場面で deleter 実行、unsafe または RT なら保留。
+    //   ★ P-4: 戻り値は常に true（growable store により ownership は必ず移転）。
+    bool terminalReclaim(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                         DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ P-4: TerminalReclaimAuthority 滞留件数
+    [[nodiscard]] std::size_t terminalReclaimResidentCount() const noexcept;
+
+    // ★ P-4: TerminalReclaimAuthority の drain（epoch-gated, 定期呼び出し）
+    void drainTerminalReclaim() noexcept;
+
+    // ★ P-4: ShutdownReclaimAuthority — shutdown 専用の ownership transfer
+    //   shutdown 中に enqueueDeferredDeleteNonRtWithResult が early-return する際、
+    //   ptr を捨てずに TerminalReclaimAuthority へ移送する（epoch-gated destruction）。
+    //   shutdown 中は Audio Thread 停止済みのため epoch は安全 → 即時破棄される。
+    //   戻り値 true = ownership transfer 成立（caller は ptr を触ってはならない）。
+    //   ★ P-4: 戻り値 false は存在しない（growable store により必ず移転）。
+    bool shutdownReclaim(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                         DeletionEntryType type) noexcept;
+
 private:
     // ★ BUG-015/027: tryReclaim 直後に退避ストアを drain（epoch 安全到達分のみ deleter 実行）
     void drainQuarantineStore() noexcept;
+    // ★ P-4: EmergencyQ + TerminalReclaimAuthority の epoch-gated drain
+    void drainEmergencyAndTerminal() noexcept;
+
+    // ★ P-4: EpochDomain::isOlder の static 版（TerminalReclaim 内から呼び出し）
+    //   isOlder(a, b) = static_cast<int64_t>(a - b) < 0 (wraparound-safe)
+    static bool isOlder(uint64_t a, uint64_t b) noexcept;
 
     convo::IEpochProvider* provider_ = nullptr;
+    convo::isr::WorldRetirementReferenceObserver* referenceObserver_ = nullptr;   // ★ T1 (D98): non-owning（measurement only・D97）
     std::atomic<uint64_t> m_overflowCount_{0};
     std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0};
     // ★ BUG-015/027: retire enqueue 失敗時の退避ストア（Router Policy lane 配下に単一配置）
     RetireQuarantineStore m_retireQuarantine;
+    // ★ P-4: EmergencyQuarantineStore — D+Q full 時の第3退避層（同一タイプ・別インスタンス）
+    RetireQuarantineStore m_emergencyQuarantine;
+    // ★ P-4: TerminalReclaimAuthority — D+Q+E 全滿時の最終退避層（epoch-gated synchronous destruction）
+    TerminalReclaimAuthority m_terminalReclaim;
     // ★ work70: 診断用カウンタ
     std::atomic<uint64_t> m_pendingRetireBytes_{0};
     std::atomic<uint32_t> m_trackedPendingEntries_{0};

@@ -46,7 +46,7 @@ struct PublishExecutor {
 
         // ★ work88 (X4-B §6.4 / X4-B-5): 一時生成 coordinator（makeRuntimePublishAuthority()）を廃止し、
         //   RuntimeWorldAuthority が sole physical publish gateway（INV-X4-2）。publish() 内部で
-        //   commit metadata（ISR currentWorld_ 更新）+ publishAndSwap（physical store swap）を束ねる
+        //   commit metadata（publication bake）+ publishAndSwap（physical store swap）を束ねる
         //   （commit-before-swap ordering — Test 7）。PublishExecutor 側の authority.commit() は
         //   publish() が内包するため削除（commit 二重化防止・二十二次レビュー必須修正1）。
         //   ★ seal はここで実行（RuntimeState 完全型 — AudioEngine.h include 済み）。
@@ -73,7 +73,7 @@ struct PublishExecutor {
                 //   PublishExecutor の Execution tail から呼ぶ。
                 bridge.didPublishRuntimeNonRt(*newWorld);
                 bridge.willRetireRuntimeNonRt(oldWorld);
-                bridge.retireRuntimePublishWorldNonRt(oldWorld, false);
+                bridge.retirePublishedRuntimeWorldNonRt(oldWorld, false);
             }
         }
         // ★ D2: commit succeeded ⇒ drop the pending registry entry

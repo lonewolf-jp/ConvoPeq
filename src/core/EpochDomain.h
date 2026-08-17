@@ -398,6 +398,27 @@ public:
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
     }
 
+    // ★ T1 (D86): telemetry type tag 付き enqueue（type を DeferredDeletionQueue に伝搬）。
+    //   type==World で world retirement を識別（telemetry metadata のみ・lifetime authority にしない）。
+    bool enqueueRetireTyped(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                            DeletionEntryType type) noexcept override
+    {
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+    }
+
+    // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・primary 経路）。
+    [[nodiscard]] uint64_t worldReclaimCount() const noexcept override
+    {
+        return deferredDeletionQueue.worldReclaimCount();
+    }
+
+    // ★ T1 (D98): reference observer を DeferredDeletionQueue に伝搬（non-owning・一方向依存）。
+    void setReferenceObserver(void* observer) noexcept override
+    {
+        deferredDeletionQueue.setReferenceObserver(
+            static_cast<convo::isr::WorldRetirementReferenceObserver*>(observer));
+    }
+
     void drainAll() noexcept override
     {
         deferredDeletionQueue.drainAllUnsafe();

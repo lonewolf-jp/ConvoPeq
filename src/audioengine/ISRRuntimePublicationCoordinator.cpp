@@ -1,10 +1,11 @@
 #include "ISRRuntimePublicationCoordinator.h"
 #include "AtomicAccess.h"
+#include "SequenceArithmetic.h"  // ★ dash2 §1.6.1 (Phase H): modular sequence arithmetic（commit monotonicity）
 #include "ISRRetireOverflowRing.h"
 #include "ISRDSPHandle.h"
 #include "ISRDSPQuarantine.h"
 #include <cassert>
-#include "AudioEngine.h"  // FUTURE-4: RuntimeState (downcast currentWorld_)
+#include "AudioEngine.h"  // FUTURE-4 / CW-3c: RuntimeState 完全型（commit() の bake・prevWorld 用）
 
 namespace convo::isr {
 
@@ -12,7 +13,6 @@ RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     : overflowScheduler_(*this)
     , shutdownScheduler_(*this)
     , priorityScheduler_(*this)
-    , currentWorld_(nullptr)
     , lastRejectCode_(RejectCode::None)
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
@@ -26,7 +26,8 @@ RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     , state_(CoordinatorState::Bootstrapping)
     , retireAuthorityCount_(0)
 {
-    // ★ FUTURE-4: persistentState_ removed — metadata derived from currentWorld_ (RuntimeState::publication)
+    // ★ dash2 §1.7 (CW-3c): persistentState_ / currentWorld_ 削除 — publication metadata は
+    //   RuntimeStore::current の RuntimeState::publication（単一 source）
 }
 
 bool RuntimeIntentCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
@@ -69,7 +70,8 @@ void RuntimeIntentCoordinator::commit(PublishAuthority,
            version,
            static_cast<PublicationSequenceId>(version),
            static_cast<PublicationEpoch>(version),
-           version);
+           version,
+           nullptr);
 }
 
 void RuntimeIntentCoordinator::commit(PublishAuthority,
@@ -78,23 +80,28 @@ void RuntimeIntentCoordinator::commit(PublishAuthority,
                                            std::uint64_t /*version*/,
                                            PublicationSequenceId sequenceId,
                                            PublicationEpoch epoch,
-                                           std::uint64_t mappedGeneration) {
+                                           std::uint64_t mappedGeneration,
+                                           const RuntimeState* prevWorld) {
     if (boundary != RuntimeBoundary::NonRTWorld || newWorld == nullptr) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
-    // ★ FUTURE-4: prev metadata derived from currentWorld_ (RuntimeState::publication), not persistentState_
-    const auto prevWorld = static_cast<const RuntimeState*>(
-        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
+    // ★ dash2 §1.7 (Phase G CW-3b): monotonicity baseline は明示された prevWorld（publish() が
+    //   runtimeStore_.observe() = RuntimeStore::current から取得）のみ。currentWorld_ は参照しない
+    //   （read/write dependency 除去 — explicit dependency。Authority は RuntimeWorldAuthority が
+    //   publication baseline を所有）。prevWorld == nullptr は初回 publish を許容（後方互換の規則
+    //   と同一 — nullptr だからといって値を無条件に受け入れる緩和はしない）。
     const auto prevSeqId = prevWorld ? prevWorld->publication.sequenceId : PublicationSequenceId{0};
     const auto prevEpoch  = prevWorld ? prevWorld->publication.epoch : PublicationEpoch{0};
     const auto prevGen    = prevWorld ? prevWorld->publication.mappedRuntimeGeneration : std::uint64_t{0};
 
     const bool hasPrevious = prevSeqId != 0 || prevEpoch != 0 || prevGen != 0;
     if (hasPrevious) {
-        if (!(static_cast<std::uint64_t>(sequenceId) > static_cast<std::uint64_t>(prevSeqId)
-              && static_cast<std::uint64_t>(epoch) > static_cast<std::uint64_t>(prevEpoch)
+        // ★ dash2 §1.6.1 (Phase H): modular comparison（wraparound-safe — Appendix E）。
+        //   isAfter(a,b) == (a > b)（非 wrap 値）。seq/epoch は 1 ずつ増加のため semantics-preserving。
+        if (!(convo::isr::isAfter(sequenceId, prevSeqId)
+              && convo::isr::isAfter(epoch, prevEpoch)
               && mappedGeneration > prevGen)) {
             convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
             return;
@@ -105,11 +112,12 @@ void RuntimeIntentCoordinator::commit(PublishAuthority,
     convo::publishAtomic(swapPending_, true, std::memory_order_release);
 
     // ★ FUTURE-4 (publish-time freeze): bake incoming publication semantics onto newWorld,
-    //   replacing the former persistentState_ cache; Reader derives metadata via currentWorld_->publication.
+    //   replacing the former persistentState_ cache; Reader derives metadata via RuntimeStore::current
+    //   ->publication（CW-1 で read source を RuntimeStore に一本化済み）。
+    //   ［MutablePrePublish の semantic contract — candidate は未観測期にのみ mutation される］
     auto* pubWorld = const_cast<RuntimeState*>(static_cast<const RuntimeState*>(newWorld));
     pubWorld->publication = PublicationSemantic{sequenceId, epoch,
         static_cast<PublicationGeneration>(mappedGeneration), prevSeqId};
-    convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(swapPending_, false, std::memory_order_release);
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
 }
@@ -122,16 +130,12 @@ void RuntimeIntentCoordinator::retire(RetireAuthority,
         return;
     }
 
-    (void) oldWorld;
-    auto observedCurrent = convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
-    if (observedCurrent == oldWorld)
-    {
-        convo::compareExchangeAtomic(currentWorld_,
-                                     observedCurrent,
-                                     static_cast<const void*>(nullptr),
-                                     std::memory_order_acq_rel,
-                                     std::memory_order_acquire);
-    }
+    // ★ dash2 §1.7 (Phase G CW-3c): currentWorld_ の metadata-cache clear（CAS）を削除。
+    //   退役の実 authority は Lifetime/EBR（onRuntimeRetiredNonRt → emitRetireIntentRT）が担当。
+    //   currentWorld_ は CW-3b 以降 non-update（commit が write しない）のため本 CAS は no-op だった。
+    //   退役の identity source は publish() の戻り値 oldWorld（caller が判定）— RuntimeStore::current
+    //   への委譲は不要（RuntimeStore::current が published-world read の単一 source）。
+    //   ［本メソッドは入力契約（NonRTWorld・oldWorld 非 null）の検証 + Fault のみを維持］
 
     // ★ dash2 §1.4 (B0-3): 本メソッドは world-retire 時に AudioEngine.Commit.cpp:461 から呼ばれる。
     //   retireBacklogCount_ はここで増加させない — 元コードは Commit.cpp:481 の setRetireBacklogCount
@@ -174,31 +178,10 @@ std::uint64_t RuntimeIntentCoordinator::retireAuthorityCount() const noexcept
     return convo::consumeAtomic(retireAuthorityCount_, std::memory_order_acquire);
 }
 
-const void* RuntimeIntentCoordinator::getCurrent() const noexcept {
-    return convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
-}
-
-std::uint64_t RuntimeIntentCoordinator::getVersion() const noexcept {
-    // ★ FUTURE-4: derive from currentWorld_ (RuntimeState::publication.mappedRuntimeGeneration)
-    const auto world = static_cast<const RuntimeState*>(
-        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
-    return world ? world->publication.mappedRuntimeGeneration : std::uint64_t{0};
-}
-
-PublicationEpoch RuntimeIntentCoordinator::currentPublicationEpoch() const noexcept {
-    // ★ FUTURE-4: latest publicationEpoch derived from currentWorld_ (RuntimeState::publication.epoch)
-    const auto world = static_cast<const RuntimeState*>(
-        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
-    return world ? world->publication.epoch : PublicationEpoch{0};
-}
-
-// ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId).
-//   Read-only Authority accessor — RuntimeWorldAuthority::sequence() delegates here.
-PublicationSequenceId RuntimeIntentCoordinator::currentPublicationSequenceId() const noexcept {
-    const auto world = static_cast<const RuntimeState*>(
-        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
-    return world ? world->publication.sequenceId : PublicationSequenceId{0};
-}
+// ★ dash2 §1.7 (Phase G CW-3c): getCurrent/getVersion/currentPublicationEpoch/currentPublicationSequenceId
+//   は production caller ゼロ（RuntimeWorldAuthority の delegation は CW-3c で削除）のため削除。
+//   published-world read は RuntimeStore::current（RuntimeWorldAuthority::observePublishedWorld）が単一 source。
+//   ［Coordinator に published-world read API を残さない — CW-1 read-side singularization と整合］
 
 // ── dash2 §1.4: semantic event accounting ──
 //   production は setter（絶対値上書き）ではなく本イベントで原子的に増減を通知する。
@@ -656,7 +639,7 @@ void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {
 // ★ P0-4C: ISR Intent 発行インターフェース実装
 //==============================================================================
 
-void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle) noexcept
+void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle, PublicationEpoch epoch) noexcept
 {
     // ★ P0-4A: Observe Intent — Timer → enqueue（RT-safe, lock-free）
     //   OBSERVE-2: push() は即座に復帰（lock-free）
@@ -668,14 +651,14 @@ void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle) noexcept
     //   cross-type FIFO で Publish/Quarantine と同じキューを共有（ObserveIntentHandler が
     //   kDispatchTable 経由で処理）。SPSC 専用リング（observeIntentQueue_/observeFallbackQueue_）
     //   への複数 Producer 依存を排除（MPSC 実態の潜在競合を構造的に解消）。
-    const auto world = static_cast<const RuntimeState*>(
-        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
-    const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
+    // ★ dash2 §1.7 (Phase G R6 修正, 2026-08-15): epoch は caller が RuntimeStore::current
+    //   （RuntimeWorldAuthority::observePublishedWorld）から取得して明示的に渡す。Coordinator は
+    //   currentWorld_ を参照しない（CW-3b で currentWorld_ は非更新 — 単一 source へ接続）。
     const auto intentId = nextObserveIntentId_.fetch_add(1, std::memory_order_relaxed);
 
     RuntimeIntentCoordinator::Intent intent{};
     intent.type = RuntimeIntentCoordinator::IntentType::Observe;
-    intent.payload.observe = RuntimeIntentCoordinator::ObservePayload{handle, currentEpoch};
+    intent.payload.observe = RuntimeIntentCoordinator::ObservePayload{handle, epoch};
     intent.sequenceId = intentId;
 
     // ★ work88 (P2-1 §1.1.3): reservation-before-push 化。
@@ -691,7 +674,7 @@ void RuntimeIntentCoordinator::submitObserve(const DSPHandle& handle) noexcept
     // intentQueue_ full → observeDeferredRing_（FUTURE-8 overflow 専用）へ退避。
     //   回御は processIntent の drainObserveDeferred（QUEUE-16）。
     observeOverflowCounter_.fetch_add(1, std::memory_order_relaxed);
-    ObserveIntent fallbackIntent{ handle, currentEpoch, intentId };
+    ObserveIntent fallbackIntent{ handle, epoch, intentId };
     if (observeDeferredRing_.push(fallbackIntent)) {
         return;
     }
@@ -862,8 +845,16 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 // ★ FUTURE-3 (work88): buildSource（RuntimeBuildSnapshot 値コピー）を payload に内包。
 //   quarantinedHandle だけでは resolve() 不能（ISRDSPHandle.cpp:69）なため、build 入力は
 //   値コピーした snapshot から引当する（epoch 逆引き不要 — lifetime を構造的に解決）。
-void RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
-                                                          const convo::RuntimeBuildSnapshot& buildSource) noexcept
+// ★ dash2 §1.1 (Phase F 検証, 2026-08-15): 単一 Producer 不変条件を確認済み。
+//   Producer = CoordinatorLoop（本メソッドは submitRecoveryIntent ← QuarantineIntentHandler /
+//   RecoveryIntentHandler〔dead code〕経由で CoordinatorLoop スレッド上でのみ呼ばれる）。
+//   Consumer = Builder Loop（popRecoveryRequest）。⇒ SPSC 維持 — MPSC 化不要。
+// ★ dash2 §1.9 (Phase E): 戻り値 — recovery obligation が生成・維持された場合 true。
+//   transport（push 成功）/ durable（queue full → recoveryAdmissionPending_）とも true
+//   （INV-X1-2: queue full ≠ Recovery lost）。shutdown gate による discard は false（wake 不要）。
+bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+                                                          const convo::RuntimeBuildSnapshot& buildSource,
+                                                          PublicationEpoch epoch) noexcept
 {
     // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
     //   requestShutdown()（CoordinatorState::ShuttingDown）確定後は Recovery を enqueue しない。
@@ -877,16 +868,17 @@ void RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
-        return;
+        return false;   // shutdown discard — wake 不要（§1.9 Phase E）
     }
 
-    const auto world = static_cast<const RuntimeState*>(
-        convo::consumeAtomic(currentWorld_, std::memory_order_acquire));
-    const auto currentEpoch = world ? world->publication.epoch : PublicationEpoch{0};
-
+    // ★ dash2 §1.7 (Phase G R7 修正, 2026-08-15): epoch は caller（submitRecoveryIntent）が
+    //   RuntimeStore::current（RuntimeWorldAuthority::observePublishedWorld）から取得して明示的に
+    //   渡す。Coordinator は currentWorld_ を参照しない（CW-3b で非更新）。RecoveryIntent::epoch
+    //   は emit 時 publicationEpoch の metadata（FIFO/epoch 検証用）— Phase E の lost-wake /
+    //   stale-discard invariant（intentId / generation ベース）には影響しない。
     RecoveryIntent intent{
         quarantinedHandle,
-        currentEpoch,
+        epoch,
         nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed),
         buildSource
     };
@@ -900,7 +892,7 @@ void RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     //   isFullyDrained が永久に false になるのを防ぐ。
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
-        return;
+        return true;   // transport recovery exists（§1.9 Phase E — wake 条件）
     }
 
     // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。
@@ -919,9 +911,10 @@ void RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     pendingRecoveryAdmission_.buildSource = buildSource;
     pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
     pendingRecoveryAdmission_.handle = quarantinedHandle;
-    pendingRecoveryAdmission_.epoch = currentEpoch;
+    pendingRecoveryAdmission_.epoch = epoch;
     pendingRecoveryAdmission_.intentId = intent.intentId;
     convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
+    return true;   // durable recovery exists（INV-X1-2: queue full ≠ Recovery lost — §1.9 Phase E）
 }
 
 // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。

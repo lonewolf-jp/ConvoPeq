@@ -103,6 +103,7 @@ namespace convo::isr { class PublicationAdmission; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
 class DSPLifetimeManager;
 #include "ISRRuntimeSemanticSchema.h"
+#include "SequenceArithmetic.h"  // ★ dash2 §1.6.1 (Phase H): modular sequence arithmetic（PublishReceiptWaiter）
 #include "ISRRuntimeIdentityGenerators.h"
 #include "ISRPayloadTier.h"
 #include "ISRRetire.h"
@@ -116,6 +117,8 @@ class DSPLifetimeManager;
 #include "RuntimeDrainAudit.h"
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISREvidenceExporter.h"
+#include "ISRWorldRetirementTelemetry.h"   // ★ T1: World retirement observation telemetry（観測値のみ・D86）
+#include "ISRWorldRetirementReference.h"   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
 #include "WorldLifecycleAudit.h"
@@ -1133,9 +1136,14 @@ public:
     [[nodiscard]] bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
     [[nodiscard]] uint32_t activeEpochObserverCount() const noexcept;
 
-    // ★ HW-1: 最新の publicationEpoch を ISR Coordinator から取得
+    // ★ HW-1: 最新の publicationEpoch を取得
+    //   ★ dash2 §1.7 (Phase G CW-1): read-source singularization — published-world epoch は
+    //     RuntimeStore::current（RuntimeWorldAuthority::observePublishedWorld）が単一 source。
+    //     ［swap 点（publishAndSwap）で公開された authoritative world の epoch。旧 currentWorld_
+    //       は CW-3c で削除済み — 単一 linearization 点（swap）］
     [[nodiscard]] convo::isr::PublicationEpoch currentPublicationEpoch() const noexcept {
-        return runtimePublicationBridge_.currentPublicationEpoch();
+        const auto* world = worldAuthority_.observePublishedWorld();
+        return world ? world->publication.epoch : convo::isr::PublicationEpoch{0};
     }
 
     // ★ FIX-D1: 順序付き epoch 差分（ordered difference）。事前条件: a >= b。
@@ -1544,6 +1552,7 @@ public:
         std::uint64_t quarantineResident = 0;
         std::uint64_t quarantineFallbackDropCount = 0;  // ★ work88: Quarantine intent 全層溢れ drop 数（Critical 昇格の根拠）
         std::uint64_t recoveryIntentDropCount = 0;  // ★ work88 (六次レビュー): Recovery Intent push 失敗 drop 数（Critical 昇格の根拠）
+        std::uint64_t quarantineAbsorptionCount = 0;  // ★ dash2 §1.9 (Phase E): initial quarantine silent absorb 数（無駄な wake 抑制の観測）
         std::uint64_t publicationBacklog = 0; // Phase1-B: kept for ABI compat (always 0)
         std::uint64_t rebuildBacklog = 0;
         std::uint64_t saturationEnterCount = 0;
@@ -1606,6 +1615,11 @@ public:
     // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
     [[nodiscard]] int currentBuildGeneration() const noexcept { return consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
 
+    // ★ dash2 §1.9 (Phase E): initial quarantine の silent absorb 回数（診断テレメトリ）。
+    [[nodiscard]] std::uint64_t quarantineAbsorptionCount() const noexcept {
+        return consumeAtomic(quarantineAbsorptionCount_, std::memory_order_acquire);
+    }
+
     [[nodiscard]] RuntimeBackpressureTelemetry getRuntimeBackpressureTelemetry() const noexcept
     {
         // ★ BUG-015/027 (work88): quarantineResident に RetireQuarantineStore 滞留を統合。
@@ -1618,6 +1632,7 @@ public:
             (consumeAtomic(quarantineResident_, std::memory_order_acquire) + retireQuarantineResident),
             runtimePublicationBridge_.quarantineFallbackDropCount(),
             runtimePublicationBridge_.recoveryIntentDropCount(),
+            consumeAtomic(quarantineAbsorptionCount_, std::memory_order_acquire),
             static_cast<std::uint64_t>(0), // publicationBacklog_ removed in Phase1-B
             consumeAtomic(rebuildBacklog_, std::memory_order_acquire),
             consumeAtomic(saturationEnterCount_, std::memory_order_acquire),
@@ -2210,6 +2225,7 @@ public:
     std::atomic<std::uint64_t> lastDroppedGeneration_ { 0 };
     std::atomic<std::uint64_t> publishedWorldCount_ { 0 };
     std::atomic<std::uint64_t> retiredWorldCount_ { 0 };
+    std::atomic<std::uint64_t> lastSampledWorldReclaimCount_ { 0 };   // ★ T1: sampler が worldReclaimCount の前回読取値（releaseObserved 反映用・Non-RT sampler のみ）
     std::atomic<std::uint64_t> oldestPublishedGeneration_ { 0 };
     std::atomic<std::uint64_t> youngestPublishedGeneration_ { 0 };
     std::atomic<std::uint64_t> oldestObservedGeneration_ { 0 };
@@ -3504,19 +3520,35 @@ public:
             engine_->onRuntimeRetiredNonRt(world);
         }
 
-        void retireRuntimePublishWorldNonRt(RuntimePublishWorld* world, bool resetRevision) noexcept
+        void retirePublishedRuntimeWorldNonRt(RuntimePublishWorld* world, bool resetRevision) noexcept
         {
+            // PRECONDITION: W ∈ PublishedDomain (must have passed publishAndSwap LP)
             if (world == nullptr)
                 return;
 
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
-                ptr->unseal();                      // ★ Phase4: SealedObject の unseal — publish 時に設定された frozen 状態を解放
+                ptr->unseal();
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
-            });
+            }, DeletionEntryType::World);
             (void)resetRevision;
+        }
+
+        void retireRejectedRuntimeWorldNonRt(RuntimePublishWorld* world) noexcept
+        {
+            // PRECONDITION: W ∉ PublishedDomain (rejected/unpublished)
+            if (world == nullptr)
+                return;
+
+            engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
+            {
+                auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                ptr->unseal();
+                ptr->~RuntimePublishWorld();
+                convo::aligned_free(ptr);
+            }, DeletionEntryType::Generic);
         }
 
     private:
@@ -3561,6 +3593,13 @@ public:
     //   observe する getter ラッパー。read API は世界Authority 経由（INV-X4-B）。
     [[nodiscard]] const RuntimePublishWorld* observePublishedWorld() const noexcept {
         return worldAuthority_.observePublishedWorld();
+    }
+
+    // ★ dash2 §1.9 (Phase E): authoritative published runtime の有無（RecoveryAdmissionPolicy）。
+    //   observePublishedWorld() != nullptr で判定（Amendment 4 — runtimePublishWorld_ は非存在）。
+    //   ［初回 publish 前は nullptr → initial quarantine の Recovery を silent absorb する］
+    [[nodiscard]] bool hasAuthoritativePublishedRuntime() const noexcept {
+        return observePublishedWorld() != nullptr;
     }
 
     // RuntimePublicationOrchestrator: 前方宣言 + unique_ptr (循環依存回避)
@@ -3630,9 +3669,11 @@ private:
     //   INV-X2-6: completion order == publication sequence order（contiguous completion 前提）。
     //     Intent FIFO → PublishExecutor FIFO → commit FIFO → completion FIFO が不変条件。
     //     したがって waitFor(seq) := seq <= lastCompleted_ が正しい（watermark が seq を超えれば
-    //     1..seq は全て完了済み — contiguous）。将来 MPSC completion / parallel publish を許す場合は
+    //     1..seq は全て完了済み — contiguous）。比較は modular（SequenceArithmetic.h — dash2
+    //     §1.6.1・wraparound-safe）で仕様化。将来 MPSC completion / parallel publish を許す場合は
     //     sparse completion（completedThrough_ + completedOutOfOrder_）への拡張が必要（現状は不要）。
-    //   INV-X2-4: stale completion cannot overwrite newer completion（mutex 下の if (seqId > lastCompleted_)）。
+    //   INV-X2-4: stale completion cannot overwrite newer completion（mutex 下の isAfter 判定 —
+    //     seqId が lastCompleted_ より後でなければ更新しない）。
     //   INV-ISR-05: committed ≠ completed。lastCommittedPublicationSequence_（Committed state）と
     //     本 watermark（Completion）は別 semantic。本構造は「案1 最小変更」で維持する（X2 §6.2）。
     struct PublishReceiptWaiter {
@@ -3640,7 +3681,9 @@ private:
         {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (seqId > lastCompleted_) { lastCompleted_ = seqId; }
+                // ★ dash2 §1.6.1 (Phase H): modular comparison（wraparound-safe）。
+                //   isAfter(seqId, lastCompleted_) == (seqId > lastCompleted_)（非 wrap 値）。
+                if (convo::isr::isAfter(seqId, lastCompleted_)) { lastCompleted_ = seqId; }
             }
             cv_.notify_all();
         }
@@ -3650,8 +3693,10 @@ private:
             std::unique_lock<std::mutex> lock(mutex_);
             const auto deadline = std::chrono::steady_clock::now()
                 + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
-            cv_.wait_until(lock, deadline, [&] { return seqId <= lastCompleted_; });
-            return seqId <= lastCompleted_;
+            // ★ dash2 §1.6.1 (Phase H): isCompleted(seq, watermark) == (seq <= lastCompleted_)
+            //   （modular at-or-before・wraparound-safe）。
+            cv_.wait_until(lock, deadline, [&] { return convo::isr::isCompleted(seqId, lastCompleted_); });
+            return convo::isr::isCompleted(seqId, lastCompleted_);
         }
 
         std::mutex mutex_;
@@ -4135,24 +4180,35 @@ static inline bool reserveInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
     return (active == 0) ? &slot.coeffSetB : &slot.coeffSetA;
 }
 
-inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexcept
+inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*),
+                                       DeletionEntryType type = DeletionEntryType::Generic) noexcept
 {
-    const auto result = enqueueDeferredDeleteNonRtWithResult(ptr, deleter);
+    const auto result = enqueueDeferredDeleteNonRtWithResult(ptr, deleter, type);
     return result != convo::isr::RetireEnqueueResult::Shutdown;
 }
 
-inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void* ptr, void (*deleter)(void*)) noexcept
+inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void* ptr, void (*deleter)(void*),
+                                                                           DeletionEntryType type = DeletionEntryType::Generic) noexcept
 {
     if (ptr == nullptr || deleter == nullptr)
         return convo::isr::RetireEnqueueResult::Success;
 
     if (isShutdownInProgress())
-        return convo::isr::RetireEnqueueResult::Shutdown;
+    {
+        // ★ P-4: shutdown 中も ownership transfer を維持する。
+        //   ptr を捨てず、ShutdownReclaimAuthority（TerminalReclaimAuthority 経由）へ移送する。
+        //   shutdown 中は Audio Thread 停止済みのため epoch は安全 → 即時破棄される。
+        //   invariant: 「caller → authority への ownership transfer が成立してから return」
+        const uint64_t epoch = markRetireEpoch();
+        const bool transferred = m_retireRouter->shutdownReclaim(ptr, deleter, epoch, type);
+        return transferred ? convo::isr::RetireEnqueueResult::Success
+                           : convo::isr::RetireEnqueueResult::Shutdown;
+    }
 
     const uint64_t epoch = markRetireEpoch();
 
     // [Bug2 Phase1] Router の enqueueWithRetry に委譲（リトライロジックは Router に集約）
-    auto result = m_retireRouter->enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
+    auto result = m_retireRouter->enqueueWithRetry(ptr, deleter, epoch, type);
     if (result == convo::isr::RetireEnqueueResult::Success)
     {
         // ★ dash2 §1.4 (B0-7): setRetireBacklogCount による Coordinator へのスナップショット
@@ -4342,7 +4398,29 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
                                  const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
-    runtimePublicationBridge_.submitRecoveryRequest(quarantinedHandle, buildSource);
+    // ★ dash2 §1.9 (Phase E — quarantine wake 最適化): RecoveryAdmissionPolicy。
+    //   authoritative runtime（初回 publish 済み world）が存在しない場合、initial quarantine
+    //   の Recovery 要求は silent absorb する（無駄な RebuildThread 起床の抑制 — Amendment 4）。
+    //   ［absorb は quarantineAbsorptionCount_ で観測可能。recovery obligation を失わない
+    //     （INV-X1-2: queue full ≠ Recovery lost — authoritative runtime 非存在時は再構築対象の
+    //     published world が無いため recovery build は不要）］
+    if (!hasAuthoritativePublishedRuntime())
+    {
+        quarantineAbsorptionCount_.fetch_add(1, std::memory_order_relaxed);
+        return;   // absorb — enqueue も wake もしない
+    }
+
+    // HasAuthoritativeRuntime mode: current 3-path（transport / durable / shutdown）。
+    //   ★ §1.9: recovery obligation が実際に存在する場合のみ wake（recoveryPending set + notify）。
+    //   transport（push 成功）と durable（queue full → recoveryAdmissionPending_）は両方 wake
+    //   （INV-X1-2: queue full ≠ Recovery lost）。shutdown discard（admitted=false）は wake 不要。
+    //   ★ dash2 §1.7 (Phase G R7 修正, 2026-08-15): epoch は RuntimeStore::current（単一 source）
+    //     から currentPublicationEpoch() で取得して明示的に渡す（Coordinator は currentWorld_ 非参照）。
+    const bool admitted = runtimePublicationBridge_.submitRecoveryRequest(
+        quarantinedHandle, buildSource, currentPublicationEpoch());
+    if (!admitted)
+        return;
+
     // ★ 監査指摘 (work88): Recovery を Builder Work Queue に投入後、rebuild スレッドを起床させる。
     //   recoveryIntentQueue_ への push は rebuildCV を起こさないため、アイドル時に Recovery が
     //   処理されない配線漏れを解消（RecoveryIntentHandler からの enqueue-only 経路）。
@@ -4596,6 +4674,9 @@ public:
     // スナップショット基盤（Phase 2）
     // ==================================================================
     convo::EpochDomain m_epochDomain;
+    // ★ T1 (D98): reference observer — m_retireRouter より前に宣言（初期化順: observer → m_retireRouter・
+    //   破棄順: m_retireRouter → observer・D97 invariant を満たす）。measurement only・retirement authority でない。
+    convo::isr::WorldRetirementReferenceObserver worldRetirementReference_;
     // [work21] ISRRetireRouter — 唯一のretire/publication API入口(unique_ptr, forward-declared)
     std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
@@ -4708,6 +4789,9 @@ public:
     std::atomic<int> retireLowWatermark_ { 1024 };
     std::atomic<bool> retireSaturationActive_ { false };
     std::atomic<bool> retireSaturationRecoveryPending_ { false };
+    // ★ dash2 §1.9 (Phase E): authoritative runtime 非存在時の initial quarantine を silent absorb
+    //   した回数（無駄な RebuildThread 起床の抑制 — quarantineAbsorption テレメトリ）。
+    std::atomic<std::uint64_t> quarantineAbsorptionCount_ { 0 };
     std::atomic<std::uint64_t> retireSaturationRecoveryBaselinePublishCount_ { 0 };
     std::atomic<std::int64_t> emergencyReclaimWindowStartTicks_ { 0 };
     std::atomic<std::int64_t> emergencyReclaimLastBoostTicks_ { 0 };
@@ -4779,6 +4863,7 @@ public:
     //   (sole owner). AudioEngine reaches them only via worldAuthority_.lifetime().
     convo::isr::ShutdownRuntime shutdownRuntime_;
     convo::isr::EvidenceExporter evidenceExporter_;
+    convo::isr::WorldRetirementTelemetry worldRetirementTelemetry_;   // ★ T1: world retirement 観測 telemetry（観測値のみ・authority でない・D86）
     convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;
@@ -4825,6 +4910,44 @@ public:
         // ★ A3 Step 5-2: PublishExecutor reaches the sole commit() Authority (HANDLER-1: no bypass).
         convo::isr::RuntimeWorldAuthority& worldAuthority() noexcept { return worldAuthority_; }
         const convo::isr::RuntimeWorldAuthority& worldAuthority() const noexcept { return worldAuthority_; }
+        // ★ T1 (D86): World retirement observation telemetry（sampler / export が読み取り・観測値のみ）。
+        convo::isr::WorldRetirementTelemetry& worldRetirementTelemetry() noexcept { return worldRetirementTelemetry_; }
+        const convo::isr::WorldRetirementTelemetry& worldRetirementTelemetry() const noexcept { return worldRetirementTelemetry_; }
+        // ★ T1 (D99): World retirement reference observer（event-driven・measurement only・D94/D99）。
+        convo::isr::WorldRetirementReferenceObserver& worldRetirementReference() noexcept { return worldRetirementReference_; }
+        const convo::isr::WorldRetirementReferenceObserver& worldRetirementReference() const noexcept { return worldRetirementReference_; }
+        // ★ T1 (D91): window-reset measurement request API（Non-RT 限定・D91 基準 1・2）。
+        //   Start/End request は atomic CAS（Idle→StartRequested・Running→EndRequested・D91.1 上書き・重複要求契約）。
+        //   実測ツール / テストから呼ぶ。window transition は sampler（timerCallback）が唯一実行する（D91 基準 3）。
+        void requestWorldRetirementMeasurementStart() noexcept
+        {
+            worldRetirementTelemetry_.requestMeasurementStart();
+        }
+        void requestWorldRetirementMeasurementEnd() noexcept
+        {
+            worldRetirementTelemetry_.requestMeasurementEnd();
+        }
+        // ★ T1 (D100): テスト用 — world retirement sampler を手動駆動（JUCE Timer がヘッドレスで動かない場合）。
+        //   timerCallback 内の sampler と同じ処理（samplerTick + reference observer の window 同期）を実行する。
+        void driveWorldRetirementSamplerForMeasurement() noexcept
+        {
+            auto& telemetry = worldRetirementTelemetry();
+            telemetry.samplerTick(convo::getCurrentTimeUs());
+            if (telemetry.measurementState() == convo::isr::MeasurementState::Running)
+                worldRetirementReference_.onMeasurementStart();
+            else
+                worldRetirementReference_.onMeasurementEnd();
+        }
+        // ★ T1 (D100.4): テスト用 — world retirement reclaim を手動駆動（JUCE Timer がヘッドレスで動かない場合）。
+        //   production では timerCallback が tryReclaimResources() を定期実行するが、ヘッドレスでは動かないため、
+        //   epoch を進行させてから tryReclaim を実行し、type==World の terminal deleter（onRelease）を発生させる。
+        //   publish 時に markRetireEpoch() で epoch は進行済みだが、enqueue 時点の epoch は「現在 epoch」のため、
+        //   もう一度 publishEpoch() で進めてから tryReclaim しないと isOlder(entry.epoch, minReaderEpoch) が偽になる。
+        void driveWorldRetirementReclaimForMeasurement() noexcept
+        {
+            m_retireRouter->publishEpoch();
+            tryReclaimResources();
+        }
 
 };
 

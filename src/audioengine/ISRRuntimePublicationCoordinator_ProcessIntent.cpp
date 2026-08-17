@@ -66,7 +66,8 @@ void RuntimeIntentCoordinator::processIntent(
         kDispatchTable[static_cast<std::size_t>(commonIntent.type)]->handle(commonIntent, ctx);
     }
 
-    drainObserveDeferred(lifetimeMgr);  // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）
+    // ★ dash2 §1.7 (Phase G CW-3c): currentEpoch は RuntimeStore::current（engine.currentPublicationEpoch()）から取得。
+    drainObserveDeferred(lifetimeMgr, engine.currentPublicationEpoch());  // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）
 
     engine.markReceiptReclaimComplete();
 
@@ -77,7 +78,8 @@ void RuntimeIntentCoordinator::processIntent(
 }
 
 // ★ FUTURE-8/QUEUE-16: Observe Intent 専用 Deferred Ring 回収（Retire drain と分離）。
-void RuntimeIntentCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept
+void RuntimeIntentCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetimeMgr,
+                                                    PublicationEpoch currentEpoch) noexcept
 {
     ObserveIntent deferred{};
     while (observeDeferredRing_.pop(deferred)) {
@@ -85,7 +87,6 @@ void RuntimeIntentCoordinator::drainObserveDeferred(DSPLifetimeManager& lifetime
         //   古い世代 / null handle で skip される場合も、enqueue 済み（reservation 済み）の
         //   Intent は pop で消費されたため fetchSub する（pop 成功数 == push 成功数の不変条件）。
         convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
-        const auto currentEpoch = currentPublicationEpoch();
         if (deferred.epoch < currentEpoch || deferred.handle.isNull())
             continue;
         lifetimeMgr.retireByHandle(deferred.handle);  // handle 保持 ── 正しい retire 対象を特定

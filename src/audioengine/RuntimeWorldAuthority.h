@@ -26,7 +26,8 @@ namespace convo::isr {
 //   enqueue→commit lifetime gap. registerPublish() populates the gap at the enqueue
 //   Producer (after releaseState, keyed on the builder-baked publication.sequenceId);
 //   ISR PublishExecutor resolves it at commit via lookup() and drops the entry via
-//   unregister() once currentWorld_ takes ownership. Registry ≠ Authority.
+//   unregister() once publishAndSwap publishes the world to RuntimeStore::current
+//   （単一 source — CW-3c で currentWorld_ 削除）。Registry ≠ Authority.
 //   Lock-free (audio-thread safe): registerPublish is Non-RT; lookup/unregister may run
 //   on the ISR/audio thread via ProcessIntent → PublishExecutor::executePublish.
 class PendingPublishRegistry {
@@ -90,19 +91,19 @@ public:
 //   INV-X4-4: RT / Audio callback から RuntimeStateOwner / unique_ptr / WriteAccess を
 //             新規取得・破棄しない（RT は観測主体・実行主体でない）
 //   INV-X4-5: X4-B 後、RuntimeWorldAuthority::RuntimeStore 以外の write-capable RuntimeStore を作らない
-//   INV-X4-6: publish transaction 完了後、currentWorld_ と RuntimeStore::current は同一
-//             PublicationIdentity（sequenceId + publicationEpoch + mappedGeneration）
-//   INV-X4-7: currentWorld_ と RuntimeStore::current を独立した authoritative source として
-//             扱う API を禁止（getCurrent() を consumeWorldHandle の置換先にしない）
-//   INV-X4-8: currentWorld_ = metadata observation alias（non-owning）/ RuntimeStore::current =
-//             physical publication source。交換可能として扱う API を禁止
-//   INV-X4-A: currentWorld_ is observation-only（RuntimeWorld 取得元として使わない）
+//   INV-X4-6: publish transaction 全体で、RuntimeStore::current の RuntimeState::publication
+//             identity（sequenceId + publicationEpoch + mappedGeneration）が整合 — bake は
+//             publishAndSwap より前に実行される（旧 currentWorld_ は CW-3c で削除）
+//   INV-X4-7: 独立した authoritative read source を複数持たない — RuntimeStore::current のみ
+//             （旧 getCurrent() 等の accessor は CW-3c で削除）
+//   INV-X4-8: RuntimeStore::current = physical publication source（旧 metadata observation alias
+//             currentWorld_ は CW-3c で削除）
+//   INV-X4-A: published-world read は RuntimeStore::current（observePublishedWorld）のみ
 //   INV-X4-B: RuntimeStore::current が唯一の物理 RuntimeWorld source
-//   INV-X4-C: RT API は currentWorld_ から RuntimeWorld の ownership/lifetime を導出しない
+//   INV-X4-C: RT API は RuntimeStore::current から RuntimeWorld の ownership/lifetime を導出しない
 //   ★ X4-B は write authority singularization（RuntimeWorldAuthority が Store を所有）。
-//     read-source singularization（currentWorld_ 廃止）は Future（二十四次レビュー §27-C）。
-//     現状は PublishExecutor が sole gateway + 一時生成 Coordinator が唯一の store-swap のため
-//     INV-X4-3 は de facto 成立（X4-B で物理所有へ一本化する）。
+//     read-source singularization は CW-1〜CW-3c で完了（currentWorld_ 削除・accessor 削除・
+//     RuntimeStore::current 単一 source）。Coordinator に published-world read API は残さない。
 class RuntimeWorldAuthority
 {
 public:
@@ -129,27 +130,9 @@ public:
     RuntimeWorldAuthority(RuntimeWorldAuthority&&) = delete;
     RuntimeWorldAuthority& operator=(RuntimeWorldAuthority&&) = delete;
 
-    // ── Authority: publication metadata (derived from currentWorld_) ──
-    [[nodiscard]] PublicationEpoch currentEpoch() const noexcept
-    {
-        return coordinator_.currentPublicationEpoch();
-    }
-
-    [[nodiscard]] PublicationSequenceId sequence() const noexcept
-    {
-        return coordinator_.currentPublicationSequenceId();
-    }
-
-    // ── Authority: world snapshot source (read) ──
-    [[nodiscard]] const void* getCurrent() const noexcept
-    {
-        return coordinator_.getCurrent();
-    }
-
-    [[nodiscard]] std::uint64_t getVersion() const noexcept
-    {
-        return coordinator_.getVersion();
-    }
+    // ★ dash2 §1.7 (Phase G CW-3c): currentEpoch/sequence/getCurrent/getVersion は production caller
+    //   ゼロ（Coordinator への delegation のみ）のため削除。published-world read は observePublishedWorld /
+    //   consumeWorldHandle（RuntimeStore::current — INV-X4-B）が単一 source。
 
     // ★ ADR-D3: gap registry for async publish (non-owning handle; owner during enqueue→commit).
     [[nodiscard]] PendingPublishRegistry& registry() noexcept { return registry_; }
@@ -175,8 +158,9 @@ public:
     [[nodiscard]] OwnerChannelType& ownerChannel() noexcept { return ownerChannel_; }
 
     // ── ★ work88 (X4-B §6.4 / X4-B-9): read API — RuntimeStore::current が唯一の物理
-    //   RuntimeWorld source（INV-X4-B）。getCurrent() は置換先にしない（INV-X4-7 —
-    //   currentWorld_ は metadata observation alias）。ReadToken は opaque トークン。
+    //   RuntimeWorld source（INV-X4-B）。published-world read は observePublishedWorld /
+    //   consumeWorldHandle（いずれも runtimeStore_.observe()）のみ（旧 getCurrent 等は
+    //   CW-3c で削除）。ReadToken は opaque トークン。
     struct ReadToken
     {
     private:
@@ -244,12 +228,16 @@ public:
             if (committed != nullptr) *committed = false;
             return nullptr;                                 // validate: metadata invalid → Rejected
         }
-        // commit metadata（ISR currentWorld_ 更新 + publication bake）— commit-before-swap（Test 7）
+        // commit metadata（publication bake + monotonicity check）— commit-before-swap（Test 7）
+        // ★ dash2 §1.7 (Phase G CW-3b): monotonicity baseline = RuntimeStore::current（単一 source）。
+        //   commit() は currentWorld_ を参照しない — prevWorld を明示的に渡す（explicit dependency）。
+        //   prevWorld == nullptr は初回 publish（hasPrevious=false）を許容。
+        const auto* prevWorld = runtimeStore_.observe();
         coordinator_.commit(PublishAuthority::Granted, metadata.boundary, newWorld, metadata.version,
-                            metadata.sequenceId, metadata.epoch, metadata.mappedGeneration);
+                            metadata.sequenceId, metadata.epoch, metadata.mappedGeneration, prevWorld);
         // ★ work88（監査軽微指摘2）: commit が Faulted（monotonicity violation 等）なら swap しない。
         //   FIFO producer により到達不能だが、commit 失敗後の物理 swap による currentWorld_
-        //   （metadata alias）と Store::current の不一致を構造的に排除する（transaction 原子性）。
+        //   公開 world（RuntimeStore::current）への物理 swap を構造的に排除する（transaction 原子性）。
         if (coordinator_.getState() == RuntimeIntentCoordinator::CoordinatorState::Faulted)
         {
             if (committed != nullptr) *committed = false;
@@ -279,7 +267,7 @@ private:
     // ★ member order（二十一次レビュー①・確定）: runtimeStore_ を writeAccess_ より先に宣言。
     //   C++ 逆順破棄により writeAccess_ → runtimeStore_ の順で破棄（WriteAccess が生きている間に
     //   Store が破棄されない）。
-    RuntimeIntentCoordinator& coordinator_;   // commit metadata（ISR currentWorld_）委譲先
+    RuntimeIntentCoordinator& coordinator_;   // commit metadata（publication bake）委譲先
     Store runtimeStore_;                       // ★ X4-B-2: Authority が物理 Store を所有
     WriteAccess writeAccess_;                  // ★ X4-B-3: Store の唯一の WriteAccess
     OwnerChannelType ownerChannel_;            // ★ B3 (Option C): owned by value here.

@@ -280,7 +280,15 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         telemetryRecorder_.recordProgress(correlationId,
             static_cast<uint64_t>(req.generation), 0,
             PublishStage::Published, nowUs);
-        return PublicationAdmission::Decision::RejectedShutdown;
+        // ★ 15-P-6: publish 失敗を genuine shutdown と区別する。
+        //   admission（evaluate）は isShutdownInProgress() をチェック済みだが、
+        //   admission と publish の間に shutdown が開始される race が理論上存在する。
+        //   publish 失敗時点で shutdown 中なら RejectedShutdown、それ以外は
+        //   RejectedPublishFailure（内部失敗）を返す。ownership はどちらでも
+        //   destroyRolledBackDSP() により回収済み（decision 分類から独立）。
+        if (engine_.isShutdownInProgress())
+            return PublicationAdmission::Decision::RejectedShutdown;
+        return PublicationAdmission::Decision::RejectedPublishFailure;
     }
 
     juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish SUCCEEDED gen="
@@ -351,6 +359,15 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Shutdown,
                 FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
+                0, nowUs);
+            return;
+        // ★ 15-P-6: publish-time 内部失敗 — shutdown telemetry に誤計上しない。
+        //   FailureStage::Execution / FailureReason::PublishFailed で記録し、
+        //   recovery suppression（shutdown 扱い）を回避する。
+        case PublicationAdmission::Decision::RejectedPublishFailure:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Execution,
+                FailureReason::PublishFailed, "submitPublishRequest:publishFailure",
                 0, nowUs);
             return;
     }

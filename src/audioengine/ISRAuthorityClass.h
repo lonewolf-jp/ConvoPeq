@@ -22,11 +22,15 @@ enum class AuthorityClass : std::uint8_t {
 // - QueuePressure: accepted via fallback path under pressure.
 // - QueueFull: accepted at/over high fallback depth (action required by coordinator).
 // - Shutdown: enqueue request rejected because shutdown phase disallows new work.
+// - TerminalReclaim: ptr transferred to TerminalReclaimAuthority (all bounded
+//   stores + EmergencyQ full; either epoch-safe destroyed in-place, or retained
+//   for retry when epoch becomes safe). Caller retains NO ownership.
 enum class RetireEnqueueResult : std::uint8_t {
     Success = 0,
     QueuePressure,
     QueueFull,
-    Shutdown
+    Shutdown,
+    TerminalReclaim
 };
 
 // ★ Phase5: Retire 優先度 enum

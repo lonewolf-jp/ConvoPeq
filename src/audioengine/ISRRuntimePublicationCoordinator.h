@@ -25,6 +25,10 @@
 //   ただし .h での include は循環依存防止のため、global 前方宣言＋.cpp で include する。
 class DSPLifetimeManager;
 class AudioEngine;
+// ★ dash2 §1.7 (Phase G CW-3b): commit() の monotonicity baseline 型（確立済み semantic type）。
+//   RuntimeState は global scope で定義（AudioEngine.h:140 — convo::isr::SealedObject 継承）。
+//   前方宣言のみ（循環 include 回避）。
+struct RuntimeState;
 
 namespace convo::isr {
 
@@ -78,9 +82,10 @@ enum class RuntimeBoundary : uint8_t {
 //   INV-ISR-04: ShutdownQuiescent reclaim は readerRegistrationClosed なしでは絶対に許可しない
 //     （§6.3 X3 と整合）
 //   INV-ISR-05: completion watermark を publication committed と同一視しない（§6.2 X2 と整合）
-//   INV-ISR-06: currentWorld_ を ownership source として扱わない（§6.4-X4 INV-X4-8 と整合）
-//   INV-ISR-07: currentWorld_ と RuntimeStore::current が存在する間は、両者の identity
-//     consistency を検証可能にする（§6.4-X4 Test 9 / INV-X4-6 と整合）
+//   INV-ISR-06: 退役・ownership の identity source は publish() の oldWorld / Lifetime であり、
+//     RuntimeStore::current は published-world read の単一 source（旧 currentWorld_ は CW-3c で削除）
+//   INV-ISR-07: RuntimeStore::current の RuntimeState::publication identity が publish transaction
+//     全体で整合（bake は publishAndSwap 前に実行 — 単一 source・INV-X4-6 更新版）
 class RuntimeIntentCoordinator {
 public:
     enum class CoordinatorState : uint8_t {
@@ -104,7 +109,8 @@ public:
                 std::uint64_t version,
                 PublicationSequenceId sequenceId,
                 PublicationEpoch epoch,
-                std::uint64_t mappedGeneration);
+                std::uint64_t mappedGeneration,
+                const RuntimeState* prevWorld);
     void retire(RetireAuthority, RuntimeBoundary boundary, const void* oldWorld);
     [[nodiscard]] RetireEnqueueResult enqueueRetire(RetireAuthority auth,
                                                       ISRRetireRouter& router,
@@ -112,12 +118,8 @@ public:
                                                       void (*deleter)(void*),
                                                       std::uint64_t epoch) noexcept;
     [[nodiscard]] std::uint64_t retireAuthorityCount() const noexcept;
-    const void* getCurrent() const noexcept;
-    std::uint64_t getVersion() const noexcept;
-    // ★ FUTURE-4: latest publicationEpoch derived from currentWorld_ (RuntimeState::publication.epoch)
-    [[nodiscard]] PublicationEpoch currentPublicationEpoch() const noexcept;
-    // ★ A-1: sequence derived from currentWorld_ (RuntimeState::publication.sequenceId) — read-only Authority access.
-    [[nodiscard]] PublicationSequenceId currentPublicationSequenceId() const noexcept;
+    // ★ dash2 §1.7 (Phase G CW-3c): getCurrent/getVersion/currentPublicationEpoch/currentPublicationSequenceId
+    //   は production caller ゼロのため削除。published-world read は RuntimeStore::current が単一 source。
 
     // ── dash2 §1.4 (REPAIR_PLAN2-dash2): semantic event accounting ──
     //   外部 setter（setRetireBacklogCount 等）の廃止に伴い、Coordinator は自身のカウンタを
@@ -199,7 +201,7 @@ public:
     /// Coordinator は Intent Queue に追加し、非同期に処理する。
     /// OBSERVE-1〜8 に従い、Timer はこのメソッドのみを呼び出す。
     /// handle: 観測対象の DSPHandle（processIntent が retire する DSP を識別するために使用）
-    void submitObserve(const DSPHandle& handle) noexcept;
+    void submitObserve(const DSPHandle& handle, PublicationEpoch epoch) noexcept;
 
     /// Quarantine Intent: 指定された DSPHandle を quarantine する要求を発行する。
     /// QSVC-2: Coordinator は QuarantineService 経由で quarantine を実行する。
@@ -238,8 +240,13 @@ public:
      /// Coordinator は Request enqueue のみ。Admission 判定は行わない（純粋発行関数）。
      /// ★ FUTURE-3 (work88): buildSource は build 入力の metadata/fingerprint を値コピーで運ぶ
      ///   （Recovery semantic = quarantined 除外した現在の authoritative configuration の再構築）。
-     void submitRecoveryRequest(const DSPHandle& quarantinedHandle,
-                                const convo::RuntimeBuildSnapshot& buildSource) noexcept;
+     /// ★ dash2 §1.9 (Phase E): 戻り値 — この呼び出しが recovery obligation を生成・維持した場合 true。
+     ///   transport（push 成功）と durable（queue full → recoveryAdmissionPending_）の両方が true
+     ///   （INV-X1-2: queue full ≠ Recovery lost）。shutdown gate による discard は false（wake 不要）。
+     ///   submitRecoveryIntent（AudioEngine）は戻り値に基づいて RebuildThread を起床する（§1.9）。
+     bool submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+                                const convo::RuntimeBuildSnapshot& buildSource,
+                                PublicationEpoch epoch) noexcept;
 
      /// Recovery Intent を Builder Loop へ引き渡す (1件 pop, transport-only)。
      /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。
@@ -473,7 +480,9 @@ private:
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     // ★ FUTURE-8/QUEUE-16: Observe Deferred Ring 回御（Retire drain と分離）。
-    void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr) noexcept;
+    // ★ dash2 §1.7 (Phase G CW-3c): currentEpoch は caller（processIntent → engine.currentPublicationEpoch()）が
+    //   渡す（Coordinator は currentWorld_ を参照しない — R6/R7 と同一方針）。
+    void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr, PublicationEpoch currentEpoch) noexcept;
 
     // ── dash2 §1.4: retire backlog 変更時の pressure slope 検出 + 状態遷移 ──
     //   setRetireBacklogCount（TEST-ONLY）と onRetireAccepted（production semantic event）が
@@ -520,10 +529,9 @@ private:
         InvalidPayloadTier
     };
 
-    // ★ FUTURE-4: persistentState_ removed — metadata (epoch/sequenceId/mappedRuntimeGeneration)
-    //   is derived from currentWorld_ (RuntimeState::publication) at read time.
+    // ★ dash2 §1.7 (Phase G CW-3c): currentWorld_（metadata observation alias）を削除。
+    //   published-world metadata は RuntimeStore::current（RuntimeWorldAuthority）が単一 source。
 
-    std::atomic<const void*> currentWorld_;
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
@@ -617,6 +625,14 @@ private:
     LockFreeRingBuffer<ObserveIntent, kObserveDeferredRingCapacity> observeDeferredRing_;
 
      // ── ★ FUTURE-3: Recovery Intent Queue (transport-only SPSC) ──
+    //   ★ dash2 §1.1 (Phase F 検証, 2026-08-15): 単一 Producer 不変条件を実コードで確認済み。
+    //     Producer = CoordinatorLoop のみ（submitRecoveryRequest ← submitRecoveryIntent ←
+    //     QuarantineIntentHandler / RecoveryIntentHandler — 両 handler とも processIntent 経由で
+    //     CoordinatorLoop スレッド上で実行。RecoveryIntentHandler は現状 dead code）。
+    //     Consumer = Builder Loop のみ（popRecoveryRequest / takePendingRecoveryAdmission）。
+    //   ⇒ MPSC 化は現時点で不要（LockFreeRingBuffer は SPSC 前提 — 複数 Producer 不可）。
+    //   ［将来 Timer 等から直接 submitRecoveryRequest を呼ぶ経路を追加する場合のみ MPSC 化
+    //     （MpscBoundedRing 置換 + pendingRecoveryAdmission_ の mutex 保護 — plan §1.1.1）］
     static constexpr size_t kRecoveryIntentQueueCapacity = 256;
     LockFreeRingBuffer<RecoveryIntent, kRecoveryIntentQueueCapacity> recoveryIntentQueue_;
     std::atomic<uint64_t> nextRecoveryIntentId_{0};

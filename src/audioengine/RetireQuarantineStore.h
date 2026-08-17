@@ -28,6 +28,7 @@
 
 #include "../DeferredDeletionQueue.h"  // DeletionEntryType
 #include "core/TimeUtils.h"            // getCurrentTimeUs
+#include "ISRWorldRetirementReference.h"   // ★ T1 (D98): reference observer（measurement only・D97）
 
 namespace convo {
 namespace isr {
@@ -103,6 +104,7 @@ public:
         //   deleter が再entrant（別の quarantine/retire を呼ぶ）でもデッドロックしない。
         void* pendingPtrs[kMaxQuarantinedEntries]{};
         void (*pendingDeleters[kMaxQuarantinedEntries])(void*) = {};
+        DeletionEntryType pendingTypes[kMaxQuarantinedEntries]{};  // ★ T1: world 破棄観測用（quarantine transfer 後の type 保持・D86 チェック 2）
         std::size_t pendingCount = 0;
         {
             std::lock_guard<std::mutex> lock(mtx_);
@@ -115,6 +117,7 @@ public:
                     // epoch 安全到達後のみ deleter 対象として抽出（EBR 安全削除）
                     pendingPtrs[pendingCount] = e.ptr;
                     pendingDeleters[pendingCount] = e.deleter;
+                    pendingTypes[pendingCount] = e.type;   // ★ T1: type を保持して deleter 実行後に判定
                     ++pendingCount;
                     e = QuarantinedEntry{};
                 } else {
@@ -126,8 +129,19 @@ public:
             size_ = w;
         }
         // unlock 後に deleter 実行（reentrancy / deadlock 回避）
-        for (std::size_t i = 0; i < pendingCount; ++i)
+        for (std::size_t i = 0; i < pendingCount; ++i) {
+            const auto entryType = pendingTypes[i];   // deleter 実行後に判定（D86.1 の順序維持）
             pendingDeleters[i](pendingPtrs[i]);
+            // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（quarantine drain）。
+            //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
+            if (entryType == DeletionEntryType::World)
+            {
+                convo::fetchAddAtomic(worldReclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+                // ★ T1 (D98): reference observer に release event を通知（event-driven・D95 固定点 4）。
+                if (referenceObserver_ != nullptr)
+                    referenceObserver_->onRelease();
+            }
+        }
     }
 
     // Shutdown 専用: 全強制解放（Audio Thread 停止後 — destroyForShutdown と同契約）
@@ -135,6 +149,7 @@ public:
     {
         void* pendingPtrs[kMaxQuarantinedEntries]{};
         void (*pendingDeleters[kMaxQuarantinedEntries])(void*) = {};
+        DeletionEntryType pendingTypes[kMaxQuarantinedEntries]{};  // ★ T1: world 破棄観測用
         std::size_t pendingCount = 0;
         {
             std::lock_guard<std::mutex> lock(mtx_);
@@ -143,14 +158,25 @@ public:
                 if (e.ptr != nullptr && e.deleter != nullptr) {
                     pendingPtrs[pendingCount] = e.ptr;
                     pendingDeleters[pendingCount] = e.deleter;
+                    pendingTypes[pendingCount] = e.type;   // ★ T1: shutdown drainAll でも type 保持
                     ++pendingCount;
                 }
                 e = QuarantinedEntry{};
             }
             size_ = 0;
         }
-        for (std::size_t i = 0; i < pendingCount; ++i)
+        for (std::size_t i = 0; i < pendingCount; ++i) {
+            const auto entryType = pendingTypes[i];
             pendingDeleters[i](pendingPtrs[i]);
+            // ★ T1 (D86): shutdown drainAll でも type==World の terminal deleter 実行後 → world 破棄観測。
+            if (entryType == DeletionEntryType::World)
+            {
+                convo::fetchAddAtomic(worldReclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+                // ★ T1 (D98): reference observer に release event を通知（shutdown drain 含む・D95 固定点 3）。
+                if (referenceObserver_ != nullptr)
+                    referenceObserver_->onRelease();
+            }
+        }
     }
 
     // 滞留件数（backpressure テレメトリ / high watermark 監視用）
@@ -167,6 +193,19 @@ public:
         return overflowCount_;
     }
 
+    // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・quarantine 経路）。
+    //   release observation（案 B）の一次情報源。sampler（Non-RT）が読み取る（D83.2 責務分離）。
+    [[nodiscard]] std::uint64_t worldReclaimCount() const noexcept
+    {
+        return convo::consumeAtomic(worldReclaimCount_, std::memory_order_acquire);
+    }
+
+    // ★ T1 (D98): reference observer 設定（non-owning・一方向依存・AudioEngine を逆参照しない）。
+    void setReferenceObserver(WorldRetirementReferenceObserver* observer) noexcept
+    {
+        referenceObserver_ = observer;
+    }
+
 private:
     mutable std::mutex mtx_;
     // ★ 三次レビュー: std::vector は noexec 保証下で allocation を引き起こすため
@@ -174,6 +213,8 @@ private:
     std::array<QuarantinedEntry, kMaxQuarantinedEntries> entries_{};
     std::size_t size_ = 0;
     std::uint64_t overflowCount_ = 0;  // store full で quarantine() が拒否した回数（診断用）
+    std::atomic<std::uint64_t> worldReclaimCount_{0};  // ★ T1: world 破棄観測カウンタ（telemetry のみ）
+    WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // ★ T1 (D98): non-owning（measurement only）
 };
 
 } // namespace isr

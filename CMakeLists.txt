@@ -361,6 +361,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME MpscBoundedRingTests
         COMMAND MpscBoundedRingTests)
 
+    # ★ dash2 §1.6.1 (Phase H): SequenceArithmetic 単体テスト（modular sequence arithmetic）
+    #   isBefore/isAfter/isCompleted の正常系・out-of-order・duplicate・wraparound・antipode
+    add_executable(SequenceArithmeticTests
+        src/tests/SequenceArithmeticTests.cpp
+    )
+    add_test(NAME SequenceArithmeticTests
+        COMMAND SequenceArithmeticTests)
+
     # ★ work88 (FUTURE-6 監査): DSPHandleTable 単体テスト（open addressing + tombstone）
     #   erase 後のクラスタ断絶リグレッション防止（find が後続エントリを探し続けること）
     add_executable(DSPHandleTableTests
@@ -589,6 +597,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(MpscBoundedRingTests PRIVATE cxx_std_20)
     target_compile_options(MpscBoundedRingTests PRIVATE /EHsc /utf-8)
     target_include_directories(MpscBoundedRingTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_compile_features(SequenceArithmeticTests PRIVATE cxx_std_20)
+    target_compile_options(SequenceArithmeticTests PRIVATE /EHsc /utf-8)
+    target_include_directories(SequenceArithmeticTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
@@ -1612,6 +1628,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
+        src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)

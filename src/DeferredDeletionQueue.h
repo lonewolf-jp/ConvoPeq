@@ -16,9 +16,11 @@
 #include <type_traits>
 
 #include "audioengine/AtomicAccess.h"
+#include "audioengine/ISRWorldRetirementReference.h"   // ★ T1 (D98): reference observer（measurement only・D97）
 
 enum class DeletionEntryType : uint8_t {
-    Generic = 0
+    Generic = 0,
+    World   = 1   // ★ T1 (D86): world retirement の識別 metadata（telemetry 専用・lifetime authority ではない）
 };
 
 // DeletionEntry: 削除対象のエントリ
@@ -139,7 +141,18 @@ public:
                                                  std::memory_order_release,  // 成功時 release: 次回 dequeue/drainAllUnsafe の acquire と HB しスロット解放を公知
                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して再試行
                     if (entry.deleter && entry.ptr) {
+                        const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
                         entry.deleter(entry.ptr);
+                        // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（release observation・案 B）。
+                        //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
+                        if (entryType == DeletionEntryType::World)
+                        {
+                            convo::fetchAddAtomic(worldReclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+                            // ★ T1 (D98): reference observer に release event を通知（event-driven・D95 固定点 4・
+                            //   terminalization 成功後・例外/所有権変更/reclaim 再試行なし・D97）。
+                            if (referenceObserver_ != nullptr)
+                                referenceObserver_->onRelease();
+                        }
                     }
                     ++reclaimed;  // ★ A-1: 実際に解放した件数をカウント
                     entry.ptr = nullptr;
@@ -180,7 +193,16 @@ public:
                                                  std::memory_order_acq_rel,  // 成功時 acq_rel: acquire で enqueue acq_rel と HB; release で次回ドレインの acquire と HB
                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して retry
                     if (entry.deleter && entry.ptr) {
+                        const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
                         entry.deleter(entry.ptr);
+                        // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（shutdown drain 含む）。
+                        if (entryType == DeletionEntryType::World)
+                        {
+                            convo::fetchAddAtomic(worldReclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+                            // ★ T1 (D98): reference observer に release event を通知（shutdown drain 含む・D95 固定点 3）。
+                            if (referenceObserver_ != nullptr)
+                                referenceObserver_->onRelease();
+                        }
                     }
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
@@ -219,6 +241,18 @@ public:
         convo::publishAtomic(maxRetireAgeUs_, static_cast<uint64_t>(0), std::memory_order_release);
     }
 
+    // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・累積・monotonic）。
+    //   release observation（案 B）の一次情報源。sampler（Non-RT）が読み取る（D83.2 責務分離）。
+    [[nodiscard]] uint64_t worldReclaimCount() const noexcept {
+        return convo::consumeAtomic(worldReclaimCount_, std::memory_order_acquire);
+    }
+
+    // ★ T1 (D98): reference observer 設定（non-owning・一方向依存・AudioEngine を逆参照しない）。
+    void setReferenceObserver(convo::isr::WorldRetirementReferenceObserver* observer) noexcept
+    {
+        referenceObserver_ = observer;
+    }
+
 private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
@@ -233,5 +267,7 @@ private:
     alignas(64) std::atomic<uint32_t> enqueuePos{0};
     alignas(64) std::atomic<uint32_t> dequeuePos{0};
     alignas(64) std::atomic<uint64_t> maxRetireAgeUs_{0};
+    alignas(64) std::atomic<uint64_t> worldReclaimCount_{0};  // ★ T1: world 破棄観測カウンタ（telemetry のみ）
+    convo::isr::WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // ★ T1 (D98): non-owning（measurement only）
 };
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容

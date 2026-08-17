@@ -142,6 +142,15 @@ bool AudioEngine::isFullyDrained() noexcept
     const auto retireQuarantineResident = (m_retireRouter != nullptr)
         ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
 
+    // ★ 15-P-5: TerminalReclaimAuthority 滞留も直接判定する（P-4 追加の最終退避層）。
+    //   quarantineResidentCount() は Q + EmergencyQ のみで Terminal を含まないため、
+    //   ここを追加しないと「Terminal に World が残っているのに isFullyDrained()==true」と
+    //   誤判定し、waitForDrain が premature に成功を返す（shutdown 中の World リーク経路）。
+    //   Terminal は epoch-gated drain（drainTerminalReclaim）と強制 drain（drainAll）の
+    //   両方で空になるため、この判定は shutdown 完了の正しい必要条件である。
+    const auto terminalReclaimResident = (m_retireRouter != nullptr)
+        ? static_cast<std::uint64_t>(m_retireRouter->terminalReclaimResidentCount()) : 0u;
+
     // ★ work88 (X3 §6.3 / INV-X3-5): pendingReclaimHandles_ が reclaim pending の source of truth。
     //   reclaimInFlightCount_（+1/0 リセットの近似 counter）だけでは複数 pending reclaim を正確に
     //   数えられない（A pending + B pending で A 成功 → count=0 なのに B が残る状態を作り得る）。
@@ -160,6 +169,7 @@ bool AudioEngine::isFullyDrained() noexcept
         && ringResident == 0
         && dspQuarantineResident == 0
         && retireQuarantineResident == 0
+        && terminalReclaimResident == 0
         && runtimePublicationBridge_.isFullyDrained();
 }
 

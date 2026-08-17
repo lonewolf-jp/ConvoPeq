@@ -18,6 +18,15 @@ enum class PublishStageResult : uint8_t {
     Failed
 };
 
+// ★ T1 (D86): ReservationExhausted — reservation capacity 枯渇を示すステータス（D70/D71）。
+//   ★ Phase I-T1: 型準備のみ（実際の生成処理なし・T2 authority で実装）。
+//   T1 では ReservationExhausted を生成しない（D86 非交渉条件 7）。
+enum class ReservationExhausted : uint8_t {
+    None = 0,   // 枯渇なし（既定）
+    Capacity,   // 容量枯渇（held storage が満杯）
+    Stalled     // 滞留超過（retirement が長時間停滞）
+};
+
 struct RuntimeBuildSnapshot;
 
 template <typename World, typename Handle, typename Bridge>
@@ -86,7 +95,7 @@ public:
         shutdownClearRequested_ = false;
 
         auto* world = writeAccess_.publishAndSwap(nullptr);
-        bridge_.retireRuntimePublishWorldNonRt(world, true);
+        bridge_.retirePublishedRuntimeWorldNonRt(world, true);
     }
 
     void requestShutdownClearNonRt() noexcept
@@ -111,7 +120,7 @@ public:
             if (!bridge_.validatePublicationNonRt(*worldOwner))
             {
                 auto* rejectedWorld = const_cast<World*>(worldOwner.release());
-                bridge_.retireRuntimePublishWorldNonRt(rejectedWorld, false);
+                bridge_.retireRejectedRuntimeWorldNonRt(rejectedWorld);
                 return PublishStageResult::Rejected;
             }
         }
@@ -135,7 +144,7 @@ public:
             bridge_.willRetireRuntimeNonRt(oldWorld);
         }
 
-        bridge_.retireRuntimePublishWorldNonRt(oldWorld, false);
+        bridge_.retirePublishedRuntimeWorldNonRt(oldWorld, false);
 
         return PublishStageResult::Success;
     }

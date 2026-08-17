@@ -64,7 +64,7 @@ void AudioEngine::initialize()
             //   X4-B 後は validate 失敗（Rejected 相当）でこの分岐に入る — Debug のみ検出。
             jassertfalse;
             auto* rejectedWorld = const_cast<RuntimePublishWorld*>(bootstrapWorld.release());
-            bootstrapBridge.retireRuntimePublishWorldNonRt(rejectedWorld, false);
+            bootstrapBridge.retireRejectedRuntimeWorldNonRt(rejectedWorld);
         }
         else
         {
@@ -85,7 +85,7 @@ void AudioEngine::initialize()
             {
                 bootstrapBridge.didPublishRuntimeNonRt(*bootstrapWorldPtr);
                 bootstrapBridge.willRetireRuntimeNonRt(oldWorld);
-                bootstrapBridge.retireRuntimePublishWorldNonRt(oldWorld, false);
+                bootstrapBridge.retirePublishedRuntimeWorldNonRt(oldWorld, false);
             }
         }
     }

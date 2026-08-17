@@ -67,6 +67,10 @@ public:
     [[nodiscard]] virtual uint64_t reclaimAttemptCount() const noexcept { return 0; }
     [[nodiscard]] virtual uint64_t reclaimSuccessCount() const noexcept { return 0; }
 
+    // ★ T1 (D98): reference observer 設定（デフォルト no-op・EpochDomain がオーバーライド・non-owning）。
+    //   void* で受け取る（core → audioengine の依存を回避）。
+    virtual void setReferenceObserver(void* /*observer*/) noexcept {}
+
     // ── ★ Phase 3: Reader Quarantine API ──
 
     // ★ stuck Reader を quarantined にマーク（killしない）

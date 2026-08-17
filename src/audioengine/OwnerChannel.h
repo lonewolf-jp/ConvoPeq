@@ -107,6 +107,33 @@ public:
         return OwnerPtr(raw, typename OwnerPtr::deleter_type{});
     }
 
+    // ★ 15-P-CROSS-IMPLEMENTATION-1: GAP-CROSS-1 fix — OwnerChannel terminal drain.
+    //   Drain all residual owners (Non-RT phase, producer/consumer quiescent).
+    //   Ownership is *relinquished* (not released) — each raw Owner* is handed to `reclaim`
+    //   which MUST transfer ownership to an existing retire authority. It must NOT delete.
+    //   Caller contract: enqueue(producer) and take(consumer) MUST be quiescent — i.e.
+    //   shutdown has joined the producer/consumer before this is called.
+    //   Uses the same consume->publish(nullptr,release) single-transfer pattern as take()
+    //   (so re-drain is a no-op: slots_ seen nullptr after the first drain).
+    //   s.key is NOT reset — key-matching is irrelevant for a full scan; slot emptiness
+    //   is determined by owner==nullptr (matches take()'s empty-slot check).
+    template <class Fn>
+    std::size_t drainAllNonRt(Fn&& reclaim) noexcept
+    {
+        std::size_t reclaimed = 0;
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            Slot& s = slots_[i];
+            Owner* const raw = consumeAtomic(s.owner, std::memory_order_acquire);
+            if (raw != nullptr) {
+                publishAtomic(s.owner, static_cast<Owner*>(nullptr),
+                              std::memory_order_release);   // single-transfer (same as take)
+                reclaim(raw);
+                ++reclaimed;
+            }
+        }
+        return reclaimed;
+    }
+
     // B2 diagnostic only (not on the publish hot path): occupied-slot count.
     std::size_t size() const noexcept {
         std::size_t n = 0;

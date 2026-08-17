@@ -88,11 +88,12 @@ namespace {
                        1,
                        1,
                        1,
-                       1);
+                       1,
+                       nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != 1)   // ★ CW-3b: bake 検証（current は非追跡）
         return false;
-    if (coordinator.getVersion() != 1)
+    if (world1->publication.mappedRuntimeGeneration != 1)
         return false;
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
@@ -103,10 +104,11 @@ namespace {
                        2,
                        2,
                        2,
-                       2);
-    if (coordinator.getCurrent() != world2.get())
+                       2,
+                       world1.get());   // ★ CW-3b: 直前の committed world を baseline に
+    if (world2->publication.sequenceId != 2)
         return false;
-    if (coordinator.getVersion() != 2)
+    if (world2->publication.mappedRuntimeGeneration != 2)
         return false;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -115,14 +117,11 @@ namespace {
                        1,
                        1,
                        1,
-                       1);
+                       1,
+                       world2.get());   // ★ CW-3b: 同一 seq(1) < baseline(2) → Faulted
 
-    if (coordinator.getCurrent() != world2.get())
-        return false;
-    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
-        return false;
-
-    return true;
+    // ★ CW-3b: current は非追跡のため reject 後の current 保持チェックは廃止（Faulted のみ検証）
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
 [[nodiscard]] bool testCoordinatorRejectEpochRollbackContract()
@@ -139,9 +138,10 @@ namespace {
                        1,
                        1,
                        5,
-                       10);
+                       10,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != 1)   // ★ CW-3b: bake 検証
         return false;
 
     // sequence は増加しても epoch rollback は fail-closed
@@ -151,11 +151,10 @@ namespace {
                        2,
                        2,
                        4,
-                       11);
+                       11,
+                       world1.get());   // ★ CW-3b: baseline = world1（epoch 4 < 5 → Faulted）
 
-    if (coordinator.getCurrent() != world1.get())
-        return false;
-
+    // ★ CW-3b: current 非追跡のため reject 後の current 保持チェックは廃止
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
@@ -173,9 +172,10 @@ namespace {
                        1,
                        10,
                        10,
-                       100);
+                       100,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != 10)   // ★ CW-3b: bake 検証
         return false;
 
     // epoch advance 時の mapped generation rollback は fail-closed
@@ -185,11 +185,10 @@ namespace {
                        2,
                        11,
                        11,
-                       99);
+                       99,
+                       world1.get());   // ★ CW-3b: baseline = world1（gen 99 < 100 → Faulted）
 
-    if (coordinator.getCurrent() != world1.get())
-        return false;
-
+    // ★ CW-3b: current 非追跡のため reject 後の current 保持チェックは廃止
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
@@ -207,9 +206,10 @@ namespace {
                        1,
                        100,
                        100,
-                       1000);
+                       1000,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != 100)   // ★ CW-3b: bake 検証
         return false;
 
     // sequence が進んでも epoch reuse は strict monotonic 契約違反
@@ -219,11 +219,10 @@ namespace {
                        2,
                        101,
                        100,
-                       1001);
+                       1001,
+                       world1.get());   // ★ CW-3b: baseline = world1（epoch 100 不変 → Faulted）
 
-    if (coordinator.getCurrent() != world1.get())
-        return false;
-
+    // ★ CW-3b: current 非追跡のため reject 後の current 保持チェックは廃止
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
@@ -241,9 +240,10 @@ namespace {
                        1,
                        200,
                        200,
-                       5000);
+                       5000,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != 200)   // ★ CW-3b: bake 検証
         return false;
 
     // epoch が進んでも mapped generation reuse は strict monotonic 契約違反
@@ -253,11 +253,10 @@ namespace {
                        2,
                        201,
                        201,
-                       5000);
+                       5000,
+                       world1.get());   // ★ CW-3b: baseline = world1（gen 5000 不変 → Faulted）
 
-    if (coordinator.getCurrent() != world1.get())
-        return false;
-
+    // ★ CW-3b: current 非追跡のため reject 後の current 保持チェックは廃止
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
@@ -278,9 +277,10 @@ namespace {
                        maxValue - 1,
                        maxValue - 1,
                        maxValue - 1,
-                       maxValue - 1);
+                       maxValue - 1,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != maxValue - 1)   // ★ CW-3b: bake 検証
         return false;
 
     coordinator.commit(convo::isr::PublishAuthority::Granted,
@@ -289,9 +289,10 @@ namespace {
                        maxValue,
                        maxValue,
                        maxValue,
-                       maxValue);
+                       maxValue,
+                       world1.get());   // ★ CW-3b: baseline = world1
 
-    if (coordinator.getCurrent() != world2.get())
+    if (world2->publication.sequenceId != maxValue)
         return false;
 
     // wraparound（max -> 0）は strict monotonic 契約違反
@@ -301,11 +302,10 @@ namespace {
                        0,
                        0,
                        0,
-                       0);
+                       0,
+                       world2.get());   // ★ CW-3b: baseline = world2（0 < max → Faulted）
 
-    if (coordinator.getCurrent() != world2.get())
-        return false;
-
+    // ★ CW-3b: current 非追跡のため reject 後の current 保持チェックは廃止
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
 
@@ -320,7 +320,8 @@ namespace {
                        1,
                        1,
                        1,
-                       1);
+                       1,
+                       nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
     coordinator.setRetireBacklogCount(0);
     coordinator.setPublicationBacklogCount(0);
@@ -354,7 +355,8 @@ namespace {
                        1,
                        1,
                        1,
-                       1);
+                       1,
+                       nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
     coordinator.setRetireBacklogCount(1); // drained 条件を破る
     coordinator.setPublicationBacklogCount(0);
@@ -385,7 +387,8 @@ namespace {
                        1,
                        1,
                        1,
-                       1);
+                       1,
+                       nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
     // slope > threshold で Pressure へ遷移
     coordinator.setRetireBacklogCount(9);
@@ -423,7 +426,8 @@ namespace {
                        1,
                        1,
                        1,
-                       1);
+                       1,
+                       nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
     coordinator.setRetireBacklogCount(0);
     coordinator.setPublicationBacklogCount(0);
@@ -460,7 +464,8 @@ namespace {
                        1,
                        100,
                        100,
-                       100);
+                       100,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
@@ -472,11 +477,39 @@ namespace {
                        2,
                        100,
                        101,
-                       100);
+                       100,
+                       world1.get());   // ★ CW-3b: baseline = world1（seq 100 不変 → Faulted）
 
-    // world1 が維持され、Faulted になるべき
-    if (coordinator.getCurrent() != world1.get())
+    // ★ CW-3b: current 非追跡のため reject 後の current 保持チェックは廃止（Faulted のみ検証）
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
+}
+
+// ★ dash2 §1.7 (Phase G CW-3 調査, 2026-08-15): publish フローの二重 commit 検証。
+//   ［CW-3a で onRuntimePublishedNonRt の冗長 commit #2 を除去済み］
+//   ［CW-3b: monotonicity baseline は明示的な prevWorld。同一 world を baseline に渡すと
+//     strict monotonic（seq/epoch/gen 全て増加）違反 → Faulted］
+[[nodiscard]] bool testCoordinatorDoubleCommitSameWorldFaults()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    auto world1 = RuntimeState::createForTest();
+
+    // commit #1: publish() 相当（初回 commit — prevWorld = nullptr）
+    coordinator.commit(convo::isr::PublishAuthority::Granted,
+                       convo::isr::RuntimeBoundary::NonRTWorld,
+                       world1.get(),
+                       1, 1, 1, 1,
+                       nullptr);
+    if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready)
         return false;
+
+    // commit #2: 同一 world を baseline として再 commit → monotonicity 違反（1 > 1 = false）→ Faulted
+    coordinator.commit(convo::isr::PublishAuthority::Granted,
+                       convo::isr::RuntimeBoundary::NonRTWorld,
+                       world1.get(),
+                       1, 1, 1, 1,
+                       world1.get());
 
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
 }
@@ -498,30 +531,31 @@ namespace {
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
                        world1.get(),
-                       1, 1, 1, 1);
+                       1, 1, 1, 1,
+                       nullptr);   // ★ CW-3b: 初回 commit
 
-    if (coordinator.getCurrent() != world1.get())
+    if (world1->publication.sequenceId != 1)   // ★ CW-3b: bake 検証
         return false;
-    if (coordinator.getVersion() != 1)
+    if (world1->publication.mappedRuntimeGeneration != 1)
         return false;
 
     // 不正な commit（epoch rollback）で reject されるはず
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
                        world2.get(),
-                       2, 2, 0, 2);
+                       2, 2, 0, 2,
+                       world1.get());   // ★ CW-3b: baseline = world1（epoch 0 < 1 → Faulted）
 
     // state は Faulted に遷移する（fail-closed）: これは意図された動作
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
 
-    // currentWorld が reject 前の値（world1）を維持している
-    if (coordinator.getCurrent() != world1.get())
-        return false;
-
-    // version が reject 前の値（1）を維持している
-    if (coordinator.getVersion() != 1)
-        return false;
+    // ★ CW-3b: current 非追跡のため reject 後の current/version 保持チェックは廃止。
+    //   代わりに「reject された candidate は bake されない」ことを検証（fail-closed）。
+    if (world2->publication.sequenceId != 0)
+        return false;                    // world2 は bake されていない（default のまま）
+    if (world1->publication.mappedRuntimeGeneration != 1)
+        return false;                    // 前回有効な bake は維持
 
     return true;
 }
@@ -535,12 +569,13 @@ namespace {
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
-                       world.get(), 1, 1, 10, 100);
-    if (coordinator.getCurrent() != world.get())
+                       world.get(), 1, 1, 10, 100,
+                       nullptr);   // ★ CW-3b: 初回 commit
+    if (world->publication.sequenceId != 1)   // ★ CW-3b: bake 検証
         return false;
-    if (coordinator.getVersion() != 100)
+    if (world->publication.mappedRuntimeGeneration != 100)
         return false;
-    if (coordinator.currentPublicationEpoch() != 10)
+    if (world->publication.epoch != 10)
         return false;
     return true;
 }
@@ -553,17 +588,17 @@ namespace {
     auto world2 = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
-                       world1.get(), 1, 1, 10, 100);
+                       world1.get(), 1, 1, 10, 100,
+                       nullptr);   // ★ CW-3b: 初回 commit
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
-                       world2.get(), 2, 2, 4, 11);
+                       world2.get(), 2, 2, 4, 11,
+                       world1.get());   // ★ CW-3b: baseline = world1（epoch 4 < 10 → Faulted）
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
         return false;
-    if (coordinator.getCurrent() != world1.get())
-        return false;
-    if (coordinator.getVersion() != 100)
-        return false;
-    if (coordinator.currentPublicationEpoch() != 10)
+    // ★ CW-3b: current 非追跡のため reject 後の current/version/epoch 保持チェックは廃止。
+    //   代わりに「reject された candidate は bake されない」ことを検証（fail-closed）。
+    if (world2->publication.sequenceId != 0)
         return false;
     return true;
 }
@@ -576,15 +611,17 @@ namespace {
     auto w2 = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
-                       w1.get(), 1, 1, 1, 1);
+                       w1.get(), 1, 1, 1, 1,
+                       nullptr);   // ★ CW-3b: 初回 commit
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
-                       w2.get(), 2, 2, 2, 2);
-    if (coordinator.getCurrent() != w2.get())
+                       w2.get(), 2, 2, 2, 2,
+                       w1.get());   // ★ CW-3b: baseline = w1
+    if (w2->publication.sequenceId != 2)   // ★ CW-3b: bake 検証
         return false;
-    if (coordinator.getVersion() != 2)
+    if (w2->publication.mappedRuntimeGeneration != 2)
         return false;
-    if (coordinator.currentPublicationEpoch() != 2)
+    if (w2->publication.epoch != 2)
         return false;
     return true;
 }
@@ -597,10 +634,11 @@ namespace {
     auto world = RuntimeState::createForTest();
     coordinator.commit(convo::isr::PublishAuthority::Granted,
                        convo::isr::RuntimeBoundary::NonRTWorld,
-                       world.get(), 1, 1, 7, 700);
-    if (coordinator.getVersion() != 700)
+                       world.get(), 1, 1, 7, 700,
+                       nullptr);   // ★ CW-3b: 初回 commit
+    if (world->publication.mappedRuntimeGeneration != 700)   // ★ CW-3b: bake 検証
         return false;
-    if (coordinator.currentPublicationEpoch() != 7)
+    if (world->publication.epoch != 7)
         return false;
     return true;
 }
@@ -616,14 +654,36 @@ namespace {
     //   quarantinedHandle 単独では resolve 不能なため、build 入力は値コピーで引当する。
     convo::RuntimeBuildSnapshot buildSource{};
     buildSource.sealed = true;  // 1-hop 輸送テストのため sealed 済み snapshot を渡す
-    coordinator.submitRecoveryRequest(handle, buildSource);   // enqueue（Admission 判定なし）
+    // ★ dash2 §1.9 (Phase E): transport 成功時は true（recovery obligation 存在 — wake 条件）。
+    if (!coordinator.submitRecoveryRequest(handle, buildSource, 0))   // enqueue（Admission 判定なし）
+        return false;
     if (!coordinator.popRecoveryRequest().has_value())
         return false;                            // Builder pop path
     if (coordinator.popRecoveryRequest().has_value())
         return false;                            // 1-hop transport（duplicate/queue-no-op なし）
     return true;
 }
+// ★ dash2 §1.7 (Phase G R7 回帰テスト, 2026-08-15): submitRecoveryRequest の epoch 伝搬。
+//   CW-3b で commit() が currentWorld_ を非更新にした後、Coordinator が currentWorld_ から epoch を
+//   読むと常に 0 になる潜在回帰（R7）を捕捉する。修正後は caller が epoch を明示的に渡す
+//   （RuntimeStore::current 由来）。本テストは「epoch=0 固定では検出できない」回帰を検証する。
+[[nodiscard]] bool testRecoveryRequestEpochPropagation()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+    convo::RuntimeBuildSnapshot buildSource{};
+    buildSource.sealed = true;
 
+    // 明示 epoch（42）を渡す → popRecoveryRequest で同一 epoch が返る（R7 回帰捕捉）
+    if (!coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 42))
+        return false;
+    auto recovery = coordinator.popRecoveryRequest();
+    if (!recovery.has_value())
+        return false;
+    if (recovery->epoch != static_cast<convo::isr::PublicationEpoch>(42))
+        return false;                    // epoch=0 固定だと失敗（R7 回帰）
+    return true;
+}
 // ★ work88 (X1 §6.1): Recovery Durable Admission — queue full ≠ Recovery lost（INV-X1-2）。
 //   recoveryIntentQueue_（256）を満杯 → 257th submit は durable admission（PendingRecoveryAdmission）
 //   に保持され、hasPendingRecoveryAdmission() == true。takePendingRecoveryAdmission() は
@@ -640,12 +700,18 @@ namespace {
 
     // recoveryIntentQueue_（256）を満杯にする（全て transport に成功 → durable 無し）
     for (int i = 0; i < kCap; ++i)
-        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    {
+        // ★ dash2 §1.9 (Phase E): transport 成功時は true
+        if (!coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0))
+            return false;
+    }
     if (coordinator.hasPendingRecoveryAdmission())
         return false;   // 満杯まで durable は無いはず
 
     // 257th: queue full → durable admission に保持（INV-X1-2: queue full ≠ Recovery lost）
-    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    //   ★ dash2 §1.9 (Phase E): durable 化時も true（recovery obligation 存在 — wake 条件）
+    if (!coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0))
+        return false;
     if (!coordinator.hasPendingRecoveryAdmission())
         return false;
 
@@ -683,14 +749,14 @@ namespace {
 
     // 満杯 → durable admission 作成
     for (int i = 0; i < 256; ++i)
-        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
-    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0);
     if (!coordinator.hasPendingRecoveryAdmission())
         return false;
 
     // さらに durable submit（coalesce）— durable は単一のまま（INV-X1-5）
-    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
-    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0);
 
     // take で 1 回だけ消費でき、その後は空（coalesce により単一 durable のみ）
     if (!coordinator.takePendingRecoveryAdmission().has_value())
@@ -716,8 +782,8 @@ namespace {
 
     // 満杯 → durable admission 作成
     for (int i = 0; i < 256; ++i)
-        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
-    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource);
+        coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0);
+    coordinator.submitRecoveryRequest(convo::isr::DSPHandle::null(), buildSource, 0);
     if (!coordinator.hasPendingRecoveryAdmission())
         return false;
 
@@ -750,14 +816,16 @@ namespace {
     const auto handle = convo::isr::DSPHandle::null();
     constexpr int N = 4100;  // 1024(L1) + 2048(L2) + 1024(L3) + drop
     for (int i = 0; i < N; ++i)
-        coordinator.submitObserve(handle);
+        coordinator.submitObserve(handle, 0);
     return coordinator.getPendingIntentCount() == static_cast<std::uint64_t>(N);
 }
 
 // ★ A-1 (X4-B §6.4 Test 1 / 二十一次レビュー): RuntimeWorldAuthority owns the physical
 //   RuntimeStore（write authority singularization — INV-X4-3/5）。Store::OwnerType ==
-//   RuntimeWorldAuthority はコンパイル時不変条件。metadata 委譲（epoch/sequence/version）は
-//   Coordinator と同一（シャドウ状態なし）を引き続き検証する（read API は物理 Store から）。
+//   RuntimeWorldAuthority はコンパイル時不変条件。published-world read は物理 Store
+//   （RuntimeStore::current — observePublishedWorld / consumeWorldHandle）のみが単一 source
+//   （★ CW-3c: Coordinator/RWA の metadata accessor は production caller ゼロのため削除 —
+//     read-side singularization 完了）。
 static_assert(std::is_same_v<convo::isr::RuntimeWorldAuthority::Store::OwnerType,
                              convo::isr::RuntimeWorldAuthority>,
     "X4-B Test 1: RuntimeWorldAuthority must own its RuntimeStore (INV-X4-3/5)");
@@ -792,17 +860,11 @@ static_assert(std::is_nothrow_move_assignable_v<X4BTestWriteAccess>,
     auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
     auto authority = std::make_unique<convo::isr::RuntimeWorldAuthority>(*coordinator);
 
-    if (authority->currentEpoch() != coordinator->currentPublicationEpoch())
-        return false;
-    if (authority->sequence() != coordinator->currentPublicationSequenceId())
-        return false;
-    if (authority->getCurrent() != coordinator->getCurrent())
-        return false;
-    if (authority->getVersion() != coordinator->getVersion())
-        return false;
+    // ★ dash2 §1.7 (Phase G CW-3c): currentEpoch/sequence/getCurrent/getVersion は production caller
+    //   ゼロのため削除済み。Adapter は read API（RuntimeStore::current — INV-X4-B）を検証する。
 
     // X4-B: read API は物理 Store（RuntimeStore::current — INV-X4-B）から observe する。
-    //   未 publish 時は null（Store 初期値）。getCurrent()（currentWorld_ 観測）と混同しない。
+    //   未 publish 時は null（Store 初期値）。
     const auto token = authority->acquireReadToken();
     if (authority->consumeWorldHandle(token) != nullptr)
         return false;
@@ -892,6 +954,10 @@ int main()
     if (!testP4SameGenerationEpochChangeRejected())
         throw std::runtime_error("P4: same-generation epoch change must be rejected");
 
+    // --- dash2 §1.7 CW-3 調査: 二重 commit 検証 ---
+    if (!testCoordinatorDoubleCommitSameWorldFaults())
+        throw std::runtime_error("CW-3: double-commit (same world) must fault");
+
     // --- P20 ロールバックテスト群 ---
     if (!testP20RejectPreservesWorldState())
         throw std::runtime_error("P20: reject must preserve world state");
@@ -909,6 +975,10 @@ int main()
     // --- FUTURE-3: submitRecoveryRequest transport contract (enqueue → pop 1-hop) ---
     if (!testRecoveryRequestEnqueueAndPop())
         throw std::runtime_error("FUTURE-3: recovery request enqueue/pop failed");
+
+    // --- dash2 §1.7 Phase G R7: recovery epoch propagation (epoch=0 回帰捕捉) ---
+    if (!testRecoveryRequestEpochPropagation())
+        throw std::runtime_error("Phase G R7: recovery epoch propagation failed");
 
     // --- work88 (X1 §6.1): Recovery Durable Admission (queue full ≠ lost / lease / coalesce) ---
     if (!testRecoveryDurableAdmission())

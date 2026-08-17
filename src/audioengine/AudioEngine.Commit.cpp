@@ -387,16 +387,25 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
                                static_cast<std::uint64_t>(world.runtimeVersion),
                                static_cast<int>(std::memory_order_release));
 
-    runtimePublicationBridge_.commit(convo::isr::PublishAuthority::Granted,
-                                     convo::isr::RuntimeBoundary::NonRTWorld,
-                                     &world,
-                                     world.generation,
-                                     world.publication.sequenceId,
-                                     world.publication.epoch,
-                                     world.publication.mappedRuntimeGeneration);
+    // ★ dash2 §1.7 (Phase G CW-3a, 2026-08-15): 冗長 commit #2 を除去（潜在バグ修正）。
+    //   publish() 内の commit #1（RuntimeWorldAuthority::publish → coordinator_.commit）が
+    //   publication bake + state_ Ready を既に完了している（単一 authority instance —
+    //   worldAuthority_.coordinator_ == runtimePublicationBridge_。bake 対象は
+    //   RuntimeStore::current の publication identity — CW-3c で currentWorld_ 削除済み）。
+    //   本コールバック（onRuntimePublishedNonRt）で同一 world（同一 seq/epoch/gen）の commit を
+    //   再実行すると monotonicity 契約（全て strict increase）違反で state_ = Faulted になる
+    //   （実証: testCoordinatorDoubleCommitSameWorldFaults）。commit #2 は fault 前に return する
+    //   ため bake / state_ に何も寄与しない — 除去して問題なし。
+    //   以降の bookkeeping（audit / rollback 検出 / diagnostics / metrics / telemetry）は
+    //   commit と独立に維持する。
     convo::publishAtomic(lastCommittedRuntimeGeneration_, world.generation, std::memory_order_release);
     convo::publishAtomic(lastCommittedPublicationSequence_, world.publication.sequenceId, std::memory_order_release);
     convo::fetchAddAtomic(publishedWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    // ★ T1 (D86): retirement obligation 生成（publish 成功）→ acquireObserved++。
+    //   atomic observation counter・CoordinatorLoop Non-RT（D83 #8）・authority でない（D76.4）。
+    worldRetirementTelemetry_.onAcquireObserved();
+    // ★ T1 (D98): reference observer に acquire event を通知（event-driven・publish LP 一致・D97 固定点 4）。
+    worldRetirementReference_.onAcquire();
     updateMinMetric(oldestPublishedGeneration_, world.generation);
     updateMaxMetric(youngestPublishedGeneration_, world.generation);
 
@@ -701,6 +710,71 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     worldAuthority_.lifetime().emitRetireTimeline(evidenceRoot / "retire_timeline.json");
     evidenceExporter_.exportEvidence();
     worldLifecycleAudit_.tryDumpPeriodic();
+
+    // ★ T1 (D86): World retirement observation telemetry の export（window-tagged・1 秒周期）。
+    //   observedOutstandingEstimate / Max / window tag を evidence に書き出す（観測値のみ・authority 非依存・D83 #7）。
+    //   ★ T1 (D91): Closed window snapshot を immutable 読み取りで出力（D91 基準 10・export race 対策・監視項目 4）。
+    {
+        auto& telemetry = worldRetirementTelemetry();
+        const auto estimate = telemetry.observedOutstandingEstimate();
+        const auto maxObserved = telemetry.observedOutstandingMax();
+        const auto tag = static_cast<int>(telemetry.windowTag());
+        const auto snap = telemetry.lastClosedSnapshot();
+        // ★ T1 (D98): reference observer（T_w = reference max・event-driven・D94）を取得（O_w と同一 windowId で比較）。
+        const auto refMax = worldRetirementReference_.referenceMax();
+        const auto refAcquire = worldRetirementReference_.referenceAcquireCount();
+        const auto refRelease = worldRetirementReference_.referenceReleaseCount();
+        const auto evidencePath = evidenceRoot / "world_retirement_telemetry.json";
+        const auto tmpPath = evidenceRoot / "world_retirement_telemetry.json.tmp";
+        std::error_code ec;
+        std::filesystem::create_directories(evidenceRoot, ec);
+        if (!ec) {
+            std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+            if (file.is_open()) {
+                file << "{\n";
+                file << "  \"acquireObserved\": " << telemetry.acquireObserved() << ",\n";
+                file << "  \"releaseObserved\": " << telemetry.releaseObserved() << ",\n";
+                file << "  \"observedOutstandingEstimate\": " << estimate << ",\n";
+                file << "  \"observedOutstandingMax\": " << maxObserved << ",\n";   // accumulated（D91 基準 8）
+                file << "  \"windowTag\": " << tag << ",\n";
+                file << "  \"windowTagName\": \"" << convo::isr::windowTagName(tag) << "\",\n";
+                file << "  \"measurementWindow\": ";
+                if (snap.valid != 0) {
+                    file << "{\n";
+                    file << "    \"windowId\": " << snap.windowId << ",\n";
+                    file << "    \"startAcquire\": " << snap.startAcquire << ",\n";
+                    file << "    \"startRelease\": " << snap.startRelease << ",\n";
+                    file << "    \"endAcquire\": " << snap.endAcquire << ",\n";
+                    file << "    \"endRelease\": " << snap.endRelease << ",\n";
+                    file << "    \"finalEstimate\": " << snap.finalEstimate << ",\n";
+                    file << "    \"windowMax\": " << snap.windowMax << ",\n";       // bounded（D91 基準 8）
+                    file << "    \"windowStartTimestampUs\": " << snap.windowStartTimestampUs << ",\n";
+                    file << "    \"windowEndTimestampUs\": " << snap.windowEndTimestampUs << ",\n";
+                    file << "    \"sampleCount\": " << snap.sampleCount << ",\n";
+                    file << "    \"maxSamplingGapUs\": " << snap.maxSamplingGapUs << ",\n";
+                    file << "    \"missedTickCount\": " << snap.missedTickCount << ",\n";
+                    file << "    \"counterWrapped\": " << snap.counterWrapped << "\n";   // 診断のみ（D91 基準 9）
+                    file << "  },\n";
+                } else {
+                    file << "null,\n";
+                }
+                // ★ T1 (D98): reference observer（T_w・event-driven・D94）。E_w = T_w - O_w は診断のみ（M の安全側根拠にしない）。
+                file << "  \"referenceObserver\": {\n";
+                file << "    \"referenceAcquireCount\": " << refAcquire << ",\n";
+                file << "    \"referenceReleaseCount\": " << refRelease << ",\n";
+                file << "    \"referenceOutstanding\": " << (static_cast<std::int64_t>(refAcquire) - static_cast<std::int64_t>(refRelease)) << ",\n";
+                file << "    \"referenceMax\": " << refMax << ",\n";                    // T_w
+                file << "    \"Ew\": " << (refMax - maxObserved) << "\n";               // E_w = T_w - O_w（診断のみ）
+                file << "  }\n";
+                file << "}\n";
+                file.close();
+                if (!file.fail()) {
+                    std::filesystem::rename(tmpPath, evidencePath, ec);
+                }
+            }
+        }
+        std::filesystem::remove(tmpPath, ec);
+    }
 }
 
 // [PR-3/3A] Orchestrator 経路のみ。Deferred は submitPublishRequest が自動 enqueue する。

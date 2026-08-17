@@ -417,6 +417,37 @@ void AudioEngine::timerCallback()
     const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
     const auto* currentSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
 
+    // ★ T1 (D86): Non-RT sampler — A/R loads → signedWide → estimate → max → window tag（D83.2 責務分離）。
+    //   100ms 周期（timerCallback）・MessageThread Non-RT。releaseObserved は storage 側の
+    //   worldReclaimCount（type==World の terminal deleter 実行数・案 B）の累積差分を反映する。
+    {
+        auto& telemetry = worldRetirementTelemetry();
+        const uint64_t worldReclaimed = m_retireRouter ? m_retireRouter->worldReclaimCount() : 0;
+        const uint64_t prevReclaimed = convo::consumeAtomic(lastSampledWorldReclaimCount_, std::memory_order_acquire);
+        if (worldReclaimed > prevReclaimed)
+        {
+            telemetry.addReleaseObserved(worldReclaimed - prevReclaimed);
+            convo::publishAtomic(lastSampledWorldReclaimCount_, worldReclaimed, std::memory_order_release);
+        }
+        const std::int64_t estimate = telemetry.observedOutstandingEstimate();   // D82: signedWide(A) - signedWide(R)
+        telemetry.updateObservedOutstandingMax(estimate);                        // D83.2/D86: max は sampler のみ
+        if (isShutdownInProgress())
+            telemetry.setWindowTag(convo::isr::ObservationWindowTag::Shutdown);  // D76.2
+        else
+            telemetry.setWindowTag(convo::isr::ObservationWindowTag::Normal);
+        // ★ T1 (D91): window-reset measurement sampler — request を観測し window transition を実行。
+        //   sampler（timerCallback・MessageThread）が唯一の transition owner（D91 基準 3）。
+        //   samplerTick は A/R から estimate を計算し windowMax（bounded）を更新する（D91 基準 6・8）。
+        const auto windowNowUs = convo::getCurrentTimeUs();
+        telemetry.samplerTick(windowNowUs);
+        // ★ T1 (D98): reference observer の window 同期（T1 の sampler boundary に一致・D96 実装ゲート ④）。
+        //   T1 の state が Running の間 observer も running・Closed/Idle で停止（冪等・D95 固定点 5・7）。
+        if (telemetry.measurementState() == convo::isr::MeasurementState::Running)
+            worldRetirementReference_.onMeasurementStart();
+        else
+            worldRetirementReference_.onMeasurementEnd();
+    }
+
     emitEvidenceTickNonRt(false);
 
     {
@@ -893,7 +924,7 @@ void AudioEngine::timerCallback()
                 //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得して emit
                 const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
                 if (!fadingHandle.isNull())
-                    runtimePublicationBridge_.submitObserve(fadingHandle);
+                    runtimePublicationBridge_.submitObserve(fadingHandle, currentPublicationEpoch());
             }
         }
         crossfadeRuntime_.complete();
@@ -1026,7 +1057,7 @@ void AudioEngine::timerCallback()
             //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
             const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
             if (!fadingHandle.isNull())
-                runtimePublicationBridge_.submitObserve(fadingHandle);
+                runtimePublicationBridge_.submitObserve(fadingHandle, currentPublicationEpoch());
         }
     }
 
@@ -1565,7 +1596,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
             // ★ ISR: Observer — Intent Queue push のみ
             const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
             if (!fadingHandle.isNull())
-                runtimePublicationBridge_.submitObserve(fadingHandle);
+                runtimePublicationBridge_.submitObserve(fadingHandle, currentPublicationEpoch());
         }
 
         // 2. ★ PR2/PR4: Authority の Registry から全 active レコードを取得

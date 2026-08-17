@@ -39,6 +39,10 @@ public:
         RejectedNotFinalized,
         RejectedPressure,
         RejectedShutdown,
+        // ★ 15-P-6: publish-time の内部失敗（genuine shutdown と区別）。
+        //   trySubmitImpl の executor_.publish() 失敗時に使用。admission-time の
+        //   RejectedShutdown（isShutdownInProgress()）とは意味論が異なる。
+        RejectedPublishFailure,
         DeferredFadingActive,
         RejectedLowPriority   // ★ P1-6: 低優先度要求拒否
     };

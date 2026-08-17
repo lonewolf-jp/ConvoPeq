@@ -457,8 +457,20 @@ void AudioEngine::releaseResources()
     if (clearedWorld != nullptr)
     {
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
-        clearBridge.retireRuntimePublishWorldNonRt(clearedWorld, true);
+        clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
+
+    // ★ 15-P-5: clear 後の最終強制 drain（quiescence 確立時のみ）。
+    //   clearPublishedRuntimeSnapshotsNonRt が返した oldWorld は enqueueDeferredDeleteNonRt →
+    //   shutdownReclaim → terminalReclaim 経由で、epoch safe なら即時破棄、epoch unsafe
+    //   （stuck reader が残る場合）なら TerminalReclaimAuthority に保持される。
+    //   drainAllQuarantineStore()（PR2）はこの clear より前に実行済みのため、ここで保持された
+    //   World はそこでは対象外。quiescence（activeReaderCount==0）を確認してから Q + E + Terminal
+    //   を強制 drain し、Terminal 残留 World のリークを防ぐ。stuck reader が残る場合は
+    //   UAF 回避のため強制 drain をスキップし、epoch-gated drain（waitForDrain 内の
+    //   drainTerminalReclaim）に委ねる。
+    if (m_retireRouter->activeReaderCount() == 0)
+        m_retireRouter->drainAllQuarantineStore();
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
@@ -511,6 +523,35 @@ void AudioEngine::releaseResources()
     }
 
     m_coordinator.finalizeShutdown(timedOut);  // ★ P1-2: 二段構えの正常系
+
+    // ★ 15-P-CROSS-IMPLEMENTATION-1: GAP-CROSS-1 fix — terminal drain of residual OwnerChannel owners.
+    //   finalizeShutdown 直後: producer/consumer は既に停止済み (shutdownCoordinatorLoop join,
+    //   stopRebuildThread join)。quiescence は確認済み (advanceRetireEpoch, drainAllQuarantineStore).
+    //   drainAllNonRt は consume->publish(nullptr,release) single-transfer — owner==nullptr で
+    //   empty slot を検出するため re-drain は no-op。callback は既存 retire chain へ transfer:
+    //     enqueueDeferredDeleteNonRtWithResult(raw, runtimePublishWorldDeleter, World)
+    //       → isShutdownInProgress()==true → shutdownReclaim → terminalReclaim (growable)
+    //   enqueueRetire は Success|QueuePressure のみ返す (Shutdown は dead code) ため、
+    //   callback は既存 authority chain へ ownership を確実に移転する。
+    const auto drainedResidual = worldAuthority_.ownerChannel().drainAllNonRt(
+        [this](const RuntimeState* raw) noexcept {
+            // const RuntimeState* -> void*: existing World deleter
+            // (retirePublishedRuntimeWorldNonRt, AudioEngine.h:3525) が
+            // static_cast<RuntimePublishWorld*>(p) で const_cast を行う。
+            enqueueDeferredDeleteNonRtWithResult(
+                const_cast<RuntimeState*>(raw),
+                [](void* p) noexcept {
+                    auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                    ptr->unseal();
+                    ptr->~RuntimePublishWorld();
+                    convo::aligned_free(ptr);
+                },
+                DeletionEntryType::World);
+        });
+    if (drainedResidual > 0)
+        diagLog("[AUDIT] drainAllNonRt residual: reclaimed "
+            + juce::String(static_cast<juce::int64>(drainedResidual))
+            + " residual OwnerChannel owners -> terminal retire chain");
 
     // ★ A-2.7: ReleaseResources の DrainAudit 統合
     const auto currentShutdownPhase = shutdownRuntime_.getPhase();

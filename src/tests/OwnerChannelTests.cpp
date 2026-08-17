@@ -127,6 +127,62 @@ using Channel = convo::isr::OwnerChannel<std::unique_ptr<MockOwner>>;
     return true;
 }
 
+// 7. drainAllNonRt: drains all residual owners via callback (no key needed).
+//    - all slots drained → callback count matches enqueue count
+//    - ownership relinquished: re-drain is no-op (slots_ empty after drain)
+//    - single-transfer: callback receives each owner exactly once (no double-fire)
+[[nodiscard]] bool testOwnerChannelDrainAllNonRt() {
+    MockOwner::alive = 0;
+    Channel ch;
+    constexpr std::size_t kFill = 5;       // fill a few slots (distinct keys)
+    for (std::size_t i = 0; i < kFill; ++i) {
+        const convo::isr::OwnerChannelKey key{ i + 1, 0, i };
+        if (!ch.enqueue(key, std::make_unique<MockOwner>(static_cast<int>(i + 1))))
+            return false;
+    }
+    if (ch.size() != kFill)
+        return false;
+
+    // drainAllNonRt: callback must fire for each enqueued owner exactly once.
+    int drained = 0;
+    std::size_t count = ch.drainAllNonRt([&](const MockOwner* raw) {
+        if (raw == nullptr) return;        // defensive
+        ++drained;
+        // ownership: callback receives the raw Owner* (not re-wrap); caller
+        // owns the deletion semantics. Here we just count — the mock's dtor
+        // runs when the test's unique_ptr scope ends.
+    });
+    if (count != kFill || drained != static_cast<int>(kFill))
+        return false;
+
+    // re-drain: all slots now nullptr -> no-op (single-transfer proven)
+    std::size_t count2 = ch.drainAllNonRt([&](const MockOwner*) {});
+    if (count2 != 0)
+        return false;
+
+    // slots_ fully drained (size() walks the same full scan)
+    if (ch.size() != 0)
+        return false;
+
+    return true;                            // drained exactly kFill owners, re-drain no-op
+}
+
+// 8. drainAllNonRt does NOT touch wrong-key isolation: drain then enqueue(take) still works.
+[[nodiscard]] bool testOwnerChannelDrainThenReenqueue() {
+    MockOwner::alive = 0;
+    Channel ch;
+    ch.enqueue({7, 0, 0}, std::make_unique<MockOwner>(1));
+    ch.drainAllNonRt([&](const MockOwner*) {});   // drain the owner
+    if (ch.size() != 0)
+        return false;
+
+    // channel is reusable after drain (empty slot recycled)
+    if (!ch.enqueue({7, 0, 0}, std::make_unique<MockOwner>(2)))
+        return false;
+    auto got = ch.take({7, 0, 0});
+    return got && got->id == 2;
+}
+
 int main() {
     if (!testOwnerChannelBasicTransfer())     throw std::runtime_error("OwnerChannel basic transfer failed");
     if (!testOwnerChannelWrongKey())          throw std::runtime_error("OwnerChannel wrong-key failed");
@@ -134,5 +190,7 @@ int main() {
     if (!testOwnerChannelLifetime())          throw std::runtime_error("OwnerChannel lifetime failed");
     if (!testOwnerChannelStress100k())        throw std::runtime_error("OwnerChannel stress 100k failed");
     if (!testOwnerChannelFullBackpressure())  throw std::runtime_error("OwnerChannel full backpressure failed");
+    if (!testOwnerChannelDrainAllNonRt())     throw std::runtime_error("OwnerChannel drainAllNonRt failed");
+    if (!testOwnerChannelDrainThenReenqueue()) throw std::runtime_error("OwnerChannel drain-then-reenqueue failed");
     return 0;
 }

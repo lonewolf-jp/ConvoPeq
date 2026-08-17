@@ -59,7 +59,12 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     // 初回失敗 → enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
     //   Coordinator の Authority チェックは初回で済んでいるため、直接 Router に委譲
     result = stackRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
-    return result == convo::isr::RetireEnqueueResult::Success;
+    // ★ P-4: Success / QueuePressure / TerminalReclaim は全て ownership transfer 成立
+    //   （D / Q / E / Terminal のいずれかが ptr を所有 — drop ではない）。
+    //   false は Shutdown（caller が ownership 保持）のみ。
+    return result == convo::isr::RetireEnqueueResult::Success
+        || result == convo::isr::RetireEnqueueResult::QueuePressure
+        || result == convo::isr::RetireEnqueueResult::TerminalReclaim;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.

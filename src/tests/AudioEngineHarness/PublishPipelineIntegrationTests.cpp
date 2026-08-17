@@ -35,6 +35,9 @@ bool runSoakScenarios(bool full, const char* scenario);
 // DeferredFlowIntegrationTests.cpp (ADR-C4 / design-D4)
 int runDeferredFlowIntegrationTests();
 
+// WorldRetirementMeasurementTests.cpp (T1 D100・burst test harness)
+bool runWorldRetirementMeasurement(const char* condition);
+
 // DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
 int runDeferredPublishViewStateMachineTests();
 
@@ -321,6 +324,7 @@ int main(int argc, char* argv[])
     {
         bool full = false;
         const char* scenario = "all";
+        std::string measurement;   // ★ T1 (D100): --measurement=normal|burst|jitter|all（burst test harness）
         for (int i = 1; i < argc; ++i)
         {
             const std::string a(argv[i]);
@@ -328,7 +332,11 @@ int main(int argc, char* argv[])
                 full = true;
             else if (a.rfind("--scenario=", 0) == 0)
                 scenario = argv[i] + std::strlen("--scenario=");
+            else if (a.rfind("--measurement=", 0) == 0)
+                measurement = argv[i] + std::strlen("--measurement=");
         }
+        if (!measurement.empty())
+            return runWorldRetirementMeasurement(measurement.c_str()) ? 0 : 1;   // ★ T1 (D100)
         return convo_soak::runSoakScenarios(full, scenario) ? 0 : 1;
     }
 

@@ -53,7 +53,11 @@ struct TestBridge
         retiredCount_++;
     }
 
-    void retireRuntimePublishWorldNonRt(TestWorld* world, bool) noexcept
+    void retirePublishedRuntimeWorldNonRt(TestWorld* world, bool) noexcept
+    {
+        convo::AlignedObjectDeleter<TestWorld>{}(world);
+    }
+    void retireRejectedRuntimeWorldNonRt(TestWorld* world) noexcept
     {
         convo::AlignedObjectDeleter<TestWorld>{}(world);
     }

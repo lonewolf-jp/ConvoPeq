@@ -153,7 +153,7 @@ public:
             //   Self-contained Intent: getFadingRuntimeDSPHandle から DSPHandle を取得
             const auto fadingHandle = engine_.dspHandleRuntime_.getFadingRuntimeDSPHandle();
             if (!fadingHandle.isNull())
-                engine_.runtimePublicationBridge_.submitObserve(fadingHandle);
+                engine_.runtimePublicationBridge_.submitObserve(fadingHandle, engine_.currentPublicationEpoch());
         }
 
         engine_.crossfadeRuntime_.setDryHoldSamples(0);

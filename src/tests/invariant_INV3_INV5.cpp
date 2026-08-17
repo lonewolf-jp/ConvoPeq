@@ -298,7 +298,11 @@ private:
 
     constexpr int kCapacity = 256;   // kRecoveryIntentQueueCapacity
     for (int i = 0; i < kCapacity; ++i)
-        coordinator.submitRecoveryRequest(handle, buildSource);
+    {
+        // ★ dash2 §1.9 (Phase E): transport 成功時は true
+        if (!coordinator.submitRecoveryRequest(handle, buildSource, 0))
+            return false;
+    }
 
     // full 直前: pendingIntentCount == 容量、drop なし
     if (coordinator.getPendingIntentCount() != static_cast<std::uint64_t>(kCapacity))
@@ -307,7 +311,9 @@ private:
         return false;
 
     // 257 回目: full → drop カウンタ増 + pendingIntentCount 不変（INV-5: drop 計上整合）
-    coordinator.submitRecoveryRequest(handle, buildSource);
+    //   ★ dash2 §1.9 (Phase E): durable 化時も true（recovery obligation 存在 — wake 条件）
+    if (!coordinator.submitRecoveryRequest(handle, buildSource, 0))
+        return false;
     if (coordinator.recoveryIntentDropCount() != 1)
         return false;
     if (coordinator.getPendingIntentCount() != static_cast<std::uint64_t>(kCapacity))
@@ -371,8 +377,10 @@ private:
     auto& coordinator = *coordinatorStorage;
 
     // shutdown 前に 1 件 enqueue（正常系）
+    //   ★ dash2 §1.9 (Phase E): transport 成功時は true
     convo::RuntimeBuildSnapshot buildSource{};
-    coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource);
+    if (!coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource, 0))
+        return false;
     if (coordinator.getPendingIntentCount() != 1)
         return false;
 
@@ -383,7 +391,9 @@ private:
         return false;
 
     // shutdown 後の submit → enqueue されず ShutdownDiscard として記録
-    coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource);
+    //   ★ dash2 §1.9 (Phase E): shutdown discard は false（wake 不要）
+    if (coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource, 0))
+        return false;
     if (coordinator.recoveryShutdownDiscardCount() != 1)
         return false;
     if (coordinator.recoveryIntentDropCount() != 0)
@@ -415,7 +425,7 @@ private:
     // 残留 3 件を enqueue（shutdown 前に submit された想定）
     convo::RuntimeBuildSnapshot buildSource{};
     for (int i = 0; i < 3; ++i)
-        coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource);
+        coordinator.submitRecoveryRequest(DSPHandle::null(), buildSource, 0);
     if (coordinator.getPendingIntentCount() != 3)
         return false;
 

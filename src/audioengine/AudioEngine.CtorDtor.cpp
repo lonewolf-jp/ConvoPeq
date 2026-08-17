@@ -32,7 +32,10 @@ AudioEngine::AudioEngine()
     engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter
 
     // [work21] ISRRetireRouter初期化
-    m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);
+    // ★ T1 (D100.4): reference observer に telemetry を配線（onRelease → releaseObserved 転送・
+    //   sampler の outstanding 推定 acquireObserved - releaseObserved を正しくする）。
+    worldRetirementReference_.setTelemetry(&worldRetirementTelemetry_);
+    m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain, &worldRetirementReference_);
     // ★ BUG-015/027 (work88): SnapshotCoordinator の退避移送先を Router に接続
     //   （Category A — Router API 経由で RetireQuarantineStore へ移送。直接保持はしない）
     m_coordinator.setRetireSink(m_retireRouter.get());
@@ -228,10 +231,19 @@ AudioEngine::~AudioEngine()
     if (clearedWorld != nullptr)
     {
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
-        clearBridge.retireRuntimePublishWorldNonRt(clearedWorld, true);
+        clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
     drainDeferredRetireQueues(true);
-    m_epochDomain.drainAll();
+
+    // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
+    //   TerminalReclaimAuthority に保持された World（stuck reader ケースの clearedWorld 等）が
+    //   漏れる。quiescence（activeReaderCount==0）確立時のみ m_retireRouter->drainAll() で
+    //   全 store を強制解放する。stuck reader が残る場合は UAF 回避のため D のみ（従来動作）に
+    //   フォールバックし、epoch-gated drain（drainTerminalReclaim）に委ねる。
+    if (m_retireRouter->activeReaderCount() == 0)
+        m_retireRouter->drainAll();
+    else
+        m_epochDomain.drainAll();
     runtimePublicationBridge_.markShutdownComplete();
 
     // ...既存の解放処理...
