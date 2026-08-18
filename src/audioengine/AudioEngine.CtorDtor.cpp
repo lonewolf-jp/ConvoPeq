@@ -235,16 +235,34 @@ AudioEngine::~AudioEngine()
     }
     drainDeferredRetireQueues(true);
 
+    // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) before pointer-lifetime
+    //   drain (drainAll). OverflowRing may hold entries not yet processed because the RT commit
+    //   path (the only caller of dequeuePendingRetireIntents()) has stopped.
+    drainPendingRetireIntentsForShutdown();
+
     // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
     //   TerminalReclaimAuthority に保持された World（stuck reader ケースの clearedWorld 等）が
     //   漏れる。quiescence（activeReaderCount==0）確立時のみ m_retireRouter->drainAll() で
     //   全 store を強制解放する。stuck reader が残る場合は UAF 回避のため D のみ（従来動作）に
     //   フォールバックし、epoch-gated drain（drainTerminalReclaim）に委ねる。
+    // ★ 15-P-5 FIX: stuck-reader fallback は D のみにしない。Audio Thread は停止済みのため、
+    //   Q + E + T の drainAllQuarantineStore（drainAllUnsafe ベース、epoch 非依存）も強制実行する。
+    //   drainAllUnsafe は Audio Thread 停止後のみ呼ばれる契約を満たす（RetireQuarantineStore.h:59参照）。
     if (m_retireRouter->activeReaderCount() == 0)
         m_retireRouter->drainAll();
     else
-        m_epochDomain.drainAll();
+    {
+        diagLog("[DRAIN] Destructor stuck-reader fallback: activeReaderCount > 0 — draining D + Q + E + T");
+        m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
+        m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
+    }
     runtimePublicationBridge_.markShutdownComplete();
+
+    // ★ 15-P-5: Post-shutdown Faulted state diagnostic
+    //   markShutdownComplete 後、Coordinator が Faulted 状態である場合は shutdown 異常を記録。
+    if (runtimePublicationBridge_.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted)
+        diagLog("[FAULT] ~AudioEngine: coordinator in Faulted state after markShutdownComplete — "
+                "residual intents may remain in System 1 queues");
 
     // ...既存の解放処理...
     if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }

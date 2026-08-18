@@ -387,6 +387,329 @@
 				"clear": true,
 				"showReuseMessage": false
 			}
+		},
+		{
+			"label": "Build + Run RetireGraceTests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target RetireGraceSemanticsTests --target ISRSSRTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R \"RetireGrace\" -R \"ISR\" --output-on-failure 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run RetireGraceTests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target RetireGraceSemanticsTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R RetireGrace --output-on-failure 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run RetireGrace",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target RetireGraceSemanticsTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R RetireGrace --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run ShutdownRetireIntentDrain Tests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R ShutdownRetireIntent --output-on-failure"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run ShutdownRetireIntentDrain Direct",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run ShutdownRetireIntentDrain Direct",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run Test Direct No CTest",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe & echo RC=$?"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run Test Bare",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe; echo EXITCODE=%ERRORLEVEL%"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Check Test Binary",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && echo Before && ShutdownRetireIntentDrainTests.exe && echo After || echo Failed"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run Minimal Test",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && echo hello && type nul"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Compile Minimal Test",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && cl /std:c++20 /EHsc /MDd /Zi /FS /I\"C:\\VSC_Project\\ConvoPeq\\src\" /I\"C:\\VSC_Project\\ConvoPeq\\src\\audioengine\" /I\"C:\\VSC_Project\\ConvoPeq\\src\\core\" /I\"C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\JuceLibraryCode\" /I\"C:\\VSC_Project\\ConvoPeq\\JUCE\\modules\" /D_NOMINMAX /D_CRT_SECURE_NO_WARNINGS C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRetire.cpp C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRetireRuntimeEx.cpp C:\\VSC_Project\\ConvoPeq\\src\\tests\\MinimalLifetimeTest.cpp /Fe:C:\\VSC_Project\\ConvoPeq\\build\\Debug\\MinimalLifetimeTest.exe /link kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Check Binary Exists",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"dir C:\\VSC_Project\\ConvoPeq\\build\\Debug\\ShutdownRetireIntentDrainTests.exe && dir C:\\VSC_Project\\ConvoPeq\\build\\Debug\\RetireGraceSemanticsTests.exe"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Run RetireGrace Tests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && RetireGraceSemanticsTests.exe && echo PASS || echo FAIL"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run ISRSoakTests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ISRSoakTests.exe 2>&1 && echo PASS || echo FAIL"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain v2",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain v3",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Build + Run ShutdownRetireIntentDrain v4",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build C:\\VSC_Project\\ConvoPeq\\build --config Debug --target ShutdownRetireIntentDrainTests && cd C:\\VSC_Project\\ConvoPeq\\build\\Debug && ShutdownRetireIntentDrainTests.exe 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run Full Retire Tests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R \"RetireGrace\" --output-on-failure 2>&1 && ctest -C Debug -R \"ShutdownRetireIntent\" --output-on-failure 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run ShutdownRetireIntentDrain Tests After Cleanup",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cd C:\\VSC_Project\\ConvoPeq\\build && ctest -C Debug -R \"ShutdownRetireIntent\" --output-on-failure 2>&1"
+			],
+			"isBackground": false,
+			"group": "test"
 		}
 	]
 }

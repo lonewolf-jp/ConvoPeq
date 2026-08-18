@@ -245,6 +245,35 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/RetireGraceSemanticsTests.cpp
     )
 
+    # ★ 15-P-4-5-FIX: Tests for drainPendingRetireIntentsForShutdown()
+    add_executable(ShutdownRetireIntentDrainTests
+        src/tests/ShutdownRetireIntentDrainTests.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp
+    )
+    target_link_libraries(ShutdownRetireIntentDrainTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(ShutdownRetireIntentDrainTests ConvoPeq)
+
+    # ★ 15-P-7: Stuck-reader fallback regression tests (drainAllQuarantineStore)
+    add_executable(StuckReaderFallbackDrainTests
+        src/tests/StuckReaderFallbackDrainTests.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp
+    )
+    target_include_directories(StuckReaderFallbackDrainTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_link_libraries(StuckReaderFallbackDrainTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(StuckReaderFallbackDrainTests ConvoPeq)
+    target_compile_features(StuckReaderFallbackDrainTests PRIVATE cxx_std_20)
+    target_compile_options(StuckReaderFallbackDrainTests PRIVATE /EHsc /utf-8)
+
     # ★ Work91: ISRSoakTests — ヘッドレスデータ構造耐久（publish を含まない）。
     #   publish 系は AudioEngineHarness 側に配置する原則（doc/work91/soak-test-design.md §2.2）。
     #   ISRSemanticValidationTests と同じ include/link パターン（RuntimePublicationCoordinator
@@ -483,6 +512,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
     target_compile_features(invariant_INV3_INV5Tests PRIVATE cxx_std_20)
     target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
+    target_compile_features(ShutdownRetireIntentDrainTests PRIVATE cxx_std_20)
     target_compile_features(NormalRetireDSPHandleCompareTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
     target_compile_features(ObservePathSingleSourceTests PRIVATE cxx_std_20)
@@ -521,6 +551,14 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
     )
     target_include_directories(RetireGraceSemanticsTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(ShutdownRetireIntentDrainTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
@@ -629,6 +667,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
+    add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
+    add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
@@ -651,6 +691,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
         target_compile_options(invariant_INV3_INV5Tests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
+        target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /utf-8)
         target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
         target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
         target_compile_options(ObservePathSingleSourceTests PRIVATE /utf-8)
@@ -670,6 +711,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
                      ISRSemanticValidationTests invariant_INV3_INV5Tests
                      RetireGraceSemanticsTests
+                     ShutdownRetireIntentDrainTests
                      NormalRetireDSPHandleCompareTests
                      RuntimeSemanticSchemaValidationTests ObservePathSingleSourceTests
                      OverlapAuthoritySingularTests ShadowCompareContractTests
@@ -691,6 +733,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ShutdownRetireIntentDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -722,6 +766,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         )
     endif()
     target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+        target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /EHsc)
     target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /EHsc)
     target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
     target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
@@ -1731,7 +1776,8 @@ if(ENABLE_ASAN)
         MpscBoundedRingTests DSPHandleTableTests
         PriorityIntegrationTests GainStagingContractTests EQProcessorMaxGainTests
         EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
-        AudioEngineHarness ISRSoakTests)
+        AudioEngineHarness ISRSoakTests
+        ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})
             if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")

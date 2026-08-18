@@ -482,6 +482,12 @@ void AudioEngine::releaseResources()
     const bool drainedWithinBudget = waitForDrain(2000, 2);
     const bool timedOut = !drainedWithinBudget;
 
+    // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) after graceful drain.
+    //   OverflowRing may still hold entries that drainOverflowRing() couldn't process because
+    //   dequeuePendingRetireIntents() is ONLY called in RT commit path (now stopped).
+    //   This is idempotent and safe — reclaim() is a no-op on already-Reclaimed slots.
+    drainPendingRetireIntentsForShutdown();
+
     if (timedOut) {
         // ★ A-3: VerifyDrained で Reader 異常を検出 → markTimedOut に ReaderActive を伝達
         auto audit = collectDrainAudit();
@@ -608,4 +614,95 @@ void AudioEngine::releaseResources()
 
     // P0-A0: LifecycleIsolationRuntime integration - leave release phase
     lifecycleRuntime_.leaveRelease(lifecycleToken);
+}
+
+// ★ 15-P-4-5-FIX: EmergencyDrain-safe drain of RetireIntent (slot-state) system.
+//   Drains OverflowRing → emitRetireIntent → MPSC queue → processIntent → reclaim().
+//   This is the *slot-state* drain (System 1), separate from DeferredDeletionQueue (System 2/pointer-lifetime).
+//   Idempotent: reclaim() is a state-transition no-op on already-Reclaimed slots; recomputeIntentPending()
+//   handles zero-count correctly. Must be called with no active RT audio thread (post-stopRebuildThread).
+void AudioEngine::drainPendingRetireIntentsForShutdown() noexcept
+{
+    try {
+        auto& lifetime = worldAuthority_.lifetime();
+
+        // Step 1: Drain OverflowRing (SPSC lock-free) — pop all entries, emitRetireIntent each
+        {
+            auto* overflowRing = lifetime.getOverflowRing();
+            if (overflowRing != nullptr)
+            {
+                convo::isr::RetireOverflowEntry entry;
+                while (overflowRing->pop(entry))
+                {
+                    lifetime.emitRetireIntent(entry.intent);
+                }
+                // Safety: clear in case partial pop occurred
+                overflowRing->clear();
+            }
+        }
+
+        // Step 2: Drain LifetimeState MPSC queue + fallback queue (mutex-protected)
+        //   dequeueOne() pops from lock-free slots_[256] MPSC queue
+        //   dequeueFallback() pops mutex-protected fallbackQueue_
+        {
+            convo::isr::RetireIntent intent;
+            constexpr int kMaxIntentDrain = 65536;  // safety bound — should never hit in practice
+            int drained = 0;
+
+            while (drained < kMaxIntentDrain)
+            {
+                // Try MPSC queue first (lock-free, noexcept)
+                if (lifetime.dequeueOne(intent))
+                {
+                    lifetime.reclaim(intent.dspSlot);
+                    ++drained;
+                    continue;
+                }
+                // Try fallback queue (mutex-protected, noexcept)
+                if (lifetime.dequeueFallback(intent))
+                {
+                    lifetime.reclaim(intent.dspSlot);
+                    ++drained;
+                    continue;
+                }
+                // Both queues empty — done
+                break;
+            }
+        }
+
+        // Step 3: If any intents were re-injected into OverflowRing (e.g. by reclaim → enqueueRetire),
+        //   drain again (bounded 3 iterations — overflow ring should not refill during shutdown
+        //   since no RT thread is pushing).
+        for (int iter = 0; iter < 3; ++iter)
+        {
+            auto* overflowRing2 = lifetime.getOverflowRing();
+            if (overflowRing2 == nullptr) break;
+
+            convo::isr::RetireOverflowEntry entry2;
+            bool refilled = false;
+            while (overflowRing2->pop(entry2))
+            {
+                lifetime.emitRetireIntent(entry2.intent);
+                refilled = true;
+            }
+            if (refilled)
+            {
+                overflowRing2->clear();
+                // Drain the re-injected intents
+                convo::isr::RetireIntent intent2;
+                while (lifetime.dequeueOne(intent2) || lifetime.dequeueFallback(intent2))
+                {
+                    lifetime.reclaim(intent2.dspSlot);
+                }
+            }
+            else
+            {
+                break;  // No refill — fully drained
+            }
+        }
+    }
+    catch (...) {
+        // noexcept context — swallow any unexpected exception
+        // (reclaim/dequeueOne/dequeueFallback are effectively noexcept: atomics + mutex only)
+    }
 }

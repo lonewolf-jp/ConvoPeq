@@ -1494,6 +1494,11 @@ public:
 
     void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
+    // ★ 15-P-4-5-FIX: Drain RetireIntent (slot-state) system during shutdown.
+    //   Drains OverflowRing → emitRetireIntent → MPSC queue → processIntent → reclaim().
+    //   Called from both releaseResources() and ~AudioEngine() with correct ordering.
+    void drainPendingRetireIntentsForShutdown() noexcept;
+
     void setOversamplingFactor(int factor);
     [[nodiscard]] int getOversamplingFactor() const;
 
