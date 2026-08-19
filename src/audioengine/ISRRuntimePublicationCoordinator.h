@@ -633,6 +633,11 @@ private:
     //   ⇒ MPSC 化は現時点で不要（LockFreeRingBuffer は SPSC 前提 — 複数 Producer 不可）。
     //   ［将来 Timer 等から直接 submitRecoveryRequest を呼ぶ経路を追加する場合のみ MPSC 化
     //     （MpscBoundedRing 置換 + pendingRecoveryAdmission_ の mutex 保護 — plan §1.1.1）］
+    //   ★ F-0 事前監査（2026-08-19, evidence/phase-f-0-recovery-intent-queue-audit.md）:
+    //     判定 = NO-GO（現時点では実装しない）。単一 Producer（CoordinatorLoop）は検証済み不変条件、
+    //     reservation→push→rollback / pop fetchSub は既に実装済み、第2 producer の引き金未発生。
+    //     条件付き GO: 第2 Non-RT producer（例: Timer 直接経路）の設計確定時に実施
+    //     （型置換 + pendingRecoveryAdmission_ 保護 + 2-producer テスト — plan §1.1）。
     static constexpr size_t kRecoveryIntentQueueCapacity = 256;
     LockFreeRingBuffer<RecoveryIntent, kRecoveryIntentQueueCapacity> recoveryIntentQueue_;
     std::atomic<uint64_t> nextRecoveryIntentId_{0};

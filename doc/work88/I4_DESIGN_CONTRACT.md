@@ -7047,6 +7047,10 @@ else:
 > **Phase I NO-GO 維持**: E_w > 0 が確認されたことで measurement instrumentation は機能しているが、
 > M の安全偺上界が未導出のため R / R_cap / T2 への進行要件を満たさない。
 
+<!-- audit: D101-0 M-Bound Mathematical Audit → evidence/phase-d101-0-m-bound-mathematical-audit.md (verdict: INCOMPLETE) -->
+<!-- audit: D101-1 M-Bound Step 2 Counter/Observation Error → evidence/phase-d101-1-m-bound-step2-counter-observation-error.md (verdict: INCOMPLETE) -->
+<!-- audit: D101-1.5 Finite-Bound Source Audit → evidence/phase-d101-1.5-finite-bound-source-audit.md (verdict: NO_FINITE_BOUND → D101 M proof UNPROVABLE, I-T2/R derivation STOP) -->
+
 ------
 
 ## I4.D101 — Authority Boundary for DeletionEntryType::World (D101 #1 Proof Audit)

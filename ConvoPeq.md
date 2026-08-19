@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-19 21:44:52
+> Generated: 2026-08-20 01:01:56
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -39463,6 +39463,14 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     //                FIFO 順序逆転があっても INV-EPOCH-1/2 が保たれていれば UAF は発生しない。
     //   （RCU 整合性: ISO C++ P0279R1 — retire/reclaim の安全性は read-side critical section と
     //     grace period の関係で決まり、単なるキュー処理順序ではない。）
+    //
+    // ★ C-0 事前監査（2026-08-19）: R4 retire 順序（FIFO）の完全解消 — 判定 NO-GO。
+    //   evidence/phase-c-0-r4-retire-order-audit.md 参照。
+    //   - AC-R4-1〜10 全充足（shutdownReclaim 排除・ReclaimAuthority 一本化は実装済み）。
+    //   - 残る「retire 順序逆転の完全解消」は INV-FIFO-1 で secondary（optimization /
+    //     determinism / telemetry）と定義。memory safety ではない。
+    //   - Epoch safety ≠ FIFO — INV-EPOCH-1/2 が既に UAF を保証。FIFO 強化は実装しない。
+    //   - 条件付き GO: FIFO 順序が determinism / telemetry 要件として必須になる設計確定時。
     {
         // 登録は複数スレッド（retireDSPHandleForRuntime）から行われるため、まず排他して抽出。
         // ★ dash2 §2.2 (G14): pendingReclaimHandles_ は ReclaimIdentity（handle + retireSequence）。
@@ -40980,6 +40988,21 @@ void AudioEngine::timerCallback()
         else
             worldRetirementReference_.onMeasurementEnd();
     }
+
+    // ★ I-T2/R (Phase I-T2/R 事前監査 2026-08-19): R_required 導出可能性監査 — verdict B（R = UNDETERMINED）
+    //   T1 telemetry integrity は健全（D83 CLOSED / D99 29/29 PASS / D100 E_w > 0 実証）。
+    //   しかし R_required = R_baseline + B_max(T_stall) + M の導出は以下の proof obligation 未充足で BLOCKED:
+    //   (1) M の数学的バインド（D101）未着手 — D100.5 は「D101 へ引継ぐ」としているが I4_DESIGN_CONTRACT.md
+    //       に ## D101 セクションは存在しない（grep ^## D101 → 0 件）。D82.5 の
+    //       B_max^true ≤ B_max^observed + M は OPEN（実測方法から証明）のまま。
+    //   (2) D94.5/D100.5 は明示的に M = max(E_w) を禁止 — E_w=1 は「O_w ≠ T_w が存在する」の証明にすぎず
+    //       M の安全側上界ではない。
+    //   (3) 観測データ不足 — 3 single-window test runs のみ（normal/burst/jitter 各 1 window）。
+    //       production observation 未実施（evidence/world_retirement_telemetry.json なし）。
+    //       reclaim latency 完全未観測（D101.3 #7 delayed release = OPEN）。
+    //   → R_required は現在の telemetry から導出不能。telemetry の問題（C）ではなく
+    //     proof obligation の未充足（B）。D101 実装 + sustained observation 後に再監査。
+    //   evidence: evidence/phase-i-t2-r-observation-and-derivation-audit.md
 
     emitEvidenceTickNonRt(false);
 
@@ -46333,6 +46356,11 @@ private:
     //     1..seq は全て完了済み — contiguous）。比較は modular（SequenceArithmetic.h — dash2
     //     §1.6.1・wraparound-safe）で仕様化。将来 MPSC completion / parallel publish を許す場合は
     //     sparse completion（completedThrough_ + completedOutOfOrder_）への拡張が必要（現状は不要）。
+    //   ★ H-0 事前監査（2026-08-19, evidence/phase-h-0-publish-receipt-waiter-sparse-completion-audit.md）:
+    //     判定 = NO-GO（現状では実装しない）。現行は O(1) watermark（dense scan なし）で sparse 化は
+    //     状態・計算量を増加させるのみ。単一 completion writer（INV-X2-5）+ FIFO（INV-X2-6）が構造的に
+    //     保証され全 invariant 成立。条件付き GO: 第2 completion writer / parallel publish の設計確定時
+    //     （completedThrough_ + completedOutOfOrder_ 導入 + waitFor 併用 + out-of-order/duplicate/wraparound 統合テスト）。
     //   INV-X2-4: stale completion cannot overwrite newer completion（mutex 下の isAfter 判定 —
     //     seqId が lastCompleted_ より後でなければ更新しない）。
     //   INV-ISR-05: committed ≠ completed。lastCommittedPublicationSequence_（Committed state）と
@@ -56938,6 +56966,11 @@ private:
     //   ⇒ MPSC 化は現時点で不要（LockFreeRingBuffer は SPSC 前提 — 複数 Producer 不可）。
     //   ［将来 Timer 等から直接 submitRecoveryRequest を呼ぶ経路を追加する場合のみ MPSC 化
     //     （MpscBoundedRing 置換 + pendingRecoveryAdmission_ の mutex 保護 — plan §1.1.1）］
+    //   ★ F-0 事前監査（2026-08-19, evidence/phase-f-0-recovery-intent-queue-audit.md）:
+    //     判定 = NO-GO（現時点では実装しない）。単一 Producer（CoordinatorLoop）は検証済み不変条件、
+    //     reservation→push→rollback / pop fetchSub は既に実装済み、第2 producer の引き金未発生。
+    //     条件付き GO: 第2 Non-RT producer（例: Timer 直接経路）の設計確定時に実施
+    //     （型置換 + pendingRecoveryAdmission_ 保護 + 2-producer テスト — plan §1.1）。
     static constexpr size_t kRecoveryIntentQueueCapacity = 256;
     LockFreeRingBuffer<RecoveryIntent, kRecoveryIntentQueueCapacity> recoveryIntentQueue_;
     std::atomic<uint64_t> nextRecoveryIntentId_{0};
@@ -61125,6 +61158,18 @@ struct BuildResult {
     BuildError error = BuildError::None;
     bool prepared = false;
 };
+
+// ★ E-NEXT-6 / Phase D2-0 事前監査（2026-08-19）: PrepareResult 導入 = NO-GO（audit-only で閉じる）。
+//   evidence/phase-d2-0-preparer-result-build-error-propagation-audit.md
+//   - 現行の BuildError + BuildResult + runtime==nullptr 検知 + classifyBuildError（site 3）の
+//     伝播は、全ての現行 failure モード（InvalidInput / ResourceUnavailable / InternalError /
+//     WarmupFailed）に対して十分。prepare → build → caller → publish の chain に semantic loss なし。
+//   - MKLFailure / ConvolverFailure / PrepareFailure は enum+toString のみ（保険分類）で、どの
+//     コードパスからも生成されない。§1.8.5.3 の「一時的 vs InternalError 丸め」不一致は設計レベルで休眠。
+//   - PrepareResult 導入は 10+ prepare サブシステムの status 化（§1.8.12 項目1）を前提とした
+//     大規模侵入的変更で、現行の利益ゼロ。将来 convolver/prepare の実 failure が観測可能になり
+//     subsystem 別 retry 判定が必要になる設計確定時のみ、フル PrepareResult ではなく最小 wiring
+//     （status 伝播 + caller failure check 強化 + buildErrorCount_ telemetry）で対応する。
 
 const char* toString(BuildError error) noexcept;
 

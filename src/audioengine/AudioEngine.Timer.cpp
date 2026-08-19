@@ -448,6 +448,21 @@ void AudioEngine::timerCallback()
             worldRetirementReference_.onMeasurementEnd();
     }
 
+    // ★ I-T2/R (Phase I-T2/R 事前監査 2026-08-19): R_required 導出可能性監査 — verdict B（R = UNDETERMINED）
+    //   T1 telemetry integrity は健全（D83 CLOSED / D99 29/29 PASS / D100 E_w > 0 実証）。
+    //   しかし R_required = R_baseline + B_max(T_stall) + M の導出は以下の proof obligation 未充足で BLOCKED:
+    //   (1) M の数学的バインド（D101）未着手 — D100.5 は「D101 へ引継ぐ」としているが I4_DESIGN_CONTRACT.md
+    //       に ## D101 セクションは存在しない（grep ^## D101 → 0 件）。D82.5 の
+    //       B_max^true ≤ B_max^observed + M は OPEN（実測方法から証明）のまま。
+    //   (2) D94.5/D100.5 は明示的に M = max(E_w) を禁止 — E_w=1 は「O_w ≠ T_w が存在する」の証明にすぎず
+    //       M の安全側上界ではない。
+    //   (3) 観測データ不足 — 3 single-window test runs のみ（normal/burst/jitter 各 1 window）。
+    //       production observation 未実施（evidence/world_retirement_telemetry.json なし）。
+    //       reclaim latency 完全未観測（D101.3 #7 delayed release = OPEN）。
+    //   → R_required は現在の telemetry から導出不能。telemetry の問題（C）ではなく
+    //     proof obligation の未充足（B）。D101 実装 + sustained observation 後に再監査。
+    //   evidence: evidence/phase-i-t2-r-observation-and-derivation-audit.md
+
     emitEvidenceTickNonRt(false);
 
     {

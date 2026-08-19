@@ -79,6 +79,14 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     //                FIFO 順序逆転があっても INV-EPOCH-1/2 が保たれていれば UAF は発生しない。
     //   （RCU 整合性: ISO C++ P0279R1 — retire/reclaim の安全性は read-side critical section と
     //     grace period の関係で決まり、単なるキュー処理順序ではない。）
+    //
+    // ★ C-0 事前監査（2026-08-19）: R4 retire 順序（FIFO）の完全解消 — 判定 NO-GO。
+    //   evidence/phase-c-0-r4-retire-order-audit.md 参照。
+    //   - AC-R4-1〜10 全充足（shutdownReclaim 排除・ReclaimAuthority 一本化は実装済み）。
+    //   - 残る「retire 順序逆転の完全解消」は INV-FIFO-1 で secondary（optimization /
+    //     determinism / telemetry）と定義。memory safety ではない。
+    //   - Epoch safety ≠ FIFO — INV-EPOCH-1/2 が既に UAF を保証。FIFO 強化は実装しない。
+    //   - 条件付き GO: FIFO 順序が determinism / telemetry 要件として必須になる設計確定時。
     {
         // 登録は複数スレッド（retireDSPHandleForRuntime）から行われるため、まず排他して抽出。
         // ★ dash2 §2.2 (G14): pendingReclaimHandles_ は ReclaimIdentity（handle + retireSequence）。

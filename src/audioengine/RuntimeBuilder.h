@@ -192,6 +192,18 @@ struct BuildResult {
     bool prepared = false;
 };
 
+// ★ E-NEXT-6 / Phase D2-0 事前監査（2026-08-19）: PrepareResult 導入 = NO-GO（audit-only で閉じる）。
+//   evidence/phase-d2-0-preparer-result-build-error-propagation-audit.md
+//   - 現行の BuildError + BuildResult + runtime==nullptr 検知 + classifyBuildError（site 3）の
+//     伝播は、全ての現行 failure モード（InvalidInput / ResourceUnavailable / InternalError /
+//     WarmupFailed）に対して十分。prepare → build → caller → publish の chain に semantic loss なし。
+//   - MKLFailure / ConvolverFailure / PrepareFailure は enum+toString のみ（保険分類）で、どの
+//     コードパスからも生成されない。§1.8.5.3 の「一時的 vs InternalError 丸め」不一致は設計レベルで休眠。
+//   - PrepareResult 導入は 10+ prepare サブシステムの status 化（§1.8.12 項目1）を前提とした
+//     大規模侵入的変更で、現行の利益ゼロ。将来 convolver/prepare の実 failure が観測可能になり
+//     subsystem 別 retry 判定が必要になる設計確定時のみ、フル PrepareResult ではなく最小 wiring
+//     （status 伝播 + caller failure check 強化 + buildErrorCount_ telemetry）で対応する。
+
 const char* toString(BuildError error) noexcept;
 
 class RuntimeBuilder {

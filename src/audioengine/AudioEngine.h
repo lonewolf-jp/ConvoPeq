@@ -3677,6 +3677,11 @@ private:
     //     1..seq は全て完了済み — contiguous）。比較は modular（SequenceArithmetic.h — dash2
     //     §1.6.1・wraparound-safe）で仕様化。将来 MPSC completion / parallel publish を許す場合は
     //     sparse completion（completedThrough_ + completedOutOfOrder_）への拡張が必要（現状は不要）。
+    //   ★ H-0 事前監査（2026-08-19, evidence/phase-h-0-publish-receipt-waiter-sparse-completion-audit.md）:
+    //     判定 = NO-GO（現状では実装しない）。現行は O(1) watermark（dense scan なし）で sparse 化は
+    //     状態・計算量を増加させるのみ。単一 completion writer（INV-X2-5）+ FIFO（INV-X2-6）が構造的に
+    //     保証され全 invariant 成立。条件付き GO: 第2 completion writer / parallel publish の設計確定時
+    //     （completedThrough_ + completedOutOfOrder_ 導入 + waitFor 併用 + out-of-order/duplicate/wraparound 統合テスト）。
     //   INV-X2-4: stale completion cannot overwrite newer completion（mutex 下の isAfter 判定 —
     //     seqId が lastCompleted_ より後でなければ更新しない）。
     //   INV-ISR-05: committed ≠ completed。lastCommittedPublicationSequence_（Committed state）と
