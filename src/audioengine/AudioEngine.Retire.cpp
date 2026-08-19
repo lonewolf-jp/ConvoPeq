@@ -34,6 +34,10 @@ namespace
 
 void AudioEngine::tryReclaimResources() noexcept
 {
+    // ★ E-1.9-A: empty-drain suppression — skip if nothing pending
+    if (m_retireRouter->pendingRetireCount() == 0
+        && m_retireRouter->residentCountAtomic() == 0)
+        return;
     convo::fetchAddAtomic(rtAuxMutable_.runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     m_retireRouter->tryReclaim();
 }
@@ -41,6 +45,14 @@ void AudioEngine::tryReclaimResources() noexcept
 void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 {
     if (!allowDuringShutdown && isShutdownInProgress())
+        return;
+
+    // ★ E-1.9-A: empty-drain suppression — skip drain when nothing is pending.
+    //   Lock-free atomic checks only (no mutex on Non-RT path). Shutdown drains
+    //   (allowDuringShutdown=true) are never suppressed.
+    if (!allowDuringShutdown
+        && m_retireRouter->pendingRetireCount() == 0
+        && m_retireRouter->residentCountAtomic() == 0)
         return;
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();

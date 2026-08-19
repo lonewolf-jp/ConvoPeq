@@ -32,6 +32,7 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
 
     std::lock_guard<std::mutex> lock(mtx_);
     entries_.push_back(Entry{ptr, deleter, epoch, type, reason});
+    residentAtomic_.fetch_add(1, std::memory_order_release);
     return true;  // ★ P-4: growable store — ALWAYS accepts
 }
 
@@ -60,6 +61,8 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
         }
         entries_.resize(w);
     }
+    // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
+    residentAtomic_.fetch_sub(static_cast<uint32_t>(pending.size()), std::memory_order_release);
     for (auto& e : pending) {
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
@@ -77,6 +80,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
     {
         std::lock_guard<std::mutex> lock(mtx_);
         pending.swap(entries_);  // take all entries under lock
+        // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
+        residentAtomic_.store(0, std::memory_order_release);
     }
     for (auto& e : pending) {
         if (e.ptr != nullptr && e.deleter != nullptr) {
@@ -279,6 +284,13 @@ RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
                                                         uint64_t epoch,
                                                         DeletionEntryType type) noexcept
 {
+    // ★ B-I3: RT boundary — enqueueWithRetry can reach Q/E/T (mutex + allocation),
+    //   therefore it MUST only be called from Non-RT context. All RT callers use
+    //   retireRT() → enqueueRetire() (D queue only, lock-free).
+    //   NOTE: This assert is a guard rail, not a proof of RT safety — production
+    //   caller enumeration (B-R2-2) is the authoritative verification.
+    jassert(!convo::numeric_policy::isAudioThread());
+
     // ★ P-4: Ownership chain: D → Q → EmergencyQ → TerminalReclaimAuthority
     //   Ownership invariant: ptr を手放す前に、必ず次の authority に ownership が移る。
     //   assert(false) → return という経路は残さない（Release で L > 0 が発生する）。
@@ -310,27 +322,40 @@ RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
             ptr, deleter, epoch, type, "enqueueWithRetry:QueuePressure",
             /*publicationSequenceId=*/0, /*generation=*/0);
         if (stored)
-            return RetireEnqueueResult::QueuePressure;  // Q owns ptr ✅
+            result = RetireEnqueueResult::QueuePressure;  // Q owns ptr ✅
+        else
+        {
+            // ★ P-4: Q full → Stage 4: EmergencyQuarantineStore (E)
+            //   ★ drainAllUnsafe は呼ばない（Audio Thread 稼働中の UAF リスク + 無意味：
+            //     ptr はまだ Q に無いため Q を空にしても空きは増えない）。
+            const bool estored = m_emergencyQuarantine.quarantine(
+                ptr, deleter, epoch, type, "enqueueWithRetry:EmergencyQuarantine",
+                /*publicationSequenceId=*/0, /*generation=*/0);
+            if (estored)
+                result = RetireEnqueueResult::QueuePressure;  // E owns ptr ✅
+            else
+            {
+                // ★ P-4: E full → Stage 5: TerminalReclaimAuthority
+                //   D+Q+E 全滿 → TerminalReclaimAuthority へ移送
+                //   epoch safe かつ Non-RT なら即座に deleter 実行（synchronous destruction）
+                //   epoch unsafe なら保持（drain() が epoch safe になった時に解放）
+                //   ★ P-4: growable store により常に true → ownership は必ず移転。
+                //     assert(false) 経路は存在しない（EBR 破綻による L > 0 は構造的に排除）。
+                const bool tstored = terminalReclaim(ptr, deleter, epoch, type,
+                                                     "enqueueWithRetry:TerminalReclaim");
+                (void)tstored;  // ★ P-4: 常に true（growable store）
+                result = RetireEnqueueResult::TerminalReclaim;  // Terminal owns ptr ✅
+            }
+        }
 
-        // ★ P-4: Q full → Stage 4: EmergencyQuarantineStore (E)
-        //   ★ drainAllUnsafe は呼ばない（Audio Thread 稼働中の UAF リスク + 無意味：
-        //     ptr はまだ Q に無いため Q を空にしても空きは増えない）。
-        const bool estored = m_emergencyQuarantine.quarantine(
-            ptr, deleter, epoch, type, "enqueueWithRetry:EmergencyQuarantine",
-            /*publicationSequenceId=*/0, /*generation=*/0);
-        if (estored)
-            return RetireEnqueueResult::QueuePressure;  // E owns ptr ✅
-
-        // ★ P-4: E full → Stage 5: TerminalReclaimAuthority
-        //   D+Q+E 全滿 → TerminalReclaimAuthority へ移送
-        //   epoch safe かつ Non-RT なら即座に deleter 実行（synchronous destruction）
-        //   epoch unsafe なら保持（drain() が epoch safe になった時に解放）
-        //   ★ P-4: growable store により常に true → ownership は必ず移転。
-        //     assert(false) 経路は存在しない（EBR 破綻による L > 0 は構造的に排除）。
-        const bool tstored = terminalReclaim(ptr, deleter, epoch, type,
-                                             "enqueueWithRetry:TerminalReclaim");
-        (void)tstored;  // ★ P-4: 常に true（growable store）
-        return RetireEnqueueResult::TerminalReclaim;  // Terminal owns ptr ✅
+        // ★ E-1.9-B-R2-1: Single signal point — Q/E/T received an entry.
+        //   The entry is now resident in Q, E, or T (residentAtomic_ has been
+        //   incremented under the store mutex). Signal the CoordinatorLoop
+        //   to wake from CV wait. signalDrainWakeup() acquires drainCvMtx_
+        //   before notify_one (B-R3 fix) — this serializes the notify with the
+        //   consumer's wait transition, eliminating the lost-wake window.
+        signalDrainWakeup();
+        return result;
     }
 
     // ★ P-4: Shutdown — caller retains ownership (enqueueDeferredDeleteNonRtWithResult handles)
@@ -402,6 +427,46 @@ void ISRRetireRouter::drainAllQuarantineStore() noexcept
     m_emergencyQuarantine.drainAllUnsafe();
     // ★ P-4: TerminalReclaimAuthority も全強制解放（Audio Thread 停止後）
     m_terminalReclaim.drainAll();
+}
+
+// ★ E-1.9-B: Signal the CoordinatorLoop that Q/E/T may have new entries.
+//   Non-RT only: all Q/E/T producers are Non-RT (verified B-R2-2 / R3-5).
+//
+//   ★ B-R3 FIX: notify_one MUST be issued while holding drainCvMtx_.
+//   Without the mutex, the following interleaving loses the wake:
+//     Consumer: lock(drainCvMtx_), predicate check → false
+//     Producer: residentAtomic_++ (predicate true), notify_one() → NO waiter yet → LOST
+//     Consumer: wait_for → unlock + block → sleeps until timeout (1ms latency regression)
+//   Acquiring drainCvMtx_ in the signal path serializes the notify with the
+//   consumer's wait transition:
+//     Case 1 (producer first): producer locks, notifies (no waiter), unlocks;
+//       consumer locks, predicate check → TRUE → skips wait entirely.
+//     Case 2 (consumer first): consumer locks, predicate false, enters wait
+//       (atomically releases lock); producer acquires lock, notifies → wakes
+//       consumer; consumer rechecks predicate → TRUE → proceeds immediately.
+//   The resident counter itself stays atomic (NOT protected by drainCvMtx_) —
+//   only the notify participates in the CV synchronization protocol.
+void ISRRetireRouter::signalDrainWakeup() noexcept
+{
+    std::lock_guard<std::mutex> lock(drainCvMtx_);
+    drainCv_.notify_one();
+}
+
+// ★ E-1.9-B: Wait for drain predicate to become true or timeout.
+//   Predicate: pendingRetireCount() != 0 || residentCountAtomic() != 0
+//   These are the SAME E-1.9-A atomic counters used by the empty-drain
+//   suppression gate — Semantic Single Source (no drainSignaled_ state).
+//   timeoutMs fallback preserves the 1ms polling cadence of CoordinatorLoop.
+//   Non-RT only (called from CoordinatorLoop::run).
+void ISRRetireRouter::waitForDrainSignalOrTimeout(int timeoutMs) noexcept
+{
+    std::unique_lock<std::mutex> lock(drainCvMtx_);
+    drainCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs),
+        [&] {
+            return pendingRetireCount() != 0
+                || residentCountAtomic() != 0;
+        });
+    // Predicate true (drain needed) or timeout expired — caller proceeds to runCoordinatorPhase.
 }
 
 // ★ P-4: EmergencyQuarantineStore API — D+Q full 時の第3退避層

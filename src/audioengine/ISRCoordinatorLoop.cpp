@@ -38,7 +38,13 @@ void CoordinatorLoop::run()
         // Non-RT Coordinator phase (processIntent + overflow drain + deferred resubmit).
         engine_.runCoordinatorPhase();
 
-        wait(kIntervalMs);
+        // ★ E-1.9-B: Event-driven wake with 1ms fallback timeout.
+        //   Blocks on drainCv_ until Q/E/T has pending entries (predicate:
+        //   pendingRetireCount() != 0 || residentCountAtomic() != 0) or the
+        //   1ms timeout expires. This preserves the existing 1ms polling cadence
+        //   as a bounded fallback while enabling sub-1ms wake when entries arrive.
+        //   Non-RT only (CoordinatorLoop is a juce::Thread, never RT).
+        engine_.waitForDrainSignalOrTimeout(kIntervalMs);
     }
 }
 

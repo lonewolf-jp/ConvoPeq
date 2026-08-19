@@ -90,6 +90,7 @@ public:
             reason, convo::getCurrentTimeUs()
         };
         ++size_;
+        residentAtomic_.fetch_add(1, std::memory_order_release);
         return true;
     }
 
@@ -128,6 +129,8 @@ public:
             }
             size_ = w;
         }
+        // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
+        residentAtomic_.fetch_sub(static_cast<uint32_t>(pendingCount), std::memory_order_release);
         // unlock 後に deleter 実行（reentrancy / deadlock 回避）
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];   // deleter 実行後に判定（D86.1 の順序維持）
@@ -164,6 +167,8 @@ public:
                 e = QuarantinedEntry{};
             }
             size_ = 0;
+            // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
+            residentAtomic_.store(0, std::memory_order_release);
         }
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];
@@ -184,6 +189,12 @@ public:
     {
         std::lock_guard<std::mutex> lock(mtx_);
         return size_;
+    }
+
+    // ★ E-1.9-A: ロックフリー滞留カウンタ読み取り（empty-drain suppression 用）
+    [[nodiscard]] uint32_t residentCountAtomic() const noexcept
+    {
+        return convo::consumeAtomic(residentAtomic_, std::memory_order_acquire);
     }
 
     // store full 到達（quarantine 拒否）を検出した場合の異常カウンタ
@@ -213,6 +224,10 @@ private:
     std::array<QuarantinedEntry, kMaxQuarantinedEntries> entries_{};
     std::size_t size_ = 0;
     std::uint64_t overflowCount_ = 0;  // store full で quarantine() が拒否した回数（診断用）
+    // ★ E-1.9-A: ロックフリー滞留カウンタ（Phase E §1.9-A empty-drain suppression）
+    //   quarantine() で increment（mutex 下）、drain()/drainAllUnsafe() で decrement/reset。
+    //   RT パスからの空チェック可能（mutex 不要）。Non-RT 専用カウンタ。
+    std::atomic<uint32_t> residentAtomic_{0};
     std::atomic<std::uint64_t> worldReclaimCount_{0};  // ★ T1: world 破棄観測カウンタ（telemetry のみ）
     WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // ★ T1 (D98): non-owning（measurement only）
 };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cassert>
 #include <functional>
@@ -87,6 +88,11 @@ public:
                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
 
     [[nodiscard]] std::size_t residentCount() const noexcept;
+    // ★ E-1.9-A: ロックフリー滞留カウンタ読み取り（empty-drain suppression 用）
+    [[nodiscard]] uint32_t residentCountAtomic() const noexcept
+    {
+        return convo::consumeAtomic(residentAtomic_, std::memory_order_acquire);
+    }
     [[nodiscard]] std::uint64_t reclaimCount() const noexcept {
         return convo::consumeAtomic(reclaimCount_, std::memory_order_acquire);
     }
@@ -110,6 +116,8 @@ private:
     mutable std::mutex mtx_;  // Non-RT only — std::mutex acceptable
     std::atomic<std::uint64_t> reclaimCount_{0};
     WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // non-owning
+    // ★ E-1.9-A: ロックフリー滞留カウンタ（Phase E §1.9-A empty-drain suppression）
+    std::atomic<uint32_t> residentAtomic_{0};
 };
 
 /**
@@ -289,6 +297,32 @@ public:
     // ★ P-4: TerminalReclaimAuthority 滞留件数
     [[nodiscard]] std::size_t terminalReclaimResidentCount() const noexcept;
 
+    // ★ E-1.9-A: Q + EmergencyQ + TerminalReclaimAuthority のロックフリー滞留合計
+    //   empty-drain suppression 用の atomic カウンタ。RT パスから安全に呼び出し可能。
+    [[nodiscard]] uint32_t residentCountAtomic() const noexcept
+    {
+        return m_retireQuarantine.residentCountAtomic()
+             + m_emergencyQuarantine.residentCountAtomic()
+             + m_terminalReclaim.residentCountAtomic();
+    }
+
+    // ★ E-1.9-B: Event-driven drain wake primitive.
+    //   CoordinatorLoop (Non-RT) blocks on drainCv_ with predicate:
+    //     pendingRetireCount() != 0 || residentCountAtomic() != 0
+    //   Producers (enqueueWithRetry, Non-RT only) call signalDrainWakeup()
+    //   after placing an entry in Q/E/T. The predicate reads the E-1.9-A atomic
+    //   counters — no separate drainSignaled_ state is introduced (Semantic
+    //   Single Source: resident count is the sole authority for "has pending").
+    //   ★ B-R3: signalDrainWakeup() acquires drainCvMtx_ before notify_one to
+    //   participate in the CV synchronization protocol (prevents lost-wake).
+    //   Non-RT only: no RT thread ever touches drainCv_ or drainCvMtx_.
+    void signalDrainWakeup() noexcept;
+
+    // ★ E-1.9-B: CoordinatorLoop calls this to block until drain predicate is
+    //   true or timeoutMs elapses. Preserves the 1ms polling fallback.
+    //   Non-RT only (called from CoordinatorLoop::run).
+    void waitForDrainSignalOrTimeout(int timeoutMs) noexcept;
+
     // ★ P-4: TerminalReclaimAuthority の drain（epoch-gated, 定期呼び出し）
     void drainTerminalReclaim() noexcept;
 
@@ -315,6 +349,7 @@ private:
     convo::isr::WorldRetirementReferenceObserver* referenceObserver_ = nullptr;   // ★ T1 (D98): non-owning（measurement only・D97）
     std::atomic<uint64_t> m_overflowCount_{0};
     std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0};
+
     // ★ BUG-015/027: retire enqueue 失敗時の退避ストア（Router Policy lane 配下に単一配置）
     RetireQuarantineStore m_retireQuarantine;
     // ★ P-4: EmergencyQuarantineStore — D+Q full 時の第3退避層（同一タイプ・別インスタンス）
@@ -324,6 +359,21 @@ private:
     // ★ work70: 診断用カウンタ
     std::atomic<uint64_t> m_pendingRetireBytes_{0};
     std::atomic<uint32_t> m_trackedPendingEntries_{0};
+
+    // ★ E-1.9-B: drain wake primitive (Non-RT only)
+    //   drainCv_ / drainCvMtx_ are used by CoordinatorLoop to block on the
+    //   E-1.9-A atomic predicates (pendingRetireCount / residentCountAtomic).
+    //   signalDrainWakeup() is called from enqueueWithRetry (Non-RT producers of
+    //   Q/E/T entries). No RT thread ever touches these — verified by B-R2-2.
+    std::condition_variable drainCv_;
+    std::mutex drainCvMtx_;
+
+    // ★ B-R3/R5: Test-only access for the lost-wake regression test.
+    //   The test class accesses drainCv_ / drainCvMtx_ through this friend to
+    //   deterministically force the "consumer holds lock, producer notifies"
+    //   interleaving. The primitives are NOT exposed as public API — production
+    //   code must go through signalDrainWakeup() / waitForDrainSignalOrTimeout().
+    friend class RetireGraceSemanticsTestAccess;
 };
 
 } // namespace isr

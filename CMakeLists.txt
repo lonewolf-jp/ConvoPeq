@@ -243,6 +243,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
+        src/audioengine/ISRRetireRouter.cpp
     )
 
     # ★ 15-P-4-5-FIX: Tests for drainPendingRetireIntentsForShutdown()
@@ -558,6 +559,11 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
         ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
     )
+    target_link_libraries(RetireGraceSemanticsTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(RetireGraceSemanticsTests ConvoPeq)
+    # ★ E-1.9-A: ISRRetireRouter.cpp をコンパイルするため JUCE_DSP_USE_INTEL_MKL 定義と MKLROOT/include を追加
+    target_compile_definitions(RetireGraceSemanticsTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    target_include_directories(RetireGraceSemanticsTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
     target_include_directories(ShutdownRetireIntentDrainTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src

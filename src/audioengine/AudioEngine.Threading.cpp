@@ -212,6 +212,18 @@ void AudioEngine::processDeferredReleases()
     drainDeferredRetireQueues(false);
 }
 
+// ★ E-1.9-B: Event-driven drain wake with fallback timeout.
+//   Delegates to ISRRetireRouter's CV wait. The predicate is the E-1.9-A atomic
+//   counters (pendingRetireCount / residentCountAtomic) — Semantic Single Source,
+//   no drainSignaled_ state. Non-RT only (CoordinatorLoop context).
+void AudioEngine::waitForDrainSignalOrTimeout(int timeoutMs) noexcept
+{
+    if (m_retireRouter != nullptr)
+        m_retireRouter->waitForDrainSignalOrTimeout(timeoutMs);
+    else
+        juce::Thread::sleep(timeoutMs);  // fallback if router not initialized
+}
+
 //==============================================================================
 // ★ FUTURE-9: Dedicated Coordinator Worker — Scheduling Authority lifecycle.
 //   The periodic Coordinator cadence (processIntent / overflow drain / deferred
@@ -276,4 +288,16 @@ void AudioEngine::runCoordinatorPhase() noexcept
                 m_retireRouter->tryReclaim();
         }
     }
+
+    // ★ E-1.9-B Phase2: Deferred retire drain (Q/E/T).
+    //   Event-driven: CoordinatorLoop wakes via drainCv_ when Q/E/T receives entries
+    //   (signalDrainWakeup() from enqueueWithRetry). The 1ms timeout fallback in
+    //   waitForDrainSignalOrTimeout ensures periodic polling even without signals.
+    //   E-1.9-A empty-guard inside drainDeferredRetireQueues(false) prevents
+    //   wasted work on spurious wakes. Non-shutdown only (allowDuringShutdown=false).
+    //   ★ B-I5: Inserted at END of runCoordinatorPhase, AFTER all existing phases —
+    //   preserves existing phase ordering (processIntent → deferred resubmit → overflow drain).
+    //   Q/E/T drain is the final step, ensuring epoch advances from overflow drain
+    //   are visible before draining retirement stores.
+    drainDeferredRetireQueues(false);
 }

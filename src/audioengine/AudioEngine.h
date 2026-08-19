@@ -4706,6 +4706,10 @@ public:
     void startCoordinatorLoop() noexcept;
     void shutdownCoordinatorLoop() noexcept;
     void runCoordinatorPhase() noexcept;
+    // ★ E-1.9-B: Event-driven drain wake with fallback timeout.
+    //   Delegates to ISRRetireRouter::waitForDrainSignalOrTimeout.
+    //   Non-RT only (called from CoordinatorLoop::run).
+    void waitForDrainSignalOrTimeout(int timeoutMs) noexcept;
     std::unique_ptr<convo::isr::CoordinatorLoop> coordinatorLoop_;
     std::mutex rebuildAdmissionIntentMutex_;
     RebuildAdmissionIntentState rebuildAdmissionPendingIntent_ {};
