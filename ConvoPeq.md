@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-20 01:01:56
+> Generated: 2026-08-20 15:06:54
 
 ## 📁 Directory Tree (Selected Targets Only)
 

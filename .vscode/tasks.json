@@ -710,6 +710,17 @@
 			],
 			"isBackground": false,
 			"group": "test"
+		},
+		{
+			"label": "Create Step 6 evidence doc",
+			"type": "shell",
+			"command": "wsl",
+			"args": [
+				"bash",
+				"-c",
+				"cd /mnt/c/VSC_Project/ConvoPeq && touch evidence/phase-d101-8-step6-k-world-derivation.md && echo done"
+			],
+			"isBackground": false
 		}
 	]
 }

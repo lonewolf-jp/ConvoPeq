@@ -50,7 +50,7 @@ function startProxy() {
     "--mode", "token", "--target-ratio", "0.40", "--memory",
     "--intercept-tool-results", "--rpm", "200", "--tpm", "500000",
     "--keepalive-expiry", "30", "--protect-tool-results", "Bash,WebFetch,Read",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HEADROOM_ROLLOUT_CHANNEL: "canary" } });
 
   const log = (m) => console.error(`[headroom:${PORT}] ${m}`);
   proxy.stdout?.on("data", (d) => { const s = d.toString().trim(); if (s) log(s); });
