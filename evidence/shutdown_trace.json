@@ -9,7 +9,7 @@
   "transitionViolations": 0,
   "sh1_callbackCount": 0,
   "sh2_activeCrossfade": 0,
-  "sh3_pendingRetire": 1,
+  "sh3_pendingRetire": 0,
   "sh4_observerCount": 0,
   "sh5_lateCallbackCount": 0,
   "sh6_postStopEnqueueCount": 0,
@@ -71,9 +71,9 @@
     {
       "reason": "Unknown",
       "count": 1,
-      "maxDurationUs": 9973379816,
-      "firstSeenUs": 9973379816
+      "maxDurationUs": 20231043924,
+      "firstSeenUs": 20231043924
     }
   ],
-  "verified": false
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":9973394962600}
+  "verified": true
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":20231053603900}

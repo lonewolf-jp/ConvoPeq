@@ -188,6 +188,16 @@ void AudioEngine::releaseResources()
     setShutdownPhase(ShutdownPhase::StopWorkers, "releaseResources");
     shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker before drains
     stopRebuildThread();
+
+    // ★★★ Phase 9-A: Q1/Q7 Admission Closure (D101-8 Step 8R code gap fix) ★★★
+    // Producers are joined (Q2), so no new work can be generated.
+    // closeAdmission(): Open→Closing (satisfies Q7 NoResurrection via !isAdmissionOpen()).
+    // joinProducers(): Closing→Closed (satisfies Q1 AdmissionClosed — requires state==Closing).
+    //   NOTE: Thread joins above do NOT update admissionState_ — both calls are required.
+    //   closeAdmission() advances shutdownGeneration_ (identity binding for ReclaimPermit).
+    shutdownRuntime_.closeAdmission();
+    shutdownRuntime_.joinProducers();
+
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ObserverDrained);
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
 
@@ -534,9 +544,11 @@ void AudioEngine::releaseResources()
     //   finalizeShutdown 直後: producer/consumer は既に停止済み (shutdownCoordinatorLoop join,
     //   stopRebuildThread join)。quiescence は確認済み (advanceRetireEpoch, drainAllQuarantineStore).
     //   drainAllNonRt は consume->publish(nullptr,release) single-transfer — owner==nullptr で
-    //   empty slot を検出するため re-drain は no-op。callback は既存 retire chain へ transfer:
-    //     enqueueDeferredDeleteNonRtWithResult(raw, runtimePublishWorldDeleter, World)
-    //       → isShutdownInProgress()==true → shutdownReclaim → terminalReclaim (growable)
+    //   empty slot を検出するため re-drain は no-op。
+    //   ★ Phase I-T1-D101-1F: OwnerChannel residual = pre-publication transport residue.
+    //   publishAndSwap LP を通過していないため W ∉ PublishedDomain — DeletionEntryType::Generic
+    //   （destruction only・no World retirement observation）として既存 DeferredDeletionQueue →
+    //   reclaim → deleter chain へ移譲する。
     //   enqueueRetire は Success|QueuePressure のみ返す (Shutdown は dead code) ため、
     //   callback は既存 authority chain へ ownership を確実に移転する。
     const auto drainedResidual = worldAuthority_.ownerChannel().drainAllNonRt(
@@ -552,7 +564,7 @@ void AudioEngine::releaseResources()
                     ptr->~RuntimePublishWorld();
                     convo::aligned_free(ptr);
                 },
-                DeletionEntryType::World);
+                DeletionEntryType::Generic);
         });
     if (drainedResidual > 0)
         diagLog("[AUDIT] drainAllNonRt residual: reclaimed "

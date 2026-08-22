@@ -1221,6 +1221,14 @@ public:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
     void timerCallback() override;
+    // ★ T1 (G2-1): worldReclaimCount delta → releaseObserved transfer（production/test 共通 step）。
+    //   timerCallback と driveWorldRetirementSamplerForMeasurement の双方から呼ばれ semantic drift を防ぐ。
+    //   実装は AudioEngine.Timer.cpp。releaseObserved の authoritative writer 経路はこの step のみ（D86 案B）。
+    void transferWorldReclaimDeltaForTelemetry() noexcept;
+    // ★ T1 (G2-2): production / test 共通 measurement step（transfer + estimate/max + tag + samplerTick + reference 同期）。
+    //   production 順序契約: 1.transfer 2.estimate 3.max 4.tag 5.samplerTick 6.reference 同期（変更禁止）。
+    //   timerCallback と driveWorldRetirementSamplerForMeasurement の双方から呼ばれる唯一の measurement 実装。
+    void runWorldRetirementMeasurementStep() noexcept;
 
     //----------------------------------------------------------
     // 外部インターフェース (Message Thread)
@@ -4942,15 +4950,18 @@ public:
             worldRetirementTelemetry_.requestMeasurementEnd();
         }
         // ★ T1 (D100): テスト用 — world retirement sampler を手動駆動（JUCE Timer がヘッドレスで動かない場合）。
-        //   timerCallback 内の sampler と同じ処理（samplerTick + reference observer の window 同期）を実行する。
+        //   ★ T1 (G2-2): production timerCallback と同一の measurement step（transfer + estimate/max +
+        //   tag + samplerTick + reference 同期）を実行する。observedOutstandingMax / windowTag も
+        //   production と同一経路で更新される（Telemetry API の直接操作はしない）。
         void driveWorldRetirementSamplerForMeasurement() noexcept
         {
-            auto& telemetry = worldRetirementTelemetry();
-            telemetry.samplerTick(convo::getCurrentTimeUs());
-            if (telemetry.measurementState() == convo::isr::MeasurementState::Running)
-                worldRetirementReference_.onMeasurementStart();
-            else
-                worldRetirementReference_.onMeasurementEnd();
+            runWorldRetirementMeasurementStep();
+        }
+        // ★ T1 (G2-1): テスト用 — storage 側の物理 World 破壊数（authoritative release observation の一次情報源・D86）。
+        //   読み取り専用。measurement authority は変更しない（R1 regression guard の期待値計算に使用）。
+        [[nodiscard]] std::uint64_t worldReclaimCountForMeasurement() const noexcept
+        {
+            return m_retireRouter ? m_retireRouter->worldReclaimCount() : 0;
         }
         // ★ T1 (D100.4): テスト用 — world retirement reclaim を手動駆動（JUCE Timer がヘッドレスで動かない場合）。
         //   production では timerCallback が tryReclaimResources() を定期実行するが、ヘッドレスでは動かないため、

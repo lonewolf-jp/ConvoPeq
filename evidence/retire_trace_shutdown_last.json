@@ -11,11 +11,11 @@
     "laneCoordination": 3,
     "laneEpoch": 3,
     "laneReclaim": 3,
-    "laneQuarantine": 2,
+    "laneQuarantine": 0,
     "lifecycleVisible": 0,
     "lifecycleCompareEligible": 3,
     "lifecycleTelemetryRetained": 3,
-    "lifecycleReplayRetainedOptional": 2,
+    "lifecycleReplayRetainedOptional": 0,
     "lifecycleReclaimEligible": 3,
     "lifecycleReclaimed": 3
   }

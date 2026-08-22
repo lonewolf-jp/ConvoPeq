@@ -34,13 +34,11 @@ public:
 
     // ★ release event（type==World の terminal deleter 成功後・4 箇所）: referenceReleaseCount_++ → running max 更新。
     //   例外・所有権変更・reclaim 再試行なし（retirement control-flow に波及しない・D97）。
-    //   ★ T1 (D100.4): sampler の outstanding 推定（acquireObserved - releaseObserved）を正しくするため、
-    //     telemetry の releaseObserved にも転送する（同一 terminal release を両観測系が観測・D100 の独立観測）。
+    //   ★ T1 (R3 authority fix / D100 separate): reference max 用のみ。telemetry.releaseObserved へは転送しない（separate observation）。
+    //     T1 release measurement の authoritative source は worldReclaimCount → sampler → addReleaseObserved(delta) のみ。
     void onRelease() noexcept
     {
         convo::fetchAddAtomic(referenceReleaseCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-        if (telemetry_ != nullptr)
-            telemetry_->onReleaseObserved();
         updateRunningMax();
     }
 

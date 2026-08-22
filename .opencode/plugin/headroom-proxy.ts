@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+﻿import { spawn } from "node:child_process";
 import http from "node:http";
 
 const PORT = 8787;
@@ -49,8 +49,8 @@ function startProxy() {
     "proxy", "--port", String(PORT), "--host", "127.0.0.1",
     "--mode", "token", "--target-ratio", "0.40", "--memory",
     "--intercept-tool-results", "--rpm", "200", "--tpm", "500000",
-    "--keepalive-expiry", "30", "--protect-tool-results", "Bash,WebFetch,Read",
-  ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HEADROOM_ROLLOUT_CHANNEL: "canary" } });
+    "--keepalive-expiry", "30", "--protect-tool-results", "Bash,WebFetch,Read", "--code-aware",
+  ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HEADROOM_ROLLOUT_CHANNEL: "canary", HEADROOM_SKIP_UPSTREAM_CHECK: "1" } });
 
   const log = (m) => console.error(`[headroom:${PORT}] ${m}`);
   proxy.stdout?.on("data", (d) => { const s = d.toString().trim(); if (s) log(s); });
@@ -85,9 +85,9 @@ export default async () => {
   if (ready) {
     process.env.ANTHROPIC_BASE_URL = BASE;
     process.env.OPENAI_BASE_URL = `${BASE}/v1`;
-    console.error(`[headroom:${PORT}] healthy, ANTHROPIC_BASE_URL → ${BASE}`);
+    console.error(`[headroom:${PORT}] healthy, ANTHROPIC_BASE_URL 竊・${BASE}`);
   } else {
-    console.error(`[headroom:${PORT}] startup timeout — direct API will be used`);
+    console.error(`[headroom:${PORT}] startup timeout 窶・direct API will be used`);
     proxy?.kill();
     proxy = null;
   }
@@ -104,3 +104,4 @@ export default async () => {
 
   return {};
 };
+
