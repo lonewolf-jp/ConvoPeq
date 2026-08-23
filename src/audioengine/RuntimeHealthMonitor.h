@@ -64,6 +64,12 @@ static constexpr uint32_t EVENT_OVERFLOW_RATE_CRITICAL = 1013;
 static constexpr uint32_t EVENT_WORLD_CONSISTENCY_NORMAL      = 7000;
 static constexpr uint32_t EVENT_WORLD_CONSISTENCY_SUSPICIOUS = 7001;
 static constexpr uint32_t EVENT_WORLD_CONSISTENCY_BROKEN     = 7002;
+// ★ D101-9 Step 5-VI-C: Terminal/quarantine chain evidence codes
+//   (1xxx retire-chain family continuation; free numbers verified in 5-VI-B §B-8)
+static constexpr uint32_t EVENT_EMERGENCY_Q_ENGAGED          = 1014;  // Tier 2 Warning
+static constexpr uint32_t EVENT_QUARANTINE_OVERFLOW_DETECTED = 1015;  // Tier 3 Warning (Q+E aggregate)
+static constexpr uint32_t EVENT_TERMINAL_ADMISSION           = 1016;  // Tier 4 Error
+static constexpr uint32_t EVENT_TERMINAL_GROWTH_SUSTAINED    = 1017;  // Tier 5 Error
 // ★ Phase-1.5: Validator Telemetry
 static constexpr uint32_t EVENT_VALIDATION_SEMANTIC_FAILURE     = 6000;
 static constexpr uint32_t EVENT_VALIDATION_TOPOLOGY_FAILURE   = 6001;
@@ -282,6 +288,11 @@ private:
     [[nodiscard]] TrendSnapshot takeSnapshot() const noexcept;
     [[nodiscard]] RecoveryOutcome computeTrend(const TrendSnapshot& before,
                                                 const TrendSnapshot& now) const noexcept;
+    // ★ D101-9 Step 5-VI-C: sole delta-evaluation site for the retire spill chain
+    //   (D→Q→E→Terminal). Raw reads happen only in takeSnapshot(); deltas only here.
+    void evaluateRetireChainTiers(const TrendSnapshot& now,
+                                  const TrendSnapshot& prev) noexcept;
+    void emitTerminalChainEvent(uint32_t eventCode, uint64_t value) noexcept;
     // [work39 Phase 5] Learner FIFO 監視
     void checkLearnerBackpressure() noexcept;
     // ★ P1-C/Practical-2/4/5/6: 追加監視
@@ -304,6 +315,29 @@ private:
     MonitorState m_prevReaderSlotState { MonitorState::Normal };    // ★ Practical-4
     MonitorState m_prevOverflowRateState { MonitorState::Normal };  // ★ Practical-3
     MonitorState m_prevRetireAgeState { MonitorState::Normal };     // ★ Practical-5
+    // ★ D101-9 Step 5-VI-C: retire-chain tier state (Message Thread only — non-atomic)
+    MonitorState m_prevEmergencyQState_{MonitorState::Normal};
+    MonitorState m_prevQuarantineOverflowState_{MonitorState::Normal};
+    TrendSnapshot m_prevTickSnapshot_{};          // authoritative previous sample (5-VI-B B-3)
+    bool m_prevTickSnapshotValid_{false};         // bootstrap guard (Tier 3-5 skip on first tick)
+    bool m_terminalAdmissionLatched_{false};      // Tier 4 episode latch
+    bool m_terminalGrowthSustainedLatched_{false};// Tier 5 latch
+    std::uint8_t m_terminalGrowthTicks_{0};       // consecutive Δresident>0 count (cap 2)
+    std::uint64_t m_lastTerminalEvidenceUs_{0};   // 10 s periodic evidence timer (episode)
+    // Correlation cache — filled by takeSnapshot() (sole raw-read site), consumed on the
+    // rare event-emission path. mutable because takeSnapshot() is const.
+    struct CachedStuckDiagnosis {
+        bool isStuck{false};
+        int32_t readerIndex{-1};
+        std::uint64_t readerEpoch{0};
+        std::uint64_t residencyTimeUs{0};
+    };
+    mutable CachedStuckDiagnosis m_lastStuckDiagnosis_{};
+
+    // ★ D101-9 Step 5-VI-D: minimal test-only seam (priority-3 per Step 5-VI-D §D-14).
+    //   Grants the contract-test access struct entry to the tier state machine and its
+    //   latches. No public API change; no behavior change in production builds.
+    friend struct RuntimeHealthMonitorTierTestAccess;
     std::atomic<ISRHealthState> m_healthState_{ISRHealthState::Healthy};
     // ★ P1-C/Practical-2/4/5/6: 監視用参照
     const convo::isr::CrossfadeRuntime* m_crossfadeRuntime = nullptr;

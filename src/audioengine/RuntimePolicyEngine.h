@@ -81,6 +81,14 @@ struct TrendSnapshot {
     uint64_t lastCompletedEpoch{0};      // 最終完了Epoch ID
     uint64_t publicationGeneration{0};   // Publication世代
     RestorePhase restorePhase{RestorePhase::None};
+    // ★ D101-9 Step 5-VI-C: retire-chain raw observations (5-VI-B §B-2).
+    //   Raw values ONLY — deltas are computed solely by
+    //   RuntimeHealthMonitor::evaluateRetireChainTiers().
+    std::uint64_t terminalStoreCount{0};
+    std::uint64_t terminalReclaimResidentCount{0};
+    std::uint64_t emergencyQuarantineResidentCount{0};
+    std::uint64_t quarantineOverflowCount{0};
+    std::uint64_t minReaderEpoch{0};
 };
 
 // activeFaultMask ビット定義

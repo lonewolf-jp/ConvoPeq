@@ -1,6 +1,8 @@
 #include <JuceHeader.h>
 #include <bit>
 #include "AudioEngine.h"
+#include "BuildErrorPolicy.h"   // ★ D101-24 Step 3: classifyBuildError caller-side policy (scheduler には持ち込まない)
+#include "RetryScheduler.h"     // ★ D101-24 Step 3: RetryScheduleRequest / schedule (4-field only)
 #include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
@@ -1161,11 +1163,29 @@ void AudioEngine::rebuildThreadLoop()
                     + " irFinalized=" + juce::String(static_cast<int>(newDSP->convolverRt().isIRFinalized()))
                     + " irLoading=" + juce::String(static_cast<int>(newDSP->convolverRt().isLoadingIR())));
 
-                if (retryable)
+                // ★ D101-24 Step 3: caller-side policy (BuildError → RetryDisposition), scheduler は 4-field のみ
+                if (retryable && retryScheduler_ != nullptr)
+                {
+                    const auto outcome = convo::classifyBuildError(warmupError);
+                    if (outcome.retry != convo::RetryDisposition::NoRetry)
+                    {
+                        const RetryScheduleRequest req{
+                            convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable
+                        };
+                        retryScheduler_->schedule(req, std::chrono::milliseconds(0));
+                    }
+                }
+                else if (retryable)
+                {
+                    // ★ fallback: scheduler 未生成の異常系（テスト/単体ビルド）では従来経路を維持
                     submitRebuildIntent(convo::RebuildKind::Structural,
                                         RebuildTelemetryReason::RebuildThreadWarmupRetry,
                                         RebuildTelemetryClass::Structural,
                                         RebuildTelemetryPolicy::Replaceable);
+                }
 
                 continue;
             }

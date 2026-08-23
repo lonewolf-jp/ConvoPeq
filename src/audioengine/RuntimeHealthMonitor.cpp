@@ -18,6 +18,16 @@ uint64_t RuntimeHealthMonitor::getRetireStallDurationUs() const noexcept {
 
 void RuntimeHealthMonitor::tick() noexcept {
     checkRetireStall();
+
+    // ★ D101-9 Step 5-VI-C: retire-chain tier evaluation (sole raw-read via takeSnapshot;
+    //   sole delta site per 5-VI-B Gate G1). Message Thread only.
+    {
+        const TrendSnapshot chainNow = takeSnapshot();
+        evaluateRetireChainTiers(chainNow, m_prevTickSnapshot_);
+        m_prevTickSnapshot_ = chainNow;
+        m_prevTickSnapshotValid_ = true;
+    }
+
     checkPublicationStall();
     diagnoseRetireStall();
     checkCrossfadeTimeout();
@@ -621,6 +631,17 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
         const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
         snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
         snap.activeReaderCount = m_retireRouter->activeReaderCount();
+        // ★ D101-9 Step 5-VI-C: retire-chain raw observations (sole raw-read site)
+        snap.terminalStoreCount = m_retireRouter->terminalStoreCount();
+        snap.terminalReclaimResidentCount = m_retireRouter->terminalReclaimResidentCount();
+        snap.emergencyQuarantineResidentCount = m_retireRouter->emergencyQuarantineResidentCount();
+        snap.quarantineOverflowCount = m_retireRouter->quarantineOverflowCount();
+        snap.minReaderEpoch = m_retireRouter->minReaderEpoch();
+        // correlation cache — same-tick diagnosis reuse (no second detection pass)
+        m_lastStuckDiagnosis_.isStuck = stuckInfo.isStuck;
+        m_lastStuckDiagnosis_.readerIndex = stuckInfo.readerIndex;
+        m_lastStuckDiagnosis_.readerEpoch = stuckInfo.readerEpoch;
+        m_lastStuckDiagnosis_.residencyTimeUs = stuckInfo.residencyTimeUs;
     }
     if (m_publicationSequenceRef_)
         snap.publicationSeq = convo::consumeAtomic(*m_publicationSequenceRef_,
@@ -646,6 +667,114 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
     snap.activeFaultMask = faultMask;
     snap.freezeDetected = (m_prevProgressFreezeState_ == MonitorState::Error);
     return snap;
+}
+
+// ★ D101-9 Step 5-VI-C: retire-chain tier evaluation (5-VI-B ratified design).
+//   SOLE site computing terminal/quarantine deltas (Gate C3). Message Thread only.
+//   Tier order fixed per Step 5-VI-C instruction §C-6: Tier2 → deltas → Tier3 → Tier4 → Tier5 → exit.
+void RuntimeHealthMonitor::evaluateRetireChainTiers(
+    const TrendSnapshot& now, const TrendSnapshot& prev) noexcept
+{
+    // ── A. Tier 2: EmergencyQ engaged — absolute gauge (evaluated every tick incl. first).
+    //    Warning/escalation evidence only; NOT a Terminal-fault assertion (E has not
+    //    overflowed to Terminal yet). Episode-latch-free — existing transition pattern.
+    emitOnTransition(m_prevEmergencyQState_,
+                     now.emergencyQuarantineResidentCount > 0 ? MonitorState::Warning
+                                                              : MonitorState::Normal,
+                     HealthEvent::Severity::Warning,
+                     EVENT_EMERGENCY_Q_ENGAGED,
+                     now.emergencyQuarantineResidentCount);
+
+    // Bootstrap tick: no previous sample → deltas undefined; Tiers 3-5 skipped (Gate C4).
+    if (!m_prevTickSnapshotValid_)
+        return;
+
+    // ── B. Signed deltas — raw unsigned subtraction is forbidden (wraparound safety).
+    const int64_t dStore =
+        static_cast<int64_t>(now.terminalStoreCount)
+        - static_cast<int64_t>(prev.terminalStoreCount);
+    const int64_t dResident =
+        static_cast<int64_t>(now.terminalReclaimResidentCount)
+        - static_cast<int64_t>(prev.terminalReclaimResidentCount);
+    const int64_t dOverflow =
+        static_cast<int64_t>(now.quarantineOverflowCount)
+        - static_cast<int64_t>(prev.quarantineOverflowCount);
+
+    // ── C. Tier 3: Q+E AGGREGATE overflow detected (historical evidence).
+    //    The counter sums Q-store and EmergencyQ overflows — it must never be read as an
+    //    "EmergencyQ-only" gauge (5-VI-A §B3 / Step 5-VI-C §C-6-C).
+    emitOnTransition(m_prevQuarantineOverflowState_,
+                     dOverflow > 0 ? MonitorState::Warning : MonitorState::Normal,
+                     HealthEvent::Severity::Warning,
+                     EVENT_QUARANTINE_OVERFLOW_DETECTED,
+                     now.quarantineOverflowCount);
+
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    // ── D. Tier 4: Terminal admission — episode latch (single fire + 10 s periodic evidence).
+    //    One admission is itself proof that D+Q+E absorption (5120) was exceeded.
+    //    Evidence-only: no K comparison, no terminalPeakResident read, no recovery action.
+    if (dStore > 0 && !m_terminalAdmissionLatched_)
+    {
+        m_terminalAdmissionLatched_ = true;
+        emitTerminalChainEvent(EVENT_TERMINAL_ADMISSION, now.terminalStoreCount);
+        m_lastTerminalEvidenceUs_ = nowUs;
+    }
+    else if (m_terminalAdmissionLatched_
+             && nowUs - m_lastTerminalEvidenceUs_ >= kStuckEvidenceIntervalUs)
+    {
+        // Periodic evidence while the episode persists (EVENT_READER_STUCK pattern).
+        emitTerminalChainEvent(EVENT_TERMINAL_ADMISSION, now.terminalStoreCount);
+        m_lastTerminalEvidenceUs_ = nowUs;
+    }
+
+    // ── Tier 5: Terminal sustained growth — resident Δ>0 × 2 consecutive ticks.
+    //    resident is a current-value series: Δ<0 is healthy drain progress, not anomaly.
+    if (dResident > 0)
+    {
+        if (m_terminalGrowthTicks_ < 2)
+            ++m_terminalGrowthTicks_;
+    }
+    else
+    {
+        // Δ == 0 : plateau (arrival paused, epoch still unsafe)  → reset
+        // Δ < 0  : draining (recovery progress)                  → reset
+        m_terminalGrowthTicks_ = 0;
+    }
+    if (m_terminalGrowthTicks_ >= 2 && !m_terminalGrowthSustainedLatched_)
+    {
+        m_terminalGrowthSustainedLatched_ = true;
+        emitTerminalChainEvent(EVENT_TERMINAL_GROWTH_SUSTAINED,
+                               now.terminalReclaimResidentCount);
+    }
+
+    // ── Episode exit (N=1 provisional per 5-VI-B §B-6; independent of CriticalExitCondition's
+    //    global stability gating). Silent clear — 1018 deferred per Step 5-VI-C §C-10.
+    if (m_terminalAdmissionLatched_
+        && now.terminalReclaimResidentCount == 0
+        && dStore == 0)
+    {
+        m_terminalAdmissionLatched_ = false;
+        m_terminalGrowthSustainedLatched_ = false;
+        m_terminalGrowthTicks_ = 0;
+    }
+}
+
+// Terminal-chain event emitter with reader-stuck correlation.
+// Correlation verdict authority remains detectStuckReaders(10) (cached by takeSnapshot);
+// no new stagnation thresholds are introduced (5-VI-B §B-7).
+void RuntimeHealthMonitor::emitTerminalChainEvent(uint32_t eventCode, uint64_t value) noexcept
+{
+    if (!m_callback)
+        return;
+    HealthEvent ev{getCurrentTimeUs(), HealthEvent::Severity::Error, eventCode, value, 0};
+    if (m_lastStuckDiagnosis_.isStuck)
+    {
+        ev.readerIndex     = m_lastStuckDiagnosis_.readerIndex;
+        ev.readerEpoch     = m_lastStuckDiagnosis_.readerEpoch;
+        ev.residencyTimeUs = m_lastStuckDiagnosis_.residencyTimeUs;
+    }
+    m_callback(ev);
 }
 
 // [work39 Phase 3] 傾向判定（computeTrend）
@@ -1254,6 +1383,17 @@ void RuntimeHealthMonitor::reset() noexcept
     // ★ Phase-1.5: Validator Telemetry レート制限タイムスタンプリセット
     for (auto& t : m_lastValidationEventUs_)
         convo::publishAtomic(t, uint64_t{0}, std::memory_order_release);
+
+    // ★ D101-9 Step 5-VI-C: retire-chain tier state reset (no cross-episode carryover)
+    m_prevEmergencyQState_ = MonitorState::Normal;
+    m_prevQuarantineOverflowState_ = MonitorState::Normal;
+    m_prevTickSnapshot_ = TrendSnapshot{};
+    m_prevTickSnapshotValid_ = false;
+    m_terminalAdmissionLatched_ = false;
+    m_terminalGrowthSustainedLatched_ = false;
+    m_terminalGrowthTicks_ = 0;
+    m_lastTerminalEvidenceUs_ = 0;
+    m_lastStuckDiagnosis_ = CachedStuckDiagnosis{};
 }
 
 // ★ Phase-1.5: Validator Telemetry — ValidationFailure を HealthEvent として発行

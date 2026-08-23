@@ -90,7 +90,7 @@ public:
             reason, convo::getCurrentTimeUs()
         };
         ++size_;
-        residentAtomic_.fetch_add(1, std::memory_order_release);
+        convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
         return true;
     }
 
@@ -130,7 +130,7 @@ public:
             size_ = w;
         }
         // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
-        residentAtomic_.fetch_sub(static_cast<uint32_t>(pendingCount), std::memory_order_release);
+        convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(pendingCount), std::memory_order_release);
         // unlock 後に deleter 実行（reentrancy / deadlock 回避）
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];   // deleter 実行後に判定（D86.1 の順序維持）
@@ -168,7 +168,7 @@ public:
             }
             size_ = 0;
             // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
-            residentAtomic_.store(0, std::memory_order_release);
+            convo::publishAtomic(residentAtomic_, static_cast<uint32_t>(0), std::memory_order_release);
         }
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];

@@ -246,6 +246,51 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRRetireRouter.cpp
     )
 
+    # ★ Phase 9-B Step 5-I: Terminal Telemetry Instrumentation Contract Tests (T-5.1-T-5.6)
+    add_executable(TerminalTelemetryContractTests
+        src/tests/TerminalTelemetryContractTests.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_link_libraries(TerminalTelemetryContractTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(TerminalTelemetryContractTests ConvoPeq)
+    target_include_directories(TerminalTelemetryContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_features(TerminalTelemetryContractTests PRIVATE cxx_std_20)
+    target_compile_definitions(TerminalTelemetryContractTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    target_include_directories(TerminalTelemetryContractTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    add_test(NAME TerminalTelemetryContract COMMAND TerminalTelemetryContractTests)
+
+    # ★ D101-9 Step 5-VI-D: HealthMonitor threshold contract tests (Tier 2-5 semantics).
+    #   NOTE: intentionally NO add_dependencies(<Test> ConvoPeq) — that chain breaks with
+    #   the pre-existing ConvoPeq.exe icx Debug link failure and skips these exes.
+    add_executable(RuntimeHealthMonitorTierTests
+        src/tests/RuntimeHealthMonitorTierTests.cpp
+        src/audioengine/RuntimeHealthMonitor.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_link_libraries(RuntimeHealthMonitorTierTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    target_include_directories(RuntimeHealthMonitorTierTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_features(RuntimeHealthMonitorTierTests PRIVATE cxx_std_20)
+    target_compile_options(RuntimeHealthMonitorTierTests PRIVATE /EHsc /utf-8)
+    # ★ min/max macro collision guard: ISRRetireRouter.cpp pulls EpochDomain.h etc. whose
+    #   numeric_limits<T>::max() calls break if windows.h leaks min/max without NOMINMAX.
+    target_compile_definitions(RuntimeHealthMonitorTierTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    add_test(NAME RuntimeHealthMonitorTierTests COMMAND RuntimeHealthMonitorTierTests)
+
     # ★ 15-P-4-5-FIX: Tests for drainPendingRetireIntentsForShutdown()
     add_executable(ShutdownRetireIntentDrainTests
         src/tests/ShutdownRetireIntentDrainTests.cpp
@@ -370,6 +415,39 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(BuildInputSemanticContractTests
         src/tests/BuildInputSemanticContractTests.cpp
     )
+
+    # ★ D101-13 Phase D-3: BuildError Retry Policy Contract Tests
+    #   classifyBuildError() → BuildOutcome 8-value default policy を executable contract として固定
+    #   小さな独立 target（BuildErrorPolicy.h のみ、JUCE非依存ヘッダオンリー）
+    add_executable(BuildErrorClassificationTests
+        src/tests/BuildErrorClassificationTests.cpp
+    )
+    target_compile_features(BuildErrorClassificationTests PRIVATE cxx_std_20)
+    target_compile_options(BuildErrorClassificationTests PRIVATE /EHsc /utf-8)
+    target_include_directories(BuildErrorClassificationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME BuildErrorClassificationTests COMMAND BuildErrorClassificationTests)
+
+    # ★ D-5-2 Step 4-A: RetryScheduler single tests (delay executor)
+    add_executable(RetrySchedulerTests
+        src/tests/RetrySchedulerTests.cpp
+        src/audioengine/RetryScheduler.cpp
+    )
+    target_compile_features(RetrySchedulerTests PRIVATE cxx_std_20)
+    target_compile_options(RetrySchedulerTests PRIVATE /EHsc /utf-8)
+    target_include_directories(RetrySchedulerTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(RetrySchedulerTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    target_link_libraries(RetrySchedulerTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(RetrySchedulerTests ConvoPeq)
+    target_compile_definitions(RetrySchedulerTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    add_test(NAME RetrySchedulerTests COMMAND RetrySchedulerTests)
 
     # ★ Phase3/5: Priority Integration Tests
     # ★ Bug#5: DeferredDeletionQueue reclaim 自動実測テスト
@@ -691,7 +769,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
     add_test(NAME PriorityIntegration COMMAND PriorityIntegrationTests)
 
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TerminalTelemetryContractTests PRIVATE /utf-8)
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
@@ -723,7 +802,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
                      OverlapAuthoritySingularTests ShadowCompareContractTests
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
                      PartialPublicationRejectTests RebuildAdmissionRegressionTests
-                     BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests)
+                     BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests
+                     TerminalTelemetryContractTests)
             target_compile_definitions(${tgt} PRIVATE
                 _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
             )
@@ -740,6 +820,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ShutdownRetireIntentDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -773,6 +854,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     endif()
     target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
         target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /EHsc)
+        target_compile_options(TerminalTelemetryContractTests PRIVATE /EHsc)
     target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /EHsc)
     target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
     target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
@@ -1001,6 +1083,7 @@ set(CONVOPEQ_ALL_SOURCES
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
                 src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0
+                src/audioengine/RetryScheduler.cpp       # ★ D-5-2 Step 4-A: Delayed intent scheduler
                 src/audioengine/WorldLifecycleAudit.cpp
                 src/audioengine/AudioEngine.Processing.Latency.cpp
     src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
@@ -1680,6 +1763,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
+        src/tests/AudioEngineHarness/T1Measurement.cpp
+        src/tests/AudioEngineHarness/T2Measurement.cpp
+        src/tests/AudioEngineHarness/T3Measurement.cpp
+        src/tests/AudioEngineHarness/T4Measurement.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)
@@ -1759,7 +1846,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_link_libraries(AudioEngineHarness PRIVATE IPP::ippcore IPP::ipps)
     endif()
     # JuceHeader.h 生成順序: ConvoPeq (juce_add_gui_app) が生成するため依存させる
-    add_dependencies(AudioEngineHarness ConvoPeq)
+    # ★ 2026-08-XX: AudioEngineHarness はスタンドアロンテスト用途。
+    #   ConvoPeq 依存を外すことで、 icx リンカー問題の影響を回避し独立ビルドできる。
+    # add_dependencies(AudioEngineHarness ConvoPeq)
     add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
 endif()
 
@@ -1783,7 +1872,8 @@ if(ENABLE_ASAN)
         PriorityIntegrationTests GainStagingContractTests EQProcessorMaxGainTests
         EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
         AudioEngineHarness ISRSoakTests
-        ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests)
+        ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
+        TerminalTelemetryContractTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})
             if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")

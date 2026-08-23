@@ -38,6 +38,19 @@ int runDeferredFlowIntegrationTests();
 // WorldRetirementMeasurementTests.cpp (T1 D100・burst test harness)
 bool runWorldRetirementMeasurement(const char* condition);
 
+// T1Measurement.cpp removed — T1 baseline now handled via --t1 flag in main()
+// Forward declaration for T1 baseline measurement
+bool runT1BaselineMeasurement(int durationSec);
+
+// Forward declaration for T2 short-stall measurement
+bool runT2ShortStallMeasurement(int stallMs, int durationSec);
+
+// Forward declaration for T3 long-stall measurement
+bool runT3LongStallMeasurement(int stallSec);
+
+// Forward declaration for T4 repeated-publish measurement (Step 5-III-E)
+bool runT4RepeatedPublishMeasurement(int intervalUs);
+
 // DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
 int runDeferredPublishViewStateMachineTests();
 
@@ -320,21 +333,99 @@ int main(int argc, char* argv[])
 {
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
+    //
+    // ★ Step 5-III-B T1: --t1[=duration_s] で通常運転ベースライン測定を実行。
+    //   AudioEngine を通常運転（publish/rebuild/audio processing）の状態で
+    //   --duration-s 秒間 (default 600s = 10min) 稼働させ、100ms 間隔の
+    //   [D101_9_T5_OBS] ログを stderr へ出力。reader stall を意図的に発生させない。
+
+    // Parse T1 duration override (e.g. --t1=120 or --t1=120s)
+    int t1DurationSec = 600;  // default 10 minutes
+    std::string t1Measurement;  // empty = no T1 mode
+    std::string t2Measurement;  // empty = no T2 mode
+    int t2StallMs = 50;         // default 50ms reader stall
+    std::string t3Measurement;  // empty = no T3 mode
+    int t3StallSec = 5;
+    std::string t4Measurement;  // empty = no T4 mode
+    int t4IntervalUs = 3333;    // default T4-B (~300 pub/s target)
+    std::string measurement;
+    bool full = false;
+    const char* scenario = "all";
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a(argv[i]);
+        if (a == "--soak")
+            full = true;
+        else if (a.rfind("--scenario=", 0) == 0)
+            scenario = argv[i] + std::strlen("--scenario=");
+        else if (a.rfind("--measurement=", 0) == 0)
+            measurement = argv[i] + std::strlen("--measurement=");
+        else if (a == "--t1")
+            t1Measurement = "t1";
+        else if (a.rfind("--t1=", 0) == 0)
+        {
+            t1Measurement = "t1";
+            t1DurationSec = std::stoi(a.substr(5));
+        }
+        else if (a == "--t2")
+        {
+            t2Measurement = "t2";
+            t2StallMs = 50;  // default 50ms stall
+        }
+        else if (a.rfind("--t2=", 0) == 0)
+        {
+            t2Measurement = "t2";
+            t2StallMs = std::stoi(a.substr(5));
+        }
+        else if (a.rfind("--duration-s=", 0) == 0)
+            t1DurationSec = std::stoi(a.substr(13));
+        else if (a == "--t3")
+        {
+            t3Measurement = "t3";
+        }
+        else if (a.rfind("--t3=", 0) == 0)
+        {
+            t3Measurement = "t3";
+            t3StallSec = std::stoi(a.substr(5));
+        }
+        else if (a == "--t4")
+        {
+            t4Measurement = "t4";
+        }
+        else if (a.rfind("--t4=", 0) == 0)
+        {
+            t4Measurement = "t4";
+            t4IntervalUs = std::stoi(a.substr(5));
+        }
+    }
+
+    // ★ T1: baseline measurement mode
+    if (!t1Measurement.empty())
+    {
+        return runT1BaselineMeasurement(t1DurationSec) ? 0 : 1;
+    }
+
+    // ★ T2: short-stall measurement mode
+    if (!t2Measurement.empty())
+    {
+        return runT2ShortStallMeasurement(t2StallMs, 20) ? 0 : 1;
+    }
+
+    // ★ T3: long-stall measurement mode
+    if (!t3Measurement.empty())
+    {
+        return runT3LongStallMeasurement(t3StallSec) ? 0 : 1;
+    }
+
+    // ★ T4: repeated-publish measurement mode (Step 5-III-E, fixed 30 s stall)
+    if (!t4Measurement.empty())
+    {
+        return runT4RepeatedPublishMeasurement(t4IntervalUs) ? 0 : 1;
+    }
+
     if (argc > 1)
     {
-        bool full = false;
-        const char* scenario = "all";
-        std::string measurement;   // ★ T1 (D100): --measurement=normal|burst|jitter|all（burst test harness）
-        for (int i = 1; i < argc; ++i)
-        {
-            const std::string a(argv[i]);
-            if (a == "--soak")
-                full = true;
-            else if (a.rfind("--scenario=", 0) == 0)
-                scenario = argv[i] + std::strlen("--scenario=");
-            else if (a.rfind("--measurement=", 0) == 0)
-                measurement = argv[i] + std::strlen("--measurement=");
-        }
         if (!measurement.empty())
             return runWorldRetirementMeasurement(measurement.c_str()) ? 0 : 1;   // ★ T1 (D100)
         return convo_soak::runSoakScenarios(full, scenario) ? 0 : 1;

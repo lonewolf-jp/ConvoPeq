@@ -97,10 +97,33 @@ public:
         return convo::consumeAtomic(reclaimCount_, std::memory_order_acquire);
     }
 
+    // ★ Step 5-I: Telemetry — peak Terminal occupancy (lock-free observable)
+    //   Updated in store() after residentAtomic_ increment using CAS loop.
+    //   authoritative observation source is residentAtomic_ (E-1.9-A predicate),
+    //   NOT entries_.size() (requires mutex).
+    [[nodiscard]] uint32_t terminalPeakResident() const noexcept {
+        return convo::consumeAtomic(terminalPeakResident_, std::memory_order_acquire);
+    }
+
+    // ★ Step 5-I: Telemetry — cumulative entry store count (Generic + World)
+    [[nodiscard]] std::uint64_t terminalStoreCount() const noexcept {
+        return convo::consumeAtomic(terminalStoreCount_, std::memory_order_acquire);
+    }
+
+    // ★ Step 5-I: Telemetry — cumulative drainAll() invocation count
+    [[nodiscard]] std::uint64_t terminalDrainAllCount() const noexcept {
+        return convo::consumeAtomic(terminalDrainAllCount_, std::memory_order_acquire);
+    }
+
+    // ★ Step 5-I: Telemetry — cumulative entries actually drained by drainAll()
+    [[nodiscard]] std::uint64_t terminalDrainEntryCount() const noexcept {
+        return convo::consumeAtomic(terminalDrainEntryCount_, std::memory_order_acquire);
+    }
+
     // ★ P-4: Record a World reclaim (synchronous destruction path in ISRRetireRouter).
     //   Increments reclaimCount_ and notifies the reference observer (non-owning).
     void recordWorldReclaim() noexcept {
-        ++reclaimCount_;
+        convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
         if (referenceObserver_ != nullptr)
             referenceObserver_->onRelease();
     }
@@ -115,6 +138,11 @@ private:
     std::vector<Entry> entries_;
     mutable std::mutex mtx_;  // Non-RT only — std::mutex acceptable
     std::atomic<std::uint64_t> reclaimCount_{0};
+    // ★ Step 5-I: telemetry members for K_terminal sizing (D101-9 Phase 9-B Step 5)
+    std::atomic<uint32_t> terminalPeakResident_{0};     // peak Terminal resident (lock-free observable)
+    std::atomic<std::uint64_t> terminalStoreCount_{0};   // cumulative store() entry count
+    std::atomic<std::uint64_t> terminalDrainAllCount_{0}; // cumulative drainAll() invocations
+    std::atomic<std::uint64_t> terminalDrainEntryCount_{0}; // cumulative entries drained by drainAll()
     WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // non-owning
     // ★ E-1.9-A: ロックフリー滞留カウンタ（Phase E §1.9-A empty-drain suppression）
     std::atomic<uint32_t> residentAtomic_{0};
@@ -296,6 +324,25 @@ public:
 
     // ★ P-4: TerminalReclaimAuthority 滞留件数
     [[nodiscard]] std::size_t terminalReclaimResidentCount() const noexcept;
+
+    // ★ Step 5-I: Terminal telemetry accessors (for K_terminal sizing)
+    //   These delegate to m_terminalReclaim's telemetry members.
+    [[nodiscard]] uint32_t terminalPeakResident() const noexcept
+    {
+        return m_terminalReclaim.terminalPeakResident();
+    }
+    [[nodiscard]] std::uint64_t terminalStoreCount() const noexcept
+    {
+        return m_terminalReclaim.terminalStoreCount();
+    }
+    [[nodiscard]] std::uint64_t terminalDrainAllCount() const noexcept
+    {
+        return m_terminalReclaim.terminalDrainAllCount();
+    }
+    [[nodiscard]] std::uint64_t terminalDrainEntryCount() const noexcept
+    {
+        return m_terminalReclaim.terminalDrainEntryCount();
+    }
 
     // ★ E-1.9-A: Q + EmergencyQ + TerminalReclaimAuthority のロックフリー滞留合計
     //   empty-drain suppression 用の atomic カウンタ。RT パスから安全に呼び出し可能。

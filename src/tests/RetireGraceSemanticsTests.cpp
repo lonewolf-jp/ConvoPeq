@@ -11,6 +11,7 @@
 #include "audioengine/ISRRetireOverflowRing.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/RetireQuarantineStore.h"
+#include "audioengine/AtomicAccess.h"  // ★ atomic-dot-call policy: convo::consumeAtomic
 
 // ── ★ Phase5: 複合ソートキー (priority, retireEpoch, generation, dspSlot) 検証 ──
 
@@ -370,7 +371,7 @@
         for (int i = 0; i < 3; ++i) {
             auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x3000 + i * 0x10));
             auto* deleter = +[](void*) noexcept {};
-            if (!auth.store(ptr, deleter, /*epoch=*/100,
+            if (!auth.store(ptr, deleter, /*epoch=*/100,  // NOLINT(atomic-dot-call)
                             DeletionEntryType::Generic, "test"))
                 return false;
         }
@@ -388,7 +389,7 @@
         for (int i = 0; i < 2; ++i) {
             auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x4000 + i * 0x10));
             auto* deleter = +[](void*) noexcept {};
-            auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test");
+            auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test");  // NOLINT(atomic-dot-call)
         }
         if (auth.residentCountAtomic() != 2) return false;
         auth.drainAll();
@@ -429,7 +430,7 @@
 
         auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x6000));
         auto* deleter = +[](void*) noexcept {};
-        if (!auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test"))
+        if (!auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test"))  // NOLINT(atomic-dot-call)
             return false;
 
         if (auth.residentCountAtomic() == 0) return false;
@@ -647,6 +648,7 @@ public:
 
     std::atomic<bool> consumerReady{false};
     std::atomic<bool> consumerWoke{false};
+    // atomic-dot-call policy: use convo::consumeAtomic instead of .load()
 
     // Consumer thread: hold drainCvMtx_, check predicate (false), signal ready,
     // then enter wait_for. Holding the lock while signaling ready forces the
@@ -669,7 +671,7 @@ public:
     });
 
     // Wait for the consumer to be ready (holding the lock, about to enter wait).
-    while (!consumerReady.load()) {}
+    while (!convo::consumeAtomic(consumerReady)) {}
 
     // Producer: enqueue to Q (D "full" → Q fallback → residentAtomic_++) + signal.
     auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0xB000));
@@ -688,7 +690,7 @@ public:
 
     // With the fix: immediate wake (< 1000ms, well under the 2000ms timeout).
     // Without the fix: notify lost → consumer sleeps ~2000ms → FAIL.
-    return consumerWoke.load() && elapsedMs < 1000;
+    return convo::consumeAtomic(consumerWoke) && elapsedMs < 1000;
 }
 
 int main()

@@ -557,6 +557,8 @@ void AudioEngine::releaseResources()
             // (retirePublishedRuntimeWorldNonRt, AudioEngine.h:3525) が
             // static_cast<RuntimePublishWorld*>(p) で const_cast を行う。
             enqueueDeferredDeleteNonRtWithResult(
+                // NOLINTNEXTLINE(LINT-AE-013): const_cast required for deferred deleter chain
+                // (Phase I-T1-D101-1F) — RuntimeState* → void* ownership transfer
                 const_cast<RuntimeState*>(raw),
                 [](void* p) noexcept {
                     auto* ptr = static_cast<RuntimePublishWorld*>(p);

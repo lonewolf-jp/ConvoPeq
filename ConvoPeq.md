@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-23 00:09:10
+> Generated: 2026-08-24 00:42:06
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -134,6 +134,7 @@
         │   ├── AudioEngineProcessor.h
         │   ├── AutoGainPlanner.cpp
         │   ├── AutoGainPlanner.h
+        │   ├── BuildErrorPolicy.h
         │   ├── CrossfadeAuthority.cpp
         │   ├── CrossfadeAuthority.h
         │   ├── CrossfadeRuntime.h
@@ -194,6 +195,9 @@
         │   ├── PublicationExecutor.cpp
         │   ├── PublicationExecutor.h
         │   ├── RetireQuarantineStore.h
+        │   ├── RetryScheduler.cpp
+        │   ├── RetryScheduler.h
+        │   ├── RetrySchedulerTypes.h
         │   ├── RuntimeBuildTypes.h
         │   ├── RuntimeBuilder.cpp
         │   ├── RuntimeBuilder.h
@@ -301,7 +305,12 @@
             │   ├── DeferredPublishViewStateMachineTests.cpp
             │   ├── PublishPipelineIntegrationTests.cpp
             │   ├── SoakPublishIntegrationTests.cpp
+            │   ├── T1Measurement.cpp
+            │   ├── T2Measurement.cpp
+            │   ├── T3Measurement.cpp
+            │   ├── T4Measurement.cpp
             │   └── WorldRetirementMeasurementTests.cpp
+            ├── BuildErrorClassificationTests.cpp
             ├── BuildInputSemanticContractTests.cpp
             ├── CrossfadeExecutorLocalContractTests.cpp
             ├── DSPHandleTableTests.cpp
@@ -327,6 +336,8 @@
             ├── PublicationValidatorIsolationTests.cpp
             ├── RebuildAdmissionRegressionTests.cpp
             ├── RetireGraceSemanticsTests.cpp
+            ├── RetrySchedulerTests.cpp
+            ├── RuntimeHealthMonitorTierTests.cpp
             ├── RuntimePublicationCoordinatorTests.cpp
             ├── RuntimeSemanticSchemaValidationTests.cpp
             ├── RuntimeWorldAuthorityProjectionTests.cpp
@@ -334,6 +345,7 @@
             ├── ShadowCompareContractTests.cpp
             ├── ShutdownRetireIntentDrainTests.cpp
             ├── StuckReaderFallbackDrainTests.cpp
+            ├── TerminalTelemetryContractTests.cpp
             └── invariant_INV3_INV5.cpp
 ```
 
@@ -590,6 +602,51 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRRetireRouter.cpp
     )
 
+    # ★ Phase 9-B Step 5-I: Terminal Telemetry Instrumentation Contract Tests (T-5.1-T-5.6)
+    add_executable(TerminalTelemetryContractTests
+        src/tests/TerminalTelemetryContractTests.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_link_libraries(TerminalTelemetryContractTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(TerminalTelemetryContractTests ConvoPeq)
+    target_include_directories(TerminalTelemetryContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_features(TerminalTelemetryContractTests PRIVATE cxx_std_20)
+    target_compile_definitions(TerminalTelemetryContractTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    target_include_directories(TerminalTelemetryContractTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    add_test(NAME TerminalTelemetryContract COMMAND TerminalTelemetryContractTests)
+
+    # ★ D101-9 Step 5-VI-D: HealthMonitor threshold contract tests (Tier 2-5 semantics).
+    #   NOTE: intentionally NO add_dependencies(<Test> ConvoPeq) — that chain breaks with
+    #   the pre-existing ConvoPeq.exe icx Debug link failure and skips these exes.
+    add_executable(RuntimeHealthMonitorTierTests
+        src/tests/RuntimeHealthMonitorTierTests.cpp
+        src/audioengine/RuntimeHealthMonitor.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_link_libraries(RuntimeHealthMonitorTierTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    target_include_directories(RuntimeHealthMonitorTierTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_features(RuntimeHealthMonitorTierTests PRIVATE cxx_std_20)
+    target_compile_options(RuntimeHealthMonitorTierTests PRIVATE /EHsc /utf-8)
+    # ★ min/max macro collision guard: ISRRetireRouter.cpp pulls EpochDomain.h etc. whose
+    #   numeric_limits<T>::max() calls break if windows.h leaks min/max without NOMINMAX.
+    target_compile_definitions(RuntimeHealthMonitorTierTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    add_test(NAME RuntimeHealthMonitorTierTests COMMAND RuntimeHealthMonitorTierTests)
+
     # ★ 15-P-4-5-FIX: Tests for drainPendingRetireIntentsForShutdown()
     add_executable(ShutdownRetireIntentDrainTests
         src/tests/ShutdownRetireIntentDrainTests.cpp
@@ -714,6 +771,39 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_executable(BuildInputSemanticContractTests
         src/tests/BuildInputSemanticContractTests.cpp
     )
+
+    # ★ D101-13 Phase D-3: BuildError Retry Policy Contract Tests
+    #   classifyBuildError() → BuildOutcome 8-value default policy を executable contract として固定
+    #   小さな独立 target（BuildErrorPolicy.h のみ、JUCE非依存ヘッダオンリー）
+    add_executable(BuildErrorClassificationTests
+        src/tests/BuildErrorClassificationTests.cpp
+    )
+    target_compile_features(BuildErrorClassificationTests PRIVATE cxx_std_20)
+    target_compile_options(BuildErrorClassificationTests PRIVATE /EHsc /utf-8)
+    target_include_directories(BuildErrorClassificationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME BuildErrorClassificationTests COMMAND BuildErrorClassificationTests)
+
+    # ★ D-5-2 Step 4-A: RetryScheduler single tests (delay executor)
+    add_executable(RetrySchedulerTests
+        src/tests/RetrySchedulerTests.cpp
+        src/audioengine/RetryScheduler.cpp
+    )
+    target_compile_features(RetrySchedulerTests PRIVATE cxx_std_20)
+    target_compile_options(RetrySchedulerTests PRIVATE /EHsc /utf-8)
+    target_include_directories(RetrySchedulerTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(RetrySchedulerTests SYSTEM PRIVATE "$ENV{MKLROOT}/include")
+    target_link_libraries(RetrySchedulerTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(RetrySchedulerTests ConvoPeq)
+    target_compile_definitions(RetrySchedulerTests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    add_test(NAME RetrySchedulerTests COMMAND RetrySchedulerTests)
 
     # ★ Phase3/5: Priority Integration Tests
     # ★ Bug#5: DeferredDeletionQueue reclaim 自動実測テスト
@@ -1035,7 +1125,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
     add_test(NAME PriorityIntegration COMMAND PriorityIntegrationTests)
 
-    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TerminalTelemetryContractTests PRIVATE /utf-8)
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
@@ -1067,7 +1158,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
                      OverlapAuthoritySingularTests ShadowCompareContractTests
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
                      PartialPublicationRejectTests RebuildAdmissionRegressionTests
-                     BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests)
+                     BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests
+                     TerminalTelemetryContractTests)
             target_compile_definitions(${tgt} PRIVATE
                 _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
             )
@@ -1084,6 +1176,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ShutdownRetireIntentDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -1117,6 +1210,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     endif()
     target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
         target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /EHsc)
+        target_compile_options(TerminalTelemetryContractTests PRIVATE /EHsc)
     target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /EHsc)
     target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
     target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
@@ -1345,6 +1439,7 @@ set(CONVOPEQ_ALL_SOURCES
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
                 src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0
+                src/audioengine/RetryScheduler.cpp       # ★ D-5-2 Step 4-A: Delayed intent scheduler
                 src/audioengine/WorldLifecycleAudit.cpp
                 src/audioengine/AudioEngine.Processing.Latency.cpp
     src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
@@ -2024,6 +2119,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
+        src/tests/AudioEngineHarness/T1Measurement.cpp
+        src/tests/AudioEngineHarness/T2Measurement.cpp
+        src/tests/AudioEngineHarness/T3Measurement.cpp
+        src/tests/AudioEngineHarness/T4Measurement.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)
@@ -2103,7 +2202,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_link_libraries(AudioEngineHarness PRIVATE IPP::ippcore IPP::ipps)
     endif()
     # JuceHeader.h 生成順序: ConvoPeq (juce_add_gui_app) が生成するため依存させる
-    add_dependencies(AudioEngineHarness ConvoPeq)
+    # ★ 2026-08-XX: AudioEngineHarness はスタンドアロンテスト用途。
+    #   ConvoPeq 依存を外すことで、 icx リンカー問題の影響を回避し独立ビルドできる。
+    # add_dependencies(AudioEngineHarness ConvoPeq)
     add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
 endif()
 
@@ -2127,7 +2228,8 @@ if(ENABLE_ASAN)
         PriorityIntegrationTests GainStagingContractTests EQProcessorMaxGainTests
         EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
         AudioEngineHarness ISRSoakTests
-        ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests)
+        ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
+        TerminalTelemetryContractTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})
             if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
@@ -11516,11 +11618,11 @@ inline void system_aligned_free(void* ptr) noexcept
   #ifdef _MSC_VER
     #define DIAG_MKL_MALLOC(size, align) convo::diag::diagMklMalloc((size), (align))
     #define DIAG_MKL_FREE(ptr, size) \
-        convo::diag::diagMklFree((ptr), (size), __FILE_NAME__, __LINE__, __func__)
+        convo::diag::diagMklFree((ptr), (size), __FILE__, __LINE__, __func__)
   #else
     #define DIAG_MKL_MALLOC(size, align) convo::diag::diagMklMalloc((size), (align))
     #define DIAG_MKL_FREE(ptr, size) \
-        convo::diag::diagMklFree((ptr), (size), __FILE__, __LINE__, __func__)
+        convo::diag::diagMklFree((ptr), (size), __FILE_NAME__, __LINE__, __func__)
   #endif
 #else
   // ★ work72: MKL-free ビルドでは抽象化レイヤーを使用
@@ -30606,6 +30708,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RetryScheduler.h" // ★ D101-24 Step 1: complete type for unique_ptr<RetryScheduler> destruction
 #include "core/RuntimeReaderContext.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
@@ -30697,6 +30800,12 @@ AudioEngine::AudioEngine()
 
     // ★ B14: Vyukov MPSC Retire Queue 初期化
     worldAuthority_.lifetime().initQueue();
+
+    // ★ D101-24 Step 2: production DispatchFn wiring (AudioEngine owns → DispatchFn → submitRebuildIntent boundary)
+    //   RetryScheduler owns time/ordering only; BuildError/RetryDisposition stays caller-side.
+    retryScheduler_ = std::make_unique<RetryScheduler>([this](const RetryScheduleRequest& req) noexcept {
+        this->submitRebuildIntent(req.kind, req.reason, req.rebuildClass, req.collapsePolicy);
+    });
 }
 
 AudioEngine::~AudioEngine()
@@ -30716,6 +30825,11 @@ AudioEngine::~AudioEngine()
     stopTimer();
 
     setShutdownPhase(ShutdownPhase::StopWorkers, "~AudioEngine");
+    // ★ D101-24 Step 4: RetryScheduler を先に停止 (stop accepting → clear/discard → prevent callback → join)
+    //   rebuildThread 停止前に scheduler の dispatch を止めないと shutdown 後に submitRebuildIntent が走る。
+    //   member destruction order に依存せず明示 shutdown (idempotent)。
+    if (retryScheduler_)
+        retryScheduler_->shutdown();
     // releaseResources が未実行の異常系でも worker 終了を保証する。
     shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker (defensive)
     stopRebuildThread();
@@ -37765,6 +37879,8 @@ void AudioEngine::releaseResources()
             // (retirePublishedRuntimeWorldNonRt, AudioEngine.h:3525) が
             // static_cast<RuntimePublishWorld*>(p) で const_cast を行う。
             enqueueDeferredDeleteNonRtWithResult(
+                // NOLINTNEXTLINE(LINT-AE-013): const_cast required for deferred deleter chain
+                // (Phase I-T1-D101-1F) — RuntimeState* → void* ownership transfer
                 const_cast<RuntimeState*>(raw),
                 [](void* p) noexcept {
                     auto* ptr = static_cast<RuntimePublishWorld*>(p);
@@ -38138,6 +38254,8 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 #include <JuceHeader.h>
 #include <bit>
 #include "AudioEngine.h"
+#include "BuildErrorPolicy.h"   // ★ D101-24 Step 3: classifyBuildError caller-side policy (scheduler には持ち込まない)
+#include "RetryScheduler.h"     // ★ D101-24 Step 3: RetryScheduleRequest / schedule (4-field only)
 #include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
@@ -39298,11 +39416,29 @@ void AudioEngine::rebuildThreadLoop()
                     + " irFinalized=" + juce::String(static_cast<int>(newDSP->convolverRt().isIRFinalized()))
                     + " irLoading=" + juce::String(static_cast<int>(newDSP->convolverRt().isLoadingIR())));
 
-                if (retryable)
+                // ★ D101-24 Step 3: caller-side policy (BuildError → RetryDisposition), scheduler は 4-field のみ
+                if (retryable && retryScheduler_ != nullptr)
+                {
+                    const auto outcome = convo::classifyBuildError(warmupError);
+                    if (outcome.retry != convo::RetryDisposition::NoRetry)
+                    {
+                        const RetryScheduleRequest req{
+                            convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable
+                        };
+                        retryScheduler_->schedule(req, std::chrono::milliseconds(0));
+                    }
+                }
+                else if (retryable)
+                {
+                    // ★ fallback: scheduler 未生成の異常系（テスト/単体ビルド）では従来経路を維持
                     submitRebuildIntent(convo::RebuildKind::Structural,
                                         RebuildTelemetryReason::RebuildThreadWarmupRetry,
                                         RebuildTelemetryClass::Structural,
                                         RebuildTelemetryPolicy::Replaceable);
+                }
 
                 continue;
             }
@@ -41755,6 +41891,27 @@ void AudioEngine::timerCallback()
     uiConvolverProcessor.cleanup();
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ Step 5-III-A: Periodic Terminal telemetry observation capture (every 100ms timer tick)
+    //   NOT a change-triggered diagnostic — this is a correlated measurement probe.
+    //   Scenario identifier is external/manual (annotated in log post-hoc); no embedded detection logic.
+    {
+        const auto obs = getRuntimeBackpressureTelemetry();
+        const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+        diagLog(diagPrefix(gen)
+            + " [D101_9_T5_OBS]"
+            + " T_store=" + juce::String(static_cast<juce::int64>(obs.terminalStoreCount))
+            + " T_drainAll=" + juce::String(static_cast<juce::int64>(obs.terminalDrainAllCount))
+            + " T_drainEntry=" + juce::String(static_cast<juce::int64>(obs.terminalDrainEntryCount))
+            + " T_peak=" + juce::String(static_cast<int>(obs.terminalPeakResident))
+            + " T_resident=" + juce::String(static_cast<juce::int64>(obs.terminalResident))
+            + " Q_resident=" + juce::String(static_cast<juce::int64>(obs.quarantineResident))
+            + " E_resident=" + juce::String(static_cast<juce::int64>(obs.emergencyQuarantineResident))
+            + " activeReaders=" + juce::String(static_cast<int>(obs.activeReaderCount))
+            + " minEpoch=" + juce::String(static_cast<juce::int64>(obs.minReaderEpoch))
+            + " pendingRetire=" + juce::String(static_cast<int>(obs.pendingRetireCount))
+            + " pressureLevel=" + juce::String(obs.retirePressureLevel));
+    }
+
     // ★ 計測ログ: Backpressure 診断（変化時のみ [BACKPRESSURE] として出力）
     {
         const auto backpressure = getRuntimeBackpressureTelemetry();
@@ -42120,6 +42277,27 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
         + " severity=" + juce::String(static_cast<int>(event.severity))
         + " value=" + juce::String(static_cast<juce::int64>(event.value)));
+
+    // ★ D101-9 Step 5-VI-C: Terminal/quarantine chain evidence.
+    //   Evidence-only — NO recovery action here; recovery stays exclusively on the
+    //   reader-stuck path (EVENT_READER_STUCK → quarantineReader). Single same-tick
+    //   telemetry snapshot read via the existing accessor (no new acquisition path).
+    if (event.eventCode == convo::EVENT_EMERGENCY_Q_ENGAGED
+        || event.eventCode == convo::EVENT_QUARANTINE_OVERFLOW_DETECTED
+        || event.eventCode == convo::EVENT_TERMINAL_ADMISSION
+        || event.eventCode == convo::EVENT_TERMINAL_GROWTH_SUSTAINED)
+    {
+        const auto tp = getRuntimeBackpressureTelemetry();
+        diagLog("[TERMINAL_EVIDENCE] code=" + juce::String(static_cast<int>(event.eventCode))
+            + " T_store=" + juce::String(static_cast<juce::int64>(tp.terminalStoreCount))
+            + " T_resident=" + juce::String(static_cast<juce::int64>(tp.terminalResident))
+            + " pend=" + juce::String(static_cast<juce::int64>(tp.pendingRetireCount))
+            + " E_resident=" + juce::String(static_cast<juce::int64>(tp.emergencyQuarantineResident))
+            + " readers=" + juce::String(static_cast<int>(tp.activeReaderCount))
+            + " minEpoch=" + juce::String(static_cast<juce::int64>(tp.minReaderEpoch))
+            + " readerIdx=" + juce::String(static_cast<int>(event.readerIndex)));
+        return;
+    }
 
     // ★ A-1: Reader Exhaustion → Admission 強制停止 + 診断ダンプ
     if (event.eventCode == convo::EVENT_READER_SLOT_USAGE
@@ -42758,6 +42936,7 @@ struct CoeffSet {
     double k[kDim] = {};
 };
 
+#include "RetrySchedulerTypes.h"
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstdint>
@@ -42823,6 +43002,7 @@ namespace convo::isr { class PublicationAdmission; }
     namespace convo::isr { struct PublishExecutor; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
 class DSPLifetimeManager;
+class RetryScheduler; // ★ D101-24 Step 1: forward-declared (unique_ptr ownership, AudioEngine owns RetryScheduler)
 #include "ISRRuntimeSemanticSchema.h"
 #include "SequenceArithmetic.h"  // ★ dash2 §1.6.1 (Phase H): modular sequence arithmetic（PublishReceiptWaiter）
 #include "ISRRuntimeIdentityGenerators.h"
@@ -44299,6 +44479,19 @@ public:
         std::uint64_t maxRetireDeferralEpochs = 0;
         double maxRetireWallClockMs = 0.0;
         double reclaimLatency = 0.0;
+        // ★ Step 5-I: Terminal telemetry (for K_terminal sizing — Phase 9-B Step 5)
+        std::uint64_t terminalStoreCount = 0;    // cumulative entries stored in Terminal
+        std::uint64_t terminalDrainAllCount = 0; // cumulative drainAll() invocations
+        std::uint64_t terminalDrainEntryCount = 0; // cumulative entries drained by drainAll()
+        uint32_t terminalPeakResident = 0;       // peak Terminal resident count
+        std::size_t terminalResident = 0;        // current Terminal resident count (snapshot)
+        // ★ Step 5-III-A: Observation snapshot fields (for T1-T6 correlated capture)
+        //   These extend RuntimeBackpressureTelemetry as a single-snapshot observation contract.
+        //   NOT modifying HealthMonitor's TrendSnapshot (per instructions).
+        uint32_t activeReaderCount = 0;          // ISRRetireRouter::activeReaderCount()
+        std::uint64_t minReaderEpoch = 0;        // ISRRetireRouter::minReaderEpoch()
+        uint32_t pendingRetireCount = 0;         // ISRRetireRouter::pendingRetireCount() (D queue)
+        std::uint64_t emergencyQuarantineResident = 0;  // ISRRetireRouter::emergencyQuarantineResidentCount() (E only)
     };
 
     // ★ 計測ログ追加: RT-safe XRUN イベント（trivially copyable → LockFreeRingBuffer 対応）
@@ -44360,6 +44553,18 @@ public:
         //   退避ストアの high watermark 監視（backpressure テレメトリ）を維持する。
         const auto retireQuarantineResident = (m_retireRouter != nullptr)
             ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
+        // ★ Step 5-I: Terminal telemetry snapshot
+        const auto terminalResident = (m_retireRouter != nullptr)
+            ? m_retireRouter->terminalReclaimResidentCount() : static_cast<std::size_t>(0);
+        // ★ Step 5-III-A: Q/E/D observation snapshot (single-call consistency)
+        const auto readerCount = (m_retireRouter != nullptr)
+            ? m_retireRouter->activeReaderCount() : 0u;
+        const auto minReader = (m_retireRouter != nullptr)
+            ? m_retireRouter->minReaderEpoch() : std::uint64_t{0};
+        const auto pendingRetire = (m_retireRouter != nullptr)
+            ? m_retireRouter->pendingRetireCount() : 0u;
+        const auto emergencyResident = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->emergencyQuarantineResidentCount()) : 0u;
         return {
             consumeAtomic(retireQueueDepth_, std::memory_order_acquire),
             consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),
@@ -44378,7 +44583,18 @@ public:
             consumeAtomic(retireProtectiveModeEnterCount_, std::memory_order_acquire),
             consumeAtomic(maxRetireDeferralEpochs_, std::memory_order_acquire),
             consumeAtomic(maxRetireWallClockMs_, std::memory_order_acquire),
-            consumeAtomic(reclaimLatency_, std::memory_order_acquire)
+            consumeAtomic(reclaimLatency_, std::memory_order_acquire),
+            // ★ Step 5-I: Terminal telemetry fields
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalStoreCount() : 0,
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalDrainAllCount() : 0,
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalDrainEntryCount() : 0,
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalPeakResident() : 0,
+            terminalResident,
+            // ★ Step 5-III-A: Q/E/D observation snapshot fields
+            readerCount,
+            minReader,
+            pendingRetire,
+            emergencyResident
         };
     }
 
@@ -45354,6 +45570,8 @@ public:
     //   consume/discard → releaseSlot → submitPublishRequest）を実行する。
     //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
     bool publishRetryReady = false;
+    // ★ D101-24 Step 1: production-owned delayed intent scheduler (AudioEngine owns, RetryScheduler non-owning back-ptr)
+    std::unique_ptr<RetryScheduler> retryScheduler_;
 
     struct RebuildTask {
         DSPCore* currentDSP = nullptr;
@@ -45455,60 +45673,12 @@ public:
         Dispatched
     };
 
-    enum class RebuildTelemetryReason : uint8_t
-    {
-        ConvolverParamsChanged,
-        MixedPhaseIntermediate,
-        HashDedup,
-        PreparedIRApplyWindow,
-        SnapshotEnqueueFailed,
-        SnapshotEnqueued,
-        RequestRebuildKindEntry,
-        UiEqEditorChangeListener,
-        PrepareToPlayNonMt,
-        RebuildThreadWarmupRetry,
-        ShutdownInProgress,
-        KindFiltered,
-        DelegateRequestRebuildSrBs,
-        MissingSrBs,
-        NonMtTriggerAsync,
-        NonMtAlreadyPending,
-        AsyncBridgeConsume,
-        AsyncBridgeDelegateSrBs,
-        AsyncBridgeMissingSrBs,
-        RequestRebuildSrBs,
-        DeferredStructuralWindow,
-        TaskQueued,
-        RecentDuplicate,
-        PendingDuplicate,
-        DeferredStructuralDue,
-        DeferredStructuralRebuildRequested,
-        DeferredFinalizeReady,
-        DeferredFinalizeRebuildRequested,
-        EnqueueSnapshotCommand,
-        SnapshotIntentDebounced,
-        SnapshotCommandBufferFull,
-        SnapshotCommandQueued,
-        SnapshotCommandBufferFullNonMt,
-        SnapshotCommandQueuedNonMt,
-        RetirePressureSevere,
-        SameAsPendingWouldMerge
-    };
+    // ★ D-5-2 Step 1: 3 telemetry enums extracted to RetrySchedulerTypes.h
+    //   (RebuildKind remains in core/RebuildTypes.h; global enums exposed via using-declarations)
+    using RebuildTelemetryReason = ::RebuildTelemetryReason;
+    using RebuildTelemetryClass = ::RebuildTelemetryClass;
+    using RebuildTelemetryPolicy = ::RebuildTelemetryPolicy;
 
-    enum class RebuildTelemetryClass : uint8_t
-    {
-        NA,
-        Structural,
-        FinalizeAware,
-        Snapshot
-    };
-
-    enum class RebuildTelemetryPolicy : uint8_t
-    {
-        NA,
-        Replaceable,
-        MustExecute
-    };
     enum class RebuildTelemetryDecision : uint8_t
     {
         Accepted,
@@ -48230,6 +48400,94 @@ public:
 };
 
 #pragma warning(pop)
+
+```
+
+### 📄 `src\audioengine\BuildErrorPolicy.h`
+
+```
+#pragma once
+// BuildErrorPolicy.h — D101-13 Phase D-3
+// Extracted policy contract (BuildError / FailureClassification / RetryDisposition / BuildOutcome)
+// to allow standalone contract tests without pulling AudioEngine.h / JUCE.
+
+#include <cstddef>
+#include <cstdint>
+
+namespace convo {
+
+enum class BuildError {
+    None,
+    InvalidInput,
+    ResourceUnavailable,
+    MKLFailure,          // ★ C-2: MKL 初期化・FFT 計画失敗
+    ConvolverFailure,    // ★ C-2: Convolver Build 失敗
+    PrepareFailure,      // ★ C-2: DSPCore::prepare() 失敗
+    WarmupFailed,
+    InternalError
+};
+
+// ── ★ dash2 §1.8 (Phase D — H.11.2 / §1.8.5.2): retryability の分類分離 ──
+enum class FailureClassification : uint8_t {
+    Permanent,       // retry 無意味（InvalidInput）
+    Transient,       // retry 有効（ResourceUnavailable / WarmupFailed）
+    Infrastructure,  // retry 有効・環境依存（ConvolverFailure / PrepareFailure）
+    Fatal            // retry 無意味・異常終了（InternalError / MKLFailure）
+};
+
+enum class RetryDisposition : uint8_t {
+    NoRetry,         // retry 禁止（Permanent / Fatal）
+    RetryBackoff,    // exponential backoff 付き retry（Transient / Infrastructure）
+    RetryImmediate   // immediate retry（WarmupFailed 等 latency-sensitive）
+};
+
+struct BuildOutcome {
+    BuildError error = BuildError::None;
+    FailureClassification classification = FailureClassification::Fatal;
+    RetryDisposition retry = RetryDisposition::NoRetry;
+};
+
+// ★ §1.8.10.3: constexpr descriptor table
+constexpr BuildOutcome kBuildErrorDefaultTable[] = {
+    /* None */              { BuildError::None,              FailureClassification::Permanent,      RetryDisposition::NoRetry },
+    /* InvalidInput */      { BuildError::InvalidInput,      FailureClassification::Permanent,      RetryDisposition::NoRetry },
+    /* ResourceUnavailable */{ BuildError::ResourceUnavailable, FailureClassification::Transient,   RetryDisposition::RetryBackoff },
+    /* MKLFailure */        { BuildError::MKLFailure,        FailureClassification::Fatal,          RetryDisposition::NoRetry },
+    /* ConvolverFailure */  { BuildError::ConvolverFailure,  FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
+    /* PrepareFailure */    { BuildError::PrepareFailure,    FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
+    /* WarmupFailed */      { BuildError::WarmupFailed,      FailureClassification::Transient,      RetryDisposition::RetryImmediate },
+    /* InternalError */     { BuildError::InternalError,     FailureClassification::Fatal,          RetryDisposition::NoRetry },
+};
+static_assert(sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome)
+                  == static_cast<size_t>(BuildError::InternalError) + 1,
+              "kBuildErrorDefaultTable must cover all BuildError values");
+
+constexpr const char* kBuildErrorNames[] = {
+    "None", "InvalidInput", "ResourceUnavailable", "MKLFailure",
+    "ConvolverFailure", "PrepareFailure", "WarmupFailed", "InternalError"
+};
+static_assert(sizeof(kBuildErrorNames) / sizeof(const char*)
+                  == static_cast<size_t>(BuildError::InternalError) + 1,
+              "kBuildErrorNames must cover all BuildError values");
+
+// ★ §1.8.5.2 / H.11.2: BuildError → デフォルト分類の解決。
+[[nodiscard]] inline BuildOutcome classifyBuildError(BuildError error) noexcept
+{
+    const auto idx = static_cast<size_t>(error);
+    if (idx >= sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome))
+        return { BuildError::InternalError, FailureClassification::Fatal, RetryDisposition::NoRetry };
+    return kBuildErrorDefaultTable[idx];
+}
+
+[[nodiscard]] inline const char* classifyBuildErrorToString(BuildError error) noexcept
+{
+    const auto idx = static_cast<size_t>(error);
+    if (idx >= sizeof(kBuildErrorNames) / sizeof(const char*))
+        return "Unknown";
+    return kBuildErrorNames[idx];
+}
+
+} // namespace convo
 
 ```
 
@@ -52508,14 +52766,14 @@ public:
     [[nodiscard]] bool consume() noexcept
     {
         State expected = State::Issued;
-        return state_.compare_exchange_strong(expected, State::Consumed,
+        return convo::compareExchangeAtomic(state_, expected, State::Consumed,
                                               std::memory_order_acq_rel,
                                               std::memory_order_acquire);
     }
 
     [[nodiscard]] bool isConsumed() const noexcept
     {
-        return state_.load(std::memory_order_acquire) == State::Consumed;
+        return convo::consumeAtomic(state_, std::memory_order_acquire) == State::Consumed;
     }
 
 private:
@@ -53740,7 +53998,20 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
 
     std::lock_guard<std::mutex> lock(mtx_);
     entries_.push_back(Entry{ptr, deleter, epoch, type, reason});
-    residentAtomic_.fetch_add(1, std::memory_order_release);
+    // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_add)
+    convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
+    // ★ Step 5-I: telemetry — cumulative store count (Generic + World)
+    convo::fetchAddAtomic(terminalStoreCount_, std::uint64_t{1}, std::memory_order_release);
+    // ★ Step 5-I: telemetry — peak resident update (CAS loop, uses residentAtomic_ as authoritative source)
+    {
+        const uint32_t current = convo::consumeAtomic(residentAtomic_, std::memory_order_acquire);
+        uint32_t expected = convo::consumeAtomic(terminalPeakResident_, std::memory_order_acquire);
+        while (current > expected) {
+            if (convo::compareExchangeAtomic(terminalPeakResident_, expected, current,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
     return true;  // ★ P-4: growable store — ALWAYS accepts
 }
 
@@ -53770,12 +54041,14 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
         entries_.resize(w);
     }
     // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
-    residentAtomic_.fetch_sub(static_cast<uint32_t>(pending.size()), std::memory_order_release);
+    // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_sub)
+    convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(pending.size()), std::memory_order_release);
     for (auto& e : pending) {
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
         {
-            ++reclaimCount_;
+            // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw ++)
+            convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             if (referenceObserver_ != nullptr)
                 referenceObserver_->onRelease();
         }
@@ -53784,19 +54057,25 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
 
 void TerminalReclaimAuthority::drainAll() noexcept
 {
+    // ★ Step 5-I: telemetry — increment drainAll invocation count
+    convo::fetchAddAtomic(terminalDrainAllCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     std::vector<Entry> pending;
     {
         std::lock_guard<std::mutex> lock(mtx_);
         pending.swap(entries_);  // take all entries under lock
         // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
-        residentAtomic_.store(0, std::memory_order_release);
+        // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw store)
+        convo::publishAtomic(residentAtomic_, uint32_t{0}, std::memory_order_release);
     }
     for (auto& e : pending) {
         if (e.ptr != nullptr && e.deleter != nullptr) {
             e.deleter(e.ptr);
+            // ★ Step 5-I: telemetry — count actually drained entries
+            convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1}, std::memory_order_release);
             if (e.type == DeletionEntryType::World)
             {
-                ++reclaimCount_;
+                // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw ++)
+                convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
                 if (referenceObserver_ != nullptr)
                     referenceObserver_->onRelease();
             }
@@ -54216,7 +54495,7 @@ bool ISRRetireRouter::terminalReclaim(void* ptr, void (*deleter)(void*), uint64_
 
     // epoch unsafe OR RT caller → store for later drain
     // ★ P-4: growable store — ALWAYS accepts (ownership always transfers)
-    return m_terminalReclaim.store(ptr, deleter, epoch, type, reason);
+    return m_terminalReclaim.store(ptr, deleter, epoch, type, reason);  // NOLINT(atomic-dot-call)
 }
 
 // ★ P-4: TerminalReclaimAuthority 滞留件数
@@ -54407,10 +54686,33 @@ public:
         return convo::consumeAtomic(reclaimCount_, std::memory_order_acquire);
     }
 
+    // ★ Step 5-I: Telemetry — peak Terminal occupancy (lock-free observable)
+    //   Updated in store() after residentAtomic_ increment using CAS loop.
+    //   authoritative observation source is residentAtomic_ (E-1.9-A predicate),
+    //   NOT entries_.size() (requires mutex).
+    [[nodiscard]] uint32_t terminalPeakResident() const noexcept {
+        return convo::consumeAtomic(terminalPeakResident_, std::memory_order_acquire);
+    }
+
+    // ★ Step 5-I: Telemetry — cumulative entry store count (Generic + World)
+    [[nodiscard]] std::uint64_t terminalStoreCount() const noexcept {
+        return convo::consumeAtomic(terminalStoreCount_, std::memory_order_acquire);
+    }
+
+    // ★ Step 5-I: Telemetry — cumulative drainAll() invocation count
+    [[nodiscard]] std::uint64_t terminalDrainAllCount() const noexcept {
+        return convo::consumeAtomic(terminalDrainAllCount_, std::memory_order_acquire);
+    }
+
+    // ★ Step 5-I: Telemetry — cumulative entries actually drained by drainAll()
+    [[nodiscard]] std::uint64_t terminalDrainEntryCount() const noexcept {
+        return convo::consumeAtomic(terminalDrainEntryCount_, std::memory_order_acquire);
+    }
+
     // ★ P-4: Record a World reclaim (synchronous destruction path in ISRRetireRouter).
     //   Increments reclaimCount_ and notifies the reference observer (non-owning).
     void recordWorldReclaim() noexcept {
-        ++reclaimCount_;
+        convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
         if (referenceObserver_ != nullptr)
             referenceObserver_->onRelease();
     }
@@ -54425,6 +54727,11 @@ private:
     std::vector<Entry> entries_;
     mutable std::mutex mtx_;  // Non-RT only — std::mutex acceptable
     std::atomic<std::uint64_t> reclaimCount_{0};
+    // ★ Step 5-I: telemetry members for K_terminal sizing (D101-9 Phase 9-B Step 5)
+    std::atomic<uint32_t> terminalPeakResident_{0};     // peak Terminal resident (lock-free observable)
+    std::atomic<std::uint64_t> terminalStoreCount_{0};   // cumulative store() entry count
+    std::atomic<std::uint64_t> terminalDrainAllCount_{0}; // cumulative drainAll() invocations
+    std::atomic<std::uint64_t> terminalDrainEntryCount_{0}; // cumulative entries drained by drainAll()
     WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // non-owning
     // ★ E-1.9-A: ロックフリー滞留カウンタ（Phase E §1.9-A empty-drain suppression）
     std::atomic<uint32_t> residentAtomic_{0};
@@ -54606,6 +54913,25 @@ public:
 
     // ★ P-4: TerminalReclaimAuthority 滞留件数
     [[nodiscard]] std::size_t terminalReclaimResidentCount() const noexcept;
+
+    // ★ Step 5-I: Terminal telemetry accessors (for K_terminal sizing)
+    //   These delegate to m_terminalReclaim's telemetry members.
+    [[nodiscard]] uint32_t terminalPeakResident() const noexcept
+    {
+        return m_terminalReclaim.terminalPeakResident();
+    }
+    [[nodiscard]] std::uint64_t terminalStoreCount() const noexcept
+    {
+        return m_terminalReclaim.terminalStoreCount();
+    }
+    [[nodiscard]] std::uint64_t terminalDrainAllCount() const noexcept
+    {
+        return m_terminalReclaim.terminalDrainAllCount();
+    }
+    [[nodiscard]] std::uint64_t terminalDrainEntryCount() const noexcept
+    {
+        return m_terminalReclaim.terminalDrainEntryCount();
+    }
 
     // ★ E-1.9-A: Q + EmergencyQ + TerminalReclaimAuthority のロックフリー滞留合計
     //   empty-drain suppression 用の atomic カウンタ。RT パスから安全に呼び出し可能。
@@ -60050,7 +60376,7 @@ public:
             reason, convo::getCurrentTimeUs()
         };
         ++size_;
-        residentAtomic_.fetch_add(1, std::memory_order_release);
+        convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
         return true;
     }
 
@@ -60090,7 +60416,7 @@ public:
             size_ = w;
         }
         // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
-        residentAtomic_.fetch_sub(static_cast<uint32_t>(pendingCount), std::memory_order_release);
+        convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(pendingCount), std::memory_order_release);
         // unlock 後に deleter 実行（reentrancy / deadlock 回避）
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];   // deleter 実行後に判定（D86.1 の順序維持）
@@ -60128,7 +60454,7 @@ public:
             }
             size_ = 0;
             // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
-            residentAtomic_.store(0, std::memory_order_release);
+            convo::publishAtomic(residentAtomic_, static_cast<uint32_t>(0), std::memory_order_release);
         }
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];
@@ -60194,6 +60520,255 @@ private:
 
 } // namespace isr
 } // namespace convo
+
+```
+
+### 📄 `src\audioengine\RetryScheduler.cpp`
+
+```
+#include "RetryScheduler.h"
+
+RetryScheduler::RetryScheduler(DispatchFn dispatch) noexcept
+    : dispatch_(std::move(dispatch))
+{
+    try {
+        worker_ = std::thread(&RetryScheduler::run, this);
+    } catch (...) {
+        shouldExit_ = true;
+    }
+}
+
+RetryScheduler::~RetryScheduler() noexcept
+{
+    shutdown();
+}
+
+void RetryScheduler::schedule(RetryScheduleRequest request,
+                              std::chrono::milliseconds delay) noexcept
+{
+    const auto deadline = std::chrono::steady_clock::now() + delay;
+    const PendingRetry entry{ request, deadline };
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (shouldExit_) {
+        ++rejectCount_;
+        return;
+    }
+    if (queue_.size() >= kCapacity) {
+        ++rejectCount_;
+        return;
+    }
+    try {
+        // deadline ascending insertion (stable for equal deadlines)
+        auto it = queue_.begin();
+        for (; it != queue_.end(); ++it) {
+            if (deadline < it->deadline) break;
+        }
+        queue_.insert(it, entry);
+    } catch (...) {
+        ++rejectCount_;
+        return;
+    }
+    lock.unlock();
+    cv_.notify_all();
+}
+
+void RetryScheduler::shutdown() noexcept
+{
+    bool doJoin = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shouldExit_) return;
+        shouldExit_ = true;
+        queue_.clear();
+        doJoin = true;
+    }
+    cv_.notify_all();
+    if (doJoin && worker_.joinable()) {
+        try { worker_.join(); } catch (...) {}
+    }
+}
+
+std::size_t RetryScheduler::pendingCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.size();
+}
+
+uint64_t RetryScheduler::rejectCount() const noexcept
+{
+    return rejectCount_.load(std::memory_order_relaxed);
+}
+
+void RetryScheduler::run() noexcept
+{
+    while (true) {
+        PendingRetry pending{};
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            while (!shouldExit_ && queue_.empty()) {
+                cv_.wait(lock);
+            }
+            if (shouldExit_) return;
+            // wait until front deadline
+            const auto deadline = queue_.front().deadline;
+            const auto status = cv_.wait_until(lock, deadline);
+            if (shouldExit_) return;
+            if (status == std::cv_status::timeout) {
+                // deadline reached if still front and deadline <= now
+                const auto now = std::chrono::steady_clock::now();
+                if (queue_.empty()) continue;
+                if (queue_.front().deadline > now) continue; // spurious or earlier wake due to new earlier deadline
+                pending = queue_.front();
+                queue_.pop_front();
+            } else {
+                // woken by schedule() with earlier deadline or shutdown
+                continue;
+            }
+        }
+        // unlock before dispatch to avoid lock-order coupling (single production path via DispatchFn)
+        if (dispatch_) {
+            dispatch_(pending.request);
+        }
+    }
+}
+
+```
+
+### 📄 `src\audioengine\RetryScheduler.h`
+
+```
+#pragma once
+// RetryScheduler.h — D-5-2 Step 4-A: RetryScheduler minimal scheduler
+// RetryScheduleRequest + PendingRetry + RetryScheduler class declarations.
+// Depends only on RebuildKind (core/RebuildTypes.h) + telemetry enums.
+// Engine dispatch is via injected callback to avoid AudioEngine.h dependency.
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
+
+#include "core/RebuildTypes.h"
+#include "RetrySchedulerTypes.h"
+
+struct RetryScheduleRequest
+{
+    convo::RebuildKind kind;
+    RebuildTelemetryReason reason;
+    RebuildTelemetryClass rebuildClass;
+    RebuildTelemetryPolicy collapsePolicy;
+};
+
+struct PendingRetry
+{
+    RetryScheduleRequest request;
+    std::chrono::steady_clock::time_point deadline;
+};
+
+class RetryScheduler
+{
+public:
+    using DispatchFn = std::function<void(const RetryScheduleRequest&)>;
+
+    explicit RetryScheduler(DispatchFn dispatch) noexcept;
+    ~RetryScheduler() noexcept;
+
+    void schedule(RetryScheduleRequest request,
+                  std::chrono::milliseconds delay) noexcept;
+
+    void shutdown() noexcept;
+
+    [[nodiscard]] std::size_t pendingCount() const noexcept;
+    [[nodiscard]] std::uint64_t rejectCount() const noexcept;
+
+private:
+    void run() noexcept;
+
+    DispatchFn dispatch_;
+
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<PendingRetry> queue_;
+
+    std::atomic<bool> shouldExit_{false};
+    std::atomic<uint64_t> rejectCount_{0};
+
+    std::thread worker_;
+
+    static constexpr std::size_t kCapacity = 8;
+};
+
+```
+
+### 📄 `src\audioengine\RetrySchedulerTypes.h`
+
+```
+#pragma once
+// RetrySchedulerTypes.h — D-5-2 Step 1: enum-only extraction from AudioEngine.h
+// Contains the 3 rebuild telemetry semantic types used by submitRebuildIntent().
+// RebuildKind remains in core/RebuildTypes.h.
+// This header includes only <cstdint>; RebuildKind is NOT redefined here.
+
+#include <cstdint>
+
+enum class RebuildTelemetryReason : uint8_t
+{
+    ConvolverParamsChanged,
+    MixedPhaseIntermediate,
+    HashDedup,
+    PreparedIRApplyWindow,
+    SnapshotEnqueueFailed,
+    SnapshotEnqueued,
+    RequestRebuildKindEntry,
+    UiEqEditorChangeListener,
+    PrepareToPlayNonMt,
+    RebuildThreadWarmupRetry,
+    ShutdownInProgress,
+    KindFiltered,
+    DelegateRequestRebuildSrBs,
+    MissingSrBs,
+    NonMtTriggerAsync,
+    NonMtAlreadyPending,
+    AsyncBridgeConsume,
+    AsyncBridgeDelegateSrBs,
+    AsyncBridgeMissingSrBs,
+    RequestRebuildSrBs,
+    DeferredStructuralWindow,
+    TaskQueued,
+    RecentDuplicate,
+    PendingDuplicate,
+    DeferredStructuralDue,
+    DeferredStructuralRebuildRequested,
+    DeferredFinalizeReady,
+    DeferredFinalizeRebuildRequested,
+    EnqueueSnapshotCommand,
+    SnapshotIntentDebounced,
+    SnapshotCommandBufferFull,
+    SnapshotCommandQueued,
+    SnapshotCommandBufferFullNonMt,
+    SnapshotCommandQueuedNonMt,
+    RetirePressureSevere,
+    SameAsPendingWouldMerge
+};
+
+enum class RebuildTelemetryClass : uint8_t
+{
+    NA,
+    Structural,
+    FinalizeAware,
+    Snapshot
+};
+
+enum class RebuildTelemetryPolicy : uint8_t
+{
+    NA,
+    Replaceable,
+    MustExecute
+};
 
 ```
 
@@ -61020,6 +61595,7 @@ BuildError RuntimeBuilder::validateWarmup(const AudioEngine::DSPCore& runtime) c
 
 #include "AudioEngine.h"
 #include "RuntimeBuildTypes.h"
+#include "BuildErrorPolicy.h"
 
 namespace convo {
 
@@ -61121,88 +61697,6 @@ struct RuntimePublishSpecification {
         std::uint64_t coeffGeneration = 0;
     } adaptive;
 };
-
-enum class BuildError {
-    None,
-    InvalidInput,
-    ResourceUnavailable,
-    MKLFailure,          // ★ C-2: MKL 初期化・FFT 計画失敗
-    ConvolverFailure,    // ★ C-2: Convolver Build 失敗
-    PrepareFailure,      // ★ C-2: DSPCore::prepare() 失敗
-    WarmupFailed,
-    InternalError
-};
-
-// ── ★ dash2 §1.8 (Phase D — H.11.2 / §1.8.5.2): retryability の分類分離 ──
-//   BuildError は failure 原因のみを表し、retryability は caller が推測していた（8/14 レビュー指摘）。
-//   FailureClassification + RetryDisposition を分離し、retry 方針を型で表現する。
-//   ⚠️ 本分類は「デフォルト分類」であり、固定 lookup table ではない（第四者レビュー §21）。
-//   実装は BuildError + BuildContext → FailureClassification → RetryDisposition の順で解決する
-//   （BuildContext は将来拡張。現行はデフォルト表のみ — §1.8.12 未解決課題）。
-enum class FailureClassification : uint8_t {
-    Permanent,       // retry 無意味（InvalidInput）
-    Transient,       // retry 有効（ResourceUnavailable / WarmupFailed）
-    Infrastructure,  // retry 有効・環境依存（ConvolverFailure / PrepareFailure）
-    Fatal            // retry 無意味・異常終了（InternalError / MKLFailure）
-};
-
-enum class RetryDisposition : uint8_t {
-    NoRetry,         // retry 禁止（Permanent / Fatal）
-    RetryBackoff,    // exponential backoff 付き retry（Transient / Infrastructure）
-    RetryImmediate   // immediate retry（WarmupFailed 等 latency-sensitive）
-};
-
-struct BuildOutcome {
-    BuildError error = BuildError::None;
-    FailureClassification classification = FailureClassification::Fatal;
-    RetryDisposition retry = RetryDisposition::NoRetry;
-};
-
-// ★ §1.8.10.3: constexpr descriptor table（static_assert でなく table で網羅性を担保）
-//   BuildError → (Classification, RetryDisposition) のデフォルト分類。
-//   本 table は enum 順序と同期する（static_assert で件数検証）。
-constexpr BuildOutcome kBuildErrorDefaultTable[] = {
-    /* None */              { BuildError::None,              FailureClassification::Permanent,      RetryDisposition::NoRetry },
-    /* InvalidInput */      { BuildError::InvalidInput,      FailureClassification::Permanent,      RetryDisposition::NoRetry },
-    /* ResourceUnavailable */{ BuildError::ResourceUnavailable, FailureClassification::Transient,   RetryDisposition::RetryBackoff },
-    /* MKLFailure */        { BuildError::MKLFailure,        FailureClassification::Fatal,          RetryDisposition::NoRetry },
-    /* ConvolverFailure */  { BuildError::ConvolverFailure,  FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
-    /* PrepareFailure */    { BuildError::PrepareFailure,    FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
-    /* WarmupFailed */      { BuildError::WarmupFailed,      FailureClassification::Transient,      RetryDisposition::RetryImmediate },
-    /* InternalError */     { BuildError::InternalError,     FailureClassification::Fatal,          RetryDisposition::NoRetry },
-};
-static_assert(sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome)
-                  == static_cast<size_t>(BuildError::InternalError) + 1,
-              "kBuildErrorDefaultTable must cover all BuildError values");
-
-// ★ §1.8.10.3 / 第十八者 #6: toString は descriptor table から生成（switch 重複を排除）。
-//   BuildError → 文字列。網羅性は kBuildErrorDefaultTable と同一サイズで検証。
-constexpr const char* kBuildErrorNames[] = {
-    "None", "InvalidInput", "ResourceUnavailable", "MKLFailure",
-    "ConvolverFailure", "PrepareFailure", "WarmupFailed", "InternalError"
-};
-static_assert(sizeof(kBuildErrorNames) / sizeof(const char*)
-                  == static_cast<size_t>(BuildError::InternalError) + 1,
-              "kBuildErrorNames must cover all BuildError values");
-
-// ★ §1.8.5.2 / H.11.2: BuildError → デフォルト分類の解決。
-//   将来的に BuildContext（一時的 resource exhaustion / persistent config）で上書きする。
-[[nodiscard]] inline BuildOutcome classifyBuildError(BuildError error) noexcept
-{
-    const auto idx = static_cast<size_t>(error);
-    if (idx >= sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome))
-        return { BuildError::InternalError, FailureClassification::Fatal, RetryDisposition::NoRetry };
-    return kBuildErrorDefaultTable[idx];
-}
-
-// ★ §1.8.10.3: toString の table ベース実装（inline — 網羅性 static_assert 済み）。
-[[nodiscard]] inline const char* classifyBuildErrorToString(BuildError error) noexcept
-{
-    const auto idx = static_cast<size_t>(error);
-    if (idx >= sizeof(kBuildErrorNames) / sizeof(const char*))
-        return "Unknown";
-    return kBuildErrorNames[idx];
-}
 
 struct BuildResult {
     AudioEngine::DSPCore* runtime = nullptr;
@@ -61546,6 +62040,16 @@ uint64_t RuntimeHealthMonitor::getRetireStallDurationUs() const noexcept {
 
 void RuntimeHealthMonitor::tick() noexcept {
     checkRetireStall();
+
+    // ★ D101-9 Step 5-VI-C: retire-chain tier evaluation (sole raw-read via takeSnapshot;
+    //   sole delta site per 5-VI-B Gate G1). Message Thread only.
+    {
+        const TrendSnapshot chainNow = takeSnapshot();
+        evaluateRetireChainTiers(chainNow, m_prevTickSnapshot_);
+        m_prevTickSnapshot_ = chainNow;
+        m_prevTickSnapshotValid_ = true;
+    }
+
     checkPublicationStall();
     diagnoseRetireStall();
     checkCrossfadeTimeout();
@@ -62149,6 +62653,17 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
         const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
         snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
         snap.activeReaderCount = m_retireRouter->activeReaderCount();
+        // ★ D101-9 Step 5-VI-C: retire-chain raw observations (sole raw-read site)
+        snap.terminalStoreCount = m_retireRouter->terminalStoreCount();
+        snap.terminalReclaimResidentCount = m_retireRouter->terminalReclaimResidentCount();
+        snap.emergencyQuarantineResidentCount = m_retireRouter->emergencyQuarantineResidentCount();
+        snap.quarantineOverflowCount = m_retireRouter->quarantineOverflowCount();
+        snap.minReaderEpoch = m_retireRouter->minReaderEpoch();
+        // correlation cache — same-tick diagnosis reuse (no second detection pass)
+        m_lastStuckDiagnosis_.isStuck = stuckInfo.isStuck;
+        m_lastStuckDiagnosis_.readerIndex = stuckInfo.readerIndex;
+        m_lastStuckDiagnosis_.readerEpoch = stuckInfo.readerEpoch;
+        m_lastStuckDiagnosis_.residencyTimeUs = stuckInfo.residencyTimeUs;
     }
     if (m_publicationSequenceRef_)
         snap.publicationSeq = convo::consumeAtomic(*m_publicationSequenceRef_,
@@ -62174,6 +62689,114 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
     snap.activeFaultMask = faultMask;
     snap.freezeDetected = (m_prevProgressFreezeState_ == MonitorState::Error);
     return snap;
+}
+
+// ★ D101-9 Step 5-VI-C: retire-chain tier evaluation (5-VI-B ratified design).
+//   SOLE site computing terminal/quarantine deltas (Gate C3). Message Thread only.
+//   Tier order fixed per Step 5-VI-C instruction §C-6: Tier2 → deltas → Tier3 → Tier4 → Tier5 → exit.
+void RuntimeHealthMonitor::evaluateRetireChainTiers(
+    const TrendSnapshot& now, const TrendSnapshot& prev) noexcept
+{
+    // ── A. Tier 2: EmergencyQ engaged — absolute gauge (evaluated every tick incl. first).
+    //    Warning/escalation evidence only; NOT a Terminal-fault assertion (E has not
+    //    overflowed to Terminal yet). Episode-latch-free — existing transition pattern.
+    emitOnTransition(m_prevEmergencyQState_,
+                     now.emergencyQuarantineResidentCount > 0 ? MonitorState::Warning
+                                                              : MonitorState::Normal,
+                     HealthEvent::Severity::Warning,
+                     EVENT_EMERGENCY_Q_ENGAGED,
+                     now.emergencyQuarantineResidentCount);
+
+    // Bootstrap tick: no previous sample → deltas undefined; Tiers 3-5 skipped (Gate C4).
+    if (!m_prevTickSnapshotValid_)
+        return;
+
+    // ── B. Signed deltas — raw unsigned subtraction is forbidden (wraparound safety).
+    const int64_t dStore =
+        static_cast<int64_t>(now.terminalStoreCount)
+        - static_cast<int64_t>(prev.terminalStoreCount);
+    const int64_t dResident =
+        static_cast<int64_t>(now.terminalReclaimResidentCount)
+        - static_cast<int64_t>(prev.terminalReclaimResidentCount);
+    const int64_t dOverflow =
+        static_cast<int64_t>(now.quarantineOverflowCount)
+        - static_cast<int64_t>(prev.quarantineOverflowCount);
+
+    // ── C. Tier 3: Q+E AGGREGATE overflow detected (historical evidence).
+    //    The counter sums Q-store and EmergencyQ overflows — it must never be read as an
+    //    "EmergencyQ-only" gauge (5-VI-A §B3 / Step 5-VI-C §C-6-C).
+    emitOnTransition(m_prevQuarantineOverflowState_,
+                     dOverflow > 0 ? MonitorState::Warning : MonitorState::Normal,
+                     HealthEvent::Severity::Warning,
+                     EVENT_QUARANTINE_OVERFLOW_DETECTED,
+                     now.quarantineOverflowCount);
+
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    // ── D. Tier 4: Terminal admission — episode latch (single fire + 10 s periodic evidence).
+    //    One admission is itself proof that D+Q+E absorption (5120) was exceeded.
+    //    Evidence-only: no K comparison, no terminalPeakResident read, no recovery action.
+    if (dStore > 0 && !m_terminalAdmissionLatched_)
+    {
+        m_terminalAdmissionLatched_ = true;
+        emitTerminalChainEvent(EVENT_TERMINAL_ADMISSION, now.terminalStoreCount);
+        m_lastTerminalEvidenceUs_ = nowUs;
+    }
+    else if (m_terminalAdmissionLatched_
+             && nowUs - m_lastTerminalEvidenceUs_ >= kStuckEvidenceIntervalUs)
+    {
+        // Periodic evidence while the episode persists (EVENT_READER_STUCK pattern).
+        emitTerminalChainEvent(EVENT_TERMINAL_ADMISSION, now.terminalStoreCount);
+        m_lastTerminalEvidenceUs_ = nowUs;
+    }
+
+    // ── Tier 5: Terminal sustained growth — resident Δ>0 × 2 consecutive ticks.
+    //    resident is a current-value series: Δ<0 is healthy drain progress, not anomaly.
+    if (dResident > 0)
+    {
+        if (m_terminalGrowthTicks_ < 2)
+            ++m_terminalGrowthTicks_;
+    }
+    else
+    {
+        // Δ == 0 : plateau (arrival paused, epoch still unsafe)  → reset
+        // Δ < 0  : draining (recovery progress)                  → reset
+        m_terminalGrowthTicks_ = 0;
+    }
+    if (m_terminalGrowthTicks_ >= 2 && !m_terminalGrowthSustainedLatched_)
+    {
+        m_terminalGrowthSustainedLatched_ = true;
+        emitTerminalChainEvent(EVENT_TERMINAL_GROWTH_SUSTAINED,
+                               now.terminalReclaimResidentCount);
+    }
+
+    // ── Episode exit (N=1 provisional per 5-VI-B §B-6; independent of CriticalExitCondition's
+    //    global stability gating). Silent clear — 1018 deferred per Step 5-VI-C §C-10.
+    if (m_terminalAdmissionLatched_
+        && now.terminalReclaimResidentCount == 0
+        && dStore == 0)
+    {
+        m_terminalAdmissionLatched_ = false;
+        m_terminalGrowthSustainedLatched_ = false;
+        m_terminalGrowthTicks_ = 0;
+    }
+}
+
+// Terminal-chain event emitter with reader-stuck correlation.
+// Correlation verdict authority remains detectStuckReaders(10) (cached by takeSnapshot);
+// no new stagnation thresholds are introduced (5-VI-B §B-7).
+void RuntimeHealthMonitor::emitTerminalChainEvent(uint32_t eventCode, uint64_t value) noexcept
+{
+    if (!m_callback)
+        return;
+    HealthEvent ev{getCurrentTimeUs(), HealthEvent::Severity::Error, eventCode, value, 0};
+    if (m_lastStuckDiagnosis_.isStuck)
+    {
+        ev.readerIndex     = m_lastStuckDiagnosis_.readerIndex;
+        ev.readerEpoch     = m_lastStuckDiagnosis_.readerEpoch;
+        ev.residencyTimeUs = m_lastStuckDiagnosis_.residencyTimeUs;
+    }
+    m_callback(ev);
 }
 
 // [work39 Phase 3] 傾向判定（computeTrend）
@@ -62782,6 +63405,17 @@ void RuntimeHealthMonitor::reset() noexcept
     // ★ Phase-1.5: Validator Telemetry レート制限タイムスタンプリセット
     for (auto& t : m_lastValidationEventUs_)
         convo::publishAtomic(t, uint64_t{0}, std::memory_order_release);
+
+    // ★ D101-9 Step 5-VI-C: retire-chain tier state reset (no cross-episode carryover)
+    m_prevEmergencyQState_ = MonitorState::Normal;
+    m_prevQuarantineOverflowState_ = MonitorState::Normal;
+    m_prevTickSnapshot_ = TrendSnapshot{};
+    m_prevTickSnapshotValid_ = false;
+    m_terminalAdmissionLatched_ = false;
+    m_terminalGrowthSustainedLatched_ = false;
+    m_terminalGrowthTicks_ = 0;
+    m_lastTerminalEvidenceUs_ = 0;
+    m_lastStuckDiagnosis_ = CachedStuckDiagnosis{};
 }
 
 // ★ Phase-1.5: Validator Telemetry — ValidationFailure を HealthEvent として発行
@@ -62888,6 +63522,12 @@ static constexpr uint32_t EVENT_OVERFLOW_RATE_CRITICAL = 1013;
 static constexpr uint32_t EVENT_WORLD_CONSISTENCY_NORMAL      = 7000;
 static constexpr uint32_t EVENT_WORLD_CONSISTENCY_SUSPICIOUS = 7001;
 static constexpr uint32_t EVENT_WORLD_CONSISTENCY_BROKEN     = 7002;
+// ★ D101-9 Step 5-VI-C: Terminal/quarantine chain evidence codes
+//   (1xxx retire-chain family continuation; free numbers verified in 5-VI-B §B-8)
+static constexpr uint32_t EVENT_EMERGENCY_Q_ENGAGED          = 1014;  // Tier 2 Warning
+static constexpr uint32_t EVENT_QUARANTINE_OVERFLOW_DETECTED = 1015;  // Tier 3 Warning (Q+E aggregate)
+static constexpr uint32_t EVENT_TERMINAL_ADMISSION           = 1016;  // Tier 4 Error
+static constexpr uint32_t EVENT_TERMINAL_GROWTH_SUSTAINED    = 1017;  // Tier 5 Error
 // ★ Phase-1.5: Validator Telemetry
 static constexpr uint32_t EVENT_VALIDATION_SEMANTIC_FAILURE     = 6000;
 static constexpr uint32_t EVENT_VALIDATION_TOPOLOGY_FAILURE   = 6001;
@@ -63106,6 +63746,11 @@ private:
     [[nodiscard]] TrendSnapshot takeSnapshot() const noexcept;
     [[nodiscard]] RecoveryOutcome computeTrend(const TrendSnapshot& before,
                                                 const TrendSnapshot& now) const noexcept;
+    // ★ D101-9 Step 5-VI-C: sole delta-evaluation site for the retire spill chain
+    //   (D→Q→E→Terminal). Raw reads happen only in takeSnapshot(); deltas only here.
+    void evaluateRetireChainTiers(const TrendSnapshot& now,
+                                  const TrendSnapshot& prev) noexcept;
+    void emitTerminalChainEvent(uint32_t eventCode, uint64_t value) noexcept;
     // [work39 Phase 5] Learner FIFO 監視
     void checkLearnerBackpressure() noexcept;
     // ★ P1-C/Practical-2/4/5/6: 追加監視
@@ -63128,6 +63773,29 @@ private:
     MonitorState m_prevReaderSlotState { MonitorState::Normal };    // ★ Practical-4
     MonitorState m_prevOverflowRateState { MonitorState::Normal };  // ★ Practical-3
     MonitorState m_prevRetireAgeState { MonitorState::Normal };     // ★ Practical-5
+    // ★ D101-9 Step 5-VI-C: retire-chain tier state (Message Thread only — non-atomic)
+    MonitorState m_prevEmergencyQState_{MonitorState::Normal};
+    MonitorState m_prevQuarantineOverflowState_{MonitorState::Normal};
+    TrendSnapshot m_prevTickSnapshot_{};          // authoritative previous sample (5-VI-B B-3)
+    bool m_prevTickSnapshotValid_{false};         // bootstrap guard (Tier 3-5 skip on first tick)
+    bool m_terminalAdmissionLatched_{false};      // Tier 4 episode latch
+    bool m_terminalGrowthSustainedLatched_{false};// Tier 5 latch
+    std::uint8_t m_terminalGrowthTicks_{0};       // consecutive Δresident>0 count (cap 2)
+    std::uint64_t m_lastTerminalEvidenceUs_{0};   // 10 s periodic evidence timer (episode)
+    // Correlation cache — filled by takeSnapshot() (sole raw-read site), consumed on the
+    // rare event-emission path. mutable because takeSnapshot() is const.
+    struct CachedStuckDiagnosis {
+        bool isStuck{false};
+        int32_t readerIndex{-1};
+        std::uint64_t readerEpoch{0};
+        std::uint64_t residencyTimeUs{0};
+    };
+    mutable CachedStuckDiagnosis m_lastStuckDiagnosis_{};
+
+    // ★ D101-9 Step 5-VI-D: minimal test-only seam (priority-3 per Step 5-VI-D §D-14).
+    //   Grants the contract-test access struct entry to the tier state machine and its
+    //   latches. No public API change; no behavior change in production builds.
+    friend struct RuntimeHealthMonitorTierTestAccess;
     std::atomic<ISRHealthState> m_healthState_{ISRHealthState::Healthy};
     // ★ P1-C/Practical-2/4/5/6: 監視用参照
     const convo::isr::CrossfadeRuntime* m_crossfadeRuntime = nullptr;
@@ -63664,6 +64332,14 @@ struct TrendSnapshot {
     uint64_t lastCompletedEpoch{0};      // 最終完了Epoch ID
     uint64_t publicationGeneration{0};   // Publication世代
     RestorePhase restorePhase{RestorePhase::None};
+    // ★ D101-9 Step 5-VI-C: retire-chain raw observations (5-VI-B §B-2).
+    //   Raw values ONLY — deltas are computed solely by
+    //   RuntimeHealthMonitor::evaluateRetireChainTiers().
+    std::uint64_t terminalStoreCount{0};
+    std::uint64_t terminalReclaimResidentCount{0};
+    std::uint64_t emergencyQuarantineResidentCount{0};
+    std::uint64_t quarantineOverflowCount{0};
+    std::uint64_t minReaderEpoch{0};
 };
 
 // activeFaultMask ビット定義
@@ -81863,6 +82539,250 @@ public:
 
 ```
 
+### 📄 `src\tests\BuildErrorClassificationTests.cpp`
+
+```
+// BuildErrorClassificationTests.cpp — D101-13 Phase D-3
+// Contract test for classifyBuildError() → BuildOutcome (8-value default policy)
+// Uses standalone main() with no external framework (existing repo convention).
+// Tested: Test A (exact matrix), Test B (table coverage), Test C (classifier/table consistency),
+//         Test E (defensive out-of-range fallback). No BuildContext, no scheduler, no retry wiring.
+
+#include <iostream>
+#include <string>
+#include <stdexcept>
+
+#include "audioengine/BuildErrorPolicy.h"
+
+namespace {
+int g_pass = 0;
+int g_fail = 0;
+
+void check(bool cond, const char* /*unused*/ = "")
+{
+    // For internal use; caller prints context on failure
+    (void)cond;
+}
+
+#define CHECK(cond, msg) \
+    do { \
+        if (!(cond)) { \
+            std::cerr << "[FAIL] " << (msg) << " @ " << __LINE__ << "\n"; \
+            ++g_fail; \
+        } else { \
+            ++g_pass; \
+        } \
+    } while (0)
+
+// Helper: stringify enums via underlying int for diagnostics
+const char* toStringFC(convo::FailureClassification v)
+{
+    switch (v) {
+        case convo::FailureClassification::Permanent: return "Permanent";
+        case convo::FailureClassification::Transient: return "Transient";
+        case convo::FailureClassification::Infrastructure: return "Infrastructure";
+        case convo::FailureClassification::Fatal: return "Fatal";
+    }
+    return "UnknownFC";
+}
+
+const char* toStringRD(convo::RetryDisposition v)
+{
+    switch (v) {
+        case convo::RetryDisposition::NoRetry: return "NoRetry";
+        case convo::RetryDisposition::RetryBackoff: return "RetryBackoff";
+        case convo::RetryDisposition::RetryImmediate: return "RetryImmediate";
+    }
+    return "UnknownRD";
+}
+
+struct Expected {
+    convo::BuildError error;
+    convo::FailureClassification classification;
+    convo::RetryDisposition retry;
+};
+
+// D-2 ratified 8-value default policy (matches kBuildErrorDefaultTable)
+constexpr Expected kExpected[8] = {
+    { convo::BuildError::None,              convo::FailureClassification::Permanent,      convo::RetryDisposition::NoRetry },
+    { convo::BuildError::InvalidInput,      convo::FailureClassification::Permanent,      convo::RetryDisposition::NoRetry },
+    { convo::BuildError::ResourceUnavailable, convo::FailureClassification::Transient,   convo::RetryDisposition::RetryBackoff },
+    { convo::BuildError::MKLFailure,        convo::FailureClassification::Fatal,          convo::RetryDisposition::NoRetry },
+    { convo::BuildError::ConvolverFailure,  convo::FailureClassification::Infrastructure, convo::RetryDisposition::RetryBackoff },
+    { convo::BuildError::PrepareFailure,    convo::FailureClassification::Infrastructure, convo::RetryDisposition::RetryBackoff },
+    { convo::BuildError::WarmupFailed,      convo::FailureClassification::Transient,      convo::RetryDisposition::RetryImmediate },
+    { convo::BuildError::InternalError,     convo::FailureClassification::Fatal,          convo::RetryDisposition::NoRetry },
+};
+
+// ── Test A — exact policy matrix (3 fields per value) ──
+[[nodiscard]] bool runTestA()
+{
+    bool ok = true;
+    for (auto& exp : kExpected) {
+        const auto out = convo::classifyBuildError(exp.error);
+        const int idx = static_cast<int>(exp.error);
+        bool pass = (out.error == exp.error)
+                 && (out.classification == exp.classification)
+                 && (out.retry == exp.retry);
+        if (!pass) {
+            std::cerr << "[FAIL] TestA idx=" << idx
+                      << " want(" << toStringFC(exp.classification) << "," << toStringRD(exp.retry) << ")"
+                      << " got(" << toStringFC(out.classification) << "," << toStringRD(out.retry) << ")\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+        // Also verify returned error echoes input
+        if (out.error != exp.error) {
+            std::cerr << "[FAIL] TestA error echo mismatch idx=" << idx << "\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+    }
+    if (ok) std::cerr << "[PASS] TestA exact policy matrix (8x3 fields)\n";
+    return ok;
+}
+
+// ── Test B — table coverage: kBuildErrorDefaultTable index/error alignment ──
+[[nodiscard]] bool runTestB()
+{
+    bool ok = true;
+    constexpr size_t kSize = sizeof(convo::kBuildErrorDefaultTable) / sizeof(convo::BuildOutcome);
+    CHECK(kSize == 8u, "kBuildErrorDefaultTable size == 8");
+    // Also verify static_assert equivalence at runtime: table covers InternalError+1
+    CHECK(kSize == static_cast<size_t>(convo::BuildError::InternalError) + 1u,
+          "table size == InternalError+1");
+    for (size_t i = 0; i < kSize; ++i) {
+        const auto& row = convo::kBuildErrorDefaultTable[i];
+        const auto want = static_cast<convo::BuildError>(i);
+        if (row.error != want) {
+            std::cerr << "[FAIL] TestB index=" << i << " table.error != BuildError(i)\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+        // Also verify row matches kExpected
+        const auto& exp = kExpected[i];
+        bool match = (row.classification == exp.classification) && (row.retry == exp.retry);
+        if (!match) {
+            std::cerr << "[FAIL] TestB index=" << i << " table row != expected\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+    }
+    if (ok) std::cerr << "[PASS] TestB table coverage (index/error alignment)\n";
+    return ok;
+}
+
+// ── Test C — classifier/table consistency ──
+[[nodiscard]] bool runTestC()
+{
+    bool ok = true;
+    for (size_t i = 0; i < 8u; ++i) {
+        const auto err = static_cast<convo::BuildError>(i);
+        const auto via = convo::classifyBuildError(err);
+        const auto& tbl = convo::kBuildErrorDefaultTable[i];
+        bool eq = (via.error == tbl.error)
+               && (via.classification == tbl.classification)
+               && (via.retry == tbl.retry);
+        if (!eq) {
+            std::cerr << "[FAIL] TestC idx=" << i << " classify != table[i]\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+    }
+    if (ok) std::cerr << "[PASS] TestC classifier/table consistency (8)\n";
+    return ok;
+}
+
+// ── Test D — kBuildErrorNames coverage (sanity, not policy but table integrity) ──
+[[nodiscard]] bool runTestD()
+{
+    bool ok = true;
+    constexpr size_t kN = sizeof(convo::kBuildErrorNames) / sizeof(const char*);
+    CHECK(kN == 8u, "kBuildErrorNames size == 8");
+    for (size_t i = 0; i < kN; ++i) {
+        const auto err = static_cast<convo::BuildError>(i);
+        const char* s = convo::classifyBuildErrorToString(err);
+        const char* t = convo::kBuildErrorNames[i];
+        bool same = (s == t) || (s && t && std::string(s) == std::string(t));
+        if (!same) {
+            std::cerr << "[FAIL] TestD name mismatch idx=" << i << " via=" << (s ? s : "null") << " table=" << (t ? t : "null") << "\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+        if (!s || !*s) {
+            std::cerr << "[FAIL] TestD empty name idx=" << i << "\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+    }
+    if (ok) std::cerr << "[PASS] TestD names coverage\n";
+    return ok;
+}
+
+// ── Test E — defensive out-of-range fallback ──
+[[nodiscard]] bool runTestE()
+{
+    bool ok = true;
+    auto testOne = [&](convo::BuildError bad) {
+        const auto out = convo::classifyBuildError(bad);
+        bool pass = (out.error == convo::BuildError::InternalError)
+                 && (out.classification == convo::FailureClassification::Fatal)
+                 && (out.retry == convo::RetryDisposition::NoRetry);
+        if (!pass) {
+            std::cerr << "[FAIL] TestE bad=" << static_cast<int>(bad) << "\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+        const char* s = convo::classifyBuildErrorToString(bad);
+        if (!s || std::string(s) != "Unknown") {
+            std::cerr << "[FAIL] TestE toString bad=" << static_cast<int>(bad) << " want Unknown got " << (s ? s : "null") << "\n";
+            ++g_fail;
+            ok = false;
+        } else {
+            ++g_pass;
+        }
+    };
+    testOne(static_cast<convo::BuildError>(255));
+    testOne(static_cast<convo::BuildError>(8));
+    testOne(static_cast<convo::BuildError>(100));
+    if (ok) std::cerr << "[PASS] TestE defensive fallback (out-of-range → InternalError/Fatal/NoRetry + Unknown)\n";
+    return ok;
+}
+
+} // namespace
+
+int main()
+{
+    bool a = runTestA();
+    bool b = runTestB();
+    bool c = runTestC();
+    bool d = runTestD();
+    bool e = runTestE();
+
+    std::cerr << "[BuildErrorClassification] checks=" << g_pass << " fails=" << g_fail
+              << ((a&&b&&c&&d&&e) ? " PASS" : " FAIL") << "\n";
+    std::cout << g_pass << " checks, " << g_fail << " failures\n";
+    return (a && b && c && d && e && g_fail == 0) ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\BuildInputSemanticContractTests.cpp`
 
 ```
@@ -91162,6 +92082,7 @@ int main()
 #include "audioengine/ISRRetireOverflowRing.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/RetireQuarantineStore.h"
+#include "audioengine/AtomicAccess.h"  // ★ atomic-dot-call policy: convo::consumeAtomic
 
 // ── ★ Phase5: 複合ソートキー (priority, retireEpoch, generation, dspSlot) 検証 ──
 
@@ -91521,7 +92442,7 @@ int main()
         for (int i = 0; i < 3; ++i) {
             auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x3000 + i * 0x10));
             auto* deleter = +[](void*) noexcept {};
-            if (!auth.store(ptr, deleter, /*epoch=*/100,
+            if (!auth.store(ptr, deleter, /*epoch=*/100,  // NOLINT(atomic-dot-call)
                             DeletionEntryType::Generic, "test"))
                 return false;
         }
@@ -91539,7 +92460,7 @@ int main()
         for (int i = 0; i < 2; ++i) {
             auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x4000 + i * 0x10));
             auto* deleter = +[](void*) noexcept {};
-            auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test");
+            auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test");  // NOLINT(atomic-dot-call)
         }
         if (auth.residentCountAtomic() != 2) return false;
         auth.drainAll();
@@ -91580,7 +92501,7 @@ int main()
 
         auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x6000));
         auto* deleter = +[](void*) noexcept {};
-        if (!auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test"))
+        if (!auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test"))  // NOLINT(atomic-dot-call)
             return false;
 
         if (auth.residentCountAtomic() == 0) return false;
@@ -91798,6 +92719,7 @@ public:
 
     std::atomic<bool> consumerReady{false};
     std::atomic<bool> consumerWoke{false};
+    // atomic-dot-call policy: use convo::consumeAtomic instead of .load()
 
     // Consumer thread: hold drainCvMtx_, check predicate (false), signal ready,
     // then enter wait_for. Holding the lock while signaling ready forces the
@@ -91820,7 +92742,7 @@ public:
     });
 
     // Wait for the consumer to be ready (holding the lock, about to enter wait).
-    while (!consumerReady.load()) {}
+    while (!convo::consumeAtomic(consumerReady)) {}
 
     // Producer: enqueue to Q (D "full" → Q fallback → residentAtomic_++) + signal.
     auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0xB000));
@@ -91839,7 +92761,7 @@ public:
 
     // With the fix: immediate wake (< 1000ms, well under the 2000ms timeout).
     // Without the fix: notify lost → consumer sleeps ~2000ms → FAIL.
-    return consumerWoke.load() && elapsedMs < 1000;
+    return convo::consumeAtomic(consumerWoke) && elapsedMs < 1000;
 }
 
 int main()
@@ -91896,6 +92818,844 @@ if (!testEmptyDrainSuppressionAtomicCounter())
         throw std::runtime_error("wake lost-wake regression failed");
 
     return 0;
+}
+
+```
+
+### 📄 `src\tests\RetrySchedulerTests.cpp`
+
+```
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <vector>
+#include <iostream>
+#include <mutex>
+
+#include "audioengine/RetryScheduler.h"
+#include "audioengine/RetrySchedulerTypes.h"
+#include "core/RebuildTypes.h"
+
+struct MockSink {
+    std::atomic<int> callCount{0};
+    std::vector<RebuildTelemetryReason> reasons;
+    std::mutex mtx;
+    void onDispatch(const RetryScheduleRequest& req) noexcept {
+        callCount.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(mtx);
+        reasons.push_back(req.reason);
+    }
+};
+
+static RetryScheduleRequest makeReq(RebuildTelemetryReason r = RebuildTelemetryReason::EnqueueSnapshotCommand) {
+    return RetryScheduleRequest{ convo::RebuildKind::Structural, r, RebuildTelemetryClass::Structural, RebuildTelemetryPolicy::Replaceable };
+}
+
+static bool testDelay50() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    auto req = makeReq();
+    sched.schedule(req, std::chrono::milliseconds(50));
+    if (sched.pendingCount() != 1) { std::cerr << "T1: pendingCount != 1\n"; return false; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (sink.callCount.load() != 0) { std::cerr << "T1: dispatched before deadline\n"; return false; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    if (sink.callCount.load() != 1) { std::cerr << "T1: not dispatched after deadline\n"; return false; }
+    sched.shutdown();
+    std::cout << "T1 PASS\n"; return true;
+}
+
+static bool testZeroDelay() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    auto req = makeReq();
+    sched.schedule(req, std::chrono::milliseconds(0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    if (sink.callCount.load() != 1) { std::cerr << "T2: zero delay not dispatched\n"; return false; }
+    sched.shutdown();
+    std::cout << "T2 PASS\n"; return true;
+}
+
+static bool testDeadlineOrdering() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    auto r1 = makeReq(RebuildTelemetryReason::ConvolverParamsChanged);
+    auto r2 = makeReq(RebuildTelemetryReason::HashDedup);
+    auto r3 = makeReq(RebuildTelemetryReason::SnapshotEnqueued);
+    sched.schedule(r1, std::chrono::milliseconds(100));
+    sched.schedule(r2, std::chrono::milliseconds(20));
+    sched.schedule(r3, std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::lock_guard<std::mutex> lk(sink.mtx);
+    if (sink.reasons.size() != 3) { std::cerr << "T4: reasons size " << sink.reasons.size() << "\n"; return false; }
+    if (sink.reasons[0] != RebuildTelemetryReason::HashDedup) { std::cerr << "T4: order 0 wrong\n"; return false; }
+    if (sink.reasons[1] != RebuildTelemetryReason::SnapshotEnqueued) { std::cerr << "T4: order 1 wrong\n"; return false; }
+    if (sink.reasons[2] != RebuildTelemetryReason::ConvolverParamsChanged) { std::cerr << "T4: order 2 wrong\n"; return false; }
+    sched.shutdown();
+    std::cout << "T4 PASS\n"; return true;
+}
+
+static bool testMultipleProducers() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    std::atomic<bool> failed{false};
+    auto producer = [&](int base) {
+        for (int i = 0; i < 4; ++i) {
+            auto r = makeReq();
+            (void)base;
+            sched.schedule(r, std::chrono::milliseconds(10 + i * 5));
+        }
+    };
+    std::thread t1([&]{ producer(0); });
+    std::thread t2([&]{ producer(10); });
+    t1.join(); t2.join();
+    if (sched.pendingCount() > 8) { std::cerr << "T5: queue corruption\n"; failed = true; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (sink.callCount.load() > 8) { std::cerr << "T5: too many dispatches\n"; failed = true; }
+    sched.shutdown();
+    if (failed) return false;
+    std::cout << "T5 PASS\n"; return true;
+}
+
+static bool testQueueFull() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    for (int i = 0; i < 8; ++i) {
+        sched.schedule(makeReq(), std::chrono::milliseconds(500));
+    }
+    if (sched.pendingCount() != 8) { std::cerr << "T6a: pending != 8\n"; return false; }
+    uint64_t before = sched.rejectCount();
+    sched.schedule(makeReq(), std::chrono::milliseconds(500));
+    if (sched.pendingCount() != 8) { std::cerr << "T6b: pending changed after reject\n"; return false; }
+    if (sched.rejectCount() != before + 1) { std::cerr << "T6c: rejectCount not incremented\n"; return false; }
+    sched.shutdown();
+    std::cout << "T6 PASS\n"; return true;
+}
+
+static bool testShutdown() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    sched.schedule(makeReq(), std::chrono::milliseconds(500));
+    if (sched.pendingCount() != 1) { std::cerr << "T7a\n"; return false; }
+    sched.shutdown();
+    if (sched.pendingCount() != 0) { std::cerr << "T7b\n"; return false; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (sink.callCount.load() != 0) { std::cerr << "T7c: dispatched after shutdown\n"; return false; }
+    sched.shutdown();
+    std::cout << "T7 PASS\n"; return true;
+}
+
+static bool testConcurrentShutdown() {
+    MockSink sink;
+    RetryScheduler sched([&](const RetryScheduleRequest& req){ sink.onDispatch(req); });
+    std::thread t([&]{ sched.schedule(makeReq(), std::chrono::milliseconds(0)); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    sched.shutdown();
+    t.join();
+    std::cout << "T8 PASS\n"; return true;
+}
+
+int main() {
+    bool ok = true;
+    ok &= testDelay50();
+    ok &= testZeroDelay();
+    ok &= testDeadlineOrdering();
+    ok &= testMultipleProducers();
+    ok &= testQueueFull();
+    ok &= testShutdown();
+    ok &= testConcurrentShutdown();
+    std::cout << (ok ? "ALL PASS\n" : "FAIL\n");
+    return ok ? 0 : 1;
+}
+
+```
+
+### 📄 `src\tests\RuntimeHealthMonitorTierTests.cpp`
+
+```
+//==============================================================================
+// RuntimeHealthMonitorTierTests.cpp — D101-9 Step 5-VI-D
+//
+// HealthMonitor Threshold Contract Tests (5-VI-B design / 5-VI-C implementation).
+//
+// ■ Test strategy (Step 5-VI-D §D-14 priority 3: minimal test-only seam):
+//   The tier state machine (evaluateRetireChainTiers) is private by design; the sole
+//   raw-read site is takeSnapshot() and the sole delta site is evaluateRetireChainTiers()
+//   (Gate G1/G2 of 5-VI-B). ISRRetireRouter's terminal accessors are non-virtual, so a
+//   fake router cannot intercept them. A one-line `friend struct
+//   RuntimeHealthMonitorTierTestAccess;` grants the test direct entry to feed synthetic
+//   TrendSnapshot pairs through the REAL delta machine — no production behavior change.
+//
+// ■ Covered contract groups:
+//   D1 bootstrap/snapshot/delta, D2 Tier2/Tier3, D3 Tier4/Tier5/episode latch,
+//   D4 correlation/reset/evidence-value semantics.
+//
+// ■ Explicitly NOT tested here (deferred per Step 5-VI-D §D-15): N>1 exit,
+//   terminalPeakResident thresholds, K_terminal(4092/8192), S=2, T_stall_design=30s,
+//   quarantine from Terminal events, computeTrend integration, ISRHealthState::Critical
+//   wiring, EVENT_TERMINAL_EPISODE_CLEARED(1018).
+//
+//==============================================================================
+
+#include "audioengine/RuntimeHealthMonitor.h"
+#include "audioengine/ISRRetire.h"                              // isr::LifetimeState 完全型（link stub）
+#include "audioengine/ISRRuntimePublicationCoordinator.h"       // isr::RuntimeIntentCoordinator 完全型
+#include "audioengine/RuntimePublicationOrchestrator.h"         // isr::RuntimePublicationOrchestrator 完全型
+#include "core/TimeUtils.h"
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+//==============================================================================
+// 簡易 TestRunner (MpscBoundedRingTests と同一パターン)
+//==============================================================================
+int g_testCount = 0;
+int g_failCount = 0;
+
+void checkTrue(const char* name, bool condition)
+{
+    if (condition) {
+        std::cout << "  PASS: " << name << std::endl;
+        ++g_testCount;
+    } else {
+        std::cout << "  FAIL: " << name << " -- condition was false" << std::endl;
+        ++g_testCount;
+        ++g_failCount;
+    }
+}
+
+void checkEq(const char* name, long long actual, long long expected)
+{
+    if (actual == expected) {
+        std::cout << "  PASS: " << name << std::endl;
+        ++g_testCount;
+    } else {
+        std::cout << "  FAIL: " << name << " -- actual=" << actual
+                  << " expected=" << expected << std::endl;
+        ++g_testCount;
+        ++g_failCount;
+    }
+}
+} // namespace (test runner helpers)
+
+void checkFalse(const char* name, bool condition)
+{
+    if (!condition) {
+        std::cout << "  PASS: " << name << std::endl;
+        ++g_testCount;
+    } else {
+        std::cout << "  FAIL: " << name << " -- condition was true" << std::endl;
+        ++g_testCount;
+        ++g_failCount;
+    }
+}
+
+//==============================================================================
+// Event recorder
+//==============================================================================
+struct RecordedEvent {
+    uint32_t code = 0;
+    int severity = 0;               // HealthEvent::Severity
+    uint64_t value = 0;
+    int32_t readerIndex = -1;
+    uint64_t readerEpoch = 0;
+    uint64_t residencyTimeUs = 0;
+};
+
+class EventRecorder
+{
+public:
+    void attach(convo::RuntimeHealthMonitor& m)
+    {
+        m.setEventCallback([this](const convo::HealthEvent& ev) {
+            RecordedEvent r;
+            r.code = ev.eventCode;
+            r.severity = static_cast<int>(ev.severity);
+            r.value = ev.value;
+            r.readerIndex = ev.readerIndex;
+            r.readerEpoch = ev.readerEpoch;
+            r.residencyTimeUs = ev.residencyTimeUs;
+            events.push_back(r);
+        });
+    }
+    size_t count(uint32_t code) const
+    {
+        size_t n = 0;
+        for (const auto& e : events) if (e.code == code) ++n;
+        return n;
+    }
+    bool has(uint32_t code) const { return count(code) > 0; }
+    const RecordedEvent* last(uint32_t code) const
+    {
+        const RecordedEvent* found = nullptr;
+        for (const auto& e : events) if (e.code == code) found = &e;
+        return found;
+    }
+    void clear() { events.clear(); }
+    std::vector<RecordedEvent> events;
+};
+
+//==============================================================================
+// Test-only access seam (friend declared in RuntimeHealthMonitor.h)
+//==============================================================================
+namespace convo {
+struct RuntimeHealthMonitorTierTestAccess {
+    using Snap = TrendSnapshot;
+
+    // Feed one tick through the REAL delta machine, then roll the previous sample.
+    static void feedTick(RuntimeHealthMonitor& m, const Snap& now)
+    {
+        m.evaluateRetireChainTiers(now, m.m_prevTickSnapshot_);
+        m.m_prevTickSnapshot_ = now;
+        m.m_prevTickSnapshotValid_ = true;
+    }
+    static void primePrev(RuntimeHealthMonitor& m, const Snap& prev)
+    {
+        m.m_prevTickSnapshot_ = prev;
+        m.m_prevTickSnapshotValid_ = true;
+    }
+    static void invalidatePrev(RuntimeHealthMonitor& m) { m.m_prevTickSnapshotValid_ = false; }
+    static bool admissionLatched(const RuntimeHealthMonitor& m) { return m.m_terminalAdmissionLatched_; }
+    static bool growthLatched(const RuntimeHealthMonitor& m) { return m.m_terminalGrowthSustainedLatched_; }
+    static unsigned growthTicks(const RuntimeHealthMonitor& m) { return m.m_terminalGrowthTicks_; }
+    static void setStuckDiagnosis(RuntimeHealthMonitor& m,
+                                  int32_t idx, std::uint64_t epoch, std::uint64_t residencyUs)
+    {
+        m.m_lastStuckDiagnosis_.isStuck = true;
+        m.m_lastStuckDiagnosis_.readerIndex = idx;
+        m.m_lastStuckDiagnosis_.readerEpoch = epoch;
+        m.m_lastStuckDiagnosis_.residencyTimeUs = residencyUs;
+    }
+    static void clearStuckDiagnosis(RuntimeHealthMonitor& m)
+    {
+        m.m_lastStuckDiagnosis_ = RuntimeHealthMonitor::CachedStuckDiagnosis{};
+    }
+    static void setLastEvidenceUs(RuntimeHealthMonitor& m, std::uint64_t us)
+    {
+        m.m_lastTerminalEvidenceUs_ = us;
+    }
+};
+} // namespace convo
+
+using convo::RuntimeHealthMonitor;
+using convo::RuntimeHealthMonitorTierTestAccess;
+using Snap = convo::TrendSnapshot;
+
+//==============================================================================
+// Link stubs (Step 5-VI-D §D-14): the tests drive evaluateRetireChainTiers(),
+// emitTerminalChainEvent(), reset() and the ctor directly — tick() is NEVER called.
+// The out-of-line definitions below are referenced by unrelated monitor functions
+// (tick / checkPublicationStall / checkRetireStall) compiled from
+// RuntimeHealthMonitor.cpp; they are stubbed here so the test TU links standalone
+// without dragging in the engine graph. Production code is untouched.
+//==============================================================================
+namespace convo {
+
+RuntimePolicyEngine::RuntimePolicyEngine() noexcept = default;
+
+bool RecoveryBudget::isExhausted(std::uint64_t) const noexcept { return false; }
+bool RecoveryBudget::isStormDetected(RecoveryAction, std::uint64_t) const noexcept { return false; }
+void RecoveryBudget::record(RecoveryAction, std::uint64_t) noexcept {}
+void RecoveryBudget::recordCycleCompletion(std::uint64_t) noexcept {}
+void RecoveryBudget::recordHeavyReach(std::uint64_t) noexcept {}
+void RecoveryBudget::reset() noexcept {}
+
+PolicyDecision RuntimePolicyEngine::evaluateAggregate(MonitorState, MonitorState, MonitorState,
+                                                      MonitorState, MonitorState, MonitorState) noexcept
+{
+    return PolicyDecision{};
+}
+bool RuntimePolicyEngine::canExecute(RecoveryAction) const noexcept { return false; }
+void RuntimePolicyEngine::markExecuted(RecoveryAction) noexcept {}
+void RuntimePolicyEngine::reset() noexcept {}
+void RuntimePolicyEngine::markForVerification(RecoveryAction, const TrendSnapshot&) noexcept {}
+VerificationEntry& RuntimePolicyEngine::getEntry(RecoveryAction) noexcept
+{
+    static VerificationEntry e;
+    return e;
+}
+const VerificationEntry& RuntimePolicyEngine::getEntry(RecoveryAction) const noexcept
+{
+    static VerificationEntry e;
+    return e;
+}
+void RuntimePolicyEngine::resetVerification() noexcept {}
+bool RuntimePolicyEngine::hasPendingVerification() const noexcept { return false; }
+void RuntimePolicyEngine::markExecutedCritical(RecoveryAction) noexcept {}
+struct RecoveryBudget& RuntimePolicyEngine::getBudget() noexcept
+{
+    static RecoveryBudget b;
+    return b;
+}
+const struct RecoveryBudget& RuntimePolicyEngine::getBudget() const noexcept
+{
+    static RecoveryBudget b;
+    return b;
+}
+
+std::uint64_t isr::LifetimeState::pendingIntentCount() const noexcept { return 0; }
+std::uint64_t isr::RuntimeIntentCoordinator::getPublicationBacklogCount() const noexcept { return 0; }
+std::uint64_t isr::RuntimePublicationOrchestrator::getMaxDeferredAgeMs() const noexcept { return 0; }
+
+} // namespace convo
+
+constexpr uint32_t kEvQEngaged  = convo::EVENT_EMERGENCY_Q_ENGAGED;          // 1014
+constexpr uint32_t kEvOverflow  = convo::EVENT_QUARANTINE_OVERFLOW_DETECTED; // 1015
+constexpr uint32_t kEvAdmission = convo::EVENT_TERMINAL_ADMISSION;           // 1016
+constexpr uint32_t kEvGrowth    = convo::EVENT_TERMINAL_GROWTH_SUSTAINED;    // 1017
+
+Snap makeSnap(std::uint64_t store, std::uint64_t resident,
+              std::uint64_t eqResident, std::uint64_t overflow,
+              std::uint64_t minEpoch = 0,
+              std::uint32_t readers = 0, std::uint64_t pending = 0)
+{
+    Snap s;
+    s.pendingRetire = pending;
+    s.activeReaderCount = readers;
+    s.terminalStoreCount = store;
+    s.terminalReclaimResidentCount = resident;
+    s.emergencyQuarantineResidentCount = eqResident;
+    s.quarantineOverflowCount = overflow;
+    s.minReaderEpoch = minEpoch;
+    return s;
+}
+
+//==============================================================================
+// D-2: Bootstrap — Tier 2 evaluated, Tiers 3-5 skipped on first tick
+//==============================================================================
+bool testBootstrapSkip()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    // All deltas WOULD be positive if a prev sample existed — none does.
+    RuntimeHealthMonitorTierTestAccess::feedTick(
+        m, makeSnap(/*store*/5, /*resident*/2, /*eq*/1, /*overflow*/3));
+
+    checkEq("bootstrap: exactly 1 event emitted", static_cast<long long>(rec.events.size()), 1);
+    checkTrue("bootstrap: 1014 fired (absolute gauge)", rec.has(kEvQEngaged));
+    checkFalse("bootstrap: no 1015", rec.has(kEvOverflow));
+    checkFalse("bootstrap: no 1016", rec.has(kEvAdmission));
+    checkFalse("bootstrap: no 1017", rec.has(kEvGrowth));
+    checkFalse("bootstrap: admission not latched", RuntimeHealthMonitorTierTestAccess::admissionLatched(m));
+    return true;
+}
+
+//==============================================================================
+// D-3: Tier 2 engage / hold / clear / re-engage
+//==============================================================================
+bool testTier2EngageClearReengage()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(0,0,0,0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,1,0));   // E 0→1
+    checkEq("tier2: engage fires once", static_cast<long long>(rec.count(kEvQEngaged)), 1);
+    checkEq("tier2: severity is Warning",
+            rec.last(kEvQEngaged) ? static_cast<long long>(rec.last(kEvQEngaged)->severity) : -1,
+            static_cast<long long>(convo::HealthEvent::Severity::Warning));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,1,0));   // E 1→1
+    checkEq("tier2: hold does not re-fire", static_cast<long long>(rec.count(kEvQEngaged)), 1);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,0,0));   // E 1→0
+    checkEq("tier2: clear is silent", static_cast<long long>(rec.count(kEvQEngaged)), 1);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,1,0));   // E 0→1 again
+    checkEq("tier2: re-engage fires again", static_cast<long long>(rec.count(kEvQEngaged)), 2);
+    return true;
+}
+
+//==============================================================================
+// D-4: Tier 3 — Q+E AGGREGATE cumulative overflow delta
+//==============================================================================
+bool testTier3OverflowDelta()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(0,0,0,10));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,0,11));  // 10→11
+    checkEq("tier3: first burst fires once", static_cast<long long>(rec.count(kEvOverflow)), 1);
+    checkEq("tier3: severity is Warning",
+            rec.last(kEvOverflow) ? static_cast<long long>(rec.last(kEvOverflow)->severity) : -1,
+            static_cast<long long>(convo::HealthEvent::Severity::Warning));
+    checkEq("tier3: value carries cumulative counter",
+            rec.last(kEvOverflow) ? static_cast<long long>(rec.last(kEvOverflow)->value) : -1, 11);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,0,12));  // 11→12 (still Warning state)
+    checkEq("tier3: consecutive increase does not re-fire while Warning held",
+            static_cast<long long>(rec.count(kEvOverflow)), 1);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,0,12));  // 12→12
+    checkEq("tier3: flat counter emits nothing", static_cast<long long>(rec.count(kEvOverflow)), 1);
+    return true;
+}
+
+//==============================================================================
+// D-5: Tier 4 single admission + episode latch (no re-fire while Δstore>0 continues)
+//==============================================================================
+bool testTier4SingleAdmissionAndLatch()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0)); // store 100→101
+    checkEq("tier4: admission fires exactly once", static_cast<long long>(rec.count(kEvAdmission)), 1);
+    checkTrue("tier4: admission latched", RuntimeHealthMonitorTierTestAccess::admissionLatched(m));
+    checkEq("tier4: severity is Error",
+            rec.last(kEvAdmission) ? static_cast<long long>(rec.last(kEvAdmission)->severity) : -1,
+            static_cast<long long>(convo::HealthEvent::Severity::Error));
+    checkEq("tier4: value = cumulative store count",
+            rec.last(kEvAdmission) ? static_cast<long long>(rec.last(kEvAdmission)->value) : -1, 101);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(102,2,0,0)); // store 101→102
+    checkEq("tier4: continued Δstore>0 does not re-fire (episode entry, not per-tick)",
+            static_cast<long long>(rec.count(kEvAdmission)), 1);
+    return true;
+}
+
+//==============================================================================
+// D-6: Tier 4 periodic evidence at 10 s boundary (no double-fire on transition tick)
+//==============================================================================
+bool testTier4PeriodicEvidence()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0)); // transition tick
+    checkEq("periodic: transition fires once", static_cast<long long>(rec.count(kEvAdmission)), 1);
+
+    // <10s: no evidence
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(102,1,0,0));
+    checkEq("periodic: below interval emits nothing",
+            static_cast<long long>(rec.count(kEvAdmission)), 1);
+
+    // ≥10s since last evidence → periodic evidence re-emission
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    RuntimeHealthMonitorTierTestAccess::setLastEvidenceUs(m, nowUs - 11'000'000ULL);
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(103,1,0,0));
+    checkEq("periodic: past interval re-emits evidence",
+            static_cast<long long>(rec.count(kEvAdmission)), 2);
+
+    // immediately after evidence refresh → suppressed again (double-fire suppression)
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(104,1,0,0));
+    checkEq("periodic: refreshed timer suppresses immediate re-fire",
+            static_cast<long long>(rec.count(kEvAdmission)), 2);
+    return true;
+}
+
+//==============================================================================
+// D-7 Case 1: Tier 5 positive growth ×2 (no event on first tick)
+//==============================================================================
+bool testTier5PositiveX2()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,1,0,0)); // res 0→1
+    checkEq("tier5 case1: ticks=1 after first growth",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 1);
+    checkEq("tier5 case1: no 1017 on first growth", static_cast<long long>(rec.count(kEvGrowth)), 0);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,2,0,0)); // res 1→2
+    checkEq("tier5 case1: ticks=2 after second growth",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 2);
+    checkEq("tier5 case1: 1017 latches on second consecutive growth",
+            static_cast<long long>(rec.count(kEvGrowth)), 1);
+    checkTrue("tier5 case1: growth latched", RuntimeHealthMonitorTierTestAccess::growthLatched(m));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,3,0,0)); // res 2→3
+    checkEq("tier5 case1: no re-fire while latched", static_cast<long long>(rec.count(kEvGrowth)), 1);
+    return true;
+}
+
+//==============================================================================
+// D-7 Case 2: plateau resets the growth counter (Δ==0 contract)
+//==============================================================================
+bool testTier5PlateauReset()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,1,0,0));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,2,0,0)); // 1→2 : ticks=1
+    checkEq("tier5 case2: ticks=1", static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 1);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,2,0,0)); // 2→2 : reset
+    checkEq("tier5 case2: plateau resets ticks to 0",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 0);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,3,0,0)); // 2→3 : ticks=1 only
+    checkEq("tier5 case2: post-plateau growth is first (not second) consecutive",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 1);
+    checkEq("tier5 case2: 1017 never fired", static_cast<long long>(rec.count(kEvGrowth)), 0);
+    return true;
+}
+
+//==============================================================================
+// D-7 Case 3: drain resets the growth counter (Δ<0 contract, healthy recovery)
+//==============================================================================
+bool testTier5DrainReset()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,2,0,0));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,3,0,0)); // +1 : ticks=1
+    checkEq("tier5 case3: ticks=1", static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 1);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,2,0,0)); // -1 : drain, reset
+    checkEq("tier5 case3: drain resets ticks to 0",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 0);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,3,0,0)); // +1 : first again
+    checkEq("tier5 case3: post-drain growth is first consecutive",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 1);
+    checkEq("tier5 case3: 1017 never fired", static_cast<long long>(rec.count(kEvGrowth)), 0);
+    return true;
+}
+
+//==============================================================================
+// D-8: Tier 4 / Tier 5 independence
+//==============================================================================
+bool testIndependenceAdmissionWithoutGrowth()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,0,0,0)); // store+1, res flat
+    checkTrue("indep A: 1016 fired", rec.has(kEvAdmission));
+    checkFalse("indep A: 1017 not fired", rec.has(kEvGrowth));
+    checkEq("indep A: growthTicks==0",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 0);
+    return true;
+}
+
+bool testIndependenceGrowthWithoutAdmission()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,1,0,0)); // res 0→1, store flat
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(100,2,0,0)); // res 1→2
+    checkFalse("indep B: 1016 not fired (no Δstore)", rec.has(kEvAdmission));
+    checkTrue("indep B: 1017 fired (sustained growth)", rec.has(kEvGrowth));
+    return true;
+}
+
+//==============================================================================
+// D-9: Episode exit (N=1) and re-arm
+//==============================================================================
+bool testEpisodeExitAndRearm()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0)); // episode starts
+    checkTrue("exit: episode latched", RuntimeHealthMonitorTierTestAccess::admissionLatched(m));
+
+    // Drain complete: resident back to 0 AND admissions stopped.
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,0,0,0));
+    checkFalse("exit: latch cleared on resident==0 ∧ dStore==0",
+               RuntimeHealthMonitorTierTestAccess::admissionLatched(m));
+    checkFalse("exit: growth latch also cleared",
+               RuntimeHealthMonitorTierTestAccess::growthLatched(m));
+    checkEq("exit: growthTicks cleared",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 0);
+
+    // New episode: another admission re-fires 1016.
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(102,1,0,0));
+    checkEq("re-arm: new episode fires 1016 again",
+            static_cast<long long>(rec.count(kEvAdmission)), 2);
+    return true;
+}
+
+//==============================================================================
+// D-11: Reader correlation — correlated / suspected / uncorrelated
+//==============================================================================
+bool testCorrelationCorrelated()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::setStuckDiagnosis(m, /*idx*/7, /*epoch*/555, /*residency*/123456);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0));
+
+    const auto* ev = rec.last(kEvAdmission);
+    checkTrue("corr: 1016 fired", ev != nullptr);
+    checkEq("corr: readerIndex propagated", ev ? static_cast<long long>(ev->readerIndex) : -99, 7);
+    checkEq("corr: readerEpoch propagated", ev ? static_cast<long long>(ev->readerEpoch) : -99, 555);
+    checkEq("corr: residencyTimeUs propagated",
+            ev ? static_cast<long long>(ev->residencyTimeUs) : -99, 123456);
+    return true;
+}
+
+bool testCorrelationSuspected()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    // No stuck diagnosis (cache empty). readers>0 with minReaderEpoch stagnation across
+    // the pair — event still fires, but reader fields remain UNSET (no invented verdict).
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0,/*minEpoch*/42,/*readers*/1));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0,/*minEpoch*/42,/*readers*/1));
+
+    const auto* ev = rec.last(kEvAdmission);
+    checkTrue("suspected: 1016 fired", ev != nullptr);
+    checkEq("suspected: readerIndex left unset",
+            ev ? static_cast<long long>(ev->readerIndex) : 0, -1);
+    checkEq("suspected: readerEpoch left unset",
+            ev ? static_cast<long long>(ev->readerEpoch) : 0, 0);
+    return true;
+}
+
+bool testCorrelationUncorrelated()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    RuntimeHealthMonitorTierTestAccess::clearStuckDiagnosis(m);
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0,/*minEpoch*/10,/*readers*/0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0,/*minEpoch*/77,/*readers*/0));
+
+    const auto* ev = rec.last(kEvAdmission);
+    checkTrue("uncorr: 1016 fired (cause open)", ev != nullptr);
+    checkEq("uncorr: reader fields unset",
+            ev ? static_cast<long long>(ev->readerIndex) : 0, -1);
+    return true;
+}
+
+//==============================================================================
+// D-10: Reset hygiene — no cross-episode carryover
+//==============================================================================
+bool testResetHygiene()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+
+    // Build up full state: engaged warning, latches, ticks, prev snapshot, stale timer.
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(100,0,0,0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,1,0,0));   // admission latched
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,2,0,0));   // growth ticks=1
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(101,3,1,5));   // E engaged + overflow warning
+    checkTrue("reset: precondition — admission latched",
+              RuntimeHealthMonitorTierTestAccess::admissionLatched(m));
+
+    m.reset();
+
+    checkFalse("reset: admission latch cleared",
+               RuntimeHealthMonitorTierTestAccess::admissionLatched(m));
+    checkFalse("reset: growth latch cleared",
+               RuntimeHealthMonitorTierTestAccess::growthLatched(m));
+    checkEq("reset: growthTicks cleared",
+            static_cast<long long>(RuntimeHealthMonitorTierTestAccess::growthTicks(m)), 0);
+
+    // Post-reset tick behaves as BOOTSTRAP even though values continue from pre-reset:
+    // deltas vs the wiped prev snapshot must NOT produce Tier 3-5 events.
+    rec.clear();
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(102,4,1,6));
+    checkFalse("reset: no 1015 from carried-over delta", rec.has(kEvOverflow));
+    checkFalse("reset: no 1016 from carried-over delta", rec.has(kEvAdmission));
+    checkFalse("reset: no 1017 from carried-over delta", rec.has(kEvGrowth));
+    checkEq("reset: periodic-evidence timer cleared (no surprise evidence)",
+            static_cast<long long>(rec.count(kEvAdmission)), 0);
+
+    // And a fresh episode can start normally afterwards.
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(103,5,1,6));
+    checkTrue("reset: fresh episode fires 1016 normally", rec.has(kEvAdmission));
+    return true;
+}
+
+//==============================================================================
+// D-12: Event payload value semantics (per-code primary metric)
+//==============================================================================
+bool testPayloadValueSemantics()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(0,0,0,40));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(0,0,3,41));   // E engage + overflow
+    checkEq("payload: 1014 value = E resident",
+            rec.last(kEvQEngaged) ? static_cast<long long>(rec.last(kEvQEngaged)->value) : -1, 3);
+    checkEq("payload: 1015 value = cumulative overflow",
+            rec.last(kEvOverflow) ? static_cast<long long>(rec.last(kEvOverflow)->value) : -1, 41);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(500,1,3,41)); // admission
+    checkEq("payload: 1016 value = cumulative store",
+            rec.last(kEvAdmission) ? static_cast<long long>(rec.last(kEvAdmission)->value) : -1, 500);
+
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(500,2,3,41)); // growth ×1
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(500,9,3,41)); // growth ×2 → latch
+    // 1017 latches on the SECOND consecutive growth tick, where resident was still 2;
+    // the later jump to 9 arrives after the latch and does not re-fire.
+    checkEq("payload: 1017 value = current resident at latch",
+            rec.last(kEvGrowth) ? static_cast<long long>(rec.last(kEvGrowth)->value) : -1, 2);
+    return true;
+}
+
+//==============================================================================
+// Wraparound safety: signed delta near u64 magnitudes stays monotonic-positive
+//==============================================================================
+bool testSignedDeltaLargeValues()
+{
+    RuntimeHealthMonitor m;
+    EventRecorder rec;
+    rec.attach(m);
+    constexpr std::uint64_t kBig = (std::uint64_t{1} << 62); // ~4.6e18, far from sign bit
+    RuntimeHealthMonitorTierTestAccess::primePrev(m, makeSnap(kBig, 0, 0, 0));
+    RuntimeHealthMonitorTierTestAccess::feedTick(m, makeSnap(kBig + 5, 1, 0, 0));
+    checkTrue("wraparound: large-magnitude Δstore>0 still admits", rec.has(kEvAdmission));
+    return true;
+}
+
+int main()
+{
+    std::cout << "=== RuntimeHealthMonitorTierTests (D101-9 Step 5-VI-D) ===" << std::endl;
+
+    testBootstrapSkip();
+    testTier2EngageClearReengage();
+    testTier3OverflowDelta();
+    testTier4SingleAdmissionAndLatch();
+    testTier4PeriodicEvidence();
+    testTier5PositiveX2();
+    testTier5PlateauReset();
+    testTier5DrainReset();
+    testIndependenceAdmissionWithoutGrowth();
+    testIndependenceGrowthWithoutAdmission();
+    testEpisodeExitAndRearm();
+    testCorrelationCorrelated();
+    testCorrelationSuspected();
+    testCorrelationUncorrelated();
+    testResetHygiene();
+    testPayloadValueSemantics();
+    testSignedDeltaLargeValues();
+
+    std::cout << "=== " << g_testCount << " checks, " << g_failCount << " failures ===" << std::endl;
+    return g_failCount == 0 ? 0 : 1;
 }
 
 ```
@@ -94186,6 +95946,269 @@ int main() {
 
 ```
 
+### 📄 `src\tests\TerminalTelemetryContractTests.cpp`
+
+```
+// TerminalTelemetryContractTests.cpp
+// Phase 9-B Step 5-I: Terminal Telemetry Instrumentation Contract Tests
+//
+// Tests T-5.1 through T-5.6: Verify the 4 telemetry members added to
+// TerminalReclaimAuthority and the AtomicAccess wrapper convention fixes.
+
+#include <cstdint>
+#include <stdexcept>
+
+#include "audioengine/ISRRetireRouter.h"
+#include "audioengine/AtomicAccess.h"  // atomic-dot-call policy: convo::consumeAtomic / publishAtomic
+
+// ── T-5.1: Initial state — all telemetry counters are zero
+[[nodiscard]] bool testTerminalTelemetryInitialState()
+{
+    convo::isr::TerminalReclaimAuthority auth;
+
+    if (auth.terminalPeakResident() != 0)
+        return false;
+    if (auth.terminalStoreCount() != 0)
+        return false;
+    if (auth.terminalDrainAllCount() != 0)
+        return false;
+    if (auth.terminalDrainEntryCount() != 0)
+        return false;
+    if (auth.residentCountAtomic() != 0)
+        return false;
+    if (auth.reclaimCount() != 0)
+        return false;
+
+    return true;
+}
+
+// ── T-5.2: 3 stores — storeCount == 3, peakResident == 3
+[[nodiscard]] bool testTerminalTelemetryAfterThreeStores()
+{
+    convo::isr::TerminalReclaimAuthority auth;
+
+    for (int i = 0; i < 3; ++i) {
+        auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x3000 + i * 0x10));
+        auto* deleter = +[](void*) noexcept {};
+        if (!auth.store(ptr, deleter, 100,  // NOLINT(atomic-dot-call)
+                        DeletionEntryType::Generic, "test"))
+            return false;
+    }
+
+    if (auth.terminalStoreCount() != 3)
+        return false;
+    if (auth.terminalPeakResident() != 3)
+        return false;
+    if (auth.residentCountAtomic() != 3)
+        return false;
+    if (auth.reclaimCount() != 0)
+        return false;
+
+    return true;
+}
+
+// ── T-5.3: drain after store — resident drops to 0, reclaimCount for World
+[[nodiscard]] bool testTerminalTelemetryAfterDrain()
+{
+    convo::isr::TerminalReclaimAuthority auth;
+
+    auto* deleter = +[](void* p) noexcept { (void)p; };
+
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x3000)),  // NOLINT(atomic-dot-call)
+                    deleter, 100, DeletionEntryType::Generic, "g1"))
+        return false;
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x3010)),  // NOLINT(atomic-dot-call)
+                    deleter, 100, DeletionEntryType::Generic, "g2"))
+        return false;
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x3020)),  // NOLINT(atomic-dot-call)
+                    deleter, 100, DeletionEntryType::World, "w1"))
+        return false;
+
+    if (auth.residentCountAtomic() != 3)
+        return false;
+    if (auth.reclaimCount() != 0)
+        return false;
+    if (auth.terminalStoreCount() != 3)
+        return false;
+
+    uint64_t minReader = 200;
+    auto isOlder = [](uint64_t a, uint64_t b) noexcept {
+        return static_cast<int64_t>(a - b) < 0;
+    };
+    auth.drain(minReader, isOlder);
+
+    if (auth.residentCountAtomic() != 0)
+        return false;
+    if (auth.reclaimCount() != 1)
+        return false;
+    if (auth.terminalDrainAllCount() != 0)
+        return false;
+    if (auth.terminalDrainEntryCount() != 0)
+        return false;
+    if (auth.terminalStoreCount() != 3)
+        return false;
+
+    return true;
+}
+
+// ── T-5.4: peak monotonicity — peak never decreases
+[[nodiscard]] bool testTerminalTelemetryPeakMonotonicity()
+{
+    convo::isr::TerminalReclaimAuthority auth;
+    auto* deleter = +[](void*) noexcept {};
+
+    uint32_t prevPeak = 0;
+
+    for (int i = 0; i < 5; ++i) {
+        auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x4000 + i * 0x10));
+        if (!auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test"))  // NOLINT(atomic-dot-call)
+            return false;
+
+        const uint32_t peak = auth.terminalPeakResident();
+        if (peak < prevPeak)
+            return false;
+        prevPeak = peak;
+
+        if (peak != static_cast<uint32_t>(i + 1))
+            return false;
+    }
+
+    if (auth.terminalPeakResident() != 5)
+        return false;
+    if (auth.residentCountAtomic() != 5)
+        return false;
+
+    uint64_t minReader = 200;
+    auto isOlder = [](uint64_t a, uint64_t b) noexcept {
+        return static_cast<int64_t>(a - b) < 0;
+    };
+    auth.drain(minReader, isOlder);
+
+    if (auth.residentCountAtomic() != 0)
+        return false;
+    if (auth.terminalPeakResident() != 5)
+        return false;
+
+    return true;
+}
+
+// ── T-5.5: drainAll — drainAllCount and drainEntryCount
+[[nodiscard]] bool testTerminalTelemetryDrainAll()
+{
+    convo::isr::TerminalReclaimAuthority auth;
+    auto* deleter = +[](void* p) noexcept { (void)p; };
+
+    for (int i = 0; i < 4; ++i) {
+        auto* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5000 + i * 0x10));
+        if (!auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test"))  // NOLINT(atomic-dot-call)
+            return false;
+    }
+
+    if (auth.terminalStoreCount() != 4)
+        return false;
+    if (auth.residentCountAtomic() != 4)
+        return false;
+    if (auth.terminalDrainAllCount() != 0)
+        return false;
+    if (auth.terminalDrainEntryCount() != 0)
+        return false;
+
+    auth.drainAll();
+
+    if (auth.terminalDrainAllCount() != 1)
+        return false;
+    if (auth.terminalDrainEntryCount() != 4)
+        return false;
+    if (auth.residentCountAtomic() != 0)
+        return false;
+    if (auth.terminalStoreCount() != 4)
+        return false;
+    if (auth.terminalPeakResident() != 4)
+        return false;
+
+    auth.drainAll();
+    if (auth.terminalDrainAllCount() != 2)
+        return false;
+    if (auth.terminalDrainEntryCount() != 4)
+        return false;
+
+    return true;
+}
+
+// ── T-5.6: Generic/World separation
+[[nodiscard]] bool testTerminalTelemetryGenericWorldSeparation()
+{
+    convo::isr::TerminalReclaimAuthority auth;
+
+    static std::atomic<int> s_deleteCount{0};
+    auto* countingDeleter = +[](void* p) noexcept {
+        (void)p;
+        convo::fetchAddAtomic(s_deleteCount, 1);  // NOLINT(atomic-dot-call)
+    };
+
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x6000)),  // NOLINT(atomic-dot-call)
+                    countingDeleter, 100, DeletionEntryType::Generic, "g1"))
+        return false;
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x6010)),  // NOLINT(atomic-dot-call)
+                    countingDeleter, 100, DeletionEntryType::Generic, "g2"))
+        return false;
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x6020)),  // NOLINT(atomic-dot-call)
+                    countingDeleter, 100, DeletionEntryType::World, "w1"))
+        return false;
+    if (!auth.store(reinterpret_cast<void*>(static_cast<uintptr_t>(0x6030)),  // NOLINT(atomic-dot-call)
+                    countingDeleter, 100, DeletionEntryType::World, "w2"))
+        return false;
+
+    if (auth.terminalStoreCount() != 4)
+        return false;
+    if (auth.residentCountAtomic() != 4)
+        return false;
+    if (auth.reclaimCount() != 0)
+        return false;
+
+    convo::publishAtomic(s_deleteCount, 0);  // NOLINT(atomic-dot-call)
+
+    auth.drainAll();
+
+    if (auth.terminalDrainAllCount() != 1)
+        return false;
+    if (auth.terminalDrainEntryCount() != 4)
+        return false;
+    if (auth.residentCountAtomic() != 0)
+        return false;
+    if (convo::consumeAtomic(s_deleteCount) != 4)  // NOLINT(atomic-dot-call)
+        return false;
+    if (auth.reclaimCount() != 2)
+        return false;
+
+    return true;
+}
+
+int main()
+{
+    if (!testTerminalTelemetryInitialState())
+        throw std::runtime_error("T-5.1: terminal telemetry initial state failed");
+
+    if (!testTerminalTelemetryAfterThreeStores())
+        throw std::runtime_error("T-5.2: terminal telemetry after 3 stores failed");
+
+    if (!testTerminalTelemetryAfterDrain())
+        throw std::runtime_error("T-5.3: terminal telemetry after drain failed");
+
+    if (!testTerminalTelemetryPeakMonotonicity())
+        throw std::runtime_error("T-5.4: terminal telemetry peak monotonicity failed");
+
+    if (!testTerminalTelemetryDrainAll())
+        throw std::runtime_error("T-5.5: terminal telemetry drainAll failed");
+
+    if (!testTerminalTelemetryGenericWorldSeparation())
+        throw std::runtime_error("T-5.6: terminal telemetry Generic/World separation failed");
+
+    return 0;
+}
+
+```
+
 ### 📄 `src\tests\invariant_INV3_INV5.cpp`
 
 ```
@@ -95665,6 +97688,19 @@ int runDeferredFlowIntegrationTests();
 // WorldRetirementMeasurementTests.cpp (T1 D100・burst test harness)
 bool runWorldRetirementMeasurement(const char* condition);
 
+// T1Measurement.cpp removed — T1 baseline now handled via --t1 flag in main()
+// Forward declaration for T1 baseline measurement
+bool runT1BaselineMeasurement(int durationSec);
+
+// Forward declaration for T2 short-stall measurement
+bool runT2ShortStallMeasurement(int stallMs, int durationSec);
+
+// Forward declaration for T3 long-stall measurement
+bool runT3LongStallMeasurement(int stallSec);
+
+// Forward declaration for T4 repeated-publish measurement (Step 5-III-E)
+bool runT4RepeatedPublishMeasurement(int intervalUs);
+
 // DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
 int runDeferredPublishViewStateMachineTests();
 
@@ -95947,21 +97983,99 @@ int main(int argc, char* argv[])
 {
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
+    //
+    // ★ Step 5-III-B T1: --t1[=duration_s] で通常運転ベースライン測定を実行。
+    //   AudioEngine を通常運転（publish/rebuild/audio processing）の状態で
+    //   --duration-s 秒間 (default 600s = 10min) 稼働させ、100ms 間隔の
+    //   [D101_9_T5_OBS] ログを stderr へ出力。reader stall を意図的に発生させない。
+
+    // Parse T1 duration override (e.g. --t1=120 or --t1=120s)
+    int t1DurationSec = 600;  // default 10 minutes
+    std::string t1Measurement;  // empty = no T1 mode
+    std::string t2Measurement;  // empty = no T2 mode
+    int t2StallMs = 50;         // default 50ms reader stall
+    std::string t3Measurement;  // empty = no T3 mode
+    int t3StallSec = 5;
+    std::string t4Measurement;  // empty = no T4 mode
+    int t4IntervalUs = 3333;    // default T4-B (~300 pub/s target)
+    std::string measurement;
+    bool full = false;
+    const char* scenario = "all";
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a(argv[i]);
+        if (a == "--soak")
+            full = true;
+        else if (a.rfind("--scenario=", 0) == 0)
+            scenario = argv[i] + std::strlen("--scenario=");
+        else if (a.rfind("--measurement=", 0) == 0)
+            measurement = argv[i] + std::strlen("--measurement=");
+        else if (a == "--t1")
+            t1Measurement = "t1";
+        else if (a.rfind("--t1=", 0) == 0)
+        {
+            t1Measurement = "t1";
+            t1DurationSec = std::stoi(a.substr(5));
+        }
+        else if (a == "--t2")
+        {
+            t2Measurement = "t2";
+            t2StallMs = 50;  // default 50ms stall
+        }
+        else if (a.rfind("--t2=", 0) == 0)
+        {
+            t2Measurement = "t2";
+            t2StallMs = std::stoi(a.substr(5));
+        }
+        else if (a.rfind("--duration-s=", 0) == 0)
+            t1DurationSec = std::stoi(a.substr(13));
+        else if (a == "--t3")
+        {
+            t3Measurement = "t3";
+        }
+        else if (a.rfind("--t3=", 0) == 0)
+        {
+            t3Measurement = "t3";
+            t3StallSec = std::stoi(a.substr(5));
+        }
+        else if (a == "--t4")
+        {
+            t4Measurement = "t4";
+        }
+        else if (a.rfind("--t4=", 0) == 0)
+        {
+            t4Measurement = "t4";
+            t4IntervalUs = std::stoi(a.substr(5));
+        }
+    }
+
+    // ★ T1: baseline measurement mode
+    if (!t1Measurement.empty())
+    {
+        return runT1BaselineMeasurement(t1DurationSec) ? 0 : 1;
+    }
+
+    // ★ T2: short-stall measurement mode
+    if (!t2Measurement.empty())
+    {
+        return runT2ShortStallMeasurement(t2StallMs, 20) ? 0 : 1;
+    }
+
+    // ★ T3: long-stall measurement mode
+    if (!t3Measurement.empty())
+    {
+        return runT3LongStallMeasurement(t3StallSec) ? 0 : 1;
+    }
+
+    // ★ T4: repeated-publish measurement mode (Step 5-III-E, fixed 30 s stall)
+    if (!t4Measurement.empty())
+    {
+        return runT4RepeatedPublishMeasurement(t4IntervalUs) ? 0 : 1;
+    }
+
     if (argc > 1)
     {
-        bool full = false;
-        const char* scenario = "all";
-        std::string measurement;   // ★ T1 (D100): --measurement=normal|burst|jitter|all（burst test harness）
-        for (int i = 1; i < argc; ++i)
-        {
-            const std::string a(argv[i]);
-            if (a == "--soak")
-                full = true;
-            else if (a.rfind("--scenario=", 0) == 0)
-                scenario = argv[i] + std::strlen("--scenario=");
-            else if (a.rfind("--measurement=", 0) == 0)
-                measurement = argv[i] + std::strlen("--measurement=");
-        }
         if (!measurement.empty())
             return runWorldRetirementMeasurement(measurement.c_str()) ? 0 : 1;   // ★ T1 (D100)
         return convo_soak::runSoakScenarios(full, scenario) ? 0 : 1;
@@ -96549,6 +98663,734 @@ bool runSoakScenarios(bool full, const char* scenario)
 }
 
 } // namespace convo_soak
+```
+
+### 📄 `src\tests\AudioEngineHarness\T1Measurement.cpp`
+
+```
+// T1Measurement.cpp
+// D101-9 Phase 9-B Step 5-III-B: T1 Baseline Measurement
+//   Runs AudioEngineHarness in normal operation for a specified duration,
+//   capturing [D101_9_T5_OBS] telemetry logs via stderr.
+//
+//   Called from PublishPipelineIntegrationTests.cpp main() with --t1 flag.
+//   The --t1 flag triggers runT1BaselineMeasurement(durationSec).
+
+#include "AudioEngineHarness.h"
+#include "audioengine/AudioEngine.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+// ★ T1 fix: JUCE Logger that writes to stderr.
+//   By default, Logger::writeToLog() and DBG() use outputDebugString() on Windows,
+//   which requires a debugger attached. In a console app without a debugger, the output
+//   is lost. This custom logger ensures all diagnostic output goes to stderr.
+class StderrLogger : public juce::Logger
+{
+public:
+    void logMessage(const juce::String& message) override
+    {
+        std::fprintf(stderr, "%s\n", message.toStdString().c_str());
+        std::fflush(stderr);
+    }
+};
+
+// T1: D101-9 Phase 9-B Step 5-III-B
+//   Runs the AudioEngine in normal operation (no reader stall) for `durationSec` seconds.
+//   The 100ms timerCallback emits [D101_9_T5_OBS] logs to stderr automatically.
+//   No shutdown is performed — T1 measures the running engine baseline.
+bool runT1BaselineMeasurement(int durationSec)
+{
+    // ★ T1 fix: Install a stderr logger so DBG() and Logger::writeToLog() output goes
+    //   to stderr instead of OutputDebugString (which requires a debugger).
+    static StderrLogger stderrLogger;
+    juce::Logger::setCurrentLogger(&stderrLogger);
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "T1: FAIL: harness start failed\n");
+        return false;
+    }
+
+    // ★ T1 fix: Start MessageManager so AudioEngine's juce::Timer::timerCallback() fires.
+    //   AudioEngine inherits juce::Timer and startTimer(100) is called in initialize().
+    //   A JUCE Timer's callback is dispatched via the MessageManager's event loop, but
+    //   the MessageManager must be created (getInstance) and runDispatchLoop() called on
+    //   the SAME thread — that thread becomes the "message thread".
+    //   Strategy: create MessageManager on the main thread (which becomes the message thread),
+    //   then run the measurement loop on a background thread and run the dispatch loop
+    //   on the main thread. When the measurement is done, call stopDispatchLoop() from
+    //   the measurement thread to unblock runDispatchLoop() on the main thread.
+    juce::MessageManager* messageManager = juce::MessageManager::getInstance();
+
+    AudioEngine& e = h.engine();
+
+    // Launch measurement loop on a background thread
+    std::atomic<bool> measurementDone{false};
+    std::thread measurementThread([&h, &e, durationSec, &measurementDone, messageManager]() {
+        AudioEngineHarness& harness = h;
+
+        // Wait for bootstrap publish to settle
+        std::fprintf(stderr, "T1: waiting for bootstrap settle...\n");
+        auto settleStart = std::chrono::steady_clock::now();
+        while (e.getPublicationBacklogCount() != 0)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - settleStart);
+            if (elapsed.count() > 30)
+            {
+                std::fprintf(stderr, "T1: WARN: bootstrap settle timeout (backlog=%llu)\n",
+                    static_cast<unsigned long long>(e.getPublicationBacklogCount()));
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        std::fprintf(stderr, "T1: bootstrap settled, starting %d-second measurement\n", durationSec);
+
+        // ★ T1 condition: normal operation — periodic low-cadence publish (no reader stall)
+        //   Publish every 500ms simulates light DAW idle operation.
+        //   The audio thread (audioLoop) continuously processes audio blocks → normal retire cycle.
+        //   The timerCallback (100ms) captures [D101_9_T5_OBS] telemetry.
+        auto start = std::chrono::steady_clock::now();
+        uint64_t publishCount = 0;
+
+        // ★ Resolve active DSP from published world (publishIdleWorldOnly returns false for nullptr)
+        AudioEngine::DSPCore* activeDSP = nullptr;
+        if (const auto* w = e.observePublishedWorld())
+            activeDSP = static_cast<AudioEngine::DSPCore*>(w->engine.current);
+
+        while (true)
+        {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start);
+            if (elapsed.count() >= durationSec)
+                break;
+
+            // Issue a periodic idle publish at low cadence (simulates normal DAW operation)
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+
+            // Sleep until next publish interval (but check time continuously for duration limit)
+            auto nextPublish = now + std::chrono::milliseconds(500);
+            while (std::chrono::steady_clock::now() < nextPublish)
+            {
+                auto checkTime = std::chrono::steady_clock::now();
+                auto remaining = std::chrono::duration_cast<std::chrono::seconds>(checkTime - start);
+                if (remaining.count() >= durationSec)
+                    goto done;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+
+    done:
+        std::fprintf(stderr, "T1: measurement complete. publishes=%llu duration=%ds\n",
+            static_cast<unsigned long long>(publishCount), durationSec);
+
+        // ★ T1: shutdown NOT performed. Observe terminal state for drainAll accounting.
+        //   The [D101_9_T5_OBS] logs are already captured via stderr during the run.
+        //   We do NOT call h.stop() — that would trigger shutdown drain.
+        //   T1 is about running-engine baseline, not shutdown behavior.
+        //   The process exit will dump all logs captured during the run.
+
+        std::fprintf(stderr, "T1: DONE (engine left running for log capture)\n");
+
+        // Signal the MessageManager dispatch loop on the main thread to stop.
+        messageManager->stopDispatchLoop();
+        measurementDone = true;
+    });
+
+    // ★ Main thread runs the MessageManager dispatch loop — this is required for
+    //   juce::Timer::timerCallback() to fire. Timer callbacks are dispatched here.
+    messageManager->runDispatchLoop();
+
+    // Wait for the measurement thread to finish
+    if (measurementThread.joinable())
+        measurementThread.join();
+    // ★ T1 fix: Restore default logger (no-op, stderrLogger is static)
+    juce::Logger::setCurrentLogger(nullptr);
+    // Note: intentionally not calling h.stop() to avoid shutdown drain in T1.
+    // The process will exit and all stderr output is captured by the test runner.
+    return true;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\T2Measurement.cpp`
+
+```
+// T2Measurement.cpp
+// D101-9 Phase 9-B Step 5-III-B: T2 Short-Stall Measurement
+//   Runs AudioEngineHarness with an intentional reader stall of `stallMs` milliseconds,
+//   capturing [D101_9_T5_OBS] telemetry logs via stdout.
+//
+//   Called from PublishPipelineIntegrationTests.cpp main() with --t2 flag.
+//   The --t2=<stall_ms> flag triggers runT2ShortStallMeasurement(stallMs, durationSec).
+//
+//   T2 procedure:
+//     1. Start engine, bootstrap settle (as T1)
+//     2. Publish normally for 5 seconds (pre-stall baseline)
+//     3. Enter reader stall: call enterRcuReader() but delay exitRcuReader() for stallMs ms
+//     4. During stall, continue publishing to generate pressure
+//     5. After stallMs, exit reader (recover) and observe recovery
+//     6. Publish normally for 5 more seconds (post-stall recovery)
+//
+//   Acceptance criteria:
+//     - During stall: activeReaders > 0, minEpoch stagnates, Q_resident/E_resident may rise
+//     - After recovery: minEpoch advances, Q/E drain, Terminal stays at 0 (expected for short stalls)
+
+#include "AudioEngineHarness.h"
+#include "audioengine/AudioEngine.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+#include <string>
+
+// ★ Shared JUCE Logger that writes to stderr.
+//   By default, Logger::writeToLog() and DBG() use outputDebugString() on Windows,
+//   which requires a debugger attached. This custom logger ensures output to stderr.
+class StderrLogger : public juce::Logger
+{
+public:
+    void logMessage(const juce::String& message) override
+    {
+        std::fprintf(stderr, "%s\n", message.toStdString().c_str());
+        std::fflush(stderr);
+    }
+};
+
+bool runT2ShortStallMeasurement(int stallMs, int durationSec)
+{
+    // ★ Install stderr logger so DBG() and Logger::writeToLog() output goes to stderr
+    static StderrLogger stderrLogger;
+    juce::Logger::setCurrentLogger(&stderrLogger);
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "T2: FAIL: harness start failed\n");
+        return false;
+    }
+
+    // ★ Start MessageManager so AudioEngine's juce::Timer::timerCallback() fires
+    juce::MessageManager* messageManager = juce::MessageManager::getInstance();
+
+    AudioEngine& e = h.engine();
+
+    // Launch measurement loop on a background thread
+    std::atomic<bool> measurementDone{false};
+    std::thread measurementThread([&h, &e, stallMs, durationSec, &measurementDone, messageManager]() {
+        // Wait for bootstrap publish to settle
+        std::fprintf(stderr, "T2: waiting for bootstrap settle...\n");
+        auto settleStart = std::chrono::steady_clock::now();
+        while (e.getPublicationBacklogCount() != 0)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - settleStart);
+            if (elapsed.count() > 30)
+            {
+                std::fprintf(stderr, "T2: WARN: bootstrap settle timeout (backlog=%llu)\n",
+                    static_cast<unsigned long long>(e.getPublicationBacklogCount()));
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        std::fprintf(stderr, "T2: bootstrap settled\n");
+
+        auto runStart = std::chrono::steady_clock::now();
+        uint64_t publishCount = 0;
+
+        // ★ Resolve active DSP from published world (publishIdleWorldOnly returns false for nullptr)
+        AudioEngine::DSPCore* activeDSP = nullptr;
+        if (const auto* w = e.observePublishedWorld())
+            activeDSP = static_cast<AudioEngine::DSPCore*>(w->engine.current);
+        if (activeDSP == nullptr)
+        {
+            std::fprintf(stderr, "T2: FAIL: could not resolve active DSP\n");
+            messageManager->stopDispatchLoop();
+            return true;
+        }
+        std::fprintf(stderr, "T2: active DSP resolved\n");
+
+        // Phase 1: Pre-stall baseline publish (5 seconds)
+        std::fprintf(stderr, "T2: Phase 1 — pre-stall baseline publish (5s)\n");
+        auto phase1End = runStart + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < phase1End)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        // Phase 2: Reader stall — enter reader, hold, then publish during stall
+        std::fprintf(stderr, "T2: Phase 2 — reader stall (%dms)\n", stallMs);
+        auto& router = e.getRetireRouter();
+        // ★ CRITICAL: Do NOT use registerReaderThread() — it performs a linear scan
+        //   for the first kInactiveEpoch slot, which can collide with ConvolverProcessor's
+        //   GlobalGuard slots (indices 2/3 via enterGlobalReader(2/3)). During a stall,
+        //   ConvolverProcessor operations will enter/exit reader slot 2 or 3, overwriting
+        //   the stall reader's epoch and breaking the epoch-gated reclaim safety invariant.
+        //   Fix: reserve a slot at index 4+ (beyond ConvolverProcessor's reserved 2/3).
+        int readerIndex = 4;
+        if (!router.reserveReaderThread(readerIndex))
+        {
+            // Fallback: try registerReaderThread if slot 4 is taken
+            readerIndex = router.registerReaderThread();
+            std::fprintf(stderr, "T2: WARN: slot 4 unavailable, using registerReaderThread() idx=%d\n", readerIndex);
+        }
+        router.enterReader(readerIndex);
+
+        std::fprintf(stderr, "T2: reader entered (index=%d), activeReaders should be > 0\n", readerIndex);
+
+        // Publish rapidly during stall to generate pressure that will show up
+        // in the next [D101_9_T5_OBS] timer callback (100ms interval).
+        auto stallStart = std::chrono::steady_clock::now();
+        auto stallEnd = stallStart + std::chrono::milliseconds(stallMs);
+        while (std::chrono::steady_clock::now() < stallEnd)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // Phase 3: Recovery — exit reader
+        std::fprintf(stderr, "T2: Phase 3 — reader recovery\n");
+        router.exitReader(readerIndex);
+        std::fprintf(stderr, "T2: reader exited\n");
+
+        // Phase 4: Post-stall recovery publish (remainder of duration)
+        auto totalEnd = runStart + std::chrono::seconds(durationSec);
+        std::fprintf(stderr, "T2: Phase 4 — post-stall recovery publish (%ds remaining)\n",
+            static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(totalEnd - std::chrono::steady_clock::now()).count()));
+        while (std::chrono::steady_clock::now() < totalEnd)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        std::fprintf(stderr, "T2: measurement complete. publishes=%llu stallMs=%d\n",
+            static_cast<unsigned long long>(publishCount), stallMs);
+
+        // Signal the MessageManager dispatch loop on the main thread to stop
+        messageManager->stopDispatchLoop();
+        measurementDone = true;
+
+        return true;
+    });
+
+    // ★ Main thread runs the MessageManager dispatch loop
+    messageManager->runDispatchLoop();
+
+    // Wait for the measurement thread to finish
+    if (measurementThread.joinable())
+        measurementThread.join();
+
+    juce::Logger::setCurrentLogger(nullptr);
+    return true;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\T3Measurement.cpp`
+
+```
+// T3Measurement.cpp
+// D101-9 Phase 9-B Step 5-III-C: T3 Long-Stall Measurement
+//   Runs AudioEngineHarness with an intentional reader stall of `stallSec` seconds,
+//   capturing [D101_9_T5_OBS] telemetry logs via stdout.
+//
+//   Called from PublishPipelineIntegrationTests.cpp main() with --t3 flag.
+//   The --t3=<stall_sec> flag triggers runT3LongStallMeasurement(stallSec).
+//
+//   T3 procedure:
+//     Phase 1: Pre-stall baseline publish (3 seconds)
+//     Phase 2: Reader stall — enter reader, hold for stallSec, publish rapidly
+//     Phase 3: Reader recovery — exit reader, observe Terminal drain
+//     Phase 4: Post-recovery stable publish (3 seconds)
+//
+//   T3 extends T2 to long stalls (1s, 5s, 10s, 30s) to observe the full causal chain:
+//     stall → minEpoch stagnation → Q/E pressure → Terminal arrival → Terminal growth
+//     → reader recovery → minEpoch advance → Terminal drain
+
+#include "AudioEngineHarness.h"
+#include "audioengine/AudioEngine.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+// ★ Shared JUCE Logger that writes to stderr.
+class StderrLogger : public juce::Logger
+{
+public:
+    void logMessage(const juce::String& message) override
+    {
+        std::fprintf(stderr, "%s\n", message.toStdString().c_str());
+        std::fflush(stderr);
+    }
+};
+
+bool runT3LongStallMeasurement(int stallSec)
+{
+    // ★ Install stderr logger so DBG() and Logger::writeToLog() output goes to stderr
+    static StderrLogger stderrLogger;
+    juce::Logger::setCurrentLogger(&stderrLogger);
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "T3: FAIL: harness start failed\n");
+        return false;
+    }
+
+    // ★ Start MessageManager so AudioEngine's juce::Timer::timerCallback() fires
+    juce::MessageManager* messageManager = juce::MessageManager::getInstance();
+
+    AudioEngine& e = h.engine();
+
+    // Launch measurement loop on a background thread
+    std::atomic<bool> measurementDone{false};
+    std::thread measurementThread([&h, &e, stallSec, &measurementDone, messageManager]() {
+        // Wait for bootstrap publish to settle
+        std::fprintf(stderr, "T3: waiting for bootstrap settle...\n");
+        auto settleStart = std::chrono::steady_clock::now();
+        while (e.getPublicationBacklogCount() != 0)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - settleStart);
+            if (elapsed.count() > 30)
+            {
+                std::fprintf(stderr, "T3: WARN: bootstrap settle timeout (backlog=%llu)\n",
+                    static_cast<unsigned long long>(e.getPublicationBacklogCount()));
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        std::fprintf(stderr, "T3: bootstrap settled\n");
+
+        auto runStart = std::chrono::steady_clock::now();
+        uint64_t publishCount = 0;
+
+        // ★ Resolve active DSP from published world (publishIdleWorldOnly returns false for nullptr)
+        AudioEngine::DSPCore* activeDSP = nullptr;
+        if (const auto* w = e.observePublishedWorld())
+            activeDSP = static_cast<AudioEngine::DSPCore*>(w->engine.current);
+        if (activeDSP == nullptr)
+        {
+            std::fprintf(stderr, "T3: FAIL: could not resolve active DSP\n");
+            messageManager->stopDispatchLoop();
+            return true;
+        }
+        std::fprintf(stderr, "T3: active DSP resolved\n");
+
+        // Phase 1: Pre-stall baseline publish (3 seconds)
+        std::fprintf(stderr, "T3: Phase 1 — pre-stall baseline publish (3s)\n");
+        auto phase1End = runStart + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < phase1End)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        // Phase 2: Reader stall — enter reader, hold for stallSec, publish rapidly
+        std::fprintf(stderr, "T3: Phase 2 — reader stall (%ds)\n", stallSec);
+        auto& router = e.getRetireRouter();
+        // ★ CRITICAL: Do NOT use registerReaderThread() — it performs a linear scan
+        //   for the first kInactiveEpoch slot, which can collide with ConvolverProcessor's
+        //   GlobalGuard slots (indices 2/3 via enterGlobalReader(2/3)). During a long
+        //   stall, ConvolverProcessor operations will enter/exit reader slot 2 or 3,
+        //   overwriting the stall reader's epoch and breaking the epoch-gated reclaim
+        //   safety invariant (minEpoch advances instead of stagnating).
+        //   Fix: reserve a slot at index 4+ (beyond ConvolverProcessor's reserved 2/3)
+        //   to guarantee no collision.
+        int readerIndex = 4;
+        if (!router.reserveReaderThread(readerIndex))
+        {
+            // Fallback: try registerReaderThread if slot 4 is taken
+            readerIndex = router.registerReaderThread();
+            std::fprintf(stderr, "T3: WARN: slot 4 unavailable, using registerReaderThread() idx=%d\n", readerIndex);
+        }
+        router.enterReader(readerIndex);
+
+        std::fprintf(stderr, "T3: reader entered (index=%d), activeReaders should be > 0\n", readerIndex);
+
+        // Publish rapidly during stall to generate pressure that will show up
+        // in the [D101_9_T5_OBS] timer callback (100ms interval).
+        auto stallStart = std::chrono::steady_clock::now();
+        auto stallEnd = stallStart + std::chrono::seconds(stallSec);
+        while (std::chrono::steady_clock::now() < stallEnd)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // Phase 3: Recovery — exit reader, observe drain
+        std::fprintf(stderr, "T3: Phase 3 — reader recovery\n");
+        router.exitReader(readerIndex);
+        std::fprintf(stderr, "T3: reader exited, waiting for Terminal drain...\n");
+
+        // Phase 4: Post-recovery publish until Terminal drains
+        auto recoveryStart = std::chrono::steady_clock::now();
+        const auto maxRecoveryWait = std::chrono::seconds(stallSec + 10);
+        while (std::chrono::steady_clock::now() < recoveryStart + maxRecoveryWait)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            publishCount++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        std::fprintf(stderr, "T3: measurement complete. publishes=%llu stallSec=%d\n",
+            static_cast<unsigned long long>(publishCount), stallSec);
+
+        // Signal the MessageManager dispatch loop on the main thread to stop
+        messageManager->stopDispatchLoop();
+        measurementDone = true;
+
+        return true;
+    });
+
+    // ★ Main thread runs the MessageManager dispatch loop
+    messageManager->runDispatchLoop();
+
+    // Wait for the measurement thread to finish
+    if (measurementThread.joinable())
+        measurementThread.join();
+
+    juce::Logger::setCurrentLogger(nullptr);
+    return true;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\T4Measurement.cpp`
+
+```
+// T4Measurement.cpp
+// D101-9 Phase 9-B Step 5-III-E: T4 Repeated-Publish Measurement
+//   Varies the publish load (sleep interval) during a FIXED 30 s reader stall to measure
+//   the load-dependence of λ_terminal and validate the T3 empirical model
+//   K ≈ λ_terminal × T_stall − (C_D + C_Q + C_E) across publish rates.
+//
+//   Called from PublishPipelineIntegrationTests.cpp main() with --t4=<interval_us>.
+//
+//   Spec cases (interval is the TARGET; actual publish rate is ground truth):
+//     T4-A: 5000 us sleep   (~200 pub/s target)
+//     T4-B: 3333 us sleep   (~300 pub/s target — T3 baseline equivalent)
+//     T4-C: 1000 us sleep   (~1000 pub/s target)
+//   Post-hoc: λ_publish = stallPublishes / actualStallDuration.
+//
+//   Stall duration is fixed at 30 s: T3-30s showed Terminal arrival at ~20 s, so 30 s
+//   covers arrival → growth → peak for every load level. 60 s/120 s not required yet.
+//
+//   Methodology locked from T3 (slot-collision fix, Step 5-III-C §0):
+//     - The stall reader MUST hold reader slot 4 (ConvolverProcessor::GlobalGuard owns
+//       slots 2/3 via enterGlobalReader(2)/(3); registerReaderThread() linear scan may
+//       grab slot 2 and get its epoch overwritten mid-stall).
+//     - ★ Step 5-III-E hardening: if reserveReaderThread(4) fails, the run is INVALID
+//       and is aborted immediately. NO fallback to registerReaderThread() — a fallback
+//       slot could silently invalidate the epoch-stagnation premise.
+//
+//   Phases (unified with T3 for T3/T4 comparability):
+//     Phase 1: baseline 3 s @ 500 ms
+//     Phase 2: reader enter(slot 4) → 30 s stalled repeated publish at target load
+//     Phase 3: reader exit
+//     Phase 4: recovery ~10 s @ 100 ms (T3-30s drained fully within 79 ms of exit,
+//              so 10 s is ample; mechanism identical to T3)
+//
+//   Run-level accounting is printed as a machine-parseable line:
+//     T4_SUMMARY: intervalUs=<u> stallSec=<s> baselinePublishes=<n> stallPublishes=<n>
+//                 actualStallUs=<u> lambdaPublish=<f> recoveryPublishes=<n> totalPublishes=<n>
+//
+//   Observation: existing [D101_9_T5_OBS] (100 ms timer tick) used as-is. Primary metrics
+//   per Step 5-III-E §11: pendingRetire / terminalStoreCount / terminalResident /
+//   terminalPeakResident. Q_resident OBS field is an aggregate (store + auxiliary counter)
+//   and must NOT be used to infer Q capacity.
+
+#include "AudioEngineHarness.h"
+#include "audioengine/AudioEngine.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+// ★ Shared JUCE Logger that writes to stderr (same as T1/T2/T3).
+class StderrLogger : public juce::Logger
+{
+public:
+    void logMessage(const juce::String& message) override
+    {
+        std::fprintf(stderr, "%s\n", message.toStdString().c_str());
+        std::fflush(stderr);
+    }
+};
+
+// ★ File-scope constants (usable inside the measurement-thread lambda without capture)
+inline constexpr int kT4StallSec = 30;          // Step 5-III-E: fixed 30 s stall
+inline constexpr int kT4StallReaderSlot = 4;    // MANDATORY — see file header
+
+bool runT4RepeatedPublishMeasurement(int intervalUs)
+{
+    // ★ Install stderr logger so DBG() and Logger::writeToLog() output goes to stderr
+    static StderrLogger stderrLogger;
+    juce::Logger::setCurrentLogger(&stderrLogger);
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "T4: FAIL: harness start failed\n");
+        return false;
+    }
+
+    // ★ Start MessageManager so AudioEngine's juce::Timer::timerCallback() fires
+    //   (same main-thread dispatch-loop strategy as T1/T2/T3).
+    juce::MessageManager* messageManager = juce::MessageManager::getInstance();
+
+    AudioEngine& e = h.engine();
+
+    std::atomic<bool> measurementDone{false};
+    std::thread measurementThread([&h, &e, intervalUs, &measurementDone, messageManager]() {
+        // Wait for bootstrap publish to settle
+        std::fprintf(stderr, "T4: waiting for bootstrap settle...\n");
+        auto settleStart = std::chrono::steady_clock::now();
+        while (e.getPublicationBacklogCount() != 0)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - settleStart);
+            if (elapsed.count() > 30)
+            {
+                std::fprintf(stderr, "T4: WARN: bootstrap settle timeout (backlog=%llu)\n",
+                    static_cast<unsigned long long>(e.getPublicationBacklogCount()));
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        std::fprintf(stderr, "T4: bootstrap settled\n");
+
+        auto runStart = std::chrono::steady_clock::now();
+        uint64_t baselinePublishes = 0;
+        uint64_t stallPublishes = 0;
+        uint64_t recoveryPublishes = 0;
+
+        // ★ Resolve active DSP from published world (publishIdleWorldOnly no-ops on nullptr)
+        AudioEngine::DSPCore* activeDSP = nullptr;
+        if (const auto* w = e.observePublishedWorld())
+            activeDSP = static_cast<AudioEngine::DSPCore*>(w->engine.current);
+        if (activeDSP == nullptr)
+        {
+            std::fprintf(stderr, "T4: INVALID: could not resolve active DSP — aborting run\n");
+            messageManager->stopDispatchLoop();
+            measurementDone = true;
+            return false;
+        }
+        std::fprintf(stderr, "T4: active DSP resolved\n");
+
+        // ── Phase 1: Pre-stall baseline publish (3 s @ 500 ms) ──
+        std::fprintf(stderr, "T4: Phase 1 — pre-stall baseline publish (3s)\n");
+        auto phase1End = runStart + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < phase1End)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            baselinePublishes++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        // ── Phase 2: Reader stall (fixed 30 s) with repeated publish at target load ──
+        std::fprintf(stderr, "T4: Phase 2 — reader stall (%ds), target interval=%dus\n",
+            kT4StallSec, intervalUs);
+        auto& router = e.getRetireRouter();
+
+        // ★★ MANDATORY slot 4 (Step 5-III-E §4): reserve failure ⇒ INVALID run.
+        //   No fallback — a linear-scan slot could collide with GlobalGuard slots 2/3
+        //   and silently invalidate the epoch-stagnation premise (see T3 evidence §0).
+        if (!router.reserveReaderThread(kT4StallReaderSlot))
+        {
+            std::fprintf(stderr,
+                "T4: INVALID: reserveReaderThread(%d) failed — measurement aborted "
+                "(no fallback per Step 5-III-E methodology)\n", kT4StallReaderSlot);
+            messageManager->stopDispatchLoop();
+            measurementDone = true;
+            return false;
+        }
+        router.enterReader(kT4StallReaderSlot);
+        std::fprintf(stderr, "T4: reader entered (index=%d), activeReaders should be > 0\n",
+            kT4StallReaderSlot);
+
+        auto stallStart = std::chrono::steady_clock::now();
+        auto stallEnd = stallStart + std::chrono::seconds(kT4StallSec);
+        while (std::chrono::steady_clock::now() < stallEnd)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            stallPublishes++;
+            if (intervalUs > 0)
+                std::this_thread::sleep_for(std::chrono::microseconds(intervalUs));
+        }
+        const auto actualStallUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - stallStart).count();
+
+        // ── Phase 3: Reader exit ──
+        std::fprintf(stderr, "T4: Phase 3 — reader recovery\n");
+        router.exitReader(kT4StallReaderSlot);
+        std::fprintf(stderr, "T4: reader exited, waiting for Terminal drain...\n");
+
+        // ★ Print run-level accounting BEFORE recovery so λ_publish survives even if a
+        //   later stage hangs. λ_publish = stallPublishes / actualStallDuration.
+        const double lambdaPublish =
+            static_cast<double>(stallPublishes) * 1e6 / static_cast<double>(actualStallUs);
+        std::fprintf(stderr,
+            "T4_SUMMARY: intervalUs=%d stallSec=%d baselinePublishes=%llu "
+            "stallPublishes=%llu actualStallUs=%lld lambdaPublish=%.2f\n",
+            intervalUs, kT4StallSec,
+            static_cast<unsigned long long>(baselinePublishes),
+            static_cast<unsigned long long>(stallPublishes),
+            static_cast<long long>(actualStallUs),
+            lambdaPublish);
+
+        // ── Phase 4: Recovery publish (~10 s @ 100 ms) — same mechanism as T3 ──
+        auto recoveryStart = std::chrono::steady_clock::now();
+        const auto maxRecoveryWait = std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < recoveryStart + maxRecoveryWait)
+        {
+            (void)e.publishIdleWorldOnly(activeDSP, convo::TransitionPolicy::SmoothOnly);
+            recoveryPublishes++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        const uint64_t totalPublishes =
+            baselinePublishes + stallPublishes + recoveryPublishes;
+        std::fprintf(stderr,
+            "T4: measurement complete. totalPublishes=%llu recoveryPublishes=%llu stallSec=%d\n",
+            static_cast<unsigned long long>(totalPublishes),
+            static_cast<unsigned long long>(recoveryPublishes),
+            kT4StallSec);
+
+        // Signal the MessageManager dispatch loop on the main thread to stop
+        messageManager->stopDispatchLoop();
+        measurementDone = true;
+
+        return true;
+    });
+
+    // ★ Main thread runs the MessageManager dispatch loop
+    messageManager->runDispatchLoop();
+
+    // Wait for the measurement thread to finish
+    if (measurementThread.joinable())
+        measurementThread.join();
+
+    juce::Logger::setCurrentLogger(nullptr);
+    return true;
+}
+
 ```
 
 ### 📄 `src\tests\AudioEngineHarness\WorldRetirementMeasurementTests.cpp`

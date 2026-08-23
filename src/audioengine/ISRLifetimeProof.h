@@ -150,14 +150,14 @@ public:
     [[nodiscard]] bool consume() noexcept
     {
         State expected = State::Issued;
-        return state_.compare_exchange_strong(expected, State::Consumed,
+        return convo::compareExchangeAtomic(state_, expected, State::Consumed,
                                               std::memory_order_acq_rel,
                                               std::memory_order_acquire);
     }
 
     [[nodiscard]] bool isConsumed() const noexcept
     {
-        return state_.load(std::memory_order_acquire) == State::Consumed;
+        return convo::consumeAtomic(state_, std::memory_order_acquire) == State::Consumed;
     }
 
 private:

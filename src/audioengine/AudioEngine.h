@@ -37,6 +37,7 @@ struct CoeffSet {
     double k[kDim] = {};
 };
 
+#include "RetrySchedulerTypes.h"
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstdint>
@@ -102,6 +103,7 @@ namespace convo::isr { class PublicationAdmission; }
     namespace convo::isr { struct PublishExecutor; }
 #include "ISRCoordinatorLoop.h"  // ★ FUTURE-9: Dedicated Coordinator Worker (complete type for coordinatorLoop_)
 class DSPLifetimeManager;
+class RetryScheduler; // ★ D101-24 Step 1: forward-declared (unique_ptr ownership, AudioEngine owns RetryScheduler)
 #include "ISRRuntimeSemanticSchema.h"
 #include "SequenceArithmetic.h"  // ★ dash2 §1.6.1 (Phase H): modular sequence arithmetic（PublishReceiptWaiter）
 #include "ISRRuntimeIdentityGenerators.h"
@@ -1578,6 +1580,19 @@ public:
         std::uint64_t maxRetireDeferralEpochs = 0;
         double maxRetireWallClockMs = 0.0;
         double reclaimLatency = 0.0;
+        // ★ Step 5-I: Terminal telemetry (for K_terminal sizing — Phase 9-B Step 5)
+        std::uint64_t terminalStoreCount = 0;    // cumulative entries stored in Terminal
+        std::uint64_t terminalDrainAllCount = 0; // cumulative drainAll() invocations
+        std::uint64_t terminalDrainEntryCount = 0; // cumulative entries drained by drainAll()
+        uint32_t terminalPeakResident = 0;       // peak Terminal resident count
+        std::size_t terminalResident = 0;        // current Terminal resident count (snapshot)
+        // ★ Step 5-III-A: Observation snapshot fields (for T1-T6 correlated capture)
+        //   These extend RuntimeBackpressureTelemetry as a single-snapshot observation contract.
+        //   NOT modifying HealthMonitor's TrendSnapshot (per instructions).
+        uint32_t activeReaderCount = 0;          // ISRRetireRouter::activeReaderCount()
+        std::uint64_t minReaderEpoch = 0;        // ISRRetireRouter::minReaderEpoch()
+        uint32_t pendingRetireCount = 0;         // ISRRetireRouter::pendingRetireCount() (D queue)
+        std::uint64_t emergencyQuarantineResident = 0;  // ISRRetireRouter::emergencyQuarantineResidentCount() (E only)
     };
 
     // ★ 計測ログ追加: RT-safe XRUN イベント（trivially copyable → LockFreeRingBuffer 対応）
@@ -1639,6 +1654,18 @@ public:
         //   退避ストアの high watermark 監視（backpressure テレメトリ）を維持する。
         const auto retireQuarantineResident = (m_retireRouter != nullptr)
             ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
+        // ★ Step 5-I: Terminal telemetry snapshot
+        const auto terminalResident = (m_retireRouter != nullptr)
+            ? m_retireRouter->terminalReclaimResidentCount() : static_cast<std::size_t>(0);
+        // ★ Step 5-III-A: Q/E/D observation snapshot (single-call consistency)
+        const auto readerCount = (m_retireRouter != nullptr)
+            ? m_retireRouter->activeReaderCount() : 0u;
+        const auto minReader = (m_retireRouter != nullptr)
+            ? m_retireRouter->minReaderEpoch() : std::uint64_t{0};
+        const auto pendingRetire = (m_retireRouter != nullptr)
+            ? m_retireRouter->pendingRetireCount() : 0u;
+        const auto emergencyResident = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->emergencyQuarantineResidentCount()) : 0u;
         return {
             consumeAtomic(retireQueueDepth_, std::memory_order_acquire),
             consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),
@@ -1657,7 +1684,18 @@ public:
             consumeAtomic(retireProtectiveModeEnterCount_, std::memory_order_acquire),
             consumeAtomic(maxRetireDeferralEpochs_, std::memory_order_acquire),
             consumeAtomic(maxRetireWallClockMs_, std::memory_order_acquire),
-            consumeAtomic(reclaimLatency_, std::memory_order_acquire)
+            consumeAtomic(reclaimLatency_, std::memory_order_acquire),
+            // ★ Step 5-I: Terminal telemetry fields
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalStoreCount() : 0,
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalDrainAllCount() : 0,
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalDrainEntryCount() : 0,
+            (m_retireRouter != nullptr) ? m_retireRouter->terminalPeakResident() : 0,
+            terminalResident,
+            // ★ Step 5-III-A: Q/E/D observation snapshot fields
+            readerCount,
+            minReader,
+            pendingRetire,
+            emergencyResident
         };
     }
 
@@ -2633,6 +2671,8 @@ public:
     //   consume/discard → releaseSlot → submitPublishRequest）を実行する。
     //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
     bool publishRetryReady = false;
+    // ★ D101-24 Step 1: production-owned delayed intent scheduler (AudioEngine owns, RetryScheduler non-owning back-ptr)
+    std::unique_ptr<RetryScheduler> retryScheduler_;
 
     struct RebuildTask {
         DSPCore* currentDSP = nullptr;
@@ -2734,60 +2774,12 @@ public:
         Dispatched
     };
 
-    enum class RebuildTelemetryReason : uint8_t
-    {
-        ConvolverParamsChanged,
-        MixedPhaseIntermediate,
-        HashDedup,
-        PreparedIRApplyWindow,
-        SnapshotEnqueueFailed,
-        SnapshotEnqueued,
-        RequestRebuildKindEntry,
-        UiEqEditorChangeListener,
-        PrepareToPlayNonMt,
-        RebuildThreadWarmupRetry,
-        ShutdownInProgress,
-        KindFiltered,
-        DelegateRequestRebuildSrBs,
-        MissingSrBs,
-        NonMtTriggerAsync,
-        NonMtAlreadyPending,
-        AsyncBridgeConsume,
-        AsyncBridgeDelegateSrBs,
-        AsyncBridgeMissingSrBs,
-        RequestRebuildSrBs,
-        DeferredStructuralWindow,
-        TaskQueued,
-        RecentDuplicate,
-        PendingDuplicate,
-        DeferredStructuralDue,
-        DeferredStructuralRebuildRequested,
-        DeferredFinalizeReady,
-        DeferredFinalizeRebuildRequested,
-        EnqueueSnapshotCommand,
-        SnapshotIntentDebounced,
-        SnapshotCommandBufferFull,
-        SnapshotCommandQueued,
-        SnapshotCommandBufferFullNonMt,
-        SnapshotCommandQueuedNonMt,
-        RetirePressureSevere,
-        SameAsPendingWouldMerge
-    };
+    // ★ D-5-2 Step 1: 3 telemetry enums extracted to RetrySchedulerTypes.h
+    //   (RebuildKind remains in core/RebuildTypes.h; global enums exposed via using-declarations)
+    using RebuildTelemetryReason = ::RebuildTelemetryReason;
+    using RebuildTelemetryClass = ::RebuildTelemetryClass;
+    using RebuildTelemetryPolicy = ::RebuildTelemetryPolicy;
 
-    enum class RebuildTelemetryClass : uint8_t
-    {
-        NA,
-        Structural,
-        FinalizeAware,
-        Snapshot
-    };
-
-    enum class RebuildTelemetryPolicy : uint8_t
-    {
-        NA,
-        Replaceable,
-        MustExecute
-    };
     enum class RebuildTelemetryDecision : uint8_t
     {
         Accepted,

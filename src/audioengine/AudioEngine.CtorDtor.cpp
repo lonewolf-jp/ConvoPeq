@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RetryScheduler.h" // ★ D101-24 Step 1: complete type for unique_ptr<RetryScheduler> destruction
 #include "core/RuntimeReaderContext.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
@@ -91,6 +92,12 @@ AudioEngine::AudioEngine()
 
     // ★ B14: Vyukov MPSC Retire Queue 初期化
     worldAuthority_.lifetime().initQueue();
+
+    // ★ D101-24 Step 2: production DispatchFn wiring (AudioEngine owns → DispatchFn → submitRebuildIntent boundary)
+    //   RetryScheduler owns time/ordering only; BuildError/RetryDisposition stays caller-side.
+    retryScheduler_ = std::make_unique<RetryScheduler>([this](const RetryScheduleRequest& req) noexcept {
+        this->submitRebuildIntent(req.kind, req.reason, req.rebuildClass, req.collapsePolicy);
+    });
 }
 
 AudioEngine::~AudioEngine()
@@ -110,6 +117,11 @@ AudioEngine::~AudioEngine()
     stopTimer();
 
     setShutdownPhase(ShutdownPhase::StopWorkers, "~AudioEngine");
+    // ★ D101-24 Step 4: RetryScheduler を先に停止 (stop accepting → clear/discard → prevent callback → join)
+    //   rebuildThread 停止前に scheduler の dispatch を止めないと shutdown 後に submitRebuildIntent が走る。
+    //   member destruction order に依存せず明示 shutdown (idempotent)。
+    if (retryScheduler_)
+        retryScheduler_->shutdown();
     // releaseResources が未実行の異常系でも worker 終了を保証する。
     shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker (defensive)
     stopRebuildThread();

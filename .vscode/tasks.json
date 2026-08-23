@@ -721,6 +721,82 @@
 				"cd /mnt/c/VSC_Project/ConvoPeq && touch evidence/phase-d101-8-step6-k-world-derivation.md && echo done"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "Repair build Debug harness",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build build --config Debug --target AudioEngineHarness 2>&1 | tail -n 30"
+			]
+		},
+		{
+			"label": "Repair MSVC build Debug",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"build.bat Debug nopause 2>&1 | tail -n 50"
+			]
+		},
+		{
+			"label": "Rebuild build-icx harness",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 >nul && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >nul && cmake --build build-icx --config Debug --target AudioEngineHarness 2>&1 | findstr /R \"Built target AudioEngineHarness.*Linking.*AudioEngineHarness\\|FAILED\\|error:\" | head -n 20 & echo BUILD_ICX_EXIT_%ERRORLEVEL%"
+			]
+		},
+		{
+			"label": "Rebuild harness icx Debug",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 >nul && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >nul && cmake --build build-icx --config Debug --target AudioEngineHarness 2>&1 | tail -n 20"
+			]
+		},
+		{
+			"label": "CTest Debug Full After Wiring",
+			"type": "shell",
+			"command": "cmd.exe /d /c \"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && ctest --test-dir build -C Debug --output-on-failure\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "Regenerate ConvoPeq.md",
+			"type": "shell",
+			"command": "python output_sourcecode_markdown.py 2>&1",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release Build D101-25",
+			"type": "shell",
+			"command": "cmd.exe /d /c \"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Release 2>&1 | tail -n 80\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release Build Only D101-25",
+			"type": "shell",
+			"command": "cmd.exe /d /c \"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake --build build --config Release 2>&1 | tail -n 100\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release Build Full",
+			"type": "shell",
+			"command": "cmd.exe /d /c \"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 >NUL && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >NUL && cmake --build build --config Release --parallel 8 2>&1\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release CTest 37-37 D101-25",
+			"type": "shell",
+			"command": "cmd.exe /d /c \"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && ctest --test-dir build -C Release --output-on-failure 2>&1\"",
+			"problemMatcher": []
 		}
 	]
 }

@@ -1202,6 +1202,27 @@ void AudioEngine::timerCallback()
     uiConvolverProcessor.cleanup();
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ Step 5-III-A: Periodic Terminal telemetry observation capture (every 100ms timer tick)
+    //   NOT a change-triggered diagnostic — this is a correlated measurement probe.
+    //   Scenario identifier is external/manual (annotated in log post-hoc); no embedded detection logic.
+    {
+        const auto obs = getRuntimeBackpressureTelemetry();
+        const uint64_t gen = (runtimeWorld != nullptr) ? static_cast<uint64_t>(runtimeWorld->generation) : 0;
+        diagLog(diagPrefix(gen)
+            + " [D101_9_T5_OBS]"
+            + " T_store=" + juce::String(static_cast<juce::int64>(obs.terminalStoreCount))
+            + " T_drainAll=" + juce::String(static_cast<juce::int64>(obs.terminalDrainAllCount))
+            + " T_drainEntry=" + juce::String(static_cast<juce::int64>(obs.terminalDrainEntryCount))
+            + " T_peak=" + juce::String(static_cast<int>(obs.terminalPeakResident))
+            + " T_resident=" + juce::String(static_cast<juce::int64>(obs.terminalResident))
+            + " Q_resident=" + juce::String(static_cast<juce::int64>(obs.quarantineResident))
+            + " E_resident=" + juce::String(static_cast<juce::int64>(obs.emergencyQuarantineResident))
+            + " activeReaders=" + juce::String(static_cast<int>(obs.activeReaderCount))
+            + " minEpoch=" + juce::String(static_cast<juce::int64>(obs.minReaderEpoch))
+            + " pendingRetire=" + juce::String(static_cast<int>(obs.pendingRetireCount))
+            + " pressureLevel=" + juce::String(obs.retirePressureLevel));
+    }
+
     // ★ 計測ログ: Backpressure 診断（変化時のみ [BACKPRESSURE] として出力）
     {
         const auto backpressure = getRuntimeBackpressureTelemetry();
@@ -1567,6 +1588,27 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
         + " severity=" + juce::String(static_cast<int>(event.severity))
         + " value=" + juce::String(static_cast<juce::int64>(event.value)));
+
+    // ★ D101-9 Step 5-VI-C: Terminal/quarantine chain evidence.
+    //   Evidence-only — NO recovery action here; recovery stays exclusively on the
+    //   reader-stuck path (EVENT_READER_STUCK → quarantineReader). Single same-tick
+    //   telemetry snapshot read via the existing accessor (no new acquisition path).
+    if (event.eventCode == convo::EVENT_EMERGENCY_Q_ENGAGED
+        || event.eventCode == convo::EVENT_QUARANTINE_OVERFLOW_DETECTED
+        || event.eventCode == convo::EVENT_TERMINAL_ADMISSION
+        || event.eventCode == convo::EVENT_TERMINAL_GROWTH_SUSTAINED)
+    {
+        const auto tp = getRuntimeBackpressureTelemetry();
+        diagLog("[TERMINAL_EVIDENCE] code=" + juce::String(static_cast<int>(event.eventCode))
+            + " T_store=" + juce::String(static_cast<juce::int64>(tp.terminalStoreCount))
+            + " T_resident=" + juce::String(static_cast<juce::int64>(tp.terminalResident))
+            + " pend=" + juce::String(static_cast<juce::int64>(tp.pendingRetireCount))
+            + " E_resident=" + juce::String(static_cast<juce::int64>(tp.emergencyQuarantineResident))
+            + " readers=" + juce::String(static_cast<int>(tp.activeReaderCount))
+            + " minEpoch=" + juce::String(static_cast<juce::int64>(tp.minReaderEpoch))
+            + " readerIdx=" + juce::String(static_cast<int>(event.readerIndex)));
+        return;
+    }
 
     // ★ A-1: Reader Exhaustion → Admission 強制停止 + 診断ダンプ
     if (event.eventCode == convo::EVENT_READER_SLOT_USAGE

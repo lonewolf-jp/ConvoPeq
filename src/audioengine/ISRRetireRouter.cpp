@@ -32,7 +32,20 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
 
     std::lock_guard<std::mutex> lock(mtx_);
     entries_.push_back(Entry{ptr, deleter, epoch, type, reason});
-    residentAtomic_.fetch_add(1, std::memory_order_release);
+    // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_add)
+    convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
+    // ★ Step 5-I: telemetry — cumulative store count (Generic + World)
+    convo::fetchAddAtomic(terminalStoreCount_, std::uint64_t{1}, std::memory_order_release);
+    // ★ Step 5-I: telemetry — peak resident update (CAS loop, uses residentAtomic_ as authoritative source)
+    {
+        const uint32_t current = convo::consumeAtomic(residentAtomic_, std::memory_order_acquire);
+        uint32_t expected = convo::consumeAtomic(terminalPeakResident_, std::memory_order_acquire);
+        while (current > expected) {
+            if (convo::compareExchangeAtomic(terminalPeakResident_, expected, current,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
     return true;  // ★ P-4: growable store — ALWAYS accepts
 }
 
@@ -62,12 +75,14 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
         entries_.resize(w);
     }
     // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
-    residentAtomic_.fetch_sub(static_cast<uint32_t>(pending.size()), std::memory_order_release);
+    // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_sub)
+    convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(pending.size()), std::memory_order_release);
     for (auto& e : pending) {
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
         {
-            ++reclaimCount_;
+            // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw ++)
+            convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             if (referenceObserver_ != nullptr)
                 referenceObserver_->onRelease();
         }
@@ -76,19 +91,25 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
 
 void TerminalReclaimAuthority::drainAll() noexcept
 {
+    // ★ Step 5-I: telemetry — increment drainAll invocation count
+    convo::fetchAddAtomic(terminalDrainAllCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     std::vector<Entry> pending;
     {
         std::lock_guard<std::mutex> lock(mtx_);
         pending.swap(entries_);  // take all entries under lock
         // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
-        residentAtomic_.store(0, std::memory_order_release);
+        // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw store)
+        convo::publishAtomic(residentAtomic_, uint32_t{0}, std::memory_order_release);
     }
     for (auto& e : pending) {
         if (e.ptr != nullptr && e.deleter != nullptr) {
             e.deleter(e.ptr);
+            // ★ Step 5-I: telemetry — count actually drained entries
+            convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1}, std::memory_order_release);
             if (e.type == DeletionEntryType::World)
             {
-                ++reclaimCount_;
+                // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw ++)
+                convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
                 if (referenceObserver_ != nullptr)
                     referenceObserver_->onRelease();
             }
@@ -508,7 +529,7 @@ bool ISRRetireRouter::terminalReclaim(void* ptr, void (*deleter)(void*), uint64_
 
     // epoch unsafe OR RT caller → store for later drain
     // ★ P-4: growable store — ALWAYS accepts (ownership always transfers)
-    return m_terminalReclaim.store(ptr, deleter, epoch, type, reason);
+    return m_terminalReclaim.store(ptr, deleter, epoch, type, reason);  // NOLINT(atomic-dot-call)
 }
 
 // ★ P-4: TerminalReclaimAuthority 滞留件数

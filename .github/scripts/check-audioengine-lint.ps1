@@ -526,9 +526,12 @@ foreach ($file in $sourceFiles) {
                 #   - RuntimePublishExecutor.h: publish 前 seal（immutable 化、PR-5）
                 #   - RuntimeWorldAuthority.h: physical store swap の所有権移行（INV-X4-3）
                 #   - AudioEngine.Init.cpp: bootstrap publish の seal / rejected world 所有権移行（X4-B-6）
+                #   - AudioEngine.Processing.ReleaseResources.cpp: drainAllNonRt residual
+                #     const RuntimeState* → void* for deferred deleter chain (Phase I-T1-D101-1F)
                 '^src/audioengine/RuntimePublishExecutor\.h$'
                 '^src/audioengine/RuntimeWorldAuthority\.h$'
                 '^src/audioengine/AudioEngine\.Init\.cpp$'
+                '^src/audioengine/AudioEngine\.Processing\.ReleaseResources\.cpp$'
             )
             $isAllowed = $false
             foreach ($pattern in $allowedConstCastPatterns) {

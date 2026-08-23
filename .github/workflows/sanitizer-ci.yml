@@ -194,7 +194,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # ★ ISR: azure.archive.ubuntu.com がタイムアウトする問題に対するリトライロジック
+          for i in 1 2 3; do
+            sudo apt-get update && break || {
+              echo "apt-get update attempt $i failed, retrying in 10s..."
+              sleep 10
+            }
+          done
           sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev cmake
 
       - name: Check MKL/IPP availability

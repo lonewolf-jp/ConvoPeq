@@ -1,0 +1,188 @@
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=1 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=1 reason=non_mt_trigger_async class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[AFFINITY] Symmetric cores (N=7). Audio pinned to last physical core.
+[AFFINITY] coreTopology: physical=7 logical=16 heterogeneous=false
+[AFFINITY] audioMask=0x3000 nonAudio=0xfff worker=0x3 learner=0xc heavyBG=0xfff lightBG=0xfff ui=0xfff
+[DIAG] prepareToPlay: enter spb=512 sr=48000.00
+[DIAG] prepareToPlay: lifecycleToken acquired
+[DIAG] prepareToPlay: lifecycle state set to Preparing
+[DIAG] prepareToPlay: shutdownPhase set to Running
+[DIAG] prepareToPlay: rebuild request generation reset to 0
+[DIAG] prepareToPlay: latency buffers ready
+[DIAG] prepareToPlay: lifecycleState set to Prepared
+[DIAG] prepareToPlay: hasPublishedCurrent=0
+[DIAG] prepareToPlay: creating placeholderDSP
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
+[DIAG] prepareToPlay: placeholderDSP created
+[DIAG] prepareToPlay: calling placeholderDSP->prepare
+[DSPCORE_PREPARE] enter
+[DSPCORE_PREPARE] setRetireCoordinator
+[DSPCORE_PREPARE] setRetireCoordinator done
+[DSPCORE_PREPARE] sampleRate set: sr=48000 spb=512
+[DSPCORE_PREPARE] blockCalc: inputMaxBlock=512 internalMaxBlock=4096
+[DSPCORE_PREPARE] allocating aligned buffers: required=4096
+[DSPCORE_PREPARE] calling ramp.prepare
+[DSPCORE_PREPARE] ramp.prepare done
+[DSPCORE_PREPARE] calling oversampling.prepare
+[DSPCORE_PREPARE] oversampling.prepare done
+[DSPCORE_PREPARE] calling softClipOS.prepareSingleStage
+[DSPCORE_PREPARE] softClipOS.prepareSingleStage done
+[DSPCORE_PREPARE] processingRate=384000 processingBlockSize=4096
+[DSPCORE_PREPARE] calling convolverState->prepare
+[DSPCORE_PREPARE] convolverState->prepare done
+[DSPCORE_PREPARE] calling eqState->prepare
+[EQ_PREPARE] enter: sr=384000 block=4096
+[EQ_PREPARE] rateChanged=1
+[EQ_PREPARE] scratch: required=32768 capacity=0
+[EQ_PREPARE] scratch allocated
+[EQ_PREPARE] channel: required=8192 dryCap=0
+[EQ_PREPARE] dryBypass allocated
+[EQ_PREPARE] parallel buffers allocated
+[EQ_PREPARE] xfade buffers allocated
+[EQ_PREPARE] msWorkBuffer allocated: 16384
+[EQ_PREPARE] agc tables allocated
+[DSPCORE_PREPARE] eqState->prepare done
+[DSPCORE_PREPARE] calling dcBlockers().init
+[DSPCORE_PREPARE] dcBlockers().init done
+[DSPCORE_PREPARE] calling noise shaper prepare: type=0
+[DSPCORE_PREPARE] noise shaper prepare done
+[DSPCORE_PREPARE] calling outputFilter.prepare
+[DSPCORE_PREPARE] outputFilter.prepare done
+[DSPCORE_PREPARE] calling truePeakDetector.prepare
+[DSPCORE_PREPARE] truePeakDetector.prepare done
+[DSPCORE_PREPARE] calling loudnessMeter.prepare
+[DSPCORE_PREPARE] loudnessMeter.prepare done
+[DSPCORE_PREPARE] calling peakLimiter.prepare
+[DSPCORE_PREPARE] peakLimiter.prepare done
+[DSPCORE_PREPARE] calling setFixedLatencySamples
+[DSPCORE_PREPARE] setFixedLatencySamples done
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=2 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x9943552022b27e3d finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=2 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x9943552022b27e3d finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=3 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[AUTO_GAIN_ANALYSIS] eqMeasuredGainDb=0.00 eqUpperBoundGainDb=0.00 boundExcessDb=0.000 eqMaxQ=0.0000 algorithm=1
+[DIAG] requestRebuild(sr,bs): task queued generation=1 SR=48000.00
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=3 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0x9943552022b27e3d finalizeState=N/A decision=dispatched latencyMs=5.115
+[DIAG] prepareToPlay: exit currentSR=48000.00 maxSPB=512
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=4 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[CONV_IR] transferIRStateFrom: no IR data to transfer
+[DIAG] convolverParamsChanged: enter
+[DSPCORE_PREPARE] enter
+[DSPCORE_PREPARE] setRetireCoordinator
+[DSPCORE_PREPARE] setRetireCoordinator done
+T1: waiting for bootstrap settle...
+T1: bootstrap settled, starting 30-second measurement
+[DSPCORE_PREPARE] sampleRate set: sr=48000 spb=512
+[DSPCORE_PREPARE] blockCalc: inputMaxBlock=512 internalMaxBlock=4096
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[DSPCORE_PREPARE] allocating aligned buffers: required=4096
+[DSPCORE_PREPARE] calling ramp.prepare
+[DSPCORE_PREPARE] ramp.prepare done
+[DSPCORE_PREPARE] calling oversampling.prepare
+[DSPCORE_PREPARE] oversampling.prepare done
+[DSPCORE_PREPARE] calling softClipOS.prepareSingleStage
+[DSPCORE_PREPARE] softClipOS.prepareSingleStage done
+[DSPCORE_PREPARE] processingRate=384000 processingBlockSize=4096
+[DSPCORE_PREPARE] calling convolverState->prepare
+[DSPCORE_PREPARE] convolverState->prepare done
+[DSPCORE_PREPARE] calling eqState->prepare
+[EQ_PREPARE] enter: sr=384000 block=4096
+[EQ_PREPARE] rateChanged=1
+[EQ_PREPARE] scratch: required=32768 capacity=0
+[EQ_PREPARE] scratch allocated
+[EQ_PREPARE] channel: required=8192 dryCap=0
+[EQ_PREPARE] dryBypass allocated
+[EQ_PREPARE] parallel buffers allocated
+[EQ_PREPARE] xfade buffers allocated
+[EQ_PREPARE] msWorkBuffer allocated: 16384
+[EQ_PREPARE] agc tables allocated
+[DSPCORE_PREPARE] eqState->prepare done
+[DSPCORE_PREPARE] calling dcBlockers().init
+[DSPCORE_PREPARE] dcBlockers().init done
+[DSPCORE_PREPARE] calling noise shaper prepare: type=0
+[DSPCORE_PREPARE] noise shaper prepare done
+[DSPCORE_PREPARE] calling outputFilter.prepare
+[DSPCORE_PREPARE] outputFilter.prepare done
+[DSPCORE_PREPARE] calling truePeakDetector.prepare
+[DSPCORE_PREPARE] truePeakDetector.prepare done
+[DSPCORE_PREPARE] calling loudnessMeter.prepare
+[DSPCORE_PREPARE] loudnessMeter.prepare done
+[DSPCORE_PREPARE] calling peakLimiter.prepare
+[DSPCORE_PREPARE] peakLimiter.prepare done
+[DSPCORE_PREPARE] calling setFixedLatencySamples
+[DSPCORE_PREPARE] setFixedLatencySamples done
+[DIAG] rebuildThreadLoop: generation=1 build=19.5ms rebuildIR=0.0ms
+[CONV_STATUS] rebuildThreadLoop: generation=1 irLoaded=0 irLen=0 convBypass=0 sr=48000.0 osFactor=0 processingRate=384000.0
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[PUBLISH] seq=4 gen=4 worldId=4 publishDurationUs=2683 publishCallbackIdx=12
+[DIAG] trySubmit: executor_.publish SUCCEEDED gen=1
+[VERIFY] EQ createdHash=0xc1315729e16b7054 gen=4
+[AudioEngine] processLearningCommands: DSPReady state=0
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+[AUTO_GAIN_PLAN] eqMaxGainDb=0.00 eqMaxQ=0.0000 irFreqPeakGainDb=0.00 qMargin=0.00 eqBoost=0.0 convBoost=0.0 inputHeadroomDb=-0.00 outputMakeupDb=0.00 convolverInputTrimDb=0.00 clamped=no
+T1: measurement complete. publishes=59 duration=30s
+T1: DONE (engine left running for log capture)

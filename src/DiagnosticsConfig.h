@@ -92,11 +92,11 @@ inline void system_aligned_free(void* ptr) noexcept
   #ifdef _MSC_VER
     #define DIAG_MKL_MALLOC(size, align) convo::diag::diagMklMalloc((size), (align))
     #define DIAG_MKL_FREE(ptr, size) \
-        convo::diag::diagMklFree((ptr), (size), __FILE_NAME__, __LINE__, __func__)
+        convo::diag::diagMklFree((ptr), (size), __FILE__, __LINE__, __func__)
   #else
     #define DIAG_MKL_MALLOC(size, align) convo::diag::diagMklMalloc((size), (align))
     #define DIAG_MKL_FREE(ptr, size) \
-        convo::diag::diagMklFree((ptr), (size), __FILE__, __LINE__, __func__)
+        convo::diag::diagMklFree((ptr), (size), __FILE_NAME__, __LINE__, __func__)
   #endif
 #else
   // ★ work72: MKL-free ビルドでは抽象化レイヤーを使用

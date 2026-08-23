@@ -17,6 +17,7 @@
             "*.h": "cpp"
         },
         "workbench.colorTheme": "Dark Modern",
-        "workbench.preferredDarkColorTheme": "Dark Modern"
+        "workbench.preferredDarkColorTheme": "Dark Modern",
+        "nvidia-nim.showReasoning": true
     }
 }

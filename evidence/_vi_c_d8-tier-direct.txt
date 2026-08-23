@@ -1,0 +1,74 @@
+=== RuntimeHealthMonitorTierTests (D101-9 Step 5-VI-D) ===
+  PASS: bootstrap: exactly 1 event emitted
+  PASS: bootstrap: 1014 fired (absolute gauge)
+  PASS: bootstrap: no 1015
+  PASS: bootstrap: no 1016
+  PASS: bootstrap: no 1017
+  PASS: bootstrap: admission not latched
+  PASS: tier2: engage fires once
+  PASS: tier2: severity is Warning
+  PASS: tier2: hold does not re-fire
+  PASS: tier2: clear is silent
+  PASS: tier2: re-engage fires again
+  PASS: tier3: first burst fires once
+  PASS: tier3: severity is Warning
+  PASS: tier3: value carries cumulative counter
+  PASS: tier3: consecutive increase does not re-fire while Warning held
+  PASS: tier3: flat counter emits nothing
+  PASS: tier4: admission fires exactly once
+  PASS: tier4: admission latched
+  PASS: tier4: severity is Error
+  PASS: tier4: value = cumulative store count
+  PASS: tier4: continued Δstore>0 does not re-fire (episode entry, not per-tick)
+  PASS: periodic: transition fires once
+  PASS: periodic: below interval emits nothing
+  PASS: periodic: past interval re-emits evidence
+  PASS: periodic: refreshed timer suppresses immediate re-fire
+  PASS: tier5 case1: ticks=1 after first growth
+  PASS: tier5 case1: no 1017 on first growth
+  PASS: tier5 case1: ticks=2 after second growth
+  PASS: tier5 case1: 1017 latches on second consecutive growth
+  PASS: tier5 case1: growth latched
+  PASS: tier5 case1: no re-fire while latched
+  PASS: tier5 case2: ticks=1
+  PASS: tier5 case2: plateau resets ticks to 0
+  PASS: tier5 case2: post-plateau growth is first (not second) consecutive
+  PASS: tier5 case2: 1017 never fired
+  PASS: tier5 case3: ticks=1
+  PASS: tier5 case3: drain resets ticks to 0
+  PASS: tier5 case3: post-drain growth is first consecutive
+  PASS: tier5 case3: 1017 never fired
+  PASS: indep A: 1016 fired
+  PASS: indep A: 1017 not fired
+  PASS: indep A: growthTicks==0
+  PASS: indep B: 1016 not fired (no Δstore)
+  PASS: indep B: 1017 fired (sustained growth)
+  PASS: exit: episode latched
+  PASS: exit: latch cleared on resident==0 ∧ dStore==0
+  PASS: exit: growth latch also cleared
+  PASS: exit: growthTicks cleared
+  PASS: re-arm: new episode fires 1016 again
+  PASS: corr: 1016 fired
+  PASS: corr: readerIndex propagated
+  PASS: corr: readerEpoch propagated
+  PASS: corr: residencyTimeUs propagated
+  PASS: suspected: 1016 fired
+  PASS: suspected: readerIndex left unset
+  PASS: suspected: readerEpoch left unset
+  PASS: uncorr: 1016 fired (cause open)
+  PASS: uncorr: reader fields unset
+  PASS: reset: precondition — admission latched
+  PASS: reset: admission latch cleared
+  PASS: reset: growth latch cleared
+  PASS: reset: growthTicks cleared
+  PASS: reset: no 1015 from carried-over delta
+  PASS: reset: no 1016 from carried-over delta
+  PASS: reset: no 1017 from carried-over delta
+  PASS: reset: periodic-evidence timer cleared (no surprise evidence)
+  PASS: reset: fresh episode fires 1016 normally
+  PASS: payload: 1014 value = E resident
+  PASS: payload: 1015 value = cumulative overflow
+  PASS: payload: 1016 value = cumulative store
+  PASS: payload: 1017 value = current resident at latch
+  PASS: wraparound: large-magnitude Δstore>0 still admits
+=== 72 checks, 0 failures ===

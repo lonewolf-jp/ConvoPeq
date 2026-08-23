@@ -1,0 +1,152 @@
+FAILED: [code=2] CMakeFiles/RuntimeHealthMonitorTierTests.dir/Debug/src/tests/RuntimeHealthMonitorTierTests.cpp.obj 
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(116): error C2061: �\���G���[: ���ʎq 'TrendSnapshot'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(119): error C2061: �\���G���[: ���ʎq 'RuntimeHealthMonitor'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(125): error C2061: �\���G���[: ���ʎq 'RuntimeHealthMonitor'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(130): error C2061: �\���G���[: ���ʎq 'RuntimeHealthMonitor'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(131): error C4430: �^�w��q������܂��� - int �Ɖ��肵�܂����B����: C++ �� int ������l�Ƃ��ăT�|�[�g���Ă��܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(131): error C2143: �\���G���[: ',' �� '&' �̑O�ɂ���܂���B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(132): error C4430: �^�w��q������܂��� - int �Ɖ��肵�܂����B����: C++ �� int ������l�Ƃ��ăT�|�[�g���Ă��܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(132): error C2143: �\���G���[: ',' �� '&' �̑O�ɂ���܂���B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(133): error C4430: �^�w��q������܂��� - int �Ɖ��肵�܂����B����: C++ �� int ������l�Ƃ��ăT�|�[�g���Ă��܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(133): error C2143: �\���G���[: ',' �� '&' �̑O�ɂ���܂���B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(134): error C2061: �\���G���[: ���ʎq 'RuntimeHealthMonitor'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(142): error C2061: �\���G���[: ���ʎq 'RuntimeHealthMonitor'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(146): error C2061: �\���G���[: ���ʎq 'RuntimeHealthMonitor'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(121): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(121): error C2065: 'now': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(121): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(122): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(122): error C2065: 'now': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(123): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(127): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(127): error C2065: 'prev': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(128): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(130): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(131): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(132): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(133): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(137): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(138): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(138): error C2065: 'idx': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(139): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(139): error C2065: 'epoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(140): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(140): error C2065: 'residencyUs': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(144): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(144): error C2065: 'CachedStuckDiagnosis': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(148): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(148): error C2065: 'us': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(153): error C2039: 'RuntimeHealthMonitor': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(153): error C2873: 'RuntimeHealthMonitor': �V���{���� using �錾�̒��Ŏg�p���邱�Ƃ͂ł��܂���B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(155): error C2039: 'TrendSnapshot': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(155): error C2061: �\���G���[: ���ʎq 'TrendSnapshot'
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(157): error C2039: 'EVENT_EMERGENCY_Q_ENGAGED': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(157): error C2065: 'EVENT_EMERGENCY_Q_ENGAGED': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(157): error C2131: ���͒萔�ɕ]������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(157): note: ��萔�̎� (�܂��̓T�u��) �����o����܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(158): error C2039: 'EVENT_QUARANTINE_OVERFLOW_DETECTED': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(158): error C2065: 'EVENT_QUARANTINE_OVERFLOW_DETECTED': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(158): error C2131: ���͒萔�ɕ]������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(158): note: ��萔�̎� (�܂��̓T�u��) �����o����܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(159): error C2039: 'EVENT_TERMINAL_ADMISSION': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(159): error C2065: 'EVENT_TERMINAL_ADMISSION': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(159): error C2131: ���͒萔�ɕ]������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(159): note: ��萔�̎� (�܂��̓T�u��) �����o����܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(160): error C2039: 'EVENT_TERMINAL_GROWTH_SUSTAINED': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(160): error C2065: 'EVENT_TERMINAL_GROWTH_SUSTAINED': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(160): error C2131: ���͒萔�ɕ]������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(160): note: ��萔�̎� (�܂��̓T�u��) �����o����܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(162): error C4430: �^�w��q������܂��� - int �Ɖ��肵�܂����B����: C++ �� int ������l�Ƃ��ăT�|�[�g���Ă��܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(162): error C2146: �\���G���[: ';' ���A���ʎq 'makeSnap' �̑O�ɕK�v�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(166): error C2143: �\���G���[: ';' �� '{' �̑O�ɂ���܂���B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(166): error C2447: '{': �Ή�����֐��w�b�_�[������܂��� (���`���̉��������X�g?)
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(183): error C2065: 'RuntimeHealthMonitor': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(183): error C2146: �\���G���[: ';' ���A���ʎq 'm' �̑O�ɕK�v�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(183): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(185): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(188): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(188): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(192): error C3861: 'checkFalse': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(193): error C3861: 'checkFalse': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(194): error C3861: 'checkFalse': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(195): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(195): error C3861: 'checkFalse': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(204): error C2065: 'RuntimeHealthMonitor': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(204): error C2146: �\���G���[: ';' ���A���ʎq 'm' �̑O�ɕK�v�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(204): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(206): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(208): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(208): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(209): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(209): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(213): error C3083: 'HealthEvent': '::' �̍����̃V���{���ɂ́A�^���w�肵�Ȃ���΂Ȃ�܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(213): error C3083: 'Severity': '::' �̍����̃V���{���ɂ́A�^���w�肵�Ȃ���΂Ȃ�܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(213): error C2039: 'Warning': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(213): error C2065: 'Warning': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(215): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(215): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(218): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(218): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(221): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(221): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(231): error C2065: 'RuntimeHealthMonitor': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(231): error C2146: �\���G���[: ';' ���A���ʎq 'm' �̑O�ɕK�v�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(231): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(233): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(234): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(234): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(236): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(236): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(240): error C3083: 'HealthEvent': '::' �̍����̃V���{���ɂ́A�^���w�肵�Ȃ���΂Ȃ�܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(240): error C3083: 'Severity': '::' �̍����̃V���{���ɂ́A�^���w�肵�Ȃ���΂Ȃ�܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(240): error C2039: 'Warning': '`anonymous-namespace'::convo' �̃����o�[�ł͂���܂���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(114): note: '`anonymous-namespace'::convo' �̐錾���m�F���Ă�������
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(240): error C2065: 'Warning': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(244): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(244): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(248): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(248): error C3861: 'makeSnap': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(258): error C2065: 'RuntimeHealthMonitor': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(258): error C2146: �\���G���[: ';' ���A���ʎq 'm' �̑O�ɕK�v�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(258): error C2065: 'm': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\tests\RuntimeHealthMonitorTierTests.cpp(258): fatal error C1003: �v���O�������̃G���[�� 100 �𒴂��܂����B�R���p�C���͒��f����܂��B
+FAILED: [code=2] CMakeFiles/RuntimeHealthMonitorTierTests.dir/Debug/src/audioengine/RuntimeHealthMonitor.cpp.obj 
+C:\VSC_Project\ConvoPeq\src\SafeStateSwapper.h(376): error C2589: '(': �X�R�[�v�������Z�q (::) �̉E���ɂ���g�[�N���͎g���܂���B
+C:\VSC_Project\ConvoPeq\src\SafeStateSwapper.h(376): error C2059: �\���G���[: ')'
+C:\VSC_Project\ConvoPeq\src\core/ThreadAffinityManager.h(251): error C2589: '(': �X�R�[�v�������Z�q (::) �̉E���ɂ���g�[�N���͎g���܂���B
+C:\VSC_Project\ConvoPeq\src\DeferredFreeThread.h(143): error C2589: '(': �X�R�[�v�������Z�q (::) �̉E���ɂ���g�[�N���͎g���܂���B
+C:\VSC_Project\ConvoPeq\src\DeferredFreeThread.h(143): error C2059: �\���G���[: ')'
+C:\VSC_Project\ConvoPeq\src\DeferredFreeThread.h(144): error C2143: �\���G���[: ';' �� '{' �̑O�ɂ���܂���B
+C:\VSC_Project\ConvoPeq\src\DeferredFreeThread.h(145): error C3536: 'ptr': �������O�Ɏg�p���邱�Ƃ͂ł��܂���
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(23): error C2589: '(': �X�R�[�v�������Z�q (::) �̉E���ɂ���g�[�N���͎g���܂���B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(23): error C2059: �\���G���[: ')'
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(23): error C4430: �^�w��q������܂��� - int �Ɖ��肵�܂����B����: C++ �� int ������l�Ƃ��ăT�|�[�g���Ă��܂���
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(24): error C2589: '(': �X�R�[�v�������Z�q (::) �̉E���ɂ���g�[�N���͎g���܂���B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(24): error C2059: �\���G���[: ')'
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(24): error C4430: �^�w��q������܂��� - int �Ɖ��肵�܂����B����: C++ �� int ������l�Ƃ��ăT�|�[�g���Ă��܂���
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(566): error C3861: 'kInactiveEpoch': ���ʎq��������܂���ł���
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(566): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(566): error C2280: 'std::atomic<unsigned __int64>::atomic(const std::atomic<unsigned __int64> &)': �폜���ꂽ�֐����Q�Ƃ��悤�Ƃ��Ă��܂�
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\atomic(2143): note: 'std::atomic<unsigned __int64>::atomic' �̐錾���m�F���Ă�������
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\atomic(2143): note: 'std::atomic<unsigned __int64>::atomic(const std::atomic<unsigned __int64> &)': �֐��͖����I�
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(32): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(54): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(59): error C2065: 'kReservedEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(92): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(98): error C2065: 'kReservedEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(165): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(237): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(237): error C2065: 'kReservedEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(368): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(368): error C2065: 'kReservedEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\core/EpochDomain.h(482): error C2065: 'kInactiveEpoch': ��`����Ă��Ȃ����ʎq�ł��B
+C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.h(62): fatal error C1083: include �t�@�C�����J���܂���B'EQProcessor.h':No such file or directory
+ninja: build stopped: subcommand failed.
+ninja: build stopped: subcommand failed.
