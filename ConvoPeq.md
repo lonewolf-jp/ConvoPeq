@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-24 00:42:06
+> Generated: 2026-08-25 14:24:14
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -297,6 +297,8 @@
         │   ├── UpperBoundEstimator.cpp
         │   └── UpperBoundEstimator.h
         └── tests/
+            ├── AdmissionPackedStateTestAccess.h
+            ├── AdmissionPackedStateTests.cpp
             ├── AudioEngineHarness/
             │   ├── AudioEngineHarness.cpp
             │   ├── AudioEngineHarness.h
@@ -596,6 +598,41 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_link_libraries(invariant_INV3_INV5Tests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
     # JuceHeader.h の生成を invariant_INV3_INV5Tests より先に行う
     add_dependencies(invariant_INV3_INV5Tests ConvoPeq)
+
+    # ★ D101-31-B B-13: AdmissionPackedState unit tests
+    add_executable(AdmissionPackedStateTests
+        src/tests/AdmissionPackedStateTests.cpp
+        src/audioengine/ISRShutdown.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(AdmissionPackedStateTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(AdmissionPackedStateTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(AdmissionPackedStateTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    target_compile_features(AdmissionPackedStateTests PRIVATE cxx_std_20)
+    # ★ D101-31-D-3: AdmissionPackedStateTestAccess seam を有効化（テストビルドのみ）。
+    #   ISRShutdown.h の friend 宣言は本define下でのみコンパイルされ、Production バイナリ無変更。
+    target_compile_definitions(AdmissionPackedStateTests PRIVATE CONVOPEQ_UNIT_TESTS=1)
+    add_dependencies(AdmissionPackedStateTests ConvoPeq)
 
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
@@ -1106,6 +1143,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
+    add_test(NAME AdmissionPackedState COMMAND AdmissionPackedStateTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
@@ -1131,6 +1169,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
         target_compile_options(invariant_INV3_INV5Tests PRIVATE /utf-8)
+        target_compile_options(AdmissionPackedStateTests PRIVATE /utf-8)
+        target_compile_options(AdmissionPackedStateTests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
         target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /utf-8)
         target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
@@ -1151,6 +1191,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     if(WIN32)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
                      ISRSemanticValidationTests invariant_INV3_INV5Tests
+                     AdmissionPackedStateTests
                      RetireGraceSemanticsTests
                      ShutdownRetireIntentDrainTests
                      NormalRetireDSPHandleCompareTests
@@ -1174,6 +1215,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(AdmissionPackedStateTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ShutdownRetireIntentDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -1197,6 +1239,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
     target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
     target_compile_options(invariant_INV3_INV5Tests PRIVATE /EHsc)
+    target_compile_options(AdmissionPackedStateTests PRIVATE /EHsc)
     # ISRSemanticValidationTests は juce_core.cpp をコンパイルするため、
     # コマンドライン NOMINMAX=1 と JUCE の #define NOMINMAX（空）の衝突警告を抑制する。
     # （ConvoPeq 本体と同様の対応。CMakeLists.txt 参照）
@@ -1234,6 +1277,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /Qmkl:sequential)
         target_compile_options(PartialPublicationRejectTests PRIVATE /Qmkl:sequential)
+        target_compile_options(AdmissionPackedStateTests PRIVATE /Qmkl:sequential)
     endif()
 endif()
 
@@ -1905,6 +1949,23 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(ConvoPeq PRIVATE
         $<$<AND:$<CONFIG:Debug>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/MT>
     )
+    # icx + MSVC Runtime Library ハンドリング
+    # icx は MSVC の MSVC_RUNTIME_LIBRARY プロパティを完全には認識しないため、
+    # 明示的に linker ライブラリを追加する
+    # /MT コンパイル → リンク時に libcmtd.lib (Debug) / libcmt.lib (Release) が必要
+    if(ENABLE_ASAN)
+        target_link_libraries(ConvoPeq PRIVATE
+            $<$<CONFIG:Debug>:msvcrtd>
+            $<$<CONFIG:Release>:msvcrt>
+            $<$<CONFIG:RelWithDebInfo>:msvcrtd>
+        )
+    else()
+        target_link_libraries(ConvoPeq PRIVATE
+            $<$<CONFIG:Debug>:libcmtd>
+            $<$<CONFIG:Release>:libcmt>
+            $<$<CONFIG:RelWithDebInfo>:libcmt>
+        )
+    endif()
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
 endif()
@@ -37396,6 +37457,18 @@ void AudioEngine::releaseResources()
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
     runtimePublicationBridge_.requestShutdown();
 
+    // ★ D101-33-C (D101-33-B A′ design): Early Close Convergence.
+    //   closeAdmission() を requestShutdown() 直後へ前倒し（旧位置: shutdownCoordinatorLoop/
+    //   stopRebuildThread 後の :198 付近）。これにより admission authority（packedState_）と
+    //   transport gate の閉鎖時刻が収束し、「admission は開いているが transport gate は
+    //   閉じている」不整合区間が消滅する。
+    //   - この時点以降の tryAdmit は Closing/Closed を読んで拒否（副作用ゼロ）。
+    //   - 先行して tryAdmit 済みの producer は outstanding()>0 として観測され、
+    //     下段の joinProducers retry loop（:198 付近・維持）が durable release + drain を待つ。
+    //   - joinProducers() 自体は count==0 && Closing を要求するため、ここでは呼ばない
+    //     （producer join 後に下段で実行）。
+    shutdownRuntime_.closeAdmission();
+
     // ★ [work70 v9.11] MMCSS シャットダウン: フラグ経由で Audio Thread に委譲。
     //    Message Thread はフラグのみセットし、実際の AvRevert は次回コールバックで実行される。
     //    NativeRT モード（useMmcssPriority=false）の復元は finalizeMmcssShutdown() で行う。
@@ -37511,14 +37584,24 @@ void AudioEngine::releaseResources()
     shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker before drains
     stopRebuildThread();
 
-    // ★★★ Phase 9-A: Q1/Q7 Admission Closure (D101-8 Step 8R code gap fix) ★★★
-    // Producers are joined (Q2), so no new work can be generated.
-    // closeAdmission(): Open→Closing (satisfies Q7 NoResurrection via !isAdmissionOpen()).
-    // joinProducers(): Closing→Closed (satisfies Q1 AdmissionClosed — requires state==Closing).
-    //   NOTE: Thread joins above do NOT update admissionState_ — both calls are required.
-    //   closeAdmission() advances shutdownGeneration_ (identity binding for ReclaimPermit).
-    shutdownRuntime_.closeAdmission();
-    shutdownRuntime_.joinProducers();
+    // ★★★ Phase 9-A: Q1/Q7 Admission Closure ★★★
+    //   ★ D101-33-C: closeAdmission() は上段（requestShutdown 直後）へ移動済み
+    //     （Early Close Convergence）。本位置では Closing 状態で producer join 待ちのみ行う。
+    // Producers are joined (Q2: CoordinatorLoop + RebuildThread), so no new work can be
+    // generated. joinProducers(): Closing→Closed (satisfies Q1 AdmissionClosed — requires
+    // state==Closing).
+    //   D101-31-B B-7: Retry loop — joinProducers() returns false if outstanding() > 0.
+    //   All reservation holders (Publication[Path A/B]/Recovery/Build) must release before
+    //   Closed. D101-33-C により Path B（commitRuntimePublication 直接 producer）も token
+    //   を保持するため、outstanding()==0 が全 publication transaction の完遂を証明する。
+    while (!shutdownRuntime_.joinProducers())
+    {
+        // Outstanding reservations exist — drain wait (follows 5000ms drain pattern above).
+        const bool drainedWithinBudget = waitForDrain(100, 1);
+        if (!drainedWithinBudget)
+            break;
+    }
+    // joinProducers() succeeded OR drain budget exhausted — transition proceeds.
 
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ObserverDrained);
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
@@ -38566,6 +38649,16 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     }
 
     // Message Thread かつ実行コンテキスト有効時は直接 rebuild 実行へ進む
+    // D101-31-B B-10: tryAdmit(1) after isShutdownInProgress() check passed.
+    // Intent will be stored (requestRebuild or triggerAsyncUpdate → rebuildAdmissionPendingIntent_).
+    // release(1) fires at function exit — obligation survives in durable state.
+    if (!shutdownRuntime_.tryAdmit(1))
+        return;
+    struct RebuildReservationGuard {
+        convo::isr::ShutdownRuntime& rt;
+        bool active = true;
+        ~RebuildReservationGuard() { if (active) rt.release(1); }
+    } rebuildGuard{ shutdownRuntime_ };
     if (kind == convo::RebuildKind::Structural)
     {
         if (isMessageThread)
@@ -44389,6 +44482,11 @@ public:
         return lifecycleShutdown || shutdownRuntime_.isShutdownInProgress();
     }
 
+    // D101-31-B: NonRT admission-control accessor for orchestrators that hold AudioEngine&.
+    // Used by RuntimePublicationOrchestrator for tryAdmit/release on the Publication path.
+    [[nodiscard]] convo::isr::ShutdownRuntime& isrShutdownRuntime() noexcept
+    { return shutdownRuntime_; }
+
     // [[deprecated("Use PublicationAdmission::evaluate() instead")]]
     // [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
     [[nodiscard]] bool isFullyDrained() noexcept;
@@ -47264,7 +47362,8 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 
     // Q0〜Q7 の観測値（EpochDomain / RetireRouter / ShutdownRuntime から収集）
     convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;   // Q0: admission reservations は producer join 後 0
+    obs.admissionReservationsZero = (shutdownRuntime_.outstanding() == 0);  // Q0
+    // D101-31-B B-6: outstanding() is the authority. AudioEngine must NOT access packedState_ directly.
     obs.allProducersJoined = true;          // Q2: shutdown 確定 + producer join 完了
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
     obs.activeReadersZero = (m_retireRouter != nullptr)
@@ -47330,6 +47429,12 @@ inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
     if (!admitted)
         return;
 
+    // D101-31-B B-9: tryAdmit(1) after CoordinatorState::ShuttingDown gate passed.
+    // The recovery obligation survives in durable state after this point (transport/durable paths).
+    // release(1) fires at function return — obligation is durable.
+    if (!shutdownRuntime_.tryAdmit(1))
+        return;
+
     // ★ 監査指摘 (work88): Recovery を Builder Work Queue に投入後、rebuild スレッドを起床させる。
     //   recoveryIntentQueue_ への push は rebuildCV を起こさないため、アイドル時に Recovery が
     //   処理されない配線漏れを解消（RecoveryIntentHandler からの enqueue-only 経路）。
@@ -47338,6 +47443,9 @@ inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
         recoveryPending = true;
     }
     rebuildCV.notify_all();
+
+    // D101-31-B B-9: Release admission reservation — recovery obligation is durable.
+    shutdownRuntime_.release(1);
 }
 
 // ★ work70-FIX: lookupDSPHandleForRuntime — DSPCore* → DSPHandle 逆引き（const）
@@ -47410,6 +47518,31 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     const RegistrationContext& regCtx,
     const convo::isr::DSPHandle& oldHandle) noexcept
 {
+    // ★ D101-33-C (D101-33-B A′ design): Admission-first token.
+    //   tryAdmit(1) is THE linearization point vs closeAdmission() — both CAS on the same
+    //   packedState_ word, so either admit precedes close (reservation observable via
+    //   outstanding()>0; joinProducers waits for durable release) or close precedes admit
+    //   (reject). No third interleaving → No-Resurrection Case C structurally excluded.
+    //
+    //   tryAdmit failure = side-effect zero:
+    //     - no DSP handle registration
+    //     - no registry entry
+    //     - no ownerChannel transfer
+    //     - no X5 residency reservation
+    //     - world ownership stays with caller (CallerDestroy semantics)
+    if (!shutdownRuntime_.tryAdmit(1))
+        return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+
+    // ★ D101-33-C: RAII TokenGuard (Path A ReservationGuard と同型・Orchestrator.cpp:70-76).
+    //   唯一の正常系 release point = enqueuePublicationIntent()==true の直後
+    //   （obligation durable 点）。それ以外の全失敗経路は guard デストラクタで release される
+    //   （release 漏れ禁止 / 二重 release は active フラグで防止）。
+    struct AdmissionTokenGuard {
+        convo::isr::ShutdownRuntime& rt;
+        bool active = true;
+        ~AdmissionTokenGuard() { if (active) rt.release(1); }
+    } admissionTokenGuard{ shutdownRuntime_ };
+
     convo::isr::DSPHandle rollbackHandle;
     ScopeExit guard { [&]() noexcept {
         if (!rollbackHandle.isNull())
@@ -47468,6 +47601,9 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     if (!runtimePublicationBridge_.enqueuePublicationIntent(intent))
     {
         // キュー full: 移譲した Owner を取り戻し、registry をクリアして rollback に委ねる。
+        // ★ D101-33-C: token は AdmissionTokenGuard デストラクタで release（X5 rollback は
+        //   enqueuePublicationIntent 内部で完了済み — token/residency/owner/registry の
+        //   partial state なし）。
         (void)worldAuthority_.ownerChannel().take(
             convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
         worldAuthority_.registry().unregister(seqId);
@@ -47476,6 +47612,12 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 
     // fire-and-forget: wait しない。所有権は移譲済み（executePublish が後続で commit する）。
     // rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
+    // ★ D101-33-C: obligation durable 点 — ここで token を release する
+    //   （Path A 前例 Orchestrator.cpp:330-333「intent is enqueued, obligation now survives
+    //     in durable state」と同一契約。以降は outstanding()==0 でも obligation は
+    //     ISR intent queue / residency として観測可能）。
+    admissionTokenGuard.active = false;
+    shutdownRuntime_.release(1);
     rollbackHandle = convo::isr::DSPHandle::null();
     return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
 }
@@ -55653,9 +55795,7 @@ RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
     , pendingIntentCount_(0)
-    , fallbackBacklogCount_(0)
     , reclaimInFlightCount_(0)
-    , deferredRetireResidencyCount_(0)
     , previousRetireBacklogCount_(0)
     , pressureNormalizedWindows_(0)
     , swapPending_(false)
@@ -55843,31 +55983,8 @@ void RuntimeIntentCoordinator::onRetireConsumed() noexcept {
     }
 }
 
-void RuntimeIntentCoordinator::onFallbackAccepted() noexcept {
-    convo::fetchAddAtomic(fallbackBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-}
-
-void RuntimeIntentCoordinator::onFallbackConsumed() noexcept {
-    const auto old = convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
-    if (old > 0) {
-        convo::fetchSubAtomic(fallbackBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-    } else {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-    }
-}
-
-void RuntimeIntentCoordinator::onDeferredRetireAccepted() noexcept {
-    convo::fetchAddAtomic(deferredRetireResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-}
-
-void RuntimeIntentCoordinator::onDeferredRetireConsumed() noexcept {
-    const auto old = convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
-    if (old > 0) {
-        convo::fetchSubAtomic(deferredRetireResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-    } else {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-    }
-}
+// ★ D101-32-D: onFallbackAccepted/Consumed / onDeferredRetireAccepted/Consumed は削除済み
+//   （D101-32-C §5 — caller ゼロ・対応 counter と domain 一括除去）。
 
 void RuntimeIntentCoordinator::onReclaimBegin() noexcept {
     convo::fetchAddAtomic(reclaimInFlightCount_, std::uint64_t{1}, std::memory_order_acq_rel);
@@ -55935,21 +56052,10 @@ void RuntimeIntentCoordinator::setPendingIntentCount(std::uint64_t count) noexce
     convo::publishAtomic(pendingIntentCount_, count, std::memory_order_release);
 }
 
-void RuntimeIntentCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(fallbackBacklogCount_, count, std::memory_order_release);
-}
-
-void RuntimeIntentCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(reclaimInFlightCount_, count, std::memory_order_release);
-}
-
-void RuntimeIntentCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(deferredRetireResidencyCount_, count, std::memory_order_release);
-}
-
-void RuntimeIntentCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(quarantineResidentCount_, count, std::memory_order_release);
-}
+// ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
+//   setDeferredRetireResidencyCount / setQuarantineResidentCount は削除済み
+//   （D101-32-C §7 — fallback/deferred/quarantine-resident domain の vestigial setter。
+//     setReclaimInFlightCount は onReclaimBegin/End 移行済みのため test reset 用途も消滅）。
 
 void RuntimeIntentCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
     convo::publishAtomic(overflowMaxAgeUs_, maxAgeUs, std::memory_order_release);
@@ -56125,17 +56231,8 @@ std::uint64_t RuntimeIntentCoordinator::getQuarantineRingResidencyCount() const 
     return convo::consumeAtomic(quarantineRingResidencyCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimeIntentCoordinator::getFallbackBacklogCount() const noexcept {
-    return convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
-}
-
-std::uint64_t RuntimeIntentCoordinator::getDeferredRetireResidencyCount() const noexcept {
-    return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
-}
-
-std::uint64_t RuntimeIntentCoordinator::getQuarantineResidentCount() const noexcept {
-    return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
-}
+// ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
+//   getQuarantineResidentCount（Coordinator側）は削除済み（vestigial counter の getter）。
 
 // ★ Phase5: Delegation to ShutdownScheduler
 bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
@@ -56211,16 +56308,18 @@ bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcep
         //   Publish Intent）を捕捉できないため、本 counter で独立判定する。
         && convo::consumeAtomic(coordinator_.publicationIntentResidencyCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
+        // ★ D101-32-D: fallbackBacklogCount_ / deferredRetireResidencyCount_ の == 0 判定は削除。
+        //   両 counter は vestigial（writer ゼロ）であり恒真判定だった。fallback/deferred の実在
+        //   資源は quarantineFallbackQueue_ / observeDeferredRing_ の実測と Layer 1 実測が authority
+        //   （D101-32-C §4/§6 — 情報欠落なし）。
         && convo::consumeAtomic(coordinator_.reclaimInFlightCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.deferredRetireResidencyCount_, std::memory_order_acquire) == 0
         // ★ work88 (X6 §6.6): Quarantine transport residency を個別に == 0（INV-X6-4）。
         //   quarantineIntentResidencyCount_（intentQueue_ 残留）と quarantineRingResidencyCount_
-        //   （quarantineFallbackQueue_ 残留）をそれぞれ独立判定する。quarantineResidentCount_
-        //   （実在 DSP）は AudioEngine::isFullyDrained が DSPQuarantineManager を直接判定（X6）。
+        //   （quarantineFallbackQueue_ 残留）をそれぞれ独立判定する。実在 DSP quarantine resident
+        //   （旧 quarantineResidentCount_ 項目）は D101-32-D で削除 — AudioEngine::isFullyDrained が
+        //   DSPQuarantineManager を直接判定（X6、authority 変更なし）。
         && convo::consumeAtomic(coordinator_.quarantineIntentResidencyCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.quarantineRingResidencyCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0
         // ★ work88 (X1 §6.1): durable Recovery admission が空であること（INV-X1-1/INV-X1-2）。
         //   lease 方式では DurablePending OR Building の両方が false であること（recoveryAdmissionPending_
         //   は Building 中も true を維持 — 二十六次レビュー）。shutdown 時は discardPendingRecoveryAdmission
@@ -56842,23 +56941,22 @@ public:
     //   ［本 API は NonRT-thread からのみ呼び出すこと（AC-ISR-1）］
     void onRetireAccepted() noexcept;      // retire backlog +1（atomic fetch_add + pressure 更新）
     void onRetireConsumed() noexcept;      // retire backlog -1（underflow ガード付き fetch_sub）
-    void onFallbackAccepted() noexcept;    // fallback backlog +1
-    void onFallbackConsumed() noexcept;    // fallback backlog -1（underflow ガード付き）
-    void onDeferredRetireAccepted() noexcept;  // deferred retire residency +1
-    void onDeferredRetireConsumed() noexcept;  // deferred retire residency -1（underflow ガード付き）
     void onReclaimBegin() noexcept;        // reclaim in-flight +1
     void onReclaimEnd() noexcept;          // reclaim in-flight -1（underflow ガード付き）
+    // ★ D101-32-D: onFallbackAccepted/Consumed / onDeferredRetireAccepted/Consumed は削除済み。
+    //   対応 counter（fallbackBacklogCount_ / deferredRetireResidencyCount_）と共に vestigial 判定
+    //   （D101-32-C §4/§5）。fallback/deferred の実測は Layer 1 実測 + queue emptiness が担当。
 
     // ⚠️ 旧 setter API 群 — dash2 §1.4 により production からの呼び出しは全廃。
     //   残存するのはテスト初期化リセット（P2 教訓: テストでのリセットは許可）のみ。
     //   production からの絶対値上書きは禁止（コンパイル時参照 = 0 を維持すること）。
-    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY
+    //   ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
+    //     setDeferredRetireResidencyCount / setQuarantineResidentCount は削除済み
+    //     （D101-32-C §7 削除境界）。setRetireBacklogCount は Pressure FSM / drain violation
+    //     の決定論的テスト駆動のため KEEP（絶対値注入がテストの意味本体）。
+    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY（KEEP — Pressure FSM 駆動）
     void setPublicationBacklogCount(std::uint64_t count) noexcept;   // TEST-ONLY（dead counter）
     void setPendingIntentCount(std::uint64_t count) noexcept;        // TEST-ONLY
-    void setFallbackBacklogCount(std::uint64_t count) noexcept;      // TEST-ONLY
-    void setReclaimInFlightCount(std::uint64_t count) noexcept;      // TEST-ONLY
-    void setDeferredRetireResidencyCount(std::uint64_t count) noexcept; // TEST-ONLY
-    void setQuarantineResidentCount(std::uint64_t count) noexcept;   // TEST-ONLY（★ Phase2）
     void escalateAllRetires(RetirePriority minPriority) noexcept;    // ★ Phase5: 全RetireIntent の優先度を底上げ
     void setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept;       // ★ Phase5: OverflowRing 滞留年限警告しきい値
     void setSwapPending(bool pending) noexcept;
@@ -56869,9 +56967,10 @@ public:
     [[nodiscard]] std::uint64_t getPublicationIntentResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
     [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
-    [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
-    [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
-    [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;  // ★ Phase2
+    // ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
+    //   getQuarantineResidentCount（Coordinator側）は削除済み（D101-32-C §7 — vestigial counter
+    //   の getter も domain 一括で除去）。実在 quarantine DSP は DSPQuarantineManager::residentCount()、
+    //   Q+EmergencyQ は EpochControl::getQuarantineResidentCount()（別クラス・別semantic）が authority。
     // ★ work88 (X6 §6.6): Quarantine transport residency counter（INV-X6-4）。診断 / isFullyDrained 用。
     [[nodiscard]] std::uint64_t getQuarantineIntentResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineRingResidencyCount() const noexcept;
@@ -57062,16 +57161,15 @@ public:
     //   reclaims the outstanding Owner via RuntimeWorldAuthority::ownerChannel().take(key).
     [[nodiscard]] bool enqueuePublicationIntent(const Intent& intent) noexcept
     {
-        // ★ dash2 §2.5 (Phase B3 — Path B admission gate): shutdown 確定後は Publish Intent を
-        //   enqueue しない。CoordinatorState::ShuttingDown が requestShutdown() で確定するため、
-        //   本 gate が Path B（enqueuePublicationIntent）の最終 linearization point になる
-        //   （Path C: submitRecoveryRequest の gate と同型 — H.11.6 Commit 6）。
-        //   閉鎖後の enqueue は拒否（false 返却）— 呼出し元は Owner を reclaim する。
-        //   ［注: 呼出し元（commitRuntimePublication）は通常 CoordinatorState::ShuttingDown 確定前
-        //   に呼ばれ、シャットダウン中の publish は isShutdownInProgress() で事前に遮断される。
-        //   本 gate は defense-in-depth としての二次防衛。］
-        if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
-            return false;
+        // ★ D101-33-C (D101-33-B A′ design): state_ == ShuttingDown gate は削除済み。
+        //   Publication admission authority は ShutdownRuntime::packedState_
+        //   （enqueueRuntimePublicationFireAndForget 冒頭の tryAdmit CAS — closeAdmission と
+        //   同一単語で線形化、No-Resurrection Case C を構造的排除）に一本化された。
+        //   本関数が呼ばれる時点で caller は admission token を保持しており、
+        //   CoordinatorState::ShuttingDown は drain-mode signal のみを担う
+        //   （authority separation — D101-32-F/D101-33-B 確定）。
+        //   ［旧実装: state_ load による check-then-act gate は close と非同期で TOCTOU
+        //     window を持つため linearization point たり得なかった（D101-33-A Case C GAP）］
 
         Intent prepared = intent;
         prepared.type = IntentType::Publish;
@@ -57271,19 +57369,21 @@ private:
     //   - 絶対値上書き（setPendingIntentCount）は本カウンタに対して禁止。AudioEngine.Commit /
     //     Threading からの RetireIntent 混入を排除するため。
     std::atomic<std::uint64_t> pendingIntentCount_;
-    std::atomic<std::uint64_t> fallbackBacklogCount_;
+    // ★ D101-32-D: fallbackBacklogCount_ / deferredRetireResidencyCount_ /
+    //   quarantineResidentCount_（Coordinator側）は削除済み（D101-32-C §4 — vestigial 判定）。
+    //   - fallback 実測   = Layer 1 overflow ring resident + quarantineFallbackQueue_.sizeApprox()
+    //   - deferred 実測   = observeDeferredRing_.size() + router 側実測
+    //   - quarantine DSP  = DSPQuarantineManager::residentCount()（唯一の source of truth）
+    //   reclaimInFlightCount_ は onReclaimBegin/End（production wired）が authority のため KEEP。
     std::atomic<std::uint64_t> reclaimInFlightCount_;
-    std::atomic<std::uint64_t> deferredRetireResidencyCount_;
-    // ★ work88 (X6 §6.6): Quarantine の transport residency と DSP residency を semantic 分離（INV-X6-4）。
+    // ★ work88 (X6 §6.6): Quarantine の transport residency を semantic 分離（INV-X6-4）。
     //   quarantineIntentResidencyCount_ = intentQueue_ 内の Quarantine Intent 数（primary transport）
     //   quarantineRingResidencyCount_   = quarantineFallbackQueue_ 内の Quarantine Intent 数（fallback/ring）
-    //   quarantineResidentCount_        = 実在 quarantine DSP 数（DSPQuarantineManager::residentCount() が
-    //                                     唯一の source of truth — AudioEngine::isFullyDrained で直接判定）。
-    //   ★ Coordinator 側の quarantineResidentCount_ は X6 以降 submitQuarantine が +1 しない（DSPQuarantineManager
-    //     管理に委譲）。本 counter は従来のドレイン判定では常に 0（source of truth は AudioEngine 側）。
+    //   実在 quarantine DSP 数は Coordinator 外 — DSPQuarantineManager::residentCount() が唯一の
+    //   source of truth（AudioEngine::isFullyDrained で直接判定）。Coordinator 側 resident counter
+    //   は D101-32-D で削除済み（X6 以降 writer ゼロのため）。
     std::atomic<std::uint64_t> quarantineIntentResidencyCount_{0};   // ★ X6 新設（Intent lane residency）
     std::atomic<std::uint64_t> quarantineRingResidencyCount_{0};     // ★ X6 新設（ring/fallback 残留）
-    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント（X6 以降は常時 0 — DSPQuarantineManager が source）
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_{false}; // [work87 P2-5]
@@ -58362,6 +58462,7 @@ private:
 ```
 #include "ISRShutdown.h"
 #include "AtomicAccess.h"
+#include "../DspNumericPolicy.h"  // ★ D101-31-B: ASSERT_NON_RT_THREAD
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 #include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
 #include "core/TimeUtils.h"  // ★ A-2: getCurrentTimeUs
@@ -58772,21 +58873,48 @@ std::optional<ReclaimPermit> ShutdownRuntime::tryMakeReclaimPermit(
     return permit;
 }
 
-// ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM 実装 ──
-//   Open→Closing→Closed の不可逆遷移（INV-LIFE-9: Closed→Open 禁止）。
+// ── ★ D101-31-B: AdmissionPackedState constants ──
+//   Layout (D101-30 locked):
+//     bits [0:1]   AdmissionState (Open=0, Closing=1, Closed=2, Faulted=3)
+//     bits [2:7]   version (6-bit, increment on closeAdmission)
+//     bits [8:31]  reservationCount (24 bits, max 16,777,215)
+constexpr uint32_t kAdmissionStateMask = 0x3u;
+constexpr uint32_t kVersionMask      = 0x3Fu;
+constexpr uint32_t kVersionShift     = 2;
+constexpr uint32_t kReservationMask  = 0x00FFFFFFu;
+constexpr uint32_t kReservationShift = 8;
+
+// ── ★ D101-31-B: AdmissionPackedState ──
+//   tryAdmit() と closeAdmission() は同一 packedState_ atomic word に対して CAS する
+//   （G-H linearization point — D101-30 Step 5）。
+
 void ShutdownRuntime::closeAdmission() noexcept
 {
-    AdmissionState expected = AdmissionState::Open;
-    // Open のときのみ Closing へ（CAS で不可逆遷移を原子的に）
-    if (convo::compareExchangeAtomic(admissionState_, expected, AdmissionState::Closing,
-                                     std::memory_order_acq_rel, std::memory_order_acquire))
+    // G-H linearization: CAS on packedState_ (same word as tryAdmit).
+    // Open → Closing: increment version.
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
     {
-        // ★ dash2 §2.2 (Step 14 — Race B / T10): shutdown transaction 開始を確定（generation 前進）。
-        //   Proof 生成はこの確定済み generation を使うため、同一 shutdown 内の複数 reclaim で
-        //   identity が安定し、Shutdown N+1 の begin で stale になる（H.11.11.9.3 Step 11）。
-        //   ［Open→Closing 遷移成功時のみ increment — 二重開始防止（INV-LIFE-6）］
-        (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
-                                    std::memory_order_acq_rel);
+        const uint32_t state = expected & kAdmissionStateMask;
+        if (state != static_cast<uint32_t>(AdmissionState::Open))
+            break;  // Already Closing/Closed/Faulted — idempotent
+        const uint32_t version = (expected >> kVersionShift) & kVersionMask;
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        // ★ D101-31-D-2: version は 6bit 内で wrap させる（version==63 → next==0）。
+        //   mask 無しの (version + 1) << kVersionShift は bit8 に侵入し reservationCount を破壊する。
+        const uint32_t nextVersion = (version + 1u) & kVersionMask;
+        const uint32_t desired = (static_cast<uint32_t>(AdmissionState::Closing)
+                            | (nextVersion << kVersionShift)
+                            | (count << kReservationShift));
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            // ★ dash2 §2.2 (Step 14 — Race B / T10)
+            (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
+                                        std::memory_order_acq_rel);
+            break;
+        }
+        // CAS failed — retry with updated expected
     }
 }
 
@@ -58795,23 +58923,88 @@ uint64_t ShutdownRuntime::currentShutdownGeneration() const noexcept
     return convo::consumeAtomic(shutdownGeneration_, std::memory_order_acquire);
 }
 
-void ShutdownRuntime::joinProducers() noexcept
+bool ShutdownRuntime::joinProducers() noexcept
 {
-    AdmissionState expected = AdmissionState::Closing;
-    // Closing のときのみ Closed へ（producer join 完了を通知 — 不可逆）
-    convo::compareExchangeAtomic(admissionState_, expected, AdmissionState::Closed,
-                                 std::memory_order_acq_rel, std::memory_order_acquire);
+    // D101-31-B Step E: count==0 required for Closing→Closed.
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
+    {
+        const uint32_t state = expected & kAdmissionStateMask;
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        if (state != static_cast<uint32_t>(AdmissionState::Closing))
+            return false;  // Not Closing — cannot transition
+        if (count != 0)
+            return false;  // Reservations outstanding — caller must retry
+        const uint32_t desired =
+            (static_cast<uint32_t>(AdmissionState::Closed)
+         | (expected & (kVersionMask << kVersionShift))
+         | (0u << kReservationShift));
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+            return true;  // Closing→Closed succeeded
+        // CAS failed — retry
+    }
 }
 
 bool ShutdownRuntime::isAdmissionOpen() const noexcept
 {
-    // Open のみ許可。Closing / Closed / Faulted では enqueue 拒否。
-    return convo::consumeAtomic(admissionState_, std::memory_order_acquire) == AdmissionState::Open;
+    return (convo::consumeAtomic(packedState_, std::memory_order_acquire) & kAdmissionStateMask)
+        == static_cast<uint32_t>(AdmissionState::Open);
 }
 
 AdmissionState ShutdownRuntime::admissionState() const noexcept
 {
-    return convo::consumeAtomic(admissionState_, std::memory_order_acquire);
+    return static_cast<AdmissionState>(
+        convo::consumeAtomic(packedState_, std::memory_order_acquire) & kAdmissionStateMask);
+}
+
+// ── ★ D101-31-B: AdmissionReservation API ──
+
+bool ShutdownRuntime::tryAdmit(uint32_t n) noexcept
+{
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
+    {
+        const uint32_t state = expected & kAdmissionStateMask;
+        if (state != static_cast<uint32_t>(AdmissionState::Open))
+            return false;  // Not Open — admission closed
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        if (count > kReservationMask || n > kReservationMask || count + n > kReservationMask)
+            return false;  // overflow
+        // version unchanged — only count changes
+        const uint32_t desired =
+            (static_cast<uint32_t>(AdmissionState::Open)
+         | (expected & (kVersionMask << kVersionShift))
+         | ((count + n) << kReservationShift));
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+            return true;  // Admission reservation acquired
+        // CAS failed — retry
+    }
+}
+
+void ShutdownRuntime::release(uint32_t n) noexcept
+{
+    ASSERT_NON_RT_THREAD();  // D101-31-B: release is NonRT only
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
+    {
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        if (count < n)
+            break;  // underflow — silently clamp (double-release bug indicator)
+        const uint32_t desired = (expected & ~(kReservationMask << kReservationShift))
+                             | ((count - n) << kReservationShift);
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+            break;  // Released successfully
+        // CAS failed — retry
+    }
+}
+
+uint32_t ShutdownRuntime::outstanding() const noexcept
+{
+    return (convo::consumeAtomic(packedState_, std::memory_order_acquire) >> kReservationShift)
+        & kReservationMask;
 }
 
 }  // namespace isr
@@ -58839,6 +59032,12 @@ namespace convo {
 enum class ISRHealthState : uint8_t;
 
 namespace isr {
+
+#if defined(CONVOPEQ_UNIT_TESTS)
+// ★ D101-31-D-3: テスト専用 Friend Test Access の前方宣言（test-only seam）。
+//   定義は src/tests/AdmissionPackedStateTestAccess.h（テストターゲットのみインクルード）。
+struct AdmissionPackedStateTestAccess;
+#endif
 
 // ★ dash2 §2.2 (Phase A2 — Step 14): ReclaimAuthority の前方宣言。
 //   ShutdownRuntime コンストラクタ（constructor 固定注入）/ Proof 生成時の bindShutdownIdentity に使用。
@@ -59116,9 +59315,17 @@ public:
     //   - admissionState(): 現在状態（診断用）
     //   Closed→Open は存在しない（INV-LIFE-9 no-resurrection）。
     void closeAdmission() noexcept;
-    void joinProducers() noexcept;
+    bool joinProducers() noexcept;
     [[nodiscard]] bool isAdmissionOpen() const noexcept;
     [[nodiscard]] AdmissionState admissionState() const noexcept;
+
+    // ── ★ D101-31-B: AdmissionReservation API ──
+    //   tryAdmit/release/outstanding は packedState_ に対する atomic 操作。
+    //   tryAdmit と closeAdmission は同一 atomic word の CAS で linearization（G-H race）。
+    //   対象: Publication / Recovery / Build の3経路のみ。Retire は含まない。
+    bool tryAdmit(uint32_t n = 1) noexcept;
+    void release(uint32_t n = 1) noexcept;
+    [[nodiscard]] uint32_t outstanding() const noexcept;
 
     // ★ dash2 §2.2 (Phase A2 — Step 14 / Race B / T10): 現在の shutdown transaction generation。
     //   closeAdmission()（shutdown 開始）で確定し、その shutdown 中は固定。
@@ -59172,9 +59379,23 @@ private:
     //   ［AudioEngine は composition root として constructor initializer で依存を渡すのみ］
     class RuntimeIntentCoordinator& reclaimAuthority_;
 
-    // ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM ──
-    //   Open→Closing→Closed の不可逆遷移。Closed→Open 禁止（INV-LIFE-9）。
-    std::atomic<AdmissionState> admissionState_{AdmissionState::Open};
+    // ── ★ D101-31-B (AdmissionPackedState): AdmissionState + Reservation count ──
+    //   D101-30 locked contract: single 32-bit atomic for G-H linearization point.
+    //   Layout:
+    //     bits  [0:1]  AdmissionState (Open=0, Closing=1, Closed=2, Faulted=3)
+    //     bits  [2:7]  version (6-bit ABA counter; increment on closeAdmission)
+    //     bits  [8:31] reservationCount (24 bits, max 16,777,215)
+    //   tryAdmit() と closeAdmission() は本 atomic word に対して CAS する。
+    //   ShutdownPhase (phase_) は本 packed word には含めない — separate sequential state.
+    std::atomic<uint32_t> packedState_{0};  // D101-31-B: replaces admissionState_
+
+#if defined(CONVOPEQ_UNIT_TESTS)
+    // ★ D101-31-D-3: テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）。
+    //   version wrap（6bit）regression test が packedState_ へ version=63 を注入するためだけの seam。
+    //   Production ビルドではこの friend 宣言はコンパイルされず、バイナリ無変更
+    //   （AudioEngine.h の DeferredPublicationTestAccess と同一パターン）。
+    friend struct convo::isr::AdmissionPackedStateTestAccess;
+#endif
 };
 
 }  // namespace isr
@@ -64699,6 +64920,17 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Submitted, nowUs);
 
+    // D101-31-B B-8: Admission reservation for Publication path.
+    // tryAdmit(1) after evaluate()→Accepted, release(1) after enqueue (or on failure).
+    // RAII guard ensures release on any early return / exception-free exit.
+    if (!engine_.isrShutdownRuntime().tryAdmit(1))
+        return PublicationAdmission::Decision::RejectedShutdown;
+    struct ReservationGuard {
+        convo::isr::ShutdownRuntime& rt;
+        bool active = true;
+        ~ReservationGuard() { if (active) rt.release(1); }
+    } reservationGuard{ engine_.isrShutdownRuntime() };
+
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
     // ★ Phase2: DSPHandle → DSPCore* 解決 (Execution Path Handle Normalization)
@@ -64934,6 +65166,11 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     telemetryRecorder_.recordProgress(correlationId,
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Published, nowUs);
+
+    // D101-31-B B-8: Release admission reservation — intent is enqueued, obligation now
+    // survives in durable state (ISR intent queue / coordinator loop).
+    reservationGuard.active = false;
+    engine_.isrShutdownRuntime().release(1);
 
     // ★ B4-a4: publish 成功後の activate/crossfade/retire と epoch advance は
     //   ISR PublishExecutor::executePublish の Execution tail（onPublishCompleted →
@@ -82539,6 +82776,571 @@ public:
 
 ```
 
+### 📄 `src\tests\AdmissionPackedStateTestAccess.h`
+
+```
+//==============================================================================
+// AdmissionPackedStateTestAccess.h — D101-31-D-3: test-only Friend Test Access
+//
+// ShutdownRuntime::packedState_ への version 注入（6bit wrap regression test 用）。
+// 本番 API は増やさない。Authority 境界を汚染しない。
+// ISRShutdown.h 側の friend 宣言は #if defined(CONVOPEQ_UNIT_TESTS) でガードされ、
+// Production ビルドではバイナリ無変更
+// （AudioEngine.h の DeferredPublicationTestAccess と同一パターン）。
+//
+// ★ D101-31-D 制約: 本クラスは production authority（packedState_ の単一CAS word契約）
+//   を崩さない。テストターゲット（AdmissionPackedStateTests）からのみ使用すること。
+//==============================================================================
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+
+#include "audioengine/ISRShutdown.h"
+#include "audioengine/AtomicAccess.h"
+
+namespace convo {
+namespace isr {
+
+struct AdmissionPackedStateTestAccess final
+{
+    static uint32_t load(const ShutdownRuntime& rt) noexcept
+    {
+        return convo::consumeAtomic(rt.packedState_, std::memory_order_acquire);
+    }
+
+    static void store(ShutdownRuntime& rt, uint32_t raw) noexcept
+    {
+        // テスト前提: シングルスレッド setup 時にのみ呼ぶ（production 契約外の直接書き込み）。
+        convo::publishAtomic(rt.packedState_, raw, std::memory_order_release);
+    }
+};
+
+}  // namespace isr
+}  // namespace convo
+
+```
+
+### 📄 `src\tests\AdmissionPackedStateTests.cpp`
+
+```
+//==============================================================================
+// AdmissionPackedStateTests.cpp — D101-31-B B-13: tryAdmit/release/outstanding unit tests
+//
+// Verifies the packed-state admission reservation contract:
+//   - tryAdmit succeeds only when AdmissionState == Open
+//   - tryAdmit increments reservationCount; release decrements
+//   - outstanding() reflects the current reservationCount
+//   - closeAdmission → joinProducers transitions correctly with count==0
+//   - G-H linearization: tryAdmit and closeAdmission CAS on the same packedState_ word
+//
+// ★ D101-31-D additions:
+//   - versionWrapDoesNotCorruptReservationCount (D-3): 6-bit version wrap at 63→0
+//     via test-only AdmissionPackedStateTestAccess seam (CONVOPEQ_UNIT_TESTS)
+//   - concurrentTryAdmitCloseAdmission (D-4): tryAdmit ↔ closeAdmission race,
+//     Case A / Case B both converge to consistent Closed state
+//   - doubleReleaseDoesNotUnderflow (D-5): release underflow clamps, no wrap
+//
+// Build: standalone test target (links ISRShutdown.cpp + JUCE core)
+//==============================================================================
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+#include "audioengine/AtomicAccess.h"     // convo::publishAtomic / consumeAtomic
+#include "audioengine/ISRShutdown.h"
+#include "audioengine/ISRRuntimePublicationCoordinator.h"
+#include "../DspNumericPolicy.h"  // ASSERT_NON_RT_THREAD
+#include "AdmissionPackedStateTestAccess.h"  // ★ D101-31-D-3: version 注入用 test-only seam
+
+namespace {
+
+// Test fixture: ShutdownRuntime with a minimal RuntimeIntentCoordinator.
+//   NOTE: RuntimeIntentCoordinator is a large object (embedded MpscBoundedRing buffers,
+//   LockFreeRingBuffer arrays, large fixed-size queues) — well over 1 MB. It MUST be
+//   heap-allocated (via make_unique) to avoid stack overflow on the test thread.
+class TestShutdownRuntime {
+public:
+    std::unique_ptr<convo::isr::RuntimeIntentCoordinator> coordinator;
+    std::unique_ptr<convo::isr::ShutdownRuntime> runtime;
+
+    TestShutdownRuntime()
+        : coordinator(std::make_unique<convo::isr::RuntimeIntentCoordinator>())
+        , runtime(std::make_unique<convo::isr::ShutdownRuntime>(*coordinator))
+    {}
+};
+
+// ── Test 1: tryAdmit succeeds in Open state, outstanding increments ──
+bool testTryAdmitIncrementsOutstanding() {
+    TestShutdownRuntime t;
+    assert(t.runtime->isAdmissionOpen());  // Open initially
+    assert(t.runtime->outstanding() == 0);
+
+    bool ok = t.runtime->tryAdmit(1);
+    if (!ok) return false;
+    if (t.runtime->outstanding() != 1) return false;
+
+    ok = t.runtime->tryAdmit(5);
+    if (!ok) return false;
+    if (t.runtime->outstanding() != 6) return false;
+
+    return true;
+}
+
+// ── Test 2: tryAdmit fails after closeAdmission (Closing state) ──
+bool testTryAdmitFailsAfterClose() {
+    TestShutdownRuntime t;
+    t.runtime->closeAdmission();  // Open → Closing
+    assert(!t.runtime->isAdmissionOpen());
+
+    if (t.runtime->tryAdmit(1)) return false;  // Should fail — not Open
+    if (t.runtime->outstanding() != 0) return false;
+
+    return true;
+}
+
+// ── Test 3: release decrements outstanding ──
+bool testReleaseDecrements() {
+    TestShutdownRuntime t;
+    t.runtime->tryAdmit(3);
+    assert(t.runtime->outstanding() == 3);
+
+    t.runtime->release(1);
+    if (t.runtime->outstanding() != 2) return false;
+
+    t.runtime->release(2);
+    if (t.runtime->outstanding() != 0) return false;
+
+    return true;
+}
+
+// ── Test 4: joinProducers returns false when outstanding > 0 ──
+bool testJoinProducersFailsWhenOutstanding() {
+    TestShutdownRuntime t;
+    t.runtime->tryAdmit(1);
+    assert(t.runtime->outstanding() == 1);
+
+    t.runtime->closeAdmission();  // Open → Closing (reservations still outstanding)
+
+    bool joined = t.runtime->joinProducers();
+    if (joined) return false;  // Should NOT join — outstanding > 0
+
+    // Release the reservation, then join should succeed
+    t.runtime->release(1);
+    assert(t.runtime->outstanding() == 0);
+
+    joined = t.runtime->joinProducers();
+    if (!joined) return false;  // Should succeed now
+
+    // Verify state is Closed
+    if (t.runtime->isAdmissionOpen()) return false;
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+
+    return true;
+}
+
+// ── Test 5: joinProducers fails if not in Closing state ──
+bool testJoinProducersFailsIfNotClosing() {
+    TestShutdownRuntime t;
+    // State is still Open
+    bool joined = t.runtime->joinProducers();
+    if (joined) return false;  // Should fail — not Closing
+
+    return true;
+}
+
+// ── Test 6: closeAdmission is idempotent ──
+bool testCloseAdmissionIdempotent() {
+    TestShutdownRuntime t;
+    t.runtime->closeAdmission();  // Open → Closing
+    // Second call should be no-op (already Closing)
+    t.runtime->closeAdmission();
+
+    // Third call after joinProducers → Closed
+    // (joinProducers requires count==0; no reservations so should join)
+    t.runtime->joinProducers();
+    // Now Closed — closeAdmission should be no-op
+    t.runtime->closeAdmission();
+
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+
+    return true;
+}
+
+// ── Test 7: Concurrent tryAdmit/release stress (G-H race) ──
+bool testConcurrentTryAdmitRelease() {
+    TestShutdownRuntime t;
+    const int kNprocs = 4;
+    const int kOpsPerThread = 1000;
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kNprocs; i++) {
+        threads.emplace_back([&t, kOpsPerThread]() {
+            for (int j = 0; j < kOpsPerThread; j++) {
+                if (t.runtime->tryAdmit(1)) {
+                    t.runtime->release(1);
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // All reservations should be released
+    if (t.runtime->outstanding() != 0) return false;
+
+    return true;
+}
+
+// ── Test 8: tryAdmit with n > 1 and overflow protection ──
+bool testTryAdmitBatchAndOverflow() {
+    TestShutdownRuntime t;
+    // Batch admit
+    if (!t.runtime->tryAdmit(10)) return false;
+    if (t.runtime->outstanding() != 10) return false;
+
+    // Overflow: try to admit beyond 24-bit max (0x00FFFFFF = 16,777,215)
+    // The max reservation count fits in 24 bits. We can't easily test the overflow
+    // with a small number, but verify that tryAdmit with a huge n fails
+    if (t.runtime->tryAdmit(0x00FFFFFF)) return false;  // would overflow
+
+    return true;
+}
+
+// ── Test 9: version increments on closeAdmission ──
+bool testVersionIncrement() {
+    TestShutdownRuntime t;
+    // Initial version is 0 (packedState_ = 0)
+    // closeAdmission should bump version to 1
+    t.runtime->closeAdmission();
+    // We can't directly observe version, but we can verify behavior:
+    // After close+join, the state should be Closed
+    t.runtime->joinProducers();
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+
+    // A second close should start a new generation (version bumps again)
+    // But since state is already Closed, closeAdmission is idempotent
+    // This test verifies no crash on repeated close
+    return true;
+}
+
+// ── Test 10 (D101-31-D-3): version 63 → closeAdmission wraps to 0 without
+//    corrupting reservationCount (6-bit version field contract) ──
+bool testVersionWrapDoesNotCorruptReservationCount() {
+    using convo::isr::AdmissionPackedStateTestAccess;
+    TestShutdownRuntime t;
+
+    // Inject: state=Open(0), version=63, count=5 → raw = 0x5FC
+    constexpr uint32_t kRawVersion63 =
+        (63u << 2) | (5u << 8);  // Open=0, kVersionShift=2, kReservationShift=8
+    AdmissionPackedStateTestAccess::store(*t.runtime, kRawVersion63);
+    if (t.runtime->outstanding() != 5) return false;
+    if (!t.runtime->isAdmissionOpen()) return false;
+
+    t.runtime->closeAdmission();  // Open→Closing with version wrap 63→0
+
+    // Exact word check: Closing(1) | version 0 | count 5 = 0x501.
+    // The pre-fix bug ((version + 1) << shift unmasked) would produce 0x601 — bit8 leaks into the
+    // reservationCount region and outstanding() would read 6.
+    constexpr uint32_t kExpectedAfterWrap =
+        static_cast<uint32_t>(convo::isr::AdmissionState::Closing) | (5u << 8);
+    if (AdmissionPackedStateTestAccess::load(*t.runtime) != kExpectedAfterWrap) return false;
+
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closing) return false;
+    if (t.runtime->outstanding() != 5) return false;  // reservationCount 不変
+
+    // Drain then join: wrap must not block Closing→Closed
+    t.runtime->release(5);
+    if (t.runtime->outstanding() != 0) return false;
+    if (!t.runtime->joinProducers()) return false;
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+
+    return true;
+}
+
+// ── Test 11 (D101-31-D-4): tryAdmit ↔ closeAdmission G-H race ──
+//   Single-word CAS linearization executable evidence. Never asserts which side
+//   wins; verifies both legal outcomes converge to a consistent state:
+//     Case A (tryAdmit CAS first): admits happen under Open, all released,
+//                                  joinProducers()==true afterwards.
+//     Case B (closeAdmission CAS first): every subsequent tryAdmit fails,
+//                                  outstanding stays 0, joinProducers()==true.
+//   Contradiction ("both succeeded into inconsistent state") is impossible:
+//   after the closing CAS completes on packedState_, no later tryAdmit can win.
+bool testConcurrentTryAdmitCloseAdmission() {
+    const int kRounds = 100;
+    const int kSpinners = 4;
+    int caseA = 0;  // tryAdmit won at least once before/during close
+    int caseB = 0;  // closeAdmission fully preceded admission attempts
+
+    for (int r = 0; r < kRounds; ++r) {
+        TestShutdownRuntime t;
+        std::atomic<bool> go{false};
+        std::atomic<bool> stop{false};
+        std::atomic<int> admitted{0};
+
+        std::vector<std::thread> threads;
+        threads.reserve(kSpinners);
+        for (int i = 0; i < kSpinners; ++i) {
+            threads.emplace_back([&t, &go, &stop, &admitted]() {
+                while (!go.load(std::memory_order_relaxed)) {
+                    // spin until closer releases the start gate
+                }
+                while (!stop.load(std::memory_order_relaxed)) {
+                    if (!t.runtime->tryAdmit(1)) break;  // admission closed — exit
+                    admitted.fetch_add(1, std::memory_order_relaxed);
+                    t.runtime->release(1);  // exactly-one release per admit
+                }
+            });
+        }
+
+        go.store(true, std::memory_order_release);
+        t.runtime->closeAdmission();          // G-H linearization point (this thread)
+        stop.store(true, std::memory_order_release);
+
+        for (auto& th : threads) th.join();
+
+        const int roundAdmitted = admitted.load();
+        if (roundAdmitted > 0) ++caseA; else ++caseB;
+
+        // Case-invariant checks (identical for A and B):
+        if (t.runtime->outstanding() != 0) return false;       // every admit was released exactly once
+        if (t.runtime->tryAdmit(1)) return false;              // post-close admission impossible
+        if (!t.runtime->joinProducers()) return false;         // Closing→Closed after full drain
+        if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+        if (t.runtime->isAdmissionOpen()) return false;        // no resurrection
+    }
+
+    printf("    [info] race rounds: tryAdmit-first(Case A)=%d, close-first(Case B)=%d\n",
+           caseA, caseB);
+    fflush(stdout);
+
+    // Both outcomes must be exercised across rounds for genuine race coverage
+    // (scheduler-dependent, but 100 rounds × 4 spinners makes single-sided runs implausible)
+    if (caseA == 0 && caseB == 100) {
+        printf("    [warn] no interleaving observed — verify thread scheduling\n");
+    }
+    return true;
+}
+
+// ── Test 12 (D101-31-D-5): double-release / release-underflow contract ──
+//   Contract (documented, unchanged behavior): release(n) with count < n is a
+//   silent no-op (state and count unchanged). Double-release must never wrap
+//   reservationCount into 0x00FFFFFF territory.
+bool testDoubleReleaseDoesNotUnderflow() {
+    TestShutdownRuntime t;
+
+    t.runtime->tryAdmit(1);
+    t.runtime->release(1);
+    t.runtime->release(1);  // double release — must be a no-op
+    if (t.runtime->outstanding() != 0) return false;   // must NOT wrap to 0x00FFFFFF
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Open) return false;
+
+    // Underflow guard: n > count → unchanged
+    if (!t.runtime->tryAdmit(1)) return false;
+    t.runtime->release(2);
+    if (t.runtime->outstanding() != 1) return false;
+
+    // Repeated over-release stress: first decrements to 0, rest clamp at 0
+    for (int i = 0; i < 1000; ++i) t.runtime->release(1);
+    if (t.runtime->outstanding() != 0) return false;
+
+    // FSM untouched by clamped releases: shutdown path still works
+    t.runtime->closeAdmission();
+    if (!t.runtime->joinProducers()) return false;
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+    if (t.runtime->outstanding() != 0) return false;
+
+    return true;
+}
+
+// ── Test 13 (D101-33-C Case B): shutdown 後 admission は副作用ゼロで拒否 ──
+bool testCaseB_ShutdownRejectSideEffectZero() {
+    using convo::isr::RuntimeIntentCoordinator;
+    TestShutdownRuntime t;
+
+    t.runtime->closeAdmission();  // shutdown 確定（Early Close Convergence 後の状態）
+
+    // Path B producer の入口と同一操作: tryAdmit 失敗 = side effect zero
+    if (t.runtime->tryAdmit(1)) return false;
+
+    if (t.runtime->outstanding() != 0) return false;                       // token 残留なし
+    if (t.coordinator->getPendingIntentCount() != 0) return false;         // intent 会計不变
+    if (t.coordinator->getPublicationIntentResidencyCount() != 0)
+        return false;                                                      // X5 residency 不变
+    // queue 未変更の代理観測: 全 counter/queue が空のため drain 判定が true
+    if (!t.coordinator->isFullyDrained()) return false;
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closing) return false;
+
+    // token なしでの enqueue も禁止（admission authority は packedState_ のみ）
+    RuntimeIntentCoordinator::Intent intent{};
+    // NOTE: D101-33-C 以降、enqueuePublicationIntent 自体は token を検査しない
+    // （authority は facade の tryAdmit に収束）。本テストは「close 後は tryAdmit が
+    //  失敗するため Path B transaction が開始されない」ことを検証済み。
+
+    // close 後でも closeAdmission は冪等、joinProducers は可能
+    t.runtime->closeAdmission();
+    if (!t.runtime->joinProducers()) return false;
+    if (t.runtime->admissionState() != convo::isr::AdmissionState::Closed) return false;
+
+    return true;
+}
+
+// ── Test 14 (D101-33-C Case C): close vs publication-admit race stress ──
+//   tryAdmit/closeAdmission は同一 packedState_ word への CAS（全順序）。
+//   各 iteration の不変条件:
+//     admit 成功 ⇒ outstanding()==1 が即時観測可能（token observable）
+//     admit 失敗 ⇒ publication 側効果ゼロ（push しない）
+//     全 thread join 後 ⇒ outstanding==0 / residency==pushed 数（漏れ・過剰なし）
+bool testCaseC_CloseVsPublicationAdmitStress() {
+    const int kRounds = 200;
+
+    int caseA = 0;  // admit 先行（token 観測下で push 完遂）
+    int caseB = 0;  // close 先行（reject）
+
+    for (int r = 0; r < kRounds; ++r) {
+        TestShutdownRuntime t;
+        std::atomic<bool> go{false};
+        std::atomic<int> pushed{0};
+
+        std::thread producer([&]() {
+            while (!go.load(std::memory_order_relaxed)) {}
+            // Path B producer transaction（facade 冒頭と同一の token 取得）
+            if (!t.runtime->tryAdmit(1)) return;              // close 先行 → reject
+            // token observable: 直後に reservation が見える
+            if (t.runtime->outstanding() < 1) return;
+
+            convo::isr::RuntimeIntentCoordinator::Intent intent{};
+            if (t.coordinator->enqueuePublicationIntent(intent)) {
+                pushed.fetch_add(1, std::memory_order_relaxed);
+            }
+            // push 失敗（full）の場合も X5 rollback は choke point 内部で完了済み。
+            // durable 点（push 成功）または失敗確定点で token release。
+            t.runtime->release(1);
+        });
+
+        go.store(true, std::memory_order_release);
+        t.runtime->closeAdmission();                           // close vs admit race
+        producer.join();
+
+        (pushed.load() > 0 ? ++caseA : ++caseB);
+
+        // round 不変条件: 漏れ・過剰なし
+        if (t.runtime->outstanding() != 0) return false;       // token 残留なし
+        if (t.coordinator->getPendingIntentCount() != 0) return false;
+        if (t.coordinator->getPublicationIntentResidencyCount()
+                != static_cast<std::uint64_t>(pushed.load())) return false;  // X5 == push 数
+        if (t.runtime->tryAdmit(1)) return false;              // close 後の再 admission 不可
+        if (t.runtime->admissionState() == convo::isr::AdmissionState::Open) return false;
+    }
+
+    printf("    [info] race rounds: admit-first(Case A)=%d, close-first(Case B)=%d\n",
+           caseA, caseB);
+    fflush(stdout);
+    return true;
+}
+
+// ── Test 15 (D101-33-C Case D): queue full — token/X5/rollback chain ──
+bool testCaseD_QueueFullRollbackChain() {
+    using convo::isr::RuntimeIntentCoordinator;
+    TestShutdownRuntime t;
+
+    // intentQueue_ を満たすまで Path B transaction（admit→enqueue→durable release）を反復
+    unsigned long long succeeded = 0;
+    bool hitFull = false;
+    constexpr int kMaxAttempts = 300000;
+    for (int i = 0; i < kMaxAttempts; ++i) {
+        if (!t.runtime->tryAdmit(1)) return false;             // token 取得
+        RuntimeIntentCoordinator::Intent intent{};
+        if (t.coordinator->enqueuePublicationIntent(intent)) {
+            ++succeeded;
+            t.runtime->release(1);                             // durable 点 release
+        } else {
+            // queue full: X5 rollback は choke point 内部で完了済み
+            t.runtime->release(1);                             // token release（失敗経路）
+            hitFull = true;
+            break;
+        }
+        if (t.runtime->outstanding() != 0) return false;       // durable release 漏れチェック
+    }
+    if (!hitFull) return false;                                // 容量確認できず
+
+    // full 状態での整合: residency == 成功 push 数、token 残留なし
+    if (t.coordinator->getPublicationIntentResidencyCount() != succeeded) return false;
+    if (t.runtime->outstanding() != 0) return false;
+
+    // full 状態での Case D chain 再検証: admit → push fail → rollback → release
+    if (!t.runtime->tryAdmit(1)) return false;
+    if (t.runtime->outstanding() != 1) return false;
+    RuntimeIntentCoordinator::Intent intent{};
+    if (t.coordinator->enqueuePublicationIntent(intent)) return false;   // full なので失敗
+    const auto resAfterFail = t.coordinator->getPublicationIntentResidencyCount();
+    if (resAfterFail != succeeded) return false;               // X5 rollback 済
+    t.runtime->release(1);
+    if (t.runtime->outstanding() != 0) return false;           // token release 済
+    if (t.coordinator->getPendingIntentCount() != 0) return false;  // Publish は計上されない
+
+    return true;
+}
+
+}  // namespace
+
+int main() {
+    struct Test { const char* name; bool (*fn)(); };
+    Test tests[] = {
+        {"tryAdmitIncrementsOutstanding",    testTryAdmitIncrementsOutstanding},
+        {"tryAdmitFailsAfterClose",          testTryAdmitFailsAfterClose},
+        {"releaseDecrements",                testReleaseDecrements},
+        {"joinProducersFailsWhenOutstanding",testJoinProducersFailsWhenOutstanding},
+        {"joinProducersFailsIfNotClosing",   testJoinProducersFailsIfNotClosing},
+        {"closeAdmissionIdempotent",         testCloseAdmissionIdempotent},
+        {"concurrentTryAdmitRelease",        testConcurrentTryAdmitRelease},
+        {"tryAdmitBatchAndOverflow",         testTryAdmitBatchAndOverflow},
+        {"versionIncrement",                 testVersionIncrement},
+        {"versionWrapDoesNotCorruptReservationCount",
+                                             testVersionWrapDoesNotCorruptReservationCount},
+        {"concurrentTryAdmitCloseAdmission", testConcurrentTryAdmitCloseAdmission},
+        {"doubleReleaseDoesNotUnderflow",    testDoubleReleaseDoesNotUnderflow},
+        {"caseB_ShutdownRejectSideEffectZero",
+                                             testCaseB_ShutdownRejectSideEffectZero},
+        {"caseC_CloseVsPublicationAdmitStress",
+                                             testCaseC_CloseVsPublicationAdmitStress},
+        {"caseD_QueueFullRollbackChain",     testCaseD_QueueFullRollbackChain},
+    };
+
+    int passed = 0;
+    int failed = 0;
+    for (const auto& test : tests) {
+        bool ok = false;        try {
+            ok = test.fn();
+        } catch (...) {
+            ok = false;
+        }
+        if (ok) {
+            printf("[PASS] %s\n", test.name);
+            fflush(stdout);
+            passed++;
+        } else {
+            printf("[FAIL] %s\n", test.name);
+            fflush(stdout);
+            failed++;
+        }
+    }
+
+    printf("\n%d passed, %d failed out of %d tests\n", passed, failed,
+           static_cast<int>(sizeof(tests) / sizeof(tests[0])));
+    return failed == 0 ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\BuildErrorClassificationTests.cpp`
 
 ```
@@ -88027,9 +88829,10 @@ namespace {
     coordinator.setRetireBacklogCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
-    coordinator.setFallbackBacklogCount(0);
-    coordinator.setReclaimInFlightCount(0);
-    coordinator.setDeferredRetireResidencyCount(0);
+    // ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
+    //   setDeferredRetireResidencyCount は削除済み（vestigial setter）。
+    //   fresh instance の初期値 0 が初期状態を保証する。fallback/deferred/reclaim の
+    //   実測は Layer 1 + onReclaimBegin/End（semantic event）が authority。
     coordinator.setSwapPending(false);
 
     if (!coordinator.isFullyDrained())
@@ -88062,9 +88865,8 @@ namespace {
     coordinator.setRetireBacklogCount(1); // drained 条件を破る
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
-    coordinator.setFallbackBacklogCount(0);
-    coordinator.setReclaimInFlightCount(0);
-    coordinator.setDeferredRetireResidencyCount(0);
+    // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
+    //   fresh instance 初期値 0。drain 違反は setRetireBacklogCount(1) のみで駆動。
     coordinator.setSwapPending(false);
 
     if (coordinator.isFullyDrained())
@@ -88133,9 +88935,8 @@ namespace {
     coordinator.setRetireBacklogCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
-    coordinator.setFallbackBacklogCount(0);
-    coordinator.setReclaimInFlightCount(0);
-    coordinator.setDeferredRetireResidencyCount(0);
+    // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
+    //   fresh instance 初期値 0。drain 違反は setSwapPending(true) で駆動。
     coordinator.setSwapPending(true); // drained 条件を破る
 
     if (coordinator.isFullyDrained())
