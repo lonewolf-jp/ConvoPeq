@@ -281,6 +281,19 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/audioengine/ISRRetireRouter.cpp
     )
 
+    # ★ D8-1 Wrapper+Cache Test-First
+    add_executable(D8_1_WrapperCacheTests
+        src/tests/D8_1_WrapperCacheTests.cpp
+    )
+    target_include_directories(D8_1_WrapperCacheTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_compile_features(D8_1_WrapperCacheTests PRIVATE cxx_std_20)
+    add_test(NAME D8_1_WrapperCacheTests COMMAND D8_1_WrapperCacheTests)
+
     # ★ Phase 9-B Step 5-I: Terminal Telemetry Instrumentation Contract Tests (T-5.1-T-5.6)
     add_executable(TerminalTelemetryContractTests
         src/tests/TerminalTelemetryContractTests.cpp
@@ -1826,6 +1839,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/T2Measurement.cpp
         src/tests/AudioEngineHarness/T3Measurement.cpp
         src/tests/AudioEngineHarness/T4Measurement.cpp
+        src/tests/AudioEngineHarness/OdenomCampaignTests.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)

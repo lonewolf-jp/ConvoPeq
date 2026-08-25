@@ -13,8 +13,7 @@ AudioEngine::EQCacheManager::EQCacheManager(AudioEngine& ownerIn) noexcept
     if (map == nullptr)
         return true;
 
-    owner.enqueueDeferredDeleteNonRt(map, [](void* p) { delete static_cast<CacheMap*>(p); });
-    return true;
+    return owner.enqueueDeferredDeleteNonRt(map, [](void* p) { delete static_cast<CacheMap*>(p); });
 }
 
 void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
@@ -38,7 +37,15 @@ void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
     if (old == nullptr)
         return;
 
-    owner.enqueueDeferredDeleteNonRt(old, [](void* p) { delete static_cast<CacheMap*>(p); });
+    if (!owner.enqueueDeferredDeleteNonRt(old, [](void* p) { delete static_cast<CacheMap*>(p); })) {
+        // QueueFull/Shutdown -> caller retains -> keep in enqueueFallbackMaps for later drain
+        // caller (getOrCreate) holds writeMutex, so no lock needed
+        try {
+            enqueueFallbackMaps.push_back(old);
+        } catch (...) {
+            delete old;
+        }
+    }
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,

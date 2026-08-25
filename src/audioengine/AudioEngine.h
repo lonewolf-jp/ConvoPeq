@@ -4199,7 +4199,8 @@ inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*),
                                        DeletionEntryType type = DeletionEntryType::Generic) noexcept
 {
     const auto result = enqueueDeferredDeleteNonRtWithResult(ptr, deleter, type);
-    return result != convo::isr::RetireEnqueueResult::Shutdown;
+    return result != convo::isr::RetireEnqueueResult::Shutdown
+        && result != convo::isr::RetireEnqueueResult::QueueFull;
 }
 
 inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void* ptr, void (*deleter)(void*),

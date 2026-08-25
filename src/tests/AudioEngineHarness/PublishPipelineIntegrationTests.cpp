@@ -329,6 +329,10 @@ bool testPublishCompletionMonotonicity()
 
 } // namespace
 
+// D102-C2-3 O_denom campaign — forward declaration (harness-only, production unchanged)
+class AudioEngineHarness;
+bool runOdenomCampaignDefault(AudioEngineHarness& h);
+
 int main(int argc, char* argv[])
 {
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
@@ -350,6 +354,7 @@ int main(int argc, char* argv[])
     int t4IntervalUs = 3333;    // default T4-B (~300 pub/s target)
     std::string measurement;
     bool full = false;
+    bool odenomCampaign = false;
     const char* scenario = "all";
 
     for (int i = 1; i < argc; ++i)
@@ -357,6 +362,8 @@ int main(int argc, char* argv[])
         const std::string a(argv[i]);
         if (a == "--soak")
             full = true;
+        else if (a == "--odenom-campaign" || a == "--odenom")
+            odenomCampaign = true;
         else if (a.rfind("--scenario=", 0) == 0)
             scenario = argv[i] + std::strlen("--scenario=");
         else if (a.rfind("--measurement=", 0) == 0)
@@ -422,6 +429,20 @@ int main(int argc, char* argv[])
     if (!t4Measurement.empty())
     {
         return runT4RepeatedPublishMeasurement(t4IntervalUs) ? 0 : 1;
+    }
+
+    // ★ D102-C2-3: O_denom campaign (warmup 1 + 10 measurement windows, 4 pubs/60ms/100ms sampler)
+    if (odenomCampaign)
+    {
+        AudioEngineHarness h;
+        if (!h.start(48000.0, 512))
+        {
+            std::fprintf(stderr, "OdenomCampaign: harness start failed\n");
+            return 1;
+        }
+        bool ok = runOdenomCampaignDefault(h);
+        h.stop();
+        return ok ? 0 : 1;
     }
 
     if (argc > 1)
