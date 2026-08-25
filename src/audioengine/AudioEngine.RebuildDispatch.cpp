@@ -313,6 +313,16 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     }
 
     // Message Thread かつ実行コンテキスト有効時は直接 rebuild 実行へ進む
+    // D101-31-B B-10: tryAdmit(1) after isShutdownInProgress() check passed.
+    // Intent will be stored (requestRebuild or triggerAsyncUpdate → rebuildAdmissionPendingIntent_).
+    // release(1) fires at function exit — obligation survives in durable state.
+    if (!shutdownRuntime_.tryAdmit(1))
+        return;
+    struct RebuildReservationGuard {
+        convo::isr::ShutdownRuntime& rt;
+        bool active = true;
+        ~RebuildReservationGuard() { if (active) rt.release(1); }
+    } rebuildGuard{ shutdownRuntime_ };
     if (kind == convo::RebuildKind::Structural)
     {
         if (isMessageThread)

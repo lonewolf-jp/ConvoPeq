@@ -326,9 +326,10 @@ namespace {
     coordinator.setRetireBacklogCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
-    coordinator.setFallbackBacklogCount(0);
-    coordinator.setReclaimInFlightCount(0);
-    coordinator.setDeferredRetireResidencyCount(0);
+    // ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
+    //   setDeferredRetireResidencyCount は削除済み（vestigial setter）。
+    //   fresh instance の初期値 0 が初期状態を保証する。fallback/deferred/reclaim の
+    //   実測は Layer 1 + onReclaimBegin/End（semantic event）が authority。
     coordinator.setSwapPending(false);
 
     if (!coordinator.isFullyDrained())
@@ -361,9 +362,8 @@ namespace {
     coordinator.setRetireBacklogCount(1); // drained 条件を破る
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
-    coordinator.setFallbackBacklogCount(0);
-    coordinator.setReclaimInFlightCount(0);
-    coordinator.setDeferredRetireResidencyCount(0);
+    // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
+    //   fresh instance 初期値 0。drain 違反は setRetireBacklogCount(1) のみで駆動。
     coordinator.setSwapPending(false);
 
     if (coordinator.isFullyDrained())
@@ -432,9 +432,8 @@ namespace {
     coordinator.setRetireBacklogCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
-    coordinator.setFallbackBacklogCount(0);
-    coordinator.setReclaimInFlightCount(0);
-    coordinator.setDeferredRetireResidencyCount(0);
+    // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
+    //   fresh instance 初期値 0。drain 違反は setSwapPending(true) で駆動。
     coordinator.setSwapPending(true); // drained 条件を破る
 
     if (coordinator.isFullyDrained())

@@ -1490,6 +1490,11 @@ public:
         return lifecycleShutdown || shutdownRuntime_.isShutdownInProgress();
     }
 
+    // D101-31-B: NonRT admission-control accessor for orchestrators that hold AudioEngine&.
+    // Used by RuntimePublicationOrchestrator for tryAdmit/release on the Publication path.
+    [[nodiscard]] convo::isr::ShutdownRuntime& isrShutdownRuntime() noexcept
+    { return shutdownRuntime_; }
+
     // [[deprecated("Use PublicationAdmission::evaluate() instead")]]
     // [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
     [[nodiscard]] bool isFullyDrained() noexcept;
@@ -4365,7 +4370,8 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 
     // Q0〜Q7 の観測値（EpochDomain / RetireRouter / ShutdownRuntime から収集）
     convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;   // Q0: admission reservations は producer join 後 0
+    obs.admissionReservationsZero = (shutdownRuntime_.outstanding() == 0);  // Q0
+    // D101-31-B B-6: outstanding() is the authority. AudioEngine must NOT access packedState_ directly.
     obs.allProducersJoined = true;          // Q2: shutdown 確定 + producer join 完了
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
     obs.activeReadersZero = (m_retireRouter != nullptr)
@@ -4431,6 +4437,12 @@ inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
     if (!admitted)
         return;
 
+    // D101-31-B B-9: tryAdmit(1) after CoordinatorState::ShuttingDown gate passed.
+    // The recovery obligation survives in durable state after this point (transport/durable paths).
+    // release(1) fires at function return — obligation is durable.
+    if (!shutdownRuntime_.tryAdmit(1))
+        return;
+
     // ★ 監査指摘 (work88): Recovery を Builder Work Queue に投入後、rebuild スレッドを起床させる。
     //   recoveryIntentQueue_ への push は rebuildCV を起こさないため、アイドル時に Recovery が
     //   処理されない配線漏れを解消（RecoveryIntentHandler からの enqueue-only 経路）。
@@ -4439,6 +4451,9 @@ inline void submitRecoveryIntent(convo::isr::DSPHandle quarantinedHandle,
         recoveryPending = true;
     }
     rebuildCV.notify_all();
+
+    // D101-31-B B-9: Release admission reservation — recovery obligation is durable.
+    shutdownRuntime_.release(1);
 }
 
 // ★ work70-FIX: lookupDSPHandleForRuntime — DSPCore* → DSPHandle 逆引き（const）
@@ -4511,6 +4526,31 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     const RegistrationContext& regCtx,
     const convo::isr::DSPHandle& oldHandle) noexcept
 {
+    // ★ D101-33-C (D101-33-B A′ design): Admission-first token.
+    //   tryAdmit(1) is THE linearization point vs closeAdmission() — both CAS on the same
+    //   packedState_ word, so either admit precedes close (reservation observable via
+    //   outstanding()>0; joinProducers waits for durable release) or close precedes admit
+    //   (reject). No third interleaving → No-Resurrection Case C structurally excluded.
+    //
+    //   tryAdmit failure = side-effect zero:
+    //     - no DSP handle registration
+    //     - no registry entry
+    //     - no ownerChannel transfer
+    //     - no X5 residency reservation
+    //     - world ownership stays with caller (CallerDestroy semantics)
+    if (!shutdownRuntime_.tryAdmit(1))
+        return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+
+    // ★ D101-33-C: RAII TokenGuard (Path A ReservationGuard と同型・Orchestrator.cpp:70-76).
+    //   唯一の正常系 release point = enqueuePublicationIntent()==true の直後
+    //   （obligation durable 点）。それ以外の全失敗経路は guard デストラクタで release される
+    //   （release 漏れ禁止 / 二重 release は active フラグで防止）。
+    struct AdmissionTokenGuard {
+        convo::isr::ShutdownRuntime& rt;
+        bool active = true;
+        ~AdmissionTokenGuard() { if (active) rt.release(1); }
+    } admissionTokenGuard{ shutdownRuntime_ };
+
     convo::isr::DSPHandle rollbackHandle;
     ScopeExit guard { [&]() noexcept {
         if (!rollbackHandle.isNull())
@@ -4569,6 +4609,9 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     if (!runtimePublicationBridge_.enqueuePublicationIntent(intent))
     {
         // キュー full: 移譲した Owner を取り戻し、registry をクリアして rollback に委ねる。
+        // ★ D101-33-C: token は AdmissionTokenGuard デストラクタで release（X5 rollback は
+        //   enqueuePublicationIntent 内部で完了済み — token/residency/owner/registry の
+        //   partial state なし）。
         (void)worldAuthority_.ownerChannel().take(
             convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
         worldAuthority_.registry().unregister(seqId);
@@ -4577,6 +4620,12 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 
     // fire-and-forget: wait しない。所有権は移譲済み（executePublish が後続で commit する）。
     // rollback 義務は消滅（rollbackHandle を無効化して ScopeExit による rollback を防止）。
+    // ★ D101-33-C: obligation durable 点 — ここで token を release する
+    //   （Path A 前例 Orchestrator.cpp:330-333「intent is enqueued, obligation now survives
+    //     in durable state」と同一契約。以降は outstanding()==0 でも obligation は
+    //     ISR intent queue / residency として観測可能）。
+    admissionTokenGuard.active = false;
+    shutdownRuntime_.release(1);
     rollbackHandle = convo::isr::DSPHandle::null();
     return { convo::PublishStageResult::Success, OwnershipDisposition::Transferred };
 }

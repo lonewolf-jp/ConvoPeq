@@ -130,23 +130,22 @@ public:
     //   ［本 API は NonRT-thread からのみ呼び出すこと（AC-ISR-1）］
     void onRetireAccepted() noexcept;      // retire backlog +1（atomic fetch_add + pressure 更新）
     void onRetireConsumed() noexcept;      // retire backlog -1（underflow ガード付き fetch_sub）
-    void onFallbackAccepted() noexcept;    // fallback backlog +1
-    void onFallbackConsumed() noexcept;    // fallback backlog -1（underflow ガード付き）
-    void onDeferredRetireAccepted() noexcept;  // deferred retire residency +1
-    void onDeferredRetireConsumed() noexcept;  // deferred retire residency -1（underflow ガード付き）
     void onReclaimBegin() noexcept;        // reclaim in-flight +1
     void onReclaimEnd() noexcept;          // reclaim in-flight -1（underflow ガード付き）
+    // ★ D101-32-D: onFallbackAccepted/Consumed / onDeferredRetireAccepted/Consumed は削除済み。
+    //   対応 counter（fallbackBacklogCount_ / deferredRetireResidencyCount_）と共に vestigial 判定
+    //   （D101-32-C §4/§5）。fallback/deferred の実測は Layer 1 実測 + queue emptiness が担当。
 
     // ⚠️ 旧 setter API 群 — dash2 §1.4 により production からの呼び出しは全廃。
     //   残存するのはテスト初期化リセット（P2 教訓: テストでのリセットは許可）のみ。
     //   production からの絶対値上書きは禁止（コンパイル時参照 = 0 を維持すること）。
-    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY
+    //   ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
+    //     setDeferredRetireResidencyCount / setQuarantineResidentCount は削除済み
+    //     （D101-32-C §7 削除境界）。setRetireBacklogCount は Pressure FSM / drain violation
+    //     の決定論的テスト駆動のため KEEP（絶対値注入がテストの意味本体）。
+    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY（KEEP — Pressure FSM 駆動）
     void setPublicationBacklogCount(std::uint64_t count) noexcept;   // TEST-ONLY（dead counter）
     void setPendingIntentCount(std::uint64_t count) noexcept;        // TEST-ONLY
-    void setFallbackBacklogCount(std::uint64_t count) noexcept;      // TEST-ONLY
-    void setReclaimInFlightCount(std::uint64_t count) noexcept;      // TEST-ONLY
-    void setDeferredRetireResidencyCount(std::uint64_t count) noexcept; // TEST-ONLY
-    void setQuarantineResidentCount(std::uint64_t count) noexcept;   // TEST-ONLY（★ Phase2）
     void escalateAllRetires(RetirePriority minPriority) noexcept;    // ★ Phase5: 全RetireIntent の優先度を底上げ
     void setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept;       // ★ Phase5: OverflowRing 滞留年限警告しきい値
     void setSwapPending(bool pending) noexcept;
@@ -157,9 +156,10 @@ public:
     [[nodiscard]] std::uint64_t getPublicationIntentResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
     [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
-    [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
-    [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
-    [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;  // ★ Phase2
+    // ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
+    //   getQuarantineResidentCount（Coordinator側）は削除済み（D101-32-C §7 — vestigial counter
+    //   の getter も domain 一括で除去）。実在 quarantine DSP は DSPQuarantineManager::residentCount()、
+    //   Q+EmergencyQ は EpochControl::getQuarantineResidentCount()（別クラス・別semantic）が authority。
     // ★ work88 (X6 §6.6): Quarantine transport residency counter（INV-X6-4）。診断 / isFullyDrained 用。
     [[nodiscard]] std::uint64_t getQuarantineIntentResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineRingResidencyCount() const noexcept;
@@ -350,16 +350,15 @@ public:
     //   reclaims the outstanding Owner via RuntimeWorldAuthority::ownerChannel().take(key).
     [[nodiscard]] bool enqueuePublicationIntent(const Intent& intent) noexcept
     {
-        // ★ dash2 §2.5 (Phase B3 — Path B admission gate): shutdown 確定後は Publish Intent を
-        //   enqueue しない。CoordinatorState::ShuttingDown が requestShutdown() で確定するため、
-        //   本 gate が Path B（enqueuePublicationIntent）の最終 linearization point になる
-        //   （Path C: submitRecoveryRequest の gate と同型 — H.11.6 Commit 6）。
-        //   閉鎖後の enqueue は拒否（false 返却）— 呼出し元は Owner を reclaim する。
-        //   ［注: 呼出し元（commitRuntimePublication）は通常 CoordinatorState::ShuttingDown 確定前
-        //   に呼ばれ、シャットダウン中の publish は isShutdownInProgress() で事前に遮断される。
-        //   本 gate は defense-in-depth としての二次防衛。］
-        if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
-            return false;
+        // ★ D101-33-C (D101-33-B A′ design): state_ == ShuttingDown gate は削除済み。
+        //   Publication admission authority は ShutdownRuntime::packedState_
+        //   （enqueueRuntimePublicationFireAndForget 冒頭の tryAdmit CAS — closeAdmission と
+        //   同一単語で線形化、No-Resurrection Case C を構造的排除）に一本化された。
+        //   本関数が呼ばれる時点で caller は admission token を保持しており、
+        //   CoordinatorState::ShuttingDown は drain-mode signal のみを担う
+        //   （authority separation — D101-32-F/D101-33-B 確定）。
+        //   ［旧実装: state_ load による check-then-act gate は close と非同期で TOCTOU
+        //     window を持つため linearization point たり得なかった（D101-33-A Case C GAP）］
 
         Intent prepared = intent;
         prepared.type = IntentType::Publish;
@@ -559,19 +558,21 @@ private:
     //   - 絶対値上書き（setPendingIntentCount）は本カウンタに対して禁止。AudioEngine.Commit /
     //     Threading からの RetireIntent 混入を排除するため。
     std::atomic<std::uint64_t> pendingIntentCount_;
-    std::atomic<std::uint64_t> fallbackBacklogCount_;
+    // ★ D101-32-D: fallbackBacklogCount_ / deferredRetireResidencyCount_ /
+    //   quarantineResidentCount_（Coordinator側）は削除済み（D101-32-C §4 — vestigial 判定）。
+    //   - fallback 実測   = Layer 1 overflow ring resident + quarantineFallbackQueue_.sizeApprox()
+    //   - deferred 実測   = observeDeferredRing_.size() + router 側実測
+    //   - quarantine DSP  = DSPQuarantineManager::residentCount()（唯一の source of truth）
+    //   reclaimInFlightCount_ は onReclaimBegin/End（production wired）が authority のため KEEP。
     std::atomic<std::uint64_t> reclaimInFlightCount_;
-    std::atomic<std::uint64_t> deferredRetireResidencyCount_;
-    // ★ work88 (X6 §6.6): Quarantine の transport residency と DSP residency を semantic 分離（INV-X6-4）。
+    // ★ work88 (X6 §6.6): Quarantine の transport residency を semantic 分離（INV-X6-4）。
     //   quarantineIntentResidencyCount_ = intentQueue_ 内の Quarantine Intent 数（primary transport）
     //   quarantineRingResidencyCount_   = quarantineFallbackQueue_ 内の Quarantine Intent 数（fallback/ring）
-    //   quarantineResidentCount_        = 実在 quarantine DSP 数（DSPQuarantineManager::residentCount() が
-    //                                     唯一の source of truth — AudioEngine::isFullyDrained で直接判定）。
-    //   ★ Coordinator 側の quarantineResidentCount_ は X6 以降 submitQuarantine が +1 しない（DSPQuarantineManager
-    //     管理に委譲）。本 counter は従来のドレイン判定では常に 0（source of truth は AudioEngine 側）。
+    //   実在 quarantine DSP 数は Coordinator 外 — DSPQuarantineManager::residentCount() が唯一の
+    //   source of truth（AudioEngine::isFullyDrained で直接判定）。Coordinator 側 resident counter
+    //   は D101-32-D で削除済み（X6 以降 writer ゼロのため）。
     std::atomic<std::uint64_t> quarantineIntentResidencyCount_{0};   // ★ X6 新設（Intent lane residency）
     std::atomic<std::uint64_t> quarantineRingResidencyCount_{0};     // ★ X6 新設（ring/fallback 残留）
-    std::atomic<std::uint64_t> quarantineResidentCount_;    // ★ Phase2: Quarantine滞留カウント（X6 以降は常時 0 — DSPQuarantineManager が source）
     std::atomic<std::uint64_t> previousRetireBacklogCount_;
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_{false}; // [work87 P2-5]

@@ -63,6 +63,17 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Submitted, nowUs);
 
+    // D101-31-B B-8: Admission reservation for Publication path.
+    // tryAdmit(1) after evaluate()→Accepted, release(1) after enqueue (or on failure).
+    // RAII guard ensures release on any early return / exception-free exit.
+    if (!engine_.isrShutdownRuntime().tryAdmit(1))
+        return PublicationAdmission::Decision::RejectedShutdown;
+    struct ReservationGuard {
+        convo::isr::ShutdownRuntime& rt;
+        bool active = true;
+        ~ReservationGuard() { if (active) rt.release(1); }
+    } reservationGuard{ engine_.isrShutdownRuntime() };
+
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
     // ★ Phase2: DSPHandle → DSPCore* 解決 (Execution Path Handle Normalization)
@@ -298,6 +309,11 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     telemetryRecorder_.recordProgress(correlationId,
         static_cast<uint64_t>(req.generation), 0,
         PublishStage::Published, nowUs);
+
+    // D101-31-B B-8: Release admission reservation — intent is enqueued, obligation now
+    // survives in durable state (ISR intent queue / coordinator loop).
+    reservationGuard.active = false;
+    engine_.isrShutdownRuntime().release(1);
 
     // ★ B4-a4: publish 成功後の activate/crossfade/retire と epoch advance は
     //   ISR PublishExecutor::executePublish の Execution tail（onPublishCompleted →

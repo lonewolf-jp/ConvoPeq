@@ -17,9 +17,7 @@ RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
     , pendingIntentCount_(0)
-    , fallbackBacklogCount_(0)
     , reclaimInFlightCount_(0)
-    , deferredRetireResidencyCount_(0)
     , previousRetireBacklogCount_(0)
     , pressureNormalizedWindows_(0)
     , swapPending_(false)
@@ -207,31 +205,8 @@ void RuntimeIntentCoordinator::onRetireConsumed() noexcept {
     }
 }
 
-void RuntimeIntentCoordinator::onFallbackAccepted() noexcept {
-    convo::fetchAddAtomic(fallbackBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-}
-
-void RuntimeIntentCoordinator::onFallbackConsumed() noexcept {
-    const auto old = convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
-    if (old > 0) {
-        convo::fetchSubAtomic(fallbackBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-    } else {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-    }
-}
-
-void RuntimeIntentCoordinator::onDeferredRetireAccepted() noexcept {
-    convo::fetchAddAtomic(deferredRetireResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-}
-
-void RuntimeIntentCoordinator::onDeferredRetireConsumed() noexcept {
-    const auto old = convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
-    if (old > 0) {
-        convo::fetchSubAtomic(deferredRetireResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-    } else {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-    }
-}
+// ★ D101-32-D: onFallbackAccepted/Consumed / onDeferredRetireAccepted/Consumed は削除済み
+//   （D101-32-C §5 — caller ゼロ・対応 counter と domain 一括除去）。
 
 void RuntimeIntentCoordinator::onReclaimBegin() noexcept {
     convo::fetchAddAtomic(reclaimInFlightCount_, std::uint64_t{1}, std::memory_order_acq_rel);
@@ -299,21 +274,10 @@ void RuntimeIntentCoordinator::setPendingIntentCount(std::uint64_t count) noexce
     convo::publishAtomic(pendingIntentCount_, count, std::memory_order_release);
 }
 
-void RuntimeIntentCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(fallbackBacklogCount_, count, std::memory_order_release);
-}
-
-void RuntimeIntentCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(reclaimInFlightCount_, count, std::memory_order_release);
-}
-
-void RuntimeIntentCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(deferredRetireResidencyCount_, count, std::memory_order_release);
-}
-
-void RuntimeIntentCoordinator::setQuarantineResidentCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(quarantineResidentCount_, count, std::memory_order_release);
-}
+// ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
+//   setDeferredRetireResidencyCount / setQuarantineResidentCount は削除済み
+//   （D101-32-C §7 — fallback/deferred/quarantine-resident domain の vestigial setter。
+//     setReclaimInFlightCount は onReclaimBegin/End 移行済みのため test reset 用途も消滅）。
 
 void RuntimeIntentCoordinator::setOverflowMaxAgeUs(std::uint64_t maxAgeUs) noexcept {
     convo::publishAtomic(overflowMaxAgeUs_, maxAgeUs, std::memory_order_release);
@@ -489,17 +453,8 @@ std::uint64_t RuntimeIntentCoordinator::getQuarantineRingResidencyCount() const 
     return convo::consumeAtomic(quarantineRingResidencyCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimeIntentCoordinator::getFallbackBacklogCount() const noexcept {
-    return convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
-}
-
-std::uint64_t RuntimeIntentCoordinator::getDeferredRetireResidencyCount() const noexcept {
-    return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
-}
-
-std::uint64_t RuntimeIntentCoordinator::getQuarantineResidentCount() const noexcept {
-    return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
-}
+// ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
+//   getQuarantineResidentCount（Coordinator側）は削除済み（vestigial counter の getter）。
 
 // ★ Phase5: Delegation to ShutdownScheduler
 bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
@@ -575,16 +530,18 @@ bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcep
         //   Publish Intent）を捕捉できないため、本 counter で独立判定する。
         && convo::consumeAtomic(coordinator_.publicationIntentResidencyCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.pendingIntentCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.fallbackBacklogCount_, std::memory_order_acquire) == 0
+        // ★ D101-32-D: fallbackBacklogCount_ / deferredRetireResidencyCount_ の == 0 判定は削除。
+        //   両 counter は vestigial（writer ゼロ）であり恒真判定だった。fallback/deferred の実在
+        //   資源は quarantineFallbackQueue_ / observeDeferredRing_ の実測と Layer 1 実測が authority
+        //   （D101-32-C §4/§6 — 情報欠落なし）。
         && convo::consumeAtomic(coordinator_.reclaimInFlightCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.deferredRetireResidencyCount_, std::memory_order_acquire) == 0
         // ★ work88 (X6 §6.6): Quarantine transport residency を個別に == 0（INV-X6-4）。
         //   quarantineIntentResidencyCount_（intentQueue_ 残留）と quarantineRingResidencyCount_
-        //   （quarantineFallbackQueue_ 残留）をそれぞれ独立判定する。quarantineResidentCount_
-        //   （実在 DSP）は AudioEngine::isFullyDrained が DSPQuarantineManager を直接判定（X6）。
+        //   （quarantineFallbackQueue_ 残留）をそれぞれ独立判定する。実在 DSP quarantine resident
+        //   （旧 quarantineResidentCount_ 項目）は D101-32-D で削除 — AudioEngine::isFullyDrained が
+        //   DSPQuarantineManager を直接判定（X6、authority 変更なし）。
         && convo::consumeAtomic(coordinator_.quarantineIntentResidencyCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.quarantineRingResidencyCount_, std::memory_order_acquire) == 0
-        && convo::consumeAtomic(coordinator_.quarantineResidentCount_, std::memory_order_acquire) == 0
         // ★ work88 (X1 §6.1): durable Recovery admission が空であること（INV-X1-1/INV-X1-2）。
         //   lease 方式では DurablePending OR Building の両方が false であること（recoveryAdmissionPending_
         //   は Building 中も true を維持 — 二十六次レビュー）。shutdown 時は discardPendingRecoveryAdmission

@@ -241,6 +241,41 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # JuceHeader.h の生成を invariant_INV3_INV5Tests より先に行う
     add_dependencies(invariant_INV3_INV5Tests ConvoPeq)
 
+    # ★ D101-31-B B-13: AdmissionPackedState unit tests
+    add_executable(AdmissionPackedStateTests
+        src/tests/AdmissionPackedStateTests.cpp
+        src/audioengine/ISRShutdown.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(AdmissionPackedStateTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(AdmissionPackedStateTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(AdmissionPackedStateTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    target_compile_features(AdmissionPackedStateTests PRIVATE cxx_std_20)
+    # ★ D101-31-D-3: AdmissionPackedStateTestAccess seam を有効化（テストビルドのみ）。
+    #   ISRShutdown.h の friend 宣言は本define下でのみコンパイルされ、Production バイナリ無変更。
+    target_compile_definitions(AdmissionPackedStateTests PRIVATE CONVOPEQ_UNIT_TESTS=1)
+    add_dependencies(AdmissionPackedStateTests ConvoPeq)
+
     add_executable(RetireGraceSemanticsTests
         src/tests/RetireGraceSemanticsTests.cpp
         src/audioengine/ISRRetireRouter.cpp
@@ -750,6 +785,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
+    add_test(NAME AdmissionPackedState COMMAND AdmissionPackedStateTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
@@ -775,6 +811,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
         target_compile_options(invariant_INV3_INV5Tests PRIVATE /utf-8)
+        target_compile_options(AdmissionPackedStateTests PRIVATE /utf-8)
+        target_compile_options(AdmissionPackedStateTests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
         target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /utf-8)
         target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
@@ -795,6 +833,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     if(WIN32)
         foreach(tgt IN ITEMS ISRRuntimeIdentityTests RuntimePublicationCoordinatorTests
                      ISRSemanticValidationTests invariant_INV3_INV5Tests
+                     AdmissionPackedStateTests
                      RetireGraceSemanticsTests
                      ShutdownRetireIntentDrainTests
                      NormalRetireDSPHandleCompareTests
@@ -818,6 +857,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(invariant_INV3_INV5Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(AdmissionPackedStateTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ShutdownRetireIntentDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -841,6 +881,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
     target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
     target_compile_options(invariant_INV3_INV5Tests PRIVATE /EHsc)
+    target_compile_options(AdmissionPackedStateTests PRIVATE /EHsc)
     # ISRSemanticValidationTests は juce_core.cpp をコンパイルするため、
     # コマンドライン NOMINMAX=1 と JUCE の #define NOMINMAX（空）の衝突警告を抑制する。
     # （ConvoPeq 本体と同様の対応。CMakeLists.txt 参照）
@@ -878,6 +919,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /Qmkl:sequential)
         target_compile_options(PartialPublicationRejectTests PRIVATE /Qmkl:sequential)
+        target_compile_options(AdmissionPackedStateTests PRIVATE /Qmkl:sequential)
     endif()
 endif()
 
@@ -1549,6 +1591,23 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(ConvoPeq PRIVATE
         $<$<AND:$<CONFIG:Debug>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/MT>
     )
+    # icx + MSVC Runtime Library ハンドリング
+    # icx は MSVC の MSVC_RUNTIME_LIBRARY プロパティを完全には認識しないため、
+    # 明示的に linker ライブラリを追加する
+    # /MT コンパイル → リンク時に libcmtd.lib (Debug) / libcmt.lib (Release) が必要
+    if(ENABLE_ASAN)
+        target_link_libraries(ConvoPeq PRIVATE
+            $<$<CONFIG:Debug>:msvcrtd>
+            $<$<CONFIG:Release>:msvcrt>
+            $<$<CONFIG:RelWithDebInfo>:msvcrtd>
+        )
+    else()
+        target_link_libraries(ConvoPeq PRIVATE
+            $<$<CONFIG:Debug>:libcmtd>
+            $<$<CONFIG:Release>:libcmt>
+            $<$<CONFIG:RelWithDebInfo>:libcmt>
+        )
+    endif()
     # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
     # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
 endif()

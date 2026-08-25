@@ -74,6 +74,18 @@ void AudioEngine::releaseResources()
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
     runtimePublicationBridge_.requestShutdown();
 
+    // ★ D101-33-C (D101-33-B A′ design): Early Close Convergence.
+    //   closeAdmission() を requestShutdown() 直後へ前倒し（旧位置: shutdownCoordinatorLoop/
+    //   stopRebuildThread 後の :198 付近）。これにより admission authority（packedState_）と
+    //   transport gate の閉鎖時刻が収束し、「admission は開いているが transport gate は
+    //   閉じている」不整合区間が消滅する。
+    //   - この時点以降の tryAdmit は Closing/Closed を読んで拒否（副作用ゼロ）。
+    //   - 先行して tryAdmit 済みの producer は outstanding()>0 として観測され、
+    //     下段の joinProducers retry loop（:198 付近・維持）が durable release + drain を待つ。
+    //   - joinProducers() 自体は count==0 && Closing を要求するため、ここでは呼ばない
+    //     （producer join 後に下段で実行）。
+    shutdownRuntime_.closeAdmission();
+
     // ★ [work70 v9.11] MMCSS シャットダウン: フラグ経由で Audio Thread に委譲。
     //    Message Thread はフラグのみセットし、実際の AvRevert は次回コールバックで実行される。
     //    NativeRT モード（useMmcssPriority=false）の復元は finalizeMmcssShutdown() で行う。
@@ -189,14 +201,24 @@ void AudioEngine::releaseResources()
     shutdownCoordinatorLoop();  // ★ FUTURE-9: join Coordinator Worker before drains
     stopRebuildThread();
 
-    // ★★★ Phase 9-A: Q1/Q7 Admission Closure (D101-8 Step 8R code gap fix) ★★★
-    // Producers are joined (Q2), so no new work can be generated.
-    // closeAdmission(): Open→Closing (satisfies Q7 NoResurrection via !isAdmissionOpen()).
-    // joinProducers(): Closing→Closed (satisfies Q1 AdmissionClosed — requires state==Closing).
-    //   NOTE: Thread joins above do NOT update admissionState_ — both calls are required.
-    //   closeAdmission() advances shutdownGeneration_ (identity binding for ReclaimPermit).
-    shutdownRuntime_.closeAdmission();
-    shutdownRuntime_.joinProducers();
+    // ★★★ Phase 9-A: Q1/Q7 Admission Closure ★★★
+    //   ★ D101-33-C: closeAdmission() は上段（requestShutdown 直後）へ移動済み
+    //     （Early Close Convergence）。本位置では Closing 状態で producer join 待ちのみ行う。
+    // Producers are joined (Q2: CoordinatorLoop + RebuildThread), so no new work can be
+    // generated. joinProducers(): Closing→Closed (satisfies Q1 AdmissionClosed — requires
+    // state==Closing).
+    //   D101-31-B B-7: Retry loop — joinProducers() returns false if outstanding() > 0.
+    //   All reservation holders (Publication[Path A/B]/Recovery/Build) must release before
+    //   Closed. D101-33-C により Path B（commitRuntimePublication 直接 producer）も token
+    //   を保持するため、outstanding()==0 が全 publication transaction の完遂を証明する。
+    while (!shutdownRuntime_.joinProducers())
+    {
+        // Outstanding reservations exist — drain wait (follows 5000ms drain pattern above).
+        const bool drainedWithinBudget = waitForDrain(100, 1);
+        if (!drainedWithinBudget)
+            break;
+    }
+    // joinProducers() succeeded OR drain budget exhausted — transition proceeds.
 
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ObserverDrained);
     diagLog("[DIAG] releaseResources: after stopRebuildThread");

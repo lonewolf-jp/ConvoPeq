@@ -16,6 +16,12 @@ enum class ISRHealthState : uint8_t;
 
 namespace isr {
 
+#if defined(CONVOPEQ_UNIT_TESTS)
+// ★ D101-31-D-3: テスト専用 Friend Test Access の前方宣言（test-only seam）。
+//   定義は src/tests/AdmissionPackedStateTestAccess.h（テストターゲットのみインクルード）。
+struct AdmissionPackedStateTestAccess;
+#endif
+
 // ★ dash2 §2.2 (Phase A2 — Step 14): ReclaimAuthority の前方宣言。
 //   ShutdownRuntime コンストラクタ（constructor 固定注入）/ Proof 生成時の bindShutdownIdentity に使用。
 //   完全定義は ISRRuntimePublicationCoordinator.h（friend 宣言は Coordinator 側）。
@@ -292,9 +298,17 @@ public:
     //   - admissionState(): 現在状態（診断用）
     //   Closed→Open は存在しない（INV-LIFE-9 no-resurrection）。
     void closeAdmission() noexcept;
-    void joinProducers() noexcept;
+    bool joinProducers() noexcept;
     [[nodiscard]] bool isAdmissionOpen() const noexcept;
     [[nodiscard]] AdmissionState admissionState() const noexcept;
+
+    // ── ★ D101-31-B: AdmissionReservation API ──
+    //   tryAdmit/release/outstanding は packedState_ に対する atomic 操作。
+    //   tryAdmit と closeAdmission は同一 atomic word の CAS で linearization（G-H race）。
+    //   対象: Publication / Recovery / Build の3経路のみ。Retire は含まない。
+    bool tryAdmit(uint32_t n = 1) noexcept;
+    void release(uint32_t n = 1) noexcept;
+    [[nodiscard]] uint32_t outstanding() const noexcept;
 
     // ★ dash2 §2.2 (Phase A2 — Step 14 / Race B / T10): 現在の shutdown transaction generation。
     //   closeAdmission()（shutdown 開始）で確定し、その shutdown 中は固定。
@@ -348,9 +362,23 @@ private:
     //   ［AudioEngine は composition root として constructor initializer で依存を渡すのみ］
     class RuntimeIntentCoordinator& reclaimAuthority_;
 
-    // ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM ──
-    //   Open→Closing→Closed の不可逆遷移。Closed→Open 禁止（INV-LIFE-9）。
-    std::atomic<AdmissionState> admissionState_{AdmissionState::Open};
+    // ── ★ D101-31-B (AdmissionPackedState): AdmissionState + Reservation count ──
+    //   D101-30 locked contract: single 32-bit atomic for G-H linearization point.
+    //   Layout:
+    //     bits  [0:1]  AdmissionState (Open=0, Closing=1, Closed=2, Faulted=3)
+    //     bits  [2:7]  version (6-bit ABA counter; increment on closeAdmission)
+    //     bits  [8:31] reservationCount (24 bits, max 16,777,215)
+    //   tryAdmit() と closeAdmission() は本 atomic word に対して CAS する。
+    //   ShutdownPhase (phase_) は本 packed word には含めない — separate sequential state.
+    std::atomic<uint32_t> packedState_{0};  // D101-31-B: replaces admissionState_
+
+#if defined(CONVOPEQ_UNIT_TESTS)
+    // ★ D101-31-D-3: テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）。
+    //   version wrap（6bit）regression test が packedState_ へ version=63 を注入するためだけの seam。
+    //   Production ビルドではこの friend 宣言はコンパイルされず、バイナリ無変更
+    //   （AudioEngine.h の DeferredPublicationTestAccess と同一パターン）。
+    friend struct convo::isr::AdmissionPackedStateTestAccess;
+#endif
 };
 
 }  // namespace isr

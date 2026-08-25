@@ -1,5 +1,6 @@
 #include "ISRShutdown.h"
 #include "AtomicAccess.h"
+#include "../DspNumericPolicy.h"  // ★ D101-31-B: ASSERT_NON_RT_THREAD
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 #include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
 #include "core/TimeUtils.h"  // ★ A-2: getCurrentTimeUs
@@ -410,21 +411,48 @@ std::optional<ReclaimPermit> ShutdownRuntime::tryMakeReclaimPermit(
     return permit;
 }
 
-// ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM 実装 ──
-//   Open→Closing→Closed の不可逆遷移（INV-LIFE-9: Closed→Open 禁止）。
+// ── ★ D101-31-B: AdmissionPackedState constants ──
+//   Layout (D101-30 locked):
+//     bits [0:1]   AdmissionState (Open=0, Closing=1, Closed=2, Faulted=3)
+//     bits [2:7]   version (6-bit, increment on closeAdmission)
+//     bits [8:31]  reservationCount (24 bits, max 16,777,215)
+constexpr uint32_t kAdmissionStateMask = 0x3u;
+constexpr uint32_t kVersionMask      = 0x3Fu;
+constexpr uint32_t kVersionShift     = 2;
+constexpr uint32_t kReservationMask  = 0x00FFFFFFu;
+constexpr uint32_t kReservationShift = 8;
+
+// ── ★ D101-31-B: AdmissionPackedState ──
+//   tryAdmit() と closeAdmission() は同一 packedState_ atomic word に対して CAS する
+//   （G-H linearization point — D101-30 Step 5）。
+
 void ShutdownRuntime::closeAdmission() noexcept
 {
-    AdmissionState expected = AdmissionState::Open;
-    // Open のときのみ Closing へ（CAS で不可逆遷移を原子的に）
-    if (convo::compareExchangeAtomic(admissionState_, expected, AdmissionState::Closing,
-                                     std::memory_order_acq_rel, std::memory_order_acquire))
+    // G-H linearization: CAS on packedState_ (same word as tryAdmit).
+    // Open → Closing: increment version.
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
     {
-        // ★ dash2 §2.2 (Step 14 — Race B / T10): shutdown transaction 開始を確定（generation 前進）。
-        //   Proof 生成はこの確定済み generation を使うため、同一 shutdown 内の複数 reclaim で
-        //   identity が安定し、Shutdown N+1 の begin で stale になる（H.11.11.9.3 Step 11）。
-        //   ［Open→Closing 遷移成功時のみ increment — 二重開始防止（INV-LIFE-6）］
-        (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
-                                    std::memory_order_acq_rel);
+        const uint32_t state = expected & kAdmissionStateMask;
+        if (state != static_cast<uint32_t>(AdmissionState::Open))
+            break;  // Already Closing/Closed/Faulted — idempotent
+        const uint32_t version = (expected >> kVersionShift) & kVersionMask;
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        // ★ D101-31-D-2: version は 6bit 内で wrap させる（version==63 → next==0）。
+        //   mask 無しの (version + 1) << kVersionShift は bit8 に侵入し reservationCount を破壊する。
+        const uint32_t nextVersion = (version + 1u) & kVersionMask;
+        const uint32_t desired = (static_cast<uint32_t>(AdmissionState::Closing)
+                            | (nextVersion << kVersionShift)
+                            | (count << kReservationShift));
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            // ★ dash2 §2.2 (Step 14 — Race B / T10)
+            (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
+                                        std::memory_order_acq_rel);
+            break;
+        }
+        // CAS failed — retry with updated expected
     }
 }
 
@@ -433,23 +461,88 @@ uint64_t ShutdownRuntime::currentShutdownGeneration() const noexcept
     return convo::consumeAtomic(shutdownGeneration_, std::memory_order_acquire);
 }
 
-void ShutdownRuntime::joinProducers() noexcept
+bool ShutdownRuntime::joinProducers() noexcept
 {
-    AdmissionState expected = AdmissionState::Closing;
-    // Closing のときのみ Closed へ（producer join 完了を通知 — 不可逆）
-    convo::compareExchangeAtomic(admissionState_, expected, AdmissionState::Closed,
-                                 std::memory_order_acq_rel, std::memory_order_acquire);
+    // D101-31-B Step E: count==0 required for Closing→Closed.
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
+    {
+        const uint32_t state = expected & kAdmissionStateMask;
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        if (state != static_cast<uint32_t>(AdmissionState::Closing))
+            return false;  // Not Closing — cannot transition
+        if (count != 0)
+            return false;  // Reservations outstanding — caller must retry
+        const uint32_t desired =
+            (static_cast<uint32_t>(AdmissionState::Closed)
+         | (expected & (kVersionMask << kVersionShift))
+         | (0u << kReservationShift));
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+            return true;  // Closing→Closed succeeded
+        // CAS failed — retry
+    }
 }
 
 bool ShutdownRuntime::isAdmissionOpen() const noexcept
 {
-    // Open のみ許可。Closing / Closed / Faulted では enqueue 拒否。
-    return convo::consumeAtomic(admissionState_, std::memory_order_acquire) == AdmissionState::Open;
+    return (convo::consumeAtomic(packedState_, std::memory_order_acquire) & kAdmissionStateMask)
+        == static_cast<uint32_t>(AdmissionState::Open);
 }
 
 AdmissionState ShutdownRuntime::admissionState() const noexcept
 {
-    return convo::consumeAtomic(admissionState_, std::memory_order_acquire);
+    return static_cast<AdmissionState>(
+        convo::consumeAtomic(packedState_, std::memory_order_acquire) & kAdmissionStateMask);
+}
+
+// ── ★ D101-31-B: AdmissionReservation API ──
+
+bool ShutdownRuntime::tryAdmit(uint32_t n) noexcept
+{
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
+    {
+        const uint32_t state = expected & kAdmissionStateMask;
+        if (state != static_cast<uint32_t>(AdmissionState::Open))
+            return false;  // Not Open — admission closed
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        if (count > kReservationMask || n > kReservationMask || count + n > kReservationMask)
+            return false;  // overflow
+        // version unchanged — only count changes
+        const uint32_t desired =
+            (static_cast<uint32_t>(AdmissionState::Open)
+         | (expected & (kVersionMask << kVersionShift))
+         | ((count + n) << kReservationShift));
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+            return true;  // Admission reservation acquired
+        // CAS failed — retry
+    }
+}
+
+void ShutdownRuntime::release(uint32_t n) noexcept
+{
+    ASSERT_NON_RT_THREAD();  // D101-31-B: release is NonRT only
+    uint32_t expected = convo::consumeAtomic(packedState_, std::memory_order_acquire);
+    while (true)
+    {
+        const uint32_t count = (expected >> kReservationShift) & kReservationMask;
+        if (count < n)
+            break;  // underflow — silently clamp (double-release bug indicator)
+        const uint32_t desired = (expected & ~(kReservationMask << kReservationShift))
+                             | ((count - n) << kReservationShift);
+        if (convo::compareExchangeAtomic(packedState_, expected, desired,
+                                         std::memory_order_acq_rel, std::memory_order_acquire))
+            break;  // Released successfully
+        // CAS failed — retry
+    }
+}
+
+uint32_t ShutdownRuntime::outstanding() const noexcept
+{
+    return (convo::consumeAtomic(packedState_, std::memory_order_acquire) >> kReservationShift)
+        & kReservationMask;
 }
 
 }  // namespace isr
