@@ -6944,8 +6944,19 @@ O_w と T_w の 2 つの観測系の差 E_w を測定）。burst test harness �
 | T337 | release イベント観測 | referenceRelease > 0 を確認（normal=10 / burst=22 / jitter=10） | CLOSED |
 | T338 | M 導出可能性 | E_w > 0 確認済み（normal/burst E_w=1）・ただし M = max(E_w) で終了しない（D94/D95）・M は pub+reclaim の時間幅 / sampler tick 間隔により変動 | EVALUATED |
 
-### D101 — M の数学的バインド契約（D100.7 からの引継ぎ・next）
+### D101 — M の数学的バインド契約（D100.7 からの引継ぎ）
 **目的**: `B_max^true ≤ O_w + M(G, λ, τ_b, …)` を**構造上の上界**として導出する。
+
+> **★ 2026-08-25 Status Update (D101-35-A/B′/C/D-R 完了)**:
+>
+> - **M-bound = SYMBOLICALLY PROVEN**: `M ≤ K + λ_prod_bound × G_bound + N_timer(G_bound) < ∞`
+>   （K = kIntentQueueCapacity = 4096・N_timer は JUCE Timer coalescing premise 下で有限）
+> - 証明詳細: evidence/D101-35-A / D101-35-B′ / **D101-35-C-MBound-Mathematical-Derivation.md**
+> - 残作業: `λ_prod_bound` / `G_bound` の契約定数値決定（D102-C2）→ 数値 M 確定
+> - 本節の D101.1〜D101.3 レビュー順序 #1〜#9 は D101-35-A/B′/C で全項監査・証明済み
+>   （#1 completeness: D101-34-B/D101-35-A §2、#2 state equation: D101-35-A §4、
+>     #3 sampler gap: G_bound 契約候補、#4〜#7 envelope: λ_prod_bound scope Model 2′、
+>     #8 shutdown/quarantine: 加算項なし確認、#9 finite proof: D101-35-C §2）
 
 #### D101.1 Outstanding の状態方程式 (strict 3-layer)
 ```
@@ -6988,6 +6999,10 @@ B_obs(t_k) — sampler が tick 時刻 t_k に観測した値
 8. **Shutdown / quarantine / deferred deletion** — 通常経路以外も同じ bound に含める
 9. **Finite M proof** — #1-#8 から `sup_k Δ_k^growth` と `E^obs` が有限になることの証明
 10. **D102 gate** — `finite M` が証明できれば `B_max^true ≤ O_w + M` が安全保証として成立 → D102 GO / NO → redesign
+    ★ 2026-08-25 更新: `finite M` は **D101-35-C/D-R で構造的に証明済み**
+    （`M ≤ K + λ_prod_bound × G_bound + N_timer(G_bound) < ∞`、契約定数値決定待ち）。
+    `O_w` は measurement 出力、denominator は `O_denom`（D-R 分離）として区別:
+    `R_required = 1 + ceil(M_scope / O_denom)`。
 
 #### D101.3.1 Reference completeness — 4-tier proof
 1. **Acquire completeness**: World の reference 増加が発生する**全 terminal publication path**で
@@ -7025,25 +7040,47 @@ B_obs(t_k) — sampler が tick 時刻 t_k に観測した値
 > - **本質**: `B_ref = A_ref - R_ref` の意味を守るためには, published-domain と unpublished-domain の **lifetime accounting 分離を形式化** する必要あり.
 > - **Next**: WorldState predicate (Built→Owned→Published→Retired→Quarantine→Reclaimed) の published-domain membership をコード上で証明 (#1 audit target → #2 proof).
 >
-> **D101 #1 = OPEN**: Tier 1-3 ✅, Tier 4 🔴 (published-domain exclusion proof pending) → D101 = OPEN / M 未導出 / Phase I NO-GO 維持.
+> **D101 #1 = CLOSED (2026-08-25 / D101-34-A〜C)**: World published-domain boundary proof 完了。
+> **M-bound = SYMBOLICALLY PROVEN (2026-08-25 / D101-35-C)**: 構造上界
+> `M ≤ K + λ_prod_bound × G_bound + N_timer(G_bound) < ∞` 導出済み。
+> **契約定数値（λ_prod_bound / G_bound）決定まで M 数値 / Phase I NO-GO 解除 / D102 numeric は維持**
+> （詳細は I4.D101 節および evidence/D101-35-C-MBound-Mathematical-Derivation.md /
+> evidence/D102-B-TruePeak-Bound-RRequired-Derivation.md）。
 
-#### D101.4 判定条件
+#### D101.4 判定条件（2026-08-25 更新: 構造上界証明済み）
 ```
 if M は構造上の上界として導出可能:
     B_max^true ≤ O_w + M
-    → R_required = ceil(M / O_w) が導出可能 (D102)
+    → R_required = 1 + ceil(M_scope / O_denom) が導出可能 (D102)
+      ※ O_denom は denominator 契約入力、O_w は measurement 出力（分離・D101-35-D-R）
 else:
     M は未観測 peak により無限 (D94/D95)
     → NO-GO (R / R_cap / T2 は導出不能)
 ```
-**現状**: `M = max(E_w) = 1` は有限値だが、**これは実測観測値であり安全偺上界ではない** (D94/D95)。
-**M の数学的バインドは D101 で構造上の上界を導出するまで NO-GO。**
+**現状（2026-08-25 更新）**: `M = max(E_w) = 1` は実測観測値であり安全偺上界ではない
+(D94/D95) — **この禁止は維持**。一方、**構造上界は導出済み**:
+
+```text
+M ≤ M_scope = K + λ_prod_bound × G_bound + N_timer(G_bound)
+            = 4096 + λ_prod_bound × G_bound + ⌊G_bound/T_sampler⌋ + 1   < ∞
+    （K: kIntentQueueCapacity コード定数 /
+      N_timer: JUCE Timer coalescing premise 下の有限項 /
+      λ_prod_bound, G_bound: 抽象有限契約定数 — 値は D102-C2 で決定）
+    証明: evidence/D101-35-C-MBound-Mathematical-Derivation.md §2
+          （Case B: T_build_min 不仮定で閉鎖済み）
+```
 
 > **D100.7 → D101 引継ぎ**: E_w > 0 を実証（O_w != T_w）完了 (D100.5)。
 > D101 への引継ぎ: `B_max^true ≤ O_w + M` の**構造上の上界**を導出する。
 > - G (maxSamplingGapUs), λ (retirement rate), τ_b (burst duration), μ_burst, jitter_bound を定義。
 > - reference observer completeness を契約化（T_w は真値ではない）。
 > - M = f(…) として導出 → D102 で R_required を計算。
+>
+> **↑ 引継ぎ事項の完遂状況（2026-08-25 / D101-35-A〜C）**:
+> - G/λ/τ_b/μ_burst/jitter の**意味の固定**: ✅ 完了（D101-35-A §3・observed ≠ safe bound 分離）
+> - reference observer completeness: ✅ 完了（D101-34-B exactly-once 証明 + D101-35-A A-1）
+> - M = f(…) 導出: ✅ 完了 — `f(G,λ) = K + λ_prod_bound×G_bound + N_timer(G_bound)`
+>   （残り: 契約定数値決定のみ）
 > **Phase I NO-GO 維持**: E_w > 0 が確認されたことで measurement instrumentation は機能しているが、
 > M の安全偺上界が未導出のため R / R_cap / T2 への進行要件を満たさない。
 
@@ -7055,26 +7092,33 @@ else:
 
 ## I4.D101 — Authority Boundary for DeletionEntryType::World (D101 #1 Proof Audit)
 
-- 日付: 2026-08-16
-- 判定: **Step 1 (Producer Completeness) = CLOSED** / **Step 2 (API Separation) = Design-only (NOT implemented)** / **D101 #1 = OPEN**
+- 日付: 2026-08-16 (Step 1〜3 監査) / **2026-08-25 同期更新 (D101-34-A/B/C)**
+- 判定: **Step 1 (Producer Completeness) = CLOSED** / **Step 2 (API Separation) = IMPLEMENTED** /
+  **Step 3 (Caller Provenance) = CLOSED (verified)** / **INV-PUB-3 = CODE-FIXED** /
+  **INV-PUB-4 = PROOF COMPLETE (exactly-once)** / **RuntimeStore shutdown contract = PROVED** /
+  **D101 #1 = CLOSED**
 
-### 0. Background
+### 0. Background（2026-08-25 同期更新済み）
 
-`DeletionEntryType::World` は **1箋所** で生成される (Step 1 audit = CLOSED):
-
-```text
-AudioEngine.h:3534 (within retireRuntimePublishWorldNonRt)
-```
-
-しかしながら, producer に渡される `W` は常に PublishedDomain に属するわけではない:
+`DeletionEntryType::World` は **1箇所** で生成される:
 
 ```text
-Init.cpp:67 — rejectedWorld → retireRuntimePublishWorldNonRt → World → onRelease
+AudioEngine.h:3545 — within retirePublishedRuntimeWorldNonRt()
+  PRECONDITION: W ∈ PublishedDomain (must have passed publishAndSwap LP)
 ```
 
-これが INV-PUB-3 (`W ∉ PublishedDomain ⇒ R_ref(W) = 0`) の **direct counterexample**.
+旧監査（2026-08-16）で記録された反例は **解消済み（OBSOLETE）**:
 
-### 1. Root Cause
+```text
+【旧・解消済み】Init.cpp:67 — rejectedWorld → retireRuntimePublishWorldNonRt → World → onRelease
+【現行】Init.cpp:67 — rejectedWorld → retireRejectedRuntimeWorldNonRt
+        → DeletionEntryType::Generic → no onRelease()
+```
+
+現行では INV-PUB-3 (`W ∉ PublishedDomain ⇒ R_ref(W) = 0`) の反例は存在しない
+（code-fixed。形式閉包の状態は §INV-PUB-3 参照）。
+
+### 1. Root Cause（歴史記録 — 2026-08-25 に解消済み）
 
 ```text
 retireRuntimePublishWorldNonRt(W, resetRevision)
@@ -7084,6 +7128,7 @@ retireRuntimePublishWorldNonRt(W, resetRevision)
 ```
 
 `resetRevision` (bool) では **domain 判定** を区別できない。
+→ **解消**: API separation（retirePublished / retireRejected 分離）により本経路は消滅。
 
 ### 2. Step 1 — Producer Completeness (CLOSED)
 
@@ -7092,7 +7137,7 @@ retireRuntimePublishWorldNonRt(W, resetRevision)
 Total: 1 producer
 
 ```text
-AudioEngine.h:3534 — within retireRuntimePublishWorldNonRt()
+AudioEngine.h:3545 — within retirePublishedRuntimeWorldNonRt()
 ```
 
 ### Layer 2 — enqueue transfer
@@ -7116,11 +7161,24 @@ AudioEngine.h:3534 — within retireRuntimePublishWorldNonRt()
 
 | function | sites | role |
 |----------|-------|------|
-| `onAcquire()` | 1 site (`Commit.cpp:408`) | single source of truth |
-| `onRelease()` | **3** terminal sites | World entry only |
+| `onAcquire()` | 1 site (`Commit.cpp:409`) | single source of truth |
+| `onRelease()` | **7 candidate sites** | World entry only（entry 1個につき実行は 1回 — INV-PUB-4 証明済み） |
 
-> **DISCLAIMER**: "Layer 4 — onRelease() 4 sites" は 3+1 の記述上の不一致 — `onAcquire()` は terminal
-> consumer ではない為, **3 terminal sites** が正しい。INV-PUB-4 exactly-once proof の基準値.
+> **2026-08-25 更新 (D101-34-B)**: 旧記述「3 terminal sites」は陳腐化。現行の
+> onRelease candidate sites は **7**:
+>
+> | # | site | 対象 storage |
+> |---|---|---|
+> | R1 | DeferredDeletionQueue.h:154 (`reclaim`) | D |
+> | R2 | DeferredDeletionQueue.h:204 (`drainAllUnsafe`) | D |
+> | R3 | ISRRetireRouter.cpp:87 (`TerminalReclaimAuthority::drain`) | T |
+> | R4 | ISRRetireRouter.cpp:114 (`TerminalReclaimAuthority::drainAll`) | T |
+> | R5 | ISRRetireRouter.h:128 (`recordWorldReclaim` — 同期破壊・storage 非経由) | なし |
+> | R6 | RetireQuarantineStore.h:145 (`reclaimBatch` — Q/E インスタンス共通) | Q / E |
+> | R7 | RetireQuarantineStore.h:182 (`drainAllUnsafe` — Q/E 共通) | Q / E |
+>
+> exactly-once 証明（entry 1個につき実行回数 = 1）は
+> evidence/D101-34-B-Contract-Sync-InvPub4-Shutdown-Proof.md §2 を参照。
 
 ### 3層トレース (full trace, confirmed)
 
@@ -7136,20 +7194,27 @@ reclaim() / drainAllUnsafe()
 onRelease() (World branch only)
 ```
 
-### Counterexample trace
+### Counterexample trace（OBSOLETE — 2026-08-25 に解消済み）
 
 ```text
+【旧・解消済み経路】
 Init.cpp:67 — rejectedWorld
   → retireRuntimePublishWorldNonRt(rejectedWorld, false)
-  → enqueueDeferredDeleteNonRt(W, ..., DeletionEntryType::World)     ← AudioEngine.h:3534
-  → enqueueWithRetry()                                                ← AudioEngine.h:4186
+  → enqueueDeferredDeleteNonRt(W, ..., DeletionEntryType::World)     ← 旧 AudioEngine.h:3534
+  → enqueueWithRetry()
   → DeferredDeletionQueue entry (type=World)
-  → reclaim() → onRelease()                                           ← DeferredDeletionQueue.h:148
+  → reclaim() → onRelease()
+
+【現行経路】
+Init.cpp:67 — rejectedWorld
+  → retireRejectedRuntimeWorldNonRt(rejectedWorld)                   ← AudioEngine.h:3549
+  → enqueueDeferredDeleteNonRt(W, ..., DeletionEntryType::Generic)   ← no onRelease
 ```
 
-**W は `publishAndSwap()` を経由せず** に `onRelease()` を呼び出す.
+旧実装では W が `publishAndSwap()` を経由せず `onRelease()` を呼び出していたが、
+API separation 実装により当該経路は消滅した。
 
-### 3. Step 2 — Design Contract (NOT implemented)
+### 3. Step 2 — Design Contract (IMPLEMENTED — 2026-08-25 時点で稼働)
 
 ```cpp
 // === Design Contract ===
@@ -7166,7 +7231,7 @@ Init.cpp:67 — rejectedWorld
 //                  → destruction only → NO onRelease()
 ```
 
-### INV-WORLD-TYPE (post-implementation closure target)
+### INV-WORLD-TYPE (CONFIRMED — 2026-08-25 / D101-34-B)
 
 ```text
 ∀ W: enqueue(..., DeletionEntryType::World)
@@ -7197,9 +7262,31 @@ if (entryType == DeletionEntryType::World) {
 }
 ```
 
-### 4. caller provenance (Step 3 — to be audited after Step 2 code change)
+### 4. caller provenance (Step 3 — CLOSED / verified 2026-08-25 by D101-34-A)
 
-ResetRevision == false callers (critical mix)
+実測 caller 全列挙（production・grep 100% 検証）:
+
+**retirePublishedRuntimeWorldNonRt — 6 site（全て PublishedDomain）**
+
+| caller | provenance |
+|--------|------------|
+| `AudioEngine.CtorDtor.cpp:246`（shutdown clear clearedWorld） | Published |
+| `AudioEngine.Init.cpp:88`（bootstrap oldWorld, committed=true） | Published |
+| `AudioEngine.Processing.ReleaseResources.cpp:492`（shutdown clear clearedWorld） | Published |
+| `RuntimePublishExecutor.h:76`（commit 後 oldWorld） | Published |
+| `core/RuntimePublicationCoordinator.h:98`（clearPublishedRuntimeSnapshotsNonRt） | Published |
+| `core/RuntimePublicationCoordinator.h:147`（publishAndSwap LP 直後 oldWorld） | Published |
+
+**retireRejectedRuntimeWorldNonRt — 2 site（全て非 Published）**
+
+| caller | provenance |
+|--------|------------|
+| `AudioEngine.Init.cpp:67`（bootstrap validate 失敗） | Rejected（pre-LP） |
+| `core/RuntimePublicationCoordinator.h:123`（validatePublicationNonRt 失敗） | Rejected（pre-LP） |
+
+（以下の旧 proposed-API テーブルは上記実測テーブルに統合済み — 履歴として保持）
+
+ResetRevision == false callers (critical mix)【旧監査時点の案・2026-08-25 実測で確定】
 
 | caller | provenance | proposed API |
 |--------|------------|--------------|
@@ -7214,23 +7301,52 @@ ResetRevision == false callers (critical mix)
 |--------|------------|--------------|
 | shutdown | Published | `retirePublishedRuntimeWorldNonRt` |
 
-### 5. D101 #1 Current Status
+### 5. D101 #1 Current Status（2026-08-25 更新）
 
 ```text
 D100        CLOSED
 D101.2      CLOSED
-D101 #1     OPEN   (Step 1 で反例が完全確認済み)
+D101 #1     CLOSED   (2026-08-25 — World published-domain boundary proof 完了)
 
-Step 1      CLOSED   ✅ World producer completeness = 100% traced
-Step 2      NOT STARTED   — Design contract drafted only (API separation)
+Step 1      CLOSED / IMPLEMENTED   ✅ World producer completeness = 100% traced
+Step 2      CLOSED / IMPLEMENTED   ✅ API separation 稼働中
+              （retirePublishedRuntimeWorldNonRt = World entry /
+                retireRejectedRuntimeWorldNonRt = Generic entry）
+Step 3      CLOSED   ✅ caller provenance verified
+              （Published 6 site / Rejected 2 site — 全て分類済み）
 
 INV-PUB-1   OPEN
 INV-PUB-2   OPEN
-INV-PUB-3   DISPROVEN   (rejected W → World → onRelease — direct counterexample)
-INV-PUB-4   OPEN
+INV-PUB-3   CODE-FIXED   ✅ 反例解消（旧: DISPROVEN）
+              formal closure: publication domain complete
+              whole-engine type-state enforcement: pending
+INV-PUB-4   PROOF COMPLETE   ✅ exactly-once（acquire 1 site / release candidate 7 sites）
+RuntimeStore shutdown contract   PROVED   ✅ current==nullptr at destruction
+              （前提: Q2 producer join — clear 前後に producer が publish LP に到達しないこと）
 
-M           NO-GO
+M-bound     SYMBOLICALLY PROVEN   ✅（2026-08-25 / D101-35-C）
+              M ≤ K + λ_prod_bound × G_bound + N_timer(G_bound) < ∞
+              （K = kIntentQueueCapacity = 4096 /
+                N_timer は JUCE Timer coalescing premise 下の有限項 /
+                λ_prod_bound, G_bound は抽象有限契約定数 — 値は D102-C2 で決定）
+              証明: evidence/D101-35-C-MBound-Mathematical-Derivation.md
+              （Case B: T_build_min 不仮定で閉鎖・二重計上なし — D101-35-D-R 確認済み）
 Phase I     NO-GO
+D102        mathematical GO 🟢 / numeric NO-GO (values TBD)
+D102 R_required   SYMBOLIC DONE   = 1 + ceil(M_scope / O_denom)
+              O_w は measurement 出力、O_denom は denominator 契約入力（分離）
 ```
 
-コード変更は**未実施** — audit/fix phase を分離する方針のため, この証明記録を保持.
+### 6. 実装・証明エビデンス（2026-08-25）
+
+| 成果物 | 参照 |
+|---|---|
+| Producer/caller provenance audit | evidence/D101-34-A-WorldDomainBoundary-Provenance-Audit.md |
+| INV-PUB-4 exactly-once proof / RuntimeStore shutdown contract proof | evidence/D101-34-B-Contract-Sync-InvPub4-Shutdown-Proof.md |
+| 本同期更新 | D101-34-C（本節） |
+
+注意: 本契約書の他セクション（D39/D45/D52/D74/D86 等）に残る `retireRuntimePublishWorldNonRt`
+への言及は、API separation **前**の歴史記録である（当該関数は現行ソースに存在せず、
+retirePublished/retireRejected の2関数に分割済み）。
+
+コード変更は**未実施** — D101-34-A/B/C は監査・証明・契約同期フェーズとして分離。

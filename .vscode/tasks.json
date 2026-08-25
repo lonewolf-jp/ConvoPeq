@@ -797,6 +797,98 @@
 			"type": "shell",
 			"command": "cmd.exe /d /c \"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && ctest --test-dir build -C Release --output-on-failure 2>&1\"",
 			"problemMatcher": []
+		},
+		{
+			"label": "Verify All Tools",
+			"type": "shell",
+			"command": "wsl sh -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk git status'",
+			"problemMatcher": []
+		},
+		{
+			"label": "CMake Reconfigure",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
+			]
+		},
+		{
+			"label": "CMake Reconfigure icx",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && del /q build\\CMakeCache.txt && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Debug Build (retry)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 >NUL && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >NUL && cmake --build build --config Debug --parallel 8 2>&1 | findstr /i error"
+			],
+			"group": "build"
+		},
+		{
+			"label": "CMake Reconfigure vs2026",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && del /q build\\CMakeCache.txt && cmake -S . -B build --preset vs2026-x64"
+			],
+			"group": "build"
+		},
+		{
+			"label": "CMake Reconfigure icx (build)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && del /q build\\CMakeCache.txt && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx"
+			],
+			"group": "build"
+		},
+		{
+			"label": "CMake Reconfigure icx (full)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 >NUL && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >NUL && del /q build\\CMakeCache.txt && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Check MKLROOT",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >NUL && echo MKLROOT=%MKLROOT% && echo IPPROOT=%IPPROOT%"
+			]
+		},
+		{
+			"label": "Debug Build (icx)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 >NUL && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 >NUL && cmake --build build --config Debug --parallel 8"
+			],
+			"group": "build"
 		}
 	]
 }
