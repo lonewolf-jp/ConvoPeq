@@ -121,7 +121,7 @@ namespace {
         }
     }
 
-    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {});", "audio header enqueuePublicationIntentForRuntimeCommit"))
+    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {}, std::uint64_t recoveryObligationId = 0);", "audio header enqueuePublicationIntentForRuntimeCommit"))
         return false;
     // [P1 Phase1-B] appendPublicationIntentForCommitProducer/Consumer removed
     if (!requireContains(runtimeBuilderHeader, "const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr", "runtime builder header sealed snapshot"))

@@ -9,21 +9,21 @@
     "crossfadeOnly": false,
     "retirePathOnly": true
   },
-  "totalTransitions": 206,
+  "totalTransitions": 588,
   "laneCounters": {
-    "rtIntent": 46,
-    "coordination": 46,
-    "epoch": 46,
-    "reclaim": 46,
-    "quarantine": 22
+    "rtIntent": 120,
+    "coordination": 120,
+    "epoch": 120,
+    "reclaim": 120,
+    "quarantine": 108
   },
   "lifecycleCounters": {
     "visible": 0,
-    "compareEligible": 46,
-    "telemetryRetained": 46,
-    "replayRetainedOptional": 22,
-    "reclaimEligible": 46,
-    "reclaimed": 46
+    "compareEligible": 120,
+    "telemetryRetained": 120,
+    "replayRetainedOptional": 108,
+    "reclaimEligible": 120,
+    "reclaimed": 120
   },
   "lifecycleSample": [
     {"slot": 0, "state": "visible"},
@@ -35,4 +35,4 @@
     {"slot": 6, "state": "reclaimed"},
     {"slot": 7, "state": "reclaimed"}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":104625821862300}
+}

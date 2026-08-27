@@ -996,7 +996,7 @@ void AudioEngine::rebuildThreadLoop()
                     auto recoverySnapshot = recovery->buildSource;
                     recoverySnapshot.generation = recoveryGeneration;
                     recoverySnapshot.sealed = true;
-                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot, {}, {}, {}, recovery->obligationId);
                 }
 
                 // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission の残余を消費。
@@ -1069,7 +1069,7 @@ void AudioEngine::rebuildThreadLoop()
                     auto recoverySnapshot = recovery->buildSource;
                     recoverySnapshot.generation = recoveryGeneration;
                     recoverySnapshot.sealed = true;
-                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot, {}, {}, {}, recovery->obligationId);
                     // build success → durable admission をクリア（NoAdmission + recoveryAdmissionPending_ = false）
                     runtimePublicationBridge_.settlePendingRecoveryAdmission(false);
                     recoveryConsecutiveFailures = 0;   // ★ 監査軽微指摘4: 成功で連続失敗カウンタをリセット

@@ -294,6 +294,34 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(D8_1_WrapperCacheTests PRIVATE cxx_std_20)
     add_test(NAME D8_1_WrapperCacheTests COMMAND D8_1_WrapperCacheTests)
 
+    # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
+    add_executable(D8_2_B_2_Tests
+        src/tests/D8_2_B_2_Tests.cpp
+        src/core/SnapshotCoordinator.cpp
+        src/core/SnapshotFactory.cpp
+        src/core/GlobalSnapshot.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_include_directories(D8_2_B_2_Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(D8_2_B_2_Tests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(D8_2_B_2_Tests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(D8_2_B_2_Tests ConvoPeq)
+    target_compile_definitions(D8_2_B_2_Tests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    target_compile_features(D8_2_B_2_Tests PRIVATE cxx_std_20)
+    target_compile_options(D8_2_B_2_Tests PRIVATE /EHsc /utf-8)
+    add_test(NAME D8_2_B_2_Tests COMMAND D8_2_B_2_Tests)
+
     # ★ Phase 9-B Step 5-I: Terminal Telemetry Instrumentation Contract Tests (T-5.1-T-5.6)
     add_executable(TerminalTelemetryContractTests
         src/tests/TerminalTelemetryContractTests.cpp
@@ -855,7 +883,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
                      PartialPublicationRejectTests RebuildAdmissionRegressionTests
                      BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests
-                     TerminalTelemetryContractTests)
+                     TerminalTelemetryContractTests
+                     D8_2_B_2_Tests)
             target_compile_definitions(${tgt} PRIVATE
                 _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
             )
@@ -885,6 +914,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(PartialPublicationRejectTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RebuildAdmissionRegressionTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(D8_2_B_2_Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     endif()
 
     # テストターゲットに /EHsc を追加（例外処理を有効化）

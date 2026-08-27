@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-26 02:03:30
+> Generated: 2026-08-27 23:32:34
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -317,6 +317,7 @@
             ├── BuildInputSemanticContractTests.cpp
             ├── CrossfadeExecutorLocalContractTests.cpp
             ├── D8_1_WrapperCacheTests.cpp
+            ├── D8_2_B_2_Tests.cpp
             ├── DSPHandleTableTests.cpp
             ├── DeferredDeletionQueueReclaimTests.cpp
             ├── EQAnalysisUnitTests.cpp
@@ -653,6 +654,34 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
     target_compile_features(D8_1_WrapperCacheTests PRIVATE cxx_std_20)
     add_test(NAME D8_1_WrapperCacheTests COMMAND D8_1_WrapperCacheTests)
+
+    # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
+    add_executable(D8_2_B_2_Tests
+        src/tests/D8_2_B_2_Tests.cpp
+        src/core/SnapshotCoordinator.cpp
+        src/core/SnapshotFactory.cpp
+        src/core/GlobalSnapshot.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_include_directories(D8_2_B_2_Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(D8_2_B_2_Tests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(D8_2_B_2_Tests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(D8_2_B_2_Tests ConvoPeq)
+    target_compile_definitions(D8_2_B_2_Tests PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    target_compile_features(D8_2_B_2_Tests PRIVATE cxx_std_20)
+    target_compile_options(D8_2_B_2_Tests PRIVATE /EHsc /utf-8)
+    add_test(NAME D8_2_B_2_Tests COMMAND D8_2_B_2_Tests)
 
     # ★ Phase 9-B Step 5-I: Terminal Telemetry Instrumentation Contract Tests (T-5.1-T-5.6)
     add_executable(TerminalTelemetryContractTests
@@ -1215,7 +1244,8 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
                      CrossfadeExecutorLocalContractTests RuntimeWorldAuthorityProjectionTests
                      PartialPublicationRejectTests RebuildAdmissionRegressionTests
                      BuildInputSemanticContractTests PriorityIntegrationTests ISRSoakTests
-                     TerminalTelemetryContractTests)
+                     TerminalTelemetryContractTests
+                     D8_2_B_2_Tests)
             target_compile_definitions(${tgt} PRIVATE
                 _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
             )
@@ -1245,6 +1275,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(PartialPublicationRejectTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RebuildAdmissionRegressionTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(D8_2_B_2_Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     endif()
 
     # テストターゲットに /EHsc を追加（例外処理を有効化）
@@ -30769,6 +30800,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.buildAnalysis = buildAnalysis;
     req.oversamplingResult = oversamplingResult;
     req.buildDiagnostics = buildDiagnostics;
+    req.recoveryObligationId = recoveryObligationId;   // ★ D105-R5-8: carry obligation id to completion
 
     runtimeOrchestrator_->submitPublishRequest(req);
 
@@ -39355,7 +39387,7 @@ void AudioEngine::rebuildThreadLoop()
                     auto recoverySnapshot = recovery->buildSource;
                     recoverySnapshot.generation = recoveryGeneration;
                     recoverySnapshot.sealed = true;
-                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot, {}, {}, {}, recovery->obligationId);
                 }
 
                 // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission の残余を消費。
@@ -39428,7 +39460,7 @@ void AudioEngine::rebuildThreadLoop()
                     auto recoverySnapshot = recovery->buildSource;
                     recoverySnapshot.generation = recoveryGeneration;
                     recoverySnapshot.sealed = true;
-                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot);
+                    enqueuePublicationIntentForRuntimeCommit(dspToCommit, recoveryGeneration, recoverySnapshot, {}, {}, {}, recovery->obligationId);
                     // build success → durable admission をクリア（NoAdmission + recoveryAdmissionPending_ = false）
                     runtimePublicationBridge_.settlePendingRecoveryAdmission(false);
                     recoveryConsecutiveFailures = 0;   // ★ 監査軽微指摘4: 成功で連続失敗カウンタをリセット
@@ -45563,7 +45595,7 @@ public:
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
-    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {});
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {}, std::uint64_t recoveryObligationId = 0);
     // acquire: requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
@@ -47622,6 +47654,7 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     intent.payload.publish.mappedGeneration = mappedGen;
     intent.payload.publish.boundary = convo::isr::RuntimeBoundary::NonRTWorld;
     intent.payload.publish.decision = decision;
+    intent.payload.publish.recoveryObligationId = 0;   // ★ D105-R5-8: Route B (non-recovery) ⇒ no obligation
     if (!runtimePublicationBridge_.enqueuePublicationIntent(intent))
     {
         // キュー full: 移譲した Owner を取り戻し、registry をクリアして rollback に委ねる。
@@ -56612,29 +56645,17 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 //   transport（push 成功）/ durable（queue full → recoveryAdmissionPending_）とも true
 //   （INV-X1-2: queue full ≠ Recovery lost）。shutdown gate による discard は false（wake 不要）。
 bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
-                                                          const convo::RuntimeBuildSnapshot& buildSource,
-                                                          PublicationEpoch epoch) noexcept
+                                                   const convo::RuntimeBuildSnapshot& buildSource,
+                                                   PublicationEpoch epoch) noexcept
 {
-    // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
-    //   requestShutdown()（CoordinatorState::ShuttingDown）確定後は Recovery を enqueue しない。
-    //   CoordinatorLoop::run() の先頭 shutdown check は phase execution と atomic ではなく、
-    //   in-flight runCoordinatorPhase 中に shutdown が発生しても、submit 側のこの gate が
-    //   Recovery admission の最終 linearization point になる（Admission/Notify authority は
-    //   Coordinator、shutdown boundary は Recovery admission が担当 — Authority Singularization）。
-    //   閉鎖後の submit は silent loss ではなく ShutdownDiscard として観測可能に記録する（INV-5）。
-    //   本 gate は reservation（pendingIntentCount_ fetchAdd）より前で評価するため、閉鎖後は
-    //   counter に触れない（counter == actual residency の不変条件を維持 — dash §1.1.6）。
+    // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。 (unchanged)
     if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
         return false;   // shutdown discard — wake 不要（§1.9 Phase E）
     }
 
-    // ★ dash2 §1.7 (Phase G R7 修正, 2026-08-15): epoch は caller（submitRecoveryIntent）が
-    //   RuntimeStore::current（RuntimeWorldAuthority::observePublishedWorld）から取得して明示的に
-    //   渡す。Coordinator は currentWorld_ を参照しない（CW-3b で非更新）。RecoveryIntent::epoch
-    //   は emit 時 publicationEpoch の metadata（FIFO/epoch 検証用）— Phase E の lost-wake /
-    //   stale-discard invariant（intentId / generation ベース）には影響しない。
+    // ★ dash2 §1.7 (Phase G R7 修正): epoch は caller が渡す。Coordinator は currentWorld_ を参照しない。
     RecoveryIntent intent{
         quarantinedHandle,
         epoch,
@@ -56642,28 +56663,62 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
         buildSource
     };
 
-    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push):
-    //   recoveryIntentQueue_ は SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）。
-    //   push 失敗（full = Builder が遅延）は Recovery Intent の drop を意味し、INV-5 違反。
-    //   drop は診断カウンタに記録する（INV-5-1: drop 時は pendingIntentCount_ 不変）。
-    //   reservation-before-push: push 前に fetchAdd → push 失敗時は fetchSub で rollback。
-    //   これにより pop 成功時 fetchSub（popRecoveryRequest）と整合し、shutdown の
-    //   isFullyDrained が永久に false になるのを防ぐ。
+    // ── ★ D105-R5-8: Logical Recovery Obligation admission protocol (RecoveryAdmissionTable) ──
+    //   Coalesce by semantic target (build fingerprint): reuse an existing Live obligation (ΔL = 0).
+    //   Otherwise enforce L < 32: on capacity exhaustion REJECT (no obligation, no transport).
+    // ★ D105-R5-9 MUST-3: CoalesceIdentity = quarantinedHandle + SemanticRecoveryTarget.
+    //   Two distinct handles with identical fingerprints are NOT coalesced (R8 §4 counterexample).
+    const CoalesceIdentity cid{
+        quarantinedHandle,
+        { buildSource.rebuildFingerprint.irIdentityHash,
+          buildSource.rebuildFingerprint.convolutionConfigHash,
+          buildSource.rebuildFingerprint.dspParameterHash }
+    };
+    std::uint64_t oblId = 0;
+    const std::size_t existing = recoveryAdmissions_.findByKey(cid);
+    if (existing != recoveryAdmissions_.kCapacity) {
+        // coalesce: reuse existing Live obligation (R5-rev1 Option 1 — ΔL = 0)
+        oblId = recoveryAdmissions_.slot(existing).id.load(std::memory_order_acquire);
+        recoveryAdmissions_.slot(existing).intentId = intent.intentId; // diagnostic refresh
+        convo::fetchAddAtomic(recoveryCoalescedCount_, std::uint64_t{1}, std::memory_order_release);
+    } else {
+        const auto ins = recoveryAdmissions_.tryInsert(cid);
+        if (!ins) {
+            // ★ D105-R5-8: capacity exhausted (L == 32) — reject (INV-X1-7). No obligation, no transport.
+            convo::fetchAddAtomic(recoveryCapacityExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
+            return false;
+        }
+        auto& slot = recoveryAdmissions_.slot(*ins);
+        oblId = slot.id.load(std::memory_order_acquire);
+        slot.handle = quarantinedHandle;
+        slot.epoch = epoch;
+        slot.intentId = intent.intentId;
+        slot.buildSource = buildSource;
+    }
+    // ★ D105-R5-8 §4: carry obligationId on the transport intent (and durable fallback below).
+    intent.obligationId = oblId;
+
+    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push): (unchanged)
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
         return true;   // transport recovery exists（§1.9 Phase E — wake 条件）
     }
 
-    // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。
-    //   transport residency から rollback（fetchSub）し、durable admission state に保持する
-    //   （recoveryAdmissionPending_ = true）。drop カウンタ（recoveryIntentDropCount_）は
-    //   queue saturation の診断として維持（INV-X1-3 — telemetry 削除しない）。
-    //   1 logical admission = 1 reservation（INV-X1-5）— coalesce で reservation を増やさない。
-    //   durable admission は queue residency と二重計上しない（INV-X1-6）。
+    // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。 (durable fallback now carries obligationId)
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
 
-    // durable admission へ保持（coalesce: 単一スロット — 既存 durable があれば最新で上書き）
+    // ★ D105-R5-9 MUST-2: never clobber a distinct live obligation's ONLY delivery representation.
+    //   The single durable slot may already hold a DIFFERENT obligation (B). Overwriting B would drop
+    //   B's delivery while B is still Live (a leak). In that case we must NOT overwrite: defer this
+    //   obligation's retry (it stays Live; bounded by L<=32) and let B keep its slot. This is the
+    //   single-slot durable limitation made explicit — NOT a silent overwrite.
+    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission
+        && pendingRecoveryAdmission_.recoveryObligationId != oblId) {
+        convo::fetchAddAtomic(recoveryRetryDeferredCount_, std::uint64_t{1}, std::memory_order_release);
+        return true;   // obligation stays Live; delivery re-driven when the occupied slot frees (Phase-II multi-slot)
+    }
+    // durable admission へ保持（単一スロット — 空、または同じ obligation なら最新で上書き）
     pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
     pendingRecoveryAdmission_.pending = true;
     pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
@@ -56672,8 +56727,42 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     pendingRecoveryAdmission_.handle = quarantinedHandle;
     pendingRecoveryAdmission_.epoch = epoch;
     pendingRecoveryAdmission_.intentId = intent.intentId;
+    pendingRecoveryAdmission_.recoveryObligationId = oblId;   // ★ D105-R5-8
     convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
     return true;   // durable recovery exists（INV-X1-2: queue full ≠ Recovery lost — §1.9 Phase E）
+}
+
+// ★ D105-R5-9: single Completion Authority (idempotent, lock-free, ISR-safe).
+//   Transitions the first Live→terminal for the given id via the table's id-based resolve();
+//   subsequent calls (same id) are no-ops. Called from onPublishCommitted (ISR, Route B),
+//   trySubmitImpl (RebuildThread, Route A) and submitPublishRequest rejection branches (Route C).
+void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept
+{
+    if (obligationId == 0)
+        return;
+    // ★ D105-R5-9 MUST-1: Retry keeps the obligation Live (ΔL = 0); the durable admission is re-armed
+    //   at the transport layer (settlePendingRecoveryAdmission(true)). Only terminal resolutions perform
+    //   the single −1 via the table's id-based resolve (which re-scans by id — no cached index, no ABA).
+    if (outcome == RecoveryOutcome::Retry)
+        return;
+    const ObligationState terminal = (outcome == RecoveryOutcome::Published)          ? ObligationState::ResolvedSuccess
+                               : (outcome == RecoveryOutcome::StaleSuperseded)   ? ObligationState::ResolvedStaleSuperseded
+                               : (outcome == RecoveryOutcome::ShutdownDiscarded) ? ObligationState::ShutdownDiscarded
+                               :                                                   ObligationState::ResolvedFailed;
+    if (recoveryAdmissions_.resolve(obligationId, terminal)
+        && outcome == RecoveryOutcome::ShutdownDiscarded)
+        convo::fetchAddAtomic(recoveryObligationShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
+// ★ D105-R5-9 MUST-2: guarded re-arm for a Retry obligation. Only touches the durable slot when it
+//   already holds THIS obligation in Building state; never overwrites a distinct live obligation.
+void RuntimeIntentCoordinator::rearmRecoveryRetry(std::uint64_t obligationId) noexcept
+{
+    if (obligationId == 0)
+        return;
+    if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::Building
+        && pendingRecoveryAdmission_.recoveryObligationId == obligationId)
+        settlePendingRecoveryAdmission(true);
 }
 
 // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
@@ -56694,6 +56783,7 @@ RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
         pendingRecoveryAdmission_.intentId,
         pendingRecoveryAdmission_.buildSource
     };
+    intent.obligationId = pendingRecoveryAdmission_.recoveryObligationId;   // ★ D105-R5-8
     // ★ lease: DurablePending → Building（クリアしない）。build 失敗時は Building → DurablePending へ戻す。
     pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::Building;
     return intent;
@@ -56765,6 +56855,15 @@ void RuntimeIntentCoordinator::discardRecoveryRequestsOnShutdown() noexcept
     while (popRecoveryRequest())
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+    }
+    // ★ D105-R5-8: close all Live logical obligations (ShutdownDiscarded) — table-centric shutdown.
+    //   Routes through the single Completion Authority (resolveRecoveryObligation → table.resolve) so the
+    //   −1 stays idempotent (CAS Live→terminal); a concurrent ISR completion that wins the CAS makes
+    //   shutdown skip it (no double −1, no L underflow). Delivery discard below does NOT touch L.
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        const std::uint64_t oblId = recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire);
+        if (oblId != 0)
+            resolveRecoveryObligation(oblId, RecoveryOutcome::ShutdownDiscarded);
     }
 }
 
@@ -56839,6 +56938,7 @@ void RuntimeIntentCoordinator::submitQuarantine(
 #include <memory>
 #include <cstdint>
 #include <type_traits>
+#include <array>       // ★ D105-R5-8: RecoveryAdmissionTable
 #include <optional>  // ★ FUTURE-3: popRecoveryRequest() return type
 #include "ISRClosure.h"
 #include "ISRPayloadTier.h"
@@ -57053,6 +57153,7 @@ public:
          DSPHandle handle;            // recovery 対象（quarantined DSPHandle）
          PublicationEpoch epoch;      // emit 時の publicationEpoch（FIFO/epoch 検証用）
          uint64_t intentId;           // 診断・モニタリング用シーケンス番号
+        uint64_t obligationId{0};     // ★ D105-R5-8: logical recovery obligation id (allocated by Coordinator)
          // ★ FUTURE-3 (work88): build spec を値コピーで内包（POD、trivially copyable）。
          //   quarantinedHandle 単独では resolve() 不能（ISRDSPHandle.cpp:69）なため、build 入力は
          //   値コピーした snapshot から引当する（epoch 逆引き不要 — lifetime を構造的に解決）。
@@ -57067,8 +57168,145 @@ public:
          "RecoveryIntent must be trivially copyable for LockFreeRingBuffer");
      static_assert(std::is_standard_layout_v<RecoveryIntent>,
          "RecoveryIntent must be standard layout for LockFreeRingBuffer");
-     static_assert(std::is_trivially_copyable_v<convo::RuntimeBuildSnapshot>,
-         "FUTURE-3: RuntimeBuildSnapshot must be trivially copyable to embed in RecoveryIntent");
+    static_assert(std::is_trivially_copyable_v<convo::RuntimeBuildSnapshot>,
+        "FUTURE-3: RuntimeBuildSnapshot must be trivially copyable to embed in RecoveryIntent");
+
+    // ── ★ D105-R5-8: Logical Recovery Obligation (identity + capacity accounting) ──
+    //   Coordinator-owned logical layer (recoveryAdmissions_ table) enforcing liveLogicalRecoveryObligationCount ≤ 32
+    //   (INV-X1-7 / INV-CAP-7). Distinct from the single-slot durable *transport* fallback
+    //   (pendingRecoveryAdmission_) which is preserved unchanged.
+    using LogicalRecoveryObligationId = std::uint64_t;
+
+    // Semantic recovery target — derived from build fingerprint; basis for coalescing
+    // (R5-rev1 Option 1: existing O preserved, new attempt coalesced — ΔL = 0).
+    struct SemanticRecoveryTarget {
+        std::uint64_t irIdentityHash = 0;
+        std::uint64_t convolutionConfigHash = 0;
+        std::uint64_t dspParameterHash = 0;
+        bool operator==(const SemanticRecoveryTarget& o) const noexcept {
+            return irIdentityHash == o.irIdentityHash
+                && convolutionConfigHash == o.convolutionConfigHash
+                && dspParameterHash == o.dspParameterHash;
+        }
+    };
+    // ★ D105-R5-9 MUST-3: CoalesceIdentity = quarantinedHandle + SemanticRecoveryTarget.
+    //   Equivalence requires BOTH handle and target to match, so two distinct DSP handles that
+    //   happen to share the same build fingerprint are NOT coalesced (R8 §4 counterexample:
+    //   (H1,T) != (H2,T) => 2 obligations).
+    struct CoalesceIdentity {
+        DSPHandle quarantinedHandle{};
+        SemanticRecoveryTarget target{};
+        bool operator==(const CoalesceIdentity& o) const noexcept {
+            return quarantinedHandle == o.quarantinedHandle
+                && target == o.target;
+        }
+    };
+
+    enum class ObligationState : std::uint8_t {
+        NoObligation = 0,
+        Live,               // admitted, outstanding (transport queued / durable / building)
+        ResolvedSuccess,
+        ResolvedFailed,
+        ResolvedStaleSuperseded,   // ★ D105-R5-9 MUST-4: stale-generation rejection (R7 §11)
+        ResolvedRetry,
+        ShutdownDiscarded
+    };
+
+    // Resolution outcome for a logical recovery obligation. Retry keeps the obligation Live (ΔL=0,
+    // durable re-armed); the rest are terminal (Live→terminal via the single Completion Authority).
+    // NOTE: `Superseded` (R7 §11) is intentionally NOT implemented — it has no real supersession
+    // transition in the current source, so it is left as a Phase-II item (do not fake a transition).
+    enum class RecoveryOutcome : std::uint8_t {
+        Published = 0,      // recovery publish succeeded (Route A trySubmitImpl / Route B onPublishCommitted)
+        Failed,             // build/publish hard failure → terminal (no leak)
+        StaleSuperseded,    // ★ D105-R5-9 MUST-4: RejectedStaleGeneration → terminal (−1)
+        Retry,              // transient build failure → obligation stays Live (ΔL=0, rebuild retried)
+        ShutdownDiscarded   // shutdown close (table-centric discard; L −1 via single authority)
+    };
+    using RecoveryResolution = RecoveryOutcome;   // resolution input to the Completion Authority
+
+    // Lock-free, ISR-safe obligation record. id/state are atomic so the single completion
+    // authority (resolveRecoveryObligation, callable from ISR) can transition Live→terminal
+    // without a mutex. identity is immutable once admitted (written only by CoordinatorLoop).
+    struct LogicalRecoveryObligation {
+        std::atomic<LogicalRecoveryObligationId> id{0};
+        CoalesceIdentity identity{};
+        std::atomic<ObligationState> state{ObligationState::NoObligation};
+        DSPHandle handle{};
+        PublicationEpoch epoch{0};
+        std::uint64_t intentId = 0;
+        convo::RuntimeBuildSnapshot buildSource{};
+    };
+    static constexpr std::size_t kMaxLogicalRecoveryObligations = 32;  // INV-CAP-7
+
+    // ── ★ D105-R5-8: Coordinator-owned Recovery Admission Table (logical obligation accounting) ──
+    //   Enforces liveLogicalRecoveryObligationCount ≤ 32 (INV-X1-7 / INV-CAP-7). Distinct from the
+    //   single-slot durable *transport* fallback (pendingRecoveryAdmission_). The table owns the only
+    //   +1 (tryInsert, post-coalesce, L<Capacity) and the only −1 (resolve, Live→terminal CAS), so the
+    //   invariants are structural, not by-convention.
+    template <std::size_t Capacity>
+    class RecoveryAdmissionTable {
+    public:
+        static constexpr std::size_t kCapacity = Capacity;
+
+        // Find a Live obligation by coalesce key (for coalescing a new attempt onto an existing O).
+        std::size_t findByKey(const CoalesceIdentity& key) const noexcept {
+            for (std::size_t i = 0; i < kCapacity; ++i) {
+                if (slots_[i].state.load(std::memory_order_acquire) == ObligationState::Live
+                    && slots_[i].identity == key)
+                    return i;
+            }
+            return kCapacity; // npos
+        }
+
+        // Single +1 site: allocate a new Live obligation (post-coalesce). Returns nullopt at capacity.
+        std::optional<std::size_t> tryInsert(const CoalesceIdentity& key) noexcept {
+            if (liveCount_.load(std::memory_order_acquire) >= kCapacity)
+                return std::nullopt; // capacity exhausted → caller rejects (ΔL=0)
+            for (std::size_t i = 0; i < kCapacity; ++i) {
+                // a non-Live slot is reusable (fresh id==0, or terminal → reclaimed)
+                if (slots_[i].state.load(std::memory_order_acquire) != ObligationState::Live) {
+                    const LogicalRecoveryObligationId id = ++nextId_;
+                    slots_[i].id.store(id, std::memory_order_relaxed);
+                    slots_[i].identity = key;
+                    slots_[i].state.store(ObligationState::Live, std::memory_order_release);
+                    convo::fetchAddAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
+                    return i;
+                }
+            }
+            return std::nullopt; // invariant guard (unreachable while L < Capacity)
+        }
+
+        // Single −1 authority. ★ D105-R5-9 MUST-3: id-based resolution — re-scans by id and CASes
+        // state within the same atomic step (NO cached index from a prior findById). A reused slot is
+        // always assigned a strictly-greater id (nextId_ is monotonic), so a reused slot can never match
+        // a stale id → no ABA / no wrong-obligation termination. Idempotent: a prior terminal state (or a
+        // lost CAS race) makes the inner CAS fail → returns false (no double −1, no L underflow).
+        bool resolve(LogicalRecoveryObligationId id, ObligationState terminalState) noexcept {
+            for (std::size_t i = 0; i < kCapacity; ++i) {
+                if (slots_[i].id.load(std::memory_order_acquire) != id)
+                    continue;
+                ObligationState expected = ObligationState::Live;
+                if (slots_[i].state.compare_exchange_strong(expected, terminalState, std::memory_order_acq_rel)) {
+                    convo::fetchSubAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
+                    return true;
+                }
+                return false; // already terminal (or lost race) → idempotent no-op
+            }
+            return false;     // unknown/mismatched id → no-op
+        }
+
+        std::uint64_t liveCount() const noexcept {
+            return convo::consumeAtomic(liveCount_, std::memory_order_acquire);
+        }
+        const LogicalRecoveryObligation& slot(std::size_t i) const noexcept { return slots_[i]; }
+        LogicalRecoveryObligation& slot(std::size_t i) noexcept { return slots_[i]; }
+
+    private:
+        std::array<LogicalRecoveryObligation, kCapacity> slots_{};
+        std::atomic<std::uint64_t> liveCount_{0};
+        LogicalRecoveryObligationId nextId_{1}; // single-writer (CoordinatorLoop)
+    };
 
      /// Recovery Intent: Quarantined DSPHandle の復旧要求を発行する。
      /// FUTURE-3/QSVC-5: rollback 廃止。New RuntimeWorld の Immutable Publish で復旧。
@@ -57079,9 +57317,37 @@ public:
      ///   transport（push 成功）と durable（queue full → recoveryAdmissionPending_）の両方が true
      ///   （INV-X1-2: queue full ≠ Recovery lost）。shutdown gate による discard は false（wake 不要）。
      ///   submitRecoveryIntent（AudioEngine）は戻り値に基づいて RebuildThread を起床する（§1.9）。
-     bool submitRecoveryRequest(const DSPHandle& quarantinedHandle,
-                                const convo::RuntimeBuildSnapshot& buildSource,
-                                PublicationEpoch epoch) noexcept;
+      bool submitRecoveryRequest(const DSPHandle& quarantinedHandle,
+                                 const convo::RuntimeBuildSnapshot& buildSource,
+                                 PublicationEpoch epoch) noexcept;
+
+      // ★ D105-R5-8: single Completion Authority. Callable from ISR (onPublishCommitted) and
+      //   RebuildThread (trySubmitImpl failure). Idempotent: only the first Live→terminal
+      //   transition counts; subsequent calls (same id) are no-ops.
+       void resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept;
+
+       // ★ D105-R5-9 MUST-2: re-arm a Retry obligation's durable delivery. Only re-arms when the single
+       //   durable slot already holds THIS obligation (Building state); never overwrites a distinct live
+       //   obligation (would drop that obligation's only delivery). Otherwise the retry is deferred
+       //   (obligation stays Live; bounded by L<=32) — the documented single-durable-slot limitation.
+       void rearmRecoveryRetry(std::uint64_t obligationId) noexcept;
+
+      // ★ D105-R5-8: telemetry accessors for live obligation count + rejections.
+       [[nodiscard]] std::uint64_t liveLogicalRecoveryObligationCount() const noexcept {
+           return recoveryAdmissions_.liveCount();
+       }
+       [[nodiscard]] std::uint64_t recoveryCoalescedCount() const noexcept {
+           return convo::consumeAtomic(recoveryCoalescedCount_, std::memory_order_acquire);
+       }
+      [[nodiscard]] std::uint64_t recoveryCapacityExhaustedCount() const noexcept {
+          return convo::consumeAtomic(recoveryCapacityExhaustedCount_, std::memory_order_acquire);
+      }
+       [[nodiscard]] std::uint64_t recoveryObligationShutdownDiscardCount() const noexcept {
+           return convo::consumeAtomic(recoveryObligationShutdownDiscardCount_, std::memory_order_acquire);
+       }
+       [[nodiscard]] std::uint64_t recoveryRetryDeferredCount() const noexcept {
+           return convo::consumeAtomic(recoveryRetryDeferredCount_, std::memory_order_acquire);
+       }
 
      /// Recovery Intent を Builder Loop へ引き渡す (1件 pop, transport-only)。
      /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。
@@ -57146,6 +57412,7 @@ public:
         std::uint64_t mappedGeneration;          // ★ A3 Step 5-1: mapped generation (fixed at enqueue)
         RuntimeBoundary boundary;                // ★ A3 Step 5-1: publish boundary (fixed at enqueue)
         PublishDecisionSnapshot decision;        // ★ A3 Step 5-3: Decision Snapshot (HANDLER-1 read-only, fixed at enqueue)
+        std::uint64_t recoveryObligationId{0};    // ★ D105-R5-8: logical recovery obligation id (carried to completion)
     };
     struct RecoveryPayload { DSPHandle quarantinedHandle; convo::RuntimeBuildSnapshot buildSource; };
     struct QuarantinePayload { DSPHandle handle; QuarantineReason reason; uint64_t contextEpoch; };
@@ -57513,12 +57780,22 @@ private:
         DSPHandle handle{};                   // recovery 対象（quarantined DSPHandle）— 消費時 isNull 検証
         PublicationEpoch epoch{0};            // emit 時 publicationEpoch（FIFO/epoch 検証用）
         uint64_t intentId{0};                 // 診断・モニタリング用シーケンス番号
+        uint64_t recoveryObligationId{0};     // ★ D105-R5-8: logical recovery obligation id
     };
     PendingRecoveryAdmission pendingRecoveryAdmission_;   // SPSC（plain 構造体 — atomic 不要）
     std::atomic<bool> recoveryAdmissionPending_{false};   // durable 有効フラグ（isFullyDrained が読む）
     static_assert(std::is_trivially_copyable_v<PendingRecoveryAdmission>,
         "PendingRecoveryAdmission must be trivially copyable");
 #pragma warning(pop)
+
+    // ── ★ D105-R5-8: Logical Recovery Obligation table (capacity-enforced, lock-free) ──
+    RecoveryAdmissionTable<kMaxLogicalRecoveryObligations> recoveryAdmissions_;
+    std::atomic<std::uint64_t> recoveryCoalescedCount_{0};                   // coalesce-before-capacity hits
+    std::atomic<std::uint64_t> recoveryCapacityExhaustedCount_{0};          // L==32 rejects
+    std::atomic<std::uint64_t> recoveryObligationShutdownDiscardCount_{0};   // shutdown discards
+    std::atomic<std::uint64_t> recoveryRetryDeferredCount_{0};              // ★ D105-R5-9 MUST-2: durable-slot
+                                                                             //   occupied by a different live obligation
+                                                                             //   → retry delivery deferred (L unchanged)
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。
@@ -60268,6 +60545,7 @@ public:
         BuildAnalysis buildAnalysis {};           // ★ v14.0: Auto Gain 解析値
         OversamplingResult oversamplingResult {}; // ★ v14.38
         BuildDiagnostics buildDiagnostics {};     // ★ v14.37
+        std::uint64_t recoveryObligationId{0};    // ★ D105-R5-8: logical recovery obligation id (0 = non-recovery)
     };
 
     // ★ P1-6: Pressure レベル (Adaptive Backpressure)
@@ -65067,6 +65345,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         telemetryRecorder_.recordFailure(FailureStage::Execution,
             FailureReason::PublishFailed, "trySubmit:build",
             correlationId.shortValue(), nowUs);
+        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
@@ -65130,9 +65409,10 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
                 static_cast<uint64_t>(req.generation), 0,
                 PublishStage::Built, nowUs);
             telemetryRecorder_.recordFailure(FailureStage::Execution,
-                FailureReason::PublishFailed, "trySubmit:rebuild",
-                correlationId.shortValue(), nowUs);
-            return PublicationAdmission::Decision::RejectedNotFinalized;
+            FailureReason::PublishFailed, "trySubmit:rebuild",
+            correlationId.shortValue(), nowUs);
+        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
+        return PublicationAdmission::Decision::RejectedNotFinalized;
         }
     }
 
@@ -65178,6 +65458,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   publish 失敗時点で shutdown 中なら RejectedShutdown、それ以外は
         //   RejectedPublishFailure（内部失敗）を返す。ownership はどちらでも
         //   destroyRolledBackDSP() により回収済み（decision 分類から独立）。
+        // ★ D105-R5-8: publish failure → terminal obligation (no leak)
+        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);
         if (engine_.isShutdownInProgress())
             return PublicationAdmission::Decision::RejectedShutdown;
         return PublicationAdmission::Decision::RejectedPublishFailure;
@@ -65185,6 +65467,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
 
     juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish SUCCEEDED gen="
         + juce::String(req.generation));
+    // ★ D105-R5-8: Route A completion authority — publish succeeded ⇒ resolve obligation.
+    engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Published);
     // ★ v19: StateOwner + TelemetryRecorder: Published 記録
     stateOwner_.onPublished(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
@@ -65207,7 +65491,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     return PublicationAdmission::Decision::Accepted;
 }
 
-void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId seqId) noexcept {
+void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId seqId, std::uint64_t recoveryObligationId) noexcept {
     // ★ (a) Completion layer — ISR post-commit notification (not via IntentHandlerContext).
     //   Invoked from the ISR PublishExecutor once authority.commit() succeeds; records the
     //   committed sequence + progress timestamp so the P1-6 stall observer tracks ISR commits.
@@ -65216,6 +65500,9 @@ void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId se
     convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
     // ★ B3/C2: per-receipt completion — Producer はこの seqId で自分の publish 完了を待てるようになる。
     engine_.notifyPublishReceipt(seqId);
+    // ★ D105-R5-8: Route B completion authority. recoveryObligationId == 0 for non-recovery
+    //   publishes ⇒ resolveRecoveryObligation early-returns (no-op).
+    engine_.runtimePublicationBridge_.resolveRecoveryObligation(recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Published);
 }
 
 void RuntimePublicationOrchestrator::submitPublishRequest(
@@ -65225,6 +65512,15 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     const auto nowUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    // ★ D105-R5-9 MUST-1: route a rejected recovery obligation through the single Completion Authority.
+    //   Recovery obligations that fail admission must still be resolved (otherwise the Live slot leaks,
+    //   permanently consuming one of 32). Normal (recoveryObligationId==0) publishes are unaffected.
+    //   All branches route through resolveRecoveryObligation → table.resolve → single −1 (idempotent).
+    auto resolveIfRecovery = [&](RuntimeIntentCoordinator::RecoveryOutcome outcome) noexcept {
+        if (req.recoveryObligationId != 0)
+            engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, outcome);
+    };
 
     switch (decision) {
         case PublicationAdmission::Decision::Accepted:
@@ -65237,6 +65533,7 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::StaleGeneration, "submitPublishRequest:stale",
                 0, nowUs);
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);  // ★ D105-R5-9: −1
             return;
         default:
             return;
@@ -65245,22 +65542,32 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::ValidationFailed, "submitPublishRequest:notFinalized",
                 0, nowUs);
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Failed);           // ★ D105-R5-9: −1
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::QueuePressure, "submitPublishRequest:pressure",
                 0, nowUs);
+            // ★ D105-R5-9 MUST-2: QueuePressure → Retry (ΔL=0, obligation stays Live). Re-arm the
+            //   durable slot only when it already holds THIS obligation; otherwise delivery re-drive is
+            //   deferred (documented single-slot limitation). Never overwrites a distinct live obligation.
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Retry);
+            if (req.recoveryObligationId != 0)
+                engine_.runtimePublicationBridge_.rearmRecoveryRetry(req.recoveryObligationId);  // ★ D105-R5-9: guarded re-arm
             return;
         case PublicationAdmission::Decision::RejectedShutdown:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Shutdown,
                 FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
                 0, nowUs);
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded); // ★ D105-R5-9: −1 (idempotent)
             return;
         // ★ 15-P-6: publish-time 内部失敗 — shutdown telemetry に誤計上しない。
         //   FailureStage::Execution / FailureReason::PublishFailed で記録し、
         //   recovery suppression（shutdown 扱い）を回避する。
+        //   NOTE: trySubmitImpl already resolved this obligation (Failed) before returning
+        //   RejectedPublishFailure, so no second resolve is needed here (would be a no-op anyway).
         case PublicationAdmission::Decision::RejectedPublishFailure:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Execution,
@@ -65641,7 +65948,7 @@ public:
     //   Single seam for "publish committed"; the ISR PublishExecutor routes here
     //   (NOT via IntentHandlerContext), keeping intent handlers HANDLER-1 (pure).
     //   Audio-thread trySubmit retains its inline completion (unchanged).
-    void onPublishCommitted(PublicationSequenceId seqId) noexcept;
+    void onPublishCommitted(PublicationSequenceId seqId, std::uint64_t recoveryObligationId) noexcept;
 
     // ★ A3 Step 5-3: access to the stateless publish-completion facade (ADR-D2), owned by
     //   the orchestrator (audio-thread world-publish path). Bound into IntentHandlerContext
@@ -66423,7 +66730,7 @@ struct PublishExecutor {
 
         // ★ (a): Completion-notify — ISR post-commit. Routed through the orchestrator
         //   (Completion layer), NOT via IntentHandlerContext (Handler stays pure / HANDLER-1).
-        ctx.engine.runtimeOrchestrator_->onPublishCommitted(intent.sequenceId);
+        ctx.engine.runtimeOrchestrator_->onPublishCommitted(intent.sequenceId, intent.payload.publish.recoveryObligationId);
     }
 };
 
@@ -83735,7 +84042,7 @@ namespace {
         }
     }
 
-    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {});", "audio header enqueuePublicationIntentForRuntimeCommit"))
+    if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {}, std::uint64_t recoveryObligationId = 0);", "audio header enqueuePublicationIntentForRuntimeCommit"))
         return false;
     // [P1 Phase1-B] appendPublicationIntentForCommitProducer/Consumer removed
     if (!requireContains(runtimeBuilderHeader, "const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr", "runtime builder header sealed snapshot"))
@@ -84186,6 +84493,855 @@ int main() {
         return 0;
     } else {
         std::printf("D8-1 Wrapper+Cache tests FAIL\n");
+        return 1;
+    }
+}
+
+```
+
+### 📄 `src\tests\D8_2_B_2_Tests.cpp`
+
+```
+// D8-2-B-2_Tests.cpp
+// D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
+//
+// Test-first: ownership disposition observability for D/Q/E/T pathways.
+// No production code changes. Test-only helpers only (anonymous namespace).
+//
+// T5 (QueueFull)     = DEFERRED (dead code; Terminal is growable)
+// T6 (Shutdown)       = DEFERRED (no production path added)
+// T9 (DSPLifetimeMgr) = DEFERRED (source audit only, see follow-up)
+// T10 (RT boundary)   = source audit (no friend, no public化)
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+
+#include "audioengine/AtomicAccess.h"
+#include "audioengine/ISRAuthorityClass.h"   // RetireEnqueueResult
+#include "audioengine/ISRRetireRouter.h"
+
+#include "core/IEpochProvider.h"
+#include "core/SnapshotCoordinator.h"
+#include "core/SnapshotFactory.h"
+#include "core/SnapshotParams.h"
+#include "core/GlobalSnapshot.h"
+
+#include "DeferredDeletionQueue.h"              // DeletionEntryType
+
+namespace {
+
+//============================================================================
+// ConfigurableEpochProvider — test-only IEpochProvider stub
+//
+// All control via atomics (no std::function — RT-safe by design).
+// Merges the patterns from:
+//   - RetireGraceSemanticsTests.cpp (TestProvider: enqueueRetire=false)
+//   - D8_1_WrapperCacheTests.cpp    (TestEpochProvider: enqueueRetire=true)
+//============================================================================
+
+class ConfigurableEpochProvider final : public convo::IEpochProvider
+{
+public:
+    // ── Control (settable per-test) ───────────────────────────────────────
+
+    /// When true: enqueueRetire / enqueueRetireTyped return true (D owns).
+    /// When false: return false → triggers Q/E/T escalation.
+    std::atomic<bool> enqueueRetireResult{true};
+
+    /// minReaderEpoch returned by getMinReaderEpoch().
+    /// Entries with epoch < minReaderEpoch are drainable (isOlder).
+    /// Default 0 → entries with epoch 0 are NOT drainable (isOlder(0,0)=false).
+    std::atomic<uint64_t> minReaderEpoch_{0};
+
+    // ── Observability counters ─────────────────────────────────────────────
+
+    std::atomic<int>       enqueueRetireCallCount{0};
+    std::atomic<int>       enqueueRetireTypedCallCount{0};
+    std::atomic<int>       tryReclaimCount{0};
+    std::atomic<int>       publishEpochCount{0};
+    std::atomic<uint64_t>  currentEpoch_{0};
+
+    /// Last ptr accepted by D (enqueueRetire returned true).
+    /// Used for cleanup of D-path test objects.
+    std::atomic<void*> lastEnqueuedPtr{nullptr};
+
+    // ── IEpochProvider interface (RT-safe atomics only) ────────────────────
+
+    // ── Retire API (IRetireProvider) ──
+
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
+    {
+        ++enqueueRetireCallCount;
+        (void)deleter; (void)epoch;
+        if (enqueueRetireResult.load(std::memory_order_acquire))
+        {
+            lastEnqueuedPtr.store(ptr, std::memory_order_release);
+            return true;   // D accepts
+        }
+        return false;      // D rejects → caller falls through to Q
+    }
+
+    bool enqueueRetireTyped(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                            DeletionEntryType type) noexcept override
+    {
+        ++enqueueRetireTypedCallCount;
+        (void)deleter; (void)epoch; (void)type;
+        if (enqueueRetireResult.load(std::memory_order_acquire))
+        {
+            lastEnqueuedPtr.store(ptr, std::memory_order_release);
+            return true;
+        }
+        return false;
+    }
+
+    void tryReclaim() noexcept override
+    {
+        ++tryReclaimCount;
+    }
+
+    std::uint32_t pendingRetireCount() const noexcept override
+    {
+        return 0;  // stub: no real D queue
+    }
+
+    void drainAll() noexcept override
+    {
+        // stub: no-op
+    }
+
+    // ── Reader API (IReaderEpochProvider) — stub (no real readers) ──
+
+    int registerReaderThread() noexcept override                { return 0; }
+    bool reserveReaderThread(int /*readerIndex*/) noexcept override { return true; }
+    void enterReader(int /*readerIndex*/) noexcept override     {}
+    void exitReader(int /*readerIndex*/) noexcept override      {}
+
+    uint64_t currentEpoch() const noexcept override
+    {
+        return currentEpoch_.load(std::memory_order_acquire);
+    }
+
+    std::uint32_t activeReaderCount() const noexcept override
+    {
+        return 0;
+    }
+
+    int readerCapacity() const noexcept override                { return 1; }
+
+    uint64_t getMinReaderEpoch() const noexcept override
+    {
+        return minReaderEpoch_.load(std::memory_order_acquire);
+    }
+
+    // ── Publication API (IPublicationProvider) ──
+
+    uint64_t publishEpoch() noexcept override
+    {
+        ++publishEpochCount;
+        return ++currentEpoch_;
+    }
+
+    // ── IEpochProvider additional virtuals (defaults are fine, override for completeness) ──
+
+    convo::ReaderSlotDetail getReaderSlotDetail(int /*readerIndex*/) const noexcept override
+    {
+        return convo::ReaderSlotDetail{};
+    }
+
+    convo::StuckReaderInfo detectStuckReaders(uint64_t /*stuckThreshold*/) const noexcept override
+    {
+        return convo::StuckReaderInfo{};
+    }
+
+    uint64_t reclaimAttemptCount() const noexcept override  { return 0; }
+    uint64_t reclaimSuccessCount()  const noexcept override  { return 0; }
+    uint64_t pendingRetireBytes()   const noexcept override  { return 0; }
+    uint64_t worldReclaimCount()    const noexcept override  { return 0; }
+
+    void setReferenceObserver(void* /*observer*/) noexcept override {}
+    bool quarantineReader(int /*readerIndex*/) noexcept override     { return false; }
+    void unquarantineAllReaders() noexcept override                   {}
+    int  quarantinedReaderCount() const noexcept override             { return 0; }
+};
+
+//============================================================================
+// Counting deleter infrastructure (test-only, mirrors D8_1_WrapperCacheTests.cpp)
+//============================================================================
+
+struct TestObject
+{
+    int value = 42;
+};
+
+static std::atomic<int> g_deleteCount{0};
+static int              g_totalCreated{0};
+
+static void countingDeleter(void* ptr) noexcept
+{
+    ++g_deleteCount;
+    delete static_cast<TestObject*>(ptr);
+}
+
+static void resetDeleteCount() noexcept
+{
+    g_deleteCount.store(0, std::memory_order_release);
+}
+
+static int getDeleteCount() noexcept
+{
+    return g_deleteCount.load(std::memory_order_acquire);
+}
+
+static void noopDeleter(void*) noexcept {}
+
+} // anonymous namespace
+
+//============================================================================
+// T1 — SnapshotCoordinator → D (Success)
+//
+//   SnapshotCoordinator.switchImmediate → enqueueWithRetry → IEpochProvider::enqueueRetire = true
+//   → Success (D owns)
+//
+// Expect:
+//   enqueueRetireCallCount >= 1   (D accepted)
+//   quarantineResidentCount == 0  (Q not used)
+//   emergency == 0, terminal == 0
+//============================================================================
+
+static bool test_T1_SnapshotD()
+{
+    std::printf("[T1] SnapshotCoordinator → D (Success)...\n");
+
+    ConfigurableEpochProvider provider;         // enqueueRetireResult = true (default)
+    convo::isr::ISRRetireRouter router(provider);
+
+    auto coordinator = std::make_unique<convo::SnapshotCoordinator>(provider);
+    coordinator->setRetireSink(&router);
+
+    auto* snap1 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    auto* snap2 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    if (!snap1 || !snap2)
+    {
+        std::printf("  FAIL: SnapshotFactory::create returned null\n");
+        convo::SnapshotFactory::destroy(snap1);
+        convo::SnapshotFactory::destroy(snap2);
+        return false;
+    }
+
+    coordinator->switchImmediate(snap1);        // first call: no old current
+    coordinator->switchImmediate(snap2);        // retires snap1 via enqueueWithRetry
+
+    // ── Verify D owns (no Q/E/T) ──
+    const int  retireCalls = provider.enqueueRetireCallCount.load(std::memory_order_acquire);
+    const auto qResidents  = router.quarantineResidentCount();
+    const auto eResidents  = router.emergencyQuarantineResidentCount();
+    const auto tResidents  = router.terminalReclaimResidentCount();
+
+    bool pass = true;
+    if (retireCalls < 1)
+    {
+        std::printf("  FAIL: enqueueRetireCallCount=%d, expected >= 1\n", retireCalls);
+        pass = false;
+    }
+    if (qResidents != 0)
+    {
+        std::printf("  FAIL: quarantineResidentCount=%zu, expected 0\n", qResidents);
+        pass = false;
+    }
+    if (eResidents != 0)
+    {
+        std::printf("  FAIL: emergencyQuarantineResidentCount=%zu, expected 0\n", eResidents);
+        pass = false;
+    }
+    if (tResidents != 0)
+    {
+        std::printf("  FAIL: terminalReclaimResidentCount=%zu, expected 0\n", tResidents);
+        pass = false;
+    }
+
+    // ── Cleanup ──
+    // Force Q path so destructor's retireCurrentAndTarget goes to Q (not D leak)
+    provider.enqueueRetireResult.store(false);
+    void* dPtr = provider.lastEnqueuedPtr.exchange(nullptr, std::memory_order_acq_rel);
+    if (dPtr)
+        convo::SnapshotFactory::destroy(static_cast<convo::GlobalSnapshot*>(dPtr));   // snap1 was D-owned
+    coordinator.reset();           // destructor: snap2 → Q (enqueueRetireResult=false)
+    router.drainAllQuarantineStore(); // drains Q → snapshotDeleter → SnapshotFactory::destroy
+
+    if (pass) std::printf("  PASS: D owns, Q/E/T empty\n");
+    return pass;
+}
+
+//============================================================================
+// T2 — SnapshotCoordinator → Q (QueuePressure fallback)
+//
+//   enqueueRetire = false → retry fails → quarantineRetireSink → ISRRetireRouter::Q
+//
+// Expect:
+//   enqueueRetireCallCount == 2  (initial + retry)
+//   quarantineResidentCount == 1 (Q owns exactly 1)
+//   emergency == 0, terminal == 0
+//   deleteCount == 0              (not deleted while Q owns)
+//============================================================================
+
+static bool test_T2_SnapshotQ()
+{
+    std::printf("[T2] SnapshotCoordinator → Q (QueuePressure fallback)...\n");
+
+    ConfigurableEpochProvider provider;
+    provider.enqueueRetireResult.store(false);   // force Q fallback
+    convo::isr::ISRRetireRouter router(provider);
+
+    auto coordinator = std::make_unique<convo::SnapshotCoordinator>(provider);
+    coordinator->setRetireSink(&router);
+
+    auto* snap1 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    auto* snap2 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    if (!snap1 || !snap2)
+    {
+        std::printf("  FAIL: SnapshotFactory::create returned null\n");
+        convo::SnapshotFactory::destroy(snap1);
+        convo::SnapshotFactory::destroy(snap2);
+        return false;
+    }
+
+    coordinator->switchImmediate(snap1);        // first: no old current
+    coordinator->switchImmediate(snap2);        // retires snap1 via enqueueWithRetry → false → Q
+
+    // ── Verify Q owns (D rejected, exactly one transfer to Q) ──
+    const int  retryCount     = provider.tryReclaimCount;       // called once between retries
+    const int  retireCalls    = provider.enqueueRetireCallCount.load(std::memory_order_acquire);
+    const auto qResidents     = router.quarantineResidentCount();
+    const auto eResidents     = router.emergencyQuarantineResidentCount();
+    const auto tResidents     = router.terminalReclaimResidentCount();
+    const auto dPending       = router.pendingRetireCount();
+
+    bool pass = true;
+    if (retireCalls != 2)
+    {
+        std::printf("  FAIL: enqueueRetireCallCount=%d, expected 2 (initial + retry)\n", retireCalls);
+        pass = false;
+    }
+    if (qResidents != 1)
+    {
+        std::printf("  FAIL: quarantineResidentCount=%zu, expected 1\n", qResidents);
+        pass = false;
+    }
+    if (eResidents != 0)
+    {
+        std::printf("  FAIL: emergencyQuarantineResidentCount=%zu, expected 0\n", eResidents);
+        pass = false;
+    }
+    if (tResidents != 0)
+    {
+        std::printf("  FAIL: terminalReclaimResidentCount=%zu, expected 0\n", tResidents);
+        pass = false;
+    }
+    if (dPending != 0)
+    {
+        std::printf("  FAIL: pendingRetireCount=%u, expected 0 (D did not accept)\n", dPending);
+        pass = false;
+    }
+
+    // ── Cleanup ──
+    // snap2 will be retired to Q by destructor; drain all Q entries
+    coordinator.reset();           // destructor: snap2 → Q (enqueueRetireResult already false)
+    router.drainAllQuarantineStore(); // drains Q (snap1 + snap2) → snapshotDeleter → destroy
+
+    if (pass) std::printf("  PASS: Q owns exactly 1, D/E/T empty, no double-transfer\n");
+    return pass;
+}
+
+//============================================================================
+// T3 — ISRRetireRouter → E (EmergencyQuarantine escalation)
+//
+//   Q = full (512) → D fails → Q rejects → E accepts
+//
+// Expect:
+//   result == QueuePressure       (Q or E accepted)
+//   emergencyQuarantineResidentCount == 1  (E owns the entry)
+//   quarantineResidentCount     == 513     (512 Q + 1 E)
+//   terminalReclaimResidentCount == 0
+//   deleteCount == 0
+//============================================================================
+
+static bool test_T3_RouterE()
+{
+    std::printf("[T3] ISRRetireRouter Q → E (EmergencyQuarantine)...\n");
+    resetDeleteCount();
+
+    constexpr int kQCapacity = 512;
+
+    ConfigurableEpochProvider provider;
+    provider.enqueueRetireResult.store(false);   // force Q/E/T path
+    convo::isr::ISRRetireRouter router(provider);
+
+    // ── Pre-fill Q to capacity via direct quarantineRetire ──
+    for (int i = 0; i < kQCapacity; ++i)
+    {
+        void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1000 + i));
+        if (!router.quarantineRetire(ptr, noopDeleter, /*epoch=*/0,
+                                     DeletionEntryType::Generic,
+                                     "T3:pre-fill Q", /*pubSeq=*/0, /*gen=*/0))
+        {
+            std::printf("  FAIL: pre-fill Q entry %d rejected (capacity reached early)\n", i);
+            router.drainAllQuarantineStore();
+            return false;
+        }
+    }
+
+    const auto qBefore = router.quarantineResidentCount();
+    if (qBefore != static_cast<std::size_t>(kQCapacity))
+    {
+        std::printf("  FAIL: Q pre-fill = %zu, expected %d\n", qBefore, kQCapacity);
+        router.drainAllQuarantineStore();
+        return false;
+    }
+
+    // ── Exercise: enqueueWithRetry should escalate D→Q(full)→E ──
+    auto* obj = new TestObject{42};
+    auto result = router.enqueueWithRetry(obj, countingDeleter, /*epoch=*/0, DeletionEntryType::Generic);
+
+    const auto qAfter = router.quarantineResidentCount();
+    const auto eCount = router.emergencyQuarantineResidentCount();
+    const auto tCount = router.terminalReclaimResidentCount();
+    const int  delCount = getDeleteCount();
+
+    bool pass = true;
+    if (result != convo::isr::RetireEnqueueResult::QueuePressure)
+    {
+        std::printf("  FAIL: result=%d, expected QueuePressure(%d)\n",
+                    static_cast<int>(result),
+                    static_cast<int>(convo::isr::RetireEnqueueResult::QueuePressure));
+        pass = false;
+    }
+    if (eCount != 1)
+    {
+        std::printf("  FAIL: emergencyQuarantineResidentCount=%zu, expected 1\n", eCount);
+        pass = false;
+    }
+    if (tCount != 0)
+    {
+        std::printf("  FAIL: terminalReclaimResidentCount=%zu, expected 0\n", tCount);
+        pass = false;
+    }
+    if (delCount != 0)
+    {
+        std::printf("  FAIL: deleteCount=%d, expected 0 (entry stored in E, not deleted)\n", delCount);
+        pass = false;
+    }
+
+    // ── Cleanup ──
+    router.drainAllQuarantineStore();   // Q (512 noop) + E (1 counting) → deleteCount == 1
+
+    if (pass) std::printf("  PASS: E owns 1, Q=512 full, T empty, deleteCount==0\n");
+    return pass;
+}
+
+//============================================================================
+// T4 — ISRRetireRouter → T (TerminalReclaim)
+//
+//   Q = full (512) + E = full (512) → D fails → Q rejects → E rejects → T accepts
+//   TerminalReclaimAuthority stores() is growable → ALWAYS succeeds (T owns).
+//
+// Expect:
+//   result == TerminalReclaim
+//   terminalReclaimResidentCount == 1  (T owns the entry)
+//   emergencyQuarantineResidentCount == 512  (E full)
+//   deleteCount == 0
+//============================================================================
+
+static bool test_T4_RouterT()
+{
+    std::printf("[T4] ISRRetireRouter Q+E → T (TerminalReclaim)...\n");
+    resetDeleteCount();
+
+    constexpr int kQCapacity = 512;
+    constexpr int kECapacity = 512;
+
+    ConfigurableEpochProvider provider;
+    provider.enqueueRetireResult.store(false);   // force Q/E/T path
+    convo::isr::ISRRetireRouter router(provider);
+
+    // ── Pre-fill Q to capacity ──
+    for (int i = 0; i < kQCapacity; ++i)
+    {
+        void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1000 + i));
+        if (!router.quarantineRetire(ptr, noopDeleter, 0, DeletionEntryType::Generic,
+                                     "T4:pre-fill Q", 0, 0))
+        {
+            std::printf("  FAIL: pre-fill Q entry %d rejected\n", i);
+            router.drainAllQuarantineStore();
+            return false;
+        }
+    }
+
+    // ── Pre-fill E to capacity ──
+    for (int i = 0; i < kECapacity; ++i)
+    {
+        void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x2000 + i));
+        if (!router.emergencyQuarantine(ptr, noopDeleter, 0, DeletionEntryType::Generic,
+                                        "T4:pre-fill E", 0, 0))
+        {
+            std::printf("  FAIL: pre-fill E entry %d rejected\n", i);
+            router.drainAllQuarantineStore();
+            return false;
+        }
+    }
+
+    const auto eBefore = router.emergencyQuarantineResidentCount();
+    if (eBefore != static_cast<std::size_t>(kECapacity))
+    {
+        std::printf("  FAIL: E pre-fill = %zu, expected %d\n", eBefore, kECapacity);
+        router.drainAllQuarantineStore();
+        return false;
+    }
+
+    // ── Exercise: enqueueWithRetry should escalate to Terminal ──
+    auto* obj = new TestObject{42};
+    auto result = router.enqueueWithRetry(obj, countingDeleter, 0, DeletionEntryType::Generic);
+
+    const auto tCount = router.terminalReclaimResidentCount();
+    const int  delCount = getDeleteCount();
+
+    bool pass = true;
+    if (result != convo::isr::RetireEnqueueResult::TerminalReclaim)
+    {
+        std::printf("  FAIL: result=%d, expected TerminalReclaim(%d)\n",
+                    static_cast<int>(result),
+                    static_cast<int>(convo::isr::RetireEnqueueResult::TerminalReclaim));
+        pass = false;
+    }
+    if (tCount != 1)
+    {
+        std::printf("  FAIL: terminalReclaimResidentCount=%zu, expected 1\n", tCount);
+        pass = false;
+    }
+    if (delCount != 0)
+    {
+        std::printf("  FAIL: deleteCount=%d, expected 0 (T stores, not deletes yet)\n", delCount);
+        pass = false;
+    }
+
+    // ── Cleanup ──
+    router.drainAllQuarantineStore();
+    const int finalDelCount = getDeleteCount();
+    if (finalDelCount != 1)
+    {
+        std::printf("  FAIL: after drain deleteCount=%d, expected 1 (Terminal owns, delete exactly once)\n",
+                    finalDelCount);
+        pass = false;
+    }
+
+    if (pass) std::printf("  PASS: T owns 1, growable store accepted, deleteCount==1 after drain\n");
+    return pass;
+}
+
+//============================================================================
+// T7 — SnapshotCoordinator ownership conservation
+//
+//   Verifies: caller → D OR caller → Q, never both.
+//   D path: enqueueRetire=true → D accepts, Q empty.
+//   Q path: enqueueRetire=false → D rejects, Q stores exactly 1.
+//
+//   Invariant: admitted = 1, ownership is in exactly ONE destination.
+//============================================================================
+
+static bool test_T7_SnapshotOwnershipConservation()
+{
+    std::printf("[T7] SnapshotCoordinator ownership conservation...\n");
+    bool pass = true;
+
+    // ── Sub-test A: D path ──
+    {
+        ConfigurableEpochProvider provider;  // enqueueRetireResult = true (default)
+        convo::isr::ISRRetireRouter router(provider);
+        auto coordinator = std::make_unique<convo::SnapshotCoordinator>(provider);
+        coordinator->setRetireSink(&router);
+
+        auto* snap1 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* snap2 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+
+        coordinator->switchImmediate(snap1);
+        coordinator->switchImmediate(snap2);
+
+        const int  dAccepts   = provider.enqueueRetireCallCount.load(std::memory_order_acquire);
+        const auto qResidents = router.quarantineResidentCount();
+
+        // D owns snap1: enqueueRetireCount >= 1, Q empty
+        const bool dOwns = (dAccepts >= 1) && (qResidents == 0);
+        if (!dOwns)
+        {
+            std::printf("  FAIL [A]: D path: D accepts=%d, Q=%zu — expected D≥1, Q=0\n",
+                        dAccepts, qResidents);
+            pass = false;
+        }
+        else
+        {
+            std::printf("  PASS [A]: D owns snap1 (enqueueRetireCount=%d), Q=0\n", dAccepts);
+        }
+
+        // Cleanup: snap1 was D-path (stub accepted, never stored) → manual destroy
+        // snap2 goes to Q via destructor (enqueueRetireResult=false) → drainAllQuarantineStore
+        provider.enqueueRetireResult.store(false);
+        void* dPtr = provider.lastEnqueuedPtr.exchange(nullptr, std::memory_order_acq_rel);
+        if (dPtr)
+            convo::SnapshotFactory::destroy(static_cast<convo::GlobalSnapshot*>(dPtr));
+        coordinator.reset();           // destructor: snap2 → Q
+        router.drainAllQuarantineStore(); // drains Q → snapshotDeleter → destroy snap2
+    }
+
+    // ── Sub-test B: Q path ──
+    {
+        ConfigurableEpochProvider provider;
+        provider.enqueueRetireResult.store(false);  // force Q
+        convo::isr::ISRRetireRouter router(provider);
+        auto coordinator = std::make_unique<convo::SnapshotCoordinator>(provider);
+        coordinator->setRetireSink(&router);
+
+        auto* snap1 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* snap2 = convo::SnapshotFactory::create(convo::SnapshotParams{});
+
+        coordinator->switchImmediate(snap1);
+        coordinator->switchImmediate(snap2);
+
+        const int  dRejects    = provider.enqueueRetireCallCount.load(std::memory_order_acquire);
+        const auto qResidents  = router.quarantineResidentCount();
+
+        // Q owns snap1: D rejected (count==2 from retry), Q has exactly 1
+        const bool qOwns = (qResidents == 1) && (dRejects == 2);
+        if (!qOwns)
+        {
+            std::printf("  FAIL [B]: Q path: D calls=%d, Q=%zu — expected D=2(retry), Q=1\n",
+                        dRejects, qResidents);
+            pass = false;
+        }
+        else
+        {
+            std::printf("  PASS [B]: Q owns snap1 (D rejected=%d), Q=1, exactly one transfer\n", dRejects);
+        }
+
+        // Cleanup
+        coordinator.reset();
+        router.drainAllQuarantineStore();  // destroys snap1 + snap2 from Q
+    }
+
+    if (pass) std::printf("  PASS: ownership conserved — ptr in exactly one destination in all paths\n");
+    return pass;
+}
+
+//============================================================================
+// T8 — ISRRetireRouter ownership conservation (counting deleter)
+//
+//   Verifies:
+//     - Entry admitted to ONE store (Q, E, or T) — no double transfer.
+//     - After drain: deleteCount == exactly 1 (exactly-once deletion).
+//============================================================================
+
+static bool test_T8_RouterOwnershipConservation()
+{
+    std::printf("[T8] ISRRetireRouter ownership conservation (counting deleter)...\n");
+    bool pass = true;
+
+    // ── Sub-test A: Q path ──
+    {
+        resetDeleteCount();
+        constexpr int kQCapacity = 512;
+
+        ConfigurableEpochProvider provider;
+        provider.enqueueRetireResult.store(false);
+        convo::isr::ISRRetireRouter router(provider);
+
+        // Pre-fill Q so the test entry is NOT stored in Q (forces E? No — for Q path test,
+        // we want the entry TO go to Q, so no pre-fill needed.)
+        // Actually, for pure Q path: no pre-fill, enqueueWithRetry → Q stores
+        auto* obj = new TestObject{42};
+        auto result = router.enqueueWithRetry(obj, countingDeleter, 0, DeletionEntryType::Generic);
+
+        const auto qCount = router.quarantineResidentCount();
+        const int  delBeforeDrain = getDeleteCount();
+
+        bool subPass = true;
+        if (result != convo::isr::RetireEnqueueResult::QueuePressure)
+        {
+            std::printf("  FAIL [A]: result=%d, expected QueuePressure\n", static_cast<int>(result));
+            subPass = false;
+        }
+        if (qCount != 1)
+        {
+            std::printf("  FAIL [A]: Q resident=%zu, expected 1\n", qCount);
+            subPass = false;
+        }
+        if (delBeforeDrain != 0)
+        {
+            std::printf("  FAIL [A]: deleteCount=%d before drain, expected 0\n", delBeforeDrain);
+            subPass = false;
+        }
+
+        // Drain → deleter must fire exactly once
+        router.drainAllQuarantineStore();
+        const int delAfterDrain = getDeleteCount();
+        if (delAfterDrain != 1)
+        {
+            std::printf("  FAIL [A]: deleteCount=%d after drain, expected 1\n", delAfterDrain);
+            subPass = false;
+        }
+
+        if (subPass) std::printf("  PASS [A]: Q path — admitted 1, deleted exactly once\n");
+        else pass = false;
+    }
+
+    // ── Sub-test B: E path ──
+    {
+        resetDeleteCount();
+        constexpr int kQCapacity = 512;
+
+        ConfigurableEpochProvider provider;
+        provider.enqueueRetireResult.store(false);
+        convo::isr::ISRRetireRouter router(provider);
+
+        // Pre-fill Q to capacity → 513th entry escalates to E
+        for (int i = 0; i < kQCapacity; ++i)
+        {
+            void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x3000 + i));
+            router.quarantineRetire(ptr, noopDeleter, 0, DeletionEntryType::Generic, "T8:B prefill", 0, 0);
+        }
+
+        auto* obj = new TestObject{42};
+        auto result = router.enqueueWithRetry(obj, countingDeleter, 0, DeletionEntryType::Generic);
+
+        const auto eCount = router.emergencyQuarantineResidentCount();
+        const int  delBeforeDrain = getDeleteCount();
+
+        bool subPass = true;
+        if (result != convo::isr::RetireEnqueueResult::QueuePressure)
+        {
+            std::printf("  FAIL [B]: result=%d, expected QueuePressure\n", static_cast<int>(result));
+            subPass = false;
+        }
+        if (eCount != 1)
+        {
+            std::printf("  FAIL [B]: E resident=%zu, expected 1\n", eCount);
+            subPass = false;
+        }
+        if (delBeforeDrain != 0)
+        {
+            std::printf("  FAIL [B]: deleteCount=%d before drain, expected 0\n", delBeforeDrain);
+            subPass = false;
+        }
+
+        router.drainAllQuarantineStore();
+        const int delAfterDrain = getDeleteCount();
+        if (delAfterDrain != 1)
+        {
+            std::printf("  FAIL [B]: deleteCount=%d after drain, expected 1\n", delAfterDrain);
+            subPass = false;
+        }
+
+        if (subPass) std::printf("  PASS [B]: E path — admitted 1, deleted exactly once\n");
+        else pass = false;
+    }
+
+    // ── Sub-test C: T path ──
+    {
+        resetDeleteCount();
+        constexpr int kQCapacity = 512;
+        constexpr int kECapacity = 512;
+
+        ConfigurableEpochProvider provider;
+        provider.enqueueRetireResult.store(false);
+        convo::isr::ISRRetireRouter router(provider);
+
+        // Pre-fill Q + E to capacity → 1025th entry escalates to T
+        for (int i = 0; i < kQCapacity; ++i)
+        {
+            void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x4000 + i));
+            router.quarantineRetire(ptr, noopDeleter, 0, DeletionEntryType::Generic, "T8:C prefill Q", 0, 0);
+        }
+        for (int i = 0; i < kECapacity; ++i)
+        {
+            void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5000 + i));
+            router.emergencyQuarantine(ptr, noopDeleter, 0, DeletionEntryType::Generic, "T8:C prefill E", 0, 0);
+        }
+
+        auto* obj = new TestObject{42};
+        auto result = router.enqueueWithRetry(obj, countingDeleter, 0, DeletionEntryType::Generic);
+
+        const auto tCount = router.terminalReclaimResidentCount();
+        const int  delBeforeDrain = getDeleteCount();
+
+        bool subPass = true;
+        if (result != convo::isr::RetireEnqueueResult::TerminalReclaim)
+        {
+            std::printf("  FAIL [C]: result=%d, expected TerminalReclaim(%d)\n",
+                        static_cast<int>(result),
+                        static_cast<int>(convo::isr::RetireEnqueueResult::TerminalReclaim));
+            subPass = false;
+        }
+        if (tCount != 1)
+        {
+            std::printf("  FAIL [C]: T resident=%zu, expected 1\n", tCount);
+            subPass = false;
+        }
+        if (delBeforeDrain != 0)
+        {
+            std::printf("  FAIL [C]: deleteCount=%d before drain, expected 0\n", delBeforeDrain);
+            subPass = false;
+        }
+
+        router.drainAllQuarantineStore();
+        const int delAfterDrain = getDeleteCount();
+        if (delAfterDrain != 1)
+        {
+            std::printf("  FAIL [C]: deleteCount=%d after drain, expected 1\n", delAfterDrain);
+            subPass = false;
+        }
+
+        if (subPass) std::printf("  PASS [C]: T path — admitted 1 (growable), deleted exactly once\n");
+        else pass = false;
+    }
+
+    if (pass) std::printf("  PASS: all paths conserve ownership, deleteCount==1 after drain\n");
+    return pass;
+}
+
+//============================================================================
+// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
+//============================================================================
+
+int main()
+{
+    bool ok = true;
+
+    ok &= test_T1_SnapshotD();
+    ok &= test_T2_SnapshotQ();
+    ok &= test_T3_RouterE();
+    ok &= test_T4_RouterT();
+    ok &= test_T7_SnapshotOwnershipConservation();
+    ok &= test_T8_RouterOwnershipConservation();
+
+    if (ok)
+    {
+        std::printf("\n========================================\n");
+        std::printf("D8-2-B-2 Tests PASS\n");
+        std::printf("  T1  Snapshot → D      PASS\n");
+        std::printf("  T2  Snapshot → Q      PASS\n");
+        std::printf("  T3  Router   → E      PASS\n");
+        std::printf("  T4  Router   → T      PASS\n");
+        std::printf("  T7  Snapshot conservation  PASS\n");
+        std::printf("  T8  Router   conservation  PASS\n");
+        std::printf("  T5  DEFERRED (dead code QueueFull)\n");
+        std::printf("  T6  DEFERRED (no production Shutdown path)\n");
+        std::printf("  T9  DEFERRED (source audit only)\n");
+        std::printf("  T10 source audit (no friend/addition)\n");
+        std::printf("========================================\n");
+        return 0;
+    }
+    else
+    {
+        std::printf("\nD8-2-B-2 Tests FAIL\n");
         return 1;
     }
 }
@@ -89642,6 +90798,167 @@ static_assert(std::is_nothrow_move_assignable_v<X4BTestWriteAccess>,
 
 } // namespace
 
+// =============================================================================
+// D105-R5-9: Recovery Logical Obligation Enforcement — counterexample tests C1-C10
+// Enforce the single +1/−1 invariant, handle-bearing CoalesceIdentity, id-based
+// ABA-safe resolve, and StaleSuperseded terminal. A failure here means the
+// completion-authority contract regressed (leak / double-free / stale resolve).
+// =============================================================================
+namespace {
+    convo::RuntimeBuildSnapshot makeRecoverySnapshot(std::uint64_t identityHash)
+    {
+        convo::RuntimeBuildSnapshot snap{};
+        snap.rebuildFingerprint.irIdentityHash = identityHash;
+        snap.rebuildFingerprint.convolutionConfigHash = 0x21u;
+        snap.rebuildFingerprint.dspParameterHash = 0x42u;
+        snap.rebuildFingerprint.fingerprintVersion = 1;
+        return snap;
+    }
+
+    std::optional<std::uint64_t> submitAndGetId(convo::isr::RuntimeIntentCoordinator& c,
+                                                const convo::isr::DSPHandle& h,
+                                                std::uint64_t identityHash)
+    {
+        convo::RuntimeBuildSnapshot snap = makeRecoverySnapshot(identityHash);
+        if (!c.submitRecoveryRequest(h, snap, 1))
+            return std::nullopt;
+        auto pop = c.popRecoveryRequest();
+        if (!pop)
+            return std::nullopt;
+        return pop->obligationId;
+    }
+
+    // C1: 32 distinct recovery obligations are all accepted and counted (L==32).
+    [[nodiscard]] bool testRLOE_C1_unique32()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        for (std::uint64_t i = 0; i < 32; ++i)
+            if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(i + 1), 1))
+                return false;
+        return c->liveLogicalRecoveryObligationCount() == 32;
+    }
+
+    // C2: the 33rd distinct obligation is rejected (capacity 32) and must NOT increment L.
+    [[nodiscard]] bool testRLOE_C2_33rdRejected()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        for (std::uint64_t i = 0; i < 32; ++i)
+            if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(i + 1), 1))
+                return false;
+        const bool accepted = c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(999), 1);
+        return (!accepted)
+            && c->liveLogicalRecoveryObligationCount() == 32
+            && c->recoveryCapacityExhaustedCount() >= 1;
+    }
+
+    // C3: at capacity (L==32), a duplicate submission coalesces (accepted, L unchanged, coalescedCount+1).
+    [[nodiscard]] bool testRLOE_C3_coalesceAtFull()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        for (std::uint64_t i = 0; i < 32; ++i)
+            if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(i + 1), 1))
+                return false;
+        const std::uint64_t coalescedBefore = c->recoveryCoalescedCount();
+        const bool accepted = c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(7), 1);
+        return accepted
+            && c->liveLogicalRecoveryObligationCount() == 32
+            && c->recoveryCoalescedCount() == coalescedBefore + 1;
+    }
+
+    // C4: two distinct handles with identical target are two distinct obligations (L==before+2).
+    [[nodiscard]] bool testRLOE_C4_distinctHandlesSameTarget()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        convo::RuntimeBuildSnapshot snap = makeRecoverySnapshot(555);
+        const std::uint64_t before = c->liveLogicalRecoveryObligationCount();
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle{1, 1}, snap, 1)) return false;
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle{2, 1}, snap, 1)) return false;
+        return c->liveLogicalRecoveryObligationCount() == before + 2;
+    }
+
+    // C5: QueuePressure/Retry resolution keeps the obligation Live (ΔL==0) and still deliverable.
+    [[nodiscard]] bool testRLOE_C5_retryKeepsLive()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 11);
+        if (!id) return false;
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        c->resolveRecoveryObligation(*id, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Retry);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;  // must remain Live
+        // still deliverable: a duplicate submission coalesces (accepted, L unchanged)
+        const bool dup = c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(11), 1);
+        return dup && c->liveLogicalRecoveryObligationCount() == 1;
+    }
+
+    // C6: StaleGeneration rejection routes to StaleSuperseded terminal → L 1→0 (no leak).
+    [[nodiscard]] bool testRLOE_C6_staleSupersededResolves()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 22);
+        if (!id) return false;
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        c->resolveRecoveryObligation(*id, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
+        return c->liveLogicalRecoveryObligationCount() == 0;
+    }
+
+    // C7: duplicate Published resolution is idempotent — L 1→0 exactly once, never negative.
+    [[nodiscard]] bool testRLOE_C7_duplicatePublishedOnce()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 33);
+        if (!id) return false;
+        c->resolveRecoveryObligation(*id, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published);
+        const std::uint64_t l0 = c->liveLogicalRecoveryObligationCount();
+        c->resolveRecoveryObligation(*id, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published); // no-op
+        return l0 == 0 && c->liveLogicalRecoveryObligationCount() == 0;
+    }
+
+    // C8: shutdown race — Failed then ShutdownDiscarded (or reverse) resolves once; count increments once.
+    [[nodiscard]] bool testRLOE_C8_shutdownRaceOnce()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 44);
+        if (!id) return false;
+        const std::uint64_t sdBefore = c->recoveryObligationShutdownDiscardCount();
+        c->resolveRecoveryObligation(*id, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Failed);
+        c->resolveRecoveryObligation(*id, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded); // no-op
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryObligationShutdownDiscardCount() != sdBefore) return false;  // not incremented by no-op
+        // direct shutdown-discard path increments exactly once
+        auto id2 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 45);
+        if (!id2) return false;
+        c->resolveRecoveryObligation(*id2, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded);
+        return c->liveLogicalRecoveryObligationCount() == 0
+            && c->recoveryObligationShutdownDiscardCount() == sdBefore + 1;
+    }
+
+    // C9: ABA safety — stale late resolve of a reused slot must NOT resurrect / free the new obligation.
+    [[nodiscard]] bool testRLOE_C9_abaStaleResolveNoOp()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id1 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 1);   // L=1, slot0
+        if (!id1) return false;
+        c->resolveRecoveryObligation(*id1, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published); // L=0, slot0 free
+        auto id2 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 2);   // L=1, slot0 REUSED (new id)
+        if (!id2) return false;
+        if (*id2 == *id1) return false;
+        c->resolveRecoveryObligation(*id1, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published); // stale, must be no-op
+        return c->liveLogicalRecoveryObligationCount() == 1;  // O2 still Live; O1 not resurrected
+    }
+
+    // C10: 256 distinct submissions under concurrency-shaped loop must cap at L==32 (no overflow),
+    // with exactly 256-32 == 224 capacity-exhausted rejects.
+    [[nodiscard]] bool testRLOE_C10_stress256CapsAt32()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        for (std::uint64_t i = 0; i < 256; ++i)
+            (void)c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(i + 1), 1);
+        return c->liveLogicalRecoveryObligationCount() == 32
+            && c->recoveryCapacityExhaustedCount() >= 224
+            && c->liveLogicalRecoveryObligationCount() <= 32;
+    }
+}
+
 int main()
 {
     try
@@ -89731,6 +91048,28 @@ int main()
     // --- B3 invariant #4: publish intent queue-full => explicit backpressure ---
     if (!testPublishIntentQueueFullBackpressure())
         throw std::runtime_error("B3: publish intent queue-full backpressure contract failed");
+
+    // --- D105-R5-9: Recovery Logical Obligation Enforcement counterexample tests C1-C10 ---
+    if (!testRLOE_C1_unique32())
+        throw std::runtime_error("D105-R5-9 C1: 32 distinct obligations must count to 32");
+    if (!testRLOE_C2_33rdRejected())
+        throw std::runtime_error("D105-R5-9 C2: 33rd distinct must be rejected without L change");
+    if (!testRLOE_C3_coalesceAtFull())
+        throw std::runtime_error("D105-R5-9 C3: duplicate at capacity must coalesce (L unchanged)");
+    if (!testRLOE_C4_distinctHandlesSameTarget())
+        throw std::runtime_error("D105-R5-9 C4: distinct handle + same target must be two obligations");
+    if (!testRLOE_C5_retryKeepsLive())
+        throw std::runtime_error("D105-R5-9 C5: Retry must keep obligation Live (ΔL=0)");
+    if (!testRLOE_C6_staleSupersededResolves())
+        throw std::runtime_error("D105-R5-9 C6: StaleSuperseded must resolve to L 1->0");
+    if (!testRLOE_C7_duplicatePublishedOnce())
+        throw std::runtime_error("D105-R5-9 C7: duplicate Published must be idempotent (L 1->0 once)");
+    if (!testRLOE_C8_shutdownRaceOnce())
+        throw std::runtime_error("D105-R5-9 C8: shutdown race must resolve once (count once)");
+    if (!testRLOE_C9_abaStaleResolveNoOp())
+        throw std::runtime_error("D105-R5-9 C9: ABA stale resolve must be no-op (O2 stays Live)");
+    if (!testRLOE_C10_stress256CapsAt32())
+        throw std::runtime_error("D105-R5-9 C10: 256 distinct must cap at L<=32 (no overflow)");
 
     return 0;
     }

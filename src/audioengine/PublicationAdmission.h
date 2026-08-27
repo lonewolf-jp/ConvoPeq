@@ -23,6 +23,7 @@ public:
         BuildAnalysis buildAnalysis {};           // ★ v14.0: Auto Gain 解析値
         OversamplingResult oversamplingResult {}; // ★ v14.38
         BuildDiagnostics buildDiagnostics {};     // ★ v14.37
+        std::uint64_t recoveryObligationId{0};    // ★ D105-R5-8: logical recovery obligation id (0 = non-recovery)
     };
 
     // ★ P1-6: Pressure レベル (Adaptive Backpressure)

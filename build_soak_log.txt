@@ -1,0 +1,20 @@
+[0/2] Re-checking globbed directories...
+[1/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_core\juce_core_CompilationTime.cpp.obj
+[2/20] Building C object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_graphics\juce_graphics_Sheenbidi.c.obj
+[3/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRPayloadTier.cpp.obj
+[4/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRClosure.cpp.obj
+[5/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRDSPQuarantine.cpp.obj
+[6/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRDSPHandle.cpp.obj
+[7/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRRetire.cpp.obj
+[8/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_data_structures\juce_data_structures.cpp.obj
+[9/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_events\juce_events.cpp.obj
+[10/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_core\juce_core.cpp.obj
+[11/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_gui_extra\juce_gui_extra.cpp.obj
+[12/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[13/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRRetireRouter.cpp.obj
+[14/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\tests\ISRSoakTests.cpp.obj
+[15/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\src\audioengine\ISRRuntimePublicationCoordinator.cpp.obj
+[16/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_graphics\juce_graphics.cpp.obj
+[17/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_graphics\juce_graphics_Harfbuzz.cpp.obj
+[18/20] Building CXX object CMakeFiles\ISRSoakTests.dir\Debug\JUCE\modules\juce_gui_basics\juce_gui_basics.cpp.obj
+[19/20] Linking CXX executable Debug\ISRSoakTests.exe

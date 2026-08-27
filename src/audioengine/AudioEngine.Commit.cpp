@@ -784,7 +784,8 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
                                                            const convo::RuntimeBuildSnapshot& sealedSnapshot,
                                                            const convo::BuildAnalysis& buildAnalysis,
                                                            const convo::OversamplingResult& oversamplingResult,
-                                                           const convo::BuildDiagnostics& buildDiagnostics)
+                                                           const convo::BuildDiagnostics& buildDiagnostics,
+                                                           std::uint64_t recoveryObligationId)
 {
     if (newDSP == nullptr)
         return;
@@ -809,6 +810,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.buildAnalysis = buildAnalysis;
     req.oversamplingResult = oversamplingResult;
     req.buildDiagnostics = buildDiagnostics;
+    req.recoveryObligationId = recoveryObligationId;   // ★ D105-R5-8: carry obligation id to completion
 
     runtimeOrchestrator_->submitPublishRequest(req);
 

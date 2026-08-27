@@ -102,7 +102,7 @@ struct PublishExecutor {
 
         // ★ (a): Completion-notify — ISR post-commit. Routed through the orchestrator
         //   (Completion layer), NOT via IntentHandlerContext (Handler stays pure / HANDLER-1).
-        ctx.engine.runtimeOrchestrator_->onPublishCommitted(intent.sequenceId);
+        ctx.engine.runtimeOrchestrator_->onPublishCommitted(intent.sequenceId, intent.payload.publish.recoveryObligationId);
     }
 };
 

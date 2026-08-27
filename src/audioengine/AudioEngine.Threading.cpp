@@ -259,6 +259,12 @@ void AudioEngine::runCoordinatorPhase() noexcept
         runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
 
+    // ★ D105-R5-10: re-drive any deferred Live recovery obligations each Coordinator tick (option C).
+    //   Runs on the CoordinatorLoop (producer) thread — SPSC-safe. Complements the opportunistic trigger
+    //   in submitRecoveryRequest: ensures deferred obligations are redispatched once a delivery resource
+    //   frees, even when no new recovery submissions occur.
+    runtimePublicationBridge_.redriveDeferredRecoveryObligations();
+
     // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
     //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。
     //     deferred がある場合、publishRetryReady フラグを立てて RebuildThread を起床させるだけ。

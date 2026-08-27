@@ -546,7 +546,14 @@ bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcep
         //   lease 方式では DurablePending OR Building の両方が false であること（recoveryAdmissionPending_
         //   は Building 中も true を維持 — 二十六次レビュー）。shutdown 時は discardPendingRecoveryAdmission
         //   （RecoveryAdmissionClosed）で破棄されるため、本条件は成立する。
-        && !convo::consumeAtomic(coordinator_.recoveryAdmissionPending_, std::memory_order_acquire);
+        && !convo::consumeAtomic(coordinator_.recoveryAdmissionPending_, std::memory_order_acquire)
+        // ★ D105-R13 (INV-1-2 structural): logical obligation residency must be zero. Previously this held
+        //   only as an emergent property of shutdown ordering (requestShutdown → Coordinator/Builder joined
+        //   → discardRecoveryRequestsOnShutdown closes every Live slot). A popped-but-not-yet-resolved
+        //   obligation (Live + empty transport/durable/counters) would otherwise be a silent false-positive
+        //   "drained". Elevating it into the predicate forces such a case to report not-drained. The single −1
+        //   authority (RecoveryAdmissionTable::resolve, idempotent) guarantees liveCount_==0 once discard runs.
+        && coordinator_.liveLogicalRecoveryObligationCount() == 0;
 }
 
 void RuntimeIntentCoordinator::ShutdownScheduler::requestShutdown() noexcept {
@@ -810,58 +817,116 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 //   transport（push 成功）/ durable（queue full → recoveryAdmissionPending_）とも true
 //   （INV-X1-2: queue full ≠ Recovery lost）。shutdown gate による discard は false（wake 不要）。
 bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
-                                                          const convo::RuntimeBuildSnapshot& buildSource,
-                                                          PublicationEpoch epoch) noexcept
+                                                   const convo::RuntimeBuildSnapshot& buildSource,
+                                                   PublicationEpoch epoch) noexcept
 {
-    // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。
-    //   requestShutdown()（CoordinatorState::ShuttingDown）確定後は Recovery を enqueue しない。
-    //   CoordinatorLoop::run() の先頭 shutdown check は phase execution と atomic ではなく、
-    //   in-flight runCoordinatorPhase 中に shutdown が発生しても、submit 側のこの gate が
-    //   Recovery admission の最終 linearization point になる（Admission/Notify authority は
-    //   Coordinator、shutdown boundary は Recovery admission が担当 — Authority Singularization）。
-    //   閉鎖後の submit は silent loss ではなく ShutdownDiscard として観測可能に記録する（INV-5）。
-    //   本 gate は reservation（pendingIntentCount_ fetchAdd）より前で評価するため、閉鎖後は
-    //   counter に触れない（counter == actual residency の不変条件を維持 — dash §1.1.6）。
+    // ★ work88 (P2-4 監査補正 — Step B: Recovery admission の shutdown gate)。 (unchanged)
     if (convo::consumeAtomic(state_, std::memory_order_acquire) == CoordinatorState::ShuttingDown)
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
         return false;   // shutdown discard — wake 不要（§1.9 Phase E）
     }
 
-    // ★ dash2 §1.7 (Phase G R7 修正, 2026-08-15): epoch は caller（submitRecoveryIntent）が
-    //   RuntimeStore::current（RuntimeWorldAuthority::observePublishedWorld）から取得して明示的に
-    //   渡す。Coordinator は currentWorld_ を参照しない（CW-3b で非更新）。RecoveryIntent::epoch
-    //   は emit 時 publicationEpoch の metadata（FIFO/epoch 検証用）— Phase E の lost-wake /
-    //   stale-discard invariant（intentId / generation ベース）には影響しない。
+    // ★ D105-R5-10: opportunistically re-drive any deferred Live obligation before processing this
+    //   submission. Delivery resources freed by prior takes/drains are reused promptly. Runs on the
+    //   CoordinatorLoop (producer) thread only — SPSC-safe for recoveryIntentQueue_ / pendingRecoveryAdmission_.
+    //   CoalesceIdentity is resolved up-front so we can snapshot whether THIS target was deferred (delivery==None)
+    //   BEFORE redrive runs; if redrive attaches the delivery in this same call, the coalesced resubmit below
+    //   must not push a second representation (R10-3 / C16 single representation).
+    const CoalesceIdentity cid{
+        quarantinedHandle,
+        { buildSource.rebuildFingerprint.irIdentityHash,
+          buildSource.rebuildFingerprint.convolutionConfigHash,
+          buildSource.rebuildFingerprint.dspParameterHash }
+    };
+    const bool wasDeferredBefore = [&]() noexcept -> bool {
+        const std::size_t e = recoveryAdmissions_.findByKey(cid);
+        if (e == recoveryAdmissions_.kCapacity) return false;
+        return recoveryAdmissions_.slot(e).delivery == ObligationDeliveryState::None;
+    }();
+    redriveDeferredRecoveryObligations();
+
+    // ★ dash2 §1.7 (Phase G R7 修正): epoch は caller が渡す。Coordinator は currentWorld_ を参照しない。
     RecoveryIntent intent{
         quarantinedHandle,
         epoch,
         nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed),
+        std::uint64_t{0},   // obligationId (assigned below from oblId)
         buildSource
     };
 
-    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push):
-    //   recoveryIntentQueue_ は SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）。
-    //   push 失敗（full = Builder が遅延）は Recovery Intent の drop を意味し、INV-5 違反。
-    //   drop は診断カウンタに記録する（INV-5-1: drop 時は pendingIntentCount_ 不変）。
-    //   reservation-before-push: push 前に fetchAdd → push 失敗時は fetchSub で rollback。
-    //   これにより pop 成功時 fetchSub（popRecoveryRequest）と整合し、shutdown の
-    //   isFullyDrained が永久に false になるのを防ぐ。
+    // ── ★ D105-R5-8: Logical Recovery Obligation admission protocol (RecoveryAdmissionTable) ──
+    //   Coalesce by semantic target (build fingerprint): reuse an existing Live obligation (ΔL = 0).
+    //   Otherwise enforce L < 32: on capacity exhaustion REJECT (no obligation, no transport).
+    // ★ D105-R5-9 MUST-3: CoalesceIdentity = quarantinedHandle + SemanticRecoveryTarget.
+    //   Two distinct handles with identical fingerprints are NOT coalesced (R8 §4 counterexample).
+    // (cid resolved above, before redrive — see D105-R5-10 wasDeferredBefore snapshot)
+    std::uint64_t oblId = 0;
+    std::size_t slotIdx = recoveryAdmissions_.kCapacity;
+    const std::size_t existing = recoveryAdmissions_.findByKey(cid);
+    if (existing != recoveryAdmissions_.kCapacity) {
+        // coalesce: reuse existing Live obligation (R5-rev1 Option 1 — ΔL = 0)
+        oblId = recoveryAdmissions_.slot(existing).id.load(std::memory_order_acquire);
+        slotIdx = existing;
+        recoveryAdmissions_.slot(existing).intentId = intent.intentId; // diagnostic refresh
+        convo::fetchAddAtomic(recoveryCoalescedCount_, std::uint64_t{1}, std::memory_order_release);
+        // ★ D105-R5-10: if THIS submission's redrive just attached the delivery to a previously-deferred
+        //   obligation, the redrive already enqueued the single transport/durable representation — do NOT
+        //   push a second one (R10-3 no-double-delivery; C16 single representation). Resubmissions of an
+        //   obligation already delivered before redrive (e.g. fillRecoveryQueue) still fall through and re-push.
+        if (wasDeferredBefore && recoveryAdmissions_.slot(existing).delivery != ObligationDeliveryState::None)
+            return true;
+    } else {
+        const auto ins = recoveryAdmissions_.tryInsert(cid);
+        if (!ins) {
+            // ★ D105-R5-8: capacity exhausted (L == 32) — reject (INV-X1-7). No obligation, no transport.
+            convo::fetchAddAtomic(recoveryCapacityExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
+            return false;
+        }
+        slotIdx = *ins;
+        auto& slot = recoveryAdmissions_.slot(*ins);
+        oblId = slot.id.load(std::memory_order_acquire);
+        slot.handle = quarantinedHandle;
+        slot.epoch = epoch;
+        slot.intentId = intent.intentId;
+        slot.buildSource = buildSource;
+    }
+
+    // NOTE (D105-R5-10): a coalesced re-submission is ALLOWED to re-push its transport intent (this is how
+    //   recoveryIntentQueue_ (256) fills to capacity — see testRecoveryDurableAdmission / fillRecoveryQueue,
+    //   where the obligation was ALREADY delivered (Transport/Durable) before redrive, so wasDeferredBefore is
+    //   false and we fall through to the push below). The §5 "no double delivery" guarantee for a DEFERRED
+    //   obligation is enforced two ways: (a) redriveDeferredRecovery only acts on delivery==None, never
+    //   re-attaching a second representation to one that already has one; (b) the coalesce branch above returns
+    //   early (wasDeferredBefore && delivery!=None) when THIS submission's redrive already enqueued the single
+    //   representation — so C16 (deferred → same-key resubmit) yields exactly ONE transport representation.
+
+    // ★ D105-R5-8 §4: carry obligationId on the transport intent (and durable fallback below).
+    intent.obligationId = oblId;
+
+    // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push): (unchanged)
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
+        recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::Transport;   // ★ D105-R5-10
         return true;   // transport recovery exists（§1.9 Phase E — wake 条件）
     }
 
-    // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。
-    //   transport residency から rollback（fetchSub）し、durable admission state に保持する
-    //   （recoveryAdmissionPending_ = true）。drop カウンタ（recoveryIntentDropCount_）は
-    //   queue saturation の診断として維持（INV-X1-3 — telemetry 削除しない）。
-    //   1 logical admission = 1 reservation（INV-X1-5）— coalesce で reservation を増やさない。
-    //   durable admission は queue residency と二重計上しない（INV-X1-6）。
+    // ★ work88 (X1 §6.1): queue full ≠ Recovery lost（INV-X1-2）。 (durable fallback now carries obligationId)
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
 
-    // durable admission へ保持（coalesce: 単一スロット — 既存 durable があれば最新で上書き）
+    // ★ D105-R5-9 MUST-2 + D105-R5-10: never clobber a distinct live obligation's ONLY delivery representation.
+    //   The single durable slot may already hold a DIFFERENT obligation (B). Overwriting B would drop
+    //   B's delivery while B is still Live (a leak). In that case we must NOT overwrite: defer this
+    //   obligation's delivery (stays Live, delivery==None) and let B keep its slot. The re-drive
+    //   (D105-R5-10) rediscovers it when the occupied slot frees.
+    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission
+        && pendingRecoveryAdmission_.recoveryObligationId != oblId) {
+        recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::None;   // ★ D105-R5-10: deferred
+        convo::fetchAddAtomic(recoveryRetryDeferredCount_, std::uint64_t{1}, std::memory_order_release);
+        return true;   // obligation stays Live; delivery re-driven when the occupied slot frees
+    }
+    // durable admission へ保持（単一スロット — 空、または同じ obligation なら最新で上書き）
     pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
     pendingRecoveryAdmission_.pending = true;
     pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
@@ -870,9 +935,124 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     pendingRecoveryAdmission_.handle = quarantinedHandle;
     pendingRecoveryAdmission_.epoch = epoch;
     pendingRecoveryAdmission_.intentId = intent.intentId;
+    pendingRecoveryAdmission_.recoveryObligationId = oblId;   // ★ D105-R5-8
     convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
+    recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::Durable;   // ★ D105-R5-10
     return true;   // durable recovery exists（INV-X1-2: queue full ≠ Recovery lost — §1.9 Phase E）
 }
+
+// ★ D105-R5-9: single Completion Authority (idempotent, lock-free, ISR-safe).
+//   Transitions the first Live→terminal for the given id via the table's id-based resolve();
+//   subsequent calls (same id) are no-ops. Called from onPublishCommitted (ISR, Route B),
+//   trySubmitImpl (RebuildThread, Route A) and submitPublishRequest rejection branches (Route C).
+void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept
+{
+    if (obligationId == 0)
+        return;
+    // ★ D105-R5-9 MUST-1: Retry keeps the obligation Live (ΔL = 0); the durable admission is re-armed
+    //   at the transport layer (settlePendingRecoveryAdmission(true)). Only terminal resolutions perform
+    //   the single −1 via the table's id-based resolve (which re-scans by id — no cached index, no ABA).
+    if (outcome == RecoveryOutcome::Retry)
+        return;
+    const ObligationState terminal = (outcome == RecoveryOutcome::Published)          ? ObligationState::ResolvedSuccess
+                               : (outcome == RecoveryOutcome::StaleSuperseded)   ? ObligationState::ResolvedStaleSuperseded
+                               : (outcome == RecoveryOutcome::ShutdownDiscarded) ? ObligationState::ShutdownDiscarded
+                               :                                                   ObligationState::ResolvedFailed;
+    if (recoveryAdmissions_.resolve(obligationId, terminal)
+        && outcome == RecoveryOutcome::ShutdownDiscarded)
+        convo::fetchAddAtomic(recoveryObligationShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
+// ★ D105-R5-9 MUST-2: guarded re-arm for a Retry obligation. Only touches the durable slot when it
+//   already holds THIS obligation in Building state; never overwrites a distinct live obligation.
+void RuntimeIntentCoordinator::rearmRecoveryRetry(std::uint64_t obligationId) noexcept
+{
+    if (obligationId == 0)
+        return;
+    if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::Building
+        && pendingRecoveryAdmission_.recoveryObligationId == obligationId)
+        settlePendingRecoveryAdmission(true);
+}
+
+// ★ D105-R5-10: re-drive every Live obligation that currently has NO delivery representation
+//   (delivery==None, i.e. a deferred obligation). Called only from the CoordinatorLoop (producer)
+//   thread — SPSC-safe for recoveryIntentQueue_ and pendingRecoveryAdmission_. O(kCapacity=32).
+//   ΔL=0: never inserts a new obligation or terminates one; only re-attaches a delivery representation
+//   to an EXISTING Live obligation (existing id + buildSource preserved).
+void RuntimeIntentCoordinator::redriveDeferredRecoveryObligations() noexcept
+{
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        auto& s = recoveryAdmissions_.slot(i);
+        if (s.state.load(std::memory_order_acquire) != ObligationState::Live)
+            continue;
+        if (s.delivery != ObligationDeliveryState::None)
+            continue;   // already has a delivery representation — do not re-send (§5)
+        redriveDeferredRecovery(s.id.load(std::memory_order_acquire));
+    }
+}
+
+// ★ D105-R5-10: re-attach a delivery representation to ONE existing Live obligation. Restores the
+//   obligationId + buildSource from the table record (NO new obligation, NO new id). On success the
+//   obligation's delivery residency is set; if BOTH resources are busy it remains deferred (delivery==None)
+//   and is retried on a later redrive opportunity. Idempotent: a non-None delivery state is a no-op.
+void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationId) noexcept
+{
+    if (obligationId == 0)
+        return;
+    std::size_t idx = recoveryAdmissions_.kCapacity;
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        if (recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire) == obligationId) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == recoveryAdmissions_.kCapacity)
+        return;   // unknown / mismatched id → no-op (do not fabricate an obligation)
+    auto& s = recoveryAdmissions_.slot(idx);
+    if (s.state.load(std::memory_order_acquire) != ObligationState::Live)
+        return;
+    if (s.delivery != ObligationDeliveryState::None)
+        return;   // idempotent: already delivered (no duplicate)
+
+    convo::fetchAddAtomic(recoveryRetryRedriveCount_, std::uint64_t{1}, std::memory_order_release);
+
+    RecoveryIntent intent{
+        s.handle,
+        s.epoch,
+        nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed),
+        std::uint64_t{0},   // obligationId (assigned below from obligationId)
+        s.buildSource
+    };
+    intent.obligationId = obligationId;   // preserve the existing obligation id (no new id issued)
+
+    // Durable slot takes priority if free (single slot; admit THIS obligation, not a new one).
+    if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::NoAdmission) {
+        pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
+        pendingRecoveryAdmission_.pending = true;
+        pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
+        pendingRecoveryAdmission_.buildSource = s.buildSource;
+        pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
+        pendingRecoveryAdmission_.handle = s.handle;
+        pendingRecoveryAdmission_.epoch = s.epoch;
+        pendingRecoveryAdmission_.intentId = intent.intentId;
+        pendingRecoveryAdmission_.recoveryObligationId = obligationId;
+        convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
+        s.delivery = ObligationDeliveryState::Durable;
+        return;
+    }
+
+    // Else attempt transport queue.
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    if (recoveryIntentQueue_.push(intent)) {
+        s.delivery = ObligationDeliveryState::Transport;
+        return;
+    }
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
+    // Both resources busy → remain deferred (delivery==None); ΔL=0; retry on a later redrive opportunity.
+    convo::fetchAddAtomic(recoveryRetryRedriveFailureCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
 
 // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
 //   二十六次レビュー（必須修正1）: destructive dequeue ではなく DurablePending → Building の
@@ -890,8 +1070,10 @@ RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
         pendingRecoveryAdmission_.handle,
         pendingRecoveryAdmission_.epoch,
         pendingRecoveryAdmission_.intentId,
+        pendingRecoveryAdmission_.recoveryObligationId,
         pendingRecoveryAdmission_.buildSource
     };
+    intent.obligationId = pendingRecoveryAdmission_.recoveryObligationId;   // ★ D105-R5-8
     // ★ lease: DurablePending → Building（クリアしない）。build 失敗時は Building → DurablePending へ戻す。
     pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::Building;
     return intent;
@@ -963,6 +1145,15 @@ void RuntimeIntentCoordinator::discardRecoveryRequestsOnShutdown() noexcept
     while (popRecoveryRequest())
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+    }
+    // ★ D105-R5-8: close all Live logical obligations (ShutdownDiscarded) — table-centric shutdown.
+    //   Routes through the single Completion Authority (resolveRecoveryObligation → table.resolve) so the
+    //   −1 stays idempotent (CAS Live→terminal); a concurrent ISR completion that wins the CAS makes
+    //   shutdown skip it (no double −1, no L underflow). Delivery discard below does NOT touch L.
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        const std::uint64_t oblId = recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire);
+        if (oblId != 0)
+            resolveRecoveryObligation(oblId, RecoveryOutcome::ShutdownDiscarded);
     }
 }
 

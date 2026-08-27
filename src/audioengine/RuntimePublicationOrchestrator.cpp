@@ -186,6 +186,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         telemetryRecorder_.recordFailure(FailureStage::Execution,
             FailureReason::PublishFailed, "trySubmit:build",
             correlationId.shortValue(), nowUs);
+        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
@@ -249,9 +250,10 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
                 static_cast<uint64_t>(req.generation), 0,
                 PublishStage::Built, nowUs);
             telemetryRecorder_.recordFailure(FailureStage::Execution,
-                FailureReason::PublishFailed, "trySubmit:rebuild",
-                correlationId.shortValue(), nowUs);
-            return PublicationAdmission::Decision::RejectedNotFinalized;
+            FailureReason::PublishFailed, "trySubmit:rebuild",
+            correlationId.shortValue(), nowUs);
+        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
+        return PublicationAdmission::Decision::RejectedNotFinalized;
         }
     }
 
@@ -297,6 +299,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   publish 失敗時点で shutdown 中なら RejectedShutdown、それ以外は
         //   RejectedPublishFailure（内部失敗）を返す。ownership はどちらでも
         //   destroyRolledBackDSP() により回収済み（decision 分類から独立）。
+        // ★ D105-R5-8: publish failure → terminal obligation (no leak)
+        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);
         if (engine_.isShutdownInProgress())
             return PublicationAdmission::Decision::RejectedShutdown;
         return PublicationAdmission::Decision::RejectedPublishFailure;
@@ -304,6 +308,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
 
     juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish SUCCEEDED gen="
         + juce::String(req.generation));
+    // ★ D105-R5-8: Route A completion authority — publish succeeded ⇒ resolve obligation.
+    engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Published);
     // ★ v19: StateOwner + TelemetryRecorder: Published 記録
     stateOwner_.onPublished(correlationId.shortValue());
     telemetryRecorder_.recordProgress(correlationId,
@@ -326,7 +332,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     return PublicationAdmission::Decision::Accepted;
 }
 
-void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId seqId) noexcept {
+void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId seqId, std::uint64_t recoveryObligationId) noexcept {
     // ★ (a) Completion layer — ISR post-commit notification (not via IntentHandlerContext).
     //   Invoked from the ISR PublishExecutor once authority.commit() succeeds; records the
     //   committed sequence + progress timestamp so the P1-6 stall observer tracks ISR commits.
@@ -335,6 +341,9 @@ void RuntimePublicationOrchestrator::onPublishCommitted(PublicationSequenceId se
     convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
     // ★ B3/C2: per-receipt completion — Producer はこの seqId で自分の publish 完了を待てるようになる。
     engine_.notifyPublishReceipt(seqId);
+    // ★ D105-R5-8: Route B completion authority. recoveryObligationId == 0 for non-recovery
+    //   publishes ⇒ resolveRecoveryObligation early-returns (no-op).
+    engine_.runtimePublicationBridge_.resolveRecoveryObligation(recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Published);
 }
 
 void RuntimePublicationOrchestrator::submitPublishRequest(
@@ -344,6 +353,15 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     const auto nowUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    // ★ D105-R5-9 MUST-1: route a rejected recovery obligation through the single Completion Authority.
+    //   Recovery obligations that fail admission must still be resolved (otherwise the Live slot leaks,
+    //   permanently consuming one of 32). Normal (recoveryObligationId==0) publishes are unaffected.
+    //   All branches route through resolveRecoveryObligation → table.resolve → single −1 (idempotent).
+    auto resolveIfRecovery = [&](RuntimeIntentCoordinator::RecoveryOutcome outcome) noexcept {
+        if (req.recoveryObligationId != 0)
+            engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, outcome);
+    };
 
     switch (decision) {
         case PublicationAdmission::Decision::Accepted:
@@ -356,6 +374,7 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::StaleGeneration, "submitPublishRequest:stale",
                 0, nowUs);
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);  // ★ D105-R5-9: −1
             return;
         default:
             return;
@@ -364,22 +383,32 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::ValidationFailed, "submitPublishRequest:notFinalized",
                 0, nowUs);
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Failed);           // ★ D105-R5-9: −1
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::QueuePressure, "submitPublishRequest:pressure",
                 0, nowUs);
+            // ★ D105-R5-9 MUST-2: QueuePressure → Retry (ΔL=0, obligation stays Live). Re-arm the
+            //   durable slot only when it already holds THIS obligation; otherwise delivery re-drive is
+            //   deferred (documented single-slot limitation). Never overwrites a distinct live obligation.
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Retry);
+            if (req.recoveryObligationId != 0)
+                engine_.runtimePublicationBridge_.rearmRecoveryRetry(req.recoveryObligationId);  // ★ D105-R5-9: guarded re-arm
             return;
         case PublicationAdmission::Decision::RejectedShutdown:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Shutdown,
                 FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
                 0, nowUs);
+            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded); // ★ D105-R5-9: −1 (idempotent)
             return;
         // ★ 15-P-6: publish-time 内部失敗 — shutdown telemetry に誤計上しない。
         //   FailureStage::Execution / FailureReason::PublishFailed で記録し、
         //   recovery suppression（shutdown 扱い）を回避する。
+        //   NOTE: trySubmitImpl already resolved this obligation (Failed) before returning
+        //   RejectedPublishFailure, so no second resolve is needed here (would be a no-op anyway).
         case PublicationAdmission::Decision::RejectedPublishFailure:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Execution,

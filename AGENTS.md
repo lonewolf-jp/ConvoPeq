@@ -1,16 +1,18 @@
-# Token Reduction — 常時運用ルール（2026-07-29 確定・2026-08-10・08-14・08-15 再確認・2026-08-23 再確認）
+# Token Reduction — 常時運用ルール（2026-07-29 確定・2026-08-10・08-14・08-15 再確認・2026-08-23 再確認・2026-08-27 commandcode環境固定）
 
-## ★ 絶対遵守 — 全セッションで3層パイプラインを常時使用
+## ★ 絶対遵守 — commandcode環境では常時かつ必ず3層パイプラインを使用
 
-以降の全セッションにおいて、**headroom MCP + context-mode MCP + RTK (WSL版) の3層パイプラインを常時使用すること**がユーザーから明示的に指示された。
+commandcode環境では、**headroom (proxy / CLI) + context-mode MCP + RTK (WSL版) の3層パイプラインを「常時かつ必ず」使用すること**がユーザーから明示的に指示された。
 
-**【2026-08-15 再確認】「今後は常時かつ必ず」使用する。AI作業に支障のない範囲で適正なトークン削減を行うため、3つの役割分担を適宜最適化する。headroom MCP/CLI がうまく動作しない場合は context-mode MCP を優先して使用する。**
+**【2026-08-27 確定】トークン削減性能を AI との動作に支障のない範囲で最適化するため、3 系統の役割を適宜最適な形で分担する。**
+- **headroom は MCP ではなく proxy mode（`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`）で運用**し、CLI の `headroom compress` / `headroom retrieve <hash>` で大きなコンテキストを手動保存する。
+- proxy/CLI がうまく動作しない場合は context-mode MCP を優先して使用する。
 
 ## 必須3系統
 
 | 系統 | 役割 | 自動/手動 |
 | --- | --- | --- |
-| **Headroom MCP** | コンテキスト内の大きなコンテンツを圧縮（60-95%削減） | 手動で能動的利用 |
+| **Headroom (proxy + CLI)** | トークン圧縮は ANTHROPIC_BASE_URL 経由の proxy が常時稼働。大きなコンテキストの手動保存は `headroom compress` / `headroom retrieve <hash>` (CLI) | proxy 自動 / CLI 手動 |
 | **Context-Mode MCP** | ファイル分析・並列実行・検索（Read/Grep代替、93-99%削減） | 手動で能動的利用（最優先） |
 | **RTK (WSL版)** | CLIコマンド出力を60-90%圧縮 | 手動でprefix付与（常時） |
 
@@ -22,7 +24,7 @@
 | 複数コマンド並列実行 | **ctx_batch_execute** | 1回の呼び出しで最大8並列 |
 | 過去内容の検索 | **ctx_search** | セッションメモリ＋インデックス化済みデータ |
 | Web取得 | **ctx_fetch_and_index → ctx_search** | 生HTMLはコンテキストに入れない |
-| 大きなコンテキスト保存 | **headroom_compress** | 復元は headroom_retrieve(hash) |
+| 大きなコンテキスト保存 | **headroom_compress** | 復元は `headroom retrieve <hash>` (CLI) |
 | CLIコマンド | **rtk (WSL版)** | `wsl bash -c '...rtk <cmd>'` |
 | ファイル編集 | **Read + Edit** | 編集時のみ通常ツールを使用 |
 | コード検索 | AiDex > serena > semble > ctx_execute > WSL CLI | 優先順位順 |
@@ -37,7 +39,7 @@
 
 ## フォールバック
 
-- **headroom MCP が動作しない場合 → context-mode MCP を優先して使用する（無理にheadroomを使わない）**
+- **headroom proxy/CLI が動作しない場合 → context-mode MCP を優先して使用する（無理にheadroomを使わない）**
 - proxy起動失敗: ANTHROPIC_BASE_URL未設定 → 直接API (支障なし)
 - proxy異常終了: プラグインが自動再起動 + 30秒モニター
 - RTK非対応コマンド: 素通し (rewrite不能時)

@@ -2548,7 +2548,7 @@ public:
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
-    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {});
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {}, std::uint64_t recoveryObligationId = 0);
     // acquire: requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
@@ -4607,6 +4607,7 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     intent.payload.publish.mappedGeneration = mappedGen;
     intent.payload.publish.boundary = convo::isr::RuntimeBoundary::NonRTWorld;
     intent.payload.publish.decision = decision;
+    intent.payload.publish.recoveryObligationId = 0;   // ★ D105-R5-8: Route B (non-recovery) ⇒ no obligation
     if (!runtimePublicationBridge_.enqueuePublicationIntent(intent))
     {
         // キュー full: 移譲した Owner を取り戻し、registry をクリアして rollback に委ねる。

@@ -143,7 +143,7 @@ public:
     //   Single seam for "publish committed"; the ISR PublishExecutor routes here
     //   (NOT via IntentHandlerContext), keeping intent handlers HANDLER-1 (pure).
     //   Audio-thread trySubmit retains its inline completion (unchanged).
-    void onPublishCommitted(PublicationSequenceId seqId) noexcept;
+    void onPublishCommitted(PublicationSequenceId seqId, std::uint64_t recoveryObligationId) noexcept;
 
     // ★ A3 Step 5-3: access to the stateless publish-completion facade (ADR-D2), owned by
     //   the orchestrator (audio-thread world-publish path). Bound into IntentHandlerContext

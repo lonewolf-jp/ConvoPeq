@@ -7,7 +7,8 @@
         "ms-vscode.cmake-tools",                 // CMake プロジェクトのビルド・構成
         "twxs.cmake",                            // CMake 文法ハイライト
         "xaver.clang-format",                    // clang-format 統合（手動フォーマット用）
-        "cschlosser.doxdocgen"                   // Doxygen コメント生成補助
+        "cschlosser.doxdocgen",                  // Doxygen コメント生成補助
+        "llvm-vs-code.clangd"                    // clangd LSP (ソース解析エンジン)
     ],
 
     // ── 非推奨拡張機能 ────────────────────────────────────────────────

@@ -1,30 +1,16 @@
 {
-  "acquireObserved": 47,
-  "releaseObserved": 46,
+  "acquireObserved": 121,
+  "releaseObserved": 120,
   "observedOutstandingEstimate": 1,
   "observedOutstandingMax": 1,
   "windowTag": 0,
   "windowTagName": "normal",
-  "measurementWindow": {
-    "windowId": 11,
-    "startAcquire": 43,
-    "startRelease": 42,
-    "endAcquire": 47,
-    "endRelease": 46,
-    "finalEstimate": 1,
-    "windowMax": 1,
-    "windowStartTimestampUs": 104622900283,
-    "windowEndTimestampUs": 104623412808,
-    "sampleCount": 5,
-    "maxSamplingGapUs": 110914,
-    "missedTickCount": 0,
-    "counterWrapped": 0
-  },
+  "measurementWindow": null,
   "referenceObserver": {
-    "referenceAcquireCount": 47,
-    "referenceReleaseCount": 47,
+    "referenceAcquireCount": 121,
+    "referenceReleaseCount": 121,
     "referenceOutstanding": 0,
-    "referenceMax": 2,
-    "Ew": 1
+    "referenceMax": 0,
+    "Ew": -1
   }
 }

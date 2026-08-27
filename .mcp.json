@@ -1,0 +1,26 @@
+{
+    "mcpServers": {
+        "serena": {
+            "type": "stdio",
+            "command": "serena",
+            "args": [
+                "start-mcp-server",
+                "--project",
+                "C:\\VSC_Project\\ConvoPeq",
+                "--transport",
+                "stdio"
+            ]
+        },
+        "context-mode": {
+            "type": "stdio",
+            "command": "context-mode"
+        },
+        "aidex": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"
+            ]
+        }
+    }
+}

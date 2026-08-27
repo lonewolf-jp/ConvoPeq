@@ -1,0 +1,5 @@
+[0/2] Re-checking globbed directories...
+[1/5] Linking CXX executable ConvoPeq_artefacts\Debug\ConvoPeq.exe
+[2/5] Building CXX object CMakeFiles\ISRSemanticValidationTests.dir\Debug\src\tests\ISRSemanticValidationTests.cpp.obj
+[3/5] Building CXX object CMakeFiles\ISRSemanticValidationTests.dir\Debug\src\audioengine\ISRRuntimePublicationCoordinator.cpp.obj
+[4/5] Linking CXX executable Debug\ISRSemanticValidationTests.exe

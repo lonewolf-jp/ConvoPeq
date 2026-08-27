@@ -1,13 +1,61 @@
 CompileFlags:
   CompilationDatabase: .
+  Compiler: cl.exe
+  Remove:
+    - /nologo
+    - /bigobj
+    - /Zm400
+    - /MP1
+    - /Ob0
+    - /Ob2
+    - /Od
+    - /O2
+    - /Ot
+    - /Zi
+    - /RTC1
+    - /W4
+    - /wd4100
+    - /wd4189
+    - /fp:fast
+    - /Gw
+    - /Gy
+    - /FS
+    - /Fo*
+    - /Fd*
+    - /INCREMENTAL
+    - /Qipo
+    - /Qmkl*
+    - /QxCORE-AVX2
+    - /arch:AVX2
+    - /GL
   Add:
-    - "/I"
-    - "C:/Program Files (x86)/Intel/oneAPI/mkl/latest/include"
-    - "-D"
-    - "JUCE_DSP_USE_INTEL_MKL"
-    - "/I"
-    - "C:/Program Files (x86)/Intel/oneAPI/ipp/2026.0/include"
-    - "/I"
+    - "-std=c++20"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq/src"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq/src/audioengine"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq/src/convolver"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq/src/core"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq/src/eqprocessor"
+    - "-I"
+    - "C:/VSC_Project/ConvoPeq/build/ConvoPeq_artefacts/JuceLibraryCode"
+    - "-I"
     - "C:/VSC_Project/ConvoPeq/JUCE/modules"
-    - "/I"
+    - "-I"
     - "C:/VSC_Project/ConvoPeq/r8brain-free-src"
+    - "-I"
+    - "C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/include"
+    - "-I"
+    - "C:/Program Files (x86)/Intel/oneAPI/ipp/2026.0/include"
+
+Index:
+  StandardLibrary: true
+  Background: Build
+
+Diagnostics:
+  MissingIncludes: Strict
