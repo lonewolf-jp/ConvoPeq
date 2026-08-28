@@ -160,6 +160,24 @@ placement: Transport / DurablePending / Building / Stalled
 - **INV-X1-7 改訂**: logical obligation の消失理由から「explicitly observable terminal failure」を**削除**。
   消失は **Success / Superseded / ShutdownDiscard** のみ。terminal failure は構造的非到達の観測可能化
   （Debug assert + telemetry）に留め、**disappearance 理由としては認めない**。
+- **★ D105-R21 amendment — transient failure ≠ terminal disposition**:
+  **transient build / publish / admission failure は logical obligation を消滅させない**。これらは
+  `Live` 状態のまま保持され、再試行される。構造:
+  ```
+  Live
+    -- transient failure -->
+  Live                     (ΔL = 0, delivery = None, consecutiveFailureCount++)
+  ```
+  - ΔL（`liveLogicalObligationCount` の差分）は **0** である（Live のまま）。
+  - `delivery` フィールドは **`None`** に修復される（P-B: stranded Transport/Durable → None）、
+    次の `redriveDeferredRecoveryObligations` サイクルで delivery が再付与される。
+  - `consecutiveFailureCount` は **+1** される（per-obligation retry budget の消費）。
+  - terminal disposition は行われない（slot は Live のまま解放されない）。
+  - **RetryExhaustion は transient failure そのものではなく、retry budget exhaustion による terminal
+    disposition である**。`consecutiveFailureCount == kMaxObligationConsecutiveFailures`（K=4）のとき
+    のみ発火する（後述 D15.2 / D18.3）。
+- **重要**: 本節を「failure なら `Failed`」と一般化してはならない。`Failed` terminal は retry budget
+  exhaustion の唯一の合法的発火点であり、transient failure の直接結果ではない。
 - **capacity の根拠（決定待ち E）**: `kMaxLogicalRecoveryObligations` の値は「同時 quarantine episode 数」の
   **invariant とセット**で定める。候補 32: 単一ユーザーの同時 config-failure エピソード数は実用上 1〜数個。
   coalesce/supersede により live obligation ≤ concurrent episodes。32 ≫ 実同時 episode。
@@ -184,13 +202,15 @@ admissionEventCount
 ownership conservation:
     transportCount + durableCount + buildingCount + stalledCount
         + supersededCount + shutdownDiscardCount
+        + retryExhaustedCount
         == admittedLogicalObligationCount
 
-（terminal-failure は消失理由に含めない — D14.3。Debug assert のみ）
+（terminal-failure は消失理由に含めない — D14.3。Debug assert のみ。
+  transient failure は terminal count ではない — D14.3 amendment。）
 ```
 - **INV-X1-5 厳密化**: 1 logical obligation = exactly 1 reservation（reservation-first・D14）。
   `logicalObligationCount ≤ admissionEventCount`（coalesce は logical 数を増やさない）。
-- **INV-X1-7 厳密化**（D14.3 反映）:
+- **INV-X1-7 厳密化**（D14.3 / D15.2 反映）:
   ```
   For every admitted Recovery obligation:
       exactly one of Transport / DurablePending / Building / Stalled owns the obligation.
@@ -200,8 +220,22 @@ ownership conservation:
       overwrite a non-supersedable obligation,
       cancel a Building lease through supersession.
   A logical obligation may disappear only by:
-      Success, explicit Superseded decision, ShutdownDiscard.
+      Success, explicit Superseded decision, ShutdownDiscard, RetryExhaustion.
   ```
+- **★ D105-R21 amendment — RetryExhaustion を disappearance set に追加**:
+  disappearance set は `{Success, Superseded, ShutdownDiscard, RetryExhaustion}` の **4 値**。
+  - **`ResolvedFailed` ⇔ `RetryExhaustion`**（意味論の限定）。`ResolvedFailed` を「一般的な failure
+    terminal」として定義しない。
+  - **`RetryExhaustion = consecutiveFailureCount reaches K = kMaxObligationConsecutiveFailures`**
+    （4）の単一定義。K=4 未満では `ResolvedFailed` を発火しない。
+  - **唯一の production 発火点**は `markTransientFailure()` の exhaustion branch
+    （`RuntimeIntentCoordinator::markTransientFailure` の `if (newCount >= K)` 分岐）— 他の
+    production 経路は `ResolvedFailed` を発火しない。`resolveRecoveryObligation(_, Failed)` の
+    production caller は **0**（C8 test のみ保持）。
+- **transient failure は conservation equation の terminal count には含めない**。transient failure は
+  `liveLogicalObligationCount` を減らず（ΔL=0）、terminal disposition ではない。仮に `transientFailureCount`
+  を tracking する場合、それは **telemetry / observability のみ**であり、conservation equation の右辺
+  （terminal count 側）には入れない。
 
 ---
 
@@ -313,7 +347,10 @@ Phase I:
 current occupancy と terminal disposition を分離:
 ```
 liveOwnershipCount      = transportCount + durableCount + buildingCount + stalledCount
-terminalDispositionCount= successCount + supersededCount + shutdownDiscardCount
+terminalDispositionCount= successCount
+                        + supersededCount
+                        + shutdownDiscardCount
+                        + retryExhaustedCount        // ★ D105-R21: 4 つ目の terminal count
 
 admittedLogicalObligationCount
     = liveOwnershipCount + terminalDispositionCount
@@ -324,7 +361,76 @@ admissionEventCount ≥ admittedLogicalObligationCount   （別 invariant・coal
 - `liveOwnershipCount` は **current ownership**（各時刻の占有）。
 - `terminalDispositionCount` は **累積 terminal**（monotone）。
 - Phase I では `supersededCount == 0`（D18.1 の不活性帰結）だが、式としては将来含めて正しい。
+- **★ D105-R21 amendment — `retryExhaustedCount` を terminalDispositionCount に追加**:
+  `RetryExhaustion` は disappearance set の 4 つ目の正当な値（D15.2 参照）。`resolved failed` を
+  terminalDispositionCount の構成要素として明示し、conservation equation の右辺に含める。
+  - **`transientFailureCount` は conservation equation に含めない**。transient failure は terminal
+    disposition ではなく（ΔL=0、Live のまま）、telemetry / observability のみで追跡する。
+  - 4 つの terminal count は **disjoint** である（同一 obligation は 1 種類のみの terminal を持つ）。
+    `retryExhaustedCount` は `markTransientFailure()` の exhaustion branch のみがインクリメントし、
+    `shutdownDiscardCount` は `resolveRecoveryObligation(_, ShutdownDiscarded)` のみがインクリメントする。
+  - `successCount` + `supersededCount` + `shutdownDiscardCount` + `retryExhaustedCount` =
+    `terminalDispositionCount`（重複なし、漏れなし）。
 - **INV-X1-5 厳密化**: `logicalObligationCount ≤ admissionEventCount`（coalesce は logical 数を増やさない）。
+
+**★ D105-R23 — D18.3 conservation を Phase-I production runtime 観測可能性に限定**:
+
+R22 audit で判明した通り、**Phase-I production runtime は `successCount` / `supersededCount` /
+`admittedLogicalObligationCount` / `admissionEventCount` を独立 counter として持っていない**。runtime が
+直接観測する counter は:
+
+- `recoveryAdmissions_.liveCount_`（Live logical obligation の現在数、`RecoveryAdmissionTable` 内）
+- `recoveryObligationShutdownDiscardCount_`（shutdown terminal の累積回数）
+- `recoveryRetryExhaustedCount_`（exhaustion terminal の累積回数）
+- `recoveryCoalescedCount_`（coalesce event の累積回数）
+- `recoveryCapacityExhaustedCount_`（admission rejection の累積回数）
+- `recoveryRetryDeferredCount_`、`recoveryRetryRedriveCount_`、`recoveryRetryRedriveFailureCount_`
+
+`successCount` / `supersededCount` は **別 counter として実装されていない**（terminal transition は
+すべて `table.resolve` を経由し、`liveCount_--` の atomic decrement としてのみ観測される）。
+
+R21 で導入された D18.3 改訂式は構造的には正しいが、runtime 観測可能性との対応が不完全。
+Phase-I production contract として、**runtime で直接検証可能な形**に限定する:
+
+```
+D18.3 (★ D105-R23 — Phase-I production observable form):
+    RecoveryAdmissionTable.liveCount_ == 0
+        iff
+    for every admitted obligation: terminal transition has occurred
+```
+
+- **意味**: `liveCount_ == 0` という single counter の状態が、**全 Live logical obligation の
+  terminal 完了**と等価。これは `RecoveryAdmissionTable::resolve` の `table.resolve` の atomic
+  decrement の結果として成立する。
+- **terminal type の disjointness**: 4 つの terminal type（Success / Superseded / ShutdownDiscard /
+  RetryExhaustion）は **disjoint**（同一 obligation は 1 種類のみの terminal を持つ）— `table.resolve` の
+  CAS が一度成功すれば他方は失敗するため。
+- **`successCount` / `supersededCount` の個別 counter 不在**: Phase-I production ではこれらは
+  **分離された観測点を持たない**。ただし、**terminal transition の type 自体は
+  `table.resolve(..., ResolvedSuccess)` / `ResolvedStaleSuperseded)` などの enum 値として
+  識別可能**。terminal telemetry（`recoveryObligationShutdownDiscardCount_` および
+  `recoveryRetryExhaustedCount_`）は ShutdownDiscarded と RetryExhaustion のみ個別観測し、
+  Success / Superseded は **未観測**。
+- **`admittedLogicalObligationCount` の不在**: 現行 production runtime は `admitted` counter を
+  保持していない。代わりに `liveCount_` と `recoveryCoalescedCount_` の差分（coalesce 補正）から
+  implied に reconstruct できるが、これは **invariant ではなく導出値**。
+
+**R21 D18.3 維持条項**:
+- `liveCount_ == 0` 状態が「全 Live obligation 消滅」と等価
+- 4 つの terminal type の disjointness
+- `transientFailureCount` を conservation terminal count に含めない
+
+**R21 D18.3 削除条項（Phase-I production contract から）**:
+- `liveOwnershipCount + 4 つの terminal = admittedLogicalObligationCount` の等式
+  （runtime 観測不能）
+- `admissionEventCount ≥ admittedLogicalObligationCount` の等式（`admissionEventCount` 未実装）
+- `supersededCount == 0`（Phase-I supersede 不活性）の文言（D18.1 supersede path 自体は
+  Phase-II deferred だが、Phase-I では superseded terminal は到達しないため不問）
+
+**Phase-II 復活条項**（D18.3 full form として再評価）:
+- 各 terminal ごとの個別 counter（successCount, supersededCount, etc.）
+- `admittedLogicalObligationCount` および `admissionEventCount` の独立 tracking
+- `supersededCount > 0` 時の挙動定義（Phase-II supersede 実装時）
 
 ### D18.4 Reservation semantics（ユーザー指摘3）
 **reservation は「新規 logical obligation の生成」に対して exactly once**（全 admission event ではない）:
@@ -361,6 +467,41 @@ SHUTDOWN_DISCARD: reservation release
   - R1 superseded by R2 で R2 が live なら episode は継続。
   - `episode closes iff liveLogicalObligationCount == 0`。
 
+**★ D105-R23 — D17.5 closure 文言を Phase-I production contract に整合**:
+D17.5 の文言「`liveLogicalObligationCount == 0`」自体は Phase-I production runtime で
+**直接 enforce されている**（`RecoveryAdmissionTable::resolve` 後の `liveCount_` decrement、
+D17.5 自体は不変）。ただし **`liveLogicalObligationCount` を「episode の closure 条件」と呼ぶのは
+不正確**になる。Phase-I production runtime には `RecoveryEpisodeId` という episode 概念が
+存在しないため、`liveCount_ == 0` は「episode closure」ではなく「**全 Live logical obligation の消滅**」
+を意味する。
+
+D17.5 を以下のように Phase-I production contract に整合させる:
+
+```
+D17.5 (★ D105-R23 改訂): Logical obligation domain closure
+    liveLogicalObligationCount == 0  iff  all admitted obligations are terminal
+```
+
+- **意味**: `liveLogicalObligationCount == 0` は logical obligation 集合全体が消滅したことを
+  示す。**RecoveryEpisodeId 単位ではない**（`RecoveryEpisodeId` は Phase-I production runtime に
+  存在しないため、`RecoveryEpisodeId` 単位の closure は意味をなさない）。
+- **Runtime enforcement**: `RecoveryAdmissionTable::liveCount_` の atomic decrement。
+  terminal transition（Success / Superseded / ShutdownDiscard / RetryExhaustion）の
+  いずれかが発生し `liveCount_` が `0` に到達したとき、本 invariant が成立。
+- **RetryExhaustion ≠ EpisodeClosure**:
+  D20.5 audit verdict を維持。1 obligation が `RetryExhaustion` で terminal になっても、
+  同じ `RecoveryEpisodeId`（Phase-II で導入予定）に他の Live obligation が存在するなら、
+  episode は**閉じない**。Phase-I production では「全 Live obligation 消滅」と等価。
+- **Future / Deferred (Phase-II)**:
+  D17.5 を「**`liveLogicalObligationCount == 0` 状態**」として **per-episode counter
+  (`liveLogicalObligationCount[RecoveryEpisodeId]`) へ一般化する**のは Phase-II。
+  Phase-II では D17.5 を以下のように re-state する:
+  ```
+  D17.5 (Phase-II): per-episode closure
+      liveLogicalObligationCount[E] == 0  iff  episode E is closed
+  ```
+  Phase-II では `RecoveryEpisodeId` 型の allocation と同時に実装する。
+
 ### D18.6 テスト行列更新（D15 修正 + coalesce/reservation）
 | # | テスト | 検証 |
 |---|--------|------|
@@ -369,6 +510,86 @@ SHUTDOWN_DISCARD: reservation release
 | **T22** | coalesce と budget 満杯 | budget 満杯でも既存同一 CoalesceIdentity への coalesce は成功（reservation 取得不要） |
 | **T23** | reservation lifetime | SUPERSEDE: incoming +1 → older release（Superseded 後） / SUCCESS・SHUTDOWN_DISCARD: release |
 | T15b | admissionEventCount ≥ admittedLogicalObligationCount | coalesce は event を増やすが logical 数を増やさない |
+| **★ D105-R21** T15c | conservation with retryExhaustedCount | liveOwnershipCount + successCount + supersededCount + shutdownDiscardCount + **retryExhaustedCount** == admittedLogicalObligationCount |
+| **★ D105-R21** T15d | 4 terminal count disjointness | 各 obligation は 1 種類のみの terminal を持つ（success/supersede/shutdown/retryExhaustion の disjointness） |
+| **★ D105-R21** T15e | transient failure is non-terminal | 3 回の `markTransientFailure` 呼び出し後: `liveLogicalObligationCount == 1`（ΔL=0）、`consecutiveFailureCount == 3`（K未満）、`recoveryRetryExhaustedCount == 0` |
+| **★ D105-R21** T15f | exhaustion only via K | 4 回目の呼び出し後: `liveLogicalObligationCount == 0`、`recoveryRetryExhaustedCount == 1`、`state == ResolvedFailed` |
+
+### D18.7 CoalesceIdentity — Phase-I production 実装との整合（★ D105-R23 — Path A 適用）
+
+D18.1 で定義された `CoalesceIdentity = { handle, RecoveryEpisodeId, SemanticRecoveryTarget }` は
+**Phase-II Future Design** として保持しつつ、Phase-I production contract として現行実装と整合する版を
+明示する:
+
+```
+D18.7 (★ D105-R23): Phase-I production CoalesceIdentity
+    CoalesceIdentity = { quarantinedHandle, SemanticRecoveryTarget }
+                      (RecoveryEpisodeId 成分なし — Phase-II deferred)
+```
+
+- **意味**: 現行 Production Runtime の `findByKey(cid)` (ISRRuntimePublicationCoordinator.h:344) は
+  `(handle, target)` のみをキーに取る。`RecoveryEpisodeId` 成分を追加すると現行実装と矛盾する。
+- **ソース確認**: `ISRRuntimePublicationCoordinator.cpp:836-841`:
+  ```cpp
+  const CoalesceIdentity cid{
+      quarantinedHandle,
+      { buildSource.rebuildFingerprint.irIdentityHash,
+        buildSource.rebuildFingerprint.convolutionConfigHash,
+        buildSource.rebuildFingerprint.dspParameterHash }
+  };
+  ```
+  上記は `(handle, SemanticRecoveryTarget)` のみで構成。`RecoveryEpisodeId` フィールドは存在しない。
+- **R5-9 MUST-3** (現行 Runtime 実装) は `CoalesceIdentity = { handle, SemanticRecoveryTarget }` を
+ 採用している。
+
+**Phase-I production の coalesce 規則**:
+- **same handle + same target** → **COALESCE**（現行実装で動作確認済み・R5-9 / T-R18-1 参照）
+- **same handle + different target** → **new logical obligation**（R3 §7.3 counterexample 確認）
+- **different handle** → **new logical obligation**（R5-9 MUST-3 参照 — handle が同一性の主軸）
+
+**★ D105-R23 重要条項 — O_max = 1 を主張しない**:
+D18.1（Phase-II Design）は `same target → same episode` を主張していたが、Phase-I production では
+`same handle + different target` が**同一 episode 内で複数 obligation を生成**し得る
+（R3 counterexample 確認）。これは **`O_max = 1` が Phase-I production では成立しない**ことを意味する。
+
+- 現行 Production の **effective `O_max` は ≥ 2**（上限なし）:
+  同一 handle が同一 episode lifetime 内で複数の異なる target を順次生成しうるため。
+- **`O_max = 1` は Phase-II Future Design** として保持。Phase-II では episode 層を導入した後、
+  same episode 内の multiple target を episode 終了まで buffer する仕組みが必要。
+
+**Future / Deferred (Phase-II)**:
+- `RecoveryEpisodeId` を `CoalesceIdentity` の 3 番目のフィールドとして追加
+- `nextRecoveryEpisodeId_` monotonic counter を allocation
+- `O_max = 1` を episode lifecycle 内で enforce（per-episode cap）
+
+### D18.8 Snapshot drift contract（★ D105-R23 — R3 counterexample を契約として固定）
+
+D18.7 で確認した通り、Phase-I production では `same handle + different target` が**同一 episode lifetime
+内で複数 obligation を生成**し得る。これは snapshot drift に起因する:
+
+```
+D18.8 (★ D105-R23): Snapshot drift contract
+    Phase-I production runtime では:
+
+    同一 handle H の recovery episode lifetime 中に、
+    `currentBuildSnapshot_` の値（→ buildSource.rebuildFingerprint.{3 hashes}）が変化し得る。
+    これは RebuildThread の非同期更新（UI Convolver / EQ 等の parameter 更新）に起因する。
+
+    snapshot drift による結果:
+    - 同一 handle H + target_T1 → obligation_O1（coalesce: 1 obligation のみ存在）
+    - 同一 handle H + target_T2 (≠ T1) → obligation_O2（new obligation, ΔL=+1）
+    - 結果: 同一 handle H に紐づく Live obligation 数は `1 + (snapshot drift 数)` に増加し得る
+```
+
+- **Phase-I production invariant**: `liveLogicalObligationCount ≤ 32` は維持される（`O_max` とは無関係）
+- **O_max = 1 不成立**: 同一 handle で複数 target を持つ Live obligation が存在し得る
+- **`E_max × O_max ≤ 32` 主張の撤回**: D18.8 が snapshot drift により `O_max ≥ 2` を構造的に
+  成立させるため、`E_max × O_max ≤ 32` は arithmetically unsatisfiable
+
+- **Future / Deferred (Phase-II)**:
+  - `currentBuildSnapshot_` を episode 開始時に immutable freeze し、episode lifetime 中の
+    同一性保証を runtime レベルで enforce
+  - `RecoveryEpisodeId` に基づく episode scope 内で coalesce を強制
 
 ---
 
@@ -409,6 +630,27 @@ new recovery episode → new RecoveryEpisodeId（monotonic / non-reused episode 
 - D17 の「episode authority が baseline を所有」と整合（閉鎖時 baseline release は安全 — 以後その
   RecoveryEpisodeId に到達不能）。
 
+**★ D105-R23 — D19.1 を Phase-II deferred として明示**:
+現行 Phase-I production runtime には `RecoveryEpisodeId` 型・`nextRecoveryEpisodeId_` counter・
+`recoveryClosedEpisodeRejectCount_` telemetry・baseline ownership authority が**未実装**
+（grep 0 hits）。D19.1 全体の文言は **Phase-II Future Design** として保持するが、
+**Phase-I production contract としては無効**。
+
+- **Phase-I production contract における closure の意味**:
+  D17.5 の文言（★ D105-R23 改訂版）だけが Phase-I production closure invariant として有効。
+  詳細は D17.5 を参照。
+
+**★ D105-R23 残存条項**:
+- 「`liveLogicalObligationCount == 0`」は **Phase-I production invariant** として保持
+  （D17.5 改訂版）
+- ただし「episode 」（`RecoveryEpisodeId` の単位）の意味は Phase-II まで deferred
+
+**★ D105-R23 D19.1 削除条項**:
+- `RecoveryEpisodeId 割当` (nextRecoveryEpisodeId_) → **Phase-II deferred**（runtime に存在しない）
+- `closed episode への admission / coalesce / supersede は REJECT` → **Phase-II deferred**（runtime に
+  関連する型が存在しない）
+- `D17 の「episode authority が baseline を所有」` → **Phase-II deferred**（baseline authority 未実装）
+
 ### D19.2 INV-X1-9 — Backpressure progress / deadlock-free（D14 refinement・P0 相当）
 ```
 When the logical-obligation budget is exhausted:
@@ -433,24 +675,50 @@ When the logical-obligation budget is exhausted:
 ★ **「coalesce/supersede により live ≤ concurrent episodes」という Design-5 の説明は D18 と整合しない**
   （異なる target は retain both — 同一 episode でも複数 target が live 可能）。具体例（ユーザー）:
   同一 episode E1 に T1..T32（全て異種 target）→ COALESCE なし・SUPERSEDE なし → **live = 32 に到達可**。
-★ したがって容量は episode 数ではなく、**upstream / episode / target の bound から導出**する:
+
+**★ D105-R23 — Path A 適用: episode-decomposition を Phase-I production invariant から除外**:
+
+現行 Production Runtime では `RecoveryEpisodeId` 型・counter・`CoalesceIdentity` の episode 成分が**未実装**（R3 確認、R22 再確認）。
+E×O≤32 の前提（`RecoveryEpisodeId` で episode を識別・上限 32 まで）が満たせないため、この invariant を
+**production contract から外し、Future / Deferred Design に格下げ**する。代わりに、以下の **direct
+invariant のみ**を Phase-I production contract とする:
+
 ```
-kMaxLogicalRecoveryObligations = 32（候補・決定待ち F）
+kMaxLogicalRecoveryObligations = 32
 
 INV-CAP-1: liveLogicalObligationCount ≤ kMaxLogicalRecoveryObligations
-INV-CAP-2: maximum concurrent RecoveryEpisodeId count ≤ E_max
-            （upstream bound: 同時 quarantine 対象 handle 数）
-INV-CAP-3: maximum live non-coalesced obligations per episode ≤ O_max
-            （upstream bound: episode 内の異種 semantic target の上限）
-INV-CAP-4: E_max × O_max ≤ kMaxLogicalRecoveryObligations
+           （直接 enforcement: RecoveryAdmissionTable::tryInsert の liveCount_ < kCapacity ゲート）
 ```
-- 代替: episode 数を使わず、upstream admission source の「最大 outstanding 異種 recovery target 数」を
-  直接 bound（≤ 32）してもよい。
-- **O_max が bound できない場合の設計**: **episode 自体を backpressure 単位**にする — episode 内の
-  live obligation が O_max 到達 → 同一 episode への新規異種 target admission は admission authority で
-  park/backpressure（INV-X1-9 と同一機構・lost なし）。
-- **決定待ち F**: E_max / O_max の具体値（同時 quarantine 対象数・episode 内異種 target 数の設計/実測上限から
-  導出）。**32 を invariant として証明するには INV-CAP-2/3 の導出が必須**（arbitrary constant のままにしない）。
+
+- **`kMaxLogicalRecoveryObligations = 32` は「episode 数 × episode 内 obligation 数」から導出された値ではなく、
+  `RecoveryAdmissionTable` に対する**直接的な admission resource bound** である。**
+- `E_max`、`O_max`、`E_max × O_max ≤ 32` の 3 つの invariant は **Phase-I production contract から除外**する。
+- 現行コードの capacity enforcement:
+  ```cpp
+  // ISRRuntimePublicationCoordinator.h:355-356 (RecoveryAdmissionTable::tryInsert)
+  if (liveCount_.load(std::memory_order_acquire) >= kCapacity)
+      return std::nullopt; // capacity exhausted → caller rejects (ΔL=0)
+  ```
+  上記のみが Phase-I production invariant。
+
+**Future / Deferred Design (Phase-II)**:
+- `RecoveryEpisodeId` の allocation / closure / resurrection 防止
+- `E_max` / `O_max` の episode-decomposition 証明
+- `E×O ≤ 32` の product form
+- D19.3 INV-CAP-2/3/4 は **Phase-II で復活**（recovery episode 層を実装した後）。
+
+★ D105-R23 削除条項:
+- **INV-CAP-2**: 「maximum concurrent RecoveryEpisodeId count ≤ E_max」 → **production contract から削除**
+  （理由: `RecoveryEpisodeId` 未実装、E_max を定義する対象が存在しない）
+- **INV-CAP-3**: 「maximum live non-coalesced obligations per episode ≤ O_max」 → **削除**
+  （理由: episode 概念未実装、`O_max` を定義する episode grouping が存在しない）
+- **INV-CAP-4**: 「E_max × O_max ≤ kMaxLogicalRecoveryObligations」 → **削除**
+  （理由: 現行コードで `E_max = 256` (quarantineActiveFlags_[256])、`O_max ≥ 2` (R3 counterexample) →
+  `E × O ≥ 512 ≠ 32` arithmetically unsatisfiable）
+
+★ D105-R23 残存条項:
+- **INV-CAP-1** のみが Phase-I production invariant。
+- D22.2 採用設計の「deliberate resource bound」哲学は維持（D25 INV-CAP-7 参照）。
 
 ### D19.4 INV-X1-10 — Coalesce source mutation（D18.1 補強）
 `buildSource ∉ CoalesceIdentity` を明文化（ユーザー指摘8 — 将来の semantic ambiguity 再発防止）:
@@ -520,6 +788,29 @@ For each RecoveryEpisodeId E:
   （RecoveryEpisode = admission authority が所有）と、admission commit / terminal disposition の
   線形化順序（原子カウンタが提供）の明示。D20 はそれを固定する。
 
+**★ D105-R23 — D20 / D23 を Phase-II deferred、Phase-I production closure は D17.5 参照**:
+
+現行 Phase-I production runtime には `RecoveryEpisodeId` 型・`Closed` フラグ・episode authority が
+**未実装**（R3 確認、R22 再確認）。D20 / D23 の文言は **Phase-II Future Design** として保持するが、
+**Phase-I production contract としては無効**。Phase-I production における closure の意味は
+**D17.5（★ D105-R23 改訂版）の `liveLogicalObligationCount == 0`** のみ。
+
+**D20 / D23 の Phase-II deferred 条項**:
+- `RecoveryEpisodeId` の allocation および `nextRecoveryEpisodeId_` monotonic counter
+- `Closed` フラグの atomic 観測および admission/terminal との linearization
+- `item 4`（admission-commit が closure を跨ぐ場合の有効性）の Phase-II 詳細証明
+- `item 5`（admission not yet linearized at closure）の reject 機構
+- D23.2 INV-X1-8b（closure-aware admission CAS）の single-atomic 実装
+- D23.1 race（`!Closed → reservation → live++` の TOCTOU）の解決
+
+**Phase-I production closure（★ D105-R23 改訂 D17.5 参照）**:
+- `liveLogicalObligationCount == 0` が**全 Live logical obligation 消滅**と等価
+- `RecoveryAdmissionTable::resolve` の atomic CAS が `liveCount_--` を一度だけ実行
+- 「closure」=「`liveCount_ == 0`」だが、これは **`RecoveryEpisodeId` 単位ではなく logical
+  obligation 集合全体**の消滅
+- `RetryExhaustion ≠ EpisodeClosure`（D20.5 audit verdict 維持）— Phase-I production では
+  `RecoveryEpisodeId` 概念不在のため「`RetryExhaustion` で episode が閉じる」は定義上発生しない
+
 ### D21 — Backpressure liveness contract（D19.2 refinement・P0）
 #### D21.1 ParkedAdmission の semantic status（ユーザー指摘3）
 ```
@@ -561,6 +852,15 @@ the next CoordinatorLoop cycle MUST observe the retryable predicate.
   `recoveryPending` + CV 述語パターンと整合 — Phase E）。
 - notify loss でも `next CoordinatorLoop cycle → pending && budgetAvailable → retry` で進行。
 
+- **★ D105-R21 audit — D20.5 closure linearization は R21 で変更しない**:
+  `RetryExhaustion` は **disappearance set に追加された**（D15.2 amendment）が、closure
+  linearization（D20 / D23 / D31）のセマンティクスは**不変**。1 obligation が retry exhaustion
+  になり `ResolvedFailed` に到達しても、同一 episode に別の Live obligation が存在するなら
+  episode は閉じない。closure point は依然として「`liveLogicalObligationCount: 1 → 0`」で定義される。
+  - すなわち **`RetryExhaustion ≠ EpisodeClosure`**。
+  - この独立性は INV-OBL-3（last LIVE が terminal した瞬間に OPEN(1)→CLOSED(0)）と
+    terminal transition の disjointness から自然に導出される。
+
 ### D22 — Capacity proof（D19.3 refinement・NO-GO 解消）
 #### D22.1 現状の問題（ユーザー指摘4〜7）
 - `E_max × O_max ≤ 32` は正しい方向だが、**E_max/O_max が「定義上の上限」のまま**（なぜ 4？ なぜ 8？ がない）。
@@ -588,8 +888,102 @@ INV-CAP-6: 到達可能な全状態 S で:
 - **「32 = upstream maximum」か「32 = deliberate resource bound」かを明示的に後者に確定**（ユーザー指摘7）。
 - 32 の妥当性は **memory/resource budget analysis** で説明（DSPHandleTable 512 上限・同時 quarantine 対象
   の実用上限・obligation あたりのメモリ）— 但し**「システムが 32 を強制する」ことは invariant
-  （admission-level enforcement）であり、導出された上限を主張しない。
+  （admission-level enforcement）であり、導出された上限を主張しない**。
 - これにより循環論法を排除し、**容量は「選択された bounded resource capacity」として invariant に強制**。
+
+**★ D105-R23 — Path A 適用: D22.2 の episode-decomposition 文言を改訂**:
+
+現行 Production Runtime では `RecoveryEpisodeId` 型・counter・`E_max`/`O_max` を構造的に表現する
+対象が**存在しない**。D22.2 の `Σ episode live obligations ≤ 32` 文言は、Phase-I production 実装上の
+実態（`liveLogicalObligationCount ≤ 32` の single counter）と**意味論的に等価ではない**
+（前者には episode という中間構造が前提だが、後者にはそれがない）。D22.2 を **Phase-I production
+contract に整合**させる:
+
+```
+採用（★ D105-R23 改訂）:
+    kMaxLogicalRecoveryObligations = 32 = 【deliberate resource bound】
+      （upstream maximum ではない。memory/resource budget analysis で説明）
+    admission authority が直接 enforcement:
+        liveLogicalObligationCount ≤ 32
+      （obligation table 内の single counter: RecoveryAdmissionTable::liveCount_ < kCapacity ゲート）
+    per-episode 配分 / Σ episode bound は Phase-II に deferred。
+    INV-CAP-5 / INV-CAP-6 の条項は Phase-II で episode 層実装後に再評価。
+```
+
+**★ D105-R23 削除条項**:
+- `Σ episode live obligations ≤ 32`（episode 集合に依存した表現）→ **`liveLogicalObligationCount ≤ 32`**
+  （single counter）に書換え
+- `per-episode はこの global bound の配分として扱う（O_max は policy-enforced cap として admission レベルで
+  強制・upstream 導出を主張しない）` → **Phase-II に deferred**
+
+**Future / Deferred Design (Phase-II)**:
+- `RecoveryEpisodeId` 型 + `nextRecoveryEpisodeId_` monotonic counter
+- `E_max` / `O_max` の episode-decomposition 証明
+- per-episode cap の enforcement
+
+**★ D22.2 維持条項**:
+- `kMaxLogicalRecoveryObligations = 32 = 【deliberate resource bound】` 哲学（D25 INV-CAP-7 整合）
+- 32 は `RecoveryAdmissionTable` に対する direct admission resource bound として enforce
+
+### D22.3 Capacity 名前の厳密分離（★ D105-R23 — Path A 適用: Phase-I production 実装事実との対応）
+
+R2/R3/R22 の audit で 4 つの capacity 概念が混同されていた。R23 でこれを**厳密に分離**する:
+
+#### 物理 quarantine capacity
+```
+Q_max = 256
+```
+- **意味**: `quarantineActiveFlags_[256]` の物理的最大数
+- 出典: `ISRDSPQuarantine.h:68` `static constexpr size_t kMaxSlots = 256;`
+- **Episode 数ではない**（quarantine された DSPHandle slot の数であって、`RecoveryEpisodeId`
+  の数ではない）
+
+#### 物理 recovery residency
+```
+L_residency_max = 257
+              = transport 256
+              + durable 1
+```
+- **意味**: recovery intent の物理的 residency 上限
+- 出典: `ISRRuntimePublicationCoordinator.h:886` `kRecoveryIntentQueueCapacity = 256` +
+  `PendingRecoveryAdmission` 単一スロット
+- **Logical obligation 数ではない**（transport queue の residency 容量であり、
+  `RecoveryAdmissionTable` 内の Live obligation 数ではない）
+
+#### Logical recovery obligation capacity
+```
+L_logical_max = 32
+```
+- **意味**: `RecoveryAdmissionTable` が同時に保持できる Live logical obligation の上限
+- 出典: `ISRRuntimePublicationCoordinator.h:325`
+  `static constexpr std::size_t kMaxLogicalRecoveryObligations = 32;` (INV-CAP-7)
+- **Enforcement**: `tryInsert` h:355-356 の `liveCount_ >= kCapacity` ゲート
+- **唯一性**: `liveLogicalObligationCount ≤ 32` は **Phase-I production invariant**（INV-CAP-1）
+- **唯一性確認**: runtime には `32` を超える logical obligation count を作成する path が存在しない
+  （rejected at `tryInsert`）
+
+#### Episode capacity
+```
+E_max = N/A
+O_max = N/A
+```
+- **意味**: Phase-I production runtime には `RecoveryEpisodeId` の allocation も `episode` の
+  grouping も存在しないため、`E_max` および `O_max` の値を**導出・推定しない**。
+- R3 audit 確認:
+  - `RecoveryEpisodeId`: 0 production hits（grep 0 matches in `src/`）
+  - `CoalesceIdentity` = `{handle, SemanticRecoveryTarget}`（episode 成分なし、現行 R5-9 実装）
+  - `nextRecoveryEpisodeId_` counter: 0 production hits
+
+#### 概念分離の contract-level 明示
+```
+Q_max ≠ E_max
+L_residency_max ≠ L_logical_max
+E_max × O_max ≤ 32:  NOT A PHASE-I INVARIANT
+```
+- **`Q_max = 256`** は DSPHandle slot registry の物理的最大数。
+- **`L_residency_max = 257`** は transport queue + durable slot の物理的 residency。
+- **`L_logical_max = 32`** は `RecoveryAdmissionTable` 内の Live logical obligation の最大数（INV-CAP-1 のみが Phase-I production invariant）。
+- **`E_max × O_max ≤ 32`** は Phase-II deferred（episode 層実装後に再評価）。
 
 ### D20.4 INV-X1-10a — Coalesce source mutation ordering（D19.4 refinement・ユーザー指摘8）
 ```
@@ -899,6 +1293,59 @@ Worst-case:
 | **T36** | tentative capacity accounting（P0級） | `reservedLogicalObligations = Tentative + Owned ≤ 32`・tentative 中の他 admission は reject/park（overcommit なし） |
 | **T37** | GlobalRecoveryBudget sole authority | placement は reservation を移動のみ・container が独立に allocate/release しない |
 
+**★ D105-R23 — D26 を Phase-I production contract に整合**:
+
+D26 で定義された `Tentative` / `Owned` / `Released` の 3 状態および
+`reservedLogicalObligations = Tentative + Owned ≤ 32` は、**Phase-II Future Design として保持**しつつ、
+**Phase-I production contract としては無効**。現行 Phase-I production runtime は:
+
+- `Tentative` 状態を持たない（episode admission CAS がない — `RecoveryEpisodeId` なし）
+- `Owned` 状態も `Released` 状態も `RecoveryAdmissionTable::state` のみ（`NoObligation` / `Live` / `ResolvedSuccess` / `ResolvedFailed` / `ResolvedStaleSuperseded` / `ShutdownDiscarded`）
+- `GlobalRecoveryBudget` API を持たない（`acquireTentative() / promoteToOwned() / release()` なし）
+- `reservedLogicalObligations` 単一 counter を持たない（`liveCount_` のみ）
+- `EpisodeAdmissionState`（OPEN/CLOSED）を持たない
+
+**Phase-I production の capacity model**:
+```cpp
+// ISRRuntimePublicationCoordinator.h:325
+static constexpr std::size_t kMaxLogicalRecoveryObligations = 32;
+
+// ISRRuntimePublicationCoordinator.h:355-356 (RecoveryAdmissionTable::tryInsert)
+if (liveCount_.load(std::memory_order_acquire) >= kCapacity)
+    return std::nullopt; // capacity exhausted → caller rejects (ΔL=0)
+
+// ISRRuntimePublicationCoordinator.cpp:880-885 (submitRecoveryRequest)
+const auto ins = recoveryAdmissions_.tryInsert(cid);
+if (!ins) {
+    convo::fetchAddAtomic(recoveryCapacityExhaustedCount_, 1, ...);
+    return false;  // ★ INV-X1-7: L==32 → reject, no transport
+}
+```
+
+**`liveCount_` 単一 counter が `≤ 32` を直接 enforce**。Tentative 中間状態なし、placement phase なし、
+episode 単位の accounting なし — すべて `RecoveryAdmissionTable` の single live count で扱う。
+
+**D26 維持条項**（Phase-II Design として保持）:
+- D26.1 episode state transition（OPEN/CLOSED）— Phase-II deferred
+- D26.2 ReservationState（{Tentative, Owned, Released}）— Phase-II deferred
+- D26.3 GlobalRecoveryBudget sole authority（INV-CAP-8）— Phase-II deferred
+- D26.4 LIVENESS-ASSUMPTION-X1 — Phase-II deferred
+- D26.5 Coalesce lookup + creation serial ordering（単一 producer）— **Phase-I production で成立**
+  （`submitRecoveryRequest` の single CoordinatorLoop thread 実行）
+- D26.6 resource adequacy analysis scope — Phase-II deferred
+- D26.7 T35/T36/T37 — Phase-II deferred
+
+**D26 → Phase-I production contract への書換え**:
+- `reservedLogicalObligations = Tentative + Owned ≤ 32` → **`liveCount_ ≤ 32`**（single counter）
+- 4 test cases（T35/T36/T37 + D26.7 関連）は **Phase-II deferred** として維持
+- 現行 production 観測は C1 / C2 / T-R18-5（capacity 検証のみ） — **Phase-I production test** として R5-8 で verify 済み
+
+**Phase-II 復活時**:
+- `acquireTentative() / promoteToOwned() / release()` API を `GlobalRecoveryBudget` として実装
+- `EpisodeAdmissionState`（OPEN/CLOSED）を `RecoveryEpisode` struct に追加
+- `liveCount_[RecoveryEpisodeId]` per-episode counter を実装
+- D26.6 resource adequacy analysis を `RecoveryEpisode` 層を含めて再評価
+
 ---
 
 ## Design-10 最終判定
@@ -1202,9 +1649,23 @@ Settlement（Builder・独立スレッド）
             → 最後の LIVE なら episode OPEN(1)→CLOSED(0)（INV-OBL-3）
             → budget release signal（level-triggered・INV-X1-9a/LIVENESS-ASSUMPTION-X1）
 
+  ★ D105-R21 amendment — MARK-TRANSIENT-FAILURE（non-terminal settlement action）:
+            ObligationState LIVE(src)→LIVE(src)              （ΔL = 0・terminal ではない）
+            → delivery = None（P-B: stranded Transport/Durable → None 修復）
+            → consecutiveFailureCount++                      （per-obligation retry budget 消費）
+            → exhausted（counter == K）の場合のみ terminal へ昇格:
+                  LIVE(src)→ResolvedFailed(src)
+                  → release（Owned→Released・reserved-- 一回）
+                  → retryExhaustedCount++                     （terminalDispositionCount に反映）
+                  → 最後の LIVE なら episode OPEN(1)→CLOSED(0)（INV-OBL-3）
+
 capacity: reservedLogicalObligations = Tentative + Owned ≤ 32（GlobalRecoveryBudget sole authority・INV-CAP-8）
 ```
 - これにより **Episode / Budget / Obligation の authority と linearization が単一 state machine に接続**。
+- **★ D105-R21: MARK-TRANSIENT-FAILURE は non-terminal settlement action**である。Live → Live の
+  self-loop で、terminal transition（Success / Superseded / ShutdownDiscard / RetryExhaustion）とは
+  分離される。これは D14.3 amendment（transient failure ≠ disappearance reason）を
+  state machine レベルで固定する。
 
 ### D29.9 G: resource adequacy analysis（着手・D26.6 スコープ）
 ```
@@ -7344,6 +7805,145 @@ D102 R_required   SYMBOLIC DONE   = 1 + ceil(M_scope / O_denom)
 | Producer/caller provenance audit | evidence/D101-34-A-WorldDomainBoundary-Provenance-Audit.md |
 | INV-PUB-4 exactly-once proof / RuntimeStore shutdown contract proof | evidence/D101-34-B-Contract-Sync-InvPub4-Shutdown-Proof.md |
 | 本同期更新 | D101-34-C（本節） |
+
+---
+
+### 7. D105-R23 — Obligation-Table Model への収束（2026-08-28）
+
+**D105-R23 スコープ**: 現行 Production Runtime に**存在しない episode abstraction**（`RecoveryEpisodeId` 型・
+`nextRecoveryEpisodeId_` counter・`EpisodeAdmissionState` (OPEN/CLOSED) フラグ・`GlobalRecoveryBudget` API
+(Tentative/Owned/Released)）を Phase-I production contract から外し、**obligation-table model** へ
+**収束**させる。
+
+#### 7.1 収束前の問題（R2/R3/R22 audit 結果）
+
+- `E_max × O_max ≤ 32` (D19.3 INV-CAP-4 / D22.2): **`E_max = 256` (quarantineActiveFlags_[256]) × `O_max ≥ 2`
+  (R3 counterexample) = ≥512 ≠ 32` で arithmetically unsatisfiable**。R1/R2 で「E=2, O=16」
+  として整合させる試みは、**topology 仮定**に基づく証明で**コード構造から導出不能**。
+- R3 audit: **`RecoveryEpisodeId` 0 production hits**、`CoalesceIdentity = {handle, SemanticRecoveryTarget}`
+  (episode 成分なし)、`currentBuildSnapshot_` の非同期更新により `O_max ≥ 2`。
+- R22 audit: 同じ結論 + **D20 / D23 closure linearization は実装不在**（`Closed` フラグ atomic
+  観測・`!Closed → reservation → live++` の TOCTOU 解決なし）。
+- I4 の **`recoverClosedEpisodeRejectCount_` 等の telemetry** は設計のみで実装不在（grep 0 hits）。
+
+#### 7.2 収束方針（Path A 採用）
+
+**Episode abstraction の復活は Phase-II に deferred**。Phase-I production contract は
+**obligation-table model** に統一する:
+
+```
+Physical quarantine capacity:
+    Q_max = 256
+    (quarantineActiveFlags_[256] の物理的最大数; ISRDSPQuarantine.h:68)
+
+Physical recovery residency:
+    L_residency_max = 257
+    = transport 256 (kRecoveryIntentQueueCapacity)
+    + durable 1 (PendingRecoveryAdmission)
+
+Logical recovery obligation capacity:
+    L_logical_max = 32
+    (kMaxLogicalRecoveryObligations; ISRRuntimePublicationCoordinator.h:325)
+
+Admission invariant (Phase-I production 唯一の capacity invariant):
+    liveLogicalObligationCount ≤ 32
+    (RecoveryAdmissionTable::tryInsert の liveCount_ < kCapacity ゲート)
+
+Coalesce identity (Phase-I production):
+    CoalesceIdentity = { quarantinedHandle, SemanticRecoveryTarget }
+    (RecoveryEpisodeId 成分なし — Phase-II deferred)
+
+Episode capacity:
+    E_max = N/A
+    O_max = N/A
+    (Phase-I production runtime には `RecoveryEpisodeId` 型が存在しないため値を導出しない)
+
+E_max × O_max ≤ 32:
+    NOT A PHASE-I INVARIANT
+    (arithmetic violation; Phase-II deferred)
+```
+
+#### 7.3 I4 amendment 一覧（D105-R23 適用）
+
+| Section | Amendment | Phase-I status |
+|---|---|---|
+| **D14.3** | transient failure ≠ terminal disposition | **MAINTAINED** (R21 改正; Runtime 実装と整合) |
+| **D15.2 disappearance set** | `{Success, Superseded, ShutdownDiscard, RetryExhaustion}` | **MAINTAINED** (R21 改正) |
+| **D17.5 closure** | `liveLogicalObligationCount == 0` のみが Phase-I closure invariant | **REWRITTEN** (D105-R23) |
+| **D18.1 CoalesceIdentity** | `{handle, SemanticRecoveryTarget}` | **REWRITTEN** (D105-R23) |
+| **D18.3 conservation** | runtime 観測可能項のみ | **REWRITTEN** (D105-R23) |
+| **D19.1 episode closure finality** | `RecoveryEpisodeId` 未実装 | **DEFERRED to Phase-II** |
+| **D19.3 INV-CAP-2/3/4** | `E_max`, `O_max`, `E×O ≤ 32` | **REMOVED from Phase-I** (Phase-II deferred) |
+| **D20 closure linearization** | episode-level | **DEFERRED to Phase-II** (D17.5 参照) |
+| **D21 backpressure liveness** | D21.1/D21.2 | **MAINTAINED** (Phase-I production 観測可能) |
+| **D22.2 Σ episode bound** | `liveLogicalObligationCount ≤ 32` 単一 counter に書換え | **REWRITTEN** (D105-R23) |
+| **D22.3 capacity 名分離** | `Q_max` ≠ `L_residency_max` ≠ `L_logical_max` ≠ `E_max`/`O_max` | **NEW** (D105-R23) |
+| **D23 closure-aware CAS** | `Closed` フラグ atomic | **DEFERRED to Phase-II** |
+| **D26 Tentative/Owned** | D26.2 単一 counter model に書換え | **REWRITTEN** (D105-R23) |
+| **D29.8 end-to-end state machine** | `MARK-TRANSIENT-FAILURE` non-terminal | **MAINTAINED** (R21 改正) |
+
+#### 7.4 R21 amendments 保持
+
+R21 で導入された以下の contract 条項は **D105-R23 でも維持**:
+
+- D14.3 transient failure ≠ terminal disposition (R21 amendment)
+- D15.2 disappearance set に RetryExhaustion 追加 (R21 amendment)
+- D18.3 terminalDispositionCount に retryExhaustedCount 追加 (R21 amendment)
+- D18.6 テスト T15c/T15d/T15e/T15f (R21 追加)
+- D20.5 audit verdict (RetryExhaustion ≠ EpisodeClosure)
+- D29.8 `MARK-TRANSIENT-FAILURE` non-terminal settlement action (R21 amendment)
+- R23 で新規追加:
+  - D17.5 改訂 (closure 意味論の obligation-table level 統一)
+  - D18.7 CoalesceIdentity 改訂 (`{handle, target}` Phase-I production 整合)
+  - D18.8 Snapshot drift contract (R3 counterexample の契約化)
+  - D22.3 Capacity 名分離 (4 つの capacity 概念)
+
+#### 7.5 Phase-II deferred 項目（Future Design として保持）
+
+- `RecoveryEpisodeId` 型 + `nextRecoveryEpisodeId_` monotonic counter
+- `EpisodeAdmissionState` (OPEN/CLOSED) フラグ
+- `GlobalRecoveryBudget` API (acquireTentative / promoteToOwned / release)
+- `E_max` / `O_max` の episode-decomposition 証明
+- per-episode cap の enforcement
+- D19.1 episode closure finality の full 実装
+- D20 / D23 closure linearization の full atomic linearization
+- D26.6 resource adequacy analysis の episode 層対応再評価
+- T12 / T25 / T26 / T35 / T36 / T37 等の episode-related test matrix
+
+#### 7.6 Path A / Path B 判断（最終）
+
+- **Path A 採用** (episode 層を production contract から外し、Phase-II に deferred)
+  - 理由: 現行 Phase-I production runtime は安定稼働中（40/40 tests PASS）。新 layer 導入は R23 brief
+    の「**過大**」判定と一致。Episode 概念は Phase-II Future Design として保持しつつ、
+    現行 obligation-table model を Phase-I production contract として固定する。
+- **Path B 不採用** (Phase-I で episode 層を実装)
+  - 理由: 現行 runtime は obligation-table 単層で安定動作。multi-week 実装で 32/40
+    既存 test を再回帰する必要があり、R23 brief の conservative 方針に反する。
+
+#### 7.7 R23 検証マトリクス（GO 条件全 PASS）
+
+- ✅ Runtime source unchanged (R23 audit 期間中の source 変更: 0)
+- ✅ `RecoveryEpisodeId`: Phase-I production contract から除外 (D105-R23 amendment)
+- ✅ `E_max`: N/A として明示 (D22.3)
+- ✅ `O_max`: N/A として明示 (D22.3)
+- ✅ `E×O ≤ 32`: production invariant から除去 (D19.3 / D22.2)
+- ✅ `Q_max = 256`: 物理 quarantine capacity として維持 (D22.3)
+- ✅ `L_residency_max = 257`: 物理 recovery residency として維持 (D22.3)
+- ✅ `L_logical_max = 32`: logical capacity として直接 enforce (D22.3)
+- ✅ admission enforcement: `tryInsert` の 32 gate と対応 (D22.3)
+- ✅ CoalesceIdentity: `{handle, target}` に一致 (D18.7)
+- ✅ snapshot drift: new target = new obligation として明記 (D18.8)
+- ✅ RetryExhaustion: R21 semantics 維持
+- ✅ transient failure: Live→Live 維持 (D14.3)
+- ✅ closure: `liveCount 1→0` を logical domain に限定 (D17.5 改訂)
+- ✅ D20/D23: Episode closure 仕様を Production fact として扱わない (deferred)
+- ✅ D26: Runtime の actual capacity model と一致 (D26 改訂)
+- ✅ conservation: Runtime で証明可能な形に限定 (D18.3 改訂)
+- ✅ bidirectional trace: I4→Runtime / Runtime→I4 とも全項目対応 (R22 確認 + R23 改訂)
+- ✅ unsupported claims: 0 件 (E_max / O_max / E×O / episode abstraction を全部 deferred)
+- ✅ I4 internal contradiction: 0 件 (R21 + R23 改訂で contract 自己整合)
+
+**D105-R23: 全 GO 条件 PASS** → R24 へ進む。
 
 注意: 本契約書の他セクション（D39/D45/D52/D74/D86 等）に残る `retireRuntimePublishWorldNonRt`
 への言及は、API separation **前**の歴史記録である（当該関数は現行ソースに存在せず、

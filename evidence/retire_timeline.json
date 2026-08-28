@@ -9,21 +9,21 @@
     "crossfadeOnly": false,
     "retirePathOnly": true
   },
-  "totalTransitions": 588,
+  "totalTransitions": 66,
   "laneCounters": {
-    "rtIntent": 120,
-    "coordination": 120,
-    "epoch": 120,
-    "reclaim": 120,
-    "quarantine": 108
+    "rtIntent": 14,
+    "coordination": 14,
+    "epoch": 14,
+    "reclaim": 14,
+    "quarantine": 10
   },
   "lifecycleCounters": {
     "visible": 0,
-    "compareEligible": 120,
-    "telemetryRetained": 120,
-    "replayRetainedOptional": 108,
-    "reclaimEligible": 120,
-    "reclaimed": 120
+    "compareEligible": 14,
+    "telemetryRetained": 14,
+    "replayRetainedOptional": 10,
+    "reclaimEligible": 14,
+    "reclaimed": 14
   },
   "lifecycleSample": [
     {"slot": 0, "state": "visible"},

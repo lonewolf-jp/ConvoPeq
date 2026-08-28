@@ -2080,9 +2080,32 @@ private:
             {
             }
 
-            // ★ P0-2: デストラクタ。
-            //   通常パス: retire のみ（コピー先マップが参照中のため delete 不可）。
-            //   Shutdown: resolve → delete → reclaim（全マップ同時破棄のため安全）。
+            // ★ D113-A (read-only comment correction; production logic unchanged):
+            //   CacheMap dtor is invoked from two paths:
+            //     (a) ~EQCacheManager (AudioEngine.Cache.cpp:161) — direct delete under writeMutex,
+            //         after cacheMapPtr is exchanged to nullptr. AudioEngine 寿命内.
+            //     (b) deleter registered via owner->enqueueDeferredDeleteNonRt(...) — invoked by
+            //         m_retireRouter on a consumer thread, epoch-gated; see
+            //         AudioEngine.h enqueueDeferredDeleteNonRt (定義 4219), ISRRetireRouter.h:382
+            //         shutdownReclaim (ShutdownReclaimAuthority), and ISRRetireRouter.h:247
+            //         drainAllQuarantineStore (shutdown drain: ReleaseResources.cpp:410/505).
+            //         directDelete は禁忌 (REPAIR_PLAN.md:2412).
+            //
+            //   Within the dtor, owner==nullptr ガード + dspHandleRuntime_ への参照は
+            //   AudioEngine 寿命に依存 (UAF 防止の前提). m_retireRouter への直接参照は
+            //   本 dtor には無く、所有権系は owner->dspHandleRuntime_ 経由.
+            //
+            //   実コードの順序 (shutdownPhase >= Destroy branch — 本 dtor の if ブロック。
+            //   行番号参照はコメント挿入でずれるため branch 識別で行う):
+            //     1. tryShutdownQuiescentReclaim(entry.second)  (Reclaim Authority, Permit-gated)
+            //     2. rt.resolve(entry.second)
+            //     3. delete EQCoeffCache
+            //   reclaim 失敗時は物理解放をスキップ (object 消滅 + handle 未回収の組合せを回避).
+            //
+            //   通常パス (shutdownPhase < Destroy — 本 dtor の else ブロック):
+            //     retire のみ。deferred delete queue (enqueueDeferredDeleteNonRt) は別 thread で
+            //     epoch-gated drain される (ISRRetireRouter) ため、CacheMap 自体の delete は
+            //     ここでは行わない (RT 参照中の UAF 防止).
             ~CacheMap()
             {
                 jassert(owner != nullptr);

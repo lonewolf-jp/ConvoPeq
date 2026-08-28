@@ -1,18 +1,19 @@
-# Token Reduction — 常時運用ルール（2026-07-29 確定・2026-08-10・08-14・08-15 再確認・2026-08-23 再確認・2026-08-27 commandcode環境固定）
+# Token Reduction — 常時運用ルール（2026-07-29 確定・2026-08-10・08-14・08-15 再確認・2026-08-23 再確認・2026-08-27 commandcode環境固定・2026-08-28 ZCode環境でも適用確認）
 
-## ★ 絶対遵守 — commandcode環境では常時かつ必ず3層パイプラインを使用
+## ★ 絶対遵守 — 常時かつ必ず3層パイプラインを使用（commandcode環境・ZCode環境ともに）
 
-commandcode環境では、**headroom (proxy / CLI) + context-mode MCP + RTK (WSL版) の3層パイプラインを「常時かつ必ず」使用すること**がユーザーから明示的に指示された。
+commandcode環境およびZCode環境では、**headroom (proxy / CLI) + context-mode MCP + RTK (WSL版) の3層パイプラインを「常時かつ必ず」使用すること**がユーザーから明示的に指示された（2026-08-28 ZCode環境で再指示）。
 
-**【2026-08-27 確定】トークン削減性能を AI との動作に支障のない範囲で最適化するため、3 系統の役割を適宜最適な形で分担する。**
-- **headroom は MCP ではなく proxy mode（`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`）で運用**し、CLI の `headroom compress` / `headroom retrieve <hash>` で大きなコンテキストを手動保存する。
-- proxy/CLI がうまく動作しない場合は context-mode MCP を優先して使用する。
+**【2026-08-27 確定・2026-08-28 更新】トークン削減性能を AI との動作に支障のない範囲で最適化するため、3 系統の役割を適宜最適な形で分担する。**
+- **headroom は proxy mode（`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`）で常時稼働**（v0.36.5、`headroom doctor` で疎通確認可）。
+- **【v0.36.5 仕様】CLI に `compress` / `retrieve` コマンドは存在しない**。手動の圧縮・復元は MCP ツール `mcp__headroom__headroom_compress` / `mcp__headroom__headroom_retrieve`（＋`headroom_stats`）を使用する。proxy は全トラフィックを自動圧縮し、圧縮マーカーの hash から `headroom_retrieve` で原文を復元できる（CCR）。
+- proxy がうまく動作しない場合は context-mode MCP を優先して使用する。
 
 ## 必須3系統
 
 | 系統 | 役割 | 自動/手動 |
 | --- | --- | --- |
-| **Headroom (proxy + CLI)** | トークン圧縮は ANTHROPIC_BASE_URL 経由の proxy が常時稼働。大きなコンテキストの手動保存は `headroom compress` / `headroom retrieve <hash>` (CLI) | proxy 自動 / CLI 手動 |
+| **Headroom (proxy + MCP + CLI)** | トークン圧縮は ANTHROPIC_BASE_URL 経由の proxy が常時稼働。手動の圧縮/復元は MCP ツール `headroom_compress` / `headroom_retrieve`（CLIにcompress/retrieveコマンドは無し）。CLIは `savings` / `doctor` / `perf` / `memory` を使用 | proxy 自動 / MCP 手動 |
 | **Context-Mode MCP** | ファイル分析・並列実行・検索（Read/Grep代替、93-99%削減） | 手動で能動的利用（最優先） |
 | **RTK (WSL版)** | CLIコマンド出力を60-90%圧縮 | 手動でprefix付与（常時） |
 
@@ -24,7 +25,7 @@ commandcode環境では、**headroom (proxy / CLI) + context-mode MCP + RTK (WSL
 | 複数コマンド並列実行 | **ctx_batch_execute** | 1回の呼び出しで最大8並列 |
 | 過去内容の検索 | **ctx_search** | セッションメモリ＋インデックス化済みデータ |
 | Web取得 | **ctx_fetch_and_index → ctx_search** | 生HTMLはコンテキストに入れない |
-| 大きなコンテキスト保存 | **headroom_compress** | 復元は `headroom retrieve <hash>` (CLI) |
+| 大きなコンテキスト保存 | **headroom_compress** (MCP) | 復元は **headroom_retrieve** (MCP、hash指定) |
 | CLIコマンド | **rtk (WSL版)** | `wsl bash -c '...rtk <cmd>'` |
 | ファイル編集 | **Read + Edit** | 編集時のみ通常ツールを使用 |
 | コード検索 | AiDex > serena > semble > ctx_execute > WSL CLI | 優先順位順 |
@@ -74,7 +75,9 @@ wsl.exe bash -c 'cd /mnt/c/VSC_Project/ConvoPeq && ~/.local/bin/rtk git status'
 /c/Users/user/AppData/Roaming/Python/Python314/Scripts/headroom.exe --version
 ```
 
-## Serena MCP Server (v1.7.0)
+## Serena MCP Server (v1.7.0・2026-08-28 動作確認済み)
+
+> 注意: MCPハンドシェイクの serverInfo.version（例: "1.28.1"）は serena 本体ではなく内部の `mcp` Pythonライブラリのバージョン。serena 本体のバージョンは `serena --version` で確認する（uv版 1.7.0 / pip版 Python314 に 1.6.2.dev0 も残留）。
 
 Serena MCP server は OpenCode に接続されています (`--context ide` 使用中)。
 

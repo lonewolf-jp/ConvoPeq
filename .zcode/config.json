@@ -1,0 +1,36 @@
+{
+  "mcp": {
+    "servers": {
+      "serena": {
+        "type": "stdio",
+        "command": "C:/Users/user/.local/bin/serena.exe",
+        "args": [
+          "start-mcp-server",
+          "--project",
+          "C:/VSC_Project/ConvoPeq",
+          "--transport",
+          "stdio"
+        ]
+      },
+      "context-mode": {
+        "type": "stdio",
+        "command": "C:/Users/user/AppData/Roaming/npm/context-mode.cmd"
+      },
+      "headroom": {
+        "type": "stdio",
+        "command": "C:/Users/user/.local/bin/headroom.exe",
+        "args": [
+          "mcp",
+          "serve"
+        ]
+      },
+      "aidex": {
+        "type": "stdio",
+        "command": "C:/nvm4w/nodejs/node.exe",
+        "args": [
+          "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"
+        ]
+      }
+    }
+  }
+}

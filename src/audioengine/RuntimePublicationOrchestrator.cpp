@@ -186,7 +186,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         telemetryRecorder_.recordFailure(FailureStage::Execution,
             FailureReason::PublishFailed, "trySubmit:build",
             correlationId.shortValue(), nowUs);
-        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
+        // ★ D105-R20: transient build failure → return RejectedNotFinalized. The obligation
+        //   disposition is centralized in submitPublishRequest's RejectedNotFinalized
+        //   switch case (one markTransientFailure call per failure event; A/B/D unified).
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
@@ -252,7 +254,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
             telemetryRecorder_.recordFailure(FailureStage::Execution,
             FailureReason::PublishFailed, "trySubmit:rebuild",
             correlationId.shortValue(), nowUs);
-        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
+        // ★ D105-R20: transient crossfade-rebuild failure → return RejectedNotFinalized.
+        //   Centralized in submitPublishRequest's switch case (one markTransientFailure
+        //   per failure event; A/B/D unified). See Build #1 failure above.
         return PublicationAdmission::Decision::RejectedNotFinalized;
         }
     }
@@ -299,8 +303,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   publish 失敗時点で shutdown 中なら RejectedShutdown、それ以外は
         //   RejectedPublishFailure（内部失敗）を返す。ownership はどちらでも
         //   destroyRolledBackDSP() により回収済み（decision 分類から独立）。
-        // ★ D105-R5-8: publish failure → terminal obligation (no leak)
-        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);
+        // ★ D105-R18: transient publish failure → markTransientFailure (ΔL=0, same id,
+        //   delivery=None — repairs stranded Transport after Builder pop, retry counter
+        //   incremented). ResolvedFailed only at retry exhaustion. The shutdown check
+        //   below still routes to RejectedShutdown; obligation disposition is independent
+        //   of the return decision.
+        engine_.runtimePublicationBridge_.markTransientFailure(req.recoveryObligationId);
         if (engine_.isShutdownInProgress())
             return PublicationAdmission::Decision::RejectedShutdown;
         return PublicationAdmission::Decision::RejectedPublishFailure;
@@ -383,7 +391,14 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::ValidationFailed, "submitPublishRequest:notFinalized",
                 0, nowUs);
-            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Failed);           // ★ D105-R5-9: −1
+            // ★ D105-R20: centralized markTransientFailure for ALL three RejectedNotFinalized
+            //   paths (A: build #1, B: crossfade rebuild, D: admission-rejection). The previous
+            //   direct resolveIfRecovery(Failed) was a leak-tightening path (R5-9) that
+            //   conflicted with the R18 retry-preservation contract; centralizing here
+            //   guarantees exactly one markTransientFailure call per failure event. ΔL=0,
+            //   delivery=None (P-B), counter+1, exhaustion→ResolvedFailed (path X only).
+            if (req.recoveryObligationId != 0)
+                engine_.runtimePublicationBridge_.markTransientFailure(req.recoveryObligationId);
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);

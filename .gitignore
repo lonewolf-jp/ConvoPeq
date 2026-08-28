@@ -58,6 +58,7 @@ vendor/
 steering/
 storage/
 .github/tmp/
+.mimosa/
 
 # Python caches
 __pycache__/

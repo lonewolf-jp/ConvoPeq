@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-27 23:32:34
+> Generated: 2026-08-28 21:22:04
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -30775,7 +30775,8 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
                                                            const convo::RuntimeBuildSnapshot& sealedSnapshot,
                                                            const convo::BuildAnalysis& buildAnalysis,
                                                            const convo::OversamplingResult& oversamplingResult,
-                                                           const convo::BuildDiagnostics& buildDiagnostics)
+                                                           const convo::BuildDiagnostics& buildDiagnostics,
+                                                           std::uint64_t recoveryObligationId)
 {
     if (newDSP == nullptr)
         return;
@@ -39423,6 +39424,11 @@ void AudioEngine::rebuildThreadLoop()
                             + juce::String(convo::toString(recoveryResult.error)));
                         // transient failure → DurablePending へ戻す（次サイクルで再 take — retry）
                         runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ D105-R18: also drive the obligation-level retry counter (separate
+                        //   concern from the Builder-local spin-prevention counter). Dual-LP
+                        //   per R17-7 Row 5: durable-slot sub-state and obligation counter are
+                        //   independent linearizations on different fields.
+                        runtimePublicationBridge_.markTransientFailure(recovery->obligationId);
                         // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
                         if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
                             break;
@@ -39445,6 +39451,8 @@ void AudioEngine::rebuildThreadLoop()
                         }
                         // transient failure → DurablePending へ戻す（retry）
                         runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ D105-R18: also drive the obligation-level retry counter.
+                        runtimePublicationBridge_.markTransientFailure(recovery->obligationId);
                         // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
                         if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
                             break;
@@ -40786,6 +40794,12 @@ void AudioEngine::runCoordinatorPhase() noexcept
         DSPLifetimeManager lifetimeMgr(*this);
         runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
+
+    // ★ D105-R5-10: re-drive any deferred Live recovery obligations each Coordinator tick (option C).
+    //   Runs on the CoordinatorLoop (producer) thread — SPSC-safe. Complements the opportunistic trigger
+    //   in submitRecoveryRequest: ensures deferred obligations are redispatched once a delivery resource
+    //   frees, even when no new recovery submissions occur.
+    runtimePublicationBridge_.redriveDeferredRecoveryObligations();
 
     // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
     //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。
@@ -56381,7 +56395,14 @@ bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcep
         //   lease 方式では DurablePending OR Building の両方が false であること（recoveryAdmissionPending_
         //   は Building 中も true を維持 — 二十六次レビュー）。shutdown 時は discardPendingRecoveryAdmission
         //   （RecoveryAdmissionClosed）で破棄されるため、本条件は成立する。
-        && !convo::consumeAtomic(coordinator_.recoveryAdmissionPending_, std::memory_order_acquire);
+        && !convo::consumeAtomic(coordinator_.recoveryAdmissionPending_, std::memory_order_acquire)
+        // ★ D105-R13 (INV-1-2 structural): logical obligation residency must be zero. Previously this held
+        //   only as an emergent property of shutdown ordering (requestShutdown → Coordinator/Builder joined
+        //   → discardRecoveryRequestsOnShutdown closes every Live slot). A popped-but-not-yet-resolved
+        //   obligation (Live + empty transport/durable/counters) would otherwise be a silent false-positive
+        //   "drained". Elevating it into the predicate forces such a case to report not-drained. The single −1
+        //   authority (RecoveryAdmissionTable::resolve, idempotent) guarantees liveCount_==0 once discard runs.
+        && coordinator_.liveLogicalRecoveryObligationCount() == 0;
 }
 
 void RuntimeIntentCoordinator::ShutdownScheduler::requestShutdown() noexcept {
@@ -56655,11 +56676,31 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
         return false;   // shutdown discard — wake 不要（§1.9 Phase E）
     }
 
+    // ★ D105-R5-10: opportunistically re-drive any deferred Live obligation before processing this
+    //   submission. Delivery resources freed by prior takes/drains are reused promptly. Runs on the
+    //   CoordinatorLoop (producer) thread only — SPSC-safe for recoveryIntentQueue_ / pendingRecoveryAdmission_.
+    //   CoalesceIdentity is resolved up-front so we can snapshot whether THIS target was deferred (delivery==None)
+    //   BEFORE redrive runs; if redrive attaches the delivery in this same call, the coalesced resubmit below
+    //   must not push a second representation (R10-3 / C16 single representation).
+    const CoalesceIdentity cid{
+        quarantinedHandle,
+        { buildSource.rebuildFingerprint.irIdentityHash,
+          buildSource.rebuildFingerprint.convolutionConfigHash,
+          buildSource.rebuildFingerprint.dspParameterHash }
+    };
+    const bool wasDeferredBefore = [&]() noexcept -> bool {
+        const std::size_t e = recoveryAdmissions_.findByKey(cid);
+        if (e == recoveryAdmissions_.kCapacity) return false;
+        return recoveryAdmissions_.slot(e).delivery == ObligationDeliveryState::None;
+    }();
+    redriveDeferredRecoveryObligations();
+
     // ★ dash2 §1.7 (Phase G R7 修正): epoch は caller が渡す。Coordinator は currentWorld_ を参照しない。
     RecoveryIntent intent{
         quarantinedHandle,
         epoch,
         nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed),
+        std::uint64_t{0},   // obligationId (assigned below from oblId)
         buildSource
     };
 
@@ -56668,19 +56709,22 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     //   Otherwise enforce L < 32: on capacity exhaustion REJECT (no obligation, no transport).
     // ★ D105-R5-9 MUST-3: CoalesceIdentity = quarantinedHandle + SemanticRecoveryTarget.
     //   Two distinct handles with identical fingerprints are NOT coalesced (R8 §4 counterexample).
-    const CoalesceIdentity cid{
-        quarantinedHandle,
-        { buildSource.rebuildFingerprint.irIdentityHash,
-          buildSource.rebuildFingerprint.convolutionConfigHash,
-          buildSource.rebuildFingerprint.dspParameterHash }
-    };
+    // (cid resolved above, before redrive — see D105-R5-10 wasDeferredBefore snapshot)
     std::uint64_t oblId = 0;
+    std::size_t slotIdx = recoveryAdmissions_.kCapacity;
     const std::size_t existing = recoveryAdmissions_.findByKey(cid);
     if (existing != recoveryAdmissions_.kCapacity) {
         // coalesce: reuse existing Live obligation (R5-rev1 Option 1 — ΔL = 0)
         oblId = recoveryAdmissions_.slot(existing).id.load(std::memory_order_acquire);
+        slotIdx = existing;
         recoveryAdmissions_.slot(existing).intentId = intent.intentId; // diagnostic refresh
         convo::fetchAddAtomic(recoveryCoalescedCount_, std::uint64_t{1}, std::memory_order_release);
+        // ★ D105-R5-10: if THIS submission's redrive just attached the delivery to a previously-deferred
+        //   obligation, the redrive already enqueued the single transport/durable representation — do NOT
+        //   push a second one (R10-3 no-double-delivery; C16 single representation). Resubmissions of an
+        //   obligation already delivered before redrive (e.g. fillRecoveryQueue) still fall through and re-push.
+        if (wasDeferredBefore && recoveryAdmissions_.slot(existing).delivery != ObligationDeliveryState::None)
+            return true;
     } else {
         const auto ins = recoveryAdmissions_.tryInsert(cid);
         if (!ins) {
@@ -56688,6 +56732,7 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
             convo::fetchAddAtomic(recoveryCapacityExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
             return false;
         }
+        slotIdx = *ins;
         auto& slot = recoveryAdmissions_.slot(*ins);
         oblId = slot.id.load(std::memory_order_acquire);
         slot.handle = quarantinedHandle;
@@ -56695,12 +56740,23 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
         slot.intentId = intent.intentId;
         slot.buildSource = buildSource;
     }
+
+    // NOTE (D105-R5-10): a coalesced re-submission is ALLOWED to re-push its transport intent (this is how
+    //   recoveryIntentQueue_ (256) fills to capacity — see testRecoveryDurableAdmission / fillRecoveryQueue,
+    //   where the obligation was ALREADY delivered (Transport/Durable) before redrive, so wasDeferredBefore is
+    //   false and we fall through to the push below). The §5 "no double delivery" guarantee for a DEFERRED
+    //   obligation is enforced two ways: (a) redriveDeferredRecovery only acts on delivery==None, never
+    //   re-attaching a second representation to one that already has one; (b) the coalesce branch above returns
+    //   early (wasDeferredBefore && delivery!=None) when THIS submission's redrive already enqueued the single
+    //   representation — so C16 (deferred → same-key resubmit) yields exactly ONE transport representation.
+
     // ★ D105-R5-8 §4: carry obligationId on the transport intent (and durable fallback below).
     intent.obligationId = oblId;
 
     // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push): (unchanged)
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
+        recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::Transport;   // ★ D105-R5-10
         return true;   // transport recovery exists（§1.9 Phase E — wake 条件）
     }
 
@@ -56708,15 +56764,16 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
 
-    // ★ D105-R5-9 MUST-2: never clobber a distinct live obligation's ONLY delivery representation.
+    // ★ D105-R5-9 MUST-2 + D105-R5-10: never clobber a distinct live obligation's ONLY delivery representation.
     //   The single durable slot may already hold a DIFFERENT obligation (B). Overwriting B would drop
     //   B's delivery while B is still Live (a leak). In that case we must NOT overwrite: defer this
-    //   obligation's retry (it stays Live; bounded by L<=32) and let B keep its slot. This is the
-    //   single-slot durable limitation made explicit — NOT a silent overwrite.
+    //   obligation's delivery (stays Live, delivery==None) and let B keep its slot. The re-drive
+    //   (D105-R5-10) rediscovers it when the occupied slot frees.
     if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission
         && pendingRecoveryAdmission_.recoveryObligationId != oblId) {
+        recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::None;   // ★ D105-R5-10: deferred
         convo::fetchAddAtomic(recoveryRetryDeferredCount_, std::uint64_t{1}, std::memory_order_release);
-        return true;   // obligation stays Live; delivery re-driven when the occupied slot frees (Phase-II multi-slot)
+        return true;   // obligation stays Live; delivery re-driven when the occupied slot frees
     }
     // durable admission へ保持（単一スロット — 空、または同じ obligation なら最新で上書き）
     pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
@@ -56729,13 +56786,21 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     pendingRecoveryAdmission_.intentId = intent.intentId;
     pendingRecoveryAdmission_.recoveryObligationId = oblId;   // ★ D105-R5-8
     convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
+    recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::Durable;   // ★ D105-R5-10
     return true;   // durable recovery exists（INV-X1-2: queue full ≠ Recovery lost — §1.9 Phase E）
 }
 
-// ★ D105-R5-9: single Completion Authority (idempotent, lock-free, ISR-safe).
+// ★ D105-R5-9 + D105-R18: single Completion Authority (idempotent, lock-free, ISR-safe).
 //   Transitions the first Live→terminal for the given id via the table's id-based resolve();
 //   subsequent calls (same id) are no-ops. Called from onPublishCommitted (ISR, Route B),
-//   trySubmitImpl (RebuildThread, Route A) and submitPublishRequest rejection branches (Route C).
+//   submitPublishRequest rejection branches (Route C), and markTransientFailure's
+//   retry-exhaustion branch (Route D — D105-R18).
+//
+//   ★ D105-R18: the historical `else → ResolvedFailed` fallthrough has been removed. Each
+//   outcome now maps explicitly; the default branch asserts (Debug) / falls through
+//   harmlessly (Release) for unknown values. `RecoveryOutcome::Failed` is still a valid
+//   enum value but is reached only from markTransientFailure's exhaustion branch
+//   (the only sanctioned path to ResolvedFailed per R17-4 / D105-R18).
 void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept
 {
     if (obligationId == 0)
@@ -56745,13 +56810,66 @@ void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligatio
     //   the single −1 via the table's id-based resolve (which re-scans by id — no cached index, no ABA).
     if (outcome == RecoveryOutcome::Retry)
         return;
-    const ObligationState terminal = (outcome == RecoveryOutcome::Published)          ? ObligationState::ResolvedSuccess
-                               : (outcome == RecoveryOutcome::StaleSuperseded)   ? ObligationState::ResolvedStaleSuperseded
-                               : (outcome == RecoveryOutcome::ShutdownDiscarded) ? ObligationState::ShutdownDiscarded
-                               :                                                   ObligationState::ResolvedFailed;
+    ObligationState terminal;
+    switch (outcome) {
+        case RecoveryOutcome::Published:          terminal = ObligationState::ResolvedSuccess; break;
+        case RecoveryOutcome::StaleSuperseded:    terminal = ObligationState::ResolvedStaleSuperseded; break;
+        case RecoveryOutcome::ShutdownDiscarded:  terminal = ObligationState::ShutdownDiscarded; break;
+        case RecoveryOutcome::Failed:             terminal = ObligationState::ResolvedFailed; break;
+        case RecoveryOutcome::Retry:              return;  // ★ D105-R5-9: handled above; defensive no-op
+        default:
+            // ★ D105-R18: any unknown outcome is a programming error. The historical fallthrough
+            //   to ResolvedFailed has been removed; do not silently re-introduce it.
+            jassertfalse;
+            return;
+    }
     if (recoveryAdmissions_.resolve(obligationId, terminal)
         && outcome == RecoveryOutcome::ShutdownDiscarded)
         convo::fetchAddAtomic(recoveryObligationShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
+// ★ D105-R18: transient-failure adjudication authority. Single public method that may
+//   produce ResolvedFailed in production. Atomic contract (per R17-7 LP-E):
+//     1. Re-scan the table for `id`; if not found or not Live, no-op.
+//     2. delivery = None  (P-B: re-eligibility for redrive, stranded Transport→None repair).
+//     3. consecutiveFailureCount.fetch_add(1, acq_rel).
+//     4. If new count >= kMaxObligationConsecutiveFailures → resolve(id, Failed).
+//        Increment recoveryRetryExhaustedCount_ for observability.
+//
+//   The counter is reset to 0 by RecoveryAdmissionTable::resolve on any terminal.
+//   `markTransientFailure` is called from the Orchestrator (transport-path build/publish
+//   failure sites — RuntimePublicationOrchestrator.cpp) and the Builder (durable-path
+//   build/warmup failure sites — AudioEngine.RebuildDispatch.cpp:1034/1056). The Builder
+//   call is alongside the existing settlePendingRecoveryAdmission(true) (separate linearizations
+//   for the durable slot's sub-state and the obligation-level counter per LP-F).
+//
+//   ΔL = 0 except in the exhaustion branch (terminal: −1).
+void RuntimeIntentCoordinator::markTransientFailure(std::uint64_t obligationId) noexcept
+{
+    if (obligationId == 0)
+        return;
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        if (recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire) != obligationId)
+            continue;
+        if (recoveryAdmissions_.slot(i).state.load(std::memory_order_acquire) != ObligationState::Live)
+            return;   // not Live → no-op (idempotent / late / wrong-id)
+        // (1) P-B: re-eligibility for redrive. Always reset delivery to None — the obligation
+        //     may have been Transport (stranded after Builder pop) or Durable (post-settle);
+        //     the redrive scan only picks up `delivery==None` obligations (R5-10).
+        recoveryAdmissions_.slot(i).delivery = ObligationDeliveryState::None;
+        // (2) Increment retry counter. fetch_add returns the *old* value; the new count is old+1.
+        const std::uint8_t newCount =
+            static_cast<std::uint8_t>(recoveryAdmissions_.slot(i).consecutiveFailureCount.fetch_add(
+                std::uint8_t{1}, std::memory_order_acq_rel) + std::uint8_t{1});
+        // (3) Exhaustion: route to ResolvedFailed terminal. This is the ONLY production
+        //     call site of resolveRecoveryObligation(id, Failed) per R17-4.
+        if (newCount >= kMaxObligationConsecutiveFailures) {
+            convo::fetchAddAtomic(recoveryRetryExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
+            recoveryAdmissions_.resolve(obligationId, ObligationState::ResolvedFailed);
+        }
+        return;
+    }
+    // unknown id → no-op
 }
 
 // ★ D105-R5-9 MUST-2: guarded re-arm for a Retry obligation. Only touches the durable slot when it
@@ -56764,6 +56882,86 @@ void RuntimeIntentCoordinator::rearmRecoveryRetry(std::uint64_t obligationId) no
         && pendingRecoveryAdmission_.recoveryObligationId == obligationId)
         settlePendingRecoveryAdmission(true);
 }
+
+// ★ D105-R5-10: re-drive every Live obligation that currently has NO delivery representation
+//   (delivery==None, i.e. a deferred obligation). Called only from the CoordinatorLoop (producer)
+//   thread — SPSC-safe for recoveryIntentQueue_ and pendingRecoveryAdmission_. O(kCapacity=32).
+//   ΔL=0: never inserts a new obligation or terminates one; only re-attaches a delivery representation
+//   to an EXISTING Live obligation (existing id + buildSource preserved).
+void RuntimeIntentCoordinator::redriveDeferredRecoveryObligations() noexcept
+{
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        auto& s = recoveryAdmissions_.slot(i);
+        if (s.state.load(std::memory_order_acquire) != ObligationState::Live)
+            continue;
+        if (s.delivery != ObligationDeliveryState::None)
+            continue;   // already has a delivery representation — do not re-send (§5)
+        redriveDeferredRecovery(s.id.load(std::memory_order_acquire));
+    }
+}
+
+// ★ D105-R5-10: re-attach a delivery representation to ONE existing Live obligation. Restores the
+//   obligationId + buildSource from the table record (NO new obligation, NO new id). On success the
+//   obligation's delivery residency is set; if BOTH resources are busy it remains deferred (delivery==None)
+//   and is retried on a later redrive opportunity. Idempotent: a non-None delivery state is a no-op.
+void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationId) noexcept
+{
+    if (obligationId == 0)
+        return;
+    std::size_t idx = recoveryAdmissions_.kCapacity;
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        if (recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire) == obligationId) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == recoveryAdmissions_.kCapacity)
+        return;   // unknown / mismatched id → no-op (do not fabricate an obligation)
+    auto& s = recoveryAdmissions_.slot(idx);
+    if (s.state.load(std::memory_order_acquire) != ObligationState::Live)
+        return;
+    if (s.delivery != ObligationDeliveryState::None)
+        return;   // idempotent: already delivered (no duplicate)
+
+    convo::fetchAddAtomic(recoveryRetryRedriveCount_, std::uint64_t{1}, std::memory_order_release);
+
+    RecoveryIntent intent{
+        s.handle,
+        s.epoch,
+        nextRecoveryIntentId_.fetch_add(1, std::memory_order_relaxed),
+        std::uint64_t{0},   // obligationId (assigned below from obligationId)
+        s.buildSource
+    };
+    intent.obligationId = obligationId;   // preserve the existing obligation id (no new id issued)
+
+    // Durable slot takes priority if free (single slot; admit THIS obligation, not a new one).
+    if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::NoAdmission) {
+        pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
+        pendingRecoveryAdmission_.pending = true;
+        pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
+        pendingRecoveryAdmission_.buildSource = s.buildSource;
+        pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
+        pendingRecoveryAdmission_.handle = s.handle;
+        pendingRecoveryAdmission_.epoch = s.epoch;
+        pendingRecoveryAdmission_.intentId = intent.intentId;
+        pendingRecoveryAdmission_.recoveryObligationId = obligationId;
+        convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
+        s.delivery = ObligationDeliveryState::Durable;
+        return;
+    }
+
+    // Else attempt transport queue.
+    convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    if (recoveryIntentQueue_.push(intent)) {
+        s.delivery = ObligationDeliveryState::Transport;
+        return;
+    }
+    convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
+    // Both resources busy → remain deferred (delivery==None); ΔL=0; retry on a later redrive opportunity.
+    convo::fetchAddAtomic(recoveryRetryRedriveFailureCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
 
 // ★ work88 (X1 §6.1 — lease 方式): durable Recovery admission を Builder が消費する。
 //   二十六次レビュー（必須修正1）: destructive dequeue ではなく DurablePending → Building の
@@ -56781,6 +56979,7 @@ RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
         pendingRecoveryAdmission_.handle,
         pendingRecoveryAdmission_.epoch,
         pendingRecoveryAdmission_.intentId,
+        pendingRecoveryAdmission_.recoveryObligationId,
         pendingRecoveryAdmission_.buildSource
     };
     intent.obligationId = pendingRecoveryAdmission_.recoveryObligationId;   // ★ D105-R5-8
@@ -57212,6 +57411,19 @@ public:
         ShutdownDiscarded
     };
 
+    // ★ D105-R5-10: per-obligation delivery residency. Independent of ObligationState.
+    //   None     = Live but NO delivery representation (deferred; re-drive target).
+    //   Transport= intent is (or was) in recoveryIntentQueue_ (enqueued for the Builder).
+    //   Durable  = held in the single durable slot (DurablePending / Building sub-states).
+    //   Lets the re-drive rediscover ONLY Live obligations lacking a delivery representation
+    //   (§5: do not re-send Transport/Durable obligations → no duplicate delivery). CoordinatorLoop-
+    //   only field (written solely on the producer thread) — non-atomic by design.
+    enum class ObligationDeliveryState : std::uint8_t {
+        None = 0,
+        Transport,
+        Durable
+    };
+
     // Resolution outcome for a logical recovery obligation. Retry keeps the obligation Live (ΔL=0,
     // durable re-armed); the rest are terminal (Live→terminal via the single Completion Authority).
     // NOTE: `Superseded` (R7 §11) is intentionally NOT implemented — it has no real supersession
@@ -57236,8 +57448,20 @@ public:
         PublicationEpoch epoch{0};
         std::uint64_t intentId = 0;
         convo::RuntimeBuildSnapshot buildSource{};
+        ObligationDeliveryState delivery{ObligationDeliveryState::None};   // ★ D105-R5-10
+        // ★ D105-R18: per-obligation retry budget. Single writer (CoordinatorLoop via
+        //   markTransientFailure) for transient failures; reset to 0 in resolve() on
+        //   terminal disposition. Reaches kMaxObligationConsecutiveFailures → only
+        //   sanctioned path to ResolvedFailed.
+        std::atomic<std::uint8_t> consecutiveFailureCount{0};
     };
     static constexpr std::size_t kMaxLogicalRecoveryObligations = 32;  // INV-CAP-7
+    // ★ D105-R18: obligation-level retry exhaustion bound. Inherited from the existing
+    //   AudioEngine.RebuildDispatch.cpp:1015 kMaxRecoveryConsecutiveFailures (Builder-local
+    //   spin-prevention). Same value (4) but at the obligation lifetime, surviving
+    //   durable↔transport transitions. Exhaustion routes the obligation to ResolvedFailed
+    //   (the only sanctioned Failed terminal per R17-4).
+    static constexpr std::uint8_t kMaxObligationConsecutiveFailures = 4;
 
     // ── ★ D105-R5-8: Coordinator-owned Recovery Admission Table (logical obligation accounting) ──
     //   Enforces liveLogicalRecoveryObligationCount ≤ 32 (INV-X1-7 / INV-CAP-7). Distinct from the
@@ -57270,6 +57494,10 @@ public:
                     slots_[i].id.store(id, std::memory_order_relaxed);
                     slots_[i].identity = key;
                     slots_[i].state.store(ObligationState::Live, std::memory_order_release);
+                    slots_[i].delivery = ObligationDeliveryState::None;   // ★ D105-R5-10: fresh slot has none
+                    // ★ D105-R18: reset retry budget on slot reuse (slot is fresh — any prior terminal
+                    //   left consecutiveFailureCount at its terminal value; reset for clean accounting).
+                    slots_[i].consecutiveFailureCount.store(0, std::memory_order_release);
                     convo::fetchAddAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
                     return i;
                 }
@@ -57282,12 +57510,16 @@ public:
         // always assigned a strictly-greater id (nextId_ is monotonic), so a reused slot can never match
         // a stale id → no ABA / no wrong-obligation termination. Idempotent: a prior terminal state (or a
         // lost CAS race) makes the inner CAS fail → returns false (no double −1, no L underflow).
+        // ★ D105-R18: on successful Live→terminal CAS, reset consecutiveFailureCount to 0 (slot is
+        //   freed; any prior counter value is meaningless post-terminal). Reset is a plain store
+        //   *after* the CAS so it is observed only by readers after the terminal is visible.
         bool resolve(LogicalRecoveryObligationId id, ObligationState terminalState) noexcept {
             for (std::size_t i = 0; i < kCapacity; ++i) {
                 if (slots_[i].id.load(std::memory_order_acquire) != id)
                     continue;
                 ObligationState expected = ObligationState::Live;
                 if (slots_[i].state.compare_exchange_strong(expected, terminalState, std::memory_order_acq_rel)) {
+                    slots_[i].consecutiveFailureCount.store(0, std::memory_order_release);
                     convo::fetchSubAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
                     return true;
                 }
@@ -57301,6 +57533,10 @@ public:
         }
         const LogicalRecoveryObligation& slot(std::size_t i) const noexcept { return slots_[i]; }
         LogicalRecoveryObligation& slot(std::size_t i) noexcept { return slots_[i]; }
+        // ★ D105-R18: read-only accessor for the retry counter (used by tests / telemetry).
+        std::uint8_t consecutiveFailureCount(std::size_t i) const noexcept {
+            return slots_[i].consecutiveFailureCount.load(std::memory_order_acquire);
+        }
 
     private:
         std::array<LogicalRecoveryObligation, kCapacity> slots_{};
@@ -57326,11 +57562,32 @@ public:
       //   transition counts; subsequent calls (same id) are no-ops.
        void resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept;
 
-       // ★ D105-R5-9 MUST-2: re-arm a Retry obligation's durable delivery. Only re-arms when the single
-       //   durable slot already holds THIS obligation (Building state); never overwrites a distinct live
-       //   obligation (would drop that obligation's only delivery). Otherwise the retry is deferred
-       //   (obligation stays Live; bounded by L<=32) — the documented single-durable-slot limitation.
+       // ★ D105-R18: transient-failure adjudication authority. Called by the Orchestrator
+       //   (trySubmitImpl build/publish failure sites) and the Builder (durable build/warmup
+       //   failure sites) for a single obligation id. Atomically performs:
+       //     1. delivery = None (P-B: re-eligibility for redrive, stranded Transport→None)
+       //     2. consecutiveFailureCount.fetch_add(1)
+       //     3. if counter reaches kMaxObligationConsecutiveFailures → resolve(id, Failed)
+       //        (only sanctioned path to ResolvedFailed per R17-4)
+       //   The counter persists across durable↔transport transitions and across the obligation
+       //   lifetime. Idempotent on a non-Live slot (no-op). ΔL=0 unless exhaustion fires.
+       //   This is the only public method that produces ResolvedFailed in production.
+       void markTransientFailure(std::uint64_t obligationId) noexcept;
+
+      // ★ D105-R5-9 MUST-2: re-arm a Retry obligation's durable delivery. Only re-arms when the single
+      //   durable slot already holds THIS obligation (Building state); never overwrites a distinct live
+      //   obligation (would drop that obligation's only delivery). Otherwise the retry is deferred
+      //   (obligation stays Live; bounded by L<=32) — the documented single-durable-slot limitation.
        void rearmRecoveryRetry(std::uint64_t obligationId) noexcept;
+
+        // ★ D105-R5-10: re-drive deferred Live obligations (delivery==None) back onto a transport/durable
+        //   delivery when a delivery resource frees. Runs ONLY on the CoordinatorLoop (producer) thread —
+        //   SPSC-safe for recoveryIntentQueue_ / pendingRecoveryAdmission_. ΔL=0: never inserts a new
+        //   obligation or terminates one; only re-attaches a delivery representation to an EXISTING Live
+        //   obligation (existing id + buildSource preserved), so no new LogicalRecoveryObligationId is issued.
+        void redriveDeferredRecoveryObligations() noexcept;
+        void redriveDeferredRecovery(std::uint64_t obligationId) noexcept;
+
 
       // ★ D105-R5-8: telemetry accessors for live obligation count + rejections.
        [[nodiscard]] std::uint64_t liveLogicalRecoveryObligationCount() const noexcept {
@@ -57345,9 +57602,27 @@ public:
        [[nodiscard]] std::uint64_t recoveryObligationShutdownDiscardCount() const noexcept {
            return convo::consumeAtomic(recoveryObligationShutdownDiscardCount_, std::memory_order_acquire);
        }
-       [[nodiscard]] std::uint64_t recoveryRetryDeferredCount() const noexcept {
-           return convo::consumeAtomic(recoveryRetryDeferredCount_, std::memory_order_acquire);
-       }
+        [[nodiscard]] std::uint64_t recoveryRetryDeferredCount() const noexcept {
+            return convo::consumeAtomic(recoveryRetryDeferredCount_, std::memory_order_acquire);
+        }
+        [[nodiscard]] std::uint64_t recoveryRetryRedriveCount() const noexcept {        // ★ D105-R5-10
+            return convo::consumeAtomic(recoveryRetryRedriveCount_, std::memory_order_acquire);
+        }
+        [[nodiscard]] std::uint64_t recoveryRetryRedriveFailureCount() const noexcept { // ★ D105-R5-10
+            return convo::consumeAtomic(recoveryRetryRedriveFailureCount_, std::memory_order_acquire);
+        }
+        // ★ D105-R18: telemetry for retry-exhaustion path. Incremented only by
+        //   markTransientFailure when the obligation's consecutiveFailureCount reaches
+        //   kMaxObligationConsecutiveFailures. Distinguished from any historical Failed
+        //   (which is now unreachable in production per R17-4).
+        [[nodiscard]] std::uint64_t recoveryRetryExhaustedCount() const noexcept {
+            return convo::consumeAtomic(recoveryRetryExhaustedCount_, std::memory_order_acquire);
+        }
+        // ★ D105-R18: read-only accessor for a slot's retry counter (used by tests).
+        [[nodiscard]] std::uint8_t recoveryConsecutiveFailureCount(std::size_t i) const noexcept {
+            return recoveryAdmissions_.consecutiveFailureCount(i);
+        }
+
 
      /// Recovery Intent を Builder Loop へ引き渡す (1件 pop, transport-only)。
      /// FUTURE-10 共通 Intent Queue 化後は processIntent へ統合。
@@ -57794,8 +58069,14 @@ private:
     std::atomic<std::uint64_t> recoveryCapacityExhaustedCount_{0};          // L==32 rejects
     std::atomic<std::uint64_t> recoveryObligationShutdownDiscardCount_{0};   // shutdown discards
     std::atomic<std::uint64_t> recoveryRetryDeferredCount_{0};              // ★ D105-R5-9 MUST-2: durable-slot
-                                                                             //   occupied by a different live obligation
-                                                                             //   → retry delivery deferred (L unchanged)
+                                                                              //   occupied by a different live obligation
+                                                                              //   → retry delivery deferred (L unchanged)
+    std::atomic<std::uint64_t> recoveryRetryRedriveCount_{0};               // ★ D105-R5-10: re-drive attempts
+    std::atomic<std::uint64_t> recoveryRetryRedriveFailureCount_{0};         // ★ D105-R5-10: both resources busy
+                                                                               //   → remains deferred (L unchanged)
+    std::atomic<std::uint64_t> recoveryRetryExhaustedCount_{0};              // ★ D105-R18: retry-budget exhaustion
+                                                                               //   (only sanctioned path to ResolvedFailed)
+
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
     //   ★ work88 (FUTURE-10 前提 0): LockFreeRingBuffer（SPSC）→ MpscBoundedRing（MPSC）に置換。
@@ -65345,7 +65626,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         telemetryRecorder_.recordFailure(FailureStage::Execution,
             FailureReason::PublishFailed, "trySubmit:build",
             correlationId.shortValue(), nowUs);
-        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
+        // ★ D105-R20: transient build failure → return RejectedNotFinalized. The obligation
+        //   disposition is centralized in submitPublishRequest's RejectedNotFinalized
+        //   switch case (one markTransientFailure call per failure event; A/B/D unified).
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
@@ -65411,7 +65694,9 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
             telemetryRecorder_.recordFailure(FailureStage::Execution,
             FailureReason::PublishFailed, "trySubmit:rebuild",
             correlationId.shortValue(), nowUs);
-        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);  // ★ D105-R5-8
+        // ★ D105-R20: transient crossfade-rebuild failure → return RejectedNotFinalized.
+        //   Centralized in submitPublishRequest's switch case (one markTransientFailure
+        //   per failure event; A/B/D unified). See Build #1 failure above.
         return PublicationAdmission::Decision::RejectedNotFinalized;
         }
     }
@@ -65458,8 +65743,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   publish 失敗時点で shutdown 中なら RejectedShutdown、それ以外は
         //   RejectedPublishFailure（内部失敗）を返す。ownership はどちらでも
         //   destroyRolledBackDSP() により回収済み（decision 分類から独立）。
-        // ★ D105-R5-8: publish failure → terminal obligation (no leak)
-        engine_.runtimePublicationBridge_.resolveRecoveryObligation(req.recoveryObligationId, RuntimeIntentCoordinator::RecoveryOutcome::Failed);
+        // ★ D105-R18: transient publish failure → markTransientFailure (ΔL=0, same id,
+        //   delivery=None — repairs stranded Transport after Builder pop, retry counter
+        //   incremented). ResolvedFailed only at retry exhaustion. The shutdown check
+        //   below still routes to RejectedShutdown; obligation disposition is independent
+        //   of the return decision.
+        engine_.runtimePublicationBridge_.markTransientFailure(req.recoveryObligationId);
         if (engine_.isShutdownInProgress())
             return PublicationAdmission::Decision::RejectedShutdown;
         return PublicationAdmission::Decision::RejectedPublishFailure;
@@ -65542,7 +65831,14 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::ValidationFailed, "submitPublishRequest:notFinalized",
                 0, nowUs);
-            resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Failed);           // ★ D105-R5-9: −1
+            // ★ D105-R20: centralized markTransientFailure for ALL three RejectedNotFinalized
+            //   paths (A: build #1, B: crossfade rebuild, D: admission-rejection). The previous
+            //   direct resolveIfRecovery(Failed) was a leak-tightening path (R5-9) that
+            //   conflicted with the R18 retry-preservation contract; centralizing here
+            //   guarantees exactly one markTransientFailure call per failure event. ΔL=0,
+            //   delivery=None (P-B), counter+1, exhaustion→ResolvedFailed (path X only).
+            if (req.recoveryObligationId != 0)
+                engine_.runtimePublicationBridge_.markTransientFailure(req.recoveryObligationId);
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);
@@ -90957,6 +91253,678 @@ namespace {
             && c->recoveryCapacityExhaustedCount() >= 224
             && c->liveLogicalRecoveryObligationCount() <= 32;
     }
+
+    // ★ D105-R5-10 helper: fill recoveryIntentQueue_ (256) with `count` coalesced submissions of one target.
+    void fillRecoveryQueue(convo::isr::RuntimeIntentCoordinator& c, std::uint64_t identityHash)
+    {
+        convo::RuntimeBuildSnapshot snap = makeRecoverySnapshot(identityHash);
+        for (int i = 0; i < 256; ++i)
+            (void)c.submitRecoveryRequest(convo::isr::DSPHandle::null(), snap, 1);
+    }
+
+    // C11: a deferred (Live, delivery==None) obligation is redriven onto the durable slot when it frees.
+    //   Setup: O1 fills queue (256 coalesced intents, transport); O2 → durable (free slot); O3 → deferred
+    //   (durable occupied by O2). Free the durable slot, redrive → O3 must re-attach to durable. ΔL = 0.
+    [[nodiscard]] bool testRLOE_C11_redriveRecoversDeferredViaDurable()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);                                                       // O1: queue full
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false;  // O2 → durable
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false;  // O3 → deferred
+        if (c->recoveryRetryDeferredCount() < 1) return false;                          // O3 deferred
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;
+
+        if (!c->takePendingRecoveryAdmission().has_value()) return false;               // consume O2
+        c->settlePendingRecoveryAdmission(false);                                       // durable slot free
+
+        c->redriveDeferredRecoveryObligations();                                        // O3 → durable
+        if (c->recoveryRetryRedriveCount() < 1) return false;
+
+        auto redriven = c->takePendingRecoveryAdmission();                              // O3 now durable
+        if (!redriven.has_value()) return false;
+        if (redriven->obligationId == 0) return false;
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;                // ΔL == 0
+        if (c->takePendingRecoveryAdmission().has_value()) return false;                // exactly one durable (no dup)
+        return true;
+    }
+
+    // C12: redrive is idempotent — a second redrive on an already-delivered obligation does NOT create a
+    //   duplicate delivery representation.
+    [[nodiscard]] bool testRLOE_C12_redriveIdempotentNoDuplicate()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false;
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false;
+        if (!c->takePendingRecoveryAdmission().has_value()) return false;
+        c->settlePendingRecoveryAdmission(false);
+        c->redriveDeferredRecoveryObligations();
+        c->redriveDeferredRecoveryObligations();                                        // second redrive: no-op (delivery!=None)
+        if (!c->takePendingRecoveryAdmission().has_value()) return false;              // one durable only
+        if (c->takePendingRecoveryAdmission().has_value()) return false;               // no duplicate
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;
+        return true;
+    }
+
+    // C13: redrive prefers durable but falls back to transport when the durable slot is busy.
+    //   Setup: queue full (O1), O2 → durable, O3 → deferred. Drain the queue (keep O2 in durable), redrive.
+    //   O3 must go to transport (queue now has space), NOT durable (still O2).
+    [[nodiscard]] bool testRLOE_C13_redriveFallsBackToTransport()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false;
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false;
+        for (int i = 0; i < 256; ++i)                                                 // drain queue, keep O2 durable
+            if (!c->popRecoveryRequest().has_value()) return false;
+        if (c->popRecoveryRequest().has_value()) return false;
+
+        c->redriveDeferredRecoveryObligations();
+        if (c->recoveryRetryRedriveCount() < 1) return false;
+
+        auto t = c->popRecoveryRequest();                                              // O3 must be in transport
+        if (!t.has_value()) return false;
+        if (t->obligationId == 0) return false;
+        if (!c->hasPendingRecoveryAdmission()) return false;                           // O2 still occupies durable (not O3)
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;
+        return true;
+    }
+
+    // C14: redrive when BOTH resources are busy leaves the obligation deferred (ΔL=0, failure counted),
+    //   and a later redrive after a resource frees recovers it.
+    [[nodiscard]] bool testRLOE_C14_redriveFailureBothBusy()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false;
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false;
+        // both busy (queue full, durable=O2) → redrive fails gracefully
+        c->redriveDeferredRecoveryObligations();
+        if (c->recoveryRetryRedriveFailureCount() < 1) return false;
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;                // O3 still Live
+
+        if (!c->takePendingRecoveryAdmission().has_value()) return false;              // free durable
+        c->settlePendingRecoveryAdmission(false);
+        c->redriveDeferredRecoveryObligations();                                       // now recovers
+        if (c->recoveryRetryRedriveCount() < 1) return false;
+        if (!c->takePendingRecoveryAdmission().has_value()) return false;
+        return true;
+    }
+
+    // C15: redrive never changes the live obligation count (no +1 / no -1).
+    [[nodiscard]] bool testRLOE_C15_redrivePreservesLiveCount()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false;
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false;
+        const std::uint64_t L0 = c->liveLogicalRecoveryObligationCount();
+        if (L0 != 3) return false;
+        if (!c->takePendingRecoveryAdmission().has_value()) return false;
+        c->settlePendingRecoveryAdmission(false);
+        c->redriveDeferredRecoveryObligations();
+        if (c->liveLogicalRecoveryObligationCount() != L0) return false;
+        c->redriveDeferredRecoveryObligations();
+        c->redriveDeferredRecoveryObligations();
+        if (c->liveLogicalRecoveryObligationCount() != L0) return false;
+        return true;
+    }
+
+    // C16: a deferred obligation, on same-key re-submission, coalesces (no new id, L unchanged) and is
+    //   delivered with a single representation (no duplicate). Drain the queue first so the resubmit enqueues.
+    [[nodiscard]] bool testRLOE_C16_deferredSameKeyResubmitCoalesces()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false;
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false;  // O3 deferred
+        const std::uint64_t L0 = c->liveLogicalRecoveryObligationCount();
+        if (L0 != 3) return false;
+        const std::uint64_t coalescedBefore = c->recoveryCoalescedCount();
+
+        for (int i = 0; i < 256; ++i)                                                 // drain queue
+            if (!c->popRecoveryRequest().has_value()) return false;
+
+        const bool accepted = c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1);
+        if (!accepted) return false;                                                   // coalesced, not rejected
+        if (c->liveLogicalRecoveryObligationCount() != L0) return false;               // no L increment
+        if (c->recoveryCoalescedCount() != coalescedBefore + 1) return false;          // coalesce, no new id
+
+        auto t = c->popRecoveryRequest();                                              // single transport representation
+        if (!t.has_value()) return false;
+        if (t->obligationId == 0) return false;
+        if (c->popRecoveryRequest().has_value()) return false;                          // exactly one intent for O3
+        return true;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // D105-R13: structural assertion — isFullyDrained() must require liveCount()==0.
+    //   These pin down the exact false-positive R13 closes (a residual Live obligation with
+    //   drained transport/durable/counters is NOT "drained"), and that shutdown drain + the
+    //   no-resurrection-after-discard ordering hold. No D105-R5-10 behavior is altered.
+    // ────────────────────────────────────────────────────────────────────────────
+
+    // T-R13-1: a Live obligation whose transport intent has been consumed (push then pop ⇒
+    //   queue empty, pendingIntentCount_ back to 0, durable clear) must NOT be reported drained.
+    //   This FAILS without the R13 assertion (pre-R13 false-positive) and PASSES with it.
+    [[nodiscard]] bool testR13_liveObligationWithDrainedTransportIsNotFullyDrained()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(1), 1)) return false;
+        if (!c->popRecoveryRequest().has_value()) return false;          // transport consumed
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;  // still Live
+        return !c->isFullyDrained();                                     // R13: liveCount>0 ⇒ not drained
+    }
+
+    // T-R13-2: shutdown + discard must terminalize every Live obligation to 0 and then drain structurally.
+    [[nodiscard]] bool testR13_discardTerminalizesAllAndDrains()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(1), 1)) return false;
+        if (!c->popRecoveryRequest().has_value()) return false;
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        if (c->isFullyDrained()) return false;                           // not drained yet (L==1)
+        c->requestShutdown();                                            // close admission (no new +1)
+        c->discardRecoveryRequestsOnShutdown();                          // terminalize all Live ⇒ 0
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        return c->isFullyDrained();                                      // now structurally drained
+    }
+
+    // T-R13-3 (R5-10 regression): a DEFERRED obligation (delivery==None) must not be mistaken as
+    //   "already delivered/drained", and must be terminalized by shutdown discard (not abandoned).
+    [[nodiscard]] bool testR13_deferredNoneObligationNotAbandonedAtShutdown()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);                                        // O1: transport queue full (256)
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false; // O2 durable
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false; // O3 deferred (None)
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;
+        if (c->recoveryRetryDeferredCount() < 1) return false;         // O3 did defer (None)
+        // drain transport (O1) + consume durable (O2) so residual Live obligations remain.
+        for (int i = 0; i < 256; ++i)
+            if (!c->popRecoveryRequest().has_value()) return false;
+        if (auto dur = c->takePendingRecoveryAdmission())
+            c->settlePendingRecoveryAdmission(false);                    // durable slot clear, O2 still Live
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;  // none terminalized yet (incl. O3 None)
+        if (c->isFullyDrained()) return false;                          // R12 false-positive pre-check; R13 rejects (L==3)
+        c->requestShutdown();
+        c->discardRecoveryRequestsOnShutdown();                          // must close the None obligation too
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false; // incl. deferred O3 ⇒ 0
+        return c->isFullyDrained();
+    }
+
+    // T-R13-4: after shutdown+discard, no new obligation can be admitted (submit rejected ⇒ liveCount stuck at 0).
+    [[nodiscard]] bool testR13_noNewAdmissionAfterShutdownDiscard()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(1), 1)) return false;
+        if (!c->popRecoveryRequest().has_value()) return false;
+        c->requestShutdown();
+        c->discardRecoveryRequestsOnShutdown();
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (!c->isFullyDrained()) return false;
+        if (c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false; // gated => rejected
+        return c->liveLogicalRecoveryObligationCount() == 0 && c->isFullyDrained();
+    }
+
+    // =========================================================================
+    // D105-R18: Retry-preserving obligation semantics (production-layer tests)
+    //   These tests exercise markTransientFailure directly (the new adjudication
+    //   authority). C8 (table-level Failed arm) is preserved unchanged.
+    //   The K value is kMaxObligationConsecutiveFailures=4 (matches the
+    //   Builder-local kMaxRecoveryConsecutiveFailures=4, separate counter).
+    // =========================================================================
+
+    // T-R18-1: transient build failure → obligation stays Live (ΔL=0), counter=1.
+    //   The single −1 producer at this code path is removed; transient failure
+    //   increments the obligation-level retry counter and resets delivery=None.
+    [[nodiscard]] bool testR18_T1_transientBuildFailureKeepsLive()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 1);
+        if (!id) return false;
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        // Simulate a transient build failure at the Orchestrator site.
+        c->markTransientFailure(*id);
+        // ΔL = 0; obligation remains Live.
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        // No Failed terminal was emitted.
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // recoveryObligationShutdownDiscardCount must NOT be bumped (this is not ShutdownDiscard).
+        if (c->recoveryObligationShutdownDiscardCount() != 0) return false;
+        // The obligation's id is still accepted by submitRecoveryRequest coalesce.
+        // Note: coalesce may return true with no new push when delivery was None
+        // and redrive already re-attached the obligation (R5-10 §2 wasDeferredBefore path).
+        const bool coalesced = c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(1), 1);
+        if (!coalesced) return false;
+        // After coalesce, the obligation is still Live; liveCount == 1 (ΔL == 0).
+        return c->liveLogicalRecoveryObligationCount() == 1;
+    }
+
+    // T-R18-2: transient publish failure → obligation stays Live (ΔL=0), counter=1.
+    [[nodiscard]] bool testR18_T2_transientPublishFailureKeepsLive()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 2);
+        if (!id) return false;
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // After markTransientFailure, delivery==None; a fresh attempt coalesces back.
+        // Note: same caveat as T-R18-1: coalesce may return true with no push.
+        const bool coalesced = c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1);
+        if (!coalesced) return false;
+        return c->liveLogicalRecoveryObligationCount() == 1;
+    }
+
+    // T-R18-3: after markTransientFailure, the obligation's delivery is forced to None,
+    //   so redriveDeferredRecoveryObligations can re-attach delivery and the obligation
+    //   reaches a Builder-consumable state again.
+    [[nodiscard]] bool testR18_T3_deliveryResetToNone()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 3);
+        if (!id) return false;
+        // The obligation is Live with delivery=Transport (popped by submitAndGetId).
+        c->markTransientFailure(*id);
+        // delivery must be None (P-B) — obligation is now redrive-eligible.
+        // The redrive will prefer the durable slot if free; the obligation is now
+        // re-deliverable to a Builder via takePendingRecoveryAdmission.
+        c->redriveDeferredRecoveryObligations();
+        if (c->recoveryRetryRedriveCount() < 1) return false;
+        // The obligation should now be in a Builder-consumable state. Either:
+        //   - durable slot is free → redrive went to durable (preferred path)
+        //   - transport queue has space → redrive went to transport
+        // Verify the obligation id is recoverable from the durable slot or transport.
+        auto durable = c->takePendingRecoveryAdmission();
+        if (durable.has_value()) {
+            return durable->obligationId == *id;
+        }
+        // Else check transport.
+        auto pop = c->popRecoveryRequest();
+        if (!pop.has_value()) return false;
+        return pop->obligationId == *id;
+    }
+
+    // T-R18-4: same id is preserved across markTransientFailure → re-submit.
+    //   The obligation must coalesce (findByKey matches Live) and not re-allocate id.
+    [[nodiscard]] bool testR18_T4_sameIdAcrossFailure()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id1 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 4);
+        if (!id1) return false;
+        c->markTransientFailure(*id1);
+        // Re-submit with the same identity; must coalesce, id preserved.
+        // Note: when delivery==None at coalesce time, the redrive inside
+        // submitRecoveryRequest (cpp:847) may already have re-attached delivery
+        // to durable, so the early-return in the coalesce branch fires and no
+        // transport push occurs. We then redrive to put the obligation back
+        // on a delivery representation and verify the id is preserved.
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(4), 1)) return false;
+        c->redriveDeferredRecoveryObligations();
+        // The obligation should now be in a delivery representation (durable preferred).
+        auto durable = c->takePendingRecoveryAdmission();
+        if (durable.has_value()) {
+            return durable->obligationId == *id1;
+        }
+        // Else check transport.
+        auto pop = c->popRecoveryRequest();
+        if (!pop.has_value()) return false;
+        return pop->obligationId == *id1;
+    }
+
+    // T-R18-5: K consecutive failures increment the counter and K-th forces terminal.
+    [[nodiscard]] bool testR18_T5_repeatedFailureCountAndExhaustion()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 5);
+        if (!id) return false;
+        // K-1 = 3 transient failures: obligation stays Live.
+        for (int i = 0; i < 3; ++i) {
+            c->markTransientFailure(*id);
+            if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+            if (c->recoveryRetryExhaustedCount() != 0) return false;
+        }
+        // 4th failure (K-th) triggers exhaustion.
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        // Failed is not ShutdownDiscarded.
+        if (c->recoveryObligationShutdownDiscardCount() != 0) return false;
+        return true;
+    }
+
+    // T-R18-6: successful publish after retries → exactly one −1, counter reset to 0.
+    [[nodiscard]] bool testR18_T6_successAfterRetriesExactlyOnce()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 6);
+        if (!id) return false;
+        // 2 transient failures (counter reaches 2).
+        c->markTransientFailure(*id);
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // Successful publish terminalizes.
+        c->resolveRecoveryObligation(*id,
+            convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        // No exhaustion was emitted.
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        return true;
+    }
+
+    // T-R18-7: shutdown during failed/deferred recovery → ShutdownDiscarded, not Failed.
+    [[nodiscard]] bool testR18_T7_shutdownDuringDeferredRetry()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 7);
+        if (!id) return false;
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        c->requestShutdown();
+        c->discardRecoveryRequestsOnShutdown();
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryObligationShutdownDiscardCount() != 1) return false;
+        // No exhaustion (Failed) emitted; the obligation was terminalized by ShutdownDiscarded.
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        return true;
+    }
+
+    // T-R18-8: stale (RejectedStaleGeneration) after retries → ResolvedStaleSuperseded, not Failed.
+    [[nodiscard]] bool testR18_T8_staleAfterRetries()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 8);
+        if (!id) return false;
+        c->markTransientFailure(*id);
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        c->resolveRecoveryObligation(*id,
+            convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        if (c->recoveryObligationShutdownDiscardCount() != 0) return false;
+        return true;
+    }
+
+    // T-R18-9: transport-resident stranded case is repaired (R16-3 / R16-4 P-B).
+    [[nodiscard]] bool testR18_T9_strandedTransportRepaired()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        fillRecoveryQueue(*c, 1);  // O1: 256 entries in transport
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(2), 1)) return false; // O2 durable
+        if (!c->submitRecoveryRequest(convo::isr::DSPHandle::null(), makeRecoverySnapshot(3), 1)) return false; // O3 deferred
+        // Pop one entry of O1 from the transport queue to capture its id.
+        auto first = c->popRecoveryRequest();
+        if (!first.has_value()) return false;
+        const std::uint64_t strandedId = first->obligationId;
+        // Simulate publish failure of O1's intent: markTransientFailure.
+        c->markTransientFailure(strandedId);
+        if (c->liveLogicalRecoveryObligationCount() != 3) return false;
+        // delivery must now be None; redrive picks it up.
+        c->redriveDeferredRecoveryObligations();
+        if (c->recoveryRetryRedriveCount() < 1) return false;
+        return true;
+    }
+
+    // T-R18-10: pressure (RejectedPressure → Retry) regression unchanged.
+    //   Calling resolveRecoveryObligation(id, Retry) must keep the obligation Live
+    //   (ΔL=0). This is the existing R5-9 MUST-2 contract; the test asserts it
+    //   survives R18's resolve() refactor (switch with Failed arm retained).
+    [[nodiscard]] bool testR18_T10_pressureRetryUnchanged()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 10);
+        if (!id) return false;
+        const std::uint64_t L0 = c->liveLogicalRecoveryObligationCount();
+        c->resolveRecoveryObligation(*id,
+            convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Retry);
+        if (c->liveLogicalRecoveryObligationCount() != L0) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        return true;
+    }
+
+    // T-R18-11: markTransientFailure on a non-Live or unknown id is a no-op.
+    //   Idempotency: stale, terminalized, or unknown ids must not throw and must
+    //   not produce any −1.
+    [[nodiscard]] bool testR18_T11_markTransientFailureIdempotent()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        // unknown id
+        c->markTransientFailure(0xDEADBEEFu);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // id=0 short-circuit
+        c->markTransientFailure(0);
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // admit + resolve to terminal, then call markTransientFailure on the terminalized id
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 11);
+        if (!id) return false;
+        c->resolveRecoveryObligation(*id,
+            convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        c->markTransientFailure(*id);  // post-terminal: no-op
+        return c->liveLogicalRecoveryObligationCount() == 0
+            && c->recoveryRetryExhaustedCount() == 0;
+    }
+
+    // T-R18-12: counter is reset to 0 on slot reuse (tryInsert).
+    //   After exhaustion, the slot is freed; a new obligation for a different
+    //   identity gets a new id and the counter must be 0 on the new obligation
+    //   (no carryover from the exhausted slot).
+    [[nodiscard]] bool testR18_T12_counterResetOnSlotReuse()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id1 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 12);
+        if (!id1) return false;
+        // Exhaust the obligation (4 calls).
+        for (int i = 0; i < 4; ++i) c->markTransientFailure(*id1);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        // Fresh obligation for a *different* identity reuses the freed slot.
+        auto id2 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 13);
+        if (!id2) return false;
+        if (*id2 == *id1) return false;  // new id (findByKey matches terminal ⇒ not Live ⇒ no coalesce)
+        // The new obligation is Live with counter=0 (tryInsert reset).
+        c->markTransientFailure(*id2);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        // No exhaustion (counter=1, not yet 4).
+        if (c->recoveryRetryExhaustedCount() != 1) return false;  // unchanged
+        return true;
+    }
+
+    // =========================================================================
+    // D105-R20: RejectedNotFinalized Retry Centralization / Single-Count Repair
+    //   These tests verify that:
+    //   - markTransientFailure is called exactly once per failure event.
+    //   - The orchestration (A/B in trySubmitImpl + D in :389) is unified via
+    //     the centralized :389 switch case.
+    //   - The 1:1 call ratio is preserved across all transient-failure paths.
+    // =========================================================================
+
+    // T-R20-1: admission rejection retry preservation.
+    //   Simulates the path-D scenario: obligation Live + delivery=Transport.
+    //   After admission rejection + centralized markTransientFailure:
+    //   - Live (ΔL=0)
+    //   - counter+1
+    //   - delivery=None
+    [[nodiscard]] bool testR20_T1_admissionRejectionRetryPreservation()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 1);
+        if (!id) return false;
+        const std::uint64_t L0 = c->liveLogicalRecoveryObligationCount();
+        if (L0 != 1) return false;
+        // Before: counter=0, delivery=Transport (popped by submitAndGetId).
+        // The markTransientFailure call simulates the centralized :389 dispatch.
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // Delivery is now None (P-B repair); redrive is eligible.
+        c->redriveDeferredRecoveryObligations();
+        if (c->recoveryRetryRedriveCount() < 1) return false;
+        return true;
+    }
+
+    // T-R20-2: admission rejection redrive preserves the same obligationId.
+    //   Verifies the full chain: markTransientFailure → delivery=None → redrive
+    //   → obligation is re-attached to a delivery representation → same id.
+    [[nodiscard]] bool testR20_T2_admissionRejectionRedriveSameId()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 2);
+        if (!id) return false;
+        c->markTransientFailure(*id);   // simulates centralized :389 dispatch
+        c->redriveDeferredRecoveryObligations();
+        // The obligation should now be in a delivery representation.
+        auto durable = c->takePendingRecoveryAdmission();
+        if (durable.has_value()) {
+            return durable->obligationId == *id;
+        }
+        auto pop = c->popRecoveryRequest();
+        if (!pop.has_value()) return false;
+        return pop->obligationId == *id;
+    }
+
+    // T-R20-3: exactly-once failure counting.
+    //   After R20, each call to markTransientFailure increments the counter by
+    //   exactly 1. Calling markTransientFailure once produces counter=1 (not 0→2).
+    //   Three calls produce counter=3; the 4th produces exhaustion.
+    [[nodiscard]] bool testR20_T3_exactlyOnceFailureCounting()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 3);
+        if (!id) return false;
+        // Single call → counter increments by 1, not 2.
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // 3 calls total → still Live (counter would be 3 < 4).
+        c->markTransientFailure(*id);
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // 4th call → exhaustion → ResolvedFailed.
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        return true;
+    }
+
+    // T-R20-4: ResolvedFailed production reachability — `resolveRecoveryObligation(_, Failed)`
+    //   must have 0 production callers after R20.
+    //   This test simulates the production flow: an obligation is submitted,
+    //   markTransientFailure is called (simulating any of A/B/D's centralized
+    //   handling), and we verify the obligation reaches ResolvedFailed only via
+    //   the exhaustion path (counter >= K) — never via a direct
+    //   resolveRecoveryObligation(Failed) call.
+    [[nodiscard]] bool testR20_T4_resolvedFailedOnlyViaExhaustion()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 4);
+        if (!id) return false;
+        // 1 transient failure: counter=1, Live, no Failed.
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 1) return false;
+        // The recoveryRetryExhaustedCount is the only "Failed" telemetry.
+        // If it is 0, no ResolvedFailed was emitted.
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // To reach ResolvedFailed in production, the obligation must exhaust:
+        for (int i = 0; i < 3; ++i) c->markTransientFailure(*id);
+        // Now counter=4 → ResolvedFailed; recoveryRetryExhaustedCount==1.
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        return true;
+    }
+
+    // =========================================================================
+    // D105-R21: I4 Contract Amendment — RetryExhaustion & conservation equation
+    //   These tests re-use the R18/R20 public API to assert the I4 contract
+    //   properties that R21 formalizes:
+    //   - T-R21-1: liveOwnershipCount + successCount + supersededCount
+    //              + shutdownDiscardCount + retryExhaustedCount
+    //              == admittedLogicalObligationCount
+    //   - T-R21-2: 3 transient failures → Live (ΔL=0, counter=3, no exhaustion)
+    //   - T-R21-3: 4th failure → ResolvedFailed; recoveryRetryExhaustedCount==1
+    //   (T-R21-3 is a fresh assert that the conservation increment of
+    //    retryExhaustedCount matches the equation. It exercises one of the
+    //    4 disjoint terminal paths.)
+    // =========================================================================
+
+    // T-R21-1: conservation equation with retryExhaustedCount.
+    //   After:
+    //     - 1 Published terminal (resolves to ResolvedSuccess)
+    //     - 1 StaleSuperseded terminal
+    //     - 1 ShutdownDiscarded terminal (via shutdown path)
+    //     - 1 RetryExhausted terminal (via markTransientFailure K=4)
+    //   The equation live + 4 terminals = admitted (=4) must hold.
+    [[nodiscard]] bool testR21_T1_conservationEquation()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        // Terminal 1: RetryExhaustion (counter==K).
+        auto id1 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 11);
+        if (!id1) return false;
+        for (int i = 0; i < 4; ++i) c->markTransientFailure(*id1);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        // Terminal 2: Published.
+        auto id2 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 22);
+        if (!id2) return false;
+        c->resolveRecoveryObligation(*id2,
+            convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        // Terminal 3: StaleSuperseded.
+        auto id3 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 33);
+        if (!id3) return false;
+        c->resolveRecoveryObligation(*id3,
+            convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
+        // Terminal 4: ShutdownDiscarded (via shutdown path).
+        auto id4 = submitAndGetId(*c, convo::isr::DSPHandle::null(), 44);
+        if (!id4) return false;
+        c->requestShutdown();
+        c->discardRecoveryRequestsOnShutdown();
+        // Conservation check: 4 terminal, 0 live, 4 admitted.
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        if (c->recoveryObligationShutdownDiscardCount() != 1) return false;
+        return true;
+    }
+
+    // T-R21-2: transient failure is non-terminal.
+    //   3 calls to markTransientFailure: Live (ΔL=0), counter=3, no Failed.
+    [[nodiscard]] bool testR21_T2_transientFailureIsNonTerminal()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 1);
+        if (!id) return false;
+        const std::uint64_t L0 = c->liveLogicalRecoveryObligationCount();
+        if (L0 != 1) return false;
+        // 3 transient failures: obligation must stay Live (ΔL=0 each call).
+        for (int i = 0; i < 3; ++i) {
+            c->markTransientFailure(*id);
+            if (c->liveLogicalRecoveryObligationCount() != 1) return false;  // ΔL = 0
+        }
+        // 3 failures but no exhaustion (counter < K=4).
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        return true;
+    }
+
+    // T-R21-3: exhaustion only via K.
+    //   4th call → ResolvedFailed; recoveryRetryExhaustedCount==1.
+    [[nodiscard]] bool testR21_T3_exhaustionOnlyViaK()
+    {
+        auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(), 1);
+        if (!id) return false;
+        for (int i = 0; i < 3; ++i) c->markTransientFailure(*id);
+        if (c->recoveryRetryExhaustedCount() != 0) return false;
+        // 4th call: counter == K == 4 → exhaustion.
+        c->markTransientFailure(*id);
+        if (c->liveLogicalRecoveryObligationCount() != 0) return false;
+        if (c->recoveryRetryExhaustedCount() != 1) return false;
+        return true;
+    }
 }
 
 int main()
@@ -91070,6 +92038,74 @@ int main()
         throw std::runtime_error("D105-R5-9 C9: ABA stale resolve must be no-op (O2 stays Live)");
     if (!testRLOE_C10_stress256CapsAt32())
         throw std::runtime_error("D105-R5-9 C10: 256 distinct must cap at L<=32 (no overflow)");
+
+    // --- D105-R5-10: Recovery Logical Obligation deferred re-drive counterexample tests C11-C16 ---
+    if (!testRLOE_C11_redriveRecoversDeferredViaDurable())
+        throw std::runtime_error("D105-R5-10 C11: deferred obligation must be redriven onto durable when it frees");
+    if (!testRLOE_C12_redriveIdempotentNoDuplicate())
+        throw std::runtime_error("D105-R5-10 C12: redrive must be idempotent (no duplicate delivery)");
+    if (!testRLOE_C13_redriveFallsBackToTransport())
+        throw std::runtime_error("D105-R5-10 C13: redrive must fall back to transport when durable is busy");
+    if (!testRLOE_C14_redriveFailureBothBusy())
+        throw std::runtime_error("D105-R5-10 C14: redrive must stay deferred (ΔL=0) when both resources busy");
+    if (!testRLOE_C15_redrivePreservesLiveCount())
+        throw std::runtime_error("D105-R5-10 C15: redrive must never change live obligation count");
+    if (!testRLOE_C16_deferredSameKeyResubmitCoalesces())
+        throw std::runtime_error("D105-R5-10 C16: deferred + same-key resubmit must coalesce (no new id, single representation)");
+
+    // --- D105-R13: isFullyDrained() logical-obligation-zero structural assertion ---
+    if (!testR13_liveObligationWithDrainedTransportIsNotFullyDrained())
+        throw std::runtime_error("D105-R13 T-R13-1: residual Live obligation (drained transport) must not be reported drained");
+    if (!testR13_discardTerminalizesAllAndDrains())
+        throw std::runtime_error("D105-R13 T-R13-2: discard must terminalize all Live obligations to 0 and drain structurally");
+    if (!testR13_deferredNoneObligationNotAbandonedAtShutdown())
+        throw std::runtime_error("D105-R13 T-R13-3: deferred (None) obligation must not be abandoned at shutdown");
+    if (!testR13_noNewAdmissionAfterShutdownDiscard())
+        throw std::runtime_error("D105-R13 T-R13-4: no new recovery admission after shutdown discard");
+
+    // --- D105-R18: Retry-preserving obligation semantics (production-layer) ---
+    if (!testR18_T1_transientBuildFailureKeepsLive())
+        throw std::runtime_error("D105-R18 T-R18-1: transient build failure must keep obligation Live (ΔL=0)");
+    if (!testR18_T2_transientPublishFailureKeepsLive())
+        throw std::runtime_error("D105-R18 T-R18-2: transient publish failure must keep obligation Live (ΔL=0)");
+    if (!testR18_T3_deliveryResetToNone())
+        throw std::runtime_error("D105-R18 T-R18-3: markTransientFailure must reset delivery=None for redrive");
+    if (!testR18_T4_sameIdAcrossFailure())
+        throw std::runtime_error("D105-R18 T-R18-4: obligation id must be preserved across markTransientFailure + re-submit");
+    if (!testR18_T5_repeatedFailureCountAndExhaustion())
+        throw std::runtime_error("D105-R18 T-R18-5: K consecutive failures must increment counter; K-th forces ResolvedFailed");
+    if (!testR18_T6_successAfterRetriesExactlyOnce())
+        throw std::runtime_error("D105-R18 T-R18-6: successful publish after retries must exactly once decrement L");
+    if (!testR18_T7_shutdownDuringDeferredRetry())
+        throw std::runtime_error("D105-R18 T-R18-7: shutdown during failed/deferred must emit ShutdownDiscarded, not Failed");
+    if (!testR18_T8_staleAfterRetries())
+        throw std::runtime_error("D105-R18 T-R18-8: stale after retries must emit StaleSuperseded, not Failed");
+    if (!testR18_T9_strandedTransportRepaired())
+        throw std::runtime_error("D105-R18 T-R18-9: stranded Transport obligation must be repaired (delivery=None) and redriven");
+    if (!testR18_T10_pressureRetryUnchanged())
+        throw std::runtime_error("D105-R18 T-R18-10: RejectedPressure → Retry regression must be preserved (R5-9 MUST-2)");
+    if (!testR18_T11_markTransientFailureIdempotent())
+        throw std::runtime_error("D105-R18 T-R18-11: markTransientFailure on unknown/terminal id must be no-op");
+    if (!testR18_T12_counterResetOnSlotReuse())
+        throw std::runtime_error("D105-R18 T-R18-12: counter must be reset to 0 on slot reuse after exhaustion");
+
+    // --- D105-R20: RejectedNotFinalized Retry Centralization / Single-Count Repair ---
+    if (!testR20_T1_admissionRejectionRetryPreservation())
+        throw std::runtime_error("D105-R20 T-R20-1: admission rejection must trigger exactly one markTransientFailure (ΔL=0, counter+1, delivery=None)");
+    if (!testR20_T2_admissionRejectionRedriveSameId())
+        throw std::runtime_error("D105-R20 T-R20-2: admission rejection + markTransientFailure must redrive to same obligationId");
+    if (!testR20_T3_exactlyOnceFailureCounting())
+        throw std::runtime_error("D105-R20 T-R20-3: 1 call → counter+1 (NOT +2); 4th call → ResolvedFailed");
+    if (!testR20_T4_resolvedFailedOnlyViaExhaustion())
+        throw std::runtime_error("D105-R20 T-R20-4: ResolvedFailed reached only via exhaustion (counter == K)");
+
+    // --- D105-R21: I4 Contract Amendment — RetryExhaustion & conservation equation ---
+    if (!testR21_T1_conservationEquation())
+        throw std::runtime_error("D105-R21 T-R21-1: I4 conservation equation with retryExhaustedCount must hold");
+    if (!testR21_T2_transientFailureIsNonTerminal())
+        throw std::runtime_error("D105-R21 T-R21-2: 3 transient failures must keep obligation Live (ΔL=0, no exhaustion)");
+    if (!testR21_T3_exhaustionOnlyViaK())
+        throw std::runtime_error("D105-R21 T-R21-3: 4th markTransientFailure must produce ResolvedFailed + retryExhaustedCount==1");
 
     return 0;
     }

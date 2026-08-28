@@ -1032,6 +1032,11 @@ void AudioEngine::rebuildThreadLoop()
                             + juce::String(convo::toString(recoveryResult.error)));
                         // transient failure → DurablePending へ戻す（次サイクルで再 take — retry）
                         runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ D105-R18: also drive the obligation-level retry counter (separate
+                        //   concern from the Builder-local spin-prevention counter). Dual-LP
+                        //   per R17-7 Row 5: durable-slot sub-state and obligation counter are
+                        //   independent linearizations on different fields.
+                        runtimePublicationBridge_.markTransientFailure(recovery->obligationId);
                         // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
                         if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
                             break;
@@ -1054,6 +1059,8 @@ void AudioEngine::rebuildThreadLoop()
                         }
                         // transient failure → DurablePending へ戻す（retry）
                         runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
+                        // ★ D105-R18: also drive the obligation-level retry counter.
+                        runtimePublicationBridge_.markTransientFailure(recovery->obligationId);
                         // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
                         if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
                             break;

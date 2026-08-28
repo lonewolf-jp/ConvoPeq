@@ -941,10 +941,17 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     return true;   // durable recovery exists（INV-X1-2: queue full ≠ Recovery lost — §1.9 Phase E）
 }
 
-// ★ D105-R5-9: single Completion Authority (idempotent, lock-free, ISR-safe).
+// ★ D105-R5-9 + D105-R18: single Completion Authority (idempotent, lock-free, ISR-safe).
 //   Transitions the first Live→terminal for the given id via the table's id-based resolve();
 //   subsequent calls (same id) are no-ops. Called from onPublishCommitted (ISR, Route B),
-//   trySubmitImpl (RebuildThread, Route A) and submitPublishRequest rejection branches (Route C).
+//   submitPublishRequest rejection branches (Route C), and markTransientFailure's
+//   retry-exhaustion branch (Route D — D105-R18).
+//
+//   ★ D105-R18: the historical `else → ResolvedFailed` fallthrough has been removed. Each
+//   outcome now maps explicitly; the default branch asserts (Debug) / falls through
+//   harmlessly (Release) for unknown values. `RecoveryOutcome::Failed` is still a valid
+//   enum value but is reached only from markTransientFailure's exhaustion branch
+//   (the only sanctioned path to ResolvedFailed per R17-4 / D105-R18).
 void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept
 {
     if (obligationId == 0)
@@ -954,13 +961,66 @@ void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligatio
     //   the single −1 via the table's id-based resolve (which re-scans by id — no cached index, no ABA).
     if (outcome == RecoveryOutcome::Retry)
         return;
-    const ObligationState terminal = (outcome == RecoveryOutcome::Published)          ? ObligationState::ResolvedSuccess
-                               : (outcome == RecoveryOutcome::StaleSuperseded)   ? ObligationState::ResolvedStaleSuperseded
-                               : (outcome == RecoveryOutcome::ShutdownDiscarded) ? ObligationState::ShutdownDiscarded
-                               :                                                   ObligationState::ResolvedFailed;
+    ObligationState terminal;
+    switch (outcome) {
+        case RecoveryOutcome::Published:          terminal = ObligationState::ResolvedSuccess; break;
+        case RecoveryOutcome::StaleSuperseded:    terminal = ObligationState::ResolvedStaleSuperseded; break;
+        case RecoveryOutcome::ShutdownDiscarded:  terminal = ObligationState::ShutdownDiscarded; break;
+        case RecoveryOutcome::Failed:             terminal = ObligationState::ResolvedFailed; break;
+        case RecoveryOutcome::Retry:              return;  // ★ D105-R5-9: handled above; defensive no-op
+        default:
+            // ★ D105-R18: any unknown outcome is a programming error. The historical fallthrough
+            //   to ResolvedFailed has been removed; do not silently re-introduce it.
+            jassertfalse;
+            return;
+    }
     if (recoveryAdmissions_.resolve(obligationId, terminal)
         && outcome == RecoveryOutcome::ShutdownDiscarded)
         convo::fetchAddAtomic(recoveryObligationShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
+// ★ D105-R18: transient-failure adjudication authority. Single public method that may
+//   produce ResolvedFailed in production. Atomic contract (per R17-7 LP-E):
+//     1. Re-scan the table for `id`; if not found or not Live, no-op.
+//     2. delivery = None  (P-B: re-eligibility for redrive, stranded Transport→None repair).
+//     3. consecutiveFailureCount.fetch_add(1, acq_rel).
+//     4. If new count >= kMaxObligationConsecutiveFailures → resolve(id, Failed).
+//        Increment recoveryRetryExhaustedCount_ for observability.
+//
+//   The counter is reset to 0 by RecoveryAdmissionTable::resolve on any terminal.
+//   `markTransientFailure` is called from the Orchestrator (transport-path build/publish
+//   failure sites — RuntimePublicationOrchestrator.cpp) and the Builder (durable-path
+//   build/warmup failure sites — AudioEngine.RebuildDispatch.cpp:1034/1056). The Builder
+//   call is alongside the existing settlePendingRecoveryAdmission(true) (separate linearizations
+//   for the durable slot's sub-state and the obligation-level counter per LP-F).
+//
+//   ΔL = 0 except in the exhaustion branch (terminal: −1).
+void RuntimeIntentCoordinator::markTransientFailure(std::uint64_t obligationId) noexcept
+{
+    if (obligationId == 0)
+        return;
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        if (recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire) != obligationId)
+            continue;
+        if (recoveryAdmissions_.slot(i).state.load(std::memory_order_acquire) != ObligationState::Live)
+            return;   // not Live → no-op (idempotent / late / wrong-id)
+        // (1) P-B: re-eligibility for redrive. Always reset delivery to None — the obligation
+        //     may have been Transport (stranded after Builder pop) or Durable (post-settle);
+        //     the redrive scan only picks up `delivery==None` obligations (R5-10).
+        recoveryAdmissions_.slot(i).delivery = ObligationDeliveryState::None;
+        // (2) Increment retry counter. fetch_add returns the *old* value; the new count is old+1.
+        const std::uint8_t newCount =
+            static_cast<std::uint8_t>(recoveryAdmissions_.slot(i).consecutiveFailureCount.fetch_add(
+                std::uint8_t{1}, std::memory_order_acq_rel) + std::uint8_t{1});
+        // (3) Exhaustion: route to ResolvedFailed terminal. This is the ONLY production
+        //     call site of resolveRecoveryObligation(id, Failed) per R17-4.
+        if (newCount >= kMaxObligationConsecutiveFailures) {
+            convo::fetchAddAtomic(recoveryRetryExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
+            recoveryAdmissions_.resolve(obligationId, ObligationState::ResolvedFailed);
+        }
+        return;
+    }
+    // unknown id → no-op
 }
 
 // ★ D105-R5-9 MUST-2: guarded re-arm for a Retry obligation. Only touches the durable slot when it

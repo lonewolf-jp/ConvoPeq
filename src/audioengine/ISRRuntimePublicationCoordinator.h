@@ -316,8 +316,19 @@ public:
         std::uint64_t intentId = 0;
         convo::RuntimeBuildSnapshot buildSource{};
         ObligationDeliveryState delivery{ObligationDeliveryState::None};   // ★ D105-R5-10
+        // ★ D105-R18: per-obligation retry budget. Single writer (CoordinatorLoop via
+        //   markTransientFailure) for transient failures; reset to 0 in resolve() on
+        //   terminal disposition. Reaches kMaxObligationConsecutiveFailures → only
+        //   sanctioned path to ResolvedFailed.
+        std::atomic<std::uint8_t> consecutiveFailureCount{0};
     };
     static constexpr std::size_t kMaxLogicalRecoveryObligations = 32;  // INV-CAP-7
+    // ★ D105-R18: obligation-level retry exhaustion bound. Inherited from the existing
+    //   AudioEngine.RebuildDispatch.cpp:1015 kMaxRecoveryConsecutiveFailures (Builder-local
+    //   spin-prevention). Same value (4) but at the obligation lifetime, surviving
+    //   durable↔transport transitions. Exhaustion routes the obligation to ResolvedFailed
+    //   (the only sanctioned Failed terminal per R17-4).
+    static constexpr std::uint8_t kMaxObligationConsecutiveFailures = 4;
 
     // ── ★ D105-R5-8: Coordinator-owned Recovery Admission Table (logical obligation accounting) ──
     //   Enforces liveLogicalRecoveryObligationCount ≤ 32 (INV-X1-7 / INV-CAP-7). Distinct from the
@@ -351,6 +362,9 @@ public:
                     slots_[i].identity = key;
                     slots_[i].state.store(ObligationState::Live, std::memory_order_release);
                     slots_[i].delivery = ObligationDeliveryState::None;   // ★ D105-R5-10: fresh slot has none
+                    // ★ D105-R18: reset retry budget on slot reuse (slot is fresh — any prior terminal
+                    //   left consecutiveFailureCount at its terminal value; reset for clean accounting).
+                    slots_[i].consecutiveFailureCount.store(0, std::memory_order_release);
                     convo::fetchAddAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
                     return i;
                 }
@@ -363,12 +377,16 @@ public:
         // always assigned a strictly-greater id (nextId_ is monotonic), so a reused slot can never match
         // a stale id → no ABA / no wrong-obligation termination. Idempotent: a prior terminal state (or a
         // lost CAS race) makes the inner CAS fail → returns false (no double −1, no L underflow).
+        // ★ D105-R18: on successful Live→terminal CAS, reset consecutiveFailureCount to 0 (slot is
+        //   freed; any prior counter value is meaningless post-terminal). Reset is a plain store
+        //   *after* the CAS so it is observed only by readers after the terminal is visible.
         bool resolve(LogicalRecoveryObligationId id, ObligationState terminalState) noexcept {
             for (std::size_t i = 0; i < kCapacity; ++i) {
                 if (slots_[i].id.load(std::memory_order_acquire) != id)
                     continue;
                 ObligationState expected = ObligationState::Live;
                 if (slots_[i].state.compare_exchange_strong(expected, terminalState, std::memory_order_acq_rel)) {
+                    slots_[i].consecutiveFailureCount.store(0, std::memory_order_release);
                     convo::fetchSubAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
                     return true;
                 }
@@ -382,6 +400,10 @@ public:
         }
         const LogicalRecoveryObligation& slot(std::size_t i) const noexcept { return slots_[i]; }
         LogicalRecoveryObligation& slot(std::size_t i) noexcept { return slots_[i]; }
+        // ★ D105-R18: read-only accessor for the retry counter (used by tests / telemetry).
+        std::uint8_t consecutiveFailureCount(std::size_t i) const noexcept {
+            return slots_[i].consecutiveFailureCount.load(std::memory_order_acquire);
+        }
 
     private:
         std::array<LogicalRecoveryObligation, kCapacity> slots_{};
@@ -407,11 +429,23 @@ public:
       //   transition counts; subsequent calls (same id) are no-ops.
        void resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept;
 
-       // ★ D105-R5-9 MUST-2: re-arm a Retry obligation's durable delivery. Only re-arms when the single
-       //   durable slot already holds THIS obligation (Building state); never overwrites a distinct live
-       //   obligation (would drop that obligation's only delivery). Otherwise the retry is deferred
-       //   (obligation stays Live; bounded by L<=32) — the documented single-durable-slot limitation.
-        void rearmRecoveryRetry(std::uint64_t obligationId) noexcept;
+       // ★ D105-R18: transient-failure adjudication authority. Called by the Orchestrator
+       //   (trySubmitImpl build/publish failure sites) and the Builder (durable build/warmup
+       //   failure sites) for a single obligation id. Atomically performs:
+       //     1. delivery = None (P-B: re-eligibility for redrive, stranded Transport→None)
+       //     2. consecutiveFailureCount.fetch_add(1)
+       //     3. if counter reaches kMaxObligationConsecutiveFailures → resolve(id, Failed)
+       //        (only sanctioned path to ResolvedFailed per R17-4)
+       //   The counter persists across durable↔transport transitions and across the obligation
+       //   lifetime. Idempotent on a non-Live slot (no-op). ΔL=0 unless exhaustion fires.
+       //   This is the only public method that produces ResolvedFailed in production.
+       void markTransientFailure(std::uint64_t obligationId) noexcept;
+
+      // ★ D105-R5-9 MUST-2: re-arm a Retry obligation's durable delivery. Only re-arms when the single
+      //   durable slot already holds THIS obligation (Building state); never overwrites a distinct live
+      //   obligation (would drop that obligation's only delivery). Otherwise the retry is deferred
+      //   (obligation stays Live; bounded by L<=32) — the documented single-durable-slot limitation.
+       void rearmRecoveryRetry(std::uint64_t obligationId) noexcept;
 
         // ★ D105-R5-10: re-drive deferred Live obligations (delivery==None) back onto a transport/durable
         //   delivery when a delivery resource frees. Runs ONLY on the CoordinatorLoop (producer) thread —
@@ -443,6 +477,17 @@ public:
         }
         [[nodiscard]] std::uint64_t recoveryRetryRedriveFailureCount() const noexcept { // ★ D105-R5-10
             return convo::consumeAtomic(recoveryRetryRedriveFailureCount_, std::memory_order_acquire);
+        }
+        // ★ D105-R18: telemetry for retry-exhaustion path. Incremented only by
+        //   markTransientFailure when the obligation's consecutiveFailureCount reaches
+        //   kMaxObligationConsecutiveFailures. Distinguished from any historical Failed
+        //   (which is now unreachable in production per R17-4).
+        [[nodiscard]] std::uint64_t recoveryRetryExhaustedCount() const noexcept {
+            return convo::consumeAtomic(recoveryRetryExhaustedCount_, std::memory_order_acquire);
+        }
+        // ★ D105-R18: read-only accessor for a slot's retry counter (used by tests).
+        [[nodiscard]] std::uint8_t recoveryConsecutiveFailureCount(std::size_t i) const noexcept {
+            return recoveryAdmissions_.consecutiveFailureCount(i);
         }
 
 
@@ -895,7 +940,9 @@ private:
                                                                               //   → retry delivery deferred (L unchanged)
     std::atomic<std::uint64_t> recoveryRetryRedriveCount_{0};               // ★ D105-R5-10: re-drive attempts
     std::atomic<std::uint64_t> recoveryRetryRedriveFailureCount_{0};         // ★ D105-R5-10: both resources busy
-                                                                              //   → remains deferred (L unchanged)
+                                                                               //   → remains deferred (L unchanged)
+    std::atomic<std::uint64_t> recoveryRetryExhaustedCount_{0};              // ★ D105-R18: retry-budget exhaustion
+                                                                               //   (only sanctioned path to ResolvedFailed)
 
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──
