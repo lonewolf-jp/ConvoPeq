@@ -18,6 +18,7 @@ build-asan-msvc/
 build-asan-check/
 build-ci-check/
 build-ci-nomkl/
+build-*/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -89,6 +90,7 @@ sampledata/synthetic/
 .commandcode
 .freebuff/
 build-msvc/
+.zcode/
 nul
 
 # Coverage reports

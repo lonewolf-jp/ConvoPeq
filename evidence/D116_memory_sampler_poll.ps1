@@ -1,8 +1,11 @@
 $OutCsv = "C:\VSC_Project\ConvoPeq\evidence\D116_scenarioB_memory.csv"
+$MaxMs = 60000
+if ($args.Count -ge 1) { $OutCsv = $args[0] }
+if ($args.Count -ge 2) { $MaxMs = [int]$args[1] }
 "timestamp_ms,pid,private_mb,workingset_mb,responding" | Out-File -FilePath $OutCsv -Encoding utf8
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $seen = $false
-while ($sw.ElapsedMilliseconds -lt 60000) {
+while ($sw.ElapsedMilliseconds -lt $MaxMs) {
     $p = Get-Process -Name ConvoPeq -ErrorAction SilentlyContinue
     if ($null -ne $p) {
         $seen = $true

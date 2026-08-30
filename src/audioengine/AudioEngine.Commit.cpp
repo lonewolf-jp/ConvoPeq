@@ -811,7 +811,14 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.oversamplingResult = oversamplingResult;
     req.buildDiagnostics = buildDiagnostics;
     req.recoveryObligationId = recoveryObligationId;   // ★ D105-R5-8: carry obligation id to completion
-
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        diagLog("[D133] enqueue gen=" + juce::String(req.generation)
+            + " irLoaded=" + juce::String(static_cast<int>(req.sealedSnapshot.irLoaded))
+            + " irFinalized=" + juce::String(static_cast<int>(req.sealedSnapshot.irFinalized))
+            + " sealed=" + juce::String(static_cast<int>(req.sealedSnapshot.sealed)));
+    }
+#endif
     runtimeOrchestrator_->submitPublishRequest(req);
 
     // DSP commit 完了時に DSPReady を常に enqueue する。

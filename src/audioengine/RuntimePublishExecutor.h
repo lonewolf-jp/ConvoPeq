@@ -92,6 +92,15 @@ struct PublishExecutor {
             p.decision.newHasIR,
             p.decision.fadeTimeSec
         };
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ D127-NOGO diagnostic: tail 到達と oldDSP 配送の観測（observation-only）
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[D127_TAIL] seq=%llu oldHandleNull=%d oldResolvedValid=%d needsCrossfade=%d",
+            (unsigned long long) intent.sequenceId,
+            p.decision.oldHandle.isNull() ? 1 : 0,
+            oldResolved.valid ? 1 : 0,
+            decision.needsCrossfade ? 1 : 0));
+#endif
         ctx.transition.onPublishCompleted(
             newResolved.valid ? static_cast<AudioEngine::DSPCore*>(newResolved.instance) : nullptr,
             oldResolved.valid ? static_cast<AudioEngine::DSPCore*>(oldResolved.instance) : nullptr,

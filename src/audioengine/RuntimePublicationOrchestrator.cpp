@@ -457,6 +457,59 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         }
     }
 
+    // ★ D132 (INV-DEFERRED-2): overwrite 時の旧 DSPCore retire。
+    if (deferredSlot_.has_value()) {
+        const auto oldHandle = deferredSlot_->request.newDSP;
+        if (!oldHandle.isNull()) {
+            auto* oldDSP = engine_.resolveDSPHandle(oldHandle);
+            if (oldDSP != nullptr)
+                engine_.retireDSPHandleForRuntime(oldDSP);
+        }
+    }
+
+    // ★ D135-1 / F6: obligation accounting — identity = (generation, recoveryObligationId).
+    //   DeferredFadingActive の再 enqueue は「retention（保持）」であり retry ではない →
+    //   deferredRetryCount_ を増加させない。新 obligation（key 相違）のみ createdAt を now で
+    //   初期化し、re-drive は createdAt を維持する（→ TTL は obligation dwell を測る）。
+    {
+        const bool sameObligation = (req.generation == deferredRetryGeneration_
+                                     && req.recoveryObligationId == deferredRetryObligationId_);
+        if (!sameObligation) {
+            deferredRetryGeneration_ = req.generation;
+            deferredRetryObligationId_ = req.recoveryObligationId;
+            deferredRetryCount_ = 0;
+            deferredObligationCreatedAtUs = now;
+        }
+        // retention (sameObligation): count / createdAt とも不変（re-drive は新 obligation ではない）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        {
+            const int curGen = convo::consumeAtomic(engine_.rebuildRequestGeneration, std::memory_order_acquire);
+            juce::Logger::writeToLog(juce::String("[D135] re-defer")
+                + (sameObligation ? " (retain)" : " (new)")
+                + " gen=" + juce::String(req.generation)
+                + " oblId=" + juce::String(static_cast<juce::int64>(req.recoveryObligationId))
+                + " currentGen=" + juce::String(curGen)
+                + " retryCount=" + juce::String(deferredRetryCount_));
+        }
+#endif
+        // ★ F6-6: dormant guard — 現行 production に Type-A retry 経路は無く、retention は count を
+        //   増やさないため deferredRetryCount_ は常に 0（この分岐は発火しない）。将来の Type-A 用に保持。
+        if (deferredRetryCount_ > kMaxDeferredRetries) {
+            if (!req.newDSP.isNull()) {
+                if (auto* dsp = engine_.resolveDSPHandle(req.newDSP); dsp != nullptr)
+                    engine_.retireDSPHandleForRuntime(dsp);
+            }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String("[HEALTH] Deferred publish starved")
+                + " gen=" + juce::String(req.generation)
+                + " sequence=" + juce::String(static_cast<juce::int64>(engine_.getLastCommittedPublicationSequence()))
+                + " retryCount=" + juce::String(deferredRetryCount_)
+                + " reason=RetryExhaustedDiscard");
+#endif
+            return;
+        }
+    }
+
     deferredSlot_ = DeferredPublishSlot{
         .request = req,
         .guard = DeferredGuard{
@@ -465,13 +518,17 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
             .sequence = engine_.getLastCommittedPublicationSequence()
         },
         // ★ Phase-1: enqueue-time immutable snapshot（View.metadata() の参照先）。
-        //   guard{generation,sequence} + enqueueTimestampUs から構築。design-D4 A-3/D-13.6 反映。
+        //   ★ F6-3: metadata.enqueueTimestampUs の意味は「今回 enqueue 時刻」ではなく
+        //   「現在の obligation が生成された時刻」（deferredObligationCreatedAtUs）。re-drive では
+        //   維持されるため evaluateDeferred の TTL は obligation dwell を測る（F3 の失効バグ修正）。
+        //   名前は本パッチでは変更しない（F4-10 別パッチ #8 扱い）。
         .metadata = PublicationAdmission::DeferredPublishMetadata{
             .generation = req.generation,
             .sequence = engine_.getLastCommittedPublicationSequence(),
-            .enqueueTimestampUs = now
+            .enqueueTimestampUs = deferredObligationCreatedAtUs
         },
         .lastDiscardReason = DiscardReason::None,
+        // ★ slot 側 timestamp は「今回の enqueue 時刻」の意味のまま（overwrite age 専用、F5-4）。
         .enqueueTimestampUs = now
     };
     convo::publishAtomic(hasDeferred_, true, std::memory_order_release);
@@ -499,6 +556,10 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
     }
 
+    // ★ D135-1 / F6-7: shutdown による deferred 消去 — obligation metadata も無効化
+    invalidateDeferredObligation();
+    convo::publishAtomic(lastRecoveryPublishSeq_, PublicationSequenceId{0}, std::memory_order_release);
+
     // ★ v19: DeferredHealth 記録
     DeferredHealth dh;
     dh.deferredCount = 0;
@@ -506,6 +567,44 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
     dh.lastDiscardReason = DiscardReason::ShutdownDiscard;
     dh.lastDiscardTimestampUs = nowUs;
     telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ D135-8 Step 9 (Option C): deferred-clear wake-provenance latch.
+//   requestDeferredClear() is invoked from non-RebuildThread callers (the 3
+//   AudioEngine.Timer.cpp health-recovery sites C2/C3/C4). If the RebuildThread is
+//   already stopping (rebuildThreadShouldExit), the C1 synchronous fallback clears
+//   inline — mirroring EmergencyDrain (ReleaseResources.cpp). Otherwise the clear
+//   intent is latched (release-store) + the RebuildThread woken; the actual clear
+//   always runs on the RebuildThread via drainDeferredClearIfRequested().
+void RuntimePublicationOrchestrator::requestDeferredClear() noexcept
+{
+    // C1: RebuildThread is stopping/stopped (post join). No concurrent RebuildThread
+    //     writer can touch the plain deferred members → clear synchronously.
+    if (convo::consumeAtomic(engine_.rebuildThreadShouldExit, std::memory_order_acquire))
+    {
+        clearDeferredForShutdown();
+        return;
+    }
+    // Live runtime: latch intent (release-store) + wake RebuildThread.
+    // deferredClearRequested_ is NOT in the rebuildCV predicate; it is persistent
+    // and consumed on the next wake → no lost clear.
+    convo::publishAtomic(deferredClearRequested_, true, std::memory_order_release);
+    engine_.rebuildCV.notify_one();
+}
+
+// ★ D135-8 Step 9 (Option C): RebuildThread-only consumer.
+//   Mirrors resetDeferredRetryBudget()'s ownership idiom (h:171-175): assert
+//   RebuildThread ownership here. clearDeferredForShutdown() stays the assert-free
+//   synchronous primitive (EmergencyDrain + C1 fallback call it from non-RebuildThread).
+bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    if (convo::exchangeAtomic(deferredClearRequested_, false, std::memory_order_acq_rel))
+    {
+        clearDeferredForShutdown();
+        return true;
+    }
+    return false;
 }
 
 // ★ Phase-1: peekDeferred — consumeDeferredRequest の後継（View 借用）。hasDeferred_ 非反転。
@@ -548,12 +647,28 @@ void RuntimePublicationOrchestrator::finishView() noexcept
     deferredSlot_.reset();
     convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
 
+    // ★ F6-7: terminal discard（StaleDiscard / Expired / ShutdownDiscard-via-discard）では
+    //   obligation metadata を無効化。consume（reason==None、re-drive）では維持する
+    //   （後続の enqueueDeferred が key 一致で retention と判定するため）。
+    if (reason != DiscardReason::None)
+        invalidateDeferredObligation();
+
     DeferredHealth dh;
     dh.deferredCount = 0;
     dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
     dh.lastDiscardReason = reason;
     dh.lastDiscardTimestampUs = discardTs;
     telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ F6-7: obligation metadata 無効化（terminal 専用）。identity key・createdAt・count を
+//   初期値へ戻す。rebuild-thread 専用（single-owner）。
+void RuntimePublicationOrchestrator::invalidateDeferredObligation() noexcept
+{
+    deferredRetryGeneration_ = 0;
+    deferredRetryObligationId_ = 0;
+    deferredRetryCount_ = 0;
+    deferredObligationCreatedAtUs = 0;
 }
 
 // ★ Phase-1: DeferredPublishView 実装（out-of-line。Orchestrator 定義完結後 = .cpp 内）。
@@ -582,9 +697,23 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
 //   resubmit；必要なら再 enqueue（hasDeferred_=true）される。
 //   （旧: RebuildDispatch.cpp:846 'consumeDeferredRequest → submitPublishRequest'。
 //    AudioEngine.h:2528-2529 の consumeDeferredRequest → processDeferredAdmission 一本化済み）
-void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
+void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWake) noexcept
 {
     jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // ★ D135-8 Step 7 (P3): recovery-wake provenance gate (D135-5 blind-bool blocker resolved by
+    //   Step 6). wasRecoveryWake is true iff THIS admission was provoked by the crossfade-timeout
+    //   recovery path (recoveryRetryReady stamped release-store at AudioEngine.Timer.cpp:1748 under
+    //   rebuildMutex, consumed read-and-clear via exchangeAtomic at AudioEngine.RebuildDispatch.cpp:888).
+    //   Recovery commits a fresh zero-fading world, so the deferred obligation that follows is
+    //   treated as a NEW dwell: resetDeferredRetryBudget clears identity key + count + createdAt.
+    //   ★ F6: ordinary wakes (wasRecoveryWake == false) do NOT increment the retry budget —
+    //   DeferredFadingActive re-drive is retention (see enqueueDeferred accounting ~:470).
+    //   Placed at START, before peekDeferred(), per D135-7 preflight: the reset must precede any peek
+    //   so the identity/createdAt baseline is fresh when the accounting at ~:470 compares
+    //   (req.generation, req.recoveryObligationId) against the stored key.
+    //   (lastRecoveryPublishSeq_ is a separate correlation stamp via setRecoveryPublishSeq.)
+    if (wasRecoveryWake)
+        resetDeferredRetryBudget();
     if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire))
         return;
 
@@ -609,6 +738,12 @@ void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
             break;
         }
     }
+
+    // ★ F6-7: Ready→submitPublishRequest 後に obligation が再 Deferred でなければ
+    //   （Accepted / Rejected* 終端）metadata を無効化。再 Deferred（retention）なら
+    //   enqueueDeferred が key/createdAt を維持済みなので触れない。
+    if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire))
+        invalidateDeferredObligation();
 }
 
 // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間

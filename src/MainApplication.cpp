@@ -174,6 +174,9 @@ void MainApplication::initialise(const juce::String& commandLine)
 void MainApplication::shutdown()
 {
     juce::Logger::writeToLog("[DIAG] MainApplication::shutdown() enter");
+    // ★ D127-E (diagnostic only): SHUTDOWN_BEGIN — teardown phase 計測の起点。
+    //   production semantics 変更なし（ログ出力のみ）。
+    juce::Logger::writeToLog("[D123] SHUTDOWN_BEGIN");
     // unique_ptr のデストラクタで MainWindow が閉じられる
     // MainWindow デストラクタ内で:
     //   1) オーディオコールバック停止
@@ -181,8 +184,13 @@ void MainApplication::shutdown()
     //   3) AudioEngine 破棄
     // の順で安全にシャットダウンされる
     mainWindow.reset();
+    // ★ D127-E: mainWindow.reset()（~MainWindow/~AudioEngine/teardown 全体）が完了した
+    //   ことを明示。クラッシュ時はこの行が出ない = crash phase が mainWindow.reset() 内と
+    //   特定できる（D119-BLOCKER-2 診断）。
+    juce::Logger::writeToLog("[D123] SHUTDOWN: mainWindow.reset() completed");
 
     juce::Logger::writeToLog("MainApplication shutting down.");
+    juce::Logger::writeToLog("[D123] LOGGER_DETACH / SHUTDOWN_END");
     juce::Logger::setCurrentLogger(nullptr);
     fileLogger.reset();
 

@@ -59,7 +59,19 @@ public:
                 auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
                 if (health == convo::ISRHealthState::Critical) {
                     lifetime.activate(newDSP);
-                    if (oldDSP != nullptr) {
+                    // ★ D132 (M1 / D122-A 契約): active runtime handle を公開。
+                    //   registration（lifetime.activate = map登録）と activation
+                    //   （DSPHandleRuntime::activate = activeRuntimeDSPHandle_ 公開）は別操作。
+                    //   未公開のままでは次 publish の oldHandle が常に null になり retire が
+                    //   到達不能（D117/D120 CAUSE）。publish 成功後のみ・publish 失敗
+                    //   （rollback）では呼ばれない（ScopeExit が tail 前に完結）。
+                    if (newDSP != nullptr) {
+                        const auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
+                        if (!newHandle.isNull())
+                            engine_.dspHandleRuntime_.activate(newHandle);
+                    }
+                    // ★ D132(5): oldDSP == newDSP は retire/crossfade 対象外。
+                    if (oldDSP != nullptr && oldDSP != newDSP) {
                         // ★ Temporary: exchangeFadingRuntimeDSP (A-6 fix).
                         //   Will be removed after B-1 CAS-only claimFadingRuntimeDSP().
                         auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);
@@ -83,9 +95,18 @@ public:
 
         // 1. activate (publish 成功後にのみ実行)
         lifetime.activate(newDSP);
+        // ★ D132 (M1 / D122-A 契約): active runtime handle を公開（registration ≠ activation —
+        //   D121-2）。fading null 化の副作用は isSlotInCrossfade（crossfadeRecords_ 参照）に非依存、
+        //   beginCrossfade が直後に再設定するため安全（D122-A 審査済み）。
+        if (newDSP != nullptr) {
+            const auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
+            if (!newHandle.isNull())
+                engine_.dspHandleRuntime_.activate(newHandle);
+        }
 
         // 2. Crossfade または Retire
-        if (decision.needsCrossfade && oldDSP != nullptr) {
+        // ★ D132(5): oldDSP == newDSP（同一 DSP 再 publish）は retire/crossfade 対象外。
+        if (decision.needsCrossfade && oldDSP != nullptr && oldDSP != newDSP) {
             // ★ BUG-054: oldHandle は呼び出し側（enqueue 時に resolve 済みの真の old DSP handle）を
             //   使用する。getActiveRuntimeDSPHandle() は commitRuntimePublication の activate 後に
             //   呼ばれるため NEW DSP の handle を返し、old==new の同一 crossfade を登録していた。
@@ -120,8 +141,13 @@ public:
                 (newDSP != nullptr) ? newDSP->sampleRate
                     : convo::consumeAtomic(engine_.currentSampleRate, std::memory_order_acquire));
             engine_.crossfadeRuntime_.start(decision.fadeTimeSec, rampSampleRate);
-            engine_.setIRChangeFlag();
-        } else if (oldDSP != nullptr) {
+            // ★ D132 (M5): DSPTransition crossfade completion での setIRChangeFlag() 撤去。
+            //   rebuild 起因の crossfade は IR 変更を意味しない（新 DSP は既存 IR を transfer）ため、
+            //   UIEvents.cpp:177 / Timer.cpp:800 以外の caller は責務過剰（D124 確定）。
+            //   D131-G5 結論: :123 のみが rebuild loop 入口であり、本撤去で
+            //   Accepted → publish → crossfade → DeferredFadingActive の
+            //   self-loop を遮断する。
+        } else if (oldDSP != nullptr && oldDSP != newDSP) {
             // Crossfade 不要: 即時 retire
             engine_.crossfadeRuntime_.complete();
             lifetime.retire(oldDSP);

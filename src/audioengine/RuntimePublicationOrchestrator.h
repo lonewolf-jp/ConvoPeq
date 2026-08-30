@@ -156,6 +156,27 @@ public:
 
     // hasDeferredRequest: 保留中 publish 要求確認 (DrainAudit / RuntimeHealth / Stall 用)。
     [[nodiscard]] bool hasDeferredRequest() const noexcept { return convo::consumeAtomic(hasDeferred_, std::memory_order_acquire); }
+    // ★ D135-1: test 用 — retry 世代/カウント取得 (hasDeferred と併せて観測)
+    [[nodiscard]] int getRetryGeneration() const noexcept { return deferredRetryGeneration_; }
+    [[nodiscard]] uint8_t getRetryCount() const noexcept { return deferredRetryCount_; }
+
+    // ★ D135-1: crossfade-timeout recovery 発行 world の seq を記録/取得。
+    void setRecoveryPublishSeq(PublicationSequenceId seq) noexcept {
+        convo::publishAtomic(lastRecoveryPublishSeq_, seq, std::memory_order_release);
+    }
+    [[nodiscard]] PublicationSequenceId recoveryPublishSeq() const noexcept {
+        return convo::consumeAtomic(lastRecoveryPublishSeq_, std::memory_order_acquire);
+    }
+    // ★ D135-1 / F6: recovery が zero-fading world を commit した時点で obligation metadata をリセット。
+    //   identity key・count・createdAt を初期化し、recovery 後の再駆動を新 dwell として扱う。
+    //   （F6: retention は count を増やさないため count は実質常に 0。recovery provenance は維持。）
+    void resetDeferredRetryBudget() noexcept {
+        jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+        deferredRetryGeneration_ = 0;
+        deferredRetryObligationId_ = 0;
+        deferredRetryCount_ = 0;
+        deferredObligationCreatedAtUs = 0;
+    }
 
     // ★ Phase-1: peekDeferred — consumeDeferredRequest の後継 (View 経由のみ)（design-D4 D-13 ①）。
     //   hasDeferred_ は反転しない（peek only）。実際の ownership release は
@@ -173,10 +194,19 @@ public:
     //   releaseSlot → (Ready なら submitPublishRequest；再 Deferred は submitPublishRequest
     //   が自動 enqueue)。AudioEngine.h:2528-2529 の
     //   'consumeDeferredRequest → submitPublishRequest' を一本化。
-    void processDeferredAdmission() noexcept;
+    // ★ D135-8 Step 7 (P3): wake-provenance discriminator wired end-to-end (P1 blocked → resolved).
+    void processDeferredAdmission(bool wasRecoveryWake) noexcept;
 
     // ★ C-2.2: shutdown 時に deferred publish を強制消去
     void clearDeferredForShutdown() noexcept;
+
+    // ★ D135-8 Step 9 (Option C): deferred-clear wake-provenance latch.
+    //   requestDeferredClear() is the sole Writer (non-RebuildThread, Timer.cpp);
+    //   drainDeferredClearIfRequested() is the sole Reader (RebuildThread only).
+    //   deferredClearRequested_ is PREDICATE-INELIGIBLE: persistent latch consumed
+    //   on every wake, so a lost notify_one cannot starve the clear.
+    void requestDeferredClear() noexcept;
+    bool drainDeferredClearIfRequested() noexcept;
 
     // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
     [[nodiscard]] uint64_t getMaxDeferredAgeMs() const noexcept;
@@ -253,7 +283,35 @@ private:
     std::atomic<uint64_t> deferredOverwriteCount_{0};
     std::atomic<uint64_t> maxDeferredAgeMs_{0};
 
+    // ★ D135-1 / F6: Deferred obligation accounting — rebuild-thread single-owner。
+    //   obligation identity = (generation, recoveryObligationId)。generation 単独ではない
+    //   （recovery は同一 generation を再利用して別 payload を発行する — RebuildDispatch:1035-1036）。
+    //   enqueueDeferred は deferredSlot_ を構造体ごと置換するため counter/createdAt は Orchestrator
+    //   メンバに保持する（slot 内ではない — consume→finishView で slot は消えるため、re-drive 時に
+    //   旧 slot から timestamp は読めない）。rebuild-thread 専用（同一スレッド）で rebuildMutex 不要。
+    //   ★ F6 契約: DeferredFadingActive の再駆動は「retention（保持）」であり retry ではない。
+    //   同一 (G,O) の re-drive では deferredRetryCount_ を増加させない → RetryExhaustedDiscard は
+    //   retention に対して発生しない。kMaxDeferredRetries は将来の真の Type-A retry 経路用の
+    //   dormant guard として保持（削除しない）。判定は現行実装 `>` を正とする（F5-9/F6-6）。
+    int deferredRetryGeneration_{0};                 // 現在の obligation identity: generation
+    std::uint64_t deferredRetryObligationId_{0};     // 現在の obligation identity: recoveryObligationId（0=通常）
+    uint8_t deferredRetryCount_{0};                  // Type-A retry 回数（retention では不増加 → 現行 0 固定）
+    std::uint64_t deferredObligationCreatedAtUs{0};  // obligation 生成時刻（TTL source-of-truth、re-drive で維持）
+    static constexpr uint8_t kMaxDeferredRetries = 2;   // F6: retention に適用しない（dormant guard）
+    // ★ D135-1: crossfade-timeout recovery が発行した idle world の seq。
+    std::atomic<PublicationSequenceId> lastRecoveryPublishSeq_{0};
+    // ★ D135-8 Step 9 (Option C): clear-provenance latch. std::atomic because
+    //   requestDeferredClear() (Timer.cpp, non-RebuildThread) writes and
+    //   drainDeferredClearIfRequested() (RebuildThread) reads. Predicate-ineligible;
+    //   persistent, drained on every wake (no lost clear).
+    std::atomic<bool> deferredClearRequested_{false};
+
     void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
+
+    // ★ F6-7: obligation metadata（identity key + createdAt + count）を無効化する。
+    //   terminal（Accepted / StaleDiscard / Expired / ShutdownDiscard）で呼ぶ。
+    //   re-drive（retention）では呼ばない（enqueueDeferred が key 一致で維持するため）。
+    void invalidateDeferredObligation() noexcept;
 
     // ★ Phase-1 private helpers (Single Thread Owner / RebuildThread 前提)
     [[nodiscard]] PublicationAdmission::DeferredAdmissionSnapshot buildDeferredAdmissionSnapshot() const noexcept;

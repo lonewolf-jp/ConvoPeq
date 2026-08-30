@@ -12,7 +12,14 @@ enum class DiscardReason : uint8_t {
     ShutdownDiscard,
     StaleDiscard,
     SupersededDiscard,
-    Expired   // ★ work37: TTL 超過
+    Expired,   // ★ work37: TTL 超過
+    // ★ D135-1 / F6: RetryExhaustedDiscard — 同一 obligation の **Type-A retry**（publish 再試行）が
+    //   retry-cap (kMaxDeferredRetries=2, 判定は `deferredRetryCount_ > kMax` を正) に達した場合の終端。
+    //   ★ F6 契約: DeferredFadingActive の再駆動は「retention（保持）」であり retry ではないため
+    //   deferredRetryCount_ を増加させない → 現行 production には Type-A 経路が存在せず、この終端は
+    //   dormant（到達不能）。retention の bound は watchdog 間隔 + obligation createdAt 起点の TTL(30s)
+    //   が担う。identity は (generation, recoveryObligationId)。StaleDiscard とは異なり payload は fresh。
+    RetryExhaustedDiscard
 };
 
 // ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。

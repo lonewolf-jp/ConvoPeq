@@ -93,6 +93,11 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     int fadeSamples = convo::consumeAtomic(m_eqFadeSamples, std::memory_order_acquire);
     const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D125-A: flag 昇格消費点の観測（clear point 特定用）
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[D125_IRFLAG_PROMOTE_SNAPSHOT] promoted=%d", promoteToStructural ? 1 : 0));
+#endif
     if (promoteToStructural)
     {
         // 例外昇格判定は制御スレッド側で確定する。

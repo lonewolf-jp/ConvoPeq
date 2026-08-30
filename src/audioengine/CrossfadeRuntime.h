@@ -79,6 +79,19 @@ public:
         return completedFadeQueue_.pop(ev);
     }
 
+    // ★ D132 (M2): RT 側 ramp 完了検出（LinearRamp remaining 1→0 エッジで exactly-once 呼び出し）。
+    //   identity 非携帯の純シグナル — Timer が fading slot CAS で DSPCore* を取得し、
+    //   receipt で交叉検証して retire する（D129-1/D129-2 契約: ramp 完了 ≠ retire 許可）。
+    void notifyRampComplete() noexcept
+    {
+        CompletedFadeEvent ev{ CrossfadeId{0}, getCurrentTimeUs() };
+        if (!completedFadeQueue_.push(ev))
+        {
+            convo::fetchAddAtomic(crossfadeEventDropCount_, uint64_t{1},
+                std::memory_order_release);
+        }
+    }
+
     // ★ Practical-2: 開始からの経過時間（Timeout 監視用）
     [[nodiscard]] uint64_t getFadeAgeUs() const noexcept
     {

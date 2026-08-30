@@ -1173,6 +1173,12 @@ public:
     // Precondition: current は fadingRuntimeDSPSlot の CAS 成功で取得済み。
     void retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept;
 
+    // ★ D132 (M2): fading DSP の唯一の ownership terminalization primitive。
+    //   completion / timeout / overlap claim-fail の全経路がここに収束する
+    //   （INV-XFADE-COMP-2: terminal transition は exactly-once — CAS + 冪等 retire）。
+    //   identity は CAS 取得の DSPCore*（一次）+ receipt.handle の resolve 交叉検証。
+    void terminalizeFadingDSP() noexcept;
+
     // ★ P1-2: resetReceipt — pendingReceipt_ を安全に解放する。
     //   Normal Retire: receipt 一致後、リセット。
     //   Emergency/Stale: quarantine Intent を発行後、リセット。
@@ -1466,7 +1472,18 @@ public:
     [[nodiscard]] int getEQFadeSamples() const noexcept { return consumeAtomic(m_eqFadeSamples, std::memory_order_acquire); }
     [[nodiscard]] bool isFading() const noexcept { return m_coordinator.isFading(); }
     // release: IR 変更フラグを Audio Thread の acquire で観測できるよう公開。
-    void setIRChangeFlag() noexcept { publishAtomic(m_pendingIRChange, true, std::memory_order_release); }
+    // ★ D125-A: caller-tag 診断（observation-only・macro-gated）。production 挙動は不変。
+    void setIRChangeFlag(const char* callerTag = "unknown") noexcept
+    {
+        publishAtomic(m_pendingIRChange, true, std::memory_order_release);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[D125_IRFLAG_SET] caller=%s pendingIRGen=%llu thread=%p",
+            callerTag ? callerTag : "unknown",
+            (unsigned long long) pendingIRGeneration,
+            juce::Thread::getCurrentThreadId()));
+#endif
+    }
 
     // acquire: Audio Thread の release (debugLastCreatedEqHash publish) と HB し、診断ハッシュを取得。
     [[nodiscard]] uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(rtAuxMutable_.debugLastCreatedEqHash, std::memory_order_acquire); }
@@ -2699,6 +2716,16 @@ public:
     //   consume/discard → releaseSlot → submitPublishRequest）を実行する。
     //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
     bool publishRetryReady = false;
+    // ★ F6-5: deferred wake watchdog — CoordinatorLoop thread 専用（single-owner、atomic 不要）。
+    //   現行 P1（coordinator poll）は毎 tick publishRetryReady を立てていたが、F6 では
+    //   fade-complete wake（P3）が正常経路、本カウンタ到達時のみ発火する poll が lost-wake
+    //   自己修復（watchdog）となる。周期は fallback tuning 値であり設計契約ではない（F5-6:
+    //   「100ms が仕様」として固定しない。named constant として実装者が調整可能）。
+    static constexpr std::uint32_t kDeferredWakeWatchdogTicks = 100;  // ~100ms @1ms tick（tunable fallback）
+    std::uint32_t coordinatorDeferredWatchdogTicks_ = 0;
+    // D135-8: Recovery crossfade-timeout wake provenance.
+    // This is provenance only; it is not part of the rebuildCV wake predicate.
+    std::atomic<bool> recoveryRetryReady { false };
     // ★ D101-24 Step 1: production-owned delayed intent scheduler (AudioEngine owns, RetryScheduler non-owning back-ptr)
     std::unique_ptr<RetryScheduler> retryScheduler_;
 

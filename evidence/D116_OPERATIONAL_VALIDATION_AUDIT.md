@@ -121,7 +121,13 @@
 
 ## 総合判定: **CONDITIONAL PASS（自動化可能範囲）** — HOLD 項目 3 件
 
-1. **D116-5 音質確認**（impulse/sine/music/IR switching での実耳確認）— 実機オーディオでの人間聴覚判断が必要
+> **【2026-08-29 続報】** D116-5/6/7 を実施（`evidence/D116-5_6_7_AUDIO_LONGRUN_RESTART.md`）。
+> D116-7 Restart は **PASS**（6/6 cycles、残留なし）。D116-6 Long-run で **新規 HOLD 該当事象を検出**:
+> IR reload + rebuild の組合せ継続時に **約145MB/pair のメモリが実行中に回収されず単調増加**
+> （6分で +8.8GB、+1.45GB/min。burst単独・reload単独・restart cycles はフラット。shutdown で解放）。
+> 処理時間・異常テレメトリ・AUTH_CONTRACT は全期間正常。**原因監査（D117 相当）まで commit 凍結を継続。**
+
+1. **D116-5 音質確認**（impulse/sine/music/IR switching での実耳確認）— 実機オーディオでの人間聴覚判断が必要（客観代理指標は PASS）
 2. **D116-6 長時間試験**（3min 以上の continuous audio + repeated publication）— 本検証は最長 42s
 3. **D116-7 Shutdown/Restart 反復**（複数回 start→operate→shutdown→start の残留状態確認）
 

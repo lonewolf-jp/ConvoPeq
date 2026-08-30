@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-08-28 21:22:04
+> Generated: 2026-08-30 19:19:29
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -19181,6 +19181,9 @@ void MainApplication::initialise(const juce::String& commandLine)
 void MainApplication::shutdown()
 {
     juce::Logger::writeToLog("[DIAG] MainApplication::shutdown() enter");
+    // ★ D127-E (diagnostic only): SHUTDOWN_BEGIN — teardown phase 計測の起点。
+    //   production semantics 変更なし（ログ出力のみ）。
+    juce::Logger::writeToLog("[D123] SHUTDOWN_BEGIN");
     // unique_ptr のデストラクタで MainWindow が閉じられる
     // MainWindow デストラクタ内で:
     //   1) オーディオコールバック停止
@@ -19188,8 +19191,13 @@ void MainApplication::shutdown()
     //   3) AudioEngine 破棄
     // の順で安全にシャットダウンされる
     mainWindow.reset();
+    // ★ D127-E: mainWindow.reset()（~MainWindow/~AudioEngine/teardown 全体）が完了した
+    //   ことを明示。クラッシュ時はこの行が出ない = crash phase が mainWindow.reset() 内と
+    //   特定できる（D119-BLOCKER-2 診断）。
+    juce::Logger::writeToLog("[D123] SHUTDOWN: mainWindow.reset() completed");
 
     juce::Logger::writeToLog("MainApplication shutting down.");
+    juce::Logger::writeToLog("[D123] LOGGER_DETACH / SHUTDOWN_END");
     juce::Logger::setCurrentLogger(nullptr);
     fileLogger.reset();
 
@@ -20334,7 +20342,10 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
             {
                 // ★ v14.47: Flush log file before exit (P5 fix)
                 juce::Logger::writeToLog("[CLI] Auto-exit flush: shutting down");
-                juce::Logger::setCurrentLogger(nullptr);
+                // ★ D127-E (diagnostic only): ここでの logger 切断は teardown 全体を観測不能に
+                //   していた（D119-BLOCKER-2 診断障害）。切断は MainApplication::shutdown() 末尾
+                //   （LOGGER_DETACH）に移譲し、teardown 全程をファイルに記録する。
+                //   production ownership semantics 変更なし（ログ出力タイミングのみ）。
 
                 if (safeThis != nullptr)
                 {
@@ -30802,7 +30813,14 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     req.oversamplingResult = oversamplingResult;
     req.buildDiagnostics = buildDiagnostics;
     req.recoveryObligationId = recoveryObligationId;   // ★ D105-R5-8: carry obligation id to completion
-
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        diagLog("[D133] enqueue gen=" + juce::String(req.generation)
+            + " irLoaded=" + juce::String(static_cast<int>(req.sealedSnapshot.irLoaded))
+            + " irFinalized=" + juce::String(static_cast<int>(req.sealedSnapshot.irFinalized))
+            + " sealed=" + juce::String(static_cast<int>(req.sealedSnapshot.sealed)));
+    }
+#endif
     runtimeOrchestrator_->submitPublishRequest(req);
 
     // DSP commit 完了時に DSPReady を常に enqueue する。
@@ -33638,8 +33656,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     t1_dspStartUs = convo::getCurrentTimeUs();
 #endif
 
+        // ★ D132 (M2): ramp 完了エッジ検出用（block 開始時の smoothing 状態）
+        const bool crossfadeWasSmoothing = crossfadeRuntime_.getGain().isSmoothing();
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
-            && crossfadeRuntime_.getGain().isSmoothing()
+            && crossfadeWasSmoothing
             && dspCrossfadeFloatBuffer.getNumChannels() >= 2
             && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
 
@@ -33714,6 +33734,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             }
 
             finalizeCrossfadeMixPath(dsp, fading, true);
+
+            // ★ D132 (M2): RT ramp 完了エッジ検出 — remaining 1→0 遷移で exactly-once 発火。
+            //   identity 非携帯の純シグナル（SPSC push のみ・alloc/lock/blocking なし）。
+            //   Timer が active crossfade records を解決して endCrossfade → retire に進む。
+            if (crossfadeWasSmoothing && !crossfadeRuntime_.getGain().isSmoothing())
+                crossfadeRuntime_.notifyRampComplete();
         }
         else
         {
@@ -39052,7 +39078,15 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                                             generation,
                                             structuralHash,
                                             uiConvolverProcessor.isIRLoaded(),
-                                            uiConvolverProcessor.isIRFinalized())));
+                                             uiConvolverProcessor.isIRFinalized())));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                diagLog("[D133] queue snapshot gen=" + juce::String(generation)
+                    + " irLoaded=" + juce::String(static_cast<int>(task.runtimeBuildSnapshot.irLoaded))
+                    + " irFinalized=" + juce::String(static_cast<int>(task.runtimeBuildSnapshot.irFinalized))
+                    + " sealed=" + juce::String(static_cast<int>(task.runtimeBuildSnapshot.sealed)));
+            }
+#endif
             // ★ v14.0: BuildAnalysis を生成（Worker Thread で解析）
             // ★ v14.38: OversamplingPolicy::resolve() を使用して processingRate を解決
             {
@@ -39224,6 +39258,12 @@ void AudioEngine::rebuildThreadLoop()
         {
             RebuildTask task;
             bool doDeferredPublish = false;  // ★ CoordinatorLoop からの deferred publish ハンドオフ
+            bool wokeByPendingTask = false;  // ★ D132 (M3-A): wakeup 要因（mutex 保護下で確定）
+            // ★ D135-8 Step 6 (P2): recovery-wake provenance. Declared in the outer loop scope so
+            //   it survives the lock release (scope closes at the '}' below) and reaches the
+            //   processDeferredAdmission call. Assigned once under lock (exchange), read once
+            //   after unlock — effective const-ness. PROVENANCE-ONLY: not part of rebuildCV predicate.
+            bool wasRecoveryWake = false;
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
                 // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が publishRetryReady を立てた時に
@@ -39245,16 +39285,43 @@ void AudioEngine::rebuildThreadLoop()
                     break;
                 }
 
-                // Copy task and clear pendingTask pointers to transfer ownership
-                task = pendingTask;
-                pendingTask.currentDSP = nullptr;
+                // ★ D132 (M3-A): wake reason を mutex 保護下で確定してから所有権 transfer。
+                wokeByPendingTask = hasPendingTask;
 
-                hasPendingTask = false;
+                if (wokeByPendingTask)
+                {
+                    // Copy task and clear pendingTask pointers to transfer ownership
+                    task = pendingTask;
+                    pendingTask.currentDSP = nullptr;
+                    hasPendingTask = false;
+                }
+                // ★ M3-C: !wokeByPendingTask の場合 pendingTask は未変更 — stale task の
+                //   currentDSP ownership を失わない（build も行わない、下記 guard で continue）。
+
                 // ★ deferred publish ハンドオフを消費（ビジーループ防止のため先にクリア）
+                // ★ D135-8 Step 6 (P2): consume recovery-wake provenance BEFORE publishRetryReady.
+                //   recoveryRetryReady is provenance-only (not in rebuildCV predicate); exchange
+                //   read-and-clear returns the value the recovery handler stamped (true) iff THIS
+                //   wake was provoked by the crossfade-timeout recovery path.
+                wasRecoveryWake = convo::exchangeAtomic(recoveryRetryReady, false, std::memory_order_acq_rel);
                 doDeferredPublish = publishRetryReady;
                 publishRetryReady = false;
                 convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(0), std::memory_order_release);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                // ★ D129-3B/D132: TASK_WAKE（M3 適用版 — wake reason と task transfer を正確に記録）
+                diagLog(juce::String::formatted(
+                    "[D129_TASK_WAKE] wokeByPendingTask=%d wokeByRetryReady=%d taskTransferred=%d taskGen=%d sealed=%d",
+                    wokeByPendingTask ? 1 : 0, doDeferredPublish ? 1 : 0,
+                    wokeByPendingTask ? 1 : 0,
+                    task.generation, task.runtimeBuildSnapshot.sealed ? 1 : 0));
+#endif
             }
+
+            // ★ D135-8 Step 9 (Option C): drain a deferred-clear latch that
+            //   requestDeferredClear() may have set while this loop was busy.
+            //   Predicate-ineligible persistent latch; consumed on every wake → no lost clear.
+            if (runtimeOrchestrator_ != nullptr)
+                runtimeOrchestrator_->drainDeferredClearIfRequested();
 
             // ★ ISR Builder/Coordinator 分離: CoordinatorLoop からの deferred publish ハンドオフ。
             //   Builder（RebuildThread）が consume → submit（同期）を実行する。
@@ -39268,7 +39335,7 @@ void AudioEngine::rebuildThreadLoop()
                 //   processDeferredAdmission() へ一本化（peek → evaluateDeferred →
                 //   consume/discard → finishView → submitPublishRequest）。
                 //   submitPublishRequest は必要なら再 enqueue（hasDeferred_=true）。
-                runtimeOrchestrator_->processDeferredAdmission();
+                runtimeOrchestrator_->processDeferredAdmission(wasRecoveryWake);
             }
 
             struct DSPGuard
@@ -39474,6 +39541,15 @@ void AudioEngine::rebuildThreadLoop()
                     recoveryConsecutiveFailures = 0;   // ★ 監査軽微指摘4: 成功で連続失敗カウンタをリセット
                 }
             }
+
+            // ★ D132 (M3): stale task re-build prevention。
+            //   publishRetryReady のみで起床した場合（pendingTask 未 transfer）、task は
+            //   前回の stale copy であり、isRebuildObsolete は等号を obsolete と見なさないため
+            //   同一世代の再 build が無限に発生する（D123 storm 実測: gen 9 = 73 回）。
+            //   deferred publish ハンドオフと recovery は上記で処理済みのため、ここで
+            //   build を skip して次の wakeup を待つ（INV-REBUILD-WAKE-1）。
+            if (!wokeByPendingTask)
+                continue;
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
@@ -40235,6 +40311,11 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     int fadeSamples = convo::consumeAtomic(m_eqFadeSamples, std::memory_order_acquire);
     const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D125-A: flag 昇格消費点の観測（clear point 特定用）
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[D125_IRFLAG_PROMOTE_SNAPSHOT] promoted=%d", promoteToStructural ? 1 : 0));
+#endif
     if (promoteToStructural)
     {
         // 例外昇格判定は制御スレッド側で確定する。
@@ -40552,6 +40633,10 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
 void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D117 root-cause audit: observation-only trace (no semantic change).
+    juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
+#endif
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
@@ -40809,15 +40894,27 @@ void AudioEngine::runCoordinatorPhase() noexcept
     //   ★ ビジーループ防止: predicate に hasDeferredRequest() を直接入れず、フラグ駆動にする。
     //     Deferred が継続しても RebuildThread は休眠し、Coordinator が次 1ms tick で再通知するまで
     //     再試行しない。これにより crossfade 終了まで CPU スピンすることはない。
+    // ★ F6-5: watchdog 化 — 現行は毎 tick publishRetryReady を立てていた（= 実質 1ms polling）。
+    //   F6 では fade-complete wake（P3, Timer.cpp）が正常経路となり、本 poll は lost-wake 自己修復
+    //   専用として kDeferredWakeWatchdogTicks ごとにのみ発火する。publishRetryReady の意味・
+    //   rebuildMutex→flag→unlock→notify の順序・hasDeferred_ を predicate にしない方針は不変。
     if (!isShutdownInProgress()
         && runtimeOrchestrator_ != nullptr
         && runtimeOrchestrator_->hasDeferredRequest())
     {
+        if (++coordinatorDeferredWatchdogTicks_ >= kDeferredWakeWatchdogTicks)
         {
-            std::lock_guard<std::mutex> lock(rebuildMutex);
-            publishRetryReady = true;
+            coordinatorDeferredWatchdogTicks_ = 0;
+            {
+                std::lock_guard<std::mutex> lock(rebuildMutex);
+                publishRetryReady = true;
+            }
+            rebuildCV.notify_one();
         }
-        rebuildCV.notify_one();
+    }
+    else
+    {
+        coordinatorDeferredWatchdogTicks_ = 0;
     }
 
     // ★ Phase1: OverflowRing drain (relocated from timerCallback).
@@ -41849,6 +41946,26 @@ void AudioEngine::timerCallback()
         }
 
         sendChangeMessage();
+
+        // ★ F6-4: fade-complete wake — fading が解消され idle world commit 済みになった時点で、
+        //   保留中の deferred publish があれば RebuildThread に再評価を依頼する（wake request のみ）。
+        //   - fade 完了前には発火しない（本ブロック自体が fadeCompleted 時のみ実行）
+        //   - deferred 不在なら no-op（hasDeferredRequest() ガード）
+        //   - shutdown 中は wake しない
+        //   - recoveryRetryReady には触れない（provenance 非汚染・wasRecoveryWake=false のまま）
+        //   - publish decision / retire / reclaim は行わない（決定権不変）
+        //   lock ordering: timerCallback 本体は mutex 非保持、rebuildMutex はリーフレール
+        //   （recovery handoff Timer.cpp:1746-1751 と同型）。
+        if (!isShutdownInProgress()
+            && runtimeOrchestrator_ != nullptr
+            && runtimeOrchestrator_->hasDeferredRequest())
+        {
+            {
+                std::lock_guard<std::mutex> lock(rebuildMutex);
+                publishRetryReady = true;
+            }
+            rebuildCV.notify_one();
+        }
     }
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -42490,7 +42607,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         diagLog("[HEALTH] Publication stall detected, draining deferred publish");
 
         if (runtimeOrchestrator_) {
-            runtimeOrchestrator_->clearDeferredForShutdown();
+            runtimeOrchestrator_->requestDeferredClear();
         }
 
         // 強制診断ダンプ
@@ -42566,6 +42683,42 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
                 convo::TransitionPolicy::HardReset);
         }
 
+        // ★ D135-1 §5: timeout recovery は publishIdleWorldOnly (commitRuntimePublication,
+        //   sync) で zero-fading world を live commit 済み。pending deferred request
+        //   (hasDeferred_) が存在すれば rebuild thread だけに 1 回再駆動を依頼する。
+        if (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest()) {
+            const auto recoverySeq = getLastCommittedPublicationSequence();
+            runtimeOrchestrator_->setRecoveryPublishSeq(recoverySeq);
+            // ★ D135-5/8: blind producer-side reset removed. Recovery-retry budget reset is now
+            //   gated on recoveryRetryReady provenance in processDeferredAdmission (P3).
+            //   The provenance stamp below (publishRetryReady) wakes the rebuild thread; the
+            //   atomic recoveryRetryReady flag lets the consumer distinguish recovery redrive
+            //   (reset budget) from ordinary retry (increment count).
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const convo::RuntimeReaderContext msgCtx{
+                    messageThreadRcuReader, convo::ObserveChannel::Message };
+                const auto handle = makeRuntimeReadHandle(msgCtx);
+                const auto* rw = getRuntimeWorldFromReadHandle(handle);
+                const auto worldFadingUuid = (rw != nullptr)
+                    ? static_cast<juce::int64>(rw->topology.fadingRuntimeUuid) : -1;
+                diagLog(juce::String("[D135] recovery-redrive")
+                    + " recoveryWorldSeq=" + juce::String(static_cast<juce::int64>(recoverySeq))
+                    + " observedWorldSeq=" + juce::String(static_cast<juce::int64>(getLastCommittedPublicationSequence()))
+                    + " worldFadingUuid=" + juce::String(worldFadingUuid)
+                    + " hasDeferred=" + juce::String(1)
+                    + " currentGen=" + juce::String(static_cast<juce::int64>(
+                        convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire))));
+            }
+#endif
+            {
+                std::lock_guard<std::mutex> lock(rebuildMutex);
+                convo::publishAtomic(recoveryRetryReady, true, std::memory_order_release);
+                publishRetryReady = true;
+            }
+            rebuildCV.notify_one();
+        }
+
         diagLog("[HEALTH] Crossfade timeout recovery completed");
     }
 
@@ -42621,7 +42774,7 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
             tryReclaimResources();
             drainDeferredRetireQueues(false);
             if (runtimeOrchestrator_)
-                runtimeOrchestrator_->clearDeferredForShutdown();
+                runtimeOrchestrator_->requestDeferredClear();
             break;
 
         case convo::RecoveryAction::Restore:
@@ -42641,7 +42794,7 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
                 noiseShaperLearner->setState(lastKnownGoodNoiseShaper_.state);
             // DeferredPublicationFlush
             if (runtimeOrchestrator_)
-                runtimeOrchestrator_->clearDeferredForShutdown();
+                runtimeOrchestrator_->requestDeferredClear();
             // Step2（publishIdleWorldOnly）は閉ループ制御後 (Phase 6)
             m_restorePhase_ = convo::RestorePhase::EpochRecoveryIssued;
             break;
@@ -43034,7 +43187,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         if (needsStructuralRebuild && srForRebuild > 0.0)
         {
             ++pendingIRGeneration;
-            setIRChangeFlag();
+            setIRChangeFlag("UI");
 
             const LearningCommand cmd {
                 LearningCommand::Type::IRChanged,
@@ -44234,6 +44387,12 @@ public:
     // Precondition: current は fadingRuntimeDSPSlot の CAS 成功で取得済み。
     void retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept;
 
+    // ★ D132 (M2): fading DSP の唯一の ownership terminalization primitive。
+    //   completion / timeout / overlap claim-fail の全経路がここに収束する
+    //   （INV-XFADE-COMP-2: terminal transition は exactly-once — CAS + 冪等 retire）。
+    //   identity は CAS 取得の DSPCore*（一次）+ receipt.handle の resolve 交叉検証。
+    void terminalizeFadingDSP() noexcept;
+
     // ★ P1-2: resetReceipt — pendingReceipt_ を安全に解放する。
     //   Normal Retire: receipt 一致後、リセット。
     //   Emergency/Stale: quarantine Intent を発行後、リセット。
@@ -44527,7 +44686,18 @@ public:
     [[nodiscard]] int getEQFadeSamples() const noexcept { return consumeAtomic(m_eqFadeSamples, std::memory_order_acquire); }
     [[nodiscard]] bool isFading() const noexcept { return m_coordinator.isFading(); }
     // release: IR 変更フラグを Audio Thread の acquire で観測できるよう公開。
-    void setIRChangeFlag() noexcept { publishAtomic(m_pendingIRChange, true, std::memory_order_release); }
+    // ★ D125-A: caller-tag 診断（observation-only・macro-gated）。production 挙動は不変。
+    void setIRChangeFlag(const char* callerTag = "unknown") noexcept
+    {
+        publishAtomic(m_pendingIRChange, true, std::memory_order_release);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[D125_IRFLAG_SET] caller=%s pendingIRGen=%llu thread=%p",
+            callerTag ? callerTag : "unknown",
+            (unsigned long long) pendingIRGeneration,
+            juce::Thread::getCurrentThreadId()));
+#endif
+    }
 
     // acquire: Audio Thread の release (debugLastCreatedEqHash publish) と HB し、診断ハッシュを取得。
     [[nodiscard]] uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(rtAuxMutable_.debugLastCreatedEqHash, std::memory_order_acquire); }
@@ -45141,9 +45311,32 @@ private:
             {
             }
 
-            // ★ P0-2: デストラクタ。
-            //   通常パス: retire のみ（コピー先マップが参照中のため delete 不可）。
-            //   Shutdown: resolve → delete → reclaim（全マップ同時破棄のため安全）。
+            // ★ D113-A (read-only comment correction; production logic unchanged):
+            //   CacheMap dtor is invoked from two paths:
+            //     (a) ~EQCacheManager (AudioEngine.Cache.cpp:161) — direct delete under writeMutex,
+            //         after cacheMapPtr is exchanged to nullptr. AudioEngine 寿命内.
+            //     (b) deleter registered via owner->enqueueDeferredDeleteNonRt(...) — invoked by
+            //         m_retireRouter on a consumer thread, epoch-gated; see
+            //         AudioEngine.h enqueueDeferredDeleteNonRt (定義 4219), ISRRetireRouter.h:382
+            //         shutdownReclaim (ShutdownReclaimAuthority), and ISRRetireRouter.h:247
+            //         drainAllQuarantineStore (shutdown drain: ReleaseResources.cpp:410/505).
+            //         directDelete は禁忌 (REPAIR_PLAN.md:2412).
+            //
+            //   Within the dtor, owner==nullptr ガード + dspHandleRuntime_ への参照は
+            //   AudioEngine 寿命に依存 (UAF 防止の前提). m_retireRouter への直接参照は
+            //   本 dtor には無く、所有権系は owner->dspHandleRuntime_ 経由.
+            //
+            //   実コードの順序 (shutdownPhase >= Destroy branch — 本 dtor の if ブロック。
+            //   行番号参照はコメント挿入でずれるため branch 識別で行う):
+            //     1. tryShutdownQuiescentReclaim(entry.second)  (Reclaim Authority, Permit-gated)
+            //     2. rt.resolve(entry.second)
+            //     3. delete EQCoeffCache
+            //   reclaim 失敗時は物理解放をスキップ (object 消滅 + handle 未回収の組合せを回避).
+            //
+            //   通常パス (shutdownPhase < Destroy — 本 dtor の else ブロック):
+            //     retire のみ。deferred delete queue (enqueueDeferredDeleteNonRt) は別 thread で
+            //     epoch-gated drain される (ISRRetireRouter) ため、CacheMap 自体の delete は
+            //     ここでは行わない (RT 参照中の UAF 防止).
             ~CacheMap()
             {
                 jassert(owner != nullptr);
@@ -45737,6 +45930,16 @@ public:
     //   consume/discard → releaseSlot → submitPublishRequest）を実行する。
     //   predicate に hasDeferredRequest() を直接入れないことで、Deferred 継続中のビジーループを防ぐ。
     bool publishRetryReady = false;
+    // ★ F6-5: deferred wake watchdog — CoordinatorLoop thread 専用（single-owner、atomic 不要）。
+    //   現行 P1（coordinator poll）は毎 tick publishRetryReady を立てていたが、F6 では
+    //   fade-complete wake（P3）が正常経路、本カウンタ到達時のみ発火する poll が lost-wake
+    //   自己修復（watchdog）となる。周期は fallback tuning 値であり設計契約ではない（F5-6:
+    //   「100ms が仕様」として固定しない。named constant として実装者が調整可能）。
+    static constexpr std::uint32_t kDeferredWakeWatchdogTicks = 100;  // ~100ms @1ms tick（tunable fallback）
+    std::uint32_t coordinatorDeferredWatchdogTicks_ = 0;
+    // D135-8: Recovery crossfade-timeout wake provenance.
+    // This is provenance only; it is not part of the rebuildCV wake predicate.
+    std::atomic<bool> recoveryRetryReady { false };
     // ★ D101-24 Step 1: production-owned delayed intent scheduler (AudioEngine owns, RetryScheduler non-owning back-ptr)
     std::unique_ptr<RetryScheduler> retryScheduler_;
 
@@ -48900,6 +49103,19 @@ public:
         return completedFadeQueue_.pop(ev);
     }
 
+    // ★ D132 (M2): RT 側 ramp 完了検出（LinearRamp remaining 1→0 エッジで exactly-once 呼び出し）。
+    //   identity 非携帯の純シグナル — Timer が fading slot CAS で DSPCore* を取得し、
+    //   receipt で交叉検証して retire する（D129-1/D129-2 契約: ramp 完了 ≠ retire 許可）。
+    void notifyRampComplete() noexcept
+    {
+        CompletedFadeEvent ev{ CrossfadeId{0}, getCurrentTimeUs() };
+        if (!completedFadeQueue_.push(ev))
+        {
+            convo::fetchAddAtomic(crossfadeEventDropCount_, uint64_t{1},
+                std::memory_order_release);
+        }
+    }
+
     // ★ Practical-2: 開始からの経過時間（Timeout 監視用）
     [[nodiscard]] uint64_t getFadeAgeUs() const noexcept
     {
@@ -49227,6 +49443,13 @@ private:
 #include "DSPLifetimeManager.h"
 #include "AudioEngine.h"
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// ★ D117 root-cause audit: observation-only lifetime trace (no semantic change).
+#define D117_LIFETIME_LOG(msg) juce::Logger::writeToLog(msg)
+#else
+#define D117_LIFETIME_LOG(msg) ((void) 0)
+#endif
+
 DSPLifetimeManager::DSPLifetimeManager(AudioEngine& engine) noexcept
     : engine_(engine)
     , router_(engine_.m_retireRouter.get())
@@ -49262,6 +49485,8 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         return;
 
     const bool retired = engine_.retireDSPHandleForRuntime(static_cast<AudioEngine::DSPCore*>(dsp));
+    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p retired=%d",
+                                              dsp, retired ? 1 : 0));
     if (!retired)
         return;
 
@@ -49276,6 +49501,11 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         dsp, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p enqueue=%d epoch=%llu",
+                                              dsp, static_cast<int>(result),
+                                              (unsigned long long) epoch));
+#endif
     // ★ BUG-015/027 (work88): enqueue 失敗（QueuePressure/QueueFull）は enqueueWithRetry
     //   内部で RetireQuarantineStore へ移送済み（directDelete しない — RT 参照中の UAF 排除）。
     //   Shutdown はシャットダウン経路が処理。二重移送（double-quarantine → double-free）を
@@ -49305,7 +49535,18 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
     }
 
     if (toDelete == nullptr)
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        D117_LIFETIME_LOG(juce::String::formatted(
+            "[D117_RETIRE_BY_HANDLE] handle=%llu lookup=MISS (not in runtimeDSPHandleMap_)",
+            (unsigned long long) handle.slot));
+#endif
         return;
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    D117_LIFETIME_LOG(juce::String::formatted(
+        "[D117_RETIRE_BY_HANDLE] dsp=%p lookup=HIT", toDelete));
+#endif
 
     // ★ work88 (Phase 3): retire → epoch 安全確認 → reclaim を一本化。
     //   requestReclaimHandle は epoch 安全なら requestReclaim（retire→waitReaders→reclaim）、
@@ -49323,6 +49564,11 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
         toDelete, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE_BY_HANDLE] dsp=%p enqueue=%d epoch=%llu",
+                                              toDelete, static_cast<int>(result),
+                                              (unsigned long long) epoch));
+#endif
     // ★ BUG-015/027 (work88): 同上 — enqueueWithRetry 内部で退避ストアへ移送済み。
     //   二重移送を避けるため追加処置なし（directDelete 禁止）。
     juce::ignoreUnused(result);
@@ -49456,7 +49702,19 @@ public:
                 auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
                 if (health == convo::ISRHealthState::Critical) {
                     lifetime.activate(newDSP);
-                    if (oldDSP != nullptr) {
+                    // ★ D132 (M1 / D122-A 契約): active runtime handle を公開。
+                    //   registration（lifetime.activate = map登録）と activation
+                    //   （DSPHandleRuntime::activate = activeRuntimeDSPHandle_ 公開）は別操作。
+                    //   未公開のままでは次 publish の oldHandle が常に null になり retire が
+                    //   到達不能（D117/D120 CAUSE）。publish 成功後のみ・publish 失敗
+                    //   （rollback）では呼ばれない（ScopeExit が tail 前に完結）。
+                    if (newDSP != nullptr) {
+                        const auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
+                        if (!newHandle.isNull())
+                            engine_.dspHandleRuntime_.activate(newHandle);
+                    }
+                    // ★ D132(5): oldDSP == newDSP は retire/crossfade 対象外。
+                    if (oldDSP != nullptr && oldDSP != newDSP) {
                         // ★ Temporary: exchangeFadingRuntimeDSP (A-6 fix).
                         //   Will be removed after B-1 CAS-only claimFadingRuntimeDSP().
                         auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);
@@ -49480,9 +49738,18 @@ public:
 
         // 1. activate (publish 成功後にのみ実行)
         lifetime.activate(newDSP);
+        // ★ D132 (M1 / D122-A 契約): active runtime handle を公開（registration ≠ activation —
+        //   D121-2）。fading null 化の副作用は isSlotInCrossfade（crossfadeRecords_ 参照）に非依存、
+        //   beginCrossfade が直後に再設定するため安全（D122-A 審査済み）。
+        if (newDSP != nullptr) {
+            const auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
+            if (!newHandle.isNull())
+                engine_.dspHandleRuntime_.activate(newHandle);
+        }
 
         // 2. Crossfade または Retire
-        if (decision.needsCrossfade && oldDSP != nullptr) {
+        // ★ D132(5): oldDSP == newDSP（同一 DSP 再 publish）は retire/crossfade 対象外。
+        if (decision.needsCrossfade && oldDSP != nullptr && oldDSP != newDSP) {
             // ★ BUG-054: oldHandle は呼び出し側（enqueue 時に resolve 済みの真の old DSP handle）を
             //   使用する。getActiveRuntimeDSPHandle() は commitRuntimePublication の activate 後に
             //   呼ばれるため NEW DSP の handle を返し、old==new の同一 crossfade を登録していた。
@@ -49517,8 +49784,13 @@ public:
                 (newDSP != nullptr) ? newDSP->sampleRate
                     : convo::consumeAtomic(engine_.currentSampleRate, std::memory_order_acquire));
             engine_.crossfadeRuntime_.start(decision.fadeTimeSec, rampSampleRate);
-            engine_.setIRChangeFlag();
-        } else if (oldDSP != nullptr) {
+            // ★ D132 (M5): DSPTransition crossfade completion での setIRChangeFlag() 撤去。
+            //   rebuild 起因の crossfade は IR 変更を意味しない（新 DSP は既存 IR を transfer）ため、
+            //   UIEvents.cpp:177 / Timer.cpp:800 以外の caller は責務過剰（D124 確定）。
+            //   D131-G5 結論: :123 のみが rebuild loop 入口であり、本撤去で
+            //   Accepted → publish → crossfade → DeferredFadingActive の
+            //   self-loop を遮断する。
+        } else if (oldDSP != nullptr && oldDSP != newDSP) {
             // Crossfade 不要: 即時 retire
             engine_.crossfadeRuntime_.complete();
             lifetime.retire(oldDSP);
@@ -65897,6 +66169,59 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         }
     }
 
+    // ★ D132 (INV-DEFERRED-2): overwrite 時の旧 DSPCore retire。
+    if (deferredSlot_.has_value()) {
+        const auto oldHandle = deferredSlot_->request.newDSP;
+        if (!oldHandle.isNull()) {
+            auto* oldDSP = engine_.resolveDSPHandle(oldHandle);
+            if (oldDSP != nullptr)
+                engine_.retireDSPHandleForRuntime(oldDSP);
+        }
+    }
+
+    // ★ D135-1 / F6: obligation accounting — identity = (generation, recoveryObligationId).
+    //   DeferredFadingActive の再 enqueue は「retention（保持）」であり retry ではない →
+    //   deferredRetryCount_ を増加させない。新 obligation（key 相違）のみ createdAt を now で
+    //   初期化し、re-drive は createdAt を維持する（→ TTL は obligation dwell を測る）。
+    {
+        const bool sameObligation = (req.generation == deferredRetryGeneration_
+                                     && req.recoveryObligationId == deferredRetryObligationId_);
+        if (!sameObligation) {
+            deferredRetryGeneration_ = req.generation;
+            deferredRetryObligationId_ = req.recoveryObligationId;
+            deferredRetryCount_ = 0;
+            deferredObligationCreatedAtUs = now;
+        }
+        // retention (sameObligation): count / createdAt とも不変（re-drive は新 obligation ではない）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        {
+            const int curGen = convo::consumeAtomic(engine_.rebuildRequestGeneration, std::memory_order_acquire);
+            juce::Logger::writeToLog(juce::String("[D135] re-defer")
+                + (sameObligation ? " (retain)" : " (new)")
+                + " gen=" + juce::String(req.generation)
+                + " oblId=" + juce::String(static_cast<juce::int64>(req.recoveryObligationId))
+                + " currentGen=" + juce::String(curGen)
+                + " retryCount=" + juce::String(deferredRetryCount_));
+        }
+#endif
+        // ★ F6-6: dormant guard — 現行 production に Type-A retry 経路は無く、retention は count を
+        //   増やさないため deferredRetryCount_ は常に 0（この分岐は発火しない）。将来の Type-A 用に保持。
+        if (deferredRetryCount_ > kMaxDeferredRetries) {
+            if (!req.newDSP.isNull()) {
+                if (auto* dsp = engine_.resolveDSPHandle(req.newDSP); dsp != nullptr)
+                    engine_.retireDSPHandleForRuntime(dsp);
+            }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String("[HEALTH] Deferred publish starved")
+                + " gen=" + juce::String(req.generation)
+                + " sequence=" + juce::String(static_cast<juce::int64>(engine_.getLastCommittedPublicationSequence()))
+                + " retryCount=" + juce::String(deferredRetryCount_)
+                + " reason=RetryExhaustedDiscard");
+#endif
+            return;
+        }
+    }
+
     deferredSlot_ = DeferredPublishSlot{
         .request = req,
         .guard = DeferredGuard{
@@ -65905,13 +66230,17 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
             .sequence = engine_.getLastCommittedPublicationSequence()
         },
         // ★ Phase-1: enqueue-time immutable snapshot（View.metadata() の参照先）。
-        //   guard{generation,sequence} + enqueueTimestampUs から構築。design-D4 A-3/D-13.6 反映。
+        //   ★ F6-3: metadata.enqueueTimestampUs の意味は「今回 enqueue 時刻」ではなく
+        //   「現在の obligation が生成された時刻」（deferredObligationCreatedAtUs）。re-drive では
+        //   維持されるため evaluateDeferred の TTL は obligation dwell を測る（F3 の失効バグ修正）。
+        //   名前は本パッチでは変更しない（F4-10 別パッチ #8 扱い）。
         .metadata = PublicationAdmission::DeferredPublishMetadata{
             .generation = req.generation,
             .sequence = engine_.getLastCommittedPublicationSequence(),
-            .enqueueTimestampUs = now
+            .enqueueTimestampUs = deferredObligationCreatedAtUs
         },
         .lastDiscardReason = DiscardReason::None,
+        // ★ slot 側 timestamp は「今回の enqueue 時刻」の意味のまま（overwrite age 専用、F5-4）。
         .enqueueTimestampUs = now
     };
     convo::publishAtomic(hasDeferred_, true, std::memory_order_release);
@@ -65939,6 +66268,10 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
     }
 
+    // ★ D135-1 / F6-7: shutdown による deferred 消去 — obligation metadata も無効化
+    invalidateDeferredObligation();
+    convo::publishAtomic(lastRecoveryPublishSeq_, PublicationSequenceId{0}, std::memory_order_release);
+
     // ★ v19: DeferredHealth 記録
     DeferredHealth dh;
     dh.deferredCount = 0;
@@ -65946,6 +66279,44 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
     dh.lastDiscardReason = DiscardReason::ShutdownDiscard;
     dh.lastDiscardTimestampUs = nowUs;
     telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ D135-8 Step 9 (Option C): deferred-clear wake-provenance latch.
+//   requestDeferredClear() is invoked from non-RebuildThread callers (the 3
+//   AudioEngine.Timer.cpp health-recovery sites C2/C3/C4). If the RebuildThread is
+//   already stopping (rebuildThreadShouldExit), the C1 synchronous fallback clears
+//   inline — mirroring EmergencyDrain (ReleaseResources.cpp). Otherwise the clear
+//   intent is latched (release-store) + the RebuildThread woken; the actual clear
+//   always runs on the RebuildThread via drainDeferredClearIfRequested().
+void RuntimePublicationOrchestrator::requestDeferredClear() noexcept
+{
+    // C1: RebuildThread is stopping/stopped (post join). No concurrent RebuildThread
+    //     writer can touch the plain deferred members → clear synchronously.
+    if (convo::consumeAtomic(engine_.rebuildThreadShouldExit, std::memory_order_acquire))
+    {
+        clearDeferredForShutdown();
+        return;
+    }
+    // Live runtime: latch intent (release-store) + wake RebuildThread.
+    // deferredClearRequested_ is NOT in the rebuildCV predicate; it is persistent
+    // and consumed on the next wake → no lost clear.
+    convo::publishAtomic(deferredClearRequested_, true, std::memory_order_release);
+    engine_.rebuildCV.notify_one();
+}
+
+// ★ D135-8 Step 9 (Option C): RebuildThread-only consumer.
+//   Mirrors resetDeferredRetryBudget()'s ownership idiom (h:171-175): assert
+//   RebuildThread ownership here. clearDeferredForShutdown() stays the assert-free
+//   synchronous primitive (EmergencyDrain + C1 fallback call it from non-RebuildThread).
+bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    if (convo::exchangeAtomic(deferredClearRequested_, false, std::memory_order_acq_rel))
+    {
+        clearDeferredForShutdown();
+        return true;
+    }
+    return false;
 }
 
 // ★ Phase-1: peekDeferred — consumeDeferredRequest の後継（View 借用）。hasDeferred_ 非反転。
@@ -65988,12 +66359,28 @@ void RuntimePublicationOrchestrator::finishView() noexcept
     deferredSlot_.reset();
     convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
 
+    // ★ F6-7: terminal discard（StaleDiscard / Expired / ShutdownDiscard-via-discard）では
+    //   obligation metadata を無効化。consume（reason==None、re-drive）では維持する
+    //   （後続の enqueueDeferred が key 一致で retention と判定するため）。
+    if (reason != DiscardReason::None)
+        invalidateDeferredObligation();
+
     DeferredHealth dh;
     dh.deferredCount = 0;
     dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
     dh.lastDiscardReason = reason;
     dh.lastDiscardTimestampUs = discardTs;
     telemetryRecorder_.recordDeferredHealth(dh);
+}
+
+// ★ F6-7: obligation metadata 無効化（terminal 専用）。identity key・createdAt・count を
+//   初期値へ戻す。rebuild-thread 専用（single-owner）。
+void RuntimePublicationOrchestrator::invalidateDeferredObligation() noexcept
+{
+    deferredRetryGeneration_ = 0;
+    deferredRetryObligationId_ = 0;
+    deferredRetryCount_ = 0;
+    deferredObligationCreatedAtUs = 0;
 }
 
 // ★ Phase-1: DeferredPublishView 実装（out-of-line。Orchestrator 定義完結後 = .cpp 内）。
@@ -66022,9 +66409,23 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
 //   resubmit；必要なら再 enqueue（hasDeferred_=true）される。
 //   （旧: RebuildDispatch.cpp:846 'consumeDeferredRequest → submitPublishRequest'。
 //    AudioEngine.h:2528-2529 の consumeDeferredRequest → processDeferredAdmission 一本化済み）
-void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
+void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWake) noexcept
 {
     jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // ★ D135-8 Step 7 (P3): recovery-wake provenance gate (D135-5 blind-bool blocker resolved by
+    //   Step 6). wasRecoveryWake is true iff THIS admission was provoked by the crossfade-timeout
+    //   recovery path (recoveryRetryReady stamped release-store at AudioEngine.Timer.cpp:1748 under
+    //   rebuildMutex, consumed read-and-clear via exchangeAtomic at AudioEngine.RebuildDispatch.cpp:888).
+    //   Recovery commits a fresh zero-fading world, so the deferred obligation that follows is
+    //   treated as a NEW dwell: resetDeferredRetryBudget clears identity key + count + createdAt.
+    //   ★ F6: ordinary wakes (wasRecoveryWake == false) do NOT increment the retry budget —
+    //   DeferredFadingActive re-drive is retention (see enqueueDeferred accounting ~:470).
+    //   Placed at START, before peekDeferred(), per D135-7 preflight: the reset must precede any peek
+    //   so the identity/createdAt baseline is fresh when the accounting at ~:470 compares
+    //   (req.generation, req.recoveryObligationId) against the stored key.
+    //   (lastRecoveryPublishSeq_ is a separate correlation stamp via setRecoveryPublishSeq.)
+    if (wasRecoveryWake)
+        resetDeferredRetryBudget();
     if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire))
         return;
 
@@ -66049,6 +66450,12 @@ void RuntimePublicationOrchestrator::processDeferredAdmission() noexcept
             break;
         }
     }
+
+    // ★ F6-7: Ready→submitPublishRequest 後に obligation が再 Deferred でなければ
+    //   （Accepted / Rejected* 終端）metadata を無効化。再 Deferred（retention）なら
+    //   enqueueDeferred が key/createdAt を維持済みなので触れない。
+    if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire))
+        invalidateDeferredObligation();
 }
 
 // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
@@ -66257,6 +66664,27 @@ public:
 
     // hasDeferredRequest: 保留中 publish 要求確認 (DrainAudit / RuntimeHealth / Stall 用)。
     [[nodiscard]] bool hasDeferredRequest() const noexcept { return convo::consumeAtomic(hasDeferred_, std::memory_order_acquire); }
+    // ★ D135-1: test 用 — retry 世代/カウント取得 (hasDeferred と併せて観測)
+    [[nodiscard]] int getRetryGeneration() const noexcept { return deferredRetryGeneration_; }
+    [[nodiscard]] uint8_t getRetryCount() const noexcept { return deferredRetryCount_; }
+
+    // ★ D135-1: crossfade-timeout recovery 発行 world の seq を記録/取得。
+    void setRecoveryPublishSeq(PublicationSequenceId seq) noexcept {
+        convo::publishAtomic(lastRecoveryPublishSeq_, seq, std::memory_order_release);
+    }
+    [[nodiscard]] PublicationSequenceId recoveryPublishSeq() const noexcept {
+        return convo::consumeAtomic(lastRecoveryPublishSeq_, std::memory_order_acquire);
+    }
+    // ★ D135-1 / F6: recovery が zero-fading world を commit した時点で obligation metadata をリセット。
+    //   identity key・count・createdAt を初期化し、recovery 後の再駆動を新 dwell として扱う。
+    //   （F6: retention は count を増やさないため count は実質常に 0。recovery provenance は維持。）
+    void resetDeferredRetryBudget() noexcept {
+        jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+        deferredRetryGeneration_ = 0;
+        deferredRetryObligationId_ = 0;
+        deferredRetryCount_ = 0;
+        deferredObligationCreatedAtUs = 0;
+    }
 
     // ★ Phase-1: peekDeferred — consumeDeferredRequest の後継 (View 経由のみ)（design-D4 D-13 ①）。
     //   hasDeferred_ は反転しない（peek only）。実際の ownership release は
@@ -66274,10 +66702,19 @@ public:
     //   releaseSlot → (Ready なら submitPublishRequest；再 Deferred は submitPublishRequest
     //   が自動 enqueue)。AudioEngine.h:2528-2529 の
     //   'consumeDeferredRequest → submitPublishRequest' を一本化。
-    void processDeferredAdmission() noexcept;
+    // ★ D135-8 Step 7 (P3): wake-provenance discriminator wired end-to-end (P1 blocked → resolved).
+    void processDeferredAdmission(bool wasRecoveryWake) noexcept;
 
     // ★ C-2.2: shutdown 時に deferred publish を強制消去
     void clearDeferredForShutdown() noexcept;
+
+    // ★ D135-8 Step 9 (Option C): deferred-clear wake-provenance latch.
+    //   requestDeferredClear() is the sole Writer (non-RebuildThread, Timer.cpp);
+    //   drainDeferredClearIfRequested() is the sole Reader (RebuildThread only).
+    //   deferredClearRequested_ is PREDICATE-INELIGIBLE: persistent latch consumed
+    //   on every wake, so a lost notify_one cannot starve the clear.
+    void requestDeferredClear() noexcept;
+    bool drainDeferredClearIfRequested() noexcept;
 
     // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
     [[nodiscard]] uint64_t getMaxDeferredAgeMs() const noexcept;
@@ -66354,7 +66791,35 @@ private:
     std::atomic<uint64_t> deferredOverwriteCount_{0};
     std::atomic<uint64_t> maxDeferredAgeMs_{0};
 
+    // ★ D135-1 / F6: Deferred obligation accounting — rebuild-thread single-owner。
+    //   obligation identity = (generation, recoveryObligationId)。generation 単独ではない
+    //   （recovery は同一 generation を再利用して別 payload を発行する — RebuildDispatch:1035-1036）。
+    //   enqueueDeferred は deferredSlot_ を構造体ごと置換するため counter/createdAt は Orchestrator
+    //   メンバに保持する（slot 内ではない — consume→finishView で slot は消えるため、re-drive 時に
+    //   旧 slot から timestamp は読めない）。rebuild-thread 専用（同一スレッド）で rebuildMutex 不要。
+    //   ★ F6 契約: DeferredFadingActive の再駆動は「retention（保持）」であり retry ではない。
+    //   同一 (G,O) の re-drive では deferredRetryCount_ を増加させない → RetryExhaustedDiscard は
+    //   retention に対して発生しない。kMaxDeferredRetries は将来の真の Type-A retry 経路用の
+    //   dormant guard として保持（削除しない）。判定は現行実装 `>` を正とする（F5-9/F6-6）。
+    int deferredRetryGeneration_{0};                 // 現在の obligation identity: generation
+    std::uint64_t deferredRetryObligationId_{0};     // 現在の obligation identity: recoveryObligationId（0=通常）
+    uint8_t deferredRetryCount_{0};                  // Type-A retry 回数（retention では不増加 → 現行 0 固定）
+    std::uint64_t deferredObligationCreatedAtUs{0};  // obligation 生成時刻（TTL source-of-truth、re-drive で維持）
+    static constexpr uint8_t kMaxDeferredRetries = 2;   // F6: retention に適用しない（dormant guard）
+    // ★ D135-1: crossfade-timeout recovery が発行した idle world の seq。
+    std::atomic<PublicationSequenceId> lastRecoveryPublishSeq_{0};
+    // ★ D135-8 Step 9 (Option C): clear-provenance latch. std::atomic because
+    //   requestDeferredClear() (Timer.cpp, non-RebuildThread) writes and
+    //   drainDeferredClearIfRequested() (RebuildThread) reads. Predicate-ineligible;
+    //   persistent, drained on every wake (no lost clear).
+    std::atomic<bool> deferredClearRequested_{false};
+
     void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
+
+    // ★ F6-7: obligation metadata（identity key + createdAt + count）を無効化する。
+    //   terminal（Accepted / StaleDiscard / Expired / ShutdownDiscard）で呼ぶ。
+    //   re-drive（retention）では呼ばない（enqueueDeferred が key 一致で維持するため）。
+    void invalidateDeferredObligation() noexcept;
 
     // ★ Phase-1 private helpers (Single Thread Owner / RebuildThread 前提)
     [[nodiscard]] PublicationAdmission::DeferredAdmissionSnapshot buildDeferredAdmissionSnapshot() const noexcept;
@@ -66408,7 +66873,14 @@ enum class DiscardReason : uint8_t {
     ShutdownDiscard,
     StaleDiscard,
     SupersededDiscard,
-    Expired   // ★ work37: TTL 超過
+    Expired,   // ★ work37: TTL 超過
+    // ★ D135-1 / F6: RetryExhaustedDiscard — 同一 obligation の **Type-A retry**（publish 再試行）が
+    //   retry-cap (kMaxDeferredRetries=2, 判定は `deferredRetryCount_ > kMax` を正) に達した場合の終端。
+    //   ★ F6 契約: DeferredFadingActive の再駆動は「retention（保持）」であり retry ではないため
+    //   deferredRetryCount_ を増加させない → 現行 production には Type-A 経路が存在せず、この終端は
+    //   dormant（到達不能）。retention の bound は watchdog 間隔 + obligation createdAt 起点の TTL(30s)
+    //   が担う。identity は (generation, recoveryObligationId)。StaleDiscard とは異なり payload は fresh。
+    RetryExhaustedDiscard
 };
 
 // ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。
@@ -67016,6 +67488,15 @@ struct PublishExecutor {
             p.decision.newHasIR,
             p.decision.fadeTimeSec
         };
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ D127-NOGO diagnostic: tail 到達と oldDSP 配送の観測（observation-only）
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[D127_TAIL] seq=%llu oldHandleNull=%d oldResolvedValid=%d needsCrossfade=%d",
+            (unsigned long long) intent.sequenceId,
+            p.decision.oldHandle.isNull() ? 1 : 0,
+            oldResolved.valid ? 1 : 0,
+            decision.needsCrossfade ? 1 : 0));
+#endif
         ctx.transition.onPublishCompleted(
             newResolved.valid ? static_cast<AudioEngine::DSPCore*>(newResolved.instance) : nullptr,
             oldResolved.valid ? static_cast<AudioEngine::DSPCore*>(oldResolved.instance) : nullptr,
@@ -100688,7 +101169,7 @@ bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
     {
         if (pred())
             return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return pred();
 }

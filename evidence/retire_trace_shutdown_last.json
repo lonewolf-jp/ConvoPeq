@@ -3,31 +3,19 @@
   "totalSlots": 256,
   "slots": [
     { "slot": 1, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 3, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 4, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 5, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 6, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 7, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 8, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 9, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 10, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 11, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 12, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 13, "lane": "reclaim", "lifecycle": "reclaimed" },
-    { "slot": 14, "lane": "reclaim", "lifecycle": "reclaimed" }
+    { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" }
   ],
   "counts": {
-    "laneRTIntent": 14,
-    "laneCoordination": 14,
-    "laneEpoch": 14,
-    "laneReclaim": 14,
-    "laneQuarantine": 10,
+    "laneRTIntent": 2,
+    "laneCoordination": 2,
+    "laneEpoch": 2,
+    "laneReclaim": 2,
+    "laneQuarantine": 0,
     "lifecycleVisible": 0,
-    "lifecycleCompareEligible": 14,
-    "lifecycleTelemetryRetained": 14,
-    "lifecycleReplayRetainedOptional": 10,
-    "lifecycleReclaimEligible": 14,
-    "lifecycleReclaimed": 14
+    "lifecycleCompareEligible": 2,
+    "lifecycleTelemetryRetained": 2,
+    "lifecycleReplayRetainedOptional": 0,
+    "lifecycleReclaimEligible": 2,
+    "lifecycleReclaimed": 2
   }
 }

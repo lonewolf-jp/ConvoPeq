@@ -174,7 +174,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         if (needsStructuralRebuild && srForRebuild > 0.0)
         {
             ++pendingIRGeneration;
-            setIRChangeFlag();
+            setIRChangeFlag("UI");
 
             const LearningCommand cmd {
                 LearningCommand::Type::IRChanged,

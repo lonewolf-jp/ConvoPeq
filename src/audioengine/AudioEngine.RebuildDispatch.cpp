@@ -660,7 +660,15 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                                             generation,
                                             structuralHash,
                                             uiConvolverProcessor.isIRLoaded(),
-                                            uiConvolverProcessor.isIRFinalized())));
+                                             uiConvolverProcessor.isIRFinalized())));
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                diagLog("[D133] queue snapshot gen=" + juce::String(generation)
+                    + " irLoaded=" + juce::String(static_cast<int>(task.runtimeBuildSnapshot.irLoaded))
+                    + " irFinalized=" + juce::String(static_cast<int>(task.runtimeBuildSnapshot.irFinalized))
+                    + " sealed=" + juce::String(static_cast<int>(task.runtimeBuildSnapshot.sealed)));
+            }
+#endif
             // ★ v14.0: BuildAnalysis を生成（Worker Thread で解析）
             // ★ v14.38: OversamplingPolicy::resolve() を使用して processingRate を解決
             {
@@ -832,6 +840,12 @@ void AudioEngine::rebuildThreadLoop()
         {
             RebuildTask task;
             bool doDeferredPublish = false;  // ★ CoordinatorLoop からの deferred publish ハンドオフ
+            bool wokeByPendingTask = false;  // ★ D132 (M3-A): wakeup 要因（mutex 保護下で確定）
+            // ★ D135-8 Step 6 (P2): recovery-wake provenance. Declared in the outer loop scope so
+            //   it survives the lock release (scope closes at the '}' below) and reaches the
+            //   processDeferredAdmission call. Assigned once under lock (exchange), read once
+            //   after unlock — effective const-ness. PROVENANCE-ONLY: not part of rebuildCV predicate.
+            bool wasRecoveryWake = false;
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
                 // ★ ISR Builder/Coordinator 分離: CoordinatorLoop が publishRetryReady を立てた時に
@@ -853,16 +867,43 @@ void AudioEngine::rebuildThreadLoop()
                     break;
                 }
 
-                // Copy task and clear pendingTask pointers to transfer ownership
-                task = pendingTask;
-                pendingTask.currentDSP = nullptr;
+                // ★ D132 (M3-A): wake reason を mutex 保護下で確定してから所有権 transfer。
+                wokeByPendingTask = hasPendingTask;
 
-                hasPendingTask = false;
+                if (wokeByPendingTask)
+                {
+                    // Copy task and clear pendingTask pointers to transfer ownership
+                    task = pendingTask;
+                    pendingTask.currentDSP = nullptr;
+                    hasPendingTask = false;
+                }
+                // ★ M3-C: !wokeByPendingTask の場合 pendingTask は未変更 — stale task の
+                //   currentDSP ownership を失わない（build も行わない、下記 guard で continue）。
+
                 // ★ deferred publish ハンドオフを消費（ビジーループ防止のため先にクリア）
+                // ★ D135-8 Step 6 (P2): consume recovery-wake provenance BEFORE publishRetryReady.
+                //   recoveryRetryReady is provenance-only (not in rebuildCV predicate); exchange
+                //   read-and-clear returns the value the recovery handler stamped (true) iff THIS
+                //   wake was provoked by the crossfade-timeout recovery path.
+                wasRecoveryWake = convo::exchangeAtomic(recoveryRetryReady, false, std::memory_order_acq_rel);
                 doDeferredPublish = publishRetryReady;
                 publishRetryReady = false;
                 convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(0), std::memory_order_release);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                // ★ D129-3B/D132: TASK_WAKE（M3 適用版 — wake reason と task transfer を正確に記録）
+                diagLog(juce::String::formatted(
+                    "[D129_TASK_WAKE] wokeByPendingTask=%d wokeByRetryReady=%d taskTransferred=%d taskGen=%d sealed=%d",
+                    wokeByPendingTask ? 1 : 0, doDeferredPublish ? 1 : 0,
+                    wokeByPendingTask ? 1 : 0,
+                    task.generation, task.runtimeBuildSnapshot.sealed ? 1 : 0));
+#endif
             }
+
+            // ★ D135-8 Step 9 (Option C): drain a deferred-clear latch that
+            //   requestDeferredClear() may have set while this loop was busy.
+            //   Predicate-ineligible persistent latch; consumed on every wake → no lost clear.
+            if (runtimeOrchestrator_ != nullptr)
+                runtimeOrchestrator_->drainDeferredClearIfRequested();
 
             // ★ ISR Builder/Coordinator 分離: CoordinatorLoop からの deferred publish ハンドオフ。
             //   Builder（RebuildThread）が consume → submit（同期）を実行する。
@@ -876,7 +917,7 @@ void AudioEngine::rebuildThreadLoop()
                 //   processDeferredAdmission() へ一本化（peek → evaluateDeferred →
                 //   consume/discard → finishView → submitPublishRequest）。
                 //   submitPublishRequest は必要なら再 enqueue（hasDeferred_=true）。
-                runtimeOrchestrator_->processDeferredAdmission();
+                runtimeOrchestrator_->processDeferredAdmission(wasRecoveryWake);
             }
 
             struct DSPGuard
@@ -1082,6 +1123,15 @@ void AudioEngine::rebuildThreadLoop()
                     recoveryConsecutiveFailures = 0;   // ★ 監査軽微指摘4: 成功で連続失敗カウンタをリセット
                 }
             }
+
+            // ★ D132 (M3): stale task re-build prevention。
+            //   publishRetryReady のみで起床した場合（pendingTask 未 transfer）、task は
+            //   前回の stale copy であり、isRebuildObsolete は等号を obsolete と見なさないため
+            //   同一世代の再 build が無限に発生する（D123 storm 実測: gen 9 = 73 回）。
+            //   deferred publish ハンドオフと recovery は上記で処理済みのため、ここで
+            //   build を skip して次の wakeup を待つ（INV-REBUILD-WAKE-1）。
+            if (!wokeByPendingTask)
+                continue;
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {

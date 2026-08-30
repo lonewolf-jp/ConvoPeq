@@ -1,0 +1,86 @@
+GATF1_CONFIGURE_START src=C:\VSC_Project\ConvoPeq bld=C:\VSC_Project\ConvoPeq\build-diag cfg=Release 
+-- clang-tidy build-time integration disabled.
+-- MKL_VERSION: 2026.1.0
+-- MKL_ROOT: C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1
+-- MKL_ARCH: intel64
+-- MKL_LINK: static
+-- MKL_INTERFACE_FULL: intel_lp64
+-- MKL_THREADING: sequential
+-- MKL_MPI: intelmpi
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_scalapack_lp64.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_cdft_core.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_intel_lp64.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_sequential.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_core.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_blacs_intelmpi_lp64.lib
+-- MKL: found via CMake Config, will link MKL::MKL (CONVOPEQ_REQUIRE_MKL=ON)
+-- Intel IPP found.
+-- Configuring juceaide
+-- Building juceaide
+-- Exporting juceaide
+-- Testing juceaide
+-- Finished setting up juceaide
+-- JUCE_DSP_USE_INTEL_MKL=1 ‚Üí MKL allocator (mkl_malloc/mkl_free)
+-- Intel IPP found.
+-- [PGO] Normal Release build with LTCG
+-- Configuring done (1.2s)
+-- Generating done (0.8s)
+-- Build files have been written to: C:/VSC_Project/ConvoPeq/build-diag
+GATF1_BUILD_START 
+[0/2] Re-checking globbed directories...
+[1/51] Linking CXX executable MTNUPCMeasurement_artefacts\Release\MTNUPCMeasurement.exe
+[2/51] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\tests\RuntimeHealthMonitorTierTests.cpp.obj
+[3/51] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\audioengine\RuntimeHealthMonitor.cpp.obj
+[4/51] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\audioengine\RuntimePublicationOrchestrator.cpp.obj
+C:\VSC_Project\ConvoPeq\src\audioengine\ISRRuntimePublicationCoordinator.h(314): warning C4324: 'convo::isr::RuntimeIntentCoordinator::LogicalRecoveryObligation': ÉAÉâÉCÉìÉÅÉìÉgéwíËéqÇÃÇΩÇﬂÇ…ç\ë¢ëÃÇ™ÉpÉbÉhÇ≥ÇÍÇ‹ÇµÇΩ
+C:\VSC_Project\ConvoPeq\src\FFTBackend.h(195): warning C4505: 'convo::assertWorkBufferAlignment': ì‡ïîÉäÉìÉPÅ[ÉWä‹ÇﬁéQè∆Ç≥ÇÍÇƒÇ¢Ç»Ç¢ä÷êîÇ™çÌèúÇ≥ÇÍÇ‹ÇµÇΩ
+[5/51] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\audioengine\AudioEngine.RebuildDispatch.cpp.obj
+C:\VSC_Project\ConvoPeq\src\audioengine\ISRRuntimePublicationCoordinator.h(314): warning C4324: 'convo::isr::RuntimeIntentCoordinator::LogicalRecoveryObligation': ÉAÉâÉCÉìÉÅÉìÉgéwíËéqÇÃÇΩÇﬂÇ…ç\ë¢ëÃÇ™ÉpÉbÉhÇ≥ÇÍÇ‹ÇµÇΩ
+C:\VSC_Project\ConvoPeq\src\FFTBackend.h(195): warning C4505: 'convo::assertWorkBufferAlignment': ì‡ïîÉäÉìÉPÅ[ÉWä‹ÇﬁéQè∆Ç≥ÇÍÇƒÇ¢Ç»Ç¢ä÷êîÇ™çÌèúÇ≥ÇÍÇ‹ÇµÇΩ
+[6/51] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\audioengine\AudioEngine.Timer.cpp.obj
+C:\VSC_Project\ConvoPeq\src\audioengine\ISRRuntimePublicationCoordinator.h(314): warning C4324: 'convo::isr::RuntimeIntentCoordinator::LogicalRecoveryObligation': ÉAÉâÉCÉìÉÅÉìÉgéwíËéqÇÃÇΩÇﬂÇ…ç\ë¢ëÃÇ™ÉpÉbÉhÇ≥ÇÍÇ‹ÇµÇΩ
+C:\VSC_Project\ConvoPeq\src\FFTBackend.h(195): warning C4505: 'convo::assertWorkBufferAlignment': ì‡ïîÉäÉìÉPÅ[ÉWä‹ÇﬁéQè∆Ç≥ÇÍÇƒÇ¢Ç»Ç¢ä÷êîÇ™çÌèúÇ≥ÇÍÇ‹ÇµÇΩ
+[7/51] Building CXX object CMakeFiles\AudioEngineHarness.dir\Release\src\audioengine\RuntimePublicationOrchestrator.cpp.obj
+[8/51] Linking CXX executable Release\RuntimeHealthMonitorTierTests.exe
+[9/51] Building CXX object CMakeFiles\AudioEngineHarness.dir\Release\src\audioengine\AudioEngine.RebuildDispatch.cpp.obj
+[10/51] Building CXX object CMakeFiles\AudioEngineHarness.dir\Release\src\audioengine\AudioEngine.Timer.cpp.obj
+[11/51] Linking CXX executable Release\AudioEngineHarness.exe
+[12/51] Linking CXX executable ConvoPeq_artefacts\Release\ConvoPeq.exe
+[13/51] Building CXX object CMakeFiles\PublicationAdmissionTests.dir\Release\src\tests\PublicationAdmissionTests.cpp.obj
+[14/51] Building CXX object CMakeFiles\ISRSemanticValidationTests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[15/51] Building CXX object CMakeFiles\AdmissionPackedStateTests.dir\Release\src\audioengine\ISRShutdown.cpp.obj
+[16/51] Building CXX object CMakeFiles\D8_2_B_2_Tests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[17/51] Building CXX object CMakeFiles\AdmissionPackedStateTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[18/51] Building CXX object CMakeFiles\invariant_INV3_INV5Tests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[19/51] Building CXX object CMakeFiles\RetireGraceSemanticsTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[20/51] Building CXX object CMakeFiles\invariant_INV3_INV5Tests.dir\Release\src\audioengine\ISRShutdown.cpp.obj
+[21/51] Building CXX object CMakeFiles\AdmissionPackedStateTests.dir\Release\src\tests\AdmissionPackedStateTests.cpp.obj
+[22/51] Building CXX object CMakeFiles\ISRSemanticValidationTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[23/51] Building CXX object CMakeFiles\PublicationAdmissionTests.dir\Release\src\audioengine\PublicationAdmission.cpp.obj
+[24/51] Building CXX object CMakeFiles\AdmissionPackedStateTests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[25/51] Building CXX object CMakeFiles\AdmissionPackedStateTests.dir\Release\src\audioengine\ISRRuntimePublicationCoordinator.cpp.obj
+[26/51] Building CXX object CMakeFiles\invariant_INV3_INV5Tests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[27/51] Building CXX object CMakeFiles\TerminalTelemetryContractTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[28/51] Building CXX object CMakeFiles\ISRSemanticValidationTests.dir\Release\src\tests\ISRSemanticValidationTests.cpp.obj
+[29/51] Building CXX object CMakeFiles\ISRSemanticValidationTests.dir\Release\src\audioengine\ISRRuntimePublicationCoordinator.cpp.obj
+[30/51] Building CXX object CMakeFiles\PublicationAdmissionTests.dir\Release\src\tests\PublicationAdmissionTestRuntimeStubs.cpp.obj
+[31/51] Building CXX object CMakeFiles\invariant_INV3_INV5Tests.dir\Release\src\audioengine\ISRRuntimePublicationCoordinator.cpp.obj
+[32/51] Building CXX object CMakeFiles\ShutdownRetireIntentDrainTests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[33/51] Building CXX object CMakeFiles\StuckReaderFallbackDrainTests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[34/51] Building CXX object CMakeFiles\StuckReaderFallbackDrainTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[35/51] Building CXX object CMakeFiles\ISRSoakTests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[36/51] Building CXX object CMakeFiles\ISRSoakTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+[37/51] Building CXX object CMakeFiles\PriorityIntegrationTests.dir\Release\src\audioengine\ISRRetireRuntimeEx.cpp.obj
+[38/51] Linking CXX executable Release\RetireGraceSemanticsTests.exe
+[39/51] Building CXX object CMakeFiles\ISRSoakTests.dir\Release\src\audioengine\ISRRuntimePublicationCoordinator.cpp.obj
+[40/51] Building CXX object CMakeFiles\ISRSoakTests.dir\Release\src\tests\ISRSoakTests.cpp.obj
+[41/51] Linking CXX executable Release\D8_2_B_2_Tests.exe
+[42/51] Linking CXX executable Release\AdmissionPackedStateTests.exe
+[43/51] Linking CXX executable Release\TerminalTelemetryContractTests.exe
+[44/51] Linking CXX executable Release\ISRSemanticValidationTests.exe
+[45/51] Linking CXX executable Release\invariant_INV3_INV5Tests.exe
+[46/51] Linking CXX executable Release\PublicationAdmissionTests.exe
+[47/51] Linking CXX executable Release\ShutdownRetireIntentDrainTests.exe
+[48/51] Linking CXX executable Release\StuckReaderFallbackDrainTests.exe
+[49/51] Linking CXX executable Release\PriorityIntegrationTests.exe
+[50/51] Linking CXX executable Release\ISRSoakTests.exe

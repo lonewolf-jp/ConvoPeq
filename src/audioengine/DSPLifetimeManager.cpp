@@ -1,6 +1,13 @@
 #include "DSPLifetimeManager.h"
 #include "AudioEngine.h"
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// ★ D117 root-cause audit: observation-only lifetime trace (no semantic change).
+#define D117_LIFETIME_LOG(msg) juce::Logger::writeToLog(msg)
+#else
+#define D117_LIFETIME_LOG(msg) ((void) 0)
+#endif
+
 DSPLifetimeManager::DSPLifetimeManager(AudioEngine& engine) noexcept
     : engine_(engine)
     , router_(engine_.m_retireRouter.get())
@@ -36,6 +43,8 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         return;
 
     const bool retired = engine_.retireDSPHandleForRuntime(static_cast<AudioEngine::DSPCore*>(dsp));
+    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p retired=%d",
+                                              dsp, retired ? 1 : 0));
     if (!retired)
         return;
 
@@ -50,6 +59,11 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         dsp, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p enqueue=%d epoch=%llu",
+                                              dsp, static_cast<int>(result),
+                                              (unsigned long long) epoch));
+#endif
     // ★ BUG-015/027 (work88): enqueue 失敗（QueuePressure/QueueFull）は enqueueWithRetry
     //   内部で RetireQuarantineStore へ移送済み（directDelete しない — RT 参照中の UAF 排除）。
     //   Shutdown はシャットダウン経路が処理。二重移送（double-quarantine → double-free）を
@@ -79,7 +93,18 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
     }
 
     if (toDelete == nullptr)
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        D117_LIFETIME_LOG(juce::String::formatted(
+            "[D117_RETIRE_BY_HANDLE] handle=%llu lookup=MISS (not in runtimeDSPHandleMap_)",
+            (unsigned long long) handle.slot));
+#endif
         return;
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    D117_LIFETIME_LOG(juce::String::formatted(
+        "[D117_RETIRE_BY_HANDLE] dsp=%p lookup=HIT", toDelete));
+#endif
 
     // ★ work88 (Phase 3): retire → epoch 安全確認 → reclaim を一本化。
     //   requestReclaimHandle は epoch 安全なら requestReclaim（retire→waitReaders→reclaim）、
@@ -97,6 +122,11 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
         toDelete, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE_BY_HANDLE] dsp=%p enqueue=%d epoch=%llu",
+                                              toDelete, static_cast<int>(result),
+                                              (unsigned long long) epoch));
+#endif
     // ★ BUG-015/027 (work88): 同上 — enqueueWithRetry 内部で退避ストアへ移送済み。
     //   二重移送を避けるため追加処置なし（directDelete 禁止）。
     juce::ignoreUnused(result);

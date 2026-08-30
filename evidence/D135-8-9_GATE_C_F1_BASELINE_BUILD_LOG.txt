@@ -1,0 +1,80 @@
+GATF1_CONFIGURE_START src=C:\VSC_Project\ConvoPeq-f1baseline bld=C:\VSC_Project\ConvoPeq-f1baseline\build-f1 cfg=Release 
+-- The CXX compiler identification is MSVC 19.51.36256.0
+-- The C compiler identification is MSVC 19.51.36256.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- clang-tidy build-time integration disabled.
+-- MKL_VERSION: 2026.1.0
+-- MKL_ROOT: C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1
+-- MKL_ARCH: intel64
+-- MKL_LINK: static
+-- MKL_INTERFACE_FULL: intel_lp64
+-- MKL_THREADING: sequential
+-- MKL_MPI: None, set to ` intelmpi` by default
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_scalapack_lp64.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_cdft_core.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_intel_lp64.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_sequential.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_core.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/2026.1/lib/mkl_blacs_intelmpi_lp64.lib
+-- MKL: found via CMake Config, will link MKL::MKL (CONVOPEQ_REQUIRE_MKL=ON)
+-- Intel IPP found.
+-- Configuring juceaide
+-- Building juceaide
+-- Exporting juceaide
+-- Testing juceaide
+-- Finished setting up juceaide
+-- JUCE_DSP_USE_INTEL_MKL=1 ‚Üí MKL allocator (mkl_malloc/mkl_free)
+-- Intel IPP found.
+-- [PGO] Normal Release build with LTCG
+-- Configuring done (33.3s)
+-- Generating done (1.0s)
+-- Build files have been written to: C:/VSC_Project/ConvoPeq-f1baseline/build-f1
+GATF1_BUILD_START 
+[0/2] Re-checking globbed directories...
+[1/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_core\juce_core_CompilationTime.cpp.obj
+[2/555] Building C object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_graphics\juce_graphics_Sheenbidi.c.obj
+[3/555] Building CXX object CMakeFiles\D8_1_WrapperCacheTests.dir\Release\src\tests\D8_1_WrapperCacheTests.cpp.obj
+[4/555] Building CXX object CMakeFiles\ISRRuntimeIdentityTests.dir\Release\src\tests\ISRRuntimeIdentityGeneratorsTests.cpp.obj
+[5/555] Building CXX object CMakeFiles\OwnerChannelTests.dir\Release\src\tests\OwnerChannelTests.cpp.obj
+[6/555] Building CXX object CMakeFiles\RuntimePublicationCoordinatorTests.dir\Release\src\tests\RuntimePublicationCoordinatorTests.cpp.obj
+[7/555] Generating MTNUPCMeasurement_artefacts/JuceLibraryCode/MTNUPCMeasurement_resources.rc
+[8/555] Generating ConvoPeq_artefacts/JuceLibraryCode/ConvoPeq_resources.rc
+[9/555] Building CXX object CMakeFiles\ShadowCompareContractTests.dir\Release\src\tests\ShadowCompareContractTests.cpp.obj
+[10/555] Building RC object CMakeFiles\MTNUPCMeasurement_rc_lib.dir\Release\MTNUPCMeasurement_artefacts\JuceLibraryCode\MTNUPCMeasurement_resources.rc.res
+[11/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj
+FAILED: [code=2] CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj 
+"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo /TP -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_MODULE_AVAILABLE_juce_graphics=1 -DJUCE_MODULE_AVAILABLE_juce_gui_basics=1 -DJUCE_MODULE_AVAILABLE_juce_gui_extra=1 -DNDEBUG=1 -DNOMINMAX -DR8B_EXTFILTERS=0 -DR8B_FASTTIMING=1 -DWIN32_LEAN_AND_MEAN -D_NDEBUG=1 -DCMAKE_INTDIR=\"Release\" -IC:\VSC_Project\ConvoPeq-f1baseline -IC:\VSC_Project\ConvoPeq-f1baseline\src -IC:\VSC_Project\ConvoPeq-f1baseline\src\audioengine -IC:\VSC_Project\ConvoPeq-f1baseline\src\core -IC:\VSC_Project\ConvoPeq-f1baseline\src\eqprocessor -IC:\VSC_Project\ConvoPeq-f1baseline\build-f1\ConvoPeq_artefacts\JuceLibraryCode -IC:\VSC_Project\ConvoPeq-f1baseline\JUCE\modules -external:IC:\VSC_Project\ConvoPeq-f1baseline\r8brain-free-src -external:W0 /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj /showIncludes /FoCMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\audioengine\ISRRetireRouter.cpp.obj /FdCMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\ /FS -c C:\VSC_Project\ConvoPeq-f1baseline\src\audioengine\ISRRetireRouter.cpp
+C:\VSC_Project\ConvoPeq-f1baseline\src\audioengine\../DspNumericPolicy.h(11): fatal error C1083: include ÉtÉ@ÉCÉãÇäJÇØÇ‹ÇπÇÒÅB'JuceHeader.h':No such file or directory
+[12/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\audioengine\RuntimeHealthMonitor.cpp.obj
+FAILED: [code=2] CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/src/audioengine/RuntimeHealthMonitor.cpp.obj 
+"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo /TP -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_MODULE_AVAILABLE_juce_graphics=1 -DJUCE_MODULE_AVAILABLE_juce_gui_basics=1 -DJUCE_MODULE_AVAILABLE_juce_gui_extra=1 -DNDEBUG=1 -DNOMINMAX -DR8B_EXTFILTERS=0 -DR8B_FASTTIMING=1 -DWIN32_LEAN_AND_MEAN -D_NDEBUG=1 -DCMAKE_INTDIR=\"Release\" -IC:\VSC_Project\ConvoPeq-f1baseline -IC:\VSC_Project\ConvoPeq-f1baseline\src -IC:\VSC_Project\ConvoPeq-f1baseline\src\audioengine -IC:\VSC_Project\ConvoPeq-f1baseline\src\core -IC:\VSC_Project\ConvoPeq-f1baseline\src\eqprocessor -IC:\VSC_Project\ConvoPeq-f1baseline\build-f1\ConvoPeq_artefacts\JuceLibraryCode -IC:\VSC_Project\ConvoPeq-f1baseline\JUCE\modules -external:IC:\VSC_Project\ConvoPeq-f1baseline\r8brain-free-src -external:W0 /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj /showIncludes /FoCMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\audioengine\RuntimeHealthMonitor.cpp.obj /FdCMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\ /FS -c C:\VSC_Project\ConvoPeq-f1baseline\src\audioengine\RuntimeHealthMonitor.cpp
+C:\VSC_Project\ConvoPeq-f1baseline\src\audioengine\AudioEngine.h(41): fatal error C1083: include ÉtÉ@ÉCÉãÇäJÇØÇ‹ÇπÇÒÅB'JuceHeader.h':No such file or directory
+[13/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\tests\RuntimeHealthMonitorTierTests.cpp.obj
+FAILED: [code=2] CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/src/tests/RuntimeHealthMonitorTierTests.cpp.obj 
+"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo /TP -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_MODULE_AVAILABLE_juce_graphics=1 -DJUCE_MODULE_AVAILABLE_juce_gui_basics=1 -DJUCE_MODULE_AVAILABLE_juce_gui_extra=1 -DNDEBUG=1 -DNOMINMAX -DR8B_EXTFILTERS=0 -DR8B_FASTTIMING=1 -DWIN32_LEAN_AND_MEAN -D_NDEBUG=1 -DCMAKE_INTDIR=\"Release\" -IC:\VSC_Project\ConvoPeq-f1baseline -IC:\VSC_Project\ConvoPeq-f1baseline\src -IC:\VSC_Project\ConvoPeq-f1baseline\src\audioengine -IC:\VSC_Project\ConvoPeq-f1baseline\src\core -IC:\VSC_Project\ConvoPeq-f1baseline\src\eqprocessor -IC:\VSC_Project\ConvoPeq-f1baseline\build-f1\ConvoPeq_artefacts\JuceLibraryCode -IC:\VSC_Project\ConvoPeq-f1baseline\JUCE\modules -external:IC:\VSC_Project\ConvoPeq-f1baseline\r8brain-free-src -external:W0 /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj /showIncludes /FoCMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\src\tests\RuntimeHealthMonitorTierTests.cpp.obj /FdCMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\ /FS -c C:\VSC_Project\ConvoPeq-f1baseline\src\tests\RuntimeHealthMonitorTierTests.cpp
+C:\VSC_Project\ConvoPeq-f1baseline\src\audioengine\AudioEngine.h(41): fatal error C1083: include ÉtÉ@ÉCÉãÇäJÇØÇ‹ÇπÇÒÅB'JuceHeader.h':No such file or directory
+[14/555] Building RC object CMakeFiles\ConvoPeq_rc_lib.dir\Release\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res
+[15/555] Generating MTNUPCMeasurement_artefacts/JuceLibraryCode/JuceHeader.h
+[16/555] Building CXX object CMakeFiles\NormalRetireDSPHandleCompareTests.dir\Release\src\tests\NormalRetireDSPHandleCompareTests.cpp.obj
+[17/555] Building CXX object CMakeFiles\RuntimeSemanticSchemaValidationTests.dir\Release\src\tests\RuntimeSemanticSchemaValidationTests.cpp.obj
+[18/555] Building CXX object CMakeFiles\NormalRetireDSPHandleCompareTests.dir\Release\src\audioengine\ISRDSPHandle.cpp.obj
+[19/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_data_structures\juce_data_structures.cpp.obj
+[20/555] Building CXX object CMakeFiles\OverlapAuthoritySingularTests.dir\Release\src\tests\OverlapAuthoritySingularTests.cpp.obj
+[21/555] Building CXX object CMakeFiles\ObservePathSingleSourceTests.dir\Release\src\tests\ObservePathSingleSourceTests.cpp.obj
+[22/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_events\juce_events.cpp.obj
+[23/555] Building CXX object CMakeFiles\CrossfadeExecutorLocalContractTests.dir\Release\src\tests\CrossfadeExecutorLocalContractTests.cpp.obj
+[24/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_core\juce_core.cpp.obj
+[25/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_gui_extra\juce_gui_extra.cpp.obj
+[26/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_graphics\juce_graphics.cpp.obj
+[27/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_graphics\juce_graphics_Harfbuzz.cpp.obj
+[28/555] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Release\JUCE\modules\juce_gui_basics\juce_gui_basics.cpp.obj
+ninja: build stopped: subcommand failed.

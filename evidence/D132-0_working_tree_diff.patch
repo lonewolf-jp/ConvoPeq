@@ -1,0 +1,397 @@
+warning: in the working copy of 'src/audioengine/AudioEngine.Threading.cpp', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/audioengine/AudioEngine.h', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/audioengine/DSPLifetimeManager.cpp', CRLF will be replaced by LF the next time Git touches it
+diff --git a/src/MainApplication.cpp b/src/MainApplication.cpp
+index a3a98be..32de950 100644
+--- a/src/MainApplication.cpp
++++ b/src/MainApplication.cpp
+@@ -174,6 +174,9 @@ void MainApplication::initialise(const juce::String& commandLine)
+ void MainApplication::shutdown()
+ {
+     juce::Logger::writeToLog("[DIAG] MainApplication::shutdown() enter");
++    // 笘・D127-E (diagnostic only): SHUTDOWN_BEGIN 窶・teardown phase 險域ｸｬ縺ｮ襍ｷ轤ｹ縲・+    //   production semantics 螟画峩縺ｪ縺暦ｼ医Ο繧ｰ蜃ｺ蜉帙・縺ｿ・峨・+    juce::Logger::writeToLog("[D123] SHUTDOWN_BEGIN");
+     // unique_ptr 縺ｮ繝・せ繝医Λ繧ｯ繧ｿ縺ｧ MainWindow 縺碁哩縺倥ｉ繧後ｋ
+     // MainWindow 繝・せ繝医Λ繧ｯ繧ｿ蜀・〒:
+     //   1) 繧ｪ繝ｼ繝・ぅ繧ｪ繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ蛛懈ｭ｢
+@@ -181,8 +184,13 @@ void MainApplication::shutdown()
+     //   3) AudioEngine 遐ｴ譽・     // 縺ｮ鬆・〒螳牙・縺ｫ繧ｷ繝｣繝・ヨ繝繧ｦ繝ｳ縺輔ｌ繧・     mainWindow.reset();
++    // 笘・D127-E: mainWindow.reset()・・MainWindow/~AudioEngine/teardown 蜈ｨ菴難ｼ峨′螳御ｺ・＠縺・+    //   縺薙→繧呈・遉ｺ縲ゅけ繝ｩ繝・す繝･譎ゅ・縺薙・陦後′蜃ｺ縺ｪ縺・= crash phase 縺・mainWindow.reset() 蜀・→
++    //   迚ｹ螳壹〒縺阪ｋ・・119-BLOCKER-2 險ｺ譁ｭ・峨・+    juce::Logger::writeToLog("[D123] SHUTDOWN: mainWindow.reset() completed");
+ 
+     juce::Logger::writeToLog("MainApplication shutting down.");
++    juce::Logger::writeToLog("[D123] LOGGER_DETACH / SHUTDOWN_END");
+     juce::Logger::setCurrentLogger(nullptr);
+     fileLogger.reset();
+ 
+diff --git a/src/MainWindow.cpp b/src/MainWindow.cpp
+index b20993d..9ed5fd4 100644
+--- a/src/MainWindow.cpp
++++ b/src/MainWindow.cpp
+@@ -1077,7 +1077,10 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
+             {
+                 // 笘・v14.47: Flush log file before exit (P5 fix)
+                 juce::Logger::writeToLog("[CLI] Auto-exit flush: shutting down");
+-                juce::Logger::setCurrentLogger(nullptr);
++                // 笘・D127-E (diagnostic only): 縺薙％縺ｧ縺ｮ logger 蛻・妙縺ｯ teardown 蜈ｨ菴薙ｒ隕ｳ貂ｬ荳崎・縺ｫ
++                //   縺励※縺・◆・・119-BLOCKER-2 險ｺ譁ｭ髫懷ｮｳ・峨ょ・譁ｭ縺ｯ MainApplication::shutdown() 譛ｫ蟆ｾ
++                //   ・・OGGER_DETACH・峨↓遘ｻ隴ｲ縺励》eardown 蜈ｨ遞九ｒ繝輔ぃ繧､繝ｫ縺ｫ險倬鹸縺吶ｋ縲・+                //   production ownership semantics 螟画峩縺ｪ縺暦ｼ医Ο繧ｰ蜃ｺ蜉帙ち繧､繝溘Φ繧ｰ縺ｮ縺ｿ・峨・ 
+                 if (safeThis != nullptr)
+                 {
+diff --git a/src/audioengine/AudioEngine.Processing.AudioBlock.cpp b/src/audioengine/AudioEngine.Processing.AudioBlock.cpp
+index e5e9dec..ea4669f 100644
+--- a/src/audioengine/AudioEngine.Processing.AudioBlock.cpp
++++ b/src/audioengine/AudioEngine.Processing.AudioBlock.cpp
+@@ -380,8 +380,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
+     t1_dspStartUs = convo::getCurrentTimeUs();
+ #endif
+ 
++        // 笘・D132 (M2): ramp 螳御ｺ・お繝・ず讀懷・逕ｨ・・lock 髢句ｧ区凾縺ｮ smoothing 迥ｶ諷具ｼ・+        const bool crossfadeWasSmoothing = crossfadeRuntime_.getGain().isSmoothing();
+         const bool canCrossfade = (fading != nullptr || useDryAsOld)
+-            && crossfadeRuntime_.getGain().isSmoothing()
++            && crossfadeWasSmoothing
+             && dspCrossfadeFloatBuffer.getNumChannels() >= 2
+             && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
+ 
+@@ -456,6 +458,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
+             }
+ 
+             finalizeCrossfadeMixPath(dsp, fading, true);
++
++            // 笘・D132 (M2): RT ramp 螳御ｺ・お繝・ず讀懷・ 窶・remaining 1竊・ 驕ｷ遘ｻ縺ｧ exactly-once 逋ｺ轣ｫ縲・+            //   identity 髱樊声蟶ｯ縺ｮ邏斐す繧ｰ繝翫Ν・・PSC push 縺ｮ縺ｿ繝ｻalloc/lock/blocking 縺ｪ縺暦ｼ峨・+            //   Timer 縺・active crossfade records 繧定ｧ｣豎ｺ縺励※ endCrossfade 竊・retire 縺ｫ騾ｲ繧縲・+            if (crossfadeWasSmoothing && !crossfadeRuntime_.getGain().isSmoothing())
++                crossfadeRuntime_.notifyRampComplete();
+         }
+         else
+         {
+diff --git a/src/audioengine/AudioEngine.RebuildDispatch.cpp b/src/audioengine/AudioEngine.RebuildDispatch.cpp
+index c502b96..2030e04 100644
+--- a/src/audioengine/AudioEngine.RebuildDispatch.cpp
++++ b/src/audioengine/AudioEngine.RebuildDispatch.cpp
+@@ -832,6 +832,7 @@ void AudioEngine::rebuildThreadLoop()
+         {
+             RebuildTask task;
+             bool doDeferredPublish = false;  // 笘・CoordinatorLoop 縺九ｉ縺ｮ deferred publish 繝上Φ繝峨が繝・+            bool wokeByPendingTask = false;  // 笘・D132 (M3-A): wakeup 隕∝屏・・utex 菫晁ｭｷ荳九〒遒ｺ螳夲ｼ・             {
+                 std::unique_lock<std::mutex> lock(rebuildMutex);
+                 // 笘・ISR Builder/Coordinator 蛻・屬: CoordinatorLoop 縺・publishRetryReady 繧堤ｫ九※縺滓凾縺ｫ
+@@ -853,15 +854,31 @@ void AudioEngine::rebuildThreadLoop()
+                     break;
+                 }
+ 
+-                // Copy task and clear pendingTask pointers to transfer ownership
+-                task = pendingTask;
+-                pendingTask.currentDSP = nullptr;
++                // 笘・D132 (M3-A): wake reason 繧・mutex 菫晁ｭｷ荳九〒遒ｺ螳壹＠縺ｦ縺九ｉ謇譛画ｨｩ transfer縲・+                wokeByPendingTask = hasPendingTask;
++
++                if (wokeByPendingTask)
++                {
++                    // Copy task and clear pendingTask pointers to transfer ownership
++                    task = pendingTask;
++                    pendingTask.currentDSP = nullptr;
++                    hasPendingTask = false;
++                }
++                // 笘・M3-C: !wokeByPendingTask 縺ｮ蝣ｴ蜷・pendingTask 縺ｯ譛ｪ螟画峩 窶・stale task 縺ｮ
++                //   currentDSP ownership 繧貞､ｱ繧上↑縺・ｼ・uild 繧り｡後ｏ縺ｪ縺・∽ｸ玖ｨ・guard 縺ｧ continue・峨・ 
+-                hasPendingTask = false;
+                 // 笘・deferred publish 繝上Φ繝峨が繝輔ｒ豸郁ｲｻ・医ン繧ｸ繝ｼ繝ｫ繝ｼ繝鈴亟豁｢縺ｮ縺溘ａ蜈医↓繧ｯ繝ｪ繧｢・・                 doDeferredPublish = publishRetryReady;
+                 publishRetryReady = false;
+                 convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(0), std::memory_order_release);
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++                // 笘・D129-3B/D132: TASK_WAKE・・3 驕ｩ逕ｨ迚・窶・wake reason 縺ｨ task transfer 繧呈ｭ｣遒ｺ縺ｫ險倬鹸・・+                diagLog(juce::String::formatted(
++                    "[D129_TASK_WAKE] wokeByPendingTask=%d wokeByRetryReady=%d taskTransferred=%d taskGen=%d sealed=%d",
++                    wokeByPendingTask ? 1 : 0, doDeferredPublish ? 1 : 0,
++                    wokeByPendingTask ? 1 : 0,
++                    task.generation, task.runtimeBuildSnapshot.sealed ? 1 : 0));
++#endif
+             }
+ 
+             // 笘・ISR Builder/Coordinator 蛻・屬: CoordinatorLoop 縺九ｉ縺ｮ deferred publish 繝上Φ繝峨が繝輔・@@ -1083,6 +1100,15 @@ void AudioEngine::rebuildThreadLoop()
+                 }
+             }
+ 
++            // 笘・D132 (M3): stale task re-build prevention縲・+            //   publishRetryReady 縺ｮ縺ｿ縺ｧ襍ｷ蠎翫＠縺溷ｴ蜷茨ｼ・endingTask 譛ｪ transfer・峨》ask 縺ｯ
++            //   蜑榊屓縺ｮ stale copy 縺ｧ縺ゅｊ縲（sRebuildObsolete 縺ｯ遲牙捷繧・obsolete 縺ｨ隕九↑縺輔↑縺・◆繧・+            //   蜷御ｸ荳紋ｻ｣縺ｮ蜀・build 縺檎┌髯舌↓逋ｺ逕溘☆繧具ｼ・123 storm 螳滓ｸｬ: gen 9 = 73 蝗橸ｼ峨・+            //   deferred publish 繝上Φ繝峨が繝輔→ recovery 縺ｯ荳願ｨ倥〒蜃ｦ逅・ｸ医∩縺ｮ縺溘ａ縲√％縺薙〒
++            //   build 繧・skip 縺励※谺｡縺ｮ wakeup 繧貞ｾ・▽・・NV-REBUILD-WAKE-1・峨・+            if (!wokeByPendingTask)
++                continue;
++
+             // Helper to check obsolescence
+             const auto isObsolete = [&] {
+                 return isRebuildObsolete(task.generation) || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
+diff --git a/src/audioengine/AudioEngine.Snapshot.cpp b/src/audioengine/AudioEngine.Snapshot.cpp
+index 02fc462..667e029 100644
+--- a/src/audioengine/AudioEngine.Snapshot.cpp
++++ b/src/audioengine/AudioEngine.Snapshot.cpp
+@@ -93,6 +93,11 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
+ 
+     int fadeSamples = convo::consumeAtomic(m_eqFadeSamples, std::memory_order_acquire);
+     const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++    // 笘・D125-A: flag 譏・ｼ豸郁ｲｻ轤ｹ縺ｮ隕ｳ貂ｬ・・lear point 迚ｹ螳夂畑・・+    juce::Logger::writeToLog(juce::String::formatted(
++        "[D125_IRFLAG_PROMOTE_SNAPSHOT] promoted=%d", promoteToStructural ? 1 : 0));
++#endif
+     if (promoteToStructural)
+     {
+         // 萓句､匁・譬ｼ蛻､螳壹・蛻ｶ蠕｡繧ｹ繝ｬ繝・ラ蛛ｴ縺ｧ遒ｺ螳壹☆繧九・diff --git a/src/audioengine/AudioEngine.Threading.cpp b/src/audioengine/AudioEngine.Threading.cpp
+index 2f3107e..a1a0406 100644
+--- a/src/audioengine/AudioEngine.Threading.cpp
++++ b/src/audioengine/AudioEngine.Threading.cpp
+@@ -16,6 +16,10 @@
+ 
+ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+ {
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++    // 笘・D117 root-cause audit: observation-only trace (no semantic change).
++    juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
++#endif
+     auto* core = static_cast<DSPCore*>(p);
+     core->~DSPCore();
+     convo::aligned_free(core);
+diff --git a/src/audioengine/AudioEngine.Timer.cpp b/src/audioengine/AudioEngine.Timer.cpp
+index e5f5c1a..d84e13c 100644
+--- a/src/audioengine/AudioEngine.Timer.cpp
++++ b/src/audioengine/AudioEngine.Timer.cpp
+@@ -965,11 +965,10 @@ void AudioEngine::timerCallback()
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_acquire))
+             {
+-                // 笘・ISR: Observer 窶・Intent Queue push 縺ｮ縺ｿ縲３etire 縺ｯ Coordinator 縺ｮ雋ｬ蜍吶・-                //   Self-contained Intent: getFadingRuntimeDSPHandle 縺九ｉ DSPHandle 繧貞叙蠕励＠縺ｦ emit
+-                const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+-                if (!fadingHandle.isNull())
+-                    runtimePublicationBridge_.submitObserve(fadingHandle, currentPublicationEpoch());
++                // 笘・D132 (M2): fading DSP 縺ｮ ownership terminalization・亥髪荳縺ｮ primitive・峨・+                //   譌ｧ submitObserve 邨瑚ｷｯ縺ｯ fading handle 縺・endCrossfade 貂医∩ null 縺ｮ縺溘ａ蟶ｸ縺ｫ
++                //   skip 縺輔ｌ retire 縺檎匱轣ｫ縺励↑縺九▲縺滂ｼ・117 CAUSE-C1・峨ＳetirePublishedDSP 縺ｸ蜿取據縲・+                terminalizeFadingDSP();
+             }
+         }
+         crossfadeRuntime_.complete();
+@@ -1089,21 +1088,9 @@ void AudioEngine::timerCallback()
+ 
+     if (!m_coordinator.isFading())
+     {
+-        // 笘・B-1: CAS-based fading slot clear
+-        DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
+-        if (current != nullptr
+-            && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current,
+-                                             static_cast<DSPCore*>(nullptr),
+-                                             std::memory_order_acq_rel,
+-                                             std::memory_order_acquire))
+-        {
+-            DSPLifetimeManager lifetimeMgr(*this);
+-            // 笘・ISR: Observer 窶・Intent Queue push 縺ｮ縺ｿ
+-            //   Self-contained Intent: getFadingRuntimeDSPHandle 縺九ｉ DSPHandle 繧貞叙蠕・-            const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+-            if (!fadingHandle.isNull())
+-                runtimePublicationBridge_.submitObserve(fadingHandle, currentPublicationEpoch());
+-        }
++        // 笘・D132 (M2): retire authority 荳譛ｬ蛹・窶・submitObserve・・ading handle null 縺ｧ
++        //   蟶ｸ譎・skip繝ｻD117 CAUSE-C1・峨ｒ terminalizeFadingDSP 縺ｸ鄂ｮ謠帙・AS 謗剃ｻ悶〒 once-only縲・+        terminalizeFadingDSP();
+     }
+ 
+ 
+@@ -1671,20 +1658,9 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
+         diagLog("[HEALTH] Crossfade timeout detected, initiating recovery");
+ 
+         // 1. 貊樒蕗荳ｭ縺ｮ fading DSP 繧貞ｼｷ蛻ｶ騾蠖ｹ
+-        // 笘・B-1: CAS-based fading slot clear
+-        DSPCore* current = convo::consumeAtomic(fadingRuntimeDSPSlot, std::memory_order_acquire);
+-        if (current != nullptr
+-            && convo::compareExchangeAtomic(fadingRuntimeDSPSlot, current,
+-                                             static_cast<DSPCore*>(nullptr),
+-                                             std::memory_order_acq_rel,
+-                                             std::memory_order_acquire))
+-        {
+-            DSPLifetimeManager lifetime(*this);
+-            // 笘・ISR: Observer 窶・Intent Queue push 縺ｮ縺ｿ
+-            const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+-            if (!fadingHandle.isNull())
+-                runtimePublicationBridge_.submitObserve(fadingHandle, currentPublicationEpoch());
+-        }
++        // 笘・D132 (M2): timeout 邨瑚ｷｯ繧ょ酔荳 terminalization 縺ｫ蜿取據・・129-3A Gate A・峨・+        //   HealthMonitor 縺ｯ繧ｷ繧ｰ繝翫Ν逋ｺ陦後・縺ｿ縺ｧ retire 縺ｯ陦後ｏ縺ｪ縺・ｼ・SR-HM-001/003 貅匁侠・峨・+        terminalizeFadingDSP();
+ 
+         // 2. 笘・PR2/PR4: Authority 縺ｮ Registry 縺九ｉ蜈ｨ active 繝ｬ繧ｳ繝ｼ繝峨ｒ蜿門ｾ・         auto records = crossfadeAuthorityRuntime_.getActiveCrossfades();
+diff --git a/src/audioengine/AudioEngine.UIEvents.cpp b/src/audioengine/AudioEngine.UIEvents.cpp
+index 973e9ee..d4b60da 100644
+--- a/src/audioengine/AudioEngine.UIEvents.cpp
++++ b/src/audioengine/AudioEngine.UIEvents.cpp
+@@ -174,7 +174,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
+         if (needsStructuralRebuild && srForRebuild > 0.0)
+         {
+             ++pendingIRGeneration;
+-            setIRChangeFlag();
++            setIRChangeFlag("UI");
+ 
+             const LearningCommand cmd {
+                 LearningCommand::Type::IRChanged,
+diff --git a/src/audioengine/AudioEngine.h b/src/audioengine/AudioEngine.h
+index dbbbc65..38ead64 100644
+--- a/src/audioengine/AudioEngine.h
++++ b/src/audioengine/AudioEngine.h
+@@ -1173,6 +1173,18 @@ public:
+     // Precondition: current 縺ｯ fadingRuntimeDSPSlot 縺ｮ CAS 謌仙粥縺ｧ蜿門ｾ玲ｸ医∩縲・     void retirePublishedDSP(DSPCore* current, DSPLifetimeManager& lifetimeMgr) noexcept;
+ 
++    // 笘・D132 (M2): fading DSP 縺ｮ蜚ｯ荳縺ｮ ownership terminalization primitive縲・+    //   completion / timeout / overlap claim-fail 縺ｮ蜈ｨ邨瑚ｷｯ縺後％縺薙↓蜿取據縺吶ｋ
++    //   ・・NV-XFADE-COMP-2: terminal transition 縺ｯ exactly-once 窶・CAS + 蜀ｪ遲・retire・峨・+    //   identity 縺ｯ CAS 蜿門ｾ励・ DSPCore*・井ｸ谺｡・・ receipt.handle 縺ｮ resolve 莠､蜿画､懆ｨｼ縲・+    void terminalizeFadingDSP() noexcept;
++
++    // 笘・D129-3B (M2): fading DSP 縺ｮ蜚ｯ荳縺ｮ ownership terminalization primitive縲・+    //   completion / timeout / overlap claim-fail 縺ｮ蜈ｨ邨瑚ｷｯ縺後％縺薙↓蜿取據縺吶ｋ
++    //   ・・NV-XFADE-COMP-2: terminal transition 縺ｯ exactly-once 窶・CAS + 蜀ｪ遲・retire・峨・+    //   identity 縺ｯ CAS 蜿門ｾ励・ DSPCore*・井ｸ谺｡・・ receipt.handle 縺ｮ resolve 莠､蜿画､懆ｨｼ縲・+    void terminalizeFadingDSP() noexcept;
++
+     // 笘・P1-2: resetReceipt 窶・pendingReceipt_ 繧貞ｮ牙・縺ｫ隗｣謾ｾ縺吶ｋ縲・     //   Normal Retire: receipt 荳閾ｴ蠕後√Μ繧ｻ繝・ヨ縲・     //   Emergency/Stale: quarantine Intent 繧堤匱陦悟ｾ後√Μ繧ｻ繝・ヨ縲・@@ -1466,7 +1478,18 @@ public:
+     [[nodiscard]] int getEQFadeSamples() const noexcept { return consumeAtomic(m_eqFadeSamples, std::memory_order_acquire); }
+     [[nodiscard]] bool isFading() const noexcept { return m_coordinator.isFading(); }
+     // release: IR 螟画峩繝輔Λ繧ｰ繧・Audio Thread 縺ｮ acquire 縺ｧ隕ｳ貂ｬ縺ｧ縺阪ｋ繧医≧蜈ｬ髢九・-    void setIRChangeFlag() noexcept { publishAtomic(m_pendingIRChange, true, std::memory_order_release); }
++    // 笘・D125-A: caller-tag 險ｺ譁ｭ・・bservation-only繝ｻmacro-gated・峨Ｑroduction 謖吝虚縺ｯ荳榊､峨・+    void setIRChangeFlag(const char* callerTag = "unknown") noexcept
++    {
++        publishAtomic(m_pendingIRChange, true, std::memory_order_release);
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++        juce::Logger::writeToLog(juce::String::formatted(
++            "[D125_IRFLAG_SET] caller=%s pendingIRGen=%llu thread=%p",
++            callerTag ? callerTag : "unknown",
++            (unsigned long long) pendingIRGeneration,
++            juce::Thread::getCurrentThreadId()));
++#endif
++    }
+ 
+     // acquire: Audio Thread 縺ｮ release (debugLastCreatedEqHash publish) 縺ｨ HB 縺励∬ｨｺ譁ｭ繝上ャ繧ｷ繝･繧貞叙蠕励・     [[nodiscard]] uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(rtAuxMutable_.debugLastCreatedEqHash, std::memory_order_acquire); }
+diff --git a/src/audioengine/CrossfadeRuntime.h b/src/audioengine/CrossfadeRuntime.h
+index b1f9caa..79bfcf9 100644
+--- a/src/audioengine/CrossfadeRuntime.h
++++ b/src/audioengine/CrossfadeRuntime.h
+@@ -79,6 +79,19 @@ public:
+         return completedFadeQueue_.pop(ev);
+     }
+ 
++    // 笘・D132 (M2): RT 蛛ｴ ramp 螳御ｺ・､懷・・・inearRamp remaining 1竊・ 繧ｨ繝・ず縺ｧ exactly-once 蜻ｼ縺ｳ蜃ｺ縺暦ｼ峨・+    //   identity 髱樊声蟶ｯ縺ｮ邏斐す繧ｰ繝翫Ν 窶・Timer 縺・fading slot CAS 縺ｧ DSPCore* 繧貞叙蠕励＠縲・+    //   receipt 縺ｧ莠､蜿画､懆ｨｼ縺励※ retire 縺吶ｋ・・129-1/D129-2 螂醍ｴ・ ramp 螳御ｺ・竕 retire 險ｱ蜿ｯ・峨・+    void notifyRampComplete() noexcept
++    {
++        CompletedFadeEvent ev{ CrossfadeId{0}, getCurrentTimeUs() };
++        if (!completedFadeQueue_.push(ev))
++        {
++            convo::fetchAddAtomic(crossfadeEventDropCount_, uint64_t{1},
++                std::memory_order_release);
++        }
++    }
++
+     // 笘・Practical-2: 髢句ｧ九°繧峨・邨碁℃譎る俣・・imeout 逶｣隕也畑・・     [[nodiscard]] uint64_t getFadeAgeUs() const noexcept
+     {
+diff --git a/src/audioengine/DSPLifetimeManager.cpp b/src/audioengine/DSPLifetimeManager.cpp
+index 4b911ca..a6bb673 100644
+--- a/src/audioengine/DSPLifetimeManager.cpp
++++ b/src/audioengine/DSPLifetimeManager.cpp
+@@ -1,6 +1,13 @@
+ #include "DSPLifetimeManager.h"
+ #include "AudioEngine.h"
+ 
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++// 笘・D117 root-cause audit: observation-only lifetime trace (no semantic change).
++#define D117_LIFETIME_LOG(msg) juce::Logger::writeToLog(msg)
++#else
++#define D117_LIFETIME_LOG(msg) ((void) 0)
++#endif
++
+ DSPLifetimeManager::DSPLifetimeManager(AudioEngine& engine) noexcept
+     : engine_(engine)
+     , router_(engine_.m_retireRouter.get())
+@@ -36,6 +43,8 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
+         return;
+ 
+     const bool retired = engine_.retireDSPHandleForRuntime(static_cast<AudioEngine::DSPCore*>(dsp));
++    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p retired=%d",
++                                              dsp, retired ? 1 : 0));
+     if (!retired)
+         return;
+ 
+@@ -50,6 +59,11 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
+         dsp, &AudioEngine::destroyDSPCoreNode,
+         epoch,
+         DeletionEntryType::Generic);
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p enqueue=%d epoch=%llu",
++                                              dsp, static_cast<int>(result),
++                                              (unsigned long long) epoch));
++#endif
+     // 笘・BUG-015/027 (work88): enqueue 螟ｱ謨暦ｼ・ueuePressure/QueueFull・峨・ enqueueWithRetry
+     //   蜀・Κ縺ｧ RetireQuarantineStore 縺ｸ遘ｻ騾∵ｸ医∩・・irectDelete 縺励↑縺・窶・RT 蜿ら・荳ｭ縺ｮ UAF 謗帝勁・峨・     //   Shutdown 縺ｯ繧ｷ繝｣繝・ヨ繝繧ｦ繝ｳ邨瑚ｷｯ縺悟・逅・ゆｺ碁㍾遘ｻ騾・ｼ・ouble-quarantine 竊・double-free・峨ｒ
+@@ -79,7 +93,18 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
+     }
+ 
+     if (toDelete == nullptr)
++    {
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++        D117_LIFETIME_LOG(juce::String::formatted(
++            "[D117_RETIRE_BY_HANDLE] handle=%llu lookup=MISS (not in runtimeDSPHandleMap_)",
++            (unsigned long long) handle.slot));
++#endif
+         return;
++    }
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++    D117_LIFETIME_LOG(juce::String::formatted(
++        "[D117_RETIRE_BY_HANDLE] dsp=%p lookup=HIT", toDelete));
++#endif
+ 
+     // 笘・work88 (Phase 3): retire 竊・epoch 螳牙・遒ｺ隱・竊・reclaim 繧剃ｸ譛ｬ蛹悶・     //   requestReclaimHandle 縺ｯ epoch 螳牙・縺ｪ繧・requestReclaim・・etire竊蜘aitReaders竊池eclaim・峨・@@ -97,6 +122,11 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
+         toDelete, &AudioEngine::destroyDSPCoreNode,
+         epoch,
+         DeletionEntryType::Generic);
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++    D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE_BY_HANDLE] dsp=%p enqueue=%d epoch=%llu",
++                                              toDelete, static_cast<int>(result),
++                                              (unsigned long long) epoch));
++#endif
+     // 笘・BUG-015/027 (work88): 蜷御ｸ・窶・enqueueWithRetry 蜀・Κ縺ｧ騾驕ｿ繧ｹ繝医い縺ｸ遘ｻ騾∵ｸ医∩縲・     //   莠碁㍾遘ｻ騾√ｒ驕ｿ縺代ｋ縺溘ａ霑ｽ蜉蜃ｦ鄂ｮ縺ｪ縺暦ｼ・irectDelete 遖∵ｭ｢・峨・     juce::ignoreUnused(result);
+diff --git a/src/audioengine/DSPTransition.h b/src/audioengine/DSPTransition.h
+index 74378a2..a9bfc46 100644
+--- a/src/audioengine/DSPTransition.h
++++ b/src/audioengine/DSPTransition.h
+@@ -59,7 +59,19 @@ public:
+                 auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+                 if (health == convo::ISRHealthState::Critical) {
+                     lifetime.activate(newDSP);
+-                    if (oldDSP != nullptr) {
++                    // 笘・D132 (M1 / D122-A 螂醍ｴ・: active runtime handle 繧貞・髢九・+                    //   registration・・ifetime.activate = map逋ｻ骭ｲ・峨→ activation
++                    //   ・・SPHandleRuntime::activate = activeRuntimeDSPHandle_ 蜈ｬ髢具ｼ峨・蛻･謫堺ｽ懊・+                    //   譛ｪ蜈ｬ髢九・縺ｾ縺ｾ縺ｧ縺ｯ谺｡ publish 縺ｮ oldHandle 縺悟ｸｸ縺ｫ null 縺ｫ縺ｪ繧・retire 縺・+                    //   蛻ｰ驕比ｸ崎・・・117/D120 CAUSE・峨Ｑublish 謌仙粥蠕後・縺ｿ繝ｻpublish 螟ｱ謨・+                    //   ・・ollback・峨〒縺ｯ蜻ｼ縺ｰ繧後↑縺・ｼ・copeExit 縺・tail 蜑阪↓螳檎ｵ撰ｼ峨・+                    if (newDSP != nullptr) {
++                        const auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
++                        if (!newHandle.isNull())
++                            engine_.dspHandleRuntime_.activate(newHandle);
++                    }
++                    // 笘・D132(5): oldDSP == newDSP 縺ｯ retire/crossfade 蟇ｾ雎｡螟悶・+                    if (oldDSP != nullptr && oldDSP != newDSP) {
+                         // 笘・Temporary: exchangeFadingRuntimeDSP (A-6 fix).
+                         //   Will be removed after B-1 CAS-only claimFadingRuntimeDSP().
+                         auto* prevRaw = engine_.exchangeFadingRuntimeDSP(oldDSP);
+@@ -83,9 +95,18 @@ public:
+ 
+         // 1. activate (publish 謌仙粥蠕後↓縺ｮ縺ｿ螳溯｡・
+         lifetime.activate(newDSP);
++        // 笘・D132 (M1 / D122-A 螂醍ｴ・: active runtime handle 繧貞・髢具ｼ・egistration 竕 activation 窶・+        //   D121-2・峨Ｇading null 蛹悶・蜑ｯ菴懃畑縺ｯ isSlotInCrossfade・・rossfadeRecords_ 蜿ら・・峨↓髱樔ｾ晏ｭ倥・+        //   beginCrossfade 縺檎峩蠕後↓蜀崎ｨｭ螳壹☆繧九◆繧∝ｮ牙・・・122-A 蟇ｩ譟ｻ貂医∩・峨・+        if (newDSP != nullptr) {
++            const auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
++            if (!newHandle.isNull())
++                engine_.dspHandleRuntime_.activate(newHandle);
++        }
+ 
+         // 2. Crossfade 縺ｾ縺溘・ Retire
+-        if (decision.needsCrossfade && oldDSP != nullptr) {
++        // 笘・D132(5): oldDSP == newDSP・亥酔荳 DSP 蜀・publish・峨・ retire/crossfade 蟇ｾ雎｡螟悶・+        if (decision.needsCrossfade && oldDSP != nullptr && oldDSP != newDSP) {
+             // 笘・BUG-054: oldHandle 縺ｯ蜻ｼ縺ｳ蜃ｺ縺怜・・・nqueue 譎ゅ↓ resolve 貂医∩縺ｮ逵溘・ old DSP handle・峨ｒ
+             //   菴ｿ逕ｨ縺吶ｋ縲ＨetActiveRuntimeDSPHandle() 縺ｯ commitRuntimePublication 縺ｮ activate 蠕後↓
+             //   蜻ｼ縺ｰ繧後ｋ縺溘ａ NEW DSP 縺ｮ handle 繧定ｿ斐＠縲｛ld==new 縺ｮ蜷御ｸ crossfade 繧堤匳骭ｲ縺励※縺・◆縲・@@ -121,7 +142,7 @@ public:
+                     : convo::consumeAtomic(engine_.currentSampleRate, std::memory_order_acquire));
+             engine_.crossfadeRuntime_.start(decision.fadeTimeSec, rampSampleRate);
+             engine_.setIRChangeFlag();
+-        } else if (oldDSP != nullptr) {
++        } else if (oldDSP != nullptr && oldDSP != newDSP) {
+             // Crossfade 荳崎ｦ・ 蜊ｳ譎・retire
+             engine_.crossfadeRuntime_.complete();
+             lifetime.retire(oldDSP);
+diff --git a/src/audioengine/RuntimePublishExecutor.h b/src/audioengine/RuntimePublishExecutor.h
+index d2a783c..fbacf84 100644
+--- a/src/audioengine/RuntimePublishExecutor.h
++++ b/src/audioengine/RuntimePublishExecutor.h
+@@ -92,6 +92,15 @@ struct PublishExecutor {
+             p.decision.newHasIR,
+             p.decision.fadeTimeSec
+         };
++#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
++        // 笘・D127-NOGO diagnostic: tail 蛻ｰ驕斐→ oldDSP 驟埼√・隕ｳ貂ｬ・・bservation-only・・+        juce::Logger::writeToLog(juce::String::formatted(
++            "[D127_TAIL] seq=%llu oldHandleNull=%d oldResolvedValid=%d needsCrossfade=%d",
++            (unsigned long long) intent.sequenceId,
++            p.decision.oldHandle.isNull() ? 1 : 0,
++            oldResolved.valid ? 1 : 0,
++            decision.needsCrossfade ? 1 : 0));
++#endif
+         ctx.transition.onPublishCompleted(
+             newResolved.valid ? static_cast<AudioEngine::DSPCore*>(newResolved.instance) : nullptr,
+             oldResolved.valid ? static_cast<AudioEngine::DSPCore*>(oldResolved.instance) : nullptr,

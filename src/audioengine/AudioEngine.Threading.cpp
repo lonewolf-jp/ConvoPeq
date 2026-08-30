@@ -16,6 +16,10 @@
 
 void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D117 root-cause audit: observation-only trace (no semantic change).
+    juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
+#endif
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
@@ -273,15 +277,27 @@ void AudioEngine::runCoordinatorPhase() noexcept
     //   ★ ビジーループ防止: predicate に hasDeferredRequest() を直接入れず、フラグ駆動にする。
     //     Deferred が継続しても RebuildThread は休眠し、Coordinator が次 1ms tick で再通知するまで
     //     再試行しない。これにより crossfade 終了まで CPU スピンすることはない。
+    // ★ F6-5: watchdog 化 — 現行は毎 tick publishRetryReady を立てていた（= 実質 1ms polling）。
+    //   F6 では fade-complete wake（P3, Timer.cpp）が正常経路となり、本 poll は lost-wake 自己修復
+    //   専用として kDeferredWakeWatchdogTicks ごとにのみ発火する。publishRetryReady の意味・
+    //   rebuildMutex→flag→unlock→notify の順序・hasDeferred_ を predicate にしない方針は不変。
     if (!isShutdownInProgress()
         && runtimeOrchestrator_ != nullptr
         && runtimeOrchestrator_->hasDeferredRequest())
     {
+        if (++coordinatorDeferredWatchdogTicks_ >= kDeferredWakeWatchdogTicks)
         {
-            std::lock_guard<std::mutex> lock(rebuildMutex);
-            publishRetryReady = true;
+            coordinatorDeferredWatchdogTicks_ = 0;
+            {
+                std::lock_guard<std::mutex> lock(rebuildMutex);
+                publishRetryReady = true;
+            }
+            rebuildCV.notify_one();
         }
-        rebuildCV.notify_one();
+    }
+    else
+    {
+        coordinatorDeferredWatchdogTicks_ = 0;
     }
 
     // ★ Phase1: OverflowRing drain (relocated from timerCallback).

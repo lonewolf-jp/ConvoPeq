@@ -1077,7 +1077,10 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
             {
                 // ★ v14.47: Flush log file before exit (P5 fix)
                 juce::Logger::writeToLog("[CLI] Auto-exit flush: shutting down");
-                juce::Logger::setCurrentLogger(nullptr);
+                // ★ D127-E (diagnostic only): ここでの logger 切断は teardown 全体を観測不能に
+                //   していた（D119-BLOCKER-2 診断障害）。切断は MainApplication::shutdown() 末尾
+                //   （LOGGER_DETACH）に移譲し、teardown 全程をファイルに記録する。
+                //   production ownership semantics 変更なし（ログ出力タイミングのみ）。
 
                 if (safeThis != nullptr)
                 {

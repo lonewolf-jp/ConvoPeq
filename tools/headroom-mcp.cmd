@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-rem Prefer the latest installed version (~/.local/bin, e.g. v0.36.5)
+rem Prefer the latest installed version (~/.local/bin, e.g. v0.37.0)
 set HEADROOM_EXE=%USERPROFILE%\.local\bin\headroom.exe
 
 if not exist "%HEADROOM_EXE%" (

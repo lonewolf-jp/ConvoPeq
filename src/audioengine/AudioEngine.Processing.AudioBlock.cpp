@@ -380,8 +380,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     t1_dspStartUs = convo::getCurrentTimeUs();
 #endif
 
+        // ★ D132 (M2): ramp 完了エッジ検出用（block 開始時の smoothing 状態）
+        const bool crossfadeWasSmoothing = crossfadeRuntime_.getGain().isSmoothing();
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
-            && crossfadeRuntime_.getGain().isSmoothing()
+            && crossfadeWasSmoothing
             && dspCrossfadeFloatBuffer.getNumChannels() >= 2
             && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
 
@@ -456,6 +458,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             }
 
             finalizeCrossfadeMixPath(dsp, fading, true);
+
+            // ★ D132 (M2): RT ramp 完了エッジ検出 — remaining 1→0 遷移で exactly-once 発火。
+            //   identity 非携帯の純シグナル（SPSC push のみ・alloc/lock/blocking なし）。
+            //   Timer が active crossfade records を解決して endCrossfade → retire に進む。
+            if (crossfadeWasSmoothing && !crossfadeRuntime_.getGain().isSmoothing())
+                crossfadeRuntime_.notifyRampComplete();
         }
         else
         {

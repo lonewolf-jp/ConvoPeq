@@ -48,7 +48,7 @@ bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
     {
         if (pred())
             return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return pred();
 }

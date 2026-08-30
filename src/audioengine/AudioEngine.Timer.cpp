@@ -998,6 +998,26 @@ void AudioEngine::timerCallback()
         }
 
         sendChangeMessage();
+
+        // ★ F6-4: fade-complete wake — fading が解消され idle world commit 済みになった時点で、
+        //   保留中の deferred publish があれば RebuildThread に再評価を依頼する（wake request のみ）。
+        //   - fade 完了前には発火しない（本ブロック自体が fadeCompleted 時のみ実行）
+        //   - deferred 不在なら no-op（hasDeferredRequest() ガード）
+        //   - shutdown 中は wake しない
+        //   - recoveryRetryReady には触れない（provenance 非汚染・wasRecoveryWake=false のまま）
+        //   - publish decision / retire / reclaim は行わない（決定権不変）
+        //   lock ordering: timerCallback 本体は mutex 非保持、rebuildMutex はリーフレール
+        //   （recovery handoff Timer.cpp:1746-1751 と同型）。
+        if (!isShutdownInProgress()
+            && runtimeOrchestrator_ != nullptr
+            && runtimeOrchestrator_->hasDeferredRequest())
+        {
+            {
+                std::lock_guard<std::mutex> lock(rebuildMutex);
+                publishRetryReady = true;
+            }
+            rebuildCV.notify_one();
+        }
     }
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -1639,7 +1659,7 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         diagLog("[HEALTH] Publication stall detected, draining deferred publish");
 
         if (runtimeOrchestrator_) {
-            runtimeOrchestrator_->clearDeferredForShutdown();
+            runtimeOrchestrator_->requestDeferredClear();
         }
 
         // 強制診断ダンプ
@@ -1715,6 +1735,42 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
                 convo::TransitionPolicy::HardReset);
         }
 
+        // ★ D135-1 §5: timeout recovery は publishIdleWorldOnly (commitRuntimePublication,
+        //   sync) で zero-fading world を live commit 済み。pending deferred request
+        //   (hasDeferred_) が存在すれば rebuild thread だけに 1 回再駆動を依頼する。
+        if (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest()) {
+            const auto recoverySeq = getLastCommittedPublicationSequence();
+            runtimeOrchestrator_->setRecoveryPublishSeq(recoverySeq);
+            // ★ D135-5/8: blind producer-side reset removed. Recovery-retry budget reset is now
+            //   gated on recoveryRetryReady provenance in processDeferredAdmission (P3).
+            //   The provenance stamp below (publishRetryReady) wakes the rebuild thread; the
+            //   atomic recoveryRetryReady flag lets the consumer distinguish recovery redrive
+            //   (reset budget) from ordinary retry (increment count).
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            {
+                const convo::RuntimeReaderContext msgCtx{
+                    messageThreadRcuReader, convo::ObserveChannel::Message };
+                const auto handle = makeRuntimeReadHandle(msgCtx);
+                const auto* rw = getRuntimeWorldFromReadHandle(handle);
+                const auto worldFadingUuid = (rw != nullptr)
+                    ? static_cast<juce::int64>(rw->topology.fadingRuntimeUuid) : -1;
+                diagLog(juce::String("[D135] recovery-redrive")
+                    + " recoveryWorldSeq=" + juce::String(static_cast<juce::int64>(recoverySeq))
+                    + " observedWorldSeq=" + juce::String(static_cast<juce::int64>(getLastCommittedPublicationSequence()))
+                    + " worldFadingUuid=" + juce::String(worldFadingUuid)
+                    + " hasDeferred=" + juce::String(1)
+                    + " currentGen=" + juce::String(static_cast<juce::int64>(
+                        convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire))));
+            }
+#endif
+            {
+                std::lock_guard<std::mutex> lock(rebuildMutex);
+                convo::publishAtomic(recoveryRetryReady, true, std::memory_order_release);
+                publishRetryReady = true;
+            }
+            rebuildCV.notify_one();
+        }
+
         diagLog("[HEALTH] Crossfade timeout recovery completed");
     }
 
@@ -1770,7 +1826,7 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
             tryReclaimResources();
             drainDeferredRetireQueues(false);
             if (runtimeOrchestrator_)
-                runtimeOrchestrator_->clearDeferredForShutdown();
+                runtimeOrchestrator_->requestDeferredClear();
             break;
 
         case convo::RecoveryAction::Restore:
@@ -1790,7 +1846,7 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
                 noiseShaperLearner->setState(lastKnownGoodNoiseShaper_.state);
             // DeferredPublicationFlush
             if (runtimeOrchestrator_)
-                runtimeOrchestrator_->clearDeferredForShutdown();
+                runtimeOrchestrator_->requestDeferredClear();
             // Step2（publishIdleWorldOnly）は閉ループ制御後 (Phase 6)
             m_restorePhase_ = convo::RestorePhase::EpochRecoveryIssued;
             break;
