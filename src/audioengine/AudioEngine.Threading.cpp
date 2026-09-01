@@ -263,11 +263,35 @@ void AudioEngine::runCoordinatorPhase() noexcept
         runtimePublicationBridge_.processIntent(*this, lifetimeMgr);
     }
 
+    // ★ D152 T2 (D152-R1): adjudicate recovery failure signals — CoordinatorLoop-only consumer.
+    //   Runs AFTER processIntent (obligations admitted/terminalized this tick are visible) and
+    //   BEFORE redrive, so a failure→None transition becomes redrive-eligible in the SAME tick
+    //   (D148 §1-D placement). Adjudication commits only via full-word lifecycle CAS; exhausted
+    //   telemetry and liveCount −1 are CAS-winner-gated. CL-only placement is a determinism
+    //   convention — no thread-id assert (D152 §8; TEST-ONLY wrapper runs elsewhere).
+    runtimePublicationBridge_.adjudicateRecoveryFailureSignals();
+
     // ★ D105-R5-10: re-drive any deferred Live recovery obligations each Coordinator tick (option C).
     //   Runs on the CoordinatorLoop (producer) thread — SPSC-safe. Complements the opportunistic trigger
     //   in submitRecoveryRequest: ensures deferred obligations are redispatched once a delivery resource
     //   frees, even when no new recovery submissions occur.
     runtimePublicationBridge_.redriveDeferredRecoveryObligations();
+
+    // ★ G-4.4-P2 (D137): redrive attach → Builder wake. If any deferred obligation re-acquired a
+    //   delivery representation (None → Transport/Durable) — including the opportunistic redrive run
+    //   inside processIntent's submitRecoveryRequest this same phase — raise the EXISTING
+    //   recoveryPending predicate + notify, exactly the submitRecoveryIntent wake protocol
+    //   (AudioEngine.h). Event-driven: zero wakes when nothing attached (no per-tick notify —
+    //   preserves F6-5). The latch is CoordinatorLoop-only (same thread set/consume — no new
+    //   cross-thread ordering; recoveryPending remains rebuildMutex-guarded).
+    if (runtimePublicationBridge_.consumeRedriveWake())
+    {
+        {
+            std::lock_guard<std::mutex> lock(rebuildMutex);
+            recoveryPending = true;
+        }
+        rebuildCV.notify_all();
+    }
 
     // [PR-3] Deferred publish resubmit — Coordinator は Decision/Routing のみに徹する。
     //   ★ ISR Builder/Coordinator 分離: Coordinator は world build / publish を実行しない。

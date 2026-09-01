@@ -1,0 +1,86 @@
+T3C_CTEST_START config=Release 
+Test project C:/VSC_Project/ConvoPeq/build
+      Start  1: PublicationAdmissionTests
+ 1/40 Test  #1: PublicationAdmissionTests .................   Passed    0.18 sec
+      Start  2: D8_1_WrapperCacheTests
+ 2/40 Test  #2: D8_1_WrapperCacheTests ....................   Passed    0.28 sec
+      Start  3: D8_2_B_2_Tests
+ 3/40 Test  #3: D8_2_B_2_Tests ............................   Passed    0.17 sec
+      Start  4: TerminalTelemetryContract
+ 4/40 Test  #4: TerminalTelemetryContract .................   Passed    0.18 sec
+      Start  5: RuntimeHealthMonitorTierTests
+ 5/40 Test  #5: RuntimeHealthMonitorTierTests .............   Passed    0.18 sec
+      Start  6: ISRSoakTests
+ 6/40 Test  #6: ISRSoakTests ..............................   Passed    0.24 sec
+      Start  7: OwnerChannel
+ 7/40 Test  #7: OwnerChannel ..............................   Passed    0.18 sec
+      Start  8: BuildErrorClassificationTests
+ 8/40 Test  #8: BuildErrorClassificationTests .............   Passed    0.16 sec
+      Start  9: RetrySchedulerTests
+ 9/40 Test  #9: RetrySchedulerTests .......................   Passed    0.71 sec
+      Start 10: DeferredDeletionQueueReclaimTests
+10/40 Test #10: DeferredDeletionQueueReclaimTests .........   Passed    3.18 sec
+      Start 11: MpscBoundedRingTests
+11/40 Test #11: MpscBoundedRingTests ......................   Passed    0.19 sec
+      Start 12: SequenceArithmeticTests
+12/40 Test #12: SequenceArithmeticTests ...................   Passed    0.18 sec
+      Start 13: DSPHandleTableTests
+13/40 Test #13: DSPHandleTableTests .......................   Passed    0.17 sec
+      Start 14: GainStagingContractTests
+14/40 Test #14: GainStagingContractTests ..................   Passed    0.18 sec
+      Start 15: EQProcessorMaxGainTests
+15/40 Test #15: EQProcessorMaxGainTests ...................   Passed    0.20 sec
+      Start 16: EQAnalysisUnitTests
+16/40 Test #16: EQAnalysisUnitTests .......................   Passed    0.17 sec
+      Start 17: FFTBackendTests
+17/40 Test #17: FFTBackendTests ...........................   Passed    0.29 sec
+      Start 18: EQBoundExcessBenchmark
+18/40 Test #18: EQBoundExcessBenchmark ....................   Passed    0.24 sec
+      Start 19: ISRRuntimeIdentityGenerators
+19/40 Test #19: ISRRuntimeIdentityGenerators ..............   Passed    0.21 sec
+      Start 20: RuntimePublicationCoordinatorRejects
+20/40 Test #20: RuntimePublicationCoordinatorRejects ......   Passed    0.19 sec
+      Start 21: ISRSemanticValidationRejects
+21/40 Test #21: ISRSemanticValidationRejects ..............   Passed    0.30 sec
+      Start 22: InvariantINV3INV5
+22/40 Test #22: InvariantINV3INV5 .........................   Passed    0.17 sec
+      Start 23: AdmissionPackedState
+23/40 Test #23: AdmissionPackedState ......................   Passed    0.38 sec
+      Start 24: RetireGraceSemantics
+24/40 Test #24: RetireGraceSemantics ......................   Passed    0.21 sec
+      Start 25: ShutdownRetireIntentDrain
+25/40 Test #25: ShutdownRetireIntentDrain .................   Passed    0.20 sec
+      Start 26: StuckReaderFallbackDrain
+26/40 Test #26: StuckReaderFallbackDrain ..................   Passed    0.19 sec
+      Start 27: NormalRetireDSPHandleCompare
+27/40 Test #27: NormalRetireDSPHandleCompare ..............   Passed    0.18 sec
+      Start 28: RuntimeSemanticSchemaValidation
+28/40 Test #28: RuntimeSemanticSchemaValidation ...........   Passed    0.17 sec
+      Start 29: ObservePathSingleSource
+29/40 Test #29: ObservePathSingleSource ...................   Passed    0.19 sec
+      Start 30: OverlapAuthoritySingular
+30/40 Test #30: OverlapAuthoritySingular ..................   Passed    0.18 sec
+      Start 31: ShadowCompareContract
+31/40 Test #31: ShadowCompareContract .....................   Passed    0.17 sec
+      Start 32: CrossfadeExecutorLocalContract
+32/40 Test #32: CrossfadeExecutorLocalContract ............   Passed    0.18 sec
+      Start 33: RuntimeWorldAuthorityProjectionContract
+33/40 Test #33: RuntimeWorldAuthorityProjectionContract ...   Passed    0.40 sec
+      Start 34: PartialPublicationReject
+34/40 Test #34: PartialPublicationReject ..................   Passed    0.19 sec
+      Start 35: RebuildAdmissionRegression
+35/40 Test #35: RebuildAdmissionRegression ................   Passed    0.20 sec
+      Start 36: HeadlessAudioPathVerification
+36/40 Test #36: HeadlessAudioPathVerification .............   Passed    5.75 sec
+      Start 37: BuildInputSemanticContract
+37/40 Test #37: BuildInputSemanticContract ................   Passed    0.19 sec
+      Start 38: PriorityIntegration
+38/40 Test #38: PriorityIntegration .......................   Passed    0.19 sec
+      Start 39: MTNUPCMeasurement
+39/40 Test #39: MTNUPCMeasurement .........................   Passed    0.69 sec
+      Start 40: AudioEngineHarness
+40/40 Test #40: AudioEngineHarness ........................   Passed   16.63 sec
+
+100% tests passed out of 40
+
+Total Test time (real) =  34.33 sec

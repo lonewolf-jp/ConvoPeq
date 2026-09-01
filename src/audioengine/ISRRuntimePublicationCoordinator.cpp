@@ -816,6 +816,55 @@ QuarantineService::QuarantineResult QuarantineService::executeQuarantine(
 // ★ dash2 §1.9 (Phase E): 戻り値 — recovery obligation が生成・維持された場合 true。
 //   transport（push 成功）/ durable（queue full → recoveryAdmissionPending_）とも true
 //   （INV-X1-2: queue full ≠ Recovery lost）。shutdown gate による discard は false（wake 不要）。
+// ── ★ G-4.2: SemanticRecoveryTarget derivation helpers (I4 D12.2). ──
+//   Metadata generation only — NOT wired into supersession/admission yet (G-4.3+). No side effects.
+	namespace {
+	// G-4.2 helpers live at convo::isr anonymous-namespace scope; ObligationDomains is a nested
+	// member type of RuntimeIntentCoordinator — alias it here so the helpers can name it.
+	using convo::isr::RuntimeIntentCoordinator;
+	using ObligationDomains = RuntimeIntentCoordinator::ObligationDomains;
+	// Canonical FNV-1a over BuildInput configuration values (deterministic; no padding dependence).
+std::uint64_t computeBuildInputHash(const convo::BuildInput& in) noexcept
+{
+    uint64_t h = 1469598103934665603ULL;   // FNV-1a 64-bit offset basis
+    auto mix = [&h](std::uint64_t v) noexcept {
+        for (int b = 0; b < 8; ++b) { h ^= ((v >> (b * 8)) & 0xFF); h *= 1099511628211ULL; }
+    };
+    mix(std::bit_cast<std::uint64_t>(in.sampleRate));
+    mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(in.blockSize)));
+    mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(in.ditherBitDepth)));
+    mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(in.oversamplingFactor)));
+    mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(in.oversamplingType)));
+    mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(in.noiseShaperType)));
+    mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(in.processingOrder)));
+    mix(static_cast<std::uint64_t>(in.eqBypassed ? 1u : 0u));
+    mix(static_cast<std::uint64_t>(in.convBypassed ? 1u : 0u));
+    mix(static_cast<std::uint64_t>(in.softClipEnabled ? 1u : 0u));
+    mix(std::bit_cast<std::uint64_t>(in.saturationAmount));
+    mix(std::bit_cast<std::uint64_t>(in.inputHeadroomGain));
+    mix(std::bit_cast<std::uint64_t>(in.outputMakeupGain));
+    mix(std::bit_cast<std::uint64_t>(in.convolverInputTrimGain));
+    mix(static_cast<std::uint64_t>(in.autoGainStagingEnabled ? 1u : 0u));
+    return h;
+}
+
+// Necessary-condition metadata: which semantic domain(s) have a non-default value in the snapshot.
+// (D12.2 — coverage is a necessary condition, never sufficient; not a supersession gate.)
+ObligationDomains computeDomainCoverage(const convo::RuntimeBuildSnapshot& s) noexcept
+{
+    ObligationDomains dc = ObligationDomains::None;
+    if (s.rebuildFingerprint.irIdentityHash != 0)
+        dc = static_cast<ObligationDomains>(static_cast<std::uint8_t>(dc) | static_cast<std::uint8_t>(ObligationDomains::IR));
+    if (s.rebuildFingerprint.convolutionConfigHash != 0 || s.convolverFingerprint != 0)
+        dc = static_cast<ObligationDomains>(static_cast<std::uint8_t>(dc) | static_cast<std::uint8_t>(ObligationDomains::Conv));
+    if (s.rebuildFingerprint.dspParameterHash != 0)
+        dc = static_cast<ObligationDomains>(static_cast<std::uint8_t>(dc) | static_cast<std::uint8_t>(ObligationDomains::EQ));
+    if (computeBuildInputHash(s.buildInput) != 0)
+        dc = static_cast<ObligationDomains>(static_cast<std::uint8_t>(dc) | static_cast<std::uint8_t>(ObligationDomains::Config));
+    return dc;
+}
+} // namespace
+
 bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantinedHandle,
                                                    const convo::RuntimeBuildSnapshot& buildSource,
                                                    PublicationEpoch epoch) noexcept
@@ -829,20 +878,29 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
 
     // ★ D105-R5-10: opportunistically re-drive any deferred Live obligation before processing this
     //   submission. Delivery resources freed by prior takes/drains are reused promptly. Runs on the
-    //   CoordinatorLoop (producer) thread only — SPSC-safe for recoveryIntentQueue_ / pendingRecoveryAdmission_.
+    //   CoordinatorLoop (producer) thread only — recoveryIntentQueue_ は SPSC、pendingRecoveryAdmission_ は
+    //   ★ D146: state CAS プロトコル＋payload 書込権限規約で保護される（旧「SPSC-safe」記述から更新）。
     //   CoalesceIdentity is resolved up-front so we can snapshot whether THIS target was deferred (delivery==None)
     //   BEFORE redrive runs; if redrive attaches the delivery in this same call, the coalesced resubmit below
     //   must not push a second representation (R10-3 / C16 single representation).
-    const CoalesceIdentity cid{
-        quarantinedHandle,
-        { buildSource.rebuildFingerprint.irIdentityHash,
-          buildSource.rebuildFingerprint.convolutionConfigHash,
-          buildSource.rebuildFingerprint.dspParameterHash }
+    // ★ G-4.2: I4 D12.2 SemanticRecoveryTarget from the RuntimeBuildSnapshot semantic source.
+    //   domainCoverage = necessary-condition metadata; buildInputHash = canonical BuildInput hash (NOT a
+    //   dummy/id/generation). These build the identity fields; NOT wired to supersession yet (G-4.3+).
+    const SemanticRecoveryTarget srt{
+        buildSource.rebuildFingerprint.irIdentityHash,
+        buildSource.rebuildFingerprint.convolutionConfigHash,
+        buildSource.rebuildFingerprint.dspParameterHash,
+        computeDomainCoverage(buildSource),
+        buildSource.convolverFingerprint,
+        computeBuildInputHash(buildSource.buildInput)
     };
+    const CoalesceIdentity cid{ quarantinedHandle, srt };
     const bool wasDeferredBefore = [&]() noexcept -> bool {
         const std::size_t e = recoveryAdmissions_.findByKey(cid);
         if (e == recoveryAdmissions_.kCapacity) return false;
-        return recoveryAdmissions_.slot(e).delivery == ObligationDeliveryState::None;
+        // ★ D152 T7: delivery read from the lifecycle snapshot (advisory; attaches commit via CAS).
+        return recoveryAdmissions_.slot(e).lifecycle.load(std::memory_order_acquire).delivery
+            == static_cast<std::uint8_t>(ObligationDeliveryState::None);
     }();
     redriveDeferredRecoveryObligations();
 
@@ -863,33 +921,55 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     // (cid resolved above, before redrive — see D105-R5-10 wasDeferredBefore snapshot)
     std::uint64_t oblId = 0;
     std::size_t slotIdx = recoveryAdmissions_.kCapacity;
+    // ★ G-4.3 (D27.2 linearization) + ★ D152 T5 (D152-R1): findByKey is a snapshot; a concurrent
+    //   resolveRecoveryObligation (RebuildThread Route A/C) can terminalize this slot between the
+    //   lookup and our use. Re-validate with a FULL-WORD identity CAS (expected == desired) so
+    //   COALESCE linearizes at a defined point and never mutates a terminal obligation.
+    //   ★ T5 retry rule (D152 R1): under the unified lifecycle word a CAS failure can ALSO mean
+    //   benign contention (a concurrent postSignal changed pending, or an attach changed delivery)
+    //   — NOT terminalization. compare_exchange_strong updates `w` to the current word; re-evaluate:
+    //   still Live → RETRY the identity CAS; terminal → fall through to tryInsert. NEVER create a
+    //   NEW obligation on a single contention failure (would double-count ΔL).
     const std::size_t existing = recoveryAdmissions_.findByKey(cid);
+    bool coalesceOnLive = false;
     if (existing != recoveryAdmissions_.kCapacity) {
-        // coalesce: reuse existing Live obligation (R5-rev1 Option 1 — ΔL = 0)
-        oblId = recoveryAdmissions_.slot(existing).id.load(std::memory_order_acquire);
+        auto& life = recoveryAdmissions_.slot(existing).lifecycle;
+        RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+        for (;;) {
+            if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
+                break;                                   // terminal → fresh admission path
+            RecoveryLifecycleWord desired = w;           // full-word identity CAS (D27.2)
+            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) {
+                coalesceOnLive = true;
+                break;
+            }
+            // CAS failed: w == current word. Benign contention → retry; terminal → break above.
+        }
+    }
+    if (coalesceOnLive) {
+        // COALESCE: reuse existing Live obligation (D18.7 — ΔL = 0; no new oblId)
+        oblId = recoveryAdmissions_.slot(existing).lifecycle.load(std::memory_order_acquire).obligationId;
         slotIdx = existing;
-        recoveryAdmissions_.slot(existing).intentId = intent.intentId; // diagnostic refresh
         convo::fetchAddAtomic(recoveryCoalescedCount_, std::uint64_t{1}, std::memory_order_release);
-        // ★ D105-R5-10: if THIS submission's redrive just attached the delivery to a previously-deferred
-        //   obligation, the redrive already enqueued the single transport/durable representation — do NOT
-        //   push a second one (R10-3 no-double-delivery; C16 single representation). Resubmissions of an
-        //   obligation already delivered before redrive (e.g. fillRecoveryQueue) still fall through and re-push.
-        if (wasDeferredBefore && recoveryAdmissions_.slot(existing).delivery != ObligationDeliveryState::None)
+        // ★ D105-R5-10: redrive may have attached a single delivery to a previously-deferred obligation —
+        //   do NOT push a second representation (R10-3 / C16 single-representation). Resubmissions of an
+        //   obligation already delivered before redrive still fall through and re-push.
+        if (wasDeferredBefore
+            && recoveryAdmissions_.slot(existing).lifecycle.load(std::memory_order_acquire).delivery
+                != static_cast<std::uint8_t>(ObligationDeliveryState::None))
             return true;
     } else {
-        const auto ins = recoveryAdmissions_.tryInsert(cid);
+        // ★ D152 T4: payload (handle/epoch/intentId/buildSource) moves INSIDE tryInsert, before the
+        //   Live-publishing CAS — the old post-insert writes (former cpp:956-959) are gone.
+        const auto ins = recoveryAdmissions_.tryInsert(cid, quarantinedHandle, epoch,
+                                                       intent.intentId, buildSource);
         if (!ins) {
             // ★ D105-R5-8: capacity exhausted (L == 32) — reject (INV-X1-7). No obligation, no transport.
             convo::fetchAddAtomic(recoveryCapacityExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
             return false;
         }
         slotIdx = *ins;
-        auto& slot = recoveryAdmissions_.slot(*ins);
-        oblId = slot.id.load(std::memory_order_acquire);
-        slot.handle = quarantinedHandle;
-        slot.epoch = epoch;
-        slot.intentId = intent.intentId;
-        slot.buildSource = buildSource;
+        oblId = recoveryAdmissions_.slot(*ins).lifecycle.load(std::memory_order_acquire).obligationId;
     }
 
     // NOTE (D105-R5-10): a coalesced re-submission is ALLOWED to re-push its transport intent (this is how
@@ -903,11 +983,13 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
 
     // ★ D105-R5-8 §4: carry obligationId on the transport intent (and durable fallback below).
     intent.obligationId = oblId;
-
+    // ★ G-4.2: thread the obligation's episode lineage id + in-episode recovery ordinal (source-of-truth
+    //   = the table slot; stable across coalesce/redrive). intentId stays the diagnostic event sequence.
+    intent.recoveryGeneration = recoveryAdmissions_.slot(slotIdx).recoveryGeneration;
     // ★ work88 (六次レビュー — INV-5: Recovery drop 禁止 / P2-1 §1.1.4 reservation-before-push): (unchanged)
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
-        recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::Transport;   // ★ D105-R5-10
+        casDelivery(slotIdx, oblId, ObligationDeliveryState::Transport);   // ★ D152 T6: full-word CAS attach
         return true;   // transport recovery exists（§1.9 Phase E — wake 条件）
     }
 
@@ -915,121 +997,187 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     convo::fetchAddAtomic(recoveryIntentDropCount_, std::uint64_t{1}, std::memory_order_release);
 
-    // ★ D105-R5-9 MUST-2 + D105-R5-10: never clobber a distinct live obligation's ONLY delivery representation.
-    //   The single durable slot may already hold a DIFFERENT obligation (B). Overwriting B would drop
-    //   B's delivery while B is still Live (a leak). In that case we must NOT overwrite: defer this
-    //   obligation's delivery (stays Live, delivery==None) and let B keep its slot. The re-drive
-    //   (D105-R5-10) rediscovers it when the occupied slot frees.
-    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission
-        && pendingRecoveryAdmission_.recoveryObligationId != oblId) {
-        recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::None;   // ★ D105-R5-10: deferred
+    // ★ D146 (I-HS2 / D144 Case C 修復): 単一の attach primitive へ収束。
+    //   旧経路の「state!=NoAdmission ∧ oblId 一致 → payload 上書き」は廃止（Building lease 中の
+    //   payload 書込 = cross-thread conflicting access の発生源）。同一 oblId が既に表現されていれば
+    //   no-op（意味不変の証明: D145 Phase 1-D — oblId mint 専有性 ⇒ 同一 semantic target）。
+    const auto attach = tryAttachDurableRecovery(quarantinedHandle, epoch, intent.intentId,
+                                                 oblId, intent.recoveryGeneration, buildSource);
+    if (attach == DurableAttachResult::OccupiedByOther) {
+        // ★ D105-R5-9 MUST-2 + D105-R5-10: never clobber a distinct live obligation's ONLY delivery
+        //   representation. Defer this obligation (delivery==None); redrive re-attaches when free.
+        casDelivery(slotIdx, oblId, ObligationDeliveryState::None);   // ★ D152 T6: deferred (CAS)
         convo::fetchAddAtomic(recoveryRetryDeferredCount_, std::uint64_t{1}, std::memory_order_release);
         return true;   // obligation stays Live; delivery re-driven when the occupied slot frees
     }
-    // durable admission へ保持（単一スロット — 空、または同じ obligation なら最新で上書き）
-    pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
-    pendingRecoveryAdmission_.pending = true;
-    pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
-    pendingRecoveryAdmission_.buildSource = buildSource;
-    pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
-    pendingRecoveryAdmission_.handle = quarantinedHandle;
-    pendingRecoveryAdmission_.epoch = epoch;
-    pendingRecoveryAdmission_.intentId = intent.intentId;
-    pendingRecoveryAdmission_.recoveryObligationId = oblId;   // ★ D105-R5-8
-    convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
-    recoveryAdmissions_.slot(slotIdx).delivery = ObligationDeliveryState::Durable;   // ★ D105-R5-10
+    // Attached（新規 publish）または AlreadyRepresented（既存 durable 表現あり — delivery 再同期）。
+    casDelivery(slotIdx, oblId, ObligationDeliveryState::Durable);   // ★ D152 T6: durable attach (CAS)
     return true;   // durable recovery exists（INV-X1-2: queue full ≠ Recovery lost — §1.9 Phase E）
 }
 
 // ★ D105-R5-9 + D105-R18: single Completion Authority (idempotent, lock-free, ISR-safe).
 //   Transitions the first Live→terminal for the given id via the table's id-based resolve();
-//   subsequent calls (same id) are no-ops. Called from onPublishCommitted (ISR, Route B),
-//   submitPublishRequest rejection branches (Route C), and markTransientFailure's
-//   retry-exhaustion branch (Route D — D105-R18).
+//   subsequent calls (same id) are no-ops. Called from onPublishCommitted (CoordinatorLoop,
+//   Route B), submitPublishRequest rejection branches (Route C), and the T3c adjudicate
+//   retry-exhaustion path (Route D — D152 T2 routes through THIS authority so the terminal
+//   transition + counter reset stay one full-word CAS; exhausted telemetry is winner-gated).
 //
 //   ★ D105-R18: the historical `else → ResolvedFailed` fallthrough has been removed. Each
 //   outcome now maps explicitly; the default branch asserts (Debug) / falls through
 //   harmlessly (Release) for unknown values. `RecoveryOutcome::Failed` is still a valid
-//   enum value but is reached only from markTransientFailure's exhaustion branch
-//   (the only sanctioned path to ResolvedFailed per R17-4 / D105-R18).
-void RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept
+//   enum value but is reached only from the exhaustion path (the only sanctioned path to
+//   ResolvedFailed per R17-4 / D105-R18 / D152 T2).
+//   ★ D152 T3: returns true iff this call won the Live→terminal CAS (single −1 authority).
+bool RuntimeIntentCoordinator::resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept
 {
     if (obligationId == 0)
-        return;
+        return false;
     // ★ D105-R5-9 MUST-1: Retry keeps the obligation Live (ΔL = 0); the durable admission is re-armed
     //   at the transport layer (settlePendingRecoveryAdmission(true)). Only terminal resolutions perform
     //   the single −1 via the table's id-based resolve (which re-scans by id — no cached index, no ABA).
     if (outcome == RecoveryOutcome::Retry)
-        return;
+        return false;
     ObligationState terminal;
     switch (outcome) {
         case RecoveryOutcome::Published:          terminal = ObligationState::ResolvedSuccess; break;
         case RecoveryOutcome::StaleSuperseded:    terminal = ObligationState::ResolvedStaleSuperseded; break;
         case RecoveryOutcome::ShutdownDiscarded:  terminal = ObligationState::ShutdownDiscarded; break;
         case RecoveryOutcome::Failed:             terminal = ObligationState::ResolvedFailed; break;
-        case RecoveryOutcome::Retry:              return;  // ★ D105-R5-9: handled above; defensive no-op
+        case RecoveryOutcome::Retry:              return false;  // ★ D105-R5-9: handled above; defensive no-op
         default:
             // ★ D105-R18: any unknown outcome is a programming error. The historical fallthrough
             //   to ResolvedFailed has been removed; do not silently re-introduce it.
             jassertfalse;
-            return;
+            return false;
     }
-    if (recoveryAdmissions_.resolve(obligationId, terminal)
-        && outcome == RecoveryOutcome::ShutdownDiscarded)
-        convo::fetchAddAtomic(recoveryObligationShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+    std::uint8_t discardedPending = 0;
+    const bool won = recoveryAdmissions_.resolve(obligationId, terminal, &discardedPending);
+    if (won) {
+        // ★ D152 T3: in-flight signals zeroed by terminalization are classified (observability only).
+        if (discardedPending > 0)
+            convo::fetchAddAtomic(recoveryFailureSignalDroppedTerminalCount_,
+                                  static_cast<std::uint64_t>(discardedPending), std::memory_order_release);
+        if (outcome == RecoveryOutcome::ShutdownDiscarded)
+            convo::fetchAddAtomic(recoveryObligationShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
+    }
+    return won;
 }
 
-// ★ D105-R18: transient-failure adjudication authority. Single public method that may
-//   produce ResolvedFailed in production. Atomic contract (per R17-7 LP-E):
-//     1. Re-scan the table for `id`; if not found or not Live, no-op.
-//     2. delivery = None  (P-B: re-eligibility for redrive, stranded Transport→None repair).
-//     3. consecutiveFailureCount.fetch_add(1, acq_rel).
-//     4. If new count >= kMaxObligationConsecutiveFailures → resolve(id, Failed).
-//        Increment recoveryRetryExhaustedCount_ for observability.
-//
-//   The counter is reset to 0 by RecoveryAdmissionTable::resolve on any terminal.
-//   `markTransientFailure` is called from the Orchestrator (transport-path build/publish
-//   failure sites — RuntimePublicationOrchestrator.cpp) and the Builder (durable-path
-//   build/warmup failure sites — AudioEngine.RebuildDispatch.cpp:1034/1056). The Builder
-//   call is alongside the existing settlePendingRecoveryAdmission(true) (separate linearizations
-//   for the durable slot's sub-state and the obligation-level counter per LP-F).
-//
-//   ΔL = 0 except in the exhaustion branch (terminal: −1).
-void RuntimeIntentCoordinator::markTransientFailure(std::uint64_t obligationId) noexcept
+// ── ★ D152/D152-R1 (T3c): transient-failure signal transport (T1) + adjudication (T2). ──
+// T1 producer (RebuildThread — the 6 former markTransientFailure sites):
+//   loop { w = load(acquire);
+//          id != O        → droppedStale   (unknown / post-reuse)
+//          state != Live  → droppedTerminal
+//          pending >= K   → saturated      (inert — adjudication terminals at K anyway)
+//          CAS {O, Live, p+1, a, d} }
+//   Touches NOTHING outside the lifecycle word (no payload/delivery/state/liveCount).
+void RuntimeIntentCoordinator::postRecoveryFailureSignal(std::uint64_t obligationId) noexcept
 {
-    if (obligationId == 0)
-        return;
-    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
-        if (recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire) != obligationId)
-            continue;
-        if (recoveryAdmissions_.slot(i).state.load(std::memory_order_acquire) != ObligationState::Live)
-            return;   // not Live → no-op (idempotent / late / wrong-id)
-        // (1) P-B: re-eligibility for redrive. Always reset delivery to None — the obligation
-        //     may have been Transport (stranded after Builder pop) or Durable (post-settle);
-        //     the redrive scan only picks up `delivery==None` obligations (R5-10).
-        recoveryAdmissions_.slot(i).delivery = ObligationDeliveryState::None;
-        // (2) Increment retry counter. fetch_add returns the *old* value; the new count is old+1.
-        const std::uint8_t newCount =
-            static_cast<std::uint8_t>(recoveryAdmissions_.slot(i).consecutiveFailureCount.fetch_add(
-                std::uint8_t{1}, std::memory_order_acq_rel) + std::uint8_t{1});
-        // (3) Exhaustion: route to ResolvedFailed terminal. This is the ONLY production
-        //     call site of resolveRecoveryObligation(id, Failed) per R17-4.
-        if (newCount >= kMaxObligationConsecutiveFailures) {
-            convo::fetchAddAtomic(recoveryRetryExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
-            recoveryAdmissions_.resolve(obligationId, ObligationState::ResolvedFailed);
-        }
+    if (obligationId == 0) {
+        convo::fetchAddAtomic(recoveryFailureSignalDroppedInvalidCount_, std::uint64_t{1}, std::memory_order_release);
         return;
     }
-    // unknown id → no-op
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        auto& life = recoveryAdmissions_.slot(i).lifecycle;
+        RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+        if (w.obligationId != obligationId)
+            continue;
+        for (;;) {
+            if (w.state != static_cast<std::uint8_t>(ObligationState::Live)) {
+                convo::fetchAddAtomic(recoveryFailureSignalDroppedTerminalCount_, std::uint64_t{1}, std::memory_order_release);
+                return;
+            }
+            if (w.pending >= kMaxObligationConsecutiveFailures) {
+                convo::fetchAddAtomic(recoveryFailureSignalSaturatedCount_, std::uint64_t{1}, std::memory_order_release);
+                return;
+            }
+            RecoveryLifecycleWord desired = w;
+            desired.pending = static_cast<std::uint8_t>(w.pending + 1);
+            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel))
+                return;   // posted
+            if (w.obligationId != obligationId) {
+                // slot reused (id monotonic) → this observation belongs to a dead obligation
+                convo::fetchAddAtomic(recoveryFailureSignalDroppedStaleCount_, std::uint64_t{1}, std::memory_order_release);
+                return;
+            }
+            // benign contention (adjudicate/attach changed the word) → retry with updated w
+        }
+    }
+    // no slot carries this id → stale/unknown observation
+    convo::fetchAddAtomic(recoveryFailureSignalDroppedStaleCount_, std::uint64_t{1}, std::memory_order_release);
+}
+
+// T2 consumer (CoordinatorLoop ONLY — runCoordinatorPhase, after processIntent, before redrive):
+//   per slot with pending>0:
+//     a2 = adjudicated + pending
+//     a2 >= K → terminalize via the SINGLE resolve authority (full-word CAS {O,Live,..}→{O,Failed,0,0,d});
+//               exhausted telemetry + liveCount −1 on the CAS winner ONLY (no over-count — D152 §9).
+//     else    → ONE CAS: pending=0 ∧ adjudicated=a2 ∧ delivery=None (drain+apply+P-B repair unified).
+//   state != Live → break (terminalization zeroed pending; counted in T3).
+//   id change (reuse) → break — old O's signals NEVER reach N (D149 #6 closed without affinity).
+void RuntimeIntentCoordinator::adjudicateRecoveryFailureSignals() noexcept
+{
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        auto& life = recoveryAdmissions_.slot(i).lifecycle;
+        RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+        if (w.pending == 0)
+            continue;
+        const std::uint64_t oid = w.obligationId;
+        for (;;) {
+            if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
+                break;   // terminalized concurrently — resolve zeroed/zeroes pending (T3 telemetry)
+            const std::uint8_t a2 = static_cast<std::uint8_t>(w.adjudicated + w.pending);
+            if (a2 >= kMaxObligationConsecutiveFailures) {
+                // ★ exhaustion: route through the single terminal authority; winner-only telemetry.
+                if (resolveRecoveryObligation(oid, RecoveryOutcome::Failed))
+                    convo::fetchAddAtomic(recoveryRetryExhaustedCount_, std::uint64_t{1}, std::memory_order_release);
+                break;
+            }
+            RecoveryLifecycleWord desired = w;
+            desired.pending = 0;
+            desired.adjudicated = a2;
+            desired.delivery = static_cast<std::uint8_t>(ObligationDeliveryState::None);   // P-B repair
+            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel))
+                break;   // drained + applied + None-ing in ONE transition
+            if (w.obligationId != oid)
+                break;   // slot reused — old signals are inert
+            // benign contention (postSignal) → retry with updated w
+        }
+    }
+}
+
+// ★ TEST-ONLY (D152 §7): synchronous compatibility wrapper preserving the pre-T3c semantics
+//   (1 call = 1 pending observation + 1 immediate adjudication) for the R18/R20/R21/P2/P3 suites.
+//   Production sites use postRecoveryFailureSignal (T1) + CL adjudicate (T2); the production call
+//   count of THIS method must remain 0 (D153 V1, grep-enforced).
+void RuntimeIntentCoordinator::markTransientFailure(std::uint64_t obligationId) noexcept
+{
+    postRecoveryFailureSignal(obligationId);
+    adjudicateRecoveryFailureSignals();
+}
+
+// ★ TEST-ONLY (D152 §10.2): advisory lifecycle snapshot for NT-1..5 (single-threaded test context).
+std::optional<RecoveryLifecycleWord>
+RuntimeIntentCoordinator::peekLifecycleForTest(std::uint64_t obligationId) const noexcept
+{
+    for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
+        const auto w = recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire);
+        if (w.obligationId == obligationId)
+            return w;
+    }
+    return std::nullopt;
 }
 
 // ★ D105-R5-9 MUST-2: guarded re-arm for a Retry obligation. Only touches the durable slot when it
 //   already holds THIS obligation in Building state; never overwrites a distinct live obligation.
+//   ★ D146 (Option A / D144-4): Builder 側維持。state は acquire 読のみ（transition は settle の CAS へ一元化）。
+//   Building は take CAS 成功（RebuildThread）しか生成せず、本関数も RebuildThread（Orchestrator:413 経由）
+//   で実行されるため、lease 内同一スレッド操作 — 二段 plain read の競合は atomic load で解消。
 void RuntimeIntentCoordinator::rearmRecoveryRetry(std::uint64_t obligationId) noexcept
 {
     if (obligationId == 0)
         return;
-    if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::Building
+    if (pendingRecoveryAdmission_.state.load(std::memory_order_acquire) == PendingRecoveryAdmission::State::Building
         && pendingRecoveryAdmission_.recoveryObligationId == obligationId)
         settlePendingRecoveryAdmission(true);
 }
@@ -1043,11 +1191,14 @@ void RuntimeIntentCoordinator::redriveDeferredRecoveryObligations() noexcept
 {
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
         auto& s = recoveryAdmissions_.slot(i);
-        if (s.state.load(std::memory_order_acquire) != ObligationState::Live)
+        // ★ D152 T7: ONE lifecycle snapshot — state/delivery/id read as a consistent word, never
+        //   as separate ownership decisions (the attach below commits via full-word CAS anyway).
+        const auto w = s.lifecycle.load(std::memory_order_acquire);
+        if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
             continue;
-        if (s.delivery != ObligationDeliveryState::None)
+        if (w.delivery != static_cast<std::uint8_t>(ObligationDeliveryState::None))
             continue;   // already has a delivery representation — do not re-send (§5)
-        redriveDeferredRecovery(s.id.load(std::memory_order_acquire));
+        redriveDeferredRecovery(w.obligationId);
     }
 }
 
@@ -1061,7 +1212,7 @@ void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationI
         return;
     std::size_t idx = recoveryAdmissions_.kCapacity;
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
-        if (recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire) == obligationId) {
+        if (recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire).obligationId == obligationId) {
             idx = i;
             break;
         }
@@ -1069,10 +1220,14 @@ void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationI
     if (idx == recoveryAdmissions_.kCapacity)
         return;   // unknown / mismatched id → no-op (do not fabricate an obligation)
     auto& s = recoveryAdmissions_.slot(idx);
-    if (s.state.load(std::memory_order_acquire) != ObligationState::Live)
-        return;
-    if (s.delivery != ObligationDeliveryState::None)
-        return;   // idempotent: already delivered (no duplicate)
+    // ★ D152 T7: lifecycle snapshot gate (advisory) — the attach commits via full-word CAS.
+    {
+        const auto w = s.lifecycle.load(std::memory_order_acquire);
+        if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
+            return;
+        if (w.delivery != static_cast<std::uint8_t>(ObligationDeliveryState::None))
+            return;   // idempotent: already delivered (no duplicate)
+    }
 
     convo::fetchAddAtomic(recoveryRetryRedriveCount_, std::uint64_t{1}, std::memory_order_release);
 
@@ -1084,27 +1239,24 @@ void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationI
         s.buildSource
     };
     intent.obligationId = obligationId;   // preserve the existing obligation id (no new id issued)
-
-    // Durable slot takes priority if free (single slot; admit THIS obligation, not a new one).
-    if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::NoAdmission) {
-        pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
-        pendingRecoveryAdmission_.pending = true;
-        pendingRecoveryAdmission_.recoveryGeneration = intent.intentId;
-        pendingRecoveryAdmission_.buildSource = s.buildSource;
-        pendingRecoveryAdmission_.reservationOwned = true;   // 1 admission = 1 reservation（INV-X1-5）
-        pendingRecoveryAdmission_.handle = s.handle;
-        pendingRecoveryAdmission_.epoch = s.epoch;
-        pendingRecoveryAdmission_.intentId = intent.intentId;
-        pendingRecoveryAdmission_.recoveryObligationId = obligationId;
-        convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
-        s.delivery = ObligationDeliveryState::Durable;
+    // ★ G-4.2: redrive preserves the obligation's episode lineage id + recovery ordinal (no new allocation).
+    intent.recoveryGeneration = s.recoveryGeneration;
+    // ★ D146 (I-HS2 / D146-5): submit と同一の attach primitive へ収束（独自 state check/payload 書込を廃止）。
+    //   Attached = 新規 publish、AlreadyRepresented = P3 same-holder repair（delivery 再同期・実体生成なし）、
+    //   OccupiedByOther = 他 oblId 占有 → transport fallback（C13 意味論不変）。
+    const auto attach = tryAttachDurableRecovery(s.handle, s.epoch, intent.intentId,
+                                                 obligationId, intent.recoveryGeneration, s.buildSource);
+    if (attach != DurableAttachResult::OccupiedByOther) {
+        casDelivery(idx, obligationId, ObligationDeliveryState::Durable);   // ★ D152 T7: CAS attach
+        redriveWakePending_ = true;   // ★ G-4.4-P2: 表現が消費待ち → Builder wake（repair も同一プロトコル）
         return;
     }
 
-    // Else attempt transport queue.
+    // Else attempt transport queue. (different holder — C13 fallback semantics unchanged)
     convo::fetchAddAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
     if (recoveryIntentQueue_.push(intent)) {
-        s.delivery = ObligationDeliveryState::Transport;
+        casDelivery(idx, obligationId, ObligationDeliveryState::Transport);   // ★ D152 T7: CAS attach
+        redriveWakePending_ = true;   // ★ G-4.4-P2 (D137): None→Transport attach success → wake Builder this tick
         return;
     }
     convo::fetchSubAtomic(pendingIntentCount_, std::uint64_t{1}, std::memory_order_release);
@@ -1119,13 +1271,18 @@ void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationI
 //   state transition。build 失敗（transient）は Building → DurablePending へ戻すことで
 //   retry を構造的に保証する（INV-X1-1: accepted ⇒ exactly one durable state が常に成立）。
 //   recoveryAdmissionPending_ は Building 中も true を維持（build gap を isFullyDrained が検出）。
-//   SPSC（Producer=CoordinatorLoop, Consumer=Builder Loop）のため競合なし。
+//   ★ D146 (I-HS2): CAS(DurablePending→Building, acquire) 成功そのものが lease 取得。
+//   二段判定（load してから store）は lease ではない — CAS 失敗時は payload を読まない。
 std::optional<RuntimeIntentCoordinator::RecoveryIntent>
 RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
 {
-    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::DurablePending)
-        return std::nullopt;
+    PendingRecoveryAdmission::State expected = PendingRecoveryAdmission::State::DurablePending;
+    if (!pendingRecoveryAdmission_.state.compare_exchange_strong(
+            expected, PendingRecoveryAdmission::State::Building,
+            std::memory_order_acquire, std::memory_order_relaxed))
+        return std::nullopt;   // 非 DurablePending → lease 取得失敗、payload 非読取
 
+    // lease 保持（Building）。acquire が attach の release と対になり payload 書込が可視・安定。
     RecoveryIntent intent{
         pendingRecoveryAdmission_.handle,
         pendingRecoveryAdmission_.epoch,
@@ -1134,27 +1291,31 @@ RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
         pendingRecoveryAdmission_.buildSource
     };
     intent.obligationId = pendingRecoveryAdmission_.recoveryObligationId;   // ★ D105-R5-8
-    // ★ lease: DurablePending → Building（クリアしない）。build 失敗時は Building → DurablePending へ戻す。
-    pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::Building;
+    intent.recoveryGeneration = pendingRecoveryAdmission_.recoveryGeneration;  // ★ G-4.2: durable slot ordinal
     return intent;
 }
 
 bool RuntimeIntentCoordinator::hasPendingRecoveryAdmission() const noexcept
 {
     return convo::consumeAtomic(recoveryAdmissionPending_, std::memory_order_acquire)
-        && pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission;
+        && pendingRecoveryAdmission_.state.load(std::memory_order_acquire)
+               != PendingRecoveryAdmission::State::NoAdmission;
 }
 
 // ★ work88 (X1 §6.1 — RecoveryAdmissionClosed): durable admission を破棄（shutdown 専用）。
 //   shutdown 中は publish/commit が実行されないため、durable admission を保持しても意味がない
 //   （§6.1 case B）。discard は ShutdownDiscard として recoveryShutdownDiscardCount_ に記録
 //   （INV-5 — silent loss ではない・意図的な lifecycle discard — dash §8.1）。
+//   ★ D146: 実行時点は shutdownCoordinatorLoop() + rebuildThread.join() 後（単一スレッド）。
+//   reset 順序 = payload クリア → state release（逆順禁止）。
 void RuntimeIntentCoordinator::discardPendingRecoveryAdmission() noexcept
 {
-    if (pendingRecoveryAdmission_.state != PendingRecoveryAdmission::State::NoAdmission)
+    if (pendingRecoveryAdmission_.state.load(std::memory_order_acquire) != PendingRecoveryAdmission::State::NoAdmission)
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
-        pendingRecoveryAdmission_ = PendingRecoveryAdmission{};
+        resetDurableAdmissionPayload();
+        pendingRecoveryAdmission_.state.store(PendingRecoveryAdmission::State::NoAdmission,
+                                              std::memory_order_release);
         convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
     }
 }
@@ -1162,19 +1323,107 @@ void RuntimeIntentCoordinator::discardPendingRecoveryAdmission() noexcept
 // ★ work88 (X1 §6.1 — lease 方式): Builder の build 結果に応じて durable admission を settle。
 //   retry=true: Building → DurablePending（transient failure — 次サイクルで再 take。recoveryAdmissionPending_
 //   は true 維持 = build gap を isFullyDrained が検出）。
-//   retry=false: クリア（build success / Discarded — state = NoAdmission + recoveryAdmissionPending_ = false）。
-//   SPSC（Consumer = Builder Loop のみ）のため競合なし。
+//   retry=false: クリア（build success / Discarded — payload reset → state NoAdmission release →
+//                recoveryAdmissionPending_ = false）。
+//   ★ D146 (I-HS2): 両分岐とも CAS を linearization point とする（plain read→plain write 置換は禁止）。
+//   settle は Builder（lease 保持者）のみが呼ぶ（take CAS 成功か rearm の Building 確認後）。
 void RuntimeIntentCoordinator::settlePendingRecoveryAdmission(bool retry) noexcept
 {
     if (retry)
     {
-        if (pendingRecoveryAdmission_.state == PendingRecoveryAdmission::State::Building)
-            pendingRecoveryAdmission_.state = PendingRecoveryAdmission::State::DurablePending;
-        // recoveryAdmissionPending_ は true 維持（durable 有効のまま）
+        PendingRecoveryAdmission::State expected = PendingRecoveryAdmission::State::Building;
+        pendingRecoveryAdmission_.state.compare_exchange_strong(
+            expected, PendingRecoveryAdmission::State::DurablePending,
+            std::memory_order_release, std::memory_order_relaxed);
+        // 非 Building（契約上あり得ない）は no-op。recoveryAdmissionPending_ は true 維持。
         return;
     }
-    pendingRecoveryAdmission_ = PendingRecoveryAdmission{};
+    // ★ reset 順序固定: payload クリア → state release（逆順は Builder→CL の stale 読を生むため禁止）。
+    resetDurableAdmissionPayload();
+    PendingRecoveryAdmission::State expected = PendingRecoveryAdmission::State::Building;
+    pendingRecoveryAdmission_.state.compare_exchange_strong(
+        expected, PendingRecoveryAdmission::State::NoAdmission,
+        std::memory_order_release, std::memory_order_relaxed);
     convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
+}
+
+// ★ D146 (I-HS2 / D144 Case C 修復): 単一の durable payload mutation path。
+//   submitRecoveryRequest（durable fallback）と redriveDeferredRecovery（付着・repair）が共通。
+//   契約:
+//     1. state を acquire で観測 — NoAdmission のときだけ payload に触れる。
+//        （NoAdmission からの唯一の退出権限は本 CL 経路自身。Builder は NoAdmission を生成するだけで
+//         消費せず、discard は join 後 → live 中に他者遷移は存在しない。）
+//     2. payload 全書込 → CAS(NoAdmission→DurablePending, release) で publish。
+//     3. 占有中は絶対上書きしない: 同一 oblId = AlreadyRepresented（no-op・意味不変の証明は
+//        D145 Phase 1-D: oblId mint 専有性 ⇒ 同一 CoalesceIdentity ⇒ 同一 buildInput、epoch/intentId
+//        は recovery build 経路で非消費/診断専用）、異 oblId = OccupiedByOther（D105-R5-9 MUST-2）。
+RuntimeIntentCoordinator::DurableAttachResult
+RuntimeIntentCoordinator::tryAttachDurableRecovery(const DSPHandle& handle, PublicationEpoch epoch,
+                                                   std::uint64_t intentId, std::uint64_t oblId,
+                                                   RecoveryGeneration generation,
+                                                   const convo::RuntimeBuildSnapshot& buildSource) noexcept
+{
+    using State = PendingRecoveryAdmission::State;
+    const State observed = pendingRecoveryAdmission_.state.load(std::memory_order_acquire);
+    if (observed != State::NoAdmission) {
+        if (pendingRecoveryAdmission_.recoveryObligationId == oblId)
+            return DurableAttachResult::AlreadyRepresented;   // 既存表現あり — payload 非書込（D144 Case C）
+        return DurableAttachResult::OccupiedByOther;          // 他 obligation の唯一表現を clobber しない
+    }
+    pendingRecoveryAdmission_.pending = true;
+    pendingRecoveryAdmission_.recoveryGeneration = generation;   // ★ G-4.2: in-episode ordinal (dedicated; NOT intentId)
+    pendingRecoveryAdmission_.buildSource = buildSource;
+    pendingRecoveryAdmission_.reservationOwned = true;           // 1 admission = 1 reservation（INV-X1-5）
+    pendingRecoveryAdmission_.handle = handle;
+    pendingRecoveryAdmission_.epoch = epoch;
+    pendingRecoveryAdmission_.intentId = intentId;
+    pendingRecoveryAdmission_.recoveryObligationId = oblId;      // ★ D105-R5-8
+    State expected = State::NoAdmission;
+    if (pendingRecoveryAdmission_.state.compare_exchange_strong(
+            expected, State::DurablePending, std::memory_order_release, std::memory_order_acquire)) {
+        convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
+        return DurableAttachResult::Attached;
+    }
+    // 防御（live 中は発生不能 — 上記権限論証）。残骸 payload は NoAdmission 下で誰にも読まれず、
+    // 次の attach が全面上書きするため rollback 不要。観測された占有者で分類を返す。
+    return (pendingRecoveryAdmission_.recoveryObligationId == oblId)
+        ? DurableAttachResult::AlreadyRepresented
+        : DurableAttachResult::OccupiedByOther;
+}
+
+void RuntimeIntentCoordinator::resetDurableAdmissionPayload() noexcept
+{
+    // ★ D146: 呼び出し側が遷移権限（Building lease / join 後 discard / NoAdmission 観測 attach）を持つこと。
+    pendingRecoveryAdmission_.pending = false;
+    pendingRecoveryAdmission_.recoveryGeneration = 0;
+    pendingRecoveryAdmission_.buildSource = {};
+    pendingRecoveryAdmission_.reservationOwned = false;
+    pendingRecoveryAdmission_.handle = {};
+    pendingRecoveryAdmission_.epoch = 0;
+    pendingRecoveryAdmission_.intentId = 0;
+    pendingRecoveryAdmission_.recoveryObligationId = 0;
+}
+
+// ★ D152 T6/T7: single delivery-attach primitive. Changes ONLY W.delivery via full-word CAS.
+//   Returns false when the slot no longer carries oblId or is not Live (terminalized concurrently) —
+//   delivery is NEVER written to a terminal or reused obligation (D150 §8 / D152 §6).
+//   CoordinatorLoop-only callers (submit attach / redrive attach). Benign contention (a concurrent
+//   postSignal changed pending) retries with the CAS-updated current word.
+bool RuntimeIntentCoordinator::casDelivery(std::size_t slotIdx, std::uint64_t oblId,
+                                           ObligationDeliveryState to) noexcept
+{
+    auto& life = recoveryAdmissions_.slot(slotIdx).lifecycle;
+    RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+    for (;;) {
+        if (w.obligationId != oblId
+            || w.state != static_cast<std::uint8_t>(ObligationState::Live))
+            return false;
+        RecoveryLifecycleWord desired = w;
+        desired.delivery = static_cast<std::uint8_t>(to);
+        if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel))
+            return true;
+        // w updated to the current word → re-evaluate (terminal/reuse exits above; contention retries)
+    }
 }
 
 std::optional<RuntimeIntentCoordinator::RecoveryIntent>
@@ -1211,7 +1460,7 @@ void RuntimeIntentCoordinator::discardRecoveryRequestsOnShutdown() noexcept
     //   −1 stays idempotent (CAS Live→terminal); a concurrent ISR completion that wins the CAS makes
     //   shutdown skip it (no double −1, no L underflow). Delivery discard below does NOT touch L.
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
-        const std::uint64_t oblId = recoveryAdmissions_.slot(i).id.load(std::memory_order_acquire);
+        const std::uint64_t oblId = recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire).obligationId;
         if (oblId != 0)
             resolveRecoveryObligation(oblId, RecoveryOutcome::ShutdownDiscarded);
     }

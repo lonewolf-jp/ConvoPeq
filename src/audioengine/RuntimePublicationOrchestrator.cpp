@@ -308,7 +308,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   incremented). ResolvedFailed only at retry exhaustion. The shutdown check
         //   below still routes to RejectedShutdown; obligation disposition is independent
         //   of the return decision.
-        engine_.runtimePublicationBridge_.markTransientFailure(req.recoveryObligationId);
+        engine_.runtimePublicationBridge_.postRecoveryFailureSignal(req.recoveryObligationId);
         if (engine_.isShutdownInProgress())
             return PublicationAdmission::Decision::RejectedShutdown;
         return PublicationAdmission::Decision::RejectedPublishFailure;
@@ -398,7 +398,7 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             //   guarantees exactly one markTransientFailure call per failure event. ΔL=0,
             //   delivery=None (P-B), counter+1, exhaustion→ResolvedFailed (path X only).
             if (req.recoveryObligationId != 0)
-                engine_.runtimePublicationBridge_.markTransientFailure(req.recoveryObligationId);
+                engine_.runtimePublicationBridge_.postRecoveryFailureSignal(req.recoveryObligationId);
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);

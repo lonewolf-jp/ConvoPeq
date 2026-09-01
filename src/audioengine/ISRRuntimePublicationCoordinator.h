@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <array>       // ★ D105-R5-8: RecoveryAdmissionTable
+#include <cassert>   // ★ D152-R1 §4: RecoveryAdmissionTable ctor の runtime lock-free 検証（ISRDSPHandle.cpp 前例）
 #include <optional>  // ★ FUTURE-3: popRecoveryRequest() return type
 #include "ISRClosure.h"
 #include "ISRPayloadTier.h"
@@ -69,6 +70,32 @@ enum class RuntimeBoundary : uint8_t {
     RTWorld,
     NonRTWorld
 };
+
+// ── ★ D152/D152-R1 (T3c): single atomic ownership domain for one logical recovery obligation ──
+//   ALL lifecycle decisions — identity (obligationId), liveness (state), un-adjudicated failure
+//   signals (pending), adjudicated retry budget (adjudicated), transport residency (delivery) —
+//   commit ONLY via a full 16-byte CAS on this word (compare_exchange_strong). Loads are advisory:
+//   they never commit a transition by themselves (TOCTOU discipline — D152-R1 §3).
+//   Backend (D152-R1 §2 / D152-R2 訂正): std::atomic<RecoveryLifecycleWord>. MSVC's 16-byte
+//   by-value atomic uses the STL lock-pool backend (_Atomic_storage spinlock; CAS = spinlock-
+//   guarded full 16-byte compare/copy = true atomic mutual exclusion + full barrier), and
+//   is_lock_free()==false is an ACCURATE report (D152-R2 §1). The runtime value is recorded
+//   in the RecoveryAdmissionTable ctor (ISRDSPHandle.cpp:12-27 precedent); false is expected.
+struct alignas(16) RecoveryLifecycleWord {
+    std::uint64_t obligationId = 0;   // +0   monotonic identity (0 = none; resolveRecoveryObligation early-return)
+    std::uint8_t  state        = 0;   // +8   ObligationState (full enum byte; 8 values incl. dormant)
+    std::uint8_t  pending      = 0;   // +9   un-adjudicated failure signals (0..K, saturating)
+    std::uint8_t  adjudicated  = 0;   // +10  adjudicated consecutive failures (0..K-1 while Live; 0 at terminal)
+    std::uint8_t  delivery     = 0;   // +11  ObligationDeliveryState
+    std::uint8_t  pad[4]       = {};  // +12  ALWAYS zero — the CAS compares all 16 bytes
+};
+static_assert(sizeof(RecoveryLifecycleWord) == 16, "T3c lifecycle word must be exactly 16 bytes");
+static_assert(alignof(RecoveryLifecycleWord) == 16, "T3c lifecycle word must be 16-byte aligned (lock-free switch readiness)");
+static_assert(std::is_trivially_copyable_v<RecoveryLifecycleWord>, "T3c lifecycle word must be trivially copyable");
+static_assert(std::is_standard_layout_v<RecoveryLifecycleWord>, "T3c lifecycle word must be standard layout");
+static_assert(alignof(std::atomic<RecoveryLifecycleWord>) >= 16,
+    "atomic<RecoveryLifecycleWord> must keep 16-byte alignment (lock-free switch readiness; ISRDSPHandle.h:212 precedent)");
+// ★ D152-R2 教訓: is_always_lock_free の static_assert は禁止（MSVC の atomic<16B by-value> は lock-pool 実装で false が正確）。
 
 // ★ work88 (X1〜X6 §6.9 Phase 0 / 二十五次レビュー): INV-ISR-01〜07 — ISR 全体の最上位不変条件。
 //   （コード契約として固定 — Phase 0 invariant freeze / X_IMPL_CHECKLIST #2）
@@ -215,7 +242,26 @@ public:
      // ── ★ FUTURE-3: Recovery Intent (transport-only payload) ──
      //   submitRecoveryRequest() は enqueue のみ。pop は Builder Loop (FUTURE-10 共通 Intent Queue へ移行)。
      //   Decision Authority を持たない: push/pop 以外の意味なし（復旧 World build は Builder 側）。
-     struct RecoveryIntent {
+    // ── ★ G-4.1 (R1): Recovery identity domain types (I4 D13 domain separation). ──
+    //   Distinct named types so the recovery lineage / generation domains are reasoned separately.
+    //   ★ D105-R23 (phase-I): RecoveryEpisodeId (quarantine episode lineage) is Phase-II deferred — design-only here.
+    //   RecoveryGeneration is an in-episode ordinal used ONLY for "newer is after older" in
+    //   canSupersede (D12.4/D16) — it is NOT part of the coalesce/identity key (D18).
+    using RecoveryGeneration = std::uint64_t;   // in-episode recovery ordinal (newer-is-after only; != intentId)
+
+    // ★ G-4.1 (R1): ObligationDomains — which semantic domain(s) a recovery target covers (bitmask).
+    //   D12.2/D13. Necessary condition for supersession (isDomainSuperset); never a sufficient condition.
+    //   Phase-I semantic containment is value-equality only (D12.2/D18).
+    enum class ObligationDomains : std::uint8_t {
+        None   = 0,
+        IR     = 1u << 0,
+        Conv   = 1u << 1,
+        EQ     = 1u << 2,
+        Config = 1u << 3,
+        OS     = 1u << 4
+    };
+
+    struct RecoveryIntent {
          DSPHandle handle;            // recovery 対象（quarantined DSPHandle）
          PublicationEpoch epoch;      // emit 時の publicationEpoch（FIFO/epoch 検証用）
          uint64_t intentId;           // 診断・モニタリング用シーケンス番号
@@ -229,7 +275,8 @@ public:
          //   ConvolverProcessor::BuildSnapshot は juce::File/String を含み POD でないため内包しない
          //   （五次レビュー案 i — build 時に uiConvolverProcessor.captureBuildSnapshot() から取得）。
          convo::RuntimeBuildSnapshot buildSource;
-     };
+        RecoveryGeneration recoveryGeneration{0};   // ★ G-4.2: in-episode lineage ordinal (allocated in tryInsert; != intentId)
+    };
      static_assert(std::is_trivially_copyable_v<RecoveryIntent>,
          "RecoveryIntent must be trivially copyable for LockFreeRingBuffer");
      static_assert(std::is_standard_layout_v<RecoveryIntent>,
@@ -245,16 +292,31 @@ public:
 
     // Semantic recovery target — derived from build fingerprint; basis for coalescing
     // (R5-rev1 Option 1: existing O preserved, new attempt coalesced — ΔL = 0).
+    // ★ G-4.1 (R1): SemanticRecoveryTarget — I4 D12.2 canonical (5 semantic values + domainCoverage).
+    //   Derived deterministically from RuntimeBuildSnapshot (rebuildFingerprint hashes + convolverFingerprint
+    //   + buildInput hash). Phase-I isSemanticTargetSuperset = ALL 5 values equal (conservative). domainCoverage
+    //   is the NECESSARY condition only (never sufficient). D12.1/T17: A={IR=B},B={IR=C} same {IR} domain ⇒
+    //   B does NOT supersede A.
     struct SemanticRecoveryTarget {
-        std::uint64_t irIdentityHash = 0;
-        std::uint64_t convolutionConfigHash = 0;
-        std::uint64_t dspParameterHash = 0;
+        // Field order: the 3 original hashes FIRST so the existing aggregate init at
+        // submitRecoveryRequest (cpp:836-841 `{irIdentityHash, convolutionConfigHash, dspParameterHash}`)
+        // stays index-stable and behavior-identical (G-4.1 behavioral freeze; no .cpp change).
+        std::uint64_t irIdentityHash = 0;         // IR domain real value
+        std::uint64_t convolutionConfigHash = 0;  // Conv domain real value
+        std::uint64_t dspParameterHash = 0;       // EQ domain real value
+        ObligationDomains domainCoverage = ObligationDomains::None;   // necessary condition (isDomainSuperset)
+        std::uint64_t convolverFingerprint = 0;   // Conv value (D12.2)
+        std::uint64_t buildInputHash = 0;         // Config value (D12.2)
         bool operator==(const SemanticRecoveryTarget& o) const noexcept {
             return irIdentityHash == o.irIdentityHash
                 && convolutionConfigHash == o.convolutionConfigHash
-                && dspParameterHash == o.dspParameterHash;
+                && convolverFingerprint == o.convolverFingerprint
+                && dspParameterHash == o.dspParameterHash
+                && buildInputHash == o.buildInputHash;
         }
     };
+
+
     // ★ D105-R5-9 MUST-3: CoalesceIdentity = quarantinedHandle + SemanticRecoveryTarget.
     //   Equivalence requires BOTH handle and target to match, so two distinct DSP handles that
     //   happen to share the same build fingerprint are NOT coalesced (R8 §4 counterexample:
@@ -275,7 +337,9 @@ public:
         ResolvedFailed,
         ResolvedStaleSuperseded,   // ★ D105-R5-9 MUST-4: stale-generation rejection (R7 §11)
         ResolvedRetry,
-        ShutdownDiscarded
+        ShutdownDiscarded,
+        ResolvedSuperseded   // ★ G-4.1 (R1): dormant in Phase I — semantic containment is equality-only,
+                             //   so no production transition reaches this yet (G-4.4 / Phase II extension).
     };
 
     // ★ D105-R5-10: per-obligation delivery residency. Independent of ObligationState.
@@ -283,8 +347,12 @@ public:
     //   Transport= intent is (or was) in recoveryIntentQueue_ (enqueued for the Builder).
     //   Durable  = held in the single durable slot (DurablePending / Building sub-states).
     //   Lets the re-drive rediscover ONLY Live obligations lacking a delivery representation
-    //   (§5: do not re-send Transport/Durable obligations → no duplicate delivery). CoordinatorLoop-
-    //   only field (written solely on the producer thread) — non-atomic by design.
+    //   (§5: do not re-send Transport/Durable obligations → no duplicate delivery).
+    // ★ D152-R1 (T3c): delivery is now a FIELD of RecoveryLifecycleWord (W.delivery).
+    //   Mutations happen ONLY via full-word CAS on the CoordinatorLoop (tryInsert init / submit
+    //   attach / redrive attach / adjudicate None-ing). postSignal and resolve PRESERVE delivery.
+    //   The old RebuildThread plain write (markTransientFailure cpp:1071) is eliminated (W5) —
+    //   the "CoordinatorLoop-only writer" claim below is now structurally true (grep-enforced V2).
     enum class ObligationDeliveryState : std::uint8_t {
         None = 0,
         Transport,
@@ -304,24 +372,26 @@ public:
     };
     using RecoveryResolution = RecoveryOutcome;   // resolution input to the Completion Authority
 
-    // Lock-free, ISR-safe obligation record. id/state are atomic so the single completion
-    // authority (resolveRecoveryObligation, callable from ISR) can transition Live→terminal
-    // without a mutex. identity is immutable once admitted (written only by CoordinatorLoop).
+    // ★ D152/D152-R1 (T3c): Lock-free obligation record with a SINGLE 16-byte lifecycle ownership
+    //   domain. obligationId/state/pending/adjudicated/delivery commit ONLY via full-word CAS on
+    //   `lifecycle` (compare_exchange_strong) — the completion authority (resolveRecoveryObligation)
+    //   transitions Live→terminal without a mutex, and an old adjudication can no longer overwrite
+    //   the terminal counter reset (D149 STOP #5 structurally eliminated).
+    //   The payload fields below are plain: written ONLY by the CoordinatorLoop BEFORE the
+    //   Live-publishing CAS (tryInsert — D152 T4 ordering), read ONLY on the CoordinatorLoop;
+    //   publication is ordered by the CAS (acq_rel full barrier). identity is immutable once admitted.
+#pragma warning(push)
+#pragma warning(disable : 4324)   // C4324: intentional padding from the alignas(16) lifecycle word
     struct LogicalRecoveryObligation {
-        std::atomic<LogicalRecoveryObligationId> id{0};
+        std::atomic<RecoveryLifecycleWord> lifecycle{RecoveryLifecycleWord{}};   // ★ T3c 単一所有権ドメイン
         CoalesceIdentity identity{};
-        std::atomic<ObligationState> state{ObligationState::NoObligation};
         DSPHandle handle{};
         PublicationEpoch epoch{0};
         std::uint64_t intentId = 0;
         convo::RuntimeBuildSnapshot buildSource{};
-        ObligationDeliveryState delivery{ObligationDeliveryState::None};   // ★ D105-R5-10
-        // ★ D105-R18: per-obligation retry budget. Single writer (CoordinatorLoop via
-        //   markTransientFailure) for transient failures; reset to 0 in resolve() on
-        //   terminal disposition. Reaches kMaxObligationConsecutiveFailures → only
-        //   sanctioned path to ResolvedFailed.
-        std::atomic<std::uint8_t> consecutiveFailureCount{0};
+        RecoveryGeneration recoveryGeneration{0};  // ★ G-4.2: in-episode ordinal — allocated per obligation (tryInsert); != intentId, != buildSource.generation
     };
+#pragma warning(pop)
     static constexpr std::size_t kMaxLogicalRecoveryObligations = 32;  // INV-CAP-7
     // ★ D105-R18: obligation-level retry exhaustion bound. Inherited from the existing
     //   AudioEngine.RebuildDispatch.cpp:1015 kMaxRecoveryConsecutiveFailures (Builder-local
@@ -340,57 +410,122 @@ public:
     public:
         static constexpr std::size_t kCapacity = Capacity;
 
+        // ★ D152-R1 §4 / D152-R2 §3: runtime is_lock_free() probe of the 16-byte lifecycle atomic.
+        //   Follows the ISRDSPHandle.cpp:12-27 precedent EXACTLY: on MSVC, atomic<16B by-value>
+        //   uses the STL lock-pool backend and is_lock_free()==false is an ACCURATE report
+        //   (not an anomaly — the MSVC branch records the value only); non-MSVC x64 asserts.
+        //   is_always_lock_free is NOT a failure criterion (D152-R2 教訓).
+        RecoveryAdmissionTable() noexcept {
+            static const bool isLockFree = [] {
+                std::atomic<RecoveryLifecycleWord> test{};
+                const bool ok = test.is_lock_free();
+#if defined(_MSC_VER)
+                (void)ok;   // MSVC: false is the expected, accurate lock-pool report (D152-R2 §3); value recorded only.
+#else
+                assert(ok && "atomic<RecoveryLifecycleWord> must be lock-free on x64 for ISR Runtime");
+#endif
+                return ok;
+            }();
+            (void)isLockFree;   // unused in Release
+        }
+
         // Find a Live obligation by coalesce key (for coalescing a new attempt onto an existing O).
+        // ★ D152 T5: state is read from the lifecycle snapshot (advisory load — the caller commits
+        //   via the full-word identity CAS; a stale Live here cannot produce a false commit).
         std::size_t findByKey(const CoalesceIdentity& key) const noexcept {
             for (std::size_t i = 0; i < kCapacity; ++i) {
-                if (slots_[i].state.load(std::memory_order_acquire) == ObligationState::Live
+                const auto w = slots_[i].lifecycle.load(std::memory_order_acquire);
+                if (w.state == static_cast<std::uint8_t>(ObligationState::Live)
                     && slots_[i].identity == key)
                     return i;
             }
             return kCapacity; // npos
         }
 
-        // Single +1 site: allocate a new Live obligation (post-coalesce). Returns nullopt at capacity.
-        std::optional<std::size_t> tryInsert(const CoalesceIdentity& key) noexcept {
+        // ★ D152 T4 (single +1 site): allocate a new Live obligation (post-coalesce).
+        //   Publication ordering is FIXED (D152-R1 §3 / D153 §3-B):
+        //     (1) payload plain writes (identity/handle/epoch/intentId/buildSource/recoveryGeneration)
+        //         — sequenced-before the Live-publishing CAS; a terminal slot has no cross-thread
+        //         payload readers, so overwriting the previous occupant's payload is safe;
+        //     (2) full-word CAS {observed non-Live} → {N, Live, 0, 0, None} — id/state/pending/
+        //         adjudicated/delivery become visible ATOMICALLY (acq_rel; MSVC = lock-pool CAS, D152-R2);
+        //     (3) liveCount_ +1 — ONLY the CAS winner increments.
+        //   The payload arguments move the former caller-side post-insert writes (old cpp:956-959)
+        //   INSIDE the pre-CAS window — no payload write may remain after Live publication.
+        //   Returns nullopt at capacity.
+        std::optional<std::size_t> tryInsert(const CoalesceIdentity& key,
+                                             const DSPHandle& handle,
+                                             PublicationEpoch epoch,
+                                             std::uint64_t intentId,
+                                             const convo::RuntimeBuildSnapshot& buildSource) noexcept {
             if (liveCount_.load(std::memory_order_acquire) >= kCapacity)
                 return std::nullopt; // capacity exhausted → caller rejects (ΔL=0)
             for (std::size_t i = 0; i < kCapacity; ++i) {
                 // a non-Live slot is reusable (fresh id==0, or terminal → reclaimed)
-                if (slots_[i].state.load(std::memory_order_acquire) != ObligationState::Live) {
-                    const LogicalRecoveryObligationId id = ++nextId_;
-                    slots_[i].id.store(id, std::memory_order_relaxed);
-                    slots_[i].identity = key;
-                    slots_[i].state.store(ObligationState::Live, std::memory_order_release);
-                    slots_[i].delivery = ObligationDeliveryState::None;   // ★ D105-R5-10: fresh slot has none
-                    // ★ D105-R18: reset retry budget on slot reuse (slot is fresh — any prior terminal
-                    //   left consecutiveFailureCount at its terminal value; reset for clean accounting).
-                    slots_[i].consecutiveFailureCount.store(0, std::memory_order_release);
-                    convo::fetchAddAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
-                    return i;
+                RecoveryLifecycleWord expected = slots_[i].lifecycle.load(std::memory_order_acquire);
+                if (expected.state == static_cast<std::uint8_t>(ObligationState::Live))
+                    continue;
+                const LogicalRecoveryObligationId id = ++nextId_;
+                // (1) payload BEFORE Live publication
+                slots_[i].identity = key;
+                slots_[i].handle = handle;
+                slots_[i].epoch = epoch;
+                slots_[i].intentId = intentId;
+                slots_[i].buildSource = buildSource;
+                slots_[i].recoveryGeneration = ++nextRecoveryGeneration_;
+                // (2) full-word CAS: observed non-Live → {N, Live, 0, 0, None}
+                RecoveryLifecycleWord desired{};
+                desired.obligationId = id;
+                desired.state = static_cast<std::uint8_t>(ObligationState::Live);
+                bool published = false;
+                while (expected.state != static_cast<std::uint8_t>(ObligationState::Live)) {
+                    if (slots_[i].lifecycle.compare_exchange_strong(
+                            expected, desired, std::memory_order_acq_rel)) {
+                        published = true;
+                        break;
+                    }
+                    // expected updated to the current word by compare_exchange_strong. A still-non-Live
+                    // current word means a benign race (e.g. concurrent terminalization) → retry.
                 }
+                if (!published)
+                    continue; // slot became Live (single-inserter CL makes this unreachable; defensive)
+                // (3) liveCount_ ONLY on the Live-publishing winner
+                convo::fetchAddAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
+                return i;
             }
             return std::nullopt; // invariant guard (unreachable while L < Capacity)
         }
 
-        // Single −1 authority. ★ D105-R5-9 MUST-3: id-based resolution — re-scans by id and CASes
-        // state within the same atomic step (NO cached index from a prior findById). A reused slot is
-        // always assigned a strictly-greater id (nextId_ is monotonic), so a reused slot can never match
-        // a stale id → no ABA / no wrong-obligation termination. Idempotent: a prior terminal state (or a
-        // lost CAS race) makes the inner CAS fail → returns false (no double −1, no L underflow).
-        // ★ D105-R18: on successful Live→terminal CAS, reset consecutiveFailureCount to 0 (slot is
-        //   freed; any prior counter value is meaningless post-terminal). Reset is a plain store
-        //   *after* the CAS so it is observed only by readers after the terminal is visible.
-        bool resolve(LogicalRecoveryObligationId id, ObligationState terminalState) noexcept {
+        // ★ D152 T3 (single −1 authority): id-based resolution with the terminal transition and the
+        //   counter/pending reset UNIFIED into ONE full-word CAS:
+        //     {id, Live, p, a, d} → {id, T, 0, 0, d}   (delivery PRESERVED; tryInsert re-inits it)
+        //   The old separate-atomic structure (state CAS, then counter.store(0)) is GONE — an old
+        //   adjudication can no longer overwrite the terminal reset (D149 STOP #5 eliminated).
+        //   A reused slot carries a strictly-greater id (nextId_ monotonic) → no ABA / no wrong-
+        //   obligation termination. Idempotent: non-Live, lost CAS, or id-mismatch → false (no
+        //   double −1, no L underflow). liveCount_ −1 runs ONLY on the CAS winner.
+        //   discardedPendingOut reports in-flight signals zeroed by terminalization (telemetry).
+        bool resolve(LogicalRecoveryObligationId id, ObligationState terminalState,
+                     std::uint8_t* discardedPendingOut = nullptr) noexcept {
+            const auto term = static_cast<std::uint8_t>(terminalState);
             for (std::size_t i = 0; i < kCapacity; ++i) {
-                if (slots_[i].id.load(std::memory_order_acquire) != id)
+                RecoveryLifecycleWord w = slots_[i].lifecycle.load(std::memory_order_acquire);
+                if (w.obligationId != id)
                     continue;
-                ObligationState expected = ObligationState::Live;
-                if (slots_[i].state.compare_exchange_strong(expected, terminalState, std::memory_order_acq_rel)) {
-                    slots_[i].consecutiveFailureCount.store(0, std::memory_order_release);
-                    convo::fetchSubAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
-                    return true;
+                while (w.state == static_cast<std::uint8_t>(ObligationState::Live)) {
+                    RecoveryLifecycleWord desired = w;
+                    desired.state = term;
+                    desired.pending = 0;
+                    desired.adjudicated = 0;
+                    if (slots_[i].lifecycle.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) {
+                        if (discardedPendingOut != nullptr)
+                            *discardedPendingOut = w.pending;
+                        convo::fetchSubAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
+                        return true;
+                    }
+                    // w updated to the current word; re-evaluate (id may have changed via reuse → exit).
                 }
-                return false; // already terminal (or lost race) → idempotent no-op
+                return false; // already terminal / lost race / reused → idempotent no-op
             }
             return false;     // unknown/mismatched id → no-op
         }
@@ -400,15 +535,17 @@ public:
         }
         const LogicalRecoveryObligation& slot(std::size_t i) const noexcept { return slots_[i]; }
         LogicalRecoveryObligation& slot(std::size_t i) noexcept { return slots_[i]; }
-        // ★ D105-R18: read-only accessor for the retry counter (used by tests / telemetry).
-        std::uint8_t consecutiveFailureCount(std::size_t i) const noexcept {
-            return slots_[i].consecutiveFailureCount.load(std::memory_order_acquire);
+        // ★ D152-R1: read-only accessor for the adjudicated retry budget (W.adjudicated).
+        //   Advisory snapshot (telemetry/tests only — never an ownership decision input).
+        std::uint8_t adjudicatedFailureCount(std::size_t i) const noexcept {
+            return slots_[i].lifecycle.load(std::memory_order_acquire).adjudicated;
         }
 
     private:
         std::array<LogicalRecoveryObligation, kCapacity> slots_{};
         std::atomic<std::uint64_t> liveCount_{0};
         LogicalRecoveryObligationId nextId_{1}; // single-writer (CoordinatorLoop)
+        RecoveryGeneration nextRecoveryGeneration_{1}; // ★ G-4.2: single-writer, monotonic in-episode recovery ordinal (!= intentId)
     };
 
      /// Recovery Intent: Quarantined DSPHandle の復旧要求を発行する。
@@ -427,19 +564,33 @@ public:
       // ★ D105-R5-8: single Completion Authority. Callable from ISR (onPublishCommitted) and
       //   RebuildThread (trySubmitImpl failure). Idempotent: only the first Live→terminal
       //   transition counts; subsequent calls (same id) are no-ops.
-       void resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept;
+      // ★ D152 T3: returns true iff THIS call won the Live→terminal CAS (single −1 authority).
+       bool resolveRecoveryObligation(std::uint64_t obligationId, RecoveryResolution outcome) noexcept;
 
-       // ★ D105-R18: transient-failure adjudication authority. Called by the Orchestrator
-       //   (trySubmitImpl build/publish failure sites) and the Builder (durable build/warmup
-       //   failure sites) for a single obligation id. Atomically performs:
-       //     1. delivery = None (P-B: re-eligibility for redrive, stranded Transport→None)
-       //     2. consecutiveFailureCount.fetch_add(1)
-       //     3. if counter reaches kMaxObligationConsecutiveFailures → resolve(id, Failed)
-       //        (only sanctioned path to ResolvedFailed per R17-4)
-       //   The counter persists across durable↔transport transitions and across the obligation
-       //   lifetime. Idempotent on a non-Live slot (no-op). ΔL=0 unless exhaustion fires.
-       //   This is the only public method that produces ResolvedFailed in production.
+       // ── ★ D152/D152-R1 (T3c): transient-failure handling split into signal transport (T1)
+       //   and adjudication (T2). The old single-method check-then-act authority (delivery plain
+       //   write + counter fetch_add + resolve) is replaced by:
+       //     T1 postRecoveryFailureSignal — producer (RebuildThread, the 6 failure sites):
+       //        full-word CAS {O, Live, p<K, a, d} → {O, Live, p+1, a, d}. Touches NOTHING else;
+       //        stale-id / terminal / saturated observations are classified into telemetry.
+       //     T2 adjudicateRecoveryFailureSignals — consumer (CoordinatorLoop ONLY, runCoordinatorPhase
+       //        after processIntent, before redrive): drains pending into W.adjudicated and sets
+       //        delivery=None in ONE CAS; on cumulative >= K terminalizes via the single resolve
+       //        authority — exhausted telemetry + liveCount −1 on the CAS winner ONLY (no over-count).
+       //   Safety is CAS-based and thread-independent; the CL-only placement is a determinism
+       //   convention (D152 §8: no jassert — the TEST-ONLY wrapper legitimately runs on other threads).
+       void postRecoveryFailureSignal(std::uint64_t obligationId) noexcept;
+       void adjudicateRecoveryFailureSignals() noexcept;
+
+       // ★ TEST-ONLY (D152 §7; h:147 setRetireBacklogCount precedent): synchronous compatibility
+       //   wrapper = postRecoveryFailureSignal + immediate adjudicate on the CALLING thread.
+       //   Preserves the old "1 observation = 1 adjudicated increment" semantics for the R18/R20/
+       //   R21/P2/P3 suites. Production call count of this method MUST remain 0 (D153 V1, grep-enforced).
        void markTransientFailure(std::uint64_t obligationId) noexcept;
+
+       // ★ TEST-ONLY (D152 §10.2): advisory lifecycle snapshot for NT-1..5 (single-threaded test
+       //   context). nullopt for unknown id. Never used for production decisions.
+       [[nodiscard]] std::optional<RecoveryLifecycleWord> peekLifecycleForTest(std::uint64_t obligationId) const noexcept;
 
       // ★ D105-R5-9 MUST-2: re-arm a Retry obligation's durable delivery. Only re-arms when the single
       //   durable slot already holds THIS obligation (Building state); never overwrites a distinct live
@@ -454,6 +605,18 @@ public:
         //   obligation (existing id + buildSource preserved), so no new LogicalRecoveryObligationId is issued.
         void redriveDeferredRecoveryObligations() noexcept;
         void redriveDeferredRecovery(std::uint64_t obligationId) noexcept;
+
+        // ★ G-4.4-P2 (D137): redrive attach → Builder wake latch. redriveDeferredRecovery raises this
+        //   ONLY when an obligation actually transitions None → Transport/Durable (attach success).
+        //   Consumed by runCoordinatorPhase on the SAME CoordinatorLoop thread (plain bool — no
+        //   cross-thread ordering needed) to raise the EXISTING recoveryPending predicate +
+        //   rebuildCV.notify_all() (the submitRecoveryIntent wake protocol). Event-driven by design:
+        //   zero wakes when nothing attached — does NOT reintroduce per-tick notify (F6-5 intent).
+        [[nodiscard]] bool consumeRedriveWake() noexcept {
+            const bool v = redriveWakePending_;
+            redriveWakePending_ = false;
+            return v;
+        }
 
 
       // ★ D105-R5-8: telemetry accessors for live obligation count + rejections.
@@ -478,16 +641,28 @@ public:
         [[nodiscard]] std::uint64_t recoveryRetryRedriveFailureCount() const noexcept { // ★ D105-R5-10
             return convo::consumeAtomic(recoveryRetryRedriveFailureCount_, std::memory_order_acquire);
         }
-        // ★ D105-R18: telemetry for retry-exhaustion path. Incremented only by
-        //   markTransientFailure when the obligation's consecutiveFailureCount reaches
-        //   kMaxObligationConsecutiveFailures. Distinguished from any historical Failed
-        //   (which is now unreachable in production per R17-4).
+        // ★ D105-R18 / D152 T2: telemetry for retry-exhaustion path. Incremented ONLY by the
+        //   adjudicate exhaustion CAS winner (resolve true) — no over-count on lost races
+        //   (the old pre-resolve increment at former cpp:1079 is eliminated).
         [[nodiscard]] std::uint64_t recoveryRetryExhaustedCount() const noexcept {
             return convo::consumeAtomic(recoveryRetryExhaustedCount_, std::memory_order_acquire);
         }
-        // ★ D105-R18: read-only accessor for a slot's retry counter (used by tests).
-        [[nodiscard]] std::uint8_t recoveryConsecutiveFailureCount(std::size_t i) const noexcept {
-            return recoveryAdmissions_.consecutiveFailureCount(i);
+        // ★ D152-R1: read-only accessor for a slot's adjudicated retry budget (W.adjudicated).
+        [[nodiscard]] std::uint8_t recoveryAdjudicatedFailureCount(std::size_t i) const noexcept {
+            return recoveryAdmissions_.adjudicatedFailureCount(i);
+        }
+        // ★ D152 §9: signal-transport telemetry (observability only — never ownership decisions).
+        [[nodiscard]] std::uint64_t recoveryFailureSignalSaturatedCount() const noexcept {
+            return convo::consumeAtomic(recoveryFailureSignalSaturatedCount_, std::memory_order_acquire);
+        }
+        [[nodiscard]] std::uint64_t recoveryFailureSignalDroppedStaleCount() const noexcept {
+            return convo::consumeAtomic(recoveryFailureSignalDroppedStaleCount_, std::memory_order_acquire);
+        }
+        [[nodiscard]] std::uint64_t recoveryFailureSignalDroppedTerminalCount() const noexcept {
+            return convo::consumeAtomic(recoveryFailureSignalDroppedTerminalCount_, std::memory_order_acquire);
+        }
+        [[nodiscard]] std::uint64_t recoveryFailureSignalDroppedInvalidCount() const noexcept {
+            return convo::consumeAtomic(recoveryFailureSignalDroppedInvalidCount_, std::memory_order_acquire);
         }
 
 
@@ -895,40 +1070,65 @@ private:
 
     // ── ★ work88 (X1 §6.1): Recovery Durable Admission（lease 方式）──
     //   queue full で Recovery が「失われる」ことを構造的に排除する durable admission state。
+    //   ★ D146 (P4 Phase 2 / I-HS2): `state` は atomic 領域 — 全遷移が CAS linearization point:
+    //     NoAdmission→DurablePending = CL attach publish（release）
+    //     DurablePending→Building  = Builder take lease（acquire）
+    //     Building→DurablePending  = settle(true)（release）
+    //     Building→NoAdmission     = settle(false) / shutdown discard（payload reset → release）
+    //   payload field は plain のままだが書込権限が規約化される（D144 Case C 修復）:
+    //     - CL: acquire で NoAdmission を観測した時だけ publish 前書込（tryAttachDurableRecovery 唯一経路）
+    //     - Builder: 自身の Building lease 内 reset のみ（NoAdmission release に sequenced-before）
+    //     - shutdown discard: 両スレッド join 後（単一スレッド）
+    //   same-oblId overwrite 禁止: 既存表現があれば no-op（意味不変の証明は D145 Phase 1-D —
+    //     oblId mint 専有性 ⇒ 同一 CoalesceIdentity ⇒ 同一 buildInput、epoch/intentId は非消費/診断専用）。
     //   INV-X1-1: accepted ⇒ exactly one durable state（DurablePending OR Building）exists
     //   INV-X1-2: queue full ≠ Recovery lost（durable admission が保持）
     //   INV-X1-4: durable state は World ownership を持たない（DSPHandle / epoch / intentId /
     //             RuntimeBuildSnapshot のみ — 非所有）
     //   INV-X1-5: 1 logical Recovery admission = at most 1 reservation（coalesce で増やさない）
     //   INV-X1-6: durable admission は queue residency と二重計上しない
-    //   SPSC: Producer = CoordinatorLoop（submitRecoveryRequest / QuarantineIntentHandler 経由）
-    //         Consumer = Builder Loop（takePendingRecoveryAdmission）— 競合なし
     //   ★ 二十六次レビュー（lease 方式・必須修正1）: take は destructive dequeue ではなく
     //     DurablePending → Building の state transition。build 失敗（transient）は
     //     Building → DurablePending へ戻す（retry を構造的保証）。obsolete は Discarded。
 #pragma warning(push)
 #pragma warning(disable : 4324)   // DSPHandle(alignas 16) による構造体パディング警告を抑制
     struct PendingRecoveryAdmission {
-        enum class State : uint8_t {
+        enum class State : std::uint8_t {
             NoAdmission = 0,
             DurablePending,
             Building
         };
-        State state = State::NoAdmission;
-        bool pending = false;                 // durable state 有効（state != NoAdmission）
-        uint64_t recoveryGeneration = 0;      // 入ってきた時点の rebuildRequestGeneration（coalesce 判定用）
-        convo::RuntimeBuildSnapshot buildSource{};  // latest（coalesce で更新）
+        std::atomic<State> state{State::NoAdmission};   // ★ D146: CAS linearized（plain read/write 禁止）
+        bool pending = false;                 // durable 有効（state != NoAdmission）— 診断用写像
+        RecoveryGeneration recoveryGeneration = 0;      // ★ D146 注記訂正: in-episode ordinal（slot 由来・coalesce 判定には不使用）
+        convo::RuntimeBuildSnapshot buildSource{};  // payload — 書込権限規約は上掲（旧「coalesce で更新」は D146 で廃止）
         bool reservationOwned = false;        // 1 admission = 1 reservation（INV-X1-5）
         DSPHandle handle{};                   // recovery 対象（quarantined DSPHandle）— 消費時 isNull 検証
-        PublicationEpoch epoch{0};            // emit 時 publicationEpoch（FIFO/epoch 検証用）
+        PublicationEpoch epoch{0};            // emit 時 publicationEpoch（診断用 — recovery build 経路では非消費）
         uint64_t intentId{0};                 // 診断・モニタリング用シーケンス番号
         uint64_t recoveryObligationId{0};     // ★ D105-R5-8: logical recovery obligation id
     };
-    PendingRecoveryAdmission pendingRecoveryAdmission_;   // SPSC（plain 構造体 — atomic 不要）
+    PendingRecoveryAdmission pendingRecoveryAdmission_;   // ★ D146: state=atomic CAS プロトコル／payload=権限規約
     std::atomic<bool> recoveryAdmissionPending_{false};   // durable 有効フラグ（isFullyDrained が読む）
-    static_assert(std::is_trivially_copyable_v<PendingRecoveryAdmission>,
-        "PendingRecoveryAdmission must be trivially copyable");
+    bool redriveWakePending_ = false;   // ★ G-4.4-P2: CoordinatorLoop 専用（attach で set、同一 tick で consume）
+    // ★ D146: trivially-copyable 静的検証は削除 — atomic<State> メンバにより構造体は memcpy されない
+    //   （reset は明示 field クリア＋state release ストアの順序規約で実施）。
 #pragma warning(pop)
+
+    // ★ D146 (I-HS2): 単一の durable payload mutation path（submit / redrive 共通 primitive）。
+    enum class DurableAttachResult { Attached, AlreadyRepresented, OccupiedByOther };
+    DurableAttachResult tryAttachDurableRecovery(const DSPHandle& handle, PublicationEpoch epoch,
+                                                 std::uint64_t intentId, std::uint64_t oblId,
+                                                 RecoveryGeneration generation,
+                                                 const convo::RuntimeBuildSnapshot& buildSource) noexcept;
+    void resetDurableAdmissionPayload() noexcept;   // 呼び出し側が遷移権限（lease / join 後）を保持していること
+
+    // ★ D152 T6/T7: single delivery-attach primitive — full-word CAS changing ONLY W.delivery.
+    //   Returns false when the slot no longer carries oblId or is not Live (terminalized concurrently)
+    //   — delivery is NEVER written to a terminal or reused obligation (D150 §8 / D152 §6).
+    //   CoordinatorLoop-only callers (submit attach / redrive attach). Benign contention (a
+    //   concurrent postSignal changed pending) retries with the CAS-updated current word.
+    bool casDelivery(std::size_t slotIdx, std::uint64_t oblId, ObligationDeliveryState to) noexcept;
 
     // ── ★ D105-R5-8: Logical Recovery Obligation table (capacity-enforced, lock-free) ──
     RecoveryAdmissionTable<kMaxLogicalRecoveryObligations> recoveryAdmissions_;
@@ -943,6 +1143,12 @@ private:
                                                                                //   → remains deferred (L unchanged)
     std::atomic<std::uint64_t> recoveryRetryExhaustedCount_{0};              // ★ D105-R18: retry-budget exhaustion
                                                                                //   (only sanctioned path to ResolvedFailed)
+    // ★ D152 §9: T3c signal-transport telemetry (reason-classified drops; observability only —
+    //   never an ownership decision input; coordinator-owned, NOT slot state — G-4.3-R 区別維持).
+    std::atomic<std::uint64_t> recoveryFailureSignalSaturatedCount_{0};       // pending >= K no-op (T1)
+    std::atomic<std::uint64_t> recoveryFailureSignalDroppedStaleCount_{0};    // id mismatch: unknown / post-reuse (T1)
+    std::atomic<std::uint64_t> recoveryFailureSignalDroppedTerminalCount_{0}; // state != Live (T1) + pending zeroed by terminalization (T3)
+    std::atomic<std::uint64_t> recoveryFailureSignalDroppedInvalidCount_{0};  // obligationId == 0 (T1)
 
 
     // ── ★ FUTURE-10: 共通 Intent Queue（種別問わず単一 FIFO） ──

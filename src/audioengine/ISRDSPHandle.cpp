@@ -9,15 +9,15 @@ namespace isr {
 
 DSPHandleRuntime::DSPHandleRuntime()
 {
-    // Runtime初期化時に atomic<DSPHandle> のロックフリー性を一度だけ検証
+    // Runtime初期化時に atomic<DSPHandle> の runtime is_lock_free() 値を一度だけ記録検証
     static const bool isLockFree = []{
         std::atomic<DSPHandle> test{ DSPHandle::null() };
         const bool ok = test.is_lock_free();
-        // MSVC では 16バイト atomic の is_lock_free()/is_always_lock_free() が
-        // false を返す（STL の保宅的判定）。実際は InterlockedCompareExchange128
-        // (CMPXCHG16B) で lock-free に動作するため、MSVC ではアサートを回避する。
-        // Clang/GCC x64 では alignas(16) により is_lock_free()==true が保証される。
-        // see ISRDSPHandle.h:174-182 (ADR-005)。
+        // MSVC では 16バイト by-value atomic の is_lock_free() は lock-pool（spinlock）
+        // 実装を正確に反映して false を返す（保身ではない — D152-R2 確定事実）。
+        // CAS 意味論（原子的相互排他 + フルバリア）は lock-pool でも保持されるため、
+        // MSVC では runtime 値の記録のみ（異常扱いしない）。Clang/GCC x64 では
+        // alignas(16) により is_lock_free()==true。see ISRDSPHandle.h:204-218 (ADR-005)。
 #if defined(_MSC_VER)
         (void)ok;
 #else

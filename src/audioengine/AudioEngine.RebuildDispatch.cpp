@@ -997,6 +997,13 @@ void AudioEngine::rebuildThreadLoop()
                     {
                         diagLog("[DIAG] rebuildThreadLoop: recovery build failed error="
                             + juce::String(convo::toString(recoveryResult.error)));
+                        // ★ G-4.4-P1 (D136-A): transport recovery build 失敗 — intent は pop 済み
+                        //   （transport 表現は消費された）。markTransientFailure なしだと obligation は
+                        //   Live+delivery=Transport のまま redrive 候補（delivery==None のみ）から
+                        //   恒久除外され、recovery が決定論的に stranded する（durable 側
+                        //   RebuildDispatch:1075-1084 と非対称だった）。retry 可能状態へ戻す:
+                        //   delivery=None + obligation-level retry counter（枯渇→ResolvedFailed）。
+                        runtimePublicationBridge_.postRecoveryFailureSignal(recovery->obligationId);
                         continue;
                     }
                     dspGuard.ptr = recoveryResult.runtime;
@@ -1020,6 +1027,10 @@ void AudioEngine::rebuildThreadLoop()
                             AudioEngine::destroyDSPCoreNode(dspGuard.ptr);
                             dspGuard.ptr = nullptr;
                         }
+                        // ★ G-4.4-P1 (D136-A): warmup 失敗も transient failure — build 失敗と同様に
+                        //   obligation を retry 可能状態（delivery=None + retry counter）へ戻す。
+                        //   未コミット DSP は上記で破棄済み（continue 前に呼ぶ — guard 解除後）。
+                        runtimePublicationBridge_.postRecoveryFailureSignal(recovery->obligationId);
                         continue;
                     }
 
@@ -1077,7 +1088,7 @@ void AudioEngine::rebuildThreadLoop()
                         //   concern from the Builder-local spin-prevention counter). Dual-LP
                         //   per R17-7 Row 5: durable-slot sub-state and obligation counter are
                         //   independent linearizations on different fields.
-                        runtimePublicationBridge_.markTransientFailure(recovery->obligationId);
+                        runtimePublicationBridge_.postRecoveryFailureSignal(recovery->obligationId);
                         // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
                         if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
                             break;
@@ -1101,7 +1112,7 @@ void AudioEngine::rebuildThreadLoop()
                         // transient failure → DurablePending へ戻す（retry）
                         runtimePublicationBridge_.settlePendingRecoveryAdmission(true);
                         // ★ D105-R18: also drive the obligation-level retry counter.
-                        runtimePublicationBridge_.markTransientFailure(recovery->obligationId);
+                        runtimePublicationBridge_.postRecoveryFailureSignal(recovery->obligationId);
                         // ★ 監査軽微指摘4: 連続失敗が上限を超えたらスピン回避のため次サイクルへ委譲
                         if (++recoveryConsecutiveFailures >= kMaxRecoveryConsecutiveFailures)
                             break;

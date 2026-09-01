@@ -1,0 +1,5 @@
+t3c_lockfree_probe.cpp
+tools\t3c_lockfree_probe.cpp(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+sizeof=16 alignof=16 atomic_alignof=16 is_lock_free=0
+cas_success=1 cas_fail_updates_comparand=1 (observed id=7)
+PROBE_EXIT=1 

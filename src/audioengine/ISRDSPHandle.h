@@ -19,10 +19,10 @@ namespace isr {
 /**
  * DSP スロット + 世代による handle（ABA 防止）
  *
- * alignas(16): 16バイト構造体のため atomic<DSPHandle> が CMPXCHG16B を
- * 使用するには 16バイトアライメントが必要。MSVC では 8アラインのまま
- * だと is_lock_free() が false になり Debug ビルドの assert が失敗する。
- * （ISRDSPHandle.cpp:12-20 / ISRDSPHandle.h:174-177 参照）
+ * alignas(16): 16バイト構造体の atomic に必要な原子的 CAS semantics を、将来の
+ * lock-free 切替（atomic_ref 参照形 / wrapper 案）でも保証するための静的保証。
+ * MSVC の atomic<16B by-value> は lock-pool で動作し is_lock_free()==false が正確
+ * （D152-R2）。（ISRDSPHandle.cpp:12-20 / ISRDSPHandle.h:204-218 参照）
  */
 #pragma warning(push)
 #pragma warning(disable : 4324) // C4324: alignas(16) による意図的なパディングを許容
@@ -201,23 +201,23 @@ private:
     std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
     uint32_t freeSize_ = 0;
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
-    //   DSPHandle is a 16-byte POD; std::atomic<DSPHandle> must be lock-free,
-    //   which on x64 requires 16-byte alignment (CMPXCHG16B, Haswell+ / AVX2).
-    //   x64 ABI is assumed throughout ISR (no 32-bit build target).
+    //   DSPHandle is a 16-byte POD; its atomic requires atomic 16-byte CAS semantics
+    //   (MSVC: lock-pool backend, is_lock_free()==false is accurate; all consumers NonRT).
+    //   alignas(16) prepares a future lock-free switch. x64 ABI assumed (no 32-bit target).
     static_assert(std::is_trivially_copyable_v<DSPHandle>,
         "DSPHandle must be trivially copyable for ISR Runtime");
     static_assert(std::is_standard_layout_v<DSPHandle>,
         "DSPHandle must be standard layout for ISR Runtime");
     static_assert(alignof(DSPHandle) >= 16,
-        "DSPHandle must be alignas(16) so atomic<DSPHandle> uses CMPXCHG16B on x64");
+        "DSPHandle must be alignas(16) (lock-free switch readiness; MSVC atomic<16B> uses lock-pool)");
 #if !defined(_MSC_VER)
     // Clang/GCC x64: alignas(16) guarantees lock-free atomics — enforce at compile time.
     static_assert(std::atomic<DSPHandle>::is_always_lock_free,
         "atomic<DSPHandle> must be lock-free on x64 for ISR Runtime");
 #else
-    // MSVC x64 (Debug/Release): the STL does not guarantee is_always_lock_free at
-    //   compile time, so it is verified at runtime in DSPHandleRuntime's ctor
-    //   (ISRDSPHandle.cpp:12-27) on BOTH configurations.
+    // MSVC x64 (Debug/Release): atomic<16B by-value> uses the STL lock-pool backend
+    //   (is_lock_free()==false is an ACCURATE report — D152-R2). The runtime value is
+    //   recorded in DSPHandleRuntime's ctor (ISRDSPHandle.cpp:12-27); false is expected.
 #endif
     std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
     std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
