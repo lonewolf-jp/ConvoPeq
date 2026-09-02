@@ -1142,6 +1142,94 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         __snap.layerBufs[0] / (1024.0*1024.0),
         __snap.layerBufs[1] / (1024.0*1024.0),
         __snap.layerBufs[2] / (1024.0*1024.0)));
+
+    // ★ D162-1R-B: layer × kind 単位の個別 allocSizes 出力 + IPP 実測 + [NUC_FOOTPRINT]。
+    //   既存 allocation ownership（newConv → active engine 交換 → 旧 retire）は変更しない。
+    //   IPP サイズは createPlan と同一引数の ippsFFTGetSize_R_64f による再問い合わせ
+    //   （純粋なサイズクエリ・アロケーション発生なし）。全ログ行は NonRT（SetImpulse）専用。
+    {
+        struct KindName { const char* name; size_t LayerAllocSizes::* field; };
+        static constexpr KindName kKinds[] = {
+            { "irFreqDomain", &LayerAllocSizes::irFreqDomain },
+            { "irFreqReal",   &LayerAllocSizes::irFreqReal },
+            { "irFreqImag",   &LayerAllocSizes::irFreqImag },
+            { "fdlBuf",       &LayerAllocSizes::fdlBuf },
+            { "fdlReal",      &LayerAllocSizes::fdlReal },
+            { "fdlImag",      &LayerAllocSizes::fdlImag },
+            { "fftTimeBuf",   &LayerAllocSizes::fftTimeBuf },
+            { "fftOutBuf",    &LayerAllocSizes::fftOutBuf },
+            { "prevInputBuf", &LayerAllocSizes::prevInputBuf },
+            { "accumBuf",     &LayerAllocSizes::accumBuf },
+            { "accumReal",    &LayerAllocSizes::accumReal },
+            { "accumImag",    &LayerAllocSizes::accumImag },
+            { "inputAccBuf",  &LayerAllocSizes::inputAccBuf },
+            { "tailOutputBuf",&LayerAllocSizes::tailOutputBuf },
+            { "delayLineBuf", &LayerAllocSizes::delayLineBuf },
+        };
+
+        size_t nucPersistent = 0, nucScratch = 0, ippStored = 0;
+        diagFootprintBytes(nucPersistent, nucScratch, ippStored);
+
+        for (int li = 0; li < kNumLayers; ++li)
+        {
+            const Layer& l = m_layers[li];
+            for (const auto& k : kKinds)
+            {
+                const size_t bytes = l.allocSizes.*k.field;
+                if (bytes != 0)
+                {
+                    // NOTE: juce::String::formatted の %s は引数をワイド文字列として
+                    // 解釈するため、narrow 文字列は format 文字列に埋め込まず連結する。
+                    diagLogNonRt(juce::String::formatted(
+                        "[NUC_ALLOC] nuc=%p seq=%llu layer=%d kind=",
+                        (void*)this, (unsigned long long)diagSeq, li)
+                        + juce::String(k.name)
+                        + juce::String::formatted(" bytes=%zu", bytes));
+                }
+            }
+        }
+
+        // IPP spec/work 実測（構築済み層の Plan サイズを再問い合わせで合算）
+        size_t ippSpecSum = 0, ippWorkSum = 0;
+        for (int li = 0; li < kNumLayers; ++li)
+        {
+            const int fftSz = m_layers[li].fftSize;
+            if (fftSz <= 0 || !m_fftPlan[li].isValid())
+                continue;
+            int order = 0;
+            int tmp = fftSz;
+            while (tmp > 1) { tmp >>= 1; ++order; }
+            int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
+            if (ippsFFTGetSize_R_64f(order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
+                                     &sizeSpec, &sizeInit, &sizeWork) == ippStsNoErr)
+            {
+                ippSpecSum += static_cast<size_t>(sizeSpec);
+                ippWorkSum += static_cast<size_t>(sizeWork);
+            }
+        }
+        m_diagIppSpecBytes = ippSpecSum;
+        m_diagIppWorkBytes = ippWorkSum;
+        if (ippSpecSum != 0)
+        {
+            diagLogNonRt(juce::String::formatted(
+                "[NUC_ALLOC] nuc=%p seq=%llu layer=-1 kind=ippSpec bytes=%zu",
+                (void*)this, (unsigned long long)diagSeq, ippSpecSum));
+        }
+        if (ippWorkSum != 0)
+        {
+            diagLogNonRt(juce::String::formatted(
+                "[NUC_ALLOC] nuc=%p seq=%llu layer=-1 kind=ippWork bytes=%zu",
+                (void*)this, (unsigned long long)diagSeq, ippWorkSum));
+        }
+
+        const size_t persistentAll = nucPersistent + ippSpecSum;
+        const size_t scratchAll = nucScratch;
+        const size_t totalAll = persistentAll + scratchAll + ippWorkSum;
+        diagLogNonRt(juce::String::formatted(
+            "[NUC_FOOTPRINT] nuc=%p seq=%llu persistent=%zu scratch=%zu ipp=%zu TOTAL=%zu",
+            (void*)this, (unsigned long long)diagSeq,
+            persistentAll, scratchAll, ippSpecSum + ippWorkSum, totalAll));
+    }
 #endif
 
 

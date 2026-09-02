@@ -1,0 +1,12 @@
+{
+  "schema": "shadow_compare_cadence_v1",
+  "minCadenceMs": 1000,
+  "burstWindowMs": 250,
+  "burstEscalationThreshold": 3,
+  "totalObservations": 26,
+  "mismatchCount": 25,
+  "monotonicViolationCount": 0,
+  "cadenceViolationCount": 18,
+  "escalationCount": 0,
+  "lastSequenceId": 37
+}

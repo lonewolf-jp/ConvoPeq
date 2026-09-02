@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include <algorithm>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
 #include "ISRDSPQuarantine.h"
 #include "RuntimeDrainAudit.h"
 #include "RuntimePublicationOrchestrator.h"
@@ -19,10 +20,30 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ D117 root-cause audit: observation-only trace (no semantic change).
     juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
+    // ★ D162-1R-B: 破壊前の実測 footprint を DSPCore 保存値から出力
+    //   （AC-R5: construct/retained/destroy を pointer identity で突合）。
+    if (p != nullptr)
+    {
+        auto* coreDiag = static_cast<DSPCore*>(p);
+        const auto& fp = coreDiag->diagFootprint;
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[DSP_DESTROY_FOOTPRINT] dsp=%p gen=%llu trackedFootprint=%zu "
+            "(convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu)",
+            p,
+            (unsigned long long)coreDiag->diagGeneration.load(std::memory_order_relaxed),
+            fp.total(), fp.convolver, fp.irData, fp.nuc, fp.ipp,
+            fp.latency, fp.eq, fp.other));
+    }
 #endif
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: 破壊完了確認（保存 footprint 全カテゴリは DSPCore と運命を共にするため
+    //   帰属対象 0 = released）。実メモリ還収は OS/allocator 依存（H4 判定は MEM_SNAP 側）。
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[DSP_FOOTPRINT_RELEASED] dsp=%p remaining=0", p));
+#endif
 }
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
@@ -58,9 +79,23 @@ bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
     const auto resolved = dspHandleRuntime_.resolve(handle);
     DSPCore* dsp = static_cast<DSPCore*>(resolved.instance);
     if (dsp != nullptr) {
-        // retireDSPHandleForRuntime は runtimeDSPHandleMap_ からエントリを削除する。
-        // 既に retired 済みの DSP には何もしない (二重登録防止)。
-        retireDSPHandleForRuntime(dsp);  // EpochDomain 経由の deferred delete
+        // ★ D162-2-B (C′): quarantine も DSPCore の到達不能脱落点だった（D162-2-A §1 #14）。
+        //   意味論確定（orphan — 意図的 resident ownership ではない）:
+        //   (a) resolve は Quarantined state を拒否するため、quarantine 後は誰も DSPCore に
+        //       到達できない（RebuildDispatch RECOVERY-6 comment / ISRDSPHandle.cpp resolve）。
+        //   (b) DSPQuarantineManager は metadata（slot/generation/reason の audit log）のみを
+        //       保持し DSPCore* を保持しない（ISRDSPQuarantine.cpp:17-47）。
+        //   (c) Recovery は buildSource snapshot から再 build し、quarantined DSPCore を
+        //       参照しない（RECOVERY-SEMANTIC-001 / ProcessIntent.cpp:126-131）。
+        //   (d) quarantine 解放（Commit.cpp destroyForShutdown / destroyQuarantineSlot）は
+        //       slot 状態遷移のみで DSPCore を破壊しない。
+        //   よって台帳解除のみの retireDSPHandleForRuntime 直呼び（旧実装・コメントの
+        //   「EpochDomain 経由の deferred delete」は実体が無かった）から authority
+        //   （DSPLifetimeManager::retire = 台帳解除 + EBR 破壊権取得）に統一する。
+        //   EBR は epoch gate 付きのため、quarantine 直前まで RT 参照があった場合も
+        //   reader grace 経過後にのみ破壊される（INV-D162-5 準拠）。
+        DSPLifetimeManager lifetimeMgr(*this);
+        lifetimeMgr.retire(dsp);  // EpochDomain 経由の deferred delete（EBR enqueue 含む）
     }
 
     // Step 3: Projection 更新（truth を反映）

@@ -102,6 +102,15 @@ public:
     //   終端で owner_->finishView() を呼び ownership release を行う（ADR principle: Admission = reason 決定のみ）。
     void discard(DiscardReason reason) noexcept;
 
+    // ★ D162-2-B (S2): slot 保持中の request の値コピー（Single Thread Owner 契約内の読み取り）。
+    //   discard/consume 前に DSP disposition 用の handle を snapshot するために使用する。
+    //   Valid 状態でのみ呼ぶこと（それ以外は default request を返す）。
+    [[nodiscard]] PublicationAdmission::PublishRequest peekRequestCopy() const noexcept {
+        if (state_ != State::Valid || slot_ == nullptr)
+            return PublicationAdmission::PublishRequest{};
+        return slot_->request;
+    }
+
 private:
     RuntimePublicationOrchestrator* owner_{nullptr};
     DeferredPublishSlot* slot_{nullptr};
@@ -269,6 +278,19 @@ public:
     [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
         return engine_.getPublicationBacklogCount();
     }
+
+    // ★ D162-2-B (C′): registered DSP の terminal disposition authority。
+    //   INV-D162-1/3: enqueuePublicationIntentForRuntimeCommit で handle 登録済みの DSPCore を
+    //   手放す全経路（deferred overwrite/discard/shutdown clear/admission reject/dormant
+    //   retry-exhausted）は、この helper 経由で DSPLifetimeManager::retire
+    //   （= retireDSPHandleForRuntime による台帳解除 + enqueueWithRetry による EBR 破壊権取得）
+    //   を 1 回だけ実行する。retireDSPHandleForRuntime を単独で terminal disposition として
+    //   使用しない（台帳解除のみで DSPCore が orphan 化する — D162-2-A §3）。
+    //   例外安全: retire は noexcept、null-safe（未登録 DSP → false → no-op、
+    //   DSPGuard/destroyRolledBackDSP 契約の direct-destroy 対象には触れない）。
+    //   呼出スレッド: RebuildThread（deferred 系）／Message Thread（shutdown clear）— 全て NonRT。
+    void retireRegisteredDSP(const PublicationAdmission::PublishRequest& req,
+                             const char* origin) noexcept;
 
 private:
     // ★ P1-6: 出版停滞監視用フィールド（30秒以上 sequence が進まない場合に stall 検出）

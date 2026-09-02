@@ -825,6 +825,15 @@ void AudioEngine::rebuildThreadLoop()
 {
     affinityManager.applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
+    // ★ CR-α (ND-07 §1/§6): Site 3 warmup retry state — rebuildThreadLoop 関数スコープ
+    //   （RebuildThread 単一所有・mutex/atomic 不要）。generation 紐付け: task.generation が
+    //   変わるたびに counter/exhausted を rebind（新規明示 request = retry state 再開）。
+    //   RetryScheduler には持たせない（scheduler は time/ordering のみ — D101-24 契約）。
+    //   ★ recovery の K=4（Site 1/2）とは別ドメイン — kMaxWarmupConsecutiveRetries=3。
+    int warmupRetryBoundGeneration = -1;   // sentinel（task.generation は非負 int）
+    std::uint32_t warmupRetryCount = 0;    // warmup failure 回数（1..3 = retry #1..#3 / 4 = exhausted）
+    bool warmupRetryExhausted = false;     // exhaustion terminal telemetry の one-shot flag
+
     // Set denormal handling modes for this thread. This is crucial for performance
     // in MKL VML and AVX/SSE operations, which can be significantly slowed down
     // by subnormal numbers. This setting is thread-local.
@@ -1162,6 +1171,16 @@ void AudioEngine::rebuildThreadLoop()
             if (!task.runtimeBuildSnapshot.sealed)
                 continue;
 
+            // ★ CR-α (ND-07 §6): retry budget は generation ごとに独立 — task.generation が
+            //   変わるたびに counter/exhausted を rebind（新規明示 request = retry state 再開）。
+            //   exhaustion は永続 mask ではない（次の明示的 rebuild request で再開）。
+            if (task.generation != warmupRetryBoundGeneration)
+            {
+                warmupRetryBoundGeneration = task.generation;
+                warmupRetryCount = 0;
+                warmupRetryExhausted = false;
+            }
+
             // 1. Prepare (メモリ確保)
             const double buildStartMs = juce::Time::getMillisecondCounterHiRes();
             convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
@@ -1241,29 +1260,60 @@ void AudioEngine::rebuildThreadLoop()
                     + " irFinalized=" + juce::String(static_cast<int>(newDSP->convolverRt().isIRFinalized()))
                     + " irLoading=" + juce::String(static_cast<int>(newDSP->convolverRt().isLoadingIR())));
 
-                // ★ D101-24 Step 3: caller-side policy (BuildError → RetryDisposition), scheduler は 4-field のみ
-                if (retryable && retryScheduler_ != nullptr)
+                // ★ CR-α (ND-07 §2/§5 — Site 3 bounded warmup retry):
+                //   counter 意味論 = warmup failure 回数（schedule 前に ++）。
+                //   counter 1..3 → retry #1..#3 / 4 回目の failure → Exhausted（schedule しない +
+                //   terminal diagLog 1 回 — 同 generation で以後 telemetry なし・5 回目以後 nothing）。
+                //   decision は純関数（BuildErrorPolicy.h）: contextRetryable AND !obsolete AND
+                //   attempt <= max AND disposition != NoRetry — RetryImmediate も無条件 retry ではない。
+                //   ★ schedule() は void: reject（capacity 満杯 / shutdown）時は attempt 消費の
+                //     retry drop として扱う（巻き戻ししない — ND-07 §7 契約）。
+                //   ★ Recovery 系（Site 1/2）の K=4 / spin guard 4 とは別ドメイン（max=3）。
+                ++warmupRetryCount;
+                const auto outcome = convo::classifyBuildError(warmupError);
+                const auto decision = convo::warmupRetryDecision(
+                    warmupRetryCount, convo::kMaxWarmupConsecutiveRetries,
+                    retryable, isObsolete(), outcome.retry,
+                    convo::kDefaultWarmupRetryBackoff);
+
+                if (decision.action == convo::WarmupRetryAction::Value::Schedule)
                 {
-                    const auto outcome = convo::classifyBuildError(warmupError);
-                    if (outcome.retry != convo::RetryDisposition::NoRetry)
+                    const RetryScheduleRequest req{
+                        convo::RebuildKind::Structural,
+                        RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                        RebuildTelemetryClass::Structural,
+                        RebuildTelemetryPolicy::Replaceable
+                    };
+                    diagLog("[DIAG] rebuildThreadLoop: warmup retry scheduled generation="
+                        + juce::String(task.generation)
+                        + " attempt=" + juce::String(static_cast<int>(warmupRetryCount))
+                        + " limit=" + juce::String(static_cast<int>(convo::kMaxWarmupConsecutiveRetries))
+                        + " delayMs=" + juce::String(static_cast<int>(decision.delayMs))
+                        + " error=" + juce::String(convo::toString(warmupError)));
+                    if (retryScheduler_ != nullptr)
+                        retryScheduler_->schedule(req, std::chrono::milliseconds(decision.delayMs));
+                    else
                     {
-                        const RetryScheduleRequest req{
-                            convo::RebuildKind::Structural,
-                            RebuildTelemetryReason::RebuildThreadWarmupRetry,
-                            RebuildTelemetryClass::Structural,
-                            RebuildTelemetryPolicy::Replaceable
-                        };
-                        retryScheduler_->schedule(req, std::chrono::milliseconds(0));
+                        // ★ fallback: scheduler 未生成の異常系（テスト/単体ビルド）では従来経路を維持
+                        submitRebuildIntent(convo::RebuildKind::Structural,
+                                            RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                                            RebuildTelemetryClass::Structural,
+                                            RebuildTelemetryPolicy::Replaceable);
                     }
                 }
-                else if (retryable)
+                else if (decision.action == convo::WarmupRetryAction::Value::Exhausted
+                         && !warmupRetryExhausted)
                 {
-                    // ★ fallback: scheduler 未生成の異常系（テスト/単体ビルド）では従来経路を維持
-                    submitRebuildIntent(convo::RebuildKind::Structural,
-                                        RebuildTelemetryReason::RebuildThreadWarmupRetry,
-                                        RebuildTelemetryClass::Structural,
-                                        RebuildTelemetryPolicy::Replaceable);
+                    // ★ terminal telemetry 1 回（同 generation で以後再発火しない — exhausted flag）。
+                    warmupRetryExhausted = true;
+                    diagLog("[DIAG] rebuildThreadLoop: warmup retry exhausted generation="
+                        + juce::String(task.generation)
+                        + " attempts=" + juce::String(static_cast<int>(warmupRetryCount - 1))
+                        + " limit=" + juce::String(static_cast<int>(convo::kMaxWarmupConsecutiveRetries))
+                        + " error=" + juce::String(convo::toString(warmupError))
+                        + " (no further retry until generation changes)");
                 }
+                // NoRetry / exhausted 重複後は telemetry なし（nothing）。
 
                 continue;
             }

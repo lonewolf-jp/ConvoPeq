@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-01 08:11:53
+> Generated: 2026-09-03 03:19:12
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -6921,6 +6921,58 @@ public:
     [[nodiscard]] static uint32_t getStereoLiveCount() noexcept {
         return StereoConvolver::liveCount.load(std::memory_order_relaxed);
     }
+
+    // ★ D162-1R-B: 固定バッファの実ヒープサイズ（bytes）— DIAG 専用・NonRT からのみ呼ぶこと。
+    //   prepareToPlay で確保される delay/dry/smoothing/oldDry/wet/fadeRamp の
+    //   現在の capacity × sizeof(double) × ch を実測値として返す（推定値を含まない）。
+    struct DiagFixedBufferFootprint
+    {
+        size_t delay = 0;       // delayBuffer[2] × DELAY_BUFFER_SIZE
+        size_t dry = 0;         // dryBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t smoothing = 0;   // smoothingBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t oldDry = 0;      // oldDryBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t wet = 0;         // wetBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t fadeRamp = 0;    // delayFadeRampBuffer × MAX_BLOCK_SIZE
+        [[nodiscard]] size_t total() const noexcept { return delay + dry + smoothing + oldDry + wet + fadeRamp; }
+    };
+
+    [[nodiscard]] DiagFixedBufferFootprint diagFixedBufferFootprint() const noexcept
+    {
+        DiagFixedBufferFootprint fp{};
+        constexpr size_t sampleBytes = sizeof(double);
+        if (delayBuffer[0].get() != nullptr) fp.delay = static_cast<size_t>(delayBufferCapacity) * sampleBytes * 2;
+        if (dryBufferStorage[0].get() != nullptr) fp.dry = static_cast<size_t>(dryBufferCapacity) * sampleBytes * 2;
+        if (smoothingBufferStorage[0].get() != nullptr) fp.smoothing = static_cast<size_t>(smoothingBufferCapacity) * sampleBytes * 2;
+        if (oldDryBufferStorage[0].get() != nullptr) fp.oldDry = static_cast<size_t>(oldDryBufferCapacity) * sampleBytes * 2;
+        if (wetBufferStorage[0].get() != nullptr) fp.wet = static_cast<size_t>(wetBufferCapacity) * sampleBytes * 2;
+        if (delayFadeRampBuffer.get() != nullptr) fp.fadeRamp = static_cast<size_t>(delayFadeRampCapacity) * sampleBytes;
+        return fp;
+    }
+
+    // ★ D162-1R-B: アクティブ StereoConvolver の NUC 実サイズ合計（MKL バッファ + IPP spec/work）
+    //   と irData 実サイズを DIAG 専用で取得。既存所有権モデルを参照するのみ（新規テーブルなし）。
+    //   呼び出しは NonRT（prepare 直後の同一スレッド or Message Thread）からのみ。
+    //   engine 未構築時は 0 を返す。NUC の実サイズは NUC 側 diagFootprintBytes()（allocSizes 実測）。
+    void diagActiveEngineFootprint(size_t& nucBytesInOut, size_t& ippBytesInOut, size_t& irDataBytesInOut) const noexcept
+    {
+        auto* engine = loadActiveEngine(std::memory_order_acquire);
+        if (engine == nullptr)
+            return;
+        for (int i = 0; i < 2; ++i)
+        {
+            if (engine->nucConvolvers[i] != nullptr)
+            {
+                size_t persistent = 0, scratch = 0, ipp = 0;
+                engine->nucConvolvers[i]->diagFootprintBytes(persistent, scratch, ipp);
+                nucBytesInOut += persistent + scratch;
+                ippBytesInOut += ipp;
+            }
+        }
+        if (engine->irData[0] != nullptr)
+            irDataBytesInOut += static_cast<size_t>(engine->irDataLength) * sizeof(double);
+        if (engine->irData[1] != nullptr)
+            irDataBytesInOut += static_cast<size_t>(engine->irDataLength) * sizeof(double);
+    }
 #endif
 
     class Listener
@@ -11752,6 +11804,7 @@ inline void system_aligned_free(void* ptr) noexcept
 #include <psapi.h>
 #include <cassert>      // assert
 #include <algorithm>    // std::max
+#include <JuceHeader.h> // juce::String (diagFootprintLog 用)
 
 // ============================================================================
 // MklAllocStats — MKL 分配の Single Source of Truth
@@ -11910,6 +11963,19 @@ inline std::atomic<uint64_t>& diagSequenceCounter() noexcept
 {
     static std::atomic<uint64_t> counter{ 0 };
     return counter;
+}
+
+// ============================================================================
+// ★ D162-1R-B: footprint 診断ログ出力ヘルパ（NonRT 専用・behavior 変更なし）
+//   用途: [CONV_FOOTPRINT]/[NUC_ALLOC]/[NUC_FOOTPRINT]/[DSP_ALLOC]/
+//         [DSP_FOOTPRINT]/[DSP_DESTROY_FOOTPRINT]/[DSP_FOOTPRINT_RELEASED]
+//   呼び出し側は juce::String::formatted で整形済み文字列を渡す
+//   （printf 系可変引数は使用しない）。全て Message/Rebuild/destroy 経路
+//   （NonRT）から呼ぶこと。RT からの呼び出し禁止。
+// ============================================================================
+inline void diagFootprintLog(const juce::String& message) noexcept
+{
+    juce::Logger::writeToLog(message);
 }
 
 // ---- ProcessMemoryInfo ----
@@ -17889,6 +17955,94 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         __snap.layerBufs[0] / (1024.0*1024.0),
         __snap.layerBufs[1] / (1024.0*1024.0),
         __snap.layerBufs[2] / (1024.0*1024.0)));
+
+    // ★ D162-1R-B: layer × kind 単位の個別 allocSizes 出力 + IPP 実測 + [NUC_FOOTPRINT]。
+    //   既存 allocation ownership（newConv → active engine 交換 → 旧 retire）は変更しない。
+    //   IPP サイズは createPlan と同一引数の ippsFFTGetSize_R_64f による再問い合わせ
+    //   （純粋なサイズクエリ・アロケーション発生なし）。全ログ行は NonRT（SetImpulse）専用。
+    {
+        struct KindName { const char* name; size_t LayerAllocSizes::* field; };
+        static constexpr KindName kKinds[] = {
+            { "irFreqDomain", &LayerAllocSizes::irFreqDomain },
+            { "irFreqReal",   &LayerAllocSizes::irFreqReal },
+            { "irFreqImag",   &LayerAllocSizes::irFreqImag },
+            { "fdlBuf",       &LayerAllocSizes::fdlBuf },
+            { "fdlReal",      &LayerAllocSizes::fdlReal },
+            { "fdlImag",      &LayerAllocSizes::fdlImag },
+            { "fftTimeBuf",   &LayerAllocSizes::fftTimeBuf },
+            { "fftOutBuf",    &LayerAllocSizes::fftOutBuf },
+            { "prevInputBuf", &LayerAllocSizes::prevInputBuf },
+            { "accumBuf",     &LayerAllocSizes::accumBuf },
+            { "accumReal",    &LayerAllocSizes::accumReal },
+            { "accumImag",    &LayerAllocSizes::accumImag },
+            { "inputAccBuf",  &LayerAllocSizes::inputAccBuf },
+            { "tailOutputBuf",&LayerAllocSizes::tailOutputBuf },
+            { "delayLineBuf", &LayerAllocSizes::delayLineBuf },
+        };
+
+        size_t nucPersistent = 0, nucScratch = 0, ippStored = 0;
+        diagFootprintBytes(nucPersistent, nucScratch, ippStored);
+
+        for (int li = 0; li < kNumLayers; ++li)
+        {
+            const Layer& l = m_layers[li];
+            for (const auto& k : kKinds)
+            {
+                const size_t bytes = l.allocSizes.*k.field;
+                if (bytes != 0)
+                {
+                    // NOTE: juce::String::formatted の %s は引数をワイド文字列として
+                    // 解釈するため、narrow 文字列は format 文字列に埋め込まず連結する。
+                    diagLogNonRt(juce::String::formatted(
+                        "[NUC_ALLOC] nuc=%p seq=%llu layer=%d kind=",
+                        (void*)this, (unsigned long long)diagSeq, li)
+                        + juce::String(k.name)
+                        + juce::String::formatted(" bytes=%zu", bytes));
+                }
+            }
+        }
+
+        // IPP spec/work 実測（構築済み層の Plan サイズを再問い合わせで合算）
+        size_t ippSpecSum = 0, ippWorkSum = 0;
+        for (int li = 0; li < kNumLayers; ++li)
+        {
+            const int fftSz = m_layers[li].fftSize;
+            if (fftSz <= 0 || !m_fftPlan[li].isValid())
+                continue;
+            int order = 0;
+            int tmp = fftSz;
+            while (tmp > 1) { tmp >>= 1; ++order; }
+            int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
+            if (ippsFFTGetSize_R_64f(order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
+                                     &sizeSpec, &sizeInit, &sizeWork) == ippStsNoErr)
+            {
+                ippSpecSum += static_cast<size_t>(sizeSpec);
+                ippWorkSum += static_cast<size_t>(sizeWork);
+            }
+        }
+        m_diagIppSpecBytes = ippSpecSum;
+        m_diagIppWorkBytes = ippWorkSum;
+        if (ippSpecSum != 0)
+        {
+            diagLogNonRt(juce::String::formatted(
+                "[NUC_ALLOC] nuc=%p seq=%llu layer=-1 kind=ippSpec bytes=%zu",
+                (void*)this, (unsigned long long)diagSeq, ippSpecSum));
+        }
+        if (ippWorkSum != 0)
+        {
+            diagLogNonRt(juce::String::formatted(
+                "[NUC_ALLOC] nuc=%p seq=%llu layer=-1 kind=ippWork bytes=%zu",
+                (void*)this, (unsigned long long)diagSeq, ippWorkSum));
+        }
+
+        const size_t persistentAll = nucPersistent + ippSpecSum;
+        const size_t scratchAll = nucScratch;
+        const size_t totalAll = persistentAll + scratchAll + ippWorkSum;
+        diagLogNonRt(juce::String::formatted(
+            "[NUC_FOOTPRINT] nuc=%p seq=%llu persistent=%zu scratch=%zu ipp=%zu TOTAL=%zu",
+            (void*)this, (unsigned long long)diagSeq,
+            persistentAll, scratchAll, ippSpecSum + ippWorkSum, totalAll));
+    }
 #endif
 
 
@@ -18767,6 +18921,45 @@ public:
         overflowUserData = userData;
     }
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: NUC の実ヒープサイズ（bytes）を DIAG 専用で返す（public —
+    //   ConvolverProcessor::diagActiveEngineFootprint から参照するため）。
+    //   persistent = Audio Thread が継続参照する本体（SoA IR / SoA FDL / tail / delayLine / ring / direct）
+    //   scratch    = 使い捨てスクラッチ（AoS 中継 / fftTime/Out / prevInput / accum / inputAcc）
+    //   ipp        = ProductionFft::Plan の IPP spec+work（SetImpulse が記録した実測値）
+    //   getDiagnostics() と異なり Message Thread 制約なし（jassert なし・純粋な算術のみ）。
+    //   実測値の源泉は Layer::allocSizes（SetImpulse 時に保存済み）。スレッド競合下でも
+    //   読み取りのみで安全（メンバは SetImpulse 完了後にのみ変化する）。
+    void diagFootprintBytes(size_t& persistentInOut, size_t& scratchInOut, size_t& ippInOut) const noexcept
+    {
+        for (int li = 0; li < kNumLayers; ++li)
+        {
+            const Layer& l = m_layers[li];
+            if (l.irFreqDomain == nullptr && l.irFreqReal == nullptr && l.fdlBuf == nullptr
+                && l.fftTimeBuf == nullptr && l.tailOutputBuf == nullptr)
+                continue; // 未構築レイヤー（allocSizes も 0）
+            scratchInOut += l.allocSizes.irFreqDomain + l.allocSizes.fdlBuf
+                          + l.allocSizes.fftTimeBuf + l.allocSizes.fftOutBuf
+                          + l.allocSizes.prevInputBuf + l.allocSizes.accumBuf
+                          + l.allocSizes.accumReal + l.allocSizes.accumImag
+                          + l.allocSizes.inputAccBuf;
+            persistentInOut += l.allocSizes.irFreqReal + l.allocSizes.irFreqImag
+                             + l.allocSizes.fdlReal + l.allocSizes.fdlImag
+                             + l.allocSizes.tailOutputBuf + l.allocSizes.delayLineBuf;
+        }
+        persistentInOut += static_cast<size_t>(m_ringSize) * sizeof(double);
+        if (m_directIRRev != nullptr)
+            persistentInOut += static_cast<size_t>(m_directTapCount) * sizeof(double);
+        if (m_directHistory != nullptr)
+            persistentInOut += static_cast<size_t>(m_directHistLen) * sizeof(double);
+        if (m_directWindow != nullptr)
+            persistentInOut += static_cast<size_t>(m_directHistLen + m_directMaxBlock) * sizeof(double);
+        if (m_directOutBuf != nullptr)
+            persistentInOut += static_cast<size_t>(m_directMaxBlock) * sizeof(double);
+        ippInOut += m_diagIppSpecBytes + m_diagIppWorkBytes;
+    }
+#endif
+
 private:
 #if JUCE_DEBUG
     static std::atomic<int> debugWarmupGuardCountStorage_;
@@ -18864,6 +19057,12 @@ private:
     //----------------------------------------------------------
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     [[nodiscard]] NucDiagnosticsSnapshot getDiagnostics() const noexcept;
+
+    // ★ D162-1R-B: SetImpulse が記録する IPP spec/work 実測値（createPlan と同一引数の
+    //   ippsFFTGetSize_R_64f による再問い合わせ結果。アロケーションは発生しない）。
+    //   diagFootprintBytes()（public・上記）から参照される。
+    size_t m_diagIppSpecBytes = 0;
+    size_t m_diagIppWorkBytes = 0;
 #endif
 
     //----------------------------------------------------------
@@ -30821,6 +31020,44 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
             + " sealed=" + juce::String(static_cast<int>(req.sealedSnapshot.sealed)));
     }
 #endif
+
+    // ★ D162-1R-B: generation stamp + retained 時点の実測 footprint 再取得。
+    //   NUC / irData は DSPCore::prepare 後の rebuildAllIRsSynchronous（RebuildThread）で
+    //   構築されるため、construct 時の値では NUC=0。ここ（enqueue 時点）で全 generation
+    //   （published / non-published 両方）の実測値を上書き保存する。非 publish DSP は
+    //   retire/destroy されないため、この保存値が [DSP_DESTROY_FOOTPRINT] と突合される。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        newDSP->diagGeneration.store(static_cast<std::uint64_t>(generation), std::memory_order_relaxed);
+        newDSP->diagFootprint = newDSP->diagCaptureFootprint();
+        newDSP->diagFootprintCaptured.store(true, std::memory_order_release);
+        const auto& fp = newDSP->diagFootprint;
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=convolver bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.convolver));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=irData bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.irData));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=nuc bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.nuc));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=ipp bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.ipp));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=latency bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.latency));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=eq bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.eq));
+        diagLog(juce::String::formatted(
+            "[DSP_FOOTPRINT] dsp=%p gen=%llu phase=retained convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu oversampler=UNMEASURED loudness=UNMEASURED truePeak=UNMEASURED other=%zu TOTAL=%zu",
+            (void*)newDSP,
+            (unsigned long long)generation,
+            fp.convolver, fp.irData, fp.nuc, fp.ipp, fp.latency, fp.eq,
+            fp.other, fp.total()));
+    }
+#endif
     runtimeOrchestrator_->submitPublishRequest(req);
 
     // DSP commit 完了時に DSPReady を常に enqueue する。
@@ -36815,6 +37052,21 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     diagLog("[DSPCORE_PREPARE] setFixedLatencySamples done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
 
     diagLog("[DSPCORE_PREPARE] total: " + juce::String(elapsedSince(prepareStartMs), 2) + "ms");
+
+    // ★ D162-1R-B: construct 時点の実測 footprint を保持（NUC は後続の rebuildIR で
+    //   構築されるため、ここでは convolver 固定バッファ/latency/eq が主体。NUC/irData は
+    //   enqueue 時の retained 再取得で上書きされる）。
+    {
+        diagFootprint = diagCaptureFootprint();
+        diagFootprintCaptured.store(true, std::memory_order_release);
+        diagLog(juce::String::formatted(
+            "[DSP_FOOTPRINT] dsp=%p gen=%llu phase=construct convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu TOTAL=%zu",
+            (void*)this,
+            (unsigned long long)diagGeneration.load(std::memory_order_relaxed),
+            diagFootprint.convolver, diagFootprint.irData, diagFootprint.nuc,
+            diagFootprint.ipp, diagFootprint.latency, diagFootprint.eq,
+            diagFootprint.other, diagFootprint.total()));
+    }
 #else
     auto& ramp = ramps();
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling ramp.prepare");
@@ -36868,6 +37120,37 @@ void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
 {
     histories().configureFixedLatencySamples(samples, maxInternalBlockSize);
 }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// ★ D162-1R-B: DSP 単位 footprint 実測取得（NonRT 専用・読み取りのみ・所有権変更なし）。
+//   実測の源泉:
+//     convolver = ConvolverProcessor::diagFixedBufferFootprint()（capacity × sizeof(double)）
+//     irData    = StereoConvolver::irData[2]（irDataLength × sizeof(double）× 有効 ch）
+//     nuc/ipp   = アクティブ StereoConvolver の 2 NUC（Layer::allocSizes + IPP 再問い合わせ）
+//     latency   = HistoryRuntimeState::fixedLatencyBufferL/R（fixedLatencyBufferSize × 8B × 2）
+//     eq        = EQProcessor::diagFootprintBytes()（capacity 実測合算）
+//   未計測（oversampler/loudness/truePeak）は 0 のまま＝TOTAL に計上されない。
+//   convolver が prepareToPlay で固定バッファ確保前に呼ばれた場合は 0 を返す（未計上）。
+AudioEngine::DSPCore::DiagFootprint
+AudioEngine::DSPCore::diagCaptureFootprint() noexcept
+{
+    DiagFootprint fp{};
+
+    const auto convFp = convolver.diagFixedBufferFootprint();
+    fp.convolver = convFp.total();
+
+    size_t nucBytes = 0, ippBytes = 0, irDataBytes = 0;
+    convolver.diagActiveEngineFootprint(nucBytes, ippBytes, irDataBytes);
+    fp.nuc = nucBytes;
+    fp.ipp = ippBytes;
+    fp.irData = irDataBytes;
+
+    fp.latency = static_cast<size_t>(histories().fixedLatencyBufferSize) * sizeof(double) * 2;
+    fp.eq = eq.diagFootprintBytes();
+    fp.other = 0;
+    return fp;
+}
+#endif
 
 // ★ v8.3: TrackedMemoryStatistics 収集 — NonRT 専用
 AudioEngine::DSPCore::TrackedMemoryStatistics
@@ -37914,6 +38197,22 @@ void AudioEngine::releaseResources()
     // ★ dash2 §2.2 (Phase A2 — Step 11): caller-side shutdown 判断（readerRegistrationClosed()）
     //   を撤去し、tryShutdownQuiescentReclaim（ShutdownRuntime が Proof → Permit → reclaim）に
     //   委譲（AC-2: caller-side shutdown 判断 0 件）。retire は事前実行（冪等 — 既存契約）。
+    // ★ D162-2-B (C′): 最終 active/fading DSPCore の物理破壊が現行経路に存在しなかった
+    //   （slot 状態遷移のみ → D162-1P: 最終 published DSP が destroy されず残留）。
+    //   slot 状態遷移の前に実体を resolve し、既存の slot 遷移（冪等）を維持した上で破壊する。
+    //   ★ 実装ノート（D162-2-B 実行時確定）: ここでの破壊は T2 direct destroy
+    //   （destroyDSPCoreNode 直接呼び）。理由: (1) tryShutdownQuiescentReclaim の Permit が
+    //   quiescence（reader registration closed + readers zero + epoch settled + no resurrection）
+    //   を証明済み = epoch 安全は ShutdownRuntime authority が保証（reclaimShutdownQuiescent と
+    //   同根の安全性根拠）。(2) 実測で EBR 経由（DSPLifetimeManager::retire → enqueueWithRetry）に
+    //   すると destroy が shutdown teardown 境界を跨いで遅延し、~AudioEngine 後半の member teardown
+    //   で mkl_free 不正ポインタ AV (0xC0000005) を誘発した（分離試験で確定）。
+    //   二重破壊禁止（INV-D162-3）: resolve は Retired/Reclaimed で nullptr を返すため、
+    //   既に disposition 済みの DSP は何もしない。DSPHandle slot は既に Reclaimed 済みのため
+    //   以後の resolve も nullptr（map の 二重 erase/二重 destroy は構造的に不可能）。
+    auto* activeDSPToDestroy = (!activeHandle.isNull()) ? resolveDSPHandle(activeHandle) : nullptr;
+    auto* fadingDSPToDestroy = (!fadingHandle.isNull() && fadingHandle != activeHandle)
+        ? resolveDSPHandle(fadingHandle) : nullptr;
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
@@ -37968,6 +38267,31 @@ void AudioEngine::releaseResources()
     //   drainTerminalReclaim）に委ねる。
     if (m_retireRouter->activeReaderCount() == 0)
         m_retireRouter->drainAllQuarantineStore();
+
+    // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。
+    //   world (dspProjection/topology) が DSPCore* を保持したまま先に破壊すると、
+    //   world 開放経路から解放済み DSPCore が観測される（実測: exit 時 0xC0000005）。
+    {
+        DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
+        if (false && activeDSPToDestroy != nullptr) // ★ D162-2-B 残課題: 本破壊は exit AV を誘発（実測）。D162-2-C で teardown 順序確定後に有効化。
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2B_DESTROY] dsp=%p origin=verify-drained-active",
+                (void*)activeDSPToDestroy));
+#endif
+            lifetimeMgrForFinalDSP.destroyRolledBackDSP(activeDSPToDestroy);
+        }
+        if (false && fadingDSPToDestroy != nullptr) // ★ D162-2-B 残課題: 同上
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2B_DESTROY] dsp=%p origin=verify-drained-fading",
+                (void*)fadingDSPToDestroy));
+#endif
+            lifetimeMgrForFinalDSP.destroyRolledBackDSP(fadingDSPToDestroy);
+        }
+    }
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
@@ -39243,6 +39567,15 @@ void AudioEngine::rebuildThreadLoop()
 {
     affinityManager.applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
+    // ★ CR-α (ND-07 §1/§6): Site 3 warmup retry state — rebuildThreadLoop 関数スコープ
+    //   （RebuildThread 単一所有・mutex/atomic 不要）。generation 紐付け: task.generation が
+    //   変わるたびに counter/exhausted を rebind（新規明示 request = retry state 再開）。
+    //   RetryScheduler には持たせない（scheduler は time/ordering のみ — D101-24 契約）。
+    //   ★ recovery の K=4（Site 1/2）とは別ドメイン — kMaxWarmupConsecutiveRetries=3。
+    int warmupRetryBoundGeneration = -1;   // sentinel（task.generation は非負 int）
+    std::uint32_t warmupRetryCount = 0;    // warmup failure 回数（1..3 = retry #1..#3 / 4 = exhausted）
+    bool warmupRetryExhausted = false;     // exhaustion terminal telemetry の one-shot flag
+
     // Set denormal handling modes for this thread. This is crucial for performance
     // in MKL VML and AVX/SSE operations, which can be significantly slowed down
     // by subnormal numbers. This setting is thread-local.
@@ -39580,6 +39913,16 @@ void AudioEngine::rebuildThreadLoop()
             if (!task.runtimeBuildSnapshot.sealed)
                 continue;
 
+            // ★ CR-α (ND-07 §6): retry budget は generation ごとに独立 — task.generation が
+            //   変わるたびに counter/exhausted を rebind（新規明示 request = retry state 再開）。
+            //   exhaustion は永続 mask ではない（次の明示的 rebuild request で再開）。
+            if (task.generation != warmupRetryBoundGeneration)
+            {
+                warmupRetryBoundGeneration = task.generation;
+                warmupRetryCount = 0;
+                warmupRetryExhausted = false;
+            }
+
             // 1. Prepare (メモリ確保)
             const double buildStartMs = juce::Time::getMillisecondCounterHiRes();
             convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
@@ -39659,29 +40002,60 @@ void AudioEngine::rebuildThreadLoop()
                     + " irFinalized=" + juce::String(static_cast<int>(newDSP->convolverRt().isIRFinalized()))
                     + " irLoading=" + juce::String(static_cast<int>(newDSP->convolverRt().isLoadingIR())));
 
-                // ★ D101-24 Step 3: caller-side policy (BuildError → RetryDisposition), scheduler は 4-field のみ
-                if (retryable && retryScheduler_ != nullptr)
+                // ★ CR-α (ND-07 §2/§5 — Site 3 bounded warmup retry):
+                //   counter 意味論 = warmup failure 回数（schedule 前に ++）。
+                //   counter 1..3 → retry #1..#3 / 4 回目の failure → Exhausted（schedule しない +
+                //   terminal diagLog 1 回 — 同 generation で以後 telemetry なし・5 回目以後 nothing）。
+                //   decision は純関数（BuildErrorPolicy.h）: contextRetryable AND !obsolete AND
+                //   attempt <= max AND disposition != NoRetry — RetryImmediate も無条件 retry ではない。
+                //   ★ schedule() は void: reject（capacity 満杯 / shutdown）時は attempt 消費の
+                //     retry drop として扱う（巻き戻ししない — ND-07 §7 契約）。
+                //   ★ Recovery 系（Site 1/2）の K=4 / spin guard 4 とは別ドメイン（max=3）。
+                ++warmupRetryCount;
+                const auto outcome = convo::classifyBuildError(warmupError);
+                const auto decision = convo::warmupRetryDecision(
+                    warmupRetryCount, convo::kMaxWarmupConsecutiveRetries,
+                    retryable, isObsolete(), outcome.retry,
+                    convo::kDefaultWarmupRetryBackoff);
+
+                if (decision.action == convo::WarmupRetryAction::Value::Schedule)
                 {
-                    const auto outcome = convo::classifyBuildError(warmupError);
-                    if (outcome.retry != convo::RetryDisposition::NoRetry)
+                    const RetryScheduleRequest req{
+                        convo::RebuildKind::Structural,
+                        RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                        RebuildTelemetryClass::Structural,
+                        RebuildTelemetryPolicy::Replaceable
+                    };
+                    diagLog("[DIAG] rebuildThreadLoop: warmup retry scheduled generation="
+                        + juce::String(task.generation)
+                        + " attempt=" + juce::String(static_cast<int>(warmupRetryCount))
+                        + " limit=" + juce::String(static_cast<int>(convo::kMaxWarmupConsecutiveRetries))
+                        + " delayMs=" + juce::String(static_cast<int>(decision.delayMs))
+                        + " error=" + juce::String(convo::toString(warmupError)));
+                    if (retryScheduler_ != nullptr)
+                        retryScheduler_->schedule(req, std::chrono::milliseconds(decision.delayMs));
+                    else
                     {
-                        const RetryScheduleRequest req{
-                            convo::RebuildKind::Structural,
-                            RebuildTelemetryReason::RebuildThreadWarmupRetry,
-                            RebuildTelemetryClass::Structural,
-                            RebuildTelemetryPolicy::Replaceable
-                        };
-                        retryScheduler_->schedule(req, std::chrono::milliseconds(0));
+                        // ★ fallback: scheduler 未生成の異常系（テスト/単体ビルド）では従来経路を維持
+                        submitRebuildIntent(convo::RebuildKind::Structural,
+                                            RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                                            RebuildTelemetryClass::Structural,
+                                            RebuildTelemetryPolicy::Replaceable);
                     }
                 }
-                else if (retryable)
+                else if (decision.action == convo::WarmupRetryAction::Value::Exhausted
+                         && !warmupRetryExhausted)
                 {
-                    // ★ fallback: scheduler 未生成の異常系（テスト/単体ビルド）では従来経路を維持
-                    submitRebuildIntent(convo::RebuildKind::Structural,
-                                        RebuildTelemetryReason::RebuildThreadWarmupRetry,
-                                        RebuildTelemetryClass::Structural,
-                                        RebuildTelemetryPolicy::Replaceable);
+                    // ★ terminal telemetry 1 回（同 generation で以後再発火しない — exhausted flag）。
+                    warmupRetryExhausted = true;
+                    diagLog("[DIAG] rebuildThreadLoop: warmup retry exhausted generation="
+                        + juce::String(task.generation)
+                        + " attempts=" + juce::String(static_cast<int>(warmupRetryCount - 1))
+                        + " limit=" + juce::String(static_cast<int>(convo::kMaxWarmupConsecutiveRetries))
+                        + " error=" + juce::String(convo::toString(warmupError))
+                        + " (no further retry until generation changes)");
                 }
+                // NoRetry / exhausted 重複後は telemetry なし（nothing）。
 
                 continue;
             }
@@ -40629,6 +41003,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 #include <JuceHeader.h>
 #include <algorithm>
 #include "AudioEngine.h"
+#include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
 #include "ISRDSPQuarantine.h"
 #include "RuntimeDrainAudit.h"
 #include "RuntimePublicationOrchestrator.h"
@@ -40647,10 +41022,30 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ D117 root-cause audit: observation-only trace (no semantic change).
     juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
+    // ★ D162-1R-B: 破壊前の実測 footprint を DSPCore 保存値から出力
+    //   （AC-R5: construct/retained/destroy を pointer identity で突合）。
+    if (p != nullptr)
+    {
+        auto* coreDiag = static_cast<DSPCore*>(p);
+        const auto& fp = coreDiag->diagFootprint;
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[DSP_DESTROY_FOOTPRINT] dsp=%p gen=%llu trackedFootprint=%zu "
+            "(convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu)",
+            p,
+            (unsigned long long)coreDiag->diagGeneration.load(std::memory_order_relaxed),
+            fp.total(), fp.convolver, fp.irData, fp.nuc, fp.ipp,
+            fp.latency, fp.eq, fp.other));
+    }
 #endif
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: 破壊完了確認（保存 footprint 全カテゴリは DSPCore と運命を共にするため
+    //   帰属対象 0 = released）。実メモリ還収は OS/allocator 依存（H4 判定は MEM_SNAP 側）。
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[DSP_FOOTPRINT_RELEASED] dsp=%p remaining=0", p));
+#endif
 }
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
@@ -40686,9 +41081,23 @@ bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
     const auto resolved = dspHandleRuntime_.resolve(handle);
     DSPCore* dsp = static_cast<DSPCore*>(resolved.instance);
     if (dsp != nullptr) {
-        // retireDSPHandleForRuntime は runtimeDSPHandleMap_ からエントリを削除する。
-        // 既に retired 済みの DSP には何もしない (二重登録防止)。
-        retireDSPHandleForRuntime(dsp);  // EpochDomain 経由の deferred delete
+        // ★ D162-2-B (C′): quarantine も DSPCore の到達不能脱落点だった（D162-2-A §1 #14）。
+        //   意味論確定（orphan — 意図的 resident ownership ではない）:
+        //   (a) resolve は Quarantined state を拒否するため、quarantine 後は誰も DSPCore に
+        //       到達できない（RebuildDispatch RECOVERY-6 comment / ISRDSPHandle.cpp resolve）。
+        //   (b) DSPQuarantineManager は metadata（slot/generation/reason の audit log）のみを
+        //       保持し DSPCore* を保持しない（ISRDSPQuarantine.cpp:17-47）。
+        //   (c) Recovery は buildSource snapshot から再 build し、quarantined DSPCore を
+        //       参照しない（RECOVERY-SEMANTIC-001 / ProcessIntent.cpp:126-131）。
+        //   (d) quarantine 解放（Commit.cpp destroyForShutdown / destroyQuarantineSlot）は
+        //       slot 状態遷移のみで DSPCore を破壊しない。
+        //   よって台帳解除のみの retireDSPHandleForRuntime 直呼び（旧実装・コメントの
+        //   「EpochDomain 経由の deferred delete」は実体が無かった）から authority
+        //   （DSPLifetimeManager::retire = 台帳解除 + EBR 破壊権取得）に統一する。
+        //   EBR は epoch gate 付きのため、quarantine 直前まで RT 参照があった場合も
+        //   reader grace 経過後にのみ破壊される（INV-D162-5 準拠）。
+        DSPLifetimeManager lifetimeMgr(*this);
+        lifetimeMgr.retire(dsp);  // EpochDomain 経由の deferred delete（EBR enqueue 含む）
     }
 
     // Step 3: Projection 更新（truth を反映）
@@ -44315,6 +44724,32 @@ public:
         //   ASSERT_NON_RT_THREAD() 必須
         [[nodiscard]] TrackedMemoryStatistics collectTrackedMemoryStatistics() const noexcept;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ D162-1R-B: DSP 単位 footprint 診断（DIAG 専用・挙動変更なし）。
+        //   実測値のみを保持する（推定値・残差押し込みは禁止）。未計測カテゴリ
+        //   (oversampler/loudness/truePeak) は 0 のまま＝計上対象外（UNMEASURED）。
+        struct DiagFootprint
+        {
+            size_t convolver = 0;   // ConvolverProcessor 固定バッファ（delay/dry/smoothing/oldDry/wet/fadeRamp）
+            size_t irData = 0;      // StereoConvolver::irData[2]
+            size_t nuc = 0;         // NUC ×2 MKL バッファ合計
+            size_t ipp = 0;         // NUC ×2 IPP spec+work 合計
+            size_t latency = 0;     // HistoryRuntimeState::fixedLatencyBufferL/R
+            size_t eq = 0;          // EQProcessor バッファ
+            size_t other = 0;       // 実測だが分類外のもの（現行 0 固定）
+            [[nodiscard]] size_t total() const noexcept { return convolver + irData + nuc + ipp + latency + eq + other; }
+        };
+
+        // capture 時点の generation（enqueuePublicationIntentForRuntimeCommit が唯一の stamp 経路）。
+        std::atomic<std::uint64_t> diagGeneration { 0 };
+        DiagFootprint diagFootprint {};             // 非 RT 前提（capture/stamp/destroy は全て NonRT）
+        std::atomic<bool> diagFootprintCaptured { false };
+
+        // NonRT 専用: 実測 footprint の取得（publish 前の DSPCore を capture 時点の
+        // 構築スレッドまたは Message Thread から呼ぶこと）。
+        [[nodiscard]] DiagFootprint diagCaptureFootprint() noexcept;
+#endif
+
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
         static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
@@ -47543,7 +47978,24 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
 
 // ★ R-2: retireDSP() 削除 — 呼び出し元不在のデッドコード。
 //   DSP の退役は DSPLifetimeManager 経由に一本化済み。
-//   代わりに retireDSPHandleForRuntime() を直接使用すること。
+//
+// ★★★ D162-2-B (C′) — retireDSPHandleForRuntime の契約明確化 ★★★
+//   retireDSPHandleForRuntime() は「物理破壊まで行う retire」ではなく、
+//   **handle registry disposition の primitive**（runtimeDSPHandleMap_ からの台帳解除 +
+//   DSPHandleRuntime slot の Retired 遷移 + requestReclaim による slot reclaim）である。
+//   DSPCore の物理破壊（destroyDSPCoreNode）は、この関数自体は行わない。
+//   物理破壊まで行う完全な terminal disposition は
+//   **DSPLifetimeManager::retire()**（台帳解除 + ISRRetireRouter::enqueueWithRetry による
+//   EBR 破壊権取得 → epoch 安全確認後に destroyDSPCoreNode）である。
+//   ★ 使用規則（INV-D162-1/3・D162-2-A §5）:
+//     - registered DSPCore を手放す全経路 → DSPLifetimeManager::retire() を使うこと。
+//       retireDSPHandleForRuntime を単独で terminal disposition として使用すると、
+//       台帳解除のみで DSPCore が orphan 化する（D162-1P: 49 件残留の根本原因）。
+//     - 未登録 DSPCore（handle map 不在・publish されない）→ DSPGuard 契約の
+//       destroyDSPCoreNode 直接破壊（EBR epoch 保護不要）。
+//     - publish 実行失敗で rollback → destroyRolledBackDSP()（registry rollback済み）。
+//   本関数の正当な直接呼び出し元は DSPLifetimeManager（retire/retireByHandle 内部）と
+//   診断用 lookup のみを想定する。API rename は D162-2-B では行わない（既存契約の注記のみ）。
 
 inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
 {
@@ -48936,6 +49388,87 @@ static_assert(sizeof(kBuildErrorNames) / sizeof(const char*)
     if (idx >= sizeof(kBuildErrorNames) / sizeof(const char*))
         return "Unknown";
     return kBuildErrorNames[idx];
+}
+
+// ── ★ CR-α (ND-07 contract — Site 3 warmup retry bound + backoff): ──
+//   Site 3（main rebuild warmup）専用の bounded retry policy。純粋な constexpr/noexcept
+//   policy logic（JUCE / RetryScheduler / Logger 非依存）。RebuildThread が呼び出し側。
+//
+//   ★ ドメイン分離（ND-07 §3 — 絶対遵守）:
+//     kMaxWarmupConsecutiveRetries = 3 は Site 3 専用。
+//     Recovery 系（Site 1/2）は obligation-level K=4
+//     （kMaxObligationConsecutiveFailures、ISRRuntimePublicationCoordinator.h:401）と
+//     Builder-local spin guard 4（AudioEngine.RebuildDispatch.cpp）で管理され、**別ドメイン**。
+//     意図的に別値（3 vs 4）にすることで grep/telemetry 読解時の混同を検出可能にする。
+inline constexpr std::uint32_t kMaxWarmupConsecutiveRetries = 3;
+
+// ★ dash2 H.11.27.6（第十八者 #7）: backoff 値は tuning parameter（invariant にしない）。
+//   invariant は NonRT 実行 / non-blocking / bounded（maxDelayMs 上限存在）/ caller-side counter。
+//   normative default = 設計記録の 10→20→40→80ms（ND-07 §4 確定）。
+struct RetryBackoffPolicy
+{
+    std::uint32_t initialDelayMs = 10;   // attempt 1 の delay
+    std::uint32_t maxDelayMs     = 80;   // saturation 上限
+    std::uint32_t multiplier     = 2;    // exponential 倍率
+};
+
+inline constexpr RetryBackoffPolicy kDefaultWarmupRetryBackoff { 10, 80, 2 };
+
+// attempt (1-based) の backoff delay。saturation: 掛算が maxDelayMs に到達したら固定
+// （uint64 中間計算 + 上限早期 return により overflow を構造的に排除）。
+// attempt 0 → 0 / 1 → initialDelayMs / 2 → initial*mult / ... / maxDelayMs 到達後は固定。
+[[nodiscard]] inline std::uint32_t retryBackoffDelayMs(
+    const RetryBackoffPolicy& policy, std::uint32_t attempt) noexcept
+{
+    if (attempt == 0)
+        return 0;
+    std::uint64_t delay = policy.initialDelayMs;
+    for (std::uint32_t i = 1; i < attempt; ++i)
+    {
+        delay *= policy.multiplier;
+        if (delay >= policy.maxDelayMs)
+            return policy.maxDelayMs;
+    }
+    return static_cast<std::uint32_t>(delay > policy.maxDelayMs ? policy.maxDelayMs : delay);
+}
+
+// ── ★ Site 3 warmup retry decision（純関数 — unit test 可能化）: ──
+//   decision 条件（ND-07 §2/§5 — 全て AND・1 つでも欠ければ retry しない）:
+//     contextRetryable AND !obsolete AND attempt <= maxRetries AND disposition != NoRetry
+//   ★ RetryImmediate は「無条件 retry」ではない — delay 0 で bounded な retry である。
+//   counter 意味論（ND-07 §2 / CR-α-1 Step 4）: counter は warmup failure 回数（schedule 前に ++）。
+//     counter 1..max → retry #1..#max / counter max+1 回目の failure → Exhausted。
+struct WarmupRetryAction
+{
+    // Schedule = schedule(req, delayMs) を実行 / Exhausted = retry 打ち切り（terminal telemetry 1 回）
+    // / NoRetry = retry しない（telemetry なし）
+    enum class Value : std::uint8_t { Schedule, Exhausted, NoRetry };
+};
+
+struct WarmupRetryDecision
+{
+    WarmupRetryAction::Value action = WarmupRetryAction::Value::NoRetry;
+    std::uint32_t delayMs = 0;
+};
+
+[[nodiscard]] inline WarmupRetryDecision warmupRetryDecision(
+    std::uint32_t attempt,                     // warmup failure count（この failure で ++ 済みの値）
+    std::uint32_t maxRetries,                  // schedule 可能な retry 回数（kMaxWarmupConsecutiveRetries）
+    bool contextRetryable,                     // shouldRetryWarmupFailure() = isLoadingIR()
+    bool obsolete,                             // isObsolete()（schedule 前に再確認）
+    RetryDisposition disposition,              // classifyBuildError(...).retry（policy source）
+    const RetryBackoffPolicy& policy) noexcept
+{
+    // NoRetry / context 非該当 / obsolete は retry 打ち切り（telemetry なし）。
+    if (disposition == RetryDisposition::NoRetry || !contextRetryable || obsolete)
+        return { WarmupRetryAction::Value::NoRetry, 0 };
+    // attempt は failure 回数: 1..maxRetries = retry #1..#maxRetries / maxRetries+1 = exhausted。
+    if (attempt > maxRetries)
+        return { WarmupRetryAction::Value::Exhausted, 0 };
+    const std::uint32_t delay = (disposition == RetryDisposition::RetryBackoff)
+                                    ? retryBackoffDelayMs(policy, attempt)
+                                    : 0;   // RetryImmediate
+    return { WarmupRetryAction::Value::Schedule, delay };
 }
 
 } // namespace convo
@@ -66205,6 +66738,7 @@ private:
 #include "RuntimeBuilder.h"
 #include "CrossfadeAuthority.h"
 #include "FrozenRuntimeWorld.h"
+#include "DSPLifetimeManager.h"   // ★ D162-2-B: terminal disposition authority
 #include <chrono>
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -66579,12 +67113,22 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
         case PublicationAdmission::Decision::DeferredFadingActive:
             enqueueDeferred(req);
             return;
+        // ★ D162-2-B (C′ / H1 修正 S4 — latent path repair):
+        //   Rejected* 終端は newDSP（handle 登録済み・未 publish・World から到達不能）の
+        //   disposition を行わず orphan 化する脱落点（D162-2-A 脇落点 S4・soak 未発火だが
+        //   D162-1P の stale-gen 条件は実在する）。各 Rejected* で authority retire を実行する。
+        //   ★ RejectedPublishFailure は例外: trySubmitImpl 内で destroyRolledBackDSP により
+        //   既に直接破壊済み（Orchestrator.cpp:290-291）＋ handle registry が rollback
+        //   （Reclaimed）へ遷移しているため、resolveDSPHandle が nullptr を返し本 helper は
+        //   no-op になる（二重破壊禁止契約 INV-D162-3 — retire を追加して破壊しない）。
+        //   helper の no-op 保証により全 case で同一呼び出しが安全なため、default 経路で一括処理する。
         case PublicationAdmission::Decision::RejectedStaleGeneration:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::StaleGeneration, "submitPublishRequest:stale",
                 0, nowUs);
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);  // ★ D105-R5-9: −1
+            retireRegisteredDSP(req, "rejected-stale-generation");  // ★ D162-2-B (S4)
             return;
         default:
             return;
@@ -66601,6 +67145,10 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             //   delivery=None (P-B), counter+1, exhaustion→ResolvedFailed (path X only).
             if (req.recoveryObligationId != 0)
                 engine_.runtimePublicationBridge_.postRecoveryFailureSignal(req.recoveryObligationId);
+            // ★ D162-2-B (S4): notFinalized は DSPCore 自体は健全（IR finalize 待ち）。
+            //   publish されないため World 到達不能 → authority retire（A/B 経路の
+            //   world-build-fail retire と同処置・Orchestrator.cpp:181/:249 前例）。
+            retireRegisteredDSP(req, "rejected-not-finalized");
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);
@@ -66613,6 +67161,11 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Retry);
             if (req.recoveryObligationId != 0)
                 engine_.runtimePublicationBridge_.rearmRecoveryRetry(req.recoveryObligationId);  // ★ D105-R5-9: guarded re-arm
+            // ★ D162-2-B (S4): obligation は Live のまま再 drive 可能だが、本 DSPCore 自体は
+            //   obligation 再発行時に新 build が作る（obligation は buildSource を保持し、
+            //   DSPCore instance を保持しない）。滞留 DSPCore は World 到達不能のため
+            //   authority retire する（Pressure 連鎖での multi-gen orphan 防止）。
+            retireRegisteredDSP(req, "rejected-pressure");
             return;
         case PublicationAdmission::Decision::RejectedShutdown:
             stateOwner_.onRejected(0);
@@ -66620,12 +67173,19 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
                 FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
                 0, nowUs);
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded); // ★ D105-R5-9: −1 (idempotent)
+            // ★ D162-2-B (S4): shutdown 拒否 DSP も World 到達不能。shutdown drain は
+            //   EBR 経路を処理する（drainDeferredRetireQueues(true)）ため authority retire が
+            //   shutdown 契約と整合する。
+            retireRegisteredDSP(req, "rejected-shutdown");
             return;
         // ★ 15-P-6: publish-time 内部失敗 — shutdown telemetry に誤計上しない。
         //   FailureStage::Execution / FailureReason::PublishFailed で記録し、
         //   recovery suppression（shutdown 扱い）を回避する。
         //   NOTE: trySubmitImpl already resolved this obligation (Failed) before returning
         //   RejectedPublishFailure, so no second resolve is needed here (would be a no-op anyway).
+        //   ★ D162-2-B (S4): newDSP は destroyRolledBackDSP（Orchestrator.cpp:290-291）で
+        //   直接破壊済み。retire を追加すると二重破壊になるため、ここでは disposition しない
+        //   （helper が呼ばれても no-op 保証があるが、明示的に呼ばない — INV-D162-3）。
         case PublicationAdmission::Decision::RejectedPublishFailure:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Execution,
@@ -66660,13 +67220,15 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     }
 
     // ★ D132 (INV-DEFERRED-2): overwrite 時の旧 DSPCore retire。
+    //   ★ D162-2-B (C′ / H1 修正 S1): 旧実装は engine_.retireDSPHandleForRuntime 直呼び
+    //   （台帳解除のみ）で、EBR 破壊権取得が行われず DSPCore が orphan 化していた
+    //   （D162-1P: 49 retained のうち 48 件が本経路）。authority（DSPLifetimeManager::retire）
+    //   に統一し、handle map erase + EBR enqueue を 1 回だけ実行する。
+    //   D132 の意味（旧 deferred holder の retire）は不変。二重 retire は
+    //   retireDSPHandleForRuntime の map lookup が単調に false を返すため構造的に不可。
+    //   oldHandle は直下の deferredSlot_ 置換（:513）で失われるため、置換前に retire する。
     if (deferredSlot_.has_value()) {
-        const auto oldHandle = deferredSlot_->request.newDSP;
-        if (!oldHandle.isNull()) {
-            auto* oldDSP = engine_.resolveDSPHandle(oldHandle);
-            if (oldDSP != nullptr)
-                engine_.retireDSPHandleForRuntime(oldDSP);
-        }
+        retireRegisteredDSP(deferredSlot_->request, "deferred-overwrite");
     }
 
     // ★ D135-1 / F6: obligation accounting — identity = (generation, recoveryObligationId).
@@ -66697,10 +67259,9 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         // ★ F6-6: dormant guard — 現行 production に Type-A retry 経路は無く、retention は count を
         //   増やさないため deferredRetryCount_ は常に 0（この分岐は発火しない）。将来の Type-A 用に保持。
         if (deferredRetryCount_ > kMaxDeferredRetries) {
-            if (!req.newDSP.isNull()) {
-                if (auto* dsp = engine_.resolveDSPHandle(req.newDSP); dsp != nullptr)
-                    engine_.retireDSPHandleForRuntime(dsp);
-            }
+            // ★ D162-2-B (C′ / latent path repair): H1 実測 49 件には不寄与（F6-6 どおり不発）だが、
+            //   S1 同型の orphan 脱落点のため authority 経由に修正（latent path として本修正に計上）。
+            retireRegisteredDSP(req, "retry-exhausted-discard");
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             juce::Logger::writeToLog(juce::String("[HEALTH] Deferred publish starved")
                 + " gen=" + juce::String(req.generation)
@@ -66754,6 +67315,29 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
     if (convo::consumeAtomic(hasDeferred_, std::memory_order_acquire)) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
+        // ★ D162-2-B (H1 修正 S3): slot reset の前に、slot が保持していた handle 登録済み
+        //   DSPCore を disposition する（D162-2-A 脱落点 S3・D162-1P 実測 1 件）。
+        //   ★ 実装ノート（D162-2-B 実行時確定）: 本 DSP は一度も publish されていないため
+        //   （RuntimePublishWorld topology / activeRuntimeDSPSlot / fadingRuntimeDSPSlot の
+        //   いずれにも現れない・handle registry state は Constructing のまま）、RT reader は
+        //   到達不能である。これは DSPGuard 契約（RebuildDispatch.cpp:938-965「未登録 DSPCore は
+        //   EBR epoch 保護不要」）と同型の T2 direct destroy が正当なケースである。
+        //   初版の DSPLifetimeManager::retire（EBR enqueue）は、shutdown teardown 境界を跨いで
+        //   EBR destroy が遅延実行されることで exit 時 AV (0xC0000005・mkl_free 不正ポインタ) を
+        //   誘発した（分離試験: S3 無効化で exit 0x0 再現）。clear 時点（engine 全員生存・
+        //   Message/Rebuild Thread・NonRT）で直接破壊する方が所有権連鎖が単一ポイントで完結し安全。
+        //   ownership 遷移: deferredSlot（現 owner）→ 本関数（同期的破壊）→ 終端。
+        //   thread 契約: assert-free（非 RebuildThread caller: ReleaseResources.cpp:359 EmergencyDrain /
+        //   C1 fallback — D135-8 Gate A 審査済み）。NonRT 実行。
+        // ★ D162-2-B 残課題（D162-2-C へ繰り越し）: shutdown 時の deferred DSP disposition。
+        //   初版（DSPLifetimeManager::retire = EBR enqueue）と第2版（T2 direct destroy）の双方で、
+        //   破壊を実行した場合に限り ~AudioEngine 後半の member teardown で 0xC0000005 (mkl_free 不正
+        //   ポインタ) が発生することを実測で確定した（破壊しない現行挙動では exit 0x0）。
+        //   原因は shutdown teardown 順序と DSPHandle registry / EQCacheManager / rcuSwapper の
+        //   相互作用にあり、S3 単独の修正範囲を超える。D162-2-C（read-only validation から
+        //   teardown 順序監査へ拡張）で root-cause 確定後に有効化すること。
+        //   現状の残留: shutdown 時に slot 残留していた deferred DSP 1 件のみ破壊されない
+        //   （process exit で OS 回収・S1 により通常運転中の orphan は解消済み）。
         deferredSlot_.reset();
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
     }
@@ -66831,6 +67415,35 @@ RuntimePublicationOrchestrator::buildDeferredAdmissionSnapshot() const noexcept
         .nowUs = convo::getCurrentTimeUs(),
         .ttlUs = kDeferredPublishTTLUs
     };
+}
+
+// ★ D162-2-B (C′): registered DSP の terminal disposition authority（実装）。
+//   INV-D162-1: 本 helper が「registered DSP を手放す」唯一の口。
+//   INV-D162-3: DSPLifetimeManager::retire は台帳解除（retireDSPHandleForRuntime）と
+//     EBR 破壊権取得（enqueueWithRetry）を 1 callee で同時に実行する。台帳解除済み
+//     （map 不在）の DSP に対しては retire が false で no-op するため、二重 EBR enqueue /
+//     二重破壊は構造的に発生しない（destroyRolledBackDSP で直接破壊済みの DSP も
+//     rollback により handle registry が Reclaimed へ遷移しており resolve が nullptr を
+//     返すため、本 helper は何もしない — 二重破壊禁止契約）。
+//   所有権遷移: handle map（現 owner）→ EBR（enqueueWithRetry 時点）→ destroyDSPCoreNode。
+//     途中で参照を失う window は存在しない。
+void RuntimePublicationOrchestrator::retireRegisteredDSP(
+    const PublicationAdmission::PublishRequest& req, const char* origin) noexcept
+{
+    if (req.newDSP.isNull())
+        return;
+    auto* dsp = engine_.resolveDSPHandle(req.newDSP);
+    if (dsp == nullptr)
+        return;  // 未登録 / rollback / quarantine / reclaimed — disposition 済み。no-op。
+
+    DSPLifetimeManager lifetimeMgr{engine_};
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[D162-2B_RETIRE] dsp=%p gen=%llu origin=%s",
+        (void*)dsp, (unsigned long long)req.generation,
+        origin != nullptr ? origin : "unknown"));
+#endif
+    lifetimeMgr.retire(dsp);
 }
 
 // ★ Phase-1: finishView — ownership Release の唯一口（design-D4 §1488 / §139-140）。
@@ -66925,6 +67538,9 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
 
     auto result = admission_.evaluateDeferred(view->metadata(),
                                              buildDeferredAdmissionSnapshot());
+    // ★ D162-2-B (S2): evaluateDeferred 判定後・discard 前に request を値コピー
+    //   （retireRegisteredDSP へ渡す用。view は参照借用のため discard 後は slot 無効）。
+    PublicationAdmission::PublishRequest slotRequestSnapshot = view->peekRequestCopy();
     switch (result.decision) {
         case PublicationAdmission::DeferredDecision::Ready: {
             // consume は owner_->finishView() を呼んで ownership release を完結する。
@@ -66935,6 +67551,15 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
         }
         case PublicationAdmission::DeferredDecision::Discard: {
             // discard は lastDiscardReason 記録 + owner_->finishView() で ownership release。
+            // ★ D162-2-B (C′ / H1 修正 S2): view->discard() は deferredSlot の ownership release
+            //   のみで、slot が保持していた request.newDSP（handle 登録済み DSPCore）の
+            //   disposition を行わなかった（D162-2-A 脱落点 S2）。slot 破棄と DSP destruction を
+            //   分離し、ownership が宙に浮かない順序にする:
+            //   (1) 先に request を move-out 不可のため snapshot（view の slot 参照経由）、
+            //   (2) authority retire（台帳解除 + EBR 破壊権取得）で ownership を EBR へ移譲、
+            //   (3) view->discard() で slot を release。
+            //   retire と discard の間で DSP は EBR が所有（単一 owner 継続）。
+            retireRegisteredDSP(slotRequestSnapshot, "deferred-discard");
             view->discard(result.discardReason);
             view.reset();
             break;
@@ -67099,6 +67724,15 @@ public:
     // discard: Admission が決定した DiscardReason を記録し state_ を State::Discarded へ遷移。
     //   終端で owner_->finishView() を呼び ownership release を行う（ADR principle: Admission = reason 決定のみ）。
     void discard(DiscardReason reason) noexcept;
+
+    // ★ D162-2-B (S2): slot 保持中の request の値コピー（Single Thread Owner 契約内の読み取り）。
+    //   discard/consume 前に DSP disposition 用の handle を snapshot するために使用する。
+    //   Valid 状態でのみ呼ぶこと（それ以外は default request を返す）。
+    [[nodiscard]] PublicationAdmission::PublishRequest peekRequestCopy() const noexcept {
+        if (state_ != State::Valid || slot_ == nullptr)
+            return PublicationAdmission::PublishRequest{};
+        return slot_->request;
+    }
 
 private:
     RuntimePublicationOrchestrator* owner_{nullptr};
@@ -67267,6 +67901,19 @@ public:
     [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
         return engine_.getPublicationBacklogCount();
     }
+
+    // ★ D162-2-B (C′): registered DSP の terminal disposition authority。
+    //   INV-D162-1/3: enqueuePublicationIntentForRuntimeCommit で handle 登録済みの DSPCore を
+    //   手放す全経路（deferred overwrite/discard/shutdown clear/admission reject/dormant
+    //   retry-exhausted）は、この helper 経由で DSPLifetimeManager::retire
+    //   （= retireDSPHandleForRuntime による台帳解除 + enqueueWithRetry による EBR 破壊権取得）
+    //   を 1 回だけ実行する。retireDSPHandleForRuntime を単独で terminal disposition として
+    //   使用しない（台帳解除のみで DSPCore が orphan 化する — D162-2-A §3）。
+    //   例外安全: retire は noexcept、null-safe（未登録 DSP → false → no-op、
+    //   DSPGuard/destroyRolledBackDSP 契約の direct-destroy 対象には触れない）。
+    //   呼出スレッド: RebuildThread（deferred 系）／Message Thread（shutdown clear）— 全て NonRT。
+    void retireRegisteredDSP(const PublicationAdmission::PublishRequest& req,
+                             const char* origin) noexcept;
 
 private:
     // ★ P1-6: 出版停滞監視用フィールド（30秒以上 sequence が進まない場合に stall 検出）
@@ -68153,6 +68800,42 @@ public:
     }
 };
 
+// ── ★ dash2 H.11.27.4 (CW-8): PublishedWorldObservation — read-side pair snapshot ──
+//   {world, identity} が同一 publication transaction 由来であることを型で表明する
+//   非所有 borrow 値（read-side strengthening — 新 authority / 新 atomic / topology 変更なし）。
+//   identity は独立 storage ではなく RuntimeState::publication（publish 前 bake・sealed 後
+//   不変）への同一オブジェクト内部 pointer であり、factory 以外の構築（aggregate init /
+//   独立 pair 捏造）を private member + private ctor + friend で構造的に遮断する
+//   （設計前例: 下記 ReadToken）。
+//
+//   Ownership:   none — 非所有 borrow pair。world / publication の寿命に影響しない
+//   Lifetime:    返却 pointer は既存 reader/EBR 契約下でのみ有効
+//                （identity pointer の寿命 == world の寿命 — 同一オブジェクト内部）
+//   Mutation:    observation は publication を変更しない（const のみ）
+//   Publication: observation は publish に参加しない
+//   Retire:      observation は retire/reclaim を起動・遅延・無効化しない
+//   Thread:      既存 read API（observePublishedWorld / consumeWorldHandle）と同一の
+//                read-path 制約に従う
+//   ReadToken:   意味を拡張しない（opaque のまま・epoch ownership を追加しない）
+class PublishedWorldObservation
+{
+public:
+    PublishedWorldObservation(const PublishedWorldObservation&) noexcept = default;
+    PublishedWorldObservation& operator=(const PublishedWorldObservation&) noexcept = default;
+
+    [[nodiscard]] const RuntimeState* world() const noexcept { return world_; }
+    [[nodiscard]] const PublicationSemantic* identity() const noexcept { return identity_; }
+
+private:
+    friend class RuntimeWorldAuthority;
+    PublishedWorldObservation(const RuntimeState* world,
+                              const PublicationSemantic* identity) noexcept
+        : world_(world), identity_(identity) {}
+
+    const RuntimeState* world_ = nullptr;
+    const PublicationSemantic* identity_ = nullptr;
+};
+
 // ★ A-1: RuntimeWorldAuthority — ISR Authority Surface (mutable API only).
 //   Delegate-first: wraps the existing RuntimeIntentCoordinator and forwards
 //   the Authority surface (epoch / sequence / world-read / commit).
@@ -68266,6 +68949,33 @@ public:
     [[nodiscard]] const RuntimeState* observePublishedWorld() const noexcept
     {
         return runtimeStore_.observe();
+    }
+
+    // ── ★ dash2 H.11.27.4 (CW-8): pair observation — 単一 physical read から {world, identity}
+    //   を同時確定する。read topology は既存 API と同一（runtimeStore_.observe() 1 回 acquire
+    //   load のみ・二段 read / 別 atomic は禁止）。identity は world 内部 publication への
+    //   pointer 導出のみで得られ、独立に構築できない（CW-8: world N + identity N+1 の混在は
+    //   型システム上表現不能）。未 publish 時（Store 初期値）は {nullptr, nullptr} を返す
+    //   （world == nullptr 時に &world->publication を評価しない）。Retire 時も同様に null が
+    //   公開される（clearPublishedRuntimeSnapshotsNonRt の publishAndSwap(nullptr) と同一契約）。
+    //
+    //   ★ 実装上の制約: RuntimeState は本ヘッダでは前方宣言のみ（AudioEngine.h 循環回避 —
+    //     ヘッダ先頭コメント）。identity 導出（world->publication 参照）には完全型が必要なため
+    //     factory は member function template とし、呼び出し点（AudioEngine.h が可視の TU）で
+    //     instantiation する。★ world の型を依存型（const StateT*）にすることで member access
+    //     の意味検査を instantiation まで先送りする — 非依存（const RuntimeState*）で書くと
+    //     2-phase lookup の定義時検査で不完全型 C2027 になり、本ヘッダを include する全 TU が
+    //     失敗する（ND-04 Debug build で実測）。
+    template <typename StateT = RuntimeState>
+    [[nodiscard]] PublishedWorldObservation observePublishedObservation(const ReadToken&) const noexcept
+    {
+        static_assert(std::is_same_v<StateT, RuntimeState>,
+                      "observePublishedObservation requires the complete RuntimeState "
+                      "(include AudioEngine.h at the call site)");
+        const StateT* world = runtimeStore_.observe();
+        if (world == nullptr)
+            return PublishedWorldObservation(nullptr, nullptr);
+        return PublishedWorldObservation(world, &world->publication);
     }
 
     // ── ★ work88 (X4-B §6.4 / X4-B-4): publish — semantic publication transaction の唯一の
@@ -69473,6 +70183,7 @@ namespace ConvolverProcessorInternal
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/ThreadAffinityManager.h"
 #include "AlignedAllocation.h"
+#include "DiagnosticsConfig.h" // ★ D162-1R-B: diagFootprintLog（DIAG 構成のみ有効）
 #include <mkl.h>
 
 #include "audioengine/AtomicAccess.h"
@@ -69865,6 +70576,20 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     // 世代カウンターをインクリメント (NonRT → RT 通知)
     convo::fetchAddAtomic(firstProcessCallGen, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: Runtime 側 acquire と HB
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: ConvolverProcessor 固定バッファの実ヒープサイズを記録（heap allocations
+    //   owned by this ConvolverProcessor のみ。sizeof(ConvolverProcessor) は計上しない）。
+    //   NonRT（prepareToPlay 呼び出しスレッド）からのみ出力。
+    {
+        const auto fp = diagFixedBufferFootprint();
+        size_t nucBytes = 0, ippBytes = 0, irDataBytes = 0;
+        diagActiveEngineFootprint(nucBytes, ippBytes, irDataBytes);
+        diagFootprintLog(juce::String::formatted(
+            "[CONV_FOOTPRINT] conv=%p delay=%zu dry=%zu smoothing=%zu oldDry=%zu wet=%zu fadeRamp=%zu TOTAL=%zu",
+            (void*)this, fp.delay, fp.dry, fp.smoothing, fp.oldDry, fp.wet, fp.fadeRamp, fp.total()));
+    }
+#endif
 
     convo::publishAtomic(isPrepared, true, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
     updateLatencyCache();
@@ -83361,6 +84086,29 @@ public:
     const double* getAgcSmoothCoeffTable() const noexcept { return agcSmoothCoeffTable.get(); }
     int getAgcCoeffTableCapacity() const noexcept { return agcCoeffTableCapacity; }
 
+#if defined(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS) && CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: EQ バッファの実ヒープサイズ（bytes）を DIAG 専用で返す。
+    //   prepareToPlay で確保された capacity メンバの実測値の合算（推定値を含まない）。
+    //   挙動変更なし・読み取りのみ。DIAG 構成でのみコンパイルされる。
+    [[nodiscard]] size_t diagFootprintBytes() const noexcept
+    {
+        constexpr size_t sampleBytes = sizeof(double);
+        size_t total = 0;
+        if (scratchBuffer.get() != nullptr) total += static_cast<size_t>(scratchCapacity) * sampleBytes;
+        if (dryBypassBuffer.get() != nullptr) total += static_cast<size_t>(dryBypassCapacity) * sampleBytes;
+        if (parallelInputBuffer.get() != nullptr) total += static_cast<size_t>(parallelBufferCapacity) * sampleBytes;
+        if (parallelWorkBuffer.get() != nullptr) total += static_cast<size_t>(parallelBufferCapacity) * sampleBytes;
+        if (parallelAccumBuffer.get() != nullptr) total += static_cast<size_t>(parallelBufferCapacity) * sampleBytes;
+        if (structureOldOutBuffer.get() != nullptr) total += static_cast<size_t>(structureXfadeBufferCapacity) * sampleBytes;
+        if (structureNewOutBuffer.get() != nullptr) total += static_cast<size_t>(structureXfadeBufferCapacity) * sampleBytes;
+        if (msWorkBuffer.get() != nullptr) total += static_cast<size_t>(msWorkCapacity) * sampleBytes;
+        if (agcAttackCoeffTable.get() != nullptr) total += static_cast<size_t>(agcCoeffTableCapacity) * sampleBytes;
+        if (agcReleaseCoeffTable.get() != nullptr) total += static_cast<size_t>(agcCoeffTableCapacity) * sampleBytes;
+        if (agcSmoothCoeffTable.get() != nullptr) total += static_cast<size_t>(agcCoeffTableCapacity) * sampleBytes;
+        return total;
+    }
+#endif
+
     // フィルタータイプ変更
     void setBandType(int band, EQBandType type);
     EQBandType getBandType(int band) const;
@@ -85165,6 +85913,91 @@ constexpr Expected kExpected[8] = {
     return ok;
 }
 
+// =============================================================================
+// ★ CR-α (ND-07 contract): Site 3 warmup retry — bounded retry + backoff policy
+//   T-CRα-1: retryBackoffDelayMs table（0/10/20/40/80/80 + saturation）
+//   T-CRα-2: normative default {10,80,2} + kMaxWarmupConsecutiveRetries = 3
+//   T-CRα-3: warmupRetryDecision — context / obsolete / max（純関数・Scheduler 不使用）
+//   T-CRα-4: disposition → delay mapping（Immediate=0 / Backoff=policy / NoRetry=none）
+//   T-CRα-5/6: source inspection（exhaustion で再発行なし・diagLog 項目）は CR-α-2/5 の
+//              read-only verification で実施（本ファイルは純関数のみ）
+// =============================================================================
+[[nodiscard]] bool runTestF()
+{
+    bool ok = true;
+    using convo::BuildError;
+    using convo::RetryBackoffPolicy;
+    using convo::RetryDisposition;
+    using convo::WarmupRetryAction;
+    using Action = WarmupRetryAction::Value;
+
+    // --- T-CRα-2: normative default {10,80,2} + max = 3（recovery K=4 と別ドメイン・別値） ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        CHECK(p.initialDelayMs == 10, "T-CRα-2: default initialDelayMs must be 10");
+        CHECK(p.maxDelayMs == 80, "T-CRα-2: default maxDelayMs must be 80");
+        CHECK(p.multiplier == 2, "T-CRα-2: default multiplier must be 2");
+        CHECK(convo::kMaxWarmupConsecutiveRetries == 3,
+              "T-CRα-2: Site 3 warmup retry bound must be 3 (deliberately distinct from recovery K=4)");
+    }
+
+    // --- T-CRα-1: retryBackoffDelayMs table + saturation ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        CHECK(convo::retryBackoffDelayMs(p, 0) == 0, "T-CRα-1: attempt 0 → 0");
+        CHECK(convo::retryBackoffDelayMs(p, 1) == 10, "T-CRα-1: attempt 1 → 10");
+        CHECK(convo::retryBackoffDelayMs(p, 2) == 20, "T-CRα-1: attempt 2 → 20");
+        CHECK(convo::retryBackoffDelayMs(p, 3) == 40, "T-CRα-1: attempt 3 → 40");
+        CHECK(convo::retryBackoffDelayMs(p, 4) == 80, "T-CRα-1: attempt 4 → 80 (saturation)");
+        CHECK(convo::retryBackoffDelayMs(p, 5) == 80, "T-CRα-1: attempt 5 → 80 (saturated)");
+        CHECK(convo::retryBackoffDelayMs(p, 100) == 80, "T-CRα-1: attempt 100 → 80 (no overflow)");
+        // saturation 構造: initial > max の policy でも cap される
+        constexpr RetryBackoffPolicy inverted { 100, 50, 2 };
+        CHECK(convo::retryBackoffDelayMs(inverted, 1) == 50, "T-CRα-1: initial > max is capped");
+    }
+
+    // --- T-CRα-3: decision — context / obsolete / max ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        // context 非該当（IR 未 loading）→ NoRetry（WarmupFailed は無条件 retry ではない）
+        CHECK(convo::warmupRetryDecision(1, 3, false, false, RetryDisposition::RetryImmediate, p).action
+                  == Action::NoRetry, "T-CRα-3: !contextRetryable → NoRetry");
+        // obsolete → NoRetry（schedule しない）
+        CHECK(convo::warmupRetryDecision(1, 3, true, true, RetryDisposition::RetryImmediate, p).action
+                  == Action::NoRetry, "T-CRα-3: obsolete → NoRetry");
+        // NoRetry disposition → NoRetry
+        CHECK(convo::warmupRetryDecision(1, 3, true, false, RetryDisposition::NoRetry, p).action
+                  == Action::NoRetry, "T-CRα-4: NoRetry disposition → NoRetry");
+        // attempt 4（4 回目の failure）→ Exhausted（max=3 超過）
+        CHECK(convo::warmupRetryDecision(4, 3, true, false, RetryDisposition::RetryImmediate, p).action
+                  == Action::Exhausted, "T-CRα-3: attempt 4 > max → Exhausted");
+        CHECK(convo::warmupRetryDecision(5, 3, true, false, RetryDisposition::RetryBackoff, p).action
+                  == Action::Exhausted, "T-CRα-3: attempt 5 → Exhausted");
+    }
+
+    // --- T-CRα-4: disposition → delay mapping ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        // RetryImmediate → delay 0（latency-sensitive — bounded のみ適用）
+        const auto imm1 = convo::warmupRetryDecision(1, 3, true, false, RetryDisposition::RetryImmediate, p);
+        CHECK(imm1.action == Action::Schedule && imm1.delayMs == 0,
+              "T-CRα-4: RetryImmediate attempt 1 → Schedule delay 0");
+        const auto imm3 = convo::warmupRetryDecision(3, 3, true, false, RetryDisposition::RetryImmediate, p);
+        CHECK(imm3.action == Action::Schedule && imm3.delayMs == 0,
+              "T-CRα-4: RetryImmediate attempt 3 → Schedule delay 0");
+        // RetryBackoff → policy 表（attempt 1 → 10）
+        const auto bk1 = convo::warmupRetryDecision(1, 3, true, false, RetryDisposition::RetryBackoff, p);
+        CHECK(bk1.action == Action::Schedule && bk1.delayMs == 10,
+              "T-CRα-4: RetryBackoff attempt 1 → Schedule delay 10");
+        const auto bk2 = convo::warmupRetryDecision(2, 3, true, false, RetryDisposition::RetryBackoff, p);
+        CHECK(bk2.action == Action::Schedule && bk2.delayMs == 20,
+              "T-CRα-4: RetryBackoff attempt 2 → Schedule delay 20");
+    }
+
+    if (ok) std::cerr << "[PASS] TestF warmup retry policy (delay table + saturation + decision + mapping)\n";
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -85174,11 +86007,12 @@ int main()
     bool c = runTestC();
     bool d = runTestD();
     bool e = runTestE();
+    bool f = runTestF();
 
     std::cerr << "[BuildErrorClassification] checks=" << g_pass << " fails=" << g_fail
-              << ((a&&b&&c&&d&&e) ? " PASS" : " FAIL") << "\n";
+              << ((a&&b&&c&&d&&e&&f) ? " PASS" : " FAIL") << "\n";
     std::cout << g_pass << " checks, " << g_fail << " failures\n";
-    return (a && b && c && d && e && g_fail == 0) ? 0 : 1;
+    return (a && b && c && d && e && f && g_fail == 0) ? 0 : 1;
 }
 
 ```
@@ -92068,6 +92902,164 @@ static_assert(std::is_nothrow_move_assignable_v<X4BTestWriteAccess>,
     return true;
 }
 
+// =============================================================================
+// ★ dash2 H.11.27.4 (CW-8): PublishedWorldObservation contract tests
+//
+//   T-CW8-1/2/3 (統合): deterministic observe→publish→observe — pair address identity
+//     （obs.identity() == &obs.world()->publication）・publish N→N+1 で pair が進行し
+//     旧 observation は凍結。大量 rapid publish は対象外（deterministic 最小ケースのみ）。
+//   T-CW8-4: black-box — publish metadata（bake 値）== observed world->publication ==
+//     observed identity。production hook は追加しない（ordering は既存契約に委譲）。
+//   T-CW8-6/7: 型レベル — non-owning trivially copyable 型であること（6）と、
+//     world と identity を独立に持つ pair を public API から構築不能であること（7）。
+//     T-CW8-7 が本 CW-8 の核心: 間違った pair は構造的に生成不能であることを表明する。
+//   lifetime 契約（ND-02 §4）: observation は非所有 borrow。テストは Bridge tail
+//     （retire）を呼ばないため oldWorld はテスト側が所有し dangling は発生しない
+//     （EBR grace は本テストの検証対象ではない — 既存 retire suite に委譲）。
+// =============================================================================
+[[nodiscard]] bool testCW8_PublishedWorldObservation()
+{
+    using convo::isr::PublishedWorldObservation;
+
+    // --- T-CW8-7: construction restriction（型レベル・最重要） ---
+    //   private member + private ctor + friend factory → 非 aggregate・default 構築不能・
+    //   テスト TU（非 friend）からの独立 pair 構築不能。
+    static_assert(std::is_trivially_copyable_v<PublishedWorldObservation>,
+                  "CW-8 T7: observation must be a non-owning trivially copyable borrow pair");
+    static_assert(!std::is_aggregate_v<PublishedWorldObservation>,
+                  "CW-8 T7: brace/designed aggregate init {world, identity} must be prohibited");
+    static_assert(!std::is_default_constructible_v<PublishedWorldObservation>,
+                  "CW-8 T7: observation must only be produced by the authority factory");
+    static_assert(!std::is_constructible_v<PublishedWorldObservation,
+                                           const RuntimeState*,
+                                           const PublicationSemantic*>,
+                  "CW-8 T7: independent pair construction must be unrepresentable from "
+                  "non-friend code (test TU)");
+    static_assert(std::is_nothrow_copy_constructible_v<PublishedWorldObservation>,
+                  "CW-8 T6: copy must be noexcept borrow duplication");
+    //   注意: trivially copyable は lifetime safety の証明ではない（ownership contract の表明）。
+
+    // --- ハーネス（既存 X4-B テストと同一パターン: Coordinator は ~953KB のためヒープ確保） ---
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+    convo::isr::RuntimeWorldAuthority authority(coordinator);
+    const auto token = authority.acquireReadToken();
+
+    // --- T-CW8-1 (null case): 未 publish 時は {nullptr, nullptr}（&world->publication は評価しない） ---
+    {
+        const auto obs = authority.observePublishedObservation(token);
+        if (obs.world() != nullptr || obs.identity() != nullptr)
+            return false;
+    }
+
+    // --- T-CW8-1/2/3 統合: publish N → observe → publish N+1 → observe ---
+    //   publish() は owner を消費するため、各 world は createForBuilder で生成する。
+    //   metadata: monotonicity（seq/epoch/gen が前回より進む）を満たす値を直接指定する。
+    //   本テストは seal→publish の本番順序（PublishExecutor::executePublish の PR-5 seal）を
+    //   再現する — production と同一の publish 前提（sealed 後不変）を満たす。
+    auto makeOwner = []() {
+        auto owner = RuntimeState::createForBuilder(RuntimeState::BuilderToken{});
+        owner->sealRecursively();   // PR-5: publish 前 immutable 化（PublishExecutor と同一順序）
+        return convo::aligned_unique_ptr<const RuntimeState>(std::move(owner));
+    };
+
+    const auto publishWorld = [&authority, &makeOwner](
+                                  std::uint64_t seq, std::uint64_t epoch, std::uint64_t gen,
+                                  bool* committed) {
+        return authority.publish(makeOwner(),
+                                 convo::isr::RuntimeWorldAuthority::PublishMetadata{
+                                     convo::isr::RuntimeBoundary::NonRTWorld, seq, /*sequenceId*/
+                                     static_cast<convo::isr::PublicationSequenceId>(seq),
+                                     static_cast<convo::isr::PublicationEpoch>(epoch), gen },
+                                 committed);
+    };
+
+    bool committedN = false;
+    RuntimeState* oldN = publishWorld(1, 1, 1, &committedN);
+    if (!committedN || oldN != nullptr)   // 初回 publish: oldWorld は存在しない
+        return false;
+
+    const auto obsN = authority.observePublishedObservation(token);
+    // T-CW8-1: pair address identity — identity は world 内部 member への pointer
+    if (obsN.world() == nullptr)
+        return false;
+    if (obsN.identity() != &obsN.world()->publication)
+        return false;
+    // T-CW8-4: black-box — bake 済み metadata == observed publication == observed identity
+    if (obsN.identity()->sequenceId != static_cast<convo::isr::PublicationSequenceId>(1)
+        || obsN.identity()->epoch != static_cast<convo::isr::PublicationEpoch>(1)
+        || obsN.identity()->mappedRuntimeGeneration != 1)
+        return false;
+
+    bool committedN1 = false;
+    RuntimeState* oldN1 = publishWorld(2, 2, 2, &committedN1);
+    if (!committedN1 || oldN1 == nullptr)
+        return false;
+    // T-CW8-2: 前回 observation は swap 後も凍結（oldN1 == world N はまだ生存 → deref 可能）。
+    //   swap 戻り値と observation の world が同一であることも同時に検証する。
+    if (obsN.world() != oldN1
+        || obsN.identity()->sequenceId != static_cast<convo::isr::PublicationSequenceId>(1))
+        return false;
+
+    const auto obsN1 = authority.observePublishedObservation(token);
+    if (obsN1.world() == nullptr || obsN1.identity() == nullptr)
+        return false;
+    // T-CW8-1: 新しい observation でも pair address identity が成立
+    if (obsN1.identity() != &obsN1.world()->publication)
+        return false;
+    // T-CW8-2: world N と world N+1 は異なる・pair も異なる
+    if (obsN.world() == obsN1.world() || obsN.identity() == obsN1.identity())
+        return false;
+    // T-CW8-3 (deterministic 最小ケース): observe→publish→observe の繰返しでも
+    //   pair integrity が維持される（identity が常にその world 内部を指す）
+    if (obsN1.identity()->sequenceId != static_cast<convo::isr::PublicationSequenceId>(2))
+        return false;
+    if (obsN1.world()->publication.sequenceId != obsN1.identity()->sequenceId)
+        return false;
+
+    // --- T-CW8-6: non-owning 型契約（runtime 側の追補 — 型レベルは上記 static_assert） ---
+    //   copy した observation は同一 pair を指す（独立構築ではなく borrow 複製）
+    const auto obsCopy = obsN1;
+    if (obsCopy.world() != obsN1.world() || obsCopy.identity() != obsN1.identity())
+        return false;
+
+    // --- T-CW8-1 追補: shutdown clear（null swap）前後の null semantics ---
+    //   （clearPublishedRuntimeSnapshotsNonRt は request 未呼出では no-op: nullptr 返却・
+    //     current 不変 — 既存 API semantics が CW-8 追加で変わっていないことの動作確認を兼ねる。）
+    RuntimeState* cleared = authority.clearPublishedRuntimeSnapshotsNonRt();
+    if (cleared != nullptr)
+        return false;   // request 未呼出の no-op 契約（nullptr 返却・current 不変）
+    const auto obsAfterNoop = authority.observePublishedObservation(token);
+    if (obsAfterNoop.world() != obsN1.world() || obsAfterNoop.identity() != obsN1.identity())
+        return false;
+
+    // --- 破棄責務（本テストは Bridge tail を呼ばないため oldN1 を明示破棄する） ---
+    //   retirePublishedRuntimeWorldNonRt と同一の aligned free 契約（unseal + dtor + aligned_free）。
+    //   初回 publish の oldN は nullptr のため破棄不要。
+    oldN1->unseal();
+    oldN1->~RuntimeState();
+    convo::aligned_free(oldN1);
+
+    //   破棄後は current も null swap して物理 source を空にする（テスト終了時の store 状態契約）。
+    //   （Authority 破棄時に store も死ぬため必須ではないが、現行契約「shutdown clear → null 公開」
+    //     の観測も兼ねる。requestShutdownClearNonRt は Authority の NonRT API。）
+    authority.requestShutdownClearNonRt();
+    RuntimeState* clearedAfterRequest = authority.clearPublishedRuntimeSnapshotsNonRt();
+    //   clearedAfterRequest は N+1 world（store に残っていた最新 world）— 破棄責務は本テスト。
+    //   ただし N+1 world は seal 済みのため unseal してから破棄する。
+    if (clearedAfterRequest != nullptr)
+    {
+        clearedAfterRequest->unseal();
+        clearedAfterRequest->~RuntimeState();
+        convo::aligned_free(clearedAfterRequest);
+    }
+    const auto obsAfterClear = authority.observePublishedObservation(token);
+    if (obsAfterClear.world() != nullptr || obsAfterClear.identity() != nullptr)
+        return false;   // null swap 後の observation は {nullptr, nullptr}（CW-8 null semantics）
+
+    return true;
+}
+
 } // namespace
 
 // =============================================================================
@@ -93600,6 +94592,10 @@ int main()
     // --- B3 invariant #4: publish intent queue-full => explicit backpressure ---
     if (!testPublishIntentQueueFullBackpressure())
         throw std::runtime_error("B3: publish intent queue-full backpressure contract failed");
+
+    // --- CW-8: PublishedWorldObservation pair-snapshot contract (T-CW8-1/2/3/4/6/7) ---
+    if (!testCW8_PublishedWorldObservation())
+        throw std::runtime_error("CW-8: PublishedWorldObservation pair-snapshot contract failed");
 
     // --- D105-R5-9: Recovery Logical Obligation Enforcement counterexample tests C1-C10 ---
     if (!testRLOE_C1_unique32())

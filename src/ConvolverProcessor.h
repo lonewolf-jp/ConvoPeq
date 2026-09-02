@@ -144,6 +144,58 @@ public:
     [[nodiscard]] static uint32_t getStereoLiveCount() noexcept {
         return StereoConvolver::liveCount.load(std::memory_order_relaxed);
     }
+
+    // ★ D162-1R-B: 固定バッファの実ヒープサイズ（bytes）— DIAG 専用・NonRT からのみ呼ぶこと。
+    //   prepareToPlay で確保される delay/dry/smoothing/oldDry/wet/fadeRamp の
+    //   現在の capacity × sizeof(double) × ch を実測値として返す（推定値を含まない）。
+    struct DiagFixedBufferFootprint
+    {
+        size_t delay = 0;       // delayBuffer[2] × DELAY_BUFFER_SIZE
+        size_t dry = 0;         // dryBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t smoothing = 0;   // smoothingBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t oldDry = 0;      // oldDryBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t wet = 0;         // wetBufferStorage[2] × MAX_BLOCK_SIZE
+        size_t fadeRamp = 0;    // delayFadeRampBuffer × MAX_BLOCK_SIZE
+        [[nodiscard]] size_t total() const noexcept { return delay + dry + smoothing + oldDry + wet + fadeRamp; }
+    };
+
+    [[nodiscard]] DiagFixedBufferFootprint diagFixedBufferFootprint() const noexcept
+    {
+        DiagFixedBufferFootprint fp{};
+        constexpr size_t sampleBytes = sizeof(double);
+        if (delayBuffer[0].get() != nullptr) fp.delay = static_cast<size_t>(delayBufferCapacity) * sampleBytes * 2;
+        if (dryBufferStorage[0].get() != nullptr) fp.dry = static_cast<size_t>(dryBufferCapacity) * sampleBytes * 2;
+        if (smoothingBufferStorage[0].get() != nullptr) fp.smoothing = static_cast<size_t>(smoothingBufferCapacity) * sampleBytes * 2;
+        if (oldDryBufferStorage[0].get() != nullptr) fp.oldDry = static_cast<size_t>(oldDryBufferCapacity) * sampleBytes * 2;
+        if (wetBufferStorage[0].get() != nullptr) fp.wet = static_cast<size_t>(wetBufferCapacity) * sampleBytes * 2;
+        if (delayFadeRampBuffer.get() != nullptr) fp.fadeRamp = static_cast<size_t>(delayFadeRampCapacity) * sampleBytes;
+        return fp;
+    }
+
+    // ★ D162-1R-B: アクティブ StereoConvolver の NUC 実サイズ合計（MKL バッファ + IPP spec/work）
+    //   と irData 実サイズを DIAG 専用で取得。既存所有権モデルを参照するのみ（新規テーブルなし）。
+    //   呼び出しは NonRT（prepare 直後の同一スレッド or Message Thread）からのみ。
+    //   engine 未構築時は 0 を返す。NUC の実サイズは NUC 側 diagFootprintBytes()（allocSizes 実測）。
+    void diagActiveEngineFootprint(size_t& nucBytesInOut, size_t& ippBytesInOut, size_t& irDataBytesInOut) const noexcept
+    {
+        auto* engine = loadActiveEngine(std::memory_order_acquire);
+        if (engine == nullptr)
+            return;
+        for (int i = 0; i < 2; ++i)
+        {
+            if (engine->nucConvolvers[i] != nullptr)
+            {
+                size_t persistent = 0, scratch = 0, ipp = 0;
+                engine->nucConvolvers[i]->diagFootprintBytes(persistent, scratch, ipp);
+                nucBytesInOut += persistent + scratch;
+                ippBytesInOut += ipp;
+            }
+        }
+        if (engine->irData[0] != nullptr)
+            irDataBytesInOut += static_cast<size_t>(engine->irDataLength) * sizeof(double);
+        if (engine->irData[1] != nullptr)
+            irDataBytesInOut += static_cast<size_t>(engine->irDataLength) * sizeof(double);
+    }
 #endif
 
     class Listener

@@ -6,6 +6,7 @@
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/ThreadAffinityManager.h"
 #include "AlignedAllocation.h"
+#include "DiagnosticsConfig.h" // ★ D162-1R-B: diagFootprintLog（DIAG 構成のみ有効）
 #include <mkl.h>
 
 #include "audioengine/AtomicAccess.h"
@@ -398,6 +399,20 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     // 世代カウンターをインクリメント (NonRT → RT 通知)
     convo::fetchAddAtomic(firstProcessCallGen, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: Runtime 側 acquire と HB
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: ConvolverProcessor 固定バッファの実ヒープサイズを記録（heap allocations
+    //   owned by this ConvolverProcessor のみ。sizeof(ConvolverProcessor) は計上しない）。
+    //   NonRT（prepareToPlay 呼び出しスレッド）からのみ出力。
+    {
+        const auto fp = diagFixedBufferFootprint();
+        size_t nucBytes = 0, ippBytes = 0, irDataBytes = 0;
+        diagActiveEngineFootprint(nucBytes, ippBytes, irDataBytes);
+        diagFootprintLog(juce::String::formatted(
+            "[CONV_FOOTPRINT] conv=%p delay=%zu dry=%zu smoothing=%zu oldDry=%zu wet=%zu fadeRamp=%zu TOTAL=%zu",
+            (void*)this, fp.delay, fp.dry, fp.smoothing, fp.oldDry, fp.wet, fp.fadeRamp, fp.total()));
+    }
+#endif
 
     convo::publishAtomic(isPrepared, true, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
     updateLatencyCache();

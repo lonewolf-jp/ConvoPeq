@@ -233,6 +233,21 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     diagLog("[DSPCORE_PREPARE] setFixedLatencySamples done: " + juce::String(elapsedSince(t0), 2) + "ms"); }
 
     diagLog("[DSPCORE_PREPARE] total: " + juce::String(elapsedSince(prepareStartMs), 2) + "ms");
+
+    // ★ D162-1R-B: construct 時点の実測 footprint を保持（NUC は後続の rebuildIR で
+    //   構築されるため、ここでは convolver 固定バッファ/latency/eq が主体。NUC/irData は
+    //   enqueue 時の retained 再取得で上書きされる）。
+    {
+        diagFootprint = diagCaptureFootprint();
+        diagFootprintCaptured.store(true, std::memory_order_release);
+        diagLog(juce::String::formatted(
+            "[DSP_FOOTPRINT] dsp=%p gen=%llu phase=construct convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu TOTAL=%zu",
+            (void*)this,
+            (unsigned long long)diagGeneration.load(std::memory_order_relaxed),
+            diagFootprint.convolver, diagFootprint.irData, diagFootprint.nuc,
+            diagFootprint.ipp, diagFootprint.latency, diagFootprint.eq,
+            diagFootprint.other, diagFootprint.total()));
+    }
 #else
     auto& ramp = ramps();
     juce::Logger::writeToLog("[DSPCORE_PREPARE] calling ramp.prepare");
@@ -286,6 +301,37 @@ void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
 {
     histories().configureFixedLatencySamples(samples, maxInternalBlockSize);
 }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// ★ D162-1R-B: DSP 単位 footprint 実測取得（NonRT 専用・読み取りのみ・所有権変更なし）。
+//   実測の源泉:
+//     convolver = ConvolverProcessor::diagFixedBufferFootprint()（capacity × sizeof(double)）
+//     irData    = StereoConvolver::irData[2]（irDataLength × sizeof(double）× 有効 ch）
+//     nuc/ipp   = アクティブ StereoConvolver の 2 NUC（Layer::allocSizes + IPP 再問い合わせ）
+//     latency   = HistoryRuntimeState::fixedLatencyBufferL/R（fixedLatencyBufferSize × 8B × 2）
+//     eq        = EQProcessor::diagFootprintBytes()（capacity 実測合算）
+//   未計測（oversampler/loudness/truePeak）は 0 のまま＝TOTAL に計上されない。
+//   convolver が prepareToPlay で固定バッファ確保前に呼ばれた場合は 0 を返す（未計上）。
+AudioEngine::DSPCore::DiagFootprint
+AudioEngine::DSPCore::diagCaptureFootprint() noexcept
+{
+    DiagFootprint fp{};
+
+    const auto convFp = convolver.diagFixedBufferFootprint();
+    fp.convolver = convFp.total();
+
+    size_t nucBytes = 0, ippBytes = 0, irDataBytes = 0;
+    convolver.diagActiveEngineFootprint(nucBytes, ippBytes, irDataBytes);
+    fp.nuc = nucBytes;
+    fp.ipp = ippBytes;
+    fp.irData = irDataBytes;
+
+    fp.latency = static_cast<size_t>(histories().fixedLatencyBufferSize) * sizeof(double) * 2;
+    fp.eq = eq.diagFootprintBytes();
+    fp.other = 0;
+    return fp;
+}
+#endif
 
 // ★ v8.3: TrackedMemoryStatistics 収集 — NonRT 専用
 AudioEngine::DSPCore::TrackedMemoryStatistics

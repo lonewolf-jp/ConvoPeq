@@ -272,6 +272,45 @@ public:
         overflowUserData = userData;
     }
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: NUC の実ヒープサイズ（bytes）を DIAG 専用で返す（public —
+    //   ConvolverProcessor::diagActiveEngineFootprint から参照するため）。
+    //   persistent = Audio Thread が継続参照する本体（SoA IR / SoA FDL / tail / delayLine / ring / direct）
+    //   scratch    = 使い捨てスクラッチ（AoS 中継 / fftTime/Out / prevInput / accum / inputAcc）
+    //   ipp        = ProductionFft::Plan の IPP spec+work（SetImpulse が記録した実測値）
+    //   getDiagnostics() と異なり Message Thread 制約なし（jassert なし・純粋な算術のみ）。
+    //   実測値の源泉は Layer::allocSizes（SetImpulse 時に保存済み）。スレッド競合下でも
+    //   読み取りのみで安全（メンバは SetImpulse 完了後にのみ変化する）。
+    void diagFootprintBytes(size_t& persistentInOut, size_t& scratchInOut, size_t& ippInOut) const noexcept
+    {
+        for (int li = 0; li < kNumLayers; ++li)
+        {
+            const Layer& l = m_layers[li];
+            if (l.irFreqDomain == nullptr && l.irFreqReal == nullptr && l.fdlBuf == nullptr
+                && l.fftTimeBuf == nullptr && l.tailOutputBuf == nullptr)
+                continue; // 未構築レイヤー（allocSizes も 0）
+            scratchInOut += l.allocSizes.irFreqDomain + l.allocSizes.fdlBuf
+                          + l.allocSizes.fftTimeBuf + l.allocSizes.fftOutBuf
+                          + l.allocSizes.prevInputBuf + l.allocSizes.accumBuf
+                          + l.allocSizes.accumReal + l.allocSizes.accumImag
+                          + l.allocSizes.inputAccBuf;
+            persistentInOut += l.allocSizes.irFreqReal + l.allocSizes.irFreqImag
+                             + l.allocSizes.fdlReal + l.allocSizes.fdlImag
+                             + l.allocSizes.tailOutputBuf + l.allocSizes.delayLineBuf;
+        }
+        persistentInOut += static_cast<size_t>(m_ringSize) * sizeof(double);
+        if (m_directIRRev != nullptr)
+            persistentInOut += static_cast<size_t>(m_directTapCount) * sizeof(double);
+        if (m_directHistory != nullptr)
+            persistentInOut += static_cast<size_t>(m_directHistLen) * sizeof(double);
+        if (m_directWindow != nullptr)
+            persistentInOut += static_cast<size_t>(m_directHistLen + m_directMaxBlock) * sizeof(double);
+        if (m_directOutBuf != nullptr)
+            persistentInOut += static_cast<size_t>(m_directMaxBlock) * sizeof(double);
+        ippInOut += m_diagIppSpecBytes + m_diagIppWorkBytes;
+    }
+#endif
+
 private:
 #if JUCE_DEBUG
     static std::atomic<int> debugWarmupGuardCountStorage_;
@@ -369,6 +408,12 @@ private:
     //----------------------------------------------------------
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     [[nodiscard]] NucDiagnosticsSnapshot getDiagnostics() const noexcept;
+
+    // ★ D162-1R-B: SetImpulse が記録する IPP spec/work 実測値（createPlan と同一引数の
+    //   ippsFFTGetSize_R_64f による再問い合わせ結果。アロケーションは発生しない）。
+    //   diagFootprintBytes()（public・上記）から参照される。
+    size_t m_diagIppSpecBytes = 0;
+    size_t m_diagIppWorkBytes = 0;
 #endif
 
     //----------------------------------------------------------

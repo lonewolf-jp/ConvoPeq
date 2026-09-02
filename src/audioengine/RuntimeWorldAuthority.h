@@ -70,6 +70,42 @@ public:
     }
 };
 
+// ── ★ dash2 H.11.27.4 (CW-8): PublishedWorldObservation — read-side pair snapshot ──
+//   {world, identity} が同一 publication transaction 由来であることを型で表明する
+//   非所有 borrow 値（read-side strengthening — 新 authority / 新 atomic / topology 変更なし）。
+//   identity は独立 storage ではなく RuntimeState::publication（publish 前 bake・sealed 後
+//   不変）への同一オブジェクト内部 pointer であり、factory 以外の構築（aggregate init /
+//   独立 pair 捏造）を private member + private ctor + friend で構造的に遮断する
+//   （設計前例: 下記 ReadToken）。
+//
+//   Ownership:   none — 非所有 borrow pair。world / publication の寿命に影響しない
+//   Lifetime:    返却 pointer は既存 reader/EBR 契約下でのみ有効
+//                （identity pointer の寿命 == world の寿命 — 同一オブジェクト内部）
+//   Mutation:    observation は publication を変更しない（const のみ）
+//   Publication: observation は publish に参加しない
+//   Retire:      observation は retire/reclaim を起動・遅延・無効化しない
+//   Thread:      既存 read API（observePublishedWorld / consumeWorldHandle）と同一の
+//                read-path 制約に従う
+//   ReadToken:   意味を拡張しない（opaque のまま・epoch ownership を追加しない）
+class PublishedWorldObservation
+{
+public:
+    PublishedWorldObservation(const PublishedWorldObservation&) noexcept = default;
+    PublishedWorldObservation& operator=(const PublishedWorldObservation&) noexcept = default;
+
+    [[nodiscard]] const RuntimeState* world() const noexcept { return world_; }
+    [[nodiscard]] const PublicationSemantic* identity() const noexcept { return identity_; }
+
+private:
+    friend class RuntimeWorldAuthority;
+    PublishedWorldObservation(const RuntimeState* world,
+                              const PublicationSemantic* identity) noexcept
+        : world_(world), identity_(identity) {}
+
+    const RuntimeState* world_ = nullptr;
+    const PublicationSemantic* identity_ = nullptr;
+};
+
 // ★ A-1: RuntimeWorldAuthority — ISR Authority Surface (mutable API only).
 //   Delegate-first: wraps the existing RuntimeIntentCoordinator and forwards
 //   the Authority surface (epoch / sequence / world-read / commit).
@@ -183,6 +219,33 @@ public:
     [[nodiscard]] const RuntimeState* observePublishedWorld() const noexcept
     {
         return runtimeStore_.observe();
+    }
+
+    // ── ★ dash2 H.11.27.4 (CW-8): pair observation — 単一 physical read から {world, identity}
+    //   を同時確定する。read topology は既存 API と同一（runtimeStore_.observe() 1 回 acquire
+    //   load のみ・二段 read / 別 atomic は禁止）。identity は world 内部 publication への
+    //   pointer 導出のみで得られ、独立に構築できない（CW-8: world N + identity N+1 の混在は
+    //   型システム上表現不能）。未 publish 時（Store 初期値）は {nullptr, nullptr} を返す
+    //   （world == nullptr 時に &world->publication を評価しない）。Retire 時も同様に null が
+    //   公開される（clearPublishedRuntimeSnapshotsNonRt の publishAndSwap(nullptr) と同一契約）。
+    //
+    //   ★ 実装上の制約: RuntimeState は本ヘッダでは前方宣言のみ（AudioEngine.h 循環回避 —
+    //     ヘッダ先頭コメント）。identity 導出（world->publication 参照）には完全型が必要なため
+    //     factory は member function template とし、呼び出し点（AudioEngine.h が可視の TU）で
+    //     instantiation する。★ world の型を依存型（const StateT*）にすることで member access
+    //     の意味検査を instantiation まで先送りする — 非依存（const RuntimeState*）で書くと
+    //     2-phase lookup の定義時検査で不完全型 C2027 になり、本ヘッダを include する全 TU が
+    //     失敗する（ND-04 Debug build で実測）。
+    template <typename StateT = RuntimeState>
+    [[nodiscard]] PublishedWorldObservation observePublishedObservation(const ReadToken&) const noexcept
+    {
+        static_assert(std::is_same_v<StateT, RuntimeState>,
+                      "observePublishedObservation requires the complete RuntimeState "
+                      "(include AudioEngine.h at the call site)");
+        const StateT* world = runtimeStore_.observe();
+        if (world == nullptr)
+            return PublishedWorldObservation(nullptr, nullptr);
+        return PublishedWorldObservation(world, &world->publication);
     }
 
     // ── ★ work88 (X4-B §6.4 / X4-B-4): publish — semantic publication transaction の唯一の

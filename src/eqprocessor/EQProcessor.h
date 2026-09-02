@@ -222,6 +222,29 @@ public:
     const double* getAgcSmoothCoeffTable() const noexcept { return agcSmoothCoeffTable.get(); }
     int getAgcCoeffTableCapacity() const noexcept { return agcCoeffTableCapacity; }
 
+#if defined(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS) && CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-1R-B: EQ バッファの実ヒープサイズ（bytes）を DIAG 専用で返す。
+    //   prepareToPlay で確保された capacity メンバの実測値の合算（推定値を含まない）。
+    //   挙動変更なし・読み取りのみ。DIAG 構成でのみコンパイルされる。
+    [[nodiscard]] size_t diagFootprintBytes() const noexcept
+    {
+        constexpr size_t sampleBytes = sizeof(double);
+        size_t total = 0;
+        if (scratchBuffer.get() != nullptr) total += static_cast<size_t>(scratchCapacity) * sampleBytes;
+        if (dryBypassBuffer.get() != nullptr) total += static_cast<size_t>(dryBypassCapacity) * sampleBytes;
+        if (parallelInputBuffer.get() != nullptr) total += static_cast<size_t>(parallelBufferCapacity) * sampleBytes;
+        if (parallelWorkBuffer.get() != nullptr) total += static_cast<size_t>(parallelBufferCapacity) * sampleBytes;
+        if (parallelAccumBuffer.get() != nullptr) total += static_cast<size_t>(parallelBufferCapacity) * sampleBytes;
+        if (structureOldOutBuffer.get() != nullptr) total += static_cast<size_t>(structureXfadeBufferCapacity) * sampleBytes;
+        if (structureNewOutBuffer.get() != nullptr) total += static_cast<size_t>(structureXfadeBufferCapacity) * sampleBytes;
+        if (msWorkBuffer.get() != nullptr) total += static_cast<size_t>(msWorkCapacity) * sampleBytes;
+        if (agcAttackCoeffTable.get() != nullptr) total += static_cast<size_t>(agcCoeffTableCapacity) * sampleBytes;
+        if (agcReleaseCoeffTable.get() != nullptr) total += static_cast<size_t>(agcCoeffTableCapacity) * sampleBytes;
+        if (agcSmoothCoeffTable.get() != nullptr) total += static_cast<size_t>(agcCoeffTableCapacity) * sampleBytes;
+        return total;
+    }
+#endif
+
     // フィルタータイプ変更
     void setBandType(int band, EQBandType type);
     EQBandType getBandType(int band) const;

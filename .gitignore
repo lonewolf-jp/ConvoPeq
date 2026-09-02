@@ -91,6 +91,7 @@ sampledata/synthetic/
 .freebuff/
 build-msvc/
 .zcode/
+.momosa/
 nul
 
 # Coverage reports

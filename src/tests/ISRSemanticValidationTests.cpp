@@ -912,6 +912,164 @@ static_assert(std::is_nothrow_move_assignable_v<X4BTestWriteAccess>,
     return true;
 }
 
+// =============================================================================
+// ★ dash2 H.11.27.4 (CW-8): PublishedWorldObservation contract tests
+//
+//   T-CW8-1/2/3 (統合): deterministic observe→publish→observe — pair address identity
+//     （obs.identity() == &obs.world()->publication）・publish N→N+1 で pair が進行し
+//     旧 observation は凍結。大量 rapid publish は対象外（deterministic 最小ケースのみ）。
+//   T-CW8-4: black-box — publish metadata（bake 値）== observed world->publication ==
+//     observed identity。production hook は追加しない（ordering は既存契約に委譲）。
+//   T-CW8-6/7: 型レベル — non-owning trivially copyable 型であること（6）と、
+//     world と identity を独立に持つ pair を public API から構築不能であること（7）。
+//     T-CW8-7 が本 CW-8 の核心: 間違った pair は構造的に生成不能であることを表明する。
+//   lifetime 契約（ND-02 §4）: observation は非所有 borrow。テストは Bridge tail
+//     （retire）を呼ばないため oldWorld はテスト側が所有し dangling は発生しない
+//     （EBR grace は本テストの検証対象ではない — 既存 retire suite に委譲）。
+// =============================================================================
+[[nodiscard]] bool testCW8_PublishedWorldObservation()
+{
+    using convo::isr::PublishedWorldObservation;
+
+    // --- T-CW8-7: construction restriction（型レベル・最重要） ---
+    //   private member + private ctor + friend factory → 非 aggregate・default 構築不能・
+    //   テスト TU（非 friend）からの独立 pair 構築不能。
+    static_assert(std::is_trivially_copyable_v<PublishedWorldObservation>,
+                  "CW-8 T7: observation must be a non-owning trivially copyable borrow pair");
+    static_assert(!std::is_aggregate_v<PublishedWorldObservation>,
+                  "CW-8 T7: brace/designed aggregate init {world, identity} must be prohibited");
+    static_assert(!std::is_default_constructible_v<PublishedWorldObservation>,
+                  "CW-8 T7: observation must only be produced by the authority factory");
+    static_assert(!std::is_constructible_v<PublishedWorldObservation,
+                                           const RuntimeState*,
+                                           const PublicationSemantic*>,
+                  "CW-8 T7: independent pair construction must be unrepresentable from "
+                  "non-friend code (test TU)");
+    static_assert(std::is_nothrow_copy_constructible_v<PublishedWorldObservation>,
+                  "CW-8 T6: copy must be noexcept borrow duplication");
+    //   注意: trivially copyable は lifetime safety の証明ではない（ownership contract の表明）。
+
+    // --- ハーネス（既存 X4-B テストと同一パターン: Coordinator は ~953KB のためヒープ確保） ---
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+    convo::isr::RuntimeWorldAuthority authority(coordinator);
+    const auto token = authority.acquireReadToken();
+
+    // --- T-CW8-1 (null case): 未 publish 時は {nullptr, nullptr}（&world->publication は評価しない） ---
+    {
+        const auto obs = authority.observePublishedObservation(token);
+        if (obs.world() != nullptr || obs.identity() != nullptr)
+            return false;
+    }
+
+    // --- T-CW8-1/2/3 統合: publish N → observe → publish N+1 → observe ---
+    //   publish() は owner を消費するため、各 world は createForBuilder で生成する。
+    //   metadata: monotonicity（seq/epoch/gen が前回より進む）を満たす値を直接指定する。
+    //   本テストは seal→publish の本番順序（PublishExecutor::executePublish の PR-5 seal）を
+    //   再現する — production と同一の publish 前提（sealed 後不変）を満たす。
+    auto makeOwner = []() {
+        auto owner = RuntimeState::createForBuilder(RuntimeState::BuilderToken{});
+        owner->sealRecursively();   // PR-5: publish 前 immutable 化（PublishExecutor と同一順序）
+        return convo::aligned_unique_ptr<const RuntimeState>(std::move(owner));
+    };
+
+    const auto publishWorld = [&authority, &makeOwner](
+                                  std::uint64_t seq, std::uint64_t epoch, std::uint64_t gen,
+                                  bool* committed) {
+        return authority.publish(makeOwner(),
+                                 convo::isr::RuntimeWorldAuthority::PublishMetadata{
+                                     convo::isr::RuntimeBoundary::NonRTWorld, seq, /*sequenceId*/
+                                     static_cast<convo::isr::PublicationSequenceId>(seq),
+                                     static_cast<convo::isr::PublicationEpoch>(epoch), gen },
+                                 committed);
+    };
+
+    bool committedN = false;
+    RuntimeState* oldN = publishWorld(1, 1, 1, &committedN);
+    if (!committedN || oldN != nullptr)   // 初回 publish: oldWorld は存在しない
+        return false;
+
+    const auto obsN = authority.observePublishedObservation(token);
+    // T-CW8-1: pair address identity — identity は world 内部 member への pointer
+    if (obsN.world() == nullptr)
+        return false;
+    if (obsN.identity() != &obsN.world()->publication)
+        return false;
+    // T-CW8-4: black-box — bake 済み metadata == observed publication == observed identity
+    if (obsN.identity()->sequenceId != static_cast<convo::isr::PublicationSequenceId>(1)
+        || obsN.identity()->epoch != static_cast<convo::isr::PublicationEpoch>(1)
+        || obsN.identity()->mappedRuntimeGeneration != 1)
+        return false;
+
+    bool committedN1 = false;
+    RuntimeState* oldN1 = publishWorld(2, 2, 2, &committedN1);
+    if (!committedN1 || oldN1 == nullptr)
+        return false;
+    // T-CW8-2: 前回 observation は swap 後も凍結（oldN1 == world N はまだ生存 → deref 可能）。
+    //   swap 戻り値と observation の world が同一であることも同時に検証する。
+    if (obsN.world() != oldN1
+        || obsN.identity()->sequenceId != static_cast<convo::isr::PublicationSequenceId>(1))
+        return false;
+
+    const auto obsN1 = authority.observePublishedObservation(token);
+    if (obsN1.world() == nullptr || obsN1.identity() == nullptr)
+        return false;
+    // T-CW8-1: 新しい observation でも pair address identity が成立
+    if (obsN1.identity() != &obsN1.world()->publication)
+        return false;
+    // T-CW8-2: world N と world N+1 は異なる・pair も異なる
+    if (obsN.world() == obsN1.world() || obsN.identity() == obsN1.identity())
+        return false;
+    // T-CW8-3 (deterministic 最小ケース): observe→publish→observe の繰返しでも
+    //   pair integrity が維持される（identity が常にその world 内部を指す）
+    if (obsN1.identity()->sequenceId != static_cast<convo::isr::PublicationSequenceId>(2))
+        return false;
+    if (obsN1.world()->publication.sequenceId != obsN1.identity()->sequenceId)
+        return false;
+
+    // --- T-CW8-6: non-owning 型契約（runtime 側の追補 — 型レベルは上記 static_assert） ---
+    //   copy した observation は同一 pair を指す（独立構築ではなく borrow 複製）
+    const auto obsCopy = obsN1;
+    if (obsCopy.world() != obsN1.world() || obsCopy.identity() != obsN1.identity())
+        return false;
+
+    // --- T-CW8-1 追補: shutdown clear（null swap）前後の null semantics ---
+    //   （clearPublishedRuntimeSnapshotsNonRt は request 未呼出では no-op: nullptr 返却・
+    //     current 不変 — 既存 API semantics が CW-8 追加で変わっていないことの動作確認を兼ねる。）
+    RuntimeState* cleared = authority.clearPublishedRuntimeSnapshotsNonRt();
+    if (cleared != nullptr)
+        return false;   // request 未呼出の no-op 契約（nullptr 返却・current 不変）
+    const auto obsAfterNoop = authority.observePublishedObservation(token);
+    if (obsAfterNoop.world() != obsN1.world() || obsAfterNoop.identity() != obsN1.identity())
+        return false;
+
+    // --- 破棄責務（本テストは Bridge tail を呼ばないため oldN1 を明示破棄する） ---
+    //   retirePublishedRuntimeWorldNonRt と同一の aligned free 契約（unseal + dtor + aligned_free）。
+    //   初回 publish の oldN は nullptr のため破棄不要。
+    oldN1->unseal();
+    oldN1->~RuntimeState();
+    convo::aligned_free(oldN1);
+
+    //   破棄後は current も null swap して物理 source を空にする（テスト終了時の store 状態契約）。
+    //   （Authority 破棄時に store も死ぬため必須ではないが、現行契約「shutdown clear → null 公開」
+    //     の観測も兼ねる。requestShutdownClearNonRt は Authority の NonRT API。）
+    authority.requestShutdownClearNonRt();
+    RuntimeState* clearedAfterRequest = authority.clearPublishedRuntimeSnapshotsNonRt();
+    //   clearedAfterRequest は N+1 world（store に残っていた最新 world）— 破棄責務は本テスト。
+    //   ただし N+1 world は seal 済みのため unseal してから破棄する。
+    if (clearedAfterRequest != nullptr)
+    {
+        clearedAfterRequest->unseal();
+        clearedAfterRequest->~RuntimeState();
+        convo::aligned_free(clearedAfterRequest);
+    }
+    const auto obsAfterClear = authority.observePublishedObservation(token);
+    if (obsAfterClear.world() != nullptr || obsAfterClear.identity() != nullptr)
+        return false;   // null swap 後の observation は {nullptr, nullptr}（CW-8 null semantics）
+
+    return true;
+}
+
 } // namespace
 
 // =============================================================================
@@ -2444,6 +2602,10 @@ int main()
     // --- B3 invariant #4: publish intent queue-full => explicit backpressure ---
     if (!testPublishIntentQueueFullBackpressure())
         throw std::runtime_error("B3: publish intent queue-full backpressure contract failed");
+
+    // --- CW-8: PublishedWorldObservation pair-snapshot contract (T-CW8-1/2/3/4/6/7) ---
+    if (!testCW8_PublishedWorldObservation())
+        throw std::runtime_error("CW-8: PublishedWorldObservation pair-snapshot contract failed");
 
     // --- D105-R5-9: Recovery Logical Obligation Enforcement counterexample tests C1-C10 ---
     if (!testRLOE_C1_unique32())

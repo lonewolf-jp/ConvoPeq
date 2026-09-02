@@ -221,6 +221,91 @@ constexpr Expected kExpected[8] = {
     return ok;
 }
 
+// =============================================================================
+// ★ CR-α (ND-07 contract): Site 3 warmup retry — bounded retry + backoff policy
+//   T-CRα-1: retryBackoffDelayMs table（0/10/20/40/80/80 + saturation）
+//   T-CRα-2: normative default {10,80,2} + kMaxWarmupConsecutiveRetries = 3
+//   T-CRα-3: warmupRetryDecision — context / obsolete / max（純関数・Scheduler 不使用）
+//   T-CRα-4: disposition → delay mapping（Immediate=0 / Backoff=policy / NoRetry=none）
+//   T-CRα-5/6: source inspection（exhaustion で再発行なし・diagLog 項目）は CR-α-2/5 の
+//              read-only verification で実施（本ファイルは純関数のみ）
+// =============================================================================
+[[nodiscard]] bool runTestF()
+{
+    bool ok = true;
+    using convo::BuildError;
+    using convo::RetryBackoffPolicy;
+    using convo::RetryDisposition;
+    using convo::WarmupRetryAction;
+    using Action = WarmupRetryAction::Value;
+
+    // --- T-CRα-2: normative default {10,80,2} + max = 3（recovery K=4 と別ドメイン・別値） ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        CHECK(p.initialDelayMs == 10, "T-CRα-2: default initialDelayMs must be 10");
+        CHECK(p.maxDelayMs == 80, "T-CRα-2: default maxDelayMs must be 80");
+        CHECK(p.multiplier == 2, "T-CRα-2: default multiplier must be 2");
+        CHECK(convo::kMaxWarmupConsecutiveRetries == 3,
+              "T-CRα-2: Site 3 warmup retry bound must be 3 (deliberately distinct from recovery K=4)");
+    }
+
+    // --- T-CRα-1: retryBackoffDelayMs table + saturation ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        CHECK(convo::retryBackoffDelayMs(p, 0) == 0, "T-CRα-1: attempt 0 → 0");
+        CHECK(convo::retryBackoffDelayMs(p, 1) == 10, "T-CRα-1: attempt 1 → 10");
+        CHECK(convo::retryBackoffDelayMs(p, 2) == 20, "T-CRα-1: attempt 2 → 20");
+        CHECK(convo::retryBackoffDelayMs(p, 3) == 40, "T-CRα-1: attempt 3 → 40");
+        CHECK(convo::retryBackoffDelayMs(p, 4) == 80, "T-CRα-1: attempt 4 → 80 (saturation)");
+        CHECK(convo::retryBackoffDelayMs(p, 5) == 80, "T-CRα-1: attempt 5 → 80 (saturated)");
+        CHECK(convo::retryBackoffDelayMs(p, 100) == 80, "T-CRα-1: attempt 100 → 80 (no overflow)");
+        // saturation 構造: initial > max の policy でも cap される
+        constexpr RetryBackoffPolicy inverted { 100, 50, 2 };
+        CHECK(convo::retryBackoffDelayMs(inverted, 1) == 50, "T-CRα-1: initial > max is capped");
+    }
+
+    // --- T-CRα-3: decision — context / obsolete / max ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        // context 非該当（IR 未 loading）→ NoRetry（WarmupFailed は無条件 retry ではない）
+        CHECK(convo::warmupRetryDecision(1, 3, false, false, RetryDisposition::RetryImmediate, p).action
+                  == Action::NoRetry, "T-CRα-3: !contextRetryable → NoRetry");
+        // obsolete → NoRetry（schedule しない）
+        CHECK(convo::warmupRetryDecision(1, 3, true, true, RetryDisposition::RetryImmediate, p).action
+                  == Action::NoRetry, "T-CRα-3: obsolete → NoRetry");
+        // NoRetry disposition → NoRetry
+        CHECK(convo::warmupRetryDecision(1, 3, true, false, RetryDisposition::NoRetry, p).action
+                  == Action::NoRetry, "T-CRα-4: NoRetry disposition → NoRetry");
+        // attempt 4（4 回目の failure）→ Exhausted（max=3 超過）
+        CHECK(convo::warmupRetryDecision(4, 3, true, false, RetryDisposition::RetryImmediate, p).action
+                  == Action::Exhausted, "T-CRα-3: attempt 4 > max → Exhausted");
+        CHECK(convo::warmupRetryDecision(5, 3, true, false, RetryDisposition::RetryBackoff, p).action
+                  == Action::Exhausted, "T-CRα-3: attempt 5 → Exhausted");
+    }
+
+    // --- T-CRα-4: disposition → delay mapping ---
+    {
+        constexpr RetryBackoffPolicy p = convo::kDefaultWarmupRetryBackoff;
+        // RetryImmediate → delay 0（latency-sensitive — bounded のみ適用）
+        const auto imm1 = convo::warmupRetryDecision(1, 3, true, false, RetryDisposition::RetryImmediate, p);
+        CHECK(imm1.action == Action::Schedule && imm1.delayMs == 0,
+              "T-CRα-4: RetryImmediate attempt 1 → Schedule delay 0");
+        const auto imm3 = convo::warmupRetryDecision(3, 3, true, false, RetryDisposition::RetryImmediate, p);
+        CHECK(imm3.action == Action::Schedule && imm3.delayMs == 0,
+              "T-CRα-4: RetryImmediate attempt 3 → Schedule delay 0");
+        // RetryBackoff → policy 表（attempt 1 → 10）
+        const auto bk1 = convo::warmupRetryDecision(1, 3, true, false, RetryDisposition::RetryBackoff, p);
+        CHECK(bk1.action == Action::Schedule && bk1.delayMs == 10,
+              "T-CRα-4: RetryBackoff attempt 1 → Schedule delay 10");
+        const auto bk2 = convo::warmupRetryDecision(2, 3, true, false, RetryDisposition::RetryBackoff, p);
+        CHECK(bk2.action == Action::Schedule && bk2.delayMs == 20,
+              "T-CRα-4: RetryBackoff attempt 2 → Schedule delay 20");
+    }
+
+    if (ok) std::cerr << "[PASS] TestF warmup retry policy (delay table + saturation + decision + mapping)\n";
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -230,9 +315,10 @@ int main()
     bool c = runTestC();
     bool d = runTestD();
     bool e = runTestE();
+    bool f = runTestF();
 
     std::cerr << "[BuildErrorClassification] checks=" << g_pass << " fails=" << g_fail
-              << ((a&&b&&c&&d&&e) ? " PASS" : " FAIL") << "\n";
+              << ((a&&b&&c&&d&&e&&f) ? " PASS" : " FAIL") << "\n";
     std::cout << g_pass << " checks, " << g_fail << " failures\n";
-    return (a && b && c && d && e && g_fail == 0) ? 0 : 1;
+    return (a && b && c && d && e && f && g_fail == 0) ? 0 : 1;
 }

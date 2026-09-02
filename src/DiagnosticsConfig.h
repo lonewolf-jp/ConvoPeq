@@ -118,6 +118,7 @@ inline void system_aligned_free(void* ptr) noexcept
 #include <psapi.h>
 #include <cassert>      // assert
 #include <algorithm>    // std::max
+#include <JuceHeader.h> // juce::String (diagFootprintLog 用)
 
 // ============================================================================
 // MklAllocStats — MKL 分配の Single Source of Truth
@@ -276,6 +277,19 @@ inline std::atomic<uint64_t>& diagSequenceCounter() noexcept
 {
     static std::atomic<uint64_t> counter{ 0 };
     return counter;
+}
+
+// ============================================================================
+// ★ D162-1R-B: footprint 診断ログ出力ヘルパ（NonRT 専用・behavior 変更なし）
+//   用途: [CONV_FOOTPRINT]/[NUC_ALLOC]/[NUC_FOOTPRINT]/[DSP_ALLOC]/
+//         [DSP_FOOTPRINT]/[DSP_DESTROY_FOOTPRINT]/[DSP_FOOTPRINT_RELEASED]
+//   呼び出し側は juce::String::formatted で整形済み文字列を渡す
+//   （printf 系可変引数は使用しない）。全て Message/Rebuild/destroy 経路
+//   （NonRT）から呼ぶこと。RT からの呼び出し禁止。
+// ============================================================================
+inline void diagFootprintLog(const juce::String& message) noexcept
+{
+    juce::Logger::writeToLog(message);
 }
 
 // ---- ProcessMemoryInfo ----

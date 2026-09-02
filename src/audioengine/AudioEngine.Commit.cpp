@@ -819,6 +819,44 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
             + " sealed=" + juce::String(static_cast<int>(req.sealedSnapshot.sealed)));
     }
 #endif
+
+    // ★ D162-1R-B: generation stamp + retained 時点の実測 footprint 再取得。
+    //   NUC / irData は DSPCore::prepare 後の rebuildAllIRsSynchronous（RebuildThread）で
+    //   構築されるため、construct 時の値では NUC=0。ここ（enqueue 時点）で全 generation
+    //   （published / non-published 両方）の実測値を上書き保存する。非 publish DSP は
+    //   retire/destroy されないため、この保存値が [DSP_DESTROY_FOOTPRINT] と突合される。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        newDSP->diagGeneration.store(static_cast<std::uint64_t>(generation), std::memory_order_relaxed);
+        newDSP->diagFootprint = newDSP->diagCaptureFootprint();
+        newDSP->diagFootprintCaptured.store(true, std::memory_order_release);
+        const auto& fp = newDSP->diagFootprint;
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=convolver bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.convolver));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=irData bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.irData));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=nuc bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.nuc));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=ipp bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.ipp));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=latency bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.latency));
+        diagLog(juce::String::formatted(
+            "[DSP_ALLOC] dsp=%p gen=%llu kind=eq bytes=%zu", (void*)newDSP,
+            (unsigned long long)generation, fp.eq));
+        diagLog(juce::String::formatted(
+            "[DSP_FOOTPRINT] dsp=%p gen=%llu phase=retained convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu oversampler=UNMEASURED loudness=UNMEASURED truePeak=UNMEASURED other=%zu TOTAL=%zu",
+            (void*)newDSP,
+            (unsigned long long)generation,
+            fp.convolver, fp.irData, fp.nuc, fp.ipp, fp.latency, fp.eq,
+            fp.other, fp.total()));
+    }
+#endif
     runtimeOrchestrator_->submitPublishRequest(req);
 
     // DSP commit 完了時に DSPReady を常に enqueue する。

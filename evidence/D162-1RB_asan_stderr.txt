@@ -1,0 +1,89 @@
+=================================================================
+==27624==ERROR: AddressSanitizer: heap-use-after-free on address 0x12602cb68800 at pc 0x7ff607fe34ef bp 0x00ae0cefec40 sp 0x00ae0cefec48
+READ of size 8 at 0x12602cb68800 thread T0
+    #0 0x7ff607fe34ee in AudioEngine::tryShutdownQuiescentReclaim(struct convo::isr::DSPHandle) C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.h:4454
+    #1 0x7ff607fe3030 in AudioEngine::EQCacheManager::CacheMap::~CacheMap(void) C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.h:2172
+    #2 0x7ff607fe4b21 in AudioEngine::EQCacheManager::~EQCacheManager(void) C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.Cache.cpp:172
+    #3 0x7ff607fd3e16 in AudioEngine::~AudioEngine(void) C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.CtorDtor.cpp:288
+    #4 0x7ff607f9b3e6 in MainWindow::~MainWindow(void) C:\VSC_Project\ConvoPeq\src\MainWindow.cpp:1162
+    #5 0x7ff607f8f473 in MainWindow::`scalar deleting dtor'(unsigned int) (C:\VSC_Project\ConvoPeq\build-diag-asan\ConvoPeq_artefacts\Release\ConvoPeq.exe+0x14217f473)
+    #6 0x7ff607f8bef5 in std::default_delete<juce::FileLogger>::operator() C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3338
+    #7 0x7ff607f8bef5 in std::unique_ptr<class juce::Viewport, struct std::default_delete<class juce::Viewport>>::reset(class juce::Viewport *) C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3507
+    #8 0x7ff607f8bb25 in MainApplication::shutdown(void) C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:186
+    #9 0x7ff60864cdb6 in juce::JUCEApplicationBase::shutdownApp(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_events\messages\juce_ApplicationBase.cpp:339
+    #10 0x7ff60864c75e in juce::JUCEApplicationBase::main(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_events\messages\juce_ApplicationBase.cpp:281
+    #11 0x7ff607f8be56 in WinMain C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:204
+    #12 0x7ff6087e6328 in invoke_main D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:102
+    #13 0x7ff6087e6328 in __scrt_common_main_seh D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288
+    #14 0x7fff399dccb6  (C:\WINDOWS\System32\KERNEL32.DLL+0x18002ccb6)
+    #15 0x7fff3b3acaeb  (C:\WINDOWS\SYSTEM32\ntdll.dll+0x1800acaeb)
+
+0x12602cb68800 is located 0 bytes inside of 66168-byte region [0x12602cb68800,0x12602cb78a78)
+freed by thread T0 here:
+    #0 0x7ff6087e5313 in operator delete(void *, unsigned __int64) D:\a\_work\1\s\src\vctools\asan\llvm\compiler-rt\lib\asan\asan_win_delete_scalar_size_thunk.cpp:41
+    #1 0x7ff60802782c in convo::isr::ISRRetireRouter::`scalar deleting dtor'(unsigned int) (C:\VSC_Project\ConvoPeq\build-diag-asan\ConvoPeq_artefacts\Release\ConvoPeq.exe+0x14221782c)
+    #2 0x7ff607f8bf6c in std::default_delete<juce::FileLogger>::operator() C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3338
+    #3 0x7ff607f8bf6c in std::unique_ptr<class std::_Node_assert, struct std::default_delete<class std::_Node_assert>>::~unique_ptr<class std::_Node_assert, struct std::default_delete<class std::_Node_assert>>(void) C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3456
+    #4 0x7ff607fd3d6e in AudioEngine::~AudioEngine(void) C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.CtorDtor.cpp:288
+    #5 0x7ff607f9b3e6 in MainWindow::~MainWindow(void) C:\VSC_Project\ConvoPeq\src\MainWindow.cpp:1162
+    #6 0x7ff607f8f473 in MainWindow::`scalar deleting dtor'(unsigned int) (C:\VSC_Project\ConvoPeq\build-diag-asan\ConvoPeq_artefacts\Release\ConvoPeq.exe+0x14217f473)
+    #7 0x7ff607f8bef5 in std::default_delete<juce::FileLogger>::operator() C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3338
+    #8 0x7ff607f8bef5 in std::unique_ptr<class juce::Viewport, struct std::default_delete<class juce::Viewport>>::reset(class juce::Viewport *) C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3507
+    #9 0x7ff607f8bb25 in MainApplication::shutdown(void) C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:186
+    #10 0x7ff60864cdb6 in juce::JUCEApplicationBase::shutdownApp(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_events\messages\juce_ApplicationBase.cpp:339
+    #11 0x7ff60864c75e in juce::JUCEApplicationBase::main(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_events\messages\juce_ApplicationBase.cpp:281
+    #12 0x7ff607f8be56 in WinMain C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:204
+    #13 0x7ff6087e6328 in invoke_main D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:102
+    #14 0x7ff6087e6328 in __scrt_common_main_seh D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288
+    #15 0x7fff399dccb6  (C:\WINDOWS\System32\KERNEL32.DLL+0x18002ccb6)
+    #16 0x7fff3b3acaeb  (C:\WINDOWS\SYSTEM32\ntdll.dll+0x1800acaeb)
+
+previously allocated by thread T0 here:
+    #0 0x7ff6087e51e5 in operator new(unsigned __int64) D:\a\_work\1\s\src\vctools\asan\llvm\compiler-rt\lib\asan\asan_win_new_scalar_thunk.cpp:40
+    #1 0x7ff607fd13e8 in std::make_unique C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3666
+    #2 0x7ff607fd13e8 in AudioEngine::AudioEngine(void) C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.CtorDtor.cpp:39
+    #3 0x7ff607f8ecac in MainWindow::MainWindow(class juce::String const &) C:\VSC_Project\ConvoPeq\src\MainWindow.cpp:254
+    #4 0x7ff607f8b76a in std::make_unique C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory:3666
+    #5 0x7ff607f8b76a in MainApplication::initialise(class juce::String const &) C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:166
+    #6 0x7ff60864c9ec in juce::JUCEApplicationBase::initialiseApp(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_events\messages\juce_ApplicationBase.cpp:312
+    #7 0x7ff6082202a8 in juce::JUCEApplication::initialiseApp(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_gui_basics\application\juce_Application.cpp:97
+    #8 0x7ff60864c6b0 in juce::JUCEApplicationBase::main(void) C:\VSC_Project\ConvoPeq\JUCE\modules\juce_events\messages\juce_ApplicationBase.cpp:271
+    #9 0x7ff607f8be56 in WinMain C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:204
+    #10 0x7ff6087e6328 in invoke_main D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:102
+    #11 0x7ff6087e6328 in __scrt_common_main_seh D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288
+    #12 0x7fff399dccb6  (C:\WINDOWS\System32\KERNEL32.DLL+0x18002ccb6)
+    #13 0x7fff3b3acaeb  (C:\WINDOWS\SYSTEM32\ntdll.dll+0x1800acaeb)
+
+SUMMARY: AddressSanitizer: heap-use-after-free C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.h:4454 in AudioEngine::tryShutdownQuiescentReclaim(struct convo::isr::DSPHandle)
+Shadow bytes around the buggy address:
+  0x12602cb68580: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x12602cb68600: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x12602cb68680: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x12602cb68700: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x12602cb68780: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+=>0x12602cb68800:[fd]fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x12602cb68880: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x12602cb68900: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x12602cb68980: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x12602cb68a00: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x12602cb68a80: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==27624==ABORTING

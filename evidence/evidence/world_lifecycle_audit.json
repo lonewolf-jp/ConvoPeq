@@ -1,0 +1,214 @@
+{
+  "schema": "world_lifecycle_audit_v1",
+  "activeWorldCount": 1,
+  "publishedCount": 25,
+  "retiredCount": 24,
+  "doubleRetireCount": 0,
+  "ringBufferSize": 25,
+  "ringBufferCapacity": 4096,
+  "lastRetiredWorldId": 34,
+  "lastRetireEpoch": 34,
+  "lastRetireTimestampUs": 25981494546,
+  "recentRecords": [
+    {
+      "worldId": 1,
+      "publishEpoch": 1,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25638041598,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 1
+    },
+    {
+      "worldId": 2,
+      "publishEpoch": 2,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25638150336,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 2
+    },
+    {
+      "worldId": 3,
+      "publishEpoch": 3,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25638544342,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 3
+    },
+    {
+      "worldId": 4,
+      "publishEpoch": 4,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25638777204,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 4
+    },
+    {
+      "worldId": 6,
+      "publishEpoch": 6,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25645449037,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 6
+    },
+    {
+      "worldId": 7,
+      "publishEpoch": 7,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25675526098,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 7
+    },
+    {
+      "worldId": 9,
+      "publishEpoch": 9,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25681459235,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 9
+    },
+    {
+      "worldId": 10,
+      "publishEpoch": 10,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25711519605,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 10
+    },
+    {
+      "worldId": 12,
+      "publishEpoch": 12,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25711538535,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 12
+    },
+    {
+      "worldId": 13,
+      "publishEpoch": 13,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25741622882,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 13
+    },
+    {
+      "worldId": 15,
+      "publishEpoch": 15,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25741677815,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 15
+    },
+    {
+      "worldId": 16,
+      "publishEpoch": 16,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25771712527,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 16
+    },
+    {
+      "worldId": 18,
+      "publishEpoch": 18,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25771765087,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 18
+    },
+    {
+      "worldId": 19,
+      "publishEpoch": 19,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25801781419,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 19
+    },
+    {
+      "worldId": 21,
+      "publishEpoch": 21,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25801798253,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 21
+    },
+    {
+      "worldId": 22,
+      "publishEpoch": 22,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25831907027,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 22
+    },
+    {
+      "worldId": 24,
+      "publishEpoch": 24,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25837470076,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 24
+    },
+    {
+      "worldId": 25,
+      "publishEpoch": 25,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25867518442,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 25
+    },
+    {
+      "worldId": 27,
+      "publishEpoch": 27,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25873469472,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 27
+    },
+    {
+      "worldId": 28,
+      "publishEpoch": 28,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25903509979,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 28
+    },
+    {
+      "worldId": 30,
+      "publishEpoch": 30,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25909493802,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 30
+    },
+    {
+      "worldId": 31,
+      "publishEpoch": 31,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25939610674,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 31
+    },
+    {
+      "worldId": 33,
+      "publishEpoch": 33,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25945471362,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 33
+    },
+    {
+      "worldId": 34,
+      "publishEpoch": 34,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25975571830,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 34
+    },
+    {
+      "worldId": 36,
+      "publishEpoch": 36,
+      "retireEpoch": 0,
+      "publishTimestampUs": 25981493375,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 36
+    }
+  ]
+}

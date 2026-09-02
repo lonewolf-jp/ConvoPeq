@@ -1,0 +1,38 @@
+{
+  "schema": "retire_timeline_v2",
+  "epochMode": "split",
+  "rollbackMode": "split",
+  "rollbackReady": true,
+  "rollbackFlags": {
+    "global": true,
+    "publicationOnly": false,
+    "crossfadeOnly": false,
+    "retirePathOnly": true
+  },
+  "totalTransitions": 122,
+  "laneCounters": {
+    "rtIntent": 25,
+    "coordination": 25,
+    "epoch": 25,
+    "reclaim": 25,
+    "quarantine": 22
+  },
+  "lifecycleCounters": {
+    "visible": 0,
+    "compareEligible": 25,
+    "telemetryRetained": 25,
+    "replayRetainedOptional": 22,
+    "reclaimEligible": 25,
+    "reclaimed": 25
+  },
+  "lifecycleSample": [
+    {"slot": 0, "state": "visible"},
+    {"slot": 1, "state": "reclaimed"},
+    {"slot": 2, "state": "reclaimed"},
+    {"slot": 3, "state": "reclaimed"},
+    {"slot": 4, "state": "reclaimed"},
+    {"slot": 5, "state": "visible"},
+    {"slot": 6, "state": "reclaimed"},
+    {"slot": 7, "state": "reclaimed"}
+  ]
+}

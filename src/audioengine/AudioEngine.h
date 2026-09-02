@@ -1066,6 +1066,32 @@ public:
         //   ASSERT_NON_RT_THREAD() 必須
         [[nodiscard]] TrackedMemoryStatistics collectTrackedMemoryStatistics() const noexcept;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ D162-1R-B: DSP 単位 footprint 診断（DIAG 専用・挙動変更なし）。
+        //   実測値のみを保持する（推定値・残差押し込みは禁止）。未計測カテゴリ
+        //   (oversampler/loudness/truePeak) は 0 のまま＝計上対象外（UNMEASURED）。
+        struct DiagFootprint
+        {
+            size_t convolver = 0;   // ConvolverProcessor 固定バッファ（delay/dry/smoothing/oldDry/wet/fadeRamp）
+            size_t irData = 0;      // StereoConvolver::irData[2]
+            size_t nuc = 0;         // NUC ×2 MKL バッファ合計
+            size_t ipp = 0;         // NUC ×2 IPP spec+work 合計
+            size_t latency = 0;     // HistoryRuntimeState::fixedLatencyBufferL/R
+            size_t eq = 0;          // EQProcessor バッファ
+            size_t other = 0;       // 実測だが分類外のもの（現行 0 固定）
+            [[nodiscard]] size_t total() const noexcept { return convolver + irData + nuc + ipp + latency + eq + other; }
+        };
+
+        // capture 時点の generation（enqueuePublicationIntentForRuntimeCommit が唯一の stamp 経路）。
+        std::atomic<std::uint64_t> diagGeneration { 0 };
+        DiagFootprint diagFootprint {};             // 非 RT 前提（capture/stamp/destroy は全て NonRT）
+        std::atomic<bool> diagFootprintCaptured { false };
+
+        // NonRT 専用: 実測 footprint の取得（publish 前の DSPCore を capture 時点の
+        // 構築スレッドまたは Message Thread から呼ぶこと）。
+        [[nodiscard]] DiagFootprint diagCaptureFootprint() noexcept;
+#endif
+
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
         static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
@@ -4294,7 +4320,24 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
 
 // ★ R-2: retireDSP() 削除 — 呼び出し元不在のデッドコード。
 //   DSP の退役は DSPLifetimeManager 経由に一本化済み。
-//   代わりに retireDSPHandleForRuntime() を直接使用すること。
+//
+// ★★★ D162-2-B (C′) — retireDSPHandleForRuntime の契約明確化 ★★★
+//   retireDSPHandleForRuntime() は「物理破壊まで行う retire」ではなく、
+//   **handle registry disposition の primitive**（runtimeDSPHandleMap_ からの台帳解除 +
+//   DSPHandleRuntime slot の Retired 遷移 + requestReclaim による slot reclaim）である。
+//   DSPCore の物理破壊（destroyDSPCoreNode）は、この関数自体は行わない。
+//   物理破壊まで行う完全な terminal disposition は
+//   **DSPLifetimeManager::retire()**（台帳解除 + ISRRetireRouter::enqueueWithRetry による
+//   EBR 破壊権取得 → epoch 安全確認後に destroyDSPCoreNode）である。
+//   ★ 使用規則（INV-D162-1/3・D162-2-A §5）:
+//     - registered DSPCore を手放す全経路 → DSPLifetimeManager::retire() を使うこと。
+//       retireDSPHandleForRuntime を単独で terminal disposition として使用すると、
+//       台帳解除のみで DSPCore が orphan 化する（D162-1P: 49 件残留の根本原因）。
+//     - 未登録 DSPCore（handle map 不在・publish されない）→ DSPGuard 契約の
+//       destroyDSPCoreNode 直接破壊（EBR epoch 保護不要）。
+//     - publish 実行失敗で rollback → destroyRolledBackDSP()（registry rollback済み）。
+//   本関数の正当な直接呼び出し元は DSPLifetimeManager（retire/retireByHandle 内部）と
+//   診断用 lookup のみを想定する。API rename は D162-2-B では行わない（既存契約の注記のみ）。
 
 inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
 {

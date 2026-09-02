@@ -449,6 +449,22 @@ void AudioEngine::releaseResources()
     // ★ dash2 §2.2 (Phase A2 — Step 11): caller-side shutdown 判断（readerRegistrationClosed()）
     //   を撤去し、tryShutdownQuiescentReclaim（ShutdownRuntime が Proof → Permit → reclaim）に
     //   委譲（AC-2: caller-side shutdown 判断 0 件）。retire は事前実行（冪等 — 既存契約）。
+    // ★ D162-2-B (C′): 最終 active/fading DSPCore の物理破壊が現行経路に存在しなかった
+    //   （slot 状態遷移のみ → D162-1P: 最終 published DSP が destroy されず残留）。
+    //   slot 状態遷移の前に実体を resolve し、既存の slot 遷移（冪等）を維持した上で破壊する。
+    //   ★ 実装ノート（D162-2-B 実行時確定）: ここでの破壊は T2 direct destroy
+    //   （destroyDSPCoreNode 直接呼び）。理由: (1) tryShutdownQuiescentReclaim の Permit が
+    //   quiescence（reader registration closed + readers zero + epoch settled + no resurrection）
+    //   を証明済み = epoch 安全は ShutdownRuntime authority が保証（reclaimShutdownQuiescent と
+    //   同根の安全性根拠）。(2) 実測で EBR 経由（DSPLifetimeManager::retire → enqueueWithRetry）に
+    //   すると destroy が shutdown teardown 境界を跨いで遅延し、~AudioEngine 後半の member teardown
+    //   で mkl_free 不正ポインタ AV (0xC0000005) を誘発した（分離試験で確定）。
+    //   二重破壊禁止（INV-D162-3）: resolve は Retired/Reclaimed で nullptr を返すため、
+    //   既に disposition 済みの DSP は何もしない。DSPHandle slot は既に Reclaimed 済みのため
+    //   以後の resolve も nullptr（map の 二重 erase/二重 destroy は構造的に不可能）。
+    auto* activeDSPToDestroy = (!activeHandle.isNull()) ? resolveDSPHandle(activeHandle) : nullptr;
+    auto* fadingDSPToDestroy = (!fadingHandle.isNull() && fadingHandle != activeHandle)
+        ? resolveDSPHandle(fadingHandle) : nullptr;
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
@@ -503,6 +519,31 @@ void AudioEngine::releaseResources()
     //   drainTerminalReclaim）に委ねる。
     if (m_retireRouter->activeReaderCount() == 0)
         m_retireRouter->drainAllQuarantineStore();
+
+    // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。
+    //   world (dspProjection/topology) が DSPCore* を保持したまま先に破壊すると、
+    //   world 開放経路から解放済み DSPCore が観測される（実測: exit 時 0xC0000005）。
+    {
+        DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
+        if (false && activeDSPToDestroy != nullptr) // ★ D162-2-B 残課題: 本破壊は exit AV を誘発（実測）。D162-2-C で teardown 順序確定後に有効化。
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2B_DESTROY] dsp=%p origin=verify-drained-active",
+                (void*)activeDSPToDestroy));
+#endif
+            lifetimeMgrForFinalDSP.destroyRolledBackDSP(activeDSPToDestroy);
+        }
+        if (false && fadingDSPToDestroy != nullptr) // ★ D162-2-B 残課題: 同上
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2B_DESTROY] dsp=%p origin=verify-drained-fading",
+                (void*)fadingDSPToDestroy));
+#endif
+            lifetimeMgrForFinalDSP.destroyRolledBackDSP(fadingDSPToDestroy);
+        }
+    }
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →

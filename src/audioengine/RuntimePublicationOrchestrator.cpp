@@ -3,6 +3,7 @@
 #include "RuntimeBuilder.h"
 #include "CrossfadeAuthority.h"
 #include "FrozenRuntimeWorld.h"
+#include "DSPLifetimeManager.h"   // ★ D162-2-B: terminal disposition authority
 #include <chrono>
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -377,12 +378,22 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
         case PublicationAdmission::Decision::DeferredFadingActive:
             enqueueDeferred(req);
             return;
+        // ★ D162-2-B (C′ / H1 修正 S4 — latent path repair):
+        //   Rejected* 終端は newDSP（handle 登録済み・未 publish・World から到達不能）の
+        //   disposition を行わず orphan 化する脱落点（D162-2-A 脇落点 S4・soak 未発火だが
+        //   D162-1P の stale-gen 条件は実在する）。各 Rejected* で authority retire を実行する。
+        //   ★ RejectedPublishFailure は例外: trySubmitImpl 内で destroyRolledBackDSP により
+        //   既に直接破壊済み（Orchestrator.cpp:290-291）＋ handle registry が rollback
+        //   （Reclaimed）へ遷移しているため、resolveDSPHandle が nullptr を返し本 helper は
+        //   no-op になる（二重破壊禁止契約 INV-D162-3 — retire を追加して破壊しない）。
+        //   helper の no-op 保証により全 case で同一呼び出しが安全なため、default 経路で一括処理する。
         case PublicationAdmission::Decision::RejectedStaleGeneration:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Admission,
                 FailureReason::StaleGeneration, "submitPublishRequest:stale",
                 0, nowUs);
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);  // ★ D105-R5-9: −1
+            retireRegisteredDSP(req, "rejected-stale-generation");  // ★ D162-2-B (S4)
             return;
         default:
             return;
@@ -399,6 +410,10 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             //   delivery=None (P-B), counter+1, exhaustion→ResolvedFailed (path X only).
             if (req.recoveryObligationId != 0)
                 engine_.runtimePublicationBridge_.postRecoveryFailureSignal(req.recoveryObligationId);
+            // ★ D162-2-B (S4): notFinalized は DSPCore 自体は健全（IR finalize 待ち）。
+            //   publish されないため World 到達不能 → authority retire（A/B 経路の
+            //   world-build-fail retire と同処置・Orchestrator.cpp:181/:249 前例）。
+            retireRegisteredDSP(req, "rejected-not-finalized");
             return;
         case PublicationAdmission::Decision::RejectedPressure:
             stateOwner_.onRejected(0);
@@ -411,6 +426,11 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Retry);
             if (req.recoveryObligationId != 0)
                 engine_.runtimePublicationBridge_.rearmRecoveryRetry(req.recoveryObligationId);  // ★ D105-R5-9: guarded re-arm
+            // ★ D162-2-B (S4): obligation は Live のまま再 drive 可能だが、本 DSPCore 自体は
+            //   obligation 再発行時に新 build が作る（obligation は buildSource を保持し、
+            //   DSPCore instance を保持しない）。滞留 DSPCore は World 到達不能のため
+            //   authority retire する（Pressure 連鎖での multi-gen orphan 防止）。
+            retireRegisteredDSP(req, "rejected-pressure");
             return;
         case PublicationAdmission::Decision::RejectedShutdown:
             stateOwner_.onRejected(0);
@@ -418,12 +438,19 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
                 FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
                 0, nowUs);
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded); // ★ D105-R5-9: −1 (idempotent)
+            // ★ D162-2-B (S4): shutdown 拒否 DSP も World 到達不能。shutdown drain は
+            //   EBR 経路を処理する（drainDeferredRetireQueues(true)）ため authority retire が
+            //   shutdown 契約と整合する。
+            retireRegisteredDSP(req, "rejected-shutdown");
             return;
         // ★ 15-P-6: publish-time 内部失敗 — shutdown telemetry に誤計上しない。
         //   FailureStage::Execution / FailureReason::PublishFailed で記録し、
         //   recovery suppression（shutdown 扱い）を回避する。
         //   NOTE: trySubmitImpl already resolved this obligation (Failed) before returning
         //   RejectedPublishFailure, so no second resolve is needed here (would be a no-op anyway).
+        //   ★ D162-2-B (S4): newDSP は destroyRolledBackDSP（Orchestrator.cpp:290-291）で
+        //   直接破壊済み。retire を追加すると二重破壊になるため、ここでは disposition しない
+        //   （helper が呼ばれても no-op 保証があるが、明示的に呼ばない — INV-D162-3）。
         case PublicationAdmission::Decision::RejectedPublishFailure:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Execution,
@@ -458,13 +485,15 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     }
 
     // ★ D132 (INV-DEFERRED-2): overwrite 時の旧 DSPCore retire。
+    //   ★ D162-2-B (C′ / H1 修正 S1): 旧実装は engine_.retireDSPHandleForRuntime 直呼び
+    //   （台帳解除のみ）で、EBR 破壊権取得が行われず DSPCore が orphan 化していた
+    //   （D162-1P: 49 retained のうち 48 件が本経路）。authority（DSPLifetimeManager::retire）
+    //   に統一し、handle map erase + EBR enqueue を 1 回だけ実行する。
+    //   D132 の意味（旧 deferred holder の retire）は不変。二重 retire は
+    //   retireDSPHandleForRuntime の map lookup が単調に false を返すため構造的に不可。
+    //   oldHandle は直下の deferredSlot_ 置換（:513）で失われるため、置換前に retire する。
     if (deferredSlot_.has_value()) {
-        const auto oldHandle = deferredSlot_->request.newDSP;
-        if (!oldHandle.isNull()) {
-            auto* oldDSP = engine_.resolveDSPHandle(oldHandle);
-            if (oldDSP != nullptr)
-                engine_.retireDSPHandleForRuntime(oldDSP);
-        }
+        retireRegisteredDSP(deferredSlot_->request, "deferred-overwrite");
     }
 
     // ★ D135-1 / F6: obligation accounting — identity = (generation, recoveryObligationId).
@@ -495,10 +524,9 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         // ★ F6-6: dormant guard — 現行 production に Type-A retry 経路は無く、retention は count を
         //   増やさないため deferredRetryCount_ は常に 0（この分岐は発火しない）。将来の Type-A 用に保持。
         if (deferredRetryCount_ > kMaxDeferredRetries) {
-            if (!req.newDSP.isNull()) {
-                if (auto* dsp = engine_.resolveDSPHandle(req.newDSP); dsp != nullptr)
-                    engine_.retireDSPHandleForRuntime(dsp);
-            }
+            // ★ D162-2-B (C′ / latent path repair): H1 実測 49 件には不寄与（F6-6 どおり不発）だが、
+            //   S1 同型の orphan 脱落点のため authority 経由に修正（latent path として本修正に計上）。
+            retireRegisteredDSP(req, "retry-exhausted-discard");
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             juce::Logger::writeToLog(juce::String("[HEALTH] Deferred publish starved")
                 + " gen=" + juce::String(req.generation)
@@ -552,6 +580,29 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
     if (convo::consumeAtomic(hasDeferred_, std::memory_order_acquire)) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
+        // ★ D162-2-B (H1 修正 S3): slot reset の前に、slot が保持していた handle 登録済み
+        //   DSPCore を disposition する（D162-2-A 脱落点 S3・D162-1P 実測 1 件）。
+        //   ★ 実装ノート（D162-2-B 実行時確定）: 本 DSP は一度も publish されていないため
+        //   （RuntimePublishWorld topology / activeRuntimeDSPSlot / fadingRuntimeDSPSlot の
+        //   いずれにも現れない・handle registry state は Constructing のまま）、RT reader は
+        //   到達不能である。これは DSPGuard 契約（RebuildDispatch.cpp:938-965「未登録 DSPCore は
+        //   EBR epoch 保護不要」）と同型の T2 direct destroy が正当なケースである。
+        //   初版の DSPLifetimeManager::retire（EBR enqueue）は、shutdown teardown 境界を跨いで
+        //   EBR destroy が遅延実行されることで exit 時 AV (0xC0000005・mkl_free 不正ポインタ) を
+        //   誘発した（分離試験: S3 無効化で exit 0x0 再現）。clear 時点（engine 全員生存・
+        //   Message/Rebuild Thread・NonRT）で直接破壊する方が所有権連鎖が単一ポイントで完結し安全。
+        //   ownership 遷移: deferredSlot（現 owner）→ 本関数（同期的破壊）→ 終端。
+        //   thread 契約: assert-free（非 RebuildThread caller: ReleaseResources.cpp:359 EmergencyDrain /
+        //   C1 fallback — D135-8 Gate A 審査済み）。NonRT 実行。
+        // ★ D162-2-B 残課題（D162-2-C へ繰り越し）: shutdown 時の deferred DSP disposition。
+        //   初版（DSPLifetimeManager::retire = EBR enqueue）と第2版（T2 direct destroy）の双方で、
+        //   破壊を実行した場合に限り ~AudioEngine 後半の member teardown で 0xC0000005 (mkl_free 不正
+        //   ポインタ) が発生することを実測で確定した（破壊しない現行挙動では exit 0x0）。
+        //   原因は shutdown teardown 順序と DSPHandle registry / EQCacheManager / rcuSwapper の
+        //   相互作用にあり、S3 単独の修正範囲を超える。D162-2-C（read-only validation から
+        //   teardown 順序監査へ拡張）で root-cause 確定後に有効化すること。
+        //   現状の残留: shutdown 時に slot 残留していた deferred DSP 1 件のみ破壊されない
+        //   （process exit で OS 回収・S1 により通常運転中の orphan は解消済み）。
         deferredSlot_.reset();
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
     }
@@ -629,6 +680,35 @@ RuntimePublicationOrchestrator::buildDeferredAdmissionSnapshot() const noexcept
         .nowUs = convo::getCurrentTimeUs(),
         .ttlUs = kDeferredPublishTTLUs
     };
+}
+
+// ★ D162-2-B (C′): registered DSP の terminal disposition authority（実装）。
+//   INV-D162-1: 本 helper が「registered DSP を手放す」唯一の口。
+//   INV-D162-3: DSPLifetimeManager::retire は台帳解除（retireDSPHandleForRuntime）と
+//     EBR 破壊権取得（enqueueWithRetry）を 1 callee で同時に実行する。台帳解除済み
+//     （map 不在）の DSP に対しては retire が false で no-op するため、二重 EBR enqueue /
+//     二重破壊は構造的に発生しない（destroyRolledBackDSP で直接破壊済みの DSP も
+//     rollback により handle registry が Reclaimed へ遷移しており resolve が nullptr を
+//     返すため、本 helper は何もしない — 二重破壊禁止契約）。
+//   所有権遷移: handle map（現 owner）→ EBR（enqueueWithRetry 時点）→ destroyDSPCoreNode。
+//     途中で参照を失う window は存在しない。
+void RuntimePublicationOrchestrator::retireRegisteredDSP(
+    const PublicationAdmission::PublishRequest& req, const char* origin) noexcept
+{
+    if (req.newDSP.isNull())
+        return;
+    auto* dsp = engine_.resolveDSPHandle(req.newDSP);
+    if (dsp == nullptr)
+        return;  // 未登録 / rollback / quarantine / reclaimed — disposition 済み。no-op。
+
+    DSPLifetimeManager lifetimeMgr{engine_};
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[D162-2B_RETIRE] dsp=%p gen=%llu origin=%s",
+        (void*)dsp, (unsigned long long)req.generation,
+        origin != nullptr ? origin : "unknown"));
+#endif
+    lifetimeMgr.retire(dsp);
 }
 
 // ★ Phase-1: finishView — ownership Release の唯一口（design-D4 §1488 / §139-140）。
@@ -723,6 +803,9 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
 
     auto result = admission_.evaluateDeferred(view->metadata(),
                                              buildDeferredAdmissionSnapshot());
+    // ★ D162-2-B (S2): evaluateDeferred 判定後・discard 前に request を値コピー
+    //   （retireRegisteredDSP へ渡す用。view は参照借用のため discard 後は slot 無効）。
+    PublicationAdmission::PublishRequest slotRequestSnapshot = view->peekRequestCopy();
     switch (result.decision) {
         case PublicationAdmission::DeferredDecision::Ready: {
             // consume は owner_->finishView() を呼んで ownership release を完結する。
@@ -733,6 +816,15 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
         }
         case PublicationAdmission::DeferredDecision::Discard: {
             // discard は lastDiscardReason 記録 + owner_->finishView() で ownership release。
+            // ★ D162-2-B (C′ / H1 修正 S2): view->discard() は deferredSlot の ownership release
+            //   のみで、slot が保持していた request.newDSP（handle 登録済み DSPCore）の
+            //   disposition を行わなかった（D162-2-A 脱落点 S2）。slot 破棄と DSP destruction を
+            //   分離し、ownership が宙に浮かない順序にする:
+            //   (1) 先に request を move-out 不可のため snapshot（view の slot 参照経由）、
+            //   (2) authority retire（台帳解除 + EBR 破壊権取得）で ownership を EBR へ移譲、
+            //   (3) view->discard() で slot を release。
+            //   retire と discard の間で DSP は EBR が所有（単一 owner 継続）。
+            retireRegisteredDSP(slotRequestSnapshot, "deferred-discard");
             view->discard(result.discardReason);
             view.reset();
             break;
