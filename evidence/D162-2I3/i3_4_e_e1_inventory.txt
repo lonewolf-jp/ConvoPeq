@@ -1,0 +1,806 @@
+=== I3-4-E E1 inventory (generated 2026-09-05 20:51:41) ===
+build dir: C:\VSC_Project\ConvoPeq\build-diag
+
+=== rule family census (Release, relevant src/ .obj outputs) ===
+
+=== per-TU inventory ===
+{
+ "target": "ObservePathSingleSourceTests",
+ "obj": "CMakeFiles\\ObservePathSingleSourceTests.dir\\Release\\src\\tests\\ObservePathSingleSourceTests.cpp.obj",
+ "obj_mtime": "2026-09-05 20:09:51",
+ "obj_sha256_16": "e6b6de022e93981d",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\ObservePathSingleSourceTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__ObservePathSingleSourceTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_ObservePathSingleSourceTests_RELEASE <-  [phony]",
+  "Release\\ObservePathSingleSourceTests.exe <- CMakeFiles\\ObservePathSingleSourceTests.dir\\Release\\src\\tests\\ObservePathSingleSourceTests.cpp.obj [CXX_EXECUTABLE_LINKER__ObservePathSingleSourceTests_Release]",
+  "ObservePathSingleSourceTests.exe$:Release <- Release\\ObservePathSingleSourceTests.exe [phony]",
+  "ObservePathSingleSourceTests$:Release <- Release\\ObservePathSingleSourceTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc",
+  "INCLUDES": "-IC:\\VSC_Project\\ConvoPeq -IC:\\VSC_Project\\ConvoPeq\\src -IC:\\VSC_Project\\ConvoPeq\\src\\audioengine -IC:\\VSC_Project\\ConvoPeq\\src\\core",
+  "OBJECT_DIR": "CMakeFiles\\ObservePathSingleSourceTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\ObservePathSingleSourceTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\ObservePathSingleSourceTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\ObservePathSingleSourceTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\ObservePathSingleSourceTests.dir"
+ }
+}
+{
+ "target": "OverlapAuthoritySingularTests",
+ "obj": "CMakeFiles\\OverlapAuthoritySingularTests.dir\\Release\\src\\tests\\OverlapAuthoritySingularTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:00",
+ "obj_sha256_16": "6efc1e73fdbcdaa0",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\OverlapAuthoritySingularTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__OverlapAuthoritySingularTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_OverlapAuthoritySingularTests_RELEASE <-  [phony]",
+  "Release\\OverlapAuthoritySingularTests.exe <- CMakeFiles\\OverlapAuthoritySingularTests.dir\\Release\\src\\tests\\OverlapAuthoritySingularTests.cpp.obj [CXX_EXECUTABLE_LINKER__OverlapAuthoritySingularTests_Release]",
+  "OverlapAuthoritySingularTests.exe$:Release <- Release\\OverlapAuthoritySingularTests.exe [phony]",
+  "OverlapAuthoritySingularTests$:Release <- Release\\OverlapAuthoritySingularTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc",
+  "INCLUDES": "-IC:\\VSC_Project\\ConvoPeq -IC:\\VSC_Project\\ConvoPeq\\src -IC:\\VSC_Project\\ConvoPeq\\src\\audioengine -IC:\\VSC_Project\\ConvoPeq\\src\\core",
+  "OBJECT_DIR": "CMakeFiles\\OverlapAuthoritySingularTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\OverlapAuthoritySingularTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\OverlapAuthoritySingularTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\OverlapAuthoritySingularTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\OverlapAuthoritySingularTests.dir"
+ }
+}
+{
+ "target": "CrossfadeExecutorLocalContractTests",
+ "obj": "CMakeFiles\\CrossfadeExecutorLocalContractTests.dir\\Release\\src\\tests\\CrossfadeExecutorLocalContractTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:01",
+ "obj_sha256_16": "084702bf96ba082b",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\CrossfadeExecutorLocalContractTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__CrossfadeExecutorLocalContractTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_CrossfadeExecutorLocalContractTests_RELEASE <-  [phony]",
+  "Release\\CrossfadeExecutorLocalContractTests.exe <- CMakeFiles\\CrossfadeExecutorLocalContractTests.dir\\Release\\src\\tests\\CrossfadeExecutorLocalContractTests.cpp.obj [CXX_EXECUTABLE_LINKER__CrossfadeExecutorLocalContractTests_Release]",
+  "CrossfadeExecutorLocalContractTests.exe$:Release <- Release\\CrossfadeExecutorLocalContractTests.exe [phony]",
+  "CrossfadeExecutorLocalContractTests$:Release <- Release\\CrossfadeExecutorLocalContractTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc",
+  "INCLUDES": "-IC:\\VSC_Project\\ConvoPeq -IC:\\VSC_Project\\ConvoPeq\\src -IC:\\VSC_Project\\ConvoPeq\\src\\audioengine -IC:\\VSC_Project\\ConvoPeq\\src\\core",
+  "OBJECT_DIR": "CMakeFiles\\CrossfadeExecutorLocalContractTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\CrossfadeExecutorLocalContractTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\CrossfadeExecutorLocalContractTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\CrossfadeExecutorLocalContractTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\CrossfadeExecutorLocalContractTests.dir"
+ }
+}
+{
+ "target": "RebuildAdmissionRegressionTests",
+ "obj": "CMakeFiles\\RebuildAdmissionRegressionTests.dir\\Release\\src\\tests\\RebuildAdmissionRegressionTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:02",
+ "obj_sha256_16": "223f554ce5cdd321",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\RebuildAdmissionRegressionTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__RebuildAdmissionRegressionTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_RebuildAdmissionRegressionTests_RELEASE <-  [phony]",
+  "Release\\RebuildAdmissionRegressionTests.exe <- CMakeFiles\\RebuildAdmissionRegressionTests.dir\\Release\\src\\tests\\RebuildAdmissionRegressionTests.cpp.obj [CXX_EXECUTABLE_LINKER__RebuildAdmissionRegressionTests_Release]",
+  "RebuildAdmissionRegressionTests.exe$:Release <- Release\\RebuildAdmissionRegressionTests.exe [phony]",
+  "RebuildAdmissionRegressionTests$:Release <- Release\\RebuildAdmissionRegressionTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc",
+  "INCLUDES": "-IC:\\VSC_Project\\ConvoPeq -IC:\\VSC_Project\\ConvoPeq\\src -IC:\\VSC_Project\\ConvoPeq\\src\\audioengine -IC:\\VSC_Project\\ConvoPeq\\src\\core",
+  "OBJECT_DIR": "CMakeFiles\\RebuildAdmissionRegressionTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\RebuildAdmissionRegressionTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\RebuildAdmissionRegressionTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\RebuildAdmissionRegressionTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\RebuildAdmissionRegressionTests.dir"
+ }
+}
+{
+ "target": "RuntimeWorldAuthorityProjectionTests",
+ "obj": "CMakeFiles\\RuntimeWorldAuthorityProjectionTests.dir\\Release\\src\\tests\\RuntimeWorldAuthorityProjectionTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:04",
+ "obj_sha256_16": "bb43d5e494b1d89c",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\RuntimeWorldAuthorityProjectionTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_RuntimeWorldAuthorityProjectionTests_RELEASE <-  [phony]",
+  "Release\\RuntimeWorldAuthorityProjectionTests.exe <- CMakeFiles\\RuntimeWorldAuthorityProjectionTests.dir\\Release\\src\\tests\\RuntimeWorldAuthorityProjectionTests.cpp.obj [CXX_EXECUTABLE_LINKER__RuntimeWorldAuthorityProjectionTests_Release]",
+  "RuntimeWorldAuthorityProjectionTests.exe$:Release <- Release\\RuntimeWorldAuthorityProjectionTests.exe [phony]",
+  "RuntimeWorldAuthorityProjectionTests$:Release <- Release\\RuntimeWorldAuthorityProjectionTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc",
+  "INCLUDES": "-IC:\\VSC_Project\\ConvoPeq -IC:\\VSC_Project\\ConvoPeq\\src -IC:\\VSC_Project\\ConvoPeq\\src\\audioengine -IC:\\VSC_Project\\ConvoPeq\\src\\core",
+  "OBJECT_DIR": "CMakeFiles\\RuntimeWorldAuthorityProjectionTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\RuntimeWorldAuthorityProjectionTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\RuntimeWorldAuthorityProjectionTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\RuntimeWorldAuthorityProjectionTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\RuntimeWorldAuthorityProjectionTests.dir"
+ }
+}
+{
+ "target": "GainStagingContractTests",
+ "obj": "CMakeFiles\\GainStagingContractTests.dir\\Release\\src\\tests\\GainStagingContractTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:50",
+ "obj_sha256_16": "35d8f99355935468",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\GainStagingContractTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__GainStagingContractTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_GainStagingContractTests_RELEASE <-  [phony]",
+  "Release\\GainStagingContractTests.exe <- CMakeFiles\\GainStagingContractTests.dir\\Release\\src\\tests\\GainStagingContractTests.cpp.obj [CXX_EXECUTABLE_LINKER__GainStagingContractTests_Release]",
+  "GainStagingContractTests.exe$:Release <- Release\\GainStagingContractTests.exe [phony]",
+  "GainStagingContractTests$:Release <- Release\\GainStagingContractTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD",
+  "OBJECT_DIR": "CMakeFiles\\GainStagingContractTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\GainStagingContractTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\GainStagingContractTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\GainStagingContractTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\GainStagingContractTests.dir"
+ }
+}
+{
+ "target": "EQProcessorMaxGainTests",
+ "obj": "CMakeFiles\\EQProcessorMaxGainTests.dir\\Release\\src\\tests\\EQProcessorMaxGainTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:53",
+ "obj_sha256_16": "e00fa7ebc45d6cac",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\EQProcessorMaxGainTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__EQProcessorMaxGainTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_EQProcessorMaxGainTests_RELEASE <-  [phony]",
+  "Release\\EQProcessorMaxGainTests.exe <- CMakeFiles\\EQProcessorMaxGainTests.dir\\Release\\src\\tests\\EQProcessorMaxGainTests.cpp.obj [CXX_EXECUTABLE_LINKER__EQProcessorMaxGainTests_Release]",
+  "EQProcessorMaxGainTests.exe$:Release <- Release\\EQProcessorMaxGainTests.exe [phony]",
+  "EQProcessorMaxGainTests$:Release <- Release\\EQProcessorMaxGainTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD",
+  "OBJECT_DIR": "CMakeFiles\\EQProcessorMaxGainTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\EQProcessorMaxGainTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\EQProcessorMaxGainTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\EQProcessorMaxGainTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\EQProcessorMaxGainTests.dir"
+ }
+}
+{
+ "target": "BuildInputSemanticContractTests",
+ "obj": "CMakeFiles\\BuildInputSemanticContractTests.dir\\Release\\src\\tests\\BuildInputSemanticContractTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:53:05",
+ "obj_sha256_16": "d1c4dc2de780cc8c",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\BuildInputSemanticContractTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__BuildInputSemanticContractTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_BuildInputSemanticContractTests_RELEASE <-  [phony]",
+  "Release\\BuildInputSemanticContractTests.exe <- CMakeFiles\\BuildInputSemanticContractTests.dir\\Release\\src\\tests\\BuildInputSemanticContractTests.cpp.obj [CXX_EXECUTABLE_LINKER__BuildInputSemanticContractTests_Release]",
+  "BuildInputSemanticContractTests.exe$:Release <- Release\\BuildInputSemanticContractTests.exe [phony]",
+  "BuildInputSemanticContractTests$:Release <- Release\\BuildInputSemanticContractTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc /GS-",
+  "INCLUDES": "-IC:\\VSC_Project\\ConvoPeq -IC:\\VSC_Project\\ConvoPeq\\src -IC:\\VSC_Project\\ConvoPeq\\src\\audioengine -IC:\\VSC_Project\\ConvoPeq\\src\\core",
+  "OBJECT_DIR": "CMakeFiles\\BuildInputSemanticContractTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\BuildInputSemanticContractTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\BuildInputSemanticContractTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\BuildInputSemanticContractTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\BuildInputSemanticContractTests.dir"
+ }
+}
+{
+ "target": "EQAnalysisUnitTests",
+ "obj": "CMakeFiles\\EQAnalysisUnitTests.dir\\Release\\src\\tests\\EQAnalysisUnitTests.cpp.obj",
+ "obj_mtime": "2026-09-05 19:54:00",
+ "obj_sha256_16": "5e9fb383e886ac6d",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\EQAnalysisUnitTests.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__EQAnalysisUnitTests_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_EQAnalysisUnitTests_RELEASE <-  [phony]",
+  "Release\\EQAnalysisUnitTests.exe <- CMakeFiles\\EQAnalysisUnitTests.dir\\Release\\src\\tests\\EQAnalysisUnitTests.cpp.obj [CXX_EXECUTABLE_LINKER__EQAnalysisUnitTests_Release]",
+  "EQAnalysisUnitTests.exe$:Release <- Release\\EQAnalysisUnitTests.exe [phony]",
+  "EQAnalysisUnitTests$:Release <- Release\\EQAnalysisUnitTests.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD",
+  "OBJECT_DIR": "CMakeFiles\\EQAnalysisUnitTests.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\EQAnalysisUnitTests.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\EQAnalysisUnitTests.dir\\Release\\",
+  "TARGET_PDB": "Release\\EQAnalysisUnitTests.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\EQAnalysisUnitTests.dir"
+ }
+}
+{
+ "target": "EQBoundExcessBenchmark",
+ "obj": "CMakeFiles\\EQBoundExcessBenchmark.dir\\Release\\src\\tests\\EQBoundExcessBenchmark.cpp.obj",
+ "obj_mtime": "2026-09-05 19:54:11",
+ "obj_sha256_16": "90cafb7cf4f96d8b",
+ "cpp": "C$:\\VSC_Project\\ConvoPeq\\src\\tests\\EQBoundExcessBenchmark.cpp",
+ "cpp_mtime": "MISSING",
+ "cpp_sha256_16": "COPY-FAIL [WinEr",
+ "rule": "CXX_COMPILER__EQBoundExcessBenchmark_unscanned_Release",
+ "rule_deps": "msvc",
+ "rule_restat": "-",
+ "command_head": "${LAUNCHER}${CODE_CHECK}\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in",
+ "has_showIncludes": true,
+ "scan_dd_edges": [
+  "cmake_object_order_depends_target_EQBoundExcessBenchmark_RELEASE <-  [phony]",
+  "Release\\EQBoundExcessBenchmark.exe <- CMakeFiles\\EQBoundExcessBenchmark.dir\\Release\\src\\tests\\EQBoundExcessBenchmark.cpp.obj [CXX_EXECUTABLE_LINKER__EQBoundExcessBenchmark_Release]",
+  "EQBoundExcessBenchmark.exe$:Release <- Release\\EQBoundExcessBenchmark.exe [phony]",
+  "EQBoundExcessBenchmark$:Release <- Release\\EQBoundExcessBenchmark.exe [phony]"
+ ],
+ "compile_vars": {
+  "CONFIG": "Release",
+  "DEFINES": "-DCMAKE_INTDIR=\\\"Release\\\"",
+  "FLAGS": "/DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD",
+  "OBJECT_DIR": "CMakeFiles\\EQBoundExcessBenchmark.dir\\Release",
+  "OBJECT_FILE_DIR": "CMakeFiles\\EQBoundExcessBenchmark.dir\\Release\\src\\tests",
+  "TARGET_COMPILE_PDB": "CMakeFiles\\EQBoundExcessBenchmark.dir\\Release\\",
+  "TARGET_PDB": "Release\\EQBoundExcessBenchmark.pdb",
+  "TARGET_SUPPORT_DIR": "CMakeFiles\\EQBoundExcessBenchmark.dir"
+ }
+}
+
+=== msvc_deps_prefix / deps= census across ninja files ===
+  build.ninja                      msvc_deps_prefix=0 deps=msvc=0 deps=gcc=0
+  CMakeFiles/common.ninja          msvc_deps_prefix=0 deps=msvc=0 deps=gcc=0
+  CMakeFiles/rules.ninja           msvc_deps_prefix=1 deps=msvc=408 deps=gcc=6
+      prefix bytes: 838183823a2083438393834e838b815b836820837483408343838b3a2020 ... len=30
+  CMakeFiles/impl-Release.ninja    msvc_deps_prefix=0 deps=msvc=0 deps=gcc=0
+  CMakeFiles/impl-Debug.ninja      msvc_deps_prefix=0 deps=msvc=0 deps=gcc=0
+  CMakeFiles/impl-RelWithDebInfo.ninja msvc_deps_prefix=0 deps=msvc=0 deps=gcc=0
+
+=== rule variants (rules.ninja) CXX compile/scan/dyndep ===
+  CXX_SCAN__ISRRuntimeIdentityTests_Debug                      deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRRuntimeIdentityTests_Debug                    deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRRuntimeIdentityTests_scanned_Debug          deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRRuntimeIdentityTests_unscanned_Debug        deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRRuntimeIdentityTests_Release                    deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRRuntimeIdentityTests_Release                  deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRRuntimeIdentityTests_scanned_Release        deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRRuntimeIdentityTests_unscanned_Release      deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRRuntimeIdentityTests_RelWithDebInfo             deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRRuntimeIdentityTests_RelWithDebInfo           deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRRuntimeIdentityTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRRuntimeIdentityTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimePublicationCoordinatorTests_Debug           deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimePublicationCoordinatorTests_Debug         deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimePublicationCoordinatorTests_scanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimePublicationCoordinatorTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimePublicationCoordinatorTests_Release         deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimePublicationCoordinatorTests_Release       deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimePublicationCoordinatorTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimePublicationCoordinatorTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimePublicationCoordinatorTests_RelWithDebInfo  deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimePublicationCoordinatorTests_RelWithDebInfo deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimePublicationCoordinatorTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimePublicationCoordinatorTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PublicationAdmissionTests_Debug                    deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PublicationAdmissionTests_Debug                  deps=-      restat=1      showInc=False
+  CXX_COMPILER__PublicationAdmissionTests_scanned_Debug        deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PublicationAdmissionTests_unscanned_Debug      deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PublicationAdmissionTests_Release                  deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PublicationAdmissionTests_Release                deps=-      restat=1      showInc=False
+  CXX_COMPILER__PublicationAdmissionTests_scanned_Release      deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PublicationAdmissionTests_unscanned_Release    deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PublicationAdmissionTests_RelWithDebInfo           deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PublicationAdmissionTests_RelWithDebInfo         deps=-      restat=1      showInc=False
+  CXX_COMPILER__PublicationAdmissionTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PublicationAdmissionTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRSemanticValidationTests_Debug                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRSemanticValidationTests_Debug                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRSemanticValidationTests_scanned_Debug       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRSemanticValidationTests_unscanned_Debug     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRSemanticValidationTests_Release                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRSemanticValidationTests_Release               deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRSemanticValidationTests_scanned_Release     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRSemanticValidationTests_unscanned_Release   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRSemanticValidationTests_RelWithDebInfo          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRSemanticValidationTests_RelWithDebInfo        deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRSemanticValidationTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRSemanticValidationTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__invariant_INV3_INV5Tests_Debug                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__invariant_INV3_INV5Tests_Debug                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__invariant_INV3_INV5Tests_scanned_Debug         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__invariant_INV3_INV5Tests_unscanned_Debug       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__invariant_INV3_INV5Tests_Release                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__invariant_INV3_INV5Tests_Release                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__invariant_INV3_INV5Tests_scanned_Release       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__invariant_INV3_INV5Tests_unscanned_Release     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__invariant_INV3_INV5Tests_RelWithDebInfo            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__invariant_INV3_INV5Tests_RelWithDebInfo          deps=-      restat=1      showInc=False
+  CXX_COMPILER__invariant_INV3_INV5Tests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__invariant_INV3_INV5Tests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__AdmissionPackedStateTests_Debug                    deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__AdmissionPackedStateTests_Debug                  deps=-      restat=1      showInc=False
+  CXX_COMPILER__AdmissionPackedStateTests_scanned_Debug        deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__AdmissionPackedStateTests_unscanned_Debug      deps=msvc   restat=-      showInc=True
+  CXX_SCAN__AdmissionPackedStateTests_Release                  deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__AdmissionPackedStateTests_Release                deps=-      restat=1      showInc=False
+  CXX_COMPILER__AdmissionPackedStateTests_scanned_Release      deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__AdmissionPackedStateTests_unscanned_Release    deps=msvc   restat=-      showInc=True
+  CXX_SCAN__AdmissionPackedStateTests_RelWithDebInfo           deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__AdmissionPackedStateTests_RelWithDebInfo         deps=-      restat=1      showInc=False
+  CXX_COMPILER__AdmissionPackedStateTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__AdmissionPackedStateTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RetireGraceSemanticsTests_Debug                    deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RetireGraceSemanticsTests_Debug                  deps=-      restat=1      showInc=False
+  CXX_COMPILER__RetireGraceSemanticsTests_scanned_Debug        deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RetireGraceSemanticsTests_unscanned_Debug      deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RetireGraceSemanticsTests_Release                  deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RetireGraceSemanticsTests_Release                deps=-      restat=1      showInc=False
+  CXX_COMPILER__RetireGraceSemanticsTests_scanned_Release      deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RetireGraceSemanticsTests_unscanned_Release    deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RetireGraceSemanticsTests_RelWithDebInfo           deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RetireGraceSemanticsTests_RelWithDebInfo         deps=-      restat=1      showInc=False
+  CXX_COMPILER__RetireGraceSemanticsTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RetireGraceSemanticsTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__D8_1_WrapperCacheTests_Debug                       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__D8_1_WrapperCacheTests_Debug                     deps=-      restat=1      showInc=False
+  CXX_COMPILER__D8_1_WrapperCacheTests_scanned_Debug           deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__D8_1_WrapperCacheTests_unscanned_Debug         deps=msvc   restat=-      showInc=True
+  CXX_SCAN__D8_1_WrapperCacheTests_Release                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__D8_1_WrapperCacheTests_Release                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__D8_1_WrapperCacheTests_scanned_Release         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__D8_1_WrapperCacheTests_unscanned_Release       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__D8_1_WrapperCacheTests_RelWithDebInfo              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__D8_1_WrapperCacheTests_RelWithDebInfo            deps=-      restat=1      showInc=False
+  CXX_COMPILER__D8_1_WrapperCacheTests_scanned_RelWithDebInfo  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__D8_1_WrapperCacheTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__D8_2_B_2_Tests_Debug                               deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__D8_2_B_2_Tests_Debug                             deps=-      restat=1      showInc=False
+  CXX_COMPILER__D8_2_B_2_Tests_scanned_Debug                   deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__D8_2_B_2_Tests_unscanned_Debug                 deps=msvc   restat=-      showInc=True
+  CXX_SCAN__D8_2_B_2_Tests_Release                             deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__D8_2_B_2_Tests_Release                           deps=-      restat=1      showInc=False
+  CXX_COMPILER__D8_2_B_2_Tests_scanned_Release                 deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__D8_2_B_2_Tests_unscanned_Release               deps=msvc   restat=-      showInc=True
+  CXX_SCAN__D8_2_B_2_Tests_RelWithDebInfo                      deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__D8_2_B_2_Tests_RelWithDebInfo                    deps=-      restat=1      showInc=False
+  CXX_COMPILER__D8_2_B_2_Tests_scanned_RelWithDebInfo          deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__D8_2_B_2_Tests_unscanned_RelWithDebInfo        deps=msvc   restat=-      showInc=True
+  CXX_SCAN__TerminalTelemetryContractTests_Debug               deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__TerminalTelemetryContractTests_Debug             deps=-      restat=1      showInc=False
+  CXX_COMPILER__TerminalTelemetryContractTests_scanned_Debug   deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__TerminalTelemetryContractTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__TerminalTelemetryContractTests_Release             deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__TerminalTelemetryContractTests_Release           deps=-      restat=1      showInc=False
+  CXX_COMPILER__TerminalTelemetryContractTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__TerminalTelemetryContractTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__TerminalTelemetryContractTests_RelWithDebInfo      deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__TerminalTelemetryContractTests_RelWithDebInfo    deps=-      restat=1      showInc=False
+  CXX_COMPILER__TerminalTelemetryContractTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__TerminalTelemetryContractTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeHealthMonitorTierTests_Debug                deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeHealthMonitorTierTests_Debug              deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeHealthMonitorTierTests_scanned_Debug    deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeHealthMonitorTierTests_unscanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeHealthMonitorTierTests_Release              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeHealthMonitorTierTests_Release            deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeHealthMonitorTierTests_scanned_Release  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeHealthMonitorTierTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeHealthMonitorTierTests_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeHealthMonitorTierTests_RelWithDebInfo     deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeHealthMonitorTierTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeHealthMonitorTierTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ShutdownRetireIntentDrainTests_Debug               deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ShutdownRetireIntentDrainTests_Debug             deps=-      restat=1      showInc=False
+  CXX_COMPILER__ShutdownRetireIntentDrainTests_scanned_Debug   deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ShutdownRetireIntentDrainTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ShutdownRetireIntentDrainTests_Release             deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ShutdownRetireIntentDrainTests_Release           deps=-      restat=1      showInc=False
+  CXX_COMPILER__ShutdownRetireIntentDrainTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ShutdownRetireIntentDrainTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ShutdownRetireIntentDrainTests_RelWithDebInfo      deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ShutdownRetireIntentDrainTests_RelWithDebInfo    deps=-      restat=1      showInc=False
+  CXX_COMPILER__ShutdownRetireIntentDrainTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ShutdownRetireIntentDrainTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__StuckReaderFallbackDrainTests_Debug                deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__StuckReaderFallbackDrainTests_Debug              deps=-      restat=1      showInc=False
+  CXX_COMPILER__StuckReaderFallbackDrainTests_scanned_Debug    deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__StuckReaderFallbackDrainTests_unscanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_SCAN__StuckReaderFallbackDrainTests_Release              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__StuckReaderFallbackDrainTests_Release            deps=-      restat=1      showInc=False
+  CXX_COMPILER__StuckReaderFallbackDrainTests_scanned_Release  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__StuckReaderFallbackDrainTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__StuckReaderFallbackDrainTests_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__StuckReaderFallbackDrainTests_RelWithDebInfo     deps=-      restat=1      showInc=False
+  CXX_COMPILER__StuckReaderFallbackDrainTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__StuckReaderFallbackDrainTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRSoakTests_Debug                                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRSoakTests_Debug                               deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRSoakTests_scanned_Debug                     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRSoakTests_unscanned_Debug                   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRSoakTests_Release                               deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRSoakTests_Release                             deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRSoakTests_scanned_Release                   deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRSoakTests_unscanned_Release                 deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ISRSoakTests_RelWithDebInfo                        deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ISRSoakTests_RelWithDebInfo                      deps=-      restat=1      showInc=False
+  CXX_COMPILER__ISRSoakTests_scanned_RelWithDebInfo            deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ISRSoakTests_unscanned_RelWithDebInfo          deps=msvc   restat=-      showInc=True
+  CXX_SCAN__OwnerChannelTests_Debug                            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__OwnerChannelTests_Debug                          deps=-      restat=1      showInc=False
+  CXX_COMPILER__OwnerChannelTests_scanned_Debug                deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__OwnerChannelTests_unscanned_Debug              deps=msvc   restat=-      showInc=True
+  CXX_SCAN__OwnerChannelTests_Release                          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__OwnerChannelTests_Release                        deps=-      restat=1      showInc=False
+  CXX_COMPILER__OwnerChannelTests_scanned_Release              deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__OwnerChannelTests_unscanned_Release            deps=msvc   restat=-      showInc=True
+  CXX_SCAN__OwnerChannelTests_RelWithDebInfo                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__OwnerChannelTests_RelWithDebInfo                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__OwnerChannelTests_scanned_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__OwnerChannelTests_unscanned_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__NormalRetireDSPHandleCompareTests_Debug            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__NormalRetireDSPHandleCompareTests_Debug          deps=-      restat=1      showInc=False
+  CXX_COMPILER__NormalRetireDSPHandleCompareTests_scanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__NormalRetireDSPHandleCompareTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__NormalRetireDSPHandleCompareTests_Release          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__NormalRetireDSPHandleCompareTests_Release        deps=-      restat=1      showInc=False
+  CXX_COMPILER__NormalRetireDSPHandleCompareTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__NormalRetireDSPHandleCompareTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__NormalRetireDSPHandleCompareTests_RelWithDebInfo   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__NormalRetireDSPHandleCompareTests_RelWithDebInfo deps=-      restat=1      showInc=False
+  CXX_COMPILER__NormalRetireDSPHandleCompareTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__NormalRetireDSPHandleCompareTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeSemanticSchemaValidationTests_Debug         deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeSemanticSchemaValidationTests_Debug       deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeSemanticSchemaValidationTests_scanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeSemanticSchemaValidationTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeSemanticSchemaValidationTests_Release       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeSemanticSchemaValidationTests_Release     deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeSemanticSchemaValidationTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeSemanticSchemaValidationTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeSemanticSchemaValidationTests_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeSemanticSchemaValidationTests_RelWithDebInfo deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeSemanticSchemaValidationTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeSemanticSchemaValidationTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ObservePathSingleSourceTests_Debug                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ObservePathSingleSourceTests_Debug               deps=-      restat=1      showInc=False
+  CXX_COMPILER__ObservePathSingleSourceTests_scanned_Debug     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ObservePathSingleSourceTests_unscanned_Debug   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ObservePathSingleSourceTests_Release               deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ObservePathSingleSourceTests_Release             deps=-      restat=1      showInc=False
+  CXX_COMPILER__ObservePathSingleSourceTests_scanned_Release   deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ObservePathSingleSourceTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ObservePathSingleSourceTests_RelWithDebInfo        deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ObservePathSingleSourceTests_RelWithDebInfo      deps=-      restat=1      showInc=False
+  CXX_COMPILER__ObservePathSingleSourceTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ObservePathSingleSourceTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__OverlapAuthoritySingularTests_Debug                deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__OverlapAuthoritySingularTests_Debug              deps=-      restat=1      showInc=False
+  CXX_COMPILER__OverlapAuthoritySingularTests_scanned_Debug    deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__OverlapAuthoritySingularTests_unscanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_SCAN__OverlapAuthoritySingularTests_Release              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__OverlapAuthoritySingularTests_Release            deps=-      restat=1      showInc=False
+  CXX_COMPILER__OverlapAuthoritySingularTests_scanned_Release  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__OverlapAuthoritySingularTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__OverlapAuthoritySingularTests_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__OverlapAuthoritySingularTests_RelWithDebInfo     deps=-      restat=1      showInc=False
+  CXX_COMPILER__OverlapAuthoritySingularTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__OverlapAuthoritySingularTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ShadowCompareContractTests_Debug                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ShadowCompareContractTests_Debug                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__ShadowCompareContractTests_scanned_Debug       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ShadowCompareContractTests_unscanned_Debug     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ShadowCompareContractTests_Release                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ShadowCompareContractTests_Release               deps=-      restat=1      showInc=False
+  CXX_COMPILER__ShadowCompareContractTests_scanned_Release     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ShadowCompareContractTests_unscanned_Release   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ShadowCompareContractTests_RelWithDebInfo          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ShadowCompareContractTests_RelWithDebInfo        deps=-      restat=1      showInc=False
+  CXX_COMPILER__ShadowCompareContractTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ShadowCompareContractTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__CrossfadeExecutorLocalContractTests_Debug          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__CrossfadeExecutorLocalContractTests_Debug        deps=-      restat=1      showInc=False
+  CXX_COMPILER__CrossfadeExecutorLocalContractTests_scanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__CrossfadeExecutorLocalContractTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__CrossfadeExecutorLocalContractTests_Release        deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__CrossfadeExecutorLocalContractTests_Release      deps=-      restat=1      showInc=False
+  CXX_COMPILER__CrossfadeExecutorLocalContractTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__CrossfadeExecutorLocalContractTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__CrossfadeExecutorLocalContractTests_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__CrossfadeExecutorLocalContractTests_RelWithDebInfo deps=-      restat=1      showInc=False
+  CXX_COMPILER__CrossfadeExecutorLocalContractTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__CrossfadeExecutorLocalContractTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeWorldAuthorityProjectionTests_Debug         deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeWorldAuthorityProjectionTests_Debug       deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_scanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeWorldAuthorityProjectionTests_Release       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeWorldAuthorityProjectionTests_Release     deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RuntimeWorldAuthorityProjectionTests_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RuntimeWorldAuthorityProjectionTests_RelWithDebInfo deps=-      restat=1      showInc=False
+  CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RuntimeWorldAuthorityProjectionTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PartialPublicationRejectTests_Debug                deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PartialPublicationRejectTests_Debug              deps=-      restat=1      showInc=False
+  CXX_COMPILER__PartialPublicationRejectTests_scanned_Debug    deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PartialPublicationRejectTests_unscanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PartialPublicationRejectTests_Release              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PartialPublicationRejectTests_Release            deps=-      restat=1      showInc=False
+  CXX_COMPILER__PartialPublicationRejectTests_scanned_Release  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PartialPublicationRejectTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PartialPublicationRejectTests_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PartialPublicationRejectTests_RelWithDebInfo     deps=-      restat=1      showInc=False
+  CXX_COMPILER__PartialPublicationRejectTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PartialPublicationRejectTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RebuildAdmissionRegressionTests_Debug              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RebuildAdmissionRegressionTests_Debug            deps=-      restat=1      showInc=False
+  CXX_COMPILER__RebuildAdmissionRegressionTests_scanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RebuildAdmissionRegressionTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RebuildAdmissionRegressionTests_Release            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RebuildAdmissionRegressionTests_Release          deps=-      restat=1      showInc=False
+  CXX_COMPILER__RebuildAdmissionRegressionTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RebuildAdmissionRegressionTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RebuildAdmissionRegressionTests_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RebuildAdmissionRegressionTests_RelWithDebInfo   deps=-      restat=1      showInc=False
+  CXX_COMPILER__RebuildAdmissionRegressionTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RebuildAdmissionRegressionTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__BuildInputSemanticContractTests_Debug              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__BuildInputSemanticContractTests_Debug            deps=-      restat=1      showInc=False
+  CXX_COMPILER__BuildInputSemanticContractTests_scanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__BuildInputSemanticContractTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__BuildInputSemanticContractTests_Release            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__BuildInputSemanticContractTests_Release          deps=-      restat=1      showInc=False
+  CXX_COMPILER__BuildInputSemanticContractTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__BuildInputSemanticContractTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__BuildInputSemanticContractTests_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__BuildInputSemanticContractTests_RelWithDebInfo   deps=-      restat=1      showInc=False
+  CXX_COMPILER__BuildInputSemanticContractTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__BuildInputSemanticContractTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__BuildErrorClassificationTests_Debug                deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__BuildErrorClassificationTests_Debug              deps=-      restat=1      showInc=False
+  CXX_COMPILER__BuildErrorClassificationTests_scanned_Debug    deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__BuildErrorClassificationTests_unscanned_Debug  deps=msvc   restat=-      showInc=True
+  CXX_SCAN__BuildErrorClassificationTests_Release              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__BuildErrorClassificationTests_Release            deps=-      restat=1      showInc=False
+  CXX_COMPILER__BuildErrorClassificationTests_scanned_Release  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__BuildErrorClassificationTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__BuildErrorClassificationTests_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__BuildErrorClassificationTests_RelWithDebInfo     deps=-      restat=1      showInc=False
+  CXX_COMPILER__BuildErrorClassificationTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__BuildErrorClassificationTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RetrySchedulerTests_Debug                          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RetrySchedulerTests_Debug                        deps=-      restat=1      showInc=False
+  CXX_COMPILER__RetrySchedulerTests_scanned_Debug              deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RetrySchedulerTests_unscanned_Debug            deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RetrySchedulerTests_Release                        deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RetrySchedulerTests_Release                      deps=-      restat=1      showInc=False
+  CXX_COMPILER__RetrySchedulerTests_scanned_Release            deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RetrySchedulerTests_unscanned_Release          deps=msvc   restat=-      showInc=True
+  CXX_SCAN__RetrySchedulerTests_RelWithDebInfo                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__RetrySchedulerTests_RelWithDebInfo               deps=-      restat=1      showInc=False
+  CXX_COMPILER__RetrySchedulerTests_scanned_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__RetrySchedulerTests_unscanned_RelWithDebInfo   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__DeferredDeletionQueueReclaimTests_Debug            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__DeferredDeletionQueueReclaimTests_Debug          deps=-      restat=1      showInc=False
+  CXX_COMPILER__DeferredDeletionQueueReclaimTests_scanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__DeferredDeletionQueueReclaimTests_unscanned_Debug deps=msvc   restat=-      showInc=True
+  CXX_SCAN__DeferredDeletionQueueReclaimTests_Release          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__DeferredDeletionQueueReclaimTests_Release        deps=-      restat=1      showInc=False
+  CXX_COMPILER__DeferredDeletionQueueReclaimTests_scanned_Release deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__DeferredDeletionQueueReclaimTests_unscanned_Release deps=msvc   restat=-      showInc=True
+  CXX_SCAN__DeferredDeletionQueueReclaimTests_RelWithDebInfo   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__DeferredDeletionQueueReclaimTests_RelWithDebInfo deps=-      restat=1      showInc=False
+  CXX_COMPILER__DeferredDeletionQueueReclaimTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__DeferredDeletionQueueReclaimTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__MpscBoundedRingTests_Debug                         deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__MpscBoundedRingTests_Debug                       deps=-      restat=1      showInc=False
+  CXX_COMPILER__MpscBoundedRingTests_scanned_Debug             deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__MpscBoundedRingTests_unscanned_Debug           deps=msvc   restat=-      showInc=True
+  CXX_SCAN__MpscBoundedRingTests_Release                       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__MpscBoundedRingTests_Release                     deps=-      restat=1      showInc=False
+  CXX_COMPILER__MpscBoundedRingTests_scanned_Release           deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__MpscBoundedRingTests_unscanned_Release         deps=msvc   restat=-      showInc=True
+  CXX_SCAN__MpscBoundedRingTests_RelWithDebInfo                deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__MpscBoundedRingTests_RelWithDebInfo              deps=-      restat=1      showInc=False
+  CXX_COMPILER__MpscBoundedRingTests_scanned_RelWithDebInfo    deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__MpscBoundedRingTests_unscanned_RelWithDebInfo  deps=msvc   restat=-      showInc=True
+  CXX_SCAN__SequenceArithmeticTests_Debug                      deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__SequenceArithmeticTests_Debug                    deps=-      restat=1      showInc=False
+  CXX_COMPILER__SequenceArithmeticTests_scanned_Debug          deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__SequenceArithmeticTests_unscanned_Debug        deps=msvc   restat=-      showInc=True
+  CXX_SCAN__SequenceArithmeticTests_Release                    deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__SequenceArithmeticTests_Release                  deps=-      restat=1      showInc=False
+  CXX_COMPILER__SequenceArithmeticTests_scanned_Release        deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__SequenceArithmeticTests_unscanned_Release      deps=msvc   restat=-      showInc=True
+  CXX_SCAN__SequenceArithmeticTests_RelWithDebInfo             deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__SequenceArithmeticTests_RelWithDebInfo           deps=-      restat=1      showInc=False
+  CXX_COMPILER__SequenceArithmeticTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__SequenceArithmeticTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__DSPHandleTableTests_Debug                          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__DSPHandleTableTests_Debug                        deps=-      restat=1      showInc=False
+  CXX_COMPILER__DSPHandleTableTests_scanned_Debug              deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__DSPHandleTableTests_unscanned_Debug            deps=msvc   restat=-      showInc=True
+  CXX_SCAN__DSPHandleTableTests_Release                        deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__DSPHandleTableTests_Release                      deps=-      restat=1      showInc=False
+  CXX_COMPILER__DSPHandleTableTests_scanned_Release            deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__DSPHandleTableTests_unscanned_Release          deps=msvc   restat=-      showInc=True
+  CXX_SCAN__DSPHandleTableTests_RelWithDebInfo                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__DSPHandleTableTests_RelWithDebInfo               deps=-      restat=1      showInc=False
+  CXX_COMPILER__DSPHandleTableTests_scanned_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__DSPHandleTableTests_unscanned_RelWithDebInfo   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PriorityIntegrationTests_Debug                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PriorityIntegrationTests_Debug                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__PriorityIntegrationTests_scanned_Debug         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PriorityIntegrationTests_unscanned_Debug       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PriorityIntegrationTests_Release                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PriorityIntegrationTests_Release                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__PriorityIntegrationTests_scanned_Release       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PriorityIntegrationTests_unscanned_Release     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__PriorityIntegrationTests_RelWithDebInfo            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__PriorityIntegrationTests_RelWithDebInfo          deps=-      restat=1      showInc=False
+  CXX_COMPILER__PriorityIntegrationTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__PriorityIntegrationTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__GainStagingContractTests_Debug                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__GainStagingContractTests_Debug                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__GainStagingContractTests_scanned_Debug         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__GainStagingContractTests_unscanned_Debug       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__GainStagingContractTests_Release                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__GainStagingContractTests_Release                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__GainStagingContractTests_scanned_Release       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__GainStagingContractTests_unscanned_Release     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__GainStagingContractTests_RelWithDebInfo            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__GainStagingContractTests_RelWithDebInfo          deps=-      restat=1      showInc=False
+  CXX_COMPILER__GainStagingContractTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__GainStagingContractTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQProcessorMaxGainTests_Debug                      deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQProcessorMaxGainTests_Debug                    deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQProcessorMaxGainTests_scanned_Debug          deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQProcessorMaxGainTests_unscanned_Debug        deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQProcessorMaxGainTests_Release                    deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQProcessorMaxGainTests_Release                  deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQProcessorMaxGainTests_scanned_Release        deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQProcessorMaxGainTests_unscanned_Release      deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQProcessorMaxGainTests_RelWithDebInfo             deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQProcessorMaxGainTests_RelWithDebInfo           deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQProcessorMaxGainTests_scanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQProcessorMaxGainTests_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQAnalysisUnitTests_Debug                          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQAnalysisUnitTests_Debug                        deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQAnalysisUnitTests_scanned_Debug              deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQAnalysisUnitTests_unscanned_Debug            deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQAnalysisUnitTests_Release                        deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQAnalysisUnitTests_Release                      deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQAnalysisUnitTests_scanned_Release            deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQAnalysisUnitTests_unscanned_Release          deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQAnalysisUnitTests_RelWithDebInfo                 deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQAnalysisUnitTests_RelWithDebInfo               deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQAnalysisUnitTests_scanned_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQAnalysisUnitTests_unscanned_RelWithDebInfo   deps=msvc   restat=-      showInc=True
+  CXX_SCAN__FFTBackendTests_Debug                              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__FFTBackendTests_Debug                            deps=-      restat=1      showInc=False
+  CXX_COMPILER__FFTBackendTests_scanned_Debug                  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__FFTBackendTests_unscanned_Debug                deps=msvc   restat=-      showInc=True
+  CXX_SCAN__FFTBackendTests_Release                            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__FFTBackendTests_Release                          deps=-      restat=1      showInc=False
+  CXX_COMPILER__FFTBackendTests_scanned_Release                deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__FFTBackendTests_unscanned_Release              deps=msvc   restat=-      showInc=True
+  CXX_SCAN__FFTBackendTests_RelWithDebInfo                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__FFTBackendTests_RelWithDebInfo                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__FFTBackendTests_scanned_RelWithDebInfo         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__FFTBackendTests_unscanned_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQBoundExcessBenchmark_Debug                       deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQBoundExcessBenchmark_Debug                     deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQBoundExcessBenchmark_scanned_Debug           deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQBoundExcessBenchmark_unscanned_Debug         deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQBoundExcessBenchmark_Release                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQBoundExcessBenchmark_Release                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQBoundExcessBenchmark_scanned_Release         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQBoundExcessBenchmark_unscanned_Release       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__EQBoundExcessBenchmark_RelWithDebInfo              deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__EQBoundExcessBenchmark_RelWithDebInfo            deps=-      restat=1      showInc=False
+  CXX_COMPILER__EQBoundExcessBenchmark_scanned_RelWithDebInfo  deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__EQBoundExcessBenchmark_unscanned_RelWithDebInfo deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ConvoPeq_Debug                                     deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ConvoPeq_Debug                                   deps=-      restat=1      showInc=False
+  CXX_COMPILER__ConvoPeq_scanned_Debug                         deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ConvoPeq_unscanned_Debug                       deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ConvoPeq_Release                                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ConvoPeq_Release                                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__ConvoPeq_scanned_Release                       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ConvoPeq_unscanned_Release                     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__ConvoPeq_RelWithDebInfo                            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__ConvoPeq_RelWithDebInfo                          deps=-      restat=1      showInc=False
+  CXX_COMPILER__ConvoPeq_scanned_RelWithDebInfo                deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__ConvoPeq_unscanned_RelWithDebInfo              deps=msvc   restat=-      showInc=True
+  CXX_SCAN__MTNUPCMeasurement_Debug                            deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__MTNUPCMeasurement_Debug                          deps=-      restat=1      showInc=False
+  CXX_COMPILER__MTNUPCMeasurement_scanned_Debug                deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__MTNUPCMeasurement_unscanned_Debug              deps=msvc   restat=-      showInc=True
+  CXX_SCAN__MTNUPCMeasurement_Release                          deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__MTNUPCMeasurement_Release                        deps=-      restat=1      showInc=False
+  CXX_COMPILER__MTNUPCMeasurement_scanned_Release              deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__MTNUPCMeasurement_unscanned_Release            deps=msvc   restat=-      showInc=True
+  CXX_SCAN__MTNUPCMeasurement_RelWithDebInfo                   deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__MTNUPCMeasurement_RelWithDebInfo                 deps=-      restat=1      showInc=False
+  CXX_COMPILER__MTNUPCMeasurement_scanned_RelWithDebInfo       deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__MTNUPCMeasurement_unscanned_RelWithDebInfo     deps=msvc   restat=-      showInc=True
+  CXX_SCAN__AudioEngineHarness_Debug                           deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__AudioEngineHarness_Debug                         deps=-      restat=1      showInc=False
+  CXX_COMPILER__AudioEngineHarness_scanned_Debug               deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__AudioEngineHarness_unscanned_Debug             deps=msvc   restat=-      showInc=True
+  CXX_SCAN__AudioEngineHarness_Release                         deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__AudioEngineHarness_Release                       deps=-      restat=1      showInc=False
+  CXX_COMPILER__AudioEngineHarness_scanned_Release             deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__AudioEngineHarness_unscanned_Release           deps=msvc   restat=-      showInc=True
+  CXX_SCAN__AudioEngineHarness_RelWithDebInfo                  deps=msvc   restat=-      showInc=True
+  CXX_DYNDEP__AudioEngineHarness_RelWithDebInfo                deps=-      restat=1      showInc=False
+  CXX_COMPILER__AudioEngineHarness_scanned_RelWithDebInfo      deps=msvc   restat=-      showInc=True
+  CXX_COMPILER__AudioEngineHarness_unscanned_RelWithDebInfo    deps=msvc   restat=-      showInc=True
+
+=== .ninja_log records for affected TU outputs ===
+  (total 0 .ninja_log lines matched affected TUs)

@@ -30,6 +30,15 @@ public:
 
     bool start(double sampleRate = 48000.0, int blockSize = 512);
     void stop();
+    // ★ D162-2-I2: audio thread のみ停止（engine releaseResources を伴わない）。
+    //   prepare → release → prepare の reconfigure 系テストが
+    //   「releaseResources は audio thread 停止後に呼ぶ」harness 契約を守るための seam。
+    void stopAudioOnly();
+    // ★ D162-2-I2: engine を release せず放棄する（意図的 leak・OS 回収）。
+    //   「prepare → release → prepare → release」の 2 回目 releaseResources は
+    //   Debug で pre-existing segfault を踏む（BISECT で修復無起因と確認済み・I3 課題）。
+    //   CallerDestroy 系テストがこの既知 crash を迂回して phase 判定のみを完遂するための seam。
+    void abandonEngine();
 
     AudioEngine& engine() noexcept { return *engine_; }
     long long blocksProcessed() const noexcept { return blocksProcessed_.load(std::memory_order_relaxed); }

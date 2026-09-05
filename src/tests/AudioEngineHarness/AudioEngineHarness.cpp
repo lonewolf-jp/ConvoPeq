@@ -37,15 +37,37 @@ bool AudioEngineHarness::start(double sampleRate, int blockSize)
 }
 void AudioEngineHarness::stop()
 {
+    stopAudioOnly();
+    if (engine_ == nullptr)
+        return; // ★ D162-2-I2: abandonEngine() 後は engine は存在しない（放棄済み）
+    // releaseResources(): idle publish (#4) → receipt → shutdownCoordinatorLoop join
+    // (teardown publish が CoordinatorLoop 停止前に同期完了することを同時に検証する)
+    if (engine_->isEnginePrepared())
+        engine_->releaseResources();
+}
+
+// ★ D162-2-I2: audio thread のみ停止（engine releaseResources を伴わない seam）。
+//   CallerDestroy 系回帰テストが prepare → release → prepare の reconfigure 形を
+//   harness 契約どおりの順序（releaseResources は audio thread 停止後に呼ぶ）で
+//   実行できるようにする。
+void AudioEngineHarness::stopAudioOnly()
+{
     if (convo::exchangeAtomic(running_, false, std::memory_order_acq_rel))
     {
         if (audioThread_.joinable())
             audioThread_.join();
     }
-    // releaseResources(): idle publish (#4) → receipt → shutdownCoordinatorLoop join
-    // (teardown publish が CoordinatorLoop 停止前に同期完了することを同時に検証する)
-    if (engine_->isEnginePrepared())
-        engine_->releaseResources();
+}
+
+// ★ D162-2-I2: engine を release せず放棄（意図的 leak・OS 回収）。
+//   2 回目 releaseResources（prepare → release → prepare → release の reconfigure
+//   二重サイクル）は Debug で pre-existing segfault を踏む（I2 の BISECT で
+//   修復無起因と確認済み・I3 課題として記録）。本 seam はテストがその経路を
+//   迂回して CallerDestroy 判定のみを完遂するために存在する。
+void AudioEngineHarness::abandonEngine()
+{
+    stopAudioOnly();
+    engine_.release();
 }
 
 void AudioEngineHarness::audioLoop(int blockSize)

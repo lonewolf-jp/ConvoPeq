@@ -1,0 +1,28 @@
+D162-2-I3-4-C — C1 dependency-tracking effectiveness audit
+====================================================================================================
+
+[1] rule CXX_COMPILER__AudioEngineHarness_unscanned_Release:
+rule CXX_COMPILER__AudioEngineHarness_unscanned_Release
+  deps = msvc
+  command = ${LAUNCHER}${CODE_CHECK}"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo /TP $DEFINES $INCLUDES $FLAGS /showIncludes /Fo$out /Fd$TARGET_COMPILE_PDB /FS -c $in
+  description = Building CXX object $out
+
+deps = msvc present: True
+/showIncludes in command: True
+
+[2] dependency records (post-clean-rebuild .ninja_deps):
+  ISRRuntimePublicationCoordinator_ProcessIntent.cpp.obj: #deps 747 VALID
+      includes ISRRuntimePublicationCoordinator.h: True
+      total header deps in record: 896
+  AudioEngine.Init.cpp.obj: #deps 740 VALID
+      includes ISRRuntimePublicationCoordinator.h: True
+      total header deps in record: 894
+  AudioEngine.CtorDtor.cpp.obj: #deps 750 VALID
+      includes ISRRuntimePublicationCoordinator.h: True
+      total header deps in record: 896
+  AudioEngine.Threading.cpp.obj: #deps 745 VALID
+      includes ISRRuntimePublicationCoordinator.h: True
+      total header deps in record: 896
+  AudioEngine.Timer.cpp.obj: #deps 751 VALID
+      includes ISRRuntimePublicationCoordinator.h: True
+      total header deps in record: 896

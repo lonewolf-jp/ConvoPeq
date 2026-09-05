@@ -1,0 +1,166 @@
+{
+ "image_base": "0x7ff6a41c0000",
+ "events": [
+  {
+   "ev": "create_process_raw",
+   "head": "18020000000000001402000000000000100200000000000000001ca4f67f0000"
+  },
+  {
+   "ev": "create_process",
+   "pid": 13048,
+   "image_base": "0x7ff6a41c0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb757a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb745d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72a70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6f820000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb735f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73310000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73a30000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72ff0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72e80000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb731b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73a60000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75490000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75000000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb734d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb3b570000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb39cb0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6c520000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb63b60000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74900000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb756b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74310000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb39d50000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4cea0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x215ba100000"
+  },
+  {
+   "ev": "exception",
+   "tid": 3488,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ffb758c2239"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb742d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71650000"
+  },
+  {
+   "ev": "exception",
+   "tid": 3488,
+   "code": "0xC0000005",
+   "first_chance": 1,
+   "address": "0x7ff6a613f89d"
+  },
+  {
+   "ev": "exception",
+   "tid": 3488,
+   "code": "0xC0000005",
+   "first_chance": 0,
+   "address": "0x7ff6a613f89d"
+  },
+  {
+   "event": "CAPTURED_UNHANDLED",
+   "tid": 3488,
+   "exception_code": "0xC0000005",
+   "exception_address": "0x7ff6a613f89d",
+   "faulting_instruction_bytes": "c6426502c64264014d8999980100004d8991a0010000498999a80100004d8981",
+   "rip": "0x7ff6a613f89d",
+   "rsp": "0x412ab1f800",
+   "rbp": "0x412ab1f910",
+   "rax": "0x0",
+   "rcx": "0x0",
+   "rdx": "0x0",
+   "rbx": "0x1",
+   "rsi": "0x0",
+   "rdi": "0x0",
+   "r8": "0x0",
+   "r9": "0x215ba208cc0",
+   "r10": "0x1",
+   "r11": "0x1",
+   "r12": "0x0",
+   "r13": "0x215bbd52080",
+   "r14": "0x0",
+   "r15": "0x0",
+   "eflags": "0x10244",
+   "stack_return_candidates": [],
+   "stack_dump_hex": ""
+  }
+ ]
+}

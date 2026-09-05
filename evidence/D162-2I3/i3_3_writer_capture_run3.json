@@ -1,0 +1,37 @@
+{
+ "run": "C",
+ "engine_instance": "0x0000024337B4C080",
+ "W_addr": "0x0000024338df36c0",
+ "watch": "bphws W, w, 8 (x64dbg hardware DR watchpoint)",
+ "armed_at": "AudioEngine ctor entry bp (RVA 0x1F5D080) \u2014 BEFORE any member write",
+ "WRITE_HITS": [
+  {
+   "n": 1,
+   "rip": "0x00007FFB39D6E73F",
+   "module": "vcruntime140.dll",
+   "symbol": "memmove+0xC3F (x64dbg label) \u2014 AVX-256 bulk zero",
+   "instruction": "vmovdqu ymmword ptr [rcx+r9-0x80], ymm0 (ymm0=0)",
+   "rcx": "0x0000024338df36c0",
+   "r9": "0xA0",
+   "trap_dst": "0x0000024338df36c0",
+   "write_span": "[W-0x80, W+0x20) during this insn; final memset covers [W-0x20, W+0x90)",
+   "W_value_after": "0x0",
+   "caller_chain": [
+    "ret 0x1F7F190 (AudioEngine ctor clone F, func 0x1F7EE30..0x1F7F1EE) \u2014 final memset(rcx=engine+0x12A7620, 0, 0xB0) via VCRUNTIME140!memset import thunk 0x1F7F18B->0x2078030",
+    "ret 0x1F5F209 (AudioEngine ctor clone A, func 0x1F5D080..0x1F5FB5E) \u2014 call clone F at 0x1F5F204 with this=engine+0x1121AC0",
+    "ret 0x1F40E6E",
+    "ret 0x1F46849",
+    "ret 0x1F6231B3F (main thread start)"
+   ],
+   "thread": "main thread (BaseThreadInitThunk chain \u2014 no worker)"
+  }
+ ],
+ "TOTAL_WRITES_TO_W_IN_PROCESS_LIFETIME": 1,
+ "W_value_at_publish_caller_entry": "0x0",
+ "AV": {
+  "rva": "0x1F7F89D",
+  "info": "[1,101] WRITE @ 0x65 (rdx=0)",
+  "W_at_crash": "0x0"
+ },
+ "note": "coordinator_ reference-binding store (bridge address) was NEVER observed on W \u2014 the single write is a zero-fill from the bridge ctor tail crossing into worldAuthority_"
+}

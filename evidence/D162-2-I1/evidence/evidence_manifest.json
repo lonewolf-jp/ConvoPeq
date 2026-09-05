@@ -1,0 +1,12 @@
+{
+  "schema": "evidence_manifest_v1",
+  "generationMode": "runtime",
+  "runtimeRunId": "runtime-local",
+  "runId": "runtime-local",
+  "buildMode": "Release",
+  "proofLevel": "off",
+  "generatedAtNs": 65381642198900,
+  "artifacts": [
+  ],
+  "minimalEvidence": true
+}

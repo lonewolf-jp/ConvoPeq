@@ -158,6 +158,54 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
     return currentMap->map.find(hash) != currentMap->map.end();
 }
 
+// ★ D162-2-E (E-1 / INV-D162-6): member teardown 前の全 CacheMap エントリ処分。
+//   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。shutdownRuntime_ /
+//   m_retireRouter / dspHandleRuntime_ 等が全て生存している状態で:
+//     1. cacheMapPtr を nullptr に exchange（新規アクセス遮断）
+//     2. 全 CacheMap エントリの DSPHandle を dspHandleRuntime_.retire（Retired 遷移）し、
+//        resolve で取得した EQCoeffCache* を物理解放
+//     3. enqueueFallbackMaps の各 CacheMap も同様に処分
+//   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
+void AudioEngine::EQCacheManager::drainForShutdown() noexcept
+{
+    std::lock_guard<std::mutex> lock(writeMutex);
+
+    CacheMap* currentMap = convo::exchangeAtomic(cacheMapPtr, nullptr, std::memory_order_acq_rel);
+    if (currentMap != nullptr)
+    {
+        for (auto& entry : currentMap->map)
+        {
+            if (entry.second.isNull())
+                continue;
+            // Retired 遷移（grace period concept は shutdown なので即 reclaim 相当）
+            owner.dspHandleRuntime_.retire(entry.second);
+            const auto resolved = owner.dspHandleRuntime_.resolve(entry.second);
+            if (resolved.instance != nullptr)
+                delete static_cast<EQCoeffCache*>(resolved.instance);
+        }
+        currentMap->map.clear();
+        delete currentMap;
+    }
+
+    for (auto* map : enqueueFallbackMaps)
+    {
+        if (map == nullptr)
+            continue;
+        for (auto& entry : map->map)
+        {
+            if (entry.second.isNull())
+                continue;
+            owner.dspHandleRuntime_.retire(entry.second);
+            const auto resolved = owner.dspHandleRuntime_.resolve(entry.second);
+            if (resolved.instance != nullptr)
+                delete static_cast<EQCoeffCache*>(resolved.instance);
+        }
+        map->map.clear();
+        delete map;
+    }
+    enqueueFallbackMaps.clear();
+}
+
 AudioEngine::EQCacheManager::~EQCacheManager()
 {
     std::lock_guard<std::mutex> lock(writeMutex);

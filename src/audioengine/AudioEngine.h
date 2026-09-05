@@ -2104,6 +2104,11 @@ private:
                                   uint64_t generation);
         EQCoeffCache* get(uint64_t hash) noexcept;
         [[nodiscard]] bool containsNonRt(uint64_t hash) noexcept;
+        // ★ D162-2-E (E-1 / INV-D162-6): member teardown 前に全 CacheMap エントリを処分する。
+        //   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。
+        //   呼び出し後は cacheMapPtr == nullptr かつ enqueueFallbackMaps == 空が保証され、
+        //   ~CacheMap は engine member 非依存の no-op となる。
+        void drainForShutdown() noexcept;
         ~EQCacheManager();
 
     private:
@@ -2151,42 +2156,15 @@ private:
             //     ここでは行わない (RT 参照中の UAF 防止).
             ~CacheMap()
             {
-                jassert(owner != nullptr);
-                auto& rt = owner->dspHandleRuntime_;
-                if (convo::consumeAtomic(owner->shutdownPhase, std::memory_order_acquire)
-                    >= AudioEngine::ShutdownPhase::Destroy) {
-                    for (auto& entry : map)
-                    {
-                        if (!entry.second.isNull())
-                        {
-                            // ★ work88 (X3 §6.3 / R4 Phase 4): shutdownReclaim bypass を廃止し、
-                            //   Reclaim Authority（ShutdownQuiescent モード）に一本化。
-                            // ★ dash2 §2.2 (Phase A2 — Step 10/13): caller-side shutdown 判断を撤去し、
-                            //   tryShutdownQuiescentReclaim（ShutdownRuntime が Proof → Permit →
-                            //   reclaimShutdownQuiescent）に委譲（AC-2）。
-                            // ★ Step 13 (destruction ordering): H.11.11.9.4 の blocker 対応。
-                            //   旧実装は「delete EQCoeffCache → reclaim(slot)」の順序で、reclaim 失敗時に
-                            //   object 消滅 + handle 未回収の状態を作り得た。本実装は reclaim（slot 状態遷移）
-                            //   を先に成功させ、成功時のみ EQCoeffCache を物理解放する（ReclaimStarted →
-                            //   physical destruction → ReclaimCompleted の順序に整合）。
-                            const bool reclaimed = owner->tryShutdownQuiescentReclaim(entry.second);
-                            if (reclaimed)
-                            {
-                                const auto resolved = rt.resolve(entry.second);
-                                if (resolved.instance != nullptr)
-                                    delete static_cast<EQCoeffCache*>(resolved.instance);
-                            }
-                            jassert(reclaimed);
-                            juce::ignoreUnused(reclaimed);   // Release(NDEBUG) で jassert 消滅時の未使用警告対策
-                        }
-                    }
-                } else {
-                    for (auto& entry : map)
-                    {
-                        if (!entry.second.isNull())
-                            owner->dspHandleRuntime_.retire(entry.second);
-                    }
-                }
+                // ★ D162-2-E (E-1 / INV-D162-6): CacheMap dtor は engine member に一切触れない。
+                //   member teardown 時点で shutdownRuntime_ / m_retireRouter / dspHandleRuntime_ 等は
+                //   破壊済み（宣言降順破壊のため shutdownRuntime_(:5022) は eqCacheManager(:2444) より
+                //   先に破壊される）のため、tryShutdownQuiescentReclaim / resolve / retire は UAF となる。
+                //   事前 drain は EQCacheManager::drainForShutdown()（~AudioEngine body 内・
+                //   AudioEngine.Cache.cpp の実装）で完了し、本 dtor 時点で map は空か、
+                //   異常系のみ非空（その場合は EQCoeffCache を leak する — UAF より安全）。
+                //   ★ Step 13 (destruction ordering) の契約は drainForShutdown 側に移管。
+                map.clear();
             }
 
             AudioEngine* owner = nullptr;

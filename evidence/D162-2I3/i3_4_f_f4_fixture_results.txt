@@ -1,0 +1,15 @@
+I3-4-F F4 adversarial fixture matrix — FINAL (corrected deps reader)
+==============================================================================
+
+Case A system-only + prefix match       ndeps=0    engine(nonSys=0,unres=0) -> ZERO_DEPS_SYSTEM_ONLY(WARN+ALLOW)   [MATCH]
+Case B direct-project + prefix match    ndeps=2    engine(nonSys=2,unres=0) -> DEPS_VALID(PASS)   [MATCH]
+Case C transitive-project + match       ndeps=2    engine(nonSys=2,unres=0) -> DEPS_VALID(PASS)   [MATCH]
+Case D project + prefix MISMATCH        ndeps=0    engine(nonSys=2,unres=0) -> ZERO_DEPS_SUSPICIOUS(FAIL)   [MATCH]
+
+ALL FOUR CASES MATCH EXPECTATION: True
+
+Case E (stale-obj propagation, separate fixture i3_4_f_f4d_e_neg):
+  healthy compile (CP932)      -> ndeps=1
+  recompile under CP65001      -> ndeps=0 (deps lost)
+  header content changed (1->3), cpp untouched -> ninja: no work to do
+  => obj permanently stale with #deps 0; only the classifier's SUSPICIOUS(FAIL) catches it

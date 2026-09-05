@@ -1,0 +1,1027 @@
+{
+ "image_base": "0x1f0",
+ "events": [
+  {
+   "ev": "create_process_raw",
+   "head": "0002000000000000f0010000000000006c000000000000000000f196f67f0000"
+  },
+  {
+   "ev": "create_process",
+   "pid": 11952,
+   "image_base": "0x1f0"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb757a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb745d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72a70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6f820000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb735f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73310000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73a30000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72ff0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72e80000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb731b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73a60000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75490000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75000000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb734d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74460000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb746a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75390000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74f70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74900000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4d280000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74310000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb756b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74540000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb742d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb51880000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb51a90000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6c520000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4d580000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6b9f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb63b60000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fd20000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fbc0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e4d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6eb10000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb51850000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb55940000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6d980000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6ed80000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4a2f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72830000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e000000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71650000"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ffb758c2239"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72810000"
+  },
+  {
+   "ev": "exception",
+   "tid": 33032,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 13440,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ada52f2"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ada59c9"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ada59c9"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ada5ef6"
+  },
+  {
+   "ev": "exception",
+   "tid": 33688,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 20636,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb729b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fa70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb747a0000"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 20636,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 15836,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 32600,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 33100,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33100,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 19888,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 14028,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 33912,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33912,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 15716,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 28508,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 27784,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 27784,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 23204,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 8096,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 26236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 26236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 34956,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 28312,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 22148,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 28312,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 2464,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 20052,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 19324,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 20052,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 2180,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 24780,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 33756,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 24780,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 24780,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69ade04da"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a08866f"
+  },
+  {
+   "ev": "exception",
+   "tid": 31868,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 9492,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 20856,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1dee8e"
+  },
+  {
+   "ev": "exception",
+   "tid": 20856,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a11e2ae"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1def02"
+  },
+  {
+   "ev": "exception",
+   "tid": 33236,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exception",
+   "tid": 32468,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff69a1f4e19"
+  },
+  {
+   "ev": "exit_process"
+  }
+ ]
+}

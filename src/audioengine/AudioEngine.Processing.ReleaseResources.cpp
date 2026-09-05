@@ -523,27 +523,47 @@ void AudioEngine::releaseResources()
     // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。
     //   world (dspProjection/topology) が DSPCore* を保持したまま先に破壊すると、
     //   world 開放経路から解放済み DSPCore が観測される（実測: exit 時 0xC0000005）。
+    //   ★ D162-2-G2 (V-D-b staged re-enable): 破壊を direct destroy（destroyRolledBackDSP）
+    //   から authority（DSPLifetimeManager::retire = map erase + registry Retired +
+    //   requestReclaim + EBR enqueue）に統一する。B-era の AV は D0 で allocator mismatch
+    //   （D162-2-F で修正済み）による churn 顕在化と確定しており、direct destroy 選択の
+    //   根拠は消失。retire 経由により stale map entry（V-D-a の latent 二重破壊経路・
+    //   D162-2-G0 N-1）も構造的に排除される。resolve は Retired/Reclaimed で nullptr を
+    //   返すため、既に disposition 済みの DSP は何もしない（INV-D162-3・二重 retire 不可）。
+    //   EBR destroy は dtor body 内 D5/D8 drain で digest される（INV-D162-8 適合）。
     {
         DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
-        if (false && activeDSPToDestroy != nullptr) // ★ D162-2-B 残課題: 本破壊は exit AV を誘発（実測）。D162-2-C で teardown 順序確定後に有効化。
+        if (activeDSPToDestroy != nullptr) // ★ D162-2-G2 (V-D-b): authority retire で再有効化。
         {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2B_DESTROY] dsp=%p origin=verify-drained-active",
+                "[D162-2G2_VD_RETIRE] dsp=%p target=active-final",
                 (void*)activeDSPToDestroy));
 #endif
-            lifetimeMgrForFinalDSP.destroyRolledBackDSP(activeDSPToDestroy);
+            lifetimeMgrForFinalDSP.retire(activeDSPToDestroy);
         }
-        if (false && fadingDSPToDestroy != nullptr) // ★ D162-2-B 残課題: 同上
+        if (fadingDSPToDestroy != nullptr && fadingDSPToDestroy != activeDSPToDestroy) // ★ D162-2-G2 (V-D-b): 同上・同一 DSP の二重 retire 防止
         {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2B_DESTROY] dsp=%p origin=verify-drained-fading",
+                "[D162-2G2_VD_RETIRE] dsp=%p target=fading-final",
                 (void*)fadingDSPToDestroy));
 #endif
-            lifetimeMgrForFinalDSP.destroyRolledBackDSP(fadingDSPToDestroy);
+            lifetimeMgrForFinalDSP.retire(fadingDSPToDestroy);
         }
     }
+
+    // ★ D162-2-I1 修復（R0 Candidate A′）: shutdown 時 deferred slot の無条件 terminal
+    //   disposition。S3（clearDeferredForShutdown）の既存呼出経路は EmergencyDrain
+    //   （isEmergencyDrainRequested 条件付き）/ Timer midrun（C2/C3/C4 trigger 条件）/
+    //    C1 fallback のいずれも条件付き trigger のため、短時間 shutdown では slot 残留
+    //    DSP が無処分になる（Profile B-1 実測: residual=1・149MB）。
+    //    本位置は (i) RebuildThread join 後（単一 writer 契約成立）・(ii) world clear 後
+    //   （world topology 参照解消済み）であり、slot 保持 DSP を authority（EBR）経由で
+    //    処分する。slot 空の場合は no-op（EmergencyDrain で先に clear された場合も冪等）。
+    //    EBR entry は下記 waitForDrain と ~AudioEngine D5/D8 drain で消化（INV-D162-8 準拠）。
+    if (runtimeOrchestrator_)
+        runtimeOrchestrator_->clearDeferredForShutdown();
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →

@@ -1,0 +1,39 @@
+I3-4-F F5 — Windows SDK identity determination (measured 2026-09-05 22:21:56)
+==========================================================================
+
+=== candidate sources probed ===
+CMakeCache CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION / CMAKE_SYSTEM_VERSION: ABSENT
+  (Ninja Multi-Config + cl does not record either -> not usable as stamp source)
+registry HKLM Microsoft SDKs: install inventory only, does not reflect vcvars selection
+
+=== selected truth: vcvarsall environment (the SDK MSVC actually uses) ===
+  WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10\
+  WindowsSDKVersion=10.0.26100.0\
+  UCRTVersion=10.0.26100.0
+INCLUDE env SDK dirs (9 total dirs, 6 SDK):
+   C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt
+   C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um
+   C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared
+   C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\winrt
+   C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\cppwinrt
+   C:\Program Files (x86)\Windows Kits\NETFXSDK\4.8\include\um
+  -> environment selection (10.0.26100.0) matches every SDK include dir in INCLUDE = consistent
+
+=== include-tree directory fingerprints (in-place update detector) ===
+Windows SDK include tree:
+  path: C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0
+  files: 4771  fingerprint(sha256[:16]) = 9532f89a0433f1b1  walk-time 0.107s
+MSVC compiler include tree:
+  path: C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include
+  files: 353  fingerprint(sha256[:16]) = d497c484a142d053  walk-time 0.009s
+  manifest input per file: relpath|size|mtime_ns (deterministic order)
+  => an in-place SDK servicing update (same version number) changes file mtimes/sizes
+     and therefore the fingerprint, enabling COHERENCE-grade detection where the
+     version string alone would not.
+
+=== gate cost estimate ===
+  SDK stat-walk 0.05s + MSVC stat-walk 0.02s + prefix/stamp check: well under 1s per --check
+
+=== showIncludes attestation cross-check (from I3-4-E E2-A raw stdout) ===
+  affected TU stdout contains SDK paths e.g. 'C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.26100.0\\ucrt\\crtdbg.h'
+  -> the version the compiler actually opened equals the environment selection above

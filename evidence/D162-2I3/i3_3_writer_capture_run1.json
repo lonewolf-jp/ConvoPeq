@@ -1,0 +1,77 @@
+{
+ "run": "A",
+ "method": "x64dbg hardware write watchpoint (DR1) 8-byte @ W",
+ "image_base": "0x7FF6A41C0000",
+ "engine_instance": "0x000001526A258080",
+ "W_addr": "0x000001526B4FF6C0",
+ "W_offset_in_engine": "0x12A7640",
+ "precondition": {
+  "W_value_at_ctor_entry": "0x0 (uninitialized heap, allocation zero-filled)",
+  "ctor_entry_rva": "0x1F5D080",
+  "ctor_rcx(engine)": "0x000001526A258080"
+ },
+ "WRITE_HIT_1": {
+  "rip": "0x00007FFB39D6E73F",
+  "module": "vcruntime140.dll",
+  "symbol": "memmove (x64dbg label memmove+0xC3F) \u2014 AVX-256 bulk zero tail",
+  "instruction_at_rip": "vmovdqu ymmword ptr ds:[rcx+r9*1-0x80], ymm0",
+  "instruction_encoding": "write of 32-byte ymm0 (all-zero) at rcx+r9-0x80",
+  "rcx": "0x000001526B4FF6C0  (= W exactly)",
+  "r9": "0xA0",
+  "r8": "0x90",
+  "rdx": "0x20",
+  "rax": "0x000001526B4FF6A0",
+  "rdi": "0x000001526B4FF670",
+  "destination_of_trap_instruction": "0x000001526B4FF6C0 (rcx+r9-0x80 = W+0xA0-0x80)",
+  "write_span_instruction": "vmovdqu [rcx+r9-0x80] .. [rcx+r9-0x20] .. [rax=W-0x20] => writes cover W-0x80..W \u2192 W written",
+  "W_value_after": "0x0",
+  "call_stack": [
+   {
+    "frame": 0,
+    "ret_to": "0x00007FF6A613F190",
+    "rva": "0x1F7F190",
+    "module": "audioengineharness.exe",
+    "note": "return into AudioEngine ctor clone F (func 0x1F7EE30..0x1F7F1EE)"
+   },
+   {
+    "frame": 1,
+    "ret_to": "0x00007FF6A611F209",
+    "rva": "0x1F5F209",
+    "module": "audioengineharness.exe",
+    "note": "return into AudioEngine ctor clone A entry func (0x1F5D080..0x1F5FB5E) \u2014 same func as ctor entry bp"
+   },
+   {
+    "frame": 2,
+    "ret_to": "0x00007FF6A6100E6E",
+    "rva": "0x1F40E6E"
+   },
+   {
+    "frame": 3,
+    "ret_to": "0x00007FF6A6106849",
+    "rva": "0x1F46849"
+   },
+   {
+    "frame": 4,
+    "ret_to": "0x00007FF6A6231B3F"
+   },
+   {
+    "frame": 5,
+    "ret_to": "kernel32.BaseThreadInitThunk"
+   }
+  ],
+  "post_return_writes_by_frame0 (decoded from exe bytes)": "0x1F7F190: mov [rdi+0xE0], rbp ; lea rdi,[rdi+0xF0] ; loop with xmm zero writes (vmovdqu/vmovups [reg],xmm0) \u2014 rdv=0, rsi=0x13 iterations",
+  "WRITE_COUNT_TOTAL_TO_W": 1,
+  "note": "DR watch armed at AudioEngine ctor ENTRY (before any member write). The ONE and ONLY write to [W,W+8) in the entire process lifetime wrote 0. The legitimate reference-binding store (bridge address) NEVER executed."
+ },
+ "post_hit_verification": {
+  "caller_entry_bp_hit": true,
+  "W_at_publish_caller_entry": "0x0",
+  "AV_rip_rva": "0x1F7F89D (mov byte [rdx+0x65],2 \u00b7 rdx=0)",
+  "AV_info": "[1,101] WRITE @ 0x65",
+  "W_at_crash": "0x0"
+ },
+ "classification": {
+  "case": "B (bulk zero writer) + structural root cause: member-init ORDER defect \u2014 the AudioEngine ctor clone F zeroes [W-0x1E0 .. W+0x30] region (worldAuthority_ subobject) via CRT memmove/vmovdqu AFTER the coordinator_ reference slot was already bound, OR the binding store was never emitted; net effect: coordinator_ reference slot = NULL from construction",
+  "confirmed_by": "hardware DR watchpoint from ctor entry: exactly 1 write to W, value 0, writer = CRT bulk zero inside ctor inlined code"
+ }
+}

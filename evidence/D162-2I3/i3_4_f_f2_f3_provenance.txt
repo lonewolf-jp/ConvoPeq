@@ -1,0 +1,99 @@
+I3-4-F F2/F3 — engine (impl.ninja edge -I) vs DepsLog validation + zero-deps classification (Release)
+==============================================================================
+
+F2 validation (ndeps>0, 327 TUs): matched=101 mismatched=226
+  MISMATCH RuntimePublicationCoordinatorTests.cpp (engine=644 rec=8)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_basics\audio_play_head\juce_AudioPlayHead.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_basics\buffers\juce_AudioChannelSet.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_basics\buffers\juce_AudioDataConverters.h
+  MISMATCH PublicationAdmission.cpp (engine=747 rec=739)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPBlockConvolver.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFIRFilter.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFracInterpolator.h
+  MISMATCH PublicationAdmissionTestRuntimeStubs.cpp (engine=746 rec=738)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPBlockConvolver.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFIRFilter.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFracInterpolator.h
+  MISMATCH ISRSemanticValidationTests.cpp (engine=746 rec=738)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPBlockConvolver.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFIRFilter.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFracInterpolator.h
+  MISMATCH ISRRetireRouter.cpp (engine=652 rec=630)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+  MISMATCH ISRRetireRuntimeEx.cpp (engine=642 rec=620)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+  MISMATCH ISRRuntimePublicationCoordinator.cpp (engine=746 rec=738)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPBlockConvolver.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFIRFilter.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFracInterpolator.h
+  MISMATCH ISRRetireRouter.cpp (engine=652 rec=630)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+  MISMATCH ISRRetireRuntimeEx.cpp (engine=642 rec=620)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+  MISMATCH ISRRuntimePublicationCoordinator.cpp (engine=746 rec=738)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPBlockConvolver.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFIRFilter.h
+    depslog-only: C:\VSC_Project\ConvoPeq\r8brain-free-src\CDSPFracInterpolator.h
+  MISMATCH ISRShutdown.cpp (engine=671 rec=649)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+  MISMATCH AdmissionPackedStateTests.cpp (engine=670 rec=648)
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_devices\native\juce_Audio_ios.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_formats\format\juce_ARAAudioReaders.h
+    engine-only: C:\VSC_Project\ConvoPeq\JUCE\modules\juce_audio_processors_headless\utilities\ARA\juce_ARADocumentController.h
+
+=== F3: zero-deps Release src TUs classified by engine (edge-level -I) ===
+  ObservePathSingleSourceTests.cpp                           nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: ObservePathSingleSourceTests.dir
+      breakdown: project=0 third_party=0 external=0 system=5 | depslog ndeps=0
+  OverlapAuthoritySingularTests.cpp                          nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: OverlapAuthoritySingularTests.dir
+      breakdown: project=0 third_party=0 external=0 system=5 | depslog ndeps=0
+  CrossfadeExecutorLocalContractTests.cpp                    nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: CrossfadeExecutorLocalContractTests.dir
+      breakdown: project=0 third_party=0 external=0 system=5 | depslog ndeps=0
+  RuntimeWorldAuthorityProjectionTests.cpp                   nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: RuntimeWorldAuthorityProjectionTests.dir
+      breakdown: project=0 third_party=0 external=0 system=6 | depslog ndeps=0
+  RebuildAdmissionRegressionTests.cpp                        nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: RebuildAdmissionRegressionTests.dir
+      breakdown: project=0 third_party=0 external=0 system=7 | depslog ndeps=0
+  BuildInputSemanticContractTests.cpp                        nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: BuildInputSemanticContractTests.dir
+      breakdown: project=0 third_party=0 external=0 system=6 | depslog ndeps=0
+  GainStagingContractTests.cpp                               nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: GainStagingContractTests.dir
+      breakdown: project=0 third_party=0 external=0 system=5 | depslog ndeps=0
+  EQProcessorMaxGainTests.cpp                                nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: EQProcessorMaxGainTests.dir
+      breakdown: project=0 third_party=0 external=0 system=7 | depslog ndeps=0
+  EQAnalysisUnitTests.cpp                                    nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: EQAnalysisUnitTests.dir
+      breakdown: project=0 third_party=0 external=0 system=9 | depslog ndeps=0
+  EQBoundExcessBenchmark.cpp                                 nonSys=0   unresolved=0  -> SYSTEM_ONLY(EXPECTED) <-- AFFECTED-10
+      target: EQBoundExcessBenchmark.dir
+      breakdown: project=0 third_party=0 external=0 system=14 | depslog ndeps=0

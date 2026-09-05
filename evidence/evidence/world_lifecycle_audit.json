@@ -1,20 +1,20 @@
 {
   "schema": "world_lifecycle_audit_v1",
   "activeWorldCount": 1,
-  "publishedCount": 25,
-  "retiredCount": 24,
+  "publishedCount": 27,
+  "retiredCount": 26,
   "doubleRetireCount": 0,
-  "ringBufferSize": 25,
+  "ringBufferSize": 27,
   "ringBufferCapacity": 4096,
-  "lastRetiredWorldId": 34,
-  "lastRetireEpoch": 34,
-  "lastRetireTimestampUs": 25981494546,
+  "lastRetiredWorldId": 37,
+  "lastRetireEpoch": 37,
+  "lastRetireTimestampUs": 19039985577,
   "recentRecords": [
     {
       "worldId": 1,
       "publishEpoch": 1,
       "retireEpoch": 0,
-      "publishTimestampUs": 25638041598,
+      "publishTimestampUs": 18666419076,
       "retireTimestampUs": 0,
       "correlationIdShort": 1
     },
@@ -22,7 +22,7 @@
       "worldId": 2,
       "publishEpoch": 2,
       "retireEpoch": 0,
-      "publishTimestampUs": 25638150336,
+      "publishTimestampUs": 18666541486,
       "retireTimestampUs": 0,
       "correlationIdShort": 2
     },
@@ -30,7 +30,7 @@
       "worldId": 3,
       "publishEpoch": 3,
       "retireEpoch": 0,
-      "publishTimestampUs": 25638544342,
+      "publishTimestampUs": 18666926355,
       "retireTimestampUs": 0,
       "correlationIdShort": 3
     },
@@ -38,177 +38,193 @@
       "worldId": 4,
       "publishEpoch": 4,
       "retireEpoch": 0,
-      "publishTimestampUs": 25638777204,
+      "publishTimestampUs": 18667148950,
       "retireTimestampUs": 0,
       "correlationIdShort": 4
     },
     {
-      "worldId": 6,
-      "publishEpoch": 6,
+      "worldId": 5,
+      "publishEpoch": 5,
       "retireEpoch": 0,
-      "publishTimestampUs": 25645449037,
+      "publishTimestampUs": 18667492766,
       "retireTimestampUs": 0,
-      "correlationIdShort": 6
+      "correlationIdShort": 5
     },
     {
       "worldId": 7,
       "publishEpoch": 7,
       "retireEpoch": 0,
-      "publishTimestampUs": 25675526098,
+      "publishTimestampUs": 18673921566,
       "retireTimestampUs": 0,
       "correlationIdShort": 7
     },
     {
-      "worldId": 9,
-      "publishEpoch": 9,
+      "worldId": 8,
+      "publishEpoch": 8,
       "retireEpoch": 0,
-      "publishTimestampUs": 25681459235,
+      "publishTimestampUs": 18704040743,
       "retireTimestampUs": 0,
-      "correlationIdShort": 9
+      "correlationIdShort": 8
     },
     {
       "worldId": 10,
       "publishEpoch": 10,
       "retireEpoch": 0,
-      "publishTimestampUs": 25711519605,
+      "publishTimestampUs": 18709900634,
       "retireTimestampUs": 0,
       "correlationIdShort": 10
     },
     {
-      "worldId": 12,
-      "publishEpoch": 12,
+      "worldId": 11,
+      "publishEpoch": 11,
       "retireEpoch": 0,
-      "publishTimestampUs": 25711538535,
+      "publishTimestampUs": 18739928398,
       "retireTimestampUs": 0,
-      "correlationIdShort": 12
+      "correlationIdShort": 11
     },
     {
       "worldId": 13,
       "publishEpoch": 13,
       "retireEpoch": 0,
-      "publishTimestampUs": 25741622882,
+      "publishTimestampUs": 18745958425,
       "retireTimestampUs": 0,
       "correlationIdShort": 13
     },
     {
-      "worldId": 15,
-      "publishEpoch": 15,
+      "worldId": 14,
+      "publishEpoch": 14,
       "retireEpoch": 0,
-      "publishTimestampUs": 25741677815,
+      "publishTimestampUs": 18776036864,
       "retireTimestampUs": 0,
-      "correlationIdShort": 15
+      "correlationIdShort": 14
     },
     {
       "worldId": 16,
       "publishEpoch": 16,
       "retireEpoch": 0,
-      "publishTimestampUs": 25771712527,
+      "publishTimestampUs": 18776095384,
       "retireTimestampUs": 0,
       "correlationIdShort": 16
     },
     {
-      "worldId": 18,
-      "publishEpoch": 18,
+      "worldId": 17,
+      "publishEpoch": 17,
       "retireEpoch": 0,
-      "publishTimestampUs": 25771765087,
+      "publishTimestampUs": 18806195181,
       "retireTimestampUs": 0,
-      "correlationIdShort": 18
+      "correlationIdShort": 17
     },
     {
       "worldId": 19,
       "publishEpoch": 19,
       "retireEpoch": 0,
-      "publishTimestampUs": 25801781419,
+      "publishTimestampUs": 18806248030,
       "retireTimestampUs": 0,
       "correlationIdShort": 19
     },
     {
-      "worldId": 21,
-      "publishEpoch": 21,
+      "worldId": 20,
+      "publishEpoch": 20,
       "retireEpoch": 0,
-      "publishTimestampUs": 25801798253,
+      "publishTimestampUs": 18836317233,
       "retireTimestampUs": 0,
-      "correlationIdShort": 21
+      "correlationIdShort": 20
     },
     {
       "worldId": 22,
       "publishEpoch": 22,
       "retireEpoch": 0,
-      "publishTimestampUs": 25831907027,
+      "publishTimestampUs": 18836361602,
       "retireTimestampUs": 0,
       "correlationIdShort": 22
     },
     {
-      "worldId": 24,
-      "publishEpoch": 24,
+      "worldId": 23,
+      "publishEpoch": 23,
       "retireEpoch": 0,
-      "publishTimestampUs": 25837470076,
+      "publishTimestampUs": 18866435934,
       "retireTimestampUs": 0,
-      "correlationIdShort": 24
+      "correlationIdShort": 23
     },
     {
       "worldId": 25,
       "publishEpoch": 25,
       "retireEpoch": 0,
-      "publishTimestampUs": 25867518442,
+      "publishTimestampUs": 18871990864,
       "retireTimestampUs": 0,
       "correlationIdShort": 25
     },
     {
-      "worldId": 27,
-      "publishEpoch": 27,
+      "worldId": 26,
+      "publishEpoch": 26,
       "retireEpoch": 0,
-      "publishTimestampUs": 25873469472,
+      "publishTimestampUs": 18902038487,
       "retireTimestampUs": 0,
-      "correlationIdShort": 27
+      "correlationIdShort": 26
     },
     {
       "worldId": 28,
       "publishEpoch": 28,
       "retireEpoch": 0,
-      "publishTimestampUs": 25903509979,
+      "publishTimestampUs": 18907947635,
       "retireTimestampUs": 0,
       "correlationIdShort": 28
     },
     {
-      "worldId": 30,
-      "publishEpoch": 30,
+      "worldId": 29,
+      "publishEpoch": 29,
       "retireEpoch": 0,
-      "publishTimestampUs": 25909493802,
+      "publishTimestampUs": 18938015951,
       "retireTimestampUs": 0,
-      "correlationIdShort": 30
+      "correlationIdShort": 29
     },
     {
       "worldId": 31,
       "publishEpoch": 31,
       "retireEpoch": 0,
-      "publishTimestampUs": 25939610674,
+      "publishTimestampUs": 18943943055,
       "retireTimestampUs": 0,
       "correlationIdShort": 31
     },
     {
-      "worldId": 33,
-      "publishEpoch": 33,
+      "worldId": 32,
+      "publishEpoch": 32,
       "retireEpoch": 0,
-      "publishTimestampUs": 25945471362,
+      "publishTimestampUs": 18974019097,
       "retireTimestampUs": 0,
-      "correlationIdShort": 33
+      "correlationIdShort": 32
     },
     {
       "worldId": 34,
       "publishEpoch": 34,
       "retireEpoch": 0,
-      "publishTimestampUs": 25975571830,
+      "publishTimestampUs": 18974071122,
       "retireTimestampUs": 0,
       "correlationIdShort": 34
     },
     {
-      "worldId": 36,
-      "publishEpoch": 36,
+      "worldId": 35,
+      "publishEpoch": 35,
       "retireEpoch": 0,
-      "publishTimestampUs": 25981493375,
+      "publishTimestampUs": 19004132881,
       "retireTimestampUs": 0,
-      "correlationIdShort": 36
+      "correlationIdShort": 35
+    },
+    {
+      "worldId": 37,
+      "publishEpoch": 37,
+      "retireEpoch": 0,
+      "publishTimestampUs": 19009915548,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 37
+    },
+    {
+      "worldId": 38,
+      "publishEpoch": 38,
+      "retireEpoch": 0,
+      "publishTimestampUs": 19039984651,
+      "retireTimestampUs": 0,
+      "correlationIdShort": 38
     }
   ]
 }

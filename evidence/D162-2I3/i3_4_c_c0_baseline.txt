@@ -1,0 +1,26 @@
+D162-2-I3-4-C — C0 baseline (post-clean-rebuild build-state, 2026-09-05)
+====================================================================================================
+
+   EXISTS  2026-09-05 18:58:32      21721  CMakeCache.txt
+   EXISTS  2026-09-05 18:58:32      10819  build.ninja
+   EXISTS  2026-09-05 18:58:32       8766  build-Debug.ninja
+   EXISTS  2026-09-05 18:58:32       8976  build-Release.ninja
+   EXISTS  2026-09-05 18:58:32       9711  build-RelWithDebInfo.ninja
+   EXISTS  2026-09-05 18:58:32     340748  CMakeFiles\rules.ninja
+   EXISTS  2026-09-05 18:58:32      63638  CMakeFiles\common.ninja
+   EXISTS  2026-09-05 18:58:32    1509626  CMakeFiles\impl-Release.ninja
+   EXISTS  2026-09-05 18:58:32    1490732  CMakeFiles\impl-Debug.ninja
+   EXISTS  2026-09-05 18:58:32    1524266  CMakeFiles\impl-RelWithDebInfo.ninja
+   EXISTS  2026-09-05 19:08:30    7832116  .ninja_deps
+   EXISTS  2026-09-05 19:08:39     257044  .ninja_log
+   ABSENT                               0  CMakeFiles\AudioEngineHarness.Release.rsp
+   ABSENT                               0  build.bat
+   EXISTS  2026-08-11 16:39:26      13192  ..\build.bat
+CMAKE_CONFIGURATION_TYPES:STRING=Debug;Release;RelWithDebInfo
+CMAKE_GENERATOR:INTERNAL=Ninja Multi-Config
+ninja version: 1.13.2
+Release exe: 2026-09-05 19:02:54 size=40,907,264 sha256[:16]=833dba185d40b398
+Debug exe: 2026-09-05 19:08:38 size=89,305,600 sha256[:16]=6fff7ef0b87df3e5
+RelWithDebInfo exe: 2026-09-05 13:22:33 size=72,307,200 sha256[:16]=f12883193cf658e5
+Release harness objs: 143, span 19:00:48..19:02:52 (09-05)
+Release harness free run x3: exit 0x0 (B6 evidence)

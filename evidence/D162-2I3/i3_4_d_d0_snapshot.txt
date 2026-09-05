@@ -1,0 +1,128 @@
+D162-2-I3-4-D — D0 pre-implementation snapshot
+====================================================================================================
+git HEAD: 0aeb22cad108f68a1408a0ca5e8e5892216dfa76
+
+git status --short (file count: 97):
+ M .zcode/config.json
+ M ConvoPeq.md
+ M evidence/epoch_reclaim_audit.json
+ M evidence/evidence/epoch_reclaim_audit.json
+ M evidence/evidence/evidence_manifest.json
+ M evidence/evidence/hb_graph_trace.json
+ M evidence/evidence/recovery_trace.json
+ M evidence/evidence/retire_timeline.json
+ M evidence/evidence/retire_trace_shutdown_last.json
+ M evidence/evidence/runtime_budget_report.json
+ M evidence/evidence/runtime_snapshot.json
+ M evidence/evidence/shadow_compare_cadence.json
+ M evidence/evidence/shutdown_trace.json
+ M evidence/evidence/world_lifecycle_audit.json
+ M evidence/evidence/world_retirement_telemetry.json
+ M evidence/evidence_manifest.json
+ M evidence/retire_timeline.json
+ M evidence/retire_trace_shutdown_last.json
+ M evidence/shadow_compare_cadence.json
+ M evidence/shutdown_trace.json
+ M evidence/world_lifecycle_audit.json
+ M evidence/world_retirement_telemetry.json
+ M src/AudioSegmentBuffer.h
+ M src/audioengine/AudioEngine.Cache.cpp
+ M src/audioengine/AudioEngine.CtorDtor.cpp
+ M src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
+ M src/audioengine/AudioEngine.Processing.ReleaseResources.cpp
+ M src/audioengine/AudioEngine.h
+ M src/audioengine/RuntimePublicationOrchestrator.cpp
+ M src/tests/AudioEngineHarness/AudioEngineHarness.cpp
+ M src/tests/AudioEngineHarness/AudioEngineHarness.h
+ M src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp
+?? .x64dbg-mcp/
+?? doc/work88/D162-2-E_TEARDOWN_SAFETY_REPAIR_REPORT.md
+?? doc/work88/D162-2-F_ALLOCATOR_CONTRACT_REPAIR_REPORT.md
+?? doc/work88/D162-2-G0_STAGED_REENABLE_PREFLIGHT_REPORT.md
+?? doc/work88/D162-2-G1_S3_REENABLE_REPORT.md
+?? doc/work88/D162-2-G2_VD_REENABLE_REPORT.md
+?? doc/work88/D162-2-G3_JOINT_REPROOF_REPORT.md
+?? doc/work88/D162-2-G4_FINAL_SOAK_REPORT.md
+?? doc/work88/D162-2-H0_POST_G_CLOSURE_REAUDIT_REPORT.md
+?? doc/work88/D162-2-I0_MEASUREMENT_RECONCILIATION_REPORT.md
+?? doc/work88/D162-2-I1-D-R0_RECONFIGURE_ORPHAN_OWNERSHIP_AUDIT_REPORT.md
+?? doc/work88/D162-2-I1-R0_DEFERRED_DISPOSITION_REAUDIT_REPORT.md
+?? doc/work88/D162-2-I3-0_TRIAGE_REPORT.md
+?? doc/work88/D162-2-I3-1_CRASH_AUDIT_REPORT.md
+?? doc/work88/D162-2-I3-2_NULL_BASE_CALLER_AUDIT_REPORT.md
+?? doc/work88/D162-2-I3-3_NULL_WRITE_PRODUCER_AUDIT_REPORT.md
+?? doc/work88/D162-2-I3-4-A_OBJECT_EXTENT_CORRELATION_REPORT.md
+?? doc/work88/D162-2-I3-4-B_BUILD_INTEGRITY_AUDIT_REPORT.md
+?? doc/work88/D162-2-I3-4-C_BUILD_PERMANENT_PREVENTION_CONTRACT_AUDIT_REPORT.md
+?? evidence/D162-2-D0_HEAP_CORRUPTION_ORIGIN_AUDIT.md
+?? evidence/D162-2-G0_PREFLIGHT_AUDIT.md
+?? evidence/D162-2-H0_POST_G_CLOSURE_REAUDIT.md
+?? evidence/D162-2-I0_MEASUREMENT_RECONCILIATION.md
+?? evidence/D162-2-I1-R0_DEFERRED_DISPOSITION_REAUDIT.md
+?? evidence/D162-2-I1/
+?? evidence/D162-2-I2/
+?? evidence/D162-2C_SHUTDOWN_TEARDOWN_AUDIT.md
+?? evidence/D162-2C_dump22572_stack.txt
+?? evidence/D162-2C_dump448_srcframes.txt
+?? evidence/D162-2C_dump_stack_candidates.txt
+?? evidence/D162-2D0_dump30992_srcframes.txt
+?? evidence/D162-2G1_S3_REENABLE_EVIDENCE.md
+?? evidence/D162-2G1_build_debug.bat
+?? evidence/D162-2G1_build_release.bat
+?? evidence/D162-2G1_build_rwdi.bat
+?? evidence/D162-2G1_dbg6.ps1
+?? evidence/D162-2G1_soak6.ps1
+?? evidence/D162-2G1_soak60.ps1
+?? evidence/D162-2G2_VD_REENABLE_EVIDENCE.md
+?? evidence/D162-2G2_build_debug.bat
+?? evidence/D162-2G2_build_release.bat
+?? evidence/D162-2G2_build_rwdi.bat
+?? evidence/D162-2G2_dbg6.ps1
+?? evidence/D162-2G2_soak6.ps1
+?? evidence/D162-2G2_soak60.ps1
+?? evidence/D162-2G3_JOINT_REPROOF_EVIDENCE.md
+?? evidence/D162-2G3_build_debug.bat
+?? evidence/D162-2G3_build_release.bat
+?? evidence/D162-2G3_build_rwdi.bat
+?? evidence/D162-2G3_dbg6.ps1
+?? evidence/D162-2G3_soak6.ps1
+?? evidence/D162-2G3_soak60.ps1
+?? evidence/D162-2G4_FINAL_SOAK_EVIDENCE.md
+?? evidence/D162-2G4_build_debug.bat
+?? evidence/D162-2G4_build_release.bat
+?? evidence/D162-2G4_build_rwdi.bat
+?? evidence/D162-2G4_soak60_r1.ps1
+?? evidence/D162-2G4_soak60_r2.ps1
+?? evidence/D162-2I1R2_build_debug.bat
+?? evidence/D162-2I1R2_build_release.bat
+?? evidence/D162-2I1R2_build_rwdi.bat
+?? evidence/D162-2I2/
+?? evidence/D162-2I2_build.bat
+?? evidence/D162-2I3/
+?? evidence/evidence/D162-2G2_soak6.ps1
+
+git diff --stat HEAD (tail):
+   .../AudioEngine.Processing.PrepareToPlay.cpp       |  30 +-
+   .../AudioEngine.Processing.ReleaseResources.cpp    |  32 +-
+   src/audioengine/AudioEngine.h                      |  50 +-
+   src/audioengine/RuntimePublicationOrchestrator.cpp | 104 +++-
+   .../AudioEngineHarness/AudioEngineHarness.cpp      |  30 +-
+   src/tests/AudioEngineHarness/AudioEngineHarness.h  |   9 +
+   .../PublishPipelineIntegrationTests.cpp            | 212 ++++++++
+   32 files changed, 1189 insertions(+), 325 deletions(-)
+
+toolchain:
+  cmake version 4.4.3
+  ninja 1.13.2
+  console codepage: ���݂̃R�[�h �y�[�W: 932
+  cl.exe (pinned path exists: True): MSVC 14.51.36231
+
+build-state file timestamps (pre-implementation):
+  2026-09-05 18:58:32  CMakeCache.txt
+  2026-09-05 18:58:32  build.ninja
+  2026-09-05 18:58:32  CMakeFiles\rules.ninja
+  2026-09-05 19:08:30  .ninja_deps
+  2026-09-05 19:08:39  .ninja_log
+  2026-08-11 16:39:26  ..\build.bat
+  cl.exe FileVersion: 19.51.36256.0
+  full git diff HEAD saved: evidence/D162-2I3/i3_4_d_d0_git_diff.txt (108241 chars)

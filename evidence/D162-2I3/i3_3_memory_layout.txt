@@ -1,0 +1,38 @@
+D162-2-I3-3 memory layout (Release AudioEngineHarness.exe, image base varies; offsets RVA-relative)
+
+[Static]
+  .text                      RVA 0x0001000 size 0x209FE01
+  commit (8-arg) entry       RVA 0x1F7F7F0   prologue: 48 83 EC 08 | 48 8B D1 | 41 80 F8 01 | 0F 85 DB 00 00 00
+  crash instruction          RVA 0x1F7F89D   C6 42 65 02  (mov byte [rdx+0x65],2; rdx=this=0)
+  commit crash COMDAT start  RVA 0x1F7F7F0, crash at +0xAD (matches I3-2 line fragment 173->109)
+  ctor clone A (AudioEngine) RVA 0x1F5D080   entry bp anchor (rcx = AudioEngine*)
+  ctor clone F (bridge)      RVA 0x1F7EE30..0x1F7F1EE
+  memset import thunk        RVA 0x2078030 -> IAT 0x21E4718 = VCRUNTIME140.dll!memset
+  crash-path caller          RVA 0x1F64A70..0x1F658A3 (publish executor; `mov rcx,[r13+0x12A7640]` at 0x1F64F35)
+
+[Dynamic] (Run A values; B/C identical with different heap bases)
+  AudioEngine instance       0x1526A258080   (heap, RegionSize 0x1310000)
+  W = &worldAuthority_.coordinator_
+                             0x1526B4FF6C0   = engine + 0x12A7640
+  bridge ctor clone F this   0x1526B379B40   = engine + 0x1121AC0
+  W value at ctor entry      0x0   (fresh heap)
+  W value after the ONLY write (memset)   0x0
+  W value at crash           0x0
+
+[Member layout facts]
+  AudioEngine.h:4964  convo::isr::RuntimeIntentCoordinator runtimePublicationBridge_
+  AudioEngine.h:4966  convo::isr::RuntimeWorldAuthority   worldAuthority_   <- immediate successor
+  RuntimeWorldAuthority.h: first member = RuntimeIntentCoordinator& coordinator_ (8-byte slot W)
+  ISRRuntimePublicationCoordinator.h:1178 quarantineService_ = bridge's LAST member
+  => worldAuthority_.coordinator_ sits at the bridge storage boundary; the crashing write's
+     zero range [engine+0x12A7620, engine+0x12A76D0) begins 0x50 bytes BEFORE W (bridge tail)
+     and extends 0x90 bytes past W (worldAuthority_ head).
+
+[Phase D arithmetic]
+  writer destination      : engine+0x12A7620 .. engine+0x12A76D0 (0xB0 bytes, value 0)
+  W                        : engine+0x12A7640
+  offset(writer_dst - W)   : -0x20 (writer starts 0x20 below W; spans +0x90 beyond)
+  0x20 < 0xB0              : W is inside the writer range -> writer CAN and DOES overwrite W
+  boundary crossing        : writer begins inside bridge storage, ends inside worldAuthority_
+  conclusion               : bridge-tail bulk zero crossing the member boundary — Case C geometry
+                             executed by a Case B (CRT memset) writer, during construction.

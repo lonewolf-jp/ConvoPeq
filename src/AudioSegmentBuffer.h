@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <memory>
-#include <malloc.h>  // _aligned_malloc, _aligned_free
 
 #include <JuceHeader.h>
 #include "audioengine/AtomicAccess.h"
@@ -22,20 +21,29 @@ public:
     // ★ Contract: create() は NonRT（Builder/MessageThread）のみから呼び出し可能。
     //   RT（Audio Thread）内での呼び出しは禁止。
     // ★ Strong exception guarantee: success=fully initialized, failure=no allocation remains
+    // ★ D162-2-F: allocator contract 一致修正。
+    //   旧実装は _aligned_malloc（CRT）で確保し、所有者 ScopedAlignedPtr の dtor が
+    //   aligned_free → mkl_free（DiagnosticsConfig.h CONVOPEQ_ALIGNED_FREE）で解放していた。
+    //   この allocator mismatch により Debug CRT の _free_dbg が no-man's-land 破壊を検出し
+    //   0xC0000005 が発生（D162-2-D0 PASS-B で確定）。
+    //   修正: convo::aligned_malloc（→ DIAG_MKL_MALLOC/mkl_malloc）に統一し、
+    //   所有者 ScopedAlignedPtr の aligned_free（→ mkl_free）と pair を一致させた。
+    //   失敗時の _aligned_free も aligned_free（= mkl_free）に統一（no-op 安全: nullptr free）。
     [[nodiscard]] static std::unique_ptr<AudioSegmentBuffer> create()
     {
         // aligned allocation on heap（RT-safe: 事前確保）
-        auto* left = static_cast<double*>(_aligned_malloc(
+        //   NonRT のみ呼び出し可能なため例外伝播は安全（aligned_malloc は bad_alloc 送出）。
+        auto* left = static_cast<double*>(convo::aligned_malloc(
             kCapacity * sizeof(double), kAlignment));
-        auto* right = static_cast<double*>(_aligned_malloc(
+        auto* right = static_cast<double*>(convo::aligned_malloc(
             kCapacity * sizeof(double), kAlignment));
         if (!left || !right)
         {
-            _aligned_free(left);
-            _aligned_free(right);
+            convo::aligned_free(left);   // nullptr free は no-op（mkl_free(ptr==nullptr) 安全）
+            convo::aligned_free(right);
             return nullptr;  // Fail-Closed
         }
-        // ScopedAlignedPtr に所有権移譲
+        // ScopedAlignedPtr に所有権移譲（aligned_malloc ↔ aligned_free pair 一致）
         auto buf = std::unique_ptr<AudioSegmentBuffer>(new AudioSegmentBuffer());
         buf->leftSamples_.reset(left);
         buf->rightSamples_.reset(right);

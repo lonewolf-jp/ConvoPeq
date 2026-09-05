@@ -493,6 +493,13 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
     //   retireDSPHandleForRuntime の map lookup が単調に false を返すため構造的に不可。
     //   oldHandle は直下の deferredSlot_ 置換（:513）で失われるため、置換前に retire する。
     if (deferredSlot_.has_value()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — OVERWRITE（旧 holder 退避）。
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[D162-2E_DEFERRED] event=OVERWRITE oldGen=%llu oldDsp=%p",
+            (unsigned long long)deferredSlot_->request.generation,
+            (void*)engine_.resolveDSPHandle(deferredSlot_->request.newDSP)));
+#endif
         retireRegisteredDSP(deferredSlot_->request, "deferred-overwrite");
     }
 
@@ -559,6 +566,13 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         // ★ slot 側 timestamp は「今回の enqueue 時刻」の意味のまま（overwrite age 専用、F5-4）。
         .enqueueTimestampUs = now
     };
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — CREATE。
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[D162-2E_DEFERRED] event=CREATE gen=%llu dsp=%p",
+        (unsigned long long)req.generation,
+        (void*)engine_.resolveDSPHandle(req.newDSP)));
+#endif
     convo::publishAtomic(hasDeferred_, true, std::memory_order_release);
 
     // ★ v19: DeferredHealth 記録
@@ -582,27 +596,41 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
         // ★ D162-2-B (H1 修正 S3): slot reset の前に、slot が保持していた handle 登録済み
         //   DSPCore を disposition する（D162-2-A 脱落点 S3・D162-1P 実測 1 件）。
-        //   ★ 実装ノート（D162-2-B 実行時確定）: 本 DSP は一度も publish されていないため
-        //   （RuntimePublishWorld topology / activeRuntimeDSPSlot / fadingRuntimeDSPSlot の
-        //   いずれにも現れない・handle registry state は Constructing のまま）、RT reader は
-        //   到達不能である。これは DSPGuard 契約（RebuildDispatch.cpp:938-965「未登録 DSPCore は
-        //   EBR epoch 保護不要」）と同型の T2 direct destroy が正当なケースである。
-        //   初版の DSPLifetimeManager::retire（EBR enqueue）は、shutdown teardown 境界を跨いで
-        //   EBR destroy が遅延実行されることで exit 時 AV (0xC0000005・mkl_free 不正ポインタ) を
-        //   誘発した（分離試験: S3 無効化で exit 0x0 再現）。clear 時点（engine 全員生存・
-        //   Message/Rebuild Thread・NonRT）で直接破壊する方が所有権連鎖が単一ポイントで完結し安全。
-        //   ownership 遷移: deferredSlot（現 owner）→ 本関数（同期的破壊）→ 終端。
-        //   thread 契約: assert-free（非 RebuildThread caller: ReleaseResources.cpp:359 EmergencyDrain /
-        //   C1 fallback — D135-8 Gate A 審査済み）。NonRT 実行。
-        // ★ D162-2-B 残課題（D162-2-C へ繰り越し）: shutdown 時の deferred DSP disposition。
-        //   初版（DSPLifetimeManager::retire = EBR enqueue）と第2版（T2 direct destroy）の双方で、
-        //   破壊を実行した場合に限り ~AudioEngine 後半の member teardown で 0xC0000005 (mkl_free 不正
-        //   ポインタ) が発生することを実測で確定した（破壊しない現行挙動では exit 0x0）。
-        //   原因は shutdown teardown 順序と DSPHandle registry / EQCacheManager / rcuSwapper の
-        //   相互作用にあり、S3 単独の修正範囲を超える。D162-2-C（read-only validation から
-        //   teardown 順序監査へ拡張）で root-cause 確定後に有効化すること。
-        //   現状の残留: shutdown 時に slot 残留していた deferred DSP 1 件のみ破壊されない
-        //   （process exit で OS 回収・S1 により通常運転中の orphan は解消済み）。
+        // ★ D162-2-B 残課題（D162-2-C → D162-2-D0 繰り越し）:
+        //   shutdown 時の deferred DSP disposition。
+        //   初版（EBR enqueue）と第2版（direct destroy）の双方で、破壊を実行した場合に限り
+        //   ~AudioEngine 後半の member teardown で 0xC0000005 (mkl_free 不正ポインタ) が発生。
+        //   ★ D162-2-D0 PASS-B: corrupting free は AudioSegmentBuffer の allocator mismatch
+        //   （_aligned_malloc ↔ mkl_free）と確定 — S3/V-D destroy とは直接因果なし。
+        //   D162-2-F で mismatch 修正完了（D0 signature 消失・60-gen exit 0x0 確認）。
+        //   ★ D162-2-G1 (S3 staged re-enable): S3 disposition を authority（EBR）経由で
+        //   再有効化する（下記 block）。旧「1 件のみ破壊されない（process exit で OS 回収）」
+        //   の残留は解消。V-D は本件では無効のまま（D162-2-G2 対象）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — CLEAR（shutdown 時）。
+        if (deferredSlot_.has_value()) {
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2E_DEFERRED] event=CLEAR gen=%llu dsp=%p",
+                (unsigned long long)deferredSlot_->request.generation,
+                (void*)engine_.resolveDSPHandle(deferredSlot_->request.newDSP)));
+        }
+#endif
+        // ★ D162-2-G1 (S3 re-enable): slot reset の前に、slot が保持していた handle 登録済み
+        //   DSPCore を authority（EBR・INV-D162-8 単経路）で disposition する。
+        //   midrun 経由（drainDeferredClearIfRequested → E-4d retire 済み）では map 不在で
+        //   no-op となるため二重 retire は構造的に発生しない（INV-D162-3）。
+        if (deferredSlot_.has_value())
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2E_DEFERRED] event=CLEAR_SHUTDOWN_DISPOSITION gen=%llu dsp=%p",
+                (unsigned long long)deferredSlot_->request.generation,
+                (void*)engine_.resolveDSPHandle(deferredSlot_->request.newDSP)));
+#endif
+            retireRegisteredDSP(
+                deferredSlot_->request,
+                "shutdown-clear");
+        }
         deferredSlot_.reset();
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
     }
@@ -652,6 +680,25 @@ bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
     jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
     if (convo::exchangeAtomic(deferredClearRequested_, false, std::memory_order_acq_rel))
     {
+        // ★ D162-2-E (E-4d): Timer C2/C3/C4 requestDeferredClear → mid-run clear path の
+        //   deferred DSP disposition。旧実装は clearDeferredForShutdown() が slot を reset する
+        //   のみで、slot 保持中の deferred DSP（handle 登録済み・未 publish）が無処分で消失
+        //   していた（D162-2-C residual gen 10/16/21/28/34/40/45 の root cause）。
+        //   この clear は mid-run（RebuildThread 生存中）であり shutdown 時 S3 disposition とは
+        //   別経路。S1 authority（retireRegisteredDSP）で台帳解除 + EBR enqueue を行う。
+        //   EBR destroy は運転中の tryReclaim tick で消化される（epoch 安全・shutdown 境界を
+        //   跨がないため S3 とは AV リスクプロファイルが異なる）。
+        //   shutdown 文脈（EmergencyDrain / C1 fallback）の S3 disposition は引き続き無効
+        //   （D162-2-E 変更境界）。
+        if (deferredSlot_.has_value()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2E_DEFERRED] event=CLEAR_MIDRUN_DISPOSITION gen=%llu dsp=%p",
+                (unsigned long long)deferredSlot_->request.generation,
+                (void*)engine_.resolveDSPHandle(deferredSlot_->request.newDSP)));
+#endif
+            retireRegisteredDSP(deferredSlot_->request, "timer-clear-midrun");
+        }
         clearDeferredForShutdown();
         return true;
     }
@@ -809,6 +856,13 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
     switch (result.decision) {
         case PublicationAdmission::DeferredDecision::Ready: {
             // consume は owner_->finishView() を呼んで ownership release を完結する。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — CONSUME。
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2E_DEFERRED] event=CONSUME gen=%llu dsp=%p",
+                (unsigned long long)slotRequestSnapshot.generation,
+                (void*)engine_.resolveDSPHandle(slotRequestSnapshot.newDSP)));
+#endif
             auto req = view->consume();      // move-out + finishView()
             view.reset();                    // borrow 解除（slot は Orchestrator が reset 済み）
             submitPublishRequest(req);       // resubmit（再 enqueue は submitPublishRequest 内で）
@@ -824,6 +878,14 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
             //   (2) authority retire（台帳解除 + EBR 破壊権取得）で ownership を EBR へ移譲、
             //   (3) view->discard() で slot を release。
             //   retire と discard の間で DSP は EBR が所有（単一 owner 継続）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — DISCARD。
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[D162-2E_DEFERRED] event=DISCARD reason=%d gen=%llu dsp=%p",
+                (int)result.discardReason,
+                (unsigned long long)slotRequestSnapshot.generation,
+                (void*)engine_.resolveDSPHandle(slotRequestSnapshot.newDSP)));
+#endif
             retireRegisteredDSP(slotRequestSnapshot, "deferred-discard");
             view->discard(result.discardReason);
             view.reset();

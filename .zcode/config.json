@@ -30,6 +30,14 @@
         "args": [
           "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"
         ]
+      },
+      "x64dbg": {
+        "type": "stdio",
+        "command": "C:/Program Files/nodejs/npx.cmd",
+        "args": [
+          "-y",
+          "x64dbg-mcp-server"
+        ]
       }
     }
   }

@@ -1,0 +1,25 @@
+D162-2-I3-4-C — C2 propagation experiment + locale probes (fixture: %TEMP%/i3_4_c_propagation_test)
+====================================================================================================
+
+[fixture] build.ninja (English prefix attempt #1) → FAIL: "unknown build rule link" fixed, then #deps 0
+[fixture] build.ninja prefix = "Note: including file:" + JP cl output → #deps 0 → header change NOT propagated (FEATURE_VERSION=1 after change)
+[fixture] build.ninja prefix = UTF-8 JP bytes + CP932 cl output → still #deps 0 (byte mismatch)
+[fixture] build.ninja prefix = CP932 JP bytes + CP932 cl output → #deps 741, header change PROPAGATED, exe printed FEATURE_VERSION=2
+
+[probe A] console CP932 : cl emits CP932 prefix bytes 0x83 0x81 0x83 0x62 ...
+[probe B] console CP437 : cl emits mangled bytes "?? ?????? ????: ..." → prefix mismatch → #deps 0
+[probe C] LANG=en_US    : no effect (still Japanese/CP932 bytes)
+[probe D] VSLANG=1033   : no effect on this cl version
+[probe E] CP65001 (build.bat の chcp 65001): cl emits UTF-8 bytes 0xE3 0x83 0xA1 ... → mismatch vs CP932-baked prefix!
+
+[byte comparison]
+  CP932   prefix : 83 81 83 62 3A 20 83 43 83 93 83 4E 83 8B 81 5B 83 68 20 83 74 83 40 83 43 83 8B 3A
+  CP65001 prefix : E3 83 A1 E3 83 A2 3A 20 E3 82 A4 E3 83 B3 E3 82 AF E3 83 AB E3 83 BC E3 83 89 20 E3 83 95 E3 82 A1 E3 82 A4 E3 83 AB 3A
+  → 同一 cl.exe でも console codepage により prefix bytes が変化する（SAME BYTES: False 実測）
+
+[build-diag 現状] rules.ninja の msvc_deps_prefix は CP932 bytes（09-05 18:58 configure は CP932 console で実施）
+[build.bat] 先頭で chcp 65001 を実行 → build.bat 経由の configure は CP65001 prefix を焼く
+  → CP932 console（agent shell 等）からの後続ビルドが prefix mismatch → #deps 0（今回の事故と同一メカニズム）
+
+[C2 結論] deps=msvc の追跡は、configure 時と build 時の console codepage が一致する場合のみ機能する。
+          一致しないビルドでは ninja は header 変更を検知できず、stale obj を静かに link する。

@@ -1,0 +1,46 @@
+0x14360d3b3:
+    ReadPointerNoFence @ D:\a\_work\1\s\src\ExternalAPIs\WindowsSDKInc\c\Include\10.0.26100.0\um\winnt.h:9803:0
+0x14360d770:
+    _guard_icall_checks_enforced @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\misc\guard_support.c:170:0
+0x143715ba0:
+    _guard_dispatch_icall_nop @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\misc\amd64\guard_dispatch.asm:53:0
+0x1436d0990:
+    _CrtDefaultAllocHook @ minkernel\crts\ucrt\src\appcrt\heap\debug_heap_hook.cpp:28:0
+0x14270f17c:
+    convo::aligned_free(void *) @ C:\VSC_Project\ConvoPeq\src\AlignedAllocation.h:41:0
+0x143631b8d:
+    _free_dbg @ minkernel\crts\ucrt\src\appcrt\heap\debug_heap.cpp:1036:0
+0x1427510e8:
+    convo::ScopedAlignedPtr<double>::reset(double *) @ C:\VSC_Project\ConvoPeq\src\AlignedAllocation.h:86:0
+0x14362f7d8:
+    free @ minkernel\crts\ucrt\src\appcrt\heap\free.cpp:39:0
+0x1427505f6:
+    convo::ScopedAlignedPtr<double>::~ScopedAlignedPtr<double>(void) @ C:\VSC_Project\ConvoPeq\src\AlignedAllocation.h:61:0
+0x1428f376b:
+    AudioSegmentBuffer::~AudioSegmentBuffer(void) @ C:\VSC_Project\ConvoPeq\src\AudioSegmentBuffer.h:131:0
+0x1428e30ff:
+    NoiseShaperLearner::~NoiseShaperLearner(void) @ C:\VSC_Project\ConvoPeq\src\NoiseShaperLearner.cpp:95:0
+0x1427049f2:
+    AudioEngine::~AudioEngine(void) @ C:\VSC_Project\ConvoPeq\src\audioengine\AudioEngine.CtorDtor.cpp:288:0
+0x1436bd097:
+    __acrt_unlock @ minkernel\crts\ucrt\src\appcrt\internal\locks.cpp:60:0
+0x1426b855a:
+    MainWindow::~MainWindow(void) @ C:\VSC_Project\ConvoPeq\src\MainWindow.cpp:1162:0
+0x1426b5e64:
+    MainApplication::shutdown(void) @ C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:186:0
+0x1435d08f9:
+    `anonymous namespace'::_ExceptionPtr_static<std::bad_alloc>::_ExceptionPtr_static<std::bad_alloc> @ D:\a\_work\1\s\src\vctools\crt\github\stl\src\excptptr.cpp:217:0
+0x1426b5f4c:
+    WinMain @ C:\VSC_Project\ConvoPeq\src\MainApplication.cpp:204:0
+0x14360d2e2:
+    invoke_main @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:107:0
+0x14360d232:
+    __scrt_common_main_seh @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288:0
+0x14360c9e0:
+    __dyn_tls_dtor @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\tls\tlsdtor.cpp:109:0
+0x14360cdd0:
+    __dyn_tls_init @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\tls\tlsdyn.cpp:82:0
+0x14360d0ee:
+    __scrt_common_main @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:331:0
+0x14360d35e:
+    WinMainCRTStartup @ D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_winmain.cpp:17:0

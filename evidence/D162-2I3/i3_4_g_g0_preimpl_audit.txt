@@ -1,0 +1,47 @@
+I3-4-G G0 — pre-implementation audit (read-only; generated 2026-09-05 22:51:44)
+==========================================================================
+
+1. build.bat
+   - line 4:  chcp 65001 (codepage hazard source, documented I3-4-C)
+   - msvc mode has NO explicit vcvarsall call: developer shell must have vcvars applied;
+     therefore WindowsSdkDir/WindowsSDKVersion/INCLUDE env ARE alive at gate time
+     (gate runs inside build.bat at :configure_cmake_ok, line 197-214)
+   - gate call: --check when CMakeFiles/.build_identity exists, else stamp-create+gate
+   - gate failure -> build.bat exits 1 (refuses to link; no automatic clean)
+   - configure retry path deletes .ninja_log/.ninja_deps only (not stamp)
+
+2. src/tools/build_identity_gate.py v1 (backed up to i3_4_g_g0_build_identity_gate_v1_backup.py)
+   - identity schema 1: generator/compiler_id/compiler_path/compiler_version/architecture/
+     cmake_version/ninja_version/configuration_family/source_revision/console_codepage/
+     msvc_deps_prefix_sha256/stamp_schema
+   - --check: compares env-derived identity vs stamp; ANY diff -> rc=3 (COHERENCE-4)
+   - #deps 0 fail-closed: deps_gate() -> any RELEVANT obj with #deps 0 -> rc=3
+   - RELEVANT_OBJ_RE = /(?:Release|Debug|RelWithDebInfo)/src/  (project TUs only)
+   - rc=3 paths: (a) build dir not configured, (b) ninja -t deps failure,
+     (c) #deps 0 relevant objs, (d) stamp write path with prefix/codepage change, (e) --check diff
+
+3. src/tools/check_layout_offsets.py — standalone PE .text disp32 scanner;
+   hardcodes build-diag Release/Debug AudioEngineHarness.exe paths; no gate interaction -> non-interference confirmed
+
+4. impl-{Release,Debug,RelWithDebInfo}.ninja
+   - TU -> target -> object mapping safely obtainable from build-edge outputs
+     (CMakeFiles/<target>.dir/<Config>/src/...obj) + edge vars (INCLUDES, OBJECT_DIR)
+   - per-config impl files contain their own edges (no cross-config leakage)
+
+5. production link set (ninja -t deps not needed for this; impl edge inputs suffice)
+   - 'build ConvoPeq_artefacts\<cfg>\ConvoPeq.exe:' edge exists in all 3 configs
+   - direct obj inputs: 134 (116 under src/), no rspfile indirection
+   -> production set extraction is deterministic from impl-<cfg>.ninja
+
+6. F4 fixture reuse: fixtures gain (a) CMakeFiles/impl-Release.ninja (compile edges +
+   optional ConvoPeq_artefacts link edge for production case), (b) CMakeFiles/rules.ninja
+   with the CP932 msvc_deps_prefix line, (c) minimal CMakeCache.txt with
+   CMAKE_GENERATOR/CMAKE_C(CXX)_COMPILER fields -> gate runs unmodified against fixtures
+
+7. whitelist design (NOT a filename list):
+   #deps==0 -> in production link set ? YES->FAIL
+             -> else transitive closure (edge -I + INCLUDE env, quoted/angle rules)
+                all system & unresolved==0 -> ZERO_DEPS_SYSTEM_ONLY -> WARN+ALLOW
+                else -> FAIL (SUSPICIOUS / UNRESOLVED)
+
+VERDICT: implementation may proceed (G1/G2/G3) within build.bat + build_identity_gate.py only.

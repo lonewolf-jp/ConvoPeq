@@ -1,0 +1,9 @@
+# D162-2-I1 CrashDumps start-state record (captured before A-1 pilot, 2026-09-04 ~21:55)
+# Attribution: all pre-existing (G4 CTest era: AudioEngineHarness 0xC0000374 pre-existing +
+# HeadlessAudioPathVerification old build-icx tolerated class; rpcs3 = unrelated external app)
+total 262448
+-rw-r--r-- 1 user 197121 69834728 Sep  4 21:18 rpcs3.exe.11936.dmp
+-rw-r--r-- 1 user 197121  2618607 Sep  4 21:17 AudioEngineHarness.exe.7920.dmp
+-rw-r--r-- 1 user 197121 37578238 Sep  4 21:17 ConvoPeq.exe.12068.dmp
+-rw-r--r-- 1 user 197121  2590651 Sep  4 20:44 AudioEngineHarness.exe.24952.dmp
+# I1 attribution rule: any NEW ConvoPeq.exe.*.dmp with mtime > I1 start time = I1 run attribution

@@ -1,0 +1,68 @@
+I3-4-G G4 adversarial gate fixture matrix (gate v2 against 8 fixtures)
+==============================================================================
+
+Case g4_a_systemonly              rc=0   class=WARN+ALLOW   expect(rc=0,WARN+ALLOW) -> MATCH
+Case g4_b_projectdirect           rc=0   class=CLEANPASS    expect(rc=0,CLEANPASS) -> MATCH
+Case g4_c_transitive              rc=0   class=CLEANPASS    expect(rc=0,CLEANPASS) -> MATCH
+Case g4_d_mismatch                rc=3   class=SUSPICIOUS   expect(rc=3,SUSPICIOUS) -> MATCH
+Case g4_e_unresolved              rc=3   class=UNRESOLVED   expect(rc=3,UNRESOLVED) -> MATCH
+Case g4_f_production              rc=3   class=PRODUCTION   expect(rc=3,PRODUCTION) -> MATCH
+Case g4_g_testonly_systemonly     rc=0   class=WARN+ALLOW   expect(rc=0,WARN+ALLOW) -> MATCH
+Case g4_h_mixed                   rc=3   class=SUSPICIOUS   expect(rc=3,SUSPICIOUS) -> MATCH
+
+ALL 8 CASES MATCH: True
+
+---- g4_a_systemonly gate.log (tail) ----
+[GATE-OK ] build identity stamp written (first configure).
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/CaseTgt.dir/Release/src/tests/caseA.cpp.obj
+[GATE-OK ] dependency gate: 1 relevant .obj checked; 1 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+
+---- g4_b_projectdirect gate.log (tail) ----
+[GATE-OK ] build identity stamp written (first configure).
+[GATE-OK ] dependency gate: 1 relevant .obj checked; 0 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+
+---- g4_c_transitive gate.log (tail) ----
+[GATE-OK ] build identity stamp written (first configure).
+[GATE-OK ] dependency gate: 1 relevant .obj checked; 0 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+
+---- g4_d_mismatch gate.log (tail) ----
+[GATE-FAIL]     non-system dep: C:\Users\user\AppData\Local\Temp\i3_4_g_g4\g4_d_mismatch\P1.h
+[GATE-FAIL]     non-system dep: C:\Users\user\AppData\Local\Temp\i3_4_g_g4\g4_d_mismatch\P2.h
+[GATE-FAIL] These objects would silently ignore future header changes
+[GATE-FAIL] (root cause of the D162-2 ODR/layout mixing crash).
+[GATE-FAIL] zero-deps classification failed for 1 object(s).
+[GATE-FAIL] recovery: run: build.bat Release clean   (explicit clean recovery)
+[GATE-FAIL] refusing to continue (fail-closed; no automatic clean).
+
+---- g4_e_unresolved gate.log (tail) ----
+[GATE-FAIL]   ZERO_DEPS_UNRESOLVED (cannot prove absence): CMakeFiles/CaseTgt.dir/Release/src/tests/caseE.cpp.obj
+[GATE-FAIL]     unresolved include: phantom_header.h
+[GATE-FAIL] These objects would silently ignore future header changes
+[GATE-FAIL] (root cause of the D162-2 ODR/layout mixing crash).
+[GATE-FAIL] zero-deps classification failed for 1 object(s).
+[GATE-FAIL] recovery: run: build.bat Release clean   (explicit clean recovery)
+[GATE-FAIL] refusing to continue (fail-closed; no automatic clean).
+
+---- g4_f_production gate.log (tail) ----
+[GATE-FAIL] 1 zero-deps object(s) FAILED classification (config=Release):
+[GATE-FAIL]   PRODUCTION #deps 0 (always fail): CMakeFiles/CaseTgt.dir/Release/src/tests/prod.cpp.obj
+[GATE-FAIL] These objects would silently ignore future header changes
+[GATE-FAIL] (root cause of the D162-2 ODR/layout mixing crash).
+[GATE-FAIL] zero-deps classification failed for 1 object(s).
+[GATE-FAIL] recovery: run: build.bat Release clean   (explicit clean recovery)
+[GATE-FAIL] refusing to continue (fail-closed; no automatic clean).
+
+---- g4_g_testonly_systemonly gate.log (tail) ----
+[GATE-OK ] build identity stamp written (first configure).
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/CaseTgt.dir/Release/src/tests/caseG.cpp.obj
+[GATE-OK ] dependency gate: 1 relevant .obj checked; 1 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+
+---- g4_h_mixed gate.log (tail) ----
+[GATE-FAIL]     non-system dep: C:\Users\user\AppData\Local\Temp\i3_4_g_g4\g4_h_mixed\P1.h
+[GATE-FAIL]     non-system dep: C:\Users\user\AppData\Local\Temp\i3_4_g_g4\g4_h_mixed\P2.h
+[GATE-FAIL] These objects would silently ignore future header changes
+[GATE-FAIL] (root cause of the D162-2 ODR/layout mixing crash).
+[GATE-FAIL] zero-deps classification failed for 1 object(s).
+[GATE-FAIL] recovery: run: build.bat Release clean   (explicit clean recovery)
+[GATE-FAIL] refusing to continue (fail-closed; no automatic clean).
+

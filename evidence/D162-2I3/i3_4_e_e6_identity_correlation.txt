@@ -1,0 +1,554 @@
+=== FLAGS/DEFINES signature vs ndeps (Release .cpp.obj, matched=492 edges) ===
+--- signature: 12 edges, 5 zero-deps
+    DEFINES = -DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\"Release\"
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc
+      ZERO  CMakeFiles/ObservePathSingleSourceTests.dir/Release/src/tests/ObservePathSingleSourceTests.cpp.obj
+      ZERO  CMakeFiles/OverlapAuthoritySingularTests.dir/Release/src/tests/OverlapAuthoritySingularTests.cpp.obj
+      ZERO  CMakeFiles/CrossfadeExecutorLocalContractTests.dir/Release/src/tests/CrossfadeExecutorLocalContractTests.cpp.obj
+      ZERO  CMakeFiles/RuntimeWorldAuthorityProjectionTests.dir/Release/src/tests/RuntimeWorldAuthorityProjectionTests.cpp.obj
+      ZERO  CMakeFiles/RebuildAdmissionRegressionTests.dir/Release/src/tests/RebuildAdmissionRegressionTests.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=3     CMakeFiles/ISRRuntimeIdentityTests.dir/Release/src/tests/ISRRuntimeIdentityGeneratorsTests.cpp.obj
+        ndeps=8     CMakeFiles/RuntimePublicationCoordinatorTests.dir/Release/src/tests/RuntimePublicationCoordinatorTests.cpp.obj
+        ndeps=2     CMakeFiles/NormalRetireDSPHandleCompareTests.dir/Release/src/tests/NormalRetireDSPHandleCompareTests.cpp.obj
+        ndeps=2     CMakeFiles/NormalRetireDSPHandleCompareTests.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=1     CMakeFiles/RuntimeSemanticSchemaValidationTests.dir/Release/src/tests/RuntimeSemanticSchemaValidationTests.cpp.obj
+        ndeps=1     CMakeFiles/ShadowCompareContractTests.dir/Release/src/tests/ShadowCompareContractTests.cpp.obj
+        ndeps=8     CMakeFiles/PartialPublicationRejectTests.dir/Release/src/tests/PartialPublicationRejectTests.cpp.obj
+--- signature: 55 edges, 4 zero-deps
+    DEFINES = -DJUCE_DSP_USE_INTEL_MKL=1 -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAIL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc /bigobj
+      ZERO  CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      ZERO  CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      ZERO  CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      ZERO  CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=738   CMakeFiles/ISRSemanticValidationTests.dir/Release/src/tests/ISRSemanticValidationTests.cpp.obj
+        ndeps=1     CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRClosure.cpp.obj
+        ndeps=1     CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRPayloadTier.cpp.obj
+        ndeps=630   CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=8     CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=738   CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator.cpp.obj
+        ndeps=2     CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=2     CMakeFiles/ISRSemanticValidationTests.dir/Release/src/audioengine/ISRDSPQuarantine.cpp.obj
+        ndeps=247   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/ISRSemanticValidationTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=34    CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/tests/invariant_INV3_INV5.cpp.obj
+        ndeps=1     CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRClosure.cpp.obj
+        ndeps=1     CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRPayloadTier.cpp.obj
+        ndeps=630   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=8     CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=738   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator.cpp.obj
+        ndeps=2     CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=2     CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRDSPQuarantine.cpp.obj
+        ndeps=649   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/src/audioengine/ISRShutdown.cpp.obj
+        ndeps=247   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/invariant_INV3_INV5Tests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=20    CMakeFiles/RetireGraceSemanticsTests.dir/Release/src/tests/RetireGraceSemanticsTests.cpp.obj
+        ndeps=630   CMakeFiles/RetireGraceSemanticsTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=247   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/RetireGraceSemanticsTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=14    CMakeFiles/TerminalTelemetryContractTests.dir/Release/src/tests/TerminalTelemetryContractTests.cpp.obj
+        ndeps=630   CMakeFiles/TerminalTelemetryContractTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=247   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/TerminalTelemetryContractTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 6 edges, 4 zero-deps
+    DEFINES = -DCMAKE_INTDIR=\"Release\"
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD
+      ZERO  CMakeFiles/GainStagingContractTests.dir/Release/src/tests/GainStagingContractTests.cpp.obj
+      ZERO  CMakeFiles/EQProcessorMaxGainTests.dir/Release/src/tests/EQProcessorMaxGainTests.cpp.obj
+      ZERO  CMakeFiles/EQAnalysisUnitTests.dir/Release/src/tests/EQAnalysisUnitTests.cpp.obj
+      ZERO  CMakeFiles/EQBoundExcessBenchmark.dir/Release/src/tests/EQBoundExcessBenchmark.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=1     CMakeFiles/D8_1_WrapperCacheTests.dir/Release/src/tests/D8_1_WrapperCacheTests.cpp.obj
+        ndeps=4     CMakeFiles/DeferredDeletionQueueReclaimTests.dir/Release/src/tests/DeferredDeletionQueueReclaimTests.cpp.obj
+--- signature: 30 edges, 2 zero-deps
+    DEFINES = -DJUCE_DSP_USE_INTEL_MKL=1 -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAIL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj
+      ZERO  CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      ZERO  CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=25    CMakeFiles/D8_2_B_2_Tests.dir/Release/src/tests/D8_2_B_2_Tests.cpp.obj
+        ndeps=25    CMakeFiles/D8_2_B_2_Tests.dir/Release/src/core/SnapshotCoordinator.cpp.obj
+        ndeps=6     CMakeFiles/D8_2_B_2_Tests.dir/Release/src/core/SnapshotFactory.cpp.obj
+        ndeps=4     CMakeFiles/D8_2_B_2_Tests.dir/Release/src/core/GlobalSnapshot.cpp.obj
+        ndeps=630   CMakeFiles/D8_2_B_2_Tests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=247   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/D8_2_B_2_Tests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=738   CMakeFiles/ISRSoakTests.dir/Release/src/tests/ISRSoakTests.cpp.obj
+        ndeps=1     CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRClosure.cpp.obj
+        ndeps=1     CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRPayloadTier.cpp.obj
+        ndeps=630   CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=8     CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=738   CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator.cpp.obj
+        ndeps=2     CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=2     CMakeFiles/ISRSoakTests.dir/Release/src/audioengine/ISRDSPQuarantine.cpp.obj
+        ndeps=247   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/ISRSoakTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 142 edges, 1 zero-deps
+    DEFINES = -DCONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1 -DCONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1 -DCONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1 -DCONVOPEQ_ENABLE_CONVOL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /arch:AVX2 /bigobj
+      ZERO  CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=740   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/AudioEngineHarness.cpp.obj
+        ndeps=741   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp.obj
+        ndeps=741   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp.obj
+        ndeps=747   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp.obj
+        ndeps=747   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp.obj
+        ndeps=741   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/T1Measurement.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/T2Measurement.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/T3Measurement.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/T4Measurement.cpp.obj
+        ndeps=741   CMakeFiles/AudioEngineHarness.dir/Release/src/tests/AudioEngineHarness/OdenomCampaignTests.cpp.obj
+        ndeps=753   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.RebuildDispatch.cpp.obj
+        ndeps=745   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Commit.cpp.obj
+        ndeps=750   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.CtorDtor.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Globals.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Learning.cpp.obj
+        ndeps=740   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Init.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Cache.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Snapshot.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Fifo.cpp.obj
+        ndeps=751   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Timer.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Mmcss.cpp.obj
+        ndeps=747   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Transition.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Parameters.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.EQResponse.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.UIEvents.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.StateIO.cpp.obj
+        ndeps=745   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Threading.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Publication.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Reader.cpp.obj
+        ndeps=745   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Retire.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRLifecycle.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRRTExecution.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=1     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRClosure.cpp.obj
+        ndeps=1     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRPayloadTier.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRHB.cpp.obj
+        ndeps=8     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=630   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=649   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRShutdown.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator.cpp.obj
+        ndeps=747   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator_ProcessIntent.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/RuntimePublicationValidator.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/CrossfadeAuthority.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/PublicationAdmission.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/PublicationExecutor.cpp.obj
+        ndeps=747   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/RuntimePublicationOrchestrator.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/DSPLifetimeManager.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRCoordinatorLoop.cpp.obj
+        ndeps=3     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/TelemetryRecorder.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRDSPQuarantine.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRClosureGraphWalker.cpp.obj
+        ndeps=3     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRDebugRuntime.cpp.obj
+        ndeps=620   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/FrozenRuntimeWorld.cpp.obj
+        ndeps=5     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/ISREvidenceExporter.cpp.obj
+        ndeps=746   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/RuntimeHealthMonitor.cpp.obj
+        ndeps=3     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/RuntimePolicyEngine.cpp.obj
+        ndeps=3     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/RetryScheduler.cpp.obj
+        ndeps=5     CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/WorldLifecycleAudit.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.Latency.cpp.obj
+        ndeps=747   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp.obj
+        ndeps=751   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.ReleaseResources.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.AudioBlock.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.BlockDouble.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.Snapshot.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreLifecycle.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreToBuffer.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreFloat.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp.obj
+        ndeps=620   CMakeFiles/AudioEngineHarness.dir/Release/src/CustomInputOversampler.cpp.obj
+        ndeps=618   CMakeFiles/AudioEngineHarness.dir/Release/src/TruePeakDetector.cpp.obj
+        ndeps=619   CMakeFiles/AudioEngineHarness.dir/Release/src/LoudnessMeter.cpp.obj
+        ndeps=741   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/RuntimeBuilder.cpp.obj
+        ndeps=143   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AutoGainPlanner.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/audioengine/AudioEngineProcessor.cpp.obj
+        ndeps=620   CMakeFiles/AudioEngineHarness.dir/Release/src/PsychoacousticDither.cpp.obj
+        ndeps=1     CMakeFiles/AudioEngineHarness.dir/Release/src/MKLRealTimeSetup.cpp.obj
+        ndeps=740   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.Lifecycle.cpp.obj
+        ndeps=664   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.Rebuild.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.LoaderThread.cpp.obj
+        ndeps=665   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.MixedPhase.cpp.obj
+        ndeps=664   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.ResampleAndFallback.cpp.obj
+        ndeps=740   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.LoadPipeline.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.Runtime.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/convolver/ConvolverProcessor.StateAndUI.cpp.obj
+        ndeps=616   CMakeFiles/AudioEngineHarness.dir/Release/src/ConvolverState.cpp.obj
+        ndeps=623   CMakeFiles/AudioEngineHarness.dir/Release/src/MKLNonUniformConvolver.cpp.obj
+        ndeps=3     CMakeFiles/AudioEngineHarness.dir/Release/src/FFTBackend.cpp.obj
+        ndeps=2     CMakeFiles/AudioEngineHarness.dir/Release/src/FFTExecutionContext.cpp.obj
+        ndeps=653   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/EQProcessor.Core.cpp.obj
+        ndeps=631   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/EQProcessor.Parameters.cpp.obj
+        ndeps=638   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/EQProcessor.Coefficients.cpp.obj
+        ndeps=632   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/EQProcessor.Processing.cpp.obj
+        ndeps=631   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/EQProcessor.ProcessingCache.cpp.obj
+        ndeps=634   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/PeakEstimator.cpp.obj
+        ndeps=633   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/UpperBoundEstimator.cpp.obj
+        ndeps=634   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/EQResponseSampler.cpp.obj
+        ndeps=634   CMakeFiles/AudioEngineHarness.dir/Release/src/eqprocessor/BandHelper.cpp.obj
+        ndeps=738   CMakeFiles/AudioEngineHarness.dir/Release/src/EQEditProcessor.cpp.obj
+        ndeps=741   CMakeFiles/AudioEngineHarness.dir/Release/src/ConvolverControlPanel.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/EQControlPanel.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/SpectrumAnalyzerComponent.cpp.obj
+        ndeps=746   CMakeFiles/AudioEngineHarness.dir/Release/src/DeviceSettings.cpp.obj
+        ndeps=743   CMakeFiles/AudioEngineHarness.dir/Release/src/NoiseShaperLearningComponent.cpp.obj
+        ndeps=618   CMakeFiles/AudioEngineHarness.dir/Release/src/OutputFilter.cpp.obj
+        ndeps=742   CMakeFiles/AudioEngineHarness.dir/Release/src/NoiseShaperLearner.cpp.obj
+        ndeps=618   CMakeFiles/AudioEngineHarness.dir/Release/src/AllpassDesigner.cpp.obj
+        ndeps=1     CMakeFiles/AudioEngineHarness.dir/Release/src/CmaEsOptimizerDynamic.cpp.obj
+        ndeps=665   CMakeFiles/AudioEngineHarness.dir/Release/src/MixedPhaseOptimizationComponent.cpp.obj
+        ndeps=634   CMakeFiles/AudioEngineHarness.dir/Release/src/IRConverter.cpp.obj
+        ndeps=615   CMakeFiles/AudioEngineHarness.dir/Release/src/IRAnalyzer.cpp.obj
+        ndeps=666   CMakeFiles/AudioEngineHarness.dir/Release/src/ProgressiveUpgradeThread.cpp.obj
+        ndeps=615   CMakeFiles/AudioEngineHarness.dir/Release/src/MixedPhasePersistentCache.cpp.obj
+        ndeps=618   CMakeFiles/AudioEngineHarness.dir/Release/src/CacheManager.cpp.obj
+        ndeps=739   CMakeFiles/AudioEngineHarness.dir/Release/src/ConvolverSettingsComponent.cpp.obj
+        ndeps=630   CMakeFiles/AudioEngineHarness.dir/Release/src/IRDSP.cpp.obj
+        ndeps=4     CMakeFiles/AudioEngineHarness.dir/Release/src/core/GlobalSnapshot.cpp.obj
+        ndeps=6     CMakeFiles/AudioEngineHarness.dir/Release/src/core/SnapshotFactory.cpp.obj
+        ndeps=4     CMakeFiles/AudioEngineHarness.dir/Release/src/core/SnapshotAssembler.cpp.obj
+        ndeps=25    CMakeFiles/AudioEngineHarness.dir/Release/src/core/SnapshotCoordinator.cpp.obj
+        ndeps=5     CMakeFiles/AudioEngineHarness.dir/Release/src/core/DeletionQueue.cpp.obj
+        ndeps=619   CMakeFiles/AudioEngineHarness.dir/Release/src/core/WorkerThread.cpp.obj
+        ndeps=1     CMakeFiles/AudioEngineHarness.dir/Release/src/CpuFeatureCheck.cpp.obj
+        ndeps=583   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_utils/juce_audio_utils.cpp.obj
+        ndeps=529   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_processors/juce_audio_processors.cpp.obj
+        ndeps=431   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=247   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=183   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=282   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp.obj
+        ndeps=5     CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless_ara.cpp.obj
+        ndeps=3     CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless_lv2_libs.cpp.obj
+        ndeps=241   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_basics/juce_audio_basics.cpp.obj
+        ndeps=353   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_formats/juce_audio_formats.cpp.obj
+        ndeps=320   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_audio_devices/juce_audio_devices.cpp.obj
+        ndeps=286   CMakeFiles/AudioEngineHarness.dir/Release/JUCE/modules/juce_dsp/juce_dsp.cpp.obj
+--- signature: 133 edges, 1 zero-deps
+    DEFINES = -DCONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1 -DCONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1 -DCONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1 -DCONVOPEQ_ENABLE_CONVOL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MT /GL /GL /utf-8 /W4 /wd4100 /wd4189 /MP1 /EHsc /Zm400 /bigobj /arch:AVX2
+      ZERO  CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=749   CMakeFiles/ConvoPeq.dir/Release/src/MainApplication.cpp.obj
+        ndeps=746   CMakeFiles/ConvoPeq.dir/Release/src/MainWindow.cpp.obj
+        ndeps=753   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.RebuildDispatch.cpp.obj
+        ndeps=745   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Commit.cpp.obj
+        ndeps=750   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.CtorDtor.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Globals.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Learning.cpp.obj
+        ndeps=740   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Init.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Cache.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Snapshot.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Fifo.cpp.obj
+        ndeps=751   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Timer.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Mmcss.cpp.obj
+        ndeps=747   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Transition.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Parameters.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.EQResponse.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.UIEvents.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.StateIO.cpp.obj
+        ndeps=745   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Threading.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Publication.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Reader.cpp.obj
+        ndeps=745   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Retire.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRLifecycle.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRRTExecution.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=1     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRClosure.cpp.obj
+        ndeps=1     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRPayloadTier.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRHB.cpp.obj
+        ndeps=8     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=630   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=649   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRShutdown.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator.cpp.obj
+        ndeps=747   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator_ProcessIntent.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/RuntimePublicationValidator.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/CrossfadeAuthority.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/PublicationAdmission.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/PublicationExecutor.cpp.obj
+        ndeps=747   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/RuntimePublicationOrchestrator.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/DSPLifetimeManager.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRCoordinatorLoop.cpp.obj
+        ndeps=3     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/TelemetryRecorder.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRDSPQuarantine.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRClosureGraphWalker.cpp.obj
+        ndeps=3     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRDebugRuntime.cpp.obj
+        ndeps=620   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/FrozenRuntimeWorld.cpp.obj
+        ndeps=5     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/ISREvidenceExporter.cpp.obj
+        ndeps=746   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/RuntimeHealthMonitor.cpp.obj
+        ndeps=3     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/RuntimePolicyEngine.cpp.obj
+        ndeps=3     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/RetryScheduler.cpp.obj
+        ndeps=5     CMakeFiles/ConvoPeq.dir/Release/src/audioengine/WorldLifecycleAudit.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.Latency.cpp.obj
+        ndeps=747   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp.obj
+        ndeps=751   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.ReleaseResources.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.AudioBlock.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.BlockDouble.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.Snapshot.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreLifecycle.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreToBuffer.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreFloat.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp.obj
+        ndeps=620   CMakeFiles/ConvoPeq.dir/Release/src/CustomInputOversampler.cpp.obj
+        ndeps=618   CMakeFiles/ConvoPeq.dir/Release/src/TruePeakDetector.cpp.obj
+        ndeps=619   CMakeFiles/ConvoPeq.dir/Release/src/LoudnessMeter.cpp.obj
+        ndeps=741   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/RuntimeBuilder.cpp.obj
+        ndeps=143   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AutoGainPlanner.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/audioengine/AudioEngineProcessor.cpp.obj
+        ndeps=620   CMakeFiles/ConvoPeq.dir/Release/src/PsychoacousticDither.cpp.obj
+        ndeps=1     CMakeFiles/ConvoPeq.dir/Release/src/MKLRealTimeSetup.cpp.obj
+        ndeps=740   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.Lifecycle.cpp.obj
+        ndeps=664   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.Rebuild.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.LoaderThread.cpp.obj
+        ndeps=665   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.MixedPhase.cpp.obj
+        ndeps=664   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.ResampleAndFallback.cpp.obj
+        ndeps=740   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.LoadPipeline.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.Runtime.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/convolver/ConvolverProcessor.StateAndUI.cpp.obj
+        ndeps=616   CMakeFiles/ConvoPeq.dir/Release/src/ConvolverState.cpp.obj
+        ndeps=623   CMakeFiles/ConvoPeq.dir/Release/src/MKLNonUniformConvolver.cpp.obj
+        ndeps=3     CMakeFiles/ConvoPeq.dir/Release/src/FFTBackend.cpp.obj
+        ndeps=2     CMakeFiles/ConvoPeq.dir/Release/src/FFTExecutionContext.cpp.obj
+        ndeps=653   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/EQProcessor.Core.cpp.obj
+        ndeps=631   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/EQProcessor.Parameters.cpp.obj
+        ndeps=638   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/EQProcessor.Coefficients.cpp.obj
+        ndeps=632   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/EQProcessor.Processing.cpp.obj
+        ndeps=631   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/EQProcessor.ProcessingCache.cpp.obj
+        ndeps=634   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/PeakEstimator.cpp.obj
+        ndeps=633   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/UpperBoundEstimator.cpp.obj
+        ndeps=634   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/EQResponseSampler.cpp.obj
+        ndeps=634   CMakeFiles/ConvoPeq.dir/Release/src/eqprocessor/BandHelper.cpp.obj
+        ndeps=738   CMakeFiles/ConvoPeq.dir/Release/src/EQEditProcessor.cpp.obj
+        ndeps=741   CMakeFiles/ConvoPeq.dir/Release/src/ConvolverControlPanel.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/EQControlPanel.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/SpectrumAnalyzerComponent.cpp.obj
+        ndeps=746   CMakeFiles/ConvoPeq.dir/Release/src/DeviceSettings.cpp.obj
+        ndeps=743   CMakeFiles/ConvoPeq.dir/Release/src/NoiseShaperLearningComponent.cpp.obj
+        ndeps=618   CMakeFiles/ConvoPeq.dir/Release/src/OutputFilter.cpp.obj
+        ndeps=742   CMakeFiles/ConvoPeq.dir/Release/src/NoiseShaperLearner.cpp.obj
+        ndeps=618   CMakeFiles/ConvoPeq.dir/Release/src/AllpassDesigner.cpp.obj
+        ndeps=1     CMakeFiles/ConvoPeq.dir/Release/src/CmaEsOptimizerDynamic.cpp.obj
+        ndeps=665   CMakeFiles/ConvoPeq.dir/Release/src/MixedPhaseOptimizationComponent.cpp.obj
+        ndeps=634   CMakeFiles/ConvoPeq.dir/Release/src/IRConverter.cpp.obj
+        ndeps=615   CMakeFiles/ConvoPeq.dir/Release/src/IRAnalyzer.cpp.obj
+        ndeps=666   CMakeFiles/ConvoPeq.dir/Release/src/ProgressiveUpgradeThread.cpp.obj
+        ndeps=615   CMakeFiles/ConvoPeq.dir/Release/src/MixedPhasePersistentCache.cpp.obj
+        ndeps=618   CMakeFiles/ConvoPeq.dir/Release/src/CacheManager.cpp.obj
+        ndeps=739   CMakeFiles/ConvoPeq.dir/Release/src/ConvolverSettingsComponent.cpp.obj
+        ndeps=630   CMakeFiles/ConvoPeq.dir/Release/src/IRDSP.cpp.obj
+        ndeps=4     CMakeFiles/ConvoPeq.dir/Release/src/core/GlobalSnapshot.cpp.obj
+        ndeps=6     CMakeFiles/ConvoPeq.dir/Release/src/core/SnapshotFactory.cpp.obj
+        ndeps=4     CMakeFiles/ConvoPeq.dir/Release/src/core/SnapshotAssembler.cpp.obj
+        ndeps=25    CMakeFiles/ConvoPeq.dir/Release/src/core/SnapshotCoordinator.cpp.obj
+        ndeps=5     CMakeFiles/ConvoPeq.dir/Release/src/core/DeletionQueue.cpp.obj
+        ndeps=619   CMakeFiles/ConvoPeq.dir/Release/src/core/WorkerThread.cpp.obj
+        ndeps=1     CMakeFiles/ConvoPeq.dir/Release/src/CpuFeatureCheck.cpp.obj
+        ndeps=583   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_utils/juce_audio_utils.cpp.obj
+        ndeps=529   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_processors/juce_audio_processors.cpp.obj
+        ndeps=431   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=247   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=183   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=282   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp.obj
+        ndeps=5     CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless_ara.cpp.obj
+        ndeps=3     CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless_lv2_libs.cpp.obj
+        ndeps=241   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_basics/juce_audio_basics.cpp.obj
+        ndeps=353   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_formats/juce_audio_formats.cpp.obj
+        ndeps=320   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_audio_devices/juce_audio_devices.cpp.obj
+        ndeps=286   CMakeFiles/ConvoPeq.dir/Release/JUCE/modules/juce_dsp/juce_dsp.cpp.obj
+--- signature: 21 edges, 1 zero-deps
+    DEFINES = -DJUCE_DSP_USE_INTEL_MKL=1 -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_audio_basics=1 -DJUCE_MODULE_AVAILABLE_juce_audio_devices=1 -DJUCE_MODULE
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /arch:AVX2 /utf-8 /EHsc /bigobj
+      ZERO  CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=621   CMakeFiles/MTNUPCMeasurement.dir/Release/src/tests/MT-NUPC-Measurement.cpp.obj
+        ndeps=623   CMakeFiles/MTNUPCMeasurement.dir/Release/src/MKLNonUniformConvolver.cpp.obj
+        ndeps=3     CMakeFiles/MTNUPCMeasurement.dir/Release/src/FFTBackend.cpp.obj
+        ndeps=2     CMakeFiles/MTNUPCMeasurement.dir/Release/src/FFTExecutionContext.cpp.obj
+        ndeps=247   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=286   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_dsp/juce_dsp.cpp.obj
+        ndeps=353   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_formats/juce_audio_formats.cpp.obj
+        ndeps=241   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_basics/juce_audio_basics.cpp.obj
+        ndeps=583   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_utils/juce_audio_utils.cpp.obj
+        ndeps=529   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_processors/juce_audio_processors.cpp.obj
+        ndeps=432   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+        ndeps=282   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp.obj
+        ndeps=5     CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless_ara.cpp.obj
+        ndeps=3     CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_processors_headless/juce_audio_processors_headless_lv2_libs.cpp.obj
+        ndeps=316   CMakeFiles/MTNUPCMeasurement.dir/Release/JUCE/modules/juce_audio_devices/juce_audio_devices.cpp.obj
+--- signature: 18 edges, 1 zero-deps
+    DEFINES = -DCONVOPEQ_UNIT_TESTS=1 -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc /bigobj
+      ZERO  CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=648   CMakeFiles/AdmissionPackedStateTests.dir/Release/src/tests/AdmissionPackedStateTests.cpp.obj
+        ndeps=649   CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRShutdown.cpp.obj
+        ndeps=1     CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRClosure.cpp.obj
+        ndeps=1     CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRPayloadTier.cpp.obj
+        ndeps=630   CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=8     CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=738   CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRRuntimePublicationCoordinator.cpp.obj
+        ndeps=2     CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRDSPHandle.cpp.obj
+        ndeps=2     CMakeFiles/AdmissionPackedStateTests.dir/Release/src/audioengine/ISRDSPQuarantine.cpp.obj
+        ndeps=247   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/AdmissionPackedStateTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 12 edges, 1 zero-deps
+    DEFINES = -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_M
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj
+      ZERO  CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=16    CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/src/tests/StuckReaderFallbackDrainTests.cpp.obj
+        ndeps=630   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=8     CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=247   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/StuckReaderFallbackDrainTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 11 edges, 1 zero-deps
+    DEFINES = -DJUCE_DSP_USE_INTEL_MKL=1 -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAIL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /bigobj
+      ZERO  CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=13    CMakeFiles/PublicationAdmissionTests.dir/Release/src/tests/PublicationAdmissionTests.cpp.obj
+        ndeps=739   CMakeFiles/PublicationAdmissionTests.dir/Release/src/audioengine/PublicationAdmission.cpp.obj
+        ndeps=738   CMakeFiles/PublicationAdmissionTests.dir/Release/src/tests/PublicationAdmissionTestRuntimeStubs.cpp.obj
+        ndeps=247   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/PublicationAdmissionTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 11 edges, 1 zero-deps
+    DEFINES = -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_M
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj
+      ZERO  CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=745   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/src/tests/RuntimeHealthMonitorTierTests.cpp.obj
+        ndeps=746   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/src/audioengine/RuntimeHealthMonitor.cpp.obj
+        ndeps=630   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/src/audioengine/ISRRetireRouter.cpp.obj
+        ndeps=247   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/RuntimeHealthMonitorTierTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 11 edges, 1 zero-deps
+    DEFINES = -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_M
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc /bigobj
+      ZERO  CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=8     CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/src/tests/ShutdownRetireIntentDrainTests.cpp.obj
+        ndeps=8     CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=247   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/ShutdownRetireIntentDrainTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 11 edges, 1 zero-deps
+    DEFINES = -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAILABLE_juce_events=1 -DJUCE_M
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj
+      ZERO  CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=6     CMakeFiles/PriorityIntegrationTests.dir/Release/src/tests/PriorityIntegrationTests.cpp.obj
+        ndeps=8     CMakeFiles/PriorityIntegrationTests.dir/Release/src/audioengine/ISRRetire.cpp.obj
+        ndeps=620   CMakeFiles/PriorityIntegrationTests.dir/Release/src/audioengine/ISRRetireRuntimeEx.cpp.obj
+        ndeps=247   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/PriorityIntegrationTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 10 edges, 1 zero-deps
+    DEFINES = -DJUCE_DSP_USE_INTEL_MKL=1 -DJUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 -DJUCE_MODULE_AVAILABLE_juce_core=1 -DJUCE_MODULE_AVAILABLE_juce_data_structures=1 -DJUCE_MODULE_AVAIL
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8 /bigobj
+      ZERO  CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_core/juce_core_CompilationTime.cpp.obj
+      HEALTHY-examples-with-same-signature:
+        ndeps=3     CMakeFiles/RetrySchedulerTests.dir/Release/src/tests/RetrySchedulerTests.cpp.obj
+        ndeps=3     CMakeFiles/RetrySchedulerTests.dir/Release/src/audioengine/RetryScheduler.cpp.obj
+        ndeps=247   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_core/juce_core.cpp.obj
+        ndeps=432   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_gui_extra/juce_gui_extra.cpp.obj
+        ndeps=573   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_gui_basics/juce_gui_basics.cpp.obj
+        ndeps=390   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics.cpp.obj
+        ndeps=318   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_graphics/juce_graphics_Harfbuzz.cpp.obj
+        ndeps=186   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_events/juce_events.cpp.obj
+        ndeps=183   CMakeFiles/RetrySchedulerTests.dir/Release/JUCE/modules/juce_data_structures/juce_data_structures.cpp.obj
+--- signature: 1 edges, 1 zero-deps
+    DEFINES = -DNOMINMAX -DUNICODE -D_CRT_SECURE_NO_WARNINGS -D_UNICODE -DCMAKE_INTDIR=\"Release\"
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /utf-8 /EHsc /GS-
+      ZERO  CMakeFiles/BuildInputSemanticContractTests.dir/Release/src/tests/BuildInputSemanticContractTests.cpp.obj
+--- signature: 4 edges, 0 zero-deps
+    DEFINES = -DCMAKE_INTDIR=\"Release\"
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8
+--- signature: 3 edges, 0 zero-deps
+    DEFINES = -DCMAKE_INTDIR=\"Release\"
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc
+--- signature: 1 edges, 0 zero-deps
+    DEFINES = -DCONVO_TESTING=1 -DCMAKE_INTDIR=\"Release\"
+    FLAGS   = /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc -std:c++20 -MD /EHsc /utf-8
+

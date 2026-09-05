@@ -1,0 +1,18 @@
+D162-2-I3-4-C — C4 build-provenance metadata audit
+====================================================================================================
+
+  Generator              | CMakeCache.txt CMAKE_GENERATOR:INTERNAL                 | derivable (cache)
+  Compiler path          | CMakeCache CMAKE_CXX_COMPILER:FILEPATH                  | derivable (cache)
+  Compiler version       | not recorded (only path "cl")                           | MISSING in build state
+  Target architecture    | rules.ninja -MACHINE:X64 / link line                    | derivable (rules)
+  Configuration          | impl-Release.ninja path                                 | derivable
+  CMake version          | CMakeConfigureLog / build.ninja header                  | derivable
+  Ninja version          | nowhere (log v7 header only)                            | MISSING
+  Source revision        | not recorded (git SHA absent from build state)          | MISSING
+  Build dir identity     | implicit (path); no ID stored                           | MISSING
+  showIncludes prefix    | rules.ninja msvc_deps_prefix bytes (CP932)              | derivable — but no validity check per build
+  obj deps state         | .ninja_deps #deps N per obj                             | derivable via ninja -t deps — but never gated
+
+判定: generator/compiler identity mismatch は cache レベルでは CMake が検出するが、
+      (1) codepage 不一致、(2) #deps 0 obj の link 参入、(3) exe と obj generation の対応、
+      は現状どこでも検出されていない。

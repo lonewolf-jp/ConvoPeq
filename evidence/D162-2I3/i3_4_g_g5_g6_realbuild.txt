@@ -1,0 +1,70 @@
+=== Step1: stamp migration schema1->2 (gate stamp-create, vcvars+CP932) rc=0 (3.1s) ===
+[GATE-OK ] build identity stamp written (first configure).
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/ObservePathSingleSourceTests.dir/Release/src/tests/ObservePathSingleSourceTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/OverlapAuthoritySingularTests.dir/Release/src/tests/OverlapAuthoritySingularTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/CrossfadeExecutorLocalContractTests.dir/Release/src/tests/CrossfadeExecutorLocalContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/RebuildAdmissionRegressionTests.dir/Release/src/tests/RebuildAdmissionRegressionTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/RuntimeWorldAuthorityProjectionTests.dir/Release/src/tests/RuntimeWorldAuthorityProjectionTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/GainStagingContractTests.dir/Release/src/tests/GainStagingContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQProcessorMaxGainTests.dir/Release/src/tests/EQProcessorMaxGainTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/BuildInputSemanticContractTests.dir/Release/src/tests/BuildInputSemanticContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQAnalysisUnitTests.dir/Release/src/tests/EQAnalysisUnitTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQBoundExcessBenchmark.dir/Release/src/tests/EQBoundExcessBenchmark.cpp.obj
+[GATE-OK ] dependency gate: 337 relevant .obj checked; 10 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+
+
+=== Step2: gate --check Release rc=0 (3.0s) ===
+[GATE-OK ] build identity matches stamp (codepage=932, prefix=b84b3da8..., sdk=10.0.26100.0/2c5e417e...).
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/ObservePathSingleSourceTests.dir/Release/src/tests/ObservePathSingleSourceTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/OverlapAuthoritySingularTests.dir/Release/src/tests/OverlapAuthoritySingularTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/CrossfadeExecutorLocalContractTests.dir/Release/src/tests/CrossfadeExecutorLocalContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/RebuildAdmissionRegressionTests.dir/Release/src/tests/RebuildAdmissionRegressionTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/RuntimeWorldAuthorityProjectionTests.dir/Release/src/tests/RuntimeWorldAuthorityProjectionTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/GainStagingContractTests.dir/Release/src/tests/GainStagingContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQProcessorMaxGainTests.dir/Release/src/tests/EQProcessorMaxGainTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/BuildInputSemanticContractTests.dir/Release/src/tests/BuildInputSemanticContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQAnalysisUnitTests.dir/Release/src/tests/EQAnalysisUnitTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQBoundExcessBenchmark.dir/Release/src/tests/EQBoundExcessBenchmark.cpp.obj
+[GATE-OK ] dependency gate: 337 relevant .obj checked; 10 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+
+
+=== Step3: full Release build (cmake --build, all targets) ===
+rc=-1 (2.6s)
+
+
+=== Step4: touch-cycle (mtime-only touch of ObservePathSingleSourceTests.cpp; content hash verified unchanged) ===
+=== Step3 (redo): full Release build ===
+rc=0 (2.7s)
+[0/2] Re-checking globbed directories...
+ninja: no work to do.
+
+=== Step4: touch-cycle (mtime-only; content hash before=74b48b54665b9314) ===
+build rc=0 ; post-build gate --check rc=0 (5.9s)
+rebuild log tail:
+[0/2] Re-checking globbed directories...
+[1/3] Building CXX object CMakeFiles\ObservePathSingleSourceTests.dir\Release\src\tests\ObservePathSingleSourceTests.cpp.obj
+[2/3] Linking CXX executable Release\ObservePathSingleSourceTests.exe
+gate --check tail:
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/BuildInputSemanticContractTests.dir/Release/src/tests/BuildInputSemanticContractTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQAnalysisUnitTests.dir/Release/src/tests/EQAnalysisUnitTests.cpp.obj
+[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency proven by closure): CMakeFiles/EQBoundExcessBenchmark.dir/Release/src/tests/EQBoundExcessBenchmark.cpp.obj
+[GATE-OK ] dependency gate: 337 relevant .obj checked; 10 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+content hash after=74b48b54665b9314 -> content unchanged: True
+
+=== G6: Debug ===
+build rc=9009 ; gate --check rc=0 (97.4s)
+build tail: [161/508] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Debug\src\audioengine\ISRRetireRouter.cpp.obj | [162/508] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_gui_basics\juce_gui_basics.cpp.obj | ninja: build stopped: subcommand failed.
+gate summary: [GATE-OK ] dependency gate: 337 relevant .obj checked; 10 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+WARN count: 10
+=== G6: Debug ===
+build rc=2 ; gate --check rc=0 (127.2s)
+build tail: [161/508] Building CXX object CMakeFiles\RuntimeHealthMonitorTierTests.dir\Debug\src\audioengine\ISRRetireRouter.cpp.obj | [162/508] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_gui_basics\juce_gui_basics.cpp.obj | ninja: build stopped: subcommand failed.
+gate summary: [GATE-OK ] dependency gate: 337 relevant .obj checked; 10 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+WARN count: 10
+
+=== G6: RelWithDebInfo ===
+build rc=2 ; gate --check rc=0 (183.1s)
+build tail: [171/553] Building CXX object CMakeFiles\ConvoPeq.dir\RelWithDebInfo\JUCE\modules\juce_graphics\juce_graphics.cpp.obj | [172/553] Building CXX object CMakeFiles\ConvoPeq.dir\RelWithDebInfo\JUCE\modules\juce_gui_basics\juce_gui_basics.cpp.obj | ninja: build stopped: subcommand failed.
+gate summary: [GATE-OK ] dependency gate: 331 relevant .obj checked; 6 zero-deps system-only allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.
+WARN count: 6
+

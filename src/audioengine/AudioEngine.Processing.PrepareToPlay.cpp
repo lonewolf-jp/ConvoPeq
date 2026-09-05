@@ -3,6 +3,7 @@
 #include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
+#include "DSPLifetimeManager.h"  // ★ D162-2-I2: destroyRolledBackDSP (CallerDestroy 履行)
 
 namespace {
 void diagLog(const juce::String& message)
@@ -261,23 +262,44 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             return;
         }
 
-        setActiveRuntimeDSP(placeholderDSP.release());
+        // ★ D162-2-I2 (ownership repair / A 案): 所有権を unique_ptr から放棄した後も
+        //   caller が末代 owner として terminal destruction を履行できるよう
+        //   release 値を明示保持する（identity を getActiveRuntimeDSP() 再取得に依存させない）。
+        //   activeRuntimeDSPSlot は非所有 topology mirror（h:2245）であり所有権を運ばない。
+        DSPCore* placeholderRaw = placeholderDSP.release();
+        setActiveRuntimeDSP(placeholderRaw);
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
 
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto worldBuilder = convo::RuntimeBuilder(*this);
-            auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(placeholderRaw,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
                                                                      0.0,
                                                                      false);
             // ★ B4: idle publish (#3) — oldHandle は null 固定
             const auto pubResult2 = commitRuntimePublication(std::move(worldOwner),
-                                     RegistrationContext::needsRegistration(getActiveRuntimeDSP()),
+                                     RegistrationContext::needsRegistration(placeholderRaw),
                                      convo::isr::DSPHandle::null());
-            juce::ignoreUnused(pubResult2);
+            // ★ D162-2-I2: CallerDestroy 契約（h:3632-3641「rollback 完了、呼び出し元が
+            //   物理解放すべき（destroyRolledBackDSP 経由）」）の履行。tryAdmit 失敗
+            //   （admission Closed = INV-LIFE-9）では registration に到達せず未登録のまま
+            //   帰るため、本 caller が唯一の owner — 破壊しないと ~108MB が
+            //   terminal disposition なしで process-exit 回収になる（Profile D 実測 6/6）。
+            //   registration 済みで帰る失敗点（OwnerChannel / queue full）は ScopeExit の
+            //   rollback 完了後に CallerDestroy となるため同一履行で正しい（Orchestrator
+            //   :291-292 前例と同型）。Transferred（成功）では破壊しない。
+            //   ※ reconfigure 後も admission Closed のまま publication が復活しない
+            //     （Active=0・bypass 継続）問題は I2 の scope 外（D162-2-I1-D-R0 §5/§7-C/D）。
+            if (!PublishStageResultTraits::isCommitted(pubResult2.stage)
+                && pubResult2.ownership == OwnershipDisposition::CallerDestroy)
+            {
+                DSPLifetimeManager lifetimeMgr(*this);
+                lifetimeMgr.destroyRolledBackDSP(placeholderRaw);
+                setActiveRuntimeDSP(nullptr);
+            }
         }
     }
 

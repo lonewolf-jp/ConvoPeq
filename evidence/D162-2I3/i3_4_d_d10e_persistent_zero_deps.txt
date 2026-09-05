@@ -1,0 +1,34 @@
+D162-2-I3-4-D — D10-E depth-2 finding: persistent zero-dep class (10 test TUs)
+
+After full rebuild of ALL Release targets (272 edges, 19:43-19:54), 10 test-only TUs
+still record #deps 0 on every rebuild:
+
+  ObservePathSingleSourceTests.cpp.obj
+  OverlapAuthoritySingularTests.cpp.obj
+  CrossfadeExecutorLocalContractTests.cpp.obj
+  RebuildAdmissionRegressionTests.cpp.obj
+  RuntimeWorldAuthorityProjectionTests.cpp.obj
+  GainStagingContractTests.cpp.obj
+  EQProcessorMaxGainTests.cpp.obj
+  BuildInputSemanticContractTests.cpp.obj
+  EQAnalysisUnitTests.cpp.obj
+  EQBoundExcessBenchmark.cpp.obj
+
+Facts established:
+  1. Manual execution of the EXACT ninja command emits 159 correct CP932 prefix lines.
+  2. cl is the same binary/rules as ConvoPeq objs (deps recorded fine, 241/241).
+  3. .ninja_log has the edge entries (with command hash 9d2d0856e97aac0a) — ninja
+     executed the compile and recorded a deps entry with an EMPTY deps list.
+  4. Locale probe: prefix bytes vary by console codepage — but these builds ran under
+     the same CP932 console that succeeded for ConvoPeq.
+  5. Therefore: a ninja deps-recording failure distinct from the codepage mechanism
+     (candidate: DepsLog write ordering / restat / multiple identical command hashes
+     across targets — 10 TUs share similar commands; hash collision class not excluded).
+
+Gate behavior (correct per contract): Release build refuses (rc=3) while these objects
+remain untrusted. The gate converts a silent ODR hazard into a hard, actionable failure.
+
+Disposition: 10 TUs are test-only (not linked into ConvoPeq.exe production CLI).
+I3-4-E will (a) file ninja upstream with this repro, (b) consider per-target restat
+workaround, or (c) whitelist-with-warning for test-only targets after layout review.
+Production (ConvoPeq + Harness) objs: 241/241 have dependency info — clean.

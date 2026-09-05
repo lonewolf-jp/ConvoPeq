@@ -1,0 +1,42 @@
+I3-4-F F0 baseline — generated 2026-09-05 21:47:47
+
+=== E0 freeze vs current (hash[:16], UNCHANGED if identical) ===
+  .ninja_deps              cur=b4dedd4c0e81e0e4(2026-09-05 20:09:51) e0=b4dedd4c0e81e0e4(2026-09-05 20:09:51) UNCHANGED
+  .ninja_log               cur=82aebf9250e436d8(2026-09-05 20:09:51) e0=82aebf9250e436d8(2026-09-05 20:09:51) UNCHANGED
+  rules.ninja              cur=193b5ab3d9279de6(2026-09-05 18:58:32) e0=193b5ab3d9279de6(2026-09-05 18:58:32) UNCHANGED
+  impl-Release.ninja       cur=8c0cb07e2b3cfc62(2026-09-05 18:58:32) e0=8c0cb07e2b3cfc62(2026-09-05 18:58:32) UNCHANGED
+  impl-Debug.ninja         cur=3f19a7c90ddc0ff2(2026-09-05 18:58:32) e0=3f19a7c90ddc0ff2(2026-09-05 18:58:32) UNCHANGED
+  impl-RelWithDebInfo.ninja cur=6b1a28745aaeb5c2(2026-09-05 18:58:32) e0=6b1a28745aaeb5c2(2026-09-05 18:58:32) UNCHANGED
+  .build_identity          cur=f592c5ed22a27333(2026-09-05 19:41:54) e0=f592c5ed22a27333(2026-09-05 19:41:54) UNCHANGED
+  CMakeCache.txt           cur=481a19a87fcec513(2026-09-05 18:58:32) e0=481a19a87fcec513(2026-09-05 18:58:32) UNCHANGED
+  build.ninja              cur=513bc87f369ee164(2026-09-05 18:58:32) e0=513bc87f369ee164(2026-09-05 18:58:32) UNCHANGED
+
+=== .build_identity (current) ===
+{
+ "architecture": "x64",
+ "cmake_version": "cmake version 4.4.3",
+ "compiler_id": "MSVC",
+ "compiler_path": "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe",
+ "compiler_version": "MSVC 19.51",
+ "configuration_family": "Debug;Release;RelWithDebInfo",
+ "console_codepage": "932",
+ "generator": "Ninja Multi-Config",
+ "msvc_deps_prefix_sha256": "b84b3da87752fa51",
+ "ninja_version": "1.13.2",
+ "source_revision": "0aeb22c+dirty",
+ "stamp_schema": 1
+}
+
+chcp now: ���݂̃R�[�h �y�[�W: 932
+
+=== affected objs (current vs E0 frozen) ===
+  ObservePathSingleSourceTests             e6b6de022e93981d SAME-GEN
+  OverlapAuthoritySingularTests            6efc1e73fdbcdaa0 SAME-GEN
+  CrossfadeExecutorLocalContractTests      084702bf96ba082b SAME-GEN
+  RebuildAdmissionRegressionTests          223f554ce5cdd321 SAME-GEN
+  RuntimeWorldAuthorityProjectionTests     bb43d5e494b1d89c SAME-GEN
+  GainStagingContractTests                 35d8f99355935468 SAME-GEN
+  EQProcessorMaxGainTests                  e00fa7ebc45d6cac SAME-GEN
+  BuildInputSemanticContractTests          d1c4dc2de780cc8c SAME-GEN
+  EQAnalysisUnitTests                      5e9fb383e886ac6d SAME-GEN
+  EQBoundExcessBenchmark                   90cafb7cf4f96d8b SAME-GEN

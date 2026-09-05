@@ -1,0 +1,16 @@
+{
+  "artifact": "runtime_budget_report.json",
+  "schema": "runtime_budget_report_v1",
+  "buildMode": "CI",
+  "generatedAtNs": 75454663324600,
+  "artifactTotalBytes": 7912,
+  "limits": {
+    "closureTraversal": "O(N) bounded",
+    "publishValidationLatency": "bounded",
+    "rtInstrumentation": "zero alloc / lock-free",
+    "artifactSize": "bounded",
+    "retireLatencyOverhead": "bounded",
+    "metadataGrowth": "bounded"
+  },
+  "validatorPolicy": ["RB-1", "RB-2", "RB-3"]
+}

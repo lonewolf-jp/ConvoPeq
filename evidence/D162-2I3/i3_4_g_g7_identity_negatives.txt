@@ -1,0 +1,11 @@
+I3-4-G G7 identity negative tests (stamp tampered -> gate --check must rc=3; stamp restored after)
+==============================================================================
+
+windows_sdk_version                -> GATE_RC=3
+windows_sdk_include_fingerprint    -> GATE_RC=3
+compiler_version                   -> GATE_RC=3
+console_codepage                   -> GATE_RC=3
+generator                          -> GATE_RC=3
+
+stamp sha[:16] before=42ae358299e07111 restored=42ae358299e07111 identical=True
+post-restore --check: ['[GATE-OK ] build identity matches stamp (codepage=932, prefix=b84b3da8..., sdk=10.0.26100.0/2c5e417e...).', 'GATE_RC=0']

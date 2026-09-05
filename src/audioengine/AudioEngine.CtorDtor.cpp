@@ -129,6 +129,8 @@ AudioEngine::~AudioEngine()
     // まず rebuild thread 側へ終了を通知し、pending task を破棄して
     // 終了時に重い再構築へ入る経路を閉じる。
     // pending task を破棄して進行中 rebuild を obsolete にし、thread を停止する。
+    // ★ D162-2-E (E-2): activeToRelease / fadingToRelease は slot 切離しの観測用のみとなり
+    //   （E-2 により handle-based retire に移管）、pointer-value retirement には使用しない。
     DSPCore* activeToRelease = nullptr;
     DSPCore* fadingToRelease = nullptr;
     {
@@ -185,10 +187,30 @@ AudioEngine::~AudioEngine()
 
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
+    // ★ D162-2-E (E-2 / INV-D162-7): activeRuntimeDSPSlot / fadingRuntimeDSPSlot は
+    //   placeholder 専用レガシースロット（h:2267 comment 参照 — runtime world 公開後は null）であり、
+    //   bootstrap placeholder 破壊後は dangling ポインタを保持し続ける。
+    //   この値を retireDSPHandleForRuntime（map.find by pointer value）に渡すと、
+    //   address reuse 時に生存 DSP の map entry を誤 lookup して二重破壊を引き起こし得る
+    //   （D162-2-C §4.3 / D0-5-A）。
+    //   修正: pointer-value retirement を廃止し、handle registry の authority
+    //   （getActiveRuntimeDSPHandle / getFadingRuntimeDSPHandle — generation 検証付き）のみを
+    //   retirement identity として使用する。slot 値自体は topology convenience state であり、
+    //   ownership authority に昇格させない。
+    //   なお releaseResources が正常実行済みの場合、これらの slot は既に null のため
+    //   retiredByHandle は no-op（二重 retire 不可・DSPHandleRuntime::retire は冪等）。
+    //   activeToRelease / fadingToRelease は handle-based retire で全てカバーされるため
+    //   pointer-value retirement は廃止（変数は観測用として維持・juce::ignoreUnused で抑制）。
     {
         DSPLifetimeManager lifetimeMgr(*this);
-        if (activeToRelease) lifetimeMgr.retire(activeToRelease);
-        if (fadingToRelease) lifetimeMgr.retire(fadingToRelease);
+        const auto activeHandleAtDtor = dspHandleRuntime_.getActiveRuntimeDSPHandle();
+        if (!activeHandleAtDtor.isNull())
+            lifetimeMgr.retireByHandle(activeHandleAtDtor);
+        const auto fadingHandleAtDtor = dspHandleRuntime_.getFadingRuntimeDSPHandle();
+        if (!fadingHandleAtDtor.isNull() && fadingHandleAtDtor != activeHandleAtDtor)
+            lifetimeMgr.retireByHandle(fadingHandleAtDtor);
+        juce::ignoreUnused(activeToRelease);
+        juce::ignoreUnused(fadingToRelease);
     }
 
     uiConvolverProcessor.removeChangeListener(this);
@@ -268,6 +290,19 @@ AudioEngine::~AudioEngine()
         m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
         m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
     }
+    // ★ D162-2-E (E-3 / INV-D162-8): 全 EBR store drain 後の pending 残留確認。
+    //   D8 の drainAll / drainAllQuarantineStore が完了した時点で DSPCore 破壊は EBR closure を
+    //   全て消化しているはず。残留があれば member teardown に EBR entry を持ち越すことになり
+    //   INV-D162-8 違反（観測のみ・shutdown order は変更しない）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const auto residualPending = m_retireRouter->pendingRetireCount();
+        if (residualPending != 0)
+            diagLog("[D162-2E] INV-D162-8: EBR residual pending=" + juce::String((int)residualPending)
+                + " after drainAll — DSPCore destruction may carry into member teardown");
+        jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
+    }
+#endif
     runtimePublicationBridge_.markShutdownComplete();
 
     // ★ 15-P-5: Post-shutdown Faulted state diagnostic
@@ -282,6 +317,12 @@ AudioEngine::~AudioEngine()
     if (latencyBufNewL) { convo::aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
     if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
     latencyBufSize = 0;
+    // ★ D162-2-E (E-1 / INV-D162-6): member teardown 開始前に EQ cache を全件処分。
+    //   この時点では shutdownRuntime_ / m_retireRouter / dspHandleRuntime_ 等が全て生存しているため、
+    //   dspHandleRuntime_.retire + resolve + delete が安全に実行できる。
+    //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
+    eqCacheManager.drainForShutdown();
+
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");

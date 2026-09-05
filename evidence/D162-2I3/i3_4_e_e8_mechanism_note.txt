@@ -1,0 +1,42 @@
+I3-4-E / E8 mechanism note — why #deps 0 is produced by design
+========================================================================
+
+ninja v1.13.2 src/clparser.cc (verified 2026-09-05 from upstream tag v1.13.2):
+
+  bool CLParser::IsSystemInclude(string path) {
+    transform(path.begin(), path.end(), path.begin(), ToLowerASCII);
+    // TODO: this is a heuristic, perhaps there's a better way?
+    return (path.find("program files") != string::npos ||
+            path.find("microsoft visual studio") != string::npos);
+  }
+
+CLParser::Parse loop (same file):
+    if (!IsSystemInclude(normalized)) includes_.insert(normalized);
+
+Consequences:
+  1. Any /showIncludes path containing 'program files' or 'microsoft visual studio'
+     (case-insensitive) is DISCARDED before DepsLog recording. This covers:
+       - MSVC standard library / CRT headers   (C:\Program Files\Microsoft Visual Studio\...)
+       - Windows SDK headers                   (C:\Program Files (x86)\Windows Kits\...)
+     This is intentional upstream design: system headers are assumed immutable,
+     so tracking them in DepsLog is considered unnecessary (and would bloat the log).
+
+  2. Therefore a TU whose transitive include set consists ONLY of such headers
+     records a deps entry with an EMPTY list -> `#deps 0`. Ninja treats #deps 0
+     as VALID; it means 'we tracked the deps and there were none worth recording'.
+
+  3. The 10 ConvoPeq test TUs include exclusively <stdexcept> <fstream> <sstream>
+     <string> <filesystem> <cmath> etc. (see i3_4_e_e1_include_census.txt).
+     Their cl /showIncludes output has 91-159 correct prefix lines (all system),
+     every one filtered -> 0 inserted -> #deps 0 on every build in every config.
+
+  4. This is NOT the same failure mode as D162-2-I3-4-C's codepage mismatch:
+     - codepage mismatch: prefix bytes wrong -> even PROJECT includes are lost
+       (catastrophic: stale objects ignore project header changes).
+     - this mechanism: prefix correct, project includes recorded, only SYSTEM
+       includes intentionally dropped (by-design behavior with a narrow blind spot:
+       a VS/SDK update in-place would not trigger rebuild of these TUs).
+
+Upstream precedent: the heuristic is documented in clparser.cc with a TODO;
+the same file family has known locale issues (#1766, #1669) but the system-include
+filter itself is longstanding intended behavior (since 2015, clparser.cc).

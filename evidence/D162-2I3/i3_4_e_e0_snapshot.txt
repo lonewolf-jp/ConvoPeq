@@ -1,0 +1,32 @@
+I3-4-E E0 freeze snapshot - generated 2026-09-05 20:51:41
+build dir (active, Ninja Multi-Config): C:\VSC_Project\ConvoPeq\build-diag
+
+ninja: 1.13.2
+cmake: cmake version 4.4.3
+chcp: ���݂̃R�[�h �y�[�W: 932
+python: Python 3.14.7
+
+freeze dir contents (sha256[:16], mtime):
+  affected_objs\BuildInputSemanticContractTests.cpp.obj d1c4dc2de780cc8c 2026-09-05 19:53:05
+  affected_objs\CrossfadeExecutorLocalContractTests.cpp.obj 084702bf96ba082b 2026-09-05 19:53:01
+  affected_objs\EQAnalysisUnitTests.cpp.obj 5e9fb383e886ac6d 2026-09-05 19:54:00
+  affected_objs\EQBoundExcessBenchmark.cpp.obj 90cafb7cf4f96d8b 2026-09-05 19:54:11
+  affected_objs\EQProcessorMaxGainTests.cpp.obj e00fa7ebc45d6cac 2026-09-05 19:53:53
+  affected_objs\GainStagingContractTests.cpp.obj 35d8f99355935468 2026-09-05 19:53:50
+  affected_objs\ObservePathSingleSourceTests.cpp.obj e6b6de022e93981d 2026-09-05 20:09:51
+  affected_objs\OverlapAuthoritySingularTests.cpp.obj 6efc1e73fdbcdaa0 2026-09-05 19:53:00
+  affected_objs\RebuildAdmissionRegressionTests.cpp.obj 223f554ce5cdd321 2026-09-05 19:53:02
+  affected_objs\RuntimeWorldAuthorityProjectionTests.cpp.obj bb43d5e494b1d89c 2026-09-05 19:53:04
+  ninja_files\.build_identity  f592c5ed22a27333 2026-09-05 19:41:54
+  ninja_files\.ninja_deps      b4dedd4c0e81e0e4 2026-09-05 20:09:51
+  ninja_files\.ninja_log       82aebf9250e436d8 2026-09-05 20:09:51
+  ninja_files\CMakeCache.txt   481a19a87fcec513 2026-09-05 18:58:32
+  ninja_files\build-Debug.ninja acd21b73528222ee 2026-09-05 18:58:32
+  ninja_files\build-RelWithDebInfo.ninja 85e739b7fe4f9a0a 2026-09-05 18:58:32
+  ninja_files\build-Release.ninja d5df11b5430484d8 2026-09-05 18:58:32
+  ninja_files\build.ninja      513bc87f369ee164 2026-09-05 18:58:32
+  ninja_files\common.ninja     a0bf64cfec735646 2026-09-05 18:58:32
+  ninja_files\impl-Debug.ninja 3f19a7c90ddc0ff2 2026-09-05 18:58:32
+  ninja_files\impl-RelWithDebInfo.ninja 6b1a28745aaeb5c2 2026-09-05 18:58:32
+  ninja_files\impl-Release.ninja 8c0cb07e2b3cfc62 2026-09-05 18:58:32
+  ninja_files\rules.ninja      193b5ab3d9279de6 2026-09-05 18:58:32

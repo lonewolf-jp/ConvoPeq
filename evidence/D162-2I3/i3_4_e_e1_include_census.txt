@@ -1,0 +1,79 @@
+ObservePathSingleSourceTests               total= 5  project-tree=0  quoted-rel=0  system=<...>=5
+      stdexcept
+      fstream
+      sstream
+      string
+      filesystem
+OverlapAuthoritySingularTests              total= 5  project-tree=0  quoted-rel=0  system=<...>=5
+      stdexcept
+      fstream
+      sstream
+      string
+      filesystem
+CrossfadeExecutorLocalContractTests        total= 5  project-tree=0  quoted-rel=0  system=<...>=5
+      stdexcept
+      fstream
+      sstream
+      string
+      filesystem
+RebuildAdmissionRegressionTests            total= 7  project-tree=0  quoted-rel=0  system=<...>=7
+      cstdint
+      filesystem
+      fstream
+      iostream
+      sstream
+      stdexcept
+      string
+RuntimeWorldAuthorityProjectionTests       total= 6  project-tree=0  quoted-rel=0  system=<...>=6
+      stdexcept
+      fstream
+      sstream
+      string
+      filesystem
+      array
+GainStagingContractTests                   total= 5  project-tree=0  quoted-rel=0  system=<...>=5
+      algorithm
+      cmath
+      cstdint
+      iostream
+      string
+EQProcessorMaxGainTests                    total= 7  project-tree=0  quoted-rel=0  system=<...>=7
+      cmath
+      complex
+      iostream
+      string
+      algorithm
+      vector
+      numbers
+BuildInputSemanticContractTests            total= 6  project-tree=0  quoted-rel=0  system=<...>=6
+      stdexcept
+      fstream
+      sstream
+      string
+      filesystem
+      iostream
+EQAnalysisUnitTests                        total= 9  project-tree=0  quoted-rel=0  system=<...>=9
+      cmath
+      complex
+      iostream
+      string
+      algorithm
+      vector
+      cfloat
+      cstdint
+      numbers
+EQBoundExcessBenchmark                     total=14  project-tree=0  quoted-rel=0  system=<...>=14
+      cmath
+      complex
+      iostream
+      iomanip
+      string
+      sstream
+      algorithm
+      vector
+      array
+      cstdint
+      cfloat
+      chrono
+      random
+      map

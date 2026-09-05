@@ -1,0 +1,476 @@
+{
+ "image_base": "0x218",
+ "events": [
+  {
+   "ev": "create_process_raw",
+   "head": "1c02000000000000180200000000000014020000000000000000fa03f67f0000"
+  },
+  {
+   "ev": "create_process",
+   "pid": 22004,
+   "image_base": "0x218"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb757a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb745d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72a70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6f820000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75490000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72e80000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb731b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73a30000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73310000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72ff0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb735f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75000000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb734d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73a60000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74460000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6c520000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb746a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb756b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb75390000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74f70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74900000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74310000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4d280000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74540000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb742d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb63b60000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4d580000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6b9f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fd20000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e4d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6eb10000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fbc0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb55940000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6ed80000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72830000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71650000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e000000"
+  },
+  {
+   "ev": "exception",
+   "tid": 34592,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ffb758c2239"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72810000"
+  },
+  {
+   "ev": "exception",
+   "tid": 30204,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 31456,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 34592,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb729b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fa70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb747a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74200000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb64370000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb703f0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb157b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6fb70000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb700a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6c5d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb724d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb2d850000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71fb0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6b810000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73340000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71f50000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72030000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6b470000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb72530000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb73120000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74ef0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71f30000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb715b0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb728a0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffa70d10000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb05a10000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffa6b700000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb27a10000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb728d0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb71780000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb02e30000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb0a570000"
+  },
+  {
+   "ev": "exception",
+   "tid": 27796,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e260000"
+  },
+  {
+   "ev": "exception",
+   "tid": 28028,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "exception",
+   "tid": 33884,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e260000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb4eb10000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6f400000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6bea0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6c850000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab5b40000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb5afd0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab5ae0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab5ab0000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb55d00000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab6160000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab6180000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab3790000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb74a60000"
+  },
+  {
+   "ev": "exception",
+   "tid": 7196,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e260000"
+  },
+  {
+   "ev": "exception",
+   "tid": 35740,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb6e260000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb03580000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffab2b30000"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb1f790000"
+  },
+  {
+   "ev": "exception",
+   "tid": 23636,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb51b40000"
+  },
+  {
+   "ev": "exception",
+   "tid": 31580,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff60679c619"
+  },
+  {
+   "ev": "exception",
+   "tid": 23636,
+   "code": "0x80000003",
+   "first_chance": 1,
+   "address": "0x7ff60679c619"
+  },
+  {
+   "ev": "exception",
+   "tid": 30136,
+   "code": "0x406D1388",
+   "first_chance": 1,
+   "address": "0x7ffb72b33cfa"
+  },
+  {
+   "ev": "load_dll",
+   "base": "0x7ffb58c40000"
+  },
+  {
+   "ev": "exit_process"
+  }
+ ]
+}

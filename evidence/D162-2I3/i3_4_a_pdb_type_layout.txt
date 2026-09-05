@@ -1,0 +1,73 @@
+D162-2-I3-4-A — type layout evidence (llvm-pdbutil dump --types, RWDI PDB 2026-09-05 13:22:33)
+====================================================================================================
+
+[1] convo::isr::RuntimeIntentCoordinator (resolved 0xF7A8)
+    sizeof = 1,600,960 (0x186DC0); AudioEngine::runtimePublicationBridge_ @ engine+0x1121AC0
+
+    - LF_MEMBER [name = `overflowScheduler_`, Type = 0xF796, offset = 0, attrs = private]
+    - LF_MEMBER [name = `shutdownScheduler_`, Type = 0xF797, offset = 8, attrs = private]
+    - LF_MEMBER [name = `priorityScheduler_`, Type = 0xF798, offset = 16, attrs = private]
+    - LF_MEMBER [name = `lastRejectCode_`, Type = 0xEC94, offset = 24, attrs = private]
+    - LF_MEMBER [name = `retireBacklogCount_`, Type = 0x119B, offset = 32, attrs = private]
+    - LF_MEMBER [name = `publicationBacklogCount_`, Type = 0x119B, offset = 40, attrs = private]
+    - LF_MEMBER [name = `publicationIntentResidencyCount_`, Type = 0x119B, offset = 48, attrs = private]
+    - LF_MEMBER [name = `pendingIntentCount_`, Type = 0x119B, offset = 56, attrs = private]
+    - LF_MEMBER [name = `reclaimInFlightCount_`, Type = 0x119B, offset = 64, attrs = private]
+    - LF_MEMBER [name = `quarantineIntentResidencyCount_`, Type = 0x119B, offset = 72, attrs = private]
+    - LF_MEMBER [name = `quarantineRingResidencyCount_`, Type = 0x119B, offset = 80, attrs = private]
+    - LF_MEMBER [name = `previousRetireBacklogCount_`, Type = 0x119B, offset = 88, attrs = private]
+    - LF_MEMBER [name = `pressureNormalizedWindows_`, Type = 0x17DF, offset = 96, attrs = private]
+    - LF_MEMBER [name = `swapPending_`, Type = 0x11FF, offset = 100, attrs = private]
+    - LF_MEMBER [name = `state_`, Type = 0xA956, offset = 101, attrs = private]
+    - LF_MEMBER [name = `retireAuthorityCount_`, Type = 0x119B, offset = 104, attrs = private]
+    - LF_MEMBER [name = `overflowMaxAgeUs_`, Type = 0x119B, offset = 112, attrs = private]
+    - LF_MEMBER [name = `shutdownIdentityBound_`, Type = 0x11FF, offset = 120, attrs = private]
+    - LF_MEMBER [name = `currentShutdownIdentity_`, Type = 0xF30D, offset = 128, attrs = private]
+    - LF_MEMBER [name = `coordinatorDeferredRing_`, Type = 0xF799, offset = 192, attrs = private]
+    - LF_MEMBER [name = `coordinatorDeferredCount_`, Type = 0x119B, offset = 49472, attrs = private]
+    - LF_MEMBER [name = `lastResortQueue_`, Type = 0xF79A, offset = 49480, attrs = private]
+    - LF_MEMBER [name = `lastResortCount_`, Type = 0x119B, offset = 246088, attrs = private]
+    - LF_MEMBER [name = `nextObserveIntentId_`, Type = 0x119B, offset = 246096, attrs = private]
+    - LF_MEMBER [name = `observeOverflowCounter_`, Type = 0x119B, offset = 246104, attrs = private]
+    - LF_MEMBER [name = `observeFallbackOverflowCounter_`, Type = 0x119B, offset = 246112, attrs = private]
+    - LF_MEMBER [name = `observeDeferredRing_`, Type = 0xF79C, offset = 246144, attrs = private]
+    - LF_MEMBER [name = `recoveryIntentQueue_`, Type = 0xF79D, offset = 279040, attrs = private]
+    - LF_MEMBER [name = `nextRecoveryIntentId_`, Type = 0x119B, offset = 340608, attrs = private]
+    - LF_MEMBER [name = `recoveryIntentDropCount_`, Type = 0x119B, offset = 340616, attrs = private]
+    - LF_MEMBER [name = `recoveryShutdownDiscardCount_`, Type = 0x119B, offset = 340624, attrs = private]
+    - LF_MEMBER [name = `pendingRecoveryAdmission_`, Type = 0xF79E, offset = 340640, attrs = private]
+    - LF_MEMBER [name = `recoveryAdmissionPending_`, Type = 0x11FF, offset = 340896, attrs = private]
+    - LF_MEMBER [name = `redriveWakePending_`, Type = 0x0030 (bool), offset = 340897, attrs = private]
+    - LF_MEMBER [name = `recoveryAdmissions_`, Type = 0xF7A5, offset = 340912, attrs = private]
+    - LF_MEMBER [name = `recoveryCoalescedCount_`, Type = 0x119B, offset = 351184, attrs = private]
+    - LF_MEMBER [name = `recoveryCapacityExhaustedCount_`, Type = 0x119B, offset = 351192, attrs = private]
+    - LF_MEMBER [name = `recoveryObligationShutdownDiscardCount_`, Type = 0x119B, offset = 351200, attrs = private]
+    - LF_MEMBER [name = `recoveryRetryDeferredCount_`, Type = 0x119B, offset = 351208, attrs = private]
+    - LF_MEMBER [name = `recoveryRetryRedriveCount_`, Type = 0x119B, offset = 351216, attrs = private]
+    - LF_MEMBER [name = `recoveryRetryRedriveFailureCount_`, Type = 0x119B, offset = 351224, attrs = private]
+    - LF_MEMBER [name = `recoveryRetryExhaustedCount_`, Type = 0x119B, offset = 351232, attrs = private]
+    - LF_MEMBER [name = `recoveryFailureSignalSaturatedCount_`, Type = 0x119B, offset = 351240, attrs = private]
+    - LF_MEMBER [name = `recoveryFailureSignalDroppedStaleCount_`, Type = 0x119B, offset = 351248, attrs = private]
+    - LF_MEMBER [name = `recoveryFailureSignalDroppedTerminalCount_`, Type = 0x119B, offset = 351256, attrs = private]
+    - LF_MEMBER [name = `recoveryFailureSignalDroppedInvalidCount_`, Type = 0x119B, offset = 351264, attrs = private]
+    - LF_MEMBER [name = `intentQueue_`, Type = 0x19C8, offset = 351296, attrs = private]
+    - LF_MEMBER [name = `nextIntentId_`, Type = 0x119B, offset = 1350848, attrs = private]
+    - LF_MEMBER [name = `quarantineFallbackQueue_`, Type = 0xF7A6, offset = 1350912, attrs = private]
+    - LF_MEMBER [name = `quarantineFallbackDropCount_`, Type = 0x119B, offset = 1600896, attrs = private]
+    - LF_MEMBER [name = `overflowAgeWarnCallback_`, Type = 0xF790, offset = 1600904, attrs = private]
+    - LF_MEMBER [name = `quarantineService_`, Type = 0xF6E4, offset = 1600912, attrs = private]
+    0xF7A8 | LF_CLASS [size = 104] `convo::isr::RuntimeIntentCoordinator`
+
+[2] convo::isr::RuntimeWorldAuthority (resolved 0xF840)
+    sizeof = 154,992 (0x25D70); AudioEngine::worldAuthority_ @ engine+0x12A8880 (== bridge end)
+
+
+[3] QuarantineService (resolved 0xF6EB)
+    sizeof = 1 (stateless; no data members — confirms 0xB0 memset is NOT the service object)
+    0xF6EB | LF_CLASS [size = 88] `convo::isr::QuarantineService`
+    options: contains nested class | has unique name, sizeof 1
+
+[4] Cross-check: 0xB0 memset range [engine+0x12A7620, engine+0x12A76D0) vs coordinator extent
+    [engine+0x1121AC0, engine+0x12A8880): fully inside (ends 0x11B0 before bridge end)
+    in-coordinator: [0x185B60, 0x185C10) — quarantineFallbackQueue_ tail pad /
+    quarantineFallbackDropCount_(0x186D80 は後続) … trailing trivial-member value-init region

@@ -1,0 +1,31 @@
+D162-2-I3-3 writer capture — call stack at the single WRITE hit on W
+(= &worldAuthority_.coordinator_ = AudioEngine+0x12A7640)
+
+Captured 3/3 runs under x64dbg (hardware write watchpoint, armed at AudioEngine
+ctor entry RVA 0x1F5D080, BEFORE any member write).
+
+Thread: main thread (AudioEngineHarness test body — construction path)
+
+Frame 0  vcruntime140.dll!memset (dispatched AVX-256 bulk zero)
+         RIP  0x00007FFB39D6E73F   instruction: vmovdqu ymmword ptr [rcx+r9-0x80], ymm0
+         ymm0 = 0; rcx = W; r9 = 0xA0; rdx = 0x20; rsi = 0x13; rbp = 0
+         (x64dbg label: memmove+0xC3F — memset/memmove share the ISA-dispatch body)
+         zero fill in progress: [W-0x80, W+0x20); enclosing call zeroes [W-0x20, W+0x90)
+         call site: audioengineharness.exe+0x1F7F18B  (e8 -> import thunk 0x2078030 -> VCRUNTIME140!memset)
+Frame 1  audioengineharness.exe+0x1F7F190   (return address into ctor clone F)
+         func 0x1F7EE30..0x1F7F1EE — RuntimeIntentCoordinator ctor clone
+         (this = engine+0x1121AC0; tail loop: mov [rdi+0xE0],rbp / lea rdi,[rdi+0xF0] x rsi=0x13;
+          final memset(rcx=rdi+0x30, 0, 0xB0) with rdi = engine+0x12A75F0 = W-0x50)
+Frame 2  audioengineharness.exe+0x1F5F209   (return into ctor clone A)
+         func 0x1F5D080..0x1F5FB5E — AudioEngine ctor clone (entry bp hit here; rcx=engine)
+         call sequence just before: lea r12,[r14+0x121A1AC0]; mov rcx,r12; call clone F (0x1F5F204)
+Frame 3  audioengineharness.exe+0x1F40E6E
+Frame 4  audioengineharness.exe+0x1F46849
+Frame 5  audioengineharness.exe+0x1F6231B3F  (main/test harness)
+Frame 6  kernel32!BaseThreadInitThunk+0x17
+Frame 7  ntdll!RtlUserThreadStart+0x2C
+
+Post-hit state (all 3 runs):
+  [W] stays 0x0 for the whole process lifetime — NO later write (watch stays armed).
+  publish path reads rcx = [r13+0x12A7640] = 0 -> commit(this=0) -> AV @ 0x1F7F89D
+  (mov byte [rdx+0x65],2 with rdx=0), exception info [1,101] — identical to WER dump.
