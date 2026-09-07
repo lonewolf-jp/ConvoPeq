@@ -1075,17 +1075,22 @@ void AudioEngine::timerCallback()
         double dspEqMB = 0.0;
         double dspAlignedMB = 0.0;
         double dspLatencyMB = 0.0;
+        // ★ D172-3 (D172-2 contract): TRK source = RuntimeWorld current DSP
+        //   （旧: legacy activeRuntimeDSPSlot — non-owning placeholder mirror を観測
+        //     authority として使用していた。slot 値は置換 destroy 後に dangling になり
+        //     得るため dereference を廃止 — D172-1 CONFIRMED LIFETIME HAZARD）。
+        //   既存 runtimeReadHandle（callback 冒頭 :428 取得・callback 全体スコープ）の
+        //     epoch pin 下で world current を解決する — RT path（Latency.cpp）と同一。
+        //   world 未公開時（resolver が nullptr）は TRK = 0。
+        auto* activeDSP = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        if (activeDSP != nullptr)
         {
-            auto* activeDSP = getActiveRuntimeDSP();
-            if (activeDSP != nullptr)
-            {
-                auto stats = activeDSP->collectTrackedMemoryStatistics();
-                dspTrackedTotalMB = stats.totalTracked() / (1024.0 * 1024.0);
-                dspOversamplingMB = stats.oversampling / (1024.0 * 1024.0);
-                dspEqMB = stats.eqProcessor / (1024.0 * 1024.0);
-                dspAlignedMB = stats.alignedBuffers / (1024.0 * 1024.0);
-                dspLatencyMB = stats.latencyBuffers / (1024.0 * 1024.0);
-            }
+            auto stats = activeDSP->collectTrackedMemoryStatistics();
+            dspTrackedTotalMB = stats.totalTracked() / (1024.0 * 1024.0);
+            dspOversamplingMB = stats.oversampling / (1024.0 * 1024.0);
+            dspEqMB = stats.eqProcessor / (1024.0 * 1024.0);
+            dspAlignedMB = stats.alignedBuffers / (1024.0 * 1024.0);
+            dspLatencyMB = stats.latencyBuffers / (1024.0 * 1024.0);
         }
 
         juce::Logger::writeToLog(juce::String::formatted(

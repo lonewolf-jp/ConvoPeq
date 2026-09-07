@@ -1,15 +1,15 @@
 {
-  "acquireObserved": 4,
-  "releaseObserved": 3,
+  "acquireObserved": 5,
+  "releaseObserved": 4,
   "observedOutstandingEstimate": 1,
   "observedOutstandingMax": 1,
   "windowTag": 0,
   "windowTagName": "normal",
   "measurementWindow": null,
   "referenceObserver": {
-    "referenceAcquireCount": 4,
-    "referenceReleaseCount": 3,
-    "referenceOutstanding": 1,
+    "referenceAcquireCount": 5,
+    "referenceReleaseCount": 5,
+    "referenceOutstanding": 0,
     "referenceMax": 0,
     "Ew": -1
   }

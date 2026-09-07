@@ -3839,6 +3839,11 @@ public:
         juce::Logger::writeToLog(message);
     }
 
+    // ★ D172-3 契約（dormant diagnostic — production caller 0 件）:
+    //   本関数は legacy activeRuntimeDSPSlot（getActiveRuntimeDSP）を dereference する。
+    //   slot は non-owning mirror であり置換 destroy 後に dangling になり得る（D172-1）。
+    //   復活・再利用時は resolveActiveRuntimeDSPFromRuntimeWorldOnly（RuntimeWorld
+    //   read-handle authority 経由）に統一すること — slot dereference の新規追加禁止。
     inline void logRuntimeTransitionEvent(const char* origin,
                                           DSPCore* primary,
                                           DSPCore* secondary = nullptr) const noexcept

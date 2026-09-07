@@ -1,0 +1,23 @@
+{
+  "schema": "retire_trace_v1",
+  "totalSlots": 256,
+  "slots": [
+    { "slot": 1, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 3, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 4, "lane": "reclaim", "lifecycle": "reclaimed" }
+  ],
+  "counts": {
+    "laneRTIntent": 4,
+    "laneCoordination": 4,
+    "laneEpoch": 4,
+    "laneReclaim": 4,
+    "laneQuarantine": 0,
+    "lifecycleVisible": 0,
+    "lifecycleCompareEligible": 4,
+    "lifecycleTelemetryRetained": 4,
+    "lifecycleReplayRetainedOptional": 0,
+    "lifecycleReclaimEligible": 4,
+    "lifecycleReclaimed": 4
+  }
+}
