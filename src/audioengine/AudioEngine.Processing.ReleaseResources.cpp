@@ -36,6 +36,28 @@ void AudioEngine::releaseResources()
     ASSERT_NON_RT_THREAD();
     diagLog("[DIAG] releaseResources: enter");
 
+    // ★ D167-2: terminal / reconfigure 境界（D166 Option 1 最小增量）。
+    //   JUCE 契約上 releaseResources() は reconfigure（device switch / SR・BS 変更 /
+    //   device 再列挙）と terminal shutdown の両方で同一入口から呼ばれる（D166 §3）。
+    //   callee 側から terminal 性は判定できないため、caller が requestTerminalRelease()
+    //   を呼んだ場合のみ terminal pipeline を実行する。それ以外は reconfigure pass
+    //   （releaseResourcesForReconfigure — DSP buffer / device-dependent resource のみ解放・
+    //   admission Open 維持）に委譲する。
+    //   terminal intent は consume-once: 受領した pass が消費する。
+    //   - terminal pass: 交換して true を取得 → 従来 pipeline を無変更で実行（D167-4）。
+    //   - reconfigure pass: フラグは保持される（誤って JUCE が先に release を呼んだ場合も
+    //     terminal intent は失われず、次の requestTerminalRelease 付き pass で消化される）。
+    const bool terminalRelease = convo::exchangeAtomic(terminalReleaseRequested_,
+                                                       false,
+                                                       std::memory_order_acq_rel);
+    if (!terminalRelease)
+    {
+        diagLog("[DIAG] releaseResources: reconfigure pass (terminal intent not set)");
+        releaseResourcesForReconfigure();
+        return;
+    }
+    diagLog("[DIAG] releaseResources: terminal pass (terminal intent consumed)");
+
     auto previousState = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     for (;;)
     {
@@ -126,13 +148,19 @@ void AudioEngine::releaseResources()
     resetLearningControlState();
     setShutdownPhase(ShutdownPhase::StopAudio, "releaseResources");
 
+    // ★ D169-1R (RC-D169-1-2): activeRuntimeDSPSlot / fadingRuntimeDSPSlot は placeholder 専用
+    //   レガシースロット（h:2265 comment 参照 — rebuild publish は pointer slot を更新しない）であり、
+    //   下記 capture は topology observation 用にのみ使用する（ownership authority に昇格させない）。
+    //   ★ D169-1R (RC-D169-1-1): pointer-value retirement は廃止。旧 :352-359 の
+    //   lifetimeForShutdown.retire(activeToRelease 等) は retireDSPHandleForRuntime の
+    //   raw-pointer map key lookup（address reuse で生存 DSP を誤 lookup し二重破壊・
+    //   D169-1 probe8/9 実測 0xC0000005）であり、D162-2-E (E-2) が dtor から廃止済みの
+    //   pattern の残存だった。registered DSP の terminal disposition は本 pass 下段の
+    //   handle-based 経路（getActive/FadingRuntimeDSPHandle → dspHandleRuntime_.retire →
+    //   tryShutdownQuiescentReclaim → V-D-b authority retire）に一本化する。
+    //   capture 値自体は handle 経路で全て disposition 済みのため観測専用（juce::ignoreUnused）。
     DSPCore* activeToRelease = nullptr;
     DSPCore* fadingToRelease = nullptr;
-    DSPCore* pendingNewToRelease = nullptr;
-    DSPCore* pendingCurrentToRelease = nullptr;
-
-    // ★ [PR-A2] DSPLifetimeManager 経由で retire (lifetime は lock 外でも参照可能にする)
-    DSPLifetimeManager lifetimeForShutdown(*this);
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
@@ -169,7 +197,8 @@ void AudioEngine::releaseResources()
         if (hasPendingTask)
         {
             // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
-            pendingCurrentToRelease = pendingTask.currentDSP;
+            //   ★ D169-1R: currentDSP の非 null writer は現行 source に存在しないため
+            //   （D170-1 preflight 実測）、capture 変数は廃止し slot 衛生（clear）のみ維持。
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
             publishRetryReady = false;
@@ -327,14 +356,12 @@ void AudioEngine::releaseResources()
 
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
-    if (activeToRelease)
-        lifetimeForShutdown.retire(activeToRelease);
-    if (fadingToRelease)
-        lifetimeForShutdown.retire(fadingToRelease);
-    if (pendingNewToRelease)
-        lifetimeForShutdown.retire(pendingNewToRelease);
-    if (pendingCurrentToRelease)
-        lifetimeForShutdown.retire(pendingCurrentToRelease);
+    // ★ D169-1R (RC-D169-1-1): pointer-value retirement 廃止 — 旧 :352-359 の
+    //   lifetimeForShutdown.retire(activeToRelease/fadingToRelease/pendingNew/pendingCurrent) は削除。
+    //   terminal disposition は下段 handle 経路（VerifyDrained: dspHandleRuntime_.retire +
+    //   tryShutdownQuiescentReclaim、V-D-b: DSPLifetimeManager::retire authority）に一本化。
+    juce::ignoreUnused(activeToRelease);
+    juce::ignoreUnused(fadingToRelease);
 
     // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
     // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。
@@ -711,6 +738,48 @@ void AudioEngine::releaseResources()
 
     // P0-A0: LifecycleIsolationRuntime integration - leave release phase
     lifecycleRuntime_.leaveRelease(lifecycleToken);
+}
+
+// ★ D167-3: reconfigure pass — device switch / SR・BS 変更 / device 再列挙で JUCE が
+//   呼ぶ releaseResources から terminal pipeline を完全に分離する（D166 §10 Option 1）。
+//
+//   実行しない（terminal pass 専用 — D167-4 の既存 pipeline をここで踏まない）:
+//     closeAdmission / transitionTo(terminal 系) / requestShutdown / joinProducers /
+//     shutdown drain / shutdown trace emission / markShutdownComplete / DSP retire /
+//     world clear / rebuild thread 停止 / reader registration close / MMCSS shutdown /
+//     lifecycleState → Unprepared。
+//
+//   実行する（reconfigure に本来必要な device-dependent resource release）:
+//     audio session 停止に伴う transient 状態の解放。admission は Open 維持、
+//     公開 world / active DSP は device switch を跨いで生存し、rebuild thread は
+//     停止しない（prepareToPlay が正常系として re-prepare する）。
+//
+//   前提（呼び出し契約）: Message Thread / RT audio thread 停止済み（JUCE
+//   audioDeviceStopped 後）/ lifecycleState == Prepared（caller が確認）。
+//   lifecycleState は変更しない — isEnginePrepared() を true のまま維持することで
+//   AudioEngineProcessor の duplicate-release guard 意味論と JUCE 契約を保全する。
+void AudioEngine::releaseResourcesForReconfigure() noexcept
+{
+    diagLog("[DIAG] releaseResources: reconfigure pass enter (terminal pipeline skipped)");
+
+    // learner: 現行 release が停止する挙動を維持（post-prepare 状態を terminal 系と揃える・
+    //   prepareToPlay に restart logic はないため停止のまま）。device 依存ではないが、
+    //   audio session 単位の解析コンポーネントのため session 停止時に解放する。
+    if (noiseShaperLearner)
+    {
+        juce::Logger::writeToLog("[AudioEngine] releaseResources(reconfigure): stopping learner");
+        noiseShaperLearner->stopLearning();
+    }
+    resetLearningControlState();
+
+    // RT transient 指標のリセット（次回 prepareToPlay が再初期化するものと整合）。
+    //   currentSampleRate / crossfadeRuntime / pendingTask 等は触らない — 触ると
+    //   device switch を跨ぐ publication 継続（D166 §10 リスク登録項目）を破壊する。
+    convo::publishAtomic(inputLevelLinear, 0.0f, std::memory_order_release);
+    convo::publishAtomic(outputLevelLinear, 0.0f, std::memory_order_release);
+
+    diagLog("[DIAG] releaseResources: reconfigure pass complete (admission stays Open, state="
+            + juce::String(static_cast<int>(shutdownRuntime_.admissionState())) + ")");
 }
 
 // ★ 15-P-4-5-FIX: EmergencyDrain-safe drain of RetireIntent (slot-state) system.

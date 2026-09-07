@@ -1,0 +1,66 @@
+[OK] cl found: 
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe
+=== Case A: exception code + /EHsc ===
+fixture_eh.cpp
+[rc=0]
+CAUGHT: boom
+[CaseA run rc=42] 
+=== Case B: exception code WITHOUT /EHsc ===
+fixture_eh.cpp
+fixture_eh.cpp(4): warning C4530: C++ 例外処理を使っていますが、アンワインド セマンティクスは有効にはなりません。/EHsc を指定してください。
+[rc=0]
+CAUGHT: boom
+[CaseB run rc=42] 
+=== Case C1: JUCE-style guard WITHOUT /EHsc ===
+main_juce.cpp
+C:\Users\user\AppData\Local\Temp\ehsc_i34i\juce_guard.h(2): fatal error C1189: #error:  "You're compiling without exceptions enabled! This is needed for a lot of JUCE classes, please update your compiler settings!"
+[rc=2]
+[CaseC1: compile failed as expected] 
+=== Case C2: JUCE-style guard WITH /EHsc ===
+main_juce.cpp
+[rc=0]
+JUCE_STYLE_OK
+[CaseC2 run rc=7] 
+=== Case D: .c file WITH /EHsc ===
+fixture_c.c
+[rc=0]
+C_OK
+[CaseD run rc=0] 
+=== Case D2: .c file WITH /utf-8 ===
+fixture_c.c
+[rc=0]
+C_OK
+[CaseD2 run rc=0] 
+=== Case E: fresh CMake (no project flag sets) ===
+-- The CXX compiler identification is MSVC 19.51.36256.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (1.2s)
+-- Generating done (0.0s)
+CMake Warning (unused-cli):
+  Manually-specified variables were not used by the project:
+
+    CMAKE_C_COMPILER
+
+
+-- Build files have been written to: C:/Users/user/AppData/Local/Temp/ehsc_i34i/caseE/bld
+[configure rc=0]
+CMAKE_CXX_FLAGS:STRING=/DWIN32 /D_WINDOWS /EHsc
+CMAKE_CXX_FLAGS_DEBUG:STRING=/Zi /Ob0 /Od /RTC1
+CMAKE_CXX_FLAGS_MINSIZEREL:STRING=/O1 /Ob1 /DNDEBUG
+CMAKE_CXX_FLAGS_RELEASE:STRING=/O2 /Ob2 /DNDEBUG
+CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=/Zi /O2 /Ob1 /DNDEBUG
+=== Case E: RWDI build ===
+[1/2] Building CXX object CMakeFiles\eh_probe.dir\RelWithDebInfo\C_\Users\user\AppData\Local\Temp\ehsc_i34i\fixture_eh.cpp.obj
+[2/2] Linking CXX executable RelWithDebInfo\eh_probe.exe
+[build rc=0]
+
+
+=== Case E fresh-cache CMAKE_CXX_FLAGS (CMake 4.4.3 default, no project flag sets) ===
+CMAKE_CXX_FLAGS:STRING=/DWIN32 /D_WINDOWS /EHsc
+CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=/Zi /O2 /Ob1 /DNDEBUG
+
+Conclusion: base CMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc is the CMake MSVC default (CMP0092 NEW strips /W3) - reproduced from a fresh %TEMP% configure.

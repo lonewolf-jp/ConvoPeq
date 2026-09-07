@@ -316,8 +316,25 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     // D101-31-B B-10: tryAdmit(1) after isShutdownInProgress() check passed.
     // Intent will be stored (requestRebuild or triggerAsyncUpdate → rebuildAdmissionPendingIntent_).
     // release(1) fires at function exit — obligation survives in durable state.
+    // ★ D167-5: tryAdmit 失敗（admission Closing/Closed）は無出力 return せず、
+    //   REQUESTED(accepted) との会計を成立させる（D166 §5 — Build 経路のみ telemetry 皆無の
+    //   observability defect）。terminal shutdown と競合した request は
+    //   Suppressed(AdmissionClosed) として追跡可能になる。event vocabulary 変更なし
+    //   （既存 Suppressed event + 新 reason 1 件のみ）。
     if (!shutdownRuntime_.tryAdmit(1))
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::AdmissionClosed,
+                             RebuildTelemetryDecision::Suppressed,
+                             structuralHash,
+                             fingerprint,
+                             rebuildClass,
+                             collapsePolicy,
+                             kPhase5TagKeep);
         return;
+    }
     struct RebuildReservationGuard {
         convo::isr::ShutdownRuntime& rt;
         bool active = true;

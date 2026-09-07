@@ -19,6 +19,23 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // P0-A0: LifecycleIsolationRuntime integration
     auto lifecycleToken = lifecycleRuntime_.enterPrepare(samplesPerBlockExpected, static_cast<int>(sampleRate));
 
+    // ★ D169-2-4 (RC-D169-2-1/3/5): duplicate-prepare collapse = no-op。
+    //   enterPrepare() が expectedPhase == Prepared の token を返すのは collapse 経路のみ
+    //   （phase==Prepared && 同一 SR/BS — ISRLifecycle.cpp:27-36・通常経路は常に Preparing）。
+    //   collapse は「prepare transaction の開始」ではなく「duplicate request の既存
+    //   Prepared state への吸収」のため、prepare body を一切実行せず早期 return する
+    //   （RC-D169-2-5: generation reset / pendingTask reset / publish / buffer realloc /
+    //   placeholder / submitRebuildIntent 等の全 side effect 不実行）。
+    //   本 return は leavePrepare() 呼出より前にあるため collapsed token は
+    //   leavePrepare に到達しない（RC-D169-2-3・leavePrepare の phase==Preparing 前提は無変更）。
+    //   D169-2-1: 本分岐が無いと同一 SR/BS の device restart（JUCE 冪等 re-prepare）で
+    //   leavePrepare の前提違反 → std::abort() に至る。
+    if (lifecycleToken.expectedPhase == convo::isr::LifecyclePhase::Prepared)
+    {
+        diagLog("[DIAG] prepareToPlay: duplicate-prepare collapsed (same SR/BS, already Prepared)");
+        return;
+    }
+
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
     diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 

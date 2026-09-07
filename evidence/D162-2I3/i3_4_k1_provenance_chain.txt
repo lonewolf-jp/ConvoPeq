@@ -1,0 +1,95 @@
+I3-4-K K1 - /utf-8 occurrence condition chains (CMakeLists @ 9cacee1f+dirty)
+icx evaluation: MSVC=TRUE, CMAKE_CXX_COMPILER_ID=IntelLLVM, ENABLE_ASAN=OFF under icx mode
+
+L174   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(PublicationAdmissionTests PRIVATE /utf-8)
+L322   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(D8_2_B_2_Tests PRIVATE /EHsc /utf-8)
+L364   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(RuntimeHealthMonitorTierTests PRIVATE /EHsc /utf-8)
+L397   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(StuckReaderFallbackDrainTests PRIVATE /EHsc /utf-8)
+L432   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(ISRSoakTests PRIVATE /EHsc /utf-8)
+L442   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(OwnerChannelTests PRIVATE /EHsc /utf-8)
+L502   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(BuildErrorClassificationTests PRIVATE /EHsc /utf-8)
+L514   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(RetrySchedulerTests PRIVATE /EHsc /utf-8)
+L796   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(MpscBoundedRingTests PRIVATE /EHsc /utf-8)
+L804   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(SequenceArithmeticTests PRIVATE /EHsc /utf-8)
+L812   icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(DSPHandleTableTests PRIVATE /EHsc /utf-8)
+L850   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(TerminalTelemetryContractTests PRIVATE /utf-8)
+L851   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
+L852   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
+L853   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
+L854   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(invariant_INV3_INV5Tests PRIVATE /utf-8)
+L855   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(AdmissionPackedStateTests PRIVATE /utf-8)
+L856   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(AdmissionPackedStateTests PRIVATE /utf-8)
+L857   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
+L858   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /utf-8)
+L859   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /utf-8)
+L860   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
+L861   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(ObservePathSingleSourceTests PRIVATE /utf-8)
+L862   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(OverlapAuthoritySingularTests PRIVATE /utf-8)
+L863   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(ShadowCompareContractTests PRIVATE /utf-8)
+L864   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /utf-8)
+L865   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /utf-8)
+L866   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(PartialPublicationRejectTests PRIVATE /utf-8)
+L867   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(RebuildAdmissionRegressionTests PRIVATE /utf-8)
+L868   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(BuildInputSemanticContractTests PRIVATE /utf-8)
+L869   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(PriorityIntegrationTests PRIVATE /utf-8)
+L870   icx=False chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(ISRSoakTests PRIVATE /utf-8)
+L1100  icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS >> MSVC
+        target_compile_options(MTNUPCMeasurement PRIVATE /utf-8 /EHsc)
+L1499  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
+L1519  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+L1520  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+L1524  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
+L1525  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_C_FLAGS_DEBUG   "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
+L1534  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Zi /O2 /Ob1 /DNDEBUG /utf-8")
+L1535  icx=False chain=MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_C_FLAGS_RELWITHDEBINFO   "/Zi /O2 /Ob1 /DNDEBUG /utf-8")
+L1576  icx=True  chain=CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        /utf-8
+L1606  icx=True  chain=CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+L1607  icx=True  chain=CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+L1886  icx=True  chain=CONVOPEQ_ENABLE_ISR_TESTS
+        target_compile_options(AudioEngineHarness PRIVATE /EHsc /utf-8)
+L1997  icx=False chain=ENABLE_ASAN >> TARGET ${tgt} >> MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"
+        target_compile_options(${tgt} PRIVATE $<$<CONFIG:Debug>:/RTC1-> /utf-8 /fsanitize=address)
+
+NOTE: L850-870 group (ISR-family /utf-8) sits inside 'MSVC AND NOT ... IntelLLVM' -> not applied under icx.

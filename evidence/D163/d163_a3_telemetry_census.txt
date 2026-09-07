@@ -1,0 +1,17 @@
+D163-A3 telemetry census (production src/**, 2026-09-06)
+================================================================================
+buildErrorCount_                 未実装 (将来拡張コメント)
+retryStormDetected               未実装・CR-α 契約にも含まれず
+retryExhaustedCount              recovery 側は kMaxObligationConsecutiveFailures 達成時 ResolvedFailed で表現
+retryLatency                     未実装
+Site3 warmup retry telemetry     diagLog 実装済み: generation/attempt/limit/delayMs/error + one-shot exhausted log
+RetryScheduler.rejectCount_      atomic 実装済み (schedule reject 観測先) + pendingCount()
+recoveryRetryDeferredCount_      実装済み (coordinator.h:1138) — durable-slot retry defer 計数
+recoveryIntentDropCount_         実装済み (:1066)
+recoveryShutdownDiscardCount_    実装済み (:1069)
+recoveryCoalescedCount_          実装済み (:1135)
+recoveryCapacityExhaustedCount_  実装済み (:968)
+
+意味的重複判定: buildErrorCount_(build failure 総数) は既存 recovery*Count_(obligation transport 統計)
+と母集団が異なるが、Site 3 の failure は diagLog が error 名付きで逐次記録済み。
+counter 集約の欠落は long-running 統計需要が発生するまで実障害ではない (CRBETA0 B-2 と同結論)。

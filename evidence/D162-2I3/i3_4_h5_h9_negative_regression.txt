@@ -1,0 +1,15 @@
+I3-4-H5 H9 - negative regression: G4 fixture suite rerun against gate v2 (post CMakeLists /utf-8 fix)
+==============================================================================
+
+g4_a_systemonly              rc=0  class=WARN+ALLOW   expect(rc=0,WARN+ALLOW) -> MATCH
+g4_b_projectdirect           rc=0  class=CLEANPASS    expect(rc=0,CLEANPASS) -> MATCH
+g4_c_transitive              rc=0  class=CLEANPASS    expect(rc=0,CLEANPASS) -> MATCH
+g4_d_mismatch                rc=3  class=SUSPICIOUS   expect(rc=3,SUSPICIOUS) -> MATCH
+g4_e_unresolved              rc=3  class=UNRESOLVED   expect(rc=3,UNRESOLVED) -> MATCH
+g4_f_production              rc=3  class=PRODUCTION   expect(rc=3,PRODUCTION) -> MATCH
+g4_g_testonly_systemonly     rc=0  class=WARN+ALLOW   expect(rc=0,WARN+ALLOW) -> MATCH
+g4_h_mixed                   rc=3  class=SUSPICIOUS   expect(rc=3,SUSPICIOUS) -> MATCH
+
+ALL 8 CASES MATCH: True
+
+(fail-closed semantics unchanged by the CMakeLists /utf-8 fix - gate v2 untouched in I3-4-H5)

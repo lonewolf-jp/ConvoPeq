@@ -1,0 +1,13 @@
+{
+ "git_status": "M CMakeLists.txt\n?? doc/work88/D162-2-I3-4-H5_RWDI_UTF8_FIX_IMPLEMENTATION_REPORT.md\n?? doc/work88/D162-2-I3-4-H_RWDI_UTF8_CONFIG_COHERENCE_AUDIT_REPORT.md\n?? evidence/D162-2I3/I3_4_H5_RWDI_UTF8_FIX_IMPLEMENTATION_REPORT.md\n?? evidence/D162-2I3/I3_4_H_RWDI_UTF8_CONFIG_COHERENCE_AUDIT.md\n?? evidence/D162-2I3/i3_4_h5_h10_change_scope.txt\n?? evidence/D162-2I3/i3_4_h5_h6_census.txt\n?? evidence/D162-2I3/i3_4_h5_h9_negative_regression.txt\n?? evidence/D162-2I3/i3_4_h_h0_freeze/\n?? evidence/D162-2I3/i3_4_h_h0_snapshot.txt\n?? evidence/D162-2I3/i3_4_h_h1_flag_provenance.txt\n?? evidence/D162-2I3/i3_4_h_h3_fixture_logs/\n?? evidence/D162-2I3/i3_4_h_h5_cmakelists_before.txt\n?? evidence/D162-2I3/i3_4_i0_freeze/",
+ "git_head": "9cacee1f4c81f47bf55eb6396627270cd3cb7618",
+ "CMakeLists_sha256_16": "680e82395c78eb80",
+ "impl-Release.ninja.mtime": "2026-09-06 07:08:49",
+ "impl-Release.ninja.size": 1506925,
+ "impl-Debug.ninja.mtime": "2026-09-06 07:08:49",
+ "impl-Debug.ninja.size": 1488031,
+ "impl-RelWithDebInfo.ninja.mtime": "2026-09-06 07:08:49",
+ "impl-RelWithDebInfo.ninja.size": 1525401,
+ "compile_commands.mtime": "2026-09-06 07:08:49",
+ "rwdi_global_flags_string_present": true
+}

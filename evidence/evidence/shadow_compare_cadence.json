@@ -3,10 +3,10 @@
   "minCadenceMs": 1000,
   "burstWindowMs": 250,
   "burstEscalationThreshold": 3,
-  "totalObservations": 27,
-  "mismatchCount": 26,
+  "totalObservations": 28,
+  "mismatchCount": 27,
   "monotonicViolationCount": 0,
-  "cadenceViolationCount": 18,
+  "cadenceViolationCount": 20,
   "escalationCount": 0,
-  "lastSequenceId": 38
+  "lastSequenceId": 39
 }

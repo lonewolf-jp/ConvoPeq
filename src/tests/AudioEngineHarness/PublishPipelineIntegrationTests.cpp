@@ -223,8 +223,13 @@ bool testCallerDestroyTerminalDisposition()
     //     harness 外部から audio を止める簡易手段として engine 側 prepare/release の
     //     契約範囲で再現する: ここでは running_ を直接触らず、
     //     testRunner 側に audio 停止のみを行う seam を追加した stopAudioOnly() を使用。）
+    //   ★ D167-2: 本テストの前提は「admission Closed → CallerDestroy」= terminal flow。
+    //     releaseResources は terminal intent なしでは reconfigure pass（admission Open 維持）
+    //     になるため、requestTerminalRelease() を明示して terminal pass として実行する
+    //     （テスト意図 = terminal shutdown の CallerDestroy 契約のまま・不変）。
     std::fprintf(stderr, "[I2T] phase2: releaseResources (admission closed)\n");
     h.stopAudioOnly();
+    e.requestTerminalRelease();
     e.releaseResources();
     std::fprintf(stderr, "[I2T] phase2 ok: releaseResources done\n");
     e.prepareToPlay(512, 48000.0);
@@ -232,8 +237,7 @@ bool testCallerDestroyTerminalDisposition()
 
     if (e.getActiveRuntimeDSP() != nullptr)
     {
-        std::fprintf(stderr, "FAIL: dangling placeholder left in active slot after "
-                             "CallerDestroy (ownership repair missing)\n");
+        std::fprintf(stderr, "FAIL: dangling placeholder left in active slot after CallerDestroy\n");
         return false;
     }
     std::fprintf(stderr, "[I2T] phase3 ok: slot is null (repair verified)\n");
@@ -259,8 +263,7 @@ bool testCallerDestroyTerminalDisposition()
     static I2FileLogger* diagCapture = nullptr;
     diagCapture = new I2FileLogger("C:/VSC_Project/ConvoPeq/evidence/D162-2I2/teardown_diag.log");
     (void)diagCapture;
-    std::fprintf(stderr, "[I2T] phase4: abandon engine (second releaseResources is "
-                         "a pre-existing Debug segfault route — I3 issue, not I2)\n");
+    std::fprintf(stderr, "[I2T] phase4: abandon engine (pre-existing Debug segfault route, I3 issue)\n");
     h.abandonEngine();
     std::fprintf(stderr, "[I2T] phase4 ok: engine abandoned (T-I2-1 complete)\n");
     return true;
@@ -510,6 +513,560 @@ bool testPublishCompletionMonotonicity()
     return true;
 }
 
+// ── D167: reconfigure / terminal boundary（DS-F2 修復の harness レベル固定）──
+//   releaseResources() は terminal intent（requestTerminalRelease）がない限り reconfigure
+//   pass となり、admission / phase / lifecycleState / world / rebuild thread を保全する。
+//   D167-7 テストマトリクス対応:
+//     [1]  normal startup → admission Open
+//     [2]  normal rebuild dispatched > 0（SR 変更 re-prepare → dispatch → publish）
+//     [3]  device reconfigure → admission usable
+//     [4]  reconfigure → rebuild dispatched > 0
+//     [5]  repeated reconfigure → admission usable
+//     [6]  terminal shutdown → admission Closed
+//     [7]  terminal → tryAdmit reject
+//     [8]  terminal → drain complete（isFullyDrained + collectResult().completed）
+//     [11] reconfigure → TV=0（collectResult().transitionViolations）
+//     [12] reconfigure → no shutdown trace（phase Running 維持 = terminal pipeline 不発）
+//     [13] terminal → shutdown trace（terminal pass 内 emit・D167-9 で実機確認）
+bool testD167ReconfigureKeepsAdmissionOperational()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+    {
+        std::fprintf(stderr, "FAIL: D167: admission not Open after startup\n");
+        return false;
+    }
+
+    // reconfigure pass: terminal intent なしの bare releaseResources（JUCE device switch 相当）
+    h.stopAudioOnly();
+    e.releaseResources();
+
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+    {
+        std::fprintf(stderr, "FAIL: D167: reconfigure pass closed admission (DS-F2 regression)\n");
+        return false;
+    }
+    if (e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::Running)
+    {
+        std::fprintf(stderr, "FAIL: D167: reconfigure pass advanced shutdown phase\n");
+        return false;
+    }
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D167: reconfigure pass consumed Prepared state\n");
+        return false;
+    }
+
+    // admission usable: tryAdmit/release round-trip（reconfigure 後も admission が機能する）
+    if (!e.isrShutdownRuntime().tryAdmit(1)
+        || e.isrShutdownRuntime().outstanding() != 1)
+    {
+        std::fprintf(stderr, "FAIL: D167: admission reservation rejected after reconfigure\n");
+        return false;
+    }
+    e.isrShutdownRuntime().release(1);
+
+    // reconfigure → rebuild resumes: SR 変更 re-prepare が structural rebuild を dispatch し、
+    // publish が admission gate を通過して store を進める（D167-7 [2][4]）
+    const auto seq0 = e.observePublishedWorld()->publication.sequenceId;
+    e.prepareToPlay(512, 44100.0);
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D167: prepareToPlay after reconfigure failed\n");
+        return false;
+    }
+    const bool rebuilt = waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > seq0;
+    });
+    if (!rebuilt)
+    {
+        std::fprintf(stderr, "FAIL: D167: rebuild did not dispatch/publish after reconfigure\n");
+        return false;
+    }
+
+    // repeated reconfigure: admission が複数回の reconfigure pass で劣化しない（D167-7 [5]）
+    //   ★ 同一 SR/BS の連続 prepareToPlay は lifecycleRuntime_ の duplicate-prepare
+    //   collapse 経路（ISRLifecycle.cpp enterPrepare 同一 sr/bs で token を折りたたむ）と
+    //   leavePrepare の phase==Preparing 前提が衝突する pre-existing 課題があるため、
+    //   SR を交互に変えて collapse 経路を回避する（admission 劣化の証明には十分）。
+    for (int i = 0; i < 2; ++i)
+    {
+        h.stopAudioOnly();
+        e.releaseResources();
+        if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+        {
+            std::fprintf(stderr, "FAIL: D167: repeated reconfigure %d closed admission\n", i);
+            return false;
+        }
+        // step-d が 44100 のため、i=0 は 48000 に変えて duplicate-prepare collapse を回避
+        e.prepareToPlay(512, (i % 2 == 0) ? 48000.0 : 44100.0);
+        if (!e.isEnginePrepared())
+        {
+            std::fprintf(stderr, "FAIL: D167: re-prepare %d after repeated reconfigure failed\n", i);
+            return false;
+        }
+    }
+
+    // rebuild 完了待機: step-e の SR 変更 re-prepare が dispatch した in-flight rebuild が
+    //   terminal shutdown と競合すると、terminal の activeHandle resolve が退避済み DSP を
+    //   指す窗口が生じる（D167 検証で確認した in-flight rebuild × terminal race）。
+    //   unit test としては rebuild 静穏化を待ってから terminal に進む（実機での競合は
+    //   別途 finding として記録・D167 の修復 scope 外）。
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // terminal shutdown（h.stop() が terminal intent を発行）:
+    //   admission Closed / tryAdmit reject / ShutdownComplete / drain complete / TV=0
+    //   （D167-7 [6][7][8][11]）
+    h.stop();
+
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed)
+    {
+        std::fprintf(stderr, "FAIL: D167: terminal shutdown did not close admission\n");
+        return false;
+    }
+    if (e.isrShutdownRuntime().tryAdmit(1))
+    {
+        std::fprintf(stderr, "FAIL: D167: tryAdmit accepted after terminal shutdown\n");
+        return false;
+    }
+    if (e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::ShutdownComplete)
+    {
+        std::fprintf(stderr, "FAIL: D167: terminal shutdown did not reach ShutdownComplete\n");
+        return false;
+    }
+    // D162-2-I2 A 案の CallerDestroy（deferred slot 処分）は clearDeferredForShutdown +
+    //   waitForDrain 内 drainTerminalReclaim で消化されるため、ShutdownComplete 到達 +
+    //   admission Closed + collectResult().completed が terminal closure の契約。
+    //   isFullyDrained() は recovery obligation / intent residency を含む広い判定であり、
+    //   本テストの reconfigure 経路が残留を作るものではない（残留は D162-2 台帳の範囲）。
+    const auto result = e.isrShutdownRuntime().collectResult(
+        static_cast<convo::ISRHealthState>(0), 0);
+    if (!result.completed)
+    {
+        std::fprintf(stderr, "FAIL: D167: collectResult().completed == false\n");
+        return false;
+    }
+    if (result.transitionViolations != 0)
+    {
+        std::fprintf(stderr, "FAIL: D167: transitionViolations=%u after reconfigure pass\n",
+                     static_cast<unsigned>(result.transitionViolations));
+        return false;
+    }
+
+    std::printf("  [PASS] D167: reconfigure keeps admission operational\n");
+    return true;
+}
+
+// ── D169-2-5: duplicate-prepare collapse = no-op regression (D169-2-1 R11 gap fill) ──
+//   D167 テストは duplicate-prepare collapse 経路を SR 交互で意図的に回避していた。
+//   D169-2-1 で同一 SR/BS 連続 prepare が leavePrepare 前提違反 → abort（0xC0000409）
+//   として確定し、D169-2-4 で collapse を真の no-op に修復した。本テストは targeted
+//   regression: same SR/BS の prepareToPlay を 4 回連続投入し、abort しないこと・
+//   collapse が実際に発生すること（diagLog 観測）・prepare body 副作用が再実行されない
+//   こと（generation / publication sequence / rebuild telemetry / slot 不変）・
+//   lifecycleState == Prepared 維持を観測する。
+//   harness 契約（PrepareToPlay.cpp 「AudioThread 停止中のみ呼ぶ」）に従い、collapse 投入
+//   前に stopAudioOnly + reconfigure release を実行する（D167 テストと同一パターン）。
+//   capture logger は Timer thread の [MEM_SNAP] 並行書込み（writeToLog は全 config で
+//   有効）と競合しないよう CriticalSection で直列化する。
+class D169CollapseCaptureLogger final : public juce::Logger
+{
+public:
+    juce::CriticalSection lock;
+    juce::StringArray lines;
+    void logMessage(const juce::String& message) override
+    {
+        const juce::ScopedLock sl(lock);
+        lines.add(message);
+    }
+    int countContains(const char* needle) const
+    {
+        const juce::ScopedLock sl(lock);
+        int n = 0;
+        for (const auto& line : lines)
+            if (line.contains(needle))
+                ++n;
+        return n;
+    }
+};
+
+bool testD169DuplicatePrepareCollapseNoop()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    // startup rebuild 完了待ち（観測ベースラインの確定）+ merge 窓落ち着き
+    const auto* world0 = e.observePublishedWorld();
+    const auto bootstrapSeq = (world0 != nullptr) ? world0->publication.sequenceId : 0;
+    (void)waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > bootstrapSeq;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: engine not Prepared at baseline\n");
+        return false;
+    }
+
+    // harness 契約: prepareToPlay は audio thread 停止後に呼ぶ（D167 テストと同一順序）。
+    //   reconfigure pass（terminal intent 無し）で admission Open・phase/state Prepared 維持。
+    h.stopAudioOnly();
+    e.releaseResources();
+
+    // ベースライン観測（collapse 直前）
+    const int genBefore = e.currentBuildGeneration();
+    const auto* worldBefore = e.observePublishedWorld();
+    const auto seqBefore = (worldBefore != nullptr) ? worldBefore->publication.sequenceId : 0;
+    AudioEngine::DSPCore* slotBefore = e.getActiveRuntimeDSP();
+
+    D169CollapseCaptureLogger logger;
+    juce::Logger::setCurrentLogger(&logger);
+
+    // same SR/BS duplicate prepare ×4（指示 §2: 3 回以上の連続投入）
+    for (int i = 0; i < 4; ++i)
+        e.prepareToPlay(512, 48000.0);
+
+    juce::Logger::setCurrentLogger(nullptr);
+
+    // (a) abort しなかった = ここに到達する
+    // (b) collapse が実際に 4 回発生
+    const int collapsed = logger.countContains("duplicate-prepare collapsed");
+    if (collapsed != 4)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: collapse observed %d/4\n", collapsed);
+        return false;
+    }
+
+    // (c) prepare body 副作用の非再実行
+    const int genAfter = e.currentBuildGeneration();
+    if (genAfter != genBefore)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: generation changed on collapse\n");
+        return false;
+    }
+    const auto* worldAfter = e.observePublishedWorld();
+    const auto seqAfter = (worldAfter != nullptr) ? worldAfter->publication.sequenceId : 0;
+    if (seqAfter != seqBefore)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: publication advanced on collapse\n");
+        return false;
+    }
+    // body 入口 log が出ない（collapse は enter log より前に return する）
+    const int bodyEnters = logger.countContains("prepareToPlay: enter spb=");
+    if (bodyEnters != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: prepare body entered on collapse\n");
+        return false;
+    }
+    // rebuild telemetry が増えない（submitRebuildIntent 不発）
+    const int telemetry = logger.countContains("REBUILD_TELEMETRY");
+    if (telemetry != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: rebuild telemetry on collapse\n");
+        return false;
+    }
+    // placeholder slot 不変（新 placeholder 作成も null 化もしない）
+    AudioEngine::DSPCore* slotAfter = e.getActiveRuntimeDSP();
+    if (slotAfter != slotBefore)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: active slot changed on collapse\n");
+        return false;
+    }
+
+    // (d) lifecycleState == Prepared 維持（Preparing 経由なし）
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: engine not Prepared after collapse\n");
+        return false;
+    }
+
+    // 非 collapse 経路が無傷（RC-6）: SR 変更 re-prepare は従来どおり完全 prepare で
+    // publication が進行する（D167 step-d 再確認・audio 停止済み）。
+    e.prepareToPlay(512, 44100.0);
+    const bool rebuilt = waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > seqBefore;
+    });
+    if (!rebuilt)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: SR-change re-prepare did not publish\n");
+        return false;
+    }
+    // negative check（指示 §6）: SR 変更では collapse 分岐に入らない
+    const int collapsedOnSRChange = logger.countContains("duplicate-prepare collapsed") - collapsed;
+    if (collapsedOnSRChange != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: collapse taken on SR change\n");
+        return false;
+    }
+
+    // terminal shutdown が collapse 後の engine で完走する（race 非混入の帰無検証）
+    h.stop();
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed
+        || e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::ShutdownComplete)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: terminal shutdown incomplete\n");
+        return false;
+    }
+
+    std::printf("  [PASS] D169-2-5: duplicate-prepare collapse is a true no-op\n");
+    return true;
+}
+
+// ── D169-2-6: device restart / collapse stress (P3 protocol) ──
+//   JUCE device restart chain（audioDeviceStopped → releaseResources(reconfigure) →
+//   audioDeviceAboutToStart → setProcessor swap → prepareToPlay）の engine 側相当を
+//   1 cycle として反復する。cycle = audio 停止 → reconfigure release →
+//   same SR/BS prepare（collapse）→ audio 再開。50 cycles 実施し、各 cycle で
+//   (a) collapse が 1 回発生（diagLog 観測）(b) prepare body 副作用が 0
+//   （gen / seq / telemetry / slot 不変）(c) Prepared/admission 維持
+//   (d) audio run が resume することを観測する。最終 terminal shutdown 完走も確認。
+//   pre-existing hazard（MEM_SNAP sampler の dangling 参照・D169-2-5 記録）は
+//   修正しない — 発生した場合は "D169-2-6 observed pre-existing hazard" として独立記録。
+bool testD169DeviceRestartCollapseStress()
+{
+    constexpr int kCycles = 50;
+    constexpr int kBlockSize = 512;
+    constexpr double kSampleRate = 48000.0;
+
+    AudioEngineHarness h;
+    if (!h.start(kSampleRate, kBlockSize))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    // startup rebuild 完了待ち + merge 窓落ち着き
+    const auto* world0 = e.observePublishedWorld();
+    const auto bootstrapSeq = (world0 != nullptr) ? world0->publication.sequenceId : 0;
+    (void)waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > bootstrapSeq;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: engine not Prepared at baseline\n");
+        return false;
+    }
+
+    // ベースライン（stress 全体で不変であるべき値）
+    const int genBaseline = e.currentBuildGeneration();
+    const auto* worldBaseline = e.observePublishedWorld();
+    const auto seqBaseline = (worldBaseline != nullptr) ? worldBaseline->publication.sequenceId : 0;
+    AudioEngine::DSPCore* slotBaseline = e.getActiveRuntimeDSP();
+    const int telemetryBaseline = [this_ = &e]() {
+        // REBUILD_TELEMETRY は main logger に流れないため cycle 中の capture 差分で管理する。
+        return 0;
+    }();
+    (void)telemetryBaseline;
+
+    D169CollapseCaptureLogger logger;
+    juce::Logger::setCurrentLogger(&logger);
+
+    int cyclesOk = 0;
+    for (int cycle = 0; cycle < kCycles; ++cycle)
+    {
+        // JUCE device stop 相当: audio thread 停止 → reconfigure release
+        //   （device restart では terminal intent を発行しない = reconfigure pass）
+        h.stopAudioOnly();
+        e.releaseResources();
+
+        const int collapseBefore = logger.countContains("duplicate-prepare collapsed");
+
+        // JUCE device about-to-start 相当: setProcessor swap → prepareToPlay（same SR/BS）
+        e.prepareToPlay(kBlockSize, kSampleRate);
+
+        const int collapseAfter = logger.countContains("duplicate-prepare collapsed");
+        if (collapseAfter != collapseBefore + 1)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d collapse count %d -> %d\n",
+                         cycle, collapseBefore, collapseAfter);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        // body 副作用 0: enter log / rebuild telemetry が増えない
+        if (logger.countContains("prepareToPlay: enter spb=")
+            || logger.countContains("REBUILD_TELEMETRY") != 0)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d prepare body side effect observed\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        // collapse 側 leavePrepare 到達不能の間接確認: phase 不変（collapse 後も
+        // collapse が継続成立する = phase が Prepared のまま）
+        if (!e.isEnginePrepared())
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d not Prepared after collapse\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d admission not Open\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        // audio resume（JUCE device start 後の callback 再開相当）
+        h.startAudioOnly(kBlockSize);
+        const long long blocksAtCycleStart = h.blocksProcessed();
+        const bool audioRan = waitUntil(5.0, [&] {
+            return h.blocksProcessed() > blocksAtCycleStart;
+        });
+        if (!audioRan)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d audio did not resume\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        ++cyclesOk;
+    }
+
+    juce::Logger::setCurrentLogger(nullptr);
+
+    // stress 全体の不変性（P5）: generation / publication / slot が cycle 反復で変化しない
+    const int genFinal = e.currentBuildGeneration();
+    const auto* worldFinal = e.observePublishedWorld();
+    const auto seqFinal = (worldFinal != nullptr) ? worldFinal->publication.sequenceId : 0;
+    AudioEngine::DSPCore* slotFinal = e.getActiveRuntimeDSP();
+
+    if (cyclesOk != kCycles)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: only %d/%d cycles ok\n", cyclesOk, kCycles);
+        return false;
+    }
+    if (genFinal != genBaseline)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: generation changed over stress\n");
+        return false;
+    }
+    if (seqFinal != seqBaseline)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: publication advanced over stress\n");
+        return false;
+    }
+    if (slotFinal != slotBaseline)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: active slot changed over stress\n");
+        return false;
+    }
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: not Prepared after stress\n");
+        return false;
+    }
+    if (logger.countContains("REBUILD_TELEMETRY") != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: rebuild telemetry over stress\n");
+        return false;
+    }
+
+    // 最終 terminal shutdown（P4: ShutdownComplete 到達）
+    h.stop();
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed
+        || e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::ShutdownComplete)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: terminal shutdown incomplete after stress\n");
+        return false;
+    }
+
+    std::printf("  [PASS] D169-2-6: %d device-restart collapse cycles OK\n", kCycles);
+    return true;
+}
+
+// ── D167-5: Suppressed(AdmissionClosed) telemetry accounting (D167-7 [14]) ──
+//   Admission を Closing に置いた状態で SR 変更 re-prepare（structural intent 発行）を
+//   行うと、REQUESTED(accepted) → tryAdmit 失敗 → Suppressed(AdmissionClosed) が
+//   telemetry に記録される（D166 accounting defect の修復検証）。
+class D167TelemetryCaptureLogger final : public juce::Logger
+{
+public:
+    juce::StringArray lines;
+    void logMessage(const juce::String& message) override { lines.add(message); }
+};
+
+bool testD167AdmissionClosedTelemetry()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    // startup rebuild を完了させてから admission を閉じる（決定論化）
+    const auto* world0 = e.observePublishedWorld();
+    const auto bootstrapSeq = (world0 != nullptr) ? world0->publication.sequenceId : 0;
+    (void)waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > bootstrapSeq;
+    });
+
+    if (!e.isrShutdownRuntime().isAdmissionOpen())
+    {
+        std::fprintf(stderr, "FAIL: D167-5: admission not Open at test start\n");
+        return false;
+    }
+
+    // latest-wins merge 窓（debounce）の失待ち: startup rebuild 直後の pending intent に
+    //   merge されると tryAdmit に到達しないため、commit 完了（rebuildOutstanding 解消）を待つ。
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // admission Closing（Accepted 後の admission close race を決定論的に再現）。
+    //   phase は Running のまま（closeAdmission は phase_ を変更しない）。
+    e.isrShutdownRuntime().closeAdmission();
+
+    // structural intent を admission Closing 状態で発行 → REQUESTED(accepted) →
+    //   tryAdmit 失敗 → Suppressed(AdmissionClosed)。telemetry log を capture して検証する。
+    //   ※ requestRebuild(kind) は lifecycleState を触らない公開入口（prepareToPlay は
+    //     Releasing 中の gate で先に抑制されるため vehicle として不適）。
+    D167TelemetryCaptureLogger capture;
+    auto* previousLogger = juce::Logger::getCurrentLogger();
+    juce::Logger::setCurrentLogger(&capture);
+    e.requestRebuild(convo::RebuildKind::Structural);
+    juce::Logger::setCurrentLogger(previousLogger);
+
+    bool sawRequested = false;
+    bool sawSuppressedAdmissionClosed = false;
+    for (const auto& line : capture.lines)
+    {
+        if (line.contains("[REBUILD_TELEMETRY]") && line.contains("event=REBUILD_REQUESTED")
+            && line.contains("decision=accepted"))
+            sawRequested = true;
+        if (line.contains("[REBUILD_TELEMETRY]") && line.contains("event=REBUILD_SUPPRESSED")
+            && line.contains("reason=admission_closed"))
+            sawSuppressedAdmissionClosed = true;
+    }
+    if (!sawRequested || !sawSuppressedAdmissionClosed)
+    {
+        std::fprintf(stderr, "FAIL: D167-5: telemetry accounting incomplete (req=%d sup=%d)\n",
+                     sawRequested ? 1 : 0, sawSuppressedAdmissionClosed ? 1 : 0);
+        return false;
+    }
+
+    // 後片付け: terminal pipeline（h.stop()）で Closing → Closed 完走。
+    //   closeAdmission は冪等のため terminal pass の二重 close は安全（既存契約）。
+    h.stop();
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed)
+    {
+        std::fprintf(stderr, "FAIL: D167-5: terminal shutdown did not close admission\n");
+        return false;
+    }
+
+    std::printf("  [PASS] D167-5: Suppressed(AdmissionClosed) telemetry accounting\n");
+    return true;
+}
+
 } // namespace
 
 // D102-C2-3 O_denom campaign — forward declaration (harness-only, production unchanged)
@@ -674,6 +1231,39 @@ int main(int argc, char* argv[])
     if (!testPublishCompletionMonotonicity())
     {
         std::fprintf(stderr, "FAIL: testPublishCompletionMonotonicity\n");
+        return 1;
+    }
+
+    // ★ D167: reconfigure/terminal boundary（DS-F2 修復）+ Suppressed(AdmissionClosed)
+    //   telemetry 会計。I2 CallerDestroy テストの前に実行（abandon 前提の
+    //   testCallerDestroyTerminalDisposition は最後に置く既存契約を維持）。
+    if (!testD167ReconfigureKeepsAdmissionOperational())
+    {
+        std::fprintf(stderr, "FAIL: testD167ReconfigureKeepsAdmissionOperational\n");
+        return 1;
+    }
+
+    if (!testD167AdmissionClosedTelemetry())
+    {
+        std::fprintf(stderr, "FAIL: testD167AdmissionClosedTelemetry\n");
+        return 1;
+    }
+
+    // ★ D169-2-5: duplicate-prepare collapse = no-op targeted regression。
+    //   同一 SR/BS 連続 prepare（旧コードでは abort 0xC0000409 の defect 経路）の
+    //   修復検証。D167 テストが SR 交互で回避していた経路の coverage gap を埋める。
+    if (!testD169DuplicatePrepareCollapseNoop())
+    {
+        std::fprintf(stderr, "FAIL: testD169DuplicatePrepareCollapseNoop\n");
+        return 1;
+    }
+
+    // ★ D169-2-6: device restart / collapse stress（50 cycles）。
+    //   JUCE restart chain 相当（stop → reconfigure release → same SR/BS prepare →
+    //   audio resume）の反復で collapse が破綻しないことを確認する。
+    if (!testD169DeviceRestartCollapseStress())
+    {
+        std::fprintf(stderr, "FAIL: testD169DeviceRestartCollapseStress\n");
         return 1;
     }
 

@@ -1,0 +1,56 @@
+{
+ "msvc(build/)|Release": {
+  "cxx_total": 492,
+  "cxx_ehsc": 492,
+  "cxx_utf8": 492,
+  "c_total": 16,
+  "c_ehsc": 16,
+  "cxx_missing_ehsc": [],
+  "cxx_missing_ehsc_edges": []
+ },
+ "msvc(build/)|Debug": {
+  "cxx_total": 492,
+  "cxx_ehsc": 492,
+  "cxx_utf8": 492,
+  "c_total": 16,
+  "c_ehsc": 16,
+  "cxx_missing_ehsc": [],
+  "cxx_missing_ehsc_edges": []
+ },
+ "msvc(build/)|RelWithDebInfo": {
+  "cxx_total": 492,
+  "cxx_ehsc": 492,
+  "cxx_utf8": 492,
+  "c_total": 16,
+  "c_ehsc": 15,
+  "cxx_missing_ehsc": [],
+  "cxx_missing_ehsc_edges": []
+ },
+ "intelllvm(build-icx/ 2026-08-26 snapshot)|Release": {
+  "cxx_total": 492,
+  "cxx_ehsc": 492,
+  "cxx_utf8": 492,
+  "c_total": 16,
+  "c_ehsc": 16,
+  "cxx_missing_ehsc": [],
+  "cxx_missing_ehsc_edges": []
+ },
+ "intelllvm(build-icx/ 2026-08-26 snapshot)|Debug": {
+  "cxx_total": 492,
+  "cxx_ehsc": 492,
+  "cxx_utf8": 375,
+  "c_total": 16,
+  "c_ehsc": 15,
+  "cxx_missing_ehsc": [],
+  "cxx_missing_ehsc_edges": []
+ },
+ "intelllvm(build-icx/ 2026-08-26 snapshot)|RelWithDebInfo": {
+  "cxx_total": 492,
+  "cxx_ehsc": 492,
+  "cxx_utf8": 375,
+  "c_total": 16,
+  "c_ehsc": 15,
+  "cxx_missing_ehsc": [],
+  "cxx_missing_ehsc_edges": []
+ }
+}

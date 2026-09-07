@@ -1,0 +1,28 @@
+{
+  "schema": "retire_trace_v1",
+  "totalSlots": 256,
+  "slots": [
+    { "slot": 1, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 2, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 3, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 4, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 5, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 6, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 7, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 8, "lane": "reclaim", "lifecycle": "reclaimed" },
+    { "slot": 9, "lane": "reclaim", "lifecycle": "reclaimed" }
+  ],
+  "counts": {
+    "laneRTIntent": 9,
+    "laneCoordination": 9,
+    "laneEpoch": 9,
+    "laneReclaim": 9,
+    "laneQuarantine": 0,
+    "lifecycleVisible": 0,
+    "lifecycleCompareEligible": 9,
+    "lifecycleTelemetryRetained": 9,
+    "lifecycleReplayRetainedOptional": 0,
+    "lifecycleReclaimEligible": 9,
+    "lifecycleReclaimed": 9
+  }
+}

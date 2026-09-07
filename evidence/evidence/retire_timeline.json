@@ -9,21 +9,21 @@
     "crossfadeOnly": false,
     "retirePathOnly": true
   },
-  "totalTransitions": 126,
+  "totalTransitions": 130,
   "laneCounters": {
-    "rtIntent": 26,
-    "coordination": 26,
-    "epoch": 26,
-    "reclaim": 26,
+    "rtIntent": 27,
+    "coordination": 27,
+    "epoch": 27,
+    "reclaim": 27,
     "quarantine": 22
   },
   "lifecycleCounters": {
     "visible": 0,
-    "compareEligible": 26,
-    "telemetryRetained": 26,
+    "compareEligible": 27,
+    "telemetryRetained": 27,
     "replayRetainedOptional": 22,
-    "reclaimEligible": 26,
-    "reclaimed": 26
+    "reclaimEligible": 27,
+    "reclaimed": 27
   },
   "lifecycleSample": [
     {"slot": 0, "state": "visible"},
@@ -32,7 +32,7 @@
     {"slot": 3, "state": "reclaimed"},
     {"slot": 4, "state": "reclaimed"},
     {"slot": 5, "state": "reclaimed"},
-    {"slot": 6, "state": "visible"},
-    {"slot": 7, "state": "reclaimed"}
+    {"slot": 6, "state": "reclaimed"},
+    {"slot": 7, "state": "visible"}
   ]
 }

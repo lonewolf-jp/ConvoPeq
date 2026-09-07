@@ -1149,6 +1149,26 @@ public:
                == EngineLifecycleState::Prepared;
     }
 
+    // ★ D167-2: terminal-release intent — releaseResources の reconfigure / terminal 境界の
+    //   明示信号。JUCE 契約上 releaseResources() は reconfigure（device switch / SR・BS 変更 /
+    //   device 再列挙）と terminal shutdown の両方で同一入口から呼ばれ、callee 側からは
+    //   terminal 性を判定できない（D166 §3 caller matrix — DS-F2 root cause）。
+    //   terminal teardown を意図する caller（MainApplication::shutdown / test harness stop）
+    //   は releaseResources() を呼ぶ前に本 API で意図を明示する。
+    //   - consume-once: releaseResources() の terminal branch が受領時に消費する。
+    //   - reconfigure pass は本フラグを消費しない（terminal intent は次の pass まで保持）。
+    //   - ShutdownRuntime への reopen API は存在しない（INV-LIFE-9 不変）。本信号は
+    //     「どちらの pass を実行するか」の選択のみを提供し、admission FSM を変更しない。
+    void requestTerminalRelease() noexcept
+    {
+        convo::publishAtomic(terminalReleaseRequested_, true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isTerminalReleaseRequested() const noexcept
+    {
+        return convo::consumeAtomic(terminalReleaseRequested_, std::memory_order_acquire);
+    }
+
     // ==================================================================
     // EBR (Epoch-Based Reclamation) 基盤
     // ==================================================================
@@ -2699,6 +2719,12 @@ public:
     // Worker thread for rebuilds
     void rebuildThreadLoop();
     void stopRebuildThread();
+    // ★ D167-3: reconfigure pass — JUCE reconfigure（device switch / SR・BS 変更 / 再列挙）で
+    //   呼ばれる releaseResources から terminal pipeline を分離した軽量 pass。
+    //   closeAdmission / transitionTo(terminal) / requestShutdown / joinProducers / drain /
+    //   shutdown trace / rebuild thread 停止 / DSP retire / world clear は一切実行しない
+    //   （admission Open 維持 — INV-LIFE-9 不変）。lifecycleState は Prepared のまま。
+    void releaseResourcesForReconfigure() noexcept;
     std::thread rebuildThread;
     std::mutex rebuildMutex;
     std::condition_variable rebuildCV;
@@ -2706,6 +2732,9 @@ public:
     std::atomic<bool> rebuildThreadIsRunning { false };
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
+    // ★ D167-2: terminal-release intent（requestTerminalRelease が writer・releaseResources の
+    //   terminal branch が唯一の consumer — consume-once）。NonRT Message Thread 専用。
+    std::atomic<bool> terminalReleaseRequested_ { false };
     bool hasPendingTask = false;
     // ★ 監査指摘 (work88): Recovery Intent を Builder Work Queue に投入したことを rebuild
     //   スレッドへ通知するフラグ（hasPendingTask と同じ rebuildMutex で保護）。
@@ -2904,6 +2933,7 @@ public:
             case RebuildTelemetryReason::SnapshotCommandQueuedNonMt: return "snapshot_command_queued_non_mt";
             case RebuildTelemetryReason::RetirePressureSevere: return "retire_pressure_severe";
             case RebuildTelemetryReason::SameAsPendingWouldMerge: return "same_as_pending_would_merge";
+            case RebuildTelemetryReason::AdmissionClosed: return "admission_closed"; // ★ D167-5
         }
         return "unknown_reason";
     }

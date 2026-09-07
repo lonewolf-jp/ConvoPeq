@@ -1,0 +1,31 @@
+{
+ "git_status_tracked": "M CMakeLists.txt (+10/-0 = H5 RWDI /utf-8 block のみ)",
+ "cmakelists_sha256_16": "680e82395c78eb80",
+ "build_icx_impl_mtimes": {
+  "Release": "2026-08-26 22:13",
+  "Debug": "2026-08-26 22:13",
+  "RelWithDebInfo": "2026-08-26 22:13"
+ },
+ "build_icx_cache_mtime": "2026-08-23 19:01",
+ "icx": "Intel(R) oneAPI DPC++/C++ Compiler 2026.1.0 Build 20260617",
+ "icx_path": "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/icx.exe",
+ "generator": "Ninja Multi-Config",
+ "ninja": "C:/Users/user/AppData/Local/Microsoft/WinGet/Links/ninja.exe",
+ "options": {
+  "ENABLE_ASAN": "OFF",
+  "ENABLE_TSAN": "OFF",
+  "CONVOPEQ_PGO_INSTRUMENT": "OFF",
+  "CONVOPEQ_PGO_USE": "OFF",
+  "CONVOPEQ_ENABLE_ISR_TESTS": "ON",
+  "CONVOPEQ_ENABLE_CLANG_TIDY": "OFF",
+  "CONVOPEQ_REQUIRE_MKL": "ON(cache前 set HAS_MKL=OFF→env依存)"
+ },
+ "icx_cache_flags": {
+  "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc",
+  "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS",
+  "CMAKE_CXX_FLAGS_DEBUG": "/Zi /Ob0 /Od /RTC1",
+  "CMAKE_CXX_FLAGS_RELEASE": "/O2 /Ob2 /DNDEBUG",
+  "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "/Zi /O2 /Ob1 /DNDEBUG"
+ },
+ "convopeq_md": "stale (Generated 2026-09-05 12:02 < H5 edit 09-06 00:00) — 本監査では基準に使用しない"
+}

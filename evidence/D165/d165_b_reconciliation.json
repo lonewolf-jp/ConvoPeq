@@ -1,0 +1,119 @@
+{
+ "task": "D165-D 4-channel reconciliation (8 runs: I2-WA, I2-DS, I2-R×6)",
+ "authoritative_metrics": "per-run: PowerShell ExitCode (0x0), DumpNew (0), TransVio (JSON), log analysis (zone, lifecycle closure, markers)",
+ "runs": {
+  "WA": {
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 0,
+   "zone": "clean",
+   "objs_destroyed": 61,
+   "gens": "4..64",
+   "mem_snap": 4135,
+   "retire1": 58,
+   "retired0": 2,
+   "vd": 1,
+   "sc": 1,
+   "ebr_ovf": 0,
+   "final_pend": 0,
+   "remaining": "all 0",
+   "dup_destroy": 0,
+   "e3": 0,
+   "sig": 0,
+   "stale_hit": 0,
+   "xrun": 36,
+   "xrun_shutdown_window": 0,
+   "fault_15p5": 1,
+   "rebuild_requested": 120,
+   "rebuild_dispatched": 120
+  },
+  "DS": {
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 7,
+   "zone": "clean",
+   "objs_destroyed": 2,
+   "gens": "0..5",
+   "mem_snap": 4163,
+   "retire1": 1,
+   "retired0": 0,
+   "vd": 1,
+   "sc": 1,
+   "ebr_ovf": 0,
+   "final_pend": 0,
+   "remaining": "all 0",
+   "dup_destroy": 0,
+   "e3": 0,
+   "sig": 0,
+   "stale_hit": 0,
+   "xrun": 0,
+   "xrun_shutdown_window": 0,
+   "fault_15p5": 1,
+   "rebuild_requested": 61,
+   "rebuild_dispatched": 0
+  },
+  "R1": {
+   "device": "Windows Audio",
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 0,
+   "zone": "clean",
+   "objs_destroyed": 4,
+   "dispatched": 6,
+   "xrun_shutdown_window": 0
+  },
+  "R2": {
+   "device": "DirectSound",
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 7,
+   "zone": "clean",
+   "objs_destroyed": 2,
+   "dispatched": 0,
+   "xrun_shutdown_window": 0
+  },
+  "R3": {
+   "device": "Windows Audio",
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 0,
+   "zone": "clean",
+   "objs_destroyed": 4,
+   "dispatched": 6,
+   "xrun_shutdown_window": 0
+  },
+  "R4": {
+   "device": "DirectSound",
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 7,
+   "zone": "clean",
+   "objs_destroyed": 2,
+   "dispatched": 0,
+   "xrun_shutdown_window": 0
+  },
+  "R5": {
+   "device": "Windows Audio",
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 0,
+   "zone": "clean",
+   "objs_destroyed": 4,
+   "dispatched": 6,
+   "xrun_shutdown_window": 0
+  },
+  "R6": {
+   "device": "DirectSound",
+   "exit": "0x00000000",
+   "dump_new": 0,
+   "transVio": 7,
+   "zone": "clean",
+   "objs_destroyed": 2,
+   "dispatched": 0,
+   "xrun_shutdown_window": 0
+  }
+ },
+ "labels": {
+  "transitionViolations=7": "D164 で確立した既知 residual — releaseResources 二重 pass（1st pass = CLI device-type 切替時に JUCE が旧 device close で releaseResources を呼出）で 2nd pass の 7 回 backward transition が guard reject。終端 ShutdownComplete 昇格は許容。Drone drain/exit 正常。pass1 生成 JSON では phase=10(ShutdownComplete), TV=7 — mechanisms 同一"
+ }
+}

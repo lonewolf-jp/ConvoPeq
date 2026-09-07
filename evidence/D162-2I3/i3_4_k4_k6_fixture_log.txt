@@ -1,0 +1,59 @@
+=== Case A: BOM-less UTF-8 + icx + /utf-8 === 
+[rc=0] 
+IDENT_OK=42
+LEN=30
+E6 97 A5 E6 9C AC E8 AA 9E E3 83 86 E3 82 B9 E3 83 88 E8 A1 A8 E3 82 BD E5 8D 81 E6 A7 8B 
+[run rc=0] 
+=== Case B: BOM-less UTF-8 + icx WITHOUT /utf-8 === 
+[rc=0] 
+IDENT_OK=42
+LEN=30
+E6 97 A5 E6 9C AC E8 AA 9E E3 83 86 E3 82 B9 E3 83 88 E8 A1 A8 E3 82 BD E5 8D 81 E6 A7 8B 
+[run rc=0] 
+=== Case B2: cl WITHOUT /utf-8 (MSVC counterpart for contrast) === 
+fixture_utf8.cpp
+fixture_utf8.cpp(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+fixture_utf8.cpp(11): error C2065: 'g_text': 定義されていない識別子です。
+fixture_utf8.cpp(13): error C2065: 'g_text': 定義されていない識別子です。
+fixture_utf8.cpp(13): warning C4473: 'printf': 書式文字列として渡された引数が不足しています
+fixture_utf8.cpp(13): note: プレースホルダーとそのパラメーターには 1 の可変個引数が必要ですが、0 が指定されています。
+fixture_utf8.cpp(13): note: 不足している可変個引数 1 が書式文字列 '%02X' に必要です
+[rc=2] 
+=== Case C: CMake IntelLLVM Release (project default: no /utf-8 in test target) === 
+-- The CXX compiler identification is IntelLLVM 2026.1.0 with MSVC-like command-line
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/icx.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.9s)
+-- Generating done (0.0s)
+CMake Warning (unused-cli):
+  Manually-specified variables were not used by the project:
+
+    CMAKE_C_COMPILER
+
+
+-- Build files have been written to: C:/Users/user/AppData/Local/Temp/icx_i34k/caseE/bld
+[configure rc=0] 
+--- Release edge FLAGS --- 
+[1/2] Building CXX object CMakeFiles\utf8_probe.dir\Release\C_\Users\user\AppData\Local\Temp\icx_i34k\fixture_utf8.cpp.obj
+[2/2] Linking CXX executable Release\utf8_probe.exe
+[Release build rc=0] 
+=== Case D: CMake IntelLLVM Debug === 
+[1/2] Building CXX object CMakeFiles\utf8_probe.dir\Debug\C_\Users\user\AppData\Local\Temp\icx_i34k\fixture_utf8.cpp.obj
+[2/2] Linking CXX executable Debug\utf8_probe.exe
+[Debug build rc=0] 
+=== Case E: CMake IntelLLVM RelWithDebInfo === 
+[1/2] Building CXX object CMakeFiles\utf8_probe.dir\RelWithDebInfo\C_\Users\user\AppData\Local\Temp\icx_i34k\fixture_utf8.cpp.obj
+[2/2] Linking CXX executable RelWithDebInfo\utf8_probe.exe
+[RWDI build rc=0] 
+IDENT_OK=42
+LEN=30
+E6 97 A5 E6 9C AC E8 AA 9E E3 83 86 E3 82 B9 E3 83 88 E8 A1 A8 E3 82 BD E5 8D 81 E6 A7 8B 
+[rel run rc=0] 
+IDENT_OK=42
+LEN=30
+E6 97 A5 E6 9C AC E8 AA 9E E3 83 86 E3 82 B9 E3 83 88 E8 A1 A8 E3 82 BD E5 8D 81 E6 A7 8B 
+[rwdi run rc=0] 
+=== edge FLAGS dump (all configs) === 

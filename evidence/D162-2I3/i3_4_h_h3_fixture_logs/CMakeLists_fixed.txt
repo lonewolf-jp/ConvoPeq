@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.20)
+project(utf8probe CXX)
+set(CMAKE_CXX_STANDARD 20)
+if(MSVC)
+    # replica of ConvoPeq CMakeLists L1519/L1524 pattern:
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /utf-8")
+    set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /RTC1 /utf-8")
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Zi /O2 /Ob1 /DNDEBUG /utf-8")  # H5 candidate fix
+    set(ENABLE_ASAN OFF)
+    add_executable(plain main_plain.cpp)
+    add_executable(withopt main_target.cpp)
+    target_compile_options(withopt PRIVATE /utf-8)
+endif()

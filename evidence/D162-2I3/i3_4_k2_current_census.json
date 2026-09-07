@@ -1,0 +1,11 @@
+{
+ "Release": {
+  "error": "impl missing"
+ },
+ "Debug": {
+  "error": "impl missing"
+ },
+ "RelWithDebInfo": {
+  "error": "impl missing"
+ }
+}

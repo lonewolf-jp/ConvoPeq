@@ -1,0 +1,105 @@
+I3-4-I I1 - /EHsc source occurrence census (CMakeLists.txt @ 9cacee1f+dirty, sha16=680e82395c78eb80)
+Classification: A=global CXX config set(), B=global C config set(), C=target_compile_options (MSVC/agnostic),
+                D=generator expression (0 found), E=IntelLLVM-block target options, F=comment-only, G=other (clang-tidy)
+Outside CMakeLists.txt: JUCE/extras/Build/CMake/JUCEHelperTargets.cmake:123 juce_recommended_config_flags
+  INTERFACE /EHsc — project CMakeLists references juce_recommended_config_flags 0 times => not in play
+==============================================================================================================
+
+L322   C: target_compile_options                  tgt=D8_2_B_2_Tests
+        target_compile_options(D8_2_B_2_Tests PRIVATE /EHsc /utf-8)
+L364   C: target_compile_options                  tgt=RuntimeHealthMonitorTierTests
+        target_compile_options(RuntimeHealthMonitorTierTests PRIVATE /EHsc /utf-8)
+L397   C: target_compile_options                  tgt=StuckReaderFallbackDrainTests
+        target_compile_options(StuckReaderFallbackDrainTests PRIVATE /EHsc /utf-8)
+L432   C: target_compile_options                  tgt=ISRSoakTests
+        target_compile_options(ISRSoakTests PRIVATE /EHsc /utf-8)
+L442   C: target_compile_options                  tgt=OwnerChannelTests
+        target_compile_options(OwnerChannelTests PRIVATE /EHsc /utf-8)
+L502   C: target_compile_options                  tgt=BuildErrorClassificationTests
+        target_compile_options(BuildErrorClassificationTests PRIVATE /EHsc /utf-8)
+L514   C: target_compile_options                  tgt=RetrySchedulerTests
+        target_compile_options(RetrySchedulerTests PRIVATE /EHsc /utf-8)
+L569   C: target_compile_options                  tgt=PriorityIntegrationTests
+        target_compile_options(PriorityIntegrationTests PRIVATE /EHsc)
+L626   C: target_compile_options                  tgt=FFTBackendTests
+        target_compile_options(FFTBackendTests PRIVATE /EHsc)
+L796   C: target_compile_options                  tgt=MpscBoundedRingTests
+        target_compile_options(MpscBoundedRingTests PRIVATE /EHsc /utf-8)
+L804   C: target_compile_options                  tgt=SequenceArithmeticTests
+        target_compile_options(SequenceArithmeticTests PRIVATE /EHsc /utf-8)
+L812   C: target_compile_options                  tgt=DSPHandleTableTests
+        target_compile_options(DSPHandleTableTests PRIVATE /EHsc /utf-8)
+L920   F: comment-only                            tgt=None
+        # テストターゲットに /EHsc を追加（例外処理を有効化）
+L923   C: target_compile_options                  tgt=ISRRuntimeIdentityTests
+        target_compile_options(ISRRuntimeIdentityTests PRIVATE /EHsc)
+L924   C: target_compile_options                  tgt=RuntimePublicationCoordinatorTests
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /EHsc)
+L925   C: target_compile_options                  tgt=ISRSemanticValidationTests
+        target_compile_options(ISRSemanticValidationTests PRIVATE /EHsc)
+L926   C: target_compile_options                  tgt=invariant_INV3_INV5Tests
+        target_compile_options(invariant_INV3_INV5Tests PRIVATE /EHsc)
+L927   C: target_compile_options                  tgt=AdmissionPackedStateTests
+        target_compile_options(AdmissionPackedStateTests PRIVATE /EHsc)
+L939   C: target_compile_options                  tgt=RetireGraceSemanticsTests
+        target_compile_options(RetireGraceSemanticsTests PRIVATE /EHsc)
+L940   C: target_compile_options                  tgt=ShutdownRetireIntentDrainTests
+        target_compile_options(ShutdownRetireIntentDrainTests PRIVATE /EHsc)
+L941   C: target_compile_options                  tgt=TerminalTelemetryContractTests
+        target_compile_options(TerminalTelemetryContractTests PRIVATE /EHsc)
+L942   C: target_compile_options                  tgt=NormalRetireDSPHandleCompareTests
+        target_compile_options(NormalRetireDSPHandleCompareTests PRIVATE /EHsc)
+L943   C: target_compile_options                  tgt=RuntimeSemanticSchemaValidationTests
+        target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /EHsc)
+L944   C: target_compile_options                  tgt=ObservePathSingleSourceTests
+        target_compile_options(ObservePathSingleSourceTests PRIVATE /EHsc)
+L945   C: target_compile_options                  tgt=OverlapAuthoritySingularTests
+        target_compile_options(OverlapAuthoritySingularTests PRIVATE /EHsc)
+L946   C: target_compile_options                  tgt=ShadowCompareContractTests
+        target_compile_options(ShadowCompareContractTests PRIVATE /EHsc)
+L947   C: target_compile_options                  tgt=CrossfadeExecutorLocalContractTests
+        target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /EHsc)
+L948   C: target_compile_options                  tgt=RuntimeWorldAuthorityProjectionTests
+        target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /EHsc)
+L949   C: target_compile_options                  tgt=PartialPublicationRejectTests
+        target_compile_options(PartialPublicationRejectTests PRIVATE /EHsc)
+L950   C: target_compile_options                  tgt=RebuildAdmissionRegressionTests
+        target_compile_options(RebuildAdmissionRegressionTests PRIVATE /EHsc)
+L951   C: target_compile_options                  tgt=BuildInputSemanticContractTests
+        target_compile_options(BuildInputSemanticContractTests PRIVATE /EHsc)
+L1100  C: target_compile_options                  tgt=MTNUPCMeasurement
+        target_compile_options(MTNUPCMeasurement PRIVATE /utf-8 /EHsc)
+L1506  C: target_compile_options                  tgt=ConvoPeq
+        /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
+L1517  F: comment-only                            tgt=None
+        # ★ work88 (Phase 7): /EHsc を追加 — 欠落すると JUCE が「exceptions 無効」で C1189 エラー
+L1518  F: comment-only                            tgt=None
+        #   （Debug の CMAKE_CXX_FLAGS_DEBUG には /EHsc があり、Release だけ欠落していた既存バグ）
+L1519  A: CMAKE_CXX_FLAGS_RELEASE (global)        tgt=None
+        set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+L1520  B: CMAKE_C_FLAGS_RELEASE (global)          tgt=None
+        set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+L1524  A: CMAKE_CXX_FLAGS_DEBUG (global)          tgt=None
+        set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
+L1525  B: CMAKE_C_FLAGS_DEBUG (global)            tgt=None
+        set(CMAKE_C_FLAGS_DEBUG   "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
+L1532  F: comment-only                            tgt=None
+        # /EHsc は RWDI にも欠落しているが、本修正の根因 (/utf-8) と切り離すため
+L1575  E: IntelLLVM-block target options          tgt=ConvoPeq
+        /EHsc
+L1605  F: comment-only                            tgt=None
+        # ★ work88 (Phase 7): /EHsc を追加（Release の JUCE C1189 回避 — icx 側も同様）
+L1606  A: CMAKE_CXX_FLAGS_RELEASE (global)        tgt=None
+        set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+L1607  B: CMAKE_C_FLAGS_RELEASE (global)          tgt=None
+        set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+L1807  G: clang-tidy --extra-arg                  tgt=None
+        "--extra-arg=/EHsc"
+L1816  G: clang-tidy --extra-arg                  tgt=None
+        "--extra-arg=/EHsc"
+L1886  C: target_compile_options                  tgt=AudioEngineHarness
+        target_compile_options(AudioEngineHarness PRIVATE /EHsc /utf-8)
+
+totals: {'C': 33, 'F': 5, 'A': 3, 'B': 3, 'E': 1, 'G': 2} grand=47  (grep -c '/EHsc' = 47)
+Note: L1506 = ConvoPeq target options (C); L1575 = ConvoPeq IntelLLVM options (E);
+L1606/L1607 = IntelLLVM Release global set() (A/B); L1100 MTNUPCMeasurement if(MSVC) applies to cl and icx (C).

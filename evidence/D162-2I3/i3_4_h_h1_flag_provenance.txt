@@ -1,0 +1,27 @@
+I3-4-H H1/H2 - /utf-8 provenance: CMake semantics -> generated edges (all CXX compile edges per config)
+==============================================================================
+
+CMakeLists.txt provenance (source level):
+  L1497-1509  target_compile_options(ConvoPeq PRIVATE /utf-8 /W4 ...)   [target-level, all configs]
+  L1519-1520  set(CMAKE_CXX_FLAGS_RELEASE '... /utf-8 /EHsc')            [config-level, ALL targets]
+  L1524-1525  set(CMAKE_CXX_FLAGS_DEBUG   '... /utf-8 /EHsc')            [config-level, ALL targets]
+  (NO set(CMAKE_CXX_FLAGS_RELWITHDEBINFO ...) anywhere in CMakeLists.txt)
+  L1980-2002  ASan loop: target_compile_options(${tgt} PRIVATE ... /utf-8 ...)  [target-level]
+  L1985-1986  comment explicitly acknowledges the RWDI gap
+  => RWDI falls back to CMake default /Zi /O2 /Ob1 /DNDEBUG (no /utf-8)
+
+=== generated-edge census (impl-<cfg>.ninja, all CXX_COMPILER edges) ===
+Release: CXX edges=492  with /utf-8=492  WITHOUT=0  (0 targets affected)
+   flags variants:
+     x492  utf8=True  /DWIN32 /D_WINDOWS /EHsc /Zm400 /bigobj /O2 /Ob2 /DNDEBUG /f
+
+Debug: CXX edges=492  with /utf-8=492  WITHOUT=0  (0 targets affected)
+   flags variants:
+     x492  utf8=True  /DWIN32 /D_WINDOWS /EHsc /D_DEBUG /bigobj /Zm400 /Ob0 /Od /Z
+
+RelWithDebInfo: CXX edges=492  with /utf-8=483  WITHOUT=9  (7 targets affected)
+   flags variants:
+     x483  utf8=True  /DWIN32 /D_WINDOWS /EHsc /Zi /O2 /Ob1 /DNDEBUG -std:c++20 -M
+     x9    utf8=False /DWIN32 /D_WINDOWS /EHsc /Zi /O2 /Ob1 /DNDEBUG -std:c++20 -M
+   targets WITHOUT /utf-8 (7): D8_1_WrapperCacheTests, DeferredDeletionQueueReclaimTests, EQAnalysisUnitTests, EQBoundExcessBenchmark, EQProcessorMaxGainTests, FFTBackendTests, GainStagingContractTests
+

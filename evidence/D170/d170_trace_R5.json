@@ -1,0 +1,79 @@
+{
+  "schema": "shutdown_trace_v4",
+  "phase": 10,
+  "phaseName": "ShutdownComplete",
+  "healthState": 0,
+  "healthStateName": "Healthy",
+  "blockingReason": "Unknown",
+  "blockingReasonCode": 9,
+  "transitionViolations": 0,
+  "sh1_callbackCount": 0,
+  "sh2_activeCrossfade": 0,
+  "sh3_pendingRetire": 3,
+  "sh4_observerCount": 0,
+  "sh5_lateCallbackCount": 0,
+  "sh6_postStopEnqueueCount": 0,
+  "blockingReasonStats": [
+    {
+      "reason": "None",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "PendingPublication",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "PendingRetire",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ActiveCrossfade",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "DeferredPublish",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "QuarantineResident",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "RouterPendingRetire",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ReaderActive",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "ActiveBuilder",
+      "count": 0,
+      "maxDurationUs": 0,
+      "firstSeenUs": 0
+    },
+    {
+      "reason": "Unknown",
+      "count": 1,
+      "maxDurationUs": 86771290716,
+      "firstSeenUs": 86771290716
+    }
+  ],
+  "verified": false
+}

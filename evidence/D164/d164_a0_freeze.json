@@ -1,0 +1,44 @@
+{
+  "task": "D164 — D162-2-I1 Corrected Operational Shutdown Soak",
+  "freeze_time": "2026-09-06 (A0)",
+  "git": {
+    "head_sha": "9cacee1f4c81f47bf55eb6396627270cd3cb7618",
+    "head_date": "2026-09-05 23:39:20 +0900",
+    "dirty_files": ["CMakeLists.txt (M, H5 +10 lines /utf-8 RWDI block — pre-existing, do not touch)"],
+    "untracked": "evidence/D162-2I3, evidence/D163, doc/work88 reports (docs only)"
+  },
+  "cmakelists_sha256": "680e82395c78eb802e8382f0703713dfd206178f3d320d30632888c05ac99a9f",
+  "binary": {
+    "path": "build-diag/ConvoPeq_artefacts/RelWithDebInfo/ConvoPeq.exe",
+    "mtime": "2026-09-06 02:00",
+    "sha256": "3642813285859dce2606b6df5bd9b9a74c41a42e948cc57ee77797977a3fd5ac",
+    "config": "RWDI diag (same config as G4 soak — lifecycle closure observable)",
+    "DRIFT_FOUND": "A0 freeze missed compile-flag check: this binary was built with CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=OFF (H5 reconfigure 09-06 00:01 wiped the ON cache value). First 26 runs INVALID (channel 4 unobservable) — quarantined to evidence/D164/invalid_v1/.",
+    "restored_binary": {
+      "mtime": "2026-09-06 10:49",
+      "sha256": "72cce20a759f29fcf2e025d988d88814107d181f1ec4daec2e028224433e3ad2",
+      "config": "RUNTIME_DIAGNOSTICS=ON restored via evidence/D164/d164_diag_restore_build.bat (build tree only, no source change); smoke: MEM_SNAP=119 Seq=36 exit 0x0 zone clean",
+      "used_for": "official 26 runs (A×8 B×6 C×6 D×6)"
+    }
+  },
+  "source_authority": {
+    "note": "ConvoPeq.md (Generated 2026-09-05 12:02:18) is stale vs H5 edit (2026-09-06 00:00) — NOT used as source authority; direct src/ reads used. No source rebuild needed: binary 02:00 postdates H5 00:00 edit.",
+    "s3_vd": "G4 production tree (S3=ON / V-D=ON) — clearDeferredForShutdown retire (G1) + V-D retire-not-destroy (G2) in current src"
+  },
+  "crash_dumps_baseline": {
+    "dir": "%LOCALAPPDATA%/CrashDumps",
+    "convopeq_count_at_A0": 7,
+    "latest": ["ConvoPeq.exe.6824.dmp (09-06 02:07)", "ConvoPeq.exe.924.dmp (09-06 02:06)", "ConvoPeq.exe.29176.dmp (09-05 23:30)"],
+    "rule": "before/after snapshot diff per run — new dump attribution only"
+  },
+  "profiles": {
+    "A": {"runs": 8, "cli": "--cli-run --cli-log-file <log> --cli-exit-ms 15000", "d120_hist": "2/5 crash"},
+    "B": {"runs": 6, "cli": "--cli-run --cli-log-file <log> --cli-ir D162-1P_active.wav --cli-intent-burst-count 3 --cli-intent-burst-interval-ms 2000 --cli-exit-ms 15000", "d120_hist": "3/3 crash", "note": "most critical; STOP gates subsequent profiles"},
+    "C": {"runs": 6, "cli": "+ --cli-ir-reload-count 3 --cli-ir-reload-interval-ms 3000 --cli-intent-burst-count 3 --cli-intent-burst-interval-ms 3000 --cli-exit-ms 18000", "d120_hist": "n/a"},
+    "D": {"runs": 6, "cli": "--cli-device-type {Windows Audio|DirectSound} rotation --cli-exit-ms 15000", "d120_hist": "n/a", "note": "each run = 1 device cycle"}
+  },
+  "pass_criteria": "all runs: exit==0x0, new dump==0, zone clean (SHUTDOWN_BEGIN->reset completed->LOGGER_DETACH/SHUTDOWN_END), E-3==0, Signature A/B/C==0, EBR ovf==0, final EBR pend==0, residual==0, gen 1:1, dup destroy==0, direct destroy==0, forbidden stale-map HIT==0",
+  "stop_criteria": "any of the above violated in 1 run -> stop that profile, no auto-advance, diagnostic attribution first",
+  "runner": "evidence/D164_soak.ps1",
+  "verdict_frame": "not absolute non-existence proof; conclusion = 'D120 historical teardown race did not reproduce in I1 profiles under current G4 tree'"
+}

@@ -1,0 +1,27 @@
+I3-4-H5 H10 - change-scope audit (generated 2026-09-06 02:48:10)
+==========================================================================
+
+git diff --stat CMakeLists.txt build.bat src/ tests/:
+(no tracked diffs in these paths)
+
+git status CMakeLists.txt/build.bat: M CMakeLists.txt
+
+CMakeLists.txt diff: +10 lines / -0 lines
+added lines:
+  +
+  +    # RelWithDebInfo も Release/Debug と同じ semantic source から /utf-8 を得る。
+  +    # 欠落していた場合、RWDI の compile edge は CMake デフォルト (/Zi /O2 /Ob1 /DNDEBUG)
+  +    # にフォールバックして /utf-8 を失い、UTF-8 (BOM 無し) ソースを CP932 解釈して
+  +    # C4819 + mojibake 構文エラー（例: AtomicAccess.h(55)）となる。
+  +    # (I3-4-H 監査: RWDI 492 CXX edge のうち 9 edge / 7 target が欠落・fixture で再現済み)
+  +    # /EHsc は RWDI にも欠落しているが、本修正の根因 (/utf-8) と切り離すため
+  +    # 別途 provenance audit を経てから適用する (I3-4-H4 契約)。
+  +    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Zi /O2 /Ob1 /DNDEBUG /utf-8")
+  +    set(CMAKE_C_FLAGS_RELWITHDEBINFO   "/Zi /O2 /Ob1 /DNDEBUG /utf-8")
+removed lines: 0
+
+src/tools/build_identity_gate.py: now=a6ebf9effa8c0d44 G-final=a6ebf9effa8c0d44 -> unchanged-in-H5: True
+build.bat: now=67b291a5f0f16e90 G-backup=67b291a5f0f16e90 -> unchanged-in-H5-and-G: True
+
+src/tests/ObservePathSingleSourceTests.cpp sha[:16]=74b48b54665b9314 (G5 touch was mtime-only; content tracked by git)
+  git status: (clean - content unchanged vs HEAD)

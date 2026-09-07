@@ -1,0 +1,18 @@
+{
+ "architecture": "x64",
+ "cmake_version": "cmake version 4.4.3",
+ "compiler_id": "MSVC",
+ "compiler_path": "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe",
+ "compiler_version": "MSVC 19.51",
+ "configuration_family": "Debug;Release;RelWithDebInfo",
+ "console_codepage": "932",
+ "generator": "Ninja Multi-Config",
+ "msvc_deps_prefix_sha256": "b84b3da87752fa51",
+ "ninja_version": "1.13.2",
+ "source_revision": "0aeb22c+dirty",
+ "stamp_schema": 2,
+ "windows_sdk_dir": "C:\\Program Files (x86)\\Windows Kits\\10",
+ "windows_sdk_fingerprint_source": "environment",
+ "windows_sdk_include_fingerprint": "2c5e417e4aee1303",
+ "windows_sdk_version": "10.0.26100.0"
+}

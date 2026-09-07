@@ -1,0 +1,46 @@
+{
+  "task": "D165 — D162-2-I2 Long-run / Device-cycle Validation",
+  "gate": "D165-A0 extended freeze (D164 lesson: binary hash alone insufficient — include CMake cache diagnostic flags)",
+  "freeze_time": "2026-09-06 ~11:15 JST",
+  "git": {
+    "head_sha": "9cacee1f4c81f47bf55eb6396627270cd3cb7618",
+    "source_diff_vs_HEAD": "0 (src/ clean)",
+    "tracked_dirty": [
+      "CMakeLists.txt (H5 +10 /utf-8 RWDI block, SHA 680e8239…, unchanged during D164)",
+      "evidence/evidence/*.json x9 — app runtime telemetry written by D164 runs (not source)"
+    ],
+    "untracked": "evidence/D162-2I3, D163, D164, D164_soak.ps1, D164_*.log, doc/work88 reports (docs only)"
+  },
+  "cmakelists_sha256": "680e82395c78eb802e8382f0703713dfd206178f3d320d30632888c05ac99a9f",
+  "binary": {
+    "path": "build-diag/ConvoPeq_artefacts/RelWithDebInfo/ConvoPeq.exe",
+    "sha256": "72cce20a759f29fcf2e025d988d88814107d181f1ec4daec2e028224433e3ad2",
+    "mtime": "2026-09-06 10:49",
+    "size": 73820672,
+    "same_as": "D164 正式 binary (restored DIAG build)"
+  },
+  "cmake_cache_build_diag": {
+    "CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS": "ON — required for MEM_SNAP/D117 lifecycle channel (D164 drift lesson)",
+    "CONVOPEQ_REQUIRE_MKL": "ON",
+    "CMAKE_GENERATOR": "Ninja Multi-Config",
+    "CMAKE_CXX_COMPILER": "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe (full path, not short 'cl')",
+    "CMAKE_C_COMPILER": "same full path"
+  },
+  "s3_vd": {
+    "S3": "RuntimePublicationOrchestrator.cpp:632 origin=shutdown-clear (fired 1/run in D164 B/C)",
+    "VD": "D162-2G2_VD_RETIRE in AudioEngine.Processing.ReleaseResources.cpp (fired every D164 run)"
+  },
+  "crash_dumps_baseline": {
+    "dir": "%LOCALAPPDATA%/CrashDumps",
+    "convopeq_count": 7,
+    "rule": "before/after snapshot diff per run"
+  },
+  "cli_flags_confirmed": "MainWindow.cpp:367-400 (cli-run/ir/ir-reload/device-type/intent-burst/exit-ms/log-file all existing)",
+  "convoPeq_md": "Generated 2026-09-05 12:02 — stale vs H5 (09-06 00:00); NOT used as source authority",
+  "workload_design": {
+    "I2_WA": "1 run: 60-gen long soak WA: --cli-ir-reload-count 60 interval 6000 + intent-burst 60/6000 + exit 420000 + --cli-device-type 'Windows Audio'",
+    "I2_DS": "1 run: same on DirectSound (residual tracking: expect transitionViolations=7 at shutdown; D164-known, not STOP)",
+    "I2_R": "restart cycle ×6 (WA/DS alternating): IR + reload×2 (2500ms) + burst×3 (2500ms) + exit 30000",
+    "json_capture": "per-run shutdown_trace.json copy (transitionViolations per-run attribution)"
+  }
+}

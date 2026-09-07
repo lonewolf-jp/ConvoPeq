@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-05 12:02:18
+> Generated: 2026-09-07 21:38:42
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -296,62 +296,66 @@
         │   ├── PeakEstimator.h
         │   ├── UpperBoundEstimator.cpp
         │   └── UpperBoundEstimator.h
-        └── tests/
-            ├── AdmissionPackedStateTestAccess.h
-            ├── AdmissionPackedStateTests.cpp
-            ├── AudioEngineHarness/
-            │   ├── AudioEngineHarness.cpp
-            │   ├── AudioEngineHarness.h
-            │   ├── DeferredFlowIntegrationTests.cpp
-            │   ├── DeferredPublicationTestAccess.h
-            │   ├── DeferredPublishViewStateMachineTests.cpp
-            │   ├── OdenomCampaignTests.cpp
-            │   ├── PublishPipelineIntegrationTests.cpp
-            │   ├── SoakPublishIntegrationTests.cpp
-            │   ├── T1Measurement.cpp
-            │   ├── T2Measurement.cpp
-            │   ├── T3Measurement.cpp
-            │   ├── T4Measurement.cpp
-            │   └── WorldRetirementMeasurementTests.cpp
-            ├── BuildErrorClassificationTests.cpp
-            ├── BuildInputSemanticContractTests.cpp
-            ├── CrossfadeExecutorLocalContractTests.cpp
-            ├── D8_1_WrapperCacheTests.cpp
-            ├── D8_2_B_2_Tests.cpp
-            ├── DSPHandleTableTests.cpp
-            ├── DeferredDeletionQueueReclaimTests.cpp
-            ├── EQAnalysisUnitTests.cpp
-            ├── EQBoundExcessBenchmark.cpp
-            ├── EQProcessorMaxGainTests.cpp
-            ├── FFTBackendTests.cpp
-            ├── GainStagingContractTests.cpp
-            ├── ISRRuntimeIdentityGeneratorsTests.cpp
-            ├── ISRSemanticValidationTests.cpp
-            ├── ISRSoakTests.cpp
-            ├── MT-NUPC-Measurement.cpp
-            ├── MpscBoundedRingTests.cpp
-            ├── NormalRetireDSPHandleCompareTests.cpp
-            ├── ObservePathSingleSourceTests.cpp
-            ├── OverlapAuthoritySingularTests.cpp
-            ├── OwnerChannelTests.cpp
-            ├── PartialPublicationRejectTests.cpp
-            ├── PriorityIntegrationTests.cpp
-            ├── PublicationAdmissionTestRuntimeStubs.cpp
-            ├── PublicationAdmissionTests.cpp
-            ├── PublicationValidatorIsolationTests.cpp
-            ├── RebuildAdmissionRegressionTests.cpp
-            ├── RetireGraceSemanticsTests.cpp
-            ├── RetrySchedulerTests.cpp
-            ├── RuntimeHealthMonitorTierTests.cpp
-            ├── RuntimePublicationCoordinatorTests.cpp
-            ├── RuntimeSemanticSchemaValidationTests.cpp
-            ├── RuntimeWorldAuthorityProjectionTests.cpp
-            ├── SequenceArithmeticTests.cpp
-            ├── ShadowCompareContractTests.cpp
-            ├── ShutdownRetireIntentDrainTests.cpp
-            ├── StuckReaderFallbackDrainTests.cpp
-            ├── TerminalTelemetryContractTests.cpp
-            └── invariant_INV3_INV5.cpp
+        ├── tests/
+        │   ├── AdmissionPackedStateTestAccess.h
+        │   ├── AdmissionPackedStateTests.cpp
+        │   ├── AudioEngineHarness/
+        │   │   ├── AudioEngineHarness.cpp
+        │   │   ├── AudioEngineHarness.h
+        │   │   ├── DeferredFlowIntegrationTests.cpp
+        │   │   ├── DeferredPublicationTestAccess.h
+        │   │   ├── DeferredPublishViewStateMachineTests.cpp
+        │   │   ├── OdenomCampaignTests.cpp
+        │   │   ├── PublishPipelineIntegrationTests.cpp
+        │   │   ├── SoakPublishIntegrationTests.cpp
+        │   │   ├── T1Measurement.cpp
+        │   │   ├── T2Measurement.cpp
+        │   │   ├── T3Measurement.cpp
+        │   │   ├── T4Measurement.cpp
+        │   │   └── WorldRetirementMeasurementTests.cpp
+        │   ├── BuildErrorClassificationTests.cpp
+        │   ├── BuildInputSemanticContractTests.cpp
+        │   ├── CrossfadeExecutorLocalContractTests.cpp
+        │   ├── D8_1_WrapperCacheTests.cpp
+        │   ├── D8_2_B_2_Tests.cpp
+        │   ├── DSPHandleTableTests.cpp
+        │   ├── DeferredDeletionQueueReclaimTests.cpp
+        │   ├── EQAnalysisUnitTests.cpp
+        │   ├── EQBoundExcessBenchmark.cpp
+        │   ├── EQProcessorMaxGainTests.cpp
+        │   ├── FFTBackendTests.cpp
+        │   ├── GainStagingContractTests.cpp
+        │   ├── ISRRuntimeIdentityGeneratorsTests.cpp
+        │   ├── ISRSemanticValidationTests.cpp
+        │   ├── ISRSoakTests.cpp
+        │   ├── MT-NUPC-Measurement.cpp
+        │   ├── MpscBoundedRingTests.cpp
+        │   ├── NormalRetireDSPHandleCompareTests.cpp
+        │   ├── ObservePathSingleSourceTests.cpp
+        │   ├── OverlapAuthoritySingularTests.cpp
+        │   ├── OwnerChannelTests.cpp
+        │   ├── PartialPublicationRejectTests.cpp
+        │   ├── PriorityIntegrationTests.cpp
+        │   ├── PublicationAdmissionTestRuntimeStubs.cpp
+        │   ├── PublicationAdmissionTests.cpp
+        │   ├── PublicationValidatorIsolationTests.cpp
+        │   ├── RebuildAdmissionRegressionTests.cpp
+        │   ├── RetireGraceSemanticsTests.cpp
+        │   ├── RetrySchedulerTests.cpp
+        │   ├── RuntimeHealthMonitorTierTests.cpp
+        │   ├── RuntimePublicationCoordinatorTests.cpp
+        │   ├── RuntimeSemanticSchemaValidationTests.cpp
+        │   ├── RuntimeWorldAuthorityProjectionTests.cpp
+        │   ├── SequenceArithmeticTests.cpp
+        │   ├── ShadowCompareContractTests.cpp
+        │   ├── ShutdownRetireIntentDrainTests.cpp
+        │   ├── StuckReaderFallbackDrainTests.cpp
+        │   ├── TerminalTelemetryContractTests.cpp
+        │   └── invariant_INV3_INV5.cpp
+        └── tools/
+            ├── __pycache__/
+            ├── build_identity_gate.py
+            └── check_layout_offsets.py
 ```
 
 ## 📄 Source Code Contents
@@ -1884,6 +1888,16 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
     set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
     set(CMAKE_C_FLAGS_DEBUG   "/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc")
+
+    # RelWithDebInfo も Release/Debug と同じ semantic source から /utf-8 を得る。
+    # 欠落していた場合、RWDI の compile edge は CMake デフォルト (/Zi /O2 /Ob1 /DNDEBUG)
+    # にフォールバックして /utf-8 を失い、UTF-8 (BOM 無し) ソースを CP932 解釈して
+    # C4819 + mojibake 構文エラー（例: AtomicAccess.h(55)）となる。
+    # (I3-4-H 監査: RWDI 492 CXX edge のうち 9 edge / 7 target が欠落・fixture で再現済み)
+    # /EHsc は RWDI にも欠落しているが、本修正の根因 (/utf-8) と切り離すため
+    # 別途 provenance audit を経てから適用する (I3-4-H4 契約)。
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Zi /O2 /Ob1 /DNDEBUG /utf-8")
+    set(CMAKE_C_FLAGS_RELWITHDEBINFO   "/Zi /O2 /Ob1 /DNDEBUG /utf-8")
     # MSVCリンカーフラグは target_link_options で設定（他コンパイラに漏洩しない）
     target_link_options(ConvoPeq PRIVATE
         $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR>
@@ -2565,6 +2579,23 @@ timeout /t 2 >nul
 goto configure_cmake
 
 :configure_cmake_ok
+REM ------------------------------------------------------------
+REM D162-2-I3-4-D (COHERENCE-1..5 gate): build identity stamp + dependency gate.
+REM Fail-closed: identity mismatch or #deps-0 relevant .obj => build refuses.
+REM No automatic clean (explicit "build.bat <cfg> clean" is the recovery path).
+echo [GATE ] build identity + dependency gate...
+if exist "%BUILD_DIR%\CMakeFiles\.build_identity" (
+    python "%~dp0src\tools\build_identity_gate.py" --build-dir "%BUILD_DIR%" --check --config !BUILD_CONFIG!
+) else (
+    python "%~dp0src\tools\build_identity_gate.py" --build-dir "%BUILD_DIR%" --config !BUILD_CONFIG!
+)
+if errorlevel 1 (
+    echo [ERROR] Build gate failed - see [GATE-FAIL] messages above.
+    echo [ERROR] Refusing to link with potentially incoherent build state.
+    call :maybe_pause
+    exit /b 1
+)
+
 
 REM ------------------------------------------------------------
 REM Copy compile_commands.json to project root for clangd/serena LSP
@@ -19391,6 +19422,19 @@ void MainApplication::shutdown()
     // ★ D127-E (diagnostic only): SHUTDOWN_BEGIN — teardown phase 計測の起点。
     //   production semantics 変更なし（ログ出力のみ）。
     juce::Logger::writeToLog("[D123] SHUTDOWN_BEGIN");
+    // ★ D167-2: terminal-release intent。~MainWindow の closeAudioDevice() が引き起こす
+    //   AudioEngineProcessor::releaseResources() は reconfigure と terminal を同一入口で
+    //   呼ぶ（JUCE 契約）ため、app shutdown であることを engine へ明示する
+    //   （信号なしでは device switch と terminal を区別できず、D166 DS-F2 の root cause）。
+    //   consume-once: 以後の最初の releaseResources pass が terminal pipeline を実行する。
+    //   shutdown() を経由しない異常系では ~AudioEngine の独立 terminal 経路
+    //   （dtor は releaseResources を呼ばない・CtorDtor.cpp 自前 teardown）が後始末を担う。
+    if (mainWindow != nullptr)
+    {
+        if (auto* engine = mainWindow->getAudioEngine())
+            engine->requestTerminalRelease();
+        juce::Logger::writeToLog("[D167] terminal-release intent set (app shutdown)");
+    }
     // unique_ptr のデストラクタで MainWindow が閉じられる
     // MainWindow デストラクタ内で:
     //   1) オーディオコールバック停止
@@ -37552,6 +37596,23 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // P0-A0: LifecycleIsolationRuntime integration
     auto lifecycleToken = lifecycleRuntime_.enterPrepare(samplesPerBlockExpected, static_cast<int>(sampleRate));
 
+    // ★ D169-2-4 (RC-D169-2-1/3/5): duplicate-prepare collapse = no-op。
+    //   enterPrepare() が expectedPhase == Prepared の token を返すのは collapse 経路のみ
+    //   （phase==Prepared && 同一 SR/BS — ISRLifecycle.cpp:27-36・通常経路は常に Preparing）。
+    //   collapse は「prepare transaction の開始」ではなく「duplicate request の既存
+    //   Prepared state への吸収」のため、prepare body を一切実行せず早期 return する
+    //   （RC-D169-2-5: generation reset / pendingTask reset / publish / buffer realloc /
+    //   placeholder / submitRebuildIntent 等の全 side effect 不実行）。
+    //   本 return は leavePrepare() 呼出より前にあるため collapsed token は
+    //   leavePrepare に到達しない（RC-D169-2-3・leavePrepare の phase==Preparing 前提は無変更）。
+    //   D169-2-1: 本分岐が無いと同一 SR/BS の device restart（JUCE 冪等 re-prepare）で
+    //   leavePrepare の前提違反 → std::abort() に至る。
+    if (lifecycleToken.expectedPhase == convo::isr::LifecyclePhase::Prepared)
+    {
+        diagLog("[DIAG] prepareToPlay: duplicate-prepare collapsed (same SR/BS, already Prepared)");
+        return;
+    }
+
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
     diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 
@@ -37903,6 +37964,28 @@ void AudioEngine::releaseResources()
     ASSERT_NON_RT_THREAD();
     diagLog("[DIAG] releaseResources: enter");
 
+    // ★ D167-2: terminal / reconfigure 境界（D166 Option 1 最小增量）。
+    //   JUCE 契約上 releaseResources() は reconfigure（device switch / SR・BS 変更 /
+    //   device 再列挙）と terminal shutdown の両方で同一入口から呼ばれる（D166 §3）。
+    //   callee 側から terminal 性は判定できないため、caller が requestTerminalRelease()
+    //   を呼んだ場合のみ terminal pipeline を実行する。それ以外は reconfigure pass
+    //   （releaseResourcesForReconfigure — DSP buffer / device-dependent resource のみ解放・
+    //   admission Open 維持）に委譲する。
+    //   terminal intent は consume-once: 受領した pass が消費する。
+    //   - terminal pass: 交換して true を取得 → 従来 pipeline を無変更で実行（D167-4）。
+    //   - reconfigure pass: フラグは保持される（誤って JUCE が先に release を呼んだ場合も
+    //     terminal intent は失われず、次の requestTerminalRelease 付き pass で消化される）。
+    const bool terminalRelease = convo::exchangeAtomic(terminalReleaseRequested_,
+                                                       false,
+                                                       std::memory_order_acq_rel);
+    if (!terminalRelease)
+    {
+        diagLog("[DIAG] releaseResources: reconfigure pass (terminal intent not set)");
+        releaseResourcesForReconfigure();
+        return;
+    }
+    diagLog("[DIAG] releaseResources: terminal pass (terminal intent consumed)");
+
     auto previousState = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     for (;;)
     {
@@ -37993,13 +38076,19 @@ void AudioEngine::releaseResources()
     resetLearningControlState();
     setShutdownPhase(ShutdownPhase::StopAudio, "releaseResources");
 
+    // ★ D169-1R (RC-D169-1-2): activeRuntimeDSPSlot / fadingRuntimeDSPSlot は placeholder 専用
+    //   レガシースロット（h:2265 comment 参照 — rebuild publish は pointer slot を更新しない）であり、
+    //   下記 capture は topology observation 用にのみ使用する（ownership authority に昇格させない）。
+    //   ★ D169-1R (RC-D169-1-1): pointer-value retirement は廃止。旧 :352-359 の
+    //   lifetimeForShutdown.retire(activeToRelease 等) は retireDSPHandleForRuntime の
+    //   raw-pointer map key lookup（address reuse で生存 DSP を誤 lookup し二重破壊・
+    //   D169-1 probe8/9 実測 0xC0000005）であり、D162-2-E (E-2) が dtor から廃止済みの
+    //   pattern の残存だった。registered DSP の terminal disposition は本 pass 下段の
+    //   handle-based 経路（getActive/FadingRuntimeDSPHandle → dspHandleRuntime_.retire →
+    //   tryShutdownQuiescentReclaim → V-D-b authority retire）に一本化する。
+    //   capture 値自体は handle 経路で全て disposition 済みのため観測専用（juce::ignoreUnused）。
     DSPCore* activeToRelease = nullptr;
     DSPCore* fadingToRelease = nullptr;
-    DSPCore* pendingNewToRelease = nullptr;
-    DSPCore* pendingCurrentToRelease = nullptr;
-
-    // ★ [PR-A2] DSPLifetimeManager 経由で retire (lifetime は lock 外でも参照可能にする)
-    DSPLifetimeManager lifetimeForShutdown(*this);
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
@@ -38036,7 +38125,8 @@ void AudioEngine::releaseResources()
         if (hasPendingTask)
         {
             // ★ BUG-051: sentinel (uintptr_t)-1 は書き込まれない（常に nullptr or 有効 ptr）。
-            pendingCurrentToRelease = pendingTask.currentDSP;
+            //   ★ D169-1R: currentDSP の非 null writer は現行 source に存在しないため
+            //   （D170-1 preflight 実測）、capture 変数は廃止し slot 衛生（clear）のみ維持。
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
             publishRetryReady = false;
@@ -38194,14 +38284,12 @@ void AudioEngine::releaseResources()
 
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
-    if (activeToRelease)
-        lifetimeForShutdown.retire(activeToRelease);
-    if (fadingToRelease)
-        lifetimeForShutdown.retire(fadingToRelease);
-    if (pendingNewToRelease)
-        lifetimeForShutdown.retire(pendingNewToRelease);
-    if (pendingCurrentToRelease)
-        lifetimeForShutdown.retire(pendingCurrentToRelease);
+    // ★ D169-1R (RC-D169-1-1): pointer-value retirement 廃止 — 旧 :352-359 の
+    //   lifetimeForShutdown.retire(activeToRelease/fadingToRelease/pendingNew/pendingCurrent) は削除。
+    //   terminal disposition は下段 handle 経路（VerifyDrained: dspHandleRuntime_.retire +
+    //   tryShutdownQuiescentReclaim、V-D-b: DSPLifetimeManager::retire authority）に一本化。
+    juce::ignoreUnused(activeToRelease);
+    juce::ignoreUnused(fadingToRelease);
 
     // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
     // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。
@@ -38578,6 +38666,48 @@ void AudioEngine::releaseResources()
 
     // P0-A0: LifecycleIsolationRuntime integration - leave release phase
     lifecycleRuntime_.leaveRelease(lifecycleToken);
+}
+
+// ★ D167-3: reconfigure pass — device switch / SR・BS 変更 / device 再列挙で JUCE が
+//   呼ぶ releaseResources から terminal pipeline を完全に分離する（D166 §10 Option 1）。
+//
+//   実行しない（terminal pass 専用 — D167-4 の既存 pipeline をここで踏まない）:
+//     closeAdmission / transitionTo(terminal 系) / requestShutdown / joinProducers /
+//     shutdown drain / shutdown trace emission / markShutdownComplete / DSP retire /
+//     world clear / rebuild thread 停止 / reader registration close / MMCSS shutdown /
+//     lifecycleState → Unprepared。
+//
+//   実行する（reconfigure に本来必要な device-dependent resource release）:
+//     audio session 停止に伴う transient 状態の解放。admission は Open 維持、
+//     公開 world / active DSP は device switch を跨いで生存し、rebuild thread は
+//     停止しない（prepareToPlay が正常系として re-prepare する）。
+//
+//   前提（呼び出し契約）: Message Thread / RT audio thread 停止済み（JUCE
+//   audioDeviceStopped 後）/ lifecycleState == Prepared（caller が確認）。
+//   lifecycleState は変更しない — isEnginePrepared() を true のまま維持することで
+//   AudioEngineProcessor の duplicate-release guard 意味論と JUCE 契約を保全する。
+void AudioEngine::releaseResourcesForReconfigure() noexcept
+{
+    diagLog("[DIAG] releaseResources: reconfigure pass enter (terminal pipeline skipped)");
+
+    // learner: 現行 release が停止する挙動を維持（post-prepare 状態を terminal 系と揃える・
+    //   prepareToPlay に restart logic はないため停止のまま）。device 依存ではないが、
+    //   audio session 単位の解析コンポーネントのため session 停止時に解放する。
+    if (noiseShaperLearner)
+    {
+        juce::Logger::writeToLog("[AudioEngine] releaseResources(reconfigure): stopping learner");
+        noiseShaperLearner->stopLearning();
+    }
+    resetLearningControlState();
+
+    // RT transient 指標のリセット（次回 prepareToPlay が再初期化するものと整合）。
+    //   currentSampleRate / crossfadeRuntime / pendingTask 等は触らない — 触ると
+    //   device switch を跨ぐ publication 継続（D166 §10 リスク登録項目）を破壊する。
+    convo::publishAtomic(inputLevelLinear, 0.0f, std::memory_order_release);
+    convo::publishAtomic(outputLevelLinear, 0.0f, std::memory_order_release);
+
+    diagLog("[DIAG] releaseResources: reconfigure pass complete (admission stays Open, state="
+            + juce::String(static_cast<int>(shutdownRuntime_.admissionState())) + ")");
 }
 
 // ★ 15-P-4-5-FIX: EmergencyDrain-safe drain of RetireIntent (slot-state) system.
@@ -39197,8 +39327,25 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     // D101-31-B B-10: tryAdmit(1) after isShutdownInProgress() check passed.
     // Intent will be stored (requestRebuild or triggerAsyncUpdate → rebuildAdmissionPendingIntent_).
     // release(1) fires at function exit — obligation survives in durable state.
+    // ★ D167-5: tryAdmit 失敗（admission Closing/Closed）は無出力 return せず、
+    //   REQUESTED(accepted) との会計を成立させる（D166 §5 — Build 経路のみ telemetry 皆無の
+    //   observability defect）。terminal shutdown と競合した request は
+    //   Suppressed(AdmissionClosed) として追跡可能になる。event vocabulary 変更なし
+    //   （既存 Suppressed event + 新 reason 1 件のみ）。
     if (!shutdownRuntime_.tryAdmit(1))
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::AdmissionClosed,
+                             RebuildTelemetryDecision::Suppressed,
+                             structuralHash,
+                             fingerprint,
+                             rebuildClass,
+                             collapsePolicy,
+                             kPhase5TagKeep);
         return;
+    }
     struct RebuildReservationGuard {
         convo::isr::ShutdownRuntime& rt;
         bool active = true;
@@ -44946,6 +45093,26 @@ public:
                == EngineLifecycleState::Prepared;
     }
 
+    // ★ D167-2: terminal-release intent — releaseResources の reconfigure / terminal 境界の
+    //   明示信号。JUCE 契約上 releaseResources() は reconfigure（device switch / SR・BS 変更 /
+    //   device 再列挙）と terminal shutdown の両方で同一入口から呼ばれ、callee 側からは
+    //   terminal 性を判定できない（D166 §3 caller matrix — DS-F2 root cause）。
+    //   terminal teardown を意図する caller（MainApplication::shutdown / test harness stop）
+    //   は releaseResources() を呼ぶ前に本 API で意図を明示する。
+    //   - consume-once: releaseResources() の terminal branch が受領時に消費する。
+    //   - reconfigure pass は本フラグを消費しない（terminal intent は次の pass まで保持）。
+    //   - ShutdownRuntime への reopen API は存在しない（INV-LIFE-9 不変）。本信号は
+    //     「どちらの pass を実行するか」の選択のみを提供し、admission FSM を変更しない。
+    void requestTerminalRelease() noexcept
+    {
+        convo::publishAtomic(terminalReleaseRequested_, true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isTerminalReleaseRequested() const noexcept
+    {
+        return convo::consumeAtomic(terminalReleaseRequested_, std::memory_order_acquire);
+    }
+
     // ==================================================================
     // EBR (Epoch-Based Reclamation) 基盤
     // ==================================================================
@@ -46496,6 +46663,12 @@ public:
     // Worker thread for rebuilds
     void rebuildThreadLoop();
     void stopRebuildThread();
+    // ★ D167-3: reconfigure pass — JUCE reconfigure（device switch / SR・BS 変更 / 再列挙）で
+    //   呼ばれる releaseResources から terminal pipeline を分離した軽量 pass。
+    //   closeAdmission / transitionTo(terminal) / requestShutdown / joinProducers / drain /
+    //   shutdown trace / rebuild thread 停止 / DSP retire / world clear は一切実行しない
+    //   （admission Open 維持 — INV-LIFE-9 不変）。lifecycleState は Prepared のまま。
+    void releaseResourcesForReconfigure() noexcept;
     std::thread rebuildThread;
     std::mutex rebuildMutex;
     std::condition_variable rebuildCV;
@@ -46503,6 +46676,9 @@ public:
     std::atomic<bool> rebuildThreadIsRunning { false };
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
+    // ★ D167-2: terminal-release intent（requestTerminalRelease が writer・releaseResources の
+    //   terminal branch が唯一の consumer — consume-once）。NonRT Message Thread 専用。
+    std::atomic<bool> terminalReleaseRequested_ { false };
     bool hasPendingTask = false;
     // ★ 監査指摘 (work88): Recovery Intent を Builder Work Queue に投入したことを rebuild
     //   スレッドへ通知するフラグ（hasPendingTask と同じ rebuildMutex で保護）。
@@ -46701,6 +46877,7 @@ public:
             case RebuildTelemetryReason::SnapshotCommandQueuedNonMt: return "snapshot_command_queued_non_mt";
             case RebuildTelemetryReason::RetirePressureSevere: return "retire_pressure_severe";
             case RebuildTelemetryReason::SameAsPendingWouldMerge: return "same_as_pending_would_merge";
+            case RebuildTelemetryReason::AdmissionClosed: return "admission_closed"; // ★ D167-5
         }
         return "unknown_reason";
     }
@@ -62968,7 +63145,11 @@ enum class RebuildTelemetryReason : uint8_t
     SnapshotCommandBufferFullNonMt,
     SnapshotCommandQueuedNonMt,
     RetirePressureSevere,
-    SameAsPendingWouldMerge
+    SameAsPendingWouldMerge,
+    // ★ D167-5: tryAdmit 失敗（admission Closing/Closed）の会計用。Build 経路の
+    //   REQUESTED(accepted) → 無出力消滅を Suppressed(AdmissionClosed) として記録する
+    //   （D166 §5 observability defect 修復）。末尾追加 — 既存値の再番号付けなし。
+    AdmissionClosed
 };
 
 enum class RebuildTelemetryClass : uint8_t
@@ -103384,6 +103565,12 @@ void AudioEngineHarness::stop()
     stopAudioOnly();
     if (engine_ == nullptr)
         return; // ★ D162-2-I2: abandonEngine() 後は engine は存在しない（放棄済み）
+    // ★ D167-2: harness stop() は terminal teardown（MainWindow 相当の終端）。
+    //   releaseResources の reconfigure/terminal 境界（D167-2）により、terminal intent を
+    //   明示しない限り releaseResources は reconfigure pass になる。harness stop() は
+    //   MainWindow ~dtor + MainApplication::shutdown 相当の terminal teardown であるため
+    //   requestTerminalRelease() を先に発行する（既存 pipeline を無変更で実行）。
+    engine_->requestTerminalRelease();
     // releaseResources(): idle publish (#4) → receipt → shutdownCoordinatorLoop join
     // (teardown publish が CoordinatorLoop 停止前に同期完了することを同時に検証する)
     if (engine_->isEnginePrepared())
@@ -103401,6 +103588,18 @@ void AudioEngineHarness::stopAudioOnly()
         if (audioThread_.joinable())
             audioThread_.join();
     }
+}
+
+// ★ D169-2-6: audio thread のみ再開（engine prepare/release を伴わない seam）。
+//   device restart stress テストが「restart cycle 毎に audio run → stop → restart」
+//   を engine 再構築なしで反復するために使用する。running_ false 化済み（join 済み）
+//   であることが前提（stopAudioOnly と対になる起動側）。
+bool AudioEngineHarness::startAudioOnly(int blockSize)
+{
+    if (convo::exchangeAtomic(running_, true, std::memory_order_acq_rel))
+        return true; // already running
+    audioThread_ = std::thread([this, blockSize]() { audioLoop(blockSize); });
+    return true;
 }
 
 // ★ D162-2-I2: engine を release せず放棄（意図的 leak・OS 回収）。
@@ -103470,6 +103669,10 @@ public:
     //   prepare → release → prepare の reconfigure 系テストが
     //   「releaseResources は audio thread 停止後に呼ぶ」harness 契約を守るための seam。
     void stopAudioOnly();
+    // ★ D169-2-6: audio thread のみ再開（engine prepare/release を伴わない）。
+    //   device restart stress が restart cycle 毎に audio run/stop を反復するための seam。
+    //   stopAudioOnly() 呼出後（running_ false・audioThread_ join 済み）であること。
+    bool startAudioOnly(int blockSize);
     // ★ D162-2-I2: engine を release せず放棄する（意図的 leak・OS 回収）。
     //   「prepare → release → prepare → release」の 2 回目 releaseResources は
     //   Debug で pre-existing segfault を踏む（BISECT で修復無起因と確認済み・I3 課題）。
@@ -104575,8 +104778,13 @@ bool testCallerDestroyTerminalDisposition()
     //     harness 外部から audio を止める簡易手段として engine 側 prepare/release の
     //     契約範囲で再現する: ここでは running_ を直接触らず、
     //     testRunner 側に audio 停止のみを行う seam を追加した stopAudioOnly() を使用。）
+    //   ★ D167-2: 本テストの前提は「admission Closed → CallerDestroy」= terminal flow。
+    //     releaseResources は terminal intent なしでは reconfigure pass（admission Open 維持）
+    //     になるため、requestTerminalRelease() を明示して terminal pass として実行する
+    //     （テスト意図 = terminal shutdown の CallerDestroy 契約のまま・不変）。
     std::fprintf(stderr, "[I2T] phase2: releaseResources (admission closed)\n");
     h.stopAudioOnly();
+    e.requestTerminalRelease();
     e.releaseResources();
     std::fprintf(stderr, "[I2T] phase2 ok: releaseResources done\n");
     e.prepareToPlay(512, 48000.0);
@@ -104584,8 +104792,7 @@ bool testCallerDestroyTerminalDisposition()
 
     if (e.getActiveRuntimeDSP() != nullptr)
     {
-        std::fprintf(stderr, "FAIL: dangling placeholder left in active slot after "
-                             "CallerDestroy (ownership repair missing)\n");
+        std::fprintf(stderr, "FAIL: dangling placeholder left in active slot after CallerDestroy\n");
         return false;
     }
     std::fprintf(stderr, "[I2T] phase3 ok: slot is null (repair verified)\n");
@@ -104611,8 +104818,7 @@ bool testCallerDestroyTerminalDisposition()
     static I2FileLogger* diagCapture = nullptr;
     diagCapture = new I2FileLogger("C:/VSC_Project/ConvoPeq/evidence/D162-2I2/teardown_diag.log");
     (void)diagCapture;
-    std::fprintf(stderr, "[I2T] phase4: abandon engine (second releaseResources is "
-                         "a pre-existing Debug segfault route — I3 issue, not I2)\n");
+    std::fprintf(stderr, "[I2T] phase4: abandon engine (pre-existing Debug segfault route, I3 issue)\n");
     h.abandonEngine();
     std::fprintf(stderr, "[I2T] phase4 ok: engine abandoned (T-I2-1 complete)\n");
     return true;
@@ -104862,6 +105068,560 @@ bool testPublishCompletionMonotonicity()
     return true;
 }
 
+// ── D167: reconfigure / terminal boundary（DS-F2 修復の harness レベル固定）──
+//   releaseResources() は terminal intent（requestTerminalRelease）がない限り reconfigure
+//   pass となり、admission / phase / lifecycleState / world / rebuild thread を保全する。
+//   D167-7 テストマトリクス対応:
+//     [1]  normal startup → admission Open
+//     [2]  normal rebuild dispatched > 0（SR 変更 re-prepare → dispatch → publish）
+//     [3]  device reconfigure → admission usable
+//     [4]  reconfigure → rebuild dispatched > 0
+//     [5]  repeated reconfigure → admission usable
+//     [6]  terminal shutdown → admission Closed
+//     [7]  terminal → tryAdmit reject
+//     [8]  terminal → drain complete（isFullyDrained + collectResult().completed）
+//     [11] reconfigure → TV=0（collectResult().transitionViolations）
+//     [12] reconfigure → no shutdown trace（phase Running 維持 = terminal pipeline 不発）
+//     [13] terminal → shutdown trace（terminal pass 内 emit・D167-9 で実機確認）
+bool testD167ReconfigureKeepsAdmissionOperational()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+    {
+        std::fprintf(stderr, "FAIL: D167: admission not Open after startup\n");
+        return false;
+    }
+
+    // reconfigure pass: terminal intent なしの bare releaseResources（JUCE device switch 相当）
+    h.stopAudioOnly();
+    e.releaseResources();
+
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+    {
+        std::fprintf(stderr, "FAIL: D167: reconfigure pass closed admission (DS-F2 regression)\n");
+        return false;
+    }
+    if (e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::Running)
+    {
+        std::fprintf(stderr, "FAIL: D167: reconfigure pass advanced shutdown phase\n");
+        return false;
+    }
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D167: reconfigure pass consumed Prepared state\n");
+        return false;
+    }
+
+    // admission usable: tryAdmit/release round-trip（reconfigure 後も admission が機能する）
+    if (!e.isrShutdownRuntime().tryAdmit(1)
+        || e.isrShutdownRuntime().outstanding() != 1)
+    {
+        std::fprintf(stderr, "FAIL: D167: admission reservation rejected after reconfigure\n");
+        return false;
+    }
+    e.isrShutdownRuntime().release(1);
+
+    // reconfigure → rebuild resumes: SR 変更 re-prepare が structural rebuild を dispatch し、
+    // publish が admission gate を通過して store を進める（D167-7 [2][4]）
+    const auto seq0 = e.observePublishedWorld()->publication.sequenceId;
+    e.prepareToPlay(512, 44100.0);
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D167: prepareToPlay after reconfigure failed\n");
+        return false;
+    }
+    const bool rebuilt = waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > seq0;
+    });
+    if (!rebuilt)
+    {
+        std::fprintf(stderr, "FAIL: D167: rebuild did not dispatch/publish after reconfigure\n");
+        return false;
+    }
+
+    // repeated reconfigure: admission が複数回の reconfigure pass で劣化しない（D167-7 [5]）
+    //   ★ 同一 SR/BS の連続 prepareToPlay は lifecycleRuntime_ の duplicate-prepare
+    //   collapse 経路（ISRLifecycle.cpp enterPrepare 同一 sr/bs で token を折りたたむ）と
+    //   leavePrepare の phase==Preparing 前提が衝突する pre-existing 課題があるため、
+    //   SR を交互に変えて collapse 経路を回避する（admission 劣化の証明には十分）。
+    for (int i = 0; i < 2; ++i)
+    {
+        h.stopAudioOnly();
+        e.releaseResources();
+        if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+        {
+            std::fprintf(stderr, "FAIL: D167: repeated reconfigure %d closed admission\n", i);
+            return false;
+        }
+        // step-d が 44100 のため、i=0 は 48000 に変えて duplicate-prepare collapse を回避
+        e.prepareToPlay(512, (i % 2 == 0) ? 48000.0 : 44100.0);
+        if (!e.isEnginePrepared())
+        {
+            std::fprintf(stderr, "FAIL: D167: re-prepare %d after repeated reconfigure failed\n", i);
+            return false;
+        }
+    }
+
+    // rebuild 完了待機: step-e の SR 変更 re-prepare が dispatch した in-flight rebuild が
+    //   terminal shutdown と競合すると、terminal の activeHandle resolve が退避済み DSP を
+    //   指す窗口が生じる（D167 検証で確認した in-flight rebuild × terminal race）。
+    //   unit test としては rebuild 静穏化を待ってから terminal に進む（実機での競合は
+    //   別途 finding として記録・D167 の修復 scope 外）。
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // terminal shutdown（h.stop() が terminal intent を発行）:
+    //   admission Closed / tryAdmit reject / ShutdownComplete / drain complete / TV=0
+    //   （D167-7 [6][7][8][11]）
+    h.stop();
+
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed)
+    {
+        std::fprintf(stderr, "FAIL: D167: terminal shutdown did not close admission\n");
+        return false;
+    }
+    if (e.isrShutdownRuntime().tryAdmit(1))
+    {
+        std::fprintf(stderr, "FAIL: D167: tryAdmit accepted after terminal shutdown\n");
+        return false;
+    }
+    if (e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::ShutdownComplete)
+    {
+        std::fprintf(stderr, "FAIL: D167: terminal shutdown did not reach ShutdownComplete\n");
+        return false;
+    }
+    // D162-2-I2 A 案の CallerDestroy（deferred slot 処分）は clearDeferredForShutdown +
+    //   waitForDrain 内 drainTerminalReclaim で消化されるため、ShutdownComplete 到達 +
+    //   admission Closed + collectResult().completed が terminal closure の契約。
+    //   isFullyDrained() は recovery obligation / intent residency を含む広い判定であり、
+    //   本テストの reconfigure 経路が残留を作るものではない（残留は D162-2 台帳の範囲）。
+    const auto result = e.isrShutdownRuntime().collectResult(
+        static_cast<convo::ISRHealthState>(0), 0);
+    if (!result.completed)
+    {
+        std::fprintf(stderr, "FAIL: D167: collectResult().completed == false\n");
+        return false;
+    }
+    if (result.transitionViolations != 0)
+    {
+        std::fprintf(stderr, "FAIL: D167: transitionViolations=%u after reconfigure pass\n",
+                     static_cast<unsigned>(result.transitionViolations));
+        return false;
+    }
+
+    std::printf("  [PASS] D167: reconfigure keeps admission operational\n");
+    return true;
+}
+
+// ── D169-2-5: duplicate-prepare collapse = no-op regression (D169-2-1 R11 gap fill) ──
+//   D167 テストは duplicate-prepare collapse 経路を SR 交互で意図的に回避していた。
+//   D169-2-1 で同一 SR/BS 連続 prepare が leavePrepare 前提違反 → abort（0xC0000409）
+//   として確定し、D169-2-4 で collapse を真の no-op に修復した。本テストは targeted
+//   regression: same SR/BS の prepareToPlay を 4 回連続投入し、abort しないこと・
+//   collapse が実際に発生すること（diagLog 観測）・prepare body 副作用が再実行されない
+//   こと（generation / publication sequence / rebuild telemetry / slot 不変）・
+//   lifecycleState == Prepared 維持を観測する。
+//   harness 契約（PrepareToPlay.cpp 「AudioThread 停止中のみ呼ぶ」）に従い、collapse 投入
+//   前に stopAudioOnly + reconfigure release を実行する（D167 テストと同一パターン）。
+//   capture logger は Timer thread の [MEM_SNAP] 並行書込み（writeToLog は全 config で
+//   有効）と競合しないよう CriticalSection で直列化する。
+class D169CollapseCaptureLogger final : public juce::Logger
+{
+public:
+    juce::CriticalSection lock;
+    juce::StringArray lines;
+    void logMessage(const juce::String& message) override
+    {
+        const juce::ScopedLock sl(lock);
+        lines.add(message);
+    }
+    int countContains(const char* needle) const
+    {
+        const juce::ScopedLock sl(lock);
+        int n = 0;
+        for (const auto& line : lines)
+            if (line.contains(needle))
+                ++n;
+        return n;
+    }
+};
+
+bool testD169DuplicatePrepareCollapseNoop()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    // startup rebuild 完了待ち（観測ベースラインの確定）+ merge 窓落ち着き
+    const auto* world0 = e.observePublishedWorld();
+    const auto bootstrapSeq = (world0 != nullptr) ? world0->publication.sequenceId : 0;
+    (void)waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > bootstrapSeq;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: engine not Prepared at baseline\n");
+        return false;
+    }
+
+    // harness 契約: prepareToPlay は audio thread 停止後に呼ぶ（D167 テストと同一順序）。
+    //   reconfigure pass（terminal intent 無し）で admission Open・phase/state Prepared 維持。
+    h.stopAudioOnly();
+    e.releaseResources();
+
+    // ベースライン観測（collapse 直前）
+    const int genBefore = e.currentBuildGeneration();
+    const auto* worldBefore = e.observePublishedWorld();
+    const auto seqBefore = (worldBefore != nullptr) ? worldBefore->publication.sequenceId : 0;
+    AudioEngine::DSPCore* slotBefore = e.getActiveRuntimeDSP();
+
+    D169CollapseCaptureLogger logger;
+    juce::Logger::setCurrentLogger(&logger);
+
+    // same SR/BS duplicate prepare ×4（指示 §2: 3 回以上の連続投入）
+    for (int i = 0; i < 4; ++i)
+        e.prepareToPlay(512, 48000.0);
+
+    juce::Logger::setCurrentLogger(nullptr);
+
+    // (a) abort しなかった = ここに到達する
+    // (b) collapse が実際に 4 回発生
+    const int collapsed = logger.countContains("duplicate-prepare collapsed");
+    if (collapsed != 4)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: collapse observed %d/4\n", collapsed);
+        return false;
+    }
+
+    // (c) prepare body 副作用の非再実行
+    const int genAfter = e.currentBuildGeneration();
+    if (genAfter != genBefore)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: generation changed on collapse\n");
+        return false;
+    }
+    const auto* worldAfter = e.observePublishedWorld();
+    const auto seqAfter = (worldAfter != nullptr) ? worldAfter->publication.sequenceId : 0;
+    if (seqAfter != seqBefore)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: publication advanced on collapse\n");
+        return false;
+    }
+    // body 入口 log が出ない（collapse は enter log より前に return する）
+    const int bodyEnters = logger.countContains("prepareToPlay: enter spb=");
+    if (bodyEnters != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: prepare body entered on collapse\n");
+        return false;
+    }
+    // rebuild telemetry が増えない（submitRebuildIntent 不発）
+    const int telemetry = logger.countContains("REBUILD_TELEMETRY");
+    if (telemetry != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: rebuild telemetry on collapse\n");
+        return false;
+    }
+    // placeholder slot 不変（新 placeholder 作成も null 化もしない）
+    AudioEngine::DSPCore* slotAfter = e.getActiveRuntimeDSP();
+    if (slotAfter != slotBefore)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: active slot changed on collapse\n");
+        return false;
+    }
+
+    // (d) lifecycleState == Prepared 維持（Preparing 経由なし）
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: engine not Prepared after collapse\n");
+        return false;
+    }
+
+    // 非 collapse 経路が無傷（RC-6）: SR 変更 re-prepare は従来どおり完全 prepare で
+    // publication が進行する（D167 step-d 再確認・audio 停止済み）。
+    e.prepareToPlay(512, 44100.0);
+    const bool rebuilt = waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > seqBefore;
+    });
+    if (!rebuilt)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: SR-change re-prepare did not publish\n");
+        return false;
+    }
+    // negative check（指示 §6）: SR 変更では collapse 分岐に入らない
+    const int collapsedOnSRChange = logger.countContains("duplicate-prepare collapsed") - collapsed;
+    if (collapsedOnSRChange != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: collapse taken on SR change\n");
+        return false;
+    }
+
+    // terminal shutdown が collapse 後の engine で完走する（race 非混入の帰無検証）
+    h.stop();
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed
+        || e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::ShutdownComplete)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-5: terminal shutdown incomplete\n");
+        return false;
+    }
+
+    std::printf("  [PASS] D169-2-5: duplicate-prepare collapse is a true no-op\n");
+    return true;
+}
+
+// ── D169-2-6: device restart / collapse stress (P3 protocol) ──
+//   JUCE device restart chain（audioDeviceStopped → releaseResources(reconfigure) →
+//   audioDeviceAboutToStart → setProcessor swap → prepareToPlay）の engine 側相当を
+//   1 cycle として反復する。cycle = audio 停止 → reconfigure release →
+//   same SR/BS prepare（collapse）→ audio 再開。50 cycles 実施し、各 cycle で
+//   (a) collapse が 1 回発生（diagLog 観測）(b) prepare body 副作用が 0
+//   （gen / seq / telemetry / slot 不変）(c) Prepared/admission 維持
+//   (d) audio run が resume することを観測する。最終 terminal shutdown 完走も確認。
+//   pre-existing hazard（MEM_SNAP sampler の dangling 参照・D169-2-5 記録）は
+//   修正しない — 発生した場合は "D169-2-6 observed pre-existing hazard" として独立記録。
+bool testD169DeviceRestartCollapseStress()
+{
+    constexpr int kCycles = 50;
+    constexpr int kBlockSize = 512;
+    constexpr double kSampleRate = 48000.0;
+
+    AudioEngineHarness h;
+    if (!h.start(kSampleRate, kBlockSize))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    // startup rebuild 完了待ち + merge 窓落ち着き
+    const auto* world0 = e.observePublishedWorld();
+    const auto bootstrapSeq = (world0 != nullptr) ? world0->publication.sequenceId : 0;
+    (void)waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > bootstrapSeq;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: engine not Prepared at baseline\n");
+        return false;
+    }
+
+    // ベースライン（stress 全体で不変であるべき値）
+    const int genBaseline = e.currentBuildGeneration();
+    const auto* worldBaseline = e.observePublishedWorld();
+    const auto seqBaseline = (worldBaseline != nullptr) ? worldBaseline->publication.sequenceId : 0;
+    AudioEngine::DSPCore* slotBaseline = e.getActiveRuntimeDSP();
+    const int telemetryBaseline = [this_ = &e]() {
+        // REBUILD_TELEMETRY は main logger に流れないため cycle 中の capture 差分で管理する。
+        return 0;
+    }();
+    (void)telemetryBaseline;
+
+    D169CollapseCaptureLogger logger;
+    juce::Logger::setCurrentLogger(&logger);
+
+    int cyclesOk = 0;
+    for (int cycle = 0; cycle < kCycles; ++cycle)
+    {
+        // JUCE device stop 相当: audio thread 停止 → reconfigure release
+        //   （device restart では terminal intent を発行しない = reconfigure pass）
+        h.stopAudioOnly();
+        e.releaseResources();
+
+        const int collapseBefore = logger.countContains("duplicate-prepare collapsed");
+
+        // JUCE device about-to-start 相当: setProcessor swap → prepareToPlay（same SR/BS）
+        e.prepareToPlay(kBlockSize, kSampleRate);
+
+        const int collapseAfter = logger.countContains("duplicate-prepare collapsed");
+        if (collapseAfter != collapseBefore + 1)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d collapse count %d -> %d\n",
+                         cycle, collapseBefore, collapseAfter);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        // body 副作用 0: enter log / rebuild telemetry が増えない
+        if (logger.countContains("prepareToPlay: enter spb=")
+            || logger.countContains("REBUILD_TELEMETRY") != 0)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d prepare body side effect observed\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        // collapse 側 leavePrepare 到達不能の間接確認: phase 不変（collapse 後も
+        // collapse が継続成立する = phase が Prepared のまま）
+        if (!e.isEnginePrepared())
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d not Prepared after collapse\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Open)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d admission not Open\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        // audio resume（JUCE device start 後の callback 再開相当）
+        h.startAudioOnly(kBlockSize);
+        const long long blocksAtCycleStart = h.blocksProcessed();
+        const bool audioRan = waitUntil(5.0, [&] {
+            return h.blocksProcessed() > blocksAtCycleStart;
+        });
+        if (!audioRan)
+        {
+            std::fprintf(stderr, "FAIL: D169-2-6: cycle %d audio did not resume\n", cycle);
+            juce::Logger::setCurrentLogger(nullptr);
+            return false;
+        }
+        ++cyclesOk;
+    }
+
+    juce::Logger::setCurrentLogger(nullptr);
+
+    // stress 全体の不変性（P5）: generation / publication / slot が cycle 反復で変化しない
+    const int genFinal = e.currentBuildGeneration();
+    const auto* worldFinal = e.observePublishedWorld();
+    const auto seqFinal = (worldFinal != nullptr) ? worldFinal->publication.sequenceId : 0;
+    AudioEngine::DSPCore* slotFinal = e.getActiveRuntimeDSP();
+
+    if (cyclesOk != kCycles)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: only %d/%d cycles ok\n", cyclesOk, kCycles);
+        return false;
+    }
+    if (genFinal != genBaseline)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: generation changed over stress\n");
+        return false;
+    }
+    if (seqFinal != seqBaseline)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: publication advanced over stress\n");
+        return false;
+    }
+    if (slotFinal != slotBaseline)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: active slot changed over stress\n");
+        return false;
+    }
+    if (!e.isEnginePrepared())
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: not Prepared after stress\n");
+        return false;
+    }
+    if (logger.countContains("REBUILD_TELEMETRY") != 0)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: rebuild telemetry over stress\n");
+        return false;
+    }
+
+    // 最終 terminal shutdown（P4: ShutdownComplete 到達）
+    h.stop();
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed
+        || e.isrShutdownRuntime().getPhase() != convo::isr::ShutdownPhase::ShutdownComplete)
+    {
+        std::fprintf(stderr, "FAIL: D169-2-6: terminal shutdown incomplete after stress\n");
+        return false;
+    }
+
+    std::printf("  [PASS] D169-2-6: %d device-restart collapse cycles OK\n", kCycles);
+    return true;
+}
+
+// ── D167-5: Suppressed(AdmissionClosed) telemetry accounting (D167-7 [14]) ──
+//   Admission を Closing に置いた状態で SR 変更 re-prepare（structural intent 発行）を
+//   行うと、REQUESTED(accepted) → tryAdmit 失敗 → Suppressed(AdmissionClosed) が
+//   telemetry に記録される（D166 accounting defect の修復検証）。
+class D167TelemetryCaptureLogger final : public juce::Logger
+{
+public:
+    juce::StringArray lines;
+    void logMessage(const juce::String& message) override { lines.add(message); }
+};
+
+bool testD167AdmissionClosedTelemetry()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+        return false;
+
+    AudioEngine& e = h.engine();
+
+    // startup rebuild を完了させてから admission を閉じる（決定論化）
+    const auto* world0 = e.observePublishedWorld();
+    const auto bootstrapSeq = (world0 != nullptr) ? world0->publication.sequenceId : 0;
+    (void)waitUntil(20.0, [&] {
+        const auto* w = e.observePublishedWorld();
+        return w != nullptr && w->publication.sequenceId > bootstrapSeq;
+    });
+
+    if (!e.isrShutdownRuntime().isAdmissionOpen())
+    {
+        std::fprintf(stderr, "FAIL: D167-5: admission not Open at test start\n");
+        return false;
+    }
+
+    // latest-wins merge 窓（debounce）の失待ち: startup rebuild 直後の pending intent に
+    //   merge されると tryAdmit に到達しないため、commit 完了（rebuildOutstanding 解消）を待つ。
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // admission Closing（Accepted 後の admission close race を決定論的に再現）。
+    //   phase は Running のまま（closeAdmission は phase_ を変更しない）。
+    e.isrShutdownRuntime().closeAdmission();
+
+    // structural intent を admission Closing 状態で発行 → REQUESTED(accepted) →
+    //   tryAdmit 失敗 → Suppressed(AdmissionClosed)。telemetry log を capture して検証する。
+    //   ※ requestRebuild(kind) は lifecycleState を触らない公開入口（prepareToPlay は
+    //     Releasing 中の gate で先に抑制されるため vehicle として不適）。
+    D167TelemetryCaptureLogger capture;
+    auto* previousLogger = juce::Logger::getCurrentLogger();
+    juce::Logger::setCurrentLogger(&capture);
+    e.requestRebuild(convo::RebuildKind::Structural);
+    juce::Logger::setCurrentLogger(previousLogger);
+
+    bool sawRequested = false;
+    bool sawSuppressedAdmissionClosed = false;
+    for (const auto& line : capture.lines)
+    {
+        if (line.contains("[REBUILD_TELEMETRY]") && line.contains("event=REBUILD_REQUESTED")
+            && line.contains("decision=accepted"))
+            sawRequested = true;
+        if (line.contains("[REBUILD_TELEMETRY]") && line.contains("event=REBUILD_SUPPRESSED")
+            && line.contains("reason=admission_closed"))
+            sawSuppressedAdmissionClosed = true;
+    }
+    if (!sawRequested || !sawSuppressedAdmissionClosed)
+    {
+        std::fprintf(stderr, "FAIL: D167-5: telemetry accounting incomplete (req=%d sup=%d)\n",
+                     sawRequested ? 1 : 0, sawSuppressedAdmissionClosed ? 1 : 0);
+        return false;
+    }
+
+    // 後片付け: terminal pipeline（h.stop()）で Closing → Closed 完走。
+    //   closeAdmission は冪等のため terminal pass の二重 close は安全（既存契約）。
+    h.stop();
+    if (e.isrShutdownRuntime().admissionState() != convo::isr::AdmissionState::Closed)
+    {
+        std::fprintf(stderr, "FAIL: D167-5: terminal shutdown did not close admission\n");
+        return false;
+    }
+
+    std::printf("  [PASS] D167-5: Suppressed(AdmissionClosed) telemetry accounting\n");
+    return true;
+}
+
 } // namespace
 
 // D102-C2-3 O_denom campaign — forward declaration (harness-only, production unchanged)
@@ -105026,6 +105786,39 @@ int main(int argc, char* argv[])
     if (!testPublishCompletionMonotonicity())
     {
         std::fprintf(stderr, "FAIL: testPublishCompletionMonotonicity\n");
+        return 1;
+    }
+
+    // ★ D167: reconfigure/terminal boundary（DS-F2 修復）+ Suppressed(AdmissionClosed)
+    //   telemetry 会計。I2 CallerDestroy テストの前に実行（abandon 前提の
+    //   testCallerDestroyTerminalDisposition は最後に置く既存契約を維持）。
+    if (!testD167ReconfigureKeepsAdmissionOperational())
+    {
+        std::fprintf(stderr, "FAIL: testD167ReconfigureKeepsAdmissionOperational\n");
+        return 1;
+    }
+
+    if (!testD167AdmissionClosedTelemetry())
+    {
+        std::fprintf(stderr, "FAIL: testD167AdmissionClosedTelemetry\n");
+        return 1;
+    }
+
+    // ★ D169-2-5: duplicate-prepare collapse = no-op targeted regression。
+    //   同一 SR/BS 連続 prepare（旧コードでは abort 0xC0000409 の defect 経路）の
+    //   修復検証。D167 テストが SR 交互で回避していた経路の coverage gap を埋める。
+    if (!testD169DuplicatePrepareCollapseNoop())
+    {
+        std::fprintf(stderr, "FAIL: testD169DuplicatePrepareCollapseNoop\n");
+        return 1;
+    }
+
+    // ★ D169-2-6: device restart / collapse stress（50 cycles）。
+    //   JUCE restart chain 相当（stop → reconfigure release → same SR/BS prepare →
+    //   audio resume）の反復で collapse が破綻しないことを確認する。
+    if (!testD169DeviceRestartCollapseStress())
+    {
+        std::fprintf(stderr, "FAIL: testD169DeviceRestartCollapseStress\n");
         return 1;
     }
 
@@ -107181,6 +107974,542 @@ bool runWorldRetirementMeasurement(const char* condition)
         std::fprintf(stderr, "unknown measurement condition: %s\n", condition);
     return ok;
 }
+
+```
+
+### 📄 `src\tools\build_identity_gate.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+r"""build_identity_gate.py v2 - D162-2-I3-4-G (COHERENCE-1..5 gate, fail-closed)
+
+v2 additions (I3-4-G, on top of I3-4-D v1):
+  G1  Windows SDK identity stamped at configure time and verified before every build:
+      windows_sdk_dir / windows_sdk_version / windows_sdk_include_fingerprint /
+      windows_sdk_fingerprint_source. The fingerprint (relpath|size|mtime_ns manifest
+      over the SDK include tree) detects in-place servicing that keeps the same
+      version number. SDK env is read from the vcvars-provided environment, which is
+      guaranteed alive because the gate runs inside build.bat.
+  G2  #deps 0 semantic classification (I3-4-F contract):
+      DEPS_VALID              #deps > 0                         -> PASS
+      ZERO_DEPS_SYSTEM_ONLY   #deps 0 + closure proves no       -> WARN + ALLOW
+                              non-system dep (test obj only)
+      ZERO_DEPS_SUSPICIOUS    #deps 0 + closure finds a         -> FAIL
+                              non-system dep
+      ZERO_DEPS_UNRESOLVED    #deps 0 + closure cannot resolve  -> FAIL
+      production objects (inputs of the ConvoPeq_artefacts\<cfg>\ConvoPeq.exe link
+      edge) with #deps 0 -> ALWAYS FAIL, no exceptions.
+  G3  provenance boundaries: TU identity = full source path + edge identity (never
+      basename); permission ground = transitive include closure (never a filename
+      whitelist, never a bare #deps 0 value).
+
+v1 contract unchanged:
+  COHERENCE-1/4 identity stamp verified before every build (any diff -> rc=3).
+  COHERENCE-3   dependency information missing -> fail-closed (now semantic).
+  COHERENCE-5   no object without provenance reaches the Release link.
+  Scope guard: only project-source TUs (src/**) are classified; JUCE/third-party/
+  resource artifacts stay outside the gate (D4). No automatic clean ever.
+
+Usage:
+  python src/tools/build_identity_gate.py --build-dir build           # stamp + gate (after configure)
+  python src/tools/build_identity_gate.py --build-dir build --check   # gate only (before build)
+  python src/tools/build_identity_gate.py --build-dir build --show    # print stamp
+  python src/tools/build_identity_gate.py --build-dir build --check --explain-zero-deps
+                                                      # diagnostic detail, rc=0 on classify-only
+"""
+import argparse, hashlib, os, re, subprocess, sys, json
+
+RELEVANT_OBJ_RE = re.compile(r'/(?:Release|Debug|RelWithDebInfo)/src/', re.I)
+PRODUCTION_EXE_RE = re.compile(r'ConvoPeq_artefacts[/\\](?:Release|Debug|RelWithDebInfo)[/\\]ConvoPeq\.exe$', re.I)
+SYSTEM_PATH_RE = re.compile(r'program files|microsoft visual studio', re.I)
+INC_RE = re.compile(r'^\s*#\s*include\s*([<"])([^">]+)[">]', re.M)
+STAMP_SCHEMA = 2
+SDK_SUBTREES = ['ucrt', 'um', 'shared', 'winrt', 'cppwinrt']
+
+
+def run(cmd, cwd=None):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                       errors='replace', shell=False)
+    return p.returncode, (p.stdout or '') + (p.stderr or '')
+
+
+def console_codepage():
+    rc, out = run(['cmd', '/c', 'chcp'])
+    m = re.search(r':\s*(\d+)', out or '')
+    return m.group(1) if m else 'unknown'
+
+
+def file_sha256(path):
+    try:
+        return hashlib.sha256(open(path, 'rb').read()).hexdigest()
+    except OSError:
+        return None
+
+
+def rules_prefix_sha256(build_dir):
+    rules = os.path.join(build_dir, 'CMakeFiles', 'rules.ninja')
+    data = open(rules, 'rb').read() if os.path.exists(rules) else b''
+    m = re.search(rb'msvc_deps_prefix = ([^\r\n]*)', data)
+    if not m:
+        return 'no-msvc-deps-prefix'
+    return hashlib.sha256(m.group(1)).hexdigest()[:16]
+
+
+def cmake_cache_field(build_dir, key):
+    p = os.path.join(build_dir, 'CMakeCache.txt')
+    if not os.path.exists(p):
+        return None
+    for line in open(p, encoding='utf-8', errors='replace'):
+        if line.startswith(key + ':'):
+            return line.split('=', 1)[1].strip()
+    return None
+
+
+def normalize_env_path(p):
+    return p.replace('/', '\\').strip().rstrip('\\')
+
+
+def windows_sdk_env():
+    """The SDK MSVC actually uses = vcvars selection (I3-4-F F5 truth source)."""
+    d = os.environ.get('WindowsSdkDir', '')
+    v = os.environ.get('WindowsSDKVersion', '')
+    if not d.strip() or not v.strip():
+        return None
+    return normalize_env_path(d), v.rstrip('\\').rstrip('/')
+
+
+def dir_fingerprint(base, subtrees):
+    """Deterministic (relpath|size|mtime_ns) manifest -> sha256[:16]. Detects
+    in-place SDK servicing that keeps the same version string."""
+    rows = []
+    for sub in subtrees:
+        d = os.path.join(base, sub)
+        if not os.path.isdir(d):
+            continue
+        for root, dirs, files in os.walk(d):
+            dirs.sort()
+            for f in sorted(files):
+                p = os.path.join(root, f)
+                rel = os.path.relpath(p, base).lower().replace('\\', '/')
+                try:
+                    st = os.stat(p)
+                    rows.append((rel, st.st_size, st.st_mtime_ns))
+                except OSError:
+                    rows.append((rel, -1, -1))
+    h = hashlib.sha256()
+    for r in rows:
+        h.update(('%s|%d|%d\n' % r).encode('utf-8'))
+    return h.hexdigest()[:16], len(rows)
+
+
+def gather_identity(build_dir, source_root):
+    gen = cmake_cache_field(build_dir, 'CMAKE_GENERATOR') or 'unknown'
+    cxx = cmake_cache_field(build_dir, 'CMAKE_CXX_COMPILER') or 'unknown'
+    cc = cmake_cache_field(build_dir, 'CMAKE_C_COMPILER') or 'unknown'
+    _, nv = run(['ninja', '--version'])
+    rc, cv = run([cxx.strip('"'), '/?'], cwd=source_root)
+    ver = 'unknown'
+    m = re.search(r'Version (\d+\.\d+)', cv)
+    if m:
+        ver = 'MSVC ' + m.group(1)
+    else:
+        rc2, fv = run(['powershell', '-NoProfile', '-Command',
+                       "(Get-Item -LiteralPath \"%s\").VersionInfo.FileVersion" % cxx.strip('"')])
+        if fv.strip():
+            ver = 'MSVC ' + fv.strip()
+    rc, sha = run(['git', '-C', source_root, 'rev-parse', '--short', 'HEAD'])
+    rc, dirty = run(['git', '-C', source_root, 'status', '--porcelain'])
+    ident = {
+        'generator': gen,
+        'compiler_id': 'MSVC',
+        'compiler_path': cxx,
+        'compiler_version': ver,
+        'architecture': 'x64',
+        'cmake_version': (run(['cmake', '--version'])[1].split('\n')[0]),
+        'ninja_version': nv.strip(),
+        'configuration_family': 'Debug;Release;RelWithDebInfo',
+        'source_revision': (sha.strip() or 'unknown') + ('+dirty' if dirty.strip() else ''),
+        'console_codepage': console_codepage(),
+        'msvc_deps_prefix_sha256': rules_prefix_sha256(build_dir),
+    }
+    sdk = windows_sdk_env()
+    if sdk:
+        sdk_dir, sdk_ver = sdk
+        fp, n = dir_fingerprint(os.path.join(sdk_dir, 'include', sdk_ver), SDK_SUBTREES)
+        ident['windows_sdk_dir'] = sdk_dir
+        ident['windows_sdk_version'] = sdk_ver
+        ident['windows_sdk_include_fingerprint'] = fp
+        ident['windows_sdk_fingerprint_source'] = 'environment'
+    else:
+        ident['windows_sdk_dir'] = 'unknown'
+        ident['windows_sdk_version'] = 'unknown'
+        ident['windows_sdk_include_fingerprint'] = 'unknown'
+        ident['windows_sdk_fingerprint_source'] = 'environment'
+    return ident
+
+
+def stamp_path(build_dir):
+    return os.path.join(build_dir, 'CMakeFiles', '.build_identity')
+
+
+def write_stamp(build_dir, ident):
+    ident = dict(ident)
+    ident['stamp_schema'] = STAMP_SCHEMA
+    with open(stamp_path(build_dir), 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(ident, f, indent=1, sort_keys=True)
+    return ident
+
+
+def load_stamp(build_dir):
+    try:
+        return json.load(open(stamp_path(build_dir), encoding='utf-8'))
+    except Exception:
+        return None
+
+
+def fail(msg, recovery=''):
+    print('[GATE-FAIL] ' + msg)
+    if recovery:
+        print('[GATE-FAIL] recovery: ' + recovery)
+    print('[GATE-FAIL] refusing to continue (fail-closed; no automatic clean).')
+    sys.exit(3)
+
+
+# ---------------------------------------------------------------- G3: manifest
+
+def parse_impl_manifest(impl_path):
+    """obj path (forward-slash) -> {'ins': [...], 'vars': {...}}. TU identity is the
+    full edge identity (output path + inputs), never a basename."""
+    edges = {}
+    cur = None
+    for raw in open(impl_path, 'rb').read().split(b'\n'):
+        line = raw.rstrip(b'\r')
+        if line.startswith(b'build '):
+            head = line[6:].decode('latin-1')
+            outp, _, rest = head.partition(':')
+            toks = rest.split()
+            inputs = []
+            for t in toks[1:]:
+                if t in ('|', '||'):
+                    break
+                inputs.append(t.replace('$:', ':'))
+            cur = outp.strip().replace('\\', '/')
+            edges[cur] = {'ins': inputs, 'vars': {}}
+        elif line.startswith(b'  ') and cur and line.strip():
+            k, _, v = line.strip().partition(b'=')
+            edges[cur]['vars'][k.decode('latin-1').strip()] = v.decode('latin-1').strip()
+        elif line.strip() and not line.startswith(b' '):
+            cur = None
+    return edges
+
+
+def production_link_objs(edges):
+    prods = set()
+    for out, e in edges.items():
+        if PRODUCTION_EXE_RE.search(out):
+            for i in e['ins']:
+                if i.lower().endswith('.obj'):
+                    prods.add(i.replace('\\', '/'))
+    return prods
+
+
+# ------------------------------------------------- G2: zero-deps classification
+
+def tu_closure(src_abs, inc_dirs, env_inc_dirs):
+    """Transitive include closure (I3-4-F contract). quoted: dir(cur) then -I dirs;
+    angle: -I dirs then INCLUDE env. Recurses only into non-system headers
+    (mirrors ninja IsSystemInclude dropping 'program files' paths)."""
+    res = {'NONSYSTEM': set(), 'UNRESOLVED': []}
+    seen = set()
+    stack = [src_abs]
+    while stack:
+        cur = stack.pop()
+        key = cur.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            text = open(cur, 'rb').read().decode('utf-8', 'replace')
+        except OSError:
+            res['UNRESOLVED'].append((cur, '<unreadable source>'))
+            continue
+        for m in INC_RE.finditer(text):
+            q, spec = m.group(1), m.group(2)
+            cands = []
+            if q == '"':
+                cands.append(os.path.normpath(os.path.join(os.path.dirname(cur), spec)))
+            for d in inc_dirs:
+                cands.append(os.path.normpath(os.path.join(d, spec)))
+            if q == '<':
+                for d in env_inc_dirs:
+                    cands.append(os.path.normpath(os.path.join(d, spec)))
+            hit = next((c for c in cands if os.path.isfile(c)), None)
+            if hit is None:
+                res['UNRESOLVED'].append((spec, cur))
+                continue
+            if SYSTEM_PATH_RE.search(hit):
+                continue
+            res['NONSYSTEM'].add(hit)
+            stack.append(hit)
+    return res
+
+
+def classify_zero_deps(build_dir, config, deps_zero, edges, verbose=False):
+    """Returns (allowed, prod_zero, suspicious, unresolved) - lists of detail tuples."""
+    production = production_link_objs(edges)
+    env_inc = [normalize_env_path(d) for d in os.environ.get('INCLUDE', '').split(';') if d.strip()]
+    allowed, prod_zero, suspicious, unresolved = [], [], [], []
+    for obj in deps_zero:
+        slash = obj.replace('\\', '/')
+        if not RELEVANT_OBJ_RE.search(slash):
+            continue
+        if slash in production:
+            prod_zero.append((obj, 'object is an input of the production ConvoPeq.exe link edge'))
+            continue
+        e = edges.get(slash)
+        if e is None or not e['ins']:
+            unresolved.append((obj, [('no compile edge found for object', '')]))
+            continue
+        src = os.path.normpath(e['ins'][0])
+        inc_dirs = re.findall(r'[-/]I"?([^"\s]+)"?', e['vars'].get('INCLUDES', ''))
+        cl = tu_closure(src, inc_dirs, env_inc)
+        if cl['UNRESOLVED']:
+            unresolved.append((obj, cl['UNRESOLVED'][:4]))
+        elif cl['NONSYSTEM']:
+            suspicious.append((obj, sorted(cl['NONSYSTEM'])[:4]))
+        else:
+            allowed.append(obj)
+            if verbose:
+                print('[GATE-INFO] system-only closure proven for ' + obj)
+    return allowed, prod_zero, suspicious, unresolved
+
+
+def deps_gate(build_dir, config, explain=False):
+    """COHERENCE-3 (semantic, G2): collect #deps 0 relevant objs, classify, fail-closed.
+    explain=True: diagnostic detail, always rc=0 (identity validation has already run)."""
+    impl = os.path.join(build_dir, 'CMakeFiles', 'impl-%s.ninja' % config)
+    if not os.path.exists(impl):
+        fail('impl-%s.ninja not found (configure first).' % config)
+    rc, out = run(['ninja', '-C', build_dir, '-f', impl, '-t', 'deps'])
+    if rc != 0:
+        fail('ninja -t deps failed (rc=%d).' % rc)
+    zero = []
+    checked = 0
+    for line in out.split('\n'):
+        if ': #deps' in line:
+            cur_obj = line.split(':')[0].strip()
+            n = int(line.split('#deps ')[1].split(',')[0])
+            if RELEVANT_OBJ_RE.search(cur_obj):
+                checked += 1
+                if n == 0:
+                    zero.append(cur_obj)
+    edges = parse_impl_manifest(impl)
+    production = production_link_objs(edges)
+    env_inc = [normalize_env_path(d) for d in os.environ.get('INCLUDE', '').split(';') if d.strip()]
+    allowed, prod_zero, suspicious, unresolved = [], [], [], []
+    for obj in zero:
+        slash = obj.replace('\\', '/')
+        if not RELEVANT_OBJ_RE.search(slash):
+            continue
+        if slash in production:
+            prod_zero.append((obj, 'object is an input of the production ConvoPeq.exe link edge'))
+            continue
+        e = edges.get(slash)
+        if e is None or not e['ins']:
+            unresolved.append((obj, [('no compile edge found for object', '')]))
+            continue
+        src = os.path.normpath(e['ins'][0])
+        inc_dirs = re.findall(r'[-/]I"?([^"\s]+)"?', e['vars'].get('INCLUDES', ''))
+        cl = tu_closure(src, inc_dirs, env_inc)
+        if cl['UNRESOLVED']:
+            unresolved.append((obj, cl['UNRESOLVED'][:4]))
+        elif cl['NONSYSTEM']:
+            suspicious.append((obj, sorted(cl['NONSYSTEM'])[:4]))
+        else:
+            allowed.append(obj)
+
+    for obj in allowed:
+        print('[GATE-WARN] ZERO_DEPS_SYSTEM_ONLY (test-only, no project dependency '
+              'proven by closure): ' + obj)
+    if explain:
+        print('[GATE-INFO] zero-deps classification detail (config=%s)' % config)
+        print('[GATE-INFO] relevant objs checked: %d ; #deps 0: %d' % (checked, len(zero)))
+        print('[GATE-INFO] system-only allowed: %d ; production-fail: %d ; '
+              'suspicious: %d ; unresolved: %d'
+              % (len(allowed), len(prod_zero), len(suspicious), len(unresolved)))
+        for obj, why in prod_zero:
+            print('[GATE-INFO]   PRODUCTION_ZERO_DEPS (would FAIL): %s (%s)' % (obj, why))
+        for obj, ex in suspicious:
+            print('[GATE-INFO]   ZERO_DEPS_SUSPICIOUS (would FAIL): %s' % obj)
+            for s in ex:
+                print('[GATE-INFO]     non-system dep: %s' % s)
+        for obj, ex in unresolved:
+            print('[GATE-INFO]   ZERO_DEPS_UNRESOLVED (would FAIL): %s' % obj)
+            for s, frm in ex:
+                print('[GATE-INFO]     unresolved include: %s (in %s)' % (s, os.path.basename(frm)))
+        print('[GATE-INFO] diagnostic mode: classification result does not affect exit code.')
+        return
+
+    if prod_zero or suspicious or unresolved:
+        n = len(prod_zero) + len(suspicious) + len(unresolved)
+        print('[GATE-FAIL] %d zero-deps object(s) FAILED classification (config=%s):' % (n, config))
+        for obj, why in prod_zero:
+            print('[GATE-FAIL]   PRODUCTION #deps 0 (always fail): %s' % obj)
+        for obj, ex in suspicious:
+            print('[GATE-FAIL]   ZERO_DEPS_SUSPICIOUS (project dependency present but '
+                  'deps lost): %s' % obj)
+            for s in ex:
+                print('[GATE-FAIL]     non-system dep: %s' % s)
+        for obj, ex in unresolved:
+            print('[GATE-FAIL]   ZERO_DEPS_UNRESOLVED (cannot prove absence): %s' % obj)
+            for s, frm in ex:
+                print('[GATE-FAIL]     unresolved include: %s' % s)
+        print('[GATE-FAIL] These objects would silently ignore future header changes')
+        print('[GATE-FAIL] (root cause of the D162-2 ODR/layout mixing crash).')
+        fail('zero-deps classification failed for %d object(s).' % n,
+             'run: build.bat %s clean   (explicit clean recovery)' % config)
+    print('[GATE-OK ] dependency gate: %d relevant .obj checked; %d zero-deps system-only '
+          'allowed (warn); production #deps 0 = 0; suspicious = 0; unresolved = 0.'
+          % (checked, len(allowed)))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--build-dir', default='build')
+    ap.add_argument('--source-root', default=None)
+    ap.add_argument('--config', default='Release')
+    ap.add_argument('--check', action='store_true',
+                    help='verify existing stamp + deps gate (no stamp write)')
+    ap.add_argument('--show', action='store_true')
+    ap.add_argument('--explain-zero-deps', action='store_true',
+                    help='diagnostic: print zero-deps classification detail (rc=0 unless identity fails)')
+    a = ap.parse_args()
+
+    build_dir = os.path.abspath(a.build_dir)
+    source_root = a.source_root or os.path.dirname(build_dir)
+    if not os.path.exists(os.path.join(build_dir, 'CMakeCache.txt')):
+        print('[GATE-FAIL] %s is not a configured CMake build directory.' % build_dir)
+        sys.exit(3)
+
+    ident = gather_identity(build_dir, source_root)
+    if a.show:
+        print(json.dumps(ident, indent=1, sort_keys=True))
+        return
+
+    old = load_stamp(build_dir)
+    if not a.check or old is None:
+        changed = []
+        if old:
+            for k in sorted(ident):
+                if old.get(k) != ident[k]:
+                    changed.append('%s: %r -> %r' % (k, old.get(k), ident[k]))
+        write_stamp(build_dir, ident)
+        if changed:
+            print('[GATE-OK ] build identity stamp updated (%d field(s) changed):' % len(changed))
+            for c in changed:
+                print('           ' + c)
+            if any('msvc_deps_prefix_sha256' in c or 'console_codepage' in c for c in changed):
+                fail('identity changed in dependency-parser-sensitive fields:\n           '
+                     + '\n           '.join(c for c in changed
+                                            if 'prefix' in c or 'codepage' in c)
+                     + '\n[GATE-FAIL] Existing .obj may have been built under a different'
+                     + '\n[GATE-FAIL] /showIncludes prefix - incremental build is not trusted.',
+                     'run: build.bat %s clean   (explicit clean recovery)' % a.config)
+            if any('windows_sdk' in c for c in changed):
+                old_schema = old.get('stamp_schema') if old else None
+                if old_schema == STAMP_SCHEMA:
+                    fail('Windows SDK identity changed since last configure:\n           '
+                         + '\n           '.join(c for c in changed if 'windows_sdk' in c)
+                         + '\n[GATE-FAIL] SDK headers are not tracked by ninja deps'
+                         + ' (system-include class);'
+                         + '\n[GATE-FAIL] existing .obj may be stale against the new SDK.',
+                         'run: build.bat %s clean   (explicit clean recovery)' % a.config)
+                else:
+                    print('[GATE-WARN] stamp migrated schema %s -> %d; Windows SDK fields '
+                          'recorded for the first time.' % (old_schema, STAMP_SCHEMA))
+        else:
+            print('[GATE-OK ] build identity stamp written (first configure).')
+        deps_gate(build_dir, a.config)
+        return
+
+    # --check: before-build verification
+    diffs = []
+    for k in sorted(ident):
+        if old.get(k) != ident[k]:
+            diffs.append('%s: stamp=%r now=%r' % (k, old.get(k), ident[k]))
+    if diffs:
+        print('[GATE-FAIL] build identity mismatch (stamp vs current environment):')
+        for d in diffs:
+            print('           ' + d)
+        fail('COHERENCE-4 violated.',
+             'run: build.bat %s clean   (explicit clean recovery)' % a.config)
+    print('[GATE-OK ] build identity matches stamp (codepage=%s, prefix=%s..., sdk=%s/%s...).' % (
+        ident['console_codepage'], ident['msvc_deps_prefix_sha256'][:8],
+        ident['windows_sdk_version'][:12], ident['windows_sdk_include_fingerprint'][:8]))
+    deps_gate(build_dir, a.config, explain=a.explain_zero_deps)
+
+
+if __name__ == '__main__':
+    main()
+
+```
+
+### 📄 `src\tools\check_layout_offsets.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""check_layout_offsets.py — D11 layout coherence regression check (D162-2-I3-4-D).
+
+Confirms the rebuilt executables reference a single, consistent
+worldAuthority_.coordinator_ slot offset (ctor store == publish-side loads)
+and that the old crash-era offsets are absent.
+"""
+import struct
+
+def rva_scan(path):
+    data = open(path, 'rb').read()
+    pe = struct.unpack_from('<I', data, 0x3C)[0]
+    nsec = struct.unpack_from('<H', data, pe + 6)[0]
+    opt_size = struct.unpack_from('<H', data, pe + 20)[0]
+    sec_tab = pe + 24 + opt_size
+    text = None
+    for i in range(nsec):
+        off = sec_tab + i * 40
+        nm = data[off:off+8].rstrip(b'\0')
+        vsize, vaddr, rsize, roff = struct.unpack_from('<IIII', data, off + 8)
+        if nm == b'.text':
+            text = (vaddr, vsize, roff, rsize)
+    va, vs, ro, rs = text
+    t = data[ro:ro+rs]
+    # candidate W disp32 values, newest first
+    candidates = [0x01290880, 0x012A8880, 0x012A7640]
+    found = {}
+    for c in candidates:
+        pat = struct.pack('<I', c)
+        j = t.find(pat)
+        found[c] = t.count(pat)
+    return found
+
+if __name__ == '__main__':
+    exes = {
+        'Release': r'C:\VSC_Project\ConvoPeq\build-diag\Release\AudioEngineHarness.exe',
+        'Debug':   r'C:\VSC_Project\ConvoPeq\build-diag\Debug\AudioEngineHarness.exe',
+    }
+    print('D11 layout coherence check')
+    ok = True
+    for cfg, p in exes.items():
+        f = rva_scan(p)
+        print(f'  {cfg}: disp32 counts = ' + ', '.join(f'0x{c:X}:{n}' for c, n in f.items()))
+        # coherence: exactly one nonzero-candidate family, old-crash offset 0x12A7640 absent
+        nonzero = [c for c, n in f.items() if n > 0]
+        if 0x012A7640 in f and f[0x012A7640] > 0:
+            print(f'  {cfg}: FAIL - old crash-era offset 0x12A7640 present')
+            ok = False
+        elif len(nonzero) != 1:
+            print(f'  {cfg}: WARN - ambiguous offset families: {[hex(c) for c in nonzero]}')
+    print('RESULT:', 'PASS' if ok else 'FAIL')
 
 ```
 

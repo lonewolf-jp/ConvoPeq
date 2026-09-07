@@ -1,0 +1,52 @@
+I3-4-I I2/I3 - /EHsc edge census + per-target provenance (build/ tree, impl-*.ninja regenerated 2026-09-06 07:08)
+==============================================================================================================
+
+[Release] CXX edges=492 with-/EHsc=492 missing=0 | C edges=16 with-/EHsc=16 without=[]
+[Debug] CXX edges=492 with-/EHsc=492 missing=0 | C edges=16 with-/EHsc=16 without=[]
+[RelWithDebInfo] CXX edges=492 with-/EHsc=492 missing=0 | C edges=16 with-/EHsc=15 without=['PublicationAdmissionTests']
+
+per-target provenance (RWDI):
+target                                     edges EHsc EHsc-x2 utf8 target-opt
+AdmissionPackedStateTests                     18   18       18   18 True    
+AudioEngineHarness                           142  142      142  142 True    
+BuildErrorClassificationTests                  1    1        1    1 True    
+BuildInputSemanticContractTests                1    1        1    1 True    
+ConvoPeq                                     133  133      133  133 True    
+CrossfadeExecutorLocalContractTests            1    1        1    1 True    
+D8_1_WrapperCacheTests                         1    1        0    1 False   
+D8_2_B_2_Tests                                13   13       13   13 True    
+DSPHandleTableTests                            1    1        1    1 True    
+DeferredDeletionQueueReclaimTests              1    1        0    1 False   
+EQAnalysisUnitTests                            1    1        0    1 False   
+EQBoundExcessBenchmark                         1    1        0    1 False   
+EQProcessorMaxGainTests                        1    1        0    1 False   
+FFTBackendTests                                3    3        3    3 True    
+GainStagingContractTests                       1    1        0    1 False   
+ISRRuntimeIdentityTests                        1    1        1    1 True    
+ISRSemanticValidationTests                    17   17       17   17 True    
+ISRSoakTests                                  17   17       17   17 True    
+MTNUPCMeasurement                             21   21       21   21 True    
+MpscBoundedRingTests                           1    1        1    1 True    
+NormalRetireDSPHandleCompareTests              2    2        2    2 True    
+ObservePathSingleSourceTests                   1    1        1    1 True    
+OverlapAuthoritySingularTests                  1    1        1    1 True    
+OwnerChannelTests                              1    1        1    1 True    
+PartialPublicationRejectTests                  1    1        1    1 True    
+PriorityIntegrationTests                      11   11       11   11 True    
+PublicationAdmissionTests                     11   11        0   11 False   
+RebuildAdmissionRegressionTests                1    1        1    1 True    
+RetireGraceSemanticsTests                     10   10       10   10 True    
+RetrySchedulerTests                           10   10       10   10 True    
+RuntimeHealthMonitorTierTests                 11   11       11   11 True    
+RuntimePublicationCoordinatorTests             1    1        1    1 True    
+RuntimeSemanticSchemaValidationTests           1    1        1    1 True    
+RuntimeWorldAuthorityProjectionTests           1    1        1    1 True    
+SequenceArithmeticTests                        1    1        1    1 True    
+ShadowCompareContractTests                     1    1        1    1 True    
+ShutdownRetireIntentDrainTests                11   11       11   11 True    
+StuckReaderFallbackDrainTests                 12   12       12   12 True    
+TerminalTelemetryContractTests                10   10       10   10 True    
+invariant_INV3_INV5Tests                      18   18       18   18 True    
+
+RWDI C edges without /EHsc: ["PublicationAdmissionTests"]
+  -> juce_graphics_Sheenbidi.c (C language; /EHsc is a C++-only option, no semantic impact) - Case D

@@ -177,6 +177,19 @@ void MainApplication::shutdown()
     // ★ D127-E (diagnostic only): SHUTDOWN_BEGIN — teardown phase 計測の起点。
     //   production semantics 変更なし（ログ出力のみ）。
     juce::Logger::writeToLog("[D123] SHUTDOWN_BEGIN");
+    // ★ D167-2: terminal-release intent。~MainWindow の closeAudioDevice() が引き起こす
+    //   AudioEngineProcessor::releaseResources() は reconfigure と terminal を同一入口で
+    //   呼ぶ（JUCE 契約）ため、app shutdown であることを engine へ明示する
+    //   （信号なしでは device switch と terminal を区別できず、D166 DS-F2 の root cause）。
+    //   consume-once: 以後の最初の releaseResources pass が terminal pipeline を実行する。
+    //   shutdown() を経由しない異常系では ~AudioEngine の独立 terminal 経路
+    //   （dtor は releaseResources を呼ばない・CtorDtor.cpp 自前 teardown）が後始末を担う。
+    if (mainWindow != nullptr)
+    {
+        if (auto* engine = mainWindow->getAudioEngine())
+            engine->requestTerminalRelease();
+        juce::Logger::writeToLog("[D167] terminal-release intent set (app shutdown)");
+    }
     // unique_ptr のデストラクタで MainWindow が閉じられる
     // MainWindow デストラクタ内で:
     //   1) オーディオコールバック停止

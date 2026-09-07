@@ -1,0 +1,22 @@
+{
+ "date": "2026-09-06",
+ "git_head": "9cacee1f4c81f47bf55eb6396627270cd3cb7618",
+ "tracked_changes": [
+  "M CMakeLists.txt"
+ ],
+ "cmakelists_diff": "+10/-0 = H5 RWDI /utf-8 block のみ (I3-4-H5)",
+ "convopeq_md": "Generated 2026-09-05 12:02 = H5 (09-06 00:00) 以前の stale → authority に使用しない (A0 指示)",
+ "source_authority": "src/** 生ファイル (HEAD 9cacee1f + H5 CMakeLists のみの差分)",
+ "prior_closed_reports": [
+  "doc/work88/CRALPHA6_CLOSURE_REPORT.md (2026-09-01): CR-α = CLOSED / ACCEPTED (15/15)",
+  "doc/work88/CRBETA0_RESIDUAL_TRIAGE_REPORT.md (2026-09-01): 候補A=ALREADY COVERED / 候補B=DEFER NO TRIGGER",
+  "doc/work88/ND01_CW8_AUDIT_REPORT.md: CW-8 read-side strengthening NO-GO 条件不該当"
+ ],
+ "changes": {
+  "production": 0,
+  "test": 0,
+  "cmake": 0,
+  "build": 0,
+  "tools": 0
+ }
+}

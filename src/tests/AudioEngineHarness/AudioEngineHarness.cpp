@@ -40,6 +40,12 @@ void AudioEngineHarness::stop()
     stopAudioOnly();
     if (engine_ == nullptr)
         return; // ★ D162-2-I2: abandonEngine() 後は engine は存在しない（放棄済み）
+    // ★ D167-2: harness stop() は terminal teardown（MainWindow 相当の終端）。
+    //   releaseResources の reconfigure/terminal 境界（D167-2）により、terminal intent を
+    //   明示しない限り releaseResources は reconfigure pass になる。harness stop() は
+    //   MainWindow ~dtor + MainApplication::shutdown 相当の terminal teardown であるため
+    //   requestTerminalRelease() を先に発行する（既存 pipeline を無変更で実行）。
+    engine_->requestTerminalRelease();
     // releaseResources(): idle publish (#4) → receipt → shutdownCoordinatorLoop join
     // (teardown publish が CoordinatorLoop 停止前に同期完了することを同時に検証する)
     if (engine_->isEnginePrepared())
@@ -57,6 +63,18 @@ void AudioEngineHarness::stopAudioOnly()
         if (audioThread_.joinable())
             audioThread_.join();
     }
+}
+
+// ★ D169-2-6: audio thread のみ再開（engine prepare/release を伴わない seam）。
+//   device restart stress テストが「restart cycle 毎に audio run → stop → restart」
+//   を engine 再構築なしで反復するために使用する。running_ false 化済み（join 済み）
+//   であることが前提（stopAudioOnly と対になる起動側）。
+bool AudioEngineHarness::startAudioOnly(int blockSize)
+{
+    if (convo::exchangeAtomic(running_, true, std::memory_order_acq_rel))
+        return true; // already running
+    audioThread_ = std::thread([this, blockSize]() { audioLoop(blockSize); });
+    return true;
 }
 
 // ★ D162-2-I2: engine を release せず放棄（意図的 leak・OS 回収）。

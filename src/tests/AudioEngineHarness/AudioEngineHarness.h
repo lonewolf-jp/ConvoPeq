@@ -34,6 +34,10 @@ public:
     //   prepare → release → prepare の reconfigure 系テストが
     //   「releaseResources は audio thread 停止後に呼ぶ」harness 契約を守るための seam。
     void stopAudioOnly();
+    // ★ D169-2-6: audio thread のみ再開（engine prepare/release を伴わない）。
+    //   device restart stress が restart cycle 毎に audio run/stop を反復するための seam。
+    //   stopAudioOnly() 呼出後（running_ false・audioThread_ join 済み）であること。
+    bool startAudioOnly(int blockSize);
     // ★ D162-2-I2: engine を release せず放棄する（意図的 leak・OS 回収）。
     //   「prepare → release → prepare → release」の 2 回目 releaseResources は
     //   Debug で pre-existing segfault を踏む（BISECT で修復無起因と確認済み・I3 課題）。

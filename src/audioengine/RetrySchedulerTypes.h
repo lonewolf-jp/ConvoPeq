@@ -43,7 +43,11 @@ enum class RebuildTelemetryReason : uint8_t
     SnapshotCommandBufferFullNonMt,
     SnapshotCommandQueuedNonMt,
     RetirePressureSevere,
-    SameAsPendingWouldMerge
+    SameAsPendingWouldMerge,
+    // ★ D167-5: tryAdmit 失敗（admission Closing/Closed）の会計用。Build 経路の
+    //   REQUESTED(accepted) → 無出力消滅を Suppressed(AdmissionClosed) として記録する
+    //   （D166 §5 observability defect 修復）。末尾追加 — 既存値の再番号付けなし。
+    AdmissionClosed
 };
 
 enum class RebuildTelemetryClass : uint8_t

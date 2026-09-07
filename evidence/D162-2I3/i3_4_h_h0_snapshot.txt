@@ -1,0 +1,49 @@
+I3-4-H H0 - current-state freeze (read-only; generated 2026-09-05 23:42:15)
+==========================================================================
+
+1. ConvoPeq.md currency:
+   mtime: 2026-09-05 12:02:31  size: 4840405
+   internal Generated marker: ['2026-09-05 12:02:18']
+   CMakeLists.txt mtime: 2026-08-26 20:40:35  (ConvoPeq.md generated after it: YES)
+
+2. preservation -> evidence/D162-2I3/i3_4_h_h0_freeze/
+   CMakeLists.txt sha[:16]=5fbd56e1b58684ca
+   impl-RelWithDebInfo.ninja sha[:16]=6b1a28745aaeb5c2
+   impl-Release.ninja sha[:16]=8c0cb07e2b3cfc62
+   impl-Debug.ninja sha[:16]=3f19a7c90ddc0ff2
+   .build_identity sha[:16]=42ae358299e07111
+
+3. CMakeCache.txt per-config CXX flags:
+   CMAKE_CXX_FLAGS:STRING=/DWIN32 /D_WINDOWS /EHsc
+   CMAKE_CXX_FLAGS_RELEASE:STRING=/O2 /Ob2 /DNDEBUG
+   CMAKE_CXX_FLAGS_DEBUG:STRING=/Zi /Ob0 /Od /RTC1
+   CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=/Zi /O2 /Ob1 /DNDEBUG
+   CMAKE_C_FLAGS:STRING=/DWIN32 /D_WINDOWS
+   CMAKE_C_FLAGS_RELEASE:STRING=/O2 /Ob2 /DNDEBUG
+   CMAKE_C_FLAGS_DEBUG:STRING=/Zi /Ob0 /Od /RTC1
+   CMAKE_C_FLAGS_RELWITHDEBINFO:STRING=/Zi /O2 /Ob1 /DNDEBUG
+   CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=/debug /INCREMENTAL
+   CMAKE_CXX_STANDARD_LIBRARIES:STRING=kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib
+
+   (note: cache holds INITIAL values; CMakeLists may set normal variables of the same name
+    which do NOT appear here - see H1 provenance)
+
+4. .build_identity (current):
+{
+ "architecture": "x64",
+ "cmake_version": "cmake version 4.4.3",
+ "compiler_id": "MSVC",
+ "compiler_path": "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe",
+ "compiler_version": "MSVC 19.51",
+ "configuration_family": "Debug;Release;RelWithDebInfo",
+ "console_codepage": "932",
+ "generator": "Ninja Multi-Config",
+ "msvc_deps_prefix_sha256": "b84b3da87752fa51",
+ "ninja_version": "1.13.2",
+ "source_revision": "0aeb22c+dirty",
+ "stamp_schema": 2,
+ "windows_sdk_dir": "C:\\Program Files (x86)\\Windows Kits\\10",
+ "windows_sdk_fingerprint_source": "environment",
+ "windows_sdk_include_fingerprint": "2c5e417e4aee1303",
+ "windows_sdk_version": "10.0.26100.0"
+}

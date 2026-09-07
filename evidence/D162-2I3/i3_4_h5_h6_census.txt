@@ -1,0 +1,15 @@
+I3-4-H5/H6 - post-fix census (impl-<cfg>.ninja regenerated after CMakeLists /utf-8 fix)
+==============================================================================
+
+Release          CXX edges=492  /utf-8=492  missing=0   |  C edges=16  /utf-8=16  missing=0
+Debug            CXX edges=492  /utf-8=492  missing=0   |  C edges=16  /utf-8=16  missing=0
+RelWithDebInfo   CXX edges=492  /utf-8=492  missing=0   |  C edges=16  /utf-8=16  missing=0
+
+=== the 7 previously-broken targets (RWDI) after fix ===
+  D8_1_WrapperCacheTests             edges=1 with=/utf-8 1, without=0 OK
+  DeferredDeletionQueueReclaimTests  edges=1 with=/utf-8 1, without=0 OK
+  EQAnalysisUnitTests                edges=1 with=/utf-8 1, without=0 OK
+  EQBoundExcessBenchmark             edges=1 with=/utf-8 1, without=0 OK
+  EQProcessorMaxGainTests            edges=1 with=/utf-8 1, without=0 OK
+  FFTBackendTests                    edges=3 with=/utf-8 3, without=0 OK
+  GainStagingContractTests           edges=1 with=/utf-8 1, without=0 OK
