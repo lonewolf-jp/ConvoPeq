@@ -4,6 +4,16 @@ $ErrorActionPreference = "Stop"
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $targetDir = Join-Path $repoRoot "src"
 
+# ★ 2026-09-08 (Practical Stable ISR): production code is the strict target.
+#   src/tests/** exercises test-provider bookkeeping atomics (load/store/exchange on
+#   MockSink/Provider members) that are intentionally direct std::atomic — they are
+#   test scaffolding, not RT-path production code. Scanning tests would fail this
+#   gate on every run with zero production value. Production files keep the strict
+#   policy (convo::consumeAtomic/publishAtomic/exchangeAtomic helpers).
+#   Forbidden-symbol and seq_cst rules still scan the whole src tree (both scopes).
+$strictTargets = Get-ChildItem -Path $targetDir -Recurse -File |
+    Where-Object { $_.FullName -notmatch '\\tests\\' }
+
 if (-not (Test-Path $targetDir)) {
     Write-Error "Target directory not found: $targetDir"
     exit 2
@@ -59,9 +69,7 @@ function Remove-CommentsFromLine {
     return $result
 }
 
-$sourceFiles = foreach ($ext in $extensions) {
-    Get-ChildItem -Path $targetDir -Recurse -File -Filter $ext
-}
+$sourceFiles = @($strictTargets | Where-Object { $_.Extension -in @('.h', '.hpp', '.hh', '.cpp', '.cxx', '.cc') })
 
 $violations = @()
 

@@ -60,6 +60,7 @@ steering/
 storage/
 .github/tmp/
 .mimosa/
+.x64dbg-mcp/
 
 # Python caches
 __pycache__/

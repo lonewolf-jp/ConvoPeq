@@ -899,7 +899,7 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
         const std::size_t e = recoveryAdmissions_.findByKey(cid);
         if (e == recoveryAdmissions_.kCapacity) return false;
         // ★ D152 T7: delivery read from the lifecycle snapshot (advisory; attaches commit via CAS).
-        return recoveryAdmissions_.slot(e).lifecycle.load(std::memory_order_acquire).delivery
+        return recoveryAdmissions_.slot(e).lifecycle.load(std::memory_order_acquire).delivery // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
             == static_cast<std::uint8_t>(ObligationDeliveryState::None);
     }();
     redriveDeferredRecoveryObligations();
@@ -934,12 +934,12 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     bool coalesceOnLive = false;
     if (existing != recoveryAdmissions_.kCapacity) {
         auto& life = recoveryAdmissions_.slot(existing).lifecycle;
-        RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+        RecoveryLifecycleWord w = life.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         for (;;) {
             if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
                 break;                                   // terminal → fresh admission path
             RecoveryLifecycleWord desired = w;           // full-word identity CAS (D27.2)
-            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) {
+            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) { // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 coalesceOnLive = true;
                 break;
             }
@@ -948,14 +948,14 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
     }
     if (coalesceOnLive) {
         // COALESCE: reuse existing Live obligation (D18.7 — ΔL = 0; no new oblId)
-        oblId = recoveryAdmissions_.slot(existing).lifecycle.load(std::memory_order_acquire).obligationId;
+        oblId = recoveryAdmissions_.slot(existing).lifecycle.load(std::memory_order_acquire).obligationId; // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         slotIdx = existing;
         convo::fetchAddAtomic(recoveryCoalescedCount_, std::uint64_t{1}, std::memory_order_release);
         // ★ D105-R5-10: redrive may have attached a single delivery to a previously-deferred obligation —
         //   do NOT push a second representation (R10-3 / C16 single-representation). Resubmissions of an
         //   obligation already delivered before redrive still fall through and re-push.
         if (wasDeferredBefore
-            && recoveryAdmissions_.slot(existing).lifecycle.load(std::memory_order_acquire).delivery
+            && recoveryAdmissions_.slot(existing).lifecycle.load(std::memory_order_acquire).delivery // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 != static_cast<std::uint8_t>(ObligationDeliveryState::None))
             return true;
     } else {
@@ -969,7 +969,7 @@ bool RuntimeIntentCoordinator::submitRecoveryRequest(const DSPHandle& quarantine
             return false;
         }
         slotIdx = *ins;
-        oblId = recoveryAdmissions_.slot(*ins).lifecycle.load(std::memory_order_acquire).obligationId;
+        oblId = recoveryAdmissions_.slot(*ins).lifecycle.load(std::memory_order_acquire).obligationId; // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
     }
 
     // NOTE (D105-R5-10): a coalesced re-submission is ALLOWED to re-push its transport intent (this is how
@@ -1079,7 +1079,7 @@ void RuntimeIntentCoordinator::postRecoveryFailureSignal(std::uint64_t obligatio
     }
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
         auto& life = recoveryAdmissions_.slot(i).lifecycle;
-        RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+        RecoveryLifecycleWord w = life.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         if (w.obligationId != obligationId)
             continue;
         for (;;) {
@@ -1093,7 +1093,7 @@ void RuntimeIntentCoordinator::postRecoveryFailureSignal(std::uint64_t obligatio
             }
             RecoveryLifecycleWord desired = w;
             desired.pending = static_cast<std::uint8_t>(w.pending + 1);
-            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel))
+            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 return;   // posted
             if (w.obligationId != obligationId) {
                 // slot reused (id monotonic) → this observation belongs to a dead obligation
@@ -1119,7 +1119,7 @@ void RuntimeIntentCoordinator::adjudicateRecoveryFailureSignals() noexcept
 {
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
         auto& life = recoveryAdmissions_.slot(i).lifecycle;
-        RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+        RecoveryLifecycleWord w = life.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         if (w.pending == 0)
             continue;
         const std::uint64_t oid = w.obligationId;
@@ -1137,7 +1137,7 @@ void RuntimeIntentCoordinator::adjudicateRecoveryFailureSignals() noexcept
             desired.pending = 0;
             desired.adjudicated = a2;
             desired.delivery = static_cast<std::uint8_t>(ObligationDeliveryState::None);   // P-B repair
-            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel))
+            if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 break;   // drained + applied + None-ing in ONE transition
             if (w.obligationId != oid)
                 break;   // slot reused — old signals are inert
@@ -1161,7 +1161,7 @@ std::optional<RecoveryLifecycleWord>
 RuntimeIntentCoordinator::peekLifecycleForTest(std::uint64_t obligationId) const noexcept
 {
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
-        const auto w = recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire);
+        const auto w = recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         if (w.obligationId == obligationId)
             return w;
     }
@@ -1177,7 +1177,7 @@ void RuntimeIntentCoordinator::rearmRecoveryRetry(std::uint64_t obligationId) no
 {
     if (obligationId == 0)
         return;
-    if (pendingRecoveryAdmission_.state.load(std::memory_order_acquire) == PendingRecoveryAdmission::State::Building
+    if (pendingRecoveryAdmission_.state.load(std::memory_order_acquire) == PendingRecoveryAdmission::State::Building // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         && pendingRecoveryAdmission_.recoveryObligationId == obligationId)
         settlePendingRecoveryAdmission(true);
 }
@@ -1193,7 +1193,7 @@ void RuntimeIntentCoordinator::redriveDeferredRecoveryObligations() noexcept
         auto& s = recoveryAdmissions_.slot(i);
         // ★ D152 T7: ONE lifecycle snapshot — state/delivery/id read as a consistent word, never
         //   as separate ownership decisions (the attach below commits via full-word CAS anyway).
-        const auto w = s.lifecycle.load(std::memory_order_acquire);
+        const auto w = s.lifecycle.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
             continue;
         if (w.delivery != static_cast<std::uint8_t>(ObligationDeliveryState::None))
@@ -1212,7 +1212,7 @@ void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationI
         return;
     std::size_t idx = recoveryAdmissions_.kCapacity;
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
-        if (recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire).obligationId == obligationId) {
+        if (recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire).obligationId == obligationId) { // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
             idx = i;
             break;
         }
@@ -1222,7 +1222,7 @@ void RuntimeIntentCoordinator::redriveDeferredRecovery(std::uint64_t obligationI
     auto& s = recoveryAdmissions_.slot(idx);
     // ★ D152 T7: lifecycle snapshot gate (advisory) — the attach commits via full-word CAS.
     {
-        const auto w = s.lifecycle.load(std::memory_order_acquire);
+        const auto w = s.lifecycle.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         if (w.state != static_cast<std::uint8_t>(ObligationState::Live))
             return;
         if (w.delivery != static_cast<std::uint8_t>(ObligationDeliveryState::None))
@@ -1277,7 +1277,7 @@ std::optional<RuntimeIntentCoordinator::RecoveryIntent>
 RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
 {
     PendingRecoveryAdmission::State expected = PendingRecoveryAdmission::State::DurablePending;
-    if (!pendingRecoveryAdmission_.state.compare_exchange_strong(
+    if (!pendingRecoveryAdmission_.state.compare_exchange_strong( // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
             expected, PendingRecoveryAdmission::State::Building,
             std::memory_order_acquire, std::memory_order_relaxed))
         return std::nullopt;   // 非 DurablePending → lease 取得失敗、payload 非読取
@@ -1298,7 +1298,7 @@ RuntimeIntentCoordinator::takePendingRecoveryAdmission() noexcept
 bool RuntimeIntentCoordinator::hasPendingRecoveryAdmission() const noexcept
 {
     return convo::consumeAtomic(recoveryAdmissionPending_, std::memory_order_acquire)
-        && pendingRecoveryAdmission_.state.load(std::memory_order_acquire)
+        && pendingRecoveryAdmission_.state.load(std::memory_order_acquire) // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                != PendingRecoveryAdmission::State::NoAdmission;
 }
 
@@ -1310,11 +1310,11 @@ bool RuntimeIntentCoordinator::hasPendingRecoveryAdmission() const noexcept
 //   reset 順序 = payload クリア → state release（逆順禁止）。
 void RuntimeIntentCoordinator::discardPendingRecoveryAdmission() noexcept
 {
-    if (pendingRecoveryAdmission_.state.load(std::memory_order_acquire) != PendingRecoveryAdmission::State::NoAdmission)
+    if (pendingRecoveryAdmission_.state.load(std::memory_order_acquire) != PendingRecoveryAdmission::State::NoAdmission) // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
     {
         convo::fetchAddAtomic(recoveryShutdownDiscardCount_, std::uint64_t{1}, std::memory_order_release);
         resetDurableAdmissionPayload();
-        pendingRecoveryAdmission_.state.store(PendingRecoveryAdmission::State::NoAdmission,
+        pendingRecoveryAdmission_.state.store(PendingRecoveryAdmission::State::NoAdmission, // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                                               std::memory_order_release);
         convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
     }
@@ -1332,7 +1332,7 @@ void RuntimeIntentCoordinator::settlePendingRecoveryAdmission(bool retry) noexce
     if (retry)
     {
         PendingRecoveryAdmission::State expected = PendingRecoveryAdmission::State::Building;
-        pendingRecoveryAdmission_.state.compare_exchange_strong(
+        pendingRecoveryAdmission_.state.compare_exchange_strong( // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
             expected, PendingRecoveryAdmission::State::DurablePending,
             std::memory_order_release, std::memory_order_relaxed);
         // 非 Building（契約上あり得ない）は no-op。recoveryAdmissionPending_ は true 維持。
@@ -1341,7 +1341,7 @@ void RuntimeIntentCoordinator::settlePendingRecoveryAdmission(bool retry) noexce
     // ★ reset 順序固定: payload クリア → state release（逆順は Builder→CL の stale 読を生むため禁止）。
     resetDurableAdmissionPayload();
     PendingRecoveryAdmission::State expected = PendingRecoveryAdmission::State::Building;
-    pendingRecoveryAdmission_.state.compare_exchange_strong(
+    pendingRecoveryAdmission_.state.compare_exchange_strong( // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         expected, PendingRecoveryAdmission::State::NoAdmission,
         std::memory_order_release, std::memory_order_relaxed);
     convo::publishAtomic(recoveryAdmissionPending_, false, std::memory_order_release);
@@ -1364,7 +1364,7 @@ RuntimeIntentCoordinator::tryAttachDurableRecovery(const DSPHandle& handle, Publ
                                                    const convo::RuntimeBuildSnapshot& buildSource) noexcept
 {
     using State = PendingRecoveryAdmission::State;
-    const State observed = pendingRecoveryAdmission_.state.load(std::memory_order_acquire);
+    const State observed = pendingRecoveryAdmission_.state.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
     if (observed != State::NoAdmission) {
         if (pendingRecoveryAdmission_.recoveryObligationId == oblId)
             return DurableAttachResult::AlreadyRepresented;   // 既存表現あり — payload 非書込（D144 Case C）
@@ -1379,7 +1379,7 @@ RuntimeIntentCoordinator::tryAttachDurableRecovery(const DSPHandle& handle, Publ
     pendingRecoveryAdmission_.intentId = intentId;
     pendingRecoveryAdmission_.recoveryObligationId = oblId;      // ★ D105-R5-8
     State expected = State::NoAdmission;
-    if (pendingRecoveryAdmission_.state.compare_exchange_strong(
+    if (pendingRecoveryAdmission_.state.compare_exchange_strong( // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
             expected, State::DurablePending, std::memory_order_release, std::memory_order_acquire)) {
         convo::publishAtomic(recoveryAdmissionPending_, true, std::memory_order_release);
         return DurableAttachResult::Attached;
@@ -1413,14 +1413,14 @@ bool RuntimeIntentCoordinator::casDelivery(std::size_t slotIdx, std::uint64_t ob
                                            ObligationDeliveryState to) noexcept
 {
     auto& life = recoveryAdmissions_.slot(slotIdx).lifecycle;
-    RecoveryLifecycleWord w = life.load(std::memory_order_acquire);
+    RecoveryLifecycleWord w = life.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
     for (;;) {
         if (w.obligationId != oblId
             || w.state != static_cast<std::uint8_t>(ObligationState::Live))
             return false;
         RecoveryLifecycleWord desired = w;
         desired.delivery = static_cast<std::uint8_t>(to);
-        if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel))
+        if (life.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
             return true;
         // w updated to the current word → re-evaluate (terminal/reuse exits above; contention retries)
     }
@@ -1460,7 +1460,7 @@ void RuntimeIntentCoordinator::discardRecoveryRequestsOnShutdown() noexcept
     //   −1 stays idempotent (CAS Live→terminal); a concurrent ISR completion that wins the CAS makes
     //   shutdown skip it (no double −1, no L underflow). Delivery discard below does NOT touch L.
     for (std::size_t i = 0; i < recoveryAdmissions_.kCapacity; ++i) {
-        const std::uint64_t oblId = recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire).obligationId;
+        const std::uint64_t oblId = recoveryAdmissions_.slot(i).lifecycle.load(std::memory_order_acquire).obligationId; // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         if (oblId != 0)
             resolveRecoveryObligation(oblId, RecoveryOutcome::ShutdownDiscarded);
     }

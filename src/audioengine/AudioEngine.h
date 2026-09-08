@@ -1085,7 +1085,7 @@ public:
         // capture 時点の generation（enqueuePublicationIntentForRuntimeCommit が唯一の stamp 経路）。
         std::atomic<std::uint64_t> diagGeneration { 0 };
         DiagFootprint diagFootprint {};             // 非 RT 前提（capture/stamp/destroy は全て NonRT）
-        std::atomic<bool> diagFootprintCaptured { false };
+        bool diagFootprintCaptured { false };       // 非 RT 前提（diagFootprint と同系・write-only marker）
 
         // NonRT 専用: 実測 footprint の取得（publish 前の DSPCore を capture 時点の
         // 構築スレッドまたは Message Thread から呼ぶこと）。
@@ -2262,9 +2262,15 @@ public:
     }
 
     // ★ ISR Bridge Runtime: published runtime world に current DSP が存在するか。
-    //   getActiveRuntimeDSP()（activeRuntimeDSPSlot）は placeholder 専用のレガシースロットで
-    //   通常動作（runtime world 公開後）では null のため、UI/レイテンシー表示はこちらを
-    //   情報源にする（RT 処理パスと同じ runtime world 解決）。
+    //   getActiveRuntimeDSP()（activeRuntimeDSPSlot）は placeholder 専用の非所有 legacy
+    //   mirror である。slot が値を持つのは placeholder bootstrap path のみ
+    //   （prepareToPlay で hasPublishedCurrent==false && !hasActiveRuntimeDSP() の場合に
+    //   placeholder を生成して setActiveRuntimeDSP() する経路 — PrepareToPlay.cpp:283-287）
+    //   であり、通常の published RuntimeWorld が存在する rebuild path では pointer slot は
+    //   rebuild current DSP を表さない（rebuild publish は slot を更新しない — RC-D169-1-2）。
+    //   したがって UI/レイテンシー表示は published RuntimeWorld（本関数 / RT 処理パスと同じ
+    //   runtime world 解決）を情報源にする。slot を dereference する新規経路の追加は禁止
+    //   （D172-1/D172-2 契約 — MEM_SNAP は RuntimeWorld resolver 経由に統一済み）。
     [[nodiscard]] inline bool hasPublishedRuntimeDSP() const noexcept
     {
         const auto readToken = worldAuthority_.acquireReadToken();

@@ -6,15 +6,33 @@ baseline: ConvoPeq.md Generated 2026-09-01 15:30:13（D161 で確定した現行
 対象: doc/work88/REPAIR_PLAN2-dash2.md（5391 行）/ doc/work88/I4_DESIGN_CONTRACT.md（7952 行）
 方法: 全見出しインベントリ + 明示的未実装マーカー全数抽出（未実装 / not yet implemented / CONFIRMED UNIMPLEMENTED / 実装不在 / 未導入）+ 現行 src 実測照合
 位置づけ: 通常開発でのユーザー要求による調査。D159 freeze register との整合判定を含む
+
+─── D175-0 更新記録（2026-09-08・doc-only）──────────────────────────────
+本 inventory の 1-C（新規 CR 候補 2 系統）は後続調査で STALE 化が確定したため反映した。
+根拠: D163（CR-α/CR-β REJECT・2026-09-06）/ D171-1（OPEN items re-audit・2026-09-07）/
+      D174（OPEN candidate triage・call-chain 実測・2026-09-08）。
+authority stamp: ConvoPeq.md Generated 2026-09-08 07:15:27（実装 commit 54ba7b40 = D172-3）。
+現行結論: genuine OPEN implementation item = 0 件。
+  - CR-α 本体（Site 3 warmup backoff）= 実装済み CLOSED（CR-α-1..6・commit 0aeb22ca）
+  - Site 2 retry 適用 = DEFER（非 defect・dash2 §1.8 Phase D 仕様通り・将来拡張コメント現役）
+  - buildErrorCount_ = DEFER / monitoring（freeze register 補助 trigger 登録済み → §3 更新分参照）
+  - CR-β / CW-8 = ALREADY COVERED / STALE（実装済み・production caller 0 は保守的休止）
+─────────────────────────────────────────────────────────────────────────
 ```
 
 ## 総合判定
 
-> **両文書から、D159 freeze register でカバーされていない未実装項目が 2 系統確認された。**
+> **【2026-09-01 時点の原文】両文書から、D159 freeze register でカバーされていない未実装項目が 2 系統確認された。**
 > 1. **dash2 §1.8 BuildError Phase-2 残部（A-4/A-5 / Amendment 1.8 criteria）** — exponential backoff / retry count / retry telemetry。ソース内コメントで将来拡張として明示記録済み・非 blocking。
 > 2. **CW-8 PublishedWorldObservation atomic snapshot contract** — 設計のみ・src 0 件。
 >
 > これ以外の全項目は「実装済み」「STALE（後続実装で陳腐化）」「D159 DEFER 凍結（Phase-II）」のいずれかに分類され、新たに着手すべき OPEN 項目は上記 2 件のみ。
+
+> **【D175-0 更新・2026-09-08 現行】上記 2 系統はいずれも後続実装で解決済み（STALE 化）:**
+> 1. **CR-α 本体（Site 3 warmup backoff / retry count / disposition→delay mapping）= 実装済み CLOSED** — `RetryBackoffPolicy{kDefaultWarmupRetryBackoff={10,80,2}}`・`warmupRetryDecision()` 純関数・唯一の production call site `schedule(req, decision.delayMs)`（RebuildDispatch.cpp:1311）に接続済み・T-CRα-1..4 テスト完備（CR-α-1..6 CLOSED・commit 0aeb22ca・D163 REJECT / D174 call-chain 実測）。**Site 2 retry 適用は DEFER**（非 defect・dash2 §1.8 Phase D 仕様通り・将来拡張コメント現役）。**buildErrorCount_ telemetry は DEFER / monitoring**（§3 更新分の trigger 登録参照）。
+> 2. **CR-β / CW-8 = ALREADY COVERED / STALE** — `PublishedWorldObservation` 型（private ctor + friend 構造遮断）+ factory `observePublishedObservation()`（単一 acquire load から {world, &world->publication} 同時確定）+ T-CW8-1..7 テスト + harness 登録が実装済み（commit 0aeb22ca ND-01..04・D163 REJECT / D174 確認）。production caller 0 件は保守的休止。
+>
+> **現行結論（2026-09-08）: genuine OPEN implementation item = 0 件。** Phase-II 項目は D159 freeze register（D1〜D6 + 補助 trigger）待ち。実装系新規 track は RuntimeBuilder.h:118-124 の trigger 条件成立（設計確定イベント）まで起票禁止（D174 Final Decision）。
 
 ---
 
@@ -54,7 +72,11 @@ baseline: ConvoPeq.md Generated 2026-09-01 15:30:13（D161 で確定した現行
 
 #### 1-C-1. dash2 §1.8 Phase-2 残部 / A-4 / A-5 / Amendment 1.8 Acceptance Criteria（retry backoff・count・telemetry）
 
-**本調査の主な新規発見。** 現行ソース実測:
+> **【D175-0 判定更新・2026-09-08】本項目は STALE — CR-α 本体（Site 3 warmup backoff / count / disposition→delay mapping）は実装済み CLOSED。**
+> 根拠: CR-α-1..6 CLOSED（commit 0aeb22ca・CRALPHA6_CLOSURE_REPORT）・D163 REJECT / D174-1 call-chain 実測（classifyBuildError 2 sites・schedule production call site 1 箇所 = RebuildDispatch.cpp:1311 `schedule(req, decision.delayMs)`）。
+> **分離後の現行状態**: ① Site 3 backoff = 実装済み（kDefaultWarmupRetryBackoff={10,80,2}・T-CRα-1..4 テスト）② Site 2 retry 適用 = **DEFER**（非 defect・dash2 §1.8 Phase D 仕様通り・将来拡張コメント現役）③ buildErrorCount_ telemetry = **DEFER / monitoring**（§3 更新分 trigger 登録参照）。
+
+**以下は 2026-09-01 時点の原文実測（historical）:**
 
 - `classifyBuildError()` は 2 call site（build 失敗 :1178 / warmup 失敗 :1247）で分類・ログ出力するが、**retry 方針の実適用（backoff 等）は行っていない**。ソース自身が明示: 「retry 方針の実適用（backoff 等）は D-5 RetryBackoffPolicy tuning と併せて将来拡張 — 1.8.9 実装手順」（RebuildDispatch.cpp:1175-1177）
 - `retryScheduler_->schedule(req, std::chrono::milliseconds(0))` — **delay 0 固定**（:1256、唯一の call site）。Amendment 1.8 の「exponential backoff（min 1ms, max 100ms）」未実装
@@ -67,7 +89,14 @@ baseline: ConvoPeq.md Generated 2026-09-01 15:30:13（D161 で確定した現行
 
 **D159 freeze register での扱い:** 未登録（D6 は P2/G2/W1 static bound のみ）。→ 新規 CR または freeze register への追記が必要。
 
+**【D175-0 追記】上記「未登録」は解消済み**: buildErrorCount_ の補助 trigger は D175-1 で登録（§3 更新分）。Site 3 backoff 実装は CR-α として独立 closure 済み。
+
 #### 1-C-2. dash2 H.11.27.4 CW-8 — PublishedWorldObservation atomic snapshot contract
+
+> **【D175-0 判定更新・2026-09-08】本項目は STALE / ALREADY COVERED — 実装済み。実装禁止。**
+> 根拠: D163 CR-β REJECT / D174-4 確認。実装 anchor（commit 0aeb22ca ND-01..04）: `PublishedWorldObservation` 型（RuntimeWorldAuthority.h — private ctor + friend 構造遮断・trivially copyable・独立構築不能）+ factory `observePublishedObservation(const ReadToken&)`（**単一 acquire load から {world, &world->publication} 同時確定**・未 publish 時 {nullptr,nullptr}）+ `testCW8_PublishedWorldObservation`（T-CW8-1/2/3/4/6/7）+ harness 登録。inventory「src 0 hits」記述は stale（19 hits 実測）。production caller 0 件は保守的休止。
+
+**以下は 2026-09-01 時点の原文実測（historical）:**
 
 - 「`{world, identity}` が同一 publication transaction 由来であることを read-contract として保証」する設計（第十八者 #37-C）。**src 0 hits** — 設計のみ。
 - 現行は CW-5（`RuntimeStore::current.identity == RuntimeState::publication.identity`）+ INV-ISR-06（CW-3c 実装済み）で部分カバーされるが、単一 acquire load でのペア取得保証は未実装。
@@ -125,6 +154,30 @@ I4 設計名の `terminalDispositionCount` / `retryExhaustedCount` / `recoverClo
 ---
 
 ## 3. 結論と推奨処理
+
+> **【D175-0 更新・2026-09-08 現行】**
+>
+> | 分類 | 件数 | 処理 |
+> |---|---|---|
+> | 実装済み（dash2 本体 + A 系 + H 系 findings + **CR-α Site 3 backoff + CW-8**） | 19 項目 | なし（closure 済み） |
+> | STALE（後続実装で陳腐化した記述。**1-C-1 本体・1-C-2 を含む**） | 8 項目 | なし（historical。D159 規則どおり） |
+> | DEFER（D159 凍結と一致 + **Site 2 retry 適用** + **buildErrorCount_ telemetry**） | 8 項目 | なし（trigger 待ち・monitoring） |
+> | **未実装・未登録（新規 CR 候補）** | **0 系統** | **— genuine OPEN implementation item = 0 件（D174 Final Decision）** |
+>
+> **buildErrorCount_ の freeze register 補助 trigger（D175-1 登録・2026-09-08）:**
+>
+> ```text
+> buildErrorCount_ telemetry（集約 build failure counter）
+>     ↓ trigger 未発生（現行）
+> DEFER / monitoring — 追加実装は行わない
+>     ↓ trigger 発生時のみ Phase-II 再評価
+> ```
+>
+> **trigger 条件**: convolver / prepare の実 failure が production 経路から実際に観測可能になり、かつ subsystem 別 retry policy が必要であることが設計として確定した場合（RuntimeBuilder.h:118-124 の仕様記述と同一）。現状 MKLFailure / ConvolverFailure / PrepareFailure は生成経路なしの休眠分類であり、観測ギャップは既存 telemetry（REBUILD_TELEMETRY + classifyBuildError ログ + Site 3 Exhausted terminal）で埋まっている。
+>
+> **D174 判定（2026-09-08）のまま**: BuildError Phase-II / CW-8 / Site 2 retry の実装系新規 track 起票は禁止。doc-only maintenance（本更新）が着手可能な作業のすべて。
+
+**以下は 2026-09-01 時点の原文結論（historical — 1-C は上記更新により STALE/DEFER 化済み）:**
 
 | 分類 | 件数 | 処理 |
 |---|---|---|

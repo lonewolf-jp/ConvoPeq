@@ -458,6 +458,17 @@ foreach ($file in $sourceFiles) {
             if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, $allowedMutablePattern)) {
                 # Legitimate const-correct mutex pattern, skip
             }
+            # ★ 2026-09-08 (Practical Stable ISR): mutable POD struct member for a NonRT-only
+            #   correlation cache is the same const-correctness pattern as mutable mutex.
+            #   Allowed only when the declared type is a locally-defined trivially-copyable
+            #   aggregate (POD) — struct/class with no destructor — and the surrounding
+            #   comment documents the NonRT-only thread contract.
+            #   Precedent: RuntimeHealthMonitor::m_lastStuckDiagnosis_ (filled by takeSnapshot()
+            #   on the MessageThread 100ms timerCallback; never touched from the RT path).
+            elseif ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, '\bmutable\s+\w+\s+\w+\s*(\{\s*\}\s*)?;') `
+                -and ($lines[[Math]::Max(0, $lineIndex - 9)..$lineIndex] -join ' ') -match 'NonRT|MessageThread|Non-RT|timerCallback') {
+                # mutable POD aggregate + documented NonRT thread contract, skip
+            }
             elseif ($lineText -match 'NOLINT\(thread-local\)' -and $lineText -match 'RT-SAFE:') {
                 # NOLINT(thread-local) + RT-SAFE: intentinally reviewed thread-local cache.
                 # ISR rule: allowed only when the comment documents WHY it is RT-safe

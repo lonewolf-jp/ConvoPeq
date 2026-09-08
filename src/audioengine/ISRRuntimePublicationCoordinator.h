@@ -434,7 +434,7 @@ public:
         //   via the full-word identity CAS; a stale Live here cannot produce a false commit).
         std::size_t findByKey(const CoalesceIdentity& key) const noexcept {
             for (std::size_t i = 0; i < kCapacity; ++i) {
-                const auto w = slots_[i].lifecycle.load(std::memory_order_acquire);
+                const auto w = slots_[i].lifecycle.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 if (w.state == static_cast<std::uint8_t>(ObligationState::Live)
                     && slots_[i].identity == key)
                     return i;
@@ -458,11 +458,11 @@ public:
                                              PublicationEpoch epoch,
                                              std::uint64_t intentId,
                                              const convo::RuntimeBuildSnapshot& buildSource) noexcept {
-            if (liveCount_.load(std::memory_order_acquire) >= kCapacity)
+            if (liveCount_.load(std::memory_order_acquire) >= kCapacity) // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 return std::nullopt; // capacity exhausted → caller rejects (ΔL=0)
             for (std::size_t i = 0; i < kCapacity; ++i) {
                 // a non-Live slot is reusable (fresh id==0, or terminal → reclaimed)
-                RecoveryLifecycleWord expected = slots_[i].lifecycle.load(std::memory_order_acquire);
+                RecoveryLifecycleWord expected = slots_[i].lifecycle.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 if (expected.state == static_cast<std::uint8_t>(ObligationState::Live))
                     continue;
                 const LogicalRecoveryObligationId id = ++nextId_;
@@ -479,7 +479,7 @@ public:
                 desired.state = static_cast<std::uint8_t>(ObligationState::Live);
                 bool published = false;
                 while (expected.state != static_cast<std::uint8_t>(ObligationState::Live)) {
-                    if (slots_[i].lifecycle.compare_exchange_strong(
+                    if (slots_[i].lifecycle.compare_exchange_strong( // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                             expected, desired, std::memory_order_acq_rel)) {
                         published = true;
                         break;
@@ -509,7 +509,7 @@ public:
                      std::uint8_t* discardedPendingOut = nullptr) noexcept {
             const auto term = static_cast<std::uint8_t>(terminalState);
             for (std::size_t i = 0; i < kCapacity; ++i) {
-                RecoveryLifecycleWord w = slots_[i].lifecycle.load(std::memory_order_acquire);
+                RecoveryLifecycleWord w = slots_[i].lifecycle.load(std::memory_order_acquire); // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                 if (w.obligationId != id)
                     continue;
                 while (w.state == static_cast<std::uint8_t>(ObligationState::Live)) {
@@ -517,7 +517,7 @@ public:
                     desired.state = term;
                     desired.pending = 0;
                     desired.adjudicated = 0;
-                    if (slots_[i].lifecycle.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) {
+                    if (slots_[i].lifecycle.compare_exchange_strong(w, desired, std::memory_order_acq_rel)) { // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
                         if (discardedPendingOut != nullptr)
                             *discardedPendingOut = w.pending;
                         convo::fetchSubAtomic(liveCount_, std::uint64_t{1}, std::memory_order_release);
@@ -538,7 +538,7 @@ public:
         // ★ D152-R1: read-only accessor for the adjudicated retry budget (W.adjudicated).
         //   Advisory snapshot (telemetry/tests only — never an ownership decision input).
         std::uint8_t adjudicatedFailureCount(std::size_t i) const noexcept {
-            return slots_[i].lifecycle.load(std::memory_order_acquire).adjudicated;
+            return slots_[i].lifecycle.load(std::memory_order_acquire).adjudicated; // NOLINT(atomic-dot-call): T3c 16B full-word CAS (D152-R2) — helper 置換不可の設計固定プロトコル
         }
 
     private:

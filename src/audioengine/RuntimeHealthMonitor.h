@@ -326,6 +326,8 @@ private:
     std::uint64_t m_lastTerminalEvidenceUs_{0};   // 10 s periodic evidence timer (episode)
     // Correlation cache — filled by takeSnapshot() (sole raw-read site), consumed on the
     // rare event-emission path. mutable because takeSnapshot() is const.
+    // Thread contract: MessageThread-only (NonRT 100ms timerCallback sampler) — never
+    // touched from the RT audio path. POD aggregate, no destructor, no cross-thread handoff.
     struct CachedStuckDiagnosis {
         bool isStuck{false};
         int32_t readerIndex{-1};

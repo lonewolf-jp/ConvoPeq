@@ -829,7 +829,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     {
         newDSP->diagGeneration.store(static_cast<std::uint64_t>(generation), std::memory_order_relaxed);
         newDSP->diagFootprint = newDSP->diagCaptureFootprint();
-        newDSP->diagFootprintCaptured.store(true, std::memory_order_release);
+        newDSP->diagFootprintCaptured = true;
         const auto& fp = newDSP->diagFootprint;
         diagLog(juce::String::formatted(
             "[DSP_ALLOC] dsp=%p gen=%llu kind=convolver bytes=%zu", (void*)newDSP,

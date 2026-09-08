@@ -239,7 +239,7 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     //   enqueue 時の retained 再取得で上書きされる）。
     {
         diagFootprint = diagCaptureFootprint();
-        diagFootprintCaptured.store(true, std::memory_order_release);
+        diagFootprintCaptured = true;
         diagLog(juce::String::formatted(
             "[DSP_FOOTPRINT] dsp=%p gen=%llu phase=construct convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu TOTAL=%zu",
             (void*)this,
