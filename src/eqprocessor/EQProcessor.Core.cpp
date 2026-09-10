@@ -282,6 +282,12 @@ void EQProcessor::reset()
     //   累積した mask+serial を clobber していた（G5 新発見の pre-existing 競合）。
     //   consumer（Processing.cpp:595-601）は serial 進行検知 → fetch_or(mask=0)=no-op
     //   acknowledge で吸収するため無変更で可。
+    //   [work89 R-3a] 本 CAS は並行 requestBandReset() の mask を clobber し得るが、
+    //   **現行の mask 消費意味が filterState の band reset に限定される限り**、本関数の
+    //   filterState 全体 memset によりその効果は subsume される
+    //   （REMEDIATION_PLAN_R123_20260910 §1.5 P-A1〜P-A5）。本関数は現行直接呼出し 0 の
+    //   休眠コードであり発火は Audio Thread 停止中に限定。mask に filterState リセット
+    //   以外の意味を追加する変更時は本証明を再実施すること（§1.8）。
     {
         std::uint64_t packed = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
         for (;;)
@@ -604,10 +610,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);     // acquire: 同上
     const FilterStructure syncedStructure = static_cast<FilterStructure>(clonedState->filterStructure);
     const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);                      // acquire: other の bypassed publishAtomic release と HB
-    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire); // acquire: other の requestBandReset/publishAtomic acq_rel/release と HB
-    const std::uint32_t syncedBandResetMask = bandResetMaskFromPacked(syncedBandResetPacked);
-    const std::uint64_t syncedBandResetSerial = static_cast<std::uint64_t>(bandResetSerialFromPacked(syncedBandResetPacked));
-    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire); // acquire: other の requestAgcReset acq_rel と HB
+    // ★ work89 R-1: bandResetPacked / agcResetSerial の shadow 同期は廃止（下記参照）。
 
     // Avoid publication-domain split here: sync uses immutable state swap plus RT-local shadow updates.
     bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
@@ -620,10 +623,13 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
     rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
 
-    rtDeferredBandResetMask.store(syncedBandResetMask, std::memory_order_relaxed);
-    rtSeenBandResetSerial = syncedBandResetSerial;
-    rtSeenAgcResetSerial = syncedAgcResetSerial;
-
+    // ★ work89 R-1: rtSeenBandResetSerial / rtSeenAgcResetSerial / rtDeferredBandResetMask
+    //   への Non-RT 直接書込を廃止（data race 解消・REMEDIATION_PLAN_R123_20260910 §2 R-1）。
+    //   本関数は現行直接呼出し 0 の休眠コード（dormant・wrapper 経由の活性化配線は
+    //   dead_code_callers_verifier の DORMANT_EDGE 監視下）。将来活性化する場合も
+    //   rt シャドウ（rt*Shadow / rtDeferredBandResetMask / rtSeen*Serial）への Non-RT
+    //   書込は禁止 — serial は fetchAddAtomic 前進 + Audio Thread 自己更新に一任し、
+    //   本体（残存する shadow store を含む）は再設計すること。
 }
 
 //============================================================================
@@ -653,6 +659,9 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 
 //============================================================================
 // グローバル状態同期 (Worker Threadからも安全)
+// ★ work89 R-1: 本関数は現行直接呼出し 0 の休眠コード（dormant）。旧「Worker が
+//   shadow を同期する」プロトコルは撤回済み — 活性化時は EQProcessor.h の
+//   shadow ownership 契約（work92 B-7a / work89 R-1）に従うこと。
 //============================================================================
 void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 {
@@ -664,10 +673,7 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
         ? static_cast<FilterStructure>(otherState->filterStructure)
         : convo::consumeAtomic(other.requestedStructure, std::memory_order_acquire); // acquire: setFilterStructure の release と HB (フォールバック)
     const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);                      // acquire: other の bypassed publishAtomic release と HB
-    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire); // acquire: other の requestBandReset acq_rel と HB
-    const std::uint32_t syncedBandResetMask = bandResetMaskFromPacked(syncedBandResetPacked);
-    const std::uint64_t syncedBandResetSerial = static_cast<std::uint64_t>(bandResetSerialFromPacked(syncedBandResetPacked));
-    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire); // acquire: other の requestAgcReset acq_rel と HB
+    // ★ work89 R-1: bandResetPacked / agcResetSerial の shadow 同期は廃止（下記参照）。
 
     // Keep sync as shadow-state update to prevent multi-atomic partial visibility.
     bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
@@ -684,10 +690,13 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
     rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
 
-    rtDeferredBandResetMask.store(syncedBandResetMask, std::memory_order_relaxed);
-    rtSeenBandResetSerial = syncedBandResetSerial;
-    rtSeenAgcResetSerial = syncedAgcResetSerial;
-
+    // ★ work89 R-1: rtSeenBandResetSerial / rtSeenAgcResetSerial / rtDeferredBandResetMask
+    //   への Non-RT 直接書込を廃止（data race 解消・REMEDIATION_PLAN_R123_20260910 §2 R-1）。
+    //   本関数は現行直接呼出し 0 の休眠コード（dormant・wrapper 経由の活性化配線は
+    //   dead_code_callers_verifier の DORMANT_EDGE 監視下）。将来活性化する場合も
+    //   rt シャドウ（rt*Shadow / rtDeferredBandResetMask / rtSeen*Serial）への Non-RT
+    //   書込は禁止 — serial は fetchAddAtomic 前進 + Audio Thread 自己更新に一任し、
+    //   本体（残存する shadow store を含む）は再設計すること。
 }
 
 //============================================================================
@@ -806,6 +815,11 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
     // ★ work92 B-7b: reset() と同一の CAS 統一（serial 前進 + mask=0）。
+    //   [work89 R-3b] 本 CAS は clobber し得る相手が構造的に存在しない: prepareToPlay の
+    //   呼出経路は DSPCore::prepare()（RuntimeBuilder.cpp:425 fresh DSPCore 生成 →
+    //   :430 prepare → :435 release 後に publish）に限定され、fresh instance の
+    //   bandResetPacked に並行 writer は存在しない（REMEDIATION_PLAN_R123_20260910
+    //   §1.6 P-B1〜P-B4）。live instance への再 prepare 経路は 0 件。
     {
         std::uint64_t packed = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
         for (;;)

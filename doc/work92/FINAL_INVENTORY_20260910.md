@@ -61,6 +61,26 @@
 
 **結論**: 残存する OPEN バグ項目は **ゼロ**。残置は全て「設計確定イベント待ち」（big 1-7 案 B・big 1-2 producer・R-新規A〜D）または「監視のみ」（big 3-1/3-3/3-4/3-8）であり、PLAN v3.1 §8 の分類と整合する。
 
+### 5-1. 「OPEN BUG = 0」の監査上の厳密定義（2026-09-10 追記・ユーザー監査指摘の反映）
+
+> ユーザー監査（2026-09-10）の指摘により、上記「残存する OPEN バグ項目はゼロ」の表現を厳密化する。詳細な分類表と現行 HEAD（3b43a35d）実測根拠は `doc/work89/INTEGRATED-BUG-LIST.md` §17.8 を authority とする。
+
+**正確な意味**:
+
+> **監査対象として登録された既知バグ集合（work89 BUG-047〜065 + work92 CORRECT list 56 番号 + big_bug 固有 35 項目）のうち、現行稼働経路に存在する未修正の実害バグ（ACTIVE/OPEN BUG）はゼロ。**
+> 一方で「未解決事項が一切存在しない」わけではない:
+
+| 分類 | 件数 | 項目 |
+|------|------|------|
+| **ACTIVE / OPEN BUG** | **0** | — |
+| **CLOSED BUG** | 62+ | BUG-047〜065・BUG-044・BUG-011/012/013/016・big 1-1/1-3/1-6/1-8/1-9/1-10（lastResortQueue_ 部分含む）/2-6/2-9/2-10・big 3-5/3-6/3-7/3-9/3-10 |
+| **DORMANT RISK** | 2 | R-新規A（reset は ~StereoConvolver + aligned_free 実装済みだが rebuildJob make_unique 0 件で未発火）・R-新規B（incremental rebuild 未接続） |
+| **DESIGN DEFERRED** | 2 | big 1-7 案 B（B-1 リネーム済み・RT 分離は Retire authority 設計変更時に別 work item）・big 1-2 producer（big_bug §10-3-1 確定設計方針どおり実装なし） |
+| **FUTURE RISK / P3** | 2 | R-新規C（rebuildAllIRsSynchronous は現行経路・bad_alloc 限定）・R-新規D（文書のみ — executePendingCommit の「Message Thread のみ」コメントは LoadPipeline.cpp:764 に現行整合を確認） |
+| **MONITORING ONLY** | 4 | big 3-1（NoiseShaperLearner.cpp:68-69 SPSC 単一利用）・big 3-3（AlignedAllocation.h:32 aligned_malloc_nothrow 提供済み）・big 3-4（mkl_malloc 64-byte 保証）・big 3-8（LatencySnapshot はコピー delete 済み） |
+
+**注意**: 「バグが存在しない」と「監査対象として登録されている未修正バグがない」は論理的に区別される。以後の文書で OPEN = 0 と記載する場合は本節（または work89 §17.8）の分類を前提とする。FUTURE RISK/P3・DORMANT・DESIGN DEFERRED・MONITORING ONLY は ACTIVE/OPEN BUG には数えない。
+
 ## 6. 現在の状態と次アクション
 
 - **変更内容**: 31 ファイル +924/−177（work92 本体）+ README.md matrix + ICX_ISA_AUDIT_PROCEDURE.md + CORRECT_INTEGRATED_BUG_LIST.md 判定更新 + doc/work92 報告書 3 件 — **すべて未 commit**（ユーザー commit 待ち）

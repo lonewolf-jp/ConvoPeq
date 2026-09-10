@@ -23,10 +23,21 @@ Exit codes:
 Known limitations:
 - Comments (line / block / trailing) and string literals are stripped before
   matching, so commented-out calls are NOT flagged.
-- The reset-family guard uses a whitelist of receiver names observed in the
-  codebase (eqRt, uiEqEditor, eq, ...). A call through an unlisted receiver
-  name would be a false negative; the sync* family additionally has a
-  receiver-agnostic catch-all to reduce that risk.
+- The sync* family uses a receiver-agnostic catch-all; the reset family now also
+  covers the wrapper chain via resetForRuntime()/ref().reset() patterns (R-2).
+
+work89 R-2 addition (DORMANT_EDGE registry, REMEDIATION_PLAN_R123_20260910 §2 R-2):
+- The wrapper chain DSPCore::reset() -> eqState->resetForRuntime() ->
+  EQRuntimeState::resetForRuntime() -> ref().reset() == EQProcessor::reset() is
+  *wired but dormant*: DSPCore::reset() itself has zero direct callers. The old
+  receiver whitelist could not see `ref().reset()` inside the wrapper (documented
+  false negative). R-2 closes that gap with an explicit registry:
+    ACTIVE        : detection -> FAIL (default)
+    DORMANT_EDGE  : detection -> WARN **only if** the actual callee set inside the
+                    registered {file, function} matches expected_callees exactly
+                    (callee addition/removal, function change, file change -> FAIL)
+  The allowlist is structural ({file, function, expected_callee, reason}), never
+  line-number based: "this edge is intended by design", not "this line is OK".
 """
 
 import argparse
@@ -124,6 +135,47 @@ GENERIC_SYNC_CALL_RE = re.compile(
     r"(syncStateFrom|syncGlobalStateFrom|syncBandNodeFrom)\s*\("
 )
 
+# ---------------------------------------------------------------------------
+# work89 R-2: DORMANT_EDGE registry — explicit dormant wiring (structural).
+# Detection patterns for the wrapper chain. Any occurrence OUTSIDE a registered
+# DORMANT_EDGE region is an ACTIVE violation (FAIL).
+# ---------------------------------------------------------------------------
+
+RESET_FOR_RUNTIME_CALL_RE = re.compile(
+    r"\b(?:eqState|convolverState)\s*->\s*resetForRuntime\s*\("
+)
+REF_RESET_RE = re.compile(r"\bref\s*\(\s*\)\s*\.\s*reset\s*\(\s*\)")
+
+DORMANT_EDGES = [
+    {
+        "name": "DSPCore::reset dormant wiring",
+        "kind": "function_region",
+        "file": "src/audioengine/AudioEngine.Processing.DSPCoreLifecycle.cpp",
+        "function_header_re": r"^void\s+AudioEngine::DSPCore::reset\s*\(\s*\)",
+        "expected_callees": [
+            (r"\bconvolverState\s*->\s*resetForRuntime\s*\(\s*\)",
+             "convolverState->resetForRuntime()"),
+            (r"\beqState\s*->\s*resetForRuntime\s*\(\s*\)",
+             "eqState->resetForRuntime()"),
+        ],
+        "reason": ("intentional dormant wiring: DSPCore::reset() itself has zero direct "
+                   "callers (doc/work89/REMEDIATION_PLAN_R123_20260910 §1.4); activation "
+                   "requires Audio-Thread-stopped context and a fresh audit"),
+    },
+    {
+        "name": "RuntimeState wrapper resetForRuntime definitions",
+        "kind": "wrapper_structs",
+        "file": "src/audioengine/AudioEngine.h",
+        "wrappers": ["EQRuntimeState", "ConvolverRuntimeState"],
+        "expected_callees": [
+            (r"\bref\s*\(\s*\)\s*\.\s*reset\s*\(\s*\)", "ref().reset()"),
+        ],
+        "reason": ("wrapper definitions forwarding resetForRuntime() to "
+                   "EQProcessor::reset()/ConvolverProcessor::reset() — dormant unless "
+                   "the DSPCore::reset edge is activated"),
+    },
+]
+
 
 def strip_comments_and_strings(line, in_block):
     """Remove comments (line / block / trailing) and blank string-literal
@@ -193,7 +245,7 @@ def iter_source_files(src_dir, exclude_globs):
             yield path, rel
 
 
-def check_file(filepath, relpath):
+def check_file(filepath, relpath, covered=None):
     """Return list of (line_no, original_line, function_name) violations."""
     found = []
     in_block = False
@@ -211,12 +263,185 @@ def check_file(filepath, relpath):
                 found.append((lineno, original.strip(), "*::" + m.group(1)))
                 continue
             # --- receiver-specific patterns ---
+            hit = False
             for w in WATCHED:
                 for pat in w["patterns"]:
                     if re.search(pat, line):
                         found.append((lineno, original.strip(), w["name"]))
+                        hit = True
                         break
+                if hit:
+                    continue
+            # --- work89 R-2: wrapper-chain patterns outside DORMANT_EDGE regions ---
+            if covered is not None and (relpath, lineno) not in covered:
+                if RESET_FOR_RUNTIME_CALL_RE.search(line) or REF_RESET_RE.search(line):
+                    found.append((lineno, original.strip(), "*dormant-chain-active*"))
     return found
+
+
+# ---------------------------------------------------------------------------
+# work89 R-2: DORMANT_EDGE structural verification.
+# ---------------------------------------------------------------------------
+
+
+def _read_stripped(filepath):
+    """Return list of (lineno, original, stripped) with comments/strings stripped."""
+    out = []
+    in_block = False
+    with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            original = raw.rstrip("\n")
+            stripped, in_block = strip_comments_and_strings(original, in_block)
+            out.append((lineno, original, stripped))
+    return out
+
+
+def _depth_annotated(stripped_lines):
+    """Annotate each (lineno, original, stripped) with the brace depth *before* it."""
+    out = []
+    depth = 0
+    for lineno, original, stripped in stripped_lines:
+        out.append((lineno, original, stripped, depth))
+        for ch in stripped:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+    return out
+
+
+def _function_region(annotated, header_re):
+    """Return (lineno, stripped) lines of the top-level function whose signature
+    matches header_re (region ends at the first '}' in column 0). None if absent."""
+    region = []
+    started = False
+    for lineno, _orig, stripped, _depth in annotated:
+        if not started:
+            if re.match(header_re, stripped):
+                started = True
+                region.append((lineno, stripped))
+            continue
+        region.append((lineno, stripped))
+        if stripped.startswith("}"):
+            break
+    return region if started else None
+
+
+def _struct_regions(annotated, struct_names):
+    """Map struct_name -> list of (lineno, stripped) lines inside `struct <Name>`
+    (declaration line through the matching closing brace)."""
+    names_re = re.compile(
+        r"\bstruct\s+(" + "|".join(re.escape(n) for n in struct_names) + r")\b"
+    )
+    regions = {}
+    pending_name = None
+    decl_depth = None
+    body = []
+    seen_open = False
+    for lineno, _orig, stripped, depth_before in annotated:
+        depth_after = depth_before
+        for ch in stripped:
+            if ch == "{":
+                depth_after += 1
+            elif ch == "}":
+                depth_after -= 1
+        if pending_name is None:
+            m = names_re.search(stripped)
+            if m:
+                pending_name = m.group(1)
+                decl_depth = depth_before
+                body = [(lineno, stripped)]
+                seen_open = "{" in stripped
+                if seen_open and depth_after == decl_depth:
+                    pending_name = None  # degenerate one-line struct, nothing to watch
+            continue
+        body.append((lineno, stripped))
+        if "{" in stripped:
+            seen_open = True
+        if seen_open and depth_after == decl_depth:
+            regions[pending_name] = body
+            pending_name = None
+    return regions
+
+
+def scan_dormant_edges(src_dir, exclude_globs):
+    """work89 R-2: verify the DORMANT_EDGE registry.
+
+    Returns (warns, fails, covered):
+      warns   : list of (edge_name, file, reason, callee_summary) — structure matched
+      fails   : list of (file, lineno, message, edge_name) — structural mismatch
+      covered : set of (relpath, lineno) inside registered dormant regions (excluded
+                from the ACTIVE global scan)
+    """
+    del exclude_globs  # registry targets are core sources; excludes apply to the active scan
+    warns, fails = [], []
+    covered = set()
+
+    for edge in DORMANT_EDGES:
+        target = os.path.join(REPO_ROOT, edge["file"].replace("/", os.sep))
+        if not os.path.isfile(target):
+            fails.append((edge["file"], 0,
+                          f"DORMANT_EDGE target file missing: {edge['file']}",
+                          edge["name"]))
+            continue
+        annotated = _depth_annotated(_read_stripped(target))
+        rel = edge["file"]
+
+        if edge["kind"] == "function_region":
+            region = _function_region(annotated, edge["function_header_re"])
+            if region is None:
+                fails.append((rel, 0,
+                              "registered function not found (moved/renamed?)",
+                              edge["name"]))
+                continue
+            counts = {label: 0 for _re, label in edge["expected_callees"]}
+            extras = []
+            for lineno, stripped in region:
+                matched = False
+                for callee_re, label in edge["expected_callees"]:
+                    if re.search(callee_re, stripped):
+                        counts[label] += 1
+                        matched = True
+                        covered.add((rel, lineno))
+                if not matched and (RESET_FOR_RUNTIME_CALL_RE.search(stripped)
+                                    or REF_RESET_RE.search(stripped)):
+                    extras.append(f"line {lineno}: {stripped.strip()}")
+            missing = [label for label, n in counts.items() if n == 0]
+            if extras or missing or any(n > 1 for n in counts.values()):
+                detail = ", ".join(f"{label} x{n}" for label, n in counts.items())
+                msg = f"callee set mismatch ({detail})"
+                if extras:
+                    msg += "; unexpected callee(s): " + "; ".join(extras)
+                fails.append((rel, 0, msg, edge["name"]))
+            else:
+                warns.append((edge["name"], edge["file"], edge["reason"],
+                              ", ".join(f"{label} x{n}" for label, n in counts.items())))
+
+        elif edge["kind"] == "wrapper_structs":
+            regions = _struct_regions(annotated, edge["wrappers"])
+            for name in edge["wrappers"]:
+                region = regions.get(name)
+                if region is None:
+                    fails.append((rel, 0,
+                                  f"registered wrapper struct not found: {name}",
+                                  edge["name"]))
+                    continue
+                count = 0
+                for lineno, stripped in region:
+                    for callee_re, _label in edge["expected_callees"]:
+                        if re.search(callee_re, stripped):
+                            count += 1
+                            covered.add((rel, lineno))
+                if count != 1:
+                    fails.append((rel, 0,
+                                  f"{name}: ref().reset() count = {count} "
+                                  "(expected exactly 1)",
+                                  edge["name"]))
+                else:
+                    warns.append((f"{edge['name']} [{name}]", edge["file"],
+                                  edge["reason"], "ref().reset() x1"))
+
+    return warns, fails, covered
 
 
 def main():
@@ -234,26 +459,45 @@ def main():
     )
     args = parser.parse_args()
 
+    # --- work89 R-2: DORMANT_EDGE structural verification (first pass) ---
+    d_warns, d_fails, covered = scan_dormant_edges(args.src, args.exclude)
+
+    # --- existing dead-code call-site scan + ACTIVE wrapper-chain scan ---
     violations = []
     for filepath, rel in iter_source_files(args.src, args.exclude):
-        for lineno, original, fname in check_file(filepath, rel):
+        for lineno, original, fname in check_file(filepath, rel, covered):
             violations.append((rel, lineno, original, fname))
 
-    if violations:
-        print(f"[FAIL] Found {len(violations)} call site(s) of dead-code functions:")
-        for rel, lineno, original, fname in violations:
-            print(f"  - {rel}:{lineno}  [{fname}]")
-            print(f"      {original}")
+    for w in d_warns:
+        print(f"[DORMANT_EDGE][WARN] {w[0]}")
+        print(f"    file   : {w[1]}")
+        print(f"    callees: {w[3]}")
+        print(f"    reason : {w[2]}")
+
+    if d_fails or violations:
+        if d_fails:
+            print(f"[FAIL] DORMANT_EDGE structural mismatch: {len(d_fails)}")
+            for rel, lineno, msg, name in d_fails:
+                print(f"  - {rel}:{lineno}  [{name}]")
+                print(f"      {msg}")
+        if violations:
+            print(f"[FAIL] Found {len(violations)} call site(s) of dead-code functions:")
+            for rel, lineno, original, fname in violations:
+                print(f"  - {rel}:{lineno}  [{fname}]")
+                print(f"      {original}")
         print(
-            "\nThese functions are intentionally dead code (see doc/work89/"
-            "INTEGRATED-BUG-LIST.md §11). "
-            "If you need one of them, re-design it first: Non-RT threads must "
-            "NOT write rt-shadow variables (data race). Use serial-based sync "
-            "(§9/§10)."
+            "\nDORMANT_EDGE entries are structural allowlists "
+            "({file, function, expected_callee, reason}). Any structural change "
+            "(callee added/removed, function/file changed) is a FAIL — re-audit "
+            "the dormant chain before wiring it (doc/work89/"
+            "REMEDIATION_PLAN_R123_20260910 §2 R-2). "
+            "If you need a dead-code function, re-design it first: Non-RT threads "
+            "must NOT write rt-shadow variables (data race). Use serial-based sync."
         )
         return 1
 
-    print("[PASS] No call sites of dead-code functions detected")
+    print(f"[PASS] No call sites of dead-code functions detected "
+          f"({len(d_warns)} dormant edge(s) verified)")
     return 0
 
 

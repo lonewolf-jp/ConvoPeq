@@ -17,7 +17,7 @@
 | ユニークバグ | **19** | BUG-047(重複除く), 048〜065 |
 | 修正済み（ソースで確認） | **19 / 19** | 全バグに修正コード + `★ BUG-XXX` コメントが残存 |
 | 未修正（ソースで確認） | 0 | — |
-| 残存リスク（注意事項） | 1 | BUG-065 の一部（`rtSeenAgcResetSerial` 直接書き込み） |
+| 残存リスク（注意事項） | 1 | BUG-065 の一部（`rtSeenAgcResetSerial` 直接書き込み）※ **2026-09-10 work92 B-7a で解消済み**（§17.3 参照） |
 
 > **最重要所見**: バグレポート（2026-07-26 作成）後に全 19 バグが修正され、各修正箇所に `★ BUG-XXX` コメントが残されている（※ BUG-060/063/064/065 は ★ なし表記、N-9 参照）。README 記載の「work88 全バグ (BUG-011〜BUG-046) は修正されていない」という記述は work89 バグには適用されない。**現行コードに未修正バグはゼロ**。
 
@@ -45,7 +45,7 @@
 | **BUG-062** | checkRetireReclaimLatency uint64_t 版に正常復帰イベント欠如 | MEDIUM | ✅ 修正済み | uint64_t 版にも **`EVENT_RETIRE_AGE_NORMAL` 復帰パスを追加**（double 版と整合）（RuntimeHealthMonitor.cpp:897-901） |
 | **BUG-063** | EpochDomain ownerTag 非同期読み書き (data race) | LOW | ✅ 修正済み | `ownerThreadId` (`std::atomic<uint64_t>`) を追加し、**ownerThreadId != 0 の時のみ ownerTag をコピー**（EpochDomain.h:69-71, 490-495, 538-539）。register 側は CAS 排他下で設定 |
 | **BUG-064** | Float/Double 出力パスで applyFixedLatencyDelay と clamp の順序不一致 | MEDIUM | ✅ 修正済み | float パス `processOutput` を **clamp → delay の順序**（double パスと統一）に変更。delay buffer に clamp 済み値のみ格納されることを保証（DSPCoreIO.cpp:521-530） |
-| **BUG-065** | EQProcessor::reset() が AGC リセットを発火しない（serial を 0 に設定） | MEDIUM | ⚠️ **修正済み＋1点残存リスク** | `publishAtomic(agcResetSerial, 0)` を **`fetchAddAtomic(agcResetSerial, 1)`（increment）** に変更（EQProcessor.Core.cpp:276, 787 = reset()/prepareToPlay()）。→ **残存**: `rtSeenAgcResetSerial = 0` の直接書き込み（:279）は残っている |
+| **BUG-065** | EQProcessor::reset() が AGC リセットを発火しない（serial を 0 に設定） | MEDIUM | ✅ **修正済み＋残存リスク解消**（2026-09-10） | `publishAtomic(agcResetSerial, 0)` を **`fetchAddAtomic(agcResetSerial, 1)`（increment）** に変更（EQProcessor.Core.cpp:297, 821 = reset()/prepareToPlay()）。旧「残存」の `rtSeenAgcResetSerial = 0` 直接書き込みは **work92 B-7a（commit 3b43a35d）で削除済み**（§17.3 参照） |
 
 ---
 
@@ -165,15 +165,15 @@
 - **検証（修正後）**: `DSPCoreIO.cpp:521-530` に `★ BUG-064` コメント。float パス `processOutput` を **clamp（jlimit）→ applyFixedLatencyDelay** の順序に変更し、double パス（DSPCoreDouble.cpp:739）と統一。delay buffer には clamp 済み値のみ格納。
 - **判定**: 修正完了（修正案「clamp-then-delay 側に統一（推奨案）」どおり）。
 
-### BUG-065 — reset() が AGC リセットを発火しない 【MEDIUM → 修正済み（1点残存）】
+### BUG-065 — reset() が AGC リセットを発火しない 【MEDIUM → 修正済み（1点残存 → 2026-09-10 残存解消）】
 
 - **報告**: `publishAtomic(agcResetSerial, 0)` ＋ `rtSeenAgcResetSerial = 0` 直接書き込みで、Audio Thread の比較 `agcResetSerialNow != rtSeenAgcResetSerial` が false になり AGC リセットが発火しない。加えて Message Thread からの `rtSeenAgcResetSerial` 書き込みは data race。
 - **検証（修正後）**:
   - `EQProcessor.Core.cpp:276`（reset()）と `:787`（prepareToPlay()）— 共に **`fetchAddAtomic(agcResetSerial, 1)`（increment）** に変更（コメント `// increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)`）。
   - `:277-279` — `rtDeferredBandResetMask.store(0, relaxed)` / `rtSeenBandResetSerial = 0` / **`rtSeenAgcResetSerial = 0` は残存**。
 - **判定**: **機能修正は完了**（serial が必ず変化するため Audio Thread はリセットを検知する）。
-  - **残存リスク ①（data race）**: `rtSeenAgcResetSerial = 0` の直接書き込み（:279）は非 atomic 変数への Message Thread 書き込みであり、Audio Thread 実行中の `process()` と競合し得る（C++ 標準上は UB）。ただし `reset()` は prepareToPlay 停止パス等で呼ばれることが多く、Audio Thread 停止中なら実害なし。安全化するなら `:279` を削除する（increment 方式なら Audio Thread が検知して自身で rtSeen を更新するため不要）。
-  - **残存リスク ②（意味論）**: reset() 直後の最初の process で 1 回 AGC リセットが走るのは意図どおりだが、`rtSeenAgcResetSerial=0` が Audio Thread の検知**後**に書き込まれると 2 回目リセットが起こり得る（前後関係に依存）。
+  - **残存リスク ①（data race）**: `rtSeenAgcResetSerial = 0` の直接書き込み（:279）は非 atomic 変数への Message Thread 書き込みであり、Audio Thread 実行中の `process()` と競合し得る（C++ 標準上は UB）。ただし `reset()` は prepareToPlay 停止パス等で呼ばれることが多く、Audio Thread 停止中なら実害なし。安全化するなら `:279` を削除する（increment 方式なら Audio Thread が検知して自身で rtSeen を更新するため不要）。→ **【2026-09-10 解消済み】** work92 B-7a で当該行は削除済み（§17.3 参照）。
+  - **残存リスク ②（意味論）**: reset() 直後の最初の process で 1 回 AGC リセットが走るのは意図どおりだが、`rtSeenAgcResetSerial=0` が Audio Thread の検知**後**に書き込まれると 2 回目リセットが起こり得る（前後関係に依存）。→ **【2026-09-10 解消済み】** 同一修正（B-7a/B-7b・bandResetPacked CAS 統一）で書込自体が存在しなくなり意味論リスクも消滅（§17.3 参照）。
 
 ---
 
@@ -188,6 +188,7 @@
 - work88 バグ（BUG-011〜BUG-046）は本リストの対象外（README 参照）。
 - 修正の入ったコミットは 2026-07-30 〜 2026-08-05 のコミット群に含まれる（`★ BUG-XXX` コメントは現行 HEAD に残存）。**※ 2026-08-12 再検証で特定: 全 19 バグの修正＋★ コメントは単一コミット `444c2f3`（2026-08-05）で一括導入**（`git log -S 'BUG-0XX' -- src/` で全数確認）。
 - **※ 2026-08-12 追記（ビルド検証）**: `tools/build-check.log`（2026-08-11 16:15）で **Debug 構成 166/166 ターゲットのビルド成功**を確認（AudioEngineHarness.exe・各テスト exe 含む）。HEAD（3198acc）の src/ はビルド時点（c8ca439）から変更なしのため、現行ソースはコンパイル検証済み。
+- **※ 2026-09-10 追記（ビルド検証の最新化）**: work92 実装報告書（doc/work92/IMPLEMENTATION_REPORT_20260910.md）により、Debug+Release ビルド PASS・**CTest 40/40（Debug ×10 回・Release ×1 回）** を確認。authority は HEAD 40f4229e→3b43a35d（2026-09-10 10:31 commit、work92 B-7a/B-7b を含む）。§5 の「動作検証は範囲外」制約はこの時点で解消（§17.3 参照）。
 
 ## 6. 結論
 
@@ -198,7 +199,7 @@
    - **メモリ順序修正（2）**: BUG-050（epoch 先行 store）、BUG-063（ownerThreadId ガード）
    - **状態遷移補完（4）**: BUG-056、BUG-058、BUG-059、BUG-062（Normal 復帰/専用 state/統一リセット）
    - **ロジック修正（8）**: BUG-047、048、053、054、055、057、061、064
-3. **唯一の残存リスク**は BUG-065 の `rtSeenAgcResetSerial = 0` 直接書き込み（data race の可能性）。機能上の AGC リセットは動作するが、完全に解消するには :279 行の削除が望ましい。
+3. **唯一の残存リスク**は BUG-065 の `rtSeenAgcResetSerial = 0` 直接書き込み（data race の可能性）。機能上の AGC リセットは動作するが、完全に解消するには :279 行の削除が望ましい。→ **【2026-09-10 解消済み】** work92 B-7a（commit 3b43a35d）で削除済み（§17.3 参照）。
 
 ---
 
@@ -1210,3 +1211,116 @@ const double rmsSoft = h.getOutputRms();
 2. **N-1 のみ訂正**: Emergency Override の exchange は work88 BUG-029 の意図的設計であり、「CAS-only 化が望ましい」とする第1パスの推奨を撤回（N-1 に反映済み）。
 3. 未完了事項・要調査事項は**ゼロ**に確定。D-1〜D-6 の「実装は別作業」判断は維持。
 4. 使用ツール: serena / AiDex MCP（stdio JSON-RPC）、WSL rg/ast-grep/fd/fzf/ag/sed/awk、ccc / semble / graphify、git log、web 検索（JUCE ドキュメント）。
+
+---
+
+## §17 第3パス再検証（2026-09-10・現行 HEAD 3b43a35d 照合）結果（追記: 2026-09-10）
+
+> ユーザー再依頼に対応し、第3パスとして (a) 現行 HEAD（3b43a35d, 2026-09-10 10:31）での全 19 バグ修正コードの全数再照合、(b) §15.4 D-1〜D-6 の実装状況の現状確定、(c) 3198acc 以降の 117 ファイル変更（work90〜92・+17,487/−882 行）が本 doc の主張に与える影響の棚卸し、(d) 追加ツール（cppcheck 2.x / clang-tidy 23.1.0 / ast-grep 0.44.0 / tgrep / fdfind / fzf 0.67.0 / ag / AiDex / serena / ccc / semble / graphify / rtk(WSL)）による静的検証を実施した。
+> **結論: §1〜§6 の核心的結論（全 19 バグ修正済み・HEAD 残存）は現行 HEAD でも完全に成立。唯一の残存リスク（BUG-065）は work92 B-7a/B-7b で解消済み。D-1 は実装完了、D-2〜D-6 は現状確定。新規バグ・不正確な記述は 0 件。**
+
+### 17.1 検証方法と使用ツール
+
+- 照合基準: 現行 HEAD `3b43a35d`（2026-09-10 10:31:31 +0900・working tree clean）。前回検証基準 HEAD `3198acc`（2026-08-12）以降、`src/` は 117 ファイル変更（+17,487/−882）。
+- 使用ツール: serena MCP（`search_for_pattern`・シンボル照合）、AiDex MCP（`aidex_query`・識別子検索）、context-mode MCP（`ctx_batch_execute` による WSL rg / git / sed 並列実行・出力圧縮）、headroom proxy（全トラフィック自動圧縮）、rtk(WSL)（CLI 出力圧縮）、cppcheck 2.x（`--enable=warning --std=c++17`）、clang-tidy 23.1.0（version 確認・compile_commands は evidence/work92/compile_commands_msvc.json）、ast-grep 0.44.0（WSL）、tgrep（Windows）、fdfind 10.3 / ag 2.2 / fzf 0.67.0（WSL）、ccc（`.cocoindex_code` インデックス 142,235 chunks / 2,263 files、status 健全性確認）、semble（Windows CLI・自然言語検索）、graphify v0.9.x（ナレッジグラフ query・44,244 ノード）、`dead_code_callers_verifier.py`（[PASS]）。
+
+### 17.2 全 19 バグの現行 HEAD 再照合結果（全数）
+
+| ID | 判定 | 現行 HEAD での所在（行番号更新） | §15/§16 からの変化 |
+|----|------|--------------------------------|-------------------|
+| BUG-047 | ✅ 修正済み維持 | EQProcessor.ProcessingCache.cpp:24-53（★ :46）・宣言 EQProcessor.h:265・getOrCreate 側 AudioEngine.Cache.cpp:58 | 行番号ドリフトのみ |
+| BUG-048 | ✅ 修正済み維持 | EpochDomain.h:462（detectStuckReaders）・:476（3パスコメント）・Pass3/2/1 条件に `pendingRetireCount > 0` 含む（N-2 維持） | ファイル移動 `src/audioengine/` → `src/core/`（work92 B-4 関連の整理） |
+| BUG-049 | ✅ 修正済み維持 | EpochDomain.h:172-191（昇格 CAS）・:274-325（quarantineReader CAS 3 遷移・0x03 生成防止）・getMinReaderEpoch 除外 :214 | 同上（src/core/ 移動） |
+| BUG-050 | ✅ 修正済み維持 | EpochDomain.h:123（epoch 先行 store コメント）・実装 :125-133・`[[deprecated]]` 維持（RCUReader 移行推奨） | 同上 |
+| BUG-051 | ✅ 修正済み維持 | AudioEngine.CtorDtor.cpp:150・ReleaseResources.cpp:176/199（sentinel 不書込保証コメント）・`(uintptr_t)-1` 実コード残存 0 件 | 行番号ドリフトのみ |
+| BUG-052 | ✅ 修正済み維持 | RuntimePublicationOrchestrator.h:39-109（DeferredPublishView move-only）・hasDeferredRequest :167（consumeAtomic）・peekDeferred :194/cpp:708・finishView :199・processDeferredAdmission(bool) :203 | 行番号ドリフトのみ |
+| BUG-053 | ✅ 修正済み維持 | AudioEngine.Learning.cpp:55-63（キュー一本化コメント・直接呼出削除維持） | 行番号ドリフトのみ |
+| BUG-054 | ✅ 修正済み維持 | DSPTransition.h:110/134（oldHandle 引数渡し・fadingHandle 改名） | 行番号ドリフトのみ |
+| BUG-055 | ✅ 修正済み維持 | AudioEngine.Commit.cpp:221（到達不能 else if 削除コメント維持） | 行番号ドリフトのみ |
+| BUG-056 | ✅ 修正済み維持 | RuntimeHealthMonitor.cpp:544/573（Normal 復帰）・:1346（reset で Normal 化） | 行番号ドリフト（:534→:544, :562→:573, :1217→:1346） |
+| BUG-057 | ✅ 修正済み維持 | RuntimeHealthMonitor.h:60-61（EVENT_OVERFLOW_RATE_WARNING=1012 / CRITICAL=1013） | 行番号ドリフトのみ |
+| BUG-058 | ✅ 修正済み維持 | RuntimeHealthMonitor.h:63（7000/7001/7002）・:408（専用 state）・.cpp:1082/1106/1366 | 行番号ドリフト（:950-985→:1082 前後等） |
+| BUG-059 | ✅ 修正済み維持 | RuntimeHealthMonitor.cpp:1341（全 MonitorState Normal 統一リセット）・:1369（`m_prevConfigDriftState_` 追補 — work92 世代で新規追加のリセット対象） | **追補 1 点**: リセット対象に `m_prevConfigDriftState_` が追加されている（doc §3 BUG-059 の列挙より広い＝より完全なクリーンスタート。主張に矛盾なし） |
+| BUG-060 | ✅ 修正済み維持 | ISRRetireRuntimeEx.cpp:217-224（fetchSub 単一アトミック + previous==0 回復）・:236-237（quarantine 側 previousLane!=Quarantine ガード） | 行番号ドリフトのみ |
+| BUG-061 | ✅ 修正済み維持 | ISRDSPQuarantine.cpp:35/84/118/157/176・.h:64/85（`mutable std::mutex auditMutex_`） | 行番号ドリフトのみ |
+| BUG-062 | ✅ 修正済み維持 | RuntimeHealthMonitor.cpp:1026-1029（uint64 版 EVENT_RETIRE_AGE_NORMAL 復帰） | 行番号ドリフト（:897→:1026） |
+| BUG-063 | ✅ 修正済み維持 | EpochDomain.h:74-77（ownerThreadId 単調 ID 採番・work92 B-4 で acquireUniqueThreadId 統一）・:526-531（非0 時のみ ownerTag copy） | **強化**: work92 B-4 で ownerThreadId 採番が `acquireUniqueThreadId()`（1 起点静止・0 は無効値予約）に統一（BIG 2-6 対応）。BUG-063 修正は維持のまま強化 |
+| BUG-064 | ✅ 修正済み維持 | AudioEngine.Processing.DSPCoreIO.cpp:531-538（clamp → applyFixedLatencyDelay 順序・delay buffer へ clamp 済み値のみ格納） | 行番号ドリフト（:521→:531） |
+| BUG-065 | ✅ 修正済み＋残存リスク解消 | EQProcessor.Core.cpp:297/821（fetchAddAtomic increment 維持）・**rt シャドウ直接書込 3 行×2 関数は削除済み**（work92 B-7a・★ コメント :298-301） | **§17.3 参照 — 本検証の最重要更新** |
+
+### 17.3 BUG-065 残存リスクの解消確認（work92 B-7a/B-7b・D-1 実装完了）
+
+§15.4 D-1 で「案 A（rt シャドウ書込の全廃 + bandResetPacked serial 前進クリア）を確定・推奨、実装は別作業」としていたものが、**commit 3b43a35d（2026-09-10 10:31・work92 v3.1 計画の B-7a/B-7b）で実装・コミット済み**であることを確認した。
+
+1. **B-7a（rt シャドウ直接書込の削除）**: `EQProcessor::reset()`（現行 :298-301）と `prepareToPlay()`（現行 :822-824）の `rtDeferredBandResetMask.store(0)` / `rtSeenBandResetSerial = 0` / `rtSeenAgcResetSerial = 0` の 6 行（両関数 × 3 行）を削除。置換コメント「★ work92 B-7a (BUG-065 解消): rt シャドウの Non-RT 直接書込を削除。rtDeferredBandResetMask / rtSeenBandResetSerial / rtSeenAgcResetSerial は Audio Thread 専有。serial は先行 fetchAddAtomic で前進済みのため、Audio Thread 側の serial != rtSeen 検知が shadow を自己更新する」を実在確認。
+2. **B-7b（bandResetPacked CAS 統一）**: 両関数の `publishAtomic(bandResetPacked, 0, release)` を **CAS ループ（serial+1・mask=0・acq_rel/acquire）** に置換し、`requestBandReset` と同一 linearization に統一（G5 clobber 競合の解消を含む）。`publishAtomic(bandResetPacked` の残存は 0 件（work92 報告書 §B-7 静的監査と本検証の grep 結果一致）。
+3. **現行の rtSeenAgcResetSerial 書込経路は Audio Thread 専有**: 全 4 箇所 = Processing.cpp:589/:1073（Audio Thread 検知後自己更新）+ Core.cpp:625/:689（syncStateFrom 系・**デッドコード（呼出元 0 件・§8.2/F-2 確定維持）**）。Non-RT 直接書込は 0 件となり、**data race は解消**。
+4. **検証**: work92 実装報告書（doc/work92/IMPLEMENTATION_REPORT_20260910.md）により Debug+Release build PASS・CTest 40/40（Debug ×10 回・Release ×1 回）を確認。本検証でも `dead_code_callers_verifier.py` [PASS]・cppcheck warning 0（修正対象箇所について）を再確認。
+
+→ **§1/§2/§6 の「残存リスク 1 件（BUG-065）」は解消済み。現行 HEAD での残存リスクは 0 件。**
+
+### 17.4 D-1〜D-6 の現状確定（§15.4 からの更新）
+
+| 項目 | §15.4 の確定結果 | 現状（2026-09-10 確定） |
+|------|----------------|----------------------|
+| D-1 | 案 A 確定・実装は別作業 | **実装完了（CLOSED）**。work92 B-7a/B-7b として commit 3b43a35d に同梱。§17.3 参照。案 A どおり（rt シャドウ全廃 + bandResetPacked CAS serial 前進クリア）。 |
+| D-2 | 案 A（AGC atomic 3 削除）確定・実装は別作業 | **未実装のまま（OPEN・低優先）**。`agcCurrentGain/agcEnvInput/agcEnvOutput` は EQProcessor.h:568-570 に残存。参照は Core.cpp 内 publish（:246-248/:269-271/:804-806）と syncStateFrom 系 consume（:602-604/:660-662）のみで、後者はデッドコードのため実効参照は publish 側のみ。動作影響なし・二重管理のまま。D-1 と同一ファイルのため将来併せて実施推奨（維持）。 |
+| D-3 | 監視下で維持（削除は work89 完了後に再評価） | **維持を再確認**。`dead_code_callers_verifier.py` 再実行 [PASS]・6 関数（reset/sync 系）の呼出元 0 件を再確認（syncStateFrom は ConvolverProcessor 版含め宣言と定義のみ・AudioEngine 側は rebuildAllIRsSynchronous 経路）。work89/work92 とも完了したため、削除判断は次回 work item に移行。 |
+| D-4 | レベル 2 統合テスト未実装・レベル 1 PASS | **未実装のまま（OPEN・任意）**。`src/tests/` に eqLPFMode 伝播テストなし（全数 ls 確認）。レベル 1 静的検証 5 項目は本検証でも成立確認（AudioEngine.h:3953/4015 snapshot capture・:4053 代入維持）。 |
+| D-5 | 重複ファイルは相互リンク化を推奨（管理判断） | **未実施のまま（OPEN・管理事項）**。`doc/work89/bugs/BUG-047-EQCoeffCache-ハッシュにsampleRate不足.md` は残存。内容は BUG-047 の短縮版（症状/再現手順のみ）であることを再確認。 |
+| D-6 | §12.7/§13.7 適用済みを実査確認 | **適用済み維持を再確認**。Parameters.cpp:645/661（旧 syncStateFrom 方式撤去済みコメント）・StateAndUI.cpp:414 / ConvolverProcessor.h:550（[DEAD CODE] 注記）実在確認。 |
+
+### 17.5 N-1〜N-9 の現行 HEAD 再確認
+
+- **N-1（exchangeFadingRuntimeDSP）**: 維持。定義 AudioEngine.h:2233・呼出元 DSPTransition.h:76（Emergency Override のみ）・claimFadingRuntimeDSP は :2241。work88 BUG-029 の displacement セマンティクス設計として正しい（§15 訂正後の結論を維持）。`★ Temporary` コメント（:74-75）は現状のまま。
+- **N-2/N-3（BUG-048 条件・BUG-049 CAS）**: 維持。Pass3/Pass2 の `pendingRetireCount > 0` 条件・CAS 3 遷移とも実コードで再確認（§17.2 表参照）。
+- **N-4（単一コミット 444c2f3）**: 維持。`git log -S` 再実行で全 BUG-XXX マーカーの起源が 444c2f3f（2026-08-05 01:04:29 +0900）であることを再確認。※ 以降に `BUG-065` 文字列を変えた唯一の追加変更は 3b43a35d（work92 B-7a コメント）のみ。
+- **N-5（ビルド検証）**: 更新。2026-08-11 の Debug 166/166 に加え、**work92 実装報告書の Debug+Release build PASS・CTest 40/40（Debug ×10・Release ×1）が現行 HEAD 3b43a35d 直前世代の検証として成立**。3b43a35d 自体のビルド検証は evidence/work92/ 配下の記録（compile_commands_msvc.json 等）と work92 報告書を authority とする。
+- **N-6（行番号ドリフト）**: §17.2 表に現行 HEAD の行番号を反映済み。主要ドリフト: EpochDomain.h は `src/audioengine/` → `src/core/` へ移動、BUG-056/058/059/062 は RuntimeHealthMonitor.cpp 内で +20〜+130 行、BUG-064 は :521→:531。
+- **N-7（MCP 実使用）**: 本検証では serena / AiDex MCP に直接アクセス可能（stdio ブリッジ不要）。
+- **N-8（類推探索）**: 維持・再確認。CacheManager.cpp:90-100（computeKey は srBits を hash に含む）、fetchSubAtomic 13 箇所（work92 世代で 18→13 に減少 — RefCountedDeferred 系の retire 一本化による）、WorldLifecycleAudit.h:48 は fetchSub 後の prev==0 ガード設計、sentinel `(uintptr_t)-1` 実コード 0 件。**同種バグなし**。
+- **N-9（★ 表記不整合）**: 維持。BUG-060/063/064/065 は★なし表記（ISRRetireRuntimeEx.cpp:217 / EpochDomain.h:526 / DSPCoreIO.cpp:531 / EQProcessor.Core.cpp:297,821）＋ work92 B-7a の新規コメントは「★ work92 B-7a」表記。
+
+### 17.6 追加ツールによる静的検証（第3パス新規実施分）
+
+- **cppcheck 2.x（--enable=warning --std=c++17）**: EpochDomain.h / EQProcessor.Core.cpp を検査。BUG-047〜065 の修正箇所に関する新規 warning は **0 件**。検出された uninitMemberVar 系は pre-existing の軽微な指摘（BandNode::active 等・本バグ群と無関係）。AtomicAccess.h の syntaxError は cppcheck がカスタムアトミックラッパーマクロ（convo::publishAtomic 等）を解釈できない既知の限界であり、実コードの問題ではない（MSVC/icx ビルド PASS と整合）。
+- **clang-tidy 23.1.0**: 存在確認済み。work92 で生成された `evidence/work92/compile_commands_msvc.json`（MSVC コンパイル DB）を利用可能。
+- **ccc（cocoindex-code）**: `.cocoindex_code` インデックス 142,235 chunks / 2,263 files・status 正常（本検証時に 155 ファイル再インデックス実行）。セマンティック検索の基盤として健全。
+- **graphify**: ナレッジグラフ 44,244 ノードで `agcResetSerial` / `bandResetPacked` の所属コミュニティ（EQProcessor）と参照関係を確認 — grep 結果と整合。
+- **semble / AiDex / serena**: いずれも現行 HEAD のインデックスで `consumeDeferredRequest`（残存はコメント 5 件のみ = 実装廃止確認）、`exchangeFadingRuntimeDSP`（Emergency Override のみ）等を確認。
+
+### 17.7 第3パスの結論
+
+1. **§1〜§6 の核心的結論は現行 HEAD（3b43a35d）でも全て成立**: 全 19 ユニークバグの修正コードと ★ マーカーは HEAD に残存する。
+2. **唯一の残存リスク（BUG-065 の rt シャドウ直接書込）は work92 B-7a/B-7b（commit 3b43a35d）で解消済み**。D-1 は実装完了（CLOSED）。
+3. **D-2〜D-6 は現状確定**: D-2（AGC atomic 削除）と D-4（レベル 2 テスト）と D-5（重複ファイル管理）は未実施のまま OPEN（いずれも動作影響なし・低優先/管理事項）。D-3（デッドコード監視維持）と D-6（適用済み）は再確認 PASS。
+4. **3198acc 以降の 117 ファイル変更（work90〜92）が本 doc の主張を覆す事実は 0 件**。むしろ work92 B-4（BUG-063 強化）・B-7b（G5 clobber 解消）・B-8（saturating subtraction）により同種耐性が強化されている。
+5. 未完了事項・要調査事項は **D-2/D-4/D-5 の 3 件（すべて低優先・動作影響なし）のみ**に整理。
+
+### 17.8 監査用語の厳密化 — 「OPEN BUG = 0」の正確な定義（2026-09-10 第4パス追記・ユーザー監査指摘の反映）
+
+> ユーザー監査（2026-09-10）の指摘「単純な OPEN = 0 は第三者に『未解決事項が一切存在しない』と誤読され得る」を反映し、ステータス分類を厳密化する。
+
+**本 doc（および work92 棚卸し）で「OPEN BUG = 0」と述べる場合、その正確な意味は次のとおり:**
+
+> **監査対象として登録された既知バグ集合（doc/work89/bugs BUG-047〜065 + work92 CORRECT list 56 番号 + big_bug 固有 35 項目）のうち、現行稼働経路に存在する未修正の実害バグ（ACTIVE/OPEN BUG）はゼロ。**
+> **一方、DORMANT（休眠経路の潜在リスク）・DESIGN DEFERRED（設計確定待ち）・FUTURE RISK/P3（発火条件限定の将来リスク）・MONITORING ONLY（実害成立の証拠なし・監視対象）は残存しており、これらは ACTIVE/OPEN BUG には分類しない。**「バグが存在しない」と「監査対象として登録されている未修正バグがない」は論理的に区別される。
+
+#### 正式ステータス分類（現行 HEAD 3b43a35d 実測つき）
+
+| 分類 | 定義 | 対象項目（現行 HEAD 実測根拠） |
+|------|------|------------------------------|
+| **ACTIVE / OPEN BUG** | 現行稼働経路に存在する未修正の実害バグ | **0 件** |
+| **CLOSED BUG** | 修正実装済み・実コード確認済み | BUG-047〜065（§17.2 全 19 件）・BUG-044（MklFftEvaluator.h:144-147 `= delete` 4 連）・BUG-011/012/013/016（std::clamp/sanitize）・big 1-1（StateAndUI.cpp:250-253 setProperty 実装）・big 1-3 の本体 A-2（InputBitDepthTransform.h:114-118 storeu）・big 1-6（MklFftEvaluator.h:279-290 fftFailed + ippFailureCount_）・big 1-8（LoaderThread.cpp:450-474 kStreamChunk 256K ストリーミング）・big 1-9（MKLNonUniformConvolver.h:334 fftSize int64 化）・big 1-10（B-2 契約コメント）・big 2-6（ThreadHash.h:33 acquireUniqueThreadId・RCUReader.h:156・EpochDomain.h:78）・big 2-9（TimeUtils.h:30 saturatingSubUs・AudioBlock:633/639・BlockDouble:590/595）・big 2-10（StateIO.cpp:93-99 範囲ガード）・big 3-5（CacheManager.cpp:202-252 atomic_signal_fence）・big 3-6（SnapshotFactory.cpp:62-65 isnan ガード）・big 3-7（SpectrumAnalyzerComponent.cpp:461-463 alignas(32) ループ外）・big 3-9/3-10（CMakeLists.txt:1519 /fp:precise 化・:1609-1618 icx AVX2 target 固有化）・big 1-2 lastResortQueue_ 部分（ISRRuntimePublicationCoordinator.h:1016 `{}` 値初期化） |
+| **DORMANT RISK** | 現行到達経路が存在しないため未発火（有効化時監査対象） | R-新規A（IncrementalRebuildJob::reset は ~StereoConvolver + aligned_free 実装済み・Rebuild.cpp:110-135 — 旧監査より改善済みだが rebuildJob の make_unique は src 全体 0 件のため未発火）・R-新規B（incremental rebuild サブシステム未接続・同根拠） |
+| **DESIGN DEFERRED** | バグではなく設計確定イベント待ち | big 1-7 案 B（B-1 リネームで API 誤解リスク解消済み・mutex 非使用 RT 実装は Retire authority 設計変更が必要 — ISRRetire.h:59 emitRetireIntentNonRT・ISRRetire.cpp:96-100 Finding 9 契約コメント・呼出元 Commit.cpp:485 のみ）・big 1-2 producer（coordinatorDeferredRing_ の producer 実装なしは big_bug §10-3-1 の確定設計方針） |
+| **FUTURE RISK / P3** | 発火条件が限定（OOM 等）の将来リスク | R-新規C（rebuildAllIRsSynchronous は現行稼働経路・Rebuild.cpp:44 実在。bad_alloc 限定）・R-新規D（executePendingCommit の「Message Thread のみ」コメントは LoadPipeline.cpp:764 に実在し整合確認 — 元指摘のコメント不整合は現行で解消済みの可能性・文書のみ P3 として保持） |
+| **MONITORING ONLY** | 現時点で failure condition 成立の証拠なし | big 3-1（AudioSegmentBuffer は NoiseShaperLearner.cpp:68-69 の Factory 経由 SPSC 単一利用）・big 3-3（AlignedAllocation.h:32 aligned_malloc_nothrow 提供済み）・big 3-4（mkl_malloc 64-byte アライン保証・MKLNonUniformConvolver.cpp:361/721/809/906）・big 3-8（LatencySnapshot は `= delete` コピーで NonRT 公開前のみ new） |
+
+#### work89 doc スコープ内の D-2/D-4/D-5 の扱い
+
+D-2（AGC atomic 3 削除）・D-4（eqLPFMode レベル 2 テスト）・D-5（BUG-047 重複ファイル管理）は「**OPTIMIZATION / PROCESS DEBT（最適化・手順債務）**」に分類する — いずれも現行動作に影響しない改善候補であり、ACTIVE/OPEN BUG にも DORMANT/DESIGN DEFERRED にも該当しない。
+
+#### 使用上の注意
+
+以降の文書で「OPEN BUG = 0」「genuine OPEN 0」等と記載する場合、本節の分類を前提とする。単独で「OPEN = 0」と書く場合は「（ACTIVE/OPEN BUG のみを指す・本 §17.8 の定義）」を明記するか、本節への参照を付すこと。

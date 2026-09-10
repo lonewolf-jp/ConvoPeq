@@ -93,6 +93,12 @@ sampledata/synthetic/
 build-msvc/
 .zcode/
 .momosa/
+build-t1-test/
+.browser4-cli/snapshot/
+.opencode/plugin/
+.x64dbg-mcp/
+.zcode/
+.rtk/
 nul
 
 # Coverage reports

@@ -509,6 +509,13 @@ private:
 
     // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
     // high 32-bit: serial, low 32-bit: mask
+    // [work89 R-3c・DOCUMENTED LIMITATION] serial は順序比較ではなく変更世代識別であり、
+    // consumer は != 等価比較のみで検知するため、単純な 32bit wraparound（0xFFFFFFFF→0）
+    // は順序判定を壊さない。ただし consumer が同一値を保持したまま 2^32 回以上の
+    // publication が発生すると同一 serial 値が再利用され（ABA）、変更を見逃す理論的
+    // 可能性が残る — 排除には publication 総数/consumer 停滞時間の有限上限証明が別途
+    // 必要で未証明（REMEDIATION_PLAN_R123_20260910 §1.7）。publication source を大幅に
+    // 拡張する（automation/MIDI/batch 等）場合は 64bit serial 化を前提条件とすること。
     std::atomic<std::uint64_t> bandResetPacked { 0 };
     std::atomic<std::uint64_t> agcResetSerial { 0 };
 
@@ -716,14 +723,14 @@ private:
     //
     // These values must never become independent sources of truth.
     //
-    // Synchronization protocol:
-    //   Source of Truth → Worker syncStateFrom() → this shadow
-    //   Worker = synchronization agent (store() authoritative snapshot)
-    //   RT     = load() / temporary RMW only  // NOLINT(danger-comment)
-    //
-    // Worker synchronization intentionally overwrites RT temporary state.  // NOLINT(danger-comment)
-    // Do NOT change Worker store() to fetch_or() etc. — that would alter
-    // the synchronization protocol, not just an access pattern.
+    // ★ work89 R-1: shadow ownership 契約（work92 B-7a 後の確定版）。
+    //   shadow の唯一の書込主体は **Audio Thread**（EQProcessor.Processing.cpp の
+    //   process 内）。旧「Source of Truth → Worker syncStateFrom() → shadow 上書き」
+    //   同期プロトコルは、syncStateFrom()/syncGlobalStateFrom() が現行直接呼出し 0 の
+    //   休眠コード（dormant・dead_code_callers_verifier の DORMANT_EDGE 監視下）と
+    //   なったため撤退済み。将来これらの関数を活性化する場合も shadow への Non-RT
+    //   書込は禁止 — serial は Non-RT 側の fetchAddAtomic 前進 + Audio Thread の
+    //   自己更新に一任する（REMEDIATION_PLAN_R123_20260910 §1.1/§2 R-1）。
     //
     // Individual atomicization (memory_order_relaxed) suffices because
     // each value is semantically independent — no cross-value snapshot
@@ -735,12 +742,12 @@ private:
     std::atomic<double> rtAgcEnvOutputShadow { 0.0 };
     std::atomic<bool> rtBypassedShadow { false };
     std::atomic<FilterStructure> rtActiveStructureShadow { FilterStructure::Serial };
-    // Source of Truth for band reset requests is bandResetPacked (CAS-accumulated).
-    // Worker copies the complete accumulated snapshot from bandResetPacked.
-    // RT may temporarily accumulate during processing via fetch_or() —
-    // those transient bits are overwritten by next Worker sync by design.
+    // ★ work89 R-1: bandResetPacked（Source of Truth・CAS 蓄積）は Non-RT が serial
+    //   前進のみを行い、rtDeferredBandResetMask / rtSeen*Serial は Audio Thread が
+    //   検知後に自己更新する。旧「Worker が snapshot を上書きする」記述は休眠
+    //   プロトコルの名残として撤回済み（上記 ownership 契約参照）。
     std::atomic<std::uint32_t> rtDeferredBandResetMask { 0 };
-    std::uint64_t rtSeenBandResetSerial = 0;
-    std::uint64_t rtSeenAgcResetSerial = 0;
+    std::uint64_t rtSeenBandResetSerial = 0;   // Audio Thread 専有（Non-RT 書込禁止）
+    std::uint64_t rtSeenAgcResetSerial = 0;    // Audio Thread 専有（Non-RT 書込禁止）
 
 };
