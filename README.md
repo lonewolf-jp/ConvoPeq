@@ -26,7 +26,7 @@ ConvoPeq v0.6.10 is built with JUCE 8.0.12 and is designed for low-latency, real
 | SIMD / Math | **AVX2** + **Intel oneMKL** (sequential, static link) + **Intel IPP** |
 | Build System | **CMake 3.22+** + **Ninja Multi-Config** |
 | Language | **C++20** |
-| Source | **277 files** (~3.17 MB) across `src/` + 21 test files
+| Source | **336 files** (~4.62 MB) across `src/` + 36 test executables (55 test source files)
 
 ### Compiler / CPU support matrix (work92 C-8)
 
@@ -60,7 +60,7 @@ The `doc/work/` directory contains ~82 ISR design documents covering the full IS
 
 ### Companion Analysis
 
-- [doc/sourcecode_analysis_2026-07-03.md](doc/sourcecode_analysis_2026-07-03.md): Complete source code structure analysis (277 files, 25 sections, all data flows)
+- [doc/sourcecode_analysis_2026-07-03.md](doc/sourcecode_analysis_2026-07-03.md): Complete source code structure analysis (25 sections, all data flows)
 
 ### Manuals ([manual/](manual/))
 
@@ -82,8 +82,8 @@ The `doc/work/` directory contains ~82 ISR design documents covering the full IS
 
 ```text
 ConvoPeq/
-├── src/                       # Main C++ source (277 files, ~3.17 MB)
-│   ├── audioengine/           # ISR runtime governance, AudioEngine split TU (107 files)
+├── src/                       # Main C++ source (336 files, ~4.62 MB)
+│   ├── audioengine/           # ISR runtime governance, AudioEngine split TU (126 files)
 │   │   ├── AudioEngine.Processing.*.cpp  # Audio thread core (DSPCore, Block, Latency)
 │   │   ├── AudioEngine.*.cpp            # Lifecycle, Timer, Commit, Rebuild, Retire
 │   │   └── ISR*.cpp                     # Closure, HB, Shutdown, Publication, Retire, etc.
@@ -95,26 +95,28 @@ ConvoPeq/
 │   │   └── ConvolverProcessor.{Lifecycle,Rebuild,LoaderThread,LoadPipeline,
 │   │                           MixedPhase,ResampleAndFallback,StateAndUI,Internal}.cpp
 │   ├── core/                  # RCU snapshot foundation (40 files)
-│   │   ├── EpochDomain.h      # 64-slot named reader domain (26 KB)
+│   │   ├── EpochDomain.h      # 64-slot named reader domain (32.2 KB)
 │   │   ├── RCUReader.h, SnapshotCoordinator, GlobalSnapshot, DeletionQueue, FadeEngine
 │   │   ├── WorkerThread, Types, CommandBuffer, SnapshotSlotStore, SnapshotRetireManager
 │   │   └── IEpochProvider, IPublicationProvider, IRetireRouter (Provider pattern)
-│   └── tests/                 # CTest regression suite (21 files)
+│   ├── dsp/math/              # FastTanhApprox.h (AVX2 tanh approximation)
+│   ├── tools/                 # Build identity gate + layout offset check (Python)
+│   └── tests/                 # CTest regression suite (55 files, 36 executables)
 ├── config/                    # JSON authority manifests (4 files)
-├── tools/                     # CodeGraph, CodeQL, CI verification scripts
+├── tools/                     # Build/verify scripts (66 .py + 54 .bat)
 ├── doc/                       # Architecture work docs (~82 ISR design files)
 │   ├── work/                  # ISR design, audit, compliance
 │   └── sourcecode_analysis_2026-07-03.md  # Full source analysis
 ├── manual/                    # User manuals (EN/JP, 4 topics each)
-├── .github/                   # CI workflows, ISR policies, scripts, prompts
-├── .vscode/                   # tasks.json (22 tasks), launch.json (5 configs), mcp.json
+├── .github/                   # CI workflows, ISR policies, scripts (184 files)
+├── .vscode/                   # tasks.json (77 entries), launch.json (5 configs)
 ├── resources/                 # App resources (icons, assets)
 ├── sampledata/                # Sample IR/EQ files
 ├── JUCE/                      # JUCE 8.0.12 framework source (in-tree)
 ├── r8brain-free-src/          # IR resampler (external dependency)
-├── CMakeLists.txt             # Build configuration (1042 lines, v0.6.10)
+├── CMakeLists.txt             # Build configuration (2,030 lines, v0.6.10)
 ├── CMakePresets.json          # 3 configure + 2 build presets
-├── build.bat                  # Primary build script (MSVC + icx)
+├── build.bat                  # Primary build script (MSVC + icx, 347 lines)
 ├── ProjectMetadata.cmake      # App name, version (v0.6.10), company
 ├── README.md                  # This file
 ├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.10)
@@ -138,10 +140,11 @@ ConvoPeq/
   - `EQCoeffCache`: refcounted shared coefficient cache (v2.3)
 - **IR convolution** (`ConvolverProcessor`, split TU: 10 files in `src/convolver/`)
   - Intel MKL **Non-Uniform Partitioned Convolution (NUC)** engine
+  - FFT abstraction: `ConvolverBuilder` → `FFTBackend` (IPP ProductionFft / TestFft) → `FFTExecutionContext`
   - Phase modes: **As-Is / Minimum / Mixed** with tunable transition (`f1`, `f2`, `tau`)
   - IR loading on dedicated background `LoaderThread` — no audio thread blocking
   - RCU (Read-Copy-Update) pattern for glitch-free IR handoff
-  - Legacy `MKLNonUniformConvolver.cpp` retained for backward compatibility
+  - Legacy `MKLNonUniformConvolver.{h,cpp}` retained for backward compatibility
 - **Runtime-selectable processing order**: EQ→Convolver or Convolver→EQ
 - **Input oversampling**: 2×/4×/8× via `CustomInputOversampler` (IIRLike / LinearPhase presets)
 - **Output conditioning**: `OutputFilter` (HCF/LCF conditional on final processor), musical soft clipping with `fastTanh` (AVX2 vectorized), makeup gain
@@ -150,10 +153,10 @@ ConvoPeq/
 - **PsychoacousticDither**: 12th-order error-feedback (GUI: "9th-order"), MKL VSL RNG + TPDF, `kCoeffTable[6][3][12]` per sample rate and bit depth
 - **FixedNoiseShaper**: 4th-order error-feedback, psychoacoustically tuned coefficients
 - **Fixed15TapNoiseShaper**: 16th-order error-feedback (class name "15Tap" for legacy consistency, ORDER = 16)
-- **Adaptive 9th-order** (`NoiseShaperLearner`, 68 KB): lattice-ladder noise shaper with CMA-ES optimization on a dedicated worker thread, RCU coefficient handoff, per-(sample rate, bit depth, mode) banks, 6 learning modes (Shortest–Ultra), converge in 5–160 minutes
+- **Adaptive 9th-order** (`NoiseShaperLearner`, 79.8 KB): lattice-ladder noise shaper with CMA-ES optimization on a dedicated worker thread, RCU coefficient handoff, per-(sample rate, bit depth, mode) banks, 6 learning modes (Shortest / Short / Middle / Long / Ultra / Continuous)
 
 ### Analysis & Metering
-- **Real-time spectrum analyzer** with EQ overlay (`SpectrumAnalyzerComponent`, 52 KB)
+- **Real-time spectrum analyzer** with EQ overlay (`SpectrumAnalyzerComponent`, 59.0 KB)
 - **LoudnessMeter**: ITU-R BS.1770-4/5 K-weighting (2-stage biquad), lock-free ring buffer publish to worker thread
 - **TruePeakDetector**: 4× oversampled true peak (63-tap linear phase FIR, ITU-R BS.1770-3)
 - **DC blocking**: two-stage IIR per `UltraHighRateDCBlocker` (input + post-upsampling)
@@ -163,17 +166,18 @@ ConvoPeq/
 - Persistent device settings (`device_settings.xml`)
 - `AsioBlacklist.h` for known broken ASIO drivers
 
-### ISR Runtime Governance (107 files in `src/audioengine/`)
+### ISR Runtime Governance (126 files in `src/audioengine/`)
 - **RCU + atomic** parameter handoff (`publishAtomic` / `consumeAtomic` primitives)
 - **EpochDomain** (64 named reader slots) + `RCUReader` RAII pattern
-- Publication choreography: `ISRRuntimePublicationCoordinator`, `PublicationAdmission`, `PublicationExecutor`
-- Retire pipeline: `DSPLifetimeManager` → `ISRRetireRouter` → `DeletionQueue`
+- Publication choreography: `ISRRuntimePublicationCoordinator`, `PublicationAdmission`, `RuntimePublishExecutor`
+- Retire pipeline: `DSPLifetimeManager` → `ISRRetireRouter` → `DeletionQueue` (+ `RetireQuarantineStore` fallback)
 - Crossfade governance: `CrossfadeAuthority` / `CrossfadeRuntime` (Authority pattern)
 - Health monitoring: `RuntimeHealthMonitor`, `RuntimePolicyEngine`
+- Build resilience: `BuildErrorPolicy` (Permanent/Transient/Infrastructure/Fatal) + `RetryScheduler`
 - Deferred garbage collection: `DeferredDeletionQueue`, `RefCountedDeferred`, `DeferredFreeThread`
 
 ### Build & Test Infrastructure
- - **CTest regression suite**: 21 test executables (ISR identity, publication coordinator, semantic validation, grace semantics, etc.)
+ - **CTest regression suite**: 36 test executables (40 `add_test` entries — ISR identity, publication coordinator, semantic validation, grace semantics, MPSC ring, retry scheduler, FFT backend, etc.)
 
 ---
 
@@ -229,7 +233,7 @@ Dither/Noise Shaping → Downsampling (if OS) → Output
 - **Latency retargeting** is hysteresis-controlled to avoid frequent retriggers.
 - User-facing controls are debounced to avoid unnecessary rebuild pressure during UI dragging.
 
-Convolution algorithm: **Intel MKL NUC (Non-Uniform Partitioned Convolution)** with non-uniform block partitioning (shorter blocks near IR start for low latency, longer blocks toward the tail for efficiency).
+Convolution algorithm: **Intel MKL NUC (Non-Uniform Partitioned Convolution)** with non-uniform block partitioning (shorter blocks near IR start for low latency, longer blocks toward the tail for efficiency). FFT operations use the `ConvolverBuilder` → `FFTBackend` (Intel IPP) → `FFTExecutionContext` abstraction layer.
 
 Phase modes: **As-Is / Minimum / Mixed**. Mixed mode blends linear-phase (low frequencies) with minimum-phase (high frequencies) per `mixedTransitionStartHz` / `mixedTransitionEndHz` / `tau`.
 
@@ -333,12 +337,13 @@ build.bat Release pgo-use     # MSVC PGO optimization
 
 What `build.bat` does:
 
-1. Auto-detects Visual Studio via `vswhere` (or falls back to known VS17/VS18 paths)
-2. Calls `vcvarsall.bat x64` (MSVC mode) — skipped for icx
-3. Calls Intel `setvars.bat intel64` (both MSVC and icx)
-4. Configures CMake with `Ninja Multi-Config` generator
-5. Builds selected configuration
-6. Retries once on RC1109 (common icx first-build issue)
+1. Validates `JUCE\CMakeLists.txt` exists
+2. Cleans stale juceaide sub-build cache (prevents generator-mismatch errors)
+3. **icx mode**: calls `setvars.bat intel64`; **MSVC mode**: relies on pre-initialized environment (Developer Command Prompt or VS Code task)
+4. Configures CMake with `Ninja Multi-Config` generator (retries up to 3 times on failure)
+5. Runs build identity gate (`src/tools/build_identity_gate.py`)
+6. Builds selected configuration (icx uses `-j 1`)
+7. Auto-retries once on RC1109 (common icx first-build issue)
 
 **Output binaries:**
 
@@ -365,12 +370,12 @@ For `CMakePresets.json` usage, VS Code task reference, CTest suite commands, and
 ## Notes
 
 - Standalone app target (not a plugin target) — **Windows 11 x64 only**
-- Default daily workflow: `build.bat` or VS Code tasks (22 tasks in `.vscode/tasks.json`)
+- Default daily workflow: `build.bat` or VS Code tasks (77 entries in `.vscode/tasks.json`)
 - MSVC and icx build directories are fully isolated (`build/` vs `build-icx/`) — can coexist
 - PGO (Profile-Guided Optimization) is MSVC-only; not supported for icx
 - RNG ring buffer for dither is pre-filled by worker thread — no RNG generation on audio thread
 - All coefficients (EQ SVF, filter biquad, AGC tables, noise shaper) precomputed in message thread
- - 21 CTest regression tests available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
+- 36 CTest regression executables available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
 - Do not modify external dependency trees directly:
   - `JUCE/`
   - `r8brain-free-src/`

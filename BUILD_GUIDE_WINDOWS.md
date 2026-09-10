@@ -1,8 +1,8 @@
 # ConvoPeq Build Guide (Windows 11 x64)
 
-This guide reflects the **current repository setup** — `build.bat`, `CMakeLists.txt` (v0.6.9), `CMakePresets.json`, and `.vscode/tasks.json` (22 tasks).
+This guide reflects the **current repository setup** — `build.bat` (347 lines), `CMakeLists.txt` (v0.6.10, 2,030 lines), `CMakePresets.json`, and `.vscode/tasks.json` (77 task entries).
 
-**Project**: ConvoPeq v0.6.9 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
+**Project**: ConvoPeq v0.6.10 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20 · MSVC 19.44+ / icx 2026.0
 
 ---
@@ -18,7 +18,7 @@ This guide reflects the **current repository setup** — `build.bat`, `CMakeList
 | Build System | CMake 3.22+ + Ninja Multi-Config |
 | Language | C++20 |
 | Math Backend | Intel oneMKL (sequential, static link) |
-| SIMD | AVX2 (both MSVC and icx) |
+| SIMD | AVX2 (MSVC: all configs; icx: Release only) |
 
 ConvoPeq is a **Windows-only standalone application** (no plugin target).
 
@@ -45,14 +45,15 @@ ConvoPeq is a **Windows-only standalone application** (no plugin target).
 | CMake | 3.22+ | Generator-agnostic build configuration |
 | Ninja | any recent | Build system (used via `Ninja Multi-Config`) |
 | Intel oneAPI Base Toolkit | 2026.0 | MKL + IPP libraries |
+| Python 3 | 3.x | Build identity gate (`src/tools/build_identity_gate.py`) |
 
 ### 2.3 Optional Tools
 
 | Tool | Purpose |
 |------|---------|
-| vswhere.exe | Auto-detects Visual Studio install path |
 | clang-tidy | Static analysis (disabled by default) |
-| AddressSanitizer (ASan) | Memory error detection (Debug only) |
+| AddressSanitizer (ASan) | Memory error detection (`ENABLE_ASAN=ON`) |
+| ThreadSanitizer (TSan) | Data-race detection (`ENABLE_TSAN=ON`, Clang only) |
 
 ---
 
@@ -60,23 +61,31 @@ ConvoPeq is a **Windows-only standalone application** (no plugin target).
 
 ```
 ConvoPeq/
-├── build.bat                    # Primary build script
-├── CMakeLists.txt               # v0.6.9, 1042 lines
+├── build.bat                    # Primary build script (347 lines)
+├── CMakeLists.txt               # v0.6.10, 2,030 lines
 ├── CMakePresets.json            # 3 configure presets
-├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.9), COMPANY, BUNDLE_ID
+├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.10), COMPANY, BUNDLE_ID
 ├── JUCE/                        # JUCE 8.0.12 (in-tree, required)
-├── r8brain-free-src/            # IR resampler (optional, for 内蔵 FFT)
-├── src/                         # 277 source files
-├── config/                      # Authority manifests
-├── tools/                       # CodeGraph, CodeQL scripts
+├── r8brain-free-src/            # IR resampler library
+├── src/                         # 336 source files
+│   ├── [87 root files]          # DSP + UI + FFT abstraction
+│   ├── audioengine/ (126)       # ISR Runtime Governance
+│   ├── core/         (40)       # RCU Foundation
+│   ├── convolver/    (10)       # Convolver Split
+│   ├── eqprocessor/  (17)       # EQ Split + Analysis
+│   ├── tests/        (55)       # CTest suite (36 executables)
+│   ├── dsp/math/     ( 1)       # FastTanhApprox.h
+│   └── tools/        ( 2)       # Build gate Python scripts
+├── config/                      # Authority manifests (4 JSON)
+├── tools/                       # 66 .py + 54 .bat build/verify scripts
 ├── .vscode/
-│   ├── tasks.json               # 22 tasks
+│   ├── tasks.json               # 77 task entries (68 unique labels)
 │   ├── launch.json              # 5 debug configs
 │   └── c_cpp_properties.json
-└── .github/scripts/             # CI/test scripts
+└── .github/scripts/             # CI/test scripts (184 files)
 ```
 
-`build.bat` validates `JUCE\CMakeLists.txt` before configuring.
+`build.bat` validates `JUCE\CMakeLists.txt` before configuring and runs a build identity gate after configure.
 
 ---
 
@@ -95,21 +104,33 @@ build.bat Debug   icx          # Intel icx Debug
 build.bat Release clean icx    # Clean + icx
 
 build.bat Release pgo-gen      # MSVC PGO instrumentation
-build.bat Release pgo-use     # MSVC PGO optimization
+build.bat Release pgo-use      # MSVC PGO optimization
 
 build.bat Release icx pgo-gen  # ERROR: PGO not supported for icx
+
+# Pass extra CMake defines (-D prefix, SHIFT parsing, no quotes needed):
+build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+build.bat Debug icx -DCONVOPEQ_REQUIRE_MKL=OFF
 ```
+
+> **Note**: Do not put `!` inside `-D` values — it conflicts with DelayedExpansion.
 
 ### 4.2 What build.bat Does
 
-1. **Parses arguments**: BUILD_CONFIG (Debug/Release), PGO_MODE (normal/pgo-gen/pgo-use), DO_CLEAN, COMPILER_MODE (msvc/icx/icpx)
+1. **Parses arguments**: `BUILD_CONFIG` (Debug/Release), `PGO_MODE` (normal/pgo-gen/pgo-use), `DO_CLEAN`, `NO_PAUSE`, `COMPILER_MODE` (msvc/icx/icpx), `CMAKE_EXTRA_FLAGS` (`-DVAR[=VALUE]`)
 2. **Validates JUCE**: checks `JUCE\CMakeLists.txt` exists
-3. **Initializes MSVC** (skipped for icx): uses vswhere to find latest VS, falls back to known VS17/VS18 paths
-4. **Initializes oneAPI** (both MSVC and icx): calls `setvars.bat intel64`
+3. **Cleans juceaide sub-build cache**: removes stale `JUCE/tools/CMakeCache.txt` to prevent generator-mismatch errors
+4. **Environment setup**:
+   - **icx mode**: calls `setvars.bat intel64`; sets `MKLROOT` / `IPPROOT` / `LIB`
+   - **MSVC mode**: does **not** call `vcvarsall.bat` — the shell must already be initialized (Developer Command Prompt, VS Code task, or manual `vcvarsall.bat`)
 5. **Cleans** (if `clean`): kills `cmcldeps.exe`, `ninja.exe`, `ConvoPeq.exe`; removes build dir
-6. **Configures CMake**: `Ninja Multi-Config` generator, passes PGO flags as `-DCONVOPEQ_PGO_INSTRUMENT=/USE`
-7. **Retries on RC1109**: for icx first-build, auto-removes stale RC resource and retries once
-8. **Builds** selected config with `cmake --build`
+6. **Configures CMake**: `Ninja Multi-Config` generator, passes PGO flags + extra `-D` defines. Retries up to 3 times on configure failure (clears `.ninja_log` / `.ninja_deps`)
+7. **Build identity gate**: runs `src/tools/build_identity_gate.py --check` (fail-closed on identity mismatch)
+8. **Builds** selected config with `cmake --build` (icx uses `-j 1`)
+9. **RC1109 auto-retry**: for icx first-build, removes stale RC resource and retries once
+10. **Post-build verification**: checks CMakeCache PGO flags and artifact existence
+
+> **ASan is not a build.bat argument.** Use CMake directly: `-DENABLE_ASAN=ON` (see §9).
 
 ### 4.3 Output Locations
 
@@ -192,12 +213,14 @@ cmake --build build-icx --config Release
 
 ## 7. Compiler Flags Reference
 
-### 7.1 MSVC (all configs)
+### 7.1 MSVC (ConvoPeq target)
 
 | Flag | Value | Purpose |
 |------|-------|---------|
 | `/utf-8` | on | UTF-8 source + runtime |
 | `/W4` | on | Warning level 4 |
+| `/wd4100` | on | Suppress unused param (JUCE) |
+| `/wd4189` | on | Suppress unused local (r8brain) |
 | `/MP1` | on | Multi-processor compile (1 core, memory-minimal) |
 | `/EHsc` | on | C++ exceptions only (no SEH) |
 | `/Zm400` | on | 400% precompiled header heap |
@@ -205,18 +228,20 @@ cmake --build build-icx --config Release
 | `/arch:AVX2` | on | AVX2 SIMD (all configs) |
 | `/MT` (Release) | on | Static CRT link |
 | `/MTd` (Debug) | on | Static CRT link |
-| `/D_DEBUG` | Debug | Debug symbol |
-| `/Od` | Debug | No optimization |
-| `/Zi` | Debug | PDB debug info |
-| `/RTC1` | Debug | Runtime checks |
-| `/O2` | Release | Max speed |
-| `/GL` | Release | Whole Program Optimization (LTO) |
-| `/LTCG` | Release | Link-time code generation |
-| `/OPT:REF /OPT:ICF /OPT:LBR` | Release | Linker optimization |
 
-**Disabled warnings**: `4100` (unused param), `4189` (unused local, r8brain)
+**Global flags** (CMAKE_CXX_FLAGS_*):
 
-### 7.2 Intel icx (all configs)
+| Config | Flags |
+|--------|-------|
+| Release | `/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /Gw /Gy /Zi /utf-8 /EHsc` |
+| Debug | `/D_DEBUG /bigobj /Zm400 /Ob0 /Od /Zi /RTC1 /utf-8 /EHsc` |
+| RelWithDebInfo | `/Zi /O2 /Ob1 /DNDEBUG /utf-8` |
+
+**Linker (Release)**: `/DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR`
+
+> **`/fp:fast` is intentionally NOT used for MSVC** (work92 C-8). MSVC uses the default `/fp:precise` to guarantee DSP numeric accuracy and standard AVX2 behavior on AMD CPUs.
+
+### 7.2 Intel icx (ConvoPeq target)
 
 | Flag | Value | Purpose |
 |------|-------|---------|
@@ -227,25 +252,30 @@ cmake --build build-icx --config Release
 | `-Wno-macro-redefined` | on | Suppress NOMINMAX redefinition |
 | `/EHsc` | on | C++ exceptions |
 | `/utf-8` | on | UTF-8 source |
-| `/QxCORE-AVX2` | on | Haswell+ AVX2+FMA (all configs) |
-| `/MT` | Release | Static CRT (icx default) |
-| `/O3` | Release | Max optimization |
-| `/fp:fast` | Release | Fast floating point (no denormal loss) |
+| `-mvzeroupper` | CXX only | Auto-insert vzeroupper at AVX→SSE boundaries |
+| `/QxCORE-AVX2` | **Release only** | Haswell+ AVX2+FMA (config-gated) |
+| `/MT` | Release | Static CRT (when ASan off) |
+| `/O2` | Release | Max optimization (`/O3` causes LLVM OOM on JUCE) |
+| `/fp:fast` | Release | Fast floating point (icx performance choice) |
 | `/Gy` | Release | Function-level linking |
 | `/Zi` | Release | PDB debug info |
 | `/Qipo` | Release | Whole program optimization (=LTO) |
 
-**Important**: `/fp:precise + /Qimf-arch-consistency:true` cause `LLVM ERROR: out of memory` in icx 2026.0 and are not used.
+**Important**:
+- `/fp:precise + /Qimf-arch-consistency:true` cause `LLVM ERROR: out of memory` in icx 2026.0 and are not used.
+- `/O3` causes `LLVM ERROR: out of memory` on large JUCE TUs; `/O2` is used instead.
+- **icx binaries are officially supported on Intel CPUs only.** AMD execution is unsupported (AVX2 codegen verified within AVX2 subset but not guaranteed on all paths).
 
 ### 7.3 MSVC vs icx — Key Differences
 
 | Aspect | MSVC | icx |
 |--------|------|-----|
-| AVX2 flag | `/arch:AVX2` | `/QxCORE-AVX2` |
+| AVX2 flag | `/arch:AVX2` (all configs) | `/QxCORE-AVX2` (**Release only**) |
 | LTO | `/GL + /LTCG` | `/Qipo` |
 | MKL linking | `find_package(MKL)` + `target_link_libraries` | `/Qmkl:sequential` compile option |
 | IPO | `INTERPROCEDURAL_OPTIMIZATION_RELEASE=TRUE` | `/Qipo` target property |
-| CRT | Static (`/MT` / `/MTd`) | Static (icx default) |
+| CRT | Static (`/MT` / `/MTd`) | Static (`/MT` Release, when ASan off) |
+| FP mode | `/fp:precise` (default) | `/fp:fast` (Release) |
 
 ---
 
@@ -253,7 +283,7 @@ cmake --build build-icx --config Release
 
 ### 8.1 Linking Strategy
 
-**MSVC**:
+**MSVC** (`CONVOPEQ_REQUIRE_MKL=ON`, default):
 ```cmake
 set(MKL_LINK static)
 set(MKL_THREADING sequential)
@@ -261,6 +291,10 @@ set(MKL_INTERFACE_FULL intel_lp64)
 find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
 target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
 ```
+
+**MSVC without MKL** (`CONVOPEQ_REQUIRE_MKL=OFF`):
+- Falls back to system aligned allocator
+- Useful for environments without oneAPI installed
 
 **icx**:
 ```cmake
@@ -274,7 +308,7 @@ MKLROOT is detected from `$ENV{MKLROOT}` and added to CMAKE_PREFIX_PATH.
 
 IPP is **optional** (quiet find). If found:
 - `IPP::ippcore`, `IPP::ipps` are linked
-- Used for supplementary DSP operations
+- Used for supplementary DSP operations and the FFTBackend abstraction
 - `R8B_IPP=1` is intentionally **not enabled** — r8brain uses its built-in FFT due to API incompatibility with IPP 2022.3+
 
 ---
@@ -288,11 +322,7 @@ ASan requires **dynamic CRT** and a CRT-consistent ASan runtime DLL.
 | `/MDd` (Debug) | `clang_rt.asan_dbg_dynamic-*.dll` |
 | `/MD` (RelWithDebInfo / Release) | `clang_rt.asan_dynamic-*.dll` |
 
-```cmd
-build.bat Debug asan=on
-```
-
-Or via CMake:
+Enable via CMake (not a build.bat argument):
 
 ```cmd
 cmake -S . -B build -DENABLE_ASAN=ON ...
@@ -300,25 +330,43 @@ cmake -S . -B build -DENABLE_ASAN=ON ...
 
 | Compiler | ASan Effect |
 |----------|------------|
-| MSVC | `/fsanitize=address` + dynamic CRT override (Debug → `/MDd`, others → `/MD`) |
-| icx | `-fsanitize=address` |
+| MSVC | `/fsanitize=address` + dynamic CRT override (Debug → `/MDd`) + `/RTC1-` strip |
+| icx | `-fsanitize=address` + dynamic CRT override |
 
 **Important**:
-- Static CRT (`/MTd`) combined with MSVC ASan causes `LNK2038` mismatch error. The build system automatically switches to dynamic CRT when ASan is enabled.
-- **CRT must match the ASan runtime DLL.** `/MDd` requires `clang_rt.asan_dbg_dynamic-*.dll`; if only the release DLL (`clang_rt.asan_dynamic-*.dll`) is deployed, `/MDd` binaries hang or abort with `bad-free` inside the CRT. **Recommended ASan verification flow: build the test/harness targets in `RelWithDebInfo` config** (`/MD`, matches the deployed release ASan DLL):
+- Static CRT (`/MTd`) combined with MSVC ASan causes `LNK2038` mismatch. The build system automatically switches to dynamic CRT when ASan is enabled.
+- **ASan + PGO is mutually exclusive** — CMake errors if both are ON.
+- **CRT must match the ASan runtime DLL.** `/MDd` requires `clang_rt.asan_dbg_dynamic-*.dll`; if only the release DLL is deployed, `/MDd` binaries hang or abort with `bad-free`. **Recommended flow: build test targets in `RelWithDebInfo`** (`/MD`):
   ```cmd
   cmake --build build_asan --config RelWithDebInfo --target <TestTarget>
   ```
-  Copy `clang_rt.asan_dynamic-x86_64.dll` next to the resulting `.exe` (the DLL is not auto-copied). Run with `ASAN_OPTIONS=detect_leaks=0` to suppress LSan (which is not fully functional on Windows).
-- `/RTC1` is incompatible with ASan and with `/O2`. The build system strips it via `$<$<CONFIG:Debug>:/RTC1->` (note: MSVC cl parses `/RTC1-` as `/RTC1`, so it must only be emitted in Debug where the global `CMAKE_CXX_FLAGS_DEBUG` adds `/RTC1`).
+  Copy `clang_rt.asan_dynamic-x86_64.dll` next to the resulting `.exe`. Run with `ASAN_OPTIONS=detect_leaks=0` to suppress LSan.
+- `/RTC1` is incompatible with ASan. The build system strips it via `$<$<CONFIG:Debug>:/RTC1->`.
 
 ---
 
-## 10. Profile-Guided Optimization (PGO) — MSVC Only
+## 10. ThreadSanitizer (TSan) — Clang Only
+
+TSan is available for Clang builds only (`ENABLE_TSAN=ON`). MSVC is not supported.
+
+```cmd
+cmake -S . -B build-clang -DENABLE_TSAN=ON ...
+```
+
+| Constraint | Detail |
+|------------|--------|
+| Compiler | Clang only (MSVC → CMake FATAL_ERROR) |
+| Mutually exclusive | Cannot combine with `ENABLE_ASAN` |
+| CRT | Requires dynamic CRT (static CRT incompatible) |
+| LTO | Incompatible with LTCG/IPO |
+
+---
+
+## 11. Profile-Guided Optimization (PGO) — MSVC Only
 
 PGO is **not supported for icx**. It requires two separate builds on real workloads.
 
-### 10.1 Step 1 — Instrumented Build
+### 11.1 Step 1 — Instrumented Build
 
 ```cmd
 build.bat Release pgo-gen
@@ -327,11 +375,11 @@ build.bat Release pgo-gen
 CMake flags: `-DCONVOPEQ_PGO_INSTRUMENT=ON -DCONVOPEQ_PGO_USE=OFF`
 Result: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` + `*.pgc` files in same directory.
 
-### 10.2 Step 2 — Exercise the Application
+### 11.2 Step 2 — Exercise the Application
 
 Run `ConvoPeq.exe` and use the application normally. CPU load will be ~200% during profiling.
 
-### 10.3 Step 3 — Merge Profile Data
+### 11.3 Step 3 — Merge Profile Data
 
 ```cmd
 cd build\ConvoPeq_artefacts\Release
@@ -344,7 +392,7 @@ Or use the full path to `pgomgr.exe`:
 "C:\Program Files\Microsoft Visual Studio\[2022|2026]\VC\Tools\MSVC\<version>\bin\Hostx64\x64\pgomgr.exe" /merge *.pgc ConvoPeq.pgd
 ```
 
-### 10.4 Step 4 — Optimized Build
+### 11.4 Step 4 — Optimized Build
 
 ```cmd
 build.bat Release pgo-use
@@ -357,31 +405,56 @@ Result: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` (PGO-optimized)
 
 ---
 
-## 11. CTest Regression Suite
+## 12. CTest Regression Suite
 
-21 test executables are defined in CMakeLists.txt (enabled by default, `CONVOPEQ_ENABLE_ISR_TESTS=ON`).
+**36 test executables** are defined in CMakeLists.txt, registering **40 `add_test()`** entries (enabled by default, `CONVOPEQ_ENABLE_ISR_TESTS=ON`).
 
-### 11.1 Test List
+### 12.1 Test List
 
 | Test Name | Executable | Purpose |
 |-----------|-----------|---------|
-| `ISRRuntimeIdentityGenerators` | ISRRuntimeIdentityTests.exe | ISR identity generation |
-| `RuntimePublicationCoordinatorRejects` | RuntimePublicationCoordinatorTests.exe | Publication coordinator rejection |
-| `ISRSemanticValidationRejects` | ISRSemanticValidationTests.exe | Semantic validation |
-| `RetireGraceSemantics` | RetireGraceSemanticsTests.exe | Retire grace semantics |
-| `RuntimeSemanticSchemaValidation` | RuntimeSemanticSchemaValidationTests.exe | Schema validation |
-| `ObservePathSingleSource` | ObservePathSingleSourceTests.exe | Observe path single source |
-| `OverlapAuthoritySingular` | OverlapAuthoritySingularTests.exe | Overlap authority singular |
-| `ShadowCompareContract` | ShadowCompareContractTests.exe | Shadow compare contract |
-| `CrossfadeExecutorLocalContract` | CrossfadeExecutorLocalContractTests.exe | Crossfade executor local contract |
-| `RuntimeWorldAuthorityProjectionContract` | RuntimeWorldAuthorityProjectionTests.exe | World authority projection |
-| `PartialPublicationReject` | PartialPublicationRejectTests.exe | Partial publication rejection |
-| `RebuildAdmissionRegression` | RebuildAdmissionRegressionTests.exe | Rebuild admission regression |
-| `BuildInputSemanticContract` | BuildInputSemanticContractTests.exe | Build input semantic contract |
-| `PriorityIntegration` | PriorityIntegrationTests.exe | Priority integration |
-| `HeadlessAudioPathVerification` | cli-smoke-test.ps1 | Audio callback smoke test (skipped in CI) |
+| `ISRRuntimeIdentityGenerators` | ISRRuntimeIdentityTests | ISR identity generation |
+| `RuntimePublicationCoordinatorRejects` | RuntimePublicationCoordinatorTests | Publication coordinator rejection |
+| `ISRSemanticValidationRejects` | ISRSemanticValidationTests | Semantic validation |
+| `InvariantINV3INV5` | invariant_INV3_INV5Tests | INV-3 / INV-5 invariants |
+| `AdmissionPackedState` | AdmissionPackedStateTests | Admission packed-state access |
+| `RetireGraceSemantics` | RetireGraceSemanticsTests | Retire grace semantics |
+| `ShutdownRetireIntentDrain` | ShutdownRetireIntentDrainTests | Shutdown retire-intent drain |
+| `StuckReaderFallbackDrain` | StuckReaderFallbackDrainTests | Stuck-reader fallback drain |
+| `NormalRetireDSPHandleCompare` | NormalRetireDSPHandleCompareTests | Normal-retire DSP handle comparison |
+| `RuntimeSemanticSchemaValidation` | RuntimeSemanticSchemaValidationTests | Schema validation |
+| `ObservePathSingleSource` | ObservePathSingleSourceTests | Observe path single source |
+| `OverlapAuthoritySingular` | OverlapAuthoritySingularTests | Overlap authority singular |
+| `ShadowCompareContract` | ShadowCompareContractTests | Shadow compare contract |
+| `CrossfadeExecutorLocalContract` | CrossfadeExecutorLocalContractTests | Crossfade executor local contract |
+| `RuntimeWorldAuthorityProjectionContract` | RuntimeWorldAuthorityProjectionTests | World authority projection |
+| `PartialPublicationReject` | PartialPublicationRejectTests | Partial publication rejection |
+| `RebuildAdmissionRegression` | RebuildAdmissionRegressionTests | Rebuild admission regression |
+| `BuildInputSemanticContract` | BuildInputSemanticContractTests | Build input semantic contract |
+| `BuildErrorClassificationTests` | BuildErrorClassificationTests | BuildError / FailureClassification contract |
+| `RetrySchedulerTests` | RetrySchedulerTests | RetryScheduler schedule/dispatch |
+| `PublicationAdmissionTests` | PublicationAdmissionTests | Publication admission evaluation |
+| `D8_1_WrapperCacheTests` | D8_1_WrapperCacheTests | Wrapper cache (D8-1) |
+| `D8_2_B_2_Tests` | D8_2_B_2_Tests | D8-2-B-2 contract |
+| `TerminalTelemetryContract` | TerminalTelemetryContractTests | Terminal telemetry contract |
+| `RuntimeHealthMonitorTierTests` | RuntimeHealthMonitorTierTests | Health monitor tier selection |
+| `ISRSoakTests` | ISRSoakTests | ISR soak / stress |
+| `OwnerChannel` | OwnerChannelTests | OwnerChannel SPSC transfer |
+| `DeferredDeletionQueueReclaimTests` | DeferredDeletionQueueReclaimTests | Deferred deletion reclaim |
+| `MpscBoundedRingTests` | MpscBoundedRingTests | MPSC bounded ring contract |
+| `SequenceArithmeticTests` | SequenceArithmeticTests | Modular sequence arithmetic |
+| `DSPHandleTableTests` | DSPHandleTableTests | DSPHandleTable O(1) map |
+| `PriorityIntegration` | PriorityIntegrationTests | Priority integration |
+| `GainStagingContractTests` | GainStagingContractTests | Auto gain staging contract |
+| `EQProcessorMaxGainTests` | EQProcessorMaxGainTests | EQ max gain response math |
+| `EQAnalysisUnitTests` | EQAnalysisUnitTests | EQ analysis unit tests |
+| `FFTBackendTests` | FFTBackendTests | FFTBackend abstraction |
+| `EQBoundExcessBenchmark` | EQBoundExcessBenchmark | boundExcessDb benchmark (--quick) |
+| `MTNUPCMeasurement` | MTNUPCMeasurement | MT-NUPC measurement console |
+| `AudioEngineHarness` | AudioEngineHarness | Audio engine integration harness |
+| `HeadlessAudioPathVerification` | cli-smoke-test.ps1 | Audio callback smoke test (CI-gated) |
 
-### 11.2 Running Tests
+### 12.2 Running Tests
 
 ```cmd
 cmake --build build --config Debug
@@ -389,20 +462,20 @@ cd build
 ctest -C Debug --output-on-failure
 
 # Exclude slow tests
-ctest -C Debug --output-on-failure -E "BuildInputSemanticContract|RuntimeWorldAuthority"
+ctest -C Debug --output-on-failure -E "BuildInputSemanticContract|RuntimeWorldAuthority|ISRSoak"
 
 # Skip audio test (CI environment)
 # Set CONVO_CI_BUILD=1 to skip HeadlessAudioPathVerification
 ```
 
-### 11.3 BuildInputSemanticContractTests Stack Size
+### 12.3 BuildInputSemanticContractTests Stack Size
 
 This test reads large source files and may overflow the default stack. CMakeLists.txt applies:
 - MSVC: `/GS-` (buffer security check off) + `/STACK:8388608` (8 MB stack)
 
 ---
 
-## 12. Clang-Tidy Integration
+## 13. Clang-Tidy Integration
 
 clang-tidy is **disabled by default** (`CONVOPEQ_ENABLE_CLANG_TIDY=OFF`).
 
@@ -420,11 +493,13 @@ clang-tidy is invoked automatically during build if enabled and the binary is fo
 
 ---
 
-## 13. VS Code Tasks (22 Total)
+## 14. VS Code Tasks (77 Entries, 68 Unique Labels)
 
 All tasks use `shell: cmd.exe`. Generator is `Ninja Multi-Config`.
 
-### 13.1 Core Build Tasks
+> Many entries are one-off debugging tasks from past investigation sessions. The stable core tasks are listed below.
+
+### 14.1 Core Build Tasks
 
 | Label | Description | Build Dir |
 |-------|------------|-----------|
@@ -432,17 +507,29 @@ All tasks use `shell: cmd.exe`. Generator is `Ninja Multi-Config`.
 | `Release` | MSVC Release, default | `build/` |
 | `Debug (icx)` | Intel icx Debug | `build-icx/` |
 | `Release (icx)` | Intel icx Release | `build-icx/` |
+| `Release Build With PDB` | MSVC Release with full PDB | `build/` |
 
-### 13.2 Utility Tasks
+### 14.2 Utility Tasks
 
 | Label | Description |
 |-------|-------------|
 | `Kill Previous Instance` | `taskkill /F /IM ConvoPeq.exe` |
 | `Clean` | Remove `build/` directory |
-| `CLI Smoke Test` | Run `cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks` (depends on Debug) |
-| `Debug Build + Test` | Build Debug + run CTest (excludes BuildInputSemanticContract, RuntimeWorldAuthority) |
+| `CLI Smoke Test` | Run `cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks` |
+| `Debug Build + Test` | Build Debug + run CTest |
+| `Check MKLROOT` | Verify MKLROOT environment |
 
-### 13.3 CodeGraph Tasks (Static Index)
+### 14.3 CMake Reconfigure Tasks
+
+| Label | Description |
+|-------|-------------|
+| `CMake Reconfigure` | Reconfigure MSVC build |
+| `CMake Reconfigure vs2026` | Reconfigure with vs2026 preset |
+| `CMake Reconfigure icx` | Reconfigure icx build |
+| `CMake Reconfigure icx (build)` | Reconfigure + build icx |
+| `CMake Reconfigure icx (full)` | Full icx reconfigure |
+
+### 14.4 CodeGraph Tasks (Static Index)
 
 | Label | Description |
 |-------|-------------|
@@ -451,7 +538,7 @@ All tasks use `shell: cmd.exe`. Generator is `Ninja Multi-Config`.
 | `CodeGraph Stats` | Show CodeGraph stats |
 | `CodeGraph Apply Local Patch` | Apply local CodeGraph patch |
 
-### 13.4 CodeQL Tasks (Security Analysis)
+### 14.5 CodeQL Tasks (Security Analysis)
 
 | Label | Description |
 |-------|-------------|
@@ -460,16 +547,14 @@ All tasks use `shell: cmd.exe`. Generator is `Ninja Multi-Config`.
 | `CodeQL One-Step (ConvoPeq Standard)` | Run full CodeQL analysis |
 | `CodeQL One-Step (ConvoPeq Standard DryRun)` | Dry-run the analysis |
 
-### 13.5 PGO / Debug / Analysis Tasks
+### 14.6 Analysis / Verification Tasks
 
 | Label | Description |
 |-------|-------------|
-| `Release Build With PDB` | MSVC Release with full PDB generation |
-| `Debug Build (cmd env)` | Debug via `cmd.exe /d /c` chain |
-| `Release Build (cmd env retry)` | Release via `cmd.exe /d /c` chain |
-| `Debug Build (cmd env retry)` | Debug via `cmd.exe /d /c` chain |
-| `Strict Atomic Dot-Call Scan` | PowerShell script to scan src/ for atomic dot-calls |
-| `work21 EpochDomain CI Gate` | CI gate for work21 EpochDomain |
+| `Strict Atomic Dot-Call Scan` | Scan src/ for atomic dot-calls |
+| `work21 EpochDomain CI Gate` | CI gate for EpochDomain |
+| `Verify All Tools` | Verify build tools availability |
+| `Headroom Proxy: Status` / `Stop` | Headroom proxy management |
 
 **Recommended workflow**:
 - **Terminal → Run Task → Debug** (MSVC Debug)
@@ -479,7 +564,7 @@ All tasks use `shell: cmd.exe`. Generator is `Ninja Multi-Config`.
 
 ---
 
-## 14. VS Code Debug Configurations (launch.json)
+## 15. VS Code Debug Configurations (launch.json)
 
 Five configurations are available:
 
@@ -499,16 +584,18 @@ plus the MSVC toolchain path for debugging.
 
 ---
 
-## 15. Common Issues and Fixes
+## 16. Common Issues and Fixes
 
 ### A) `windows.h` or standard headers not found
 
 **Cause**: MSVC/SDK environment not initialized in the same command chain.
 
 **Fix**:
-- Use `build.bat`, or
+- Use `build.bat` from a Developer Command Prompt, or
 - Ensure both `vcvarsall.bat` and `setvars.bat` are called before CMake in the same shell session
 - In PowerShell: `cmd.exe /d /c "... && ..."`
+
+> **Note**: `build.bat` does **not** auto-detect or call `vcvarsall.bat` for MSVC mode. The environment must already be initialized.
 
 ### B) `Release` task produces Debug artifacts
 
@@ -536,6 +623,7 @@ plus the MSVC toolchain path for debugging.
 - Install Intel oneAPI Base Toolkit
 - Confirm `C:\Program Files (x86)\Intel\oneAPI\setvars.bat` exists
 - Run from a clean shell
+- Or set `CONVOPEQ_REQUIRE_MKL=OFF` to use the system aligned allocator fallback
 
 ### E) JUCE check fails in build.bat
 
@@ -552,8 +640,8 @@ plus the MSVC toolchain path for debugging.
 **Cause**: ASan requires dynamic CRT (`/MDd`) but project defaults to static CRT (`/MTd`) on Debug.
 
 **Fix**:
-- Build system automatically overrides `MSVC_RUNTIME_LIBRARY` to `MultiThreadedDebugDLL` when `ENABLE_ASAN=ON`
-- Use `build.bat Debug asan=on`
+- Build system automatically overrides `MSVC_RUNTIME_LIBRARY` to dynamic when `ENABLE_ASAN=ON`
+- Configure with `cmake -S . -B build -DENABLE_ASAN=ON`
 
 ### G) icx first build fails with RC1109
 
@@ -569,24 +657,46 @@ plus the MSVC toolchain path for debugging.
 
 **Fix**:
 - Use MSVC for PGO: `build.bat Release pgo-gen` / `build.bat Release pgo-use`
-- icx + PGO is planned for a future phase
+
+### I) Generator mismatch after switching toolchains
+
+**Cause**: juceaide sub-build cache retains the old generator.
+
+**Fix**:
+- `build.bat` automatically removes `build\JUCE\tools\CMakeCache.txt` on every reconfigure
+- Or run `Clean` task and reconfigure from scratch
 
 ---
 
-## 16. CMake Options Reference
+## 17. CMake Options Reference
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `CONVOPEQ_ENABLE_CLANG_TIDY` | OFF | Run clang-tidy during build |
-| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | Build CTest regression suite |
-| `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` | OFF | Enable runtime diagnostic logging |
+| `CONVOPEQ_REQUIRE_MKL` | ON | Require Intel MKL for MSVC builds (OFF → system aligned allocator) |
+| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | Build CTest regression suite (36 executables) |
+| `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` | OFF | Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD) |
 | `CONVOPEQ_PGO_INSTRUMENT` | OFF | PGO instrumentation build |
 | `CONVOPEQ_PGO_USE` | OFF | PGO optimized build |
-| `ENABLE_ASAN` | OFF | AddressSanitizer (Debug only) |
+| `ENABLE_ASAN` | OFF | AddressSanitizer (mutually exclusive with PGO and TSAN) |
+| `ENABLE_TSAN` | OFF | ThreadSanitizer (Clang only; mutually exclusive with ASAN) |
+
+### Convolver Split Feature Flags (all ON)
+
+```
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RESAMPLE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
+CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
+```
 
 ---
 
-## 17. Dependency Boundaries
+## 18. Dependency Boundaries
 
 Do **not** modify external dependency trees directly:
 
@@ -595,20 +705,23 @@ Do **not** modify external dependency trees directly:
 
 ---
 
-## 18. Architecture Notes
+## 19. Architecture Notes
 
 - ConvoPeq is a **standalone app** (not a plugin target)
 - The **default daily workflow** is `build.bat` or VS Code tasks
 - Use `Clean` when switching toolchains or after generator/cache conflicts
 - **MSVC and icx modes are fully isolated** (separate build directories) and can coexist
-- **icx binaries require Intel CPU** (AVX2 check enforced at runtime)
+- **icx binaries require Intel CPU** (AVX2 check enforced at runtime; AMD is unsupported)
 - **PGO is MSVC-only**; `.pgd` stored in `build\ConvoPeq_artefacts\Release\`
 - **CI skips audio test** when `CONVO_CI_BUILD=1` is defined (no audio device in CI)
 - **BuildInputSemanticContractTests** requires 8 MB stack on MSVC
+- **Build identity gate** runs after every configure (fail-closed)
+- **MSVC uses `/fp:precise`** (not `/fp:fast`) for DSP numeric accuracy
+- **icx uses `/O2`** (not `/O3`) to avoid LLVM OOM on large JUCE TUs
 
 ---
 
-## 19. Quick Reference
+## 20. Quick Reference
 
 ```cmd
 # MSVC Debug
@@ -631,8 +744,12 @@ build.bat Release icx
 # Clean
 build.bat Release clean
 
-# ASan Debug
-build.bat Debug asan=on
+# Extra CMake define
+build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
+# ASan (via CMake, not build.bat)
+cmake -S . -B build -DENABLE_ASAN=ON
+cmake --build build --config Debug
 
 # Run tests
 cmake --build build --config Debug
@@ -647,24 +764,50 @@ cd build && ctest -C Debug --output-on-failure
 ConvoPeq.exe sources (CMakeLists.txt target_sources):
   src/MainApplication.cpp
   src/MainWindow.cpp
-  src/audioengine/
-    AudioEngine.*.cpp  (15 files — Lifecycle, Timer, Commit, Rebuild, etc.)
-    ISR*.cpp           (31 files — Closure, PayloadTier, HB, Retire, etc.)
-    Processing.*.cpp   (11 files — AudioBlock, BlockDouble, DSPCore*, etc.)
+  src/audioengine/                          (126 files total)
+    AudioEngine.*.cpp         (31 files — Timer, Commit, Rebuild, Processing, etc.)
+    ISR*.cpp                  (17 files — Closure, Retire, Shutdown, Publication, etc.)
+    AudioEngineProcessor.cpp
+    AutoGainPlanner.cpp
+    CrossfadeAuthority.cpp
+    DSPLifetimeManager.cpp
+    FrozenRuntimeWorld.cpp
+    PublicationAdmission.cpp
+    PublicationExecutor.cpp
+    RetryScheduler.cpp
+    RuntimeBuilder.cpp
+    RuntimeHealthMonitor.cpp
+    RuntimePolicyEngine.cpp
+    RuntimePublicationOrchestrator.cpp
+    RuntimePublicationValidator.cpp
+    TelemetryRecorder.cpp
+    WorldLifecycleAudit.cpp
   src/convolver/
-    ConvolverProcessor.*.cpp  (8 files — Lifecycle, Rebuild, LoaderThread, etc.)
+    ConvolverProcessor.*.cpp  (8 TUs — Lifecycle, Rebuild, LoaderThread, etc.)
   src/eqprocessor/
-    EQProcessor.*.cpp  (5 files — Core, Parameters, Coefficients, Processing, etc.)
+    EQProcessor.*.cpp         (5 TUs — Core, Parameters, Coefficients, Processing, etc.)
   src/core/
-    GlobalSnapshot.*, SnapshotCoordinator.*, EpochDomain.h, RCUReader.h, etc.
+    GlobalSnapshot.cpp, SnapshotCoordinator.cpp, SnapshotFactory.cpp,
+    SnapshotAssembler.cpp, DeletionQueue.cpp, WorkerThread.cpp
   src/CustomInputOversampler.cpp
   src/TruePeakDetector.cpp
   src/LoudnessMeter.cpp
   src/MKLNonUniformConvolver.cpp
   src/NoiseShaperLearner.cpp
-  src/RuntimeBuilder.cpp
-  src/AudioEngineProcessor.cpp
-  + 21 test executables in src/tests/
+  src/FFTBackend.cpp
+  src/FFTExecutionContext.cpp
+  src/OutputFilter.cpp
+  src/ProgressiveUpgradeThread.cpp
+  src/IRConverter.cpp
+  src/IRAnalyzer.cpp
+  src/IRDSP.cpp
+  src/CacheManager.cpp
+  src/MixedPhasePersistentCache.cpp
+  src/PsychoacousticDither.cpp
+  src/AllpassDesigner.cpp
+  src/CmaEsOptimizerDynamic.cpp
+  + 36 test executables in src/tests/
+  + AudioEngineHarness in src/tests/AudioEngineHarness/
 ```
 
 ## Appendix B. Build Directory Structure
@@ -673,6 +816,7 @@ ConvoPeq.exe sources (CMakeLists.txt target_sources):
 build/                              # MSVC build root
 ├── CMakeCache.txt
 ├── CMakeFiles/
+│   └── .build_identity             # Build identity stamp (gate-checked)
 ├── ConvoPeq_artefacts/
 │   ├── Debug/ConvoPeq.exe
 │   └── Release/ConvoPeq.exe
@@ -685,17 +829,12 @@ build-icx/                          # icx build root (fully isolated)
 out/build/<presetName>/              # CMakePresets custom build dir
 ```
 
-## Appendix C. MSVC Version Detection
+## Appendix C. MSVC Environment Initialization
 
-`build.bat` auto-detects Visual Studio via vswhere, then falls back to known paths in order:
+`build.bat` does **not** auto-detect Visual Studio via vswhere. For MSVC mode, the calling shell must already have the MSVC environment initialized:
 
-```
-VS 18 Enterprise  → C:\Program Files\Microsoft Visual Studio\18\Enterprise\...
-VS 18 Professional → ...
-VS 18 Community   → ...
-VS 17 Enterprise  → ...
-VS 17 Professional → ...
-VS 17 Community   → ...
-```
+- **VS Code tasks**: each task chain calls `vcvarsall.bat` before `cmake`
+- **Developer Command Prompt**: environment is pre-initialized
+- **Manual**: call `vcvarsall.bat x64` yourself before running `build.bat`
 
-CMakeLists.txt specifies `MSVC 19.44+` (VS2022 17.11+), so VS17 or VS18 both satisfy this requirement.
+For icx mode, `build.bat` calls `setvars.bat intel64` automatically.

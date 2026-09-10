@@ -243,9 +243,9 @@ void EQProcessor::resetToDefaults()
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
-    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の acquire と HB し AGC 初期化を公知
-    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: 同上
-    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: 同上
+    // ★ work89 R-4 (D-2): AGC atomic publish 削除 — requestAgcReset()（:256 相当）の
+    //   serial 前進により Audio Thread が rtAgc*Shadow を初期化する（唯一の実効経路・
+    //   DESIGN_R4_D2D3 §1.5 修正 A: constructor/UI Reset/loadPreset の 3 経路すべて同一）。
 
     // 全バンドの係数を更新
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -266,9 +266,9 @@ void EQProcessor::reset()
     // フィルタ状態をリセット (memsetで高速化)
     std::memset(filterState.data(), 0, sizeof(filterState));
 
-    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の agcCurrentGain acquire と HB し初期値を公知
-    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: Processing.cpp の acquire と HB
-    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
+    // ★ work89 R-4 (D-2): AGC atomic publish 削除 — 下記の fetchAdd(agcResetSerial) が
+    //   serial を前進させるため、Audio Thread の検知自己更新で shadow は初期化される
+    //   （P-D2-1: 活性 Read 0 件 / DESIGN_R4_D2D3 §1.1・§1.6）。
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state)
@@ -584,122 +584,6 @@ void EQProcessor::setState (const juce::ValueTree& v)
 }
 
 //============================================================================
-// 状態同期（他のプロセッサから）
-//============================================================================
-void EQProcessor::syncStateFrom(const EQProcessor& other)
-{
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-    auto otherState = other.loadCurrentState(std::memory_order_acquire); // acquire: other の exchangeCurrentState/publishCurrentState と HB
-    if (otherState == nullptr)
-        return;
-
-    auto* clonedState = new EQState(*otherState);
-    auto oldState = exchangeCurrentState(clonedState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
-
-    if (oldState)
-    {
-        if (!retireEQStateDeferred(oldState))            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
-    }
-    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
-
-    for (int i = 0; i < NUM_BANDS; ++i)
-        updateBandNode(i);
-
-    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire); // acquire: other の publishAtomic release と HB
-    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);       // acquire: 同上
-    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);     // acquire: 同上
-    const FilterStructure syncedStructure = static_cast<FilterStructure>(clonedState->filterStructure);
-    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);                      // acquire: other の bypassed publishAtomic release と HB
-    // ★ work89 R-1: bandResetPacked / agcResetSerial の shadow 同期は廃止（下記参照）。
-
-    // Avoid publication-domain split here: sync uses immutable state swap plus RT-local shadow updates.
-    bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
-    smoothTotalGain.setCurrentAndTargetValue(
-        juce::Decibels::decibelsToGain<double>(static_cast<double>(clonedState->totalGainDb)));
-
-    rtBypassedShadow.store(syncedBypassed, std::memory_order_relaxed);
-    rtActiveStructureShadow.store(syncedStructure, std::memory_order_relaxed);
-    rtAgcCurrentGainShadow.store(syncedAgcCurrentGain, std::memory_order_relaxed);
-    rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
-    rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
-
-    // ★ work89 R-1: rtSeenBandResetSerial / rtSeenAgcResetSerial / rtDeferredBandResetMask
-    //   への Non-RT 直接書込を廃止（data race 解消・REMEDIATION_PLAN_R123_20260910 §2 R-1）。
-    //   本関数は現行直接呼出し 0 の休眠コード（dormant・wrapper 経由の活性化配線は
-    //   dead_code_callers_verifier の DORMANT_EDGE 監視下）。将来活性化する場合も
-    //   rt シャドウ（rt*Shadow / rtDeferredBandResetMask / rtSeen*Serial）への Non-RT
-    //   書込は禁止 — serial は fetchAddAtomic 前進 + Audio Thread 自己更新に一任し、
-    //   本体（残存する shadow store を含む）は再設計すること。
-}
-
-//============================================================================
-// 単一バンド同期
-//============================================================================
-void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
-{
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-
-    if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
-
-    const auto* otherState = other.loadCurrentState(std::memory_order_acquire); // acquire: other の exchangeCurrentState/publishCurrentState と HB
-    if (otherState == nullptr)
-        return;
-
-    auto* newNode = createBandNode(bandIndex, *otherState);
-    auto* oldNode = exchangeBandNode(bandIndex, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
-
-    activeBandNodes[bandIndex] = newNode;
-
-    if (oldNode)
-        if (!retireBandNodeDeferred(oldNode))
-            convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
-
-    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
-}
-
-//============================================================================
-// グローバル状態同期 (Worker Threadからも安全)
-// ★ work89 R-1: 本関数は現行直接呼出し 0 の休眠コード（dormant）。旧「Worker が
-//   shadow を同期する」プロトコルは撤回済み — 活性化時は EQProcessor.h の
-//   shadow ownership 契約（work92 B-7a / work89 R-1）に従うこと。
-//============================================================================
-void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
-{
-    const auto* otherState = other.loadCurrentState(std::memory_order_acquire); // acquire: other の exchangeCurrentState/publishCurrentState と HB
-    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire); // acquire: other の publishAtomic release と HB
-    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);       // acquire: 同上
-    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);     // acquire: 同上
-    const FilterStructure syncedStructure = (otherState != nullptr)
-        ? static_cast<FilterStructure>(otherState->filterStructure)
-        : convo::consumeAtomic(other.requestedStructure, std::memory_order_acquire); // acquire: setFilterStructure の release と HB (フォールバック)
-    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);                      // acquire: other の bypassed publishAtomic release と HB
-    // ★ work89 R-1: bandResetPacked / agcResetSerial の shadow 同期は廃止（下記参照）。
-
-    // Keep sync as shadow-state update to prevent multi-atomic partial visibility.
-    bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
-
-    const float syncedTotalGainDb = (otherState != nullptr)
-        ? otherState->totalGainDb
-        : convo::consumeAtomic(other.totalGainDbTarget, std::memory_order_acquire); // acquire: other.storeTotalGainDb の publishAtomic release と HB
-    smoothTotalGain.setCurrentAndTargetValue(
-        juce::Decibels::decibelsToGain<double>(static_cast<double>(syncedTotalGainDb)));
-
-    rtBypassedShadow.store(syncedBypassed, std::memory_order_relaxed);
-    rtActiveStructureShadow.store(syncedStructure, std::memory_order_relaxed);
-    rtAgcCurrentGainShadow.store(syncedAgcCurrentGain, std::memory_order_relaxed);
-    rtAgcEnvInputShadow.store(syncedAgcEnvInput, std::memory_order_relaxed);
-    rtAgcEnvOutputShadow.store(syncedAgcEnvOutput, std::memory_order_relaxed);
-
-    // ★ work89 R-1: rtSeenBandResetSerial / rtSeenAgcResetSerial / rtDeferredBandResetMask
-    //   への Non-RT 直接書込を廃止（data race 解消・REMEDIATION_PLAN_R123_20260910 §2 R-1）。
-    //   本関数は現行直接呼出し 0 の休眠コード（dormant・wrapper 経由の活性化配線は
-    //   dead_code_callers_verifier の DORMANT_EDGE 監視下）。将来活性化する場合も
-    //   rt シャドウ（rt*Shadow / rtDeferredBandResetMask / rtSeen*Serial）への Non-RT
-    //   書込は禁止 — serial は fetchAddAtomic 前進 + Audio Thread 自己更新に一任し、
-    //   本体（残存する shadow store を含む）は再設計すること。
-}
-
-//============================================================================
 // メモリ事前確保 & 係数再計算
 //============================================================================
 void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
@@ -810,9 +694,9 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         }
     }
 
-    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の agcCurrentGain acquire と HB
-    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: Processing.cpp の acquire と HB
-    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
+    // ★ work89 R-4 (D-2): AGC atomic publish 削除 — 下記の fetchAdd(agcResetSerial) が
+    //   正常完了時に必ず serial を前進させるため（P-D2-2 ①）、Audio Thread 検知後の
+    //   shadow 自己更新が初期化を担う（DESIGN_R4_D2D3 §1.6）。fetchAdd は削除禁止。
 
     // ★ work92 B-7b: reset() と同一の CAS 統一（serial 前進 + mask=0）。
     //   [work89 R-3b] 本 CAS は clobber し得る相手が構造的に存在しない: prepareToPlay の

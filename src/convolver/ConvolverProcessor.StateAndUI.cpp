@@ -411,35 +411,6 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
     }
 }
 
-// [DEAD CODE] 呼び出し元ゼロ (§11 調査確定)。AudioEngine 側は captureBuildSnapshot → applyBuildSnapshot
-// + transferIRStateFrom → rebuildAllIRsSynchronous に置換済み (Parameters.cpp:641 コメント参照)。
-// 活性化時は本関数自体が snapshot/apply のラッパであるため代替機構は不要だが、
-// 再導入の際は dead_code_callers_verifier.py の監視対象であることに注意。
-void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
-{
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-
-    const BuildSnapshot snapshot = other.captureBuildSnapshot();
-    applyBuildSnapshot(snapshot);
-
-    if (const IRState* otherState = other.acquireIRState())
-    {
-        if (otherState->irOwner)
-            updateIRState(otherState->irOwner, otherState->sampleRate, otherState->additionalAttenuationDb, otherState->irFreqPeakGainDb);
-        releaseIRState(otherState);
-    }
-    // ★ currentIrFile / irName は captureBuildSnapshot → applyBuildSnapshot で
-    //   other.irFileLock / this->irFileLock を経由して同期済み。
-    //   二重コピーを避けるため、個別コピーは不要。
-    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release);
-
-    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
-    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
-    if (oldConv)
-        retireStereoConvolver(oldConv, retireEpoch);
-}
-
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
 {
     struct GlobalGuard {

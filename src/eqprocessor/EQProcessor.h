@@ -375,12 +375,6 @@ public:
         return convo::exchangeAtomic(m_pendingAGCChange, false, std::memory_order_acq_rel); // acq_rel: acquire で setAGCEnabled の publishAtomic release と HB; release で次回呼び出しの acquire と HB
     }
 
-    // 他のインスタンスから状態を同期 (AudioEngine用)
-    void syncStateFrom(const EQProcessor& other);
-    // 個別パラメータの同期 (最適化)
-    void syncBandNodeFrom(const EQProcessor& other, int bandIndex);
-    void syncGlobalStateFrom(const EQProcessor& other);
-
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
     //----------------------------------------------------------
@@ -572,9 +566,11 @@ private:
 
     std::atomic<bool> agcEnabled { false };
     std::atomic<bool> m_pendingAGCChange { false };
-    std::atomic<double> agcCurrentGain { 1.0 };
-    std::atomic<double> agcEnvInput    { 0.0 };
-    std::atomic<double> agcEnvOutput   { 0.0 };
+    // ★ work89 R-4 (D-2): agcCurrentGain / agcEnvInput / agcEnvOutput の atomic を削除。
+    //   Audio Thread は rtAgc*Shadow のみを使用し、AGC リセットは agcResetSerial
+    //   （requestAgcReset / prepareToPlay / reset の fetchAdd）検知後の shadow 自己更新で
+    //   完結する（P-D2-1 全参照分類・活性 Read 0 件 / P-D2-2 機能同値性 —
+    //   doc/work89/DESIGN_R4_D2D3_20260910.md §1.1/§1.6）。
     std::atomic<double> agcAttackCoeff { 0.0 };
     std::atomic<double> agcReleaseCoeff { 0.0 };
     std::atomic<double> agcSmoothCoeff { 0.0 };

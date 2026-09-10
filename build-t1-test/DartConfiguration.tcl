@@ -1,3 +1,0 @@
-SET(CTEST_PROJECT_NAME "ConvoPeq")
-SET(CTEST_SOURCE_DIRECTORY "C:/VSC_Project/ConvoPeq")
-SET(CTEST_BINARY_DIRECTORY "C:/VSC_Project/ConvoPeq/build-t1-test")

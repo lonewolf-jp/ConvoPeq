@@ -6,12 +6,28 @@ Verifies that designated "dead-code" functions are NOT called anywhere in the
 codebase. If any call site is introduced, the script fails with a non-zero exit
 code so CI can catch regressions.
 
-Background (see doc/work89/INTEGRATED-BUG-LIST.md §11):
+Background (see doc/work89/INTEGRATED-BUG-LIST.md §11 and
+doc/work89/DESIGN_R4_D2D3_20260910.md R-4):
 - DSPCore::reset() / EQProcessor::reset() / EQProcessor::syncStateFrom() /
   EQProcessor::syncGlobalStateFrom() / EQProcessor::syncBandNodeFrom() /
-  ConvolverProcessor::syncStateFrom() are all dead code (zero call sites).
+  ConvolverProcessor::syncStateFrom() were dead code (zero call sites).
+  The four sync-family functions were REMOVED (R-4 Phase 1, 2026-09-10);
+  their symbol patterns are retained here as regression guards against
+  re-invention (FORBIDDEN_SYMBOLS semantics below — absent is PASS, a
+  reappearing call site is FAIL). EQProcessor::reset / DSPCore::reset are
+  intentionally retained dormant (DORMANT_EDGE_GUARDS below).
 - This script guards against accidental re-activation (which would resurrect
   the data-race risks described in §9/§10: rt-shadow writes from Non-RT threads).
+
+Semantics (3-layer, R-4 v2.2 §2.4 / audit P-V1 verified):
+  ACTIVE / FORBIDDEN_SYMBOLS   : call site present -> FAIL ; absent -> PASS
+                                 (NOT a requirement that the symbol exists)
+  DORMANT_EDGE_GUARDS          : registered dormant wiring, structure matches
+                                 expected callee set exactly -> WARN (PASS);
+                                 any deviation (callee added/removed, function
+                                 changed, file changed) -> FAIL
+  P-V1 empirical confirmation  : probe with a watched call -> exit 1; probe
+                                 removed -> exit 0 (2026-09-10, DESIGN_R4 doc)
 
 Usage:
     python tools/dead_code_callers_verifier.py [--src <path>] [--exclude <glob> ...]
@@ -71,7 +87,7 @@ DEF_OR_DECL_RE = re.compile(
 # Watched functions and their call-site patterns.
 # ---------------------------------------------------------------------------
 
-WATCHED = [
+FORBIDDEN_SYMBOLS = [
     {
         "name": "DSPCore::reset",
         "patterns": [
@@ -146,7 +162,7 @@ RESET_FOR_RUNTIME_CALL_RE = re.compile(
 )
 REF_RESET_RE = re.compile(r"\bref\s*\(\s*\)\s*\.\s*reset\s*\(\s*\)")
 
-DORMANT_EDGES = [
+DORMANT_EDGE_GUARDS = [
     {
         "name": "DSPCore::reset dormant wiring",
         "kind": "function_region",
@@ -264,7 +280,7 @@ def check_file(filepath, relpath, covered=None):
                 continue
             # --- receiver-specific patterns ---
             hit = False
-            for w in WATCHED:
+            for w in FORBIDDEN_SYMBOLS:
                 for pat in w["patterns"]:
                     if re.search(pat, line):
                         found.append((lineno, original.strip(), w["name"]))
@@ -377,7 +393,7 @@ def scan_dormant_edges(src_dir, exclude_globs):
     warns, fails = [], []
     covered = set()
 
-    for edge in DORMANT_EDGES:
+    for edge in DORMANT_EDGE_GUARDS:
         target = os.path.join(REPO_ROOT, edge["file"].replace("/", os.sep))
         if not os.path.isfile(target):
             fails.append((edge["file"], 0,
