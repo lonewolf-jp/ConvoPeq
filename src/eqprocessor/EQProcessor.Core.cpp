@@ -277,11 +277,28 @@ void EQProcessor::reset()
         storeTotalGainDb(state->totalGainDb);
     }
 
-    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
+    // ★ work92 B-7b: bandResetPacked を CAS（serial 前進 + mask=0）で統一。
+    //   旧 publishAtomic(0) は serial を 0 に巻き戻し、並行 requestBandReset() が
+    //   累積した mask+serial を clobber していた（G5 新発見の pre-existing 競合）。
+    //   consumer（Processing.cpp:595-601）は serial 進行検知 → fetch_or(mask=0)=no-op
+    //   acknowledge で吸収するため無変更で可。
+    {
+        std::uint64_t packed = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+        for (;;)
+        {
+            const auto serial = static_cast<std::uint32_t>(bandResetSerialFromPacked(packed) + 1u);
+            const std::uint64_t desired = makeBandResetPacked(serial, 0u);
+            if (convo::compareExchangeAtomic(bandResetPacked, packed, desired,
+                                             std::memory_order_acq_rel,  // 成功: acq_rel — 前回 CAS acquire と HB / Processing.cpp acquire と HB
+                                             std::memory_order_acquire)) // 失敗: acquire — 最新 packed を再観測して retry
+                break;
+        }
+    }
     convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
-    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
-    rtSeenBandResetSerial = 0;
-    rtSeenAgcResetSerial = 0;
+    // ★ work92 B-7a (BUG-065 解消): rt シャドウの Non-RT 直接書込を削除。
+    //   rtDeferredBandResetMask / rtSeenBandResetSerial / rtSeenAgcResetSerial は
+    //   Audio Thread 専有。serial は先行 fetchAddAtomic で前進済みのため、
+    //   Audio Thread 側の serial != rtSeen 検知が shadow を自己更新する。
 
     const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire); // acquire: setBypass の publishAtomic release と HB
     convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);                    // release: Processing.cpp の bypassed acquire と HB
@@ -788,11 +805,21 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: Processing.cpp の acquire と HB
     convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
-    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
+    // ★ work92 B-7b: reset() と同一の CAS 統一（serial 前進 + mask=0）。
+    {
+        std::uint64_t packed = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+        for (;;)
+        {
+            const auto serial = static_cast<std::uint32_t>(bandResetSerialFromPacked(packed) + 1u);
+            const std::uint64_t desired = makeBandResetPacked(serial, 0u);
+            if (convo::compareExchangeAtomic(bandResetPacked, packed, desired,
+                                             std::memory_order_acq_rel,  // 成功: acq_rel
+                                             std::memory_order_acquire)) // 失敗: acquire — 再観測 retry
+                break;
+        }
+    }
     convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
-    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
-    rtSeenBandResetSerial = 0;
-    rtSeenAgcResetSerial = 0;
+    // ★ work92 B-7a: rt シャドウの Non-RT 直接書込を削除（reset() 側と同一契約）。
     convo::publishAtomic(activeStructure,
                          convo::consumeAtomic(requestedStructure, std::memory_order_acquire), // acquire: setFilterStructure の release と HB
                          std::memory_order_release); // release: Processing.cpp の activeStructure acquire と HB

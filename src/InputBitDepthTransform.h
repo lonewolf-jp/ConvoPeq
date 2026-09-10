@@ -111,8 +111,10 @@ namespace convo::input_transform
             const __m256 vf = _mm256_loadu_ps(src + i);
             const __m128 lo = _mm256_castps256_ps128(vf);
             const __m128 hi = _mm256_extractf128_ps(vf, 1);
-            _mm256_store_pd(dst + i,     _mm256_cvtps_pd(lo));
-            _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
+            // ★ work92 A-2 (big 1-3): dst はアライメント契約なしで呼ばれるため
+            //   storeu 必須（:60/:81 と同一契約・aligned dst では storeu と性能差なし）。
+            _mm256_storeu_pd(dst + i,     _mm256_cvtps_pd(lo));
+            _mm256_storeu_pd(dst + i + 4, _mm256_cvtps_pd(hi));
         }
         for (; i < numSamples; ++i)
             dst[i] = static_cast<double>(src[i]);

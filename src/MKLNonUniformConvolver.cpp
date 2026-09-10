@@ -352,7 +352,7 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         Layer& l = m_layers[li];
         if (!l.irFreqReal || !l.irFreqImag) continue;
 
-        const int N      = l.fftSize;
+        const int N      = static_cast<int>(l.fftSize); // B-6: fftSize は int64 化・現行 plan は int 範囲（partSize*2・partSize は検証済み int）
         const int halfN  = N / 2;
         const int cSize  = l.complexSize;
 
@@ -789,7 +789,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // FFT-PROD-2: Plan 生成は NonRT (SetImpulse) 専用。
         // PLAN-LT-10: setPlan() は NonRT のみ。
         {
-            auto plan = ProductionFft::createPlan(l.fftSize);
+            auto plan = ProductionFft::createPlan(static_cast<int>(l.fftSize)); // B-6: createPlan は int 契約（現行 plan 範囲）
             if (!plan.isValid())
             {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -890,12 +890,12 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
         juce::FloatVectorOperations::clear(l.fdlReal,      fdlSoaSize);
         juce::FloatVectorOperations::clear(l.fdlImag,      fdlSoaSize);
-        juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
-        juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
+        juce::FloatVectorOperations::clear(l.fftTimeBuf,   static_cast<int>(l.fftSize));
+        juce::FloatVectorOperations::clear(l.fftOutBuf,    static_cast<int>(l.fftSize));
         juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
-        juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
-        juce::FloatVectorOperations::clear(l.accumReal,    l.complexSize);
-        juce::FloatVectorOperations::clear(l.accumImag,    l.complexSize);
+        juce::FloatVectorOperations::clear(l.accumBuf,     static_cast<int>(l.partStride));
+        juce::FloatVectorOperations::clear(l.accumReal,    static_cast<int>(l.complexSize));
+        juce::FloatVectorOperations::clear(l.accumImag,    static_cast<int>(l.complexSize));
         juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
         if (l.tailOutputBuf)
             juce::FloatVectorOperations::clear(l.tailOutputBuf, l.partSize);
@@ -1558,7 +1558,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
                     // [最適化2] mirror write
                     double* mirrorFDLSlot = l.fdlBuf + l.partStride;
-                    juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, l.partStride);
+                    juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, static_cast<int>(l.partStride));
 
                     const int mirrorIndex = l.fdlIndex + l.numParts;
                     deinterleaveComplex(mirrorFDLSlot,
@@ -1792,12 +1792,12 @@ void MKLNonUniformConvolver::Reset()
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
         juce::FloatVectorOperations::clear(l.fdlReal,      fdlSoaSize);
         juce::FloatVectorOperations::clear(l.fdlImag,      fdlSoaSize);
-        juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
-        juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
+        juce::FloatVectorOperations::clear(l.fftTimeBuf,   static_cast<int>(l.fftSize));
+        juce::FloatVectorOperations::clear(l.fftOutBuf,    static_cast<int>(l.fftSize));
         juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
-        juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
-        juce::FloatVectorOperations::clear(l.accumReal,    l.complexSize);
-        juce::FloatVectorOperations::clear(l.accumImag,    l.complexSize);
+        juce::FloatVectorOperations::clear(l.accumBuf,     static_cast<int>(l.partStride));
+        juce::FloatVectorOperations::clear(l.accumReal,    static_cast<int>(l.complexSize));
+        juce::FloatVectorOperations::clear(l.accumImag,    static_cast<int>(l.complexSize));
         juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
 
         if (l.tailOutputBuf)

@@ -327,13 +327,17 @@ private:
     struct Layer
     {
         // ── 設定値 ──
-        int fftSize       = 0;   // FFT サイズ (2 * partSize)
+        // ★ work92 B-6 (big 1-9): fftSize を int64_t 化。
+        //   int × sizeof(double) の積算（mkl_malloc サイズ計算）での将来溢れ防止
+        //   （5秒@768kHz 級の超大 IR で partSize*2 が int 域を超え得る将来リスク）。
+        //   complexSize/partStride は派生値のため同じく 64bit で保持する。
+        std::int64_t fftSize       = 0;   // FFT サイズ (2 * partSize) — B-6: int64 化（mkl_malloc 積算溢れ防止）
         int partSize      = 0;   // パーティションサイズ
         int numParts      = 0;   // FDL スロット数 (power-of-two)
         int numPartsIR    = 0;   // 実 IR パーティション数 (ゼロパディング前)
         int fdlMask       = 0;   // = numParts - 1 (巡回インデックス用)
-        int complexSize   = 0;   // = fftSize / 2 + 1
-        int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン
+        int complexSize   = 0;   // = fftSize / 2 + 1（派生値: partSize は検証済み int のため int 維持）
+        int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン（同上）
         bool isImmediate  = false; // true = L0 (Add() 内で即時処理, リングを使用)
 
         // ── IR 周波数領域 (Message Thread で確保・プリコンピュート) ──

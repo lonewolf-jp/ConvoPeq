@@ -250,6 +250,12 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     dc.inputL.process(lPtr, numSamples);
     dc.inputR.process(rPtr, numSamples);
 
+    // ★ work92 C-3 (big 2-2): DC ブロッカー後の NaN/Inf スクラブ。
+    //   入力前 sanitize (:231-232) のみでは、ブロッカー内部状態からの
+    //   異常値再混入を検知できないため、下流 DSP へ渡す前にもう 1 度クリーニングする。
+    sanitizeFiniteChunk(lPtr, numSamples);
+    sanitizeFiniteChunk(rPtr, numSamples);
+
     return inputLevel;
 }
 
@@ -300,6 +306,10 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
     auto& dc = dcBlockers();
     dc.inputL.process(lPtr, numSamples);
     dc.inputR.process(rPtr, numSamples);
+
+    // ★ work92 C-3 (big 2-2): processInputDouble 側も同一の post-DC sanitize。
+    sanitizeFiniteChunk(lPtr, numSamples);
+    sanitizeFiniteChunk(rPtr, numSamples);
 
     return inputLevel;
 }

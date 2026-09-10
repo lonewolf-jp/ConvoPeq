@@ -199,11 +199,18 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
     std::memcpy(dst, src, dataSize);
 
     // Warm up pages to reduce first-touch faults on audio-adjacent paths.
+    // ★ work92 C-7 (big 3-1): volatile sink を atomic_signal_fence パターンに置換。
+    //   volatile 変数はデータ競合セマンティクスを持たず、最適化抑止も保証されない。
+    //   signal fence はコンパイラにメモリアクセス観測を強制する（実行時コスト 0）。
     constexpr size_t kPage = 4096;
-    volatile uint8_t sink = 0;
     uint8_t* raw = reinterpret_cast<uint8_t*>(dst);
+    uint8_t sink = 0;
     for (size_t i = 0; i < dataSize; i += kPage)
+    {
+        std::atomic_signal_fence(std::memory_order_acquire); // 読み取りの除去を抑止
         sink ^= raw[i];
+    }
+    (void)sink;
     (void)sink;
 
     return dst;
@@ -236,12 +243,16 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
 
     std::memcpy(copied, dataStart, static_cast<size_t>(header.dataSize));
 
-    // Warm up pages to reduce first-touch faults.
+    // Warm up pages to reduce first-touch faults. (C-7: signal fence パターン — 上記参照)
     constexpr size_t kPage = 4096;
-    volatile uint8_t sink = 0;
     uint8_t* raw = reinterpret_cast<uint8_t*>(copied);
+    uint8_t sink = 0;
     for (size_t i = 0; i < static_cast<size_t>(header.dataSize); i += kPage)
+    {
+        std::atomic_signal_fence(std::memory_order_acquire); // 読み取りの除去を抑止
         sink ^= raw[i];
+    }
+    (void)sink;
     (void)sink;
 
     auto prepared = std::make_unique<PreparedIRState>();
@@ -264,14 +275,16 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
             auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(
                 static_cast<int>(header.timeDomainChannels),
                 static_cast<int>(header.timeDomainNumSamples));
-            const double* tdSrc = reinterpret_cast<const double*>(tdStart);
-            size_t idx = 0;
+            // ★ work92 C-4 (big 2-4): strict-aliasing 違反の解消。
+            //   mmap 先頭は uint8_t バッファであり double としての有効型を持たないため
+            //   reinterpret_cast<const double*> の逆参照は UB。バイトオフセット + memcpy
+            //   （逆参照なしのコピー）に置換する。数値は bit 単位で同一。
+            const uint8_t* tdCursor = tdStart;
+            const size_t rowBytes = static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double);
             for (int ch = 0; ch < static_cast<int>(header.timeDomainChannels); ++ch)
             {
-                std::memcpy(tdBuffer->getWritePointer(ch),
-                            tdSrc + idx,
-                            static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double));
-                idx += static_cast<size_t>(header.timeDomainNumSamples);
+                std::memcpy(tdBuffer->getWritePointer(ch), tdCursor, rowBytes);
+                tdCursor += rowBytes;
             }
             prepared->timeDomainIR = std::move(tdBuffer);
         }

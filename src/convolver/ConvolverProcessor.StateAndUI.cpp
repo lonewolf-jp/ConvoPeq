@@ -240,6 +240,18 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     v.setProperty ("targetUpgradeFFTSize", getTargetUpgradeFFTSize(), nullptr);
     v.setProperty ("enableProgressiveUpgrade", isProgressiveUpgradeEnabled(), nullptr);
     v.setProperty ("maxCacheEntries", static_cast<int>(getMaxCacheEntries()), nullptr);
+    // ★ work92 A-1 (big 1-1): NUC フィルターモードのセッション永続化。
+    //   runtime 側は snapshot 同期 (:142-143)・jlimit 正規化 (:194-199)・ハッシュ (:55-56) に
+    //   含まれるが ValueTree 往復のみ欠落していた。読み出しは pendingOverride 一元
+    //   （H3 フェーズ 2c 統一化・正規化は setState 側の jlimit 1 箇所のみ）。
+    int nucHc, nucLc;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        nucHc = pendingOverride.nucHCMode;
+        nucLc = pendingOverride.nucLCMode;
+    }
+    v.setProperty ("nucHCMode", nucHc, nullptr);
+    v.setProperty ("nucLCMode", nucLc, nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -360,6 +372,19 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
     if (v.hasProperty ("targetUpgradeFFTSize")) setTargetUpgradeFFTSize (static_cast<int>(v.getProperty("targetUpgradeFFTSize")));
     if (v.hasProperty ("enableProgressiveUpgrade")) setEnableProgressiveUpgrade (static_cast<bool>(v.getProperty("enableProgressiveUpgrade")));
     if (v.hasProperty ("maxCacheEntries")) setMaxCacheEntries (static_cast<size_t>(static_cast<int>(v.getProperty("maxCacheEntries"))));
+
+    // ★ work92 A-1 (big 1-1): NUC フィルターモードの復元。
+    //   両プロパティ揃って存在するときのみ適用（旧セッション後方互換: 不在時は現状維持）。
+    //   範囲正規化はここで 1 箇所のみ実施（tailMode と同一の idiom）。
+    //   実測: setNUCFilterModes() 自体はクランプを持たず、jlimit は AudioEngine.Snapshot.cpp:194-199
+    //   （snapshot 同期経路）にあるため、ValueTree 経路の正規化点を本関数に固定する。
+    if (v.hasProperty ("nucHCMode") && v.hasProperty ("nucLCMode"))
+        setNUCFilterModes (static_cast<convo::HCMode>(juce::jlimit(static_cast<int>(convo::HCMode::Sharp),
+                                                                  static_cast<int>(convo::HCMode::Soft),
+                                                                  static_cast<int>(v.getProperty("nucHCMode")))),
+                           static_cast<convo::LCMode>(juce::jlimit(static_cast<int>(convo::LCMode::Natural),
+                                                                  static_cast<int>(convo::LCMode::Soft),
+                                                                  static_cast<int>(v.getProperty("nucLCMode")))));
 
     if (v.hasProperty ("irPath"))
     {

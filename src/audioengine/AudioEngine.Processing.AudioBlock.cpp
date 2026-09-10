@@ -629,13 +629,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             // cbStartUs は早期 return を通過した時点 = DSP処理後の実測開始点
             const auto nowUs = convo::getCurrentTimeUs();
             // callback実行時間(μs) = nowUs - cbStartUs（既にμs）
-            const auto callbackUs = static_cast<uint32_t>(nowUs - cbStartUs);
+            // ★ work92 B-8: クロック逆転時の uint64 wrap を saturate 0 に置換
+            const auto callbackUs = static_cast<uint32_t>(convo::saturatingSubUs(nowUs, cbStartUs));
             updateAtomicMaximum(callbackMaxUs_, callbackUs);
 
             // interval計測(μs) — cbPrevEndUsからcbStartUsまでの経過時間
             if (cbPrevEndUs > 0)
             {
-                const auto intervalUs = static_cast<uint32_t>(cbStartUs - cbPrevEndUs);
+                const auto intervalUs = static_cast<uint32_t>(convo::saturatingSubUs(cbStartUs, cbPrevEndUs));
                 updateAtomicMaximum(intervalMaxUs_, intervalUs);
             }
         }

@@ -56,7 +56,7 @@ public:
     void emitRetireIntent(const RetireIntent& intent) noexcept;
 
     // Preferred API for runtime retire intent publication from commit path.
-    void emitRetireIntentRT(const RetireIntent& intent) noexcept;
+    void emitRetireIntentNonRT(const RetireIntent& intent) noexcept;
 
     // ★ B14: Vyukov MPSC 新 API
     void initQueue() noexcept;

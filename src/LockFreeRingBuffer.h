@@ -74,10 +74,15 @@ public:
         return true;
     }
     size_t size() const noexcept {
-        // acquire × 2: push/pop の release と HB し、一貫した（ベストエフォート）占有数を算出。
+        // ★ work92 C-5 (big 2-5): 読取順序固定 — writeIndex を先に読む。
+        //   旧実装 (r を先に読む) では、直後に producer が w を進めた場合 w - r が
+        //   実占有数より大きくなり得、整数 wrap で巨大値を返す窓があった。
+        //   w 先読みにより w は「読取時点以前の値」に固定され、r はその後進むため
+        //   計算結果は実占有数以下に飽和する（過大評価は起きない）。
+        //   acquire × 2: push/pop の release と HB し、一貫した（ベストエフォート）占有数を算出。
         size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
-        return w - r;
+        return (w >= r) ? (w - r) : 0;
     }
     // 注意: この関数はスレッドセーフではない。
     // プロデューサーとコンシューマーが完全に停止している状態でのみ呼び出すこと。

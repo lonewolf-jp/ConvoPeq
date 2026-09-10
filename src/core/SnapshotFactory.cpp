@@ -53,6 +53,20 @@ bool SnapshotFactory::areSnapshotsEquivalent(const SnapshotParams& params,
     if (params.eqCoeffHash != snapshot.eqCoeffHash)
         return false;
 
+    // ★ work92 C-6 (big 3-6): NaN 等価誤判定の解消。
+    //   std::abs(NaN - x) > eps は常に false になるため、旧実装は NaN を
+    //   「どの値とも等価（スナップショット再利用可）」と誤判定していた。
+    //   NaN は必ず非等価（スナップショット無効化）とする。
+    {
+        const bool anyNaN =
+            std::isnan(params.sampleRate) || std::isnan(snapshot.sampleRate)
+            || std::isnan(params.inputHeadroomGain) || std::isnan(snapshot.inputHeadroomGain)
+            || std::isnan(params.outputMakeupGain) || std::isnan(snapshot.outputMakeupGain)
+            || std::isnan(params.convInputTrimGain) || std::isnan(snapshot.convInputTrimGain);
+        if (anyNaN)
+            return false;
+    }
+
     if (std::abs(params.sampleRate - snapshot.sampleRate) > 1.0e-9)
         return false;
     if (params.maxBlockSize != snapshot.maxBlockSize)

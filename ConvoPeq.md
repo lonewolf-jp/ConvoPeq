@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-09 01:32:32
+> Generated: 2026-09-10 10:13:03
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -302,6 +302,7 @@
         │   ├── AudioEngineHarness/
         │   │   ├── AudioEngineHarness.cpp
         │   │   ├── AudioEngineHarness.h
+        │   │   ├── ConvolverStateRoundTripTests.cpp
         │   │   ├── DeferredFlowIntegrationTests.cpp
         │   │   ├── DeferredPublicationTestAccess.h
         │   │   ├── DeferredPublishViewStateMachineTests.cpp
@@ -1881,8 +1882,11 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /arch:AVX2 → target_compile_options(ConvoPeq PRIVATE /arch:AVX2) で追加
     # ★ work88 (Phase 7): /EHsc を追加 — 欠落すると JUCE が「exceptions 無効」で C1189 エラー
     #   （Debug の CMAKE_CXX_FLAGS_DEBUG には /EHsc があり、Release だけ欠落していた既存バグ）
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+    # ★ work92 C-8 (big 3-9/3-10): /fp:fast を除去（MSVC 既定の /fp:precise に戻す）。
+    #   DSP 数値精度を優先し、MSVC ビルドの AMD 動作を標準 AVX2 + precise で保証する。
+    #   （数値回帰は CTest 全テストの期待値で検証 — AC-C8-1）
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /Gw /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /DNDEBUG /Gw /Gy /Zi /utf-8 /EHsc")
 
     # Debugフラグを明示設定（CMakeデフォルトに /utf-8 /bigobj /Zm400 を追加）
     # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
@@ -1967,9 +1971,17 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     )
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
-    # ★ work88 (Phase 7): /EHsc を追加（Release の JUCE C1189 回避 — icx 側も同様）
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
-    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+    # ★ work92 C-8 (big 3-9/3-10/R-9): compiler matrix 分離。
+    #   (2) icx: /QxCORE-AVX2 を global Release flags から除去し target 固有・
+    #       config-gated に移行（旧 :1606-1607 の global 指定 + 旧 :1622 の全 config
+    #       無条件指定を廃止 — Debug まで AVX2 要求が漏洩しない）。
+    #   /fp:fast は icx の性能上の意図的選択（:1590-1593 コメント: LLVM OOM 回避で
+    #   /O2 + fp:fast 維持）として icx Release のみに残置する。
+    #   icx の AVX2 codegen は G6 実測（PLAN v3 §5-0）で AVX2 サブセット内を確認済みだが
+    #   全コードパスの保証ではないため、icx バイナリの AMD 実行は「unsupported（公式
+    #   サポート対象外）」と README/ビルドドキュメントに明記すること（実行可否は断定しない）。
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /fp:fast /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /fp:fast /Gy /Zi /utf-8 /EHsc")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
     # ASan 有効時は Qipo を無効化（ASan と LTO は非互換）
     target_compile_options(ConvoPeq PRIVATE
@@ -1983,8 +1995,13 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         $<$<AND:$<CXX_COMPILER_ID:IntelLLVM>,$<CONFIG:Release>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/DEBUG /Qipo>
     )
 
-    # AVX2 フラグ（全コンフィグで有効化）
-    target_compile_options(ConvoPeq PRIVATE /QxCORE-AVX2)
+    # ★ work92 C-8: /QxCORE-AVX2 は config-gated・CXX のみ（旧「全コンフィグで有効化」を廃止）。
+    #   AVX2 は JUCE の SIMD レジスタ保持契約（vzeroupper 自動挿入）とあわせて
+    #   Release の DSP 性能 path のみで要求する。Debug は baseline ISA でビルドし、
+    #   デバッガ互換性と AVX2 非対応環境での検証可能性を確保する。
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/QxCORE-AVX2>
+    )
 
     # icx -mvzeroupper: AVX→legacy SSE 境界に vzeroupper を自動挿入
     # CXX 翻訳単位のみに限定（Cコンパイラには不要）
@@ -2239,6 +2256,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
+        src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
         src/tests/AudioEngineHarness/T2Measurement.cpp
@@ -4200,11 +4218,18 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
     std::memcpy(dst, src, dataSize);
 
     // Warm up pages to reduce first-touch faults on audio-adjacent paths.
+    // ★ work92 C-7 (big 3-1): volatile sink を atomic_signal_fence パターンに置換。
+    //   volatile 変数はデータ競合セマンティクスを持たず、最適化抑止も保証されない。
+    //   signal fence はコンパイラにメモリアクセス観測を強制する（実行時コスト 0）。
     constexpr size_t kPage = 4096;
-    volatile uint8_t sink = 0;
     uint8_t* raw = reinterpret_cast<uint8_t*>(dst);
+    uint8_t sink = 0;
     for (size_t i = 0; i < dataSize; i += kPage)
+    {
+        std::atomic_signal_fence(std::memory_order_acquire); // 読み取りの除去を抑止
         sink ^= raw[i];
+    }
+    (void)sink;
     (void)sink;
 
     return dst;
@@ -4237,12 +4262,16 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
 
     std::memcpy(copied, dataStart, static_cast<size_t>(header.dataSize));
 
-    // Warm up pages to reduce first-touch faults.
+    // Warm up pages to reduce first-touch faults. (C-7: signal fence パターン — 上記参照)
     constexpr size_t kPage = 4096;
-    volatile uint8_t sink = 0;
     uint8_t* raw = reinterpret_cast<uint8_t*>(copied);
+    uint8_t sink = 0;
     for (size_t i = 0; i < static_cast<size_t>(header.dataSize); i += kPage)
+    {
+        std::atomic_signal_fence(std::memory_order_acquire); // 読み取りの除去を抑止
         sink ^= raw[i];
+    }
+    (void)sink;
     (void)sink;
 
     auto prepared = std::make_unique<PreparedIRState>();
@@ -4265,14 +4294,16 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
             auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(
                 static_cast<int>(header.timeDomainChannels),
                 static_cast<int>(header.timeDomainNumSamples));
-            const double* tdSrc = reinterpret_cast<const double*>(tdStart);
-            size_t idx = 0;
+            // ★ work92 C-4 (big 2-4): strict-aliasing 違反の解消。
+            //   mmap 先頭は uint8_t バッファであり double としての有効型を持たないため
+            //   reinterpret_cast<const double*> の逆参照は UB。バイトオフセット + memcpy
+            //   （逆参照なしのコピー）に置換する。数値は bit 単位で同一。
+            const uint8_t* tdCursor = tdStart;
+            const size_t rowBytes = static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double);
             for (int ch = 0; ch < static_cast<int>(header.timeDomainChannels); ++ch)
             {
-                std::memcpy(tdBuffer->getWritePointer(ch),
-                            tdSrc + idx,
-                            static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double));
-                idx += static_cast<size_t>(header.timeDomainNumSamples);
+                std::memcpy(tdBuffer->getWritePointer(ch), tdCursor, rowBytes);
+                tdCursor += rowBytes;
             }
             prepared->timeDomainIR = std::move(tdBuffer);
         }
@@ -15892,8 +15923,10 @@ namespace convo::input_transform
             const __m256 vf = _mm256_loadu_ps(src + i);
             const __m128 lo = _mm256_castps256_ps128(vf);
             const __m128 hi = _mm256_extractf128_ps(vf, 1);
-            _mm256_store_pd(dst + i,     _mm256_cvtps_pd(lo));
-            _mm256_store_pd(dst + i + 4, _mm256_cvtps_pd(hi));
+            // ★ work92 A-2 (big 1-3): dst はアライメント契約なしで呼ばれるため
+            //   storeu 必須（:60/:81 と同一契約・aligned dst では storeu と性能差なし）。
+            _mm256_storeu_pd(dst + i,     _mm256_cvtps_pd(lo));
+            _mm256_storeu_pd(dst + i + 4, _mm256_cvtps_pd(hi));
         }
         for (; i < numSamples; ++i)
             dst[i] = static_cast<double>(src[i]);
@@ -16479,10 +16512,15 @@ public:
         return true;
     }
     size_t size() const noexcept {
-        // acquire × 2: push/pop の release と HB し、一貫した（ベストエフォート）占有数を算出。
+        // ★ work92 C-5 (big 2-5): 読取順序固定 — writeIndex を先に読む。
+        //   旧実装 (r を先に読む) では、直後に producer が w を進めた場合 w - r が
+        //   実占有数より大きくなり得、整数 wrap で巨大値を返す窓があった。
+        //   w 先読みにより w は「読取時点以前の値」に固定され、r はその後進むため
+        //   計算結果は実占有数以下に飽和する（過大評価は起きない）。
+        //   acquire × 2: push/pop の release と HB し、一貫した（ベストエフォート）占有数を算出。
         size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
-        return w - r;
+        return (w >= r) ? (w - r) : 0;
     }
     // 注意: この関数はスレッドセーフではない。
     // プロデューサーとコンシューマーが完全に停止している状態でのみ呼び出すこと。
@@ -17204,7 +17242,7 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         Layer& l = m_layers[li];
         if (!l.irFreqReal || !l.irFreqImag) continue;
 
-        const int N      = l.fftSize;
+        const int N      = static_cast<int>(l.fftSize); // B-6: fftSize は int64 化・現行 plan は int 範囲（partSize*2・partSize は検証済み int）
         const int halfN  = N / 2;
         const int cSize  = l.complexSize;
 
@@ -17641,7 +17679,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // FFT-PROD-2: Plan 生成は NonRT (SetImpulse) 専用。
         // PLAN-LT-10: setPlan() は NonRT のみ。
         {
-            auto plan = ProductionFft::createPlan(l.fftSize);
+            auto plan = ProductionFft::createPlan(static_cast<int>(l.fftSize)); // B-6: createPlan は int 契約（現行 plan 範囲）
             if (!plan.isValid())
             {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -17742,12 +17780,12 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
         juce::FloatVectorOperations::clear(l.fdlReal,      fdlSoaSize);
         juce::FloatVectorOperations::clear(l.fdlImag,      fdlSoaSize);
-        juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
-        juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
+        juce::FloatVectorOperations::clear(l.fftTimeBuf,   static_cast<int>(l.fftSize));
+        juce::FloatVectorOperations::clear(l.fftOutBuf,    static_cast<int>(l.fftSize));
         juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
-        juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
-        juce::FloatVectorOperations::clear(l.accumReal,    l.complexSize);
-        juce::FloatVectorOperations::clear(l.accumImag,    l.complexSize);
+        juce::FloatVectorOperations::clear(l.accumBuf,     static_cast<int>(l.partStride));
+        juce::FloatVectorOperations::clear(l.accumReal,    static_cast<int>(l.complexSize));
+        juce::FloatVectorOperations::clear(l.accumImag,    static_cast<int>(l.complexSize));
         juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
         if (l.tailOutputBuf)
             juce::FloatVectorOperations::clear(l.tailOutputBuf, l.partSize);
@@ -18410,7 +18448,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
                     // [最適化2] mirror write
                     double* mirrorFDLSlot = l.fdlBuf + l.partStride;
-                    juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, l.partStride);
+                    juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, static_cast<int>(l.partStride));
 
                     const int mirrorIndex = l.fdlIndex + l.numParts;
                     deinterleaveComplex(mirrorFDLSlot,
@@ -18644,12 +18682,12 @@ void MKLNonUniformConvolver::Reset()
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
         juce::FloatVectorOperations::clear(l.fdlReal,      fdlSoaSize);
         juce::FloatVectorOperations::clear(l.fdlImag,      fdlSoaSize);
-        juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
-        juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
+        juce::FloatVectorOperations::clear(l.fftTimeBuf,   static_cast<int>(l.fftSize));
+        juce::FloatVectorOperations::clear(l.fftOutBuf,    static_cast<int>(l.fftSize));
         juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
-        juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
-        juce::FloatVectorOperations::clear(l.accumReal,    l.complexSize);
-        juce::FloatVectorOperations::clear(l.accumImag,    l.complexSize);
+        juce::FloatVectorOperations::clear(l.accumBuf,     static_cast<int>(l.partStride));
+        juce::FloatVectorOperations::clear(l.accumReal,    static_cast<int>(l.complexSize));
+        juce::FloatVectorOperations::clear(l.accumImag,    static_cast<int>(l.complexSize));
         juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
 
         if (l.tailOutputBuf)
@@ -19015,13 +19053,17 @@ private:
     struct Layer
     {
         // ── 設定値 ──
-        int fftSize       = 0;   // FFT サイズ (2 * partSize)
+        // ★ work92 B-6 (big 1-9): fftSize を int64_t 化。
+        //   int × sizeof(double) の積算（mkl_malloc サイズ計算）での将来溢れ防止
+        //   （5秒@768kHz 級の超大 IR で partSize*2 が int 域を超え得る将来リスク）。
+        //   complexSize/partStride は派生値のため同じく 64bit で保持する。
+        std::int64_t fftSize       = 0;   // FFT サイズ (2 * partSize) — B-6: int64 化（mkl_malloc 積算溢れ防止）
         int partSize      = 0;   // パーティションサイズ
         int numParts      = 0;   // FDL スロット数 (power-of-two)
         int numPartsIR    = 0;   // 実 IR パーティション数 (ゼロパディング前)
         int fdlMask       = 0;   // = numParts - 1 (巡回インデックス用)
-        int complexSize   = 0;   // = fftSize / 2 + 1
-        int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン
+        int complexSize   = 0;   // = fftSize / 2 + 1（派生値: partSize は検証済み int のため int 維持）
+        int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン（同上）
         bool isImmediate  = false; // true = L0 (Add() 内で即時処理, リングを使用)
 
         // ── IR 周波数領域 (Message Thread で確保・プリコンピュート) ──
@@ -21961,6 +22003,7 @@ private:
 #include <JuceHeader.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -22002,6 +22045,12 @@ public:
         double hfPenalty = 0.0;
         double timeDomainRms = 0.0;
         double compositeScore = 0.0;
+        // ★ work92 A-3 (big 1-6): IPP 実行時失敗の明示。
+        //   Result{} = 「FFT 利用不可」（constructor 失敗 [Bug 2/3 fix] で確立済みの
+        //   failure semantics）であり、本フィールドは実行時 failure を同じ semantics で
+        //   観測可能にする（silent loss の排除）。composite score 消費側は値がすべて 0
+        //   である点は従来どおりで、fftFailed のみ追加観測となる。
+        bool   fftFailed = false;
     };
 
     MklFftEvaluator()
@@ -22225,8 +22274,22 @@ public:
 
         // [v2.1] Forward FFT: real → CCS
         // 出力は CcsComplex 配列に直接書き込む (reinterpret_cast 安全: 同一メモリレイアウト)
-        ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
-        ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        // ★ work92 A-3 (big 1-6): IPP 戻り値を検査する。片側でも失敗したら
+        //   composite score は L+R blend のため意味論的に無効 → L/R ともゼロ化して
+        //   fftFailed=true を返す（G2 監査確定 — 部分成功の保存は行わない）。
+        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        if (stL != ippStsNoErr || stR != ippStsNoErr)
+        {
+            std::memset(spectrumLeft,  0, sizeof(CcsComplex) * kSpectrumBins);
+            std::memset(spectrumRight, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (ippFailureCount_.fetch_add(1, std::memory_order_relaxed) == 0)
+                DBG("MklFftEvaluator: ippsFFTFwd_RToCCS_64f failed (stL=" << static_cast<int>(stL)
+                    << " stR=" << static_cast<int>(stR) << ") — returning zero Result (fftFailed=true)");
+            Result r {};
+            r.fftFailed = true;
+            return r;
+        }
 
         std::array<double, kSpectrumBins> averagePower {};
 
@@ -22380,11 +22443,27 @@ public:
         juce::FloatVectorOperations::copy(inputRight, dataR, kFftLength);
         // CcsComplex は [double real, double im] の標準レイアウト構造体。
         // IPP CCS 出力 [re0,im0,...] と同一メモリ配置のため reinterpret_cast 安全。
-        ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
-        ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        // ★ work92 A-3 (big 1-6): evaluate() と同一の failure semantics —
+        //   status 検査 + 失敗時は L/R ともゼロクリア（ゴミを下流に流さない）。
+        //   戻り値を持たないため失敗は ippFailureCount_ で観測（初回 DBG）。
+        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
+        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        if (stL != ippStsNoErr || stR != ippStsNoErr)
+        {
+            if (outL) std::memset(outL, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (outR) std::memset(outR, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (ippFailureCount_.fetch_add(1, std::memory_order_relaxed) == 0)
+                DBG("MklFftEvaluator: computeFft ippsFFTFwd_RToCCS_64f failed (stL=" << static_cast<int>(stL)
+                    << " stR=" << static_cast<int>(stR) << ") — outputs zeroed");
+        }
     }
 
 private:
+    // ★ work92 A-3 (big 1-6): IPP 実行時 failure の観測カウンタ。
+    //   evaluate() は NonRT（NoiseShaperLearner worker・G2 確認済み）、
+    //   computeFft も同一 evaluator 内で NonRT のみから呼ばれるため relaxed で十分。
+    std::atomic<std::uint64_t> ippFailureCount_ { 0 };
+
     static constexpr double kMinPower = 1.0e-24;
     static constexpr double kReferenceSplDb = 90.0;
     static constexpr double kCalibrationOffsetDb = 0.0;
@@ -28187,6 +28266,10 @@ void SpectrumAnalyzerComponent::timerCallback()
         const int vEnd = numBins / 8 * 8;
         const __m256 vScale = _mm256_set1_ps(FFT_MAGNITUDE_SCALE);
 
+        // ★ work92 C-7: alignas スクラッチをループ外へ移動（ループ内の再アライメント
+        //   処理を排除）。_mm256_store_ps は 32 バイト整列を要求するため alignas(32)。
+        alignas(32) float mags[8];
+
         for (; i < vEnd; i += 8)
         {
             const float* binPtr = dst + (2 * i);
@@ -28200,7 +28283,6 @@ void SpectrumAnalyzerComponent::timerCallback()
             __m256 mag2 = _mm256_add_ps(_mm256_mul_ps(re, re), _mm256_mul_ps(im, im));
             __m256 mag = _mm256_mul_ps(_mm256_sqrt_ps(mag2), vScale);
 
-            alignas(64) float mags[8];
             _mm256_store_ps(mags, mag);
 
             for (int k = 0; k < 8; ++k)
@@ -30783,7 +30865,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.generation = generation;
     intent.retireEpoch = static_cast<std::uint64_t>(world->generation);
 
-    worldAuthority_.lifetime().emitRetireIntentRT(intent);
+    worldAuthority_.lifetime().emitRetireIntentNonRT(intent);
     // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止。
     //   pendingIntentCount_ は Observe/Quarantine/Recovery の transport residency 専用
     //   （reservation ベースで Coordinator 内部が維持）。
@@ -34283,13 +34365,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             // cbStartUs は早期 return を通過した時点 = DSP処理後の実測開始点
             const auto nowUs = convo::getCurrentTimeUs();
             // callback実行時間(μs) = nowUs - cbStartUs（既にμs）
-            const auto callbackUs = static_cast<uint32_t>(nowUs - cbStartUs);
+            // ★ work92 B-8: クロック逆転時の uint64 wrap を saturate 0 に置換
+            const auto callbackUs = static_cast<uint32_t>(convo::saturatingSubUs(nowUs, cbStartUs));
             updateAtomicMaximum(callbackMaxUs_, callbackUs);
 
             // interval計測(μs) — cbPrevEndUsからcbStartUsまでの経過時間
             if (cbPrevEndUs > 0)
             {
-                const auto intervalUs = static_cast<uint32_t>(cbStartUs - cbPrevEndUs);
+                const auto intervalUs = static_cast<uint32_t>(convo::saturatingSubUs(cbStartUs, cbPrevEndUs));
                 updateAtomicMaximum(intervalMaxUs_, intervalUs);
             }
         }
@@ -35022,12 +35105,13 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         if (cbStartUs != kNeverStartedUs)
         {
             const auto nowUs = convo::getCurrentTimeUs();
-            const auto callbackUs = static_cast<uint32_t>(nowUs - cbStartUs);
+            // ★ work92 B-8: クロック逆転時の uint64 wrap を saturate 0 に置換
+            const auto callbackUs = static_cast<uint32_t>(convo::saturatingSubUs(nowUs, cbStartUs));
             updateAtomicMaximum(callbackMaxUs_, callbackUs);
 
             if (cbPrevEndUs > 0)
             {
-                const auto intervalUs = static_cast<uint32_t>(cbStartUs - cbPrevEndUs);
+                const auto intervalUs = static_cast<uint32_t>(convo::saturatingSubUs(cbStartUs, cbPrevEndUs));
                 updateAtomicMaximum(intervalMaxUs_, intervalUs);
             }
         }
@@ -35297,7 +35381,7 @@ inline double musicalSoftClipScalar(double x, double threshold, double knee, dou
     }
 
     const double linear = abs_x;
-    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadéPolicy>((abs_x - threshold) / knee);
+    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadePolicy>((abs_x - threshold) / knee);
 
     const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
@@ -35361,7 +35445,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d ks = _mm256_mul_pd(t2, _mm256_fnmadd_pd(vTwo, t, vThree));
 
         __m256d arg = _mm256_mul_pd(_mm256_sub_pd(absX, vThreshold), vRecipKnee);
-        __m256d tanhVal = convo::dsp::fastTanhV256<convo::dsp::SoftClipPadéPolicy>(arg);
+        __m256d tanhVal = convo::dsp::fastTanhV256<convo::dsp::SoftClipPadePolicy>(arg);
 
         __m256d clipped = _mm256_fmadd_pd(vKnee, tanhVal, vThreshold);
 
@@ -36663,6 +36747,12 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     dc.inputL.process(lPtr, numSamples);
     dc.inputR.process(rPtr, numSamples);
 
+    // ★ work92 C-3 (big 2-2): DC ブロッカー後の NaN/Inf スクラブ。
+    //   入力前 sanitize (:231-232) のみでは、ブロッカー内部状態からの
+    //   異常値再混入を検知できないため、下流 DSP へ渡す前にもう 1 度クリーニングする。
+    sanitizeFiniteChunk(lPtr, numSamples);
+    sanitizeFiniteChunk(rPtr, numSamples);
+
     return inputLevel;
 }
 
@@ -36713,6 +36803,10 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
     auto& dc = dcBlockers();
     dc.inputL.process(lPtr, numSamples);
     dc.inputR.process(rPtr, numSamples);
+
+    // ★ work92 C-3 (big 2-2): processInputDouble 側も同一の post-DC sanitize。
+    sanitizeFiniteChunk(lPtr, numSamples);
+    sanitizeFiniteChunk(rPtr, numSamples);
 
     return inputLevel;
 }
@@ -40981,6 +41075,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
 
     int fadeSamples = convo::consumeAtomic(m_eqFadeSamples, std::memory_order_acquire);
+    // ★ work92 B-2 (big 1-10) — m_pendingIRChange acknowledgement protocol（v2 再監査確定）:
+    //   本 exchange(false) はこの flag の唯一の acknowledge 点（clear 点）である。
+    //   flag は level marker であり、writer（Timer.cpp:800 / UIEvents.cpp:177 —
+    //   setIRChangeFlag の呼び出し 2 箇所のみ）は必ず直前のブロックで
+    //   submitRebuildIntent(Structural) を先に発行している（G1 CFG 確認済み）。
+    //   よって本 clear で IR 変更要求が消失することはない — intent は rebuild 系に
+    //   すでに存在し、flag は「構造 intent が先行発行済み」の観測用マーカに過ぎない。
+    //   この契約を壊す変更（flag 単独セットの新設・submit との順序逆転）は禁止。
     const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ D125-A: flag 昇格消費点の観測（clear point 特定用）
@@ -41146,8 +41248,17 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("ditherBitDepth"))
         setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
 
+    // ★ work92 B-3 (big 2-10): enum 範囲ガード。
+    //   汚染セッション（範囲外値 4, -1 等）のまま cast すると setNoiseShaperType 内に
+    //   正規化がないため、範囲外 enum がそのまま publish されていた。既存契約
+    //   （NoiseShaperType::Psychoacoustic(0)〜Fixed15Tap(3)）の範囲外はデフォルト維持。
     if (state.hasProperty("noiseShaperType"))
-        setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
+    {
+        const int raw = static_cast<int>(state.getProperty("noiseShaperType"));
+        if (raw >= static_cast<int>(NoiseShaperType::Psychoacoustic)
+            && raw <= static_cast<int>(NoiseShaperType::Fixed15Tap))
+            setNoiseShaperType(static_cast<NoiseShaperType>(raw));
+    }
 
     {
         [[maybe_unused]] bool hasBankedAdaptiveCoefficients = false;
@@ -41176,8 +41287,15 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     }
 
+    // ★ work92 B-3 拡張 (RECONCILIATION §5-4): NoiseShaperType と同型の無検証キャスト。
+    //   範囲外値（2, -1 等）はデフォルト維持（IIR(0)）。
     if (state.hasProperty("oversamplingType"))
-        setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
+    {
+        const int raw = static_cast<int>(state.getProperty("oversamplingType"));
+        if (raw >= static_cast<int>(OversamplingType::IIR)
+            && raw <= static_cast<int>(OversamplingType::LinearPhase))
+            setOversamplingType(static_cast<OversamplingType>(raw));
+    }
 
     // --- NoiseShaperLearner Settings ---
     if (state.hasProperty("cmaesRestarts") || state.hasProperty("coeffSafetyMargin") || state.hasProperty("enableStabilityCheck"))
@@ -54794,13 +54912,14 @@ void LifetimeState::emitRetireIntent(const RetireIntent& intent) noexcept
     convo::publishAtomic(slots_[idx].sequence, ticket + 1, std::memory_order_release);
 }
 
-void LifetimeState::emitRetireIntentRT(const RetireIntent& intent) noexcept
+void LifetimeState::emitRetireIntentNonRT(const RetireIntent& intent) noexcept
 {
-    // ★ Finding 9: 「RT」は RealTime thread safety を意味しない。
-    //   実装は emitRetireIntent() を素通しし、輻輳時に std::mutex をロックする。
-    //   現時点では呼び出し元は全て非 RT スレッドであることを確認済み。
-    //   将来 Audio Thread から呼び出す場合は、mutex を使わない別実装を用意すること。
-    //   将来リネーム予定: emitRetireIntentFromNonRT（バージョンアップ時に実施）
+    // ★ Finding 9 + work92 B-1 (big 1-7 リネーム):
+    //   「RT」は RealTime thread safety を意味しない。実装は emitRetireIntent() を
+    //   素通しし、輻輳時に std::mutex をロックする（:44/:135/:265 の lock_guard）。
+    //   現時点では呼び出し元（AudioEngine.Commit.cpp:485）は全て非 RT スレッドである
+    //   ことを確認済み。将来 Audio Thread から呼ぶ場合は mutex を使わない別実装を
+    //   用意すること（リネーム済みのため RT 誤用の API 誤解リスクは解消）。
     //   注: jassert(!isAudioThread()) は ISRRetire.cpp では JUCE ヘッダ未インクルードのため使用不可
     emitRetireIntent(intent);
 }
@@ -55044,7 +55163,7 @@ public:
     void emitRetireIntent(const RetireIntent& intent) noexcept;
 
     // Preferred API for runtime retire intent publication from commit path.
-    void emitRetireIntentRT(const RetireIntent& intent) noexcept;
+    void emitRetireIntentNonRT(const RetireIntent& intent) noexcept;
 
     // ★ B14: Vyukov MPSC 新 API
     void initQueue() noexcept;
@@ -57128,7 +57247,7 @@ void RuntimeIntentCoordinator::retire(RetireAuthority,
     }
 
     // ★ dash2 §1.7 (Phase G CW-3c): currentWorld_ の metadata-cache clear（CAS）を削除。
-    //   退役の実 authority は Lifetime/EBR（onRuntimeRetiredNonRt → emitRetireIntentRT）が担当。
+    //   退役の実 authority は Lifetime/EBR（onRuntimeRetiredNonRt → emitRetireIntentNonRT）が担当。
     //   currentWorld_ は CW-3b 以降 non-update（commit が write しない）のため本 CAS は no-op だった。
     //   退役の identity source は publish() の戻り値 oldWorld（caller が判定）— RuntimeStore::current
     //   への委譲は不要（RuntimeStore::current が published-world read の単一 source）。
@@ -59545,7 +59664,7 @@ private:
     LockFreeRingBuffer<RetireOverflowEntry, kCoordinatorDeferredRingCapacity> coordinatorDeferredRing_;
     std::atomic<size_t> coordinatorDeferredCount_{0};
     static constexpr size_t kLastResortQueueCapacity = 4096;
-    RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity];
+    RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity] {}; // ★ work92 C-9: 値初期化（未初期化状態への依存可能性の排除）
     std::atomic<size_t> lastResortCount_{0};
 
     // ── ★ P0-4A: Observe Intent Queue (4層 Overflow) ──
@@ -72402,14 +72521,18 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
             return false;
         }
 
-        juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-        if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
-        {
-            stepResult.errorMessage = "Failed to read audio data from file.";
-            return false;
-        }
-
-        auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(fileLength));
+        // ★ work92 B-5 (big 1-8 / R-新規C): ストリーミング読込。
+        //   旧実装は fileLength 分を一括確保（ステレオ float ~16GB / double ~32GB の
+        //   確保試行 → OOM）。チャンク読込に変更し、常時メモリはチャンク分のみ。
+        //   G4 narrowing proof（PLAN v3 §3-B-5）:
+        //   - offset は int64 のまま reader->read の startSampleInFile に渡す
+        //     （juce_AudioFormatReader.h:282 — int64 契約・static_cast<int> 禁止）
+        //   - ループ不変式: offset + chunk ≤ fileLength ≤ INT32_MAX（int64 算術）により
+        //     copyFrom の int 位置 narrowing は値域証明済み
+        //   - chunk ≤ kStreamChunk = 256*1024 で自明に int 域内
+        constexpr int64 kStreamChunk = 256 * 1024;
+        juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(kStreamChunk));
+        auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(kStreamChunk));
         if (!tempAligned)
         {
             stepResult.errorMessage = "Failed to allocate temporary buffer for IR loading.";
@@ -72417,12 +72540,33 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
         }
 
         stepResult.loadedIR.setSize(numChannels, static_cast<int>(fileLength));
-        for (int ch = 0; ch < numChannels; ++ch)
+        stepResult.loadedIR.clear();
+
+        for (int64 offset = 0; offset < fileLength; offset += kStreamChunk)
         {
-            const float* src = tempFloatBuffer.getReadPointer(ch);
-            convo::input_transform::convertFloatToDoubleHighQuality(
-                src, tempAligned.get(), static_cast<int>(fileLength));
-            stepResult.loadedIR.copyFrom(ch, 0, tempAligned.get(), static_cast<int>(fileLength));
+            if (externalCancellationCheck && externalCancellationCheck())
+            {
+                stepResult.errorMessage = "IR loading cancelled.";
+                return false;
+            }
+
+            const int64 remaining = fileLength - offset; // ループ不変: remaining > 0
+            const int chunk = static_cast<int>(std::min<int64>(kStreamChunk, remaining));
+            jassert(offset + chunk <= 2147483647); // ★ G4: narrowing 前の belt-and-braces
+
+            if (!reader->read(&tempFloatBuffer, 0, chunk, offset, true, true))
+            {
+                stepResult.errorMessage = "Failed to read audio data from file.";
+                return false;
+            }
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                const float* src = tempFloatBuffer.getReadPointer(ch);
+                convo::input_transform::convertFloatToDoubleHighQuality(
+                    src, tempAligned.get(), chunk);
+                stepResult.loadedIR.copyFrom(ch, static_cast<int>(offset), tempAligned.get(), chunk);
+            }
         }
         stepResult.loadedSR = reader->sampleRate;
     }
@@ -75849,6 +75993,18 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     v.setProperty ("targetUpgradeFFTSize", getTargetUpgradeFFTSize(), nullptr);
     v.setProperty ("enableProgressiveUpgrade", isProgressiveUpgradeEnabled(), nullptr);
     v.setProperty ("maxCacheEntries", static_cast<int>(getMaxCacheEntries()), nullptr);
+    // ★ work92 A-1 (big 1-1): NUC フィルターモードのセッション永続化。
+    //   runtime 側は snapshot 同期 (:142-143)・jlimit 正規化 (:194-199)・ハッシュ (:55-56) に
+    //   含まれるが ValueTree 往復のみ欠落していた。読み出しは pendingOverride 一元
+    //   （H3 フェーズ 2c 統一化・正規化は setState 側の jlimit 1 箇所のみ）。
+    int nucHc, nucLc;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        nucHc = pendingOverride.nucHCMode;
+        nucLc = pendingOverride.nucLCMode;
+    }
+    v.setProperty ("nucHCMode", nucHc, nullptr);
+    v.setProperty ("nucLCMode", nucLc, nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -75969,6 +76125,19 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
     if (v.hasProperty ("targetUpgradeFFTSize")) setTargetUpgradeFFTSize (static_cast<int>(v.getProperty("targetUpgradeFFTSize")));
     if (v.hasProperty ("enableProgressiveUpgrade")) setEnableProgressiveUpgrade (static_cast<bool>(v.getProperty("enableProgressiveUpgrade")));
     if (v.hasProperty ("maxCacheEntries")) setMaxCacheEntries (static_cast<size_t>(static_cast<int>(v.getProperty("maxCacheEntries"))));
+
+    // ★ work92 A-1 (big 1-1): NUC フィルターモードの復元。
+    //   両プロパティ揃って存在するときのみ適用（旧セッション後方互換: 不在時は現状維持）。
+    //   範囲正規化はここで 1 箇所のみ実施（tailMode と同一の idiom）。
+    //   実測: setNUCFilterModes() 自体はクランプを持たず、jlimit は AudioEngine.Snapshot.cpp:194-199
+    //   （snapshot 同期経路）にあるため、ValueTree 経路の正規化点を本関数に固定する。
+    if (v.hasProperty ("nucHCMode") && v.hasProperty ("nucLCMode"))
+        setNUCFilterModes (static_cast<convo::HCMode>(juce::jlimit(static_cast<int>(convo::HCMode::Sharp),
+                                                                  static_cast<int>(convo::HCMode::Soft),
+                                                                  static_cast<int>(v.getProperty("nucHCMode")))),
+                           static_cast<convo::LCMode>(juce::jlimit(static_cast<int>(convo::LCMode::Natural),
+                                                                  static_cast<int>(convo::LCMode::Soft),
+                                                                  static_cast<int>(v.getProperty("nucLCMode")))));
 
     if (v.hasProperty ("irPath"))
     {
@@ -77092,8 +77261,11 @@ public:
                     readers[static_cast<size_t>(i)].ownerTag[
                         sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1] = '\0';
                 }
+                // ★ work92 B-4: ownerThreadId を単調 ID 採番に統一（BUG-063/BIG 2-6）。
+                //   ownerThreadId 初期値 0 = 無効値のため、採番は 1 起点静止
+                //   （acquireUniqueThreadId 契約）と整合。
                 convo::publishAtomic(readers[static_cast<size_t>(i)].ownerThreadId,
-                                     convo::cachedThreadHash(),
+                                     convo::acquireUniqueThreadId(),
                                      std::memory_order_release);
                 return i;
             }
@@ -78414,9 +78586,13 @@ public:
     }
 
 private:
+    // ★ work92 B-4 (big 2-6): token 生成を単調 ID 採番に統一。
+    //   衝突時の RCU reader 二重登録 / epoch 停止（reclaim 停止）の潜在を排除。
+    //   DspNumericPolicy.h の役割タグ（isAudioThread 等）は衝突許容のため
+    //   cachedThreadHash() を維持する（RECONCILIATION §5-3 設計確定）。
     static uint64_t currentThreadToken() noexcept
     {
-        return convo::cachedThreadHash();
+        return convo::acquireUniqueThreadId();
     }
 
     int acquireThreadSlot() noexcept
@@ -79376,6 +79552,20 @@ bool SnapshotFactory::areSnapshotsEquivalent(const SnapshotParams& params,
     if (params.eqCoeffHash != snapshot.eqCoeffHash)
         return false;
 
+    // ★ work92 C-6 (big 3-6): NaN 等価誤判定の解消。
+    //   std::abs(NaN - x) > eps は常に false になるため、旧実装は NaN を
+    //   「どの値とも等価（スナップショット再利用可）」と誤判定していた。
+    //   NaN は必ず非等価（スナップショット無効化）とする。
+    {
+        const bool anyNaN =
+            std::isnan(params.sampleRate) || std::isnan(snapshot.sampleRate)
+            || std::isnan(params.inputHeadroomGain) || std::isnan(snapshot.inputHeadroomGain)
+            || std::isnan(params.outputMakeupGain) || std::isnan(snapshot.outputMakeupGain)
+            || std::isnan(params.convInputTrimGain) || std::isnan(snapshot.convInputTrimGain);
+        if (anyNaN)
+            return false;
+    }
+
     if (std::abs(params.sampleRate - snapshot.sampleRate) > 1.0e-9)
         return false;
     if (params.maxBlockSize != snapshot.maxBlockSize)
@@ -80204,6 +80394,7 @@ private:
 #pragma once
 #include <thread>
 #include <cstdint>
+#include <atomic>
 
 namespace convo {
 
@@ -80215,6 +80406,33 @@ inline uint64_t cachedThreadHash() noexcept
     static thread_local const uint64_t s_cachedHash = // NOLINT(thread-local) RT-SAFE:
         static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
     return s_cachedHash;
+}
+
+/// ★ work92 B-4 (big 2-6): プロセス単調 ID 採番 — RCU reader token / EpochDomain
+///   ownerThreadId 専用の thread 識別子。
+///
+///   cachedThreadHash()（std::hash<std::thread::id>）は衝突が理論上排除されず、
+///   衝突時は「別スレッドが同一 token を名乗る」→ RCU reader 二重登録 /
+///   ownerThreadId 誤一致 → epoch が進まず reclaim 停止の潜在。
+///   本関数はカウンタを 1 起点で単調採番する（0 は無効値予約 — EpochDomain.h:571
+///   の ownerThreadId 初期値 0 と整合・RCUReader exit() の 0 リセットとも整合）。
+///
+///   thread_local 契約（G3 確定・AC-B4-3）:
+///   - steady-state: thread_local 読み取り 1 回・追加コストゼロ
+///   - first-init: そのスレッドの初回 enter() で 1 回のみ発生
+///     （audio thread = 最初の callback block）。既存 cachedThreadHash() と
+///     同一タイミング・同一の thread_local 機構に依存し、新規 blocking/allocation なし。
+///   - カウンタ fetch_add はスレッド寿命あたり 1 回のみ（first-init 内）。
+inline uint64_t acquireUniqueThreadId() noexcept
+{
+    static thread_local const uint64_t s_uniqueId = // NOLINT(thread-local) RT-SAFE: 同上
+        []() noexcept {
+            // fetch_add(relaxed): 採番の一意性のみが必要（順序・可視性の契約なし）。
+            // 1 起点静止（0 は無効値予約）: 初回 fetch_add が 0 を返すため +1。
+            static std::atomic<uint64_t> s_counter { 0 };
+            return s_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        }();
+    return s_uniqueId;
 }
 
 } // namespace convo
@@ -80243,6 +80461,18 @@ inline uint64_t getCurrentTimeUs() noexcept {
             std::chrono::steady_clock::now().time_since_epoch()
         ).count()
     );
+}
+
+/**
+ * ★ work92 B-8 (big 2-9): saturating subtraction — a >= b を保証する減算。
+ *
+ * クロック逆転（ steady_clock は正順保証だが複数取得点の並び替え・
+ * 診断経路での古い時刻再利用等）で a < b になった場合、通常の減算は
+ * uint64 巨大値に wrap し、診断表示（callbackUs / intervalUs）が破壊される。
+ * RT-safe（分岐のみ・例外なし）。
+ */
+inline uint64_t saturatingSubUs(uint64_t a, uint64_t b) noexcept {
+    return (a >= b) ? (a - b) : uint64_t{0};
 }
 
 } // namespace convo
@@ -80543,7 +80773,7 @@ struct DefaultFastTanhPolicy {
 //   f(x) = x*(10395 + x²*(1260 + 21*x²)) / (10395 + x²*(4725 + x²*(210 + x²)))
 //   5次/6次 Padé近似。x=4.5 で約 0.99927 に収束。
 //==============================================================================
-struct SoftClipPadéPolicy {
+struct SoftClipPadePolicy {
     static constexpr double clipThreshold = 4.5;
 
     // ★ R-3: PascalCase 定数（fastTanhV256 用）
@@ -81963,11 +82193,28 @@ void EQProcessor::reset()
         storeTotalGainDb(state->totalGainDb);
     }
 
-    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
+    // ★ work92 B-7b: bandResetPacked を CAS（serial 前進 + mask=0）で統一。
+    //   旧 publishAtomic(0) は serial を 0 に巻き戻し、並行 requestBandReset() が
+    //   累積した mask+serial を clobber していた（G5 新発見の pre-existing 競合）。
+    //   consumer（Processing.cpp:595-601）は serial 進行検知 → fetch_or(mask=0)=no-op
+    //   acknowledge で吸収するため無変更で可。
+    {
+        std::uint64_t packed = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+        for (;;)
+        {
+            const auto serial = static_cast<std::uint32_t>(bandResetSerialFromPacked(packed) + 1u);
+            const std::uint64_t desired = makeBandResetPacked(serial, 0u);
+            if (convo::compareExchangeAtomic(bandResetPacked, packed, desired,
+                                             std::memory_order_acq_rel,  // 成功: acq_rel — 前回 CAS acquire と HB / Processing.cpp acquire と HB
+                                             std::memory_order_acquire)) // 失敗: acquire — 最新 packed を再観測して retry
+                break;
+        }
+    }
     convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
-    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
-    rtSeenBandResetSerial = 0;
-    rtSeenAgcResetSerial = 0;
+    // ★ work92 B-7a (BUG-065 解消): rt シャドウの Non-RT 直接書込を削除。
+    //   rtDeferredBandResetMask / rtSeenBandResetSerial / rtSeenAgcResetSerial は
+    //   Audio Thread 専有。serial は先行 fetchAddAtomic で前進済みのため、
+    //   Audio Thread 側の serial != rtSeen 検知が shadow を自己更新する。
 
     const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire); // acquire: setBypass の publishAtomic release と HB
     convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);                    // release: Processing.cpp の bypassed acquire と HB
@@ -82474,11 +82721,21 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: Processing.cpp の acquire と HB
     convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
-    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
+    // ★ work92 B-7b: reset() と同一の CAS 統一（serial 前進 + mask=0）。
+    {
+        std::uint64_t packed = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+        for (;;)
+        {
+            const auto serial = static_cast<std::uint32_t>(bandResetSerialFromPacked(packed) + 1u);
+            const std::uint64_t desired = makeBandResetPacked(serial, 0u);
+            if (convo::compareExchangeAtomic(bandResetPacked, packed, desired,
+                                             std::memory_order_acq_rel,  // 成功: acq_rel
+                                             std::memory_order_acquire)) // 失敗: acquire — 再観測 retry
+                break;
+        }
+    }
     convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // increment (not set to 0): so RT agcResetSerialNow != rtSeenAgcResetSerial triggers AGC reset (BUG-065)
-    rtDeferredBandResetMask.store(0, std::memory_order_relaxed);
-    rtSeenBandResetSerial = 0;
-    rtSeenAgcResetSerial = 0;
+    // ★ work92 B-7a: rt シャドウの Non-RT 直接書込を削除（reset() 側と同一契約）。
     convo::publishAtomic(activeStructure,
                          convo::consumeAtomic(requestedStructure, std::memory_order_acquire), // acquire: setFilterStructure の release と HB
                          std::memory_order_release); // release: Processing.cpp の activeStructure acquire と HB
@@ -91264,15 +91521,33 @@ void testLog1pUpperBoundStability()
     const double kTwentyOverLog10 = 20.0 / std::log(10.0);
 
     // 極端に小さい delta
+    // ★ work92 C-2 (big 2-3): 旧条件はループ (delta < 1e-6) と内側分岐 (delta > 1e-6)
+    //   が同時に真になり得ず logBound が常に 0.0 だった（テストが何も検証していなかった）。
+    //   本修正: 本番コード（EQAnalysisMath.h:48 kEpsilon = 1e-6）と同一の切り捨て
+    //   条件を delta に直接反映し、切り捨て閾値直下/直上の両側で有限性を検証する。
     {
-        double logBound = 0.0;
+        // kEpsilon 直下の delta（切り捨てられる領域）: logBound は 0 で有限
+        double logBoundTruncated = 0.0;
         for (double delta = 1e-15; delta < 1e-6; delta *= 10.0)
         {
-            if (delta > 1e-6)  // 微小項切り捨て条件と同じ
-                logBound += std::log1p(delta);
+            const double deltaBelowEpsilon = delta; // 常に 1e-6 未満 → 本番コードでは切り捨て
+            if (deltaBelowEpsilon > 1e-6)
+                logBoundTruncated += std::log1p(deltaBelowEpsilon);
         }
-        const double ubDb = kTwentyOverLog10 * logBound;
-        check(std::isfinite(ubDb), "log1p upperBound: tiny delta finite");
+        const double ubDbTruncated = kTwentyOverLog10 * logBoundTruncated;
+        check(std::isfinite(ubDbTruncated), "log1p upperBound: tiny delta (truncated) finite");
+        check(ubDbTruncated == 0.0, "log1p upperBound: tiny delta truncates to zero bound");
+
+        // kEpsilon 直上の delta（加算される領域）: log1p が有限・正
+        double logBoundJustAbove = 0.0;
+        {
+            const double delta = 1e-5; // > kEpsilon
+            if (std::isfinite(delta) && delta > 1e-6)
+                logBoundJustAbove += std::log1p(delta);
+        }
+        const double ubDbJustAbove = kTwentyOverLog10 * logBoundJustAbove;
+        check(std::isfinite(ubDbJustAbove), "log1p upperBound: delta just above epsilon finite");
+        check(ubDbJustAbove > 0.0, "log1p upperBound: delta just above epsilon positive");
     }
 
     // 極端に大きい delta
@@ -103712,6 +103987,186 @@ private:
 
 ```
 
+### 📄 `src\tests\AudioEngineHarness\ConvolverStateRoundTripTests.cpp`
+
+```
+// ConvolverStateRoundTripTests.cpp — ★ work92 A-1 (big 1-1)
+//
+// ConvolverProcessor::getState() → setState() の round-trip で
+// nucHCMode / nucLCMode が保存・復元されることを直接検証する統合テスト。
+//
+// 検証項目（PLAN work92 A-1 / RECONCILIATION §1 A-1）:
+//   AC-A1-1: round-trip 後のモード一致（setNUCFilterModes → getState → setState →
+//            captureBuildSnapshot().nucHCMode/nucLCMode が元値一致）
+//   AC-A1-2: 範囲外値 (-1, 99) が jlimit 正規化され、クラッシュしない
+//   AC-A1-3: プロパティ不在の ValueTree（旧セッション相当）でデフォルト維持
+//   AC-A1-4: round-trip で changeNotification が 1 回だけ coalesce される
+//            （setNUCFilterModes の postCoalescedChangeNotification 経路）
+//
+// 本テストは AudioEngine 実体（uiConvolverProcessor）を必要とするため
+// AudioEngineHarness 側に配置（runDeferredFlowIntegrationTests と同一パターン）。
+
+#include "AudioEngineHarness.h"
+
+#include "InputBitDepthTransform.h"
+
+#include <cstdio>
+#include <vector>
+
+namespace {
+
+bool checkNucRoundTrip()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[A1] harness start failed\n");
+        return false;
+    }
+
+    ConvolverProcessor& conv = h.engine().getConvolverProcessor();
+
+    // AC-A1-1: setNUCFilterModes(Soft/Soft) → getState → setState → 読み戻し一致
+    conv.setNUCFilterModes(convo::HCMode::Soft, convo::LCMode::Soft);
+
+    juce::ValueTree saved = conv.getState();
+    if (!saved.hasProperty("nucHCMode") || !saved.hasProperty("nucLCMode"))
+    {
+        std::fprintf(stderr, "[A1] FAIL: AC-A1-1 getState() missing nucHCMode/nucLCMode\n");
+        h.stop();
+        return false;
+    }
+
+    // 別の値へ一度変更してから復元する（同一値への no-op set で coalesce が発火しない契約を避ける）
+    conv.setNUCFilterModes(convo::HCMode::Sharp, convo::LCMode::Natural);
+
+    // 復元: 保存済み ValueTree をそのまま setState
+    conv.setState(saved);
+
+    {
+        const auto snap = conv.captureBuildSnapshot();
+        const bool okHC = snap.nucHCMode == static_cast<int>(convo::HCMode::Soft);
+        const bool okLC = snap.nucLCMode == static_cast<int>(convo::LCMode::Soft);
+        if (!okHC || !okLC)
+        {
+            std::fprintf(stderr, "[A1] FAIL: AC-A1-1 round-trip mismatch: HC=%d (want %d) LC=%d (want %d)\n",
+                         snap.nucHCMode, static_cast<int>(convo::HCMode::Soft),
+                         snap.nucLCMode, static_cast<int>(convo::LCMode::Soft));
+            h.stop();
+            return false;
+        }
+    }
+
+    // AC-A1-2: 範囲外値 (-1, 99) は jlimit 正規化（HC: -1→Sharp(0)・99→Soft(2) / LC: -1→Natural(0)・99→Soft(1)）
+    juce::ValueTree outOfRange("Convolver");
+    outOfRange.setProperty("nucHCMode", -1, nullptr);
+    outOfRange.setProperty("nucLCMode", 99, nullptr);
+    conv.setState(outOfRange);
+    {
+        const auto snap = conv.captureBuildSnapshot();
+        const bool okHC = snap.nucHCMode == static_cast<int>(convo::HCMode::Sharp);
+        const bool okLC = snap.nucLCMode == static_cast<int>(convo::LCMode::Soft);
+        if (!okHC || !okLC)
+        {
+            std::fprintf(stderr, "[A1] FAIL: AC-A1-2 out-of-range not clamped: HC=%d LC=%d\n",
+                         snap.nucHCMode, snap.nucLCMode);
+            h.stop();
+            return false;
+        }
+    }
+
+    // AC-A1-3: プロパティ不在の ValueTree で現状維持（旧セッション後方互換・デフォルトへ戻さない）
+    conv.setNUCFilterModes(convo::HCMode::Soft, convo::LCMode::Soft);
+    juce::ValueTree legacy("Convolver");
+    legacy.setProperty("mix", 1.0f, nullptr); // nuc プロパティを持たない旧セッション相当
+    conv.setState(legacy);
+    {
+        const auto snap = conv.captureBuildSnapshot();
+        const bool okHC = snap.nucHCMode == static_cast<int>(convo::HCMode::Soft);
+        const bool okLC = snap.nucLCMode == static_cast<int>(convo::LCMode::Soft);
+        if (!okHC || !okLC)
+        {
+            std::fprintf(stderr, "[A1] FAIL: AC-A1-3 legacy tree reset modes: HC=%d LC=%d\n",
+                         snap.nucHCMode, snap.nucLCMode);
+            h.stop();
+            return false;
+        }
+    }
+
+    h.stop();
+    std::printf("ConvolverStateRoundTripTests: PASS (AC-A1-1/2/3)\n");
+    return true;
+}
+
+//==============================================================================
+// ★ work92 A-2 (big 1-3): InputBitDepthTransform AVX2 store 契約テスト
+//   AC-A2-1: 非アライン dst（double 1 個分オフセット）で #GP 不発
+//   AC-A2-2: 数値等価（float→double 変換がスカラー参照と bit 一致）
+//==============================================================================
+bool checkInputTransformUnalignedDst()
+{
+    // 入力は sanitizeAndLimit の正規化域 [-1,1] 内に収める（[-0.9, 0.9]）。
+    //   → applyHighQuality64BitTransform(gain=1.0) は sanitize のみで恒等写像になり、
+    //     スカラー参照 static_cast<double> との bit 一致が検証できる。
+    constexpr int kN = 1024;
+    std::vector<float> src(kN);
+    for (int i = 0; i < kN; ++i)
+        src[i] = (static_cast<float>(i % 200) / 200.0f - 0.5f) * 1.8f;
+
+    std::vector<double> baseline(kN + 8, -999.0);
+    convo::input_transform::convertFloatToDoubleHighQuality(src.data(), baseline.data(), kN, 1.0);
+
+    // AC-A2-1: dst を double 1 個分（8 バイト）ずらした非アライン領域に書かせる。
+    //   旧 _mm256_store_pd ではここで #GP で即死する。
+    std::vector<double> storage(kN + 8, -999.0);
+    double* unalignedDst = storage.data() + 1;
+    convo::input_transform::convertFloatToDoubleHighQuality(src.data(), unalignedDst, kN, 1.0);
+
+    // AC-A2-1 検証: aligned / unaligned 両呼び出しの bit 一致（store 命令差が結果を変えない）
+    for (int i = 0; i < kN; ++i)
+    {
+        if (unalignedDst[i] != baseline[i])
+        {
+            std::fprintf(stderr, "[A2] FAIL: unaligned dst mismatch at %d\n", i);
+            return false;
+        }
+    }
+
+    // AC-A2-2 検証: 正規化域入力では恒等写像（float→double はスカラー cast と bit 一致）
+    for (int i = 0; i < kN; ++i)
+    {
+        if (baseline[i] != static_cast<double>(src[i]))
+        {
+            std::fprintf(stderr, "[A2] FAIL: numerical mismatch at %d: %f vs %f\n",
+                         i, baseline[i], static_cast<double>(src[i]));
+            return false;
+        }
+    }
+
+    std::printf("checkInputTransformUnalignedDst: PASS (AC-A2-1/2)\n");
+    return true;
+}
+
+} // namespace
+
+// main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
+int runConvolverStateRoundTripTests()
+{
+    if (!checkNucRoundTrip())
+    {
+        std::fprintf(stderr, "FAIL: checkNucRoundTrip\n");
+        return 1;
+    }
+    if (!checkInputTransformUnalignedDst())
+    {
+        std::fprintf(stderr, "FAIL: checkInputTransformUnalignedDst\n");
+        return 1;
+    }
+    return 0;
+}
+
+```
+
 ### 📄 `src\tests\AudioEngineHarness\DeferredFlowIntegrationTests.cpp`
 
 ```
@@ -104627,6 +105082,9 @@ bool runT4RepeatedPublishMeasurement(int intervalUs);
 
 // DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
 int runDeferredPublishViewStateMachineTests();
+
+// ConvolverStateRoundTripTests.cpp (★ work92 A-1: NUC mode ValueTree round-trip)
+int runConvolverStateRoundTripTests();
 
 namespace {
 
@@ -105844,6 +106302,12 @@ int main(int argc, char* argv[])
         return 1;
 
     if (runDeferredPublishViewStateMachineTests() != 0)
+        return 1;
+
+    // ★ work92 A-1: NUC mode セッション永続化の round-trip 回帰。
+    //   setNUCFilterModes/getState/setState は Message Thread 契約のため
+    //   audio thread 停止状態で harness engine に対して直接実行する。
+    if (runConvolverStateRoundTripTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。

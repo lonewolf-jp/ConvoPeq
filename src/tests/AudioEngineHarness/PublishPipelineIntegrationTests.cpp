@@ -55,6 +55,9 @@ bool runT4RepeatedPublishMeasurement(int intervalUs);
 // DeferredPublishViewStateMachineTests.cpp (design-D4 不変条件8 / 状態遷移表)
 int runDeferredPublishViewStateMachineTests();
 
+// ConvolverStateRoundTripTests.cpp (★ work92 A-1: NUC mode ValueTree round-trip)
+int runConvolverStateRoundTripTests();
+
 namespace {
 
 bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
@@ -1271,6 +1274,12 @@ int main(int argc, char* argv[])
         return 1;
 
     if (runDeferredPublishViewStateMachineTests() != 0)
+        return 1;
+
+    // ★ work92 A-1: NUC mode セッション永続化の round-trip 回帰。
+    //   setNUCFilterModes/getState/setState は Message Thread 契約のため
+    //   audio thread 停止状態で harness engine に対して直接実行する。
+    if (runConvolverStateRoundTripTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。

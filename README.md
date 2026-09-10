@@ -28,6 +28,15 @@ ConvoPeq v0.6.10 is built with JUCE 8.0.12 and is designed for low-latency, real
 | Language | **C++20** |
 | Source | **277 files** (~3.17 MB) across `src/` + 21 test files
 
+### Compiler / CPU support matrix (work92 C-8)
+
+| Build | AVX2 flag | Floating point | AMD CPU execution |
+|-------|-----------|----------------|-------------------|
+| **MSVC Release** | `/arch:AVX2` (target-local) | `/fp:precise` (MSVC default — `fp:fast` removed in work92) | **Supported** — standard AVX2 codegen (AMD Ryzen 全対応) |
+| **MSVC Debug** | baseline ISA | — | **Supported** |
+| **icx Release** | `/QxCORE-AVX2` (Release + CXX only, target-local) | `/fp:fast` (intentional — LLVM OOM workaround, see CMakeLists) | **Unsupported (not officially tested)** — representative DSP loops verified to stay within the AVX2 subset (no Intel-only instructions such as vpcompressd/zmm/gather/kmov; G6 audit 2026-09-09), but full-binary AMD compatibility is not guaranteed. Execution may work, but is not a supported configuration. |
+| **icx Debug** | baseline ISA | — | Unsupported (same as above) |
+
 ---
 
 ## Documentation

@@ -129,7 +129,7 @@ void RuntimeIntentCoordinator::retire(RetireAuthority,
     }
 
     // ★ dash2 §1.7 (Phase G CW-3c): currentWorld_ の metadata-cache clear（CAS）を削除。
-    //   退役の実 authority は Lifetime/EBR（onRuntimeRetiredNonRt → emitRetireIntentRT）が担当。
+    //   退役の実 authority は Lifetime/EBR（onRuntimeRetiredNonRt → emitRetireIntentNonRT）が担当。
     //   currentWorld_ は CW-3b 以降 non-update（commit が write しない）のため本 CAS は no-op だった。
     //   退役の identity source は publish() の戻り値 oldWorld（caller が判定）— RuntimeStore::current
     //   への委譲は不要（RuntimeStore::current が published-world read の単一 source）。

@@ -60,7 +60,7 @@ struct DefaultFastTanhPolicy {
 //   f(x) = x*(10395 + x²*(1260 + 21*x²)) / (10395 + x²*(4725 + x²*(210 + x²)))
 //   5次/6次 Padé近似。x=4.5 で約 0.99927 に収束。
 //==============================================================================
-struct SoftClipPadéPolicy {
+struct SoftClipPadePolicy {
     static constexpr double clipThreshold = 4.5;
 
     // ★ R-3: PascalCase 定数（fastTanhV256 用）

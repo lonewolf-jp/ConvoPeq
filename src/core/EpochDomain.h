@@ -71,8 +71,11 @@ public:
                     readers[static_cast<size_t>(i)].ownerTag[
                         sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1] = '\0';
                 }
+                // ★ work92 B-4: ownerThreadId を単調 ID 採番に統一（BUG-063/BIG 2-6）。
+                //   ownerThreadId 初期値 0 = 無効値のため、採番は 1 起点静止
+                //   （acquireUniqueThreadId 契約）と整合。
                 convo::publishAtomic(readers[static_cast<size_t>(i)].ownerThreadId,
-                                     convo::cachedThreadHash(),
+                                     convo::acquireUniqueThreadId(),
                                      std::memory_order_release);
                 return i;
             }

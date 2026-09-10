@@ -1516,8 +1516,11 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # /arch:AVX2 → target_compile_options(ConvoPeq PRIVATE /arch:AVX2) で追加
     # ★ work88 (Phase 7): /EHsc を追加 — 欠落すると JUCE が「exceptions 無効」で C1189 エラー
     #   （Debug の CMAKE_CXX_FLAGS_DEBUG には /EHsc があり、Release だけ欠落していた既存バグ）
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /fp:fast /Gw /Gy /Zi /utf-8 /EHsc")
+    # ★ work92 C-8 (big 3-9/3-10): /fp:fast を除去（MSVC 既定の /fp:precise に戻す）。
+    #   DSP 数値精度を優先し、MSVC ビルドの AMD 動作を標準 AVX2 + precise で保証する。
+    #   （数値回帰は CTest 全テストの期待値で検証 — AC-C8-1）
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /Gw /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /DNDEBUG /Gw /Gy /Zi /utf-8 /EHsc")
 
     # Debugフラグを明示設定（CMakeデフォルトに /utf-8 /bigobj /Zm400 を追加）
     # ランタイムライブラリ (/MDd /MTd) は JUCE の juce_add_gui_app が制御するため設定しない
@@ -1602,9 +1605,17 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     )
     # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
     # 注: string(REGEX REPLACE "/GL|-GL") は直後の set() で上書きされるため不要（除去済）
-    # ★ work88 (Phase 7): /EHsc を追加（Release の JUCE C1189 回避 — icx 側も同様）
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
-    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi /utf-8 /EHsc")
+    # ★ work92 C-8 (big 3-9/3-10/R-9): compiler matrix 分離。
+    #   (2) icx: /QxCORE-AVX2 を global Release flags から除去し target 固有・
+    #       config-gated に移行（旧 :1606-1607 の global 指定 + 旧 :1622 の全 config
+    #       無条件指定を廃止 — Debug まで AVX2 要求が漏洩しない）。
+    #   /fp:fast は icx の性能上の意図的選択（:1590-1593 コメント: LLVM OOM 回避で
+    #   /O2 + fp:fast 維持）として icx Release のみに残置する。
+    #   icx の AVX2 codegen は G6 実測（PLAN v3 §5-0）で AVX2 サブセット内を確認済みだが
+    #   全コードパスの保証ではないため、icx バイナリの AMD 実行は「unsupported（公式
+    #   サポート対象外）」と README/ビルドドキュメントに明記すること（実行可否は断定しない）。
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /fp:fast /Gy /Zi /utf-8 /EHsc")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG /fp:fast /Gy /Zi /utf-8 /EHsc")
     # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
     # ASan 有効時は Qipo を無効化（ASan と LTO は非互換）
     target_compile_options(ConvoPeq PRIVATE
@@ -1618,8 +1629,13 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         $<$<AND:$<CXX_COMPILER_ID:IntelLLVM>,$<CONFIG:Release>,$<NOT:$<BOOL:${ENABLE_ASAN}>>>:/DEBUG /Qipo>
     )
 
-    # AVX2 フラグ（全コンフィグで有効化）
-    target_compile_options(ConvoPeq PRIVATE /QxCORE-AVX2)
+    # ★ work92 C-8: /QxCORE-AVX2 は config-gated・CXX のみ（旧「全コンフィグで有効化」を廃止）。
+    #   AVX2 は JUCE の SIMD レジスタ保持契約（vzeroupper 自動挿入）とあわせて
+    #   Release の DSP 性能 path のみで要求する。Debug は baseline ISA でビルドし、
+    #   デバッガ互換性と AVX2 非対応環境での検証可能性を確保する。
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/QxCORE-AVX2>
+    )
 
     # icx -mvzeroupper: AVX→legacy SSE 境界に vzeroupper を自動挿入
     # CXX 翻訳単位のみに限定（Cコンパイラには不要）
@@ -1874,6 +1890,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
+        src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
         src/tests/AudioEngineHarness/T2Measurement.cpp

@@ -86,8 +86,17 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("ditherBitDepth"))
         setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
 
+    // ★ work92 B-3 (big 2-10): enum 範囲ガード。
+    //   汚染セッション（範囲外値 4, -1 等）のまま cast すると setNoiseShaperType 内に
+    //   正規化がないため、範囲外 enum がそのまま publish されていた。既存契約
+    //   （NoiseShaperType::Psychoacoustic(0)〜Fixed15Tap(3)）の範囲外はデフォルト維持。
     if (state.hasProperty("noiseShaperType"))
-        setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
+    {
+        const int raw = static_cast<int>(state.getProperty("noiseShaperType"));
+        if (raw >= static_cast<int>(NoiseShaperType::Psychoacoustic)
+            && raw <= static_cast<int>(NoiseShaperType::Fixed15Tap))
+            setNoiseShaperType(static_cast<NoiseShaperType>(raw));
+    }
 
     {
         [[maybe_unused]] bool hasBankedAdaptiveCoefficients = false;
@@ -116,8 +125,15 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     }
 
+    // ★ work92 B-3 拡張 (RECONCILIATION §5-4): NoiseShaperType と同型の無検証キャスト。
+    //   範囲外値（2, -1 等）はデフォルト維持（IIR(0)）。
     if (state.hasProperty("oversamplingType"))
-        setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
+    {
+        const int raw = static_cast<int>(state.getProperty("oversamplingType"));
+        if (raw >= static_cast<int>(OversamplingType::IIR)
+            && raw <= static_cast<int>(OversamplingType::LinearPhase))
+            setOversamplingType(static_cast<OversamplingType>(raw));
+    }
 
     // --- NoiseShaperLearner Settings ---
     if (state.hasProperty("cmaesRestarts") || state.hasProperty("coeffSafetyMargin") || state.hasProperty("enableStabilityCheck"))

@@ -1013,7 +1013,7 @@ private:
     LockFreeRingBuffer<RetireOverflowEntry, kCoordinatorDeferredRingCapacity> coordinatorDeferredRing_;
     std::atomic<size_t> coordinatorDeferredCount_{0};
     static constexpr size_t kLastResortQueueCapacity = 4096;
-    RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity];
+    RetireOverflowEntry lastResortQueue_[kLastResortQueueCapacity] {}; // ★ work92 C-9: 値初期化（未初期化状態への依存可能性の排除）
     std::atomic<size_t> lastResortCount_{0};
 
     // ── ★ P0-4A: Observe Intent Queue (4層 Overflow) ──

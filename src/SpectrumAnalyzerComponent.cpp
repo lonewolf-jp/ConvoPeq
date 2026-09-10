@@ -458,6 +458,10 @@ void SpectrumAnalyzerComponent::timerCallback()
         const int vEnd = numBins / 8 * 8;
         const __m256 vScale = _mm256_set1_ps(FFT_MAGNITUDE_SCALE);
 
+        // ★ work92 C-7: alignas スクラッチをループ外へ移動（ループ内の再アライメント
+        //   処理を排除）。_mm256_store_ps は 32 バイト整列を要求するため alignas(32)。
+        alignas(32) float mags[8];
+
         for (; i < vEnd; i += 8)
         {
             const float* binPtr = dst + (2 * i);
@@ -471,7 +475,6 @@ void SpectrumAnalyzerComponent::timerCallback()
             __m256 mag2 = _mm256_add_ps(_mm256_mul_ps(re, re), _mm256_mul_ps(im, im));
             __m256 mag = _mm256_mul_ps(_mm256_sqrt_ps(mag2), vScale);
 
-            alignas(64) float mags[8];
             _mm256_store_ps(mags, mag);
 
             for (int k = 0; k < 8; ++k)

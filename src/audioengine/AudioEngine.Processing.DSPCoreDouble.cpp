@@ -124,7 +124,7 @@ inline double musicalSoftClipScalar(double x, double threshold, double knee, dou
     }
 
     const double linear = abs_x;
-    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadéPolicy>((abs_x - threshold) / knee);
+    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadePolicy>((abs_x - threshold) / knee);
 
     const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
@@ -188,7 +188,7 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d ks = _mm256_mul_pd(t2, _mm256_fnmadd_pd(vTwo, t, vThree));
 
         __m256d arg = _mm256_mul_pd(_mm256_sub_pd(absX, vThreshold), vRecipKnee);
-        __m256d tanhVal = convo::dsp::fastTanhV256<convo::dsp::SoftClipPadéPolicy>(arg);
+        __m256d tanhVal = convo::dsp::fastTanhV256<convo::dsp::SoftClipPadePolicy>(arg);
 
         __m256d clipped = _mm256_fmadd_pd(vKnee, tanhVal, vThreshold);
 

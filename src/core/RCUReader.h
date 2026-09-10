@@ -147,9 +147,13 @@ public:
     }
 
 private:
+    // ★ work92 B-4 (big 2-6): token 生成を単調 ID 採番に統一。
+    //   衝突時の RCU reader 二重登録 / epoch 停止（reclaim 停止）の潜在を排除。
+    //   DspNumericPolicy.h の役割タグ（isAudioThread 等）は衝突許容のため
+    //   cachedThreadHash() を維持する（RECONCILIATION §5-3 設計確定）。
     static uint64_t currentThreadToken() noexcept
     {
-        return convo::cachedThreadHash();
+        return convo::acquireUniqueThreadId();
     }
 
     int acquireThreadSlot() noexcept

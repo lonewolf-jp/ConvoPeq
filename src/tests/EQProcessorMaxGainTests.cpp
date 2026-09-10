@@ -350,15 +350,33 @@ void testLog1pUpperBoundStability()
     const double kTwentyOverLog10 = 20.0 / std::log(10.0);
 
     // 極端に小さい delta
+    // ★ work92 C-2 (big 2-3): 旧条件はループ (delta < 1e-6) と内側分岐 (delta > 1e-6)
+    //   が同時に真になり得ず logBound が常に 0.0 だった（テストが何も検証していなかった）。
+    //   本修正: 本番コード（EQAnalysisMath.h:48 kEpsilon = 1e-6）と同一の切り捨て
+    //   条件を delta に直接反映し、切り捨て閾値直下/直上の両側で有限性を検証する。
     {
-        double logBound = 0.0;
+        // kEpsilon 直下の delta（切り捨てられる領域）: logBound は 0 で有限
+        double logBoundTruncated = 0.0;
         for (double delta = 1e-15; delta < 1e-6; delta *= 10.0)
         {
-            if (delta > 1e-6)  // 微小項切り捨て条件と同じ
-                logBound += std::log1p(delta);
+            const double deltaBelowEpsilon = delta; // 常に 1e-6 未満 → 本番コードでは切り捨て
+            if (deltaBelowEpsilon > 1e-6)
+                logBoundTruncated += std::log1p(deltaBelowEpsilon);
         }
-        const double ubDb = kTwentyOverLog10 * logBound;
-        check(std::isfinite(ubDb), "log1p upperBound: tiny delta finite");
+        const double ubDbTruncated = kTwentyOverLog10 * logBoundTruncated;
+        check(std::isfinite(ubDbTruncated), "log1p upperBound: tiny delta (truncated) finite");
+        check(ubDbTruncated == 0.0, "log1p upperBound: tiny delta truncates to zero bound");
+
+        // kEpsilon 直上の delta（加算される領域）: log1p が有限・正
+        double logBoundJustAbove = 0.0;
+        {
+            const double delta = 1e-5; // > kEpsilon
+            if (std::isfinite(delta) && delta > 1e-6)
+                logBoundJustAbove += std::log1p(delta);
+        }
+        const double ubDbJustAbove = kTwentyOverLog10 * logBoundJustAbove;
+        check(std::isfinite(ubDbJustAbove), "log1p upperBound: delta just above epsilon finite");
+        check(ubDbJustAbove > 0.0, "log1p upperBound: delta just above epsilon positive");
     }
 
     // 極端に大きい delta

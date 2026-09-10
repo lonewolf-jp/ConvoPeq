@@ -91,13 +91,14 @@ void LifetimeState::emitRetireIntent(const RetireIntent& intent) noexcept
     convo::publishAtomic(slots_[idx].sequence, ticket + 1, std::memory_order_release);
 }
 
-void LifetimeState::emitRetireIntentRT(const RetireIntent& intent) noexcept
+void LifetimeState::emitRetireIntentNonRT(const RetireIntent& intent) noexcept
 {
-    // ★ Finding 9: 「RT」は RealTime thread safety を意味しない。
-    //   実装は emitRetireIntent() を素通しし、輻輳時に std::mutex をロックする。
-    //   現時点では呼び出し元は全て非 RT スレッドであることを確認済み。
-    //   将来 Audio Thread から呼び出す場合は、mutex を使わない別実装を用意すること。
-    //   将来リネーム予定: emitRetireIntentFromNonRT（バージョンアップ時に実施）
+    // ★ Finding 9 + work92 B-1 (big 1-7 リネーム):
+    //   「RT」は RealTime thread safety を意味しない。実装は emitRetireIntent() を
+    //   素通しし、輻輳時に std::mutex をロックする（:44/:135/:265 の lock_guard）。
+    //   現時点では呼び出し元（AudioEngine.Commit.cpp:485）は全て非 RT スレッドである
+    //   ことを確認済み。将来 Audio Thread から呼ぶ場合は mutex を使わない別実装を
+    //   用意すること（リネーム済みのため RT 誤用の API 誤解リスクは解消）。
     //   注: jassert(!isAudioThread()) は ISRRetire.cpp では JUCE ヘッダ未インクルードのため使用不可
     emitRetireIntent(intent);
 }

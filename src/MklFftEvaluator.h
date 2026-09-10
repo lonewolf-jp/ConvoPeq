@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -44,6 +45,12 @@ public:
         double hfPenalty = 0.0;
         double timeDomainRms = 0.0;
         double compositeScore = 0.0;
+        // ★ work92 A-3 (big 1-6): IPP 実行時失敗の明示。
+        //   Result{} = 「FFT 利用不可」（constructor 失敗 [Bug 2/3 fix] で確立済みの
+        //   failure semantics）であり、本フィールドは実行時 failure を同じ semantics で
+        //   観測可能にする（silent loss の排除）。composite score 消費側は値がすべて 0
+        //   である点は従来どおりで、fftFailed のみ追加観測となる。
+        bool   fftFailed = false;
     };
 
     MklFftEvaluator()
@@ -267,8 +274,22 @@ public:
 
         // [v2.1] Forward FFT: real → CCS
         // 出力は CcsComplex 配列に直接書き込む (reinterpret_cast 安全: 同一メモリレイアウト)
-        ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
-        ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        // ★ work92 A-3 (big 1-6): IPP 戻り値を検査する。片側でも失敗したら
+        //   composite score は L+R blend のため意味論的に無効 → L/R ともゼロ化して
+        //   fftFailed=true を返す（G2 監査確定 — 部分成功の保存は行わない）。
+        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        if (stL != ippStsNoErr || stR != ippStsNoErr)
+        {
+            std::memset(spectrumLeft,  0, sizeof(CcsComplex) * kSpectrumBins);
+            std::memset(spectrumRight, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (ippFailureCount_.fetch_add(1, std::memory_order_relaxed) == 0)
+                DBG("MklFftEvaluator: ippsFFTFwd_RToCCS_64f failed (stL=" << static_cast<int>(stL)
+                    << " stR=" << static_cast<int>(stR) << ") — returning zero Result (fftFailed=true)");
+            Result r {};
+            r.fftFailed = true;
+            return r;
+        }
 
         std::array<double, kSpectrumBins> averagePower {};
 
@@ -422,11 +443,27 @@ public:
         juce::FloatVectorOperations::copy(inputRight, dataR, kFftLength);
         // CcsComplex は [double real, double im] の標準レイアウト構造体。
         // IPP CCS 出力 [re0,im0,...] と同一メモリ配置のため reinterpret_cast 安全。
-        ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
-        ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        // ★ work92 A-3 (big 1-6): evaluate() と同一の failure semantics —
+        //   status 検査 + 失敗時は L/R ともゼロクリア（ゴミを下流に流さない）。
+        //   戻り値を持たないため失敗は ippFailureCount_ で観測（初回 DBG）。
+        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
+        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        if (stL != ippStsNoErr || stR != ippStsNoErr)
+        {
+            if (outL) std::memset(outL, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (outR) std::memset(outR, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (ippFailureCount_.fetch_add(1, std::memory_order_relaxed) == 0)
+                DBG("MklFftEvaluator: computeFft ippsFFTFwd_RToCCS_64f failed (stL=" << static_cast<int>(stL)
+                    << " stR=" << static_cast<int>(stR) << ") — outputs zeroed");
+        }
     }
 
 private:
+    // ★ work92 A-3 (big 1-6): IPP 実行時 failure の観測カウンタ。
+    //   evaluate() は NonRT（NoiseShaperLearner worker・G2 確認済み）、
+    //   computeFft も同一 evaluator 内で NonRT のみから呼ばれるため relaxed で十分。
+    std::atomic<std::uint64_t> ippFailureCount_ { 0 };
+
     static constexpr double kMinPower = 1.0e-24;
     static constexpr double kReferenceSplDb = 90.0;
     static constexpr double kCalibrationOffsetDb = 0.0;

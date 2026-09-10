@@ -482,7 +482,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.generation = generation;
     intent.retireEpoch = static_cast<std::uint64_t>(world->generation);
 
-    worldAuthority_.lifetime().emitRetireIntentRT(intent);
+    worldAuthority_.lifetime().emitRetireIntentNonRT(intent);
     // ★ work88 (P2-1 §1.1.5): setPendingIntentCount による RetireIntent 混入は廃止。
     //   pendingIntentCount_ は Observe/Quarantine/Recovery の transport residency 専用
     //   （reservation ベースで Coordinator 内部が維持）。

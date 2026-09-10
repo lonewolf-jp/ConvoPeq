@@ -92,6 +92,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
 
     int fadeSamples = convo::consumeAtomic(m_eqFadeSamples, std::memory_order_acquire);
+    // ★ work92 B-2 (big 1-10) — m_pendingIRChange acknowledgement protocol（v2 再監査確定）:
+    //   本 exchange(false) はこの flag の唯一の acknowledge 点（clear 点）である。
+    //   flag は level marker であり、writer（Timer.cpp:800 / UIEvents.cpp:177 —
+    //   setIRChangeFlag の呼び出し 2 箇所のみ）は必ず直前のブロックで
+    //   submitRebuildIntent(Structural) を先に発行している（G1 CFG 確認済み）。
+    //   よって本 clear で IR 変更要求が消失することはない — intent は rebuild 系に
+    //   すでに存在し、flag は「構造 intent が先行発行済み」の観測用マーカに過ぎない。
+    //   この契約を壊す変更（flag 単独セットの新設・submit との順序逆転）は禁止。
     const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ D125-A: flag 昇格消費点の観測（clear point 特定用）

@@ -460,14 +460,18 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
             return false;
         }
 
-        juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-        if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
-        {
-            stepResult.errorMessage = "Failed to read audio data from file.";
-            return false;
-        }
-
-        auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(fileLength));
+        // ★ work92 B-5 (big 1-8 / R-新規C): ストリーミング読込。
+        //   旧実装は fileLength 分を一括確保（ステレオ float ~16GB / double ~32GB の
+        //   確保試行 → OOM）。チャンク読込に変更し、常時メモリはチャンク分のみ。
+        //   G4 narrowing proof（PLAN v3 §3-B-5）:
+        //   - offset は int64 のまま reader->read の startSampleInFile に渡す
+        //     （juce_AudioFormatReader.h:282 — int64 契約・static_cast<int> 禁止）
+        //   - ループ不変式: offset + chunk ≤ fileLength ≤ INT32_MAX（int64 算術）により
+        //     copyFrom の int 位置 narrowing は値域証明済み
+        //   - chunk ≤ kStreamChunk = 256*1024 で自明に int 域内
+        constexpr int64 kStreamChunk = 256 * 1024;
+        juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(kStreamChunk));
+        auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(kStreamChunk));
         if (!tempAligned)
         {
             stepResult.errorMessage = "Failed to allocate temporary buffer for IR loading.";
@@ -475,12 +479,33 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
         }
 
         stepResult.loadedIR.setSize(numChannels, static_cast<int>(fileLength));
-        for (int ch = 0; ch < numChannels; ++ch)
+        stepResult.loadedIR.clear();
+
+        for (int64 offset = 0; offset < fileLength; offset += kStreamChunk)
         {
-            const float* src = tempFloatBuffer.getReadPointer(ch);
-            convo::input_transform::convertFloatToDoubleHighQuality(
-                src, tempAligned.get(), static_cast<int>(fileLength));
-            stepResult.loadedIR.copyFrom(ch, 0, tempAligned.get(), static_cast<int>(fileLength));
+            if (externalCancellationCheck && externalCancellationCheck())
+            {
+                stepResult.errorMessage = "IR loading cancelled.";
+                return false;
+            }
+
+            const int64 remaining = fileLength - offset; // ループ不変: remaining > 0
+            const int chunk = static_cast<int>(std::min<int64>(kStreamChunk, remaining));
+            jassert(offset + chunk <= 2147483647); // ★ G4: narrowing 前の belt-and-braces
+
+            if (!reader->read(&tempFloatBuffer, 0, chunk, offset, true, true))
+            {
+                stepResult.errorMessage = "Failed to read audio data from file.";
+                return false;
+            }
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                const float* src = tempFloatBuffer.getReadPointer(ch);
+                convo::input_transform::convertFloatToDoubleHighQuality(
+                    src, tempAligned.get(), chunk);
+                stepResult.loadedIR.copyFrom(ch, static_cast<int>(offset), tempAligned.get(), chunk);
+            }
         }
         stepResult.loadedSR = reader->sampleRate;
     }
