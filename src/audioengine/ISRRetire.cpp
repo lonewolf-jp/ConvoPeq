@@ -46,7 +46,6 @@ void LifetimeState::emitRetireIntent(const RetireIntent& intent) noexcept
                 const size_t tail = (fallbackHead_ + fallbackCount_) % FALLBACK_QUEUE_CAPACITY;
                 fallbackQueue_[tail] = localIntent;
                 ++fallbackCount_;
-                convo::publishAtomic(fallbackQueuePeak_, fallbackCount_.load(std::memory_order_relaxed), std::memory_order_release);
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
             } else {
                 // ★ Fallback も満杯 → OverflowRing へ退避試行
@@ -231,11 +230,6 @@ std::uint64_t LifetimeState::lastOverflowWindowCount() const noexcept
 std::size_t LifetimeState::fallbackOccupancy() const noexcept
 {
     return convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
-}
-
-std::size_t LifetimeState::fallbackHighWatermark() const noexcept
-{
-    return convo::consumeAtomic(fallbackQueuePeak_, std::memory_order_acquire);
 }
 
 std::uint64_t LifetimeState::fallbackOverflowCount() const noexcept

@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-12 17:26:46
+> Generated: 2026-09-12 19:20:17
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -54944,7 +54944,6 @@ void LifetimeState::emitRetireIntent(const RetireIntent& intent) noexcept
                 const size_t tail = (fallbackHead_ + fallbackCount_) % FALLBACK_QUEUE_CAPACITY;
                 fallbackQueue_[tail] = localIntent;
                 ++fallbackCount_;
-                convo::publishAtomic(fallbackQueuePeak_, fallbackCount_.load(std::memory_order_relaxed), std::memory_order_release);
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
             } else {
                 // ★ Fallback も満杯 → OverflowRing へ退避試行
@@ -55131,11 +55130,6 @@ std::size_t LifetimeState::fallbackOccupancy() const noexcept
     return convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
 }
 
-std::size_t LifetimeState::fallbackHighWatermark() const noexcept
-{
-    return convo::consumeAtomic(fallbackQueuePeak_, std::memory_order_acquire);
-}
-
 std::uint64_t LifetimeState::fallbackOverflowCount() const noexcept
 {
     return convo::consumeAtomic(fallbackOverflowCount_, std::memory_order_acquire);
@@ -55256,7 +55250,6 @@ public:
 
     // ★ P1: Fallback queue metrics
     [[nodiscard]] std::size_t fallbackOccupancy() const noexcept;
-    [[nodiscard]] std::size_t fallbackHighWatermark() const noexcept;
 
     // ★ Phase5: 全保留中Intentの優先度を底上げ（Shutdown時の Critical 一括昇格用）
     void escalateAllRetires(RetirePriority minPriority) noexcept;
@@ -55348,7 +55341,6 @@ private:
     RetireIntent fallbackQueue_[FALLBACK_QUEUE_CAPACITY];
     size_t fallbackHead_{0};
     std::atomic<size_t> fallbackCount_{0};
-    std::atomic<size_t> fallbackQueuePeak_{0};
     std::atomic<uint64_t> fallbackOverflowCount_{0};
     mutable std::mutex fallbackMutex_;
 

@@ -72,7 +72,6 @@ public:
 
     // ★ P1: Fallback queue metrics
     [[nodiscard]] std::size_t fallbackOccupancy() const noexcept;
-    [[nodiscard]] std::size_t fallbackHighWatermark() const noexcept;
 
     // ★ Phase5: 全保留中Intentの優先度を底上げ（Shutdown時の Critical 一括昇格用）
     void escalateAllRetires(RetirePriority minPriority) noexcept;
@@ -164,7 +163,6 @@ private:
     RetireIntent fallbackQueue_[FALLBACK_QUEUE_CAPACITY];
     size_t fallbackHead_{0};
     std::atomic<size_t> fallbackCount_{0};
-    std::atomic<size_t> fallbackQueuePeak_{0};
     std::atomic<uint64_t> fallbackOverflowCount_{0};
     mutable std::mutex fallbackMutex_;
 
