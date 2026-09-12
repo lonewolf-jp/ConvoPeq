@@ -5,6 +5,14 @@
 - **プロジェクト**: ConvoPeq
 - **目的**: 低音「ジジジ」ノイズ原因の静的解析による特定
 
+> **【2026-09-12 クローズ更新 — work57 B13 Policy R 修復 + Gardner Null Test v2.9（D4 実測）】**
+> 本レポートの Aランク未解決項目（§1.3 / §2.1 / §2.2）は **解決済み**:
+> - 修復前実測（Step 3）: 全 case |oPE| ≥ 128（−1152〜−30720 samples の先行ズレ）・M1 波形 −23〜+2 dB → **旧 read policy（maxRead 自律進行）が outputDelaySamples を実効無効化していたことが確定**
+> - 修復後実測（Step 4 / D4）: Policy R（`readStart = t0 − o_L`）導入で **全 case oPE = 0**・M1 波形 null **−309〜−311 dB**（判定帯 < −90 dBFS = 正常域）・M3 L1 diff = 0
+> - §2.2 の理論誤差（~1312 samples）の実体は旧 read policy の timing model によるもので、Policy R 修復により I1 placement（`t_output(j) = jP + o_L`）が実測成立
+> - 参照: `null_test_step3_results_20260912.md`（修復前実測）/ `b13_repair_design_20260912.md`（Rev 4）/ `b13_step4_work_report_20260912.md`（v1.6）/ `b14_final_audit_20260912.md`（最終監査 FINDING 0）
+> - 本文以下は当時の静的解析記録として保持（§0 の「未解決」記述はクローズ時点の状態を指す）
+
 ---
 
 ## 0. エグゼクティブサマリー
@@ -29,7 +37,7 @@
 **主張**: 「初期FDLが空で不完全な畳み込みになる」
 **判定**: x[n<0]=0（因果系定義）の自然な帰結。正常動作。
 
-### 1.3 Gardnerレイヤー間遅延補償 — 🔴 Aランク（未解決）
+### 1.3 Gardnerレイヤー間遅延補償 — 🔴 Aランク（未解決）→ ✅ 解決（2026-09-12）
 
 **第1版からの主張**: 「L1/L2出力にl0Len分のFIFO遅延が必要」
 
@@ -41,11 +49,21 @@
 
 → **Null Testで差分を実測するまで、原因候補から除外できない。**
 
+**【解決 2026-09-12】**: Null Test（v2.9・Step 3 実測）を実施し、先行ズレの実体を確定 —
+旧 read policy（`max(R, maxRead)` 自律進行）が `outputDelaySamples`（2048/34816）を拘束せず、
+oPE = −1152〜−1600（L1）・−30720（L2）を発生。**Policy R（`readStart = t0 − o_L`）修復後は
+全 case oPE = 0**（sample-accurate stream-time placement 回復・M1 −309〜−311 dB）。
+→ `null_test_step3_results_20260912.md`（修復前実測）/ `b13_repair_design_20260912.md`（Rev 4）
+
 ---
 
 ## 2. 未確定（A/B/Cランク）— ランタイム検証優先
 
-### 2.1 🔴 Null Test（理想逐次畳み込み vs NUC）（Aランク・最優先）
+### 2.1 🔴 Null Test（理想逐次畳み込み vs NUC）（Aランク・最優先）→ ✅ 実施済み・解決（2026-09-12）
+
+**【実施結果 2026-09-12】**: v2.9 手順書（Step 3 + Step 4/D4）で実施。修復前 −23〜+2 dB（FAIL）→
+Policy R 修復後 **T1〜T7 全 PASS（−309.86〜−311.39 dB）** — 判定帯 < −90 dBFS の「正常。NUCは正確」域。
+詳細は `null_test_procedure_v2.md`（v2.9）/ `b13_step4_work_report_20260912.md`（v1.6）。
 
 **目的**: すべての仮説を一掃する決定的テスト。
 
@@ -67,7 +85,12 @@
 | -50〜-70 dBFS | 要調査。分散MAC/Gardner誤差の可能性 |
 | > -50 dBFS | 異常候補。構造的誤差の可能性大 |
 
-### 2.2 🔴 Gardnerレイヤ間時間整合性検証（Aランク）
+### 2.2 🔴 Gardnerレイヤ間時間整合性検証（Aランク）→ ✅ 解決（2026-09-12）
+
+**【解決 2026-09-12】**: 理論誤差 ~1312 samples の実体は旧 read policy の timing model（自律進行が
+outputDelaySamples を拘束しない）であり、Policy R 修復で D4 実測 oPE = 0（I1 placement:
+`t_output(j) = jP + o_L` 成立・全 anchor 一致）を確認。レイヤ間時間整合性は
+Gardner 理論に適合する状態に回復。→ `b14_final_audit_20260912.md`（FINDING 0）
 
 **目的**: Get()でのL0（ringBuf）+ L1（tailOutputBuf）単純加算が、Gardner理論$y[n]=\sum y_m[n-D_m]$に適合するかを検証する。
 

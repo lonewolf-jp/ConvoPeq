@@ -95,7 +95,7 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
 
 ## P2 — 改善提案
 
-### RB-05: delayLineBuf 書き込みラップリスク (capacity < partSize) 🟢 P2
+### RB-05: delayLineBuf 書き込みラップリスク (capacity < partSize) ✅ 解決済み（2026-09-12 検証閉包）
 
 **発見経緯**: 第二次監査 #4 → 第三次レビューで実コード引用により確認。
 
@@ -212,6 +212,21 @@ prevLayerTotalSamples += cfgs[li].len;                        // line 1120
 
 **因果関係**: ✅ B13 改修で新規実装。
 
+**解決（2026-09-12 検証閉包 — work57 B13 Policy R 最終監査）**:
+
+- capacity 式は **修正案どおり実装済み**（`MKLNonUniformConvolver.cpp:1007` —
+  `((prevLayerTotalSamples + l.partSize + m_maxBlockSize + 15) / 16) * 16`）。
+  実測: **L1 = 2624 ≥ partSize 512、L2 = 38976 ≥ partSize 4096** — `capacity < partSize` は現行構成で不成立。
+- work57 B13 Policy R 修復（2026-09-12）で **I3 構造 gate**（`cap ≥ o_L − lead + 2P`）を SetImpulse に追加 —
+  全テスト case で OK（T3 余裕 0・T7 L2 余裕 64）。
+- リングの正常折り返し（write wrap）は T7 run3 実測で **L1 39.61 周 / L2 2.63 周** 発生 — wrap 下で
+  oPE = 0（全 anchor）・M1 波形 null −309〜−311 dB 通過。音声破綻なし。
+- 残置メモ（別枠・現行 48kHz/64 仕様では不発）: `capacity % blockSize != 0` の構成では read 側
+  二分割（wrap-crossing read）が発火し得るが、T7 run3 実測の wrap-crossing read は **0 件**
+  （2624 / 38976 はともに B=64 の倍数のため `readOffset + B ≤ cap` が常に成立）。
+  RB-05 の本体懸念（同一書き込み内 `n > capacity` 上書き）は capacity ≥ partSize 保証で解消済み。
+- サマリ表のステータスも ✅ 解決済 に更新。
+
 ---
 
 ### RB-02: `goto final_drop` の構造的問題 🟢 P2
@@ -321,7 +336,7 @@ Float 版 bypass blend は `dryBypassBufferDouble` を使用するため、こ�
 |----|------|--------|------|---------|------|
 | **RB-01** | `pendingIntentCount()` fallback 不計上 | 🟡 P1 | B14 改修起因 | ISRRetire.cpp | 10分 |
 | **RB-11** | `setProcessingOrder` sendChangeMessage 欠落 | 🟡 P1 | 既存バグ | Parameters.cpp | 5分 |
-| **RB-05** | delayLineBuf capacity < partSize（コード事実確認） | 🟢 P2 | B13 改修起因 | MKLNonUniformConvolver.cpp | 15分 |
+| **RB-05** | delayLineBuf capacity < partSize（コード事実確認） | ✅ 解決済 | capacity 式実装済み（cpp:1007）+ I3 gate 実測（work57 B13 監査で閉包） | MKLNonUniformConvolver.cpp | 閉包 |
 | **RB-02** | `goto final_drop` 構造的問題 | 🟢 P2 | B14 改修起因 | ISRRetire.cpp | 5分 |
 | **RB-07** | `dryBypassBufferFloatL/R` デッドコード | 🟢 P3 | B01 改修残骸 | AudioEngine.h | 5分 |
 | **RB-03** | CAS loop 冗長 | 🟢 P3 | B14 改修起因 | ISRRetire.cpp | 5分 |

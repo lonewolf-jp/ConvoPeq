@@ -1096,6 +1096,41 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         }
     }
 
+    // ★ B13 Policy R (Repair Design Rev 4 — Step 4-C): I2/I5/I3 構造不変条件 gate
+    //   設計 §8（実装契約）。I2: lead ≤ o_L − B（lead は構成から決定論算出）。
+    //   I5: P % B == 0 ∧ o_L % B == 0。I3: cap ≥ o_L − lead + 2P。
+    //   outputDelaySamples は測定対象のため assert しない（Repair Design §7 / 手順書 §7）。
+    //   gate 違反は構造設計バグ → jassertfalse（Debug 検出）+ 常時ログ。
+    {
+        const int b = m_maxBlockSize;
+        for (int li = 1; li < m_numActiveLayers; ++li)
+        {
+            const Layer& l = m_layers[li];
+            if (l.outputDelaySamples <= 0 || l.partSize <= 0 || l.partsPerCallback <= 0)
+                continue;
+            const int bpp     = (l.partSize + b - 1) / b;
+            const int distCbs = (l.numPartsIR + l.partsPerCallback - 1) / l.partsPerCallback;
+            const int lead    = b * (bpp + distCbs - 2);
+            const int oL      = l.outputDelaySamples;
+            const bool i2 = (lead <= oL - b);
+            const bool i2General = (2 * l.partSize - b <= oL);   // 十分条件（現行 scheduler 前提）
+            const bool i5 = (l.partSize % b == 0) && (oL % b == 0);
+            const bool i3 = (l.delayLineCapacity >= oL - lead + 2 * l.partSize);
+            juce::Logger::writeToLog (juce::String::formatted (
+                "[B13-GATE] L%d: P=%d o_L=%d lead=%d | I2(lead<=oL-B)=%s I2g(2P-B<=oL)=%s"
+                " I5(align)=%s I3(cap %d >= need %d)=%s",
+                li, l.partSize, oL, lead,
+                i2 ? "OK" : "NG", i2General ? "OK" : "NG", i5 ? "OK" : "NG",
+                l.delayLineCapacity, oL - lead + 2 * l.partSize, i3 ? "OK" : "NG"));
+            if (! i2 || ! i5 || ! i3)
+            {
+                // 構造不変条件違反 = 設計バグ（outputDelaySamples の測定とは区別）
+                juce::Logger::writeToLog ("[B13-GATE][NG] structural invariant violated - see Repair Design §8");
+                jassertfalse;
+            }
+        }
+    }
+
     convo::publishAtomic(m_ready, true, std::memory_order_release);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t afterMkl = convo::diag::allocatedBytes();
@@ -1650,6 +1685,11 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         return 0;
     }
 
+    // ★ I4 Get Clock (B13 Policy R / Repair Design Rev 4): t0 はこの Get ブロックの
+    //   先頭サンプルの絶対インデックス（Get 呼び出し時点の m_outputSamplesProcessed）。
+    //   m_outputSamplesProcessed += got は L1/L2 read より後に実施（off-by-B 防止 — I4 契約）。
+    const std::uint64_t t0 = m_outputSamplesProcessed;
+
     const int got = ringRead(output, numSamples);
 
     auto addFallback = [](int n, double* dst, const double* src) noexcept
@@ -1703,7 +1743,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         }
     }
 
-    // ── L1/L2 出力 (B13: 遅延補償リングバッファ経由) ──
+    // ── L1/L2 出力 (B13 Policy R: stream-time fixed-offset read — Repair Design Rev 4 §2.2) ──
     for (int li = 1; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
@@ -1714,9 +1754,12 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
             const double layerGain = m_tailEnabled
                 ? m_tailLayerGain[juce::jlimit(0, kNumLayers - 1, li)]
                 : 0.0;
-            delayLineReadAdd(l, output, numSamples, layerGain);
+            delayLineReadAdd(l, output, numSamples, t0, layerGain);
         }
     }
+
+    // ★ I4 Get Clock: Get 完了後に got 分だけ clock を進める（L1/L2 read より後に実施）
+    m_outputSamplesProcessed += static_cast<std::uint64_t>(got);
 
     return got;
 }
@@ -1736,25 +1779,38 @@ void MKLNonUniformConvolver::delayLineWrite(Layer& l, const double* src, int n) 
 }
 
 //==============================================================================
-// ★ B13: delayLineReadAdd — 遅延補償リングバッファ読み出し + 加算 (Get)
+// ★ B13 Policy R (Repair Design Rev 4): delayLineReadAdd — stream-time fixed-offset read
+//   読み出し位置は「stream time − IR offset」（論理位置 → ストリーム時刻の写像、I1 Placement）。
+//   旧 policy（maxRead / delayReadCursor 自律進行の max()）は廃止（Step 3 実測で oPE = −1152〜−1600
+//   の先行ズレが確定 — Repair Design §1.1）。delayReadCursor は observation/telemetry として維持。
 //==============================================================================
-void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamples, double gain) noexcept
+void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamples,
+                                              std::uint64_t t0, double gain) noexcept
 {
     if (l.delayLineBuf == nullptr || l.delayLineCapacity <= 0 || dst == nullptr)
         return;
 
-    // ★ readCursor = max(readCursor, writeCursor - outputDelaySamples)
-    const uint64_t maxRead = (l.delayWriteCursor >= static_cast<uint64_t>(l.outputDelaySamples))
-        ? (l.delayWriteCursor - static_cast<uint64_t>(l.outputDelaySamples))
-        : 0;
-    const uint64_t actualReadStart = std::max(l.delayReadCursor, maxRead);
-
-    // ★ Writer がまだ outputDelaySamples 分先に進んでいない → スキップ
-    if (actualReadStart + static_cast<uint64_t>(numSamples) > l.delayWriteCursor)
+    // ★ I4 Get Clock / F1: Phase 0 判定は減算前。
+    //   uint64 では readStart = t0 − o_L を先に計算すると t0 < o_L でラップアラウンドし
+    //   readStart < 0 が成立しない（Repair Design Rev 4 §2.2 契約）。
+    //   Phase 0（t0 < o_L）は欠落ではなく reference と一致する区間（Repair Design §2.4 証明 2）。
+    if (t0 < static_cast<std::uint64_t>(l.outputDelaySamples))
         return;
 
-    // ★ リングバッファ読み出し
-    const size_t readOffset = static_cast<size_t>(actualReadStart % static_cast<uint64_t>(l.delayLineCapacity));
+    // ★ 読み出し位置 = stream time − IR offset（論理位置 → ストリーム時刻の写像、I1 Placement）
+    const std::uint64_t readStart = t0 - static_cast<std::uint64_t>(l.outputDelaySamples);
+
+    // ★ 可否: 未計算 content を読まない（I2 Availability — Repair Design §2.5 証明 3）。
+    //   違反は「証明済み前提条件の破綻」→ deterministic safety guard（fail-closed no-add + diagnostic）。
+    //   RT policy decision ではない（Observer/metrics のみ）。
+    if (readStart + static_cast<std::uint64_t>(numSamples) > l.delayWriteCursor)
+    {
+        convo::fetchAddAtomic(m_delayI2ViolationCount, 1, std::memory_order_acq_rel);
+        return;
+    }
+
+    // ★ リングバッファ読み出し（既存の二分割方式を維持 — wrap-around 処理）
+    const size_t readOffset = static_cast<size_t>(readStart % static_cast<uint64_t>(l.delayLineCapacity));
     const int first = std::min(numSamples, l.delayLineCapacity - static_cast<int>(readOffset));
     if (first > 0) {
         const double* src = l.delayLineBuf + readOffset;
@@ -1772,7 +1828,8 @@ void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamp
             for (int i = 0; i < second; ++i) dst[first + i] += src[i] * gain;
     }
 
-    l.delayReadCursor = actualReadStart + static_cast<uint64_t>(numSamples);
+    // ★ delayReadCursor は observation/telemetry として維持（policy cursor ではない — F2 分離）
+    l.delayReadCursor = readStart + static_cast<std::uint64_t>(numSamples);
 }
 
 //==============================================================================
@@ -1819,6 +1876,10 @@ void MKLNonUniformConvolver::Reset()
     m_ringWrite = 0;
     m_ringRead  = 0;
     m_ringAvail = 0;
+
+    // ★ B13 Policy R (I4 Get Clock): stream clock をリセット（I2 counter も observation として）
+    m_outputSamplesProcessed = 0;
+    convo::publishAtomic(m_delayI2ViolationCount, 0, std::memory_order_release);
 
     if (m_directHistLen > 0 && m_directHistory)
         memset(m_directHistory, 0, static_cast<size_t>(m_directHistLen) * sizeof(double));

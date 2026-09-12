@@ -312,6 +312,12 @@ public:
 #endif
 
 private:
+    // Gardner Null Test v2.9 (Step 3) 専用: 読み出しのみのテスト access。
+    // NUPCTestAccess は getter のみを提供し、状態変更・publish・retire は行わない
+    // （Practical Stable ISR Bridge Runtime の "Observer は副作用を持たない" 原則）。
+    // unqualified friend（namespace convo 内）— qualified 名は事前宣言が必要なため。
+    friend struct NUPCTestAccess;
+
 #if JUCE_DEBUG
     static std::atomic<int> debugWarmupGuardCountStorage_;
     static std::atomic<int>& debugWarmupGuardCount() noexcept;
@@ -376,7 +382,10 @@ private:
         int     delayLineCapacity = 0;    // リングバッファ容量
         double* delayLineBuf = nullptr;   // mkl_malloc(delayLineCapacity * sizeof(double), 64)
         uint64_t delayWriteCursor = 0;    // Add() が書き込んだ累積サンプル数
-        uint64_t delayReadCursor = 0;     // Get() が読み出した累積サンプル数 (唯一のRead Authority)
+        // ★ B13 Policy R (Repair Design Rev 4): observation/telemetry 用の実読み出し位置。
+        //   Policy R の logical read head は t0 − outputDelaySamples（Get 引数 t0）。
+        //   本値は read policy の authority ではない（旧コメント「唯一のRead Authority」は廃止）。
+        uint64_t delayReadCursor = 0;
 
         // B7: FFT ウォームアップ済みフラグ（レイヤーごと、Non-Audio Thread でセット）
         std::atomic<bool> warmupCompleted { false };
@@ -432,7 +441,9 @@ private:
 
     // ★ B13: 遅延補償 内部ヘルパー
     void delayLineWrite(Layer& l, const double* src, int n) noexcept;
-    void delayLineReadAdd(Layer& l, double* dst, int n, double gain) noexcept;
+    // ★ B13 Policy R (Repair Design Rev 4): 読み出し位置は t0 − outputDelaySamples（固定ストリーム遅延）。
+    //   t0 = この Get ブロックの先頭サンプルの絶対インデックス（I4 Get Clock）。
+    void delayLineReadAdd(Layer& l, double* dst, int n, std::uint64_t t0, double gain) noexcept;
 
     //----------------------------------------------------------
     // メンバ変数
@@ -481,6 +492,15 @@ private:
     int     m_maxBlockSize = 0;  // ★ B13: コールバックブロックサイズ (EnsureCapacity 算出用)
     double  m_tailStrength = 1.0;
     double  m_tailLayerGain[kNumLayers] { 1.0, 1.0, 1.0 };
+
+    // ★ B13 Policy R (Repair Design Rev 4 §2.2 / I4 Get Clock Invariant):
+    //   stream clock — Reset で 0、Get の got 分ずつ加算（L1/L2 read より前に += got しない）。
+    //   この Get が扱う出力ストリームの先頭時刻 = 本値（I4: off-by-B 防止）。
+    std::uint64_t m_outputSamplesProcessed = 0;
+    // ★ B13 Policy R (I2 deterministic safety guard): 証明済み前提条件（I2 Availability）違反の
+    //   検出 → fail-closed no-add → diagnostic counter。RT policy decision ではない
+    //   （Observer/metrics のみ — Practical Stable ISR Bridge Runtime 原則）。
+    std::atomic<std::uint32_t> m_delayI2ViolationCount { 0 };
 
     #ifdef NUC_DEBUG_GUARDS
     alignas(64) uint64_t guardAfter[4] = {

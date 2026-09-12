@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-10 21:29:39
+> Generated: 2026-09-12 13:07:53
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -331,6 +331,7 @@
         │   ├── ISRSoakTests.cpp
         │   ├── MT-NUPC-Measurement.cpp
         │   ├── MpscBoundedRingTests.cpp
+        │   ├── NUPCTestAccess.h
         │   ├── NormalRetireDSPHandleCompareTests.cpp
         │   ├── ObservePathSingleSourceTests.cpp
         │   ├── OverlapAuthoritySingularTests.cpp
@@ -17981,6 +17982,41 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         }
     }
 
+    // ★ B13 Policy R (Repair Design Rev 4 — Step 4-C): I2/I5/I3 構造不変条件 gate
+    //   設計 §8（実装契約）。I2: lead ≤ o_L − B（lead は構成から決定論算出）。
+    //   I5: P % B == 0 ∧ o_L % B == 0。I3: cap ≥ o_L − lead + 2P。
+    //   outputDelaySamples は測定対象のため assert しない（Repair Design §7 / 手順書 §7）。
+    //   gate 違反は構造設計バグ → jassertfalse（Debug 検出）+ 常時ログ。
+    {
+        const int b = m_maxBlockSize;
+        for (int li = 1; li < m_numActiveLayers; ++li)
+        {
+            const Layer& l = m_layers[li];
+            if (l.outputDelaySamples <= 0 || l.partSize <= 0 || l.partsPerCallback <= 0)
+                continue;
+            const int bpp     = (l.partSize + b - 1) / b;
+            const int distCbs = (l.numPartsIR + l.partsPerCallback - 1) / l.partsPerCallback;
+            const int lead    = b * (bpp + distCbs - 2);
+            const int oL      = l.outputDelaySamples;
+            const bool i2 = (lead <= oL - b);
+            const bool i2General = (2 * l.partSize - b <= oL);   // 十分条件（現行 scheduler 前提）
+            const bool i5 = (l.partSize % b == 0) && (oL % b == 0);
+            const bool i3 = (l.delayLineCapacity >= oL - lead + 2 * l.partSize);
+            juce::Logger::writeToLog (juce::String::formatted (
+                "[B13-GATE] L%d: P=%d o_L=%d lead=%d | I2(lead<=oL-B)=%s I2g(2P-B<=oL)=%s"
+                " I5(align)=%s I3(cap %d >= need %d)=%s",
+                li, l.partSize, oL, lead,
+                i2 ? "OK" : "NG", i2General ? "OK" : "NG", i5 ? "OK" : "NG",
+                l.delayLineCapacity, oL - lead + 2 * l.partSize, i3 ? "OK" : "NG"));
+            if (! i2 || ! i5 || ! i3)
+            {
+                // 構造不変条件違反 = 設計バグ（outputDelaySamples の測定とは区別）
+                juce::Logger::writeToLog ("[B13-GATE][NG] structural invariant violated - see Repair Design §8");
+                jassertfalse;
+            }
+        }
+    }
+
     convo::publishAtomic(m_ready, true, std::memory_order_release);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t afterMkl = convo::diag::allocatedBytes();
@@ -18535,6 +18571,11 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         return 0;
     }
 
+    // ★ I4 Get Clock (B13 Policy R / Repair Design Rev 4): t0 はこの Get ブロックの
+    //   先頭サンプルの絶対インデックス（Get 呼び出し時点の m_outputSamplesProcessed）。
+    //   m_outputSamplesProcessed += got は L1/L2 read より後に実施（off-by-B 防止 — I4 契約）。
+    const std::uint64_t t0 = m_outputSamplesProcessed;
+
     const int got = ringRead(output, numSamples);
 
     auto addFallback = [](int n, double* dst, const double* src) noexcept
@@ -18588,7 +18629,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         }
     }
 
-    // ── L1/L2 出力 (B13: 遅延補償リングバッファ経由) ──
+    // ── L1/L2 出力 (B13 Policy R: stream-time fixed-offset read — Repair Design Rev 4 §2.2) ──
     for (int li = 1; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
@@ -18599,9 +18640,12 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
             const double layerGain = m_tailEnabled
                 ? m_tailLayerGain[juce::jlimit(0, kNumLayers - 1, li)]
                 : 0.0;
-            delayLineReadAdd(l, output, numSamples, layerGain);
+            delayLineReadAdd(l, output, numSamples, t0, layerGain);
         }
     }
+
+    // ★ I4 Get Clock: Get 完了後に got 分だけ clock を進める（L1/L2 read より後に実施）
+    m_outputSamplesProcessed += static_cast<std::uint64_t>(got);
 
     return got;
 }
@@ -18621,25 +18665,38 @@ void MKLNonUniformConvolver::delayLineWrite(Layer& l, const double* src, int n) 
 }
 
 //==============================================================================
-// ★ B13: delayLineReadAdd — 遅延補償リングバッファ読み出し + 加算 (Get)
+// ★ B13 Policy R (Repair Design Rev 4): delayLineReadAdd — stream-time fixed-offset read
+//   読み出し位置は「stream time − IR offset」（論理位置 → ストリーム時刻の写像、I1 Placement）。
+//   旧 policy（maxRead / delayReadCursor 自律進行の max()）は廃止（Step 3 実測で oPE = −1152〜−1600
+//   の先行ズレが確定 — Repair Design §1.1）。delayReadCursor は observation/telemetry として維持。
 //==============================================================================
-void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamples, double gain) noexcept
+void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamples,
+                                              std::uint64_t t0, double gain) noexcept
 {
     if (l.delayLineBuf == nullptr || l.delayLineCapacity <= 0 || dst == nullptr)
         return;
 
-    // ★ readCursor = max(readCursor, writeCursor - outputDelaySamples)
-    const uint64_t maxRead = (l.delayWriteCursor >= static_cast<uint64_t>(l.outputDelaySamples))
-        ? (l.delayWriteCursor - static_cast<uint64_t>(l.outputDelaySamples))
-        : 0;
-    const uint64_t actualReadStart = std::max(l.delayReadCursor, maxRead);
-
-    // ★ Writer がまだ outputDelaySamples 分先に進んでいない → スキップ
-    if (actualReadStart + static_cast<uint64_t>(numSamples) > l.delayWriteCursor)
+    // ★ I4 Get Clock / F1: Phase 0 判定は減算前。
+    //   uint64 では readStart = t0 − o_L を先に計算すると t0 < o_L でラップアラウンドし
+    //   readStart < 0 が成立しない（Repair Design Rev 4 §2.2 契約）。
+    //   Phase 0（t0 < o_L）は欠落ではなく reference と一致する区間（Repair Design §2.4 証明 2）。
+    if (t0 < static_cast<std::uint64_t>(l.outputDelaySamples))
         return;
 
-    // ★ リングバッファ読み出し
-    const size_t readOffset = static_cast<size_t>(actualReadStart % static_cast<uint64_t>(l.delayLineCapacity));
+    // ★ 読み出し位置 = stream time − IR offset（論理位置 → ストリーム時刻の写像、I1 Placement）
+    const std::uint64_t readStart = t0 - static_cast<std::uint64_t>(l.outputDelaySamples);
+
+    // ★ 可否: 未計算 content を読まない（I2 Availability — Repair Design §2.5 証明 3）。
+    //   違反は「証明済み前提条件の破綻」→ deterministic safety guard（fail-closed no-add + diagnostic）。
+    //   RT policy decision ではない（Observer/metrics のみ）。
+    if (readStart + static_cast<std::uint64_t>(numSamples) > l.delayWriteCursor)
+    {
+        convo::fetchAddAtomic(m_delayI2ViolationCount, 1, std::memory_order_acq_rel);
+        return;
+    }
+
+    // ★ リングバッファ読み出し（既存の二分割方式を維持 — wrap-around 処理）
+    const size_t readOffset = static_cast<size_t>(readStart % static_cast<uint64_t>(l.delayLineCapacity));
     const int first = std::min(numSamples, l.delayLineCapacity - static_cast<int>(readOffset));
     if (first > 0) {
         const double* src = l.delayLineBuf + readOffset;
@@ -18657,7 +18714,8 @@ void MKLNonUniformConvolver::delayLineReadAdd(Layer& l, double* dst, int numSamp
             for (int i = 0; i < second; ++i) dst[first + i] += src[i] * gain;
     }
 
-    l.delayReadCursor = actualReadStart + static_cast<uint64_t>(numSamples);
+    // ★ delayReadCursor は observation/telemetry として維持（policy cursor ではない — F2 分離）
+    l.delayReadCursor = readStart + static_cast<std::uint64_t>(numSamples);
 }
 
 //==============================================================================
@@ -18704,6 +18762,10 @@ void MKLNonUniformConvolver::Reset()
     m_ringWrite = 0;
     m_ringRead  = 0;
     m_ringAvail = 0;
+
+    // ★ B13 Policy R (I4 Get Clock): stream clock をリセット（I2 counter も observation として）
+    m_outputSamplesProcessed = 0;
+    convo::publishAtomic(m_delayI2ViolationCount, 0, std::memory_order_release);
 
     if (m_directHistLen > 0 && m_directHistory)
         memset(m_directHistory, 0, static_cast<size_t>(m_directHistLen) * sizeof(double));
@@ -19033,6 +19095,12 @@ public:
 #endif
 
 private:
+    // Gardner Null Test v2.9 (Step 3) 専用: 読み出しのみのテスト access。
+    // NUPCTestAccess は getter のみを提供し、状態変更・publish・retire は行わない
+    // （Practical Stable ISR Bridge Runtime の "Observer は副作用を持たない" 原則）。
+    // unqualified friend（namespace convo 内）— qualified 名は事前宣言が必要なため。
+    friend struct NUPCTestAccess;
+
 #if JUCE_DEBUG
     static std::atomic<int> debugWarmupGuardCountStorage_;
     static std::atomic<int>& debugWarmupGuardCount() noexcept;
@@ -19097,7 +19165,10 @@ private:
         int     delayLineCapacity = 0;    // リングバッファ容量
         double* delayLineBuf = nullptr;   // mkl_malloc(delayLineCapacity * sizeof(double), 64)
         uint64_t delayWriteCursor = 0;    // Add() が書き込んだ累積サンプル数
-        uint64_t delayReadCursor = 0;     // Get() が読み出した累積サンプル数 (唯一のRead Authority)
+        // ★ B13 Policy R (Repair Design Rev 4): observation/telemetry 用の実読み出し位置。
+        //   Policy R の logical read head は t0 − outputDelaySamples（Get 引数 t0）。
+        //   本値は read policy の authority ではない（旧コメント「唯一のRead Authority」は廃止）。
+        uint64_t delayReadCursor = 0;
 
         // B7: FFT ウォームアップ済みフラグ（レイヤーごと、Non-Audio Thread でセット）
         std::atomic<bool> warmupCompleted { false };
@@ -19153,7 +19224,9 @@ private:
 
     // ★ B13: 遅延補償 内部ヘルパー
     void delayLineWrite(Layer& l, const double* src, int n) noexcept;
-    void delayLineReadAdd(Layer& l, double* dst, int n, double gain) noexcept;
+    // ★ B13 Policy R (Repair Design Rev 4): 読み出し位置は t0 − outputDelaySamples（固定ストリーム遅延）。
+    //   t0 = この Get ブロックの先頭サンプルの絶対インデックス（I4 Get Clock）。
+    void delayLineReadAdd(Layer& l, double* dst, int n, std::uint64_t t0, double gain) noexcept;
 
     //----------------------------------------------------------
     // メンバ変数
@@ -19202,6 +19275,15 @@ private:
     int     m_maxBlockSize = 0;  // ★ B13: コールバックブロックサイズ (EnsureCapacity 算出用)
     double  m_tailStrength = 1.0;
     double  m_tailLayerGain[kNumLayers] { 1.0, 1.0, 1.0 };
+
+    // ★ B13 Policy R (Repair Design Rev 4 §2.2 / I4 Get Clock Invariant):
+    //   stream clock — Reset で 0、Get の got 分ずつ加算（L1/L2 read より前に += got しない）。
+    //   この Get が扱う出力ストリームの先頭時刻 = 本値（I4: off-by-B 防止）。
+    std::uint64_t m_outputSamplesProcessed = 0;
+    // ★ B13 Policy R (I2 deterministic safety guard): 証明済み前提条件（I2 Availability）違反の
+    //   検出 → fail-closed no-add → diagnostic counter。RT policy decision ではない
+    //   （Observer/metrics のみ — Practical Stable ISR Bridge Runtime 原則）。
+    std::atomic<std::uint32_t> m_delayI2ViolationCount { 0 };
 
     #ifdef NUC_DEBUG_GUARDS
     alignas(64) uint64_t guardAfter[4] = {
@@ -95829,251 +95911,784 @@ int main()
 
 ```
 // MT-NUPC-Measurement.cpp
-// B13: NUPC レイヤー間遅延アライメント測定 (Phase 1)
+// Gardner Null Test v2.9 (Step 3) — NUPC レイヤー間遅延アライメント測定
 //
-// 測定内容:
-//   MT-NUPC-01: 各レイヤーの outputDelaySamples 理論値検証
-//   MT-NUPC-02: Dirac 応答による遅延実測
-//   MT-NUPC-03: Partition Boundary テスト (2047/2048/2049)
+// 仕様: doc/work57/null_test_procedure_v2.md (v2.9)
+//   M1: layerGain 反映 reference との Null Test（波形の正しさ）
+//   M2: 三時刻観測（content_time / t_write_callback / t_output_callback）
+//       → outputPlacementError（時間軸の正しさ・**主判定**）
+//   M3: インパルス応答の L1/L2 成分位置同定（独立補助証拠）
 //
-// ビルド: カスタム main() + bool testXxx() パターン
-// 依存: MKL, IPP, JUCE
+// 判定帯（§6）:
+//   outputPlacementError == 0      → B13 正当（**唯一の合格条件**）
+//   1 ≤ |error| ≤ 64               → 要精査（合格ではない）
+//   |error| ≥ 128                  → B13 補償不成立
+//
+// 実装上の規約:
+//   - outputDelaySamples は **assert しない**（測定対象。startup log のみ）
+//   - Get() には必ず有効な出力バッファを渡す（Get(nullptr) は L1/L2 読み出しをスキップ）
+//   - M2 は impulse 位置 n0 ごとに独立 run（M1 差分のクリーン化・M3 ピーク分離・CSV n0 帰属のため。
+//     oPE 本体は write/read スケジュールのみで決まり重ね合わせに非依存）
+//   - exit code は構造的健全性（SetImpulse 成功・event coverage=1.0・CSV 書き込み成功）のみを反映。
+//     oPE 値（B13 正当/不成立）は Step 4 の解析対象であり exit code に影響させない。
+//   - 出力は std::cout / std::ofstream（型安全ストリーム）に統一
+//
+// ビルド: CMake ターゲット MTNUPCMeasurement（CONVOPEQ_ENABLE_ISR_TESTS）
+// 依存: MKL, JUCE（JuceHeader 経由）, NUPCTestAccess.h（friend 読み取りのみ）
 
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <algorithm>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+#include <map>
+#include <filesystem>
+
+#include <mkl_dfti.h>
 
 #include "MKLNonUniformConvolver.h"
+#include "NUPCTestAccess.h"      // friend 読み取りのみ（同一ディレクトリ）
 #include "audioengine/AtomicAccess.h"
-#include "DspNumericPolicy.h"  // for convo::isAudioThreadCheck (unused here)
+#include "DspNumericPolicy.h"
 
 namespace {
 
-// ── ヘルパー: Dirac インパルス応答計測 ──
-struct MeasurementResult {
-    int irLength;
-    int blockSize;
-    int numActiveLayers;
-    int layer0Delay;
-    int layer1Delay;
-    int layer1OutputDelaySamples;
-    int layer2Delay;
-    int layer2OutputDelaySamples;
-    bool delayAlignmentConsistent;
+constexpr int    kBlockSize      = 64;
+constexpr double kSampleRate     = 48000.0;
+constexpr int    kL0MaxParts     = 32;   // MKLNonUniformConvolver.h
+constexpr int    kL1MaxParts     = 64;
+constexpr int    kTailL1L2Mult   = 8;    // filterSpec=nullptr / FilterSpec デフォルト
+constexpr int    kMaxBlocksTrack = 512;  // run ごとに event を追跡するブロック数上限
+
+// ── 層構成の理論値（48 kHz / blockSize=64 / tailMode=1） ──────────────────
+//   l0Part = nextPow2(max(64,64)) = 64、l1Part = 512、l2Part = 4096
+//   l0LenByTailStart = llround(tailStartSec × 48000) ≥ 5760（tailMode=1 の 0.12 クランプ）
+//   → l0LenTarget = jlimit(64, 2048, ≥5760) = **2048 常時クランプ**（手順書 §1）
+struct LayerCfgTheo
+{
+    int offset[3] = { 0, 0, 0 };
+    int len[3]    = { 0, 0, 0 };
+    int partSize[3] = { 0, 0, 0 };
+    int numLayers = 0;
 };
 
-// ★ Dirac 応答からレイヤー遅延を実測する
-//   全レイヤーを即時 flush させるため、IR 長分のサンプルを feed する。
-MeasurementResult measureLayerDelays(int irLength, int blockSize)
+int nextPow2 (int n) noexcept
 {
-    MeasurementResult result{};
-    result.irLength = irLength;
-    result.blockSize = blockSize;
-
-    convo::MKLNonUniformConvolver conv;
-
-    // ★ IR: ランダム位相 MLS-like 信号 (全周波数励起)
-    std::vector<double> ir(static_cast<size_t>(irLength), 0.0);
-    for (int i = 0; i < irLength; ++i)
-        ir[static_cast<size_t>(i)] = (std::sin(static_cast<double>(i) * 0.1) > 0.0) ? 1.0 : -1.0;
-
-    if (!conv.SetImpulse(ir.data(), irLength, blockSize, 1.0, false, nullptr)) {
-        std::fprintf(stderr, "SetImpulse failed (irLen=%d, blockSize=%d)\n", irLength, blockSize);
-        return result;
-    }
-
-    // ★ レイヤー数と理論遅延値を取得
-    // 注: kNumLayers=3 は MKLNonUniformConvolver の設計定数
-    result.numActiveLayers = 3;
-
-    // 注: outputDelaySamples は private メンバのため直接アクセス不可。
-    // ここでは Get() の出力による実測で遅延を検証する。
-
-    // ★ Dirac 入力: サンプル位置 0 に 1.0
-    std::vector<double> input(static_cast<size_t>(blockSize), 0.0);
-    input[0] = 1.0;
-
-    // ★ 十分な出力バッファ (IR長 x 2)
-    const int totalOutputSamples = ((irLength * 2 + blockSize - 1) / blockSize) * blockSize;
-    std::vector<double> output(static_cast<size_t>(totalOutputSamples), 0.0);
-
-    // ★ ブロック単位で処理
-    int totalProcessed = 0;
-    while (totalProcessed < totalOutputSamples) {
-        // 最初のブロックのみ Dirac を入力、以降は無音
-        if (totalProcessed > 0)
-            std::fill(input.begin(), input.end(), 0.0);
-
-        conv.Add(input.data(), blockSize);
-        const int got = conv.Get(output.data() + static_cast<size_t>(totalProcessed), blockSize);
-        totalProcessed += got;
-    }
-
-    // ★ 出力解析: 最大振幅のピーク位置 (バッファ範囲を安全に制限)
-    double absMax = 0.0;
-    int peakPos = 0;
-    const int safeLen = std::min(static_cast<int>(output.size()), totalProcessed);
-    for (int i = 0; i < safeLen; ++i) {
-        const double absVal = std::abs(output[static_cast<size_t>(i)]);
-        if (absVal > absMax) {
-            absMax = absVal;
-            peakPos = i;
-        }
-    }
-
-    // ★ レイヤー別の遅延を検出 (簡易: ピーク位置から判断)
-    //   実際の NUPC では L0/L1/L2 の出力が重畳するため、
-    //   個別分離には部分 IR または WDF 解析が必要。
-    //   ここでは理論値を基準とした自己検証を行う。
-    result.layer0Delay = blockSize;  // L0 = 1 partition latency
-    result.layer1OutputDelaySamples = irLength / 3;  // 理論近似
-    result.layer2OutputDelaySamples = irLength * 2 / 3;  // 理論近似
-    result.layer1Delay = result.layer0Delay + result.layer1OutputDelaySamples;
-    result.layer2Delay = result.layer0Delay + result.layer2OutputDelaySamples;
-    result.delayAlignmentConsistent = (peakPos >= 0);  // output が得られていれば OK
-
-    return result;
+    int p = 1;
+    while (p < n) p <<= 1;
+    return p;
 }
 
-// ── テスト 1: MT-NUPC-01 理論遅延値検証 ──
-bool testMT_NUPC_01_TheoreticalDelay()
+LayerCfgTheo computeLayerCfg (int irLen, bool tailEnabled)
 {
-    // ★ 様々な IR 長で outputDelaySamples が適切に設定されるか検証
-    const int testConfigs[][2] = {
-        {4096,  512},
-        {8192,  512},
-        {16384, 512},
-        {8192,  1024},
-        {4096,  256},
+    LayerCfgTheo cfg;
+    const int l0Part  = nextPow2 (std::max (kBlockSize, 64));   // 64
+    const int l1Part  = l0Part * kTailL1L2Mult;                 // 512
+    const int l2Part  = l1Part * kTailL1L2Mult;                 // 4096
+    const int l0MaxLen = kL0MaxParts * l0Part;                  // 2048
+    const int l0Len    = std::min (irLen, l0MaxLen);            // tailMode=1 クランプで l0LenTarget==l0MaxLen
+    const int l1Len    = tailEnabled ? std::max (0, std::min (irLen - l0Len, kL1MaxParts * l1Part)) : 0;
+    const int l2Len    = tailEnabled ? std::max (0, irLen - l0Len - l1Len) : 0;
+
+    cfg.partSize[0] = l0Part; cfg.partSize[1] = l1Part; cfg.partSize[2] = l2Part;
+    cfg.len[0] = l0Len;  cfg.len[1] = l1Len;  cfg.len[2] = l2Len;
+    cfg.offset[0] = 0;   cfg.offset[1] = l0Len; cfg.offset[2] = l0Len + l1Len;
+    cfg.numLayers = (l0Len > 0 ? 1 : 0) + (l1Len > 0 ? 1 : 0) + (l2Len > 0 ? 1 : 0);
+    return cfg;
+}
+
+// ── 判定帯（手順書 §6） ──────────────────────────────────────────────────
+std::string bandOf (long long ope)
+{
+    if (ope == 0) return "PASS(B13-ALIGNED)";
+    const long long a = ope < 0 ? -ope : ope;
+    if (a <= 64)  return "INVESTIGATE(1..64)";
+    return "FAIL(B13-NOT-ALIGNED)";
+}
+
+// ── テスト IR（決定的。ダイレクト + 顕著な早期反射 + 減衰ノイズ） ────────
+void buildTestIR (int irLen, std::vector<double>& ir)
+{
+    ir.assign ((size_t) irLen, 0.0);
+    std::uint64_t seed = 0x9E3779B97F4A7C15ull;
+    auto rnd = [&seed]() {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+        return (double) (seed >> 11) / 9007199254740992.0;
     };
-    constexpr int kNumConfigs = sizeof(testConfigs) / sizeof(testConfigs[0]);
+    for (int i = 0; i < irLen; ++i)
+        ir[(size_t) i] = std::exp (-4.0 * (double) i / (double) std::max (irLen, 1)) * (rnd() * 2.0 - 1.0) * 0.3;
+    if (irLen > 0)   ir[0]   = 1.0;    // ダイレクト音
+    if (irLen > 100) ir[100] += 0.5;   // 顕著な早期反射（M3 ピーク同定用）
+    if (irLen > 300) ir[300] += 0.25;
+}
 
-    for (int ci = 0; ci < kNumConfigs; ++ci) {
-        const int irLen = testConfigs[ci][0];
-        const int blockSize = testConfigs[ci][1];
+// ── M1: layerGain 反映 reference（インパルス応答の解析的構成） ───────────
+// 入力が単位インパルス x[n0]=1 のため、time-domain 畳み込み
+//   y[n] = Σ_li gain[li] · Σ_m ir[off[li]+m] · x[n − n0 − off[li] − m]
+// は y[n0 + off[li] + m] += gain[li]·ir[off[li]+m] の直接配置と数学的に等価。
+// （ゲインは layerTailGain accessor の**実測値**を使用 — 設計値のハードコード禁止）
+void buildReference (const double* ir, const LayerCfgTheo& cfg, int numLayers,
+                     const double* gain, int n0, int totalLen, std::vector<double>& yRef)
+{
+    yRef.assign ((size_t) totalLen, 0.0);
+    for (int li = 0; li < numLayers; ++li)
+    {
+        for (int m = 0; m < cfg.len[li]; ++m)
+        {
+            const std::size_t idx = (std::size_t) (n0 + cfg.offset[li] + m);
+            if (idx < yRef.size())
+                yRef[idx] += gain[li] * ir[(size_t) (cfg.offset[li] + m)];
+        }
+    }
+}
 
-        auto result = measureLayerDelays(irLen, blockSize);
-        if (result.numActiveLayers == 0) {
-            std::fprintf(stderr, "FAIL: SetImpulse failed for irLen=%d, blockSize=%d\n",
-                         irLen, blockSize);
-            return false;
+// ── M1: 帯域別誤差スペクトル（MKL DFTI・real FFT） ────────────────────────
+// bands: [0,200) / [200,1000) / [1000,10000) / [10000,24000] Hz
+void computeBandSpectrum (const std::vector<double>& diff, const std::vector<double>& ref, double outDb[4])
+{
+    const std::size_t srcLen = diff.size();
+    std::size_t n = 1;
+    while (n < srcLen) n <<= 1;
+
+    // ★ INPLACE real FFT (CCS) の出力は N+2 doubles（re0 と re_N/2 が単独 + (N/2-1) 複素ペア）。
+    //   N サイズのバッファに書くと 2 doubles のヒープ破壊になるため N+2 を確保する。
+    std::vector<double> d (n + 2, 0.0), r (n + 2, 0.0);
+    std::copy (diff.begin(), diff.end(), d.begin());
+    std::copy (ref.begin(),  ref.end(),  r.begin());
+
+    DFTI_DESCRIPTOR_HANDLE hd = nullptr, hr = nullptr;
+    MKL_LONG st = DftiCreateDescriptor (&hd, DFTI_DOUBLE, DFTI_REAL, 1, (MKL_LONG) n);
+    if (st == 0) st = DftiSetValue (hd, DFTI_PLACEMENT, DFTI_INPLACE);
+    if (st == 0) st = DftiCommitDescriptor (hd);
+    if (st == 0) st = DftiCreateDescriptor (&hr, DFTI_DOUBLE, DFTI_REAL, 1, (MKL_LONG) n);
+    if (st == 0) st = DftiSetValue (hr, DFTI_PLACEMENT, DFTI_INPLACE);
+    if (st == 0) st = DftiCommitDescriptor (hr);
+    if (st != 0)
+    {
+        DftiFreeDescriptor (&hd);
+        DftiFreeDescriptor (&hr);
+        for (int b = 0; b < 4; ++b) outDb[b] = -999.0;
+        return;
+    }
+    DftiComputeForward (hd, d.data());
+    DftiComputeForward (hr, r.data());
+    DftiFreeDescriptor (&hd);
+    DftiFreeDescriptor (&hr);
+
+    const double bandEdge[5] = { 0.0, 200.0, 1000.0, 10000.0, 24000.0 };
+    double eDiff[4] = { 0, 0, 0, 0 }, eRef[4] = { 0, 0, 0, 0 };
+    const std::size_t half = n / 2;
+    for (std::size_t k = 0; k <= half; ++k)
+    {
+        double re, im, rre, rim;
+        if (k == 0)          { re = d[0]; im = 0.0; rre = r[0]; rim = 0.0; }
+        else if (k == half)  { re = d[1]; im = 0.0; rre = r[1]; rim = 0.0; }
+        else                 { re = d[2*k]; im = d[2*k+1]; rre = r[2*k]; rim = r[2*k+1]; }
+        const double f = (double) k * kSampleRate / (double) n;
+        int b = 3;
+        for (int bi = 3; bi >= 0; --bi) if (f >= bandEdge[bi]) { b = bi; break; }
+        eDiff[b] += re*re + im*im;
+        eRef[b]  += rre*rre + rim*rim;
+    }
+    for (int b = 0; b < 4; ++b)
+    {
+        const double ratio = (eRef[b] > 1e-300) ? eDiff[b] / eRef[b] : (eDiff[b] > 0.0 ? 1e12 : 0.0);
+        outDb[b] = (ratio > 0.0) ? 10.0 * std::log10 (ratio) : -999.0;
+    }
+}
+
+struct M1Result
+{
+    double rmsDb = 0.0;          // 20log10(RMS(diff)/RMS(ref))
+    double peakDb = 0.0;         // 20log10(max|diff|/RMS(ref))
+    double bandDb[4] = { 0, 0, 0, 0 };
+    double segRmsDb[3] = { 0, 0, 0 };  // セグメント別（L0 区間 / L1 区間 / テール区間）
+};
+
+// ── M3: セグメント相関による位置同定 ─────────────────────────────────────
+// k* = argmax_{k ∈ [searchFrom, searchTo)} Σ_m seg[m] · nuc[k+m]
+int correlationPeak (const std::vector<double>& nuc, const std::vector<double>& seg,
+                     int searchFrom, int searchTo)
+{
+    int bestK = searchFrom;
+    double bestVal = -1e300;
+    const int segLen = (int) seg.size();
+    const int lim = std::min (searchTo, (int) nuc.size() - segLen);
+    for (int k = std::max (0, searchFrom); k < lim; ++k)
+    {
+        double acc = 0.0;
+        for (int m = 0; m < segLen; ++m)
+            acc += seg[(size_t) m] * nuc[(size_t) (k + m)];
+        if (acc > bestVal) { bestVal = acc; bestK = k; }
+    }
+    return bestK;
+}
+
+// ── M2: 1 run（1 impulse / 1 Reset からのコールバック系列） ──────────────
+struct M2RunResult
+{
+    bool setupOk = false;
+    int  numLayers = 0;
+    int  partSize[3] = { 0, 0, 0 };
+    int  numPartsIR[3] = { 0, 0, 0 };
+    int  ppc[3] = { 0, 0, 0 };
+    int  outputDelaySamples[3] = { 0, 0, 0 };
+    int  delayLineCapacity[3] = { 0, 0, 0 };
+    double layerGain[3] = { 1.0, 0.0, 0.0 };
+    int  totalCallbacks = 0;
+    // write/read-anchor events（layer 別、j 昇順）
+    int  writeEventCb[3][kMaxBlocksTrack] = {};
+    int  writeEventCount[3] = { 0, 0, 0 };
+    int  readAnchorCb[3][kMaxBlocksTrack] = {};
+    int  readAnchorCount[3] = { 0, 0, 0 };
+    long long opeConst[3] = { 0, 0, 0 };       // 定常 oPE（全 j 一致時の値）— **Primary gate**
+    bool opeConstant[3] = { false, false, false };
+    long long effConst[3] = { 0, 0, 0 };       // 定常 effectiveDelay（t − R_after）— 補助診断（H1: layer 別）
+    bool effConstant[3] = { false, false, false };
+    std::string firstReadMode[3];
+    std::uint32_t i2ViolationCount = 0;        // I2 違反カウンタ（deterministic safety guard）実測値
+    bool coverageOk[3] = { false, false, false };
+    // ★ P0-1: Phase 0/1 分離集計（I6 契約 — coverage は Phase 1 のみで判定）
+    int  phase0Callbacks[3] = { 0, 0, 0 };      // t < o_L の callback 数
+    int  phase0Writes[3]    = { 0, 0, 0 };      // Phase 0 中の write event 数（未 read で正常）
+    int  phase0Reads[3]     = { 0, 0, 0 };      // Phase 0 中の read 実行数（Policy R では 0 期待）
+    int  phase1Callbacks[3] = { 0, 0, 0 };      // t ≥ o_L の callback 数
+    int  phase1StartT[3]    = { 0, 0, 0 };      // Phase 1 開始時刻（= o_L）
+    int  phase1ExpectedAnchors[3] = { 0, 0, 0 };// logical position ごとの expected read-anchor
+    int  phase1ObservedAnchors[3] = { 0, 0, 0 };// 実測 read-anchor（unique）
+    int  phase1MissingAnchors[3]  = { 0, 0, 0 };
+    int  phase1DuplicateAnchors[3]= { 0, 0, 0 };
+    double coveragePhase1[3] = { 0.0, 0.0, 0.0 };
+    bool csvOk = false;
+    std::string csvPath;
+};
+
+// Policy R（本番実装と同一の式 — Repair Design Rev 4 §2.2 / I1〜I6）で観測値を導出
+// I4 Get Clock: t0 = この Get ブロックの先頭時刻。F1: Phase 0 判定（t0 < o_L）は減算前。
+struct CursorObs
+{
+    std::uint64_t t0 = 0;
+    std::uint64_t readStart = 0;   // 論理リードヘッド（F2: t0 − o_L）
+    bool phase0 = false;           // t0 < o_L（L 寄与なし — reference 整合）
+    bool readExecuted = false;
+    std::string mode = "PHASE0";   // PHASE0 / POLICY-R / UNAVAILABLE
+};
+
+CursorObs observeCursor (std::uint64_t wAfter, std::uint64_t t0, int outputDelay, int blockSize)
+{
+    CursorObs o;
+    o.t0 = t0;
+    o.phase0 = (t0 < (std::uint64_t) outputDelay);
+    if (o.phase0)
+    {
+        o.mode = "PHASE0";
+        return o;    // Phase 0: 加算なし（reference と整合 — 欠落ではない）
+    }
+    o.readStart = t0 - (std::uint64_t) outputDelay;   // I4: 減算は Phase 0 判定後（underflow なし）
+    o.readExecuted = o.readStart + (std::uint64_t) blockSize <= wAfter;
+    o.mode = o.readExecuted ? "POLICY-R" : "UNAVAILABLE";
+    return o;
+}
+
+bool runM2 (int irLen, bool tailEnabled, int n0, const double* ir,
+            const LayerCfgTheo& cfg, const char* caseName, int runId,
+            M2RunResult& out)
+{
+    convo::MKLNonUniformConvolver conv;
+    bool ok;
+    if (tailEnabled)
+        ok = conv.SetImpulse (ir, irLen, kBlockSize, 1.0, /*enableDirectHead*/ false, /*filterSpec*/ nullptr);
+    else
+    {
+        convo::FilterSpec spec {};    // デフォルト（tailMode=1, tailStartSeconds=0.085）+ tail bypass
+        spec.tailEnabled = false;
+        ok = conv.SetImpulse (ir, irLen, kBlockSize, 1.0, false, &spec);
+    }
+    if (!ok) return false;
+
+    out.setupOk = true;
+    out.numLayers = convo::NUPCTestAccess::numActiveLayers (conv);
+    for (int li = 0; li < out.numLayers; ++li)
+    {
+        out.partSize[li]           = convo::NUPCTestAccess::layerPartSize (conv, li);
+        out.numPartsIR[li]         = convo::NUPCTestAccess::layerNumPartsIR (conv, li);
+        out.ppc[li]                = convo::NUPCTestAccess::layerPartsPerCallback (conv, li);
+        out.outputDelaySamples[li] = convo::NUPCTestAccess::layerOutputDelaySamples (conv, li);
+        out.delayLineCapacity[li]  = convo::NUPCTestAccess::layerDelayLineCapacity (conv, li);
+        out.layerGain[li]          = convo::NUPCTestAccess::layerTailGain (conv, li);
+    }
+    out.i2ViolationCount = convo::NUPCTestAccess::delayI2ViolationCount (conv);
+
+    // ── CSV（std::ofstream・型安全書き込み） ──
+    std::filesystem::create_directories ("nupc_v29_csv");
+    out.csvPath = std::string ("nupc_v29_csv/M2_") + caseName + "_run" + std::to_string (runId) + ".csv";
+    std::ofstream csv (out.csvPath);
+    out.csvOk = csv.good();
+    if (csv)
+        csv << "run_id,impulse_pos,t,layer,layerGain,t0,"
+               "delayWriteCursor_before,delayWriteCursor_after,"
+               "delayReadCursor_before,delayReadCursor_after,"
+               "readStart,readExecuted,readMode,phase0,"
+               "i2ViolationCount,outputDelaySamples,partSize,numPartsIR,partsPerCallback\n";
+
+    const int totalLen = ((n0 + irLen * 2 + 8192 + kBlockSize - 1) / kBlockSize) * kBlockSize;
+    const int totalCallbacks = totalLen / kBlockSize;
+    out.totalCallbacks = totalCallbacks;
+
+    std::vector<double> inBlock ((size_t) kBlockSize, 0.0);
+    std::vector<double> outBlock ((size_t) kBlockSize, 0.0);
+
+    // run 中の生イベント記録（解析は run 終了後）— Policy R: read は t0 ベース
+    struct Ev { int cb; std::uint64_t t0, wBefore, wAfter, rBefore, rAfter; };
+    std::vector<Ev> evs[3];
+
+    for (int c = 0; c < totalCallbacks; ++c)
+    {
+        const int t = c * kBlockSize;
+        for (int i = 0; i < kBlockSize; ++i)
+            inBlock[(size_t) i] = (t + i == n0) ? 1.0 : 0.0;
+
+        // ── Add 前後で delayWriteCursor を読む（write event 検出） ──
+        std::uint64_t wBefore[3] = { 0, 0, 0 }, wAfter[3] = { 0, 0, 0 };
+        for (int li = 1; li < out.numLayers; ++li)
+            wBefore[li] = convo::NUPCTestAccess::layerDelayWriteCursor (conv, li);
+        conv.Add (inBlock.data(), kBlockSize);
+        for (int li = 1; li < out.numLayers; ++li)
+            wAfter[li] = convo::NUPCTestAccess::layerDelayWriteCursor (conv, li);
+
+        // ── Get（有効出力バッファ必須。本番と同じ Add→Get 順序） ──
+        // I4 Get Clock: t0 = この Get ブロックの先頭時刻（Get 呼び出し時点の clock）
+        const std::uint64_t t0 = convo::NUPCTestAccess::outputSamplesProcessed (conv);
+        std::uint64_t rBefore[3] = { 0, 0, 0 }, rAfter[3] = { 0, 0, 0 };
+        for (int li = 1; li < out.numLayers; ++li)
+            rBefore[li] = convo::NUPCTestAccess::layerDelayReadCursor (conv, li);
+        conv.Get (outBlock.data(), kBlockSize);
+        for (int li = 1; li < out.numLayers; ++li)
+            rAfter[li] = convo::NUPCTestAccess::layerDelayReadCursor (conv, li);
+
+        // ── 本番実装と同一の式（Policy R）で観測値を再構成 ──
+        // evs は全 callback を記録する（Phase 0 を含む）。write event は Phase 0 期間にも発生
+        // （t_write(0) = lead < o_L）するため、read 実行の有無でフィルタすると write 欠落になる。
+        // read-anchor / I2 判定は CursorObs（phase0 / readExecuted）で分離。
+        for (int li = 1; li < out.numLayers; ++li)
+        {
+            const CursorObs o = observeCursor (wAfter[li], t0, out.outputDelaySamples[li], kBlockSize);
+            evs[li].push_back ({ c, t0, wBefore[li], wAfter[li], rBefore[li], rAfter[li] });
+            if (csv)
+            {
+                csv << runId << ',' << n0 << ',' << t << ',' << li << ',' << out.layerGain[li] << ',' << t0 << ','
+                    << wBefore[li] << ',' << wAfter[li] << ','
+                    << rBefore[li] << ',' << rAfter[li] << ','
+                    << o.readStart << ',' << (o.readExecuted ? 1 : 0) << ',' << o.mode << ',' << (o.phase0 ? 1 : 0) << ','
+                    << out.i2ViolationCount << ',' << out.outputDelaySamples[li] << ',' << out.partSize[li] << ','
+                    << out.numPartsIR[li] << ',' << out.ppc[li] << '\n';
+            }
+        }
+    }
+
+    // ── イベント抽出と oPE / effectiveDelay の導出 ──
+    for (int li = 1; li < out.numLayers; ++li)
+    {
+        const int ps  = out.partSize[li];
+        const int oL  = out.outputDelaySamples[li];
+        const int irOffset = cfg.offset[li];   // L1: l0Len、L2: l0Len+l1Len
+        const int numBlocks = (int) (evs[li].empty() ? 0 : evs[li].back().wAfter / (std::uint64_t) ps);
+
+        // ── P0-1: Phase 0/1 分離集計（I6 契約 — coverage は Phase 1 のみで判定） ──
+        // Phase 境界 callback（I5: o_L % B == 0 → 境界は整数 callback）
+        const int bCb = oL / kBlockSize;       // t = o_L となる callback（Phase 1 開始）
+        out.phase0Callbacks[li] = std::min (totalCallbacks, bCb);
+        out.phase1Callbacks[li] = std::max (0, totalCallbacks - bCb);
+        out.phase1StartT[li]    = oL;
+
+        // observed anchor 集計（j ごとの観測 callback — duplicate 検出対応）
+        //   read-anchor: readExecuted ∧ readStart == j×ps（Policy R: readStart = t0 − o_L）
+        //   Phase 0（t < o_L）は加算なし（F1 契約）→ read-anchor は Phase 1 でのみ発生
+        std::map<int, std::vector<int>> anchorCbs;   // j → callback list（重複検出対応）
+        int p0w = 0, p0r = 0, p1w = 0;
+        int wj = 0;
+        for (const auto& e : evs[li])
+        {
+            const CursorObs o = observeCursor (e.wAfter, e.t0, oL, kBlockSize);
+            // write event（W_before == j×ps ∧ W_after == (j+1)×ps、j 昇順照合）
+            if (e.wBefore == (std::uint64_t) (wj * ps) && e.wAfter == (std::uint64_t) ((wj + 1) * ps))
+            {
+                if (e.cb < bCb) ++p0w; else ++p1w;
+                ++wj;
+            }
+            // read-anchor（readStart == j×ps）
+            if (o.readExecuted)
+            {
+                const std::uint64_t psU = (std::uint64_t) ps;
+                if (o.readStart % psU == 0)
+                {
+                    const int j = (int) (o.readStart / psU);
+                    anchorCbs[j].push_back (e.cb);
+                    if (o.phase0) ++p0r;   // Phase 0 中の read 実行は I1 違反候補
+                }
+            }
+        }
+        out.phase0Writes[li] = p0w;
+        out.phase0Reads[li]  = p0r;
+
+        // write event 抽出（writeEventCb — 既存の逐次照合を維持。coverageOk 判定からは除外）
+        int j = 0;
+        for (const auto& e : evs[li])
+        {
+            if (e.wBefore == (std::uint64_t) (j * ps) && e.wAfter == (std::uint64_t) ((j + 1) * ps))
+            {
+                if (j < kMaxBlocksTrack) out.writeEventCb[li][out.writeEventCount[li]++] = e.cb;
+                ++j;
+            }
         }
 
-        // 出力が得られたことの確認 (遅延値の実測は別途)
-        std::printf("MT-NUPC-01: irLen=%d blockSize=%d layers=%d peak=%s\n",
-                    irLen, blockSize, result.numActiveLayers,
-                    result.delayAlignmentConsistent ? "detected" : "none");
-    }
+        // expected: logical position j のうち、content_time(j) = jP + o_L が
+        // run 時間内（最終 callback の末尾 t = totalCallbacks × B）に到達するもののみ。
+        // run 時間外の j は expected に含めない（missing 3 = run 長不足分の誤集計を修正）。
+        const long long totalStream = (long long) totalCallbacks * kBlockSize;
+        int expected = 0;
+        for (int jx = 0; jx < numBlocks; ++jx)
+            if ((long long) jx * ps + oL <= totalStream) ++expected;
+        out.phase1ExpectedAnchors[li] = expected;
+        out.phase1ObservedAnchors[li] = (int) anchorCbs.size();
+        int missing = 0, dup = 0;
+        for (int jx = 0; jx < numBlocks; ++jx)
+        {
+            const auto it = anchorCbs.find (jx);
+            if (it == anchorCbs.end())
+            {
+                // run 時間内の content のみ missing として数える
+                if ((long long) jx * ps + oL <= totalStream) ++missing;
+            }
+            else if (it->second.size() > 1) dup += (int) it->second.size() - 1;
+        }
+        out.phase1MissingAnchors[li] = missing;
+        out.phase1DuplicateAnchors[li] = dup;
+        out.coveragePhase1[li] = (out.phase1ExpectedAnchors[li] > 0)
+            ? (double) out.phase1ObservedAnchors[li] / (double) out.phase1ExpectedAnchors[li] : 0.0;
 
+        // oPE 計算（anchorCbs ベース — 全 anchor で同一値か確認）
+        long long opeVal = 0; bool opeSeen = false; bool opeAllSame = true;
+        for (const auto& [jx, cbs] : anchorCbs)
+        {
+            const long long contentTime = (long long) jx * ps + irOffset;
+            for (int cb : cbs)
+            {
+                const long long ope = (long long) cb * kBlockSize - contentTime;
+                if (! opeSeen) { opeVal = ope; opeSeen = true; }
+                else if (ope != opeVal) opeAllSame = false;
+            }
+        }
+        out.opeConstant[li] = opeAllSame && opeSeen;
+        out.opeConst[li] = opeVal;
+
+        // effectiveDelay（t − R_after）— 補助診断（Policy R では o_L − B 定常）
+        //   evs 全体（read 実行 callback）から計算 — anchorCbs ループでは rAfter が取れないため分離
+        long long effVal = 0; bool effSeen = false; bool effAllSame = true;
+        for (const auto& e : evs[li])
+        {
+            const CursorObs o = observeCursor (e.wAfter, e.t0, oL, kBlockSize);
+            if (o.readExecuted)
+            {
+                const long long eff = (long long) e.cb * kBlockSize - (long long) e.rAfter;
+                if (! effSeen) { effVal = eff; effSeen = true; }
+                else if (eff != effVal) effAllSame = false;
+            }
+        }
+        out.effConstant[li] = effAllSame && effSeen;
+        out.effConst[li] = effVal;
+
+        // coverageOk（Phase 1 基準 — P0-1 で変更）:
+        //   Phase 1 expected 全 position が observed（missing 0）かつ duplicate 0。
+        //   Phase 0 中の write（未 read）は正常扱い（I6 契約）— coverageOk に含めない。
+        //   numBlocks と expected の差（run 時間外の論理位置）も異常ではない。
+        out.coverageOk[li] = (out.phase1ExpectedAnchors[li] > 0
+                              && out.phase1MissingAnchors[li] == 0
+                              && out.phase1DuplicateAnchors[li] == 0);
+        // 初回 read の mode
+        if (! evs[li].empty())
+            out.firstReadMode[li] = observeCursor (evs[li].front().wAfter, evs[li].front().t0,
+                                                   out.outputDelaySamples[li], kBlockSize).mode;
+    }
+    out.i2ViolationCount = convo::NUPCTestAccess::delayI2ViolationCount (conv);
     return true;
 }
 
-// ── テスト 2: MT-NUPC-02 Dirac 応答 ──
-bool testMT_NUPC_02_DiracResponse()
+// ── M2 定常 oPE の判定サマリー（1 layer 分） ─────────────────────────────
+// 修復後（Policy R）: Primary gate は oPE == 0。effDelay は補助診断（Policy R では o_L − B 定常）。
+void printM2Line (const char* caseName, int runId, int li, const M2RunResult& r, int expectedOpe, int expectedEff)
 {
-    constexpr int irLen = 8192;
-    constexpr int blockSize = 512;
-
-    convo::MKLNonUniformConvolver conv;
-
-    std::vector<double> ir(static_cast<size_t>(irLen), 0.0);
-    for (size_t i = 0; i < static_cast<size_t>(irLen); ++i)
-        ir[i] = std::sin(static_cast<double>(i) * 0.5);
-
-    if (!conv.SetImpulse(ir.data(), irLen, blockSize, 1.0, false, nullptr)) {
-        std::fprintf(stderr, "FAIL: SetImpulse failed\n");
-        return false;
-    }
-
-    // ★ Dirac 応答: 全サンプル処理して出力検証
-    std::vector<double> dirac(static_cast<size_t>(blockSize), 0.0);
-    dirac[0] = 1.0;
-
-    constexpr int kOutputLen = 16384;
-    std::vector<double> output(static_cast<size_t>(kOutputLen), 0.0);
-
-    int totalProcessed = 0;
-    bool firstBlock = true;
-    while (totalProcessed < kOutputLen) {
-        conv.Add(firstBlock ? dirac.data() : nullptr, blockSize);
-        totalProcessed += conv.Get(
-            output.data() + static_cast<size_t>(totalProcessed), blockSize);
-        firstBlock = false;
-    }
-
-    // ★ 出力のエネルギーが 0 より大きいことを確認
-    double totalEnergy = 0.0;
-    for (int i = 0; i < kOutputLen; ++i)
-        totalEnergy += output[static_cast<size_t>(i)] * output[static_cast<size_t>(i)];
-
-    if (totalEnergy < 1e-20) {
-        std::fprintf(stderr, "FAIL: Dirac response is zero\n");
-        return false;
-    }
-
-    std::printf("MT-NUPC-02: Dirac response energy=%.6f (OK)\n", totalEnergy);
-    return true;
+    std::cout << "  M2 " << std::left << std::setw (4) << caseName << " run" << runId
+              << " L" << li
+              << ": oPE=" << r.opeConst[li]
+              << " (expected " << expectedOpe << ", " << ((r.opeConst[li] == expectedOpe) ? "MODEL-MATCH" : "MODEL-DIFF") << ")"
+              << " band=" << bandOf (r.opeConst[li])
+              << " | effDelay=" << r.effConst[li] << " (expected " << expectedEff << ", " << (r.effConstant[li] ? "const" : "varies") << ")"
+              << " | readMode first=" << r.firstReadMode[li]
+              << " | i2Violations=" << r.i2ViolationCount
+              << " | coverage=" << (r.coverageOk[li] ? "OK" : "MISSING")
+              << "\n";
+    // ★ P0-1: Phase 0/1 分離集計（I6 契約 — coverage は Phase 1 のみで判定）
+    std::cout << std::fixed << std::setprecision (6)
+              << "  COV L" << li << ": Phase0(cb=" << r.phase0Callbacks[li]
+              << " writes=" << r.phase0Writes[li] << " reads=" << r.phase0Reads[li] << ")"
+              << " Phase1(start=" << r.phase1StartT[li] << " cb=" << r.phase1Callbacks[li] << ")"
+              << " expected=" << r.phase1ExpectedAnchors[li]
+              << " observed=" << r.phase1ObservedAnchors[li]
+              << " missing=" << r.phase1MissingAnchors[li]
+              << " dup=" << r.phase1DuplicateAnchors[li]
+              << " coveragePhase1=" << r.coveragePhase1[li] << "\n";
 }
 
-// ── テスト 3: MT-NUPC-03 Partition Boundary ──
-bool testMT_NUPC_03_PartitionBoundary()
+} // anonymous namespace
+
+// ══════════════════════════════════════════════════════════════════════════
+// main — T1〜T8 実行
+// ══════════════════════════════════════════════════════════════════════════
+int main()
 {
-    // ★ Partition 境界付近の IR 長でテスト
-    const int testSizes[] = {1024, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193};
-    constexpr int kNumTests = sizeof(testSizes) / sizeof(testSizes[0]);
+    juce::initialiseJuce_GUI();
 
-    for (int ti = 0; ti < kNumTests; ++ti) {
-        const int irLen = testSizes[ti];
-        const int blockSize = (irLen < 512) ? 64 : 512;
+    int structuralFailures = 0;
+    std::cout << "=== Gardner Null Test v2.9 (Step 3) ===\n";
+    std::cout << "sampleRate=" << kSampleRate << " blockSize=" << kBlockSize << " (48kHz/64 専用仕様)\n\n";
 
-        auto result = measureLayerDelays(irLen, blockSize);
-        if (result.numActiveLayers == 0) {
-            std::fprintf(stderr, "FAIL: SetImpulse failed at boundary irLen=%d\n", irLen);
+    // ── テスト IR ──
+    constexpr int maxIrLen = 40000;
+    std::vector<double> ir;
+    buildTestIR (maxIrLen, ir);
+
+    // ── case 定義（期待値は Policy R 修復後: oPE == 0 / effDelay == o_L − B） ──
+    // （旧 policy 実測値 −1152〜−1600 / −30720 は Step 3 報告書 v1.2 に記録済み）
+    struct Case
+    {
+        const char* name = nullptr;
+        int irLen = 0;
+        bool tailEnabled = false;
+        std::vector<int> n0s {};
+        int expectedOpeL1 = 0;
+        int expectedEffL1 = 0;
+        int expectedOpeL2 = 0;
+        int expectedEffL2 = 0;
+    };
+    const Case cases[] = {
+        { "T1",  2000,  true,  { 0 },                            0, 0,    0,     0 },
+        { "T2",  2048,  true,  { 0 },                            0, 0,    0,     0 },
+        { "T3",  2049,  true,  { 0, 4096 },                      0, 1984, 0,     0 },
+        { "T4",  5000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
+        { "T5",  8000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
+        { "T6", 12000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
+        { "T7", 40000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     34752 },
+        { "T8",  5000,  false, { 0 },                            0, 0,    0,     0 },
+    };
+
+    std::cout << "=== M2: 三時刻観測（主判定）===\n";
+    for (const auto& cs : cases)
+    {
+        const LayerCfgTheo cfg = computeLayerCfg (cs.irLen, cs.tailEnabled);
+        int runId = 0;
+        for (int n0 : cs.n0s)
+        {
+            M2RunResult r;
+            if (! runM2 (cs.irLen, cs.tailEnabled, n0, ir.data(), cfg, cs.name, runId, r))
+            {
+                std::cout << "  M2 " << cs.name << " run" << runId << ": SetImpulse FAILED\n";
+                ++structuralFailures;
+                ++runId;
+                continue;
+            }
+
+            // ── スタートアップゲート（expected/actual 分離。outputDelaySamples は assert しない） ──
+            std::cout << "  M2 " << cs.name << " run" << runId << " (n0=" << n0 << "): layers=" << r.numLayers << " |";
+            for (int li = 0; li < r.numLayers; ++li)
+            {
+                const int expLen = cfg.len[li];
+                const int expParts = (expLen == 0) ? 0 : (expLen + r.partSize[li] - 1) / r.partSize[li];
+                std::cout << " L" << li << ": partSize=" << r.partSize[li] << "(exp " << cfg.partSize[li] << ")"
+                          << " numPartsIR=" << r.numPartsIR[li] << "(exp " << expParts << ")"
+                          << " ppc=" << r.ppc[li]
+                          << " outputDelay=" << r.outputDelaySamples[li]
+                          << "(cap " << r.delayLineCapacity[li] << ")"
+                          << " gain=" << std::fixed << std::setprecision (6) << r.layerGain[li] << " |";
+            }
+            std::cout << " csv=" << (r.csvOk ? "OK" : "FAIL") << "\n";
+
+            // topology 照合（partSize / numPartsIR は構造値 → 不一致は構造的異常）
+            for (int li = 0; li < r.numLayers; ++li)
+            {
+                const int expLen = cfg.len[li];
+                const int expParts = (expLen == 0) ? 0 : (expLen + r.partSize[li] - 1) / r.partSize[li];
+                if (r.partSize[li] != cfg.partSize[li] || r.numPartsIR[li] != expParts)
+                {
+                    std::cout << "    [STRUCTURAL-FAIL] L" << li << " topology mismatch (partSize "
+                              << r.partSize[li] << " vs " << cfg.partSize[li] << ", numPartsIR "
+                              << r.numPartsIR[li] << " vs " << expParts << ")\n";
+                    ++structuralFailures;
+                }
+                if (li >= 1 && ! r.coverageOk[li])
+                {
+                    // P0-1: coverage は Phase 1 基準（missing/dup = 0 が合格）。
+                    //   Phase 0 中の write（未 read）は正常 — write>read の総数比は判定に使用しない。
+                    std::cout << "    [STRUCTURAL-FAIL] L" << li
+                              << " event coverage (Phase 1) missing=" << r.phase1MissingAnchors[li]
+                              << " dup=" << r.phase1DuplicateAnchors[li]
+                              << " (writes=" << r.writeEventCount[li]
+                              << ", Phase1 anchors=" << r.phase1ObservedAnchors[li] << ")\n";
+                    ++structuralFailures;
+                }
+            }
+
+            // ── M2 判定行（期待値は case 別 — 手順書 §2.3） ──
+            if (r.numLayers >= 2)
+                printM2Line (cs.name, runId, 1, r, cs.expectedOpeL1, cs.expectedEffL1);
+            if (r.numLayers >= 3)
+                printM2Line (cs.name, runId, 2, r, cs.expectedOpeL2, cs.expectedEffL2);
+            ++runId;
+        }
+    }
+
+    // ── M1: layerGain 反映 Null Test（主要 case を全長計算） ──
+    std::cout << "\n=== M1: layerGain 反映 Null Test（align=0）===\n";
+    for (const auto& cs : cases)
+    {
+        const LayerCfgTheo cfg = computeLayerCfg (cs.irLen, cs.tailEnabled);
+        const int n0 = cs.n0s.empty() ? 0 : cs.n0s[0];
+        const int totalLen = ((n0 + cs.irLen * 2 + 8192 + kBlockSize - 1) / kBlockSize) * kBlockSize;
+
+        convo::MKLNonUniformConvolver conv;
+        bool ok;
+        if (cs.tailEnabled)
+            ok = conv.SetImpulse (ir.data(), cs.irLen, kBlockSize, 1.0, false, nullptr);
+        else
+        {
+            convo::FilterSpec spec {}; spec.tailEnabled = false;
+            ok = conv.SetImpulse (ir.data(), cs.irLen, kBlockSize, 1.0, false, &spec);
+        }
+        if (! ok)
+        {
+            std::cout << "  M1 " << cs.name << ": SetImpulse FAILED\n";
+            ++structuralFailures;
             continue;
         }
 
-        std::printf("MT-NUPC-03: boundary irLen=%d -> layers=%d peak=%s delayL1=%d delayL2=%d\n",
-                    irLen, result.numActiveLayers,
-                    result.delayAlignmentConsistent ? "OK" : "N/A",
-                    result.layer1OutputDelaySamples,
-                    result.layer2OutputDelaySamples);
+        const int numLayers = convo::NUPCTestAccess::numActiveLayers (conv);
+        double gain[3] = { 1.0, 0.0, 0.0 };
+        for (int li = 0; li < numLayers; ++li)
+            gain[li] = convo::NUPCTestAccess::layerTailGain (conv, li);
+
+        std::vector<double> inBlock ((size_t) kBlockSize, 0.0), outBlock ((size_t) kBlockSize, 0.0);
+        std::vector<double> nuc ((size_t) totalLen, 0.0);
+        for (int c = 0; c < totalLen / kBlockSize; ++c)
+        {
+            for (int i = 0; i < kBlockSize; ++i)
+                inBlock[(size_t) i] = (c * kBlockSize + i == n0) ? 1.0 : 0.0;
+            conv.Add (inBlock.data(), kBlockSize);
+            conv.Get (outBlock.data(), kBlockSize);   // 有効出力バッファ必須
+            std::copy (outBlock.begin(), outBlock.end(), nuc.begin() + (std::size_t) (c * kBlockSize));
+        }
+
+        // reference（layerGain 実測値を反映 — 設計値ハードコード禁止）
+        std::vector<double> yRef;
+        buildReference (ir.data(), cfg, numLayers, gain, n0, totalLen, yRef);
+
+        std::vector<double> diff ((size_t) totalLen, 0.0);
+        double sumRefSq = 0.0, sumDiffSq = 0.0, maxAbs = 0.0;
+        for (int n = 0; n < totalLen; ++n)
+        {
+            const double d = nuc[(size_t) n] - yRef[(size_t) n];
+            diff[(size_t) n] = d;
+            sumRefSq  += yRef[(size_t) n] * yRef[(size_t) n];
+            sumDiffSq += d * d;
+            if (std::fabs (d) > maxAbs) maxAbs = std::fabs (d);
+        }
+        const double rmsRef = std::sqrt (sumRefSq / (double) totalLen);
+        const double rmsDiff = std::sqrt (sumDiffSq / (double) totalLen);
+        M1Result m1;
+        m1.rmsDb  = (rmsDiff > 0.0 && rmsRef > 0.0) ? 20.0 * std::log10 (rmsDiff / rmsRef) : -999.0;
+        m1.peakDb = (maxAbs > 0.0 && rmsRef > 0.0) ? 20.0 * std::log10 (maxAbs / rmsRef) : -999.0;
+        computeBandSpectrum (diff, yRef, m1.bandDb);
+
+        // セグメント別 RMS（位置局在: L0 区間 / L1 区間 / テール区間）
+        const int segStart[3] = { n0, n0 + cfg.offset[1], n0 + cfg.offset[2] };
+        const int segLen[3]   = { cfg.len[0], cfg.len[1], cfg.len[2] };
+        for (int s = 0; s < 3; ++s)
+        {
+            double sd = 0.0, sr = 0.0;
+            for (int n = segStart[s]; n < segStart[s] + segLen[s] && n < totalLen; ++n)
+            {
+                sd += diff[(size_t) n] * diff[(size_t) n];
+                sr += yRef[(size_t) n] * yRef[(size_t) n];
+            }
+            const double rmsSd = std::sqrt (sd / (double) std::max (segLen[s], 1));
+            const double rmsSr = std::sqrt (sr / (double) std::max (segLen[s], 1));
+            m1.segRmsDb[s] = (rmsSd > 0.0 && rmsSr > 0.0) ? 20.0 * std::log10 (rmsSd / rmsSr) : -999.0;
+        }
+
+        std::cout << std::fixed << std::setprecision (2)
+                  << "  M1 " << cs.name << ": RMS=" << std::setw (8) << m1.rmsDb
+                  << " dB (gate: " << (cs.tailEnabled ? (m1.rmsDb < -90.0 ? "PASS" : "FAIL")
+                                                       : "EXCLUDED (filterSpec mismatch)") << ")"
+                  << " Peak=" << m1.peakDb
+                  << " dB | band[dB] " << m1.bandDb[0] << "/" << m1.bandDb[1] << "/" << m1.bandDb[2] << "/" << m1.bandDb[3]
+                  << " | seg RMS[dB] L0:" << m1.segRmsDb[0] << " L1:" << m1.segRmsDb[1] << " L2:" << m1.segRmsDb[2]
+                  << std::setprecision (6) << " | gain=" << gain[1] << "/" << gain[2] << "\n";
     }
 
-    return true;
-}
+    // ── M3: インパルス応答の L1/L2 成分位置同定（補助証拠） ──
+    std::cout << "\n=== M3: 位置同定（補助証拠・k*(B) − (n0+IR_offset) ≒ oPE 期待値）===\n";
+    for (const auto& cs : cases)
+    {
+        if (cs.irLen <= 2048) continue;   // L1 なし（T1/T2）
+        const LayerCfgTheo cfg = computeLayerCfg (cs.irLen, cs.tailEnabled);
+        if (cfg.len[1] <= 0) continue;    // T8 は tail bypass
+        const int n0 = cs.n0s.empty() ? 0 : cs.n0s[0];
 
-}  // anonymous namespace
+        convo::MKLNonUniformConvolver conv;
+        conv.SetImpulse (ir.data(), cs.irLen, kBlockSize, 1.0, false, nullptr);
+        const int numLayers = convo::NUPCTestAccess::numActiveLayers (conv);
+        const int totalLen = ((n0 + cs.irLen * 2 + 8192 + kBlockSize - 1) / kBlockSize) * kBlockSize;
+        std::vector<double> inBlock ((size_t) kBlockSize, 0.0), outBlock ((size_t) kBlockSize, 0.0);
+        std::vector<double> nuc ((size_t) totalLen, 0.0);
+        for (int c = 0; c < totalLen / kBlockSize; ++c)
+        {
+            for (int i = 0; i < kBlockSize; ++i)
+                inBlock[(size_t) i] = (c * kBlockSize + i == n0) ? 1.0 : 0.0;
+            conv.Add (inBlock.data(), kBlockSize);
+            conv.Get (outBlock.data(), kBlockSize);
+            std::copy (outBlock.begin(), outBlock.end(), nuc.begin() + (std::size_t) (c * kBlockSize));
+        }
 
-// ── main ──
-int main()
-{
-    // ★ JUCE メッセージスレッド初期化 (MKLNonUniformConvolver::releaseAllLayers 必要)
-    juce::initialiseJuce_GUI();
+        // L1 セグメント（gain 反映）で相関
+        std::vector<double> seg ((size_t) cfg.len[1]);
+        const double g1 = convo::NUPCTestAccess::layerTailGain (conv, numLayers >= 2 ? 1 : 0);
+        for (int m = 0; m < cfg.len[1]; ++m) seg[(size_t) m] = g1 * ir[(size_t) (cfg.offset[1] + m)];
+        const int k1 = correlationPeak (nuc, seg, n0 + cfg.offset[1] - 2048, n0 + cfg.offset[1] + 16384);
+        std::cout << "  M3 " << cs.name << " L1: k*(B)=" << k1 << ", n0+IR_offset=" << (n0 + cfg.offset[1])
+                  << ", diff=" << (k1 - (n0 + cfg.offset[1])) << " (expected oPE=" << cs.expectedOpeL1 << ")\n";
 
-    std::printf("=== MT-NUPC Measurement Suite (Phase 1) ===\n\n");
+        // L2 セグメント（存在時）
+        if (numLayers >= 3 && cfg.len[2] > 0)
+        {
+            std::vector<double> seg2 ((size_t) cfg.len[2]);
+            const double g2 = convo::NUPCTestAccess::layerTailGain (conv, 2);
+            for (int m = 0; m < cfg.len[2]; ++m) seg2[(size_t) m] = g2 * ir[(size_t) (cfg.offset[2] + m)];
+            const int k2 = correlationPeak (nuc, seg2, n0 + cfg.offset[2] - 32768, n0 + cfg.offset[2] + 32768);
+            std::cout << "  M3 " << cs.name << " L2: k*(B)=" << k2 << ", n0+IR_offset=" << (n0 + cfg.offset[2])
+                      << ", diff=" << (k2 - (n0 + cfg.offset[2])) << " (expected oPE=" << cs.expectedOpeL2 << ")\n";
+        }
+    }
 
-    bool allPassed = true;
-
-    std::printf("--- MT-NUPC-01: Theoretical Delay Validation ---\n");
-    allPassed &= testMT_NUPC_01_TheoreticalDelay();
-    std::printf("\n");
-
-    std::printf("--- MT-NUPC-02: Dirac Response ---\n");
-    allPassed &= testMT_NUPC_02_DiracResponse();
-    std::printf("\n");
-
-    std::printf("--- MT-NUPC-03: Partition Boundary Test ---\n");
-    allPassed &= testMT_NUPC_03_PartitionBoundary();
-    std::printf("\n");
-
-    std::printf("=== %s ===\n", allPassed ? "ALL PASSED" : "SOME FAILED");
+    std::cout << "\n=== EXIT: structural failures = " << structuralFailures << " ===\n";
+    std::cout << "B13 判定（outputPlacementError）は上記 M2 行の値と判定帯（==0 / 1..64 / >=128）で Step 4 解析してください。\n";
+    std::cout << "（exit code は構造的健全性のみを反映 — oPE 値は測定結果であり Step 4 の解析対象）\n";
 
     juce::shutdownJuce_GUI();
-    return allPassed ? 0 : 1;
+    return (structuralFailures == 0) ? 0 : 1;
 }
 
 ```
@@ -96481,6 +97096,63 @@ int main()
 
     return (g_failCount == 0) ? 0 : 1;
 }
+
+```
+
+### 📄 `src\tests\NUPCTestAccess.h`
+
+```
+// NUPCTestAccess.h
+// Gardner Null Test v2.9 (Step 3) 専用の Friend Test Access。
+//
+// MKLNonUniformConvolver は private メンバ（m_layers / m_numActiveLayers / m_tailLayerGain）を
+// 持つため、テストから到達するには friend 宣言（MKLNonUniformConvolver.h private: 直後）が必要。
+// 本クラスは DeferredPublicationTestAccess.h と同じ friend + static accessor パターンを踏襲する。
+//
+// ★ Practical Stable ISR Bridge Runtime の Observer 原則:
+//   - Observer は metrics / logging / telemetry のみ許可
+//   - publish / retire / crossfade 変更 / ownership 取得 / 状態変更 は禁止
+//   → 本クラスは**純粋な読み取り getter のみ**を提供する。
+//     setter・cursor 変更・sync・reset・publish・retire は一切提供しない。
+
+#pragma once
+
+#include <cstdint>
+
+#include "MKLNonUniformConvolver.h"
+
+namespace convo
+{
+
+struct NUPCTestAccess final
+{
+    // ── topology ──
+    static int numActiveLayers (const MKLNonUniformConvolver& c) noexcept { return c.m_numActiveLayers; }
+    static int layerPartSize        (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].partSize; }
+    static int layerNumPartsIR      (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].numPartsIR; }
+    static int layerNumParts        (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].numParts; }
+    static int layerPartsPerCallback(const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].partsPerCallback; }
+    static bool layerIsImmediate    (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].isImmediate; }
+
+    // ── B13 遅延補償構成（測定対象: assert してはならない） ──
+    static int layerOutputDelaySamples (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].outputDelaySamples; }
+    static int layerDelayLineCapacity  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].delayLineCapacity; }
+
+    // ── tail gain（M1 reference 用の実測値） ──
+    static double layerTailGain (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_tailLayerGain[li]; }
+    static bool   tailEnabled   (const MKLNonUniformConvolver& c) noexcept { return c.m_tailEnabled; }
+
+    // ── B13 cursor（write / read-anchor event 観測用） ──
+    static std::uint64_t layerDelayWriteCursor (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].delayWriteCursor; }
+    static std::uint64_t layerDelayReadCursor  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].delayReadCursor; }
+
+    // ── B13 Policy R（stream clock / I2 safety counter — 読み取りのみ） ──
+    // ★ ISR Bridge 原則: atomic は wrapper 経由のみ（raw .load()/.store() 不使用）。
+    static std::uint64_t outputSamplesProcessed (const MKLNonUniformConvolver& c) noexcept { return c.m_outputSamplesProcessed; }
+    static std::uint32_t delayI2ViolationCount  (const MKLNonUniformConvolver& c) noexcept { return convo::consumeAtomic (c.m_delayI2ViolationCount, std::memory_order_acquire); }
+};
+
+} // namespace convo
 
 ```
 
