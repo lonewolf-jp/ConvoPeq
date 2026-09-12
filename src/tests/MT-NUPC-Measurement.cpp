@@ -252,6 +252,16 @@ struct M2RunResult
     int  phase1MissingAnchors[3]  = { 0, 0, 0 };
     int  phase1DuplicateAnchors[3]= { 0, 0, 0 };
     double coveragePhase1[3] = { 0.0, 0.0, 0.0 };
+    // ★ P1-x-I: R2-b WRITE/READ-CADENCE-SPLIT + R3-b′ margin 計測
+    //   観測側の純粋関数のみで導出（production 変更・accessor 追加なし）
+    int  lead[3] = { 0, 0, 0 };                  // lead = B×(bpp + distCbs − 2) — gate 式の観測側ミラー
+    long long marginMin[3] = { 0, 0, 0 };        // min(delayWriteCursor_after − (readStart + B)) over executed reads
+    long long marginMax[3] = { 0, 0, 0 };
+    int  ringSplitCount[3] = { 0, 0, 0 };        // (readStart % cap) + B > cap — I5 下で構造的に 0 期待
+    int  straddleCount[3]  = { 0, 0, 0 };        // (readStart % ps) + B > ps — I5 下で構造的に 0 期待
+    bool telemetryModelMatch[3] = { false, false, false };   // B軸: 本番 delayReadCursor == readStart + B（連続性含む）
+    bool readStartIndependent[3] = { false, false, false };  // C軸: readStart == t0 − o_L（wAfter 非依存の独立再計算と一致）
+    bool clockContinuous[3] = { false, false, false };       // R4: t0 == cb×B 全行・evs 数 == totalCallbacks
     bool csvOk = false;
     std::string csvPath;
 };
@@ -477,19 +487,64 @@ bool runM2 (int irLen, bool tailEnabled, int n0, const double* ir,
 
         // effectiveDelay（t − R_after）— 補助診断（Policy R では o_L − B 定常）
         //   evs 全体（read 実行 callback）から計算 — anchorCbs ループでは rAfter が取れないため分離
+        // ★ P1-x-I: 同一ループで margin 分布・telemetry 突合・split カウント・clock 連続性を実施
         long long effVal = 0; bool effSeen = false; bool effAllSame = true;
+        long long mMin = 0, mMax = 0; bool mSeen = false;
+        bool telemetryOk = true, independenceOk = true, clockOk = true, telemetrySeen = false;
+        int ringSplit = 0, straddle = 0;
+        const std::uint64_t capU = (std::uint64_t) out.delayLineCapacity[li];
+        const std::uint64_t psU  = (std::uint64_t) ps;
+        std::uint64_t prevRAfter = 0; bool prevSeen = false;
         for (const auto& e : evs[li])
         {
+            // R4: clock 連続性 — 各 Get の t0 が cb×B と一致（連続する output stream clock）
+            if (e.t0 != (std::uint64_t) e.cb * (std::uint64_t) kBlockSize) clockOk = false;
             const CursorObs o = observeCursor (e.wAfter, e.t0, oL, kBlockSize);
             if (o.readExecuted)
             {
                 const long long eff = (long long) e.cb * kBlockSize - (long long) e.rAfter;
                 if (! effSeen) { effVal = eff; effSeen = true; }
                 else if (eff != effVal) effAllSame = false;
+
+                // B軸: 本番 telemetry（delayReadCursor）と Policy R モデルの突合
+                //   rAfter == readStart + B（cpp:1832 delayReadCursor = readStart + numSamples）
+                //   + 連続性: rBefore == 直前の rAfter（Get 間で telemetry cursor が途切れない）
+                if (e.rAfter != o.readStart + (std::uint64_t) kBlockSize) telemetryOk = false;
+                if (prevSeen && e.rBefore != prevRAfter) telemetryOk = false;
+                prevRAfter = e.rAfter; prevSeen = true;
+                telemetrySeen = true;
+
+                // C軸: readStart の独立性 — wAfter を使わない独立再計算（t0 − o_L）と一致
+                //   = read 位置が write cursor の変動に依存しないことの実測
+                const std::uint64_t readStartModel = e.t0 - (std::uint64_t) oL;   // Phase 1 のみ到達
+                if (o.readStart != readStartModel) independenceOk = false;
+
+                // R3-b′: margin = write head − (readStart + B) — 期待: margin_min == o_L − lead
+                const long long margin = (long long) e.wAfter
+                                       - (long long) (o.readStart + (std::uint64_t) kBlockSize);
+                if (! mSeen) { mMin = margin; mMax = margin; mSeen = true; }
+                else { mMin = std::min (mMin, margin); mMax = std::max (mMax, margin); }
+
+                // D軸: split 2 種（I5: P%B==0 ∧ o_L%B==0 下では構造的に 0 期待）
+                if ((o.readStart % capU) + (std::uint64_t) kBlockSize > capU) ++ringSplit;
+                if ((o.readStart % psU) + (std::uint64_t) kBlockSize > psU) ++straddle;
             }
         }
         out.effConstant[li] = effAllSame && effSeen;
         out.effConst[li] = effVal;
+        // ★ P1-x-I: lead 再計算（gate 式ミラー — 観測側の純粋関数・cpp:990-993 の実測値から導出）
+        {
+            const int bpp     = (ps + kBlockSize - 1) / kBlockSize;
+            const int distCbs = (out.numPartsIR[li] + out.ppc[li] - 1) / out.ppc[li];
+            out.lead[li] = kBlockSize * (bpp + distCbs - 2);
+        }
+        out.marginMin[li] = mSeen ? mMin : 0;
+        out.marginMax[li] = mSeen ? mMax : 0;
+        out.ringSplitCount[li] = ringSplit;
+        out.straddleCount[li]  = straddle;
+        out.telemetryModelMatch[li] = telemetrySeen && telemetryOk;
+        out.readStartIndependent[li] = telemetrySeen && independenceOk;
+        out.clockContinuous[li] = clockOk && ((int) evs[li].size() == out.totalCallbacks);
 
         // coverageOk（Phase 1 基準 — P0-1 で変更）:
         //   Phase 1 expected 全 position が observed（missing 0）かつ duplicate 0。
@@ -533,6 +588,53 @@ void printM2Line (const char* caseName, int runId, int li, const M2RunResult& r,
               << " coveragePhase1=" << r.coveragePhase1[li] << "\n";
 }
 
+// ── P1-x 5 軸判定（run レベル・R2-b WRITE/READ-CADENCE-SPLIT） ─────────────
+// A output-placement / B stream-read-anchor / C write-read-independence /
+// D block-boundary-independence / E phase-0 — M2 一本化を排除し個別 assert する。
+struct P1xAxes { bool a = false, b = false, c = false, d = false, e = false; };
+
+P1xAxes computeP1xAxes (const M2RunResult& r, int expectedOpeL1, int expectedOpeL2)
+{
+    P1xAxes x { true, true, true, true, true };
+    for (int li = 1; li < r.numLayers; ++li)
+    {
+        // A: output placement — oPE 定常かつ expected（0）と一致
+        if (! (r.opeConstant[li] && r.opeConst[li] == (li == 1 ? expectedOpeL1 : expectedOpeL2)))
+            x.a = false;
+        // B: stream read anchor — 本番 telemetry が Policy R モデルと一致
+        //    （rAfter == readStart + B・rBefore/rAfter 連続・readStart = t0 − o_L）
+        if (! r.telemetryModelMatch[li]) x.b = false;
+        // C: write/read independence — readStart が t0 のみで決定（write cursor 変動に非依存）
+        //    + Get 間の clock 連続性（R4）
+        if (! (r.readStartIndependent[li] && r.clockContinuous[li])) x.c = false;
+        // D: block-boundary independence — ring split / partition straddle とも 0
+        //    （I5 下の構造的不発 — 0 以外は Policy R モデル破綻）
+        if (! (r.ringSplitCount[li] == 0 && r.straddleCount[li] == 0)) x.d = false;
+        // E: Phase 0 invariant — Phase 0 中 read 0 + I2 violation 0
+        if (! (r.phase0Reads[li] == 0 && r.i2ViolationCount == 0)) x.e = false;
+    }
+    return x;
+}
+
+// sweep サマリ用の 1 行（case × layer ごとの lead/margin 計測結果）
+struct P1xSweepRow
+{
+    const char* caseName = nullptr;
+    int irLen = 0;
+    int li = 0;
+    int numPartsIR = 0;
+    int ppc = 0;
+    int lead = 0;
+    long long marginMin = 0;
+    long long marginMax = 0;
+    long long theoryMarginMin = 0;   // o_L − lead
+    long long ope = 0;
+    std::uint32_t i2 = 0;
+    long long expectedEff = 0;
+    long long actualEff = 0;
+    bool effConstant = false;
+};
+
 } // anonymous namespace
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -547,7 +649,7 @@ int main()
     std::cout << "sampleRate=" << kSampleRate << " blockSize=" << kBlockSize << " (48kHz/64 専用仕様)\n\n";
 
     // ── テスト IR ──
-    constexpr int maxIrLen = 40000;
+    constexpr int maxIrLen = 46000;   // ★ P1-x-I: R2bL2 (irLen=45000) 用に拡大
     std::vector<double> ir;
     buildTestIR (maxIrLen, ir);
 
@@ -573,7 +675,17 @@ int main()
         { "T6", 12000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
         { "T7", 40000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     34752 },
         { "T8",  5000,  false, { 0 },                            0, 0,    0,     0 },
+        // ★ P1-x-I R2-b WRITE/READ-CADENCE-SPLIT sweep 追加ケース
+        //   R2b  : irLen=20000 → l1Len=17952 (nIR=36, ppc=5, distCbs=8, lead=896)・l2Len=0 → L1 のみ
+        //   R2bL2: irLen=45000 → l1Len=32768(cap) (nIR=64, ppc=8, lead=896) + l2Len=10184
+        //          (nIR=3, ppc=1, distCbs=3, lead=64×(64+3−2)=4160) — L2 lead 変動の実証
+        { "R2b",  20000, true, { 0, 4096 },                      0, 1984, 0,     0 },
+        { "R2bL2",45000, true, { 0, 4096 },                      0, 1984, 0,     34752 },
     };
+
+    // ★ P1-x-I: R2-b sweep 収集 + M1 結果収集（サマリで併記）
+    std::vector<P1xSweepRow> p1xSweep;
+    std::map<std::string, std::string> p1xM1Verdict;   // caseName → PASS/FAIL/EXCLUDED
 
     std::cout << "=== M2: 三時刻観測（主判定）===\n";
     for (const auto& cs : cases)
@@ -636,6 +748,30 @@ int main()
                 printM2Line (cs.name, runId, 1, r, cs.expectedOpeL1, cs.expectedEffL1);
             if (r.numLayers >= 3)
                 printM2Line (cs.name, runId, 2, r, cs.expectedOpeL2, cs.expectedEffL2);
+
+            // ★ P1-x-I: 5 軸判定（R2-b WRITE/READ-CADENCE-SPLIT — M2 一本化の排除）
+            const P1xAxes ax = computeP1xAxes (r, cs.expectedOpeL1, cs.expectedOpeL2);
+            for (int li = 1; li < r.numLayers; ++li)
+            {
+                const bool m2ok = r.opeConstant[li]
+                               && r.opeConst[li] == (li == 1 ? cs.expectedOpeL1 : cs.expectedOpeL2);
+                std::cout << "  P1-x axes " << cs.name << " run" << runId << " L" << li
+                          << ": A output-placement=" << (ax.a ? "PASS" : "FAIL")
+                          << " B stream-read-anchor=" << (ax.b ? "PASS" : "FAIL")
+                          << " C write/read-independence=" << (ax.c ? "PASS" : "FAIL")
+                          << " D block-boundary-independence=" << (ax.d ? "PASS" : "FAIL")
+                          << " E phase-0=" << (ax.e ? "PASS" : "FAIL")
+                          << " | M2=" << (m2ok ? "PASS" : "FAIL")
+                          << " I2=" << (r.i2ViolationCount == 0 ? "PASS" : "FAIL")
+                          << "\n";
+                p1xSweep.push_back ({ cs.name, cs.irLen, li,
+                                      r.numPartsIR[li], r.ppc[li], r.lead[li],
+                                      r.marginMin[li], r.marginMax[li],
+                                      (long long) r.outputDelaySamples[li] - r.lead[li],
+                                      r.opeConst[li], r.i2ViolationCount,
+                                      (li == 1 ? cs.expectedEffL1 : cs.expectedEffL2),
+                                      r.effConst[li], r.effConstant[li] });
+            }
             ++runId;
         }
     }
@@ -725,6 +861,8 @@ int main()
                   << " dB | band[dB] " << m1.bandDb[0] << "/" << m1.bandDb[1] << "/" << m1.bandDb[2] << "/" << m1.bandDb[3]
                   << " | seg RMS[dB] L0:" << m1.segRmsDb[0] << " L1:" << m1.segRmsDb[1] << " L2:" << m1.segRmsDb[2]
                   << std::setprecision (6) << " | gain=" << gain[1] << "/" << gain[2] << "\n";
+        p1xM1Verdict[cs.name] = cs.tailEnabled ? (m1.rmsDb < -90.0 ? "PASS" : "FAIL")
+                                               : "EXCLUDED (filterSpec mismatch)";
     }
 
     // ── M3: インパルス応答の L1/L2 成分位置同定（補助証拠） ──
@@ -770,6 +908,37 @@ int main()
                       << ", diff=" << (k2 - (n0 + cfg.offset[2])) << " (expected oPE=" << cs.expectedOpeL2 << ")\n";
         }
     }
+
+    // ══ P1-x-I: R2-b WRITE/READ-CADENCE-SPLIT sweep サマリ + R3-b′ 飽和証明 ══
+    std::cout << "\n=== P1-x R2-b WRITE/READ-CADENCE-SPLIT sweep summary ===\n";
+    std::cout << "  (write: partition-completion burst [P samples] / read: output callback [B samples]\n"
+              << "   — cadence intentionally different; NOT a ring-buffer two-segment split)\n";
+    std::cout << "  [STRUCTURAL] ring-wrap split & partition straddle: unreachable under I5 (P%B==0 and o_L%B==0)\n";
+    bool p1xAllOk = true;
+    for (const auto& s : p1xSweep)
+    {
+        const bool theoryMatch = (s.marginMin == s.theoryMarginMin);
+        const bool marginOk    = (s.marginMin >= (long long) kBlockSize);   // I2 gate 合格の runtime 意味
+        const bool effOk       = s.effConstant && s.actualEff == s.expectedEff;
+        if (! marginOk || ! effOk || s.ope != 0 || s.i2 != 0) p1xAllOk = false;
+        std::cout << "  " << std::left << std::setw (6) << s.caseName
+                  << " irLen=" << std::setw (6) << s.irLen
+                  << " L" << s.li
+                  << " nIR=" << std::setw (3) << s.numPartsIR
+                  << " ppc=" << s.ppc
+                  << " lead=" << std::setw (5) << s.lead
+                  << " margin=[" << s.marginMin << ".." << s.marginMax << "]"
+                  << " theory(oL-lead)=" << s.theoryMarginMin
+                  << " " << (theoryMatch ? "THEORY-MATCH" : "THEORY-DIFF")
+                  << " | eff=" << s.actualEff << "(exp " << s.expectedEff << (effOk ? ",MATCH)" : ",DIFF)")
+                  << " oPE=" << s.ope
+                  << " i2=" << s.i2
+                  << " M1=" << (p1xM1Verdict.count (s.caseName) ? p1xM1Verdict[s.caseName] : "n/a")
+                  << (marginOk ? "" : " [MARGIN-FAIL]") << "\n";
+    }
+    std::cout << "  [STRUCTURAL] L1 lead_max = 896 (numPartsIR <= kL1MaxParts=64 -> ppc<=8 -> distCbs<=8) — saturation by cap\n";
+    std::cout << "  [R3-b'] I2 boundary (margin==B) unreachable under current ppc design — scheduler-change-dependent\n";
+    std::cout << "  P1-x sweep verdict: " << (p1xAllOk ? "PASS" : "FAIL") << "\n";
 
     std::cout << "\n=== EXIT: structural failures = " << structuralFailures << " ===\n";
     std::cout << "B13 判定（outputPlacementError）は上記 M2 行の値と判定帯（==0 / 1..64 / >=128）で Step 4 解析してください。\n";

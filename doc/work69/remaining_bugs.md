@@ -22,7 +22,7 @@
 
 ## P1 — 要修正
 
-### RB-01: `pendingIntentCount()` が fallback queue を計上していない 🟡 P1
+### RB-01: `pendingIntentCount()` が fallback queue を計上していない ✅ 解決済み（2026-09-12 現行ソース再判定）
 
 **発見経緯**: 第二次監査 #1。graphify path 確認 + semble 検索で発見。
 
@@ -58,9 +58,16 @@ std::uint64_t RetireRuntime::pendingIntentCount() const noexcept
 
 **因果関係**: ✅ B14 改修の一部。既存コードでは `retireIntentHead_/Tail_` で維持していた fallback カウントが Vyukov 移行で欠落。
 
+**解決（2026-09-12 現行ソース再判定 — read-only audit）**:
+- `LifetimeState::pendingIntentCount()`（`ISRRetire.cpp:183-190`）は **`mainPending + fbPending` で fallback 計上済み** — 本修正案と同一形が実装済み。
+- `approxQueueDepth()`（`ISRRetire.h:100-107`・「★ B14: Queue Pressure 診断」）も同様に `mainPending + fbPending`。
+- `fallbackQueueDepth` も Threading 側で「★ P1-9: ring+fallback 合計」として実装済み。
+- 回帰カバレッジ: `ShutdownRetireIntentDrainTests.cpp`（pendingIntentCount drain 契約 — CTest 40/40 内）。
+- Required action: NONE。stale bug record。
+
 ---
 
-### RB-11: `setProcessingOrder()` に `sendChangeMessage()` 欠落 🟡 P1
+### RB-11: `setProcessingOrder()` に `sendChangeMessage()` 欠落 ✅ 解決済み（2026-09-12 現行ソース再判定）
 
 **発見経緯**: 元文書 `bug_final_report.md` Appendix K で確定された B0 バグ。
 第一次監査では見落とし。第二次監査でコード確認により確定。
@@ -90,6 +97,11 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
 **ファイル**: `src/audioengine/AudioEngine.Parameters.cpp`
 
 **因果関係**: 🔴 B14/B13/B20 等とは独立した既存バグ。work69 スコープ確認時に発見され放置。
+
+**解決（2026-09-12 現行ソース再判定 — read-only audit）**:
+- 現行 `setProcessingOrder`（`AudioEngine.Parameters.cpp:268-275`）には **`sendChangeMessage()` が :274 に存在**（記録時の構造から変更済み）。
+- 他 setter（:161/:172/:188）と同形の対称実装。唯一の呼び出し元は `MainWindow.cpp:1372/1377`（Non-RT）。
+- Required action: NONE。stale bug record。
 
 ---
 
@@ -229,7 +241,7 @@ prevLayerTotalSamples += cfgs[li].len;                        // line 1120
 
 ---
 
-### RB-02: `goto final_drop` の構造的問題 🟢 P2
+### RB-02: `goto final_drop` の構造的問題 ✅ 解決済み（2026-09-12 現行ソース再判定 — 構造自体が不存在）
 
 **発見経緯**: 第二次監査 #2。ast-grep 構造検出。
 
@@ -242,11 +254,18 @@ C++ 上 UB ではないが制御フローが追いにくい。
 
 **因果関係**: ✅ B14 改修で新規に発生。
 
+**解決（2026-09-12 現行ソース再判定 — read-only audit）**:
+- **`final_drop` は現行ソースに存在しない**: `rg "final_drop" src/` = 0 件・`ConvoPeq.md`（2026-09-12 16:00:44 版・HEAD 2451d964 と同一内容）でも 0 件。**`goto` 自体が src/audioengine/ 全体で 0 件** — 台帳の修正案（ラベル移動）を超えて goto を使わない直線構造に再設計済み。
+- 現行 `emitRetireIntent`（`ISRRetire.cpp:23-60`）: Vyukov ticket → bounded spin（64）→ 失敗時 tombstone + fallback enqueue（mutex + capacity チェック + overflowCount）。制御フロー追いにくさの原因は消滅。
+- Non-RT 境界は `emitRetireIntentNonRT`（cpp:94-103・work92 big 1-7 リネーム）で明文化 — 呼び出し元 `AudioEngine.Commit.cpp:485` は全て非 RT 確認済み（`ISRRuntimePublicationCoordinator.cpp:352/364/390` は OverflowRing drain 系・同じく非 RT）。
+- 回帰カバレッジ: `ShutdownRetireIntentDrainTests.cpp`（Case 1-8）+ `PriorityIntegrationTests.cpp`（CTest 40/40 内）。
+- Required action: NONE。stale bug record（symptom removed）。
+
 ---
 
 ## P3 — 軽微な改善
 
-### RB-07: `dryBypassBufferFloatL/R` 完全なデッドコード 🟢 P3
+### RB-07: `dryBypassBufferFloatL/R` 完全なデッドコード ✅ 解決済み（2026-09-12 現行ソース再判定 — メンバ削除済み）
 
 **発見経緯**: 第一次監査 #6 / 第二次監査 #6。semble 検索 + 全参照確認。
 
@@ -268,9 +287,14 @@ Float 版 bypass blend は `dryBypassBufferDouble` を使用するため、こ�
 
 **因果関係**: ✅ B01 改修で Float 版バッファを Double に統合した際の残骸。
 
+**解決（2026-09-12 現行ソース再判定 — read-only audit）**:
+- **メンバ自体が現行ソースから削除済み**: `rg "dryBypassBufferFloat" src/` = 0 件・`ConvoPeq.md`（16:00:44 版）も 0 件。
+- Float bypass path は **dryBypassBufferDoubleL/R を使用**（`DSPCoreFloat.cpp:254-258`「★ B01: Float 版 dry 信号保存 (Double 版と同じ dryBypassBufferDouble を使用)」+ :409-438 blend 経路・`dryBypassCapacityDouble` は AudioEngine.h:1017 で現行使用中）。
+- historical dead-code 判定（P3-CONFIRMED）は正当で、削除が実施済み。Required action: NONE。
+
 ---
 
-### RB-03: `fallbackQueuePeak_` CAS loop が mutex 下で冗長 🟢 P3
+### RB-03: `fallbackQueuePeak_` CAS loop が mutex 下で冗長 ✅ historical claim 解決済み + 現行観察（2026-09-12 再判定）
 
 **発見経緯**: 第二次監査 #3。
 
@@ -279,6 +303,12 @@ Float 版 bypass blend は `dryBypassBufferDouble` を使用するため、こ�
 **修正案**: `convo::publishAtomic(fallbackQueuePeak_, fbCountVal, memory_order_release)` に単純化。
 
 **ファイル**: `src/audioengine/ISRRetire.cpp` emitRetireIntent()
+
+**解決 + 現行観察（2026-09-12 現行ソース再判定 — read-only audit）**:
+- **historical claim（CAS 冗長）は解決済み**: 現行 write は 1 箇所（`ISRRetire.cpp:49`）で **publishAtomic = 単純 store**（`AtomicAccess.h:52-57` — `std::atomic_store_explicit`・CAS ではない）。write は fallbackMutex_ lock 下（:44-50）。
+- **現行観察 1 — peak 意味論の不一致**: 現行 store は「enqueue 成功時の fallbackCount_ 現在値」の無条件 store で、**単調非減少（high-watermark）ではない**（drain 後の再 enqueue で値が下がる）。`fallbackHighWatermark()` / `fallbackQueuePeak_` の名前に反する。
+- **現行観察 2 — 消費者 0 件**: `fallbackHighWatermark()` / `fallbackOccupancy()` の呼び出し元は src/ 全体で 0 件（HealthMonitor / telemetry 未接続）— **dead metric**（symbol 7 件すべて declaration/definition — 分類 C）。
+- **Disposition（2026-09-12 RB-03 Disposition Audit）**: **Option C — dead metric として削除候補に確定**。削除スコープ: `fallbackQueuePeak_`（h:167）+ `fallbackHighWatermark()`（h:75/cpp:236-238）+ write 行（cpp:49・enqueue 自体は維持）。fallbackOccupancy は別枠（同 consumer 0 件だが fallbackCount_ の 1 行 wrapper）。**実装は別 commit**（P1-x-I commit に混ぜない — 責務分離）。ISR-OBS-001/HM-001/ATM-001/002 いずれも PASS（metric 処置により不変条件は変化しない）。
 
 **因果関係**: ✅ B14 改修で新規に発生。
 
@@ -334,10 +364,10 @@ Float 版 bypass blend は `dryBypassBufferDouble` を使用するため、こ�
 
 | ID | 項目 | 重要度 | 原因 | ファイル | 工数 |
 |----|------|--------|------|---------|------|
-| **RB-01** | `pendingIntentCount()` fallback 不計上 | 🟡 P1 | B14 改修起因 | ISRRetire.cpp | 10分 |
-| **RB-11** | `setProcessingOrder` sendChangeMessage 欠落 | 🟡 P1 | 既存バグ | Parameters.cpp | 5分 |
+| **RB-01** | `pendingIntentCount()` fallback 不計上 | ✅ 解決済 | fallback 計上実装済み（cpp:183-190・h:100-107）— work57 RB audit で閉包 | ISRRetire.cpp | 閉包 |
+| **RB-11** | `setProcessingOrder` sendChangeMessage 欠落 | ✅ 解決済 | sendChangeMessage 実装済み（Parameters.cpp:274）— work57 RB audit で閉包 | Parameters.cpp | 閉包 |
 | **RB-05** | delayLineBuf capacity < partSize（コード事実確認） | ✅ 解決済 | capacity 式実装済み（cpp:1007）+ I3 gate 実測（work57 B13 監査で閉包） | MKLNonUniformConvolver.cpp | 閉包 |
-| **RB-02** | `goto final_drop` 構造的問題 | 🟢 P2 | B14 改修起因 | ISRRetire.cpp | 5分 |
-| **RB-07** | `dryBypassBufferFloatL/R` デッドコード | 🟢 P3 | B01 改修残骸 | AudioEngine.h | 5分 |
-| **RB-03** | CAS loop 冗長 | 🟢 P3 | B14 改修起因 | ISRRetire.cpp | 5分 |
+| **RB-02** | `goto final_drop` 構造的問題 | ✅ 解決済 | goto/final_drop 自体が現行ソースに不存在（work57 RB audit で閉包） | ISRRetire.cpp | 閉包 |
+| **RB-07** | `dryBypassBufferFloatL/R` デッドコード | ✅ 解決済 | メンバ自体が現行ソースから削除済み — work57 RB audit で閉包 | AudioEngine.h | 閉包 |
+| **RB-03** | CAS loop 冗長 | ✅ historical claim 解決済 + 現行観察（peak 意味論不一致・消費者 0 件の dead metric）| ISRRetire.cpp | 別変更候補（低優先） |
 | **RB-08** | MT-NUPC-03 Debug 異常終了 | ✅ 解決済 | バッファ範囲外アクセス | MT-NUPC-Measurement.cpp | 修正済 |
