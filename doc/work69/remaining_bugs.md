@@ -369,5 +369,5 @@ Float 版 bypass blend は `dryBypassBufferDouble` を使用するため、こ�
 | **RB-05** | delayLineBuf capacity < partSize（コード事実確認） | ✅ 解決済 | capacity 式実装済み（cpp:1007）+ I3 gate 実測（work57 B13 監査で閉包） | MKLNonUniformConvolver.cpp | 閉包 |
 | **RB-02** | `goto final_drop` 構造的問題 | ✅ 解決済 | goto/final_drop 自体が現行ソースに不存在（work57 RB audit で閉包） | ISRRetire.cpp | 閉包 |
 | **RB-07** | `dryBypassBufferFloatL/R` デッドコード | ✅ 解決済 | メンバ自体が現行ソースから削除済み — work57 RB audit で閉包 | AudioEngine.h | 閉包 |
-| **RB-03** | CAS loop 冗長 | ✅ historical claim 解決済 + 現行観察（peak 意味論不一致・消費者 0 件の dead metric）| ISRRetire.cpp | 別変更候補（低優先） |
+| **RB-03** | CAS loop 冗長 / dead metric | ✅ 解決済（Gate 6 commit `0428951e` で削除・Gate 7 PASS・clang-tidy error 0）| ISRRetire.cpp | 閉包 |
 | **RB-08** | MT-NUPC-03 Debug 異常終了 | ✅ 解決済 | バッファ範囲外アクセス | MT-NUPC-Measurement.cpp | 修正済 |
