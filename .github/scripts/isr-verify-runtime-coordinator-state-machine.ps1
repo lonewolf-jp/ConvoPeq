@@ -44,18 +44,45 @@ if (-not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorSt
     $violations.Add('commit must implement Publishing -> swapPending(true) -> metadata publish -> swapPending(false) -> Ready sequence')
 }
 
-if (-not [regex]::IsMatch($cppText, 'static_cast<std::uint64_t>\(sequenceId\) > static_cast<std::uint64_t>\(prevSeqId\)') -or
+# ★ work93 refresh (dash2 §1.6.1 同期): sequence/epoch の単調性は wraparound-safe modular
+#   comparison（convo::isr::isAfter / SequenceArithmetic.h）で強制するのが现行契約
+#   （isAfter(a,b)==(a>b) at 非 wrap 値・seq/epoch は +1 増加のため semantics-preserving）。
+#   mappedGeneration は raw 比較維持。旧条項の static_cast<uint64_t> raw > regex は
+#   c8ca439b (2026-08-11) 時点形で、3b43a35d (2026-09-10, work89 Phase H) の意図的再設計が
+#   未反映だった → 検査側を现行契约へ同期（production code を旧形へ戻す方向は禁止）。
+if (-not [regex]::IsMatch($cppText, 'convo::isr::isAfter\(sequenceId, prevSeqId\)') -or
+    -not [regex]::IsMatch($cppText, 'convo::isr::isAfter\(epoch, prevEpoch\)') -or
     -not [regex]::IsMatch($cppText, 'mappedGeneration > prevGen')) {
-    $violations.Add('commit must enforce monotonic sequence (non-increasing sequenceId => Faulted)')
+    $violations.Add('commit must enforce monotonic sequence via wraparound-safe isAfter(seq/epoch) + gen comparison (non-monotonic => Faulted)')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorld \|\| oldWorld == nullptr\)\s*\{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
     $violations.Add('retire must fail-closed to Faulted on invalid boundary/oldWorld')
 }
 
-if (-not [regex]::IsMatch($cppText, 'const auto backlog = convo::consumeAtomic\(retireBacklogCount_, std::memory_order_acquire\) \+ 1u;') -or
-    -not [regex]::IsMatch($cppText, 'setRetireBacklogCount\(backlog\);')) {
-    $violations.Add('retire must update backlog through setRetireBacklogCount(backlog+1) in thin coordinator mode')
+# ★ work93 refresh (dash2 §1.4 同期): 现行 accounting contract —
+#   retire() は retireBacklogCount_ を直接増やさない（元 setRetireBacklogCount 上書き設計の
+#   commit 毎無制限増加回帰を防止。retire の実測判定は Layer 1 が pendingRetireCount +
+#   pendingIntentCount を直参照）。accounting の本体は semantic event 対
+#   onRetireAccepted()（fetch_add + noteRetireBacklogChanged）/ onRetireConsumed()
+#   （old>0 underflow guard + fetch_sub、違反時 Faulted）。setRetireBacklogCount は
+#   TEST-ONLY（production 絶対値上書き禁止）。旧条項「retire must update backlog through
+#   setRetireBacklogCount(backlog+1)」は c8ca439b (08-11) 時点形で 3b43a35d (09-10) の
+#   意図的再設計が未反映 → 検査側を现行契约へ同期（production code は変更しない）。
+$retireFn = [regex]::Match($cppText, 'void RuntimeIntentCoordinator::retire\([^{]*\{[\s\S]*?\n\}')
+if (-not $retireFn.Success) {
+    $violations.Add('retire(...) definition not found for backlog contract check')
+} elseif ([regex]::IsMatch($retireFn.Value, 'fetchAddAtomic\(retireBacklogCount_')) {
+    $violations.Add('retire must NOT increment retireBacklogCount_ directly (dash2 §1.4: accounting via onRetireAccepted/onRetireConsumed)')
+}
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::onRetireAccepted\(\) noexcept \{[\s\S]*?fetchAddAtomic\(retireBacklogCount_')) {
+    $violations.Add('onRetireAccepted must account backlog via fetchAddAtomic(retireBacklogCount_ ...) (dash2 §1.4)')
+}
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::onRetireConsumed\(\) noexcept \{[\s\S]*?if \(old > 0\)[\s\S]*?fetchSubAtomic\(retireBacklogCount_')) {
+    $violations.Add('onRetireConsumed must guard underflow (old > 0) before fetchSubAtomic(retireBacklogCount_ ...) (dash2 §1.4)')
+}
+if (-not [regex]::IsMatch($cppText, 'TEST-ONLY[\s\S]{0,160}void RuntimeIntentCoordinator::setRetireBacklogCount')) {
+    $violations.Add('setRetireBacklogCount must remain TEST-ONLY marked (dash2 §1.4: production absolute-value overwrite prohibited)')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(backlog > 0\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Pressure') -and

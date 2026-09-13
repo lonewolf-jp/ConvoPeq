@@ -55,9 +55,13 @@ if (-not [regex]::IsMatch($retireText, 'publishAtomic\(retirePressureAdmissionSt
 }
 
 # ★ 2026-08-11: FUTURE-4 で persistentState_ キャッシュを廃止し、currentWorld_ から prev metadata を取得
+# ★ work93 sync (dash2 §1.7 CW-3b): prev metadata の baseline は明示 prevWorld 引数
+#   （RuntimeWorldAuthority が RuntimeStore::current から供給）へ移行 — currentWorld_ 参照自体が
+#   read/write dependency 除去のため撤去された（意味は同一・依存が単一化されより強い）。
+#   旧 regex の currentWorld_ cast 形は形式失効 → 検査側のみ同期。
 if (-not [regex]::IsMatch($coordinatorText,
-    'const auto prevWorld = static_cast<const RuntimeState\*>\(')) {
-    $violations.Add('ISRRuntimePublicationCoordinator.cpp must read prev metadata from currentWorld_ before monotonic checks') | Out-Null
+    'const auto prevSeqId = prevWorld \? prevWorld->publication\.sequenceId')) {
+    $violations.Add('ISRRuntimePublicationCoordinator.cpp must read prev metadata from explicit prevWorld baseline (CW-3b) before monotonic checks') | Out-Null
 }
 
 # ★ 2026-08-11: FUTURE-4 で metadata は currentWorld_ に bake（persistentState_ 廃止）
@@ -66,16 +70,19 @@ if (-not [regex]::IsMatch($coordinatorText,
     $violations.Add('ISRRuntimePublicationCoordinator.cpp must bake publication semantics onto currentWorld_ after monotonic checks') | Out-Null
 }
 
-# isMonotonic 冁E��実裁E�E監査�E�Eeturn false への改悪を防止�E�E
+# isMonotonic 冁E実裁EE監査EEeturn false への改悪を防止EE
 # isMonotonic はヘッダのインライン定義なので combinedCoordinatorText を使用
 # ★ 2026-08-11: isMonotonic メソッドは廃止し、commit() 内でインライン比較（FUTURE-4）
+# ★ work93 sync (dash2 §1.6.1 Phase H): seq/epoch 比較は wraparound-safe modular
+#   comparison（convo::isr::isAfter）へ進化（非 wrap 値で (a>b) と同値・+1 増加のため
+#   semantics-preserving）。mappedGeneration は raw 比較維持。検査側のみ同期。
 if (-not [regex]::IsMatch($coordinatorText,
-    'static_cast<std::uint64_t>\(sequenceId\) > static_cast<std::uint64_t>\(prevSeqId\)')) {
-    $violations.Add('commit(): sequenceId strict monotonic contract violated') | Out-Null
+    'convo::isr::isAfter\(sequenceId, prevSeqId\)')) {
+    $violations.Add('commit(): sequenceId strict monotonic contract violated (isAfter modular comparison required)') | Out-Null
 }
 if (-not [regex]::IsMatch($coordinatorText,
-    'static_cast<std::uint64_t>\(epoch\) > static_cast<std::uint64_t>\(prevEpoch\)')) {
-    $violations.Add('commit(): epoch strict monotonic contract violated') | Out-Null
+    'convo::isr::isAfter\(epoch, prevEpoch\)')) {
+    $violations.Add('commit(): epoch strict monotonic contract violated (isAfter modular comparison required)') | Out-Null
 }
 if (-not [regex]::IsMatch($coordinatorText,
     'mappedGeneration > prevGen')) {

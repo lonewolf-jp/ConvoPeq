@@ -12,9 +12,10 @@ $inventoryScriptPath = Join-Path $repoRoot '.github\scripts\isr-generate-authori
 $coordinatorHeaderPath = Join-Path $repoRoot 'src\audioengine\ISRRuntimePublicationCoordinator.h'
 $coordinatorSourcePath = Join-Path $repoRoot 'src\audioengine\ISRRuntimePublicationCoordinator.cpp'
 $commitSourcePath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Commit.cpp'
+$worldAuthorityPath = Join-Path $repoRoot 'src\audioengine\RuntimeWorldAuthority.h'
 $audioEngineSourceRoot = Join-Path $repoRoot 'src\audioengine'
 
-foreach ($path in @($inventoryScriptPath, $coordinatorHeaderPath, $coordinatorSourcePath, $commitSourcePath)) {
+foreach ($path in @($inventoryScriptPath, $coordinatorHeaderPath, $coordinatorSourcePath, $commitSourcePath, $worldAuthorityPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Publication single-path gate missing required file: $path"
     }
@@ -24,6 +25,7 @@ $inventoryScript = Get-Content -LiteralPath $inventoryScriptPath -Raw -Encoding 
 $coordinatorHeader = Get-Content -LiteralPath $coordinatorHeaderPath -Raw -Encoding UTF8
 $coordinatorSource = Get-Content -LiteralPath $coordinatorSourcePath -Raw -Encoding UTF8
 $commitSource = Get-Content -LiteralPath $commitSourcePath -Raw -Encoding UTF8
+$worldAuthorityText = Get-Content -LiteralPath $worldAuthorityPath -Raw -Encoding UTF8
 
 $violations = New-Object 'System.Collections.Generic.List[string]'
 
@@ -45,15 +47,24 @@ if (-not [regex]::IsMatch($coordinatorHeader, 'void\s+commit\s*\(\s*PublishAutho
     $violations.Add('RuntimeIntentCoordinator header missing commit(authority, boundary, world, version) signature')
 }
 
-if (-not [regex]::IsMatch($coordinatorHeader, 'void\s+commit\s*\(\s*PublishAuthority\s*,\s*RuntimeBoundary\s+boundary\s*,\s*const\s+void\*\s+newWorld\s*,\s*std::uint64_t\s+version\s*,\s*PublicationSequenceId\s+sequenceId\s*,\s*PublicationEpoch\s+epoch\s*,\s*std::uint64_t\s+mappedGeneration\s*\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
-    $violations.Add('RuntimeIntentCoordinator header missing semantic commit(authority, boundary, world, version, sequenceId, epoch, mappedGeneration) signature')
+# ★ work93 sync (dash2 §1.7 CW-3b): semantic commit は prevWorld（RuntimeStore::current 由来の
+#   monotonicity baseline 明示依存）を追加した 8 引数形が现行契约。7 引数旧 regex は形式失効。
+if (-not [regex]::IsMatch($coordinatorHeader, 'void\s+commit\s*\(\s*PublishAuthority\s*,\s*RuntimeBoundary\s+boundary\s*,\s*const\s+void\*\s+newWorld\s*,\s*std::uint64_t\s+version\s*,\s*PublicationSequenceId\s+sequenceId\s*,\s*PublicationEpoch\s+epoch\s*,\s*std::uint64_t\s+mappedGeneration\s*(?:,\s*const\s+RuntimeState\*\s+prevWorld\s*)?\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+    $violations.Add('RuntimeIntentCoordinator header missing semantic commit(authority, boundary, world, version, sequenceId, epoch, mappedGeneration[, prevWorld]) signature')
 }
 
+# ★ work93 sync (CW-3b 単一経路): commit 呼出は RuntimeWorldAuthority.publishAndSwap の
+#   coordinator_.commit(PublishAuthority::Granted, ...) 1 箇所に収束（bridge/legacy 呼出は 0 のまま
+#   強制 — 意味は同一、位置だけ進化）。旧 regex（AudioEngine.Commit.cpp 内に 1 呼出）は形式失効。
 $commitRuntimePublicationCount = ([regex]::Matches($commitSource, 'commitRuntimePublication\(world\)')).Count
 $bridgeCommitCallCount = ([regex]::Matches($commitSource, 'runtimePublicationBridge_\.commit\s*\(')).Count
-$publishCommitPathCount = $commitRuntimePublicationCount + $bridgeCommitCallCount
+$authorityCommitCount = ([regex]::Matches($worldAuthorityText, 'coordinator_\.commit\(PublishAuthority::Granted')).Count
+$publishCommitPathCount = $authorityCommitCount
+if ($commitRuntimePublicationCount -ne 0 -or $bridgeCommitCallCount -ne 0) {
+    $violations.Add("legacy/bridge commit path must be zero (legacy=$commitRuntimePublicationCount bridge=$bridgeCommitCallCount)")
+}
 if ($publishCommitPathCount -ne 1) {
-    $violations.Add("publish-to-commit call count mismatch: expected=1 actual=$publishCommitPathCount (legacy=$commitRuntimePublicationCount bridge=$bridgeCommitCallCount)")
+    $violations.Add("publish-to-commit single-path mismatch: authorityCommitCount=$publishCommitPathCount (expected=1 at RuntimeWorldAuthority.publishAndSwap)")
 }
 
 if (-not [regex]::IsMatch($commitSource, 'runPublicationPrecheckNonRt\(const RuntimePublishWorld& world\)')) {
@@ -122,6 +133,7 @@ $report = [ordered]@{
         commitDefinitionCount = $sourceCommitCount
         commitRuntimePublicationCount = $commitRuntimePublicationCount
         bridgeCommitCallCount = $bridgeCommitCallCount
+        authorityCommitCount = $authorityCommitCount
         publishCommitPathCount = $publishCommitPathCount
         frozenPrecheck = [regex]::IsMatch($commitSource, 'world\.isFrozen\s*\(\s*\)')
         sealedPrecheck = [regex]::IsMatch($commitSource, 'world\.isSealedRecursively\s*\(\s*\)')

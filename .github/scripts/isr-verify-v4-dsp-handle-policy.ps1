@@ -67,10 +67,18 @@ if ($dspHandleCppText -notmatch 'void DSPHandleRuntime::quarantine\(') {
 }
 
 # ★ 2026-08-11: R4 Phase 7（DELETE-7）で旧 shutdownReclaim バイパスを削除し、
-#   Reclaim Authority（RuntimeIntentCoordinator::reclaim(ShutdownQuiescent)）に一本化。
-#   ReleaseResources は RuntimePublicationBridge（Coordinator）経由で reclaim を実行する。
-if ($releaseResourcesText -notmatch 'runtimePublicationBridge_\.reclaim\(') {
-    throw 'Shutdown reclaim path must route through the Coordinator Reclaim Authority (runtimePublicationBridge_.reclaim).'
+#   Reclaim Authority に一本化。
+# ★ work93 refresh: dash2 §2.2 Step 12-14（work88）で供給経路が
+#   ReleaseResources → tryShutdownQuiescentReclaim（Proof→Permit→reclaim 一括 helper・AC-2）
+#   → runtimePublicationBridge_.reclaimShutdownQuiescent（Permit consume — single-use）へ
+#   進化しており、旧 regex（reclaim( を ReleaseResources 直下に要求）は形式だけ失効していた。
+#   意味（Coordinator Reclaim Authority 一本・bypass 禁止）は保持、検査は同一強度以上へ同期
+#   （helper 単一入口 + bridge shutdown-quiescent API の両方を要求）。production code は変更しない。
+if ($releaseResourcesText -notmatch 'tryShutdownQuiescentReclaim\(') {
+    throw 'Shutdown reclaim path must route through the single Proof->Permit->reclaim helper entry (tryShutdownQuiescentReclaim, dash2 §2.2 Step 12).'
+}
+if ($audioEngineText -notmatch 'runtimePublicationBridge_\.reclaimShutdownQuiescent\(') {
+    throw 'Shutdown reclaim helper must reach the Coordinator Reclaim Authority via runtimePublicationBridge_.reclaimShutdownQuiescent (Permit consume).'
 }
 
 $hasHandleRuntimeObservePath = ($audioEngineCppText -match 'dspHandleRuntime_\.resolve\(')

@@ -37,8 +37,20 @@ if ($commitCppText -notmatch 'void\s+AudioEngine::onRuntimeRetiredNonRt\(const\s
 }
 
 # ★ 2026-08-11: emitRetireIntentRT は LifetimeState（worldAuthority_.lifetime()）経由に変更
-if ($commitCppText -notmatch 'worldAuthority_\.lifetime\(\)\.emitRetireIntentRT\(') {
-    throw 'R9 bridge path must emit retire intent from callback detection path.'
+# ★ work93 sync (D132 M2 / Step 12 設計): RT callback 検出経路は「RT 上での intent 発行」から
+#   SPSC 純シグナル（crossfadeRuntime_.notifyRampComplete — identity 非携帯）へ移行し、
+#   intent 発行本体は NonRT bridge 経路（willRetire → onRuntimeRetiredNonRt →
+#   lifetime().emitRetireIntentNonRT）に収束した。旧 regex（emitRetireIntentRT）は形式失効。
+#   同期は検査側のみ・両端束縛で強度以上（RT 側の直接 intent 発行復活は (ii) で検出、
+#   検出シグナル喪失は (i) で検出）。production code は変更しない。
+if ($commitCppText -notmatch 'worldAuthority_\.lifetime\(\)\.emitRetireIntentNonRT\(') {
+    throw 'R9 bridge path must emit retire intent via LifetimeState on NonRT (emitRetireIntentNonRT, D132 M2).'
+}
+$rtDetectPath = Join-Path $repoRoot "src\audioengine\AudioEngine.Processing.AudioBlock.cpp"
+if (-not (Test-Path -LiteralPath $rtDetectPath)) { throw "Missing file: $rtDetectPath" }
+$rtDetectText = Get-Content -LiteralPath $rtDetectPath -Raw -Encoding UTF8
+if ($rtDetectText -notmatch 'notifyRampComplete\(') {
+    throw 'R9 RT callback detection must signal ramp-complete edge to NonRT (crossfadeRuntime_.notifyRampComplete, D132 M2 SPSC).'
 }
 
 # ★ 2026-08-11: retire enqueue は LifetimeState（worldAuthority_.lifetime()）経由に変更

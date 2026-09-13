@@ -93,17 +93,21 @@ $results.Add((New-CheckResult -Id 'C3' -Description 'retireRuntimePublication re
 
 # C4: AudioEngine authority legacy ops removed from legacy path
 # ISR Bridge 移行後の正規関数は除外（例: commitOrRollbackProbe, publishIdleWorldOnly）
+# ★ work93 refresh: commit 供給経路は Sprint-2/#21 以降 Bridge の責務から外れ、
+#   RuntimeWorldAuthority の publishAndSwap が coordinator.commit(PublishAuthority::Granted) を
+#   呼ぶ単一 authority 経路へ移行した（旧 regex の runtimePublicationBridge_.commit( は形式失効）。
+#   検査意図（legacy ops ゼロ + commit の単一正规経路強制）は維持、同期は検査側のみの変更。
 $c4LegacyCommit = Count-RegexMatches -Files $files -Pattern '\bprepareCommit\s*\('
 $c4LegacyExecute = Count-RegexMatches -Files $files -Pattern '\bexecuteCommit\s*\('
 $c4LegacyCommitNewDsp = Count-RegexMatches -Files $files -Pattern '\bcommitNewDSP\s*\('
-$c4BridgeCommit = Count-RegexMatches -Files $files -Pattern 'runtimePublicationBridge_\.commit\s*\('
+$c4CommitAuthority = Count-RegexMatches -Files $files -Pattern 'coordinator_\.commit\(PublishAuthority::Granted'
 $c4BridgeRetire = Count-RegexMatches -Files $files -Pattern 'runtimePublicationBridge_\.retire\s*\('
 $c4ForbiddenAudioEngineOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commit|publish|retire|build|activate)\w*\s*\('
 # ISR Bridge 正規関数を除外（commitOrRollbackProbe, publishIdleWorldOnly, retirePublishedDSP）
 $c4IsrBridgeOps = Count-RegexMatches -Files $files -Pattern '\bAudioEngine::(?:commitOrRollbackProbe|publishIdleWorldOnly|retirePublishedDSP)\s*\('
 $c4ForbiddenAudioEngineOps = [Math]::Max(0, $c4ForbiddenAudioEngineOps - $c4IsrBridgeOps)
-$c4Status = if ($c4LegacyCommit -eq 0 -and $c4LegacyExecute -eq 0 -and $c4LegacyCommitNewDsp -eq 0 -and $c4BridgeCommit -ge 1 -and $c4BridgeRetire -ge 1 -and $c4ForbiddenAudioEngineOps -eq 0) { 'pass' } else { 'fail' }
-$c4Evidence = "legacyPrepareCommit=$c4LegacyCommit legacyExecuteCommit=$c4LegacyExecute legacyCommitNewDSP=$c4LegacyCommitNewDsp bridgeCommit=$c4BridgeCommit bridgeRetire=$c4BridgeRetire forbiddenAudioEngineOps=$c4ForbiddenAudioEngineOps"
+$c4Status = if ($c4LegacyCommit -eq 0 -and $c4LegacyExecute -eq 0 -and $c4LegacyCommitNewDsp -eq 0 -and $c4CommitAuthority -ge 1 -and $c4BridgeRetire -ge 1 -and $c4ForbiddenAudioEngineOps -eq 0) { 'pass' } else { 'fail' }
+$c4Evidence = "legacyPrepareCommit=$c4LegacyCommit legacyExecuteCommit=$c4LegacyExecute legacyCommitNewDSP=$c4LegacyCommitNewDsp commitAuthorityPath=$c4CommitAuthority bridgeRetire=$c4BridgeRetire forbiddenAudioEngineOps=$c4ForbiddenAudioEngineOps"
 $results.Add((New-CheckResult -Id 'C4' -Description 'AudioEngine authority operations removed from legacy path' -Status $c4Status -Evidence $c4Evidence)) | Out-Null
 
 # C6: execution branch must not depend on transition.active / execution.transitionActive
