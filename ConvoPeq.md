@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-13 14:15:44
+> Generated: 2026-09-13 23:06:47
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -7464,6 +7464,25 @@ public:
 private:
     static std::atomic<int> latencyClampCounterStorage_;
     static std::atomic<int>& latencyClampCounter() noexcept;
+
+    // ★ H-02 (H02-C1/C2/C3): canonical IR ピーク遅延測定（両呼出点の単一権威）。
+    //   argmax_{ch∈[0,C), i∈[0,N)} |sample[ch][i]|、N = min(ir.getNumSamples(), targetLength)、
+    //   C = ir.getNumChannels() 実測のみ。走査 ch-major・i 昇順・strict > 比較のため
+    //   同値タイブレークは lowest index（初回到達ピーク）。非有限サンプル（NaN/±Inf）は
+    //   std::isfinite で比較から除外（全除外時 0）。targetLength <= 0 / C == 0 / N == 0 ⇒ 0。
+    //   決定的純関数・noexcept・アロケーション無し。職掌は測定のみ（IR validation /
+    //   scaleFactor / publishAtomic / ownership は非関与）。
+    //   定義: ConvolverProcessor.LoadPipeline.cpp
+    //   呼出点: LoaderThread::buildConvolverFromTrimmed / applyComputedIR (RCU)
+    static int measureIrPeakLatencySamples(const juce::AudioBuffer<double>& ir,
+                                           int targetLength) noexcept;
+
+#if defined(CONVOPEQ_UNIT_TESTS)
+    // ★ H-02 T4 テストシーム: private helper 直接検証用（本番 API を増やさない）。
+    //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
+    //   Production ビルド（CONVOPEQ_UNIT_TESTS 未定義）では宣言ごと存在せずバイナリ無変更。
+    friend struct IRPeakLatencyTestAccess;
+#endif
 
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
@@ -37800,8 +37819,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
         latencyBufSize = 0;
         latencyWritePos = 0;
-        convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
-        convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
+        // ★ SR-03 (SR03-C1): latencyDelay 書込を唯一の publish 関口へ収束
+        //   （rollback では latencyBufSize=0 が先行 → cap=0 → (0,0) 固定。旧直接 publishAtomic 廃止）。
+        publishLatencyDelayAtomics(0, 0);
         convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
         crossfadeRuntime_.reset();
         refreshCrossfadePreparedSnapshotFromAtomics();
@@ -46272,6 +46292,8 @@ private:
     // 遅延値はatomicで管理（MessageThread→AudioThread）
     std::atomic<int> latencyDelayOld { 0 };
     std::atomic<int> latencyDelayNew { 0 };
+    // ★ SR-03 (SR03-C1): publish 時 clamp 発動の telemetry（NonRT 書込 / NonRT 観測）。
+    std::atomic<uint64_t> latencyDelayClampCount_ { 0 };
     int dspCrossfadeStartDelayBlocks_RT = 0;
     bool dspCrossfadeArmed_RT = false;
     // バッファリセット要求（MessageThread→AudioThread）
@@ -47366,11 +47388,40 @@ public:
         AudioEngine::DSPCore* currentAfterFade,
         convo::TransitionPolicy idlePolicy) noexcept;
 
+    // ★ SR-03 (SG-1 案A / SR03-C1): latencyDelayOld/New の唯一 publish 関口（publish 権威収束）。
+    //   契約: 入力域は RT 消費前提条件ではなく publish 時点で保証する（RT 側 clamp 禁止）。
+    //     cap = (latencyBufSize > 0) ? latencyBufSize - 1 : 0
+    //     published = jlimit(0, cap, raw)
+    //     latencyBufSize == 0（未確保）は (0,0) 固定 ＝ 明示的安全契約。
+    //     oldDelay / newDelay は独立に超過判定し、超過値ごとに latencyDelayClampCount_ 1 増 + NonRT ログ。
+    //   线程契约: NonRT のみ（initialize / prepareToPlay / rollbackPrepareFailure の現 3 caller・
+    //     MessageThread・audio 停止域）。違反caller追加 = 契約STOP。
+    //   ★ 区別（ゲート凍結留保）: 「現 live で安全」（全 caller (0,0)・RT の readOld/readNew は
+    //   wrapIdx でリング内に閉じる）と「将来の実遅延配線でも安全」（本 clamp 契約によってのみ成立）
+    //   は別命題。RT 側 wrapIdx / runLatencyAlignedCrossfadeMixLoop は不動（F1 を RT へ逃がさない）。
     inline void publishLatencyDelayAtomics(int oldDelay,
                                            int newDelay) noexcept
     {
-        convo::publishAtomic(latencyDelayOld, oldDelay, std::memory_order_release); // release: audio thread の latency read と HB
-        convo::publishAtomic(latencyDelayNew, newDelay, std::memory_order_release); // release: audio thread の latency read と HB
+        const int cap = (latencyBufSize > 0) ? latencyBufSize - 1 : 0;
+
+        const int pubOld = juce::jlimit(0, cap, oldDelay);
+        const int pubNew = juce::jlimit(0, cap, newDelay);
+
+        if (pubOld != oldDelay)
+        {
+            convo::fetchAddAtomic(latencyDelayClampCount_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
+            juce::Logger::writeToLog("[SR03] publishLatencyDelayAtomics: oldDelay clamped raw="
+                                     + juce::String(oldDelay) + " cap=" + juce::String(cap));
+        }
+        if (pubNew != newDelay)
+        {
+            convo::fetchAddAtomic(latencyDelayClampCount_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
+            juce::Logger::writeToLog("[SR03] publishLatencyDelayAtomics: newDelay clamped raw="
+                                     + juce::String(newDelay) + " cap=" + juce::String(cap));
+        }
+
+        convo::publishAtomic(latencyDelayOld, pubOld, std::memory_order_release); // release: audio thread の latency read と HB
+        convo::publishAtomic(latencyDelayNew, pubNew, std::memory_order_release); // release: audio thread の latency read と HB
     }
 
     inline void resetLatencyDelayRtState() noexcept
@@ -47876,6 +47927,10 @@ private:
 #if defined(CONVOPEQ_UNIT_TESTS)
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
+    // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
+    //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
+    //   Production ビルドでは宣言ごと非存在・バイナリ無変更。
+    friend class LatencyDelayWiringTestAccess;
     // テストビルドでのみ evaluate()（PublicationAdmission）が
     // testFadingRuntimePresent() に到達できるようにする（Production ビルドでは
     // この friend 宣言・メンバ・評価分岐がすべて存在せず、バイナリ無変更）。
@@ -71690,6 +71745,49 @@ public:
     ApplyComputedIRLoadingGuard& operator=(const ApplyComputedIRLoadingGuard&) = delete;
 };
 
+// ★ H-02 (H02-C1/C2/C3): canonical helper — IR ピーク遅延測定の単一権威。
+//   契約（凍結済み・ConvolverProcessor.h 宣言側のコメントと一致）:
+//     irPeakLatency = argmax_{ch,i} |sample[ch][i]|、N = min(getNumSamples(), targetLength)、
+//     C = getNumChannels() 実測のみ（外部 channel 数引数を持たない）。
+//     走査 ch-major・i 昇順・strict > ⇒ 同値は lowest index（初回到達ピーク）。
+//     非有限（NaN/±Inf）は std::isfinite で除外（+Inf の index が選ばれることを禁止）。
+//     targetLength <= 0 / C == 0 / N == 0 / 全サンプル zero / 全除外 ⇒ 返り値 0。
+//     決定的純関数・noexcept・アロケーション無し。NonRT のみ（LoaderThread / MessageThread）。
+int ConvolverProcessor::measureIrPeakLatencySamples(const juce::AudioBuffer<double>& ir,
+                                                    int targetLength) noexcept
+{
+    if (targetLength <= 0)
+        return 0;
+
+    const int channels = ir.getNumChannels();
+    const int samples = ir.getNumSamples();
+    if (channels <= 0 || samples <= 0)
+        return 0;
+
+    const int n = juce::jmin(samples, targetLength);
+    double bestAbs = 0.0;
+    int bestIndex = 0;
+
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        const double* data = ir.getReadPointer(ch);
+        for (int i = 0; i < n; ++i)
+        {
+            const double value = data[i];
+            if (!std::isfinite(value))
+                continue;
+            const double magnitude = std::abs(value);
+            if (magnitude > bestAbs)
+            {
+                bestAbs = magnitude;
+                bestIndex = i;
+            }
+        }
+    }
+
+    return bestIndex;
+}
+
 void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
     if (!prepared)
@@ -71842,29 +71940,15 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
         const bool directHeadActive = getExperimentalDirectHeadEnabled();
         const int algorithmLatency = directHeadActive ? 0 : juce::jmax(0, prepared->fftSize);
 
+        // ★ H-02 (H02-C3): inline 計算廃止 → canonical helper 呼出へ置換。
+        //   RCU 経路は全サンプルが測定対象（payload 生成時点で trim 済み）なので
+        //   targetLength = getNumSamples()（N=min(s,s)=s、Gate-1 突合: 既存 bestIndex
+        //   走査と意味論一致。差分は非有限除外の明示化のみ・上流 :417 validation とは二重防御）。
         int irPeakLatency = 0;
         if (prepared->timeDomainIR && prepared->timeDomainIR->getNumChannels() > 0)
         {
-            const int channels = prepared->timeDomainIR->getNumChannels();
-            const int samples = prepared->timeDomainIR->getNumSamples();
-            double bestAbs = 0.0;
-            int bestIndex = 0;
-
-            for (int ch = 0; ch < channels; ++ch)
-            {
-                const double* src = prepared->timeDomainIR->getReadPointer(ch);
-                for (int i = 0; i < samples; ++i)
-                {
-                    const double a = std::abs(src[i]);
-                    if (a > bestAbs)
-                    {
-                        bestAbs = a;
-                        bestIndex = i;
-                    }
-                }
-            }
-
-            irPeakLatency = juce::jmax(0, bestIndex);
+            irPeakLatency = measureIrPeakLatencySamples(*prepared->timeDomainIR,
+                                                        prepared->timeDomainIR->getNumSamples());
         }
 
         const int totalLatency = juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY);
@@ -72371,68 +72455,6 @@ ConvolverProcessor::LoaderThread::LoadResult ConvolverProcessor::LoaderThread::p
     return std::move(stepResult);
 }
 
-int ConvolverProcessor::LoaderThread::estimatePeakLatencySamples(const juce::AudioBuffer<double>& trimmed, int targetLength) const
-{
-    // ★ C-5: targetLength <= 0 で jlimit(0, -1, val) → UB の防止
-    if (targetLength <= 0)
-        return 0;
-
-    int irPeakLatency = 0;
-    if (trimmed.getNumChannels() > 0)
-    {
-        constexpr double ENERGY_THRESHOLD = 0.999;
-        double maxCentroid = 0.0;
-
-        const int length = targetLength;
-        std::vector<double> energyBuffer(static_cast<size_t>(length));
-        double* energy = energyBuffer.data();
-        for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
-        {
-            const double* data = trimmed.getReadPointer(ch);
-
-            double totalEnergy = 0.0;
-            for (int i = 0; i < length; ++i)
-            {
-                const double e = data[i] * data[i];
-                energy[i] = e;
-                totalEnergy += e;
-            }
-            if (totalEnergy < 1e-12)
-                continue;
-
-            double cumulative = 0.0;
-            int cutoff = length - 1;
-            for (int i = 0; i < length; ++i)
-            {
-                cumulative += energy[i];
-                if (cumulative >= totalEnergy * ENERGY_THRESHOLD)
-                {
-                    cutoff = i;
-                    break;
-                }
-            }
-
-            double sumE = 0.0;
-            double sumW = 0.0;
-            for (int i = 0; i <= cutoff; ++i)
-            {
-                const double e = energy[i];
-                sumE += e;
-                sumW += static_cast<double>(i) * e;
-            }
-
-            const double centroid = (sumE > 0.0) ? (sumW / sumE) : 0.0;
-            if (centroid > maxCentroid)
-                maxCentroid = centroid;
-        }
-
-        irPeakLatency = static_cast<int>(std::floor(maxCentroid + 0.5));
-        irPeakLatency = juce::jlimit(0, targetLength - 1, irPeakLatency);
-    }
-
-    return irPeakLatency;
-}
-
 bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& result,
                                                                   const juce::AudioBuffer<double>& trimmed,
                                                                   double sr,
@@ -72442,7 +72464,10 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
     if (trimmed.getNumChannels() == 0)
         return false;
 
-    const int irPeakLatency = estimatePeakLatencySamples(trimmed, result.targetLength);
+    // ★ H-02 (H02-C3): energy-centroid 估算を廃止し、canonical helper（max-abs argmax・
+    //   tie-break lowest index・非有限 skip）へ一本化。従来経路の NaN→centroid→
+    //   static_cast<int>(floor(NaN+.5)) UB 変換は本置換で消滅。
+    const int irPeakLatency = ConvolverProcessor::measureIrPeakLatencySamples(trimmed, result.targetLength);
 
     auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(result.targetLength));
     auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(result.targetLength));
@@ -73003,7 +73028,9 @@ public:
     void run() override;
     LoadResult performLoad(juce::Thread* thread);
 
-    int estimatePeakLatencySamples(const juce::AudioBuffer<double>& trimmed, int targetLength) const;
+    // ★ H-02 (H02-C3/C4): estimatePeakLatencySamples（energy-centroid 経路）は削除。
+    //   IR ピーク遅延測定は ConvolverProcessor::measureIrPeakLatencySamples（canonical helper）へ一本化。
+
     bool buildConvolverFromTrimmed(LoadResult& result,
                                    const juce::AudioBuffer<double>& trimmed,
                                    double sr,
@@ -104805,10 +104832,251 @@ private:
 
 #include "InputBitDepthTransform.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <vector>
 
+// ============================================================================
+// ★ H-02 (T1-T4): canonical helper measureIrPeakLatencySamples 回帰テスト
+//
+// 契約（H-02 Implementation Gate / Contract Freeze 2026-09-13 §2-§4・§7）:
+//   C1: irPeakLatency = argmax |sample[ch][i]|，N=min(getNumSamples(), targetLength)，
+//       C=getNumChannels() 実測，走査 ch-major・i 昇順・strict > ⇒ tie-break lowest index
+//   C2: targetLength<=0 / 全 zero / 非有限全除外 ⇒ 0。NaN/±Inf は比較から明示 skip
+//       （+Inf の index が選ばれることを禁止。従来 LoaderThread 重心経路の
+//        NaN→static_cast<int>(floor(NaN+.5)) UB を消去）
+//   C3: helper 単一・決定的純関数（同一 buffer・同一 targetLength ⇒ 同一返り値）
+//   T1-T4 は helper 直接測定（private static → CONVOPEQ_UNIT_TESTS 限定 friend シーム経由）。
+//   新 CTest 登録なし（AudioEngineHarness 既存 exe のサブテストとして run 側から呼出）。
+// ============================================================================
+
+// ConvolverProcessor.h の #if defined(CONVOPEQ_UNIT_TESTS) friend 宣言に対応する本体定義。
+// Production ビルドでは friend 宣言ごと存在せず、本 TU もテストビルド専用。
+struct IRPeakLatencyTestAccess
+{
+    static int measure(const juce::AudioBuffer<double>& ir, int targetLength) noexcept
+    {
+        return ConvolverProcessor::measureIrPeakLatencySamples(ir, targetLength);
+    }
+};
+
+// ★ SR-03 T-SR03: AudioEngine.h の #if defined(CONVOPEQ_UNIT_TESTS) friend 宣言に対応する本体定義。
+//   latencyDelay publish 単一関口（SR03-C1）の clamp / telemetry / RT 消費前提条件を直接検証する。
+class LatencyDelayWiringTestAccess
+{
+public:
+    static void publish(AudioEngine& e, int oldDelay, int newDelay) noexcept
+    {
+        e.publishLatencyDelayAtomics(oldDelay, newDelay);
+    }
+    static int readOld(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.latencyDelayOld, std::memory_order_acquire);
+    }
+    static int readNew(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.latencyDelayNew, std::memory_order_acquire);
+    }
+    static uint64_t clampCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.latencyDelayClampCount_, std::memory_order_acquire);
+    }
+    static int ringSize(AudioEngine& e) noexcept
+    {
+        return e.latencyBufSize;
+    }
+    // T-SR03-6 決定論性: 起動時 crossfade がリングへ残した状態を既知のクリア状態へ戻す
+    //（audio thread 停止域専用。prepareToPlay と同一の初期化意味論）。
+    static void clearRing(AudioEngine& e) noexcept
+    {
+        if (e.latencyBufSize <= 0)
+            return;
+        const size_t bytes = sizeof(double) * static_cast<size_t>(e.latencyBufSize);
+        if (e.latencyBufOldL) std::memset(e.latencyBufOldL, 0, bytes);
+        if (e.latencyBufOldR) std::memset(e.latencyBufOldR, 0, bytes);
+        if (e.latencyBufNewL) std::memset(e.latencyBufNewL, 0, bytes);
+        if (e.latencyBufNewR) std::memset(e.latencyBufNewR, 0, bytes);
+        e.latencyWritePos = 0;
+    }
+    // RT アライナ（runLatencyAlignedCrossfadeMixLoop）を bounded delay で直接実行する seam。
+    // probe(i, gain, alignedOldL, alignedNewL) をサンプル毎に呼ぶ。audio thread 停止域で実行すること。
+    template <typename ProbeFn>
+    static void runAligner(AudioEngine& e, double* dstL, double* dstR,
+                           const double* oldL, const double* oldR, int numSamples,
+                           int delayOld, int delayNew, ProbeFn probe)
+    {
+        e.runLatencyAlignedCrossfadeMixLoop<double>(
+            dstL, dstR, oldL, oldR, numSamples, delayOld, delayNew, false,
+            [&probe](double* outL, double* outR, int i, double g,
+                     double aoL, double, double anL, double anR) {
+                probe(i, g, aoL, anL);
+                if (outL != nullptr) *outL = anL;
+                if (outR != nullptr) *outR = anR;
+            });
+    }
+};
+
 namespace {
+
+bool expectIrPeak(const juce::AudioBuffer<double>& ir, int targetLength,
+                  int expected, const char* label)
+{
+    const int actual = IRPeakLatencyTestAccess::measure(ir, targetLength);
+    if (actual != expected)
+    {
+        std::fprintf(stderr, "[H02] FAIL: %s expected=%d actual=%d\n", label, expected, actual);
+        return false;
+    }
+    return true;
+}
+
+// T1: 48k 指数減衰 τ=100ms・sample0 ピーク ⇒ irPeakLatency == 0
+//     （旧 energy-centroid 経路では ~数千サンプルの重心を返し失敗していた。
+//       max-abs argmax では 0 = 直接音到達申告として正しい）
+bool checkH02T1ExpPeakSample0()
+{
+    constexpr double sr = 48000.0;
+    constexpr double tau = 0.1; // 100 ms
+    constexpr int n = 48000;    // 1 s
+    juce::AudioBuffer<double> ir(1, n);
+    double* d = ir.getWritePointer(0);
+    for (int i = 0; i < n; ++i)
+        d[i] = std::exp(-static_cast<double>(i) / (tau * sr)); // 最大値は i=0 (1.0)
+
+    if (!expectIrPeak(ir, n, 0, "T1 exp tau=100ms peak@0"))
+        return false;
+
+    std::printf("checkH02T1ExpPeakSample0: PASS (T1)\n");
+    return true;
+}
+
+// T2: L peak@100 (0.8) / R peak@300 (0.9) ⇒ 300（全チャネル argmax・channel 実測）
+bool checkH02T2MultiChannel()
+{
+    juce::AudioBuffer<double> ir(2, 512);
+    ir.clear();
+    ir.getWritePointer(0)[100] = 0.8;
+    ir.getWritePointer(1)[300] = -0.9; // |−0.9| > |0.8| ⇒ R 側が勝つ
+    if (!expectIrPeak(ir, 512, 300, "T2 L@100/R@300"))
+        return false;
+
+    // mono (C=1) 通常経路（同データ L のみ）
+    juce::AudioBuffer<double> mono(1, 512);
+    mono.clear();
+    mono.getWritePointer(0)[100] = 0.8;
+    if (!expectIrPeak(mono, 512, 100, "T2b mono"))
+        return false;
+
+    std::printf("checkH02T2MultiChannel: PASS (T2)\n");
+    return true;
+}
+
+// T3: s10=+1, s20=-1（|value| 同値）⇒ 10（strict > tie-break lowest index）
+bool checkH02T3TieBreakLowestIndex()
+{
+    juce::AudioBuffer<double> ir(1, 64);
+    ir.clear();
+    ir.getWritePointer(0)[10] = 1.0;
+    ir.getWritePointer(0)[20] = -1.0;
+    if (!expectIrPeak(ir, 64, 10, "T3 tie-break +1@10/-1@20"))
+        return false;
+
+    // ch-major 確認: ch0@30 と ch1@15 が同値最大 ⇒ 先に到達した ch0@30 が勝つ
+    //（契約の走査順 ch-major・i 昇順の定義そのまま）
+    juce::AudioBuffer<double> dual(2, 64);
+    dual.clear();
+    dual.getWritePointer(0)[30] = 1.0;
+    dual.getWritePointer(1)[15] = 1.0;
+    if (!expectIrPeak(dual, 64, 30, "T3b ch-major first-arrival"))
+        return false;
+
+    std::printf("checkH02T3TieBreakLowestIndex: PASS (T3)\n");
+    return true;
+}
+
+// T4: helper 決定的純関数性（同一 buffer・同一 targetLength 同値）＋非有限 skip
+//     （+Inf index 不被選・全 NaN→0・全 Inf→0）＋境界（zero/targetLength/channel）
+bool checkH02T4NonFiniteAndBoundaries()
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    // (a) 決定性: 同一入力 2 回測定で同値（両呼出点同一性の根拠 = 純関数同一 code path）
+    juce::AudioBuffer<double> ir(2, 128);
+    ir.clear();
+    ir.getWritePointer(0)[64] = 0.7;
+    ir.getWritePointer(1)[65] = 0.6;
+    const int first = IRPeakLatencyTestAccess::measure(ir, 128);
+    const int second = IRPeakLatencyTestAccess::measure(ir, 128);
+    if (first != 64 || second != first)
+    {
+        std::fprintf(stderr, "[H02] FAIL: T4a determinism first=%d second=%d (want 64)\n", first, second);
+        return false;
+    }
+
+    // (b) finite peak + NaN elsewhere ⇒ peak index（NaN 不選出）
+    juce::AudioBuffer<double> withNaN(1, 128);
+    withNaN.clear();
+    withNaN.getWritePointer(0)[50] = 0.5;
+    withNaN.getWritePointer(0)[0] = nan;
+    withNaN.getWritePointer(0)[127] = nan;
+    if (!expectIrPeak(withNaN, 128, 50, "T4b finite+NaN"))
+        return false;
+
+    // (c) finite peak + +Inf ⇒ +Inf の index が選ばれないこと（契約 H02-C2 明示禁止）
+    juce::AudioBuffer<double> withInf(1, 128);
+    withInf.clear();
+    withInf.getWritePointer(0)[50] = 0.5;
+    withInf.getWritePointer(0)[7] = inf;
+    withInf.getWritePointer(0)[9] = -inf;
+    if (!expectIrPeak(withInf, 128, 50, "T4c finite+Inf"))
+        return false;
+
+    // (d) 全 NaN ⇒ 0 / 全 ±Inf ⇒ 0
+    juce::AudioBuffer<double> allNaN(1, 32);
+    for (int i = 0; i < 32; ++i)
+        allNaN.getWritePointer(0)[i] = nan;
+    if (!expectIrPeak(allNaN, 32, 0, "T4d all NaN"))
+        return false;
+
+    juce::AudioBuffer<double> allInf(1, 32);
+    for (int i = 0; i < 32; ++i)
+        allInf.getWritePointer(0)[i] = (i % 2 == 0) ? inf : -inf;
+    if (!expectIrPeak(allInf, 32, 0, "T4e all Inf"))
+        return false;
+
+    // (f) 全サンプル zero ⇒ 0（bestIndex 初期値が勝つ）
+    juce::AudioBuffer<double> zero(2, 32);
+    zero.clear();
+    if (!expectIrPeak(zero, 32, 0, "T4f all zero"))
+        return false;
+
+    // (g) targetLength <= 0 ⇒ 0（C-5 ガード保持）
+    if (!expectIrPeak(ir, 0, 0, "T4g targetLength=0"))
+        return false;
+    if (!expectIrPeak(ir, -5, 0, "T4h targetLength<0"))
+        return false;
+
+    // (h) N = min(samples, targetLength) clamp: targetLength 超のピークは対象外
+    juce::AudioBuffer<double> beyond(1, 100);
+    beyond.clear();
+    beyond.getWritePointer(0)[80] = 1.0;
+    if (!expectIrPeak(beyond, 50, 0, "T4i peak beyond targetLength"))
+        return false;
+
+    // (j) 空バッファ: samples==0 / channels==0 ⇒ 0
+    juce::AudioBuffer<double> noSamples(1, 0);
+    if (!expectIrPeak(noSamples, 16, 0, "T4j numSamples=0"))
+        return false;
+    juce::AudioBuffer<double> noChannels(0, 16);
+    if (!expectIrPeak(noChannels, 16, 0, "T4k numChannels=0"))
+        return false;
+
+    std::printf("checkH02T4NonFiniteAndBoundaries: PASS (T4)\n");
+    return true;
+}
 
 bool checkNucRoundTrip()
 {
@@ -104942,6 +105210,172 @@ bool checkInputTransformUnalignedDst()
     return true;
 }
 
+// ============================================================================
+// ★ SR-03 (SG-3): latencyDelay publish 単一関口 clamp / telemetry / RT bounded 消費の回帰
+//   契約: SR03-C1（cap = latencyBufSize>0 ? size-1 : 0 / published = jlimit(0,cap,raw) /
+//         超過値ごとに counter +1 / latencyBufSize==0 は (0,0) 固定）
+//         SR03-C2（RT runLatencyAlignedCrossfadeMixLoop / wrapIdx 不動・bounded 値のみ消費）
+// ============================================================================
+bool checkSR03LatencyDelayClamp()
+{
+    AudioEngineHarness h;
+    AudioEngine& e = h.engine();
+
+    // T-SR03-1: 未 prepared（latencyBufSize==0）→ (0,0) 固定・counter 不発
+    if (LatencyDelayWiringTestAccess::ringSize(e) != 0)
+    {
+        std::fprintf(stderr, "[SR03] FAIL: T1 initial ring size=%d (want 0)\n",
+                     LatencyDelayWiringTestAccess::ringSize(e));
+        return false;
+    }
+    {
+        const uint64_t base = LatencyDelayWiringTestAccess::clampCount(e);
+        LatencyDelayWiringTestAccess::publish(e, 0, 0);
+        const int ro = LatencyDelayWiringTestAccess::readOld(e);
+        const int rn = LatencyDelayWiringTestAccess::readNew(e);
+        const uint64_t c = LatencyDelayWiringTestAccess::clampCount(e);
+        if (ro != 0 || rn != 0 || c != base)
+        {
+            std::fprintf(stderr, "[SR03] FAIL: T1 unprepared publish(0,0) old=%d new=%d count+%llu\n",
+                         ro, rn, static_cast<unsigned long long>(c - base));
+            return false;
+        }
+    }
+
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[SR03] harness start failed\n");
+        return false;
+    }
+
+    const int size = LatencyDelayWiringTestAccess::ringSize(e);
+    if (size <= 1)
+    {
+        std::fprintf(stderr, "[SR03] FAIL: prepared ring size=%d\n", size);
+        h.stop();
+        return false;
+    }
+    const int cap = size - 1;
+
+    // T-SR03-2: raw == capacity-1（境界内最大）→ 無変換・counter 不発
+    {
+        const uint64_t base = LatencyDelayWiringTestAccess::clampCount(e);
+        LatencyDelayWiringTestAccess::publish(e, cap, 0);
+        const int ro = LatencyDelayWiringTestAccess::readOld(e);
+        const uint64_t c = LatencyDelayWiringTestAccess::clampCount(e);
+        if (ro != cap || c != base)
+        {
+            std::fprintf(stderr, "[SR03] FAIL: T2 cap=%d -> old=%d count+%llu\n",
+                         cap, ro, static_cast<unsigned long long>(c - base));
+            h.stop();
+            return false;
+        }
+    }
+
+    // T-SR03-3: raw == capacity → clamp + counter +2（old/new 独立超過）
+    {
+        const uint64_t base = LatencyDelayWiringTestAccess::clampCount(e);
+        LatencyDelayWiringTestAccess::publish(e, size, size);
+        const int ro = LatencyDelayWiringTestAccess::readOld(e);
+        const int rn = LatencyDelayWiringTestAccess::readNew(e);
+        const uint64_t c = LatencyDelayWiringTestAccess::clampCount(e);
+        if (ro != cap || rn != cap || (c - base) != 2)
+        {
+            std::fprintf(stderr, "[SR03] FAIL: T3 size=%d -> old=%d new=%d count+%llu (want +2)\n",
+                         size, ro, rn, static_cast<unsigned long long>(c - base));
+            h.stop();
+            return false;
+        }
+    }
+
+    // T-SR03-4: raw >> capacity → clamp・bounded 不変式 0 <= atom <= cap
+    {
+        const uint64_t base = LatencyDelayWiringTestAccess::clampCount(e);
+        LatencyDelayWiringTestAccess::publish(e, 2 * size, 2621440); // MAX_TOTAL_DELAY 相当
+        const int ro = LatencyDelayWiringTestAccess::readOld(e);
+        const int rn = LatencyDelayWiringTestAccess::readNew(e);
+        const uint64_t c = LatencyDelayWiringTestAccess::clampCount(e);
+        if (ro != cap || rn != cap || (c - base) != 2)
+        {
+            std::fprintf(stderr, "[SR03] FAIL: T4 -> old=%d new=%d count+%llu\n",
+                         ro, rn, static_cast<unsigned long long>(c - base));
+            h.stop();
+            return false;
+        }
+    }
+
+    // T-SR03-5: 構造的到達最大総和 2,621,439 (= MAX_BLOCK_SIZE + MAX_IR_LATENCY-1)
+    {
+        const uint64_t base = LatencyDelayWiringTestAccess::clampCount(e);
+        LatencyDelayWiringTestAccess::publish(e, 2621439, 0);
+        const int ro = LatencyDelayWiringTestAccess::readOld(e);
+        const uint64_t c = LatencyDelayWiringTestAccess::clampCount(e);
+        if (ro != cap || (c - base) != 1)
+        {
+            std::fprintf(stderr, "[SR03] FAIL: T5 2621439 -> old=%d count+%llu\n",
+                         ro, static_cast<unsigned long long>(c - base));
+            h.stop();
+            return false;
+        }
+    }
+
+    // T-SR03-6: RT 消費の bounded 前提 — aligner を delayOld=cap / delayNew=0 でラップ 2 周実行。
+    //   readOld = (writePos - cap) % size = (writePos + 1) % size の関係を用いると:
+    //   lap1: i<size-1 は slot 未書込=clearRing 済 0 → alignedOld==0、
+    //         i==size-1 は slot0（同 lap i=0 で書込済）→ alignedOld==7.0
+    //   lap2: 全 slot が lap1 の oldL=7.0 → alignedOld==7.0
+    //   delayNew=0 → alignedNew は書き込み直後値 = 入力 passthrough（両 lap）
+    LatencyDelayWiringTestAccess::publish(e, 0, 0);
+    h.stopAudioOnly();
+    LatencyDelayWiringTestAccess::clearRing(e);
+    {
+        const int n = size;
+        std::vector<double> dstL(static_cast<size_t>(n)), dstR(static_cast<size_t>(n), 0.0);
+        std::vector<double> oldL(static_cast<size_t>(n), 7.0), oldR(static_cast<size_t>(n), 7.0);
+        bool ok = true;
+        for (int lap = 1; lap <= 2 && ok; ++lap)
+        {
+            for (int i = 0; i < n; ++i)
+                dstL[static_cast<size_t>(i)] = 1000.0 + static_cast<double>(i);
+            bool allOldOk = true, allNewPass = true;
+            LatencyDelayWiringTestAccess::runAligner(
+                e, dstL.data(), dstR.data(), oldL.data(), oldR.data(), n, cap, 0,
+                [&](int i, double, double aoL, double anL) {
+                    if (lap == 1)
+                    {
+                        const double want = (i == n - 1) ? 7.0 : 0.0;
+                        if (std::fabs(aoL - want) > 1e-12) allOldOk = false;
+                    }
+                    else
+                    {
+                        if (std::fabs(aoL - 7.0) > 1e-12) allOldOk = false;
+                    }
+                    if (std::fabs(anL - (1000.0 + static_cast<double>(i))) > 1e-12) allNewPass = false;
+                });
+            if (!allNewPass)
+            {
+                std::fprintf(stderr, "[SR03] FAIL: T6 lap%d new passthrough violated\n", lap);
+                ok = false;
+            }
+            if (!allOldOk)
+            {
+                std::fprintf(stderr, "[SR03] FAIL: T6 lap%d old ring semantics mismatch (wrapIdx read)\n", lap);
+                ok = false;
+            }
+        }
+        if (!ok)
+        {
+            h.stop();
+            return false;
+        }
+    }
+    LatencyDelayWiringTestAccess::publish(e, 0, 0);
+    h.stop();
+
+    std::printf("checkSR03LatencyDelayClamp: PASS (T-SR03-1..6)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -104955,6 +105389,33 @@ int runConvolverStateRoundTripTests()
     if (!checkInputTransformUnalignedDst())
     {
         std::fprintf(stderr, "FAIL: checkInputTransformUnalignedDst\n");
+        return 1;
+    }
+    // ★ H-02 T1-T4（helper 直接・新 CTest 登録なし）
+    if (!checkH02T1ExpPeakSample0())
+    {
+        std::fprintf(stderr, "FAIL: checkH02T1ExpPeakSample0\n");
+        return 1;
+    }
+    if (!checkH02T2MultiChannel())
+    {
+        std::fprintf(stderr, "FAIL: checkH02T2MultiChannel\n");
+        return 1;
+    }
+    if (!checkH02T3TieBreakLowestIndex())
+    {
+        std::fprintf(stderr, "FAIL: checkH02T3TieBreakLowestIndex\n");
+        return 1;
+    }
+    if (!checkH02T4NonFiniteAndBoundaries())
+    {
+        std::fprintf(stderr, "FAIL: checkH02T4NonFiniteAndBoundaries\n");
+        return 1;
+    }
+    // ★ SR-03 T-SR03-1〜6（publish 単一関口 clamp / telemetry / RT bounded 消費）
+    if (!checkSR03LatencyDelayClamp())
+    {
+        std::fprintf(stderr, "FAIL: checkSR03LatencyDelayClamp\n");
         return 1;
     }
     return 0;
