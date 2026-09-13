@@ -146,68 +146,6 @@ ConvolverProcessor::LoaderThread::LoadResult ConvolverProcessor::LoaderThread::p
     return std::move(stepResult);
 }
 
-int ConvolverProcessor::LoaderThread::estimatePeakLatencySamples(const juce::AudioBuffer<double>& trimmed, int targetLength) const
-{
-    // ★ C-5: targetLength <= 0 で jlimit(0, -1, val) → UB の防止
-    if (targetLength <= 0)
-        return 0;
-
-    int irPeakLatency = 0;
-    if (trimmed.getNumChannels() > 0)
-    {
-        constexpr double ENERGY_THRESHOLD = 0.999;
-        double maxCentroid = 0.0;
-
-        const int length = targetLength;
-        std::vector<double> energyBuffer(static_cast<size_t>(length));
-        double* energy = energyBuffer.data();
-        for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
-        {
-            const double* data = trimmed.getReadPointer(ch);
-
-            double totalEnergy = 0.0;
-            for (int i = 0; i < length; ++i)
-            {
-                const double e = data[i] * data[i];
-                energy[i] = e;
-                totalEnergy += e;
-            }
-            if (totalEnergy < 1e-12)
-                continue;
-
-            double cumulative = 0.0;
-            int cutoff = length - 1;
-            for (int i = 0; i < length; ++i)
-            {
-                cumulative += energy[i];
-                if (cumulative >= totalEnergy * ENERGY_THRESHOLD)
-                {
-                    cutoff = i;
-                    break;
-                }
-            }
-
-            double sumE = 0.0;
-            double sumW = 0.0;
-            for (int i = 0; i <= cutoff; ++i)
-            {
-                const double e = energy[i];
-                sumE += e;
-                sumW += static_cast<double>(i) * e;
-            }
-
-            const double centroid = (sumE > 0.0) ? (sumW / sumE) : 0.0;
-            if (centroid > maxCentroid)
-                maxCentroid = centroid;
-        }
-
-        irPeakLatency = static_cast<int>(std::floor(maxCentroid + 0.5));
-        irPeakLatency = juce::jlimit(0, targetLength - 1, irPeakLatency);
-    }
-
-    return irPeakLatency;
-}
-
 bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& result,
                                                                   const juce::AudioBuffer<double>& trimmed,
                                                                   double sr,
@@ -217,7 +155,10 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
     if (trimmed.getNumChannels() == 0)
         return false;
 
-    const int irPeakLatency = estimatePeakLatencySamples(trimmed, result.targetLength);
+    // ★ H-02 (H02-C3): energy-centroid 估算を廃止し、canonical helper（max-abs argmax・
+    //   tie-break lowest index・非有限 skip）へ一本化。従来経路の NaN→centroid→
+    //   static_cast<int>(floor(NaN+.5)) UB 変換は本置換で消滅。
+    const int irPeakLatency = ConvolverProcessor::measureIrPeakLatencySamples(trimmed, result.targetLength);
 
     auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(result.targetLength));
     auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(result.targetLength));

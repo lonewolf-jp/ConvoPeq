@@ -29,7 +29,9 @@ public:
     void run() override;
     LoadResult performLoad(juce::Thread* thread);
 
-    int estimatePeakLatencySamples(const juce::AudioBuffer<double>& trimmed, int targetLength) const;
+    // ★ H-02 (H02-C3/C4): estimatePeakLatencySamples（energy-centroid 経路）は削除。
+    //   IR ピーク遅延測定は ConvolverProcessor::measureIrPeakLatencySamples（canonical helper）へ一本化。
+
     bool buildConvolverFromTrimmed(LoadResult& result,
                                    const juce::AudioBuffer<double>& trimmed,
                                    double sr,

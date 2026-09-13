@@ -617,6 +617,25 @@ private:
     static std::atomic<int> latencyClampCounterStorage_;
     static std::atomic<int>& latencyClampCounter() noexcept;
 
+    // ★ H-02 (H02-C1/C2/C3): canonical IR ピーク遅延測定（両呼出点の単一権威）。
+    //   argmax_{ch∈[0,C), i∈[0,N)} |sample[ch][i]|、N = min(ir.getNumSamples(), targetLength)、
+    //   C = ir.getNumChannels() 実測のみ。走査 ch-major・i 昇順・strict > 比較のため
+    //   同値タイブレークは lowest index（初回到達ピーク）。非有限サンプル（NaN/±Inf）は
+    //   std::isfinite で比較から除外（全除外時 0）。targetLength <= 0 / C == 0 / N == 0 ⇒ 0。
+    //   決定的純関数・noexcept・アロケーション無し。職掌は測定のみ（IR validation /
+    //   scaleFactor / publishAtomic / ownership は非関与）。
+    //   定義: ConvolverProcessor.LoadPipeline.cpp
+    //   呼出点: LoaderThread::buildConvolverFromTrimmed / applyComputedIR (RCU)
+    static int measureIrPeakLatencySamples(const juce::AudioBuffer<double>& ir,
+                                           int targetLength) noexcept;
+
+#if defined(CONVOPEQ_UNIT_TESTS)
+    // ★ H-02 T4 テストシーム: private helper 直接検証用（本番 API を増やさない）。
+    //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
+    //   Production ビルド（CONVOPEQ_UNIT_TESTS 未定義）では宣言ごと存在せずバイナリ無変更。
+    friend struct IRPeakLatencyTestAccess;
+#endif
+
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
 

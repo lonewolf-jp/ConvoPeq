@@ -337,6 +337,49 @@ public:
     ApplyComputedIRLoadingGuard& operator=(const ApplyComputedIRLoadingGuard&) = delete;
 };
 
+// ★ H-02 (H02-C1/C2/C3): canonical helper — IR ピーク遅延測定の単一権威。
+//   契約（凍結済み・ConvolverProcessor.h 宣言側のコメントと一致）:
+//     irPeakLatency = argmax_{ch,i} |sample[ch][i]|、N = min(getNumSamples(), targetLength)、
+//     C = getNumChannels() 実測のみ（外部 channel 数引数を持たない）。
+//     走査 ch-major・i 昇順・strict > ⇒ 同値は lowest index（初回到達ピーク）。
+//     非有限（NaN/±Inf）は std::isfinite で除外（+Inf の index が選ばれることを禁止）。
+//     targetLength <= 0 / C == 0 / N == 0 / 全サンプル zero / 全除外 ⇒ 返り値 0。
+//     決定的純関数・noexcept・アロケーション無し。NonRT のみ（LoaderThread / MessageThread）。
+int ConvolverProcessor::measureIrPeakLatencySamples(const juce::AudioBuffer<double>& ir,
+                                                    int targetLength) noexcept
+{
+    if (targetLength <= 0)
+        return 0;
+
+    const int channels = ir.getNumChannels();
+    const int samples = ir.getNumSamples();
+    if (channels <= 0 || samples <= 0)
+        return 0;
+
+    const int n = juce::jmin(samples, targetLength);
+    double bestAbs = 0.0;
+    int bestIndex = 0;
+
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        const double* data = ir.getReadPointer(ch);
+        for (int i = 0; i < n; ++i)
+        {
+            const double value = data[i];
+            if (!std::isfinite(value))
+                continue;
+            const double magnitude = std::abs(value);
+            if (magnitude > bestAbs)
+            {
+                bestAbs = magnitude;
+                bestIndex = i;
+            }
+        }
+    }
+
+    return bestIndex;
+}
+
 void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
     if (!prepared)
@@ -489,29 +532,15 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
         const bool directHeadActive = getExperimentalDirectHeadEnabled();
         const int algorithmLatency = directHeadActive ? 0 : juce::jmax(0, prepared->fftSize);
 
+        // ★ H-02 (H02-C3): inline 計算廃止 → canonical helper 呼出へ置換。
+        //   RCU 経路は全サンプルが測定対象（payload 生成時点で trim 済み）なので
+        //   targetLength = getNumSamples()（N=min(s,s)=s、Gate-1 突合: 既存 bestIndex
+        //   走査と意味論一致。差分は非有限除外の明示化のみ・上流 :417 validation とは二重防御）。
         int irPeakLatency = 0;
         if (prepared->timeDomainIR && prepared->timeDomainIR->getNumChannels() > 0)
         {
-            const int channels = prepared->timeDomainIR->getNumChannels();
-            const int samples = prepared->timeDomainIR->getNumSamples();
-            double bestAbs = 0.0;
-            int bestIndex = 0;
-
-            for (int ch = 0; ch < channels; ++ch)
-            {
-                const double* src = prepared->timeDomainIR->getReadPointer(ch);
-                for (int i = 0; i < samples; ++i)
-                {
-                    const double a = std::abs(src[i]);
-                    if (a > bestAbs)
-                    {
-                        bestAbs = a;
-                        bestIndex = i;
-                    }
-                }
-            }
-
-            irPeakLatency = juce::jmax(0, bestIndex);
+            irPeakLatency = measureIrPeakLatencySamples(*prepared->timeDomainIR,
+                                                        prepared->timeDomainIR->getNumSamples());
         }
 
         const int totalLatency = juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY);
