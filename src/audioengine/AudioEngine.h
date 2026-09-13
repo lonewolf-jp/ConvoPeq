@@ -2108,6 +2108,8 @@ private:
     // 遅延値はatomicで管理（MessageThread→AudioThread）
     std::atomic<int> latencyDelayOld { 0 };
     std::atomic<int> latencyDelayNew { 0 };
+    // ★ SR-03 (SR03-C1): publish 時 clamp 発動の telemetry（NonRT 書込 / NonRT 観測）。
+    std::atomic<uint64_t> latencyDelayClampCount_ { 0 };
     int dspCrossfadeStartDelayBlocks_RT = 0;
     bool dspCrossfadeArmed_RT = false;
     // バッファリセット要求（MessageThread→AudioThread）
@@ -3202,11 +3204,40 @@ public:
         AudioEngine::DSPCore* currentAfterFade,
         convo::TransitionPolicy idlePolicy) noexcept;
 
+    // ★ SR-03 (SG-1 案A / SR03-C1): latencyDelayOld/New の唯一 publish 関口（publish 権威収束）。
+    //   契約: 入力域は RT 消費前提条件ではなく publish 時点で保証する（RT 側 clamp 禁止）。
+    //     cap = (latencyBufSize > 0) ? latencyBufSize - 1 : 0
+    //     published = jlimit(0, cap, raw)
+    //     latencyBufSize == 0（未確保）は (0,0) 固定 ＝ 明示的安全契約。
+    //     oldDelay / newDelay は独立に超過判定し、超過値ごとに latencyDelayClampCount_ 1 増 + NonRT ログ。
+    //   线程契约: NonRT のみ（initialize / prepareToPlay / rollbackPrepareFailure の現 3 caller・
+    //     MessageThread・audio 停止域）。違反caller追加 = 契約STOP。
+    //   ★ 区別（ゲート凍結留保）: 「現 live で安全」（全 caller (0,0)・RT の readOld/readNew は
+    //   wrapIdx でリング内に閉じる）と「将来の実遅延配線でも安全」（本 clamp 契約によってのみ成立）
+    //   は別命題。RT 側 wrapIdx / runLatencyAlignedCrossfadeMixLoop は不動（F1 を RT へ逃がさない）。
     inline void publishLatencyDelayAtomics(int oldDelay,
                                            int newDelay) noexcept
     {
-        convo::publishAtomic(latencyDelayOld, oldDelay, std::memory_order_release); // release: audio thread の latency read と HB
-        convo::publishAtomic(latencyDelayNew, newDelay, std::memory_order_release); // release: audio thread の latency read と HB
+        const int cap = (latencyBufSize > 0) ? latencyBufSize - 1 : 0;
+
+        const int pubOld = juce::jlimit(0, cap, oldDelay);
+        const int pubNew = juce::jlimit(0, cap, newDelay);
+
+        if (pubOld != oldDelay)
+        {
+            convo::fetchAddAtomic(latencyDelayClampCount_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
+            juce::Logger::writeToLog("[SR03] publishLatencyDelayAtomics: oldDelay clamped raw="
+                                     + juce::String(oldDelay) + " cap=" + juce::String(cap));
+        }
+        if (pubNew != newDelay)
+        {
+            convo::fetchAddAtomic(latencyDelayClampCount_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
+            juce::Logger::writeToLog("[SR03] publishLatencyDelayAtomics: newDelay clamped raw="
+                                     + juce::String(newDelay) + " cap=" + juce::String(cap));
+        }
+
+        convo::publishAtomic(latencyDelayOld, pubOld, std::memory_order_release); // release: audio thread の latency read と HB
+        convo::publishAtomic(latencyDelayNew, pubNew, std::memory_order_release); // release: audio thread の latency read と HB
     }
 
     inline void resetLatencyDelayRtState() noexcept
@@ -3712,6 +3743,10 @@ private:
 #if defined(CONVOPEQ_UNIT_TESTS)
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
+    // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
+    //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
+    //   Production ビルドでは宣言ごと非存在・バイナリ無変更。
+    friend class LatencyDelayWiringTestAccess;
     // テストビルドでのみ evaluate()（PublicationAdmission）が
     // testFadingRuntimePresent() に到達できるようにする（Production ビルドでは
     // この friend 宣言・メンバ・評価分岐がすべて存在せず、バイナリ無変更）。

@@ -52,8 +52,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
         latencyBufSize = 0;
         latencyWritePos = 0;
-        convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
-        convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
+        // ★ SR-03 (SR03-C1): latencyDelay 書込を唯一の publish 関口へ収束
+        //   （rollback では latencyBufSize=0 が先行 → cap=0 → (0,0) 固定。旧直接 publishAtomic 廃止）。
+        publishLatencyDelayAtomics(0, 0);
         convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
         crossfadeRuntime_.reset();
         refreshCrossfadePreparedSnapshotFromAtomics();
