@@ -19,7 +19,12 @@ enum class DiscardReason : uint8_t {
     //   deferredRetryCount_ を増加させない → 現行 production には Type-A 経路が存在せず、この終端は
     //   dormant（到達不能）。retention の bound は watchdog 間隔 + obligation createdAt 起点の TTL(30s)
     //   が担う。identity は (generation, recoveryObligationId)。StaleDiscard とは異なり payload は fresh。
-    RetryExhaustedDiscard
+    RetryExhaustedDiscard,
+    // ★ D135-3 Gate 2 Rev.2: redrive episode budget 枯渇 — crossfade-timeout recovery wake
+    //   （wasRecoveryWake==true）の Ready admission が E_max=2 を超えた場合の終端。
+    //   RetryExhaustedDiscard（Type-A retry・dormant）とは異なり、recovery redrive 連鎖を
+    //   有限化する gate（R(W) ≤ E_max × (1 + N_reset)）。定数・member は Orchestrator 側。
+    RedriveBudgetExhausted
 };
 
 // ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。

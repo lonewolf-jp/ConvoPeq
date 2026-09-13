@@ -209,6 +209,22 @@ public:
     // ★ C-2.2: shutdown 時に deferred publish を強制消去
     void clearDeferredForShutdown() noexcept;
 
+    // ★ D135-3 Gate 2 Rev.2 §4-2: redrive episode budget — mutation authority は本 2 API のみ。
+    //   (1) decrement: crossfade-timeout recovery wake（wasRecoveryWake==true）の Ready
+    //       admission のみ（RebuildThread 専用）。
+    bool tryConsumeRedriveBudget() noexcept;
+    //   (2) reset: natural fade completion (S0) / releaseResources (S1/S2) / shutdown final
+    //       clear (S3) の会計反応（assert-free — Timer / Message の両 NonRT caller を許す。
+    //       clearDeferredForShutdown と同一 idiom）。crossfade 判定・publish 判定は行わない。
+    //       ★ 禁止 caller: clearDeferredForShutdown() 本体 / drainDeferredClearIfRequested() /
+    //       requestDeferredClear() / EmergencyDrain（mid-run clear は reset しない —
+    //       Gate 3 rev2 BLOCKER 修正）。caller は S0/S1/S2/S3 の 4 点に固定（CT-1 (4)(5)(6)）。
+    void resetRedriveBudget() noexcept
+    {
+        convo::publishAtomic(redriveEpisodeBudget_, kMaxCrossfadeTimeoutRedrives);  // release
+        convo::fetchAddAtomic(redriveEpisodeSeq_, 1u);                              // DIAG serial
+    }
+
     // ★ D135-8 Step 9 (Option C): deferred-clear wake-provenance latch.
     //   requestDeferredClear() is the sole Writer (non-RebuildThread, Timer.cpp);
     //   drainDeferredClearIfRequested() is the sole Reader (RebuildThread only).
@@ -320,6 +336,14 @@ private:
     uint8_t deferredRetryCount_{0};                  // Type-A retry 回数（retention では不増加 → 現行 0 固定）
     std::uint64_t deferredObligationCreatedAtUs{0};  // obligation 生成時刻（TTL source-of-truth、re-drive で維持）
     static constexpr uint8_t kMaxDeferredRetries = 2;   // F6: retention に適用しない（dormant guard）
+    // ★ D135-3 Gate 2 Rev.2 §4-4: redrive episode budget（policy constant E_max）。
+    //   有限性証明は E_max ∈ ℕ, ≥1 で成立 — 値に非依存。
+    static constexpr std::uint8_t kMaxCrossfadeTimeoutRedrives = 2;
+    // ★ Gate 2 Rev.2 §4-2: owner は本クラス。private / friend なし / test backdoor なし。
+    //   アクセスは convo:: wrapper のみ（atomic-dot-call policy 対象状態）。
+    std::atomic<std::uint8_t> redriveEpisodeBudget_{kMaxCrossfadeTimeoutRedrives};
+    // DIAG 相関用 serial（reset で increment。proof には不使用）
+    std::atomic<std::uint32_t> redriveEpisodeSeq_{0};
     // ★ D135-1: crossfade-timeout recovery が発行した idle world の seq。
     std::atomic<PublicationSequenceId> lastRecoveryPublishSeq_{0};
     // ★ D135-8 Step 9 (Option C): clear-provenance latch. std::atomic because

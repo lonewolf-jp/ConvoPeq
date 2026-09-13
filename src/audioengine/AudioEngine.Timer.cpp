@@ -997,6 +997,13 @@ void AudioEngine::timerCallback()
             juce::ignoreUnused(pubResultTimer);
         }
 
+        // ★ D135-3 Gate 2 Rev.2 §1-1 (S0): natural fade completion — episode 会計の正常終端。
+        //   tryCompleteFade() の CAS edge（ramp 実走破）でのみ到達し、timeout recovery /
+        //   EmergencyDrain は m_fade 非接触のため本点は誘発されない（Gate 3 R4 証明）。
+        //   F6-4 wake（下段）より先行し、wake 時に reset 済み budget を保証する。
+        if (runtimeOrchestrator_ != nullptr)
+            runtimeOrchestrator_->resetRedriveBudget();
+
         sendChangeMessage();
 
         // ★ F6-4: fade-complete wake — fading が解消され idle world commit 済みになった時点で、

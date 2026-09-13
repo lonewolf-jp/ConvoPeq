@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-12 19:20:17
+> Generated: 2026-09-13 14:15:44
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -2646,9 +2646,9 @@ echo [3/4] Building %BUILD_CONFIG% configuration...
 set "BUILD_RETRY=0"
 :build_retry
 set "NINJA_FLAGS="
-REM icx/icpx は /Qipo リンク等でメモリを大量消費するため並列度を -j 1 に抑える（LLVM out of memory 回避）
-if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 1"
-if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 1"
+REM icx/icpx は /Qipo リンク等でメモリを大量消費するため並列度を -j 2 に抑える（LLVM out of memory 回避）
+if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
+if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
 cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
 if not errorlevel 1 goto build_ok
 
@@ -38229,6 +38229,10 @@ void AudioEngine::releaseResources()
     convo::publishAtomic(deferredFinalizeFirstSeenTicks_, 0, std::memory_order_release);
     cancelPendingUpdate();
     crossfadeRuntime_.reset();
+    // ★ D135-3 Gate 2 Rev.2 §1-1 (S1): releaseResources lifecycle — crossfadeRuntime_ reset と
+    //   episode 会計 reset の対称性（teardown で初期状態へ）。
+    if (runtimeOrchestrator_)
+        runtimeOrchestrator_->resetRedriveBudget();
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
     convo::publishAtomic(lastIssuedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
@@ -38291,6 +38295,9 @@ void AudioEngine::releaseResources()
                 fadingToRelease = nullptr;
         }
         crossfadeRuntime_.reset();
+        // ★ D135-3 Gate 2 Rev.2 §1-1 (S2): releaseResources fading clear — S1 同型の対称 reset。
+        if (runtimeOrchestrator_)
+            runtimeOrchestrator_->resetRedriveBudget();
         refreshCrossfadePreparedSnapshotFromAtomics();
 
         if (hasPendingTask)
@@ -38690,6 +38697,12 @@ void AudioEngine::releaseResources()
     //    EBR entry は下記 waitForDrain と ~AudioEngine D5/D8 drain で消化（INV-D162-8 準拠）。
     if (runtimeOrchestrator_)
         runtimeOrchestrator_->clearDeferredForShutdown();
+    // ★ D135-3 Gate 2 Rev.2 §1-1 (S3): unconditional shutdown final clear — episode 会計の
+    //   shutdown 終端。本位置のみが RebuildThread join 後に shutdown で必ず通る唯一の clear
+    //   境界（EmergencyDrain / C1 fallback / mid-run drain は条件付き・共有 primitive のため
+    //   本体経由 reset は禁止 — Gate 3 rev2 BLOCKER 修正。呼出は本点に固定）。
+    if (runtimeOrchestrator_)
+        runtimeOrchestrator_->resetRedriveBudget();
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
@@ -42869,6 +42882,13 @@ void AudioEngine::timerCallback()
                                      convo::isr::DSPHandle::null());
             juce::ignoreUnused(pubResultTimer);
         }
+
+        // ★ D135-3 Gate 2 Rev.2 §1-1 (S0): natural fade completion — episode 会計の正常終端。
+        //   tryCompleteFade() の CAS edge（ramp 実走破）でのみ到達し、timeout recovery /
+        //   EmergencyDrain は m_fade 非接触のため本点は誘発されない（Gate 3 R4 証明）。
+        //   F6-4 wake（下段）より先行し、wake 時に reset 済み budget を保証する。
+        if (runtimeOrchestrator_ != nullptr)
+            runtimeOrchestrator_->resetRedriveBudget();
 
         sendChangeMessage();
 
@@ -68056,6 +68076,25 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
     owner_->finishView();
 }
 
+// ★ D135-3 Gate 2 Rev.2 §4-2: redrive episode budget — decrement authority（mutation A3）。
+//   RebuildThread 専用（processDeferredAdmission の Ready case・wasRecoveryWake 時のみ）。
+//   strong CAS ループ: 0 なら REFUSE（false）。reset（A4）と競合した場合は再読みで retry —
+//   保守側に倒れる（余分に 1 消費し得るが 0 ≤ B ≤ E_max は常に保たれ、gate を通らずに
+//   消費されることはない）。raw .load/.store/.fetch_sub は不使用（convo:: wrapper のみ）。
+bool RuntimePublicationOrchestrator::tryConsumeRedriveBudget() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    for (;;) {
+        const auto v = convo::consumeAtomic(redriveEpisodeBudget_);
+        if (v == 0)
+            return false;                                               // REFUSE
+        auto expected = v;
+        if (convo::compareExchangeAtomic(redriveEpisodeBudget_, expected,
+                                         static_cast<std::uint8_t>(v - 1)))
+            return true;                                                // REDRIVE (B := B − 1)
+    }
+}
+
 // ★ Phase-1: processDeferredAdmission — RebuildThread 専用の atomic flow
 //   (peek → evaluateDeferred → consume/discard → finishView → submitPublishRequest)。
 //   design-D4 D-13 ④ / ADR-C4 §113。consume/discard は owner_->finishView() を内蔵し
@@ -68094,6 +68133,29 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
     PublicationAdmission::PublishRequest slotRequestSnapshot = view->peekRequestCopy();
     switch (result.decision) {
         case PublicationAdmission::DeferredDecision::Ready: {
+            // ★ D135-3 Gate 2 Rev.2 §6-1: redrive episode budget gate — budget 消費は
+            //   crossfade-timeout recovery wake（wasRecoveryWake==true）の Ready のみ。
+            //   ordinary wake / 自然完了後の Ready は消費しない（F6 retention 契約維持）。
+            //   枯渇時は既存 Discard case と同型の authority 経由 disposition
+            //   （retire → discard）で obligation を打ち切り、redrive 連鎖を E_max で停止させる。
+            if (wasRecoveryWake) {
+                if (!tryConsumeRedriveBudget()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                    // ★ D135-3: budget 枯渇 — redrive 不発（episodeSeq は reset 相関用 serial）。
+                    juce::Logger::writeToLog(juce::String("[D135-3] redrive-budget-exhausted")
+                        + " gen=" + juce::String(slotRequestSnapshot.generation)
+                        + " episodeSeq=" + juce::String(convo::consumeAtomic(redriveEpisodeSeq_)));
+#endif
+                    retireRegisteredDSP(slotRequestSnapshot, "redrive-budget-exhausted");
+                    view->discard(DiscardReason::RedriveBudgetExhausted);
+                    view.reset();
+                    const auto nowUs = convo::getCurrentTimeUs();
+                    telemetryRecorder_.recordFailure(FailureStage::Admission,
+                        FailureReason::RedriveBudgetExhausted,
+                        "processDeferredAdmission:redriveRefused", 0, nowUs);
+                    break;
+                }
+            }
             // consume は owner_->finishView() を呼んで ownership release を完結する。
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — CONSUME。
@@ -68398,6 +68460,22 @@ public:
     // ★ C-2.2: shutdown 時に deferred publish を強制消去
     void clearDeferredForShutdown() noexcept;
 
+    // ★ D135-3 Gate 2 Rev.2 §4-2: redrive episode budget — mutation authority は本 2 API のみ。
+    //   (1) decrement: crossfade-timeout recovery wake（wasRecoveryWake==true）の Ready
+    //       admission のみ（RebuildThread 専用）。
+    bool tryConsumeRedriveBudget() noexcept;
+    //   (2) reset: natural fade completion (S0) / releaseResources (S1/S2) / shutdown final
+    //       clear (S3) の会計反応（assert-free — Timer / Message の両 NonRT caller を許す。
+    //       clearDeferredForShutdown と同一 idiom）。crossfade 判定・publish 判定は行わない。
+    //       ★ 禁止 caller: clearDeferredForShutdown() 本体 / drainDeferredClearIfRequested() /
+    //       requestDeferredClear() / EmergencyDrain（mid-run clear は reset しない —
+    //       Gate 3 rev2 BLOCKER 修正）。caller は S0/S1/S2/S3 の 4 点に固定（CT-1 (4)(5)(6)）。
+    void resetRedriveBudget() noexcept
+    {
+        convo::publishAtomic(redriveEpisodeBudget_, kMaxCrossfadeTimeoutRedrives);  // release
+        convo::fetchAddAtomic(redriveEpisodeSeq_, 1u);                              // DIAG serial
+    }
+
     // ★ D135-8 Step 9 (Option C): deferred-clear wake-provenance latch.
     //   requestDeferredClear() is the sole Writer (non-RebuildThread, Timer.cpp);
     //   drainDeferredClearIfRequested() is the sole Reader (RebuildThread only).
@@ -68509,6 +68587,14 @@ private:
     uint8_t deferredRetryCount_{0};                  // Type-A retry 回数（retention では不増加 → 現行 0 固定）
     std::uint64_t deferredObligationCreatedAtUs{0};  // obligation 生成時刻（TTL source-of-truth、re-drive で維持）
     static constexpr uint8_t kMaxDeferredRetries = 2;   // F6: retention に適用しない（dormant guard）
+    // ★ D135-3 Gate 2 Rev.2 §4-4: redrive episode budget（policy constant E_max）。
+    //   有限性証明は E_max ∈ ℕ, ≥1 で成立 — 値に非依存。
+    static constexpr std::uint8_t kMaxCrossfadeTimeoutRedrives = 2;
+    // ★ Gate 2 Rev.2 §4-2: owner は本クラス。private / friend なし / test backdoor なし。
+    //   アクセスは convo:: wrapper のみ（atomic-dot-call policy 対象状態）。
+    std::atomic<std::uint8_t> redriveEpisodeBudget_{kMaxCrossfadeTimeoutRedrives};
+    // DIAG 相関用 serial（reset で increment。proof には不使用）
+    std::atomic<std::uint32_t> redriveEpisodeSeq_{0};
     // ★ D135-1: crossfade-timeout recovery が発行した idle world の seq。
     std::atomic<PublicationSequenceId> lastRecoveryPublishSeq_{0};
     // ★ D135-8 Step 9 (Option C): clear-provenance latch. std::atomic because
@@ -68583,7 +68669,12 @@ enum class DiscardReason : uint8_t {
     //   deferredRetryCount_ を増加させない → 現行 production には Type-A 経路が存在せず、この終端は
     //   dormant（到達不能）。retention の bound は watchdog 間隔 + obligation createdAt 起点の TTL(30s)
     //   が担う。identity は (generation, recoveryObligationId)。StaleDiscard とは異なり payload は fresh。
-    RetryExhaustedDiscard
+    RetryExhaustedDiscard,
+    // ★ D135-3 Gate 2 Rev.2: redrive episode budget 枯渇 — crossfade-timeout recovery wake
+    //   （wasRecoveryWake==true）の Ready admission が E_max=2 を超えた場合の終端。
+    //   RetryExhaustedDiscard（Type-A retry・dormant）とは異なり、recovery redrive 連鎖を
+    //   有限化する gate（R(W) ≤ E_max × (1 + N_reset)）。定数・member は Orchestrator 側。
+    RedriveBudgetExhausted
 };
 
 // ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。
@@ -70120,6 +70211,10 @@ enum class FailureReason : uint8_t {
     ShutdownRejected,
     StaleGeneration,
     QueuePressure,
+    // ★ D135-3 Gate 2 Rev.2: redrive episode budget 枯渇（Count 直前挿入 — buckets_ は
+    //   Count サイズ配列のため自動拡張。policy / HealthMonitor は FailureRecord を
+    //   消費しないため telemetry ring 専用）。
+    RedriveBudgetExhausted,
     Count   // バケット数。常に最後
 };
 

@@ -817,6 +817,25 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
     owner_->finishView();
 }
 
+// ★ D135-3 Gate 2 Rev.2 §4-2: redrive episode budget — decrement authority（mutation A3）。
+//   RebuildThread 専用（processDeferredAdmission の Ready case・wasRecoveryWake 時のみ）。
+//   strong CAS ループ: 0 なら REFUSE（false）。reset（A4）と競合した場合は再読みで retry —
+//   保守側に倒れる（余分に 1 消費し得るが 0 ≤ B ≤ E_max は常に保たれ、gate を通らずに
+//   消費されることはない）。raw .load/.store/.fetch_sub は不使用（convo:: wrapper のみ）。
+bool RuntimePublicationOrchestrator::tryConsumeRedriveBudget() noexcept
+{
+    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    for (;;) {
+        const auto v = convo::consumeAtomic(redriveEpisodeBudget_);
+        if (v == 0)
+            return false;                                               // REFUSE
+        auto expected = v;
+        if (convo::compareExchangeAtomic(redriveEpisodeBudget_, expected,
+                                         static_cast<std::uint8_t>(v - 1)))
+            return true;                                                // REDRIVE (B := B − 1)
+    }
+}
+
 // ★ Phase-1: processDeferredAdmission — RebuildThread 専用の atomic flow
 //   (peek → evaluateDeferred → consume/discard → finishView → submitPublishRequest)。
 //   design-D4 D-13 ④ / ADR-C4 §113。consume/discard は owner_->finishView() を内蔵し
@@ -855,6 +874,29 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
     PublicationAdmission::PublishRequest slotRequestSnapshot = view->peekRequestCopy();
     switch (result.decision) {
         case PublicationAdmission::DeferredDecision::Ready: {
+            // ★ D135-3 Gate 2 Rev.2 §6-1: redrive episode budget gate — budget 消費は
+            //   crossfade-timeout recovery wake（wasRecoveryWake==true）の Ready のみ。
+            //   ordinary wake / 自然完了後の Ready は消費しない（F6 retention 契約維持）。
+            //   枯渇時は既存 Discard case と同型の authority 経由 disposition
+            //   （retire → discard）で obligation を打ち切り、redrive 連鎖を E_max で停止させる。
+            if (wasRecoveryWake) {
+                if (!tryConsumeRedriveBudget()) {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                    // ★ D135-3: budget 枯渇 — redrive 不発（episodeSeq は reset 相関用 serial）。
+                    juce::Logger::writeToLog(juce::String("[D135-3] redrive-budget-exhausted")
+                        + " gen=" + juce::String(slotRequestSnapshot.generation)
+                        + " episodeSeq=" + juce::String(convo::consumeAtomic(redriveEpisodeSeq_)));
+#endif
+                    retireRegisteredDSP(slotRequestSnapshot, "redrive-budget-exhausted");
+                    view->discard(DiscardReason::RedriveBudgetExhausted);
+                    view.reset();
+                    const auto nowUs = convo::getCurrentTimeUs();
+                    telemetryRecorder_.recordFailure(FailureStage::Admission,
+                        FailureReason::RedriveBudgetExhausted,
+                        "processDeferredAdmission:redriveRefused", 0, nowUs);
+                    break;
+                }
+            }
             // consume は owner_->finishView() を呼んで ownership release を完結する。
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             // ★ D162-2-E (E-4 / INV-D162-9): slot 出口の全数監査 — CONSUME。

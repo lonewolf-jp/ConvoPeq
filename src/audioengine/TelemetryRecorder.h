@@ -38,6 +38,10 @@ enum class FailureReason : uint8_t {
     ShutdownRejected,
     StaleGeneration,
     QueuePressure,
+    // ★ D135-3 Gate 2 Rev.2: redrive episode budget 枯渇（Count 直前挿入 — buckets_ は
+    //   Count サイズ配列のため自動拡張。policy / HealthMonitor は FailureRecord を
+    //   消費しないため telemetry ring 専用）。
+    RedriveBudgetExhausted,
     Count   // バケット数。常に最後
 };
 

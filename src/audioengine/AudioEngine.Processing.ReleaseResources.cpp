@@ -130,6 +130,10 @@ void AudioEngine::releaseResources()
     convo::publishAtomic(deferredFinalizeFirstSeenTicks_, 0, std::memory_order_release);
     cancelPendingUpdate();
     crossfadeRuntime_.reset();
+    // ★ D135-3 Gate 2 Rev.2 §1-1 (S1): releaseResources lifecycle — crossfadeRuntime_ reset と
+    //   episode 会計 reset の対称性（teardown で初期状態へ）。
+    if (runtimeOrchestrator_)
+        runtimeOrchestrator_->resetRedriveBudget();
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
     convo::publishAtomic(lastIssuedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
@@ -192,6 +196,9 @@ void AudioEngine::releaseResources()
                 fadingToRelease = nullptr;
         }
         crossfadeRuntime_.reset();
+        // ★ D135-3 Gate 2 Rev.2 §1-1 (S2): releaseResources fading clear — S1 同型の対称 reset。
+        if (runtimeOrchestrator_)
+            runtimeOrchestrator_->resetRedriveBudget();
         refreshCrossfadePreparedSnapshotFromAtomics();
 
         if (hasPendingTask)
@@ -591,6 +598,12 @@ void AudioEngine::releaseResources()
     //    EBR entry は下記 waitForDrain と ~AudioEngine D5/D8 drain で消化（INV-D162-8 準拠）。
     if (runtimeOrchestrator_)
         runtimeOrchestrator_->clearDeferredForShutdown();
+    // ★ D135-3 Gate 2 Rev.2 §1-1 (S3): unconditional shutdown final clear — episode 会計の
+    //   shutdown 終端。本位置のみが RebuildThread join 後に shutdown で必ず通る唯一の clear
+    //   境界（EmergencyDrain / C1 fallback / mid-run drain は条件付き・共有 primitive のため
+    //   本体経由 reset は禁止 — Gate 3 rev2 BLOCKER 修正。呼出は本点に固定）。
+    if (runtimeOrchestrator_)
+        runtimeOrchestrator_->resetRedriveBudget();
 
     // ★ work88 (SHUTDOWN-7 五次レビュー): SHUTDOWN-ORDER 契約の防御的検証。
     //   順序不変条件: requestShutdown(:75) → shutdownCoordinatorLoop(:189, join) →
