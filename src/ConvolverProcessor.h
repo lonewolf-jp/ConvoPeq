@@ -617,6 +617,18 @@ private:
     static std::atomic<int> latencyClampCounterStorage_;
     static std::atomic<int>& latencyClampCounter() noexcept;
 
+    // ★ H-01 (H01-C2): internal dry alignment 遅延基準のコンパイル時フラグ。
+    //   true  = legacy: dry 遅延 = algorithmLatency + irPeak（smoother 報告値をそのまま使用）
+    //   false = H-01 是正: dry 遅延 = irPeak のみ（dry 読出側で algorithmLatency を減算）
+    //   ※ 意味を絶対に逆転させないこと（テスト契約 T-H01-1 がこの語義に依存）。
+    //   根拠: wet OLS 出力は配列遅延 0（NUC ringWrite = fftOutBuf+partSize 後半／
+    //   M1 Null −309dB・M2 outputPlacementError==0 実測）。algorithmLatency
+    //   （= NUC m_latency = L0.partSize）はブロック周期（グループ遅延）の申告概念であり、
+    //   wet 側に実配列遅延として存在しないため、dry 加算は mix 中間でコム/エコーを生む。
+    //   host PDC / UI breakdown / smoother retarget 判定（totalLatency=algo+peak）は
+    //   このフラグと無関係に不変（契約 H01-C1・方案 C）。
+    static constexpr bool kDryDelayUsesAlgorithmLatency = false;
+
     // ★ H-02 (H02-C1/C2/C3): canonical IR ピーク遅延測定（両呼出点の単一権威）。
     //   argmax_{ch∈[0,C), i∈[0,N)} |sample[ch][i]|、N = min(ir.getNumSamples(), targetLength)、
     //   C = ir.getNumChannels() 実測のみ。走査 ch-major・i 昇順・strict > 比較のため

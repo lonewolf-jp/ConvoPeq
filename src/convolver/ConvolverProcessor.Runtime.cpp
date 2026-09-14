@@ -141,7 +141,11 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
 
     const int algorithmLatency = conv.storedDirectHeadEnabled ? 0 : juce::jmax(0, conv.latency);
     const int irPeakLatency = juce::jmax(0, conv.irLatency);
-    int delaySamples = juce::jmax(0, algorithmLatency + irPeakLatency);
+    // ★ H-01 (H01-C1): bypass 経路の dry 遅延も internal alignment 基準（irPeak のみ）へ。
+    //   true = legacy (algo+peak) / false = H-01 是正 (peak only)。host PDC は無関係（申告側不変）。
+    int delaySamples = kDryDelayUsesAlgorithmLatency
+        ? juce::jmax(0, algorithmLatency + irPeakLatency)
+        : irPeakLatency;
     delaySamples = juce::jmin(delaySamples, MAX_TOTAL_DELAY);
     delaySamples = juce::jlimit(0, DELAY_BUFFER_SIZE - 1, delaySamples);
 
@@ -248,6 +252,24 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (!conv)
         return;
 
+    // ★ H-01 (H01-C1): internal dry alignment 遅延値の単一変換関口。
+    //   smoother は報告基準（totalLatency = algorithmLatency + irPeak）を維持し、
+    //   dry 読出（oldDelay / newDelay / delayInt）のみ irPeak 基準へ変換する。
+    //   ※ flag 語義（逆転禁止）: kDryDelayUsesAlgorithmLatency
+    //       true  = legacy: 変換なし（dry 遅延 = algo+peak）
+    //       false = H-01 是正: algo 減算（dry 遅延 = peak のみ）
+    //   directHead ON では algorithmLatency==0 のため変換は恒等（既存形状と一致）。
+    //   retarget 判定・PDC/UI・pendingLatencyValue は報告基準のまま（契約 H01-C1）。
+    auto dryAlignDelay = [conv](double reportedLatency) noexcept -> double
+    {
+        if constexpr (kDryDelayUsesAlgorithmLatency)
+        {
+            return reportedLatency; // legacy: smoother 報告値をそのまま dry 遅延に使用
+        }
+        const int algo = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
+        return juce::jmax(0.0, reportedLatency - static_cast<double>(algo)); // H-01: peak のみ
+    };
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t convStartUs = convo::getCurrentTimeUs();
     const double srForConv = convo::consumeAtomic(currentSampleRate, std::memory_order_relaxed);
@@ -280,7 +302,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         {
             if (!activeCrossfadeGain.isSmoothing())
             {
-                activeOldDelay = activeLatencySmoother.getCurrentValue();
+                activeOldDelay = dryAlignDelay(activeLatencySmoother.getCurrentValue());
                 activeCrossfadeGain.applyImmediateValueRT(0.0);
                 activeCrossfadeGain.setTargetValue(1.0);
                 activeLatencySmoother.setTargetValue(static_cast<double>(totalLatency));
@@ -328,7 +350,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 if (!activeCrossfadeGain.isSmoothing())
                 {
-                    activeOldDelay = activeLatencySmoother.getCurrentValue();
+                    activeOldDelay = dryAlignDelay(activeLatencySmoother.getCurrentValue());
                     activeLatencySmoother.setTargetValue(newTarget);
                     activeCrossfadeGain.applyImmediateValueRT(0.0);
                     activeCrossfadeGain.setTargetValue(1.0);
@@ -392,7 +414,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
         if (activeCrossfadeGain.isSmoothing())
         {
-            const double newDelay = activeLatencySmoother.getTargetValue();
+            const double newDelay = dryAlignDelay(activeLatencySmoother.getTargetValue());
 
             // ★ M-05: delayFadeRamp バッファ (wetBuf[0]流用の解消)
             double* delayFadeRamp = delayFadeRampBuffer.get();
@@ -543,12 +565,12 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             if (!activeCrossfadeGain.isSmoothing())
             {
                 activeLatencySmoother.applyImmediateValueRT(activeLatencySmoother.getTargetValue());
-                activeOldDelay = activeLatencySmoother.getCurrentValue();
+                activeOldDelay = dryAlignDelay(activeLatencySmoother.getCurrentValue());
             }
         }
         else
         {
-            int delayInt = static_cast<int>(activeLatencySmoother.getCurrentValue() + 0.5);
+            int delayInt = static_cast<int>(dryAlignDelay(activeLatencySmoother.getCurrentValue()) + 0.5);
             int rPos = (activeDelayWritePos - delayInt) & DELAY_BUFFER_MASK;
             if (rPos < 0) rPos += DELAY_BUFFER_SIZE;
 

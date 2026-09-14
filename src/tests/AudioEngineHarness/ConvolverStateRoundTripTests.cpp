@@ -18,10 +18,12 @@
 
 #include "InputBitDepthTransform.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <thread>
 #include <vector>
 
 // ============================================================================
@@ -562,6 +564,309 @@ bool checkSR03LatencyDelayClamp()
     return true;
 }
 
+// ============================================================================
+// ★ H-01 (T-H01-1..6): internal dry alignment = irPeak のみ／host PDC 不変 の回帰
+//
+// 契約（H-01 Implementation Gate / Contract Freeze 2026-09-14）:
+//   wet 実到着位置を基準に、dry 直音到着位置との差が 0 samples であること（核心判定）。
+//   flag 語義: kDryDelayUsesAlgorithmLatency true=legacy(algo+peak) / false=H-01(peakのみ)。
+//   host PDC / breakdown（algo+peak）は flag に関係なく不変（方案 C）。
+// 実装: ConvolverProcessor を単体で駆動（メモリ WAV → loadImpulseResponse → poll → impulse 計測）。
+// ============================================================================
+
+namespace {
+
+// 指定 peakPos に δ を持つ 48k/2ch/100ms WAV を temp に書き出す。
+juce::File writeH01TempIr(const juce::String& tag, int peakPos)
+{
+    const juce::File f = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getChildFile(tag);
+    f.deleteFile();
+    std::unique_ptr<juce::OutputStream> stream(f.createOutputStream());
+    if (stream == nullptr)
+        return {};
+    juce::WavAudioFormat fmt;
+    std::unique_ptr<juce::AudioFormatWriter> w(fmt.createWriterFor(stream,
+        juce::AudioFormatWriterOptions{}
+            .withSampleRate(48000.0)
+            .withNumChannels(2)
+            .withBitsPerSample(16)));
+    if (w == nullptr)
+        return {};
+    juce::AudioBuffer<float> buf(2, 4800);
+    buf.clear();
+    buf.getWritePointer(0)[peakPos] = 1.0f;
+    buf.getWritePointer(1)[peakPos] = 1.0f;
+    if (!w->writeFromAudioSampleBuffer(buf, 0, 4800))
+        return {};
+    w.reset(); // flush before stream destruction
+    return f;
+}
+
+// ★ 座標系: measureH01Arrival は **グローバル sample index** を返す（impulse は
+//   kH01ImpulseBase に打たれる）。到着期待値 = kH01ImpulseBase + peakPos。
+// ★ warmup は NUC B13-GATE の lead 制約（lead ≤ o_L - B、P=4096 実測 o_L=5760・B=512
+//   → lead≤5248）を満たす 10 block に抑える（mix/latency smoother ramp は 960/4800 sample
+//   で 10 block=5120 内で収束）。
+constexpr int kH01Block = 512;
+constexpr int kH01WarmupBlocks = 10;
+constexpr int kH01ImpulseBase = kH01WarmupBlocks * kH01Block;
+
+// mix を設定後、impulse(ch0/ch1 @block0/sample0)を process で流し、
+// 最大 |L|+|R| 到着(global sample index)を返す。warmup で mix/smoothing ramp を吸収。
+int measureH01Arrival(ConvolverProcessor& conv, float mix, int captureBlocks)
+{
+    conv.setMix(mix);
+    constexpr int kBlock = kH01Block;
+    constexpr int kWarmup = kH01WarmupBlocks;
+    juce::AudioBuffer<double> ab(2, kBlock);
+    juce::dsp::AudioBlock<double> blk(ab);
+    for (int i = 0; i < kWarmup; ++i)
+    {
+        ab.clear();
+        conv.process(blk);
+    }
+    int bestIdx = -1;
+    double bestVal = 0.0;
+    for (int b = 0; b < captureBlocks; ++b)
+    {
+        ab.clear();
+        if (b == 0)
+        {
+            ab.getWritePointer(0)[0] = 1.0;
+            ab.getWritePointer(1)[0] = 1.0;
+        }
+        conv.process(blk);
+        for (int i = 0; i < ab.getNumSamples(); ++i)
+        {
+            const double v = std::fabs(ab.getWritePointer(0)[i]) + std::fabs(ab.getWritePointer(1)[i]);
+            if (v > bestVal)
+            {
+                bestVal = v;
+                bestIdx = (b + kWarmup) * kBlock + i;
+            }
+        }
+    }
+    return bestIdx;
+}
+
+// ★ JUCE 制約: loadImpulseResponse の finalize は queueFinalizeOnMessageThread（MessageManager）経由。
+//   console test には MainApplication の message loop が無いため、test 本体と同じ main thread で
+//   MM を初期化し、poll ループ内で Win32 メッセージを自 pump する（コンソール JUCE の定石）。
+//   （runDispatchLoopUntil は JUCE_MODAL_LOOPS_PERMITTED=0 で不使用可、専用 pump thread は
+//    Windows の JUCE message thread 制約と衝突するため本方式を採用）
+namespace {
+
+void pumpH01Messages() noexcept
+{
+#if JUCE_WINDOWS
+    MSG msg {};
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+#endif
+}
+
+} // namespace
+
+// load 完了を irPeakLatencySamples 経由で poll（最大 ~10s、messages pump 込み）。失敗時は進捗を診断 print。
+bool pollH01Peak(ConvolverProcessor& conv, int expectedPeak)
+{
+    for (int i = 0; i < 2000; ++i)
+    {
+        const auto bd = conv.getLatencyBreakdown();
+        if (bd.irPeakLatencySamples == expectedPeak && bd.totalLatencySamples >= expectedPeak)
+            return true;
+        pumpH01Messages();
+        juce::Thread::sleep(5);
+    }
+    std::fprintf(stderr, "[H01] diag: loading=%d finalized=%d irLen=%d algo=%d peak=%d err='%s'\n",
+                 conv.isLoadingIR() ? 1 : 0, conv.isIRFinalized() ? 1 : 0,
+                 conv.getIRLength(),
+                 conv.getLatencyBreakdown().algorithmLatencySamples,
+                 conv.getLatencyBreakdown().irPeakLatencySamples,
+                 conv.getLastError().toRawUTF8());
+    pumpH01Messages();
+    return false;
+}
+
+} // namespace
+
+bool checkH01DryWetAlignment()
+{
+    constexpr int kPeakA = 100;
+    constexpr int kPeakB = 200;
+
+    // ★ 診断: JUCE Logger の既定出力は ODS でキャプチャ不能なため、この check 中は
+    //   stderr に反映する（LoaderThread / finalize / init 失敗理由の確定用）。
+    struct H01Logger : juce::Logger {
+        void logMessage(const juce::String& m) override
+        {
+            std::fprintf(stderr, "[H01log] %s\n", m.toRawUTF8());
+            std::fflush(stderr);
+        }
+    };
+    static H01Logger h01Log;
+    juce::Logger* prevLogger = juce::Logger::getCurrentLogger();
+    juce::Logger::setCurrentLogger(&h01Log);
+
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+
+    // ★ JUCE 制約: finalize の MessageManager ディスパッチには main thread の MM が必要
+    //   （poll 側の pumpH01Messages で Win32 メッセージを消費する）。static = プロセス lifetime・冪等。
+    static juce::ScopedJuceInitialiser_GUI h01JuceInit;
+    (void)h01JuceInit;
+
+    const juce::File irA = writeH01TempIr("h01_a.wav", kPeakA);
+    if (!irA.existsAsFile())
+    {
+        std::fprintf(stderr, "[H01] FAIL: temp IR A write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(irA, false);
+    if (!pollH01Peak(conv, kPeakA))
+    {
+        const auto bd0 = conv.getLatencyBreakdown();
+        std::fprintf(stderr, "[H01] FAIL: IR A load timeout (irPeak=%d total=%d)\n",
+                     bd0.irPeakLatencySamples, bd0.totalLatencySamples);
+        irA.deleteFile();
+        return false;
+    }
+
+    // T-H01-4（先に PDC 申告値）: breakdown = algo + peak（報告基準は flag 無関係で不変）。
+    const auto bd = conv.getLatencyBreakdown();
+    if (bd.irPeakLatencySamples != kPeakA
+        || bd.algorithmLatencySamples <= 0
+        || bd.totalLatencySamples != bd.algorithmLatencySamples + kPeakA)
+    {
+        std::fprintf(stderr, "[H01] FAIL: T-H01-4 PDC breakdown: algo=%d peak=%d total=%d\n",
+                     bd.algorithmLatencySamples, bd.irPeakLatencySamples, bd.totalLatencySamples);
+        irA.deleteFile();
+        return false;
+    }
+    const int algorithmLatency = bd.algorithmLatencySamples;
+
+    // T-H01-1/2/3/5/6 共通の計測ウィンドウ（peak + ring tail 余裕）
+    const int kBlocks = (kPeakB + 2048) / 512 + 6;
+
+    const int wetA = measureH01Arrival(conv, 1.0f, kBlocks);   // mix=1.0 → wet のみ
+    const int dryA = measureH01Arrival(conv, 0.0f, kBlocks);   // mix=0.0 → dry のみ
+    const int mix50A = measureH01Arrival(conv, 0.5f, kBlocks); // mix=0.5 → 構成波 peak
+
+    bool ok = true;
+    // T-H01-2: wet 実到着 == impulse global + peak（基準の成立・global 座標系）
+    if (wetA != kH01ImpulseBase + kPeakA)
+    {
+        std::fprintf(stderr, "[H01] FAIL: T-H01-2 wet arrival=%d (want %d)\n",
+                     wetA, kH01ImpulseBase + kPeakA);
+        ok = false;
+    }
+    // T-H01-1 核心: wet 実測到着基準で dry との差 0（legacy なら algo=algorithmLatency の差が出る）
+    if (dryA != wetA || mix50A != wetA)
+    {
+        std::fprintf(stderr, "[H01] FAIL: T-H01-1 wet=%d dry=%d mix50=%d (want wet==dry==mix50, algo=%d)\n",
+                     wetA, dryA, mix50A, algorithmLatency);
+        ok = false;
+    }
+
+    // T-H01-3: bypass（dry リングのみ・main と同一 alignment 基準）は dry/wet と同位置
+    conv.setMix(1.0f);
+    conv.setBypass(true);
+    const int bypA = measureH01Arrival(conv, 1.0f, kBlocks);
+    conv.setBypass(false);
+    if (bypA != wetA)
+    {
+        std::fprintf(stderr, "[H01] FAIL: T-H01-3 bypass arrival=%d (want %d)\n", bypA, wetA);
+        ok = false;
+    }
+
+    // T-H01-5: IR 差替（peak 100→200、Δ=100≥retarget 閾値 2.0 → crossfade 発火後安定）
+    const juce::File irB = writeH01TempIr("h01_b.wav", kPeakB);
+    if (!irB.existsAsFile())
+    {
+        std::fprintf(stderr, "[H01] FAIL: temp IR B write failed\n");
+        irA.deleteFile();
+        return false;
+    }
+    conv.loadImpulseResponse(irB, false);
+    if (!pollH01Peak(conv, kPeakB))
+    {
+        std::fprintf(stderr, "[H01] FAIL: IR B load timeout\n");
+        irA.deleteFile(); irB.deleteFile();
+        return false;
+    }
+    const auto bdB = conv.getLatencyBreakdown();
+    if (bdB.totalLatencySamples != bdB.algorithmLatencySamples + kPeakB)
+    {
+        std::fprintf(stderr, "[H01] FAIL: T-H01-5 PDC after retarget: algo=%d total=%d (want %d)\n",
+                     bdB.algorithmLatencySamples, bdB.totalLatencySamples,
+                     bdB.algorithmLatencySamples + kPeakB);
+        ok = false;
+    }
+    const int wetB = measureH01Arrival(conv, 1.0f, kBlocks);
+    const int dryB = measureH01Arrival(conv, 0.0f, kBlocks);
+    if (wetB != kH01ImpulseBase + kPeakB || dryB != wetB)
+    {
+        std::fprintf(stderr, "[H01] FAIL: T-H01-5 post-retarget wet=%d dry=%d (want %d/%d)\n",
+                     wetB, dryB, kH01ImpulseBase + kPeakB, kH01ImpulseBase + kPeakB);
+        ok = false;
+    }
+
+    // T-H01-6: directHead ON（algo==0 → 変換恒等）で同一アサーション（回帰）
+    {
+        ConvolverProcessor convDh;
+        convDh.prepareToPlay(48000.0, 512);
+        convDh.setExperimentalDirectHeadEnabled(true);
+        const juce::File irD = writeH01TempIr("h01_d.wav", kPeakA);
+        bool dhReady = false;
+        if (irD.existsAsFile())
+        {
+            convDh.loadImpulseResponse(irD, false);
+            dhReady = pollH01Peak(convDh, kPeakA);
+            if (!dhReady)
+                std::fprintf(stderr, "[H01] FAIL: directHead IR load timeout\n");
+            irD.deleteFile();
+        }
+        else
+        {
+            std::fprintf(stderr, "[H01] FAIL: directHead IR write failed\n");
+        }
+        if (dhReady)
+        {
+            const auto bdD = convDh.getLatencyBreakdown();
+            const int wetD = measureH01Arrival(convDh, 1.0f, kBlocks);
+            const int dryD = measureH01Arrival(convDh, 0.0f, kBlocks);
+            if (bdD.algorithmLatencySamples != 0 || wetD != kH01ImpulseBase + kPeakA || dryD != wetD)
+            {
+                std::fprintf(stderr, "[H01] FAIL: T-H01-6 directHead algo=%d wet=%d dry=%d\n",
+                             bdD.algorithmLatencySamples, wetD, dryD);
+                ok = false;
+            }
+        }
+        else
+        {
+            ok = false;
+        }
+    }
+
+    irA.deleteFile();
+    irB.deleteFile();
+    juce::Logger::setCurrentLogger(prevLogger);
+
+    if (!ok)
+        return false;
+    // ★ 注記: 本 check の駆動中、NUC 側の [B13-GATE] L1 observability log が lead 前提
+    //   （engine callback 定常スケジュール想定の gate）で NG 通知し得る（standalone burst 駆動固有）。
+    //   実測の出力配置は正確（wet=impulse+peak が全ケース一致）であり、本 log は
+    //   合否条件に含めない（MT-NUPC の oPE 観測と同扱い。product エンジン駆動経路では未発火確認済）。
+    std::printf("checkH01DryWetAlignment: PASS (T-H01-1..6: algo=%d, wet=%d dry=%d mix50=%d bypass=%d, retarget wet=%d, directHead ok)\n",
+                algorithmLatency, wetA, dryA, mix50A, bypA, wetB);
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -602,6 +907,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSR03LatencyDelayClamp())
     {
         std::fprintf(stderr, "FAIL: checkSR03LatencyDelayClamp\n");
+        return 1;
+    }
+    // ★ H-01 T-H01-1..6（internal dry alignment = irPeak／host PDC 不変）
+    if (!checkH01DryWetAlignment())
+    {
+        std::fprintf(stderr, "FAIL: checkH01DryWetAlignment\n");
         return 1;
     }
     return 0;
