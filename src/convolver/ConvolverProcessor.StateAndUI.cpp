@@ -159,11 +159,18 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
     pendingOverride.smoothingTimeSec = juce::jlimit(SMOOTHING_TIME_MIN_SEC,
                                                     SMOOTHING_TIME_MAX_SEC,
                                                     snapshot.smoothingTimeSec);
+    // ★ SR-01 (C-1): IR length 秒パラメータの上限は SR 依存 hardMax（契約凍結 2026-09-14）。
+    //   従来は静的 IR_LENGTH_MAX_SEC=3.0 クランプで、processing SR > 699,050 Hz のとき
+    //   BuildSnapshot 経由の要求が素通しされ computeTargetIRLength のサンプル数上限で無音切断していた。
+    //   setTargetIRLength / applyAutoDetectedIRLength / setState と同一の権威式へ統一する。
+    //   hardMaxSec(sr) = MAX_IR_LATENCY / sr（sr<=0 → 3.0 フォールバック）、3.0 との min は取らない
+    //   （48k "Load as-is" >3s の現行互換維持）。
+    const float irHardMaxSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     pendingOverride.targetIRLengthSec = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                     IR_LENGTH_MAX_SEC,
+                                                     irHardMaxSec,
                                                      snapshot.targetIRLengthSec);
     pendingOverride.autoDetectedIRLengthSec = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                           IR_LENGTH_MAX_SEC,
+                                                           irHardMaxSec,
                                                            snapshot.autoDetectedIRLengthSec);
     pendingOverride.irLengthManualOverride = snapshot.irLengthManualOverride;
     pendingOverride.mixedTransitionStartHz = juce::jlimit(MIXED_F1_MIN_HZ,
@@ -945,6 +952,17 @@ int ConvolverProcessor::computeTargetIRLength(double sampleRate, int originalLen
     static constexpr int kMaxIRCap = MAX_IR_LATENCY;
 
     int target = static_cast<int>(sampleRate * targetIRTimeSec);
+
+    if (target > kMaxIRCap)
+    {
+        // ★ SR-01 (C-3): cap 発動の可視化（契約凍結 2026-09-14）。従来は無音の fade trim だった。
+        //   到達経路: pendingOverride が hardMax(sr) 未反映の状態で確定したケースのみ
+        //   （典型: 未 prepare =currentSampleRate 0 の setState 復元後に高 SR で prepare/load）。
+        //   本関数は LoaderThread / rebuild（NonRT）専用。戻り値・呼び出し契約は不変。
+        juce::Logger::writeToLog("[SR-01] IR length request " + juce::String(targetIRTimeSec, 3)
+            + " s @ " + juce::String(sampleRate, 1) + " Hz exceeds MAX_IR_LATENCY ("
+            + juce::String(kMaxIRCap) + " samples); tail trimmed to hard max");
+    }
 
     target = (std::min)(target, kMaxIRCap);
     target = (std::max)(target, 1);

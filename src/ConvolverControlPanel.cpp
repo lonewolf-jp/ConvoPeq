@@ -84,7 +84,16 @@ public:
         configureLabel(tailMultLabel, "Tail L1-L2:");
 
         irLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC, 0.1);
+        // ★ SR-01 (C-2): 上限 = min(max(3.0, 現在値), hardMaxSec(processingSR))。
+        //   sr <= 699,050 Hz では従来値 (3.0) と数値一致、705.6k/768k で 2.97/2.73 に縮む。
+        {
+            auto& conv = engine.getConvolverProcessor();
+            const double hardMax = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MIN_SEC),
+                                            static_cast<double>(conv.getMaximumAllowedIRLengthSec()));
+            const double cur = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MAX_SEC),
+                                         static_cast<double>(conv.getTargetIRLength()));
+            irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, std::min(hardMax, cur), 0.1);
+        }
         irLengthSlider.setSkewFactorFromMidPoint(1.5);
         irLengthSlider.setTextValueSuffix(" s");
         irLengthSlider.setNumDecimalPlacesToDisplay(1);
@@ -288,6 +297,13 @@ private:
     void syncFromProcessor()
     {
         auto& convolver = engine.getConvolverProcessor();
+        // ★ SR-01 (C-2): processing SR は構築後に変わり得るため、range もここで同期する。
+        const double irLengthHardMax = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MIN_SEC),
+                                                static_cast<double>(convolver.getMaximumAllowedIRLengthSec()));
+        const double irLengthCur = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MAX_SEC),
+                                            static_cast<double>(convolver.getTargetIRLength()));
+        irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC,
+                                std::min(irLengthHardMax, irLengthCur), 0.1);
         if (!irLengthSlider.isMouseButtonDown())
             irLengthSlider.setValue(convolver.getTargetIRLength(), juce::dontSendNotification);
         if (!rebuildSlider.isMouseButtonDown())
@@ -435,6 +451,7 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
 
     // IR Length スライダー
     irLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    // ★ SR-01 (C-2): 上限は updateIRInfo で SR 依存に再計算される（構築時は未 prepare → 3.0）。
     irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC,
                             ConvolverProcessor::IR_LENGTH_MAX_SEC, 0.1);
     irLengthSlider.setSkewFactorFromMidPoint(1.5); // やや対数的な操作感
@@ -1306,8 +1323,14 @@ void ConvolverControlPanel::updateIRInfo()
     }
     smoothingTimeSlider.setValue((pendingSmoothingDirty ? pendingSmoothingTimeSec : convolver.getSmoothingTime()) * 1000.0,
                                  juce::dontSendNotification);
-    const double irLengthSliderMax = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MAX_SEC),
-                                              static_cast<double>(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength()));
+    // ★ SR-01 (C-2): 表記上限 = min(max(3.0, 現在値), hardMaxSec(processingSR))。
+    //   現行 max(3.0, cur) を canonical helper getMaximumAllowedIRLengthSec でさらに抑える
+    //   （768k でスライダーが 2.73 を超えて表示され、setter 側暗クランプと食い違う問題の解消）。
+    const double irLengthHardMax = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MIN_SEC),
+                                            static_cast<double>(convolver.getMaximumAllowedIRLengthSec()));
+    const double irLengthSliderMax = std::min(irLengthHardMax,
+                                              std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MAX_SEC),
+                                                       static_cast<double>(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength())));
     irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, irLengthSliderMax, 0.1);
     irLengthSlider.setValue(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength(),
                             juce::dontSendNotification);

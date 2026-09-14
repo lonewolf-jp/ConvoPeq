@@ -867,6 +867,520 @@ bool checkH01DryWetAlignment()
     return true;
 }
 
+// ============================================================================
+// ★ SR-01(B) (T-SR01-1..8): hardMaxSec(sr) = MAX_IR_LATENCY / sr 契約凍結の回帰
+//   根拠: doc/work95/sr01b_implementation_gate_contract_freeze_20260914.md
+//   C-1 copySnapshotToPendingUnlocked の SR 依存 clamp / C-2 UI canonical helper 統一
+//   / C-3 computeTargetIRLength cap 発動ログ。容量定数（cap 2^21 / DELAY 2^22）は
+//   ピン留めアサーションで不変契約化する（変更＝STOP 条件）。
+//   凍結値: @768k setter/snapshot 経路 targetLength = 2,097,151
+//             = int(sr × (double)float(MAX_IR_LATENCY/sr))   [float 正規化込み]
+//           @768k cap 発動経路（未 prepare 復元 3.0 → load）= 2,097,152 = MAX_IR_LATENCY
+// ============================================================================
+
+namespace {
+
+// 実装と同一の丸み連鎖（double 除算 → float 正規化 → double 戻し × sr → int トランケート）。
+// ※ float 除算を直接使うと double 丸め経路と一致しない可能性があるため本形を契約とする。
+constexpr float kSR01HardMax768kF = static_cast<float>(2097152.0 / 768000.0);
+constexpr int kSR01Target768kSetter = static_cast<int>(768000.0 * static_cast<double>(kSR01HardMax768kF));
+static_assert(kSR01Target768kSetter == 2097151, "SR-01 frozen value drift (768k setter path)");
+
+// C-3 ログ捕捉: "[SR-01]" を含む行だけをロック付きで蓄積し、診断のため stderr へも写す。
+struct SR01Logger : juce::Logger
+{
+    juce::CriticalSection cs;
+    juce::String captured;
+
+    void logMessage(const juce::String& m) override
+    {
+        {
+            const juce::ScopedLock sl(cs);
+            if (m.contains("SR-01"))
+                captured += m + "\n";
+        }
+        std::fprintf(stderr, "[SR01log] %s\n", m.toRawUTF8());
+        std::fflush(stderr);
+    }
+    [[nodiscard]] bool has(const juce::String& token)
+    {
+        const juce::ScopedLock sl(cs);
+        return captured.contains(token);
+    }
+    void clear()
+    {
+        const juce::ScopedLock sl(cs);
+        captured.clear();
+    }
+};
+
+SR01Logger g_sr01Logger;
+
+struct SR01LoggerScope
+{
+    juce::Logger* prev;
+    SR01LoggerScope() : prev(juce::Logger::getCurrentLogger())
+    {
+        juce::Logger::setCurrentLogger(&g_sr01Logger);
+    }
+    ~SR01LoggerScope() { juce::Logger::setCurrentLogger(prev); }
+};
+
+// numCh ch × totalSamples @ sampleRate の WAV を temp に書き出す。peakPos<0 は全面ゼロ。
+// 768k×3s = 2,304,000 samples（float buf で ~18MB）をチャンク分割で書く。
+juce::File writeSR01TempIr(const juce::String& tag, double sampleRate, int numCh, int totalSamples, int peakPos)
+{
+    const juce::File f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(tag);
+    f.deleteFile();
+    std::unique_ptr<juce::OutputStream> stream(f.createOutputStream());
+    if (stream == nullptr)
+        return {};
+    juce::WavAudioFormat fmt;
+    std::unique_ptr<juce::AudioFormatWriter> w(fmt.createWriterFor(stream,
+        juce::AudioFormatWriterOptions{}
+            .withSampleRate(sampleRate)
+            .withNumChannels(numCh)
+            .withBitsPerSample(16)));
+    if (w == nullptr)
+        return {};
+    juce::AudioBuffer<float> buf(numCh, totalSamples);
+    buf.clear();
+    if (peakPos >= 0)
+    {
+        for (int ch = 0; ch < numCh; ++ch)
+            buf.getWritePointer(ch)[peakPos] = 1.0f;
+    }
+    int written = 0;
+    while (written < totalSamples)
+    {
+        const int n = std::min(65536, totalSamples - written);
+        if (!w->writeFromAudioSampleBuffer(buf, written, n))
+            return {};
+        written += n;
+    }
+    w.reset(); // flush before stream destruction
+    return f;
+}
+
+// irPeak == expectPeak かつ irLength == expectIRLen を同一 finalize 経由で poll（最大 ~60s）。
+bool pollSR01Load(ConvolverProcessor& conv, int expectPeak, int expectIRLen, int maxIter = 12000)
+{
+    for (int i = 0; i < maxIter; ++i)
+    {
+        const auto bd = conv.getLatencyBreakdown();
+        if (bd.irPeakLatencySamples == expectPeak && conv.getIRLength() == expectIRLen)
+            return true;
+        pumpH01Messages();
+        juce::Thread::sleep(5);
+    }
+    const auto bd = conv.getLatencyBreakdown();
+    std::fprintf(stderr, "[SR01] poll timeout: peak=%d/%d irLen=%d/%d err='%s'\n",
+                 bd.irPeakLatencySamples, expectPeak, conv.getIRLength(), expectIRLen,
+                 conv.getLastError().toRawUTF8());
+    return false;
+}
+
+} // namespace
+
+// T-SR01-1: hardMaxSec 式テーブル一致 + 容量不変契約のピン留め
+bool checkSR01HardMaxFormula()
+{
+    static constexpr int kFrozenMaxIrLatency = 2097152;    // 2^21 — 変更は STOP 条件（容量不変契約）
+    static constexpr int kFrozenDelayBuffer  = 4194304;    // 2^22 — 同上
+    if (ConvolverProcessor::MAX_IR_LATENCY != kFrozenMaxIrLatency
+        || ConvolverProcessor::DELAY_BUFFER_SIZE != kFrozenDelayBuffer
+        || ConvolverProcessor::IR_LENGTH_MAX_SEC != 3.0f
+        || ConvolverProcessor::IR_LENGTH_MIN_SEC != 0.5f)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: capacity constants drifted (MAX_IR=%d DELAY=%d)\n",
+                     ConvolverProcessor::MAX_IR_LATENCY, ConvolverProcessor::DELAY_BUFFER_SIZE);
+        return false;
+    }
+    const double srs[] = {44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0,
+                          352800.0, 384000.0, 705600.0, 768000.0};
+    for (const double sr : srs)
+    {
+        const float want = static_cast<float>(static_cast<double>(kFrozenMaxIrLatency) / sr);
+        const float got = ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(sr);
+        if (got != want)
+        {
+            std::fprintf(stderr, "[SR01] FAIL: hardMax(%f)=%f want %f\n", sr, got, want);
+            return false;
+        }
+        // 非発動域（sr <= 699,050 Hz = 2^21/3.0）は hardMax >= 3.0 → 既存挙動不変の保証
+        if (sr <= 699050.0 && got < 3.0f)
+        {
+            std::fprintf(stderr, "[SR01] FAIL: hardMax(%f)=%f < 3.0 in non-binding region\n", sr, got);
+            return false;
+        }
+    }
+    if (ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(768000.0) != kSR01HardMax768kF)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: 768k hardMax != frozen %f\n", kSR01HardMax768kF);
+        return false;
+    }
+    if (ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(0.0) != 3.0f
+        || ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(-48000.0) != 3.0f)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: sr<=0 fallback != 3.0\n");
+        return false;
+    }
+    std::printf("checkSR01HardMaxFormula: PASS (44.1k..768k + constants pinned)\n");
+    return true;
+}
+
+// T-SR01-2: setter 系 clamp（@768k → hardMax / @48k → 3.0 維持 / 下限 0.5）
+bool checkSR01SetterClamp()
+{
+    static juce::ScopedJuceInitialiser_GUI sr01JuceInit;
+    ConvolverProcessor conv;
+    conv.prepareToPlay(768000.0, 512);
+    const float hardMax768 = conv.getMaximumAllowedIRLengthSec();
+    if (hardMax768 != kSR01HardMax768kF)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: getMaximumAllowedIRLengthSec(768k)=%f want %f\n",
+                     hardMax768, kSR01HardMax768kF);
+        return false;
+    }
+    conv.setTargetIRLength(3.0f);
+    if (conv.getTargetIRLength() != hardMax768)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: setTargetIRLength(3.0)@768k -> %f want %f\n",
+                     conv.getTargetIRLength(), hardMax768);
+        return false;
+    }
+    conv.applyAutoDetectedIRLength(10.0f);
+    if (conv.getTargetIRLength() != hardMax768)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: applyAutoDetected(10.0)@768k -> %f\n", conv.getTargetIRLength());
+        return false;
+    }
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(3.0f);
+    if (conv.getTargetIRLength() != 3.0f)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: setTargetIRLength(3.0)@48k -> %f\n", conv.getTargetIRLength());
+        return false;
+    }
+    conv.setTargetIRLength(0.3f);
+    if (conv.getTargetIRLength() != ConvolverProcessor::IR_LENGTH_MIN_SEC)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: lower clamp -> %f\n", conv.getTargetIRLength());
+        return false;
+    }
+    std::printf("checkSR01SetterClamp: PASS (768k hardMax / 48k unchanged / lower 0.5)\n");
+    return true;
+}
+
+// T-SR01-3: ★C-1 回帰 — BuildSnapshot 適用経路の clamp が SR 依存 hardMax に統一されたこと
+bool checkSR01SnapshotClamp()
+{
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(3.0f);
+    conv.applyAutoDetectedIRLength(3.0f);
+    const auto snap = conv.captureBuildSnapshot();
+    if (snap.targetIRLengthSec != 3.0f)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: snapshot target not 3.0 @48k\n");
+        return false;
+    }
+    // 48k で確定した 3.0 を 768k 環境へ適用 → C-1 後は hardMax(2.7306667f)。修正前は 3.0 が素通しだった。
+    conv.prepareToPlay(768000.0, 512);
+    conv.applyBuildSnapshot(snap);
+    const float hardMax768 = conv.getMaximumAllowedIRLengthSec();
+    if (conv.getTargetIRLength() != hardMax768
+        || conv.getAutoDetectedIRLength() != hardMax768)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: C-1 snapshot@768k target=%f auto=%f want %f\n",
+                     conv.getTargetIRLength(), conv.getAutoDetectedIRLength(), hardMax768);
+        return false;
+    }
+    // 48k へ戻して再適用 → 3.0 保存（非発動域の完全回帰）
+    conv.prepareToPlay(48000.0, 512);
+    conv.applyBuildSnapshot(snap);
+    if (conv.getTargetIRLength() != 3.0f || conv.getAutoDetectedIRLength() != 3.0f)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: C-1 snapshot@48k target=%f\n", conv.getTargetIRLength());
+        return false;
+    }
+    std::printf("checkSR01SnapshotClamp: PASS (C-1: 768k clamp / 48k unchanged)\n");
+    return true;
+}
+
+// T-SR01-4a: 768k で 3s IR ロード（setter→hardMax 経路）— targetLength 2,097,151・cap ログ不发火
+bool checkSR01Load768k3s()
+{
+    SR01LoggerScope scope;
+    g_sr01Logger.clear();
+    ConvolverProcessor conv;
+    conv.prepareToPlay(768000.0, 512);
+    conv.setTargetIRLength(3.0f);
+    const juce::File ir = writeSR01TempIr("sr01_4a.wav", 768000.0, 2, 2304000, 100);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-4a temp IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(ir, false);
+    const bool ok = pollSR01Load(conv, 100, kSR01Target768kSetter);
+    // breakdown 契約（H-02/SR-03 不変）: total == algo + peak。cap 未満経路なので C-3 発火しない。
+    const auto bd = conv.getLatencyBreakdown();
+    const bool contract = ok
+        && bd.totalLatencySamples == bd.algorithmLatencySamples + 100
+        && !g_sr01Logger.has("SR-01");
+    ir.deleteFile();
+    if (!contract)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-4a ok=%d algo=%d total=%d capLog=%d\n",
+                     ok ? 1 : 0, bd.algorithmLatencySamples, bd.totalLatencySamples,
+                     g_sr01Logger.has("SR-01") ? 1 : 0);
+        return false;
+    }
+    std::printf("checkSR01Load768k3s: PASS (4a: irLen=%d, no cap log, breakdown intact)\n",
+                kSR01Target768kSetter);
+    return true;
+}
+
+// T-SR01-4b: 未 prepare 復元(3.0)→ prepare(768k) → ロードで cap 発動 — 2,097,152・C-3 ログ発火
+bool checkSR01CapFiredLog()
+{
+    SR01LoggerScope scope;
+    g_sr01Logger.clear();
+    ConvolverProcessor conv;
+    juce::ValueTree st("SR01B");
+    st.setProperty("irLength", 3.0, nullptr);
+    st.setProperty("irLengthManualOverride", true, nullptr);
+    conv.setState(st);            // currentSampleRate==0 → フォールバック 3.0 が許容（契約 §6）
+    conv.prepareToPlay(768000.0, 512); // prepare は pending を再同期しない（契約 §1.3 注記）
+    if (conv.getTargetIRLength() != 3.0f)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: 4b pre-load pending=%f want 3.0\n", conv.getTargetIRLength());
+        return false;
+    }
+    const juce::File ir = writeSR01TempIr("sr01_4b.wav", 768000.0, 2, 2304000, 100);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-4b temp IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(ir, false);
+    const bool ok = pollSR01Load(conv, 100, 2097152);   // min(raw 2,304,000, cap) = 2^21 ちょうど
+    const bool logged = g_sr01Logger.has("MAX_IR_LATENCY");
+    ir.deleteFile();
+    if (!ok || !logged)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-4b ok=%d capLog=%d (want both 1)\n",
+                     ok ? 1 : 0, logged ? 1 : 0);
+        return false;
+    }
+    std::printf("checkSR01CapFiredLog: PASS (4b: irLen=2097152, [SR-01] trim log fired)\n");
+    return true;
+}
+
+// T-SR01-5: 44.1k/48k 完全回帰 — 3s = 132,300 / 144,000 samples、cap ログなし
+bool checkSR01LowRateRegression()
+{
+    SR01LoggerScope scope;
+    struct Case { double sr; int samples; };
+    const Case cases[] = {{44100.0, 132300}, {48000.0, 144000}};
+    for (const Case& c : cases)
+    {
+        g_sr01Logger.clear();
+        ConvolverProcessor conv;
+        conv.prepareToPlay(c.sr, 512);
+        conv.setTargetIRLength(3.0f);
+        const juce::String tag = juce::String("sr01_5_") + juce::String(static_cast<juce::int64>(c.sr)) + ".wav";
+        const juce::File ir = writeSR01TempIr(tag, c.sr, 2, c.samples, 100);
+        if (!ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[SR01] FAIL: T-SR01-5 IR write %s\n", tag.toRawUTF8());
+            return false;
+        }
+        conv.loadImpulseResponse(ir, false);
+        const bool ok = pollSR01Load(conv, 100, c.samples) && !g_sr01Logger.has("SR-01");
+        ir.deleteFile();
+        if (!ok)
+        {
+            std::fprintf(stderr, "[SR01] FAIL: T-SR01-5 sr=%f irLen=%d want=%d capLog=%d\n",
+                         c.sr, conv.getIRLength(), c.samples, g_sr01Logger.has("SR-01") ? 1 : 0);
+            return false;
+        }
+    }
+    std::printf("checkSR01LowRateRegression: PASS (44.1k=132300 / 48k=144000, no cap log)\n");
+    return true;
+}
+
+// T-SR01-6: 永続状態の SR 横断互換 — 48k保存3.0→768k復元=hardMax / 768k保存2.73→48k=2.73 のまま
+bool checkSR01StateCompatibility()
+{
+    ConvolverProcessor src;
+    src.prepareToPlay(48000.0, 512);
+    src.setTargetIRLength(3.0f);
+    src.setIRLengthManualOverride(true);
+    const auto tree48 = src.getState();
+    {
+        const double saved = static_cast<double>(tree48.getProperty("irLength", -1.0));
+        if (saved < ConvolverProcessor::IR_LENGTH_MIN_SEC - 1e-9
+            || saved > ConvolverProcessor::IR_LENGTH_MAX_SEC + 1e-9)
+        {
+            std::fprintf(stderr, "[SR01] FAIL: T-SR01-6 getState irLength=%f outside [0.5,3.0]\n", saved);
+            return false;
+        }
+    }
+    ConvolverProcessor dst;
+    dst.prepareToPlay(768000.0, 512);
+    dst.setState(tree48);
+    if (dst.getTargetIRLength() != kSR01HardMax768kF)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-6 restore@768k -> %f want %f\n",
+                     dst.getTargetIRLength(), kSR01HardMax768kF);
+        return false;
+    }
+    const auto tree768 = dst.getState();      // irLength = 2.7306667
+    ConvolverProcessor back;
+    back.prepareToPlay(48000.0, 512);
+    back.setState(tree768);
+    if (back.getTargetIRLength() != kSR01HardMax768kF)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-6 re-restore@48k %f (want 2.7306667, no lift)\n",
+                     back.getTargetIRLength());
+        return false;
+    }
+    std::printf("checkSR01StateCompatibility: PASS (persist window / hardMax on restore / no lift)\n");
+    return true;
+}
+
+// T-SR01-7: ロード失敗（SilentIR・別 SR の resample 経路）で旧 engine 保持・publish 単一性。
+//   NUC malloc 失敗そのものは注入点を持たない（凍結契約の「注入可なら」条件による。
+//   本ケースは load 破棄経路全体の回帰として旧 engine 保持と finalized 維持を検証する）。
+bool checkSR01LoadFailureKeepsEngine()
+{
+    SR01LoggerScope scope;
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    const juce::File ok = writeSR01TempIr("sr01_7a.wav", 48000.0, 2, 4800, 100);
+    if (!ok.existsAsFile() || !conv.loadImpulseResponse(ok, false))
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-7 baseline load rejected\n");
+        return false;
+    }
+    // 基準ロード確定を待って irLength を記録（peak==100 と同一 commit で publish 済み）
+    {
+        bool ready = false;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto bd = conv.getLatencyBreakdown();
+            if (bd.irPeakLatencySamples == 100 && conv.getIRLength() > 0)
+            {
+                ready = true;
+                break;
+            }
+            pumpH01Messages();
+            juce::Thread::sleep(5);
+        }
+        if (!ready)
+        {
+            std::fprintf(stderr, "[SR01] FAIL: T-SR01-7 baseline never finalized\n");
+            ok.deleteFile();
+            return false;
+        }
+    }
+    const int lenBefore = conv.getIRLength();
+    ok.deleteFile();
+    const juce::File silent = writeSR01TempIr("sr01_7b.wav", 44100.0, 2, 4410, -1); // 別SR → resample 経路
+    if (!silent.existsAsFile())
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-7 silent IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(silent, false);
+    bool failed = false;
+    for (int i = 0; i < 4000; ++i)
+    {
+        // silence-trim → resample 経路の順序依存で "silent" / "Resampling failed" のいずれかで終わる。
+        // 本契約の核心は「失敗時に旧 engine が保持されること」（publish 単一性）であり、
+        // 文言のどちらでもよい。ローディング完了＋非空 error を破棄判定の必要条件とする。
+        const auto err = conv.getLastError();
+        if (!conv.isLoadingIR() && err.isNotEmpty()
+            && (err.containsIgnoreCase("silent") || err.containsIgnoreCase("resampl")))
+        {
+            failed = true;
+            break;
+        }
+        pumpH01Messages();
+        juce::Thread::sleep(5);
+    }
+    const bool kept = failed && conv.getIRLength() == lenBefore && conv.isIRFinalized();
+    silent.deleteFile();
+    if (!kept)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-7 failed=%d irLen %d->%d finalized=%d\n",
+                     failed ? 1 : 0, lenBefore, conv.getIRLength(), conv.isIRFinalized() ? 1 : 0);
+        return false;
+    }
+    std::printf("checkSR01LoadFailureKeepsEngine: PASS (SilentIR rejected, old engine intact)\n");
+    return true;
+}
+
+// T-SR01-8: mono IR → ch0==ch1 複製契約（wet 到着位置の L/R 一致・H-01 基準との非抵触確認）
+bool checkSR01MonoDuplication()
+{
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(1.0f);
+    const juce::File mono = writeSR01TempIr("sr01_8.wav", 48000.0, 1, 4800, 100);
+    if (!mono.existsAsFile())
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-8 mono IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(mono, false);
+    const bool loaded = pollSR01Load(conv, 100, 48000);   // int(48000 × 1.0s)
+    mono.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-8 mono load not finalized\n");
+        return false;
+    }
+    conv.setMix(1.0f);
+    juce::AudioBuffer<double> ab(2, kH01Block);
+    juce::dsp::AudioBlock<double> blk(ab);
+    for (int i = 0; i < kH01WarmupBlocks; ++i)
+    {
+        ab.clear();
+        conv.process(blk);
+    }
+    int idxL = -1, idxR = -1;
+    double maxL = 0.0, maxR = 0.0;
+    constexpr int kSR01CaptureBlocks = 16;
+    for (int b = 0; b < kSR01CaptureBlocks; ++b)
+    {
+        ab.clear();
+        if (b == 0)
+        {
+            ab.getWritePointer(0)[0] = 1.0;
+            ab.getWritePointer(1)[0] = 1.0;
+        }
+        conv.process(blk);
+        for (int i = 0; i < ab.getNumSamples(); ++i)
+        {
+            const double l = std::fabs(ab.getReadPointer(0)[i]);
+            const double r = std::fabs(ab.getReadPointer(1)[i]);
+            if (l > maxL) { maxL = l; idxL = (b + kH01WarmupBlocks) * kH01Block + i; }
+            if (r > maxR) { maxR = r; idxR = (b + kH01WarmupBlocks) * kH01Block + i; }
+        }
+    }
+    const int want = kH01ImpulseBase + 100;
+    if (idxL != want || idxR != want || maxL <= 0.0 || maxR <= 0.0)
+    {
+        std::fprintf(stderr, "[SR01] FAIL: T-SR01-8 mono L=%d R=%d want=%d\n", idxL, idxR, want);
+        return false;
+    }
+    std::printf("checkSR01MonoDuplication: PASS (L/R argmax == %d == impulse+peak)\n", want);
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -913,6 +1427,52 @@ int runConvolverStateRoundTripTests()
     if (!checkH01DryWetAlignment())
     {
         std::fprintf(stderr, "FAIL: checkH01DryWetAlignment\n");
+        return 1;
+    }
+    // ★ SR-01(B) T-SR01-1..8（SR 依存 hardMax・C-1 snapshot clamp・C-3 trim ログ・互換回帰）
+    if (!checkSR01HardMaxFormula())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01HardMaxFormula\n");
+        return 1;
+    }
+    if (!checkSR01SetterClamp())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01SetterClamp\n");
+        return 1;
+    }
+    if (!checkSR01SnapshotClamp())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01SnapshotClamp\n");
+        return 1;
+    }
+    if (!checkSR01Load768k3s())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01Load768k3s\n");
+        return 1;
+    }
+    if (!checkSR01CapFiredLog())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01CapFiredLog\n");
+        return 1;
+    }
+    if (!checkSR01LowRateRegression())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01LowRateRegression\n");
+        return 1;
+    }
+    if (!checkSR01StateCompatibility())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01StateCompatibility\n");
+        return 1;
+    }
+    if (!checkSR01LoadFailureKeepsEngine())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01LoadFailureKeepsEngine\n");
+        return 1;
+    }
+    if (!checkSR01MonoDuplication())
+    {
+        std::fprintf(stderr, "FAIL: checkSR01MonoDuplication\n");
         return 1;
     }
     return 0;
