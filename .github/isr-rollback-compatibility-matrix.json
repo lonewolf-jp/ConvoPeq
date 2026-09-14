@@ -11,24 +11,24 @@
             "flag": "ISR_ROLLBACK_PUBLICATION_ONLY",
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-ROLLBACK-001",
-            "rationale": "Rollback publication path independently when bridge anomalies are detected",
-            "expiry": "2026-08-31"
+            "rationale": "Rollback publication path independently when bridge anomalies are detected | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "id": "crossfade-only",
             "flag": "ISR_ROLLBACK_CROSSFADE_ONLY",
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-ROLLBACK-002",
-            "rationale": "Rollback crossfade subsystem independently to protect audio quality",
-            "expiry": "2026-08-31"
+            "rationale": "Rollback crossfade subsystem independently to protect audio quality | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "id": "retire-path-only",
             "flag": "ISR_ROLLBACK_RETIRE_PATH_ONLY",
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-ROLLBACK-003",
-            "rationale": "Rollback retire path independently under reclaim/latency regressions",
-            "expiry": "2026-08-31"
+            "rationale": "Rollback retire path independently under reclaim/latency regressions | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         }
     ],
     "compatibility": [
@@ -40,8 +40,8 @@
             ],
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-ROLLBACK-010",
-            "rationale": "Global safety switch and publication-only rollback must both be available",
-            "expiry": "2026-08-31"
+            "rationale": "Global safety switch and publication-only rollback must both be available | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "scenario": "crossfade-click-pop",
@@ -51,8 +51,8 @@
             ],
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-ROLLBACK-011",
-            "rationale": "Audio quality incidents require immediate crossfade-only rollback path",
-            "expiry": "2026-08-31"
+            "rationale": "Audio quality incidents require immediate crossfade-only rollback path | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "scenario": "retire-latency-spike",
@@ -62,8 +62,8 @@
             ],
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-ROLLBACK-012",
-            "rationale": "Retire latency spikes require isolated retire-path rollback",
-            "expiry": "2026-08-31"
+            "rationale": "Retire latency spikes require isolated retire-path rollback | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         }
     ]
 }

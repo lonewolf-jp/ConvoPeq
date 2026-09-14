@@ -149,8 +149,8 @@ v7 R9 1 条項 / memory-ordering 3 条項 / publication-single-path 2 条項 —
 |---|---|
 | targeted: isr-verify-runtime-coordinator-state-machine.ps1 単体 | **PASS**（violations=0・CHECK_EXIT=0・report ready=true） |
 | negative-control: 旧 regex 条項は削除済みで code を触っていない（差分 ps1 のみ） | 成立（production diff 0） |
-| standard PUSH GATE（再実行） | GATE_RESULT_PLACEHOLDER |
-| push | PUSH_RESULT_PLACEHOLDER |
+| standard PUSH GATE（再実行・完走） | **PASS**（2026-09-14 11:4x / 160 [PASS]・FAIL/ERROR 0・最終行 `[PASS] tiered verification completed. tier=standard`） |
+| push | **実行**（work93/work94 commit 含む本 series を origin/main へ通常 push・2026-09-14） |
 
 ## 5. 残余リスクと注記
 

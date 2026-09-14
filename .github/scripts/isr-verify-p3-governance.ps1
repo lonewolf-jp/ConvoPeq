@@ -92,7 +92,11 @@ Assert-Match $timerCpp 'crossfadeAuthorityRuntime_\.unregisterCrossfade\s*\(' 'R
 $commitCppPath = Join-Path $audioRoot "AudioEngine.Commit.cpp"
 $commitCpp = Read-Text $commitCppPath
 # ★ 2026-08-11: emitRetireIntentRT は LifetimeState（worldAuthority_.lifetime()）経由に変更
-Assert-Match $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntentRT\s*\(' 'R14 gate: retire intent RT API naming consistency missing'
-Assert-NotMatch $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntent\s*\(' 'R14 gate: non-RT retire intent API usage detected in commit path'
+# ★ work94 sync (D132 M2 / v7 R9 と同一進化): commit 経路は NonRT 供給であり、现行の
+#   emission API は lifetime().emitRetireIntentNonRT(intent)（Commit.cpp:485）。
+#   RT 名の再出現／命名なし旧 API の復活は退行として禁止（検出方向は同一）。
+Assert-Match $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntentNonRT\s*\(' 'R14 gate: retire intent NonRT API naming consistency missing'
+Assert-NotMatch $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntentRT\s*\(' 'R14 gate: RT-suffixed retire intent emission must not reappear in commit path (D132 M2)'
+Assert-NotMatch $commitCpp 'worldAuthority_\.lifetime\(\)\.emitRetireIntent\s*\(' 'R14 gate: un-suffixed retire intent API usage detected in commit path'
 
 Write-Host '[PASS] P3 governance gates (R13/R14/R19/R20/R21/R23)'

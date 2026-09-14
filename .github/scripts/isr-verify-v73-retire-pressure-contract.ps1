@@ -88,16 +88,25 @@ Assert-Pattern -Text $headerText -Pattern 'drainDeferredRetireQueues\(false\);' 
 Assert-Pattern -Text $threadingText -Pattern 'if\s*\(!allowDuringShutdown\s*&&\s*isShutdownInProgress\(\)\)\s*\n\s*return;' -CheckId 'CI-RETIREPRESS-003' -File 'src/audioengine/AudioEngine.Threading.cpp' -Message 'drainDeferredRetireQueues must gate non-shutdown drains while shutdown is in progress.'
 
 # CI-RETIREPRESS-004: pressure telemetry/backlog publish が存在する
-Assert-Pattern -Text $threadingText -Pattern 'setRetireBacklogCount\(retireDepth\)' -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Threading.cpp' -Message 'Retire backlog count telemetry publication is missing.'
-Assert-Pattern -Text $threadingText -Pattern 'setDeferredRetireResidencyCount\(fallbackDepth\)' -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Threading.cpp' -Message 'Deferred retire residency telemetry publication is missing.'
+# ★ work94 sync (dash2 §1.4 B0-4・3b43a35d): external setter による絶対値上書きは意図的廃止。
+#   现行契約は Layer 1 実測 publish（retireDepth = router.pendingRetireCount() /
+#   fallbackDepth 実測）を AudioEngine.Retire.cpp で要求。旧 setter 形の復活は negative で検出。
+Assert-Pattern -Text $threadingText -Pattern 'convo::publishAtomic\(retireQueueDepth_,\s*retireDepth' -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Retire.cpp' -Message 'Retire backlog count telemetry publication is missing (measured retireQueueDepth_ publish required, dash2 §1.4).'
+Assert-Pattern -Text $threadingText -Pattern 'convo::publishAtomic\(fallbackQueueDepth_,\s*fallbackDepth' -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Retire.cpp' -Message 'Deferred retire residency telemetry publication is missing (measured fallbackQueueDepth_ publish required, dash2 §1.4).'
+if ([System.Text.RegularExpressions.Regex]::IsMatch($threadingText, 'setRetireBacklogCount\(|setDeferredRetireResidencyCount\(')) {
+    Add-Violation -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Retire.cpp' -Message 'Retire backlog external absolute-value setter must NOT reappear (dash2 §1.4 B0-4 deprecation).'
+}
 
 # CI-RETIREPRESS-005: shutdown/release pathで強制drainが実行される
 Assert-Pattern -Text $releaseText -Pattern 'drainDeferredRetireQueues\(true\);' -CheckId 'CI-RETIREPRESS-005' -File 'src/audioengine/AudioEngine.Processing.ReleaseResources.cpp' -Message 'releaseResources must force-drain deferred retire queues during shutdown.'
 Assert-Pattern -Text $releaseText -Pattern 'pendingRetireCount' -CheckId 'CI-RETIREPRESS-005' -File 'src/audioengine/AudioEngine.Processing.ReleaseResources.cpp' -Message 'releaseResources must account pending retire count for bounded teardown diagnostics.'
 
-# CI-RETIREPRESS-006: RetireEnqueueResult 4分岐を要求
-Assert-Pattern -Text $authorityText -Pattern 'enum class RetireEnqueueResult\s*:\s*std::uint8_t\s*\{\s*Success\s*=\s*0\s*,\s*QueuePressure\s*,\s*QueueFull\s*,\s*Shutdown\s*\};' -CheckId 'CI-RETIREPRESS-006' -File 'src/audioengine/ISRAuthorityClass.h' -Message 'RetireEnqueueResult must define Success/QueuePressure/QueueFull/Shutdown.'
-Assert-Pattern -Text $headerText -Pattern 'enqueueDeferredDeleteNonRtWithResult\(void\* ptr,\s*void \(\*deleter\)\(void\*\)\)\s*noexcept' -CheckId 'CI-RETIREPRESS-006' -File 'src/audioengine/AudioEngine.h' -Message 'AudioEngine must provide enqueueDeferredDeleteNonRtWithResult helper.'
+# CI-RETIREPRESS-006: RetireEnqueueResult 分岐を要求
+# ★ work94 sync (55aa7e96・2026-08-18): Success/QueuePressure/QueueFull/Shutdown に加え
+#   TerminalReclaim（優先度レーン解放結果）が増設済み。旧 4 分岐 exact regex は形式失効。
+#   helper も DeletionEntryType 引数付き（同一 commit 系）が现行形。
+Assert-Pattern -Text $authorityText -Pattern 'enum class RetireEnqueueResult\s*:\s*std::uint8_t\s*\{\s*Success\s*=\s*0\s*,\s*QueuePressure\s*,\s*QueueFull\s*,\s*Shutdown\s*(?:,\s*TerminalReclaim\s*)?\};' -CheckId 'CI-RETIREPRESS-006' -File 'src/audioengine/ISRAuthorityClass.h' -Message 'RetireEnqueueResult must define Success/QueuePressure/QueueFull/Shutdown[+TerminalReclaim].'
+Assert-Pattern -Text $headerText -Pattern 'enqueueDeferredDeleteNonRtWithResult\(void\* ptr,\s*void \(\*deleter\)\(void\*\)\s*(?:,\s*DeletionEntryType[^)]*)?\)\s*noexcept' -CheckId 'CI-RETIREPRESS-006' -File 'src/audioengine/AudioEngine.h' -Message 'AudioEngine must provide enqueueDeferredDeleteNonRtWithResult helper.'
 
 $report = @{
     schema         = 'isr_v73_retire_pressure_report_v1'

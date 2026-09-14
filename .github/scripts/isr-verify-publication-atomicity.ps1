@@ -16,11 +16,15 @@ else {
         'if \(lastCommittedGeneration != 0 && world\.generation <= lastCommittedGeneration\)',
         'if \(lastCommittedSequence != 0 && world\.publication\.sequenceId <= lastCommittedSequence\)',
         'onRuntimePublishedNonRt\(const RuntimePublishWorld& world\)',
-        'runtimePublicationBridge_\.commit\(',
         'publishAtomic\(lastCommittedRuntimeGeneration_',
         'publishAtomic\(lastCommittedPublicationSequence_'
     )
-    # ★ 2026-08-11: targetWorldIdU64 / lastEnqueuedPublicationTargetWorldId_ の重複チェックは
+    # ★ work94 sync (dash2 §1.7 CW-3a・commit 335240470 系): onRuntimePublishedNonRt 内の
+    #   冗長 commit #2 は除去済み（単一 authority commit は RuntimeWorldAuthority::publish の
+    #   coordinator_.commit — CI-RECLAIM-003 / publication-single-path / C4 が検証）。
+    #   本ファイルの ordering 検証は post-publish callback を anchor とし、callback 内での
+    #   commit 再実行（二重 commit → monotonicity Faulted 回帰）を negative で禁止。
+    #   2026-08-11: targetWorldIdU64 / lastEnqueuedPublicationTargetWorldId_ の重複チェックは
     #   generation / sequenceId の単調性チェック（lastCommittedGeneration_ / lastCommittedPublicationSequence_）
     #   に置き換えられている（worldId は generation から導出）。実装の atomicity 契約に合わせて対象外。
 
@@ -30,20 +34,28 @@ else {
         }
     }
 
-    $commitIndex = $s.IndexOf('runtimePublicationBridge_.commit(', [System.StringComparison]::Ordinal)
+    $commitIndex = $s.IndexOf('void AudioEngine::onRuntimePublishedNonRt(', [System.StringComparison]::Ordinal)
     $publishGenerationIndex = $s.IndexOf('publishAtomic(lastCommittedRuntimeGeneration_', [System.StringComparison]::Ordinal)
     $publishSequenceIndex = $s.IndexOf('publishAtomic(lastCommittedPublicationSequence_', [System.StringComparison]::Ordinal)
 
     if ($commitIndex -lt 0) {
-        $violations.Add('Atomic publication bridge commit call not found') | Out-Null
+        $violations.Add('Atomic publication post-publish callback anchor not found (onRuntimePublishedNonRt)') | Out-Null
     }
     else {
         if ($publishGenerationIndex -lt 0 -or $publishGenerationIndex -le $commitIndex) {
-            $violations.Add('Atomic publication ordering violation: lastCommittedRuntimeGeneration_ must publish after runtimePublicationBridge_.commit(...)') | Out-Null
+            $violations.Add('Atomic publication ordering violation: lastCommittedRuntimeGeneration_ must publish after onRuntimePublishedNonRt entry') | Out-Null
         }
 
         if ($publishSequenceIndex -lt 0 -or $publishSequenceIndex -le $commitIndex) {
-            $violations.Add('Atomic publication ordering violation: lastCommittedPublicationSequence_ must publish after runtimePublicationBridge_.commit(...)') | Out-Null
+            $violations.Add('Atomic publication ordering violation: lastCommittedPublicationSequence_ must publish after onRuntimePublishedNonRt entry') | Out-Null
+        }
+    }
+
+    # CW-3a 退行禁止: callback 内（commitIndex 以降）に commit 再実行が現れたら fail
+    if ($commitIndex -ge 0) {
+        $tailText = $s.Substring($commitIndex)
+        if ($tailText.IndexOf('runtimePublicationBridge_.commit(', [System.StringComparison]::Ordinal) -ge 0) {
+            $violations.Add('Duplicate bridge commit reappeared in post-publish callback (CW-3a removal regression)') | Out-Null
         }
     }
 }

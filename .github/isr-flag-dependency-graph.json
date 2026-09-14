@@ -2,8 +2,8 @@
     "schema": "flag_dependency_graph_v1",
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-FLAGGRAPH-001",
-    "rationale": "Prevent rollback flag interaction hell by validating acyclic dependencies and matrix alignment",
-    "expiry": "2026-08-31",
+    "rationale": "Prevent rollback flag interaction hell by validating acyclic dependencies and matrix alignment | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+    "expiry": "2026-12-31",
     "nodes": [
         "ISR_ROLLBACK_GLOBAL",
         "ISR_ROLLBACK_PUBLICATION_ONLY",

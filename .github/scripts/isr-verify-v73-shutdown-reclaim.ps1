@@ -575,6 +575,9 @@ foreach ($f in $cppFiles) {
 
     foreach ($h in $hits) {
         $lineText = "$($h.Line)"
+        # ★ work94 sync: allowlist の対象は実 callsite。コメント文中の言及は callsite ではないため
+        #   対象外（callsite 側の検出能力は不変、注釈の文言で allowlist が腐る運用退行を排除）。
+        if ($lineText -match '^\s*(//|/\*|\*)') { continue }
         $allowMatched = $false
 
         foreach ($allow in @($policy.shutdownReclaimChecks.waitForDrainCallsiteAllowlist)) {
@@ -604,6 +607,8 @@ foreach ($f in $cppFiles) {
 
     foreach ($h in $hits) {
         $lineText = "$($h.Line)"
+        # ★ work94 sync: 同上（コメント文中の isFullyDrained 言及は callsite ではない）
+        if ($lineText -match '^\s*(//|/\*|\*)') { continue }
         $allowMatched = $false
 
         foreach ($allow in @($policy.shutdownReclaimChecks.isFullyDrainedCallsiteAllowlist)) {

@@ -22,6 +22,14 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "Integration test exercising the engine rebuild path (requestRebuild → rebuild dispatch)",
                 "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/tests/AudioEngineHarness/PublishPipelineIntegrationTests\\.cpp$",
+                "lineRegex": "requestRebuild\\s*\\(",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "D167 integration test exercises the engine rebuild path as telemetry vehicle (requestRebuild -> admission-closed suppression telemetry); same pattern as DeferredFlowIntegrationTests entry (commit 335240470)",
+                "expiry": "2027-12-31"
             }
         ],
         "requiredAdmissionGatePatterns": [
@@ -177,7 +185,8 @@
         "MixedPhaseIntermediate",
         "SnapshotEnqueueFailed",
         "RetirePressureSevere",
-        "SameAsPendingWouldMerge"
+        "SameAsPendingWouldMerge",
+        "AdmissionClosed"
     ],
     "residencyKnownContainers": [
         "retire queue",
@@ -310,6 +319,14 @@
             "owner": "audio-runtime",
             "issue": "BRIDGE-ISR-AI-GOV-001",
             "rationale": "Recovery intent queue residency container (transport-only SPSC)",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/RetryScheduler\\.h$",
+            "lineRegex": "std::deque<PendingRetry>\\s+queue_\\s*;",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "RetryScheduler bounded pending-retry deque (fd42796b 2026-08-24); name heuristic 'queue' match, bounded residency - allowlisted as declaration site",
             "expiry": "2027-12-31"
         }
     ],
@@ -548,6 +565,14 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "bounded non-RT shutdown path is the only permitted waitForDrain invocation",
                 "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.Processing\\.ReleaseResources\\.cpp$",
+                "lineRegex": "waitForDrain\\(100,\\s*1\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "D169-2 reconfigure-path bounded drain (100ms x1) is a second bounded non-RT callsite (commit 5c84ec9d 2026-08-25); add via work94 sync - both waitForDrain invocations remain bounded, non-RT, budget-explicit",
+                "expiry": "2027-12-31"
             }
         ],
         "isFullyDrainedCallsiteAllowlist": [
@@ -657,15 +682,15 @@
             }
         ],
         "requiredReclaimPrioritizationPatterns": [
-            "RuntimeIntentCoordinator::reclaim\\("
+            "RuntimeIntentCoordinator::(requestReclaim|reclaimNormal|reclaimShutdownQuiescent)\\("
         ],
         "requiredReclaimPrioritizationApplications": [
             {
                 "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
-                "lineRegex": "RuntimeIntentCoordinator::reclaim\\(",
+                "lineRegex": "RuntimeIntentCoordinator::(requestReclaim|reclaimNormal|reclaimShutdownQuiescent)\\(",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "reclaim prioritization is enforced through the single Reclaim Authority entry point (FIFO retire order)",
+                "rationale": "reclaim prioritization is enforced through the single Reclaim Authority entry point (FIFO retire order) | work94 sync (work88 Step 9 / dash2 §2.2): old bool reclaim API deleted; single Reclaim Authority is now requestReclaim/reclaimNormal/reclaimShutdownQuiescent.",
                 "expiry": "2027-12-31"
             }
         ]
@@ -949,27 +974,11 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
-                "lineRegex": "runtimePublicationBridge_\\.setFallbackBacklogCount\\(fallbackDepth\\)",
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "drainDeferredRetireQueues\\(false\\);",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "fallback enqueue must immediately synchronize fallback backlog into coordinator telemetry bridge",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
-                "lineRegex": "runtimePublicationBridge_\\.setRetireBacklogCount\\(retireDepth\\)",
-                "owner": "audio-runtime",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "fallback enqueue must immediately synchronize retire backlog into coordinator telemetry bridge",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
-                "lineRegex": "runtimePublicationBridge_\\.setDeferredRetireResidencyCount\\(fallbackDepth\\)",
-                "owner": "audio-runtime",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "fallback enqueue must immediately synchronize deferred-retire residency for pressure comparison",
+                "rationale": "work94 sync (dash2 B0-4/B0-7): fallback enqueue immediate sync is best-effort measured drain + publishAtomic(retireQueueDepth_, pendingRetireCount()) in enqueueDeferredDeleteNonRtWithResult; bridge absolute-value setter API was removed",
                 "expiry": "2027-12-31"
             }
         ]

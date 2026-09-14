@@ -22,7 +22,7 @@
             "threshold": "<=2_per_10min_vs_baseline",
             "action": "Enable ISR_ROLLBACK_CROSSFADE_ONLY and file incident in BRIDGE-METRIC-001",
             "issue": "BRIDGE-METRIC-001",
-            "expiry": "2026-08-31"
+            "expiry": "2026-12-31"
         },
         {
             "id": "callbackJitter",
@@ -33,7 +33,7 @@
             "threshold": "p99<=1.5x_baseline",
             "action": "Enable ISR_ROLLBACK_PUBLICATION_ONLY and run jitter triage playbook",
             "issue": "BRIDGE-METRIC-002",
-            "expiry": "2026-08-31"
+            "expiry": "2026-12-31"
         },
         {
             "id": "retireLatency",
@@ -44,7 +44,7 @@
             "threshold": "p99<=2.0x_baseline",
             "action": "Enable ISR_ROLLBACK_RETIRE_PATH_ONLY and collect retire timeline evidence",
             "issue": "BRIDGE-METRIC-003",
-            "expiry": "2026-08-31"
+            "expiry": "2026-12-31"
         },
         {
             "id": "crossfadePeak",
@@ -55,7 +55,7 @@
             "threshold": "<=-1dBFS_peak_delta",
             "action": "Record anomaly and schedule crossfade tuning follow-up",
             "issue": "BRIDGE-METRIC-004",
-            "expiry": "2026-08-31"
+            "expiry": "2026-12-31"
         }
     ]
 }

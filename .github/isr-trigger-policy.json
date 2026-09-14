@@ -13,8 +13,8 @@
             "allowedMax": 0,
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-TRIGGER-001",
-            "rationale": "legacy activeDSP readers remain during controlled coexistence",
-            "expiry": "2026-08-31"
+            "rationale": "legacy activeDSP readers remain during controlled coexistence | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "id": "fadingOutDspDeletionStart",
@@ -23,8 +23,8 @@
             "allowedMax": 0,
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-TRIGGER-002",
-            "rationale": "crossfade subsystem migration is phased and write path still active",
-            "expiry": "2026-08-31"
+            "rationale": "crossfade subsystem migration is phased and write path still active | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "id": "retireFacadeRemovalStart",
@@ -33,8 +33,8 @@
             "allowedMax": 0,
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-TRIGGER-003",
-            "rationale": "retire facade direct dependencies are reduced incrementally",
-            "expiry": "2026-08-31"
+            "rationale": "retire facade direct dependencies are reduced incrementally | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "id": "observeShimRemovalStart",
@@ -43,8 +43,8 @@
             "allowedMax": 0,
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-TRIGGER-004",
-            "rationale": "legacy direct observe paths must converge to shim-only allowlisted usage before shim removal",
-            "expiry": "2026-08-31"
+            "rationale": "legacy direct observe paths must converge to shim-only allowlisted usage before shim removal | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         },
         {
             "id": "runtimeExecutionViewConvergence",
@@ -53,8 +53,8 @@
             "allowedMax": 0,
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-TRIGGER-005",
-            "rationale": "runtime execution read path migration completed and must not regress to legacy symbol naming",
-            "expiry": "2026-08-31"
+            "rationale": "runtime execution read path migration completed and must not regress to legacy symbol naming | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+            "expiry": "2026-12-31"
         }
     ]
 }

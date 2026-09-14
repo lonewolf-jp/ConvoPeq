@@ -504,9 +504,12 @@ if (-not (Test-Path -LiteralPath $audioEngineHeaderPath)) {
 else {
     $audioEngineHeaderText = Get-Content -LiteralPath $audioEngineHeaderPath -Raw -Encoding UTF8
 
+    # ★ work94 sync (dash2 B0-7): bridge absolute-value setter は削除済み。现行の
+    #   fallback enqueue 即時同期契約は best-effort drain + 実測 publishAtomic
+    #   （AudioEngine.h enqueueDeferredDeleteNonRtWithResult:4367-4371）。
     $requiredImmediateSyncPatterns = @(
         'convo::publishAtomic\(retireQueueDepth_, retireDepth,\s*std::memory_order_release\)',
-        'runtimePublicationBridge_\.setRetireBacklogCount\(retireDepth\)'
+        'drainDeferredRetireQueues\(false\);'
     )
 
     foreach ($pattern in $requiredImmediateSyncPatterns) {

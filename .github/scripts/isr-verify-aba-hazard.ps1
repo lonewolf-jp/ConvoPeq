@@ -65,10 +65,14 @@ foreach ($pattern in $builderPatterns) {
 
 # ★ 2026-08-11: FUTURE-4 で persistentState_ / PersistentStateBlock::isMonotonic を廃止し、
 #   currentWorld_ から prev metadata を取得し、インラインで monotonic 比較を行う実装に合わせて修正。
+# ★ work94 sync (dash2 §1.7 CW-3b / §1.6.1 Phase H・work88/89 系): prev metadata baseline は
+#   明示 prevWorld 引数からの読み出しに収束、seq/epoch 比較は wraparound-safe
+#   convo::isr::isAfter へ進化（memory-ordering-contract と同一形）。ABA 検出意図
+#   （stale prev との比較必須・strict monotonic・bake）は同一維持。
 $coordinatorPatterns = @(
-    'const auto prevWorld = static_cast<const RuntimeState\*>\s*\(',
-    'static_cast<std::uint64_t>\(sequenceId\) > static_cast<std::uint64_t>\(prevSeqId\)',
-    'static_cast<std::uint64_t>\(epoch\) > static_cast<std::uint64_t>\(prevEpoch\)',
+    'const auto prevSeqId = prevWorld \? prevWorld->publication\.sequenceId',
+    'convo::isr::isAfter\(sequenceId, prevSeqId\)',
+    'convo::isr::isAfter\(epoch, prevEpoch\)',
     'mappedGeneration > prevGen',
     'pubWorld->publication = PublicationSemantic\{'
 )

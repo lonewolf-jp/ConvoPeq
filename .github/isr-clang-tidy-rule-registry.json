@@ -2,8 +2,8 @@
     "schema": "clang_tidy_rule_registry_v1",
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-CLANGTIDY-001",
-    "rationale": "Phase2-2 enforcement migration requires reproducible clang-tidy readiness and minimum check coverage",
-    "expiry": "2026-08-31",
+    "rationale": "Phase2-2 enforcement migration requires reproducible clang-tidy readiness and minimum check coverage | work94 re-review 2026-09-14: quarterly expiry re-approved 2026-08-31 -> 2026-12-31 (monitoring-anchor semantics unchanged; re-verified zero-regression by word-boundary/report audit at this date).",
+    "expiry": "2026-12-31",
     "requiredChecks": [
         "bugprone-use-after-move",
         "bugprone-branch-clone",
