@@ -4,6 +4,7 @@
 // Convolverコントロールパネルの実装
 //============================================================================
 #include "ConvolverControlPanel.h"
+#include "MKLNonUniformConvolver.h" // ★ SR-02 (S-3): L0 coverage 表示の単一権威（kL0PartsHardCap）
 #include "MixedPhaseOptimizationComponent.h"
 #include "ConvolverSettingsComponent.h"
 #include <cmath>
@@ -304,6 +305,31 @@ private:
                                             static_cast<double>(convolver.getTargetIRLength()));
         irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC,
                                 std::min(irLengthHardMax, irLengthCur), 0.1);
+        // ★ SR-02 (S-3): tailStart tooltip に実効 L0 coverage を表示
+        //   （契約式: effectiveCoverage = min(ts, kL0PartsHardCap × l0Part / sr)）。
+        //   l0Part は NUC L0 partSize == breakdown.algorithmLatencySamples（directHead ON → 0）。
+        {
+            const double sr = engine.getProcessingSampleRate();
+            const int l0Part = convolver.getLatencyBreakdown().algorithmLatencySamples;
+            const double ts = static_cast<double>(convolver.getTailStartSec());
+            if (l0Part > 0 && sr > 0.0)
+            {
+                const double capSec = static_cast<double>(convo::MKLNonUniformConvolver::kL0PartsHardCap)
+                                    * static_cast<double>(l0Part) / sr;
+                juce::String tip = juce::String::formatted(
+                    "L0 coverage ceiling: %.1f ms (max %d partitions x %d samples @ %.0f Hz)",
+                    capSec * 1000.0, convo::MKLNonUniformConvolver::kL0PartsHardCap, l0Part, sr);
+                if (ts > capSec)
+                    tip += juce::String::formatted(
+                        "  — requested %.1f ms exceeds ceiling (L0 capped)", ts * 1000.0);
+                tailStartSlider.setTooltip(tip);
+            }
+            else
+            {
+                tailStartSlider.setTooltip(
+                    "L0 coverage ceiling: n/a (directHead active or engine not prepared)");
+            }
+        }
         if (!irLengthSlider.isMouseButtonDown())
             irLengthSlider.setValue(convolver.getTargetIRLength(), juce::dontSendNotification);
         if (!rebuildSlider.isMouseButtonDown())

@@ -200,6 +200,21 @@ public:
                     const FilterSpec* filterSpec = nullptr);
 
     //----------------------------------------------------------
+    // ★ SR-02 (S-1) — L0 coverage 上限式（doc/work96 契約凍結 2026-09-14）
+    //   純関数（NonRT）。SetImpulse / 境界テスト / UI 表示の単一権威。
+    //
+    //   l0MaxParts = tailEnabled ? clamp(ceil(coverageSamples / l0Part), 32, 256) : 32
+    //     - floor 32 = 現行幾何（kL0MaxParts）。required ≤ 32 の全構成は現行とビット一致。
+    //     - hard cap 256 = RT ceiling（processLayerBlock の partition-ops 線形成長に対する
+    //       実測保証: work96 §2.2 / T-SR02-6 wall-clock 契約）。
+    //     - tailEnabled=false (Bypass) は tailStart 非依存で現行不変。
+    //   int 演算のみ（double 丸みに依存しない）。pow2 切り上げは禁止（最大 2× 膨張、不採用）。
+    //----------------------------------------------------------
+    static constexpr int kL0PartsFloor = 32;
+    static constexpr int kL0PartsHardCap = 256;
+    [[nodiscard]] static int computeL0MaxParts(int l0Part, int coverageSamples, bool tailEnabled) noexcept;
+
+    //----------------------------------------------------------
     // Add  ─ Audio Thread のみ
     // 入力サンプルを畳み込みエンジンへ投入する。
     // @param input      入力バッファ (numSamples サンプル)。nullptr=無音として扱う

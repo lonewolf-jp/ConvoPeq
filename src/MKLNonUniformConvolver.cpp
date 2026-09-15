@@ -605,6 +605,20 @@ NucDiagnosticsSnapshot MKLNonUniformConvolver::getDiagnostics() const noexcept
 #endif
 
 //==============================================================================
+// ★ SR-02 (S-1) — L0 coverage 上限式の単一権威（doc/work96 契約凍結）。純関数・NonRT。
+//==============================================================================
+int MKLNonUniformConvolver::computeL0MaxParts(int l0Part, int coverageSamples, bool tailEnabled) noexcept
+{
+    if (!tailEnabled || l0Part <= 0 || coverageSamples <= 0)
+        return kL0PartsFloor;
+    const long long required = (static_cast<long long>(coverageSamples) + l0Part - 1) / l0Part;
+    long long parts = required;
+    if (parts < kL0PartsFloor)   parts = kL0PartsFloor;
+    if (parts > kL0PartsHardCap) parts = kL0PartsHardCap;
+    return static_cast<int>(parts);
+}
+
+//==============================================================================
 // SetImpulse  ─ Message Thread のみ
 //==============================================================================
 bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int blockSize, double scale,
@@ -739,10 +753,43 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     const int l1Part = l0Part * tailL1L2Mult;
     const int l2Part = l1Part * tailL1L2Mult;
 
-    const int l0MaxLen = kL0MaxParts * l0Part;
+    // ★ SR-02 (S-1): l0MaxLen は秒ベース上限式へ（doc/work96 契約凍結 2026-09-14）。
+    //   l0LenByTailStart = mode clamp 後の実効 tailStartSec（:630-670）のサンプル数。
+    //   従来 l0MaxLen = kL0MaxParts(32) × l0Part は秒換算で SR に反比例し、
+    //   192k/bs256 以降で意図カバレッジに対し 12.5〜50% に潰れていた（SR-02）。
+    //   floor 32 により低 SR の全既構成は現行幾何とビット一致（48k/bs64 の MT-NUPC
+    //   構成は required=90 の意図的例外 — work57 期待値表を同一サイクルで更新）。
     const int l0LenByTailStart = static_cast<int>(std::llround(tailStartSec * sampleRateForTail));
-    const int l0LenTarget = juce::jlimit(l0Part, l0MaxLen, l0LenByTailStart);
+
+    // ★ I5 保証（B13 gate: o_L % B == 0 / P % B == 0）: llround による partSize 非整除を
+    //   production 側で排除する（air 48k: 0.085×48000=4080 は 512 の倍数でなく o_L=4080 →
+    //   I5 NG — 本 landmine は SR-02 前から存在したが、旧幾何では target が常時 l0MaxLen
+    //   （pow2 由来）へ clamped され顕在化していなかった）。
+    //   カバレッジを l0Part（pow2）の倍数へ切り上げる。b（ブロックホップ）が pow2 なら
+    //   b | l0Part より o_L=l0Len は自動的に I5 充足（非 pow2 b は B13 I5 の既存前提外）。
+    //   pow2 切り上げは行わない（契約: partSize 倍数のみ — work96 §3 / 不要な 2× 膨張の回避）。
+    const int l0CoverageAligned =
+        ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
+    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, tailEnabled);
+    const int l0MaxLen = l0MaxParts * l0Part;
+    const int l0LenTarget = juce::jlimit(l0Part, l0MaxLen, l0CoverageAligned);
     const int l0Len = std::min(irLen, tailEnabled ? l0LenTarget : l0MaxLen);
+
+    // ★ SR-02 (S-4): 拡大 / cap 発動の可視化（NonRT ログのみ。RT 側ログは禁止）。
+    //   ※ juce::String::formatted の %s は引数をワイド文字列として解釈するため（B13-GATE と同注記）、
+    //     サフィックスは連結で組み立てる（"hard cap" 検出のテスト contract 依存）。
+    if (tailEnabled && (l0MaxParts != kL0PartsFloor || l0CoverageAligned > l0MaxLen))
+    {
+        const double covMs = (sampleRateForTail > 0.0)
+            ? (1000.0 * static_cast<double>(l0MaxLen) / sampleRateForTail) : 0.0;
+        const bool capped = (l0CoverageAligned > l0MaxLen);
+        juce::String line = juce::String::formatted("[SR-02] L0 parts %d->%d (coverage %.1f ms",
+                                                    kL0PartsFloor, l0MaxParts, covMs);
+        if (capped)
+            line += ", hard cap reached";
+        line += ")";
+        juce::Logger::writeToLog(line);
+    }
 
     const int l1Offset = l0Len;
     const int l1Len    = tailEnabled ? std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)) : 0;
@@ -1116,12 +1163,19 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
             const bool i2General = (2 * l.partSize - b <= oL);   // 十分条件（現行 scheduler 前提）
             const bool i5 = (l.partSize % b == 0) && (oL % b == 0);
             const bool i3 = (l.delayLineCapacity >= oL - lead + 2 * l.partSize);
-            juce::Logger::writeToLog (juce::String::formatted (
-                "[B13-GATE] L%d: P=%d o_L=%d lead=%d | I2(lead<=oL-B)=%s I2g(2P-B<=oL)=%s"
-                " I5(align)=%s I3(cap %d >= need %d)=%s",
-                li, l.partSize, oL, lead,
-                i2 ? "OK" : "NG", i2General ? "OK" : "NG", i5 ? "OK" : "NG",
-                l.delayLineCapacity, oL - lead + 2 * l.partSize, i3 ? "OK" : "NG"));
+            // ★ SR-02 (S-4 同種是正): %s の narrow リテラルはワイド解釈で mojibake 化するため
+            //   OK/NG フラグは連結で構築（gate 監査・M4 診断の機械判読性を回復）。
+            juce::String line = juce::String::formatted(
+                "[B13-GATE] L%d: P=%d o_L=%d lead=%d | I2(lead<=oL-B)=",
+                li, l.partSize, oL, lead);
+            line += (i2 ? "OK" : "NG");
+            line += " I2g(2P-B<=oL)=";
+            line += (i2General ? "OK" : "NG");
+            line += " I5(align)=";
+            line += (i5 ? "OK" : "NG");
+            line += juce::String::formatted(" I3(cap %d >= need %d)=", l.delayLineCapacity, oL - lead + 2 * l.partSize);
+            line += (i3 ? "OK" : "NG");
+            juce::Logger::writeToLog(line);
             if (! i2 || ! i5 || ! i3)
             {
                 // 構造不変条件違反 = 設計バグ（outputDelaySamples の測定とは区別）

@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -48,15 +49,18 @@ namespace {
 
 constexpr int    kBlockSize      = 64;
 constexpr double kSampleRate     = 48000.0;
-constexpr int    kL0MaxParts     = 32;   // MKLNonUniformConvolver.h
+// ★ SR-02 (S-2): kL0MaxParts 直書き（=32）は廃止 — 本番単一権威
+//   convo::MKLNonUniformConvolver::computeL0MaxParts() を呼ぶ（doc/work96 契約凍結）。
+constexpr double kTheoTailStartClamped = 0.12;  // tailMode=1 の mode clamp（cpp:661-662、0.085→≥0.12）
 constexpr int    kL1MaxParts     = 64;
 constexpr int    kTailL1L2Mult   = 8;    // filterSpec=nullptr / FilterSpec デフォルト
 constexpr int    kMaxBlocksTrack = 512;  // run ごとに event を追跡するブロック数上限
 
 // ── 層構成の理論値（48 kHz / blockSize=64 / tailMode=1） ──────────────────
 //   l0Part = nextPow2(max(64,64)) = 64、l1Part = 512、l2Part = 4096
-//   l0LenByTailStart = llround(tailStartSec × 48000) ≥ 5760（tailMode=1 の 0.12 クランプ）
-//   → l0LenTarget = jlimit(64, 2048, ≥5760) = **2048 常時クランプ**（手順書 §1）
+//   ★ SR-02: l0LenByTailStart = llround(0.12 × 48000) = 5760 →
+//   computeL0MaxParts(64, 5760, true) = 90 → l0MaxLen = 5760（旧 2048 からの意図的例外）
+//   l0LenTarget = jlimit(64, 5760, 5760) = 5760（l0MaxLen=5760 に縮んで常時一致は消滅）
 struct LayerCfgTheo
 {
     int offset[3] = { 0, 0, 0 };
@@ -78,8 +82,12 @@ LayerCfgTheo computeLayerCfg (int irLen, bool tailEnabled)
     const int l0Part  = nextPow2 (std::max (kBlockSize, 64));   // 64
     const int l1Part  = l0Part * kTailL1L2Mult;                 // 512
     const int l2Part  = l1Part * kTailL1L2Mult;                 // 4096
-    const int l0MaxLen = kL0MaxParts * l0Part;                  // 2048
-    const int l0Len    = std::min (irLen, l0MaxLen);            // tailMode=1 クランプで l0LenTarget==l0MaxLen
+    const int l0LenByTailStart = static_cast<int> (std::llround (kTheoTailStartClamped * kSampleRate)); // 5760
+    // ★ I5 保証アライン（production cpp:758-764と同式）。5760 は 64 の倍数のため本構成では無変。
+    const int l0CoverageAligned = ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
+    const int l0MaxParts = convo::MKLNonUniformConvolver::computeL0MaxParts (l0Part, l0CoverageAligned, tailEnabled);
+    const int l0MaxLen = l0MaxParts * l0Part;                   // tail on: 5760 / tail off: 2048
+    const int l0Len    = std::min (irLen, l0MaxLen);
     const int l1Len    = tailEnabled ? std::max (0, std::min (irLen - l0Len, kL1MaxParts * l1Part)) : 0;
     const int l2Len    = tailEnabled ? std::max (0, irLen - l0Len - l1Len) : 0;
 
@@ -88,6 +96,15 @@ LayerCfgTheo computeLayerCfg (int irLen, bool tailEnabled)
     cfg.offset[0] = 0;   cfg.offset[1] = l0Len; cfg.offset[2] = l0Len + l1Len;
     cfg.numLayers = (l0Len > 0 ? 1 : 0) + (l1Len > 0 ? 1 : 0) + (l2Len > 0 ? 1 : 0);
     return cfg;
+}
+
+// ★ SR-02 (S-2): effDelay 期待値の理論導出（手編集禁止・モデル単一系統）。
+//   Policy R 修復契約によりレイヤ実効遅延 = o_L = 先行層 IR 総和 = cfg.offset[li]。
+//   期待 effDelay = o_L − B（b13_repair_design §10 / 旧リテラル 1984=2048−64・
+//   34752=34816−64 と本式は全 case で一致することを Step 4 実測で再確認）。
+int expectedEffFrom (const LayerCfgTheo& cfg, int li) noexcept
+{
+    return (li < 3 && cfg.len[li] > 0) ? cfg.offset[li] - kBlockSize : 0;
 }
 
 // ── 判定帯（手順書 §6） ──────────────────────────────────────────────────
@@ -251,6 +268,7 @@ struct M2RunResult
     int  phase1ObservedAnchors[3] = { 0, 0, 0 };// 実測 read-anchor（unique）
     int  phase1MissingAnchors[3]  = { 0, 0, 0 };
     int  phase1DuplicateAnchors[3]= { 0, 0, 0 };
+    std::string missingJList[3];                // ★ SR-02 診断: 欠落 j の列挙
     double coveragePhase1[3] = { 0.0, 0.0, 0.0 };
     // ★ P1-x-I: R2-b WRITE/READ-CADENCE-SPLIT + R3-b′ margin 計測
     //   観測側の純粋関数のみで導出（production 変更・accessor 追加なし）
@@ -446,12 +464,16 @@ bool runM2 (int irLen, bool tailEnabled, int n0, const double* ir,
         }
 
         // expected: logical position j のうち、content_time(j) = jP + o_L が
-        // run 時間内（最終 callback の末尾 t = totalCallbacks × B）に到達するもののみ。
+        // run 時間内（最終 callback の末尾 t = totalCallbacks × B を**严格に**未満）に到達するもののみ。
         // run 時間外の j は expected に含めない（missing 3 = run 長不足分の誤集計を修正）。
+        // ★ SR-02 (S-2/共変): o_L が 512 非整数倍（=5760: 128 mod 512）となったことで
+        //   contentTime == totalStream の厳密尾が顕在化。当該位置は run 内で到達しない
+        //   （Get の最終 callback は t < totalStream をカバー）→ 境界を < に是正。
+        //   旧幾何（o_L=2048/34816 は 512 倍数）では < と <= の差は空集合だった。
         const long long totalStream = (long long) totalCallbacks * kBlockSize;
         int expected = 0;
         for (int jx = 0; jx < numBlocks; ++jx)
-            if ((long long) jx * ps + oL <= totalStream) ++expected;
+            if ((long long) jx * ps + oL < totalStream) ++expected;
         out.phase1ExpectedAnchors[li] = expected;
         out.phase1ObservedAnchors[li] = (int) anchorCbs.size();
         int missing = 0, dup = 0;
@@ -461,7 +483,11 @@ bool runM2 (int irLen, bool tailEnabled, int n0, const double* ir,
             if (it == anchorCbs.end())
             {
                 // run 時間内の content のみ missing として数える
-                if ((long long) jx * ps + oL <= totalStream) ++missing;
+                if ((long long) jx * ps + oL < totalStream)
+                {
+                    ++missing;
+                    out.missingJList[li] += std::to_string (jx) + " ";
+                }
             }
             else if (it->second.size() > 1) dup += (int) it->second.size() - 1;
         }
@@ -662,25 +688,27 @@ int main()
         bool tailEnabled = false;
         std::vector<int> n0s {};
         int expectedOpeL1 = 0;
-        int expectedEffL1 = 0;
         int expectedOpeL2 = 0;
-        int expectedEffL2 = 0;
+        // ★ SR-02 (S-2): expectedEff* リテラルは廃止 — expectedEffFrom(cfg) の理論導出へ
+        //   （手編集禁止。理論モデル → 期待値 → 実測照合の単一系統）
     };
     const Case cases[] = {
-        { "T1",  2000,  true,  { 0 },                            0, 0,    0,     0 },
-        { "T2",  2048,  true,  { 0 },                            0, 0,    0,     0 },
-        { "T3",  2049,  true,  { 0, 4096 },                      0, 1984, 0,     0 },
-        { "T4",  5000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
-        { "T5",  8000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
-        { "T6", 12000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     0 },
-        { "T7", 40000,  true,  { 0, 4096, 8192, 16384 },         0, 1984, 0,     34752 },
-        { "T8",  5000,  false, { 0 },                            0, 0,    0,     0 },
+        { "T1",  2000,  true,  { 0 } },
+        { "T2",  2048,  true,  { 0 } },
+        // ★ SR-02: 新 l0MaxLen=5760 境界ケース（L1 出現の初回 irLen）
+        { "B1",  5761,  true,  { 0, 4096 } },
+        { "T3",  2049,  true,  { 0, 4096 } },
+        { "T4",  5000,  true,  { 0, 4096, 8192, 16384 } },
+        { "T5",  8000,  true,  { 0, 4096, 8192, 16384 } },
+        { "T6", 12000,  true,  { 0, 4096, 8192, 16384 } },
+        { "T7", 40000,  true,  { 0, 4096, 8192, 16384 } },
+        { "T8",  5000,  false, { 0 } },
         // ★ P1-x-I R2-b WRITE/READ-CADENCE-SPLIT sweep 追加ケース
-        //   R2b  : irLen=20000 → l1Len=17952 (nIR=36, ppc=5, distCbs=8, lead=896)・l2Len=0 → L1 のみ
-        //   R2bL2: irLen=45000 → l1Len=32768(cap) (nIR=64, ppc=8, lead=896) + l2Len=10184
-        //          (nIR=3, ppc=1, distCbs=3, lead=64×(64+3−2)=4160) — L2 lead 変動の実証
-        { "R2b",  20000, true, { 0, 4096 },                      0, 1984, 0,     0 },
-        { "R2bL2",45000, true, { 0, 4096 },                      0, 1984, 0,     34752 },
+        //   （★ SR-02 後のジオメトリはモデル導出 — 旧注記 17952/10184 は失効）
+        //   R2b  : irLen=20000 → l0Len=5760, l1Len=14240, l2Len=0 → L1 のみ
+        //   R2bL2: irLen=45000 → l1Len=32768(kL1MaxParts cap), l2Len=6472 → L2 出現
+        { "R2b",  20000, true, { 0, 4096 } },
+        { "R2bL2",45000, true, { 0, 4096 } },
     };
 
     // ★ P1-x-I: R2-b sweep 収集 + M1 結果収集（サマリで併記）
@@ -688,9 +716,13 @@ int main()
     std::map<std::string, std::string> p1xM1Verdict;   // caseName → PASS/FAIL/EXCLUDED
 
     std::cout << "=== M2: 三時刻観測（主判定）===\n";
+    const auto m2T0 = std::chrono::steady_clock::now();   // ★ SR-02 (T-SR02-6): 主測定フェーズ時間
     for (const auto& cs : cases)
     {
         const LayerCfgTheo cfg = computeLayerCfg (cs.irLen, cs.tailEnabled);
+        // ★ SR-02 (S-2): eff 期待値は理論導出（旧リテラル 1984/34752 は offset−B と全 case 一致）
+        const int expEffL1 = expectedEffFrom (cfg, 1);
+        const int expEffL2 = expectedEffFrom (cfg, 2);
         int runId = 0;
         for (int n0 : cs.n0s)
         {
@@ -730,24 +762,26 @@ int main()
                               << r.numPartsIR[li] << " vs " << expParts << ")\n";
                     ++structuralFailures;
                 }
-                if (li >= 1 && ! r.coverageOk[li])
-                {
-                    // P0-1: coverage は Phase 1 基準（missing/dup = 0 が合格）。
-                    //   Phase 0 中の write（未 read）は正常 — write>read の総数比は判定に使用しない。
-                    std::cout << "    [STRUCTURAL-FAIL] L" << li
-                              << " event coverage (Phase 1) missing=" << r.phase1MissingAnchors[li]
-                              << " dup=" << r.phase1DuplicateAnchors[li]
-                              << " (writes=" << r.writeEventCount[li]
-                              << ", Phase1 anchors=" << r.phase1ObservedAnchors[li] << ")\n";
-                    ++structuralFailures;
-                }
+            if (li >= 1 && ! r.coverageOk[li])
+            {
+                // ★ SR-02 診断: 欠落 j は runM2 集計側で記録（missingJList）
+                // P0-1: coverage は Phase 1 基準（missing/dup = 0 が合格）。
+                //   Phase 0 中の write（未 read）は正常 — write>read の総数比は判定に使用しない。
+                std::cout << "    [STRUCTURAL-FAIL] L" << li
+                          << " event coverage (Phase 1) missing=" << r.phase1MissingAnchors[li]
+                          << " dup=" << r.phase1DuplicateAnchors[li]
+                          << " missingJ=[" << r.missingJList[li] << "]"
+                          << " (writes=" << r.writeEventCount[li]
+                          << ", Phase1 anchors=" << r.phase1ObservedAnchors[li] << ")\n";
+                ++structuralFailures;
+            }
             }
 
             // ── M2 判定行（期待値は case 別 — 手順書 §2.3） ──
             if (r.numLayers >= 2)
-                printM2Line (cs.name, runId, 1, r, cs.expectedOpeL1, cs.expectedEffL1);
+                printM2Line (cs.name, runId, 1, r, cs.expectedOpeL1, expEffL1);
             if (r.numLayers >= 3)
-                printM2Line (cs.name, runId, 2, r, cs.expectedOpeL2, cs.expectedEffL2);
+                printM2Line (cs.name, runId, 2, r, cs.expectedOpeL2, expEffL2);
 
             // ★ P1-x-I: 5 軸判定（R2-b WRITE/READ-CADENCE-SPLIT — M2 一本化の排除）
             const P1xAxes ax = computeP1xAxes (r, cs.expectedOpeL1, cs.expectedOpeL2);
@@ -769,11 +803,17 @@ int main()
                                       r.marginMin[li], r.marginMax[li],
                                       (long long) r.outputDelaySamples[li] - r.lead[li],
                                       r.opeConst[li], r.i2ViolationCount,
-                                      (li == 1 ? cs.expectedEffL1 : cs.expectedEffL2),
+                                      (li == 1 ? expEffL1 : expEffL2),
                                       r.effConst[li], r.effConstant[li] });
             }
             ++runId;
         }
+    }
+
+    // ★ SR-02 (T-SR02-6): M2 主測定フェーズの実時間（baseline 1.048 s は MT-NUPC 全体）
+    {
+        const double m2Sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - m2T0).count();
+        std::cout << "=== M2 done: phase wall-clock = " << m2Sec << " s ===\n";
     }
 
     // ── M1: layerGain 反映 Null Test（主要 case を全長計算） ──
@@ -936,9 +976,135 @@ int main()
                   << " M1=" << (p1xM1Verdict.count (s.caseName) ? p1xM1Verdict[s.caseName] : "n/a")
                   << (marginOk ? "" : " [MARGIN-FAIL]") << "\n";
     }
-    std::cout << "  [STRUCTURAL] L1 lead_max = 896 (numPartsIR <= kL1MaxParts=64 -> ppc<=8 -> distCbs<=8) — saturation by cap\n";
+    std::cout << "  [STRUCTURAL] L1 lead bound: numPartsIR <= kL1MaxParts=64 (ppc<=8, distCbs<=8) — saturation by cap (SR-02 後は per-case 値は M2 行を参照)\n";
     std::cout << "  [R3-b'] I2 boundary (margin==B) unreachable under current ppc design — scheduler-change-dependent\n";
     std::cout << "  P1-x sweep verdict: " << (p1xAllOk ? "PASS" : "FAIL") << "\n";
+
+    // ══ M4: SR-02 境界表 / B13 全構成再検証（T-SR02-1/2/3/8 + T-SR02-4）══
+    //   doc/work96 契約凍結。単一権威 = 本番 computeL0MaxParts / SetImpulse 実測読み取り。
+    std::cout << "\n=== M4: SR-02 L0 boundary table / B13 grid ===\n";
+    {
+        struct SR02LogCapture : juce::Logger {
+            juce::String sr02;       // "[SR-02]"
+            juce::String ng;         // "B13-GATE][NG"
+            juce::String detail;     // ★ 診断: "[B13-GATE] L" 詳細行
+            void logMessage (const juce::String& m) override {
+                if (m.contains ("[SR-02]")) sr02 += m + "\n";
+                if (m.contains ("B13-GATE][NG")) ng += m + "\n";
+                if (m.contains ("[B13-GATE] L")) detail += m + "\n";
+            }
+        };
+        SR02LogCapture capture;
+        juce::Logger* prevLog = juce::Logger::getCurrentLogger();
+        juce::Logger::setCurrentLogger (&capture);
+
+        // (1) T-SR02-1: 式テーブル（production 静的純関数を直接呼ぶ）
+        struct Row { int l0Part; double sr; double ts; bool tail; int want; };
+        const Row rows[] = {
+            { 256,  48000.0, 0.12, true,  32 },   // required 23 → floor 32（低SR回帰）
+            { 512,  96000.0, 0.12, true,  32 },   // 23 → floor 32（低SR回帰）
+            { 256, 192000.0, 0.12, true,  90 },
+            { 512, 384000.0, 0.12, true,  90 },
+            { 512, 768000.0, 0.12, true, 180 },
+            { 256, 768000.0, 0.12, true, 256 },   // required 360 → hard cap 256
+            {  64,  48000.0, 0.12, true,  90 },   // MT-NUPC 本構成（意図的例外）
+            { 512, 768000.0, 0.12, false, 32 },   // tail bypass → 32（T-SR02-3）
+            {  64,  48000.0, 0.80, true, 256 },   // required 600 → hard cap（T-SR02-8）
+        };
+        for (const auto& rw : rows)
+        {
+            const int covRaw = static_cast<int> (std::llround (rw.ts * rw.sr));
+            const int cov = ((covRaw + rw.l0Part - 1) / rw.l0Part) * rw.l0Part; // I5 アライン（production 同式）
+            const int got = convo::MKLNonUniformConvolver::computeL0MaxParts (rw.l0Part, cov, rw.tail);
+            if (got != rw.want)
+            {
+                std::cout << "  [M4-FAIL] formula l0Part=" << rw.l0Part << " sr=" << rw.sr
+                          << " ts=" << rw.ts << " tail=" << (rw.tail ? 1 : 0)
+                          << " -> " << got << " (want " << rw.want << ")\n";
+                ++structuralFailures;
+            }
+        }
+
+        // (2) T-SR02-2/3: production geometry 直接読み（SetImpulse + NUPCTestAccess）
+        auto geometryCheck = [&] (const char* name, double sr, int bs, int irLen,
+                                  double ts, bool tail, int wantL0Parts) {
+            std::vector<double> big (static_cast<size_t> (irLen), 0.0);
+            big[8] = 1.0;
+            convo::FilterSpec spec {};
+            spec.sampleRate = sr;
+            spec.tailMode = 1;
+            spec.tailStartSeconds = ts;
+            spec.tailEnabled = tail;
+            convo::MKLNonUniformConvolver conv;
+            if (! conv.SetImpulse (big.data(), irLen, bs, 1.0, false, &spec))
+            {
+                std::cout << "  [M4-FAIL] " << name << ": SetImpulse failed\n";
+                ++structuralFailures;
+                return;
+            }
+            const int ps = convo::NUPCTestAccess::layerPartSize (conv, 0);
+            const int np = convo::NUPCTestAccess::layerNumPartsIR (conv, 0);
+            const bool pass = (ps == nextPow2 (std::max (bs, 64))) && (np == wantL0Parts);
+            std::cout << "  M4 " << name << ": L0 partSize=" << ps
+                      << " numPartsIR=" << np << " (want " << wantL0Parts << ") -> "
+                      << (pass ? "PASS" : "FAIL") << "\n";
+            if (! pass) ++structuralFailures;
+        };
+        geometryCheck ("768k/bs512 contour default(0.12 clamp)", 768000.0, 512, 200000, 0.085, true, 180);
+        geometryCheck ("768k/bs512 bypass",                       768000.0, 512, 200000, 0.085, false,  32);
+        geometryCheck ("48k/bs64 ts0.80 hard cap",                 48000.0,  64, 100000, 0.80,  true,  256);
+
+        // (3) S-4 ログ検証（拡大発動 + hard cap 到達）
+        const bool sr02LogSeen = capture.sr02.contains ("[SR-02]");
+        const bool capLogSeen  = capture.sr02.contains ("hard cap");
+        std::cout << "  M4 SR-02 logging: expand=" << (sr02LogSeen ? "OK" : "MISSING")
+                  << ", hardCap=" << (capLogSeen ? "OK" : "MISSING") << "\n";
+        if (! sr02LogSeen) ++structuralFailures;
+        if (! capLogSeen)  ++structuralFailures;
+
+        // (4) T-SR02-4: B13 構造不変条件グリッド — SR×bs×irLen×tailMode 全構成で [NG] 0 が必須
+        struct GRow { double sr; int bs; int irLen; int tailMode; };
+        const GRow grid[] = {
+            {  48000.0,  64,  45000, 1 },   // 本 test 基準（意図的例外構成・contour）
+            {  96000.0, 256, 150000, 1 },   // floor 領域
+            { 192000.0, 256, 300000, 1 },   // 拡大開始
+            { 384000.0, 512, 400000, 1 },
+            { 768000.0, 512, 300000, 1 },   // 180 parts + L2 生成
+            { 768000.0, 256, 500000, 1 },   // hard cap 256 + 大 L2
+            {  48000.0,  64,  45000, 0 },   // ★ air absorption（ts≥0.055 / mult≥6 系幾何）
+            { 768000.0, 512, 300000, 0 },   // ★ air @ 高 SR（cov 46080→90 parts + L2）
+        };
+        for (const auto& g : grid)
+        {
+            std::vector<double> big (static_cast<size_t> (g.irLen), 0.0);
+            big[8] = 1.0;
+            convo::FilterSpec spec {};
+            spec.sampleRate = g.sr;
+            spec.tailMode = g.tailMode;
+            spec.tailStartSeconds = 0.085;
+            convo::MKLNonUniformConvolver conv;
+            if (! conv.SetImpulse (big.data(), g.irLen, g.bs, 1.0, false, &spec))
+            {
+                std::cout << "  [M4-FAIL] B13 grid SetImpulse sr=" << g.sr << " bs=" << g.bs
+                          << " mode=" << g.tailMode << "\n";
+                ++structuralFailures;
+            }
+        }
+        if (capture.ng.isNotEmpty())
+        {
+            std::cout << "  [M4-FAIL] B13-GATE [NG] detected under SR-02 geometry:\n"
+                      << capture.ng << "\n";
+            std::cout << "  [M4-DIAG] gate detail:\n" << capture.detail << "\n";
+            ++structuralFailures;
+        }
+        else
+        {
+            std::cout << "  M4 B13 grid: " << (int) (sizeof (grid) / sizeof (grid[0]))
+                      << " configs, [NG]=0 -> PASS\n";
+        }
+
+        juce::Logger::setCurrentLogger (prevLog);
+    }
 
     std::cout << "\n=== EXIT: structural failures = " << structuralFailures << " ===\n";
     std::cout << "B13 判定（outputPlacementError）は上記 M2 行の値と判定帯（==0 / 1..64 / >=128）で Step 4 解析してください。\n";
