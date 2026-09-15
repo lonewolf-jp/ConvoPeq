@@ -1704,6 +1704,15 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
             // ── 全パーティション累積完了 → IFFT → tailOutputBuf へコピー ──
             if (l.nextPart >= l.numPartsIR)
             {
+                // ★ M-01 (D-M01=β・doc/work99 §4 G-M01-1..4): L1/L2 pre-IFFT denormal hygiene。
+                //   既存 scalar killDenormal を L0 scalar 枝 (:1500-1502) と同形で accumBuf[0,partStride)
+                //   に適用。責務は厳密 IEEE subnormal の除却のみ（NaN/Inf は保持 = M-02 の非有限
+                //   containment との分離条項 G-M01-4）。閾値新設 0・primitive 定義変更 0。
+                //   Release では killDenormal は #if により no-op（FTZ/DAZ: process() の
+                //   ScopedNoDenormals + MainApplication/MKLRealTimeSetup の per-thread 設定で保証）。
+                for (int k = 0; k < l.partStride; ++k)
+                    l.accumBuf[k] = killDenormal(l.accumBuf[k]);
+
                 // ★ P1-1: Backward FFT (via FFTExecutionContext)
                 const auto invResult = m_fftCtx[li].processLayerInv(l.accumBuf, l.fftOutBuf);
                 if (invResult != FftStatus::Ok)

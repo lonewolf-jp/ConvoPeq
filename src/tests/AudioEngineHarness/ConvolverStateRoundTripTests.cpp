@@ -19,6 +19,7 @@
 #include "InputBitDepthTransform.h"
 
 #include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1811,6 +1812,177 @@ bool checkM02NonFiniteTelemetry()
     return true;
 }
 
+// ============================================================================
+// ★ M-01 (T-M01-1/2): L1/L2 pre-IFFT denormal hygiene（D-M01=β scalar killDenormal）
+//   根拠: doc/work99/m01_pre_audit_failure_contract_freeze_20260915.md
+//   契約の二層検証:
+//   (a) primitive 層（T-M01-1a・観察可能・vacuous でない）:
+//       guard 本体と同一の #if 条件で、Release では恒等性（=命令増 0 の構造保証 T-M01-4）、
+//       Debug では subnormal→0・normal/NaN/Inf/±0 保持（=M-02 責務分離 G-M01-4）。
+//   (b) DSP 層（T-M01-1b・契約回帰ロック）: L1 活性幾何へ subnormal 専用入力を注入し、
+//       全出力サンプルの不変式「x == 0.0 || |x| >= DBL_MIN」を両ビルドで主張。
+//       ※ 正直な位置づけ（work99 §8-1）: RT 実行時は ScopedNoDenormals（process() :288）と
+//       MainApplication の per-thread FTZ/DAZ 設定により、guard 追加前から HW が subnormal
+//       演算結果を flush しているため、この不変式は pre-guard でも成立する（=バグ再現でなく
+//       契約の固定。guard は software 層の defense-in-depth）。finiteness への弱体化は禁止
+//       （ユーザー指示）— 厳密な 0/DBL_MIN 判定を維持する。
+//   T-M01-2（正常信号 long-run）は (b) の clean 区間 + warmup で同一不変式を検証。
+//   T-M01-3（M-02 非退行）は本 binary の checkM02NonFiniteTelemetry（両構成 ctest）で強制、
+//   T-M01-4（Release 等価）は (a) Release 分岐 + semantic-hash verifier 群（PUSH GATE）で担保。
+// ============================================================================
+
+bool checkM01DenormalHygiene()
+{
+    static juce::ScopedJuceInitialiser_GUI m01Init;
+    bool ok = true;
+
+    // --- (a) primitive 契約（guard 本体と同一のビルド条件） ---
+    {
+        constexpr double kSub  = 1.0e-310;   // 真の IEEE subnormal
+        constexpr double kNorm = 1.0e-300;   // normal（subnormal 境界 DBL_MIN ≒2.2e-308 より上）
+        const double kNaN = std::numeric_limits<double>::quiet_NaN();
+        const double kInf = std::numeric_limits<double>::infinity();
+        // リテラルが実際に subnormal であることの前提検証（ツールチェーン依存排除）
+        if (!(kSub != 0.0 && std::fabs(kSub) < DBL_MIN))
+        {
+            std::fprintf(stderr, "[M-01] FAIL: preflight subnormal literal invalid\n");
+            return false;
+        }
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+        // Release: guard はコンパイル時 no-op（T-M01-4 構造保証）
+        if (killDenormal(kSub) != kSub) { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a release not identity\n"); ok = false; }
+        if (killDenormal(kNorm) != kNorm) { ok = false; std::fprintf(stderr, "[M-01] FAIL: T-M01-1a release normal altered\n"); }
+        if (!std::isnan(killDenormal(kNaN))) { ok = false; std::fprintf(stderr, "[M-01] FAIL: T-M01-1a release NaN touched\n"); }
+        if (killDenormal(kInf) != kInf) { ok = false; std::fprintf(stderr, "[M-01] FAIL: T-M01-1a release Inf touched\n"); }
+#else
+        // Debug: 厳密 subnormal のみ 0 化。normal/NaN/Inf/±0 は保持（責務分離）
+        if (killDenormal(kSub) != 0.0) { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a debug subnormal not flushed\n"); ok = false; }
+        if (killDenormal(-kSub) != 0.0) { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a debug neg subnormal not flushed\n"); ok = false; }
+        if (killDenormal(kNorm) != kNorm) { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a debug normal altered\n"); ok = false; }
+        if (!std::isnan(killDenormal(kNaN))) { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a debug NaN not preserved\n"); ok = false; }
+        if (killDenormal(kInf) != kInf) { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a debug Inf not preserved\n"); ok = false; }
+        if (killDenormal(0.0) != 0.0 || std::signbit(killDenormal(-0.0)) == false)
+        { std::fprintf(stderr, "[M-01] FAIL: T-M01-1a debug signed zero altered\n"); ok = false; }
+#endif
+    }
+
+    // --- (b) DSP 契約回帰ロック: L1 活性幾何（4800/512/48k → l1Len=704）+ subnormal 注入 ---
+    auto makePattern = [](int blockIdx) {
+        juce::AudioBuffer<double> ab(2, 512);
+        ab.clear();
+        const int p = 11 + blockIdx * 61;
+        ab.getWritePointer(0)[p % 512] = 0.25;
+        ab.getWritePointer(1)[(p + 17) % 512] = -0.125;
+        return ab;
+    };
+    // 契約判定（厳密）: 全サンプルが有限 かつ「0 または |x| >= DBL_MIN」
+    auto contractHolds = [](const juce::AudioBuffer<double>& ab) {
+        for (int ch = 0; ch < ab.getNumChannels(); ++ch)
+            for (int i = 0; i < ab.getNumSamples(); ++i)
+            {
+                const double x = ab.getReadPointer(ch)[i];
+                if (!std::isfinite(x)) return false;
+                if (x != 0.0 && std::fabs(x) < DBL_MIN) return false;   // subnormal 出現 = 契約違反
+            }
+        return true;
+    };
+    auto energy = [](const juce::AudioBuffer<double>& ab) {
+        double e = 0.0;
+        for (int ch = 0; ch < ab.getNumChannels(); ++ch)
+            for (int i = 0; i < ab.getNumSamples(); ++i)
+                e += std::fabs(ab.getReadPointer(ch)[i]);
+        return e;
+    };
+
+    ConvolverProcessor cp;
+    cp.prepareToPlay(48000.0, 512);
+    cp.setTargetIRLength(1.0f);
+    const juce::File ir = writeSR01TempIr("m01_ir.wav", 48000.0, 2, 4800, 100);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[M-01] FAIL: IR write failed\n");
+        cp.releaseResources();
+        return false;
+    }
+    cp.loadImpulseResponse(ir, false);
+    const bool loaded = pollSR01Load(cp, 100, 48000);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[M-01] FAIL: IR load not finalized\n");
+        cp.releaseResources();
+        return false;
+    }
+    cp.setMix(1.0f);
+
+    auto processBlock = [&cp](juce::AudioBuffer<double>& ab) {
+        juce::dsp::AudioBlock<double> blk(ab);
+        cp.process(blk);
+    };
+
+    // warmup（ramp 収束）+ T-M01-2 前半: 正常信号で不変式・非零応答確認
+    double warmEnergy = 0.0;
+    for (int j = 0; j < 16; ++j)
+    {
+        juce::AudioBuffer<double> a = makePattern(j);
+        processBlock(a);
+        if (!contractHolds(a))
+        {
+            std::fprintf(stderr, "[M-01] FAIL: T-M01-2 warmup block %d subnormal in output\n", j);
+            ok = false;
+        }
+        warmEnergy += energy(a);
+    }
+    if (warmEnergy <= 0.0)   // 空証防止: engine が実際に応答していること
+    {
+        std::fprintf(stderr, "[M-01] FAIL: warmup produced no output (vacuous)\n");
+        ok = false;
+    }
+
+    // T-M01-1b: subnormal 専用 impulse を 8 blocks 注入（L1 part ちょうど）→ 40 blocks drain
+    for (int j = 0; j < 8; ++j)
+    {
+        juce::AudioBuffer<double> a = makePattern(16 + j);
+        a.getWritePointer(0)[4] = 1.0e-310;
+        a.getWritePointer(1)[60] = -1.0e-311;
+        processBlock(a);
+        if (!contractHolds(a))
+        {
+            std::fprintf(stderr, "[M-01] FAIL: T-M01-1b inject block %d contract violated\n", j);
+            ok = false;
+        }
+    }
+    for (int j = 0; j < 40; ++j)
+    {
+        juce::AudioBuffer<double> a = makePattern(24 + j);
+        processBlock(a);
+        if (!contractHolds(a))
+        {
+            std::fprintf(stderr, "[M-01] FAIL: T-M01-1b drain block %d contract violated\n", 24 + j);
+            ok = false;
+        }
+    }
+
+    // T-M01-2 後半: 長尺 clean 運転で不変式継続（guard が正常信号の意味論を変えない回帰側）
+    for (int j = 0; j < 32; ++j)
+    {
+        juce::AudioBuffer<double> a = makePattern(64 + j);
+        processBlock(a);
+        if (!contractHolds(a))
+        {
+            std::fprintf(stderr, "[M-01] FAIL: T-M01-2 clean block %d contract violated\n", 64 + j);
+            ok = false;
+        }
+    }
+
+    cp.releaseResources();
+
+    if (!ok)
+        return false;
+    std::printf("checkM01DenormalHygiene: PASS (T-M01-1: primitive contract + subnormal-injection invariant lock / T-M01-2: clean long-run invariant)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -1915,6 +2087,13 @@ int runConvolverStateRoundTripTests()
     if (!checkM02NonFiniteTelemetry())
     {
         std::fprintf(stderr, "FAIL: checkM02NonFiniteTelemetry\n");
+        return 1;
+    }
+    // ★ M-01 T-M01-1/2（pre-IFFT denormal hygiene・T-M01-3 は本 M-02 チェックの両構成 PASS で強制、
+    //   T-M01-4 は Release 分岐 + semantic verifier 群で担保）
+    if (!checkM01DenormalHygiene())
+    {
+        std::fprintf(stderr, "FAIL: checkM01DenormalHygiene\n");
         return 1;
     }
     return 0;
