@@ -61,6 +61,18 @@ struct M04OversizedTestAccess
     static void pumpReport(ConvolverProcessor& cp) { cp.timerCallback(); }
 };
 
+// ★ M-02: ConvolverProcessor.h の friend 宣言（global 名前空間で解決される）に対応する本体定義。
+//   wet scrub telemetry counter 読み取りと reporter（timerCallback）駆動専用。
+//   （production 駆動休眠は doc/work98 §1.6 の既知事項。test pump が唯一の駆動元）
+struct M02NonFiniteTestAccess
+{
+    static int count() noexcept
+    {
+        return convo::consumeAtomic(ConvolverProcessor::nonFiniteBlockCounter(), std::memory_order_relaxed);
+    }
+    static void pumpReport(ConvolverProcessor& cp) { cp.timerCallback(); }
+};
+
 // ★ SR-03 T-SR03: AudioEngine.h の #if defined(CONVOPEQ_UNIT_TESTS) friend 宣言に対応する本体定義。
 //   latencyDelay publish 単一関口（SR03-C1）の clamp / telemetry / RT 消費前提条件を直接検証する。
 class LatencyDelayWiringTestAccess
@@ -1422,7 +1434,9 @@ bool checkM04OversizedContainment()
         juce::AudioBuffer<double> ab(2, 512);
         ab.clear();
         const int p = 37 + blockIdx * 97;            // 決定的パターン
-        ab.getWritePointer(0)[p] = 1.0;
+        // ★ ch0 側 %512 化（work98 §8-9: 無 modulo は buf 512 超えで OOB 書込 = heap corruption。
+        //   ch1 は元から %512。T-M04 の意味（決定的パターン注入）は不変）
+        ab.getWritePointer(0)[p % 512] = 1.0;
         ab.getWritePointer(1)[(p + 13) % 512] = 0.5;
         return ab;
     };
@@ -1589,6 +1603,214 @@ bool checkM04OversizedContainment()
     return true;
 }
 
+// ============================================================================
+// ★ M-02 (T-M02-1..5): wet scrub telemetry（C-1 のみ・D-1=(a) telemetry-only）
+//   根拠: doc/work98/m02_pre_audit_failure_contract_freeze_20260915.md
+//   単位契約（§4 C-1 凍結）: counter 増分 = scrub 発火 chunk 数（+1/発火 chunk）。
+//     sanitizeFiniteChunk の返却「置換サンプル数」は検出判定専用であり counter 単位ではない。
+//   recovery: 受動的自己失効。実測失効窓 = burst 終了から約 100 blocks（doc/work98 §8-12。
+//     本 commit の drain 上限 512 blocks ≫ 窓。失効後 16 blocks 連続一致で安定を判定する）。
+//     Reset/re-init/pending は対象外（D-1=(a) 承認・C-2(c) 却下）。
+//   トリガー設計:
+//   - 定常 mix=1.0（dryG=0）→ 最終出力 = scrub 適用 wet。burst 中 per-block finiteness は
+//     wet スクラブの保証として主張（dry リング汚染は §2-(a) スコープ外・主張しない）。
+//   - 注入は quiet_NaN のみ（±Inf は Debug L0 killDenormalV を通過し持続が非決定化・§8-11）。
+//   - getWritePointer 計算 index は必ず %512（OOB=heap corruption の教訓・§8-9）。
+// ============================================================================
+
+bool checkM02NonFiniteTelemetry()
+{
+    static juce::ScopedJuceInitialiser_GUI m02Init;
+    struct M02Logger : juce::Logger {
+        juce::String captured;
+        void logMessage(const juce::String& m) override
+        {
+            if (m.contains("M-02 non-finite wet scrub"))
+                captured += m + "\n";
+        }
+    };
+    M02Logger m02Log;
+    juce::Logger* prevLogger = juce::Logger::getCurrentLogger();
+
+    auto makeClean = [](int blockIdx) {
+        juce::AudioBuffer<double> ab(2, 512);
+        ab.clear();
+        const int p = 11 + blockIdx * 61;
+        ab.getWritePointer(0)[p % 512] = 0.25;          // ★ %512 必須（§8-9）
+        ab.getWritePointer(1)[(p + 17) % 512] = -0.125;
+        return ab;
+    };
+    auto injectNaN = [](juce::AudioBuffer<double>& ab) {
+        ab.getWritePointer(0)[3] = std::numeric_limits<double>::quiet_NaN();
+        ab.getWritePointer(1)[7] = std::numeric_limits<double>::quiet_NaN();
+    };
+    auto allFinite = [](const juce::AudioBuffer<double>& ab) {
+        for (int ch = 0; ch < ab.getNumChannels(); ++ch)
+            for (int i = 0; i < ab.getNumSamples(); ++i)
+                if (!std::isfinite(ab.getReadPointer(ch)[i])) return false;
+        return true;
+    };
+    auto blocksEqual = [](const juce::AudioBuffer<double>& x, const juce::AudioBuffer<double>& y) {
+        for (int ch = 0; ch < x.getNumChannels(); ++ch)
+            if (std::memcmp(x.getReadPointer(ch), y.getReadPointer(ch),
+                            sizeof(double) * static_cast<size_t>(x.getNumSamples())) != 0)
+                return false;
+        return true;
+    };
+    auto processBlock = [](ConvolverProcessor& cp, juce::AudioBuffer<double>& ab) {
+        juce::dsp::AudioBlock<double> blk(ab);
+        cp.process(blk);
+    };
+
+    ConvolverProcessor control;
+    ConvolverProcessor gated;
+    control.prepareToPlay(48000.0, 512);
+    gated.prepareToPlay(48000.0, 512);
+    control.setTargetIRLength(1.0f);
+    gated.setTargetIRLength(1.0f);
+
+    const juce::File ir = writeSR01TempIr("m02_ir.wav", 48000.0, 2, 4800, 100);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[M-02] FAIL: IR write failed\n");
+        control.releaseResources();
+        gated.releaseResources();
+        return false;
+    }
+    control.loadImpulseResponse(ir, false);
+    gated.loadImpulseResponse(ir, false);
+    const bool bothLoaded = pollSR01Load(control, 100, 48000) && pollSR01Load(gated, 100, 48000);
+    ir.deleteFile();
+    if (!bothLoaded)
+    {
+        std::fprintf(stderr, "[M-02] FAIL: IR load not finalized\n");
+        control.releaseResources();
+        gated.releaseResources();
+        return false;
+    }
+    control.setMix(1.0f);
+    gated.setMix(1.0f);   // 定常時 dryG=0 → 最終出力 = scrub 適用 wet
+
+    bool ok = true;
+
+    // --- T-M02-3: 検証済ロード鎖の無発火 + warmup 40 blocks（mix ramp 収束・両系一致基線）---
+    const int cntPre = M02NonFiniteTestAccess::count();
+    int equalRunWarm = 0;
+    for (int j = 0; j < 40; ++j)
+    {
+        juce::AudioBuffer<double> a = makeClean(j);
+        juce::AudioBuffer<double> b = makeClean(j);
+        processBlock(control, a);
+        processBlock(gated, b);
+        if (j >= 32)
+        {
+            if (!allFinite(b))
+            {
+                std::fprintf(stderr, "[M-02] FAIL: T-M02-3 warmup block %d not finite\n", j);
+                ok = false;
+            }
+            equalRunWarm = blocksEqual(a, b) ? equalRunWarm + 1 : 0;
+        }
+    }
+    if (M02NonFiniteTestAccess::count() != cntPre)
+    {
+        std::fprintf(stderr, "[M-02] FAIL: T-M02-3 load/warmup counter delta != 0\n");
+        ok = false;
+    }
+    if (equalRunWarm < 4)
+    {
+        std::fprintf(stderr, "[M-02] FAIL: T-M02-3 baseline control!=gated before burst (equalRun=%d)\n", equalRunWarm);
+        ok = false;
+    }
+
+    // --- T-M02-1: NaN burst 8 blocks（gated のみ、clean 入力との差分注入）---
+    //   burst 中の dst 最終ブロックの finiteness は主張しない: 注入 NaN は dry リング
+    //   （delayBuffer 生入力写像）へも供給され、mixSteadySmall の `dry[i]*dryG` は
+    //   dryG=0.0 でも IEEE 上 NaN を生成する（0*NaN=NaN・doc/work98 §8-14/§2-(a)）。
+    //   wet スクラブ（C-1）の有限性証明は drain ループ（入力=dry 洁净）で担保する。
+    for (int j = 0; j < 8; ++j)
+    {
+        juce::AudioBuffer<double> a = makeClean(40 + j);
+        juce::AudioBuffer<double> b = makeClean(40 + j);
+        injectNaN(b);
+        processBlock(control, a);
+        processBlock(gated, b);
+    }
+
+    // --- T-M02-2: 有界受動失効 recovery — clean 入力で対照系と連続 16 blocks ビット一致まで drain ---
+    //   失効窓実測 ≒ 100 blocks（doc/work98 §8-12）。cap 512 で非回復（=永久ミュート）を検出する。
+    //   各 drain block の allFinite = wetOut が非有限でも dst 有限（= scrub 動作の直接証明、
+    //   発火継続区間 48..147 を含む）。
+    int stableRun = 0;
+    int drained = 0;
+    for (; drained < 512 && stableRun < 16; ++drained)
+    {
+        const int idx = 48 + drained;
+        juce::AudioBuffer<double> a = makeClean(idx);
+        juce::AudioBuffer<double> b = makeClean(idx);
+        processBlock(control, a);
+        processBlock(gated, b);
+        if (!allFinite(b))
+        {
+            std::fprintf(stderr, "[M-02] FAIL: T-M02-2 drain block %d not finite\n", idx);
+            ok = false;
+        }
+        stableRun = blocksEqual(a, b) ? stableRun + 1 : 0;
+    }
+    if (stableRun < 16)
+    {
+        std::fprintf(stderr, "[M-02] FAIL: T-M02-2 recovery not stable within cap (drained=%d stableRun=%d)\n",
+                     drained, stableRun);
+        ok = false;
+    }
+    const int cnt1 = M02NonFiniteTestAccess::count();
+    if (cnt1 <= cntPre)
+    {
+        std::fprintf(stderr, "[M-02] FAIL: T-M02-1 counter not fired (pre=%d post=%d)\n", cntPre, cnt1);
+        ok = false;
+    }
+
+    // --- T-M02-5: 復旧後の正常 block は scrub 無発火（誤発火防止） ---
+    {
+        const int cntR = M02NonFiniteTestAccess::count();
+        for (int j = 0; j < 8; ++j)
+        {
+            juce::AudioBuffer<double> b = makeClean(600 + j);
+            processBlock(gated, b);
+        }
+        if (M02NonFiniteTestAccess::count() != cntR)
+        {
+            std::fprintf(stderr, "[M-02] FAIL: T-M02-5 clean blocks after recovery fired scrub\n");
+            ok = false;
+        }
+    }
+
+    // --- T-M02-4: NonRT reporter（timerCallback・pump ×2 でちょうど 1 行 = ヒステリシス） ---
+    {
+        juce::Logger::setCurrentLogger(&m02Log);
+        M02NonFiniteTestAccess::pumpReport(gated);   // delta あり → 1 行
+        M02NonFiniteTestAccess::pumpReport(gated);   // delta なし → 追加なし
+        juce::Logger::setCurrentLogger(prevLogger);
+        const int nlFirst = m02Log.captured.indexOf("\n");
+        const int nlLast  = m02Log.captured.lastIndexOf("\n");
+        if (m02Log.captured.isEmpty() || nlFirst != nlLast)
+        {
+            std::fprintf(stderr, "[M-02] FAIL: T-M02-4 reporter log/hysteresis: '%s'\n",
+                         m02Log.captured.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    // 後片付け: LoaderThread/retire を停止（テスト間干渉・非決定性排除）
+    control.releaseResources();
+    gated.releaseResources();
+
+    if (!ok)
+        return false;
+    std::printf("checkM02NonFiniteTelemetry: PASS (T-M02-1..5: load-clean baseline / burst->fired / drain finiteness+bounded aging recovery / reporter hysteresis / no false fire)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -1687,6 +1909,12 @@ int runConvolverStateRoundTripTests()
     if (!checkM04OversizedContainment())
     {
         std::fprintf(stderr, "FAIL: checkM04OversizedContainment\n");
+        return 1;
+    }
+    // ★ M-02 T-M02-1..5（wet scrub telemetry / 単位契約 / reporter ヒステリシス / 受動失効 recovery）
+    if (!checkM02NonFiniteTelemetry())
+    {
+        std::fprintf(stderr, "FAIL: checkM02NonFiniteTelemetry\n");
         return 1;
     }
     return 0;

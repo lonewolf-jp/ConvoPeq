@@ -169,6 +169,17 @@ void ConvolverProcessor::timerCallback()
         lastReportedOversizedCount_ = currentOversizedCount;
     }
 
+    // ★ M-02 (C-1): wet scrub telemetry reporter（SR-03/M-04 reporting と同一パターン。
+    //   timerCallback = NonRT。検出のみ・recovery 動作なし（D-1=(a)・doc/work98 §3）。
+    //   本 reporter の production 駆動配線は別 work（§2-(d) 記録・startTimer 追加禁止）。
+    const int currentNonFiniteCount = convo::consumeAtomic(nonFiniteBlockCounter(), std::memory_order_acquire); // acquire: Runtime 側 fetchAddAtomic acq_rel と HB
+    if (currentNonFiniteCount != lastReportedNonFiniteCount_)
+    {
+        juce::Logger::writeToLog("ConvolverProcessor: M-02 non-finite wet scrub fired (total: "
+                                 + juce::String(currentNonFiniteCount) + " blocks)");
+        lastReportedNonFiniteCount_ = currentNonFiniteCount;
+    }
+
     // ── リングバッファオーバーフロー診断 (NUC ringOverflowCount の確認) ──
     {
         auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB

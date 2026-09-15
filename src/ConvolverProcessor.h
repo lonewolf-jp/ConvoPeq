@@ -622,6 +622,12 @@ private:
     static std::atomic<int> oversizedBlockCounterStorage_;
     static std::atomic<int>& oversizedBlockCounter() noexcept;
 
+    // ★ M-02 (C-1): wet scrub telemetry（doc/work98 契約凍結 2026-09-15。SR-03/M-04 と同一文法・
+    //   wrapper 必須）。単位契約: counter 増分 = scrub 発火 chunk 数（+1/発火）、
+    //   sanitizeFiniteChunk の返却「置換サンプル数」は検出判定専用 — 単位混同禁止。
+    static std::atomic<int> nonFiniteBlockCounterStorage_;
+    static std::atomic<int>& nonFiniteBlockCounter() noexcept;
+
     // ★ H-01 (H01-C2): internal dry alignment 遅延基準のコンパイル時フラグ。
     //   true  = legacy: dry 遅延 = algorithmLatency + irPeak（smoother 報告値をそのまま使用）
     //   false = H-01 是正: dry 遅延 = irPeak のみ（dry 読出側で algorithmLatency を減算）
@@ -654,6 +660,9 @@ private:
     // ★ M-04 (T-M04-1/2/3/5) テストシーム: oversized counter 読み取りと reporter 駆動専用
     //   （本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp。production 影响なし）
     friend struct M04OversizedTestAccess;
+    // ★ M-02 (T-M02-1..5) テストシーム: non-finite scrub counter 読み取りと reporter 駆動専用
+    //   （本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp。production 影响なし）
+    friend struct M02NonFiniteTestAccess;
 #endif
 
     struct StereoConvolver;
@@ -1017,6 +1026,7 @@ private:
     int lastReportedLatency = -1;
     int lastReportedClampCount_ = 0;
     int lastReportedOversizedCount_ = 0;   // ★ M-04 (G-3) reporter ヒステリシス
+    int lastReportedNonFiniteCount_ = 0;   // ★ M-02 (C-1) reporter ヒステリシス（M-04 と同一方式）
 
     // ドップラー効果対策: クロスフェード用
     convo::LinearRamp crossfadeGain;

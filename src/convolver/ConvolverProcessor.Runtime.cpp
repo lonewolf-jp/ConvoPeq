@@ -29,6 +29,15 @@ std::atomic<int>& ConvolverProcessor::oversizedBlockCounter() noexcept
     return oversizedBlockCounterStorage_;
 }
 
+// ★ M-02 (C-1): wet scrub telemetry — SR-03/M-04 counter と同一パターン
+//   （増分単位 = scrub 発火 chunk 数。sanitizeFiniteChunk 返却の置換サンプル数は検出判定専用）
+std::atomic<int> ConvolverProcessor::nonFiniteBlockCounterStorage_ { 0 };
+
+std::atomic<int>& ConvolverProcessor::nonFiniteBlockCounter() noexcept
+{
+    return nonFiniteBlockCounterStorage_;
+}
+
 namespace
 {
     // Audio thread path avoids libm calls for deterministic realtime behavior.
@@ -56,16 +65,23 @@ namespace
         return finite && (absNoLibm(x) < threshold);
     }
 
-    inline void sanitizeFiniteChunk(double* data, int count) noexcept
+    // ★ M-02 (C-1): 置換サンプル数を返却する（検出判定専用）。counter の増分単位では
+    //   ない（counter = scrub 発火 chunk 数・doc/work98 §4 C-1 単位凍結）。
+    inline int sanitizeFiniteChunk(double* data, int count) noexcept
     {
         if (data == nullptr || count <= 0)
-            return;
+            return 0;
 
+        int replacements = 0;
         for (int i = 0; i < count; ++i)
         {
             if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
+            {
                 data[i] = 0.0;
+                ++replacements;
+            }
         }
+        return replacements;
     }
 }
 
@@ -768,7 +784,10 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 }
             }
 #endif
-            sanitizeFiniteChunk(wetOut, chunkSamples);
+            // ★ M-02 (C-1): 置換数が 0 より大 = この chunk で scrub 発火 → counter +1。
+            //   置換サンプル数そのものは数えない（単位契約 §上）。RT ログ・待機・確保なし。
+            if (sanitizeFiniteChunk(wetOut, chunkSamples) > 0)
+                convo::fetchAddAtomic(nonFiniteBlockCounter(), 1, std::memory_order_acq_rel); // acq_rel: reporter 側 acquire と HB
 
             const double* wetSignal = wetOut;
             int validWetSamples = chunkSamples;
