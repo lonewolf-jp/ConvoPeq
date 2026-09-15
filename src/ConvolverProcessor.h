@@ -617,6 +617,11 @@ private:
     static std::atomic<int> latencyClampCounterStorage_;
     static std::atomic<int>& latencyClampCounter() noexcept;
 
+    // ★ M-04 (G-3): oversized containment telemetry（SR-03 counter と同一パターン。
+    //   RT 増分は fetchAddAtomic acq_rel、reporter は timerCallback の consumeAtomic acquire）
+    static std::atomic<int> oversizedBlockCounterStorage_;
+    static std::atomic<int>& oversizedBlockCounter() noexcept;
+
     // ★ H-01 (H01-C2): internal dry alignment 遅延基準のコンパイル時フラグ。
     //   true  = legacy: dry 遅延 = algorithmLatency + irPeak（smoother 報告値をそのまま使用）
     //   false = H-01 是正: dry 遅延 = irPeak のみ（dry 読出側で algorithmLatency を減算）
@@ -646,6 +651,9 @@ private:
     //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
     //   Production ビルド（CONVOPEQ_UNIT_TESTS 未定義）では宣言ごと存在せずバイナリ無変更。
     friend struct IRPeakLatencyTestAccess;
+    // ★ M-04 (T-M04-1/2/3/5) テストシーム: oversized counter 読み取りと reporter 駆動専用
+    //   （本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp。production 影响なし）
+    friend struct M04OversizedTestAccess;
 #endif
 
     struct StereoConvolver;
@@ -1008,6 +1016,7 @@ private:
     std::atomic<bool> latencyChangePending { false };
     int lastReportedLatency = -1;
     int lastReportedClampCount_ = 0;
+    int lastReportedOversizedCount_ = 0;   // ★ M-04 (G-3) reporter ヒステリシス
 
     // ドップラー効果対策: クロスフェード用
     convo::LinearRamp crossfadeGain;

@@ -50,6 +50,17 @@ struct IRPeakLatencyTestAccess
     }
 };
 
+// ★ M-04: ConvolverProcessor.h の friend 宣言（global 名前空間で解決される）に対応する本体定義。
+//   oversized telemetry counter 読み取りと reporter（timerCallback）駆動専用。
+struct M04OversizedTestAccess
+{
+    static int count() noexcept
+    {
+        return convo::consumeAtomic(ConvolverProcessor::oversizedBlockCounter(), std::memory_order_relaxed);
+    }
+    static void pumpReport(ConvolverProcessor& cp) { cp.timerCallback(); }
+};
+
 // ★ SR-03 T-SR03: AudioEngine.h の #if defined(CONVOPEQ_UNIT_TESTS) friend 宣言に対応する本体定義。
 //   latencyDelay publish 単一関口（SR03-C1）の clamp / telemetry / RT 消費前提条件を直接検証する。
 class LatencyDelayWiringTestAccess
@@ -1381,6 +1392,203 @@ bool checkSR01MonoDuplication()
     return true;
 }
 
+// ============================================================================
+// ★ M-04 (T-M04-1..5): oversized block deterministic containment（entry gate）
+//   根拠: doc/work97/m04_pre_audit_failure_contract_freeze_20260915.md
+//   契約: numSamples > MAX_BLOCK_SIZE の入力は ring/retarget/smoother/crossfade/NUC を
+//   一切進行させず決定的無音 + telemetry。bypass 含む全経路共通（cond-3）。
+//   重大度訂正: Medium-High(stale) → Low-Medium(latent hardening / OOB-prevention)。
+// ============================================================================
+
+// private telemetry 読み取りと reporter 駆動専用の test シームは
+// ファイル先頭 global スコープの M04OversizedTestAccess（friend 探索名前空間一致のため）
+
+
+bool checkM04OversizedContainment()
+{
+    static juce::ScopedJuceInitialiser_GUI m04Init;
+    struct M04Logger : juce::Logger {
+        juce::String captured;
+        void logMessage(const juce::String& m) override
+        {
+            if (m.contains("M-04 oversized block containment"))
+                captured += m + "\n";
+        }
+    };
+    M04Logger m04Log;
+    juce::Logger* prevLogger = juce::Logger::getCurrentLogger();
+
+    auto makeInput = [](int blockIdx) {
+        juce::AudioBuffer<double> ab(2, 512);
+        ab.clear();
+        const int p = 37 + blockIdx * 97;            // 決定的パターン
+        ab.getWritePointer(0)[p] = 1.0;
+        ab.getWritePointer(1)[(p + 13) % 512] = 0.5;
+        return ab;
+    };
+
+    ConvolverProcessor control;
+    ConvolverProcessor gated;
+    control.prepareToPlay(48000.0, 512);
+    gated.prepareToPlay(48000.0, 512);
+    control.setTargetIRLength(1.0f);
+    gated.setTargetIRLength(1.0f);
+
+    const juce::File ir = writeSR01TempIr("m04_ir.wav", 48000.0, 2, 4800, 100);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[M-04] FAIL: IR write failed\n");
+        return false;
+    }
+    control.loadImpulseResponse(ir, false);
+    gated.loadImpulseResponse(ir, false);
+    const bool bothLoaded = pollSR01Load(control, 100, 48000) && pollSR01Load(gated, 100, 48000);
+    ir.deleteFile();
+    if (!bothLoaded)
+    {
+        std::fprintf(stderr, "[M-04] FAIL: IR load not finalized\n");
+        return false;
+    }
+
+    control.setMix(0.5f);
+    gated.setMix(0.5f);   // 同一 ramp 状態から開始
+
+    // --- T-M04-1: oversized (524,289) → 決定的無音 + counter+1（ramp 中） ---
+    const int cnt0 = M04OversizedTestAccess::count();
+    bool ok = true;
+    {
+        juce::AudioBuffer<double> big(2, ConvolverProcessor::MAX_BLOCK_SIZE + 1);
+        big.clear();
+        for (int ch = 0; ch < 2; ++ch)
+            juce::FloatVectorOperations::fill(big.getWritePointer(ch), 0.25, big.getNumSamples());
+        juce::dsp::AudioBlock<double> bigBlock(big);
+        gated.process(bigBlock);
+        double maxAbs = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < big.getNumSamples(); i += 4096)
+                maxAbs = std::max(maxAbs, std::fabs(big.getReadPointer(ch)[i]));
+        if (maxAbs != 0.0)
+        {
+            std::fprintf(stderr, "[M-04] FAIL: T-M04-1 oversized block not silent\n");
+            ok = false;
+        }
+        if (M04OversizedTestAccess::count() != cnt0 + 1)
+        {
+            std::fprintf(stderr, "[M-04] FAIL: T-M04-1 counter delta != 1\n");
+            ok = false;
+        }
+    }
+
+    // --- T-M04-2: 無状態性 — 対照系と正常 block 出力がビット一致 ---
+    juce::AudioBuffer<double> outC[8], outT[8];
+    for (int j = 0; j < 8; ++j)
+    {
+        juce::AudioBuffer<double> ab = makeInput(j);
+        {
+            juce::dsp::AudioBlock<double> blk(ab);
+            control.process(blk);
+        }
+        outC[j] = ab;
+
+        // gated: 4 ブロック目に追加で oversized を挟む（状態を進めないことを検証）
+        if (j == 4)
+        {
+            juce::AudioBuffer<double> big2(2, ConvolverProcessor::MAX_BLOCK_SIZE + 2);
+            big2.clear();
+            juce::dsp::AudioBlock<double> big2Block(big2);
+            gated.process(big2Block);
+        }
+        juce::AudioBuffer<double> ab2 = makeInput(j);
+        {
+            juce::dsp::AudioBlock<double> blk(ab2);
+            gated.process(blk);
+        }
+        outT[j] = ab2;
+    }
+    for (int j = 0; j < 8; ++j)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            if (std::memcmp(outC[j].getReadPointer(ch), outT[j].getReadPointer(ch),
+                            sizeof(double) * outC[j].getNumSamples()) != 0)
+            {
+                std::fprintf(stderr, "[M-04] FAIL: T-M04-2 block %d ch %d diverged\n", j, ch);
+                ok = false;
+            }
+        }
+    }
+
+    // --- T-M04-3: bypass でも同一 entry contract（silence + telemetry） ---
+    {
+        gated.setBypass(true);
+        const int cntB = M04OversizedTestAccess::count();
+        juce::AudioBuffer<double> big3(2, ConvolverProcessor::MAX_BLOCK_SIZE + 1);
+        for (int ch = 0; ch < 2; ++ch)
+            juce::FloatVectorOperations::fill(big3.getWritePointer(ch), 0.75, big3.getNumSamples());
+        juce::dsp::AudioBlock<double> big3Block(big3);
+        gated.process(big3Block);
+        double maxAbs = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+            maxAbs = std::max(maxAbs, std::fabs(big3.getReadPointer(ch)[big3.getNumSamples() / 2]));
+        if (maxAbs != 0.0 || M04OversizedTestAccess::count() != cntB + 1)
+        {
+            std::fprintf(stderr, "[M-04] FAIL: T-M04-3 bypass oversized not contained\n");
+            ok = false;
+        }
+        gated.setBypass(false);
+    }
+
+    // --- T-M04-5: NonRT reporter（timerCallback 経由・ヒステリシス確認） ---
+    {
+        juce::Logger::setCurrentLogger(&m04Log);
+        M04OversizedTestAccess::pumpReport(gated);          // delta あり → ログ 1 件
+        const int logs1 = m04Log.captured.contains("M-04") ? 1 : 0;
+        M04OversizedTestAccess::pumpReport(gated);          // delta なし → 追加ログなし（ヒステリシス）
+        juce::Logger::setCurrentLogger(prevLogger);
+        const int nlFirst = m04Log.captured.indexOf("\n");
+        const int nlLast  = m04Log.captured.lastIndexOf("\n");
+        if (logs1 == 0 || nlFirst != nlLast)   // ちょうど 1 行でなければならない
+        {
+            std::fprintf(stderr, "[M-04] FAIL: T-M04-5 reporter log/hysteresis: '%s'\n",
+                         m04Log.captured.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    // --- T-M04-4: 境界証明 numSamples == MAX_BLOCK_SIZE は gate 不発（`>` semantics） ---
+    {
+        const int cntE = M04OversizedTestAccess::count();
+        juce::AudioBuffer<double> exact(2, ConvolverProcessor::MAX_BLOCK_SIZE);
+        exact.clear();
+        exact.getWritePointer(0)[1000] = 1.0;
+        exact.getWritePointer(1)[1000] = 1.0;
+        gated.setMix(1.0f);
+        {
+            juce::dsp::AudioBlock<double> blk(exact);
+            gated.process(blk);   // 524,288 ちょうど: 以後の capacity guard も通過（==は有効域）
+        }
+        double energy = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < exact.getNumSamples(); i += 256)
+                energy += std::fabs(exact.getReadPointer(ch)[i]);
+        if (energy <= 0.0)
+        {
+            std::fprintf(stderr, "[M-04] FAIL: T-M04-4 boundary block produced no output (gate mis-fire at ==?)\n");
+            ok = false;
+        }
+        if (M04OversizedTestAccess::count() != cntE)
+        {
+            std::fprintf(stderr, "[M-04] FAIL: T-M04-4 boundary block counted by gate\n");
+            ok = false;
+        }
+    }
+
+    if (!ok)
+        return false;
+    std::printf("checkM04OversizedContainment: PASS (T-M04-1..5: silence+telemetry / bit-identical recovery / bypass gate / reporter / == boundary not gated)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -1473,6 +1681,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSR01MonoDuplication())
     {
         std::fprintf(stderr, "FAIL: checkSR01MonoDuplication\n");
+        return 1;
+    }
+    // ★ M-04 T-M04-1..5（oversized deterministic containment / 無状態性 / reporter / 境界 >）
+    if (!checkM04OversizedContainment())
+    {
+        std::fprintf(stderr, "FAIL: checkM04OversizedContainment\n");
         return 1;
     }
     return 0;

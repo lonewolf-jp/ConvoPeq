@@ -159,6 +159,16 @@ void ConvolverProcessor::timerCallback()
         lastReportedClampCount_ = currentClampCount;
     }
 
+    // ★ M-04 (G-3): oversized containment reporter（SR-03 clamp reporting と同一パターン。
+    //   timerCallback = NonRT。RT 側ログ禁止の原則を維持）
+    const int currentOversizedCount = convo::consumeAtomic(oversizedBlockCounter(), std::memory_order_acquire); // acquire: Runtime 側 fetchAddAtomic acq_rel と HB
+    if (currentOversizedCount != lastReportedOversizedCount_)
+    {
+        juce::Logger::writeToLog("ConvolverProcessor: M-04 oversized block containment triggered (total: "
+                                 + juce::String(currentOversizedCount) + " blocks)");
+        lastReportedOversizedCount_ = currentOversizedCount;
+    }
+
     // ── リングバッファオーバーフロー診断 (NUC ringOverflowCount の確認) ──
     {
         auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB

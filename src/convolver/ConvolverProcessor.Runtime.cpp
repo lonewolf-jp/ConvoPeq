@@ -20,6 +20,15 @@ std::atomic<int>& ConvolverProcessor::latencyClampCounter() noexcept
     return latencyClampCounterStorage_;
 }
 
+// ★ M-04 (G-3): oversized containment telemetry — SR-03 counter と同一パターン
+//   （RT: fetchAddAtomic acq_rel / NonRT reporter: consumeAtomic acquire・raw API 直接使用なし）
+std::atomic<int> ConvolverProcessor::oversizedBlockCounterStorage_ { 0 };
+
+std::atomic<int>& ConvolverProcessor::oversizedBlockCounter() noexcept
+{
+    return oversizedBlockCounterStorage_;
+}
+
 namespace
 {
     // Audio thread path avoids libm calls for deterministic realtime behavior.
@@ -244,6 +253,21 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     static constexpr double kLatencyRetargetThresholdSamples = 2.0;
+
+    // ★ M-04 (G-1): oversized block 単一 entry gate（doc/work97 契約凍結 2026-09-15）。
+    //   配置が契約の一部: isPrepared guard 直後・**retarget 進行（:300 以降の
+    //   latencySmoother/crossfadeGain/oldDelay の状態変更）・bypass dispatch・
+    //   delay ring 書き込みより前**。supported envelope（host block ≤ SAFE_MAX 65,536
+    //   × OS 8 = MAX_BLOCK_SIZE）を超える入力は状態を一切進めず決定的無音へ降格する
+    //   （deterministic containment。stale/passthrough でも OOB でもなく無状態・無音）。
+    //   bypass 経路も含む全経路共通（cond-3 承認済）。以後の :319/:326 dry/wet capacity
+    //   guard と :615 smoothing チェックは defense-in-depth として維持（G-2）。
+    if (static_cast<int>(block.getNumSamples()) > MAX_BLOCK_SIZE)
+    {
+        block.clear();
+        convo::fetchAddAtomic(oversizedBlockCounter(), 1, std::memory_order_acq_rel); // acq_rel: reporter 側 acquire と HB
+        return;
+    }
 
     juce::ScopedNoDenormals noDenormals;
 
@@ -612,6 +636,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     if (isSmoothing)
     {
+        // ★ M-04 (G-2): defense-in-depth — 通常は :257 の entry gate（MAX_BLOCK_SIZE 比較）が
+        //   全 capacity violation（dry/wet/smoothing 容量は prepared 時すべて MAX_BLOCK_SIZE に
+        //   統一）を事前排除するため本分岐は到達しない。削除せず最終防塞として維持。
         if (activeSmoothingCapacity < numSamples)
             return;
 
