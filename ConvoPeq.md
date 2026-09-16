@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-16 01:00:43
+> Generated: 2026-09-16 22:18:13
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -106231,6 +106231,9 @@ juce::File writeSR01TempIr(const juce::String& tag, double sampleRate, int numCh
     return f;
 }
 
+// ★ M-03 T-M03-1 計測用 IR は既存 writeH01TempIr(tag, peakPos)（4800 samples/48k/2ch/16bit）を
+//   そのまま使用する。新規のファイル生成ヘルパは追加しない（既存資産の再利用・I/O 経路の単一化）。
+
 // irPeak == expectPeak かつ irLength == expectIRLen を同一 finalize 経由で poll（最大 ~60s）。
 bool pollSR01Load(ConvolverProcessor& conv, int expectPeak, int expectIRLen, int maxIter = 12000)
 {
@@ -107228,6 +107231,203 @@ bool checkM01DenormalHygiene()
     return true;
 }
 
+// ============================================================================
+// ★ M-03 (T-M03-1): Direct Head 期待/到着分離計測（**計測専用・assert しない**）
+//   根拠: doc/work100/m03_pre_audit_failure_contract_freeze_20260916.md §2/§7（D1=GO）
+//   目的: BugList §M-03 の「direct 32tap / latency=0 申告」仮説を実測で仲裁する。
+//     期待位置（理論値）と実到着位置（計測値）を**同一視しない**（監査条件）。
+//   契約: production 変更 0 / 新規 I/O 資産 0。IR は既存 writeH01TempIr(tag, peakPos) を使用し、
+//     direct 域(peak<32) と FFT/L0 域(peak>=32) を **独立 2 計測**で分離する。
+//   記録: direct 域 / FFT(L0) 域それぞれの「peak 到着 global index - 期待 peak 位置」= 実効遅延、
+//     および getLatencyBreakdown() 申告値（algo/irPeak/total/directActive）。
+//   座標系: 「最初の非零サンプル」ではなく **peak の global sample index**（H-01/H-02 と比較可能）。
+//   PASS/FAIL は返さない（判定は実測を見て Failure Contract を再凍結してから）。
+// ============================================================================
+
+// 計測本体: directOn 構成で peak@peakPos の IR をロードし、peak 到着 index と申告値を記録
+static bool measureM03One(const char* label, bool directOn, int peakPos)
+{
+    ConvolverProcessor cp;
+    cp.prepareToPlay(48000.0, 512);
+    cp.setExperimentalDirectHeadEnabled(directOn);
+    cp.setMix(1.0f);   // wet のみ観測（dry 不参加）
+
+    const juce::File ir = writeH01TempIr("m03_peak.wav", peakPos);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[M03] %-6s: IR write failed\n", label);
+        cp.releaseResources();
+        return false;
+    }
+    cp.loadImpulseResponse(ir, false);
+    const bool loaded = pollH01Peak(cp, peakPos);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[M03] %-6s: IR load not finalized (peak@%d)\n", label, peakPos);
+        cp.releaseResources();
+        return false;
+    }
+
+    // impulse を block 0 に注入し 24 blocks（12,288 samples ≫ peak 600 + マージン）を走査
+    int best = -1;
+    double bestVal = 0.0;
+    int global = 0;
+    for (int j = 0; j < 24; ++j)
+    {
+        juce::AudioBuffer<double> ab(2, 512);
+        ab.clear();
+        if (j == 0) { ab.getWritePointer(0)[0] = 1.0; ab.getWritePointer(1)[0] = 1.0; }
+        juce::dsp::AudioBlock<double> blk(ab);
+        cp.process(blk);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const double* r = ab.getReadPointer(ch);
+            for (int i = 0; i < 512; ++i)
+            {
+                const double v = std::fabs(r[i]);
+                if (v > bestVal) { bestVal = v; best = global + i; }
+            }
+        }
+        global += 512;
+    }
+
+    const auto bd = cp.getLatencyBreakdown();
+    std::fprintf(stderr,
+                 "[M03] %-6s peak@%-4d arrival=%-6d delta=%-6d | F reported algo=%d irPeak=%d total=%d directActive=%d | irLen=%d\n",
+                 label, peakPos, best, (best >= 0 ? best - peakPos : -1),
+                 bd.algorithmLatencySamples, bd.irPeakLatencySamples,
+                 bd.totalLatencySamples, bd.directHeadActive ? 1 : 0, cp.getIRLength());
+    cp.releaseResources();
+    return true;
+}
+
+void measureM03DirectHeadTiming()
+{
+    static juce::ScopedJuceInitialiser_GUI m03Init;
+    (void)m03Init;
+
+    constexpr int kDirectPeak = 10;    // direct 域（< kMaxDirectTaps=32）
+    constexpr int kFftPeak    = 600;   // FFT/L0 域（>= 32）
+
+    std::fprintf(stderr, "[M03] === T-M03-1 measurement (48k block=512 IR=4800) ===\n");
+    measureM03One("OFF/d",  false, kDirectPeak);
+    measureM03One("ON/d",   true,  kDirectPeak);
+    measureM03One("OFF/f",  false, kFftPeak);
+    measureM03One("ON/f",   true,  kFftPeak);
+    std::fprintf(stderr, "[M03] === T-M03-1 measurement end (values only; no assertion) ===\n");
+}
+
+// ============================================================================
+// ★ M-03 (T-M03-2): HC/LC 応答境界計測（**計測専用・assert しない**）
+//   根拠: doc/work100 §7（D2=GO）・§10
+//   目的: direct head が HC/LC を通らないことによる応答差が、現行契約上問題になるかを測定。
+//   契約: production 変更 0。IR 生成・ロード待ちは既存 writeH01TempIr / pollH01Peak を再利用。
+//   HC/LC は IR ロード前に setNUCFilterModes で焼き込み（load 時に BuildSnapshot 経由で適用）。
+//   測定マトリクス: HC(Sharp/Soft) × LC(Natural/Soft) × direct(ON/OFF) × peak(tap10/tap600)。
+//   指標（時間領域・周波数応答の代理値）:
+//     amp    = 応答 peak の絶対値（HC/LC の帯域制限による smear で低下する）
+//     arrival= 応答 peak の global sample index（時間整合）
+//     spread = peak ± 200 samples 内で |x| > 1% peak のサンプル数（フィルタカーネル幅の代理）
+//   direct ON = IR taps 0..31 が生値（HC/LC 非適用）、OFF = FFT 経路（HC/LC 適用済）。
+//     よって同一 peakPos での ON/OFF 比較が **HC/LC bypass 効果そのもの** を測る。
+//   PASS/FAIL は返さない（Case H1/H2/H3 の分類は実測を見て人間が実施）。
+// ============================================================================
+
+static void measureM03_2One(bool directOn, convo::HCMode hc, convo::LCMode lc, int peakPos)
+{
+    const char* hcName = (hc == convo::HCMode::Sharp)   ? "Sharp"
+                       : (hc == convo::HCMode::Natural) ? "Natural" : "Soft";
+    const char* lcName = (lc == convo::LCMode::Natural) ? "Natural" : "Soft";
+    const char* dName  = directOn ? "ON " : "OFF";
+
+    ConvolverProcessor cp;
+    cp.prepareToPlay(48000.0, 512);
+    cp.setExperimentalDirectHeadEnabled(directOn);
+    cp.setNUCFilterModes(hc, lc);
+    cp.setMix(1.0f);   // wet のみ観測
+
+    const juce::File ir = writeH01TempIr("m03_2_ir.wav", peakPos);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[M03-2] %s HC=%-7s LC=%-7s peak@%-4d IR write failed\n",
+                     dName, hcName, lcName, peakPos);
+        cp.releaseResources();
+        return;
+    }
+    cp.loadImpulseResponse(ir, false);
+    const bool loaded = pollH01Peak(cp, peakPos);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[M03-2] %s HC=%-7s LC=%-7s peak@%-4d load timeout\n",
+                     dName, hcName, lcName, peakPos);
+        cp.releaseResources();
+        return;
+    }
+
+    // impulse を block 0 に注入、以後 clean で 24 blocks 収集（12,288 samples）
+    std::vector<double> ch0;
+    ch0.reserve(24 * 512);
+    for (int j = 0; j < 24; ++j)
+    {
+        juce::AudioBuffer<double> ab(2, 512);
+        ab.clear();
+        if (j == 0) { ab.getWritePointer(0)[0] = 1.0; ab.getWritePointer(1)[0] = 1.0; }
+        juce::dsp::AudioBlock<double> blk(ab);
+        cp.process(blk);
+        const double* r = ab.getReadPointer(0);
+        for (int i = 0; i < 512; ++i) ch0.push_back(r[i]);
+    }
+
+    int peakIdx = -1;
+    double peakAmp = 0.0;
+    for (int i = 0; i < static_cast<int>(ch0.size()); ++i)
+    {
+        const double v = std::fabs(ch0[i]);
+        if (v > peakAmp) { peakAmp = v; peakIdx = i; }
+    }
+
+    int spread = 0;
+    const double thr = peakAmp * 0.01;
+    const int w0 = std::max(0, peakIdx - 200);
+    const int w1 = std::min(static_cast<int>(ch0.size()), peakIdx + 201);
+    for (int i = w0; i < w1; ++i)
+        if (std::fabs(ch0[i]) > thr) ++spread;
+
+    std::fprintf(stderr,
+                 "[M03-2] %s HC=%-7s LC=%-7s peak@%-4d | arrival=%-5d amp=%.6f spread=%d\n",
+                 dName, hcName, lcName, peakPos, peakIdx, peakAmp, spread);
+    cp.releaseResources();
+}
+
+void measureM03HcLcBoundary()
+{
+    static juce::ScopedJuceInitialiser_GUI m03_2Init;
+    (void)m03_2Init;
+
+    constexpr int kDirectPeak = 10;    // direct 域（< kMaxDirectTaps=32）
+    constexpr int kFftPeak    = 600;   // FFT/L0 域（>= 32）
+
+    std::fprintf(stderr, "[M03-2] === T-M03-2 HC/LC boundary measurement (48k block=512 IR=4800) ===\n");
+    std::fprintf(stderr, "[M03-2] direct ON = IR taps 0..31 raw (bypasses HC/LC); OFF = FFT path (filtered)\n");
+
+    const convo::HCMode hcs[] = { convo::HCMode::Sharp, convo::HCMode::Soft };
+    const convo::LCMode lcs[] = { convo::LCMode::Natural, convo::LCMode::Soft };
+
+    for (auto hc : hcs)
+    {
+        for (auto lc : lcs)
+        {
+            measureM03_2One(false, hc, lc, kDirectPeak);
+            measureM03_2One(true,  hc, lc, kDirectPeak);
+            measureM03_2One(false, hc, lc, kFftPeak);
+            measureM03_2One(true,  hc, lc, kFftPeak);
+        }
+    }
+    std::fprintf(stderr, "[M03-2] === T-M03-2 end (values only; no assertion) ===\n");
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -107341,6 +107541,10 @@ int runConvolverStateRoundTripTests()
         std::fprintf(stderr, "FAIL: checkM01DenormalHygiene\n");
         return 1;
     }
+    // ★ M-03 T-M03-1（計測専用・PASS/FAIL なし。値のみ記録。D1=GO / 判定は実測後に再凍結）
+    measureM03DirectHeadTiming();
+    // ★ M-03 T-M03-2（計測専用・PASS/FAIL なし。HC/LC 境界の値のみ記録。D2=GO）
+    measureM03HcLcBoundary();
     return 0;
 }
 
