@@ -211,3 +211,14 @@ P3 / 潜伏系（発火条件成立まで対応不要）
 - 使用ツール: ctx_batch_execute（42 コマンド）+ rtk(WSL) rg + grep/sed + 直接ファイル読み取り
 - 検証日時点の authority: ConvoPeq.md `Generated: 2026-09-09 01:32:32` / NEWER_SRC_COUNT = 0
 - 本リストは元リスト（INTEGRATED_BUG_LIST.md）を置き換えない。元リストは「3 ソースの統合記録」、本リストは「現行ソース照合による判定修正版」として併存
+
+## 8. UPDATE 2026-09-17 — big 1-8 supersede（追記・本文変更なし）
+
+> 本節は追記のみ。§1〜§7（2026-09-09・HEAD 54ba7b40 基準）の historical 判定は保持する。
+
+- **§1 行 5（big 1-8「ストリーミング化は未実装」）および §5 road-map の big 1-8 は supersede 済み**:
+  - work92 B-5（2026-09-10）でストリーミング読込が実装（IMPLEMENTATION_REPORT :20 / FINAL_INVENTORY :76 に CLOSED 計上）。
+  - 残った「上限の明文化」は **WORK102 `859718e4`**（FC-FORM-1/2/3/4/5 admission・IRLoadAdmission.h 単一情報源）+ **WORK102-PREV-01 `eab40c23`**（preview parity）で完了。
+  - 正式状態: **big 1-8 = RESOLVED**。詳細: `doc/work92/WORK92_LEDGER_RECONCILIATION_20260917.md`
+  - WORK106（2026-09-17・HEAD eab40c23・ConvoPeq 13:10:15 FRESH）で全行再実測: True Open = 0。
+- §2-3 big 1-4 の「P2 として残す（Float/IO ローカル fastTanh 複製）」は**現行も現存**（DSPCoreFloat.cpp:146 / DSPCoreIO.cpp:76）— WORK92 closure の非ブロック P2 品質項目として ledger に記録。

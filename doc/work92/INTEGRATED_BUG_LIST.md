@@ -237,3 +237,14 @@ R-1（dryScaledL 構文エラー=破損）・R-2（resample 無限ループ）�
 | big_bug 固有（1-1〜3-10 / R-新規 / 9-x 設計課題） | doc/work88/big_bug/INTEGRATED_BUG_LIST.md §1〜§3 / §10-2-1 / §9 | — |
 
 > **9-x 系（REPAIR_PLAN2-dash レビュー記録）について**: big_bug §9 の 9-1〜9-56 はバグではなく**設計課題・レビュー記録**（X1〜X6 / P2-1〜P2-4 の ISR 設計レビュー）であり、本統合リストの「バグ」定義からは除外する。ただし 9-1（submitRecoveryRequest push 失敗）は修正済み、9-2/9-5 は P3 降格、9-3/9-7 は撤回済みなど結論は big_bug §9 に確定記録済み。また X1〜X6 の設計はその後 D105〜D179 系列で実装・検証済み（pendingRecoveryAdmission_ / RecoveryLifecycleWord 等）。
+
+---
+
+## UPDATE 2026-09-17 — big 1-8 supersede（追記・本文変更なし）
+
+> 本節は追記のみ。本リスト（3 ソース統合版）の historical 記載は保持する。
+
+- **big 1-8（:80 CONFIRMED P0・:194 road-map「ストリーミング読み込み」）は解消済み**:
+  - work92 B-5（2026-09-10）でストリーミング読込実装済み。
+  - 上限の明文化は **WORK102 `859718e4`**（FC-FORM-1/2/3/4/5 admission・IRLoadAdmission.h 単一情報源）+ **WORK102-PREV-01 `eab40c23`**（preview parity）で完了。
+  - 正式状態: **big 1-8 = RESOLVED**。詳細: `doc/work92/WORK92_LEDGER_RECONCILIATION_20260917.md`（WORK106 全行再実測・True Open = 0）

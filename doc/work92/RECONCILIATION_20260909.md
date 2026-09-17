@@ -169,3 +169,13 @@ C-1 → C-2 → C-4 → C-5 → C-6 → C-7 → C-9 → C-3 → C-8 (最後・�
 - 使用ツール: ctx_batch_execute（26 コマンド超）+ ctx_execute（shell・WSL rg）+ Windows grep/find/sed — 全実測は ConvoPeq.md `Generated: 2026-09-09 01:32:32` 世代
 - 本報告書は PLAN.md v3 を置き換えない。**v3 の設計判断は全項目維持**。本報告書は「行番号・影響範囲・設計補完」の確定層。
 - 残る未確定事項: **ゼロ**（B-3 の OversamplingType 同時修正可否のみユーザー gate として残置）
+
+---
+
+## UPDATE 2026-09-17 — big 1-8 supersede（追記・本文変更なし）
+
+> 本節は追記のみ。§1〜（2026-09-09）の historical 記載（:120「big 1-8 LoaderThread 残存 → Phase B-5」を含む）は保持する。
+
+- Phase **B-5 は IMPLEMENTATION_REPORT_20260910.md:20 で ✅ CLOSED**（FINAL_INVENTORY_20260910.md:76 も CLOSED BUG に計上）。
+- その後 work101 retriage（2026-09-16）が destination 一括確保の上限未確定を CONTRACT DEFERRED に再起票したが、**WORK102 `859718e4`**（FC-FORM-1/2/3/4/5 admission・1 GiB destination bound + IRLoadAdmission.h 単一情報源）+ **WORK102-PREV-01 `eab40c23`** で解消。
+- 正式状態: **big 1-8 = RESOLVED**。詳細: `doc/work92/WORK92_LEDGER_RECONCILIATION_20260917.md`
