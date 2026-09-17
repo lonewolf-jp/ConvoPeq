@@ -1,0 +1,95 @@
+=== M-03 Push Gate verification (2026-09-16) ===
+
+--- 1. Pre-push state ---
+HEAD        = 35461e2e3a5fd42fd009416a20adaf457b9b4031
+origin/main = 5384708741f2bc06967c35a2a2f50b81031ceacd
+ahead/behind= 0 behind / 1 ahead
+branch      = main
+remote      = https://github.com/lonewolf-jp/ConvoPeq.git
+
+--- 2. Push target ---
+commit = 35461e2e (3 files only)
+  ConvoPeq.md
+  doc/work100/m03_pre_audit_failure_contract_freeze_20260916.md
+  src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
+PRESERVE excluded = YES (.gitignore / build.bat / doc/work68)
+README.md excluded = YES
+no force push / no --all / no --tags (local branches: 4, local tags: 40+ -> untouched)
+
+--- 3. Push ---
+git push origin main
+    53847087..35461e2e  main -> main
+
+--- 4. Post-push integrity ---
+HEAD        = 35461e2e3a5fd42fd009416a20adaf457b9b4031
+origin/main = 35461e2e3a5fd42fd009416a20adaf457b9b4031
+HEAD == origin/main == 35461e2e : PASS
+ahead/behind = 0 / 0
+
+--- 5. Commit contents ---
+35461e2e docs(convolver): formalize experimental direct head contract
+ ConvoPeq.md                                        | 206 ++++-
+ ...3_pre_audit_failure_contract_freeze_20260916.md | 952 +++++++++++++++++++++
+ .../ConvolverStateRoundTripTests.cpp               | 204 +++++
+ 3 files changed, 1361 insertions(+), 1 deletion(-)
+
+--- 6. PRESERVE ---
+staged (unchanged):
+  .gitignore
+  build.bat
+  doc/work68/automatic_sound_test_plan_v7.4_validation_20260911.md
+.gitignore numstat (cached) = 2	0	.gitignore  (unchanged; trailing whitespace NOT modified)
+git diff --check (worktree) = clean
+
+--- 7. ConvoPeq.md freshness ---
+stamp = > Generated: 2026-09-16 22:18:13
+NEWER_SRC_COUNT = 0
+STATUS = FRESH
+
+--- 8. Retained limitations (unchanged) ---
+D3 = HOLD / SEPARATE CANDIDATE
+LC not independently resolved (T-M03-2 did not resolve LC effect independently)
+H3 tap 31/32 boundary = unmeasured
+audible significance = unmeasured
+
+--- committed blob vs worktree content ---
+方法: raw md5 だけでなく、.gitattributes の正規化を考慮して判定する。
+
+  ConvoPeq.md
+    worktree bytes = 5115635  (CRLF)   / blob bytes = 5003255 (LF)
+    raw md5 equal            = NO   <-- 行末差による見かけの不一致
+    CRLF->LF 正規化後 md5    = MATCH
+  src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
+    worktree bytes = 99352    (CRLF)   / blob bytes = 97048   (LF)
+    raw md5 equal            = NO   <-- 同上
+    CRLF->LF 正規化後 md5    = MATCH
+  doc/work100/m03_pre_audit_failure_contract_freeze_20260916.md
+    worktree bytes = 51224    (LF)     / blob bytes = 51224   (LF)
+    raw md5 equal            = MATCH
+
+原因: .gitattributes が `*.md text eol=lf` / `*.cpp text eol=lf` を宣言しているため、
+      blob は LF で格納される。作業ツリー側の ConvoPeq.md（Python 生成器が出力）と
+      ConvolverStateRoundTripTests.cpp は CRLF のまま残っているが、これはローカル作業
+      コピーの行末であり、git は正規化して比較する。
+
+権威ある判定（git 自身の比較）:
+  git status --short -- ConvoPeq.md src/tests/.../ConvolverStateRoundTripTests.cpp doc/work100
+    => (no output = clean)
+  git diff HEAD --stat -- <same paths>
+    => (empty = identical)
+  => commit 内容と現行ソースは同一。作業ツリーの CRLF は eol=lf 宣言により次回 checkout で LF に正規化される。
+
+retained limitations (committed work100 blob):
+  D3 = HOLD / SEPARATE CANDIDATE
+  LC not independently resolved
+  H3 tap 31/32 boundary unmeasured
+  audible significance unmeasured
+--- Final verdict ---
+M-03 Push Gate = PASS
+push = PASS
+post-push integrity = PASS
+HEAD == origin/main = PASS
+PRESERVE = PASS
+ConvoPeq.md = FRESH
+
+M-03 = CLOSED

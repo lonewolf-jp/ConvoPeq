@@ -1,11 +1,13 @@
-{
-  "observeShimAgeSec": 2,
-  "maxStalenessSec": 600,
-  "triggerAuditAgeSec": 1,
-  "observeShimPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\observe_shim_usage_report.json",
-  "schema": "projection_freshness_report_v1",
-  "triggerAuditPath": "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
-  "ready": true,
-  "violations": [],
-  "generatedAt": "2026-08-11T16:16:41.1656306+09:00"
+﻿{
+    "maxStalenessSec":  600,
+    "ready":  true,
+    "observeShimPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\observe_shim_usage_report.json",
+    "observeShimAgeSec":  1,
+    "triggerAuditPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
+    "violations":  [
+
+                   ],
+    "generatedAt":  "2026-09-16T07:14:45.4008156+09:00",
+    "schema":  "projection_freshness_report_v1",
+    "triggerAuditAgeSec":  0
 }

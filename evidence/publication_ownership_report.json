@@ -1,16 +1,20 @@
-{
-  "schema": "publication_ownership_report_v1",
-  "generatedAt": "2026-08-11T16:17:40.6906161+09:00",
-  "headerPath": "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
-  "checks": {
-    "publishWorldBuilderExists": true,
-    "publishLifecycleWrapperExists": true,
-    "retireLifecycleWrapperExists": true,
-    "authorityPublishExists": true,
-    "noRuntimePublishAuthorityFactory": true,
-    "noRtPublicationFactoryCall": true
-  },
-  "hits": [],
-  "violations": [],
-  "ready": true
+﻿{
+    "schema":  "publication_ownership_report_v1",
+    "generatedAt":  "2026-09-16T07:15:49.1615474+09:00",
+    "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
+    "checks":  {
+                   "publishWorldBuilderExists":  true,
+                   "publishLifecycleWrapperExists":  true,
+                   "retireLifecycleWrapperExists":  true,
+                   "authorityPublishExists":  true,
+                   "noRuntimePublishAuthorityFactory":  true,
+                   "noRtPublicationFactoryCall":  true
+               },
+    "hits":  [
+
+             ],
+    "violations":  [
+
+                   ],
+    "ready":  true
 }

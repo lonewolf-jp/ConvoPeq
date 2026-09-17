@@ -1,0 +1,19 @@
+=== cppcheck (M-01 changed files) ===
+CPPCHECK_EXIT=0
+=== clang-tidy (M-01 NUC production file) ===
+12 warnings generated.
+[1/1] (8/9) Processing file C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp.
+13 warnings generated.
+[1/1] (9/9) Processing file C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp.
+14 warnings generated.
+C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp:658:5: warning: repeated branch body in conditional chain [bugprone-branch-clone]
+  658 |     {
+      |     ^
+C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp:662:6: note: end of the original
+  662 |     }
+      |      ^
+C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp:686:5: note: clone 1 starts here
+  686 |     {
+      |     ^
+Suppressed 5 warnings (5 with check filters).
+TIDY_EXIT=0

@@ -1,0 +1,25 @@
+=== M-02 final verification ledger 2026-09-15 23:36 ===
+--- final chain (Release build + ctest, Debug build + ctest) ---
+=== [1/2] Release full build ===
+REL_BUILD_EXIT=0
+100% tests passed out of 40
+REL_CTEST_EXIT=0
+=== [2/2] Debug full build ===
+DBG_BUILD_EXIT=0
+100% tests passed out of 40
+DBG_CTEST_EXIT=0
+=== final chain end ===
+--- stability re-runs (harness only) ---
+Release x3: 100% passed / 100% passed / 100% passed
+Debug   x3: 100% passed / 100% passed / 100% passed
+--- static analysis ---
+=== RT safety: raw atomic dot-call scan ===
+Strict atomic dot-call scan passed (src/**/*.h,*.hpp,*.cpp,*.cxx,*.cc).
+=== cppcheck (final 3 files) ===
+CPPCHECK_DONE
+=== clang-tidy (Runtime only, changed TU) ===
+TIDY_DONE=0
+--- ConvoPeq freshness ---
+baseline Generated : 2026-09-15 23:22:48  (ConvoPeq.md)
+NEWER_SRC_COUNT    : 0
+STATUS             : FRESH — snapshot は現行ソースを反映しています

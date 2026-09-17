@@ -1,0 +1,91 @@
+=== M-03 Commit Gate verification (2026-09-16) ===
+
+--- CG-1 pre-commit state (captured before commit) ---
+HEAD            = 5384708741f2bc06967c35a2a2f50b81031ceacd   (= origin/main at commit time)
+origin/main     = 5384708741f2bc06967c35a2a2f50b81031ceacd
+branch          = main
+git diff --check = clean
+  (note: `git diff --cached --check` reports PRE-EXISTING trailing whitespace in the
+   PRESERVE file .gitignore:102-103 ['+.auto/' / '+.tgrep/']. This is not M-03 content
+   and is excluded from the M-03 commit by the pathspec commit below.)
+
+PRESERVE (staged, untouched):
+.gitignore
+build.bat
+doc/work68/automatic_sound_test_plan_v7.4_validation_20260911.md
+
+--- CG-2 candidate verification ---
+work100  : 51224 bytes / md5 7dac1c1a6c7aeab9f4662567a238f67e
+           §9 Case A / (b) CLOSED, §10 Case H2 / HC confirmed / LC unresolved / H3 unmeasured,
+           §11 (c) CLOSED AS INTENTIONAL CONTRACT, §12 D4 CLOSED / retained / default OFF,
+           §13 Implementation Gate PASS, §14 Final Gate PASS
+           retained: D3 = HOLD / SEPARATE CANDIDATE, LC not independently resolved,
+                     H3 tap 31/32 unmeasured, audible significance unmeasured
+harness  : 204	0	src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp  (add del path)
+production source changes under src/ = 0
+ConvoPeq.md stamp = > Generated: 2026-09-16 22:18:13
+ConvoPeq.md freshness = baseline Generated : 2026-09-16 22:18:13  (ConvoPeq.md) | NEWER_SRC_COUNT    : 0 | STATUS             : FRESH — snapshot は現行ソースを反映しています
+ConvoPeq.md elements: kMaxDirectTaps=32 / measureM03DirectHeadTiming / measureM03HcLcBoundary / Exp Direct Head / tooltip  -> all present
+
+--- CG-3/CG-4 boundary & staging ---
+staged after `git add -- <M-03 candidate 3>` (= M-03 candidate 3 + PRESERVE 3 = 6):
+.gitignore
+ConvoPeq.md
+build.bat
+doc/work100/m03_pre_audit_failure_contract_freeze_20260916.md
+doc/work68/automatic_sound_test_plan_v7.4_validation_20260911.md
+src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
+
+repo convention: commit was made with an explicit pathspec so that the 3 PRESERVE files
+remain staged and are NOT included in the M-03 commit.
+
+--- CG-5 candidate diff review ---
+ConvoPeq.md staged diff: 4 hunks, 205 added / 1 removed
+  removed = old stamp line only ('> Generated: 2026-09-16 01:00:43')
+  hunks 2-4 located inside the ConvolverStateRoundTripTests.cpp section of the md
+  (context anchors: writeSR01TempIr / checkM01DenormalHygiene / runConvolverStateRoundTripTests)
+  -> no production source change embedded
+harness  : 204 insertions / 0 deletions (pure additions; M-03 measurement code only)
+work100  : 952 insertions / 0 deletions (new document)
+no README / no CMakeLists / no UI / no tooltip / no D3 implementation / no PDC change
+
+--- CG-6 Commit Gate ---
+M-03 Implementation Gate = PASS
+M-03 Final Gate          = PASS
+candidate                = exactly 3 files
+production source changes= 0
+CMake changes            = 0
+UI changes               = 0
+D3 implementation        = 0
+ConvoPeq.md              = FRESH
+git diff --check         = PASS
+PRESERVE 3 files         = untouched
+README.md                = excluded
+unrelated existing changes = excluded
+=> M-03 Commit Gate = PASS
+
+--- CG-7 commit ---
+35461e2e docs(convolver): formalize experimental direct head contract
+ ConvoPeq.md                                        | 206 ++++-
+ ...3_pre_audit_failure_contract_freeze_20260916.md | 952 +++++++++++++++++++++
+ .../ConvolverStateRoundTripTests.cpp               | 204 +++++
+ 3 files changed, 1361 insertions(+), 1 deletion(-)
+
+--- CG-8 post-commit verification ---
+HEAD            = 35461e2e3a5fd42fd009416a20adaf457b9b4031
+origin/main     = 5384708741f2bc06967c35a2a2f50b81031ceacd
+ahead/behind    = 0	1 (behind ahead)
+committed files = 
+ConvoPeq.md
+doc/work100/m03_pre_audit_failure_contract_freeze_20260916.md
+src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
+PRESERVE in commit? .gitignore=no  build.bat=no  doc/work68=no  README.md=no
+staged after commit (unchanged PRESERVE 3):
+.gitignore
+build.bat
+doc/work68/automatic_sound_test_plan_v7.4_validation_20260911.md
+
+--- CG-9 state ---
+M-03 Commit Gate = PASS
+M-03 commit      = CREATED (35461e2e)
+M-03 push        = NOT YET DONE

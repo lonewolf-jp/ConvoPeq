@@ -1,0 +1,15 @@
+=== RT safety: raw atomic dot-call scan ===
+Strict atomic dot-call scan passed (src/**/*.h,*.hpp,*.cpp,*.cxx,*.cc).
+=== semantic-hash-drift verifier (T-M01-4) ===
+[INFO] report: C:\VSC_Project\ConvoPeq\evidence\semantic_hash_drift_report.json
+[PASS] semantic hash drift verification passed
+exit=0
+=== deterministic-build verifier ===
+[INFO] DeterministicBuildVerifier evidence written: C:\VSC_Project\ConvoPeq\evidence\isr_deterministic_build_report.json
+[PASS] DeterministicBuildVerifier contract verification passed
+exit=0
+=== semantic-equivalence verifier ===
+[INFO] All 8 hash dimensions confirmed in RuntimeSemanticHash
+[INFO] SemanticEquivalenceVerifier evidence written: C:\VSC_Project\ConvoPeq\evidence\isr_semantic_equivalence_report.json
+[PASS] SemanticEquivalenceVerifier contract verification passed
+exit=0

@@ -1,0 +1,129 @@
+WORK102-PREV-01 — Preview Loader Admission / Graceful Failure
+検証台帳（2026-09-17）
+================================================================
+
+Baseline
+--------
+HEAD / origin/main : 859718e4 (fix(convolver): bound IR load allocation and stream hashing)
+                     ahead/behind 0/0
+ConvoPeq.md        : 再生成 2026-09-17 12:06:24 → --check NEWER_SRC_COUNT=0 / FRESH
+                     （PREV-01 実装前 baseline: 09:13:37 / FRESH・実装後再生成確認済）
+
+凍結契約の正本: doc/work102/prev01_contract_freeze_20260917.md（FC-1〜FC-5 / S1〜S5）
+IRLoadAdmission.h : 無変更（git diff = 0・S5）
+
+変更面（production / tests）
+---------------------------
+M  src/convolver/ConvolverProcessor.ResampleAndFallback.cpp   loadImpulseResponsePreviewFile 本体
+M  src/convolver/ConvolverProcessor.StateAndUI.cpp            include 追加 + analyzeImpulseResponseFile 関数のみ
+A  src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp     +228 行（include + PA〜PE + runner）
+M  src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp +7 行（宣言 + 呼出しのみ）
+M  ConvoPeq.md                                                再生成
+
+RT / authority / UI への波及: 0（atomic 追加 0 行 / Publish・Crossfade・Retire・Epoch・
+  RuntimeWorld・LifetimeBudget・ISRShutdown・MAX_IR_LATENCY・DELAY_BUFFER_SIZE 変更 0 件 /
+  UI worker・completion・requestId 機構の変更 0 件 — ConvolverControlPanel.cpp diff = 0）
+
+Build（UTF-8 codepage + vcvars64 (VS18) + oneAPI setvars + cmake --build 2-phase）
+-----
+Release 全文ビルド : BUILD_EXIT=0（ConvoPeq 137 step + 全 target 396 step・FAILED 0 / error 0）
+Debug   全文ビルド : BUILD_EXIT=0（ConvoPeq bootstrap + 全 target 418 step・FAILED 0 / error C 0 件）
+identity gate      : GATE-OK（--check で再検証・stamp 一致）
+dependency gate    : GATE-OK（339 relevant .obj checked / production #deps 0 = 0 /
+                     suspicious = 0 / unresolved = 0 / ZERO_DEPS_SYSTEM_ONLY 10 件は
+                     test-only で warn 許容）
+
+CTest
+-----
+Release : 100% tests passed out of 40   (Total 57.48 sec / AudioEngineHarness 41.00 sec)
+Debug   : 100% tests passed out of 40   (Total 82.90 sec)
+
+Debug 第1回のみ testRegisteredDSPFailurePreservesRegistration（T-I2-3・publish/registration 経路）
+  が 11.13 秒で FAIL → **再実行 40/40 PASS（82.90s）・単独再実行 PASS（60.83s）・
+  Debug harness 直接実行 exit 0**。本テストは PREV-01 変更面（preview loader）を経由せず、
+  変更対象 TU を含まない commitRuntimePublication/registration 経路のテスト。
+  → 環境/タイミング flake（clean 再構築直後の初回）と分類。PREV-01 regression と
+    再分類しない。POST-AUDIT で再観察する。
+
+AudioEngineHarness — WORK102 + PREV-01 checks（Debug / Release 双方の直接実行・exit 0）
+--------------------------------------------------------------
+[WORK102] checkEFPredicateBoundaries: PASS                       … E / F
+[WORK102] checkStreamingHashMatchesReference: PASS (13 sizes)    … I
+[WORK102] checkChannelAdmissionRuntime: PASS (1/2/8ch, 9ch rej)  … A/B/C/D
+[WORK102] checkResampleBoundUsesTrimmedLength: PASS              … G
+[WORK102] checkResampleBoundRejectsOversized: PASS               … H
+[WORK102] checkResamplePathAccepted: PASS                        … L
+IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L)
+[PREV01] checkPreviewChannelAdmission: PASS (1/2/8ch accept, 9ch reject) … PA
+[PREV01] checkPreviewChunkedReadEquivalence: PASS (300k samples, 2 chunks) … PB
+[PREV01] checkPreviewResampleBoundUsesTrimmedLength: PASS (raw 50s -> trim -> accept) … PC
+[PREV01] checkPreviewResampleBoundRejectsOversized: PASS (3s@44.1k -> 768k reject)    … PD
+[PREV01] checkPreviewFailureCompletion: PASS (missing/garbage -> failed preview)     … PE
+IRLoadPreviewAdmissionTests: PASS (PREV-01 PA/PB/PC/PD/PE)
+
+Debug / Release 双方の AudioEngineHarness.exe 直接実行: exit code = 0
+（J / K / I(ii) 相当の S1–S5 は構造検証として明示（executable PASS と誤表示しない））
+
+構造検証 S1–S5（PREV-01 版・実測）
+--------------------------------
+S1  全量 tempFloatBuffer 形状の消滅
+    ResampleAndFallback.cpp 内の AudioBuffer<float> tempFloatBuffer は
+    :337（static_cast<int>(kStreamChunk)）のチャンク形のみ。旧全量形
+    `tempFloatBuffer(numChannels, fileLength)` / 全量 makeAlignedArray(fileLength) = 0 件。
+S2  admission ordering の実測（loadImpulseResponsePreviewFile）
+    :296-297 metadata 取得（int64/unsigned）→ :299 FC-FORM-4(ch) → :305 FC-FORM-4(len)
+    → :311 FC-FORM-3 → :318 FC-FORM-2 → :325 FC-FORM-1 → :332 narrowing(int化)
+    → :336 kStreamChunk（局所 constexpr・262,144）→ :337 チャンク確保 → :345 loadedIR.setSize。
+    narrowing は FC-FORM-2/4 の後、確保は FC-FORM-1 の後。FC-FORM-1 前の全量確保 = 0 件。
+S3  no-throw 境界
+    analyzeImpulseResponseFile の catch 群: :571 bad_alloc → :577 std::exception → :583 catch(...)。
+    worker lambda（ConvolverControlPanel.cpp:1146）の git diff = 0（無変更）。
+S4  横展開なし
+    `convo::irload::` の出現 TU = LoaderThread.cpp（WORK102 既存）/
+    ConvolverProcessor.StateAndUI.cpp（analyze のみ）/ ConvolverProcessor.ResampleAndFallback.cpp
+    （preview loader のみ）の 3 TU に限定。他 TU への波及 0 件。
+S5  IRLoadAdmission.h 無変更
+    git diff -- src/convolver/IRLoadAdmission.h = 空論理値（変更 0）。
+
+静的解析
+--------
+clang-tidy (LLVM 23.1.1 / .clang-tidy registry / -p build) — 3 変更 TU:
+  ResampleAndFallback.cpp         : 0 warning / 0 error
+  IRLoadAdmissionTests.cpp        : 0 warning / 0 error
+  ConvolverProcessor.StateAndUI.cpp : 2 件 = clang-analyzer-cplusplus.NewDeleteLeaks
+    :445 / :798（LatencySnapshot の publish 経路）。**diff 外の既存コード**
+    （PREV-01 の変更 hunk は include 行 3 行目 + analyzeImpulseResponseFile 関数
+     459-592 のみ。:445/:798 はどちらの hunk にも含まれない）。
+    WORK102 POST の clang-tidy 対象は LoaderThread/AllpassDesigner/IRLoadAdmissionTests
+    の 3 TU（StateAndUI は対象外）。当該 2 件は既存コードへの analyzer 指摘であり、
+    PREV-01 defect として再分類しない。
+  変更コードに帰属する clang-tidy 指摘: 0
+
+cppcheck (--enable=warning,performance,portability --std=c++20 / --project
+  compile_commands_prev01.json 15 entries):
+  指摘 2 件 = いずれも unknownMacro（JUCE_DECLARE_WEAK_REFERENCEABLE・
+  ConvolverProcessor.h:1390 / AudioEngine.h:5096 — **未変更 TU の設定要因**。
+  WORK102 POST と同一の pre-existing 2 件）。
+  変更後コードに帰属する指摘: 0
+
+ConvoPeq.md freshness（必須条件）
+---------------------------------
+再生成 2026-09-17 12:06:24 → --check NEWER_SRC_COUNT = 0 / STATUS FRESH
+
+Build environment note（本 session の実装環境）
+-----
+- 本 session の background bash からは vcvars/oneAPI 環境が未初期化であったため、
+  wrapper（chcp 65001 + vcvars64.bat + oneAPI setvars.bat + cmake --build 2 フェーズ）
+  でビルド。build.bat 自体は未変更（既存 staged item のまま触れていない）。
+- コンソールコードページ 932 のまま cl /showIncludes を出力すると UTF-8 の
+  msvc_deps_prefix（rules.ninja）と一致せず ninja が deps を 0 件記録するため
+  （dependency gate fail-closed）、chcp 65001 を必須化。
+- clean 後の JuceLibraryCode/JuceHeader.h 生成は ConvoPeq target 依存のため、
+  全 target ビルド前に ConvoPeq target の bootstrap を 1 回実行する構成。
+- Debug CTest 初回 flake は本環境要因の可能性を排除できていないため、POST-AUDIT で
+  再観測することを推奨に記載。
+
+判定: IMPLEMENTED（commit/push は未実施。POST-AUDIT → FINAL GATE → commit/push の工程待ち）
+残置: WORK102-PREV-01 の Final Gate は未実施 / Debug 初回 flake の再観察（POST 推奨）/
+      IS-7（別件）/ unrelated staged items（.gitignore・build.bat・doc/work68/*）の
+      別 commit 判断（既存）

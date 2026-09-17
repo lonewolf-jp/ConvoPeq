@@ -1,0 +1,184 @@
+WORK102-IMPL — Bounded IR Load Admission + Streaming Hash
+検証台帳（2026-09-17）
+================================================================
+
+Baseline
+--------
+HEAD / origin/main : 35461e2e (docs(convolver): formalize experimental direct head contract)
+ConvoPeq.md        : 再生成 2026-09-17 09:13:37 → --check NEWER_SRC_COUNT=0 / FRESH
+
+変更面（production / tests / CMake）
+-----------------------------------
+M  CMakeLists.txt                                          +1
+M  src/AllpassDesigner.cpp                         +186 / -72 （streaming hash 化）
+M  src/convolver/ConvolverProcessor.LoaderThread.cpp        +61 （admission + FC-FORM-5 + hash 移動）
+M  src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp +8 （harness 登録のみ）
+A  src/convolver/IRLoadAdmission.h                     （新規・契約の単一情報源）
+A  src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp （新規・A〜L）
+M  ConvoPeq.md                                        （再生成）
+
+RT / authority 面への波及: 0（atomic 追加 0 行 / MAX_IR_LATENCY 差分 0 件 /
+  Runtime・DSPCore・RuntimeWorld・ISRShutdown・ISRRetire・Epoch・Crossfade・
+  LifetimeBudget・Deferred* の変更 0 件）
+
+Build
+-----
+Release 全文ビルド : BUILD_EXIT=0
+Debug   全文ビルド : BUILD_EXIT=0
+（変更 TU からのコンパイラ警告 0 件）
+
+CTest
+-----
+Release : 100% tests passed out of 40   (Total 63.40 sec / AudioEngineHarness 47.98 sec)
+Debug   : 100% tests passed out of 40   (Total 89.80 sec / AudioEngineHarness 61.68 sec)
+
+AudioEngineHarness — WORK102 checks（Debug / Release 双方で同一結果）
+--------------------------------------------------------------
+[WORK102] checkEFPredicateBoundaries: PASS            … E / F
+[WORK102] checkStreamingHashMatchesReference: PASS (13 sizes, one-shot oracle) … I
+[WORK102] checkChannelAdmissionRuntime: PASS (1/2/8ch accept, 9ch reject)      … A/B/C/D
+[WORK102] checkResampleBoundUsesTrimmedLength: PASS (raw 50s -> trim -> accept) … G
+[WORK102] checkResampleBoundRejectsOversized: PASS (3s@44.1k -> 768k reject)    … H
+[WORK102] checkResamplePathAccepted: PASS (44.1k -> 48k resample accept)        … L
+IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L)
+
+静的解析
+--------
+clang-tidy (.clang-tidy registry / -p build):
+  src/AllpassDesigner.cpp
+  src/convolver/ConvolverProcessor.LoaderThread.cpp
+  src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
+  → warning 0 / error 0（TIDY_EXIT=0）
+
+cppcheck (--enable=warning,performance,portability --std=c++20):
+  初回: src/AllpassDesigner.cpp:157 uninitMemberVar 'Xxh64Stream::buf_' → **修正**
+        （uint8_t buf_[32] {}; へ）。再走で当該指摘 0。
+  残存 2 件は unknownMacro（JUCE_DECLARE_WEAK_REFERENCEABLE）で
+  未変更 TU（ConvolverProcessor.LoadPipeline.cpp）でも同一再現 → **pre-existing 設定要因**
+  変更後コードに帰属する指摘: 0
+
+Source scan（必須チェック）
+--------------------------
+scan1 computeIRHash の fileSize 比例確保（コメント除去後）      : 0 件   PASS
+scan2 HeapBlock<uint8_t> / fileSize サイズの vector（production）: 0 件   PASS
+       ※ 参考: CacheManager.cpp:70 は固定 64 KiB、MixedPhasePersistentCache.cpp:244 は
+          キャッシュファイル（別サブシステム・IR ロード経路外）→ WORK102 scope 外
+scan3 admission より前の loadedIR / full-size temp / hash buffer : 0 件   PASS
+        admission 行 = 396 / 401 / 408 / 415 / 422
+        allocation 行 = computeIRHash 431, tempFloatBuffer 443, loadedIR.setSize 451
+scan5 FC-FORM-5 の位置（trim < FC-FORM-5 < resampler）           : 544 < 555 < 572  PASS
+scan6 chunked read 維持（kStreamChunk = 256*1024）               : PASS
+scan7 preview 経路の既存ガード維持                                : PASS
+scan8 preview に irload:: 参照なし                                : PASS
+scan9 UI に irload:: 参照なし                                     : PASS
+
+契約値の不変確認
+----------------
+kMaxIRLoadBytes             = 1073741824   (1 GiB)
+kMaxIRLoadChannels          = 8u
+kMaxFileLengthSamples       = 2147483647   (INT32_MAX)
+kMaxIRResampleOutputSamples = 2097153      (2^21 + 1)
+→ 4 定数すべて R2 凍結値のまま（変更 0）
+
+実装中に検出した事象と対処
+--------------------------
+事象: Debug harness の初回実行が testCallerDestroyTerminalDisposition 内で
+      SEGFAULT（exit 139）。原因は新規テストが ConvolverProcessor の
+      releaseResources() を呼ばず、LoaderThread を滞留させたこと
+      （work98 §8-13 が同種の前例を記録済み）。
+対処: ConvReleaser RAII guard を導入し全 exit 経路で releaseResources() を実行。
+      再走で Debug harness HARNESS_EXIT=0、CTest Debug 40/40 PASS。
+      production 側の変更は不要（テスト片付け契約の遵守のみ）。
+
+判定: IMPLEMENTED（テスト失敗・契約値逸脱・scope drift なし）
+
+================================================================
+WORK102-POST — Post-Implementation Contract / Scope / Freshness Audit
+（read-only / 2026-09-17）
+================================================================
+
+一次ソース: 再生成 ConvoPeq.md（Generated 2026-09-17 09:13:37）+ 現行 source tree
+方式      : IMPL の報告や記憶を根拠にせず、bundle から順序・値・意味を再導出
+
+Baseline
+--------
+HEAD / origin/main : 35461e2e（一致）
+NEWER_SRC_COUNT    : 0 / FRESH
+変更面             : CMakeLists.txt / AllpassDesigner.cpp /
+                     ConvolverProcessor.LoaderThread.cpp /
+                     PublishPipelineIntegrationTests.cpp（harness 登録のみ）+
+                     IRLoadAdmission.h（新規）+ IRLoadAdmissionTests.cpp（新規）+
+                     ConvoPeq.md（再生成）
+                     = IMPL の変更面と完全一致（unrelated change 0）
+
+契約追跡（bundle 内定数宣言から抽出）
+-------------------------------------
+kMaxIRLoadBytes             = 1073741824  OK
+kMaxIRLoadChannels          = 8u          OK
+kMaxFileLengthSamples       = 2147483647  OK
+kMaxIRResampleOutputSamples = 2097153     OK
+MAX_IR_LATENCY のコード上出現（irload namespace, コメント除去後） = 0 件 → 非統合 OK
+
+Admission ordering（bundle 行番号で機械再導出）
+----------------------------------------------
+FC-FORM-4(72945) → 4b(72950) → 3(72957) → 2(72964) → 1(72971)
+→ narrowing(72977) → FC-FORM-6 hash(72980) → chunk temp(72992)
+→ loadedIR(73000) → chunk read(73003)
+  strictly increasing : OK
+  最後の admission より前の hash / temp / loadedIR : 0 件 OK
+FC-FORM-5: shrinkToFit(73093) < FC-FORM-5(73104) < resampleIR(73121)
+  operand = trimmedLength（raw fileLength ではない）OK
+r8b (int) conversion(74615) は FC-FORM-5(73104) より後 OK
+
+算術
+----
+admitByteBudget : 除算形 / int64 denom / zero-divisor guard / 未検証値の乗算 0
+FC-FORM-3(72957) < int(fileLength) 初出(73000, 73012) OK
+channel narrowing(72977) は FC-FORM-2(72964) より後 OK
+admitResampleOutput : double 比較のみ / SR<=0 は vacuous OK
+
+XXH64 意味同一性（10 項目すべて OK）
+------------------------------------
+seed / prime1-5 / rotl(1,7,12,18) / merge×4 / h+=total_ /
+tail 8-4-1 / readLE(memcpy) / TOCTOU size+mtime / totalRead!=declaredSize /
+fileSize 比例確保 0 / 新規 cancellation API 0
+
+failure / cancellation
+-----------------------
+bad_alloc catch / std::exception / catch(...) / "IR too large (Out of Memory)" 維持
+chunk read → cancellation check → "IR loading cancelled." 維持
+旧 hash HeapBlock allocation failure 経路は消滅（意図どおり）
+
+preview boundary
+----------------
+ResampleAndFallback.cpp / ConvolverControlPanel.cpp : git status 無変更
+irload:: の出現 0 件（横展開なし）。preview = WORK102-PREV-01 = OPEN 維持
+
+scope / architecture drift（追加コード行）
+------------------------------------------
+atomic 0 / RT process-path 0 / Publish 0 / Crossfade 0 / Retire 0 / Epoch 0 /
+RuntimeWorld 0 / LifetimeBudget 0 / ISRShutdown 0 / MAX_IR_LATENCY 0 /
+DELAY_BUFFER_SIZE 0 / UI 0
+RT 追加: allocation 0 / lock 0 / wait 0
+
+test integrity
+--------------
+A–L: 6 check 関数 / oracle 13 長 / seed 独立固定 / E-F 境界（limit, limit+1,
+     INT32_MAX, INT32_MAX+1, 2097153 ちょうど/+1）/ G は FC-FORM-5 位置の回帰 /
+     J・K・I(ii) は構造検証として明示 / ConvReleaser による片付け
+
+Debug / Release 再検証（POST）
+------------------------------
+CTest Release : 40/40 PASS（Total 53.15 s / AudioEngineHarness 39.87 s）
+CTest Debug   : 40/40 PASS（Total 100.97 s / AudioEngineHarness 60.24 s）
+直接実行の WORK102 出力: 両構成で 6 チェック + IRLoadAdmissionTests すべて PASS
+Debug harness exit code = 0
+
+ConvoPeq.md freshness（必須条件）
+---------------------------------
+NEWER_SRC_COUNT = 0 / FRESH
+
+判定: POST-PASS（contract drift 0）
+残置（POST 条件ではない）: IS-7（2 GiB 最適化・未実施）/ WORK102-PREV-01（OPEN）/
+                          IG-1〜IG-3 countersign
+

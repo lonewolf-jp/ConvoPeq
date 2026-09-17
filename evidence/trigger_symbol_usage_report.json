@@ -1,6 +1,6 @@
 {
   "schema": "trigger_symbol_usage_report_v1",
-  "generatedAt": "2026-08-11T16:16:38.8312768+09:00",
+  "generatedAt": "2026-09-16T07:14:42.8840593+09:00",
   "allowlistPath": "C:\\VSC_Project\\ConvoPeq\\.github\\isr-trigger-symbol-allowlist.json",
   "totalMatches": 8,
   "blockedMatches": 0,

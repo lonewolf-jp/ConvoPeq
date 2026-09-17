@@ -1,0 +1,77 @@
+=== TIDY: src/convolver/ConvolverProcessor.ResampleAndFallback.cpp ===
+[1/1] (1/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.ResampleAndFallback.cpp.
+1 warning generated.
+[1/1] (2/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.ResampleAndFallback.cpp.
+4 warnings generated.
+[1/1] (3/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.ResampleAndFallback.cpp.
+5 warnings generated.
+[1/1] (4/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.ResampleAndFallback.cpp.
+5 warnings generated.
+[1/1] (5/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.ResampleAndFallback.cpp.
+5 warnings generated.
+[1/1] (6/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.ResampleAndFallback.cpp.
+5 warnings generated.
+Suppressed 5 warnings (5 with check filters).
+=== TIDY: src/convolver/ConvolverProcessor.StateAndUI.cpp ===
+[1/1] (1/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp.
+7 warnings generated.
+[1/1] (2/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp.
+16 warnings generated.
+[1/1] (3/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp.
+23 warnings generated.
+[1/1] (4/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp.
+29 warnings generated.
+[1/1] (5/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp.
+35 warnings generated.
+[1/1] (6/6) Processing file C:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp.
+41 warnings generated.
+[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:445:5: [0m[0;1;35mwarning: [0m[1mPotential leak of memory pointed to by 'newSnap' [clang-analyzer-cplusplus.NewDeleteLeaks][0m
+  445 |     auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で新 snapshot 公開[0m
+      | [0;1;32m    ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:431:9: [0m[0;1;36mnote: [0mAssuming the condition is false[0m
+  431 |     if (otherConv == nullptr)[0m
+      | [0;1;32m        ^~~~~~~~~~~~~~~~~~~~
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:431:5: [0m[0;1;36mnote: [0mTaking false branch[0m
+  431 |     if (otherConv == nullptr)[0m
+      | [0;1;32m    ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:435:5: [0m[0;1;36mnote: [0mTaking false branch[0m
+  435 |     if (clonedConv == nullptr)[0m
+      | [0;1;32m    ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:438:34: [0m[0;1;36mnote: [0m'?' condition is false[0m
+  438 |     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;[0m
+      | [0;1;32m                                 ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:440:9: [0m[0;1;36mnote: [0mAssuming 'oldConv' is null[0m
+  440 |     if (oldConv)[0m
+      | [0;1;32m        ^~~~~~~
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:440:5: [0m[0;1;36mnote: [0mTaking false branch[0m
+  440 |     if (oldConv)[0m
+      | [0;1;32m    ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:444:21: [0m[0;1;36mnote: [0mAssuming 'otherSnap' is non-null[0m
+  444 |     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();[0m
+      | [0;1;32m                    ^~~~~~~~~
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:444:21: [0m[0;1;36mnote: [0m'?' condition is true[0m
+[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:444:33: [0m[0;1;36mnote: [0mMemory is allocated[0m
+  444 |     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();[0m
+      | [0;1;32m                                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:445:5: [0m[0;1;36mnote: [0mPotential leak of memory pointed to by 'newSnap'[0m
+  445 |     auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で新 snapshot 公開[0m
+      | [0;1;32m    ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:798:5: [0m[0;1;35mwarning: [0m[1mPotential leak of memory pointed to by 'newSnap' [clang-analyzer-cplusplus.NewDeleteLeaks][0m
+  798 |     auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で新 snapshot 公開[0m
+      | [0;1;32m    ^
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:797:21: [0m[0;1;36mnote: [0mMemory is allocated[0m
+  797 |     auto* newSnap = new LatencySnapshot(snap);[0m
+      | [0;1;32m                    ^~~~~~~~~~~~~~~~~~~~~~~~~
+[0m[1mC:\VSC_Project\ConvoPeq\src\convolver\ConvolverProcessor.StateAndUI.cpp:798:5: [0m[0;1;36mnote: [0mPotential leak of memory pointed to by 'newSnap'[0m
+  798 |     auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で新 snapshot 公開[0m
+      | [0;1;32m    ^
+[0mSuppressed 23 warnings (12 in non-user code, 11 with check filters).
+Use -header-filter=.* or leave it as default to display errors from all non-system headers. Use -system-headers to display errors from system headers as well.
+=== TIDY: src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp ===
+[1/1] (1/3) Processing file C:\VSC_Project\ConvoPeq\src\tests\AudioEngineHarness\IRLoadAdmissionTests.cpp.
+1 warning generated.
+[1/1] (2/3) Processing file C:\VSC_Project\ConvoPeq\src\tests\AudioEngineHarness\IRLoadAdmissionTests.cpp.
+2 warnings generated.
+[1/1] (3/3) Processing file C:\VSC_Project\ConvoPeq\src\tests\AudioEngineHarness\IRLoadAdmissionTests.cpp.
+3 warnings generated.
+Suppressed 3 warnings (3 with check filters).

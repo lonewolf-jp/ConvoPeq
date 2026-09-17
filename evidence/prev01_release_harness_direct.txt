@@ -1,0 +1,117 @@
+[I2T] T-I2-3: enter
+[I2T] T-I2-3: started
+[I2T] T-I2-3: gotWorld=1
+[H01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[H01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[H01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[H01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[H01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[H01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[H01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[H01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[H01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[H01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[H01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[H01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[SR01log] [SR-02] L0 parts 32->180 (coverage 120.0 ms)
+[SR01log] [B13-GATE] L1: P=4096 o_L=92160 lead=7168 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 96768 >= need 93184)=OK
+[SR01log] [B13-GATE] L2: P=32768 o_L=354304 lead=59392 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 387584 >= need 360448)=OK
+[SR01log] [SR-02] L0 parts 32->180 (coverage 120.0 ms)
+[SR01log] [B13-GATE] L1: P=4096 o_L=92160 lead=7168 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 96768 >= need 93184)=OK
+[SR01log] [B13-GATE] L2: P=32768 o_L=354304 lead=59392 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 387584 >= need 360448)=OK
+[SR01log] [SR-01] IR length request 3.000 s @ 768000.0 Hz exceeds MAX_IR_LATENCY (2097152 samples); tail trimmed to hard max
+[SR01log] [SR-02] L0 parts 32->180 (coverage 120.0 ms)
+[SR01log] [B13-GATE] L1: P=4096 o_L=92160 lead=7168 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 96768 >= need 93184)=OK
+[SR01log] [B13-GATE] L2: P=32768 o_L=354304 lead=59392 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 387584 >= need 360448)=OK
+[SR01log] [SR-02] L0 parts 32->180 (coverage 120.0 ms)
+[SR01log] [B13-GATE] L1: P=4096 o_L=92160 lead=7168 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 96768 >= need 93184)=OK
+[SR01log] [B13-GATE] L2: P=32768 o_L=354304 lead=59392 | I2(lead<=oL-B)=OK I2g(2P-B<=oL)=OK I5(align)=OK I3(cap 387584 >= need 360448)=OK
+[SR01log] [B13-GATE] L1: P=4096 o_L=5632 lead=7168 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10240 >= need 6656)=OK
+[SR01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[SR01log] [B13-GATE] L1: P=4096 o_L=5632 lead=7168 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10240 >= need 6656)=OK
+[SR01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[SR01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6656 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 7680)=OK
+[SR01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[SR01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6656 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 7680)=OK
+[SR01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[SR01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[SR01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[SR01log] [B13-GATE] L1: P=4096 o_L=6144 lead=6144 | I2(lead<=oL-B)=NG I2g(2P-B<=oL)=NG I5(align)=OK I3(cap 10752 >= need 8192)=OK
+[SR01log] [B13-GATE][NG] structural invariant violated - see Repair Design Â§8
+[M03] === T-M03-1 measurement (48k block=512 IR=4800) ===
+[M03] OFF/d  peak@10   arrival=10     delta=0      | F reported algo=512 irPeak=10 total=522 directActive=0 | irLen=48000
+[M03] ON/d   peak@10   arrival=10     delta=0      | F reported algo=0 irPeak=10 total=10 directActive=1 | irLen=48000
+[M03] OFF/f  peak@600  arrival=600    delta=0      | F reported algo=512 irPeak=600 total=1112 directActive=0 | irLen=48000
+[M03] ON/f   peak@600  arrival=600    delta=0      | F reported algo=0 irPeak=600 total=600 directActive=1 | irLen=48000
+[M03] === T-M03-1 measurement end (values only; no assertion) ===
+[M03-2] === T-M03-2 HC/LC boundary measurement (48k block=512 IR=4800) ===
+[M03-2] direct ON = IR taps 0..31 raw (bypasses HC/LC); OFF = FFT path (filtered)
+[M03-2] OFF HC=Sharp   LC=Natural peak@10   | arrival=10    amp=0.494371 spread=5
+[M03-2] ON  HC=Sharp   LC=Natural peak@10   | arrival=10    amp=0.500002 spread=1
+[M03-2] OFF HC=Sharp   LC=Natural peak@600  | arrival=600   amp=0.494371 spread=5
+[M03-2] ON  HC=Sharp   LC=Natural peak@600  | arrival=600   amp=0.494371 spread=5
+[M03-2] OFF HC=Sharp   LC=Soft    peak@10   | arrival=10    amp=0.494371 spread=5
+[M03-2] ON  HC=Sharp   LC=Soft    peak@10   | arrival=10    amp=0.500002 spread=1
+[M03-2] OFF HC=Sharp   LC=Soft    peak@600  | arrival=600   amp=0.494371 spread=5
+[M03-2] ON  HC=Sharp   LC=Soft    peak@600  | arrival=600   amp=0.494371 spread=5
+[M03-2] OFF HC=Soft    LC=Natural peak@10   | arrival=10    amp=0.426011 spread=17
+[M03-2] ON  HC=Soft    LC=Natural peak@10   | arrival=10    amp=0.500002 spread=1
+[M03-2] OFF HC=Soft    LC=Natural peak@600  | arrival=600   amp=0.426011 spread=17
+[M03-2] ON  HC=Soft    LC=Natural peak@600  | arrival=600   amp=0.426011 spread=17
+[M03-2] OFF HC=Soft    LC=Soft    peak@10   | arrival=10    amp=0.426011 spread=17
+[M03-2] ON  HC=Soft    LC=Soft    peak@10   | arrival=10    amp=0.500002 spread=1
+[M03-2] OFF HC=Soft    LC=Soft    peak@600  | arrival=600   amp=0.426011 spread=17
+[M03-2] ON  HC=Soft    LC=Soft    peak@600  | arrival=600   amp=0.426011 spread=17
+[M03-2] === T-M03-2 end (values only; no assertion) ===
+[I2T] phase1: first prepareToPlay
+[I2T] phase1 ok: slot=00000295E54EE080
+[I2T] phase2: releaseResources (admission closed)
+[I2T] phase2 ok: releaseResources done
+[I2T] phase3 ok: second prepareToPlay done
+[I2T] phase3 ok: slot is null (repair verified)
+[I2T] phase3 ok: slot is null (repair verified)
+[I2T] phase4: abandon engine (pre-existing Debug segfault route, I3 issue)
+[I2T] phase4 ok: engine abandoned (T-I2-1 complete)
+  [PASS] X2: publish completion monotonicity (contiguous FIFO, 8 publishes)
+  [PASS] D167: reconfigure keeps admission operational
+  [PASS] D167-5: Suppressed(AdmissionClosed) telemetry accounting
+  [PASS] D169-2-5: duplicate-prepare collapse is a true no-op
+  [PASS] D169-2-6: 50 device-restart collapse cycles OK
+INFO: Deferred->hasDeferred==true->Ready->consume->finishView->drain proved
+INFO: 2x deferred cycles drained (no slot/ownership leak)
+DeferredFlowIntegrationTests: PASS
+DeferredPublishViewStateMachineTests: PASS
+ConvolverStateRoundTripTests: PASS (AC-A1-1/2/3)
+checkInputTransformUnalignedDst: PASS (AC-A2-1/2)
+checkH02T1ExpPeakSample0: PASS (T1)
+checkH02T2MultiChannel: PASS (T2)
+checkH02T3TieBreakLowestIndex: PASS (T3)
+checkH02T4NonFiniteAndBoundaries: PASS (T4)
+checkSR03LatencyDelayClamp: PASS (T-SR03-1..6)
+checkH01DryWetAlignment: PASS (T-H01-1..6: algo=512, wet=5220 dry=5220 mix50=5220 bypass=5220, retarget wet=5320, directHead ok)
+checkSR01HardMaxFormula: PASS (44.1k..768k + constants pinned)
+checkSR01SetterClamp: PASS (768k hardMax / 48k unchanged / lower 0.5)
+checkSR01SnapshotClamp: PASS (C-1: 768k clamp / 48k unchanged)
+checkSR01Load768k3s: PASS (4a: irLen=2097151, no cap log, breakdown intact)
+checkSR01CapFiredLog: PASS (4b: irLen=2097152, [SR-01] trim log fired)
+checkSR01LowRateRegression: PASS (44.1k=132300 / 48k=144000, no cap log)
+checkSR01StateCompatibility: PASS (persist window / hardMax on restore / no lift)
+checkSR01LoadFailureKeepsEngine: PASS (SilentIR rejected, old engine intact)
+checkSR01MonoDuplication: PASS (L/R argmax == 5220 == impulse+peak)
+checkM04OversizedContainment: PASS (T-M04-1..5: silence+telemetry / bit-identical recovery / bypass gate / reporter / == boundary not gated)
+checkM02NonFiniteTelemetry: PASS (T-M02-1..5: load-clean baseline / burst->fired / drain finiteness+bounded aging recovery / reporter hysteresis / no false fire)
+checkM01DenormalHygiene: PASS (T-M01-1: primitive contract + subnormal-injection invariant lock / T-M01-2: clean long-run invariant)
+[WORK102] checkEFPredicateBoundaries: PASS
+[WORK102] checkStreamingHashMatchesReference: PASS (13 sizes, one-shot oracle)
+[WORK102] checkChannelAdmissionRuntime: PASS (1/2/8ch accept, 9ch reject)
+[WORK102] checkResampleBoundUsesTrimmedLength: PASS (raw 50s -> trim -> accept)
+[WORK102] checkResampleBoundRejectsOversized: PASS (3s@44.1k -> 768k reject)
+[WORK102] checkResamplePathAccepted: PASS (44.1k -> 48k resample accept)
+IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L)
+[PREV01] checkPreviewChannelAdmission: PASS (1/2/8ch accept, 9ch reject)
+[PREV01] checkPreviewChunkedReadEquivalence: PASS (300k samples, 2 chunks)
+[PREV01] checkPreviewResampleBoundUsesTrimmedLength: PASS (raw 50s -> trim -> accept)
+[PREV01] checkPreviewResampleBoundRejectsOversized: PASS (3s@44.1k -> 768k reject)
+[PREV01] checkPreviewFailureCompletion: PASS (missing/garbage -> failed preview)
+IRLoadPreviewAdmissionTests: PASS (PREV-01 PA/PB/PC/PD/PE)
+AudioEngineHarness: all publish pipeline tests PASS

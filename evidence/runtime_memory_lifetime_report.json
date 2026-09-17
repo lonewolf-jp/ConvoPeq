@@ -1,8 +1,10 @@
-{
-  "schema": "runtime_memory_lifetime_report_v1",
-  "generatedAt": "2026-08-11T16:17:55.7407268+09:00",
-  "serializationContract": "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtimeworld_serialization_contract.md",
-  "snapshotSchema": "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtimeworld_snapshot_schema.md",
-  "violations": [],
-  "ready": true
+﻿{
+    "schema":  "runtime_memory_lifetime_report_v1",
+    "generatedAt":  "2026-09-16T07:16:06.3830921+09:00",
+    "serializationContract":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtimeworld_serialization_contract.md",
+    "snapshotSchema":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtimeworld_snapshot_schema.md",
+    "violations":  [
+
+                   ],
+    "ready":  true
 }

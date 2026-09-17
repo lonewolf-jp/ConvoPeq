@@ -99,6 +99,8 @@ build-t1-test/
 .x64dbg-mcp/
 .zcode/
 .rtk/
+.auto/
+.tgrep/
 nul
 
 # Coverage reports

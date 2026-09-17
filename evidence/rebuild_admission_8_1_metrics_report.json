@@ -1,110 +1,218 @@
-{
-  "schema": "rebuild_admission_8_1_metrics_report_v1",
-  "generatedAt": "2026-08-11T16:16:41.4995879+09:00",
-  "status": "skipped",
-  "reason": "log_not_found",
-  "log": "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
-  "readyToClose8_1": false,
-  "metrics": {},
-  "evaluation": {},
-  "guidance": {
-    "taskHints": [
-      {
-        "label": "Release",
-        "group": "@{kind=build; isDefault=True}"
-      },
-      {
-        "label": "Debug",
-        "group": ""
-      },
-      {
-        "label": "Release (icx)",
-        "group": "build"
-      },
-      {
-        "label": "Debug (icx)",
-        "group": "build"
-      },
-      {
-        "label": "Debug Build (cmd env)",
-        "group": "build"
-      },
-      {
-        "label": "Release Build (cmd env retry)",
-        "group": "build"
-      },
-      {
-        "label": "Debug Build (cmd env retry)",
-        "group": "build"
-      },
-      {
-        "label": "Release Build With PDB",
-        "group": "build"
-      },
-      {
-        "label": "Debug Build + Test",
-        "group": "build"
-      },
-      {
-        "label": "Debug Build Test",
-        "group": "build"
-      },
-      {
-        "label": "Debug Build ConvoPeq",
-        "group": "build"
-      },
-      {
-        "label": "Debug Build + CTest",
-        "group": "test"
-      },
-      {
-        "label": "Final Audit Build",
-        "group": "build"
-      }
-    ],
-    "executableHints": [
-      {
-        "path": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
-        "lastWrite": "2026-08-11 16:12:41"
-      },
-      {
-        "path": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
-        "lastWrite": "2026-08-11 13:44:36"
-      }
-    ],
-    "logHints": [
-      {
-        "path": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.log",
-        "exists": false
-      },
-      {
-        "path": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log",
-        "exists": false
-      }
-    ],
-    "resolvedLogPath": "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
-    "captureCommands": [
-      {
-        "mode": "launch",
-        "executablePath": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
-        "command": "& 'C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe'",
-        "expectedLog": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.log"
-      },
-      {
-        "mode": "launch",
-        "executablePath": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
-        "command": "& 'C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe'",
-        "expectedLog": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log"
-      }
-    ],
-    "suggestedAction": "Run one of the detected Release/Debug build tasks, launch ConvoPeq.exe once to emit logs, then rerun isr-rebuild-admission-8_1-metrics.ps1."
-  },
-  "autoCapture": {
-    "attempted": false,
-    "timeoutSec": 20,
-    "success": false,
-    "attemptedCommand": null,
-    "producedLogPath": "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
-    "reason": "not_requested"
-  }
+﻿{
+    "schema":  "rebuild_admission_8_1_metrics_report_v1",
+    "generatedAt":  "2026-09-16T07:14:45.8792783+09:00",
+    "status":  "skipped",
+    "reason":  "log_not_found",
+    "log":  "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
+    "readyToClose8_1":  false,
+    "metrics":  {
+
+                },
+    "evaluation":  {
+
+                   },
+    "guidance":  {
+                     "captureCommands":  [
+                                             {
+                                                 "mode":  "launch",
+                                                 "executablePath":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
+                                                 "command":  "\u0026 \u0027C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe\u0027",
+                                                 "expectedLog":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.log"
+                                             },
+                                             {
+                                                 "mode":  "launch",
+                                                 "executablePath":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
+                                                 "command":  "\u0026 \u0027C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe\u0027",
+                                                 "expectedLog":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log"
+                                             }
+                                         ],
+                     "taskHints":  [
+                                       {
+                                           "label":  "Release",
+                                           "group":  "@{kind=build; isDefault=True}"
+                                       },
+                                       {
+                                           "label":  "Debug",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Release (icx)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug (icx)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build (cmd env)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Release Build (cmd env retry)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build (cmd env retry)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Release Build With PDB",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build + Test",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build Test",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build ConvoPeq",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build + CTest",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Final Audit Build",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Build + Run RetireGraceTests",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run RetireGraceTests",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run RetireGrace",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain v2",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain v3",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Build + Run ShutdownRetireIntentDrain v4",
+                                           "group":  "test"
+                                       },
+                                       {
+                                           "label":  "Repair build Debug harness",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Repair MSVC build Debug",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Rebuild build-icx harness",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Rebuild harness icx Debug",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "CTest Debug Full After Wiring",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Release Build D101-25",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Release Build Only D101-25",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Release Build Full",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Release CTest 37-37 D101-25",
+                                           "group":  ""
+                                       },
+                                       {
+                                           "label":  "Debug Build (retry)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "CMake Reconfigure icx (build)",
+                                           "group":  "build"
+                                       },
+                                       {
+                                           "label":  "Debug Build (icx)",
+                                           "group":  "build"
+                                       }
+                                   ],
+                     "logHints":  [
+                                      {
+                                          "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.log",
+                                          "exists":  false
+                                      },
+                                      {
+                                          "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log",
+                                          "exists":  false
+                                      }
+                                  ],
+                     "resolvedLogPath":  "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
+                     "suggestedAction":  "Run one of the detected Release/Debug build tasks, launch ConvoPeq.exe once to emit logs, then rerun isr-rebuild-admission-8_1-metrics.ps1.",
+                     "executableHints":  [
+                                             {
+                                                 "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
+                                                 "lastWrite":  "2026-09-16 00:53:08"
+                                             },
+                                             {
+                                                 "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
+                                                 "lastWrite":  "2026-09-16 00:50:14"
+                                             }
+                                         ]
+                 },
+    "autoCapture":  {
+                        "success":  false,
+                        "reason":  "not_requested",
+                        "timeoutSec":  20,
+                        "attempted":  false,
+                        "producedLogPath":  "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
+                        "attemptedCommand":  null
+                    }
 }

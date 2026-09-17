@@ -35,7 +35,9 @@ ConvoPeq v0.6.10 is built with JUCE 8.0.12 and is designed for low-latency, real
 | **MSVC Release** | `/arch:AVX2` (target-local) | `/fp:precise` (MSVC default — `fp:fast` removed in work92) | **Supported** — standard AVX2 codegen (AMD Ryzen 全対応) |
 | **MSVC Debug** | baseline ISA | — | **Supported** |
 | **icx Release** | `/QxCORE-AVX2` (Release + CXX only, target-local) | `/fp:fast` (intentional — LLVM OOM workaround, see CMakeLists) | **Unsupported (not officially tested)** — representative DSP loops verified to stay within the AVX2 subset (no Intel-only instructions such as vpcompressd/zmm/gather/kmov; G6 audit 2026-09-09), but full-binary AMD compatibility is not guaranteed. Execution may work, but is not a supported configuration. |
-| **icx Debug** | baseline ISA | — | Unsupported (same as above) |
+| **icx Debug / RWDI** | *no build support* | — | **Not supported — does not compile.** `/QxCORE-AVX2` is config-gated to Release (work92 C-8) while AVX2 intrinsics remain unguarded in 16+ non-test sources (e.g. `AudioEngine.EQResponse.cpp` `_mm256_*`), so clang-based icx hard-errors (`always_inline ... requires target feature 'avx'`). E-G3-1 pre-audit 2026-09-13: `.auto/rb/eg3_1_icx_debug_avx_preaudit_20260913.md`. Debug acceptance is provided by MSVC `build/` (40/40 CTest). |
+
+> **Policy (E-G3-1, option a — accepted 2026-09-13):** the icx ConvoPeq build is **officially supported for Release only**. Do not attempt `build.bat Debug icx` / RelWithDebInfo under icx; if Debug-level icx verification is ever required, it is a separate work item that must first resolve the config-gate vs unguarded-intrinsic inconsistency (options b/c in the E-G3-1 audit).
 
 ---
 
@@ -328,8 +330,8 @@ For full instructions including PGO, icx compiler flags, CTest suite, ASan, and 
 ```cmd
 build.bat Release              # MSVC Release (default)
 build.bat Debug                # MSVC Debug
-build.bat Release icx          # Intel icx Release
-build.bat Debug   icx          # Intel icx Debug
+build.bat Release icx          # Intel icx Release (icx: Release only supported — see support matrix)
+# build.bat Debug icx          # NOT SUPPORTED — icx Debug cannot compile (E-G3-1); use MSVC Debug
 build.bat Release clean        # Clean + build
 build.bat Release pgo-gen      # MSVC PGO instrumentation
 build.bat Release pgo-use     # MSVC PGO optimization
@@ -351,7 +353,7 @@ What `build.bat` does:
 |----------|-----------|--------|
 | MSVC Debug | `build/` | `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe` |
 | MSVC Release | `build/` | `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` |
-| icx Debug | `build-icx/` | `build-icx\ConvoPeq_artefacts\Debug\ConvoPeq.exe` |
+| icx Debug / RWDI | `build-icx/` | N/A — not supported (Release only; see support matrix) |
 | icx Release | `build-icx/` | `build-icx\ConvoPeq_artefacts\Release\ConvoPeq.exe` |
 
 MSVC and icx use **completely separate build directories** — both can be kept simultaneously.

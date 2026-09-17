@@ -1,0 +1,6 @@
+=== RT safety: raw atomic dot-call scan ===
+Strict atomic dot-call scan passed (src/**/*.h,*.hpp,*.cpp,*.cxx,*.cc).
+=== cppcheck (final 3 files) ===
+CPPCHECK_DONE
+=== clang-tidy (Runtime only, changed TU) ===
+TIDY_DONE=0

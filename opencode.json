@@ -17,6 +17,30 @@
       "type": "local",
       "command": ["node", "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"],
       "enabled": true
+    },
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "enabled": true,
+      "headers": {
+        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+      }
+    },
+    "firecrawl": {
+      "type": "local",
+      "command": ["npx", "-y", "firecrawl-mcp"],
+      "enabled": true,
+      "environment": {
+        "FIRECRAWL_API_KEY": "{env:FIRECRAWL_API_KEY}"
+      }
+    },
+    "brave": {
+      "type": "local",
+      "command": ["npx", "-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
+      "enabled": true,
+      "environment": {
+        "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
+      }
     }
   }
 }

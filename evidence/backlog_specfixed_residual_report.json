@@ -6,7 +6,7 @@
     "totalRStatusCount":  0,
     "specFixedResidualCount":  0,
     "promotableResidualCount":  0,
-    "generatedAt":  "2026-08-14T23:20:50.8081944+09:00",
-    "enforceNoSpecFixed":  false,
+    "generatedAt":  "2026-09-16T07:14:47.7536408+09:00",
+    "enforceNoSpecFixed":  true,
     "backlogPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work\\ISR_Completeness_Risk_Backlog.md"
 }

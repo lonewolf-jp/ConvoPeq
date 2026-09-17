@@ -1,7 +1,9 @@
-{
-  "schema": "authority_classification_rule_report_v1",
-  "generatedAt": "2026-08-11T16:16:29.9988704+09:00",
-  "total": 12,
-  "violations": [],
-  "ready": true
+﻿{
+    "schema":  "authority_classification_rule_report_v1",
+    "generatedAt":  "2026-09-16T07:14:29.9560219+09:00",
+    "total":  12,
+    "violations":  [
+
+                   ],
+    "ready":  true
 }

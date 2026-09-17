@@ -1,7 +1,9 @@
-{
-  "schema": "runtime_recovery_semantic_report_v1",
-  "generatedAt": "2026-08-11T16:17:55.7510451+09:00",
-  "contractPath": "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtime_recovery_semantic.md",
-  "violations": [],
-  "ready": true
+﻿{
+    "schema":  "runtime_recovery_semantic_report_v1",
+    "generatedAt":  "2026-09-16T07:16:06.3977005+09:00",
+    "contractPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtime_recovery_semantic.md",
+    "violations":  [
+
+                   ],
+    "ready":  true
 }

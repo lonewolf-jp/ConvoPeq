@@ -1,0 +1,54 @@
+=== M-01 final verification ledger 2026-09-16 01:10 ===
+--- full chain (Release build + ctest, Debug build + ctest) ---
+=== Release full build ===
+REL_BUILD_EXIT=0
+=== Release ctest full ===
+100% tests passed out of 40
+REL_CTEST_EXIT=0
+=== Debug full build ===
+DBG_BUILD_EXIT=0
+=== Debug ctest full ===
+100% tests passed out of 40
+DBG_CTEST_EXIT=0
+=== m01 full chain end ===
+--- stability ---
+Release x2 exit=0 / Debug x2 exit=0
+--- verifiers/static ---
+=== RT safety: raw atomic dot-call scan ===
+Strict atomic dot-call scan passed (src/**/*.h,*.hpp,*.cpp,*.cxx,*.cc).
+=== semantic-hash-drift verifier (T-M01-4) ===
+[INFO] report: C:\VSC_Project\ConvoPeq\evidence\semantic_hash_drift_report.json
+[PASS] semantic hash drift verification passed
+exit=0
+=== deterministic-build verifier ===
+[INFO] DeterministicBuildVerifier evidence written: C:\VSC_Project\ConvoPeq\evidence\isr_deterministic_build_report.json
+[PASS] DeterministicBuildVerifier contract verification passed
+exit=0
+=== semantic-equivalence verifier ===
+[INFO] All 8 hash dimensions confirmed in RuntimeSemanticHash
+[INFO] SemanticEquivalenceVerifier evidence written: C:\VSC_Project\ConvoPeq\evidence\isr_semantic_equivalence_report.json
+[PASS] SemanticEquivalenceVerifier contract verification passed
+exit=0
+=== cppcheck (M-01 changed files) ===
+CPPCHECK_EXIT=0
+=== clang-tidy (M-01 NUC production file) ===
+12 warnings generated.
+[1/1] (8/9) Processing file C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp.
+13 warnings generated.
+[1/1] (9/9) Processing file C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp.
+14 warnings generated.
+C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp:658:5: warning: repeated branch body in conditional chain [bugprone-branch-clone]
+  658 |     {
+      |     ^
+C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp:662:6: note: end of the original
+  662 |     }
+      |      ^
+C:\VSC_Project\ConvoPeq\src\MKLNonUniformConvolver.cpp:686:5: note: clone 1 starts here
+  686 |     {
+      |     ^
+Suppressed 5 warnings (5 with check filters).
+TIDY_EXIT=0
+--- ConvoPeq freshness (post-normalization) ---
+baseline Generated : 2026-09-16 01:00:43  (ConvoPeq.md)
+NEWER_SRC_COUNT    : 0
+STATUS             : FRESH — snapshot は現行ソースを反映しています
