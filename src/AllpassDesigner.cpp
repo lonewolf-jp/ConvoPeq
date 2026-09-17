@@ -139,71 +139,125 @@ inline uint64_t xxh64Avalanche(uint64_t h) noexcept
     return h;
 }
 
-inline uint64_t xxh64Digest(const uint8_t* data, size_t len, uint64_t seed) noexcept
+constexpr uint64_t kXxh64Prime1 = 11400714785074694791ull;
+constexpr uint64_t kXxh64Prime2 = 14029467366897019727ull;
+constexpr uint64_t kXxh64Prime3 = 1609587929392839161ull;
+constexpr uint64_t kXxh64Prime4 = 9650029242287828579ull;
+constexpr uint64_t kXxh64Prime5 = 2870177450012600261ull;
+
+// ★ WORK102 (FC-8 / FC-FORM-6): O(1) メモリのストリーミング XXH64。
+//   旧実装は computeIRHash 側がファイル全体を HeapBlock<uint8_t> へ読み込んでから
+//   one-shot ダイジェストを計算していた（＝物理ファイルサイズ比例の確保。確保失敗時は
+//   未検査 nullptr へ memcpy する経路があった）。本クラスは同一規格の逐次実装であり、
+//   全入力について旧 one-shot 実装と同一の digest を返す。
+//   補助メモリ = 32 B のステージングバッファ + アキュムレータ（定数）。
+class Xxh64Stream
 {
-    constexpr uint64_t kPrime1 = 11400714785074694791ull;
-    constexpr uint64_t kPrime2 = 14029467366897019727ull;
-    constexpr uint64_t kPrime3 = 1609587929392839161ull;
-    constexpr uint64_t kPrime4 = 9650029242287828579ull;
-    constexpr uint64_t kPrime5 = 2870177450012600261ull;
+public:
+    explicit Xxh64Stream(uint64_t seed) noexcept
+        : v1_(seed + kXxh64Prime1 + kXxh64Prime2)
+        , v2_(seed + kXxh64Prime2)
+        , v3_(seed)
+        , v4_(seed - kXxh64Prime1)
+        , seed_(seed)
+    {}
 
-    const uint8_t* p = data;
-    const uint8_t* end = data + len;
-    uint64_t h = 0;
-
-    if (len >= 32)
+    void update(const uint8_t* data, size_t len) noexcept
     {
-        uint64_t v1 = seed + kPrime1 + kPrime2;
-        uint64_t v2 = seed + kPrime2;
-        uint64_t v3 = seed + 0;
-        uint64_t v4 = seed - kPrime1;
+        total_ += static_cast<uint64_t>(len);
 
-        const uint8_t* limit = end - 32;
-        do
+        if (bufLen_ + len < sizeof(buf_))
         {
-            v1 = xxh64Round(v1, readLE64(p)); p += 8;
-            v2 = xxh64Round(v2, readLE64(p)); p += 8;
-            v3 = xxh64Round(v3, readLE64(p)); p += 8;
-            v4 = xxh64Round(v4, readLE64(p)); p += 8;
-        } while (p <= limit);
+            std::memcpy(buf_ + bufLen_, data, len);
+            bufLen_ += len;
+            return;
+        }
 
-        h = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18);
-        h = xxh64MergeRound(h, v1);
-        h = xxh64MergeRound(h, v2);
-        h = xxh64MergeRound(h, v3);
-        h = xxh64MergeRound(h, v4);
+        size_t i = 0;
+        if (bufLen_ > 0)
+        {
+            const size_t fill = sizeof(buf_) - bufLen_;
+            std::memcpy(buf_ + bufLen_, data, fill);
+            processStripe(buf_);
+            i = fill;
+            bufLen_ = 0;
+        }
+
+        for (; i + sizeof(buf_) <= len; i += sizeof(buf_))
+            processStripe(data + i);
+
+        const size_t rest = len - i;
+        if (rest > 0)
+        {
+            std::memcpy(buf_, data + i, rest);
+            bufLen_ = rest;
+        }
     }
-    else
+
+    [[nodiscard]] uint64_t digest() const noexcept
     {
-        h = seed + kPrime5;
+        uint64_t h = 0;
+
+        if (total_ >= sizeof(buf_))
+        {
+            h = rotl64(v1_, 1) + rotl64(v2_, 7) + rotl64(v3_, 12) + rotl64(v4_, 18);
+            h = xxh64MergeRound(h, v1_);
+            h = xxh64MergeRound(h, v2_);
+            h = xxh64MergeRound(h, v3_);
+            h = xxh64MergeRound(h, v4_);
+        }
+        else
+        {
+            h = seed_ + kXxh64Prime5;
+        }
+
+        h += total_;
+
+        const uint8_t* p = buf_;
+        const uint8_t* end = buf_ + bufLen_;
+
+        while ((p + 8) <= end)
+        {
+            h ^= xxh64Round(0, readLE64(p));
+            h = rotl64(h, 27) * kXxh64Prime1 + kXxh64Prime4;
+            p += 8;
+        }
+
+        if ((p + 4) <= end)
+        {
+            h ^= static_cast<uint64_t>(readLE32(p)) * kXxh64Prime1;
+            h = rotl64(h, 23) * kXxh64Prime2 + kXxh64Prime3;
+            p += 4;
+        }
+
+        while (p < end)
+        {
+            h ^= static_cast<uint64_t>(*p) * kXxh64Prime5;
+            h = rotl64(h, 11) * kXxh64Prime1;
+            ++p;
+        }
+
+        return xxh64Avalanche(h);
     }
 
-    h += static_cast<uint64_t>(len);
-
-    while ((p + 8) <= end)
+private:
+    void processStripe(const uint8_t* p) noexcept
     {
-        const uint64_t k1 = xxh64Round(0, readLE64(p));
-        h ^= k1;
-        h = rotl64(h, 27) * kPrime1 + kPrime4;
-        p += 8;
+        v1_ = xxh64Round(v1_, readLE64(p)); p += 8;
+        v2_ = xxh64Round(v2_, readLE64(p)); p += 8;
+        v3_ = xxh64Round(v3_, readLE64(p)); p += 8;
+        v4_ = xxh64Round(v4_, readLE64(p));
     }
 
-    if ((p + 4) <= end)
-    {
-        h ^= static_cast<uint64_t>(readLE32(p)) * kPrime1;
-        h = rotl64(h, 23) * kPrime2 + kPrime3;
-        p += 4;
-    }
-
-    while (p < end)
-    {
-        h ^= static_cast<uint64_t>(*p) * kPrime5;
-        h = rotl64(h, 11) * kPrime1;
-        ++p;
-    }
-
-    return xxh64Avalanche(h);
-}
+    uint64_t v1_;
+    uint64_t v2_;
+    uint64_t v3_;
+    uint64_t v4_;
+    uint64_t seed_;
+    uint64_t total_ = 0;
+    uint8_t buf_[32] {};
+    size_t bufLen_ = 0;
+};
 
 } // namespace
 
@@ -622,13 +676,18 @@ uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*
         return 0;
 
     // xxHash64 でファイル全体を計算し、TOCTOU は before/after 検証で防止する。
+    // ★ WORK102 (FC-8 / FC-FORM-6): 物理ファイルサイズ比例の確保を行わない。
+    //   旧実装は HeapBlock<uint8_t> を fileSize 分 malloc し、失敗時は（HeapBlock の既定
+    //   throwOnFailure=false により）nullptr のまま memcpy して AV に至る経路があった。
+    //   逐次 hash 化により補助メモリは Xxh64Stream の定数分（32 B + アキュムレータ）のみ。
+    //   TOCTOU 保証は従来どおり size+mtime 検証が担う（buffer はスナップショット用途のみで、
+    //   ストリーミングでも同一の digest が得られるため挙動等価）。
     constexpr uint64_t kHashVersionSalt = 0x434f4e564f504551ull; // "CONVOPEQ"
-    juce::HeapBlock<uint8_t> fileData;
-    const size_t fileSize = static_cast<size_t>(juce::jmax<int64>(0, sizeBefore));
-    if (fileSize > 0)
-        fileData.malloc(fileSize);
+    Xxh64Stream hasher(kHashVersionSalt);
 
-    size_t writePos = 0;
+    const uint64_t declaredSize = static_cast<uint64_t>(juce::jmax<int64>(0, sizeBefore));
+
+    uint64_t totalRead = 0;
     uint8_t tempBuffer[4096];
     for (;;)
     {
@@ -636,18 +695,18 @@ uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*
         if (bytesRead <= 0)
             break;
 
-        const size_t bytes = static_cast<size_t>(bytesRead);
-        if (writePos + bytes > fileSize)
-            return 0;
-        if (bytes > 0)
-            std::memcpy(fileData.getData() + writePos, tempBuffer, bytes);
-        writePos += bytes;
+        const uint64_t bytes = static_cast<uint64_t>(bytesRead);
+        totalRead += bytes;
+        if (totalRead > declaredSize)
+            return 0; // 旧実装の writePos + bytes > fileSize と同値の早期終了
+
+        hasher.update(tempBuffer, static_cast<size_t>(bytesRead));
     }
 
     if (stream->getStatus().failed())
         return 0;
 
-    if (writePos != fileSize)
+    if (totalRead != declaredSize)
         return 0;
 
     const auto sizeAfter = irFile.getSize();
@@ -655,8 +714,7 @@ uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*
     if (sizeBefore != sizeAfter || mtimeBefore != mtimeAfter)
         return 0;
 
-    const uint64_t hash = xxh64Digest(fileData.getData(), fileSize, kHashVersionSalt);
-    return hash;
+    return hasher.digest();
 }
 
 } // namespace convo

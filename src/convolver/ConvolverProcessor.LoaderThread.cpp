@@ -2,6 +2,7 @@
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
+#include "convolver/IRLoadAdmission.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
 
@@ -360,8 +361,6 @@ bool ConvolverProcessor::LoaderThread::stepOnce()
 bool ConvolverProcessor::LoaderThread::doLoadIRStep()
 {
     stepFileHash = 0;
-    if (!isRebuild && file.existsAsFile())
-        stepFileHash = convo::AllpassDesigner::computeIRHash(file);
 
     if (isRebuild)
     {
@@ -386,20 +385,50 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
             return false;
         }
 
+        // ★ WORK102 (big 1-8) FC-INV-9 admission ordering:
+        //   FC-FORM-4 → 3 → 2 → 1 → [確保開始] → FC-FORM-6(hash) → … → FC-FORM-5(trim 後)。
+        //   ここまで O(fileLength) / O(file bytes) の確保は 0 件。
+        //   契約の正本: doc/work102/big18_failure_contract_arbitration_20260917.md（R2 凍結）。
         const int64 fileLength = reader->lengthInSamples;
-        const int numChannels = static_cast<int>(reader->numChannels);
-        static constexpr int64 MAX_FILE_LENGTH = 2147483647;
+        const unsigned rawChannels = reader->numChannels; // narrowing 前の unsigned で判定（IG §4.4）
 
-        if (fileLength > MAX_FILE_LENGTH)
+        // FC-FORM-4: degenerate input bound
+        if (!convo::irload::admitChannelCountNonZero(rawChannels))
         {
-            stepResult.errorMessage = "IR file is too large (exceeds 2GB samples limit).";
+            stepResult.errorMessage = convo::irload::diagnosticChannelLimit(rawChannels);
             return false;
         }
-        if (numChannels <= 0)
+        if (!convo::irload::admitFileLengthNonZero(fileLength))
         {
-            stepResult.errorMessage = "Invalid channel count in IR file.";
+            stepResult.errorMessage = convo::irload::diagnosticLengthLimit(fileLength);
             return false;
         }
+
+        // FC-FORM-3: INT32 representation bound（AudioBuffer::setSize(int) への narrowing 契約）
+        if (!convo::irload::admitFileLengthRepresentable(fileLength))
+        {
+            stepResult.errorMessage = convo::irload::diagnosticLengthLimit(fileLength);
+            return false;
+        }
+
+        // FC-FORM-2: channel bound（N ≤ 8 では SR-01B の「>2ch→先頭2」を維持）
+        if (!convo::irload::admitChannelCount(rawChannels))
+        {
+            stepResult.errorMessage = convo::irload::diagnosticChannelLimit(rawChannels);
+            return false;
+        }
+
+        // FC-FORM-1: byte bound（除算形。未検証値の乗算を行わない）
+        if (!convo::irload::admitByteBudget(rawChannels, fileLength))
+        {
+            stepResult.errorMessage = convo::irload::diagnosticByteLimit(rawChannels, fileLength);
+            return false;
+        }
+
+        const int numChannels = static_cast<int>(rawChannels); // 値域は上の FC-FORM-2/4 で保証
+
+        // FC-FORM-6: hash は admission の後（FC-INV-1）。O(1) メモリのストリーミング実装。
+        stepFileHash = convo::AllpassDesigner::computeIRHash(file);
 
         // ★ work92 B-5 (big 1-8 / R-新規C): ストリーミング読込。
         //   旧実装は fileLength 分を一括確保（ステレオ float ~16GB / double ~32GB の
@@ -513,6 +542,22 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         {
             stepResult.loadedIR.setSize(numChannels, std::max(1, newLength), true);
             ConvolverProcessorInternal::shrinkToFit(stepResult.loadedIR);
+        }
+    }
+
+    // ★ WORK102 FC-FORM-5: resample 出力長の admission。
+    //   raw fileLength ではなく **trim 後** の長さに対して評価する（R2-D4）。
+    //   raw に適用すると、長い無音テールを持つファイルを
+    //   「UI は実効長で受理するが loader は拒否する」という回帰になる。
+    //   この判定は resampler 構築（r8b getMaxOutLen の (int) 変換）より前でなければならない（FC-INV-10）。
+    {
+        const int64 trimmedLength = stepResult.loadedIR.getNumSamples();
+        if (!convo::irload::admitResampleOutput(trimmedLength, stepResult.loadedSR, sampleRate))
+        {
+            stepResult.errorMessage = convo::irload::diagnosticResampleLimit(trimmedLength,
+                                                                             stepResult.loadedSR,
+                                                                             sampleRate);
+            return false;
         }
     }
 

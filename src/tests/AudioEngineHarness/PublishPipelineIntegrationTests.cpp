@@ -58,6 +58,9 @@ int runDeferredPublishViewStateMachineTests();
 // ConvolverStateRoundTripTests.cpp (★ work92 A-1: NUC mode ValueTree round-trip)
 int runConvolverStateRoundTripTests();
 
+// IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
+int runIRLoadAdmissionTests();
+
 namespace {
 
 bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
@@ -1280,6 +1283,11 @@ int main(int argc, char* argv[])
     //   setNUCFilterModes/getState/setState は Message Thread 契約のため
     //   audio thread 停止状態で harness engine に対して直接実行する。
     if (runConvolverStateRoundTripTests() != 0)
+        return 1;
+
+    // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と
+    //   streaming hash の回帰。新規 CTest target は作らない（既存 harness 内）。
+    if (runIRLoadAdmissionTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。
