@@ -61,6 +61,9 @@ int runConvolverStateRoundTripTests();
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
 
+// IRLoadAdmissionTests.cpp (★ WORK102-PREV-01: preview loader admission / graceful failure)
+int runIRLoadPreviewAdmissionTests();
+
 namespace {
 
 bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
@@ -1288,6 +1291,10 @@ int main(int argc, char* argv[])
     // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と
     //   streaming hash の回帰。新規 CTest target は作らない（既存 harness 内）。
     if (runIRLoadAdmissionTests() != 0)
+        return 1;
+
+    // ★ WORK102-PREV-01: preview loader admission（FC-1〜FC-5）と graceful failure の回帰。
+    if (runIRLoadPreviewAdmissionTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。

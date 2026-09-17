@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-17 09:13:37
+> Generated: 2026-09-17 13:10:15
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -74559,6 +74559,7 @@ void ConvolverProcessor::invalidatePendingLoads()
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
+#include "convolver/IRLoadAdmission.h"
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
@@ -74846,42 +74847,78 @@ bool loadImpulseResponsePreviewFile(const juce::File& file,
         return false;
     }
 
+    // ★ WORK102-PREV-01 (FC-1 / FC-5): main loader（LoaderThread.cpp FC-INV-9）と同一の
+    //   admission ordering を narrowing 前に適用する。契約の正本:
+    //   doc/work102/prev01_contract_freeze_20260917.md。ここまで O(fileLength) / O(file bytes)
+    //   の確保は 0 件。
     const int64 fileLength = reader->lengthInSamples;
-    const int numChannels = static_cast<int>(reader->numChannels);
-    static constexpr int64 maxFileLength = 2147483647;
+    const unsigned rawChannels = reader->numChannels; // narrowing 前の unsigned で判定（IG §4.4）
 
-    if (fileLength > maxFileLength)
+    // FC-FORM-4: degenerate input bound
+    if (!convo::irload::admitChannelCountNonZero(rawChannels))
     {
-        errorMessage = "IR file is too large (exceeds 2GB samples limit).";
+        errorMessage = convo::irload::diagnosticChannelLimit(rawChannels);
+        return false;
+    }
+    if (!convo::irload::admitFileLengthNonZero(fileLength))
+    {
+        errorMessage = convo::irload::diagnosticLengthLimit(fileLength);
         return false;
     }
 
-    if (numChannels <= 0)
+    // FC-FORM-3: INT32 representation bound（AudioBuffer::setSize(int) への narrowing 契約）
+    if (!convo::irload::admitFileLengthRepresentable(fileLength))
     {
-        errorMessage = "Invalid channel count in IR file.";
+        errorMessage = convo::irload::diagnosticLengthLimit(fileLength);
         return false;
     }
 
-    juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-    if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
+    // FC-FORM-2: channel bound（N ≤ 8 では SR-01B の「>2ch→先頭2」を維持、>8 は決定論的拒否）
+    if (!convo::irload::admitChannelCount(rawChannels))
     {
-        errorMessage = "Failed to read audio data from file.";
+        errorMessage = convo::irload::diagnosticChannelLimit(rawChannels);
         return false;
     }
 
-    auto tempAlignedBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fileLength));
-    if (!tempAlignedBuffer)
+    // FC-FORM-1: byte bound（除算形。未検証値の乗算を行わない）
+    if (!convo::irload::admitByteBudget(rawChannels, fileLength))
+    {
+        errorMessage = convo::irload::diagnosticByteLimit(rawChannels, fileLength);
+        return false;
+    }
+
+    const int numChannels = static_cast<int>(rawChannels); // 値域は上の FC-FORM-2/4 で保証
+
+    // ★ WORK102-PREV-01 (FC-2): 全量 transient を廃止し、main loader と同一のチャンク読込へ。
+    //   常駐メモリは kStreamChunk（256 KiB）× 2 分のみ。loadedIR の確保は FC-FORM-1 の後。
+    constexpr int64 kStreamChunk = 256 * 1024;
+    juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(kStreamChunk));
+    auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(kStreamChunk));
+    if (!tempAligned)
     {
         errorMessage = "Failed to allocate temporary buffer for IR loading.";
         return false;
     }
 
     loadedIR.setSize(numChannels, static_cast<int>(fileLength));
-    for (int ch = 0; ch < numChannels; ++ch)
+    for (int64 offset = 0; offset < fileLength; offset += kStreamChunk)
     {
-        const float* src = tempFloatBuffer.getReadPointer(ch);
-        convo::input_transform::convertFloatToDoubleHighQuality(src, tempAlignedBuffer.get(), static_cast<int>(fileLength));
-        loadedIR.copyFrom(ch, 0, tempAlignedBuffer.get(), static_cast<int>(fileLength));
+        const int64 remaining = fileLength - offset; // ループ不変: remaining > 0
+        const int chunk = static_cast<int>(std::min<int64>(kStreamChunk, remaining));
+        jassert(offset + chunk <= 2147483647); // ★ G4: narrowing 前の belt-and-braces（main loader と同一）
+
+        if (!reader->read(&tempFloatBuffer, 0, chunk, offset, true, true))
+        {
+            errorMessage = "Failed to read audio data from file.";
+            return false;
+        }
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const float* src = tempFloatBuffer.getReadPointer(ch);
+            convo::input_transform::convertFloatToDoubleHighQuality(src, tempAligned.get(), chunk);
+            loadedIR.copyFrom(ch, static_cast<int>(offset), tempAligned.get(), chunk);
+        }
     }
 
     loadedSampleRate = reader->sampleRate;
@@ -76299,6 +76336,7 @@ void ConvolverProcessor::StereoConvolver::process(int channel, const double* in,
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
+#include "convolver/IRLoadAdmission.h"
 #include "AlignedAllocation.h"
 #include "DftiHandle.h"
 
@@ -76755,89 +76793,133 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     preview.recommendedMaxSec = IR_LENGTH_MAX_SEC;
     preview.hardMaxSec = getMaximumAllowedIRLengthSecForSampleRate(processingSampleRate);
 
-    juce::AudioBuffer<double> loadedIR;
-    double loadedSampleRate = 0.0;
-    if (!loadImpulseResponsePreviewFile(irFile, loadedIR, loadedSampleRate, preview.errorMessage))
-        return preview;
-
-    const auto neverCancel = []() { return false; };
-
-    if (loadedIR.getNumSamples() > 0)
+    // ★ WORK102-PREV-01 (FC-3): 本関数が preview 経路で唯一の no-throw 境界である。
+    //   JUCE ThreadPool::runNextJob は job の例外を catch(...) で握り潰して後続の
+    //   callAsync（completion）を実行させない（juce_ThreadPool.cpp:387-394）ため、
+    //   ここですべての例外を IRLoadPreview.errorMessage に変換し、caller（worker lambda）
+    //   が必ず preview を受け取れるようにする。文言は main loader performLoad
+    //   （LoaderThread.cpp:129-143）の失敗語彙に整合させる。UI 側
+    //   （startAsyncIRLoadPreview / finishAsyncIRLoadPreview / requestId 機構）は本 work
+    //   で変更しない。
+    try
     {
-        const int numSamples = loadedIR.getNumSamples();
-        const int numChannels = loadedIR.getNumChannels();
-        const double threshold = 1.0e-15;
-        int newLength = 0;
+        juce::AudioBuffer<double> loadedIR;
+        double loadedSampleRate = 0.0;
+        if (!loadImpulseResponsePreviewFile(irFile, loadedIR, loadedSampleRate, preview.errorMessage))
+            return preview;
 
-        if (numChannels > 0)
+        const auto neverCancel = []() { return false; };
+
+        if (loadedIR.getNumSamples() > 0)
         {
-            const double* ch0Ptr = loadedIR.getReadPointer(0);
-            const double* ch1Ptr = (numChannels > 1) ? loadedIR.getReadPointer(1) : nullptr;
+            const int numSamples = loadedIR.getNumSamples();
+            const int numChannels = loadedIR.getNumChannels();
+            const double threshold = 1.0e-15;
+            int newLength = 0;
 
-            for (int j = numSamples - 1; j >= 0; --j)
+            if (numChannels > 0)
             {
-                if (std::abs(ch0Ptr[j]) > threshold || (ch1Ptr && std::abs(ch1Ptr[j]) > threshold))
+                const double* ch0Ptr = loadedIR.getReadPointer(0);
+                const double* ch1Ptr = (numChannels > 1) ? loadedIR.getReadPointer(1) : nullptr;
+
+                for (int j = numSamples - 1; j >= 0; --j)
                 {
-                    newLength = j + 1;
-                    break;
+                    if (std::abs(ch0Ptr[j]) > threshold || (ch1Ptr && std::abs(ch1Ptr[j]) > threshold))
+                    {
+                        newLength = j + 1;
+                        break;
+                    }
+                }
+            }
+
+            if (newLength < numSamples)
+            {
+                loadedIR.setSize(numChannels, juce::jmax(1, newLength), true);
+                shrinkToFit(loadedIR);
+            }
+        }
+
+        // ★ WORK102-PREV-01 (FC-4): FC-FORM-5 は **trim 後**の長さに対してのみ評価する（R2-D4）。
+        //   raw fileLength で評価すると、無音テール付きファイルを「UI は実効長で受理するのに
+        //   preview/loader が拒否する」回帰になる。resampler 構築（r8b getMaxOutLen の (int) 変換）
+        //   より前でなければならない点は main loader（LoaderThread.cpp FC-INV-10）と同一契約。
+        {
+            const int64 trimmedLength = loadedIR.getNumSamples();
+            if (!convo::irload::admitResampleOutput(trimmedLength, loadedSampleRate, processingSampleRate))
+            {
+                preview.errorMessage = convo::irload::diagnosticResampleLimit(trimmedLength,
+                                                                             loadedSampleRate,
+                                                                             processingSampleRate);
+                return preview;
+            }
+        }
+
+        if (loadedSampleRate > 0.0 && processingSampleRate > 0.0 && std::abs(loadedSampleRate - processingSampleRate) > 1e-6)
+        {
+            auto resampleOut = resampleIR(loadedIR, loadedSampleRate, processingSampleRate,
+                                          r8b::fprLinearPhase, neverCancel);
+            if (resampleOut.result != ResampleResult::Success ||
+                resampleOut.buffer.getNumSamples() == 0)
+            {
+                preview.errorMessage = "Resampling failed (unknown error).";
+                return preview;
+            }
+
+            loadedIR = std::move(resampleOut.buffer);
+            loadedSampleRate = processingSampleRate;
+        }
+
+        if (loadedSampleRate > 0.0 && loadedIR.getNumSamples() > 0)
+        {
+            for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+            {
+                convo::UltraHighRateDCBlocker dcBlocker;
+                dcBlocker.init(loadedSampleRate, 1.0);
+                dcBlocker.process(loadedIR.getWritePointer(ch), loadedIR.getNumSamples());
+            }
+        }
+
+        if (loadedIR.getNumSamples() > 0)
+        {
+            const int numSamples = loadedIR.getNumSamples();
+            for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+            {
+                if (!applyAsymmetricTukey(loadedIR.getWritePointer(ch), numSamples))
+                {
+                    preview.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
+                    return preview;
                 }
             }
         }
 
-        if (newLength < numSamples)
-        {
-            loadedIR.setSize(numChannels, juce::jmax(1, newLength), true);
-            shrinkToFit(loadedIR);
-        }
+        const int detectedSamples = estimateEffectiveIRLengthSamples(loadedIR, loadedSampleRate);
+        preview.autoDetectedLengthSamples = detectedSamples;
+        preview.autoDetectedLengthSec = (loadedSampleRate > 0.0)
+                                      ? static_cast<float>(static_cast<double>(detectedSamples) / loadedSampleRate)
+                                      : IR_LENGTH_DEFAULT_SEC;
+        preview.exceedsRecommended = preview.autoDetectedLengthSec > preview.recommendedMaxSec;
+        preview.exceedsHardLimit = preview.autoDetectedLengthSec > preview.hardMaxSec;
+        preview.success = true;
+        return preview;
     }
-
-    if (loadedSampleRate > 0.0 && processingSampleRate > 0.0 && std::abs(loadedSampleRate - processingSampleRate) > 1e-6)
+    catch (const std::bad_alloc&)
     {
-        auto resampleOut = resampleIR(loadedIR, loadedSampleRate, processingSampleRate,
-                                      r8b::fprLinearPhase, neverCancel);
-        if (resampleOut.result != ResampleResult::Success ||
-            resampleOut.buffer.getNumSamples() == 0)
-        {
-            preview.errorMessage = "Resampling failed (unknown error).";
-            return preview;
-        }
-
-        loadedIR = std::move(resampleOut.buffer);
-        loadedSampleRate = processingSampleRate;
+        preview.errorMessage = "IR too large (Out of Memory)";
+        juce::Logger::writeToLog("analyzeImpulseResponseFile: " + preview.errorMessage);
+        return preview;
     }
-
-    if (loadedSampleRate > 0.0 && loadedIR.getNumSamples() > 0)
+    catch (const std::exception& e)
     {
-        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-        {
-            convo::UltraHighRateDCBlocker dcBlocker;
-            dcBlocker.init(loadedSampleRate, 1.0);
-            dcBlocker.process(loadedIR.getWritePointer(ch), loadedIR.getNumSamples());
-        }
+        preview.errorMessage = "Error analyzing IR: " + juce::String(e.what());
+        juce::Logger::writeToLog("analyzeImpulseResponseFile: " + preview.errorMessage);
+        return preview;
     }
-
-    if (loadedIR.getNumSamples() > 0)
+    catch (...)
     {
-        const int numSamples = loadedIR.getNumSamples();
-        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-        {
-            if (!applyAsymmetricTukey(loadedIR.getWritePointer(ch), numSamples))
-            {
-                preview.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
-                return preview;
-            }
-        }
+        preview.errorMessage = "Unknown error analyzing IR";
+        juce::Logger::writeToLog("analyzeImpulseResponseFile: " + preview.errorMessage);
+        return preview;
     }
-
-    const int detectedSamples = estimateEffectiveIRLengthSamples(loadedIR, loadedSampleRate);
-    preview.autoDetectedLengthSamples = detectedSamples;
-    preview.autoDetectedLengthSec = (loadedSampleRate > 0.0)
-                                  ? static_cast<float>(static_cast<double>(detectedSamples) / loadedSampleRate)
-                                  : IR_LENGTH_DEFAULT_SEC;
-    preview.exceedsRecommended = preview.autoDetectedLengthSec > preview.recommendedMaxSec;
-    preview.exceedsHardLimit = preview.autoDetectedLengthSec > preview.hardMaxSec;
-    preview.success = true;
-    return preview;
 }
 
 [[nodiscard]] std::vector<float> ConvolverProcessor::getIRWaveform()
@@ -108275,6 +108357,7 @@ int runDeferredPublishViewStateMachineTests()
 #include "ConvolverProcessor.h"
 #include "AllpassDesigner.h"
 #include "convolver/IRLoadAdmission.h"
+#include "convolver/ConvolverProcessor.Internal.h"
 
 #include <cmath>
 #include <cstdint>
@@ -108853,6 +108936,233 @@ bool checkStreamingHashMatchesReference()
 
 } // namespace
 
+//----------------------------------------------------------
+// ★ WORK102-PREV-01 — preview loader admission / graceful failure
+//   契約の正本: doc/work102/prev01_contract_freeze_20260917.md（FC-1〜FC-5）
+//   テスト対応:
+//     PA  preview 実ファイル channel admission（1/2/8ch accept・9ch reject）
+//     PB  preview チャンク読込等価回帰（複数 chunk 境界のサンプル一致）
+//     PC  preview FC-FORM-5 trim 後 accept（raw > hardMax でも許容）
+//     PD  preview FC-FORM-5 trim 後 reject
+//     PE  preview failure completion（全 failure で success=false ＋ 非空 errorMessage）
+//   bad_alloc / 任意例外の捕捉は決定論的に発火させられないため S3 構造検証として報告する。
+//----------------------------------------------------------
+
+namespace {
+
+bool checkPreviewChannelAdmission()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    struct Case { const char* tag; int numCh; bool wantAccept; };
+    const Case cases[] = {
+        {"pa_1ch.wav", 1, true},
+        {"pb2_2ch.wav", 2, true},
+        {"pc2_8ch.wav", 8, true},
+        {"pd_9ch.wav", 9, false},
+    };
+
+    for (const auto& c : cases)
+    {
+        const juce::File ir = writeTestIr(c.tag, 48000.0, c.numCh, 4800, 100, 0);
+        if (!ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[PREV01] FAIL PA: fixture write failed for %s\n", c.tag);
+            return false;
+        }
+
+        juce::AudioBuffer<double> loadedIR;
+        double loadedSR = 0.0;
+        juce::String err;
+        const bool loadOk = ConvolverProcessorInternal::loadImpulseResponsePreviewFile(
+            ir, loadedIR, loadedSR, err);
+
+        bool ok = false;
+        if (c.wantAccept)
+        {
+            ok = loadOk && loadedIR.getNumChannels() == c.numCh
+                          && loadedIR.getNumSamples() == 4800
+                          && std::abs(loadedSR - 48000.0) < 1e-6
+                          && err.isEmpty();
+            if (!ok)
+                std::fprintf(stderr, "[PREV01] FAIL PA: %s expected accept, err='%s'\n",
+                             c.tag, err.toRawUTF8());
+        }
+        else
+        {
+            ok = !loadOk && containsAll(err, {"too many channels", "9", "8"});
+            if (!ok)
+                std::fprintf(stderr, "[PREV01] FAIL PA: %s expected channel reject, err='%s'\n",
+                             c.tag, err.toRawUTF8());
+        }
+
+        ir.deleteFile();
+        if (!ok)
+            return false;
+    }
+
+    std::printf("[PREV01] checkPreviewChannelAdmission: PASS (1/2/8ch accept, 9ch reject)\n");
+    return true;
+}
+
+bool checkPreviewChunkedReadEquivalence()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // 1ch 300,000 samples @48 kHz（fill=1）→ kStreamChunk=262,144 で 2 chunk に跨る。
+    // chunk 境界前後のサンプルが既知パターン（±0.25）と一致することで複数チャンク読込を確認。
+    constexpr int total = 300000;
+    const juce::File ir = writeTestIr("pb_chunk.wav", 48000.0, 1, total, 100, 1);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PB: fixture write failed\n");
+        return false;
+    }
+
+    juce::AudioBuffer<double> loadedIR;
+    double loadedSR = 0.0;
+    juce::String err;
+    const bool loadOk = ConvolverProcessorInternal::loadImpulseResponsePreviewFile(
+        ir, loadedIR, loadedSR, err);
+
+    bool ok = loadOk && err.isEmpty() && loadedIR.getNumChannels() == 1
+            && loadedIR.getNumSamples() == total && std::abs(loadedSR - 48000.0) < 1e-6;
+    if (ok)
+    {
+        constexpr double tol = 1.0e-3; // 16-bit WAV 量子化を許容
+        const struct { int pos; float want; } probes[] = {
+            {0, 0.25f}, {262143, -0.25f}, {262144, 0.25f}, {262145, 0.25f}, {299999, -0.25f},
+        };
+        for (const auto& p : probes)
+        {
+            const double got = loadedIR.getReadPointer(0)[p.pos];
+            if (std::abs(got - p.want) > tol)
+            {
+                std::fprintf(stderr, "[PREV01] FAIL PB: probe pos=%d got=%f want=%f\n",
+                             p.pos, got, p.want);
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (!ok)
+        std::fprintf(stderr, "[PREV01] FAIL PB: err='%s'\n", err.toRawUTF8());
+
+    ir.deleteFile();
+    if (ok)
+        std::printf("[PREV01] checkPreviewChunkedReadEquivalence: PASS (300k samples, 2 chunks)\n");
+    return ok;
+}
+
+bool checkPreviewResampleBoundUsesTrimmedLength()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // WORK102 G 相当（preview 版）: 48 kHz 解析で hardMaxSec = 2097153/48000 = 43.69 s。
+    // raw 50 s（先頭のみ実音・残り無音）→ trim 後約 1001 samples。raw に FC-FORM-5 を
+    // 適用する実装なら拒否される。
+    const juce::File ir = writeTestIr("pe_trim.wav", 48000.0, 2, 2400000, 1000, 0);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PC: fixture write failed\n");
+        return false;
+    }
+
+    const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(ir, 48000.0);
+    const bool ok = preview.success && preview.errorMessage.isEmpty()
+                  && preview.autoDetectedLengthSamples >= 1;
+    if (!ok)
+        std::fprintf(stderr, "[PREV01] FAIL PC: expected accept after trim, success=%d err='%s'\n",
+                     preview.success ? 1 : 0, preview.errorMessage.toRawUTF8());
+
+    ir.deleteFile();
+    if (ok)
+        std::printf("[PREV01] checkPreviewResampleBoundUsesTrimmedLength: PASS (raw 50s -> trim -> accept)\n");
+    return ok;
+}
+
+bool checkPreviewResampleBoundRejectsOversized()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // WORK102 H 相当（preview 版）: 3 s @44.1 kHz を 768 kHz 解析 → trim 後 L=132,300
+    // が必要 3.0 s > 許容 2097153/768000 = 2.731 s で reject。fill=1 なので trim は縮めない。
+    const juce::File ir = writeTestIr("pf_oversize.wav", 44100.0, 2, 132300, 100, 1);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PD: fixture write failed\n");
+        return false;
+    }
+
+    const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(ir, 768000.0);
+    const bool ok = !preview.success
+                  && containsAll(preview.errorMessage, {"longer than the DSP can use", "2097153"});
+    if (!ok)
+        std::fprintf(stderr, "[PREV01] FAIL PD: expected FC-FORM-5 reject, err='%s'\n",
+                     preview.errorMessage.toRawUTF8());
+
+    ir.deleteFile();
+    if (ok)
+        std::printf("[PREV01] checkPreviewResampleBoundRejectsOversized: PASS (3s@44.1k -> 768k reject)\n");
+    return ok;
+}
+
+bool checkPreviewFailureCompletion()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // failure completion 契約: どの failure 経路でも analyze が success=false ＋
+    // 非空 errorMessage の IRLoadPreview を返す（worker → finishAsyncIRLoadPreview へ）。
+    const juce::File missing = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("convo_prev01_missing_xyz.wav");
+    missing.deleteFile();
+
+    auto preview1 = ConvolverProcessor::analyzeImpulseResponseFile(missing, 48000.0);
+    if (preview1.success || !containsAll(preview1.errorMessage, {"IR file not found"}))
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PE: missing-file path, success=%d err='%s'\n",
+                     preview1.success ? 1 : 0, preview1.errorMessage.toRawUTF8());
+        return false;
+    }
+
+    const juce::File garbage = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("convo_prev01_garbage.bin");
+    const char text[] = "this is not an audio file";
+    garbage.replaceWithData(text, sizeof(text) - 1);
+
+    auto preview2 = ConvolverProcessor::analyzeImpulseResponseFile(garbage, 48000.0);
+    garbage.deleteFile();
+
+    if (preview2.success || preview2.errorMessage.isEmpty())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PE: garbage-file path, success=%d err='%s'\n",
+                     preview2.success ? 1 : 0, preview2.errorMessage.toRawUTF8());
+        return false;
+    }
+
+    std::printf("[PREV01] checkPreviewFailureCompletion: PASS (missing/garbage -> failed preview)\n");
+    return true;
+}
+
+} // namespace
+
+int runIRLoadPreviewAdmissionTests()
+{
+    if (!checkPreviewChannelAdmission())
+        return 1;
+    if (!checkPreviewChunkedReadEquivalence())
+        return 1;
+    if (!checkPreviewResampleBoundUsesTrimmedLength())
+        return 1;
+    if (!checkPreviewResampleBoundRejectsOversized())
+        return 1;
+    if (!checkPreviewFailureCompletion())
+        return 1;
+
+    std::printf("IRLoadPreviewAdmissionTests: PASS (PREV-01 PA/PB/PC/PD/PE)\n");
+    return 0;
+}
+
 int runIRLoadAdmissionTests()
 {
     if (!checkEFPredicateBoundaries())
@@ -109379,6 +109689,9 @@ int runConvolverStateRoundTripTests();
 
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
+
+// IRLoadAdmissionTests.cpp (★ WORK102-PREV-01: preview loader admission / graceful failure)
+int runIRLoadPreviewAdmissionTests();
 
 namespace {
 
@@ -110607,6 +110920,10 @@ int main(int argc, char* argv[])
     // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と
     //   streaming hash の回帰。新規 CTest target は作らない（既存 harness 内）。
     if (runIRLoadAdmissionTests() != 0)
+        return 1;
+
+    // ★ WORK102-PREV-01: preview loader admission（FC-1〜FC-5）と graceful failure の回帰。
+    if (runIRLoadPreviewAdmissionTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。

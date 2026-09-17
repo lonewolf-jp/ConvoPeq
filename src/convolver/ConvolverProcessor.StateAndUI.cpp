@@ -2,6 +2,7 @@
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
+#include "convolver/IRLoadAdmission.h"
 #include "AlignedAllocation.h"
 #include "DftiHandle.h"
 
@@ -458,89 +459,133 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     preview.recommendedMaxSec = IR_LENGTH_MAX_SEC;
     preview.hardMaxSec = getMaximumAllowedIRLengthSecForSampleRate(processingSampleRate);
 
-    juce::AudioBuffer<double> loadedIR;
-    double loadedSampleRate = 0.0;
-    if (!loadImpulseResponsePreviewFile(irFile, loadedIR, loadedSampleRate, preview.errorMessage))
-        return preview;
-
-    const auto neverCancel = []() { return false; };
-
-    if (loadedIR.getNumSamples() > 0)
+    // ★ WORK102-PREV-01 (FC-3): 本関数が preview 経路で唯一の no-throw 境界である。
+    //   JUCE ThreadPool::runNextJob は job の例外を catch(...) で握り潰して後続の
+    //   callAsync（completion）を実行させない（juce_ThreadPool.cpp:387-394）ため、
+    //   ここですべての例外を IRLoadPreview.errorMessage に変換し、caller（worker lambda）
+    //   が必ず preview を受け取れるようにする。文言は main loader performLoad
+    //   （LoaderThread.cpp:129-143）の失敗語彙に整合させる。UI 側
+    //   （startAsyncIRLoadPreview / finishAsyncIRLoadPreview / requestId 機構）は本 work
+    //   で変更しない。
+    try
     {
-        const int numSamples = loadedIR.getNumSamples();
-        const int numChannels = loadedIR.getNumChannels();
-        const double threshold = 1.0e-15;
-        int newLength = 0;
+        juce::AudioBuffer<double> loadedIR;
+        double loadedSampleRate = 0.0;
+        if (!loadImpulseResponsePreviewFile(irFile, loadedIR, loadedSampleRate, preview.errorMessage))
+            return preview;
 
-        if (numChannels > 0)
+        const auto neverCancel = []() { return false; };
+
+        if (loadedIR.getNumSamples() > 0)
         {
-            const double* ch0Ptr = loadedIR.getReadPointer(0);
-            const double* ch1Ptr = (numChannels > 1) ? loadedIR.getReadPointer(1) : nullptr;
+            const int numSamples = loadedIR.getNumSamples();
+            const int numChannels = loadedIR.getNumChannels();
+            const double threshold = 1.0e-15;
+            int newLength = 0;
 
-            for (int j = numSamples - 1; j >= 0; --j)
+            if (numChannels > 0)
             {
-                if (std::abs(ch0Ptr[j]) > threshold || (ch1Ptr && std::abs(ch1Ptr[j]) > threshold))
+                const double* ch0Ptr = loadedIR.getReadPointer(0);
+                const double* ch1Ptr = (numChannels > 1) ? loadedIR.getReadPointer(1) : nullptr;
+
+                for (int j = numSamples - 1; j >= 0; --j)
                 {
-                    newLength = j + 1;
-                    break;
+                    if (std::abs(ch0Ptr[j]) > threshold || (ch1Ptr && std::abs(ch1Ptr[j]) > threshold))
+                    {
+                        newLength = j + 1;
+                        break;
+                    }
+                }
+            }
+
+            if (newLength < numSamples)
+            {
+                loadedIR.setSize(numChannels, juce::jmax(1, newLength), true);
+                shrinkToFit(loadedIR);
+            }
+        }
+
+        // ★ WORK102-PREV-01 (FC-4): FC-FORM-5 は **trim 後**の長さに対してのみ評価する（R2-D4）。
+        //   raw fileLength で評価すると、無音テール付きファイルを「UI は実効長で受理するのに
+        //   preview/loader が拒否する」回帰になる。resampler 構築（r8b getMaxOutLen の (int) 変換）
+        //   より前でなければならない点は main loader（LoaderThread.cpp FC-INV-10）と同一契約。
+        {
+            const int64 trimmedLength = loadedIR.getNumSamples();
+            if (!convo::irload::admitResampleOutput(trimmedLength, loadedSampleRate, processingSampleRate))
+            {
+                preview.errorMessage = convo::irload::diagnosticResampleLimit(trimmedLength,
+                                                                             loadedSampleRate,
+                                                                             processingSampleRate);
+                return preview;
+            }
+        }
+
+        if (loadedSampleRate > 0.0 && processingSampleRate > 0.0 && std::abs(loadedSampleRate - processingSampleRate) > 1e-6)
+        {
+            auto resampleOut = resampleIR(loadedIR, loadedSampleRate, processingSampleRate,
+                                          r8b::fprLinearPhase, neverCancel);
+            if (resampleOut.result != ResampleResult::Success ||
+                resampleOut.buffer.getNumSamples() == 0)
+            {
+                preview.errorMessage = "Resampling failed (unknown error).";
+                return preview;
+            }
+
+            loadedIR = std::move(resampleOut.buffer);
+            loadedSampleRate = processingSampleRate;
+        }
+
+        if (loadedSampleRate > 0.0 && loadedIR.getNumSamples() > 0)
+        {
+            for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+            {
+                convo::UltraHighRateDCBlocker dcBlocker;
+                dcBlocker.init(loadedSampleRate, 1.0);
+                dcBlocker.process(loadedIR.getWritePointer(ch), loadedIR.getNumSamples());
+            }
+        }
+
+        if (loadedIR.getNumSamples() > 0)
+        {
+            const int numSamples = loadedIR.getNumSamples();
+            for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+            {
+                if (!applyAsymmetricTukey(loadedIR.getWritePointer(ch), numSamples))
+                {
+                    preview.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
+                    return preview;
                 }
             }
         }
 
-        if (newLength < numSamples)
-        {
-            loadedIR.setSize(numChannels, juce::jmax(1, newLength), true);
-            shrinkToFit(loadedIR);
-        }
+        const int detectedSamples = estimateEffectiveIRLengthSamples(loadedIR, loadedSampleRate);
+        preview.autoDetectedLengthSamples = detectedSamples;
+        preview.autoDetectedLengthSec = (loadedSampleRate > 0.0)
+                                      ? static_cast<float>(static_cast<double>(detectedSamples) / loadedSampleRate)
+                                      : IR_LENGTH_DEFAULT_SEC;
+        preview.exceedsRecommended = preview.autoDetectedLengthSec > preview.recommendedMaxSec;
+        preview.exceedsHardLimit = preview.autoDetectedLengthSec > preview.hardMaxSec;
+        preview.success = true;
+        return preview;
     }
-
-    if (loadedSampleRate > 0.0 && processingSampleRate > 0.0 && std::abs(loadedSampleRate - processingSampleRate) > 1e-6)
+    catch (const std::bad_alloc&)
     {
-        auto resampleOut = resampleIR(loadedIR, loadedSampleRate, processingSampleRate,
-                                      r8b::fprLinearPhase, neverCancel);
-        if (resampleOut.result != ResampleResult::Success ||
-            resampleOut.buffer.getNumSamples() == 0)
-        {
-            preview.errorMessage = "Resampling failed (unknown error).";
-            return preview;
-        }
-
-        loadedIR = std::move(resampleOut.buffer);
-        loadedSampleRate = processingSampleRate;
+        preview.errorMessage = "IR too large (Out of Memory)";
+        juce::Logger::writeToLog("analyzeImpulseResponseFile: " + preview.errorMessage);
+        return preview;
     }
-
-    if (loadedSampleRate > 0.0 && loadedIR.getNumSamples() > 0)
+    catch (const std::exception& e)
     {
-        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-        {
-            convo::UltraHighRateDCBlocker dcBlocker;
-            dcBlocker.init(loadedSampleRate, 1.0);
-            dcBlocker.process(loadedIR.getWritePointer(ch), loadedIR.getNumSamples());
-        }
+        preview.errorMessage = "Error analyzing IR: " + juce::String(e.what());
+        juce::Logger::writeToLog("analyzeImpulseResponseFile: " + preview.errorMessage);
+        return preview;
     }
-
-    if (loadedIR.getNumSamples() > 0)
+    catch (...)
     {
-        const int numSamples = loadedIR.getNumSamples();
-        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-        {
-            if (!applyAsymmetricTukey(loadedIR.getWritePointer(ch), numSamples))
-            {
-                preview.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
-                return preview;
-            }
-        }
+        preview.errorMessage = "Unknown error analyzing IR";
+        juce::Logger::writeToLog("analyzeImpulseResponseFile: " + preview.errorMessage);
+        return preview;
     }
-
-    const int detectedSamples = estimateEffectiveIRLengthSamples(loadedIR, loadedSampleRate);
-    preview.autoDetectedLengthSamples = detectedSamples;
-    preview.autoDetectedLengthSec = (loadedSampleRate > 0.0)
-                                  ? static_cast<float>(static_cast<double>(detectedSamples) / loadedSampleRate)
-                                  : IR_LENGTH_DEFAULT_SEC;
-    preview.exceedsRecommended = preview.autoDetectedLengthSec > preview.recommendedMaxSec;
-    preview.exceedsHardLimit = preview.autoDetectedLengthSec > preview.hardMaxSec;
-    preview.success = true;
-    return preview;
 }
 
 [[nodiscard]] std::vector<float> ConvolverProcessor::getIRWaveform()

@@ -19,6 +19,7 @@
 #include "ConvolverProcessor.h"
 #include "AllpassDesigner.h"
 #include "convolver/IRLoadAdmission.h"
+#include "convolver/ConvolverProcessor.Internal.h"
 
 #include <cmath>
 #include <cstdint>
@@ -596,6 +597,233 @@ bool checkStreamingHashMatchesReference()
 }
 
 } // namespace
+
+//----------------------------------------------------------
+// ★ WORK102-PREV-01 — preview loader admission / graceful failure
+//   契約の正本: doc/work102/prev01_contract_freeze_20260917.md（FC-1〜FC-5）
+//   テスト対応:
+//     PA  preview 実ファイル channel admission（1/2/8ch accept・9ch reject）
+//     PB  preview チャンク読込等価回帰（複数 chunk 境界のサンプル一致）
+//     PC  preview FC-FORM-5 trim 後 accept（raw > hardMax でも許容）
+//     PD  preview FC-FORM-5 trim 後 reject
+//     PE  preview failure completion（全 failure で success=false ＋ 非空 errorMessage）
+//   bad_alloc / 任意例外の捕捉は決定論的に発火させられないため S3 構造検証として報告する。
+//----------------------------------------------------------
+
+namespace {
+
+bool checkPreviewChannelAdmission()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    struct Case { const char* tag; int numCh; bool wantAccept; };
+    const Case cases[] = {
+        {"pa_1ch.wav", 1, true},
+        {"pb2_2ch.wav", 2, true},
+        {"pc2_8ch.wav", 8, true},
+        {"pd_9ch.wav", 9, false},
+    };
+
+    for (const auto& c : cases)
+    {
+        const juce::File ir = writeTestIr(c.tag, 48000.0, c.numCh, 4800, 100, 0);
+        if (!ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[PREV01] FAIL PA: fixture write failed for %s\n", c.tag);
+            return false;
+        }
+
+        juce::AudioBuffer<double> loadedIR;
+        double loadedSR = 0.0;
+        juce::String err;
+        const bool loadOk = ConvolverProcessorInternal::loadImpulseResponsePreviewFile(
+            ir, loadedIR, loadedSR, err);
+
+        bool ok = false;
+        if (c.wantAccept)
+        {
+            ok = loadOk && loadedIR.getNumChannels() == c.numCh
+                          && loadedIR.getNumSamples() == 4800
+                          && std::abs(loadedSR - 48000.0) < 1e-6
+                          && err.isEmpty();
+            if (!ok)
+                std::fprintf(stderr, "[PREV01] FAIL PA: %s expected accept, err='%s'\n",
+                             c.tag, err.toRawUTF8());
+        }
+        else
+        {
+            ok = !loadOk && containsAll(err, {"too many channels", "9", "8"});
+            if (!ok)
+                std::fprintf(stderr, "[PREV01] FAIL PA: %s expected channel reject, err='%s'\n",
+                             c.tag, err.toRawUTF8());
+        }
+
+        ir.deleteFile();
+        if (!ok)
+            return false;
+    }
+
+    std::printf("[PREV01] checkPreviewChannelAdmission: PASS (1/2/8ch accept, 9ch reject)\n");
+    return true;
+}
+
+bool checkPreviewChunkedReadEquivalence()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // 1ch 300,000 samples @48 kHz（fill=1）→ kStreamChunk=262,144 で 2 chunk に跨る。
+    // chunk 境界前後のサンプルが既知パターン（±0.25）と一致することで複数チャンク読込を確認。
+    constexpr int total = 300000;
+    const juce::File ir = writeTestIr("pb_chunk.wav", 48000.0, 1, total, 100, 1);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PB: fixture write failed\n");
+        return false;
+    }
+
+    juce::AudioBuffer<double> loadedIR;
+    double loadedSR = 0.0;
+    juce::String err;
+    const bool loadOk = ConvolverProcessorInternal::loadImpulseResponsePreviewFile(
+        ir, loadedIR, loadedSR, err);
+
+    bool ok = loadOk && err.isEmpty() && loadedIR.getNumChannels() == 1
+            && loadedIR.getNumSamples() == total && std::abs(loadedSR - 48000.0) < 1e-6;
+    if (ok)
+    {
+        constexpr double tol = 1.0e-3; // 16-bit WAV 量子化を許容
+        const struct { int pos; float want; } probes[] = {
+            {0, 0.25f}, {262143, -0.25f}, {262144, 0.25f}, {262145, 0.25f}, {299999, -0.25f},
+        };
+        for (const auto& p : probes)
+        {
+            const double got = loadedIR.getReadPointer(0)[p.pos];
+            if (std::abs(got - p.want) > tol)
+            {
+                std::fprintf(stderr, "[PREV01] FAIL PB: probe pos=%d got=%f want=%f\n",
+                             p.pos, got, p.want);
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (!ok)
+        std::fprintf(stderr, "[PREV01] FAIL PB: err='%s'\n", err.toRawUTF8());
+
+    ir.deleteFile();
+    if (ok)
+        std::printf("[PREV01] checkPreviewChunkedReadEquivalence: PASS (300k samples, 2 chunks)\n");
+    return ok;
+}
+
+bool checkPreviewResampleBoundUsesTrimmedLength()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // WORK102 G 相当（preview 版）: 48 kHz 解析で hardMaxSec = 2097153/48000 = 43.69 s。
+    // raw 50 s（先頭のみ実音・残り無音）→ trim 後約 1001 samples。raw に FC-FORM-5 を
+    // 適用する実装なら拒否される。
+    const juce::File ir = writeTestIr("pe_trim.wav", 48000.0, 2, 2400000, 1000, 0);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PC: fixture write failed\n");
+        return false;
+    }
+
+    const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(ir, 48000.0);
+    const bool ok = preview.success && preview.errorMessage.isEmpty()
+                  && preview.autoDetectedLengthSamples >= 1;
+    if (!ok)
+        std::fprintf(stderr, "[PREV01] FAIL PC: expected accept after trim, success=%d err='%s'\n",
+                     preview.success ? 1 : 0, preview.errorMessage.toRawUTF8());
+
+    ir.deleteFile();
+    if (ok)
+        std::printf("[PREV01] checkPreviewResampleBoundUsesTrimmedLength: PASS (raw 50s -> trim -> accept)\n");
+    return ok;
+}
+
+bool checkPreviewResampleBoundRejectsOversized()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // WORK102 H 相当（preview 版）: 3 s @44.1 kHz を 768 kHz 解析 → trim 後 L=132,300
+    // が必要 3.0 s > 許容 2097153/768000 = 2.731 s で reject。fill=1 なので trim は縮めない。
+    const juce::File ir = writeTestIr("pf_oversize.wav", 44100.0, 2, 132300, 100, 1);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PD: fixture write failed\n");
+        return false;
+    }
+
+    const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(ir, 768000.0);
+    const bool ok = !preview.success
+                  && containsAll(preview.errorMessage, {"longer than the DSP can use", "2097153"});
+    if (!ok)
+        std::fprintf(stderr, "[PREV01] FAIL PD: expected FC-FORM-5 reject, err='%s'\n",
+                     preview.errorMessage.toRawUTF8());
+
+    ir.deleteFile();
+    if (ok)
+        std::printf("[PREV01] checkPreviewResampleBoundRejectsOversized: PASS (3s@44.1k -> 768k reject)\n");
+    return ok;
+}
+
+bool checkPreviewFailureCompletion()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // failure completion 契約: どの failure 経路でも analyze が success=false ＋
+    // 非空 errorMessage の IRLoadPreview を返す（worker → finishAsyncIRLoadPreview へ）。
+    const juce::File missing = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("convo_prev01_missing_xyz.wav");
+    missing.deleteFile();
+
+    auto preview1 = ConvolverProcessor::analyzeImpulseResponseFile(missing, 48000.0);
+    if (preview1.success || !containsAll(preview1.errorMessage, {"IR file not found"}))
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PE: missing-file path, success=%d err='%s'\n",
+                     preview1.success ? 1 : 0, preview1.errorMessage.toRawUTF8());
+        return false;
+    }
+
+    const juce::File garbage = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("convo_prev01_garbage.bin");
+    const char text[] = "this is not an audio file";
+    garbage.replaceWithData(text, sizeof(text) - 1);
+
+    auto preview2 = ConvolverProcessor::analyzeImpulseResponseFile(garbage, 48000.0);
+    garbage.deleteFile();
+
+    if (preview2.success || preview2.errorMessage.isEmpty())
+    {
+        std::fprintf(stderr, "[PREV01] FAIL PE: garbage-file path, success=%d err='%s'\n",
+                     preview2.success ? 1 : 0, preview2.errorMessage.toRawUTF8());
+        return false;
+    }
+
+    std::printf("[PREV01] checkPreviewFailureCompletion: PASS (missing/garbage -> failed preview)\n");
+    return true;
+}
+
+} // namespace
+
+int runIRLoadPreviewAdmissionTests()
+{
+    if (!checkPreviewChannelAdmission())
+        return 1;
+    if (!checkPreviewChunkedReadEquivalence())
+        return 1;
+    if (!checkPreviewResampleBoundUsesTrimmedLength())
+        return 1;
+    if (!checkPreviewResampleBoundRejectsOversized())
+        return 1;
+    if (!checkPreviewFailureCompletion())
+        return 1;
+
+    std::printf("IRLoadPreviewAdmissionTests: PASS (PREV-01 PA/PB/PC/PD/PE)\n");
+    return 0;
+}
 
 int runIRLoadAdmissionTests()
 {

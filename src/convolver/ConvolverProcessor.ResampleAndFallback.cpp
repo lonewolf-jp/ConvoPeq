@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
+#include "convolver/IRLoadAdmission.h"
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
@@ -288,42 +289,78 @@ bool loadImpulseResponsePreviewFile(const juce::File& file,
         return false;
     }
 
+    // ★ WORK102-PREV-01 (FC-1 / FC-5): main loader（LoaderThread.cpp FC-INV-9）と同一の
+    //   admission ordering を narrowing 前に適用する。契約の正本:
+    //   doc/work102/prev01_contract_freeze_20260917.md。ここまで O(fileLength) / O(file bytes)
+    //   の確保は 0 件。
     const int64 fileLength = reader->lengthInSamples;
-    const int numChannels = static_cast<int>(reader->numChannels);
-    static constexpr int64 maxFileLength = 2147483647;
+    const unsigned rawChannels = reader->numChannels; // narrowing 前の unsigned で判定（IG §4.4）
 
-    if (fileLength > maxFileLength)
+    // FC-FORM-4: degenerate input bound
+    if (!convo::irload::admitChannelCountNonZero(rawChannels))
     {
-        errorMessage = "IR file is too large (exceeds 2GB samples limit).";
+        errorMessage = convo::irload::diagnosticChannelLimit(rawChannels);
+        return false;
+    }
+    if (!convo::irload::admitFileLengthNonZero(fileLength))
+    {
+        errorMessage = convo::irload::diagnosticLengthLimit(fileLength);
         return false;
     }
 
-    if (numChannels <= 0)
+    // FC-FORM-3: INT32 representation bound（AudioBuffer::setSize(int) への narrowing 契約）
+    if (!convo::irload::admitFileLengthRepresentable(fileLength))
     {
-        errorMessage = "Invalid channel count in IR file.";
+        errorMessage = convo::irload::diagnosticLengthLimit(fileLength);
         return false;
     }
 
-    juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-    if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
+    // FC-FORM-2: channel bound（N ≤ 8 では SR-01B の「>2ch→先頭2」を維持、>8 は決定論的拒否）
+    if (!convo::irload::admitChannelCount(rawChannels))
     {
-        errorMessage = "Failed to read audio data from file.";
+        errorMessage = convo::irload::diagnosticChannelLimit(rawChannels);
         return false;
     }
 
-    auto tempAlignedBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fileLength));
-    if (!tempAlignedBuffer)
+    // FC-FORM-1: byte bound（除算形。未検証値の乗算を行わない）
+    if (!convo::irload::admitByteBudget(rawChannels, fileLength))
+    {
+        errorMessage = convo::irload::diagnosticByteLimit(rawChannels, fileLength);
+        return false;
+    }
+
+    const int numChannels = static_cast<int>(rawChannels); // 値域は上の FC-FORM-2/4 で保証
+
+    // ★ WORK102-PREV-01 (FC-2): 全量 transient を廃止し、main loader と同一のチャンク読込へ。
+    //   常駐メモリは kStreamChunk（256 KiB）× 2 分のみ。loadedIR の確保は FC-FORM-1 の後。
+    constexpr int64 kStreamChunk = 256 * 1024;
+    juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(kStreamChunk));
+    auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(kStreamChunk));
+    if (!tempAligned)
     {
         errorMessage = "Failed to allocate temporary buffer for IR loading.";
         return false;
     }
 
     loadedIR.setSize(numChannels, static_cast<int>(fileLength));
-    for (int ch = 0; ch < numChannels; ++ch)
+    for (int64 offset = 0; offset < fileLength; offset += kStreamChunk)
     {
-        const float* src = tempFloatBuffer.getReadPointer(ch);
-        convo::input_transform::convertFloatToDoubleHighQuality(src, tempAlignedBuffer.get(), static_cast<int>(fileLength));
-        loadedIR.copyFrom(ch, 0, tempAlignedBuffer.get(), static_cast<int>(fileLength));
+        const int64 remaining = fileLength - offset; // ループ不変: remaining > 0
+        const int chunk = static_cast<int>(std::min<int64>(kStreamChunk, remaining));
+        jassert(offset + chunk <= 2147483647); // ★ G4: narrowing 前の belt-and-braces（main loader と同一）
+
+        if (!reader->read(&tempFloatBuffer, 0, chunk, offset, true, true))
+        {
+            errorMessage = "Failed to read audio data from file.";
+            return false;
+        }
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const float* src = tempFloatBuffer.getReadPointer(ch);
+            convo::input_transform::convertFloatToDoubleHighQuality(src, tempAligned.get(), chunk);
+            loadedIR.copyFrom(ch, static_cast<int>(offset), tempAligned.get(), chunk);
+        }
     }
 
     loadedSampleRate = reader->sampleRate;
