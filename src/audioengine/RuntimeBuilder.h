@@ -157,8 +157,13 @@ public:
         //   ProcessingPart/CrossfadeSnapshotPart/LatencyPart/PublicationSnapshotPart を設定する。
         //   （新しい Orchestrator 経由の呼び出し元は sealedSnapshot から Orchestrator が設定済み）
         spec.processing.processingOrder = static_cast<int>(convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_relaxed));
-        spec.processing.eqBypassed = convo::consumeAtomic(engine.eqBypassActive, std::memory_order_relaxed);
-        spec.processing.convBypassed = convo::consumeAtomic(engine.convBypassActive, std::memory_order_relaxed);
+        // [WORK113-16 Phase 1] bypass routing は REQUEST atomic から取得する。
+        //   old-overload world が user bypass を反映しない欠陥の修正（EQ projection 顕在化に伴う）。
+        // [WORK113 Phase 2-2] eqBypassActive/convBypassActive は authority ではなく
+        //   committed-state compatibility mirror（World.routing = authority）。
+        //   writer は publish 時（onRuntimePublishedNonRt）と prepare 時（bootstrap）の 2 箇所のみ。
+        spec.processing.eqBypassed = convo::consumeAtomic(engine.eqBypassRequested, std::memory_order_relaxed);
+        spec.processing.convBypassed = convo::consumeAtomic(engine.convBypassRequested, std::memory_order_relaxed);
         spec.processing.softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_relaxed);
         spec.processing.saturationAmount = static_cast<float>(convo::consumeAtomic(engine.saturationAmount, std::memory_order_relaxed));
         spec.processing.inputHeadroomGain = static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_relaxed));

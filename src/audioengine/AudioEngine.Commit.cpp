@@ -409,6 +409,24 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     updateMinMetric(oldestPublishedGeneration_, world.generation);
     updateMaxMetric(youngestPublishedGeneration_, world.generation);
 
+    // ★ WORK113 Phase 2-2: bypass Active mirror を committed World の derived projection として同期。
+    //   意味論（固定）: eqBypassRequested/convBypassRequested = intent、World.routing = committed
+    //   authority、eqBypassActive/convBypassActive = committed-state compatibility mirror
+    //   （authority ではない）。World は Publish 後 immutable のため本同期は単方向 copy のみで
+    //   World mutation を行わない。本 mirror の writer は本箇所（committed projection）と
+    //   PrepareToPlay（World 不存在時の bootstrap initialization）の 2 箇所のみ。
+    //   host-facing reader: Processing.Latency.cpp（conv レイテンシ込み/除外判定）・
+    //   isEQBypassed()/isConvolverBypassed()・fallback snapshot（eqBypassed/convBypassed）。
+    //   publish（RT swap）から本 callback（CoordinatorLoop Non-RT）実行までの間、mirror は旧値を
+    //   保持し得る（compatibility mirror として許容される短時間の eventual consistency）。
+    convo::publishAtomic(eqBypassActive,
+                         world.routing.eqBypassed,
+                         std::memory_order_release);
+
+    convo::publishAtomic(convBypassActive,
+                         world.routing.convBypassed,
+                         std::memory_order_release);
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
         const auto memInfo = getProcessMemoryInfo();

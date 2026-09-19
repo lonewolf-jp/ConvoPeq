@@ -186,6 +186,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     convo::publishAtomic(inputLevelLinear, 0.0f, std::memory_order_release);
     convo::publishAtomic(outputLevelLinear, 0.0f, std::memory_order_release);
 
+    // ★ WORK113 Phase 2-2: Prepare-time write = bootstrap initialization のみ
+    //   （World がまだ存在しない状態での mirror 初期化）。World 存在下の committed 同期は
+    //   onRuntimePublishedNonRt()（AudioEngine.Commit.cpp）が担う。本 2 行は残置（置換ではない）。
     convo::publishAtomic(eqBypassActive, convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire), std::memory_order_release);
     convo::publishAtomic(convBypassActive, convo::consumeAtomic(convBypassRequested, std::memory_order_acquire), std::memory_order_release);
 
