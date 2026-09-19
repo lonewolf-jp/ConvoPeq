@@ -3,8 +3,10 @@
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "convolver/IRLoadAdmission.h"
+#include "convolver/IRTrimTestHooks.h"   // ★ WORK111: test/measurement-only hook
 #include "AlignedAllocation.h"
 #include <mkl.h>
+#include <limits>   // ★ WORK112: std::numeric_limits (subnormal 判定)
 
 #include "audioengine/AtomicAccess.h"
 
@@ -485,6 +487,53 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
     return (stepResult.loadedIR.getNumSamples() > 0 && stepResult.loadedIR.getNumChannels() > 0);
 }
 
+// ★ WORK112 112-1: transform chain checkpoint（NonRT 観測のみ・値の変更なし）
+static void printChainCheckpoint(const char* tag, const juce::AudioBuffer<double>& buf, double sr)
+{
+    if (buf.getNumSamples() <= 0 || buf.getNumChannels() <= 0 || sr <= 0.0)
+    {
+        std::fprintf(stderr, "[IR_CHAIN] %s empty\n", tag);
+        return;
+    }
+    const int n = buf.getNumSamples();
+    const double* p = buf.getReadPointer(0);
+    double peak = 0.0, sum2 = 0.0, dc = 0.0;
+    long long nonfinite = 0, subnormal = 0;
+    const double subMin = std::numeric_limits<double>::min();
+    for (int i = 0; i < n; ++i)
+    {
+        const double v = p[i];
+        if (!std::isfinite(v)) { ++nonfinite; continue; }
+        const double a = std::abs(v);
+        if (a > peak) peak = a;
+        sum2 += v * v;
+        dc += v;
+        if (a > 0.0 && a < subMin) ++subnormal;
+    }
+    const double rms = std::sqrt(sum2 / static_cast<double>(std::max(1, n)));
+    dc /= static_cast<double>(std::max(1, n));
+
+    // 低域 band energy（1-pole LP の累積差分。0-20 / 20-50 / 50-100 / 100-200 Hz）
+    const double fcs[4] = { 20.0, 50.0, 100.0, 200.0 };
+    double al[4], y[4] = { 0, 0, 0, 0 }, e[4] = { 0, 0, 0, 0 };
+    for (int k = 0; k < 4; ++k)
+        al[k] = std::exp(-2.0 * 3.14159265358979323846 * fcs[k] / sr);
+    for (int i = 0; i < n; ++i)
+    {
+        const double v = p[i];
+        for (int k = 0; k < 4; ++k)
+        {
+            y[k] = (1.0 - al[k]) * v + al[k] * y[k];
+            e[k] += y[k] * y[k];
+        }
+    }
+    std::fprintf(stderr,
+        "[IR_CHAIN] %s n=%d sr=%.0f peak=%.8e rms=%.8e dc=%.8e energy=%.8e "
+        "nonfinite=%lld subnormal=%lld lf[0-20]=%.6e [20-50]=%.6e [50-100]=%.6e [100-200]=%.6e\n",
+        tag, n, sr, peak, rms, dc, sum2, nonfinite, subnormal,
+        e[0], e[1] - e[0], e[2] - e[1], e[3] - e[2]);
+}
+
 bool ConvolverProcessor::LoaderThread::doTrimStep()
 {
     auto shouldStop = [this]() -> bool {
@@ -601,6 +650,8 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
 
     if (ConvolverProcessorInternal::checkCancellation(shouldStop, nullptr)) return false;
 
+    printChainCheckpoint("A_resampled", stepResult.loadedIR, stepResult.loadedSR);
+
     if (stepResult.loadedSR > 0.0 && stepResult.loadedIR.getNumSamples() > 0)
     {
         for (int ch = 0; ch < stepResult.loadedIR.getNumChannels(); ++ch)
@@ -611,6 +662,8 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             dcBlocker.process(data, stepResult.loadedIR.getNumSamples());
         }
     }
+
+    printChainCheckpoint("B_dcblock", stepResult.loadedIR, stepResult.loadedSR);
 
     if (ConvolverProcessorInternal::checkCancellation(shouldStop, nullptr)) return false;
 
@@ -627,6 +680,8 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         }
     }
 
+    printChainCheckpoint("C_tukey", stepResult.loadedIR, stepResult.loadedSR);
+
     if (ConvolverProcessorInternal::checkCancellation(shouldStop, nullptr)) return false;
 
     stepResult.targetLength = owner.computeTargetIRLength(stepResult.loadedSR, stepResult.loadedIR.getNumSamples());
@@ -641,11 +696,77 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
     fadeSamples = juce::jlimit(minFadeSamples, maxFadeSamples, fadeSamples);
     fadeSamples = juce::jmax(0, juce::jmin(fadeSamples, copySamples - 1));
 
+    // ★ WORK111: 末尾 fade は production では常に適用。measurement-only hook が true のときのみ skip。
+    //   NonRT (doTrimStep) 専用。RT は一切参照しない。
+    const bool fadeDisabled =
+        convo::trimtest::disableTailFadeForMeasurement().load(std::memory_order_relaxed);
+
     for (int ch = 0; ch < stepResult.loadedIR.getNumChannels(); ++ch)
     {
         stepTrimmed.copyFrom(ch, 0, stepResult.loadedIR, ch, 0, copySamples);
-        if (fadeSamples > 0)
+        if (fadeSamples > 0 && !fadeDisabled)
             stepTrimmed.applyGainRamp(ch, copySamples - fadeSamples, fadeSamples, 1.0, 0.0);
+    }
+
+    printChainCheckpoint("D_trimfade", stepTrimmed, stepResult.loadedSR);
+
+    // ★ WORK111: 末尾 fade geometry / envelope / energy（NonRT trace のみ・出力は stderr）
+    if (stepResult.loadedSR > 0.0 && copySamples > 0
+        && stepResult.loadedIR.getNumChannels() > 0)
+    {
+        const int fadeStart = juce::jmax(0, copySamples - fadeSamples);
+        const int fadeEnd   = copySamples;
+        const uint64_t genDbg =
+            static_cast<unsigned long long>(owner.convolverStateGeneration.getCurrentGeneration());
+
+        std::fprintf(stderr,
+            "[IR_TAIL_GEOM] gen=%llu loadedSr=%.0f loadedLen=%d targetLength=%d copySamples=%d "
+            "fadeSamples=%d fadeStart=%d fadeEnd=%d fadeMs=%.4f fadeDisabled=%d\n",
+            static_cast<unsigned long long>(genDbg), stepResult.loadedSR,
+            stepResult.loadedIR.getNumSamples(), stepResult.targetLength,
+            copySamples, fadeSamples, fadeStart, fadeEnd,
+            1000.0 * static_cast<double>(fadeSamples) / stepResult.loadedSR,
+            fadeDisabled ? 1 : 0);
+
+        const auto* pre  = stepResult.loadedIR.getReadPointer(0); // Tukey 後 / fade 前
+        const auto* post = stepTrimmed.getReadPointer(0);         // fade 後
+        const int pts[8] = { fadeStart - 1024, fadeStart - 512, fadeStart,
+                             fadeStart + 128, fadeStart + 256, fadeStart + 512,
+                             fadeStart + 1024, fadeEnd - 1 };
+        for (int t = 0; t < 8; ++t)
+        {
+            const int i = pts[t];
+            if (i < 0 || i >= copySamples) continue;
+            const double a = static_cast<double>(pre[i]);
+            const double b = static_cast<double>(post[i]);
+            std::fprintf(stderr,
+                "[IR_TAIL_ENV] i=%d tMs=%.4f afterTukey=%.8e afterFade=%.8e gain=%.6f\n",
+                i, 1000.0 * static_cast<double>(i) / stepResult.loadedSR, a, b,
+                (std::abs(a) > 1.0e-30) ? b / a : 0.0);
+        }
+
+        // energy split（全帯域）+ 1-pole 100Hz LP 相当の低域 energy
+        double eTot = 0.0, ePre = 0.0, eBand = 0.0;
+        double lpTot = 0.0, lpPre = 0.0, lpBand = 0.0;
+        const double aLp = std::exp(-2.0 * 3.14159265358979323846 * 100.0 / stepResult.loadedSR);
+        double y = 0.0;
+        for (int i = 0; i < copySamples; ++i)
+        {
+            const double v = static_cast<double>(pre[i]);
+            const double s = v * v;
+            eTot += s;
+            if (i < fadeStart) ePre += s; else eBand += s;
+            y = (1.0 - aLp) * v + aLp * y;
+            const double sy = y * y;
+            lpTot += sy;
+            if (i < fadeStart) lpPre += sy; else lpBand += sy;
+        }
+        std::fprintf(stderr,
+            "[IR_TAIL_ENERGY] gen=%llu total=%.8e preFade=%.8e fadeBand=%.8e bandFrac=%.6f "
+            "lp100Total=%.8e lp100Pre=%.8e lp100Band=%.8e lp100BandFrac=%.6f\n",
+            static_cast<unsigned long long>(genDbg), eTot, ePre, eBand,
+            (eTot > 1.0e-30) ? eBand / eTot : 0.0,
+            lpTot, lpPre, lpBand, (lpTot > 1.0e-30) ? lpBand / lpTot : 0.0);
     }
 
 #if defined(__AVX2__)
@@ -719,6 +840,10 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
 
         stepResult.scaleFactor = scaleInfo.hasScaleFactor ? scaleInfo.scaleFactor : 1.0;
     }
+
+    printChainCheckpoint("E_phase", stepTrimmed, sampleRate);
+    std::fprintf(stderr, "[IR_CHAIN] F_scale scaleFactor=%.8f phaseMode=%d (scale は engine 内の周波数領域で乗算)\n",
+                 stepResult.scaleFactor, static_cast<int>(phaseMode));
 
     return true;
 }
