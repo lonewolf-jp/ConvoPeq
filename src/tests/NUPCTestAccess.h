@@ -56,6 +56,11 @@ struct NUPCTestAccess final
     static long long     layerFftSize     (const MKLNonUniformConvolver& c, int li) noexcept { return static_cast<long long>(c.m_layers[li].fftSize); }
     static int           layerInputPos    (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].inputPos; }
     static int           layerBaseFdlIdx  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].baseFdlIdxSaved; }
+    // ── WORK113-7E: accumulation / interleave 中間バッファ（読み取り専用） ──
+    static const double* layerAccumReal   (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].accumReal; }
+    static const double* layerAccumImag   (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].accumImag; }
+    static const double* layerAccumBuf    (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].accumBuf; }
+    static int           layerPartStride  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].partStride; }
 
     // ── B13 Policy R（stream clock / I2 safety counter — 読み取りのみ） ──
     // ★ ISR Bridge 原則: atomic は wrapper 経由のみ（raw .load()/.store() 不使用）。
