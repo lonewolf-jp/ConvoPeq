@@ -198,6 +198,15 @@ public:
                  const EQCoeffCache* coeffCache);
     void releaseResources();
 
+    // [WORK113-17 Phase 2-1] NonRT: World 投影の totalGainDb を既存 publish 機構へ反映する。
+    //   （INV-EQ-GAIN-001/002/004/005。dB→linear 変換は本関数内＝NonRT のみ。
+    //    RT は従来どおり totalGainTarget linear 値の参照のみ。）
+    void applyTotalGainDbNonRt(float gainDb) noexcept
+    {
+        ASSERT_NON_RT_THREAD();
+        storeTotalGainDb(gainDb);
+    }
+
     // バイパス制御
     void setBypass(bool shouldBypass) { convo::publishAtomic(bypassRequested, shouldBypass, std::memory_order_release); } // release: prepareToPlay/process の bypassRequested acquire と HB
     bool isBypassed() const { return convo::consumeAtomic(bypassRequested, std::memory_order_acquire); }               // acquire: setBypass の release と HB し最新バイパス状態を観測

@@ -478,6 +478,11 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
                          static_cast<AudioEngine::OversamplingType>(in.oversamplingType),
                          static_cast<AudioEngine::NoiseShaperType>(in.noiseShaperType),
                          &engine);
+        // [WORK113-17 Phase 2-1] new DSP へ World-derived totalGain を Publish 前に適用する。
+        //   （INV-EQ-GAIN-007: 新たに active となる DSP のみ。fading/old DSP には触れない。
+        //    prepare が totalGainTarget=1.0 を publish した直後に上書きするため、
+        //    Validate/Publish 時点で World と DSP の gain state が一致する。）
+        runtime->eqRt().applyTotalGainDbNonRt(in.eqParams.totalGainDb);
         // ★ WORK105: IR／ランタイム形状契約（NonRT・publish 前関門）。
         //   transfer された IRState（IR build 時の processing 形状）と、今 prepare した
         //   DSP の処理形状を照合する。不一致は無警告ガベージの確定原因のため publish 拒否。
