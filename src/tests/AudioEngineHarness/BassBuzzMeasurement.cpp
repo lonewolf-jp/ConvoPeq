@@ -1081,7 +1081,61 @@ void configureProbeFlatEQ(AudioEngine& e)
     e.endBulkParameterRestore(true);
 }
 
+// [WORK113 test-instrumentation cleanup B-2] --buzz-order= は列挙系
+//   （0 = ConvolverThenEQ / 1 = EQThenConvolver）。旧実装 `(v == "etc") ? 1 : 0` は
+//   "etc" 以外を黙って 0 に落とすため、typo・空値・"1" などが routing を意図せず
+//   ConvolverThenEQ へ上書きし得た（--buzz-eq/conv が 2026-09-19 に誘発した誤測定と同型）。
+//   呼出側は fail-closed とし、不明値は [BUZZ] FAIL を出して即時終了する。
+//   既定 -1（routing 未変更）はフラグ不在でのみ成立し、本関数は決して -1 を書かない。
+bool tryParseBuzzProcessingOrder(const std::string& v, int& out) noexcept
+{
+    if (v == "cte") { out = 0; return true; } // ConvolverThenEQ
+    if (v == "etc") { out = 1; return true; } // EQThenConvolver
+    return false;
+}
+
 } // namespace convo_buzz
+
+// ── --buzz-order= parser の regression test（pure / audio 非依存）──
+//   呼出規約は他ハーネステストと同一: 0 = PASS / 非0 = FAIL。
+//   本テストの主眼は「不明値が silent に 0 へ落ちないこと」と
+//   「失敗時に out を書かないこと（= 既定 sentinel -1 を壊さないこと）」の 2 点。
+int runBuzzArgParserTests()
+{
+    struct Case { const char* v; bool ok; int expect; const char* why; };
+    const Case cases[] = {
+        { "etc", true,  1, "正規値: EQThenConvolver" },
+        { "cte", true,  0, "正規値: ConvolverThenEQ（旧実装では表現不能だった明示値）" },
+        { "",    false, 0, "空値（旧実装では黙って 0 = ConvolverThenEQ に落ちた）" },
+        { "ect", false, 0, "typo: etc の並び替え（旧実装では黙って 0 に落ちた）" },
+        { "ETC", false, 0, "大文字は非受理（旧実装では黙って 0 に落ちた）" },
+        { "eq",  false, 0, "未知値（旧実装では黙って 0 に落ちた）" },
+        { "1",   false, 0, "数値は非受理（旧実装では 1 も黙って 0 に落ちた）" },
+        { "0",   false, 0, "数値は非受理（旧実装では 0 と偶然一致していた）" },
+    };
+
+    int failures = 0;
+    for (const Case& c : cases)
+    {
+        int out = -2; // parser が書かなければ未変更のまま検出できる番兵
+        const bool ok = convo_buzz::tryParseBuzzProcessingOrder(c.v, out);
+        const bool bad = (ok != c.ok) || (ok && out != c.expect) || (!ok && out != -2);
+        if (bad)
+        {
+            std::fprintf(stderr,
+                "[BUZZ_PARSER] FAIL: '--buzz-order=%s' -> ok=%d out=%d (expect ok=%d out=%d) : %s\n",
+                c.v, ok ? 1 : 0, out, c.ok ? 1 : 0, c.expect, c.why);
+            ++failures;
+        }
+    }
+
+    if (failures != 0)
+        return failures;
+
+    std::fprintf(stderr, "[BUZZ_PARSER] PASS: %d cases (unknown values never fall back to 0)\n",
+                 static_cast<int>(sizeof(cases) / sizeof(cases[0])));
+    return 0;
+}
 
 // ── エントリ: PublishPipelineIntegrationTests.cpp の main から --buzz で派遣 ──
 int runBassBuzzMeasurement(int argc, char* argv[])
@@ -1141,7 +1195,16 @@ int runBassBuzzMeasurement(int argc, char* argv[])
         else if (a.rfind("--buzz-quiet=", 0) == 0) quietMs = std::stoi(a.substr(13));
         else if (a.rfind("--buzz-dur=", 0) == 0) opt.runSec = std::stod(a.substr(11));
         else if (a.rfind("--buzz-probe-signal=", 0) == 0) probeSignalName = a.substr(20);
-        else if (a.rfind("--buzz-order=", 0) == 0) opt.orderMode = (a.substr(13) == "etc") ? 1 : 0;   // ★ WORK113-15
+        else if (a.rfind("--buzz-order=", 0) == 0)
+        {
+            // ★ WORK113-15 / cleanup B-2: 正規値は 'cte' / 'etc' のみ（fail-closed）
+            if (!tryParseBuzzProcessingOrder(a.substr(13), opt.orderMode))
+            {
+                std::fprintf(stderr, "[BUZZ] FAIL: --buzz-order expects 'cte' or 'etc' (got '%s')\n",
+                             a.substr(13).c_str());
+                std::exit(2);
+            }
+        }
         else if (a.rfind("--buzz-eq=", 0) == 0) opt.eqOn = parseOnOff("--buzz-eq", a.substr(10));            // ★ WORK113-15
         else if (a.rfind("--buzz-conv=", 0) == 0) opt.convOn = parseOnOff("--buzz-conv", a.substr(12));      // ★ WORK113-15
         else if (a.rfind("--buzz-hc=", 0) == 0) opt.hcMode = parseHcIdx(a.substr(10));                // ★ WORK113-15

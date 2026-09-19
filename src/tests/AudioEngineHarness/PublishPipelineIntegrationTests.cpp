@@ -1109,6 +1109,9 @@ int main(int argc, char* argv[])
 // BassBuzzMeasurement.cpp (WORK104: 低音ジジジノイズ自動計測)
 int runBassBuzzMeasurement(int argc, char* argv[]);
 
+// BassBuzzMeasurement.cpp (WORK113 cleanup B-2: --buzz-order= parser の fail-closed 回帰)
+int runBuzzArgParserTests();
+
     for (int i = 1; i < argc; ++i)
     {
         const std::string a(argv[i]);
@@ -1205,6 +1208,11 @@ int runBassBuzzMeasurement(int argc, char* argv[]);
             return runWorldRetirementMeasurement(measurement.c_str()) ? 0 : 1;   // ★ T1 (D100)
         return convo_soak::runSoakScenarios(full, scenario) ? 0 : 1;
     }
+
+    // ★ WORK113 cleanup B-2: --buzz-order= parser の fail-closed 回帰。
+    //   pure（audio 非依存・即時完了）のため既定テスト群の先頭で実行する。
+    if (runBuzzArgParserTests() != 0)
+        return 1;
 
     if (!testRebuildPublishCompletes())
     {
