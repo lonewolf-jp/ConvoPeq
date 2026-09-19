@@ -71,6 +71,31 @@
 namespace convo
 {
 
+// ★ WORK107/108 test-only trace storage（RT は relaxed telemetry のみ・読みは NonRT）。
+//   SetImpulse（NonRT）と Add/Get（RT）の双方から参照するため翻訳単位先頭で定義する。
+namespace {
+std::atomic<int> t_engRate { 0 };
+std::atomic<int> t_engLen { 0 };
+std::atomic<int> t_maxBlock { 0 };
+std::atomic<int> t_layers { 0 };
+std::atomic<int> t_l0Part { 0 };
+std::atomic<int> t_l0NumIR { 0 };
+std::atomic<int> t_l0NumParts { 0 };
+std::atomic<int> t_l0Fft { 0 };
+std::atomic<int> t_ringSize { 0 };
+std::atomic<int> t_addNs { 0 };
+std::atomic<unsigned long long> t_addCalls { 0 };
+std::atomic<unsigned long long> t_addCallsL0 { 0 };
+std::atomic<int> t_getNs { 0 };
+std::atomic<int> t_getGot { 0 };
+std::atomic<unsigned long long> t_getShort { 0 };
+std::atomic<int> t_ringW { 0 };
+std::atomic<int> t_ringR { 0 };
+std::atomic<int> t_ringAvail { 0 };
+std::atomic<int> t_l0Fdl { 0 };
+std::atomic<int> t_l0Next { 0 };
+}
+
 // ★ FFT エラー時に出力バッファをゼロクリア（Fail Closed）。
 static void clearFFTOutputOnError(double* buffer, size_t count,
                                   [[maybe_unused]] IppStatus status = ippStsNoErr,
@@ -1191,6 +1216,17 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
         }
     }
 
+    // ★ WORK107/108: engine build geometry を test-only で記録（NonRT。副作用なし）。
+    convo::publishAtomic(t_engRate, (filterSpec != nullptr) ? static_cast<int>(filterSpec->sampleRate) : 0, std::memory_order_relaxed);
+    convo::publishAtomic(t_engLen, irLen, std::memory_order_relaxed);
+    convo::publishAtomic(t_maxBlock, blockSize, std::memory_order_relaxed);
+    convo::publishAtomic(t_layers, m_numActiveLayers, std::memory_order_relaxed);
+    convo::publishAtomic(t_l0Part, (m_numActiveLayers > 0) ? m_layers[0].partSize : 0, std::memory_order_relaxed);
+    convo::publishAtomic(t_l0NumIR, (m_numActiveLayers > 0) ? m_layers[0].numPartsIR : 0, std::memory_order_relaxed);
+    convo::publishAtomic(t_l0NumParts, (m_numActiveLayers > 0) ? m_layers[0].numParts : 0, std::memory_order_relaxed);
+    convo::publishAtomic(t_l0Fft, (m_numActiveLayers > 0) ? static_cast<int>(m_layers[0].fftSize) : 0, std::memory_order_relaxed);
+    convo::publishAtomic(t_ringSize, m_ringSize, std::memory_order_relaxed);
+
     convo::publishAtomic(m_ready, true, std::memory_order_release);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t afterMkl = convo::diag::allocatedBytes();
@@ -1587,8 +1623,35 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 //==============================================================================
 // Add  ─ Audio Thread
 //==============================================================================
+void MKLNonUniformConvolver::getGeometryTrace(GeometryTrace& out) noexcept
+{
+    out.engineBuildRate  = convo::consumeAtomic(t_engRate, std::memory_order_relaxed);
+    out.engineTotalIrLen = convo::consumeAtomic(t_engLen, std::memory_order_relaxed);
+    out.maxBlockSize     = convo::consumeAtomic(t_maxBlock, std::memory_order_relaxed);
+    out.numActiveLayers  = convo::consumeAtomic(t_layers, std::memory_order_relaxed);
+    out.l0PartSize       = convo::consumeAtomic(t_l0Part, std::memory_order_relaxed);
+    out.l0NumPartsIR     = convo::consumeAtomic(t_l0NumIR, std::memory_order_relaxed);
+    out.l0NumParts       = convo::consumeAtomic(t_l0NumParts, std::memory_order_relaxed);
+    out.l0FftSize        = convo::consumeAtomic(t_l0Fft, std::memory_order_relaxed);
+    out.ringSize         = convo::consumeAtomic(t_ringSize, std::memory_order_relaxed);
+    out.lastAddNumSamples= convo::consumeAtomic(t_addNs, std::memory_order_relaxed);
+    out.addCalls         = convo::consumeAtomic(t_addCalls, std::memory_order_relaxed);
+    out.addCallsL0       = convo::consumeAtomic(t_addCallsL0, std::memory_order_relaxed);
+    out.lastGetNumSamples= convo::consumeAtomic(t_getNs, std::memory_order_relaxed);
+    out.lastGetGot       = convo::consumeAtomic(t_getGot, std::memory_order_relaxed);
+    out.getShortCount    = convo::consumeAtomic(t_getShort, std::memory_order_relaxed);
+    out.ringWrite        = convo::consumeAtomic(t_ringW, std::memory_order_relaxed);
+    out.ringRead         = convo::consumeAtomic(t_ringR, std::memory_order_relaxed);
+    out.ringAvail        = convo::consumeAtomic(t_ringAvail, std::memory_order_relaxed);
+    out.l0FdlIndex       = convo::consumeAtomic(t_l0Fdl, std::memory_order_relaxed);
+    out.l0NextPart       = convo::consumeAtomic(t_l0Next, std::memory_order_relaxed);
+}
+
 void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 {
+    // ★ WORK107/108: RT は relaxed telemetry のみ（ログ・分岐・検証なし）。読み出しは NonRT。
+    convo::publishAtomic(t_addNs, numSamples, std::memory_order_relaxed);
+    convo::fetchAddAtomic(t_addCalls, 1ULL, std::memory_order_relaxed);
     #ifdef NUC_DEBUG_GUARDS
         checkGuards();
         // 内部バッファの簡単な健全性チェック
@@ -1626,6 +1689,10 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 if (l.isImmediate)
                 {
                     processLayerBlock(l);
+                    // ★ WORK107/108: L0 の FDL index / 次 partition を test-only 記録（relaxed）。
+                    convo::publishAtomic(t_l0Fdl, static_cast<int>(l.fdlIndex), std::memory_order_relaxed);
+                    convo::publishAtomic(t_l0Next, l.nextPart, std::memory_order_relaxed);
+                    convo::fetchAddAtomic(t_addCallsL0, 1ULL, std::memory_order_relaxed);
                 }
                 else
                 {

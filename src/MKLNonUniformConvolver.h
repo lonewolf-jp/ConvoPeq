@@ -243,6 +243,35 @@ public:
     //----------------------------------------------------------
     bool isReady() const noexcept { return convo::consumeAtomic(m_ready, std::memory_order_acquire); }
 
+    // ★ WORK107/108 test-only trace（RT 側は relaxed telemetry のみ、読み出しは NonRT）。
+    //   Add()/Get() の実呼び出し形状と、エンジン構築形状（build rate・IR長・L0幾何・ring）を
+    //   NonRT で同一世代として観測するための装置。RT にログ・分岐・検証は置かない。
+    struct GeometryTrace {
+        // engine build-time（SetImpulse / NonRT）
+        int engineBuildRate = 0;   // filterSpec->sampleRate（engine IR build rate）
+        int engineTotalIrLen = 0;  // SetImpulse に渡された irLen（targetLength）
+        int maxBlockSize = 0;      // SetImpulse に渡された blockSize
+        int numActiveLayers = 0;
+        int l0PartSize = 0;
+        int l0NumPartsIR = 0;
+        int l0NumParts = 0;
+        int l0FftSize = 0;
+        int ringSize = 0;
+        // runtime（Add/Get / RT relaxed telemetry）
+        int lastAddNumSamples = 0;
+        unsigned long long addCalls = 0;
+        unsigned long long addCallsL0 = 0;
+        int lastGetNumSamples = 0;
+        int lastGetGot = 0;
+        unsigned long long getShortCount = 0;
+        int ringWrite = 0;
+        int ringRead = 0;
+        int ringAvail = 0;
+        int l0FdlIndex = 0;
+        int l0NextPart = 0;
+    };
+    static void getGeometryTrace(GeometryTrace& out) noexcept;
+
     //----------------------------------------------------------
     // areFftDescriptorsCommitted  ─ いつでも呼び出し可
     // Audio Thread で使用する IPP FFT スペックが SetImpulse() で
