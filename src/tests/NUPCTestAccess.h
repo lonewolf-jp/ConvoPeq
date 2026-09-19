@@ -42,6 +42,21 @@ struct NUPCTestAccess final
     static std::uint64_t layerDelayWriteCursor (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].delayWriteCursor; }
     static std::uint64_t layerDelayReadCursor  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].delayReadCursor; }
 
+    // ── WORK113-7B: L0 周波数領域内部バッファ（読み取り専用 getter のみ） ──
+    //   RT 経路へは一切追加しない。standalone harness からの NonRT スナップショット専用。
+    static const double* layerFftTimeBuf  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].fftTimeBuf; }
+    static const double* layerFftOutBuf   (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].fftOutBuf; }
+    static const double* layerFdlReal     (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].fdlReal; }
+    static const double* layerFdlImag     (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].fdlImag; }
+    static const double* layerIrFreqReal  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].irFreqReal; }
+    static const double* layerIrFreqImag  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].irFreqImag; }
+    static int           layerFdlIndex    (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].fdlIndex; }
+    static int           layerFdlMask     (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].fdlMask; }
+    static int           layerComplexSize (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].complexSize; }
+    static long long     layerFftSize     (const MKLNonUniformConvolver& c, int li) noexcept { return static_cast<long long>(c.m_layers[li].fftSize); }
+    static int           layerInputPos    (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].inputPos; }
+    static int           layerBaseFdlIdx  (const MKLNonUniformConvolver& c, int li) noexcept { return c.m_layers[li].baseFdlIdxSaved; }
+
     // ── B13 Policy R（stream clock / I2 safety counter — 読み取りのみ） ──
     // ★ ISR Bridge 原則: atomic は wrapper 経由のみ（raw .load()/.store() 不使用）。
     static std::uint64_t outputSamplesProcessed (const MKLNonUniformConvolver& c) noexcept { return c.m_outputSamplesProcessed; }
