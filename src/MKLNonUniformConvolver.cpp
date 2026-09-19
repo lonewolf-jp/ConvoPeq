@@ -1861,7 +1861,14 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
     //   m_outputSamplesProcessed += got は L1/L2 read より後に実施（off-by-B 防止 — I4 契約）。
     const std::uint64_t t0 = m_outputSamplesProcessed;
 
-    const int got = ringRead(output, numSamples);
+    const int got = ringRead(output, numSamples);   // ★ WORK113: 返却値を RT-safe telemetry で観測
+    convo::publishAtomic(t_getGot, got, std::memory_order_relaxed);
+    if (got < numSamples) convo::fetchAddAtomic(t_getShort, static_cast<unsigned long long>(1), std::memory_order_relaxed);
+    // ★ WORK107/108: Get 形状と ring 位置を test-only 記録（relaxed）。
+    convo::publishAtomic(t_getNs, numSamples, std::memory_order_relaxed);
+    convo::publishAtomic(t_ringW, m_ringWrite, std::memory_order_relaxed);
+    convo::publishAtomic(t_ringR, m_ringRead, std::memory_order_relaxed);
+    convo::publishAtomic(t_ringAvail, m_ringAvail, std::memory_order_relaxed);
 
     auto addFallback = [](int n, double* dst, const double* src) noexcept
     {

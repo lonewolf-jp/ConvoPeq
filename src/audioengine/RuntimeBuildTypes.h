@@ -5,6 +5,8 @@
 #include <cmath>
 #include <algorithm>
 
+#include "core/EQParameters.h" // [WORK113-16 Phase 1] EQ World projection（A1: BuildInput 経由の値 capture）
+
 #pragma warning(push)
 #pragma warning(disable : 4324) // C4324: キャッシュライン分離用alignasによる意図的なパディングを許容
 
@@ -33,6 +35,7 @@ struct BuildInput final {
     double outputMakeupGain = 1.0;
     double convolverInputTrimGain = 1.0;
     bool autoGainStagingEnabled = false;  // ★ v14.0: Auto Gain Staging フラグ
+    convo::EQParameters eqParams {};      // [WORK113-16 Phase 1] Message Thread で値 capture された EQ 状態
 };
 
 struct RuntimeBuildFingerprint

@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "core/EQParameters.h" // [WORK113-16 Phase 1] EQ World projection（A1: World-owned value）
+
 namespace convo::isr {
 
 // ★ v9: Phase-2.5 Emergency Override 公式化 + Phase-4 Validator 網羅率拡充
@@ -340,6 +342,10 @@ struct CoefficientSemantic
     int adaptiveCoeffBankIndex = -1;
     std::uint32_t adaptiveCoeffGeneration = 0;
     std::uint64_t eqCoeffHash = 0;
+    // [WORK113-16 Phase 1] A1 契約: EQ パラメータの World-owned value 投影。
+    //   eqCoeffHash != 0 が valid EQ projection の条件。hash == 0 の場合は
+    //   本値を「有効な投影」として扱わない（RT は既存 fail-closed で EQ bypass）。
+    EQParameters eqParams {};
 };
 
 struct RuntimeSemanticSchema

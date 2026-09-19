@@ -989,7 +989,8 @@ void AudioEngine::timerCallback()
                                                                      nullptr,
                                                                      convo::TransitionPolicy::SmoothOnly,
                                                                      0.0,
-                                                                     false);
+                                                                     false,
+                                                                     &currentBuildSnapshot_); // [WORK113-16 Phase 1] 最終 commit の sealed input を引継ぎ（EQ projection 含む）
             // ★ B4: idle publish (#5) — oldHandle は null 固定
             const auto pubResultTimer = commitRuntimePublication(std::move(worldOwner),
                                      RegistrationContext::needsRegistration(currentAfterFade),

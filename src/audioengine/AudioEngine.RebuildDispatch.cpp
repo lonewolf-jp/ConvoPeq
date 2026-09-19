@@ -615,6 +615,10 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     task.buildInput.outputMakeupGain = paramSnapshot.outputMakeupGain;
     task.buildInput.convolverInputTrimGain = paramSnapshot.convolverInputTrimGain;
     task.buildInput.autoGainStagingEnabled = paramSnapshot.autoGainStagingEnabled;
+    // [WORK113-16 Phase 1] EQ World projection — Message Thread で EQ shadow を値 capture
+    //   （uiConvolverProcessor.captureBuildSnapshot() と同一の capture コンテキスト）。
+    if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
+        task.buildInput.eqParams = eqState->toEQParameters();
     task.convolverBuildSnapshot = uiConvolverProcessor.captureBuildSnapshot();
     const uint64_t structuralHash = uiConvolverProcessor.isIRLoaded() ? uiConvolverProcessor.getStructuralHash() : 0;
 

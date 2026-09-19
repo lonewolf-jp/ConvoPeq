@@ -378,7 +378,50 @@ RuntimeBuilder::buildRuntimePublishWorld(
     const int bankIndex = spec.adaptive.coeffBankIndex;
     worldOwner->coefficient.adaptiveCoeffBankIndex = bankIndex;
     worldOwner->coefficient.adaptiveCoeffGeneration = static_cast<uint32_t>(spec.adaptive.coeffGeneration);
-    worldOwner->coefficient.eqCoeffHash = 0;
+    // [WORK113-16 Phase 1] EQ World projection（A1 契約: eqParams は World-owned value・hash は cache identity）
+    //   getOrCreate 失敗時は E1 telemetry + hash=0 → RT は既存 fail-closed（EQ bypass）。
+    //   「eqParams 有効 + hash 0」を正常 bypass として扱わない（Builder invariant）。
+    if (sealedSnapshot != nullptr)
+    {
+        auto* eqCache = engine.getOrCreateEQCoeffCacheForBuild(sealedSnapshot->buildInput.eqParams,
+                                                               sealedSnapshot->buildInput.sampleRate,
+                                                               sealedSnapshot->buildInput.blockSize,
+                                                               nextGraphGeneration);
+        if (eqCache != nullptr)
+        {
+            worldOwner->coefficient.eqParams = sealedSnapshot->buildInput.eqParams;
+            worldOwner->coefficient.eqCoeffHash = eqCache->paramsHash;
+        }
+        else
+        {
+            worldOwner->coefficient.eqParams = convo::EQParameters {};
+            worldOwner->coefficient.eqCoeffHash = 0;
+            engine.noteEQProjectionMissingForBuild();
+            juce::Logger::writeToLog("[EQ_PROJECTION] getOrCreate failed — EQ stays fail-closed (E1)");
+        }
+    }
+    else
+    {
+        // old-overload callers（bootstrap / reprepare / shutdown）: engine 経由で EQ shadow 値を取得
+        //   （Builder → UI の直接依存は作らず、engine の値 accessor 経由で値を受け取る）
+        const auto eqProj = engine.getEQWorldProjectionForBuild();
+        auto* eqCache = engine.getOrCreateEQCoeffCacheForBuild(eqProj.params,
+                                                               eqProj.sampleRate,
+                                                               eqProj.maxBlockSize,
+                                                               nextGraphGeneration);
+        if (eqCache != nullptr)
+        {
+            worldOwner->coefficient.eqParams = eqProj.params;
+            worldOwner->coefficient.eqCoeffHash = eqCache->paramsHash;
+        }
+        else
+        {
+            worldOwner->coefficient.eqParams = convo::EQParameters {};
+            worldOwner->coefficient.eqCoeffHash = 0;
+            engine.noteEQProjectionMissingForBuild();
+            juce::Logger::writeToLog("[EQ_PROJECTION] getOrCreate failed (old path) — EQ stays fail-closed (E1)");
+        }
+    }
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
     worldOwner->projectionFreshness.projectionRevision = nextGraphGeneration;

@@ -1534,6 +1534,43 @@ public:
     // acquire: Audio Thread の release (debugLastCreatedEqHash publish) と HB し、診断ハッシュを取得。
     [[nodiscard]] uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(rtAuxMutable_.debugLastCreatedEqHash, std::memory_order_acquire); }
 
+    // [WORK113-16 Phase 1] NonRT build path 専用: EQ cache の取得/生成（A1 契約）。
+    //   RuntimeBuilder が EQ projection（eqParams 値 + eqCoeffHash）を構築するために
+    //   使用する。RT からは呼ばない（getOrCreate は writeMutex を使用する）。
+    [[nodiscard]] EQCoeffCache* getOrCreateEQCoeffCacheForBuild(const convo::EQParameters& params,
+                                                               double sampleRate,
+                                                               int maxBlockSize,
+                                                               uint64_t generation)
+    {
+        ASSERT_NON_RT_THREAD();
+        return eqCacheManager.getOrCreate(params, sampleRate, maxBlockSize, generation);
+    }
+
+    // [WORK113-16 Phase 1] E1 telemetry: EQ projection 構築失敗（NonRT build path 専用）。
+    void noteEQProjectionMissingForBuild() noexcept
+    {
+        fetchAddAtomic(rtAuxMutable_.eqProjectionMissingCountNonRt,
+                       static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    }
+
+    // [WORK113-16 Phase 1] old-overload world build 用（Message Thread）: EQ shadow 値と
+    //   cache key 入力（sr/block）を値で返す。Builder が uiEqEditor を直接読まないための境界。
+    struct EQWorldProjectionForBuild
+    {
+        convo::EQParameters params {};
+        double sampleRate = 48000.0;
+        int maxBlockSize = 0;
+    };
+    [[nodiscard]] EQWorldProjectionForBuild getEQWorldProjectionForBuild() const
+    {
+        EQWorldProjectionForBuild p;
+        if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
+            p.params = eqState->toEQParameters();
+        p.sampleRate = consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        p.maxBlockSize = static_cast<int>(consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+        return p;
+    }
+
     void setSoftClipEnabled(bool enabled);
     [[nodiscard]] bool isSoftClipEnabled() const;
 
@@ -1912,6 +1949,7 @@ public:
         std::atomic<std::uint64_t> debugRebuildDispatchTaskSnapshotFallbackCount { 0 };
         std::atomic<std::uint64_t> eqCacheSnapshotCreateMissCountNonRt { 0 };
         std::atomic<std::uint64_t> eqCacheRuntimeLookupMissCountNonRt { 0 };
+        std::atomic<std::uint64_t> eqProjectionMissingCountNonRt { 0 }; // [WORK113-16 Phase 1] E1: EQ projection 構築失敗（getOrCreate 失敗）
         std::atomic<uint64_t> debugLastCreatedEqHash { 0 };
         std::atomic<uint64_t> lastEnqueuedSnapshotDebounceKey { 0 };
         std::atomic<bool> hasLastEnqueuedSnapshotDebounceKey { false };
@@ -4036,6 +4074,9 @@ public:
             snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
             snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
             snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;
+            // [WORK113-16 Phase 1] EQ World projection — eqParams は不変 world 内の値
+            //   （寿命 = RuntimeReadHandle の reader epoch scope。RT は既存 fail-closed のまま）。
+            snapshot.snapshotEqParams = &world->coefficient.eqParams;
         }
         else
         {
