@@ -41,6 +41,11 @@
       "environment": {
         "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
       }
+    },
+    "mslearn": {
+      "type": "remote",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "enabled": true
     }
   }
 }
