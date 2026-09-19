@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
+#include "OversamplingPolicy.h"  // ★ WORK105/F1: processing geometry 解決用
 
 namespace {
 void diagLog(const juce::String& message)
@@ -547,6 +548,12 @@ void AudioEngine::setOversamplingFactor(int factor)
     {
         convo::publishAtomic(manualOversamplingFactor, newFactor, std::memory_order_release);
         convo::publishAtomic(m_currentOversamplingFactor, newFactor, std::memory_order_release);
+        // ★ WORK105/F1: OS 変更時は UI convolver の処理形状も追従させる。
+        //   追従なしでは以降の IR ロードが旧 processing 形状で build され、
+        //   DSP world（新形状）との mismatch → publish 拒否の連鎖になる。
+        reprepareUiConvolverForProcessingGeometry(
+            convo::consumeAtomic(currentSampleRate, std::memory_order_acquire),
+            convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
         submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (!m_isRestoringState && sr > 0.0)
@@ -562,6 +569,24 @@ void AudioEngine::setOversamplingFactor(int factor)
 [[nodiscard]] int AudioEngine::getOversamplingFactor() const
 {
     return convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
+}
+
+// ★ WORK105/F1: UI convolver の処理形状追従（NonRT専用）。
+void AudioEngine::reprepareUiConvolverForProcessingGeometry(double hostSr, int hostBs) noexcept
+{
+    if (!(hostSr > 0.0) || hostBs <= 0)
+        return;
+    convo::BuildInput osIn{};
+    osIn.sampleRate = hostSr;
+    osIn.oversamplingFactor = convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
+    const auto osr = convo::OversamplingPolicy::resolve(osIn);
+    if (osr.supported && osr.isValid())
+    {
+        uiConvolverProcessor.prepareToPlay(
+            hostSr * static_cast<double>(osr.resolvedOsFactor),
+            hostBs * osr.resolvedOsFactor);
+    }
+    // 解決不可時は従来形状を維持（後続の契約検証が loud log で検出する）
 }
 
 // ---------------------------------------------------------------------------

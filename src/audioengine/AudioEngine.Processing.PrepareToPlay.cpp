@@ -325,7 +325,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     }
 
     // --- DSP再ビルド判定・同期 ---
-    uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
+    // ★ WORK105/F1: UI convolver は processing geometry で prepare する。
+    //   従来の host geometry では LoaderThread が host rate で IR を build し、
+    //   DSP world（processing rate）へ transfer されて rate mismatch を起こし、
+    //   無警告ガベージの原因になっていた（WORK104 実行時確定）。
+    //   PDC/表示は公開 world 由来の base-rate 換算のため影響なし（Latency.cpp）。
+    reprepareUiConvolverForProcessingGeometry(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
     const bool hasCurrentRuntime = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle) != nullptr);

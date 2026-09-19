@@ -1583,6 +1583,12 @@ public:
     void setOversamplingType(OversamplingType type);
     [[nodiscard]] OversamplingType getOversamplingType() const;
 
+    // ★ WORK105/F1: UI convolver を現 processing geometry に追従させる（NonRT専用）。
+    //   LoaderThread／IRState の snapshot 元。hostSr/hostBs（ホスト域）を与えると
+    //   OversamplingPolicy で解決した processing 形状で prepare し直す。
+    //   解決不可時は host 形状のまま（従来動作）＋ loud log。
+    void reprepareUiConvolverForProcessingGeometry(double hostSr, int hostBs) noexcept;
+
     // ────────────────────────────────────────────────────────────────
     // 出力周波数フィルター設定 (Thread-safe)
     //
