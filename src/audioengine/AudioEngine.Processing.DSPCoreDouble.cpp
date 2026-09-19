@@ -389,6 +389,12 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             convolverRt().process(processBlock);
             // ★ [work65] work52キャプチャコード削除
+            // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
+            outputFilter.process(processBlock,
+                                 true,
+                                 state.convHCMode,
+                                 state.convLCMode,
+                                 state.eqLPFMode);
         }
         if (!state.eqBypassed)
         {
@@ -447,19 +453,25 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             }
             convolverRt().process(processBlock);
             // ★ [work65] work52キャプチャコード削除
+            // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
+            outputFilter.process(processBlock,
+                                 true,
+                                 state.convHCMode,
+                                 state.convLCMode,
+                                 state.eqLPFMode);
         }
     }
 
+    // [WORK113-15] ② EQ final stage — EQ 有効時のみ適用（旧 convIsLast 判定による単一 call は廃止）。
+    //   ① conv 出力段 HC/LC は convolverRt().process() 直後の !convBypassed ガード内で適用済み
+    //   （HC/LC authority は convActive のみ・routing order に依存しない）。
+    if (!state.eqBypassed)
     {
-        const bool convActive = !state.convBypassed;
-        const bool eqActive   = !state.eqBypassed;
-        if (convActive || eqActive)
-        {
-            const bool convIsLast = convActive &&
-                (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            outputFilter.process(processBlock, convIsLast,
-                                 state.convHCMode, state.convLCMode, state.eqLPFMode);
-        }
+        outputFilter.process(processBlock,
+                             false,
+                             state.convHCMode,
+                             state.convLCMode,
+                             state.eqLPFMode);
     }
 
     for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)

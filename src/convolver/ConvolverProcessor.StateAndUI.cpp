@@ -910,8 +910,11 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
     hashCombine(floatBits(snapshot.mixedTransitionEndHz));
 
     hashCombine(snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
-    hashCombine(static_cast<uint64_t>(snapshot.nucHCMode));
-    hashCombine(static_cast<uint64_t>(snapshot.nucLCMode));
+    // [WORK113-13 Phase 1] nucHCMode/nucLCMode を structural hash から除外。
+    //   根拠: doc/work113/filter_application_implementation_plan_20260918.md §6 / §10
+    //   HC/LC の単一 Authority は conv 出力段の OutputFilter ① へ移行し、IR は mode 非依存になる。
+    //   よって mode 変更は IR の structural change ではない（rebuild / crossfade を要求しない）。
+    //   受入: hash 除外後、mode 変更で REBUILD_TELEMETRY が発行されないこと（0 回）。
     hashCombine(static_cast<uint64_t>(snapshot.tailMode));
     hashCombine(floatBits(snapshot.tailStartSec));
     hashCombine(floatBits(snapshot.tailStrength));

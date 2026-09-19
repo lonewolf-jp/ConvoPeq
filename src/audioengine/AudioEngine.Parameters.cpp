@@ -665,12 +665,10 @@ void AudioEngine::setOversamplingType(OversamplingType type)
 void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 {
     convo::publishAtomic(convHCFilterMode, mode, std::memory_order_release);
-    // [Mem-Fix] NUC SoA (irFreqReal/irFreqImag) を再適用するため、uiConvolverProcessor を再構築する。
-    // DSPCore::convolver は次回 requestRebuild 時に captureBuildSnapshot → applyBuildSnapshot + transferIRStateFrom
-    // → rebuildAllIRsSynchronous で追従する (旧 syncStateFrom 方式は撤去済み。詳細は doc/work89/INTEGRATED-BUG-LIST.md §12)。
-    uiConvolverProcessor.setNUCFilterModes(
-        convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),
-        convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
+    // [WORK113-13 Phase 1] IR への HC/LC 焼き込み（setNUCFilterModes fan-out）を停止。
+    //   根拠: doc/work113/filter_application_implementation_plan_20260918.md §6 / §10
+    //   HC/LC の単一 Authority は conv 出力段の OutputFilter ①（係数は prepare で全モード分生成済み・RT は index 引きのみ）。
+    //   IR は mode 非依存となるため uiConvolverProcessor へ伝搬しない（= structural rebuild を要求しない）。
 }
 
 [[nodiscard]] convo::HCMode AudioEngine::getConvHCFilterMode() const noexcept
@@ -681,12 +679,10 @@ void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 void AudioEngine::setConvLCFilterMode(convo::LCMode mode) noexcept
 {
     convo::publishAtomic(convLCFilterMode, mode, std::memory_order_release);
-    // [Mem-Fix] NUC SoA (irFreqReal/irFreqImag) を再適用するため、uiConvolverProcessor を再構築する。
-    // DSPCore::convolver は次回 requestRebuild 時に captureBuildSnapshot → applyBuildSnapshot + transferIRStateFrom
-    // → rebuildAllIRsSynchronous で追従する (旧 syncStateFrom 方式は撤去済み。詳細は doc/work89/INTEGRATED-BUG-LIST.md §12)。
-    uiConvolverProcessor.setNUCFilterModes(
-        convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),
-        convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
+    // [WORK113-13 Phase 1] IR への HC/LC 焼き込み（setNUCFilterModes fan-out）を停止。
+    //   根拠: doc/work113/filter_application_implementation_plan_20260918.md §6 / §10
+    //   HC/LC の単一 Authority は conv 出力段の OutputFilter ①（係数は prepare で全モード分生成済み・RT は index 引きのみ）。
+    //   IR は mode 非依存となるため uiConvolverProcessor へ伝搬しない（= structural rebuild を要求しない）。
 }
 
 [[nodiscard]] convo::LCMode AudioEngine::getConvLCFilterMode() const noexcept

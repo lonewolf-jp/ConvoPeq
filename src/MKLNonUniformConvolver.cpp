@@ -1101,8 +1101,14 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
 
     m_latency = m_layers[0].partSize;
 
-    if (filterSpec != nullptr)
-        applySpectrumFilter(*filterSpec);
+    // [WORK113-14 Phase 2] NUC 側 HC/LC 適用を停止（IR は raw のまま）。
+    //   根拠: doc/work113/filter_application_implementation_plan_20260918.md §6 / §10
+    //   HC/LC の単一 Authority は conv 出力段の OutputFilter ①（routing 確定は WORK113-15）。
+    //   applySpectrumFilter() 関数自体・FilterSpec は保持（削除しない）。呼出のみ停止する。
+    //   受入: STATE/TOPOLOGY INTERMEDIATE PASS（NUC 内から HC/LC が消えたこと）。
+    //     本段階は routing 未変更のため HC/LC が一時的に欠落し得る（WORK113-15 で確定）。
+    //   旧: if (filterSpec != nullptr) applySpectrumFilter(*filterSpec);
+    (void)filterSpec;
 
     if (tailEnabled && tailMode == 0)
     {
