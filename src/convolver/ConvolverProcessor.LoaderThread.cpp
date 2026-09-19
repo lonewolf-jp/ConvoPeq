@@ -612,40 +612,76 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         }
     }
 
-    if (stepResult.loadedSR > 0.0 && sampleRate > 0.0 &&
-        std::abs(stepResult.loadedSR - sampleRate) > 1e-6)
+    // ★ WORK109 109-1/109-2: resample 世代ペア + 実データ密度（non-zero index）の記録。
+    //   Numeric trace only (NonRT LoaderThread). RT には一切出力しない。
     {
-        const uint64_t myGen = owner.convolverStateGeneration.getCurrentGeneration();
-        const r8b::EDSPFilterPhaseResponse r8bPhase =
-            (owner.getResamplingPhaseMode() == ResamplingPhaseMode::Linear)
-                ? r8b::fprLinearPhase : r8b::fprMinPhase;
-
-        auto resampleOut = ConvolverProcessorInternal::resampleIR(
-            stepResult.loadedIR, stepResult.loadedSR, sampleRate, r8bPhase,
-            [&]() -> bool {
-                return shouldStop() ||
-                       !owner.convolverStateGeneration.isCurrentGeneration(myGen);
-            });
-
-        if (!owner.convolverStateGeneration.isCurrentGeneration(myGen))
-            return false;
-
-        switch (resampleOut.result)
+        const double preSr = stepResult.loadedSR;
+        const int preLen = stepResult.loadedIR.getNumSamples();
+        int preArg = -1;
+        if (preLen > 0 && stepResult.loadedIR.getNumChannels() > 0)
         {
-            case ConvolverProcessorInternal::ResampleResult::Success:
-                stepResult.loadedIR = std::move(resampleOut.buffer);
-                stepResult.loadedSR = sampleRate;
-                break;
-            case ConvolverProcessorInternal::ResampleResult::Cancelled:
-                return false;
-            case ConvolverProcessorInternal::ResampleResult::SilentIR:
-                stepResult.errorMessage = "IR is silent (all samples near zero).";
-                return false;
-            case ConvolverProcessorInternal::ResampleResult::Error:
-            default:
-                stepResult.errorMessage = "Resampling failed (unknown error).";
-                return false;
+            const double* d = stepResult.loadedIR.getReadPointer(0);
+            double bv = 0.0;
+            for (int i = 0; i < preLen; ++i)
+                if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; preArg = i; }
         }
+
+        bool didResample = false;
+
+        if (stepResult.loadedSR > 0.0 && sampleRate > 0.0 &&
+            std::abs(stepResult.loadedSR - sampleRate) > 1e-6)
+        {
+            const uint64_t myGen = owner.convolverStateGeneration.getCurrentGeneration();
+            const r8b::EDSPFilterPhaseResponse r8bPhase =
+                (owner.getResamplingPhaseMode() == ResamplingPhaseMode::Linear)
+                    ? r8b::fprLinearPhase : r8b::fprMinPhase;
+
+            auto resampleOut = ConvolverProcessorInternal::resampleIR(
+                stepResult.loadedIR, stepResult.loadedSR, sampleRate, r8bPhase,
+                [&]() -> bool {
+                    return shouldStop() ||
+                           !owner.convolverStateGeneration.isCurrentGeneration(myGen);
+                });
+
+            if (!owner.convolverStateGeneration.isCurrentGeneration(myGen))
+                return false;
+
+            switch (resampleOut.result)
+            {
+                case ConvolverProcessorInternal::ResampleResult::Success:
+                    stepResult.loadedIR = std::move(resampleOut.buffer);
+                    stepResult.loadedSR = sampleRate;
+                    break;
+                case ConvolverProcessorInternal::ResampleResult::Cancelled:
+                    return false;
+                case ConvolverProcessorInternal::ResampleResult::SilentIR:
+                    stepResult.errorMessage = "IR is silent (all samples near zero).";
+                    return false;
+                case ConvolverProcessorInternal::ResampleResult::Error:
+                default:
+                    stepResult.errorMessage = "Resampling failed (unknown error).";
+                    return false;
+            }
+            didResample = true;
+        }
+
+        const int postLen = stepResult.loadedIR.getNumSamples();
+        int postArg = -1;
+        if (postLen > 0 && stepResult.loadedIR.getNumChannels() > 0)
+        {
+            const double* d = stepResult.loadedIR.getReadPointer(0);
+            double bv = 0.0;
+            for (int i = 0; i < postLen; ++i)
+                if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; postArg = i; }
+        }
+
+        std::fprintf(stderr,
+            "[IR_RATE_GEN] gen=%llu sourceSr=%.0f targetSr=%.0f actualSr=%.0f "
+            "sourceLen=%d convertedLen=%d ratio=%.4f resampled=%s srcArgmax=%d convArgmax=%d\n",
+            static_cast<unsigned long long>(owner.convolverStateGeneration.getCurrentGeneration()),
+            preSr, sampleRate, stepResult.loadedSR, preLen, postLen,
+            static_cast<double>(postLen) / static_cast<double>(preLen > 0 ? preLen : 1),
+            didResample ? "yes" : "no", preArg, postArg);
     }
 
     if (ConvolverProcessorInternal::checkCancellation(shouldStop, nullptr)) return false;
