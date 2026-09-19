@@ -16,6 +16,8 @@ enum class BuildError {
     ConvolverFailure,    // ★ C-2: Convolver Build 失敗
     PrepareFailure,      // ★ C-2: DSPCore::prepare() 失敗
     WarmupFailed,
+    IRRateMismatch,      // ★ WORK105: IR rate != world processing rate → publish 拒否
+    IRBlockMismatch,     // ★ WORK105: IR block quantum != world processing quantum → publish 拒否
     InternalError
 };
 
@@ -48,6 +50,8 @@ constexpr BuildOutcome kBuildErrorDefaultTable[] = {
     /* ConvolverFailure */  { BuildError::ConvolverFailure,  FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
     /* PrepareFailure */    { BuildError::PrepareFailure,    FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
     /* WarmupFailed */      { BuildError::WarmupFailed,      FailureClassification::Transient,      RetryDisposition::RetryImmediate },
+    /* IRRateMismatch */    { BuildError::IRRateMismatch,    FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
+    /* IRBlockMismatch */   { BuildError::IRBlockMismatch,   FailureClassification::Infrastructure, RetryDisposition::RetryBackoff },
     /* InternalError */     { BuildError::InternalError,     FailureClassification::Fatal,          RetryDisposition::NoRetry },
 };
 static_assert(sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome)
@@ -56,7 +60,8 @@ static_assert(sizeof(kBuildErrorDefaultTable) / sizeof(BuildOutcome)
 
 constexpr const char* kBuildErrorNames[] = {
     "None", "InvalidInput", "ResourceUnavailable", "MKLFailure",
-    "ConvolverFailure", "PrepareFailure", "WarmupFailed", "InternalError"
+    "ConvolverFailure", "PrepareFailure", "WarmupFailed",
+    "IRRateMismatch", "IRBlockMismatch", "InternalError"
 };
 static_assert(sizeof(kBuildErrorNames) / sizeof(const char*)
                   == static_cast<size_t>(BuildError::InternalError) + 1,

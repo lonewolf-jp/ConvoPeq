@@ -1,5 +1,6 @@
 #include "RuntimeBuilder.h"
 #include "AutoGainPlanner.h"  // ★ v14.0
+#include "IRRuntimeContract.h" // ★ WORK105: IR／ランタイム形状契約
 
 #include <bit>
 #include <cstdint>
@@ -434,6 +435,43 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
                          static_cast<AudioEngine::OversamplingType>(in.oversamplingType),
                          static_cast<AudioEngine::NoiseShaperType>(in.noiseShaperType),
                          &engine);
+        // ★ WORK105: IR／ランタイム形状契約（NonRT・publish 前関門）。
+        //   transfer された IRState（IR build 時の processing 形状）と、今 prepare した
+        //   DSP の処理形状を照合する。不一致は無警告ガベージの確定原因のため publish 拒否。
+        //   convBypassed の world は convolver を実行しないため対象外。
+        //   RT 側への検証持込みはなし（M-04 oversize gate は defense-in-depth として維持）。
+        if (!in.convBypassed)
+        {
+            const auto irGeo = runtime->convolverRt().getIRGeometry();
+            if (irGeo.hasIR)
+            {
+                const double dspRate = runtime->convolverRt().getPreparedSampleRate();
+                const int dspBlock = runtime->convolverRt().getPreparedBlockSize();
+                const auto verdict = convo::checkIRRuntimeContract(
+                    irGeo.sampleRate, irGeo.blockSize, dspRate, dspBlock);
+                if (verdict.violation == convo::IRRuntimeContractViolation::UnknownSourceGeometry)
+                {
+                    juce::Logger::writeToLog("[IR_CONTRACT] unverifiable IR geometry (rate="
+                        + juce::String(irGeo.sampleRate, 1) + " block=" + juce::String(irGeo.blockSize)
+                        + "); allowing with loud log (legacy/RCU path)");
+                }
+                else if (verdict.refused())
+                {
+                    const auto contractError =
+                        (verdict.violation == convo::IRRuntimeContractViolation::RateMismatch)
+                            ? BuildError::IRRateMismatch : BuildError::IRBlockMismatch;
+                    juce::Logger::writeToLog("[IR_CONTRACT] REFUSED publish: "
+                        + juce::String(convo::toString(verdict.violation))
+                        + " ir(rate=" + juce::String(irGeo.sampleRate, 1)
+                        + " block=" + juce::String(irGeo.blockSize)
+                        + " gen=" + juce::String(static_cast<juce::int64>(irGeo.generation))
+                        + ") vs dsp(rate=" + juce::String(dspRate, 1)
+                        + " block=" + juce::String(dspBlock) + ")");
+                    result.error = contractError;
+                    return result;
+                }
+            }
+        }
         result.runtime = runtime.release();
         result.prepared = true;
         return result;

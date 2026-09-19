@@ -718,7 +718,8 @@ private:
                             std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                             double loadedSR, int targetLength, bool isRebuild,
                             const juce::File& file, double scaleFactor,
-                            std::unique_ptr<juce::AudioBuffer<double>> displayIR);
+                            std::unique_ptr<juce::AudioBuffer<double>> displayIR,
+                            int knownBlockSize = 0);
 
     void switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept;
 
@@ -745,7 +746,7 @@ private:
     void copySnapshotToPendingUnlocked(const BuildSnapshot& snapshot) noexcept;
 
     struct PendingCommit;  // forward declaration (defined after StereoConvolver)
-    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR, bool async = true);
+    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR, int knownBlockSize = 0, bool async = true);
     void executePendingCommit(std::unique_ptr<PendingCommit> commit);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
@@ -960,6 +961,9 @@ private:
         int targetLength = 0;
         double sampleRate = 0.0;
         double scaleFactor = 1.0;
+        // ★ WORK105: engine build 時の processing quantum（SetImpulse blockSize）。
+        //   executePendingCommit が IRState.blockSize へ刻印する。0=不明。
+        int knownBlockSize = 0;
         bool isRebuild = false;
         juce::File irFile;
 
@@ -1186,6 +1190,10 @@ private:
         std::unique_ptr<juce::AudioBuffer<double>> irOwner;
         const juce::AudioBuffer<double>* ir = nullptr;
         double sampleRate = 0.0;
+        // ★ WORK105: IR build 時の processing quantum（SetImpulse blockSize）。
+        //   RuntimeBuilder が world の processing quantum と照合する。
+        //   0 = 不明（旧経路・RCU経路）。不明時は拒否せず loud log（後方互換）。
+        int blockSize = 0;
         uint64_t generation = 0;
         float additionalAttenuationDb = 0.0f;  // ★ v14.0: IRAnalyzer による追加減衰量 [dB]
         float irFreqPeakGainDb = 0.0f;         // ★ v14.2: IRAnalyzer による周波数ピークゲイン [dB]
@@ -1200,11 +1208,11 @@ private:
 
     [[nodiscard]] const IRState* acquireIRState() const noexcept;
     void releaseIRState(const IRState* state) const noexcept;
-    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb = 0.0f, float irFreqPeakGainDb = 0.0f);
-    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR, float additionalAttenuationDb = 0.0f, float irFreqPeakGainDb = 0.0f)
+    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb = 0.0f, float irFreqPeakGainDb = 0.0f, int irBlockSize = 0);
+    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR, float additionalAttenuationDb = 0.0f, float irFreqPeakGainDb = 0.0f, int irBlockSize = 0)
     {
         if (newIR)
-            updateIRState(*newIR, newSR, additionalAttenuationDb, irFreqPeakGainDb);
+            updateIRState(*newIR, newSR, additionalAttenuationDb, irFreqPeakGainDb, irBlockSize);
     }
 
     // ★ v14.0: IRState から追加減衰量を読み取り
@@ -1222,6 +1230,38 @@ public:
         return (state != nullptr) ? state->irFreqPeakGainDb : 0.0f;
     }
 
+    // ★ WORK105: IR形状の追跡読み取り（NonRT専用・RuntimeBuilder検証用）。
+    //   hasIR=false の場合は rate/block/gen は無効。block==0 は旧経路（不明）の意味。
+    struct IRGeometry {
+        bool hasIR = false;
+        double sampleRate = 0.0;
+        int blockSize = 0;
+        std::uint64_t generation = 0;
+    };
+    [[nodiscard]] IRGeometry getIRGeometry() const noexcept
+    {
+        IRGeometry g;
+        auto* state = acquireIRState();
+        if (state != nullptr && state->ir != nullptr && state->ir->getNumSamples() > 0)
+        {
+            g.hasIR = true;
+            g.sampleRate = state->sampleRate;
+            g.blockSize = state->blockSize;
+            g.generation = state->generation;
+        }
+        return g;
+    }
+
+    // ★ WORK105: prepare済み処理形状の読み取り（NonRT専用・検証用）。
+    [[nodiscard]] double getPreparedSampleRate() const noexcept
+    {
+        return convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    }
+    [[nodiscard]] int getPreparedBlockSize() const noexcept
+    {
+        return convo::consumeAtomic(currentBufferSize, std::memory_order_acquire);
+    }
+
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
 public: // Added for AudioEngine access
     // Thread-safe IR state transfer from source convolver (copies the AudioBuffer)
@@ -1233,10 +1273,12 @@ public: // Added for AudioEngine access
         {
             const int channels = srcState->ir->getNumChannels();
             const int length   = srcState->ir->getNumSamples();
-            updateIRState(*srcState->ir, srcState->sampleRate, srcState->additionalAttenuationDb, srcState->irFreqPeakGainDb);
+            updateIRState(*srcState->ir, srcState->sampleRate, srcState->additionalAttenuationDb, srcState->irFreqPeakGainDb, srcState->blockSize);
             juce::Logger::writeToLog("[CONV_IR] transferIRStateFrom: IR transferred ch="
                 + juce::String(channels) + " len=" + juce::String(length)
-                + " sr=" + juce::String(srcState->sampleRate, 1));
+                + " sr=" + juce::String(srcState->sampleRate, 1)
+                + " block=" + juce::String(srcState->blockSize)
+                + " gen=" + juce::String(static_cast<juce::int64>(srcState->generation)));
         }
         else
         {

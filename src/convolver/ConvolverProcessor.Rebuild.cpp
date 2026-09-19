@@ -266,8 +266,10 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
     auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(job.pendingDisplayIR));
     StereoConvolver *conv = std::exchange(job.pendingConv, nullptr);
 
+    // ★ WORK105: incremental 経路は engine build 時の quantum を保持しないため
+    //   0（不明）で刻印する。不明は拒否せず loud log（RuntimeBuilder 側）。
     applyNewState(conv, std::move(loadedIR), job.pendingLoadedSR, job.pendingTargetLength,
-                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, std::move(displayIR));
+                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, std::move(displayIR), 0);
 
     job.finalizeApplied = true;
     job.lastError.clear();

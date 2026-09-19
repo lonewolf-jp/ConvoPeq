@@ -682,7 +682,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                 handleLoadError("NUC descriptors not committed - aborting load");
                 return;
             }
-            applyNewState(newConv.release(), std::move(loadedIR), sr, length, isRebuild, irFile, scaleFactor, std::move(displayIR));
+            applyNewState(newConv.release(), std::move(loadedIR), sr, length, isRebuild, irFile, scaleFactor, std::move(displayIR), knownBlockSize);
         }
         else
         {
@@ -711,6 +711,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        const juce::File& file,
                                        double scaleFactor,
                                        std::unique_ptr<juce::AudioBuffer<double>> displayIR,
+                                       int knownBlockSize,
                                        bool async)
 {
     // Phase 1: PendingCommit 作成（任意スレッド）
@@ -719,6 +720,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     commit->targetLength = targetLength;
     commit->sampleRate = loadedSR;
     commit->scaleFactor = scaleFactor;
+    commit->knownBlockSize = knownBlockSize;
     commit->isRebuild = isRebuild;
     commit->irFile = file;
     commit->loadedIR = std::move(loadedIR);
@@ -796,9 +798,10 @@ void ConvolverProcessor::executePendingCommit(std::unique_ptr<PendingCommit> com
     if (!commit || !commit->newEngine) return;
 
     // Phase 1: IR メタデータ更新
+    // ★ WORK105: engine build 時の processing quantum も刻印する（RuntimeBuilder の形状契約用）。
     if (!commit->isRebuild)
     {
-        updateIRState(commit->loadedIR, commit->sampleRate);
+        updateIRState(commit->loadedIR, commit->sampleRate, 0.0f, 0.0f, commit->knownBlockSize);
         {
             const juce::ScopedLock sl(irFileLock);
             currentIrFile = commit->irFile;
@@ -857,9 +860,10 @@ void ConvolverProcessor::commitNewConvolver(StereoConvolver* newConv,
                                             std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                             double loadedSR, int targetLength, bool isRebuild,
                                             const juce::File& file, double scaleFactor,
-                                            std::unique_ptr<juce::AudioBuffer<double>> displayIR)
+                                            std::unique_ptr<juce::AudioBuffer<double>> displayIR,
+                                            int knownBlockSize)
 {
-    applyNewState(newConv, std::move(loadedIR), loadedSR, targetLength, isRebuild, file, scaleFactor, std::move(displayIR));
+    applyNewState(newConv, std::move(loadedIR), loadedSR, targetLength, isRebuild, file, scaleFactor, std::move(displayIR), knownBlockSize);
 }
 
 void ConvolverProcessor::evictOldestCacheEntry()

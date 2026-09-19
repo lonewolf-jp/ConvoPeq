@@ -592,6 +592,18 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_include_directories(GainStagingContractTests PRIVATE ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
     add_test(NAME GainStagingContractTests COMMAND GainStagingContractTests)
 
+    # ★ WORK105: IR／ランタイム形状契約 negative tests
+    #   rate/block mismatch → 拒否、一致／不明 → 許可。JUCE/MKL に依存しない純粋関数テスト。
+    add_executable(IRRuntimeContractTests
+        src/tests/IRRuntimeContractTests.cpp
+    )
+    target_include_directories(IRRuntimeContractTests PRIVATE
+        ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_features(IRRuntimeContractTests PRIVATE cxx_std_20)
+    add_test(NAME IRRuntimeContractTests COMMAND IRRuntimeContractTests)
+
     # ★ v14.0 Phase 8: EQ 応答計算の数学的契約テスト
     #   getMagnitudeSquared + svfToDisplayBiquad の数学的正当性を検証。
     #   JUCE/MKL に依存しない純粋数学テスト。

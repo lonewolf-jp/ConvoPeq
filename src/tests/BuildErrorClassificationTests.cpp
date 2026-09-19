@@ -59,7 +59,8 @@ struct Expected {
 };
 
 // D-2 ratified 8-value default policy (matches kBuildErrorDefaultTable)
-constexpr Expected kExpected[8] = {
+// ★ WORK105: +2 (IRRateMismatch / IRBlockMismatch) → 10-value matrix
+constexpr Expected kExpected[10] = {
     { convo::BuildError::None,              convo::FailureClassification::Permanent,      convo::RetryDisposition::NoRetry },
     { convo::BuildError::InvalidInput,      convo::FailureClassification::Permanent,      convo::RetryDisposition::NoRetry },
     { convo::BuildError::ResourceUnavailable, convo::FailureClassification::Transient,   convo::RetryDisposition::RetryBackoff },
@@ -67,6 +68,8 @@ constexpr Expected kExpected[8] = {
     { convo::BuildError::ConvolverFailure,  convo::FailureClassification::Infrastructure, convo::RetryDisposition::RetryBackoff },
     { convo::BuildError::PrepareFailure,    convo::FailureClassification::Infrastructure, convo::RetryDisposition::RetryBackoff },
     { convo::BuildError::WarmupFailed,      convo::FailureClassification::Transient,      convo::RetryDisposition::RetryImmediate },
+    { convo::BuildError::IRRateMismatch,    convo::FailureClassification::Infrastructure, convo::RetryDisposition::RetryBackoff },
+    { convo::BuildError::IRBlockMismatch,   convo::FailureClassification::Infrastructure, convo::RetryDisposition::RetryBackoff },
     { convo::BuildError::InternalError,     convo::FailureClassification::Fatal,          convo::RetryDisposition::NoRetry },
 };
 
@@ -98,7 +101,7 @@ constexpr Expected kExpected[8] = {
             ++g_pass;
         }
     }
-    if (ok) std::cerr << "[PASS] TestA exact policy matrix (8x3 fields)\n";
+    if (ok) std::cerr << "[PASS] TestA exact policy matrix (10x3 fields)\n";
     return ok;
 }
 
@@ -107,7 +110,7 @@ constexpr Expected kExpected[8] = {
 {
     bool ok = true;
     constexpr size_t kSize = sizeof(convo::kBuildErrorDefaultTable) / sizeof(convo::BuildOutcome);
-    CHECK(kSize == 8u, "kBuildErrorDefaultTable size == 8");
+    CHECK(kSize == 10u, "kBuildErrorDefaultTable size == 10");
     // Also verify static_assert equivalence at runtime: table covers InternalError+1
     CHECK(kSize == static_cast<size_t>(convo::BuildError::InternalError) + 1u,
           "table size == InternalError+1");
@@ -140,7 +143,7 @@ constexpr Expected kExpected[8] = {
 [[nodiscard]] bool runTestC()
 {
     bool ok = true;
-    for (size_t i = 0; i < 8u; ++i) {
+    for (size_t i = 0; i < 10u; ++i) {
         const auto err = static_cast<convo::BuildError>(i);
         const auto via = convo::classifyBuildError(err);
         const auto& tbl = convo::kBuildErrorDefaultTable[i];
@@ -155,7 +158,7 @@ constexpr Expected kExpected[8] = {
             ++g_pass;
         }
     }
-    if (ok) std::cerr << "[PASS] TestC classifier/table consistency (8)\n";
+    if (ok) std::cerr << "[PASS] TestC classifier/table consistency (10)\n";
     return ok;
 }
 
@@ -164,7 +167,7 @@ constexpr Expected kExpected[8] = {
 {
     bool ok = true;
     constexpr size_t kN = sizeof(convo::kBuildErrorNames) / sizeof(const char*);
-    CHECK(kN == 8u, "kBuildErrorNames size == 8");
+    CHECK(kN == 10u, "kBuildErrorNames size == 10");
     for (size_t i = 0; i < kN; ++i) {
         const auto err = static_cast<convo::BuildError>(i);
         const char* s = convo::classifyBuildErrorToString(err);
@@ -215,7 +218,7 @@ constexpr Expected kExpected[8] = {
         }
     };
     testOne(static_cast<convo::BuildError>(255));
-    testOne(static_cast<convo::BuildError>(8));
+    testOne(static_cast<convo::BuildError>(10));
     testOne(static_cast<convo::BuildError>(100));
     if (ok) std::cerr << "[PASS] TestE defensive fallback (out-of-range → InternalError/Fatal/NoRetry + Unknown)\n";
     return ok;

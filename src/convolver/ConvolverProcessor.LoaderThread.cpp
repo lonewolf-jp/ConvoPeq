@@ -317,8 +317,10 @@ void ConvolverProcessor::LoaderThread::runSynchronously()
         stepResult.newConv = nullptr;
         auto loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
         auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
+        // ★ WORK105: 同期パスも engine build 時の processing quantum を刻印する。
+        const int syncKnownBlock = juce::nextPowerOfTwo(std::max(blockSize, 1));
         owner.applyNewState(conv, std::move(loadedIR), result.loadedSR, result.targetLength, isRebuild, file,
-                            result.scaleFactor, std::move(displayIR), /*async=*/false);
+                            result.scaleFactor, std::move(displayIR), syncKnownBlock, /*async=*/false);
     }
     else
     {

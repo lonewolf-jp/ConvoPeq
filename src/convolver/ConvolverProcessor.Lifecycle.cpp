@@ -28,7 +28,7 @@ void ConvolverProcessor::releaseIRState(const IRState* /*state*/) const noexcept
     // IRState lifetime is managed by deferred retirement.
 }
 
-void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb, float irFreqPeakGainDb)
+void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR, float additionalAttenuationDb, float irFreqPeakGainDb, int irBlockSize)
 {
     auto uniqueIR = std::make_unique<juce::AudioBuffer<double>>(newIR);
 
@@ -36,6 +36,7 @@ void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, d
     newState->irOwner = std::move(uniqueIR);
     newState->ir = newState->irOwner.get();
     newState->sampleRate = newSR;
+    newState->blockSize = irBlockSize;
     newState->additionalAttenuationDb = additionalAttenuationDb;
     newState->irFreqPeakGainDb = irFreqPeakGainDb;
     if (auto* provider = getRcuProvider(); provider != nullptr)
@@ -262,7 +263,22 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     if (conv) {
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
 
-        if ((rateChanged || blockChanged) && conv->irDataLength > 0)
+        // ★ WORK105: M-1 再利用の形状契約。旧 engine の IR 時間軸（storedSampleRate /
+        //   storedKnownBlockSize）が新しい処理形状と一致しない場合、旧 IR 配列の
+        //   無リサンプル再利用は無警告ガベージを生むため行わない（旧 engine を維持し、
+        //   呼び出し元 rebuildThreadLoop の rebuildAllIRsSynchronous による完成を待つ）。
+        //   RT 側への検証持込みはなし（本関数は NonRT のみ）。
+        const bool storedGeometryMatches =
+            (std::abs(conv->storedSampleRate - sampleRate) <= 1.0e-9)
+            && (conv->storedKnownBlockSize == internalBlockSize);
+        if ((rateChanged || blockChanged) && conv->irDataLength > 0 && !storedGeometryMatches)
+        {
+            juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: skipping M-1 reuse (stored "
+                + juce::String(conv->storedSampleRate, 1) + "Hz/" + juce::String(conv->storedKnownBlockSize)
+                + " vs new " + juce::String(sampleRate, 1) + "Hz/" + juce::String(internalBlockSize)
+                + "); awaiting rebuildAllIRsSynchronous completion.");
+        }
+        else if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
             // ★ [M-1] 責務: この分岐は IR サンプル配列をリサンプリングせず再利用するため、
             // 生成された engine は未完成状態（IR 時間軸が processingRate 変化に対応していない）。
