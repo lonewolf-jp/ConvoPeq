@@ -93,3 +93,15 @@ eqBypassActive / convBypassActive        = committed-state compatibility mirror�
 - 本変更の commit（production 3 ファイル + 本記録 + capture CSV 4 点）。
 - §6 の test 側計器修正（rmsTrMax 代入漏れ・フラグパース・判定窓）は別 work item 推奨。
 - rigcheck=eq の mirror 状態観測行は Phase 2-2 の恒常的な回帰観測点として有用（test 側維持推奨）。
+
+## 9. ユーザー受入判定（2026-09-19 追記）
+
+ユーザー審査の結果、全項目 **PASS / CLOSED** として受理:
+
+- Phase 2-2 実装 / World.routing → mirror 同期 / writer = prepare + committed publish の 2 箇所 / mirror を authority にしない / RT path 0 / World mutation 0 / direct atomic 0 / CI 3 件 / Release build / default AudioEngineHarness / latency T-SR03-1..6 / mirror transition / boundary jump 追加調査 → **全 PASS**
+- boundary jump（T5c 0.0386）: **CLOSE** — 現行条件では再現せず、totalGain 単独では world swap が発生しないため「Phase 2-1 実装固有不連続」として残す根拠は消滅
+- 一方向関係（Requested → RuntimeBuilder → RuntimeWorld.routing = committed authority → Publish → onRuntimePublishedNonRt → Active mirror = compatibility projection）を設計上の確定として承認（Publish 後 immutable・Build → Validate → Publish・atomic wrapper 経由の不変条件に整合）
+
+**commit**: `3ea3208` `fix(audioengine): project committed RuntimeWorld routing into bypass Active mirrors`（Commit.cpp + RuntimeBuilder.h[Phase 1 込] + PrepareToPlay bootstrap コメント hunk + 本記録）
+
+**残置**: test-instrumentation cleanup は別 work item（→ `test_instrumentation_cleanup_20260919.md`・Phase 2-2 closure には含めない）
