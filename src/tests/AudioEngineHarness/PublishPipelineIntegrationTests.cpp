@@ -1106,11 +1106,16 @@ int main(int argc, char* argv[])
     bool odenomCampaign = false;
     const char* scenario = "all";
 
+// BassBuzzMeasurement.cpp (WORK104: 低音ジジジノイズ自動計測)
+int runBassBuzzMeasurement(int argc, char* argv[]);
+
     for (int i = 1; i < argc; ++i)
     {
         const std::string a(argv[i]);
         if (a == "--soak")
             full = true;
+        else if (a == "--buzz" || a.rfind("--buzz-", 0) == 0)
+            return runBassBuzzMeasurement(argc, argv);
         else if (a == "--odenom-campaign" || a == "--odenom")
             odenomCampaign = true;
         else if (a.rfind("--scenario=", 0) == 0)

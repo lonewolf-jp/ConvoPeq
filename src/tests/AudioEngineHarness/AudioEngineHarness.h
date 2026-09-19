@@ -14,10 +14,17 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "audioengine/AudioEngine.h"
+
+// ★ WORK104: 測定用タップ。audioLoop が各ブロックで入力充填前(isInput=true)と
+//   engine処理後(isInput=false)に呼び出す。measurement専用（production無変更）。
+//   tapはmutex保護下でブロック毎にコピーされる（測定用途のみ・RT性能は不問）。
+using HarnessTapFn = std::function<void(juce::AudioBuffer<float>& buffer, bool isInput)>;
 
 class AudioEngineHarness final
 {
@@ -47,12 +54,19 @@ public:
     AudioEngine& engine() noexcept { return *engine_; }
     long long blocksProcessed() const noexcept { return blocksProcessed_.load(std::memory_order_relaxed); }
 
+    // ★ WORK104: 測定タップの設置／解除。audio thread実行中の呼出し可。
+    //   tap内では確保・ロック・I/Oを行わないこと（測定スレッド側で回収する設計）。
+    void setTap(HarnessTapFn fn);
+    void clearTap();
+
 private:
     // AudioEngine は ~19.4MB (内部配列保持) のためスタック配置不可 → ヒープ保持
     std::unique_ptr<AudioEngine> engine_;
     std::thread audioThread_;
     std::atomic<bool> running_ { false };
     std::atomic<long long> blocksProcessed_ { 0 };
+    std::mutex tapMutex_;
+    HarnessTapFn tapFn_;
 
     void audioLoop(int blockSize);
 };

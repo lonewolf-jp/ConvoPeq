@@ -1910,6 +1910,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/T3Measurement.cpp
         src/tests/AudioEngineHarness/T4Measurement.cpp
         src/tests/AudioEngineHarness/OdenomCampaignTests.cpp
+        src/tests/AudioEngineHarness/BassBuzzMeasurement.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)

@@ -96,9 +96,32 @@ void AudioEngineHarness::audioLoop(int blockSize)
 
     while (convo::consumeAtomic(running_, std::memory_order_acquire))
     {
+        HarnessTapFn tapCopy;
+        {
+            std::lock_guard<std::mutex> lk(tapMutex_);
+            tapCopy = tapFn_;
+        }
+        if (tapCopy)
+            tapCopy(buffer, true);
         juce::AudioSourceChannelInfo info(&buffer, 0, blockSize);
         engine_->getNextAudioBlock(info);
-        buffer.clear();
+        if (tapCopy)
+            tapCopy(buffer, false);
+        else
+            buffer.clear();
         blocksProcessed_.fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+// ★ WORK104: 測定タップ設置／解除（test-only seam）
+void AudioEngineHarness::setTap(HarnessTapFn fn)
+{
+    std::lock_guard<std::mutex> lk(tapMutex_);
+    tapFn_ = std::move(fn);
+}
+
+void AudioEngineHarness::clearTap()
+{
+    std::lock_guard<std::mutex> lk(tapMutex_);
+    tapFn_ = nullptr;
 }
