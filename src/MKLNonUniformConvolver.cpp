@@ -1056,6 +1056,41 @@ l.allocSizes.inputAccBuf = l.partSize * sizeof(double);
             if (swapSoA) mkl_free(swapSoA);
         }
 
+        // ★ WORK110 110-2: L0 write↔storage correspondence（NonRT のみ・数値 trace）
+        if (li == 0)
+        {
+            const double* src = impulse;
+            const int probeIdx[3] = { 488, 2536, 4584 };
+            for (int t = 0; t < 3; ++t)
+            {
+                const int ii = probeIdx[t];
+                if (src != nullptr && ii < irLen)
+                    std::fprintf(stderr, "[L0_WRITE] gen ir=%d val=%.8f\n", ii, src[ii]);
+                else
+                    std::fprintf(stderr, "[L0_WRITE] gen ir=%d val=n/a\n", ii);
+            }
+            std::fprintf(stderr, "[L0_WRITE] geom part=%d numIR=%d numParts=%d fft=%d imm=%d irLen=%d\n",
+                         l.partSize, l.numPartsIR, l.numParts, l.fftSize, l.isImmediate ? 1 : 0, irLen);
+            int shown = 0;
+            for (int p = 0; p < l.numPartsIR && shown < 40; ++p)
+            {
+                const double* re = l.irFreqReal + static_cast<size_t>(p) * l.complexSize;
+                const double* im = l.irFreqImag + static_cast<size_t>(p) * l.complexSize;
+                double peak = 0.0; int arg = -1;
+                for (int k = 0; k < l.complexSize; ++k)
+                {
+                    const double m = re[k] * re[k] + im[k] * im[k];
+                    if (m > peak) { peak = m; arg = k; }
+                }
+                if (peak > 1.0e-9)
+                {
+                    std::fprintf(stderr, "[L0_WRITE] slot=%d peak=%.6f bin=%d\n",
+                                 p, std::sqrt(peak), arg);
+                    ++shown;
+                }
+            }
+        }
+
         // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
         if (!l.isImmediate)
         {
