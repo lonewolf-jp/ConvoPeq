@@ -1,16 +1,1 @@
-{
-  "artifact": "runtime_budget_report.json",
-  "schema": "runtime_budget_report_v1",
-  "buildMode": "CI",
-  "generatedAtNs": 58700185504200,
-  "artifactTotalBytes": 682530348,
-  "limits": {
-    "closureTraversal": "O(N) bounded",
-    "publishValidationLatency": "bounded",
-    "rtInstrumentation": "zero alloc / lock-free",
-    "artifactSize": "bounded",
-    "retireLatencyOverhead": "bounded",
-    "metadataGrowth": "bounded"
-  },
-  "validatorPolicy": ["RB-1", "RB-2", "RB-3"]
-}
+﻿{"provenance":"seed","generatedAtNs":1789836197418000000,"schema":"runtime_budget_report_v1","artifactTotalBytes":1,"runId":"d8f0a711add246bf9970fb70198bde09"}

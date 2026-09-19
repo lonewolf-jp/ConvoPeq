@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "bridge_plan_completeness_report_v1",
-    "generatedAt":  "2026-09-16T07:14:48.1359936+09:00",
+    "generatedAt":  "2026-09-20T01:43:39.9481557+09:00",
     "planPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work\\bridge_runtime_migration_plan.md",
     "bridgePolicyPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work\\ISR_Bridge_Runtime_AI_暴走防止規約.md",
     "tierRunnerPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
@@ -133,43 +133,43 @@
     "phaseEvidenceChronology":  {
                                     "phase0":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:44.9626898+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:36.8462791+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                },
                                     "phase1":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_readiness_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:46.0037134+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:37.7910663+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                },
                                     "phase2":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\enforcement_adoption_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:45.9277817+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:37.7115271+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                },
                                     "phase3":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\facade_bypass_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:46.7440793+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:38.5596360+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                },
                                     "phase4":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\phase4_generation_drift_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:29.4572975+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:20.6583819+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                },
                                     "phase5":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:46.1158210+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:37.9170072+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                },
                                     "phase6":  {
                                                    "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_cleanup_completion_report.json",
-                                                   "generatedAt":  "2026-09-16T07:14:47.7239952+09:00",
+                                                   "generatedAt":  "2026-09-20T01:43:39.5399206+09:00",
                                                    "runId":  "",
                                                    "parseOk":  true
                                                }

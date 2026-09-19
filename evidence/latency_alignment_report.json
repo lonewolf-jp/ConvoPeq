@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "latency_alignment_report_v2",
-    "generatedAt":  "2026-09-16T07:14:46.7695426+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.5789379+09:00",
     "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
     "initPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Init.cpp",
     "preparePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.PrepareToPlay.cpp",

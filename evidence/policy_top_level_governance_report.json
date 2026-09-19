@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "policy_top_level_governance_report_v2",
-    "generatedAt":  "2026-09-16T07:14:46.3189534+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.1099185+09:00",
     "policyGlob":  ".github/isr-*.json",
     "policyCount":  24,
     "requiredFields":  [

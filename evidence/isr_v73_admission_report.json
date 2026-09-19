@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "isr_v73_admission_report_v1",
-    "generatedAt":  "2026-09-16T07:15:45.7046878+09:00",
+    "generatedAt":  "2026-09-20T01:44:40.9629619+09:00",
     "mode":  "fail",
     "checks":  [
                    "CI-ADMISSION-001",

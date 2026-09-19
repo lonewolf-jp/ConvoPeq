@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "enforcement_adoption_report_v1",
-    "generatedAt":  "2026-09-16T07:14:45.9277817+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.7115271+09:00",
     "triggerAuditReportPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
     "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-enforcement-adoption-policy.json",
     "tier":  "standard",

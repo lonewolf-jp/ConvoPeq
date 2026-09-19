@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "retire_queue_saturation_policy_report_v1",
-    "generatedAt":  "2026-09-16T07:16:06.3690964+09:00",
+    "generatedAt":  "2026-09-20T01:45:05.0277925+09:00",
     "queueBudget":  256,
     "policy":  "warn_then_fail_closed",
     "violations":  [

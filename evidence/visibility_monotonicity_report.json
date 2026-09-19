@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "visibility_monotonicity_report_v1",
-    "generatedAt":  "2026-09-16T07:14:30.0623518+09:00",
+    "generatedAt":  "2026-09-20T01:43:21.1897523+09:00",
     "schemaPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
     "audioHeaderPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
     "violations":  [

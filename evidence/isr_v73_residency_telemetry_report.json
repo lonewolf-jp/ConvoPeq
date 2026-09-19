@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "isr_v73_residency_telemetry_report_v1",
-    "generatedAt":  "2026-09-16T07:15:48.7377515+09:00",
+    "generatedAt":  "2026-09-20T01:44:44.7271723+09:00",
     "mode":  "fail",
     "checks":  [
                    "CI-RESIDENCY-001",

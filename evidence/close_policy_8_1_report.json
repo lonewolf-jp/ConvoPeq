@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "close_policy_8_1_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.1735248+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.9830960+09:00",
     "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-8_1-close-policy.json",
     "policy":  {
                    "schema":  "isr_8_1_close_policy_v1",
@@ -8,7 +8,7 @@
                    "issue":  "BRIDGE-8_1-CLOSE-POLICY",
                    "rationale":  "8.1 close evidence collection and enforcement parameters must be policy-driven and fail-closed.",
                    "expiry":  "2026-12-31",
-                   "expiryDaysRemaining":  106,
+                   "expiryDaysRemaining":  102,
                    "expiryValid":  true,
                    "expired":  false,
                    "expiryGuardDaysByTier":  {

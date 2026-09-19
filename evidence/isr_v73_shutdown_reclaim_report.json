@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "isr_v73_shutdown_reclaim_report_v1",
-    "generatedAt":  "2026-09-16T07:15:46.6224256+09:00",
+    "generatedAt":  "2026-09-20T01:44:42.1577528+09:00",
     "mode":  "fail",
     "checks":  [
                    "CI-SHUTDOWN-001",

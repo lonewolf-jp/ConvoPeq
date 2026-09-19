@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "soak_governance_report_v1",
-    "generatedAt":  "2026-09-16T07:15:49.1349022+09:00",
+    "generatedAt":  "2026-09-20T01:44:45.1215367+09:00",
     "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-pr-sla-policy.json",
     "tierRunnerPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
     "workflowPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",

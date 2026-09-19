@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "authority_inventory_report_v1",
-    "generatedAt":  "2026-09-16T07:15:48.9626231+09:00",
+    "generatedAt":  "2026-09-20T01:44:44.9582988+09:00",
     "inventoryDir":  "C:\\VSC_Project\\ConvoPeq\\storage\\isr_inventory",
     "artifacts":  {
                       "current":  "C:\\VSC_Project\\ConvoPeq\\storage\\isr_inventory\\current_authority_inventory.json",

@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "authority_count_baseline_report_v1",
-    "generatedAt":  "2026-09-16T07:14:29.8917303+09:00",
+    "generatedAt":  "2026-09-20T01:43:20.9894850+09:00",
     "expected":  12,
     "actual":  12,
     "violations":  [

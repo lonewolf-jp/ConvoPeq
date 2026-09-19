@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "c1_c15_minimal_report_v1",
-    "generatedAt":  "2026-09-16T07:14:29.3562236+09:00",
+    "generatedAt":  "2026-09-20T01:43:20.5721627+09:00",
     "source":  ".github/scripts/isr-verify-c1-c15-minimal.ps1",
     "passCount":  15,
     "failCount":  0,

@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "rebuild_admission_8_1_metrics_report_v1",
-    "generatedAt":  "2026-09-16T07:14:45.8792783+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.6730484+09:00",
     "status":  "skipped",
     "reason":  "log_not_found",
     "log":  "build/ConvoPeq_artefacts/Release/ConvoPeq.log",
@@ -13,12 +13,6 @@
                    },
     "guidance":  {
                      "captureCommands":  [
-                                             {
-                                                 "mode":  "launch",
-                                                 "executablePath":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
-                                                 "command":  "\u0026 \u0027C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe\u0027",
-                                                 "expectedLog":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.log"
-                                             },
                                              {
                                                  "mode":  "launch",
                                                  "executablePath":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
@@ -186,10 +180,6 @@
                                    ],
                      "logHints":  [
                                       {
-                                          "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.log",
-                                          "exists":  false
-                                      },
-                                      {
                                           "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log",
                                           "exists":  false
                                       }
@@ -198,12 +188,8 @@
                      "suggestedAction":  "Run one of the detected Release/Debug build tasks, launch ConvoPeq.exe once to emit logs, then rerun isr-rebuild-admission-8_1-metrics.ps1.",
                      "executableHints":  [
                                              {
-                                                 "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
-                                                 "lastWrite":  "2026-09-16 00:53:08"
-                                             },
-                                             {
                                                  "path":  "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
-                                                 "lastWrite":  "2026-09-16 00:50:14"
+                                                 "lastWrite":  "2026-09-19 16:51:48"
                                              }
                                          ]
                  },

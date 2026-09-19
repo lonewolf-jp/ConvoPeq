@@ -9,7 +9,7 @@
     "violations":  [
 
                    ],
-    "generatedAt":  "2026-09-16T07:14:45.3635710+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.2082732+09:00",
     "forbiddenPatterns":  [
                               "cachedResolvedRouting",
                               "cachedEffectiveTopology",

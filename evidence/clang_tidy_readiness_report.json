@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "clang_tidy_readiness_report_v1",
-    "generatedAt":  "2026-09-16T07:14:48.1640239+09:00",
+    "generatedAt":  "2026-09-20T01:43:39.9726948+09:00",
     "registryPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-clang-tidy-rule-registry.json",
     "clangTidyPath":  "C:\\VSC_Project\\ConvoPeq\\.clang-tidy",
     "cmakePath":  "C:\\VSC_Project\\ConvoPeq\\CMakeLists.txt",

@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "close_policy_8_1_workflow_input_coherence_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.2451828+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.0408554+09:00",
     "workflowPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
     "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-8_1-close-policy.json",
     "defaults":  {

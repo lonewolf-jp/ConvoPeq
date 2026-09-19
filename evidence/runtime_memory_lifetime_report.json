@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "runtime_memory_lifetime_report_v1",
-    "generatedAt":  "2026-09-16T07:16:06.3830921+09:00",
+    "generatedAt":  "2026-09-20T01:45:05.0441320+09:00",
     "serializationContract":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtimeworld_serialization_contract.md",
     "snapshotSchema":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtimeworld_snapshot_schema.md",
     "violations":  [

@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "pr_sla_report_v1",
-    "generatedAt":  "2026-09-16T07:14:47.0124907+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.8306654+09:00",
     "declaredClass":  "Class-A",
     "declaredClassSource":  "default",
     "tier":  "standard",
@@ -95,9 +95,9 @@
     "openedAt":  null,
     "openedAtSource":  "none",
     "eventHeadSha":  null,
-    "currentHeadSha":  "5384708741f2bc06967c35a2a2f50b81031ceacd",
+    "currentHeadSha":  "32137e60577a87cff33ecdda517a4d94c6dda8b4",
     "staleEvaluation":  false,
-    "now":  "2026-09-16T07:14:46.9843545+09:00",
+    "now":  "2026-09-20T01:43:38.8042801+09:00",
     "deadlineAt":  null,
     "needsRevalidation":  false,
     "labelSuggestions":  [

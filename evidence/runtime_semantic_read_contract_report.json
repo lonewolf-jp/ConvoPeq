@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "runtime_semantic_read_contract_report_v1",
-    "generatedAt":  "2026-09-16T07:16:06.0610065+09:00",
+    "generatedAt":  "2026-09-20T01:45:04.7083826+09:00",
     "contractPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtime_semantic_read_contract.md",
     "sourcePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
     "violations":  [

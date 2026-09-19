@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "safety_regression_baseline_capture_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.8578673+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.6658662+09:00",
     "baselinePath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-safety-regression-baseline.json",
     "candidatePath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\isr-safety-regression-baseline.candidate.json",
     "applied":  false,

@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "semantic_reachability_report_v2",
-    "generatedAt":  "2026-09-16T07:15:49.2131693+09:00",
+    "generatedAt":  "2026-09-20T01:44:45.1956934+09:00",
     "inputs":  {
                    "contractPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtime_semantic_reachability.md",
                    "testPath":  "C:\\VSC_Project\\ConvoPeq\\src\\tests\\RuntimeSemanticSchemaValidationTests.cpp",

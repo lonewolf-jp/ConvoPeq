@@ -4,7 +4,7 @@
     "issue":  "BRIDGE-SAFETY-BASELINE-001",
     "rationale":  "captured from latest verified evidence snapshot for SafetyPass baseline comparison",
     "expiry":  "2026-09-30",
-    "capturedAt":  "2026-09-16T07:14:46.8546647+09:00",
+    "capturedAt":  "2026-09-20T01:43:38.6648723+09:00",
     "metrics":  {
                     "xrunDelta":  0,
                     "staleObserveCount":  0,

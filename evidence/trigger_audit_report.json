@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "trigger_audit_report_v1",
-    "generatedAt":  "2026-09-16T07:14:44.9626898+09:00",
+    "generatedAt":  "2026-09-20T01:43:36.8462791+09:00",
     "enforce":  true,
     "astEvidenceRequired":  false,
     "policyMode":  "enforce",

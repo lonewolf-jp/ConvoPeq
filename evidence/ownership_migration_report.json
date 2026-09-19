@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "ownership_migration_report_v2",
-    "generatedAt":  "2026-09-16T07:14:47.0995193+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.9242737+09:00",
     "headerPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
     "lifecyclePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Processing.DSPCoreLifecycle.cpp",
     "triggerAuditReportPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",

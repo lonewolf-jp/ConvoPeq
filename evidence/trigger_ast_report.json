@@ -1,6 +1,6 @@
 {
   "schema": "trigger_ast_report_v1",
-  "generatedAt": "2026-09-16T07:14:44.5764664+09:00",
+  "generatedAt": "2026-09-20T01:43:36.4269401+09:00",
   "required": false,
   "available": true,
   "tool": "ast-grep.exe",

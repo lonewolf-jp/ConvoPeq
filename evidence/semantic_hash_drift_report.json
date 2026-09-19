@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "semantic_hash_drift_report_v1",
-    "generatedAt":  "2026-09-16T07:16:06.5891878+09:00",
+    "generatedAt":  "2026-09-20T01:45:05.2701004+09:00",
     "schemaPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
     "tierRunnerPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
     "requiredHashFields":  [

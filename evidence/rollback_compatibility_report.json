@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "rollback_compatibility_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.1158210+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.9170072+09:00",
     "matrixPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-rollback-compatibility-matrix.json",
     "matrixOwner":  "audioengine-runtime-bridge",
     "matrixIssue":  "BRIDGE-ROLLBACK-GOV-001",

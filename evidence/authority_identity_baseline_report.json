@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "authority_identity_baseline_report_v1",
-    "generatedAt":  "2026-09-16T07:14:29.9122924+09:00",
+    "generatedAt":  "2026-09-20T01:43:21.0109131+09:00",
     "expected":  [
                      "RuntimeGraph::eqAgcAttackCoeffTable",
                      "RuntimeGraph::captureSessionId",

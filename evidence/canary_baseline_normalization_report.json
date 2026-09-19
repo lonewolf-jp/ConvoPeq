@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "canary_baseline_normalization_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.8222777+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.6341869+09:00",
     "strictEvidence":  false,
     "registryPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-metric-governance.json",
     "metricGovernanceReportPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\metric_governance_report.json",

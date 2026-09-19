@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "runtime_snapshot_identity_report_v1",
-    "generatedAt":  "2026-09-16T07:16:06.3087989+09:00",
+    "generatedAt":  "2026-09-20T01:45:04.9627109+09:00",
     "inventoryPath":  "C:\\VSC_Project\\ConvoPeq\\storage\\isr_inventory\\post_authority_inventory.json",
     "identityCount":  12,
     "violations":  [

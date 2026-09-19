@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "enforcement_source_purity_report_v1",
-    "generatedAt":  "2026-09-16T07:14:45.9687390+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.7564990+09:00",
     "policyPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-enforcement-source-policy.json",
     "triggerAuditReportPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\trigger_audit_report.json",
     "allowedRawRegexFields":  [

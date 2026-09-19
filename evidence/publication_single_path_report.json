@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "publication_single_path_report_v1",
-    "generatedAt":  "2026-09-16T07:14:31.0277170+09:00",
+    "generatedAt":  "2026-09-20T01:43:22.0707599+09:00",
     "files":  {
                   "inventoryScript":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-generate-authority-inventory.ps1",
                   "coordinatorHeader":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimePublicationCoordinator.h",

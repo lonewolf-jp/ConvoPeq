@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "runtime_semantic_schema_v16_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.3842197+09:00",
+    "generatedAt":  "2026-09-20T01:43:38.1943908+09:00",
     "schemaPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\ISRRuntimeSemanticSchema.h",
     "runtimeStatePath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.h",
     "runtimeBuilderPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\RuntimeBuilder.cpp",

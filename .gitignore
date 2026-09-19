@@ -101,6 +101,7 @@ build-t1-test/
 .rtk/
 .auto/
 .tgrep/
+tmp/
 nul
 
 # Coverage reports

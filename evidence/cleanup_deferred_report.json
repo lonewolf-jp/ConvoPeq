@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "cleanup_deferred_report_v1",
-    "generatedAt":  "2026-09-16T07:14:46.0397566+09:00",
+    "generatedAt":  "2026-09-20T01:43:37.8246279+09:00",
     "registryPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\isr-cleanup-deferred.json",
     "pruneReportPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\cleanup_deferred_prune_report.json",
     "registryOwner":  "audioengine-runtime-bridge",

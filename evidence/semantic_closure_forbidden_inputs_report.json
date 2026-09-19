@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "semantic_closure_forbidden_inputs_report_v1",
-    "generatedAt":  "2026-09-16T07:16:06.1607348+09:00",
+    "generatedAt":  "2026-09-20T01:45:04.7966643+09:00",
     "contractPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\semantic_closure_forbidden_inputs.md",
     "commitPath":  "C:\\VSC_Project\\ConvoPeq\\src\\audioengine\\AudioEngine.Commit.cpp",
     "violations":  [

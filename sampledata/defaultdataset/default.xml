@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Preset processingOrder="0" softClipEnabled="1" saturationAmount="0.05000000074505806"
+        inputHeadroomDb="-8.0" outputMakeupDb="3.0" analyzerSource="1"
+        convolverInputTrimDb="0.0" autoGainStagingEnabled="1" ditherBitDepth="32"
+        noiseShaperType="2" oversamplingType="1" cmaesRestarts="5" coeffSafetyMargin="0.85"
+        enableStabilityCheck="1" eqBypassed="0" convBypassed="0" convHCFilterMode="1"
+        convLCFilterMode="0" eqLPFFilterMode="1" adaptiveCoeff_44100_0="0.0"
+        adaptiveCoeff_44100_1="0.0" adaptiveCoeff_44100_2="0.0" adaptiveCoeff_44100_3="0.0"
+        adaptiveCoeff_44100_4="0.0" adaptiveCoeff_44100_5="0.0" adaptiveCoeff_44100_6="0.0"
+        adaptiveCoeff_44100_7="0.0" adaptiveCoeff_44100_8="0.0" adaptiveCoeff_48000_0="0.0"
+        adaptiveCoeff_48000_1="0.0" adaptiveCoeff_48000_2="0.0" adaptiveCoeff_48000_3="0.0"
+        adaptiveCoeff_48000_4="0.0" adaptiveCoeff_48000_5="0.0" adaptiveCoeff_48000_6="0.0"
+        adaptiveCoeff_48000_7="0.0" adaptiveCoeff_48000_8="0.0" adaptiveCoeff_88200_0="0.0"
+        adaptiveCoeff_88200_1="0.0" adaptiveCoeff_88200_2="0.0" adaptiveCoeff_88200_3="0.0"
+        adaptiveCoeff_88200_4="0.0" adaptiveCoeff_88200_5="0.0" adaptiveCoeff_88200_6="0.0"
+        adaptiveCoeff_88200_7="0.0" adaptiveCoeff_88200_8="0.0" adaptiveCoeff_96000_0="0.0"
+        adaptiveCoeff_96000_1="0.0" adaptiveCoeff_96000_2="0.0" adaptiveCoeff_96000_3="0.0"
+        adaptiveCoeff_96000_4="0.0" adaptiveCoeff_96000_5="0.0" adaptiveCoeff_96000_6="0.0"
+        adaptiveCoeff_96000_7="0.0" adaptiveCoeff_96000_8="0.0" adaptiveCoeff_176400_0="0.0"
+        adaptiveCoeff_176400_1="0.0" adaptiveCoeff_176400_2="0.0" adaptiveCoeff_176400_3="0.0"
+        adaptiveCoeff_176400_4="0.0" adaptiveCoeff_176400_5="0.0" adaptiveCoeff_176400_6="0.0"
+        adaptiveCoeff_176400_7="0.0" adaptiveCoeff_176400_8="0.0" adaptiveCoeff_192000_0="0.0"
+        adaptiveCoeff_192000_1="0.0" adaptiveCoeff_192000_2="0.0" adaptiveCoeff_192000_3="0.0"
+        adaptiveCoeff_192000_4="0.0" adaptiveCoeff_192000_5="0.0" adaptiveCoeff_192000_6="0.0"
+        adaptiveCoeff_192000_7="0.0" adaptiveCoeff_192000_8="0.0" adaptiveCoeff_352800_0="0.0"
+        adaptiveCoeff_352800_1="0.0" adaptiveCoeff_352800_2="0.0" adaptiveCoeff_352800_3="0.0"
+        adaptiveCoeff_352800_4="0.0" adaptiveCoeff_352800_5="0.0" adaptiveCoeff_352800_6="0.0"
+        adaptiveCoeff_352800_7="0.0" adaptiveCoeff_352800_8="0.0" adaptiveCoeff_384000_0="0.0"
+        adaptiveCoeff_384000_1="0.0" adaptiveCoeff_384000_2="0.0" adaptiveCoeff_384000_3="0.0"
+        adaptiveCoeff_384000_4="0.0" adaptiveCoeff_384000_5="0.0" adaptiveCoeff_384000_6="0.0"
+        adaptiveCoeff_384000_7="0.0" adaptiveCoeff_384000_8="0.0" adaptiveCoeff_705600_0="0.0"
+        adaptiveCoeff_705600_1="0.0" adaptiveCoeff_705600_2="0.0" adaptiveCoeff_705600_3="0.0"
+        adaptiveCoeff_705600_4="0.0" adaptiveCoeff_705600_5="0.0" adaptiveCoeff_705600_6="0.0"
+        adaptiveCoeff_705600_7="0.0" adaptiveCoeff_705600_8="0.0" adaptiveCoeff_768000_0="0.0"
+        adaptiveCoeff_768000_1="0.0" adaptiveCoeff_768000_2="0.0" adaptiveCoeff_768000_3="0.0"
+        adaptiveCoeff_768000_4="0.0" adaptiveCoeff_768000_5="0.0" adaptiveCoeff_768000_6="0.0"
+        adaptiveCoeff_768000_7="0.0" adaptiveCoeff_768000_8="0.0">
+  <EQ totalGain="-2.0" agcEnabled="0" nonlinearSaturation="0.05000000074505806"
+      filterStructure="1">
+    <Band index="0" enabled="1" freq="25.0" gain="3.0" q="0.7070000171661377"
+          type="0" channel="0"/>
+    <Band index="1" enabled="1" freq="40.0" gain="3.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="2" enabled="1" freq="63.0" gain="3.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="3" enabled="1" freq="100.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="4" enabled="1" freq="160.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="5" enabled="1" freq="250.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="6" enabled="1" freq="400.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="7" enabled="1" freq="630.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="8" enabled="1" freq="1000.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="9" enabled="1" freq="1600.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="10" enabled="1" freq="2500.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="11" enabled="1" freq="4000.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="12" enabled="1" freq="6300.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="13" enabled="1" freq="10000.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="14" enabled="1" freq="11000.0" gain="0.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="15" enabled="1" freq="12500.0" gain="0.5" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="16" enabled="1" freq="14000.0" gain="0.699999988079071"
+          q="0.7070000171661377" type="1" channel="0"/>
+    <Band index="17" enabled="1" freq="16500.0" gain="1.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="18" enabled="1" freq="18000.0" gain="1.0" q="0.7070000171661377"
+          type="1" channel="0"/>
+    <Band index="19" enabled="1" freq="19500.0" gain="1.0" q="0.7070000171661377"
+          type="2" channel="0"/>
+  </EQ>
+  <Convolver phaseMode="1" useMinPhase="0" mix="1.0" bypassed="0" smoothingTime="0.1000000014901161"
+             irLength="0.5" autoDetectedIRLength="0.5" irLengthManualOverride="0"
+             mixedF1Hz="200.0" mixedF2Hz="1000.0" rebuildDebounceMs="400"
+             experimentalDirectHeadEnabled="0" tailMode="1" tailStartSec="0.08500000089406967"
+             tailStrength="0.5" tailL1L2Multiplier="8" targetUpgradeFFTSize="4096"
+             enableProgressiveUpgrade="0" maxCacheEntries="10" irPath="C:\Users\user\Documents\conv_filter\impulse.wav"/>
+</Preset>

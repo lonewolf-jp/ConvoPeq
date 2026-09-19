@@ -1,6 +1,6 @@
 ﻿{
     "schema":  "validator_tiering_report_v3",
-    "generatedAt":  "2026-09-16T07:14:47.3974206+09:00",
+    "generatedAt":  "2026-09-20T01:43:39.2111049+09:00",
     "tierRunnerPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\scripts\\isr-run-tiered-verification.ps1",
     "workflowPath":  "C:\\VSC_Project\\ConvoPeq\\.github\\workflows\\isr-verification.yml",
     "planPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work\\bridge_runtime_migration_plan.md",
@@ -40,7 +40,7 @@
                              "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\hb_violation_report.json",
                              "expectedSchema":  "hb_violation_report_v1",
                              "present":  true,
-                             "generatedAtUtc":  "2026-09-15T22:14:26.1830000Z",
+                             "generatedAtUtc":  "2026-09-19T16:43:17.4170000Z",
                              "ageHours":  0.01,
                              "maxAgeHours":  24,
                              "withinSla":  true
@@ -50,14 +50,14 @@
                              "artifactPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\payload_tier_report.json",
                              "expectedSchema":  "payload_tier_report_v1",
                              "present":  true,
-                             "generatedAtUtc":  "2026-09-15T22:14:26.1830000Z",
+                             "generatedAtUtc":  "2026-09-19T16:43:17.4170000Z",
                              "ageHours":  0.01,
                              "maxAgeHours":  72,
                              "withinSla":  true
                          }
                      ],
     "sourceRoot":  "C:\\VSC_Project\\ConvoPeq\\src",
-    "scannedSourceFileCount":  340,
+    "scannedSourceFileCount":  347,
     "violations":  [
 
                    ]
