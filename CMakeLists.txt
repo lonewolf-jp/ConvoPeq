@@ -1994,6 +1994,67 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     #   ConvoPeq 依存を外すことで、 icx リンカー問題の影響を回避し独立ビルドできる。
     # add_dependencies(AudioEngineHarness ConvoPeq)
     add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
+
+    #------------------------------------------------------------
+    # work113 C1（R15-2 + R17-2 + R18-1）: PolyphaseGainFidelityTests
+    #   Phase 0 REF-FIDELITY 基盤（test-only・40 番目 target）。
+    #   production CustomInputOversampler.cpp を同一 target・同一 compile option で
+    #   compile し（R17-3 同一 BUILD-ID 契約）、Shadow 独立 reference model と
+    #   bitwise 比較する。production 側 flag token は Phase 1 まで
+    #   一切定義しない（R15-2 — 本ブロックにも token を書かない）。
+    #------------------------------------------------------------
+    add_executable(PolyphaseGainFidelityTests
+        src/tests/AudioEngineHarness/PolyphaseGainFidelityTests.cpp
+        src/CustomInputOversampler.cpp
+    )
+    target_compile_features(PolyphaseGainFidelityTests PRIVATE cxx_std_20)
+    target_compile_options(PolyphaseGainFidelityTests PRIVATE /EHsc /utf-8)
+    # ★ AudioEngineHarness と同一フラグ（R17-3: 同一 compiler configuration を保証）
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(PolyphaseGainFidelityTests PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(PolyphaseGainFidelityTests PRIVATE /QxCORE-AVX2)
+    endif()
+    target_compile_definitions(PolyphaseGainFidelityTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
+        JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
+        JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
+        JUCE_USE_SSE_INTRINSICS=1
+        JUCE_USE_SIMD=1
+        $<$<PLATFORM_ID:Windows>:
+            _UNICODE
+            UNICODE
+            NOMINMAX
+            _CRT_SECURE_NO_WARNINGS
+        >
+    )
+    target_include_directories(PolyphaseGainFidelityTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+    )
+    target_include_directories(PolyphaseGainFidelityTests SYSTEM PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules")
+    target_link_libraries(PolyphaseGainFidelityTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_dsp
+        juce::juce_gui_basics
+        juce::juce_core
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(PolyphaseGainFidelityTests PRIVATE MKL::MKL)
+        endif()
+    endif()
+    if(IPP_FOUND)
+        target_link_libraries(PolyphaseGainFidelityTests PRIVATE IPP::ippcore IPP::ipps)
+    endif()
+    # JuceHeader.h 生成順序: ConvoPeq (juce_add_gui_app) が生成するため依存させる
+    add_dependencies(PolyphaseGainFidelityTests ConvoPeq)
+    add_test(NAME PolyphaseGainFidelityTests COMMAND PolyphaseGainFidelityTests)
 endif()
 
 #------------------------------------------------------------

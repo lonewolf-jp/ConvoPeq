@@ -392,6 +392,92 @@ def deps_gate(build_dir, config, explain=False):
           % (checked, len(allowed)))
 
 
+def _run_git(args, cwd):
+    try:
+        r = subprocess.run(['git'] + args, capture_output=True, text=True, cwd=cwd, timeout=60)
+        return r.stdout.strip()
+    except Exception:
+        return ''
+
+
+def emit_build_id(build_dir, source_root, shadow_candidate):
+    """work113 R15-1 + R16-3: 6 要素 [BUILD] ブロックを stdout へ出力する（Phase 0 必須）。"""
+    # (a) source snapshot identity
+    md = os.path.join(source_root, 'ConvoPeq.md')
+    snap = 'ConvoPeq.md missing'
+    if os.path.exists(md):
+        st = os.stat(md)
+        generated = ''
+        fresh = 'UNKNOWN'
+        try:
+            with open(md, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if 'Generated:' in line:
+                        generated = line.split('Generated:', 1)[1].strip()
+                        break
+        except OSError:
+            pass
+        try:
+            r = subprocess.run([sys.executable, 'output_sourcecode_markdown.py', '--check'],
+                               capture_output=True, text=True, cwd=source_root, timeout=180)
+            for line in (r.stdout or '').splitlines():
+                if 'STATUS' in line:
+                    fresh = line.strip().split('STATUS', 1)[1].strip()[:40]
+                    break
+        except Exception:
+            pass
+        snap = ('ConvoPeq.md %s / %d B / %s'
+                % (generated or os.path.getmtime(md), st.st_size, fresh))
+
+    # (b) git HEAD SHA
+    git_head = _run_git(['rev-parse', 'HEAD'], source_root) or 'unknown'
+    parent = _run_git(['rev-parse', 'HEAD^'], source_root)[:7]
+    head_short = git_head[:7]
+
+    # (c) working-tree state
+    prod_diff = _run_git(['diff', 'HEAD', '--name-only', '--',
+                          'src/*.cpp', 'src/*.h', ':!src/tests'], source_root)
+    wt = ('production src/ diff = 0 (tests only)' if not prod_diff
+          else 'PRODUCTION src DIFF: ' + prod_diff.splitlines()[0] + ' (+more)')
+
+    # (d) production_flag: R15-2 — Phase 0 では token 自体を存在させない
+    flag = 'undefined/off (Phase 0: R15-2 — CMake 未登録)'
+    try:
+        with open(os.path.join(source_root, 'CMakeLists.txt'), 'r',
+                  encoding='utf-8', errors='replace') as f:
+            if 'CONVOPEQ_CORRECT_POLYPHASE_GAIN' in f.read():
+                flag = 'DEFINED — Phase 0 契約違反 (R15-2): 測定無効'
+    except OSError:
+        pass
+
+    # (f) build configuration
+    build_cfg = 'unknown'
+    try:
+        with open(os.path.join(build_dir, 'CMakeCache.txt'), 'r',
+                  encoding='utf-8', errors='replace') as f:
+            cache = f.read()
+        gen = re.search(r'CMAKE_GENERATOR:INTERNAL=(\S+)', cache)
+        cfg_types = re.search(r'CMAKE_CONFIGURATION_TYPES:STRING=(\S+)', cache)
+        compiler = re.search(r'CMAKE_CXX_COMPILER:UNINITIALIZED=(\S+)', cache)
+        build_cfg = '%s / %s / %s' % (
+            (cfg_types.group(1) if cfg_types else
+             (re.search(r'CMAKE_BUILD_TYPE:STRING=(\S+)', cache).group(1)
+              if re.search(r'CMAKE_BUILD_TYPE:STRING=(\S+)', cache) else 'unknown-cfg')),
+            (compiler.group(1) if compiler else 'unknown-cc'),
+            gen.group(1) if gen else 'unknown-gen')
+    except OSError:
+        pass
+
+    print('[BUILD]')
+    print('  snapshot_identity : ' + snap)
+    print('  git_head          : %s (parent %s)' % (git_head[:7], parent or 'unknown'))
+    print('  working_tree      : ' + wt)
+    print('  production_flag   : ' + flag)
+    print('  shadow_candidate  : %s (Phase 0: shadow macro 切替)' % shadow_candidate)
+    print('  build_config      : ' + build_cfg)
+    print('[BUILD-END]')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--build-dir', default='build')
@@ -402,6 +488,10 @@ def main():
     ap.add_argument('--show', action='store_true')
     ap.add_argument('--explain-zero-deps', action='store_true',
                     help='diagnostic: print zero-deps classification detail (rc=0 unless identity fails)')
+    ap.add_argument('--emit-build-id', action='store_true',
+                    help='print the 6-element [BUILD] block (R15-1 + R16-3 / work113) and exit 0')
+    ap.add_argument('--shadow-candidate', default='0', choices=['0', '1'],
+                    help='shadow_candidate value for the [BUILD] block (Phase 0: 0/1)')
     a = ap.parse_args()
 
     build_dir = os.path.abspath(a.build_dir)
@@ -409,6 +499,10 @@ def main():
     if not os.path.exists(os.path.join(build_dir, 'CMakeCache.txt')):
         print('[GATE-FAIL] %s is not a configured CMake build directory.' % build_dir)
         sys.exit(3)
+
+    if a.emit_build_id:
+        emit_build_id(build_dir, source_root, a.shadow_candidate)
+        return
 
     ident = gather_identity(build_dir, source_root)
     if a.show:

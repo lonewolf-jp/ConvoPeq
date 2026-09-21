@@ -20,6 +20,29 @@ EXT_TO_LANG = {
     '.yml': 'yaml', '.yaml': 'yaml',
 }
 
+def ensure_within_root(path: Path, root_path: Path) -> Path:
+    """path が root_path 配下に収まることを検証して返す（path traversal 防護の単一実装）。
+
+    外部由来パス（CLI 引数・iterdir/rglob の列挙結果）は使用前に必ずこの関数を通す。
+    逸脱した場合は ValueError で即座に中断する。
+    """
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root_path):
+        raise ValueError("path escapes the project root: %s" % path)
+    return resolved
+
+def resolve_safe_output_path(root_path: Path, output_file) -> Path:
+    """出力先パスを安全に解決する。
+
+    - 相対パスのみ許可（絶対パス・上位ディレクトリ参照は拒否）
+    - 解決後のパスがプロジェクトルート直下に収まることを保証する
+    """
+    out_path = Path(output_file)
+    resolved = ensure_within_root(root_path / out_path, root_path)
+    if out_path.is_absolute() or resolved.parent != root_path:
+        raise ValueError("output file must be a relative path directly under the project root: %r" % (output_file,))
+    return resolved
+
 def is_subpath_of_target(path: Path, root_path: Path) -> bool:
     """指定されたパスが、TARGET_ITEMSで指定されたいずれかのフォルダ配下、またはファイル自身であるか判定"""
     try:
@@ -32,47 +55,65 @@ def is_subpath_of_target(path: Path, root_path: Path) -> bool:
     except ValueError:
         return False
 
+def iter_tree_items(dir_path: Path, root_path: Path):
+    """dir_path 直下のうち、ターゲット配下で除外拡張子以外の項目を Path で返す"""
+    for entry in sorted(dir_path.iterdir()):
+        try:
+            item_path = ensure_within_root(entry, root_path)
+        except ValueError:
+            continue
+        if item_path.suffix in IGNORE_EXTS:
+            continue
+        if is_subpath_of_target(item_path, root_path):
+            yield item_path
+
 def generate_tree(dir_path, root_path, prefix="", is_last=True):
     """ターゲットに合致するフォルダ・ファイルのみでツリー図を生成（再帰関数）"""
-    dir_name = Path(dir_path).name
+    dir_path = ensure_within_root(Path(dir_path), root_path)
+    dir_name = dir_path.name
 
     # ルート自身以外のとき、ターゲット配下でなければツリーに含めない
-    if dir_path != root_path and not is_subpath_of_target(Path(dir_path), root_path):
+    if dir_path != root_path and not is_subpath_of_target(dir_path, root_path):
         return ""
 
     tree_str = prefix + ("└── " if is_last else "├── ") + dir_name + "/\n"
     prefix += "    " if is_last else "│   "
 
     try:
-        items = sorted(os.listdir(dir_path))
-        valid_items = []
-
-        for item in items:
-            item_path = Path(dir_path) / item
-            if item_path.suffix in IGNORE_EXTS:
-                continue
-            # そのアイテム自体がターゲット配下ならツリーの候補に入れる
-            if is_subpath_of_target(item_path, root_path):
-                valid_items.append(item)
-
-        for idx, item in enumerate(valid_items):
-            item_path = os.path.join(dir_path, item)
+        valid_items = list(iter_tree_items(dir_path, root_path))
+        for idx, item_path in enumerate(valid_items):
             item_is_last = (idx == len(valid_items) - 1)
 
-            if os.path.isdir(item_path):
+            if item_path.is_dir():
                 tree_str += generate_tree(item_path, root_path, prefix, item_is_last)
             else:
-                tree_str += prefix + ("└── " if item_is_last else "├── ") + item + "\n"
+                tree_str += prefix + ("└── " if item_is_last else "├── ") + item_path.name + "\n"
     except PermissionError:
         pass
 
     return tree_str
 
+def iter_source_files(root_path: Path, out_path: Path):
+    """結合対象ファイルを列挙する（ensure_within_root で全境界を検証済み）。"""
+    for path in sorted(root_path.rglob("*")):
+        try:
+            file_path = ensure_within_root(path, root_path)
+        except ValueError:
+            continue
+        if not file_path.is_file():
+            continue
+        if not is_subpath_of_target(file_path, root_path):
+            continue
+        if file_path.suffix in IGNORE_EXTS or file_path == out_path:
+            continue
+        yield file_path
+
 def combine_source_codes(root_dir, output_file):
     """指定されたフォルダ配下の全ファイルを再帰的に結合してMarkdownを出力"""
     root_path = Path(root_dir).resolve()
+    out_path = resolve_safe_output_path(root_path, output_file)
 
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with open(out_path, 'w', encoding='utf-8') as f:
         # 1. タイトルとフォルダ構造の出力
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         f.write(f"# Project Extract & Source Code: {root_path.name}\n\n")
@@ -83,38 +124,21 @@ def combine_source_codes(root_dir, output_file):
         f.write("```\n\n")
         f.write("## 📄 Source Code Contents\n\n")
 
-        # 2. 各ファイルのコンテンツを出力
-        for current_dir, _, files in os.walk(root_path):
-            current_dir_path = Path(current_dir)
+        # 2. 各ファイルのコンテンツを出力（rglob 列挙 + 全境界 containment 検証済み）
+        for file_path in iter_source_files(root_path, out_path):
+            relative_path = file_path.relative_to(root_path)
+            lang = EXT_TO_LANG.get(file_path.suffix, "")
 
-            # 現在のディレクトリ自体がターゲット配下でない場合は、その中のファイルもすべてスキップ
-            if current_dir_path != root_path and not is_subpath_of_target(current_dir_path, root_path):
-                # ファイル単体で指定されているケースを考慮し、ファイルループ側でも二重チェックします
-                pass
+            f.write(f"### 📄 `{relative_path}`\n\n")
+            f.write(f"```{lang}\n")
 
-            for file in sorted(files):
-                file_path = current_dir_path / file
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as sf:
+                    f.write(sf.read())
+            except Exception as e:
+                f.write(f"/* [Error] ファイルの読み込みに失敗しました: {e} */")
 
-                # 指定ターゲット配下（または指定ファイルそのもの）でなければスキップ
-                if not is_subpath_of_target(file_path, root_path):
-                    continue
-                # 除外拡張子、または出力ファイル自身ならスキップ
-                if file_path.suffix in IGNORE_EXTS or file_path == Path(output_file).resolve():
-                    continue
-
-                relative_path = file_path.relative_to(root_path)
-                lang = EXT_TO_LANG.get(file_path.suffix, "")
-
-                f.write(f"### 📄 `{relative_path}`\n\n")
-                f.write(f"```{lang}\n")
-
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='replace') as sf:
-                        f.write(sf.read())
-                except Exception as e:
-                    f.write(f"/* [Error] ファイルの読み込みに失敗しました: {e} */")
-
-                f.write("\n```\n\n")
+            f.write("\n```\n\n")
 
 def iter_target_files(root_path: Path):
     """--check 用: TARGET_ITEMS 配下（または指定ファイル自身）の検査対象ファイルを列挙する。
@@ -123,18 +147,19 @@ def iter_target_files(root_path: Path):
     ここからのみ導出するため、生成対象が増えても check の取りこぼしが発生しない。
     出力 Markdown 自身は検査対象から除外する。
     """
-    output_file = (root_path / "ConvoPeq.md").resolve()
-    for current_dir, _, files in os.walk(root_path):
-        current_dir_path = Path(current_dir)
-        if current_dir_path != root_path and not is_subpath_of_target(current_dir_path, root_path):
+    output_file = resolve_safe_output_path(root_path, "ConvoPeq.md")
+    for path in sorted(root_path.rglob("*")):
+        try:
+            file_path = ensure_within_root(path, root_path)
+        except ValueError:
             continue
-        for file in sorted(files):
-            file_path = current_dir_path / file
-            if not is_subpath_of_target(file_path, root_path):
-                continue
-            if file_path.suffix in IGNORE_EXTS or file_path.resolve() == output_file:
-                continue
-            yield file_path
+        if not file_path.is_file():
+            continue
+        if not is_subpath_of_target(file_path, root_path):
+            continue
+        if file_path.suffix in IGNORE_EXTS or file_path == output_file:
+            continue
+        yield file_path
 
 
 def parse_generated_stamp(snapshot_path: Path):
