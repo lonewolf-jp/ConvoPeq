@@ -1,9 +1,0 @@
-﻿{
-    "schema":  "rollback_drill_report_v1",
-    "generatedAt":  "2026-09-20T01:45:05.2079553+09:00",
-    "rollbackMatrixPath":  "C:\\VSC_Project\\ConvoPeq\\evidence\\rollback_compatibility_report.json",
-    "violations":  [
-
-                   ],
-    "ready":  true
-}

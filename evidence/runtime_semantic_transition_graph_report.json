@@ -1,9 +1,0 @@
-﻿{
-    "schema":  "runtime_semantic_transition_graph_report_v1",
-    "generatedAt":  "2026-09-20T01:44:45.1616295+09:00",
-    "contractPath":  "C:\\VSC_Project\\ConvoPeq\\doc\\work10\\contracts\\runtime_semantic_transition_graph.md",
-    "violations":  [
-
-                   ],
-    "ready":  true
-}

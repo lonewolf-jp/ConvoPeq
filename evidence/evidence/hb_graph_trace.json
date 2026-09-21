@@ -1,7 +1,0 @@
-{
-  "schema": "hb_trace_v1",
-  "eventCount": 1,
-  "events": [
-    {"ts": 16255005066000, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false}
-  ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":16255021282000}
