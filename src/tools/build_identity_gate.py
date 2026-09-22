@@ -440,15 +440,22 @@ def emit_build_id(build_dir, source_root, shadow_candidate):
     wt = ('production src/ diff = 0 (tests only)' if not prod_diff
           else 'PRODUCTION src DIFF: ' + prod_diff.splitlines()[0] + ' (+more)')
 
-    # (d) production_flag: R15-2 — Phase 0 では token 自体を存在させない
+    # (d) production_flag: Phase 0 は token 不在、Phase 1 以降は CMakeCache の option 実値を表示
+    #     （R15-2: flag token の定義解禁は Phase 1 から。identity 判定ロジック自体は変更しない）
     flag = 'undefined/off (Phase 0: R15-2 — CMake 未登録)'
-    try:
-        with open(os.path.join(source_root, 'CMakeLists.txt'), 'r',
-                  encoding='utf-8', errors='replace') as f:
-            if 'CONVOPEQ_CORRECT_POLYPHASE_GAIN' in f.read():
-                flag = 'DEFINED — Phase 0 契約違反 (R15-2): 測定無効'
-    except OSError:
-        pass
+    cache_flag = cmake_cache_field(build_dir, 'CONVOPEQ_CORRECT_POLYPHASE_GAIN')
+    if cache_flag is not None:
+        _v = cache_flag.strip().upper()
+        flag = ('ON (Phase 1: 明示指定 — characterization 用)' if _v in ('ON', '1', 'TRUE')
+                else 'OFF (Phase 1: default OFF)')
+    else:
+        try:
+            with open(os.path.join(source_root, 'CMakeLists.txt'), 'r',
+                      encoding='utf-8', errors='replace') as f:
+                if 'CONVOPEQ_CORRECT_POLYPHASE_GAIN' in f.read():
+                    flag = 'CMakeLists に token あり / cache 未反映（要 re-configure）'
+        except OSError:
+            pass
 
     # (f) build configuration
     build_cfg = 'unknown'

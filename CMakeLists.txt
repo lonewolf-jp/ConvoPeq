@@ -128,6 +128,10 @@ endif()
 option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
 option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.)" OFF)
 
+# work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 OFF。
+# ON は characterization 用の明示指定のみ（default ON 化は別判断・HOLD）。
+option(CONVOPEQ_CORRECT_POLYPHASE_GAIN "Correct polyphase gain convention (B-1)" OFF)
+
 if(CONVOPEQ_ENABLE_ISR_TESTS)
     enable_testing()
 
@@ -1313,6 +1317,7 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
     $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
     # CONVOPEQ_DIAG_SAMPLE_MASK は DiagnosticsConfig.h で自動設定 (Release:0xFF, Debug:0x3F)。
     # CMake 変数 CONVOPEQ_DIAG_SAMPLE_MASK が明示的に指定された場合のみ上書きする。
     $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:$<$<BOOL:${CONVOPEQ_DIAG_SAMPLE_MASK}>:CONVOPEQ_DIAG_SAMPLE_MASK=${CONVOPEQ_DIAG_SAMPLE_MASK}>>
@@ -1911,6 +1916,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/T4Measurement.cpp
         src/tests/AudioEngineHarness/OdenomCampaignTests.cpp
         src/tests/AudioEngineHarness/BassBuzzMeasurement.cpp
+        src/tests/AudioEngineHarness/P1PolyphaseGainCharacterization.cpp
         ${CONVOPEQ_HARNESS_SOURCES}
     )
     target_compile_features(AudioEngineHarness PRIVATE cxx_std_20)
@@ -1936,6 +1942,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
         $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+        $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
         JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
         JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
         JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
@@ -2016,6 +2023,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(PolyphaseGainFidelityTests PRIVATE /QxCORE-AVX2)
     endif()
     target_compile_definitions(PolyphaseGainFidelityTests PRIVATE
+        $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_DONT_DEFINE_MIN_MAX_MACROS=1

@@ -555,6 +555,9 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
         }
 
         convValue *= 2.0;
+#if CONVOPEQ_CORRECT_POLYPHASE_GAIN
+        centerValue *= 2.0;   // 案E: denorm 判定より前に置くこと（candidate reference と同一順序が必須）
+#endif
         if (fastAbs(convValue) < kDenormThreshold) convValue = 0.0;
         if (fastAbs(centerValue) < kDenormThreshold) centerValue = 0.0;
 

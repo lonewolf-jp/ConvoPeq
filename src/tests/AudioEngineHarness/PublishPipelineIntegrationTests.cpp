@@ -1112,6 +1112,9 @@ int runBassBuzzMeasurement(int argc, char* argv[]);
 // BassBuzzMeasurement.cpp (WORK113 cleanup B-2: --buzz-order= parser の fail-closed 回帰)
 int runBuzzArgParserTests();
 
+// P1PolyphaseGainCharacterization.cpp (work113 P1-1: R12-8 OFF/ON characterization)
+int runP1PolyphaseGainCharacterization(int argc, char* argv[]);
+
     for (int i = 1; i < argc; ++i)
     {
         const std::string a(argv[i]);
@@ -1119,6 +1122,8 @@ int runBuzzArgParserTests();
             full = true;
         else if (a == "--buzz" || a.rfind("--buzz-", 0) == 0)
             return runBassBuzzMeasurement(argc, argv);
+        else if (a == "--p1-char")
+            return runP1PolyphaseGainCharacterization(argc, argv);
         else if (a == "--odenom-campaign" || a == "--odenom")
             odenomCampaign = true;
         else if (a.rfind("--scenario=", 0) == 0)
