@@ -906,6 +906,10 @@ void AudioEngine::rebuildThreadLoop()
                     task = pendingTask;
                     pendingTask.currentDSP = nullptr;
                     hasPendingTask = false;
+                    // ★ P3-5-R16: ownership transfer 完了直後のみ加算する take counter。
+                    //   queue成功・wake・backlog clear・build・commit・publish では加算しない。
+                    convo::fetchAddAtomic(rebuildTakeCount_, static_cast<std::uint64_t>(1),
+                                          std::memory_order_acq_rel);
                 }
                 // ★ M3-C: !wokeByPendingTask の場合 pendingTask は未変更 — stale task の
                 //   currentDSP ownership を失わない（build も行わない、下記 guard で continue）。
@@ -1226,6 +1230,11 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
             }
 
+            // ★ P3-5-R19: B2 build-result counter（usable runtime 到達のみ加算）。
+            //   validation／commit／publish では加算しない（R18 §6・§11）。
+            convo::fetchAddAtomic(rebuildBuildResultCount_, static_cast<std::uint64_t>(1),
+                                  std::memory_order_acq_rel);
+
             dspGuard.ptr = buildResult.runtime;
             auto* newDSP = buildResult.runtime;
 
@@ -1405,6 +1414,11 @@ void AudioEngine::rebuildThreadLoop()
                     + ",PF=" + juce::String(static_cast<juce::int64>(memAfterIR.pageFaultCount)));
             }
 #endif
+            // ★ P3-5-R22: main-site commit-enqueue 到達のみ加算する counter。
+            //   recovery enqueue（:1085／:1165）は含めない。queue／take／build／
+            //   commit／publish では加算しない。
+            convo::fetchAddAtomic(rebuildCommitEnqueueCount_, static_cast<std::uint64_t>(1),
+                                  std::memory_order_acq_rel);
             enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot, task.buildAnalysis, task.oversamplingResult, task.buildDiagnostics);
         }
         catch (const std::exception& e)

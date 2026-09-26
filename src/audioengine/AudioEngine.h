@@ -2067,6 +2067,33 @@ public:
             consumeAtomic(rtAuxMutable_.debugRebuildDispatchTaskSnapshotFallbackCount)
         };
     }
+    // ★ P3-5-R16: worker ownership-take counter の read-only reader。
+    //   queue成功数 (queuedCount) とは別イベント。scalar 1個のみ・所有権非露出、
+    [[nodiscard]] std::uint64_t getRebuildTakeCount() const noexcept
+    {
+        return convo::consumeAtomic(rebuildTakeCount_, std::memory_order_acquire);
+    }
+    // ★ P3-5-R19: B2 build-result counter の read-only reader。
+    //   usable runtime 到達のみ計数。validation／commit／publish では加算しない。
+    [[nodiscard]] std::uint64_t getRebuildBuildResultCount() const noexcept
+    {
+        return convo::consumeAtomic(rebuildBuildResultCount_, std::memory_order_acquire);
+    }
+    // ★ P3-5-R22: commit-enqueue counter の read-only reader。
+    //   main-site 到達のみ計数。recovery enqueue は含めない。
+    [[nodiscard]] std::uint64_t getRebuildCommitEnqueueCount() const noexcept
+    {
+        return convo::consumeAtomic(rebuildCommitEnqueueCount_, std::memory_order_acquire);
+    }
+    // ★ P3-5-R27: Coordinator Main-origin take counter の read-only reader（R26-A path A）。
+    //   Coordinator pop で origin==Main（recoveryObligationId==0）の場合のみ計数。Recovery take は含めない。
+    //   注意： Main bucket＝obligationId==0 全体であり、idle／bootstrap 等の non-recovery publish も
+    //   計数する（R23 §10 の既知混在）。cmt（main-site rebuild のみ）との対応は R28 で相関させる。
+    //   本体は RuntimeIntentCoordinator が所有（residency と対称）。scalar 1個のみ・所有権非露出。
+    [[nodiscard]] std::uint64_t getCoordinatorTakeCount() const noexcept
+    {
+        return runtimePublicationBridge_.getCoordinatorTakeCount();
+    }
     [[nodiscard]] EqCacheMissDiagnostics getEqCacheMissDiagnostics() const noexcept
     {
         return {
@@ -2322,6 +2349,56 @@ public:
         const auto readToken = worldAuthority_.acquireReadToken();
         const auto* world = worldAuthority_.consumeWorldHandle(readToken);
         return (world != nullptr) && (world->engine.current != nullptr);
+    }
+
+    // ★ P3-5-R10: active world snapshot (read-only diagnostics value object).
+    //   所有権・handle・pointer を返さない。RCU read は本 scope 内で完結する。
+    //   no-world 時は zero-initialized を返す（caller は generation/worldId/
+    //   publicationSequence の全ゼロで無効判定する。新 validity state なし）。
+    struct RuntimeActiveSnapshot
+    {
+        std::uint64_t generation = 0;
+        std::uint64_t worldId = 0;
+        convo::isr::PublicationSequenceId publicationSequence = 0;
+        int processingOrder = 0;
+        bool eqBypassed = false;
+        bool convBypassed = false;
+        bool softClipEnabled = false;
+        double saturationAmount = 0.0;
+        double inputHeadroomGain = 1.0;
+        double outputMakeupGain = 1.0;
+        double convolverInputTrimGain = 1.0;
+        int oversamplingFactor = 1;
+        bool irLoaded = false;
+        bool irFinalized = false;
+        std::uint64_t structuralHash = 0;
+        double fadeTimeSec = 0.0;
+    };
+
+    [[nodiscard]] inline RuntimeActiveSnapshot getActiveRuntimeSnapshot() const noexcept
+    {
+        RuntimeActiveSnapshot out {};
+        const auto readToken = worldAuthority_.acquireReadToken();
+        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
+        if (world == nullptr)
+            return out;
+        out.generation = world->generation;
+        out.worldId = world->worldId;
+        out.publicationSequence = world->publication.sequenceId;
+        out.processingOrder = world->routing.processingOrder;
+        out.eqBypassed = world->routing.eqBypassed;
+        out.convBypassed = world->routing.convBypassed;
+        out.softClipEnabled = world->automation.softClipEnabled;
+        out.saturationAmount = world->automation.saturationAmount;
+        out.inputHeadroomGain = world->automation.inputHeadroomGain;
+        out.outputMakeupGain = world->automation.outputMakeupGain;
+        out.convolverInputTrimGain = world->automation.convolverInputTrimGain;
+        out.oversamplingFactor = world->dspProjection.oversamplingFactor;
+        out.irLoaded = world->dspProjection.irLoaded;
+        out.irFinalized = world->dspProjection.irFinalized;
+        out.structuralHash = world->dspProjection.structuralHash;
+        out.fadeTimeSec = world->overlap.fadeTimeSec;
+        return out;
     }
 
     inline DSPCore* releaseActiveRuntimeDSP() noexcept
@@ -4719,7 +4796,8 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 [[nodiscard]] inline PublishCommitResult enqueueRuntimePublicationFireAndForget(
     convo::aligned_unique_ptr<const RuntimePublishWorld> world,
     const RegistrationContext& regCtx,
-    const convo::isr::DSPHandle& oldHandle) noexcept
+    const convo::isr::DSPHandle& oldHandle,
+    std::uint64_t recoveryObligationId = 0) noexcept
 {
     // ★ D101-33-C (D101-33-B A′ design): Admission-first token.
     //   tryAdmit(1) is THE linearization point vs closeAdmission() — both CAS on the same
@@ -4801,7 +4879,13 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     intent.payload.publish.mappedGeneration = mappedGen;
     intent.payload.publish.boundary = convo::isr::RuntimeBoundary::NonRTWorld;
     intent.payload.publish.decision = decision;
-    intent.payload.publish.recoveryObligationId = 0;   // ★ D105-R5-8: Route B (non-recovery) ⇒ no obligation
+    // ★ P3-5-R27: origin plumbing — trySubmitImpl の req.recoveryObligationId を搬送する
+    //   （0 = Main／!=0 = Recovery・D105 の既存意味のまま。新 field なし）。
+    //   deferred resubmit 時も元 req が move-out されるため起源保存される。
+    //   旧コメント「Route B (non-recovery) ⇒ no obligation」は本変更により無効：
+    //   Route B intent も obligation を搬送し、onPublishCommitted が async 解決し得る。
+    //   sync 側（Orchestrator.cpp:321）は後続で no-op になる（CAS single-winner・D105-R5-9）。
+    intent.payload.publish.recoveryObligationId = recoveryObligationId;
     if (!runtimePublicationBridge_.enqueuePublicationIntent(intent))
     {
         // キュー full: 移譲した Owner を取り戻し、registry をクリアして rollback に委ねる。
@@ -4832,7 +4916,8 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 [[nodiscard]] inline PublishCommitResult commitRuntimePublication(
     convo::aligned_unique_ptr<const RuntimePublishWorld> world,
     const RegistrationContext& regCtx,
-    const convo::isr::DSPHandle& oldHandle) noexcept
+    const convo::isr::DSPHandle& oldHandle,
+    std::uint64_t recoveryObligationId = 0) noexcept
 {
     static constexpr int kPublishReceiptWaitTimeoutMs = 250;  // CoordinatorLoop 1ms 周期 ≫ 十分
 
@@ -4841,7 +4926,8 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     const auto* preWorld = world.get();
     const auto seqId = (preWorld != nullptr) ? preWorld->publication.sequenceId : 0;
 
-    auto result = enqueueRuntimePublicationFireAndForget(std::move(world), regCtx, oldHandle);
+    auto result = enqueueRuntimePublicationFireAndForget(std::move(world), regCtx, oldHandle,
+                                                          recoveryObligationId);
 
     // 4. 完了通知を待つ（executePublish → orchestrator.onPublishCommitted → notifyPublishReceipt）。
     //    タイムアウトしても所有権は移譲済み（executePublish が後続で commit する）ため
@@ -4979,6 +5065,16 @@ public:
     std::atomic<std::uint64_t> quarantineResident_ { 0 };
     // publicationBacklog_ removed in Phase1-B; kept as always-0 legacy slot
     std::atomic<std::uint64_t> rebuildBacklog_ { 0 };
+    // ★ P3-5-R16: worker ownership-take counter (take直後のみ加算・queue時は加算しない)。
+    //   process lifetime 累積・reset なし。差分運用。queued==taken の再同一視をしないこと。
+    std::atomic<std::uint64_t> rebuildTakeCount_ { 0 };
+    // ★ P3-5-R19: B2 build-result counter（usable runtime 到達のみ加算）。
+    //   validation／commit／publish では加算しない。process lifetime 累積・reset なし。
+    std::atomic<std::uint64_t> rebuildBuildResultCount_ { 0 };
+    // ★ P3-5-R22: commit-enqueue counter（main-site 到達のみ加算）。
+    //   recovery enqueue・queue・consume・build・commit・publish では加算しない。
+    //   process lifetime 累積・reset なし。差分運用。
+    std::atomic<std::uint64_t> rebuildCommitEnqueueCount_ { 0 };
     std::atomic<std::uint64_t> saturationEnterCount_ { 0 };
     std::atomic<std::uint64_t> saturationExitCount_ { 0 };
     std::atomic<std::uint64_t> publicationRejectCount_ { 0 };

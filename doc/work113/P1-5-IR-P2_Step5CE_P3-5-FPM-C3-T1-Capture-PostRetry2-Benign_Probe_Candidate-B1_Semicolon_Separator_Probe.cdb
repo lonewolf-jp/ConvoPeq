@@ -1,0 +1,27 @@
+.echo C3B1C_SCRIPT_BEGIN
+.sympath+ C:\VSC_Project\ConvoPeq
+.expr /s masm
+r $t1 = 0xDEAD0001
+r $t2 = 0xDEAD0002
+r $t3 = 0xDEAD0003
+r $t4 = 0xDEAD0004
+r $t5 = 0xDEAD0005
+r $t16 = 0
+r $t17 = 0
+r $t18 = 0
+r $t19 = 0
+.echo C3B1C_SENTINEL_SET
+r $t1 = ping+0x3c
+r $t2 = ping+0x4FD0
+r $t3 = ping+0x2600
+r $t4 = ping+0x5000
+r $t5 = ping+0x40
+.echo C3B1C_ASSIGN_DONE
+r $t1, $t2, $t3, $t4, $t5
+.echo C3B1C_READBACK_DONE
+bp ping+0x39d9 ".echo C3B1C_BREAKPOINT_HIT; r $t11=@$bp0-0x39d9; r $t12=@$t11+0x3c; r $t13=@$t11+0x4FD0; r $t14=@$t11+0x2600; r $t15=@$t11+0x5000; r $t6=@$t11+0x40; .echo C3B1C_B1_DERIVED; r $t11; r $t1; r $t2; r $t3; r $t4; r $t5; .echo C3B1C_CROSSCHECK_BEGIN; .if (@$t1 == @$t12) { .echo XCHK_T1_AGREE; r $t18=@$t18+1 } ; .if (@$t2 == @$t13) { .echo XCHK_T2_AGREE; r $t18=@$t18+1 } ; .if (@$t3 == @$t14) { .echo XCHK_T3_AGREE; r $t18=@$t18+1 } ; .if (@$t4 == @$t15) { .echo XCHK_T4_AGREE; r $t18=@$t18+1 } ; .if (@$t5 == @$t6) { .echo XCHK_T5_AGREE; r $t18=@$t18+1 } ; .echo C3B1C_CROSSCHECK_END; .if (@$t1 != 0xDEAD0001) { .echo C3B1C_SENTINEL_CLEARED; r $t18=@$t18+1 } ; .echo C3B1C_TALLY; r $t16; r $t17; r $t18; r $t19"
+.echo C3B1C_BP_SET
+bl
+g
+.echo C3B1C_SCRIPT_END
+q

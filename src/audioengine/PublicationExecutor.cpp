@@ -9,9 +9,11 @@ PublishResult PublicationExecutor::publish(
     AudioEngine& engine,
     convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
     convo::isr::DSPHandle existingHandle,
-    convo::isr::DSPHandle oldHandle) noexcept
+    convo::isr::DSPHandle oldHandle,
+    std::uint64_t recoveryObligationId) noexcept
 {
-    return publishImpl(engine, std::move(frozen), existingHandle, oldHandle, /*waitForReceipt=*/true);
+    return publishImpl(engine, std::move(frozen), existingHandle, oldHandle, /*waitForReceipt=*/true,
+                       recoveryObligationId);
 }
 
 PublishResult PublicationExecutor::publishImpl(
@@ -19,7 +21,8 @@ PublishResult PublicationExecutor::publishImpl(
     convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
     convo::isr::DSPHandle existingHandle,
     convo::isr::DSPHandle oldHandle,
-    bool waitForReceipt) noexcept
+    bool waitForReceipt,
+    std::uint64_t recoveryObligationId) noexcept
 {
     if (!frozen)
         return PublishResult::PublishFailed;
@@ -53,11 +56,13 @@ PublishResult PublicationExecutor::publishImpl(
         ? engine.commitRuntimePublication(
             std::move(stateOwner),
             AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
-            oldHandle)
+            oldHandle,
+            recoveryObligationId)
         : engine.enqueueRuntimePublicationFireAndForget(
             std::move(stateOwner),
             AudioEngine::RegistrationContext::alreadyRegistered(existingHandle),
-            oldHandle);
+            oldHandle,
+            recoveryObligationId);
 
     const uint64_t publishEndUs = convo::getCurrentTimeUs();
 

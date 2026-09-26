@@ -1,0 +1,40 @@
+.sympath+ C:\VSC_Project\ConvoPeq
+.reload /f ping.exe
+.expr /s masm
+.echo C3_BENIGN_PROBE_SCRIPT_BEGIN
+r $t0 = 0
+r $t1 = 0
+r $t2 = 0
+r $t3 = 0
+r $t4 = 0
+r $t5 = 0
+r $t6 = 0
+r $t7 = 0
+r $t8 = 0
+r $t9 = 0
+r $t10 = 0
+r $t11 = 0
+r $t12 = 0
+r $t13 = 0
+r $t14 = 0
+r $t15 = 0
+r $t16 = 0
+r $t17 = 0
+r $t18 = 0
+r $t19 = 0
+r $t0 = 9
+r $t1 = ping!+0x3c
+r $t2 = ping!+0x4FD0
+r $t3 = ping!+0x2600
+r $t4 = ping!+0x5000
+r $t5 = ping!+0x40
+r $t7 = 0
+r $t8 = 1
+r $t10 = 4
+bp ping+0x1184 ".if (@$t16 == 0) { r $t16=1; r $t17=@$t17+1; r $t14=@r13&0xffffffff; r $t15=@r13>>32; r $t6=@$t5+0xc0+((@$t10&0xfff)*0x30); .if (dwo(@$t1) == 0x100) { .echo PASS_A_POS; r $t18=@$t18+1 } .else { .echo FAIL_A_POS; r $t19=1; r; q } .if (dwo(@$t1) != 0x100) { .echo FAIL_A_NEG; r $t19=1; r; q } .else { .echo PASS_A_NEG; r $t18=@$t18+1 } .if (@$t7 == 0) { .if (@$t8 == 1) { .echo PASS_B_POS; r $t18=@$t18+1 } .else { .echo FAIL_B_POS; r $t19=1; r; q } } .else { .echo FAIL_B_POS; r $t19=1; r; q } .if (@$t7 != 0) { .echo FAIL_B_NEG; r $t19=1; r; q } .else { .echo PASS_B_NEG; r $t18=@$t18+1 } .if (@rsp != 0) { .echo PASS_B_HW_POS; r $t18=@$t18+1 } .else { .echo FAIL_B_HW_POS; r $t19=1; r; q } .if (@rsp == 0) { .echo FAIL_B_HW_NEG; r $t19=1; r; q } .else { .echo PASS_B_HW_NEG; r $t18=@$t18+1 } .if ((@r13&0xffffffff) == @$t14) { .if ((@r13>>32) == @$t15) { .echo PASS_C_POS; r $t18=@$t18+1 } .else { .echo FAIL_C_POS; r $t19=1; r; q } } .else { .echo FAIL_C_POS; r $t19=1; r; q } r $t15=@$t15^1; .if ((@r13>>32) == @$t15) { .echo FAIL_C_NEG; r $t19=1; r; q } .else { .echo PASS_C_NEG; r $t18=@$t18+1 } .if (poi(@$t4) != 0) { .echo PASS_D_POS; r $t18=@$t18+1 } .else { .echo FAIL_D_POS; r $t19=1; r; q } .if (poi(@$t4) == 0) { .echo FAIL_D_NEG; r $t19=1; r; q } .else { .echo PASS_D_NEG; r $t18=@$t18+1 } .if (@$t6 == ping!+0x1c0) { .echo PASS_E_POS; r $t18=@$t18+1 } .else { .echo FAIL_E_POS; r $t19=1; r; q } .if (@$t6 != ping!+0x1c0) { .echo FAIL_E_NEG; r $t19=1; r; q } .else { .echo PASS_E_NEG; r $t18=@$t18+1 } .if ((@$t0 == 9) and (@$t10 == 4)) { .echo PASS_F_POS; r $t18=@$t18+1 } .else { .echo FAIL_F_POS; r $t19=1; r; q } .if ((@$t0 == 9) and (@$t10 == 5)) { .echo FAIL_F_NEG; r $t19=1; r; q } .else { .echo PASS_F_NEG; r $t18=@$t18+1 } .if (dwo(@$t1) == 0x100) { dd @$t2+((dwo(@$t1)&0xfff)*4) L1; dq @$t3+((dwo(@$t1)&0xfff)*0x30) L6; .echo PASS_G_POS; r $t18=@$t18+1 } .else { .echo FAIL_G_POS; r $t19=1; r; q } .if (dwo(@$t1) != 0x100) { .echo FAIL_G_NEG; r $t19=1; r; q } .else { .echo PASS_G_NEG; r $t18=@$t18+1 } .if (@$t18 == 16) { .echo PASS_TERMINATION_Q; r $t18=@$t18+1; r; r $t16; r $t17; r $t18; r $t19; q } .else { .echo FAIL_TERMINATION_Q; r $t19=1; r; q } } .else { .echo FAIL_PROBE_STATE; r $t19=1; r; q }"
+bp ping+0x387d ".if (@$t16 == 0) { r $t16=1; r $t17=@$t17+1; r $t14=@r13&0xffffffff; r $t15=@r13>>32; r $t6=@$t5+0xc0+((@$t10&0xfff)*0x30); .if (dwo(@$t1) == 0x100) { .echo PASS_A_POS; r $t18=@$t18+1 } .else { .echo FAIL_A_POS; r $t19=1; r; q } .if (dwo(@$t1) != 0x100) { .echo FAIL_A_NEG; r $t19=1; r; q } .else { .echo PASS_A_NEG; r $t18=@$t18+1 } .if (@$t7 == 0) { .if (@$t8 == 1) { .echo PASS_B_POS; r $t18=@$t18+1 } .else { .echo FAIL_B_POS; r $t19=1; r; q } } .else { .echo FAIL_B_POS; r $t19=1; r; q } .if (@$t7 != 0) { .echo FAIL_B_NEG; r $t19=1; r; q } .else { .echo PASS_B_NEG; r $t18=@$t18+1 } .if (@rsp != 0) { .echo PASS_B_HW_POS; r $t18=@$t18+1 } .else { .echo FAIL_B_HW_POS; r $t19=1; r; q } .if (@rsp == 0) { .echo FAIL_B_HW_NEG; r $t19=1; r; q } .else { .echo PASS_B_HW_NEG; r $t18=@$t18+1 } .if ((@r13&0xffffffff) == @$t14) { .if ((@r13>>32) == @$t15) { .echo PASS_C_POS; r $t18=@$t18+1 } .else { .echo FAIL_C_POS; r $t19=1; r; q } } .else { .echo FAIL_C_POS; r $t19=1; r; q } r $t15=@$t15^1; .if ((@r13>>32) == @$t15) { .echo FAIL_C_NEG; r $t19=1; r; q } .else { .echo PASS_C_NEG; r $t18=@$t18+1 } .if (poi(@$t4) != 0) { .echo PASS_D_POS; r $t18=@$t18+1 } .else { .echo FAIL_D_POS; r $t19=1; r; q } .if (poi(@$t4) == 0) { .echo FAIL_D_NEG; r $t19=1; r; q } .else { .echo PASS_D_NEG; r $t18=@$t18+1 } .if (@$t6 == ping!+0x1c0) { .echo PASS_E_POS; r $t18=@$t18+1 } .else { .echo FAIL_E_POS; r $t19=1; r; q } .if (@$t6 != ping!+0x1c0) { .echo FAIL_E_NEG; r $t19=1; r; q } .else { .echo PASS_E_NEG; r $t18=@$t18+1 } .if ((@$t0 == 9) and (@$t10 == 4)) { .echo PASS_F_POS; r $t18=@$t18+1 } .else { .echo FAIL_F_POS; r $t19=1; r; q } .if ((@$t0 == 9) and (@$t10 == 5)) { .echo FAIL_F_NEG; r $t19=1; r; q } .else { .echo PASS_F_NEG; r $t18=@$t18+1 } .if (dwo(@$t1) == 0x100) { dd @$t2+((dwo(@$t1)&0xfff)*4) L1; dq @$t3+((dwo(@$t1)&0xfff)*0x30) L6; .echo PASS_G_POS; r $t18=@$t18+1 } .else { .echo FAIL_G_POS; r $t19=1; r; q } .if (dwo(@$t1) != 0x100) { .echo FAIL_G_NEG; r $t19=1; r; q } .else { .echo PASS_G_NEG; r $t18=@$t18+1 } .if (@$t18 == 16) { .echo PASS_TERMINATION_Q; r $t18=@$t18+1; r; r $t16; r $t17; r $t18; r $t19; q } .else { .echo FAIL_TERMINATION_Q; r $t19=1; r; q } } .else { .echo FAIL_PROBE_STATE; r $t19=1; r; q }"
+bp ping+0x39d9 ".if (@$t16 == 0) { r $t16=1; r $t17=@$t17+1; r $t14=@r13&0xffffffff; r $t15=@r13>>32; r $t6=@$t5+0xc0+((@$t10&0xfff)*0x30); .if (dwo(@$t1) == 0x100) { .echo PASS_A_POS; r $t18=@$t18+1 } .else { .echo FAIL_A_POS; r $t19=1; r; q } .if (dwo(@$t1) != 0x100) { .echo FAIL_A_NEG; r $t19=1; r; q } .else { .echo PASS_A_NEG; r $t18=@$t18+1 } .if (@$t7 == 0) { .if (@$t8 == 1) { .echo PASS_B_POS; r $t18=@$t18+1 } .else { .echo FAIL_B_POS; r $t19=1; r; q } } .else { .echo FAIL_B_POS; r $t19=1; r; q } .if (@$t7 != 0) { .echo FAIL_B_NEG; r $t19=1; r; q } .else { .echo PASS_B_NEG; r $t18=@$t18+1 } .if (@rsp != 0) { .echo PASS_B_HW_POS; r $t18=@$t18+1 } .else { .echo FAIL_B_HW_POS; r $t19=1; r; q } .if (@rsp == 0) { .echo FAIL_B_HW_NEG; r $t19=1; r; q } .else { .echo PASS_B_HW_NEG; r $t18=@$t18+1 } .if ((@r13&0xffffffff) == @$t14) { .if ((@r13>>32) == @$t15) { .echo PASS_C_POS; r $t18=@$t18+1 } .else { .echo FAIL_C_POS; r $t19=1; r; q } } .else { .echo FAIL_C_POS; r $t19=1; r; q } r $t15=@$t15^1; .if ((@r13>>32) == @$t15) { .echo FAIL_C_NEG; r $t19=1; r; q } .else { .echo PASS_C_NEG; r $t18=@$t18+1 } .if (poi(@$t4) != 0) { .echo PASS_D_POS; r $t18=@$t18+1 } .else { .echo FAIL_D_POS; r $t19=1; r; q } .if (poi(@$t4) == 0) { .echo FAIL_D_NEG; r $t19=1; r; q } .else { .echo PASS_D_NEG; r $t18=@$t18+1 } .if (@$t6 == ping!+0x1c0) { .echo PASS_E_POS; r $t18=@$t18+1 } .else { .echo FAIL_E_POS; r $t19=1; r; q } .if (@$t6 != ping!+0x1c0) { .echo FAIL_E_NEG; r $t19=1; r; q } .else { .echo PASS_E_NEG; r $t18=@$t18+1 } .if ((@$t0 == 9) and (@$t10 == 4)) { .echo PASS_F_POS; r $t18=@$t18+1 } .else { .echo FAIL_F_POS; r $t19=1; r; q } .if ((@$t0 == 9) and (@$t10 == 5)) { .echo FAIL_F_NEG; r $t19=1; r; q } .else { .echo PASS_F_NEG; r $t18=@$t18+1 } .if (dwo(@$t1) == 0x100) { dd @$t2+((dwo(@$t1)&0xfff)*4) L1; dq @$t3+((dwo(@$t1)&0xfff)*0x30) L6; .echo PASS_G_POS; r $t18=@$t18+1 } .else { .echo FAIL_G_POS; r $t19=1; r; q } .if (dwo(@$t1) != 0x100) { .echo FAIL_G_NEG; r $t19=1; r; q } .else { .echo PASS_G_NEG; r $t18=@$t18+1 } .if (@$t18 == 16) { .echo PASS_TERMINATION_Q; r $t18=@$t18+1; r; r $t16; r $t17; r $t18; r $t19; q } .else { .echo FAIL_TERMINATION_Q; r $t19=1; r; q } } .else { .echo FAIL_PROBE_STATE; r $t19=1; r; q }"
+bl
+g
+.echo C3_BENIGN_PROBE_SCRIPT_END
+q

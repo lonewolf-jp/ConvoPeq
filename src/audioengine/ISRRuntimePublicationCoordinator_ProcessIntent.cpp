@@ -54,6 +54,12 @@ void RuntimeIntentCoordinator::processIntent(
         {
         case IntentType::Publish:
             convo::fetchSubAtomic(publicationIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+            // ★ P3-5-R27: Main-origin take counter（R26-A path A・唯一の writer）。
+            //   origin==Main（recoveryObligationId==0）の場合のみ加算。Recovery は含めない。
+            //   residency 減算と同位置の一元管理（handler では行わない — HANDLER-1）。
+            //   Decision／World の書換なし（read-only 参照のみ）。
+            if (commonIntent.payload.publish.recoveryObligationId == 0)
+                convo::fetchAddAtomic(coordinatorTakeCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             break;
         case IntentType::Quarantine:
             convo::fetchSubAtomic(quarantineIntentResidencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);

@@ -135,6 +135,7 @@ $ git diff HEAD --name-only -- 'src/*.cpp' 'src/*.h' ':!src/tests'
 
 ## 6. 判定と次工程
 
-- **C1 の実装と検証: 完了**（31 検定 ALL PASS・静的解析警告 0・production 変更 0・PRECOMMIT GATE 5/5 PASS）。
-- **REF-FIDELITY の性格**: 本 exe は **Shadow fidelity gate**（production 正しさの gate ではない・R12-8）— 「production == shadow」は「production が数学的に正しい」を意味せず、T4〜T8 の独立した数学的制約が共通バグリスクを低減する位置づけ。**C1 PASS ≠ B-1 PASS ≠ 案E採用**。P0-A〜P0-I の characterization は Phase 0 で G-0/C0 承認後に実施（P0-I は事前数学検証 PASS のみ・実測は 0-5）。
-- **次の着手境界**: 人間による staged 確認（§5 の 3 項目）→ C1 commit → G-0 / C0 承認 → rebuild → Phase 0 characterization（0-1 〜 0-6）。
+- **C1 の実装と検証: 完了 + commit 済み**（HEAD `85aa13b9`・31 検定 ALL PASS・静的解析警告 0・production 変更 0・PRECOMMIT GATE 5/5 PASS）。
+- **REF-FIDELITY の性格**: 本 exe は **Shadow fidelity gate**（production 正しさの gate ではない・R12-8）— 「production == shadow」は「production が数学的に正しい」を意味せず、T4〜T8 の独立した数学的制約が共通バグリスクを低減する位置づけ。**C1 PASS ≠ B-1 PASS ≠ 案E採用**。P0-A〜P0-I の characterization は Phase 0 で実施（P0-I は事前数学検証 PASS のみ・実測は 0-5）。
+- **承認状態（2026-09-22）**: G-0 / T-1 / T-2 / T-3 / C0 **全承認済み**（ユーザー確定・v3.2 計画書 §3 に記録）。
+- **次の着手境界**: C0 独立 commit（evidence/ 追跡外化・承認済み・実行は次の指示時）→ ConvoPeq.md 再生成 → FRESH 確認 → Phase 0 characterization（0-1 〜 0-6）。production `centerValue *= 2.0`・CMake flag・default ON・calibration・案E 最終採用・F-3/F-4 は全 HOLD 継続。

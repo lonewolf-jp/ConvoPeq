@@ -29,22 +29,28 @@ public:
     //   commitRuntimePublication（register→rollback トランザクション）を実行する。
     // ★ B4: oldHandle = Rebuild (#7) の old DSP retire 意図（current active DSP handle）。
     //   trySubmit が解決した oldHandle を渡し、idle publish とは異なり retire する意図を表現する。
+    // ★ P3-5-R27: origin plumbing — trySubmitImpl の req.recoveryObligationId を
+    //   intent payload まで搬送する（0 = Main／!=0 = Recovery・既存意味のまま）。
+    //   新 struct field なし。default 0 のため既存 caller（idle／bootstrap 等）は不変。
     [[nodiscard]] PublishResult publish(
         AudioEngine& engine,
         convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
         convo::isr::DSPHandle existingHandle,
-        convo::isr::DSPHandle oldHandle) noexcept;
+        convo::isr::DSPHandle oldHandle,
+        std::uint64_t recoveryObligationId = 0) noexcept;
 
     void advanceEpoch() noexcept {}
 
 private:
     // publish / publishFireAndForget の共通実装。
+    // ★ P3-5-R27: recoveryObligationId を commit／fire-and-forget 両経路へ中継する。
     [[nodiscard]] PublishResult publishImpl(
         AudioEngine& engine,
         convo::aligned_unique_ptr<convo::FrozenRuntimeWorld> frozen,
         convo::isr::DSPHandle existingHandle,
         convo::isr::DSPHandle oldHandle,
-        bool waitForReceipt) noexcept;
+        bool waitForReceipt,
+        std::uint64_t recoveryObligationId = 0) noexcept;
 };
 
 } // namespace convo::isr

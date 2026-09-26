@@ -1,51 +1,154 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "lsp": true,
-  "plugin": ["context-mode"],
+  "lsp": {
+    "clangd": {
+      "command": ["C:/Users/user/.cache/opencode/bin/clangd_22.1.6/bin/clangd.exe", "--background-index", "--clang-tidy", "--completion-style=detailed"],
+      "extensions": [".c", ".cpp", ".cc", ".cxx", ".c++", ".h", ".hpp", ".hh", ".hxx", ".h++"]
+    }
+  },
+  "plugins": [],
   "mcp": {
-    "serena": {
-      "type": "local",
-      "command": ["C:/Users/user/.local/bin/serena.exe", "start-mcp-server", "--context", "ide", "--project", "C:/VSC_Project/ConvoPeq", "--mode", "editing", "--add-mode", "interactive"],
-      "enabled": true
-    },
-    "headroom": {
-      "type": "local",
-      "command": [".venv/Scripts/headroom.exe", "mcp", "serve"],
-      "enabled": true
-    },
-    "aidex": {
-      "type": "local",
-      "command": ["node", "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"],
-      "enabled": true
-    },
-    "context7": {
-      "type": "remote",
-      "url": "https://mcp.context7.com/mcp",
-      "enabled": true,
-      "headers": {
-        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+    "servers": {
+      "serena": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/Users/user/.local/bin/serena.exe",
+          "start-mcp-server",
+          "--context",
+          "ide",
+          "--project",
+          "C:/VSC_Project/ConvoPeq",
+          "--mode",
+          "editing",
+          "--add-mode",
+          "interactive"
+        ],
+        "disabled": false
+      },
+      "headroom": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/VSC_Project/ConvoPeq/.venv/Scripts/headroom.exe",
+          "mcp",
+          "serve"
+        ],
+        "disabled": false
+      },
+      "aidex": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "node",
+          "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"
+        ],
+        "disabled": false
+      },
+      "context7": {
+        "type": "remote",
+        "url": "https://mcp.context7.com/mcp",
+        "disabled": false,
+        "headers": {
+          "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+        }
+      },
+      "firecrawl": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:\\Users\\user\\AppData\\Roaming\\npm\\npx.cmd",
+          "-y",
+          "firecrawl-mcp"
+        ],
+        "disabled": false,
+        "environment": {
+          "FIRECRAWL_API_KEY": "{env:FIRECRAWL_API_KEY}"
+        }
+      },
+      "brave": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:\\Users\\user\\AppData\\Roaming\\npm\\npx.cmd",
+          "-y",
+          "@brave/brave-search-mcp-server",
+          "--transport",
+          "stdio"
+        ],
+        "disabled": false,
+        "environment": {
+          "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
+        }
+      },
+      "mslearn": {
+        "type": "remote",
+        "url": "https://learn.microsoft.com/api/mcp",
+        "disabled": false
+      },
+      "context-mode": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/Users/user/AppData/Roaming/npm/context-mode.cmd"
+        ],
+        "environment": {
+          "CONTEXT_MODE_DIR": "C:/Users/user/AppData/Roaming/opencode/context-mode"
+        },
+        "disabled": false
+      },
+      "obscura": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/Users/user/.local/bin/obscura/obscura.exe",
+          "mcp"
+        ],
+        "disabled": false
+      },
+      "ddgs": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/Python314/Scripts/uvx.exe",
+          "--from",
+          "ddgs[mcp]",
+          "ddgs",
+          "mcp"
+        ],
+        "disabled": false
+      },
+      "graphify": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/Users/user/AppData/Roaming/Python/Python314/Scripts/graphify-mcp.exe",
+          "--transport",
+          "stdio",
+          "--graph",
+          "C:/VSC_Project/ConvoPeq/graphify-out/graph.json"
+        ],
+        "disabled": false
+      },
+      "cocoindex": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\pythonw.exe",
+          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+          "C:/Users/user/.local/bin/ccc.exe",
+          "mcp"
+        ],
+        "disabled": false
       }
-    },
-    "firecrawl": {
-      "type": "local",
-      "command": ["npx", "-y", "firecrawl-mcp"],
-      "enabled": true,
-      "environment": {
-        "FIRECRAWL_API_KEY": "{env:FIRECRAWL_API_KEY}"
-      }
-    },
-    "brave": {
-      "type": "local",
-      "command": ["npx", "-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
-      "enabled": true,
-      "environment": {
-        "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
-      }
-    },
-    "mslearn": {
-      "type": "remote",
-      "url": "https://learn.microsoft.com/api/mcp",
-      "enabled": true
     }
   }
 }

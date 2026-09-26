@@ -1,0 +1,116 @@
+== 係数検証（全 6 design） ==
+  511t/140dB: FIRsum=1.000000000000000 center=0.500000000000000 convSum=0.500000000000000 cTap=255 cPar=1 vPar=0
+  127t/110dB: FIRsum=1.000000000000000 center=0.500000000000000 convSum=0.500000000000000 cTap=63 cPar=1 vPar=0
+  31t/90dB: FIRsum=1.000000000000000 center=0.500000000000000 convSum=0.500000000000000 cTap=15 cPar=1 vPar=0
+  1023t/160dB: FIRsum=1.000000000000000 center=0.500000000000000 convSum=0.500000000000000 cTap=511 cPar=1 vPar=0
+  255t/140dB: FIRsum=1.000000000000000 center=0.500000000000000 convSum=0.500000000000000 cTap=127 cPar=1 vPar=0
+  63t/120dB: FIRsum=1.000000000000000 center=0.500000000000000 convSum=0.500000000000000 cTap=31 cPar=1 vPar=0
+== 1. DC round-trip（アルゴリズム厳密シミュレーション） ==
+  IIRLike r=2: base=0.750000000000 (0.75^1=0.750000000000) cand=1.000000000000
+  IIRLike r=4: base=0.562500000000 (0.75^2=0.562500000000) cand=1.000000000000
+  IIRLike r=8: base=0.421875000000 (0.75^3=0.421875000000) cand=1.000000000000
+  LinearPhase r=2: base=0.750000000000 (0.75^1=0.750000000000) cand=1.000000000000
+  LinearPhase r=4: base=0.562500000000 (0.75^2=0.562500000000) cand=1.000000000000
+  LinearPhase r=8: base=0.421875000000 (0.75^3=0.421875000000) cand=1.000000000000
+
+== 2. full-chain round-trip |H| (Fs_in 基準・exact DTFT) ==
+  S1   (31/90) (N=1):
+    f=     50.0Hz(0.00Fs): base= -2.4988dB cand= -0.0000dB dev=+0.0000dB
+    f=   1000.0Hz(0.01Fs): base= -2.4988dB cand= -0.0000dB dev=+0.0000dB
+    f=  10000.0Hz(0.05Fs): base= -2.4995dB cand= -0.0005dB dev=+0.0002dB
+    f=  48000.0Hz(0.25Fs): base= -2.4993dB cand= -0.0004dB dev=+0.0001dB
+    f=  86400.0Hz(0.45Fs): base= -7.7406dB cand= -3.6068dB dev=+1.6350dB
+    f=  94080.0Hz(0.49Fs): base=-11.7810dB cand= -5.8895dB dev=+3.3927dB
+    ripple[0.005,0.45]: base=5.242dB cand=3.607dB
+    ripple[0.01,0.3]: base=0.001dB cand=0.001dB
+    0.1dB edge: base=0.0000 cand=0.3526 Fs_in
+  IIR3 (511/127/31) (N=3):
+    f=     50.0Hz(0.00Fs): base= -7.5067dB cand= -0.0078dB dev=+0.0026dB
+    f=   1000.0Hz(0.01Fs): base= -7.5004dB cand= -0.0030dB dev=+0.0010dB
+    f=  10000.0Hz(0.05Fs): base= -7.5033dB cand= -0.0052dB dev=+0.0017dB
+    f=  48000.0Hz(0.25Fs): base= -7.5108dB cand= -0.0108dB dev=+0.0036dB
+    f=  86400.0Hz(0.45Fs): base= -7.5449dB cand= -0.0364dB dev=+0.0121dB
+    f=  94080.0Hz(0.49Fs): base= -7.6484dB cand= -0.1459dB dev=+0.0062dB
+    ripple[0.005,0.45]: base=0.111dB cand=0.084dB
+    ripple[0.01,0.3]: base=0.034dB cand=0.025dB
+    0.1dB edge: base=0.0000 cand=0.4897 Fs_in
+  LP3  (1023/255/63) (N=3):
+    f=     50.0Hz(0.00Fs): base= -7.5010dB cand= -0.0035dB dev=+0.0012dB
+    f=   1000.0Hz(0.01Fs): base= -7.4930dB cand=  0.0025dB dev=-0.0008dB
+    f=  10000.0Hz(0.05Fs): base= -7.4959dB cand=  0.0003dB dev=-0.0001dB
+    f=  48000.0Hz(0.25Fs): base= -7.5026dB cand= -0.0047dB dev=+0.0016dB
+    f=  86400.0Hz(0.45Fs): base= -7.4863dB cand=  0.0075dB dev=-0.0025dB
+    f=  94080.0Hz(0.49Fs): base= -7.5071dB cand= -0.0083dB dev=+0.0025dB
+    ripple[0.005,0.45]: base=0.053dB cand=0.039dB
+    ripple[0.01,0.3]: base=0.016dB cand=0.012dB
+    0.1dB edge: base=0.0000 cand=0.4945 Fs_in
+  511/140 single (N=1):
+    f=     50.0Hz(0.00Fs): base= -2.4988dB cand=  0.0000dB dev=-0.0000dB
+    f=   1000.0Hz(0.01Fs): base= -2.4988dB cand=  0.0000dB dev=-0.0000dB
+    f=  10000.0Hz(0.05Fs): base= -2.4988dB cand=  0.0000dB dev=-0.0000dB
+    f=  48000.0Hz(0.25Fs): base= -2.4988dB cand= -0.0000dB dev=+0.0000dB
+    f=  86400.0Hz(0.45Fs): base= -2.4988dB cand= -0.0000dB dev=+0.0000dB
+    f=  94080.0Hz(0.49Fs): base= -2.8398dB cand= -0.2545dB dev=+0.0865dB
+    ripple[0.005,0.45]: base=0.000dB cand=0.000dB
+    ripple[0.01,0.3]: base=0.000dB cand=0.000dB
+    0.1dB edge: base=0.0000 cand=0.4886 Fs_in
+
+== 3. per-design 絶対基準（own-rate cycles/sample・exact DTFT） ==
+  511/140: edge=0.2448 t_end=0.2590 stopmin=-319.1dB floor=130 | 0.26:-141.9 0.3:-155.2 0.35:-160.0 0.45:-174.8 0.474:-165.4
+  127/110: edge=0.2317 t_end=0.2782 stopmin=-319.1dB floor=100 | 0.26:-18.6 0.3:-114.2 0.35:-125.1 0.45:-138.9 0.474:-177.2
+  31/90: edge=0.1823 t_end=0.3452 stopmin=-315.6dB floor=80 | 0.26:-8.4 0.3:-25.4 0.35:-96.2 0.45:-107.7 0.474:-90.6
+  1023/160: edge=0.2472 t_end=0.2552 stopmin=-319.1dB floor=150 | 0.26:-167.5 0.3:-179.1 0.35:-206.4 0.45:-186.5 0.474:-188.4
+  255/140: edge=0.2396 t_end=0.2681 stopmin=-6000.0dB floor=130 | 0.26:-36.5 0.3:-152.1 0.35:-157.7 0.45:-165.4 0.474:-167.1
+  63/120: edge=0.2109 t_end=0.3130 stopmin=-6000.0dB floor=110 | 0.26:-10.7 0.3:-59.3 0.35:-130.1 0.45:-125.6 0.474:-138.3
+
+== 4. image rejection 測定（3 定義・独立確定） ==
+  D1 AUTHORITATIVE (corrected axis, v2.2 §2.7.3 / R8-1):
+    up 単段出力（2x rate）: tone bin = f̂·N / image bin = N−f̂·N + argmax 検証
+  D1 OLD AXIS (discarded, R7-1/R8-1): 旧定義 f̂ vs 0.5−f̂（v1.7 相当・解釈破棄済）
+  D2: 単段 round-trip 出力（output rate）で f̂ vs 0.5−f̂
+  D3: full-chain（S1/IIR3/LP3）出力の worst in-band spur
+  31/90 D1 base : 0.05:-9.54 0.1:-9.54 0.2:-9.54 0.3:-9.54 0.35:-9.66 0.4:-10.99 0.45:-24.18
+  31/90 D1 cand : 0.05:-91.31 0.1:-104.36 0.2:-94.62 0.3:-90.77 0.35:-46.17 0.4:-24.95 0.45:-11.14
+  31/90 D1-ARGMAX : 0.05: base tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | cand tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | 0.1: base tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | cand tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | 0.2: base tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | cand tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | 0.3: base tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | cand tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | 0.35: base tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | cand tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | 0.4: base tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | cand tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | 0.45: base tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022 | cand tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022
+  31/90 D1 OLD AXIS base : 0.05:-9.75 0.1:-10.49 0.2:-9.97 0.3:11.51 0.35:8.15 0.4:5.27 0.45:2.47
+  31/90 D1 OLD AXIS cand : 0.05:-35.94 0.1:-27.79 0.2:-10.41 0.3:13.04 0.35:23.19 0.4:11.61 0.45:4.86
+  31/90 D2 base : 0.05:-165.53 0.1:-143.00 0.2:-102.91 0.3:-97.02 0.35:-114.34 0.4:-125.81 0.45:-137.57
+  31/90 D2 cand : 0.05:-165.53 0.1:-143.00 0.2:-102.91 0.3:-97.02 0.35:-114.34 0.4:-125.82 0.45:-137.84
+  127/110 D1 base : 0.05:-9.54 0.1:-9.54 0.2:-9.54 0.3:-9.54 0.35:-9.54 0.4:-9.54 0.45:-9.55
+  127/110 D1 cand : 0.05:-94.54 0.1:-98.51 0.2:-92.93 0.3:-93.79 0.35:-92.19 0.4:-94.04 0.45:-70.44
+  127/110 D1-ARGMAX : 0.05: base tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | cand tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31129 | 0.1: base tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | cand tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29492 | 0.2: base tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | cand tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26215 | 0.3: base tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | cand tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | 0.35: base tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | cand tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21300 | 0.4: base tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | cand tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | 0.45: base tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022 | cand tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022
+  127/110 D1 OLD AXIS base : 0.05:-8.12 0.1:-3.06 0.2:5.83 0.3:6.84 0.35:9.53 0.4:10.34 0.45:-3.49
+  127/110 D1 OLD AXIS cand : 0.05:-12.60 0.1:-3.60 0.2:4.57 0.3:15.20 0.35:14.18 0.4:14.99 0.45:-2.19
+  127/110 D2 base : 0.05:-171.90 0.1:-149.99 0.2:-65.72 0.3:-86.89 0.35:-97.85 0.4:-73.98 0.45:-118.86
+  127/110 D2 cand : 0.05:-171.90 0.1:-149.99 0.2:-65.72 0.3:-86.89 0.35:-97.85 0.4:-73.98 0.45:-118.86
+  511/140 D1 base : 0.05:-9.54 0.1:-9.54 0.2:-9.54 0.3:-9.54 0.35:-9.54 0.4:-9.54 0.45:-9.54
+  511/140 D1 cand : 0.05:-115.89 0.1:-111.50 0.2:-102.69 0.3:-97.14 0.35:-95.88 0.4:-91.97 0.45:-83.89
+  511/140 D1-ARGMAX : 0.05: base tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | cand tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | 0.1: base tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | cand tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29483 | 0.2: base tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | cand tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26215 | 0.3: base tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | cand tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | 0.35: base tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | cand tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21291 | 0.4: base tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | cand tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19653 | 0.45: base tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022 | cand tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18014
+  511/140 D1 OLD AXIS base : 0.05:-9.75 0.1:-10.49 0.2:-8.64 0.3:9.84 0.35:8.09 0.4:4.81 0.45:1.23
+  511/140 D1 OLD AXIS cand : 0.05:-35.93 0.1:-27.78 0.2:-10.39 0.3:12.93 0.35:22.82 0.4:10.40 0.45:2.44
+  511/140 D2 base : 0.05:-139.69 0.1:-117.92 0.2:-78.17 0.3:-70.10 0.35:-87.99 0.4:-99.80 0.45:-113.37
+  511/140 D2 cand : 0.05:-139.69 0.1:-117.92 0.2:-78.17 0.3:-70.10 0.35:-87.99 0.4:-99.80 0.45:-113.37
+  63/120 D1 base : 0.05:-9.54 0.1:-9.54 0.2:-9.54 0.3:-9.54 0.35:-9.54 0.4:-9.57 0.45:-11.92
+  63/120 D1 cand : 0.05:-97.56 0.1:-95.39 0.2:-102.36 0.3:-92.19 0.35:-91.83 0.4:-59.13 0.45:-21.20
+  63/120 D1-ARGMAX : 0.05: base tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | cand tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31129 | 0.1: base tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | cand tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | 0.2: base tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | cand tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26215 | 0.3: base tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | cand tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | 0.35: base tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | cand tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | 0.4: base tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | cand tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | 0.45: base tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022 | cand tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022
+  63/120 D1 OLD AXIS base : 0.05:-9.12 0.1:-8.11 0.2:-6.17 0.3:-8.12 0.35:-12.71 0.4:5.19 0.45:8.92
+  63/120 D1 OLD AXIS cand : 0.05:-21.15 0.1:-15.44 0.2:-13.00 0.3:-14.70 0.35:-5.94 0.4:3.12 0.45:16.80
+  63/120 D2 base : 0.05:-185.71 0.1:-144.27 0.2:-108.76 0.3:-89.96 0.35:-115.43 0.4:-114.75 0.45:-106.15
+  63/120 D2 cand : 0.05:-185.71 0.1:-144.27 0.2:-108.76 0.3:-89.96 0.35:-115.43 0.4:-114.75 0.45:-106.13
+  255/140 D1 base : 0.05:-9.54 0.1:-9.54 0.2:-9.54 0.3:-9.54 0.35:-9.54 0.4:-9.54 0.45:-9.54
+  255/140 D1 cand : 0.05:-94.09 0.1:-102.36 0.2:-94.75 0.3:-91.39 0.35:-99.98 0.4:-89.52 0.45:-84.33
+  255/140 D1-ARGMAX : 0.05: base tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | cand tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31122 | 0.1: base tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | cand tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | 0.2: base tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | cand tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26206 | 0.3: base tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | cand tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22930 | 0.35: base tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | cand tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21291 | 0.4: base tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | cand tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19653 | 0.45: base tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022 | cand tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18014
+  255/140 D1 OLD AXIS base : 0.05:-9.96 0.1:-5.41 0.2:-4.06 0.3:10.50 0.35:10.06 0.4:2.63 0.45:14.93
+  255/140 D1 OLD AXIS cand : 0.05:-21.73 0.1:-11.91 0.2:-8.23 0.3:10.01 0.35:28.14 0.4:4.16 0.45:7.02
+  255/140 D2 base : 0.05:-162.04 0.1:-173.06 0.2:-90.65 0.3:-108.95 0.35:-79.16 0.4:-96.22 0.45:-109.69
+  255/140 D2 cand : 0.05:-162.04 0.1:-173.07 0.2:-90.65 0.3:-108.95 0.35:-79.16 0.4:-96.22 0.45:-109.69
+  1023/160 D1 base : 0.05:-9.54 0.1:-9.54 0.2:-9.54 0.3:-9.54 0.35:-9.54 0.4:-9.54 0.45:-9.54
+  1023/160 D1 cand : 0.05:-97.58 0.1:-95.58 0.2:-102.67 0.3:-92.19 0.35:-91.81 0.4:-91.94 0.45:-85.22
+  1023/160 D1-ARGMAX : 0.05: base tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31130 | cand tone_bin=1638 image_bin=31130 argmax_t=1638 argmax_i=31122 | 0.1: base tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29491 | cand tone_bin=3277 image_bin=29491 argmax_t=3277 argmax_i=29483 | 0.2: base tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26214 | cand tone_bin=6554 image_bin=26214 argmax_t=6554 argmax_i=26206 | 0.3: base tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22938 | cand tone_bin=9830 image_bin=22938 argmax_t=9830 argmax_i=22930 | 0.35: base tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21299 | cand tone_bin=11469 image_bin=21299 argmax_t=11469 argmax_i=21291 | 0.4: base tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19661 | cand tone_bin=13107 image_bin=19661 argmax_t=13107 argmax_i=19653 | 0.45: base tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18022 | cand tone_bin=14746 image_bin=18022 argmax_t=14746 argmax_i=18014
+  1023/160 D1 OLD AXIS base : 0.05:-9.13 0.1:-8.13 0.2:-6.17 0.3:-8.30 0.35:-16.65 0.4:5.41 0.45:7.20
+  1023/160 D1 OLD AXIS cand : 0.05:-21.19 0.1:-15.47 0.2:-13.03 0.3:-14.11 0.35:-7.34 0.4:3.26 0.45:15.84
+  1023/160 D2 base : 0.05:-150.22 0.1:-108.34 0.2:-74.76 0.3:-51.09 0.35:-79.41 0.4:-77.47 0.45:-71.08
+  1023/160 D2 cand : 0.05:-150.23 0.1:-108.34 0.2:-74.76 0.3:-51.09 0.35:-79.41 0.4:-77.47 0.45:-71.08
+  D3 S1: 0.05:base spur=-100.6dB@0.048 mirror(0.5-f)=-269.5dB | 0.05:cand spur=-100.6dB@0.048 mirror(0.5-f)=-269.5dB | 0.1:base spur=-100.6dB@0.098 mirror(0.5-f)=-262.1dB | 0.1:cand spur=-100.6dB@0.098 mirror(0.5-f)=-262.1dB | 0.2:base spur=-100.6dB@0.202 mirror(0.5-f)=-242.4dB | 0.2:cand spur=-100.6dB@0.202 mirror(0.5-f)=-242.4dB | 0.3:base spur=-100.6dB@0.298 mirror(0.5-f)=-230.3dB | 0.3:cand spur=-100.6dB@0.298 mirror(0.5-f)=-230.3dB
+  D3 IIR3: 0.05:base spur=-99.0dB@0.052 mirror(0.5-f)=-245.0dB | 0.05:cand spur=-99.0dB@0.052 mirror(0.5-f)=-245.0dB | 0.1:base spur=-99.0dB@0.102 mirror(0.5-f)=-230.6dB | 0.1:cand spur=-99.0dB@0.102 mirror(0.5-f)=-230.6dB | 0.2:base spur=-99.0dB@0.198 mirror(0.5-f)=-205.4dB | 0.2:cand spur=-99.0dB@0.198 mirror(0.5-f)=-205.4dB | 0.3:base spur=-99.0dB@0.302 mirror(0.5-f)=-205.9dB | 0.3:cand spur=-99.0dB@0.302 mirror(0.5-f)=-205.9dB
+  D3 LP3: 0.05:base spur=-98.1dB@0.052 mirror(0.5-f)=-268.0dB | 0.05:cand spur=-98.1dB@0.052 mirror(0.5-f)=-268.0dB | 0.1:base spur=-98.1dB@0.102 mirror(0.5-f)=-260.6dB | 0.1:cand spur=-98.1dB@0.102 mirror(0.5-f)=-260.6dB | 0.2:base spur=-98.1dB@0.198 mirror(0.5-f)=-240.9dB | 0.2:cand spur=-98.1dB@0.198 mirror(0.5-f)=-240.9dB | 0.3:base spur=-98.1dB@0.302 mirror(0.5-f)=-228.9dB | 0.3:cand spur=-98.1dB@0.302 mirror(0.5-f)=-228.9dB

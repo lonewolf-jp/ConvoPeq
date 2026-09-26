@@ -1112,8 +1112,19 @@ int runBassBuzzMeasurement(int argc, char* argv[]);
 // BassBuzzMeasurement.cpp (WORK113 cleanup B-2: --buzz-order= parser の fail-closed 回帰)
 int runBuzzArgParserTests();
 
+// BassBuzzMeasurement.cpp (B-1-R2-B1: 実 EQProcessor 単体の wet 出力 attribution)
+int runEqDirectDriveAttribution();
+
 // P1PolyphaseGainCharacterization.cpp (work113 P1-1: R12-8 OFF/ON characterization)
 int runP1PolyphaseGainCharacterization(int argc, char* argv[]);
+
+// P1PolyphaseGainCharacterization.cpp (P3-5-R30: Recovery-origin vehicle・test-only D1)
+int runP1RecoveryOrigin(int argc, char* argv[]);
+
+// P1PolyphaseGainCharacterization.cpp (P3-5-FPM-Impl-1: M0/M1/M2 measurement vehicle・test-only)
+int runFpmM0();
+int runFpmM1();
+int runFpmM2();
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1124,6 +1135,14 @@ int runP1PolyphaseGainCharacterization(int argc, char* argv[]);
             return runBassBuzzMeasurement(argc, argv);
         else if (a == "--p1-char")
             return runP1PolyphaseGainCharacterization(argc, argv);
+        else if (a == "--p1-recovery-origin")
+            return runP1RecoveryOrigin(argc, argv);
+        else if (a == "--fpm-m0")
+            return runFpmM0();
+        else if (a == "--fpm-m1")
+            return runFpmM1();
+        else if (a == "--fpm-m2")
+            return runFpmM2();
         else if (a == "--odenom-campaign" || a == "--odenom")
             odenomCampaign = true;
         else if (a.rfind("--scenario=", 0) == 0)
@@ -1218,6 +1237,11 @@ int runP1PolyphaseGainCharacterization(int argc, char* argv[]);
     //   pure（audio 非依存・即時完了）のため既定テスト群の先頭で実行する。
     if (runBuzzArgParserTests() != 0)
         return 1;
+
+    // ★ B-1-R2-B1: 実 EQProcessor 単体の wet 出力 attribution（192kHz・1 条件・1 測定）。
+    //   harness とは独立に EQProcessor を直接駆動し、材料を stderr へ出すだけ。
+    //   PASS/FAIL 判定はしないため戻り値は無視しないが build を止めない（常に 0）。
+    (void)runEqDirectDriveAttribution();
 
     if (!testRebuildPublishCompletes())
     {

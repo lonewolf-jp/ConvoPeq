@@ -278,7 +278,10 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     //   publish を使用: receipt は同スレッドの processIntent でしか配送されないため、
     //   同期 wait は自己待ち（最大250msストール）になる。enqueue 済み + 所有権移譲済みなので
     //   次 tick で executePublish が commit する。
-    auto result = executor_.publish(engine_, std::move(frozen), req.newDSP, oldHandle);
+    // ★ P3-5-R27: origin plumbing — req の obligation を intent まで搬送する。
+    //   deferred resubmit 時も consume() が元 req を move-out するため起源保存される。
+    auto result = executor_.publish(engine_, std::move(frozen), req.newDSP, oldHandle,
+                                    req.recoveryObligationId);
     if (result != PublishResult::Success) {
         juce::Logger::writeToLog("[DIAG] trySubmit: executor_.publish FAILED gen="
             + juce::String(req.generation)

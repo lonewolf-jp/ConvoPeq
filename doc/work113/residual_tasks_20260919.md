@@ -56,9 +56,30 @@ fail-closed 化 + regression test を実装・検証済み。**新規明示値 `
 
 ## B. 他オーナーへ引継ぎ済みの OPEN（本クローズ範囲外・記録確定済み）
 
-1. **EQ-on 経路の −5.17dB 減成の帰属** → **EQ DSP owner**（独立 work item）
+1. **EQ-on 経路の −5.17dB 減成の帰属** → **`CustomInputOversampler` owner**（独立 work item）— **B-1 監査完了・原因 ATTRIBUTED**
    - 実測: `0.4912 = 0.891 × 0.5513`、totalGain 0dB・全 band 無効・AGC/engine staging off でも二連続再現・原因未帰属
    - 対応不要部分: rigcheck=eq 校準窓 `[0.486,0.496]` は regression tripwire として固定済み（`6ae95149`）
+   - **[B-1] baseline 固定（再現済）**: bare `ratio=0.8846 thd=-149.2dB` / eq `ratio=0.4912 thd=-152.7dB`（inPeak=0.5000 固定）。線形減成（THD −152.7dB）。`0.891` の正体は `kOutputHeadroom = 0.8912509381337456`（−1.0dBFS、DSP 末尾で無条件乗算＋±同値クランプ）。現行 bare 実測は 0.8846 で記録の 0.891 より 0.75% 低い
+   - **[B-1] 棄却済み（実測 or 数値再現による）**: EQ 内部 AGC（診断モードで強制 OFF でも不変）・filter structure（Serial/Parallel で不変）・totalGain（`totalGainTarget` 既定 1.0）・staging headroom/makeup（eq 側は 0/0）・saturation（0・線形）・EQ 内部バンド処理（active band 0 個で両構造とも unity）・**stage ② OutputFilter**（自ソースの `makeHPF`/`makeLPF` を数値再現 → 50Hz で 0.987442 = −0.110dB、fs 非依存。実測 −5.11dB と桁違い）
+   - **[B-1] 新規識別子: サンプルレート依存**。`--buzz-sr=` 実測で 48000→0.3681 / 96000→0.3683 / 192000→0.4912（bare 比 −7.62/−7.61/−5.11dB）。**純ゲインではなくレート依存要素**だが、Hz 固定コーナーの単純フィルタでは説明不能（全 fs で同値になるはず）
+   - **[B-1] 数値の正規化（記録上の注意）**: `[EQLEVEL]` は `outLinear`（peak 絶対値）と `published/input = outLinear/inLinear` の 2 量を出す。本監査で一度この取り違えにより「×0.5 異常」と誤報した（測定異常ではなく集計ミス）。**以降は `published/input` を用いる**
+   - **[B-1] stage 別の棄却（すべて直接実測または実測ログによる）**:
+     - EQProcessor 単体: base 192k/2048 および RT 相当 768k/4096（AGC 0/1 双方）すべて `ratio=1.000000`（unity）
+     - AutoGainPlanner: `[AUTO_GAIN_ANALYSIS] eqMeasuredGainDb=0.00 eqUpperBoundGainDb=0.00 boundExcessDb=0.000` / `[AUTO_GAIN_PLAN] inputHeadroomDb=0.00 outputMakeupDb=0.00 trimDb=0.00`（恒等 EQ では 0dB 計画）
+     - World automation: `headroom=1.0 makeup=1.0`、`softClip=1 satAmount=0.1`（閾値非接触・THD 線形）
+     - OutputFilter ②: 直接駆動で 6 条件すべて `ratio=0.987442`（−0.110dB、lpMode・prepare レート非依存）→ 自ソース式の数値再現と 3 桁一致
+     - bypass blend / crossfade / fade-in: 不発動（`requestedFullBypass=false`、crossfade gain `current=1.0`、fade 10.7ms ≪ 測定窓 2s）
+     - `kOutputHeadroom`(0.8912509): publish 点より後・全経路共通
+     - `rigcheck=ir` は `convBypassed=1` のまま dry 出力（wet 対照にならない。F-5 参照）
+   - **★ [B-1] 主因（ATTRIBUTED）: `CustomInputOversampler` の up/down round-trip 利得欠陥**
+     - 直接駆動（DSP を挟まない `processUp → processDown`）: ratio 1→1.000000 / 2→**0.750000** / 4→**0.562500** / 8→**0.421875**。厳密に `0.75^log2(ratio)`、preset（IIRLike/LinearPhase）非依存
+     - 実装式: `prepareStage()` が `centerCoeff=0.5` ＋ 非center総和=`0.5` に正規化 → `interpolateStage()` は **conv 位相のみ** `convValue *= 2.0`（位相 DC gain が 0.5 / 1.0 の非対称）→ `decimateStage()` に対応する `×2` が無く両位相を 0.5/0.5 で混合 → **`0.5×0.5 + 0.5×1.0 = 0.75`**
+     - 1 stage（ratio 2）の分離実測: `upGain=1.000000` / `downGain=0.750000` → **down（間引き）側に局在**
+     - `prepareSingleStage(31, 90.0, …)`（SoftClip 局所2×OS の production 実引数）でも同一（up 1.0 / down 0.75）→ **構築経路に依存しない一様な convention**
+     - engine 実測との照合: `0.98379（= inputHeadroom≈0.9963 × ②0.987442） × 0.75^max(log2 effOS, 1)` で 4 条件すべて **0.05% 以内**（eqos1 0.737826 / eqos2 0.737516 / eq@192k 0.553142 / eq@96k 0.414820）
+     - **softClip 有効系の構造**: `softClipEnabled=false` → `0.75^log2(effOS)`。`true` → `0.75^max(log2(effOS), 1)`（`effOS==1` では主 OS が非実行の代わりに `softClipOS` 局所2×OS が 1 因子を供給。`AudioEngine.Processing.DSPCoreFloat.cpp:393-415` の分岐）。これにより「OS=1 ≡ OS=2」は**未検証の解決値仮説を用いず**説明できる
+     - **契約不整合（確定）**: `isSymmetricUpDown=true` / `isLinearPhaseFIR=true` の宣言、および `AudioEngine.Processing.Latency.cpp` の `static_assert(..., "…symmetric linear-phase FIR with identical up/down taps")` という契約前提と、実装の非対称正規化が矛盾
+   - **[B-1] 判定: ATTRIBUTED / ROOT CAUSE LOCALIZED**。**修正は別 work item**（全経路のレベルが最大 +7.5dB 変化し、rigcheck 窓 `[0.486,0.496]` を含む校正値・回帰基準の再取得が必要）。本監査を通じて production 変更 0
 2. **`--buzz-order=` silent fallback** — **CLOSED（2026-09-20 / B-2）**
    - 実測（欠陥）: 旧実装 `(v == "etc") ? 1 : 0` は `"etc"` 以外をすべて黙って `0` に落とし、`orderMode` の既定 sentinel `-1`（= routing 未変更）を生成しなかった。typo・空値・`"1"` が probe routing を意図せず `ConvolverThenEQ` へ上書きし得た（`--buzz-eq/conv` が 2026-09-19 に誘発した誤測定と同型）
    - 実測（見送り根拠の失効）: リポジトリ内に `--buzz-order=` を呼ぶ script（`.cmd`/`.bat`/`.ps1`/`.sh`）は **0 件**。`test_instrumentation_cleanup_20260919.md:25` の「既存スクリプト互換優先」は committed な呼び出し元で裏付けられなかった
@@ -140,3 +161,52 @@ Phase 2-2（mirror = committed-state compatibility projection）・stale mirror 
 3. 移植完了後にファイルを退役し、`tools/build-debug.bat` の stale 行を除去。
 
 **注意**: 上記は read-only audit の結果であり、テスト本体 / `CMakeLists.txt` / `tools/build-debug.bat` は本段階で一切変更していない。
+
+### F-2. harness 欠陥: `--buzz-rigcheck=eq` の実効 AGC が意図と一致しない（**B-1 帰属とは分離**）
+
+`--buzz-rigcheck=eq` はコメント・文書上「EQ AGC off」を前提にしているが、**実効状態は EQ AGC = ON** である（実測 `gainpath: staging=0 eqAGC=1`）。原因は呼出順:
+
+1. `configureProbeFlatEQ(e)`（`BassBuzzMeasurement.cpp:1370`）が `setEQAGCEnabled(false)` を実行する
+2. 直後の `e.setAutoGainStagingEnabled(false)`（同 1374）が内部で `getEQProcessor().setAGCEnabled(!enabled)` = **`setAGCEnabled(true)`** を呼ぶ（`AudioEngine.h:1425`）
+3. `getEQProcessor()` は `uiEqEditor` そのもの（`AudioEngine.h:1292`）であるため、1 の AGC OFF が上書きされる
+
+`--buzz-probe` 経路は呼出順が逆（staging → configureProbeFlatEQ）なので AGC OFF で終わる。
+
+- **B-1 の原因ではない**: AGC を強制 OFF にした診断モードでも ratio は 0.4912 のまま完全不変だった（§B-1 の棄却リスト参照）
+- したがって `test_instrumentation_cleanup_20260919.md:38` の「EQ AGC off で二連続実測 0.4912」は**実効状態としては誤記**（実際は AGC ON）
+- 同ファイル 1371–1373 行のコメント「staging ON だと ratio 0.4912」も実測と矛盾する（実測は staging OFF・AGC ON で 0.4912）
+- 本件は **harness cleanup** として B-1 から分離して扱う。既存窓 `[0.486,0.496]` は変更しない
+
+### F-3. EQ dry/wet 混合の潜在欠陥（R2-1 の read-only 所見・未修正）
+
+`EQProcessor.Processing.cpp:980-1010` の bypass 遷移時ブレンド:
+
+```cpp
+const bool canBlendDry = (dryCopyBase != nullptr);
+const double wetGainState = activeBypassRamp->getNextValue();
+const double dryGain = 1.0 - wetGainState;
+if (canBlendDry) out = wet * wetGainState + dry * dryGain;
+else             out = wet * wetGainState;   // ← dry 補償なしの wet-only 減衰
+```
+
+`dryCopyBase` は `bypassTransitionActive` かつ EQ 自身の `dryBypassBuffer` が十分な容量で確保できた場合のみ充填される（同 570-580）。確保できない場合は `else` 側に落ち、**bypass 遷移が終わるまで dry 項なしのレベル低下**が生じる。遷移時のみの潜在欠陥であり、**今回の定常状態の −5.11dB の原因ではない**（定常では `bypassTransitionActive=false` でブレンド自体が実行されない）。記録のみ。
+
+**R2-2（dry buffer / processed buffer / final output の同一 block 比較）は境界超過**: α は `EQProcessor::bypassFadeGain { 1.0 }`（`EQProcessor.h:676`）という **private メンバで公開 getter が存在しない**。DSPCore 側の `bypassFadeGainDouble/Float` と `dryBypassBufferDouble*` は crossfade dry-hold の別機構で、これも private。したがって内部観測には production 側（EQ ヘッダ等）への getter/tap 追加が必要となり、今回の「production src/ 変更禁止」境界を越える。代替案は「実 `EQProcessor` を直接駆動する新規テストの追加」だが、engine と同一の coefficient cache 構築の再現が必要で忠実性が未検証（既存 `EQProcessorMaxGainTests` は係数数学の**再実装**であり実 EQ を駆動していない）。判断は保留。
+
+### F-4. `--buzz-rigcheck=ir` は convolver を有効化していない（harness 欠陥・2026-09-20）
+
+`ir` モードは共通部の `setConvolverBypassRequested(true)` を残したまま `loadImpulseResponse()` するだけで `convBypassed` を解除しません（`BassBuzzMeasurement.cpp:1507` が唯一の設定箇所）。実測の World も `eqBypassed=1 convBypassed=1` で、出力は bypass blend の **dry コピー**（`published/input` が bare と同一の 0.498140）。したがって **`ir` は wet 経路の対照実験に使えません**（B-1 C2-D で「OS 段は無損失」と誤結論した原因）。既存窓 `[0.880,0.897]` は dry 測定に対する基準です。wet 対照が必要な場合は test-only 診断モード `irwet<digit>` を使用します。
+
+### F-5. Serena MCP の python language server 起動不能（環境障害・2026-09-20 修復済）
+
+`solidlsp` は `uvx -p 3.13 --from pyright==1.1.403 pyright-langserver --stdio` を起動しますが、PyPI `pyright` 1.1.403 が提供する LSP 実行ファイル名は **`pyright-python-langserver`** で不一致 → `Failed to spawn: program not found` → `LanguageServerTerminatedException` → 全 Serena ツールが `The language server manager is not initialized` で失敗。
+修復: `.serena/project.yml` の `language_servers` を `python` → **`python_basedpyright`**（Serena 1.7.0 対応、`uvx --from basedpyright==1.39.9 basedpyright-langserver --stdio`、実行ファイル名が一致）へ変更。検証: cpp / python_basedpyright / bash の 3 LS すべて起動完了・例外 0。`.serena/project.yml` は untracked のため repo は未変更。
+**本障害は B-1 の測定値とは無関係**（当該の「×0.5」は集計ミスであり測定異常ではない。§B-1 の正規化注記を参照）。
+
+### F-6. B-1 計測用 test-only 診断資産（2026-09-20・production 変更 0）
+
+`src/tests/AudioEngineHarness/BassBuzzMeasurement.cpp` に追加（`eq` の判定窓は不変）:
+- 診断モード: `eqdiag` / `eqdiagser` / `eqos<digit>`（OS 明示固定）/ `irwet<digit>`（conv 有効の真の wet 対照）
+- 観測行: `gainpath`（実効 staging/AGC/totalGain/headroom/makeup/struct）/ `[EQ_RTPATH]`（World の eqCoeffHash・eqParams・routing・eqLPFMode・RT cache 実体）/ `[XFADE]`（crossfade runtime 実値）/ `[EQLEVEL]`（`outputLevelLinear` の測定窓中最大値）
+- 直接駆動測定（既定スイート登録）: `[EQ_DIRECT]`（実 EQProcessor、base 192k/2048 と RT 768k/4096）/ `[OF_DIRECT]`（実 OutputFilter ②、3 mode×2 rate）/ `[OS_DIRECT]`（実 `CustomInputOversampler` round-trip、ratio 1/2/4/8 × preset、up/down 分離、`prepareSingleStage(31,90)`）
+- 計測上の注意: `getOutputLevel()` 等は**信号が流れている間**にサンプリングする（無音時は `measureLevel` が 0 を返す）。`published/input` と `outLinear` を取り違えない

@@ -1,0 +1,48 @@
+; ======================================================================
+; P3-5-FPM-C3-T1-Capture-PostRetry2-Benign-Probe-Preparation-3
+; Anchor-establishment-only minimal probe. DESIGN ARTIFACT - NOT EXECUTED.
+; Scope: establish $t1..$t5 as ping.exe image-relative anchors and read them back.
+; Explicitly EXCLUDED: dwo, poi, dd, dq, dereference, ring arithmetic, MASM and.
+; No memory is read by this probe. No expression family beyond anchor value is tested.
+
+.echo C3BP3_SCRIPT_BEGIN
+.sympath+ C:\VSC_Project\ConvoPeq
+.expr /s masm
+
+; Phase 1: distinct sentinels so a rejected assignment is distinguishable from a real value.
+r $t1 = 0xDEAD0001
+r $t2 = 0xDEAD0002
+r $t3 = 0xDEAD0003
+r $t4 = 0xDEAD0004
+r $t5 = 0xDEAD0005
+r $t16 = 0
+r $t17 = 0
+r $t18 = 0
+r $t19 = 0
+.echo C3BP3_SENTINEL_SET
+
+; Phase 2: Candidate A - module name + offset, no exclamation mark.
+; This is the documented name[+|offset] form already proven acceptable to bp.
+; It is the exact form that failed as r $tN = ping!+0x3c in the consumed run.
+r $t1 = ping+0x3c
+r $t2 = ping+0x4FD0
+r $t3 = ping+0x2600
+r $t4 = ping+0x5000
+r $t5 = ping+0x40
+.echo C3BP3_ASSIGN_DONE
+
+; Phase 3: immediate unconditional readback. This is the gap that made the prior run
+; "$t1..$t5 post-failure value = NOT ESTABLISHED BY LOG". This dump always prints.
+r $t1, $t2, $t3, $t4, $t5
+.echo C3BP3_READBACK_DONE
+
+; Phase 4: single benign breakpoint at the already-proven hit address.
+; Candidate B - derive the image base from @pc at hit time and rebuild every anchor
+; arithmetically, with no module-qualified symbol anywhere in the body.
+bp ping+0x39d9 ".if (@$t16 == 0) { r $t16=1; r $t17=@$t17+1; r $t11=@$pc-0x39d9; r $t12=@$t11+0x3c; r $t13=@$t11+0x4FD0; r $t14=@$t11+0x2600; r $t15=@$t11+0x5000; r $t6=@$t11+0x40; r $t7=@$t11+0x1c0; .echo C3BP3_BASE_DERIVED; r $t11; r $t7; .if (@$t1 == @$t12) { .echo PASS_T1; r $t18=@$t18+1 } .else { .echo FAIL_T1; r $t19=1; q } .if (@$t2 == @$t13) { .echo PASS_T2; r $t18=@$t18+1 } .else { .echo FAIL_T2; r $t19=1; q } .if (@$t3 == @$t14) { .echo PASS_T3; r $t18=@$t18+1 } .else { .echo FAIL_T3; r $t19=1; q } .if (@$t4 == @$t15) { .echo PASS_T4; r $t18=@$t18+1 } .else { .echo FAIL_T4; r $t19=1; q } .if (@$t5 == @$t6) { .echo PASS_T5; r $t18=@$t18+1 } .else { .echo FAIL_T5; r $t19=1; q } .if (@$t1 != 0xDEAD0001) { .echo PASS_SENTINEL_CLEARED; r $t18=@$t18+1 } .else { .echo FAIL_SENTINEL_CLEARED; r $t19=1; q } .if (@$t18 == 6) { .echo PASS_TERMINATION_Q; r $t18=@$t18+1; r; r $t16; r $t17; r $t18; r $t19; q } .else { .echo FAIL_TERMINATION_Q; r $t19=1; q } } .else { .echo C3BP3_ALREADY_HIT; gc }"
+.echo C3BP3_BP_SET
+bl
+
+g
+.echo C3BP3_SCRIPT_END
+q

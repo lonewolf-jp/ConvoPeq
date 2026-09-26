@@ -436,6 +436,11 @@ std::uint64_t RuntimeIntentCoordinator::getPublicationIntentResidencyCount() con
     return convo::consumeAtomic(publicationIntentResidencyCount_, std::memory_order_acquire);
 }
 
+// ★ P3-5-R27: Main-origin Publish take counter（R26-A path A）。
+std::uint64_t RuntimeIntentCoordinator::getCoordinatorTakeCount() const noexcept {
+    return convo::consumeAtomic(coordinatorTakeCount_, std::memory_order_acquire);
+}
+
 std::uint64_t RuntimeIntentCoordinator::getPendingIntentCount() const noexcept {
     return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
 }

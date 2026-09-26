@@ -100,8 +100,12 @@ build-t1-test/
 .zcode/
 .rtk/
 .auto/
-.tgrep/
+.tgtep/
 tmp/
+.cline/
+.workbuddy-ai/
+.opencod/
+.opencode/
 nul
 
 # Coverage reports

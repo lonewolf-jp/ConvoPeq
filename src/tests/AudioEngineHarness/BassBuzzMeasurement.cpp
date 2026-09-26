@@ -31,6 +31,8 @@
 #include "convolver/IRTrimTestHooks.h"   // ★ WORK111: test/measurement-only hook
 #include "tests/NUPCTestAccess.h"        // ★ WORK113-7B: NUC 内部読み取り専用 getter
 #include "tests/AudioEngineHarness/TransitionMetrics.h" // ★ WORK113-17: §15 transition 計測
+#include "OutputFilter.h"                // ★ C2-K: ② EQ最終段 OutputFilter の直接駆動（test-only）
+#include "CustomInputOversampler.h"      // ★ C2-L: OS up/down round-trip の直接駆動（test-only）
 #include <thread>
 #include <vector>
 
@@ -1137,13 +1139,413 @@ int runBuzzArgParserTests()
     return 0;
 }
 
+namespace {
+
+// B-1-R2-B1 の診断出力（printf 系の書式文字列を使わない安全な書き出し）
+void eqDirectLog(const std::string& line)
+{
+    std::fputs(line.c_str(), stderr);
+    std::fputc('\n', stderr);
+    std::fflush(stderr);
+}
+
+} // namespace
+
+// ── B-1-R2-B1: 実 EQProcessor 単体の wet 出力 attribution（test-only・独立測定）──
+//   目的: harness 経由の 0.4912 が「実 EQProcessor::process() の出力段階で既に発生して
+//         いるか」を二分すること。0.4912 の再現ではなく 1 点の切り分けが目的。
+//   係数数学は再実装せず、production の公開 API（computeParamsHash は使わず
+//   createCoeffCache が内部で呼ぶ）のみを用いる。
+//   条件は B-1 の eqdiag と同一:
+//     sr=192000 / block=2048 / 50Hz 正弦 / inPeak=0.5 /
+//     全 band 無効 / AGC off / saturation 0 / totalGain 0dB / Parallel / bypass off
+//   判定は本関数では行わず、材料（inPeak/outPeak/ratio/THD と cache メタ）を出力するのみ。
+static int runEqDirectOne(const char* tag, double sr, int block, bool agcOn)
+{
+    constexpr double kPi      = 3.14159265358979323846;
+    constexpr int    kNumBands = 20;
+    constexpr double kToneHz  = 50.0;
+    constexpr double kLevel   = 0.5; // -6dBFS（rigcheck の probe と同一レベル）
+    const double kSr    = sr;    // RT 条件では processingRate = sampleRate × OS
+    const int    kBlock = block; // RT 条件では processingBlockSize = samplesPerBlock × OS
+
+    EQProcessor eq;
+    eq.prepareToPlay(kSr, kBlock);
+
+    // rigcheck=eq と同一の identity 条件
+    for (int i = 0; i < kNumBands; ++i)
+        eq.setBandEnabled(i, false);
+    eq.setTotalGain(0.0f);
+    eq.setAGCEnabled(agcOn);
+    eq.setNonlinearSaturation(0.0f);
+    eq.setFilterStructure(EQProcessor::FilterStructure::Parallel);
+    eq.setBypass(false);
+    eq.setBypassFromRT(false); // RT-local shadow を明示的に非 bypass に固定
+
+    // params は EQProcessor 自身の状態から取得する（engine と同一の出所）
+    const auto* stateSnap = eq.getEQStateSnapshot();
+    if (stateSnap == nullptr)
+    {
+        eqDirectLog("[EQ_DIRECT] FAIL: EQState snapshot unavailable");
+        return 1;
+    }
+    const convo::EQParameters params = stateSnap->toEQParameters();
+
+    // cache は production の static API で実生成する（test 側で再構成しない）。
+    // 返り値は new(std::nothrow) の生ポインタなので RAII で保持する。
+    std::unique_ptr<EQCoeffCache> cache(
+        EQProcessor::createCoeffCache(params, kSr, kBlock, static_cast<std::uint64_t>(1)));
+    if (cache == nullptr)
+    {
+        eqDirectLog("[EQ_DIRECT] FAIL: createCoeffCache returned null");
+        return 1;
+    }
+
+    int activeBands = 0;
+    int enabledParams = 0;
+    for (int i = 0; i < kNumBands; ++i)
+    {
+        const size_t idx = static_cast<size_t>(i);
+        if (cache->bandActive[idx]) ++activeBands;
+        if (params.bands[idx].enabled) ++enabledParams;
+    }
+
+    // 測定前提の記録（公開 API と初期状態のみ。private メンバは覗かない）。
+    //   process(block, params, cache) は coeffCache==nullptr / bypass / smoothing の
+    //   いずれかで旧 process(block) へフォールバックするため、前提を残す。
+    //   bypassFadeGain は LinearRamp{1.0}（current==target）で初期化され、prepareToPlay の
+    //   reset() は totalSteps のみを更新するため smoothing は false。
+    {
+        std::string s = std::string("[EQ_DIRECT ") + tag + "] setup: sr=";
+        s += std::to_string(kSr);
+        s += " block=" + std::to_string(kBlock);
+        s += " tone=" + std::to_string(kToneHz) + "Hz";
+        s += " level=" + std::to_string(kLevel);
+        s += " cache=created bypassReq=" + std::to_string(eq.isBypassed() ? 1 : 0);
+        s += " bypassRT=0 agc=" + std::to_string(eq.getAGCEnabled() ? 1 : 0);
+        s += " totalGain=" + std::to_string(eq.getTotalGain()) + "dB";
+        s += " struct=" + std::to_string(static_cast<int>(eq.getFilterStructure()));
+        eqDirectLog(s);
+
+        std::string c = std::string("[EQ_DIRECT ") + tag + "] cache: paramsHash=";
+        c += std::to_string(cache->paramsHash);
+        c += " sampleRate=" + std::to_string(cache->sampleRate);
+        c += " maxBlockSize=" + std::to_string(cache->maxBlockSize);
+        c += " generation=" + std::to_string(cache->generation);
+        c += " filterStructure=" + std::to_string(cache->filterStructure);
+        c += " activeBands=" + std::to_string(activeBands);
+        c += " paramsEnabled=" + std::to_string(enabledParams);
+        eqDirectLog(c);
+    }
+
+    // 駆動: 3.0 s（rigcheck の runSec 既定と同一）
+    const int totalBlocks = static_cast<int>((3.0 * kSr) / static_cast<double>(kBlock));
+    const size_t reserveCount = static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock);
+    std::vector<float> in, out;
+    in.reserve(reserveCount);
+    out.reserve(reserveCount);
+
+    juce::AudioBuffer<double> buffer(2, kBlock);
+    double phase = 0.0;
+    const double dphi = 2.0 * kPi * kToneHz / kSr;
+    for (int b = 0; b < totalBlocks; ++b)
+    {
+        buffer.clear();
+        double* left = buffer.getWritePointer(0);
+        double* right = buffer.getWritePointer(1);
+        for (int i = 0; i < kBlock; ++i)
+        {
+            const double v = kLevel * std::sin(phase);
+            phase += dphi;
+            if (phase >= 2.0 * kPi) phase -= 2.0 * kPi;
+            left[i] = v;
+            right[i] = v;
+            in.push_back(static_cast<float>(v));
+        }
+
+        juce::dsp::AudioBlock<double> block(buffer);
+        eq.process(block, params, cache.get());
+
+        const double* outL = block.getChannelPointer(0);
+        for (int i = 0; i < kBlock; ++i)
+            out.push_back(static_cast<float>(outL[i]));
+    }
+
+    // 測定点は「EQ 直後」の 1 点のみ（rigcheck と同じ窓: 先頭 1.0s を捨てる）
+    const convo_buzz::Metrics m = convo_buzz::analyzeRun(in, out, kSr, kToneHz, 1.0);
+    const double ratio = m.outPeak / (m.inPeak + 1e-18);
+    {
+        std::string r = std::string("[EQ_DIRECT ") + tag + "] measurement: inPeak=";
+        r += std::to_string(m.inPeak);
+        r += " outPeak=" + std::to_string(m.outPeak);
+        r += " ratio=" + std::to_string(ratio);
+        r += " thd=" + std::to_string(m.thdDb) + "dB";
+        eqDirectLog(r);
+    }
+
+    return 0;
+}
+
+// ── B-1-R2-C2-L: 実 CustomInputOversampler の round-trip 利得（test-only・production 変更なし）──
+//   RT は oversamplingFactor > 1 のとき processUp → (DSP) → processDown を実行する。
+//   ここでは DSP を挟まず up→down のみを通し、純粋なオーバーサンプラ利得を測る。
+//   DSPCore は OversamplingType::IIR なら Preset::IIRLike を使う（DSPCoreLifecycle.cpp:184）。
+int runOversamplerDirect()
+{
+    constexpr double kPi     = 3.14159265358979323846;
+    constexpr double kSr     = 192000.0;
+    constexpr double kToneHz = 50.0;
+    constexpr double kLevel  = 0.5;   // -6dBFS
+    constexpr int    kBlock  = 1024;
+    const int ratios[4] = { 1, 2, 4, 8 };
+    const CustomInputOversampler::Preset presets[2] = {
+        CustomInputOversampler::Preset::IIRLike,
+        CustomInputOversampler::Preset::LinearPhase };
+    const char* presetNames[2] = { "IIRLike", "LinearPhase" };
+
+    for (int pi = 0; pi < 2; ++pi)
+    {
+        for (int ri = 0; ri < 4; ++ri)
+        {
+            const int ratio = ratios[ri];
+            CustomInputOversampler os;
+            os.prepare(kBlock, ratio, presets[pi]);
+            os.reset();
+
+            const int totalBlocks = static_cast<int>((1.5 * kSr) / static_cast<double>(kBlock));
+            std::vector<float> in, out;
+            in.reserve(static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock));
+            out.reserve(static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock));
+
+            juce::AudioBuffer<double> inBuf(2, kBlock);
+            juce::AudioBuffer<double> outBuf(2, kBlock);
+            double upPeakMax = 0.0; // ★ C2-M: up 直後（補間フィルタ後）のピーク
+            double phase = 0.0;
+            const double dphi = 2.0 * kPi * kToneHz / kSr;
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                inBuf.clear();
+                double* left = inBuf.getWritePointer(0);
+                double* right = inBuf.getWritePointer(1);
+                for (int i = 0; i < kBlock; ++i)
+                {
+                    const double v = kLevel * std::sin(phase);
+                    phase += dphi;
+                    if (phase >= 2.0 * kPi) phase -= 2.0 * kPi;
+                    left[i] = v;
+                    right[i] = v;
+                    in.push_back(static_cast<float>(v));
+                }
+
+                juce::dsp::AudioBlock<double> inBlock(inBuf);
+                auto upBlock = os.processUp(inBlock, 2);
+                // ★ C2-M: up 直後のピークを記録して up 側 / down 側の利得を分離する
+                {
+                    const double* upL = upBlock.getChannelPointer(0);
+                    const int upN = static_cast<int>(upBlock.getNumSamples());
+                    double upPeak = 0.0;
+                    for (int i = 0; i < upN; ++i)
+                        upPeak = std::max(upPeak, std::abs(upL[i]));
+                    if (upPeak > upPeakMax) upPeakMax = upPeak;
+                }
+                juce::dsp::AudioBlock<double> outBlock(outBuf);
+                os.processDown(upBlock, outBlock, 2);
+
+                const double* outL = outBlock.getChannelPointer(0);
+                for (int i = 0; i < kBlock; ++i)
+                    out.push_back(static_cast<float>(outL[i]));
+            }
+
+            const convo_buzz::Metrics m = convo_buzz::analyzeRun(in, out, kSr, kToneHz, 0.5);
+            const double ratioGain = m.outPeak / (m.inPeak + 1e-18);
+            std::string s = "[OS_DIRECT] preset=";
+            s += presetNames[pi];
+            s += " ratio=" + std::to_string(ratio);
+            s += " block=" + std::to_string(kBlock);
+            s += " inPeak=" + std::to_string(m.inPeak);
+            s += " outPeak=" + std::to_string(m.outPeak);
+            s += " roundTripGain=" + std::to_string(ratioGain);
+            s += " upPeak=" + std::to_string(upPeakMax);
+            s += " upGain=" + std::to_string(upPeakMax / (m.inPeak + 1e-18));
+            s += " downGain=" + std::to_string(m.outPeak / (upPeakMax + 1e-18));
+            s += " thd=" + std::to_string(m.thdDb) + "dB";
+            eqDirectLog(s);
+        }
+    }
+
+    // ★ C2-Q: SoftClip 局所 2× OS（prepareSingleStage）の round-trip。
+    //   production は softClipOS.prepareSingleStage(31, 90.0, internalMaxBlock) で構築する
+    //   （AudioEngine.Processing.DSPCoreLifecycle.cpp:188 / :261）。この局所 OS は
+    //   oversamplingFactor == 1 のときだけ実行されるため、これまでの engine 実測（effOS>1）では
+    //   一度も通っていない。同一 prepareStage を使うが taps=31/atten=90 で係数・parity が
+    //   通常 prepare() と同一とは限らないため、直接測って gain convention の一様性を判定する。
+    {
+        CustomInputOversampler os;
+        os.prepareSingleStage(31, 90.0, kBlock);
+        os.reset();
+
+        const int totalBlocks = static_cast<int>((1.5 * kSr) / static_cast<double>(kBlock));
+        std::vector<float> in, out;
+        in.reserve(static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock));
+        out.reserve(static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock));
+
+        juce::AudioBuffer<double> inBuf(2, kBlock);
+        juce::AudioBuffer<double> outBuf(2, kBlock);
+        double upPeakMax = 0.0;
+        double phase = 0.0;
+        const double dphi = 2.0 * kPi * kToneHz / kSr;
+        for (int b = 0; b < totalBlocks; ++b)
+        {
+            inBuf.clear();
+            double* left = inBuf.getWritePointer(0);
+            double* right = inBuf.getWritePointer(1);
+            for (int i = 0; i < kBlock; ++i)
+            {
+                const double v = kLevel * std::sin(phase);
+                phase += dphi;
+                if (phase >= 2.0 * kPi) phase -= 2.0 * kPi;
+                left[i] = v;
+                right[i] = v;
+                in.push_back(static_cast<float>(v));
+            }
+
+            juce::dsp::AudioBlock<double> inBlock(inBuf);
+            auto upBlock = os.processUp(inBlock, 2);
+            {
+                const double* upL = upBlock.getChannelPointer(0);
+                const int upN = static_cast<int>(upBlock.getNumSamples());
+                double upPeak = 0.0;
+                for (int i = 0; i < upN; ++i)
+                    upPeak = std::max(upPeak, std::abs(upL[i]));
+                if (upPeak > upPeakMax) upPeakMax = upPeak;
+            }
+            juce::dsp::AudioBlock<double> outBlock(outBuf);
+            os.processDown(upBlock, outBlock, 2);
+
+            const double* outL = outBlock.getChannelPointer(0);
+            for (int i = 0; i < kBlock; ++i)
+                out.push_back(static_cast<float>(outL[i]));
+        }
+
+        const convo_buzz::Metrics m = convo_buzz::analyzeRun(in, out, kSr, kToneHz, 0.5);
+        std::string t = "[OS_DIRECT] singleStage taps=31 atten=90.0";
+        t += " ratio=2";
+        t += " inPeak=" + std::to_string(m.inPeak);
+        t += " outPeak=" + std::to_string(m.outPeak);
+        t += " roundTripGain=" + std::to_string(m.outPeak / (m.inPeak + 1e-18));
+        t += " upGain=" + std::to_string(upPeakMax / (m.inPeak + 1e-18));
+        t += " downGain=" + std::to_string(m.outPeak / (upPeakMax + 1e-18));
+        t += " thd=" + std::to_string(m.thdDb) + "dB";
+        eqDirectLog(t);
+    }
+    return 0;
+}
+
+// ── B-1-R2-C2-K: 実 OutputFilter ② の直接駆動（test-only・production 変更なし）──
+//   RT は !eqBypassed のとき outputFilter.process(block, /*convIsLast*/false, hc, lc, lpMode) を
+//   exactly once 適用する。残差 published/input = 0.737826 (−2.64 dB) がここで発生するかを直接測る。
+//   lpMode は RuntimeWorld と同一値を使う必要があるため、rigcheck 側で getEqLPFFilterMode() を出力し、
+//   本関数は 3 モードすべてを測って該当行を選べるようにする。prepare は各レートごとに 1 回、
+//   モードごとに reset() して状態ゼロから測る。
+int runOutputFilterDirect()
+{
+    constexpr double kPi      = 3.14159265358979323846;
+    constexpr double kToneHz  = 50.0;
+    constexpr double kLevel   = 0.5;  // -6dBFS
+    constexpr int    kBlock   = 1024;
+    constexpr int    kNumModes = 3;   // HCMode: Sharp/Natural/Soft
+    constexpr double kSrList[2] = { 192000.0, 768000.0 }; // RT: OS=1 / OS=4
+
+    for (int r = 0; r < 2; ++r)
+    {
+        const double sr = kSrList[r];
+        convo::OutputFilter of;
+        of.prepare(sr);   // prepare は reset() も行う（係数は全モード分を生成）
+
+        for (int lp = 0; lp < kNumModes; ++lp)
+        {
+            of.reset();   // モードごとにフィルタ状態をゼロから
+
+            const int totalBlocks = static_cast<int>((3.0 * sr) / static_cast<double>(kBlock));
+            std::vector<float> in, out;
+            in.reserve(static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock));
+            out.reserve(static_cast<size_t>(totalBlocks) * static_cast<size_t>(kBlock));
+
+            juce::AudioBuffer<double> buffer(2, kBlock);
+            double phase = 0.0;
+            const double dphi = 2.0 * kPi * kToneHz / sr;
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                buffer.clear();
+                double* left = buffer.getWritePointer(0);
+                double* right = buffer.getWritePointer(1);
+                for (int i = 0; i < kBlock; ++i)
+                {
+                    const double v = kLevel * std::sin(phase);
+                    phase += dphi;
+                    if (phase >= 2.0 * kPi) phase -= 2.0 * kPi;
+                    left[i] = v;
+                    right[i] = v;
+                    in.push_back(static_cast<float>(v));
+                }
+
+                juce::dsp::AudioBlock<double> block(buffer);
+                // ② EQ 最終段（convIsLast=false）。hc/lc は ② では未使用なので Natural/Soft を渡す。
+                of.process(block,
+                           false,
+                           convo::HCMode::Natural,
+                           convo::LCMode::Natural,
+                           static_cast<convo::HCMode>(lp));
+
+                const double* outL = block.getChannelPointer(0);
+                for (int i = 0; i < kBlock; ++i)
+                    out.push_back(static_cast<float>(outL[i]));
+            }
+
+            const convo_buzz::Metrics m = convo_buzz::analyzeRun(in, out, sr, kToneHz, 1.0);
+            const double ratio = m.outPeak / (m.inPeak + 1e-18);
+            std::string s = "[OF_DIRECT] sr=";
+            s += std::to_string(sr);
+            s += " lpMode=" + std::to_string(lp);
+            s += " block=" + std::to_string(kBlock);
+            s += " inPeak=" + std::to_string(m.inPeak);
+            s += " outPeak=" + std::to_string(m.outPeak);
+            s += " ratio=" + std::to_string(ratio);
+            s += " thd=" + std::to_string(m.thdDb) + "dB";
+            eqDirectLog(s);
+        }
+    }
+    return 0;
+}
+
+// ── B-1-R2-C2-E: B1 direct を RT の実条件でも測る ──
+//   RT は EQProcessor を processingRate = sampleRate × OS / processingBlockSize =
+//   samplesPerBlock × OS で prepare する（DSPCoreLifecycle.cpp:191-192）ため、
+//   192 kHz/OS=4 の RT 条件は 768000 Hz / 4096 samples になる。
+//   base 条件（B1 初回測定: 192000/2048）と並べて測り、レート／ブロック長依存かを二分する。
+int runEqDirectDriveAttribution()
+{
+    const int r1 = runEqDirectOne("base192k_2048_agc0", 192000.0, 2048, false);
+    const int r2 = runEqDirectOne("rt768k_4096_agc1", 768000.0, 4096, true);
+    const int r3 = runEqDirectOne("rt768k_4096_agc0", 768000.0, 4096, false);
+    const int r4 = runOutputFilterDirect(); // C2-K: OutputFilter ② の直接駆動
+    const int r5 = runOversamplerDirect();  // C2-L: OS up/down round-trip
+    return (r1 == 0 && r2 == 0 && r3 == 0 && r4 == 0 && r5 == 0) ? 0 : 1;
+}
+
 // ── エントリ: PublishPipelineIntegrationTests.cpp の main から --buzz で派遣 ──
 int runBassBuzzMeasurement(int argc, char* argv[])
 {
     using namespace convo_buzz;
     static BuzzLogger logger;
     juce::Logger::setCurrentLogger(&logger);
-    static juce::ScopedJuceInitialiser_GUI juceInit;
+    // ★ P1-5-IR Step 3-J (test-only teardown fix): function-local static だった
+    //   juceInit は process exit 後の atexit dtor で shutdownJuce_GUI → deleteAll を
+    //   実行し、JUCE の DeletedAtShutdown 静的 Array の atexit dtor と順序逆転して
+    //   double-free を起こしていた（3-H ASan 確定）。automatic lifetime に戻し、
+    //   h（AudioEngine）破棄直後・関数 return 前に shutdown を完了させる。
+    //   BuzzLogger（:1540）は今回触らない（3-J-2）。
+    juce::ScopedJuceInitialiser_GUI juceInit;
 
     BuzzOptions opt;
     std::string rigCheckMode; // ""=off, "bare", "ir", "eq"
@@ -1151,6 +1553,7 @@ int runBassBuzzMeasurement(int argc, char* argv[])
     float probeLevel = 0.25f; // ★ WORK106: プローブ入力レベル（安全鎖非接触）
     int quietMs = 150000;     // ★ WORK106: DSP側IR再構築待ちの静穏期間
     std::string probeSignalName = "impulse"; // ★ WORK111: probe 入力信号（impulse/sine50/...）
+    int osPin = 0;               // ★ P1-5-IR-P2 test-only: 0=Auto/未指定（setOversamplingFactor を呼ばない）、1/2/4/8=pin
     bool disableTailFade = false;            // ★ WORK111: measurement-only（production 既定 OFF）
     double nuc6Freq = 0.0;                   // ★ WORK113-6: NUC standalone 入力周波数（0=無効）
     bool nuc7a = false;                      // ★ WORK113-7A: NUC standalone temporal（DC 入力）
@@ -1186,6 +1589,17 @@ int runBassBuzzMeasurement(int argc, char* argv[])
         if (a.rfind("--buzz-sr=", 0) == 0) opt.sr = std::stod(a.substr(10));
         else if (a.rfind("--buzz-block=", 0) == 0) opt.block = std::stoi(a.substr(13));
         else if (a.rfind("--buzz-ir=", 0) == 0) opt.irPath = a.substr(10);
+        else if (a.rfind("--buzz-os=", 0) == 0)
+        {
+            // ★ P1-5-IR-P2 test-only: OS pinning（fail-closed: 0/1/2/4/8 のみ・それ以外は exit(2)）
+            const std::string v = a.substr(10);
+            if (v != "0" && v != "1" && v != "2" && v != "4" && v != "8")
+            {
+                std::fprintf(stderr, "[BUZZ] FAIL: --buzz-os expects 0,1,2,4,8 (got '%s')\n", v.c_str());
+                std::exit(2);
+            }
+            osPin = std::stoi(v);
+        }
         else if (a.rfind("--buzz-out=", 0) == 0) opt.outCsv = a.substr(11);
         else if (a == "--buzz-quick") opt.quick = true;
         else if (a == "--buzz-rigcheck") rigCheckMode = "bare";
@@ -1306,7 +1720,10 @@ int runBassBuzzMeasurement(int argc, char* argv[])
     //   プローブは -6dBFS（リミッター非接触域）で透過性（peak≈in×0.891、THD<-80dB）を要求する。
     if (!rigCheckMode.empty())
     {
-        if (rigCheckMode != "bare" && rigCheckMode != "ir" && rigCheckMode != "eq")
+        if (rigCheckMode != "bare" && rigCheckMode != "ir" && rigCheckMode != "eq"
+            && rigCheckMode != "eqdiag" && rigCheckMode != "eqdiagser"
+            && rigCheckMode.rfind("eqos", 0) != 0
+            && rigCheckMode.rfind("irwet", 0) != 0)
         {
             std::fprintf(stderr, "[BUZZ] FAIL: unknown rigcheck mode '%s'\n", rigCheckMode.c_str());
             h.stop();
@@ -1361,6 +1778,36 @@ int runBassBuzzMeasurement(int argc, char* argv[])
                 std::fprintf(stderr, "[BUZZ] WARN rigcheck=ir: backlog not zero\n");
             sleepPump(2000);
         }
+        else if (rigCheckMode.rfind("irwet", 0) == 0)
+        {
+            // ★ C2-H: EQ を除いた wet 経路の対照。既存 `ir` は setConvolverBypassRequested(true) のまま
+            //   IR を load するだけなので convBypassed=1 となり、出力は bypass blend の dry コピーになる
+            //   （＝wet 経路を通らない）。ここでは convBypass を明示解除して初めて wet を測る。
+            //   OS 倍率はモード末尾の 1 桁で指定（irwet1 / irwet2 / irwet4 / irwet8）。
+            //   IR 固有のゲインは OS=1 との比で相殺する（絶対値で unity を仮定しない）。
+            int osFactor = 4;
+            if (rigCheckMode.size() > 5)
+            {
+                const char digit = rigCheckMode[5];
+                if (digit >= '1' && digit <= '8')
+                    osFactor = digit - '0';
+            }
+            e.setOversamplingFactor(osFactor);
+            e.setConvolverBypassRequested(false); // ← ここで初めて convolver を有効化（wet 経路）
+            if (!waitBacklogZero(e, 30000))
+                std::fprintf(stderr, "[BUZZ] WARN rigcheck=%s: backlog not zero\n", rigCheckMode.c_str());
+            e.getConvolverProcessor().loadImpulseResponse(irFile, false);
+            if (!waitIrFinalized(e, 300000))
+            {
+                std::fprintf(stderr, "[BUZZ] FAIL rigcheck=%s: IR load timeout\n", rigCheckMode.c_str());
+                h.clearTap();
+                h.stop();
+                return 1;
+            }
+            if (!waitBacklogZero(e, 30000))
+                std::fprintf(stderr, "[BUZZ] WARN rigcheck=%s: backlog not zero\n", rigCheckMode.c_str());
+            sleepPump(2000);
+        }
         else if (rigCheckMode == "eq")
         {
             // [WORK113 test-instrumentation cleanup] 判定基準（identity 窓 [0.880,0.897] + THD<-80dB）
@@ -1385,15 +1832,218 @@ int runBassBuzzMeasurement(int argc, char* argv[])
                 lastPublishedSeq(e),
                 e.getEQBandParams(0).gain, e.getEQBandParams(1).gain);
         }
+        else if (rigCheckMode == "eqdiag" || rigCheckMode == "eqdiagser"
+                 || rigCheckMode.rfind("eqos", 0) == 0)
+        {
+            // ★ B-1 attribution audit（test-only 診断モード。`eq` の判定窓は不変）
+            //   `eq` と設定は同一だが、staging OFF の呼出順だけを probe 経路と同じ
+            //   （staging → configureProbeFlatEQ）にし、AGC を最終的に OFF に固定する。
+            //   eqdiag = Parallel / eqdiagser = Serial / eqos<digit> = OS を明示固定。
+            //   eqos1/2/4 は「OS 段が残差を生む」仮説を、処理内容（恒等 EQ）を固定したまま
+            //   OS だけを振って分離するための測定（P: OS 非依存固定分 / Q: OS 依存分）。
+            const bool diagSerial = (rigCheckMode == "eqdiagser");
+            if (rigCheckMode.rfind("eqos", 0) == 0)
+            {
+                const char digit = rigCheckMode[4];
+                const int osF = (digit >= '1' && digit <= '8') ? (digit - '0') : 1;
+                e.setOversamplingFactor(osF); // 既存 public API（0=Auto,1,2,4,8）
+            }
+            e.setAutoGainStagingEnabled(false);
+            configureProbeFlatEQ(e);
+            e.setEQFilterStructure(diagSerial ? EQProcessor::FilterStructure::Serial
+                                              : EQProcessor::FilterStructure::Parallel);
+            e.setEqBypassRequested(false);
+            if (!waitBacklogZero(e, 30000))
+                std::fprintf(stderr, "[BUZZ] WARN rigcheck=%s: backlog not zero\n", rigCheckMode.c_str());
+            sleepPump(2000);
+            std::fprintf(stderr,
+                "[BUZZ] RIGCHECK(%s) state: eqBypassReq=%d eqBypassActive=%d convBypassReq=%d convBypassActive=%d seq=%lld\n",
+                rigCheckMode.c_str(),
+                e.isEqBypassRequested() ? 1 : 0, e.isEQBypassed() ? 1 : 0,
+                e.isConvolverBypassRequested() ? 1 : 0, e.isConvolverBypassed() ? 1 : 0,
+                lastPublishedSeq(e));
+        }
+        // ★ B-1 attribution audit（observation only・挙動変更なし）:
+        //   rigcheck 各モードの「要求値ではなく実効ゲイン経路」を 1 行で固定する。
+        //   B-1 の −5.17dB 帰属は「どの段が実効的に何を掛けているか」の確定を要するため、
+        //   staging / EQ AGC / totalGain / headroom / makeup / filter structure を可視化する。
+        std::fprintf(stderr,
+            "[BUZZ] RIGCHECK(%s) gainpath: staging=%d eqAGC=%d totalGain=%.2fdB hdr=%.2fdB makeup=%.2fdB struct=%d\n",
+            rigCheckMode.c_str(),
+            e.isAutoGainStagingEnabled() ? 1 : 0,
+            e.isEQAGCEnabled() ? 1 : 0,
+            static_cast<double>(e.getEQTotalGain()),
+            static_cast<double>(e.getInputHeadroomDb()),
+            static_cast<double>(e.getOutputMakeupDb()),
+            static_cast<int>(e.getEQFilterStructure()));
+        // ★ B-1-R2-C1（observation only）: RT が実際に使う EQ 実値を固定する。
+        //   production getter は追加せず、既存の公開 API のみで読む。
+        //   焦点: World の coefficient.eqCoeffHash / eqParams が B1 の identity EQ と同一か。
+        //   注: observePublishedWorld() は logRuntimeTransitionEvent と同型の既存 observer。
+        {
+            const auto* w = e.observePublishedWorld();
+            if (w == nullptr)
+            {
+                eqDirectLog("[EQ_RTPATH] WARN: observePublishedWorld() == nullptr (no published world)");
+            }
+            else
+            {
+                const auto proj = e.getEQWorldProjectionForBuild();
+                const uint64_t buildHash =
+                    EQProcessor::computeParamsHash(proj.params, proj.sampleRate, proj.maxBlockSize);
+                const auto& wp = w->coefficient.eqParams;
+                const int numBands = static_cast<int>(wp.bands.size());
+                int worldEnabled = 0;
+                for (int i = 0; i < numBands; ++i)
+                    if (wp.bands[static_cast<size_t>(i)].enabled) ++worldEnabled;
+
+                std::string a = "[EQ_RTPATH] world: eqCoeffHash=";
+                a += std::to_string(w->coefficient.eqCoeffHash);
+                a += " buildHash=" + std::to_string(buildHash);
+                a += " buildSr=" + std::to_string(proj.sampleRate);
+                a += " buildMbs=" + std::to_string(proj.maxBlockSize);
+                a += " b1IdentityHash=13371876604604957473";
+                eqDirectLog(a);
+
+                std::string b = "[EQ_RTPATH] world params: struct=";
+                b += std::to_string(wp.filterStructure);
+                b += " agc=" + std::to_string(wp.agcEnabled ? 1 : 0);
+                b += " totalGain=" + std::to_string(wp.totalGainDb);
+                b += " sat=" + std::to_string(wp.nonlinearSaturation);
+                b += " bandsEnabled=" + std::to_string(worldEnabled);
+                eqDirectLog(b);
+
+                std::string c = "[EQ_RTPATH] world routing: eqBypassed=";
+                c += std::to_string(w->routing.eqBypassed ? 1 : 0);
+                c += " convBypassed=" + std::to_string(w->routing.convBypassed ? 1 : 0);
+                c += " order=" + std::to_string(w->routing.processingOrder);
+                c += " makeup=" + std::to_string(w->automation.outputMakeupGain);
+                c += " headroom=" + std::to_string(w->automation.inputHeadroomGain);
+                c += " softClip=" + std::to_string(w->automation.softClipEnabled ? 1 : 0);
+                c += " satAmount=" + std::to_string(w->automation.saturationAmount);
+                c += " eqLPFMode=" + std::to_string(static_cast<int>(e.getEqLPFFilterMode()));
+                eqDirectLog(c);
+
+                for (int i = 0; i < numBands; ++i)
+                {
+                    const auto& bd = wp.bands[static_cast<size_t>(i)];
+                    if (!bd.enabled) continue;
+                    std::string d = "[EQ_RTPATH] world band ";
+                    d += std::to_string(i);
+                    d += ": type=" + std::to_string(bd.type);
+                    d += " freq=" + std::to_string(bd.frequency);
+                    d += " gain=" + std::to_string(bd.gain);
+                    d += " q=" + std::to_string(bd.q);
+                    d += " chMode=" + std::to_string(bd.channelMode);
+                    eqDirectLog(d);
+                }
+
+                std::string f = "[EQ_RTPATH] diag: lastCreatedEqHash=";
+                f += std::to_string(e.getLastCreatedEqHashForDebug());
+                eqDirectLog(f);
+
+                // ★ C1.5-A: RT が解決する cache の実体を、既存の read-only API で観測する。
+                //   eqCacheManager は public メンバ、EQCacheManager::get / containsNonRt は
+                //   いずれも read-only（生成するのは getOrCreate のみ）。getOrCreate は使わない。
+                const uint64_t worldHash = w->coefficient.eqCoeffHash;
+                std::string g = "[EQ_RTPATH] cache: containsNonRt=";
+                g += std::to_string(e.eqCacheManager.containsNonRt(worldHash) ? 1 : 0);
+                const EQCoeffCache* rc = e.eqCacheManager.get(worldHash);
+                if (rc == nullptr)
+                {
+                    g += " resolve=null";
+                    eqDirectLog(g);
+                }
+                else
+                {
+                    int rActive = 0;
+                    for (int i = 0; i < numBands; ++i)
+                        if (rc->bandActive[static_cast<size_t>(i)]) ++rActive;
+                    g += " resolve=ok";
+                    g += " sampleRate=" + std::to_string(rc->sampleRate);
+                    g += " maxBlockSize=" + std::to_string(rc->maxBlockSize);
+                    g += " filterStructure=" + std::to_string(rc->filterStructure);
+                    g += " activeBands=" + std::to_string(rActive);
+                    g += " paramsHash=" + std::to_string(rc->paramsHash);
+                    g += " | b1ref(sr=192000 mbs=2048 struct=1 active=0)";
+                    eqDirectLog(g);
+                }
+
+                // ★ C2-A: crossfade runtime の実発火状態を、既存の public メンバのみで観測する。
+                //   armCrossfadeIfPending は (prepared.pending && crossfadeRuntime_.isPending() &&
+                //   (hasFading || firstIrDryCrossfadePending)) で arm し、getGain() を 0→1 に
+                //   ランプする（applyImmediateValueRT(0.0) → setTargetValue(1.0)）。
+                //   2s 定常で isSmoothing=false かつ current==1.0 なら crossfade は寄与しない。
+                const auto& xg = e.crossfadeRuntime_.getGain();
+                std::string x = "[XFADE] rt: isPending=";
+                x += std::to_string(e.crossfadeRuntime_.isPending() ? 1 : 0);
+                x += " gainCurrent=" + std::to_string(xg.current);
+                x += " gainTarget=" + std::to_string(xg.target);
+                x += " gainRemaining=" + std::to_string(xg.remaining);
+                x += " isSmoothing=" + std::to_string(xg.isSmoothing() ? 1 : 0);
+                x += " dryScaleCurrent=" + std::to_string(e.crossfadeRuntime_.getDryScaleGain().current);
+                x += " useDryAsOld=" + std::to_string(e.crossfadeRuntime_.useDryAsOld() ? 1 : 0);
+                x += " firstIrDryPending=" + std::to_string(e.crossfadeRuntime_.isFirstIrDryPending() ? 1 : 0);
+                x += " startDelayBlocks=" + std::to_string(e.crossfadeRuntime_.getStartDelayBlocks());
+                eqDirectLog(x);
+
+                std::string y = "[XFADE] world: dspCrossfadePending=";
+                y += std::to_string(w->engine.dspCrossfadePending ? 1 : 0);
+                y += " fadingRuntimeUuid=" + std::to_string(w->topology.fadingRuntimeUuid);
+                y += " crossfadeStartDelayBlocks=" + std::to_string(w->execution.crossfadeStartDelayBlocks);
+                y += " useDryAsOld=" + std::to_string(w->overlap.useDryAsOld ? 1 : 0);
+                y += " firstIrDryCrossfadePending=" + std::to_string(w->overlap.firstIrDryCrossfadePending ? 1 : 0);
+                eqDirectLog(y);
+            }
+        }
         {
             std::lock_guard<std::mutex> lk(session.capMutex);
             session.gen.reset(BuzzSignal::Sine50, opt.sr);
             session.gen.setLevel(0.5f); // -6dBFS probe（安全鎖非接触域）
         }
         session.mode.store(1, std::memory_order_release);
-        sleepPump(static_cast<int>(opt.runSec * 1000.0));
+        // ★ C2-B: 既存 publish（process 末尾の outputLevelLinear）を「トーン投入中」にサンプリングし
+        //   最大値を採る。publish 点は processOutput（kOutputHeadroom / dither / clamp）より前なので、
+        //   final outPeak と比較すれば減衰位置を二分できる。
+        //   計装順序の注意: 無音時は measureLevel が 0 を返すため、必ず信号が流れている間に読む。
+        float maxOutDb = -200.0f;
+        float maxInDb = -200.0f;
+        {
+            const int totalMs = static_cast<int>(opt.runSec * 1000.0);
+            int elapsedMs = 0;
+            while (elapsedMs < totalMs)
+            {
+                const int stepMs = std::min(50, totalMs - elapsedMs);
+                sleepPump(stepMs);
+                elapsedMs += stepMs;
+                const float od = e.getOutputLevel();
+                const float id = e.getInputLevel();
+                if (od > maxOutDb) maxOutDb = od;
+                if (id > maxInDb) maxInDb = id;
+            }
+        }
         session.mode.store(0, std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // ★ C2-D: OS 実効値を既存 getter で確認（Auto=0 は maxAllowedFactor に解決される）。
+        {
+            std::string o = "[OS] resolved: getOversamplingFactor=";
+            o += std::to_string(e.getOversamplingFactor());
+            o += " (manualRequested=0=Auto; resolve() は Auto を maxAllowedFactor に解決:"
+                 " <=96k:8 / <=192k:4 / <=384k:2)";
+            eqDirectLog(o);
+        }
+
+        // ★ C2-B: 測定窓中の publish 最大値（processOutput 前の観測点）
+        {
+            const double outLin = std::pow(10.0, static_cast<double>(maxOutDb) / 20.0);
+            const double inLin = std::pow(10.0, static_cast<double>(maxInDb) / 20.0);
+            std::string z = "[EQLEVEL] publishedMax(tone-on): outDb=";
+            z += std::to_string(maxOutDb);
+            z += " outLinear=" + std::to_string(outLin);
+            z += " inDb=" + std::to_string(maxInDb);
+            z += " inLinear=" + std::to_string(inLin);
+            eqDirectLog(z);
+        }
         std::vector<float> in, out;
         {
             std::lock_guard<std::mutex> lk(session.capMutex);
@@ -1612,6 +2262,9 @@ int runBassBuzzMeasurement(int argc, char* argv[])
         e.setConvolverInputTrimDb(0.0f);
         if (opt.eqOn == 1)
             configureProbeFlatEQ(e); // ★ WORK113-15: fail-closed 解除（EQ 本体は恒等変換）
+        // ★ P1-5-IR-P2 test-only: OS pinning（既存 public API・0=Auto は呼ばない・既存 settle を使用）
+        if (osPin != 0)
+            e.setOversamplingFactor(osPin);
         std::fprintf(stderr,
             "[PROBE_CFG] order=%d eq=%d conv=%d hc=%d lc=%d eqlpf=%d direct=%d\n",
             opt.orderMode, opt.eqOn, opt.convOn, opt.hcMode, opt.lcMode, opt.lpMode, opt.directHead);

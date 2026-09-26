@@ -58,7 +58,7 @@ src/
 ├── eqprocessor/  (17 files) — EQ Split (5 TU) + EQProcessor.h + Analysis Subsystem + EQEditProcessor
 ├── tests/        (55 files) — CTest Regression Suite (36 executables, ~943 KB)
 ├── dsp/math/     ( 1 file)  — FastTanhApprox.h (AVX2 tanh approximation)
-└── tools/        ( 2 files) — Build identity gate + layout offset check (Python)
+└── tools/        ( 1 file)  — Build identity gate (Python)
 ```
 
 ### 3.1 `src/` Root — Core DSP / UI / Entry Points
@@ -377,12 +377,13 @@ All tests registered via `add_test()` in CMakeLists.txt. Many are JUCE-independe
 
 > CMake registers **40 `add_test()`** entries (some executables expose multiple named tests; `HeadlessAudioPathVerification` is PowerShell-gated).
 
-### 3.7 `src/tools/` — Build Gate Scripts (2 files)
+### 3.7 `src/tools/` — Build Gate Scripts (1 file)
 
 | File | Role |
 |---|---|
-| `build_identity_gate.py` | Build identity gate (pre-build verification). |
-| `check_layout_offsets.py` | Struct layout / offset checker. |
+| `build_identity_gate.py` | Build identity gate (pre-build verification). Invoked by `build.bat` as a fail-closed gate before configure/build — must stay at this path. |
+
+> `check_layout_offsets.py` (struct layout / offset checker) moved to the root `tools/` directory (2026-09-21) — manual verification tool, not referenced by any build script.
 
 ### 3.8 `config/` — JSON Authority Manifests (4 files)
 
@@ -393,7 +394,7 @@ All tests registered via `add_test()` in CMakeLists.txt. Many are JUCE-independe
 | `authority_inventory.json` | 383 | 10,127 | Generated from `ISRRuntimeSemanticSchema.h` + `RuntimeGraph.h` + `AudioEngine.h`. Declares `Authoritative/Derived/Diagnostic` authority per field. |
 | `pub_boundary_registry.json` | 66 | 2,678 | Publication-boundary registry (single source of publication transitions). |
 
-Python verifiers in `tools/` (66 `.py` + 54 `.bat` scripts) cross-check source against these JSONs at build/commit time — guards against authority drift.
+Python verifiers in `tools/` (67 `.py` + 54 `.bat` scripts, including `check_layout_offsets.py`) cross-check source against these JSONs at build/commit time — guards against authority drift.
 
 ---
 

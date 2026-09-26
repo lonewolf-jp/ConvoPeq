@@ -182,6 +182,11 @@ public:
     [[nodiscard]] std::uint64_t getPublicationBacklogCount() const noexcept;
     // ★ work88 (X5 §6.5): Publish Intent residency counter（INV-X5-1）。isFullyDrained / 診断用。
     [[nodiscard]] std::uint64_t getPublicationIntentResidencyCount() const noexcept;
+    // ★ P3-5-R27: Main-origin Publish take counter（R26-A path A）。
+    //   processIntent の Publish pop で origin==Main（recoveryObligationId==0）の場合のみ加算。
+    //   Recovery take は含めない。residency（X5）とは別物として併存（導出しない）。
+    //   process lifetime 累積・reset なし。差分運用。
+    [[nodiscard]] std::uint64_t getCoordinatorTakeCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
     [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
     // ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
@@ -964,6 +969,9 @@ private:
     //   - 減分: processIntent の intentQueue_.pop で type==Publish の場合 fetchSub
     //     （Publish pop は pendingIntentCount_ を触らない — P2-1 §1.1.6 W2）
     std::atomic<std::uint64_t> publicationIntentResidencyCount_{0};
+    // ★ P3-5-R27: Main-origin Publish take counter（R26-A path A・writer は processIntent の1箇所のみ）。
+    //   residency（X5 gauge）とは別物：cumulative take 数。Recovery 起源は数えない。
+    std::atomic<std::uint64_t> coordinatorTakeCount_{0};
     // ★ work88 (P2-1 §1.1.1): pendingIntentCount_ は「Intent transport residency + producer
     //   enqueue reservation」を追跡する。
     //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）

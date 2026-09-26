@@ -1,0 +1,51 @@
+{
+  "_comment": "Baseline for scripts/freebuff_preflight.py. Tool counts drift when a server updates; a mismatch is reported as WARN (not FAIL), while a server that cannot complete the MCP handshake under Freebuff's child environment is a FAIL. Index age limits are hours; exceeding one is a WARN that --fix can clear.",
+  "_verified": "2026-09-21",
+  "mcpServers": {
+    "serena": { "tools": 32 },
+    "aidex": { "tools": 31 },
+    "context-mode": { "tools": 11 },
+    "headroom": { "tools": 3 },
+    "cocoindex": { "tools": 1 },
+    "semble": { "tools": 2 },
+    "graphify": { "tools": 10 },
+    "obscura": { "tools": 37 },
+    "ddgs": { "tools": 6 },
+    "context7": { "tools": 2 },
+    "firecrawl": { "tools": 27 },
+    "brave-search": { "tools": 8 },
+    "github": { "tools": 31 },
+    "microsoft-learn": { "tools": 3 }
+  },
+  "skills": {
+    "reverse-skill": {
+      "dirs": ["reverse-skill"],
+      "note": "zhaoxuya520/reverse-skill — router SKILL.md plus ~89 nested modules (nested SKILL.md files are read on demand, not installed as separate skills)"
+    },
+    "debug-skill": {
+      "dirs": ["debugging-code"],
+      "cli": "dap",
+      "needs_python3": true,
+      "note": "AlmogBaku/debug-skill — skill 'debugging-code' plus the dap CLI (needs a python3 on PATH)"
+    },
+    "ui-ux-pro-max": {
+      "dirs": ["ui-ux-pro-max", "design", "design-system", "ui-styling", "slides", "banner-design", "brand"],
+      "note": "nextlevelbuilder/ui-ux-pro-max-skill — 7-skill family, all installed from .claude/skills"
+    },
+    "docmd": {
+      "dirs": [],
+      "cli": "docmd",
+      "note": "docmd-io/docmd — upstream ships no SKILL.md; usable as the global docmd CLI (@docmd/core) with `docmd mcp` for agent access"
+    },
+    "pm-skills": {
+      "dirs": ["pm-skills"],
+      "note": "product-on-purpose/pm-skills — router SKILL.md (local) over the 68-skill family, 7 agents, 11 commands; family also partly installed as sibling skills"
+    }
+  },
+  "indexMaxAgeHours": {
+    "ccc": 24,
+    "tgrep": 24,
+    "graphify": 24,
+    "aidex": 24
+  }
+}

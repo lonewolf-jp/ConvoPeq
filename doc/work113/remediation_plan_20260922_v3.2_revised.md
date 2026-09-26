@@ -167,9 +167,9 @@ git add doc/work113/implementation_report_20260922_c1_ref_fidelity.md
 
 | 項目 | 状態 |
 |------|------|
-| G-0 / T-1 / T-2 / T-3 | **ユーザー承認待ち**（確定案提示済み） |
-| C0（evidence/ 追跡外化） | **ユーザー承認待ち**（独立 commit・R17-2） |
-| Phase 0 characterization（0-1 〜 0-6） | **G-0/C0 承認後に着手** |
+| G-0 / T-1 / T-2 / T-3 | **承認済み（2026-09-22・ユーザー確定）** — DESIGN-CONTRACT-A（E1〜E5）+ T-1（R17-3/R17-4 契約）+ T-2（E-1c 絶対形 gate）+ T-3（BUILD-ID 6 要素必須）+ R17-1 動作点固定 + R17-2 commit マトリクス |
+| C0（evidence/ 追跡外化） | **承認済み（2026-09-22・ユーザー確定）** — 実行（`git rm -r --cached evidence/` + .gitignore + 独立 commit）は次工程の指示時 |
+| Phase 0 characterization（0-1 〜 0-6） | **実施済み・全 gate PASS（2026-09-22・54/54・exit 0）** — `phase0_characterization_report_20260922.md` 参照。freeze 後はユーザー GO gate（条件D） |
 | production `centerValue *= 2.0` | **HOLD**（本セッションで変更 0・本セッションで実装したものは test-only のみ） |
 | CMake flag token / default ON / calibration | **HOLD**（CMakeLists.txt に flag 定義なし・本セッションで検証済み） |
 | 案 E の最終採用 | **HOLD**（Phase 0 全 PASS + 条件D + ユーザー GO 後） |
@@ -178,6 +178,8 @@ git add doc/work113/implementation_report_20260922_c1_ref_fidelity.md
 
 ## 4. 判定
 
-- **C1 のソースレベル実装: 完了**（R18-1〜R18-3 の契約のとおり・production 変更 0）。
+- **C1 のソースレベル実装: 完了 + commit 済み**（HEAD `85aa13b9`・R18-1〜R18-3 の契約のとおり・production 変更 0・PRECOMMIT GATE 5/5 PASS）。
 - **REF-FIDELITY の実測: PASS（31/31・exit 0 — §1.3 のとおり・実ログ `tmp/c1_ref_fidelity_run_20260922.txt` で裏付け）**。ただし本 exe は **Shadow fidelity gate** であり production 正しさの gate ではない（R12-8）— 「production == shadow」から「production が数学的に正しい」は導かれず、T4〜T8 の独立した数学的制約が共通バグリスクを低減する位置づけ。P0-A〜P0-I の characterization は別物であり、C1 PASS ≠ B-1 PASS ≠ 案E採用。
-- **次の着手境界**: C1-PRECOMMIT GATE（§2 の 5 項目・全 PASS）→ 人間の staged 確認 → C1 commit → G-0/C0 承認 → Phase 0 characterization（0-1 〜 0-6）。
+- **承認状態（2026-09-22）**: G-0 / T-1 / T-2 / T-3 / C0 **全承認済み**（§3 のとおり）。
+- **工程実績**: C1 commit `85aa13b9` → C0 commit `88c6f000` → ConvoPeq.md 再生成（00:41:57 FRESH 確認）→ **Phase 0 characterization 全 gate PASS（54/54・exit 0）**。production 変更・案E・flag・calibration・F-3/F-4 は全 HOLD 継続。
+- **次の着手境界**: Phase 0 freeze → **ユーザー GO gate（条件D R15-4 適用）** → Step 2.5 条件D 最終判断プロセス → Phase 1 eligibility。
