@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-23 23:30:44
+> Generated: 2026-09-27 20:33:59
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -69098,9 +69098,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    double envIn = rtAgcEnvInputShadow.load(std::memory_order_relaxed);
-    double envOut = rtAgcEnvOutputShadow.load(std::memory_order_relaxed);
-    double currentGain = rtAgcCurrentGainShadow.load(std::memory_order_relaxed);
+    double envIn = convo::consumeAtomic(rtAgcEnvInputShadow, std::memory_order_relaxed);
+    double envOut = convo::consumeAtomic(rtAgcEnvOutputShadow, std::memory_order_relaxed);
+    double currentGain = convo::consumeAtomic(rtAgcCurrentGainShadow, std::memory_order_relaxed);
     if (!isFiniteNoLibm(envIn))  envIn = 0.0;
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
     if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
@@ -69117,9 +69117,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const double targetGain = calculateAGCGain(envIn, envOut);
     const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
 
-    rtAgcEnvInputShadow.store(envIn, std::memory_order_relaxed);
-    rtAgcEnvOutputShadow.store(envOut, std::memory_order_relaxed);
-    rtAgcCurrentGainShadow.store(nextGain, std::memory_order_relaxed);
+    convo::publishAtomic(rtAgcEnvInputShadow, envIn, std::memory_order_relaxed);
+    convo::publishAtomic(rtAgcEnvOutputShadow, envOut, std::memory_order_relaxed);
+    convo::publishAtomic(rtAgcCurrentGainShadow, nextGain, std::memory_order_relaxed);
 
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
     for (int ch = 0; ch < numChannels; ++ch)
@@ -69180,7 +69180,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 設定するまで有効であり、その間に process() が呼ばれることはない（H-01）。
     const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
     auto* activeBypassRamp = &bypassFadeGain;
-    bool effectiveBypass = rtBypassedShadow.load(std::memory_order_relaxed);
+    bool effectiveBypass = convo::consumeAtomic(rtBypassedShadow, std::memory_order_relaxed);
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
     const double currentBypassTarget = activeBypassRamp->getTargetValue();
@@ -69188,11 +69188,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         if (!requestedBypass && effectiveBypass)
         {
-            rtDeferredBandResetMask.fetch_or(0xFFFFFFFFu, std::memory_order_relaxed);
-            rtBypassedShadow.store(false, std::memory_order_relaxed);
+            convo::fetchOrAtomic(rtDeferredBandResetMask, 0xFFFFFFFFu, std::memory_order_relaxed);
+            convo::publishAtomic(rtBypassedShadow, false, std::memory_order_relaxed);
         }
         activeBypassRamp->setTargetValue(targetBypassFade);
-        effectiveBypass = rtBypassedShadow.load(std::memory_order_relaxed);
+        effectiveBypass = convo::consumeAtomic(rtBypassedShadow, std::memory_order_relaxed);
     }
 
     const bool bypassTransitionActive = activeBypassRamp->isSmoothing();
@@ -69200,7 +69200,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // フェードアウト完了時に bypassed を true にする
     if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
     {
-        rtBypassedShadow.store(true, std::memory_order_relaxed);
+        convo::publishAtomic(rtBypassedShadow, true, std::memory_order_relaxed);
         effectiveBypass = true;
     }
 
@@ -69269,9 +69269,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        rtAgcCurrentGainShadow.store(1.0, std::memory_order_relaxed);
-        rtAgcEnvInputShadow.store(0.0, std::memory_order_relaxed);
-        rtAgcEnvOutputShadow.store(0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcCurrentGainShadow, 1.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvInputShadow, 0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvOutputShadow, 0.0, std::memory_order_relaxed);
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
@@ -69279,15 +69279,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
         rtSeenBandResetSerial = bandResetSerialNow;
-        rtDeferredBandResetMask.fetch_or(bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
+        convo::fetchOrAtomic(rtDeferredBandResetMask, bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
     }
 
-    uint32_t mask = rtDeferredBandResetMask.exchange(0, std::memory_order_relaxed);
+    uint32_t mask = convo::exchangeAtomic(rtDeferredBandResetMask, 0, std::memory_order_relaxed);
     if (mask != 0)
     {
         if (!canSafelyResetState)
         {
-            rtDeferredBandResetMask.fetch_or(mask, std::memory_order_relaxed);
+            convo::fetchOrAtomic(rtDeferredBandResetMask, mask, std::memory_order_relaxed);
         }
         // 最適化: 全バンドリセットの場合は memset で一括クリア
         else if (mask == 0xFFFFFFFF)
@@ -69546,7 +69546,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     };
 
-    auto activeMode = rtActiveStructureShadow.load(std::memory_order_relaxed);
+    auto activeMode = convo::consumeAtomic(rtActiveStructureShadow, std::memory_order_relaxed);
     auto requestedMode = (stateSnapshot != nullptr)
         ? static_cast<FilterStructure>(stateSnapshot->filterStructure)
         : activeMode;
@@ -69602,14 +69602,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 blockR[n] = oldR[n] * wOld + newR[n] * wNew;
         }
 
-        rtActiveStructureShadow.store(requestedMode, std::memory_order_relaxed);
+        convo::publishAtomic(rtActiveStructureShadow, requestedMode, std::memory_order_relaxed);
     }
     else
     {
         if (requestedMode != activeMode)
         {
             activeMode = requestedMode;
-            rtActiveStructureShadow.store(activeMode, std::memory_order_relaxed);
+            convo::publishAtomic(rtActiveStructureShadow, activeMode, std::memory_order_relaxed);
         }
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
@@ -69691,9 +69691,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (!smoothingAfterBlend)
         {
             if (requestedBypass)
-                rtBypassedShadow.store(true, std::memory_order_relaxed);
+                convo::publishAtomic(rtBypassedShadow, true, std::memory_order_relaxed);
             else
-                rtBypassedShadow.store(false, std::memory_order_relaxed);
+                convo::publishAtomic(rtBypassedShadow, false, std::memory_order_relaxed);
         }
     }
 }
@@ -69702,7 +69702,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                           const convo::EQParameters& eqParams,
                           const EQCoeffCache* coeffCache)
 {
-    const bool effectiveBypassed = rtBypassedShadow.load(std::memory_order_relaxed);
+    const bool effectiveBypassed = convo::consumeAtomic(rtBypassedShadow, std::memory_order_relaxed);
     const bool bypassSmoothing = bypassFadeGain.isSmoothing();
 
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
@@ -69753,9 +69753,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        rtAgcCurrentGainShadow.store(1.0, std::memory_order_relaxed);
-        rtAgcEnvInputShadow.store(0.0, std::memory_order_relaxed);
-        rtAgcEnvOutputShadow.store(0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcCurrentGainShadow, 1.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvInputShadow, 0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvOutputShadow, 0.0, std::memory_order_relaxed);
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
@@ -69763,10 +69763,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
         rtSeenBandResetSerial = bandResetSerialNow;
-        rtDeferredBandResetMask.fetch_or(bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
+        convo::fetchOrAtomic(rtDeferredBandResetMask, bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
     }
 
-    uint32_t mask = rtDeferredBandResetMask.exchange(0, std::memory_order_relaxed);
+    uint32_t mask = convo::exchangeAtomic(rtDeferredBandResetMask, 0, std::memory_order_relaxed);
     if (mask != 0)
     {
         if (isAudioBlockSilent(block, numChannels, numSamples))
@@ -69789,7 +69789,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         }
         else
         {
-            rtDeferredBandResetMask.fetch_or(mask, std::memory_order_relaxed);
+            convo::fetchOrAtomic(rtDeferredBandResetMask, mask, std::memory_order_relaxed);
         }
     }
 
@@ -95428,9 +95428,9 @@ int runP1RecoveryOrigin(int argc, char* argv[])
              + kvi("slot", (long long)handle.slot)
              + kvi("gen", (long long)handle.generation));
 
-    // baseline drain sample（Recovery trigger 前の isFullyDrained 状態）
+    // ★ P3-5-R32: baseline settle（起動直後の bootstrap/rebuild publish を control から除外する）。
+    //   drain 観測は行わない（R31: waitForDrain は shutdown 契約内のみ）。
     sleepPump(1000);
-    emitLine(std::string("[P1REC]   drain_baseline ") + p1RecDrainFields(e));
 
     int okEpisodes = 0;
 
@@ -95470,11 +95470,8 @@ int runP1RecoveryOrigin(int argc, char* argv[])
             }
         }
 
-        // exactly-once terminalization の間接観測
-        //   waitForDrain = AudioEngine::isFullyDrained()（liveLogicalRecoveryObligationCount()==0 を含む）
-        emitLine(std::string("[P1REC]   drain_pre ") + p1RecDrainFields(e));
-        const bool drained = e.waitForDrain(kWaitMs);
-        emitLine(std::string("[P1REC]   drain_post") + p1RecDrainFields(e));
+        // ★ P3-5-R32: episode 内 waitForDrain/drain_pre/drain_post は撤去（Running 中は
+        //   shutdown 契約外 — R31 STOP-1）。terminalization は h.stop() 後の T3 で観測する。
 
         const P1RecSnap post = p1RecReadSnap(e);
         const long long dSeq   = post.seq   - pre.seq;
@@ -95488,13 +95485,12 @@ int runP1RecoveryOrigin(int argc, char* argv[])
                  + kvi("ep", ep)
                  + kvi("dSeq", dSeq) + kvi("dCoord", dCoord) + kvi("dCmt", dCmt)
                  + kvi("dDrp", dDrp) + kvi("dTake", dTake) + kvi("dBld", dBld)
-                 + kvi("seqAdvanced", seqAdvanced ? 1 : 0)
-                 + kvi("drained", drained ? 1 : 0));
+                 + kvi("seqAdvanced", seqAdvanced ? 1 : 0));
         emitLine(std::string("[P1REC]   pre ") + p1RecSnapFields(pre));
         emitLine(std::string("[P1REC]   post") + p1RecSnapFields(post));
 
-        // 期待形: seq 前進・coord 不変・drain 成功
-        if (seqAdvanced && drained && dCoord == 0)
+        // 期待形: seq 前進・coord 不変（terminalization 判定は h.stop() 後の T3 で行う）
+        if (seqAdvanced && dCoord == 0 && dCmt == 0 && dTake == 0 && dBld == 0)
         {
             ++okEpisodes;
         }
@@ -95503,22 +95499,356 @@ int runP1RecoveryOrigin(int argc, char* argv[])
             emitLine(std::string("[P1REC] WARN episode not ok")
                      + kvi("ep", ep)
                      + kvi("seqAdvanced", seqAdvanced ? 1 : 0)
-                     + kvi("drained", drained ? 1 : 0)
-                     + kvi("dCoord", dCoord));
+                     + kvi("dCoord", dCoord) + kvi("dCmt", dCmt)
+                     + kvi("dTake", dTake) + kvi("dBld", dBld));
         }
     }
 
-    // STOP-E bounded 診断: waitForDrain の契約は AudioStopped 以降（Threading.cpp:218）。
-    //   audio thread 停止後に isFullyDrained が成立し得るかを観測する（既存 API のみ）。
-    h.stopAudioOnly();
-    const bool drainAfterAudioStop = e.waitForDrain(10000);
-    emitLine(std::string("[P1REC]   drain_after_audio_stop ")
-             + kvi("drainOk", drainAfterAudioStop ? 1 : 0) + p1RecDrainFields(e));
+    // ★ P3-5-R32: episode 完了後、Recovery publish が in-flight でないことを短い settle で確認する
+    //   （各 episode は seq advancement を待っているため原則 in-flight なし）。
+    sleepPump(500);
 
+    // terminal observation（R31 の契約: waitForDrain は shutdown 内部でのみ使用される）。
+    //   h.stop() = stopAudioOnly → requestTerminalRelease → releaseResources(terminal pass)
+    //   → AudioStopped → … → VerifyDrained → waitForDrain → finalizeShutdown → ShutdownComplete
     h.stop();
+
+    // ★ h.stop() の後だけ terminal state を既存 public API で観測する（Running 中は観測しない）。
+    const auto termPhase = e.isrShutdownRuntime().getPhase();
+    const auto termResult = e.isrShutdownRuntime().collectResult(
+        static_cast<convo::ISRHealthState>(0), 0);
+    const auto termAdmission = e.isrShutdownRuntime().admissionState();
+    const bool phaseComplete = (termPhase == convo::isr::ShutdownPhase::ShutdownComplete);
+    const bool phaseTimeout  = (termPhase == convo::isr::ShutdownPhase::TimedOut);
+    const bool phaseFailed   = (termPhase == convo::isr::ShutdownPhase::Failed);
+
+    emitLine(std::string("[P1REC] terminal")
+             + kvi("phase", (long long)static_cast<int>(termPhase))
+             + kvi("phaseComplete", phaseComplete ? 1 : 0)
+             + kvi("phaseTimeout", phaseTimeout ? 1 : 0)
+             + kvi("phaseFailed", phaseFailed ? 1 : 0)
+             + kvi("completed", termResult.completed ? 1 : 0)
+             + kvi("blockingReason", (long long)static_cast<int>(termResult.blockingReason))
+             + kvi("violations", (long long)termResult.transitionViolations)
+             + kvi("admissionClosed",
+                   (termAdmission == convo::isr::AdmissionState::Closed) ? 1 : 0)
+             + kvi("lateCallbacks", (long long)termResult.lateCallbackCount)
+             + kvi("postStopEnqueue", (long long)termResult.postStopEnqueueCount));
+
+    // drain audit は shutdown 後の diagnostic evidence（補助・主判定には使わない）。
+    emitLine(std::string("[P1REC]   terminal_drain_audit ") + p1RecDrainFields(e));
+
+    const bool terminalOk = phaseComplete && termResult.completed
+                         && (termResult.transitionViolations == 0);
     emitLine(std::string("[P1REC] summary")
-             + kvi("episodes", kEpisodes) + kvi("ok", okEpisodes));
-    return (okEpisodes == kEpisodes) ? 0 : 1;
+             + kvi("episodes", kEpisodes) + kvi("okEpisodes", okEpisodes)
+             + kvi("terminalOk", terminalOk ? 1 : 0));
+    return (okEpisodes == kEpisodes && terminalOk) ? 0 : 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P3-5-FPM-Impl-1: M0/M1/M2 measurement vehicle（test-only）。
+//   FPM-PREP-1 §3-§9 の測定プロトコルを test vehicle 化する。
+//   production 変更 0・新 getter/counter 0・既存 public API のみ。
+//   既存 R30 helper（p1RecReadSnap／p1RecDrainFields／sleepPump／waitWorldPublished／
+//   waitBacklogZero／kvi／emitLine）を流用。terminal success authority は T3b 5点のみ。
+//   実行: AudioEngineHarness.exe --fpm-m0 | --fpm-m1 | --fpm-m2
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// T3b terminal capture（同一 shutdown episode の 5点＋diagnostic）。
+//   取得子は既存 public API のみ。collectDrainAudit は diagnostic（authority ではない）。
+struct FpmT3bCapture
+{
+    long long phase = 0;
+    bool phaseComplete = false;
+    bool completed = false;
+    long long blockingReason = 0;
+    long long violations = 0;
+    bool fullyDrained = false;
+    bool t3b = false;
+    // diagnostic（authority ではない）
+    long long lateCallbacks = 0;
+    long long postStopEnqueue = 0;
+    // drain audit 快照（diagnostic）
+    long long pendPub = 0, pendRetire = 0, xfade = 0, routerPending = 0;
+    long long deferred = 0, quarRes = 0;
+    long long activeWorlds = 0, published = 0, retired = 0;
+    long long activeReaders = 0, stuckReaders = 0, overflowRes = 0;
+};
+
+FpmT3bCapture fpmCaptureT3b(AudioEngine& e)
+{
+    FpmT3bCapture c;
+    const auto phase = e.isrShutdownRuntime().getPhase();
+    const auto result = e.isrShutdownRuntime().collectResult(
+        static_cast<convo::ISRHealthState>(0), 0);
+    const bool drained = e.isFullyDrained();
+    const auto audit = e.collectDrainAudit();
+    c.phase = (long long)static_cast<int>(phase);
+    c.phaseComplete = (phase == convo::isr::ShutdownPhase::ShutdownComplete);
+    c.completed = result.completed;
+    c.blockingReason = (long long)static_cast<int>(result.blockingReason);
+    c.violations = (long long)result.transitionViolations;
+    c.fullyDrained = drained;
+    // T3b authority：5点の conjunction のみ。completed 単独・phase 単独・
+    // R30/R32 型（phase&&completed&&violations）は success 判定に使わない。
+    c.t3b = c.phaseComplete && result.completed
+        && (result.blockingReason == convo::isr::ShutdownBlockingReason::None)
+        && (result.transitionViolations == 0) && drained;
+    c.lateCallbacks = (long long)result.lateCallbackCount;
+    c.postStopEnqueue = (long long)result.postStopEnqueueCount;
+    c.pendPub = (long long)audit.pendingPublication;
+    c.pendRetire = (long long)audit.pendingRetire;
+    c.xfade = (long long)audit.activeCrossfadeCount;
+    c.routerPending = (long long)audit.routerPendingRetire;
+    c.deferred = (long long)audit.deferredPublish;
+    c.quarRes = (long long)audit.quarantineResident;
+    c.activeWorlds = (long long)audit.activeWorldCount;
+    c.published = (long long)audit.publishedCount;
+    c.retired = (long long)audit.retiredCount;
+    c.activeReaders = (long long)audit.activeReaderCount;
+    c.stuckReaders = (long long)audit.stuckReaderCount;
+    c.overflowRes = (long long)audit.overflowRingResident;
+    return c;
+}
+
+void fpmEmitT3b(const char* tag, const FpmT3bCapture& c)
+{
+    emitLine(std::string("[FPM] ") + tag + std::string(" terminal")
+             + kvi("phase", c.phase)
+             + kvi("phaseComplete", c.phaseComplete ? 1 : 0)
+             + kvi("completed", c.completed ? 1 : 0)
+             + kvi("blockingReason", c.blockingReason)
+             + kvi("violations", c.violations)
+             + kvi("fullyDrained", c.fullyDrained ? 1 : 0)
+             + kvi("t3b", c.t3b ? 1 : 0)
+             + kvi("lateCallbacks", c.lateCallbacks)
+             + kvi("postStopEnqueue", c.postStopEnqueue));
+    emitLine(std::string("[FPM] ") + tag + std::string(" terminal_drain_audit")
+             + kvi("pendPub", c.pendPub)
+             + kvi("pendRetire", c.pendRetire)
+             + kvi("xfade", c.xfade)
+             + kvi("routerPending", c.routerPending)
+             + kvi("deferred", c.deferred)
+             + kvi("quarRes", c.quarRes)
+             + kvi("activeWorlds", c.activeWorlds)
+             + kvi("published", c.published)
+             + kvi("retired", c.retired)
+             + kvi("activeReaders", c.activeReaders)
+             + kvi("stuckReaders", c.stuckReaders)
+             + kvi("overflowRes", c.overflowRes));
+}
+
+// run 分類（FPM-PREP-1 §9）。
+//   VALID：T3b==true。INVALID-TERMINAL：T3a==true && T3b==false。
+const char* fpmClassify(bool t3b, bool phaseComplete)
+{
+    if (t3b) return "VALID";
+    if (phaseComplete) return "INVALID-TERMINAL";
+    return "ABORTED";
+}
+
+// startup settle：authoritative runtime＋seq 前進＋backlog 0（R30 Precondition 流用）。
+bool fpmStartupSettle(AudioEngine& e, const char* tag)
+{
+    bool ready = false;
+    for (int i = 0; i < 3000 && !ready; ++i)
+    {
+        const auto* w = e.observePublishedWorld();
+        ready = (w != nullptr && w->engine.current != nullptr
+                 && e.hasAuthoritativePublishedRuntime());
+        if (!ready) { pumpMessages(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+    }
+    if (!ready)
+    {
+        emitLine(std::string("[FPM] ") + tag + std::string(" ABORTED no authoritative runtime"));
+        return false;
+    }
+    const long long seq0 = (long long)e.getLastCommittedPublicationSequence();
+    if (!waitWorldPublished(e, seq0, 20000))
+    {
+        emitLine(std::string("[FPM] ") + tag + std::string(" ABORTED startup publish not settled"));
+        return false;
+    }
+    if (!waitBacklogZero(e, 10000))
+    {
+        emitLine(std::string("[FPM] ") + tag + std::string(" ABORTED backlog not zero"));
+        return false;
+    }
+    sleepPump(500);
+    return true;
+}
+
+// single recovery episode（R30 episode-driving の最小流用・kEpisodes=1）。
+//   E2 winner なし。Running 中 waitForDrain なし。
+bool fpmSingleRecoveryEpisode(AudioEngine& e, const char* tag)
+{
+    const auto* w0 = e.observePublishedWorld();
+    if (w0 == nullptr || w0->engine.current == nullptr)
+    {
+        emitLine(std::string("[FPM] ") + tag + std::string(" ABORTED no published world"));
+        return false;
+    }
+    auto* activeDSP = static_cast<AudioEngine::DSPCore*>(w0->engine.current);
+    const auto handle = e.registerDSPHandleForRuntime(activeDSP);
+    if (handle.isNull())
+    {
+        emitLine(std::string("[FPM] ") + tag + std::string(" ABORTED null handle"));
+        return false;
+    }
+    const P1RecSnap pre = p1RecReadSnap(e);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const long long seqBefore = pre.seq;
+    e.submitRecoveryIntent(handle, snapshot);
+    bool seqAdvanced = false;
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const auto budget = std::chrono::milliseconds(20000);
+        while (std::chrono::steady_clock::now() - start < budget)
+        {
+            if ((long long)e.getLastCommittedPublicationSequence() > seqBefore)
+            { seqAdvanced = true; break; }
+            pumpMessages();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    const P1RecSnap post = p1RecReadSnap(e);
+    const long long dSeq   = post.seq   - pre.seq;
+    const long long dCoord = post.coord - pre.coord;
+    const long long dCmt   = post.cmt   - pre.cmt;
+    const long long dTake  = post.take  - pre.take;
+    const long long dBld   = post.bld   - pre.bld;
+    emitLine(std::string("[FPM] ") + tag + std::string(" episode")
+             + kvi("dSeq", dSeq) + kvi("dCoord", dCoord) + kvi("dCmt", dCmt)
+             + kvi("dTake", dTake) + kvi("dBld", dBld)
+             + kvi("seqAdvanced", seqAdvanced ? 1 : 0));
+    emitLine(std::string("[FPM] ") + tag + std::string("   pre ") + p1RecSnapFields(pre));
+    emitLine(std::string("[FPM] ") + tag + std::string("   post") + p1RecSnapFields(post));
+    return seqAdvanced && dCoord == 0 && dCmt == 0 && dTake == 0 && dBld == 0;
+}
+
+} // namespace
+
+// M0 Control：Recovery なし・publication 最小・crossfade 最小・retire 最小。
+//   start → startup settle → stop → T3b capture → evidence emit。
+//   M0 が INVALID-TERMINAL でも捏造せず分類のみ（FPM-PREP-1 §5）。
+int runFpmM0()
+{
+    constexpr const char* kTag = "m0";
+    emitLine("[FPM] start fpm_m0_control");
+    AudioEngineHarness h;
+    if (!h.start(kSr, kBlock))
+    {
+        emitLine("[FPM] m0 ABORTED harness start");
+        return 2;
+    }
+    AudioEngine& e = h.engine();
+    if (!fpmStartupSettle(e, kTag))
+    {
+        h.stop();
+        return 2;
+    }
+    h.stop();
+    const auto cap = fpmCaptureT3b(e);
+    fpmEmitT3b(kTag, cap);
+    const char* cls = fpmClassify(cap.t3b, cap.phaseComplete);
+    emitLine(std::string("[FPM] m0 summary") + kvi("t3b", cap.t3b ? 1 : 0)
+             + std::string(" class=") + cls);
+    // exit code は vehicle sequence 完遂を示す（T3b 成否は class フィールドで判定・捏造しない）。
+    return 0;
+}
+
+// M1 Single Recovery：episode=1（R30 流用）。E2 winner なし。Running 中 waitForDrain なし。
+int runFpmM1()
+{
+    constexpr const char* kTag = "m1";
+    emitLine("[FPM] start fpm_m1_single_recovery");
+    AudioEngineHarness h;
+    if (!h.start(kSr, kBlock))
+    {
+        emitLine("[FPM] m1 ABORTED harness start");
+        return 2;
+    }
+    AudioEngine& e = h.engine();
+    if (!fpmStartupSettle(e, kTag))
+    {
+        h.stop();
+        return 2;
+    }
+    sleepPump(1000);
+    const bool epOk = fpmSingleRecoveryEpisode(e, kTag);
+    emitLine(std::string("[FPM] m1 episode_ok") + kvi("ok", epOk ? 1 : 0));
+    sleepPump(500);
+    h.stop();
+    const auto cap = fpmCaptureT3b(e);
+    fpmEmitT3b(kTag, cap);
+    const char* cls = fpmClassify(cap.t3b, cap.phaseComplete);
+    emitLine(std::string("[FPM] m1 summary") + kvi("episodeOk", epOk ? 1 : 0)
+             + kvi("t3b", cap.t3b ? 1 : 0) + std::string(" class=") + cls);
+    return 0;
+}
+
+// M2 Full Pipeline：publish→crossfade settle→recovery→publish→settle→shutdown→T3b。
+//   音質・buzz・limiter・NUC は扱わない（pipeline integrity のみ）。
+int runFpmM2()
+{
+    constexpr const char* kTag = "m2";
+    emitLine("[FPM] start fpm_m2_full_pipeline");
+    AudioEngineHarness h;
+    if (!h.start(kSr, kBlock))
+    {
+        emitLine("[FPM] m2 ABORTED harness start");
+        return 2;
+    }
+    AudioEngine& e = h.engine();
+    if (!fpmStartupSettle(e, kTag))
+    {
+        h.stop();
+        return 2;
+    }
+    sleepPump(1000);
+    // publish operation：requestRebuild(Structural)（D167-5 と同一の公開入口・
+    // lifecycleState を触らない。prepareToPlay は audio 停止後のみ呼ぶ harness 契約のため
+    // audio 実行中の M2 では使用しない）。
+    const long long seq0 = (long long)e.getLastCommittedPublicationSequence();
+    e.requestRebuild(convo::RebuildKind::Structural);
+    if (!waitWorldPublished(e, seq0, 20000))
+    {
+        emitLine("[FPM] m2 ABORTED publish-1 not settled");
+        h.stop();
+        return 2;
+    }
+    // crossfade settle：activeCrossfadeCount==0（diagnostic 条件・authority ではない）。
+    {
+        bool settled = false;
+        for (int i = 0; i < 1000 && !settled; ++i)
+        {
+            settled = (e.collectDrainAudit().activeCrossfadeCount == 0);
+            if (!settled) { pumpMessages(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+        }
+        emitLine(std::string("[FPM] m2 xfade_settle") + kvi("settled", settled ? 1 : 0));
+    }
+    const bool epOk = fpmSingleRecoveryEpisode(e, kTag);
+    emitLine(std::string("[FPM] m2 episode_ok") + kvi("ok", epOk ? 1 : 0));
+    // 2nd publish：再度 Structural rebuild を要求（D167-5 と同一の公開入口）。
+    const long long seq1 = (long long)e.getLastCommittedPublicationSequence();
+    e.requestRebuild(convo::RebuildKind::Structural);
+    if (!waitWorldPublished(e, seq1, 20000))
+    {
+        emitLine("[FPM] m2 ABORTED publish-2 not settled");
+        h.stop();
+        return 2;
+    }
+    sleepPump(500);
+    h.stop();
+    const auto cap = fpmCaptureT3b(e);
+    fpmEmitT3b(kTag, cap);
+    const char* cls = fpmClassify(cap.t3b, cap.phaseComplete);
+    emitLine(std::string("[FPM] m2 summary") + kvi("episodeOk", epOk ? 1 : 0)
+             + kvi("t3b", cap.t3b ? 1 : 0) + std::string(" class=") + cls);
+    return 0;
 }
 ```
 
@@ -98946,6 +99276,11 @@ int runP1PolyphaseGainCharacterization(int argc, char* argv[]);
 // P1PolyphaseGainCharacterization.cpp (P3-5-R30: Recovery-origin vehicle・test-only D1)
 int runP1RecoveryOrigin(int argc, char* argv[]);
 
+// P1PolyphaseGainCharacterization.cpp (P3-5-FPM-Impl-1: M0/M1/M2 measurement vehicle・test-only)
+int runFpmM0();
+int runFpmM1();
+int runFpmM2();
+
     for (int i = 1; i < argc; ++i)
     {
         const std::string a(argv[i]);
@@ -98957,6 +99292,12 @@ int runP1RecoveryOrigin(int argc, char* argv[]);
             return runP1PolyphaseGainCharacterization(argc, argv);
         else if (a == "--p1-recovery-origin")
             return runP1RecoveryOrigin(argc, argv);
+        else if (a == "--fpm-m0")
+            return runFpmM0();
+        else if (a == "--fpm-m1")
+            return runFpmM1();
+        else if (a == "--fpm-m2")
+            return runFpmM2();
         else if (a == "--odenom-campaign" || a == "--odenom")
             odenomCampaign = true;
         else if (a.rfind("--scenario=", 0) == 0)

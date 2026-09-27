@@ -416,9 +416,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    double envIn = rtAgcEnvInputShadow.load(std::memory_order_relaxed);
-    double envOut = rtAgcEnvOutputShadow.load(std::memory_order_relaxed);
-    double currentGain = rtAgcCurrentGainShadow.load(std::memory_order_relaxed);
+    double envIn = convo::consumeAtomic(rtAgcEnvInputShadow, std::memory_order_relaxed);
+    double envOut = convo::consumeAtomic(rtAgcEnvOutputShadow, std::memory_order_relaxed);
+    double currentGain = convo::consumeAtomic(rtAgcCurrentGainShadow, std::memory_order_relaxed);
     if (!isFiniteNoLibm(envIn))  envIn = 0.0;
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
     if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
@@ -435,9 +435,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const double targetGain = calculateAGCGain(envIn, envOut);
     const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
 
-    rtAgcEnvInputShadow.store(envIn, std::memory_order_relaxed);
-    rtAgcEnvOutputShadow.store(envOut, std::memory_order_relaxed);
-    rtAgcCurrentGainShadow.store(nextGain, std::memory_order_relaxed);
+    convo::publishAtomic(rtAgcEnvInputShadow, envIn, std::memory_order_relaxed);
+    convo::publishAtomic(rtAgcEnvOutputShadow, envOut, std::memory_order_relaxed);
+    convo::publishAtomic(rtAgcCurrentGainShadow, nextGain, std::memory_order_relaxed);
 
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
     for (int ch = 0; ch < numChannels; ++ch)
@@ -498,7 +498,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 設定するまで有効であり、その間に process() が呼ばれることはない（H-01）。
     const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
     auto* activeBypassRamp = &bypassFadeGain;
-    bool effectiveBypass = rtBypassedShadow.load(std::memory_order_relaxed);
+    bool effectiveBypass = convo::consumeAtomic(rtBypassedShadow, std::memory_order_relaxed);
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
     const double currentBypassTarget = activeBypassRamp->getTargetValue();
@@ -506,11 +506,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         if (!requestedBypass && effectiveBypass)
         {
-            rtDeferredBandResetMask.fetch_or(0xFFFFFFFFu, std::memory_order_relaxed);
-            rtBypassedShadow.store(false, std::memory_order_relaxed);
+            convo::fetchOrAtomic(rtDeferredBandResetMask, 0xFFFFFFFFu, std::memory_order_relaxed);
+            convo::publishAtomic(rtBypassedShadow, false, std::memory_order_relaxed);
         }
         activeBypassRamp->setTargetValue(targetBypassFade);
-        effectiveBypass = rtBypassedShadow.load(std::memory_order_relaxed);
+        effectiveBypass = convo::consumeAtomic(rtBypassedShadow, std::memory_order_relaxed);
     }
 
     const bool bypassTransitionActive = activeBypassRamp->isSmoothing();
@@ -518,7 +518,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // フェードアウト完了時に bypassed を true にする
     if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
     {
-        rtBypassedShadow.store(true, std::memory_order_relaxed);
+        convo::publishAtomic(rtBypassedShadow, true, std::memory_order_relaxed);
         effectiveBypass = true;
     }
 
@@ -587,9 +587,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        rtAgcCurrentGainShadow.store(1.0, std::memory_order_relaxed);
-        rtAgcEnvInputShadow.store(0.0, std::memory_order_relaxed);
-        rtAgcEnvOutputShadow.store(0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcCurrentGainShadow, 1.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvInputShadow, 0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvOutputShadow, 0.0, std::memory_order_relaxed);
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
@@ -597,15 +597,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
         rtSeenBandResetSerial = bandResetSerialNow;
-        rtDeferredBandResetMask.fetch_or(bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
+        convo::fetchOrAtomic(rtDeferredBandResetMask, bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
     }
 
-    uint32_t mask = rtDeferredBandResetMask.exchange(0, std::memory_order_relaxed);
+    uint32_t mask = convo::exchangeAtomic(rtDeferredBandResetMask, 0, std::memory_order_relaxed);
     if (mask != 0)
     {
         if (!canSafelyResetState)
         {
-            rtDeferredBandResetMask.fetch_or(mask, std::memory_order_relaxed);
+            convo::fetchOrAtomic(rtDeferredBandResetMask, mask, std::memory_order_relaxed);
         }
         // 最適化: 全バンドリセットの場合は memset で一括クリア
         else if (mask == 0xFFFFFFFF)
@@ -864,7 +864,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     };
 
-    auto activeMode = rtActiveStructureShadow.load(std::memory_order_relaxed);
+    auto activeMode = convo::consumeAtomic(rtActiveStructureShadow, std::memory_order_relaxed);
     auto requestedMode = (stateSnapshot != nullptr)
         ? static_cast<FilterStructure>(stateSnapshot->filterStructure)
         : activeMode;
@@ -920,14 +920,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 blockR[n] = oldR[n] * wOld + newR[n] * wNew;
         }
 
-        rtActiveStructureShadow.store(requestedMode, std::memory_order_relaxed);
+        convo::publishAtomic(rtActiveStructureShadow, requestedMode, std::memory_order_relaxed);
     }
     else
     {
         if (requestedMode != activeMode)
         {
             activeMode = requestedMode;
-            rtActiveStructureShadow.store(activeMode, std::memory_order_relaxed);
+            convo::publishAtomic(rtActiveStructureShadow, activeMode, std::memory_order_relaxed);
         }
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
@@ -1009,9 +1009,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (!smoothingAfterBlend)
         {
             if (requestedBypass)
-                rtBypassedShadow.store(true, std::memory_order_relaxed);
+                convo::publishAtomic(rtBypassedShadow, true, std::memory_order_relaxed);
             else
-                rtBypassedShadow.store(false, std::memory_order_relaxed);
+                convo::publishAtomic(rtBypassedShadow, false, std::memory_order_relaxed);
         }
     }
 }
@@ -1020,7 +1020,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                           const convo::EQParameters& eqParams,
                           const EQCoeffCache* coeffCache)
 {
-    const bool effectiveBypassed = rtBypassedShadow.load(std::memory_order_relaxed);
+    const bool effectiveBypassed = convo::consumeAtomic(rtBypassedShadow, std::memory_order_relaxed);
     const bool bypassSmoothing = bypassFadeGain.isSmoothing();
 
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
@@ -1071,9 +1071,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        rtAgcCurrentGainShadow.store(1.0, std::memory_order_relaxed);
-        rtAgcEnvInputShadow.store(0.0, std::memory_order_relaxed);
-        rtAgcEnvOutputShadow.store(0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcCurrentGainShadow, 1.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvInputShadow, 0.0, std::memory_order_relaxed);
+        convo::publishAtomic(rtAgcEnvOutputShadow, 0.0, std::memory_order_relaxed);
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
@@ -1081,10 +1081,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
         rtSeenBandResetSerial = bandResetSerialNow;
-        rtDeferredBandResetMask.fetch_or(bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
+        convo::fetchOrAtomic(rtDeferredBandResetMask, bandResetMaskFromPacked(bandResetPackedNow), std::memory_order_relaxed);
     }
 
-    uint32_t mask = rtDeferredBandResetMask.exchange(0, std::memory_order_relaxed);
+    uint32_t mask = convo::exchangeAtomic(rtDeferredBandResetMask, 0, std::memory_order_relaxed);
     if (mask != 0)
     {
         if (isAudioBlockSilent(block, numChannels, numSamples))
@@ -1107,7 +1107,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         }
         else
         {
-            rtDeferredBandResetMask.fetch_or(mask, std::memory_order_relaxed);
+            convo::fetchOrAtomic(rtDeferredBandResetMask, mask, std::memory_order_relaxed);
         }
     }
 
