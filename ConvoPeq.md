@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-09-27 23:12:13
+> Generated: 2026-09-28 07:06:17
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -8673,6 +8673,9 @@ public:
     // プライベートヘルパー (Message Thread のみ)
     //----------------------------------------------------------
     void applyDefaultsForCurrentMode();
+    // ★ STG-2: mode 遷移時の staging re-clamp（publish のみ・rebuild なし）。
+    //   呼出し元の mode setter が既存の単一 rebuild intent を担う。
+    void revalidateInputHeadroomForCurrentMode();
 
     //----------------------------------------------------------
     // ヘルパー関数
@@ -12563,6 +12566,20 @@ void diagLog(const juce::String& message)
 
     return true;
 }
+
+// ★ STG-2: input headroom の mode-dependent ceiling を副作用なしで共有する pure helpers。
+//   Conv 系（convolver 先頭）: -12.0..-6.0 dB / PEQ 系: -12.0..0.0 dB（入力保護）。
+[[nodiscard]] inline float inputHeadroomCeilingDb(bool convBypassed, bool eqBypassed,
+                                                  convo::ProcessingOrder order) noexcept
+{
+    const bool convIsFirst = !convBypassed && (order == convo::ProcessingOrder::ConvolverThenEQ || eqBypassed);
+    return convIsFirst ? -6.0f : 0.0f;
+}
+
+[[nodiscard]] inline float clampInputHeadroomDb(float db, float ceilingDb) noexcept
+{
+    return juce::jlimit(-12.0f, ceilingDb, db);
+}
 }
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
@@ -12571,6 +12588,7 @@ void AudioEngine::setEqBypassRequested (bool shouldBypass)
     convo::publishAtomic(eqBypassRequested, shouldBypass, std::memory_order_release);
     convo::publishAtomic(m_currentEqBypass, shouldBypass, std::memory_order_release);
     uiEqEditor.setBypass(shouldBypass);
+    revalidateInputHeadroomForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -12581,6 +12599,7 @@ void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
     convo::publishAtomic(convBypassRequested, shouldBypass, std::memory_order_release);
     convo::publishAtomic(m_currentConvBypass, shouldBypass, std::memory_order_release);
     uiConvolverProcessor.setBypass(shouldBypass);
+    revalidateInputHeadroomForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -12642,9 +12661,7 @@ void AudioEngine::setInputHeadroomDb(float db)
     const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
     const bool eqBypassed   = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
     const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
-    const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
-    const float maxDb = convIsFirst ? -6.0f : 0.0f;
-    float clampedDb = juce::jlimit(-12.0f, maxDb, db);
+    const float clampedDb = clampInputHeadroomDb(db, inputHeadroomCeilingDb(convBypassed, eqBypassed, order));
     if (std::abs(convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire) - clampedDb) > 1e-5f)
     {
         convo::publishAtomic(inputHeadroomDb, clampedDb, std::memory_order_release);
@@ -12683,6 +12700,7 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
     ASSERT_NON_RT_THREAD();
     convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
+    revalidateInputHeadroomForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -12754,6 +12772,26 @@ void AudioEngine::applyDefaultsForCurrentMode()
     convo::publishAtomic(m_currentOutputMakeupDb, newOutputMakeupDb, std::memory_order_release);
     convo::publishAtomic(m_currentConvInputTrimDb, newConvTrimDb, std::memory_order_release);
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+}
+
+// ★ STG-2: mode 遷移後の input headroom re-clamp。
+//   新 mode ceiling を超える stale 値を clamp し直す（STG-1 preservation と両立：
+//   ceiling 内の値は不変・default への上書きはしない）。
+//   rebuild は submit しない。呼出し元の mode setter が既存の単一 intent を担う。
+void AudioEngine::revalidateInputHeadroomForCurrentMode()
+{
+    ASSERT_NON_RT_THREAD();
+    const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
+    const bool eqBypassed   = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+    const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
+    const float currentDb = convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire);
+    const float clampedDb = clampInputHeadroomDb(currentDb, inputHeadroomCeilingDb(convBypassed, eqBypassed, order));
+    if (std::abs(currentDb - clampedDb) > 1e-5f)
+    {
+        convo::publishAtomic(inputHeadroomDb, clampedDb, std::memory_order_release);
+        convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
+        convo::publishAtomic(m_currentInputHeadroomDb, clampedDb, std::memory_order_release);
+    }
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
@@ -92565,7 +92603,189 @@ bool checkSTG1StateIORoundTrip()
     h.stop();
     if (!ok)
         return false;
-    std::printf("ConvolverStateRoundTripTests: PASS (STG-1 StateIO round-trip 3/3)\n");
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-2 StateIO round-trip 3/3)\n");
+    return true;
+}
+
+//==============================================================================
+// ★ STG-2 (test-only reproduction, pre-repair MUST FAIL):
+//   staging（旧 mode で valid）→ order/bypass 遷移で新 mode ceiling を超過残留する。
+//   契約: 遷移後は新 mode の許容範囲に収まること（STG-1 preservation と両立）。
+//   前提: AutoGain OFF。production source は変更しない。
+//==============================================================================
+bool checkSTG2OrderStaleHeadroom()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-2-A] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    e.setAutoGainStagingEnabled(false);
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    e.setConvolverBypassRequested(false);
+    e.setEqBypassRequested(false);
+    e.setInputHeadroomDb(0.0f);
+    if (e.getInputHeadroomDb() != 0.0f)
+    {
+        std::fprintf(stderr, "[STG-2-A] setup not applied: got %f want 0.0\n",
+                     static_cast<double>(e.getInputHeadroomDb()));
+        h.stop();
+        return false;
+    }
+    e.setProcessingOrder(convo::ProcessingOrder::ConvolverThenEQ);
+    const float after = e.getInputHeadroomDb();
+    h.stop();
+    if (after > -6.0f + 1e-5f)
+    {
+        std::fprintf(stderr, "[STG-2-A] FAIL: stale headroom above new ceiling: got %f want <= -6.0\n",
+                     static_cast<double>(after));
+        return false;
+    }
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-2-A order transition ceiling holds)\n");
+    return true;
+}
+
+bool checkSTG2BypassStaleHeadroom()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-2-B] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    e.setAutoGainStagingEnabled(false);
+    e.setProcessingOrder(convo::ProcessingOrder::ConvolverThenEQ);
+    e.setConvolverBypassRequested(true);
+    e.setEqBypassRequested(false);
+    e.setInputHeadroomDb(0.0f);
+    if (e.getInputHeadroomDb() != 0.0f)
+    {
+        std::fprintf(stderr, "[STG-2-B] setup not applied: got %f want 0.0\n",
+                     static_cast<double>(e.getInputHeadroomDb()));
+        h.stop();
+        return false;
+    }
+    e.setConvolverBypassRequested(false);
+    const float after = e.getInputHeadroomDb();
+    h.stop();
+    if (after > -6.0f + 1e-5f)
+    {
+        std::fprintf(stderr, "[STG-2-B] FAIL: stale headroom above new ceiling: got %f want <= -6.0\n",
+                     static_cast<double>(after));
+        return false;
+    }
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-2-B bypass transition ceiling holds)\n");
+    return true;
+}
+
+bool checkSTG2SaveLoadNormalization()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-2-C] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    e.setAutoGainStagingEnabled(false);
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    e.setConvolverBypassRequested(false);
+    e.setEqBypassRequested(false);
+    e.setInputHeadroomDb(0.0f);
+    e.setProcessingOrder(convo::ProcessingOrder::ConvolverThenEQ);
+
+    const juce::ValueTree saved = e.getCurrentState();
+    const float savedHeadroom = static_cast<float>(static_cast<double>(saved.getProperty("inputHeadroomDb")));
+    e.requestLoadState(saved);
+    const float loadedHeadroom = e.getInputHeadroomDb();
+    h.stop();
+    std::fprintf(stderr, "[STG-2-C] live/order=ConvThenEQ saved=%f loaded=%f\n",
+                 static_cast<double>(savedHeadroom), static_cast<double>(loadedHeadroom));
+    if (savedHeadroom != loadedHeadroom)
+    {
+        std::fprintf(stderr, "[STG-2-C] FAIL: save/load non-idempotent: saved %f loaded %f\n",
+                     static_cast<double>(savedHeadroom), static_cast<double>(loadedHeadroom));
+        return false;
+    }
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-2-C save/load idempotent)\n");
+    return true;
+}
+
+//==============================================================================
+// ★ STG-2-R (extended・修正後 PASS):
+//   R4: 新 ceiling 以下の旧 valid 値は維持（-8.0 が Conv-first 遷移で残る）。
+//   R5: 逆遷移・bypass 往復で valid 値を維持（-6.0 境界は引き上げない）。
+//   R6: 正規化 state の save→load→save が固定点（stable）。
+//   rebuild generation は情報記録のみ（merge/coalesce のため断定しない）。
+//==============================================================================
+bool checkSTG2PreservationAndStability()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-2-R] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    e.setAutoGainStagingEnabled(false);
+    bool ok = true;
+    auto expect = [&](float got, float want, const char* tag)
+    {
+        if (got != want)
+        {
+            std::fprintf(stderr, "[STG-2-R] FAIL: %s: got %f want %f\n",
+                         tag, static_cast<double>(got), static_cast<double>(want));
+            ok = false;
+        }
+    };
+
+    // R4: -8.0 は EQ-first→Conv-first で維持される（新 ceiling -6.0 以下）。
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    e.setConvolverBypassRequested(false);
+    e.setEqBypassRequested(false);
+    e.setInputHeadroomDb(-8.0f);
+    const int genBefore = e.currentBuildGeneration();
+    e.setProcessingOrder(convo::ProcessingOrder::ConvolverThenEQ);
+    const int genAfter = e.currentBuildGeneration();
+    expect(e.getInputHeadroomDb(), -8.0f, "R4 preserve -8.0 into Conv-first");
+    std::fprintf(stderr, "[STG-2-R] order transition build generations %d -> %d\n", genBefore, genAfter);
+
+    // R5: 逆遷移・境界値・bypass 往復の維持（引き上げなし）。
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    expect(e.getInputHeadroomDb(), -8.0f, "R5a preserve -8.0 back into EQ-first");
+    e.setInputHeadroomDb(-6.0f);
+    e.setProcessingOrder(convo::ProcessingOrder::ConvolverThenEQ);
+    expect(e.getInputHeadroomDb(), -6.0f, "R5b boundary -6.0 into Conv-first");
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    expect(e.getInputHeadroomDb(), -6.0f, "R5c boundary -6.0 back into EQ-first (no lift)");
+    e.setConvolverBypassRequested(true);
+    expect(e.getInputHeadroomDb(), -6.0f, "R5d bypass-out preserves -6.0");
+    e.setConvolverBypassRequested(false);
+    expect(e.getInputHeadroomDb(), -6.0f, "R5e bypass-in preserves -6.0");
+
+    // R6: 正規化 state の save→load→save 固定点。
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    e.setInputHeadroomDb(0.0f);
+    e.setProcessingOrder(convo::ProcessingOrder::ConvolverThenEQ);
+    const juce::ValueTree s1 = e.getCurrentState();
+    e.requestLoadState(s1);
+    const juce::ValueTree s2 = e.getCurrentState();
+    const float h1 = static_cast<float>(static_cast<double>(s1.getProperty("inputHeadroomDb")));
+    const float h2 = static_cast<float>(static_cast<double>(s2.getProperty("inputHeadroomDb")));
+    if (h1 != -6.0f || h2 != -6.0f || h1 != h2)
+    {
+        std::fprintf(stderr, "[STG-2-R] FAIL: R6 stability: s1=%f s2=%f want -6.0/-6.0\n",
+                     static_cast<double>(h1), static_cast<double>(h2));
+        ok = false;
+    }
+
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-2-R R4/R5/R6 preservation+stability)\n");
     return true;
 }
 
@@ -92697,6 +92917,31 @@ int runConvolverStateRoundTripTests()
         std::fprintf(stderr, "FAIL: checkSTG1StateIORoundTrip\n");
         return 1;
     }
+    // ★ STG-2 (test-only reproduction・修正前 MUST FAIL・新 CTest 登録なし)
+    //   A/B/C 全件を実行して記録する（早期 return しない）。
+    bool stg2ok = true;
+    if (!checkSTG2OrderStaleHeadroom())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG2OrderStaleHeadroom\n");
+        stg2ok = false;
+    }
+    if (!checkSTG2BypassStaleHeadroom())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG2BypassStaleHeadroom\n");
+        stg2ok = false;
+    }
+    if (!checkSTG2SaveLoadNormalization())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG2SaveLoadNormalization\n");
+        stg2ok = false;
+    }
+    if (!checkSTG2PreservationAndStability())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG2PreservationAndStability\n");
+        stg2ok = false;
+    }
+    if (!stg2ok)
+        return 1;
     return 0;
 }
 

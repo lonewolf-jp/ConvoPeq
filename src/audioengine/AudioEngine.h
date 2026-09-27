@@ -2731,6 +2731,9 @@ public:
     // プライベートヘルパー (Message Thread のみ)
     //----------------------------------------------------------
     void applyDefaultsForCurrentMode();
+    // ★ STG-2: mode 遷移時の staging re-clamp（publish のみ・rebuild なし）。
+    //   呼出し元の mode setter が既存の単一 rebuild intent を担う。
+    void revalidateInputHeadroomForCurrentMode();
 
     //----------------------------------------------------------
     // ヘルパー関数

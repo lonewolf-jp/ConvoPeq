@@ -149,6 +149,20 @@ void diagLog(const juce::String& message)
 
     return true;
 }
+
+// ★ STG-2: input headroom の mode-dependent ceiling を副作用なしで共有する pure helpers。
+//   Conv 系（convolver 先頭）: -12.0..-6.0 dB / PEQ 系: -12.0..0.0 dB（入力保護）。
+[[nodiscard]] inline float inputHeadroomCeilingDb(bool convBypassed, bool eqBypassed,
+                                                  convo::ProcessingOrder order) noexcept
+{
+    const bool convIsFirst = !convBypassed && (order == convo::ProcessingOrder::ConvolverThenEQ || eqBypassed);
+    return convIsFirst ? -6.0f : 0.0f;
+}
+
+[[nodiscard]] inline float clampInputHeadroomDb(float db, float ceilingDb) noexcept
+{
+    return juce::jlimit(-12.0f, ceilingDb, db);
+}
 }
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
@@ -157,6 +171,7 @@ void AudioEngine::setEqBypassRequested (bool shouldBypass)
     convo::publishAtomic(eqBypassRequested, shouldBypass, std::memory_order_release);
     convo::publishAtomic(m_currentEqBypass, shouldBypass, std::memory_order_release);
     uiEqEditor.setBypass(shouldBypass);
+    revalidateInputHeadroomForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -167,6 +182,7 @@ void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
     convo::publishAtomic(convBypassRequested, shouldBypass, std::memory_order_release);
     convo::publishAtomic(m_currentConvBypass, shouldBypass, std::memory_order_release);
     uiConvolverProcessor.setBypass(shouldBypass);
+    revalidateInputHeadroomForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -228,9 +244,7 @@ void AudioEngine::setInputHeadroomDb(float db)
     const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
     const bool eqBypassed   = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
     const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
-    const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
-    const float maxDb = convIsFirst ? -6.0f : 0.0f;
-    float clampedDb = juce::jlimit(-12.0f, maxDb, db);
+    const float clampedDb = clampInputHeadroomDb(db, inputHeadroomCeilingDb(convBypassed, eqBypassed, order));
     if (std::abs(convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire) - clampedDb) > 1e-5f)
     {
         convo::publishAtomic(inputHeadroomDb, clampedDb, std::memory_order_release);
@@ -269,6 +283,7 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
     ASSERT_NON_RT_THREAD();
     convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
+    revalidateInputHeadroomForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -340,6 +355,26 @@ void AudioEngine::applyDefaultsForCurrentMode()
     convo::publishAtomic(m_currentOutputMakeupDb, newOutputMakeupDb, std::memory_order_release);
     convo::publishAtomic(m_currentConvInputTrimDb, newConvTrimDb, std::memory_order_release);
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+}
+
+// ★ STG-2: mode 遷移後の input headroom re-clamp。
+//   新 mode ceiling を超える stale 値を clamp し直す（STG-1 preservation と両立：
+//   ceiling 内の値は不変・default への上書きはしない）。
+//   rebuild は submit しない。呼出し元の mode setter が既存の単一 intent を担う。
+void AudioEngine::revalidateInputHeadroomForCurrentMode()
+{
+    ASSERT_NON_RT_THREAD();
+    const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
+    const bool eqBypassed   = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+    const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
+    const float currentDb = convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire);
+    const float clampedDb = clampInputHeadroomDb(currentDb, inputHeadroomCeilingDb(convBypassed, eqBypassed, order));
+    if (std::abs(currentDb - clampedDb) > 1e-5f)
+    {
+        convo::publishAtomic(inputHeadroomDb, clampedDb, std::memory_order_release);
+        convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
+        convo::publishAtomic(m_currentInputHeadroomDb, clampedDb, std::memory_order_release);
+    }
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
