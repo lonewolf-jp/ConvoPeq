@@ -157,7 +157,6 @@ void AudioEngine::setEqBypassRequested (bool shouldBypass)
     convo::publishAtomic(eqBypassRequested, shouldBypass, std::memory_order_release);
     convo::publishAtomic(m_currentEqBypass, shouldBypass, std::memory_order_release);
     uiEqEditor.setBypass(shouldBypass);
-    applyDefaultsForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }
@@ -168,7 +167,6 @@ void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
     convo::publishAtomic(convBypassRequested, shouldBypass, std::memory_order_release);
     convo::publishAtomic(m_currentConvBypass, shouldBypass, std::memory_order_release);
     uiConvolverProcessor.setBypass(shouldBypass);
-    applyDefaultsForCurrentMode();
     submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
     sendChangeMessage();
 }

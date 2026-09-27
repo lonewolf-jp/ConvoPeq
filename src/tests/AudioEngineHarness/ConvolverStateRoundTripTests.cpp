@@ -2183,6 +2183,148 @@ void measureM03HcLcBoundary()
     std::fprintf(stderr, "[M03-2] === T-M03-2 end (values only; no assertion) ===\n");
 }
 
+//==============================================================================
+// ★ STG-1: bypass toggle staging preservation
+//   setEqBypassRequested() / setConvolverBypassRequested() が staging gains
+//   （inputHeadroomDb / outputMakeupDb / convolverInputTrimDb）を破壊しないこと。
+//   契約: staging setter → bypass toggle → staging unchanged。
+//   前提: AutoGain OFF（既定 ON のため明示無効化）、order EQThenConvolver。
+//   新 CTest 登録なし（AudioEngineHarness 既存 exe のサブテストとして run 側から呼出）。
+//==============================================================================
+bool stg1CheckOne(AudioEngine& e, const char* tag,
+                  void (AudioEngine::*setter)(float),
+                  float (AudioEngine::*getter)() const,
+                  float value,
+                  void (AudioEngine::*toggle)(bool),
+                  bool toggleTo)
+{
+    (e.*setter)(value);
+    if ((e.*getter)() != value)
+    {
+        std::fprintf(stderr, "[STG-1] FAIL: %s setup not applied: got %f want %f\n",
+                     tag, static_cast<double>((e.*getter)()), static_cast<double>(value));
+        return false;
+    }
+    (e.*toggle)(toggleTo);
+    const float after = (e.*getter)();
+    if (after != value)
+    {
+        std::fprintf(stderr, "[STG-1] FAIL: %s destroyed by bypass toggle: got %f want %f\n",
+                     tag, static_cast<double>(after), static_cast<double>(value));
+        return false;
+    }
+    return true;
+}
+
+bool checkSTG1BypassStagingPreservation()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-1] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    e.setAutoGainStagingEnabled(false);
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+
+    struct StgCase
+    {
+        const char* tag;
+        void (AudioEngine::*setter)(float);
+        float (AudioEngine::*getter)() const;
+        float value;
+        void (AudioEngine::*toggle)(bool);
+        bool toggleTo;
+        bool baseConvBypassed;
+        bool baseEqBypassed;
+    };
+    // 全 staging 値は全 bypass/order 状態で clamp を通過する定数。
+    //   headroom -8.0 ∈ [-12, -6] 常時可 / makeup +3.0 ∈ [0, 12] / trim -4.0 ∈ [-12, 0]
+    const StgCase cases[] = {
+        { "conv/makeup",  &AudioEngine::setOutputMakeupDb,      &AudioEngine::getOutputMakeupDb,      +3.0f,
+          &AudioEngine::setConvolverBypassRequested, false, true,  false },
+        { "conv/headroom", &AudioEngine::setInputHeadroomDb,    &AudioEngine::getInputHeadroomDb,     -8.0f,
+          &AudioEngine::setConvolverBypassRequested, false, true,  false },
+        { "conv/trim",    &AudioEngine::setConvolverInputTrimDb, &AudioEngine::getConvolverInputTrimDb, -4.0f,
+          &AudioEngine::setConvolverBypassRequested, false, true,  false },
+        { "eq/makeup",    &AudioEngine::setOutputMakeupDb,      &AudioEngine::getOutputMakeupDb,      +3.0f,
+          &AudioEngine::setEqBypassRequested,        true,  false, false },
+        { "eq/headroom",  &AudioEngine::setInputHeadroomDb,     &AudioEngine::getInputHeadroomDb,     -8.0f,
+          &AudioEngine::setEqBypassRequested,        true,  false, false },
+        { "eq/trim",      &AudioEngine::setConvolverInputTrimDb, &AudioEngine::getConvolverInputTrimDb, -4.0f,
+          &AudioEngine::setEqBypassRequested,        true,  false, false },
+    };
+    for (const auto& c : cases)
+    {
+        e.setConvolverBypassRequested(c.baseConvBypassed);
+        e.setEqBypassRequested(c.baseEqBypassed);
+        if (!stg1CheckOne(e, c.tag, c.setter, c.getter, c.value, c.toggle, c.toggleTo))
+        {
+            h.stop();
+            return false;
+        }
+    }
+
+    h.stop();
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-1 bypass staging preservation 6/6)\n");
+    return true;
+}
+
+bool checkSTG1StateIORoundTrip()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-1] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    e.setAutoGainStagingEnabled(false);
+    e.setProcessingOrder(convo::ProcessingOrder::EQThenConvolver);
+    e.setConvolverBypassRequested(true);
+    e.setEqBypassRequested(false);
+
+    e.setInputHeadroomDb(-8.0f);
+    e.setOutputMakeupDb(+3.0f);
+    e.setConvolverInputTrimDb(-4.0f);
+
+    // STG-1 trigger: bypass toggle（修正前は staging を mode default で上書きする）
+    e.setConvolverBypassRequested(false);
+
+    // save → load → get（persisted mirror 経路を含む）
+    const juce::ValueTree saved = e.getCurrentState();
+    e.requestLoadState(saved);
+
+    const float headroom = e.getInputHeadroomDb();
+    const float makeup = e.getOutputMakeupDb();
+    const float trim = e.getConvolverInputTrimDb();
+    bool ok = true;
+    if (headroom != -8.0f)
+    {
+        std::fprintf(stderr, "[STG-1] FAIL: StateIO round-trip headroom: got %f want -8.0\n",
+                     static_cast<double>(headroom));
+        ok = false;
+    }
+    if (makeup != +3.0f)
+    {
+        std::fprintf(stderr, "[STG-1] FAIL: StateIO round-trip makeup: got %f want +3.0\n",
+                     static_cast<double>(makeup));
+        ok = false;
+    }
+    if (trim != -4.0f)
+    {
+        std::fprintf(stderr, "[STG-1] FAIL: StateIO round-trip trim: got %f want -4.0\n",
+                     static_cast<double>(trim));
+        ok = false;
+    }
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-1 StateIO round-trip 3/3)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -2300,5 +2442,16 @@ int runConvolverStateRoundTripTests()
     measureM03DirectHeadTiming();
     // ★ M-03 T-M03-2（計測専用・PASS/FAIL なし。HC/LC 境界の値のみ記録。D2=GO）
     measureM03HcLcBoundary();
+    // ★ STG-1（bypass toggle staging preservation・StateIO round-trip）
+    if (!checkSTG1BypassStagingPreservation())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG1BypassStagingPreservation\n");
+        return 1;
+    }
+    if (!checkSTG1StateIORoundTrip())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG1StateIORoundTrip\n");
+        return 1;
+    }
     return 0;
 }
