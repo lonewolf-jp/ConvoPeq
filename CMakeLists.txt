@@ -400,6 +400,25 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(StuckReaderFallbackDrainTests PRIVATE cxx_std_20)
     target_compile_options(StuckReaderFallbackDrainTests PRIVATE /EHsc /utf-8)
 
+    # ★ STG-10-D1 (RC-1): reader quarantine の決定論的 regression test。
+    #   EpochDomain は header-only（AtomicAccess.h / ThreadHash.h も header-only）のため
+    #   追加 .cpp は不要。公開 API のみを使用し test hook / production 変更は 0。
+    add_executable(STG10ReaderQuarantineTests
+        src/tests/STG10ReaderQuarantineTests.cpp
+    )
+    target_include_directories(STG10ReaderQuarantineTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_link_libraries(STG10ReaderQuarantineTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(STG10ReaderQuarantineTests ConvoPeq)
+    target_compile_features(STG10ReaderQuarantineTests PRIVATE cxx_std_20)
+    target_compile_options(STG10ReaderQuarantineTests PRIVATE /EHsc /utf-8)
+
     # ★ Work91: ISRSoakTests — ヘッドレスデータ構造耐久（publish を含まない）。
     #   publish 系は AudioEngineHarness 側に配置する原則（doc/work91/soak-test-design.md §2.2）。
     #   ISRSemanticValidationTests と同じ include/link パターン（RuntimePublicationCoordinator
@@ -846,6 +865,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
+    add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
@@ -920,6 +940,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(ShutdownRetireIntentDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -2088,6 +2109,7 @@ if(ENABLE_ASAN)
         EQAnalysisUnitTests FFTBackendTests EQBoundExcessBenchmark
         AudioEngineHarness ISRSoakTests
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
+        STG10ReaderQuarantineTests
         TerminalTelemetryContractTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})

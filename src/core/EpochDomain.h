@@ -217,21 +217,23 @@ public:
 
         for (const auto& slot : readers)
         {
-            // ★ Phase 3: quarantined Reader は safe-epoch 計算から除外
-            //   kQuarantinedFlag 設定時は depth==0 が不変条件:
-            //     - 即座 quarantine: depth==0 でのみ設定
-            //     - 遅延 quarantine: exitReader で depth:1→0 後に昇格
-            //   したがって depth の再チェックは不要だが、防衛的アサートで担保する。
-            const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
-            if ((flags & ReaderSlot::kQuarantinedFlag) != 0)
-            {
-                assert(convo::consumeAtomic(slot.depth, std::memory_order_acquire) == 0
-                    && "quarantined reader must have depth==0");
-                continue;
-            }
-
             // acquire: enterReader release の depth 書き込みと HB し、depth 読み取り後に epoch を読む。
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+
+            // ★ STG-10-D1 (RC-1): quarantined Reader は safe-epoch 計算から除外するが、
+            //   その根拠は「非参加（depth==0）」でなければならない。
+            //   quarantine は reader の占有に対する一時隔離であり、slot の封印ではない。
+            //   registerReaderThread / reserveReaderThread は quarantineFlags を読まず
+            //   epoch==kInactiveEpoch だけで再割当するため、隔離済みの slot には
+            //   次の audio block で新規 reader が入場する（公開設計どおり）。
+            //   したがって「kQuarantinedFlag && depth>0」は正当な active reader であり、
+            //   フラグ単独で除外すると minReaderEpoch が真値より大きくなり、
+            //   その reader が参照中の entry が reclaim され得る（Release では無言）。
+            //   非参加の隔離 reader のみを除外する（従来と同一の挙動）。
+            const uint8_t flags = convo::consumeAtomic(slot.quarantineFlags, std::memory_order_acquire);
+            if ((flags & ReaderSlot::kQuarantinedFlag) != 0 && depth == 0)
+                continue;
+
             if (depth == 0)
                 continue;
 
