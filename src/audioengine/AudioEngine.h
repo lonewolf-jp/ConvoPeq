@@ -4593,36 +4593,31 @@ inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
 // ★ work88 (Phase 3): handle の epoch 安全確認付き reclaim（requestReclaim 一本化ヘルパー）。
 //   retireDSPHandleForRuntime と DSPLifetimeManager::retireByHandle（Observe 経路）の両方から
 //   呼ばれる共通ロジック。DELETE-2/3 の順序契約（epoch 安全確認後のみ reclaim）を守る。
-//   - epoch 安全（currentEpoch() < minReaderEpoch()）: requestReclaim が retire → reclaim を即時実行
-//   - epoch 不安全: Retired のまま保留リストへ登録 → drainDeferredRetireQueues で再試行（slot リーク防止）
-//   注意: 呼び出し元は handle を Retired に遷移済みであること（requestReclaim は retire を冪等実行、
-//   保留時は呼び出し元が retire 済みでないと Retired に遷移しないため）。
-//   ★ work88 (六次レビュー — TOCTOU 修正): requestReclaim は内部で epoch 再確認するため、
-//   事前チェック後に epoch が進むと false を返す。false 時は保留リストへ再登録する。
+//   - requestReclaim が true  : retire → epoch 安全確認 → reclaim を即時実行
+//   - requestReclaim が false : epoch deferred。保留リストへ登録し drainDeferredRetireQueues で再試行
+//     （slot リーク防止）
+//   注意: requestReclaim は retire を冪等実行するため、呼び出し元が既に Retired へ遷移済みでも
+//   同じ結果になる。
+//   ★ STG-9-D1 / RC-1: epoch の判断は ReclaimAuthority（RuntimeIntentCoordinator::reclaimNormal）
+//     へ一本化する。本関数は caller-side の epoch 事前判定を持たない。
+//     旧実装の caller-side pre-check は「caller が safe と判断 → reclaimNormal が再確認して
+//     unsafe」と反転する TOCTOU window を残し、その deferred 通知に対する
+//     reclaimInFlightCount_ の +1（reclaimNormal のみが +, Coordinator.cpp:705）と
+//     pendingReclaimHandles_ の登録が 1:1 で対応しない分岐を生んでいた。
+//     RC-1 後は「deferred 通知 1 回 = pending entry 1 件 = counter +1 1 回」が構造的に成立する。
+//     （既存 AC-2「caller-side 判断 0 件」と同一の方針。shutdown 経路で既に適用済み）
 inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
 {
     if (handle.isNull())
         return;
     const auto retireEpoch = m_retireRouter->currentEpoch();
-    const auto minReaderEpoch = m_retireRouter->minReaderEpoch();
-    if (retireEpoch < minReaderEpoch)
+    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
     {
-        // epoch 安全: requestReclaim が retire → waitReaders → reclaim を即時実行する。
-        //   内部再確認で unsafe になった場合は false → 保留リストへ再登録（slot リーク防止）。
-        if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
-        {
-            std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-            // ★ dash2 §2.2 (G14): ReclaimIdentity（handle + retireSequence）として登録。
-            //   retireSequence は deterministic ordering（INV-FIFO-1 secondary）。
-            pendingReclaimHandles_.push_back(
-                convo::isr::ReclaimIdentity{ handle, retireEpoch });
-        }
-    }
-    else
-    {
-        // epoch 不安全: RT が古い epoch を参照中 → 保留し drainDeferredRetireQueues で再試行。
+        // deferred（epoch unsafe）通知。deferred 1 通知 = pending entry 1 件 =
+        // reclaimInFlightCount_ +1 1 回（Coordinator.cpp:705 が唯一の +1 を持つため 1:1）。
         std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-        // ★ dash2 §2.2 (G14): ReclaimIdentity として登録（上記コメント参照）。
+        // ★ dash2 §2.2 (G14): ReclaimIdentity（handle + retireSequence）として登録。
+        //   retireSequence は deterministic ordering（INV-FIFO-1 secondary）。
         pendingReclaimHandles_.push_back(
             convo::isr::ReclaimIdentity{ handle, retireEpoch });
     }
@@ -5128,6 +5123,12 @@ public:
     // ★ dash2 §2.2 (Phase A2 — G14): DSPHandle → ReclaimIdentity（handle + retireSequence）に昇格。
     //   reclaim obligation の identity を実体 authority として確立（H.11.11.6）。
     //   empty() は isFullyDrained（Layer 1）の reclaim completion 判定に使用（INV-X3-5）。
+    // ★ STG-9-D1 / RC-1: 本リストは reclaim accounting の owner でもある。
+    //   「entry 1 件 = reclaimInFlightCount_ +1 1 回」を不変条件として維持する。
+    //   entry は必ず requestReclaim の deferred 戻り（= reclaimNormal の唯一の +1・
+    //   Coordinator.cpp:705）と同時に登録され、消滅時は必ず onReclaimEnd（-1）と対になる:
+    //     success consume → reclaimNormal の既存 -1（Coordinator.cpp:716）
+    //     terminal drop   → drainDeferredRetireQueues の !isRetired 分岐
     //   ［ReclaimIdentity は NonRT ReclaimAuthority 専用（AC-ISR-1 / 第七者 #12）］
     std::vector<convo::isr::ReclaimIdentity> pendingReclaimHandles_;
     mutable std::mutex pendingReclaimHandlesMutex_;

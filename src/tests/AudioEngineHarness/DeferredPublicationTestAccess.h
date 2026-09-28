@@ -57,4 +57,44 @@ public:
     {
         e.rebuildRequestGeneration.fetch_add(1, std::memory_order_acq_rel);
     }
+
+    // ===== STG-9-D1 / RC-1: reclaim accounting 観測（production 変更ゼロ）=====
+    //   AudioEngine は既に friend のため private へ到達可能。テスト専用 accessor のみで、
+    //   production ヘッダ・production ロジック・可視性は一切変更しない。
+
+    // outstanding deferred reclaim identity 数（RC-1 INV-1 の左辺）。
+    static std::size_t pendingReclaimCount(AudioEngine& e) noexcept
+    {
+        std::lock_guard<std::mutex> lock(e.pendingReclaimHandlesMutex_);
+        return e.pendingReclaimHandles_.size();
+    }
+
+    // reclaimInFlightCount_（Coordinator の近似カウンタ。RC-1 INV-1 の右辺）。
+    static std::uint64_t reclaimInFlightCount(AudioEngine& e) noexcept
+    {
+        return e.runtimePublicationBridge_.getReclaimInFlightCount();
+    }
+
+    // DSPHandleRuntime へのテスト専用参照。STG-9-D1 の terminal sink
+    // （AudioEngine::quarantineSlot の Step 3 と同じ DSPHandleRuntime::quarantineSlot）に
+    // 生産コードと同一の経路で到達するために使う。
+    static convo::isr::DSPHandleRuntime& handleRuntime(AudioEngine& e) noexcept
+    {
+        return e.dspHandleRuntime_;
+    }
+
+    // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
+    // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
+    // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは
+    //   test-induced identity の終端を特定できない。）
+    static bool pendingContains(AudioEngine& e, const convo::isr::DSPHandle& h) noexcept
+    {
+        std::lock_guard<std::mutex> lock(e.pendingReclaimHandlesMutex_);
+        for (const auto& id : e.pendingReclaimHandles_)
+        {
+            if (id.handle == h)
+                return true;
+        }
+        return false;
+    }
 };

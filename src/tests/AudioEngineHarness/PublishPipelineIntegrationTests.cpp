@@ -60,6 +60,8 @@ int runConvolverStateRoundTripTests();
 
 // STG8RecoveryObligationTests.cpp (★ STG-8-D1/D2/D3: recovery obligation 終端回帰)
 int runSTG8RecoveryObligationTests();
+// STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
+int runSTG9ReclaimAccountingTests();
 
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
@@ -1335,6 +1337,10 @@ int runFpmM2();
 
     // ★ STG-8-D1/D2/D3: recovery obligation 終端回帰（新規 CTest target なし）。
     if (runSTG8RecoveryObligationTests() != 0)
+        return 1;
+
+    // ★ STG-9-D1 / RC-1: reclaim accounting 終端回帰（新規 CTest target なし）。
+    if (runSTG9ReclaimAccountingTests() != 0)
         return 1;
 
     // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と

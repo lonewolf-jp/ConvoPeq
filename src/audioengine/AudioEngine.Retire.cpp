@@ -98,37 +98,52 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         for (const auto& identity : pending)
         {
             const auto& handle = identity.handle;
-            // requestReclaim は retire（冪等）+ epoch 確認 + reclaim を実行。
-            //   epoch がまだ安全でない場合は再び保留される（次の drain で再試行）。
+            // requestReclaim は retire（冪等）+ epoch 確認 + reclaim を実行する。
+            //   epoch がまだ安全でない場合は deferred として false を返し、次の drain で再試行。
             //
             //   ★ work88: quarantineSlot 経路（AudioEngine.Threading.cpp:59）が retire 直後に
             //   state を Quarantined に遷移するため、保留中の handle が後から隔離された場合、
             //   requestReclaim の retire() が Quarantined を Retired に上書きしてしまう。
             //   これを防ぐため、現在の state が Retired のままの場合のみ reclaim する
             //   （Quarantined/Reclaimed は quarantine lifecycle / 他経路が所有 — 二重管理防止）。
+            //
+            //   ★ STG-9-D1 / RC-1: epoch の判断は ReclaimAuthority（reclaimNormal）へ一本化する。
+            //   本関数は caller-side の epoch 事前判定を持たない（TOCTOU window の除去）。
             if (dspHandleRuntime_.isRetired(handle))
             {
                 const auto retireEpoch = m_retireRouter->currentEpoch();
-                const auto minReaderEpoch = m_retireRouter->minReaderEpoch();
-                if (retireEpoch < minReaderEpoch)
-                {
-                    // requestReclaim は内部で epoch 再確認する。事前チェック後に epoch が
-                    // 進み unsafe になった場合、false が返る → 保留リストへ再登録（TOCTOU 対策）。
-                    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
-                    {
-                        std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
-                        // ★ dash2 §2.2 (G14): ReclaimIdentity として再登録。
-                        pendingReclaimHandles_.push_back(
-                            convo::isr::ReclaimIdentity{ handle, retireEpoch });
-                    }
-                }
-                else
+                // ★ STG-9-D1 / RC-1 訂正（R2）: retry は「同一 entry の継続」ではなく
+                //   「old entry → new deferred attempt → new entry」の置換である。
+                //   requestReclaim の deferred 戻りは reclaimNormal が onReclaimBegin (+1) した
+                //   新しい +1 を伴うため、置換される old entry の +1 を対で解放する。
+                //   差分は +0（new +1 / old -1）。
+                //   順序は必ず push_back → onReclaimEnd。逆順にすると swap window 中に
+                //   member list が空の時間帯が生じ、その間の drain predicate を壊す。
+                if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
                 {
                     std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
                     // ★ dash2 §2.2 (G14): ReclaimIdentity として再登録。
                     pendingReclaimHandles_.push_back(
                         convo::isr::ReclaimIdentity{ handle, retireEpoch });
+                    // ★ STG-9-D1 / R2: 置換された old entry の +1 を解放（retry replacement accounting）。
+                    runtimePublicationBridge_.onReclaimEnd();
                 }
+            }
+            else
+            {
+                // ★ STG-9-D1 / RC-1: terminal drop — reclaim accounting の終端点。
+                //   本 entry は deferred 通知 1 回（= reclaimInFlightCount_ +1 1 回）と 1:1 で
+                //   対応する。handle の reclaim obligation は他 sink（quarantine lifecycle /
+                //   他経路の reclaim）で終端化されたため、entry が消える際にその +1 を対で解除する。
+                //   これを欠くと counter が identity より長生きし、
+                //   ShutdownScheduler::isFullyDrained()（Coordinator.cpp:542 の ==0 判定）が
+                //   恒久 false となって waitForDrain が budget 満了し、
+                //   markShutdownComplete が CoordinatorState::Faulted を書き込む。
+                //   RC-1 ownership contract:
+                //     deferred entry → pendingReclaimHandles_ →
+                //       success consume : reclaimNormal の既存 -1（Coordinator.cpp:716）
+                //       terminal drop   : ここでの -1
+                runtimePublicationBridge_.onReclaimEnd();
             }
         }
     }
