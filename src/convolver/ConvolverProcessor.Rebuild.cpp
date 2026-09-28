@@ -88,7 +88,9 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), static_cast<PhaseMode>(clampedPhaseMode), // acquire: prepareToPlay の publishAtomic release と HB
                         clampedMixedF1, clampedMixedF2,
                         convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
-                        buildSnapshot);
+                        buildSnapshot,
+                        // ★ STG-4-1: 同期実行のため interleave なし。現世代を刻印（動作不変）。
+                        convolverStateGeneration.getCurrentGeneration());
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
         };
@@ -184,7 +186,10 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
             clampedMixedF1,
             clampedMixedF2,
             convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
-            buildSnapshot);
+            buildSnapshot,
+            // ★ STG-4-1: incremental stepping 経路は finalize/commit guard を経由しない。
+            //   現世代を刻印（動作不変。job.shouldCancel が currency を担保）。
+            convolverStateGeneration.getCurrentGeneration());
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
         job.loaderInitialized = true;
     }
@@ -268,8 +273,10 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 
     // ★ WORK105: incremental 経路は engine build 時の quantum を保持しないため
     //   0（不明）で刻印する。不明は拒否せず loud log（RuntimeBuilder 側）。
+    // ★ STG-4-1: job が自前の shouldCancel で currency を担保済み。現世代を刻印（動作不変）。
     applyNewState(conv, std::move(loadedIR), job.pendingLoadedSR, job.pendingTargetLength,
-                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, std::move(displayIR), 0);
+                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, std::move(displayIR), 0,
+                  convolverStateGeneration.getCurrentGeneration());
 
     job.finalizeApplied = true;
     job.lastError.clear();

@@ -572,6 +572,7 @@ public:
                                           bool isRebuild,
                                           const juce::File& irFile,
                                           const BuildSnapshot& buildSnapshot,
+                                          uint64_t requestGen, // ★ STG-4-1: request 開始時固定の currency identity
                                           double scaleFactor, // This is for newConv->init
                                           std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                           std::unique_ptr<juce::AudioBuffer<double>> displayIR);
@@ -719,7 +720,7 @@ private:
                             double loadedSR, int targetLength, bool isRebuild,
                             const juce::File& file, double scaleFactor,
                             std::unique_ptr<juce::AudioBuffer<double>> displayIR,
-                            int knownBlockSize = 0);
+                            int knownBlockSize, uint64_t requestGen);
 
     void switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept;
 
@@ -746,7 +747,7 @@ private:
     void copySnapshotToPendingUnlocked(const BuildSnapshot& snapshot) noexcept;
 
     struct PendingCommit;  // forward declaration (defined after StereoConvolver)
-    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR, int knownBlockSize = 0, bool async = true);
+    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR, int knownBlockSize, uint64_t requestGen, bool async = true);
     void executePendingCommit(std::unique_ptr<PendingCommit> commit);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
@@ -966,6 +967,9 @@ private:
         int knownBlockSize = 0;
         bool isRebuild = false;
         juce::File irFile;
+        // ★ STG-4-1: request 開始時固定の currency identity。
+        //   executePendingCommit が現在世代と照合し、stale completion を破棄する。
+        uint64_t requestGenId = 0;
 
         void releaseEngine() noexcept
         {

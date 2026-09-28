@@ -53,6 +53,10 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         activeLoader->signalThreadShouldExit();
         loaderTrashBin.push_back(std::move(activeLoader));
     }
+    // ★ STG-4-1: request 開始時点で generation を進め、新 LoaderThread に固定する。
+    //   finalize/commit 時に currency を判定し、後続要求確定後の stale completion を破棄する。
+    //   （cancellation は最適化、commit guard が正当性。）
+    const uint64_t requestGen = convolverStateGeneration.bumpGeneration();
     const double rawProcessingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     const double processingSampleRate = (std::isfinite(rawProcessingSampleRate) && rawProcessingSampleRate > 0.0)
                                           ? rawProcessingSampleRate
@@ -78,14 +82,14 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, snapshotPhaseMode,
                                                       buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
                                                       convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState/snapshot restore 側 publishAtomic release と HB
-                                                      buildSnapshot);
+                                                      buildSnapshot, requestGen);
         releaseIRState(state);
     }
     else
     {
         activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, snapshotPhaseMode,
                                                       buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
-                                                      buildSnapshot);
+                                                      buildSnapshot, requestGen);
         convo::publishAtomic(currentIrOptimized, optimizeForRealTime, std::memory_order_release); // release: UI/loader 側 acquire と HB
     }
 
@@ -642,6 +646,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           bool isRebuild,
                                                           const juce::File& irFile,
                                                           const BuildSnapshot& buildSnapshot,
+                                                          uint64_t requestGen,
                                                           double scaleFactor,
                                                           std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                                           std::unique_ptr<juce::AudioBuffer<double>> displayIR)
@@ -682,7 +687,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                 handleLoadError("NUC descriptors not committed - aborting load");
                 return;
             }
-            applyNewState(newConv.release(), std::move(loadedIR), sr, length, isRebuild, irFile, scaleFactor, std::move(displayIR), knownBlockSize);
+            applyNewState(newConv.release(), std::move(loadedIR), sr, length, isRebuild, irFile, scaleFactor, std::move(displayIR), knownBlockSize, requestGen);
         }
         else
         {
@@ -712,6 +717,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        double scaleFactor,
                                        std::unique_ptr<juce::AudioBuffer<double>> displayIR,
                                        int knownBlockSize,
+                                       uint64_t requestGen,
                                        bool async)
 {
     // Phase 1: PendingCommit 作成（任意スレッド）
@@ -725,6 +731,9 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     commit->irFile = file;
     commit->loadedIR = std::move(loadedIR);
     commit->displayIR = std::move(displayIR);
+    // ★ STG-4-1: request 開始時固定の currency identity を commit に刻印。
+    //   executePendingCommit が陳腐化を判定する。
+    commit->requestGenId = requestGen;
 
     // Phase 2: Message Thread でコミット実行
     // WeakReference は callAsync 後のオブジェクト破棄に対する最後の安全弁。
@@ -797,6 +806,19 @@ void ConvolverProcessor::executePendingCommit(std::unique_ptr<PendingCommit> com
 {
     if (!commit || !commit->newEngine) return;
 
+    // ★ STG-4-1: currency guard（correctness）。commit 要求より新しい要求が確定済みなら
+    //   stale completion として破棄する。cancellation は最適化であり、この guard が正当性を持つ。
+    //   破棄時は Phase 4 と同じ flag 整理のみ行い、swap・metadata・publish は行わない。
+    //   （PendingCommit のデストラクタが engine を retire する。）
+    if (!convolverStateGeneration.isCurrentGeneration(commit->requestGenId))
+    {
+        juce::Logger::writeToLog("executePendingCommit: stale generation, discarding commit (reqGen="
+            + juce::String(commit->requestGenId) + ")");
+        convo::publishAtomic(isLoading, false, std::memory_order_release);
+        convo::publishAtomic(isRebuilding, false, std::memory_order_release);
+        return;
+    }
+
     // Phase 1: IR メタデータ更新
     // ★ WORK105: engine build 時の processing quantum も刻印する（RuntimeBuilder の形状契約用）。
     if (!commit->isRebuild)
@@ -861,9 +883,9 @@ void ConvolverProcessor::commitNewConvolver(StereoConvolver* newConv,
                                             double loadedSR, int targetLength, bool isRebuild,
                                             const juce::File& file, double scaleFactor,
                                             std::unique_ptr<juce::AudioBuffer<double>> displayIR,
-                                            int knownBlockSize)
+                                            int knownBlockSize, uint64_t requestGen)
 {
-    applyNewState(newConv, std::move(loadedIR), loadedSR, targetLength, isRebuild, file, scaleFactor, std::move(displayIR), knownBlockSize);
+    applyNewState(newConv, std::move(loadedIR), loadedSR, targetLength, isRebuild, file, scaleFactor, std::move(displayIR), knownBlockSize, requestGen);
 }
 
 void ConvolverProcessor::evictOldestCacheEntry()

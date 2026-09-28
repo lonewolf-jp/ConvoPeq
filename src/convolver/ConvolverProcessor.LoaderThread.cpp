@@ -14,18 +14,20 @@
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
                                  float mixedF1, float mixedF2,
-                                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
+                                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn,
+                                 uint64_t requestGen)
     : Thread("IRLoader"), owner(p), weakOwner(&p), file(f), sampleRate(sr), blockSize(bs), phaseMode(phase),
     mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2),
-    buildSnapshot(buildSnapshotIn), isRebuild(false)
+    buildSnapshot(buildSnapshotIn), isRebuild(false), requestGenerationId(requestGen)
 {}
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
                                  float mixedF1, float mixedF2, double scale,
-                                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
+                                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn,
+                                 uint64_t requestGen)
     : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), phaseMode(phase),
     mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2),
-    buildSnapshot(buildSnapshotIn), isRebuild(true), scaleFactor(scale)
+    buildSnapshot(buildSnapshotIn), isRebuild(true), scaleFactor(scale), requestGenerationId(requestGen)
 {}
 
 ConvolverProcessor::LoaderThread::~LoaderThread()
@@ -266,6 +268,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                      isReb = isRebuild,
                                      file = file,
                                      buildSnapshot = this->buildSnapshot,
+                                     reqGen = this->requestGenerationId,
                                      scale = result.scaleFactor]()
     {
         convo::ScopedAlignedPtr<double> irLHolder(irLRaw);
@@ -278,7 +281,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
             ownerPtr->finalizeNUCEngineOnMessageThread(std::move(irLHolder),
                                                        std::move(irRHolder),
                                                        length, sr, peak, known, callQ, isReb, file,
-                                                       buildSnapshot,
+                                                       buildSnapshot, reqGen,
                                                        scale, std::move(loadedIRHolder), std::move(displayIRHolder));
         }
     });
@@ -321,8 +324,10 @@ void ConvolverProcessor::LoaderThread::runSynchronously()
         auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
         // ★ WORK105: 同期パスも engine build 時の processing quantum を刻印する。
         const int syncKnownBlock = juce::nextPowerOfTwo(std::max(blockSize, 1));
+        // ★ STG-4-1: 同期実行のため interleave なし。現世代を刻印（動作不変）。
         owner.applyNewState(conv, std::move(loadedIR), result.loadedSR, result.targetLength, isRebuild, file,
-                            result.scaleFactor, std::move(displayIR), syncKnownBlock, /*async=*/false);
+                            result.scaleFactor, std::move(displayIR), syncKnownBlock,
+                            owner.convolverStateGeneration.getCurrentGeneration(), /*async=*/false);
     }
     else
     {
@@ -631,7 +636,10 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         if (stepResult.loadedSR > 0.0 && sampleRate > 0.0 &&
             std::abs(stepResult.loadedSR - sampleRate) > 1e-6)
         {
-            const uint64_t myGen = owner.convolverStateGeneration.getCurrentGeneration();
+            // ★ STG-4-1: request 開始時固定の identity を使用する。
+            //   ここで getCurrentGeneration() をサンプリングすると、新しい bump を
+            //   自世代と誤認し stale completion を素通しさせるため禁止。
+            const uint64_t myGen = requestGenerationId;
             const r8b::EDSPFilterPhaseResponse r8bPhase =
                 (owner.getResamplingPhaseMode() == ResamplingPhaseMode::Linear)
                     ? r8b::fprLinearPhase : r8b::fprMinPhase;

@@ -20,12 +20,16 @@
 
 #include <atomic>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <thread>
 #include <vector>
+#if JUCE_WINDOWS
+#include <Windows.h>
+#endif
 
 // ============================================================================
 // ★ H-02 (T1-T4): canonical helper measureIrPeakLatencySamples 回帰テスト
@@ -2507,6 +2511,211 @@ bool checkSTG2PreservationAndStability()
     return true;
 }
 
+//==============================================================================
+// ★ STG-4-1 (test-only reproduction・修正前 MUST FAIL):
+//   async A flight 中に sync B を確定させ、A の stale finalize が B を上書き
+//   することを実測する。setup failure（A が速すぎる等）と defect failure を
+//   ログで区別する。production source は変更しない。
+//==============================================================================
+static void stg41PumpMessages() noexcept
+{
+#if JUCE_WINDOWS
+    MSG msg {};
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+#endif
+}
+
+static void stg41SleepPump(int ms)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(ms))
+    {
+        stg41PumpMessages();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+// 手書き RIFF float32 ステレオ 48k WAV（delta tap＋微小 decay tail）。
+static bool stg41WriteDeltaWav(const juce::File& file, int numSamples, int tapIndex)
+{
+    if (numSamples <= 0 || tapIndex < 0 || tapIndex >= numSamples)
+        return false;
+    const int32_t dataBytes = static_cast<int32_t>(numSamples) * 2 * 4;
+    const int32_t riffSize = 36 + dataBytes;
+    std::vector<uint8_t> out;
+    out.reserve(static_cast<size_t>(44 + dataBytes));
+    auto push32 = [&](int32_t v)
+    {
+        out.push_back(static_cast<uint8_t>(v & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+    };
+    auto push16 = [&](int16_t v)
+    {
+        out.push_back(static_cast<uint8_t>(v & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    };
+    out.insert(out.end(), {'R','I','F','F'});
+    push32(riffSize);
+    out.insert(out.end(), {'W','A','V','E','f','m','t',' '});
+    push32(16);
+    push16(3);
+    push16(2);
+    push32(48000);
+    push32(48000 * 2 * 4);
+    push16(static_cast<int16_t>(2 * 4));
+    push16(32);
+    out.insert(out.end(), {'d','a','t','a'});
+    push32(dataBytes);
+    for (int n = 0; n < numSamples; ++n)
+    {
+        // STG-4-1 A: 全長にわたり非無音（decay noise・決定的 xorshift）。
+        //   末尾無音 trim で短縮されないことが slow-flight の条件。
+        // STG-4-1 B: 短尺 delta（tap＋微小 tail）。
+        float s = 0.0f;
+        if (numSamples > 100000)
+        {
+            uint32_t x = static_cast<uint32_t>(n * 2654435761u + 97u);
+            x ^= x >> 15; x *= 0x2C1B3C6Du; x ^= x >> 12;
+            const float u = static_cast<float>(x >> 8) * (1.0f / 16777216.0f) - 0.5f;
+            s = u * 0.6f * std::exp(-3.0f * static_cast<float>(n) / static_cast<float>(numSamples));
+            if (n == tapIndex)
+                s = 1.0f;
+        }
+        else
+        {
+            if (n == tapIndex)
+                s = 1.0f;
+            else if (n > tapIndex && n < tapIndex + 2048)
+                s = 0.05f * std::exp(-static_cast<float>(n - tapIndex) / 300.0f);
+        }
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(&s);
+        for (int ch = 0; ch < 2; ++ch)
+            out.insert(out.end(), b, b + 4);
+    }
+    return file.replaceWithData(out.data(), out.size());
+}
+
+bool checkSTG41StaleAsyncOverwrite()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-4-1] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& conv = e.getConvolverProcessor();
+
+    juce::File tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("stg41repro");
+    tmpDir.createDirectory();
+    const juce::File fileA = tmpDir.getChildFile("stg41_A_long.wav");
+    const juce::File fileB = tmpDir.getChildFile("stg41_B_short.wav");
+    const juce::String nameA = fileA.getFileNameWithoutExtension();
+    const juce::String nameB = fileB.getFileNameWithoutExtension();
+    if (!stg41WriteDeltaWav(fileA, 240000, 100) || !stg41WriteDeltaWav(fileB, 4096, 100))
+    {
+        std::fprintf(stderr, "[STG-4-1] SETUP FAILURE: wav write failed\n");
+        h.stop();
+        return false;
+    }
+
+    // Phase 1: async A を flight させる（二重 gate：poll true→即再確認 true）。
+    if (!conv.loadImpulseResponse(fileA, false))
+    {
+        std::fprintf(stderr, "[STG-4-1] SETUP FAILURE: loadImpulseResponse(A) rejected\n");
+        h.stop();
+        return false;
+    }
+    bool flight1 = false;
+    for (int i = 0; i < 200 && !(flight1 = conv.isLoadingIR()); ++i)
+        stg41SleepPump(25);
+    const bool flight2 = conv.isLoadingIR();
+    std::fprintf(stderr, "[STG-4-1] phase1 A requested, inFlight poll=%d recheck=%d\n",
+                 static_cast<int>(flight1), static_cast<int>(flight2));
+    if (!flight1 || !flight2)
+    {
+        std::fprintf(stderr, "[STG-4-1] SETUP FAILURE: A not in flight\n");
+        h.stop();
+        return false;
+    }
+
+    // Phase 2: sync B を production entry で確定。
+    // ★ message pump を一切行わない即時観測：A の finalize は message dispatch を
+    //   必要とするため、pump 前の read 時点では B が確定していなければならない。
+    //   ここで B が見えれば「B completed before any A-finalize」が証明される。
+    std::fprintf(stderr, "[STG-4-1] phase2 pre: loading=%d finalized=%d name=%s len=%d err=%s\n",
+                 static_cast<int>(conv.isLoadingIR()),
+                 static_cast<int>(conv.isIRFinalized()),
+                 conv.getIRName().toRawUTF8(), conv.getIRLength(),
+                 conv.getLastError().toRawUTF8());
+    e.requestConvolverPreset(fileB);
+    std::fprintf(stderr, "[STG-4-1] phase2 post: loading=%d finalized=%d name=%s len=%d err=%s\n",
+                 static_cast<int>(conv.isLoadingIR()),
+                 static_cast<int>(conv.isIRFinalized()),
+                 conv.getIRName().toRawUTF8(), conv.getIRLength(),
+                 conv.getLastError().toRawUTF8());
+    bool bEff = false;
+    int lenB = 0;
+    for (int i = 0; i < 3 && !bEff; ++i)
+    {
+        if (i > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10)); // pump なし
+        if (conv.getIRName() == nameB)
+        {
+            const int l = conv.getIRLength();
+            if (l > 0)
+            {
+                lenB = l;
+                bEff = true;
+            }
+        }
+    }
+    std::fprintf(stderr, "[STG-4-1] phase2 B effective=%d name=%s len=%d\n",
+                 static_cast<int>(bEff),
+                 conv.getIRName().toRawUTF8(), conv.getIRLength());
+    if (!bEff)
+    {
+        std::fprintf(stderr, "[STG-4-1] SETUP FAILURE: B sync completion not observed\n");
+        h.stop();
+        return false;
+    }
+
+    // Phase 3: quiescence。A の stale finalize が B を上書きすれば defect 確定。
+    //   15s window は A 残処理（実測数秒）に十分な余裕。flip 検出で早期 return。
+    bool sawA = false;
+    int lenFinal = lenB;
+    juce::String nameFinal = nameB;
+    for (int i = 0; i < 300; ++i)
+    {
+        stg41PumpMessages();
+        nameFinal = conv.getIRName();
+        lenFinal = conv.getIRLength();
+        if (nameFinal == nameA)
+        {
+            sawA = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::fprintf(stderr, "[STG-4-1] phase3 final name=%s len=%d (B len=%d) staleOverwrite=%d\n",
+                 nameFinal.toRawUTF8(), lenFinal, lenB, static_cast<int>(sawA));
+    h.stop();
+    if (sawA)
+    {
+        std::fprintf(stderr, "[STG-4-1] FAIL: stale async A overwrote sync B: file=%s engine=%s len=%d\n",
+                     nameB.toRawUTF8(), nameFinal.toRawUTF8(), lenFinal);
+        return false;
+    }
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-4-1 no stale overwrite)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -2656,6 +2865,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSTG2PreservationAndStability())
     {
         std::fprintf(stderr, "FAIL: checkSTG2PreservationAndStability\n");
+        stg2ok = false;
+    }
+    // ★ STG-4-1 (test-only reproduction・修正前 MUST FAIL・新 CTest 登録なし)
+    if (!checkSTG41StaleAsyncOverwrite())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG41StaleAsyncOverwrite\n");
         stg2ok = false;
     }
     if (!stg2ok)

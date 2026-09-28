@@ -5,10 +5,12 @@ class LoaderThread : public juce::Thread
 public:
     LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
                  float mixedF1, float mixedF2,
-                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn);
+                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn,
+                 uint64_t requestGen);
     LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
                  float mixedF1, float mixedF2, double scale,
-                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn);
+                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn,
+                 uint64_t requestGen);
     ~LoaderThread() override;
 
     std::function<bool()> externalCancellationCheck;
@@ -88,4 +90,8 @@ private:
     ConvolverProcessor::BuildSnapshot buildSnapshot;
     bool isRebuild;
     double scaleFactor = 1.0;
+    // ★ STG-4-1: request 開始時点で固定した currency identity。
+    //   load 途中でサンプリングしない（mid-load sampling では新しい bump を
+    //   自世代として誤認し stale completion を防げない）。
+    uint64_t requestGenerationId = 0;
 };
