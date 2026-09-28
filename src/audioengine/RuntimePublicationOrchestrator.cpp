@@ -429,6 +429,14 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             resolveIfRecovery(RuntimeIntentCoordinator::RecoveryOutcome::Retry);
             if (req.recoveryObligationId != 0)
                 engine_.runtimePublicationBridge_.rearmRecoveryRetry(req.recoveryObligationId);  // ★ D105-R5-9: guarded re-arm
+            // ★ STG-8-D3: transport recovery の Pressure 拒否は Retry のまま Live だが、
+            //   rearm は durable-Building のみ有効のため transport は無代表で停滞する。
+            //   RejectedNotFinalized（:414-415）と対称に failure signal を post し、
+            //   adjudicate→None→redrive で再送する（D105-R18 transient-failure pattern。
+            //   budget 4・exhaustion→Failed の意味不変。durable-Building 併存時も
+            //   tryAttach の AlreadyRepresented 短絡により二重表現なし — D144/D146）。
+            if (req.recoveryObligationId != 0)
+                engine_.runtimePublicationBridge_.postRecoveryFailureSignal(req.recoveryObligationId);
             // ★ D162-2-B (S4): obligation は Live のまま再 drive 可能だが、本 DSPCore 自体は
             //   obligation 再発行時に新 build が作る（obligation は buildSource を保持し、
             //   DSPCore instance を保持しない）。滞留 DSPCore は World 到達不能のため
@@ -504,6 +512,20 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
             (void*)engine_.resolveDSPHandle(deferredSlot_->request.newDSP)));
 #endif
         retireRegisteredDSP(deferredSlot_->request, "deferred-overwrite");
+    }
+
+    // ★ STG-8-D2: overwrite で追い出される旧 obligation を終端化する（MUST-1/MUST-4）。
+    //   ガードは oblId のみで判定する：同一 O の新 generation 再 defer（coalesce 再送）は
+    //   同一 Live obligation の新表現であり終端化してはならない（gen 比較を含めると誤終端）。
+    //   新 O の delivery/lifecycle・deferredOverwriteCount には触れない。
+    //   冪等・winner-only −1（D152 T3）。shutdown 後の追い出しは discard-all と合流（no-op）。
+    {
+        const std::uint64_t evictedObligationId =
+            deferredSlot_.has_value() ? deferredSlot_->request.recoveryObligationId : 0;
+        if (evictedObligationId != 0 && evictedObligationId != req.recoveryObligationId)
+            engine_.runtimePublicationBridge_.resolveRecoveryObligation(
+                evictedObligationId,
+                RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
     }
 
     // ★ D135-1 / F6: obligation accounting — identity = (generation, recoveryObligationId).
@@ -893,6 +915,13 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
                     retireRegisteredDSP(slotRequestSnapshot, "redrive-budget-exhausted");
                     view->discard(DiscardReason::RedriveBudgetExhausted);
                     view.reset();
+                    // ★ STG-8-D1: budget 枯渇打ち切りも obligation 終端を伴う。
+                    //   redrive 連鎖の停止＝当該 obligation の再試行なし。
+                    //   StaleSuperseded で終端化する（上記 Discard と同一 authority・冪等）。
+                    if (slotRequestSnapshot.recoveryObligationId != 0)
+                        engine_.runtimePublicationBridge_.resolveRecoveryObligation(
+                            slotRequestSnapshot.recoveryObligationId,
+                            RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
                     const auto nowUs = convo::getCurrentTimeUs();
                     telemetryRecorder_.recordFailure(FailureStage::Admission,
                         FailureReason::RedriveBudgetExhausted,
@@ -934,6 +963,18 @@ void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWa
             retireRegisteredDSP(slotRequestSnapshot, "deferred-discard");
             view->discard(result.discardReason);
             view.reset();
+            // ★ STG-8-D1: deferred slot が recovery obligation を保持していた場合、
+            //   単一 Completion Authority で終端化する（D105-R5-9 MUST-1）。
+            //   DSP retire（handle map→EBR）と table 終端（id-based CAS）は独立資源のため
+            //   順序不問。Retry は渡さない（終端化しない）。冪等・winner-only −1（D152 T3）。
+            //   ShutdownDiscard→ShutdownDiscarded、それ以外（StaleDiscard 等）→StaleSuperseded
+            //   （Ready-path :398 の StaleSuperseded 終端と対称）。
+            if (slotRequestSnapshot.recoveryObligationId != 0)
+                engine_.runtimePublicationBridge_.resolveRecoveryObligation(
+                    slotRequestSnapshot.recoveryObligationId,
+                    result.discardReason == DiscardReason::ShutdownDiscard
+                        ? RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded
+                        : RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
             break;
         }
     }

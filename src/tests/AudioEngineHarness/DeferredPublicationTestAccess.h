@@ -35,4 +35,26 @@ public:
     {
         convo::publishAtomic(e.testFadingRuntimePresent_, on, std::memory_order_release);
     }
+
+    // ★ STG-8: Coordinator 観測（liveLogicalRecoveryObligationCount /
+    //   recoveryRetryRedriveCount）。AudioEngine の friend のため private 到達可能。
+    static convo::isr::RuntimeIntentCoordinator& coordinator(AudioEngine& e) noexcept
+    {
+        return e.runtimePublicationBridge_;
+    }
+
+    // ★ STG-8-D3: retire-pressure throttle の test-only 設定。
+    //   PublicationAdmission::evaluate の Pressure 分岐（:40-48）を決定論的に発火させる。
+    static void setRetirePressureThrottle(AudioEngine& e, bool on) noexcept
+    {
+        convo::publishAtomic(e.retirePressurePublicationThrottleActive_, on, std::memory_order_release);
+    }
+
+    // ★ STG-8-D1: rebuild generation の test-only  bump。
+    //   新規 build の submit を伴わないため、deferred slot の generation-stale Discard を
+    //   決定論的に発火させる（evaluateDeferred :82-84）。
+    static void bumpRebuildGeneration(AudioEngine& e) noexcept
+    {
+        e.rebuildRequestGeneration.fetch_add(1, std::memory_order_acq_rel);
+    }
 };

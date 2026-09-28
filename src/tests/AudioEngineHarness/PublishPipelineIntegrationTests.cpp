@@ -58,6 +58,9 @@ int runDeferredPublishViewStateMachineTests();
 // ConvolverStateRoundTripTests.cpp (★ work92 A-1: NUC mode ValueTree round-trip)
 int runConvolverStateRoundTripTests();
 
+// STG8RecoveryObligationTests.cpp (★ STG-8-D1/D2/D3: recovery obligation 終端回帰)
+int runSTG8RecoveryObligationTests();
+
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
 
@@ -1328,6 +1331,10 @@ int runFpmM2();
     //   setNUCFilterModes/getState/setState は Message Thread 契約のため
     //   audio thread 停止状態で harness engine に対して直接実行する。
     if (runConvolverStateRoundTripTests() != 0)
+        return 1;
+
+    // ★ STG-8-D1/D2/D3: recovery obligation 終端回帰（新規 CTest target なし）。
+    if (runSTG8RecoveryObligationTests() != 0)
         return 1;
 
     // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と
