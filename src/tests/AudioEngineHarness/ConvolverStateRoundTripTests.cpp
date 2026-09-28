@@ -2716,6 +2716,134 @@ bool checkSTG41StaleAsyncOverwrite()
     return true;
 }
 
+//==============================================================================
+// ★ STG-6-D1 regression (failure reporting) — 修正後 PASS:
+//   default 8x state で短尺 valid WAV の preset 要求は適用失敗するが、
+//   error が報告され、既存 state が保持され、意図しない publish がないこと。
+//==============================================================================
+static long long stg61PublishedSeq(AudioEngine& e)
+{
+    return static_cast<long long>(e.getLastCommittedPublicationSequence());
+}
+
+static bool stg61SettlePublication(AudioEngine& e, int timeoutMs)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    long long last = stg61PublishedSeq(e);
+    int stableMs = 0;
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(timeoutMs))
+    {
+        stg41PumpMessages();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const long long cur = stg61PublishedSeq(e);
+        if (cur == last)
+        {
+            stableMs += 50;
+            if (stableMs >= 500)
+                return true;
+        }
+        else
+        {
+            last = cur;
+            stableMs = 0;
+        }
+    }
+    return false;
+}
+
+bool checkSTG61LoadFailureReported()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-6-D1] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& conv = e.getConvolverProcessor();
+
+    juce::File tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("stg61repro");
+    tmpDir.createDirectory();
+    const juce::File fileBase = tmpDir.getChildFile("stg61_base.wav");
+    const juce::File fileTiny = tmpDir.getChildFile("stg61_tiny.wav");
+    if (!stg41WriteDeltaWav(fileBase, 4096, 100) || !stg41WriteDeltaWav(fileTiny, 128, 10))
+    {
+        std::fprintf(stderr, "[STG-6-D1] SETUP FAILURE: wav write failed\n");
+        h.stop();
+        return false;
+    }
+    const juce::String nameBase = fileBase.getFileNameWithoutExtension();
+
+    // Baseline: 適用可能な IR を確定させる。
+    e.requestConvolverPreset(fileBase);
+    bool baseEff = false;
+    int lenBase = 0;
+    for (int i = 0; i < 200; ++i)
+    {
+        stg41PumpMessages();
+        if (conv.getIRName() == nameBase && conv.getIRLength() > 0)
+        {
+            lenBase = conv.getIRLength();
+            baseEff = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (!baseEff || !stg61SettlePublication(e, 15000))
+    {
+        std::fprintf(stderr, "[STG-6-D1] SETUP FAILURE: baseline not effective/quiescent\n");
+        h.stop();
+        return false;
+    }
+
+    // Probe: 短尺 IR（適用失敗するが報告されなければならない）。
+    const long long seqBefore = stg61PublishedSeq(e);
+    e.requestConvolverPreset(fileTiny);
+    for (int i = 0; i < 200; ++i)
+    {
+        stg41PumpMessages();
+        if (!conv.getLastError().isEmpty())
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    stg61SettlePublication(e, 5000);
+    const juce::String err = conv.getLastError();
+    const juce::String nameAfter = conv.getIRName();
+    const int lenAfter = conv.getIRLength();
+    const bool finalizedAfter = conv.isIRFinalized();
+    const long long seqAfter = stg61PublishedSeq(e);
+    std::fprintf(stderr, "[STG-6-D1] probe: err=%s name=%s len=%d finalized=%d seq=%lld->%lld\n",
+                 err.toRawUTF8(), nameAfter.toRawUTF8(), lenAfter,
+                 static_cast<int>(finalizedAfter), seqBefore, seqAfter);
+    h.stop();
+
+    bool ok = true;
+    if (err.isEmpty())
+    {
+        std::fprintf(stderr, "[STG-6-D1] FAIL: no error reported for failed preset load\n");
+        ok = false;
+    }
+    if (nameAfter != nameBase || lenAfter != lenBase)
+    {
+        std::fprintf(stderr, "[STG-6-D1] FAIL: active state not preserved\n");
+        ok = false;
+    }
+    if (!finalizedAfter)
+    {
+        std::fprintf(stderr, "[STG-6-D1] FAIL: finalized flag lost\n");
+        ok = false;
+    }
+    if (seqAfter != seqBefore)
+    {
+        std::fprintf(stderr, "[STG-6-D1] FAIL: unintended publish during failed load\n");
+        ok = false;
+    }
+    if (!ok)
+        return false;
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-6-D1 failure reported, state preserved)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
@@ -2871,6 +2999,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSTG41StaleAsyncOverwrite())
     {
         std::fprintf(stderr, "FAIL: checkSTG41StaleAsyncOverwrite\n");
+        stg2ok = false;
+    }
+    // ★ STG-6-D1 (failure reporting regression・新 CTest 登録なし)
+    if (!checkSTG61LoadFailureReported())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG61LoadFailureReported\n");
         stg2ok = false;
     }
     if (!stg2ok)

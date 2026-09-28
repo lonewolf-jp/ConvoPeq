@@ -236,7 +236,12 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     JUCE_ASSERT_MESSAGE_THREAD;
 
     if (!irFile.existsAsFile())
+    {
+        // ★ STG-6-D1: sync path の failure も async path と同一契約で報告する。
+        //   handleLoadError は engine/file/metadata を変更しない（error 状態のみ）。
+        handleLoadError("IR file not found: " + irFile.getFileName());
         return;
+    }
 
     {
         const juce::ScopedLock sl(irFileLock);
@@ -319,6 +324,8 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
             + juce::String(static_cast<int>(cacheManager != nullptr))
             + " irConverter=" + juce::String(static_cast<int>(irConverter != nullptr))
             + " sr=" + juce::String(sr, 1) + ")");
+        // ★ STG-6-D1: convert null を含む未適用終端を報告する（単一報告点）。
+        handleLoadError("IR load failed (no FFT applied): " + irFile.getFileName());
     }
 }
 
@@ -389,6 +396,8 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     if (!prepared)
     {
         juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: null payload");
+        // ★ STG-6-D1: genuine anomaly として報告（generation mismatch の stale 破棄は silent のまま）。
+        handleLoadError("IR apply failed (empty payload)");
         return;
     }
 
@@ -409,6 +418,8 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     {
         juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: sample rate mismatch sr="
             + juce::String(sr, 1) + " preparedSr=" + juce::String(prepared->sampleRate, 1));
+        // ★ STG-6-D1: Guard スコープ内。デストラクタが isLoading=false を保証する。
+        handleLoadError("IR apply failed (sample rate mismatch)");
         return;
     }
 
@@ -518,6 +529,9 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     else
     {
         juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: no timeDomainIR in payload");
+        // ★ STG-6-D1: Guard スコープ内。デストラクタが isLoading=false を保証する。
+        handleLoadError("IR apply failed (no time-domain data)");
+        return;
     }
 
     // 1. UI 用状態の更新
