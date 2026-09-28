@@ -71,6 +71,12 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
         ? static_cast<bool>(state.getProperty("autoGainStagingEnabled"))
         : false;  // 旧 Preset: Auto Gain 無効として手動ゲインを復元
 
+    // ★ STG-7-D1: 保存された AutoGain flag 自体を復元する（判定のみに使って
+    //   終わりにしない）。EQ サブツリー復元（Step 4）より前なので、DSP AGC の
+    //   不整合があれば Step 4 の subtree 値で上書きされ、最終状態は一致する。
+    //   変更なし時は setter 内 early-return のため副作用なし。
+    setAutoGainStagingEnabled(autoGainEnabled);
+
     if (!autoGainEnabled)
     {
         if (state.hasProperty("inputHeadroomDb"))

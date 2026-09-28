@@ -2728,6 +2728,8 @@ static long long stg61PublishedSeq(AudioEngine& e)
 
 static bool stg61SettlePublication(AudioEngine& e, int timeoutMs)
 {
+    // baseline の deferred rebuild tail（200ms window＋rebuild＋publish）を
+    // 確実に消化するため、backlog ゼロ＋1500ms 安定を要求する。
     const auto t0 = std::chrono::steady_clock::now();
     long long last = stg61PublishedSeq(e);
     int stableMs = 0;
@@ -2736,10 +2738,11 @@ static bool stg61SettlePublication(AudioEngine& e, int timeoutMs)
         stg41PumpMessages();
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const long long cur = stg61PublishedSeq(e);
-        if (cur == last)
+        const bool backlogClear = (e.getPublicationBacklogCount() == 0);
+        if (cur == last && backlogClear)
         {
             stableMs += 50;
-            if (stableMs >= 500)
+            if (stableMs >= 1500)
                 return true;
         }
         else
@@ -2841,6 +2844,63 @@ bool checkSTG61LoadFailureReported()
     if (!ok)
         return false;
     std::printf("ConvolverStateRoundTripTests: PASS (STG-6-D1 failure reported, state preserved)\n");
+    return true;
+}
+
+//==============================================================================
+// ★ STG-7-D1 regression: autoGainStagingEnabled flag の save/load round-trip。
+//   Case A: ON→save→OFF→load→ON。Case B: OFF→save→ON→load→OFF。
+//   save→load→save で flag が反転しないこと。
+//==============================================================================
+bool checkSTG71AutoGainFlagRoundTrip()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-7-D1] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    bool ok = true;
+    auto expectFlag = [&](bool got, bool want, const char* tag)
+    {
+        if (got != want)
+        {
+            std::fprintf(stderr, "[STG-7-D1] FAIL: %s: got %d want %d\n",
+                         tag, static_cast<int>(got), static_cast<int>(want));
+            ok = false;
+        }
+    };
+
+    // Case A: ON → save → OFF → load → ON.
+    e.setAutoGainStagingEnabled(true);
+    const juce::ValueTree savedOn = e.getCurrentState();
+    e.setAutoGainStagingEnabled(false);
+    e.requestLoadState(savedOn);
+    expectFlag(e.isAutoGainStagingEnabled(), true, "Case A flag restored ON");
+
+    // Case B: OFF → save → ON → load → OFF.
+    e.setAutoGainStagingEnabled(false);
+    const juce::ValueTree savedOff = e.getCurrentState();
+    e.setAutoGainStagingEnabled(true);
+    e.requestLoadState(savedOff);
+    expectFlag(e.isAutoGainStagingEnabled(), false, "Case B flag restored OFF");
+
+    // save → load → save 安定性（flag の semantic 一致）。
+    const juce::ValueTree reloaded = e.getCurrentState();
+    const bool flag1 = static_cast<bool>(savedOff.getProperty("autoGainStagingEnabled"));
+    const bool flag2 = static_cast<bool>(reloaded.getProperty("autoGainStagingEnabled"));
+    if (flag1 != flag2)
+    {
+        std::fprintf(stderr, "[STG-7-D1] FAIL: save/load/save not stable: %d vs %d\n",
+                     static_cast<int>(flag1), static_cast<int>(flag2));
+        ok = false;
+    }
+
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("ConvolverStateRoundTripTests: PASS (STG-7-D1 autoGain flag round-trip)\n");
     return true;
 }
 
@@ -3005,6 +3065,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSTG61LoadFailureReported())
     {
         std::fprintf(stderr, "FAIL: checkSTG61LoadFailureReported\n");
+        stg2ok = false;
+    }
+    // ★ STG-7-D1 (autoGain flag round-trip・新 CTest 登録なし)
+    if (!checkSTG71AutoGainFlagRoundTrip())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG71AutoGainFlagRoundTrip\n");
         stg2ok = false;
     }
     if (!stg2ok)
