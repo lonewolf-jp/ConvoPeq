@@ -261,6 +261,18 @@ bool AudioEngine::applyMmcssPriority() noexcept
                 const DWORD err = ::GetLastError();
                 recordAffinityFailure(2, 0, err);
             }
+            // STG-11-D4: RT-safe success observation only (INV-D4-1/2/3).
+            //   No diagLog / mutex / heap on RT even with Diagnostics ON.
+            //   NonRT timerCallback diagnoses via reportSuccessIfRecorded().
+            //   success policy unchanged (informational; priorityApplied unaffected).
+            if (nativeRtOk) {
+                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
+                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
+                recordSuccessObserved(1,
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(win32Priority)),
+                    static_cast<std::uint64_t>(pc),
+                    static_cast<std::uint64_t>(savedProcessPriorityClass));
+            }
             if (!nativeRtOk) {
                 priorityApplied = false;
             }
@@ -284,23 +296,22 @@ bool AudioEngine::applyMmcssPriority() noexcept
                 //   (informational; priorityApplied unaffected).
                 recordAffinityFailure(0, audioMask, err);
             }
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // STG-11-D4: RT-safe success observation only (INV-D4-1/2/3).
             else {
-                diagLog("[AFFINITY] AudioThread pinned mask=0x"
-                        + juce::String::toHexString(static_cast<uint64_t>(audioMask))
-                        + " prev=0x" + juce::String::toHexString(static_cast<uint64_t>(prevMask)));
+                recordSuccessObserved(2,
+                    static_cast<std::uint64_t>(audioMask),
+                    static_cast<std::uint64_t>(prevMask), 0);
             }
-#endif
         }
     }
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // STG-11-D4: RT-safe success observation only (INV-D4-1/2/3).
     else {
-        diagLog("[AFFINITY] P/E cores: AudioThread affinity skipped (MMCSS Deadline QoS)");
+        recordSuccessObserved(3, 0, 0, 0);
     }
-#endif
 
     return priorityApplied;
 }
+
 // ★ STG-11-D3: RT-side failure recorder (affinity + NativeRT).
 //   Lock-free atomic record only (convo:: wrappers). No mutex / allocation /
 //   logging backend. Callable from any thread; intended for RT failure paths.
@@ -382,6 +393,80 @@ void AudioEngine::reportAffinityFailureIfRecorded() noexcept
     convo::publishAtomic(affinityFailureReportedCount_, count, std::memory_order_release);
 }
 
+// ★ STG-11-D4: RT-side success recorder (NativeRT applied / affinity pinned / hetero skipped).
+//   Lock-free atomic record only (convo:: wrappers). No mutex / allocation /
+//   logging backend. Callable from any thread; intended for RT success paths.
+//
+//   ★ publication order（D3 ordering correction と同一）★
+//     (1) payload      : last-wins snapshot (release)
+//     (2) count        : monotonic, and the PER-RECORD publication marker.
+//                        fetchAddAtomic is a release operation (acq_rel).
+//     (3) observed     : monotonic bool flag ("a success happened at least
+//                        once"), fast-out only. Never the payload carrier.
+//
+void AudioEngine::recordSuccessObserved(
+    std::uint32_t kind, std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept // NOLINT(bugprone-easily-swappable-parameters)
+{
+    // (1) payload: publish the snapshot BEFORE anything marks the record.
+    convo::publishAtomic(successKind_, kind, std::memory_order_release);
+    convo::publishAtomic(successA_, a, std::memory_order_release);
+    convo::publishAtomic(successB_, b, std::memory_order_release);
+    convo::publishAtomic(successC_, c, std::memory_order_release);
+    // (2) count: monotonic AND the per-record publication marker.
+    convo::fetchAddAtomic(successCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    // (3) observed: monotonic flag, always the last store.
+    convo::publishAtomic(successObserved_, true, std::memory_order_release);
+}
+
+// ★ STG-11-D4: NonRT diagnosis of the recorded success.
+//   Reads the lock-free observation and emits via the existing diagLog backend.
+//   Runs on NonRT only (called from timerCallback). Reports each recorded count
+//   once (reportedCount tracks count; monotonic, race-clean).
+//   Wording matches the pre-D4 success logs so the diagnostic meaning is kept.
+//   Lossy-coalescing is explicit: payload is last-wins, count is monotonic,
+//   no ownership is carried (INV-D4-4 / INV-D4-5).
+//
+//   ★ read order ★
+//     observed is a fast-out flag only. The payload visibility guarantee comes
+//     from the acquire load of the COUNT. Snapshot reads must follow it.
+//
+void AudioEngine::reportSuccessIfRecorded() noexcept
+{
+    // fast-out only: monotonic "any success ever" flag, not a payload carrier.
+    if (!convo::consumeAtomic(successObserved_, std::memory_order_acquire))
+        return;
+    // publication marker: acquire of count == N publishes record #N's payload.
+    const std::uint64_t count = convo::consumeAtomic(successCount_, std::memory_order_acquire);
+    if (count == 0)
+        return;
+    const std::uint64_t reported =
+        convo::consumeAtomic(successReportedCount_, std::memory_order_acquire);
+    if (reported >= count)
+        return;  // already diagnosed (count is monotonic: nothing new to report)
+    // snapshot reads must come after the count acquire (see note above).
+    const std::uint32_t kind = convo::consumeAtomic(successKind_, std::memory_order_acquire);
+    const std::uint64_t a = convo::consumeAtomic(successA_, std::memory_order_acquire);
+    const std::uint64_t b = convo::consumeAtomic(successB_, std::memory_order_acquire);
+    const std::uint64_t c = convo::consumeAtomic(successC_, std::memory_order_acquire);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    if (kind == 1) {
+        diagLog("[NATIVE_RT] applied: win32Prio=" + juce::String(static_cast<int>(a))
+            + " procClass=" + juce::String(static_cast<int>(b))
+            + " savedClass=" + juce::String(static_cast<int>(c))
+            + " count=" + juce::String(static_cast<juce::int64>(count)));
+    } else if (kind == 2) {
+        diagLog("[AFFINITY] AudioThread pinned mask=0x"
+            + juce::String::toHexString(a)
+            + " prev=0x" + juce::String::toHexString(b)
+            + " count=" + juce::String(static_cast<juce::int64>(count)));
+    } else if (kind == 3) {
+        diagLog("[AFFINITY] P/E cores: AudioThread affinity skipped (MMCSS Deadline QoS)"
+            + juce::String(" count=") + juce::String(static_cast<juce::int64>(count)));
+    }
+    // unknown kind: suppress output (fail-safe for future kind extensions).
+#endif
+    convo::publishAtomic(successReportedCount_, count, std::memory_order_release);
+}
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
 // ★ JUCE委譲（work70 v9.11決定）: MMCSS は JUCE が管理するため自前での解除は不要。
@@ -1003,6 +1088,10 @@ void AudioEngine::timerCallback()
     //   RT 側（applyMmcssPriority）が lock-free atomic に記録した failure を
     //   既存 diagLog backend で出力する。RT から backend には到達しない。
     reportAffinityFailureIfRecorded();
+    // ★ STG-11-D4: success observation の NonRT 診断（同一 execution point）。
+    //   RT 側が記録した success を既存 diagLog backend で出力する。
+    //   新規 timer / thread / worker / authority は作らない。
+    reportSuccessIfRecorded();
 
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)

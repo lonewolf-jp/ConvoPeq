@@ -148,4 +148,57 @@ public:
         return convo::consumeAtomic(e.affinityFailureReportedCount_, std::memory_order_acquire);
     }
 
+    // ===== STG-11-D4: success observation（production 変更ゼロ）=====
+    //   D3 と同一の friend 経路。record/report は production の private member。
+    //   RT 側の record は OS 呼び出しを伴わないため、合成値で直接検証できる。
+
+    // RT-side record と同一の記録を実行する（synthetic kind/a/b/c）。
+    static void recordSuccessObserved(AudioEngine& e, std::uint32_t kind,
+                                      std::uint64_t a, std::uint64_t b,
+                                      std::uint64_t c) noexcept
+    {
+        e.recordSuccessObserved(kind, a, b, c);
+    }
+
+    // NonRT diagnosis を実行する（timerCallback と同一の入口）。
+    static void reportSuccess(AudioEngine& e) noexcept
+    {
+        e.reportSuccessIfRecorded();
+    }
+
+    static bool successObserved(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successObserved_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t successCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successCount_, std::memory_order_acquire);
+    }
+
+    static std::uint32_t successKind(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successKind_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t successA(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successA_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t successB(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successB_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t successC(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successC_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t successReportedCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.successReportedCount_, std::memory_order_acquire);
+    }
+
 };

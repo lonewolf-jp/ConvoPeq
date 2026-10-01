@@ -2675,6 +2675,7 @@ public:
     // ★ [work70 v9.11] MMCSS shutdown flag — Message Thread → Audio Thread notification.
     //    Message Thread sets flag, Audio Thread performs actual AvRevert.
     alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
+
     // STG-11-D3: affinity failure observation (RT to NonRT diagnostic transport).
     //   RT-safe: lock-free atomics only. lossy-coalescing (last-wins + monotonic count).
     //   No mutex / allocation / logging backend on RT. No new authority.
@@ -2686,6 +2687,20 @@ public:
     std::atomic<std::uint32_t> affinityFailureLastKind_{0}; // 0=affinity, 1=SetPriorityClass, 2=SetThreadPriority
     std::atomic<std::uint64_t> affinityFailureReportedCount_{0};
 
+    // STG-11-D4: success observation (RT to NonRT diagnostic transport).
+    //   RT-safe: lock-free atomics only. lossy-coalescing (last-wins + monotonic count).
+    //   No mutex / allocation / logging backend on RT. No new authority.
+    //   Readout and diagnosis by NonRT reportSuccessIfRecorded().
+    //   kind: 1=NativeRT applied, 2=AudioThread pinned, 3=P/E cores skipped.
+    //   payload: kind 1: A=win32Prio, B=procClass, C=savedClass;
+    //            kind 2: A=audioMask, B=prevMask, C=unused(0); kind 3: all unused(0).
+    std::atomic<bool> successObserved_{false};
+    std::atomic<std::uint64_t> successCount_{0};
+    std::atomic<std::uint32_t> successKind_{0};
+    std::atomic<std::uint64_t> successA_{0};
+    std::atomic<std::uint64_t> successB_{0};
+    std::atomic<std::uint64_t> successC_{0};
+    std::atomic<std::uint64_t> successReportedCount_{0};
 
     // ★ BUG-014: MMCSS ポリシー atomic キャッシュ（Message Thread が publish、Audio Thread が acquire load）。
     //    alignas(64) で他ホット atomic（mmcssShutdownRequested 等）とキャッシュライン分離（既存パターン踏襲）。
@@ -2794,6 +2809,10 @@ public:
     //   record: lock-free atomic record only. report: existing diagLog backend on NonRT.
     void recordAffinityFailure(std::uint32_t kind, DWORD_PTR audioMask, DWORD error) noexcept;
     void reportAffinityFailureIfRecorded() noexcept;
+    // STG-11-D4: RT-side success recorder (Timer.cpp) + NonRT diagnosis hook.
+    //   record: lock-free atomic record only. report: existing diagLog backend on NonRT.
+    void recordSuccessObserved(std::uint32_t kind, std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept;
+    void reportSuccessIfRecorded() noexcept;
     // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）— legacy alias
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias
