@@ -31,6 +31,7 @@
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
 #include "core/RCUReader.h"
+#include "audioengine/ISRRetireRouter.h"
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
@@ -253,6 +254,38 @@ public:
         return total;
     }
 #endif
+
+    // ★ STG-11-D1: EQ-owned retire router の test/diagnostic observation。
+    //   Logic-neutral（読み取りのみ）。production の判定はこれらに依存しない。
+    //   diagFootprintBytes() と同一の診断ゲッター規約。
+    [[nodiscard]] std::uint32_t eqOwnedPendingRetire() const noexcept
+    {
+        return m_ownedRetireRouter.pendingRetireCount();
+    }
+    [[nodiscard]] std::size_t eqOwnedQuarantineResident() const noexcept
+    {
+        return m_ownedRetireRouter.quarantineResidentCount();
+    }
+    [[nodiscard]] std::size_t eqOwnedEmergencyResident() const noexcept
+    {
+        return m_ownedRetireRouter.emergencyQuarantineResidentCount();
+    }
+    [[nodiscard]] std::size_t eqOwnedTerminalResident() const noexcept
+    {
+        return m_ownedRetireRouter.terminalReclaimResidentCount();
+    }
+    [[nodiscard]] std::uint64_t eqRetireDropCount() const noexcept
+    {
+        return convo::consumeAtomic(m_retireDropCount, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t eqPrivateEpoch() const noexcept
+    {
+        return m_epochDomain.currentEpoch();
+    }
+    [[nodiscard]] std::uint64_t eqOwnedRouterEpoch() const noexcept
+    {
+        return m_ownedRetireRouter.currentEpoch();
+    }
 
     // フィルタータイプ変更
     void setBandType(int band, EQBandType type);
@@ -486,6 +519,12 @@ private:
 
     // スムージング処理
     convo::EpochDomain m_epochDomain;
+    // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to m_epochDomain.
+    //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
+    //   member lifetime により drain / destruction まで保持する。
+    //   m_epochDomain より後に宣言し、provider が router より長生きする。
+    //   ISRRetireRouter.* 自体は変更しない（D → Q → E → T の chain 維持）。
+    convo::isr::ISRRetireRouter m_ownedRetireRouter { m_epochDomain };
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };

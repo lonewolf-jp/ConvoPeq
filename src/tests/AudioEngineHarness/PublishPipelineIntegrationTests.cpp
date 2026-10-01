@@ -62,6 +62,8 @@ int runConvolverStateRoundTripTests();
 int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
+// STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11EQRetireTests();
 
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
@@ -1341,6 +1343,10 @@ int runFpmM2();
 
     // ★ STG-9-D1 / RC-1: reclaim accounting 終端回帰（新規 CTest target なし）。
     if (runSTG9ReclaimAccountingTests() != 0)
+        return 1;
+
+    // ★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰（新規 CTest target なし）。
+    if (runSTG11EQRetireTests() != 0)
         return 1;
 
     // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と

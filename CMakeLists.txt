@@ -419,6 +419,86 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(STG10ReaderQuarantineTests PRIVATE cxx_std_20)
     target_compile_options(STG10ReaderQuarantineTests PRIVATE /EHsc /utf-8)
 
+    # ★ STG-11-D1 (Candidate B): EQ-owned router lifetime の決定論的 regression test。
+    #   EQProcessor 本体（eqprocessor/*.cpp）をリンクし、public setter で D→Q→E→T
+    #   まで駆動する。standalone target とすることで AudioEngineHarness の深い
+    #   コールチェイン外で実行する（EQProcessor 約 281KB / RuntimeIntentCoordinator
+    #   約 4.1MB のため stack 確保はしない。production も DSPCore ごと heap 生成）。
+    #   harness 側にも runSTG11EQRetireTests() として配線する（二重実行で回帰を固定）。
+    add_executable(STG11EQRetireTests
+        src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+        src/eqprocessor/BandHelper.cpp
+        src/eqprocessor/EQProcessor.Coefficients.cpp
+        src/eqprocessor/EQProcessor.Core.cpp
+        src/eqprocessor/EQProcessor.Parameters.cpp
+        src/eqprocessor/EQProcessor.Processing.cpp
+        src/eqprocessor/EQProcessor.ProcessingCache.cpp
+        src/eqprocessor/EQResponseSampler.cpp
+        src/eqprocessor/PeakEstimator.cpp
+        src/eqprocessor/UpperBoundEstimator.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(STG11EQRetireTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(STG11EQRetireTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(STG11EQRetireTests PRIVATE juce::juce_core juce::juce_dsp juce::juce_gui_extra juce::juce_gui_basics r8brain MKL::MKL)
+    add_dependencies(STG11EQRetireTests ConvoPeq)
+    target_compile_features(STG11EQRetireTests PRIVATE cxx_std_20)
+    target_compile_options(STG11EQRetireTests PRIVATE /EHsc /utf-8)
+    # ★ AudioEngineHarness と同一の前提（NOMINMAX / JUCE defines / AVX2）。
+    #   EQProcessor.Processing.cpp の fastTanhV256 / immintrin および
+    #   windows.h の min/max マクロ衝突回避に必要。
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(STG11EQRetireTests PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(STG11EQRetireTests PRIVATE /QxCORE-AVX2)
+    endif()
+    target_compile_definitions(STG11EQRetireTests PRIVATE
+        STG11_STANDALONE_MAIN=1
+        JUCE_DSP_USE_INTEL_MKL=1
+        CONVOPEQ_STANDALONE_ONLY=1
+        CONVOPEQ_UNIT_TESTS=1
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RESAMPLE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
+        JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
+        JUCE_USE_SSE_INTRINSICS=1
+        JUCE_USE_SIMD=1
+        $<$<PLATFORM_ID:Windows>:
+            _UNICODE
+            UNICODE
+            NOMINMAX
+            JUCE_ASIO=1
+            _CRT_SECURE_NO_WARNINGS
+        >
+    )
+
     # ★ Work91: ISRSoakTests — ヘッドレスデータ構造耐久（publish を含まない）。
     #   publish 系は AudioEngineHarness 側に配置する原則（doc/work91/soak-test-design.md §2.2）。
     #   ISRSemanticValidationTests と同じ include/link パターン（RuntimePublicationCoordinator
@@ -866,6 +946,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
+    add_test(NAME STG11EQRetire COMMAND STG11EQRetireTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
@@ -941,6 +1022,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(STG11EQRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -1931,6 +2013,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
+        src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
@@ -2110,6 +2193,7 @@ if(ENABLE_ASAN)
         AudioEngineHarness ISRSoakTests
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
         STG10ReaderQuarantineTests
+        STG11EQRetireTests
         TerminalTelemetryContractTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})

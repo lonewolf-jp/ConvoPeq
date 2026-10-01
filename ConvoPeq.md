@@ -1,11 +1,11 @@
-# Project Extract & Source Code: ConvoPeq
+# Project Extract & Source Code: stg11-d1-d18
 
-> Generated: 2026-09-29 00:19:43
+> Generated: 2026-10-01 20:14:25
 
 ## 📁 Directory Tree (Selected Targets Only)
 
 ```text
-└── ConvoPeq/
+└── stg11-d1-d18/
     ├── build.bat
     ├── CMakeLists.txt
     └── src/
@@ -314,6 +314,7 @@
         │   │   ├── PolyphaseGainFidelityTests.cpp
         │   │   ├── PublishPipelineIntegrationTests.cpp
         │   │   ├── SoakPublishIntegrationTests.cpp
+        │   │   ├── STG11EQRetireTests.cpp
         │   │   ├── STG8RecoveryObligationTests.cpp
         │   │   ├── STG9ReclaimAccountingTests.cpp
         │   │   ├── T1Measurement.cpp
@@ -365,7 +366,6 @@
         │   ├── StuckReaderFallbackDrainTests.cpp
         │   └── TerminalTelemetryContractTests.cpp
         ├── tools/
-        │   ├── __pycache__/
         │   └── build_identity_gate.py
         ├── TruePeakDetector.cpp
         ├── TruePeakDetector.h
@@ -1151,6 +1151,86 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(STG10ReaderQuarantineTests PRIVATE cxx_std_20)
     target_compile_options(STG10ReaderQuarantineTests PRIVATE /EHsc /utf-8)
 
+    # ★ STG-11-D1 (Candidate B): EQ-owned router lifetime の決定論的 regression test。
+    #   EQProcessor 本体（eqprocessor/*.cpp）をリンクし、public setter で D→Q→E→T
+    #   まで駆動する。standalone target とすることで AudioEngineHarness の深い
+    #   コールチェイン外で実行する（EQProcessor 約 281KB / RuntimeIntentCoordinator
+    #   約 4.1MB のため stack 確保はしない。production も DSPCore ごと heap 生成）。
+    #   harness 側にも runSTG11EQRetireTests() として配線する（二重実行で回帰を固定）。
+    add_executable(STG11EQRetireTests
+        src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+        src/eqprocessor/BandHelper.cpp
+        src/eqprocessor/EQProcessor.Coefficients.cpp
+        src/eqprocessor/EQProcessor.Core.cpp
+        src/eqprocessor/EQProcessor.Parameters.cpp
+        src/eqprocessor/EQProcessor.Processing.cpp
+        src/eqprocessor/EQProcessor.ProcessingCache.cpp
+        src/eqprocessor/EQResponseSampler.cpp
+        src/eqprocessor/PeakEstimator.cpp
+        src/eqprocessor/UpperBoundEstimator.cpp
+        src/audioengine/ISRRetireRouter.cpp
+        src/audioengine/ISRRetire.cpp
+        src/audioengine/ISRRetireRuntimeEx.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+        src/audioengine/ISRDSPHandle.cpp
+        src/audioengine/ISRDSPQuarantine.cpp
+    )
+    target_include_directories(STG11EQRetireTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(STG11EQRetireTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(STG11EQRetireTests PRIVATE juce::juce_core juce::juce_dsp juce::juce_gui_extra juce::juce_gui_basics r8brain MKL::MKL)
+    add_dependencies(STG11EQRetireTests ConvoPeq)
+    target_compile_features(STG11EQRetireTests PRIVATE cxx_std_20)
+    target_compile_options(STG11EQRetireTests PRIVATE /EHsc /utf-8)
+    # ★ AudioEngineHarness と同一の前提（NOMINMAX / JUCE defines / AVX2）。
+    #   EQProcessor.Processing.cpp の fastTanhV256 / immintrin および
+    #   windows.h の min/max マクロ衝突回避に必要。
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(STG11EQRetireTests PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(STG11EQRetireTests PRIVATE /QxCORE-AVX2)
+    endif()
+    target_compile_definitions(STG11EQRetireTests PRIVATE
+        STG11_STANDALONE_MAIN=1
+        JUCE_DSP_USE_INTEL_MKL=1
+        CONVOPEQ_STANDALONE_ONLY=1
+        CONVOPEQ_UNIT_TESTS=1
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RESAMPLE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
+        CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
+        JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
+        JUCE_USE_SSE_INTRINSICS=1
+        JUCE_USE_SIMD=1
+        $<$<PLATFORM_ID:Windows>:
+            _UNICODE
+            UNICODE
+            NOMINMAX
+            JUCE_ASIO=1
+            _CRT_SECURE_NO_WARNINGS
+        >
+    )
+
     # ★ Work91: ISRSoakTests — ヘッドレスデータ構造耐久（publish を含まない）。
     #   publish 系は AudioEngineHarness 側に配置する原則（doc/work91/soak-test-design.md §2.2）。
     #   ISRSemanticValidationTests と同じ include/link パターン（RuntimePublicationCoordinator
@@ -1598,6 +1678,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
+    add_test(NAME STG11EQRetire COMMAND STG11EQRetireTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
@@ -1673,6 +1754,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(STG11EQRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -2663,6 +2745,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
+        src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
@@ -2842,6 +2925,7 @@ if(ENABLE_ASAN)
         AudioEngineHarness ISRSoakTests
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
         STG10ReaderQuarantineTests
+        STG11EQRetireTests
         TerminalTelemetryContractTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})
@@ -67053,24 +67137,36 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     }
 
     const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
-    // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
-    //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
-    //   直接の継承関係になく、メモリレイアウトが異なるため、
-    //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
-    //   正しい対策: スタック上に ISRRetireRouter を構築する。
-    convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+    // ★ STG-11-D1 (Candidate B): stack-local router を member router に置換。
+    //   旧 code の reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB
+    //   （ISRRetireRouter と EpochDomain は直接の継承関係になくレイアウトが異なる）。
+    //   旧 stack-local router は Q/E/T を関数 return で失った。
+    //   m_ownedRetireRouter は m_epochDomain に束縛され、EQProcessor と同命。
+    //   retireEpoch / reclaim boundary は同一 private domain で評価される
+    //   （engine の m_epochDomain は使用しない — epoch provenance 維持）。
 
     // [Bug2 Phase1] 初回試行: Coordinator 経由で Authority チェック + 初回 enqueue
+    //   ★ STG-11-D1: m_retireCoordinator->enqueueRetire は内部で
+    //   router.enqueueWithRetry を完全に委譲実行する
+    //   （ISRRuntimePublicationCoordinator.cpp:160）。
+    //   したがって Success / QueuePressure / TerminalReclaim は
+    //   いずれも ownership transfer 成立であり、同一 ptr での再実行は
+    //   二重所有（double-delete）になるため禁止。false を返すのは
+    //   Shutdown（caller が ownership 保持）と QueueFull（未格納）のみ。
     auto result = m_retireCoordinator->enqueueRetire(
         convo::isr::RetireAuthority::Granted,
-        stackRouter,
+        m_ownedRetireRouter,
         ptr, deleter, retireEpoch);
-    if (result == convo::isr::RetireEnqueueResult::Success)
+    if (result == convo::isr::RetireEnqueueResult::Success
+        || result == convo::isr::RetireEnqueueResult::QueuePressure
+        || result == convo::isr::RetireEnqueueResult::TerminalReclaim)
         return true;
+    if (result == convo::isr::RetireEnqueueResult::Shutdown)
+        return false;
 
-    // 初回失敗 → enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
+    // QueueFull 時のみ: enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
     //   Coordinator の Authority チェックは初回で済んでいるため、直接 Router に委譲
-    result = stackRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
+    result = m_ownedRetireRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
     // ★ P-4: Success / QueuePressure / TerminalReclaim は全て ownership transfer 成立
     //   （D / Q / E / Terminal のいずれかが ptr を所有 — drop ではない）。
     //   false は Shutdown（caller が ownership 保持）のみ。
@@ -67085,6 +67181,11 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
         m_epochDomain.publishEpoch();
+        // ★ STG-11-D1: 定期的 reclaim driver（NonRT 専用）。
+        //   呼び出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
+        //   epoch 前進後に member router の D + Q + E + T を epoch-gated drain する。
+        //   新規 timer / thread / authority は追加しない。RT からは呼ばない。
+        m_ownedRetireRouter.tryReclaim();
     }
 }
 // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放
@@ -67165,6 +67266,16 @@ EQProcessor::~EQProcessor()
     for (auto& node : activeBandNodes) {
         node = nullptr;
     }
+
+    // ★ STG-11-D1: member router の Q/E/T を破棄前に drain する。
+    //   tryReclaim() は epoch-gated（安全到達分のみ解放）。
+    //   drainAllQuarantineStore() は epoch-agnostic 強制だが、破棄前提は既存の
+    //   m_epochDomain.drainAll() と同一（publication pipeline が engine-epoch-gated に
+    //   DSPCore を破棄するため audio quiescence 成立 — BlockDouble.cpp:151 の
+    //   engine-domain read 区間が audio block 全体を覆う）。
+    //   premature delete（epoch safety 無視の新規導入）は行っていない。
+    m_ownedRetireRouter.tryReclaim();
+    m_ownedRetireRouter.drainAllQuarantineStore();
 
     // 退役キューを強制 drain して可能な限り回収する。
     m_epochDomain.tryReclaim();
@@ -67863,6 +67974,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
 #include "core/RCUReader.h"
+#include "audioengine/ISRRetireRouter.h"
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
@@ -68085,6 +68197,38 @@ public:
         return total;
     }
 #endif
+
+    // ★ STG-11-D1: EQ-owned retire router の test/diagnostic observation。
+    //   Logic-neutral（読み取りのみ）。production の判定はこれらに依存しない。
+    //   diagFootprintBytes() と同一の診断ゲッター規約。
+    [[nodiscard]] std::uint32_t eqOwnedPendingRetire() const noexcept
+    {
+        return m_ownedRetireRouter.pendingRetireCount();
+    }
+    [[nodiscard]] std::size_t eqOwnedQuarantineResident() const noexcept
+    {
+        return m_ownedRetireRouter.quarantineResidentCount();
+    }
+    [[nodiscard]] std::size_t eqOwnedEmergencyResident() const noexcept
+    {
+        return m_ownedRetireRouter.emergencyQuarantineResidentCount();
+    }
+    [[nodiscard]] std::size_t eqOwnedTerminalResident() const noexcept
+    {
+        return m_ownedRetireRouter.terminalReclaimResidentCount();
+    }
+    [[nodiscard]] std::uint64_t eqRetireDropCount() const noexcept
+    {
+        return convo::consumeAtomic(m_retireDropCount, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t eqPrivateEpoch() const noexcept
+    {
+        return m_epochDomain.currentEpoch();
+    }
+    [[nodiscard]] std::uint64_t eqOwnedRouterEpoch() const noexcept
+    {
+        return m_ownedRetireRouter.currentEpoch();
+    }
 
     // フィルタータイプ変更
     void setBandType(int band, EQBandType type);
@@ -68318,6 +68462,12 @@ private:
 
     // スムージング処理
     convo::EpochDomain m_epochDomain;
+    // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to m_epochDomain.
+    //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
+    //   member lifetime により drain / destruction まで保持する。
+    //   m_epochDomain より後に宣言し、provider が router より長生きする。
+    //   ISRRetireRouter.* 自体は変更しない（D → Q → E → T の chain 維持）。
+    convo::isr::ISRRetireRouter m_ownedRetireRouter { m_epochDomain };
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
@@ -99243,6 +99393,8 @@ int runConvolverStateRoundTripTests();
 int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
+// STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11EQRetireTests();
 
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
@@ -100524,6 +100676,10 @@ int runFpmM2();
     if (runSTG9ReclaimAccountingTests() != 0)
         return 1;
 
+    // ★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰（新規 CTest target なし）。
+    if (runSTG11EQRetireTests() != 0)
+        return 1;
+
     // ★ WORK102 (big 1-8): IR load admission contract（FC-FORM-1/2/3/4/5/6）と
     //   streaming hash の回帰。新規 CTest target は作らない（既存 harness 内）。
     if (runIRLoadAdmissionTests() != 0)
@@ -101096,6 +101252,460 @@ bool runSoakScenarios(bool full, const char* scenario)
 }
 
 } // namespace convo_soak
+```
+
+### 📄 `src\tests\AudioEngineHarness\STG11EQRetireTests.cpp`
+
+```
+// STG11EQRetireTests.cpp — STG-11-D1 / Candidate B regression (TD1-1 .. TD1-4).
+//
+// 対象 defect（STG-11-D1）:
+//   EQProcessor::enqueueDeferredDeleteWithFallback() が stack-local ISRRetireRouter
+//   を使用していたため、D 満杯時に Q/E/T へ昇格した entry が関数 return で失われた。
+//   Candidate B: EQ-owned member router（m_ownedRetireRouter, m_epochDomain 束縛）。
+//
+// Test contract:
+//   TD1-1: D → Q 後の lifetime（Q residency が return を跨いで生存し、drain で回収）
+//   TD1-2: E / T まで到達した entry の lifetime（同上）
+//   TD1-3: releaseResources / destruction 後の leak / drain（全 counts 0・drop 0）
+//   TD1-4: private epoch provenance 非回帰
+//     (a) member router の epoch が private domain と一体で進む（束縛の実証）
+//     (b) reclaim は束縛 provider の epoch でのみ進む（他 domain の前進では進まない）
+//   TD1-5: 既存 retire / epoch test の非回帰（CTest で実施。改変 0）
+//
+// 方針:
+//   ・単一スレッド・決定論的。race 再現は不要。
+//   ・容量は固定値（D=4096 / Q=512 / E=512）に依存するが、これは production の
+//     公開 constexpr であり、test 側のマジックナンバーではない。
+//   ・setter 1 回 = EQState 1 + BandNode 1 の計 2 retire（setBandFrequency 経路）。
+//   ・private epoch は flush（releaseResources / prepareToPlay）でのみ進むため、
+//     fill 中は全 entry が同一 epoch で reclaim 不可 — 決定論的 fill が成立する。
+//   ・既存 oracle の改変 = 0。production ロジックの変更は Candidate B のみ。
+//
+// 注意:
+//   - standalone CTest target（STG11EQRetireTests）としても登録する
+//     （AudioEngineHarness の深いコールチェイン外で実行するため。
+//      EQProcessor / RuntimeIntentCoordinator は大きいため heap 確保する）。
+//     harness 側にも runSTG11EQRetireTests() として配線する（二重実行で回帰を固定）。
+// =============================================================================
+
+#pragma warning(push)
+#pragma warning(disable : 4996) // enterReader/exitReader は deprecated だが TD1-4b の
+                                // mechanism 検証に直接使用する（production 経路と同一 API）
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <stdexcept>
+
+#include "eqprocessor/EQProcessor.h"
+#include "core/EpochDomain.h"
+#include "audioengine/ISRRetireRouter.h"
+#include "audioengine/ISRRuntimePublicationCoordinator.h"
+
+#pragma warning(pop)
+
+// 公開 constexpr 容量（production の契約値）。
+// DeferredDeletionQueue.h:262 / RetireQuarantineStore.h:65 と対応。
+static constexpr std::uint32_t kDQueueSize = 4096;
+static constexpr std::size_t kQStoreSize = 512;
+static constexpr std::size_t kEStoreSize = 512;
+
+// setter 1 回あたりの retire 数（EQState 1 + BandNode 1）。
+static constexpr int kRetiresPerSetter = 2;
+
+namespace {
+
+// TD1-4b 用の deleter カウンタ。
+struct TD11Tracker
+{
+    std::atomic<int> invokeCount { 0 };
+    std::atomic<int> aliveCount { 0 };
+};
+
+struct TD11Object
+{
+    TD11Tracker* tracker;
+    explicit TD11Object(TD11Tracker* t) : tracker(t) { ++tracker->aliveCount; }
+    ~TD11Object() { --tracker->aliveCount; }
+};
+
+void td11Deleter(void* p) noexcept
+{
+    auto* obj = static_cast<TD11Object*>(p);
+    ++obj->tracker->invokeCount;
+    delete obj;
+}
+
+void driveSetters(EQProcessor& eq, int count, float baseFreq = 100.0f)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        eq.setBandFrequency(0, baseFreq + static_cast<float>(i) * 0.5f);
+        if ((i % 500) == 499)
+        {
+            // ★ quarantineResidentCount() は Q+E 合算のため "Q+E" と表記。
+            std::fprintf(stderr,
+                         "  [fill %d] pending=%u Q+E=%llu E=%llu T=%llu drop=%llu\n",
+                         i + 1, eq.eqOwnedPendingRetire(),
+                         static_cast<unsigned long long>(eq.eqOwnedQuarantineResident()),
+                         static_cast<unsigned long long>(eq.eqOwnedEmergencyResident()),
+                         static_cast<unsigned long long>(eq.eqOwnedTerminalResident()),
+                         static_cast<unsigned long long>(eq.eqRetireDropCount()));
+        }
+    }
+}
+
+bool checkBaselineClean(const EQProcessor& eq, const char* id)
+{
+    if (eq.eqOwnedPendingRetire() != 0 || eq.eqOwnedQuarantineResident() != 0
+        || eq.eqOwnedEmergencyResident() != 0 || eq.eqOwnedTerminalResident() != 0
+        || eq.eqRetireDropCount() != 0)
+    {
+        std::fprintf(stderr,
+                     "%s: baseline not clean (pending=%u Q=%llu E=%llu T=%llu drop=%llu)\n",
+                     id,
+                     eq.eqOwnedPendingRetire(),
+                     static_cast<unsigned long long>(eq.eqOwnedQuarantineResident()),
+                     static_cast<unsigned long long>(eq.eqOwnedEmergencyResident()),
+                     static_cast<unsigned long long>(eq.eqOwnedTerminalResident()),
+                     static_cast<unsigned long long>(eq.eqRetireDropCount()));
+        return false;
+    }
+    return true;
+}
+
+bool checkAllDrained(const EQProcessor& eq, const char* id)
+{
+    if (eq.eqOwnedPendingRetire() != 0 || eq.eqOwnedQuarantineResident() != 0
+        || eq.eqOwnedEmergencyResident() != 0 || eq.eqOwnedTerminalResident() != 0)
+    {
+        std::fprintf(stderr,
+                     "%s: not drained (pending=%u Q=%llu E=%llu T=%llu)\n",
+                     id,
+                     eq.eqOwnedPendingRetire(),
+                     static_cast<unsigned long long>(eq.eqOwnedQuarantineResident()),
+                     static_cast<unsigned long long>(eq.eqOwnedEmergencyResident()),
+                     static_cast<unsigned long long>(eq.eqOwnedTerminalResident()));
+        return false;
+    }
+    if (eq.eqRetireDropCount() != 0)
+    {
+        std::fprintf(stderr, "%s: retire drop occurred (drop=%llu)\n",
+                     id, static_cast<unsigned long long>(eq.eqRetireDropCount()));
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+// =============================================================================
+// TD1-1: D → Q 後の lifetime
+//   D(4096) を超える retire を public setter で駆動し、Q residency が
+//   関数 return を跨いで生存すること（旧 stack-local 欠陥では失われた）、
+//   および epoch 前進＋drain で回収されることを確認する。
+// =============================================================================
+static bool checkTD11QRetainsAcrossReturns()
+{
+    // production 配線と同様に coordinator を設定（DSPCoreLifecycle.cpp:90）。
+    // 未設定では enqueueDeferredDeleteWithFallback() が false を返す（by design）。
+    // ★ heap 確保: RuntimeIntentCoordinator は約 4.1MB、
+    //   EQProcessor は約 281KB のため stack 確保はしない
+    //   （production も DSPCore ごと heap 生成する）。
+    //   coordinator は eq より先に生成し、破棄は逆順（eq の dtor が coordinator を使う）。
+    std::fprintf(stderr, "TD1-1: constructing coordinator...\n");
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    std::fprintf(stderr, "TD1-1: constructing EQProcessor...\n");
+    auto eq = std::make_unique<EQProcessor>();
+    std::fprintf(stderr, "TD1-1: wiring coordinator...\n");
+    eq->setRetireCoordinator(coordinator.get());
+    if (!checkBaselineClean(*eq, "TD1-1"))
+        return false;
+    std::fprintf(stderr, "TD1-1: driving setters...\n");
+
+    // 2200 setters × 2 = 4400 > 4096 → Q に正確に 304（単一所有のため）。
+    driveSetters(*eq, 2200);
+    std::fprintf(stderr, "TD1-1: fill done, checking...\n");
+    if (eq->eqRetireDropCount() != 0)
+    {
+        std::fprintf(stderr, "TD1-1: retire drop during fill\n");
+        return false;
+    }
+    if (eq->eqOwnedPendingRetire() != kDQueueSize)
+    {
+        std::fprintf(stderr, "TD1-1: D pending=%u expected %u\n",
+                     eq->eqOwnedPendingRetire(), kDQueueSize);
+        return false;
+    }
+    const std::size_t q = eq->eqOwnedQuarantineResident();
+    if (q != 304)
+    {
+        // ★ Q=0 は旧欠陥（stack-local 喪失）の署名。
+        //   304 以外の超過は二重所有を示す。
+        std::fprintf(stderr, "TD1-1: Q residency=%llu expected 304\n",
+                     static_cast<unsigned long long>(q));
+        return false;
+    }
+
+    // epoch 前進（releaseResources 内の flush）＋ driver tryReclaim で全 drain。
+    // test 内に active reader はいないため全 entry が reclaim 可能になる。
+    std::fprintf(stderr, "TD1-1: releasing...\n");
+    eq->releaseResources();
+    std::fprintf(stderr, "TD1-1: released, checking drain...\n");
+    if (!checkAllDrained(*eq, "TD1-1"))
+        return false;
+
+    std::printf("STG11EQRetireTests: TD1-1 PASS (D->Q retained across returns, Q=%llu drained)\n",
+                static_cast<unsigned long long>(q));
+    return true;
+}
+
+// =============================================================================
+// TD1-2: E / T まで到達した entry の lifetime
+//   D(4096) + Q(512) + E(512) を超える retire を駆動し、E / T residency が
+//   生存すること、および drain で回収されることを確認する。
+// =============================================================================
+static bool checkTD12EmergencyAndTerminalRetain()
+{
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto eq = std::make_unique<EQProcessor>();
+    eq->setRetireCoordinator(coordinator.get());
+    if (!checkBaselineClean(*eq, "TD1-2"))
+        return false;
+
+    // 2700 setters × 2 = 5400 = 4096(D) + 512(Q) + 512(E) + 280(T)。単一所有のため正確。
+    driveSetters(*eq, 2700);
+    if (eq->eqRetireDropCount() != 0)
+    {
+        std::fprintf(stderr, "TD1-2: retire drop during fill\n");
+        return false;
+    }
+    // ★ quarantineResidentCount() は Q+E の合算（ISRRetireRouter.cpp:431-435）。
+    //   したがって Q 単独 = 合算 - E。
+    if (eq->eqOwnedPendingRetire() != kDQueueSize
+        || eq->eqOwnedQuarantineResident() != kQStoreSize + kEStoreSize
+        || eq->eqOwnedEmergencyResident() != kEStoreSize)
+    {
+        std::fprintf(stderr,
+                     "TD1-2: unexpected fill state (pending=%u Q+E=%llu E=%llu T=%llu)\n",
+                     eq->eqOwnedPendingRetire(),
+                     static_cast<unsigned long long>(eq->eqOwnedQuarantineResident()),
+                     static_cast<unsigned long long>(eq->eqOwnedEmergencyResident()),
+                     static_cast<unsigned long long>(eq->eqOwnedTerminalResident()));
+        return false;
+    }
+    const std::size_t qAlone = eq->eqOwnedQuarantineResident() - eq->eqOwnedEmergencyResident();
+    if (qAlone != kQStoreSize)
+    {
+        std::fprintf(stderr, "TD1-2: Q alone=%llu expected %llu\n",
+                     static_cast<unsigned long long>(qAlone),
+                     static_cast<unsigned long long>(kQStoreSize));
+        return false;
+    }
+    const std::size_t t = eq->eqOwnedTerminalResident();
+    if (t != 280)
+    {
+        // ★ T=0 は所有喪失、280 超過は二重所有を示す。
+        std::fprintf(stderr, "TD1-2: T residency=%llu expected 280\n",
+                     static_cast<unsigned long long>(t));
+        return false;
+    }
+
+    eq->releaseResources();
+    if (!checkAllDrained(*eq, "TD1-2"))
+        return false;
+
+    std::printf("STG11EQRetireTests: TD1-2 PASS (E/T retained across returns, T=%llu drained)\n",
+                static_cast<unsigned long long>(t));
+    return true;
+}
+
+// =============================================================================
+// TD1-3: release / destruction 後の leak / drain
+//   通常量の retire → releaseResources で全 counts 0・drop 0。
+//   dtor は各 test の scope exit で実行される（force-drain 前提は
+//   publication pipeline の engine-epoch-gated 破棄）。
+// =============================================================================
+static bool checkTD13ReleaseLeavesNoResidue()
+{
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto eq = std::make_unique<EQProcessor>();
+    eq->setRetireCoordinator(coordinator.get());
+    if (!checkBaselineClean(*eq, "TD1-3"))
+        return false;
+
+    driveSetters(*eq, 50);
+    eq->releaseResources();
+    if (!checkAllDrained(*eq, "TD1-3"))
+        return false;
+
+    std::printf("STG11EQRetireTests: TD1-3 PASS (release leaves no residue)\n");
+    return true;
+}
+
+// =============================================================================
+// TD1-4a: member router の epoch が private domain と一体で進む（束縛の実証）
+// =============================================================================
+static bool checkTD14aRouterBoundToPrivateDomain()
+{
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto eq = std::make_unique<EQProcessor>();
+    eq->setRetireCoordinator(coordinator.get());
+    if (eq->eqOwnedRouterEpoch() != eq->eqPrivateEpoch())
+    {
+        std::fprintf(stderr, "TD1-4a: router epoch != private epoch at baseline\n");
+        return false;
+    }
+    const std::uint64_t e0 = eq->eqPrivateEpoch();
+    eq->releaseResources(); // flush: private publishEpoch × 1
+    if (eq->eqPrivateEpoch() != e0 + 1 || eq->eqOwnedRouterEpoch() != e0 + 1)
+    {
+        std::fprintf(stderr,
+                     "TD1-4a: epochs did not advance together (priv=%llu router=%llu base=%llu)\n",
+                     static_cast<unsigned long long>(eq->eqPrivateEpoch()),
+                     static_cast<unsigned long long>(eq->eqOwnedRouterEpoch()),
+                     static_cast<unsigned long long>(e0));
+        return false;
+    }
+
+    std::printf("STG11EQRetireTests: TD1-4a PASS (router bound to private domain)\n");
+    return true;
+}
+
+// =============================================================================
+// TD1-4b: reclaim は束縛 provider の epoch でのみ進む（他 domain の前進では進まない）
+//   Candidate B の配線パターン（private domain に束縛された router）そのものを
+//   決定論的に検証する。engine domain への移管（Candidate A）が禁止される根拠。
+// =============================================================================
+static bool checkTD14bReclaimGatedOnlyOnBoundProvider()
+{
+    convo::EpochDomain eqLike;
+    convo::EpochDomain foreign;
+    convo::isr::ISRRetireRouter router(eqLike);
+    TD11Tracker tracker;
+
+    // eqLike を epoch 5 まで進め、reader を入場させる（滞留 reader を再現）。
+    for (int i = 0; i < 4; ++i)
+        (void) eqLike.publishEpoch();
+    if (eqLike.currentEpoch() != 5)
+        return false;
+    const int idx = eqLike.registerReaderThread("td1-4b");
+    if (idx < 0)
+        return false;
+    eqLike.enterReader(idx);
+
+    auto* obj = new TD11Object(&tracker);
+    if (!router.enqueueRetire(obj, &td11Deleter, 5))
+    {
+        delete obj;
+        return false;
+    }
+
+    // foreign domain を 100 進めても reclaim されない（epoch provenance）。
+    for (int i = 0; i < 100; ++i)
+        (void) foreign.publishEpoch();
+    router.tryReclaim();
+    if (tracker.invokeCount != 0 || tracker.aliveCount != 1)
+    {
+        std::fprintf(stderr, "TD1-4b: foreign epoch advance reclaimed the entry (provenance broken)\n");
+        return false;
+    }
+    if (router.pendingRetireCount() != 1)
+    {
+        std::fprintf(stderr, "TD1-4b: entry lost after foreign advance\n");
+        return false;
+    }
+
+    // 束縛 domain の reader が退出し epoch が進むと reclaim される。
+    eqLike.exitReader(idx);
+    (void) eqLike.publishEpoch();
+    router.tryReclaim();
+    if (tracker.invokeCount != 1 || tracker.aliveCount != 0)
+    {
+        std::fprintf(stderr, "TD1-4b: bound-domain reclaim did not free the entry\n");
+        return false;
+    }
+    if (router.pendingRetireCount() != 0)
+    {
+        std::fprintf(stderr, "TD1-4b: pending not empty after bound reclaim\n");
+        return false;
+    }
+
+    std::printf("STG11EQRetireTests: TD1-4b PASS (reclaim gated only on bound provider)\n");
+    return true;
+}
+
+// harness main（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
+// 新規 CTest 登録なし（AudioEngineHarness exe のサブテスト。STG-8/9 と同じ形）。
+static bool checkTD10SetterAccounting()
+{
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto eq = std::make_unique<EQProcessor>();
+    eq->setRetireCoordinator(coordinator.get());
+    // 10 setters → 20 objects を段階的に確認する。
+    for (int i = 0; i < 10; ++i) {
+        eq->setBandFrequency(0, 100.0f + static_cast<float>(i));
+        std::fprintf(stderr, "TD1-0: after setter %d: pending=%u Q=%llu E=%llu T=%llu drop=%llu\n",
+                     i + 1, eq->eqOwnedPendingRetire(),
+                     static_cast<unsigned long long>(eq->eqOwnedQuarantineResident()),
+                     static_cast<unsigned long long>(eq->eqOwnedEmergencyResident()),
+                     static_cast<unsigned long long>(eq->eqOwnedTerminalResident()),
+                     static_cast<unsigned long long>(eq->eqRetireDropCount()));
+    }
+    return true;
+}
+
+int runSTG11EQRetireTests()
+{
+    bool ok = true;
+    if (!checkTD10SetterAccounting())
+    {
+        std::fprintf(stderr, "FAIL: TD1-0 setter accounting\n");
+        ok = false;
+    }
+    if (!checkTD11QRetainsAcrossReturns())
+    {
+        std::fprintf(stderr, "FAIL: TD1-1 D->Q lifetime\n");
+        ok = false;
+    }
+    if (!checkTD12EmergencyAndTerminalRetain())
+    {
+        std::fprintf(stderr, "FAIL: TD1-2 E/T lifetime\n");
+        ok = false;
+    }
+    if (!checkTD13ReleaseLeavesNoResidue())
+    {
+        std::fprintf(stderr, "FAIL: TD1-3 release residue\n");
+        ok = false;
+    }
+    if (!checkTD14aRouterBoundToPrivateDomain())
+    {
+        std::fprintf(stderr, "FAIL: TD1-4a router binding\n");
+        ok = false;
+    }
+    if (!checkTD14bReclaimGatedOnlyOnBoundProvider())
+    {
+        std::fprintf(stderr, "FAIL: TD1-4b bound-provider gating\n");
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b)\n");
+    return ok ? 0 : 1;
+}
+
+#ifdef STG11_STANDALONE_MAIN
+// ★ standalone CTest target 用 main（STG10ReaderQuarantineTests と同じ形）。
+//   AudioEngineHarness の深いコールチェイン外で実行し、stdout を unbuffered にする。
+int main()
+{
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+    return runSTG11EQRetireTests();
+}
+#endif
+
 ```
 
 ### 📄 `src\tests\AudioEngineHarness\STG8RecoveryObligationTests.cpp`

@@ -41,24 +41,36 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     }
 
     const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
-    // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
-    //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
-    //   直接の継承関係になく、メモリレイアウトが異なるため、
-    //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
-    //   正しい対策: スタック上に ISRRetireRouter を構築する。
-    convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+    // ★ STG-11-D1 (Candidate B): stack-local router を member router に置換。
+    //   旧 code の reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB
+    //   （ISRRetireRouter と EpochDomain は直接の継承関係になくレイアウトが異なる）。
+    //   旧 stack-local router は Q/E/T を関数 return で失った。
+    //   m_ownedRetireRouter は m_epochDomain に束縛され、EQProcessor と同命。
+    //   retireEpoch / reclaim boundary は同一 private domain で評価される
+    //   （engine の m_epochDomain は使用しない — epoch provenance 維持）。
 
     // [Bug2 Phase1] 初回試行: Coordinator 経由で Authority チェック + 初回 enqueue
+    //   ★ STG-11-D1: m_retireCoordinator->enqueueRetire は内部で
+    //   router.enqueueWithRetry を完全に委譲実行する
+    //   （ISRRuntimePublicationCoordinator.cpp:160）。
+    //   したがって Success / QueuePressure / TerminalReclaim は
+    //   いずれも ownership transfer 成立であり、同一 ptr での再実行は
+    //   二重所有（double-delete）になるため禁止。false を返すのは
+    //   Shutdown（caller が ownership 保持）と QueueFull（未格納）のみ。
     auto result = m_retireCoordinator->enqueueRetire(
         convo::isr::RetireAuthority::Granted,
-        stackRouter,
+        m_ownedRetireRouter,
         ptr, deleter, retireEpoch);
-    if (result == convo::isr::RetireEnqueueResult::Success)
+    if (result == convo::isr::RetireEnqueueResult::Success
+        || result == convo::isr::RetireEnqueueResult::QueuePressure
+        || result == convo::isr::RetireEnqueueResult::TerminalReclaim)
         return true;
+    if (result == convo::isr::RetireEnqueueResult::Shutdown)
+        return false;
 
-    // 初回失敗 → enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
+    // QueueFull 時のみ: enqueueWithRetry で tryReclaim + 再試行を Router 内部で完結
     //   Coordinator の Authority チェックは初回で済んでいるため、直接 Router に委譲
-    result = stackRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
+    result = m_ownedRetireRouter.enqueueWithRetry(ptr, deleter, retireEpoch, DeletionEntryType::Generic);
     // ★ P-4: Success / QueuePressure / TerminalReclaim は全て ownership transfer 成立
     //   （D / Q / E / Terminal のいずれかが ptr を所有 — drop ではない）。
     //   false は Shutdown（caller が ownership 保持）のみ。
@@ -73,6 +85,11 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
         m_epochDomain.publishEpoch();
+        // ★ STG-11-D1: 定期的 reclaim driver（NonRT 専用）。
+        //   呼び出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
+        //   epoch 前進後に member router の D + Q + E + T を epoch-gated drain する。
+        //   新規 timer / thread / authority は追加しない。RT からは呼ばない。
+        m_ownedRetireRouter.tryReclaim();
     }
 }
 // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放
@@ -153,6 +170,16 @@ EQProcessor::~EQProcessor()
     for (auto& node : activeBandNodes) {
         node = nullptr;
     }
+
+    // ★ STG-11-D1: member router の Q/E/T を破棄前に drain する。
+    //   tryReclaim() は epoch-gated（安全到達分のみ解放）。
+    //   drainAllQuarantineStore() は epoch-agnostic 強制だが、破棄前提は既存の
+    //   m_epochDomain.drainAll() と同一（publication pipeline が engine-epoch-gated に
+    //   DSPCore を破棄するため audio quiescence 成立 — BlockDouble.cpp:151 の
+    //   engine-domain read 区間が audio block 全体を覆う）。
+    //   premature delete（epoch safety 無視の新規導入）は行っていない。
+    m_ownedRetireRouter.tryReclaim();
+    m_ownedRetireRouter.drainAllQuarantineStore();
 
     // 退役キューを強制 drain して可能な限り回収する。
     m_epochDomain.tryReclaim();
