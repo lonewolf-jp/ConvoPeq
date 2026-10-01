@@ -928,6 +928,12 @@ void ConvolverProcessor::setBypass(bool shouldBypass)
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
+    // ★ STG-11-D8: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
+    //   破損 session の NaN が格納されると computeTargetIRLength が 1 を返し
+    //   IR が 1 sample に trim される。以前値を維持する。
+    //   isFinite は bit-pattern 判定（fp:fast 安全）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
+        return;
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     float prev;
@@ -945,6 +951,9 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 
 void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 {
+    // ★ STG-11-D8: 非有限値の格納を拒否（setTargetIRLength と同一理由）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
+        return;
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
