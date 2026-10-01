@@ -98,7 +98,11 @@ void DSPHandleRuntime::activate(DSPHandle handle)
 
     convo::publishAtomic(registry_[handle.slot].state, DSPState::Active, std::memory_order_release);
     convo::publishAtomic(activeRuntimeDSPHandle_, handle, std::memory_order_release);
-    convo::publishAtomic(fadingRuntimeDSPHandle_, DSPHandle::null(), std::memory_order_release);
+    // ★ STG-11-D18 (F-A): in-flight fade の fading handle を消さない。
+    //   従来の無条件 null は、重ね合わせ publish 時に先行 fade の retire 経路
+    //   （B-1/:1310 の observe）を消滅させ、fading DSPCore を orphan 化した。
+    //   通常 path では既に null のため無変更と等価。fading handle の終端は
+    //   endCrossfade（ガード付き）が担う。
 }
 
 void DSPHandleRuntime::endCrossfade(CrossfadeId id)
@@ -111,10 +115,32 @@ void DSPHandleRuntime::endCrossfade(CrossfadeId id)
         }
 
         record.active = false;
+        // ★ STG-11-D18 (F-C): stale 書き込みのガード。
+        //   fromHandle → Retired は無条件のまま（到達状態は CrossfadingOut か
+        //   Retired のいずれかであり、両方とも Retired が正解のため）。
         convo::publishAtomic(registry_[record.fromHandle.slot].state, DSPState::Retired, std::memory_order_release);
-        convo::publishAtomic(registry_[record.toHandle.slot].state, DSPState::Active, std::memory_order_release);
-        convo::publishAtomic(activeRuntimeDSPHandle_, record.toHandle, std::memory_order_release);
-        convo::publishAtomic(fadingRuntimeDSPHandle_, DSPHandle::null(), std::memory_order_release);
+        //   toHandle → Active は現在 CrossfadingIn の場合のみ。既に Retired
+        //   （重ね合わせで即時 retire 済み）の DSP を Active に復活させない。
+        if (convo::consumeAtomic(registry_[record.toHandle.slot].state, std::memory_order_acquire)
+            == DSPState::CrossfadingIn) {
+            convo::publishAtomic(registry_[record.toHandle.slot].state, DSPState::Active, std::memory_order_release);
+        }
+        //   activeHandle は from/to のいずれかに一致する場合のみ toHandle へ。
+        //   より新しい publish が既に進めている場合は上書きしない（stale 防止）。
+        {
+            const auto currentActive = convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire);
+            if (currentActive == record.fromHandle || currentActive == record.toHandle) {
+                convo::publishAtomic(activeRuntimeDSPHandle_, record.toHandle, std::memory_order_release);
+            }
+        }
+        //   fading-handle null は現在 ==fromHandle か既に null の場合のみ。
+        //   より新しい fade の handle を消さない。
+        {
+            const auto currentFading = convo::consumeAtomic(fadingRuntimeDSPHandle_, std::memory_order_acquire);
+            if (currentFading == record.fromHandle || currentFading.isNull()) {
+                convo::publishAtomic(fadingRuntimeDSPHandle_, DSPHandle::null(), std::memory_order_release);
+            }
+        }
         break;
     }
 }

@@ -118,7 +118,19 @@ struct PublishReceiptTest {
 //==============================================================================
 // Test 4: getFadingRuntimeDSPHandle — crossfade 中の fading handle 検証
 //   P0-2b: fadingRuntimeDSPHandle_ は store(publishAtomic) で書かれ、
-//   beginCrossfade で from を保持、activate/endCrossfade で null にリセットされる。
+//   beginCrossfade で from を保持し、endCrossfade で null にリセットされる。
+//
+//   ★ STG-11-D18 (F-A): activate() は in-flight の fading handle を消さない。
+//     旧契約（activate でも null 化）を encode していた本アサーションを
+//     更新した。根拠は STG-11-D18-1 の concrete harm:
+//       publish #2 が publish #1 の fade 実行中に重なると、activate(new) が
+//       fading handle を null 化し、先行 fade の source DSP の retire 経路を
+//       消滅させる。
+//         - Timer.cpp:1142 / :1305 の submitObserve が null を見て skip → orphan
+//         - Timer.cpp:2129 retirePublishedDSP の currentHandle が null になり、
+//           receipt と不整合 → Emergency Retire（誤 quarantine / fatal_ 化）
+//     終端は endCrossfade（ガード付き F-C）が担うため、通常 path の観測結果は
+//     変わらない（本テストの最終段落で検証）。
 //==============================================================================
 [[nodiscard]] bool testFadingRuntimeDSPHandle()
 {
@@ -140,9 +152,10 @@ struct PublishReceiptTest {
     runtime.beginCrossfade(from, to, 1);
     if (!(runtime.getFadingRuntimeDSPHandle() == from)) return false;
 
-    // activate: fading が null にリセット、active は to
+    // ★ STG-11-D18 (F-A): activate は in-flight の fading handle を保持する
+    //   （source DSP の retire 経路を消滅させない）。active のみ to へ更新。
     runtime.activate(to);
-    if (!runtime.getFadingRuntimeDSPHandle().isNull()) return false;
+    if (!(runtime.getFadingRuntimeDSPHandle() == from)) return false;
     if (!(runtime.getActiveRuntimeDSPHandle() == to)) return false;
 
     // 再度 crossfade 開始 → 再び from を返す
