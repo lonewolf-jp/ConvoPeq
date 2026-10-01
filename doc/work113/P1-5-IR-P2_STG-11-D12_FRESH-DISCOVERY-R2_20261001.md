@@ -13,6 +13,21 @@
 - 本 work item は **read-only Fresh Discovery**。**production source の変更は一切行っていない。**
 - 本 commit の内容: **audit document のみ**
 
+> ### ★ 訂正記録（2026-10-01 / STG-11-D12-R1）
+>
+> 本書の §2.3.1 に事実誤認があった。`validatePresetStateTreeForDebug` には
+> `ditherBitDepth` の検査が存在する（`AudioEngine.Parameters.cpp:132-137`、
+> 条件 `bitDepth <= 0 || bitDepth > 64`）が、本書は「リストに無い」と記していた。
+> 該当箇所は訂正済み。
+>
+> - 訂正の根拠、全 6 箇所の合法値集合の確定、defect chain の 8 hop 再証明、
+>   UI 経路の新規所見、orphan テストの所見は
+>   `doc/work113/P1-5-IR-P2_STG-11-D12-R1_REVERIFICATION_20261001.md` を参照。
+> - **D12-1 の結論（defect として成立）は変わらない。** 検査が dead であるため
+>   production 上の防御力は当初の記述と変わらず 0 である。
+> - なお本書の §5.1 で「`saturationAmount` の NaN 経路は要 Owner 再評価」とした点も、
+>   同じ dead な whitelist gate を唯一の根拠としており、同じ留保が必要である。
+
 ---
 
 ## 0. 判定
@@ -142,9 +157,14 @@ hasIntRange("convLCFilterMode", ...);           // :120
 hasIntRange("eqLPFFilterMode", ...);            // :121
 hasFiniteDouble("coeffSafetyMargin", 0.0, 2.0); // :122
 hasIntRange("cmaesRestarts", 0, 1000);          // :123
+// :125-130  oversamplingFactor: {0,1,2,4,8} の個別検査
+// :132-137  ditherBitDepth: 1..64 の個別検査（★ 訂正: この検査は存在する）
 ```
 
-- **`ditherBitDepth` はこのリストに無い**（`noiseShaperType` 等の隣接項目は含むが、本項目は欠落）。
+- ~~**`ditherBitDepth` はこのリストに無い**（`noiseShaperType` 等の隣接項目は含むが、本項目は欠落）。~~
+  **★ 訂正（D12-R1）**: この記述は誤りであった。`Parameters.cpp:132-137` に
+  `ditherBitDepth` の個別検査が存在する（条件は `bitDepth <= 0 || bitDepth > 64`）。
+  当初は 74-126 行までしか読まず 127-137 行を読み飛ばしていた。
 - この validator は**呼び出し側がゼロ**。リポジトリ自身が
   `src/tests/AudioEngineHarness/STG11D7StateEnumGuardTests.cpp:13` に
   `//   The range validator (validatePresetStateTreeForDebug) exists but has zero callers.`
@@ -153,6 +173,11 @@ hasIntRange("cmaesRestarts", 0, 1000);          // :123
   防御は `requestLoadState` 内に個別に書かれた inline ガード
   （`processingOrder` / `noiseShaperType` / `oversamplingType` / `analyzerSource` / 3 filter mode）に
   全面的に依存している。**`ditherBitDepth` はそのいずれにも属さない唯一の項目。**
+- **★ 訂正による結論への影響**: なし。欠落ではなく「検査は存在するが caller がゼロで
+  実行されない」ため、production 上の防御力は当初の記述と変わらず 0 である。
+  むしろdead な検査の範囲 `1..64` は、`RuntimePublicationValidator` の契約
+  `{0,16,24,32}` と矛盾しており（0 を却下し 8 や 64 を承認する）、
+  gate として復活させるなら契約の是正が前提になる。
 
 #### 2.3.2 同一ファイル内の restore 経路との対比
 
