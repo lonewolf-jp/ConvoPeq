@@ -1092,6 +1092,10 @@ void AudioEngine::timerCallback()
     //   RT 側が記録した success を既存 diagLog backend で出力する。
     //   新規 timer / thread / worker / authority は作らない。
     reportSuccessIfRecorded();
+    // ★ STG-11-D5: MMCSS registration/revert observation の NonRT 診断（同一 execution point）。
+    //   RT 側（tryApplyMmcssForSelfManagedThread / revertMmcssOnAudioThread）が
+    //   lock-free atomic に記録した event を Mmcss.cpp の既存 diagLog backend で出力する。
+    reportMmcssEventIfRecorded();
 
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)

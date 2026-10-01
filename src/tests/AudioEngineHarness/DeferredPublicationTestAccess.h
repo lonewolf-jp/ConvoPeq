@@ -201,4 +201,59 @@ public:
         return convo::consumeAtomic(e.successReportedCount_, std::memory_order_acquire);
     }
 
+    // ===== STG-11-D5: MMCSS event observation（production 変更ゼロ）=====
+    //   D3/D4 と同一の friend 経路。record/report は production の private member。
+
+    static void recordMmcssEvent(AudioEngine& e, std::uint32_t kind,
+                                 std::uint64_t a, std::uint64_t b,
+                                 std::uint64_t c, std::uint64_t d) noexcept
+    {
+        e.recordMmcssEventObserved(kind, a, b, c, d);
+    }
+
+    // NonRT diagnosis を実行する（timerCallback と同一の入口）。
+    static void reportMmcssEvent(AudioEngine& e) noexcept
+    {
+        e.reportMmcssEventIfRecorded();
+    }
+
+    static bool mmcssObserved(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssObserved_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t mmcssCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssCount_, std::memory_order_acquire);
+    }
+
+    static std::uint32_t mmcssKind(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssKind_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t mmcssA(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssA_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t mmcssB(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssB_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t mmcssC(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssC_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t mmcssD(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssD_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t mmcssReportedCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.mmcssReportedCount_, std::memory_order_acquire);
+    }
 };

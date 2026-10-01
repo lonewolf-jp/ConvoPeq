@@ -2702,6 +2702,22 @@ public:
     std::atomic<std::uint64_t> successC_{0};
     std::atomic<std::uint64_t> successReportedCount_{0};
 
+    // STG-11-D5: MMCSS registration/revert observation (RT to NonRT diagnostic transport).
+    //   RT-safe: lock-free atomics only. lossy-coalescing (last-wins + monotonic count).
+    //   No mutex / allocation / logging backend on RT. No new authority.
+    //   Readout and diagnosis by NonRT reportMmcssEventIfRecorded() (Mmcss.cpp).
+    //   kind: 1=registered, 2=already-registered, 3=fallback, 4=FAILED, 5=reverted.
+    //   payload: A=policy (0=ProAudio, 1=Playback); B=task selector (0=primary, 1=fb1, 2=fb2);
+    //            C=priority (success) or err (kind 2/4); D=taskIndex (success only).
+    std::atomic<bool> mmcssObserved_{false};
+    std::atomic<std::uint64_t> mmcssCount_{0};
+    std::atomic<std::uint32_t> mmcssKind_{0};
+    std::atomic<std::uint64_t> mmcssA_{0};
+    std::atomic<std::uint64_t> mmcssB_{0};
+    std::atomic<std::uint64_t> mmcssC_{0};
+    std::atomic<std::uint64_t> mmcssD_{0};
+    std::atomic<std::uint64_t> mmcssReportedCount_{0};
+
     // ★ BUG-014: MMCSS ポリシー atomic キャッシュ（Message Thread が publish、Audio Thread が acquire load）。
     //    alignas(64) で他ホット atomic（mmcssShutdownRequested 等）とキャッシュライン分離（既存パターン踏襲）。
     alignas(64) std::atomic<MmcssPolicy> currentMmcssPolicy_{MmcssPolicy::None};
@@ -2813,6 +2829,10 @@ public:
     //   record: lock-free atomic record only. report: existing diagLog backend on NonRT.
     void recordSuccessObserved(std::uint32_t kind, std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept;
     void reportSuccessIfRecorded() noexcept;
+    // STG-11-D5: RT-side MMCSS event recorder (Mmcss.cpp) + NonRT diagnosis hook.
+    //   record: lock-free atomic record only. report: existing diagLog backend on NonRT.
+    void recordMmcssEventObserved(std::uint32_t kind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept;
+    void reportMmcssEventIfRecorded() noexcept;
     // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）— legacy alias
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias

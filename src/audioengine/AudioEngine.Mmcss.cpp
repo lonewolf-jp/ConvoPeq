@@ -118,16 +118,14 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
         ::AvSetMmThreadPriority(h, static_cast<AVRT_PRIORITY>(avrtPriority));
         t_mmcssHandle = h;
         t_mmcssTaskIndex = idx;
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        // ★ [diagnostic] MMCSS registration SUCCESS — logged once
-        juce::String prioStr = (avrtPriority == AVRT_PRIORITY_CRITICAL) ? "CRITICAL"
-                             : (avrtPriority == AVRT_PRIORITY_HIGH)    ? "HIGH"
-                             : (avrtPriority == AVRT_PRIORITY_NORMAL)  ? "NORMAL"
-                                                                       : "LOW";
-        diagLog("[MMCSS-" + juce::String(policyTag) + "] registered: task="
-                + juce::String(primaryTask) + " priority=" + prioStr
-                + " taskIndex=" + juce::String(static_cast<int>(idx)));
-#endif
+        // STG-11-D5: RT-safe observation only (INV-D5-1/2/3).
+        //   No diagLog / Logger I/O / heap on RT even with Diagnostics ON.
+        //   NonRT timerCallback diagnoses via reportMmcssEventIfRecorded().
+        //   Registration semantics unchanged (handle/index stored as before).
+        recordMmcssEventObserved(1,
+            (policy == MmcssPolicy::SelfManagedProAudio) ? 0u : 1u, 0u,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(avrtPriority)),
+            static_cast<std::uint64_t>(idx));
         return true;
     }
 
@@ -142,12 +140,10 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
     //     このケースは ASIO ドライバが自前で MMCSS 登録済みの環境で発生する。
     if (err == ERROR_ACCESS_DENIED || err == ERROR_ALREADY_EXISTS
         || err == ERROR_NO_MORE_ITEMS) {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        // ★ [diagnostic] MMCSS already managed by JUCE/driver — expected, not an error
-        diagLog("[MMCSS-" + juce::String(policyTag) + "] already registered by JUCE/driver (err="
-                + juce::String(static_cast<int>(err)) + ") task="
-                + juce::String(primaryTask));
-#endif
+        // STG-11-D5: RT-safe observation only (INV-D5-1/2/3). Expected path, not an error.
+        recordMmcssEventObserved(2,
+            (policy == MmcssPolicy::SelfManagedProAudio) ? 0u : 1u, 0u,
+            static_cast<std::uint64_t>(err), 0u);
         return true;
     }
 
@@ -155,7 +151,9 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
     //   1531(ERROR_INVALID_TASK_NAME): タスク名がレジストリに存在しない。
     //   1552 は上で処理済みのため、この分岐に入るのは 1531 のみ。
     if (err == ERROR_INVALID_TASK_NAME) {
-        auto attemptFallback = [&](LPCWSTR fallbackTask) -> bool {
+        // STG-11-D5: taskId records which fallback attempt succeeded
+        //   (1=fallback1, 2=fallback2). Lambda signature gain is local only.
+        auto attemptFallback = [&](LPCWSTR fallbackTask, std::uint32_t taskId) -> bool {
             if (fallbackTask == nullptr) return false;
             DWORD idx2 = 0;
             HANDLE h2 = tryTask(fallbackTask, idx2);
@@ -163,30 +161,24 @@ HANDLE tryTask(LPCWSTR taskName, DWORD& idx) noexcept
                 ::AvSetMmThreadPriority(h2, static_cast<AVRT_PRIORITY>(avrtPriority));
                 t_mmcssHandle = h2;
                 t_mmcssTaskIndex = idx2;
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                juce::String prioStr = (avrtPriority == AVRT_PRIORITY_CRITICAL) ? "CRITICAL"
-                                     : (avrtPriority == AVRT_PRIORITY_HIGH)    ? "HIGH"
-                                     : (avrtPriority == AVRT_PRIORITY_NORMAL)  ? "NORMAL"
-                                                                               : "LOW";
-                diagLog("[MMCSS-" + juce::String(policyTag) + "] registered (fallback): task="
-                        + juce::String(fallbackTask) + " priority=" + prioStr
-                        + " taskIndex=" + juce::String(static_cast<int>(idx2)));
-#endif
+                // STG-11-D5: RT-safe observation only (INV-D5-1/2/3).
+                recordMmcssEventObserved(3,
+                    (policy == MmcssPolicy::SelfManagedProAudio) ? 0u : 1u, taskId,
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(avrtPriority)),
+                    static_cast<std::uint64_t>(idx2));
                 return true;
             }
             return false;
         };
-        if (attemptFallback(fallback1)) return true;
-        if (attemptFallback(fallback2)) return true;
+        if (attemptFallback(fallback1, 1u)) return true;
+        if (attemptFallback(fallback2, 2u)) return true;
     }
 
     // All attempts failed
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ [diagnostic] MMCSS registration FAILURE — all paths exhausted
-    diagLog("[MMCSS-" + juce::String(policyTag) + "] FAILED: primary err="
-            + juce::String(static_cast<int>(err))
-            + " task=" + juce::String(primaryTask));
-#endif
+    // STG-11-D5: RT-safe observation only (INV-D5-1/2/3). Return value unchanged (false).
+    recordMmcssEventObserved(4,
+        (policy == MmcssPolicy::SelfManagedProAudio) ? 0u : 1u, 0u,
+        static_cast<std::uint64_t>(err), 0u);
     return false;
 }
 
@@ -196,13 +188,109 @@ void AudioEngine::revertMmcssOnAudioThread() noexcept
 {
     if (t_mmcssHandle != nullptr) {
         ::AvRevertMmThreadCharacteristics(t_mmcssHandle);
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        diagLog("[MMCSS] reverted on Audio Thread");
-#endif
+        // STG-11-D5: RT-safe observation only (INV-D5-1/2/3).
+        //   Same-thread revert is kept (MSDN + in-repo MUST requirement).
+        //   Only the logging moves to NonRT. State updates unchanged.
+        recordMmcssEventObserved(5, 0u, 0u, 0u, 0u);
         t_mmcssHandle = nullptr;
         t_mmcssTaskIndex = 0;
     }
     t_mmcssTried = false; // Allow retry on next device open / thread creation
+}
+
+// ★ STG-11-D5: RT-side MMCSS event recorder (registered / already / fallback / FAILED / reverted).
+//   Lock-free atomic record only (convo:: wrappers). No mutex / allocation /
+//   logging backend. Callable from any thread; intended for RT MMCSS paths.
+//
+//   ★ publication order（D3 ordering correction と同一）★
+//     (1) payload      : last-wins snapshot (release)
+//     (2) count        : monotonic, and the PER-RECORD publication marker.
+//                        fetchAddAtomic is a release operation (acq_rel).
+//     (3) observed     : monotonic bool flag, fast-out only.
+//
+void AudioEngine::recordMmcssEventObserved(
+    std::uint32_t kind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept // NOLINT(bugprone-easily-swappable-parameters)
+{
+    // (1) payload: publish the snapshot BEFORE anything marks the record.
+    convo::publishAtomic(mmcssKind_, kind, std::memory_order_release);
+    convo::publishAtomic(mmcssA_, a, std::memory_order_release);
+    convo::publishAtomic(mmcssB_, b, std::memory_order_release);
+    convo::publishAtomic(mmcssC_, c, std::memory_order_release);
+    convo::publishAtomic(mmcssD_, d, std::memory_order_release);
+    // (2) count: monotonic AND the per-record publication marker.
+    convo::fetchAddAtomic(mmcssCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    // (3) observed: monotonic flag, always the last store.
+    convo::publishAtomic(mmcssObserved_, true, std::memory_order_release);
+}
+
+// ★ STG-11-D5: NonRT diagnosis of the recorded MMCSS event.
+//   Reads the lock-free observation and emits via this TU's existing diagLog
+//   backend. Runs on NonRT only (called from timerCallback). Reports each
+//   recorded count once (reportedCount tracks count; monotonic, race-clean).
+//   Wording matches the pre-D5 logs so the diagnostic meaning is kept.
+//   Lossy-coalescing is explicit: payload is last-wins, count is monotonic,
+//   no ownership is carried (INV-D5-4 / INV-D5-5).
+//
+//   Task names and priority strings are restored here on NonRT from the
+//   recorded integers, so RT never constructs strings.
+//
+void AudioEngine::reportMmcssEventIfRecorded() noexcept
+{
+    // fast-out only: monotonic "any event ever" flag, not a payload carrier.
+    if (!convo::consumeAtomic(mmcssObserved_, std::memory_order_acquire))
+        return;
+    // publication marker: acquire of count == N publishes record #N's payload.
+    const std::uint64_t count = convo::consumeAtomic(mmcssCount_, std::memory_order_acquire);
+    if (count == 0)
+        return;
+    const std::uint64_t reported =
+        convo::consumeAtomic(mmcssReportedCount_, std::memory_order_acquire);
+    if (reported >= count)
+        return;  // already diagnosed (count is monotonic: nothing new to report)
+    // snapshot reads must come after the count acquire (see note above).
+    const std::uint32_t kind = convo::consumeAtomic(mmcssKind_, std::memory_order_acquire);
+    const std::uint64_t a = convo::consumeAtomic(mmcssA_, std::memory_order_acquire);
+    const std::uint64_t b = convo::consumeAtomic(mmcssB_, std::memory_order_acquire);
+    const std::uint64_t c = convo::consumeAtomic(mmcssC_, std::memory_order_acquire);
+    const std::uint64_t d = convo::consumeAtomic(mmcssD_, std::memory_order_acquire);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // a=policy (0=ProAudio/ASIO, 1=Playback/DS), b=task selector, c=priority or err, d=index.
+    const char* tag = (a == 0) ? "ASIO" : "DS";
+    const char* task = (b == 1) ? "Audio" : (b == 2) ? "Pro Audio"
+                     : (a == 0) ? "Pro Audio" : "Playback";
+    auto prioStr = [](std::uint64_t p) -> const char* {
+        if (p == static_cast<std::uint64_t>(AVRT_PRIORITY_CRITICAL)) return "CRITICAL";
+        if (p == static_cast<std::uint64_t>(AVRT_PRIORITY_HIGH)) return "HIGH";
+        if (p == static_cast<std::uint64_t>(AVRT_PRIORITY_NORMAL)) return "NORMAL";
+        return "LOW";
+    };
+    if (kind == 1) {
+        diagLog("[MMCSS-" + juce::String(tag) + "] registered: task="
+                + juce::String(task) + " priority=" + juce::String(prioStr(c))
+                + " taskIndex=" + juce::String(static_cast<int>(d))
+                + " count=" + juce::String(static_cast<juce::int64>(count)));
+    } else if (kind == 2) {
+        diagLog("[MMCSS-" + juce::String(tag) + "] already registered by JUCE/driver (err="
+                + juce::String(static_cast<int>(c)) + ") task="
+                + juce::String(task)
+                + " count=" + juce::String(static_cast<juce::int64>(count)));
+    } else if (kind == 3) {
+        diagLog("[MMCSS-" + juce::String(tag) + "] registered (fallback): task="
+                + juce::String(task) + " priority=" + juce::String(prioStr(c))
+                + " taskIndex=" + juce::String(static_cast<int>(d))
+                + " count=" + juce::String(static_cast<juce::int64>(count)));
+    } else if (kind == 4) {
+        diagLog("[MMCSS-" + juce::String(tag) + "] FAILED: primary err="
+                + juce::String(static_cast<int>(c)) + " task="
+                + juce::String(task)
+                + " count=" + juce::String(static_cast<juce::int64>(count)));
+    } else if (kind == 5) {
+        diagLog("[MMCSS] reverted on Audio Thread"
+                + juce::String(" count=") + juce::String(static_cast<juce::int64>(count)));
+    }
+    // unknown kind: suppress output (fail-safe for future kind extensions).
+#endif
+    convo::publishAtomic(mmcssReportedCount_, count, std::memory_order_release);
 }
 
 // ★ ADR-006: Floating-point execution environment の初期化（スレッド起動時1回のみ）

@@ -63,7 +63,9 @@ int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11D5MmcssObservationTests();
 int runSTG11D4SuccessObservationTests();
+// STG11D5MmcssObservationTests.cpp (★ STG-11-D5 / OBS-D4-1/2: RT-safe MMCSS observation)
 int runSTG11D3AffinityFailureTests();
 // STG11D4SuccessObservationTests.cpp (★ STG-11-D4 / OBS-1: RT-safe success observation)
 int runSTG11D2SnapshotRetireTests();
@@ -1355,6 +1357,10 @@ int runFpmM2();
     // ★ STG-11-D2 / R-A: SnapshotCoordinator Q-full 終端解決。
     // ★ STG-11-D3 / Candidate A: MMCSS/affinity failure の RT-safe diagnostic transport。
     // ★ STG-11-D4 / OBS-1: MMCSS/affinity success の RT-safe observation。
+    // ★ STG-11-D5 / OBS-D4-1/2: MMCSS registration/revert の RT-safe observation。
+    if (runSTG11D5MmcssObservationTests() != 0)
+        return 1;
+
     if (runSTG11D4SuccessObservationTests() != 0)
         return 1;
 
