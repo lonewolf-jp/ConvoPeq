@@ -18,15 +18,33 @@ namespace convo {
 //   Router API（quarantineRetire）経由で Router 内部の RetireQuarantineStore へ移送する。
 //   directDelete は禁止（RT 参照中の UAF 排除）。store full 時も deleter を実行しない
 //   （capacity exhaustion は health escalation で先行検知 — ここでは jassert で異常検出）。
+// ★ STG-11-D2 (R-A): Q-full 時に E → T へ昇格し、retire ownership を終端まで保持する。
+//   Q のみへの直接移送では、Q 満杯時に Release で silent loss になった。
+//   E（EmergencyQuarantineStore）/ T（TerminalReclaimAuthority）は既存 public API を
+//   そのまま使用する。ISRRetireRouter.* の意味変更なし、新規 authority なし。
+//   全段は同一 engine domain / 同一 router で評価される（epoch provenance 維持）。
+//   同一 ptr を複数 container に格納しない（各段は ownership transfer 成立でのみ return）。
 void SnapshotCoordinator::quarantineRetireSink(void* ptr, void (*deleter)(void*),
                                                uint64_t epoch, const char* reason) noexcept
 {
     if (m_retireSink == nullptr || ptr == nullptr || deleter == nullptr)
         return;
-    const bool stored = m_retireSink->quarantineRetire(
+    // Stage 1: Q（RetireQuarantineStore）。格納成功で ownership 移転成立。
+    if (m_retireSink->quarantineRetire(
+            ptr, deleter, epoch, DeletionEntryType::Generic, reason))
+        return;  // Q owns ptr
+    // Stage 2: E（EmergencyQuarantineStore）。Q-full 時のみ到達。
+    if (m_retireSink->emergencyQuarantine(
+            ptr, deleter, epoch, DeletionEntryType::Generic, reason, 0, 0))
+        return;  // E owns ptr
+    // Stage 3: T（TerminalReclaimAuthority）。growable のため常に受領し、
+    //   ownership は必ず移転する（戻り値は常に true が契約）。
+    //   epoch safe かつ Non-RT（全呼び出し元 NonRT）なら即時破棄、
+    //   epoch unsafe なら保持（drain() が epoch safe 時に解放）。
+    //   ★ assert による検出に依存しない（Release でも終端解決する）。
+    (void) m_retireSink->terminalReclaim(
         ptr, deleter, epoch, DeletionEntryType::Generic, reason);
-    if (!stored)
-        assert(false && "RetireQuarantineStore capacity exhaustion - EBR 破綻の可能性");
+    // T owns ptr
 }
 
 void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noexcept

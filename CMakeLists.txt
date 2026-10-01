@@ -499,6 +499,50 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         >
     )
 
+    # ★ STG-11-D2 (R-A): SnapshotCoordinator Q-full 終端解決の決定論的 regression test。
+    #   D8_2_B_2_Tests と同一の最小リンク集合（SnapshotCoordinator / SnapshotFactory /
+    #   GlobalSnapshot / ISRRetireRouter）。standalone target とすることで
+    #   AudioEngineHarness の深いコールチェイン外で実行する。
+    #   harness 側にも runSTG11D2SnapshotRetireTests() として配線する。
+    add_executable(STG11D2SnapshotRetireTests
+        src/tests/STG11D2SnapshotRetireTests.cpp
+        src/core/SnapshotCoordinator.cpp
+        src/core/SnapshotFactory.cpp
+        src/core/GlobalSnapshot.cpp
+        src/audioengine/ISRRetireRouter.cpp
+    )
+    target_include_directories(STG11D2SnapshotRetireTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(STG11D2SnapshotRetireTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
+    target_link_libraries(STG11D2SnapshotRetireTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    add_dependencies(STG11D2SnapshotRetireTests ConvoPeq)
+    target_compile_features(STG11D2SnapshotRetireTests PRIVATE cxx_std_20)
+    target_compile_options(STG11D2SnapshotRetireTests PRIVATE /EHsc /utf-8)
+    target_compile_definitions(STG11D2SnapshotRetireTests PRIVATE
+        STG11D2_STANDALONE_MAIN=1
+        JUCE_DSP_USE_INTEL_MKL=1
+        CONVOPEQ_STANDALONE_ONLY=1
+        CONVOPEQ_UNIT_TESTS=1
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        $<$<PLATFORM_ID:Windows>:
+            _UNICODE
+            UNICODE
+            NOMINMAX
+            JUCE_ASIO=1
+            _CRT_SECURE_NO_WARNINGS
+        >
+    )
     # ★ Work91: ISRSoakTests — ヘッドレスデータ構造耐久（publish を含まない）。
     #   publish 系は AudioEngineHarness 側に配置する原則（doc/work91/soak-test-design.md §2.2）。
     #   ISRSemanticValidationTests と同じ include/link パターン（RuntimePublicationCoordinator
@@ -947,6 +991,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
     add_test(NAME STG11EQRetire COMMAND STG11EQRetireTests)
+    add_test(NAME STG11D2SnapshotRetire COMMAND STG11D2SnapshotRetireTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
@@ -1023,6 +1068,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11EQRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(STG11D2SnapshotRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -2014,6 +2060,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
         src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+        src/tests/STG11D2SnapshotRetireTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
@@ -2194,6 +2241,7 @@ if(ENABLE_ASAN)
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
         STG10ReaderQuarantineTests
         STG11EQRetireTests
+        STG11D2SnapshotRetireTests
         TerminalTelemetryContractTests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})

@@ -63,7 +63,9 @@ int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11D2SnapshotRetireTests();
 int runSTG11EQRetireTests();
+// STG11D2SnapshotRetireTests.cpp (★ STG-11-D2 / R-A: SnapshotCoordinator Q-full 終端解決)
 
 // IRLoadAdmissionTests.cpp (★ WORK102 big 1-8: bounded IR load admission + streaming hash)
 int runIRLoadAdmissionTests();
@@ -1346,6 +1348,10 @@ int runFpmM2();
         return 1;
 
     // ★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰（新規 CTest target なし）。
+    // ★ STG-11-D2 / R-A: SnapshotCoordinator Q-full 終端解決。
+    if (runSTG11D2SnapshotRetireTests() != 0)
+        return 1;
+
     if (runSTG11EQRetireTests() != 0)
         return 1;
 
