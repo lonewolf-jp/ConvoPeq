@@ -928,12 +928,6 @@ void ConvolverProcessor::setBypass(bool shouldBypass)
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
-    // ★ STG-11-D8: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
-    //   破損 session の NaN が格納されると computeTargetIRLength が 1 を返し
-    //   IR が 1 sample に trim される。以前値を維持する。
-    //   isFinite は bit-pattern 判定（fp:fast 安全）。
-    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
-        return;
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     float prev;
@@ -951,9 +945,6 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 
 void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 {
-    // ★ STG-11-D8: 非有限値の格納を拒否（setTargetIRLength と同一理由）。
-    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
-        return;
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
@@ -1169,6 +1160,11 @@ void ConvolverProcessor::setTailMode(TailMode mode)
 
 void ConvolverProcessor::setTailStartSec(float sec)
 {
+    // ★ STG-11-D9: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
+    //   破損 session の NaN が格納されると MKL tail 形状計算が NaN 化する。
+    //   以前値を維持する。isFinite は bit-pattern 判定（fp:fast 安全）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(sec)))
+        return;
     const float clamped = juce::jlimit(TAIL_START_MIN_SEC, TAIL_START_MAX_SEC, sec);
     float prev;
     {
@@ -1189,6 +1185,11 @@ void ConvolverProcessor::setTailStartSec(float sec)
 
 void ConvolverProcessor::setTailStrength(float strength)
 {
+    // ★ STG-11-D9: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
+    //   破損 session の NaN が格納されると m_tailLayerGain が NaN 化し
+    //   RT 出力が NaN 化する。以前値を維持する。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(strength)))
+        return;
     const float clamped = juce::jlimit(TAIL_STRENGTH_MIN, TAIL_STRENGTH_MAX, strength);
     float prev;
     {

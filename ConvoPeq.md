@@ -1,6 +1,6 @@
 # Project Extract & Source Code: stg11-d1-d18
 
-> Generated: 2026-10-01 20:36:11
+> Generated: 2026-10-01 20:36:47
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -319,6 +319,7 @@
         │   │   ├── STG11D5MmcssObservationTests.cpp
         │   │   ├── STG11D7StateEnumGuardTests.cpp
         │   │   ├── STG11D8IRLengthFiniteTests.cpp
+        │   │   ├── STG11D9TailFiniteTests.cpp
         │   │   ├── STG11EQRetireTests.cpp
         │   │   ├── STG8RecoveryObligationTests.cpp
         │   │   ├── STG9ReclaimAccountingTests.cpp
@@ -2804,6 +2805,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/STG11D5MmcssObservationTests.cpp
         src/tests/AudioEngineHarness/STG11D7StateEnumGuardTests.cpp
         src/tests/AudioEngineHarness/STG11D8IRLengthFiniteTests.cpp
+        src/tests/AudioEngineHarness/STG11D9TailFiniteTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
@@ -52274,12 +52276,6 @@ void ConvolverProcessor::setBypass(bool shouldBypass)
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
-    // ★ STG-11-D8: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
-    //   破損 session の NaN が格納されると computeTargetIRLength が 1 を返し
-    //   IR が 1 sample に trim される。以前値を維持する。
-    //   isFinite は bit-pattern 判定（fp:fast 安全）。
-    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
-        return;
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     float prev;
@@ -52297,9 +52293,6 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 
 void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 {
-    // ★ STG-11-D8: 非有限値の格納を拒否（setTargetIRLength と同一理由）。
-    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
-        return;
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
@@ -52515,6 +52508,11 @@ void ConvolverProcessor::setTailMode(TailMode mode)
 
 void ConvolverProcessor::setTailStartSec(float sec)
 {
+    // ★ STG-11-D9: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
+    //   破損 session の NaN が格納されると MKL tail 形状計算が NaN 化する。
+    //   以前値を維持する。isFinite は bit-pattern 判定（fp:fast 安全）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(sec)))
+        return;
     const float clamped = juce::jlimit(TAIL_START_MIN_SEC, TAIL_START_MAX_SEC, sec);
     float prev;
     {
@@ -52535,6 +52533,11 @@ void ConvolverProcessor::setTailStartSec(float sec)
 
 void ConvolverProcessor::setTailStrength(float strength)
 {
+    // ★ STG-11-D9: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
+    //   破損 session の NaN が格納されると m_tailLayerGain が NaN 化し
+    //   RT 出力が NaN 化する。以前値を維持する。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(strength)))
+        return;
     const float clamped = juce::jlimit(TAIL_STRENGTH_MIN, TAIL_STRENGTH_MAX, strength);
     float prev;
     {
@@ -99984,7 +99987,9 @@ int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11D9TailFiniteTests();
 int runSTG11D8IRLengthFiniteTests();
+// STG11D9TailFiniteTests.cpp (★ STG-11-D9-1: NaN tail guards)
 int runSTG11D7StateEnumGuardTests();
 // STG11D8IRLengthFiniteTests.cpp (★ STG-11-D8-1: NaN IR length guards)
 int runSTG11D5MmcssObservationTests();
@@ -101285,6 +101290,10 @@ int runFpmM2();
     // ★ STG-11-D5 / OBS-D4-1/2: MMCSS registration/revert の RT-safe observation。
     // ★ STG-11-D7-1: session enum range guard（B-3 と同型）。
     // ★ STG-11-D8-1: NaN IR length guard。
+    // ★ STG-11-D9-1: NaN tail guard。
+    if (runSTG11D9TailFiniteTests() != 0)
+        return 1;
+
     if (runSTG11D8IRLengthFiniteTests() != 0)
         return 1;
 
@@ -105307,6 +105316,175 @@ int runSTG11D8IRLengthFiniteTests()
     }
     if (ok)
         std::printf("STG11D8IRLengthFiniteTests: PASS (D8-T1/D8-T2/D8-T3)\n");
+    return ok ? 0 : 1;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\STG11D9TailFiniteTests.cpp`
+
+```
+// STG11D9TailFiniteTests.cpp - STG-11-D9-1 regression (T1 .. T3).
+//
+// Target defect (STG-11-D9-1):
+//   ConvolverProcessor::setTailStrength / setTailStartSec stored the
+//   juce::jlimit result unconditionally. jlimit passes NaN through, so a
+//   corrupted session's NaN was stored as-is and flowed into the MKL tail
+//   computation (whose jlimits also pass NaN): NaN layer gains -> NaN RT
+//   audio output, NaN tailStartSec -> distorted layer geometry + NaN damping.
+//
+//   Fix: reject non-finite inputs at both setters (existing
+//   convo::numeric_policy::isFinite), keeping the previous finite value.
+//
+// Test contract:
+//   D9-T1  NaN tailStrength / tailStartSec via setState -> finite retained.
+//   D9-T2  Valid round-trip kept.
+//   D9-T3  +Inf / -Inf rejected.
+//   Negative control: with the guards removed, D9-T1 FAILs.
+//
+// No new CTest registration: sub-test of AudioEngineHarness.
+// Fixture owned by the harness.
+// =============================================================================
+
+#include <cstdio>
+#include <limits>
+
+#include "audioengine/AudioEngine.h"
+#include "AudioEngineHarness.h"
+#include "ConvolverProcessor.h"
+
+namespace {
+
+bool checkD9T1NaNRejected()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-11-D9 T-1] harness start failed\n");
+        return false;
+    }
+    h.stop();
+    ConvolverProcessor& conv = h.engine().getConvolverProcessor();
+
+    conv.setTailStrength(1.0f);
+    conv.setTailStartSec(0.2f);
+
+    juce::ValueTree v("Convolver");
+    v.setProperty("tailStrength", std::numeric_limits<float>::quiet_NaN(), nullptr);
+    v.setProperty("tailStartSec", std::numeric_limits<float>::quiet_NaN(), nullptr);
+    conv.setState(v);
+
+    bool ok = true;
+    const float s = conv.getTailStrength();
+    if (!(s > 0.0f && s < 10.0f))
+    {
+        std::fprintf(stderr, "D9-T1: NaN tailStrength stored (%f)\n", s);
+        ok = false;
+    }
+    const float t = conv.getTailStartSec();
+    if (!(t > 0.0f && t < 10.0f))
+    {
+        std::fprintf(stderr, "D9-T1: NaN tailStartSec stored (%f)\n", t);
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11D9TailFiniteTests: D9-T1 PASS (NaN tail values rejected)\n");
+    return ok;
+}
+
+bool checkD9T2ValidRoundTrip()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-11-D9 T-2] harness start failed\n");
+        return false;
+    }
+    h.stop();
+    ConvolverProcessor& conv = h.engine().getConvolverProcessor();
+
+    conv.setTailStrength(1.25f);
+    conv.setTailStartSec(0.3f);
+    juce::ValueTree saved("Convolver");
+    saved.setProperty("tailStrength", conv.getTailStrength(), nullptr);
+    saved.setProperty("tailStartSec", conv.getTailStartSec(), nullptr);
+    conv.setTailStrength(0.5f);
+    conv.setTailStartSec(0.1f);
+    conv.setState(saved);
+
+    bool ok = true;
+    if (!(conv.getTailStrength() > 1.24f && conv.getTailStrength() < 1.26f))
+    {
+        std::fprintf(stderr, "D9-T2: tailStrength round-trip broken (%f)\n", conv.getTailStrength());
+        ok = false;
+    }
+    if (!(conv.getTailStartSec() > 0.29f && conv.getTailStartSec() < 0.31f))
+    {
+        std::fprintf(stderr, "D9-T2: tailStartSec round-trip broken (%f)\n", conv.getTailStartSec());
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11D9TailFiniteTests: D9-T2 PASS (valid round-trip kept)\n");
+    return ok;
+}
+
+bool checkD9T3InfRejected()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-11-D9 T-3] harness start failed\n");
+        return false;
+    }
+    h.stop();
+    ConvolverProcessor& conv = h.engine().getConvolverProcessor();
+
+    conv.setTailStrength(1.0f);
+    conv.setTailStartSec(0.2f);
+
+    juce::ValueTree v("Convolver");
+    v.setProperty("tailStrength", std::numeric_limits<float>::infinity(), nullptr);
+    v.setProperty("tailStartSec", -std::numeric_limits<float>::infinity(), nullptr);
+    conv.setState(v);
+
+    bool ok = true;
+    if (!(conv.getTailStrength() > 0.0f && conv.getTailStrength() < 10.0f))
+    {
+        std::fprintf(stderr, "D9-T3: +Inf tailStrength stored (%f)\n", conv.getTailStrength());
+        ok = false;
+    }
+    if (!(conv.getTailStartSec() > 0.0f && conv.getTailStartSec() < 10.0f))
+    {
+        std::fprintf(stderr, "D9-T3: -Inf tailStartSec stored (%f)\n", conv.getTailStartSec());
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11D9TailFiniteTests: D9-T3 PASS (Inf rejected)\n");
+    return ok;
+}
+
+} // namespace
+
+int runSTG11D9TailFiniteTests()
+{
+    bool ok = true;
+    if (!checkD9T1NaNRejected())
+    {
+        std::fprintf(stderr, "FAIL: D9-T1 NaN rejected\n");
+        ok = false;
+    }
+    if (!checkD9T2ValidRoundTrip())
+    {
+        std::fprintf(stderr, "FAIL: D9-T2 valid round-trip\n");
+        ok = false;
+    }
+    if (!checkD9T3InfRejected())
+    {
+        std::fprintf(stderr, "FAIL: D9-T3 Inf rejected\n");
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11D9TailFiniteTests: PASS (D9-T1/D9-T2/D9-T3)\n");
     return ok ? 0 : 1;
 }
 
