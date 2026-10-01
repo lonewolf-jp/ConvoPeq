@@ -102,6 +102,12 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 //--------------------------------------------------------------
 void EQProcessor::setTotalGain(float gainDb)
 {
+    // ★ STG-11-D11: 非有限値の格納を拒否。jlimit は NaN を素通しするため、
+    //   破損 session の NaN が格納されると prepare 時の smoothTotalGain が
+    //   NaN 化し RT 出力が NaN 化する。以前値を維持する。
+    //   isFinite は bit-pattern 判定（fp:fast 安全）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(gainDb)))
+        return;
     // パラメータを安全な範囲にクランプ
     gainDb = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, gainDb);
 
@@ -159,13 +165,6 @@ bool EQProcessor::getAGCEnabled() const
 void EQProcessor::setBandType(int band, EQBandType type)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    // ★ STG-11-D10: 未検証 enum cast の排除（D7 と同型）。
-    //   破損 session の範囲外値が格納されると calcSVFCoeffs がフォールスルーし
-    //   ゼロ係数（当該 band 無音化）になる。範囲外は適用せず現状維持。
-    if (type != EQBandType::LowShelf && type != EQBandType::Peaking
-        && type != EQBandType::HighShelf && type != EQBandType::LowPass
-        && type != EQBandType::HighPass)
-        return;
 
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
@@ -190,13 +189,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    // ★ STG-11-D10: 未検証 enum cast の排除（D7 と同型）。
-    //   破損 session の範囲外値が格納されると channel 等価 chain のいずれにも
-    //   一致せず当該 band が無処理になる。範囲外は適用せず現状維持。
-    if (mode != EQChannelMode::Stereo && mode != EQChannelMode::Left
-        && mode != EQChannelMode::Right && mode != EQChannelMode::Mid
-        && mode != EQChannelMode::Side)
-        return;
+
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
