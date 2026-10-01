@@ -165,6 +165,13 @@ bool EQProcessor::getAGCEnabled() const
 void EQProcessor::setBandType(int band, EQBandType type)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    // ★ STG-11-D10: 未検証 enum cast の排除（D7 と同型）。
+    //   破損 session の範囲外値が格納されると calcSVFCoeffs がフォールスルーし
+    //   ゼロ係数（当該 band 無音化）になる。範囲外は適用せず現状維持。
+    if (type != EQBandType::LowShelf && type != EQBandType::Peaking
+        && type != EQBandType::HighShelf && type != EQBandType::LowPass
+        && type != EQBandType::HighPass)
+        return;
 
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
@@ -189,6 +196,13 @@ void EQProcessor::setBandType(int band, EQBandType type)
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    // ★ STG-11-D10: 未検証 enum cast の排除（D7 と同型）。
+    //   破損 session の範囲外値が格納されると channel 等価 chain のいずれにも
+    //   一致せず当該 band が無処理になる。範囲外は適用せず現状維持。
+    if (mode != EQChannelMode::Stereo && mode != EQChannelMode::Left
+        && mode != EQChannelMode::Right && mode != EQChannelMode::Mid
+        && mode != EQChannelMode::Side)
+        return;
 
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
