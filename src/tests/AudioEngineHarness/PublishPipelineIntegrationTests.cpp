@@ -63,7 +63,9 @@ int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11D10EQEnumGuardTests();
 int runSTG11D9TailFiniteTests();
+// STG11D10EQEnumGuardTests.cpp (★ STG-11-D10-1: EQ enum guards)
 int runSTG11D8IRLengthFiniteTests();
 // STG11D9TailFiniteTests.cpp (★ STG-11-D9-1: NaN tail guards)
 int runSTG11D7StateEnumGuardTests();
@@ -1367,6 +1369,10 @@ int runFpmM2();
     // ★ STG-11-D7-1: session enum range guard（B-3 と同型）。
     // ★ STG-11-D8-1: NaN IR length guard。
     // ★ STG-11-D9-1: NaN tail guard。
+    // ★ STG-11-D10-1: EQ enum guard。
+    if (runSTG11D10EQEnumGuardTests() != 0)
+        return 1;
+
     if (runSTG11D9TailFiniteTests() != 0)
         return 1;
 

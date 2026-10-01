@@ -1,6 +1,6 @@
 # Project Extract & Source Code: stg11-d1-d18
 
-> Generated: 2026-10-01 20:36:47
+> Generated: 2026-10-01 20:37:30
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -314,6 +314,7 @@
         │   │   ├── PolyphaseGainFidelityTests.cpp
         │   │   ├── PublishPipelineIntegrationTests.cpp
         │   │   ├── SoakPublishIntegrationTests.cpp
+        │   │   ├── STG11D10EQEnumGuardTests.cpp
         │   │   ├── STG11D3AffinityFailureTests.cpp
         │   │   ├── STG11D4SuccessObservationTests.cpp
         │   │   ├── STG11D5MmcssObservationTests.cpp
@@ -2806,6 +2807,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/STG11D7StateEnumGuardTests.cpp
         src/tests/AudioEngineHarness/STG11D8IRLengthFiniteTests.cpp
         src/tests/AudioEngineHarness/STG11D9TailFiniteTests.cpp
+        src/tests/AudioEngineHarness/STG11D10EQEnumGuardTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
@@ -69339,6 +69341,13 @@ bool EQProcessor::getAGCEnabled() const
 void EQProcessor::setBandType(int band, EQBandType type)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    // ★ STG-11-D10: 未検証 enum cast の排除（D7 と同型）。
+    //   破損 session の範囲外値が格納されると calcSVFCoeffs がフォールスルーし
+    //   ゼロ係数（当該 band 無音化）になる。範囲外は適用せず現状維持。
+    if (type != EQBandType::LowShelf && type != EQBandType::Peaking
+        && type != EQBandType::HighShelf && type != EQBandType::LowPass
+        && type != EQBandType::HighPass)
+        return;
 
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
@@ -69363,6 +69372,13 @@ void EQProcessor::setBandType(int band, EQBandType type)
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    // ★ STG-11-D10: 未検証 enum cast の排除（D7 と同型）。
+    //   破損 session の範囲外値が格納されると channel 等価 chain のいずれにも
+    //   一致せず当該 band が無処理になる。範囲外は適用せず現状維持。
+    if (mode != EQChannelMode::Stereo && mode != EQChannelMode::Left
+        && mode != EQChannelMode::Right && mode != EQChannelMode::Mid
+        && mode != EQChannelMode::Side)
+        return;
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -99987,7 +100003,9 @@ int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+int runSTG11D10EQEnumGuardTests();
 int runSTG11D9TailFiniteTests();
+// STG11D10EQEnumGuardTests.cpp (★ STG-11-D10-1: EQ enum guards)
 int runSTG11D8IRLengthFiniteTests();
 // STG11D9TailFiniteTests.cpp (★ STG-11-D9-1: NaN tail guards)
 int runSTG11D7StateEnumGuardTests();
@@ -101291,6 +101309,10 @@ int runFpmM2();
     // ★ STG-11-D7-1: session enum range guard（B-3 と同型）。
     // ★ STG-11-D8-1: NaN IR length guard。
     // ★ STG-11-D9-1: NaN tail guard。
+    // ★ STG-11-D10-1: EQ enum guard。
+    if (runSTG11D10EQEnumGuardTests() != 0)
+        return 1;
+
     if (runSTG11D9TailFiniteTests() != 0)
         return 1;
 
@@ -101887,6 +101909,211 @@ bool runSoakScenarios(bool full, const char* scenario)
 }
 
 } // namespace convo_soak
+```
+
+### 📄 `src\tests\AudioEngineHarness\STG11D10EQEnumGuardTests.cpp`
+
+```
+// STG11D10EQEnumGuardTests.cpp - STG-11-D10-1 regression (T1 .. T3).
+//
+// Target defect (STG-11-D10-1):
+//   EQProcessor::setBandType / setBandChannelMode stored session ints as
+//   enums without range validation. Out-of-range values (corrupted / tampered /
+//   future-version sessions) became runtime state: an OOB band type falls
+//   through calcSVFCoeffs' switch to zero coefficients (band silenced), and an
+//   OOB channel mode matches none of the processing equality chains (band
+//   unprocessed). Same defect class as STG-11-D7 (unvalidated session enums).
+//   RT NaN guards contain propagation (no crash), but the corrupted load
+//   silently disables the band.
+//
+//   Fix: range guards at both setters (D7 pattern). Out-of-range values keep
+//   the current value.
+//
+// Test contract:
+//   D10-T1 Out-of-range type/channel via setState -> values unchanged.
+//   D10-T2 Valid round-trip (all 5 types x all 5 channels).
+//   D10-T3 Boundaries (min/max applied, min-1/max+1 rejected).
+//   Negative control: with the guards removed, D10-T1 FAILs.
+//
+// No new CTest registration: sub-test of AudioEngineHarness.
+// Fixture owned by the harness.
+// =============================================================================
+
+#include <cstdio>
+
+#include "audioengine/AudioEngine.h"
+#include "AudioEngineHarness.h"
+#include "eqprocessor/EQProcessor.h"
+
+namespace {
+
+static EQProcessor& eqOf(AudioEngine& e) { return e.getEQProcessor(); }
+
+bool checkD10T1OutOfRangeRejected()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-11-D10 T-1] harness start failed\n");
+        return false;
+    }
+    h.stop();
+    EQProcessor& eq = eqOf(h.engine());
+
+    eq.setBandType(0, EQBandType::Peaking);
+    eq.setBandChannelMode(0, EQChannelMode::Stereo);
+
+    juce::ValueTree v("EQ");
+    juce::ValueTree band("Band");
+    band.setProperty("index", 0, nullptr);
+    band.setProperty("type", 99, nullptr);
+    band.setProperty("channel", -7, nullptr);
+    v.addChild(band, -1, nullptr);
+    eq.setState(v);
+
+    bool ok = true;
+    if (eq.getBandType(0) != EQBandType::Peaking)
+    {
+        std::fprintf(stderr, "D10-T1: OOB band type applied (%d)\n",
+                     static_cast<int>(eq.getBandType(0)));
+        ok = false;
+    }
+    if (eq.getBandChannelMode(0) != EQChannelMode::Stereo)
+    {
+        std::fprintf(stderr, "D10-T1: OOB channel mode applied (%d)\n",
+                     static_cast<int>(eq.getBandChannelMode(0)));
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11D10EQEnumGuardTests: D10-T1 PASS (OOB enums rejected)\n");
+    return ok;
+}
+
+bool checkD10T2ValidRoundTrip()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-11-D10 T-2] harness start failed\n");
+        return false;
+    }
+    h.stop();
+    EQProcessor& eq = eqOf(h.engine());
+
+    static const EQBandType kTypes[] = {
+        EQBandType::LowShelf, EQBandType::Peaking,
+        EQBandType::HighShelf, EQBandType::LowPass,
+        EQBandType::HighPass
+    };
+    static const EQChannelMode kChannels[] = {
+        EQChannelMode::Stereo, EQChannelMode::Left,
+        EQChannelMode::Right, EQChannelMode::Mid,
+        EQChannelMode::Side
+    };
+    bool ok = true;
+    for (int ti = 0; ti < 5 && ok; ++ti)
+    {
+        for (int ci = 0; ci < 5 && ok; ++ci)
+        {
+            juce::ValueTree v("EQ");
+            juce::ValueTree band("Band");
+            band.setProperty("index", 0, nullptr);
+            band.setProperty("type", static_cast<int>(kTypes[ti]), nullptr);
+            band.setProperty("channel", static_cast<int>(kChannels[ci]), nullptr);
+            v.addChild(band, -1, nullptr);
+            eq.setState(v);
+            if (eq.getBandType(0) != kTypes[ti]
+                || eq.getBandChannelMode(0) != kChannels[ci])
+            {
+                std::fprintf(stderr, "D10-T2: valid type/channel not restored (t=%d c=%d)\n", ti, ci);
+                ok = false;
+            }
+        }
+    }
+    if (ok)
+        std::printf("STG11D10EQEnumGuardTests: D10-T2 PASS (valid round-trip kept)\n");
+    return ok;
+}
+
+bool checkD10T3Boundaries()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-11-D10 T-3] harness start failed\n");
+        return false;
+    }
+    h.stop();
+    EQProcessor& eq = eqOf(h.engine());
+
+    eq.setBandType(0, EQBandType::Peaking);
+    eq.setBandChannelMode(0, EQChannelMode::Stereo);
+
+    // min-1 / max+1 rejected (defaults retained).
+    {
+        juce::ValueTree v("EQ");
+        juce::ValueTree band("Band");
+        band.setProperty("index", 0, nullptr);
+        band.setProperty("type", -1, nullptr);
+        band.setProperty("channel", 5, nullptr);
+        v.addChild(band, -1, nullptr);
+        eq.setState(v);
+    }
+    bool ok = true;
+    if (eq.getBandType(0) != EQBandType::Peaking
+        || eq.getBandChannelMode(0) != EQChannelMode::Stereo)
+    {
+        std::fprintf(stderr, "D10-T3: boundary-adjacent OOB applied\n");
+        ok = false;
+    }
+
+    // min / max accepted.
+    {
+        juce::ValueTree v("EQ");
+        juce::ValueTree band("Band");
+        band.setProperty("index", 0, nullptr);
+        band.setProperty("type", 0, nullptr);    // LowShelf
+        band.setProperty("channel", 4, nullptr); // Side
+        v.addChild(band, -1, nullptr);
+        eq.setState(v);
+    }
+    if (eq.getBandType(0) != EQBandType::LowShelf
+        || eq.getBandChannelMode(0) != EQChannelMode::Side)
+    {
+        std::fprintf(stderr, "D10-T3: boundary min/max rejected\n");
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("STG11D10EQEnumGuardTests: D10-T3 PASS (boundaries exact)\n");
+    return ok;
+}
+
+} // namespace
+
+int runSTG11D10EQEnumGuardTests()
+{
+    bool ok = true;
+    if (!checkD10T1OutOfRangeRejected())
+    {
+        std::fprintf(stderr, "FAIL: D10-T1 OOB rejected\n");
+        ok = false;
+    }
+    if (!checkD10T2ValidRoundTrip())
+    {
+        std::fprintf(stderr, "FAIL: D10-T2 valid round-trip\n");
+        ok = false;
+    }
+    if (!checkD10T3Boundaries())
+    {
+        std::fprintf(stderr, "FAIL: D10-T3 boundaries\n");
+        ok = false;
+    }
+    if (ok)
+        std::printf("STG11D10EQEnumGuardTests: PASS (D10-T1/D10-T2/D10-T3)\n");
+    return ok ? 0 : 1;
+}
+
 ```
 
 ### 📄 `src\tests\AudioEngineHarness\STG11D3AffinityFailureTests.cpp`
