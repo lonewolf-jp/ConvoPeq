@@ -97,4 +97,55 @@ public:
         }
         return false;
     }
+
+    // ===== STG-11-D3: affinity failure observation（production 変更ゼロ）=====
+    //   AudioEngine の friend のため private 到達可能。record/report は
+    //   production の private member であり、test からのみ friend 経由で呼ぶ。
+    //   RT 側の record は OS 呼び出しを伴わないため、合成値で直接検証できる。
+
+    // RT-side record と同一の記録を実行する（synthetic kind/mask/err）。
+    //   OS failure injection を行わずに transport 両端を検証するため、
+    //   production と同じ private 関数を合成値で駆動する。
+    static void recordAffinityFailure(AudioEngine& e, std::uint32_t kind, std::uint64_t mask,
+                                      std::uint32_t err) noexcept
+    {
+        e.recordAffinityFailure(kind, static_cast<DWORD_PTR>(mask), static_cast<DWORD>(err));
+    }
+
+    // NonRT diagnosis を実行する（timerCallback と同一の入口）。
+    static void reportAffinityFailure(AudioEngine& e) noexcept
+    {
+        e.reportAffinityFailureIfRecorded();
+    }
+
+    static bool affinityFailureObserved(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.affinityFailureObserved_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t affinityFailureCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.affinityFailureCount_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t affinityFailureLastMask(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.affinityFailureLastMask_, std::memory_order_acquire);
+    }
+
+    static std::uint32_t affinityFailureLastError(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.affinityFailureLastError_, std::memory_order_acquire);
+    }
+
+    static std::uint32_t affinityFailureLastKind(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.affinityFailureLastKind_, std::memory_order_acquire);
+    }
+
+    static std::uint64_t affinityFailureReportedCount(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.affinityFailureReportedCount_, std::memory_order_acquire);
+    }
+
 };

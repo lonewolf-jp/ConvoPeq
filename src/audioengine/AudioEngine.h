@@ -2675,6 +2675,17 @@ public:
     // ★ [work70 v9.11] MMCSS shutdown flag — Message Thread → Audio Thread notification.
     //    Message Thread sets flag, Audio Thread performs actual AvRevert.
     alignas(64) std::atomic<bool> mmcssShutdownRequested{false};
+    // STG-11-D3: affinity failure observation (RT to NonRT diagnostic transport).
+    //   RT-safe: lock-free atomics only. lossy-coalescing (last-wins + monotonic count).
+    //   No mutex / allocation / logging backend on RT. No new authority.
+    //   Readout and diagnosis by NonRT reportAffinityFailureIfRecorded().
+    std::atomic<bool> affinityFailureObserved_{false};
+    std::atomic<std::uint64_t> affinityFailureCount_{0};
+    std::atomic<std::uint64_t> affinityFailureLastMask_{0};
+    std::atomic<std::uint32_t> affinityFailureLastError_{0};
+    std::atomic<std::uint32_t> affinityFailureLastKind_{0}; // 0=affinity, 1=SetPriorityClass, 2=SetThreadPriority
+    std::atomic<std::uint64_t> affinityFailureReportedCount_{0};
+
 
     // ★ BUG-014: MMCSS ポリシー atomic キャッシュ（Message Thread が publish、Audio Thread が acquire load）。
     //    alignas(64) で他ホット atomic（mmcssShutdownRequested 等）とキャッシュライン分離（既存パターン踏襲）。
@@ -2779,6 +2790,10 @@ public:
     // ★ [work62/work70 v9.11] CPU affinity + NativeRT priority setting (always called once).
     //    MMCSS registration is handled by tryApplyMmcssForSelfManagedThread() separately.
     bool applyMmcssPriority() noexcept;
+    // STG-11-D3: RT-side failure recorder (Timer.cpp) + NonRT diagnosis hook.
+    //   record: lock-free atomic record only. report: existing diagLog backend on NonRT.
+    void recordAffinityFailure(std::uint32_t kind, DWORD_PTR audioMask, DWORD error) noexcept;
+    void reportAffinityFailureIfRecorded() noexcept;
     // ★ [work63] Audio Thread 上で MMCSS を解除（同一スレッド必須のため）— legacy alias
     void revertMmcssPriorityOnAudioThread() noexcept;
     // ★ [work63] シャットダウン完了処理（releaseResources から呼ばれる安全網）— legacy alias

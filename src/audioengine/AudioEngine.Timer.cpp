@@ -249,28 +249,18 @@ bool AudioEngine::applyMmcssPriority() noexcept
             const BOOL pcResult = ::SetPriorityClass(::GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
             const BOOL tpResult = ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
             const bool nativeRtOk = (pcResult != 0 && tpResult != 0);
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ STG-11-D3: RT-safe observation only (INV-D3-1/2/3).
+            //   NativeRT failure も F4 と同一機構で記録する（diagnostics ON/OFF 両対応）。
+            //   従来の guarded diagLog（F1/F2）は NonRT 診断へ移設した。
+            //   failure policy 不変（nativeRtOk==false → priorityApplied=false のまま）。
             if (pcResult == 0) {
                 const DWORD err = ::GetLastError();
-                diagLog("[NATIVE_RT] SetPriorityClass(REALTIME) FAILED: GetLastError="
-                    + juce::String(static_cast<int>(err)));
+                recordAffinityFailure(1, 0, err);
             }
             if (tpResult == 0) {
                 const DWORD err = ::GetLastError();
-                diagLog("[NATIVE_RT] SetThreadPriority(TIME_CRITICAL) FAILED: GetLastError="
-                    + juce::String(static_cast<int>(err)));
+                recordAffinityFailure(2, 0, err);
             }
-            if (nativeRtOk) {
-                const int win32Priority = ::GetThreadPriority(::GetCurrentThread());
-                const DWORD pc = ::GetPriorityClass(::GetCurrentProcess());
-                diagLog("[NATIVE_RT] applied: win32Prio=" + juce::String(win32Priority)
-                    + " procClass=" + juce::String(static_cast<int>(pc))
-                    + " savedClass=" + juce::String(static_cast<int>(savedProcessPriorityClass)));
-            }
-#else
-            (void)pcResult;
-            (void)tpResult;
-#endif
             if (!nativeRtOk) {
                 priorityApplied = false;
             }
@@ -287,9 +277,12 @@ bool AudioEngine::applyMmcssPriority() noexcept
                 ::GetCurrentThread(), audioMask);
             if (prevMask == 0) {
                 const DWORD err = ::GetLastError();
-                diagLog("[AFFINITY] FAILED: mask=0x"
-                        + juce::String::toHexString(static_cast<uint64_t>(audioMask))
-                        + " GetLastError=" + juce::String(static_cast<int>(err)));
+                // ★ STG-11-D3: RT-safe observation only (INV-D3-1/2/3).
+                //   No diagLog / mutex / heap on RT. NonRT timerCallback diagnoses
+                //   via reportAffinityFailureIfRecorded(). Lossy-coalescing:
+                //   last-wins values + monotonic count. Failure policy unchanged
+                //   (informational; priorityApplied unaffected).
+                recordAffinityFailure(0, audioMask, err);
             }
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
             else {
@@ -308,6 +301,87 @@ bool AudioEngine::applyMmcssPriority() noexcept
 
     return priorityApplied;
 }
+// ★ STG-11-D3: RT-side failure recorder (affinity + NativeRT).
+//   Lock-free atomic record only (convo:: wrappers). No mutex / allocation /
+//   logging backend. Callable from any thread; intended for RT failure paths.
+//   kind: 0=affinity (SetThreadAffinityMask), 1=SetPriorityClass, 2=SetThreadPriority.
+//
+//   ★ publication order（STG-11-D3 ordering correction）★
+//     payload stores must be sequenced BEFORE the count increment, and the
+//     observed flag must be the very last store. Otherwise a reader that
+//     acquires observed / count cannot be guaranteed to see the payload:
+//     a release store only publishes what is sequenced BEFORE it, so marking
+//     first would leave the payload outside the happens-before edge.
+//
+//     (1) payload      : last-wins snapshot (release)
+//     (2) count        : monotonic, and the PER-RECORD publication marker.
+//                        fetchAddAtomic is a release operation (acq_rel), so an
+//                        acquire load of count that reads N synchronizes-with
+//                        the increment that produced N and therefore sees the
+//                        payload of record #N.
+//     (3) observed     : monotonic bool flag ("a failure happened at least
+//                        once"), fast-out only. Never the payload carrier.
+//
+void AudioEngine::recordAffinityFailure(
+    std::uint32_t kind, DWORD_PTR audioMask, DWORD error) noexcept // NOLINT(bugprone-easily-swappable-parameters)
+{
+    // (1) payload: publish the snapshot BEFORE anything marks the record.
+    convo::publishAtomic(affinityFailureLastKind_, kind, std::memory_order_release);
+    convo::publishAtomic(affinityFailureLastMask_, static_cast<std::uint64_t>(audioMask),
+                         std::memory_order_release);
+    convo::publishAtomic(affinityFailureLastError_, static_cast<std::uint32_t>(error),
+                         std::memory_order_release);
+    // (2) count: monotonic AND the per-record publication marker.
+    convo::fetchAddAtomic(affinityFailureCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    // (3) observed: monotonic flag, always the last store.
+    convo::publishAtomic(affinityFailureObserved_, true, std::memory_order_release);
+}
+
+// ★ STG-11-D3: NonRT diagnosis of the recorded affinity / NativeRT failure.
+//   Reads the lock-free observation and emits via the existing diagLog backend.
+//   Runs on NonRT only (called from timerCallback). Reports each recorded count
+//   once (reportedCount tracks count; monotonic, race-clean).
+//   Lossy-coalescing is explicit: mask/error/kind are last-wins snapshots, the
+//   count is monotonic. No ownership is carried, so coalescing cannot lose
+//   ownership (INV-D3-4 / INV-D3-5).
+//
+//   ★ read order（ordering correction）★
+//     observed is a fast-out flag only. The payload visibility guarantee comes
+//     from the acquire load of the COUNT, which the recorder increments after
+//     publishing the payload. Reading count before the snapshot is therefore
+//     mandatory: count == N implies "the payload of record #N is visible".
+//     A snapshot newer than count is possible (RT recorded again between the
+//     two loads); that is the declared lossy-coalescing and carries no
+//     ownership, so it cannot silently lose anything. A snapshot OLDER than
+//     count is impossible by the publication order in the recorder.
+//
+void AudioEngine::reportAffinityFailureIfRecorded() noexcept
+{
+    // fast-out only: monotonic "any failure ever" flag, not a payload carrier.
+    if (!convo::consumeAtomic(affinityFailureObserved_, std::memory_order_acquire))
+        return;
+    // publication marker: acquire of count == N publishes record #N's payload.
+    const std::uint64_t count = convo::consumeAtomic(affinityFailureCount_, std::memory_order_acquire);
+    if (count == 0)
+        return;
+    const std::uint64_t reported =
+        convo::consumeAtomic(affinityFailureReportedCount_, std::memory_order_acquire);
+    if (reported >= count)
+        return;  // already diagnosed (count is monotonic: nothing new to report)
+    // snapshot reads must come after the count acquire (see note above).
+    const std::uint64_t mask = convo::consumeAtomic(affinityFailureLastMask_, std::memory_order_acquire);
+    const std::uint32_t err = convo::consumeAtomic(affinityFailureLastError_, std::memory_order_acquire);
+    const std::uint32_t kind = convo::consumeAtomic(affinityFailureLastKind_, std::memory_order_acquire);
+    const char* tag = (kind == 1) ? "[NATIVE_RT] SetPriorityClass(REALTIME) FAILED"
+                      : (kind == 2) ? "[NATIVE_RT] SetThreadPriority(TIME_CRITICAL) FAILED"
+                      : "[AFFINITY] FAILED";
+    diagLog(juce::String(tag) + ": mask=0x" + juce::String::toHexString(mask)
+        + " GetLastError=" + juce::String(static_cast<int>(err))
+        + " kind=" + juce::String(static_cast<int>(kind))
+        + " count=" + juce::String(static_cast<juce::int64>(count)));
+    convo::publishAtomic(affinityFailureReportedCount_, count, std::memory_order_release);
+}
+
 
 // ★ [work63] revertMmcssPriorityOnAudioThread — Audio Thread 上で優先度設定を解除
 // ★ JUCE委譲（work70 v9.11決定）: MMCSS は JUCE が管理するため自前での解除は不要。
@@ -924,6 +998,11 @@ void AudioEngine::timerCallback()
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
+
+    // ★ STG-11-D3: affinity failure observation の NonRT 診断。
+    //   RT 側（applyMmcssPriority）が lock-free atomic に記録した failure を
+    //   既存 diagLog backend で出力する。RT から backend には到達しない。
+    reportAffinityFailureIfRecorded();
 
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
