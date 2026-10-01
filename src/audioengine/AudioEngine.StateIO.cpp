@@ -35,11 +35,19 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     RestoreStateGuard guard(m_isRestoringState);
 
     // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
+    // ★ STG-11-D7: 未検証 enum cast の排除（B-3 big 2-10 と同型）。
+    //   破損・改変・将来 version の session が範囲外値を持つ場合、そのまま publish すると
+    //   RT の配列 index（OutputFilter::process）等に到達する。範囲外はデフォルト維持。
     if (state.hasProperty("processingOrder"))
     {
-        const auto order = (ProcessingOrder)(int)state.getProperty("processingOrder");
-        convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
-        convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
+        const int raw = static_cast<int>(state.getProperty("processingOrder"));
+        if (raw >= static_cast<int>(ProcessingOrder::ConvolverThenEQ)
+            && raw <= static_cast<int>(ProcessingOrder::EQThenConvolver))
+        {
+            const auto order = static_cast<ProcessingOrder>(raw);
+            convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
+            convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
+        }
     }
 
     if (state.hasProperty("eqBypassed"))
@@ -161,16 +169,39 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("saturationAmount"))
         setSaturationAmount(state.getProperty("saturationAmount"));
 
+    // ★ STG-11-D7: 未検証 enum cast の排除（B-3 と同型）。
     if (state.hasProperty("analyzerSource"))
-        setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
+    {
+        const int raw = static_cast<int>(state.getProperty("analyzerSource"));
+        if (raw >= static_cast<int>(AnalyzerSource::Input)
+            && raw <= static_cast<int>(AnalyzerSource::Output))
+            setAnalyzerSource(static_cast<AnalyzerSource>(raw));
+    }
 
     // 出力周波数フィルターモードの読み込み
+    // ★ STG-11-D7: 未検証 enum cast の排除（B-3 と同型）。
+    //   範囲外値が RT の OutputFilter::process の配列 index に到達すると OOB する。
     if (state.hasProperty("convHCFilterMode"))
-        setConvHCFilterMode((convo::HCMode)(int)state.getProperty("convHCFilterMode"));
+    {
+        const int raw = static_cast<int>(state.getProperty("convHCFilterMode"));
+        if (raw >= static_cast<int>(convo::HCMode::Sharp)
+            && raw <= static_cast<int>(convo::HCMode::Soft))
+            setConvHCFilterMode(static_cast<convo::HCMode>(raw));
+    }
     if (state.hasProperty("convLCFilterMode"))
-        setConvLCFilterMode((convo::LCMode)(int)state.getProperty("convLCFilterMode"));
+    {
+        const int raw = static_cast<int>(state.getProperty("convLCFilterMode"));
+        if (raw >= static_cast<int>(convo::LCMode::Natural)
+            && raw <= static_cast<int>(convo::LCMode::Soft))
+            setConvLCFilterMode(static_cast<convo::LCMode>(raw));
+    }
     if (state.hasProperty("eqLPFFilterMode"))
-        setEqLPFFilterMode((convo::HCMode)(int)state.getProperty("eqLPFFilterMode"));
+    {
+        const int raw = static_cast<int>(state.getProperty("eqLPFFilterMode"));
+        if (raw >= static_cast<int>(convo::HCMode::Sharp)
+            && raw <= static_cast<int>(convo::HCMode::Soft))
+            setEqLPFFilterMode(static_cast<convo::HCMode>(raw));
+    }
 
     // ─── Step 4: サブプロセッサ状態の復元 ───────────────────────────────────
     auto eqState = state.getChildWithName ("EQ");
