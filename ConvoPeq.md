@@ -1,6 +1,6 @@
 # Project Extract & Source Code: stg11-d1-d18
 
-> Generated: 2026-10-02 20:56:11
+> Generated: 2026-10-02 23:19:21
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -9035,6 +9035,19 @@ public:
     void releaseResourcesForReconfigure() noexcept;
     std::thread rebuildThread;
     std::mutex rebuildMutex;
+    // ★ STG-11-D15-1: OwnerChannel producer serialization (NonRT only).
+    //   OwnerChannel is SPSC by design ("Single Producer"), but three NonRT threads
+    //   reach worldAuthority_.ownerChannel().enqueue through the single facade
+    //   enqueueRuntimePublicationFireAndForget: Message thread (prepare/release/
+    //   timer idle publish), RebuildThread (trySubmitImpl), CoordinatorLoop worker
+    //   (deferred resubmit). Without serialization, two producers in enqueue()
+    //   on the same free slot race on Slot::key (non-atomic) and lose an owner
+    //   (leak) or commit a key/owner mismatch (wrong world). This mutex makes the
+    //   channel observe a single logical producer, so the SPSC contract stays
+    //   valid. RT / audio thread never touches this mutex: the facade is NonRT-only
+    //   (ASSERT_NON_RT_THREAD at its entry), the consumer take() stays lock-free,
+    //   and shutdown drain runs with producers quiescent.
+    std::mutex ownerChannelProducerMutex_;
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
     std::atomic<bool> rebuildThreadIsRunning { false };
@@ -10973,6 +10986,11 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     const convo::isr::DSPHandle& oldHandle,
     std::uint64_t recoveryObligationId = 0) noexcept
 {
+    // ★ STG-11-D15-1: NonRT-only の明示。Audio / ISR スレッドは本 facade を呼ばない
+    //   （audio-thread trySubmit は排除済み。呼び出し元は Message / Rebuild /
+    //   CoordinatorLoop の NonRT 3 スレッドのみ）。ownerChannelProducerMutex_ の
+    //   取得が RT に波及しないことの保証である（debug 時のみ検出）。
+    ASSERT_NON_RT_THREAD();
     // ★ D101-33-C (D101-33-B A′ design): Admission-first token.
     //   tryAdmit(1) is THE linearization point vs closeAdmission() — both CAS on the same
     //   packedState_ word, so either admit precedes close (reservation observable via
@@ -11035,11 +11053,25 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 
     // 2. immutable world の所有権を OwnerChannel へ移譲（key = seq/epoch/mappedGen）。
     //    enqueue 成功時点で所有権は移譲済み — 以降 executePublish が take→commit する。
-    if (!worldAuthority_.ownerChannel().enqueue(
-            convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen }, std::move(world)))
+    //    ★ STG-11-D15-1: producer-side OwnerChannel access の直列化。
+    //      OwnerChannel は SPSC 設計だが、本 facade には Message thread /
+    //      RebuildThread / CoordinatorLoop worker の 3 producer が到達する。
+    //      同一 free slot への concurrent enqueue は Slot::key（non-atomic）の
+    //      data race と owner 喪失（leak）/ key-owner 食い違い（誤 world publish）を
+    //      招くため、channel 操作を ownerChannelProducerMutex_ で直列化し、
+    //      channel から見える producer を 1 論理 producer にする。
+    //      保護範囲は channel 操作のみ（lock-free のため nested lock なし・
+    //      deadlock なし）。consumer 側 take() は lock しない（RT lock-free 維持）。
+    //      seqId は world ごとに一意のため、take-back が他 producer / consumer と
+    //      同一 key で競合することはない。
     {
-        worldAuthority_.registry().unregister(seqId);
-        return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+        std::lock_guard<std::mutex> ownerChannelProducerLock(ownerChannelProducerMutex_);
+        if (!worldAuthority_.ownerChannel().enqueue(
+                convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen }, std::move(world)))
+        {
+            worldAuthority_.registry().unregister(seqId);
+            return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+        }
     }
 
     // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
@@ -11066,8 +11098,14 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
         // ★ D101-33-C: token は AdmissionTokenGuard デストラクタで release（X5 rollback は
         //   enqueuePublicationIntent 内部で完了済み — token/residency/owner/registry の
         //   partial state なし）。
-        (void)worldAuthority_.ownerChannel().take(
-            convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
+        // ★ STG-11-D15-1: producer-side take-back も同一 mutex で直列化する。
+        //   同一 ownership serialization contract の一部であり、enqueue と対になる
+        //   producer 操作である。consumer 側の通常 take() は対象外（RT lock-free 維持）。
+        {
+            std::lock_guard<std::mutex> ownerChannelProducerLock(ownerChannelProducerMutex_);
+            (void)worldAuthority_.ownerChannel().take(
+                convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
+        }
         worldAuthority_.registry().unregister(seqId);
         return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
     }
@@ -37304,6 +37342,15 @@ struct OversamplingPolicy {
 // ★ B2: Lock-free SPSC owner-transfer channel (ADR-D3 Step 5-3 owner leg).
 //   Single Producer (Non-RT publish thread) -> Single Consumer (ISR/audio thread).
 //   Transfers SOLE OWNERSHIP of a RuntimeStateOwner across the RT boundary.
+//
+//   ★ STG-11-D15-1: SPSC contract clarification — "Single Producer" means a single
+//   LOGICAL producer as observed by this channel. Three physical NonRT threads
+//   (Message / Rebuild / CoordinatorLoop) reach the channel, but they are
+//   serialized by the sole facade (AudioEngine::enqueueRuntimePublicationFireAndForget
+//   under ownerChannelProducerMutex_) before touching it, so the channel never
+//   observes concurrent producers. Do NOT add producers that bypass the facade;
+//   do NOT take locks on the consumer (take) path — it must stay lock-free for RT.
+//   The shutdown terminal drain (drainAllNonRt) runs with producers quiescent.
 //
 //   Key invariant (B2-design): key = (sequenceId, epoch, mappedGeneration), NOT sequenceId
 //   alone — so future cancel / retry / overflow / replay cannot collide across attempts.
@@ -122716,19 +122763,30 @@ int main()
 // ★ B2: OwnerChannel unit tests (ADR-D3). JUCE-independent.
 //   Verifies ownership transfer semantics in isolation, BEFORE any publish-path wiring
 //   (B3): single-transfer, single-take, key isolation, no-overwrite, no-leak, no-double-free.
+// ★ STG-11-D15-1: multi-producer regression (tests 9/10/11). The channel is SPSC by
+//   design; production serializes its physical producers in the facade. These tests
+//   mirror that composition (producers share a mutex, consumer never locks) and prove
+//   exact ownership accounting under concurrency. Run the hammer with
+//   useSerialization=false to reproduce the defect (negative control).
 
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <vector>
 
 #include "audioengine/OwnerChannel.h"
 
 // Move-only mock; unique_ptr<MockOwner> never move-constructs a MockOwner (it only
 // transfers the internal pointer), so deleting MockOwner's move-ctor is safe and
 // catches accidental copies.
+// ★ STG-11-D15-1: alive is atomic because the multi-producer tests construct and
+//   destroy owners on several threads concurrently.
 struct MockOwner {
     int id;
-    static int alive;
+    static std::atomic<int> alive;
     explicit MockOwner(int i) : id(i) { ++alive; }
     ~MockOwner() { --alive; }
     MockOwner(const MockOwner&) = delete;
@@ -122736,7 +122794,7 @@ struct MockOwner {
     MockOwner(MockOwner&&) = delete;
     MockOwner& operator=(MockOwner&&) = delete;
 };
-int MockOwner::alive = 0;
+std::atomic<int> MockOwner::alive{ 0 };
 
 using Channel = convo::isr::OwnerChannel<std::unique_ptr<MockOwner>>;
 
@@ -122898,6 +122956,219 @@ using Channel = convo::isr::OwnerChannel<std::unique_ptr<MockOwner>>;
     return got && got->id == 2;
 }
 
+// ★ STG-11-D15-1: multi-producer regression (Test A / B / C).
+//
+// Contract under test: physical producer threads (>1) are serialized BEFORE
+// touching the channel (production: AudioEngine::enqueueRuntimePublicationFireAndForget
+// under ownerChannelProducerMutex_), so the channel observes a single logical
+// producer and its SPSC contract holds. These tests mirror that composition:
+// producers share a test-local mutex; the consumer never locks (RT lock-free
+// parity). Run the hammer with useSerialization=false to reproduce the defect
+// (negative control): same-key double-accept strands an owner (alive != 0) and
+// colliding probes lose key/owner correspondence.
+namespace d15 {
+
+constexpr int kHammerRounds = 2000;
+
+struct HammerOutcome {
+    int roundsWon = 0;
+    bool mappingIntact = true;
+};
+
+// One hammer round: both producers enqueue the SAME key. Identical keys hash to
+// the same probe start, so without serialization the two threads almost surely
+// collide on the same free slot within kHammerRounds. With serialization,
+// exactly one wins per round (single-thread overwrite-reject semantics).
+void hammerSameKey(Channel& ch, std::mutex& producerMutex, bool useSerialization,
+                   HammerOutcome& out) {
+    // 8 racers released behind a ready-gate: with this many threads spinning on
+    // the same atomic, at least two land inside the slot load->store window in
+    // essentially every batch of rounds, so the unserialized run fails reliably
+    // while the serialized run passes deterministically.
+    constexpr int kRacers = 8;
+    for (int round = 0; round < kHammerRounds; ++round) {
+        const convo::isr::OwnerChannelKey key{ 9000, 0, 0 };
+        std::atomic<int> ready{ 0 };
+        std::atomic<int> go{ 0 };
+        std::atomic<int> winners{ 0 };
+        std::vector<std::unique_ptr<MockOwner>> losers(kRacers);
+        std::vector<std::thread> threads;
+        threads.reserve(kRacers);
+        // Pre-create owners BEFORE the gate so allocation jitter cannot mask
+        // the race window.
+        std::vector<std::unique_ptr<MockOwner>> owners;
+        owners.reserve(kRacers);
+        for (int t = 0; t < kRacers; ++t)
+            owners.push_back(std::make_unique<MockOwner>(t + 1));
+
+        for (int t = 0; t < kRacers; ++t) {
+            threads.emplace_back([&, t] {
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                while (go.load(std::memory_order_acquire) == 0) {}
+                bool accepted;
+                if (useSerialization) {
+                    std::lock_guard<std::mutex> lock(producerMutex);
+                    accepted = ch.enqueue(key, std::move(owners[t]));
+                } else {
+                    accepted = ch.enqueue(key, std::move(owners[t]));
+                }
+                if (accepted)
+                    winners.fetch_add(1, std::memory_order_acq_rel);
+                else
+                    losers[t] = std::move(owners[t]);
+            });
+        }
+        while (ready.load(std::memory_order_acquire) < kRacers) {}
+        go.store(1, std::memory_order_release);
+        for (auto& th : threads)
+            th.join();
+
+        // Exactly one winner per round under correct serialization.
+        if (winners.load(std::memory_order_acquire) != 1)
+            out.mappingIntact = false;
+        else
+            ++out.roundsWon;
+        // Drain whatever is present so the next round starts clean; stranded
+        // owners (multi-accept) stay behind and trip the alive check.
+        auto got = ch.take(key);
+        if (winners.load(std::memory_order_acquire) == 1 && !got)
+            out.mappingIntact = false;
+        // losers retain their owners (destroyed at scope exit); winner above.
+    }
+}
+
+} // namespace d15
+
+// 9. Test A — multi-producer enqueue: serialized producers keep exact ownership
+//    accounting and key/owner correspondence across 2000 same-key race rounds.
+[[nodiscard]] bool testOwnerChannelMultiProducerSerialized() {
+    MockOwner::alive = 0;
+    Channel ch;
+    std::mutex producerMutex;   // mirrors ownerChannelProducerMutex_ in production
+    d15::HammerOutcome out{};
+    d15::hammerSameKey(ch, producerMutex, /*useSerialization=*/true, out);
+    if (!out.mappingIntact)
+        return false;
+    if (out.roundsWon != d15::kHammerRounds)
+        return false;
+    if (ch.size() != 0)
+        return false;
+    return MockOwner::alive == 0;
+}
+
+// 10. Test B — producer-side rollback: enqueue then take-back (intent-queue-full
+//     rollback shape) recovers caller ownership with nothing stranded.
+[[nodiscard]] bool testOwnerChannelProducerRollback() {
+    MockOwner::alive = 0;
+    Channel ch;
+    const convo::isr::OwnerChannelKey key{ 4242, 3, 9 };
+    if (!ch.enqueue(key, std::make_unique<MockOwner>(77)))
+        return false;
+    // Rollback: the producer takes back its own (unique) key.
+    auto recovered = ch.take(key);
+    if (!recovered || recovered->id != 77)
+        return false;
+    if (ch.size() != 0)
+        return false;
+    recovered.reset();
+    if (MockOwner::alive != 0)
+        return false;
+    // Rollback of an absent key is a no-op returning nullptr.
+    auto absent = ch.take(key);
+    return absent == nullptr;
+}
+
+// 11. Test C — producers + consumer concurrency: 2 serialized producers and one
+//     lock-free consumer deliver every owner exactly once with ids intact.
+[[nodiscard]] bool testOwnerChannelProducersConsumer() {
+    MockOwner::alive = 0;
+    Channel ch;
+    std::mutex producerMutex;   // producers serialized; consumer never locks
+    constexpr int kItemsPerProducer = 500;
+    std::atomic<bool> abortFlag{ false };
+    std::atomic<int> delivered{ 0 };
+    std::atomic<bool> mismatch{ false };
+
+    auto producer = [&](int baseId) {
+        for (int i = 0; i < kItemsPerProducer && !abortFlag.load(std::memory_order_acquire); ++i) {
+            const convo::isr::OwnerChannelKey key{
+                static_cast<std::uint64_t>(baseId + i), 1, 7 };
+            auto owner = std::make_unique<MockOwner>(baseId + i);
+            bool accepted = false;
+            int attempts = 0;
+            while (!accepted && !abortFlag.load(std::memory_order_acquire)
+                   && attempts < 5000000) {
+                {
+                    std::lock_guard<std::mutex> lock(producerMutex);
+                    accepted = ch.enqueue(key, std::move(owner));
+                }
+                if (!accepted) {
+                    // Slot still held by an undrained owner (consumer is behind):
+                    // yield and retry with a fresh owner. The rejected owner is
+                    // destroyed here, so alive accounting stays exact.
+                    owner = std::make_unique<MockOwner>(baseId + i);
+                    ++attempts;
+                    std::this_thread::yield();
+                }
+            }
+            if (!accepted) {
+                mismatch.store(true, std::memory_order_release);
+                abortFlag.store(true, std::memory_order_release);
+                return;
+            }
+        }
+    };
+
+    std::thread consumer([&] {
+        int wantA = 1000000;
+        int wantB = 2000000;
+        const int total = 2 * kItemsPerProducer;
+        int spins = 0;
+        while (delivered.load(std::memory_order_acquire) < total && spins < 20000000
+               && !abortFlag.load(std::memory_order_acquire)) {
+            bool progress = false;
+            for (int base : { 1000000, 2000000 }) {
+                int& want = (base == 1000000) ? wantA : wantB;
+                if (want >= base + kItemsPerProducer)
+                    continue;
+                const convo::isr::OwnerChannelKey key{
+                    static_cast<std::uint64_t>(want), 1, 7 };
+                auto got = ch.take(key);   // lock-free, as on the RT consumer path
+                if (got) {
+                    if (got->id != want)
+                        mismatch.store(true, std::memory_order_release);
+                    ++want;
+                    delivered.fetch_add(1, std::memory_order_acq_rel);
+                    progress = true;
+                }
+            }
+            if (!progress) {
+                ++spins;
+                std::this_thread::yield();
+            }
+        }
+        if (delivered.load(std::memory_order_acquire) != 2 * kItemsPerProducer)
+            abortFlag.store(true, std::memory_order_release);   // let producers stop
+    });
+
+    std::thread pA(producer, 1000000);
+    std::thread pB(producer, 2000000);
+    pA.join();
+    pB.join();
+    consumer.join();
+
+    if (abortFlag.load(std::memory_order_acquire))
+        return false;
+
+    if (mismatch.load(std::memory_order_acquire))
+        return false;
+    if (delivered.load(std::memory_order_acquire) != 2 * kItemsPerProducer)
+        return false;
+    if (ch.size() != 0)
+        return false;
+    return MockOwner::alive == 0;
+}
+
 int main() {
     if (!testOwnerChannelBasicTransfer())     throw std::runtime_error("OwnerChannel basic transfer failed");
     if (!testOwnerChannelWrongKey())          throw std::runtime_error("OwnerChannel wrong-key failed");
@@ -122907,6 +123178,9 @@ int main() {
     if (!testOwnerChannelFullBackpressure())  throw std::runtime_error("OwnerChannel full backpressure failed");
     if (!testOwnerChannelDrainAllNonRt())     throw std::runtime_error("OwnerChannel drainAllNonRt failed");
     if (!testOwnerChannelDrainThenReenqueue()) throw std::runtime_error("OwnerChannel drain-then-reenqueue failed");
+    if (!testOwnerChannelMultiProducerSerialized()) throw std::runtime_error("OwnerChannel multi-producer serialized failed");
+    if (!testOwnerChannelProducerRollback()) throw std::runtime_error("OwnerChannel producer rollback failed");
+    if (!testOwnerChannelProducersConsumer()) throw std::runtime_error("OwnerChannel producers-consumer failed");
     return 0;
 }
 

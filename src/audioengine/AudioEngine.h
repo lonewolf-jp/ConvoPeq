@@ -2913,6 +2913,19 @@ public:
     void releaseResourcesForReconfigure() noexcept;
     std::thread rebuildThread;
     std::mutex rebuildMutex;
+    // ★ STG-11-D15-1: OwnerChannel producer serialization (NonRT only).
+    //   OwnerChannel is SPSC by design ("Single Producer"), but three NonRT threads
+    //   reach worldAuthority_.ownerChannel().enqueue through the single facade
+    //   enqueueRuntimePublicationFireAndForget: Message thread (prepare/release/
+    //   timer idle publish), RebuildThread (trySubmitImpl), CoordinatorLoop worker
+    //   (deferred resubmit). Without serialization, two producers in enqueue()
+    //   on the same free slot race on Slot::key (non-atomic) and lose an owner
+    //   (leak) or commit a key/owner mismatch (wrong world). This mutex makes the
+    //   channel observe a single logical producer, so the SPSC contract stays
+    //   valid. RT / audio thread never touches this mutex: the facade is NonRT-only
+    //   (ASSERT_NON_RT_THREAD at its entry), the consumer take() stays lock-free,
+    //   and shutdown drain runs with producers quiescent.
+    std::mutex ownerChannelProducerMutex_;
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
     std::atomic<bool> rebuildThreadIsRunning { false };
@@ -4851,6 +4864,11 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
     const convo::isr::DSPHandle& oldHandle,
     std::uint64_t recoveryObligationId = 0) noexcept
 {
+    // ★ STG-11-D15-1: NonRT-only の明示。Audio / ISR スレッドは本 facade を呼ばない
+    //   （audio-thread trySubmit は排除済み。呼び出し元は Message / Rebuild /
+    //   CoordinatorLoop の NonRT 3 スレッドのみ）。ownerChannelProducerMutex_ の
+    //   取得が RT に波及しないことの保証である（debug 時のみ検出）。
+    ASSERT_NON_RT_THREAD();
     // ★ D101-33-C (D101-33-B A′ design): Admission-first token.
     //   tryAdmit(1) is THE linearization point vs closeAdmission() — both CAS on the same
     //   packedState_ word, so either admit precedes close (reservation observable via
@@ -4913,11 +4931,25 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
 
     // 2. immutable world の所有権を OwnerChannel へ移譲（key = seq/epoch/mappedGen）。
     //    enqueue 成功時点で所有権は移譲済み — 以降 executePublish が take→commit する。
-    if (!worldAuthority_.ownerChannel().enqueue(
-            convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen }, std::move(world)))
+    //    ★ STG-11-D15-1: producer-side OwnerChannel access の直列化。
+    //      OwnerChannel は SPSC 設計だが、本 facade には Message thread /
+    //      RebuildThread / CoordinatorLoop worker の 3 producer が到達する。
+    //      同一 free slot への concurrent enqueue は Slot::key（non-atomic）の
+    //      data race と owner 喪失（leak）/ key-owner 食い違い（誤 world publish）を
+    //      招くため、channel 操作を ownerChannelProducerMutex_ で直列化し、
+    //      channel から見える producer を 1 論理 producer にする。
+    //      保護範囲は channel 操作のみ（lock-free のため nested lock なし・
+    //      deadlock なし）。consumer 側 take() は lock しない（RT lock-free 維持）。
+    //      seqId は world ごとに一意のため、take-back が他 producer / consumer と
+    //      同一 key で競合することはない。
     {
-        worldAuthority_.registry().unregister(seqId);
-        return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+        std::lock_guard<std::mutex> ownerChannelProducerLock(ownerChannelProducerMutex_);
+        if (!worldAuthority_.ownerChannel().enqueue(
+                convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen }, std::move(world)))
+        {
+            worldAuthority_.registry().unregister(seqId);
+            return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+        }
     }
 
     // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
@@ -4944,8 +4976,14 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
         // ★ D101-33-C: token は AdmissionTokenGuard デストラクタで release（X5 rollback は
         //   enqueuePublicationIntent 内部で完了済み — token/residency/owner/registry の
         //   partial state なし）。
-        (void)worldAuthority_.ownerChannel().take(
-            convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
+        // ★ STG-11-D15-1: producer-side take-back も同一 mutex で直列化する。
+        //   同一 ownership serialization contract の一部であり、enqueue と対になる
+        //   producer 操作である。consumer 側の通常 take() は対象外（RT lock-free 維持）。
+        {
+            std::lock_guard<std::mutex> ownerChannelProducerLock(ownerChannelProducerMutex_);
+            (void)worldAuthority_.ownerChannel().take(
+                convo::isr::OwnerChannelKey{ seqId, epoch, mappedGen });
+        }
         worldAuthority_.registry().unregister(seqId);
         return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
     }

@@ -3,6 +3,15 @@
 //   Single Producer (Non-RT publish thread) -> Single Consumer (ISR/audio thread).
 //   Transfers SOLE OWNERSHIP of a RuntimeStateOwner across the RT boundary.
 //
+//   ★ STG-11-D15-1: SPSC contract clarification — "Single Producer" means a single
+//   LOGICAL producer as observed by this channel. Three physical NonRT threads
+//   (Message / Rebuild / CoordinatorLoop) reach the channel, but they are
+//   serialized by the sole facade (AudioEngine::enqueueRuntimePublicationFireAndForget
+//   under ownerChannelProducerMutex_) before touching it, so the channel never
+//   observes concurrent producers. Do NOT add producers that bypass the facade;
+//   do NOT take locks on the consumer (take) path — it must stay lock-free for RT.
+//   The shutdown terminal drain (drainAllNonRt) runs with producers quiescent.
+//
 //   Key invariant (B2-design): key = (sequenceId, epoch, mappedGeneration), NOT sequenceId
 //   alone — so future cancel / retry / overflow / replay cannot collide across attempts.
 //   All three fields are already present on Intent.payload.publish + intent.sequenceId,
