@@ -65,6 +65,8 @@ int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
 // STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
 int runSTG11D12StateIntegerGuardTests();
+// STG11D12NoiseShaperEnumGuardTests.cpp (★ STG-11-D12-2: noiseShaperType setter guard + publish 回復回帰)
+int runSTG11D12NoiseShaperEnumGuardTests();
 int runSTG11D11TotalGainFiniteTests();
 int runSTG11D10EQEnumGuardTests();
 // STG11D11TotalGainFiniteTests.cpp (★ STG-11-D11-1: NaN totalGain guard)
@@ -1379,6 +1381,10 @@ int runFpmM2();
     // ★ STG-11-D12-3: UI の bit depth 選択肢が authoritative 集合と一致すること。
     // ★ STG-11-D12-4: validateResources の dither 合法集合の実行可能固定。
     if (runSTG11D12StateIntegerGuardTests() != 0)
+        return 1;
+
+    // ★ STG-11-D12-2: noiseShaperType setter 境界 guard と publish 回復回帰。
+    if (runSTG11D12NoiseShaperEnumGuardTests() != 0)
         return 1;
 
     if (runSTG11D11TotalGainFiniteTests() != 0)

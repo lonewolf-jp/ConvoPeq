@@ -2070,6 +2070,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/STG11D10EQEnumGuardTests.cpp
         src/tests/AudioEngineHarness/STG11D11TotalGainFiniteTests.cpp
         src/tests/AudioEngineHarness/STG11D12StateIntegerGuardTests.cpp
+        src/tests/AudioEngineHarness/STG11D12NoiseShaperEnumGuardTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp

@@ -459,6 +459,29 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
 
 void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 {
+    // ★ STG-11-D12-2: setter 境界で enum domain を一元検証する。
+    //   受理集合は 0..3 であり、NoiseShaperType (src/core/Types.h:23-28) の
+    //   Psychoacoustic(0) / Fixed4Tap(1) / Adaptive9thOrder(2) / Fixed15Tap(3) と
+    //   RuntimePublicationValidator::validateResources
+    //   (RuntimePublicationValidator.cpp:128-131, ns < 0 || ns > 3 で reject) に一致する。
+    //
+    //   範囲外は D7 / D10 / D12-1 と同じ「現在値を維持して return」の契約で拒否する。
+    //   clamp は行わない。
+    //
+    //   なぜ setter 境界か: restore caller は session (AudioEngine.StateIO.cpp:107-113、
+    //   同所に inline guard あり) と device settings XML (DeviceSettings.cpp:1140-1141、
+    //   無検証 cast) の 2 経路あり、各々に guard を置くと semantics が caller ごとに
+    //   分岐する。ここで一元化するのが唯一の後続追加にも漏れない形。StateIO.cpp 側の
+    //   guard は削除しない（多重防御。STG11D7StateEnumGuardTests の negative control 無傷）。
+    //
+    //   なぜ defect だったか: D12-1 と同型。範囲外 enum を atomic に書くと publish 判定より
+    //   前に値が永続化され、以降の rebuild ごと validateResources で reject される。
+    //   却下時に値を戻す経路が無く、rebuild/publish 経路が恒久的に閉じてしまう。
+    const int raw = static_cast<int>(type);
+    if (raw < static_cast<int>(NoiseShaperType::Psychoacoustic)
+        || raw > static_cast<int>(NoiseShaperType::Fixed15Tap))
+        return;
+
     if (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) != type)
     {
         convo::publishAtomic(noiseShaperType, type, std::memory_order_release);
