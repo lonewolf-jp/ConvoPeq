@@ -3,15 +3,13 @@
 
 ---
 
-## New in v0.6.10
+## New in v0.6.11
 
-- Enhanced Auto-Gain Functionality: Automatic gain calculation logic based on processing order (EQ/Convolver standalone, Conv→EQ, EQ→Conv) was added, along with heuristic-based Q-surge margins and safety margin calculations. A new `AutoGainPlanner` class was introduced to design the input/output gain auto-adjustment algorithm as a purely functional planner, improving clamping ranges and net 0dB alignment.
-- Added Deferred Deletion Queue Reclaim Test: A dedicated 745-line test suite was added to verify the behavior of `DeferredDeletionQueue::reclaim()`. This suite comprehensively validates RCU mechanism safety, covering epoch progression, FIFO order guarantees, concurrent enqueue/reclaim operations, MPMC epoch correctness, and state invariants during reclamation.
-- Improved ISR Runtime Governance: Enhancements were made to the ISR (Intelligent State Reconstruction) publication adjuster, retirement router, and runtime builder. Capabilities for state transition monitoring, publication behavior verification, and graph consistency checks were expanded; additionally, bug fixes for `RuntimeWorldAuthorityProjection` and fade state management using `fadingRuntimeUuid` were implemented.
-- Enhanced Thread Affinity Management: The `ThreadAffinityManager` improved CPU affinity mask management for audio threads, adding support for the `AudioRealtime` thread type and dedicated mask settings introduced in "Work 64." Thread priority management on Windows was improved through MMCSS priority application capabilities and the `tryApplyMmcssForSelfManagedThread()` method.
-- Eliminated Real-Time Blockers in Audio Threads: Non-real-time operations within audio threads (such as `Logger::writeToLog()`, `std::hash`, and the `GetCurrentProcessorNumber()` syscall) were eliminated or conditionally compiled out. Issues involving CRT function calls and false sharing were resolved; furthermore, interrupt-free processing for real-time threads was ensured by making `ScopedNoDenormals` thread-local and enhancing the safety of atomic operations.
-
-ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
+1. Hardened the session and preset restore boundary by validating enum, integer, and floating-point inputs at setter boundaries, rejecting out-of-range and non-finite values while keeping the current state, with regression tests proving invalid restores cannot reach the runtime.
+2. Repaired regressions introduced while splitting commits by restoring accidentally dropped validation guards through forward-fix commits, verified with full Debug/Release test suites and negative controls, without rewriting any existing commit.
+3. Fixed runtime ownership, lifetime, and thread safety including retire routing, snapshot quarantine handling, off-RT-thread observation paths, epoch management, and serialization of concurrent publish producers behind a single facade lock, covered by new concurrency tests.
+4. Published a series of read-only fresh-discovery audits with evidence, correcting one earlier verdict and confirming no-action outcomes elsewhere, while recording remaining observations without promoting unproven concerns into defects.
+5. Fixed the Intel compiler build by aligning the MKL target handling with the existing configuration pattern, released version 0.6.11 through the single version authority, and verified all Debug, Release, and Intel compiler test suites pass completely.
 
 ## Overview
 
