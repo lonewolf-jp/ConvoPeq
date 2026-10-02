@@ -63,6 +63,8 @@ int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
+// STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
+int runSTG11D12StateIntegerGuardTests();
 int runSTG11D11TotalGainFiniteTests();
 int runSTG11D10EQEnumGuardTests();
 // STG11D11TotalGainFiniteTests.cpp (★ STG-11-D11-1: NaN totalGain guard)
@@ -1373,6 +1375,12 @@ int runFpmM2();
     // ★ STG-11-D9-1: NaN tail guard。
     // ★ STG-11-D10-1: EQ enum guard。
     // ★ STG-11-D11-1: NaN totalGain guard。
+    // ★ STG-11-D12-1: ditherBitDepth setter 境界 guard と publish 回復回帰。
+    // ★ STG-11-D12-3: UI の bit depth 選択肢が authoritative 集合と一致すること。
+    // ★ STG-11-D12-4: validateResources の dither 合法集合の実行可能固定。
+    if (runSTG11D12StateIntegerGuardTests() != 0)
+        return 1;
+
     if (runSTG11D11TotalGainFiniteTests() != 0)
         return 1;
 

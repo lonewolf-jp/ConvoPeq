@@ -727,18 +727,22 @@ void DeviceSettings::updateBitDepthList()
     juce::Array<int> supportedBitDepths;
 
     // 標準的なビット深度を常に表示（送出前量子化ターゲットとして利用可能）。
+    // ★ STG-11-D12-3: この 3 値が authoritative 合法集合
+    //   {0,16,24,32} から 0（Off / auto、combo 側では "Off"）を除いた全部である。
+    //   AudioEngine::setDitherBitDepth と RuntimePublicationValidator::validateResources
+    //   の受理集合と一致させる。
     supportedBitDepths.add(16);
     supportedBitDepths.add(24);
     supportedBitDepths.add(32);
 
-    // 現在開いているデバイスがあれば、その実デバイスの現在bit depthを追加（重複除去）。
-    // JUCE 8.0.12 では available bit depth 一覧APIがないため current 値のみ参照する。
-    if (auto* device = audioDeviceManager.getCurrentAudioDevice())
-    {
-        int current = device->getCurrentBitDepth();
-        if (current > 0 && !supportedBitDepths.contains(current))
-            supportedBitDepths.add(current);
-    }
+    // ★ STG-11-D12-3: device の現在 bit depth を combo へ追加する経路は撤去する。
+    //   従来は audioDeviceManager.getCurrentAudioDevice()->getCurrentBitDepth() を
+    //   無条件に追加し、その最大値を :780 で engine に渡していた。device が 64 等を
+    //   返すと combo に 64 が並び、UI domain が setter domain と
+    //   RuntimePublicationValidator domain から乖離した状態で publish が恒久拒否される。
+    //   JUCE 8.0.12 には利用可能な bit depth 一覧 API がなく current 値しか取れないため、
+    //   取得できる値は S1 の外であり得る。上記 3 値だけで必要十分なので追加しない。
+    //   Off（0）との選択 semantics は変えない（下の "Off" 追加と選択決定ロジックは不変）。
 
     supportedBitDepths.sort();
 

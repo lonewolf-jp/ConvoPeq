@@ -379,6 +379,27 @@ void AudioEngine::revalidateInputHeadroomForCurrentMode()
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
 {
+    // ★ STG-11-D12-1: setter 境界で authoritative 合法集合を一元検証する。
+    //   受理集合は RuntimePublicationValidator::validateResources
+    //   (RuntimePublicationValidator.cpp:123-126) の {0,16,24,32} と同一であり、
+    //   kAdaptiveBitDepthValues (AudioEngine.h:14) の {16,24,32} に
+    //   0（Off / adaptive 無効）を加えた集合に一致する。
+    //
+    //   範囲外は D7 / D10 と同じ「現在値を維持して return」の契約で拒否する。
+    //   clamp は行わない: 64 を 32 に黙って変換すると UI と session の意図が失われ、
+    //   「UI domain == setter domain == validator domain」の一致が偶然に依存する。
+    //
+    //   なぜ setter 境界か: restore caller は session (AudioEngine.StateIO.cpp:101)、
+    //   device settings XML (DeviceSettings.cpp:1137)、device 起動時の UI 反映
+    //   (DeviceSettings.cpp:780, MainWindow.cpp:694/876) と複数あり、各々に guard を置くと
+    //   semantics が caller ごとに分岐する。ここで一元化するのが唯一の後続追加にも漏れない形。
+    //
+    //   なぜ defect だったか: 範囲外値を atomic に書くと、publish 判定より前に値が永続化され、
+    //   以降の rebuild ごと validateResources で reject される。却下時に値を戻す経路が無く、
+    //   rebuild/publish 経路が恒久的に閉じてしまう。
+    if (bitDepth != 0 && bitDepth != 16 && bitDepth != 24 && bitDepth != 32)
+        return;
+
     if (convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire) != bitDepth)
     {
         const bool adaptiveLearningActive = (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) == NoiseShaperType::Adaptive9thOrder)
