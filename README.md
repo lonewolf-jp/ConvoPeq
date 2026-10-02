@@ -15,7 +15,7 @@ ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combi
 
 ## Overview
 
-ConvoPeq v0.6.10 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
+ConvoPeq v0.6.11 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
 
 | Aspect | Detail |
 |--------|--------|

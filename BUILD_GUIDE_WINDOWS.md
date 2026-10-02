@@ -2,7 +2,7 @@
 
 This guide reflects the **current repository setup** — `build.bat` (347 lines), `CMakeLists.txt` (v0.6.10, 2,030 lines), `CMakePresets.json`, and `.vscode/tasks.json` (77 task entries).
 
-**Project**: ConvoPeq v0.6.10 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
+**Project**: ConvoPeq v0.6.11 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20 · MSVC 19.44+ / icx 2026.0
 
 ---
