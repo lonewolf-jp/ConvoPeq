@@ -460,7 +460,15 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         "$ENV{IPPROOT}/include"
         ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
     )
-    target_link_libraries(STG11EQRetireTests PRIVATE juce::juce_core juce::juce_dsp juce::juce_gui_extra juce::juce_gui_basics r8brain MKL::MKL)
+    target_link_libraries(STG11EQRetireTests PRIVATE juce::juce_core juce::juce_dsp juce::juce_gui_extra juce::juce_gui_basics r8brain)
+    # ★ icx guard: MKL::MKL exists only when find_package(MKL) ran, i.e. MSVC
+    #   non-IntelLLVM (the IntelLLVM branch links MKL via /Qmkl:sequential by design).
+    #   Same condition structure as the other MKL::MKL links in this file.
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(STG11EQRetireTests PRIVATE MKL::MKL)
+        endif()
+    endif()
     add_dependencies(STG11EQRetireTests ConvoPeq)
     target_compile_features(STG11EQRetireTests PRIVATE cxx_std_20)
     target_compile_options(STG11EQRetireTests PRIVATE /EHsc /utf-8)
@@ -1128,6 +1136,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /Qmkl:sequential)
         target_compile_options(PartialPublicationRejectTests PRIVATE /Qmkl:sequential)
         target_compile_options(AdmissionPackedStateTests PRIVATE /Qmkl:sequential)
+        target_compile_options(STG11EQRetireTests PRIVATE /Qmkl:sequential)
     endif()
 endif()
 
@@ -2219,6 +2228,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         if(CONVOPEQ_HAS_MKL)
             target_link_libraries(PolyphaseGainFidelityTests PRIVATE MKL::MKL)
         endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(PolyphaseGainFidelityTests PRIVATE /Qmkl:sequential)
     endif()
     if(IPP_FOUND)
         target_link_libraries(PolyphaseGainFidelityTests PRIVATE IPP::ippcore IPP::ipps)
