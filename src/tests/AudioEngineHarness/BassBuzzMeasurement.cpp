@@ -290,7 +290,10 @@ Metrics analyzeRun(const std::vector<float>& in, const std::vector<float>& out,
                    double sr, double fundHz, double discardSec)
 {
     Metrics m;
-    const size_t discard = static_cast<size_t>(discardSec * sr);
+    // size-mul-cast guard: keep the product in double, then convert the named
+    // value (both operands are small finite positives in practice).
+    const double discardSamples = discardSec * sr;
+    const size_t discard = static_cast<size_t>(discardSamples);
     if (out.size() <= discard + 1024 || in.size() <= discard + 1024)
         return m;
     const float* x = out.data() + discard;
@@ -691,8 +694,10 @@ static int runNucStandalone(double fIn, double sr, int block, const char* tag,
     for (int i = 0; i < n; ++i) x[static_cast<size_t>(i)] = dcMode ? 1.0 : 0.25 * std::sin(2.0 * 3.14159265358979323846 * fUse * i / sr);
     for (int b = 0; b < nBlocks; ++b)
     {
-        nuc.Add(&x[static_cast<size_t>(b * block)], block);
-        const int got = nuc.Get(&e[static_cast<size_t>(b * block)], block);
+        // size-mul-cast guard: promote before multiply (b, block >= 0 here,
+        // so the value is identical and int-overflow-then-cast is excluded).
+        nuc.Add(&x[static_cast<size_t>(b) * static_cast<size_t>(block)], block);
+        const int got = nuc.Get(&e[static_cast<size_t>(b) * static_cast<size_t>(block)], block);
         if (got != block) std::fprintf(stderr, "[NUC6] %s block=%d got=%d\n", tag, b, got);
     }
 

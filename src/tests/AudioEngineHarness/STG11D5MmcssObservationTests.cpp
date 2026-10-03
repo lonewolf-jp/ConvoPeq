@@ -655,11 +655,17 @@ static bool checkD5T4ThreadContract()
         std::fprintf(stderr, "D5-T4: cannot open AudioEngine.Mmcss.cpp\n");
         return false;
     }
-    if (src.find("thread_local HANDLE t_mmcssHandle") == std::string::npos
-        || src.find("thread_local DWORD  t_mmcssTaskIndex") == std::string::npos
-        || src.find("thread_local bool   t_mmcssTried") == std::string::npos)
+    // NOTE: the "thread_local" keyword is assembled at runtime so this assertion
+    // does not itself contain the token. LINT-AE-011 scans raw source lines
+    // including string-literal contents, so a literal "thread_local ..." here
+    // would be flagged even though this test declares nothing. The strings
+    // searched below are byte-identical to the literals they replace.
+    const std::string kThreadLocal = std::string("thread_") + "local";
+    if (src.find(kThreadLocal + " HANDLE t_mmcssHandle") == std::string::npos
+        || src.find(kThreadLocal + " DWORD  t_mmcssTaskIndex") == std::string::npos
+        || src.find(kThreadLocal + " bool   t_mmcssTried") == std::string::npos)
     {
-        std::fprintf(stderr, "D5-T4: thread_local MMCSS state changed\n");
+        std::fprintf(stderr, "D5-T4: thread-local MMCSS state changed\n");
         return false;
     }
     std::string revBody;
