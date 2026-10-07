@@ -43,11 +43,37 @@ public:
                      const std::vector<double>& rho,
                      const std::vector<double>& theta);
 
-    static void touch(uint64_t fileHash,
-                      double sampleRate,
-                      int phaseMode,
-                      float freqStartHz, float freqEndHz,
-                      int targetLength);
+    // Phase 1 (D-1R-2M): touch() public API は削除。
+    // LRU timestamp update は load() 内の NonRT metadata update に統合された。
+    // (D-02 / D-1R-2L F-P0-06b: load-touch は N → 2N の追記破損だった)
+
+    // ======================================================================
+    // TEST-ONLY fault-injection seam (Owner D-1R-2AA section 7).
+    //
+    // This block is compiled ONLY when CONVOPEQ_PCACHE_TEST_SEAM is defined,
+    // and that macro is defined ONLY on the PersistentCacheV3Phase0FailureTests
+    // target. No production target (ConvoPeq main, Debug or Release) defines
+    // it, therefore a production binary contains no resident flag, no extra
+    // branch, no allocation, no lock and no RT-reachable code path. The class
+    // also gains no public API in production, because the declarations below
+    // are preprocessed away together with the definitions.
+    //
+    // Rationale (SOURCE-PROVEN): juce::FileOutputStream::flush() returns void
+    // in JUCE 8, so a flush failure cannot be observed from its return value.
+    // The only way to prove "flush failure is diagnostic-only" is to inject
+    // the failure at this seam.
+    // ======================================================================
+#if defined(CONVOPEQ_PCACHE_TEST_SEAM)
+    enum class TimestampWriteFault
+    {
+        none = 0,       //!< normal path: write(8) then flush() are both issued
+        timestampWrite, //!< write() reports failure: the 8 bytes are not written
+        flush           //!< write() succeeds; the explicit flush is not issued
+    };
+
+    static void armTimestampWriteFaultForTest (TimestampWriteFault mode) noexcept;
+    static int  getInjectedFaultAttemptsForTest() noexcept;
+#endif
 
     static void evictLRU(size_t maxCount);
 

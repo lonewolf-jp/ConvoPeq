@@ -1,11 +1,11 @@
-# Project Extract & Source Code: ConvoPeq
+# Project Extract & Source Code: bright-falcon
 
-> Generated: 2026-09-28 15:58:53
+> Generated: 2026-10-07 22:17:46
 
 ## 📁 Directory Tree (Selected Targets Only)
 
 ```text
-└── ConvoPeq/
+└── bright-falcon/
     ├── build.bat
     ├── CMakeLists.txt
     └── src/
@@ -346,6 +346,9 @@
         │   ├── OverlapAuthoritySingularTests.cpp
         │   ├── OwnerChannelTests.cpp
         │   ├── PartialPublicationRejectTests.cpp
+        │   ├── PersistentCacheV3Phase0FailureTests.cpp
+        │   ├── PersistentCacheV3Phase0SRTests.cpp
+        │   ├── PersistentCacheV3Phase0StateTests.cpp
         │   ├── PriorityIntegrationTests.cpp
         │   ├── PublicationAdmissionTestRuntimeStubs.cpp
         │   ├── PublicationAdmissionTests.cpp
@@ -363,7 +366,6 @@
         │   ├── StuckReaderFallbackDrainTests.cpp
         │   └── TerminalTelemetryContractTests.cpp
         ├── tools/
-        │   ├── __pycache__/
         │   └── build_identity_gate.py
         ├── TruePeakDetector.cpp
         ├── TruePeakDetector.h
@@ -1093,6 +1095,13 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
         ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
         ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    # Phase 1 build-environment repair (owner approved 2026-10-07): add the
+    # MKL/IPP include propagation that the sibling test targets already BOOST:
+    target_include_directories(RuntimeHealthMonitorTierTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
     )
     target_compile_features(RuntimeHealthMonitorTierTests PRIVATE cxx_std_20)
     target_compile_options(RuntimeHealthMonitorTierTests PRIVATE /EHsc /utf-8)
@@ -1859,6 +1868,98 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(DEFINED ENV{IPPROOT})
         target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{IPPROOT}/include")
     endif()
+endif()
+
+#------------------------------------------------------------
+# work113 D-1R-2L: PersistentCache v3 Phase 0 Executable Contract (P0-1..P0-6)
+#------------------------------------------------------------
+# Owner instruction "Owner 回答 — D-1R-2K Phase 0 GO / Production
+# Implementation NO-GO" section 8.
+#
+# PRODUCTION SOURCE CHANGE: NONE. The blocks below add test targets only.
+# No production file is compiled into a different configuration, no seam is
+# added to src/, and no RT path is touched (Owner section 9 pass conditions).
+#
+# Y-2 (forceTargetIRLengthSecForTest) was conditionally approved, but is NOT
+# needed: Owner section 8 P0-1 defines the verification as pure arithmetic over
+#     float32(2^21 / SR)  and  int(SR * float32(...))
+# so the sweep runs entirely inside the test translation unit. The seam is
+# therefore not introduced and the "production source semantic change: none"
+# condition holds without any exception.
+#
+# Y-3 (production FaultPoint seam) is NOT approved, so P0-6 reproduces every
+# failure sequence with test-owned fixtures only (read-only attribute,
+# truncated file, concurrency) and asserts the current production contract by
+# reading the production source text instead of instrumenting it.
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    # ---- P0-1 / P0-2 / P0-3 : pure arithmetic, no JUCE -----------------
+    add_executable(PersistentCacheV3Phase0SRTests
+        src/tests/PersistentCacheV3Phase0SRTests.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase0SRTests PRIVATE
+        ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+    target_compile_features(PersistentCacheV3Phase0SRTests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase0SRTests PRIVATE /utf-8 /EHsc)
+        target_compile_definitions(PersistentCacheV3Phase0SRTests PRIVATE
+            _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME PersistentCacheV3Phase0SRTests COMMAND PersistentCacheV3Phase0SRTests)
+
+    # ---- P0-4 / P0-5 : classification + destructive matrix, no JUCE ----
+    add_executable(PersistentCacheV3Phase0StateTests
+        src/tests/PersistentCacheV3Phase0StateTests.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase0StateTests PRIVATE
+        ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+    target_compile_features(PersistentCacheV3Phase0StateTests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase0StateTests PRIVATE /utf-8 /EHsc)
+        target_compile_definitions(PersistentCacheV3Phase0StateTests PRIVATE
+            _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME PersistentCacheV3Phase0StateTests COMMAND PersistentCacheV3Phase0StateTests)
+
+    # ---- P0-6 : failure injection against the real cache implementation --
+    juce_add_console_app(PersistentCacheV3Phase0FailureTests)
+    target_sources(PersistentCacheV3Phase0FailureTests PRIVATE
+        src/tests/PersistentCacheV3Phase0FailureTests.cpp
+        src/MixedPhasePersistentCache.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase0FailureTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_include_directories(PersistentCacheV3Phase0FailureTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(PersistentCacheV3Phase0FailureTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    # Owner D-1R-2AA section 7: enable the test-only timestamp-write / flush
+    # fault-injection seam for THIS target only. Because the macro is defined
+    # on this target alone, the seam is preprocessed out of every production
+    # binary, so no permanent production fault point, resident flag, branch,
+    # allocation or RT-reachable path is introduced anywhere else.
+    target_compile_definitions(PersistentCacheV3Phase0FailureTests PRIVATE
+        CONVOPEQ_PCACHE_TEST_SEAM=1
+    )
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase0FailureTests PRIVATE /utf-8 /EHsc)
+    endif()
+    # juce::AudioBuffer lives in juce_audio_basics (not juce_audio_utils),
+    # and MixedPhasePersistentCache.h requires it.
+    target_link_libraries(PersistentCacheV3Phase0FailureTests PRIVATE
+        juce::juce_core juce::juce_events juce::juce_audio_basics
+    )
+    target_link_libraries(PersistentCacheV3Phase0FailureTests PRIVATE
+        juce::juce_core juce::juce_events juce::juce_audio_basics
+    )
+    add_test(NAME PersistentCacheV3Phase0FailureTests COMMAND PersistentCacheV3Phase0FailureTests)
+    juce_generate_juce_header(PersistentCacheV3Phase0FailureTests)
 endif()
 
 #------------------------------------------------------------
@@ -76398,6 +76499,52 @@ private:
 #include <cstring>
 #include <vector>
 
+// ===========================================================================
+// TEST-ONLY fault-injection seam (Owner D-1R-2AA section 7).
+//
+// Compiled ONLY when CONVOPEQ_PCACHE_TEST_SEAM is defined. That macro is set
+// ONLY on the PersistentCacheV3Phase0FailureTests target, so this whole block
+// is absent from every production binary (ConvoPeq main, Debug and Release):
+// no resident flag, no branch, no allocation, no lock, no RT-reachable code.
+//
+// The state is a function-local static POD. It is touched only from the
+// existing NonRT metadata-update block inside load(); it does not add any new
+// reachability from the audio/RT path, and it adds no public API, no
+// authority surface and no production constant.
+// ===========================================================================
+#if defined(CONVOPEQ_PCACHE_TEST_SEAM)
+namespace convo {
+
+namespace
+{
+    struct TestSeamState
+    {
+        MixedPhasePersistentCache::TimestampWriteFault fault
+            = MixedPhasePersistentCache::TimestampWriteFault::none;
+        int attempts = 0;
+    };
+
+    TestSeamState& testSeamState() noexcept
+    {
+        static TestSeamState s;
+        return s;
+    }
+}
+
+void MixedPhasePersistentCache::armTimestampWriteFaultForTest (TimestampWriteFault mode) noexcept
+{
+    testSeamState().fault = mode;
+    testSeamState().attempts = 0;
+}
+
+int MixedPhasePersistentCache::getInjectedFaultAttemptsForTest() noexcept
+{
+    return testSeamState().attempts;
+}
+
+} // namespace convo
+#endif // CONVOPEQ_PCACHE_TEST_SEAM
+
 namespace convo {
 
 // ═══════════════════════════════════════════════════════════════
@@ -76529,8 +76676,57 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
             return false;
     }
 
-    // LRU用にタイムスタンプ更新（touch相当）
-    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, targetLength);
+    // LRU用にタイムスタンプ更新（v3 Phase 1: in-place 8-byte write）
+    // touch() public API は削除し、load() 内の NonRT metadata update に統合。
+    // DiskHeader::lastUsedTime の 8 byte のみを書き換える。
+    // setPosition(offsetof(...)) → write(8) → flush() のみを行い、
+    // truncate() は使用しない（payload / file size は変更しない）。
+    // timestamp write / flush failure は diagnostic のみ（load() == true を維持）。
+    {
+        const auto touchFile = getCacheFile(fileHash, sampleRate, phaseMode,
+                                            freqStartHz, freqEndHz, targetLength);
+        if (touchFile.existsAsFile())
+        {
+            juce::FileOutputStream touchStream(touchFile);
+            if (touchStream.openedOk())
+            {
+                const auto lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
+                const auto fileSize = touchFile.getSize();
+                if (lastUsedTimeOffset + static_cast<decltype(fileSize)>(sizeof(uint64_t)) <= fileSize)
+                {
+                    touchStream.setPosition(static_cast<int64>(lastUsedTimeOffset));
+                    const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
+
+                    // Diagnostic-only metadata update. Neither the write result
+                    // nor the flush result may change load()'s return value, the
+                    // payload bytes, or the file size.
+#if defined(CONVOPEQ_PCACHE_TEST_SEAM)
+                    const auto fault = testSeamState().fault;
+                    if (fault == TimestampWriteFault::timestampWrite)
+                    {
+                        // Simulated OS-level write failure: the 8 bytes are not
+                        // written at all. Nothing else in the file is touched.
+                        ++testSeamState().attempts;
+                    }
+                    else if (fault == TimestampWriteFault::flush)
+                    {
+                        // write() succeeds, but the explicit flush is reported
+                        // as failed and is therefore not issued. The 8 bytes
+                        // stay in the stream buffer and are never committed by
+                        // this metadata update.
+                        if (touchStream.write(&now, sizeof(now)))
+                            ++testSeamState().attempts;
+                    }
+                    else
+#endif
+                    {
+                        (void) touchStream.write(&now, sizeof(now));
+                        (void) touchStream.flush();
+                    }
+                }
+            }
+        }
+    }
 
     return true;
 }
@@ -76619,48 +76815,6 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
 // ═══════════════════════════════════════════════════════════════
 //  LRU 管理
 // ═══════════════════════════════════════════════════════════════
-
-void MixedPhasePersistentCache::touch(uint64_t fileHash,
-                                      double sampleRate,
-                                      int phaseMode,
-                                      float freqStartHz, float freqEndHz,
-                                      int targetLength)
-{
-    const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, targetLength);
-    if (!file.existsAsFile())
-        return;
-
-    // read-modify-write: ファイル全体を読み込み、ヘッダのタイムスタンプのみ更新して書き戻す
-    // (FileOutputStream で開くとファイルが切り詰められるため、read-modify-write で行う)
-    std::vector<uint8_t> buffer;
-    {
-        juce::FileInputStream inStream(file);
-        if (!inStream.openedOk())
-            return;
-
-        const auto fileSize = file.getSize();
-        if (fileSize <= 0)
-            return;
-
-        buffer.resize(static_cast<size_t>(fileSize));
-        if (inStream.read(buffer.data(), static_cast<int>(buffer.size())) != static_cast<int64>(buffer.size()))
-            return;
-    } // inStream はここで破棄され、ファイルも閉じられる
-
-    // DiskHeader 内 lastUsedTime のオフセットをコンパイル時に計算
-    const size_t lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
-    if (lastUsedTimeOffset + sizeof(uint64_t) > buffer.size())
-        return;
-
-    const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
-    std::memcpy(&buffer[lastUsedTimeOffset], &now, sizeof(now));
-
-    juce::FileOutputStream outStream(file);
-    if (!outStream.openedOk())
-        return;
-    outStream.write(buffer.data(), buffer.size());
-}
 
 void MixedPhasePersistentCache::evictLRU(size_t maxCount)
 {
@@ -76792,11 +76946,37 @@ public:
                      const std::vector<double>& rho,
                      const std::vector<double>& theta);
 
-    static void touch(uint64_t fileHash,
-                      double sampleRate,
-                      int phaseMode,
-                      float freqStartHz, float freqEndHz,
-                      int targetLength);
+    // Phase 1 (D-1R-2M): touch() public API は削除。
+    // LRU timestamp update は load() 内の NonRT metadata update に統合された。
+    // (D-02 / D-1R-2L F-P0-06b: load-touch は N → 2N の追記破損だった)
+
+    // ======================================================================
+    // TEST-ONLY fault-injection seam (Owner D-1R-2AA section 7).
+    //
+    // This block is compiled ONLY when CONVOPEQ_PCACHE_TEST_SEAM is defined,
+    // and that macro is defined ONLY on the PersistentCacheV3Phase0FailureTests
+    // target. No production target (ConvoPeq main, Debug or Release) defines
+    // it, therefore a production binary contains no resident flag, no extra
+    // branch, no allocation, no lock and no RT-reachable code path. The class
+    // also gains no public API in production, because the declarations below
+    // are preprocessed away together with the definitions.
+    //
+    // Rationale (SOURCE-PROVEN): juce::FileOutputStream::flush() returns void
+    // in JUCE 8, so a flush failure cannot be observed from its return value.
+    // The only way to prove "flush failure is diagnostic-only" is to inject
+    // the failure at this seam.
+    // ======================================================================
+#if defined(CONVOPEQ_PCACHE_TEST_SEAM)
+    enum class TimestampWriteFault
+    {
+        none = 0,       //!< normal path: write(8) then flush() are both issued
+        timestampWrite, //!< write() reports failure: the 8 bytes are not written
+        flush           //!< write() succeeds; the explicit flush is not issued
+    };
+
+    static void armTimestampWriteFaultForTest (TimestampWriteFault mode) noexcept;
+    static int  getInjectedFaultAttemptsForTest() noexcept;
+#endif
 
     static void evictLRU(size_t maxCount);
 
@@ -116623,6 +116803,2021 @@ int main()
     return 0;
 }
 
+```
+
+### 📄 `src\tests\PersistentCacheV3Phase0FailureTests.cpp`
+
+```
+// ============================================================================
+//  P0-6  -  PersistentCache v3 Phase 0 failure-injection harness
+// ----------------------------------------------------------------------------
+//  Owner instruction "Owner reply - D-1R-2K Phase 0 GO / Production
+//  Implementation NO-GO" section 8, item P0-6, and section 2.3 (Y-3):
+//
+//    Y-3 (production FaultPoint seam) is NOT approved. The Owner lists the
+//    preferred, production-change-free techniques, in order:
+//      1. test-owned temporary directory / artifact fixture      <- used here
+//      2. filesystem wrapper / dependency injection in the test TU
+//      3. JUCE File existing behaviour for permission / truncated /
+//         replacement failure fixtures                        <- used here
+//      4. minimal compile-time guarded seam ONLY if sequences remain
+//         unreproducible                                      <- NOT needed
+//
+//  This TU therefore adds NO seam and changes NO production source. Failure
+//  sequences are produced with:
+//      * a private fileHash namespace so only test-owned artifacts are touched
+//      * juce::File::setReadOnly()  -> permission failure fixture
+//      * juce::FileOutputStream with truncated content -> partial payload fixture
+//      * a read-only cache directory -> replacement / commit failure fixture
+//      * std::thread for the concurrency sequences
+//
+//  SAFETY: this test NEVER calls clear() or evictLRU(0) against the live cache,
+//  because the current production implementation maps evictLRU(0) to clear()
+//  (D-1R-2K K-03 / K-35) and that would delete the user's real cache entries.
+//  The current behaviour is asserted by reading the production source text
+//  instead (see verifyCurrentProductionContract).
+// ============================================================================
+
+#include <JuceHeader.h>
+
+#include "MixedPhasePersistentCache.h"
+
+#include <atomic>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+#include <filesystem>
+#include <algorithm>
+#include <cstring>
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+
+void check(bool ok, const std::string& what)
+{
+    ++g_checks;
+    if (!ok)
+    {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL  %s\n", what.c_str());
+    }
+}
+
+void checkEq(long long got, long long want, const std::string& what)
+{
+    ++g_checks;
+    if (got != want)
+    {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL  %s : got=%lld want=%lld\n",
+                     what.c_str(), got, want);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private identity namespace. Test artifacts are addressed by these hashes only.
+// ---------------------------------------------------------------------------
+constexpr std::uint64_t kTestHashBase = 0xD1B2C0DE00000001ull;   // Phase 0 marker
+std::uint64_t testHash(int index)
+{
+    return kTestHashBase + static_cast<std::uint64_t>(index) * 0x100000000ull;
+}
+
+constexpr double    kTestSr = 48000.0;
+constexpr int       kTestPhaseMode = 1;      // PhaseMode::Mixed
+constexpr float     kTestF1 = 100.0f;
+constexpr float     kTestF2 = 700.0f;
+constexpr int       kTestTargetLength = 480; // 48000 * 1.0 s / 100 (small fixture)
+constexpr int       kTestChannels = 2;
+constexpr int       kTestSections = 4;
+
+/// RAII cleanup: removes only artifacts created by this TU.
+struct ArtifactGuard
+{
+    std::vector<int> indices;
+
+    void track(int i) { indices.push_back(i); }
+
+    ~ArtifactGuard()
+    {
+        for (int i : indices)
+            convo::MixedPhasePersistentCache::remove(testHash(i), kTestSr,
+                                                     kTestPhaseMode, kTestF1,
+                                                     kTestF2, kTestTargetLength);
+    }
+};
+
+juce::File fileOf(int index)
+{
+    return convo::MixedPhasePersistentCache::getCacheFile(
+        testHash(index), kTestSr, kTestPhaseMode, kTestF1, kTestF2, kTestTargetLength);
+}
+
+juce::AudioBuffer<double> makeIr()
+{
+    juce::AudioBuffer<double> ir(kTestChannels, kTestTargetLength);
+    for (int ch = 0; ch < kTestChannels; ++ch)
+        for (int i = 0; i < kTestTargetLength; ++i)
+            ir.setSample(ch, i, 0.25 * std::sin(0.01 * static_cast<double>(i))
+                                    + 0.001 * static_cast<double>(ch));
+    return ir;
+}
+
+std::vector<double> makeSections()
+{
+    return { 0.5, 0.4, 0.3, 0.2 };
+}
+
+std::int64_t expectedSizeOf(int channels, int samples, int sections)
+{
+    return 76 + static_cast<std::int64_t>(channels) * samples * 8
+              + static_cast<std::int64_t>(sections) * 8 * 2;
+}
+
+// ===========================================================================
+//  Current production contract, asserted by reading the production source.
+//  This is how we observe evictLRU(0) -> clear() without executing it.
+// ===========================================================================
+std::string readRepoFile(const char* rel)
+{
+    namespace fs = std::filesystem;
+    const fs::path p(rel);
+    for (const auto& prefix : { fs::path("."), fs::path(".."),
+                                fs::path("../.."), fs::path("../../..") })
+    {
+        const fs::path cand = prefix / p;
+        std::error_code ec;
+        if (fs::exists(cand, ec))
+        {
+            std::ifstream in(cand, std::ios::in | std::ios::binary);
+            std::ostringstream oss;
+            oss << in.rdbuf();
+            return oss.str();
+        }
+    }
+    return {};
+}
+
+bool contains(const std::string& h, const std::string& n)
+{
+    return h.find(n) != std::string::npos;
+}
+
+void verifyCurrentProductionContract()
+{
+    std::fprintf(stderr, "[P0-6a] current production contract (source-level)\n");
+
+    const std::string src = readRepoFile("src/MixedPhasePersistentCache.cpp");
+    check(!src.empty(), "P0-6a production source is readable");
+
+    // Owner section 4.1: evictLRU(0) must become a no-op in v3.
+    // Current production routes 0 to clear(); this is the CONTRADICTED
+    // condition that Phase 0 records (it is NOT executed here).
+    check(contains(src, "if (maxCount == 0)") && contains(src, "clear();"),
+          "P0-6a CONFIRMED-BAD: current evictLRU(0) delegates to clear()");
+
+    // Phase 1 (D-1R-2M): touch() は削除され、load() 内の in-place 8-byte
+    // timestamp write に置き換えられた。旧 append 破損（N -> 2N）は解消済み。
+    check(contains(src, "touchStream.setPosition"),
+          "P0-6a Phase1: load() integrates an in-place timestamp write");
+    check(!contains(src, "outStream.write(buffer.data(), buffer.size())"),
+          "P0-6a Phase1: legacy full-buffer append is gone");
+    check(!contains(src, "touch(fileHash,"),
+          "P0-6a Phase1: touch() public API removed");
+
+    // D-1R-2K K-26: load() has no upper bound before setSize.
+    check(contains(src, "outIr.setSize(numChannels, numSamples);")
+              && !contains(src, "numSamples > 2097152")
+              && !contains(src, "numSamples > MAX_IR_LATENCY"),
+          "P0-6a CONFIRMED-BAD: load() has no numSamples upper bound before setSize");
+
+    // D-1R-2K K-25: load() never compares header.targetLength with header.numSamples.
+    check(!contains(src, "header.targetLength != header.numSamples")
+              && !contains(src, "header.numSamples != header.targetLength"),
+          "P0-6a CONFIRMED-BAD: load() does not verify targetLength == numSamples");
+
+    // D-1R-2K K-20: save() narrows without domain validation.
+    check(contains(src, "header.targetLength = static_cast<int32_t>(targetLength);")
+              && !contains(src, "isAdmissibleDomain"),
+          "P0-6a CONFIRMED-BAD: save() narrows without a domain predicate");
+
+    // v3 single-authority predicate must not exist yet (production is NO-GO).
+    check(!contains(src, "isAdmissibleDomain"),
+          "P0-6a v3 admissibility predicate is not in production yet (expected)");
+
+    std::fprintf(stderr, "       5 CONTRADICTED production conditions recorded\n");
+}
+
+// ===========================================================================
+//  FS-1 : header success -> payload success -> timestamp update failure
+//  The timestamp update is made to fail with a read-only file attribute.
+//  Contract: load() must still return true and the artifact must stay usable.
+//
+//  This test also VERIFIES Phase 1's corrected timestamp update:
+//  a successful load() rewrite must keep the artifact byte-identical in
+//  size and must NOT append (no N -> 2N doubling).
+// ===========================================================================
+void runFS1(ArtifactGuard& guard)
+{
+    std::fprintf(stderr, "[P0-6b] FS-1 timestamp-update failure\n");
+
+    constexpr int kIdx = 1;
+    guard.track(kIdx);
+
+    const auto ir = makeIr();
+    const auto sec = makeSections();
+
+    check(convo::MixedPhasePersistentCache::save(testHash(kIdx), kTestSr,
+                                                 kTestPhaseMode, kTestF1, kTestF2,
+                                                 kTestTargetLength, ir, sec, sec),
+          "P0-6b save() succeeds");
+
+    auto f = fileOf(kIdx);
+    const auto sizeAfterSave = f.getSize();
+    checkEq(static_cast<long long>(sizeAfterSave),
+            expectedSizeOf(kTestChannels, kTestTargetLength, kTestSections),
+            "P0-6b saved artifact has the expected exact size");
+
+    // ---- FS-1 byte-level baseline (Owner §3.4) ---------------------------
+    std::vector<char> bytesBefore;
+    {
+        std::ifstream in(f.getFullPathName().toStdString(), std::ios::in | std::ios::binary);
+        check(in.good(), "P0-6b baseline byte read opens");
+        bytesBefore.resize(static_cast<std::size_t>(sizeAfterSave));
+        in.read(bytesBefore.data(), static_cast<std::streamsize>(sizeAfterSave));
+    }
+
+    // ---- FS-1: timestamp update fails (read-only attribute) --------------
+    const bool roOk = f.setReadOnly(true);
+    check(roOk, "P0-6b artifact marked read-only (timestamp update will fail)");
+
+    juce::AudioBuffer<double> out(kTestChannels, kTestTargetLength);
+    std::vector<double> rho, theta;
+    const bool loaded = convo::MixedPhasePersistentCache::load(
+        testHash(kIdx), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+        kTestTargetLength, out, rho, theta);
+
+    // Owner section 6: a timestamp failure must NOT turn a valid artifact
+    // into load() == false.
+    check(loaded, "P0-6b load() returns TRUE despite timestamp update failure");
+    checkEq(out.getNumSamples(), kTestTargetLength,
+            "P0-6b payload length intact after timestamp failure");
+    checkEq(static_cast<long long>(rho.size()), kTestSections,
+            "P0-6b allpass section count intact");
+    checkEq(static_cast<long long>(f.getSize()), static_cast<long long>(sizeAfterSave),
+            "P0-6b failed timestamp update leaves the artifact byte-identical");
+
+    f.setReadOnly(false);
+
+    // ---- current production behaviour when the update SUCCEEDS -----------
+    juce::AudioBuffer<double> out2(kTestChannels, kTestTargetLength);
+    std::vector<double> rho2, theta2;
+    const bool loaded2 = convo::MixedPhasePersistentCache::load(
+        testHash(kIdx), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+        kTestTargetLength, out2, rho2, theta2);
+    check(loaded2, "P0-6b second load() succeeds");
+
+    const auto sizeAfterTouch = f.getSize();
+    std::fprintf(stderr, "       size after save=%lld  after successful touch=%lld\n",
+                 static_cast<long long>(sizeAfterSave),
+                 static_cast<long long>(sizeAfterTouch));
+
+    // Phase 1 in-place write keeps the artifact at its exact canonical size
+    // (no N -> 2N doubling). Owner P1 acceptance criteria:
+    //   "truncate() は使用禁止", "file size が touch 前後で完全一致",
+    //   "payload byte equality", "timestamp failure/flush failure -> load() == true".
+    checkEq(static_cast<long long>(sizeAfterTouch),
+            static_cast<long long>(sizeAfterSave),
+            "P0-6b Phase1: load() leaves the artifact size unchanged (no N -> 2N)");
+    checkEq(static_cast<long long>(sizeAfterTouch),
+            static_cast<long long>(expectedSizeOf(kTestChannels, kTestTargetLength, kTestSections)),
+            "P0-6b Phase1: artifact size stays at the exact canonical size");
+
+    // ---- FS-1 byte-level payload comparison (Owner §3.4) ------------------
+    // bytes [0,48) unchanged, bytes [48,56) may change (timestamp),
+    // bytes [56,76) unchanged, bytes [76,end) unchanged.
+    std::vector<char> bytesAfter;
+    {
+        std::ifstream in(f.getFullPathName().toStdString(), std::ios::in | std::ios::binary);
+        check(in.good(), "P0-6b post-load byte read opens");
+        bytesAfter.resize(static_cast<std::size_t>(sizeAfterTouch));
+        in.read(bytesAfter.data(), static_cast<std::streamsize>(sizeAfterTouch));
+    }
+    checkEq(bytesAfter.size(), bytesBefore.size(),
+            "P0-6b payload byte-equality: same file size");
+
+    const std::size_t kTotal = static_cast<std::size_t>(sizeAfterTouch);
+    auto cmpRange = [&](std::size_t off, std::size_t len) -> bool
+    {
+        if (off + len > kTotal) return false;
+        return std::memcmp(bytesBefore.data() + off, bytesAfter.data() + off, len) == 0;
+    };
+    check(cmpRange(0, 48),
+          "P0-6b bytes [0,48) unchanged");
+    check(cmpRange(56, 76 - 56),
+          "P0-6b bytes [56,76) unchanged (header tail)");
+    check(cmpRange(76, kTotal - 76),
+          "P0-6b payload bytes [76,end) unchanged");
+
+    // The 8 timestamp bytes [48,56) may differ; if size == size,
+    // those 8 bytes are the ONLY thing that changed.
+    int changedBytes = 0;
+    for (std::size_t i = 0; i < kTotal; ++i)
+        if (bytesBefore[i] != bytesAfter[i])
+            ++changedBytes;
+    check(changedBytes <= 8,
+          "P0-6b at most the 8 timestamp bytes changed");
+}
+
+// ===========================================================================
+//  FS-2 : header success -> partial payload -> failure
+//  Contract: load() returns false AND the artifact bytes are untouched.
+//
+//  NOTE on the fixture: juce::FileOutputStream opens with OPEN_ALWAYS plus
+//  SetFilePointer(FILE_END), so its position starts at end-of-file and
+//  truncate() becomes a no-op. The partial artifact is therefore produced by
+//  rewriting only a prefix of the saved bytes, which keeps the 76-byte header
+//  intact and removes part of the payload.
+// ===========================================================================
+void runFS2(ArtifactGuard& guard)
+{
+    std::fprintf(stderr, "[P0-6c] FS-2 partial payload\n");
+
+    constexpr int kIdx = 2;
+    guard.track(kIdx);
+
+    const auto ir = makeIr();
+    const auto sec = makeSections();
+    check(convo::MixedPhasePersistentCache::save(testHash(kIdx), kTestSr,
+                                                 kTestPhaseMode, kTestF1, kTestF2,
+                                                 kTestTargetLength, ir, sec, sec),
+          "P0-6c save() succeeds");
+
+    auto f = fileOf(kIdx);
+    const auto sizeBefore = f.getSize();
+
+    // Read the whole artifact, then write back only a prefix.
+    std::vector<char> bytes(static_cast<std::size_t>(sizeBefore));
+    {
+        std::ifstream in(f.getFullPathName().toStdString(), std::ios::in | std::ios::binary);
+        check(in.good(), "P0-6c artifact opened for the partial-payload fixture");
+        in.read(bytes.data(), static_cast<std::streamsize>(sizeBefore));
+    }
+
+    // Keep the full 76-byte header plus half of the payload.
+    const std::size_t keep = 76 + bytes.size() / 2;
+    f.deleteFile();
+    {
+        std::ofstream out(f.getFullPathName().toStdString(),
+                          std::ios::out | std::ios::binary | std::ios::trunc);
+        check(out.good(), "P0-6c partial artifact opened for writing");
+        out.write(bytes.data(), static_cast<std::streamsize>(keep));
+    }
+
+    const auto sizeAfterTrunc = f.getSize();
+    std::fprintf(stderr, "       size before=%lld  after partial rewrite=%lld\n",
+                 static_cast<long long>(sizeBefore),
+                 static_cast<long long>(sizeAfterTrunc));
+    check(sizeAfterTrunc < sizeBefore && sizeAfterTrunc >= 76,
+          "P0-6c artifact truncated to a header-complete, payload-incomplete prefix");
+
+    juce::AudioBuffer<double> out2(kTestChannels, kTestTargetLength);
+    std::vector<double> rho, theta;
+    const bool loaded = convo::MixedPhasePersistentCache::load(
+        testHash(kIdx), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+        kTestTargetLength, out2, rho, theta);
+
+    check(!loaded, "P0-6c load() returns FALSE on a partial payload");
+    checkEq(static_cast<long long>(f.getSize()), static_cast<long long>(sizeAfterTrunc),
+            "P0-6c partial artifact is left byte-identical by load()");
+}
+
+// ===========================================================================
+//  FS-3 : canonical replacement failure
+//  A read-only cache directory makes the staging commit fail.
+//  Contract: save() returns false and the previous artifact stays intact.
+// ===========================================================================
+void runFS3(ArtifactGuard& guard)
+{
+    std::fprintf(stderr, "[P0-6d] FS-3 canonical replacement failure\n");
+
+    constexpr int kIdx = 3;
+    guard.track(kIdx);
+
+    const auto ir = makeIr();
+    const auto sec = makeSections();
+    check(convo::MixedPhasePersistentCache::save(testHash(kIdx), kTestSr,
+                                                 kTestPhaseMode, kTestF1, kTestF2,
+                                                 kTestTargetLength, ir, sec, sec),
+          "P0-6d initial save() succeeds");
+
+    auto f = fileOf(kIdx);
+    const auto sizeBefore = f.getSize();
+    auto dir = convo::MixedPhasePersistentCache::getCacheDirectory();
+
+    // Make the target un-writable: read-only file blocks the replacement.
+    f.setReadOnly(true);
+
+    auto ir2 = ir;
+    ir2.applyGain(0.5);
+    const bool secondSave = convo::MixedPhasePersistentCache::save(
+        testHash(kIdx), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+        kTestTargetLength, ir2, sec, sec);
+
+    check(!secondSave, "P0-6d save() returns FALSE when replacement fails");
+    checkEq(static_cast<long long>(f.getSize()), static_cast<long long>(sizeBefore),
+            "P0-6d previous artifact stays byte-identical after a failed save");
+
+    f.setReadOnly(false);
+    (void) dir;
+}
+
+// ===========================================================================
+//  FS-4 / FS-5 / FS-6 : concurrency
+//  Contract: every identity is either fully valid or absent. Never partial.
+// ===========================================================================
+void runFS4To6(ArtifactGuard& guard)
+{
+    std::fprintf(stderr, "[P0-6e] FS-4/5/6 concurrency\n");
+
+    constexpr int kBase = 10;
+    constexpr int kIdentities = 6;
+    constexpr int kIterations = 40;
+
+    for (int i = 0; i < kIdentities; ++i)
+        guard.track(kBase + i);
+
+    const auto ir = makeIr();
+    const auto sec = makeSections();
+
+    std::atomic<int> loadsOk{0};
+    std::atomic<int> partials{0};
+
+    // FS-4: concurrent save -> load
+    {
+        std::vector<std::thread> ts;
+        for (int i = 0; i < kIdentities; ++i)
+        {
+            ts.emplace_back([&, i] {
+                for (int it = 0; it < kIterations; ++it)
+                {
+                    convo::MixedPhasePersistentCache::save(
+                        testHash(kBase + i), kTestSr, kTestPhaseMode, kTestF1,
+                        kTestF2, kTestTargetLength, ir, sec, sec);
+                    juce::AudioBuffer<double> out(kTestChannels, kTestTargetLength);
+                    std::vector<double> rho, theta;
+                    if (convo::MixedPhasePersistentCache::load(
+                            testHash(kBase + i), kTestSr, kTestPhaseMode, kTestF1,
+                            kTestF2, kTestTargetLength, out, rho, theta))
+                    {
+                        // A successful load must yield a complete payload.
+                        if (out.getNumSamples() == kTestTargetLength
+                            && static_cast<int>(rho.size()) == kTestSections)
+                            ++loadsOk;
+                        else
+                            ++partials;
+                    }
+                }
+            });
+        }
+        for (auto& t : ts) t.join();
+    }
+
+    check(partials.load() == 0,
+          "P0-6e no successful load ever returned a partial payload");
+    check(loadsOk.load() > 0,
+          "P0-6e concurrent save/load produced successful complete loads");
+
+    std::fprintf(stderr, "       concurrent save->load: ok=%d partial=%d\n",
+                 loadsOk.load(), partials.load());
+
+    // ---- After the stress, every artifact must still validate cleanly ----
+    int valid = 0;
+    for (int i = 0; i < kIdentities; ++i)
+    {
+        juce::AudioBuffer<double> out(kTestChannels, kTestTargetLength);
+        std::vector<double> rho, theta;
+        if (convo::MixedPhasePersistentCache::load(
+                testHash(kBase + i), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+                kTestTargetLength, out, rho, theta))
+            ++valid;
+    }
+    check(valid == kIdentities,
+          "P0-6e all concurrent identities remain loadable after the stress");
+    std::fprintf(stderr, "       post-stress valid identities: %d / %d\n",
+                 valid, kIdentities);
+}
+
+// ===========================================================================
+//  Producer invariant: header.targetLength == header.numSamples on disk.
+//  Read back the raw bytes to prove the producer actually writes them equal.
+// ===========================================================================
+void runProducerInvariant(ArtifactGuard& guard)
+{
+    std::fprintf(stderr, "[P0-6f] producer invariant on disk\n");
+
+    constexpr int kIdx = 4;
+    guard.track(kIdx);
+
+    const auto ir = makeIr();          // 2 channels x 480 samples
+    const auto sec = makeSections();   // 4 sections
+    check(convo::MixedPhasePersistentCache::save(testHash(kIdx), kTestSr,
+                                                 kTestPhaseMode, kTestF1, kTestF2,
+                                                 kTestTargetLength, ir, sec, sec),
+          "P0-6f save() succeeds");
+
+    auto f = fileOf(kIdx);
+    const std::string path = f.getFullPathName().toStdString();
+    std::ifstream in(path, std::ios::in | std::ios::binary);
+    check(in.good(), "P0-6f artifact opened for raw header read");
+
+    unsigned char hdr[76] = {};
+    in.read(reinterpret_cast<char*>(hdr), sizeof(hdr));
+    checkEq(static_cast<long long>(in.gcount()), 76LL,
+            "P0-6f 76-byte header read");
+
+    auto rd32 = [&](int off) -> std::int32_t
+    {
+        std::uint32_t v = 0;
+        for (int b = 3; b >= 0; --b)
+            v = (v << 8) | hdr[off + b];
+        return static_cast<std::int32_t>(v);
+    };
+    auto rd64 = [&](int off) -> std::int64_t
+    {
+        std::uint64_t v = 0;
+        for (int b = 7; b >= 0; --b)
+            v = (v << 8) | hdr[off + b];
+        return static_cast<std::int64_t>(v);
+    };
+
+    // layout: magic0 version8 headerReserved12 fileHash16 sampleRate24
+    //         phaseMode32 freqStart36 freqEnd40 targetLength44
+    //         lastUsedTime48 numChannels56 numSamples60 numSections64 total68
+    const std::int32_t targetLength = rd32(44);
+    const std::int32_t numChannels   = rd32(56);
+    const std::int32_t numSamples   = rd32(60);
+    const std::int32_t numSections  = rd32(64);
+    const std::int64_t totalSize    = rd64(68);
+
+    std::fprintf(stderr, "       header: targetLength=%d numSamples=%d ch=%d sec=%d total=%lld\n",
+                 targetLength, numSamples, numChannels, numSections,
+                 static_cast<long long>(totalSize));
+
+    checkEq(targetLength, numSamples,
+            "P0-6f on-disk header.targetLength == header.numSamples");
+    checkEq(targetLength, kTestTargetLength,
+            "P0-6f header.targetLength equals the requested trim length");
+    checkEq(numChannels, kTestChannels, "P0-6f header.numChannels as written");
+    checkEq(numSections, kTestSections, "P0-6f header.numAllpassSections as written");
+    checkEq(totalSize, expectedSizeOf(kTestChannels, kTestTargetLength, kTestSections),
+            "P0-6f header.totalFileSize equals the checked-arithmetic size");
+    checkEq(static_cast<long long>(f.getSize()), totalSize,
+            "P0-6f actualFileSize == header.totalFileSize");
+
+    // v3 admissibility predicate applied to the real header
+    const bool admissible =
+        numChannels >= 1 && numChannels <= 8
+        && numSamples  >= 1 && numSamples  <= 2097152
+        && targetLength >= 1 && targetLength <= 2097152
+        && targetLength == numSamples
+        && numSections >= 0 && numSections <= 20;
+    check(admissible, "P0-6f the real header satisfies the v3 admissibility predicate");
+}
+
+} // namespace
+
+// ===========================================================================
+//  FS-7 : independent timestamp-write failure and flush failure injection
+//  (Owner D-1R-2AA section 7)
+//
+//  Contract, verified separately for each of the two faults:
+//    (1) load() still returns TRUE          - a valid payload is never turned
+//                                              into load() == false
+//    (2) payload bytes are unchanged       - byte-level, region [76, size)
+//    (3) file size is unchanged
+//    (4) the failure is diagnostic-only    - the seam observed the attempt and
+//                                              load()'s verdict is identical to
+//                                              the unfaulted baseline
+//    (5) payload length / section count intact
+//
+//  The seam is compiled into this target only (CONVOPEQ_PCACHE_TEST_SEAM is
+//  defined on PersistentCacheV3Phase0FailureTests alone), so no permanent
+//  production fault point exists.
+// ===========================================================================
+namespace
+{
+    constexpr std::size_t kHeaderBytes = 76;   //!< header prefix excluded from the payload comparison
+
+    bool readAll (const juce::File& f, std::vector<char>& out)
+    {
+        const auto n = f.getSize();
+        out.assign (static_cast<std::size_t> (n), 0);
+        std::ifstream in (f.getFullPathName().toStdString(), std::ios::in | std::ios::binary);
+        if (! in.good())
+            return false;
+        in.read (out.data(), static_cast<std::streamsize> (n));
+        return in.good() || in.eof();
+    }
+
+    std::size_t countDiffsInHeader (const std::vector<char>& a, const std::vector<char>& b)
+    {
+        const auto n = std::min (a.size(), b.size());
+        const auto lim = std::min<std::size_t> (n, kHeaderBytes);
+        std::size_t diffs = 0;
+        for (std::size_t i = 0; i < lim; ++i)
+            if (a[i] != b[i])
+                ++diffs;
+        return diffs;
+    }
+
+    bool payloadEqual (const std::vector<char>& a, const std::vector<char>& b)
+    {
+        if (a.size() != b.size())
+            return false;
+        if (a.size() <= kHeaderBytes)
+            return true;
+        return std::memcmp (a.data() + kHeaderBytes,
+                            b.data() + kHeaderBytes,
+                            a.size() - kHeaderBytes) == 0;
+    }
+
+    // Runs one fault mode and applies the full five-point contract.
+    void runOneFaultMode (ArtifactGuard& guard,
+                          int idx,
+                          const char* tag,
+                          convo::MixedPhasePersistentCache::TimestampWriteFault mode,
+                          bool& loadedBaseline)
+    {
+        guard.track (idx);
+
+        const auto ir = makeIr();
+        const auto sec = makeSections();
+        check (convo::MixedPhasePersistentCache::save (testHash (idx), kTestSr,
+                                                        kTestPhaseMode, kTestF1, kTestF2,
+                                                        kTestTargetLength, ir, sec, sec),
+               std::string (tag) + " save() succeeds");
+
+        auto f = fileOf (idx);
+        const auto sizeAfterSave = f.getSize();
+        checkEq (static_cast<long long> (sizeAfterSave),
+                 expectedSizeOf (kTestChannels, kTestTargetLength, kTestSections),
+                 std::string (tag) + " saved artifact has the expected exact size");
+
+        std::vector<char> before;
+        check (readAll (f, before), std::string (tag) + " baseline byte read succeeds");
+
+        // ---- arm exactly one fault ------------------------------------------
+        convo::MixedPhasePersistentCache::armTimestampWriteFaultForTest (mode);
+
+        juce::AudioBuffer<double> out (kTestChannels, kTestTargetLength);
+        std::vector<double> rho, theta;
+        const bool loaded = convo::MixedPhasePersistentCache::load (
+            testHash (idx), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+            kTestTargetLength, out, rho, theta);
+
+        const int attempts = convo::MixedPhasePersistentCache::getInjectedFaultAttemptsForTest();
+        convo::MixedPhasePersistentCache::armTimestampWriteFaultForTest (
+            convo::MixedPhasePersistentCache::TimestampWriteFault::none);
+
+        // ---- (1) valid payload is never turned into load() == false ---------
+        check (loaded, std::string (tag) + " (1) load() returns TRUE despite the injected fault");
+
+        // ---- (4) diagnostic-only -------------------------------------------
+        check (attempts >= 1,
+               std::string (tag) + " (4) the seam observed the injected fault");
+        check (loaded == loadedBaseline,
+               std::string (tag) + " (4) load() verdict is identical to the unfaulted baseline");
+
+        // ---- (5) payload shape intact ---------------------------------------
+        checkEq (out.getNumSamples(), kTestTargetLength,
+                 std::string (tag) + " (5) payload length intact");
+        checkEq (static_cast<long long> (rho.size()), kTestSections,
+                 std::string (tag) + " (5) allpass section count intact");
+
+        // ---- (3) file size unchanged ----------------------------------------
+        checkEq (static_cast<long long> (f.getSize()), static_cast<long long> (sizeAfterSave),
+                 std::string (tag) + " (3) file size is unchanged");
+
+        // ---- (2) payload byte-identical -------------------------------------
+        std::vector<char> after;
+        check (readAll (f, after), std::string (tag) + " post-fault byte read succeeds");
+        check (payloadEqual (before, after),
+               std::string (tag) + " (2) payload bytes [76, size) are byte-identical");
+        std::fprintf (stderr, "       %s: header bytes differing = %zu (metadata only)\n",
+                      tag, countDiffsInHeader (before, after));
+    }
+}
+
+void runFS7FlushFaults(ArtifactGuard& guard)
+{
+    std::fprintf (stderr, "[P0-6e] FS-7 timestamp-write / flush failure injection\n");
+
+    constexpr int kBase = 7;
+    guard.track (kBase);
+
+    // Establish the unfaulted baseline verdict first.
+    {
+        const auto ir = makeIr();
+        const auto sec = makeSections();
+        check (convo::MixedPhasePersistentCache::save (testHash (kBase), kTestSr,
+                                                        kTestPhaseMode, kTestF1, kTestF2,
+                                                        kTestTargetLength, ir, sec, sec),
+               "P0-6e baseline save() succeeds");
+        juce::AudioBuffer<double> out (kTestChannels, kTestTargetLength);
+        std::vector<double> rho, theta;
+        const bool loaded = convo::MixedPhasePersistentCache::load (
+            testHash (kBase), kTestSr, kTestPhaseMode, kTestF1, kTestF2,
+            kTestTargetLength, out, rho, theta);
+        check (loaded, "P0-6e unfaulted baseline load() returns TRUE");
+        checkEq (convo::MixedPhasePersistentCache::getInjectedFaultAttemptsForTest(), 0,
+                 "P0-6e seam is inert when no fault is armed");
+    }
+
+    bool loadedBaseline = true;
+
+    runOneFaultMode (guard, kBase + 1, "P0-6e TS-write-fault",
+                     convo::MixedPhasePersistentCache::TimestampWriteFault::timestampWrite,
+                     loadedBaseline);
+
+    runOneFaultMode (guard, kBase + 2, "P0-6e flush-fault",
+                     convo::MixedPhasePersistentCache::TimestampWriteFault::flush,
+                     loadedBaseline);
+
+    // The two faults must be independently injectable: after both runs the
+    // seam is disarmed and a clean load must behave normally again.
+    checkEq (convo::MixedPhasePersistentCache::getInjectedFaultAttemptsForTest(), 0,
+             "P0-6e disarming resets the seam attempt counter");
+}
+
+int main()
+{
+    // JUCE needs this on Windows console apps that use File / Logger.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    std::fprintf(stderr, "[P0-6] failure-injection harness\n");
+    std::fprintf(stderr, "       cache dir = %s\n",
+                 convo::MixedPhasePersistentCache::getCacheDirectory()
+                     .getFullPathName().toStdString().c_str());
+
+    ArtifactGuard guard;
+
+    try
+    {
+        verifyCurrentProductionContract();
+        runProducerInvariant(guard);
+        runFS1(guard);
+        runFS2(guard);
+        runFS3(guard);
+        runFS4To6(guard);
+        runFS7FlushFaults(guard);
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "EXCEPTION: %s\n", e.what());
+        return 2;
+    }
+
+    std::fprintf(stderr, "\nPersistentCacheV3Phase0FailureTests: checks=%d failures=%d\n",
+                 g_checks, g_failures);
+    if (g_failures != 0)
+        return 1;
+    std::fprintf(stderr, "P0-6: PASS\n");
+    return 0;
+}
+```
+
+### 📄 `src\tests\PersistentCacheV3Phase0SRTests.cpp`
+
+```
+// ============================================================================
+//  P0-1 / P0-2 / P0-3  —  PersistentCache v3 Phase 0 Executable Contract
+// ----------------------------------------------------------------------------
+//  Owner 指示「Owner 回答 — D-1R-2K Phase 0 GO / Production Implementation
+//  NO-GO」§8 P0-1 / P0-2 / P0-3 の実行可能 specification。
+//
+//  ■ production source 変更ゼロ（このファイルは src/tests/ 配下の新規 TU）
+//  ■ JUCE 非依存（add_executable のみでビルド可能）
+//  ■ targetLength 正規化定数を追加しない（Owner §2.1 / §3）
+//      上限 authority は既存の MAX_IR_LATENCY のみ
+//  ■ 2,097,151 も 2,097,152 も「正当な producer value」であり、
+//      NonCanonical 扱いにしない（Owner §2.1）
+//
+//  依存経路の source trace（D-1R-2K §3.1 / §4.1）:
+//    :53707  getMaximumAllowedIRLengthSecForSampleRate
+//              return static_cast<float>(static_cast<double>(MAX_IR_LATENCY)/sr);
+//    :53728  computeTargetIRLength
+//              int target = static_cast<int>(sampleRate * targetIRTimeSec);
+//    :53741  target = (std::min)(target, kMaxIRCap);   kMaxIRCap = MAX_IR_LATENCY
+//    :48527  stepTrimmed.setSize(ch, stepResult.targetLength);
+//    :49900  const int numSamples = linearIR.getNumSamples();
+//    :49945  juce::AudioBuffer<double> mixedIR(numChannels, numSamples);
+//    :50417  key.targetLength = linearIR.getNumSamples();
+//    :77190  h = hashCombine(h, static_cast<uint64_t>(targetLength));
+//
+//  targetLength == numSamples は producer 側で構造的に成立する（上記連鎖）。
+//  本 test はその不変条件と、identity / header の一致を固定する。
+// ============================================================================
+
+#include <cstdint>
+#include <cstring>
+#include <cstdio>
+#include <cmath>
+#include <limits>
+#include <string>
+#include <vector>
+#include <stdexcept>
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// 定数（Owner §3 の裁定）。新規の semantic constant は追加しない。
+// ---------------------------------------------------------------------------
+constexpr std::int64_t kMaxIrLatency = 2097152;              // = 2^21（既存 authority）
+constexpr int         kMinChannels = 1;
+constexpr int         kMaxChannels = 8;                       // kMaxIRLoadChannels
+constexpr int         kMaxSections = 20;                      // producer の最大 {2,8,20}
+constexpr std::int64_t kHeaderBytes = 76;                     // sizeof(DiskHeader)
+constexpr int         kSrLow = 44100;
+constexpr int         kSrHigh = 768000;
+
+// ---------------------------------------------------------------------------
+// 最小 test harness
+// ---------------------------------------------------------------------------
+int g_failures = 0;
+int g_checks = 0;
+
+void check(bool ok, const std::string& what)
+{
+    ++g_checks;
+    if (!ok)
+    {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL  %s\n", what.c_str());
+    }
+}
+
+void checkEqI(std::int64_t got, std::int64_t want, const std::string& what)
+{
+    ++g_checks;
+    if (got != want)
+    {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL  %s : got=%lld want=%lld\n",
+                     what.c_str(), static_cast<long long>(got),
+                     static_cast<long long>(want));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// float32 正規化（:53707 の return static_cast<float>(...) を厳密に再現）
+// ---------------------------------------------------------------------------
+float toFloat32(double x)
+{
+    const float f = static_cast<float>(x);
+    return f;
+}
+
+/// hardMaxSec(sr) = (float)( 2^21 / sr )    — :53707
+float hardMaxSec(int sr)
+{
+    if (sr <= 0)
+        return 3.0f;                                        // IR_LENGTH_MAX_SEC
+    return toFloat32(static_cast<double>(kMaxIrLatency) / static_cast<double>(sr));
+}
+
+/// setState 復元経路が 3.0f で確定していた場合の cap 経路（:53728 + :53741）
+int capPathTargetLength(int sr)
+{
+    const double t = static_cast<double>(sr) * 3.0;
+    long long v = static_cast<long long>(t);                // truncation
+    if (v > kMaxIrLatency)
+        v = kMaxIrLatency;                                  // (std::min)(target, kMaxIRCap)
+    if (v < 1)
+        v = 1;                                              // (std::max)(target, 1)
+    return static_cast<int>(v);
+}
+
+/// hardmax クランプ経路: jlimit(0.5f, hardMaxSec(sr), t) → (int)(sr * value)
+/// t が hardMaxSec を超える（= 上限を要求した）と仮定した production 値。
+int hardMaxPathTargetLength(int sr)
+{
+    const float hm = hardMaxSec(sr);
+    const float clamped = (0.5f > hm) ? 0.5f : hm;          // t > hm のときは hm を返す
+    long long v = static_cast<long long>(static_cast<double>(sr)
+                                         * static_cast<double>(clamped));
+    if (v > kMaxIrLatency)
+        v = kMaxIrLatency;
+    if (v < 1)
+        v = 1;
+    return static_cast<int>(v);
+}
+
+/// ユーザー明示値の経路。t は厳密表現可能な float。
+int requestedPathTargetLength(int sr, float t)
+{
+    const float hm = hardMaxSec(sr);
+    float c = t;
+    if (c < 0.5f) c = 0.5f;
+    if (c > hm) c = hm;
+    long long v = static_cast<long long>(static_cast<double>(sr)
+                                         * static_cast<double>(c));
+    if (v > kMaxIrLatency) v = kMaxIrLatency;
+    if (v < 1) v = 1;
+    return static_cast<int>(v);
+}
+
+// ---------------------------------------------------------------------------
+// v3 identity encoder（Option A: numeric fixed-width hex, 64 hex）
+//   fileHash 16 + sampleRateBits 16 + phaseMode 8 + f1 8 + f2 8 + targetLength 8
+//   lowercase emit / case-insensitive decode。little-endian 表現は使わない。
+// ---------------------------------------------------------------------------
+std::string toFixedHex(std::uint64_t v, int width)
+{
+    static const char* kDigits = "0123456789abcdef";
+    std::string s(static_cast<std::size_t>(width), '0');
+    for (int i = width - 1; i >= 0; --i)
+    {
+        s[static_cast<std::size_t>(i)] = kDigits[v & 0xFu];
+        v >>= 4;
+    }
+    return s;
+}
+
+std::string encodeIdentityV3(std::uint64_t fileHash,
+                             double sampleRate,
+                             std::int32_t phaseMode,
+                             float freqStartHz,
+                             float freqEndHz,
+                             std::int32_t targetLength)
+{
+    std::uint64_t srBits = 0;
+    std::memcpy(&srBits, &sampleRate, sizeof(double));
+    std::uint32_t f1Bits = 0, f2Bits = 0;
+    std::memcpy(&f1Bits, &freqStartHz, sizeof(float));
+    std::memcpy(&f2Bits, &freqEndHz, sizeof(float));
+
+    std::string s;
+    s += toFixedHex(fileHash, 16);
+    s += toFixedHex(srBits, 16);
+    s += toFixedHex(static_cast<std::uint32_t>(phaseMode), 8);
+    s += toFixedHex(f1Bits, 8);
+    s += toFixedHex(f2Bits, 8);
+    s += toFixedHex(static_cast<std::uint32_t>(targetLength), 8);
+    return s;                                                // 64 hex
+}
+
+// ===========================================================================
+//  P0-1  SR / targetLength matrix
+//  Owner §8 P0-1: 全整数 SR 44,100〜768,000 を走査し
+//      float32(2^21 / SR) と int(SR * float32(...)) を検証する。
+//  期待値:
+//      divergence は最大 1 sample
+//      targetLength domain は [1, 2^21]
+//      2^21 - 1 は正常値
+//      2^21 も正常値
+// ===========================================================================
+void runP01()
+{
+    std::fprintf(stderr, "[P0-1] SR / targetLength matrix\n");
+
+    // ---- 全整数 SR 走査 --------------------------------------------------
+    long long diverging = 0;
+    long long maxLoss = 0;
+    long long outOfDomain = 0;
+    long long capBand = 0, capBandDiverge = 0;
+
+    for (int sr = kSrLow; sr <= kSrHigh; ++sr)
+    {
+        const int m = hardMaxPathTargetLength(sr);
+        const long long loss = kMaxIrLatency - m;
+
+        if (loss != 0)
+            ++diverging;
+        if (loss > maxLoss)
+            maxLoss = loss;
+
+        // domain [1, 2^21]
+        if (m < 1 || m > kMaxIrLatency)
+            ++outOfDomain;
+
+        // SR cap 帯（hardMaxSec < 3.0）では path 依存分裂が起きうる
+        if (hardMaxSec(sr) < 3.0f)
+        {
+            ++capBand;
+            if (m != capPathTargetLength(sr))
+                ++capBandDiverge;
+        }
+    }
+
+    const long long total = static_cast<long long>(kSrHigh) - kSrLow + 1;
+    checkEqI(total, 723901, "P0-1 scanned integer SR count");
+    checkEqI(maxLoss, 1, "P0-1 max divergence is 1 sample");
+    checkEqI(outOfDomain, 0, "P0-1 every hardmax-path targetLength is inside [1, 2^21]");
+    check(diverging > 0, "P0-1 at least one SR diverges by 1 sample");
+    check(capBandDiverge > 0, "P0-1 at least one SR in the cap band diverges between paths");
+    checkEqI(capBandDiverge, 34532, "P0-1 cap-band path divergence count");
+
+    std::fprintf(stderr, "       scanned=%lld diverging=%lld (%.4f%%) maxLoss=%lld\n",
+                 total, diverging, 100.0 * static_cast<double>(diverging)
+                                    / static_cast<double>(total), maxLoss);
+    std::fprintf(stderr, "       capBand=%lld capBandPathDiverge=%lld\n",
+                 capBand, capBandDiverge);
+
+    // ---- Owner §7 が固定した regression point --------------------------
+    struct Fixed { int sr; const char* label; };
+    const Fixed fixed[] = {
+        {44100,  "44.1kHz"}, {48000, "48kHz"},  {96000,  "96kHz"},
+        {192000, "192kHz"},  {384000, "384kHz"}, {705600, "705.6kHz"},
+        {768000, "768kHz"},
+    };
+    for (const auto& f : fixed)
+    {
+        const int m = hardMaxPathTargetLength(f.sr);
+        const int c = capPathTargetLength(f.sr);
+        check(m >= 1 && m <= kMaxIrLatency,
+              std::string("P0-1 ") + f.label + " hardmax targetLength in domain");
+        std::fprintf(stderr, "       %-8s sr=%-7d hardmax=%-9d cap=%-9d hardMaxSec=%.9f\n",
+                     f.label, f.sr, m, c, static_cast<double>(hardMaxSec(f.sr)));
+    }
+
+    // ---- 境界 699,050 / 699,051（Owner §7 必須 regression point）-------
+    const float hm699050 = hardMaxSec(699050);
+    const float hm699051 = hardMaxSec(699051);
+    check(hm699050 >= 3.0f, "P0-1 sr=699050 hardMaxSec >= 3.0");
+    check(hm699051 <  3.0f, "P0-1 sr=699051 hardMaxSec <  3.0");
+    std::fprintf(stderr, "       699050 hardMaxSec=%.9f   699051 hardMaxSec=%.9f\n",
+                 static_cast<double>(hm699050), static_cast<double>(hm699051));
+
+    // ---- 2^21 - 1 になる SR と 2^21 になる SR が双方存在 ---------------
+    bool sawMinus1 = false, sawExact = false;
+    for (int sr = kSrLow; sr <= kSrHigh; ++sr)
+    {
+        const int m = hardMaxPathTargetLength(sr);
+        if (m == kMaxIrLatency - 1) sawMinus1 = true;
+        if (m == kMaxIrLatency)      sawExact = true;
+        if (sawMinus1 && sawExact) break;
+    }
+    check(sawMinus1, "P0-1 some SR yields 2^21 - 1 (a legitimate producer value)");
+    check(sawExact, "P0-1 some SR yields 2^21     (a legitimate producer value)");
+
+    // ---- ユーザー明示値（t <= 3.0）に float32 損失が無いこと ----------
+    long long explicitMismatch = 0;
+    for (int sr : {44100, 48000, 96000, 192000, 384000, 705600, 768000})
+        for (float t : {0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f})
+        {
+            if (t > hardMaxSec(sr))
+                continue;                                   // cap が優先される
+            const int expect = static_cast<int>(static_cast<double>(sr) * t);
+            if (requestedPathTargetLength(sr, t) != expect)
+                ++explicitMismatch;
+        }
+    checkEqI(explicitMismatch, 0,
+             "P0-1 explicit t<=3.0 requests incur no float32 loss");
+
+    // ---- 44.1 kHz でも 2^21 - 1 になる（768kHz 固有ではない）----------
+    checkEqI(hardMaxPathTargetLength(44100), kMaxIrLatency - 1,
+             "P0-1 sr=44100 hardmax path yields 2^21 - 1");
+    checkEqI(hardMaxPathTargetLength(48000), kMaxIrLatency - 1,
+             "P0-1 sr=48000 hardmax path yields 2^21 - 1");
+}
+
+// ===========================================================================
+//  P0-2  targetLength identity
+//  Owner §8 P0-2: 同一 artifact の producer / consumer で
+//      targetLength / numSamples / cache identity / header.targetLength
+//      が一致することを検証する。
+// ===========================================================================
+
+// producer 側の構造（:48527 / :49900 / :49945 / :50417）を test TU で再現
+int producerNumSamples(int targetLength) { return targetLength; }   // setSize 相当
+
+#pragma pack(push, 1)
+struct DiskHeaderV3
+{
+    std::uint64_t magic;
+    std::uint32_t version;
+    std::uint32_t headerReserved;
+    std::uint64_t fileHash;
+    double        sampleRate;
+    std::int32_t  phaseMode;
+    float         freqStartHz;
+    float         freqEndHz;
+    std::int32_t  targetLength;
+    std::uint64_t lastUsedTime;
+    std::int32_t  numChannels;
+    std::int32_t  numSamples;
+    std::int32_t  numAllpassSections;
+    std::int64_t  totalFileSize;
+};
+#pragma pack(pop)
+static_assert(sizeof(DiskHeaderV3) == 76, "DiskHeaderV3 must stay 76 bytes");
+
+void runP02()
+{
+    std::fprintf(stderr, "[P0-2] targetLength identity\n");
+
+    // ---- 構造的不変: targetLength == numSamples -----------------------
+    for (int sr : {44100, 48000, 96000, 192000, 384000, 705600, 768000})
+        for (int tl : {hardMaxPathTargetLength(sr), capPathTargetLength(sr)})
+        {
+            check(tl == producerNumSamples(tl),
+                  "P0-2 producer numSamples == targetLength (setSize chain)");
+        }
+
+    // ---- 2,097,151 / 2,097,152 の双方が producer value として妥当 ----
+    for (int tl : { static_cast<int>(kMaxIrLatency) - 1,
+                  static_cast<int>(kMaxIrLatency) })
+    {
+        check(tl >= 1 && tl <= kMaxIrLatency,
+              "P0-2 legitimate producer targetLength inside domain");
+        check(tl == producerNumSamples(tl),
+              "P0-2 legitimate producer targetLength satisfies == numSamples");
+    }
+
+    // ---- mismatch は usable として受理してはならない -------------------
+    // Owner §4.2 / D-1R-2K K-24: targetLength != numSamples は Malformed。
+    const bool mismatchAdmissible = (2097151 == 2097152);   // 必ず false
+    check(!mismatchAdmissible,
+          "P0-2 targetLength != numSamples is NOT admissible (rejected)");
+
+    // ---- identity / header の一致 ------------------------------------
+    struct Probe
+    {
+        std::uint64_t fileHash; double sr; std::int32_t phaseMode;
+        float f1, f2; std::int32_t targetLength;
+    };
+    const Probe probes[] = {
+        {0x0123456789ABCDEFull, 768000.0, 1, 100.0f, 700.0f, 2097151},
+        {0x0123456789ABCDEFull, 768000.0, 1, 100.0f, 700.0f, 2097152},
+        {0xFEDCBA9876543210ull, 44100.0,  2, 400.0f, 1300.0f, 132300},
+        {0x0000000000000000ull, 192000.0, 0, 250.0f, 900.0f, 1},
+    };
+    for (const auto& p : probes)
+    {
+        const std::string id = encodeIdentityV3(p.fileHash, p.sr, p.phaseMode,
+                                               p.f1, p.f2, p.targetLength);
+        checkEqI(static_cast<std::int64_t>(id.size()), 64,
+                 "P0-2 identity is exactly 64 hex characters");
+        for (char c : id)
+            check((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
+                  "P0-2 identity is lowercase hex");
+
+        // producer と consumer は同一の targetLength から同一 identity を得る
+        const std::string idConsumer = encodeIdentityV3(p.fileHash, p.sr, p.phaseMode,
+                                                        p.f1, p.f2, p.targetLength);
+        check(id == idConsumer,
+              "P0-2 producer and consumer derive the identical identity");
+
+        // header.targetLength は identity に埋め込んだ targetLength と同一
+        DiskHeaderV3 h{};
+        h.targetLength = p.targetLength;
+        h.numSamples   = producerNumSamples(p.targetLength);
+        checkEqI(h.targetLength, p.targetLength,
+                 "P0-2 header.targetLength == identity targetLength");
+        checkEqI(h.numSamples, h.targetLength,
+                 "P0-2 header.numSamples == header.targetLength");
+
+        // identity 領域が targetLength を実際に含むこと（末尾 8 hex）
+        const std::string tail = id.substr(56, 8);
+        const std::string expect = toFixedHex(
+            static_cast<std::uint32_t>(p.targetLength), 8);
+        check(tail == expect,
+              "P0-2 identity tail 8 hex carries targetLength");
+    }
+
+    // ---- 2097151 と 2097152 は別 identity（SR-J-4 の明示的帰結）---------
+    const std::string a = encodeIdentityV3(1, 768000.0, 1, 100.0f, 700.0f, 2097151);
+    const std::string b = encodeIdentityV3(1, 768000.0, 1, 100.0f, 700.0f, 2097152);
+    check(a != b, "P0-2 2097151 and 2097152 map to different identities");
+
+    // ---- case-insensitive decode の前提: uppercase 入力も受理 ---------
+    std::string upper = a;
+    for (char& c : upper)
+        if (c >= 'a' && c <= 'f') c = static_cast<char>(c - 'a' + 'A');
+    check(upper != a, "P0-2 uppercase form differs from lowercase form");
+    std::string lowered = upper;
+    for (char& c : lowered)
+        if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+    check(lowered == a, "P0-2 case-insensitive decode round-trips");
+}
+
+// ===========================================================================
+//  P0-3  exact-size arithmetic
+//  Owner §8 P0-3: channel / sample / allpass section の組合せについて
+//      checked arithmetic を検証する。指定された 8 ケースを必ず含む。
+// ===========================================================================
+
+// checked arithmetic（Owner §4.4 C-SZ-1）
+bool computeExpectedSizeChecked(std::int64_t numChannels,
+                                std::int64_t numSamples,
+                                std::int64_t numSections,
+                                std::int64_t& out)
+{
+    const std::int64_t kLimit = std::numeric_limits<std::int64_t>::max();
+    const std::int64_t kDbl = 8;
+
+    if (numChannels < 1 || numSamples < 1 || numSections < 0)
+        return false;
+    if (numChannels > kMaxChannels || numSamples > kMaxIrLatency
+        || numSections > kMaxSections)
+        return false;
+
+    std::int64_t total = kHeaderBytes;
+    const std::int64_t chanSamples = numChannels * numSamples;
+    if (numSamples != 0 && chanSamples / numSamples != numChannels) return false; // overflow
+    const std::int64_t payload = chanSamples * kDbl;
+    if (chanSamples != 0 && payload / kDbl != chanSamples)         return false; // overflow
+    if (payload > kLimit - total)                                  return false;
+    total += payload;
+
+    const std::int64_t secBytes = numSections * kDbl * 2;
+    if (numSections != 0 && secBytes / (kDbl * 2) != numSections) return false; // overflow
+    if (secBytes > kLimit - total)                                  return false;
+    total += secBytes;
+
+    out = total;
+    return true;
+}
+
+void runP03()
+{
+    std::fprintf(stderr, "[P0-3] exact-size arithmetic\n");
+
+    struct Case
+    {
+        std::int64_t ch, samples, sections;
+        bool         admissible;
+        std::int64_t expect;             // admissible のとき
+        const char*  label;
+    };
+    // Owner §8 P0-3 の指定 8 ケースを含む
+    const Case cases[] = {
+        {1, 1, 0, true, kHeaderBytes + 8, "1ch / targetLength=1 / section=0"},
+        {1, 1, 20, true, kHeaderBytes + 8 + 320, "1ch / targetLength=1 / section=20"},
+        {1, kMaxIrLatency, 0, true, kHeaderBytes + kMaxIrLatency * 8,
+         "1ch / targetLength=MAX_IR_LATENCY / section=0"},
+        {1, kMaxIrLatency - 1, 0, true, kHeaderBytes + (kMaxIrLatency - 1) * 8,
+         "1ch / targetLength=MAX_IR_LATENCY-1"},
+        {kMaxChannels, 1, 0, true, kHeaderBytes + kMaxChannels * 8,
+         "maxch / targetLength=1 / section=0"},
+        {kMaxChannels, kMaxIrLatency, 0, true, kHeaderBytes + kMaxChannels * kMaxIrLatency * 8,
+         "maxch / targetLength=MAX_IR_LATENCY / section=0"},
+        {kMaxChannels, kMaxIrLatency, kMaxSections, true, 134218124,
+         "maxch / MAX_IR_LATENCY / section=20  (overall max)"},
+        {kMaxChannels, kMaxIrLatency - 1, kMaxSections, true, 134218060,
+         "maxch / MAX_IR_LATENCY-1 / section=20"},
+        {1, 1000, 8, true, kHeaderBytes + 8000 + 128, "mid combination"},
+        {0, 1000, 8, false, 0, "0 channel rejected"},
+        {kMaxChannels + 1, 1000, 8, false, 0, "over-max channel rejected"},
+        {kMaxChannels, 0, 8, false, 0, "0 sample rejected"},
+        {kMaxChannels, kMaxIrLatency + 1, 8, false, 0,
+         "over-max sample rejected (2,097,153 must NOT be admissible)"},
+        {kMaxChannels, 1000, kMaxSections + 1, false, 0,
+         "over-max section rejected"},
+        {kMaxChannels, 1000, -1, false, 0, "negative section rejected"},
+        {kMaxChannels, std::numeric_limits<std::int32_t>::max(), 0, false, 0,
+         "int32 max sample rejected (128 GiB allocation attempt blocked)"},
+    };
+
+    for (const auto& c : cases)
+    {
+        std::int64_t got = 0;
+        const bool ok = computeExpectedSizeChecked(c.ch, c.samples, c.sections, got);
+        check(ok == c.admissible,
+              std::string("P0-3 admissibility ") + c.label);
+        if (c.admissible)
+            checkEqI(got, c.expect, std::string("P0-3 expectedSize ") + c.label);
+    }
+
+    // ---- 2,097,153 は domain 外（Owner §2.1: 上限 authority は MAX_IR_LATENCY のみ）
+    check(!(2097153 >= 1 && 2097153 <= kMaxIrLatency),
+          "P0-3 targetLength 2,097,153 is outside the v3 domain");
+    check(2097151 >= 1 && 2097151 <= kMaxIrLatency,
+          "P0-3 targetLength 2,097,151 is inside the v3 domain");
+    check(2097152 >= 1 && 2097152 <= kMaxIrLatency,
+          "P0-3 targetLength 2,097,152 is inside the v3 domain");
+
+    // ---- 2 値間の expectedSize 差分（SR-J-3 の帰結）--------------------
+    std::int64_t s1 = 0, s2 = 0;
+    computeExpectedSizeChecked(kMaxChannels, kMaxIrLatency - 1, kMaxSections, s1);
+    computeExpectedSizeChecked(kMaxChannels, kMaxIrLatency,     kMaxSections, s2);
+    checkEqI(s2 - s1, 64, "P0-3 expectedSize delta between 2^21-1 and 2^21 is 64 bytes");
+
+    // ---- 最大値は int32 にも収まる（余裕 16 倍）------------------------
+    std::int64_t maxSize = 0;
+    computeExpectedSizeChecked(kMaxChannels, kMaxIrLatency, kMaxSections, maxSize);
+    check(maxSize < 2147483647LL,
+          "P0-3 maximum expectedSize still fits in int32 (margin > 16x)");
+    check(maxSize == 134218124LL,
+          "P0-3 maximum expectedSize equals 134,218,124 bytes (128 MiB class)");
+}
+
+} // namespace
+
+int main()
+{
+    try
+    {
+        runP01();
+        runP02();
+        runP03();
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "EXCEPTION: %s\n", e.what());
+        return 2;
+    }
+
+    std::fprintf(stderr, "\nPersistentCacheV3Phase0SRTests: checks=%d failures=%d\n",
+                 g_checks, g_failures);
+    if (g_failures != 0)
+        return 1;
+    std::fprintf(stderr, "P0-1 / P0-2 / P0-3: PASS\n");
+    return 0;
+}
+```
+
+### 📄 `src\tests\PersistentCacheV3Phase0StateTests.cpp`
+
+```
+// ============================================================================
+//  P0-4 / P0-5  -  PersistentCache v3 Phase 0 Executable Contract
+// ----------------------------------------------------------------------------
+//  Owner instruction "Owner reply - D-1R-2K Phase 0 GO / Production
+//  Implementation NO-GO" section 8, items P0-4 / P0-5.
+//
+//  PRODUCTION SOURCE CHANGE: ZERO (this is a new TU under src/tests/).
+//  No JUCE dependency.
+//  The v3 classification / destructive-permission predicates do not exist in
+//  production yet, so they are implemented here as the POSITIVE contract that
+//  production must satisfy once implementation is authorised (currently NO-GO).
+//
+//  11 artifact states (D-1R-2K 6.1 / 8.1) x 11 destructive actions
+//  -> 121 exhaustive cases (Owner section 8, P0-5).
+//
+//  Three-layer split (Owner section 5, approved):
+//      classification  ->  destructive permission  ->  delete execution
+//  classification and destructive permission are SEPARATE functions here, so
+//  the two concerns cannot be fused in one place (Owner section 10, last item).
+// ============================================================================
+
+#include <cstdio>
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <array>
+#include <algorithm>
+#include <stdexcept>
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+
+void check(bool ok, const std::string& what)
+{
+    ++g_checks;
+    if (!ok)
+    {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL  %s\n", what.c_str());
+    }
+}
+
+void checkEq(long long got, long long want, const std::string& what)
+{
+    ++g_checks;
+    if (got != want)
+    {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL  %s : got=%lld want=%lld\n",
+                     what.c_str(), got, want);
+    }
+}
+
+// ===========================================================================
+//  Layer 1 - classification (pure, no side effects)
+// ===========================================================================
+enum class ArtifactState
+{
+    Absent = 0,
+    CurrentV3Canonical,
+    CurrentV3NonCanonical,
+    Future,
+    Obsolete,
+    Malformed,
+    NonCanonical,
+    ForeignFile,
+    ValidRecoveryCandidate,
+    StageCanonical,
+    StageNonCanonical,
+    Count_
+};
+
+constexpr int kStateCount = static_cast<int>(ArtifactState::Count_);
+
+const char* stateName(ArtifactState s)
+{
+    switch (s)
+    {
+        case ArtifactState::Absent:                  return "Absent";
+        case ArtifactState::CurrentV3Canonical:     return "CurrentV3Canonical";
+        case ArtifactState::CurrentV3NonCanonical:  return "CurrentV3NonCanonical";
+        case ArtifactState::Future:                 return "Future";
+        case ArtifactState::Obsolete:               return "Obsolete";
+        case ArtifactState::Malformed:              return "Malformed";
+        case ArtifactState::NonCanonical:           return "NonCanonical";
+        case ArtifactState::ForeignFile:            return "ForeignFile";
+        case ArtifactState::ValidRecoveryCandidate: return "ValidRecoveryCandidate";
+        case ArtifactState::StageCanonical:         return "StageCanonical";
+        case ArtifactState::StageNonCanonical:      return "StageNonCanonical";
+        default:                                    return "?";
+    }
+}
+
+/// A target artifact lives in the canonical namespace (<64hex>.mph).
+/// The staging namespace states can never be the target of R1-R4.
+bool isReachableAsTarget(ArtifactState s)
+{
+    switch (s)
+    {
+        case ArtifactState::Absent:
+        case ArtifactState::CurrentV3Canonical:
+        case ArtifactState::CurrentV3NonCanonical:
+        case ArtifactState::Future:
+        case ArtifactState::Obsolete:
+        case ArtifactState::Malformed:
+        case ArtifactState::NonCanonical:
+        case ArtifactState::ForeignFile:
+            return true;
+        default:
+            return false;      // ValidRecoveryCandidate / Stage*
+    }
+}
+
+/// Observable attributes of one artifact on disk.
+struct ArtifactObservation
+{
+    bool          exists = false;
+    bool          filenameIsOneOfThreeNamespaces = false;
+    bool          stemDecodesAs64Hex = false;
+    bool          readable = false;
+    bool          magicOk = false;
+    std::int64_t  version = 0;
+    bool          isRecoveryNamespace = false;          // .stage / .bak
+    bool          selfConsistent = false;
+    bool          actualSizeMatchesExpected = false;
+    bool          headerTotalSizeMatchesExpected = false;
+    bool          filenameEqualsLowerEncodeIdentity = false;
+};
+
+/// classification: first-match over P0..P10 (D-1R-2K 6.1, 11 branches).
+/// Returns exactly one state for every observation.
+ArtifactState classifyArtifact(const ArtifactObservation& o)
+{
+    if (!o.exists)                                              return ArtifactState::Absent;          // P0
+    if (!o.filenameIsOneOfThreeNamespaces)                      return ArtifactState::ForeignFile;    // P1
+    if (!o.stemDecodesAs64Hex)                                   return ArtifactState::NonCanonical;   // P2
+    if (!o.readable || !o.magicOk)                              return ArtifactState::Malformed;      // P3
+    if (o.version > 3)                                          return ArtifactState::Future;         // P4
+    if (o.version < 3)                                          return ArtifactState::Obsolete;       // P5
+
+    // P6 / P7 recovery namespace: only a self-consistent, size-exact,
+    //        non-canonical-name artifact is a recovery candidate.
+    if (o.isRecoveryNamespace)
+        return (o.selfConsistent
+                && o.actualSizeMatchesExpected
+                && o.headerTotalSizeMatchesExpected)
+                 ? ArtifactState::ValidRecoveryCandidate
+                 : ArtifactState::Malformed;
+
+    // P8 canonical namespace with a size mismatch (truncated / appended)
+    if (!o.actualSizeMatchesExpected || !o.headerTotalSizeMatchesExpected)
+        return ArtifactState::Malformed;
+
+    // P9 / P10 canonical namespace, size exact
+    return o.filenameEqualsLowerEncodeIdentity
+             ? ArtifactState::CurrentV3Canonical                // P9
+             : ArtifactState::CurrentV3NonCanonical;            // P10
+}
+
+ArtifactObservation makeObs(bool exists, bool ns3, bool hexStem, bool readable,
+                            bool magic, std::int64_t version, bool recoveryNs,
+                            bool selfConsistent, bool sizeOk, bool hdrSizeOk,
+                            bool nameMatches)
+{
+    ArtifactObservation o;
+    o.exists = exists;
+    o.filenameIsOneOfThreeNamespaces = ns3;
+    o.stemDecodesAs64Hex = hexStem;
+    o.readable = readable;
+    o.magicOk = magic;
+    o.version = version;
+    o.isRecoveryNamespace = recoveryNs;
+    o.selfConsistent = selfConsistent;
+    o.actualSizeMatchesExpected = sizeOk;
+    o.headerTotalSizeMatchesExpected = hdrSizeOk;
+    o.filenameEqualsLowerEncodeIdentity = nameMatches;
+    return o;
+}
+
+// ===========================================================================
+//  Layer 2 - destructive permission (pure function of the classified state)
+// ===========================================================================
+enum class DestructiveAction
+{
+    LoadUsable = 0,
+    LoadRejected,
+    EnumerateCanonical,
+    EnumerateRecovery,
+    Remove,
+    Clear,
+    EvictLruZero,
+    EvictLruN,
+    DeleteArtifact,
+    Touch,
+    RecoveryRestore,
+    Count_
+};
+
+constexpr int kActionCount = static_cast<int>(DestructiveAction::Count_);
+
+const char* actionName(DestructiveAction a)
+{
+    switch (a)
+    {
+        case DestructiveAction::LoadUsable:         return "LoadUsable";
+        case DestructiveAction::LoadRejected:       return "LoadRejected";
+        case DestructiveAction::EnumerateCanonical: return "EnumerateCanonical";
+        case DestructiveAction::EnumerateRecovery:  return "EnumerateRecovery";
+        case DestructiveAction::Remove:             return "Remove";
+        case DestructiveAction::Clear:              return "Clear";
+        case DestructiveAction::EvictLruZero:       return "EvictLruZero";
+        case DestructiveAction::EvictLruN:          return "EvictLruN";
+        case DestructiveAction::DeleteArtifact:     return "DeleteArtifact";
+        case DestructiveAction::Touch:              return "Touch";
+        case DestructiveAction::RecoveryRestore:    return "RecoveryRestore";
+        default:                                    return "?";
+    }
+}
+
+enum class Permission { Allowed = 0, Rejected, NotApplicable };
+
+const char* permName(Permission p)
+{
+    switch (p)
+    {
+        case Permission::Allowed:   return "ALLOW";
+        case Permission::Rejected: return "REJECT";
+        default:                   return "N/A";
+    }
+}
+
+/// Destructive permission depends on the classified state ONLY.
+/// It never inspects a path or a filename pattern (Owner section 9, G-1).
+Permission permissionFor(ArtifactState s, DestructiveAction a)
+{
+    // Owner section 4.1 / D-1R-2K K-03:
+    // evictLRU(0) is a no-op for every state. It is never a delete-all.
+    if (a == DestructiveAction::EvictLruZero)
+        return Permission::NotApplicable;
+
+    const bool isCanonical      = (s == ArtifactState::CurrentV3Canonical);
+    const bool isStageCanonical = (s == ArtifactState::StageCanonical);
+    const bool isRecovery       = (s == ArtifactState::ValidRecoveryCandidate);
+    const bool exists           = (s != ArtifactState::Absent);
+
+    switch (a)
+    {
+        case DestructiveAction::LoadUsable:
+            return isCanonical ? Permission::Allowed : Permission::Rejected;
+
+        case DestructiveAction::LoadRejected:
+            // A canonical artifact must load successfully; every other existing
+            // artifact is entitled to be rejected by load().
+            return (exists && !isCanonical) ? Permission::Allowed
+                                            : Permission::NotApplicable;
+
+        case DestructiveAction::EnumerateCanonical:
+            return isCanonical ? Permission::Allowed : Permission::NotApplicable;
+
+        case DestructiveAction::EnumerateRecovery:
+            return isRecovery ? Permission::Allowed : Permission::NotApplicable;
+
+        case DestructiveAction::Remove:
+        case DestructiveAction::Clear:
+        case DestructiveAction::DeleteArtifact:
+            // Staging is owned by ConvoPeq so it may be cleaned up.
+            // Everything else must pass the v3 state gate.
+            return (isCanonical || isStageCanonical) ? Permission::Allowed
+                                                     : Permission::Rejected;
+
+        case DestructiveAction::EvictLruN:
+            // Owner section 5: staging / temporary is NOT an LRU candidate.
+            return isCanonical ? Permission::Allowed : Permission::Rejected;
+
+        case DestructiveAction::Touch:
+            return isCanonical ? Permission::Allowed : Permission::NotApplicable;
+
+        case DestructiveAction::RecoveryRestore:
+            return isRecovery ? Permission::Allowed : Permission::NotApplicable;
+
+        default:
+            return Permission::Rejected;
+    }
+}
+
+// ===========================================================================
+//  R1-R4 decision (Owner section 10)
+// ===========================================================================
+enum class Action
+{
+    NotApplicableTarget = 0,   // target is outside the canonical namespace
+    NoOp,
+    REC,
+    ReplaceCanonical,
+    CreateNew
+};
+
+const char* actionName2(Action a)
+{
+    switch (a)
+    {
+        case Action::NotApplicableTarget: return "NotApplicableTarget";
+        case Action::NoOp:                return "NoOp";
+        case Action::REC:                 return "REC";
+        case Action::ReplaceCanonical:    return "ReplaceCanonical";
+        case Action::CreateNew:           return "CreateNew";
+        default:                          return "?";
+    }
+}
+
+Action decideAction(ArtifactState target, ArtifactState recovery)
+{
+    if (!isReachableAsTarget(target))
+        return Action::NotApplicableTarget;
+
+    // R1  target == Future -> NoOp (UnsafeResidue; target is never touched)
+    if (target == ArtifactState::Future)
+        return Action::NoOp;
+
+    // R2  target == CurrentV3Canonical -> save replaces (recovery irrelevant)
+    if (target == ArtifactState::CurrentV3Canonical)
+        return Action::ReplaceCanonical;
+
+    // R3  target == Absent
+    if (target == ArtifactState::Absent)
+        return (recovery == ArtifactState::ValidRecoveryCandidate) ? Action::REC
+                                                                   : Action::CreateNew;
+
+    // R4  target in { CurrentV3NonCanonical, Obsolete, Malformed,
+    //                NonCanonical, ForeignFile }
+    return (recovery == ArtifactState::ValidRecoveryCandidate) ? Action::REC
+                                                               : Action::NoOp;
+}
+
+// ===========================================================================
+//  eviction ordering (Owner N5: timestamp is orthogonal to canonicality)
+// ===========================================================================
+struct EvictionKey
+{
+    bool         invalidAscending;
+    std::uint64_t lastUsedTime;
+    std::string  canonicalFilename;
+};
+
+bool operator<(const EvictionKey& a, const EvictionKey& b)
+{
+    if (a.invalidAscending != b.invalidAscending)
+        return a.invalidAscending < b.invalidAscending;
+    if (!a.invalidAscending && a.lastUsedTime != b.lastUsedTime)
+        return a.lastUsedTime < b.lastUsedTime;
+    return a.canonicalFilename < b.canonicalFilename;
+}
+
+// ===========================================================================
+//  P0-4  R1-R4 exhaustive classification
+// ===========================================================================
+void runP04()
+{
+    std::fprintf(stderr, "[P0-4] R1-R4 exhaustive classification\n");
+
+    // ---- classifier: every reachable state is produced --------------------
+    struct Probe { const char* want; ArtifactObservation o; };
+    const Probe probes[] = {
+        { "Absent",                 makeObs(false,false,false,false,false,0,false,false,false,false,false) },
+        { "CurrentV3Canonical",     makeObs(true, true, true, true, true, 3, false,true, true, true, true) },
+        { "CurrentV3NonCanonical",  makeObs(true, true, true, true, true, 3, false,false,true, true, false) },
+        { "Future",                 makeObs(true, true, true, true, true, 4, false,true, true, true, true) },
+        { "Obsolete",               makeObs(true, true, true, true, true, 2, false,true, true, true, true) },
+        { "Malformed",              makeObs(true, true, true, true, false,3, false,true, true, true, true) },
+        { "NonCanonical",           makeObs(true, true, false,true, true, 3, false,true, true, true, true) },
+        { "ForeignFile",            makeObs(true, false,false,true, true, 3, false,true, true, true, true) },
+        { "ValidRecoveryCandidate", makeObs(true, true, true, true, true, 3, true, true, true, true, false) },
+        { "Malformed",              makeObs(true, true, true, true, true, 3, true, false,true, true, false) },
+        { "Malformed",              makeObs(true, true, true, true, true, 3, false,true, false,true, true) },
+    };
+
+    for (const auto& p : probes)
+    {
+        const ArtifactState got = classifyArtifact(p.o);
+        check(std::string(stateName(got)) == p.want,
+              std::string("P0-4 classify -> ") + p.want
+                  + " (got " + stateName(got) + ")");
+    }
+
+    // ---- 11 states are all producible across the observation space -------
+    {
+        std::vector<ArtifactState> seen;
+        for (const auto& p : probes)
+        {
+            const ArtifactState s = classifyArtifact(p.o);
+            if (std::find(seen.begin(), seen.end(), s) == seen.end())
+                seen.push_back(s);
+        }
+        check(seen.size() == 9,
+              "P0-4 classifier produces 9 distinct states from the probe set");
+    }
+
+    // ---- unreachable-as-target states ------------------------------------
+    for (int s = 0; s < kStateCount; ++s)
+    {
+        const auto st = static_cast<ArtifactState>(s);
+        const bool reachable = isReachableAsTarget(st);
+        check(reachable == (st != ArtifactState::ValidRecoveryCandidate
+                             && st != ArtifactState::StageCanonical
+                             && st != ArtifactState::StageNonCanonical),
+              std::string("P0-4 target reachability of ") + stateName(st));
+        check(reachable || decideAction(st, ArtifactState::Malformed)
+                            == Action::NotApplicableTarget,
+              std::string("P0-4 unreachable target ") + stateName(st)
+                  + " yields NotApplicableTarget");
+    }
+
+    // ---- 11 x 11 = 121 exhaustive decision table -------------------------
+    int unresolved = 0, rec = 0, nop = 0, repl = 0, create = 0, na = 0;
+    for (int t = 0; t < kStateCount; ++t)
+        for (int r = 0; r < kStateCount; ++r)
+        {
+            const Action a = decideAction(static_cast<ArtifactState>(t),
+                                          static_cast<ArtifactState>(r));
+            switch (a)
+            {
+                case Action::NoOp:                ++nop;    break;
+                case Action::REC:                 ++rec;    break;
+                case Action::ReplaceCanonical:    ++repl;   break;
+                case Action::CreateNew:           ++create; break;
+                case Action::NotApplicableTarget: ++na;     break;
+                default:                          ++unresolved; break;
+            }
+        }
+    checkEq(unresolved, 0,
+            "P0-4 all 121 cases resolve to exactly one defined action");
+    checkEq(kStateCount * kStateCount, 121,
+            "P0-4 decision table is exactly 11 x 11 = 121 cases");
+    // 3 unreachable targets x 11 recovery states = 33
+    checkEq(na, 33, "P0-4 unreachable targets account for 33 cases");
+    // REC over reachable targets = R3a(1) + R4a(5) = 6, times 1 recovery state
+    checkEq(rec, 6, "P0-4 REC occurs exactly for R3a + R4a over reachable targets");
+
+    std::fprintf(stderr, "       121 cases: NoOp=%d REC=%d Replace=%d Create=%d N/A=%d\n",
+                 nop, rec, repl, create, na);
+
+    // ---- R1 / R2 are independent of the recovery state ------------------
+    for (int r = 0; r < kStateCount; ++r)
+    {
+        check(decideAction(ArtifactState::Future, static_cast<ArtifactState>(r))
+                  == Action::NoOp,
+              "P0-4 R1 Future -> NoOp for all 11 recovery states");
+        check(decideAction(ArtifactState::CurrentV3Canonical,
+                           static_cast<ArtifactState>(r)) == Action::ReplaceCanonical,
+              "P0-4 R2 CurrentV3Canonical -> ReplaceCanonical for all 11");
+    }
+
+    // ---- R3a / R3b -------------------------------------------------------
+    check(decideAction(ArtifactState::Absent,
+                       ArtifactState::ValidRecoveryCandidate) == Action::REC,
+          "P0-4 R3a Absent + recovery -> REC");
+    check(decideAction(ArtifactState::Absent,
+                       ArtifactState::Malformed) == Action::CreateNew,
+          "P0-4 R3b Absent + non-recovery -> CreateNew");
+
+    // ---- R4a / R4b over the five R4 states -------------------------------
+    const ArtifactState r4set[5] = {
+        ArtifactState::CurrentV3NonCanonical, ArtifactState::Obsolete,
+        ArtifactState::Malformed, ArtifactState::NonCanonical,
+        ArtifactState::ForeignFile
+    };
+    for (auto s : r4set)
+    {
+        check(decideAction(s, ArtifactState::ValidRecoveryCandidate) == Action::REC,
+              std::string("P0-4 R4a ") + stateName(s) + " + recovery -> REC");
+        check(decideAction(s, ArtifactState::Malformed) == Action::NoOp,
+              std::string("P0-4 R4b ") + stateName(s) + " + non-recovery -> NoOp");
+    }
+
+    // ---- exactly one R-rule owns each reachable target state -------------
+    int owned = 0;
+    for (int t = 0; t < kStateCount; ++t)
+    {
+        const auto st = static_cast<ArtifactState>(t);
+        if (!isReachableAsTarget(st))
+            continue;
+        int rules = 0;
+        if (st == ArtifactState::Future)                  ++rules;
+        if (st == ArtifactState::CurrentV3Canonical)      ++rules;
+        if (st == ArtifactState::Absent)                  ++rules;
+        if (st == ArtifactState::CurrentV3NonCanonical)   ++rules;
+        if (st == ArtifactState::Obsolete)                ++rules;
+        if (st == ArtifactState::Malformed)               ++rules;
+        if (st == ArtifactState::NonCanonical)            ++rules;
+        if (st == ArtifactState::ForeignFile)             ++rules;
+        checkEq(rules, 1,
+                std::string("P0-4 exactly one R-rule owns ") + stateName(st));
+        owned += (rules == 1) ? 1 : 0;
+    }
+    checkEq(owned, 8, "P0-4 all 8 reachable target states are covered");
+
+    // ---- eviction ordering ------------------------------------------------
+    {
+        std::vector<EvictionKey> keys = {
+            {false, 100, "bbb.mph"},
+            {false, 100, "aaa.mph"},
+            {false,   0, "ccc.mph"},
+            {true,    0, "ddd.mph"},
+        };
+        std::sort(keys.begin(), keys.end());
+        check(keys[0].canonicalFilename == "ccc.mph",
+              "P0-4 lowest lastUsedTime sorts first, including 0");
+        check(keys[1].canonicalFilename == "aaa.mph"
+                  && keys[2].canonicalFilename == "bbb.mph",
+              "P0-4 equal timestamps break by filename ascending");
+        check(keys[3].invalidAscending,
+              "P0-4 invalid entries sort last");
+    }
+}
+
+// ===========================================================================
+//  P0-5  destructive action matrix (11 states x 11 actions = 121 cases)
+// ===========================================================================
+void runP05()
+{
+    std::fprintf(stderr, "[P0-5] destructive action matrix (11 x 11 = 121)\n");
+
+    // Positive v3 contract. Column order:
+    //  LoadUsable LoadRejected EnumCanonical EnumRecovery Remove Clear
+    //  EvictLruZero EvictLruN DeleteArtifact Touch RecoveryRestore
+    const Permission table[kStateCount][kActionCount] = {
+        // ---- Absent
+        { Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- CurrentV3Canonical
+        { Permission::Allowed,     Permission::NotApplicable, Permission::Allowed,      Permission::NotApplicable,
+          Permission::Allowed,     Permission::Allowed,      Permission::NotApplicable, Permission::Allowed,
+          Permission::Allowed,     Permission::Allowed,      Permission::NotApplicable },
+        // ---- CurrentV3NonCanonical
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- Future
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- Obsolete
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- Malformed
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- NonCanonical
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- ForeignFile
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+        // ---- ValidRecoveryCandidate
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::Allowed,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::Allowed },
+        // ---- StageCanonical
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Allowed,     Permission::Allowed,      Permission::NotApplicable, Permission::Rejected,
+          Permission::Allowed,     Permission::NotApplicable, Permission::NotApplicable },
+        // ---- StageNonCanonical
+        { Permission::Rejected,    Permission::Allowed,      Permission::NotApplicable, Permission::NotApplicable,
+          Permission::Rejected,    Permission::Rejected,     Permission::NotApplicable, Permission::Rejected,
+          Permission::Rejected,    Permission::NotApplicable, Permission::NotApplicable },
+    };
+
+    int mismatches = 0;
+    for (int s = 0; s < kStateCount; ++s)
+        for (int a = 0; a < kActionCount; ++a)
+        {
+            const Permission want = table[s][a];
+            const Permission got  = permissionFor(static_cast<ArtifactState>(s),
+                                                  static_cast<DestructiveAction>(a));
+            if (want != got)
+            {
+                ++mismatches;
+                std::fprintf(stderr, "FAIL  P0-5 [%s][%s] got=%s want=%s\n",
+                             stateName(static_cast<ArtifactState>(s)),
+                             actionName(static_cast<DestructiveAction>(a)),
+                             permName(got), permName(want));
+            }
+            ++g_checks;
+        }
+    checkEq(mismatches, 0,
+            "P0-5 all 121 state x action cells match the v3 contract");
+    checkEq(kStateCount * kActionCount, 121,
+            "P0-5 matrix is exactly 11 x 11 = 121 cases");
+
+    // ---- Owner section 5: excluded from LRU candidate ---------------------
+    const ArtifactState excluded[6] = {
+        ArtifactState::StageCanonical,
+        ArtifactState::StageNonCanonical,
+        ArtifactState::Future,
+        ArtifactState::ForeignFile,
+        ArtifactState::Malformed,
+        ArtifactState::ValidRecoveryCandidate,
+    };
+    for (auto s : excluded)
+        check(permissionFor(s, DestructiveAction::EvictLruN) != Permission::Allowed,
+              std::string("P0-5 ") + stateName(s)
+                  + " is not an LRU eviction candidate");
+
+    // ---- evictLRU(0) is a no-op for every state (Owner section 4.1) ------
+    for (int s = 0; s < kStateCount; ++s)
+        check(permissionFor(static_cast<ArtifactState>(s),
+                            DestructiveAction::EvictLruZero) == Permission::NotApplicable,
+              std::string("P0-5 evictLRU(0) is a no-op for ")
+                  + stateName(static_cast<ArtifactState>(s)));
+
+    // ---- remove() and clear() agree (same state gate) --------------------
+    for (int s = 0; s < kStateCount; ++s)
+    {
+        const auto st = static_cast<ArtifactState>(s);
+        check(permissionFor(st, DestructiveAction::Remove)
+                  == permissionFor(st, DestructiveAction::Clear),
+              std::string("P0-5 remove() and clear() agree on ") + stateName(st));
+    }
+
+    // ---- structural gate: filename pattern alone never authorises -------
+    check(permissionFor(ArtifactState::Future, DestructiveAction::Remove)
+              == Permission::Rejected,
+          "P0-5 Future cannot be removed even though it exists");
+    check(permissionFor(ArtifactState::ForeignFile, DestructiveAction::Clear)
+              == Permission::Rejected,
+          "P0-5 ForeignFile is never deleted by clear() (not owned by ConvoPeq)");
+    check(permissionFor(ArtifactState::Obsolete, DestructiveAction::EvictLruN)
+              == Permission::Rejected,
+          "P0-5 Obsolete (v2) is not an eviction candidate");
+    check(permissionFor(ArtifactState::StageCanonical, DestructiveAction::EvictLruN)
+              == Permission::Rejected,
+          "P0-5 staging is cleaned by explicit residue handling, not by LRU");
+
+    // ---- only canonical entries are LRU candidates -----------------------
+    int lruCandidates = 0;
+    for (int s = 0; s < kStateCount; ++s)
+        if (permissionFor(static_cast<ArtifactState>(s),
+                          DestructiveAction::EvictLruN) == Permission::Allowed)
+            ++lruCandidates;
+    checkEq(lruCandidates, 1,
+            "P0-5 exactly one state (CurrentV3Canonical) is an LRU candidate");
+}
+
+} // namespace
+
+int main()
+{
+    try
+    {
+        runP04();
+        runP05();
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "EXCEPTION: %s\n", e.what());
+        return 2;
+    }
+
+    std::fprintf(stderr, "\nPersistentCacheV3Phase0StateTests: checks=%d failures=%d\n",
+                 g_checks, g_failures);
+    if (g_failures != 0)
+        return 1;
+    std::fprintf(stderr, "P0-4 / P0-5: PASS\n");
+    return 0;
+}
 ```
 
 ### 📄 `src\tests\PriorityIntegrationTests.cpp`
