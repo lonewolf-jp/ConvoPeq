@@ -89,7 +89,43 @@ public:
 
 private:
     static constexpr uint64_t kMagic = 0x4D69786564506800ULL;
-    static constexpr uint32_t kVersion = 2;
+    // Phase 2 (D-1R-2AI): canonical persistent cache version. v1 / v2 are
+    // obsolete and are never auto-loaded, migrated, or auto-deleted.
+    static constexpr uint32_t kVersion = 3;
+
+    // Phase 2 (Owner D-1R-2AJ section 6): adopted constant. Bound of the
+    // artifact's numAllpassSections, enforced independently on the consumer
+    // side. The producer's emergent maximum is also 20, but AllpassDesignerConfig
+    // accepts any int, so the artifact bound is NOT delegated to the producer.
+    static constexpr std::int64_t kMaxAllpassSections = 20;
+
+    // Phase 2: canonical IR-length and channel bounds. These MUST track
+    // ConvolverProcessor::MAX_IR_LATENCY (2^21 = 2,097,152) and
+    // convo::irload::kMaxIRLoadChannels (8u). They are local aliases so that
+    // MixedPhasePersistentCache does not have to include ConvolverProcessor.h
+    // (which would drag in the MKL include chain). Phase 0 tests
+    // (PersistentCacheV3Phase0SRTests.cpp) already pin the same values against
+    // the real declarations, so any drift is caught by the SR sweep.
+    static constexpr std::int64_t kMaxIrLatencyBound = 2097152;   // == MAX_IR_LATENCY
+    static constexpr std::int64_t kMaxIrChannelsBound = 8;       // == kMaxIRLoadChannels
+
+    // Phase 2: canonical v3 namespace. The v2 directory
+    // (%APPDATA%/ConvoPeq/MixedPhaseCache/) is never referenced, so v2 artifacts
+    // are never auto-loaded, migrated, auto-deleted, nor LRU candidates.
+    static constexpr const char* kCacheNamespaceV3 = "MixedPhaseCacheV3";
+
+    // Phase 2 (Owner D-1R-2AI section 5.1): the LRU / entry-count classification.
+    enum class ArtifactState
+    {
+        currentV3Canonical,   //!< the only LRU candidate and the only counted entry
+        stagingOrTemporary,   //!< not *.mph (juce::TemporaryFile staging artifact)
+        malformedOrTruncated, //!< DiskHeader cannot be read in full, or size < header
+        exactSizeMismatch,    //!< actual file size != checked expected size
+        foreign,              //!< magic mismatch
+        future,               //!< version > kVersion
+        obsolete,             //!< version < kVersion (v1 / v2)
+        outsideV3Namespace    //!< not inside the v3 namespace directory
+    };
 
 #pragma pack(push, 1)
     struct DiskHeader {
@@ -117,6 +153,41 @@ private:
                                    int phaseMode,
                                    float freqStartHz, float freqEndHz,
                                    int targetLength);
+
+    // ----------------------------------------------------------------------
+    // Phase 2 canonical validator (Owner D-1R-2AJ P2-I1 / P2-R6).
+    //
+    // Contract:
+    //  - every dimension argument is std::int64_t; the caller widens first and
+    //    narrows to the int32_t DiskHeader fields only AFTER this returns true
+    //  - no filesystem I/O, no allocation, no lock, no RT policy decision
+    //  - the identical function is used by the producer (save) and by the
+    //    consumer (load) and by the LRU / entry-count classifier
+    //
+    // kMaxIrLatency is passed in so that this private helper does not depend on
+    // ConvolverProcessor; the value supplied is MAX_IR_LATENCY (2^21).
+    // ----------------------------------------------------------------------
+    [[nodiscard]] static bool validateCanonicalDims(std::int64_t targetLength,
+                                                   std::int64_t numSamples,
+                                                   std::int64_t numChannels,
+                                                   std::int64_t numAllpassSections,
+                                                   std::int64_t kMaxIrLatency,
+                                                   std::int64_t maxChannels,
+                                                   std::int64_t& expectedFileSizeOut) noexcept;
+
+    // Expected artifact size, derived with checked int64 arithmetic. Never a
+    // hard-coded constant (Owner D-1R-2AJ section 6).
+    [[nodiscard]] static bool computeExpectedSizeChecked(std::int64_t numChannels,
+                                                         std::int64_t numSamples,
+                                                         std::int64_t numAllpassSections,
+                                                         std::int64_t& expectedSizeOut) noexcept;
+
+    // Classify one directory entry (Owner D-1R-2AJ section 5.1 fixed order).
+    [[nodiscard]] static ArtifactState classifyArtifact(const juce::File& file) noexcept;
+    [[nodiscard]] static bool isCurrentV3Canonical(ArtifactState state) noexcept
+    {
+        return state == ArtifactState::currentV3Canonical;
+    }
 };
 
 } // namespace convo

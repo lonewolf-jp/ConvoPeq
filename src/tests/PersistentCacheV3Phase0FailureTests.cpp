@@ -166,10 +166,12 @@ void verifyCurrentProductionContract()
     check(!src.empty(), "P0-6a production source is readable");
 
     // Owner section 4.1: evictLRU(0) must become a no-op in v3.
-    // Current production routes 0 to clear(); this is the CONTRADICTED
-    // condition that Phase 0 records (it is NOT executed here).
-    check(contains(src, "if (maxCount == 0)") && contains(src, "clear();"),
-          "P0-6a CONFIRMED-BAD: current evictLRU(0) delegates to clear()");
+    // Phase 2 (D-1R-2AI): production now implements the no-op. The assertion
+    // is inverted from the Phase 0 "CONFIRMED-BAD" record to the Phase 2
+    // "CONFIRMED-GOOD" contract, because the contradicted condition is resolved.
+    check(contains(src, "if (maxCount == 0)") && contains(src, "return;")
+          && !contains(src, "if (maxCount == 0)\n    {\n        clear();"),
+          "P0-6a Phase2: evictLRU(0) is a complete no-op (no clear() delegation)");
 
     // Phase 1 (D-1R-2M): touch() は削除され、load() 内の in-place 8-byte
     // timestamp write に置き換えられた。旧 append 破損（N -> 2N）は解消済み。

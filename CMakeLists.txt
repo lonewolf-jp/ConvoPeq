@@ -1386,6 +1386,39 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
     add_test(NAME PersistentCacheV3Phase0FailureTests COMMAND PersistentCacheV3Phase0FailureTests)
     juce_generate_juce_header(PersistentCacheV3Phase0FailureTests)
+
+    # ---- P2-C2 : Phase 2 direct executable test matrix ----
+    # Owner D-1R-2AJ section 7 requires DIRECT evidence for every canonical
+    # predicate boundary, artifact classification, evictLRU(0) no-op, clear()
+    # scoping and getEntryCount() semantics. The Phase 0 suites cover these only
+    # indirectly.
+    # PRODUCTION SOURCE CHANGE: NONE. Test target only.
+    juce_add_console_app(PersistentCacheV3Phase2Tests)
+    target_sources(PersistentCacheV3Phase2Tests PRIVATE
+        src/tests/PersistentCacheV3Phase2Tests.cpp
+        src/MixedPhasePersistentCache.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase2Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_include_directories(PersistentCacheV3Phase2Tests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(PersistentCacheV3Phase2Tests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase2Tests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(PersistentCacheV3Phase2Tests PRIVATE
+        juce::juce_core juce::juce_events juce::juce_audio_basics
+    )
+    add_test(NAME PersistentCacheV3Phase2Tests COMMAND PersistentCacheV3Phase2Tests)
+    juce_generate_juce_header(PersistentCacheV3Phase2Tests)
 endif()
 
 #------------------------------------------------------------
