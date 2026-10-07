@@ -364,6 +364,13 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
         ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
     )
+    # Phase 1 build-environment repair (owner approved 2026-10-07): add the
+    # MKL/IPP include propagation that the sibling test targets already BOOST:
+    target_include_directories(RuntimeHealthMonitorTierTests SYSTEM PRIVATE
+        "$ENV{MKLROOT}/include"
+        "$ENV{IPPROOT}/include"
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+    )
     target_compile_features(RuntimeHealthMonitorTierTests PRIVATE cxx_std_20)
     target_compile_options(RuntimeHealthMonitorTierTests PRIVATE /EHsc /utf-8)
     # ★ min/max macro collision guard: ISRRetireRouter.cpp pulls EpochDomain.h etc. whose
@@ -1287,6 +1294,98 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(DEFINED ENV{IPPROOT})
         target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{IPPROOT}/include")
     endif()
+endif()
+
+#------------------------------------------------------------
+# work113 D-1R-2L: PersistentCache v3 Phase 0 Executable Contract (P0-1..P0-6)
+#------------------------------------------------------------
+# Owner instruction "Owner 回答 — D-1R-2K Phase 0 GO / Production
+# Implementation NO-GO" section 8.
+#
+# PRODUCTION SOURCE CHANGE: NONE. The blocks below add test targets only.
+# No production file is compiled into a different configuration, no seam is
+# added to src/, and no RT path is touched (Owner section 9 pass conditions).
+#
+# Y-2 (forceTargetIRLengthSecForTest) was conditionally approved, but is NOT
+# needed: Owner section 8 P0-1 defines the verification as pure arithmetic over
+#     float32(2^21 / SR)  and  int(SR * float32(...))
+# so the sweep runs entirely inside the test translation unit. The seam is
+# therefore not introduced and the "production source semantic change: none"
+# condition holds without any exception.
+#
+# Y-3 (production FaultPoint seam) is NOT approved, so P0-6 reproduces every
+# failure sequence with test-owned fixtures only (read-only attribute,
+# truncated file, concurrency) and asserts the current production contract by
+# reading the production source text instead of instrumenting it.
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    # ---- P0-1 / P0-2 / P0-3 : pure arithmetic, no JUCE -----------------
+    add_executable(PersistentCacheV3Phase0SRTests
+        src/tests/PersistentCacheV3Phase0SRTests.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase0SRTests PRIVATE
+        ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+    target_compile_features(PersistentCacheV3Phase0SRTests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase0SRTests PRIVATE /utf-8 /EHsc)
+        target_compile_definitions(PersistentCacheV3Phase0SRTests PRIVATE
+            _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME PersistentCacheV3Phase0SRTests COMMAND PersistentCacheV3Phase0SRTests)
+
+    # ---- P0-4 / P0-5 : classification + destructive matrix, no JUCE ----
+    add_executable(PersistentCacheV3Phase0StateTests
+        src/tests/PersistentCacheV3Phase0StateTests.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase0StateTests PRIVATE
+        ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+    target_compile_features(PersistentCacheV3Phase0StateTests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase0StateTests PRIVATE /utf-8 /EHsc)
+        target_compile_definitions(PersistentCacheV3Phase0StateTests PRIVATE
+            _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME PersistentCacheV3Phase0StateTests COMMAND PersistentCacheV3Phase0StateTests)
+
+    # ---- P0-6 : failure injection against the real cache implementation --
+    juce_add_console_app(PersistentCacheV3Phase0FailureTests)
+    target_sources(PersistentCacheV3Phase0FailureTests PRIVATE
+        src/tests/PersistentCacheV3Phase0FailureTests.cpp
+        src/MixedPhasePersistentCache.cpp
+    )
+    target_include_directories(PersistentCacheV3Phase0FailureTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_include_directories(PersistentCacheV3Phase0FailureTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(PersistentCacheV3Phase0FailureTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    # Owner D-1R-2AA section 7: enable the test-only timestamp-write / flush
+    # fault-injection seam for THIS target only. Because the macro is defined
+    # on this target alone, the seam is preprocessed out of every production
+    # binary, so no permanent production fault point, resident flag, branch,
+    # allocation or RT-reachable path is introduced anywhere else.
+    target_compile_definitions(PersistentCacheV3Phase0FailureTests PRIVATE
+        CONVOPEQ_PCACHE_TEST_SEAM=1
+    )
+    if(MSVC)
+        target_compile_options(PersistentCacheV3Phase0FailureTests PRIVATE /utf-8 /EHsc)
+    endif()
+    # juce::AudioBuffer lives in juce_audio_basics (not juce_audio_utils),
+    # and MixedPhasePersistentCache.h requires it.
+    target_link_libraries(PersistentCacheV3Phase0FailureTests PRIVATE
+        juce::juce_core juce::juce_events juce::juce_audio_basics
+    )
+    target_link_libraries(PersistentCacheV3Phase0FailureTests PRIVATE
+        juce::juce_core juce::juce_events juce::juce_audio_basics
+    )
+    add_test(NAME PersistentCacheV3Phase0FailureTests COMMAND PersistentCacheV3Phase0FailureTests)
+    juce_generate_juce_header(PersistentCacheV3Phase0FailureTests)
 endif()
 
 #------------------------------------------------------------

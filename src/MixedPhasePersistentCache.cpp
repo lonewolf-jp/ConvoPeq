@@ -6,6 +6,52 @@
 #include <cstring>
 #include <vector>
 
+// ===========================================================================
+// TEST-ONLY fault-injection seam (Owner D-1R-2AA section 7).
+//
+// Compiled ONLY when CONVOPEQ_PCACHE_TEST_SEAM is defined. That macro is set
+// ONLY on the PersistentCacheV3Phase0FailureTests target, so this whole block
+// is absent from every production binary (ConvoPeq main, Debug and Release):
+// no resident flag, no branch, no allocation, no lock, no RT-reachable code.
+//
+// The state is a function-local static POD. It is touched only from the
+// existing NonRT metadata-update block inside load(); it does not add any new
+// reachability from the audio/RT path, and it adds no public API, no
+// authority surface and no production constant.
+// ===========================================================================
+#if defined(CONVOPEQ_PCACHE_TEST_SEAM)
+namespace convo {
+
+namespace
+{
+    struct TestSeamState
+    {
+        MixedPhasePersistentCache::TimestampWriteFault fault
+            = MixedPhasePersistentCache::TimestampWriteFault::none;
+        int attempts = 0;
+    };
+
+    TestSeamState& testSeamState() noexcept
+    {
+        static TestSeamState s;
+        return s;
+    }
+}
+
+void MixedPhasePersistentCache::armTimestampWriteFaultForTest (TimestampWriteFault mode) noexcept
+{
+    testSeamState().fault = mode;
+    testSeamState().attempts = 0;
+}
+
+int MixedPhasePersistentCache::getInjectedFaultAttemptsForTest() noexcept
+{
+    return testSeamState().attempts;
+}
+
+} // namespace convo
+#endif // CONVOPEQ_PCACHE_TEST_SEAM
+
 namespace convo {
 
 // ═══════════════════════════════════════════════════════════════
@@ -137,8 +183,57 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
             return false;
     }
 
-    // LRU用にタイムスタンプ更新（touch相当）
-    touch(fileHash, sampleRate, phaseMode, freqStartHz, freqEndHz, targetLength);
+    // LRU用にタイムスタンプ更新（v3 Phase 1: in-place 8-byte write）
+    // touch() public API は削除し、load() 内の NonRT metadata update に統合。
+    // DiskHeader::lastUsedTime の 8 byte のみを書き換える。
+    // setPosition(offsetof(...)) → write(8) → flush() のみを行い、
+    // truncate() は使用しない（payload / file size は変更しない）。
+    // timestamp write / flush failure は diagnostic のみ（load() == true を維持）。
+    {
+        const auto touchFile = getCacheFile(fileHash, sampleRate, phaseMode,
+                                            freqStartHz, freqEndHz, targetLength);
+        if (touchFile.existsAsFile())
+        {
+            juce::FileOutputStream touchStream(touchFile);
+            if (touchStream.openedOk())
+            {
+                const auto lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
+                const auto fileSize = touchFile.getSize();
+                if (lastUsedTimeOffset + static_cast<decltype(fileSize)>(sizeof(uint64_t)) <= fileSize)
+                {
+                    touchStream.setPosition(static_cast<int64>(lastUsedTimeOffset));
+                    const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
+
+                    // Diagnostic-only metadata update. Neither the write result
+                    // nor the flush result may change load()'s return value, the
+                    // payload bytes, or the file size.
+#if defined(CONVOPEQ_PCACHE_TEST_SEAM)
+                    const auto fault = testSeamState().fault;
+                    if (fault == TimestampWriteFault::timestampWrite)
+                    {
+                        // Simulated OS-level write failure: the 8 bytes are not
+                        // written at all. Nothing else in the file is touched.
+                        ++testSeamState().attempts;
+                    }
+                    else if (fault == TimestampWriteFault::flush)
+                    {
+                        // write() succeeds, but the explicit flush is reported
+                        // as failed and is therefore not issued. The 8 bytes
+                        // stay in the stream buffer and are never committed by
+                        // this metadata update.
+                        if (touchStream.write(&now, sizeof(now)))
+                            ++testSeamState().attempts;
+                    }
+                    else
+#endif
+                    {
+                        (void) touchStream.write(&now, sizeof(now));
+                        (void) touchStream.flush();
+                    }
+                }
+            }
+        }
+    }
 
     return true;
 }
@@ -227,48 +322,6 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
 // ═══════════════════════════════════════════════════════════════
 //  LRU 管理
 // ═══════════════════════════════════════════════════════════════
-
-void MixedPhasePersistentCache::touch(uint64_t fileHash,
-                                      double sampleRate,
-                                      int phaseMode,
-                                      float freqStartHz, float freqEndHz,
-                                      int targetLength)
-{
-    const auto file = getCacheFile(fileHash, sampleRate, phaseMode,
-                                   freqStartHz, freqEndHz, targetLength);
-    if (!file.existsAsFile())
-        return;
-
-    // read-modify-write: ファイル全体を読み込み、ヘッダのタイムスタンプのみ更新して書き戻す
-    // (FileOutputStream で開くとファイルが切り詰められるため、read-modify-write で行う)
-    std::vector<uint8_t> buffer;
-    {
-        juce::FileInputStream inStream(file);
-        if (!inStream.openedOk())
-            return;
-
-        const auto fileSize = file.getSize();
-        if (fileSize <= 0)
-            return;
-
-        buffer.resize(static_cast<size_t>(fileSize));
-        if (inStream.read(buffer.data(), static_cast<int>(buffer.size())) != static_cast<int64>(buffer.size()))
-            return;
-    } // inStream はここで破棄され、ファイルも閉じられる
-
-    // DiskHeader 内 lastUsedTime のオフセットをコンパイル時に計算
-    const size_t lastUsedTimeOffset = offsetof(DiskHeader, lastUsedTime);
-    if (lastUsedTimeOffset + sizeof(uint64_t) > buffer.size())
-        return;
-
-    const uint64_t now = static_cast<uint64_t>(juce::Time::getMillisecondCounter());
-    std::memcpy(&buffer[lastUsedTimeOffset], &now, sizeof(now));
-
-    juce::FileOutputStream outStream(file);
-    if (!outStream.openedOk())
-        return;
-    outStream.write(buffer.data(), buffer.size());
-}
 
 void MixedPhasePersistentCache::evictLRU(size_t maxCount)
 {
