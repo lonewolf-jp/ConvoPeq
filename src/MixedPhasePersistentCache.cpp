@@ -5,6 +5,9 @@
 #include <cstddef>
 #include <cstring>
 #include <vector>
+#include <cstdint>
+#include <algorithm>
+#include <limits>
 
 // ===========================================================================
 // TEST-ONLY fault-injection seam (Owner D-1R-2AA section 7).
@@ -89,11 +92,171 @@ uint64_t MixedPhasePersistentCache::computeKeyHash(uint64_t fileHash,
 //  パス解決
 // ═══════════════════════════════════════════════════════════════
 
+//==============================================================================
+// Phase 2 canonical validator (Owner D-1R-2AJ P2-I1).
+//
+// Implemented in the int64 domain. No filesystem I/O, no allocation, no lock,
+// no RT policy decision. Called identically by the producer (save), the
+// consumer (load) and the LRU / entry-count classifier, so predicate identity
+// is structural (Owner P2-R6 item 9).
+//==============================================================================
+namespace
+{
+    // Checked int64 helpers. INT32_MAX is never used as a bound (Owner section 5).
+    [[nodiscard]] bool checkedMul(std::int64_t a, std::int64_t b, std::int64_t& out) noexcept
+    {
+        if (a < 0 || b < 0)
+            return false;
+        if (a != 0 && b > (std::numeric_limits<std::int64_t>::max)() / a)
+            return false;
+        out = a * b;
+        return true;
+    }
+
+    [[nodiscard]] bool checkedAdd(std::int64_t a, std::int64_t b, std::int64_t& out) noexcept
+    {
+        if (a < 0 || b < 0)
+            return false;
+        if (a > (std::numeric_limits<std::int64_t>::max)() - b)
+            return false;
+        out = a + b;
+        return true;
+    }
+} // namespace
+
+bool MixedPhasePersistentCache::computeExpectedSizeChecked(std::int64_t numChannels,
+                                                            std::int64_t numSamples,
+                                                            std::int64_t numAllpassSections,
+                                                            std::int64_t& expectedSizeOut) noexcept
+{
+    // sizeof(DiskHeader) is 76 under #pragma pack(1); derived, not hard-coded.
+    std::int64_t total = static_cast<std::int64_t>(sizeof(DiskHeader));
+
+    std::int64_t perChannel = 0;
+    if (! checkedMul(numSamples, static_cast<std::int64_t>(sizeof(double)), perChannel))
+        return false;
+
+    std::int64_t payloadAll = 0;
+    if (! checkedMul(numChannels, perChannel, payloadAll))
+        return false;
+    if (! checkedAdd(total, payloadAll, total))
+        return false;
+
+    std::int64_t perSection = 0;
+    if (! checkedMul(numAllpassSections, static_cast<std::int64_t>(sizeof(double)), perSection))
+        return false;
+
+    std::int64_t allpassAll = 0;   // rho + theta
+    if (! checkedMul(perSection, 2, allpassAll))
+        return false;
+    if (! checkedAdd(total, allpassAll, total))
+        return false;
+
+    expectedSizeOut = total;
+    return true;
+}
+
+bool MixedPhasePersistentCache::validateCanonicalDims(std::int64_t targetLength,
+                                                       std::int64_t numSamples,
+                                                       std::int64_t numChannels,
+                                                       std::int64_t numAllpassSections,
+                                                       std::int64_t kMaxIrLatency,
+                                                       std::int64_t maxChannels,
+                                                       std::int64_t& expectedFileSizeOut) noexcept
+{
+    // Predicate 1: 1 <= targetLength <= MAX_IR_LATENCY
+    if (targetLength < 1 || targetLength > kMaxIrLatency)
+        return false;
+    // Predicate 2: 1 <= numSamples <= MAX_IR_LATENCY
+    if (numSamples < 1 || numSamples > kMaxIrLatency)
+        return false;
+    // Predicate 3: targetLength == numSamples
+    if (targetLength != numSamples)
+        return false;
+    // Predicate 4: 1 <= numChannels <= kMaxIRLoadChannels
+    if (numChannels < 1 || numChannels > maxChannels)
+        return false;
+    // Predicate 5: 0 <= numAllpassSections <= kPersistentCacheMaxAllpassSections
+    if (numAllpassSections < 0 || numAllpassSections > kMaxAllpassSections)
+        return false;
+
+    // Predicates 6 + 7: checked arithmetic, overflow rejected.
+    return computeExpectedSizeChecked(numChannels, numSamples, numAllpassSections,
+                                      expectedFileSizeOut);
+}
+
+//==============================================================================
+// Phase 2 artifact classifier (Owner D-1R-2AJ section 5.1 fixed order).
+// Order: v3 namespace -> staging/temporary -> header readable -> magic ->
+//        version -> dimensions (predicates 1..7) -> checked expected size vs
+//        actual size -> header.totalFileSize == expectedSize.
+//==============================================================================
+MixedPhasePersistentCache::ArtifactState
+MixedPhasePersistentCache::classifyArtifact(const juce::File& file) noexcept
+{
+    // (1) must live inside the v3 namespace directory
+    {
+        const auto dir = getCacheDirectory().getFullPathName();
+        if (! file.getFullPathName().startsWith (dir))
+            return ArtifactState::outsideV3Namespace;
+    }
+
+    // (2) staging / temporary: canonical artifacts are *.mph
+    if (file.getFileExtension() != ".mph")
+        return ArtifactState::stagingOrTemporary;
+
+    const auto actualSize = static_cast<std::int64_t>(file.getSize());
+    if (actualSize < static_cast<std::int64_t>(sizeof(DiskHeader)))
+        return ArtifactState::malformedOrTruncated;
+
+    juce::FileInputStream stream(file);
+    if (! stream.openedOk())
+        return ArtifactState::malformedOrTruncated;
+
+    DiskHeader header;
+    if (stream.read (&header, sizeof(DiskHeader)) != static_cast<int64> (sizeof(DiskHeader)))
+        return ArtifactState::malformedOrTruncated;
+
+    // (4) magic
+    if (header.magic != kMagic)
+        return ArtifactState::foreign;
+    // (5) version
+    if (header.version > kVersion)
+        return ArtifactState::future;
+    if (header.version < kVersion)
+        return ArtifactState::obsolete;   // v1 / v2
+
+    // (6) dimensions: int64 widen, then predicates 1..7
+    std::int64_t expectedSize = 0;
+    if (! validateCanonicalDims (static_cast<std::int64_t> (header.targetLength),
+                                static_cast<std::int64_t> (header.numSamples),
+                                static_cast<std::int64_t> (header.numChannels),
+                                static_cast<std::int64_t> (header.numAllpassSections),
+                                kMaxIrLatencyBound,
+                                kMaxIrChannelsBound,
+                                expectedSize))
+        return ArtifactState::malformedOrTruncated;
+
+    // (7) checked expected size == actual file size
+    if (actualSize != expectedSize)
+        return ArtifactState::exactSizeMismatch;
+    // (8) header.totalFileSize == expectedSize
+    if (static_cast<std::int64_t> (header.totalFileSize) != expectedSize)
+        return ArtifactState::exactSizeMismatch;
+
+    return ArtifactState::currentV3Canonical;
+}
+
 juce::File MixedPhasePersistentCache::getCacheDirectory()
 {
+    // Phase 2 (Owner D-1R-2AJ section 3): the canonical v3 namespace. The v2
+    // directory (%APPDATA%/ConvoPeq/MixedPhaseCache/) is never referenced, so
+    // v2 artifacts are never auto-loaded, migrated, auto-deleted, nor LRU
+    // candidates. Every public path funnels through here (the single sink), so
+    // this is the only place that selects the namespace.
     auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
                    .getChildFile("ConvoPeq")
-                   .getChildFile("MixedPhaseCache");
+                   .getChildFile(kCacheNamespaceV3);
     if (!dir.exists())
      {
          auto result = dir.createDirectory();
@@ -154,10 +317,31 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
         return false;
 
     // 波形データ読み込み
-    const int numChannels = static_cast<int>(header.numChannels);
-    const int numSamples = static_cast<int>(header.numSamples);
-    if (numChannels <= 0 || numSamples <= 0)
+    const std::int64_t targetLength64 = static_cast<std::int64_t>(header.targetLength);
+    const std::int64_t numSamples64 = static_cast<std::int64_t>(header.numSamples);
+    const std::int64_t numChannels64 = static_cast<std::int64_t>(header.numChannels);
+    const std::int64_t numSec64 = static_cast<std::int64_t>(header.numAllpassSections);
+
+    // Phase 2 (Owner D-1R-2AJ P2-I3): canonical predicate 1..7 in the int64
+    // domain, run BEFORE any allocation and BEFORE any narrowing.
+    std::int64_t expectedSize = 0;
+    if (!validateCanonicalDims(targetLength64, numSamples64, numChannels64, numSec64,
+                               kMaxIrLatencyBound,
+                               static_cast<std::int64_t>(kMaxIrChannelsBound),
+                               expectedSize))
         return false;
+
+    // Exact-size validation (predicate 8): header / actual / expected, three-way.
+    const std::int64_t actualSize = static_cast<std::int64_t>(file.getSize());
+    if (actualSize != expectedSize)
+        return false;
+    if (static_cast<std::int64_t>(header.totalFileSize) != expectedSize)
+        return false;
+
+    // ---- allocation boundary: every rejection above happens before this ----
+    const int numChannels = static_cast<int>(numChannels64);
+    const int numSamples = static_cast<int>(numSamples64);
+    const int numSec = static_cast<int>(numSec64);
 
     outIr.setSize(numChannels, numSamples);
     for (int ch = 0; ch < numChannels; ++ch)
@@ -170,7 +354,6 @@ bool MixedPhasePersistentCache::load(uint64_t fileHash,
     }
 
     // Allpass セクション読み込み
-    const int numSec = static_cast<int>(header.numAllpassSections);
     outRho.resize(static_cast<size_t>(numSec));
     outTheta.resize(static_cast<size_t>(numSec));
 
@@ -267,9 +450,24 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
         if (!stream.openedOk())
             return false;
 
-        const int numChannels = ir.getNumChannels();
-        const int numSamples = ir.getNumSamples();
-        const int numSec = static_cast<int>(rho.size());
+        // Phase 2 (Owner D-1R-2AJ P2-I4): widen to the int64 domain, run the
+        // canonical validator, and only then narrow into the int32 DiskHeader
+        // fields. rho.size() is never cast to int32 before validation.
+        const std::int64_t numChannels64 = static_cast<std::int64_t>(ir.getNumChannels());
+        const std::int64_t numSamples64 = static_cast<std::int64_t>(ir.getNumSamples());
+        const std::int64_t numSec64 = static_cast<std::int64_t>(rho.size());
+        const std::int64_t targetLength64 = static_cast<std::int64_t>(targetLength);
+
+        std::int64_t expectedSize = 0;
+        if (!validateCanonicalDims(targetLength64, numSamples64, numChannels64, numSec64,
+                                   kMaxIrLatencyBound,
+                                   static_cast<std::int64_t>(kMaxIrChannelsBound),
+                                   expectedSize))
+            return false;
+
+        const int numChannels = static_cast<int>(numChannels64);
+        const int numSamples = static_cast<int>(numSamples64);
+        const int numSec = static_cast<int>(numSec64);
 
         // ヘッダ書き込み
         DiskHeader header;
@@ -325,26 +523,27 @@ bool MixedPhasePersistentCache::save(uint64_t fileHash,
 
 void MixedPhasePersistentCache::evictLRU(size_t maxCount)
 {
+    // Phase 2 (Owner D-1R-2AJ section 5): evictLRU(0) is a complete no-op and
+    // must not delegate to clear(). 0 is never reinterpreted as "delete all".
     if (maxCount == 0)
-    {
-        clear();
         return;
-    }
 
     auto dir = getCacheDirectory();
     juce::Array<juce::File> files;
     dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
 
-    if (static_cast<size_t>(files.size()) <= maxCount)
-        return;
-
-    // 各ファイルのヘッダから lastUsedTime を読み、古い順にソート
-    // (OSのファイルアクセス時刻は無効化されている可能性があるためヘッダの値を使用する)
+    // Only CurrentV3Canonical artifacts are candidates. Everything else
+    // (staging/temporary, malformed, exact-size mismatch, foreign, future,
+    // obsolete incl. v1/v2, outside the v3 namespace) is left untouched and is
+    // NOT auto-deleted. The candidate count is therefore a subset of files.size().
     std::vector<std::pair<uint64_t, juce::File>> timedFiles;
     timedFiles.reserve(static_cast<size_t>(files.size()));
 
     for (const auto& f : files)
     {
+        if (!isCurrentV3Canonical(classifyArtifact(f)))
+            continue;   // leave non-canonical artifacts in place
+
         juce::FileInputStream stream(f);
         if (!stream.openedOk())
             continue;
@@ -352,14 +551,17 @@ void MixedPhasePersistentCache::evictLRU(size_t maxCount)
         DiskHeader header;
         if (stream.read(&header, sizeof(DiskHeader)) != static_cast<int64>(sizeof(DiskHeader)))
             continue;
-        if (header.magic != kMagic)
-            continue;
 
         timedFiles.emplace_back(header.lastUsedTime, f);
     }
 
+    if (static_cast<size_t>(timedFiles.size()) <= maxCount)
+        return;
+
+    // Evict oldest-lastUsedTime CurrentV3Canonical artifacts until the
+    // canonical count fits maxCount.
     std::sort(timedFiles.begin(), timedFiles.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    [](const auto& a, const auto& b) { return a.first < b.first; });
 
     const int toRemove = static_cast<int>(timedFiles.size()) - static_cast<int>(maxCount);
     for (int i = 0; i < toRemove; ++i)
@@ -380,6 +582,10 @@ void MixedPhasePersistentCache::remove(uint64_t fileHash,
 
 void MixedPhasePersistentCache::clear()
 {
+    // Phase 2 (Owner D-1R-2AJ section 5.3): clear() stays a public API but is
+    // limited to canonical cache artifacts inside the v3 namespace. The v2
+    // directory is never touched, and staging artifacts with another extension
+    // are not additionally deleted.
     auto dir = getCacheDirectory();
     if (!dir.exists())
         return;
@@ -387,18 +593,30 @@ void MixedPhasePersistentCache::clear()
     juce::Array<juce::File> files;
     dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
     for (auto& f : files)
-        f.deleteFile();
+    {
+        if (isCurrentV3Canonical(classifyArtifact(f)))
+            f.deleteFile();
+    }
 }
 
 size_t MixedPhasePersistentCache::getEntryCount()
 {
+    // Phase 2 (Owner D-1R-2AJ section 5.2): getEntryCount() is the
+    // CurrentV3Canonical semantic count. Staging / malformed / future / obsolete
+    // artifacts are NOT counted.
     auto dir = getCacheDirectory();
     if (!dir.exists())
         return 0;
 
     juce::Array<juce::File> files;
     dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
-    return static_cast<size_t>(files.size());
+
+    size_t canonical = 0;
+    for (const auto& f : files)
+        if (isCurrentV3Canonical(classifyArtifact(f)))
+            ++canonical;
+
+    return canonical;
 }
 
 } // namespace convo
