@@ -41,7 +41,7 @@ class WorldRetirementReferenceObserver;   // ★ T1 (D98): reference observer（
  *
  * Ownership contract:
  *   - enqueueWithRetry() transfers ptr to this authority ONLY when all stores + EmergencyQ are full.
- *   - If epoch is safe (isOlder(world_epoch, minReaderEpoch) == false), deleter
+ *   - If epoch is safe (isOlder(world_epoch, minReaderEpoch) == true), deleter
  *     executes immediately (synchronous destruction in Non-RT context).
  *   - If epoch is unsafe, the entry is retained in the internal pending list.
  *   - drain() attempts to reclaim epoch-safe entries (called from tryReclaim).
@@ -54,8 +54,9 @@ class WorldRetirementReferenceObserver;   // ★ T1 (D98): reference observer（
  *   unsafe" can never leave ptr unowned, because this authority always takes
  *   ownership and waits for the epoch to become safe (drain()).
  *
- * This class is NOT used for shutdown-only paths. Shutdown uses
- * ShutdownReclaimAuthority (see AudioEngine.h drainAll / shutdown path).
+ * This class handles terminal (out-of-bounded-store) reclamation. Shutdown uses
+ * TerminalReclaimAuthority::shutdownReclaim() (ownership transfer, epoch-gated) and
+ * ISRRetireRouter::drainAll() for final force-release during shutdown.
  *
  * ISR P1-19 conformance: epoch provider is injected, no EpochDomain exposure.
  */
