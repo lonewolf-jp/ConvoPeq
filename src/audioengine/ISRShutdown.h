@@ -282,7 +282,8 @@ public:
     // Step 4 (拡張): Proof 生成 API（Q0〜Q7 全条件を observation から検証）。
     //   ⚠️ 簡易生成（if (isFullyDrained()) return Proof{};）は禁止（A2-G05）。
     //   全 Q 条件成立時のみ valid な Proof を返す（identity は shutdownGeneration + epoch/readerReg
-    //   generation を束縛 — G17〜G20）。production 未接続（Phase A2 Step 9-15 で接続）。
+    //   generation を束縛 — G17〜G20）。AudioEngine::tryShutdownQuiescentReclaim
+    //   (AudioEngine.h:4641) から production で呼出・接続済み。
     [[nodiscard]] std::optional<ShutdownQuiescenceProof>
     tryMakeQuiescenceProof(const QuiescenceObservation& observation) noexcept;
 

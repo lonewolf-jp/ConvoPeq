@@ -350,7 +350,8 @@ void ShutdownRuntime::markPostStopEnqueue() noexcept
 std::optional<ShutdownQuiescenceProof>
 ShutdownRuntime::tryMakeQuiescenceProof(const QuiescenceObservation& observation) noexcept
 {
-    // Q0〜Q7 を個別に観測（Q1/Q6 は ShutdownRuntime 内部、その他は observation）
+    // Q0〜Q7 を個別に観測（Q1 は ShutdownRuntime 内部の admissionState()==Closed、
+    // Q6 は observation.postStopEnqueueZero、それ以外は observation）
     const bool q0 = observation.admissionReservationsZero;
     const bool q1 = (admissionState() == AdmissionState::Closed);
     const bool q2 = observation.allProducersJoined;

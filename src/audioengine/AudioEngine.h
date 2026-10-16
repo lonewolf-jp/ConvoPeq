@@ -2228,8 +2228,8 @@ private:
             //     (b) deleter registered via owner->enqueueDeferredDeleteNonRt(...) — invoked by
             //         m_retireRouter on a consumer thread, epoch-gated; see
             //         AudioEngine.h enqueueDeferredDeleteNonRt (定義 4219), ISRRetireRouter.h:382
-            //         shutdownReclaim (ShutdownReclaimAuthority), and ISRRetireRouter.h:247
-            //         drainAllQuarantineStore (shutdown drain: ReleaseResources.cpp:410/505).
+            //         TerminalReclaimAuthority::shutdownReclaim(), and ISRRetireRouter.h:247
+            //         drainAllQuarantineStore (shutdown drain: ReleaseResources.cpp:444, 555).
             //         directDelete は禁忌 (REPAIR_PLAN.md:2412).
             //
             //   Within the dtor, owner==nullptr ガード + dspHandleRuntime_ への参照は

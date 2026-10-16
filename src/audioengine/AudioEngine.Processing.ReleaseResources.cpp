@@ -429,7 +429,7 @@ void AudioEngine::releaseResources()
     }
 
     // ★★★ PR2: Quarantine 全スロット強制解放（シャットダウン専用）
-    //    この時点で GracefulDrain が activeReaderCount==0 を確認済み
+    //    この時点で GracefulDrain が activeReaderCount==0 を確認済み（※ 前提：実行時確認は未検証。別確認項目）
     {
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
         m_retireRouter->unquarantineAllReaders();
@@ -533,7 +533,9 @@ void AudioEngine::releaseResources()
     //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。clear は publish() と統合せず
     //   null 公開（world クリア）として別 API を authority 配下に置く（二十次レビュー §15）。
     //   戻り値の oldWorld は従来 bridge.retireRuntimePublishWorldNonRt(world, true) で retire していた。
-    //   shutdown 中は enqueueDeferredDeleteNonRt が Shutdown を返すため実質 no-op だが契約を維持する。
+    //   shutdown 中は shutdownReclaim（TerminalReclaimAuthority 経由）へ ownership が移転する
+    //   （AudioEngine.h:4469-4478）。enqueueDeferredDeleteNonRt は bool を返し、Shutdown は
+    //   WithResult 側の契約上の戻り値（growable store により実際には Success）。
     worldAuthority_.requestShutdownClearNonRt();
     auto* clearedWorld = worldAuthority_.clearPublishedRuntimeSnapshotsNonRt();
     if (clearedWorld != nullptr)
@@ -672,7 +674,8 @@ void AudioEngine::releaseResources()
     //   publishAndSwap LP を通過していないため W ∉ PublishedDomain — DeletionEntryType::Generic
     //   （destruction only・no World retirement observation）として既存 DeferredDeletionQueue →
     //   reclaim → deleter chain へ移譲する。
-    //   enqueueRetire は Success|QueuePressure のみ返す (Shutdown は dead code) ため、
+    //   enqueueRetire は Success/QueuePressure/QueueFull/Shutdown を返し得る（ISRAuthorityClass.h:28-34）。
+    //   Shutdown は dead code ではなく、shutdown 時の所有権保持・後続ドレインで扱われる。
     //   callback は既存 authority chain へ ownership を確実に移転する。
     const auto drainedResidual = worldAuthority_.ownerChannel().drainAllNonRt(
         [this](const RuntimeState* raw) noexcept {
