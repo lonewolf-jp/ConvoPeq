@@ -107,28 +107,36 @@ public:
         // 2. Crossfade または Retire
         // ★ D132(5): oldDSP == newDSP（同一 DSP 再 publish）は retire/crossfade 対象外。
         if (decision.needsCrossfade && oldDSP != nullptr && oldDSP != newDSP) {
-            // ★ BUG-054: oldHandle は呼び出し側（enqueue 時に resolve 済みの真の old DSP handle）を
-            //   使用する。getActiveRuntimeDSPHandle() は commitRuntimePublication の activate 後に
-            //   呼ばれるため NEW DSP の handle を返し、old==new の同一 crossfade を登録していた。
-            auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
-
-            if (!oldHandle.isNull() && !newHandle.isNull()) {
-                // CrossfadeAuthorityRuntime が CrossfadeId を発行（唯一権威）
-                const auto xfadeId = engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
-                // DSPHandleRuntime: Authority 発行の ID で状態遷移
-                engine_.dspHandleRuntime_.beginCrossfade(oldHandle, newHandle, xfadeId);
-            }
-
-            // ★ B-1: CAS-only fading slot claim.
+            // ★ STG-11-D18 (F-B): fading-slot claim を register/begin より先行。
+            //   B-1: CAS-only fading slot claim.
             //   exchangeFadingRuntimeDSP の代わりに claimFadingRuntimeDSP を使用。
             //   CAS 成功時点で slot = oldDSP となり、exchange() は不要。
             //   prevRaw を取得する必要がない（CAS が nullptr→oldDSP の直接遷移を保証）。
+            //   CAS 失敗 → 先行 fade が実行中。phantom record（実行されない fade の
+            //   主張）を作らず、oldDSP の即時 retire のみ行う。single-record
+            //   invariant を維持し、後続 completion の誤解決を防ぐ。
+            //   ★ BUG-054: oldHandle は呼び出し側（enqueue 時に resolve 済みの真の old DSP handle）を
+            //   使用する。getActiveRuntimeDSPHandle() は commitRuntimePublication の activate 後に
+            //   呼ばれるため NEW DSP の handle を返し、old==new の同一 crossfade を登録していた。
             const bool claimed = engine_.claimFadingRuntimeDSP(oldDSP);
             if (!claimed) {
                 // CAS 失敗 → 別の遷移が既にスロットを占有。oldDSP を直接 retire。
                 lifetime.retire(oldDSP);
+                // ★ STG-11-D18 (F-B): register/begin は行わない（phantom record 防止）。
+                //   ramp.start は下で無条件実行し、先行 fade の可聴タイミングを維持する。
             } else {
-                // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）
+                // ★ BUG-054（上記コメント参照）: 新 DSP の handle をここで登録する。
+                auto newHandle = engine_.registerDSPHandleForRuntime(newDSP);
+
+                if (!oldHandle.isNull() && !newHandle.isNull()) {
+                    // CrossfadeAuthorityRuntime が CrossfadeId を発行（唯一権威）
+                    const auto xfadeId = engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
+                    // DSPHandleRuntime: Authority 発行の ID で状態遷移
+                    engine_.dspHandleRuntime_.beginCrossfade(oldHandle, newHandle, xfadeId);
+                }
+
+                // ★ HW-1: Publication Metadata を保存（Timer retire パスで epoch 伝搬に使用）。
+                //   claim 成功時のみ到達するため、fading slot の occupant と一致する。
                 const auto epoch = engine_.currentPublicationEpoch();
                 // ★ P0-2b: DSPHandle のみを保存（DSPCore* は削除）
                 // ★ BUG-054: 内側変数を fadingHandle に改名（oldHandle は引数と衝突しない）
@@ -137,6 +145,8 @@ public:
             }
 
             // crossfade atomic 設定 (CrossfadeRuntime 委譲)
+            // ★ STG-11-D18: claim 成否にかかわらず無条件実行し、先行 fade の
+            //   可聴タイミングを維持する（通常 path と同一）。
             const double rampSampleRate = std::max(1.0,
                 (newDSP != nullptr) ? newDSP->sampleRate
                     : convo::consumeAtomic(engine_.currentSampleRate, std::memory_order_acquire));
