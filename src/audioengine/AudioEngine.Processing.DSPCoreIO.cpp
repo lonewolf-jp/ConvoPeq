@@ -3,6 +3,7 @@
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
 #include "InputBitDepthTransform.h"
+#include "dsp/math/FastTanhApprox.h"
 
 namespace
 {
@@ -73,25 +74,6 @@ inline void sanitizeFiniteChunk(double* data, int count) noexcept
 #endif
 }
 
-inline double fastTanh(double x) noexcept
-{
-    constexpr double numA = 10395.0;
-    constexpr double numB = 1260.0;
-    constexpr double numC = 21.0;
-    constexpr double denA = 10395.0;
-    constexpr double denB = 4725.0;
-    constexpr double denC = 210.0;
-    constexpr double clipThreshold = 4.5;
-
-    if (x >= clipThreshold) return 1.0;
-    if (x <= -clipThreshold) return -1.0;
-    const double x2 = x * x;
-
-    const double num = x * (numA + x2 * (numB + x2 * numC));
-    const double den = denA + x2 * (denB + x2 * (denC + x2));
-    return num / den;
-}
-
 inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
     const double abs_x = absNoLibm(x);
@@ -113,7 +95,7 @@ inline double musicalSoftClipScalar(double x, double threshold, double knee, dou
     }
 
     const double linear = abs_x;
-    const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
+    const double clipped = threshold + knee * convo::dsp::fastTanh<convo::dsp::SoftClipPadePolicy>((abs_x - threshold) / knee);
 
     const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
