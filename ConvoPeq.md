@@ -1,6 +1,6 @@
 # Project Extract & Source Code: integrate-main
 
-> Generated: 2026-10-20 20:36:26
+> Generated: 2026-10-21 13:30:18
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -1045,6 +1045,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
     target_compile_features(D8_1_WrapperCacheTests PRIVATE cxx_std_20)
     add_test(NAME D8_1_WrapperCacheTests COMMAND D8_1_WrapperCacheTests)
+    # V-09: structural checks must inspect THIS worktree, explicitly.
+    set_tests_properties(D8_1_WrapperCacheTests PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
 
     # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
     add_executable(D8_2_B_2_Tests
@@ -1766,7 +1768,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RebuildAdmissionRegression COMMAND RebuildAdmissionRegressionTests)
     # CI環境（CONVO_CI_BUILD定義時）は音声デバイスがないためスキップ
     if(NOT DEFINED ENV{CONVO_CI_BUILD})
-        add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks)
+        # V-07: launch the executable built in THIS build tree; the script must
+        # not auto-detect (and launch) a binary from another working tree.
+        add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -ExePath "$<TARGET_FILE:ConvoPeq>" -KillExisting -RequireAudioCallbacks)
     endif()
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
     add_test(NAME PriorityIntegration COMMAND PriorityIntegrationTests)
@@ -2948,6 +2952,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
+        src/tests/AudioEngineHarness/STG11D18CrossfadeTests.cpp
         src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
         src/tests/STG11D2SnapshotRetireTests.cpp
         src/tests/AudioEngineHarness/STG11D3AffinityFailureTests.cpp
@@ -3053,6 +3058,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     #   ConvoPeq 依存を外すことで、 icx リンカー問題の影響を回避し独立ビルドできる。
     # add_dependencies(AudioEngineHarness ConvoPeq)
     add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
+    # V-08: structural checks must inspect THIS worktree, explicitly.
+    set_tests_properties(AudioEngineHarness PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
 
     #------------------------------------------------------------
     # work113 C1（R15-2 + R17-2 + R18-1）: PolyphaseGainFidelityTests
@@ -100603,6 +100610,7 @@ int main()
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <chrono>
@@ -100646,6 +100654,8 @@ int runConvolverStateRoundTripTests();
 int runSTG8RecoveryObligationTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
+// STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
+int runSTG11D18CrossfadeTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
 // STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
 int runSTG11D12StateIntegerGuardTests();
@@ -100788,21 +100798,66 @@ bool testIdlePublishViaFacade()
     return true;
 }
 
+// ── V-10: the crash-diagnostic sink must live in the tree under test. ──
+//    CONVOPEQ_SOURCE_ROOT names that worktree (CMake passes it to the tests);
+//    with no explicit root the path stays CWD-relative. There is deliberately no
+//    absolute path into another working tree. The directory is created explicitly
+//    (ofstream never creates directories) and a failure to create it is reported,
+//    so the sink cannot fail silently.
+static std::string resolveDiagCapturePath()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    std::string dir = (root != nullptr && root[0] != '\0')
+                          ? std::string(root) + "/evidence/D162-2I2"
+                          : std::string("evidence/D162-2I2");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        std::fprintf(stderr, "[I2T] diag capture: cannot create %s (%s)\n",
+                     dir.c_str(), ec.message().c_str());
+    else if (!std::filesystem::is_directory(dir))
+        std::fprintf(stderr, "[I2T] diag capture: %s is not a directory\n", dir.c_str());
+    return dir + "/teardown_diag.log";
+}
+
 // ── 4. D162-2-I2: CallerDestroy terminal disposition（ownership repair 回帰）──
 //   crash 時の engine diag を追えるよう、全行 flush する JUCE logger capture。
 class I2FileLogger : public juce::Logger
 {
 public:
-    explicit I2FileLogger(const char* path) : out(path, std::ios::app) { previous_ = juce::Logger::getCurrentLogger(); juce::Logger::setCurrentLogger(this); }
+    explicit I2FileLogger(const char* path) : out(path, std::ios::app)
+    {
+        previous_ = juce::Logger::getCurrentLogger();
+        juce::Logger::setCurrentLogger(this);
+        if (!out.is_open())
+            reportFailure("open");
+    }
     ~I2FileLogger() override { juce::Logger::setCurrentLogger(previous_); }
+    bool isOpen() const { return out.is_open(); }
     void logMessage(const juce::String& message) override
     {
+        if (!out.is_open())
+        {
+            reportFailure("write (sink not open)");
+            return;
+        }
         out << message << "\n";
         out.flush();
+        if (!out.good())
+            reportFailure("write");
     }
 private:
+    void reportFailure(const char* what)
+    {
+        if (failureReported)
+            return;
+        failureReported = true;
+        std::fprintf(stderr, "[I2T] diag capture: %s FAILED (path=%s)\n", what, path.c_str());
+    }
     juce::Logger* previous_ = nullptr;
     std::ofstream out;
+    std::string path;
+    bool failureReported = false;
 };
 
 //   admission Closed（releaseResources 後・INV-LIFE-9）状態で、未登録 placeholder DSP を
@@ -100883,7 +100938,10 @@ bool testCallerDestroyTerminalDisposition()
     // （segfault 時に最後の engine diag 行がファイルに残る）。
     // ※ 意図的に leak（h の dtor より後まで logger を生存させるため）。
     static I2FileLogger* diagCapture = nullptr;
-    diagCapture = new I2FileLogger("C:/VSC_Project/ConvoPeq/evidence/D162-2I2/teardown_diag.log");
+    const std::string diagPath = resolveDiagCapturePath();
+    diagCapture = new I2FileLogger(diagPath.c_str());
+    std::fprintf(stderr, "[I2T] diag capture -> %s (open=%d)\n",
+                 diagPath.c_str(), diagCapture->isOpen() ? 1 : 0);
     (void)diagCapture;
     std::fprintf(stderr, "[I2T] phase4: abandon engine (pre-existing Debug segfault route, I3 issue)\n");
     h.abandonEngine();
@@ -101949,6 +102007,10 @@ int runFpmM2();
 
     // ★ STG-9-D1 / RC-1: reclaim accounting 終端回帰（新規 CTest target なし）。
     if (runSTG9ReclaimAccountingTests() != 0)
+        return 1;
+
+    // ★ STG-11-D18-1: crossfade overlap guards.
+    if (runSTG11D18CrossfadeTests() != 0)
         return 1;
 
     // ★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰（新規 CTest target なし）。
@@ -103849,6 +103911,7 @@ int runSTG11D12StateIntegerGuardTests()
 // =============================================================================
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <ios>
@@ -104006,18 +104069,32 @@ bool checkD18CNormalCompletionUnchanged()
     return ok;
 }
 
-// -- structural source check (D8_1 precedent): onPublishCompleted must claim
-//    before registering, and endCrossfade must carry the staleness guards. ---
+// -- structural source check (D8_1 precedent): the inspected tree is explicit.
+//    CONVOPEQ_SOURCE_ROOT must name the worktree to inspect (CMake passes
+//    CMAKE_CURRENT_SOURCE_DIR). There is deliberately no absolute-path fallback:
+//    a missing root fails the test instead of silently inspecting another
+//    working tree (V-08). ---
+const char* productionSourceRoot()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    return (root != nullptr && root[0] != '\0') ? root : nullptr;
+}
+
 bool readProductionSource(const char* relativePath, std::string& out)
 {
-    std::ifstream f(relativePath, std::ios::binary);
+    const char* root = productionSourceRoot();
+    if (root == nullptr)
+    {
+        std::fprintf(stderr, "D18-D: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string path = std::string(root) + "/" + relativePath;
+    std::ifstream f(path, std::ios::binary);
     if (!f.is_open())
     {
-        const std::string absPath = std::string("C:/VSC_Project/ConvoPeq/") + relativePath;
-        f.open(absPath, std::ios::binary);
-    }
-    if (!f.is_open())
+        std::fprintf(stderr, "D18-D: cannot open %s\n", path.c_str());
         return false;
+    }
     std::ostringstream ss;
     ss << f.rdbuf();
     out = ss.str();
@@ -104026,6 +104103,8 @@ bool readProductionSource(const char* relativePath, std::string& out)
 
 bool checkD18DStructuralOrdering()
 {
+    const char* root = productionSourceRoot();
+    std::printf("STG11D18CrossfadeTests: source root = %s\n", root != nullptr ? root : "(unset)");
     std::string tr;
     if (!readProductionSource("src/audioengine/DSPTransition.h", tr))
     {
@@ -104166,6 +104245,7 @@ int runSTG11D18CrossfadeTests()
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -104176,18 +104256,32 @@ int runSTG11D18CrossfadeTests()
 
 namespace {
 
-// -- production source reader (follows the D8_1_WrapperCacheTests precedent) ---
+// -- production source reader: the inspected tree is explicit. ---
+//    CONVOPEQ_SOURCE_ROOT must name the worktree to inspect (CMake passes
+//    CMAKE_CURRENT_SOURCE_DIR). There is deliberately no absolute-path
+//    fallback: a missing root fails the test instead of silently inspecting
+//    another working tree (V-08 / V-09).
+const char* productionSourceRoot()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    return (root != nullptr && root[0] != '\0') ? root : nullptr;
+}
+
 bool readProductionSource(const char* relativePath, std::string& out)
 {
-    FILE* f = std::fopen(relativePath, "r");
+    const char* root = productionSourceRoot();
+    if (root == nullptr)
+    {
+        std::fprintf(stderr, "production source: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string path = std::string(root) + "/" + relativePath;
+    FILE* f = std::fopen(path.c_str(), "r");
     if (!f)
     {
-        char absPath[512];
-        std::snprintf(absPath, sizeof(absPath), "C:/VSC_Project/ConvoPeq/%s", relativePath);
-        f = std::fopen(absPath, "r");
-    }
-    if (!f)
+        std::fprintf(stderr, "production source: cannot open %s\n", path.c_str());
         return false;
+    }
     char buf[4096];
     out.clear();
     size_t n = 0;
@@ -105202,6 +105296,7 @@ int runSTG11D3AffinityFailureTests()
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -105212,18 +105307,32 @@ int runSTG11D3AffinityFailureTests()
 
 namespace {
 
-// -- production source reader (follows the D8_1_WrapperCacheTests precedent) ---
+// -- production source reader: the inspected tree is explicit. ---
+//    CONVOPEQ_SOURCE_ROOT must name the worktree to inspect (CMake passes
+//    CMAKE_CURRENT_SOURCE_DIR). There is deliberately no absolute-path
+//    fallback: a missing root fails the test instead of silently inspecting
+//    another working tree (V-08 / V-09).
+const char* productionSourceRoot()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    return (root != nullptr && root[0] != '\0') ? root : nullptr;
+}
+
 bool readProductionSource(const char* relativePath, std::string& out)
 {
-    FILE* f = std::fopen(relativePath, "r");
+    const char* root = productionSourceRoot();
+    if (root == nullptr)
+    {
+        std::fprintf(stderr, "production source: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string path = std::string(root) + "/" + relativePath;
+    FILE* f = std::fopen(path.c_str(), "r");
     if (!f)
     {
-        char absPath[512];
-        std::snprintf(absPath, sizeof(absPath), "C:/VSC_Project/ConvoPeq/%s", relativePath);
-        f = std::fopen(absPath, "r");
-    }
-    if (!f)
+        std::fprintf(stderr, "production source: cannot open %s\n", path.c_str());
         return false;
+    }
     char buf[4096];
     out.clear();
     size_t n = 0;
@@ -106180,6 +106289,7 @@ int runSTG11D4SuccessObservationTests()
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -106190,17 +106300,32 @@ int runSTG11D4SuccessObservationTests()
 
 namespace {
 
+// -- production source reader: the inspected tree is explicit. ---
+//    CONVOPEQ_SOURCE_ROOT must name the worktree to inspect (CMake passes
+//    CMAKE_CURRENT_SOURCE_DIR). There is deliberately no absolute-path
+//    fallback: a missing root fails the test instead of silently inspecting
+//    another working tree (V-08 / V-09).
+const char* productionSourceRoot()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    return (root != nullptr && root[0] != '\0') ? root : nullptr;
+}
+
 bool readProductionSource(const char* relativePath, std::string& out)
 {
-    FILE* f = std::fopen(relativePath, "r");
+    const char* root = productionSourceRoot();
+    if (root == nullptr)
+    {
+        std::fprintf(stderr, "production source: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string path = std::string(root) + "/" + relativePath;
+    FILE* f = std::fopen(path.c_str(), "r");
     if (!f)
     {
-        char absPath[512];
-        std::snprintf(absPath, sizeof(absPath), "C:/VSC_Project/ConvoPeq/%s", relativePath);
-        f = std::fopen(absPath, "r");
-    }
-    if (!f)
+        std::fprintf(stderr, "production source: cannot open %s\n", path.c_str());
         return false;
+    }
     char buf[4096];
     out.clear();
     size_t n = 0;
@@ -111679,6 +111804,8 @@ int main()
 
 #include <cassert>
 #include <cstdio>
+#include <string>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -111710,10 +111837,19 @@ bool test_T1_WrapperSemantics() {
         return false;
     }
     // Check actual production source for bug (test-first: should fail before patch)
-    FILE* f = fopen("src/audioengine/AudioEngine.h", "r");
-    if (!f) f = fopen("C:/VSC_Project/ConvoPeq/src/audioengine/AudioEngine.h", "r");
+    // The inspected tree is explicit: CONVOPEQ_SOURCE_ROOT names the worktree
+    // to inspect (CMake passes CMAKE_CURRENT_SOURCE_DIR). There is
+    // deliberately no absolute-path fallback, so a missing root fails the test
+    // instead of silently inspecting another working tree (V-08 / V-09).
+    const char* sourceRoot = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    if (sourceRoot == nullptr || sourceRoot[0] == '\0') {
+        std::printf("FAIL T1: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string sourcePath = std::string(sourceRoot) + "/src/audioengine/AudioEngine.h";
+    FILE* f = fopen(sourcePath.c_str(), "r");
     if (!f) {
-        std::printf("FAIL T1: cannot open AudioEngine.h\n");
+        std::printf("FAIL T1: cannot open %s\n", sourcePath.c_str());
         return false;
     }
     char buf[512000];
