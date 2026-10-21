@@ -4,6 +4,8 @@
 
 #include <cassert>
 #include <cstdio>
+#include <string>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -35,10 +37,19 @@ bool test_T1_WrapperSemantics() {
         return false;
     }
     // Check actual production source for bug (test-first: should fail before patch)
-    FILE* f = fopen("src/audioengine/AudioEngine.h", "r");
-    if (!f) f = fopen("C:/VSC_Project/ConvoPeq/src/audioengine/AudioEngine.h", "r");
+    // The inspected tree is explicit: CONVOPEQ_SOURCE_ROOT names the worktree
+    // to inspect (CMake passes CMAKE_CURRENT_SOURCE_DIR). There is
+    // deliberately no absolute-path fallback, so a missing root fails the test
+    // instead of silently inspecting another working tree (V-08 / V-09).
+    const char* sourceRoot = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    if (sourceRoot == nullptr || sourceRoot[0] == '\0') {
+        std::printf("FAIL T1: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string sourcePath = std::string(sourceRoot) + "/src/audioengine/AudioEngine.h";
+    FILE* f = fopen(sourcePath.c_str(), "r");
     if (!f) {
-        std::printf("FAIL T1: cannot open AudioEngine.h\n");
+        std::printf("FAIL T1: cannot open %s\n", sourcePath.c_str());
         return false;
     }
     char buf[512000];

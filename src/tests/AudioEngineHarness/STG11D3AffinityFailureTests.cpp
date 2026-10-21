@@ -41,6 +41,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -51,18 +52,32 @@
 
 namespace {
 
-// -- production source reader (follows the D8_1_WrapperCacheTests precedent) ---
+// -- production source reader: the inspected tree is explicit. ---
+//    CONVOPEQ_SOURCE_ROOT must name the worktree to inspect (CMake passes
+//    CMAKE_CURRENT_SOURCE_DIR). There is deliberately no absolute-path
+//    fallback: a missing root fails the test instead of silently inspecting
+//    another working tree (V-08 / V-09).
+const char* productionSourceRoot()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    return (root != nullptr && root[0] != '\0') ? root : nullptr;
+}
+
 bool readProductionSource(const char* relativePath, std::string& out)
 {
-    FILE* f = std::fopen(relativePath, "r");
+    const char* root = productionSourceRoot();
+    if (root == nullptr)
+    {
+        std::fprintf(stderr, "production source: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string path = std::string(root) + "/" + relativePath;
+    FILE* f = std::fopen(path.c_str(), "r");
     if (!f)
     {
-        char absPath[512];
-        std::snprintf(absPath, sizeof(absPath), "C:/VSC_Project/ConvoPeq/%s", relativePath);
-        f = std::fopen(absPath, "r");
-    }
-    if (!f)
+        std::fprintf(stderr, "production source: cannot open %s\n", path.c_str());
         return false;
+    }
     char buf[4096];
     out.clear();
     size_t n = 0;

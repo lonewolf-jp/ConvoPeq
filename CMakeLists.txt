@@ -297,6 +297,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
     target_compile_features(D8_1_WrapperCacheTests PRIVATE cxx_std_20)
     add_test(NAME D8_1_WrapperCacheTests COMMAND D8_1_WrapperCacheTests)
+    # V-09: structural checks must inspect THIS worktree, explicitly.
+    set_tests_properties(D8_1_WrapperCacheTests PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
 
     # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
     add_executable(D8_2_B_2_Tests
