@@ -2200,6 +2200,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
+        src/tests/AudioEngineHarness/STG11D18CrossfadeTests.cpp
         src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
         src/tests/STG11D2SnapshotRetireTests.cpp
         src/tests/AudioEngineHarness/STG11D3AffinityFailureTests.cpp
