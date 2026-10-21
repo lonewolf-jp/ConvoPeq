@@ -1018,7 +1018,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RebuildAdmissionRegression COMMAND RebuildAdmissionRegressionTests)
     # CI環境（CONVO_CI_BUILD定義時）は音声デバイスがないためスキップ
     if(NOT DEFINED ENV{CONVO_CI_BUILD})
-        add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks)
+        # V-07: launch the executable built in THIS build tree; the script must
+        # not auto-detect (and launch) a binary from another working tree.
+        add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -ExePath "$<TARGET_FILE:ConvoPeq>" -KillExisting -RequireAudioCallbacks)
     endif()
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
     add_test(NAME PriorityIntegration COMMAND PriorityIntegrationTests)

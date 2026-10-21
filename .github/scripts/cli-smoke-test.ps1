@@ -10,12 +10,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Auto-detect executable if not specified
+# Auto-detect executable if not specified. Candidates are resolved from THIS
+# script's repository only; the script never looks into another working tree.
+$exePathSource = 'explicit (-ExePath)'
 if ([string]::IsNullOrEmpty($ExePath)) {
+    $exePathSource = 'autodetect (repo-relative)'
+    $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
     $candidates = @(
-        "c:\VSC_Project\ConvoPeq\build-icx\ConvoPeq_artefacts\Release\ConvoPeq.exe",
-        "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release\ConvoPeq.exe",
-        "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\ConvoPeq.exe"
+        (Join-Path $repoRoot 'build\ConvoPeq_artefacts\Release\ConvoPeq.exe'),
+        (Join-Path $repoRoot 'build\ConvoPeq_artefacts\Debug\ConvoPeq.exe')
     )
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate) {
@@ -26,17 +29,16 @@ if ([string]::IsNullOrEmpty($ExePath)) {
 }
 
 if ([string]::IsNullOrEmpty($ExePath)) {
-    throw "Auto-detect failed: no ConvoPeq.exe found in build/, build-icx/. Pass -ExePath explicitly."
+    throw "Auto-detect failed: no ConvoPeq.exe found under the script's repo build/. Pass -ExePath explicitly."
 }
 
 if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Executable not found: $ExePath"
 }
 
-$projRoot = "c:\VSC_Project\ConvoPeq"
-$buildDir = if ($ExePath -match '\\build-icx\\') { "build-icx" } else { "build" }
-$configDir = if ($UseReleaseLog -or $ExePath -match '\\Release\\') { "Release" } else { "Debug" }
-$logPath = "$projRoot\$buildDir\ConvoPeq_artefacts\$configDir\ConvoPeq.log"
+# The log always sits next to the executable that is launched. Deriving it
+# from -ExePath prevents the test from reading another working tree's log.
+$logPath = Join-Path (Split-Path -Parent $ExePath) 'ConvoPeq.log'
 
 if ($KillExisting) {
     $existing = Get-Process -Name "ConvoPeq" -ErrorAction SilentlyContinue
@@ -55,7 +57,9 @@ if (Test-Path -LiteralPath $logPath) {
     $beforeLineCount = [int](@(Get-Content -LiteralPath $logPath).Count)
 }
 
+Write-Output "[CLI-SMOKE] ExePath source: $exePathSource"
 Write-Output "[CLI-SMOKE] Launch: $ExePath"
+Write-Output "[CLI-SMOKE] Log: $logPath"
 $appArgs = @(
     "--cli-run",
     "--cli-learning-action", "start",
