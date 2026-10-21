@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <chrono>
@@ -204,21 +205,66 @@ bool testIdlePublishViaFacade()
     return true;
 }
 
+// ── V-10: the crash-diagnostic sink must live in the tree under test. ──
+//    CONVOPEQ_SOURCE_ROOT names that worktree (CMake passes it to the tests);
+//    with no explicit root the path stays CWD-relative. There is deliberately no
+//    absolute path into another working tree. The directory is created explicitly
+//    (ofstream never creates directories) and a failure to create it is reported,
+//    so the sink cannot fail silently.
+static std::string resolveDiagCapturePath()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    std::string dir = (root != nullptr && root[0] != '\0')
+                          ? std::string(root) + "/evidence/D162-2I2"
+                          : std::string("evidence/D162-2I2");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        std::fprintf(stderr, "[I2T] diag capture: cannot create %s (%s)\n",
+                     dir.c_str(), ec.message().c_str());
+    else if (!std::filesystem::is_directory(dir))
+        std::fprintf(stderr, "[I2T] diag capture: %s is not a directory\n", dir.c_str());
+    return dir + "/teardown_diag.log";
+}
+
 // ── 4. D162-2-I2: CallerDestroy terminal disposition（ownership repair 回帰）──
 //   crash 時の engine diag を追えるよう、全行 flush する JUCE logger capture。
 class I2FileLogger : public juce::Logger
 {
 public:
-    explicit I2FileLogger(const char* path) : out(path, std::ios::app) { previous_ = juce::Logger::getCurrentLogger(); juce::Logger::setCurrentLogger(this); }
+    explicit I2FileLogger(const char* path) : out(path, std::ios::app)
+    {
+        previous_ = juce::Logger::getCurrentLogger();
+        juce::Logger::setCurrentLogger(this);
+        if (!out.is_open())
+            reportFailure("open");
+    }
     ~I2FileLogger() override { juce::Logger::setCurrentLogger(previous_); }
+    bool isOpen() const { return out.is_open(); }
     void logMessage(const juce::String& message) override
     {
+        if (!out.is_open())
+        {
+            reportFailure("write (sink not open)");
+            return;
+        }
         out << message << "\n";
         out.flush();
+        if (!out.good())
+            reportFailure("write");
     }
 private:
+    void reportFailure(const char* what)
+    {
+        if (failureReported)
+            return;
+        failureReported = true;
+        std::fprintf(stderr, "[I2T] diag capture: %s FAILED (path=%s)\n", what, path.c_str());
+    }
     juce::Logger* previous_ = nullptr;
     std::ofstream out;
+    std::string path;
+    bool failureReported = false;
 };
 
 //   admission Closed（releaseResources 後・INV-LIFE-9）状態で、未登録 placeholder DSP を
@@ -299,7 +345,10 @@ bool testCallerDestroyTerminalDisposition()
     // （segfault 時に最後の engine diag 行がファイルに残る）。
     // ※ 意図的に leak（h の dtor より後まで logger を生存させるため）。
     static I2FileLogger* diagCapture = nullptr;
-    diagCapture = new I2FileLogger("C:/VSC_Project/ConvoPeq/evidence/D162-2I2/teardown_diag.log");
+    const std::string diagPath = resolveDiagCapturePath();
+    diagCapture = new I2FileLogger(diagPath.c_str());
+    std::fprintf(stderr, "[I2T] diag capture -> %s (open=%d)\n",
+                 diagPath.c_str(), diagCapture->isOpen() ? 1 : 0);
     (void)diagCapture;
     std::fprintf(stderr, "[I2T] phase4: abandon engine (pre-existing Debug segfault route, I3 issue)\n");
     h.abandonEngine();
