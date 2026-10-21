@@ -36,6 +36,7 @@
 // =============================================================================
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <ios>
@@ -193,18 +194,32 @@ bool checkD18CNormalCompletionUnchanged()
     return ok;
 }
 
-// -- structural source check (D8_1 precedent): onPublishCompleted must claim
-//    before registering, and endCrossfade must carry the staleness guards. ---
+// -- structural source check (D8_1 precedent): the inspected tree is explicit.
+//    CONVOPEQ_SOURCE_ROOT must name the worktree to inspect (CMake passes
+//    CMAKE_CURRENT_SOURCE_DIR). There is deliberately no absolute-path fallback:
+//    a missing root fails the test instead of silently inspecting another
+//    working tree (V-08). ---
+const char* productionSourceRoot()
+{
+    const char* root = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    return (root != nullptr && root[0] != '\0') ? root : nullptr;
+}
+
 bool readProductionSource(const char* relativePath, std::string& out)
 {
-    std::ifstream f(relativePath, std::ios::binary);
+    const char* root = productionSourceRoot();
+    if (root == nullptr)
+    {
+        std::fprintf(stderr, "D18-D: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string path = std::string(root) + "/" + relativePath;
+    std::ifstream f(path, std::ios::binary);
     if (!f.is_open())
     {
-        const std::string absPath = std::string("C:/VSC_Project/ConvoPeq/") + relativePath;
-        f.open(absPath, std::ios::binary);
-    }
-    if (!f.is_open())
+        std::fprintf(stderr, "D18-D: cannot open %s\n", path.c_str());
         return false;
+    }
     std::ostringstream ss;
     ss << f.rdbuf();
     out = ss.str();
@@ -213,6 +228,8 @@ bool readProductionSource(const char* relativePath, std::string& out)
 
 bool checkD18DStructuralOrdering()
 {
+    const char* root = productionSourceRoot();
+    std::printf("STG11D18CrossfadeTests: source root = %s\n", root != nullptr ? root : "(unset)");
     std::string tr;
     if (!readProductionSource("src/audioengine/DSPTransition.h", tr))
     {

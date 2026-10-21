@@ -2308,6 +2308,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     #   ConvoPeq 依存を外すことで、 icx リンカー問題の影響を回避し独立ビルドできる。
     # add_dependencies(AudioEngineHarness ConvoPeq)
     add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
+    # V-08: structural checks must inspect THIS worktree, explicitly.
+    set_tests_properties(AudioEngineHarness PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
 
     #------------------------------------------------------------
     # work113 C1（R15-2 + R17-2 + R18-1）: PolyphaseGainFidelityTests
