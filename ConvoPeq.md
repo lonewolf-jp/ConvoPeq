@@ -1,11 +1,11 @@
-# Project Extract & Source Code: integrate-main
+# Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-21 13:30:18
+> Generated: 2026-10-24 00:19:41
 
 ## 📁 Directory Tree (Selected Targets Only)
 
 ```text
-└── integrate-main/
+└── ConvoPeq/
     ├── build.bat
     ├── CMakeLists.txt
     └── src/
@@ -382,6 +382,7 @@
         │   ├── StuckReaderFallbackDrainTests.cpp
         │   └── TerminalTelemetryContractTests.cpp
         ├── tools/
+        │   ├── __pycache__/
         │   └── build_identity_gate.py
         ├── TruePeakDetector.cpp
         ├── TruePeakDetector.h
