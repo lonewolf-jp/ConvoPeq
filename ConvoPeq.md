@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-24 00:19:41
+> Generated: 2026-10-24 02:38:58
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -382,7 +382,6 @@
         │   ├── StuckReaderFallbackDrainTests.cpp
         │   └── TerminalTelemetryContractTests.cpp
         ├── tools/
-        │   ├── __pycache__/
         │   └── build_identity_gate.py
         ├── TruePeakDetector.cpp
         ├── TruePeakDetector.h
@@ -101244,10 +101243,23 @@ bool testD167ReconfigureKeepsAdmissionOperational()
     }
 
     // admission usable: tryAdmit/release round-trip（reconfigure 後も admission が機能する）
-    if (!e.isrShutdownRuntime().tryAdmit(1)
-        || e.isrShutdownRuntime().outstanding() != 1)
+    const auto d167AdmissionStateBefore = e.isrShutdownRuntime().admissionState();
+    const auto d167OutstandingBefore = e.isrShutdownRuntime().outstanding();
+    const bool d167Admitted = e.isrShutdownRuntime().tryAdmit(1);
+    const auto d167AdmissionStateAfter = e.isrShutdownRuntime().admissionState();
+    const auto d167OutstandingAfter = e.isrShutdownRuntime().outstanding();
+
+    if (!d167Admitted
+        || d167OutstandingAfter != 1)
     {
-        std::fprintf(stderr, "FAIL: D167: admission reservation rejected after reconfigure\n");
+        std::fprintf(stderr,
+                     "FAIL: D167: admission reservation rejected after reconfigure"
+                     " [diag tryAdmit=%d pre_admission=%d post_admission=%d pre_outstanding=%u post_outstanding=%u]\n",
+                     d167Admitted ? 1 : 0,
+                     static_cast<int>(d167AdmissionStateBefore),
+                     static_cast<int>(d167AdmissionStateAfter),
+                     static_cast<unsigned>(d167OutstandingBefore),
+                     static_cast<unsigned>(d167OutstandingAfter));
         return false;
     }
     e.isrShutdownRuntime().release(1);
