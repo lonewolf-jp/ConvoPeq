@@ -644,6 +644,9 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         //   DSPCore を authority（EBR・INV-D162-8 単経路）で disposition する。
         //   midrun 経由（drainDeferredClearIfRequested → E-4d retire 済み）では map 不在で
         //   no-op となるため二重 retire は構造的に発生しない（INV-D162-3）。
+        // R8 candidate fix: hoist the obligation id so it can be terminalized after the slot reset.
+        std::uint64_t clearObligationId = 0;
+        bool clearIsShutdown = false;
         if (deferredSlot_.has_value())
         {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -655,9 +658,28 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
             retireRegisteredDSP(
                 deferredSlot_->request,
                 "shutdown-clear");
+
+            // R8 candidate fix: capture the recovery obligation id before the slot is
+            // reset, so it can be terminalized below. Previously clearDeferredForShutdown()
+            // only called invalidateDeferredObligation() (retry metadata reset) and left
+            // the obligation live (L=1) - the "over-terminalized (L=1 hasDeferred=0)" defect.
+            clearObligationId = deferredSlot_->request.recoveryObligationId;
+            clearIsShutdown = engine_.isShutdownInProgress();
         }
         deferredSlot_.reset();
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
+
+        // R8 candidate fix: terminalize the recovery obligation on the clear path,
+        // mirroring the evaluateDeferred discard path (line ~973) which calls
+        // resolveRecoveryObligation(StaleSuperseded/ShutdownDiscarded). ShutdownDiscarded
+        // is used for actual shutdown; StaleSuperseded for mid-run stall drains.
+        if (clearObligationId != 0) {
+            engine_.runtimePublicationBridge_.resolveRecoveryObligation(
+                clearObligationId,
+                clearIsShutdown
+                    ? RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded
+                    : RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
+        }
     }
 
     // ★ D135-1 / F6-7: shutdown による deferred 消去 — obligation metadata も無効化
