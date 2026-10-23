@@ -12,7 +12,7 @@
       "serena": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "C:/Users/user/.local/bin/serena.exe",
           "start-mcp-server",
@@ -30,9 +30,9 @@
       "headroom": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
-          "C:/VSC_Project/ConvoPeq/.venv/Scripts/headroom.exe",
+          "C:/Users/user/AppData/Roaming/uv/tools/headroom-ai/Scripts/headroom.exe",
           "mcp",
           "serve"
         ],
@@ -41,7 +41,7 @@
       "aidex": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "node",
           "C:/Users/user/AppData/Roaming/npm/node_modules/aidex-mcp/build/index.js"
@@ -59,7 +59,7 @@
       "firecrawl": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "C:\\Users\\user\\AppData\\Roaming\\npm\\npx.cmd",
           "-y",
@@ -73,7 +73,7 @@
       "brave": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "C:\\Users\\user\\AppData\\Roaming\\npm\\npx.cmd",
           "-y",
@@ -94,7 +94,7 @@
       "context-mode": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "C:/Users/user/AppData/Roaming/npm/context-mode.cmd"
         ],
@@ -106,7 +106,7 @@
       "obscura": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "C:/Users/user/.local/bin/obscura/obscura.exe",
           "mcp"
@@ -116,7 +116,7 @@
       "ddgs": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
           "C:/Python314/Scripts/uvx.exe",
           "--from",
@@ -129,9 +129,9 @@
       "graphify": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
-          "C:/Users/user/AppData/Roaming/Python/Python314/Scripts/graphify-mcp.exe",
+          "C:/Users/user/AppData/Roaming/uv/tools/graphifyy/Scripts/graphify-mcp.exe",
           "--transport",
           "stdio",
           "--graph",
@@ -142,10 +142,9 @@
       "cocoindex": {
         "type": "local",
         "command": [
-          "C:\\Python314\\pythonw.exe",
+          "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
-          "C:/Users/user/.local/bin/ccc.exe",
-          "mcp"
+          "C:/Users/user/.local/bin/mcp/ccc-mcp.cmd"
         ],
         "disabled": false
       }
