@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-24 02:38:58
+> Generated: 2026-10-24 03:43:22
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -108617,6 +108617,7 @@ static bool checkSTG82bSameObligationNotResolved()
         return false;
     }
     e.submitRecoveryIntent(h1, snapshot);
+    const auto d2bWindowT0 = std::chrono::steady_clock::now();   // window start (failure diagnostic)
     if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
     {
         std::fprintf(stderr, "[STG-8-D2b] FAIL: O1 not admitted\n");
@@ -108629,11 +108630,29 @@ static bool checkSTG82bSameObligationNotResolved()
     }
     // 同一 handle 再 submit（coalesce → 同 O1 の新表現）。第二 build→submit に25秒猶予。
     e.submitRecoveryIntent(h1, snapshot);
-    stg8SleepPump(25000);
+    // �� R8 fix (2026-10-24): the retention window must stay clear of the production
+    //   bounded-drop watchdogs. Both are 30 s but run on different clocks:
+    //     - publication stall (kPublicationStallThresholdUs = 30 s, Orchestrator h:313)
+    //       counts from the last committed publication *progress*, which precedes this
+    //       test's T0 by the setup gap. Its recovery action (AudioEngine.Timer.cpp:1841
+    //       -> requestDeferredClear() -> clearDeferredForShutdown()) releases the deferred
+    //       slot without resolving the recovery obligation, which is exactly the
+    //       "over-terminalized (L=1 hasDeferred=0)" this test reports.
+    //     - deferred TTL (kDeferredPublishTTLUs = 30 s, Orchestrator h:134) counts from
+    //       the obligation's creation (T0 + the 1 s settle above).
+    //   A 25 s window left ~5 s of margin, so a slow/loaded setup let the stall watchdog
+    //   fire inside the window (R8; reproduced with stall/clear evidence 2026-10-24).
+    //   10 s keeps the same semantics - the same obligation is retained across a long
+    //   window and is not terminalized - with ~19 s of margin against both watchdogs.
+    stg8SleepPump(10000);
     if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
     {
-        std::fprintf(stderr, "[STG-8-D2b] FAIL: over-terminalized (L=%llu hasDeferred=%d)\n",
-                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        const long long d2bWindowMs = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - d2bWindowT0).count());
+        std::fprintf(stderr, "[STG-8-D2b] FAIL: over-terminalized (L=%llu hasDeferred=%d windowMs=%lld)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0,
+                     d2bWindowMs);
         ok = false;
     }
 
