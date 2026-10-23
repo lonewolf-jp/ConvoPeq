@@ -71,8 +71,16 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
     }
 
     const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
-    if (state == DSPState::Reclaimed || state == DSPState::Quarantined) {
-        return { nullptr, false, false };
+    // V-11 candidate fix: a Retired (or DestroyPending) DSP must not resolve to a live pointer.
+    //   Previously these states fell through and returned reg.instance, so callers such as
+    //   AudioEngine::makeRuntimeGraphState could dereference an EQProcessor whose
+    //   agc*CoeffTable storage had already been released (ScopedAlignedPtr<double>::get() AV).
+    //   Treating them as non-resolvable makes the defect fail closed (nullptr); every
+    //   caller already null-checks (makeRuntimeGraphState guards on `current != nullptr`,
+    //   and the audio thread guards on the table pointers).
+    if (state == DSPState::Reclaimed || state == DSPState::Quarantined
+        || state == DSPState::Retired || state == DSPState::DestroyPending) {
+        return { nullptr, false, true };   // isStale=true so callers can distinguish
     }
 
     return { reg.instance, true, false };
