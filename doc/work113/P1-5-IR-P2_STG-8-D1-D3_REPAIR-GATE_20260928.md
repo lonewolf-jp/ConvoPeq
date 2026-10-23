@@ -122,3 +122,28 @@ test diff（CTest 新規登録なし・harness 内 subtest）:
 - commit 未実施（commit approval 待ち）。push NOT AUTHORIZED 継続。
 - `AGENTS.md` / `headroom-proxy-start.ps1` の既存無関係差分は非接触・非混入。
 - 本書は新規作成（untracked）。DISCOVERY 記録は不変。
+## 7. Post-commit gate（commit `b0b46941` 後・2026-09-28）
+  > 注記: 本節は 2026-09-28 時点の事後ゲート記録であり、現行のテスト状況（49 件）や push 状態を示すものではない。STG-9-D1 の記録はその後 `origin/main` に収録済み。
+- A. Commit identity: `b0b46941 fix(runtime): close recovery obligation lifecycle gaps`、
+  7 ファイルのみ（production 1＋tests 3＋CMakeLists 1＋ConvoPeq.md 1＋本書 1）。
+  `AGENTS.md` / `headroom-proxy-start.ps1` の混入なし。
+- B. Authority（再生成・流用なし）: SHA-256
+  `615940DC90D73CED680081A8FBD0B491DBDC376788C0469B0A59AF7D2F6F2E3B` /
+  5,612,326 B / Generated 2026-09-28 16:17:11 / HEAD `b0b46941` /
+  `--check` FRESH / NEWER_SRC_COUNT 0。
+- C. Regression: Debug harness 全 PASS（STG-8-D1/D2/D2b/D3＋STG-1/2/4-1/6-D1/7-D1、
+  `FAIL:` 0 件）。Release harness 全 PASS。CTest **42/42 PASS**
+ （新規テストは harness 内 subtest のため CTest 件数不変・42 のまま）。
+- D. 重点確認: D1（stale discard→L==0、live 証明）、
+  D2（O1 terminal／O2 Live 維持、同一 O 世代更新で Live・ΔL なし、live 証明）、
+  D3（signal→解除→adjudicate→None→redrive→accepted→terminal、live 証明）。
+  ShutdownDiscard→ShutdownDiscarded 対応は同 shape の reason 対応として実読確認
+ （live の shutdown 中断は既存 shutdown-drain suite が table 終端を担保）。
+  `kMaxObligationConsecutiveFailures == 4` 不変（grep 確認）。
+- E. ISR audit: commit 内 production diff は Orchestrator のみ（+41/-0）。
+  RT/World/Store/Coordinator/Crossfade/Retire authority/lifecycle/delivery/raw atomic
+  の変化なし。Build→Validate→Admission→Publish→Retire の迂回経路なし。
+- F. Worktree: `AGENTS.md` / `headroom-proxy-start.ps1` は残存するが commit 非混入
+ （FAIL 条件に非該当）。`ConvoPeq.md` の差分は再生成 timestamp のみ。
+- Verdict: **STG-8-D1 CLOSED / STG-8-D2 CLOSED / STG-8-D3 CLOSED。**
+  STG-9 は開始しない（Owner 指示待ち）。push NOT AUTHORIZED 継続。
