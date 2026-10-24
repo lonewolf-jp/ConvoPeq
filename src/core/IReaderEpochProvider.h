@@ -47,6 +47,14 @@ public:
      *     re-acquired must still be counted while its depth > 0 (see
      *     EpochDomain::getMinReaderEpoch).
      *
+     *  Reservation is NOT protection: a re-acquired slot sits in the RESERVED state,
+     *  which getMinReaderEpoch() ignores (it has no reader epoch yet). The caller must
+     *  follow a successful re-acquire with enterReader() before dereferencing anything
+     *  published. RCUReader::acquireThreadSlot() does exactly that in the same call.
+     *  The reservation is single-shot: a second re-acquire without an intervening
+     *  enter/exit is refused, so a forgotten enter can never be mistaken for a live
+     *  read window.
+     *
      *  Default implementation refuses, so providers that do not track slot
      *  ownership remain fail-closed.
      */

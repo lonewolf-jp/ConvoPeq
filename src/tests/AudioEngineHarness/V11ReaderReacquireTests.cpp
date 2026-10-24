@@ -329,6 +329,104 @@ bool checkV11Concurrency()
     return true;
 }
 
+// v11_9: quarantine is preserved across a re-acquire (invariant #3).
+bool checkV11QuarantinePreserved()
+{
+    v11ResetCounters();
+    convo::EpochDomain domain;
+    convo::isr::RetireQuarantineStore store;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    { convo::RCUReaderGuard g(reader);
+      if (!g.rootEnterSucceeded())
+          return false;
+      slot = v11FindActiveSlot(domain); }
+
+    if (slot < 0)
+    {
+        std::printf("  v11_9: could not identify the held slot\n");
+        return false;
+    }
+
+    // Idle now: quarantine the slot, then close registration.
+    const bool quarantined = domain.quarantineReader(slot);
+    const int before = domain.quarantinedReaderCount();
+    domain.closeReaderRegistration();
+
+    static int object = 0;
+    void* obj = &object;
+    bool protectedWhileActive = false;
+
+    {
+        convo::RCUReaderGuard g(reader);
+        if (!g.rootEnterSucceeded())
+        {
+            std::printf("  v11_9: enter refused for a quarantined-idle slot\n");
+            return false;
+        }
+
+        const uint64_t retireEpoch = domain.currentEpoch();
+        store.quarantine(obj, v11TestDeleter, retireEpoch,
+                         DeletionEntryType::Generic, "v11-harness-q");
+        domain.publishEpoch();
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        protectedWhileActive = (g_v11DeleterCalls == 0);
+
+        if (domain.quarantinedReaderCount() != before)
+        {
+            std::printf("  v11_9: quarantine flag cleared by re-acquire (%d -> %d)\n",
+                        before, domain.quarantinedReaderCount());
+            return false;
+        }
+    }
+
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
+    const bool flagKept = domain.quarantinedReaderCount() == before;
+
+    if (!quarantined || !protectedWhileActive || !freed || !flagKept)
+    {
+        std::printf("  v11_9: quarantined=%d protectedWhileActive=%d freed=%d flagKept=%d\n",
+                    quarantined ? 1 : 0, protectedWhileActive ? 1 : 0, freed ? 1 : 0,
+                    flagKept ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
+// v11_10: the re-acquire is a single-shot reservation. A second call without an enter in
+// between must be refused, which is what keeps "reserved but not entered" from being
+// mistaken for protection. RCUReader always follows a successful re-acquire with
+// enterReader() in the same call (acquireThreadSlot -> enterReader).
+bool checkV11ReacquireIsSingleShot()
+{
+    convo::EpochDomain domain;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    { convo::RCUReaderGuard g(reader);
+      if (!g.rootEnterSucceeded())
+          return false;
+      slot = v11FindActiveSlot(domain); }
+
+    if (slot < 0)
+        return false;
+
+    domain.closeReaderRegistration();
+
+    const bool first  = domain.reacquireReaderSlot(slot);
+    const bool second = domain.reacquireReaderSlot(slot);
+
+    if (!first || second)
+    {
+        std::printf("  v11_10: first=%d second=%d (expected 1/0)\n",
+                    first ? 1 : 0, second ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int runV11ReaderReacquireTests()
@@ -358,6 +456,16 @@ int runV11ReaderReacquireTests()
     if (!checkV11Concurrency())
     {
         std::fprintf(stderr, "FAIL: checkV11Concurrency\n");
+        ok = false;
+    }
+    if (!checkV11QuarantinePreserved())
+    {
+        std::fprintf(stderr, "FAIL: checkV11QuarantinePreserved\n");
+        ok = false;
+    }
+    if (!checkV11ReacquireIsSingleShot())
+    {
+        std::fprintf(stderr, "FAIL: checkV11ReacquireIsSingleShot\n");
         ok = false;
     }
 
