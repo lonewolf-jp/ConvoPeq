@@ -3641,7 +3641,12 @@ public:
         graph.fadingNode = state.fading;
 
         auto* current = static_cast<DSPCore*>(state.current);
-        if (current != nullptr)
+        // V-11 candidate (2): defensive reset - validate current is live before
+        //   accessing eqRt(). eqState is a unique_ptr; if it is null, the DSPCore
+        //   has been (or is being) destroyed. This is a best-effort guard; it does
+        //   not prevent UAF if current itself is dangling (use-after-free of the
+        //   DSPCore object). Candidate (1) + EBR or (3) is needed for full protection.
+        if (current != nullptr && current->eqState != nullptr)
         {
             auto& eq = current->eqRt();
             graph.eqAgcAttackCoeffTable = eq.getAgcAttackCoeffTable();
