@@ -763,6 +763,88 @@ static bool checkSTG8ClearUsesShutdownReason()
     return true;
 }
 
+//==============================================================================
+// R8-5: production entry point. The 30 s publication-stall watchdog does not call
+// clearDeferredForShutdown() directly: AudioEngine.Timer.cpp:1847 calls
+// requestDeferredClear(), which latches deferredClearRequested_ + notifies the
+// RebuildThread, and the clear then runs inside drainDeferredClearIfRequested().
+// This test drives that same entry point and proves the obligation is terminalized
+// by the drain, so the latch -> notify -> drain -> clear chain is covered rather
+// than only the direct call.
+//==============================================================================
+static bool checkSTG8RequestDeferredClearDrains()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-5] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Exactly what the 30 s stall watchdog does (AudioEngine.Timer.cpp:1847).
+    orch.requestDeferredClear();
+
+    // The RebuildThread performs the clear on its next wake.
+    if (!stg8WaitUntil(45.0, [&] { return stg8LiveCount(e) == 0; }))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: obligation not terminalized by drain (L=%llu)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: hasDeferred still true after drain\n");
+        ok = false;
+    }
+    // Mid-run drain: must be StaleSuperseded, so the shutdown counter stays flat.
+    if (coord.recoveryObligationShutdownDiscardCount() != discardBefore)
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: drain classified as ShutdownDiscarded\n");
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-5 requestDeferredClear drain terminalizes)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
@@ -809,6 +891,12 @@ int runSTG8RecoveryObligationTests()
     if (!checkSTG8ClearUsesShutdownReason())
     {
         std::fprintf(stderr, "FAIL: checkSTG8ClearUsesShutdownReason\n");
+        stg8ok = false;
+    }
+    // R8-5: the production entry point (watchdog -> requestDeferredClear -> drain).
+    if (!checkSTG8RequestDeferredClearDrains())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8RequestDeferredClearDrains\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)
