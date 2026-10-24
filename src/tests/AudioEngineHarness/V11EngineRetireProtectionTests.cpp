@@ -25,8 +25,10 @@
 #include "AudioEngineHarness.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <thread>
 
 #include "core/RCUReader.h"
@@ -151,6 +153,138 @@ bool checkEngineLevelProtection()
     return true;
 }
 
+//==============================================================================
+// ★ V-11 (P0-5 complete): retire recorded FROM INSIDE the audio callback.
+//   The hook runs on the audio thread, inside getNextAudioBlock, after the RCU guard is
+//   established and before the published-world pointer is read. It holds the callback there
+//   while the test thread records a retirement at the guard's epoch, advances the global
+//   epoch and drains. Pre-fix, the guard could not be established after close (V-11); the
+//   object would then be reclaimed while the callback "holds" it.
+//==============================================================================
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+namespace {
+
+std::atomic<int>  g_v11HookCalls{0};
+std::atomic<bool> g_v11HookInside{false};
+std::atomic<bool> g_v11HookReturned{false};
+std::atomic<bool> g_v11HookRelease{false};
+
+void v11BlockHook(void*) noexcept
+{
+    if (g_v11HookCalls.fetch_add(1, std::memory_order_acq_rel) != 0)
+        return;   // only the first callback blocks
+    g_v11HookInside.store(true, std::memory_order_release);
+    while (!g_v11HookRelease.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    g_v11HookReturned.store(true, std::memory_order_release);
+}
+
+bool v11WaitFor(double timeoutSec, const std::function<bool()>& pred)
+{
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(static_cast<int>(timeoutSec * 1000));
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (pred())
+            return true;
+        std::this_thread::yield();
+    }
+    return pred();
+}
+
+} // namespace
+#endif
+
+static bool checkInCallbackRetireProtection()
+{
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // Reset the shared counters: the preceding engine-level test already reclaimed its own
+    // sentinel, so a stale count would make this test read as a failure of the product.
+    g_v11eReclaimCalls = 0;
+    g_v11eLastReclaimed = nullptr;
+
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::printf("[V11-CB] harness.start() failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+
+    // Wait for a published runtime so the callback actually reaches the read path.
+    if (!v11WaitFor(30.0, [&] { return e.hasAuthoritativePublishedRuntime(); }))
+    {
+        std::printf("[V11-CB] FAIL: no authoritative runtime\n");
+        harness.stop();
+        return false;
+    }
+
+    g_v11HookCalls.store(0);
+    g_v11HookInside.store(false);
+    g_v11HookReturned.store(false);
+    g_v11HookRelease.store(false);
+
+    e.audioBlockTestHookCtx.store(nullptr, std::memory_order_release);
+    e.audioBlockTestHook.store(&v11BlockHook, std::memory_order_release);
+
+    if (!v11WaitFor(10.0, [] { return g_v11HookInside.load(std::memory_order_acquire); }))
+    {
+        std::printf("[V11-CB] FAIL: callback hook never ran\n");
+        e.audioBlockTestHook.store(nullptr, std::memory_order_release);
+        harness.stop();
+        return false;
+    }
+
+    static int sentinel = 0;
+    void* const obj = &sentinel;
+
+    // The audio callback is parked inside the guard at epoch E.
+    const uint64_t retireEpoch = e.currentRetireEpoch();
+    const bool queued = e.enqueueRetireEpochBounded(obj, v11eSentinelDeleter, retireEpoch);
+
+    e.advanceRetireEpoch();
+    e.tryReclaimResources();
+    const bool protectedWhileInCallback = (g_v11eReclaimCalls == 0);
+
+    // Let the callback finish; the guard drops.
+    g_v11HookRelease.store(true, std::memory_order_release);
+    const bool returned = v11WaitFor(10.0, [] { return g_v11HookReturned.load(std::memory_order_acquire); });
+    e.audioBlockTestHook.store(nullptr, std::memory_order_release);
+
+    e.advanceRetireEpoch();
+    e.tryReclaimResources();
+
+    // The hook returning is NOT the guard being released: the callback still has to finish
+    // the block. Retry the drain briefly until the audio slot goes inactive.
+    bool freedAfterCallback = false;
+    const auto reclaimDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < reclaimDeadline)
+    {
+        if (g_v11eReclaimCalls >= 1)
+        {
+            freedAfterCallback = (g_v11eLastReclaimed == obj);
+            break;
+        }
+        e.advanceRetireEpoch();
+        e.tryReclaimResources();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    harness.stop();
+
+    std::printf("[V11-CB] queued=%d retireEpoch=%llu protectedWhileInCallback=%d returned=%d freedAfter=%d : %s\n",
+                queued ? 1 : 0, (unsigned long long)retireEpoch,
+                protectedWhileInCallback ? 1 : 0, returned ? 1 : 0, freedAfterCallback ? 1 : 0,
+                (queued && protectedWhileInCallback && returned && freedAfterCallback) ? "PASS" : "FAIL");
+
+    return queued && protectedWhileInCallback && returned && freedAfterCallback;
+#else
+    std::printf("[V11-CB] SKIPPED: built without CONVOPEQ_ENABLE_TEST_HOOKS\n");
+    return true;
+#endif
+}
+
 } // namespace
 
 int runV11EngineRetireProtectionTests()
@@ -161,6 +295,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkEngineLevelProtection())
     {
         std::fprintf(stderr, "FAIL: checkV11EngineRetireProtection\n");
+        return 1;
+    }
+    if (!checkInCallbackRetireProtection())
+    {
+        std::fprintf(stderr, "FAIL: checkV11InCallbackRetireProtection\n");
         return 1;
     }
     return 0;

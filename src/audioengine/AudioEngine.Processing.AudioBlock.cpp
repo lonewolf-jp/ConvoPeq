@@ -177,6 +177,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         bufferToFill.clearActiveBufferRegion();
         return;
     }
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // ★ V-11 verification seam: the guard is held and nothing has been dereferenced yet.
+    if (auto hookFn = convo::consumeAtomic(audioBlockTestHook, std::memory_order_acquire))
+        hookFn(convo::consumeAtomic(audioBlockTestHookCtx, std::memory_order_acquire));
+#endif
     auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);

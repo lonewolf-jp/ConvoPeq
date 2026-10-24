@@ -3440,6 +3440,16 @@ public:
     // これにより将来 RetireRouter の差し替え時に影響範囲を Reader 生成箇所のみに限定できる。
     // 注意: このメソッドが返すポインタの寿命は AudioEngine 全体の寿命と一致する。
     // AudioEngine より長生きする RCUReader を生成してはならない。
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // ★ V-11 verification seam (compiled only when CONVOPEQ_ENABLE_TEST_HOOKS=1).
+    //   getNextAudioBlock invokes it right after the RCU reader guard is established and
+    //   BEFORE the published-world pointer is obtained, so a test can observe the world
+    //   lifetime predicate with the real audio guard held. Lock-free (function pointer +
+    //   context, both atomic): the audio thread never allocates or takes a lock here.
+    using AudioBlockTestHookFn = void (*)(void*);
+    std::atomic<AudioBlockTestHookFn> audioBlockTestHook { nullptr };
+    std::atomic<void*> audioBlockTestHookCtx { nullptr };
+#endif
     [[nodiscard]] convo::IReaderEpochProvider& getRetireRouter() noexcept
     {
         jassert(m_retireRouter != nullptr);
