@@ -18,6 +18,24 @@
 
 #if JUCE_WINDOWS
 #include <windows.h>
+
+// R8 diagnostic: unbuffered per-test trace. A 0xC0000005 in this suite loses the unflushed
+// stdout tail, so the last stderr line is the reliable marker of the running test.
+struct Stg8Trace
+{
+    explicit Stg8Trace(const char* n) noexcept : name(n)
+    {
+        std::fprintf(stderr, "[STG8-TRACE] enter %s\n", name);
+        std::fflush(stderr);
+    }
+    ~Stg8Trace() noexcept
+    {
+        std::fprintf(stderr, "[STG8-TRACE] leave %s\n", name);
+        std::fflush(stderr);
+    }
+    const char* name;
+};
+
 #endif
 
 namespace {
@@ -99,6 +117,7 @@ static convo::isr::DSPHandle stg8RegisterActive(AudioEngine& e)
 //==============================================================================
 static bool checkSTG81DiscardTerminalizesRecovery()
 {
+    Stg8Trace trace("checkSTG81DiscardTerminalizesRecovery");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -179,6 +198,7 @@ static bool checkSTG81DiscardTerminalizesRecovery()
 //==============================================================================
 static bool checkSTG82OverwriteTerminalizesEvicted()
 {
+    Stg8Trace trace("checkSTG82OverwriteTerminalizesEvicted");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -266,6 +286,7 @@ static bool checkSTG82OverwriteTerminalizesEvicted()
 //==============================================================================
 static bool checkSTG82bSameObligationNotResolved()
 {
+    Stg8Trace trace("checkSTG82bSameObligationNotResolved");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -351,6 +372,7 @@ static bool checkSTG82bSameObligationNotResolved()
 //==============================================================================
 static bool checkSTG8ClearTerminalizesObligation()
 {
+    Stg8Trace trace("checkSTG8ClearTerminalizesObligation");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -432,6 +454,7 @@ static bool checkSTG8ClearTerminalizesObligation()
 //==============================================================================
 static bool checkSTG8ClearIsIdempotent()
 {
+    Stg8Trace trace("checkSTG8ClearIsIdempotent");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -518,6 +541,7 @@ static bool checkSTG8ClearIsIdempotent()
 //==============================================================================
 static bool checkSTG8ClearTerminalReasonIsStale()
 {
+    Stg8Trace trace("checkSTG8ClearTerminalReasonIsStale");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -596,6 +620,7 @@ static bool checkSTG8ClearTerminalReasonIsStale()
 //==============================================================================
 static bool checkSTG83PressureSignalRedrives()
 {
+    Stg8Trace trace("checkSTG83PressureSignalRedrives");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -681,6 +706,7 @@ static bool checkSTG83PressureSignalRedrives()
 //==============================================================================
 static bool checkSTG8ClearUsesShutdownReason()
 {
+    Stg8Trace trace("checkSTG8ClearUsesShutdownReason");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -774,6 +800,7 @@ static bool checkSTG8ClearUsesShutdownReason()
 //==============================================================================
 static bool checkSTG8RequestDeferredClearDrains()
 {
+    Stg8Trace trace("checkSTG8RequestDeferredClearDrains");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -859,6 +886,7 @@ static bool checkSTG8RequestDeferredClearDrains()
 //==============================================================================
 static bool checkR8WatchdogEventTerminalizesDeferred()
 {
+    Stg8Trace trace("checkR8WatchdogEventTerminalizesDeferred");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -946,6 +974,7 @@ static bool checkR8WatchdogEventTerminalizesDeferred()
 //==============================================================================
 static bool checkR8C1StoppedFlagOrdering()
 {
+    Stg8Trace trace("checkR8C1StoppedFlagOrdering");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -1026,6 +1055,7 @@ static bool checkR8C1StoppedFlagOrdering()
 //==============================================================================
 static bool checkR8ForeignThreadRefused()
 {
+    Stg8Trace trace("checkR8ForeignThreadRefused");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
