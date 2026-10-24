@@ -423,6 +423,170 @@ static bool checkSTG8ClearTerminalizesObligation()
 }
 
 //==============================================================================
+// R8-2: repeated clear must be idempotent (no double terminalization / double release).
+//   Calls clearDeferredForShutdown() three times total. After the first call the
+//   obligation is terminal (L=0); the 2nd and 3rd calls must be no-ops:
+//     - L stays exactly 0 (a second resolve would underflow the live counter,
+//       since resolve() performs the single -1 through the id-based table),
+//     - hasDeferred stays false (the slot must not be resurrected).
+//==============================================================================
+static bool checkSTG8ClearIsIdempotent()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-2] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    // First clear: obligation terminalized.
+    orch.clearDeferredForShutdown();
+    stg8SleepPump(300);
+    if (stg8LiveCount(e) != 0 || orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: first clear (L=%llu hasDeferred=%d)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        ok = false;
+    }
+
+    // Repeat twice: must be a no-op.
+    for (int i = 0; i < 2; ++i)
+    {
+        orch.clearDeferredForShutdown();
+        stg8SleepPump(100);
+    }
+
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: repeated clear changed L (L=%llu, expected 0)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: repeated clear resurrected deferred slot\n");
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-2 repeated clear is idempotent)\n");
+    return true;
+}
+
+//==============================================================================
+// R8-3: terminal reason must match the actual state.
+//   A mid-run clear is NOT a shutdown, so it must terminalize the obligation as
+//   StaleSuperseded, never ShutdownDiscarded.
+//   recoveryObligationShutdownDiscardCount() is incremented only by the
+//   ShutdownDiscarded outcome (ISRRuntimePublicationCoordinator.cpp resolve path),
+//   so it must be unchanged across a mid-run clear. If it moves, clearIsShutdown
+//   was computed wrongly and the reason recorded is wrong.
+//==============================================================================
+static bool checkSTG8ClearTerminalReasonIsStale()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-3] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    orch.clearDeferredForShutdown();   // mid-run drain: not an actual shutdown
+    stg8SleepPump(300);
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: obligation not terminalized (L=%llu)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-3] FAIL: mid-run clear counted as ShutdownDiscarded (%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-3 mid-run clear is StaleSuperseded)\n");
+    return true;
+}
+
+//==============================================================================
 // ★ STG-8-D3: RejectedPressure の transport recovery が signal→redrive で再送される。
 //   fading OFF・throttle ON → recovery submit (L=1, Transport) → Builder build→
 //   submit → RejectedPressure →（修正: signal）→ throttle OFF → adjudicate→None→
@@ -536,6 +700,18 @@ int runSTG8RecoveryObligationTests()
     if (!checkSTG8ClearTerminalizesObligation())
     {
         std::fprintf(stderr, "FAIL: checkSTG8ClearTerminalizesObligation\n");
+        stg8ok = false;
+    }
+    // R8-2: repeated clear must not double-terminalize / double-release.
+    if (!checkSTG8ClearIsIdempotent())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearIsIdempotent\n");
+        stg8ok = false;
+    }
+    // R8-3: mid-run clear must record StaleSuperseded, not ShutdownDiscarded.
+    if (!checkSTG8ClearTerminalReasonIsStale())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearTerminalReasonIsStale\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)
