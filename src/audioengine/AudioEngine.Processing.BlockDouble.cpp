@@ -149,6 +149,13 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    // V-11 candidate (3): EBR protection for published-world read.
+    //   Wrap the entire published-world read scope in an RCUReaderGuard so that
+    //   the retire router's epoch mechanism prevents DSPCore reclamation while
+    //   the audio thread holds the raw DSPCore* obtained from the published world.
+    //   Previously the audio thread read the published world without entering
+    //   the RCU reader, so a Retired DSPCore could be freed mid-use (UAF).
+    const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
     auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
