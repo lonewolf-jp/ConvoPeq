@@ -341,6 +341,88 @@ static bool checkSTG82bSameObligationNotResolved()
 }
 
 //==============================================================================
+// STG-8-CLEAR: clearDeferredForShutdown() must terminalize the recovery obligation.
+//   Reproduction test for the R8 stall-clear asymmetry: a deferred publish with a live
+//   obligation is cleared (mid-run drain path). Before the fix, clearDeferredForShutdown()
+//   released the slot (hasDeferred=0) but left the obligation live (L=1). After the fix,
+//   the obligation is resolved (L=0) via resolveRecoveryObligation(StaleSuperseded).
+//   This test calls clearDeferredForShutdown() directly to exercise the path without
+//   waiting for the 30 s stall watchdog.
+//==============================================================================
+static bool checkSTG8ClearTerminalizesObligation()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: O1 deferred state not reached\n");
+        return false;
+    }
+
+    // Pre-condition: obligation is live, deferred request is retained.
+    if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: pre-condition (L=%llu hasDeferred=%d)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        ok = false;
+    }
+
+    // Invoke the clear path (mid-run drain, not actual shutdown).
+    orch.clearDeferredForShutdown();
+    stg8SleepPump(500);
+
+    // Post-condition: deferred request released AND obligation terminalized (L=0).
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: hasDeferred still true after clear\n");
+        ok = false;
+    }
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: obligation NOT terminalized (L=%llu, expected 0)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (STG-8-CLEAR clear terminalizes obligation)\n");
+    return true;
+}
+
+//==============================================================================
 // ★ STG-8-D3: RejectedPressure の transport recovery が signal→redrive で再送される。
 //   fading OFF・throttle ON → recovery submit (L=1, Transport) → Builder build→
 //   submit → RejectedPressure →（修正: signal）→ throttle OFF → adjudicate→None→
@@ -449,6 +531,11 @@ int runSTG8RecoveryObligationTests()
     if (!checkSTG82bSameObligationNotResolved())
     {
         std::fprintf(stderr, "FAIL: checkSTG82bSameObligationNotResolved\n");
+        stg8ok = false;
+    }
+    if (!checkSTG8ClearTerminalizesObligation())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearTerminalizesObligation\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)
