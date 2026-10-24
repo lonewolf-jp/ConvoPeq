@@ -198,6 +198,16 @@ bool ISRRetireRouter::reserveReaderThread(int readerIndex) noexcept
     return provider_->reserveReaderThread(readerIndex);
 }
 
+// V-11: delegate ownership-checked re-acquisition (see IReaderEpochProvider).
+//   Fail-closed when no provider is installed, matching the other delegations.
+bool ISRRetireRouter::reacquireReaderSlot(int readerIndex) noexcept
+{
+    assert(provider_ != nullptr);
+    if (provider_ == nullptr)
+        return false;
+    return provider_->reacquireReaderSlot(readerIndex);
+}
+
 void ISRRetireRouter::enterReader(int readerIndex) noexcept
 {
     assert(provider_ != nullptr);

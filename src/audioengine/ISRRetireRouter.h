@@ -188,6 +188,9 @@ public:
     uint64_t getMinReaderEpoch() const noexcept override;
     int registerReaderThread() noexcept override;
     bool reserveReaderThread(int readerIndex) noexcept override;
+    // V-11: forward ownership-checked re-acquisition to the provider so an already
+    // registered reader keeps EBR protection after registration close.
+    bool reacquireReaderSlot(int readerIndex) noexcept override;
     void enterReader(int readerIndex) noexcept override;
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;

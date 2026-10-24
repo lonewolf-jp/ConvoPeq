@@ -61,6 +61,9 @@ int runConvolverStateRoundTripTests();
 
 // STG8RecoveryObligationTests.cpp (★ STG-8-D1/D2/D3: recovery obligation 終端回帰)
 int runSTG8RecoveryObligationTests();
+// V11ReaderReacquireTests.cpp (★ V-11 P0: reader protection re-established after
+//   registration close; ownership-checked re-acquire; contention A/B)
+int runV11ReaderReacquireTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
@@ -1425,6 +1428,10 @@ int runFpmM2();
 
     // ★ STG-8-D1/D2/D3: recovery obligation 終端回帰（新規 CTest target なし）。
     if (runSTG8RecoveryObligationTests() != 0)
+        return 1;
+
+    // ★ V-11 P0: reader protection must survive registration close (no unprotected read).
+    if (runV11ReaderReacquireTests() != 0)
         return 1;
 
     // ★ STG-9-D1 / RC-1: reclaim accounting 終端回帰（新規 CTest target なし）。

@@ -168,6 +168,15 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // P0-2: 読取入口を単一の callback authority view へ収束（R21 gate: readAudioRuntimeView）
     // V-11 candidate (3): EBR protection for published-world read.
     const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
+    // V-11 candidate (3c): fail closed when the EBR read-side guard could not be
+    //   established (see the matching guard in processBlockDouble). Without a
+    //   successful enter() no epoch protection is registered, so the published-world
+    //   DSPCore must not be dereferenced. C-7 idiom: core/ObservedRuntime.h:get().
+    if (!rcuGuard.rootEnterSucceeded())
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
     auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
