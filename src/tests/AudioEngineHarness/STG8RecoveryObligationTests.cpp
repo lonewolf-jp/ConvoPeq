@@ -975,6 +975,11 @@ static bool checkR8C1StoppedFlagOrdering()
         std::fprintf(stderr, "[R8-6] FAIL: test thread claims RebuildThread ownership\n");
         return false;
     }
+    if (DeferredPublicationTestAccess::rebuildThreadTokenOf(e) == 0)
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: no ownership token while running\n");
+        return false;
+    }
 
     h.stop();
 
@@ -998,7 +1003,14 @@ static bool checkR8C1StoppedFlagOrdering()
         std::fprintf(stderr, "[R8-6] FAIL: ownership still claimable after join\n");
         return false;
     }
+    if (DeferredPublicationTestAccess::rebuildThreadTokenOf(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: ownership token not cleared on exit\n");
+        return false;
+    }
 
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-6 stopped published after join; ownership unclaimable after)\n");
     return true;
 }
 
@@ -1089,6 +1101,9 @@ static bool checkR8ForeignThreadRefused()
     }
 
     h.stop();
+    if (ok)
+        std::printf("STG8RecoveryObligationTests: PASS "
+                    "(R8-7 foreign thread refused: peek=nullopt, slot not consumed, no stranding)\n");
     return ok;
 }
 int runSTG8RecoveryObligationTests()

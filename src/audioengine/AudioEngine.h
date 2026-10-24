@@ -1754,13 +1754,14 @@ public:
     // ★ R8 (P1): Release-active RebuildThread ownership test.
     //   The jassert above is compiled out under NDEBUG, which left the "plain
     //   deferredSlot_ is only touched by the RebuildThread" contract documentation-only in
-    //   Release. This predicate is the mechanical form: it is false for every thread once
-    //   the rebuild thread has been joined (get_id() becomes the default id), so callers can
-    //   refuse instead of mutating the slot from a foreign thread.
+    //   Release. This predicate is the mechanical form: it compares the caller's
+    //   acquireUniqueThreadId() (monotonic, never reused) with the token the worker
+    //   publishes on entry and clears on exit. Unlike std::thread::get_id(), reading it does
+    //   not race with join().
     [[nodiscard]] bool isRebuildThread() const noexcept
     {
-        const auto ownerId = rebuildThread.get_id();
-        return ownerId != std::thread::id{} && ownerId == std::this_thread::get_id();
+        const auto owner = convo::consumeAtomic(rebuildThreadToken_, std::memory_order_acquire);
+        return owner != 0 && owner == convo::acquireUniqueThreadId();
     }
 
     // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
@@ -2946,6 +2947,10 @@ public:
     //   has stopped - the RebuildThread may still be inside processDeferredAdmission().
     //   Only this flag may gate the C1 synchronous clear (see requestDeferredClear()).
     std::atomic<bool> rebuildThreadStopped { false };
+    // ★ R8 (P1): ownership token of the running RebuildThread (0 = none). Published by
+    //   rebuildThreadLoop() on entry and cleared on exit; compared against
+    //   acquireUniqueThreadId() by isRebuildThread().
+    std::atomic<std::uint64_t> rebuildThreadToken_ { 0 };
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     // ★ D167-2: terminal-release intent（requestTerminalRelease が writer・releaseResources の

@@ -869,6 +869,11 @@ void AudioEngine::rebuildThreadLoop()
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
     convo::publishAtomic(rebuildThreadIsRunning, true, std::memory_order_release);
+    // ★ R8 (P1): publish this thread's unique ownership token. acquireUniqueThreadId() is
+    //   monotonic and never reused, so a foreign thread cannot collide, and unlike
+    //   std::thread::get_id() it is safe to read while the owner may be joining.
+    convo::publishAtomic(rebuildThreadToken_, convo::acquireUniqueThreadId(),
+                         std::memory_order_release);
 
     while (true)
     {
@@ -1439,4 +1444,7 @@ void AudioEngine::rebuildThreadLoop()
     }
 
     convo::publishAtomic(rebuildThreadIsRunning, false, std::memory_order_release);
+    // ★ R8 (P1): the worker is leaving; drop ownership so no thread can claim it.
+    convo::publishAtomic(rebuildThreadToken_, static_cast<std::uint64_t>(0),
+                         std::memory_order_release);
 }

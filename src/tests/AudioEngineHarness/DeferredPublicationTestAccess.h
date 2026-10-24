@@ -294,4 +294,10 @@ public:
     {
         return e.rebuildThreadId() == std::thread::id{};
     }
+
+    // ★ R8 (P1): the ownership token the worker publishes on entry and clears on exit.
+    static std::uint64_t rebuildThreadTokenOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
+    }
 };
