@@ -672,6 +672,97 @@ static bool checkSTG83PressureSignalRedrives()
     return true;
 }
 
+//==============================================================================
+// R8-4: the shutdown branch must record ShutdownDiscarded (not StaleSuperseded).
+//   Forces EngineLifecycleState::Releasing so isShutdownInProgress() is true, then runs
+//   the clear path and asserts recoveryObligationShutdownDiscardCount() advances by
+//   exactly one while the obligation is terminalized (L=0, hasDeferred=0).
+//   The original lifecycle state is restored before the harness is stopped.
+//==============================================================================
+static bool checkSTG8ClearUsesShutdownReason()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-4] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const int savedState = DeferredPublicationTestAccess::getLifecycleStateRaw(e);
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Pretend the engine is releasing, so clearIsShutdown == true.
+    DeferredPublicationTestAccess::setLifecycleStateRaw(e, 3 /* Releasing */);
+
+    orch.clearDeferredForShutdown();
+    stg8SleepPump(300);
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+
+    // Restore immediately so nothing downstream observes a fake shutdown.
+    DeferredPublicationTestAccess::setLifecycleStateRaw(e, savedState);
+
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: obligation not terminalized (L=%llu)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: hasDeferred still true after clear\n");
+        ok = false;
+    }
+    // Shutdown branch must be classified as ShutdownDiscarded: counter increments by 1.
+    if (discardAfter != discardBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[R8-4] FAIL: shutdown clear not recorded as ShutdownDiscarded "
+                     "(%llu -> %llu, expected +1)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-4 shutdown clear records ShutdownDiscarded)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
@@ -712,6 +803,12 @@ int runSTG8RecoveryObligationTests()
     if (!checkSTG8ClearTerminalReasonIsStale())
     {
         std::fprintf(stderr, "FAIL: checkSTG8ClearTerminalReasonIsStale\n");
+        stg8ok = false;
+    }
+    // R8-4: the shutdown branch must record ShutdownDiscarded.
+    if (!checkSTG8ClearUsesShutdownReason())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearUsesShutdownReason\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)

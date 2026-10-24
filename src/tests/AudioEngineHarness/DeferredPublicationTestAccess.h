@@ -83,6 +83,22 @@ public:
         return e.dspHandleRuntime_;
     }
 
+    // R8-4: control the shutdown-in-progress predicate so the clear path can be exercised
+    // in the ShutdownDiscarded branch, and restore the original state afterwards.
+    // EngineLifecycleState: 0 Unprepared, 1 Preparing, 2 Prepared, 3 Releasing, 4 Destroyed
+    // (isShutdownInProgress() is true for 3 and 4).
+    static int getLifecycleStateRaw(AudioEngine& e) noexcept
+    {
+        return static_cast<int>(convo::consumeAtomic(e.lifecycleState, std::memory_order_acquire));
+    }
+
+    static void setLifecycleStateRaw(AudioEngine& e, int v) noexcept
+    {
+        convo::publishAtomic(e.lifecycleState,
+                             static_cast<AudioEngine::EngineLifecycleState>(v),
+                             std::memory_order_release);
+    }
+
     // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
     // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
     // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは
