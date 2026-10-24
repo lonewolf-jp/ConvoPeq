@@ -877,6 +877,115 @@ static bool checkSTG8RequestDeferredClearDrains()
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
 // 新 CTest 登録なし（AudioEngineHarness 既存 exe のサブテスト）。
 //==============================================================================
+// ★ R8-9 (P1): the REAL 30 s stall detector, driven with a synthetic clock.
+//   Stage 2 of the watchdog plan. `RuntimeHealthMonitor::tick()` calls
+//   checkPublicationStall(), which reports EVENT_PUBLICATION_STALL when there is pending
+//   work AND `isPublicationStalled()` (no committed publication for >= 30 s). Rather than
+//   blocking a thread for 30 s, the friend seam ages the progress timestamp; the detector
+//   itself (threshold comparison, engine timer, event transport, handler, latch, drain) is
+//   the production path.
+//   Pre-fix behaviour: the clear would leave the obligation live (L=1, hasDeferred=0).
+//==============================================================================
+namespace convo { namespace isr {
+struct R8PublicationProgressTestAccess
+{
+    static void ageProgress(RuntimePublicationOrchestrator& o, std::uint64_t ageUs) noexcept
+    {
+        convo::publishAtomic(o.m_lastProgressTimestampUs,
+                             convo::getCurrentTimeUs() - ageUs,
+                             std::memory_order_release);
+    }
+};
+} } // namespace convo::isr
+
+static bool checkR8PublicationStallDetectorTerminalizes()
+{
+    Stg8Trace trace("checkR8PublicationStallDetectorTerminalizes");
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-9] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Age the publication-progress observation past the production threshold (30 s) and let
+    // the engine's own health tick fire. 31 s > kPublicationStallThresholdUs.
+    convo::isr::R8PublicationProgressTestAccess::ageProgress(orch, 31ull * 1000ull * 1000ull);
+
+    // The detector must now report the stalled state (elapsed >= 30 s).
+    if (!orch.isPublicationStalled())
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: detector did not report stalled after aging\n");
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+        h.stop();
+        return false;
+    }
+
+    if (!stg8WaitUntil(45.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr,
+                     "[R8-9] FAIL: stall-detector clear did not terminalize "
+                     "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-9] FAIL: mid-run clear counted as ShutdownDiscarded (%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-9 30s stall detector -> StaleSuperseded, L=0)\n");
+    return true;
+}
+
+
+//==============================================================================
 // ★ R8-8 (P1): watchdog → handler → latch → terminalization, end to end.
 //   Stage 1 of the "real 30 s stall" plan: instead of waiting out the detector, a genuine
 //   EVENT_PUBLICATION_STALL health event is pushed through the engine's own async transport
@@ -1202,6 +1311,12 @@ int runSTG8RecoveryObligationTests()
     if (!checkR8WatchdogEventTerminalizesDeferred())
     {
         std::fprintf(stderr, "FAIL: checkR8WatchdogEventTerminalizesDeferred\n");
+        stg8ok = false;
+    }
+    // R8-9: the real 30 s stall detector, driven with a synthetic clock (stage 2).
+    if (!checkR8PublicationStallDetectorTerminalizes())
+    {
+        std::fprintf(stderr, "FAIL: checkR8PublicationStallDetectorTerminalizes\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)

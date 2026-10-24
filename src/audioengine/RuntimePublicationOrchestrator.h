@@ -285,6 +285,11 @@ public:
         convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
     }
 
+    // ★ R8-9: test-only seam. Declared friend so the harness can age the progress
+    //   observation and drive the real 30 s stall detector deterministically instead of
+    //   waiting 30 s of wall time. Production never calls this accessor.
+    friend struct R8PublicationProgressTestAccess;
+
     // ★ P1-6: RuntimeHealthMonitor からのアクセス用
     [[nodiscard]] uint64_t getPendingIntentCount() const noexcept {
         return engine_.getRetirePendingIntentCount();
