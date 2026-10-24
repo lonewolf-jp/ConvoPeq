@@ -877,7 +877,109 @@ static bool checkSTG8RequestDeferredClearDrains()
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
 // 新 CTest 登録なし（AudioEngineHarness 既存 exe のサブテスト）。
 //==============================================================================
-// ★ R8-9 (P1): the REAL 30 s stall detector, driven with a synthetic clock.
+// ★ R8-10 (P1): C1 under contention — the exact window the fix targets.
+//   A foreign thread hammers requestDeferredClear() (the timer's entry point) while the
+//   main thread runs stop() -> stopRebuildThread() -> join(). Pre-fix, the C1 branch was
+//   taken as soon as rebuildThreadShouldExit was published (before join), so the spammer
+//   called clearDeferredForShutdown() while the RebuildThread could still be inside
+//   processDeferredAdmission() - two threads on the non-atomic deferred members.
+//   Post-fix the spammer can only latch until join() has returned.
+//   Oracle: the teardown must leave exactly one terminalization (L == 0, never negative),
+//   no deferred residue, and no crash.
+//==============================================================================
+static bool checkR8C1RaceWithTeardown()
+{
+    Stg8Trace trace("checkR8C1RaceWithTeardown");
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-10] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    std::atomic<long long> spamCalls{0};
+    std::thread spammer([&]
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        // Hammer the timer's entry point only while the RebuildThread has NOT provably
+        // stopped. Once rebuildThreadStopped is published (right after join) the engine is
+        // being torn down and continuing to call into it would be a test-side UB, not the
+        // product window under test.
+        while (!DeferredPublicationTestAccess::rebuildThreadStoppedOf(e)
+               && std::chrono::steady_clock::now() < deadline)
+        {
+            orch.requestDeferredClear();
+            spamCalls.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Let it hammer while the worker is alive, then tear down underneath it.
+    stg8SleepPump(500);
+    h.stop();
+    spammer.join();
+
+    bool ok = true;
+
+    // Exactly one terminalization: the live count must be 0, not negative, and no deferred
+    // residue may survive the teardown.
+    const auto liveAfter = stg8LiveCount(e);
+    if (liveAfter != 0)
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: live count after teardown = %llu (want 0)\n",
+                     (unsigned long long)liveAfter);
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: deferred residue after teardown\n");
+        ok = false;
+    }
+    if (spamCalls.load() <= 0)
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: spammer never ran (test vacuous)\n");
+        ok = false;
+    }
+
+    if (!ok)
+        return false;
+
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-10 clear requests race teardown: single terminalization, no residue, "
+                "%lld requests)\n",
+                spamCalls.load());
+    return true;
+}
+
+
 //   Stage 2 of the watchdog plan. `RuntimeHealthMonitor::tick()` calls
 //   checkPublicationStall(), which reports EVENT_PUBLICATION_STALL when there is pending
 //   work AND `isPublicationStalled()` (no committed publication for >= 30 s). Rather than
@@ -1317,6 +1419,12 @@ int runSTG8RecoveryObligationTests()
     if (!checkR8PublicationStallDetectorTerminalizes())
     {
         std::fprintf(stderr, "FAIL: checkR8PublicationStallDetectorTerminalizes\n");
+        stg8ok = false;
+    }
+    // R8-10: clear requests racing teardown (the exact window the C1 fix targets).
+    if (!checkR8C1RaceWithTeardown())
+    {
+        std::fprintf(stderr, "FAIL: checkR8C1RaceWithTeardown\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)
