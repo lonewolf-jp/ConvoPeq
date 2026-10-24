@@ -97,6 +97,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         {
             std::lock_guard<std::mutex> lock(rebuildMutex);
             convo::publishAtomic(rebuildThreadShouldExit, false, std::memory_order_release);
+            // ★ R8 (P1): the C1 synchronous-clear predicate is rebuildThreadStopped. It is
+            //   published after join() in stopRebuildThread(), so a restart MUST clear it
+            //   here; otherwise requestDeferredClear() would take the inline branch while
+            //   this new RebuildThread is running (exactly the race R8 removes).
+            convo::publishAtomic(rebuildThreadStopped, false, std::memory_order_release);
             hasPendingTask = false;
             publishRetryReady = false;
             pendingTask = RebuildTask{};

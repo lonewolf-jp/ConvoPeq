@@ -1843,7 +1843,14 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     {
         diagLog("[HEALTH] Publication stall detected, draining deferred publish");
 
-        if (runtimeOrchestrator_) {
+        // ★ R8 (P1): during teardown the deferred clear is owned by the shutdown path
+        //   (clearDeferredForShutdown() from ReleaseResources / stopRebuildThread). Asking
+        //   for a stall-driven clear here would queue redundant recovery work while the
+        //   RebuildThread may still be stopping.
+        const bool rebuildWorkerStopping =
+            convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
+
+        if (runtimeOrchestrator_ && !rebuildWorkerStopping) {
             runtimeOrchestrator_->requestDeferredClear();
         }
 

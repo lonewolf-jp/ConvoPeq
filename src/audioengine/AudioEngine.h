@@ -1751,6 +1751,18 @@ public:
     //   の handshake が崩壊する。rebuildThread_（設計書仮名）は実際はこの std::thread メンバ
     //   の id に由来する。jassert(std::this_thread::get_id() == engine_.rebuildThreadId())。
     [[nodiscard]] std::thread::id rebuildThreadId() const noexcept { return rebuildThread.get_id(); }
+    // ★ R8 (P1): Release-active RebuildThread ownership test.
+    //   The jassert above is compiled out under NDEBUG, which left the "plain
+    //   deferredSlot_ is only touched by the RebuildThread" contract documentation-only in
+    //   Release. This predicate is the mechanical form: it is false for every thread once
+    //   the rebuild thread has been joined (get_id() becomes the default id), so callers can
+    //   refuse instead of mutating the slot from a foreign thread.
+    [[nodiscard]] bool isRebuildThread() const noexcept
+    {
+        const auto ownerId = rebuildThread.get_id();
+        return ownerId != std::thread::id{} && ownerId == std::this_thread::get_id();
+    }
+
     // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
     [[nodiscard]] int currentBuildGeneration() const noexcept { return consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
 
@@ -2929,6 +2941,11 @@ public:
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
     std::atomic<bool> rebuildThreadIsRunning { false };
+    // ★ R8 (P1): published true only AFTER rebuildThread.join() returns.
+    //   rebuildThreadShouldExit is published BEFORE join(), so it does not prove the thread
+    //   has stopped - the RebuildThread may still be inside processDeferredAdmission().
+    //   Only this flag may gate the C1 synchronous clear (see requestDeferredClear()).
+    std::atomic<bool> rebuildThreadStopped { false };
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     // ★ D167-2: terminal-release intent（requestTerminalRelease が writer・releaseResources の

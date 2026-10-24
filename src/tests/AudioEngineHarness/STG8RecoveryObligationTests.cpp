@@ -849,6 +849,248 @@ static bool checkSTG8RequestDeferredClearDrains()
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
 // 新 CTest 登録なし（AudioEngineHarness 既存 exe のサブテスト）。
+//==============================================================================
+// ★ R8-8 (P1): watchdog → handler → latch → terminalization, end to end.
+//   Stage 1 of the "real 30 s stall" plan: instead of waiting out the detector, a genuine
+//   EVENT_PUBLICATION_STALL health event is pushed through the engine's own async transport
+//   (enqueueHealthEvent → timer tick → onHealthEvent → requestDeferredClear → RebuildThread
+//   drain). The 30 s *detection* is the only part not covered here.
+//   Pre-fix behaviour: the clear left the obligation live (L=1, hasDeferred=0).
+//==============================================================================
+static bool checkR8WatchdogEventTerminalizesDeferred()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-8] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-8] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-8] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-8] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Drive the production async path: SPSC queue -> timer tick -> onHealthEvent.
+    convo::HealthEvent stall{};
+    stall.timestampUs = convo::getCurrentTimeUs();
+    stall.severity = convo::HealthEvent::Severity::Error;
+    stall.eventCode = convo::EVENT_PUBLICATION_STALL;
+    e.enqueueHealthEvent(stall);
+
+    if (!stg8WaitUntil(45.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr,
+                     "[R8-8] FAIL: watchdog clear did not terminalize "
+                     "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-8] FAIL: mid-run watchdog clear counted as ShutdownDiscarded "
+                     "(%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-8 watchdog event -> StaleSuperseded, L=0)\n");
+    return true;
+}
+
+
+//   rebuildThreadShouldExit is published BEFORE join(); it therefore does not prove the
+//   thread stopped. rebuildThreadStopped is published AFTER join() and is the only flag the
+//   C1 synchronous clear is allowed to trust. Observed invariants:
+//     while running : shouldExit=false, stopped=false, rebuild id valid, this thread is not
+//                     the rebuild thread
+//     after stop()  : shouldExit=true,  stopped=true,  rebuild id empty (get_id() after join),
+//                     isRebuildThread() false for every thread
+//==============================================================================
+static bool checkR8C1StoppedFlagOrdering()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-6] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+
+    if (DeferredPublicationTestAccess::rebuildThreadShouldExitOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: shouldExit set while running\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::rebuildThreadStoppedOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: stopped set while running\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::rebuildThreadIdIsEmpty(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: no rebuild thread id while running\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::isRebuildThreadOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: test thread claims RebuildThread ownership\n");
+        return false;
+    }
+
+    h.stop();
+
+    if (!DeferredPublicationTestAccess::rebuildThreadShouldExitOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: shouldExit not set after stop\n");
+        return false;
+    }
+    if (!DeferredPublicationTestAccess::rebuildThreadStoppedOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: stopped not set after join\n");
+        return false;
+    }
+    if (!DeferredPublicationTestAccess::rebuildThreadIdIsEmpty(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: rebuild id still valid after join\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::isRebuildThreadOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: ownership still claimable after join\n");
+        return false;
+    }
+
+    return true;
+}
+
+//==============================================================================
+// ★ R8-7 (P1): the RebuildThread contract is enforced in Release, not only by jassert.
+//   Preconditions: a deferred slot is live (hasDeferred == true, L == 1) and this thread is
+//   NOT the RebuildThread. The plain deferred members must be unreachable:
+//     peekDeferred()                -> nullopt   (and hasDeferred unchanged)
+//     tryConsumeRedriveBudget()     -> false
+//     drainDeferredClearIfRequested -> false (no latch consumed)
+//   Then a generation bump lets the real RebuildThread discard the obligation, which proves
+//   the refusal did not strand the engine.
+//==============================================================================
+static bool checkR8ForeignThreadRefused()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-7] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    bool ok = true;
+    if (DeferredPublicationTestAccess::isRebuildThreadOf(e))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: test thread is the RebuildThread (test invalid)\n");
+        return false;
+    }
+
+    const auto view = orch.peekDeferred();
+    if (view.has_value())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: foreign thread obtained a DeferredPublishView\n");
+        ok = false;
+    }
+    if (!orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: refusal consumed the deferred slot\n");
+        ok = false;
+    }
+    if (orch.tryConsumeRedriveBudget())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: foreign thread consumed redrive budget\n");
+        ok = false;
+    }
+    if (orch.drainDeferredClearIfRequested())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: foreign thread drained the clear latch\n");
+        ok = false;
+    }
+
+    // Cleanup through the real owner: generation bump => Discard on the next tick.
+    DeferredPublicationTestAccess::bumpRebuildGeneration(e);
+    if (!stg8WaitUntil(45.0, [&] { return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0; }))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: obligation not terminalized after refusal "
+                             "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    h.stop();
+    return ok;
+}
 int runSTG8RecoveryObligationTests()
 {
     bool stg8ok = true;
@@ -897,6 +1139,24 @@ int runSTG8RecoveryObligationTests()
     if (!checkSTG8RequestDeferredClearDrains())
     {
         std::fprintf(stderr, "FAIL: checkSTG8RequestDeferredClearDrains\n");
+        stg8ok = false;
+    }
+    // R8-6: rebuildThreadStopped is published only after join(); it is the C1 predicate.
+    if (!checkR8C1StoppedFlagOrdering())
+    {
+        std::fprintf(stderr, "FAIL: checkR8C1StoppedFlagOrdering\n");
+        stg8ok = false;
+    }
+    // R8-7: the RebuildThread contract is enforced in Release (refuse, not jassert-only).
+    if (!checkR8ForeignThreadRefused())
+    {
+        std::fprintf(stderr, "FAIL: checkR8ForeignThreadRefused\n");
+        stg8ok = false;
+    }
+    // R8-8: watchdog event -> handler -> latch -> terminalization (stage 1 of the 30 s plan).
+    if (!checkR8WatchdogEventTerminalizesDeferred())
+    {
+        std::fprintf(stderr, "FAIL: checkR8WatchdogEventTerminalizesDeferred\n");
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)

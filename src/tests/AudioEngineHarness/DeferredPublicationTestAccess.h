@@ -272,4 +272,26 @@ public:
     {
         return convo::consumeAtomic(e.mmcssReportedCount_, std::memory_order_acquire);
     }
+
+    // ===== R8 (P1): RebuildThread lifecycle + ownership, for the C1 ordering and
+    //   Release-enforcement tests (production change: none).
+    static bool rebuildThreadShouldExitOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadShouldExit, std::memory_order_acquire);
+    }
+
+    static bool rebuildThreadStoppedOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadStopped, std::memory_order_acquire);
+    }
+
+    static bool isRebuildThreadOf(AudioEngine& e) noexcept
+    {
+        return e.isRebuildThread();
+    }
+
+    static bool rebuildThreadIdIsEmpty(AudioEngine& e) noexcept
+    {
+        return e.rebuildThreadId() == std::thread::id{};
+    }
 };

@@ -822,6 +822,12 @@ void AudioEngine::stopRebuildThread()
     if (rebuildThread.joinable())
         rebuildThread.join();
 
+    // ★ R8 (P1): publish "stopped" only after join() returned. From here no RebuildThread
+    //   code can run, so the C1 synchronous clear (requestDeferredClear) is the only writer
+    //   of the plain deferred members. rebuildThreadShouldExit (published before join) is
+    //   NOT a sufficient proof and must not be used for that decision.
+    convo::publishAtomic(rebuildThreadStopped, true, std::memory_order_release);
+
     // ★ work88 (P2-4 監査補正 — Step C): shutdown 時に recoveryIntentQueue_ の残留 Recovery を
     //   明示 discard（ShutdownDiscard — silent loss 禁止 INV-5）。Builder join 後であり、
     //   Producer（CoordinatorLoop）は shutdownCoordinatorLoop() で join 済みのため決定的に
