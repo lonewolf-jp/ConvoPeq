@@ -3,6 +3,7 @@
 #include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
 #include "core/TimeUtils.h"
+#include "core/RCUReader.h"
 
 // windows.h: SetThreadAffinityMask 用（applyMmcssPriority 経由）
 #include <windows.h>
@@ -165,6 +166,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // P0-2: 読取入口を単一の callback authority view へ収束（R21 gate: readAudioRuntimeView）
+    // V-11 candidate (3): EBR protection for published-world read.
+    const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
     auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
