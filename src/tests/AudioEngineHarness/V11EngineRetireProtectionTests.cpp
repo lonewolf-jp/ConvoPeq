@@ -846,22 +846,33 @@ static bool checkF1bTerminalRetainsDeferred()
                      callsAfterFirst);
         ok = false;
     }
-    if (residentAfterFirst != 1)
+    // E (2026-10-25): Deferred means the callee retained ownership -> Terminal must DROP
+    // the entry (no double ownership, no second call from Terminal).
+    if (residentAfterFirst != 0)
     {
-        std::fprintf(stderr, "[F1-b-T] FAIL: Deferred entry was not retained (count=%zu, want 1)\n",
+        std::fprintf(stderr,
+                     "[F1-b-T] FAIL: Deferred entry kept in Terminal (count=%zu, want 0)\n",
                      residentAfterFirst);
+        ok = false;
+    }
+    if (DeferredPublicationTestAccess::terminalOwnershipTransferredCount(e) != 1)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-T] FAIL: ownership transfer not recorded (%llu)\n",
+                     (unsigned long long)DeferredPublicationTestAccess::
+                         terminalOwnershipTransferredCount(e));
         ok = false;
     }
     if (residentAfterSecond != 0)
     {
-        std::fprintf(stderr, "[F1-b-T] FAIL: entry still deferred after retry (count=%zu)\n",
+        std::fprintf(stderr, "[F1-b-T] FAIL: entry reappeared after a second drain (%zu)\n",
                      residentAfterSecond);
         ok = false;
     }
-    if (callsAfterSecond != 2)
+    if (callsAfterSecond != 1)
     {
         std::fprintf(stderr,
-                     "[F1-b-T] FAIL: retry count=%d (expected exactly 2 total: 1 defer + 1 destroy)\n",
+                     "[F1-b-T] FAIL: Terminal called the deleter again (calls=%d, want 1)\n",
                      callsAfterSecond);
         ok = false;
     }
@@ -1017,17 +1028,26 @@ static bool checkF1bDrainAllDoesNotForceFree()
     const auto after = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
     const auto deferred = DeferredPublicationTestAccess::terminalDeferredResidentCount(e);
 
-    if (after != 1)
+    // E (2026-10-25): Deferred transfers ownership to the callee, so Terminal must hold
+    // neither the retryable entry nor a "deferred" marker after the call.
+    if (after != 0)
     {
         std::fprintf(stderr,
-                     "[F1-b-S] FAIL: drainAll dropped the entry (count=%zu, want 1)\n", after);
+                     "[F1-b-S] FAIL: drainAll retained a transferred entry (count=%zu, want 0)\n",
+                     after);
         ok = false;
     }
-    if (deferred != 1)
+    if (deferred != 0)
     {
         std::fprintf(stderr,
-                     "[F1-b-S] FAIL: unfinished state not observable (deferred=%zu, want 1)\n",
+                     "[F1-b-S] FAIL: Terminal still reports the entry as deferred (%zu)\n",
                      deferred);
+        ok = false;
+    }
+    if (DeferredPublicationTestAccess::terminalOwnershipTransferredCount(e) != 1)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: ownership transfer not recorded (%llu)\n",
+                     (unsigned long long)DeferredPublicationTestAccess::terminalOwnershipTransferredCount(e));
         ok = false;
     }
     if (g_f1bShutdownCalls < 1)
@@ -1363,6 +1383,346 @@ static bool checkF1bProductionRetireUnderPin()
     return ok;
 }
 
+
+//==============================================================================
+// F-2 (2026-10-25): destroyQuarantineSlot() must honour the pin contract.
+//
+//   A DSPHandlePin releases by SLOT INDEX only (DSPHandlePin::release ->
+//   releasePinSlot(slot), no generation check). If the quarantine cleanup recycled the slot
+//   while a pin was alive, the old pin's release would decrement the pin counter of the NEXT
+//   generation in that slot, silently removing that DSP's protection -> freed while pinned.
+//
+//   Contract under test:
+//     (1) pin held   -> destroy returns false, state stays Quarantined, instance retained,
+//                       slot NOT returned to the free list, engine counter > 0
+//     (2) pin held   -> a generation mismatch must also change nothing
+//     (3) pin gone   -> retry destroys exactly once, slot becomes reusable with gen+1
+//     (4) second call after success -> false (no double destroy / no double free-list push)
+//==============================================================================
+static bool checkF2QuarantineDestroyHonoursPins()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F2] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // Move the slot to Quarantined (the lifecycle state the cleanup targets).
+    DeferredPublicationTestAccess::quarantineSlotForTest(e, handle.slot);
+
+    // A slot occupied by another live DSP, allocated BEFORE the destroy attempt, so the
+    // free-list order is known: after destroy(handle.slot) succeeds, the next registration
+    // must pop handle.slot (LIFO).
+    auto other = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* otherRaw = other.release();
+    auto otherHandle = e.registerDSPHandleForRuntime(otherRaw);
+    if (otherHandle.isNull())
+    {
+        std::fprintf(stderr, "[F2] FAIL: second registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(otherRaw);
+        harness.stop();
+        return false;
+    }
+
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F2] FAIL: could not pin a quarantined slot\n");
+            harness.stop();
+            return false;
+        }
+
+        const auto beforeCount = DeferredPublicationTestAccess::deferredQuarantineCountForTest(e);
+
+        if (DeferredPublicationTestAccess::destroyQuarantineSlotForTest(e, handle.slot, 0))
+        {
+            std::fprintf(stderr, "[F2] FAIL: destroy succeeded while pinned\n");
+            ok = false;
+        }
+        const auto afterCount = DeferredPublicationTestAccess::deferredQuarantineCountForTest(e);
+        if (afterCount <= beforeCount)
+        {
+            std::fprintf(stderr, "[F2] FAIL: deferral was not recorded\n");
+            ok = false;
+        }
+
+        // A stale generation must be rejected with no side effect on the deferral state.
+        if (DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
+                e, handle.slot, handle.generation + 999))
+        {
+            std::fprintf(stderr, "[F2] FAIL: stale generation was accepted\n");
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::deferredQuarantineCountForTest(e) != afterCount)
+        {
+            std::fprintf(stderr, "[F2] FAIL: stale-generation call changed the deferral state\n");
+            ok = false;
+        }
+
+        // While pinned the slot must NOT be recycled: another registration must not take it.
+        {
+            auto probe = convo::aligned_make_unique<AudioEngine::DSPCore>();
+            auto* probeRaw = probe.release();
+            const auto probeHandle = e.registerDSPHandleForRuntime(probeRaw);
+            if (!probeHandle.isNull() && probeHandle.slot == handle.slot)
+            {
+                std::fprintf(stderr,
+                             "[F2] FAIL: slot %u was recycled while pinned (new gen %llu)\n",
+                             (unsigned)handle.slot,
+                             (unsigned long long)probeHandle.generation);
+                ok = false;
+            }
+            if (!probeHandle.isNull())
+            {
+                DeferredPublicationTestAccess::quarantineSlotForTest(e, probeHandle.slot);
+                (void)DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
+                    e, probeHandle.slot, 0);
+            }
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(probeRaw);
+        }
+    }
+
+    // Pin released -> the retry must complete the destruction exactly once.
+    std::size_t destroyed = 0;
+    for (int i = 0; i < 100; ++i)
+    {
+        destroyed = DeferredPublicationTestAccess::retryDeferredQuarantineForTest(e);
+        if (destroyed > 0)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (destroyed == 0)
+    {
+        std::fprintf(stderr, "[F2] FAIL: deferred quarantine destroy never completed\n");
+        ok = false;
+    }
+    if (DeferredPublicationTestAccess::deferredQuarantineCountForTest(e) != 0)
+    {
+        std::fprintf(stderr, "[F2] FAIL: deferral counter not cleared (%u)\n",
+                     (unsigned)DeferredPublicationTestAccess::deferredQuarantineCountForTest(e));
+        ok = false;
+    }
+
+    // Second call after success must be a no-op (no double free-list push).
+    if (DeferredPublicationTestAccess::destroyQuarantineSlotForTest(e, handle.slot, 0))
+    {
+        std::fprintf(stderr, "[F2] FAIL: second destroy succeeded (double destroy)\n");
+        ok = false;
+    }
+
+    // The slot must now be reusable with the generation advanced by exactly one.
+    {
+        auto reused = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* reusedRaw = reused.release();
+        const auto reusedHandle = e.registerDSPHandleForRuntime(reusedRaw);
+        if (reusedHandle.isNull())
+        {
+            std::fprintf(stderr, "[F2] FAIL: slot was not reusable after destroy\n");
+            ok = false;
+        }
+        else if (reusedHandle.slot != handle.slot
+                 || reusedHandle.generation != handle.generation + 1)
+        {
+            std::fprintf(stderr,
+                         "[F2] FAIL: expected slot %u gen %llu, got slot %u gen %llu\n",
+                         (unsigned)handle.slot,
+                         (unsigned long long)(handle.generation + 1),
+                         (unsigned)reusedHandle.slot,
+                         (unsigned long long)reusedHandle.generation);
+            ok = false;
+        }
+        DSPLifetimeManager mgr(e);
+        mgr.retire(reusedRaw);
+        e.tryReclaimResources();
+    }
+
+    {
+        DSPLifetimeManager mgr(e);
+        mgr.retire(otherRaw);
+        e.tryReclaimResources();
+    }
+
+    harness.stop();
+    std::printf("[F2] quarantine destroy honours pins: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// G (2026-10-25): reclaimNormal() must be reachable.
+//
+//   Before the fix it compared router.currentEpoch() with minReaderEpoch(); because
+//   minReaderEpoch() <= currentEpoch() always, the deferred branch was unconditional and
+//   handleRuntime.reclaim() could never run (the pending identity list only grew).
+//
+//   Contract under test:
+//     (a) no reader      -> after the epoch advances, the pending identity is reclaimed
+//     (b) reader inside  -> while it holds its guard the identity stays pending (it can
+//         still observe the retired slot); after it leaves and the epoch advances the
+//         identity is reclaimed
+//   The observable is pendingReclaimCount() / reclaimInFlightCount(), not "no crash".
+//==============================================================================
+static bool checkGReclaimNormalUsesRetireEpoch()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[G] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+    DSPLifetimeManager mgr(e);
+
+    auto driveUntilReclaimed = [&e](int maxIterations) -> bool
+    {
+        for (int i = 0; i < maxIterations; ++i)
+        {
+            (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+            DeferredPublicationTestAccess::drainDeferredRetireQueuesForTest(e);
+            if (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+                return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        }
+        return DeferredPublicationTestAccess::pendingReclaimCount(e) == 0;
+    };
+
+    // ---- (a) reachability: the normal reclaim path must complete ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        mgr.retire(raw);
+        if (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+        {
+            std::fprintf(stderr, "[G] FAIL(a): retire did not enqueue a pending reclaim\n");
+            ok = false;
+        }
+        else if (!driveUntilReclaimed(400))
+        {
+            std::fprintf(stderr,
+                         "[G] FAIL(a): reclaim never completed (pending=%zu, cur=%llu, min=%llu)"
+                         " -- the epoch gate is still tautological\n",
+                         DeferredPublicationTestAccess::pendingReclaimCount(e),
+                         (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
+                         (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e));
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::reclaimInFlightCount(e) != 0)
+        {
+            std::fprintf(stderr, "[G] FAIL(a): reclaimInFlightCount not balanced (%llu)\n",
+                         (unsigned long long)DeferredPublicationTestAccess::reclaimInFlightCount(e));
+            ok = false;
+        }
+    }
+
+    // ---- (b) safety property: a reclaim may only complete once minReaderEpoch has passed
+    //          the RETIREMENT epoch. The engine's own audio reader can move between blocks,
+    //          so the assertion is on the property, not on "it must stay pending forever".
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        convo::RCUReader reader(e.getRetireRouter());
+        {
+            convo::RCUReaderGuard guard(reader);
+            if (!guard.rootEnterSucceeded())
+            {
+                std::fprintf(stderr, "[G] FAIL(b): reader could not enter\n");
+                harness.stop();
+                return false;
+            }
+
+            mgr.retire(raw);
+            const auto retireEpoch = DeferredPublicationTestAccess::pendingRetireEpochForTest(e);
+
+            for (int i = 0; i < 10; ++i)
+            {
+                (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+                DeferredPublicationTestAccess::drainDeferredRetireQueuesForTest(e);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+
+            // The pending list is SWAPPED OUT while a retry is in flight, so an instantaneous
+            // pendingReclaimCount()==0 is NOT proof that the identity was reclaimed. Require
+            // two consecutive "this handle is not pending" reads, separated by a delay.
+            bool stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
+            if (!stillPending)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
+            }
+
+            if (stillPending)
+            {
+                std::printf("[G] observe: identity retained while minReaderEpoch <= retireEpoch"
+                            " (retire=%llu min=%llu)\n",
+                            (unsigned long long)retireEpoch,
+                            (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e));
+            }
+            else
+            {
+                const auto minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+                if (static_cast<std::int64_t>(minEpoch - retireEpoch) <= 0)
+                {
+                    std::fprintf(stderr,
+                                 "[G] FAIL(b): reclaimed while minReaderEpoch (%llu) had not"
+                                 " passed the retire epoch (%llu)\n",
+                                 (unsigned long long)minEpoch,
+                                 (unsigned long long)retireEpoch);
+                    ok = false;
+                }
+                else
+                {
+                    std::printf("[G] note: reclaimed inside the guard window only after"
+                                " minReaderEpoch passed the retire epoch\n");
+                }
+            }
+        }
+
+        if (!driveUntilReclaimed(400))
+        {
+            std::fprintf(stderr,
+                         "[G] FAIL(b): reclaim did not complete after the reader left "
+                         "(pending=%zu)\n",
+                         DeferredPublicationTestAccess::pendingReclaimCount(e));
+            ok = false;
+        }
+    }
+
+    harness.stop();
+    std::printf("[G] normal reclaim uses the retirement epoch: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
 } // namespace
 
 int runV11EngineRetireProtectionTests()
@@ -1426,6 +1786,16 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1bProductionRetireUnderPin())
     {
         std::fprintf(stderr, "FAIL: checkF1bProductionRetireUnderPin (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF2QuarantineDestroyHonoursPins())
+    {
+        std::fprintf(stderr, "FAIL: checkF2QuarantineDestroyHonoursPins (F2)\n");
+        hdOk = false;
+    }
+    if (!checkGReclaimNormalUsesRetireEpoch())
+    {
+        std::fprintf(stderr, "FAIL: checkGReclaimNormalUsesRetireEpoch (G)\n");
         hdOk = false;
     }
     if (!checkF1bAuditNormalTickCollects())

@@ -118,6 +118,7 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
     //     - retryable を持たない従来エントリ: これまでどおり取り出して deleter を実行する。
     std::vector<Entry> legacyPending;
     std::size_t destroyedRetryable = 0;
+    std::size_t transferredRetryable = 0;   // E: Deferred -> the callee owns it
 
     // --- 1) epoch-safe な retryable 候補を集める（ロック内・呼び出しはしない）---
     std::vector<std::size_t> candidates;
@@ -170,7 +171,13 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
                 ++destroyedRetryable;
             } else {
                 // ★ 所有権を保持: エントリは残し、試行回数だけ増やす。
-                ++entries_[idx].deferredAttempts;
+                // E (2026-10-25): Deferred = the callee retained ownership (the engine
+                // retryable registers the pointer in its own retry list). Dropping the
+                // entry here is what prevents the same pointer from being owned twice.
+                entries_[idx] = Entry{};
+                ++transferredRetryable;
+                convo::fetchAddAtomic(ownershipTransferredCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
                 convo::fetchAddAtomic(deferredAttemptCount_, std::uint64_t{1},
                                       std::memory_order_acq_rel);
             }
@@ -178,7 +185,7 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
     }
 
     // --- 3) 消費したスロットを詰める ---
-    if (destroyedRetryable > 0) {
+    if (destroyedRetryable > 0 || transferredRetryable > 0) {
         std::lock_guard<std::mutex> lock(mtx_);
         std::size_t w = 0;
         for (std::size_t r = 0; r < entries_.size(); ++r) {
@@ -191,7 +198,8 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
     }
 
     // --- 4) residentAtomic_ は「未回収のエントリ数」。Deferred は減らさない（RT-3）---
-    const std::size_t consumed = legacyPending.size() + destroyedRetryable;
+    const std::size_t consumed = legacyPending.size() + destroyedRetryable
+        + transferredRetryable;
     if (consumed > 0)
         convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(consumed),
                               std::memory_order_release);
@@ -246,10 +254,13 @@ void TerminalReclaimAuthority::drainAll() noexcept
             }
             else
             {
-                ++e.deferredAttempts;
-                convo::fetchAddAtomic(deferredAttemptCount_, std::uint64_t{1},
+                // E (2026-10-25): Deferred = the callee retained ownership (the engine
+                // retry list). drainAll must NOT keep the entry either, otherwise the same
+                // pointer stays owned by two authorities across shutdown.
+                convo::fetchAddAtomic(ownershipTransferredCount_, std::uint64_t{1},
                                       std::memory_order_acq_rel);
-                kept.push_back(e);
+                convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
+                                      std::memory_order_release);
             }
             continue;
         }

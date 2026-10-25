@@ -81,6 +81,11 @@ public:
                DeletionEntryType type, const char* reason) noexcept;
 
     // ★ F1'-b: 再試行可能な deleter 版。所有権は常に移転する。
+    // OWNERSHIP CONTRACT (E, 2026-10-25):
+    //   Destroyed -> the callee freed it; Terminal drops the entry.
+    //   Deferred  -> the CALLEE retained ownership (e.g. the engine retry list).
+    //                Terminal MUST drop the entry: keeping it would leave the same
+    //                pointer owned by two authorities (double free / UAF).
     bool storeRetryable(void* ptr, RetryableDeleter retryable, uint64_t epoch,
                         DeletionEntryType type, const char* reason) noexcept;
 
@@ -104,6 +109,13 @@ public:
     [[nodiscard]] std::size_t deferredResidentCount() const noexcept;
     //   retryable として保持されているエントリ総数（延期前も含む = 所有権を保持している数）。
     [[nodiscard]] std::size_t retryableResidentCount() const noexcept;
+
+    // E (2026-10-25): entries whose ownership was transferred to the callee because the
+    // retryable deleter returned Deferred (observable residue at the Terminal level).
+    [[nodiscard]] std::uint64_t ownershipTransferredCount() const noexcept
+    {
+        return convo::consumeAtomic(ownershipTransferredCount_, std::memory_order_acquire);
+    }
     //   累積の延期回数（診断用）。
     [[nodiscard]] std::uint64_t deferredAttemptCount() const noexcept
     {
@@ -169,6 +181,8 @@ private:
     std::atomic<uint32_t> residentAtomic_{0};
     // ★ F1'-b: 累積延期回数（観測用）
     std::atomic<std::uint64_t> deferredAttemptCount_{0};
+    // E (2026-10-25): entries whose ownership moved to the callee (Deferred).
+    std::atomic<std::uint64_t> ownershipTransferredCount_{0};
 };
 
 /**
@@ -379,6 +393,12 @@ public:
     [[nodiscard]] std::size_t terminalRetryableResidentCount() const noexcept
     {
         return m_terminalReclaim.retryableResidentCount();
+    }
+
+    // E (2026-10-25): entries whose ownership was transferred to the callee (Deferred).
+    [[nodiscard]] std::uint64_t terminalOwnershipTransferredCount() const noexcept
+    {
+        return m_terminalReclaim.ownershipTransferredCount();
     }
 
     // ★ P-4: TerminalReclaimAuthority 滞留件数

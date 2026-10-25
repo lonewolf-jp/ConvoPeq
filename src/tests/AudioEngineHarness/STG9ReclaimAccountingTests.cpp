@@ -268,6 +268,26 @@ static bool checkT02DestroyDropReleasesCounter()
 //   - INV-2: retry のみの drain 前後で (pending, counter) が不変であること。
 //   - drain-completion case: terminal resolution 後の追加 drain が fixed point であること。
 //==============================================================================
+
+// G (2026-10-26): settle the deferred-reclaim bookkeeping to a FIXED POINT before a test
+// captures its baseline. Before the G fix reclaimNormal() could never succeed, so a baseline
+// captured right after h.stop() was implicitly "already settled"; now a real retirement left
+// over by the harness teardown IS reclaimable, and a later drain would change (pending,
+// counter) for reasons unrelated to the test-induced identity.
+static void stg9SettleToFixedPoint(AudioEngine& e) noexcept
+{
+    std::size_t previous = static_cast<std::size_t>(-1);
+    for (int i = 0; i < 16; ++i)
+    {
+        const auto before = stg9Pending(e);
+        if (before == previous)
+            break;                       // two consecutive stable reads
+        previous = before;
+        (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+        e.drainDeferredRetireQueues(true);
+    }
+}
+
 static bool checkT03BaselineReturnOracle()
 {
     AudioEngineHarness h;
@@ -278,6 +298,8 @@ static bool checkT03BaselineReturnOracle()
     }
     h.stop();
     AudioEngine& e = h.engine();
+
+    stg9SettleToFixedPoint(e);           // G: drain the harness's own leftovers first
 
     const auto p0 = stg9Pending(e);
     const auto c0 = stg9Counter(e);
@@ -367,9 +389,11 @@ static bool checkT03BaselineReturnOracle()
 //   retry が新しい +1 として蓄積してはならない。
 //
 //   注: reclaimNormal の success パス（true 戻り）は単一スレッドの engine level では
-//   決定論的に到達不能（retireEpoch == currentEpoch >= minReaderEpoch が構造的に成立し、
-//   成功には Coordinator.cpp:698/699 の 2 連続 load 間での epoch 前進が必要）。
-//   success 時の -1 は既存 unit test testInv3_1 / testInv3_2（TestEpochProvider による
+//   NOTE (G, 2026-10-26): the success path of reclaimNormal() is REACHABLE as of the G fix
+//   (the safety predicate now compares the RETIREMENT epoch, not currentEpoch()). This matrix
+//   therefore settles the bookkeeping to a fixed point before capturing its baseline; a retry
+//   drain is still expected to be a no-op because the test-induced identity is retired at the
+//   current epoch, which is not older than minReaderEpoch without further publication.
 //   決定論的 epoch 制御・counter 1→0 を assert）が担保する。
 //   同様に tryShutdownQuiescentReclaim の teardown 後直接呼びは Permit が構造的に stale
 //   となる（fresh proof{epoch=7} 対 bound{epoch=5} を実測 — G19/T10 ABA 防止の設計動作）。
@@ -386,6 +410,8 @@ static bool checkT04Inv1Inv2PropertyMatrix()
     }
     h.stop();
     AudioEngine& e = h.engine();
+
+    stg9SettleToFixedPoint(e);           // G: drain the harness's own leftovers first
 
     const auto p0 = stg9Pending(e);
     const auto c0 = stg9Counter(e);

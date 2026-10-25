@@ -147,6 +147,40 @@ public:
     {
         return e.m_retireRouter->residentCountAtomic();
     }
+    // F-2 (2026-10-25): quarantine-slot destruction honours the pin contract.
+    static bool destroyQuarantineSlotForTest(AudioEngine& e, std::uint32_t slot,
+                                             std::uint64_t generation) noexcept
+    {
+        return e.dspHandleRuntime_.destroyQuarantineSlot(slot, generation);
+    }
+    static void quarantineSlotForTest(AudioEngine& e, std::uint32_t slot) noexcept
+    {
+        e.dspHandleRuntime_.quarantineSlot(slot);
+    }
+    static std::size_t retryDeferredQuarantineForTest(AudioEngine& e) noexcept
+    {
+        return e.dspHandleRuntime_.retryDeferredQuarantineDestroy();
+    }
+    static std::uint32_t deferredQuarantineCountForTest(AudioEngine& e) noexcept
+    {
+        return e.deferredQuarantineDestroyCount();
+    }
+    // G (2026-10-25): drive the deferred-reclaim queue deterministically.
+    static void drainDeferredRetireQueuesForTest(AudioEngine& e) noexcept
+    {
+        e.drainDeferredRetireQueues(true);
+    }
+
+    // G (2026-10-26): retirement epoch of the oldest pending reclaim identity. The safety
+    // predicate is isOlder(retireEpoch, minReaderEpoch); exposing it lets a test assert the
+    // PROPERTY (reclaim only after min passed the retire epoch) instead of assuming that no
+    // other reader exists in the process.
+    static std::uint64_t pendingRetireEpochForTest(AudioEngine& e) noexcept
+    {
+        std::lock_guard<std::mutex> lock(e.pendingReclaimHandlesMutex_);
+        return e.pendingReclaimHandles_.empty()
+            ? 0 : e.pendingReclaimHandles_.front().retireSequence;
+    }
     static std::size_t retryDeferredDestroys(AudioEngine& e) noexcept
     {
         return e.retryDeferredDestroys();
@@ -168,6 +202,11 @@ public:
     static std::size_t terminalRetryableResidentCount(AudioEngine& e) noexcept
     {
         return e.m_retireRouter->terminalRetryableResidentCount();
+    }
+    // E (2026-10-25): Deferred ownership transfers to the callee.
+    static std::uint64_t terminalOwnershipTransferredCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalOwnershipTransferredCount();
     }
 
     // F1'-b: TerminalReclaimAuthority の drain をテストから駆動する
