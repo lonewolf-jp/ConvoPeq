@@ -3952,7 +3952,12 @@ public:
 private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
-#if defined(CONVOPEQ_UNIT_TESTS)
+    // ODR (2026-10-25): unconditional on purpose. This block used to be gated by
+    // `#if defined(CONVOPEQ_UNIT_TESTS)` and contained a DATA MEMBER, so translation
+    // units compiled with and without the macro disagreed about sizeof(AudioEngine)
+    // inside one program (silent ODR/layout violation; the linker cannot catch it).
+    // Friends cost nothing and the flag is one byte, so both are always present.
+
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
     // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
@@ -3973,7 +3978,6 @@ private:
     {
         return convo::consumeAtomic(testFadingRuntimePresent_, std::memory_order_acquire);
     }
-#endif
     friend class convo::isr::PublicationExecutor;
     friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
@@ -4754,7 +4758,8 @@ inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
     if (handle.isNull())
         return;
     const auto retireEpoch = m_retireRouter->currentEpoch();
-    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter,
+                                                  retireEpoch))
     {
         // deferred（epoch unsafe）通知。deferred 1 通知 = pending entry 1 件 =
         // reclaimInFlightCount_ +1 1 回（Coordinator.cpp:705 が唯一の +1 を持つため 1:1）。
@@ -5197,6 +5202,11 @@ public:
     [[nodiscard]] std::uint64_t deferredDestroyCount() const noexcept
     {
         return convo::consumeAtomic(deferredDestroyCount_, std::memory_order_acquire);
+    }
+    // F-2 (2026-10-25): quarantine slots whose destruction is deferred by a live pin.
+    [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept
+    {
+        return dspHandleRuntime_.deferredQuarantineDestroyCount();
     }
     mutable std::mutex deferredDestroyMutex_;
     std::vector<void*> deferredDestroy_;

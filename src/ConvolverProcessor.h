@@ -653,7 +653,9 @@ private:
     static int measureIrPeakLatencySamples(const juce::AudioBuffer<double>& ir,
                                            int targetLength) noexcept;
 
-#if defined(CONVOPEQ_UNIT_TESTS)
+    // ODR (2026-10-26): unconditional. Gating these friend declarations on
+    // CONVOPEQ_UNIT_TESTS made the class definition differ between the engine TUs
+    // (macro defined) and the plugin TUs (macro absent). Friends cost no storage.
     // ★ H-02 T4 テストシーム: private helper 直接検証用（本番 API を増やさない）。
     //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
     //   Production ビルド（CONVOPEQ_UNIT_TESTS 未定義）では宣言ごと存在せずバイナリ無変更。
@@ -664,7 +666,6 @@ private:
     // ★ M-02 (T-M02-1..5) テストシーム: non-finite scrub counter 読み取りと reporter 駆動専用
     //   （本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp。production 影响なし）
     friend struct M02NonFiniteTestAccess;
-#endif
 
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
