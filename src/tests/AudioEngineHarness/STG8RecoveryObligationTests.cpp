@@ -341,6 +341,11 @@ static bool checkSTG82bSameObligationNotResolved()
     //   fire inside the window (R8; reproduced with stall/clear evidence 2026-10-24).
     //   10 s keeps the same semantics - the same obligation is retained across a long
     //   window and is not terminalized - with ~19 s of margin against both watchdogs.
+    // The stall watchdog counts from the last committed publication progress, which
+    // precedes T0 by however long the setup took (cold link: tens of seconds). Re-baseline
+    // it here - the same call prepareToPlay() uses - so the 10 s window keeps the full ~30 s
+    // margin and cannot be cut short by the setup gap.
+    orch.resetProgressObservation();
     stg8SleepPump(10000);
     if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
     {
@@ -618,6 +623,126 @@ static bool checkSTG8ClearTerminalReasonIsStale()
 //   期待: redriveCount 増加 && L==0 && sequence 前進。
 //   修正前は redrive 0 件・L==1 のまま停滞し FAIL する。
 //==============================================================================
+//==============================================================================
+// R8-12 (P1): the real 30 s publication-stall watchdog, driven by the wall clock.
+//   R8-9 ages m_lastProgressTimestampUs (synthetic clock) so the suite stays fast, and
+//   R8-8 pushes the health event directly. Neither proves that the *production* threshold
+//   (kPublicationStallThresholdUs == 30 s) is reached by real elapsed time and that the
+//   engine's own timer tick then drives requestDeferredClear -> RebuildThread drain ->
+//   clearDeferredForShutdown. This test waits the full threshold out in real time.
+//   PASS: stalled first observed at >= 30 s real time; obligation terminalized (L=0);
+//         deferred slot drained; reason is NOT ShutdownDiscarded (engine still running).
+//==============================================================================
+static bool checkR8RealTimeStallDetectorTerminalizes()
+{
+    Stg8Trace trace("checkR8RealTimeStallDetectorTerminalizes");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-12] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Real time only: no ageProgress(), no manufactured health event. Baseline the progress
+    // observation first (the call prepareToPlay() uses) so the 30 s threshold is measured
+    // from T0 rather than from the last committed publication before the setup.
+    orch.resetProgressObservation();
+    const bool stalledAtBaseline = orch.isPublicationStalled();
+    const auto stallStart = std::chrono::steady_clock::now();
+    const bool stalled = stg8WaitUntil(90.0, [&] { return orch.isPublicationStalled(); });
+    const double stalledAfterSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - stallStart).count();
+
+    if (!stalled)
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: detector never reported stalled (waited %.1f s)\n",
+                     stalledAfterSec);
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+        h.stop();
+        return false;
+    }
+
+    if (stalledAtBaseline)
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: detector already latched right after the baseline\n");
+        ok = false;
+    }
+
+    // The health monitor evaluates on its own ~1 s tick, so the report lands at or just after
+    // the 30 s threshold. A 25 s floor still catches a detector that fires materially early
+    // (a 10 s threshold, or a clock that was not baselined) without policing tick granularity.
+    if (stalledAfterSec < 25.0)
+    {
+        std::fprintf(stderr,
+                     "[R8-12] FAIL: stalled reported after %.2f s, far before the 30 s threshold\n",
+                     stalledAfterSec);
+        ok = false;
+    }
+
+    if (!stg8WaitUntil(60.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr,
+                     "[R8-12] FAIL: real-time stall clear did not terminalize "
+                     "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-12] FAIL: mid-run clear counted as ShutdownDiscarded (%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+
+    if (!ok)
+        return false;
+
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-12 real-time 30 s stall detector -> StaleSuperseded, L=0, "
+                "stalledAfter=%.2fs)\n", stalledAfterSec);
+    return true;
+}
+
 static bool checkSTG83PressureSignalRedrives()
 {
     Stg8Trace trace("checkSTG83PressureSignalRedrives");
@@ -1428,6 +1553,12 @@ int runSTG8RecoveryObligationTests()
         stg8ok = false;
     }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)
+    // R8-12: the real 30 s stall watchdog on the wall clock (no synthetic aging).
+    if (!checkR8RealTimeStallDetectorTerminalizes())
+    {
+        std::fprintf(stderr, "FAIL: checkR8RealTimeStallDetectorTerminalizes\n");
+        stg8ok = false;
+    }
     if (!checkSTG83PressureSignalRedrives())
     {
         std::fprintf(stderr, "FAIL: checkSTG83PressureSignalRedrives\n");
