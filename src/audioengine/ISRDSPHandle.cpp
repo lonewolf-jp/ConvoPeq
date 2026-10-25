@@ -474,28 +474,28 @@ bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
 }
 
 // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
-void DSPHandleRuntime::destroyQuarantineSlot(
+bool DSPHandleRuntime::destroyQuarantineSlot(
     uint32_t slot, uint64_t expectedGeneration) noexcept
 {
     if (slot >= MAX_DSP_SLOTS)
-        return;
+        return false;
 
-    // generation 保護
+    // generation check
     if (expectedGeneration != 0) {
         const auto currentGen = convo::consumeAtomic(
             registry_[slot].generation, std::memory_order_acquire);
         if (currentGen != expectedGeneration)
-            return;
+            return false;
     }
 
-    // state==Quarantined を表明
+    // state == Quarantined is required
     const auto prevState = convo::consumeAtomic(
         registry_[slot].state, std::memory_order_acquire);
     assert(prevState == DSPState::Quarantined);
     if (prevState != DSPState::Quarantined)
-        return;
+        return false;
 
-    // Phase 1: 状態チェック — active/fading/crossfade に関与していないか
+    // Phase 1: state check - not active / fading / crossfading
     const bool activeHandleMatch =
         (convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire).slot == slot);
     const bool fadingHandleMatch =
@@ -503,9 +503,27 @@ void DSPHandleRuntime::destroyQuarantineSlot(
     const bool inCrossfade = isSlotInCrossfade(slot);
 
     if (activeHandleMatch || fadingHandleMatch || inCrossfade)
-        return;
+        return false;
 
-    // Phase 1: DestroyPending マーク（CAS で安全に遷移）
+    // F-2 (2026-10-25): pin gate.
+    //   A DSPHandlePin keeps `instance_` and releases it by SLOT INDEX only
+    //   (DSPHandlePin::release -> releasePinSlot(slot), which has no generation check).
+    //   Recycling this slot while a pin is alive would let the old pin decrement the pin
+    //   counter of the NEXT generation allocated in the same slot, silently removing that
+    //   DSP's protection and freeing it while pinned. So: close the gate, and while any pin
+    //   is still alive change NOTHING (state stays Quarantined, instance and slot retained).
+    //   The engine retries from its reclaim tick / shutdown drain once the pins drain.
+    const auto pinnedGeneration = convo::consumeAtomic(
+        registry_[slot].generation, std::memory_order_acquire);
+    (void)closePinsForDestroy(slot, pinnedGeneration);
+    if (pinnedCount(slot) != 0)
+    {
+        convo::fetchAddAtomic(deferredQuarantineDestroy_, std::uint32_t{1},
+                              std::memory_order_acq_rel);
+        return false;   // deferred: nothing was modified
+    }
+
+    // Phase 1: mark DestroyPending (CAS, safe transition)
     auto expected = convo::consumeAtomic(
         registry_[slot].state, std::memory_order_acquire);
     while (expected == DSPState::Quarantined) {
@@ -516,18 +534,53 @@ void DSPHandleRuntime::destroyQuarantineSlot(
             break;
     }
     if (expected != DSPState::Quarantined)
-        return;
+        return false;
 
-    // Phase 2: instance 解放
+    // Phase 2: clear instance
     registry_[slot].instance.store(nullptr, std::memory_order_release);
     convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
                          std::memory_order_release);
-    // ★ 監査指摘 (work88): Reclaimed 化した quarantine slot を free list へ戻す（スロットリーク防止）。
-    //   destroyQuarantineSlot は state==Quarantined を確認済みのため二重 push は起きない
-    //   （reclaim() 側の state ガードとも整合）。
+    // work88: return the reclaimed quarantine slot to the free list (prevents slot leaks).
+    //   Double push cannot happen: state==Quarantined was verified above and reclaim()
+    //   carries the same state guard.
     std::lock_guard<std::mutex> lock(freeListMutex_);
     if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = slot;
+    return true;
+}
+
+// F-2 (2026-10-25): retry quarantine-slot destruction after the pins drain.
+//   Owner: the slot (kept in state Quarantined) / Retry subject: the engine's reclaim tick
+//   (AudioEngine::tryReclaimResources) and the shutdown cleanup.
+std::size_t DSPHandleRuntime::retryDeferredQuarantineDestroy() noexcept
+{
+    if (convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire) == 0)
+        return 0;
+
+    std::size_t destroyed = 0;
+    std::uint32_t stillDeferred = 0;
+
+    for (uint32_t slot = 1; slot < MAX_DSP_SLOTS; ++slot)
+    {
+        if (convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire)
+            != DSPState::Quarantined)
+            continue;
+        if (registry_[slot].instance.load(std::memory_order_acquire) == nullptr)
+            continue;
+
+        if (destroyQuarantineSlot(slot, 0))
+            ++destroyed;
+        else if (pinnedCount(slot) != 0)
+            ++stillDeferred;
+    }
+
+    convo::publishAtomic(deferredQuarantineDestroy_, stillDeferred, std::memory_order_release);
+    return destroyed;
+}
+
+std::uint32_t DSPHandleRuntime::deferredQuarantineDestroyCount() const noexcept
+{
+    return convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire);
 }
 
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept

@@ -277,7 +277,19 @@ public:
     bool isSlotInCrossfade(uint32_t slot) const noexcept;
 
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
-    void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
+    // F-2 (2026-10-25): pin contract. true = destroyed (slot returned to the free list),
+    // false = not done (pin held / not eligible / state mismatch) and NOTHING was changed
+    // (state stays Quarantined, instance and slot ownership retained). Callers must treat
+    // false as "deferred" and retry on a later tick or at shutdown.
+    [[nodiscard]] bool destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
+
+    // F-2 (2026-10-25): retry quarantine-slot destruction after pins drain.
+    //   Owner: the slot (kept in state Quarantined) / Retry subject: AudioEngine's reclaim
+    //   tick (tryReclaimResources) and the shutdown drain.
+    [[nodiscard]] std::size_t retryDeferredQuarantineDestroy() noexcept;
+
+    // Number of quarantine slots whose destruction is deferred (observation only).
+    [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept;
 
     // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
     //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
@@ -325,6 +337,9 @@ private:
     mutable std::mutex freeListMutex_;
     std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
     uint32_t freeSize_ = 0;
+    // F-2 (2026-10-25): non-zero while at least one quarantined slot could not be destroyed
+    // because a pin was still held. Advisory: recomputed by retryDeferredQuarantineDestroy().
+    std::atomic<std::uint32_t> deferredQuarantineDestroy_{0};
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
     //   DSPHandle is a 16-byte POD; its atomic requires atomic 16-byte CAS semantics
     //   (MSVC: lock-pool backend, is_lock_free()==false is accurate; all consumers NonRT).

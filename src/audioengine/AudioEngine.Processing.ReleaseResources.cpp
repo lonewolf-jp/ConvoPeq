@@ -444,6 +444,16 @@ void AudioEngine::releaseResources()
             m_retireRouter->drainAllQuarantineStore();
         }
 
+        // F-2 (2026-10-25): last chance to finish quarantine-slot destruction that was
+        // deferred while a pin was held. Owner: the slot (still Quarantined).
+        {
+            const auto retried = dspHandleRuntime_.retryDeferredQuarantineDestroy();
+            if (retried > 0)
+                diagLog("[F1_C_QUARANTINE_SHUTDOWN] retried="
+                        + juce::String(static_cast<int>(retried))
+                        + " slot(s) destroyed after pin drain");
+        }
+
         const auto residentBefore = dspQuarantineManager_.residentCount();
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="
@@ -455,7 +465,16 @@ void AudioEngine::releaseResources()
                 if (dspQuarantineManager_.destroyForShutdown(slot)) {
                     // 系統①: DSPHandleRegistry の Quarantined→Reclaimed 遷移
                     //   destroyForShutdown が quarantine フラグ確認を済ませているため安全
-                    dspHandleRuntime_.destroyQuarantineSlot(slot, 0);
+                    if (!dspHandleRuntime_.destroyQuarantineSlot(slot, 0))
+                    {
+                        // F-2: a pin is still held at shutdown. Do NOT recycle the slot
+                        // and do NOT free: keep the world lane Quarantined and record the
+                        // residue (leaked, not UAF) instead of forcing the release.
+                        diagLog("[F1_C_QUARANTINE_SHUTDOWN] slot="
+                                + juce::String(static_cast<int>(slot))
+                                + " pinned: slot not recycled (leaked, not UAF)");
+                        continue;
+                    }
                     // 系統③: レーン解放 + quarantineResidentCount--
                     worldAuthority_.lifetime().reclaim(slot);
                 }
