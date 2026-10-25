@@ -108,7 +108,15 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
         return { nullptr, false, true };   // isStale=true so callers can distinguish
     }
 
-    return { reg.instance.load(std::memory_order_acquire), true, false };
+    // ★ F1'-prep (2026-10-25): state を読んでから instance を読む。両方とも acquire だが、
+    //   「state を読んだ直後に destroy が走る」窓は依然として残る（HL-5）。
+    //   ここで instance が null なら（F2' の無効化後）必ず失敗側へ倒す。
+    auto* instance = reg.instance.load(std::memory_order_acquire);
+    if (instance == nullptr) {
+        return { nullptr, false, true };
+    }
+
+    return { instance, true, false };
 }
 
 void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id)

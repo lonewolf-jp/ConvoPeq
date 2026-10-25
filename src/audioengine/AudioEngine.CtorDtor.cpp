@@ -109,15 +109,11 @@ AudioEngine::AudioEngine()
 
 AudioEngine::~AudioEngine()
 {
-    // ★ F2' (2026-10-25): 破棄中の destroyDSPCoreNode が解体途中のメンバへ触らないよう、
-    //   ここで所有者を降りる。teardown の DSPCore は事前に retire 済み（Retired は解決不可）で
-    //   あるため、無効化をスキップしても安全側。
-    {
-        AudioEngine* expected = this;
-        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
-                                                          std::memory_order_acq_rel);
-    }
-
+    // ★ F2' (2026-10-25): 所有者の解除は「DSPCore を解放し終えた後」でなければならない。
+    //   dtor の後半（drainDeferredRetireQueues / drainAllQuarantineStore）も
+    //   destroyDSPCoreNode を呼ぶため、冒頭で解除すると teardown 経由の解放だけ HL-1 が
+    //   効かず、F2' 導入前の状態に戻ってしまう（レビュー指摘 A）。
+    //   解除は本体末尾（§末尾の compare_exchange）で行う。
     diagLog("[DIAG] ~AudioEngine: enter");
     // Shutdown sequence (list.md 12.1.2):
     // 1) stop callbacks/workers, 2) detach published runtime pointers,
@@ -341,6 +337,16 @@ AudioEngine::~AudioEngine()
 
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
+
+    // ★ F2' (2026-10-25): ここで所有者を降りる。これ以降は DSPCore を解放しない
+    //   （最後の解放は上の drain 群で完了している）。dtor 冒頭で降りると teardown 経由の
+    //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
+    {
+        AudioEngine* expected = this;
+        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
+                                                          std::memory_order_acq_rel);
+    }
+
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
 
