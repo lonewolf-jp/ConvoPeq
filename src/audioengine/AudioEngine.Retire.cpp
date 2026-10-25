@@ -34,14 +34,19 @@ namespace
 
 void AudioEngine::tryReclaimResources() noexcept
 {
-    // ★ E-1.9-A: empty-drain suppression — skip if nothing pending
-    if (m_retireRouter->pendingRetireCount() == 0
-        && m_retireRouter->residentCountAtomic() == 0)
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 「何も無ければ何もしない」判定に
+    //   延期リストを含める。延期エントリは D/Q/E/T のどこにも入っていないため、
+    //   これを含めないと早期 return して再試行に永久に到達しない。
+    const bool routerEmpty = (m_retireRouter->pendingRetireCount() == 0
+                              && m_retireRouter->residentCountAtomic() == 0);
+    const bool deferredEmpty = (deferredDestroyResidentAtomic() == 0);
+    if (routerEmpty && deferredEmpty)
         return;
+
     convo::fetchAddAtomic(rtAuxMutable_.runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     m_retireRouter->tryReclaim();
 
-    // ★ F1'-b (2026-10-25): pin 残留で延期された破棄を再試行する。
+    // ★ F1'-b: pin 残留で延期された破棄を再試行する。
     //   pin が解放されていれば、ここで初めて物理破棄が完了する。
     (void)retryDeferredDestroys();
 }
@@ -54,9 +59,12 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     // ★ E-1.9-A: empty-drain suppression — skip drain when nothing is pending.
     //   Lock-free atomic checks only (no mutex on Non-RT path). Shutdown drains
     //   (allowDuringShutdown=true) are never suppressed.
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 延期リストも「保留あり」とみなす。
+    //   これを含めないと、D/Q/E/T が空のとき早期 return して再試行に到達しない。
     if (!allowDuringShutdown
         && m_retireRouter->pendingRetireCount() == 0
-        && m_retireRouter->residentCountAtomic() == 0)
+        && m_retireRouter->residentCountAtomic() == 0
+        && deferredDestroyResidentAtomic() == 0)
         return;
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();

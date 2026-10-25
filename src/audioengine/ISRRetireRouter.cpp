@@ -725,17 +725,29 @@ bool ISRRetireRouter::terminalReclaimRetryable(void* ptr, RetryableDeleter retry
     const bool epochSafe = ISRRetireRouter::isOlder(epoch, minReader);
     const bool isRt = convo::numeric_policy::isAudioThread();
 
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 B）: 所有権の一元化。
+    //   `retryable` が Deferred を返した場合、その実装（destroyDSPCoreNodeRetryable）は
+    //   **自分でエンジンの再試行リストに登録する**。ここでさらに
+    //   storeRetryable() すると同じポインタが 2 箇所に登録され、
+    //   片方が解放した後も他方が残る（= 二重破棄 / UAF）。
+    //
+    //   したがって「Deferred は deleter の所有者に委ねる」を契約とし、
+    //   TerminalReclaimAuthority への格納は epoch が安全でない場合
+    //   （= deleter をまだ呼べない場合）に限る。
     if (epochSafe && !isRt)
     {
         if (retryable(ptr) == DestroyOutcome::Destroyed)
         {
             if (type == DeletionEntryType::World)
                 m_terminalReclaim.recordWorldReclaim();
-            return true;   // 即時破棄完了・格納不要
         }
-        // Deferred → 下の storeRetryable へ（所有権は移転）
+        // Deferred の場合、所有権は retryable の実装（エンジン再試行リスト）が保持する。
+        // ここで再格納しない（二重所有の禁止）。
+        return true;
     }
 
+    // epoch unsafe / RT: deleter を呼べないので、Terminal に預けて後続 drain に委ねる。
+    //   （この経路では retryable はまだ 1 度も呼ばれていないため、所有権は Terminal が持つ。）
     return m_terminalReclaim.storeRetryable(ptr, retryable, epoch, type, reason);
 }
 

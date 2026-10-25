@@ -62,57 +62,54 @@ void AudioEngine::deferDestroyRetry(void* p) noexcept
     }
     deferredDestroy_.push_back(p);
     convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
+    convo::publishAtomic(deferredDestroyResidentAtomic_,
+                         static_cast<std::uint32_t>(deferredDestroy_.size()),
+                         std::memory_order_release);
 }
 
 // ★ F1'-b: 延期された破棄の再試行。Destroyed になったものだけリストから外す。
 std::size_t AudioEngine::retryDeferredDestroys() noexcept
 {
+    // F1'-b audit fix (defect D / double free):
+    //   Called from TWO threads: tryReclaimResources (Message Thread / Timer) and
+    //   drainDeferredRetireQueues (CoordinatorLoop). The old implementation copied a
+    //   snapshot under the lock and destroyed OUTSIDE the lock, so both threads could
+    //   snapshot the same pointer and each call destroyDSPCoreNodeRetryable() on it ->
+    //   double free (0xC0000005 / 0xC0000374).
+    //
+    //   Fix: take ownership by SWAPPING the list out. Only the thread that receives the
+    //   entries destroys them; a concurrent caller gets an empty list and does nothing.
+    //   Deferred entries are re-registered by destroyDSPCoreNodeRetryable() itself
+    //   (deferDestroyRetry), so no re-registration is needed here.
     std::vector<void*> snapshot;
     {
         std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
-        snapshot = deferredDestroy_;
+        snapshot.swap(deferredDestroy_);
+        convo::publishAtomic(deferredDestroyResidentAtomic_,
+                             static_cast<std::uint32_t>(0),
+                             std::memory_order_release);
     }
     if (snapshot.empty())
         return 0;
 
-    // スナップショットを試行。破棄できたものは「リストから外す」。
-    std::vector<void*> stillDeferred;
+    std::size_t destroyed = 0;
     for (void* p : snapshot)
     {
+        // Destroyed -> freed, not re-registered.
+        // Deferred  -> destroyDSPCoreNodeRetryable() re-registers it internally.
         if (destroyDSPCoreNodeRetryable(p) == DestroyOutcome::Destroyed)
-            continue;                 // 完了: 再登録しない（二重破棄の防止）
-        stillDeferred.push_back(p);   // まだ pin が残っている
+            ++destroyed;
     }
 
-    std::size_t retried = 0;
+    // Re-sync the resident count for the early-return guards.
     {
         std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
-
-        // ★ 重要: スナップショットの間に**新しく追加された**エントリだけを引き継ぐ。
-        //   snapshot に含まれるものは上のループで結論が出ているため、ここで
-        //   deferredDestroy_ から機械的に拾い直すと、破棄済みポインタを再登録してしまい
-        //   次回の再試行で二重破棄（= 解放済みメモリの ~DSPCore）になる。
-        std::vector<void*> merged = stillDeferred;
-        for (void* p : deferredDestroy_)
-        {
-            bool inSnapshot = false;
-            for (void* q : snapshot)
-                if (q == p) { inSnapshot = true; break; }
-            if (inSnapshot)
-                continue;             // 既に結論済み
-
-            bool dup = false;
-            for (void* q : merged)
-                if (q == p) { dup = true; break; }
-            if (!dup)
-                merged.push_back(p);  // 試行中に新規登録されたもの
-        }
-
-        retried = (deferredDestroy_.size() > stillDeferred.size())
-            ? (deferredDestroy_.size() - stillDeferred.size()) : 0;
-        deferredDestroy_.swap(merged);
+        convo::publishAtomic(deferredDestroyResidentAtomic_,
+                             static_cast<std::uint32_t>(deferredDestroy_.size()),
+                             std::memory_order_release);
     }
-    return retried;
+    return destroyed;
 }
 
 std::size_t AudioEngine::deferredDestroyResidentCount() const noexcept

@@ -701,7 +701,15 @@ static bool checkF1bDeferredDestroyRetainsOwnership()
         return false;
     }
 
-    // ---- 1) pin 保持中の破棄要求 → Deferred、エントリは所有権を保持 ----
+    // ---- 1) pin 保持中の破棄要求 -> Deferred、pin 受付は閉じる ----
+    //
+    //  NOTE: the background Timer (tryReclaimResources) also calls
+    //  retryDeferredDestroys(), which SWAPS the list out, retries, and re-registers.
+    //  So deferredDestroyResidentCount() is transiently 0 while a retry is in flight.
+    //  Asserting an instant count==1 races with that timer. Assert the CONTRACT instead:
+    //    (a) destroy returns Deferred while pinned,
+    //    (b) the pin gate is closed (tryPin now fails),
+    //    (c) after the pin is released, retry frees the object once.
     {
         auto pin = e.tryPinDSPHandle(handle);
         if (!static_cast<bool>(pin))
@@ -718,32 +726,43 @@ static bool checkF1bDeferredDestroyRetainsOwnership()
             ok = false;
         }
 
-        // 遅延リストに載り、所有権が保持されている。
-        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 1)
+        // (b) 受付閉鎖: 以後の pin は必ず失敗する。
+        auto pinAfter = e.tryPinDSPHandle(handle);
+        if (static_cast<bool>(pinAfter))
         {
-            std::fprintf(stderr, "[F1-b] FAIL: deferred list count=%zu (want 1)\n",
+            std::fprintf(stderr, "[F1-b] FAIL: pin succeeded after a deferred destroy\n");
+            ok = false;
+        }
+    }
+
+    // ---- 2) pin 解放後の再試行 -> 破棄が完了する（背景タイマーと競合しないよう待つ） ----
+    {
+        bool freed = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            (void)DeferredPublicationTestAccess::retryDeferredDestroys(e);
+            if (e.resolveDSPHandle(handle) == nullptr)
+            {
+                freed = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!freed)
+        {
+            std::fprintf(stderr,
+                         "[F1-b] FAIL: slot still resolves after pin release (deferred=%zu)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: deferred entry not consumed (%zu)\n",
                          DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
             ok = false;
         }
     }
 
-    // ---- 2) pin 解放後の再試行 → 破棄が完了する ----
-    {
-        const auto retried = DeferredPublicationTestAccess::retryDeferredDestroys(e);
-        (void)retried;
-        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
-        {
-            std::fprintf(stderr, "[F1-b] FAIL: deferred entry not consumed after pin release (%zu)\n",
-                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
-            ok = false;
-        }
-        // メモリは解放済みなので、スロットは解決不能でなければならない。
-        if (e.resolveDSPHandle(handle) != nullptr)
-        {
-            std::fprintf(stderr, "[F1-b] FAIL: slot resolves after deferred destroy completed\n");
-            ok = false;
-        }
-    }
 
     harness.stop();
     std::printf("[F1-b] deferred destroy retains ownership then completes: %s\n",
@@ -792,7 +811,10 @@ static bool checkF1bTerminalRetainsDeferred()
 
     // epoch 0 は必ず safe（minReaderEpoch >= 1）なので即時実行経路に入る。
     // 即時経路で Deferred を返すと storeRetryable に落ち、所有権が保持される。
-    const bool accepted = DeferredPublicationTestAccess::storeRetryableForTest(e, obj, onceDeferred, 0);
+    // ★ 監査 B-1 対応: Terminal 単体の Deferred 保持契約を検証するため、
+    //   ルータの所有権一元化を経由せず storeRetryable を直接叩く。
+    //   この経路は「格納のみ」で deleter を呼ばない（epoch 判定もルータが行う）。
+    const bool accepted = DeferredPublicationTestAccess::storeRetryableDirectForTest(e, obj, onceDeferred, 0);
     if (!accepted)
     {
         std::fprintf(stderr, "[F1-b-T] FAIL: storeRetryable rejected\n");
@@ -800,27 +822,33 @@ static bool checkF1bTerminalRetainsDeferred()
         return false;
     }
 
-    // storeRetryable は常に所有権を保持する（延期前でも retryable として在籍）。
-    const auto residentAfterFirst = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
-    const int callsAfterFirst = g_f1bDestroyCalls;
+    // 格納直後: まだ deleter は呼ばれていない（所有権は Terminal が保持）。
+    const auto residentAfterStore = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
 
-    // drain で再試行 → 今回は Destroyed になる。
-    (void)router;   // drainTerminalReclaim is private; the retry runs through the public path below.
-
-    // public path: tryReclaimResources() -> router tryReclaim -> Terminal drain.
+    // 1 回目の drain: deleter が Deferred を返す → エントリは残る（所有権保持）。
     DeferredPublicationTestAccess::drainTerminalForTest(e);
+    const int callsAfterFirst = g_f1bDestroyCalls;
+    const auto residentAfterFirst = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
 
+    // 2 回目の drain: deleter が Destroyed を返す → エントリが消費される。
+    DeferredPublicationTestAccess::drainTerminalForTest(e);
     const auto residentAfterSecond = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
     const int callsAfterSecond = g_f1bDestroyCalls;
 
-    if (callsAfterFirst < 1)
+    if (residentAfterStore != 1)
     {
-        std::fprintf(stderr, "[F1-b-T] FAIL: deleter never invoked\n");
+        std::fprintf(stderr, "[F1-b-T] FAIL: not stored (count=%zu, want 1)\n", residentAfterStore);
         ok = false;
     }
-    if (residentAfterFirst < 1)
+    if (callsAfterFirst != 1)
     {
-        std::fprintf(stderr, "[F1-b-T] FAIL: Deferred entry was not retained (count=%zu)\n",
+        std::fprintf(stderr, "[F1-b-T] FAIL: first drain did not invoke the deleter (calls=%d)\n",
+                     callsAfterFirst);
+        ok = false;
+    }
+    if (residentAfterFirst != 1)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: Deferred entry was not retained (count=%zu, want 1)\n",
                      residentAfterFirst);
         ok = false;
     }
@@ -830,11 +858,11 @@ static bool checkF1bTerminalRetainsDeferred()
                      residentAfterSecond);
         ok = false;
     }
-    if (callsAfterSecond != callsAfterFirst + 1)
+    if (callsAfterSecond != 2)
     {
         std::fprintf(stderr,
-                     "[F1-b-T] FAIL: retry count %d -> %d (expected exactly one more)\n",
-                     callsAfterFirst, callsAfterSecond);
+                     "[F1-b-T] FAIL: retry count=%d (expected exactly 2 total: 1 defer + 1 destroy)\n",
+                     callsAfterSecond);
         ok = false;
     }
 
@@ -967,7 +995,7 @@ static bool checkF1bDrainAllDoesNotForceFree()
     static int sentinel2 = 0;
     void* obj = &sentinel2;
 
-    const bool accepted = DeferredPublicationTestAccess::storeRetryableForTest(
+    const bool accepted = DeferredPublicationTestAccess::storeRetryableDirectForTest(
         e, obj, f1bAlwaysDeferred, 0);
     if (!accepted)
     {
@@ -1010,6 +1038,328 @@ static bool checkF1bDrainAllDoesNotForceFree()
 
     harness.stop();
     std::printf("[F1-b-S] drainAll keeps Deferred observable: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b 監査 A-1/A-2: 延期エントリが**通常 tick** で回収されること。
+//   監査で発見した欠陥 A: tryReclaimResources が D/Q/E/T の空判定で早期 return し、
+//   延期リストだけに在るエントリへ到達しなかった（恒久リーク）。
+//   PASS: tick を回すだけで deferred が 0 になり、破棄が 1 回だけ成立する。
+//==============================================================================
+namespace {
+int g_f1bAuditDestroyCalls = 0;
+DestroyOutcome f1bAuditDeleter(void* /*p*/) noexcept
+{
+    ++g_f1bAuditDestroyCalls;
+    return DestroyOutcome::Destroyed;
+}
+} // namespace
+
+static bool checkF1bAuditNormalTickCollects()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-A] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // pin 保持中に破棄要求 → Deferred（エンジン再試行リストへ）
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b-A] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+        if (AudioEngine::destroyDSPCoreNodeRetryable(raw) != DestroyOutcome::Deferred)
+        {
+            std::fprintf(stderr, "[F1-b-A] FAIL: destroy did not defer\n");
+            ok = false;
+        }
+    }
+
+    //  NOTE: the background Timer also calls retryDeferredDestroys(), which SWAPS the
+    //  list out while retrying, so deferredResidentAtomic() is transiently 0 even when a
+    //  destroy is still pending. An instantaneous ==1 assertion races with that timer.
+    //  Assert the CONTRACT instead: the normal tick must eventually free it (the defect
+    //  was that it never did), observed by resolve() becoming nullptr.
+    bool collected = false;
+    for (int i = 0; i < 200; ++i)
+    {
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+        if (e.resolveDSPHandle(handle) == nullptr)
+        {
+            collected = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    if (!collected)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-A] FAIL: normal tick never collected the deferred entry "
+                     "(atomic=%u) — that is the permanent-leak defect\n",
+                     (unsigned)DeferredPublicationTestAccess::deferredResidentAtomic(e));
+        ok = false;
+    }
+
+    // A-2: 二重破棄が無いこと（スロットが解決不能＝破棄済み、以後の tick で再破棄しない）
+    for (int i = 0; i < 10; ++i)
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+
+    if (DeferredPublicationTestAccess::deferredResidentAtomic(e) != 0)
+    {
+        std::fprintf(stderr, "[F1-b-A] FAIL: deferred list not empty after repeated ticks\n");
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-A] normal tick collects deferred entry once: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// F1'-b 監査 B-1: terminalReclaimRetryable 経由でも所有権が一意であること。
+//   epoch-safe 経路では deleter が Deferred を返しても Terminal に再格納しない
+//   （deleter 自身＝エンジン再試行リストが唯一の所有者）。
+//   PASS: Terminal 側の retryable 在住数が増えない。
+//==============================================================================
+static bool checkF1bAuditSingleOwnership()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-B] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // pin を保持したまま terminalReclaimRetryable 経由で破棄を要求する。
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b-B] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+
+        const auto terminalBefore = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+        const auto engineBefore = DeferredPublicationTestAccess::deferredResidentAtomic(e);
+
+        // epoch 0 は safe なので「即時実行」経路に入り、Deferred はエンジン側が保持する。
+        (void)DeferredPublicationTestAccess::storeRetryableForTest(e, raw,
+            &AudioEngine::destroyDSPCoreNodeRetryable, 0);
+
+        const auto terminalAfter = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+        const auto engineAfter = DeferredPublicationTestAccess::deferredResidentAtomic(e);
+
+        // 二重所有の判定: 両方に在住していないこと。
+        const bool bothResident = (terminalAfter > terminalBefore) && (engineAfter > engineBefore);
+        if (bothResident)
+        {
+            std::fprintf(stderr,
+                         "[F1-b-B] FAIL: double ownership (terminal %zu->%zu, engine %u->%u)\n",
+                         terminalBefore, terminalAfter,
+                         (unsigned)engineBefore, (unsigned)engineAfter);
+            ok = false;
+        }
+    }
+
+    // 後始末: pin を離して tick → 回収させる。
+    for (int i = 0; i < 40 && DeferredPublicationTestAccess::deferredResidentAtomic(e) > 0; ++i)
+    {
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    harness.stop();
+    std::printf("[F1-b-B] single ownership through terminal retryable: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b (2026-10-25) audit item 4/5: PRODUCTION retire path under a held pin.
+//
+//   The reviewer's point: `terminalReclaimRetryable` is not on the production path, so
+//   proving Terminal's Deferred retention with a test deleter does not prove the real
+//   DSPCore destroy path. This test drives the REAL entry point:
+//
+//       DSPLifetimeManager::retire(raw)      -> enqueueWithRetry (D/Q/E/T)
+//       AudioEngine::tryReclaimResources()   -> drain -> destroyDSPCoreNode
+//
+//   with a pin held, and asserts:
+//     (1) the production drain DEFERS (cumulative deferredDestroyCount increases),
+//     (2) after the pin is released the deferred entry is drained exactly once,
+//     (3) no crash (a double free here would corrupt the heap).
+//
+//   Uses deferredDestroyCount() (monotonic counter) rather than the resident count,
+//   which is transiently 0 while a retry is in flight.
+//==============================================================================
+static bool checkF1bProductionRetireUnderPin()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-P] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b-P] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+
+        // Truth measured 2026-10-25 (two wrong versions before this one):
+        //   v1: retire at currentEpoch() then drain  -> pending=1 but NOT destroyable
+        //       (the D queue destroys only entries OLDER than the min-reader epoch, and the
+        //        harness has an active reader holding min == current), so no deleter ran and
+        //        "count 0 -> 0" was a FALSE NEGATIVE, not a deferral failure.
+        //   v2: publishEpoch() then drain -> current advanced (4 -> 5) but min stayed 4
+        //       (the reader's own epoch does not move until it re-enters), still not eligible.
+        // v3 (this): retire with the PUBLICATION epoch that is older than the min-reader
+        //   epoch -- exactly what a real rebuild passes (the epoch the DSP was published at,
+        //   not "now"). The entry is then genuinely destroyable and the production drain
+        //   really invokes destroyDSPCoreNode while the pin is held.
+        std::uint64_t minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+        if (minEpoch == 0)
+        {
+            (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+            minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+        }
+        const auto retireEpoch = (minEpoch > 0) ? (minEpoch - 1) : std::uint64_t{0};
+        const auto before = DeferredPublicationTestAccess::deferredDestroyCount(e);
+
+        // PRODUCTION path: retire -> enqueueWithRetry -> (epoch gate) -> drain ->
+        // destroyDSPCoreNode -> invalidateHandleBeforeDestroy -> defer when pinned.
+        DSPLifetimeManager mgr(e);
+        mgr.retire(raw, retireEpoch);
+
+        std::printf("[F1-b-P] diag after retire: pinned=%u cur=%llu min=%llu pending=%zu "
+                    "resident=%u resolve=%d\n",
+                    (unsigned)DeferredPublicationTestAccess::pinnedCount(e, handle.slot),
+                    (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
+                    (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
+                    DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                    (unsigned)DeferredPublicationTestAccess::residentAtomicForTest(e),
+                    e.resolveDSPHandle(handle) != nullptr ? 1 : 0);
+
+        (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+        e.tryReclaimResources();
+        std::printf("[F1-b-P] diag after drain: pinned=%u cur=%llu min=%llu pending=%zu "
+                    "resident=%u deferredCount=%llu deferredResident=%u resolve=%d\n",
+                    (unsigned)DeferredPublicationTestAccess::pinnedCount(e, handle.slot),
+                    (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
+                    (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
+                    DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                    (unsigned)DeferredPublicationTestAccess::residentAtomicForTest(e),
+                    (unsigned long long)DeferredPublicationTestAccess::deferredDestroyCount(e),
+                    (unsigned)DeferredPublicationTestAccess::deferredResidentAtomic(e),
+                    e.resolveDSPHandle(handle) != nullptr ? 1 : 0);
+
+        const auto after = DeferredPublicationTestAccess::deferredDestroyCount(e);
+        if (after <= before)
+        {
+            std::fprintf(stderr,
+                         "[F1-b-P] FAIL: production retire did not defer while pinned "
+                         "(count %llu -> %llu)\n",
+                         (unsigned long long)before, (unsigned long long)after);
+            ok = false;
+        }
+        else if (e.resolveDSPHandle(handle) == nullptr)
+        {
+            // The slot may legitimately become unresolvable (Retired/DestroyPending) while the
+            // pin still owns the allocation -- that is the correct split: handle resolution
+            // closed, memory ownership retained by the retry list.
+            std::printf("[F1-b-P] observe: slot closed while pin owns the allocation\n");
+        }
+    }
+
+    // Pin released: the deferred entry must drain exactly once and leave nothing behind.
+    bool drained = false;
+    for (int i = 0; i < 400; ++i)
+    {
+        e.tryReclaimResources();
+        (void)DeferredPublicationTestAccess::retryDeferredDestroys(e);
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) == 0
+            && e.resolveDSPHandle(handle) == nullptr)
+        {
+            drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!drained)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-P] FAIL: deferred entry never drained after pin release (%zu)\n",
+                     DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+        ok = false;
+    }
+
+    // Completion contract: once freed, no retry list may re-acquire it. Extra ticks must not
+    // resurrect the entry (a re-registration after free would be a double free).
+    for (int i = 0; i < 10; ++i)
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+    if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-P] FAIL: retry list is not empty after repeated ticks (%zu)\n",
+                     DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-P] production retire under pin defers then drains: %s\n",
+                ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -1071,6 +1421,21 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1bDrainAllDoesNotForceFree())
     {
         std::fprintf(stderr, "FAIL: checkF1bDrainAllDoesNotForceFree (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bProductionRetireUnderPin())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bProductionRetireUnderPin (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bAuditNormalTickCollects())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bAuditNormalTickCollects (audit A)\n");
+        hdOk = false;
+    }
+    if (!checkF1bAuditSingleOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bAuditSingleOwnership (audit B)\n");
         hdOk = false;
     }
     if (!hdOk)

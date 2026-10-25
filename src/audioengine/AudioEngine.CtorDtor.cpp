@@ -302,6 +302,29 @@ AudioEngine::~AudioEngine()
         m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
         m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
     }
+
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 C）: 延期リストの最終 drain。
+    //   EBR store を全部 drain した後でも、pin 残留で延期された DSPCore は
+    //   エンジン再試行リストに残っている。ここで 1 度試行し、
+    //   回収できたものを解放する。回収できないものは **強制解放しない**（UAF を選ばない）。
+    {
+        const auto deferredBefore = deferredDestroyResidentCount();
+        if (deferredBefore > 0)
+        {
+            (void)retryDeferredDestroys();
+            const auto deferredAfter = deferredDestroyResidentCount();
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DEFERRED_SHUTDOWN] before=%zu after=%zu%s",
+                deferredBefore, deferredAfter,
+                deferredAfter > 0 ? " (uncollected: pins still held — leaked, not UAF)" : ""));
+            if (deferredAfter > 0)
+            {
+                // 未回収を明示的に残す（~AudioEngine はこの後 member teardown に入る）。
+                // 強制解放すると UAF になるため、リークを選ぶ。
+                diagLog("[F1_DEFERRED_SHUTDOWN] uncollected deferred DSPCore retained");
+            }
+        }
+    }
     // ★ D162-2-E (E-3 / INV-D162-8): 全 EBR store drain 後の pending 残留確認。
     //   D8 の drainAll / drainAllQuarantineStore が完了した時点で DSPCore 破壊は EBR closure を
     //   全て消化しているはず。残留があれば member teardown に EBR entry を持ち越すことになり

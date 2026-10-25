@@ -113,14 +113,53 @@ public:
         return e.invalidateHandleBeforeDestroy(core);
     }
 
-    // ===== F1'-b (deferred destroy) observation =====
+    // F1'-b (deferred destroy) observation
     static std::size_t deferredDestroyResidentCount(AudioEngine& e) noexcept
     {
         return e.deferredDestroyResidentCount();
     }
+    // F1'-b: cumulative deferral count (monotonic, not racy with the retry swap).
+    static std::uint64_t deferredDestroyCount(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyCount();
+    }
+    // F1'-b production-path test: the D queue only destroys entries whose epoch is OLDER
+    // than the min-reader epoch, so a retire issued at the current epoch is parked and no
+    // deleter runs. The test must advance the publication epoch (exactly what the audio
+    // thread does with EpochDomain::publishEpoch) to make the real drain attempt the destroy.
+    static std::uint64_t publishEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->publishEpoch();
+    }
+    static std::uint64_t currentEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->currentEpoch();
+    }
+    static std::uint64_t minReaderEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->minReaderEpoch();
+    }
+    static std::size_t pendingRetireCountForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->pendingRetireCount();
+    }
+    static std::uint32_t residentAtomicForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->residentCountAtomic();
+    }
     static std::size_t retryDeferredDestroys(AudioEngine& e) noexcept
     {
         return e.retryDeferredDestroys();
+    }
+
+    // F1'-b 監査対応: 通常 tick（早期 return を含む）をテストから叩く。
+    static void tickReclaimForTest(AudioEngine& e) noexcept
+    {
+        e.tryReclaimResources();
+    }
+    static std::uint32_t deferredResidentAtomic(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyResidentAtomic();
     }
     static std::size_t terminalDeferredResidentCount(AudioEngine& e) noexcept
     {
@@ -144,6 +183,17 @@ public:
         e.m_retireRouter->drainAllTerminalForTest();
     }
     // 再試行可能な破棄を直接駆動する（D/Q/E を経由せず、T の契約だけを見る）。
+    // ★ 監査 B-1 対応: ルータの terminalReclaimRetryable は「Deferred を格納しない」
+    //   契約に変わった（所有権の一元化）。Terminal 単体の Deferred 保持を検証するには
+    //   storeRetryable を直接叩く必要がある。
+    static bool storeRetryableDirectForTest(AudioEngine& e, void* ptr,
+                                            RetryableDeleter retryable,
+                                            std::uint64_t epoch) noexcept
+    {
+        return e.m_retireRouter->storeRetryableDirectForTest(ptr, retryable, epoch);
+    }
+
+    // ルータ API 経由（所有権一元化の検証用）。
     static bool storeRetryableForTest(AudioEngine& e, void* ptr,
                                       RetryableDeleter retryable,
                                       std::uint64_t epoch) noexcept

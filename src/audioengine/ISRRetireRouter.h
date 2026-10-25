@@ -366,6 +366,15 @@ public:
         m_terminalReclaim.drainAll();
     }
 
+    // ★ F1'-b 監査対応: ルータの API は「epoch unsafe / RT のときだけ Terminal に預ける」。
+    //   Terminal 単体の Deferred 保持契約を検証するため、格納を直接叩く経路を用意する。
+    bool storeRetryableDirectForTest(void* ptr, RetryableDeleter retryable,
+                                     uint64_t epoch) noexcept
+    {
+        return m_terminalReclaim.storeRetryable(
+            ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test-direct");
+    }
+
     // ★ F1'-b: retryable として所有権を保持しているエントリ総数（延期前も含む）。
     [[nodiscard]] std::size_t terminalRetryableResidentCount() const noexcept
     {

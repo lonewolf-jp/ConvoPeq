@@ -309,6 +309,21 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
     //   同一 slot の二重割当（double-allocation）を構造的に排除）。
     if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
         return;
+
+    // ★ F1'-c (2026-10-25) audit finding F: reclaim() must HONOUR outstanding pins.
+    //   Before this fix, reclaim() cleared `instance` and recycled the slot even while a
+    //   DSPHandlePin was held, so the destroy path could then find no matching slot and
+    //   free the allocation immediately -> the pin holder was left dangling. The
+    //   production retire path (DSPLifetimeManager::retire -> requestReclaimHandle ->
+    //   reclaim) hit exactly that, which is why the production-path test observed
+    //   "did not defer while pinned".
+    //
+    //   Fix: close the pin gate; if any lease is still alive, leave the slot intact
+    //   (instance kept) and let invalidateForDestroy() do the pin-drain + clear later.
+    (void)closePinsForDestroy(handle.slot, handle.generation);
+    if (pinnedCount(handle.slot) != 0)
+        return;   // 所有権はスロットに残す（destroy 経路が pin 消滅後に処理する）
+
     // ★ F2' (2026-10-25): 状態を先に無効化し、その後に instance を消す。
     //   逆順（instance=nullptr → state=Reclaimed）だと、resolve() が state を読んだ直後に
     //   古い state（Active/Retired）を見たまま instance を読む窓が広がる。state を先に

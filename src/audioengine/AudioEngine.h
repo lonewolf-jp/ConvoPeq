@@ -4683,7 +4683,12 @@ inline bool invalidateHandleBeforeDestroy(void* core) noexcept
         return true;
 
     // 1) pin の受付を閉じ、既存 pin の消滅を待つ（NonRT）。タイムアウトなら false。
-    if (!dspHandleRuntime_.invalidateForDestroy(core))
+    //    ★ F1'-c (2026-10-25): 待機は短くする。破棄は D キューの deleter から呼ばれる
+    //      ことがあり、その間 D キューの mutex を保持したまま秒単位で待つと
+    //      retire 経路全体が停止する。短い待機で済まない場合は「延期」して
+    //      後続の再試行に委ねる（安全側・非ブロッキング）。
+    constexpr int kPinDrainTimeoutMs = 50;
+    if (!dspHandleRuntime_.invalidateForDestroy(core, kPinDrainTimeoutMs))
         return false;
 
     // 2) ここで初めて台帳から外す（以後 register は同一ポインタを新規として扱えるが、
@@ -5181,6 +5186,14 @@ public:
     void deferDestroyRetry(void* p) noexcept;
     [[nodiscard]] std::size_t retryDeferredDestroys() noexcept;
     [[nodiscard]] std::size_t deferredDestroyResidentCount() const noexcept;
+    // ★ F1'-b (2026-10-25) 監査対応: ロックフリーの在住数。
+    //   tryReclaimResources / drainDeferredRetireQueues の「空なら何もしない」判定に使う。
+    //   これが無いと D/Q/E/T が空のとき早期 return して再試行に到達せず、
+    //   延期エントリが永久に回収されない（監査で発見した欠陥 A）。
+    [[nodiscard]] std::uint32_t deferredDestroyResidentAtomic() const noexcept
+    {
+        return convo::consumeAtomic(deferredDestroyResidentAtomic_, std::memory_order_acquire);
+    }
     [[nodiscard]] std::uint64_t deferredDestroyCount() const noexcept
     {
         return convo::consumeAtomic(deferredDestroyCount_, std::memory_order_acquire);
@@ -5188,6 +5201,7 @@ public:
     mutable std::mutex deferredDestroyMutex_;
     std::vector<void*> deferredDestroy_;
     std::atomic<std::uint64_t> deferredDestroyCount_{0};
+    std::atomic<std::uint32_t> deferredDestroyResidentAtomic_{0};
 
     // ★ F2' (2026-10-25): DSPCore の解放は destroyDSPCoreNode（static・関数ポインタとして
     //   EBR キューに渡すため this を持てない）の一本道を通る。そこで「今生きているエンジン」を
