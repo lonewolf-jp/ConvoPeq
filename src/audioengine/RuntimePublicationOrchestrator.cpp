@@ -78,17 +78,20 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
     // ★ Phase2: DSPHandle → DSPCore* 解決 (Execution Path Handle Normalization)
-    auto* newDSPResolved = engine_.resolveDSPHandle(req.newDSP);
+    // ★ F1' (2026-10-25): pin で寿命を確保してから逆参照する。lease はこの関数の
+    //   world build 完了まで保持する（規約 R2: 最後のアクセスまで）。
+    auto newPin = engine_.tryPinDSPHandle(req.newDSP);
+    auto* newDSPResolved = static_cast<AudioEngine::DSPCore*>(newPin.get());
     // ★ [PR-4A] S-A2排除: Decision層の DSPCore* 直接参照を Handle 経由に変更
     auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();
-    auto* oldDSP = (!oldHandle.isNull())
-        ? engine_.resolveDSPHandle(oldHandle)
-        : nullptr;
+    auto oldPin = (!oldHandle.isNull()) ? engine_.tryPinDSPHandle(oldHandle)
+                                        : convo::isr::DSPHandlePin{};
+    auto* oldDSP = static_cast<AudioEngine::DSPCore*>(oldPin.get());
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     if (req.newDSP.isNull()) {
         DBG("[DIAG] trySubmit: newDSP handle is NULL generation=" << req.generation);
     } else if (newDSPResolved == nullptr) {
-        DBG("[DIAG] trySubmit: resolveDSPHandle failed slot=" << (int)req.newDSP.slot
+        DBG("[DIAG] trySubmit: pin failed slot=" << (int)req.newDSP.slot
             << " gen=" << (int)req.newDSP.generation << " reqGen=" << req.generation);
     }
 #endif
@@ -179,7 +182,14 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     if (!worldOwner) {
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
+        {
+            // ★ F1' (2026-10-25): retire は enqueueWithRetry 経由で destroyDSPCoreNode を
+            //   同一スレッドで同期実行しうる。pin を持ったままだと破棄側が待ちタイムアウト
+            //   するため、**先に lease を返す**（以後 newDSPResolved を逆参照しない）。
+            newPin = convo::isr::DSPHandlePin{};
+            oldPin = convo::isr::DSPHandlePin{};
             lifetime_.retire(newDSPResolved);
+        }
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordProgress(correlationId,
             static_cast<uint64_t>(req.generation), 0,
@@ -247,7 +257,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
         if (!worldOwner) {
             if (!req.newDSP.isNull())
+            {
+                // ★ F1' : retire 前に lease を返す（上と同じ理由）。
+                newPin = convo::isr::DSPHandlePin{};
+                oldPin = convo::isr::DSPHandlePin{};
                 lifetime_.retire(newDSPResolved);
+            }
             stateOwner_.onExecutorFailed(correlationId.shortValue());
             telemetryRecorder_.recordProgress(correlationId,
                 static_cast<uint64_t>(req.generation), 0,
@@ -292,7 +307,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   false を返すため lifetime_.retire() は無効。
         //   代わりに destroyRolledBackDSP() で未公開 DSPCore を直接破棄する。
         if (newDSPResolved != nullptr)
+        {
+            // ★ F1' : destroyRolledBackDSP は直接 destroy するため、lease を先に返す。
+            newPin = convo::isr::DSPHandlePin{};
+            oldPin = convo::isr::DSPHandlePin{};
             lifetime_.destroyRolledBackDSP(newDSPResolved);
+        }
         // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordFailure(FailureStage::Execution,
@@ -769,9 +789,12 @@ void RuntimePublicationOrchestrator::retireRegisteredDSP(
 {
     if (req.newDSP.isNull())
         return;
-    auto* dsp = engine_.resolveDSPHandle(req.newDSP);
+    // ★ F1' (2026-10-25): retire は DSPCore のフィールドに触れないが、
+    //   「解決したポインタが有効なうちに retire を発行する」順序を保証するため pin を取る。
+    auto pin = engine_.tryPinDSPHandle(req.newDSP);
+    auto* dsp = static_cast<AudioEngine::DSPCore*>(pin.get());
     if (dsp == nullptr)
-        return;  // 未登録 / rollback / quarantine / reclaimed — disposition 済み。no-op。
+        return;  // 未登録 / rollback / quarantine / reclaimed / pin 受付閉鎖 — disposition 済み。no-op。
 
     DSPLifetimeManager lifetimeMgr{engine_};
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS

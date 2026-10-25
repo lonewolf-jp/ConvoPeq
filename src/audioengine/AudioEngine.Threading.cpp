@@ -17,14 +17,24 @@
 
 void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 {
-    // ★ F2' (2026-10-25): メモリを解放する前に、このインスタンスを指すハンドルを解決不能に
-    //   する。呼び出し側が retire を忘れていても（HD-1 が再現した状態）、解放後のスロットが
-    //   生ポインタを返すことはなくなる。
-    //   残る TOCTOU（resolve が state+instance を読んだ直後〜解放）は pin 方式（F1'）で閉じる。
+    // ★ F2'/F1' (2026-10-25): メモリを解放する前に、このインスタンスを指すハンドルを解決不能に
+    //   し、**既存 pin が消えるまで待つ**。呼び出し側が retire を忘れていても（HD-1 が再現した
+    //   状態）、解放後のスロットが生ポインタを返すことはなくなる。
+    //   pin が残っていて待ちきれない場合は **解放しない**（設計資料 §2.2）。
+    //   解放しないまま戻ると呼び出し側は「解放済み」と誤認するため、ここでは
+    //   リークを選ぶ（安全側）。延期は呼び出し側（TerminalReclaimAuthority）の責務であり、
+    //   deleter の契約（void(void*)・戻り値なし）では延期を表現できない。
     if (p != nullptr)
     {
         if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
-            owner->invalidateHandleBeforeDestroy(p);
+        {
+            if (!owner->invalidateHandleBeforeDestroy(p))
+            {
+                juce::Logger::writeToLog(juce::String::formatted(
+                    "[F1_DESTROY_DEFERRED] dsp=%p pins still held: memory retained (leak, not UAF)", p));
+                return;   // ★ 解放しない
+            }
+        }
     }
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS

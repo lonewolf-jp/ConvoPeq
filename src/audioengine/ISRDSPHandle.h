@@ -79,6 +79,68 @@ struct ResolvedDSP
 };
 
 /**
+ * ★ F1' (2026-10-25): DSPCore の寿命 lease。
+ *
+ *   `tryPin(handle)` が成功したときだけ生成され、生存している間は
+ *   対象インスタンスが解放されないことを保証する。生ポインタは `get()` 経由でのみ
+ *   公開され、`operator bool` が false の lease の `get()` は nullptr を返す。
+ *
+ *   規約（設計資料 F1-PIN-DESIGN-REVIEW の R1-R6）:
+ *     R2: lease は「そのポインタを使い終わるスコープ全体」に置く（get() を持ち出さない）。
+ *     R3: コピー不可（move のみ）。
+ *     R5: tryPin / 解除は RT 可（ロック・確保・待機なし）。
+ */
+class DSPHandlePin
+{
+public:
+    DSPHandlePin() noexcept = default;
+
+    DSPHandlePin(const DSPHandlePin&) = delete;
+    DSPHandlePin& operator=(const DSPHandlePin&) = delete;
+
+    DSPHandlePin(DSPHandlePin&& other) noexcept
+        : owner_(other.owner_), slot_(other.slot_), instance_(other.instance_)
+    {
+        other.owner_ = nullptr;
+        other.instance_ = nullptr;
+        other.slot_ = 0;
+    }
+
+    DSPHandlePin& operator=(DSPHandlePin&& other) noexcept
+    {
+        if (this != &other)
+        {
+            release();
+            owner_ = other.owner_;
+            slot_ = other.slot_;
+            instance_ = other.instance_;
+            other.owner_ = nullptr;
+            other.instance_ = nullptr;
+            other.slot_ = 0;
+        }
+        return *this;
+    }
+
+    ~DSPHandlePin() noexcept { release(); }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return instance_ != nullptr; }
+    [[nodiscard]] void* get() const noexcept { return instance_; }
+    [[nodiscard]] uint32_t slot() const noexcept { return slot_; }
+
+private:
+    friend class DSPHandleRuntime;
+
+    DSPHandlePin(DSPHandleRuntime* owner, uint32_t slot, void* instance) noexcept
+        : owner_(owner), slot_(slot), instance_(instance) {}
+
+    void release() noexcept;
+
+    DSPHandleRuntime* owner_ = nullptr;
+    uint32_t slot_ = 0;
+    void* instance_ = nullptr;
+};
+
+/**
  * crossfade ID（複数 crossfade の同時追跡用）
  */
 using CrossfadeId = uint32_t;
@@ -112,6 +174,14 @@ struct DSPRegistrySlot
     //   void* と同サイズ・同アラインメントなのでスロットのレイアウトは不変（24 バイト）。
     std::atomic<void*>    instance;    // DSP インスタンスポインタ
     std::atomic<DSPState> state;       // 現在状態（atomic access）
+    // ★ F1' (2026-10-25): pin 受付と pin 数を **単一ワード** に持つ。
+    //   bit 63      = kPinClosed（破棄が受付を閉じた）
+    //   bits 0..62  = pin 数
+    //   2 ワード（受付フラグ + カウンタ）に分けると「受付が開いているか確認 → +1」の間に
+    //   破棄が割り込む窓が残る（レビュー指摘 A: 受付閉鎖と寿命保護は別の不変条件）。
+    //   1 ワードの CAS なら「開いていることを確認して +1」が不可分になり、
+    //   「閉じた後に新しい pin が成立する」順序が存在しなくなる。
+    std::atomic<uint64_t> pinState;
 };
 
 /**
@@ -121,6 +191,9 @@ struct DSPRegistrySlot
 class DSPHandleRuntime
 {
 public:
+    // ★ F1' (2026-10-25): DSPHandlePin は release() で releasePinSlot を呼ぶ。
+    friend class DSPHandlePin;
+
     static constexpr size_t MAX_DSP_SLOTS = 256;
 
     DSPHandleRuntime();
@@ -143,8 +216,24 @@ public:
     //   閉じる欠陥: 解放済みメモリを指したまま Active/Retired で残るスロット（ダンプの 251）。
     //   閉じない欠陥: resolve() が state と instance を読んだ直後〜解放の間の TOCTOU。
     //   これは pin 方式（F1'・別課題）でしか閉じない。
-    //   戻り値: 無効化したスロット数。
-    int invalidateForDestroy(void* dspInstance) noexcept;
+    //   戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**（延期）。
+    //   F1' で「pin の消滅を待つ」責務が入ったため、bool を返す契約へ変更した。
+    [[nodiscard]] bool invalidateForDestroy(void* dspInstance,
+                                            int timeoutMs = 2000) noexcept;
+
+    // ★ F1' (2026-10-25): 寿命 lease の取得。成功した lease の生存中は
+    //   invalidateForDestroy / reclaim がそのインスタンスを解放できない。
+    //   RT 可（ロック・動的確保・待機なし。単一ワード CAS のみ）。
+    //   失敗（null handle / generation 不一致 / 受付閉鎖 / instance なし）は空の lease。
+    [[nodiscard]] DSPHandlePin tryPin(DSPHandle handle) noexcept;
+
+    // ★ F1' (2026-10-25): 破棄側の受付閉鎖。以後の tryPin は必ず失敗する。
+    //   戻り値: 閉鎖を確定させたか（既に閉鎖済みなら false）。
+    //   RT 不可（破棄は NonRT）。閉鎖後に pinCount を観測して 0 を待つ。
+    [[nodiscard]] bool closePinsForDestroy(uint32_t slot, uint64_t expectedGeneration) noexcept;
+
+    // ★ F1' (2026-10-25): 指定スロットの現在の pin 数（破棄側の待機用）。
+    [[nodiscard]] uint32_t pinnedCount(uint32_t slot) const noexcept;
 
     // RT/NonRT: handle を検証し、有効な参照を返す
     // stale handle（generation mismatch）は build別ポリシーで処理
@@ -214,6 +303,21 @@ private:
     //   外部からは Coordinator::requestReclaim() 経由で実行する。
     void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+
+    // ★ F1' (2026-10-25): pinState のビット定義。
+    //   bit 63 = kPinClosed / bits 0..62 = pin 数。単一ワード CAS で
+    //   「受付が開いていることを確認して +1」を不可分に行う。
+    static constexpr uint64_t kPinClosedBit = 1ull << 63;
+    static constexpr uint64_t kPinCountMask = ~kPinClosedBit;
+
+    // ★ F1' (2026-10-25): DSPHandlePin::release() から呼ばれる（DSPHandlePin は friend）。
+    void releasePinSlot(uint32_t slot) noexcept;
+
+    // ★ F1' (2026-10-25): 破棄側の待機。targets は {slot, generation} の配列
+    //   （型消去して void* で受ける。ISRDSPHandle.h の public 面を増やさないため）。
+    struct PinDrainTarget { uint32_t slot; uint64_t generation; };
+    [[nodiscard]] bool waitForPinsToDrain(const void* targets, size_t targetCount,
+                                          int timeoutMs) noexcept;
     // ★ FUTURE-5 (work88): O(1) 確保用フリーリスト（slot 1..255 をスタック管理。slot 0 は
     //   null handle 表現のため使用しない — 既存 create() の線形スキャン開始位置と同一契約）。
     //   create() はフリーリスト pop（O(1)）、reclaim/rollbackRegistration は push（O(1)）。

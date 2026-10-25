@@ -93,6 +93,26 @@ public:
         AudioEngine::destroyDSPCoreNode(core);
     }
 
+    // ===== F1' (pin) observation =====
+    //   pinnedCount はスロットの pin 数を返す。F1-2 / F1-3 が
+    //   「lease 保持中は 0 でない」「解除後は 0」を直接観測するために使う。
+    static std::uint32_t pinnedCount(AudioEngine& e, std::uint32_t slot) noexcept
+    {
+        return e.dspHandleRuntime_.pinnedCount(slot);
+    }
+
+    //   pin 受付を閉じる（破棄側の第 1 段階をテストから単独実行するため）。
+    static bool closePins(AudioEngine& e, const convo::isr::DSPHandle& h) noexcept
+    {
+        return e.dspHandleRuntime_.closePinsForDestroy(h.slot, h.generation);
+    }
+
+    //   期限付きで pin の消滅を待つ（破棄側の第 3 段階）。false = 待ちきれず **未解放**。
+    static bool invalidateHandleBeforeDestroy(AudioEngine& e, void* core) noexcept
+    {
+        return e.invalidateHandleBeforeDestroy(core);
+    }
+
     // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
     // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
     // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは

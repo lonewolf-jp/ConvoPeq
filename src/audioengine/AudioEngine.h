@@ -2196,6 +2196,12 @@ private:
                                   int maxBlockSize,
                                   uint64_t generation);
         EQCoeffCache* get(uint64_t hash) noexcept;
+
+        // ★ F1' (2026-10-25): RT 経路用の寿命 lease。`get()` は生ポインタを返すため、
+        //   音声コールバックが取得後に使うと解放と競合する（レビュー指摘 C）。
+        //   `pinByHash` は DSPHandlePin を返し、lease の生存中は当該キャッシュが解放されない。
+        //   RT 可（tryPin はロック・確保・待機なし）。
+        [[nodiscard]] convo::isr::DSPHandlePin pinByHash(uint64_t hash) noexcept;
         [[nodiscard]] bool containsNonRt(uint64_t hash) noexcept;
         // ★ D162-2-E (E-1 / INV-D162-6): member teardown 前に全 CacheMap エントリを処分する。
         //   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。
@@ -4268,20 +4274,31 @@ public:
         return snapshot;
     }
 
-    inline DSPCore::ProcessingState buildAudioThreadProcessingState(DSPCore* dsp,
-                                                                     const EngineParameterSnapshot& snapshot) noexcept
+    // ★ F1' (2026-10-25): EQ キャッシュも pin で保護する（レビュー指摘 C）。
+    //   `pin` は戻り値と同時に呼び出し側へ move され、音声ブロックの処理が終わるまで
+    //   生存する。したがって `state.eqCache` が指す先は、そのブロックの間は解放されない。
+    struct ProcessingStateWithPin
+    {
+        DSPCore::ProcessingState state;
+        convo::isr::DSPHandlePin eqPin;   // state.eqCache の寿命を保持
+    };
+
+    inline ProcessingStateWithPin buildAudioThreadProcessingState(DSPCore* dsp,
+                                                                  const EngineParameterSnapshot& snapshot) noexcept
     {
         const convo::EQParameters* eqParams = snapshot.snapshotEqParams;
         uint64_t eqCoeffHash = snapshot.snapshotEqCoeffHash;
 
-        const EQCoeffCache* eqCache = (eqParams != nullptr && eqCoeffHash != 0)
-            ? eqCacheManager.get(eqCoeffHash)
-            : nullptr;
+        // ★ F1': 生ポインタを直接取らず、lease を取ってから get() する。
+        convo::isr::DSPHandlePin eqPin = (eqParams != nullptr && eqCoeffHash != 0)
+            ? eqCacheManager.pinByHash(eqCoeffHash)
+            : convo::isr::DSPHandlePin{};
+        const EQCoeffCache* eqCache = static_cast<const EQCoeffCache*>(eqPin.get());
         // ISR厳密化: hash から cache を解決できない場合は EQ を fail-close で bypass する。
         // 非snapshot系フォールバックへ降りるより、公開済み不変状態を維持することを優先する。
         const bool eqBypassedFailClosed = snapshot.eqBypassed || (eqParams == nullptr) || (eqCache == nullptr);
 
-        return DSPCore::ProcessingState {
+        return ProcessingStateWithPin{ DSPCore::ProcessingState {
             .eqBypassed = eqBypassedFailClosed,
             .convBypassed = snapshot.convBypassed,
             .order = snapshot.order,
@@ -4305,7 +4322,7 @@ public:
             .eqParams = eqParams,
             .eqCache = eqCache,
             .eqCoeffHash = eqCoeffHash
-        };
+        }, std::move(eqPin) };
     }
 
     // ★ [DELETED] 2026-07-28: updateAudioThreadSnapshotFade は Dead Code のため削除。
@@ -4618,9 +4635,22 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
     return handle;
 }
 
+// ★ F1' (2026-10-25): 寿命 lease を取得する。**生ポインタを返さない**。
+//   戻り値が真（operator bool）の間だけ、対象 DSPCore は解放されない。
+//   呼び出し側は lease を「ポインタを使い終わるスコープ全体」に置くこと（規約 R2）。
+//   RT 可（tryPin はロック・確保・待機なし）。
+[[nodiscard]] inline convo::isr::DSPHandlePin tryPinDSPHandle(convo::isr::DSPHandle handle) noexcept
+{
+    return dspHandleRuntime_.tryPin(handle);
+}
+
 // resolveDSPHandle: DSPHandle → DSPCore* 解決 (Phase2: Execution Path Handle Normalization)
 // DSPHandleRuntime::resolve() は ResolvedDSP を返すため、後方互換のために DSPCore* に単純化する。
 // 解決失敗時は nullptr を返す（caller が適切に処理する）。
+//
+// ★ F1' (2026-10-25): この関数は **寿命保護を与えない**（戻り値は pin を持たない）。
+//   逆参照する呼び出しは tryPinDSPHandle() へ移行すること。残存呼び出しは
+//   「ポインタ値をログ/比較に使うだけで逆参照しない」箇所に限る。
 inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
 {
     if (handle.isNull())
@@ -4643,19 +4673,26 @@ inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
 //   解決不能にする。AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ぶ。
 //   - 台帳（runtimeDSPHandleMap_）から先に identity を外し、その後スロットを無効化する。
 //     2 つの mutex を入れ子にしない（register は map→freeList の順なので、ここも同じ順）。
-//   - 戻り値は無効化したスロット数（0 = 未登録インスタンス。rebuild-obsolete / recovery の
-//     直接破棄経路がこれに当たる）。
-inline int invalidateHandleBeforeDestroy(void* core) noexcept
+//   - 戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**。
+//     （未登録インスタンスは true。rebuild-obsolete / recovery の直接破棄経路がこれに当たる。）
+//   - ★ F1' (2026-10-25): 台帳を外す**前に** pin の受付を閉じる。順序を逆にすると、
+//     「台帳から消えたが pin は取れる」窓ができる。
+inline bool invalidateHandleBeforeDestroy(void* core) noexcept
 {
     if (core == nullptr)
-        return 0;
+        return true;
 
+    // 1) pin の受付を閉じ、既存 pin の消滅を待つ（NonRT）。タイムアウトなら false。
+    if (!dspHandleRuntime_.invalidateForDestroy(core))
+        return false;
+
+    // 2) ここで初めて台帳から外す（以後 register は同一ポインタを新規として扱えるが、
+    //    F3' により破棄済みスロットとは一致しない）。
     {
         std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
         runtimeDSPHandleMap_.erase(static_cast<DSPCore*>(core));
     }
-
-    return dspHandleRuntime_.invalidateForDestroy(core);
+    return true;
 }
 
 inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept

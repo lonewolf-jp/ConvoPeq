@@ -496,6 +496,13 @@ void AudioEngine::releaseResources()
     //   二重破壊禁止（INV-D162-3）: resolve は Retired/Reclaimed で nullptr を返すため、
     //   既に disposition 済みの DSP は何もしない。DSPHandle slot は既に Reclaimed 済みのため
     //   以後の resolve も nullptr（map の 二重 erase/二重 destroy は構造的に不可能）。
+    // ★ F1' (2026-10-25): ここでは **pin を取らない**。
+    //   直後の tryShutdownQuiescentReclaim / lifetimeMgr.retire が
+    //   destroyDSPCoreNode → invalidateForDestroy を同一スレッドで呼ぶため、
+    //   pin を保持していると自分自身の解放が待ちタイムアウトする。
+    //   shutdown 経路は quiescence（activeReaderCount==0）を証明済みで、
+    //   音声スレッドも停止しているため、ポインタ値を retire に渡すだけで安全。
+    //   （逆参照はしない。retire はハンドル台帳操作のみ。）
     auto* activeDSPToDestroy = (!activeHandle.isNull()) ? resolveDSPHandle(activeHandle) : nullptr;
     auto* fadingDSPToDestroy = (!fadingHandle.isNull() && fadingHandle != activeHandle)
         ? resolveDSPHandle(fadingHandle) : nullptr;

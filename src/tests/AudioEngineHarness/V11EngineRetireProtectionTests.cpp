@@ -443,6 +443,220 @@ static bool checkHandleLifetimeNoDuplicateRegistration()
     return !duplicate;
 }
 
+
+//==============================================================================
+// F1' (2026-10-25): DSPCore lifetime via DSPHandlePin.
+//   F1-1 pin と破棄開始の競合: 受付を閉じた後は pin が必ず失敗する
+//   F1-2 pin 保持中は解放されない（pinnedCount>0 の間 invalidate が false を返す）
+//   F1-3 pin 解除後に reclaim が進む（invalidate が true、instance が消える）
+//   F1-4 pin 失敗時は生ポインタが nullptr（逆参照できない）
+//   F1-5 pin の取得・解除にロック・確保・待機がない（大量反復で完走）
+//   F1-6 登録封鎖の境界でも安全（封鎖後の pin は成否いずれでも安全に終わる）
+//   F1-7 実 DSPCore を対象に、pin 保持中の解放禁止を実行時に確認
+//==============================================================================
+static bool checkF1PinLifecycle()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[F1] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        std::fprintf(stderr, "[F1] FAIL: handle registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // ---- F1-4: pin 成功時のみポインタが得られる ----
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        const bool gotPointer = static_cast<bool>(pin) && pin.get() == raw;
+        const auto pinnedWhileHeld = DeferredPublicationTestAccess::pinnedCount(e, handle.slot);
+        if (!gotPointer)
+        {
+            std::fprintf(stderr, "[F1-4] FAIL: pin did not yield the instance\n");
+            ok = false;
+        }
+        if (pinnedWhileHeld != 1)
+        {
+            std::fprintf(stderr, "[F1-2] FAIL: pinnedCount=%u while a lease is held\n",
+                         (unsigned)pinnedWhileHeld);
+            ok = false;
+        }
+
+        // ---- F1-1 / F1-2 / F1-7: 破棄側は受付を閉じても、pin が残る限り解放できない ----
+        const bool closed = DeferredPublicationTestAccess::closePins(e, handle);
+        if (!closed)
+        {
+            std::fprintf(stderr, "[F1-1] FAIL: could not close the pin gate\n");
+            ok = false;
+        }
+
+        auto pinAfterClose = e.tryPinDSPHandle(handle);
+        if (static_cast<bool>(pinAfterClose))
+        {
+            std::fprintf(stderr, "[F1-1] FAIL: pin succeeded after the gate was closed\n");
+            ok = false;
+        }
+        if (pinAfterClose.get() != nullptr)
+        {
+            std::fprintf(stderr, "[F1-4] FAIL: failed pin exposed a pointer\n");
+            ok = false;
+        }
+
+        // pin が生きている間は invalidate が「解放してはならない」を返す（F1-2 / F1-7）。
+        const bool invalidatedWhilePinned =
+            DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw);
+        if (invalidatedWhilePinned)
+        {
+            std::fprintf(stderr,
+                         "[F1-2] FAIL: destroy was allowed while a pin was held\n");
+            ok = false;
+        }
+    }
+
+    // ---- F1-3: lease を返した後は reclaim が進む ----
+    {
+        const auto pinnedAfterRelease = DeferredPublicationTestAccess::pinnedCount(e, handle.slot);
+        if (pinnedAfterRelease != 0)
+        {
+            std::fprintf(stderr, "[F1-3] FAIL: pinnedCount=%u after the lease was released\n",
+                         (unsigned)pinnedAfterRelease);
+            ok = false;
+        }
+
+        const bool invalidatedAfterRelease =
+            DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw);
+        if (!invalidatedAfterRelease)
+        {
+            std::fprintf(stderr, "[F1-3] FAIL: destroy still blocked after the lease was released\n");
+            ok = false;
+        }
+
+        const auto* afterDestroy = e.resolveDSPHandle(handle);
+        if (afterDestroy != nullptr)
+        {
+            std::fprintf(stderr, "[F1-3] FAIL: slot still resolves after invalidation\n");
+            ok = false;
+        }
+
+        // ここでメモリはまだ生きている（invalidateHandleBeforeDestroy はスロットだけを消す）。
+        // 実際の解放は destroy 経路が行う。
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+    }
+
+    // ---- F1-5: pin の取得・解除を大量に反復しても完走する（ロック/確保/待機なし） ----
+    {
+        auto core2 = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw2 = core2.release();
+        const auto handle2 = e.registerDSPHandleForRuntime(raw2);
+        if (!handle2.isNull())
+        {
+            constexpr int kIterations = 200000;
+            for (int i = 0; i < kIterations; ++i)
+            {
+                auto pin = e.tryPinDSPHandle(handle2);
+                if (!static_cast<bool>(pin))
+                {
+                    std::fprintf(stderr, "[F1-5] FAIL: pin failed at iteration %d\n", i);
+                    ok = false;
+                    break;
+                }
+            }
+            const auto countAfterLoop = DeferredPublicationTestAccess::pinnedCount(e, handle2.slot);
+            if (countAfterLoop != 0)
+            {
+                std::fprintf(stderr, "[F1-5] FAIL: pinnedCount=%u after the loop\n",
+                             (unsigned)countAfterLoop);
+                ok = false;
+            }
+            (void)e.retireDSPHandleForRuntime(raw2);
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw2);
+        }
+    }
+
+    harness.stop();
+
+    std::printf("[F1] pin lifecycle: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// F1-6: 登録封鎖 / shutdown の境界。
+//   reader 登録封鎖後に pin を試みても、成功なら lease が保護し、失敗なら nullptr を返す。
+//   どちらでも「保護されていないポインタを逆参照する」経路が生まれないことを確認する。
+//==============================================================================
+static bool checkF1PinAcrossRegistrationClose()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-6] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // reader 登録を封鎖（shutdown 相当の状態）。
+    e.m_epochDomain.closeReaderRegistration();
+
+    auto pin = e.tryPinDSPHandle(handle);
+    const bool safe = (!static_cast<bool>(pin)) || (pin.get() == raw);
+    if (!safe)
+    {
+        std::fprintf(stderr, "[F1-6] FAIL: pin returned an unexpected pointer\n");
+        ok = false;
+    }
+
+    // lease を保持したまま破棄を試みる → 封鎖中でも解放されない。
+    if (static_cast<bool>(pin))
+    {
+        if (DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw))
+        {
+            std::fprintf(stderr, "[F1-6] FAIL: destroy allowed while pinned after close\n");
+            ok = false;
+        }
+    }
+
+    pin = convo::isr::DSPHandlePin{};
+    (void)DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw);
+    (void)e.retireDSPHandleForRuntime(raw);
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+
+    harness.stop();
+    std::printf("[F1-6] registration-close boundary: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int runV11EngineRetireProtectionTests()
@@ -471,6 +685,16 @@ int runV11EngineRetireProtectionTests()
     if (!checkHandleLifetimeNoDuplicateRegistration())
     {
         std::fprintf(stderr, "FAIL: checkHandleLifetimeNoDuplicateRegistration (HD-3)\n");
+        hdOk = false;
+    }
+    if (!checkF1PinLifecycle())
+    {
+        std::fprintf(stderr, "FAIL: checkF1PinLifecycle (F1-1..F1-5, F1-7)\n");
+        hdOk = false;
+    }
+    if (!checkF1PinAcrossRegistrationClose())
+    {
+        std::fprintf(stderr, "FAIL: checkF1PinAcrossRegistrationClose (F1-6)\n");
         hdOk = false;
     }
     if (!hdOk)

@@ -316,7 +316,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // --- ProcessingStateを現行設計で初期化 ---
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
-    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    // F1′: lease をブロック全体で保持する。
+    auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    DSPCore::ProcessingState procState = stateWithPin.state;
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)

@@ -360,7 +360,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // ── Audio Thread authority: RuntimeWorld 由来のスナップショットを使用 ──
         const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
-        DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+        // F1′: lease をブロック全体で保持する。
+        auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+        DSPCore::ProcessingState procState = stateWithPin.state;
 
         DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
         const auto& preparedCrossfade = authority.preparedCrossfade;

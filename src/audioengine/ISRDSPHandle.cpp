@@ -31,6 +31,7 @@ DSPHandleRuntime::DSPHandleRuntime()
         convo::publishAtomic(registry_[i].generation, 0u, std::memory_order_relaxed);
         registry_[i].instance.store(nullptr, std::memory_order_relaxed);
         convo::publishAtomic(registry_[i].state, DSPState::Reclaimed, std::memory_order_relaxed);
+        convo::publishAtomic(registry_[i].pinState, uint64_t{0}, std::memory_order_relaxed);
     }
 
     // ★ FUTURE-5 (work88): フリーリスト初期化（slot 1..255。slot 0 は null handle 表現のため除外）
@@ -80,7 +81,108 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     reg.instance.store(dspInstance, std::memory_order_release);
     convo::publishAtomic(reg.generation, gen, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
+    // ★ F1' (2026-10-25): 受付を開いた状態（closed=0, count=0）で公開する。
+    //   Constructing の時点で破棄が来ても closePinsForDestroy が閉じられる。
+    convo::publishAtomic(reg.pinState, uint64_t{0}, std::memory_order_release);
     return DSPHandle{ slot, gen };
+}
+
+DSPHandlePin DSPHandleRuntime::tryPin(DSPHandle handle) noexcept
+{
+    // ★ F1' (2026-10-25): RT 可。ロック・動的確保・待機を一切行わない。
+    if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS)
+        return {};
+
+    auto& reg = registry_[static_cast<size_t>(handle.slot)];
+
+    if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != handle.generation)
+        return {};   // stale handle
+
+    // 「受付が開いていることを確認して pin 数 +1」を 1 回の CAS で行う。
+    //   2 ワードに分けると、確認と +1 の間に破棄が入る窓が残る（レビュー指摘 A）。
+    uint64_t observed = convo::consumeAtomic(reg.pinState, std::memory_order_acquire);
+    for (;;)
+    {
+        if ((observed & kPinClosedBit) != 0)
+            return {};                                  // 破棄が受付を閉じた → 失敗（F1-1/F1-4）
+        const uint64_t next = observed + 1;             // 下位 63bit のカウンタ
+        if (convo::compareExchangeAtomic(reg.pinState, observed, next,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            break;
+        // observed は失敗時に最新値へ更新される
+    }
+
+    void* instance = reg.instance.load(std::memory_order_acquire);
+    if (instance == nullptr)
+    {
+        // F2' の無効化後（instance が既に消えている）。pin を返して失敗側へ倒す。
+        releasePinSlot(handle.slot);
+        return {};
+    }
+
+    return DSPHandlePin(this, handle.slot, instance);
+}
+
+void DSPHandlePin::release() noexcept
+{
+    if (owner_ == nullptr)
+        return;
+    owner_->releasePinSlot(slot_);
+    owner_ = nullptr;
+    instance_ = nullptr;
+    slot_ = 0;
+}
+
+bool DSPHandleRuntime::closePinsForDestroy(uint32_t slot, uint64_t expectedGeneration) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return false;
+    auto& reg = registry_[slot];
+    if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != expectedGeneration)
+        return false;
+
+    // 受付を閉じる（カウンタは保持したまま bit63 を立てる）。
+    //   既に閉じていれば false（二重閉鎖は無害だが、呼び出し側に事実を返す）。
+    uint64_t observed = convo::consumeAtomic(reg.pinState, std::memory_order_acquire);
+    for (;;)
+    {
+        if ((observed & kPinClosedBit) != 0)
+            return false;
+        const uint64_t next = observed | kPinClosedBit;
+        if (convo::compareExchangeAtomic(reg.pinState, observed, next,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            return true;
+    }
+}
+
+uint32_t DSPHandleRuntime::pinnedCount(uint32_t slot) const noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return 0;
+    const uint64_t v = convo::consumeAtomic(registry_[slot].pinState, std::memory_order_acquire);
+    return static_cast<uint32_t>(v & kPinCountMask);
+}
+
+void DSPHandleRuntime::releasePinSlot(uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    auto& reg = registry_[slot];
+    // 受付ビットは保持したままカウンタだけ -1（待機しない）。
+    uint64_t observed = convo::consumeAtomic(reg.pinState, std::memory_order_acquire);
+    for (;;)
+    {
+        const uint64_t count = observed & kPinCountMask;
+        if (count == 0)
+            return;                                     // 不整合（二重解除）は無視して安全側
+        const uint64_t next = (observed & kPinClosedBit) | (count - 1);
+        if (convo::compareExchangeAtomic(reg.pinState, observed, next,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            return;
+    }
 }
 
 ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
@@ -223,32 +325,90 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
 //   「解放済みメモリを指したまま Active/Retired で残るスロット」を構造的に除去する。
 //   ダンプ実測: slot 251 が Active のまま instance=解放済みの 4.84MB ブロックを指し、
 //   publisher が DSPCore::runtimeUuid (+0x49E408) を読んで 0xC0000005。
-int DSPHandleRuntime::invalidateForDestroy(void* dspInstance) noexcept
+//
+// ★ F1' (2026-10-25): pin の受付を閉じ、**既存 pin が消えるまで instance を消さない**。
+//   `waitForPinsToDrain` は NonRT（破棄は NonRT）で待つ。タイムアウトしても
+//   解放を強行しない — その場合は false を返し、呼び出し側が延期する
+//   （設計資料 §2.2。ここで強行すると HL-5 そのものになる）。
+bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) noexcept
 {
     if (dspInstance == nullptr)
-        return 0;
+        return true;   // 何も無い = 解放してよい
 
-    int invalidated = 0;
-    std::lock_guard<std::mutex> lock(freeListMutex_);
-    for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
+    // 1) 受付を閉じる（この時点で新しい pin は必ず失敗する）。
+    //    スロットごとに generation を控えてから閉じる。
+    using Target = PinDrainTarget;
+    std::array<Target, MAX_DSP_SLOTS> targets{};
+    size_t targetCount = 0;
     {
-        auto& reg = registry_[i];
-        if (reg.instance.load(std::memory_order_acquire) != dspInstance)
-            continue;
-
-        const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
-        if (state == DSPState::Reclaimed)
-            continue;   // 既に無効化済み（二重 push を避ける）
-
-        convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
-        reg.instance.store(nullptr, std::memory_order_release);
-        convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
-
-        if (i != 0 && freeSize_ < MAX_DSP_SLOTS)
-            freeSlots_[freeSize_++] = static_cast<uint32_t>(i);
-        ++invalidated;
+        std::lock_guard<std::mutex> lock(freeListMutex_);
+        for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
+        {
+            auto& reg = registry_[i];
+            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+                continue;
+            if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
+                continue;
+            targets[targetCount++] = Target{ static_cast<uint32_t>(i),
+                                             convo::consumeAtomic(reg.generation,
+                                                                  std::memory_order_acquire) };
+        }
     }
-    return invalidated;
+    for (size_t k = 0; k < targetCount; ++k)
+        (void)closePinsForDestroy(targets[k].slot, targets[k].generation);
+
+    // 2) 既存 pin の消滅を待つ（受付は閉じているので増えない）。
+    //    タイムアウトしたら **解放しない**。
+    if (!waitForPinsToDrain(targets.data(), targetCount, timeoutMs))
+        return false;
+
+    // 3) instance を消す（ここに来た時点で pin 保持者はいない）。
+    {
+        std::lock_guard<std::mutex> lock(freeListMutex_);
+        for (size_t k = 0; k < targetCount; ++k)
+        {
+            auto& reg = registry_[targets[k].slot];
+            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+                continue;
+            if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
+                continue;
+
+            convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
+            reg.instance.store(nullptr, std::memory_order_release);
+            convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
+
+            if (targets[k].slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+                freeSlots_[freeSize_++] = targets[k].slot;
+        }
+    }
+    return true;
+}
+
+bool DSPHandleRuntime::waitForPinsToDrain(const void* targets, size_t targetCount,
+                                          int timeoutMs) noexcept
+{
+    if (targetCount == 0)
+        return true;
+
+    const auto* t = static_cast<const PinDrainTarget*>(targets);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    for (;;)
+    {
+        bool allZero = true;
+        for (size_t k = 0; k < targetCount; ++k)
+        {
+            if (pinnedCount(t[k].slot) != 0)
+            {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero)
+            return true;
+        if (std::chrono::steady_clock::now() >= deadline)
+            return false;   // ★ 解放を強行しない（呼び出し側が延期する）
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void DSPHandleRuntime::quarantine(DSPHandle handle)

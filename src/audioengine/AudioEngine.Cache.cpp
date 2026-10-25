@@ -135,6 +135,22 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     return static_cast<EQCoeffCache*>(resolved.instance);
 }
 
+// ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
+//   「ポインタを使い終わるスコープ全体」で保持すること（規約 R2）。
+convo::isr::DSPHandlePin AudioEngine::EQCacheManager::pinByHash(uint64_t hash) noexcept
+{
+    const CacheMap* currentMap = loadMap();
+    if (currentMap == nullptr)
+        return {};
+
+    const auto it = currentMap->map.find(hash);
+    if (it == currentMap->map.end())
+        return {};
+
+    // ★ F1': resolve() ではなく tryPin() を使う（受付閉鎖と pin 数を単一ワードで扱う）。
+    return owner.dspHandleRuntime_.tryPin(it->second);
+}
+
 EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
 {
     const CacheMap* currentMap = loadMap();
