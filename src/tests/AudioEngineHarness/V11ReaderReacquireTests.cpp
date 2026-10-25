@@ -15,9 +15,11 @@
 //
 // No new CTest target: these run as sub-tests of the AudioEngineHarness exe.
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <thread>
 
 #include "core/EpochDomain.h"
@@ -427,6 +429,104 @@ bool checkV11ReacquireIsSingleShot()
     return true;
 }
 
+
+// v11_11 (RA-6): quarantine requested while the slot is busy is a *pending* flag. It must
+// not change the barrier accounting mid-block, must be promoted when the guard drops, and
+// the resulting quarantined-idle slot must still be re-acquirable with protection.
+bool checkV11QuarantinePendingTransition()
+{
+    v11ResetCounters();
+    convo::EpochDomain domain;
+    convo::isr::RetireQuarantineStore store;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    bool requested = false;
+    bool notCountedWhilePending = false;
+    {
+        convo::RCUReaderGuard g(reader);
+        if (!g.rootEnterSucceeded())
+            return false;
+        slot = v11FindActiveSlot(domain);
+        if (slot < 0)
+            return false;
+
+        // Contract: with depth > 0 the quarantine is deferred, so the call reports
+        // false and the pending flag is the acknowledgement (EpochDomain.h:327-328,379).
+        requested = !domain.quarantineReader(slot);
+        notCountedWhilePending = (domain.quarantinedReaderCount() == 0);
+    }                                                        // exit -> promote
+
+    const bool promoted = (domain.quarantinedReaderCount() == 1);
+
+    static int object = 0;
+    void* obj = &object;
+    bool protectedWhileActive = false;
+    {
+        convo::RCUReaderGuard g(reader);
+        if (!g.rootEnterSucceeded())
+        {
+            std::printf("  v11_11: re-entry refused after pending quarantine\n");
+            return false;
+        }
+        store.quarantine(obj, v11TestDeleter, domain.currentEpoch(),
+                         DeletionEntryType::Generic, "v11-11");
+        domain.publishEpoch();
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        protectedWhileActive = (g_v11DeleterCalls == 0);
+    }
+
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
+
+    std::printf("  v11_11: deferred=%d notCountedWhilePending=%d promoted=%d "
+                "protected=%d freed=%d\n",
+                requested ? 1 : 0, notCountedWhilePending ? 1 : 0, promoted ? 1 : 0,
+                protectedWhileActive ? 1 : 0, freed ? 1 : 0);
+
+    if (!requested || !notCountedWhilePending || !promoted || !protectedWhileActive || !freed)
+        return false;
+    return true;
+}
+
+// v11_12 (RA-7): with every slot held, a further reader must be refused, and releasing one
+// must let a reader re-enter - the refusal must not poison the slots that are already held.
+bool checkV11CapacityRefusalRecovers()
+{
+    convo::EpochDomain domain;
+
+    std::array<std::unique_ptr<convo::RCUReader>, convo::EpochDomain::kMaxReaders> readers;
+    std::array<std::unique_ptr<convo::RCUReaderGuard>, convo::EpochDomain::kMaxReaders> guards;
+
+    int held = 0;
+    for (int i = 0; i < convo::EpochDomain::kMaxReaders; ++i)
+    {
+        readers[i] = std::make_unique<convo::RCUReader>(domain);
+        guards[i] = std::make_unique<convo::RCUReaderGuard>(*readers[i]);
+        if (guards[i]->rootEnterSucceeded())
+            ++held;
+    }
+
+    convo::RCUReader extra(domain);
+    convo::RCUReaderGuard extraGuard(extra);
+    const bool overflowRefused = !extraGuard.rootEnterSucceeded();
+
+    guards[0].reset();                       // release one slot
+    convo::RCUReaderGuard reenter(*readers[0]);
+    const bool recovered = reenter.rootEnterSucceeded();
+
+    for (auto& g : guards)
+        g.reset();
+
+    std::printf("  v11_12: held=%d/%d overflowRefused=%d recovered=%d\n",
+                held, convo::EpochDomain::kMaxReaders,
+                overflowRefused ? 1 : 0, recovered ? 1 : 0);
+
+    if (held != convo::EpochDomain::kMaxReaders || !overflowRefused || !recovered)
+        return false;
+    return true;
+}
+
 } // namespace
 
 int runV11ReaderReacquireTests()
@@ -466,6 +566,16 @@ int runV11ReaderReacquireTests()
     if (!checkV11ReacquireIsSingleShot())
     {
         std::fprintf(stderr, "FAIL: checkV11ReacquireIsSingleShot\n");
+        ok = false;
+    }
+    if (!checkV11QuarantinePendingTransition())
+    {
+        std::fprintf(stderr, "FAIL: checkV11QuarantinePendingTransition\n");
+        ok = false;
+    }
+    if (!checkV11CapacityRefusalRecovers())
+    {
+        std::fprintf(stderr, "FAIL: checkV11CapacityRefusalRecovers\n");
         ok = false;
     }
 
