@@ -23,6 +23,7 @@
 // deleter invocation itself — the reclaim event.
 
 #include "AudioEngineHarness.h"
+#include "DeferredPublicationTestAccess.h"
 
 #include <atomic>
 #include <chrono>
@@ -285,6 +286,163 @@ static bool checkInCallbackRetireProtection()
 #endif
 }
 
+
+namespace {
+
+// Waits until the engine has an authoritative published runtime and therefore a real
+// active handle. HD-1 needs one only so that its own activation can be undone.
+convo::isr::DSPHandle hdWaitForActiveHandle(AudioEngine& e)
+{
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+    auto active = handles.getActiveRuntimeDSPHandle();
+    for (int i = 0; i < 1000 && active.isNull(); ++i)
+    {
+        const auto* w = e.observePublishedWorld();
+        if (w != nullptr && w->engine.current != nullptr)
+            (void)e.registerDSPHandleForRuntime(
+                static_cast<AudioEngine::DSPCore*>(w->engine.current));
+        active = handles.getActiveRuntimeDSPHandle();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return active;
+}
+
+} // namespace
+
+//==============================================================================
+// HD-1 (P0): a DSPCore destroyed while its handle slot is still Active must not resolve.
+//   The 2026-10-25 crash: activeRuntimeDSPHandle_ -> slot 251 (state Active) ->
+//   instance 0x18f250e1080, already freed (unmapped). resolve() returned that pointer and
+//   the publish path read DSPCore::runtimeUuid at +0x49E408 -> 0xC0000005.
+//   This builds the same state deterministically with the production destroy path.
+//   PASS: resolveDSPHandle(handle) == nullptr after the destroy.
+//==============================================================================
+static bool checkHandleLifetimeDestroyedActiveDoesNotResolve()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[HD-1] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+
+    const auto originalActive = hdWaitForActiveHandle(e);
+    if (originalActive.isNull())
+    {
+        std::printf("[HD-1] SKIPPED: no active runtime handle to restore\n");
+        harness.stop();
+        return true;
+    }
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[HD-1] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        std::fprintf(stderr, "[HD-1] FAIL: handle registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // Mark the slot Active, then give the engine its own active handle back. The slot stays
+    // Active (the state under test) while teardown can no longer resolve it.
+    handles.activate(handle);
+    handles.activate(originalActive);
+
+    if (e.resolveDSPHandle(handle) != raw)
+    {
+        std::fprintf(stderr, "[HD-1] FAIL: live Active slot did not resolve to its instance\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        (void)e.retireDSPHandleForRuntime(raw);
+        harness.stop();
+        return false;
+    }
+
+    // Production destroy path, but WITHOUT retiring the handle first.
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+
+    const auto* resolvedAfterDestroy = e.resolveDSPHandle(handle);
+
+    (void)e.retireDSPHandleForRuntime(raw);   // drop the map entry (no dereference)
+
+    harness.stop();
+
+    std::printf("[HD-1] slot=%d resolvesAfterDestroy=%d : %s\n",
+                static_cast<int>(handle.slot),
+                resolvedAfterDestroy != nullptr ? 1 : 0,
+                resolvedAfterDestroy == nullptr ? "PASS" : "FAIL");
+    return resolvedAfterDestroy == nullptr;
+}
+
+//==============================================================================
+// HD-3 (P0): one DSPCore instance must not own two handle slots.
+//   registerDSPHandleForRuntime() dedups through runtimeDSPHandleMap_, but
+//   AudioEngine.Cache.cpp:79 calls dspHandleRuntime_.create() directly. If that happens for
+//   an already-registered instance, retire() invalidates only one of the two slots and the
+//   survivor can stay Active over a pointer that is later freed (dump: slots 251 + 254).
+//   PASS: the second create returns the same handle or a null handle.
+//==============================================================================
+static bool checkHandleLifetimeNoDuplicateRegistration()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[HD-3] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[HD-3] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto first = e.registerDSPHandleForRuntime(raw);
+    if (first.isNull())
+    {
+        std::fprintf(stderr, "[HD-3] FAIL: first registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // The cache path calls this directly, bypassing the map.
+    const auto second = handles.create(raw);
+
+    const bool duplicate = !second.isNull() && second.slot != first.slot;
+
+    if (!second.isNull())
+        handles.retire(second);
+    (void)e.retireDSPHandleForRuntime(raw);
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+
+    harness.stop();
+
+    std::printf("[HD-3] first=%d second=%d duplicateSlot=%d : %s\n",
+                static_cast<int>(first.slot),
+                second.isNull() ? -1 : static_cast<int>(second.slot),
+                duplicate ? 1 : 0,
+                duplicate ? "FAIL" : "PASS");
+    return !duplicate;
+}
+
 } // namespace
 
 int runV11EngineRetireProtectionTests()
@@ -302,5 +460,20 @@ int runV11EngineRetireProtectionTests()
         std::fprintf(stderr, "FAIL: checkV11InCallbackRetireProtection\n");
         return 1;
     }
+    // HD-1 and HD-3 are independent observations of the same defect class. Run both so one
+    // failure does not hide the other's result; this is the C-1 evidence run.
+    bool hdOk = true;
+    if (!checkHandleLifetimeDestroyedActiveDoesNotResolve())
+    {
+        std::fprintf(stderr, "FAIL: checkHandleLifetimeDestroyedActiveDoesNotResolve (HD-1)\n");
+        hdOk = false;
+    }
+    if (!checkHandleLifetimeNoDuplicateRegistration())
+    {
+        std::fprintf(stderr, "FAIL: checkHandleLifetimeNoDuplicateRegistration (HD-3)\n");
+        hdOk = false;
+    }
+    if (!hdOk)
+        return 1;
     return 0;
 }

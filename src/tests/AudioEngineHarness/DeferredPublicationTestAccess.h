@@ -83,6 +83,16 @@ public:
         return e.dspHandleRuntime_;
     }
 
+    // ===== HD-1 (V-11 handle lifetime): production destroy path, no handle retire =====
+    //   Production frees a DSPCore only after retiring its handle (DSPLifetimeManager) or
+    //   after proving shutdown quiescence. This hook runs the same destroy function without
+    //   retiring, which is the state the 2026-10-25 crash dump showed (slot Active, memory
+    //   freed). Used only by V11EngineRetireProtectionTests (HD-1).
+    static void destroyCoreNodeWithoutRetire(void* core) noexcept
+    {
+        AudioEngine::destroyDSPCoreNode(core);
+    }
+
     // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
     // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
     // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは
