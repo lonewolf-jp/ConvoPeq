@@ -106,7 +106,11 @@ struct DSPRegistrySlot
     std::atomic<uint64_t> generation;  // ★ B-1: 64bit化（ABA 防止世代番号）
     static_assert(std::atomic<uint64_t>::is_always_lock_free,
         "atomic<uint64_t> must be lock-free on x64 for ISR Runtime");
-    void*                 instance;    // DSP インスタンスポインタ
+    // ★ F2' (2026-10-25): instance を atomic 化。create()/reclaim()/invalidateForDestroy() が
+    //   書き込み、resolve() が別スレッドから読むため、plain pointer は正式なデータ競合だった
+    //   （クラッシュダンプの stale slot は解放経路と並行に読まれていた）。
+    //   void* と同サイズ・同アラインメントなのでスロットのレイアウトは不変（24 バイト）。
+    std::atomic<void*>    instance;    // DSP インスタンスポインタ
     std::atomic<DSPState> state;       // 現在状態（atomic access）
 };
 
@@ -123,7 +127,24 @@ public:
     ~DSPHandleRuntime();
 
     // NonRT: DSP インスタンスを登録し DSPHandle を返す
+    // ★ F3' (2026-10-25): 同一インスタンスに複数の有効ハンドルを発行しない。
+    //   - 既存スロットが live（Constructing/Active/CrossfadingIn/CrossfadingOut）なら
+    //     そのハンドルを返す（重複排除）。
+    //   - 既存スロットが Retired/DestroyPending/Quarantined なら **拒否**（null を返す）。
+    //     破棄が確定したオブジェクトの再登録は「復活」であり、retire が片方のスロットしか
+    //     無効化しないまま他方が Active で残る経路になる（ダンプの slot 251/254）。
+    //   - Reclaimed は instance が null なので一致せず、アドレス再利用の新オブジェクトは
+    //     通常どおり登録できる。
     DSPHandle create(void* dspInstance);
+
+    // ★ F2' (2026-10-25): DSPCore のメモリ解放より前に、そのインスタンスを指す全スロットを
+    //   解決不能にする（DestroyPending → Reclaimed + instance=nullptr + free list 返却）。
+    //   AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ばれる。
+    //   閉じる欠陥: 解放済みメモリを指したまま Active/Retired で残るスロット（ダンプの 251）。
+    //   閉じない欠陥: resolve() が state と instance を読んだ直後〜解放の間の TOCTOU。
+    //   これは pin 方式（F1'・別課題）でしか閉じない。
+    //   戻り値: 無効化したスロット数。
+    int invalidateForDestroy(void* dspInstance) noexcept;
 
     // RT/NonRT: handle を検証し、有効な参照を返す
     // stale handle（generation mismatch）は build別ポリシーで処理

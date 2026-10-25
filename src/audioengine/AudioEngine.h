@@ -4639,6 +4639,25 @@ inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
     return static_cast<DSPCore*>(resolved.instance);
 }
 
+// ★ F2' (2026-10-25): DSPCore のメモリ解放の直前に、そのインスタンスを指すハンドルを
+//   解決不能にする。AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ぶ。
+//   - 台帳（runtimeDSPHandleMap_）から先に identity を外し、その後スロットを無効化する。
+//     2 つの mutex を入れ子にしない（register は map→freeList の順なので、ここも同じ順）。
+//   - 戻り値は無効化したスロット数（0 = 未登録インスタンス。rebuild-obsolete / recovery の
+//     直接破棄経路がこれに当たる）。
+inline int invalidateHandleBeforeDestroy(void* core) noexcept
+{
+    if (core == nullptr)
+        return 0;
+
+    {
+        std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+        runtimeDSPHandleMap_.erase(static_cast<DSPCore*>(core));
+    }
+
+    return dspHandleRuntime_.invalidateForDestroy(core);
+}
+
 inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
 {
     if (dsp == nullptr)
@@ -5116,6 +5135,13 @@ public:
     // リリースキューに溜まったエントリを解放可能なものから処理する
     void processDeferredReleases();
     static void destroyDSPCoreNode(void* p) noexcept;
+
+    // ★ F2' (2026-10-25): DSPCore の解放は destroyDSPCoreNode（static・関数ポインタとして
+    //   EBR キューに渡すため this を持てない）の一本道を通る。そこで「今生きているエンジン」を
+    //   1 つだけ公開し、解放直前にそのエンジンのハンドルを無効化する。
+    //   前提: プロセス内の AudioEngine は同時に 1 つ（製品構成）。テストは 1 エンジンずつ
+    //   逐次生成するため同じ前提が成り立つ。該当スロットが無い場合は単なる no-op。
+    static std::atomic<AudioEngine*> s_handleInvalidationOwner;
 
     // スナップショット基盤（Phase 2）
     // ==================================================================

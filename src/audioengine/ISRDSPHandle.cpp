@@ -29,7 +29,7 @@ DSPHandleRuntime::DSPHandleRuntime()
 
     for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
         convo::publishAtomic(registry_[i].generation, 0u, std::memory_order_relaxed);
-        registry_[i].instance = nullptr;
+        registry_[i].instance.store(nullptr, std::memory_order_relaxed);
         convo::publishAtomic(registry_[i].state, DSPState::Reclaimed, std::memory_order_relaxed);
     }
 
@@ -43,8 +43,33 @@ DSPHandleRuntime::~DSPHandleRuntime() = default;
 
 DSPHandle DSPHandleRuntime::create(void* dspInstance)
 {
+    if (dspInstance == nullptr)
+        return DSPHandle::null();
+
     // ★ FUTURE-5 (work88): 線形スキャン → フリーリスト pop（O(1) 確保）
     std::lock_guard<std::mutex> lock(freeListMutex_);
+
+    // ★ F3' (2026-10-25): 1 インスタンス = 1 ハンドル。
+    //   重複を許すと retire() が片方しか無効化せず、残ったスロットが解放済みメモリを
+    //   Active のまま指す（2026-10-25 のダンプ: slot 251 Active / slot 254 Retired が同一
+    //   インスタンス）。スロット数は 256 固定なので走査は NonRT で許容できる。
+    for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
+        const auto& reg = registry_[i];
+        if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            continue;
+        const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
+        if (state == DSPState::Constructing || state == DSPState::Active
+            || state == DSPState::CrossfadingIn || state == DSPState::CrossfadingOut) {
+            return DSPHandle{ static_cast<uint32_t>(i),
+                              convo::consumeAtomic(reg.generation, std::memory_order_acquire) };
+        }
+        // 破棄が確定した / アクセス禁止のインスタンスは復活させない。
+        if (state == DSPState::Retired || state == DSPState::DestroyPending
+            || state == DSPState::Quarantined) {
+            return DSPHandle::null();
+        }
+    }
+
     if (freeSize_ == 0) {
         assert(false && "DSP registry exhausted");
         return DSPHandle::null();
@@ -52,7 +77,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     const uint32_t slot = freeSlots_[--freeSize_];
     auto& reg = registry_[slot];
     const auto gen = convo::consumeAtomic(reg.generation, std::memory_order_acquire) + 1u;
-    reg.instance = dspInstance;
+    reg.instance.store(dspInstance, std::memory_order_release);
     convo::publishAtomic(reg.generation, gen, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
     return DSPHandle{ slot, gen };
@@ -83,7 +108,7 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
         return { nullptr, false, true };   // isStale=true so callers can distinguish
     }
 
-    return { reg.instance, true, false };
+    return { reg.instance.load(std::memory_order_acquire), true, false };
 }
 
 void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id)
@@ -174,11 +199,48 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
     //   同一 slot の二重割当（double-allocation）を構造的に排除）。
     if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
         return;
-    reg.instance = nullptr;
+    // ★ F2' (2026-10-25): 状態を先に無効化し、その後に instance を消す。
+    //   逆順（instance=nullptr → state=Reclaimed）だと、resolve() が state を読んだ直後に
+    //   古い state（Active/Retired）を見たまま instance を読む窓が広がる。state を先に
+    //   DestroyPending にすることで、resolve() は少なくとも「解決不能」へ倒れる。
+    convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
+    reg.instance.store(nullptr, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
     // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
     if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = handle.slot;
+}
+
+// ★ F2' (2026-10-25): DSPCore のメモリ解放より前に呼ばれる。
+//   「解放済みメモリを指したまま Active/Retired で残るスロット」を構造的に除去する。
+//   ダンプ実測: slot 251 が Active のまま instance=解放済みの 4.84MB ブロックを指し、
+//   publisher が DSPCore::runtimeUuid (+0x49E408) を読んで 0xC0000005。
+int DSPHandleRuntime::invalidateForDestroy(void* dspInstance) noexcept
+{
+    if (dspInstance == nullptr)
+        return 0;
+
+    int invalidated = 0;
+    std::lock_guard<std::mutex> lock(freeListMutex_);
+    for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
+    {
+        auto& reg = registry_[i];
+        if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            continue;
+
+        const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
+        if (state == DSPState::Reclaimed)
+            continue;   // 既に無効化済み（二重 push を避ける）
+
+        convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
+        reg.instance.store(nullptr, std::memory_order_release);
+        convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
+
+        if (i != 0 && freeSize_ < MAX_DSP_SLOTS)
+            freeSlots_[freeSize_++] = static_cast<uint32_t>(i);
+        ++invalidated;
+    }
+    return invalidated;
 }
 
 void DSPHandleRuntime::quarantine(DSPHandle handle)
@@ -274,7 +336,7 @@ void DSPHandleRuntime::destroyQuarantineSlot(
         return;
 
     // Phase 2: instance 解放
-    registry_[slot].instance = nullptr;
+    registry_[slot].instance.store(nullptr, std::memory_order_release);
     convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
                          std::memory_order_release);
     // ★ 監査指摘 (work88): Reclaimed 化した quarantine slot を free list へ戻す（スロットリーク防止）。

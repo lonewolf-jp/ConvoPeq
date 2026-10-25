@@ -17,6 +17,16 @@
 
 void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 {
+    // ★ F2' (2026-10-25): メモリを解放する前に、このインスタンスを指すハンドルを解決不能に
+    //   する。呼び出し側が retire を忘れていても（HD-1 が再現した状態）、解放後のスロットが
+    //   生ポインタを返すことはなくなる。
+    //   残る TOCTOU（resolve が state+instance を読んだ直後〜解放）は pin 方式（F1'）で閉じる。
+    if (p != nullptr)
+    {
+        if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
+            owner->invalidateHandleBeforeDestroy(p);
+    }
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ D117 root-cause audit: observation-only trace (no semantic change).
     juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));

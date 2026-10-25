@@ -17,6 +17,9 @@ void diagLog(const juce::String& message)
 
 // ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+// ★ F2' (2026-10-25): destroyDSPCoreNode（static）から解放直前のハンドル無効化を行うための
+//   「現在のエンジン」。製品はプロセス内 1 エンジン、テストは逐次生成。
+std::atomic<AudioEngine*> AudioEngine::s_handleInvalidationOwner{nullptr};
 
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
@@ -98,10 +101,23 @@ AudioEngine::AudioEngine()
     retryScheduler_ = std::make_unique<RetryScheduler>([this](const RetryScheduleRequest& req) noexcept {
         this->submitRebuildIntent(req.kind, req.reason, req.rebuildClass, req.collapsePolicy);
     });
+
+    // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
+    //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
+    s_handleInvalidationOwner.store(this, std::memory_order_release);
 }
 
 AudioEngine::~AudioEngine()
 {
+    // ★ F2' (2026-10-25): 破棄中の destroyDSPCoreNode が解体途中のメンバへ触らないよう、
+    //   ここで所有者を降りる。teardown の DSPCore は事前に retire 済み（Retired は解決不可）で
+    //   あるため、無効化をスキップしても安全側。
+    {
+        AudioEngine* expected = this;
+        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
+                                                          std::memory_order_acq_rel);
+    }
+
     diagLog("[DIAG] ~AudioEngine: enter");
     // Shutdown sequence (list.md 12.1.2):
     // 1) stop callbacks/workers, 2) detach published runtime pointers,
