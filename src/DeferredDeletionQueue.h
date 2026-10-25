@@ -23,6 +23,17 @@ enum class DeletionEntryType : uint8_t {
     World   = 1   // ★ T1 (D86): world retirement の識別 metadata（telemetry 専用・lifetime authority ではない）
 };
 
+// ★ F1'-b (2026-10-25): 破棄の結果。deferred = 「解放せず、所有権を呼び出し側に残した」。
+//   pin が残っている場合に destroyDSPCoreNode がこれを返す。void(void*) では表現できないため、
+//   再試行可能な破棄（TerminalReclaimAuthority とエンジンの再試行リスト）で使う。
+enum class DestroyOutcome : uint8_t {
+    Destroyed = 0,   // 物理解放が完了した（以後 ptr は無効）
+    Deferred  = 1    // pin 残留により解放しなかった（所有権は呼び出し側に残る）
+};
+
+// ★ F1'-b: 再試行可能な deleter。void(void*) の上位互換。
+using RetryableDeleter = DestroyOutcome (*)(void*) noexcept;
+
 // DeletionEntry: 削除対象のエントリ
 // B23: static_assert を通すため、std::atomic を含まずトリビアルコピー可能である必要があります。
 struct DeletionEntry {

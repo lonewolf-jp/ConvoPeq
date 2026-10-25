@@ -40,6 +40,10 @@ void AudioEngine::tryReclaimResources() noexcept
         return;
     convo::fetchAddAtomic(rtAuxMutable_.runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     m_retireRouter->tryReclaim();
+
+    // ★ F1'-b (2026-10-25): pin 残留で延期された破棄を再試行する。
+    //   pin が解放されていれば、ここで初めて物理破棄が完了する。
+    (void)retryDeferredDestroys();
 }
 
 void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
@@ -64,6 +68,10 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     // [P1-21] epoch-free API: minReaderEpoch を直接渡す
     m_coordinator.reclaim(m_retireRouter->getMinReaderEpoch());
     runtimePublicationBridge_.onReclaimEnd();
+
+    // ★ F1'-b (2026-10-25): pin 残留で延期された破棄を再試行する。
+    //   drain の後に置くことで、retire 済み → pin 解放済み の順序が保証される。
+    (void)retryDeferredDestroys();
 
     // ★ work88 (Phase 3): 保留中 reclaim の再試行。
     //   requestReclaim が RT Reader の古い epoch 参照により遅延した handle を、

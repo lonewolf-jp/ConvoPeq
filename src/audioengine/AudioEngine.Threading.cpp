@@ -15,55 +15,110 @@
 // 本ファイルには非3PR関数のみ残す.
 //==============================================================================
 
-void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+// ★ F1'-b (2026-10-25): 破棄結果を返す版。pin が残っていれば Deferred を返し、
+//   **解放しない**（所有権は呼び出し側に残る）。void 版は後方互換のラッパー。
+DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 {
-    // ★ F2'/F1' (2026-10-25): メモリを解放する前に、このインスタンスを指すハンドルを解決不能に
-    //   し、**既存 pin が消えるまで待つ**。呼び出し側が retire を忘れていても（HD-1 が再現した
-    //   状態）、解放後のスロットが生ポインタを返すことはなくなる。
-    //   pin が残っていて待ちきれない場合は **解放しない**（設計資料 §2.2）。
-    //   解放しないまま戻ると呼び出し側は「解放済み」と誤認するため、ここでは
-    //   リークを選ぶ（安全側）。延期は呼び出し側（TerminalReclaimAuthority）の責務であり、
-    //   deleter の契約（void(void*)・戻り値なし）では延期を表現できない。
-    if (p != nullptr)
+    if (p == nullptr)
+        return DestroyOutcome::Destroyed;
+
+    if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
     {
-        if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
+        if (!owner->invalidateHandleBeforeDestroy(p))
         {
-            if (!owner->invalidateHandleBeforeDestroy(p))
-            {
-                juce::Logger::writeToLog(juce::String::formatted(
-                    "[F1_DESTROY_DEFERRED] dsp=%p pins still held: memory retained (leak, not UAF)", p));
-                return;   // ★ 解放しない
-            }
+            // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
+            //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
+            //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
+            owner->deferDestroyRetry(p);
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
+            return DestroyOutcome::Deferred;
         }
     }
 
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ D117 root-cause audit: observation-only trace (no semantic change).
-    juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
-    // ★ D162-1R-B: 破壊前の実測 footprint を DSPCore 保存値から出力
-    //   （AC-R5: construct/retained/destroy を pointer identity で突合）。
-    if (p != nullptr)
-    {
-        auto* coreDiag = static_cast<DSPCore*>(p);
-        const auto& fp = coreDiag->diagFootprint;
-        juce::Logger::writeToLog(juce::String::formatted(
-            "[DSP_DESTROY_FOOTPRINT] dsp=%p gen=%llu trackedFootprint=%zu "
-            "(convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu)",
-            p,
-            (unsigned long long)coreDiag->diagGeneration.load(std::memory_order_relaxed),
-            fp.total(), fp.convolver, fp.irData, fp.nuc, fp.ipp,
-            fp.latency, fp.eq, fp.other));
-    }
-#endif
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ D162-1R-B: 破壊完了確認（保存 footprint 全カテゴリは DSPCore と運命を共にするため
-    //   帰属対象 0 = released）。実メモリ還収は OS/allocator 依存（H4 判定は MEM_SNAP 側）。
-    juce::Logger::writeToLog(juce::String::formatted(
-        "[DSP_FOOTPRINT_RELEASED] dsp=%p remaining=0", p));
-#endif
+    return DestroyOutcome::Destroyed;
+}
+
+void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+{
+    // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
+    //   Retryable 版が Deferred 時に自ら再試行リストへ登録するので、ここは委譲するだけ。
+    (void)destroyDSPCoreNodeRetryable(p);
+}
+
+// ★ F1'-b: 再試行リストへの登録（重複は無視）。所有権はこのリストが保持する。
+void AudioEngine::deferDestroyRetry(void* p) noexcept
+{
+    if (p == nullptr)
+        return;
+    std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+    for (void* existing : deferredDestroy_)
+    {
+        if (existing == p)
+            return;   // 既に保持している（二重登録しない）
+    }
+    deferredDestroy_.push_back(p);
+    convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+}
+
+// ★ F1'-b: 延期された破棄の再試行。Destroyed になったものだけリストから外す。
+std::size_t AudioEngine::retryDeferredDestroys() noexcept
+{
+    std::vector<void*> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        snapshot = deferredDestroy_;
+    }
+    if (snapshot.empty())
+        return 0;
+
+    // スナップショットを試行。破棄できたものは「リストから外す」。
+    std::vector<void*> stillDeferred;
+    for (void* p : snapshot)
+    {
+        if (destroyDSPCoreNodeRetryable(p) == DestroyOutcome::Destroyed)
+            continue;                 // 完了: 再登録しない（二重破棄の防止）
+        stillDeferred.push_back(p);   // まだ pin が残っている
+    }
+
+    std::size_t retried = 0;
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+
+        // ★ 重要: スナップショットの間に**新しく追加された**エントリだけを引き継ぐ。
+        //   snapshot に含まれるものは上のループで結論が出ているため、ここで
+        //   deferredDestroy_ から機械的に拾い直すと、破棄済みポインタを再登録してしまい
+        //   次回の再試行で二重破棄（= 解放済みメモリの ~DSPCore）になる。
+        std::vector<void*> merged = stillDeferred;
+        for (void* p : deferredDestroy_)
+        {
+            bool inSnapshot = false;
+            for (void* q : snapshot)
+                if (q == p) { inSnapshot = true; break; }
+            if (inSnapshot)
+                continue;             // 既に結論済み
+
+            bool dup = false;
+            for (void* q : merged)
+                if (q == p) { dup = true; break; }
+            if (!dup)
+                merged.push_back(p);  // 試行中に新規登録されたもの
+        }
+
+        retried = (deferredDestroy_.size() > stillDeferred.size())
+            ? (deferredDestroy_.size() - stillDeferred.size()) : 0;
+        deferredDestroy_.swap(merged);
+    }
+    return retried;
+}
+
+std::size_t AudioEngine::deferredDestroyResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+    return deferredDestroy_.size();
 }
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept

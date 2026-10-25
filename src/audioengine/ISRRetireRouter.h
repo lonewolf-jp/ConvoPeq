@@ -65,15 +65,24 @@ public:
     struct Entry {
         void* ptr = nullptr;
         void (*deleter)(void*) = nullptr;
+        // ★ F1'-b (2026-10-25): 再試行可能な破棄。非 null ならこちらを優先する。
+        //   DestroyOutcome::Deferred を返した場合、このエントリは entries_ に残り、
+        //   所有権を保持したまま後続の drain で再試行される。
+        RetryableDeleter retryable = nullptr;
         uint64_t epoch = 0;
         DeletionEntryType type = DeletionEntryType::Generic;
         const char* reason = nullptr;
+        uint32_t deferredAttempts = 0;   // 延期された回数（観測用）
     };
 
     // Store an entry. Called when all bounded stores + EmergencyQ are full.
     // ★ P-4: ALWAYS returns true (growable store) — ownership always transfers.
     bool store(void* ptr, void (*deleter)(void*), uint64_t epoch,
                DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ F1'-b: 再試行可能な deleter 版。所有権は常に移転する。
+    bool storeRetryable(void* ptr, RetryableDeleter retryable, uint64_t epoch,
+                        DeletionEntryType type, const char* reason) noexcept;
 
     // Drain epoch-safe entries. Executes deleter for entries where isOlder(entry.epoch, minReaderEpoch) == true.
     // isOlderFn: EpochDomain::isOlder(a, b) == static_cast<int64_t>(a - b) < 0
@@ -89,6 +98,17 @@ public:
                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
 
     [[nodiscard]] std::size_t residentCount() const noexcept;
+
+    // ★ F1'-b (2026-10-25): 延期されたまま残っているエントリ数（pin 残留など）。
+    //   shutdown 後に 0 でなければ「未回収がある」ことを明示的に観測できる。
+    [[nodiscard]] std::size_t deferredResidentCount() const noexcept;
+    //   retryable として保持されているエントリ総数（延期前も含む = 所有権を保持している数）。
+    [[nodiscard]] std::size_t retryableResidentCount() const noexcept;
+    //   累積の延期回数（診断用）。
+    [[nodiscard]] std::uint64_t deferredAttemptCount() const noexcept
+    {
+        return convo::consumeAtomic(deferredAttemptCount_, std::memory_order_acquire);
+    }
     // ★ E-1.9-A: ロックフリー滞留カウンタ読み取り（empty-drain suppression 用）
     [[nodiscard]] uint32_t residentCountAtomic() const noexcept
     {
@@ -147,6 +167,8 @@ private:
     WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // non-owning
     // ★ E-1.9-A: ロックフリー滞留カウンタ（Phase E §1.9-A empty-drain suppression）
     std::atomic<uint32_t> residentAtomic_{0};
+    // ★ F1'-b: 累積延期回数（観測用）
+    std::atomic<std::uint64_t> deferredAttemptCount_{0};
 };
 
 /**
@@ -325,6 +347,30 @@ public:
     //   ★ P-4: 戻り値は常に true（growable store により ownership は必ず移転）。
     bool terminalReclaim(void* ptr, void (*deleter)(void*), uint64_t epoch,
                          DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ F1'-b (2026-10-25): 再試行可能な破棄。Deferred を返したエントリは所有権ごと保持され、
+    //   後続の drain / drainAll で再試行される（void deleter では表現できない）。
+    bool terminalReclaimRetryable(void* ptr, RetryableDeleter retryable, uint64_t epoch,
+                                  DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ F1'-b: 延期されたまま残っているエントリ数（shutdown 後の未回収観測用）。
+    [[nodiscard]] std::size_t terminalDeferredResidentCount() const noexcept
+    {
+        return m_terminalReclaim.deferredResidentCount();
+    }
+
+    // ★ F1'-b: drainAll() をテストから駆動するための公開ラッパー
+    //   （本番は shutdown 経路から呼ばれる。テストは同じ契約を単独で確認する）。
+    void drainAllTerminalForTest() noexcept
+    {
+        m_terminalReclaim.drainAll();
+    }
+
+    // ★ F1'-b: retryable として所有権を保持しているエントリ総数（延期前も含む）。
+    [[nodiscard]] std::size_t terminalRetryableResidentCount() const noexcept
+    {
+        return m_terminalReclaim.retryableResidentCount();
+    }
 
     // ★ P-4: TerminalReclaimAuthority 滞留件数
     [[nodiscard]] std::size_t terminalReclaimResidentCount() const noexcept;

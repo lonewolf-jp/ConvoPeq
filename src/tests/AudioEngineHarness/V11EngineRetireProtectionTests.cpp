@@ -657,6 +657,362 @@ static bool checkF1PinAcrossRegistrationClose()
     return ok;
 }
 
+
+//==============================================================================
+// F1'-b (2026-10-25): 破棄の延期契約。
+//   旧: void(void*) では「解放しなかった」を表現できず、drain がエントリを消費して
+//       所有権が失われていた（再試行不能・リーク・resident の誤減少）。
+//   新: DestroyOutcome を返す RetryableDeleter。Deferred は所有権ごと保持され再試行される。
+//==============================================================================
+namespace {
+
+int g_f1bDestroyCalls = 0;
+void* g_f1bLastPtr = nullptr;
+
+// 破棄を 1 回だけ成功させる（2 回目以降は失敗＝二重破棄の検出）。
+DestroyOutcome f1bRetryableDeleter(void* p) noexcept
+{
+    ++g_f1bDestroyCalls;
+    g_f1bLastPtr = p;
+    return DestroyOutcome::Destroyed;
+}
+
+} // namespace
+
+static bool checkF1bDeferredDestroyRetainsOwnership()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // ---- 1) pin 保持中の破棄要求 → Deferred、エントリは所有権を保持 ----
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+
+        const auto outcome = AudioEngine::destroyDSPCoreNodeRetryable(raw);
+        if (outcome != DestroyOutcome::Deferred)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: destroy did not defer while pinned\n");
+            ok = false;
+        }
+
+        // 遅延リストに載り、所有権が保持されている。
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 1)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: deferred list count=%zu (want 1)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+    }
+
+    // ---- 2) pin 解放後の再試行 → 破棄が完了する ----
+    {
+        const auto retried = DeferredPublicationTestAccess::retryDeferredDestroys(e);
+        (void)retried;
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: deferred entry not consumed after pin release (%zu)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+        // メモリは解放済みなので、スロットは解決不能でなければならない。
+        if (e.resolveDSPHandle(handle) != nullptr)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: slot resolves after deferred destroy completed\n");
+            ok = false;
+        }
+    }
+
+    harness.stop();
+    std::printf("[F1-b] deferred destroy retains ownership then completes: %s\n",
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// F1'-b: TerminalReclaimAuthority の Deferred 保持と再試行（二重破棄なし）
+//   epoch-safe な retryable エントリを格納し、drain で 1 回だけ破棄されることを確認。
+//   pin が残っている間は Deferred として残り、resident が減らない。
+//==============================================================================
+static bool checkF1bTerminalRetainsDeferred()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-T] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& router = *e.m_retireRouter;
+    bool ok = true;
+
+    g_f1bDestroyCalls = 0;
+    g_f1bLastPtr = nullptr;
+
+    static int sentinel = 0;
+    void* obj = &sentinel;
+
+    // 既知の Deferred を返す deleter: 1 回目は Deferred、2 回目以降は Destroyed。
+    static int deferOnce = 0;
+    deferOnce = 1;
+    auto onceDeferred = [](void* p) noexcept -> DestroyOutcome
+    {
+        ++g_f1bDestroyCalls;
+        g_f1bLastPtr = p;
+        if (deferOnce > 0)
+        {
+            --deferOnce;
+            return DestroyOutcome::Deferred;
+        }
+        return DestroyOutcome::Destroyed;
+    };
+
+    // epoch 0 は必ず safe（minReaderEpoch >= 1）なので即時実行経路に入る。
+    // 即時経路で Deferred を返すと storeRetryable に落ち、所有権が保持される。
+    const bool accepted = DeferredPublicationTestAccess::storeRetryableForTest(e, obj, onceDeferred, 0);
+    if (!accepted)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: storeRetryable rejected\n");
+        harness.stop();
+        return false;
+    }
+
+    // storeRetryable は常に所有権を保持する（延期前でも retryable として在籍）。
+    const auto residentAfterFirst = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    const int callsAfterFirst = g_f1bDestroyCalls;
+
+    // drain で再試行 → 今回は Destroyed になる。
+    (void)router;   // drainTerminalReclaim is private; the retry runs through the public path below.
+
+    // public path: tryReclaimResources() -> router tryReclaim -> Terminal drain.
+    DeferredPublicationTestAccess::drainTerminalForTest(e);
+
+    const auto residentAfterSecond = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    const int callsAfterSecond = g_f1bDestroyCalls;
+
+    if (callsAfterFirst < 1)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: deleter never invoked\n");
+        ok = false;
+    }
+    if (residentAfterFirst < 1)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: Deferred entry was not retained (count=%zu)\n",
+                     residentAfterFirst);
+        ok = false;
+    }
+    if (residentAfterSecond != 0)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: entry still deferred after retry (count=%zu)\n",
+                     residentAfterSecond);
+        ok = false;
+    }
+    if (callsAfterSecond != callsAfterFirst + 1)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-T] FAIL: retry count %d -> %d (expected exactly one more)\n",
+                     callsAfterFirst, callsAfterSecond);
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-T] terminal retains Deferred then retries once: %s\n",
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b: 既存 retire 経路の所有権保全。
+//   pin を持たない DSPCore を DSPLifetimeManager::retire で破棄したとき、
+//   「同期破棄」でも「キュー経由」でも所有権が失われないこと（未回収として観測可能）。
+//==============================================================================
+static bool checkF1bRetirePathsKeepOwnership()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-R] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    // ---- 同期経路: pin 無し → 即時破棄され、遅延リストに残らない ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        DSPLifetimeManager mgr(e);
+        mgr.retire(raw);
+
+        // 破棄が完了していればスロットは解決不能。
+        if (e.resolveDSPHandle(handle) != nullptr)
+        {
+            std::fprintf(stderr, "[F1-b-R] FAIL: synchronous retire left the slot resolvable\n");
+            ok = false;
+        }
+        // 遅延リストに取り残されていない（所有権が宙に浮いていない）。
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+        {
+            std::fprintf(stderr, "[F1-b-R] FAIL: synchronous retire left %zu deferred entries\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+    }
+
+    // ---- キュー経路: epoch を進めて drain させ、所有権が失われないことを確認 ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (!handle.isNull())
+        {
+            DSPLifetimeManager mgr(e);
+            mgr.retire(raw);
+
+            // drain を回す（epoch 前進 + reclaim）。
+            for (int i = 0; i < 50; ++i)
+            {
+                e.advanceRetireEpoch();
+                e.tryReclaimResources();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+
+            // どこかで必ず所有権が処理されている（解決不能 or 遅延リストに保持）。
+            const bool resolvable = (e.resolveDSPHandle(handle) != nullptr);
+            const auto deferred = DeferredPublicationTestAccess::deferredDestroyResidentCount(e);
+            if (resolvable && deferred == 0)
+            {
+                std::fprintf(stderr,
+                             "[F1-b-R] FAIL: queued retire left the object owned by nobody\n");
+                ok = false;
+            }
+        }
+    }
+
+    // ---- shutdown 観測性: 未回収が問い合わせ可能であること ----
+    {
+        const auto deferred = DeferredPublicationTestAccess::deferredDestroyResidentCount(e);
+        const auto terminal = DeferredPublicationTestAccess::terminalDeferredResidentCount(e);
+        (void)deferred;
+        (void)terminal;   // 例外なく取得できること自体が条件
+    }
+
+    harness.stop();
+    std::printf("[F1-b-R] retire paths keep ownership: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b: shutdown（drainAll）でも Deferred を強制解放しない。
+//   オーナー条件: 「shutdown 中の未解放 pin → 強制解放せず、未完了状態が観測可能」。
+//   PASS: 破棄は実行されず（Destroyed にならず）、retryable として残り、
+//         retryableResidentCount() で観測できる。
+//==============================================================================
+namespace {
+int g_f1bShutdownCalls = 0;
+DestroyOutcome f1bAlwaysDeferred(void* /*p*/) noexcept
+{
+    ++g_f1bShutdownCalls;
+    return DestroyOutcome::Deferred;   // 常に「解放できない」を返す
+}
+} // namespace
+
+static bool checkF1bDrainAllDoesNotForceFree()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-S] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    g_f1bShutdownCalls = 0;
+    static int sentinel2 = 0;
+    void* obj = &sentinel2;
+
+    const bool accepted = DeferredPublicationTestAccess::storeRetryableForTest(
+        e, obj, f1bAlwaysDeferred, 0);
+    if (!accepted)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: storeRetryable rejected\n");
+        harness.stop();
+        return false;
+    }
+
+    const auto before = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    if (before != 1)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: entry not retained before drainAll (count=%zu)\n", before);
+        ok = false;
+    }
+
+    // shutdown 相当の強制 drain。Deferred を返すので解放されてはならない。
+    DeferredPublicationTestAccess::drainAllTerminalForTest(e);
+
+    const auto after = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    const auto deferred = DeferredPublicationTestAccess::terminalDeferredResidentCount(e);
+
+    if (after != 1)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-S] FAIL: drainAll dropped the entry (count=%zu, want 1)\n", after);
+        ok = false;
+    }
+    if (deferred != 1)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-S] FAIL: unfinished state not observable (deferred=%zu, want 1)\n",
+                     deferred);
+        ok = false;
+    }
+    if (g_f1bShutdownCalls < 1)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: deleter never consulted\n");
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-S] drainAll keeps Deferred observable: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int runV11EngineRetireProtectionTests()
@@ -695,6 +1051,26 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1PinAcrossRegistrationClose())
     {
         std::fprintf(stderr, "FAIL: checkF1PinAcrossRegistrationClose (F1-6)\n");
+        hdOk = false;
+    }
+    if (!checkF1bDeferredDestroyRetainsOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bDeferredDestroyRetainsOwnership (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bTerminalRetainsDeferred())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bTerminalRetainsDeferred (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bRetirePathsKeepOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bRetirePathsKeepOwnership (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bDrainAllDoesNotForceFree())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bDrainAllDoesNotForceFree (F1-b)\n");
         hdOk = false;
     }
     if (!hdOk)

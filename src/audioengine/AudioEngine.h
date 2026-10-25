@@ -5173,6 +5173,22 @@ public:
     void processDeferredReleases();
     static void destroyDSPCoreNode(void* p) noexcept;
 
+    // ★ F1'-b (2026-10-25): 破棄結果を返す版。pin 残留なら Deferred を返し、解放しない。
+    static DestroyOutcome destroyDSPCoreNodeRetryable(void* p) noexcept;
+
+    // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
+    //   Deferred になったポインタをエンジンの再試行リストで保持し、所有権を失わない。
+    void deferDestroyRetry(void* p) noexcept;
+    [[nodiscard]] std::size_t retryDeferredDestroys() noexcept;
+    [[nodiscard]] std::size_t deferredDestroyResidentCount() const noexcept;
+    [[nodiscard]] std::uint64_t deferredDestroyCount() const noexcept
+    {
+        return convo::consumeAtomic(deferredDestroyCount_, std::memory_order_acquire);
+    }
+    mutable std::mutex deferredDestroyMutex_;
+    std::vector<void*> deferredDestroy_;
+    std::atomic<std::uint64_t> deferredDestroyCount_{0};
+
     // ★ F2' (2026-10-25): DSPCore の解放は destroyDSPCoreNode（static・関数ポインタとして
     //   EBR キューに渡すため this を持てない）の一本道を通る。そこで「今生きているエンジン」を
     //   1 つだけ公開し、解放直前にそのエンジンのハンドルを無効化する。

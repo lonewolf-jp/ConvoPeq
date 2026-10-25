@@ -113,6 +113,45 @@ public:
         return e.invalidateHandleBeforeDestroy(core);
     }
 
+    // ===== F1'-b (deferred destroy) observation =====
+    static std::size_t deferredDestroyResidentCount(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyResidentCount();
+    }
+    static std::size_t retryDeferredDestroys(AudioEngine& e) noexcept
+    {
+        return e.retryDeferredDestroys();
+    }
+    static std::size_t terminalDeferredResidentCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalDeferredResidentCount();
+    }
+    static std::size_t terminalRetryableResidentCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalRetryableResidentCount();
+    }
+
+    // F1'-b: TerminalReclaimAuthority の drain をテストから駆動する
+    //   （drainTerminalReclaim は private のため、公開 tryReclaim 経由で呼ぶ）。
+    static void drainTerminalForTest(AudioEngine& e) noexcept
+    {
+        e.tryReclaimResources();
+    }
+
+    // F1'-b: drainAll() をテストから駆動する（shutdown 相当の強制 drain）。
+    static void drainAllTerminalForTest(AudioEngine& e) noexcept
+    {
+        e.m_retireRouter->drainAllTerminalForTest();
+    }
+    // 再試行可能な破棄を直接駆動する（D/Q/E を経由せず、T の契約だけを見る）。
+    static bool storeRetryableForTest(AudioEngine& e, void* ptr,
+                                      RetryableDeleter retryable,
+                                      std::uint64_t epoch) noexcept
+    {
+        return e.m_retireRouter->terminalReclaimRetryable(
+            ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test");
+    }
+
     // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
     // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
     // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは
