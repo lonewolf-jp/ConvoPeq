@@ -17,6 +17,7 @@
 #include "AudioEngineHarness.h"
 
 #include "InputBitDepthTransform.h"
+#include "MklFftEvaluator.h"
 
 #include <atomic>
 #include <cfloat>
@@ -294,6 +295,33 @@ bool checkH02T4NonFiniteAndBoundaries()
     return true;
 }
 
+namespace {
+
+// Win32 message pump for the A-1 AC-4 notification test. JUCE posts its async callbacks to
+// an internal window on this thread, so PeekMessage/DispatchMessage delivers them (the same
+// mechanism the H-01 tests use; runDispatchLoopUntil is unavailable in this build).
+void a1PumpMessages(int ms) noexcept
+{
+#if JUCE_WINDOWS
+    const auto deadline = juce::Time::getMillisecondCounter()
+                          + static_cast<juce::uint32>(ms);
+    while (juce::Time::getMillisecondCounter() < deadline)
+    {
+        MSG msg {};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+#else
+    juce::ignoreUnused(ms);
+#endif
+}
+
+} // namespace
+
 bool checkNucRoundTrip()
 {
     AudioEngineHarness h;
@@ -372,8 +400,44 @@ bool checkNucRoundTrip()
         }
     }
 
+    // ---- AC-A1-4 (work92 A-1): round-trip の通知要求が 1 回に coalesce される ----
+    //   複数プロパティを変更する setState と setNUCFilterModes を、メッセージループを
+    //   回さずに連続実行する。postCoalescedChangeNotification は pending フラグで
+    //   2 回目以降を畳み込むため、配送される通知は 1 回でなければならない。
+    {
+        struct CountingChangeListener final : juce::ChangeListener
+        {
+            int count = 0;
+            void changeListenerCallback(juce::ChangeBroadcaster*) override { ++count; }
+        };
+
+        CountingChangeListener counter;
+        conv.addChangeListener(&counter);
+
+        a1PumpMessages(30);   // 以前の AC で発生した通知を排出
+        counter.count = 0;
+
+        conv.setNUCFilterModes(convo::HCMode::Sharp, convo::LCMode::Natural);
+        conv.setState(saved);
+
+        for (int i = 0; i < 40 && counter.count == 0; ++i)
+            a1PumpMessages(5);
+        a1PumpMessages(100);  // 2 通目が来ないことを確認するための整定
+
+        conv.removeChangeListener(&counter);
+
+        if (counter.count != 1)
+        {
+            std::fprintf(stderr,
+                         "[A1] FAIL: AC-A1-4 expected 1 coalesced notification, got %d\n",
+                         counter.count);
+            h.stop();
+            return false;
+        }
+    }
+
     h.stop();
-    std::printf("ConvolverStateRoundTripTests: PASS (AC-A1-1/2/3)\n");
+    std::printf("ConvolverStateRoundTripTests: PASS (AC-A1-1/2/3/4)\n");
     return true;
 }
 
@@ -2907,6 +2971,176 @@ bool checkSTG71AutoGainFlagRoundTrip()
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
+//==============================================================================
+// work92 A-3 (big 1-6): IPP FFT 戻り値の失敗経路（AC-A3-1..6）
+//
+//   製品の失敗経路は 2 か所ある:
+//     evaluate()   — 非ゼロ status で両スペクトルをゼロ化し ippFailureCount_ を 1 回加算し、
+//                    全フィールド 0 かつ fftFailed=true の Result を返す（fail-close）。
+//     computeFft() — 同じく両 *出力* をゼロ化し 1 回加算する（void 戻りなので呼び出し側は
+//                    status を観測できない = 部分スペクトルを絶対に漏らしてはならない）。
+//
+//   AC はテスト専用 seam（inline 変数・クラスレイアウト非変更・本番は 0）で上記の分岐を
+//   そのまま駆動する。強制 status は ippStsNullPtrErr を使い、本番の分岐を逐語実行する。
+//==============================================================================
+static bool checkWork92A3FftFailurePath()
+{
+    MklFftEvaluator eval;
+    eval.configureForSampleRate(48000.0);
+
+    std::array<double, MklFftEvaluator::kFftLength> errL {};
+    std::array<double, MklFftEvaluator::kFftLength> errR {};
+    for (int i = 0; i < MklFftEvaluator::kFftLength; ++i)
+    {
+        errL[static_cast<size_t>(i)] = 0.1 * std::sin(0.010 * static_cast<double>(i));
+        errR[static_cast<size_t>(i)] = 0.1 * std::cos(0.013 * static_cast<double>(i));
+    }
+
+    bool ok = true;
+
+    const auto isZeroResult = [](const MklFftEvaluator::Result& r)
+    {
+        return r.compositeScore == 0.0 && r.noisePower == 0.0
+            && r.spectralFlatnessPenalty == 0.0 && r.hfPenalty == 0.0
+            && r.timeDomainRms == 0.0;
+    };
+
+    // Baseline: 無傷の評価器は失敗を報告しない（これが無いと以降の fail-close が空振りする）。
+    const auto baseline = eval.evaluate(errL.data(), errR.data());
+    if (baseline.fftFailed)
+    {
+        std::fprintf(stderr, "[A3] FAIL: baseline evaluate reported fftFailed\n");
+        return false;
+    }
+    const auto c0 = eval.ippFailureCount();
+
+    // ---- AC-A3-1: 左チャネル単独の FFT 失敗で fail-close（ゼロ Result + fftFailed） ----
+    g_mklFftEvalFailureInjectionForTest.store(kMklFftInjectLeft, std::memory_order_relaxed);
+    const auto r1 = eval.evaluate(errL.data(), errR.data());
+    if (!r1.fftFailed || !isZeroResult(r1))
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-1 left-only not fail-closed (failed=%d score=%f noise=%f)\n",
+                     r1.fftFailed ? 1 : 0, r1.compositeScore, r1.noisePower);
+        ok = false;
+    }
+
+    // ---- AC-A3-2: 失敗は 1 回の evaluate につき 1 回だけ計上され、seam は消費される ----
+    if (eval.ippFailureCount() != c0 + 1)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-2 counter=%llu (want %llu)\n",
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c0 + 1));
+        ok = false;
+    }
+    if (g_mklFftEvalFailureInjectionForTest.load(std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-2 seam not consumed\n");
+        ok = false;
+    }
+
+    // ---- AC-A3-3: 失敗は per-call（次の evaluate は正常に戻り、計上も増えない） ----
+    const auto r3 = eval.evaluate(errL.data(), errR.data());
+    if (r3.fftFailed || eval.ippFailureCount() != c0 + 1)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-3 not recovered (failed=%d score=%f count=%llu)\n",
+                     r3.fftFailed ? 1 : 0, r3.compositeScore,
+                     (unsigned long long)eval.ippFailureCount());
+        ok = false;
+    }
+
+    // ---- AC-A3-4: 右単独／両チャネルでも fail-close、計上は呼び出しごとに 1 回 ----
+    g_mklFftEvalFailureInjectionForTest.store(kMklFftInjectRight, std::memory_order_relaxed);
+    const auto r4 = eval.evaluate(errL.data(), errR.data());
+    if (!r4.fftFailed || !isZeroResult(r4) || eval.ippFailureCount() != c0 + 2)
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-4 right-only (failed=%d score=%f count=%llu want %llu)\n",
+                     r4.fftFailed ? 1 : 0, r4.compositeScore,
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c0 + 2));
+        ok = false;
+    }
+    g_mklFftEvalFailureInjectionForTest.store(kMklFftInjectLeft | kMklFftInjectRight,
+                                             std::memory_order_relaxed);
+    const auto r5 = eval.evaluate(errL.data(), errR.data());
+    if (!r5.fftFailed || !isZeroResult(r5) || eval.ippFailureCount() != c0 + 3)
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-4 both (failed=%d score=%f count=%llu want %llu)\n",
+                     r5.fftFailed ? 1 : 0, r5.compositeScore,
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c0 + 3));
+        ok = false;
+    }
+    if (g_mklFftEvalFailureInjectionForTest.load(std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-4 seam not consumed\n");
+        ok = false;
+    }
+
+    // ---- AC-A3-5: computeFft の失敗は *両方* の出力をゼロ化する（部分スペクトルを残さない） ----
+    std::vector<MklFftEvaluator::CcsComplex> specL(
+        static_cast<size_t>(MklFftEvaluator::kSpectrumBins));
+    std::vector<MklFftEvaluator::CcsComplex> specR(
+        static_cast<size_t>(MklFftEvaluator::kSpectrumBins));
+
+    const auto fillSentinel = [](std::vector<MklFftEvaluator::CcsComplex>& v)
+    {
+        for (auto& c : v) { c.real = 1.0; c.imag = 1.0; }
+    };
+    const auto allZero = [](const std::vector<MklFftEvaluator::CcsComplex>& v)
+    {
+        for (const auto& c : v)
+            if (c.real != 0.0 || c.imag != 0.0)
+                return false;
+        return true;
+    };
+
+    fillSentinel(specL);
+    fillSentinel(specR);
+    g_mklFftComputeFailureInjectionForTest.store(kMklFftInjectLeft, std::memory_order_relaxed);
+    const auto c5 = eval.ippFailureCount();
+    eval.computeFft(errL.data(), errR.data(), specL.data(), specR.data());
+    if (!allZero(specL) || !allZero(specR))
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-5 computeFft failure left non-zero output (L=%d R=%d)\n",
+                     allZero(specL) ? 0 : 1, allZero(specR) ? 0 : 1);
+        ok = false;
+    }
+    if (eval.ippFailureCount() != c5 + 1)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-5 counter=%llu (want %llu)\n",
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c5 + 1));
+        ok = false;
+    }
+    if (g_mklFftComputeFailureInjectionForTest.load(std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-5 seam not consumed\n");
+        ok = false;
+    }
+
+    // ---- AC-A3-6: computeFft も per-call（次の呼び出しは正常で、計上も増えない） ----
+    eval.computeFft(errL.data(), errR.data(), specL.data(), specR.data());
+    bool anyNonZero = false;
+    for (const auto& c : specL)
+        if (c.real != 0.0 || c.imag != 0.0) { anyNonZero = true; break; }
+    if (!anyNonZero || eval.ippFailureCount() != c5 + 1)
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-6 computeFft not recovered (energy=%d count=%llu want %llu)\n",
+                     anyNonZero ? 1 : 0, (unsigned long long)eval.ippFailureCount(),
+                     (unsigned long long)(c5 + 1));
+        ok = false;
+    }
+
+    g_mklFftEvalFailureInjectionForTest.store(0, std::memory_order_relaxed);
+    g_mklFftComputeFailureInjectionForTest.store(0, std::memory_order_relaxed);
+
+    std::printf("ConvolverStateRoundTripTests: %s (AC-A3-1/2/3/4/5/6 failures=%llu)\n",
+                ok ? "PASS" : "FAIL",
+                (unsigned long long)(eval.ippFailureCount() - c0));
+    return ok;
+}
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -3071,6 +3305,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSTG71AutoGainFlagRoundTrip())
     {
         std::fprintf(stderr, "FAIL: checkSTG71AutoGainFlagRoundTrip\n");
+        stg2ok = false;
+    }
+    // work92 A-3 (2026-10-26): IPP FFT 失敗経路（AC-A3-1..4）
+    if (!checkWork92A3FftFailurePath())
+    {
+        std::fprintf(stderr, "FAIL: checkWork92A3FftFailurePath (work92 A-3)\n");
         stg2ok = false;
     }
     if (!stg2ok)
