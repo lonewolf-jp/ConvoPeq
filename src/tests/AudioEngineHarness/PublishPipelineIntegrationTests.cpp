@@ -16,6 +16,7 @@
 //
 // ビルド: カスタム main() + bool testXxx() パターン（既存テストと同一）
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1242,6 +1243,114 @@ HarnessSuiteSelector parseHarnessSuiteSelector(int argc, char* argv[]) noexcept
 
 } // namespace
 
+
+// ---------------------------------------------------------------------------
+// H-2-R1 (2026-10-26): mixed gain tuple window — DIAGNOSTIC ONLY.
+//
+//   H-2 established that a stale build cannot overwrite a newer world (publication
+//   admission requires req.generation == rebuildRequestGeneration) and that no path
+//   writes a world's gains back into the live atomics. The remaining residual (H-2-R1)
+//   is narrower: captureBuildParameterSnapshot() reads 13 fields with separate acquire
+//   loads, so a build captured between two gain writes can carry (new headroom, old
+//   makeup). This measurement counts how often such a tuple becomes the PUBLISHED world
+//   and how long it persists.
+//
+//   It prints [H2R1] lines and returns no verdict: a zero count is an observation limit,
+//   not proof of absence.
+// ---------------------------------------------------------------------------
+static void measureH2R1MixedGainTupleWindow(AudioEngineHarness& harness)
+{
+    AudioEngine& e = harness.engine();
+    auto approx = [](double a, double b) { return std::abs(a - b) < 1.0e-9; };
+    auto gainOf = [](double db) { return std::pow(10.0, db / 20.0); };
+
+    // Settle to a known baseline and wait until it is the published tuple.
+    const double baseH = gainOf(-3.0);
+    const double baseM = gainOf(3.0);
+    e.setInputHeadroomDb(-3.0f);
+    e.setOutputMakeupDb(3.0f);
+    for (int i = 0; i < 500; ++i)
+    {
+        const auto* w = e.observePublishedWorld();
+        if (w != nullptr && approx(w->automation.inputHeadroomGain, baseH)
+                         && approx(w->automation.outputMakeupGain, baseM))
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    int trials = 0;
+    int mixedTrials = 0;
+    int distinctWorlds = 0;
+    double maxMixedMs = 0.0;
+
+    for (int t = 0; t < 40; ++t)
+    {
+        const bool up = ((t % 2) == 0);
+        const double hDb = up ? -9.0 : -3.0;
+        const double mDb = up ? 9.0 : 3.0;
+        const double hGain = gainOf(hDb);
+        const double mGain = gainOf(mDb);
+
+        const auto* before = e.observePublishedWorld();
+        const double oldH = before != nullptr ? before->automation.inputHeadroomGain : 0.0;
+        const double oldM = before != nullptr ? before->automation.outputMakeupGain : 0.0;
+
+        e.setInputHeadroomDb(static_cast<float>(hDb));
+        std::this_thread::sleep_for(std::chrono::microseconds((t % 4) * 250));
+        e.setOutputMakeupDb(static_cast<float>(mDb));
+        ++trials;
+
+        bool sawMixed = false;
+        double mixedStartMs = 0.0;
+        double mixedMs = 0.0;
+        std::uint64_t lastGeneration = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+
+        for (int i = 0; i < 300; ++i)
+        {
+            const auto* w = e.observePublishedWorld();
+            if (w != nullptr)
+            {
+                if (w->generation != lastGeneration)
+                {
+                    ++distinctWorlds;
+                    lastGeneration = w->generation;
+                }
+                const double h = w->automation.inputHeadroomGain;
+                const double m = w->automation.outputMakeupGain;
+                const bool mixedH = approx(h, hGain) && approx(m, oldM) && !approx(oldM, mGain);
+                const bool mixedM = approx(m, mGain) && approx(h, oldH) && !approx(oldH, hGain);
+                const double nowMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (mixedH || mixedM)
+                {
+                    if (!sawMixed)
+                    {
+                        sawMixed = true;
+                        mixedStartMs = nowMs;
+                    }
+                    mixedMs = nowMs - mixedStartMs;
+                }
+                if (approx(h, hGain) && approx(m, mGain))
+                    break;   // settled on the intended tuple
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+        }
+
+        if (sawMixed)
+        {
+            ++mixedTrials;
+            if (mixedMs > maxMixedMs)
+                maxMixedMs = mixedMs;
+        }
+    }
+
+    std::printf("[H2R1] trials=%d mixed_trials=%d max_mixed_ms=%.1f distinct_worlds=%d\n",
+                trials, mixedTrials, maxMixedMs, distinctWorlds);
+    std::printf("[H2R1] note: observations only; not observing a mixed tuple is NOT proof"
+                " that it cannot occur\n");
+}
+
 int main(int argc, char* argv[])
 {
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
@@ -1288,6 +1397,23 @@ int runFpmM2();
 
     // G-1: validate the suite selector before anything can run (fail closed on bad input).
     const HarnessSuiteSelector harnessSuiteSelector = parseHarnessSuiteSelector(argc, argv);
+
+    // H-2-R1 (diagnostic, opt-in): measure whether a mixed gain tuple can become the
+    // published world when two gains change back-to-back. No PASS/FAIL is derived from it,
+    // so the default suite keeps its line count (H2R1_MEASURE is unset in normal runs).
+    if (std::getenv("H2R1_MEASURE") != nullptr)
+    {
+        AudioEngineHarness h2r1Harness;
+        if (h2r1Harness.start(48000.0, 512))
+        {
+            measureH2R1MixedGainTupleWindow(h2r1Harness);
+            h2r1Harness.stop();
+        }
+        else
+        {
+            std::fprintf(stderr, "[H2R1] harness start failed\n");
+        }
+    }
 
     for (int i = 1; i < argc; ++i)
     {
