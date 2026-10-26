@@ -26,12 +26,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROBE = os.path.join(ROOT, "tmp", "odr_probe.cpp")
 BAT = os.path.join(tempfile.gettempdir(), "opencode", "crash", "layout", "run_layout.bat")
 
-PROBE_SRC = r"""// ODR probe: every header that defines a long-lived engine type.
+PROBE_SRC = r"""// ODR probe: every header that defines a long-lived engine type, plus the headers whose
+// contents can differ per-TU (MklFftEvaluator.h carries the test-only failure-injection
+// seams, which must stay unconditional inline variables and never become class members).
 #include "audioengine/AudioEngine.h"
 #include "audioengine/ISRShutdown.h"
 #include "audioengine/ISRDSPHandle.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
+#include "MklFftEvaluator.h"
 int convopeq_odr_probe_translation_unit = 0;
 """
 

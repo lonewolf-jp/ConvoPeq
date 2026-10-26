@@ -1589,17 +1589,31 @@ static bool checkGReclaimNormalUsesRetireEpoch()
     bool ok = true;
     DSPLifetimeManager mgr(e);
 
+    // Quiescence predicate (2026-10-26): pendingReclaimCount()==0 is NOT completion.
+    //   drainDeferredRetireQueuesForTest() removes the entry from pendingReclaimHandles_
+    //   BEFORE the reclaim attempt runs, so pendingReclaimCount() reads 0 while
+    //   reclaimInFlightCount_ is still 1 (onReclaimBegin..onReclaimEnd). Treating that
+    //   transient as "done" made the (a) balance assertion fail non-deterministically
+    //   (observed once: "reclaimInFlightCount not balanced (1)").
+    //   The completion condition is therefore the CONJUNCTION of both counters, held for two
+    //   consecutive samples. This is strictly stronger than the previous check: a real leak
+    //   (counter stuck at 1) now times out here instead of passing the loop.
     auto driveUntilReclaimed = [&e](int maxIterations) -> bool
     {
+        int consecutiveQuiescent = 0;
         for (int i = 0; i < maxIterations; ++i)
         {
             (void)DeferredPublicationTestAccess::publishEpochForTest(e);
             DeferredPublicationTestAccess::drainDeferredRetireQueuesForTest(e);
-            if (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+            const bool quiescent = (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+                                && (DeferredPublicationTestAccess::reclaimInFlightCount(e) == 0);
+            consecutiveQuiescent = quiescent ? (consecutiveQuiescent + 1) : 0;
+            if (consecutiveQuiescent >= 2)
                 return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(3));
         }
-        return DeferredPublicationTestAccess::pendingReclaimCount(e) == 0;
+        return (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+            && (DeferredPublicationTestAccess::reclaimInFlightCount(e) == 0);
     };
 
     // ---- (a) reachability: the normal reclaim path must complete ----
