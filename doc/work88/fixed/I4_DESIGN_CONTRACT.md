@@ -166,15 +166,18 @@ placement: Transport / DurablePending / Building / Stalled
   ```
   Live
     -- transient failure -->
-  Live                     (ΔL = 0, delivery = None, consecutiveFailureCount++)
+  Live                     (ΔL = 0, delivery = None, failure signal posted; budget +1)
   ```
   - ΔL（`liveLogicalObligationCount` の差分）は **0** である（Live のまま）。
   - `delivery` フィールドは **`None`** に修復される（P-B: stranded Transport/Durable → None）、
     次の `redriveDeferredRecoveryObligations` サイクルで delivery が再付与される。
-  - `consecutiveFailureCount` は **+1** される（per-obligation retry budget の消費）。
+  - per-obligation retry budget は 16 byte lifecycle word の **`pending`（投稿済み・未裁定）**
+    と **`adjudicated`（消費済み）** の和で保持される（D152 T3c）。producer は
+    `postRecoveryFailureSignal()` で `pending` を +1 し、CoordinatorLoop の
+    `adjudicateRecoveryFailureSignals()` が `pending` を `adjudicated` へ移す。
   - terminal disposition は行われない（slot は Live のまま解放されない）。
   - **RetryExhaustion は transient failure そのものではなく、retry budget exhaustion による terminal
-    disposition である**。`consecutiveFailureCount == kMaxObligationConsecutiveFailures`（K=4）のとき
+    disposition である**。`adjudicated + pending >= kMaxObligationConsecutiveFailures`（K=4）のとき
     のみ発火する（後述 D15.2 / D18.3）。
 - **重要**: 本節を「failure なら `Failed`」と一般化してはならない。`Failed` terminal は retry budget
   exhaustion の唯一の合法的発火点であり、transient failure の直接結果ではない。
@@ -224,14 +227,19 @@ ownership conservation:
   ```
 - **★ D105-R21 amendment — RetryExhaustion を disappearance set に追加**:
   disappearance set は `{Success, Superseded, ShutdownDiscard, RetryExhaustion}` の **4 値**。
+  （D105-R16 の設計記録は同じ概念を `RetryExhausted` と表記している。本契約の表記
+  `RetryExhaustion` を正とし、R16 文書は歴史的記録として変更しない。）
   - **`ResolvedFailed` ⇔ `RetryExhaustion`**（意味論の限定）。`ResolvedFailed` を「一般的な failure
     terminal」として定義しない。
-  - **`RetryExhaustion = consecutiveFailureCount reaches K = kMaxObligationConsecutiveFailures`**
+  - **`RetryExhaustion = adjudicated + pending reaches K = kMaxObligationConsecutiveFailures`**
     （4）の単一定義。K=4 未満では `ResolvedFailed` を発火しない。
-  - **唯一の production 発火点**は `markTransientFailure()` の exhaustion branch
-    （`RuntimeIntentCoordinator::markTransientFailure` の `if (newCount >= K)` 分岐）— 他の
-    production 経路は `ResolvedFailed` を発火しない。`resolveRecoveryObligation(_, Failed)` の
-    production caller は **0**（C8 test のみ保持）。
+  - **唯一の production 発火点**は `adjudicateRecoveryFailureSignals()` の exhaustion 分岐
+    （`ISRRuntimePublicationCoordinator.cpp` の `if (adjudicated + pending >= K)` から
+    `resolveRecoveryObligation(id, RecoveryOutcome::Failed)` を呼ぶ 1 箇所）— 他の production
+    経路は `ResolvedFailed` を発火しない。**`resolveRecoveryObligation(_, Failed)` の production
+    caller は 1**（この枯渇分岐のみ。C8 は table レベルの冪等性テストとして残る）。
+    `markTransientFailure()` は **test-only wrapper**（`postRecoveryFailureSignal` + 即時
+    `adjudicateRecoveryFailureSignals`）であり、production 呼び出しは 0 件（grep 固定）。
 - **transient failure は conservation equation の terminal count には含めない**。transient failure は
   `liveLogicalObligationCount` を減らず（ΔL=0）、terminal disposition ではない。仮に `transientFailureCount`
   を tracking する場合、それは **telemetry / observability のみ**であり、conservation equation の右辺
@@ -367,7 +375,7 @@ admissionEventCount ≥ admittedLogicalObligationCount   （別 invariant・coal
   - **`transientFailureCount` は conservation equation に含めない**。transient failure は terminal
     disposition ではなく（ΔL=0、Live のまま）、telemetry / observability のみで追跡する。
   - 4 つの terminal count は **disjoint** である（同一 obligation は 1 種類のみの terminal を持つ）。
-    `retryExhaustedCount` は `markTransientFailure()` の exhaustion branch のみがインクリメントし、
+    `retryExhaustedCount` は exhaustion 分岐の CAS 勝者のみがインクリメントし（winner-gated）、
     `shutdownDiscardCount` は `resolveRecoveryObligation(_, ShutdownDiscarded)` のみがインクリメントする。
   - `successCount` + `supersededCount` + `shutdownDiscardCount` + `retryExhaustedCount` =
     `terminalDispositionCount`（重複なし、漏れなし）。
@@ -512,7 +520,7 @@ D17.5 (★ D105-R23 改訂): Logical obligation domain closure
 | T15b | admissionEventCount ≥ admittedLogicalObligationCount | coalesce は event を増やすが logical 数を増やさない |
 | **★ D105-R21** T15c | conservation with retryExhaustedCount | liveOwnershipCount + successCount + supersededCount + shutdownDiscardCount + **retryExhaustedCount** == admittedLogicalObligationCount |
 | **★ D105-R21** T15d | 4 terminal count disjointness | 各 obligation は 1 種類のみの terminal を持つ（success/supersede/shutdown/retryExhaustion の disjointness） |
-| **★ D105-R21** T15e | transient failure is non-terminal | 3 回の `markTransientFailure` 呼び出し後: `liveLogicalObligationCount == 1`（ΔL=0）、`consecutiveFailureCount == 3`（K未満）、`recoveryRetryExhaustedCount == 0` |
+| **★ D105-R21** T15e | transient failure is non-terminal | 3 回の `markTransientFailure` 呼び出し後: `liveLogicalObligationCount == 1`（ΔL=0）、消費済み budget（`adjudicated`）== 3（K未満）、`recoveryRetryExhaustedCount == 0` |
 | **★ D105-R21** T15f | exhaustion only via K | 4 回目の呼び出し後: `liveLogicalObligationCount == 0`、`recoveryRetryExhaustedCount == 1`、`state == ResolvedFailed` |
 
 ### D18.7 CoalesceIdentity — Phase-I production 実装との整合（★ D105-R23 — Path A 適用）
@@ -1652,8 +1660,8 @@ Settlement（Builder・独立スレッド）
   ★ D105-R21 amendment — MARK-TRANSIENT-FAILURE（non-terminal settlement action）:
             ObligationState LIVE(src)→LIVE(src)              （ΔL = 0・terminal ではない）
             → delivery = None（P-B: stranded Transport/Durable → None 修復）
-            → consecutiveFailureCount++                      （per-obligation retry budget 消費）
-            → exhausted（counter == K）の場合のみ terminal へ昇格:
+            → pending++（producer）／adjudicated += pending（adjudicate）  （per-obligation retry budget 消費）
+            → exhausted（adjudicated + pending == K）の場合のみ terminal へ昇格:
                   LIVE(src)→ResolvedFailed(src)
                   → release（Owned→Released・reserved-- 一回）
                   → retryExhaustedCount++                     （terminalDispositionCount に反映）
