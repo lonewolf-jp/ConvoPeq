@@ -458,4 +458,18 @@ public:
     {
         return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
     }
+
+    // ===== D8-2-B-1 T9: DSP delete-count observability =====
+    //   destroyDSPCoreNodeRetryable() is the ONLY place that destroys a DSPCore
+    //   (`core->~DSPCore(); convo::aligned_free(core);`, AudioEngine.Threading.cpp:39-42),
+    //   and it reports whether the object was actually destroyed (Destroyed) or retained
+    //   because a pin was still held (Deferred). Exposing it here lets a test count REAL DSP
+    //   destructions through the production funnel without adding a production counter:
+    //   DSPLifetimeManager hardcodes &AudioEngine::destroyDSPCoreNode as the deleter, so a
+    //   counting deleter cannot be injected from outside (T9 option (a) is not available as
+    //   written; this accessor is the test-only equivalent).
+    static DestroyOutcome destroyCoreNodeRetryable(void* core) noexcept
+    {
+        return AudioEngine::destroyDSPCoreNodeRetryable(core);
+    }
 };
