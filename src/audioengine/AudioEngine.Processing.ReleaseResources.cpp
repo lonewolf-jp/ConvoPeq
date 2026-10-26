@@ -444,6 +444,16 @@ void AudioEngine::releaseResources()
             m_retireRouter->drainAllQuarantineStore();
         }
 
+        // F-2 (2026-10-25): last chance to finish quarantine-slot destruction that was
+        // deferred while a pin was held. Owner: the slot (still Quarantined).
+        {
+            const auto retried = dspHandleRuntime_.retryDeferredQuarantineDestroy();
+            if (retried > 0)
+                diagLog("[F1_C_QUARANTINE_SHUTDOWN] retried="
+                        + juce::String(static_cast<int>(retried))
+                        + " slot(s) destroyed after pin drain");
+        }
+
         const auto residentBefore = dspQuarantineManager_.residentCount();
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="
@@ -455,7 +465,16 @@ void AudioEngine::releaseResources()
                 if (dspQuarantineManager_.destroyForShutdown(slot)) {
                     // 系統①: DSPHandleRegistry の Quarantined→Reclaimed 遷移
                     //   destroyForShutdown が quarantine フラグ確認を済ませているため安全
-                    dspHandleRuntime_.destroyQuarantineSlot(slot, 0);
+                    if (!dspHandleRuntime_.destroyQuarantineSlot(slot, 0))
+                    {
+                        // F-2: a pin is still held at shutdown. Do NOT recycle the slot
+                        // and do NOT free: keep the world lane Quarantined and record the
+                        // residue (leaked, not UAF) instead of forcing the release.
+                        diagLog("[F1_C_QUARANTINE_SHUTDOWN] slot="
+                                + juce::String(static_cast<int>(slot))
+                                + " pinned: slot not recycled (leaked, not UAF)");
+                        continue;
+                    }
                     // 系統③: レーン解放 + quarantineResidentCount--
                     worldAuthority_.lifetime().reclaim(slot);
                 }
@@ -496,9 +515,17 @@ void AudioEngine::releaseResources()
     //   二重破壊禁止（INV-D162-3）: resolve は Retired/Reclaimed で nullptr を返すため、
     //   既に disposition 済みの DSP は何もしない。DSPHandle slot は既に Reclaimed 済みのため
     //   以後の resolve も nullptr（map の 二重 erase/二重 destroy は構造的に不可能）。
-    auto* activeDSPToDestroy = (!activeHandle.isNull()) ? resolveDSPHandle(activeHandle) : nullptr;
-    auto* fadingDSPToDestroy = (!fadingHandle.isNull() && fadingHandle != activeHandle)
-        ? resolveDSPHandle(fadingHandle) : nullptr;
+    // ★ F1' (2026-10-25): ここでは **pin を取らない**。
+    //   直後の tryShutdownQuiescentReclaim / lifetimeMgr.retire が
+    //   destroyDSPCoreNode → invalidateForDestroy を同一スレッドで呼ぶため、
+    //   pin を保持していると自分自身の解放が待ちタイムアウトする。
+    //   shutdown 経路は quiescence（activeReaderCount==0）を証明済みで、
+    //   音声スレッドも停止しているため、ポインタ値を retire に渡すだけで安全。
+    //   （逆参照はしない。retire はハンドル台帳操作のみ。）
+    // V-11 §10.6-2 (2026-10-26): 生ポインタの resolve は行わない。
+    //   以前は slot が Reclaimed になる前に DSPCore* を確保する必要があったが、
+    //   所有権は runtimeDSPHandleMap_（handle 完全一致・世代検査つき）が保持しているため、
+    //   破棄の直前に handle から取り出せば足りる。下の retireDetachedCoreForShutdown を参照。
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
@@ -568,24 +595,21 @@ void AudioEngine::releaseResources()
     //   返すため、既に disposition 済みの DSP は何もしない（INV-D162-3・二重 retire 不可）。
     //   EBR destroy は dtor body 内 D5/D8 drain で digest される（INV-D162-8 適合）。
     {
+        // V-11 §10.6-2 (2026-10-26): handle ベースの所有権移転。
+        //   slot は上で quiescence permit により既に Reclaimed なので、retire()/reclaim() は
+        //   呼ばない（Retired への戻しと free list の二重 push を避ける）。
         DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
-        if (activeDSPToDestroy != nullptr) // ★ D162-2-G2 (V-D-b): authority retire で再有効化。
+        if (!activeHandle.isNull())
         {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2G2_VD_RETIRE] dsp=%p target=active-final",
-                (void*)activeDSPToDestroy));
-#endif
-            lifetimeMgrForFinalDSP.retire(activeDSPToDestroy);
+            const bool moved = lifetimeMgrForFinalDSP.retireDetachedCoreForShutdown(activeHandle);
+            jassert(moved);
+            juce::ignoreUnused(moved);
         }
-        if (fadingDSPToDestroy != nullptr && fadingDSPToDestroy != activeDSPToDestroy) // ★ D162-2-G2 (V-D-b): 同上・同一 DSP の二重 retire 防止
+        if (!fadingHandle.isNull() && fadingHandle != activeHandle)
         {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2G2_VD_RETIRE] dsp=%p target=fading-final",
-                (void*)fadingDSPToDestroy));
-#endif
-            lifetimeMgrForFinalDSP.retire(fadingDSPToDestroy);
+            const bool moved = lifetimeMgrForFinalDSP.retireDetachedCoreForShutdown(fadingHandle);
+            jassert(moved);
+            juce::ignoreUnused(moved);
         }
     }
 

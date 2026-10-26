@@ -809,9 +809,21 @@ public:
     ///   drainDeferredRetireQueues）は epoch 事前チェック後に本メソッドを呼ぶが、
     ///   本メソッド内部でも epoch 再確認するため、事前チェックと内部チェックの間に
     ///   epoch が進むと false が返る。戻り値で遅延を通知し、呼出し元が再試行登録する。
+    // G (2026-10-25): `retireEpoch` is the epoch captured WHEN THE HANDLE WAS RETIRED.
+    //   Safety predicate: isOlder(retireEpoch, minReaderEpoch). Passing 0 keeps the
+    //   legacy behaviour (use currentEpoch()), which can never be safe and is only kept
+    //   for callers that have no retirement epoch at hand.
     [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
                                      class DSPHandleRuntime& handleRuntime,
                                      class ISRRetireRouter& router) noexcept;
+
+    // Same, with the epoch captured WHEN THE HANDLE WAS RETIRED. The safety predicate is
+    // isOlder(retireEpoch, minReaderEpoch). Epoch 0 is a legitimate value, so this overload
+    // has no default argument: callers that have no retirement epoch use the 3-arg form.
+    [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
+                                     class DSPHandleRuntime& handleRuntime,
+                                     class ISRRetireRouter& router,
+                                     std::uint64_t retireEpoch) noexcept;
 
     // ★ work88 (X3 §6.3 / R4): Reclaim Authority の一本化 — ReclaimMode。
     //   Reclaim Authority は一つ、Safety Precondition が二種類（R4 Phase 1）。
@@ -829,6 +841,12 @@ public:
         const DSPHandle& handle,
         class DSPHandleRuntime& handleRuntime,
         class ISRRetireRouter& router) noexcept;
+
+    [[nodiscard]] bool reclaimNormal(
+        const DSPHandle& handle,
+        class DSPHandleRuntime& handleRuntime,
+        class ISRRetireRouter& router,
+        std::uint64_t retireEpoch) noexcept;
 
     // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
     //   ReclaimAuthority（本 Coordinator）が現在の shutdown transaction identity を保持する。

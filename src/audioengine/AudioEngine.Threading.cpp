@@ -15,35 +15,107 @@
 // 本ファイルには非3PR関数のみ残す.
 //==============================================================================
 
-void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+// ★ F1'-b (2026-10-25): 破棄結果を返す版。pin が残っていれば Deferred を返し、
+//   **解放しない**（所有権は呼び出し側に残る）。void 版は後方互換のラッパー。
+DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ D117 root-cause audit: observation-only trace (no semantic change).
-    juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
-    // ★ D162-1R-B: 破壊前の実測 footprint を DSPCore 保存値から出力
-    //   （AC-R5: construct/retained/destroy を pointer identity で突合）。
-    if (p != nullptr)
+    if (p == nullptr)
+        return DestroyOutcome::Destroyed;
+
+    if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
     {
-        auto* coreDiag = static_cast<DSPCore*>(p);
-        const auto& fp = coreDiag->diagFootprint;
-        juce::Logger::writeToLog(juce::String::formatted(
-            "[DSP_DESTROY_FOOTPRINT] dsp=%p gen=%llu trackedFootprint=%zu "
-            "(convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu)",
-            p,
-            (unsigned long long)coreDiag->diagGeneration.load(std::memory_order_relaxed),
-            fp.total(), fp.convolver, fp.irData, fp.nuc, fp.ipp,
-            fp.latency, fp.eq, fp.other));
+        if (!owner->invalidateHandleBeforeDestroy(p))
+        {
+            // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
+            //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
+            //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
+            owner->deferDestroyRetry(p);
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
+            return DestroyOutcome::Deferred;
+        }
     }
-#endif
+
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ D162-1R-B: 破壊完了確認（保存 footprint 全カテゴリは DSPCore と運命を共にするため
-    //   帰属対象 0 = released）。実メモリ還収は OS/allocator 依存（H4 判定は MEM_SNAP 側）。
-    juce::Logger::writeToLog(juce::String::formatted(
-        "[DSP_FOOTPRINT_RELEASED] dsp=%p remaining=0", p));
-#endif
+    return DestroyOutcome::Destroyed;
+}
+
+void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+{
+    // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
+    //   Retryable 版が Deferred 時に自ら再試行リストへ登録するので、ここは委譲するだけ。
+    (void)destroyDSPCoreNodeRetryable(p);
+}
+
+// ★ F1'-b: 再試行リストへの登録（重複は無視）。所有権はこのリストが保持する。
+void AudioEngine::deferDestroyRetry(void* p) noexcept
+{
+    if (p == nullptr)
+        return;
+    std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+    for (void* existing : deferredDestroy_)
+    {
+        if (existing == p)
+            return;   // 既に保持している（二重登録しない）
+    }
+    deferredDestroy_.push_back(p);
+    convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
+    convo::publishAtomic(deferredDestroyResidentAtomic_,
+                         static_cast<std::uint32_t>(deferredDestroy_.size()),
+                         std::memory_order_release);
+}
+
+// ★ F1'-b: 延期された破棄の再試行。Destroyed になったものだけリストから外す。
+std::size_t AudioEngine::retryDeferredDestroys() noexcept
+{
+    // F1'-b audit fix (defect D / double free):
+    //   Called from TWO threads: tryReclaimResources (Message Thread / Timer) and
+    //   drainDeferredRetireQueues (CoordinatorLoop). The old implementation copied a
+    //   snapshot under the lock and destroyed OUTSIDE the lock, so both threads could
+    //   snapshot the same pointer and each call destroyDSPCoreNodeRetryable() on it ->
+    //   double free (0xC0000005 / 0xC0000374).
+    //
+    //   Fix: take ownership by SWAPPING the list out. Only the thread that receives the
+    //   entries destroys them; a concurrent caller gets an empty list and does nothing.
+    //   Deferred entries are re-registered by destroyDSPCoreNodeRetryable() itself
+    //   (deferDestroyRetry), so no re-registration is needed here.
+    std::vector<void*> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        snapshot.swap(deferredDestroy_);
+        convo::publishAtomic(deferredDestroyResidentAtomic_,
+                             static_cast<std::uint32_t>(0),
+                             std::memory_order_release);
+    }
+    if (snapshot.empty())
+        return 0;
+
+    std::size_t destroyed = 0;
+    for (void* p : snapshot)
+    {
+        // Destroyed -> freed, not re-registered.
+        // Deferred  -> destroyDSPCoreNodeRetryable() re-registers it internally.
+        if (destroyDSPCoreNodeRetryable(p) == DestroyOutcome::Destroyed)
+            ++destroyed;
+    }
+
+    // Re-sync the resident count for the early-return guards.
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        convo::publishAtomic(deferredDestroyResidentAtomic_,
+                             static_cast<std::uint32_t>(deferredDestroy_.size()),
+                             std::memory_order_release);
+    }
+    return destroyed;
+}
+
+std::size_t AudioEngine::deferredDestroyResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+    return deferredDestroy_.size();
 }
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept

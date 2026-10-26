@@ -149,6 +149,27 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    // V-11 candidate (3): EBR protection for published-world read.
+    //   Wrap the entire published-world read scope in an RCUReaderGuard so that
+    //   the retire router's epoch mechanism prevents DSPCore reclamation while
+    //   the audio thread holds the raw DSPCore* obtained from the published world.
+    //   Previously the audio thread read the published world without entering
+    //   the RCU reader, so a Retired DSPCore could be freed mid-use (UAF).
+    const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
+    // V-11 candidate (3c): fail closed when the EBR read-side guard could not be
+    //   established. RCUReader::enter() records failure in rootEnterSucceeded_ when
+    //   the reader slot cannot be acquired (or another thread owns the reader), and
+    //   in that case NO epoch protection is registered. Proceeding would dereference
+    //   the published-world DSPCore with no protection, which is exactly the UAF this
+    //   fix exists to prevent. This mirrors the established C-7 idiom in
+    //   core/ObservedRuntime.h:get() ("if (!guard.rootEnterSucceeded()) return nullptr").
+    //   Silent audio (cleared buffer) is the safe outcome; a missed callback is
+    //   observable, a use-after-free is not recoverable.
+    if (!rcuGuard.rootEnterSucceeded())
+    {
+        buffer.clear();
+        return;
+    }
     auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
@@ -295,7 +316,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // --- ProcessingStateを現行設計で初期化 ---
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
-    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    // F1′: lease をブロック全体で保持する。
+    auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    DSPCore::ProcessingState procState = stateWithPin.state;
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)

@@ -113,6 +113,59 @@ public:
         return reserved;
     }
 
+    // ── V-11 (P0): ownership-checked re-acquisition after registration close ──
+    //   registerReaderThread()/reserveReaderThread() stop working once
+    //   registrationClosed_ is set (INV-X3-4). That is correct for admitting a *new*
+    //   reader, but the comment on registerReaderThread() above states the intent for
+    //   an already registered reader: "登録済み slot の enter/exit は継続可能
+    //   （常駐 Reader の epoch 完全性は維持）". reserveReaderThread() breaks that
+    //   intent after close: it refuses even the owning thread, so RCUReader::enter()
+    //   fails, no slot contributes to getMinReaderEpoch(), and an object retired at the
+    //   previous epoch becomes reclaimable while the callback reads it (V-11).
+    //
+    //   Ownership is checked against ownerThreadId, which registerReaderThread() sets
+    //   from acquireUniqueThreadId(): a process-wide monotonic counter that is never
+    //   reused. A recycled OS tid (or a colliding cachedThreadHash) cannot pass this
+    //   check, so it is a stronger owner test than comparing cached TIDs.
+    //
+    //   This method does NOT admit a new reader: it requires an existing owner and an
+    //   inactive slot, and it leaves registrationClosed_ untouched.
+    bool reacquireReaderSlot(int readerIndex) noexcept override
+    {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return false;
+
+        auto& slot = readers[static_cast<size_t>(readerIndex)];
+
+        // Ownership: caller must be the thread that registered this slot.
+        // 0 is the "never registered" sentinel and unique ids start at 1.
+        const uint64_t callerId = convo::acquireUniqueThreadId();
+        if (callerId == 0
+            || convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire) != callerId)
+            return false;
+
+        // Only an inactive slot is re-acquirable. kReservedEpoch means another path is
+        // mid-reservation; a live epoch means the slot is still in use.
+        uint64_t expected = kInactiveEpoch;
+        const bool reserved = convo::compareExchangeAtomic(slot.epoch,
+                                                           expected,
+                                                           kReservedEpoch,
+                                                           std::memory_order_acq_rel,
+                                                           std::memory_order_acquire);
+        if (!reserved)
+            return false;
+
+        // Same publish as reserveReaderThread: depth==0 visible before enterReader().
+        convo::publishAtomic(slot.depth, static_cast<uint32_t>(0), std::memory_order_release);
+
+        // quarantineFlags intentionally untouched: a quarantined-idle slot stays
+        // quarantined, and getMinReaderEpoch() still counts it while depth > 0
+        // (see the STG-10-D1 note at getMinReaderEpoch). Clearing the flag here would
+        // resurrect the slot into the normal accounting and could inflate the reclaim
+        // barrier.
+        return true;
+    }
+
     [[deprecated("Use RCUReader::enter() instead. See refactoring_plan.md P1-18.")]]
     void enterReader(int readerIndex) noexcept override
     {

@@ -34,12 +34,25 @@ namespace
 
 void AudioEngine::tryReclaimResources() noexcept
 {
-    // ★ E-1.9-A: empty-drain suppression — skip if nothing pending
-    if (m_retireRouter->pendingRetireCount() == 0
-        && m_retireRouter->residentCountAtomic() == 0)
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 「何も無ければ何もしない」判定に
+    //   延期リストを含める。延期エントリは D/Q/E/T のどこにも入っていないため、
+    //   これを含めないと早期 return して再試行に永久に到達しない。
+    const bool routerEmpty = (m_retireRouter->pendingRetireCount() == 0
+                              && m_retireRouter->residentCountAtomic() == 0);
+    const bool deferredEmpty = (deferredDestroyResidentAtomic() == 0);
+    // F-2 (2026-10-25): deferred quarantine-slot destruction must also reach the tick.
+    const bool quarantineEmpty = (dspHandleRuntime_.deferredQuarantineDestroyCount() == 0);
+    if (routerEmpty && deferredEmpty && quarantineEmpty)
         return;
+
     convo::fetchAddAtomic(rtAuxMutable_.runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     m_retireRouter->tryReclaim();
+
+    // ★ F1'-b: pin 残留で延期された破棄を再試行する。
+    //   pin が解放されていれば、ここで初めて物理破棄が完了する。
+    (void)retryDeferredDestroys();
+    // F-2: pin が外れた quarantine slot を破棄する（所有者はスロット）。
+    (void)dspHandleRuntime_.retryDeferredQuarantineDestroy();
 }
 
 void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
@@ -50,9 +63,13 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     // ★ E-1.9-A: empty-drain suppression — skip drain when nothing is pending.
     //   Lock-free atomic checks only (no mutex on Non-RT path). Shutdown drains
     //   (allowDuringShutdown=true) are never suppressed.
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 延期リストも「保留あり」とみなす。
+    //   これを含めないと、D/Q/E/T が空のとき早期 return して再試行に到達しない。
     if (!allowDuringShutdown
         && m_retireRouter->pendingRetireCount() == 0
-        && m_retireRouter->residentCountAtomic() == 0)
+        && m_retireRouter->residentCountAtomic() == 0
+        && deferredDestroyResidentAtomic() == 0
+        && dspHandleRuntime_.deferredQuarantineDestroyCount() == 0)
         return;
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
@@ -64,6 +81,12 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     // [P1-21] epoch-free API: minReaderEpoch を直接渡す
     m_coordinator.reclaim(m_retireRouter->getMinReaderEpoch());
     runtimePublicationBridge_.onReclaimEnd();
+
+    // ★ F1'-b (2026-10-25): pin 残留で延期された破棄を再試行する。
+    //   drain の後に置くことで、retire 済み → pin 解放済み の順序が保証される。
+    (void)retryDeferredDestroys();
+    // F-2 (2026-10-25): pin が外れた quarantine slot を破棄する（所有者はスロット）。
+    (void)dspHandleRuntime_.retryDeferredQuarantineDestroy();
 
     // ★ work88 (Phase 3): 保留中 reclaim の再試行。
     //   requestReclaim が RT Reader の古い epoch 参照により遅延した handle を、
@@ -111,7 +134,9 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
             //   本関数は caller-side の epoch 事前判定を持たない（TOCTOU window の除去）。
             if (dspHandleRuntime_.isRetired(handle))
             {
-                const auto retireEpoch = m_retireRouter->currentEpoch();
+                // G (2026-10-25): keep the ORIGINAL retirement epoch. Recomputing
+            // currentEpoch() here made every retry look unsafe forever.
+            const auto retireEpoch = identity.retireSequence;
                 // ★ STG-9-D1 / RC-1 訂正（R2）: retry は「同一 entry の継続」ではなく
                 //   「old entry → new deferred attempt → new entry」の置換である。
                 //   requestReclaim の deferred 戻りは reclaimNormal が onReclaimBegin (+1) した
@@ -119,7 +144,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
                 //   差分は +0（new +1 / old -1）。
                 //   順序は必ず push_back → onReclaimEnd。逆順にすると swap window 中に
                 //   member list が空の時間帯が生じ、その間の drain predicate を壊す。
-                if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+                if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_,
+                                                              *m_retireRouter, retireEpoch))
                 {
                     std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
                     // ★ dash2 §2.2 (G14): ReclaimIdentity として再登録。

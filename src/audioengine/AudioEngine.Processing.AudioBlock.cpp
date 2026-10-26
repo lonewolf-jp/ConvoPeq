@@ -3,6 +3,7 @@
 #include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
 #include "core/TimeUtils.h"
+#include "core/RCUReader.h"
 
 // windows.h: SetThreadAffinityMask 用（applyMmcssPriority 経由）
 #include <windows.h>
@@ -165,6 +166,22 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // P0-2: 読取入口を単一の callback authority view へ収束（R21 gate: readAudioRuntimeView）
+    // V-11 candidate (3): EBR protection for published-world read.
+    const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
+    // V-11 candidate (3c): fail closed when the EBR read-side guard could not be
+    //   established (see the matching guard in processBlockDouble). Without a
+    //   successful enter() no epoch protection is registered, so the published-world
+    //   DSPCore must not be dereferenced. C-7 idiom: core/ObservedRuntime.h:get().
+    if (!rcuGuard.rootEnterSucceeded())
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // ★ V-11 verification seam: the guard is held and nothing has been dereferenced yet.
+    if (auto hookFn = convo::consumeAtomic(audioBlockTestHook, std::memory_order_acquire))
+        hookFn(convo::consumeAtomic(audioBlockTestHookCtx, std::memory_order_acquire));
+#endif
     auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
@@ -343,7 +360,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // ── Audio Thread authority: RuntimeWorld 由来のスナップショットを使用 ──
         const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
-        DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+        // F1′: lease をブロック全体で保持する。
+        auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+        DSPCore::ProcessingState procState = stateWithPin.state;
 
         DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
         const auto& preparedCrossfade = authority.preparedCrossfade;

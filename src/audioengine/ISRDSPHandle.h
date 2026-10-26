@@ -79,6 +79,68 @@ struct ResolvedDSP
 };
 
 /**
+ * ★ F1' (2026-10-25): DSPCore の寿命 lease。
+ *
+ *   `tryPin(handle)` が成功したときだけ生成され、生存している間は
+ *   対象インスタンスが解放されないことを保証する。生ポインタは `get()` 経由でのみ
+ *   公開され、`operator bool` が false の lease の `get()` は nullptr を返す。
+ *
+ *   規約（設計資料 F1-PIN-DESIGN-REVIEW の R1-R6）:
+ *     R2: lease は「そのポインタを使い終わるスコープ全体」に置く（get() を持ち出さない）。
+ *     R3: コピー不可（move のみ）。
+ *     R5: tryPin / 解除は RT 可（ロック・確保・待機なし）。
+ */
+class DSPHandlePin
+{
+public:
+    DSPHandlePin() noexcept = default;
+
+    DSPHandlePin(const DSPHandlePin&) = delete;
+    DSPHandlePin& operator=(const DSPHandlePin&) = delete;
+
+    DSPHandlePin(DSPHandlePin&& other) noexcept
+        : owner_(other.owner_), slot_(other.slot_), instance_(other.instance_)
+    {
+        other.owner_ = nullptr;
+        other.instance_ = nullptr;
+        other.slot_ = 0;
+    }
+
+    DSPHandlePin& operator=(DSPHandlePin&& other) noexcept
+    {
+        if (this != &other)
+        {
+            release();
+            owner_ = other.owner_;
+            slot_ = other.slot_;
+            instance_ = other.instance_;
+            other.owner_ = nullptr;
+            other.instance_ = nullptr;
+            other.slot_ = 0;
+        }
+        return *this;
+    }
+
+    ~DSPHandlePin() noexcept { release(); }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return instance_ != nullptr; }
+    [[nodiscard]] void* get() const noexcept { return instance_; }
+    [[nodiscard]] uint32_t slot() const noexcept { return slot_; }
+
+private:
+    friend class DSPHandleRuntime;
+
+    DSPHandlePin(DSPHandleRuntime* owner, uint32_t slot, void* instance) noexcept
+        : owner_(owner), slot_(slot), instance_(instance) {}
+
+    void release() noexcept;
+
+    DSPHandleRuntime* owner_ = nullptr;
+    uint32_t slot_ = 0;
+    void* instance_ = nullptr;
+};
+
+/**
  * crossfade ID（複数 crossfade の同時追跡用）
  */
 using CrossfadeId = uint32_t;
@@ -106,8 +168,20 @@ struct DSPRegistrySlot
     std::atomic<uint64_t> generation;  // ★ B-1: 64bit化（ABA 防止世代番号）
     static_assert(std::atomic<uint64_t>::is_always_lock_free,
         "atomic<uint64_t> must be lock-free on x64 for ISR Runtime");
-    void*                 instance;    // DSP インスタンスポインタ
+    // ★ F2' (2026-10-25): instance を atomic 化。create()/reclaim()/invalidateForDestroy() が
+    //   書き込み、resolve() が別スレッドから読むため、plain pointer は正式なデータ競合だった
+    //   （クラッシュダンプの stale slot は解放経路と並行に読まれていた）。
+    //   void* と同サイズ・同アラインメントなのでスロットのレイアウトは不変（24 バイト）。
+    std::atomic<void*>    instance;    // DSP インスタンスポインタ
     std::atomic<DSPState> state;       // 現在状態（atomic access）
+    // ★ F1' (2026-10-25): pin 受付と pin 数を **単一ワード** に持つ。
+    //   bit 63      = kPinClosed（破棄が受付を閉じた）
+    //   bits 0..62  = pin 数
+    //   2 ワード（受付フラグ + カウンタ）に分けると「受付が開いているか確認 → +1」の間に
+    //   破棄が割り込む窓が残る（レビュー指摘 A: 受付閉鎖と寿命保護は別の不変条件）。
+    //   1 ワードの CAS なら「開いていることを確認して +1」が不可分になり、
+    //   「閉じた後に新しい pin が成立する」順序が存在しなくなる。
+    std::atomic<uint64_t> pinState;
 };
 
 /**
@@ -117,13 +191,49 @@ struct DSPRegistrySlot
 class DSPHandleRuntime
 {
 public:
+    // ★ F1' (2026-10-25): DSPHandlePin は release() で releasePinSlot を呼ぶ。
+    friend class DSPHandlePin;
+
     static constexpr size_t MAX_DSP_SLOTS = 256;
 
     DSPHandleRuntime();
     ~DSPHandleRuntime();
 
     // NonRT: DSP インスタンスを登録し DSPHandle を返す
+    // ★ F3' (2026-10-25): 同一インスタンスに複数の有効ハンドルを発行しない。
+    //   - 既存スロットが live（Constructing/Active/CrossfadingIn/CrossfadingOut）なら
+    //     そのハンドルを返す（重複排除）。
+    //   - 既存スロットが Retired/DestroyPending/Quarantined なら **拒否**（null を返す）。
+    //     破棄が確定したオブジェクトの再登録は「復活」であり、retire が片方のスロットしか
+    //     無効化しないまま他方が Active で残る経路になる（ダンプの slot 251/254）。
+    //   - Reclaimed は instance が null なので一致せず、アドレス再利用の新オブジェクトは
+    //     通常どおり登録できる。
     DSPHandle create(void* dspInstance);
+
+    // ★ F2' (2026-10-25): DSPCore のメモリ解放より前に、そのインスタンスを指す全スロットを
+    //   解決不能にする（DestroyPending → Reclaimed + instance=nullptr + free list 返却）。
+    //   AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ばれる。
+    //   閉じる欠陥: 解放済みメモリを指したまま Active/Retired で残るスロット（ダンプの 251）。
+    //   閉じない欠陥: resolve() が state と instance を読んだ直後〜解放の間の TOCTOU。
+    //   これは pin 方式（F1'・別課題）でしか閉じない。
+    //   戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**（延期）。
+    //   F1' で「pin の消滅を待つ」責務が入ったため、bool を返す契約へ変更した。
+    [[nodiscard]] bool invalidateForDestroy(void* dspInstance,
+                                            int timeoutMs = 2000) noexcept;
+
+    // ★ F1' (2026-10-25): 寿命 lease の取得。成功した lease の生存中は
+    //   invalidateForDestroy / reclaim がそのインスタンスを解放できない。
+    //   RT 可（ロック・動的確保・待機なし。単一ワード CAS のみ）。
+    //   失敗（null handle / generation 不一致 / 受付閉鎖 / instance なし）は空の lease。
+    [[nodiscard]] DSPHandlePin tryPin(DSPHandle handle) noexcept;
+
+    // ★ F1' (2026-10-25): 破棄側の受付閉鎖。以後の tryPin は必ず失敗する。
+    //   戻り値: 閉鎖を確定させたか（既に閉鎖済みなら false）。
+    //   RT 不可（破棄は NonRT）。閉鎖後に pinCount を観測して 0 を待つ。
+    [[nodiscard]] bool closePinsForDestroy(uint32_t slot, uint64_t expectedGeneration) noexcept;
+
+    // ★ F1' (2026-10-25): 指定スロットの現在の pin 数（破棄側の待機用）。
+    [[nodiscard]] uint32_t pinnedCount(uint32_t slot) const noexcept;
 
     // RT/NonRT: handle を検証し、有効な参照を返す
     // stale handle（generation mismatch）は build別ポリシーで処理
@@ -167,7 +277,19 @@ public:
     bool isSlotInCrossfade(uint32_t slot) const noexcept;
 
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
-    void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
+    // F-2 (2026-10-25): pin contract. true = destroyed (slot returned to the free list),
+    // false = not done (pin held / not eligible / state mismatch) and NOTHING was changed
+    // (state stays Quarantined, instance and slot ownership retained). Callers must treat
+    // false as "deferred" and retry on a later tick or at shutdown.
+    [[nodiscard]] bool destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
+
+    // F-2 (2026-10-25): retry quarantine-slot destruction after pins drain.
+    //   Owner: the slot (kept in state Quarantined) / Retry subject: AudioEngine's reclaim
+    //   tick (tryReclaimResources) and the shutdown drain.
+    [[nodiscard]] std::size_t retryDeferredQuarantineDestroy() noexcept;
+
+    // Number of quarantine slots whose destruction is deferred (observation only).
+    [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept;
 
     // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
     //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
@@ -193,6 +315,21 @@ private:
     //   外部からは Coordinator::requestReclaim() 経由で実行する。
     void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+
+    // ★ F1' (2026-10-25): pinState のビット定義。
+    //   bit 63 = kPinClosed / bits 0..62 = pin 数。単一ワード CAS で
+    //   「受付が開いていることを確認して +1」を不可分に行う。
+    static constexpr uint64_t kPinClosedBit = 1ull << 63;
+    static constexpr uint64_t kPinCountMask = ~kPinClosedBit;
+
+    // ★ F1' (2026-10-25): DSPHandlePin::release() から呼ばれる（DSPHandlePin は friend）。
+    void releasePinSlot(uint32_t slot) noexcept;
+
+    // ★ F1' (2026-10-25): 破棄側の待機。targets は {slot, generation} の配列
+    //   （型消去して void* で受ける。ISRDSPHandle.h の public 面を増やさないため）。
+    struct PinDrainTarget { uint32_t slot; uint64_t generation; };
+    [[nodiscard]] bool waitForPinsToDrain(const void* targets, size_t targetCount,
+                                          int timeoutMs) noexcept;
     // ★ FUTURE-5 (work88): O(1) 確保用フリーリスト（slot 1..255 をスタック管理。slot 0 は
     //   null handle 表現のため使用しない — 既存 create() の線形スキャン開始位置と同一契約）。
     //   create() はフリーリスト pop（O(1)）、reclaim/rollbackRegistration は push（O(1)）。
@@ -200,6 +337,9 @@ private:
     mutable std::mutex freeListMutex_;
     std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
     uint32_t freeSize_ = 0;
+    // F-2 (2026-10-25): non-zero while at least one quarantined slot could not be destroyed
+    // because a pin was still held. Advisory: recomputed by retryDeferredQuarantineDestroy().
+    std::atomic<std::uint32_t> deferredQuarantineDestroy_{0};
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
     //   DSPHandle is a 16-byte POD; its atomic requires atomic 16-byte CAS semantics
     //   (MSVC: lock-pool backend, is_lock_free()==false is accurate; all consumers NonRT).

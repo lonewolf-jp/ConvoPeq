@@ -78,17 +78,20 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
     // ★ Phase2: DSPHandle → DSPCore* 解決 (Execution Path Handle Normalization)
-    auto* newDSPResolved = engine_.resolveDSPHandle(req.newDSP);
+    // ★ F1' (2026-10-25): pin で寿命を確保してから逆参照する。lease はこの関数の
+    //   world build 完了まで保持する（規約 R2: 最後のアクセスまで）。
+    auto newPin = engine_.tryPinDSPHandle(req.newDSP);
+    auto* newDSPResolved = static_cast<AudioEngine::DSPCore*>(newPin.get());
     // ★ [PR-4A] S-A2排除: Decision層の DSPCore* 直接参照を Handle 経由に変更
     auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();
-    auto* oldDSP = (!oldHandle.isNull())
-        ? engine_.resolveDSPHandle(oldHandle)
-        : nullptr;
+    auto oldPin = (!oldHandle.isNull()) ? engine_.tryPinDSPHandle(oldHandle)
+                                        : convo::isr::DSPHandlePin{};
+    auto* oldDSP = static_cast<AudioEngine::DSPCore*>(oldPin.get());
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     if (req.newDSP.isNull()) {
         DBG("[DIAG] trySubmit: newDSP handle is NULL generation=" << req.generation);
     } else if (newDSPResolved == nullptr) {
-        DBG("[DIAG] trySubmit: resolveDSPHandle failed slot=" << (int)req.newDSP.slot
+        DBG("[DIAG] trySubmit: pin failed slot=" << (int)req.newDSP.slot
             << " gen=" << (int)req.newDSP.generation << " reqGen=" << req.generation);
     }
 #endif
@@ -179,7 +182,14 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     if (!worldOwner) {
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
+        {
+            // ★ F1' (2026-10-25): retire は enqueueWithRetry 経由で destroyDSPCoreNode を
+            //   同一スレッドで同期実行しうる。pin を持ったままだと破棄側が待ちタイムアウト
+            //   するため、**先に lease を返す**（以後 newDSPResolved を逆参照しない）。
+            newPin = convo::isr::DSPHandlePin{};
+            oldPin = convo::isr::DSPHandlePin{};
             lifetime_.retire(newDSPResolved);
+        }
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordProgress(correlationId,
             static_cast<uint64_t>(req.generation), 0,
@@ -247,7 +257,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
         if (!worldOwner) {
             if (!req.newDSP.isNull())
+            {
+                // ★ F1' : retire 前に lease を返す（上と同じ理由）。
+                newPin = convo::isr::DSPHandlePin{};
+                oldPin = convo::isr::DSPHandlePin{};
                 lifetime_.retire(newDSPResolved);
+            }
             stateOwner_.onExecutorFailed(correlationId.shortValue());
             telemetryRecorder_.recordProgress(correlationId,
                 static_cast<uint64_t>(req.generation), 0,
@@ -292,7 +307,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   false を返すため lifetime_.retire() は無効。
         //   代わりに destroyRolledBackDSP() で未公開 DSPCore を直接破棄する。
         if (newDSPResolved != nullptr)
+        {
+            // ★ F1' : destroyRolledBackDSP は直接 destroy するため、lease を先に返す。
+            newPin = convo::isr::DSPHandlePin{};
+            oldPin = convo::isr::DSPHandlePin{};
             lifetime_.destroyRolledBackDSP(newDSPResolved);
+        }
         // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordFailure(FailureStage::Execution,
@@ -644,6 +664,9 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         //   DSPCore を authority（EBR・INV-D162-8 単経路）で disposition する。
         //   midrun 経由（drainDeferredClearIfRequested → E-4d retire 済み）では map 不在で
         //   no-op となるため二重 retire は構造的に発生しない（INV-D162-3）。
+        // R8 candidate fix: hoist the obligation id so it can be terminalized after the slot reset.
+        std::uint64_t clearObligationId = 0;
+        bool clearIsShutdown = false;
         if (deferredSlot_.has_value())
         {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -655,9 +678,28 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
             retireRegisteredDSP(
                 deferredSlot_->request,
                 "shutdown-clear");
+
+            // R8 candidate fix: capture the recovery obligation id before the slot is
+            // reset, so it can be terminalized below. Previously clearDeferredForShutdown()
+            // only called invalidateDeferredObligation() (retry metadata reset) and left
+            // the obligation live (L=1) - the "over-terminalized (L=1 hasDeferred=0)" defect.
+            clearObligationId = deferredSlot_->request.recoveryObligationId;
+            clearIsShutdown = engine_.isShutdownInProgress();
         }
         deferredSlot_.reset();
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
+
+        // R8 candidate fix: terminalize the recovery obligation on the clear path,
+        // mirroring the evaluateDeferred discard path (line ~973) which calls
+        // resolveRecoveryObligation(StaleSuperseded/ShutdownDiscarded). ShutdownDiscarded
+        // is used for actual shutdown; StaleSuperseded for mid-run stall drains.
+        if (clearObligationId != 0) {
+            engine_.runtimePublicationBridge_.resolveRecoveryObligation(
+                clearObligationId,
+                clearIsShutdown
+                    ? RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded
+                    : RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
+        }
     }
 
     // ★ D135-1 / F6-7: shutdown による deferred 消去 — obligation metadata も無効化
@@ -682,9 +724,13 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 //   always runs on the RebuildThread via drainDeferredClearIfRequested().
 void RuntimePublicationOrchestrator::requestDeferredClear() noexcept
 {
-    // C1: RebuildThread is stopping/stopped (post join). No concurrent RebuildThread
-    //     writer can touch the plain deferred members → clear synchronously.
-    if (convo::consumeAtomic(engine_.rebuildThreadShouldExit, std::memory_order_acquire))
+    // C1: RebuildThread is stopped (post join). No concurrent RebuildThread writer can
+    //     touch the plain deferred members → clear synchronously.
+    //     ★ R8 (P1): the predicate is rebuildThreadStopped (published after join), NOT
+    //     rebuildThreadShouldExit (published before join). With the latter, the C1 branch
+    //     could run while the RebuildThread was still inside processDeferredAdmission(),
+    //     i.e. two threads writing deferredSlot_ / hasDeferred_.
+    if (convo::consumeAtomic(engine_.rebuildThreadStopped, std::memory_order_acquire))
     {
         clearDeferredForShutdown();
         return;
@@ -702,7 +748,13 @@ void RuntimePublicationOrchestrator::requestDeferredClear() noexcept
 //   synchronous primitive (EmergencyDrain + C1 fallback call it from non-RebuildThread).
 bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return false;  // refuse instead of touching the plain deferred members
+    }
     if (convo::exchangeAtomic(deferredClearRequested_, false, std::memory_order_acq_rel))
     {
         // ★ D162-2-E (E-4d): Timer C2/C3/C4 requestDeferredClear → mid-run clear path の
@@ -734,7 +786,13 @@ bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
 //   Single Thread Owner（RebuildThread）契約の jassert 付き（ADR-C4:100-105）。
 std::optional<DeferredPublishView> RuntimePublicationOrchestrator::peekDeferred() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return std::nullopt;  // refuse instead of touching the plain deferred members
+    }
     if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire) || !deferredSlot_.has_value())
         return std::nullopt;
     return DeferredPublishView(*this, *deferredSlot_);
@@ -769,9 +827,12 @@ void RuntimePublicationOrchestrator::retireRegisteredDSP(
 {
     if (req.newDSP.isNull())
         return;
-    auto* dsp = engine_.resolveDSPHandle(req.newDSP);
+    // ★ F1' (2026-10-25): retire は DSPCore のフィールドに触れないが、
+    //   「解決したポインタが有効なうちに retire を発行する」順序を保証するため pin を取る。
+    auto pin = engine_.tryPinDSPHandle(req.newDSP);
+    auto* dsp = static_cast<AudioEngine::DSPCore*>(pin.get());
     if (dsp == nullptr)
-        return;  // 未登録 / rollback / quarantine / reclaimed — disposition 済み。no-op。
+        return;  // 未登録 / rollback / quarantine / reclaimed / pin 受付閉鎖 — disposition 済み。no-op。
 
     DSPLifetimeManager lifetimeMgr{engine_};
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -788,7 +849,13 @@ void RuntimePublicationOrchestrator::retireRegisteredDSP(
 //   slot reset + hasDeferred_ flip + DeferredHealth telemetry を一括実行。
 void RuntimePublicationOrchestrator::finishView() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return;  // refuse instead of touching the plain deferred members
+    }
     DiscardReason reason = DiscardReason::None;
     uint64_t discardTs = 0;
     if (deferredSlot_.has_value()) {
@@ -849,7 +916,13 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
 //   消費されることはない）。raw .load/.store/.fetch_sub は不使用（convo:: wrapper のみ）。
 bool RuntimePublicationOrchestrator::tryConsumeRedriveBudget() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return false;  // refuse instead of touching the plain deferred members
+    }
     for (;;) {
         const auto v = convo::consumeAtomic(redriveEpisodeBudget_);
         if (v == 0)
@@ -870,7 +943,13 @@ bool RuntimePublicationOrchestrator::tryConsumeRedriveBudget() noexcept
 //    AudioEngine.h:2528-2529 の consumeDeferredRequest → processDeferredAdmission 一本化済み）
 void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWake) noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return;  // refuse instead of touching the plain deferred members
+    }
     // ★ D135-8 Step 7 (P3): recovery-wake provenance gate (D135-5 blind-bool blocker resolved by
     //   Step 6). wasRecoveryWake is true iff THIS admission was provoked by the crossfade-timeout
     //   recovery path (recoveryRetryReady stamped release-store at AudioEngine.Timer.cpp:1748 under

@@ -52,7 +52,9 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap, isFadingTarget);
 
-    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    // F1′: lease をブロック全体で保持する。
+    auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    DSPCore::ProcessingState procState = stateWithPin.state;
 
     auto* inMeter = isFadingTarget ? nullptr : &inputLevelLinear;
     auto* outMeter = isFadingTarget ? nullptr : &outputLevelLinear;

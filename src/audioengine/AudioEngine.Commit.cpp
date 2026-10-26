@@ -674,8 +674,14 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                 continue;
 
             // 3系統解放（quarantineSlot の逆順）
+            // F-2 (2026-10-25): destroy the handle slot first. If a pin is still held,
+            // destroyQuarantineSlot() changes NOTHING (state stays Quarantined), so the
+            // whole 3-store teardown must be retried on a later tick. Reclaiming the
+            // world lane or clearing the quarantine flag here would make the
+            // grace/lane guard skip this slot forever (permanent leak).
+            if (!dspHandleRuntime_.destroyQuarantineSlot(qslot, 0))
+                continue;
             worldAuthority_.lifetime().reclaim(qslot);                          // 系統③: レーン解放
-            dspHandleRuntime_.destroyQuarantineSlot(qslot, 0);         // 系統①: Reclaimedに遷移
             dspQuarantineManager_.reclaimSlot(qslot, 0);              // 系統②: フラグ解放
         }
     }

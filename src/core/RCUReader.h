@@ -170,6 +170,14 @@ private:
         {
             reservedTid = preferredTid;
         }
+        else if (preferredTid >= 0 && epochProvider->reacquireReaderSlot(preferredTid))
+        {
+            // ★ V-11: registration is closed but this thread owns the slot. Re-acquire it
+            //   so epoch protection is restored, instead of returning -1 and letting the
+            //   caller run unprotected (or, with the 3c fail-closed guard, go permanently
+            //   silent). The provider verifies ownership; a foreign thread gets false.
+            reservedTid = preferredTid;
+        }
         else
         {
             reservedTid = epochProvider->registerReaderThread();

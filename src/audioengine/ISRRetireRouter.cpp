@@ -31,7 +31,7 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
         return true;  // no-op は成功扱い
 
     std::lock_guard<std::mutex> lock(mtx_);
-    entries_.push_back(Entry{ptr, deleter, epoch, type, reason});
+    entries_.push_back(Entry{ptr, deleter, nullptr, epoch, type, reason, 0});
     // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_add)
     convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
     // ★ Step 5-I: telemetry — cumulative store count (Generic + World)
@@ -46,42 +46,169 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
                 break;
         }
     }
-    return true;  // ★ P-4: growable store — ALWAYS accepts
+    return true;  // ★ P-4: growable store → ALWAYS accepts
+}
+
+// F1'-b (2026-10-25): retryable 破棄の格納。所有権は常に移転する。
+bool TerminalReclaimAuthority::storeRetryable(void* ptr, RetryableDeleter retryable,
+                                              uint64_t epoch, DeletionEntryType type,
+                                              const char* reason) noexcept
+{
+    if (ptr == nullptr || retryable == nullptr)
+        return true;
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    entries_.push_back(Entry{ptr, nullptr, retryable, epoch, type, reason, 0});
+    convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(terminalStoreCount_, std::uint64_t{1}, std::memory_order_release);
+    {
+        const uint32_t current = convo::consumeAtomic(residentAtomic_, std::memory_order_acquire);
+        uint32_t expected = convo::consumeAtomic(terminalPeakResident_, std::memory_order_acquire);
+        while (current > expected) {
+            if (convo::compareExchangeAtomic(terminalPeakResident_, expected, current,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
+    return true;
+}
+
+// F1'-b: 延期されたまま残っているエントリ数（shutdown 後の未回収観測用）。
+//   注意: 「retryable で格納されたが、まだ 1 度も延期されていない」エントリは
+//   未回収ではない（次回 drain で破棄される予定）。ここでは
+//   「延期を経験したエントリ」= 破棄が進んでいないものを数える。
+std::size_t TerminalReclaimAuthority::deferredResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    std::size_t n = 0;
+    for (const auto& e : entries_)
+    {
+        if (e.ptr != nullptr && e.retryable != nullptr && e.deferredAttempts > 0)
+            ++n;
+    }
+    return n;
+}
+
+// F1'-b: retryable として保持されているエントリ総数（延期前も含む）。
+//   「所有権を保持しているか」の観測はこちらを使う。
+std::size_t TerminalReclaimAuthority::retryableResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    std::size_t n = 0;
+    for (const auto& e : entries_)
+    {
+        if (e.ptr != nullptr && e.retryable != nullptr)
+            ++n;
+    }
+    return n;
 }
 
 void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
                                      const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
 {
-    // Extract epoch-safe entries under lock, execute deleter outside lock (reentrancy-safe)
-    // ★ P-4: EBR 安全条件は RetireQuarantineStore::drain と同一 —
-    //   isOlder(entry.epoch, minReaderEpoch) == true（entry.epoch < minReaderEpoch）→ safe。
-    std::vector<Entry> pending;
+    // ★ F1'-b (2026-10-25): 所有権の扱いを「消費」から「結果を見て消費」へ変更。
+    //   旧実装は epoch-safe なエントリを pending に移した時点で entries_ から消していたため、
+    //   deleter が「解放しなかった」と判断しても所有権が失われていた
+    //   （再試行不能・residentAtomic_ の誤減少・shutdown 終端条件の誤成立）。
+    //
+    //   新規則:
+    //     - retryable を持つエントリ: entries_ に残したまま呼び出す。
+    //         Destroyed → 消費（所有権を放棄）
+    //         Deferred  → entries_ に残す（所有権を保持し、次回 drain で再試行）
+    //     - retryable を持たない従来エントリ: これまでどおり取り出して deleter を実行する。
+    std::vector<Entry> legacyPending;
+    std::size_t destroyedRetryable = 0;
+    std::size_t transferredRetryable = 0;   // E: Deferred -> the callee owns it
+
+    // --- 1) epoch-safe な retryable 候補を集める（ロック内・呼び出しはしない）---
+    std::vector<std::size_t> candidates;
     {
         std::lock_guard<std::mutex> lock(mtx_);
         std::size_t w = 0;
         for (std::size_t r = 0; r < entries_.size(); ++r) {
             auto& e = entries_[r];
-            if (e.ptr != nullptr && e.deleter != nullptr
-                && isOlderFn(e.epoch, minReaderEpoch))  // epoch < minReaderEpoch → safe
-            {
-                pending.push_back(e);
-                e = Entry{};
-            } else {
-                if (w != r)
-                    entries_[w] = e;
+            const bool hasTarget = (e.ptr != nullptr)
+                && (e.deleter != nullptr || e.retryable != nullptr);
+            const bool safe = hasTarget && isOlderFn(e.epoch, minReaderEpoch);
+            if (!safe) {
+                if (w != r) entries_[w] = e;
                 ++w;
+                continue;
+            }
+            if (e.retryable != nullptr) {
+                if (w != r) entries_[w] = e;   // 残す（結果を見てから決める）
+                candidates.push_back(w);
+                ++w;
+            } else {
+                legacyPending.push_back(e);    // 従来経路: 消費
+                e = Entry{};
             }
         }
         entries_.resize(w);
     }
-    // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
-    // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_sub)
-    convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(pending.size()), std::memory_order_release);
-    for (auto& e : pending) {
+
+    // --- 2) retryable をロック外で実行し、結果で消費/保持を決める ---
+    for (std::size_t idx : candidates) {
+        Entry snapshot{};
+        bool present = false;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (idx < entries_.size() && entries_[idx].ptr != nullptr
+                && entries_[idx].retryable != nullptr) {
+                snapshot = entries_[idx];
+                present = true;
+            }
+        }
+        if (!present)
+            continue;
+
+        const DestroyOutcome outcome = snapshot.retryable(snapshot.ptr);
+
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (idx < entries_.size() && entries_[idx].ptr == snapshot.ptr) {
+            if (outcome == DestroyOutcome::Destroyed) {
+                entries_[idx] = Entry{};
+                ++destroyedRetryable;
+            } else {
+                // ★ 所有権を保持: エントリは残し、試行回数だけ増やす。
+                // E (2026-10-25): Deferred = the callee retained ownership (the engine
+                // retryable registers the pointer in its own retry list). Dropping the
+                // entry here is what prevents the same pointer from being owned twice.
+                entries_[idx] = Entry{};
+                ++transferredRetryable;
+                convo::fetchAddAtomic(ownershipTransferredCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
+                convo::fetchAddAtomic(deferredAttemptCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
+            }
+        }
+    }
+
+    // --- 3) 消費したスロットを詰める ---
+    if (destroyedRetryable > 0 || transferredRetryable > 0) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        std::size_t w = 0;
+        for (std::size_t r = 0; r < entries_.size(); ++r) {
+            if (entries_[r].ptr == nullptr)
+                continue;
+            if (w != r) entries_[w] = entries_[r];
+            ++w;
+        }
+        entries_.resize(w);
+    }
+
+    // --- 4) residentAtomic_ は「未回収のエントリ数」。Deferred は減らさない（RT-3）---
+    const std::size_t consumed = legacyPending.size() + destroyedRetryable
+        + transferredRetryable;
+    if (consumed > 0)
+        convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(consumed),
+                              std::memory_order_release);
+
+    // --- 5) 従来 deleter の実行（ロック外・reentrancy 安全）---
+    for (auto& e : legacyPending) {
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
         {
-            // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw ++)
             convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             if (referenceObserver_ != nullptr)
                 referenceObserver_->onRelease();
@@ -93,16 +220,52 @@ void TerminalReclaimAuthority::drainAll() noexcept
 {
     // ★ Step 5-I: telemetry — increment drainAll invocation count
     convo::fetchAddAtomic(terminalDrainAllCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-    std::vector<Entry> pending;
+
+    // ★ F1'-b (2026-10-25): drainAll でも Deferred を強制解放しない（RT-4）。
+    //   shutdown 中に pin 保持者がいる可能性を排除できないため、UAF ではなく
+    //   「未回収として残す」方を選ぶ。残数は deferredResidentCount() で観測できる。
+    std::vector<Entry> pending;      // 従来 deleter（消費してよい）
+    std::vector<Entry> kept;         // retryable で Deferred だったもの（所有権保持）
     {
         std::lock_guard<std::mutex> lock(mtx_);
-        pending.swap(entries_);  // take all entries under lock
-        // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
-        // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw store)
+        pending.swap(entries_);      // take all entries under lock
         convo::publishAtomic(residentAtomic_, uint32_t{0}, std::memory_order_release);
     }
+
     for (auto& e : pending) {
-        if (e.ptr != nullptr && e.deleter != nullptr) {
+        if (e.ptr == nullptr)
+            continue;
+
+        if (e.retryable != nullptr)
+        {
+            // 結果を見て決める。Deferred なら所有権を保持して残す。
+            const DestroyOutcome outcome = e.retryable(e.ptr);
+            if (outcome == DestroyOutcome::Destroyed)
+            {
+                convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
+                                      std::memory_order_release);
+                if (e.type == DeletionEntryType::World)
+                {
+                    convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1},
+                                          std::memory_order_acq_rel);
+                    if (referenceObserver_ != nullptr)
+                        referenceObserver_->onRelease();
+                }
+            }
+            else
+            {
+                // E (2026-10-25): Deferred = the callee retained ownership (the engine
+                // retry list). drainAll must NOT keep the entry either, otherwise the same
+                // pointer stays owned by two authorities across shutdown.
+                convo::fetchAddAtomic(ownershipTransferredCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
+                convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
+                                      std::memory_order_release);
+            }
+            continue;
+        }
+
+        if (e.deleter != nullptr) {
             e.deleter(e.ptr);
             // ★ Step 5-I: telemetry — count actually drained entries
             convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1}, std::memory_order_release);
@@ -114,6 +277,17 @@ void TerminalReclaimAuthority::drainAll() noexcept
                     referenceObserver_->onRelease();
             }
         }
+    }
+
+    // ★ F1'-b: Deferred だったエントリを所有権ごと戻す（未回収として保持）。
+    if (!kept.empty())
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (auto& e : kept)
+            entries_.push_back(e);
+        convo::publishAtomic(residentAtomic_,
+                             static_cast<uint32_t>(entries_.size()),
+                             std::memory_order_release);
     }
 }
 
@@ -196,6 +370,16 @@ bool ISRRetireRouter::reserveReaderThread(int readerIndex) noexcept
 {
     assert(provider_ != nullptr);
     return provider_->reserveReaderThread(readerIndex);
+}
+
+// V-11: delegate ownership-checked re-acquisition (see IReaderEpochProvider).
+//   Fail-closed when no provider is installed, matching the other delegations.
+bool ISRRetireRouter::reacquireReaderSlot(int readerIndex) noexcept
+{
+    assert(provider_ != nullptr);
+    if (provider_ == nullptr)
+        return false;
+    return provider_->reacquireReaderSlot(readerIndex);
 }
 
 void ISRRetireRouter::enterReader(int readerIndex) noexcept
@@ -536,6 +720,46 @@ bool ISRRetireRouter::terminalReclaim(void* ptr, void (*deleter)(void*), uint64_
 std::size_t ISRRetireRouter::terminalReclaimResidentCount() const noexcept
 {
     return m_terminalReclaim.residentCount();
+}
+
+// ★ F1'-b (2026-10-25): 再試行可能な破棄の受け付け。
+//   epoch safe かつ Non-RT なら即時実行し、Destroyed なら完了。
+//   Deferred なら所有権ごと TerminalReclaimAuthority に移す（以後 drain で再試行）。
+bool ISRRetireRouter::terminalReclaimRetryable(void* ptr, RetryableDeleter retryable,
+                                               uint64_t epoch, DeletionEntryType type,
+                                               const char* reason) noexcept
+{
+    if (ptr == nullptr || retryable == nullptr)
+        return true;
+
+    const uint64_t minReader = minReaderEpoch();
+    const bool epochSafe = ISRRetireRouter::isOlder(epoch, minReader);
+    const bool isRt = convo::numeric_policy::isAudioThread();
+
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 B）: 所有権の一元化。
+    //   `retryable` が Deferred を返した場合、その実装（destroyDSPCoreNodeRetryable）は
+    //   **自分でエンジンの再試行リストに登録する**。ここでさらに
+    //   storeRetryable() すると同じポインタが 2 箇所に登録され、
+    //   片方が解放した後も他方が残る（= 二重破棄 / UAF）。
+    //
+    //   したがって「Deferred は deleter の所有者に委ねる」を契約とし、
+    //   TerminalReclaimAuthority への格納は epoch が安全でない場合
+    //   （= deleter をまだ呼べない場合）に限る。
+    if (epochSafe && !isRt)
+    {
+        if (retryable(ptr) == DestroyOutcome::Destroyed)
+        {
+            if (type == DeletionEntryType::World)
+                m_terminalReclaim.recordWorldReclaim();
+        }
+        // Deferred の場合、所有権は retryable の実装（エンジン再試行リスト）が保持する。
+        // ここで再格納しない（二重所有の禁止）。
+        return true;
+    }
+
+    // epoch unsafe / RT: deleter を呼べないので、Terminal に預けて後続 drain に委ねる。
+    //   （この経路では retryable はまだ 1 度も呼ばれていないため、所有権は Terminal が持つ。）
+    return m_terminalReclaim.storeRetryable(ptr, retryable, epoch, type, reason);
 }
 
 // ★ P-4: TerminalReclaimAuthority の epoch-gated drain

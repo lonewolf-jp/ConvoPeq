@@ -17,6 +17,9 @@ void diagLog(const juce::String& message)
 
 // ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+// ★ F2' (2026-10-25): destroyDSPCoreNode（static）から解放直前のハンドル無効化を行うための
+//   「現在のエンジン」。製品はプロセス内 1 エンジン、テストは逐次生成。
+std::atomic<AudioEngine*> AudioEngine::s_handleInvalidationOwner{nullptr};
 
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
@@ -98,10 +101,19 @@ AudioEngine::AudioEngine()
     retryScheduler_ = std::make_unique<RetryScheduler>([this](const RetryScheduleRequest& req) noexcept {
         this->submitRebuildIntent(req.kind, req.reason, req.rebuildClass, req.collapsePolicy);
     });
+
+    // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
+    //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
+    s_handleInvalidationOwner.store(this, std::memory_order_release);
 }
 
 AudioEngine::~AudioEngine()
 {
+    // ★ F2' (2026-10-25): 所有者の解除は「DSPCore を解放し終えた後」でなければならない。
+    //   dtor の後半（drainDeferredRetireQueues / drainAllQuarantineStore）も
+    //   destroyDSPCoreNode を呼ぶため、冒頭で解除すると teardown 経由の解放だけ HL-1 が
+    //   効かず、F2' 導入前の状態に戻ってしまう（レビュー指摘 A）。
+    //   解除は本体末尾（§末尾の compare_exchange）で行う。
     diagLog("[DIAG] ~AudioEngine: enter");
     // Shutdown sequence (list.md 12.1.2):
     // 1) stop callbacks/workers, 2) detach published runtime pointers,
@@ -290,6 +302,29 @@ AudioEngine::~AudioEngine()
         m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
         m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
     }
+
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 C）: 延期リストの最終 drain。
+    //   EBR store を全部 drain した後でも、pin 残留で延期された DSPCore は
+    //   エンジン再試行リストに残っている。ここで 1 度試行し、
+    //   回収できたものを解放する。回収できないものは **強制解放しない**（UAF を選ばない）。
+    {
+        const auto deferredBefore = deferredDestroyResidentCount();
+        if (deferredBefore > 0)
+        {
+            (void)retryDeferredDestroys();
+            const auto deferredAfter = deferredDestroyResidentCount();
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DEFERRED_SHUTDOWN] before=%zu after=%zu%s",
+                deferredBefore, deferredAfter,
+                deferredAfter > 0 ? " (uncollected: pins still held — leaked, not UAF)" : ""));
+            if (deferredAfter > 0)
+            {
+                // 未回収を明示的に残す（~AudioEngine はこの後 member teardown に入る）。
+                // 強制解放すると UAF になるため、リークを選ぶ。
+                diagLog("[F1_DEFERRED_SHUTDOWN] uncollected deferred DSPCore retained");
+            }
+        }
+    }
     // ★ D162-2-E (E-3 / INV-D162-8): 全 EBR store drain 後の pending 残留確認。
     //   D8 の drainAll / drainAllQuarantineStore が完了した時点で DSPCore 破壊は EBR closure を
     //   全て消化しているはず。残留があれば member teardown に EBR entry を持ち越すことになり
@@ -325,6 +360,16 @@ AudioEngine::~AudioEngine()
 
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
+
+    // ★ F2' (2026-10-25): ここで所有者を降りる。これ以降は DSPCore を解放しない
+    //   （最後の解放は上の drain 群で完了している）。dtor 冒頭で降りると teardown 経由の
+    //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
+    {
+        AudioEngine* expected = this;
+        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
+                                                          std::memory_order_acq_rel);
+    }
+
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
 

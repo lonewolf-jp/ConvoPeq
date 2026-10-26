@@ -675,9 +675,18 @@ bool RuntimeIntentCoordinator::requestReclaim(
     DSPHandleRuntime& handleRuntime,
     ISRRetireRouter& router) noexcept
 {
+    return requestReclaim(handle, handleRuntime, router, router.currentEpoch());
+}
+
+bool RuntimeIntentCoordinator::requestReclaim(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router,
+    std::uint64_t retireEpoch) noexcept
+{
     // ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority に一本化（RuntimeEBR モード委譲）
     // ★ dash2 §2.2 (Phase A2 Step 7): reclaimNormal（分離 API）へ委譲。
-    return reclaimNormal(handle, handleRuntime, router);
+    return reclaimNormal(handle, handleRuntime, router, retireEpoch);
 }
 
 // ── ★ dash2 §2.2 (Phase A2 — H.11.17.5 15-Step 7-9): 分離 API 実装 ──
@@ -691,13 +700,31 @@ bool RuntimeIntentCoordinator::reclaimNormal(
     DSPHandleRuntime& handleRuntime,
     ISRRetireRouter& router) noexcept
 {
+    return reclaimNormal(handle, handleRuntime, router, router.currentEpoch());
+}
+
+bool RuntimeIntentCoordinator::reclaimNormal(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router,
+    std::uint64_t retireEpoch) noexcept
+{
     // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
     handleRuntime.retire(handle);
 
     // 2. waitReaders — epoch 安全確認（retireEpoch < minReaderEpoch）
-    const auto retireEpoch = router.currentEpoch();
+    // G (2026-10-25): the safety check must use the RETIREMENT epoch, not "now".
+    //   minReaderEpoch() is always <= currentEpoch(), so comparing currentEpoch()
+    //   against it is a tautology and the reclaim below was unreachable.
+    //   Safe iff every reader that could still observe the retired slot has left,
+    //   i.e. retireEpoch < minReaderEpoch (the same predicate the D queue uses).
+    const auto epochForSafety = retireEpoch;
     const auto minReaderEpoch = router.minReaderEpoch();
-    if (retireEpoch >= minReaderEpoch) {
+    // EpochDomain::isOlder semantics (wraparound-safe). ISRRetireRouter::isOlder is
+    // private, so the same comparison is spelled out here (see drainQuarantineStore).
+    const bool epochSafe =
+        static_cast<std::int64_t>(epochForSafety - minReaderEpoch) < 0;
+    if (!epochSafe) {
         // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
         // カウンタ更新のみ行い、即座に復帰（NonRT safe）
         // ★ dash2 §2.2 (A2-G02): deferred 分を onReclaimBegin で +1（保留中としてカウント）。

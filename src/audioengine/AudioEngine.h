@@ -1751,6 +1751,19 @@ public:
     //   の handshake が崩壊する。rebuildThread_（設計書仮名）は実際はこの std::thread メンバ
     //   の id に由来する。jassert(std::this_thread::get_id() == engine_.rebuildThreadId())。
     [[nodiscard]] std::thread::id rebuildThreadId() const noexcept { return rebuildThread.get_id(); }
+    // ★ R8 (P1): Release-active RebuildThread ownership test.
+    //   The jassert above is compiled out under NDEBUG, which left the "plain
+    //   deferredSlot_ is only touched by the RebuildThread" contract documentation-only in
+    //   Release. This predicate is the mechanical form: it compares the caller's
+    //   acquireUniqueThreadId() (monotonic, never reused) with the token the worker
+    //   publishes on entry and clears on exit. Unlike std::thread::get_id(), reading it does
+    //   not race with join().
+    [[nodiscard]] bool isRebuildThread() const noexcept
+    {
+        const auto owner = convo::consumeAtomic(rebuildThreadToken_, std::memory_order_acquire);
+        return owner != 0 && owner == convo::acquireUniqueThreadId();
+    }
+
     // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
     [[nodiscard]] int currentBuildGeneration() const noexcept { return consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
 
@@ -2195,7 +2208,20 @@ private:
                                   double sampleRate,
                                   int maxBlockSize,
                                   uint64_t generation);
+        // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
+        //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
+        //     DSPHandlePin keeps the cache entry alive for the lease duration.
+        //   - The returned pointer must not be retained across a NonRT boundary that can
+        //     retire the entry (drainForShutdown / rebuild).
+        //   - Call sites are enumerated in the V-11 §10.6-3 audit record; adding an RT
+        //     caller here is a contract violation.
         EQCoeffCache* get(uint64_t hash) noexcept;
+
+        // ★ F1' (2026-10-25): RT 経路用の寿命 lease。`get()` は生ポインタを返すため、
+        //   音声コールバックが取得後に使うと解放と競合する（レビュー指摘 C）。
+        //   `pinByHash` は DSPHandlePin を返し、lease の生存中は当該キャッシュが解放されない。
+        //   RT 可（tryPin はロック・確保・待機なし）。
+        [[nodiscard]] convo::isr::DSPHandlePin pinByHash(uint64_t hash) noexcept;
         [[nodiscard]] bool containsNonRt(uint64_t hash) noexcept;
         // ★ D162-2-E (E-1 / INV-D162-6): member teardown 前に全 CacheMap エントリを処分する。
         //   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。
@@ -2929,6 +2955,15 @@ public:
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
     std::atomic<bool> rebuildThreadIsRunning { false };
+    // ★ R8 (P1): published true only AFTER rebuildThread.join() returns.
+    //   rebuildThreadShouldExit is published BEFORE join(), so it does not prove the thread
+    //   has stopped - the RebuildThread may still be inside processDeferredAdmission().
+    //   Only this flag may gate the C1 synchronous clear (see requestDeferredClear()).
+    std::atomic<bool> rebuildThreadStopped { false };
+    // ★ R8 (P1): ownership token of the running RebuildThread (0 = none). Published by
+    //   rebuildThreadLoop() on entry and cleared on exit; compared against
+    //   acquireUniqueThreadId() by isRebuildThread().
+    std::atomic<std::uint64_t> rebuildThreadToken_ { 0 };
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     // ★ D167-2: terminal-release intent（requestTerminalRelease が writer・releaseResources の
@@ -3440,6 +3475,16 @@ public:
     // これにより将来 RetireRouter の差し替え時に影響範囲を Reader 生成箇所のみに限定できる。
     // 注意: このメソッドが返すポインタの寿命は AudioEngine 全体の寿命と一致する。
     // AudioEngine より長生きする RCUReader を生成してはならない。
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // ★ V-11 verification seam (compiled only when CONVOPEQ_ENABLE_TEST_HOOKS=1).
+    //   getNextAudioBlock invokes it right after the RCU reader guard is established and
+    //   BEFORE the published-world pointer is obtained, so a test can observe the world
+    //   lifetime predicate with the real audio guard held. Lock-free (function pointer +
+    //   context, both atomic): the audio thread never allocates or takes a lock here.
+    using AudioBlockTestHookFn = void (*)(void*);
+    std::atomic<AudioBlockTestHookFn> audioBlockTestHook { nullptr };
+    std::atomic<void*> audioBlockTestHookCtx { nullptr };
+#endif
     [[nodiscard]] convo::IReaderEpochProvider& getRetireRouter() noexcept
     {
         jassert(m_retireRouter != nullptr);
@@ -3641,7 +3686,12 @@ public:
         graph.fadingNode = state.fading;
 
         auto* current = static_cast<DSPCore*>(state.current);
-        if (current != nullptr)
+        // V-11 candidate (2): defensive reset - validate current is live before
+        //   accessing eqRt(). eqState is a unique_ptr; if it is null, the DSPCore
+        //   has been (or is being) destroyed. This is a best-effort guard; it does
+        //   not prevent UAF if current itself is dangling (use-after-free of the
+        //   DSPCore object). Candidate (1) + EBR or (3) is needed for full protection.
+        if (current != nullptr && current->eqState != nullptr)
         {
             auto& eq = current->eqRt();
             graph.eqAgcAttackCoeffTable = eq.getAgcAttackCoeffTable();
@@ -3931,7 +3981,12 @@ public:
 private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
-#if defined(CONVOPEQ_UNIT_TESTS)
+    // ODR (2026-10-25): unconditional on purpose. This block used to be gated by
+    // `#if defined(CONVOPEQ_UNIT_TESTS)` and contained a DATA MEMBER, so translation
+    // units compiled with and without the macro disagreed about sizeof(AudioEngine)
+    // inside one program (silent ODR/layout violation; the linker cannot catch it).
+    // Friends cost nothing and the flag is one byte, so both are always present.
+
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
     // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
@@ -3952,7 +4007,6 @@ private:
     {
         return convo::consumeAtomic(testFadingRuntimePresent_, std::memory_order_acquire);
     }
-#endif
     friend class convo::isr::PublicationExecutor;
     friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
@@ -4253,20 +4307,31 @@ public:
         return snapshot;
     }
 
-    inline DSPCore::ProcessingState buildAudioThreadProcessingState(DSPCore* dsp,
-                                                                     const EngineParameterSnapshot& snapshot) noexcept
+    // ★ F1' (2026-10-25): EQ キャッシュも pin で保護する（レビュー指摘 C）。
+    //   `pin` は戻り値と同時に呼び出し側へ move され、音声ブロックの処理が終わるまで
+    //   生存する。したがって `state.eqCache` が指す先は、そのブロックの間は解放されない。
+    struct ProcessingStateWithPin
+    {
+        DSPCore::ProcessingState state;
+        convo::isr::DSPHandlePin eqPin;   // state.eqCache の寿命を保持
+    };
+
+    inline ProcessingStateWithPin buildAudioThreadProcessingState(DSPCore* dsp,
+                                                                  const EngineParameterSnapshot& snapshot) noexcept
     {
         const convo::EQParameters* eqParams = snapshot.snapshotEqParams;
         uint64_t eqCoeffHash = snapshot.snapshotEqCoeffHash;
 
-        const EQCoeffCache* eqCache = (eqParams != nullptr && eqCoeffHash != 0)
-            ? eqCacheManager.get(eqCoeffHash)
-            : nullptr;
+        // ★ F1': 生ポインタを直接取らず、lease を取ってから get() する。
+        convo::isr::DSPHandlePin eqPin = (eqParams != nullptr && eqCoeffHash != 0)
+            ? eqCacheManager.pinByHash(eqCoeffHash)
+            : convo::isr::DSPHandlePin{};
+        const EQCoeffCache* eqCache = static_cast<const EQCoeffCache*>(eqPin.get());
         // ISR厳密化: hash から cache を解決できない場合は EQ を fail-close で bypass する。
         // 非snapshot系フォールバックへ降りるより、公開済み不変状態を維持することを優先する。
         const bool eqBypassedFailClosed = snapshot.eqBypassed || (eqParams == nullptr) || (eqCache == nullptr);
 
-        return DSPCore::ProcessingState {
+        return ProcessingStateWithPin{ DSPCore::ProcessingState {
             .eqBypassed = eqBypassedFailClosed,
             .convBypassed = snapshot.convBypassed,
             .order = snapshot.order,
@@ -4290,7 +4355,7 @@ public:
             .eqParams = eqParams,
             .eqCache = eqCache,
             .eqCoeffHash = eqCoeffHash
-        };
+        }, std::move(eqPin) };
     }
 
     // ★ [DELETED] 2026-07-28: updateAudioThreadSnapshotFade は Dead Code のため削除。
@@ -4603,9 +4668,22 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
     return handle;
 }
 
+// ★ F1' (2026-10-25): 寿命 lease を取得する。**生ポインタを返さない**。
+//   戻り値が真（operator bool）の間だけ、対象 DSPCore は解放されない。
+//   呼び出し側は lease を「ポインタを使い終わるスコープ全体」に置くこと（規約 R2）。
+//   RT 可（tryPin はロック・確保・待機なし）。
+[[nodiscard]] inline convo::isr::DSPHandlePin tryPinDSPHandle(convo::isr::DSPHandle handle) noexcept
+{
+    return dspHandleRuntime_.tryPin(handle);
+}
+
 // resolveDSPHandle: DSPHandle → DSPCore* 解決 (Phase2: Execution Path Handle Normalization)
 // DSPHandleRuntime::resolve() は ResolvedDSP を返すため、後方互換のために DSPCore* に単純化する。
 // 解決失敗時は nullptr を返す（caller が適切に処理する）。
+//
+// ★ F1' (2026-10-25): この関数は **寿命保護を与えない**（戻り値は pin を持たない）。
+//   逆参照する呼び出しは tryPinDSPHandle() へ移行すること。残存呼び出しは
+//   「ポインタ値をログ/比較に使うだけで逆参照しない」箇所に限る。
 inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
 {
     if (handle.isNull())
@@ -4622,6 +4700,37 @@ inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
         return nullptr;
 
     return static_cast<DSPCore*>(resolved.instance);
+}
+
+// ★ F2' (2026-10-25): DSPCore のメモリ解放の直前に、そのインスタンスを指すハンドルを
+//   解決不能にする。AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ぶ。
+//   - 台帳（runtimeDSPHandleMap_）から先に identity を外し、その後スロットを無効化する。
+//     2 つの mutex を入れ子にしない（register は map→freeList の順なので、ここも同じ順）。
+//   - 戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**。
+//     （未登録インスタンスは true。rebuild-obsolete / recovery の直接破棄経路がこれに当たる。）
+//   - ★ F1' (2026-10-25): 台帳を外す**前に** pin の受付を閉じる。順序を逆にすると、
+//     「台帳から消えたが pin は取れる」窓ができる。
+inline bool invalidateHandleBeforeDestroy(void* core) noexcept
+{
+    if (core == nullptr)
+        return true;
+
+    // 1) pin の受付を閉じ、既存 pin の消滅を待つ（NonRT）。タイムアウトなら false。
+    //    ★ F1'-c (2026-10-25): 待機は短くする。破棄は D キューの deleter から呼ばれる
+    //      ことがあり、その間 D キューの mutex を保持したまま秒単位で待つと
+    //      retire 経路全体が停止する。短い待機で済まない場合は「延期」して
+    //      後続の再試行に委ねる（安全側・非ブロッキング）。
+    constexpr int kPinDrainTimeoutMs = 50;
+    if (!dspHandleRuntime_.invalidateForDestroy(core, kPinDrainTimeoutMs))
+        return false;
+
+    // 2) ここで初めて台帳から外す（以後 register は同一ポインタを新規として扱えるが、
+    //    F3' により破棄済みスロットとは一致しない）。
+    {
+        std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+        runtimeDSPHandleMap_.erase(static_cast<DSPCore*>(core));
+    }
+    return true;
 }
 
 inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
@@ -4678,7 +4787,8 @@ inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
     if (handle.isNull())
         return;
     const auto retireEpoch = m_retireRouter->currentEpoch();
-    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter,
+                                                  retireEpoch))
     {
         // deferred（epoch unsafe）通知。deferred 1 通知 = pending entry 1 件 =
         // reclaimInFlightCount_ +1 1 回（Coordinator.cpp:705 が唯一の +1 を持つため 1:1）。
@@ -5101,6 +5211,43 @@ public:
     // リリースキューに溜まったエントリを解放可能なものから処理する
     void processDeferredReleases();
     static void destroyDSPCoreNode(void* p) noexcept;
+
+    // ★ F1'-b (2026-10-25): 破棄結果を返す版。pin 残留なら Deferred を返し、解放しない。
+    static DestroyOutcome destroyDSPCoreNodeRetryable(void* p) noexcept;
+
+    // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
+    //   Deferred になったポインタをエンジンの再試行リストで保持し、所有権を失わない。
+    void deferDestroyRetry(void* p) noexcept;
+    [[nodiscard]] std::size_t retryDeferredDestroys() noexcept;
+    [[nodiscard]] std::size_t deferredDestroyResidentCount() const noexcept;
+    // ★ F1'-b (2026-10-25) 監査対応: ロックフリーの在住数。
+    //   tryReclaimResources / drainDeferredRetireQueues の「空なら何もしない」判定に使う。
+    //   これが無いと D/Q/E/T が空のとき早期 return して再試行に到達せず、
+    //   延期エントリが永久に回収されない（監査で発見した欠陥 A）。
+    [[nodiscard]] std::uint32_t deferredDestroyResidentAtomic() const noexcept
+    {
+        return convo::consumeAtomic(deferredDestroyResidentAtomic_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t deferredDestroyCount() const noexcept
+    {
+        return convo::consumeAtomic(deferredDestroyCount_, std::memory_order_acquire);
+    }
+    // F-2 (2026-10-25): quarantine slots whose destruction is deferred by a live pin.
+    [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept
+    {
+        return dspHandleRuntime_.deferredQuarantineDestroyCount();
+    }
+    mutable std::mutex deferredDestroyMutex_;
+    std::vector<void*> deferredDestroy_;
+    std::atomic<std::uint64_t> deferredDestroyCount_{0};
+    std::atomic<std::uint32_t> deferredDestroyResidentAtomic_{0};
+
+    // ★ F2' (2026-10-25): DSPCore の解放は destroyDSPCoreNode（static・関数ポインタとして
+    //   EBR キューに渡すため this を持てない）の一本道を通る。そこで「今生きているエンジン」を
+    //   1 つだけ公開し、解放直前にそのエンジンのハンドルを無効化する。
+    //   前提: プロセス内の AudioEngine は同時に 1 つ（製品構成）。テストは 1 エンジンずつ
+    //   逐次生成するため同じ前提が成り立つ。該当スロットが無い場合は単なる no-op。
+    static std::atomic<AudioEngine*> s_handleInvalidationOwner;
 
     // スナップショット基盤（Phase 2）
     // ==================================================================

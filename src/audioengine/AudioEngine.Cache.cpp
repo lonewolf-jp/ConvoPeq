@@ -91,8 +91,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     currentMap = loadMap();
     if (currentMap == nullptr)
     {
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
 
@@ -100,8 +101,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
         return static_cast<EQCoeffCache*>(resolved.instance);
     }
@@ -114,14 +116,16 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     }
     catch (const std::bad_alloc&)
     {
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
     catch (...)
     {
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
 
@@ -129,6 +133,22 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     const auto resolved = owner.dspHandleRuntime_.resolve(handle);
     return static_cast<EQCoeffCache*>(resolved.instance);
+}
+
+// ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
+//   「ポインタを使い終わるスコープ全体」で保持すること（規約 R2）。
+convo::isr::DSPHandlePin AudioEngine::EQCacheManager::pinByHash(uint64_t hash) noexcept
+{
+    const CacheMap* currentMap = loadMap();
+    if (currentMap == nullptr)
+        return {};
+
+    const auto it = currentMap->map.find(hash);
+    if (it == currentMap->map.end())
+        return {};
+
+    // ★ F1': resolve() ではなく tryPin() を使う（受付閉鎖と pin 数を単一ワードで扱う）。
+    return owner.dspHandleRuntime_.tryPin(it->second);
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
@@ -162,8 +182,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
 //   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。shutdownRuntime_ /
 //   m_retireRouter / dspHandleRuntime_ 等が全て生存している状態で:
 //     1. cacheMapPtr を nullptr に exchange（新規アクセス遮断）
-//     2. 全 CacheMap エントリの DSPHandle を dspHandleRuntime_.retire（Retired 遷移）し、
-//        resolve で取得した EQCoeffCache* を物理解放
+//     2. 全 CacheMap エントリを resolve で取得し、★F2' でスロットを無効化してから
+//        EQCoeffCache* を物理解放（retire を先にすると v11 候補 1 の resolve が
+//        nullptr を返し、キャッシュが解放されない）
 //     3. enqueueFallbackMaps の各 CacheMap も同様に処分
 //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
 void AudioEngine::EQCacheManager::drainForShutdown() noexcept
@@ -178,10 +199,15 @@ void AudioEngine::EQCacheManager::drainForShutdown() noexcept
             if (entry.second.isNull())
                 continue;
             // Retired 遷移（grace period concept は shutdown なので即 reclaim 相当）
-            owner.dspHandleRuntime_.retire(entry.second);
+            // ★ F2' (2026-10-25): 解決 → 無効化 → 削除。
+            //   retire を先にすると (v11 候補 1 の resolve は Retired を拒否) instance が
+            //   取れず、キャッシュが解放されない。
             const auto resolved = owner.dspHandleRuntime_.resolve(entry.second);
             if (resolved.instance != nullptr)
+            {
+                owner.invalidateHandleBeforeDestroy(resolved.instance);
                 delete static_cast<EQCoeffCache*>(resolved.instance);
+            }
         }
         currentMap->map.clear();
         delete currentMap;
@@ -195,10 +221,15 @@ void AudioEngine::EQCacheManager::drainForShutdown() noexcept
         {
             if (entry.second.isNull())
                 continue;
-            owner.dspHandleRuntime_.retire(entry.second);
+            // ★ F2' (2026-10-25): 解決 → 無効化 → 削除。
+            //   retire を先にすると (v11 候補 1 の resolve は Retired を拒否) instance が
+            //   取れず、キャッシュが解放されない。
             const auto resolved = owner.dspHandleRuntime_.resolve(entry.second);
             if (resolved.instance != nullptr)
+            {
+                owner.invalidateHandleBeforeDestroy(resolved.instance);
                 delete static_cast<EQCoeffCache*>(resolved.instance);
+            }
         }
         map->map.clear();
         delete map;

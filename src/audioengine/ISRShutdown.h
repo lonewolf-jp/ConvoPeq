@@ -16,11 +16,9 @@ enum class ISRHealthState : uint8_t;
 
 namespace isr {
 
-#if defined(CONVOPEQ_UNIT_TESTS)
 // ★ D101-31-D-3: テスト専用 Friend Test Access の前方宣言（test-only seam）。
 //   定義は src/tests/AdmissionPackedStateTestAccess.h（テストターゲットのみインクルード）。
 struct AdmissionPackedStateTestAccess;
-#endif
 
 // ★ dash2 §2.2 (Phase A2 — Step 14): ReclaimAuthority の前方宣言。
 //   ShutdownRuntime コンストラクタ（constructor 固定注入）/ Proof 生成時の bindShutdownIdentity に使用。
@@ -373,13 +371,11 @@ private:
     //   ShutdownPhase (phase_) は本 packed word には含めない — separate sequential state.
     std::atomic<uint32_t> packedState_{0};  // D101-31-B: replaces admissionState_
 
-#if defined(CONVOPEQ_UNIT_TESTS)
     // ★ D101-31-D-3: テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）。
     //   version wrap（6bit）regression test が packedState_ へ version=63 を注入するためだけの seam。
     //   Production ビルドではこの friend 宣言はコンパイルされず、バイナリ無変更
     //   （AudioEngine.h の DeferredPublicationTestAccess と同一パターン）。
     friend struct convo::isr::AdmissionPackedStateTestAccess;
-#endif
 };
 
 }  // namespace isr

@@ -16,6 +16,22 @@
 #include <mkl.h>
 #include <ipp.h>  // ippsFFTFwd_RToCCS_64f, IppsFFTSpec_R_64f
 
+// work92 A-3 AC (2026-10-26): failure-injection seams for the AC-A3 tests.
+//   INLINE VARIABLES, not class members, so sizeof(MklFftEvaluator) and the class layout
+//   are unchanged (the ODR/layout gate must stay green). While both are 0 the behaviour is
+//   identical to before: one relaxed exchange per call site.
+//
+//   Semantics: the armed value is a bitmask consumed by the NEXT call (exchange(0)), so one
+//   armed value affects exactly one invocation and the seam is verifiably self-clearing.
+//     kMklFftInjectLeft  (1) = force the LEFT status to fail
+//     kMklFftInjectRight (2) = force the RIGHT status to fail
+//   The forced status is ippStsNullPtrErr, so the EXISTING production failure branch runs
+//   verbatim (zero both spectra/outputs, count once, return the zero Result / void).
+inline constexpr int kMklFftInjectLeft  = 1;
+inline constexpr int kMklFftInjectRight = 2;
+inline std::atomic<int> g_mklFftEvalFailureInjectionForTest{0};     // evaluate()
+inline std::atomic<int> g_mklFftComputeFailureInjectionForTest{0};  // computeFft()
+
 class MklFftEvaluator
 {
 public:
@@ -248,6 +264,12 @@ public:
         windowCorrection = 1.0;
     }
 
+    // AC-A3 (2026-10-26): cumulative count of failed FFT evaluations (observability only).
+    [[nodiscard]] std::uint64_t ippFailureCount() const noexcept
+    {
+        return ippFailureCount_.load(std::memory_order_relaxed);
+    }
+
     Result evaluate(const double* errorLeft,
                     const double* errorRight,
                     const std::array<double, kSpectrumBins>* maskingThresholds = nullptr) noexcept
@@ -261,6 +283,10 @@ public:
         if (fftSpec == nullptr || inputLeft == nullptr || inputRight == nullptr
             || spectrumLeft == nullptr || spectrumRight == nullptr)
             return Result{};
+
+        // AC-A3: consume the armed mask (test only; 0 in production).
+        const int injected =
+            g_mklFftEvalFailureInjectionForTest.exchange(0, std::memory_order_relaxed);
 
         double sumSq = 0.0;
         for (int i = 0; i < kFftLength; ++i)
@@ -277,8 +303,20 @@ public:
         // ★ work92 A-3 (big 1-6): IPP 戻り値を検査する。片側でも失敗したら
         //   composite score は L+R blend のため意味論的に無効 → L/R ともゼロ化して
         //   fftFailed=true を返す（G2 監査確定 — 部分成功の保存は行わない）。
-        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
-        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        IppStatus stL = ippStsNoErr;
+        IppStatus stR = ippStsNoErr;
+        if (injected != 0)
+        {
+            // Do not touch IPP for the injected channel: report the same status a null spec
+            // would produce so the production failure path below is exercised verbatim.
+            stL = ((injected & kMklFftInjectLeft)  != 0) ? ippStsNullPtrErr : ippStsNoErr;
+            stR = ((injected & kMklFftInjectRight) != 0) ? ippStsNullPtrErr : ippStsNoErr;
+        }
+        else
+        {
+            stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+            stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        }
         if (stL != ippStsNoErr || stR != ippStsNoErr)
         {
             std::memset(spectrumLeft,  0, sizeof(CcsComplex) * kSpectrumBins);
@@ -446,8 +484,21 @@ public:
         // ★ work92 A-3 (big 1-6): evaluate() と同一の failure semantics —
         //   status 検査 + 失敗時は L/R ともゼロクリア（ゴミを下流に流さない）。
         //   戻り値を持たないため失敗は ippFailureCount_ で観測（初回 DBG）。
-        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
-        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        // AC-A3 (test only): consume the armed mask; 0 in production.
+        const int injected =
+            g_mklFftComputeFailureInjectionForTest.exchange(0, std::memory_order_relaxed);
+        IppStatus stL = ippStsNoErr;
+        IppStatus stR = ippStsNoErr;
+        if (injected != 0)
+        {
+            stL = ((injected & kMklFftInjectLeft)  != 0) ? ippStsNullPtrErr : ippStsNoErr;
+            stR = ((injected & kMklFftInjectRight) != 0) ? ippStsNullPtrErr : ippStsNoErr;
+        }
+        else
+        {
+            stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
+            stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        }
         if (stL != ippStsNoErr || stR != ippStsNoErr)
         {
             if (outL) std::memset(outL, 0, sizeof(CcsComplex) * kSpectrumBins);

@@ -83,6 +83,180 @@ public:
         return e.dspHandleRuntime_;
     }
 
+    // ===== HD-1 (V-11 handle lifetime): production destroy path, no handle retire =====
+    //   Production frees a DSPCore only after retiring its handle (DSPLifetimeManager) or
+    //   after proving shutdown quiescence. This hook runs the same destroy function without
+    //   retiring, which is the state the 2026-10-25 crash dump showed (slot Active, memory
+    //   freed). Used only by V11EngineRetireProtectionTests (HD-1).
+    static void destroyCoreNodeWithoutRetire(void* core) noexcept
+    {
+        AudioEngine::destroyDSPCoreNode(core);
+    }
+
+    // ===== F1' (pin) observation =====
+    //   pinnedCount はスロットの pin 数を返す。F1-2 / F1-3 が
+    //   「lease 保持中は 0 でない」「解除後は 0」を直接観測するために使う。
+    static std::uint32_t pinnedCount(AudioEngine& e, std::uint32_t slot) noexcept
+    {
+        return e.dspHandleRuntime_.pinnedCount(slot);
+    }
+
+    //   pin 受付を閉じる（破棄側の第 1 段階をテストから単独実行するため）。
+    static bool closePins(AudioEngine& e, const convo::isr::DSPHandle& h) noexcept
+    {
+        return e.dspHandleRuntime_.closePinsForDestroy(h.slot, h.generation);
+    }
+
+    //   期限付きで pin の消滅を待つ（破棄側の第 3 段階）。false = 待ちきれず **未解放**。
+    static bool invalidateHandleBeforeDestroy(AudioEngine& e, void* core) noexcept
+    {
+        return e.invalidateHandleBeforeDestroy(core);
+    }
+
+    // F1'-b (deferred destroy) observation
+    static std::size_t deferredDestroyResidentCount(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyResidentCount();
+    }
+    // F1'-b: cumulative deferral count (monotonic, not racy with the retry swap).
+    static std::uint64_t deferredDestroyCount(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyCount();
+    }
+    // F1'-b production-path test: the D queue only destroys entries whose epoch is OLDER
+    // than the min-reader epoch, so a retire issued at the current epoch is parked and no
+    // deleter runs. The test must advance the publication epoch (exactly what the audio
+    // thread does with EpochDomain::publishEpoch) to make the real drain attempt the destroy.
+    static std::uint64_t publishEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->publishEpoch();
+    }
+    static std::uint64_t currentEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->currentEpoch();
+    }
+    static std::uint64_t minReaderEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->minReaderEpoch();
+    }
+    static std::size_t pendingRetireCountForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->pendingRetireCount();
+    }
+    static std::uint32_t residentAtomicForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->residentCountAtomic();
+    }
+    // F-2 (2026-10-25): quarantine-slot destruction honours the pin contract.
+    static bool destroyQuarantineSlotForTest(AudioEngine& e, std::uint32_t slot,
+                                             std::uint64_t generation) noexcept
+    {
+        return e.dspHandleRuntime_.destroyQuarantineSlot(slot, generation);
+    }
+    static void quarantineSlotForTest(AudioEngine& e, std::uint32_t slot) noexcept
+    {
+        e.dspHandleRuntime_.quarantineSlot(slot);
+    }
+    static std::size_t retryDeferredQuarantineForTest(AudioEngine& e) noexcept
+    {
+        return e.dspHandleRuntime_.retryDeferredQuarantineDestroy();
+    }
+    static std::uint32_t deferredQuarantineCountForTest(AudioEngine& e) noexcept
+    {
+        return e.deferredQuarantineDestroyCount();
+    }
+    // G (2026-10-25): drive the deferred-reclaim queue deterministically.
+    static void drainDeferredRetireQueuesForTest(AudioEngine& e) noexcept
+    {
+        e.drainDeferredRetireQueues(true);
+    }
+
+    // G (2026-10-26): retirement epoch of the oldest pending reclaim identity. The safety
+    // predicate is isOlder(retireEpoch, minReaderEpoch); exposing it lets a test assert the
+    // PROPERTY (reclaim only after min passed the retire epoch) instead of assuming that no
+    // other reader exists in the process.
+    static std::uint64_t pendingRetireEpochForTest(AudioEngine& e) noexcept
+    {
+        std::lock_guard<std::mutex> lock(e.pendingReclaimHandlesMutex_);
+        return e.pendingReclaimHandles_.empty()
+            ? 0 : e.pendingReclaimHandles_.front().retireSequence;
+    }
+    static std::size_t retryDeferredDestroys(AudioEngine& e) noexcept
+    {
+        return e.retryDeferredDestroys();
+    }
+
+    // F1'-b 監査対応: 通常 tick（早期 return を含む）をテストから叩く。
+    static void tickReclaimForTest(AudioEngine& e) noexcept
+    {
+        e.tryReclaimResources();
+    }
+    static std::uint32_t deferredResidentAtomic(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyResidentAtomic();
+    }
+    static std::size_t terminalDeferredResidentCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalDeferredResidentCount();
+    }
+    static std::size_t terminalRetryableResidentCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalRetryableResidentCount();
+    }
+    // E (2026-10-25): Deferred ownership transfers to the callee.
+    static std::uint64_t terminalOwnershipTransferredCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalOwnershipTransferredCount();
+    }
+
+    // F1'-b: TerminalReclaimAuthority の drain をテストから駆動する
+    //   （drainTerminalReclaim は private のため、公開 tryReclaim 経由で呼ぶ）。
+    static void drainTerminalForTest(AudioEngine& e) noexcept
+    {
+        e.tryReclaimResources();
+    }
+
+    // F1'-b: drainAll() をテストから駆動する（shutdown 相当の強制 drain）。
+    static void drainAllTerminalForTest(AudioEngine& e) noexcept
+    {
+        e.m_retireRouter->drainAllTerminalForTest();
+    }
+    // 再試行可能な破棄を直接駆動する（D/Q/E を経由せず、T の契約だけを見る）。
+    // ★ 監査 B-1 対応: ルータの terminalReclaimRetryable は「Deferred を格納しない」
+    //   契約に変わった（所有権の一元化）。Terminal 単体の Deferred 保持を検証するには
+    //   storeRetryable を直接叩く必要がある。
+    static bool storeRetryableDirectForTest(AudioEngine& e, void* ptr,
+                                            RetryableDeleter retryable,
+                                            std::uint64_t epoch) noexcept
+    {
+        return e.m_retireRouter->storeRetryableDirectForTest(ptr, retryable, epoch);
+    }
+
+    // ルータ API 経由（所有権一元化の検証用）。
+    static bool storeRetryableForTest(AudioEngine& e, void* ptr,
+                                      RetryableDeleter retryable,
+                                      std::uint64_t epoch) noexcept
+    {
+        return e.m_retireRouter->terminalReclaimRetryable(
+            ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test");
+    }
+
+    // R8-4: control the shutdown-in-progress predicate so the clear path can be exercised
+    // in the ShutdownDiscarded branch, and restore the original state afterwards.
+    // EngineLifecycleState: 0 Unprepared, 1 Preparing, 2 Prepared, 3 Releasing, 4 Destroyed
+    // (isShutdownInProgress() is true for 3 and 4).
+    static int getLifecycleStateRaw(AudioEngine& e) noexcept
+    {
+        return static_cast<int>(convo::consumeAtomic(e.lifecycleState, std::memory_order_acquire));
+    }
+
+    static void setLifecycleStateRaw(AudioEngine& e, int v) noexcept
+    {
+        convo::publishAtomic(e.lifecycleState,
+                             static_cast<AudioEngine::EngineLifecycleState>(v),
+                             std::memory_order_release);
+    }
+
     // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
     // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
     // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは
@@ -255,5 +429,33 @@ public:
     static std::uint64_t mmcssReportedCount(AudioEngine& e) noexcept
     {
         return convo::consumeAtomic(e.mmcssReportedCount_, std::memory_order_acquire);
+    }
+
+    // ===== R8 (P1): RebuildThread lifecycle + ownership, for the C1 ordering and
+    //   Release-enforcement tests (production change: none).
+    static bool rebuildThreadShouldExitOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadShouldExit, std::memory_order_acquire);
+    }
+
+    static bool rebuildThreadStoppedOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadStopped, std::memory_order_acquire);
+    }
+
+    static bool isRebuildThreadOf(AudioEngine& e) noexcept
+    {
+        return e.isRebuildThread();
+    }
+
+    static bool rebuildThreadIdIsEmpty(AudioEngine& e) noexcept
+    {
+        return e.rebuildThreadId() == std::thread::id{};
+    }
+
+    // ★ R8 (P1): the ownership token the worker publishes on entry and clears on exit.
+    static std::uint64_t rebuildThreadTokenOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
     }
 };
