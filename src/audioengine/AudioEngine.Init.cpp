@@ -30,6 +30,8 @@ void AudioEngine::initialize()
     // readerEpochs と globalEpoch は静的初期化で 0
 
     // Start worker thread
+    // ★ R8 (P1): a fresh thread is not "stopped"; clear the C1 predicate before it runs.
+    convo::publishAtomic(rebuildThreadStopped, false, std::memory_order_release);
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
     // 初期DSP構築 (デフォルト設定)
