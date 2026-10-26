@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-27 00:24:59
+> Generated: 2026-10-27 01:22:56
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -97160,6 +97160,20 @@ public:
     {
         return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
     }
+
+    // ===== D8-2-B-1 T9: DSP delete-count observability =====
+    //   destroyDSPCoreNodeRetryable() is the ONLY place that destroys a DSPCore
+    //   (`core->~DSPCore(); convo::aligned_free(core);`, AudioEngine.Threading.cpp:39-42),
+    //   and it reports whether the object was actually destroyed (Destroyed) or retained
+    //   because a pin was still held (Deferred). Exposing it here lets a test count REAL DSP
+    //   destructions through the production funnel without adding a production counter:
+    //   DSPLifetimeManager hardcodes &AudioEngine::destroyDSPCoreNode as the deleter, so a
+    //   counting deleter cannot be injected from outside (T9 option (a) is not available as
+    //   written; this accessor is the test-only equivalent).
+    static DestroyOutcome destroyCoreNodeRetryable(void* core) noexcept
+    {
+        return AudioEngine::destroyDSPCoreNodeRetryable(core);
+    }
 };
 
 ```
@@ -115607,6 +115621,128 @@ static bool checkGReclaimNormalUsesRetireEpoch()
 }
 } // namespace
 
+
+// ============================================================================
+// T9 (D8-2-B-1 :27) — DSP delete-count observability.
+//
+//   Requirement: "DSPLifetimeManager | delete-count observable".
+//
+//   The audit's option (a) ("counting deleter wrapping AudioEngine::destroyDSPCoreNode") is not
+//   available as written: DSPLifetimeManager hardcodes the deleter at every retire site
+//   (DSPLifetimeManager.cpp:58-61, :122, :155-156) and calls it directly on rollback (:182),
+//   so no deleter can be injected from outside. What IS observable without a production counter
+//   is the funnel itself: destroyDSPCoreNodeRetryable() is the ONLY place a DSPCore is destroyed
+//   (AudioEngine.Threading.cpp:39-42) and it reports Destroyed vs Deferred.
+//
+//   This test counts real destructions through that funnel and proves the count discriminates:
+//   a destroy refused because a pin is held must be Deferred (ownership retained, not destroyed).
+// ============================================================================
+bool checkT9DspDeleteCountObservable()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[T9] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    // ---- (1) unpinned: Destroyed, and no retry entry is registered ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto before = DeferredPublicationTestAccess::deferredDestroyCount(e);
+        const auto outcome = DeferredPublicationTestAccess::destroyCoreNodeRetryable(raw);
+        const auto after = DeferredPublicationTestAccess::deferredDestroyCount(e);
+        if (outcome != DestroyOutcome::Destroyed)
+        {
+            std::fprintf(stderr, "[T9-a] FAIL: unpinned destroy reported Deferred\n");
+            ok = false;
+        }
+        if (after != before)
+        {
+            std::fprintf(stderr, "[T9-a] FAIL: completed destroy registered a retry entry (%llu -> %llu)\n",
+                         (unsigned long long)before, (unsigned long long)after);
+            ok = false;
+        }
+        std::printf("[T9-a] unpinned destroy -> Destroyed, deferredCount=%llu\n",
+                    (unsigned long long)after);
+    }
+
+    // ---- (2) pinned: Deferred (ownership retained, NOT destroyed) ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            std::fprintf(stderr, "[T9-b] FAIL: could not register a handle\n");
+            harness.stop();
+            return false;
+        }
+        {
+            auto pin = e.tryPinDSPHandle(handle);
+            if (!static_cast<bool>(pin))
+            {
+                std::fprintf(stderr, "[T9-b] FAIL: could not pin\n");
+                DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+                harness.stop();
+                return false;
+            }
+            const auto before = DeferredPublicationTestAccess::deferredDestroyCount(e);
+            const auto outcome = DeferredPublicationTestAccess::destroyCoreNodeRetryable(raw);
+            const auto after = DeferredPublicationTestAccess::deferredDestroyCount(e);
+            if (outcome != DestroyOutcome::Deferred)
+            {
+                std::fprintf(stderr, "[T9-b] FAIL: pinned destroy reported Destroyed (ownership dropped)\n");
+                ok = false;
+            }
+            if (after != before + 1)
+            {
+                std::fprintf(stderr, "[T9-b] FAIL: pinned destroy did not register exactly one retry entry (%llu -> %llu)\n",
+                             (unsigned long long)before, (unsigned long long)after);
+                ok = false;
+            }
+            std::printf("[T9-b] pinned destroy -> Deferred, ownership retained, deferredCount=%llu\n",
+                        (unsigned long long)after);
+        }
+
+        // ---- (3) after unpin the retry list completes exactly one destruction ----
+        bool freed = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            (void)DeferredPublicationTestAccess::retryDeferredDestroys(e);
+            if (e.resolveDSPHandle(handle) == nullptr)
+            {
+                freed = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!freed)
+        {
+            std::fprintf(stderr, "[T9-c] FAIL: slot still resolves after pin release (deferred=%zu)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+        {
+            std::fprintf(stderr, "[T9-c] FAIL: retry list still holds the entry (%zu)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+        std::printf("[T9-c] after unpin: destroyed exactly once, resident=%zu\n",
+                    DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+    }
+
+    harness.stop();
+    if (ok)
+        std::printf("[T9] DSP delete-count observable and discriminating: PASS\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     g_v11eReclaimCalls = 0;
@@ -115688,6 +115824,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1bAuditSingleOwnership())
     {
         std::fprintf(stderr, "FAIL: checkF1bAuditSingleOwnership (audit B)\n");
+        hdOk = false;
+    }
+    if (!checkT9DspDeleteCountObservable())
+    {
+        std::fprintf(stderr, "FAIL: checkT9DspDeleteCountObservable (T9)\n");
         hdOk = false;
     }
     if (!hdOk)
