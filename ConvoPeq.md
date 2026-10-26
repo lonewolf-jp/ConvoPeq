@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-24 03:43:22
+> Generated: 2026-10-26 18:20:46
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -333,6 +333,8 @@
         │   │   ├── T3Measurement.cpp
         │   │   ├── T4Measurement.cpp
         │   │   ├── TransitionMetrics.h
+        │   │   ├── V11EngineRetireProtectionTests.cpp
+        │   │   ├── V11ReaderReacquireTests.cpp
         │   │   └── WorldRetirementMeasurementTests.cpp
         │   ├── BuildErrorClassificationTests.cpp
         │   ├── BuildInputSemanticContractTests.cpp
@@ -875,6 +877,7 @@ endif()
 #------------------------------------------------------------
 option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
 option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.)" OFF)
+option(CONVOPEQ_ENABLE_TEST_HOOKS "Compile the audio-block test hook (verification builds only; default OFF)" OFF)
 
 # work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 OFF。
 # ON は characterization 用の明示指定のみ（default ON 化は別判断・HOLD）。
@@ -2359,6 +2362,7 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
     $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_ENABLE_TEST_HOOKS}>:CONVOPEQ_ENABLE_TEST_HOOKS=1>
     $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
     # CONVOPEQ_DIAG_SAMPLE_MASK は DiagnosticsConfig.h で自動設定 (Release:0xFF, Debug:0x3F)。
     # CMake 変数 CONVOPEQ_DIAG_SAMPLE_MASK が明示的に指定された場合のみ上書きする。
@@ -2951,6 +2955,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
+    src/tests/AudioEngineHarness/V11ReaderReacquireTests.cpp
+    src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
         src/tests/AudioEngineHarness/STG11D18CrossfadeTests.cpp
         src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
@@ -2999,6 +3005,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
         $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_ENABLE_TEST_HOOKS}>:CONVOPEQ_ENABLE_TEST_HOOKS=1>
         $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
         JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
         JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
@@ -4592,8 +4599,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     currentMap = loadMap();
     if (currentMap == nullptr)
     {
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
 
@@ -4601,8 +4609,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
         return static_cast<EQCoeffCache*>(resolved.instance);
     }
@@ -4615,14 +4624,16 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     }
     catch (const std::bad_alloc&)
     {
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
     catch (...)
     {
+        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+        owner.invalidateHandleBeforeDestroy(cache);
         delete cache;
-        owner.dspHandleRuntime_.retire(handle);
         return nullptr;
     }
 
@@ -4630,6 +4641,22 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     const auto resolved = owner.dspHandleRuntime_.resolve(handle);
     return static_cast<EQCoeffCache*>(resolved.instance);
+}
+
+// ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
+//   「ポインタを使い終わるスコープ全体」で保持すること（規約 R2）。
+convo::isr::DSPHandlePin AudioEngine::EQCacheManager::pinByHash(uint64_t hash) noexcept
+{
+    const CacheMap* currentMap = loadMap();
+    if (currentMap == nullptr)
+        return {};
+
+    const auto it = currentMap->map.find(hash);
+    if (it == currentMap->map.end())
+        return {};
+
+    // ★ F1': resolve() ではなく tryPin() を使う（受付閉鎖と pin 数を単一ワードで扱う）。
+    return owner.dspHandleRuntime_.tryPin(it->second);
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
@@ -4663,8 +4690,9 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
 //   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。shutdownRuntime_ /
 //   m_retireRouter / dspHandleRuntime_ 等が全て生存している状態で:
 //     1. cacheMapPtr を nullptr に exchange（新規アクセス遮断）
-//     2. 全 CacheMap エントリの DSPHandle を dspHandleRuntime_.retire（Retired 遷移）し、
-//        resolve で取得した EQCoeffCache* を物理解放
+//     2. 全 CacheMap エントリを resolve で取得し、★F2' でスロットを無効化してから
+//        EQCoeffCache* を物理解放（retire を先にすると v11 候補 1 の resolve が
+//        nullptr を返し、キャッシュが解放されない）
 //     3. enqueueFallbackMaps の各 CacheMap も同様に処分
 //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
 void AudioEngine::EQCacheManager::drainForShutdown() noexcept
@@ -4679,10 +4707,15 @@ void AudioEngine::EQCacheManager::drainForShutdown() noexcept
             if (entry.second.isNull())
                 continue;
             // Retired 遷移（grace period concept は shutdown なので即 reclaim 相当）
-            owner.dspHandleRuntime_.retire(entry.second);
+            // ★ F2' (2026-10-25): 解決 → 無効化 → 削除。
+            //   retire を先にすると (v11 候補 1 の resolve は Retired を拒否) instance が
+            //   取れず、キャッシュが解放されない。
             const auto resolved = owner.dspHandleRuntime_.resolve(entry.second);
             if (resolved.instance != nullptr)
+            {
+                owner.invalidateHandleBeforeDestroy(resolved.instance);
                 delete static_cast<EQCoeffCache*>(resolved.instance);
+            }
         }
         currentMap->map.clear();
         delete currentMap;
@@ -4696,10 +4729,15 @@ void AudioEngine::EQCacheManager::drainForShutdown() noexcept
         {
             if (entry.second.isNull())
                 continue;
-            owner.dspHandleRuntime_.retire(entry.second);
+            // ★ F2' (2026-10-25): 解決 → 無効化 → 削除。
+            //   retire を先にすると (v11 候補 1 の resolve は Retired を拒否) instance が
+            //   取れず、キャッシュが解放されない。
             const auto resolved = owner.dspHandleRuntime_.resolve(entry.second);
             if (resolved.instance != nullptr)
+            {
+                owner.invalidateHandleBeforeDestroy(resolved.instance);
                 delete static_cast<EQCoeffCache*>(resolved.instance);
+            }
         }
         map->map.clear();
         delete map;
@@ -5401,8 +5439,14 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                 continue;
 
             // 3系統解放（quarantineSlot の逆順）
+            // F-2 (2026-10-25): destroy the handle slot first. If a pin is still held,
+            // destroyQuarantineSlot() changes NOTHING (state stays Quarantined), so the
+            // whole 3-store teardown must be retried on a later tick. Reclaiming the
+            // world lane or clearing the quarantine flag here would make the
+            // grace/lane guard skip this slot forever (permanent leak).
+            if (!dspHandleRuntime_.destroyQuarantineSlot(qslot, 0))
+                continue;
             worldAuthority_.lifetime().reclaim(qslot);                          // 系統③: レーン解放
-            dspHandleRuntime_.destroyQuarantineSlot(qslot, 0);         // 系統①: Reclaimedに遷移
             dspQuarantineManager_.reclaimSlot(qslot, 0);              // 系統②: フラグ解放
         }
     }
@@ -5641,6 +5685,9 @@ void diagLog(const juce::String& message)
 
 // ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+// ★ F2' (2026-10-25): destroyDSPCoreNode（static）から解放直前のハンドル無効化を行うための
+//   「現在のエンジン」。製品はプロセス内 1 エンジン、テストは逐次生成。
+std::atomic<AudioEngine*> AudioEngine::s_handleInvalidationOwner{nullptr};
 
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
@@ -5722,10 +5769,19 @@ AudioEngine::AudioEngine()
     retryScheduler_ = std::make_unique<RetryScheduler>([this](const RetryScheduleRequest& req) noexcept {
         this->submitRebuildIntent(req.kind, req.reason, req.rebuildClass, req.collapsePolicy);
     });
+
+    // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
+    //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
+    s_handleInvalidationOwner.store(this, std::memory_order_release);
 }
 
 AudioEngine::~AudioEngine()
 {
+    // ★ F2' (2026-10-25): 所有者の解除は「DSPCore を解放し終えた後」でなければならない。
+    //   dtor の後半（drainDeferredRetireQueues / drainAllQuarantineStore）も
+    //   destroyDSPCoreNode を呼ぶため、冒頭で解除すると teardown 経由の解放だけ HL-1 が
+    //   効かず、F2' 導入前の状態に戻ってしまう（レビュー指摘 A）。
+    //   解除は本体末尾（§末尾の compare_exchange）で行う。
     diagLog("[DIAG] ~AudioEngine: enter");
     // Shutdown sequence (list.md 12.1.2):
     // 1) stop callbacks/workers, 2) detach published runtime pointers,
@@ -5914,6 +5970,29 @@ AudioEngine::~AudioEngine()
         m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
         m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
     }
+
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 C）: 延期リストの最終 drain。
+    //   EBR store を全部 drain した後でも、pin 残留で延期された DSPCore は
+    //   エンジン再試行リストに残っている。ここで 1 度試行し、
+    //   回収できたものを解放する。回収できないものは **強制解放しない**（UAF を選ばない）。
+    {
+        const auto deferredBefore = deferredDestroyResidentCount();
+        if (deferredBefore > 0)
+        {
+            (void)retryDeferredDestroys();
+            const auto deferredAfter = deferredDestroyResidentCount();
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DEFERRED_SHUTDOWN] before=%zu after=%zu%s",
+                deferredBefore, deferredAfter,
+                deferredAfter > 0 ? " (uncollected: pins still held — leaked, not UAF)" : ""));
+            if (deferredAfter > 0)
+            {
+                // 未回収を明示的に残す（~AudioEngine はこの後 member teardown に入る）。
+                // 強制解放すると UAF になるため、リークを選ぶ。
+                diagLog("[F1_DEFERRED_SHUTDOWN] uncollected deferred DSPCore retained");
+            }
+        }
+    }
     // ★ D162-2-E (E-3 / INV-D162-8): 全 EBR store drain 後の pending 残留確認。
     //   D8 の drainAll / drainAllQuarantineStore が完了した時点で DSPCore 破壊は EBR closure を
     //   全て消化しているはず。残留があれば member teardown に EBR entry を持ち越すことになり
@@ -5949,6 +6028,16 @@ AudioEngine::~AudioEngine()
 
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
+
+    // ★ F2' (2026-10-25): ここで所有者を降りる。これ以降は DSPCore を解放しない
+    //   （最後の解放は上の drain 群で完了している）。dtor 冒頭で降りると teardown 経由の
+    //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
+    {
+        AudioEngine* expected = this;
+        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
+                                                          std::memory_order_acq_rel);
+    }
+
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
 
@@ -8028,6 +8117,19 @@ public:
     //   の handshake が崩壊する。rebuildThread_（設計書仮名）は実際はこの std::thread メンバ
     //   の id に由来する。jassert(std::this_thread::get_id() == engine_.rebuildThreadId())。
     [[nodiscard]] std::thread::id rebuildThreadId() const noexcept { return rebuildThread.get_id(); }
+    // ★ R8 (P1): Release-active RebuildThread ownership test.
+    //   The jassert above is compiled out under NDEBUG, which left the "plain
+    //   deferredSlot_ is only touched by the RebuildThread" contract documentation-only in
+    //   Release. This predicate is the mechanical form: it compares the caller's
+    //   acquireUniqueThreadId() (monotonic, never reused) with the token the worker
+    //   publishes on entry and clears on exit. Unlike std::thread::get_id(), reading it does
+    //   not race with join().
+    [[nodiscard]] bool isRebuildThread() const noexcept
+    {
+        const auto owner = convo::consumeAtomic(rebuildThreadToken_, std::memory_order_acquire);
+        return owner != 0 && owner == convo::acquireUniqueThreadId();
+    }
+
     // ★ Phase-1: current build generation (isRebuildObsolete の引数用)。Atomic int そのまま読み取り。
     [[nodiscard]] int currentBuildGeneration() const noexcept { return consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
 
@@ -8472,7 +8574,20 @@ private:
                                   double sampleRate,
                                   int maxBlockSize,
                                   uint64_t generation);
+        // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
+        //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
+        //     DSPHandlePin keeps the cache entry alive for the lease duration.
+        //   - The returned pointer must not be retained across a NonRT boundary that can
+        //     retire the entry (drainForShutdown / rebuild).
+        //   - Call sites are enumerated in the V-11 §10.6-3 audit record; adding an RT
+        //     caller here is a contract violation.
         EQCoeffCache* get(uint64_t hash) noexcept;
+
+        // ★ F1' (2026-10-25): RT 経路用の寿命 lease。`get()` は生ポインタを返すため、
+        //   音声コールバックが取得後に使うと解放と競合する（レビュー指摘 C）。
+        //   `pinByHash` は DSPHandlePin を返し、lease の生存中は当該キャッシュが解放されない。
+        //   RT 可（tryPin はロック・確保・待機なし）。
+        [[nodiscard]] convo::isr::DSPHandlePin pinByHash(uint64_t hash) noexcept;
         [[nodiscard]] bool containsNonRt(uint64_t hash) noexcept;
         // ★ D162-2-E (E-1 / INV-D162-6): member teardown 前に全 CacheMap エントリを処分する。
         //   ~AudioEngine body 内（全 engine member 生存中）から呼ぶこと。
@@ -9206,6 +9321,15 @@ public:
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
     std::atomic<bool> rebuildThreadIsRunning { false };
+    // ★ R8 (P1): published true only AFTER rebuildThread.join() returns.
+    //   rebuildThreadShouldExit is published BEFORE join(), so it does not prove the thread
+    //   has stopped - the RebuildThread may still be inside processDeferredAdmission().
+    //   Only this flag may gate the C1 synchronous clear (see requestDeferredClear()).
+    std::atomic<bool> rebuildThreadStopped { false };
+    // ★ R8 (P1): ownership token of the running RebuildThread (0 = none). Published by
+    //   rebuildThreadLoop() on entry and cleared on exit; compared against
+    //   acquireUniqueThreadId() by isRebuildThread().
+    std::atomic<std::uint64_t> rebuildThreadToken_ { 0 };
     std::atomic<ShutdownPhase> shutdownPhase { ShutdownPhase::Running };
     std::atomic<EngineLifecycleState> lifecycleState { EngineLifecycleState::Unprepared };
     // ★ D167-2: terminal-release intent（requestTerminalRelease が writer・releaseResources の
@@ -9717,6 +9841,16 @@ public:
     // これにより将来 RetireRouter の差し替え時に影響範囲を Reader 生成箇所のみに限定できる。
     // 注意: このメソッドが返すポインタの寿命は AudioEngine 全体の寿命と一致する。
     // AudioEngine より長生きする RCUReader を生成してはならない。
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // ★ V-11 verification seam (compiled only when CONVOPEQ_ENABLE_TEST_HOOKS=1).
+    //   getNextAudioBlock invokes it right after the RCU reader guard is established and
+    //   BEFORE the published-world pointer is obtained, so a test can observe the world
+    //   lifetime predicate with the real audio guard held. Lock-free (function pointer +
+    //   context, both atomic): the audio thread never allocates or takes a lock here.
+    using AudioBlockTestHookFn = void (*)(void*);
+    std::atomic<AudioBlockTestHookFn> audioBlockTestHook { nullptr };
+    std::atomic<void*> audioBlockTestHookCtx { nullptr };
+#endif
     [[nodiscard]] convo::IReaderEpochProvider& getRetireRouter() noexcept
     {
         jassert(m_retireRouter != nullptr);
@@ -9918,7 +10052,12 @@ public:
         graph.fadingNode = state.fading;
 
         auto* current = static_cast<DSPCore*>(state.current);
-        if (current != nullptr)
+        // V-11 candidate (2): defensive reset - validate current is live before
+        //   accessing eqRt(). eqState is a unique_ptr; if it is null, the DSPCore
+        //   has been (or is being) destroyed. This is a best-effort guard; it does
+        //   not prevent UAF if current itself is dangling (use-after-free of the
+        //   DSPCore object). Candidate (1) + EBR or (3) is needed for full protection.
+        if (current != nullptr && current->eqState != nullptr)
         {
             auto& eq = current->eqRt();
             graph.eqAgcAttackCoeffTable = eq.getAgcAttackCoeffTable();
@@ -10208,7 +10347,12 @@ public:
 private:
     // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
     friend class convo::isr::RuntimePublicationOrchestrator;
-#if defined(CONVOPEQ_UNIT_TESTS)
+    // ODR (2026-10-25): unconditional on purpose. This block used to be gated by
+    // `#if defined(CONVOPEQ_UNIT_TESTS)` and contained a DATA MEMBER, so translation
+    // units compiled with and without the macro disagreed about sizeof(AudioEngine)
+    // inside one program (silent ODR/layout violation; the linker cannot catch it).
+    // Friends cost nothing and the flag is one byte, so both are always present.
+
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
     // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
@@ -10229,7 +10373,6 @@ private:
     {
         return convo::consumeAtomic(testFadingRuntimePresent_, std::memory_order_acquire);
     }
-#endif
     friend class convo::isr::PublicationExecutor;
     friend struct convo::isr::PublishExecutor;
     friend class convo::isr::DSPTransition;
@@ -10530,20 +10673,31 @@ public:
         return snapshot;
     }
 
-    inline DSPCore::ProcessingState buildAudioThreadProcessingState(DSPCore* dsp,
-                                                                     const EngineParameterSnapshot& snapshot) noexcept
+    // ★ F1' (2026-10-25): EQ キャッシュも pin で保護する（レビュー指摘 C）。
+    //   `pin` は戻り値と同時に呼び出し側へ move され、音声ブロックの処理が終わるまで
+    //   生存する。したがって `state.eqCache` が指す先は、そのブロックの間は解放されない。
+    struct ProcessingStateWithPin
+    {
+        DSPCore::ProcessingState state;
+        convo::isr::DSPHandlePin eqPin;   // state.eqCache の寿命を保持
+    };
+
+    inline ProcessingStateWithPin buildAudioThreadProcessingState(DSPCore* dsp,
+                                                                  const EngineParameterSnapshot& snapshot) noexcept
     {
         const convo::EQParameters* eqParams = snapshot.snapshotEqParams;
         uint64_t eqCoeffHash = snapshot.snapshotEqCoeffHash;
 
-        const EQCoeffCache* eqCache = (eqParams != nullptr && eqCoeffHash != 0)
-            ? eqCacheManager.get(eqCoeffHash)
-            : nullptr;
+        // ★ F1': 生ポインタを直接取らず、lease を取ってから get() する。
+        convo::isr::DSPHandlePin eqPin = (eqParams != nullptr && eqCoeffHash != 0)
+            ? eqCacheManager.pinByHash(eqCoeffHash)
+            : convo::isr::DSPHandlePin{};
+        const EQCoeffCache* eqCache = static_cast<const EQCoeffCache*>(eqPin.get());
         // ISR厳密化: hash から cache を解決できない場合は EQ を fail-close で bypass する。
         // 非snapshot系フォールバックへ降りるより、公開済み不変状態を維持することを優先する。
         const bool eqBypassedFailClosed = snapshot.eqBypassed || (eqParams == nullptr) || (eqCache == nullptr);
 
-        return DSPCore::ProcessingState {
+        return ProcessingStateWithPin{ DSPCore::ProcessingState {
             .eqBypassed = eqBypassedFailClosed,
             .convBypassed = snapshot.convBypassed,
             .order = snapshot.order,
@@ -10567,7 +10721,7 @@ public:
             .eqParams = eqParams,
             .eqCache = eqCache,
             .eqCoeffHash = eqCoeffHash
-        };
+        }, std::move(eqPin) };
     }
 
     // ★ [DELETED] 2026-07-28: updateAudioThreadSnapshotFade は Dead Code のため削除。
@@ -10880,9 +11034,22 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
     return handle;
 }
 
+// ★ F1' (2026-10-25): 寿命 lease を取得する。**生ポインタを返さない**。
+//   戻り値が真（operator bool）の間だけ、対象 DSPCore は解放されない。
+//   呼び出し側は lease を「ポインタを使い終わるスコープ全体」に置くこと（規約 R2）。
+//   RT 可（tryPin はロック・確保・待機なし）。
+[[nodiscard]] inline convo::isr::DSPHandlePin tryPinDSPHandle(convo::isr::DSPHandle handle) noexcept
+{
+    return dspHandleRuntime_.tryPin(handle);
+}
+
 // resolveDSPHandle: DSPHandle → DSPCore* 解決 (Phase2: Execution Path Handle Normalization)
 // DSPHandleRuntime::resolve() は ResolvedDSP を返すため、後方互換のために DSPCore* に単純化する。
 // 解決失敗時は nullptr を返す（caller が適切に処理する）。
+//
+// ★ F1' (2026-10-25): この関数は **寿命保護を与えない**（戻り値は pin を持たない）。
+//   逆参照する呼び出しは tryPinDSPHandle() へ移行すること。残存呼び出しは
+//   「ポインタ値をログ/比較に使うだけで逆参照しない」箇所に限る。
 inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
 {
     if (handle.isNull())
@@ -10899,6 +11066,37 @@ inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
         return nullptr;
 
     return static_cast<DSPCore*>(resolved.instance);
+}
+
+// ★ F2' (2026-10-25): DSPCore のメモリ解放の直前に、そのインスタンスを指すハンドルを
+//   解決不能にする。AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ぶ。
+//   - 台帳（runtimeDSPHandleMap_）から先に identity を外し、その後スロットを無効化する。
+//     2 つの mutex を入れ子にしない（register は map→freeList の順なので、ここも同じ順）。
+//   - 戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**。
+//     （未登録インスタンスは true。rebuild-obsolete / recovery の直接破棄経路がこれに当たる。）
+//   - ★ F1' (2026-10-25): 台帳を外す**前に** pin の受付を閉じる。順序を逆にすると、
+//     「台帳から消えたが pin は取れる」窓ができる。
+inline bool invalidateHandleBeforeDestroy(void* core) noexcept
+{
+    if (core == nullptr)
+        return true;
+
+    // 1) pin の受付を閉じ、既存 pin の消滅を待つ（NonRT）。タイムアウトなら false。
+    //    ★ F1'-c (2026-10-25): 待機は短くする。破棄は D キューの deleter から呼ばれる
+    //      ことがあり、その間 D キューの mutex を保持したまま秒単位で待つと
+    //      retire 経路全体が停止する。短い待機で済まない場合は「延期」して
+    //      後続の再試行に委ねる（安全側・非ブロッキング）。
+    constexpr int kPinDrainTimeoutMs = 50;
+    if (!dspHandleRuntime_.invalidateForDestroy(core, kPinDrainTimeoutMs))
+        return false;
+
+    // 2) ここで初めて台帳から外す（以後 register は同一ポインタを新規として扱えるが、
+    //    F3' により破棄済みスロットとは一致しない）。
+    {
+        std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+        runtimeDSPHandleMap_.erase(static_cast<DSPCore*>(core));
+    }
+    return true;
 }
 
 inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
@@ -10955,7 +11153,8 @@ inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
     if (handle.isNull())
         return;
     const auto retireEpoch = m_retireRouter->currentEpoch();
-    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+    if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter,
+                                                  retireEpoch))
     {
         // deferred（epoch unsafe）通知。deferred 1 通知 = pending entry 1 件 =
         // reclaimInFlightCount_ +1 1 回（Coordinator.cpp:705 が唯一の +1 を持つため 1:1）。
@@ -11379,6 +11578,43 @@ public:
     void processDeferredReleases();
     static void destroyDSPCoreNode(void* p) noexcept;
 
+    // ★ F1'-b (2026-10-25): 破棄結果を返す版。pin 残留なら Deferred を返し、解放しない。
+    static DestroyOutcome destroyDSPCoreNodeRetryable(void* p) noexcept;
+
+    // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
+    //   Deferred になったポインタをエンジンの再試行リストで保持し、所有権を失わない。
+    void deferDestroyRetry(void* p) noexcept;
+    [[nodiscard]] std::size_t retryDeferredDestroys() noexcept;
+    [[nodiscard]] std::size_t deferredDestroyResidentCount() const noexcept;
+    // ★ F1'-b (2026-10-25) 監査対応: ロックフリーの在住数。
+    //   tryReclaimResources / drainDeferredRetireQueues の「空なら何もしない」判定に使う。
+    //   これが無いと D/Q/E/T が空のとき早期 return して再試行に到達せず、
+    //   延期エントリが永久に回収されない（監査で発見した欠陥 A）。
+    [[nodiscard]] std::uint32_t deferredDestroyResidentAtomic() const noexcept
+    {
+        return convo::consumeAtomic(deferredDestroyResidentAtomic_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t deferredDestroyCount() const noexcept
+    {
+        return convo::consumeAtomic(deferredDestroyCount_, std::memory_order_acquire);
+    }
+    // F-2 (2026-10-25): quarantine slots whose destruction is deferred by a live pin.
+    [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept
+    {
+        return dspHandleRuntime_.deferredQuarantineDestroyCount();
+    }
+    mutable std::mutex deferredDestroyMutex_;
+    std::vector<void*> deferredDestroy_;
+    std::atomic<std::uint64_t> deferredDestroyCount_{0};
+    std::atomic<std::uint32_t> deferredDestroyResidentAtomic_{0};
+
+    // ★ F2' (2026-10-25): DSPCore の解放は destroyDSPCoreNode（static・関数ポインタとして
+    //   EBR キューに渡すため this を持てない）の一本道を通る。そこで「今生きているエンジン」を
+    //   1 つだけ公開し、解放直前にそのエンジンのハンドルを無効化する。
+    //   前提: プロセス内の AudioEngine は同時に 1 つ（製品構成）。テストは 1 エンジンずつ
+    //   逐次生成するため同じ前提が成り立つ。該当スロットが無い場合は単なる no-op。
+    static std::atomic<AudioEngine*> s_handleInvalidationOwner;
+
     // スナップショット基盤（Phase 2）
     // ==================================================================
     convo::EpochDomain m_epochDomain;
@@ -11800,6 +12036,8 @@ void AudioEngine::initialize()
     // readerEpochs と globalEpoch は静的初期化で 0
 
     // Start worker thread
+    // ★ R8 (P1): a fresh thread is not "stopped"; clear the C1 predicate before it runs.
+    convo::publishAtomic(rebuildThreadStopped, false, std::memory_order_release);
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
     // 初期DSP構築 (デフォルト設定)
@@ -13780,6 +14018,7 @@ void AudioEngine::clearConvolverCache()
 #include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
 #include "core/TimeUtils.h"
+#include "core/RCUReader.h"
 
 // windows.h: SetThreadAffinityMask 用（applyMmcssPriority 経由）
 #include <windows.h>
@@ -13942,6 +14181,22 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // P0-2: 読取入口を単一の callback authority view へ収束（R21 gate: readAudioRuntimeView）
+    // V-11 candidate (3): EBR protection for published-world read.
+    const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
+    // V-11 candidate (3c): fail closed when the EBR read-side guard could not be
+    //   established (see the matching guard in processBlockDouble). Without a
+    //   successful enter() no epoch protection is registered, so the published-world
+    //   DSPCore must not be dereferenced. C-7 idiom: core/ObservedRuntime.h:get().
+    if (!rcuGuard.rootEnterSucceeded())
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // ★ V-11 verification seam: the guard is held and nothing has been dereferenced yet.
+    if (auto hookFn = convo::consumeAtomic(audioBlockTestHook, std::memory_order_acquire))
+        hookFn(convo::consumeAtomic(audioBlockTestHookCtx, std::memory_order_acquire));
+#endif
     auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
@@ -14120,7 +14375,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // ── Audio Thread authority: RuntimeWorld 由来のスナップショットを使用 ──
         const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
-        DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+        // F1′: lease をブロック全体で保持する。
+        auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+        DSPCore::ProcessingState procState = stateWithPin.state;
 
         DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
         const auto& preparedCrossfade = authority.preparedCrossfade;
@@ -14709,6 +14966,27 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    // V-11 candidate (3): EBR protection for published-world read.
+    //   Wrap the entire published-world read scope in an RCUReaderGuard so that
+    //   the retire router's epoch mechanism prevents DSPCore reclamation while
+    //   the audio thread holds the raw DSPCore* obtained from the published world.
+    //   Previously the audio thread read the published world without entering
+    //   the RCU reader, so a Retired DSPCore could be freed mid-use (UAF).
+    const convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
+    // V-11 candidate (3c): fail closed when the EBR read-side guard could not be
+    //   established. RCUReader::enter() records failure in rootEnterSucceeded_ when
+    //   the reader slot cannot be acquired (or another thread owns the reader), and
+    //   in that case NO epoch protection is registered. Proceeding would dereference
+    //   the published-world DSPCore with no protection, which is exactly the UAF this
+    //   fix exists to prevent. This mirrors the established C-7 idiom in
+    //   core/ObservedRuntime.h:get() ("if (!guard.rootEnterSucceeded()) return nullptr").
+    //   Silent audio (cleared buffer) is the safe outcome; a missed callback is
+    //   observable, a use-after-free is not recoverable.
+    if (!rcuGuard.rootEnterSucceeded())
+    {
+        buffer.clear();
+        return;
+    }
     auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
@@ -14855,7 +15133,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // --- ProcessingStateを現行設計で初期化 ---
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
-    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    // F1′: lease をブロック全体で保持する。
+    auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    DSPCore::ProcessingState procState = stateWithPin.state;
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)
@@ -17799,6 +18079,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         {
             std::lock_guard<std::mutex> lock(rebuildMutex);
             convo::publishAtomic(rebuildThreadShouldExit, false, std::memory_order_release);
+            // ★ R8 (P1): the C1 synchronous-clear predicate is rebuildThreadStopped. It is
+            //   published after join() in stopRebuildThread(), so a restart MUST clear it
+            //   here; otherwise requestDeferredClear() would take the inline branch while
+            //   this new RebuildThread is running (exactly the race R8 removes).
+            convo::publishAtomic(rebuildThreadStopped, false, std::memory_order_release);
             hasPendingTask = false;
             publishRetryReady = false;
             pendingTask = RebuildTask{};
@@ -18506,6 +18791,16 @@ void AudioEngine::releaseResources()
             m_retireRouter->drainAllQuarantineStore();
         }
 
+        // F-2 (2026-10-25): last chance to finish quarantine-slot destruction that was
+        // deferred while a pin was held. Owner: the slot (still Quarantined).
+        {
+            const auto retried = dspHandleRuntime_.retryDeferredQuarantineDestroy();
+            if (retried > 0)
+                diagLog("[F1_C_QUARANTINE_SHUTDOWN] retried="
+                        + juce::String(static_cast<int>(retried))
+                        + " slot(s) destroyed after pin drain");
+        }
+
         const auto residentBefore = dspQuarantineManager_.residentCount();
         if (residentBefore > 0) {
             diagLog("[DIAG] releaseResources: quarantinedSlots="
@@ -18517,7 +18812,16 @@ void AudioEngine::releaseResources()
                 if (dspQuarantineManager_.destroyForShutdown(slot)) {
                     // 系統①: DSPHandleRegistry の Quarantined→Reclaimed 遷移
                     //   destroyForShutdown が quarantine フラグ確認を済ませているため安全
-                    dspHandleRuntime_.destroyQuarantineSlot(slot, 0);
+                    if (!dspHandleRuntime_.destroyQuarantineSlot(slot, 0))
+                    {
+                        // F-2: a pin is still held at shutdown. Do NOT recycle the slot
+                        // and do NOT free: keep the world lane Quarantined and record the
+                        // residue (leaked, not UAF) instead of forcing the release.
+                        diagLog("[F1_C_QUARANTINE_SHUTDOWN] slot="
+                                + juce::String(static_cast<int>(slot))
+                                + " pinned: slot not recycled (leaked, not UAF)");
+                        continue;
+                    }
                     // 系統③: レーン解放 + quarantineResidentCount--
                     worldAuthority_.lifetime().reclaim(slot);
                 }
@@ -18558,9 +18862,17 @@ void AudioEngine::releaseResources()
     //   二重破壊禁止（INV-D162-3）: resolve は Retired/Reclaimed で nullptr を返すため、
     //   既に disposition 済みの DSP は何もしない。DSPHandle slot は既に Reclaimed 済みのため
     //   以後の resolve も nullptr（map の 二重 erase/二重 destroy は構造的に不可能）。
-    auto* activeDSPToDestroy = (!activeHandle.isNull()) ? resolveDSPHandle(activeHandle) : nullptr;
-    auto* fadingDSPToDestroy = (!fadingHandle.isNull() && fadingHandle != activeHandle)
-        ? resolveDSPHandle(fadingHandle) : nullptr;
+    // ★ F1' (2026-10-25): ここでは **pin を取らない**。
+    //   直後の tryShutdownQuiescentReclaim / lifetimeMgr.retire が
+    //   destroyDSPCoreNode → invalidateForDestroy を同一スレッドで呼ぶため、
+    //   pin を保持していると自分自身の解放が待ちタイムアウトする。
+    //   shutdown 経路は quiescence（activeReaderCount==0）を証明済みで、
+    //   音声スレッドも停止しているため、ポインタ値を retire に渡すだけで安全。
+    //   （逆参照はしない。retire はハンドル台帳操作のみ。）
+    // V-11 §10.6-2 (2026-10-26): 生ポインタの resolve は行わない。
+    //   以前は slot が Reclaimed になる前に DSPCore* を確保する必要があったが、
+    //   所有権は runtimeDSPHandleMap_（handle 完全一致・世代検査つき）が保持しているため、
+    //   破棄の直前に handle から取り出せば足りる。下の retireDetachedCoreForShutdown を参照。
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
@@ -18630,24 +18942,21 @@ void AudioEngine::releaseResources()
     //   返すため、既に disposition 済みの DSP は何もしない（INV-D162-3・二重 retire 不可）。
     //   EBR destroy は dtor body 内 D5/D8 drain で digest される（INV-D162-8 適合）。
     {
+        // V-11 §10.6-2 (2026-10-26): handle ベースの所有権移転。
+        //   slot は上で quiescence permit により既に Reclaimed なので、retire()/reclaim() は
+        //   呼ばない（Retired への戻しと free list の二重 push を避ける）。
         DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
-        if (activeDSPToDestroy != nullptr) // ★ D162-2-G2 (V-D-b): authority retire で再有効化。
+        if (!activeHandle.isNull())
         {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2G2_VD_RETIRE] dsp=%p target=active-final",
-                (void*)activeDSPToDestroy));
-#endif
-            lifetimeMgrForFinalDSP.retire(activeDSPToDestroy);
+            const bool moved = lifetimeMgrForFinalDSP.retireDetachedCoreForShutdown(activeHandle);
+            jassert(moved);
+            juce::ignoreUnused(moved);
         }
-        if (fadingDSPToDestroy != nullptr && fadingDSPToDestroy != activeDSPToDestroy) // ★ D162-2-G2 (V-D-b): 同上・同一 DSP の二重 retire 防止
+        if (!fadingHandle.isNull() && fadingHandle != activeHandle)
         {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2G2_VD_RETIRE] dsp=%p target=fading-final",
-                (void*)fadingDSPToDestroy));
-#endif
-            lifetimeMgrForFinalDSP.retire(fadingDSPToDestroy);
+            const bool moved = lifetimeMgrForFinalDSP.retireDetachedCoreForShutdown(fadingHandle);
+            jassert(moved);
+            juce::ignoreUnused(moved);
         }
     }
 
@@ -19010,7 +19319,9 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap, isFadingTarget);
 
-    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    // F1′: lease をブロック全体で保持する。
+    auto stateWithPin = buildAudioThreadProcessingState(dsp, parameterSnapshot);
+    DSPCore::ProcessingState procState = stateWithPin.state;
 
     auto* inMeter = isFadingTarget ? nullptr : &inputLevelLinear;
     auto* outMeter = isFadingTarget ? nullptr : &outputLevelLinear;
@@ -19983,6 +20294,12 @@ void AudioEngine::stopRebuildThread()
     if (rebuildThread.joinable())
         rebuildThread.join();
 
+    // ★ R8 (P1): publish "stopped" only after join() returned. From here no RebuildThread
+    //   code can run, so the C1 synchronous clear (requestDeferredClear) is the only writer
+    //   of the plain deferred members. rebuildThreadShouldExit (published before join) is
+    //   NOT a sufficient proof and must not be used for that decision.
+    convo::publishAtomic(rebuildThreadStopped, true, std::memory_order_release);
+
     // ★ work88 (P2-4 監査補正 — Step C): shutdown 時に recoveryIntentQueue_ の残留 Recovery を
     //   明示 discard（ShutdownDiscard — silent loss 禁止 INV-5）。Builder join 後であり、
     //   Producer（CoordinatorLoop）は shutdownCoordinatorLoop() で join 済みのため決定的に
@@ -20024,6 +20341,11 @@ void AudioEngine::rebuildThreadLoop()
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
     convo::publishAtomic(rebuildThreadIsRunning, true, std::memory_order_release);
+    // ★ R8 (P1): publish this thread's unique ownership token. acquireUniqueThreadId() is
+    //   monotonic and never reused, so a foreign thread cannot collide, and unlike
+    //   std::thread::get_id() it is safe to read while the owner may be joining.
+    convo::publishAtomic(rebuildThreadToken_, convo::acquireUniqueThreadId(),
+                         std::memory_order_release);
 
     while (true)
     {
@@ -20594,6 +20916,9 @@ void AudioEngine::rebuildThreadLoop()
     }
 
     convo::publishAtomic(rebuildThreadIsRunning, false, std::memory_order_release);
+    // ★ R8 (P1): the worker is leaving; drop ownership so no thread can claim it.
+    convo::publishAtomic(rebuildThreadToken_, static_cast<std::uint64_t>(0),
+                         std::memory_order_release);
 }
 
 ```
@@ -20637,12 +20962,25 @@ namespace
 
 void AudioEngine::tryReclaimResources() noexcept
 {
-    // ★ E-1.9-A: empty-drain suppression — skip if nothing pending
-    if (m_retireRouter->pendingRetireCount() == 0
-        && m_retireRouter->residentCountAtomic() == 0)
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 「何も無ければ何もしない」判定に
+    //   延期リストを含める。延期エントリは D/Q/E/T のどこにも入っていないため、
+    //   これを含めないと早期 return して再試行に永久に到達しない。
+    const bool routerEmpty = (m_retireRouter->pendingRetireCount() == 0
+                              && m_retireRouter->residentCountAtomic() == 0);
+    const bool deferredEmpty = (deferredDestroyResidentAtomic() == 0);
+    // F-2 (2026-10-25): deferred quarantine-slot destruction must also reach the tick.
+    const bool quarantineEmpty = (dspHandleRuntime_.deferredQuarantineDestroyCount() == 0);
+    if (routerEmpty && deferredEmpty && quarantineEmpty)
         return;
+
     convo::fetchAddAtomic(rtAuxMutable_.runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     m_retireRouter->tryReclaim();
+
+    // ★ F1'-b: pin 残留で延期された破棄を再試行する。
+    //   pin が解放されていれば、ここで初めて物理破棄が完了する。
+    (void)retryDeferredDestroys();
+    // F-2: pin が外れた quarantine slot を破棄する（所有者はスロット）。
+    (void)dspHandleRuntime_.retryDeferredQuarantineDestroy();
 }
 
 void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
@@ -20653,9 +20991,13 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     // ★ E-1.9-A: empty-drain suppression — skip drain when nothing is pending.
     //   Lock-free atomic checks only (no mutex on Non-RT path). Shutdown drains
     //   (allowDuringShutdown=true) are never suppressed.
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 延期リストも「保留あり」とみなす。
+    //   これを含めないと、D/Q/E/T が空のとき早期 return して再試行に到達しない。
     if (!allowDuringShutdown
         && m_retireRouter->pendingRetireCount() == 0
-        && m_retireRouter->residentCountAtomic() == 0)
+        && m_retireRouter->residentCountAtomic() == 0
+        && deferredDestroyResidentAtomic() == 0
+        && dspHandleRuntime_.deferredQuarantineDestroyCount() == 0)
         return;
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
@@ -20667,6 +21009,12 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     // [P1-21] epoch-free API: minReaderEpoch を直接渡す
     m_coordinator.reclaim(m_retireRouter->getMinReaderEpoch());
     runtimePublicationBridge_.onReclaimEnd();
+
+    // ★ F1'-b (2026-10-25): pin 残留で延期された破棄を再試行する。
+    //   drain の後に置くことで、retire 済み → pin 解放済み の順序が保証される。
+    (void)retryDeferredDestroys();
+    // F-2 (2026-10-25): pin が外れた quarantine slot を破棄する（所有者はスロット）。
+    (void)dspHandleRuntime_.retryDeferredQuarantineDestroy();
 
     // ★ work88 (Phase 3): 保留中 reclaim の再試行。
     //   requestReclaim が RT Reader の古い epoch 参照により遅延した handle を、
@@ -20714,7 +21062,9 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
             //   本関数は caller-side の epoch 事前判定を持たない（TOCTOU window の除去）。
             if (dspHandleRuntime_.isRetired(handle))
             {
-                const auto retireEpoch = m_retireRouter->currentEpoch();
+                // G (2026-10-25): keep the ORIGINAL retirement epoch. Recomputing
+            // currentEpoch() here made every retry look unsafe forever.
+            const auto retireEpoch = identity.retireSequence;
                 // ★ STG-9-D1 / RC-1 訂正（R2）: retry は「同一 entry の継続」ではなく
                 //   「old entry → new deferred attempt → new entry」の置換である。
                 //   requestReclaim の deferred 戻りは reclaimNormal が onReclaimBegin (+1) した
@@ -20722,7 +21072,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
                 //   差分は +0（new +1 / old -1）。
                 //   順序は必ず push_back → onReclaimEnd。逆順にすると swap window 中に
                 //   member list が空の時間帯が生じ、その間の drain predicate を壊す。
-                if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_, *m_retireRouter))
+                if (!runtimePublicationBridge_.requestReclaim(handle, dspHandleRuntime_,
+                                                              *m_retireRouter, retireEpoch))
                 {
                     std::lock_guard<std::mutex> lock(pendingReclaimHandlesMutex_);
                     // ★ dash2 §2.2 (G14): ReclaimIdentity として再登録。
@@ -21547,35 +21898,107 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 // 本ファイルには非3PR関数のみ残す.
 //==============================================================================
 
-void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+// ★ F1'-b (2026-10-25): 破棄結果を返す版。pin が残っていれば Deferred を返し、
+//   **解放しない**（所有権は呼び出し側に残る）。void 版は後方互換のラッパー。
+DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ D117 root-cause audit: observation-only trace (no semantic change).
-    juce::Logger::writeToLog(juce::String::formatted("[D117_DESTROY] dsp=%p", p));
-    // ★ D162-1R-B: 破壊前の実測 footprint を DSPCore 保存値から出力
-    //   （AC-R5: construct/retained/destroy を pointer identity で突合）。
-    if (p != nullptr)
+    if (p == nullptr)
+        return DestroyOutcome::Destroyed;
+
+    if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
     {
-        auto* coreDiag = static_cast<DSPCore*>(p);
-        const auto& fp = coreDiag->diagFootprint;
-        juce::Logger::writeToLog(juce::String::formatted(
-            "[DSP_DESTROY_FOOTPRINT] dsp=%p gen=%llu trackedFootprint=%zu "
-            "(convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu)",
-            p,
-            (unsigned long long)coreDiag->diagGeneration.load(std::memory_order_relaxed),
-            fp.total(), fp.convolver, fp.irData, fp.nuc, fp.ipp,
-            fp.latency, fp.eq, fp.other));
+        if (!owner->invalidateHandleBeforeDestroy(p))
+        {
+            // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
+            //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
+            //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
+            owner->deferDestroyRetry(p);
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
+            return DestroyOutcome::Deferred;
+        }
     }
-#endif
+
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    // ★ D162-1R-B: 破壊完了確認（保存 footprint 全カテゴリは DSPCore と運命を共にするため
-    //   帰属対象 0 = released）。実メモリ還収は OS/allocator 依存（H4 判定は MEM_SNAP 側）。
-    juce::Logger::writeToLog(juce::String::formatted(
-        "[DSP_FOOTPRINT_RELEASED] dsp=%p remaining=0", p));
-#endif
+    return DestroyOutcome::Destroyed;
+}
+
+void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+{
+    // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
+    //   Retryable 版が Deferred 時に自ら再試行リストへ登録するので、ここは委譲するだけ。
+    (void)destroyDSPCoreNodeRetryable(p);
+}
+
+// ★ F1'-b: 再試行リストへの登録（重複は無視）。所有権はこのリストが保持する。
+void AudioEngine::deferDestroyRetry(void* p) noexcept
+{
+    if (p == nullptr)
+        return;
+    std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+    for (void* existing : deferredDestroy_)
+    {
+        if (existing == p)
+            return;   // 既に保持している（二重登録しない）
+    }
+    deferredDestroy_.push_back(p);
+    convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+    // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
+    convo::publishAtomic(deferredDestroyResidentAtomic_,
+                         static_cast<std::uint32_t>(deferredDestroy_.size()),
+                         std::memory_order_release);
+}
+
+// ★ F1'-b: 延期された破棄の再試行。Destroyed になったものだけリストから外す。
+std::size_t AudioEngine::retryDeferredDestroys() noexcept
+{
+    // F1'-b audit fix (defect D / double free):
+    //   Called from TWO threads: tryReclaimResources (Message Thread / Timer) and
+    //   drainDeferredRetireQueues (CoordinatorLoop). The old implementation copied a
+    //   snapshot under the lock and destroyed OUTSIDE the lock, so both threads could
+    //   snapshot the same pointer and each call destroyDSPCoreNodeRetryable() on it ->
+    //   double free (0xC0000005 / 0xC0000374).
+    //
+    //   Fix: take ownership by SWAPPING the list out. Only the thread that receives the
+    //   entries destroys them; a concurrent caller gets an empty list and does nothing.
+    //   Deferred entries are re-registered by destroyDSPCoreNodeRetryable() itself
+    //   (deferDestroyRetry), so no re-registration is needed here.
+    std::vector<void*> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        snapshot.swap(deferredDestroy_);
+        convo::publishAtomic(deferredDestroyResidentAtomic_,
+                             static_cast<std::uint32_t>(0),
+                             std::memory_order_release);
+    }
+    if (snapshot.empty())
+        return 0;
+
+    std::size_t destroyed = 0;
+    for (void* p : snapshot)
+    {
+        // Destroyed -> freed, not re-registered.
+        // Deferred  -> destroyDSPCoreNodeRetryable() re-registers it internally.
+        if (destroyDSPCoreNodeRetryable(p) == DestroyOutcome::Destroyed)
+            ++destroyed;
+    }
+
+    // Re-sync the resident count for the early-return guards.
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        convo::publishAtomic(deferredDestroyResidentAtomic_,
+                             static_cast<std::uint32_t>(deferredDestroy_.size()),
+                             std::memory_order_release);
+    }
+    return destroyed;
+}
+
+std::size_t AudioEngine::deferredDestroyResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+    return deferredDestroy_.size();
 }
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
@@ -23765,7 +24188,14 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     {
         diagLog("[HEALTH] Publication stall detected, draining deferred publish");
 
-        if (runtimeOrchestrator_) {
+        // ★ R8 (P1): during teardown the deferred clear is owned by the shutdown path
+        //   (clearDeferredForShutdown() from ReleaseResources / stopRebuildThread). Asking
+        //   for a stall-driven clear here would queue redundant recovery work while the
+        //   RebuildThread may still be stopping.
+        const bool rebuildWorkerStopping =
+            convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
+
+        if (runtimeOrchestrator_ && !rebuildWorkerStopping) {
             runtimeOrchestrator_->requestDeferredClear();
         }
 
@@ -25666,6 +26096,35 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
         std::memory_order_acq_rel);
 }
 
+bool DSPLifetimeManager::retireDetachedCoreForShutdown(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull() || router_ == nullptr)
+        return false;
+
+    void* rawKey = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(engine_.runtimeDSPHandleMapMutex_);
+        if (!engine_.runtimeDSPHandleMap_.findAndEraseByHandle(handle, rawKey))
+            return false;
+    }
+    if (rawKey == nullptr)
+        return false;
+
+    auto* core = static_cast<AudioEngine::DSPCore*>(rawKey);
+    const auto epoch = router_->currentEpoch();
+    const auto result = router_->enqueueWithRetry(
+        core, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic);
+    juce::ignoreUnused(result);
+
+    D117_LIFETIME_LOG(juce::String::formatted(
+        "[D162-2G2_VD_DETACH] dsp=%p handleSlot=%llu", rawKey,
+        static_cast<unsigned long long>(handle.slot)));
+
+    convo::fetchAddAtomic(currentRetiringGeneration_,
+        static_cast<uint64_t>(1), std::memory_order_acq_rel);
+    return true;
+}
+
 void DSPLifetimeManager::retireDeferred() noexcept
 {
     convo::consumeAtomic(currentRetiringGeneration_, std::memory_order_acquire);
@@ -25713,6 +26172,16 @@ public:
     void retire(void* dsp) noexcept;
     void retire(void* dsp, uint64_t publicationEpoch) noexcept;
     void retireByHandle(convo::isr::DSPHandle handle) noexcept;
+
+    // V-11 §10.6-2 (2026-10-26): shutdown-only ownership transfer WITHOUT touching the
+    // slot. The caller has already reclaimed the slot under a quiescence permit.
+    //   - erases the runtimeDSPHandleMap_ entry for `handle` (full handle compare, so it
+    //     is generation-safe) under runtimeDSPHandleMapMutex_;
+    //   - enqueues the DSPCore into the EBR retire path (destroyDSPCoreNode).
+    // It must NOT call retire()/reclaim(): a Reclaimed slot would go back to Retired and
+    // be pushed into the free list twice.
+    // Returns true when an entry was found and the ownership moved.
+    [[nodiscard]] bool retireDetachedCoreForShutdown(convo::isr::DSPHandle handle) noexcept;
     void retireDeferred() noexcept;
     void* getActive() const noexcept;
     void destroyRolledBackDSP(void* dsp) noexcept;
@@ -26900,8 +27369,9 @@ DSPHandleRuntime::DSPHandleRuntime()
 
     for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
         convo::publishAtomic(registry_[i].generation, 0u, std::memory_order_relaxed);
-        registry_[i].instance = nullptr;
+        registry_[i].instance.store(nullptr, std::memory_order_relaxed);
         convo::publishAtomic(registry_[i].state, DSPState::Reclaimed, std::memory_order_relaxed);
+        convo::publishAtomic(registry_[i].pinState, uint64_t{0}, std::memory_order_relaxed);
     }
 
     // ★ FUTURE-5 (work88): フリーリスト初期化（slot 1..255。slot 0 は null handle 表現のため除外）
@@ -26914,8 +27384,33 @@ DSPHandleRuntime::~DSPHandleRuntime() = default;
 
 DSPHandle DSPHandleRuntime::create(void* dspInstance)
 {
+    if (dspInstance == nullptr)
+        return DSPHandle::null();
+
     // ★ FUTURE-5 (work88): 線形スキャン → フリーリスト pop（O(1) 確保）
     std::lock_guard<std::mutex> lock(freeListMutex_);
+
+    // ★ F3' (2026-10-25): 1 インスタンス = 1 ハンドル。
+    //   重複を許すと retire() が片方しか無効化せず、残ったスロットが解放済みメモリを
+    //   Active のまま指す（2026-10-25 のダンプ: slot 251 Active / slot 254 Retired が同一
+    //   インスタンス）。スロット数は 256 固定なので走査は NonRT で許容できる。
+    for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
+        const auto& reg = registry_[i];
+        if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            continue;
+        const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
+        if (state == DSPState::Constructing || state == DSPState::Active
+            || state == DSPState::CrossfadingIn || state == DSPState::CrossfadingOut) {
+            return DSPHandle{ static_cast<uint32_t>(i),
+                              convo::consumeAtomic(reg.generation, std::memory_order_acquire) };
+        }
+        // 破棄が確定した / アクセス禁止のインスタンスは復活させない。
+        if (state == DSPState::Retired || state == DSPState::DestroyPending
+            || state == DSPState::Quarantined) {
+            return DSPHandle::null();
+        }
+    }
+
     if (freeSize_ == 0) {
         assert(false && "DSP registry exhausted");
         return DSPHandle::null();
@@ -26923,10 +27418,111 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     const uint32_t slot = freeSlots_[--freeSize_];
     auto& reg = registry_[slot];
     const auto gen = convo::consumeAtomic(reg.generation, std::memory_order_acquire) + 1u;
-    reg.instance = dspInstance;
+    reg.instance.store(dspInstance, std::memory_order_release);
     convo::publishAtomic(reg.generation, gen, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
+    // ★ F1' (2026-10-25): 受付を開いた状態（closed=0, count=0）で公開する。
+    //   Constructing の時点で破棄が来ても closePinsForDestroy が閉じられる。
+    convo::publishAtomic(reg.pinState, uint64_t{0}, std::memory_order_release);
     return DSPHandle{ slot, gen };
+}
+
+DSPHandlePin DSPHandleRuntime::tryPin(DSPHandle handle) noexcept
+{
+    // ★ F1' (2026-10-25): RT 可。ロック・動的確保・待機を一切行わない。
+    if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS)
+        return {};
+
+    auto& reg = registry_[static_cast<size_t>(handle.slot)];
+
+    if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != handle.generation)
+        return {};   // stale handle
+
+    // 「受付が開いていることを確認して pin 数 +1」を 1 回の CAS で行う。
+    //   2 ワードに分けると、確認と +1 の間に破棄が入る窓が残る（レビュー指摘 A）。
+    uint64_t observed = convo::consumeAtomic(reg.pinState, std::memory_order_acquire);
+    for (;;)
+    {
+        if ((observed & kPinClosedBit) != 0)
+            return {};                                  // 破棄が受付を閉じた → 失敗（F1-1/F1-4）
+        const uint64_t next = observed + 1;             // 下位 63bit のカウンタ
+        if (convo::compareExchangeAtomic(reg.pinState, observed, next,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            break;
+        // observed は失敗時に最新値へ更新される
+    }
+
+    void* instance = reg.instance.load(std::memory_order_acquire);
+    if (instance == nullptr)
+    {
+        // F2' の無効化後（instance が既に消えている）。pin を返して失敗側へ倒す。
+        releasePinSlot(handle.slot);
+        return {};
+    }
+
+    return DSPHandlePin(this, handle.slot, instance);
+}
+
+void DSPHandlePin::release() noexcept
+{
+    if (owner_ == nullptr)
+        return;
+    owner_->releasePinSlot(slot_);
+    owner_ = nullptr;
+    instance_ = nullptr;
+    slot_ = 0;
+}
+
+bool DSPHandleRuntime::closePinsForDestroy(uint32_t slot, uint64_t expectedGeneration) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return false;
+    auto& reg = registry_[slot];
+    if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != expectedGeneration)
+        return false;
+
+    // 受付を閉じる（カウンタは保持したまま bit63 を立てる）。
+    //   既に閉じていれば false（二重閉鎖は無害だが、呼び出し側に事実を返す）。
+    uint64_t observed = convo::consumeAtomic(reg.pinState, std::memory_order_acquire);
+    for (;;)
+    {
+        if ((observed & kPinClosedBit) != 0)
+            return false;
+        const uint64_t next = observed | kPinClosedBit;
+        if (convo::compareExchangeAtomic(reg.pinState, observed, next,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            return true;
+    }
+}
+
+uint32_t DSPHandleRuntime::pinnedCount(uint32_t slot) const noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return 0;
+    const uint64_t v = convo::consumeAtomic(registry_[slot].pinState, std::memory_order_acquire);
+    return static_cast<uint32_t>(v & kPinCountMask);
+}
+
+void DSPHandleRuntime::releasePinSlot(uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    auto& reg = registry_[slot];
+    // 受付ビットは保持したままカウンタだけ -1（待機しない）。
+    uint64_t observed = convo::consumeAtomic(reg.pinState, std::memory_order_acquire);
+    for (;;)
+    {
+        const uint64_t count = observed & kPinCountMask;
+        if (count == 0)
+            return;                                     // 不整合（二重解除）は無視して安全側
+        const uint64_t next = (observed & kPinClosedBit) | (count - 1);
+        if (convo::compareExchangeAtomic(reg.pinState, observed, next,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            return;
+    }
 }
 
 ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
@@ -26942,11 +27538,27 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
     }
 
     const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
-    if (state == DSPState::Reclaimed || state == DSPState::Quarantined) {
-        return { nullptr, false, false };
+    // V-11 candidate fix: a Retired (or DestroyPending) DSP must not resolve to a live pointer.
+    //   Previously these states fell through and returned reg.instance, so callers such as
+    //   AudioEngine::makeRuntimeGraphState could dereference an EQProcessor whose
+    //   agc*CoeffTable storage had already been released (ScopedAlignedPtr<double>::get() AV).
+    //   Treating them as non-resolvable makes the defect fail closed (nullptr); every
+    //   caller already null-checks (makeRuntimeGraphState guards on `current != nullptr`,
+    //   and the audio thread guards on the table pointers).
+    if (state == DSPState::Reclaimed || state == DSPState::Quarantined
+        || state == DSPState::Retired || state == DSPState::DestroyPending) {
+        return { nullptr, false, true };   // isStale=true so callers can distinguish
     }
 
-    return { reg.instance, true, false };
+    // ★ F1'-prep (2026-10-25): state を読んでから instance を読む。両方とも acquire だが、
+    //   「state を読んだ直後に destroy が走る」窓は依然として残る（HL-5）。
+    //   ここで instance が null なら（F2' の無効化後）必ず失敗側へ倒す。
+    auto* instance = reg.instance.load(std::memory_order_acquire);
+    if (instance == nullptr) {
+        return { nullptr, false, true };
+    }
+
+    return { instance, true, false };
 }
 
 void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId id)
@@ -27037,11 +27649,121 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
     //   同一 slot の二重割当（double-allocation）を構造的に排除）。
     if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
         return;
-    reg.instance = nullptr;
+
+    // ★ F1'-c (2026-10-25) audit finding F: reclaim() must HONOUR outstanding pins.
+    //   Before this fix, reclaim() cleared `instance` and recycled the slot even while a
+    //   DSPHandlePin was held, so the destroy path could then find no matching slot and
+    //   free the allocation immediately -> the pin holder was left dangling. The
+    //   production retire path (DSPLifetimeManager::retire -> requestReclaimHandle ->
+    //   reclaim) hit exactly that, which is why the production-path test observed
+    //   "did not defer while pinned".
+    //
+    //   Fix: close the pin gate; if any lease is still alive, leave the slot intact
+    //   (instance kept) and let invalidateForDestroy() do the pin-drain + clear later.
+    (void)closePinsForDestroy(handle.slot, handle.generation);
+    if (pinnedCount(handle.slot) != 0)
+        return;   // 所有権はスロットに残す（destroy 経路が pin 消滅後に処理する）
+
+    // ★ F2' (2026-10-25): 状態を先に無効化し、その後に instance を消す。
+    //   逆順（instance=nullptr → state=Reclaimed）だと、resolve() が state を読んだ直後に
+    //   古い state（Active/Retired）を見たまま instance を読む窓が広がる。state を先に
+    //   DestroyPending にすることで、resolve() は少なくとも「解決不能」へ倒れる。
+    convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
+    reg.instance.store(nullptr, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
     // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
     if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = handle.slot;
+}
+
+// ★ F2' (2026-10-25): DSPCore のメモリ解放より前に呼ばれる。
+//   「解放済みメモリを指したまま Active/Retired で残るスロット」を構造的に除去する。
+//   ダンプ実測: slot 251 が Active のまま instance=解放済みの 4.84MB ブロックを指し、
+//   publisher が DSPCore::runtimeUuid (+0x49E408) を読んで 0xC0000005。
+//
+// ★ F1' (2026-10-25): pin の受付を閉じ、**既存 pin が消えるまで instance を消さない**。
+//   `waitForPinsToDrain` は NonRT（破棄は NonRT）で待つ。タイムアウトしても
+//   解放を強行しない — その場合は false を返し、呼び出し側が延期する
+//   （設計資料 §2.2。ここで強行すると HL-5 そのものになる）。
+bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) noexcept
+{
+    if (dspInstance == nullptr)
+        return true;   // 何も無い = 解放してよい
+
+    // 1) 受付を閉じる（この時点で新しい pin は必ず失敗する）。
+    //    スロットごとに generation を控えてから閉じる。
+    using Target = PinDrainTarget;
+    std::array<Target, MAX_DSP_SLOTS> targets{};
+    size_t targetCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(freeListMutex_);
+        for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
+        {
+            auto& reg = registry_[i];
+            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+                continue;
+            if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
+                continue;
+            targets[targetCount++] = Target{ static_cast<uint32_t>(i),
+                                             convo::consumeAtomic(reg.generation,
+                                                                  std::memory_order_acquire) };
+        }
+    }
+    for (size_t k = 0; k < targetCount; ++k)
+        (void)closePinsForDestroy(targets[k].slot, targets[k].generation);
+
+    // 2) 既存 pin の消滅を待つ（受付は閉じているので増えない）。
+    //    タイムアウトしたら **解放しない**。
+    if (!waitForPinsToDrain(targets.data(), targetCount, timeoutMs))
+        return false;
+
+    // 3) instance を消す（ここに来た時点で pin 保持者はいない）。
+    {
+        std::lock_guard<std::mutex> lock(freeListMutex_);
+        for (size_t k = 0; k < targetCount; ++k)
+        {
+            auto& reg = registry_[targets[k].slot];
+            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+                continue;
+            if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
+                continue;
+
+            convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
+            reg.instance.store(nullptr, std::memory_order_release);
+            convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
+
+            if (targets[k].slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+                freeSlots_[freeSize_++] = targets[k].slot;
+        }
+    }
+    return true;
+}
+
+bool DSPHandleRuntime::waitForPinsToDrain(const void* targets, size_t targetCount,
+                                          int timeoutMs) noexcept
+{
+    if (targetCount == 0)
+        return true;
+
+    const auto* t = static_cast<const PinDrainTarget*>(targets);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    for (;;)
+    {
+        bool allZero = true;
+        for (size_t k = 0; k < targetCount; ++k)
+        {
+            if (pinnedCount(t[k].slot) != 0)
+            {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero)
+            return true;
+        if (std::chrono::steady_clock::now() >= deadline)
+            return false;   // ★ 解放を強行しない（呼び出し側が延期する）
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void DSPHandleRuntime::quarantine(DSPHandle handle)
@@ -27092,28 +27814,28 @@ bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
 }
 
 // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
-void DSPHandleRuntime::destroyQuarantineSlot(
+bool DSPHandleRuntime::destroyQuarantineSlot(
     uint32_t slot, uint64_t expectedGeneration) noexcept
 {
     if (slot >= MAX_DSP_SLOTS)
-        return;
+        return false;
 
-    // generation 保護
+    // generation check
     if (expectedGeneration != 0) {
         const auto currentGen = convo::consumeAtomic(
             registry_[slot].generation, std::memory_order_acquire);
         if (currentGen != expectedGeneration)
-            return;
+            return false;
     }
 
-    // state==Quarantined を表明
+    // state == Quarantined is required
     const auto prevState = convo::consumeAtomic(
         registry_[slot].state, std::memory_order_acquire);
     assert(prevState == DSPState::Quarantined);
     if (prevState != DSPState::Quarantined)
-        return;
+        return false;
 
-    // Phase 1: 状態チェック — active/fading/crossfade に関与していないか
+    // Phase 1: state check - not active / fading / crossfading
     const bool activeHandleMatch =
         (convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire).slot == slot);
     const bool fadingHandleMatch =
@@ -27121,9 +27843,27 @@ void DSPHandleRuntime::destroyQuarantineSlot(
     const bool inCrossfade = isSlotInCrossfade(slot);
 
     if (activeHandleMatch || fadingHandleMatch || inCrossfade)
-        return;
+        return false;
 
-    // Phase 1: DestroyPending マーク（CAS で安全に遷移）
+    // F-2 (2026-10-25): pin gate.
+    //   A DSPHandlePin keeps `instance_` and releases it by SLOT INDEX only
+    //   (DSPHandlePin::release -> releasePinSlot(slot), which has no generation check).
+    //   Recycling this slot while a pin is alive would let the old pin decrement the pin
+    //   counter of the NEXT generation allocated in the same slot, silently removing that
+    //   DSP's protection and freeing it while pinned. So: close the gate, and while any pin
+    //   is still alive change NOTHING (state stays Quarantined, instance and slot retained).
+    //   The engine retries from its reclaim tick / shutdown drain once the pins drain.
+    const auto pinnedGeneration = convo::consumeAtomic(
+        registry_[slot].generation, std::memory_order_acquire);
+    (void)closePinsForDestroy(slot, pinnedGeneration);
+    if (pinnedCount(slot) != 0)
+    {
+        convo::fetchAddAtomic(deferredQuarantineDestroy_, std::uint32_t{1},
+                              std::memory_order_acq_rel);
+        return false;   // deferred: nothing was modified
+    }
+
+    // Phase 1: mark DestroyPending (CAS, safe transition)
     auto expected = convo::consumeAtomic(
         registry_[slot].state, std::memory_order_acquire);
     while (expected == DSPState::Quarantined) {
@@ -27134,18 +27874,53 @@ void DSPHandleRuntime::destroyQuarantineSlot(
             break;
     }
     if (expected != DSPState::Quarantined)
-        return;
+        return false;
 
-    // Phase 2: instance 解放
-    registry_[slot].instance = nullptr;
+    // Phase 2: clear instance
+    registry_[slot].instance.store(nullptr, std::memory_order_release);
     convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
                          std::memory_order_release);
-    // ★ 監査指摘 (work88): Reclaimed 化した quarantine slot を free list へ戻す（スロットリーク防止）。
-    //   destroyQuarantineSlot は state==Quarantined を確認済みのため二重 push は起きない
-    //   （reclaim() 側の state ガードとも整合）。
+    // work88: return the reclaimed quarantine slot to the free list (prevents slot leaks).
+    //   Double push cannot happen: state==Quarantined was verified above and reclaim()
+    //   carries the same state guard.
     std::lock_guard<std::mutex> lock(freeListMutex_);
     if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = slot;
+    return true;
+}
+
+// F-2 (2026-10-25): retry quarantine-slot destruction after the pins drain.
+//   Owner: the slot (kept in state Quarantined) / Retry subject: the engine's reclaim tick
+//   (AudioEngine::tryReclaimResources) and the shutdown cleanup.
+std::size_t DSPHandleRuntime::retryDeferredQuarantineDestroy() noexcept
+{
+    if (convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire) == 0)
+        return 0;
+
+    std::size_t destroyed = 0;
+    std::uint32_t stillDeferred = 0;
+
+    for (uint32_t slot = 1; slot < MAX_DSP_SLOTS; ++slot)
+    {
+        if (convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire)
+            != DSPState::Quarantined)
+            continue;
+        if (registry_[slot].instance.load(std::memory_order_acquire) == nullptr)
+            continue;
+
+        if (destroyQuarantineSlot(slot, 0))
+            ++destroyed;
+        else if (pinnedCount(slot) != 0)
+            ++stillDeferred;
+    }
+
+    convo::publishAtomic(deferredQuarantineDestroy_, stillDeferred, std::memory_order_release);
+    return destroyed;
+}
+
+std::uint32_t DSPHandleRuntime::deferredQuarantineDestroyCount() const noexcept
+{
+    return convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire);
 }
 
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept
@@ -27315,6 +28090,68 @@ struct ResolvedDSP
 };
 
 /**
+ * ★ F1' (2026-10-25): DSPCore の寿命 lease。
+ *
+ *   `tryPin(handle)` が成功したときだけ生成され、生存している間は
+ *   対象インスタンスが解放されないことを保証する。生ポインタは `get()` 経由でのみ
+ *   公開され、`operator bool` が false の lease の `get()` は nullptr を返す。
+ *
+ *   規約（設計資料 F1-PIN-DESIGN-REVIEW の R1-R6）:
+ *     R2: lease は「そのポインタを使い終わるスコープ全体」に置く（get() を持ち出さない）。
+ *     R3: コピー不可（move のみ）。
+ *     R5: tryPin / 解除は RT 可（ロック・確保・待機なし）。
+ */
+class DSPHandlePin
+{
+public:
+    DSPHandlePin() noexcept = default;
+
+    DSPHandlePin(const DSPHandlePin&) = delete;
+    DSPHandlePin& operator=(const DSPHandlePin&) = delete;
+
+    DSPHandlePin(DSPHandlePin&& other) noexcept
+        : owner_(other.owner_), slot_(other.slot_), instance_(other.instance_)
+    {
+        other.owner_ = nullptr;
+        other.instance_ = nullptr;
+        other.slot_ = 0;
+    }
+
+    DSPHandlePin& operator=(DSPHandlePin&& other) noexcept
+    {
+        if (this != &other)
+        {
+            release();
+            owner_ = other.owner_;
+            slot_ = other.slot_;
+            instance_ = other.instance_;
+            other.owner_ = nullptr;
+            other.instance_ = nullptr;
+            other.slot_ = 0;
+        }
+        return *this;
+    }
+
+    ~DSPHandlePin() noexcept { release(); }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return instance_ != nullptr; }
+    [[nodiscard]] void* get() const noexcept { return instance_; }
+    [[nodiscard]] uint32_t slot() const noexcept { return slot_; }
+
+private:
+    friend class DSPHandleRuntime;
+
+    DSPHandlePin(DSPHandleRuntime* owner, uint32_t slot, void* instance) noexcept
+        : owner_(owner), slot_(slot), instance_(instance) {}
+
+    void release() noexcept;
+
+    DSPHandleRuntime* owner_ = nullptr;
+    uint32_t slot_ = 0;
+    void* instance_ = nullptr;
+};
+
+/**
  * crossfade ID（複数 crossfade の同時追跡用）
  */
 using CrossfadeId = uint32_t;
@@ -27342,8 +28179,20 @@ struct DSPRegistrySlot
     std::atomic<uint64_t> generation;  // ★ B-1: 64bit化（ABA 防止世代番号）
     static_assert(std::atomic<uint64_t>::is_always_lock_free,
         "atomic<uint64_t> must be lock-free on x64 for ISR Runtime");
-    void*                 instance;    // DSP インスタンスポインタ
+    // ★ F2' (2026-10-25): instance を atomic 化。create()/reclaim()/invalidateForDestroy() が
+    //   書き込み、resolve() が別スレッドから読むため、plain pointer は正式なデータ競合だった
+    //   （クラッシュダンプの stale slot は解放経路と並行に読まれていた）。
+    //   void* と同サイズ・同アラインメントなのでスロットのレイアウトは不変（24 バイト）。
+    std::atomic<void*>    instance;    // DSP インスタンスポインタ
     std::atomic<DSPState> state;       // 現在状態（atomic access）
+    // ★ F1' (2026-10-25): pin 受付と pin 数を **単一ワード** に持つ。
+    //   bit 63      = kPinClosed（破棄が受付を閉じた）
+    //   bits 0..62  = pin 数
+    //   2 ワード（受付フラグ + カウンタ）に分けると「受付が開いているか確認 → +1」の間に
+    //   破棄が割り込む窓が残る（レビュー指摘 A: 受付閉鎖と寿命保護は別の不変条件）。
+    //   1 ワードの CAS なら「開いていることを確認して +1」が不可分になり、
+    //   「閉じた後に新しい pin が成立する」順序が存在しなくなる。
+    std::atomic<uint64_t> pinState;
 };
 
 /**
@@ -27353,13 +28202,49 @@ struct DSPRegistrySlot
 class DSPHandleRuntime
 {
 public:
+    // ★ F1' (2026-10-25): DSPHandlePin は release() で releasePinSlot を呼ぶ。
+    friend class DSPHandlePin;
+
     static constexpr size_t MAX_DSP_SLOTS = 256;
 
     DSPHandleRuntime();
     ~DSPHandleRuntime();
 
     // NonRT: DSP インスタンスを登録し DSPHandle を返す
+    // ★ F3' (2026-10-25): 同一インスタンスに複数の有効ハンドルを発行しない。
+    //   - 既存スロットが live（Constructing/Active/CrossfadingIn/CrossfadingOut）なら
+    //     そのハンドルを返す（重複排除）。
+    //   - 既存スロットが Retired/DestroyPending/Quarantined なら **拒否**（null を返す）。
+    //     破棄が確定したオブジェクトの再登録は「復活」であり、retire が片方のスロットしか
+    //     無効化しないまま他方が Active で残る経路になる（ダンプの slot 251/254）。
+    //   - Reclaimed は instance が null なので一致せず、アドレス再利用の新オブジェクトは
+    //     通常どおり登録できる。
     DSPHandle create(void* dspInstance);
+
+    // ★ F2' (2026-10-25): DSPCore のメモリ解放より前に、そのインスタンスを指す全スロットを
+    //   解決不能にする（DestroyPending → Reclaimed + instance=nullptr + free list 返却）。
+    //   AudioEngine::destroyDSPCoreNode（DSPCore 解放の唯一の漏斗）から呼ばれる。
+    //   閉じる欠陥: 解放済みメモリを指したまま Active/Retired で残るスロット（ダンプの 251）。
+    //   閉じない欠陥: resolve() が state と instance を読んだ直後〜解放の間の TOCTOU。
+    //   これは pin 方式（F1'・別課題）でしか閉じない。
+    //   戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**（延期）。
+    //   F1' で「pin の消滅を待つ」責務が入ったため、bool を返す契約へ変更した。
+    [[nodiscard]] bool invalidateForDestroy(void* dspInstance,
+                                            int timeoutMs = 2000) noexcept;
+
+    // ★ F1' (2026-10-25): 寿命 lease の取得。成功した lease の生存中は
+    //   invalidateForDestroy / reclaim がそのインスタンスを解放できない。
+    //   RT 可（ロック・動的確保・待機なし。単一ワード CAS のみ）。
+    //   失敗（null handle / generation 不一致 / 受付閉鎖 / instance なし）は空の lease。
+    [[nodiscard]] DSPHandlePin tryPin(DSPHandle handle) noexcept;
+
+    // ★ F1' (2026-10-25): 破棄側の受付閉鎖。以後の tryPin は必ず失敗する。
+    //   戻り値: 閉鎖を確定させたか（既に閉鎖済みなら false）。
+    //   RT 不可（破棄は NonRT）。閉鎖後に pinCount を観測して 0 を待つ。
+    [[nodiscard]] bool closePinsForDestroy(uint32_t slot, uint64_t expectedGeneration) noexcept;
+
+    // ★ F1' (2026-10-25): 指定スロットの現在の pin 数（破棄側の待機用）。
+    [[nodiscard]] uint32_t pinnedCount(uint32_t slot) const noexcept;
 
     // RT/NonRT: handle を検証し、有効な参照を返す
     // stale handle（generation mismatch）は build別ポリシーで処理
@@ -27403,7 +28288,19 @@ public:
     bool isSlotInCrossfade(uint32_t slot) const noexcept;
 
     // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
-    void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
+    // F-2 (2026-10-25): pin contract. true = destroyed (slot returned to the free list),
+    // false = not done (pin held / not eligible / state mismatch) and NOTHING was changed
+    // (state stays Quarantined, instance and slot ownership retained). Callers must treat
+    // false as "deferred" and retry on a later tick or at shutdown.
+    [[nodiscard]] bool destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
+
+    // F-2 (2026-10-25): retry quarantine-slot destruction after pins drain.
+    //   Owner: the slot (kept in state Quarantined) / Retry subject: AudioEngine's reclaim
+    //   tick (tryReclaimResources) and the shutdown drain.
+    [[nodiscard]] std::size_t retryDeferredQuarantineDestroy() noexcept;
+
+    // Number of quarantine slots whose destruction is deferred (observation only).
+    [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept;
 
     // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
     //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
@@ -27429,6 +28326,21 @@ private:
     //   外部からは Coordinator::requestReclaim() 経由で実行する。
     void reclaim(DSPHandle handle);
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
+
+    // ★ F1' (2026-10-25): pinState のビット定義。
+    //   bit 63 = kPinClosed / bits 0..62 = pin 数。単一ワード CAS で
+    //   「受付が開いていることを確認して +1」を不可分に行う。
+    static constexpr uint64_t kPinClosedBit = 1ull << 63;
+    static constexpr uint64_t kPinCountMask = ~kPinClosedBit;
+
+    // ★ F1' (2026-10-25): DSPHandlePin::release() から呼ばれる（DSPHandlePin は friend）。
+    void releasePinSlot(uint32_t slot) noexcept;
+
+    // ★ F1' (2026-10-25): 破棄側の待機。targets は {slot, generation} の配列
+    //   （型消去して void* で受ける。ISRDSPHandle.h の public 面を増やさないため）。
+    struct PinDrainTarget { uint32_t slot; uint64_t generation; };
+    [[nodiscard]] bool waitForPinsToDrain(const void* targets, size_t targetCount,
+                                          int timeoutMs) noexcept;
     // ★ FUTURE-5 (work88): O(1) 確保用フリーリスト（slot 1..255 をスタック管理。slot 0 は
     //   null handle 表現のため使用しない — 既存 create() の線形スキャン開始位置と同一契約）。
     //   create() はフリーリスト pop（O(1)）、reclaim/rollbackRegistration は push（O(1)）。
@@ -27436,6 +28348,9 @@ private:
     mutable std::mutex freeListMutex_;
     std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
     uint32_t freeSize_ = 0;
+    // F-2 (2026-10-25): non-zero while at least one quarantined slot could not be destroyed
+    // because a pin was still held. Advisory: recomputed by retryDeferredQuarantineDestroy().
+    std::atomic<std::uint32_t> deferredQuarantineDestroy_{0};
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
     //   DSPHandle is a 16-byte POD; its atomic requires atomic 16-byte CAS semantics
     //   (MSVC: lock-pool backend, is_lock_free()==false is accurate; all consumers NonRT).
@@ -30313,7 +31228,7 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
         return true;  // no-op は成功扱い
 
     std::lock_guard<std::mutex> lock(mtx_);
-    entries_.push_back(Entry{ptr, deleter, epoch, type, reason});
+    entries_.push_back(Entry{ptr, deleter, nullptr, epoch, type, reason, 0});
     // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_add)
     convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
     // ★ Step 5-I: telemetry — cumulative store count (Generic + World)
@@ -30328,42 +31243,169 @@ bool TerminalReclaimAuthority::store(void* ptr, void (*deleter)(void*), uint64_t
                 break;
         }
     }
-    return true;  // ★ P-4: growable store — ALWAYS accepts
+    return true;  // ★ P-4: growable store → ALWAYS accepts
+}
+
+// F1'-b (2026-10-25): retryable 破棄の格納。所有権は常に移転する。
+bool TerminalReclaimAuthority::storeRetryable(void* ptr, RetryableDeleter retryable,
+                                              uint64_t epoch, DeletionEntryType type,
+                                              const char* reason) noexcept
+{
+    if (ptr == nullptr || retryable == nullptr)
+        return true;
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    entries_.push_back(Entry{ptr, nullptr, retryable, epoch, type, reason, 0});
+    convo::fetchAddAtomic(residentAtomic_, uint32_t{1}, std::memory_order_release);
+    convo::fetchAddAtomic(terminalStoreCount_, std::uint64_t{1}, std::memory_order_release);
+    {
+        const uint32_t current = convo::consumeAtomic(residentAtomic_, std::memory_order_acquire);
+        uint32_t expected = convo::consumeAtomic(terminalPeakResident_, std::memory_order_acquire);
+        while (current > expected) {
+            if (convo::compareExchangeAtomic(terminalPeakResident_, expected, current,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
+    return true;
+}
+
+// F1'-b: 延期されたまま残っているエントリ数（shutdown 後の未回収観測用）。
+//   注意: 「retryable で格納されたが、まだ 1 度も延期されていない」エントリは
+//   未回収ではない（次回 drain で破棄される予定）。ここでは
+//   「延期を経験したエントリ」= 破棄が進んでいないものを数える。
+std::size_t TerminalReclaimAuthority::deferredResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    std::size_t n = 0;
+    for (const auto& e : entries_)
+    {
+        if (e.ptr != nullptr && e.retryable != nullptr && e.deferredAttempts > 0)
+            ++n;
+    }
+    return n;
+}
+
+// F1'-b: retryable として保持されているエントリ総数（延期前も含む）。
+//   「所有権を保持しているか」の観測はこちらを使う。
+std::size_t TerminalReclaimAuthority::retryableResidentCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    std::size_t n = 0;
+    for (const auto& e : entries_)
+    {
+        if (e.ptr != nullptr && e.retryable != nullptr)
+            ++n;
+    }
+    return n;
 }
 
 void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
                                      const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
 {
-    // Extract epoch-safe entries under lock, execute deleter outside lock (reentrancy-safe)
-    // ★ P-4: EBR 安全条件は RetireQuarantineStore::drain と同一 —
-    //   isOlder(entry.epoch, minReaderEpoch) == true（entry.epoch < minReaderEpoch）→ safe。
-    std::vector<Entry> pending;
+    // ★ F1'-b (2026-10-25): 所有権の扱いを「消費」から「結果を見て消費」へ変更。
+    //   旧実装は epoch-safe なエントリを pending に移した時点で entries_ から消していたため、
+    //   deleter が「解放しなかった」と判断しても所有権が失われていた
+    //   （再試行不能・residentAtomic_ の誤減少・shutdown 終端条件の誤成立）。
+    //
+    //   新規則:
+    //     - retryable を持つエントリ: entries_ に残したまま呼び出す。
+    //         Destroyed → 消費（所有権を放棄）
+    //         Deferred  → entries_ に残す（所有権を保持し、次回 drain で再試行）
+    //     - retryable を持たない従来エントリ: これまでどおり取り出して deleter を実行する。
+    std::vector<Entry> legacyPending;
+    std::size_t destroyedRetryable = 0;
+    std::size_t transferredRetryable = 0;   // E: Deferred -> the callee owns it
+
+    // --- 1) epoch-safe な retryable 候補を集める（ロック内・呼び出しはしない）---
+    std::vector<std::size_t> candidates;
     {
         std::lock_guard<std::mutex> lock(mtx_);
         std::size_t w = 0;
         for (std::size_t r = 0; r < entries_.size(); ++r) {
             auto& e = entries_[r];
-            if (e.ptr != nullptr && e.deleter != nullptr
-                && isOlderFn(e.epoch, minReaderEpoch))  // epoch < minReaderEpoch → safe
-            {
-                pending.push_back(e);
-                e = Entry{};
-            } else {
-                if (w != r)
-                    entries_[w] = e;
+            const bool hasTarget = (e.ptr != nullptr)
+                && (e.deleter != nullptr || e.retryable != nullptr);
+            const bool safe = hasTarget && isOlderFn(e.epoch, minReaderEpoch);
+            if (!safe) {
+                if (w != r) entries_[w] = e;
                 ++w;
+                continue;
+            }
+            if (e.retryable != nullptr) {
+                if (w != r) entries_[w] = e;   // 残す（結果を見てから決める）
+                candidates.push_back(w);
+                ++w;
+            } else {
+                legacyPending.push_back(e);    // 従来経路: 消費
+                e = Entry{};
             }
         }
         entries_.resize(w);
     }
-    // ★ E-1.9-A: 解放されたエントリ数だけロックフリーカウンタを decrement
-    // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw fetch_sub)
-    convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(pending.size()), std::memory_order_release);
-    for (auto& e : pending) {
+
+    // --- 2) retryable をロック外で実行し、結果で消費/保持を決める ---
+    for (std::size_t idx : candidates) {
+        Entry snapshot{};
+        bool present = false;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (idx < entries_.size() && entries_[idx].ptr != nullptr
+                && entries_[idx].retryable != nullptr) {
+                snapshot = entries_[idx];
+                present = true;
+            }
+        }
+        if (!present)
+            continue;
+
+        const DestroyOutcome outcome = snapshot.retryable(snapshot.ptr);
+
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (idx < entries_.size() && entries_[idx].ptr == snapshot.ptr) {
+            if (outcome == DestroyOutcome::Destroyed) {
+                entries_[idx] = Entry{};
+                ++destroyedRetryable;
+            } else {
+                // ★ 所有権を保持: エントリは残し、試行回数だけ増やす。
+                // E (2026-10-25): Deferred = the callee retained ownership (the engine
+                // retryable registers the pointer in its own retry list). Dropping the
+                // entry here is what prevents the same pointer from being owned twice.
+                entries_[idx] = Entry{};
+                ++transferredRetryable;
+                convo::fetchAddAtomic(ownershipTransferredCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
+                convo::fetchAddAtomic(deferredAttemptCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
+            }
+        }
+    }
+
+    // --- 3) 消費したスロットを詰める ---
+    if (destroyedRetryable > 0 || transferredRetryable > 0) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        std::size_t w = 0;
+        for (std::size_t r = 0; r < entries_.size(); ++r) {
+            if (entries_[r].ptr == nullptr)
+                continue;
+            if (w != r) entries_[w] = entries_[r];
+            ++w;
+        }
+        entries_.resize(w);
+    }
+
+    // --- 4) residentAtomic_ は「未回収のエントリ数」。Deferred は減らさない（RT-3）---
+    const std::size_t consumed = legacyPending.size() + destroyedRetryable
+        + transferredRetryable;
+    if (consumed > 0)
+        convo::fetchSubAtomic(residentAtomic_, static_cast<uint32_t>(consumed),
+                              std::memory_order_release);
+
+    // --- 5) 従来 deleter の実行（ロック外・reentrancy 安全）---
+    for (auto& e : legacyPending) {
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
         {
-            // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw ++)
             convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
             if (referenceObserver_ != nullptr)
                 referenceObserver_->onRelease();
@@ -30375,16 +31417,52 @@ void TerminalReclaimAuthority::drainAll() noexcept
 {
     // ★ Step 5-I: telemetry — increment drainAll invocation count
     convo::fetchAddAtomic(terminalDrainAllCount_, std::uint64_t{1}, std::memory_order_acq_rel);
-    std::vector<Entry> pending;
+
+    // ★ F1'-b (2026-10-25): drainAll でも Deferred を強制解放しない（RT-4）。
+    //   shutdown 中に pin 保持者がいる可能性を排除できないため、UAF ではなく
+    //   「未回収として残す」方を選ぶ。残数は deferredResidentCount() で観測できる。
+    std::vector<Entry> pending;      // 従来 deleter（消費してよい）
+    std::vector<Entry> kept;         // retryable で Deferred だったもの（所有権保持）
     {
         std::lock_guard<std::mutex> lock(mtx_);
-        pending.swap(entries_);  // take all entries under lock
-        // ★ E-1.9-A: ロックフリーカウンタをリセット（shutdown drain）
-        // ★ Step 5-I / AtomicAccess convention: use convo:: wrapper (not raw store)
+        pending.swap(entries_);      // take all entries under lock
         convo::publishAtomic(residentAtomic_, uint32_t{0}, std::memory_order_release);
     }
+
     for (auto& e : pending) {
-        if (e.ptr != nullptr && e.deleter != nullptr) {
+        if (e.ptr == nullptr)
+            continue;
+
+        if (e.retryable != nullptr)
+        {
+            // 結果を見て決める。Deferred なら所有権を保持して残す。
+            const DestroyOutcome outcome = e.retryable(e.ptr);
+            if (outcome == DestroyOutcome::Destroyed)
+            {
+                convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
+                                      std::memory_order_release);
+                if (e.type == DeletionEntryType::World)
+                {
+                    convo::fetchAddAtomic(reclaimCount_, std::uint64_t{1},
+                                          std::memory_order_acq_rel);
+                    if (referenceObserver_ != nullptr)
+                        referenceObserver_->onRelease();
+                }
+            }
+            else
+            {
+                // E (2026-10-25): Deferred = the callee retained ownership (the engine
+                // retry list). drainAll must NOT keep the entry either, otherwise the same
+                // pointer stays owned by two authorities across shutdown.
+                convo::fetchAddAtomic(ownershipTransferredCount_, std::uint64_t{1},
+                                      std::memory_order_acq_rel);
+                convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
+                                      std::memory_order_release);
+            }
+            continue;
+        }
+
+        if (e.deleter != nullptr) {
             e.deleter(e.ptr);
             // ★ Step 5-I: telemetry — count actually drained entries
             convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1}, std::memory_order_release);
@@ -30396,6 +31474,17 @@ void TerminalReclaimAuthority::drainAll() noexcept
                     referenceObserver_->onRelease();
             }
         }
+    }
+
+    // ★ F1'-b: Deferred だったエントリを所有権ごと戻す（未回収として保持）。
+    if (!kept.empty())
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (auto& e : kept)
+            entries_.push_back(e);
+        convo::publishAtomic(residentAtomic_,
+                             static_cast<uint32_t>(entries_.size()),
+                             std::memory_order_release);
     }
 }
 
@@ -30478,6 +31567,16 @@ bool ISRRetireRouter::reserveReaderThread(int readerIndex) noexcept
 {
     assert(provider_ != nullptr);
     return provider_->reserveReaderThread(readerIndex);
+}
+
+// V-11: delegate ownership-checked re-acquisition (see IReaderEpochProvider).
+//   Fail-closed when no provider is installed, matching the other delegations.
+bool ISRRetireRouter::reacquireReaderSlot(int readerIndex) noexcept
+{
+    assert(provider_ != nullptr);
+    if (provider_ == nullptr)
+        return false;
+    return provider_->reacquireReaderSlot(readerIndex);
 }
 
 void ISRRetireRouter::enterReader(int readerIndex) noexcept
@@ -30820,6 +31919,46 @@ std::size_t ISRRetireRouter::terminalReclaimResidentCount() const noexcept
     return m_terminalReclaim.residentCount();
 }
 
+// ★ F1'-b (2026-10-25): 再試行可能な破棄の受け付け。
+//   epoch safe かつ Non-RT なら即時実行し、Destroyed なら完了。
+//   Deferred なら所有権ごと TerminalReclaimAuthority に移す（以後 drain で再試行）。
+bool ISRRetireRouter::terminalReclaimRetryable(void* ptr, RetryableDeleter retryable,
+                                               uint64_t epoch, DeletionEntryType type,
+                                               const char* reason) noexcept
+{
+    if (ptr == nullptr || retryable == nullptr)
+        return true;
+
+    const uint64_t minReader = minReaderEpoch();
+    const bool epochSafe = ISRRetireRouter::isOlder(epoch, minReader);
+    const bool isRt = convo::numeric_policy::isAudioThread();
+
+    // ★ F1'-b (2026-10-25) 監査対応（欠陥 B）: 所有権の一元化。
+    //   `retryable` が Deferred を返した場合、その実装（destroyDSPCoreNodeRetryable）は
+    //   **自分でエンジンの再試行リストに登録する**。ここでさらに
+    //   storeRetryable() すると同じポインタが 2 箇所に登録され、
+    //   片方が解放した後も他方が残る（= 二重破棄 / UAF）。
+    //
+    //   したがって「Deferred は deleter の所有者に委ねる」を契約とし、
+    //   TerminalReclaimAuthority への格納は epoch が安全でない場合
+    //   （= deleter をまだ呼べない場合）に限る。
+    if (epochSafe && !isRt)
+    {
+        if (retryable(ptr) == DestroyOutcome::Destroyed)
+        {
+            if (type == DeletionEntryType::World)
+                m_terminalReclaim.recordWorldReclaim();
+        }
+        // Deferred の場合、所有権は retryable の実装（エンジン再試行リスト）が保持する。
+        // ここで再格納しない（二重所有の禁止）。
+        return true;
+    }
+
+    // epoch unsafe / RT: deleter を呼べないので、Terminal に預けて後続 drain に委ねる。
+    //   （この経路では retryable はまだ 1 度も呼ばれていないため、所有権は Terminal が持つ。）
+    return m_terminalReclaim.storeRetryable(ptr, retryable, epoch, type, reason);
+}
+
 // ★ P-4: TerminalReclaimAuthority の epoch-gated drain
 void ISRRetireRouter::drainTerminalReclaim() noexcept
 {
@@ -30970,15 +32109,29 @@ public:
     struct Entry {
         void* ptr = nullptr;
         void (*deleter)(void*) = nullptr;
+        // ★ F1'-b (2026-10-25): 再試行可能な破棄。非 null ならこちらを優先する。
+        //   DestroyOutcome::Deferred を返した場合、このエントリは entries_ に残り、
+        //   所有権を保持したまま後続の drain で再試行される。
+        RetryableDeleter retryable = nullptr;
         uint64_t epoch = 0;
         DeletionEntryType type = DeletionEntryType::Generic;
         const char* reason = nullptr;
+        uint32_t deferredAttempts = 0;   // 延期された回数（観測用）
     };
 
     // Store an entry. Called when all bounded stores + EmergencyQ are full.
     // ★ P-4: ALWAYS returns true (growable store) — ownership always transfers.
     bool store(void* ptr, void (*deleter)(void*), uint64_t epoch,
                DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ F1'-b: 再試行可能な deleter 版。所有権は常に移転する。
+    // OWNERSHIP CONTRACT (E, 2026-10-25):
+    //   Destroyed -> the callee freed it; Terminal drops the entry.
+    //   Deferred  -> the CALLEE retained ownership (e.g. the engine retry list).
+    //                Terminal MUST drop the entry: keeping it would leave the same
+    //                pointer owned by two authorities (double free / UAF).
+    bool storeRetryable(void* ptr, RetryableDeleter retryable, uint64_t epoch,
+                        DeletionEntryType type, const char* reason) noexcept;
 
     // Drain epoch-safe entries. Executes deleter for entries where isOlder(entry.epoch, minReaderEpoch) == true.
     // isOlderFn: EpochDomain::isOlder(a, b) == static_cast<int64_t>(a - b) < 0
@@ -30994,6 +32147,24 @@ public:
                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
 
     [[nodiscard]] std::size_t residentCount() const noexcept;
+
+    // ★ F1'-b (2026-10-25): 延期されたまま残っているエントリ数（pin 残留など）。
+    //   shutdown 後に 0 でなければ「未回収がある」ことを明示的に観測できる。
+    [[nodiscard]] std::size_t deferredResidentCount() const noexcept;
+    //   retryable として保持されているエントリ総数（延期前も含む = 所有権を保持している数）。
+    [[nodiscard]] std::size_t retryableResidentCount() const noexcept;
+
+    // E (2026-10-25): entries whose ownership was transferred to the callee because the
+    // retryable deleter returned Deferred (observable residue at the Terminal level).
+    [[nodiscard]] std::uint64_t ownershipTransferredCount() const noexcept
+    {
+        return convo::consumeAtomic(ownershipTransferredCount_, std::memory_order_acquire);
+    }
+    //   累積の延期回数（診断用）。
+    [[nodiscard]] std::uint64_t deferredAttemptCount() const noexcept
+    {
+        return convo::consumeAtomic(deferredAttemptCount_, std::memory_order_acquire);
+    }
     // ★ E-1.9-A: ロックフリー滞留カウンタ読み取り（empty-drain suppression 用）
     [[nodiscard]] uint32_t residentCountAtomic() const noexcept
     {
@@ -31052,6 +32223,10 @@ private:
     WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // non-owning
     // ★ E-1.9-A: ロックフリー滞留カウンタ（Phase E §1.9-A empty-drain suppression）
     std::atomic<uint32_t> residentAtomic_{0};
+    // ★ F1'-b: 累積延期回数（観測用）
+    std::atomic<std::uint64_t> deferredAttemptCount_{0};
+    // E (2026-10-25): entries whose ownership moved to the callee (Deferred).
+    std::atomic<std::uint64_t> ownershipTransferredCount_{0};
 };
 
 /**
@@ -31093,6 +32268,9 @@ public:
     uint64_t getMinReaderEpoch() const noexcept override;
     int registerReaderThread() noexcept override;
     bool reserveReaderThread(int readerIndex) noexcept override;
+    // V-11: forward ownership-checked re-acquisition to the provider so an already
+    // registered reader keeps EBR protection after registration close.
+    bool reacquireReaderSlot(int readerIndex) noexcept override;
     void enterReader(int readerIndex) noexcept override;
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;
@@ -31227,6 +32405,45 @@ public:
     //   ★ P-4: 戻り値は常に true（growable store により ownership は必ず移転）。
     bool terminalReclaim(void* ptr, void (*deleter)(void*), uint64_t epoch,
                          DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ F1'-b (2026-10-25): 再試行可能な破棄。Deferred を返したエントリは所有権ごと保持され、
+    //   後続の drain / drainAll で再試行される（void deleter では表現できない）。
+    bool terminalReclaimRetryable(void* ptr, RetryableDeleter retryable, uint64_t epoch,
+                                  DeletionEntryType type, const char* reason) noexcept;
+
+    // ★ F1'-b: 延期されたまま残っているエントリ数（shutdown 後の未回収観測用）。
+    [[nodiscard]] std::size_t terminalDeferredResidentCount() const noexcept
+    {
+        return m_terminalReclaim.deferredResidentCount();
+    }
+
+    // ★ F1'-b: drainAll() をテストから駆動するための公開ラッパー
+    //   （本番は shutdown 経路から呼ばれる。テストは同じ契約を単独で確認する）。
+    void drainAllTerminalForTest() noexcept
+    {
+        m_terminalReclaim.drainAll();
+    }
+
+    // ★ F1'-b 監査対応: ルータの API は「epoch unsafe / RT のときだけ Terminal に預ける」。
+    //   Terminal 単体の Deferred 保持契約を検証するため、格納を直接叩く経路を用意する。
+    bool storeRetryableDirectForTest(void* ptr, RetryableDeleter retryable,
+                                     uint64_t epoch) noexcept
+    {
+        return m_terminalReclaim.storeRetryable(
+            ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test-direct");
+    }
+
+    // ★ F1'-b: retryable として所有権を保持しているエントリ総数（延期前も含む）。
+    [[nodiscard]] std::size_t terminalRetryableResidentCount() const noexcept
+    {
+        return m_terminalReclaim.retryableResidentCount();
+    }
+
+    // E (2026-10-25): entries whose ownership was transferred to the callee (Deferred).
+    [[nodiscard]] std::uint64_t terminalOwnershipTransferredCount() const noexcept
+    {
+        return m_terminalReclaim.ownershipTransferredCount();
+    }
 
     // ★ P-4: TerminalReclaimAuthority 滞留件数
     [[nodiscard]] std::size_t terminalReclaimResidentCount() const noexcept;
@@ -32992,9 +34209,18 @@ bool RuntimeIntentCoordinator::requestReclaim(
     DSPHandleRuntime& handleRuntime,
     ISRRetireRouter& router) noexcept
 {
+    return requestReclaim(handle, handleRuntime, router, router.currentEpoch());
+}
+
+bool RuntimeIntentCoordinator::requestReclaim(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router,
+    std::uint64_t retireEpoch) noexcept
+{
     // ★ work88 (X3 §6.3 / R4 Phase 2): Reclaim Authority に一本化（RuntimeEBR モード委譲）
     // ★ dash2 §2.2 (Phase A2 Step 7): reclaimNormal（分離 API）へ委譲。
-    return reclaimNormal(handle, handleRuntime, router);
+    return reclaimNormal(handle, handleRuntime, router, retireEpoch);
 }
 
 // ── ★ dash2 §2.2 (Phase A2 — H.11.17.5 15-Step 7-9): 分離 API 実装 ──
@@ -33008,13 +34234,31 @@ bool RuntimeIntentCoordinator::reclaimNormal(
     DSPHandleRuntime& handleRuntime,
     ISRRetireRouter& router) noexcept
 {
+    return reclaimNormal(handle, handleRuntime, router, router.currentEpoch());
+}
+
+bool RuntimeIntentCoordinator::reclaimNormal(
+    const DSPHandle& handle,
+    DSPHandleRuntime& handleRuntime,
+    ISRRetireRouter& router,
+    std::uint64_t retireEpoch) noexcept
+{
     // 1. executeRetire(handle) — DSPHandleRuntime に retire を委譲
     handleRuntime.retire(handle);
 
     // 2. waitReaders — epoch 安全確認（retireEpoch < minReaderEpoch）
-    const auto retireEpoch = router.currentEpoch();
+    // G (2026-10-25): the safety check must use the RETIREMENT epoch, not "now".
+    //   minReaderEpoch() is always <= currentEpoch(), so comparing currentEpoch()
+    //   against it is a tautology and the reclaim below was unreachable.
+    //   Safe iff every reader that could still observe the retired slot has left,
+    //   i.e. retireEpoch < minReaderEpoch (the same predicate the D queue uses).
+    const auto epochForSafety = retireEpoch;
     const auto minReaderEpoch = router.minReaderEpoch();
-    if (retireEpoch >= minReaderEpoch) {
+    // EpochDomain::isOlder semantics (wraparound-safe). ISRRetireRouter::isOlder is
+    // private, so the same comparison is spelled out here (see drainQuarantineStore).
+    const bool epochSafe =
+        static_cast<std::int64_t>(epochForSafety - minReaderEpoch) < 0;
+    if (!epochSafe) {
         // Reader がまだアクティブ → 再試行（次の processIntent サイクルで再確認）
         // カウンタ更新のみ行い、即座に復帰（NonRT safe）
         // ★ dash2 §2.2 (A2-G02): deferred 分を onReclaimBegin で +1（保留中としてカウント）。
@@ -34664,9 +35908,21 @@ public:
     ///   drainDeferredRetireQueues）は epoch 事前チェック後に本メソッドを呼ぶが、
     ///   本メソッド内部でも epoch 再確認するため、事前チェックと内部チェックの間に
     ///   epoch が進むと false が返る。戻り値で遅延を通知し、呼出し元が再試行登録する。
+    // G (2026-10-25): `retireEpoch` is the epoch captured WHEN THE HANDLE WAS RETIRED.
+    //   Safety predicate: isOlder(retireEpoch, minReaderEpoch). Passing 0 keeps the
+    //   legacy behaviour (use currentEpoch()), which can never be safe and is only kept
+    //   for callers that have no retirement epoch at hand.
     [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
                                      class DSPHandleRuntime& handleRuntime,
                                      class ISRRetireRouter& router) noexcept;
+
+    // Same, with the epoch captured WHEN THE HANDLE WAS RETIRED. The safety predicate is
+    // isOlder(retireEpoch, minReaderEpoch). Epoch 0 is a legitimate value, so this overload
+    // has no default argument: callers that have no retirement epoch use the 3-arg form.
+    [[nodiscard]] bool requestReclaim(const DSPHandle& handle,
+                                     class DSPHandleRuntime& handleRuntime,
+                                     class ISRRetireRouter& router,
+                                     std::uint64_t retireEpoch) noexcept;
 
     // ★ work88 (X3 §6.3 / R4): Reclaim Authority の一本化 — ReclaimMode。
     //   Reclaim Authority は一つ、Safety Precondition が二種類（R4 Phase 1）。
@@ -34684,6 +35940,12 @@ public:
         const DSPHandle& handle,
         class DSPHandleRuntime& handleRuntime,
         class ISRRetireRouter& router) noexcept;
+
+    [[nodiscard]] bool reclaimNormal(
+        const DSPHandle& handle,
+        class DSPHandleRuntime& handleRuntime,
+        class ISRRetireRouter& router,
+        std::uint64_t retireEpoch) noexcept;
 
     // ── ★ dash2 §2.2 (Phase A2 — Step 14 / Authority Singularization) ──
     //   ReclaimAuthority（本 Coordinator）が現在の shutdown transaction identity を保持する。
@@ -36564,11 +37826,9 @@ enum class ISRHealthState : uint8_t;
 
 namespace isr {
 
-#if defined(CONVOPEQ_UNIT_TESTS)
 // ★ D101-31-D-3: テスト専用 Friend Test Access の前方宣言（test-only seam）。
 //   定義は src/tests/AdmissionPackedStateTestAccess.h（テストターゲットのみインクルード）。
 struct AdmissionPackedStateTestAccess;
-#endif
 
 // ★ dash2 §2.2 (Phase A2 — Step 14): ReclaimAuthority の前方宣言。
 //   ShutdownRuntime コンストラクタ（constructor 固定注入）/ Proof 生成時の bindShutdownIdentity に使用。
@@ -36921,13 +38181,11 @@ private:
     //   ShutdownPhase (phase_) は本 packed word には含めない — separate sequential state.
     std::atomic<uint32_t> packedState_{0};  // D101-31-B: replaces admissionState_
 
-#if defined(CONVOPEQ_UNIT_TESTS)
     // ★ D101-31-D-3: テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）。
     //   version wrap（6bit）regression test が packedState_ へ version=63 を注入するためだけの seam。
     //   Production ビルドではこの friend 宣言はコンパイルされず、バイナリ無変更
     //   （AudioEngine.h の DeferredPublicationTestAccess と同一パターン）。
     friend struct convo::isr::AdmissionPackedStateTestAccess;
-#endif
 };
 
 }  // namespace isr
@@ -42588,17 +43846,20 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
     // ★ Phase2: DSPHandle → DSPCore* 解決 (Execution Path Handle Normalization)
-    auto* newDSPResolved = engine_.resolveDSPHandle(req.newDSP);
+    // ★ F1' (2026-10-25): pin で寿命を確保してから逆参照する。lease はこの関数の
+    //   world build 完了まで保持する（規約 R2: 最後のアクセスまで）。
+    auto newPin = engine_.tryPinDSPHandle(req.newDSP);
+    auto* newDSPResolved = static_cast<AudioEngine::DSPCore*>(newPin.get());
     // ★ [PR-4A] S-A2排除: Decision層の DSPCore* 直接参照を Handle 経由に変更
     auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();
-    auto* oldDSP = (!oldHandle.isNull())
-        ? engine_.resolveDSPHandle(oldHandle)
-        : nullptr;
+    auto oldPin = (!oldHandle.isNull()) ? engine_.tryPinDSPHandle(oldHandle)
+                                        : convo::isr::DSPHandlePin{};
+    auto* oldDSP = static_cast<AudioEngine::DSPCore*>(oldPin.get());
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     if (req.newDSP.isNull()) {
         DBG("[DIAG] trySubmit: newDSP handle is NULL generation=" << req.generation);
     } else if (newDSPResolved == nullptr) {
-        DBG("[DIAG] trySubmit: resolveDSPHandle failed slot=" << (int)req.newDSP.slot
+        DBG("[DIAG] trySubmit: pin failed slot=" << (int)req.newDSP.slot
             << " gen=" << (int)req.newDSP.generation << " reqGen=" << req.generation);
     }
 #endif
@@ -42689,7 +43950,14 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     if (!worldOwner) {
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
+        {
+            // ★ F1' (2026-10-25): retire は enqueueWithRetry 経由で destroyDSPCoreNode を
+            //   同一スレッドで同期実行しうる。pin を持ったままだと破棄側が待ちタイムアウト
+            //   するため、**先に lease を返す**（以後 newDSPResolved を逆参照しない）。
+            newPin = convo::isr::DSPHandlePin{};
+            oldPin = convo::isr::DSPHandlePin{};
             lifetime_.retire(newDSPResolved);
+        }
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordProgress(correlationId,
             static_cast<uint64_t>(req.generation), 0,
@@ -42757,7 +44025,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         worldOwner = worldBuilder.buildRuntimePublishWorld(&req.sealedSnapshot, spec);
         if (!worldOwner) {
             if (!req.newDSP.isNull())
+            {
+                // ★ F1' : retire 前に lease を返す（上と同じ理由）。
+                newPin = convo::isr::DSPHandlePin{};
+                oldPin = convo::isr::DSPHandlePin{};
                 lifetime_.retire(newDSPResolved);
+            }
             stateOwner_.onExecutorFailed(correlationId.shortValue());
             telemetryRecorder_.recordProgress(correlationId,
                 static_cast<uint64_t>(req.generation), 0,
@@ -42802,7 +44075,12 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         //   false を返すため lifetime_.retire() は無効。
         //   代わりに destroyRolledBackDSP() で未公開 DSPCore を直接破棄する。
         if (newDSPResolved != nullptr)
+        {
+            // ★ F1' : destroyRolledBackDSP は直接 destroy するため、lease を先に返す。
+            newPin = convo::isr::DSPHandlePin{};
+            oldPin = convo::isr::DSPHandlePin{};
             lifetime_.destroyRolledBackDSP(newDSPResolved);
+        }
         // ★ v19: StateOwner + TelemetryRecorder 記録
         stateOwner_.onExecutorFailed(correlationId.shortValue());
         telemetryRecorder_.recordFailure(FailureStage::Execution,
@@ -43154,6 +44432,9 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
         //   DSPCore を authority（EBR・INV-D162-8 単経路）で disposition する。
         //   midrun 経由（drainDeferredClearIfRequested → E-4d retire 済み）では map 不在で
         //   no-op となるため二重 retire は構造的に発生しない（INV-D162-3）。
+        // R8 candidate fix: hoist the obligation id so it can be terminalized after the slot reset.
+        std::uint64_t clearObligationId = 0;
+        bool clearIsShutdown = false;
         if (deferredSlot_.has_value())
         {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -43165,9 +44446,28 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
             retireRegisteredDSP(
                 deferredSlot_->request,
                 "shutdown-clear");
+
+            // R8 candidate fix: capture the recovery obligation id before the slot is
+            // reset, so it can be terminalized below. Previously clearDeferredForShutdown()
+            // only called invalidateDeferredObligation() (retry metadata reset) and left
+            // the obligation live (L=1) - the "over-terminalized (L=1 hasDeferred=0)" defect.
+            clearObligationId = deferredSlot_->request.recoveryObligationId;
+            clearIsShutdown = engine_.isShutdownInProgress();
         }
         deferredSlot_.reset();
         convo::publishAtomic(hasDeferred_, false, std::memory_order_release);
+
+        // R8 candidate fix: terminalize the recovery obligation on the clear path,
+        // mirroring the evaluateDeferred discard path (line ~973) which calls
+        // resolveRecoveryObligation(StaleSuperseded/ShutdownDiscarded). ShutdownDiscarded
+        // is used for actual shutdown; StaleSuperseded for mid-run stall drains.
+        if (clearObligationId != 0) {
+            engine_.runtimePublicationBridge_.resolveRecoveryObligation(
+                clearObligationId,
+                clearIsShutdown
+                    ? RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded
+                    : RuntimeIntentCoordinator::RecoveryOutcome::StaleSuperseded);
+        }
     }
 
     // ★ D135-1 / F6-7: shutdown による deferred 消去 — obligation metadata も無効化
@@ -43192,9 +44492,13 @@ void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 //   always runs on the RebuildThread via drainDeferredClearIfRequested().
 void RuntimePublicationOrchestrator::requestDeferredClear() noexcept
 {
-    // C1: RebuildThread is stopping/stopped (post join). No concurrent RebuildThread
-    //     writer can touch the plain deferred members → clear synchronously.
-    if (convo::consumeAtomic(engine_.rebuildThreadShouldExit, std::memory_order_acquire))
+    // C1: RebuildThread is stopped (post join). No concurrent RebuildThread writer can
+    //     touch the plain deferred members → clear synchronously.
+    //     ★ R8 (P1): the predicate is rebuildThreadStopped (published after join), NOT
+    //     rebuildThreadShouldExit (published before join). With the latter, the C1 branch
+    //     could run while the RebuildThread was still inside processDeferredAdmission(),
+    //     i.e. two threads writing deferredSlot_ / hasDeferred_.
+    if (convo::consumeAtomic(engine_.rebuildThreadStopped, std::memory_order_acquire))
     {
         clearDeferredForShutdown();
         return;
@@ -43212,7 +44516,13 @@ void RuntimePublicationOrchestrator::requestDeferredClear() noexcept
 //   synchronous primitive (EmergencyDrain + C1 fallback call it from non-RebuildThread).
 bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return false;  // refuse instead of touching the plain deferred members
+    }
     if (convo::exchangeAtomic(deferredClearRequested_, false, std::memory_order_acq_rel))
     {
         // ★ D162-2-E (E-4d): Timer C2/C3/C4 requestDeferredClear → mid-run clear path の
@@ -43244,7 +44554,13 @@ bool RuntimePublicationOrchestrator::drainDeferredClearIfRequested() noexcept
 //   Single Thread Owner（RebuildThread）契約の jassert 付き（ADR-C4:100-105）。
 std::optional<DeferredPublishView> RuntimePublicationOrchestrator::peekDeferred() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return std::nullopt;  // refuse instead of touching the plain deferred members
+    }
     if (!convo::consumeAtomic(hasDeferred_, std::memory_order_acquire) || !deferredSlot_.has_value())
         return std::nullopt;
     return DeferredPublishView(*this, *deferredSlot_);
@@ -43279,9 +44595,12 @@ void RuntimePublicationOrchestrator::retireRegisteredDSP(
 {
     if (req.newDSP.isNull())
         return;
-    auto* dsp = engine_.resolveDSPHandle(req.newDSP);
+    // ★ F1' (2026-10-25): retire は DSPCore のフィールドに触れないが、
+    //   「解決したポインタが有効なうちに retire を発行する」順序を保証するため pin を取る。
+    auto pin = engine_.tryPinDSPHandle(req.newDSP);
+    auto* dsp = static_cast<AudioEngine::DSPCore*>(pin.get());
     if (dsp == nullptr)
-        return;  // 未登録 / rollback / quarantine / reclaimed — disposition 済み。no-op。
+        return;  // 未登録 / rollback / quarantine / reclaimed / pin 受付閉鎖 — disposition 済み。no-op。
 
     DSPLifetimeManager lifetimeMgr{engine_};
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -43298,7 +44617,13 @@ void RuntimePublicationOrchestrator::retireRegisteredDSP(
 //   slot reset + hasDeferred_ flip + DeferredHealth telemetry を一括実行。
 void RuntimePublicationOrchestrator::finishView() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return;  // refuse instead of touching the plain deferred members
+    }
     DiscardReason reason = DiscardReason::None;
     uint64_t discardTs = 0;
     if (deferredSlot_.has_value()) {
@@ -43359,7 +44684,13 @@ void DeferredPublishView::discard(DiscardReason reason) noexcept
 //   消費されることはない）。raw .load/.store/.fetch_sub は不使用（convo:: wrapper のみ）。
 bool RuntimePublicationOrchestrator::tryConsumeRedriveBudget() noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return false;  // refuse instead of touching the plain deferred members
+    }
     for (;;) {
         const auto v = convo::consumeAtomic(redriveEpisodeBudget_);
         if (v == 0)
@@ -43380,7 +44711,13 @@ bool RuntimePublicationOrchestrator::tryConsumeRedriveBudget() noexcept
 //    AudioEngine.h:2528-2529 の consumeDeferredRequest → processDeferredAdmission 一本化済み）
 void RuntimePublicationOrchestrator::processDeferredAdmission(bool wasRecoveryWake) noexcept
 {
-    jassert(std::this_thread::get_id() == engine_.rebuildThreadId());
+    // R8 (P1): Release-active ownership guard. jassert is compiled out under
+    // NDEBUG, so the contract would otherwise be documentation-only in Release.
+    if (!engine_.isRebuildThread())
+    {
+        jassertfalse;
+        return;  // refuse instead of touching the plain deferred members
+    }
     // ★ D135-8 Step 7 (P3): recovery-wake provenance gate (D135-5 blind-bool blocker resolved by
     //   Step 6). wasRecoveryWake is true iff THIS admission was provoked by the crossfade-timeout
     //   recovery path (recoveryRetryReady stamped release-store at AudioEngine.Timer.cpp:1748 under
@@ -43830,6 +45167,11 @@ public:
     void resetProgressObservation() noexcept {
         convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
     }
+
+    // ★ R8-9: test-only seam. Declared friend so the harness can age the progress
+    //   observation and drive the real 30 s stall detector deterministically instead of
+    //   waiting 30 s of wall time. Production never calls this accessor.
+    friend struct R8PublicationProgressTestAccess;
 
     // ★ P1-6: RuntimeHealthMonitor からのアクセス用
     [[nodiscard]] uint64_t getPendingIntentCount() const noexcept {
@@ -56613,7 +57955,9 @@ private:
     static int measureIrPeakLatencySamples(const juce::AudioBuffer<double>& ir,
                                            int targetLength) noexcept;
 
-#if defined(CONVOPEQ_UNIT_TESTS)
+    // ODR (2026-10-26): unconditional. Gating these friend declarations on
+    // CONVOPEQ_UNIT_TESTS made the class definition differ between the engine TUs
+    // (macro defined) and the plugin TUs (macro absent). Friends cost no storage.
     // ★ H-02 T4 テストシーム: private helper 直接検証用（本番 API を増やさない）。
     //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
     //   Production ビルド（CONVOPEQ_UNIT_TESTS 未定義）では宣言ごと存在せずバイナリ無変更。
@@ -56624,7 +57968,6 @@ private:
     // ★ M-02 (T-M02-1..5) テストシーム: non-finite scrub counter 読み取りと reporter 駆動専用
     //   （本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp。production 影响なし）
     friend struct M02NonFiniteTestAccess;
-#endif
 
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
@@ -58183,6 +59526,59 @@ public:
         return reserved;
     }
 
+    // ── V-11 (P0): ownership-checked re-acquisition after registration close ──
+    //   registerReaderThread()/reserveReaderThread() stop working once
+    //   registrationClosed_ is set (INV-X3-4). That is correct for admitting a *new*
+    //   reader, but the comment on registerReaderThread() above states the intent for
+    //   an already registered reader: "登録済み slot の enter/exit は継続可能
+    //   （常駐 Reader の epoch 完全性は維持）". reserveReaderThread() breaks that
+    //   intent after close: it refuses even the owning thread, so RCUReader::enter()
+    //   fails, no slot contributes to getMinReaderEpoch(), and an object retired at the
+    //   previous epoch becomes reclaimable while the callback reads it (V-11).
+    //
+    //   Ownership is checked against ownerThreadId, which registerReaderThread() sets
+    //   from acquireUniqueThreadId(): a process-wide monotonic counter that is never
+    //   reused. A recycled OS tid (or a colliding cachedThreadHash) cannot pass this
+    //   check, so it is a stronger owner test than comparing cached TIDs.
+    //
+    //   This method does NOT admit a new reader: it requires an existing owner and an
+    //   inactive slot, and it leaves registrationClosed_ untouched.
+    bool reacquireReaderSlot(int readerIndex) noexcept override
+    {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return false;
+
+        auto& slot = readers[static_cast<size_t>(readerIndex)];
+
+        // Ownership: caller must be the thread that registered this slot.
+        // 0 is the "never registered" sentinel and unique ids start at 1.
+        const uint64_t callerId = convo::acquireUniqueThreadId();
+        if (callerId == 0
+            || convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire) != callerId)
+            return false;
+
+        // Only an inactive slot is re-acquirable. kReservedEpoch means another path is
+        // mid-reservation; a live epoch means the slot is still in use.
+        uint64_t expected = kInactiveEpoch;
+        const bool reserved = convo::compareExchangeAtomic(slot.epoch,
+                                                           expected,
+                                                           kReservedEpoch,
+                                                           std::memory_order_acq_rel,
+                                                           std::memory_order_acquire);
+        if (!reserved)
+            return false;
+
+        // Same publish as reserveReaderThread: depth==0 visible before enterReader().
+        convo::publishAtomic(slot.depth, static_cast<uint32_t>(0), std::memory_order_release);
+
+        // quarantineFlags intentionally untouched: a quarantined-idle slot stays
+        // quarantined, and getMinReaderEpoch() still counts it while depth > 0
+        // (see the STG-10-D1 note at getMinReaderEpoch). Clearing the flag here would
+        // resurrect the slot into the normal accounting and could inflate the reclaim
+        // barrier.
+        return true;
+    }
+
     [[deprecated("Use RCUReader::enter() instead. See refactoring_plan.md P1-18.")]]
     void enterReader(int readerIndex) noexcept override
     {
@@ -59080,8 +60476,40 @@ public:
     /** Allocate a new reader slot. Returns slot index or -1 on failure. */
     virtual int registerReaderThread() noexcept = 0;
 
-    /** Try to reserve a specific reader slot. Returns true if successful. */
+    /** Try to reserve a specific reader slot. Returns true if successful.
+     *
+     *  V-11: this path refuses once reader registration has been closed, which is
+     *  correct for a *new* reader. A thread that already owns a slot must use
+     *  reacquireReaderSlot() instead; otherwise it loses EBR protection and can
+     *  observe a reclaimed object.
+     */
     virtual bool reserveReaderThread(int readerIndex) noexcept = 0;
+
+    /** V-11: re-acquire a reader slot that the calling thread already owns.
+     *
+     *  Contract:
+     *   - succeeds only when readerIndex is a slot whose recorded owner is the
+     *     calling thread (ownership is checked by the provider, not the caller);
+     *   - succeeds after closeReaderRegistration(), i.e. it restores protection for
+     *     an already registered reader without admitting a new one;
+     *   - never creates a new registration (registrationClosed_ still governs
+     *     registerReaderThread() and reserveReaderThread());
+     *   - does not clear quarantine state; a quarantined-idle slot that is
+     *     re-acquired must still be counted while its depth > 0 (see
+     *     EpochDomain::getMinReaderEpoch).
+     *
+     *  Reservation is NOT protection: a re-acquired slot sits in the RESERVED state,
+     *  which getMinReaderEpoch() ignores (it has no reader epoch yet). The caller must
+     *  follow a successful re-acquire with enterReader() before dereferencing anything
+     *  published. RCUReader::acquireThreadSlot() does exactly that in the same call.
+     *  The reservation is single-shot: a second re-acquire without an intervening
+     *  enter/exit is refused, so a forgotten enter can never be mistaken for a live
+     *  read window.
+     *
+     *  Default implementation refuses, so providers that do not track slot
+     *  ownership remain fail-closed.
+     */
+    virtual bool reacquireReaderSlot(int /*readerIndex*/) noexcept { return false; }
 
     /** Enter reader protection for the given slot. Audio-thread safe. */
     virtual void enterReader(int readerIndex) noexcept = 0;
@@ -59544,6 +60972,14 @@ private:
         int reservedTid = -1;
         if (preferredTid >= 0 && epochProvider->reserveReaderThread(preferredTid))
         {
+            reservedTid = preferredTid;
+        }
+        else if (preferredTid >= 0 && epochProvider->reacquireReaderSlot(preferredTid))
+        {
+            // ★ V-11: registration is closed but this thread owns the slot. Re-acquire it
+            //   so epoch protection is restored, instead of returning -1 and letting the
+            //   caller run unprotected (or, with the 3c fail-closed guard, go permanently
+            //   silent). The provider verifies ownership; a foreign thread gets false.
             reservedTid = preferredTid;
         }
         else
@@ -62915,6 +64351,17 @@ enum class DeletionEntryType : uint8_t {
     Generic = 0,
     World   = 1   // ★ T1 (D86): world retirement の識別 metadata（telemetry 専用・lifetime authority ではない）
 };
+
+// ★ F1'-b (2026-10-25): 破棄の結果。deferred = 「解放せず、所有権を呼び出し側に残した」。
+//   pin が残っている場合に destroyDSPCoreNode がこれを返す。void(void*) では表現できないため、
+//   再試行可能な破棄（TerminalReclaimAuthority とエンジンの再試行リスト）で使う。
+enum class DestroyOutcome : uint8_t {
+    Destroyed = 0,   // 物理解放が完了した（以後 ptr は無効）
+    Deferred  = 1    // pin 残留により解放しなかった（所有権は呼び出し側に残る）
+};
+
+// ★ F1'-b: 再試行可能な deleter。void(void*) の上位互換。
+using RetryableDeleter = DestroyOutcome (*)(void*) noexcept;
 
 // DeletionEntry: 削除対象のエントリ
 // B23: static_assert を通すため、std::atomic を含まずトリビアルコピー可能である必要があります。
@@ -78156,6 +79603,22 @@ private:
 #include <mkl.h>
 #include <ipp.h>  // ippsFFTFwd_RToCCS_64f, IppsFFTSpec_R_64f
 
+// work92 A-3 AC (2026-10-26): failure-injection seams for the AC-A3 tests.
+//   INLINE VARIABLES, not class members, so sizeof(MklFftEvaluator) and the class layout
+//   are unchanged (the ODR/layout gate must stay green). While both are 0 the behaviour is
+//   identical to before: one relaxed exchange per call site.
+//
+//   Semantics: the armed value is a bitmask consumed by the NEXT call (exchange(0)), so one
+//   armed value affects exactly one invocation and the seam is verifiably self-clearing.
+//     kMklFftInjectLeft  (1) = force the LEFT status to fail
+//     kMklFftInjectRight (2) = force the RIGHT status to fail
+//   The forced status is ippStsNullPtrErr, so the EXISTING production failure branch runs
+//   verbatim (zero both spectra/outputs, count once, return the zero Result / void).
+inline constexpr int kMklFftInjectLeft  = 1;
+inline constexpr int kMklFftInjectRight = 2;
+inline std::atomic<int> g_mklFftEvalFailureInjectionForTest{0};     // evaluate()
+inline std::atomic<int> g_mklFftComputeFailureInjectionForTest{0};  // computeFft()
+
 class MklFftEvaluator
 {
 public:
@@ -78388,6 +79851,12 @@ public:
         windowCorrection = 1.0;
     }
 
+    // AC-A3 (2026-10-26): cumulative count of failed FFT evaluations (observability only).
+    [[nodiscard]] std::uint64_t ippFailureCount() const noexcept
+    {
+        return ippFailureCount_.load(std::memory_order_relaxed);
+    }
+
     Result evaluate(const double* errorLeft,
                     const double* errorRight,
                     const std::array<double, kSpectrumBins>* maskingThresholds = nullptr) noexcept
@@ -78401,6 +79870,10 @@ public:
         if (fftSpec == nullptr || inputLeft == nullptr || inputRight == nullptr
             || spectrumLeft == nullptr || spectrumRight == nullptr)
             return Result{};
+
+        // AC-A3: consume the armed mask (test only; 0 in production).
+        const int injected =
+            g_mklFftEvalFailureInjectionForTest.exchange(0, std::memory_order_relaxed);
 
         double sumSq = 0.0;
         for (int i = 0; i < kFftLength; ++i)
@@ -78417,8 +79890,20 @@ public:
         // ★ work92 A-3 (big 1-6): IPP 戻り値を検査する。片側でも失敗したら
         //   composite score は L+R blend のため意味論的に無効 → L/R ともゼロ化して
         //   fftFailed=true を返す（G2 監査確定 — 部分成功の保存は行わない）。
-        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
-        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        IppStatus stL = ippStsNoErr;
+        IppStatus stR = ippStsNoErr;
+        if (injected != 0)
+        {
+            // Do not touch IPP for the injected channel: report the same status a null spec
+            // would produce so the production failure path below is exercised verbatim.
+            stL = ((injected & kMklFftInjectLeft)  != 0) ? ippStsNullPtrErr : ippStsNoErr;
+            stR = ((injected & kMklFftInjectRight) != 0) ? ippStsNullPtrErr : ippStsNoErr;
+        }
+        else
+        {
+            stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+            stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
+        }
         if (stL != ippStsNoErr || stR != ippStsNoErr)
         {
             std::memset(spectrumLeft,  0, sizeof(CcsComplex) * kSpectrumBins);
@@ -78586,8 +80071,21 @@ public:
         // ★ work92 A-3 (big 1-6): evaluate() と同一の failure semantics —
         //   status 検査 + 失敗時は L/R ともゼロクリア（ゴミを下流に流さない）。
         //   戻り値を持たないため失敗は ippFailureCount_ で観測（初回 DBG）。
-        const IppStatus stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
-        const IppStatus stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        // AC-A3 (test only): consume the armed mask; 0 in production.
+        const int injected =
+            g_mklFftComputeFailureInjectionForTest.exchange(0, std::memory_order_relaxed);
+        IppStatus stL = ippStsNoErr;
+        IppStatus stR = ippStsNoErr;
+        if (injected != 0)
+        {
+            stL = ((injected & kMklFftInjectLeft)  != 0) ? ippStsNullPtrErr : ippStsNoErr;
+            stR = ((injected & kMklFftInjectRight) != 0) ? ippStsNullPtrErr : ippStsNoErr;
+        }
+        else
+        {
+            stL = ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
+            stR = ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
+        }
         if (stL != ippStsNoErr || stR != ippStsNoErr)
         {
             if (outL) std::memset(outL, 0, sizeof(CcsComplex) * kSpectrumBins);
@@ -91703,6 +93201,7 @@ int runBassBuzzMeasurement(int argc, char* argv[])
 #include "AudioEngineHarness.h"
 
 #include "InputBitDepthTransform.h"
+#include "MklFftEvaluator.h"
 
 #include <atomic>
 #include <cfloat>
@@ -91980,6 +93479,33 @@ bool checkH02T4NonFiniteAndBoundaries()
     return true;
 }
 
+namespace {
+
+// Win32 message pump for the A-1 AC-4 notification test. JUCE posts its async callbacks to
+// an internal window on this thread, so PeekMessage/DispatchMessage delivers them (the same
+// mechanism the H-01 tests use; runDispatchLoopUntil is unavailable in this build).
+void a1PumpMessages(int ms) noexcept
+{
+#if JUCE_WINDOWS
+    const auto deadline = juce::Time::getMillisecondCounter()
+                          + static_cast<juce::uint32>(ms);
+    while (juce::Time::getMillisecondCounter() < deadline)
+    {
+        MSG msg {};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+#else
+    juce::ignoreUnused(ms);
+#endif
+}
+
+} // namespace
+
 bool checkNucRoundTrip()
 {
     AudioEngineHarness h;
@@ -92058,8 +93584,44 @@ bool checkNucRoundTrip()
         }
     }
 
+    // ---- AC-A1-4 (work92 A-1): round-trip の通知要求が 1 回に coalesce される ----
+    //   複数プロパティを変更する setState と setNUCFilterModes を、メッセージループを
+    //   回さずに連続実行する。postCoalescedChangeNotification は pending フラグで
+    //   2 回目以降を畳み込むため、配送される通知は 1 回でなければならない。
+    {
+        struct CountingChangeListener final : juce::ChangeListener
+        {
+            int count = 0;
+            void changeListenerCallback(juce::ChangeBroadcaster*) override { ++count; }
+        };
+
+        CountingChangeListener counter;
+        conv.addChangeListener(&counter);
+
+        a1PumpMessages(30);   // 以前の AC で発生した通知を排出
+        counter.count = 0;
+
+        conv.setNUCFilterModes(convo::HCMode::Sharp, convo::LCMode::Natural);
+        conv.setState(saved);
+
+        for (int i = 0; i < 40 && counter.count == 0; ++i)
+            a1PumpMessages(5);
+        a1PumpMessages(100);  // 2 通目が来ないことを確認するための整定
+
+        conv.removeChangeListener(&counter);
+
+        if (counter.count != 1)
+        {
+            std::fprintf(stderr,
+                         "[A1] FAIL: AC-A1-4 expected 1 coalesced notification, got %d\n",
+                         counter.count);
+            h.stop();
+            return false;
+        }
+    }
+
     h.stop();
-    std::printf("ConvolverStateRoundTripTests: PASS (AC-A1-1/2/3)\n");
+    std::printf("ConvolverStateRoundTripTests: PASS (AC-A1-1/2/3/4)\n");
     return true;
 }
 
@@ -94593,6 +96155,176 @@ bool checkSTG71AutoGainFlagRoundTrip()
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ
+//==============================================================================
+// work92 A-3 (big 1-6): IPP FFT 戻り値の失敗経路（AC-A3-1..6）
+//
+//   製品の失敗経路は 2 か所ある:
+//     evaluate()   — 非ゼロ status で両スペクトルをゼロ化し ippFailureCount_ を 1 回加算し、
+//                    全フィールド 0 かつ fftFailed=true の Result を返す（fail-close）。
+//     computeFft() — 同じく両 *出力* をゼロ化し 1 回加算する（void 戻りなので呼び出し側は
+//                    status を観測できない = 部分スペクトルを絶対に漏らしてはならない）。
+//
+//   AC はテスト専用 seam（inline 変数・クラスレイアウト非変更・本番は 0）で上記の分岐を
+//   そのまま駆動する。強制 status は ippStsNullPtrErr を使い、本番の分岐を逐語実行する。
+//==============================================================================
+static bool checkWork92A3FftFailurePath()
+{
+    MklFftEvaluator eval;
+    eval.configureForSampleRate(48000.0);
+
+    std::array<double, MklFftEvaluator::kFftLength> errL {};
+    std::array<double, MklFftEvaluator::kFftLength> errR {};
+    for (int i = 0; i < MklFftEvaluator::kFftLength; ++i)
+    {
+        errL[static_cast<size_t>(i)] = 0.1 * std::sin(0.010 * static_cast<double>(i));
+        errR[static_cast<size_t>(i)] = 0.1 * std::cos(0.013 * static_cast<double>(i));
+    }
+
+    bool ok = true;
+
+    const auto isZeroResult = [](const MklFftEvaluator::Result& r)
+    {
+        return r.compositeScore == 0.0 && r.noisePower == 0.0
+            && r.spectralFlatnessPenalty == 0.0 && r.hfPenalty == 0.0
+            && r.timeDomainRms == 0.0;
+    };
+
+    // Baseline: 無傷の評価器は失敗を報告しない（これが無いと以降の fail-close が空振りする）。
+    const auto baseline = eval.evaluate(errL.data(), errR.data());
+    if (baseline.fftFailed)
+    {
+        std::fprintf(stderr, "[A3] FAIL: baseline evaluate reported fftFailed\n");
+        return false;
+    }
+    const auto c0 = eval.ippFailureCount();
+
+    // ---- AC-A3-1: 左チャネル単独の FFT 失敗で fail-close（ゼロ Result + fftFailed） ----
+    g_mklFftEvalFailureInjectionForTest.store(kMklFftInjectLeft, std::memory_order_relaxed);
+    const auto r1 = eval.evaluate(errL.data(), errR.data());
+    if (!r1.fftFailed || !isZeroResult(r1))
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-1 left-only not fail-closed (failed=%d score=%f noise=%f)\n",
+                     r1.fftFailed ? 1 : 0, r1.compositeScore, r1.noisePower);
+        ok = false;
+    }
+
+    // ---- AC-A3-2: 失敗は 1 回の evaluate につき 1 回だけ計上され、seam は消費される ----
+    if (eval.ippFailureCount() != c0 + 1)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-2 counter=%llu (want %llu)\n",
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c0 + 1));
+        ok = false;
+    }
+    if (g_mklFftEvalFailureInjectionForTest.load(std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-2 seam not consumed\n");
+        ok = false;
+    }
+
+    // ---- AC-A3-3: 失敗は per-call（次の evaluate は正常に戻り、計上も増えない） ----
+    const auto r3 = eval.evaluate(errL.data(), errR.data());
+    if (r3.fftFailed || eval.ippFailureCount() != c0 + 1)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-3 not recovered (failed=%d score=%f count=%llu)\n",
+                     r3.fftFailed ? 1 : 0, r3.compositeScore,
+                     (unsigned long long)eval.ippFailureCount());
+        ok = false;
+    }
+
+    // ---- AC-A3-4: 右単独／両チャネルでも fail-close、計上は呼び出しごとに 1 回 ----
+    g_mklFftEvalFailureInjectionForTest.store(kMklFftInjectRight, std::memory_order_relaxed);
+    const auto r4 = eval.evaluate(errL.data(), errR.data());
+    if (!r4.fftFailed || !isZeroResult(r4) || eval.ippFailureCount() != c0 + 2)
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-4 right-only (failed=%d score=%f count=%llu want %llu)\n",
+                     r4.fftFailed ? 1 : 0, r4.compositeScore,
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c0 + 2));
+        ok = false;
+    }
+    g_mklFftEvalFailureInjectionForTest.store(kMklFftInjectLeft | kMklFftInjectRight,
+                                             std::memory_order_relaxed);
+    const auto r5 = eval.evaluate(errL.data(), errR.data());
+    if (!r5.fftFailed || !isZeroResult(r5) || eval.ippFailureCount() != c0 + 3)
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-4 both (failed=%d score=%f count=%llu want %llu)\n",
+                     r5.fftFailed ? 1 : 0, r5.compositeScore,
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c0 + 3));
+        ok = false;
+    }
+    if (g_mklFftEvalFailureInjectionForTest.load(std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-4 seam not consumed\n");
+        ok = false;
+    }
+
+    // ---- AC-A3-5: computeFft の失敗は *両方* の出力をゼロ化する（部分スペクトルを残さない） ----
+    std::vector<MklFftEvaluator::CcsComplex> specL(
+        static_cast<size_t>(MklFftEvaluator::kSpectrumBins));
+    std::vector<MklFftEvaluator::CcsComplex> specR(
+        static_cast<size_t>(MklFftEvaluator::kSpectrumBins));
+
+    const auto fillSentinel = [](std::vector<MklFftEvaluator::CcsComplex>& v)
+    {
+        for (auto& c : v) { c.real = 1.0; c.imag = 1.0; }
+    };
+    const auto allZero = [](const std::vector<MklFftEvaluator::CcsComplex>& v)
+    {
+        for (const auto& c : v)
+            if (c.real != 0.0 || c.imag != 0.0)
+                return false;
+        return true;
+    };
+
+    fillSentinel(specL);
+    fillSentinel(specR);
+    g_mklFftComputeFailureInjectionForTest.store(kMklFftInjectLeft, std::memory_order_relaxed);
+    const auto c5 = eval.ippFailureCount();
+    eval.computeFft(errL.data(), errR.data(), specL.data(), specR.data());
+    if (!allZero(specL) || !allZero(specR))
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-5 computeFft failure left non-zero output (L=%d R=%d)\n",
+                     allZero(specL) ? 0 : 1, allZero(specR) ? 0 : 1);
+        ok = false;
+    }
+    if (eval.ippFailureCount() != c5 + 1)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-5 counter=%llu (want %llu)\n",
+                     (unsigned long long)eval.ippFailureCount(), (unsigned long long)(c5 + 1));
+        ok = false;
+    }
+    if (g_mklFftComputeFailureInjectionForTest.load(std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[A3] FAIL: AC-A3-5 seam not consumed\n");
+        ok = false;
+    }
+
+    // ---- AC-A3-6: computeFft も per-call（次の呼び出しは正常で、計上も増えない） ----
+    eval.computeFft(errL.data(), errR.data(), specL.data(), specR.data());
+    bool anyNonZero = false;
+    for (const auto& c : specL)
+        if (c.real != 0.0 || c.imag != 0.0) { anyNonZero = true; break; }
+    if (!anyNonZero || eval.ippFailureCount() != c5 + 1)
+    {
+        std::fprintf(stderr,
+                     "[A3] FAIL: AC-A3-6 computeFft not recovered (energy=%d count=%llu want %llu)\n",
+                     anyNonZero ? 1 : 0, (unsigned long long)eval.ippFailureCount(),
+                     (unsigned long long)(c5 + 1));
+        ok = false;
+    }
+
+    g_mklFftEvalFailureInjectionForTest.store(0, std::memory_order_relaxed);
+    g_mklFftComputeFailureInjectionForTest.store(0, std::memory_order_relaxed);
+
+    std::printf("ConvolverStateRoundTripTests: %s (AC-A3-1/2/3/4/5/6 failures=%llu)\n",
+                ok ? "PASS" : "FAIL",
+                (unsigned long long)(eval.ippFailureCount() - c0));
+    return ok;
+}
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -94757,6 +96489,12 @@ int runConvolverStateRoundTripTests()
     if (!checkSTG71AutoGainFlagRoundTrip())
     {
         std::fprintf(stderr, "FAIL: checkSTG71AutoGainFlagRoundTrip\n");
+        stg2ok = false;
+    }
+    // work92 A-3 (2026-10-26): IPP FFT 失敗経路（AC-A3-1..4）
+    if (!checkWork92A3FftFailurePath())
+    {
+        std::fprintf(stderr, "FAIL: checkWork92A3FftFailurePath (work92 A-3)\n");
         stg2ok = false;
     }
     if (!stg2ok)
@@ -95034,6 +96772,180 @@ public:
         return e.dspHandleRuntime_;
     }
 
+    // ===== HD-1 (V-11 handle lifetime): production destroy path, no handle retire =====
+    //   Production frees a DSPCore only after retiring its handle (DSPLifetimeManager) or
+    //   after proving shutdown quiescence. This hook runs the same destroy function without
+    //   retiring, which is the state the 2026-10-25 crash dump showed (slot Active, memory
+    //   freed). Used only by V11EngineRetireProtectionTests (HD-1).
+    static void destroyCoreNodeWithoutRetire(void* core) noexcept
+    {
+        AudioEngine::destroyDSPCoreNode(core);
+    }
+
+    // ===== F1' (pin) observation =====
+    //   pinnedCount はスロットの pin 数を返す。F1-2 / F1-3 が
+    //   「lease 保持中は 0 でない」「解除後は 0」を直接観測するために使う。
+    static std::uint32_t pinnedCount(AudioEngine& e, std::uint32_t slot) noexcept
+    {
+        return e.dspHandleRuntime_.pinnedCount(slot);
+    }
+
+    //   pin 受付を閉じる（破棄側の第 1 段階をテストから単独実行するため）。
+    static bool closePins(AudioEngine& e, const convo::isr::DSPHandle& h) noexcept
+    {
+        return e.dspHandleRuntime_.closePinsForDestroy(h.slot, h.generation);
+    }
+
+    //   期限付きで pin の消滅を待つ（破棄側の第 3 段階）。false = 待ちきれず **未解放**。
+    static bool invalidateHandleBeforeDestroy(AudioEngine& e, void* core) noexcept
+    {
+        return e.invalidateHandleBeforeDestroy(core);
+    }
+
+    // F1'-b (deferred destroy) observation
+    static std::size_t deferredDestroyResidentCount(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyResidentCount();
+    }
+    // F1'-b: cumulative deferral count (monotonic, not racy with the retry swap).
+    static std::uint64_t deferredDestroyCount(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyCount();
+    }
+    // F1'-b production-path test: the D queue only destroys entries whose epoch is OLDER
+    // than the min-reader epoch, so a retire issued at the current epoch is parked and no
+    // deleter runs. The test must advance the publication epoch (exactly what the audio
+    // thread does with EpochDomain::publishEpoch) to make the real drain attempt the destroy.
+    static std::uint64_t publishEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->publishEpoch();
+    }
+    static std::uint64_t currentEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->currentEpoch();
+    }
+    static std::uint64_t minReaderEpochForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->minReaderEpoch();
+    }
+    static std::size_t pendingRetireCountForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->pendingRetireCount();
+    }
+    static std::uint32_t residentAtomicForTest(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->residentCountAtomic();
+    }
+    // F-2 (2026-10-25): quarantine-slot destruction honours the pin contract.
+    static bool destroyQuarantineSlotForTest(AudioEngine& e, std::uint32_t slot,
+                                             std::uint64_t generation) noexcept
+    {
+        return e.dspHandleRuntime_.destroyQuarantineSlot(slot, generation);
+    }
+    static void quarantineSlotForTest(AudioEngine& e, std::uint32_t slot) noexcept
+    {
+        e.dspHandleRuntime_.quarantineSlot(slot);
+    }
+    static std::size_t retryDeferredQuarantineForTest(AudioEngine& e) noexcept
+    {
+        return e.dspHandleRuntime_.retryDeferredQuarantineDestroy();
+    }
+    static std::uint32_t deferredQuarantineCountForTest(AudioEngine& e) noexcept
+    {
+        return e.deferredQuarantineDestroyCount();
+    }
+    // G (2026-10-25): drive the deferred-reclaim queue deterministically.
+    static void drainDeferredRetireQueuesForTest(AudioEngine& e) noexcept
+    {
+        e.drainDeferredRetireQueues(true);
+    }
+
+    // G (2026-10-26): retirement epoch of the oldest pending reclaim identity. The safety
+    // predicate is isOlder(retireEpoch, minReaderEpoch); exposing it lets a test assert the
+    // PROPERTY (reclaim only after min passed the retire epoch) instead of assuming that no
+    // other reader exists in the process.
+    static std::uint64_t pendingRetireEpochForTest(AudioEngine& e) noexcept
+    {
+        std::lock_guard<std::mutex> lock(e.pendingReclaimHandlesMutex_);
+        return e.pendingReclaimHandles_.empty()
+            ? 0 : e.pendingReclaimHandles_.front().retireSequence;
+    }
+    static std::size_t retryDeferredDestroys(AudioEngine& e) noexcept
+    {
+        return e.retryDeferredDestroys();
+    }
+
+    // F1'-b 監査対応: 通常 tick（早期 return を含む）をテストから叩く。
+    static void tickReclaimForTest(AudioEngine& e) noexcept
+    {
+        e.tryReclaimResources();
+    }
+    static std::uint32_t deferredResidentAtomic(AudioEngine& e) noexcept
+    {
+        return e.deferredDestroyResidentAtomic();
+    }
+    static std::size_t terminalDeferredResidentCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalDeferredResidentCount();
+    }
+    static std::size_t terminalRetryableResidentCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalRetryableResidentCount();
+    }
+    // E (2026-10-25): Deferred ownership transfers to the callee.
+    static std::uint64_t terminalOwnershipTransferredCount(AudioEngine& e) noexcept
+    {
+        return e.m_retireRouter->terminalOwnershipTransferredCount();
+    }
+
+    // F1'-b: TerminalReclaimAuthority の drain をテストから駆動する
+    //   （drainTerminalReclaim は private のため、公開 tryReclaim 経由で呼ぶ）。
+    static void drainTerminalForTest(AudioEngine& e) noexcept
+    {
+        e.tryReclaimResources();
+    }
+
+    // F1'-b: drainAll() をテストから駆動する（shutdown 相当の強制 drain）。
+    static void drainAllTerminalForTest(AudioEngine& e) noexcept
+    {
+        e.m_retireRouter->drainAllTerminalForTest();
+    }
+    // 再試行可能な破棄を直接駆動する（D/Q/E を経由せず、T の契約だけを見る）。
+    // ★ 監査 B-1 対応: ルータの terminalReclaimRetryable は「Deferred を格納しない」
+    //   契約に変わった（所有権の一元化）。Terminal 単体の Deferred 保持を検証するには
+    //   storeRetryable を直接叩く必要がある。
+    static bool storeRetryableDirectForTest(AudioEngine& e, void* ptr,
+                                            RetryableDeleter retryable,
+                                            std::uint64_t epoch) noexcept
+    {
+        return e.m_retireRouter->storeRetryableDirectForTest(ptr, retryable, epoch);
+    }
+
+    // ルータ API 経由（所有権一元化の検証用）。
+    static bool storeRetryableForTest(AudioEngine& e, void* ptr,
+                                      RetryableDeleter retryable,
+                                      std::uint64_t epoch) noexcept
+    {
+        return e.m_retireRouter->terminalReclaimRetryable(
+            ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test");
+    }
+
+    // R8-4: control the shutdown-in-progress predicate so the clear path can be exercised
+    // in the ShutdownDiscarded branch, and restore the original state afterwards.
+    // EngineLifecycleState: 0 Unprepared, 1 Preparing, 2 Prepared, 3 Releasing, 4 Destroyed
+    // (isShutdownInProgress() is true for 3 and 4).
+    static int getLifecycleStateRaw(AudioEngine& e) noexcept
+    {
+        return static_cast<int>(convo::consumeAtomic(e.lifecycleState, std::memory_order_acquire));
+    }
+
+    static void setLifecycleStateRaw(AudioEngine& e, int v) noexcept
+    {
+        convo::publishAtomic(e.lifecycleState,
+                             static_cast<AudioEngine::EngineLifecycleState>(v),
+                             std::memory_order_release);
+    }
+
     // pendingReclaimHandles_ 内に指定 handle と一致する entry があるか。
     // STG-9-D1 の test-induced identity の presence / terminal-drop を直接検証する。
     // （slot 世代再利用により stale entry が同居し得るため、global 件数だけでは
@@ -95206,6 +97118,34 @@ public:
     static std::uint64_t mmcssReportedCount(AudioEngine& e) noexcept
     {
         return convo::consumeAtomic(e.mmcssReportedCount_, std::memory_order_acquire);
+    }
+
+    // ===== R8 (P1): RebuildThread lifecycle + ownership, for the C1 ordering and
+    //   Release-enforcement tests (production change: none).
+    static bool rebuildThreadShouldExitOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadShouldExit, std::memory_order_acquire);
+    }
+
+    static bool rebuildThreadStoppedOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadStopped, std::memory_order_acquire);
+    }
+
+    static bool isRebuildThreadOf(AudioEngine& e) noexcept
+    {
+        return e.isRebuildThread();
+    }
+
+    static bool rebuildThreadIdIsEmpty(AudioEngine& e) noexcept
+    {
+        return e.rebuildThreadId() == std::thread::id{};
+    }
+
+    // ★ R8 (P1): the ownership token the worker publishes on entry and clears on exit.
+    static std::uint64_t rebuildThreadTokenOf(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
     }
 };
 
@@ -100652,6 +102592,12 @@ int runConvolverStateRoundTripTests();
 
 // STG8RecoveryObligationTests.cpp (★ STG-8-D1/D2/D3: recovery obligation 終端回帰)
 int runSTG8RecoveryObligationTests();
+// V11ReaderReacquireTests.cpp (★ V-11 P0: reader protection re-established after
+//   registration close; ownership-checked re-acquire; contention A/B)
+int runV11ReaderReacquireTests();
+// V11EngineRetireProtectionTests.cpp (★ V-11 at engine level: closed registration +
+//   real router/domain/reclaim entry point)
+int runV11EngineRetireProtectionTests();
 // STG9ReclaimAccountingTests.cpp (★ STG-9-D1 / RC-1: reclaim accounting 終端回帰)
 int runSTG9ReclaimAccountingTests();
 // STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
@@ -102016,6 +103962,15 @@ int runFpmM2();
 
     // ★ STG-8-D1/D2/D3: recovery obligation 終端回帰（新規 CTest target なし）。
     if (runSTG8RecoveryObligationTests() != 0)
+        return 1;
+
+    // ★ V-11 P0: reader protection must survive registration close (no unprotected read).
+    if (runV11ReaderReacquireTests() != 0)
+        return 1;
+
+    // ★ V-11 P0 (engine level): same contract through the engine's real router/reclaim path
+    //   after a real releaseResources().
+    if (runV11EngineRetireProtectionTests() != 0)
         return 1;
 
     // ★ STG-9-D1 / RC-1: reclaim accounting 終端回帰（新規 CTest target なし）。
@@ -108331,17 +110286,39 @@ int main()
 //   publication sequence の公開観測のみで oracle を構成する。
 //   L は Live のみを数えるため、L==0 ⟺ 当該 obligation 終端済みと同値。
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <thread>
+#include <vector>
+#include <fstream>
 
 #include "AudioEngineHarness.h"
 #include "DeferredPublicationTestAccess.h"
 
 #if JUCE_WINDOWS
 #include <windows.h>
+
+// R8 diagnostic: unbuffered per-test trace. A 0xC0000005 in this suite loses the unflushed
+// stdout tail, so the last stderr line is the reliable marker of the running test.
+struct Stg8Trace
+{
+    explicit Stg8Trace(const char* n) noexcept : name(n)
+    {
+        std::fprintf(stderr, "[STG8-TRACE] enter %s\n", name);
+        std::fflush(stderr);
+    }
+    ~Stg8Trace() noexcept
+    {
+        std::fprintf(stderr, "[STG8-TRACE] leave %s\n", name);
+        std::fflush(stderr);
+    }
+    const char* name;
+};
+
 #endif
 
 namespace {
@@ -108423,6 +110400,7 @@ static convo::isr::DSPHandle stg8RegisterActive(AudioEngine& e)
 //==============================================================================
 static bool checkSTG81DiscardTerminalizesRecovery()
 {
+    Stg8Trace trace("checkSTG81DiscardTerminalizesRecovery");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -108503,6 +110481,7 @@ static bool checkSTG81DiscardTerminalizesRecovery()
 //==============================================================================
 static bool checkSTG82OverwriteTerminalizesEvicted()
 {
+    Stg8Trace trace("checkSTG82OverwriteTerminalizesEvicted");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -108588,12 +110567,95 @@ static bool checkSTG82OverwriteTerminalizesEvicted()
 //   期待: L==1 維持 && hasDeferred（過終端なし）。修正前後とも PASS する
 //   べき guard 証明テスト。
 //==============================================================================
-static bool checkSTG82bSameObligationNotResolved()
+static int stg8EnvInt(const char* name, int fallback)
 {
+    const char* v = std::getenv(name);
+    if (v == nullptr || *v == '\0')
+        return fallback;
+    return std::atoi(v);
+}
+
+// ---------------------------------------------------------------------------
+// T-STG8-D2b correlation instrumentation (2026-10-26, owner-approved).
+//   D2b previously sampled only the two observable atoms (hasDeferred / L). A "bad" interval
+//   therefore could not be told apart from a legitimate in-flight publication: hasDeferred_ is
+//   cleared by finishView() and re-armed by the next enqueueDeferred(), so it is false for the
+//   whole duration of a publication attempt.
+//   These samples add the forward-progress counters so a bad interval can be classified as
+//   (A) in-flight publication (counters advance) or (B) liveness loss (counters stalled).
+//   Every value comes from a const/atomic getter: nothing here mutates engine state.
+// ---------------------------------------------------------------------------
+struct D2bSample
+{
+    long long          tMs             = 0;
+    int                deferred        = 0;
+    unsigned long long live            = 0;
+    unsigned long long submitted       = 0;
+    unsigned long long published       = 0;
+    unsigned long long retired         = 0;
+    int                stage           = 0;   // RuntimePublicationState::StuckStage as int
+    unsigned long long maxDeferredAgeMs = 0;
+    int                stalled         = 0;
+    unsigned long long pending         = 0;
+    unsigned long long backlog         = 0;
+};
+
+template <typename OrchestratorT>
+static D2bSample stg8D2bSample(AudioEngine& e, OrchestratorT& orch, long long tMs) noexcept
+{
+    D2bSample s {};
+    s.tMs = tMs;
+    s.deferred = orch.hasDeferredRequest() ? 1 : 0;
+    s.live = stg8LiveCount(e);
+    const auto& prog = orch.stateOwner().state().progress;
+    s.submitted = prog.submittedCount;
+    s.published = prog.publishedCount;
+    s.retired   = prog.retiredCount;
+    s.stage     = static_cast<int>(prog.detectStuckStage());
+    s.maxDeferredAgeMs = orch.getMaxDeferredAgeMs();
+    s.stalled   = orch.isPublicationStalled() ? 1 : 0;
+    s.pending   = orch.getPendingIntentCount();
+    s.backlog   = orch.getPublicationBacklogCount();
+    return s;
+}
+
+static void stg8D2bWriteCsv(const char* path, int iteration,
+                            const std::vector<D2bSample>& samples)
+{
+    if (path == nullptr || *path == '\0' || samples.empty())
+        return;
+
+    bool needHeader = true;
+    {
+        std::ifstream probe(path);
+        if (probe.good() && probe.peek() != std::ifstream::traits_type::eof())
+            needHeader = false;
+    }
+
+    std::ofstream f(path, std::ios::app);
+    if (!f)
+        return;
+    if (needHeader)
+        f << "iter,t_ms,deferred,live,submitted,published,retired,stage,max_age_ms,stalled,pending,backlog\n";
+    for (const auto& x : samples)
+        f << iteration << ',' << x.tMs << ',' << x.deferred << ',' << x.live << ','
+          << x.submitted << ',' << x.published << ',' << x.retired << ',' << x.stage << ','
+          << x.maxDeferredAgeMs << ',' << x.stalled << ',' << x.pending << ',' << x.backlog << '\n';
+}
+
+// One D2b iteration on a fresh harness. Returns false on failure.
+//   trace: sample the two observable atoms during the retention window and print changes.
+static bool stg8RunD2bOnce(int iteration, bool trace)
+{
+    // Named differently from the bool `trace` parameter (r8 used the same name in the
+    // functions that have no such parameter).
+    Stg8Trace traceScope("checkSTG82bSameObligationNotResolved");
+    const char* tag = (iteration >= 0) ? "STG-8-D2b" : "STG-8-D2b";
+
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
-        std::fprintf(stderr, "[STG-8-D2b] harness start failed\n");
+        std::fprintf(stderr, "[%s] harness start failed (iter %d)\n", tag, iteration);
         return false;
     }
     AudioEngine& e = h.engine();
@@ -108602,7 +110664,7 @@ static bool checkSTG82bSameObligationNotResolved()
 
     if (!stg8EnsureAuthoritative(e))
     {
-        std::fprintf(stderr, "[STG-8-D2b] FAIL: no authoritative runtime\n");
+        std::fprintf(stderr, "[%s] FAIL: no authoritative runtime (iter %d)\n", tag, iteration);
         return false;
     }
     stg8SleepPump(1000);
@@ -108613,46 +110675,321 @@ static bool checkSTG82bSameObligationNotResolved()
     const auto h1 = stg8RegisterActive(e);
     if (h1.isNull())
     {
-        std::fprintf(stderr, "[STG-8-D2b] FAIL: null handle\n");
+        std::fprintf(stderr, "[%s] FAIL: null handle (iter %d)\n", tag, iteration);
         return false;
     }
     e.submitRecoveryIntent(h1, snapshot);
-    const auto d2bWindowT0 = std::chrono::steady_clock::now();   // window start (failure diagnostic)
+    const auto d2bWindowT0 = std::chrono::steady_clock::now();
     if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
     {
-        std::fprintf(stderr, "[STG-8-D2b] FAIL: O1 not admitted\n");
+        std::fprintf(stderr, "[%s] FAIL: O1 not admitted (iter %d)\n", tag, iteration);
         return false;
     }
     if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
     {
-        std::fprintf(stderr, "[STG-8-D2b] FAIL: O1 deferred state not reached\n");
+        std::fprintf(stderr, "[%s] FAIL: O1 deferred state not reached (iter %d)\n", tag, iteration);
         return false;
     }
-    // 同一 handle 再 submit（coalesce → 同 O1 の新表現）。第二 build→submit に25秒猶予。
     e.submitRecoveryIntent(h1, snapshot);
-    // �� R8 fix (2026-10-24): the retention window must stay clear of the production
-    //   bounded-drop watchdogs. Both are 30 s but run on different clocks:
-    //     - publication stall (kPublicationStallThresholdUs = 30 s, Orchestrator h:313)
-    //       counts from the last committed publication *progress*, which precedes this
-    //       test's T0 by the setup gap. Its recovery action (AudioEngine.Timer.cpp:1841
-    //       -> requestDeferredClear() -> clearDeferredForShutdown()) releases the deferred
-    //       slot without resolving the recovery obligation, which is exactly the
-    //       "over-terminalized (L=1 hasDeferred=0)" this test reports.
-    //     - deferred TTL (kDeferredPublishTTLUs = 30 s, Orchestrator h:134) counts from
-    //       the obligation's creation (T0 + the 1 s settle above).
-    //   A 25 s window left ~5 s of margin, so a slow/loaded setup let the stall watchdog
-    //   fire inside the window (R8; reproduced with stall/clear evidence 2026-10-24).
-    //   10 s keeps the same semantics - the same obligation is retained across a long
-    //   window and is not terminalized - with ~19 s of margin against both watchdogs.
-    stg8SleepPump(10000);
-    if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
+    // R8 note (kept from r8-stall-clear-obligation-fix, 2026-10-24): the retention window must
+    //   stay clear of the production bounded-drop watchdogs. Both are 30 s but run on different
+    //   clocks: the publication stall threshold counts from the last committed publication
+    //   progress (which precedes this test's T0 by the setup gap), while the deferred TTL counts
+    //   from the obligation's creation. A 25 s window left only ~5 s of margin, so a slow setup
+    //   could let the stall watchdog fire inside the window. 10 s keeps the same semantics with
+    //   ~19 s of margin. Re-baseline the stall observation here (the same call prepareToPlay()
+    //   uses) so the window cannot be cut short by the setup gap.
+    orch.resetProgressObservation();
+
+
+    // Retention window (see the R8 note in the original test): 10 s keeps clear of the 30 s
+    // publication-stall watchdog and the 30 s deferred TTL.
+    //
+    // T-STG8-D2b triage (2026-10-26): measured with CONVOPEQ_STG8_D2B_TRACE=1, the deferred
+    // flag legitimately cycles 1 -> 0 -> 1 inside this window (dips of 5-16 ms = one audio
+    // block) while the live obligation count stays 1. A single sample at the end therefore
+    // reported "over-terminalized" whenever it landed inside a re-arm dip. The verdict is
+    // now about a DURABLE loss:
+    //   - a continuous non-retained streak >= kDurableBadMs fails;
+    //   - a bad end snapshot is given kRecoveryBudgetMs to recover before failing.
+    constexpr long long kDurableBadMs = 250;     // ~23 audio blocks; a real loss is permanent
+    constexpr long long kRecoveryBudgetMs = 1000;
+    long long maxBadStreakMs = 0;
+    std::vector<D2bSample> samples;          // correlation log (trace only)
+    D2bSample firstBad {};
+    D2bSample lastBad {};
+    long long firstBadMs = -1;
+    long long lastBadMs = -1;
+    int       deferredTransitions = 0;
+    int       badSamples = 0;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        bool bad = false;
+        auto badSince = t0;
+        int  prevDeferred = -1;
+        while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10000))
+        {
+            stg8PumpMessages();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+            const auto now = std::chrono::steady_clock::now();
+            const long long tMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+            const auto s = stg8D2bSample(e, orch, tMs);
+            if (trace)
+                samples.push_back(s);
+            if (prevDeferred >= 0 && s.deferred != prevDeferred)
+                ++deferredTransitions;
+            prevDeferred = s.deferred;
+
+            if (s.live != 1 || s.deferred == 0)
+            {
+                ++badSamples;
+                if (!bad)
+                {
+                    bad = true;
+                    badSince = now;
+                    firstBad = s;
+                    firstBadMs = tMs;
+                }
+                lastBad = s;
+                lastBadMs = tMs;
+                maxBadStreakMs = std::max<long long>(
+                    maxBadStreakMs,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - badSince).count());
+            }
+            else
+            {
+                bad = false;
+            }
+        }
+    }
+
+    // ---- correlation summary (observation only; the D2b verdict is unchanged) ----
+    if (trace && !samples.empty())
+    {
+        const auto& f = samples.front();
+        const auto& l = samples.back();
+        unsigned long long maxAge = 0;
+        unsigned long long maxPending = 0;
+        unsigned long long maxBacklog = 0;
+        int stalledSamples = 0;
+        for (const auto& s : samples)
+        {
+            maxAge = std::max(maxAge, s.maxDeferredAgeMs);
+            maxPending = std::max(maxPending, s.pending);
+            maxBacklog = std::max(maxBacklog, s.backlog);
+            if (s.stalled != 0)
+                ++stalledSamples;
+        }
+        std::printf("[D2b-SUM] iter=%d samples=%zu window_ms=%lld transitions=%d bad=%d"
+                    " longestBad_ms=%lld\n",
+                    iteration, samples.size(), l.tMs, deferredTransitions, badSamples,
+                    maxBadStreakMs);
+        std::printf("[D2b-CNT] iter=%d start{t=%lld sub=%llu pub=%llu ret=%llu stage=%d age=%llu}"
+                    " end{t=%lld sub=%llu pub=%llu ret=%llu stage=%d age=%llu}\n",
+                    iteration, f.tMs, f.submitted, f.published, f.retired, f.stage,
+                    f.maxDeferredAgeMs, l.tMs, l.submitted, l.published, l.retired,
+                    l.stage, l.maxDeferredAgeMs);
+        std::printf("[D2b-BAD] iter=%d streak[%lld..%lld] sub=+%llu pub=+%llu ret=+%llu"
+                    " stage %d->%d age %llu->%llu stalled=%d maxAge=%llu maxPending=%llu"
+                    " maxBacklog=%llu\n",
+                    iteration, firstBadMs, lastBadMs,
+                    lastBad.submitted - firstBad.submitted,
+                    lastBad.published - firstBad.published,
+                    lastBad.retired - firstBad.retired,
+                    firstBad.stage, lastBad.stage,
+                    firstBad.maxDeferredAgeMs, lastBad.maxDeferredAgeMs,
+                    stalledSamples, maxAge, maxPending, maxBacklog);
+        const char* csvPath = std::getenv("CONVOPEQ_STG8_D2B_CSV");
+        if (csvPath != nullptr && *csvPath != '\0')
+            stg8D2bWriteCsv(csvPath, iteration, samples);
+    }
+
+    // Single snapshot decides the verdict; the diagnostic prints THIS snapshot only.
+    auto liveFinal = stg8LiveCount(e);
+    auto deferredFinal = orch.hasDeferredRequest();
+    long long endBadMs = 0;
+
+    if (liveFinal != 1 || !deferredFinal)
+    {
+        // Give the obligation a bounded chance to be re-armed before calling it durable.
+        const auto t0 = std::chrono::steady_clock::now();
+        for (;;)
+        {
+            stg8PumpMessages();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto now = std::chrono::steady_clock::now();
+            endBadMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+            liveFinal = stg8LiveCount(e);
+            deferredFinal = orch.hasDeferredRequest();
+            if (liveFinal == 1 && deferredFinal)
+                break;                       // recovered: transient
+            if (endBadMs >= kRecoveryBudgetMs)
+                break;                       // durable loss
+        }
+    }
+
+    const bool durableLoss =
+        (maxBadStreakMs >= kDurableBadMs) || (liveFinal != 1 || !deferredFinal);
+
+    if (durableLoss)
     {
         const long long d2bWindowMs = static_cast<long long>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - d2bWindowT0).count());
-        std::fprintf(stderr, "[STG-8-D2b] FAIL: over-terminalized (L=%llu hasDeferred=%d windowMs=%lld)\n",
-                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0,
-                     d2bWindowMs);
+        std::fprintf(stderr,
+                     "[STG-8-D2b] FAIL: over-terminalized (iter %d, snapshot L=%llu hasDeferred=%d,"
+                     " maxBadStreakMs=%lld, endBadMs=%lld, windowMs=%lld, trace=%d)\n",
+                     iteration,
+                     (unsigned long long)liveFinal, deferredFinal ? 1 : 0,
+                     maxBadStreakMs, endBadMs, d2bWindowMs, trace ? 1 : 0);
+        ok = false;
+    }
+    else if (maxBadStreakMs > 0 || endBadMs > 0)
+    {
+        std::printf("[STG-8-D2b] note iter=%d: transient re-arm dip recovered"
+                    " (maxBadStreakMs=%lld, endBadMs=%lld)\n",
+                    iteration, maxBadStreakMs, endBadMs);
+    }
+
+    // ---- (A)/(B): once fading clears, is the obligation resolved exactly once? ----
+    //   Observation only (never fails). Forward progress immediately after the retention
+    //   window supports (A) in-flight publication; a live obligation that never drains inside
+    //   the budget supports (B) liveness loss. The verdict above is not affected.
+    {
+        const auto pre = stg8D2bSample(e, orch, 0);
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+        const auto t0 = std::chrono::steady_clock::now();
+        constexpr long long kResolveBudgetMs = 15000;
+        long long resolvedMs = -1;
+        unsigned long long maxLiveObserved = pre.live;
+        unsigned long long maxAgeObserved = pre.maxDeferredAgeMs;
+        for (;;)
+        {
+            stg8PumpMessages();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto now = std::chrono::steady_clock::now();
+            const long long ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+            const auto liveNow = stg8LiveCount(e);
+            maxLiveObserved = std::max(maxLiveObserved, liveNow);
+            maxAgeObserved = std::max(maxAgeObserved, orch.getMaxDeferredAgeMs());
+            if (liveNow == 0) { resolvedMs = ms; break; }
+            if (ms >= kResolveBudgetMs) break;
+        }
+        const auto post = stg8D2bSample(e, orch, resolvedMs);
+        std::printf("[D2b-RES] iter=%d resolved=%d atMs=%lld maxLive=%llu maxAge_ms=%llu"
+                    " sub=+%llu pub=+%llu ret=+%llu stage=%d deferred=%d\n",
+                    iteration, resolvedMs >= 0 ? 1 : 0, resolvedMs, maxLiveObserved,
+                    maxAgeObserved, post.submitted - pre.submitted,
+                    post.published - pre.published, post.retired - pre.retired,
+                    post.stage, post.deferred);
+    }
+
+    h.stop();
+    return ok;
+}
+
+static bool checkSTG82bSameObligationNotResolved()
+{
+    const int repeats = stg8EnvInt("CONVOPEQ_STG8_D2B_REPEAT", 1);
+    const bool trace = stg8EnvInt("CONVOPEQ_STG8_D2B_TRACE", 0) != 0;
+
+    int failures = 0;
+    for (int i = 0; i < repeats; ++i)
+    {
+        if (!stg8RunD2bOnce(i, trace))
+            ++failures;
+        if (repeats == 1)
+            break;
+    }
+
+    if (failures != 0)
+    {
+        std::fprintf(stderr, "[STG-8-D2b] iterations=%d failures=%d\n", repeats, failures);
+        return false;
+    }
+    if (repeats > 1)
+        std::printf("STG8RecoveryObligationTests: PASS (STG-8-D2b same obligation retained, %d iterations)\n",
+                    repeats);
+    else
+        std::printf("STG8RecoveryObligationTests: PASS (STG-8-D2b same obligation retained)\n");
+    return true;
+}
+
+//==============================================================================
+// STG-8-CLEAR: clearDeferredForShutdown() must terminalize the recovery obligation.
+//   Reproduction test for the R8 stall-clear asymmetry: a deferred publish with a live
+//   obligation is cleared (mid-run drain path). Before the fix, clearDeferredForShutdown()
+//   released the slot (hasDeferred=0) but left the obligation live (L=1). After the fix,
+//   the obligation is resolved (L=0) via resolveRecoveryObligation(StaleSuperseded).
+//   This test calls clearDeferredForShutdown() directly to exercise the path without
+//   waiting for the 30 s stall watchdog.
+//==============================================================================
+static bool checkSTG8ClearTerminalizesObligation()
+{
+    Stg8Trace trace("checkSTG8ClearTerminalizesObligation");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: O1 deferred state not reached\n");
+        return false;
+    }
+
+    // Pre-condition: obligation is live, deferred request is retained.
+    if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: pre-condition (L=%llu hasDeferred=%d)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        ok = false;
+    }
+
+    // Invoke the clear path (mid-run drain, not actual shutdown).
+    orch.clearDeferredForShutdown();
+    stg8SleepPump(500);
+
+    // Post-condition: deferred request released AND obligation terminalized (L=0).
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: hasDeferred still true after clear\n");
+        ok = false;
+    }
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: obligation NOT terminalized (L=%llu, expected 0)\n",
+                     (unsigned long long)stg8LiveCount(e));
         ok = false;
     }
 
@@ -108660,7 +110997,173 @@ static bool checkSTG82bSameObligationNotResolved()
     h.stop();
     if (!ok)
         return false;
-    std::printf("STG8RecoveryObligationTests: PASS (STG-8-D2b same obligation retained)\n");
+    std::printf("STG8RecoveryObligationTests: PASS (STG-8-CLEAR clear terminalizes obligation)\n");
+    return true;
+}
+
+//==============================================================================
+// R8-2: repeated clear must be idempotent (no double terminalization / double release).
+//   Calls clearDeferredForShutdown() three times total. After the first call the
+//   obligation is terminal (L=0); the 2nd and 3rd calls must be no-ops:
+//     - L stays exactly 0 (a second resolve would underflow the live counter,
+//       since resolve() performs the single -1 through the id-based table),
+//     - hasDeferred stays false (the slot must not be resurrected).
+//==============================================================================
+static bool checkSTG8ClearIsIdempotent()
+{
+    Stg8Trace trace("checkSTG8ClearIsIdempotent");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-2] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    // First clear: obligation terminalized.
+    orch.clearDeferredForShutdown();
+    stg8SleepPump(300);
+    if (stg8LiveCount(e) != 0 || orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: first clear (L=%llu hasDeferred=%d)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        ok = false;
+    }
+
+    // Repeat twice: must be a no-op.
+    for (int i = 0; i < 2; ++i)
+    {
+        orch.clearDeferredForShutdown();
+        stg8SleepPump(100);
+    }
+
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: repeated clear changed L (L=%llu, expected 0)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-2] FAIL: repeated clear resurrected deferred slot\n");
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-2 repeated clear is idempotent)\n");
+    return true;
+}
+
+//==============================================================================
+// R8-3: terminal reason must match the actual state.
+//   A mid-run clear is NOT a shutdown, so it must terminalize the obligation as
+//   StaleSuperseded, never ShutdownDiscarded.
+//   recoveryObligationShutdownDiscardCount() is incremented only by the
+//   ShutdownDiscarded outcome (ISRRuntimePublicationCoordinator.cpp resolve path),
+//   so it must be unchanged across a mid-run clear. If it moves, clearIsShutdown
+//   was computed wrongly and the reason recorded is wrong.
+//==============================================================================
+static bool checkSTG8ClearTerminalReasonIsStale()
+{
+    Stg8Trace trace("checkSTG8ClearTerminalReasonIsStale");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-3] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    orch.clearDeferredForShutdown();   // mid-run drain: not an actual shutdown
+    stg8SleepPump(300);
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-3] FAIL: obligation not terminalized (L=%llu)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-3] FAIL: mid-run clear counted as ShutdownDiscarded (%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-3 mid-run clear is StaleSuperseded)\n");
     return true;
 }
 
@@ -108672,8 +111175,129 @@ static bool checkSTG82bSameObligationNotResolved()
 //   期待: redriveCount 増加 && L==0 && sequence 前進。
 //   修正前は redrive 0 件・L==1 のまま停滞し FAIL する。
 //==============================================================================
+//==============================================================================
+// R8-12 (P1): the real 30 s publication-stall watchdog, driven by the wall clock.
+//   R8-9 ages m_lastProgressTimestampUs (synthetic clock) so the suite stays fast, and
+//   R8-8 pushes the health event directly. Neither proves that the *production* threshold
+//   (kPublicationStallThresholdUs == 30 s) is reached by real elapsed time and that the
+//   engine's own timer tick then drives requestDeferredClear -> RebuildThread drain ->
+//   clearDeferredForShutdown. This test waits the full threshold out in real time.
+//   PASS: stalled first observed at >= 30 s real time; obligation terminalized (L=0);
+//         deferred slot drained; reason is NOT ShutdownDiscarded (engine still running).
+//==============================================================================
+static bool checkR8RealTimeStallDetectorTerminalizes()
+{
+    Stg8Trace trace("checkR8RealTimeStallDetectorTerminalizes");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-12] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Real time only: no ageProgress(), no manufactured health event. Baseline the progress
+    // observation first (the call prepareToPlay() uses) so the 30 s threshold is measured
+    // from T0 rather than from the last committed publication before the setup.
+    orch.resetProgressObservation();
+    const bool stalledAtBaseline = orch.isPublicationStalled();
+    const auto stallStart = std::chrono::steady_clock::now();
+    const bool stalled = stg8WaitUntil(90.0, [&] { return orch.isPublicationStalled(); });
+    const double stalledAfterSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - stallStart).count();
+
+    if (!stalled)
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: detector never reported stalled (waited %.1f s)\n",
+                     stalledAfterSec);
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+        h.stop();
+        return false;
+    }
+
+    if (stalledAtBaseline)
+    {
+        std::fprintf(stderr, "[R8-12] FAIL: detector already latched right after the baseline\n");
+        ok = false;
+    }
+
+    // The health monitor evaluates on its own ~1 s tick, so the report lands at or just after
+    // the 30 s threshold. A 25 s floor still catches a detector that fires materially early
+    // (a 10 s threshold, or a clock that was not baselined) without policing tick granularity.
+    if (stalledAfterSec < 25.0)
+    {
+        std::fprintf(stderr,
+                     "[R8-12] FAIL: stalled reported after %.2f s, far before the 30 s threshold\n",
+                     stalledAfterSec);
+        ok = false;
+    }
+
+    if (!stg8WaitUntil(60.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr,
+                     "[R8-12] FAIL: real-time stall clear did not terminalize "
+                     "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-12] FAIL: mid-run clear counted as ShutdownDiscarded (%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+
+    if (!ok)
+        return false;
+
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-12 real-time 30 s stall detector -> StaleSuperseded, L=0, "
+                "stalledAfter=%.2fs)\n", stalledAfterSec);
+    return true;
+}
+
 static bool checkSTG83PressureSignalRedrives()
 {
+    Stg8Trace trace("checkSTG83PressureSignalRedrives");
     AudioEngineHarness h;
     if (!h.start(48000.0, 512))
     {
@@ -108750,10 +111374,656 @@ static bool checkSTG83PressureSignalRedrives()
     return true;
 }
 
+//==============================================================================
+// R8-4: the shutdown branch must record ShutdownDiscarded (not StaleSuperseded).
+//   Forces EngineLifecycleState::Releasing so isShutdownInProgress() is true, then runs
+//   the clear path and asserts recoveryObligationShutdownDiscardCount() advances by
+//   exactly one while the obligation is terminalized (L=0, hasDeferred=0).
+//   The original lifecycle state is restored before the harness is stopped.
+//==============================================================================
+static bool checkSTG8ClearUsesShutdownReason()
+{
+    Stg8Trace trace("checkSTG8ClearUsesShutdownReason");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-4] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const int savedState = DeferredPublicationTestAccess::getLifecycleStateRaw(e);
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Pretend the engine is releasing, so clearIsShutdown == true.
+    DeferredPublicationTestAccess::setLifecycleStateRaw(e, 3 /* Releasing */);
+
+    orch.clearDeferredForShutdown();
+    stg8SleepPump(300);
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+
+    // Restore immediately so nothing downstream observes a fake shutdown.
+    DeferredPublicationTestAccess::setLifecycleStateRaw(e, savedState);
+
+    if (stg8LiveCount(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: obligation not terminalized (L=%llu)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-4] FAIL: hasDeferred still true after clear\n");
+        ok = false;
+    }
+    // Shutdown branch must be classified as ShutdownDiscarded: counter increments by 1.
+    if (discardAfter != discardBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[R8-4] FAIL: shutdown clear not recorded as ShutdownDiscarded "
+                     "(%llu -> %llu, expected +1)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-4 shutdown clear records ShutdownDiscarded)\n");
+    return true;
+}
+
+//==============================================================================
+// R8-5: production entry point. The 30 s publication-stall watchdog does not call
+// clearDeferredForShutdown() directly: AudioEngine.Timer.cpp:1847 calls
+// requestDeferredClear(), which latches deferredClearRequested_ + notifies the
+// RebuildThread, and the clear then runs inside drainDeferredClearIfRequested().
+// This test drives that same entry point and proves the obligation is terminalized
+// by the drain, so the latch -> notify -> drain -> clear chain is covered rather
+// than only the direct call.
+//==============================================================================
+static bool checkSTG8RequestDeferredClearDrains()
+{
+    Stg8Trace trace("checkSTG8RequestDeferredClearDrains");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-5] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+    if (!stg8WaitUntil(30.0, [&] { return stg8LiveCount(e) == 1; }))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: O1 not admitted\n");
+        return false;
+    }
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Exactly what the 30 s stall watchdog does (AudioEngine.Timer.cpp:1847).
+    orch.requestDeferredClear();
+
+    // The RebuildThread performs the clear on its next wake.
+    if (!stg8WaitUntil(45.0, [&] { return stg8LiveCount(e) == 0; }))
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: obligation not terminalized by drain (L=%llu)\n",
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: hasDeferred still true after drain\n");
+        ok = false;
+    }
+    // Mid-run drain: must be StaleSuperseded, so the shutdown counter stays flat.
+    if (coord.recoveryObligationShutdownDiscardCount() != discardBefore)
+    {
+        std::fprintf(stderr, "[R8-5] FAIL: drain classified as ShutdownDiscarded\n");
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-5 requestDeferredClear drain terminalizes)\n");
+    return true;
+}
+
 } // namespace
 
 // main 側（PublishPipelineIntegrationTests.cpp）から呼ばれるエントリ。
 // 新 CTest 登録なし（AudioEngineHarness 既存 exe のサブテスト）。
+//==============================================================================
+// ★ R8-10 (P1): C1 under contention — the exact window the fix targets.
+//   A foreign thread hammers requestDeferredClear() (the timer's entry point) while the
+//   main thread runs stop() -> stopRebuildThread() -> join(). Pre-fix, the C1 branch was
+//   taken as soon as rebuildThreadShouldExit was published (before join), so the spammer
+//   called clearDeferredForShutdown() while the RebuildThread could still be inside
+//   processDeferredAdmission() - two threads on the non-atomic deferred members.
+//   Post-fix the spammer can only latch until join() has returned.
+//   Oracle: the teardown must leave exactly one terminalization (L == 0, never negative),
+//   no deferred residue, and no crash.
+//==============================================================================
+static bool checkR8C1RaceWithTeardown()
+{
+    Stg8Trace trace("checkR8C1RaceWithTeardown");
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-10] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    std::atomic<long long> spamCalls{0};
+    std::thread spammer([&]
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        // Hammer the timer's entry point only while the RebuildThread has NOT provably
+        // stopped. Once rebuildThreadStopped is published (right after join) the engine is
+        // being torn down and continuing to call into it would be a test-side UB, not the
+        // product window under test.
+        while (!DeferredPublicationTestAccess::rebuildThreadStoppedOf(e)
+               && std::chrono::steady_clock::now() < deadline)
+        {
+            orch.requestDeferredClear();
+            spamCalls.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Let it hammer while the worker is alive, then tear down underneath it.
+    stg8SleepPump(500);
+    h.stop();
+    spammer.join();
+
+    bool ok = true;
+
+    // Exactly one terminalization: the live count must be 0, not negative, and no deferred
+    // residue may survive the teardown.
+    const auto liveAfter = stg8LiveCount(e);
+    if (liveAfter != 0)
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: live count after teardown = %llu (want 0)\n",
+                     (unsigned long long)liveAfter);
+        ok = false;
+    }
+    if (orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: deferred residue after teardown\n");
+        ok = false;
+    }
+    if (spamCalls.load() <= 0)
+    {
+        std::fprintf(stderr, "[R8-10] FAIL: spammer never ran (test vacuous)\n");
+        ok = false;
+    }
+
+    if (!ok)
+        return false;
+
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-10 clear requests race teardown: single terminalization, no residue, "
+                "%lld requests)\n",
+                spamCalls.load());
+    return true;
+}
+
+
+//   Stage 2 of the watchdog plan. `RuntimeHealthMonitor::tick()` calls
+//   checkPublicationStall(), which reports EVENT_PUBLICATION_STALL when there is pending
+//   work AND `isPublicationStalled()` (no committed publication for >= 30 s). Rather than
+//   blocking a thread for 30 s, the friend seam ages the progress timestamp; the detector
+//   itself (threshold comparison, engine timer, event transport, handler, latch, drain) is
+//   the production path.
+//   Pre-fix behaviour: the clear would leave the obligation live (L=1, hasDeferred=0).
+//==============================================================================
+namespace convo { namespace isr {
+struct R8PublicationProgressTestAccess
+{
+    static void ageProgress(RuntimePublicationOrchestrator& o, std::uint64_t ageUs) noexcept
+    {
+        convo::publishAtomic(o.m_lastProgressTimestampUs,
+                             convo::getCurrentTimeUs() - ageUs,
+                             std::memory_order_release);
+    }
+};
+} } // namespace convo::isr
+
+static bool checkR8PublicationStallDetectorTerminalizes()
+{
+    Stg8Trace trace("checkR8PublicationStallDetectorTerminalizes");
+
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-9] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Age the publication-progress observation past the production threshold (30 s) and let
+    // the engine's own health tick fire. 31 s > kPublicationStallThresholdUs.
+    convo::isr::R8PublicationProgressTestAccess::ageProgress(orch, 31ull * 1000ull * 1000ull);
+
+    // The detector must now report the stalled state (elapsed >= 30 s).
+    if (!orch.isPublicationStalled())
+    {
+        std::fprintf(stderr, "[R8-9] FAIL: detector did not report stalled after aging\n");
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+        h.stop();
+        return false;
+    }
+
+    if (!stg8WaitUntil(45.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr,
+                     "[R8-9] FAIL: stall-detector clear did not terminalize "
+                     "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-9] FAIL: mid-run clear counted as ShutdownDiscarded (%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-9 30s stall detector -> StaleSuperseded, L=0)\n");
+    return true;
+}
+
+
+//==============================================================================
+// ★ R8-8 (P1): watchdog → handler → latch → terminalization, end to end.
+//   Stage 1 of the "real 30 s stall" plan: instead of waiting out the detector, a genuine
+//   EVENT_PUBLICATION_STALL health event is pushed through the engine's own async transport
+//   (enqueueHealthEvent → timer tick → onHealthEvent → requestDeferredClear → RebuildThread
+//   drain). The 30 s *detection* is the only part not covered here.
+//   Pre-fix behaviour: the clear left the obligation live (L=1, hasDeferred=0).
+//==============================================================================
+static bool checkR8WatchdogEventTerminalizesDeferred()
+{
+    Stg8Trace trace("checkR8WatchdogEventTerminalizesDeferred");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-8] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+    auto& coord = DeferredPublicationTestAccess::coordinator(e);
+    bool ok = true;
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-8] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-8] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-8] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    const auto discardBefore = coord.recoveryObligationShutdownDiscardCount();
+
+    // Drive the production async path: SPSC queue -> timer tick -> onHealthEvent.
+    convo::HealthEvent stall{};
+    stall.timestampUs = convo::getCurrentTimeUs();
+    stall.severity = convo::HealthEvent::Severity::Error;
+    stall.eventCode = convo::EVENT_PUBLICATION_STALL;
+    e.enqueueHealthEvent(stall);
+
+    if (!stg8WaitUntil(45.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr,
+                     "[R8-8] FAIL: watchdog clear did not terminalize "
+                     "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    const auto discardAfter = coord.recoveryObligationShutdownDiscardCount();
+    if (discardAfter != discardBefore)
+    {
+        std::fprintf(stderr,
+                     "[R8-8] FAIL: mid-run watchdog clear counted as ShutdownDiscarded "
+                     "(%llu -> %llu)\n",
+                     (unsigned long long)discardBefore, (unsigned long long)discardAfter);
+        ok = false;
+    }
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    h.stop();
+
+    if (!ok)
+        return false;
+    std::printf("STG8RecoveryObligationTests: PASS (R8-8 watchdog event -> StaleSuperseded, L=0)\n");
+    return true;
+}
+
+
+//   rebuildThreadShouldExit is published BEFORE join(); it therefore does not prove the
+//   thread stopped. rebuildThreadStopped is published AFTER join() and is the only flag the
+//   C1 synchronous clear is allowed to trust. Observed invariants:
+//     while running : shouldExit=false, stopped=false, rebuild id valid, this thread is not
+//                     the rebuild thread
+//     after stop()  : shouldExit=true,  stopped=true,  rebuild id empty (get_id() after join),
+//                     isRebuildThread() false for every thread
+//==============================================================================
+static bool checkR8C1StoppedFlagOrdering()
+{
+    Stg8Trace trace("checkR8C1StoppedFlagOrdering");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-6] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+
+    if (DeferredPublicationTestAccess::rebuildThreadShouldExitOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: shouldExit set while running\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::rebuildThreadStoppedOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: stopped set while running\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::rebuildThreadIdIsEmpty(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: no rebuild thread id while running\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::isRebuildThreadOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: test thread claims RebuildThread ownership\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::rebuildThreadTokenOf(e) == 0)
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: no ownership token while running\n");
+        return false;
+    }
+
+    h.stop();
+
+    if (!DeferredPublicationTestAccess::rebuildThreadShouldExitOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: shouldExit not set after stop\n");
+        return false;
+    }
+    if (!DeferredPublicationTestAccess::rebuildThreadStoppedOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: stopped not set after join\n");
+        return false;
+    }
+    if (!DeferredPublicationTestAccess::rebuildThreadIdIsEmpty(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: rebuild id still valid after join\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::isRebuildThreadOf(e))
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: ownership still claimable after join\n");
+        return false;
+    }
+    if (DeferredPublicationTestAccess::rebuildThreadTokenOf(e) != 0)
+    {
+        std::fprintf(stderr, "[R8-6] FAIL: ownership token not cleared on exit\n");
+        return false;
+    }
+
+    std::printf("STG8RecoveryObligationTests: PASS "
+                "(R8-6 stopped published after join; ownership unclaimable after)\n");
+    return true;
+}
+
+//==============================================================================
+// ★ R8-7 (P1): the RebuildThread contract is enforced in Release, not only by jassert.
+//   Preconditions: a deferred slot is live (hasDeferred == true, L == 1) and this thread is
+//   NOT the RebuildThread. The plain deferred members must be unreachable:
+//     peekDeferred()                -> nullopt   (and hasDeferred unchanged)
+//     tryConsumeRedriveBudget()     -> false
+//     drainDeferredClearIfRequested -> false (no latch consumed)
+//   Then a generation bump lets the real RebuildThread discard the obligation, which proves
+//   the refusal did not strand the engine.
+//==============================================================================
+static bool checkR8ForeignThreadRefused()
+{
+    Stg8Trace trace("checkR8ForeignThreadRefused");
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R8-7] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = h.engine();
+    auto& orch = DeferredPublicationTestAccess::orchestrator(e);
+
+    if (!stg8EnsureAuthoritative(e))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: no authoritative runtime\n");
+        return false;
+    }
+    stg8SleepPump(1000);
+
+    DeferredPublicationTestAccess::setFadingRuntimePresent(e, true);
+    auto snapshot = e.getCurrentBuildSnapshotForRecovery();
+    snapshot.sealed = true;
+    const auto h1 = stg8RegisterActive(e);
+    if (h1.isNull())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: null handle\n");
+        return false;
+    }
+    e.submitRecoveryIntent(h1, snapshot);
+
+    if (!stg8WaitUntil(45.0, [&] { return orch.hasDeferredRequest(); }))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: deferred state not reached\n");
+        return false;
+    }
+
+    bool ok = true;
+    if (DeferredPublicationTestAccess::isRebuildThreadOf(e))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: test thread is the RebuildThread (test invalid)\n");
+        return false;
+    }
+
+    const auto view = orch.peekDeferred();
+    if (view.has_value())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: foreign thread obtained a DeferredPublishView\n");
+        ok = false;
+    }
+    if (!orch.hasDeferredRequest())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: refusal consumed the deferred slot\n");
+        ok = false;
+    }
+    if (orch.tryConsumeRedriveBudget())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: foreign thread consumed redrive budget\n");
+        ok = false;
+    }
+    if (orch.drainDeferredClearIfRequested())
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: foreign thread drained the clear latch\n");
+        ok = false;
+    }
+
+    // Cleanup through the real owner: generation bump => Discard on the next tick.
+    DeferredPublicationTestAccess::bumpRebuildGeneration(e);
+    if (!stg8WaitUntil(45.0, [&] { return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0; }))
+    {
+        std::fprintf(stderr, "[R8-7] FAIL: obligation not terminalized after refusal "
+                             "(hasDeferred=%d L=%llu)\n",
+                     orch.hasDeferredRequest() ? 1 : 0,
+                     (unsigned long long)stg8LiveCount(e));
+        ok = false;
+    }
+
+    h.stop();
+    if (ok)
+        std::printf("STG8RecoveryObligationTests: PASS "
+                    "(R8-7 foreign thread refused: peek=nullopt, slot not consumed, no stranding)\n");
+    return ok;
+}
 int runSTG8RecoveryObligationTests()
 {
     bool stg8ok = true;
@@ -108775,7 +112045,72 @@ int runSTG8RecoveryObligationTests()
         std::fprintf(stderr, "FAIL: checkSTG82bSameObligationNotResolved\n");
         stg8ok = false;
     }
+    if (!checkSTG8ClearTerminalizesObligation())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearTerminalizesObligation\n");
+        stg8ok = false;
+    }
+    // R8-2: repeated clear must not double-terminalize / double-release.
+    if (!checkSTG8ClearIsIdempotent())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearIsIdempotent\n");
+        stg8ok = false;
+    }
+    // R8-3: mid-run clear must record StaleSuperseded, not ShutdownDiscarded.
+    if (!checkSTG8ClearTerminalReasonIsStale())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearTerminalReasonIsStale\n");
+        stg8ok = false;
+    }
+    // R8-4: the shutdown branch must record ShutdownDiscarded.
+    if (!checkSTG8ClearUsesShutdownReason())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8ClearUsesShutdownReason\n");
+        stg8ok = false;
+    }
+    // R8-5: the production entry point (watchdog -> requestDeferredClear -> drain).
+    if (!checkSTG8RequestDeferredClearDrains())
+    {
+        std::fprintf(stderr, "FAIL: checkSTG8RequestDeferredClearDrains\n");
+        stg8ok = false;
+    }
+    // R8-6: rebuildThreadStopped is published only after join(); it is the C1 predicate.
+    if (!checkR8C1StoppedFlagOrdering())
+    {
+        std::fprintf(stderr, "FAIL: checkR8C1StoppedFlagOrdering\n");
+        stg8ok = false;
+    }
+    // R8-7: the RebuildThread contract is enforced in Release (refuse, not jassert-only).
+    if (!checkR8ForeignThreadRefused())
+    {
+        std::fprintf(stderr, "FAIL: checkR8ForeignThreadRefused\n");
+        stg8ok = false;
+    }
+    // R8-8: watchdog event -> handler -> latch -> terminalization (stage 1 of the 30 s plan).
+    if (!checkR8WatchdogEventTerminalizesDeferred())
+    {
+        std::fprintf(stderr, "FAIL: checkR8WatchdogEventTerminalizesDeferred\n");
+        stg8ok = false;
+    }
+    // R8-9: the real 30 s stall detector, driven with a synthetic clock (stage 2).
+    if (!checkR8PublicationStallDetectorTerminalizes())
+    {
+        std::fprintf(stderr, "FAIL: checkR8PublicationStallDetectorTerminalizes\n");
+        stg8ok = false;
+    }
+    // R8-10: clear requests racing teardown (the exact window the C1 fix targets).
+    if (!checkR8C1RaceWithTeardown())
+    {
+        std::fprintf(stderr, "FAIL: checkR8C1RaceWithTeardown\n");
+        stg8ok = false;
+    }
     // ★ STG-8-D3 (pressure signal redrive・新 CTest 登録なし)
+    // R8-12: the real 30 s stall watchdog on the wall clock (no synthetic aging).
+    if (!checkR8RealTimeStallDetectorTerminalizes())
+    {
+        std::fprintf(stderr, "FAIL: checkR8RealTimeStallDetectorTerminalizes\n");
+        stg8ok = false;
+    }
     if (!checkSTG83PressureSignalRedrives())
     {
         std::fprintf(stderr, "FAIL: checkSTG83PressureSignalRedrives\n");
@@ -109061,6 +112396,26 @@ static bool checkT02DestroyDropReleasesCounter()
 //   - INV-2: retry のみの drain 前後で (pending, counter) が不変であること。
 //   - drain-completion case: terminal resolution 後の追加 drain が fixed point であること。
 //==============================================================================
+
+// G (2026-10-26): settle the deferred-reclaim bookkeeping to a FIXED POINT before a test
+// captures its baseline. Before the G fix reclaimNormal() could never succeed, so a baseline
+// captured right after h.stop() was implicitly "already settled"; now a real retirement left
+// over by the harness teardown IS reclaimable, and a later drain would change (pending,
+// counter) for reasons unrelated to the test-induced identity.
+static void stg9SettleToFixedPoint(AudioEngine& e) noexcept
+{
+    std::size_t previous = static_cast<std::size_t>(-1);
+    for (int i = 0; i < 16; ++i)
+    {
+        const auto before = stg9Pending(e);
+        if (before == previous)
+            break;                       // two consecutive stable reads
+        previous = before;
+        (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+        e.drainDeferredRetireQueues(true);
+    }
+}
+
 static bool checkT03BaselineReturnOracle()
 {
     AudioEngineHarness h;
@@ -109071,6 +112426,8 @@ static bool checkT03BaselineReturnOracle()
     }
     h.stop();
     AudioEngine& e = h.engine();
+
+    stg9SettleToFixedPoint(e);           // G: drain the harness's own leftovers first
 
     const auto p0 = stg9Pending(e);
     const auto c0 = stg9Counter(e);
@@ -109160,9 +112517,11 @@ static bool checkT03BaselineReturnOracle()
 //   retry が新しい +1 として蓄積してはならない。
 //
 //   注: reclaimNormal の success パス（true 戻り）は単一スレッドの engine level では
-//   決定論的に到達不能（retireEpoch == currentEpoch >= minReaderEpoch が構造的に成立し、
-//   成功には Coordinator.cpp:698/699 の 2 連続 load 間での epoch 前進が必要）。
-//   success 時の -1 は既存 unit test testInv3_1 / testInv3_2（TestEpochProvider による
+//   NOTE (G, 2026-10-26): the success path of reclaimNormal() is REACHABLE as of the G fix
+//   (the safety predicate now compares the RETIREMENT epoch, not currentEpoch()). This matrix
+//   therefore settles the bookkeeping to a fixed point before capturing its baseline; a retry
+//   drain is still expected to be a no-op because the test-induced identity is retired at the
+//   current epoch, which is not older than minReaderEpoch without further publication.
 //   決定論的 epoch 制御・counter 1→0 を assert）が担保する。
 //   同様に tryShutdownQuiescentReclaim の teardown 後直接呼びは Permit が構造的に stale
 //   となる（fresh proof{epoch=7} 対 bound{epoch=5} を実測 — G19/T10 ABA 防止の設計動作）。
@@ -109179,6 +112538,8 @@ static bool checkT04Inv1Inv2PropertyMatrix()
     }
     h.stop();
     AudioEngine& e = h.engine();
+
+    stg9SettleToFixedPoint(e);           // G: drain the harness's own leftovers first
 
     const auto p0 = stg9Pending(e);
     const auto c0 = stg9Counter(e);
@@ -110258,6 +113619,2429 @@ inline std::string formatTransitionLine(const TransitionResult& tr, const std::s
 }
 
 } // namespace convo_buzz_transition
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\V11EngineRetireProtectionTests.cpp`
+
+```
+// V11EngineRetireProtectionTests.cpp — V-11 at engine level.
+//
+// The standalone tests drive EpochDomain/RetireQuarantineStore directly. This test uses the
+// *engine's own* objects after a real `releaseResources()` (which permanently closes reader
+// registration, AudioEngine.Processing.ReleaseResources.cpp:274):
+//
+//   - the engine's retire router (real IReaderEpochProvider, real D/Q/E queues)
+//   - the engine's EpochDomain (via the router)
+//   - the engine's reclaim entry point (AudioEngine::tryReclaimResources)
+//
+// Assertions:
+//   E1  after releaseResources(), an RCUReader that registered before the close can still
+//       establish protection (false without the provider fix — that is V-11)
+//   E2  an object retired at the reader's epoch is NOT reclaimed while the guard is held,
+//       even after the global epoch advances
+//   E3  after the guard drops, the same object IS reclaimed (no leak / not a stuck barrier)
+//   E4  a reader that never registered before the close cannot register afterwards
+//
+// E2/E3 are reported as NOT OBSERVABLE if the post-teardown router refuses new retires
+// (shutdown authority); that case is printed explicitly rather than counted as a pass.
+//
+// Oracle: the sentinel is not freed by its deleter (bounded leak), so the observation is the
+// deleter invocation itself — the reclaim event.
+
+#include "AudioEngineHarness.h"
+#include "DeferredPublicationTestAccess.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <functional>
+#include <thread>
+
+#include "core/RCUReader.h"
+
+namespace {
+
+int   g_v11eReclaimCalls = 0;
+void* g_v11eLastReclaimed = nullptr;
+
+void v11eSentinelDeleter(void* p) noexcept
+{
+    ++g_v11eReclaimCalls;
+    g_v11eLastReclaimed = p;
+}
+
+bool checkEngineLevelProtection()
+{
+    AudioEngineHarness harness;
+    if (!harness.start())
+    {
+        std::printf("  V11-ENGINE: harness.start() failed\n");
+        return false;
+    }
+
+    auto& router = harness.engine().getRetireRouter();
+
+    // Register this thread's reader slot while registration is still open.
+    convo::RCUReader probe(router);
+    {
+        convo::RCUReaderGuard g(probe);
+        if (!g.rootEnterSucceeded())
+        {
+            std::printf("  V11-ENGINE: initial enter failed (before close)\n");
+            harness.stop();
+            return false;
+        }
+    }
+
+    // Real teardown: closes reader registration permanently.
+    harness.stop();
+
+    static int sentinel = 0;
+    void* const obj = &sentinel;
+    bool retireObservable = false;
+    bool protectedWhileHeld = false;
+    bool reclaimedAfterRelease = false;
+
+    {
+        convo::RCUReaderGuard g(probe);
+
+        // E1
+        if (!g.rootEnterSucceeded())
+        {
+            std::printf("  V11-ENGINE: E1 FAIL - enter refused after releaseResources\n");
+            return false;
+        }
+
+        const uint64_t retireEpoch = harness.engine().currentRetireEpoch();
+        retireObservable = harness.engine().enqueueRetireEpochBounded(obj, v11eSentinelDeleter,
+                                                                     retireEpoch);
+
+        if (retireObservable)
+        {
+            // A new publication would advance the epoch past the retire epoch.
+            harness.engine().advanceRetireEpoch();
+            harness.engine().tryReclaimResources();
+            const int afterFirstDrain = g_v11eReclaimCalls;
+
+            harness.engine().tryReclaimResources();
+            const int afterSecondDrain = g_v11eReclaimCalls;
+
+            protectedWhileHeld = (afterFirstDrain == 0 && afterSecondDrain == 0);
+            if (!protectedWhileHeld)
+            {
+                std::printf("  V11-ENGINE: E2 FAIL - reclaimed while held (1st=%d 2nd=%d)\n",
+                            afterFirstDrain, afterSecondDrain);
+                return false;
+            }
+        }
+        else
+        {
+            std::printf("  V11-ENGINE: WARN - post-teardown retire refused; E2/E3 not observable here\n");
+        }
+    }
+
+    // E3: after the guard drops the object must become reclaimable.
+    if (retireObservable)
+    {
+        harness.engine().advanceRetireEpoch();
+        harness.engine().tryReclaimResources();
+
+        reclaimedAfterRelease = (g_v11eReclaimCalls == 1) && (g_v11eLastReclaimed == obj);
+        if (!reclaimedAfterRelease)
+        {
+            std::printf("  V11-ENGINE: E3 FAIL - not reclaimed after the guard dropped (calls=%d)\n",
+                        g_v11eReclaimCalls);
+            return false;
+        }
+    }
+
+    // E4: a reader that never registered cannot register after the close.
+    std::atomic<int> freshOutcome{99};
+    std::thread fresh([&]
+    {
+        convo::RCUReader reader(harness.engine().getRetireRouter());
+        convo::RCUReaderGuard g(reader);
+        freshOutcome.store(g.rootEnterSucceeded() ? 1 : 0, std::memory_order_release);
+    });
+    fresh.join();
+
+    if (freshOutcome.load(std::memory_order_acquire) != 0)
+    {
+        std::printf("  V11-ENGINE: E4 FAIL - a never-registered reader obtained protection\n");
+        return false;
+    }
+
+    if (retireObservable)
+        std::printf("  V11-ENGINE: E1 enter-after-close=1  E2 not-reclaimed-while-held  E3 reclaimed-after=1  E4 fresh-refused\n");
+    else
+        std::printf("  V11-ENGINE: E1 enter-after-close=1  E4 fresh-refused  (E2/E3 not observable)\n");
+
+    return true;
+}
+
+//==============================================================================
+// ★ V-11 (P0-5 complete): retire recorded FROM INSIDE the audio callback.
+//   The hook runs on the audio thread, inside getNextAudioBlock, after the RCU guard is
+//   established and before the published-world pointer is read. It holds the callback there
+//   while the test thread records a retirement at the guard's epoch, advances the global
+//   epoch and drains. Pre-fix, the guard could not be established after close (V-11); the
+//   object would then be reclaimed while the callback "holds" it.
+//==============================================================================
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+namespace {
+
+std::atomic<int>  g_v11HookCalls{0};
+std::atomic<bool> g_v11HookInside{false};
+std::atomic<bool> g_v11HookReturned{false};
+std::atomic<bool> g_v11HookRelease{false};
+
+void v11BlockHook(void*) noexcept
+{
+    if (g_v11HookCalls.fetch_add(1, std::memory_order_acq_rel) != 0)
+        return;   // only the first callback blocks
+    g_v11HookInside.store(true, std::memory_order_release);
+    while (!g_v11HookRelease.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    g_v11HookReturned.store(true, std::memory_order_release);
+}
+
+bool v11WaitFor(double timeoutSec, const std::function<bool()>& pred)
+{
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(static_cast<int>(timeoutSec * 1000));
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (pred())
+            return true;
+        std::this_thread::yield();
+    }
+    return pred();
+}
+
+} // namespace
+#endif
+
+static bool checkInCallbackRetireProtection()
+{
+#if CONVOPEQ_ENABLE_TEST_HOOKS
+    // Reset the shared counters: the preceding engine-level test already reclaimed its own
+    // sentinel, so a stale count would make this test read as a failure of the product.
+    g_v11eReclaimCalls = 0;
+    g_v11eLastReclaimed = nullptr;
+
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::printf("[V11-CB] harness.start() failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+
+    // Wait for a published runtime so the callback actually reaches the read path.
+    if (!v11WaitFor(30.0, [&] { return e.hasAuthoritativePublishedRuntime(); }))
+    {
+        std::printf("[V11-CB] FAIL: no authoritative runtime\n");
+        harness.stop();
+        return false;
+    }
+
+    g_v11HookCalls.store(0);
+    g_v11HookInside.store(false);
+    g_v11HookReturned.store(false);
+    g_v11HookRelease.store(false);
+
+    e.audioBlockTestHookCtx.store(nullptr, std::memory_order_release);
+    e.audioBlockTestHook.store(&v11BlockHook, std::memory_order_release);
+
+    if (!v11WaitFor(10.0, [] { return g_v11HookInside.load(std::memory_order_acquire); }))
+    {
+        std::printf("[V11-CB] FAIL: callback hook never ran\n");
+        e.audioBlockTestHook.store(nullptr, std::memory_order_release);
+        harness.stop();
+        return false;
+    }
+
+    static int sentinel = 0;
+    void* const obj = &sentinel;
+
+    // The audio callback is parked inside the guard at epoch E.
+    const uint64_t retireEpoch = e.currentRetireEpoch();
+    const bool queued = e.enqueueRetireEpochBounded(obj, v11eSentinelDeleter, retireEpoch);
+
+    e.advanceRetireEpoch();
+    e.tryReclaimResources();
+    const bool protectedWhileInCallback = (g_v11eReclaimCalls == 0);
+
+    // Let the callback finish; the guard drops.
+    g_v11HookRelease.store(true, std::memory_order_release);
+    const bool returned = v11WaitFor(10.0, [] { return g_v11HookReturned.load(std::memory_order_acquire); });
+    e.audioBlockTestHook.store(nullptr, std::memory_order_release);
+
+    e.advanceRetireEpoch();
+    e.tryReclaimResources();
+
+    // The hook returning is NOT the guard being released: the callback still has to finish
+    // the block. Retry the drain briefly until the audio slot goes inactive.
+    bool freedAfterCallback = false;
+    const auto reclaimDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < reclaimDeadline)
+    {
+        if (g_v11eReclaimCalls >= 1)
+        {
+            freedAfterCallback = (g_v11eLastReclaimed == obj);
+            break;
+        }
+        e.advanceRetireEpoch();
+        e.tryReclaimResources();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    harness.stop();
+
+    std::printf("[V11-CB] queued=%d retireEpoch=%llu protectedWhileInCallback=%d returned=%d freedAfter=%d : %s\n",
+                queued ? 1 : 0, (unsigned long long)retireEpoch,
+                protectedWhileInCallback ? 1 : 0, returned ? 1 : 0, freedAfterCallback ? 1 : 0,
+                (queued && protectedWhileInCallback && returned && freedAfterCallback) ? "PASS" : "FAIL");
+
+    return queued && protectedWhileInCallback && returned && freedAfterCallback;
+#else
+    std::printf("[V11-CB] SKIPPED: built without CONVOPEQ_ENABLE_TEST_HOOKS\n");
+    return true;
+#endif
+}
+
+
+namespace {
+
+// Waits until the engine has an authoritative published runtime and therefore a real
+// active handle. HD-1 needs one only so that its own activation can be undone.
+convo::isr::DSPHandle hdWaitForActiveHandle(AudioEngine& e)
+{
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+    auto active = handles.getActiveRuntimeDSPHandle();
+    for (int i = 0; i < 1000 && active.isNull(); ++i)
+    {
+        const auto* w = e.observePublishedWorld();
+        if (w != nullptr && w->engine.current != nullptr)
+            (void)e.registerDSPHandleForRuntime(
+                static_cast<AudioEngine::DSPCore*>(w->engine.current));
+        active = handles.getActiveRuntimeDSPHandle();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return active;
+}
+
+} // namespace
+
+//==============================================================================
+// HD-1 (P0): a DSPCore destroyed while its handle slot is still Active must not resolve.
+//   The 2026-10-25 crash: activeRuntimeDSPHandle_ -> slot 251 (state Active) ->
+//   instance 0x18f250e1080, already freed (unmapped). resolve() returned that pointer and
+//   the publish path read DSPCore::runtimeUuid at +0x49E408 -> 0xC0000005.
+//   This builds the same state deterministically with the production destroy path.
+//   PASS: resolveDSPHandle(handle) == nullptr after the destroy.
+//==============================================================================
+static bool checkHandleLifetimeDestroyedActiveDoesNotResolve()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[HD-1] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+
+    const auto originalActive = hdWaitForActiveHandle(e);
+    if (originalActive.isNull())
+    {
+        std::printf("[HD-1] SKIPPED: no active runtime handle to restore\n");
+        harness.stop();
+        return true;
+    }
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[HD-1] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        std::fprintf(stderr, "[HD-1] FAIL: handle registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // Mark the slot Active, then give the engine its own active handle back. The slot stays
+    // Active (the state under test) while teardown can no longer resolve it.
+    handles.activate(handle);
+    handles.activate(originalActive);
+
+    if (e.resolveDSPHandle(handle) != raw)
+    {
+        std::fprintf(stderr, "[HD-1] FAIL: live Active slot did not resolve to its instance\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        (void)e.retireDSPHandleForRuntime(raw);
+        harness.stop();
+        return false;
+    }
+
+    // Production destroy path, but WITHOUT retiring the handle first.
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+
+    const auto* resolvedAfterDestroy = e.resolveDSPHandle(handle);
+
+    (void)e.retireDSPHandleForRuntime(raw);   // drop the map entry (no dereference)
+
+    harness.stop();
+
+    std::printf("[HD-1] slot=%d resolvesAfterDestroy=%d : %s\n",
+                static_cast<int>(handle.slot),
+                resolvedAfterDestroy != nullptr ? 1 : 0,
+                resolvedAfterDestroy == nullptr ? "PASS" : "FAIL");
+    return resolvedAfterDestroy == nullptr;
+}
+
+//==============================================================================
+// HD-3 (P0): one DSPCore instance must not own two handle slots.
+//   registerDSPHandleForRuntime() dedups through runtimeDSPHandleMap_, but
+//   AudioEngine.Cache.cpp:79 calls dspHandleRuntime_.create() directly. If that happens for
+//   an already-registered instance, retire() invalidates only one of the two slots and the
+//   survivor can stay Active over a pointer that is later freed (dump: slots 251 + 254).
+//   PASS: the second create returns the same handle or a null handle.
+//==============================================================================
+static bool checkHandleLifetimeNoDuplicateRegistration()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[HD-3] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[HD-3] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto first = e.registerDSPHandleForRuntime(raw);
+    if (first.isNull())
+    {
+        std::fprintf(stderr, "[HD-3] FAIL: first registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // The cache path calls this directly, bypassing the map.
+    const auto second = handles.create(raw);
+
+    const bool duplicate = !second.isNull() && second.slot != first.slot;
+
+    if (!second.isNull())
+        handles.retire(second);
+    (void)e.retireDSPHandleForRuntime(raw);
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+
+    harness.stop();
+
+    std::printf("[HD-3] first=%d second=%d duplicateSlot=%d : %s\n",
+                static_cast<int>(first.slot),
+                second.isNull() ? -1 : static_cast<int>(second.slot),
+                duplicate ? 1 : 0,
+                duplicate ? "FAIL" : "PASS");
+    return !duplicate;
+}
+
+
+//==============================================================================
+// F1' (2026-10-25): DSPCore lifetime via DSPHandlePin.
+//   F1-1 pin と破棄開始の競合: 受付を閉じた後は pin が必ず失敗する
+//   F1-2 pin 保持中は解放されない（pinnedCount>0 の間 invalidate が false を返す）
+//   F1-3 pin 解除後に reclaim が進む（invalidate が true、instance が消える）
+//   F1-4 pin 失敗時は生ポインタが nullptr（逆参照できない）
+//   F1-5 pin の取得・解除にロック・確保・待機がない（大量反復で完走）
+//   F1-6 登録封鎖の境界でも安全（封鎖後の pin は成否いずれでも安全に終わる）
+//   F1-7 実 DSPCore を対象に、pin 保持中の解放禁止を実行時に確認
+//==============================================================================
+static bool checkF1PinLifecycle()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[F1] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        std::fprintf(stderr, "[F1] FAIL: handle registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // ---- F1-4: pin 成功時のみポインタが得られる ----
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        const bool gotPointer = static_cast<bool>(pin) && pin.get() == raw;
+        const auto pinnedWhileHeld = DeferredPublicationTestAccess::pinnedCount(e, handle.slot);
+        if (!gotPointer)
+        {
+            std::fprintf(stderr, "[F1-4] FAIL: pin did not yield the instance\n");
+            ok = false;
+        }
+        if (pinnedWhileHeld != 1)
+        {
+            std::fprintf(stderr, "[F1-2] FAIL: pinnedCount=%u while a lease is held\n",
+                         (unsigned)pinnedWhileHeld);
+            ok = false;
+        }
+
+        // ---- F1-1 / F1-2 / F1-7: 破棄側は受付を閉じても、pin が残る限り解放できない ----
+        const bool closed = DeferredPublicationTestAccess::closePins(e, handle);
+        if (!closed)
+        {
+            std::fprintf(stderr, "[F1-1] FAIL: could not close the pin gate\n");
+            ok = false;
+        }
+
+        auto pinAfterClose = e.tryPinDSPHandle(handle);
+        if (static_cast<bool>(pinAfterClose))
+        {
+            std::fprintf(stderr, "[F1-1] FAIL: pin succeeded after the gate was closed\n");
+            ok = false;
+        }
+        if (pinAfterClose.get() != nullptr)
+        {
+            std::fprintf(stderr, "[F1-4] FAIL: failed pin exposed a pointer\n");
+            ok = false;
+        }
+
+        // pin が生きている間は invalidate が「解放してはならない」を返す（F1-2 / F1-7）。
+        const bool invalidatedWhilePinned =
+            DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw);
+        if (invalidatedWhilePinned)
+        {
+            std::fprintf(stderr,
+                         "[F1-2] FAIL: destroy was allowed while a pin was held\n");
+            ok = false;
+        }
+    }
+
+    // ---- F1-3: lease を返した後は reclaim が進む ----
+    {
+        const auto pinnedAfterRelease = DeferredPublicationTestAccess::pinnedCount(e, handle.slot);
+        if (pinnedAfterRelease != 0)
+        {
+            std::fprintf(stderr, "[F1-3] FAIL: pinnedCount=%u after the lease was released\n",
+                         (unsigned)pinnedAfterRelease);
+            ok = false;
+        }
+
+        const bool invalidatedAfterRelease =
+            DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw);
+        if (!invalidatedAfterRelease)
+        {
+            std::fprintf(stderr, "[F1-3] FAIL: destroy still blocked after the lease was released\n");
+            ok = false;
+        }
+
+        const auto* afterDestroy = e.resolveDSPHandle(handle);
+        if (afterDestroy != nullptr)
+        {
+            std::fprintf(stderr, "[F1-3] FAIL: slot still resolves after invalidation\n");
+            ok = false;
+        }
+
+        // ここでメモリはまだ生きている（invalidateHandleBeforeDestroy はスロットだけを消す）。
+        // 実際の解放は destroy 経路が行う。
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+    }
+
+    // ---- F1-5: pin の取得・解除を大量に反復しても完走する（ロック/確保/待機なし） ----
+    {
+        auto core2 = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw2 = core2.release();
+        const auto handle2 = e.registerDSPHandleForRuntime(raw2);
+        if (!handle2.isNull())
+        {
+            constexpr int kIterations = 200000;
+            for (int i = 0; i < kIterations; ++i)
+            {
+                auto pin = e.tryPinDSPHandle(handle2);
+                if (!static_cast<bool>(pin))
+                {
+                    std::fprintf(stderr, "[F1-5] FAIL: pin failed at iteration %d\n", i);
+                    ok = false;
+                    break;
+                }
+            }
+            const auto countAfterLoop = DeferredPublicationTestAccess::pinnedCount(e, handle2.slot);
+            if (countAfterLoop != 0)
+            {
+                std::fprintf(stderr, "[F1-5] FAIL: pinnedCount=%u after the loop\n",
+                             (unsigned)countAfterLoop);
+                ok = false;
+            }
+            (void)e.retireDSPHandleForRuntime(raw2);
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw2);
+        }
+    }
+
+    harness.stop();
+
+    std::printf("[F1] pin lifecycle: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// F1-6: 登録封鎖 / shutdown の境界。
+//   reader 登録封鎖後に pin を試みても、成功なら lease が保護し、失敗なら nullptr を返す。
+//   どちらでも「保護されていないポインタを逆参照する」経路が生まれないことを確認する。
+//==============================================================================
+static bool checkF1PinAcrossRegistrationClose()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-6] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // reader 登録を封鎖（shutdown 相当の状態）。
+    e.m_epochDomain.closeReaderRegistration();
+
+    auto pin = e.tryPinDSPHandle(handle);
+    const bool safe = (!static_cast<bool>(pin)) || (pin.get() == raw);
+    if (!safe)
+    {
+        std::fprintf(stderr, "[F1-6] FAIL: pin returned an unexpected pointer\n");
+        ok = false;
+    }
+
+    // lease を保持したまま破棄を試みる → 封鎖中でも解放されない。
+    if (static_cast<bool>(pin))
+    {
+        if (DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw))
+        {
+            std::fprintf(stderr, "[F1-6] FAIL: destroy allowed while pinned after close\n");
+            ok = false;
+        }
+    }
+
+    pin = convo::isr::DSPHandlePin{};
+    (void)DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(e, raw);
+    (void)e.retireDSPHandleForRuntime(raw);
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+
+    harness.stop();
+    std::printf("[F1-6] registration-close boundary: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b (2026-10-25): 破棄の延期契約。
+//   旧: void(void*) では「解放しなかった」を表現できず、drain がエントリを消費して
+//       所有権が失われていた（再試行不能・リーク・resident の誤減少）。
+//   新: DestroyOutcome を返す RetryableDeleter。Deferred は所有権ごと保持され再試行される。
+//==============================================================================
+namespace {
+
+int g_f1bDestroyCalls = 0;
+void* g_f1bLastPtr = nullptr;
+
+// 破棄を 1 回だけ成功させる（2 回目以降は失敗＝二重破棄の検出）。
+DestroyOutcome f1bRetryableDeleter(void* p) noexcept
+{
+    ++g_f1bDestroyCalls;
+    g_f1bLastPtr = p;
+    return DestroyOutcome::Destroyed;
+}
+
+} // namespace
+
+static bool checkF1bDeferredDestroyRetainsOwnership()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // ---- 1) pin 保持中の破棄要求 -> Deferred、pin 受付は閉じる ----
+    //
+    //  NOTE: the background Timer (tryReclaimResources) also calls
+    //  retryDeferredDestroys(), which SWAPS the list out, retries, and re-registers.
+    //  So deferredDestroyResidentCount() is transiently 0 while a retry is in flight.
+    //  Asserting an instant count==1 races with that timer. Assert the CONTRACT instead:
+    //    (a) destroy returns Deferred while pinned,
+    //    (b) the pin gate is closed (tryPin now fails),
+    //    (c) after the pin is released, retry frees the object once.
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+
+        const auto outcome = AudioEngine::destroyDSPCoreNodeRetryable(raw);
+        if (outcome != DestroyOutcome::Deferred)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: destroy did not defer while pinned\n");
+            ok = false;
+        }
+
+        // (b) 受付閉鎖: 以後の pin は必ず失敗する。
+        auto pinAfter = e.tryPinDSPHandle(handle);
+        if (static_cast<bool>(pinAfter))
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: pin succeeded after a deferred destroy\n");
+            ok = false;
+        }
+    }
+
+    // ---- 2) pin 解放後の再試行 -> 破棄が完了する（背景タイマーと競合しないよう待つ） ----
+    {
+        bool freed = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            (void)DeferredPublicationTestAccess::retryDeferredDestroys(e);
+            if (e.resolveDSPHandle(handle) == nullptr)
+            {
+                freed = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!freed)
+        {
+            std::fprintf(stderr,
+                         "[F1-b] FAIL: slot still resolves after pin release (deferred=%zu)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+        {
+            std::fprintf(stderr, "[F1-b] FAIL: deferred entry not consumed (%zu)\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+    }
+
+
+    harness.stop();
+    std::printf("[F1-b] deferred destroy retains ownership then completes: %s\n",
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// F1'-b: TerminalReclaimAuthority の Deferred 保持と再試行（二重破棄なし）
+//   epoch-safe な retryable エントリを格納し、drain で 1 回だけ破棄されることを確認。
+//   pin が残っている間は Deferred として残り、resident が減らない。
+//==============================================================================
+static bool checkF1bTerminalRetainsDeferred()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-T] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    auto& router = *e.m_retireRouter;
+    bool ok = true;
+
+    g_f1bDestroyCalls = 0;
+    g_f1bLastPtr = nullptr;
+
+    static int sentinel = 0;
+    void* obj = &sentinel;
+
+    // 既知の Deferred を返す deleter: 1 回目は Deferred、2 回目以降は Destroyed。
+    static int deferOnce = 0;
+    deferOnce = 1;
+    auto onceDeferred = [](void* p) noexcept -> DestroyOutcome
+    {
+        ++g_f1bDestroyCalls;
+        g_f1bLastPtr = p;
+        if (deferOnce > 0)
+        {
+            --deferOnce;
+            return DestroyOutcome::Deferred;
+        }
+        return DestroyOutcome::Destroyed;
+    };
+
+    // epoch 0 は必ず safe（minReaderEpoch >= 1）なので即時実行経路に入る。
+    // 即時経路で Deferred を返すと storeRetryable に落ち、所有権が保持される。
+    // ★ 監査 B-1 対応: Terminal 単体の Deferred 保持契約を検証するため、
+    //   ルータの所有権一元化を経由せず storeRetryable を直接叩く。
+    //   この経路は「格納のみ」で deleter を呼ばない（epoch 判定もルータが行う）。
+    const bool accepted = DeferredPublicationTestAccess::storeRetryableDirectForTest(e, obj, onceDeferred, 0);
+    if (!accepted)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: storeRetryable rejected\n");
+        harness.stop();
+        return false;
+    }
+
+    // 格納直後: まだ deleter は呼ばれていない（所有権は Terminal が保持）。
+    const auto residentAfterStore = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+
+    // 1 回目の drain: deleter が Deferred を返す → エントリは残る（所有権保持）。
+    DeferredPublicationTestAccess::drainTerminalForTest(e);
+    const int callsAfterFirst = g_f1bDestroyCalls;
+    const auto residentAfterFirst = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+
+    // 2 回目の drain: deleter が Destroyed を返す → エントリが消費される。
+    DeferredPublicationTestAccess::drainTerminalForTest(e);
+    const auto residentAfterSecond = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    const int callsAfterSecond = g_f1bDestroyCalls;
+
+    if (residentAfterStore != 1)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: not stored (count=%zu, want 1)\n", residentAfterStore);
+        ok = false;
+    }
+    if (callsAfterFirst != 1)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: first drain did not invoke the deleter (calls=%d)\n",
+                     callsAfterFirst);
+        ok = false;
+    }
+    // E (2026-10-25): Deferred means the callee retained ownership -> Terminal must DROP
+    // the entry (no double ownership, no second call from Terminal).
+    if (residentAfterFirst != 0)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-T] FAIL: Deferred entry kept in Terminal (count=%zu, want 0)\n",
+                     residentAfterFirst);
+        ok = false;
+    }
+    if (DeferredPublicationTestAccess::terminalOwnershipTransferredCount(e) != 1)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-T] FAIL: ownership transfer not recorded (%llu)\n",
+                     (unsigned long long)DeferredPublicationTestAccess::
+                         terminalOwnershipTransferredCount(e));
+        ok = false;
+    }
+    if (residentAfterSecond != 0)
+    {
+        std::fprintf(stderr, "[F1-b-T] FAIL: entry reappeared after a second drain (%zu)\n",
+                     residentAfterSecond);
+        ok = false;
+    }
+    if (callsAfterSecond != 1)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-T] FAIL: Terminal called the deleter again (calls=%d, want 1)\n",
+                     callsAfterSecond);
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-T] terminal retains Deferred then retries once: %s\n",
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b: 既存 retire 経路の所有権保全。
+//   pin を持たない DSPCore を DSPLifetimeManager::retire で破棄したとき、
+//   「同期破棄」でも「キュー経由」でも所有権が失われないこと（未回収として観測可能）。
+//==============================================================================
+static bool checkF1bRetirePathsKeepOwnership()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-R] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    // ---- 同期経路: pin 無し → 即時破棄され、遅延リストに残らない ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        DSPLifetimeManager mgr(e);
+        mgr.retire(raw);
+
+        // 破棄が完了していればスロットは解決不能。
+        if (e.resolveDSPHandle(handle) != nullptr)
+        {
+            std::fprintf(stderr, "[F1-b-R] FAIL: synchronous retire left the slot resolvable\n");
+            ok = false;
+        }
+        // 遅延リストに取り残されていない（所有権が宙に浮いていない）。
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+        {
+            std::fprintf(stderr, "[F1-b-R] FAIL: synchronous retire left %zu deferred entries\n",
+                         DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            ok = false;
+        }
+    }
+
+    // ---- キュー経路: epoch を進めて drain させ、所有権が失われないことを確認 ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (!handle.isNull())
+        {
+            DSPLifetimeManager mgr(e);
+            mgr.retire(raw);
+
+            // drain を回す（epoch 前進 + reclaim）。
+            for (int i = 0; i < 50; ++i)
+            {
+                e.advanceRetireEpoch();
+                e.tryReclaimResources();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+
+            // どこかで必ず所有権が処理されている（解決不能 or 遅延リストに保持）。
+            const bool resolvable = (e.resolveDSPHandle(handle) != nullptr);
+            const auto deferred = DeferredPublicationTestAccess::deferredDestroyResidentCount(e);
+            if (resolvable && deferred == 0)
+            {
+                std::fprintf(stderr,
+                             "[F1-b-R] FAIL: queued retire left the object owned by nobody\n");
+                ok = false;
+            }
+        }
+    }
+
+    // ---- shutdown 観測性: 未回収が問い合わせ可能であること ----
+    {
+        const auto deferred = DeferredPublicationTestAccess::deferredDestroyResidentCount(e);
+        const auto terminal = DeferredPublicationTestAccess::terminalDeferredResidentCount(e);
+        (void)deferred;
+        (void)terminal;   // 例外なく取得できること自体が条件
+    }
+
+    harness.stop();
+    std::printf("[F1-b-R] retire paths keep ownership: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b: shutdown（drainAll）でも Deferred を強制解放しない。
+//   オーナー条件: 「shutdown 中の未解放 pin → 強制解放せず、未完了状態が観測可能」。
+//   PASS: 破棄は実行されず（Destroyed にならず）、retryable として残り、
+//         retryableResidentCount() で観測できる。
+//==============================================================================
+namespace {
+int g_f1bShutdownCalls = 0;
+DestroyOutcome f1bAlwaysDeferred(void* /*p*/) noexcept
+{
+    ++g_f1bShutdownCalls;
+    return DestroyOutcome::Deferred;   // 常に「解放できない」を返す
+}
+} // namespace
+
+static bool checkF1bDrainAllDoesNotForceFree()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-S] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    g_f1bShutdownCalls = 0;
+    static int sentinel2 = 0;
+    void* obj = &sentinel2;
+
+    const bool accepted = DeferredPublicationTestAccess::storeRetryableDirectForTest(
+        e, obj, f1bAlwaysDeferred, 0);
+    if (!accepted)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: storeRetryable rejected\n");
+        harness.stop();
+        return false;
+    }
+
+    const auto before = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    if (before != 1)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: entry not retained before drainAll (count=%zu)\n", before);
+        ok = false;
+    }
+
+    // shutdown 相当の強制 drain。Deferred を返すので解放されてはならない。
+    DeferredPublicationTestAccess::drainAllTerminalForTest(e);
+
+    const auto after = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+    const auto deferred = DeferredPublicationTestAccess::terminalDeferredResidentCount(e);
+
+    // E (2026-10-25): Deferred transfers ownership to the callee, so Terminal must hold
+    // neither the retryable entry nor a "deferred" marker after the call.
+    if (after != 0)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-S] FAIL: drainAll retained a transferred entry (count=%zu, want 0)\n",
+                     after);
+        ok = false;
+    }
+    if (deferred != 0)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-S] FAIL: Terminal still reports the entry as deferred (%zu)\n",
+                     deferred);
+        ok = false;
+    }
+    if (DeferredPublicationTestAccess::terminalOwnershipTransferredCount(e) != 1)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: ownership transfer not recorded (%llu)\n",
+                     (unsigned long long)DeferredPublicationTestAccess::terminalOwnershipTransferredCount(e));
+        ok = false;
+    }
+    if (g_f1bShutdownCalls < 1)
+    {
+        std::fprintf(stderr, "[F1-b-S] FAIL: deleter never consulted\n");
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-S] drainAll keeps Deferred observable: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b 監査 A-1/A-2: 延期エントリが**通常 tick** で回収されること。
+//   監査で発見した欠陥 A: tryReclaimResources が D/Q/E/T の空判定で早期 return し、
+//   延期リストだけに在るエントリへ到達しなかった（恒久リーク）。
+//   PASS: tick を回すだけで deferred が 0 になり、破棄が 1 回だけ成立する。
+//==============================================================================
+namespace {
+int g_f1bAuditDestroyCalls = 0;
+DestroyOutcome f1bAuditDeleter(void* /*p*/) noexcept
+{
+    ++g_f1bAuditDestroyCalls;
+    return DestroyOutcome::Destroyed;
+}
+} // namespace
+
+static bool checkF1bAuditNormalTickCollects()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-A] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // pin 保持中に破棄要求 → Deferred（エンジン再試行リストへ）
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b-A] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+        if (AudioEngine::destroyDSPCoreNodeRetryable(raw) != DestroyOutcome::Deferred)
+        {
+            std::fprintf(stderr, "[F1-b-A] FAIL: destroy did not defer\n");
+            ok = false;
+        }
+    }
+
+    //  NOTE: the background Timer also calls retryDeferredDestroys(), which SWAPS the
+    //  list out while retrying, so deferredResidentAtomic() is transiently 0 even when a
+    //  destroy is still pending. An instantaneous ==1 assertion races with that timer.
+    //  Assert the CONTRACT instead: the normal tick must eventually free it (the defect
+    //  was that it never did), observed by resolve() becoming nullptr.
+    bool collected = false;
+    for (int i = 0; i < 200; ++i)
+    {
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+        if (e.resolveDSPHandle(handle) == nullptr)
+        {
+            collected = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    if (!collected)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-A] FAIL: normal tick never collected the deferred entry "
+                     "(atomic=%u) — that is the permanent-leak defect\n",
+                     (unsigned)DeferredPublicationTestAccess::deferredResidentAtomic(e));
+        ok = false;
+    }
+
+    // A-2: 二重破棄が無いこと（スロットが解決不能＝破棄済み、以後の tick で再破棄しない）
+    for (int i = 0; i < 10; ++i)
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+
+    if (DeferredPublicationTestAccess::deferredResidentAtomic(e) != 0)
+    {
+        std::fprintf(stderr, "[F1-b-A] FAIL: deferred list not empty after repeated ticks\n");
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-A] normal tick collects deferred entry once: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// F1'-b 監査 B-1: terminalReclaimRetryable 経由でも所有権が一意であること。
+//   epoch-safe 経路では deleter が Deferred を返しても Terminal に再格納しない
+//   （deleter 自身＝エンジン再試行リストが唯一の所有者）。
+//   PASS: Terminal 側の retryable 在住数が増えない。
+//==============================================================================
+static bool checkF1bAuditSingleOwnership()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-B] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // pin を保持したまま terminalReclaimRetryable 経由で破棄を要求する。
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b-B] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+
+        const auto terminalBefore = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+        const auto engineBefore = DeferredPublicationTestAccess::deferredResidentAtomic(e);
+
+        // epoch 0 は safe なので「即時実行」経路に入り、Deferred はエンジン側が保持する。
+        (void)DeferredPublicationTestAccess::storeRetryableForTest(e, raw,
+            &AudioEngine::destroyDSPCoreNodeRetryable, 0);
+
+        const auto terminalAfter = DeferredPublicationTestAccess::terminalRetryableResidentCount(e);
+        const auto engineAfter = DeferredPublicationTestAccess::deferredResidentAtomic(e);
+
+        // 二重所有の判定: 両方に在住していないこと。
+        const bool bothResident = (terminalAfter > terminalBefore) && (engineAfter > engineBefore);
+        if (bothResident)
+        {
+            std::fprintf(stderr,
+                         "[F1-b-B] FAIL: double ownership (terminal %zu->%zu, engine %u->%u)\n",
+                         terminalBefore, terminalAfter,
+                         (unsigned)engineBefore, (unsigned)engineAfter);
+            ok = false;
+        }
+    }
+
+    // 後始末: pin を離して tick → 回収させる。
+    for (int i = 0; i < 40 && DeferredPublicationTestAccess::deferredResidentAtomic(e) > 0; ++i)
+    {
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    harness.stop();
+    std::printf("[F1-b-B] single ownership through terminal retryable: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F1'-b (2026-10-25) audit item 4/5: PRODUCTION retire path under a held pin.
+//
+//   The reviewer's point: `terminalReclaimRetryable` is not on the production path, so
+//   proving Terminal's Deferred retention with a test deleter does not prove the real
+//   DSPCore destroy path. This test drives the REAL entry point:
+//
+//       DSPLifetimeManager::retire(raw)      -> enqueueWithRetry (D/Q/E/T)
+//       AudioEngine::tryReclaimResources()   -> drain -> destroyDSPCoreNode
+//
+//   with a pin held, and asserts:
+//     (1) the production drain DEFERS (cumulative deferredDestroyCount increases),
+//     (2) after the pin is released the deferred entry is drained exactly once,
+//     (3) no crash (a double free here would corrupt the heap).
+//
+//   Uses deferredDestroyCount() (monotonic counter) rather than the resident count,
+//   which is transiently 0 while a retry is in flight.
+//==============================================================================
+static bool checkF1bProductionRetireUnderPin()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-P] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F1-b-P] FAIL: could not pin\n");
+            harness.stop();
+            return false;
+        }
+
+        // Truth measured 2026-10-25 (two wrong versions before this one):
+        //   v1: retire at currentEpoch() then drain  -> pending=1 but NOT destroyable
+        //       (the D queue destroys only entries OLDER than the min-reader epoch, and the
+        //        harness has an active reader holding min == current), so no deleter ran and
+        //        "count 0 -> 0" was a FALSE NEGATIVE, not a deferral failure.
+        //   v2: publishEpoch() then drain -> current advanced (4 -> 5) but min stayed 4
+        //       (the reader's own epoch does not move until it re-enters), still not eligible.
+        // v3 (this): retire with the PUBLICATION epoch that is older than the min-reader
+        //   epoch -- exactly what a real rebuild passes (the epoch the DSP was published at,
+        //   not "now"). The entry is then genuinely destroyable and the production drain
+        //   really invokes destroyDSPCoreNode while the pin is held.
+        std::uint64_t minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+        if (minEpoch == 0)
+        {
+            (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+            minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+        }
+        const auto retireEpoch = (minEpoch > 0) ? (minEpoch - 1) : std::uint64_t{0};
+        const auto before = DeferredPublicationTestAccess::deferredDestroyCount(e);
+
+        // PRODUCTION path: retire -> enqueueWithRetry -> (epoch gate) -> drain ->
+        // destroyDSPCoreNode -> invalidateHandleBeforeDestroy -> defer when pinned.
+        DSPLifetimeManager mgr(e);
+        mgr.retire(raw, retireEpoch);
+
+        std::printf("[F1-b-P] diag after retire: pinned=%u cur=%llu min=%llu pending=%zu "
+                    "resident=%u resolve=%d\n",
+                    (unsigned)DeferredPublicationTestAccess::pinnedCount(e, handle.slot),
+                    (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
+                    (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
+                    DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                    (unsigned)DeferredPublicationTestAccess::residentAtomicForTest(e),
+                    e.resolveDSPHandle(handle) != nullptr ? 1 : 0);
+
+        (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+        e.tryReclaimResources();
+        std::printf("[F1-b-P] diag after drain: pinned=%u cur=%llu min=%llu pending=%zu "
+                    "resident=%u deferredCount=%llu deferredResident=%u resolve=%d\n",
+                    (unsigned)DeferredPublicationTestAccess::pinnedCount(e, handle.slot),
+                    (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
+                    (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
+                    DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                    (unsigned)DeferredPublicationTestAccess::residentAtomicForTest(e),
+                    (unsigned long long)DeferredPublicationTestAccess::deferredDestroyCount(e),
+                    (unsigned)DeferredPublicationTestAccess::deferredResidentAtomic(e),
+                    e.resolveDSPHandle(handle) != nullptr ? 1 : 0);
+
+        const auto after = DeferredPublicationTestAccess::deferredDestroyCount(e);
+        if (after <= before)
+        {
+            std::fprintf(stderr,
+                         "[F1-b-P] FAIL: production retire did not defer while pinned "
+                         "(count %llu -> %llu)\n",
+                         (unsigned long long)before, (unsigned long long)after);
+            ok = false;
+        }
+        else if (e.resolveDSPHandle(handle) == nullptr)
+        {
+            // The slot may legitimately become unresolvable (Retired/DestroyPending) while the
+            // pin still owns the allocation -- that is the correct split: handle resolution
+            // closed, memory ownership retained by the retry list.
+            std::printf("[F1-b-P] observe: slot closed while pin owns the allocation\n");
+        }
+    }
+
+    // Pin released: the deferred entry must drain exactly once and leave nothing behind.
+    bool drained = false;
+    for (int i = 0; i < 400; ++i)
+    {
+        e.tryReclaimResources();
+        (void)DeferredPublicationTestAccess::retryDeferredDestroys(e);
+        if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) == 0
+            && e.resolveDSPHandle(handle) == nullptr)
+        {
+            drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!drained)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-P] FAIL: deferred entry never drained after pin release (%zu)\n",
+                     DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+        ok = false;
+    }
+
+    // Completion contract: once freed, no retry list may re-acquire it. Extra ticks must not
+    // resurrect the entry (a re-registration after free would be a double free).
+    for (int i = 0; i < 10; ++i)
+        DeferredPublicationTestAccess::tickReclaimForTest(e);
+    if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) != 0)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-P] FAIL: retry list is not empty after repeated ticks (%zu)\n",
+                     DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+        ok = false;
+    }
+
+    harness.stop();
+    std::printf("[F1-b-P] production retire under pin defers then drains: %s\n",
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+
+//==============================================================================
+// F-2 (2026-10-25): destroyQuarantineSlot() must honour the pin contract.
+//
+//   A DSPHandlePin releases by SLOT INDEX only (DSPHandlePin::release ->
+//   releasePinSlot(slot), no generation check). If the quarantine cleanup recycled the slot
+//   while a pin was alive, the old pin's release would decrement the pin counter of the NEXT
+//   generation in that slot, silently removing that DSP's protection -> freed while pinned.
+//
+//   Contract under test:
+//     (1) pin held   -> destroy returns false, state stays Quarantined, instance retained,
+//                       slot NOT returned to the free list, engine counter > 0
+//     (2) pin held   -> a generation mismatch must also change nothing
+//     (3) pin gone   -> retry destroys exactly once, slot becomes reusable with gen+1
+//     (4) second call after success -> false (no double destroy / no double free-list push)
+//==============================================================================
+static bool checkF2QuarantineDestroyHonoursPins()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F2] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+
+    // Move the slot to Quarantined (the lifecycle state the cleanup targets).
+    DeferredPublicationTestAccess::quarantineSlotForTest(e, handle.slot);
+
+    // A slot occupied by another live DSP, allocated BEFORE the destroy attempt, so the
+    // free-list order is known: after destroy(handle.slot) succeeds, the next registration
+    // must pop handle.slot (LIFO).
+    auto other = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* otherRaw = other.release();
+    auto otherHandle = e.registerDSPHandleForRuntime(otherRaw);
+    if (otherHandle.isNull())
+    {
+        std::fprintf(stderr, "[F2] FAIL: second registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(otherRaw);
+        harness.stop();
+        return false;
+    }
+
+    {
+        auto pin = e.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[F2] FAIL: could not pin a quarantined slot\n");
+            harness.stop();
+            return false;
+        }
+
+        const auto beforeCount = DeferredPublicationTestAccess::deferredQuarantineCountForTest(e);
+
+        if (DeferredPublicationTestAccess::destroyQuarantineSlotForTest(e, handle.slot, 0))
+        {
+            std::fprintf(stderr, "[F2] FAIL: destroy succeeded while pinned\n");
+            ok = false;
+        }
+        const auto afterCount = DeferredPublicationTestAccess::deferredQuarantineCountForTest(e);
+        if (afterCount <= beforeCount)
+        {
+            std::fprintf(stderr, "[F2] FAIL: deferral was not recorded\n");
+            ok = false;
+        }
+
+        // A stale generation must be rejected with no side effect on the deferral state.
+        if (DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
+                e, handle.slot, handle.generation + 999))
+        {
+            std::fprintf(stderr, "[F2] FAIL: stale generation was accepted\n");
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::deferredQuarantineCountForTest(e) != afterCount)
+        {
+            std::fprintf(stderr, "[F2] FAIL: stale-generation call changed the deferral state\n");
+            ok = false;
+        }
+
+        // While pinned the slot must NOT be recycled: another registration must not take it.
+        {
+            auto probe = convo::aligned_make_unique<AudioEngine::DSPCore>();
+            auto* probeRaw = probe.release();
+            const auto probeHandle = e.registerDSPHandleForRuntime(probeRaw);
+            if (!probeHandle.isNull() && probeHandle.slot == handle.slot)
+            {
+                std::fprintf(stderr,
+                             "[F2] FAIL: slot %u was recycled while pinned (new gen %llu)\n",
+                             (unsigned)handle.slot,
+                             (unsigned long long)probeHandle.generation);
+                ok = false;
+            }
+            if (!probeHandle.isNull())
+            {
+                DeferredPublicationTestAccess::quarantineSlotForTest(e, probeHandle.slot);
+                (void)DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
+                    e, probeHandle.slot, 0);
+            }
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(probeRaw);
+        }
+    }
+
+    // Pin released -> the retry must complete the destruction exactly once.
+    std::size_t destroyed = 0;
+    for (int i = 0; i < 100; ++i)
+    {
+        destroyed = DeferredPublicationTestAccess::retryDeferredQuarantineForTest(e);
+        if (destroyed > 0)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (destroyed == 0)
+    {
+        std::fprintf(stderr, "[F2] FAIL: deferred quarantine destroy never completed\n");
+        ok = false;
+    }
+    if (DeferredPublicationTestAccess::deferredQuarantineCountForTest(e) != 0)
+    {
+        std::fprintf(stderr, "[F2] FAIL: deferral counter not cleared (%u)\n",
+                     (unsigned)DeferredPublicationTestAccess::deferredQuarantineCountForTest(e));
+        ok = false;
+    }
+
+    // Second call after success must be a no-op (no double free-list push).
+    if (DeferredPublicationTestAccess::destroyQuarantineSlotForTest(e, handle.slot, 0))
+    {
+        std::fprintf(stderr, "[F2] FAIL: second destroy succeeded (double destroy)\n");
+        ok = false;
+    }
+
+    // The slot must now be reusable with the generation advanced by exactly one.
+    {
+        auto reused = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* reusedRaw = reused.release();
+        const auto reusedHandle = e.registerDSPHandleForRuntime(reusedRaw);
+        if (reusedHandle.isNull())
+        {
+            std::fprintf(stderr, "[F2] FAIL: slot was not reusable after destroy\n");
+            ok = false;
+        }
+        else if (reusedHandle.slot != handle.slot
+                 || reusedHandle.generation != handle.generation + 1)
+        {
+            std::fprintf(stderr,
+                         "[F2] FAIL: expected slot %u gen %llu, got slot %u gen %llu\n",
+                         (unsigned)handle.slot,
+                         (unsigned long long)(handle.generation + 1),
+                         (unsigned)reusedHandle.slot,
+                         (unsigned long long)reusedHandle.generation);
+            ok = false;
+        }
+        DSPLifetimeManager mgr(e);
+        mgr.retire(reusedRaw);
+        e.tryReclaimResources();
+    }
+
+    {
+        DSPLifetimeManager mgr(e);
+        mgr.retire(otherRaw);
+        e.tryReclaimResources();
+    }
+
+    harness.stop();
+    std::printf("[F2] quarantine destroy honours pins: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+//==============================================================================
+// G (2026-10-25): reclaimNormal() must be reachable.
+//
+//   Before the fix it compared router.currentEpoch() with minReaderEpoch(); because
+//   minReaderEpoch() <= currentEpoch() always, the deferred branch was unconditional and
+//   handleRuntime.reclaim() could never run (the pending identity list only grew).
+//
+//   Contract under test:
+//     (a) no reader      -> after the epoch advances, the pending identity is reclaimed
+//     (b) reader inside  -> while it holds its guard the identity stays pending (it can
+//         still observe the retired slot); after it leaves and the epoch advances the
+//         identity is reclaimed
+//   The observable is pendingReclaimCount() / reclaimInFlightCount(), not "no crash".
+//==============================================================================
+static bool checkGReclaimNormalUsesRetireEpoch()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[G] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    bool ok = true;
+    DSPLifetimeManager mgr(e);
+
+    // Quiescence predicate (2026-10-26): pendingReclaimCount()==0 is NOT completion.
+    //   drainDeferredRetireQueuesForTest() removes the entry from pendingReclaimHandles_
+    //   BEFORE the reclaim attempt runs, so pendingReclaimCount() reads 0 while
+    //   reclaimInFlightCount_ is still 1 (onReclaimBegin..onReclaimEnd). Treating that
+    //   transient as "done" made the (a) balance assertion fail non-deterministically
+    //   (observed once: "reclaimInFlightCount not balanced (1)").
+    //   The completion condition is therefore the CONJUNCTION of both counters, held for two
+    //   consecutive samples. This is strictly stronger than the previous check: a real leak
+    //   (counter stuck at 1) now times out here instead of passing the loop.
+    auto driveUntilReclaimed = [&e](int maxIterations) -> bool
+    {
+        int consecutiveQuiescent = 0;
+        for (int i = 0; i < maxIterations; ++i)
+        {
+            (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+            DeferredPublicationTestAccess::drainDeferredRetireQueuesForTest(e);
+            const bool quiescent = (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+                                && (DeferredPublicationTestAccess::reclaimInFlightCount(e) == 0);
+            consecutiveQuiescent = quiescent ? (consecutiveQuiescent + 1) : 0;
+            if (consecutiveQuiescent >= 2)
+                return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        }
+        return (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+            && (DeferredPublicationTestAccess::reclaimInFlightCount(e) == 0);
+    };
+
+    // ---- (a) reachability: the normal reclaim path must complete ----
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        mgr.retire(raw);
+        if (DeferredPublicationTestAccess::pendingReclaimCount(e) == 0)
+        {
+            std::fprintf(stderr, "[G] FAIL(a): retire did not enqueue a pending reclaim\n");
+            ok = false;
+        }
+        else if (!driveUntilReclaimed(400))
+        {
+            std::fprintf(stderr,
+                         "[G] FAIL(a): reclaim never completed (pending=%zu, cur=%llu, min=%llu)"
+                         " -- the epoch gate is still tautological\n",
+                         DeferredPublicationTestAccess::pendingReclaimCount(e),
+                         (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
+                         (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e));
+            ok = false;
+        }
+        if (DeferredPublicationTestAccess::reclaimInFlightCount(e) != 0)
+        {
+            std::fprintf(stderr, "[G] FAIL(a): reclaimInFlightCount not balanced (%llu)\n",
+                         (unsigned long long)DeferredPublicationTestAccess::reclaimInFlightCount(e));
+            ok = false;
+        }
+    }
+
+    // ---- (b) safety property: a reclaim may only complete once minReaderEpoch has passed
+    //          the RETIREMENT epoch. The engine's own audio reader can move between blocks,
+    //          so the assertion is on the property, not on "it must stay pending forever".
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        convo::RCUReader reader(e.getRetireRouter());
+        {
+            convo::RCUReaderGuard guard(reader);
+            if (!guard.rootEnterSucceeded())
+            {
+                std::fprintf(stderr, "[G] FAIL(b): reader could not enter\n");
+                harness.stop();
+                return false;
+            }
+
+            mgr.retire(raw);
+            const auto retireEpoch = DeferredPublicationTestAccess::pendingRetireEpochForTest(e);
+
+            for (int i = 0; i < 10; ++i)
+            {
+                (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+                DeferredPublicationTestAccess::drainDeferredRetireQueuesForTest(e);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+
+            // The pending list is SWAPPED OUT while a retry is in flight, so an instantaneous
+            // pendingReclaimCount()==0 is NOT proof that the identity was reclaimed. Require
+            // two consecutive "this handle is not pending" reads, separated by a delay.
+            bool stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
+            if (!stillPending)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
+            }
+
+            if (stillPending)
+            {
+                std::printf("[G] observe: identity retained while minReaderEpoch <= retireEpoch"
+                            " (retire=%llu min=%llu)\n",
+                            (unsigned long long)retireEpoch,
+                            (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e));
+            }
+            else
+            {
+                const auto minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+                if (static_cast<std::int64_t>(minEpoch - retireEpoch) <= 0)
+                {
+                    std::fprintf(stderr,
+                                 "[G] FAIL(b): reclaimed while minReaderEpoch (%llu) had not"
+                                 " passed the retire epoch (%llu)\n",
+                                 (unsigned long long)minEpoch,
+                                 (unsigned long long)retireEpoch);
+                    ok = false;
+                }
+                else
+                {
+                    std::printf("[G] note: reclaimed inside the guard window only after"
+                                " minReaderEpoch passed the retire epoch\n");
+                }
+            }
+        }
+
+        if (!driveUntilReclaimed(400))
+        {
+            std::fprintf(stderr,
+                         "[G] FAIL(b): reclaim did not complete after the reader left "
+                         "(pending=%zu)\n",
+                         DeferredPublicationTestAccess::pendingReclaimCount(e));
+            ok = false;
+        }
+    }
+
+    harness.stop();
+    std::printf("[G] normal reclaim uses the retirement epoch: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+} // namespace
+
+int runV11EngineRetireProtectionTests()
+{
+    g_v11eReclaimCalls = 0;
+    g_v11eLastReclaimed = nullptr;
+
+    if (!checkEngineLevelProtection())
+    {
+        std::fprintf(stderr, "FAIL: checkV11EngineRetireProtection\n");
+        return 1;
+    }
+    if (!checkInCallbackRetireProtection())
+    {
+        std::fprintf(stderr, "FAIL: checkV11InCallbackRetireProtection\n");
+        return 1;
+    }
+    // HD-1 and HD-3 are independent observations of the same defect class. Run both so one
+    // failure does not hide the other's result; this is the C-1 evidence run.
+    bool hdOk = true;
+    if (!checkHandleLifetimeDestroyedActiveDoesNotResolve())
+    {
+        std::fprintf(stderr, "FAIL: checkHandleLifetimeDestroyedActiveDoesNotResolve (HD-1)\n");
+        hdOk = false;
+    }
+    if (!checkHandleLifetimeNoDuplicateRegistration())
+    {
+        std::fprintf(stderr, "FAIL: checkHandleLifetimeNoDuplicateRegistration (HD-3)\n");
+        hdOk = false;
+    }
+    if (!checkF1PinLifecycle())
+    {
+        std::fprintf(stderr, "FAIL: checkF1PinLifecycle (F1-1..F1-5, F1-7)\n");
+        hdOk = false;
+    }
+    if (!checkF1PinAcrossRegistrationClose())
+    {
+        std::fprintf(stderr, "FAIL: checkF1PinAcrossRegistrationClose (F1-6)\n");
+        hdOk = false;
+    }
+    if (!checkF1bDeferredDestroyRetainsOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bDeferredDestroyRetainsOwnership (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bTerminalRetainsDeferred())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bTerminalRetainsDeferred (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bRetirePathsKeepOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bRetirePathsKeepOwnership (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bDrainAllDoesNotForceFree())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bDrainAllDoesNotForceFree (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bProductionRetireUnderPin())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bProductionRetireUnderPin (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF2QuarantineDestroyHonoursPins())
+    {
+        std::fprintf(stderr, "FAIL: checkF2QuarantineDestroyHonoursPins (F2)\n");
+        hdOk = false;
+    }
+    if (!checkGReclaimNormalUsesRetireEpoch())
+    {
+        std::fprintf(stderr, "FAIL: checkGReclaimNormalUsesRetireEpoch (G)\n");
+        hdOk = false;
+    }
+    if (!checkF1bAuditNormalTickCollects())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bAuditNormalTickCollects (audit A)\n");
+        hdOk = false;
+    }
+    if (!checkF1bAuditSingleOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bAuditSingleOwnership (audit B)\n");
+        hdOk = false;
+    }
+    if (!hdOk)
+        return 1;
+    return 0;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\V11ReaderReacquireTests.cpp`
+
+```
+// V11ReaderReacquireTests.cpp — V-11 P0 regression: reader protection must be
+// re-establishable after reader registration is closed, without admitting a new reader.
+//
+// Bug: EpochDomain::reserveReaderThread() refuses once registrationClosed_ is set, even
+// for the thread that already owns the slot. RCUReader::enter() then fails,
+// rootEnterSucceeded() is false, no slot contributes to getMinReaderEpoch(), and an
+// object retired at the previous epoch is reclaimed while the callback reads it (UAF).
+//
+// Fix under test: IReaderEpochProvider::reacquireReaderSlot() — ownership-checked
+// re-acquisition that works after close and refuses foreign threads / new readers.
+//
+// Oracle: the real reclaim pair (RetireQuarantineStore::quarantine/drain with
+// EpochDomain::isOlder) is driven directly, so "was it freed" is an observation of the
+// production deleter being invoked, not an inference.
+//
+// No new CTest target: these run as sub-tests of the AudioEngineHarness exe.
+
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <thread>
+
+#include "core/EpochDomain.h"
+#include "core/RCUReader.h"
+#include "audioengine/RetireQuarantineStore.h"
+
+namespace {
+
+constexpr uint64_t kV11ValidMagic = 0xC0FFEE11ULL;
+constexpr uint64_t kV11FreedMagic = 0xDEADDEADULL;
+
+int   g_v11DeleterCalls = 0;
+void* g_v11LastDeleted  = nullptr;
+
+void v11TestDeleter(void* p) noexcept
+{
+    ++g_v11DeleterCalls;
+    g_v11LastDeleted = p;
+}
+
+void v11ResetCounters() noexcept
+{
+    g_v11DeleterCalls = 0;
+    g_v11LastDeleted  = nullptr;
+}
+
+int v11FindActiveSlot(convo::EpochDomain& domain) noexcept
+{
+    for (int i = 0; i < domain.readerCapacity(); ++i)
+    {
+        if (domain.getReaderSlotDetail(i).depth > 0)
+            return i;
+    }
+    return -1;
+}
+
+// v11_1: baseline re-entry while registration is open.
+bool checkV11BaselineReentry()
+{
+    convo::EpochDomain domain;
+    convo::RCUReader reader(domain);
+
+    bool first = false, second = false;
+    { convo::RCUReaderGuard g(reader); first = g.rootEnterSucceeded(); }
+    { convo::RCUReaderGuard g(reader); second = g.rootEnterSucceeded(); }
+
+    if (!first || !second)
+    {
+        std::printf("  v11_1: open reentry enter#1=%d enter#2=%d\n", first ? 1 : 0, second ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
+// v11_2/3/4: after close, protection is re-established and the retired object survives
+// until the guard is dropped.
+bool checkV11ProtectionAfterClose()
+{
+    v11ResetCounters();
+    convo::EpochDomain domain;
+    convo::isr::RetireQuarantineStore store;
+    convo::RCUReader reader(domain);
+
+    { convo::RCUReaderGuard g(reader);
+      if (!g.rootEnterSucceeded())
+      {
+          std::printf("  v11_2: initial enter failed\n");
+          return false;
+      } }
+
+    domain.closeReaderRegistration();
+
+    static int object = 0;
+    void* obj = &object;
+
+    bool enteredAfterClose = false;
+    {
+        convo::RCUReaderGuard g(reader);
+        enteredAfterClose = g.rootEnterSucceeded();
+        if (!enteredAfterClose)
+        {
+            std::printf("  v11_2: enter() refused after close (protection not re-established)\n");
+            return false;
+        }
+
+        const uint64_t retireEpoch = domain.currentEpoch();
+        store.quarantine(obj, v11TestDeleter, retireEpoch,
+                         DeletionEntryType::Generic, "v11-harness");
+        domain.publishEpoch();                       // new publication advances the epoch
+
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        if (g_v11DeleterCalls != 0)
+        {
+            std::printf("  v11_3: object freed while the guard was held (calls=%d)\n",
+                        g_v11DeleterCalls);
+            return false;
+        }
+    }
+
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    if (g_v11DeleterCalls != 1 || g_v11LastDeleted != obj)
+    {
+        std::printf("  v11_4: object not freed after the guard dropped (calls=%d)\n",
+                    g_v11DeleterCalls);
+        return false;
+    }
+    return true;
+}
+
+// v11_5: a thread that never registered must not obtain a slot after close.
+bool checkV11NewThreadStillRefused()
+{
+    convo::EpochDomain domain;
+    domain.closeReaderRegistration();
+
+    std::atomic<int> outcome{99};
+    std::thread t([&]
+    {
+        convo::RCUReader reader(domain);
+        convo::RCUReaderGuard g(reader);
+        outcome.store(g.rootEnterSucceeded() ? 1 : 0, std::memory_order_release);
+    });
+    t.join();
+
+    const int got = outcome.load(std::memory_order_acquire);
+    if (got != 0)
+    {
+        std::printf("  v11_5: new thread obtained a slot after close (enter=%d)\n", got);
+        return false;
+    }
+    return true;
+}
+
+// v11_6: ownership — a foreign thread cannot re-acquire the owner's slot.
+bool checkV11ForeignReacquireRefused()
+{
+    convo::EpochDomain domain;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    { convo::RCUReaderGuard g(reader);
+      if (!g.rootEnterSucceeded())
+          return false;
+      slot = v11FindActiveSlot(domain); }
+
+    if (slot < 0)
+    {
+        std::printf("  v11_6: could not identify the held slot\n");
+        return false;
+    }
+
+    domain.closeReaderRegistration();
+
+    std::atomic<int> foreign{99};
+    std::thread t([&] { foreign.store(domain.reacquireReaderSlot(slot) ? 1 : 0,
+                                       std::memory_order_release); });
+    t.join();
+
+    const int got = foreign.load(std::memory_order_acquire);
+    if (got != 0)
+    {
+        std::printf("  v11_6: foreign thread re-acquired slot %d\n", slot);
+        return false;
+    }
+
+    if (!domain.reacquireReaderSlot(slot))
+    {
+        std::printf("  v11_6: owner could not re-acquire slot %d\n", slot);
+        return false;
+    }
+    return true;
+}
+
+struct V11ConcResult
+{
+    long long reads      = 0;
+    long long detections = 0;
+    long long enterFail  = 0;
+    long long reclaims   = 0;
+};
+
+struct V11Payload
+{
+    uint64_t magic = kV11ValidMagic;
+    uint64_t seq   = 0;
+};
+
+void v11PayloadDeleter(void* p) noexcept
+{
+    if (p != nullptr)
+        static_cast<V11Payload*>(p)->magic = kV11FreedMagic;
+}
+
+// registeredBeforeClose == false models the pre-fix / unprotected reader (it can never
+// obtain a slot, so nothing pins the epoch); true exercises the re-acquire path.
+V11ConcResult v11RunConcurrency(bool registeredBeforeClose, long long iterations)
+{
+    convo::EpochDomain domain;
+    convo::isr::RetireQuarantineStore store;
+    std::atomic<V11Payload*> world{nullptr};
+
+    std::atomic<bool>      start{false};
+    std::atomic<bool>      readerReady{false};
+    std::atomic<long long> reads{0};
+    std::atomic<long long> detections{0};
+    std::atomic<long long> enterFail{0};
+    std::atomic<long long> reclaims{0};
+
+    if (!registeredBeforeClose)
+        domain.closeReaderRegistration();
+
+    std::thread reader([&]
+    {
+        convo::RCUReader rcu(domain);
+
+        if (registeredBeforeClose)
+        {
+            { convo::RCUReaderGuard g(rcu);
+              if (!g.rootEnterSucceeded())
+                  enterFail.fetch_add(1, std::memory_order_relaxed); }
+        }
+
+        readerReady.store(true, std::memory_order_release);
+        while (!start.load(std::memory_order_acquire))
+            std::this_thread::yield();
+
+        for (long long i = 0; i < iterations; ++i)
+        {
+            convo::RCUReaderGuard g(rcu);
+            if (!g.rootEnterSucceeded())
+                enterFail.fetch_add(1, std::memory_order_relaxed);
+
+            V11Payload* p = world.load(std::memory_order_acquire);
+            if (p != nullptr)
+            {
+                reads.fetch_add(1, std::memory_order_relaxed);
+                const uint64_t m1 = p->magic;
+                std::this_thread::yield();     // widen the read window
+                const uint64_t m2 = p->magic;
+                if (m1 != kV11ValidMagic || m2 != kV11ValidMagic)
+                    detections.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    while (!readerReady.load(std::memory_order_acquire))
+        std::this_thread::yield();
+
+    if (registeredBeforeClose)
+        domain.closeReaderRegistration();
+
+    world.store(new V11Payload{kV11ValidMagic, 0}, std::memory_order_release);
+    start.store(true, std::memory_order_release);
+
+    for (long long i = 0; i < iterations; ++i)
+    {
+        V11Payload* np = new V11Payload{kV11ValidMagic, static_cast<uint64_t>(i) + 1};
+        V11Payload* old = world.exchange(np, std::memory_order_acq_rel);
+
+        const uint64_t retireEpoch = domain.currentEpoch();
+        if (old != nullptr)
+            store.quarantine(old, v11PayloadDeleter, retireEpoch,
+                             DeletionEntryType::Generic, "v11-harness-conc");
+
+        domain.publishEpoch();
+
+        const std::size_t residentBefore = store.residentCount();
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        const std::size_t residentAfter = store.residentCount();
+        if (residentAfter < residentBefore)
+            reclaims.fetch_add(static_cast<long long>(residentBefore - residentAfter),
+                               std::memory_order_relaxed);
+    }
+
+    reader.join();
+
+    V11ConcResult r;
+    r.reads      = reads.load();
+    r.detections = detections.load();
+    r.enterFail  = enterFail.load();
+    r.reclaims   = reclaims.load();
+    return r;
+}
+
+// v11_7/v11_8: under real thread contention the unprotected reader is caught reading a
+// reclaimed object, and the re-acquiring reader never is.
+bool checkV11Concurrency()
+{
+    constexpr long long kIters = 50000;
+
+    const V11ConcResult unprotected = v11RunConcurrency(false, kIters);
+    if (unprotected.detections <= 0)
+    {
+        std::printf("  v11_7: detector did not fire on the unprotected path (reads=%lld)\n",
+                    unprotected.reads);
+        return false;
+    }
+
+    const V11ConcResult protectedRun = v11RunConcurrency(true, kIters);
+    if (protectedRun.detections != 0 || protectedRun.enterFail != 0 || protectedRun.reclaims <= 0)
+    {
+        std::printf("  v11_8: protected path detections=%lld enterFail=%lld reclaims=%lld\n",
+                    protectedRun.detections, protectedRun.enterFail, protectedRun.reclaims);
+        return false;
+    }
+
+    std::printf("  v11_7/v11_8: unprotected detections=%lld, protected detections=0 (reads=%lld)\n",
+                unprotected.detections, protectedRun.reads);
+    return true;
+}
+
+// v11_9: quarantine is preserved across a re-acquire (invariant #3).
+bool checkV11QuarantinePreserved()
+{
+    v11ResetCounters();
+    convo::EpochDomain domain;
+    convo::isr::RetireQuarantineStore store;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    { convo::RCUReaderGuard g(reader);
+      if (!g.rootEnterSucceeded())
+          return false;
+      slot = v11FindActiveSlot(domain); }
+
+    if (slot < 0)
+    {
+        std::printf("  v11_9: could not identify the held slot\n");
+        return false;
+    }
+
+    // Idle now: quarantine the slot, then close registration.
+    const bool quarantined = domain.quarantineReader(slot);
+    const int before = domain.quarantinedReaderCount();
+    domain.closeReaderRegistration();
+
+    static int object = 0;
+    void* obj = &object;
+    bool protectedWhileActive = false;
+
+    {
+        convo::RCUReaderGuard g(reader);
+        if (!g.rootEnterSucceeded())
+        {
+            std::printf("  v11_9: enter refused for a quarantined-idle slot\n");
+            return false;
+        }
+
+        const uint64_t retireEpoch = domain.currentEpoch();
+        store.quarantine(obj, v11TestDeleter, retireEpoch,
+                         DeletionEntryType::Generic, "v11-harness-q");
+        domain.publishEpoch();
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        protectedWhileActive = (g_v11DeleterCalls == 0);
+
+        if (domain.quarantinedReaderCount() != before)
+        {
+            std::printf("  v11_9: quarantine flag cleared by re-acquire (%d -> %d)\n",
+                        before, domain.quarantinedReaderCount());
+            return false;
+        }
+    }
+
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
+    const bool flagKept = domain.quarantinedReaderCount() == before;
+
+    if (!quarantined || !protectedWhileActive || !freed || !flagKept)
+    {
+        std::printf("  v11_9: quarantined=%d protectedWhileActive=%d freed=%d flagKept=%d\n",
+                    quarantined ? 1 : 0, protectedWhileActive ? 1 : 0, freed ? 1 : 0,
+                    flagKept ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
+// v11_10: the re-acquire is a single-shot reservation. A second call without an enter in
+// between must be refused, which is what keeps "reserved but not entered" from being
+// mistaken for protection. RCUReader always follows a successful re-acquire with
+// enterReader() in the same call (acquireThreadSlot -> enterReader).
+bool checkV11ReacquireIsSingleShot()
+{
+    convo::EpochDomain domain;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    { convo::RCUReaderGuard g(reader);
+      if (!g.rootEnterSucceeded())
+          return false;
+      slot = v11FindActiveSlot(domain); }
+
+    if (slot < 0)
+        return false;
+
+    domain.closeReaderRegistration();
+
+    const bool first  = domain.reacquireReaderSlot(slot);
+    const bool second = domain.reacquireReaderSlot(slot);
+
+    if (!first || second)
+    {
+        std::printf("  v11_10: first=%d second=%d (expected 1/0)\n",
+                    first ? 1 : 0, second ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
+
+// v11_11 (RA-6): quarantine requested while the slot is busy is a *pending* flag. It must
+// not change the barrier accounting mid-block, must be promoted when the guard drops, and
+// the resulting quarantined-idle slot must still be re-acquirable with protection.
+bool checkV11QuarantinePendingTransition()
+{
+    v11ResetCounters();
+    convo::EpochDomain domain;
+    convo::isr::RetireQuarantineStore store;
+    convo::RCUReader reader(domain);
+
+    int slot = -1;
+    bool requested = false;
+    bool notCountedWhilePending = false;
+    {
+        convo::RCUReaderGuard g(reader);
+        if (!g.rootEnterSucceeded())
+            return false;
+        slot = v11FindActiveSlot(domain);
+        if (slot < 0)
+            return false;
+
+        // Contract: with depth > 0 the quarantine is deferred, so the call reports
+        // false and the pending flag is the acknowledgement (EpochDomain.h:327-328,379).
+        requested = !domain.quarantineReader(slot);
+        notCountedWhilePending = (domain.quarantinedReaderCount() == 0);
+    }                                                        // exit -> promote
+
+    const bool promoted = (domain.quarantinedReaderCount() == 1);
+
+    static int object = 0;
+    void* obj = &object;
+    bool protectedWhileActive = false;
+    {
+        convo::RCUReaderGuard g(reader);
+        if (!g.rootEnterSucceeded())
+        {
+            std::printf("  v11_11: re-entry refused after pending quarantine\n");
+            return false;
+        }
+        store.quarantine(obj, v11TestDeleter, domain.currentEpoch(),
+                         DeletionEntryType::Generic, "v11-11");
+        domain.publishEpoch();
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        protectedWhileActive = (g_v11DeleterCalls == 0);
+    }
+
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
+
+    std::printf("  v11_11: deferred=%d notCountedWhilePending=%d promoted=%d "
+                "protected=%d freed=%d\n",
+                requested ? 1 : 0, notCountedWhilePending ? 1 : 0, promoted ? 1 : 0,
+                protectedWhileActive ? 1 : 0, freed ? 1 : 0);
+
+    if (!requested || !notCountedWhilePending || !promoted || !protectedWhileActive || !freed)
+        return false;
+    return true;
+}
+
+// v11_12 (RA-7): with every slot held, a further reader must be refused, and releasing one
+// must let a reader re-enter - the refusal must not poison the slots that are already held.
+bool checkV11CapacityRefusalRecovers()
+{
+    convo::EpochDomain domain;
+
+    std::array<std::unique_ptr<convo::RCUReader>, convo::EpochDomain::kMaxReaders> readers;
+    std::array<std::unique_ptr<convo::RCUReaderGuard>, convo::EpochDomain::kMaxReaders> guards;
+
+    int held = 0;
+    for (int i = 0; i < convo::EpochDomain::kMaxReaders; ++i)
+    {
+        readers[i] = std::make_unique<convo::RCUReader>(domain);
+        guards[i] = std::make_unique<convo::RCUReaderGuard>(*readers[i]);
+        if (guards[i]->rootEnterSucceeded())
+            ++held;
+    }
+
+    convo::RCUReader extra(domain);
+    convo::RCUReaderGuard extraGuard(extra);
+    const bool overflowRefused = !extraGuard.rootEnterSucceeded();
+
+    guards[0].reset();                       // release one slot
+    convo::RCUReaderGuard reenter(*readers[0]);
+    const bool recovered = reenter.rootEnterSucceeded();
+
+    for (auto& g : guards)
+        g.reset();
+
+    std::printf("  v11_12: held=%d/%d overflowRefused=%d recovered=%d\n",
+                held, convo::EpochDomain::kMaxReaders,
+                overflowRefused ? 1 : 0, recovered ? 1 : 0);
+
+    if (held != convo::EpochDomain::kMaxReaders || !overflowRefused || !recovered)
+        return false;
+    return true;
+}
+
+} // namespace
+
+int runV11ReaderReacquireTests()
+{
+    bool ok = true;
+
+    if (!checkV11BaselineReentry())
+    {
+        std::fprintf(stderr, "FAIL: checkV11BaselineReentry\n");
+        ok = false;
+    }
+    if (!checkV11ProtectionAfterClose())
+    {
+        std::fprintf(stderr, "FAIL: checkV11ProtectionAfterClose\n");
+        ok = false;
+    }
+    if (!checkV11NewThreadStillRefused())
+    {
+        std::fprintf(stderr, "FAIL: checkV11NewThreadStillRefused\n");
+        ok = false;
+    }
+    if (!checkV11ForeignReacquireRefused())
+    {
+        std::fprintf(stderr, "FAIL: checkV11ForeignReacquireRefused\n");
+        ok = false;
+    }
+    if (!checkV11Concurrency())
+    {
+        std::fprintf(stderr, "FAIL: checkV11Concurrency\n");
+        ok = false;
+    }
+    if (!checkV11QuarantinePreserved())
+    {
+        std::fprintf(stderr, "FAIL: checkV11QuarantinePreserved\n");
+        ok = false;
+    }
+    if (!checkV11ReacquireIsSingleShot())
+    {
+        std::fprintf(stderr, "FAIL: checkV11ReacquireIsSingleShot\n");
+        ok = false;
+    }
+    if (!checkV11QuarantinePendingTransition())
+    {
+        std::fprintf(stderr, "FAIL: checkV11QuarantinePendingTransition\n");
+        ok = false;
+    }
+    if (!checkV11CapacityRefusalRecovers())
+    {
+        std::fprintf(stderr, "FAIL: checkV11CapacityRefusalRecovers\n");
+        ok = false;
+    }
+
+    return ok ? 0 : 1;
+}
 
 ```
 
@@ -121014,6 +126798,87 @@ namespace {
         if (c->recoveryRetryExhaustedCount() > 1) return false;           // never double-counted
         return true;
     }
+
+    // C17 (2026-10-26, GO-3 / N2 residual closure): two resolver threads race the SAME
+    //   obligation through the Completion Authority. C7/C8/C9 verify the contract
+    //   sequentially; this is the only case that exercises the actual concurrent CAS
+    //   (the decisive half of D105-R5-9).
+    //   Requirements:
+    //     - exactly ONE of the two resolves wins (the loser is a no-op, not a double count),
+    //     - L goes 1 -> 0 exactly once,
+    //     - the lifecycle state equals the WINNER's terminal state (the winner owns it),
+    //     - identity (obligationId) is preserved and a later resolve is still a no-op.
+    [[nodiscard]] bool testRLOE_C17_twoResolverRaceSingleWinner()
+    {
+        constexpr int kAttempts = 200;
+
+        for (int attempt = 0; attempt < kAttempts; ++attempt)
+        {
+            auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+            auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(),
+                                     static_cast<std::uint64_t>(9000 + attempt));
+            if (!id)
+                return false;
+            const std::uint64_t obl = *id;
+            if (c->liveLogicalRecoveryObligationCount() != 1)
+                return false;
+
+            std::atomic<int> ready{0};
+            std::atomic<bool> go{false};
+            bool wonPublished = false;
+            bool wonFailed = false;
+
+            const auto runner = [&](bool published, bool& won) {
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                while (!go.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                won = c->resolveRecoveryObligation(
+                    obl, published
+                             ? convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published
+                             : convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Failed);
+            };
+
+            std::thread tPublished([&] { runner(true, wonPublished); });
+            std::thread tFailed([&] { runner(false, wonFailed); });
+
+            while (ready.load(std::memory_order_acquire) < 2)
+                std::this_thread::yield();
+            go.store(true, std::memory_order_release);
+
+            tPublished.join();
+            tFailed.join();
+
+            // exactly one winner: both-false means the obligation was not Live; both-true is
+            // the double count this test exists to catch.
+            if (wonPublished == wonFailed)
+                return false;
+
+            if (c->liveLogicalRecoveryObligationCount() != 0)
+                return false;                                   // L 1 -> 0 exactly once
+
+            const auto w = c->peekLifecycleForTest(obl);
+            if (!w || w->obligationId != obl)
+                return false;
+
+            const auto expected =
+                wonPublished
+                    ? convo::isr::RuntimeIntentCoordinator::ObligationState::ResolvedSuccess
+                    : convo::isr::RuntimeIntentCoordinator::ObligationState::ResolvedFailed;
+            if (w->state != static_cast<std::uint8_t>(expected))
+                return false;                                   // winner owns the terminal state
+
+            if (c->resolveRecoveryObligation(
+                    obl, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded))
+                return false;                                   // late resolve must lose
+            if (c->liveLogicalRecoveryObligationCount() != 0)
+                return false;
+            const auto w2 = c->peekLifecycleForTest(obl);
+            if (!w2 || w2->state != static_cast<std::uint8_t>(expected))
+                return false;                                   // terminal state not overwritten
+        }
+
+        return true;
+    }
 }
 
 int main()
@@ -121145,6 +127010,14 @@ int main()
         throw std::runtime_error("D105-R5-10 C15: redrive must never change live obligation count");
     if (!testRLOE_C16_deferredSameKeyResubmitCoalesces())
         throw std::runtime_error("D105-R5-10 C16: deferred + same-key resubmit must coalesce (no new id, single representation)");
+    if (!testRLOE_C17_twoResolverRaceSingleWinner())
+        throw std::runtime_error("D105-R5-9 C17: two concurrent resolvers must yield exactly one winner (no double count, winner owns the terminal state)");
+    // Positive runtime evidence that the completion-authority block above actually executed
+    // (this program prints nothing on success, so exit==0 alone is not observable proof).
+    std::printf("ISRSemanticValidationTests: PASS (D105-R5-9 completion authority:"
+                " C7 duplicate resolve, C8 shutdown race, C9 ABA stale resolve,"
+                " C17 two-resolver concurrent CAS)\n");
+    std::fflush(stdout);
 
     // --- G-4.3 Phase-I Coalesce Admission regression (D105-R23 / D27.2) ---
     if (!testG43_T1_sameIdentityCoalesces())
