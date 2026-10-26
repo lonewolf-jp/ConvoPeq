@@ -85,6 +85,63 @@
     return true;
 }
 
+
+// ── ★ Compile-time verification of the pure retire rules ──────────────────────
+//   These five rule groups used to be checked at RUNTIME with constant arguments. The compiler
+//   folded every condition, deleted the `return false` path (and therefore the throw message that
+//   main() would have printed), so the binary contained no evidence that the rules had been
+//   evaluated at all - a PASS only proved "the process exited 0".
+//
+//   The rules are pure (no state, no I/O), so they are now verified at COMPILE TIME with
+//   static_assert. That makes the verification explicit and impossible to optimise away: if a rule
+//   regresses, this translation unit fails to compile instead of silently passing at runtime.
+//
+//   EpochControl's four rule functions are `static constexpr` (ISRRetireRuntimeEx.h), which is what
+//   makes this possible without any product behaviour change.
+namespace {
+
+constexpr bool graceRule_1 = convo::isr::EpochControl::isGracePeriodCompleted(100, 101, 1);   // maxObserved > world
+constexpr bool graceRule_2 = convo::isr::EpochControl::isGracePeriodCompleted(100, 100, 0);   // no callback active
+constexpr bool graceRule_3 = convo::isr::EpochControl::isGracePeriodCompleted(100, 100, 1);   // still active
+
+constexpr bool pendingRule_1 = convo::isr::EpochControl::canTransitionRetirePendingToFree(true, true, true);
+constexpr bool pendingRule_2 = convo::isr::EpochControl::canTransitionRetirePendingToFree(false, true, true);
+constexpr bool pendingRule_3 = convo::isr::EpochControl::canTransitionRetirePendingToFree(true, false, true);
+constexpr bool pendingRule_4 = convo::isr::EpochControl::canTransitionRetirePendingToFree(true, true, false);
+
+constexpr bool deferralRule_1 = convo::isr::EpochControl::hasExceededDeferralThresholds(101, 10.0, 100, 5000.0);
+constexpr bool deferralRule_2 = convo::isr::EpochControl::hasExceededDeferralThresholds(10, 5001.0, 100, 5000.0);
+constexpr bool deferralRule_3 = convo::isr::EpochControl::hasExceededDeferralThresholds(100, 5000.0, 100, 5000.0);
+
+constexpr bool escalationRule_1 = convo::isr::EpochControl::canReclaimAfterEscalation(true, true, true);
+constexpr bool escalationRule_2 = convo::isr::EpochControl::canReclaimAfterEscalation(false, true, true);
+constexpr bool escalationRule_3 = convo::isr::EpochControl::canReclaimAfterEscalation(true, false, true);
+constexpr bool escalationRule_4 = convo::isr::EpochControl::canReclaimAfterEscalation(true, true, false);
+
+// Grace period: completes only when the observed generation passed, or no callback is active.
+static_assert(graceRule_1, "grace: maxObservedGeneration > worldGeneration must complete");
+static_assert(graceRule_2, "grace: audioCallbackActiveCount == 0 must complete");
+static_assert(!graceRule_3, "grace: an active callback at the same generation must NOT complete");
+
+// Pending -> free requires all three conditions.
+static_assert(pendingRule_1, "pending->free: all three conditions must allow the transition");
+static_assert(!pendingRule_2, "pending->free: graceCompleted == false must block");
+static_assert(!pendingRule_3, "pending->free: pendingIntentOwned == false must block");
+static_assert(!pendingRule_4, "pending->free: authoritativeOwnershipReleased == false must block");
+
+// Deferral thresholds are exceeded by EITHER the epoch count OR the wall clock, not both.
+static_assert(deferralRule_1, "deferral: exceeding the epoch count alone must trip");
+static_assert(deferralRule_2, "deferral: exceeding the wall clock alone must trip");
+static_assert(!deferralRule_3, "deferral: exactly at both thresholds must NOT trip");
+
+// Reclaim after escalation requires all three safety conditions.
+static_assert(escalationRule_1, "escalation: all three conditions must allow reclaim");
+static_assert(!escalationRule_2, "escalation: a reader must block reclaim");
+static_assert(!escalationRule_3, "escalation: an executor reference must block reclaim");
+static_assert(!escalationRule_4, "escalation: a pending transition must block reclaim");
+
+} // namespace
+
 [[nodiscard]] bool testGracePeriodCompletionRules()
 {
     if (!convo::isr::EpochControl::isGracePeriodCompleted(100, 101, 1))

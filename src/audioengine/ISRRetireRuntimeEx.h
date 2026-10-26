@@ -58,20 +58,20 @@ public:
     [[nodiscard]] EpochStrategyDescriptor describeEpochStrategy() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;
     [[nodiscard]] RetireLifecycleState lifecycleStateOf(std::uint32_t slot) const noexcept;
-    [[nodiscard]] static bool isGracePeriodCompleted(std::uint64_t worldGeneration,
+    [[nodiscard]] static constexpr bool isGracePeriodCompleted(std::uint64_t worldGeneration,
                                                      std::uint64_t maxObservedGeneration,
                                                      std::uint32_t audioCallbackActiveCount) noexcept
     {
         return (maxObservedGeneration > worldGeneration) || (audioCallbackActiveCount == 0u);
     }
-    [[nodiscard]] static bool canTransitionRetirePendingToFree(bool graceCompleted,
+    [[nodiscard]] static constexpr bool canTransitionRetirePendingToFree(bool graceCompleted,
                                                                bool pendingIntentOwned,
                                                                bool authoritativeOwnershipReleased) noexcept
     {
         return graceCompleted && pendingIntentOwned && authoritativeOwnershipReleased;
     }
 
-    [[nodiscard]] static bool hasExceededDeferralThresholds(std::uint64_t retireDeferralEpochs,
+    [[nodiscard]] static constexpr bool hasExceededDeferralThresholds(std::uint64_t retireDeferralEpochs,
                                                             double retireDeferralWallClockMs,
                                                             std::uint64_t maxRetireDeferralEpochs,
                                                             double maxRetireWallClockMs) noexcept
@@ -80,7 +80,7 @@ public:
             || retireDeferralWallClockMs > maxRetireWallClockMs;
     }
 
-    [[nodiscard]] static bool canReclaimAfterEscalation(bool noReader,
+    [[nodiscard]] static constexpr bool canReclaimAfterEscalation(bool noReader,
                                                         bool noExecutorReference,
                                                         bool noPendingTransition) noexcept
     {
