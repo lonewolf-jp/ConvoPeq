@@ -2195,6 +2195,13 @@ private:
                                   double sampleRate,
                                   int maxBlockSize,
                                   uint64_t generation);
+        // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
+        //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
+        //     DSPHandlePin keeps the cache entry alive for the lease duration.
+        //   - The returned pointer must not be retained across a NonRT boundary that can
+        //     retire the entry (drainForShutdown / rebuild).
+        //   - Call sites are enumerated in the V-11 §10.6-3 audit record; adding an RT
+        //     caller here is a contract violation.
         EQCoeffCache* get(uint64_t hash) noexcept;
 
         // ★ F1' (2026-10-25): RT 経路用の寿命 lease。`get()` は生ポインタを返すため、

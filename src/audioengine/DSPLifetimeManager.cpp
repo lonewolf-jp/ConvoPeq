@@ -136,6 +136,35 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
         std::memory_order_acq_rel);
 }
 
+bool DSPLifetimeManager::retireDetachedCoreForShutdown(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull() || router_ == nullptr)
+        return false;
+
+    void* rawKey = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(engine_.runtimeDSPHandleMapMutex_);
+        if (!engine_.runtimeDSPHandleMap_.findAndEraseByHandle(handle, rawKey))
+            return false;
+    }
+    if (rawKey == nullptr)
+        return false;
+
+    auto* core = static_cast<AudioEngine::DSPCore*>(rawKey);
+    const auto epoch = router_->currentEpoch();
+    const auto result = router_->enqueueWithRetry(
+        core, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic);
+    juce::ignoreUnused(result);
+
+    D117_LIFETIME_LOG(juce::String::formatted(
+        "[D162-2G2_VD_DETACH] dsp=%p handleSlot=%llu", rawKey,
+        static_cast<unsigned long long>(handle.slot)));
+
+    convo::fetchAddAtomic(currentRetiringGeneration_,
+        static_cast<uint64_t>(1), std::memory_order_acq_rel);
+    return true;
+}
+
 void DSPLifetimeManager::retireDeferred() noexcept
 {
     convo::consumeAtomic(currentRetiringGeneration_, std::memory_order_acquire);

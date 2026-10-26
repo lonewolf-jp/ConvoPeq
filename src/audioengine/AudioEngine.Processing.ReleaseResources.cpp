@@ -522,9 +522,10 @@ void AudioEngine::releaseResources()
     //   shutdown 経路は quiescence（activeReaderCount==0）を証明済みで、
     //   音声スレッドも停止しているため、ポインタ値を retire に渡すだけで安全。
     //   （逆参照はしない。retire はハンドル台帳操作のみ。）
-    auto* activeDSPToDestroy = (!activeHandle.isNull()) ? resolveDSPHandle(activeHandle) : nullptr;
-    auto* fadingDSPToDestroy = (!fadingHandle.isNull() && fadingHandle != activeHandle)
-        ? resolveDSPHandle(fadingHandle) : nullptr;
+    // V-11 §10.6-2 (2026-10-26): 生ポインタの resolve は行わない。
+    //   以前は slot が Reclaimed になる前に DSPCore* を確保する必要があったが、
+    //   所有権は runtimeDSPHandleMap_（handle 完全一致・世代検査つき）が保持しているため、
+    //   破棄の直前に handle から取り出せば足りる。下の retireDetachedCoreForShutdown を参照。
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
@@ -594,24 +595,21 @@ void AudioEngine::releaseResources()
     //   返すため、既に disposition 済みの DSP は何もしない（INV-D162-3・二重 retire 不可）。
     //   EBR destroy は dtor body 内 D5/D8 drain で digest される（INV-D162-8 適合）。
     {
+        // V-11 §10.6-2 (2026-10-26): handle ベースの所有権移転。
+        //   slot は上で quiescence permit により既に Reclaimed なので、retire()/reclaim() は
+        //   呼ばない（Retired への戻しと free list の二重 push を避ける）。
         DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
-        if (activeDSPToDestroy != nullptr) // ★ D162-2-G2 (V-D-b): authority retire で再有効化。
+        if (!activeHandle.isNull())
         {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2G2_VD_RETIRE] dsp=%p target=active-final",
-                (void*)activeDSPToDestroy));
-#endif
-            lifetimeMgrForFinalDSP.retire(activeDSPToDestroy);
+            const bool moved = lifetimeMgrForFinalDSP.retireDetachedCoreForShutdown(activeHandle);
+            jassert(moved);
+            juce::ignoreUnused(moved);
         }
-        if (fadingDSPToDestroy != nullptr && fadingDSPToDestroy != activeDSPToDestroy) // ★ D162-2-G2 (V-D-b): 同上・同一 DSP の二重 retire 防止
+        if (!fadingHandle.isNull() && fadingHandle != activeHandle)
         {
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[D162-2G2_VD_RETIRE] dsp=%p target=fading-final",
-                (void*)fadingDSPToDestroy));
-#endif
-            lifetimeMgrForFinalDSP.retire(fadingDSPToDestroy);
+            const bool moved = lifetimeMgrForFinalDSP.retireDetachedCoreForShutdown(fadingHandle);
+            jassert(moved);
+            juce::ignoreUnused(moved);
         }
     }
 
