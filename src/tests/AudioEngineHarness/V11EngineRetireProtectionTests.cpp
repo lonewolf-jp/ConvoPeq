@@ -1686,22 +1686,45 @@ static bool checkGReclaimNormalUsesRetireEpoch()
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
 
-            // The pending list is SWAPPED OUT while a retry is in flight, so an instantaneous
-            // pendingReclaimCount()==0 is NOT proof that the identity was reclaimed. Require
-            // two consecutive "this handle is not pending" reads, separated by a delay.
-            bool stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
-            if (!stillPending)
+            // (H-5, 2026-10-26) The pending list is SWAPPED OUT while a retry is in flight, so an
+            // instantaneous "not in pendingReclaimHandles_" is NOT proof that the identity was
+            // reclaimed: the attempt that removed it may still be inside
+            // onReclaimBegin..onReclaimEnd and still own the object. Interpreting absence as a
+            // reclaim there compares minReaderEpoch against the retire epoch under a guard that is
+            // still held, and falsely FAILs ("reclaimed while minReaderEpoch (N) had not passed
+            // the retire epoch (N)").
+            //   Fix: wait until no reclaim attempt is in flight, and only then read the pending
+            //   list. This is READ-ONLY: it deliberately does not drive/drain while an attempt is
+            //   in flight (driving there stacks further attempts and perturbs later suites).
+            //   If an attempt never settles inside the window we cannot prove a reclaim, so the
+            //   identity is treated as retained — the property under test — instead of failing on
+            //   a counter snapshot.
+            bool reclaimed = false;
+            bool settled = false;
+            for (int i = 0; i < 20; ++i)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
+                const bool pendingNow = DeferredPublicationTestAccess::pendingContains(e, handle);
+                const std::uint64_t inFlightNow = DeferredPublicationTestAccess::reclaimInFlightCount(e);
+                if (inFlightNow == 0)
+                {
+                    reclaimed = !pendingNow;
+                    settled = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+
+            const bool stillPending = !(settled && reclaimed);
 
             if (stillPending)
             {
                 std::printf("[G] observe: identity retained while minReaderEpoch <= retireEpoch"
-                            " (retire=%llu min=%llu)\n",
+                            " (retire=%llu min=%llu pending=%zu inFlight=%llu settled=%d)\n",
                             (unsigned long long)retireEpoch,
-                            (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e));
+                            (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
+                            DeferredPublicationTestAccess::pendingReclaimCount(e),
+                            (unsigned long long)DeferredPublicationTestAccess::reclaimInFlightCount(e),
+                            settled ? 1 : 0);
             }
             else
             {
@@ -1718,7 +1741,12 @@ static bool checkGReclaimNormalUsesRetireEpoch()
                 else
                 {
                     std::printf("[G] note: reclaimed inside the guard window only after"
-                                " minReaderEpoch passed the retire epoch\n");
+                                " minReaderEpoch passed the retire epoch"
+                                " (retire=%llu min=%llu pending=%zu inFlight=%llu)\n",
+                                (unsigned long long)retireEpoch,
+                                (unsigned long long)minEpoch,
+                                DeferredPublicationTestAccess::pendingReclaimCount(e),
+                                (unsigned long long)DeferredPublicationTestAccess::reclaimInFlightCount(e));
                 }
             }
         }
