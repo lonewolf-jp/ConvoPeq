@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-26 23:13:08
+> Generated: 2026-10-26 23:31:38
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -118074,7 +118074,9 @@ int main() {
 // T5 (QueueFull)     = DEFERRED (dead code; Terminal is growable)
 // T6 (Shutdown)       = DEFERRED (no production path added)
 // T9 (DSPLifetimeMgr) = DEFERRED (source audit only, see follow-up)
-// T10 (RT boundary)   = IMPLEMENTED (public startFade path); see test_T10_化)
+// T10 (RT boundary)   = NOT EXERCISABLE: resetFadeStateAndRetireTarget has no production
+//                       caller (updateFade removed 2026-07-28). The reachable path
+//                       (switchImmediate) is verified instead; see test_T10_化)
 
 #include <atomic>
 #include <cstdint>
@@ -118871,31 +118873,42 @@ static bool test_T8_RouterOwnershipConservation()
 }
 
 
+
 //============================================================================
 // T10 — SnapshotCoordinator RT boundary: resetFadeStateAndRetireTarget
 //
 //   D8-2-B-1 T10 requirement:
 //     resetFadeStateAndRetireTarget only calls enqueueRetire (D), never quarantine.
 //
-//   The original deferral reason was "no friend, no public access". That premise is stale:
-//   the function is private, but the PUBLIC startFade(target, fadeSamples <= 0) forwards to
-//   switchImmediate() (SnapshotCoordinator.cpp:50-56), which leaves `target` in the target slot
-//   with an idle fade. Calling startFade() again then takes the target through
-//   resetFadeStateAndRetireTarget()'s exact path (exchange target -> publishEpoch ->
-//   enqueueRetire -> resetToIdle) without reaching into private state.
+//   CORRECTION (2026-10-26, second pass). An earlier version of this test claimed that the public
+//   startFade(target, fadeSamples <= 0) reaches resetFadeStateAndRetireTarget(). That was wrong.
+//   Evidence:
+//     * resetFadeStateAndRetireTarget() has ZERO production callers. Its only historical caller was
+//       updateFade(), removed as dead code on 2026-07-28 (SnapshotCoordinator.h:118).
+//     * startFade(_, <= 0) forwards to switchImmediate(), which is a DIFFERENT function:
+//           switchImmediate            : exchangeTarget -> currentEpoch()  -> enqueueWithRetry (retry loop)
+//           resetFadeStateAndRetireTarget: exchangeTarget -> publishEpoch() -> enqueueRetire  (single, direct)
+//       The observable difference is the epoch source and the retry loop, so a test that only sees
+//       "publishEpoch called, enqueueRetire called, Q/E/T empty" cannot tell the two apart — and in
+//       fact it exercised switchImmediate.
 //
-// Expect:
-//   publishEpochCount      == 1   (the retirement epoch)
-//   enqueueRetireCallCount == 1   (D receives the target)
-//   lastEnqueuedPtr        == target that was retired
-//   Q / E / T residents    == 0   (never quarantined)
-//   router.pendingRetireCount() == 0 (D queue untouched: the provider is the D stand-in)
-//   isFading()             == false (resetToIdle)
+//   Therefore T10's requirement is currently NOT EXERCISABLE from any production path: the function
+//   is unreachable. What this test can verify is the reachable path's behaviour, plus the structural
+//   fact that makes T10 unverifiable today. It reports the latter explicitly instead of claiming a
+//   PASS for a code path that did not run.
+//
+//   Reachable path (switchImmediate via startFade(_, 0)):
+//     first call  : current slot <- target
+//     second call : target slot retired (D accepts) -> current slot <- target
+//   Expect:
+//     enqueueRetire delta      >= 1  (the target slot entry goes to D)
+//     Q / E / T residents      == 0  (no quarantine on the accepting path)
+//     router.pendingRetireCount() == 0 (the provider is the D stand-in)
 //============================================================================
 
-static bool test_T10_SnapshotRetireTargetDOnly()
+static bool test_T10_SnapshotTargetRetireReachability()
 {
-    std::printf("[T10] SnapshotCoordinator target retire -> D only (RT boundary)...\n");
+    std::printf("[T10] SnapshotCoordinator target retire — reachable path vs T10's subject...\n");
 
     ConfigurableEpochProvider provider;              // enqueueRetireResult = true (D accepts)
     convo::isr::ISRRetireRouter router(provider);
@@ -118910,45 +118923,26 @@ static bool test_T10_SnapshotRetireTargetDOnly()
         return false;
     }
 
-    // Leave `target` in the target slot with an idle fade, using only the public API.
+    // Reachable path only. startFade(_, 0) -> switchImmediate(), NOT resetFadeStateAndRetireTarget().
     coordinator->startFade(target, /*fadeSamples=*/0);
-
-    const int publishBefore = provider.publishEpochCount.load(std::memory_order_acquire);
-    const int retireBefore  = provider.enqueueRetireCallCount.load(std::memory_order_acquire);
-
-    // Second call with fadeSamples <= 0: switchImmediate() retires the previous target through
-    // resetFadeStateAndRetireTarget()'s path (publishEpoch + enqueueRetire, no quarantine).
+    const int retireBefore = provider.enqueueRetireCallCount.load(std::memory_order_acquire);
     coordinator->startFade(target, /*fadeSamples=*/0);
+    const int retireDelta = provider.enqueueRetireCallCount.load(std::memory_order_acquire) - retireBefore;
 
-    const int publishDelta = provider.publishEpochCount.load(std::memory_order_acquire) - publishBefore;
-    const int retireDelta  = provider.enqueueRetireCallCount.load(std::memory_order_acquire) - retireBefore;
-    const auto qResidents  = router.quarantineResidentCount();
-    const auto eResidents  = router.emergencyQuarantineResidentCount();
-    const auto tResidents  = router.terminalReclaimResidentCount();
-    const auto dPending    = router.pendingRetireCount();
-    const bool fading      = coordinator->isFading();
-    void* const lastPtr    = provider.lastEnqueuedPtr.load(std::memory_order_acquire);
+    const auto qResidents = router.quarantineResidentCount();
+    const auto eResidents = router.emergencyQuarantineResidentCount();
+    const auto tResidents = router.terminalReclaimResidentCount();
+    const auto dPending   = router.pendingRetireCount();
 
     bool pass = true;
-    if (publishDelta != 1)
+    if (retireDelta < 1)
     {
-        std::printf("  FAIL: publishEpoch delta=%d, expected 1 (one retirement epoch)\n", publishDelta);
-        pass = false;
-    }
-    if (retireDelta != 1)
-    {
-        std::printf("  FAIL: enqueueRetire delta=%d, expected 1 (D only, no Q/E/T escalation)\n", retireDelta);
-        pass = false;
-    }
-    if (lastPtr != static_cast<void*>(target))
-    {
-        std::printf("  FAIL: enqueueRetire received %p, expected the retired target %p\n",
-                    lastPtr, static_cast<void*>(target));
+        std::printf("  FAIL: reachable path did not hand the previous target to D (delta=%d)\n", retireDelta);
         pass = false;
     }
     if (qResidents != 0 || eResidents != 0 || tResidents != 0)
     {
-        std::printf("  FAIL: quarantine used (Q=%zu E=%zu T=%zu), expected 0/0/0\n",
+        std::printf("  FAIL: quarantine used on the accepting path (Q=%zu E=%zu T=%zu)\n",
                     qResidents, eResidents, tResidents);
         pass = false;
     }
@@ -118957,20 +118951,19 @@ static bool test_T10_SnapshotRetireTargetDOnly()
         std::printf("  FAIL: pendingRetireCount=%u, expected 0 (D queue is the provider stub)\n", dPending);
         pass = false;
     }
-    if (fading)
-    {
-        std::printf("  FAIL: isFading()=true after resetToIdle()\n");
-        pass = false;
-    }
 
-    // Cleanup: the provider stub never deletes, so the retired snapshot is still owned by the test.
-    // The coordinator's current slot may also hold it (startFade with no prior current), so drain
-    // the coordinator first and then destroy exactly the pointers the test created.
-    coordinator->finalizeShutdown(/*timedOut=*/true);   // retire without reclaim
+    // The structural statement that decides T10's classification. If this ever becomes false, T10
+    // becomes testable through that new caller and this test must be rewritten to use it.
+    std::printf("  NOTE: T10's subject resetFadeStateAndRetireTarget() has no production caller"
+                " (updateFade was removed as dead code); T10 is NOT exercised here.\n");
+
+    coordinator->finalizeShutdown(/*timedOut=*/true);
     coordinator.reset();
     router.drainAllQuarantineStore();
 
-    if (pass) std::printf("  PASS: target retired via D only (publishEpoch=1, enqueueRetire=1, Q/E/T=0)\n");
+    if (pass)
+        std::printf("  PASS: reachable target-retire path uses D only"
+                    " (delta=%d, Q/E/T=0) — this is switchImmediate, not T10's subject\n", retireDelta);
     return pass;
 }
 
@@ -118988,7 +118981,7 @@ int main()
     ok &= test_T4_RouterT();
     ok &= test_T7_SnapshotOwnershipConservation();
     ok &= test_T8_RouterOwnershipConservation();
-    ok &= test_T10_SnapshotRetireTargetDOnly();
+    ok &= test_T10_SnapshotTargetRetireReachability();
 
     if (ok)
     {
@@ -119003,7 +118996,7 @@ int main()
         std::printf("  T5  DEFERRED (dead code QueueFull)\n");
         std::printf("  T6  DEFERRED (no production Shutdown path)\n");
         std::printf("  T9  DEFERRED (source audit only)\n");
-        std::printf("  T10 target retire -> D only      PASS\n");
+        std::printf("  T10 reachable path -> D only     PASS (T10 subject unreachable)\n");
         std::printf("========================================\n");
         return 0;
     }
