@@ -370,7 +370,13 @@ public:
     // transition in the current source, so it is left as a Phase-II item (do not fake a transition).
     enum class RecoveryOutcome : std::uint8_t {
         Published = 0,      // recovery publish succeeded (Route A trySubmitImpl / Route B onPublishCommitted)
-        Failed,             // build/publish hard failure → terminal (no leak)
+        Failed,             // retry budget EXHAUSTION only → terminal (ResolvedFailed).
+                            //   Transient build/publish failures must NOT come here: production
+                            //   producers post a failure signal (postRecoveryFailureSignal) and the
+                            //   CoordinatorLoop adjudicates (adjudicateRecoveryFailureSignals).
+                            //   The single production caller of resolveRecoveryObligation(_, Failed)
+                            //   is that exhaustion branch (D105-R18/R20/R21, D152 T3c).
+                            //   Do not re-introduce a generic failure route.
         StaleSuperseded,    // ★ D105-R5-9 MUST-4: RejectedStaleGeneration → terminal (−1)
         Retry,              // transient build failure → obligation stays Live (ΔL=0, rebuild retried)
         ShutdownDiscarded   // shutdown close (table-centric discard; L −1 via single authority)
