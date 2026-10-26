@@ -2511,6 +2511,87 @@ namespace {
         if (c->recoveryRetryExhaustedCount() > 1) return false;           // never double-counted
         return true;
     }
+
+    // C17 (2026-10-26, GO-3 / N2 residual closure): two resolver threads race the SAME
+    //   obligation through the Completion Authority. C7/C8/C9 verify the contract
+    //   sequentially; this is the only case that exercises the actual concurrent CAS
+    //   (the decisive half of D105-R5-9).
+    //   Requirements:
+    //     - exactly ONE of the two resolves wins (the loser is a no-op, not a double count),
+    //     - L goes 1 -> 0 exactly once,
+    //     - the lifecycle state equals the WINNER's terminal state (the winner owns it),
+    //     - identity (obligationId) is preserved and a later resolve is still a no-op.
+    [[nodiscard]] bool testRLOE_C17_twoResolverRaceSingleWinner()
+    {
+        constexpr int kAttempts = 200;
+
+        for (int attempt = 0; attempt < kAttempts; ++attempt)
+        {
+            auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+            auto id = submitAndGetId(*c, convo::isr::DSPHandle::null(),
+                                     static_cast<std::uint64_t>(9000 + attempt));
+            if (!id)
+                return false;
+            const std::uint64_t obl = *id;
+            if (c->liveLogicalRecoveryObligationCount() != 1)
+                return false;
+
+            std::atomic<int> ready{0};
+            std::atomic<bool> go{false};
+            bool wonPublished = false;
+            bool wonFailed = false;
+
+            const auto runner = [&](bool published, bool& won) {
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                while (!go.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                won = c->resolveRecoveryObligation(
+                    obl, published
+                             ? convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Published
+                             : convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::Failed);
+            };
+
+            std::thread tPublished([&] { runner(true, wonPublished); });
+            std::thread tFailed([&] { runner(false, wonFailed); });
+
+            while (ready.load(std::memory_order_acquire) < 2)
+                std::this_thread::yield();
+            go.store(true, std::memory_order_release);
+
+            tPublished.join();
+            tFailed.join();
+
+            // exactly one winner: both-false means the obligation was not Live; both-true is
+            // the double count this test exists to catch.
+            if (wonPublished == wonFailed)
+                return false;
+
+            if (c->liveLogicalRecoveryObligationCount() != 0)
+                return false;                                   // L 1 -> 0 exactly once
+
+            const auto w = c->peekLifecycleForTest(obl);
+            if (!w || w->obligationId != obl)
+                return false;
+
+            const auto expected =
+                wonPublished
+                    ? convo::isr::RuntimeIntentCoordinator::ObligationState::ResolvedSuccess
+                    : convo::isr::RuntimeIntentCoordinator::ObligationState::ResolvedFailed;
+            if (w->state != static_cast<std::uint8_t>(expected))
+                return false;                                   // winner owns the terminal state
+
+            if (c->resolveRecoveryObligation(
+                    obl, convo::isr::RuntimeIntentCoordinator::RecoveryOutcome::ShutdownDiscarded))
+                return false;                                   // late resolve must lose
+            if (c->liveLogicalRecoveryObligationCount() != 0)
+                return false;
+            const auto w2 = c->peekLifecycleForTest(obl);
+            if (!w2 || w2->state != static_cast<std::uint8_t>(expected))
+                return false;                                   // terminal state not overwritten
+        }
+
+        return true;
+    }
 }
 
 int main()
@@ -2642,6 +2723,14 @@ int main()
         throw std::runtime_error("D105-R5-10 C15: redrive must never change live obligation count");
     if (!testRLOE_C16_deferredSameKeyResubmitCoalesces())
         throw std::runtime_error("D105-R5-10 C16: deferred + same-key resubmit must coalesce (no new id, single representation)");
+    if (!testRLOE_C17_twoResolverRaceSingleWinner())
+        throw std::runtime_error("D105-R5-9 C17: two concurrent resolvers must yield exactly one winner (no double count, winner owns the terminal state)");
+    // Positive runtime evidence that the completion-authority block above actually executed
+    // (this program prints nothing on success, so exit==0 alone is not observable proof).
+    std::printf("ISRSemanticValidationTests: PASS (D105-R5-9 completion authority:"
+                " C7 duplicate resolve, C8 shutdown race, C9 ABA stale resolve,"
+                " C17 two-resolver concurrent CAS)\n");
+    std::fflush(stdout);
 
     // --- G-4.3 Phase-I Coalesce Admission regression (D105-R23 / D27.2) ---
     if (!testG43_T1_sameIdentityCoalesces())
