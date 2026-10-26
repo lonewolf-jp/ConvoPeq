@@ -190,6 +190,13 @@ private:
     SnapshotFadeState m_fade;
     // ★ P1-3: 二段構えのフラグ。finalizeShutdown() で true、~SnapshotCoordinator で確認
     std::atomic<bool> m_shutdownFinalized { false };
+
+    // ★ D8-2-B-1 T10 (test-only access): resetFadeStateAndRetireTarget() is private and has no
+    //   production caller (updateFade was removed 2026-07-28), so T10 cannot be exercised through
+    //   the public API. This friend grants the test direct access WITHOUT making the method public
+    //   and WITHOUT changing behaviour — same pattern as ISRRetireRouter's
+    //   RetireGraceSemanticsTestAccess (ISRRetireRouter.h:502).
+    friend class SnapshotCoordinatorTestAccess;
 };
 
 } // namespace convo
