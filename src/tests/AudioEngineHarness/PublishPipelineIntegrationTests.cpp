@@ -1181,6 +1181,67 @@ bool testD167AdmissionClosedTelemetry()
 class AudioEngineHarness;
 bool runOdenomCampaignDefault(AudioEngineHarness& h);
 
+//==============================================================================
+// G-1 (D-40 / D-38): the single, harness-level suite selector.
+//
+//   This is the ONLY place that reads STG8_ONLY. The layer is the harness runner,
+//   not STG8RecoveryObligationTests.cpp, so there is exactly one selector and no
+//   second, competing implementation inside the suite.
+//
+//   Contract:
+//     unset or empty      -> the full suite (behaviour identical to before this change)
+//     "d2b"               -> run only runSTG8RecoveryObligationTests() and exit with its code
+//     any other value     -> fail closed (never silently fall back to the full suite)
+//     "d2b" + an in-loop measurement mode argument
+//                         -> fail closed: those modes return from inside the argument loop,
+//                            so the combination would silently prefer one over the other
+//
+//   The validation below runs before the argument loop; the dispatch runs after it, which
+//   keeps every existing in-loop mode's precedence untouched.
+//==============================================================================
+namespace {
+
+enum class HarnessSuiteSelector { Full, D2bOnly };
+
+HarnessSuiteSelector parseHarnessSuiteSelector(int argc, char* argv[]) noexcept
+{
+    const char* const env = std::getenv("STG8_ONLY");
+    if (env == nullptr || env[0] == '\0')
+        return HarnessSuiteSelector::Full;
+
+    if (std::strcmp(env, "d2b") != 0)
+    {
+        std::fprintf(stderr,
+                     "FAIL: STG8_ONLY has an unknown value '%s'"
+                     " (expected unset, empty, or \"d2b\")\n", env);
+        std::fflush(nullptr);
+        _exit(1);
+    }
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a(argv[i]);
+        const bool buzzLike = (a == "--buzz") || (a.rfind("--buzz-", 0) == 0);
+        const bool inLoopMode = (a == "--p1-char")
+                             || (a == "--p1-recovery-origin")
+                             || (a == "--fpm-m0")
+                             || (a == "--fpm-m1")
+                             || (a == "--fpm-m2");
+        if (buzzLike || inLoopMode)
+        {
+            std::fprintf(stderr,
+                         "FAIL: STG8_ONLY=d2b conflicts with the in-loop mode argument"
+                         " '%s'; run one or the other, not both\n", a.c_str());
+            std::fflush(nullptr);
+            _exit(1);
+        }
+    }
+
+    return HarnessSuiteSelector::D2bOnly;
+}
+
+} // namespace
+
 int main(int argc, char* argv[])
 {
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
@@ -1224,6 +1285,9 @@ int runP1RecoveryOrigin(int argc, char* argv[]);
 int runFpmM0();
 int runFpmM1();
 int runFpmM2();
+
+    // G-1: validate the suite selector before anything can run (fail closed on bad input).
+    const HarnessSuiteSelector harnessSuiteSelector = parseHarnessSuiteSelector(argc, argv);
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1285,6 +1349,16 @@ int runFpmM2();
             t4Measurement = "t4";
             t4IntervalUs = std::stoi(a.substr(5));
         }
+    }
+
+    // G-1: suite selector dispatch. Only "d2b" reaches here (the validation above rejects
+    // unknown values and in-loop conflicts), so the full-suite path is byte-identical in
+    // behaviour to the pre-change runner.
+    if (harnessSuiteSelector == HarnessSuiteSelector::D2bOnly)
+    {
+        const int stg8OnlyExitCode = runSTG8RecoveryObligationTests();
+        std::fflush(nullptr);
+        _exit(stg8OnlyExitCode);
     }
 
     // ★ T1: baseline measurement mode
