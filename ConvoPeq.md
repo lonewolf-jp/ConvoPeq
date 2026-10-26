@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-26 18:20:46
+> Generated: 2026-10-26 22:54:07
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -35469,7 +35469,13 @@ public:
     // transition in the current source, so it is left as a Phase-II item (do not fake a transition).
     enum class RecoveryOutcome : std::uint8_t {
         Published = 0,      // recovery publish succeeded (Route A trySubmitImpl / Route B onPublishCommitted)
-        Failed,             // build/publish hard failure → terminal (no leak)
+        Failed,             // retry budget EXHAUSTION only → terminal (ResolvedFailed).
+                            //   Transient build/publish failures must NOT come here: production
+                            //   producers post a failure signal (postRecoveryFailureSignal) and the
+                            //   CoordinatorLoop adjudicates (adjudicateRecoveryFailureSignals).
+                            //   The single production caller of resolveRecoveryObligation(_, Failed)
+                            //   is that exhaustion branch (D105-R18/R20/R21, D152 T3c).
+                            //   Do not re-introduce a generic failure route.
         StaleSuperseded,    // ★ D105-R5-9 MUST-4: RejectedStaleGeneration → terminal (−1)
         Retry,              // transient build failure → obligation stays Live (ΔL=0, rebuild retried)
         ShutdownDiscarded   // shutdown close (table-centric discard; L −1 via single authority)
@@ -102547,6 +102553,7 @@ int main()
 //
 // ビルド: カスタム main() + bool testXxx() パターン（既存テストと同一）
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -103712,6 +103719,175 @@ bool testD167AdmissionClosedTelemetry()
 class AudioEngineHarness;
 bool runOdenomCampaignDefault(AudioEngineHarness& h);
 
+//==============================================================================
+// G-1 (D-40 / D-38): the single, harness-level suite selector.
+//
+//   This is the ONLY place that reads STG8_ONLY. The layer is the harness runner,
+//   not STG8RecoveryObligationTests.cpp, so there is exactly one selector and no
+//   second, competing implementation inside the suite.
+//
+//   Contract:
+//     unset or empty      -> the full suite (behaviour identical to before this change)
+//     "d2b"               -> run only runSTG8RecoveryObligationTests() and exit with its code
+//     any other value     -> fail closed (never silently fall back to the full suite)
+//     "d2b" + an in-loop measurement mode argument
+//                         -> fail closed: those modes return from inside the argument loop,
+//                            so the combination would silently prefer one over the other
+//
+//   The validation below runs before the argument loop; the dispatch runs after it, which
+//   keeps every existing in-loop mode's precedence untouched.
+//==============================================================================
+namespace {
+
+enum class HarnessSuiteSelector { Full, D2bOnly };
+
+HarnessSuiteSelector parseHarnessSuiteSelector(int argc, char* argv[]) noexcept
+{
+    const char* const env = std::getenv("STG8_ONLY");
+    if (env == nullptr || env[0] == '\0')
+        return HarnessSuiteSelector::Full;
+
+    if (std::strcmp(env, "d2b") != 0)
+    {
+        std::fprintf(stderr,
+                     "FAIL: STG8_ONLY has an unknown value '%s'"
+                     " (expected unset, empty, or \"d2b\")\n", env);
+        std::fflush(nullptr);
+        _exit(1);
+    }
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a(argv[i]);
+        const bool buzzLike = (a == "--buzz") || (a.rfind("--buzz-", 0) == 0);
+        const bool inLoopMode = (a == "--p1-char")
+                             || (a == "--p1-recovery-origin")
+                             || (a == "--fpm-m0")
+                             || (a == "--fpm-m1")
+                             || (a == "--fpm-m2");
+        if (buzzLike || inLoopMode)
+        {
+            std::fprintf(stderr,
+                         "FAIL: STG8_ONLY=d2b conflicts with the in-loop mode argument"
+                         " '%s'; run one or the other, not both\n", a.c_str());
+            std::fflush(nullptr);
+            _exit(1);
+        }
+    }
+
+    return HarnessSuiteSelector::D2bOnly;
+}
+
+} // namespace
+
+
+// ---------------------------------------------------------------------------
+// H-2-R1 (2026-10-26): mixed gain tuple window — DIAGNOSTIC ONLY.
+//
+//   H-2 established that a stale build cannot overwrite a newer world (publication
+//   admission requires req.generation == rebuildRequestGeneration) and that no path
+//   writes a world's gains back into the live atomics. The remaining residual (H-2-R1)
+//   is narrower: captureBuildParameterSnapshot() reads 13 fields with separate acquire
+//   loads, so a build captured between two gain writes can carry (new headroom, old
+//   makeup). This measurement counts how often such a tuple becomes the PUBLISHED world
+//   and how long it persists.
+//
+//   It prints [H2R1] lines and returns no verdict: a zero count is an observation limit,
+//   not proof of absence.
+// ---------------------------------------------------------------------------
+static void measureH2R1MixedGainTupleWindow(AudioEngineHarness& harness)
+{
+    AudioEngine& e = harness.engine();
+    auto approx = [](double a, double b) { return std::abs(a - b) < 1.0e-9; };
+    auto gainOf = [](double db) { return std::pow(10.0, db / 20.0); };
+
+    // Settle to a known baseline and wait until it is the published tuple.
+    const double baseH = gainOf(-3.0);
+    const double baseM = gainOf(3.0);
+    e.setInputHeadroomDb(-3.0f);
+    e.setOutputMakeupDb(3.0f);
+    for (int i = 0; i < 500; ++i)
+    {
+        const auto* w = e.observePublishedWorld();
+        if (w != nullptr && approx(w->automation.inputHeadroomGain, baseH)
+                         && approx(w->automation.outputMakeupGain, baseM))
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    int trials = 0;
+    int mixedTrials = 0;
+    int distinctWorlds = 0;
+    double maxMixedMs = 0.0;
+
+    for (int t = 0; t < 40; ++t)
+    {
+        const bool up = ((t % 2) == 0);
+        const double hDb = up ? -9.0 : -3.0;
+        const double mDb = up ? 9.0 : 3.0;
+        const double hGain = gainOf(hDb);
+        const double mGain = gainOf(mDb);
+
+        const auto* before = e.observePublishedWorld();
+        const double oldH = before != nullptr ? before->automation.inputHeadroomGain : 0.0;
+        const double oldM = before != nullptr ? before->automation.outputMakeupGain : 0.0;
+
+        e.setInputHeadroomDb(static_cast<float>(hDb));
+        std::this_thread::sleep_for(std::chrono::microseconds((t % 4) * 250));
+        e.setOutputMakeupDb(static_cast<float>(mDb));
+        ++trials;
+
+        bool sawMixed = false;
+        double mixedStartMs = 0.0;
+        double mixedMs = 0.0;
+        std::uint64_t lastGeneration = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+
+        for (int i = 0; i < 300; ++i)
+        {
+            const auto* w = e.observePublishedWorld();
+            if (w != nullptr)
+            {
+                if (w->generation != lastGeneration)
+                {
+                    ++distinctWorlds;
+                    lastGeneration = w->generation;
+                }
+                const double h = w->automation.inputHeadroomGain;
+                const double m = w->automation.outputMakeupGain;
+                const bool mixedH = approx(h, hGain) && approx(m, oldM) && !approx(oldM, mGain);
+                const bool mixedM = approx(m, mGain) && approx(h, oldH) && !approx(oldH, hGain);
+                const double nowMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (mixedH || mixedM)
+                {
+                    if (!sawMixed)
+                    {
+                        sawMixed = true;
+                        mixedStartMs = nowMs;
+                    }
+                    mixedMs = nowMs - mixedStartMs;
+                }
+                if (approx(h, hGain) && approx(m, mGain))
+                    break;   // settled on the intended tuple
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+        }
+
+        if (sawMixed)
+        {
+            ++mixedTrials;
+            if (mixedMs > maxMixedMs)
+                maxMixedMs = mixedMs;
+        }
+    }
+
+    std::printf("[H2R1] trials=%d mixed_trials=%d max_mixed_ms=%.1f distinct_worlds=%d\n",
+                trials, mixedTrials, maxMixedMs, distinctWorlds);
+    std::printf("[H2R1] note: observations only; not observing a mixed tuple is NOT proof"
+                " that it cannot occur\n");
+}
+
 int main(int argc, char* argv[])
 {
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
@@ -103755,6 +103931,26 @@ int runP1RecoveryOrigin(int argc, char* argv[]);
 int runFpmM0();
 int runFpmM1();
 int runFpmM2();
+
+    // G-1: validate the suite selector before anything can run (fail closed on bad input).
+    const HarnessSuiteSelector harnessSuiteSelector = parseHarnessSuiteSelector(argc, argv);
+
+    // H-2-R1 (diagnostic, opt-in): measure whether a mixed gain tuple can become the
+    // published world when two gains change back-to-back. No PASS/FAIL is derived from it,
+    // so the default suite keeps its line count (H2R1_MEASURE is unset in normal runs).
+    if (std::getenv("H2R1_MEASURE") != nullptr)
+    {
+        AudioEngineHarness h2r1Harness;
+        if (h2r1Harness.start(48000.0, 512))
+        {
+            measureH2R1MixedGainTupleWindow(h2r1Harness);
+            h2r1Harness.stop();
+        }
+        else
+        {
+            std::fprintf(stderr, "[H2R1] harness start failed\n");
+        }
+    }
 
     for (int i = 1; i < argc; ++i)
     {
@@ -103816,6 +104012,16 @@ int runFpmM2();
             t4Measurement = "t4";
             t4IntervalUs = std::stoi(a.substr(5));
         }
+    }
+
+    // G-1: suite selector dispatch. Only "d2b" reaches here (the validation above rejects
+    // unknown values and in-loop conflicts), so the full-suite path is byte-identical in
+    // behaviour to the pre-change runner.
+    if (harnessSuiteSelector == HarnessSuiteSelector::D2bOnly)
+    {
+        const int stg8OnlyExitCode = runSTG8RecoveryObligationTests();
+        std::fflush(nullptr);
+        _exit(stg8OnlyExitCode);
     }
 
     // ★ T1: baseline measurement mode
@@ -115313,22 +115519,45 @@ static bool checkGReclaimNormalUsesRetireEpoch()
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
 
-            // The pending list is SWAPPED OUT while a retry is in flight, so an instantaneous
-            // pendingReclaimCount()==0 is NOT proof that the identity was reclaimed. Require
-            // two consecutive "this handle is not pending" reads, separated by a delay.
-            bool stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
-            if (!stillPending)
+            // (H-5, 2026-10-26) The pending list is SWAPPED OUT while a retry is in flight, so an
+            // instantaneous "not in pendingReclaimHandles_" is NOT proof that the identity was
+            // reclaimed: the attempt that removed it may still be inside
+            // onReclaimBegin..onReclaimEnd and still own the object. Interpreting absence as a
+            // reclaim there compares minReaderEpoch against the retire epoch under a guard that is
+            // still held, and falsely FAILs ("reclaimed while minReaderEpoch (N) had not passed
+            // the retire epoch (N)").
+            //   Fix: wait until no reclaim attempt is in flight, and only then read the pending
+            //   list. This is READ-ONLY: it deliberately does not drive/drain while an attempt is
+            //   in flight (driving there stacks further attempts and perturbs later suites).
+            //   If an attempt never settles inside the window we cannot prove a reclaim, so the
+            //   identity is treated as retained — the property under test — instead of failing on
+            //   a counter snapshot.
+            bool reclaimed = false;
+            bool settled = false;
+            for (int i = 0; i < 20; ++i)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                stillPending = DeferredPublicationTestAccess::pendingContains(e, handle);
+                const bool pendingNow = DeferredPublicationTestAccess::pendingContains(e, handle);
+                const std::uint64_t inFlightNow = DeferredPublicationTestAccess::reclaimInFlightCount(e);
+                if (inFlightNow == 0)
+                {
+                    reclaimed = !pendingNow;
+                    settled = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+
+            const bool stillPending = !(settled && reclaimed);
 
             if (stillPending)
             {
                 std::printf("[G] observe: identity retained while minReaderEpoch <= retireEpoch"
-                            " (retire=%llu min=%llu)\n",
+                            " (retire=%llu min=%llu pending=%zu inFlight=%llu settled=%d)\n",
                             (unsigned long long)retireEpoch,
-                            (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e));
+                            (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
+                            DeferredPublicationTestAccess::pendingReclaimCount(e),
+                            (unsigned long long)DeferredPublicationTestAccess::reclaimInFlightCount(e),
+                            settled ? 1 : 0);
             }
             else
             {
@@ -115345,7 +115574,12 @@ static bool checkGReclaimNormalUsesRetireEpoch()
                 else
                 {
                     std::printf("[G] note: reclaimed inside the guard window only after"
-                                " minReaderEpoch passed the retire epoch\n");
+                                " minReaderEpoch passed the retire epoch"
+                                " (retire=%llu min=%llu pending=%zu inFlight=%llu)\n",
+                                (unsigned long long)retireEpoch,
+                                (unsigned long long)minEpoch,
+                                DeferredPublicationTestAccess::pendingReclaimCount(e),
+                                (unsigned long long)DeferredPublicationTestAccess::reclaimInFlightCount(e));
                 }
             }
         }
