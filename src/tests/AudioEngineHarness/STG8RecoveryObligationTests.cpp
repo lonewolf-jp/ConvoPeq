@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <functional>
 #include <thread>
+#include <vector>
+#include <fstream>
 
 #include "AudioEngineHarness.h"
 #include "DeferredPublicationTestAccess.h"
@@ -274,6 +276,74 @@ static int stg8EnvInt(const char* name, int fallback)
     return std::atoi(v);
 }
 
+// ---------------------------------------------------------------------------
+// T-STG8-D2b correlation instrumentation (2026-10-26, owner-approved).
+//   D2b previously sampled only the two observable atoms (hasDeferred / L). A "bad" interval
+//   therefore could not be told apart from a legitimate in-flight publication: hasDeferred_ is
+//   cleared by finishView() and re-armed by the next enqueueDeferred(), so it is false for the
+//   whole duration of a publication attempt.
+//   These samples add the forward-progress counters so a bad interval can be classified as
+//   (A) in-flight publication (counters advance) or (B) liveness loss (counters stalled).
+//   Every value comes from a const/atomic getter: nothing here mutates engine state.
+// ---------------------------------------------------------------------------
+struct D2bSample
+{
+    long long          tMs             = 0;
+    int                deferred        = 0;
+    unsigned long long live            = 0;
+    unsigned long long submitted       = 0;
+    unsigned long long published       = 0;
+    unsigned long long retired         = 0;
+    int                stage           = 0;   // RuntimePublicationState::StuckStage as int
+    unsigned long long maxDeferredAgeMs = 0;
+    int                stalled         = 0;
+    unsigned long long pending         = 0;
+    unsigned long long backlog         = 0;
+};
+
+template <typename OrchestratorT>
+static D2bSample stg8D2bSample(AudioEngine& e, OrchestratorT& orch, long long tMs) noexcept
+{
+    D2bSample s {};
+    s.tMs = tMs;
+    s.deferred = orch.hasDeferredRequest() ? 1 : 0;
+    s.live = stg8LiveCount(e);
+    const auto& prog = orch.stateOwner().state().progress;
+    s.submitted = prog.submittedCount;
+    s.published = prog.publishedCount;
+    s.retired   = prog.retiredCount;
+    s.stage     = static_cast<int>(prog.detectStuckStage());
+    s.maxDeferredAgeMs = orch.getMaxDeferredAgeMs();
+    s.stalled   = orch.isPublicationStalled() ? 1 : 0;
+    s.pending   = orch.getPendingIntentCount();
+    s.backlog   = orch.getPublicationBacklogCount();
+    return s;
+}
+
+static void stg8D2bWriteCsv(const char* path, int iteration,
+                            const std::vector<D2bSample>& samples)
+{
+    if (path == nullptr || *path == '\0' || samples.empty())
+        return;
+
+    bool needHeader = true;
+    {
+        std::ifstream probe(path);
+        if (probe.good() && probe.peek() != std::ifstream::traits_type::eof())
+            needHeader = false;
+    }
+
+    std::ofstream f(path, std::ios::app);
+    if (!f)
+        return;
+    if (needHeader)
+        f << "iter,t_ms,deferred,live,submitted,published,retired,stage,max_age_ms,stalled,pending,backlog\n";
+    for (const auto& x : samples)
+        f << iteration << ',' << x.tMs << ',' << x.deferred << ',' << x.live << ','
+          << x.submitted << ',' << x.published << ',' << x.retired << ',' << x.stage << ','
+          << x.maxDeferredAgeMs << ',' << x.stalled << ',' << x.pending << ',' << x.backlog << '\n';
+}
+
 // One D2b iteration on a fresh harness. Returns false on failure.
 //   trace: sample the two observable atoms during the retention window and print changes.
 static bool stg8RunD2bOnce(int iteration, bool trace)
@@ -333,25 +403,45 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
     constexpr long long kDurableBadMs = 250;     // ~23 audio blocks; a real loss is permanent
     constexpr long long kRecoveryBudgetMs = 1000;
     long long maxBadStreakMs = 0;
+    std::vector<D2bSample> samples;          // correlation log (trace only)
+    D2bSample firstBad {};
+    D2bSample lastBad {};
+    long long firstBadMs = -1;
+    long long lastBadMs = -1;
+    int       deferredTransitions = 0;
+    int       badSamples = 0;
     {
         const auto t0 = std::chrono::steady_clock::now();
         bool bad = false;
         auto badSince = t0;
+        int  prevDeferred = -1;
         while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10000))
         {
             stg8PumpMessages();
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
             const auto now = std::chrono::steady_clock::now();
-            const auto live = stg8LiveCount(e);
-            const bool deferred = orch.hasDeferredRequest();
-            if (live != 1 || !deferred)
+            const long long tMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+            const auto s = stg8D2bSample(e, orch, tMs);
+            if (trace)
+                samples.push_back(s);
+            if (prevDeferred >= 0 && s.deferred != prevDeferred)
+                ++deferredTransitions;
+            prevDeferred = s.deferred;
+
+            if (s.live != 1 || s.deferred == 0)
             {
+                ++badSamples;
                 if (!bad)
                 {
                     bad = true;
                     badSince = now;
+                    firstBad = s;
+                    firstBadMs = tMs;
                 }
+                lastBad = s;
+                lastBadMs = tMs;
                 maxBadStreakMs = std::max<long long>(
                     maxBadStreakMs,
                     std::chrono::duration_cast<std::chrono::milliseconds>(now - badSince).count());
@@ -361,6 +451,47 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                 bad = false;
             }
         }
+    }
+
+    // ---- correlation summary (observation only; the D2b verdict is unchanged) ----
+    if (trace && !samples.empty())
+    {
+        const auto& f = samples.front();
+        const auto& l = samples.back();
+        unsigned long long maxAge = 0;
+        unsigned long long maxPending = 0;
+        unsigned long long maxBacklog = 0;
+        int stalledSamples = 0;
+        for (const auto& s : samples)
+        {
+            maxAge = std::max(maxAge, s.maxDeferredAgeMs);
+            maxPending = std::max(maxPending, s.pending);
+            maxBacklog = std::max(maxBacklog, s.backlog);
+            if (s.stalled != 0)
+                ++stalledSamples;
+        }
+        std::printf("[D2b-SUM] iter=%d samples=%zu window_ms=%lld transitions=%d bad=%d"
+                    " longestBad_ms=%lld\n",
+                    iteration, samples.size(), l.tMs, deferredTransitions, badSamples,
+                    maxBadStreakMs);
+        std::printf("[D2b-CNT] iter=%d start{t=%lld sub=%llu pub=%llu ret=%llu stage=%d age=%llu}"
+                    " end{t=%lld sub=%llu pub=%llu ret=%llu stage=%d age=%llu}\n",
+                    iteration, f.tMs, f.submitted, f.published, f.retired, f.stage,
+                    f.maxDeferredAgeMs, l.tMs, l.submitted, l.published, l.retired,
+                    l.stage, l.maxDeferredAgeMs);
+        std::printf("[D2b-BAD] iter=%d streak[%lld..%lld] sub=+%llu pub=+%llu ret=+%llu"
+                    " stage %d->%d age %llu->%llu stalled=%d maxAge=%llu maxPending=%llu"
+                    " maxBacklog=%llu\n",
+                    iteration, firstBadMs, lastBadMs,
+                    lastBad.submitted - firstBad.submitted,
+                    lastBad.published - firstBad.published,
+                    lastBad.retired - firstBad.retired,
+                    firstBad.stage, lastBad.stage,
+                    firstBad.maxDeferredAgeMs, lastBad.maxDeferredAgeMs,
+                    stalledSamples, maxAge, maxPending, maxBacklog);
+        const char* csvPath = std::getenv("CONVOPEQ_STG8_D2B_CSV");
+        if (csvPath != nullptr && *csvPath != '\0')
+            stg8D2bWriteCsv(csvPath, iteration, samples);
     }
 
     // Single snapshot decides the verdict; the diagnostic prints THIS snapshot only.
@@ -410,7 +541,40 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                     iteration, maxBadStreakMs, endBadMs);
     }
 
-    DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+    // ---- (A)/(B): once fading clears, is the obligation resolved exactly once? ----
+    //   Observation only (never fails). Forward progress immediately after the retention
+    //   window supports (A) in-flight publication; a live obligation that never drains inside
+    //   the budget supports (B) liveness loss. The verdict above is not affected.
+    {
+        const auto pre = stg8D2bSample(e, orch, 0);
+        DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
+        const auto t0 = std::chrono::steady_clock::now();
+        constexpr long long kResolveBudgetMs = 15000;
+        long long resolvedMs = -1;
+        unsigned long long maxLiveObserved = pre.live;
+        unsigned long long maxAgeObserved = pre.maxDeferredAgeMs;
+        for (;;)
+        {
+            stg8PumpMessages();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto now = std::chrono::steady_clock::now();
+            const long long ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+            const auto liveNow = stg8LiveCount(e);
+            maxLiveObserved = std::max(maxLiveObserved, liveNow);
+            maxAgeObserved = std::max(maxAgeObserved, orch.getMaxDeferredAgeMs());
+            if (liveNow == 0) { resolvedMs = ms; break; }
+            if (ms >= kResolveBudgetMs) break;
+        }
+        const auto post = stg8D2bSample(e, orch, resolvedMs);
+        std::printf("[D2b-RES] iter=%d resolved=%d atMs=%lld maxLive=%llu maxAge_ms=%llu"
+                    " sub=+%llu pub=+%llu ret=+%llu stage=%d deferred=%d\n",
+                    iteration, resolvedMs >= 0 ? 1 : 0, resolvedMs, maxLiveObserved,
+                    maxAgeObserved, post.submitted - pre.submitted,
+                    post.published - pre.published, post.retired - pre.retired,
+                    post.stage, post.deferred);
+    }
+
     h.stop();
     return ok;
 }
