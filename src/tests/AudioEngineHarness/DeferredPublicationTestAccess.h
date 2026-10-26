@@ -459,6 +459,18 @@ public:
         return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
     }
 
+    // ===== D8-2-B-1 T10-c: the PRODUCTION provider used by SnapshotCoordinator =====
+    //   AudioEngine constructs SnapshotCoordinator with m_epochDomain
+    //   (AudioEngine.CtorDtor.cpp:28), NOT with the retire router. That distinction decides
+    //   T10's RT-boundary question: EpochDomain::enqueueRetire is the lock-free MPSC ring
+    //   (DeferredDeletionQueue::enqueue), while ISRRetireRouter::enqueueRetire may escalate to
+    //   tryReclaim() -> deleter -> free on queue pressure. T10-c must therefore be observed
+    //   against EpochDomain.
+    static convo::EpochDomain& epochDomain(AudioEngine& e) noexcept
+    {
+        return e.m_epochDomain;
+    }
+
     // ===== D8-2-B-1 T9: DSP delete-count observability =====
     //   destroyDSPCoreNodeRetryable() is the ONLY place that destroys a DSPCore
     //   (`core->~DSPCore(); convo::aligned_free(core);`, AudioEngine.Threading.cpp:39-42),
