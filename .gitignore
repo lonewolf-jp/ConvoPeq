@@ -84,6 +84,13 @@ CLAUDE.md
 .github/context-mode/
 .venv/
 doc/BIGDATA/
+# Timestamped ConvoPeq.md snapshots (23 files, 130,033,682 B as of 2026-10-26). They carry only a
+# "> Generated:" wall clock, not the source commit SHA, so they cannot be regenerated; they are
+# preserved out-of-repo in Dropbox /ConvoPeq-snapshots-20261026 (verified: size + content_hash,
+# 23/23). Ignoring them keeps git status clean and prevents an accidental `git add -A`; Git does
+# not delete or modify ignored working-tree files, and the generator keeps creating new
+# doc/ConvoPeqMD/<timestamp>/ directories regardless of this rule.
+doc/ConvoPeqMD/
 .browser4-cli/
 .browser4-cli/snapshot/
 sampledata/real_irs/
