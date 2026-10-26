@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-27 02:29:01
+> Generated: 2026-10-27 08:44:24
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -97161,6 +97161,18 @@ public:
         return convo::consumeAtomic(e.rebuildThreadToken_, std::memory_order_acquire);
     }
 
+    // ===== D8-2-B-1 T10-c: the PRODUCTION provider used by SnapshotCoordinator =====
+    //   AudioEngine constructs SnapshotCoordinator with m_epochDomain
+    //   (AudioEngine.CtorDtor.cpp:28), NOT with the retire router. That distinction decides
+    //   T10's RT-boundary question: EpochDomain::enqueueRetire is the lock-free MPSC ring
+    //   (DeferredDeletionQueue::enqueue), while ISRRetireRouter::enqueueRetire may escalate to
+    //   tryReclaim() -> deleter -> free on queue pressure. T10-c must therefore be observed
+    //   against EpochDomain.
+    static convo::EpochDomain& epochDomain(AudioEngine& e) noexcept
+    {
+        return e.m_epochDomain;
+    }
+
     // ===== D8-2-B-1 T9: DSP delete-count observability =====
     //   destroyDSPCoreNodeRetryable() is the ONLY place that destroys a DSPCore
     //   (`core->~DSPCore(); convo::aligned_free(core);`, AudioEngine.Threading.cpp:39-42),
@@ -113887,6 +113899,19 @@ inline std::string formatTransitionLine(const TransitionResult& tr, const std::s
 #include <thread>
 
 #include "core/RCUReader.h"
+#include "core/SnapshotCoordinator.h"
+#include "core/SnapshotFactory.h"
+#include "core/SnapshotParams.h"
+
+namespace convo {
+class SnapshotCoordinatorTestAccess {
+public:
+    static void resetFadeStateAndRetireTarget(SnapshotCoordinator& c) noexcept
+    {
+        c.resetFadeStateAndRetireTarget();
+    }
+};
+} // namespace convo
 
 namespace {
 
@@ -115743,6 +115768,129 @@ bool checkT9DspDeleteCountObservable()
     return ok;
 }
 
+
+// ============================================================================
+// T10-c (D8-2-B-1 :28, "RT context") — the PRODUCTION provider path.
+//
+//   T10-a/b already proved that resetFadeStateAndRetireTarget() calls only enqueueRetire and
+//   never quarantine (direct call via the test-only friend, with a stub provider).
+//
+//   T10-c asks what happens in the real configuration. That hinges on WHICH provider the
+//   production SnapshotCoordinator is built with:
+//
+//     AudioEngine.CtorDtor.cpp:28   m_coordinator(m_epochDomain)
+//
+//   So the provider is EpochDomain, not ISRRetireRouter:
+//
+//     EpochDomain::publishEpoch      -> two atomic fetch_add (EpochDomain.h:246-255)
+//     EpochDomain::enqueueRetire     -> DeferredDeletionQueue::enqueue, a lock-free MPSC ring
+//                                       (no mutex, no allocation; "Audio Thread から呼ばれる。
+//                                       ロックフリー。" DeferredDeletionQueue.h:81)
+//
+//   By contrast ISRRetireRouter::enqueueRetire MAY escalate to provider_->tryReclaim() under
+//   queue pressure + 500 ms cooldown (ISRRetireRouter.cpp:441-452), and reclaim() runs the
+//   deleter (DeferredDeletionQueue.h:154-156) -> aligned_free in the caller's thread.
+//   That escalation is exactly what the real wiring avoids.
+//
+//   This test therefore observes the production provider directly:
+//     * the entry lands in the EpochDomain ring (pendingRetireCount +1)
+//     * the epoch advances by exactly one
+//     * no quarantine is used
+//   What it does NOT prove: that the call cannot block in a strict RT sense. That is argued
+//   from the code (no mutex/alloc/free on this path), not measured here.
+// ============================================================================
+bool checkT10cProductionProviderPath()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[T10-c] harness start failed\n");
+        return false;
+    }
+    AudioEngine& e = harness.engine();
+    convo::EpochDomain& domain = DeferredPublicationTestAccess::epochDomain(e);
+
+    bool ok = true;
+
+    auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    if (!a || !b)
+    {
+        std::fprintf(stderr, "[T10-c] SnapshotFactory::create returned null\n");
+        convo::SnapshotFactory::destroy(a);
+        convo::SnapshotFactory::destroy(b);
+        harness.stop();
+        return false;
+    }
+
+    // A retire sink is installed so a quarantine violation is OBSERVABLE. Without it the
+    // function's "no quarantine" property cannot be falsified: the first version of this test
+    // left the sink null and a mutated build that did quarantine still passed.
+    convo::isr::ISRRetireRouter router(domain);
+    convo::SnapshotCoordinator coordinator(domain);
+    coordinator.setRetireSink(&router);
+    coordinator.startFade(a, /*fadeSamples=*/100);   // a becomes current
+    coordinator.startFade(b, /*fadeSamples=*/100);   // b moves into the target slot
+
+    const auto pendingBefore = domain.pendingRetireCount();
+    // currentEpoch() READS the epoch. publishEpoch() would advance it, so using it as the
+    // "before" sample would count its own increment (first attempt measured a delta of 2).
+    const auto epochBefore   = domain.currentEpoch();
+
+    convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coordinator);
+
+    const auto pendingAfter = domain.pendingRetireCount();
+    const auto epochAfter   = domain.currentEpoch();
+
+    if (pendingAfter != pendingBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[T10-c] FAIL: production ring did not receive exactly one entry (%u -> %u)\n",
+                     (unsigned)pendingBefore, (unsigned)pendingAfter);
+        ok = false;
+    }
+    if (epochAfter != epochBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[T10-c] FAIL: epoch did not advance by exactly one (before=%llu after=%llu)\n",
+                     (unsigned long long)epochBefore, (unsigned long long)epochAfter);
+        ok = false;
+    }
+
+    // The falsifiable half: with a sink installed, any quarantine call would show up here.
+    const auto qResidents = router.quarantineResidentCount();
+    const auto eResidents = router.emergencyQuarantineResidentCount();
+    const auto tResidents = router.terminalReclaimResidentCount();
+    if (qResidents != 0 || eResidents != 0 || tResidents != 0)
+    {
+        std::fprintf(stderr,
+                     "[T10-c] FAIL: quarantine used from the production path (Q=%zu E=%zu T=%zu)\n",
+                     qResidents, eResidents, tResidents);
+        ok = false;
+    }
+
+    std::printf("[T10-c] production provider (EpochDomain): ring %u -> %u, epoch %llu -> %llu,"
+                " Q/E/T=%zu/%zu/%zu\n",
+                (unsigned)pendingBefore, (unsigned)pendingAfter,
+                (unsigned long long)epochBefore, (unsigned long long)epochAfter,
+                qResidents, eResidents, tResidents);
+
+    // Drain so the test leaves no residue, then release the snapshots the ring will not free
+    // for us (the deleter is the production one, so drain() destroys them).
+    domain.drainAll();
+    const auto pendingEnd = domain.pendingRetireCount();
+    if (pendingEnd != 0)
+    {
+        std::fprintf(stderr, "[T10-c] FAIL: ring not empty after drain (%u)\n", (unsigned)pendingEnd);
+        ok = false;
+    }
+
+    harness.stop();
+    if (ok)
+        std::printf("[T10-c] production provider path: PASS (lock-free ring, no quarantine)\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     g_v11eReclaimCalls = 0;
@@ -115829,6 +115977,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkT9DspDeleteCountObservable())
     {
         std::fprintf(stderr, "FAIL: checkT9DspDeleteCountObservable (T9)\n");
+        hdOk = false;
+    }
+    if (!checkT10cProductionProviderPath())
+    {
+        std::fprintf(stderr, "FAIL: checkT10cProductionProviderPath (T10-c)\n");
         hdOk = false;
     }
     if (!hdOk)
