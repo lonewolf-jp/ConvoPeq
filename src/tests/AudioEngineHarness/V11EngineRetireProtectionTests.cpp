@@ -2363,6 +2363,148 @@ bool checkA2ProbeRetirePath()
     return ok;
 }
 
+// ============================================================================
+// A2 / P2-1 (2026-10-27): DSPHandleRuntime::resolve() must distinguish three
+// outcomes, because callers act on `valid`/`isStale` and on the pointer:
+//   - invalid (null handle, slot out of range) -> !valid, !isStale, nullptr
+//   - stale   (generation mismatch, Retired/Quarantined/DestroyPending/Reclaimed)
+//                                              -> !valid,  isStale, nullptr
+//   - live    (Active/Crossfading slot)        ->  valid, !isStale, instance
+//
+// The fail-closed branch for non-live states already shipped in main (df01010f);
+// this test pins the contract so a future edit cannot quietly hand back a live
+// pointer for a non-live slot, and so the three cases stay distinguishable.
+// Test-only: no product code changes, no locks, no allocation beyond the usual
+// harness setup.
+// ============================================================================
+bool checkDSPHandleResolveStates()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[P2-1] harness start failed\n");
+        return false;
+    }
+
+    auto& e = harness.engine();
+    auto& handles = DeferredPublicationTestAccess::handleRuntime(e);
+    bool ok = true;
+
+    // (1) null handle -> invalid, and NOT stale (the caller never had a handle).
+    {
+        const auto r = handles.resolve(convo::isr::DSPHandle::null());
+        if (r.valid || r.isStale || r.instance != nullptr)
+        {
+            std::fprintf(stderr,
+                         "[P2-1] FAIL null handle: valid=%d isStale=%d instance=%p\n",
+                         r.valid ? 1 : 0, r.isStale ? 1 : 0, r.instance);
+            ok = false;
+        }
+        else
+        {
+            std::printf("[P2-1] null handle: invalid, not stale: PASS\n");
+        }
+    }
+
+    // (2) slot out of range -> invalid, not stale.
+    {
+        convo::isr::DSPHandle h{};
+        h.slot = static_cast<std::uint32_t>(convo::isr::DSPHandleRuntime::MAX_DSP_SLOTS);
+        h.generation = 1;
+        const auto r = handles.resolve(h);
+        if (r.valid || r.isStale || r.instance != nullptr)
+        {
+            std::fprintf(stderr,
+                         "[P2-1] FAIL out-of-range slot: valid=%d isStale=%d instance=%p\n",
+                         r.valid ? 1 : 0, r.isStale ? 1 : 0, r.instance);
+            ok = false;
+        }
+        else
+        {
+            std::printf("[P2-1] slot out of range: invalid, not stale: PASS\n");
+        }
+    }
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    if (!core)
+    {
+        std::fprintf(stderr, "[P2-1] FAIL: DSPCore allocation failed\n");
+        harness.stop();
+        return false;
+    }
+    auto* raw = core.release();
+
+    const auto handle = e.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        std::fprintf(stderr, "[P2-1] FAIL: handle registration failed\n");
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harness.stop();
+        return false;
+    }
+    handles.activate(handle);
+
+    // (3) live handle -> valid, not stale, exact instance.
+    {
+        const auto r = handles.resolve(handle);
+        if (!r.valid || r.isStale || r.instance != raw)
+        {
+            std::fprintf(stderr,
+                         "[P2-1] FAIL live handle: valid=%d isStale=%d instance=%p expected=%p\n",
+                         r.valid ? 1 : 0, r.isStale ? 1 : 0, r.instance, (void*)raw);
+            ok = false;
+        }
+        else
+        {
+            std::printf("[P2-1] live handle: valid, not stale, instance matches: PASS\n");
+        }
+    }
+
+    // (4) same slot, wrong generation -> stale, and no pointer is handed out.
+    {
+        auto h = handle;
+        h.generation = handle.generation + 1;
+        const auto r = handles.resolve(h);
+        if (r.valid || !r.isStale || r.instance != nullptr)
+        {
+            std::fprintf(stderr,
+                         "[P2-1] FAIL generation mismatch: valid=%d isStale=%d instance=%p\n",
+                         r.valid ? 1 : 0, r.isStale ? 1 : 0, r.instance);
+            ok = false;
+        }
+        else
+        {
+            std::printf("[P2-1] generation mismatch: stale, nullptr: PASS\n");
+        }
+    }
+
+    // (5) retired slot -> stale, and no pointer is handed out (this is the
+    //     fail-closed half that df01010f introduced).
+    {
+        handles.retire(handle);
+        const auto r = handles.resolve(handle);
+        if (r.valid || !r.isStale || r.instance != nullptr)
+        {
+            std::fprintf(stderr,
+                         "[P2-1] FAIL retired slot: valid=%d isStale=%d instance=%p\n",
+                         r.valid ? 1 : 0, r.isStale ? 1 : 0, r.instance);
+            ok = false;
+        }
+        else
+        {
+            std::printf("[P2-1] retired slot: stale, nullptr: PASS\n");
+        }
+    }
+
+    DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+    (void)e.retireDSPHandleForRuntime(raw);
+    harness.stop();
+
+    if (ok)
+        std::printf("[P2-1] resolve() contract: PASS (invalid / stale / live distinguished)\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     g_v11eReclaimCalls = 0;
@@ -2469,6 +2611,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkA2ProbeRetirePath())
     {
         std::fprintf(stderr, "FAIL: checkA2ProbeRetirePath (A2 T1)\n");
+        hdOk = false;
+    }
+    if (!checkDSPHandleResolveStates())
+    {
+        std::fprintf(stderr, "FAIL: checkDSPHandleResolveStates (P2-1)\n");
         hdOk = false;
     }
     if (!hdOk)
