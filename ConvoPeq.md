@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-27 20:35:23
+> Generated: 2026-10-27 21:25:00
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -110837,6 +110837,14 @@ struct D2bSample
     int                stalled         = 0;
     unsigned long long pending         = 0;
     unsigned long long backlog         = 0;
+    // F-4 diagnostic (2026-10-27): three monotonic counters that distinguish "the deferred slot
+    //   was overwritten" from "the obligation was terminalized", and show whether a redrive was
+    //   in flight during the streak. All three are read through accessors whose backing is
+    //   std::atomic (orchestrator: deferredOverwriteCount_, lastRecoveryPublishSeq_; coordinator:
+    //   recoveryRetryRedriveCount), so sampling them from the test thread is data-race free.
+    unsigned long long overwrite       = 0;   // deferred-overwrite count (monotonic)
+    unsigned long long recSeq          = 0;   // last recovery publish sequence
+    unsigned long long redrive         = 0;   // recovery retry / redrive count (monotonic)
 };
 
 template <typename OrchestratorT>
@@ -110855,6 +110863,10 @@ static D2bSample stg8D2bSample(AudioEngine& e, OrchestratorT& orch, long long tM
     s.stalled   = orch.isPublicationStalled() ? 1 : 0;
     s.pending   = orch.getPendingIntentCount();
     s.backlog   = orch.getPublicationBacklogCount();
+    // F-4 diagnostic: counter reads only (no assertion, no wait, no behaviour change).
+    s.overwrite = orch.deferredOverwriteCount();
+    s.recSeq    = static_cast<unsigned long long>(orch.recoveryPublishSeq());
+    s.redrive   = stg8RedriveCount(e);
     return s;
 }
 
@@ -111022,9 +111034,9 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                 ++stalledSamples;
         }
         std::printf("[D2b-SUM] iter=%d samples=%zu window_ms=%lld transitions=%d bad=%d"
-                    " longestBad_ms=%lld\n",
+                    " longestBad_ms=%lld overwrite=%llu recSeq=%llu redrive=%llu\n",
                     iteration, samples.size(), l.tMs, deferredTransitions, badSamples,
-                    maxBadStreakMs);
+                    maxBadStreakMs, l.overwrite, l.recSeq, l.redrive);
         std::printf("[D2b-CNT] iter=%d start{t=%lld sub=%llu pub=%llu ret=%llu stage=%d age=%llu}"
                     " end{t=%lld sub=%llu pub=%llu ret=%llu stage=%d age=%llu}\n",
                     iteration, f.tMs, f.submitted, f.published, f.retired, f.stage,
@@ -111032,14 +111044,17 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                     l.stage, l.maxDeferredAgeMs);
         std::printf("[D2b-BAD] iter=%d streak[%lld..%lld] sub=+%llu pub=+%llu ret=+%llu"
                     " stage %d->%d age %llu->%llu stalled=%d maxAge=%llu maxPending=%llu"
-                    " maxBacklog=%llu\n",
+                    " maxBacklog=%llu overwrite=%llu->%llu recSeq=%llu->%llu redrive=%llu->%llu\n",
                     iteration, firstBadMs, lastBadMs,
                     lastBad.submitted - firstBad.submitted,
                     lastBad.published - firstBad.published,
                     lastBad.retired - firstBad.retired,
                     firstBad.stage, lastBad.stage,
                     firstBad.maxDeferredAgeMs, lastBad.maxDeferredAgeMs,
-                    stalledSamples, maxAge, maxPending, maxBacklog);
+                    stalledSamples, maxAge, maxPending, maxBacklog,
+                    firstBad.overwrite, lastBad.overwrite,
+                    firstBad.recSeq, lastBad.recSeq,
+                    firstBad.redrive, lastBad.redrive);
         const char* csvPath = std::getenv("CONVOPEQ_STG8_D2B_CSV");
         if (csvPath != nullptr && *csvPath != '\0')
             stg8D2bWriteCsv(csvPath, iteration, samples);
