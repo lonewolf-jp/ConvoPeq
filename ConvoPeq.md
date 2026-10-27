@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-27 08:44:24
+> Generated: 2026-10-27 20:35:23
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -113913,6 +113913,103 @@ public:
 };
 } // namespace convo
 
+// ============================================================================
+// A2 / B1+B3 — test-only RT allocation probe (2026-10-27)
+//
+// Deliberately independent of JUCE_DEBUG and CONVO_CI_BUILD. The Release harness
+// defines neither, so RTAllocatorFirewall::onAllocAttempt compiles to an empty
+// function there (measured: "heap allocation attempted from RT context!" is
+// absent from build\Release\AudioEngineHarness.exe while control strings are
+// present). This probe therefore counts unconditionally, in every config.
+//
+// The RT context is per-thread (thread_local depth), so one thread leaving a
+// scope cannot clear another thread's state — the defect B3 describes for the
+// production s_sharedRtContextFlag (ISRRTExecution.cpp:11).
+//
+// Declared scope of this probe (limits stated, not implied):
+//   - covers operator new / new[] / nothrow / sized forms
+//   - does NOT cover convo::aligned_malloc -> _aligned_malloc (B2, unresolved)
+//   - does NOT cover std::malloc / JUCE HeapBlock (CRT internal)
+// ============================================================================
+#include <cstdlib>
+#include <new>
+
+namespace a2probe {
+
+inline std::atomic<std::uint64_t>& countRef()
+{
+    static std::atomic<std::uint64_t> c{ 0 };
+    return c;
+}
+
+inline std::atomic<std::uint64_t>& byteRef()
+{
+    static std::atomic<std::uint64_t> b{ 0 };
+    return b;
+}
+
+inline thread_local int t_depth = 0; // NOLINT(thread-local) RT-SAFE: POD int, constant-initialised, no destructor, no allocation, no lock; depth-only test probe state that must never be shared between threads
+
+inline bool active() noexcept { return t_depth > 0; }
+
+inline void reset() noexcept
+{
+    countRef().store(0, std::memory_order_relaxed);
+    byteRef().store(0, std::memory_order_relaxed);
+}
+
+inline std::uint64_t count() noexcept { return countRef().load(std::memory_order_relaxed); }
+inline std::uint64_t bytes() noexcept { return byteRef().load(std::memory_order_relaxed); }
+
+struct Scope
+{
+    Scope() noexcept { ++t_depth; }
+    ~Scope() noexcept { --t_depth; }
+    Scope(const Scope&) = delete;
+    Scope& operator=(const Scope&) = delete;
+};
+
+} // namespace a2probe
+
+// Replacements live at global scope so every TU in this executable resolves to
+// them. The aligned overloads are intentionally NOT replaced: an aligned
+// allocation must keep its matching aligned deallocation.
+void* operator new(std::size_t n)
+{
+    if (a2probe::active())
+    {
+        a2probe::countRef().fetch_add(1, std::memory_order_relaxed);
+        a2probe::byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+    }
+    void* p = std::malloc(n != 0 ? n : 1);
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+
+void* operator new[](std::size_t n) { return ::operator new(n); }
+
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept
+{
+    if (a2probe::active())
+    {
+        a2probe::countRef().fetch_add(1, std::memory_order_relaxed);
+        a2probe::byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+    }
+    return std::malloc(n != 0 ? n : 1);
+}
+
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept
+{
+    return ::operator new(n, std::nothrow);
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+
 namespace {
 
 int   g_v11eReclaimCalls = 0;
@@ -115891,6 +115988,247 @@ bool checkT10cProductionProviderPath()
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// A2 probe self-tests. These must pass BEFORE the T1 measurement means anything:
+// a "0 allocations" reading is only evidence if the mechanism is known to fire
+// (P1/P2), to stay silent outside its scope (N1), and to be per-thread (N2).
+// ---------------------------------------------------------------------------
+bool checkA2ProbeMechanism()
+{
+    bool ok = true;
+    char fail[192];
+
+    // P1 — scalar new inside the probe scope is counted
+    a2probe::reset();
+    {
+        a2probe::Scope scope;
+        int* p = new int(1);
+        delete p;
+    }
+    if (a2probe::count() != 1)
+    {
+        std::snprintf(fail, sizeof fail, "[A2-P1] FAIL: expected 1 allocation, got %llu",
+                      (unsigned long long)a2probe::count());
+        std::fprintf(stderr, "%s\n", fail);
+        ok = false;
+    }
+    else
+    {
+        std::printf("[A2-P1] scalar new inside scope: PASS (count=1, bytes=%llu)\n",
+                    (unsigned long long)a2probe::bytes());
+    }
+
+    // P2 — array new inside the probe scope is counted
+    a2probe::reset();
+    {
+        a2probe::Scope scope;
+        int* p = new int[10];
+        delete[] p;
+    }
+    if (a2probe::count() != 1)
+    {
+        std::snprintf(fail, sizeof fail, "[A2-P2] FAIL: expected 1 allocation, got %llu",
+                      (unsigned long long)a2probe::count());
+        std::fprintf(stderr, "%s\n", fail);
+        ok = false;
+    }
+    else
+    {
+        std::printf("[A2-P2] array new inside scope: PASS (count=1)\n");
+    }
+
+    // N1 — allocation outside the probe scope is NOT counted
+    a2probe::reset();
+    {
+        int* p = new int(7);
+        delete p;
+        int* q = new int[4];
+        delete[] q;
+    }
+    if (a2probe::count() != 0)
+    {
+        std::snprintf(fail, sizeof fail, "[A2-N1] FAIL: scope-free allocation counted (%llu)",
+                      (unsigned long long)a2probe::count());
+        std::fprintf(stderr, "%s\n", fail);
+        ok = false;
+    }
+    else
+    {
+        std::printf("[A2-N1] allocation outside scope: PASS (count=0)\n");
+    }
+
+    // N3 — nesting keeps the scope alive until the outermost exit
+    a2probe::reset();
+    bool innerStillActive = false;
+    bool outerReleased    = false;
+    {
+        a2probe::Scope outer;
+        {
+            a2probe::Scope inner;
+            int* p = new int(2);
+            delete p;                       // counted once
+        }
+        innerStillActive = a2probe::active();   // must still be true (depth 1)
+        int* q = new int(3);
+        delete q;                                // counted (depth 1)
+    }
+    outerReleased = !a2probe::active();
+    {
+        int* r = new int(4);
+        delete r;                                // NOT counted (depth 0)
+    }
+    const auto nestedCount = a2probe::count();
+    if (!innerStillActive || !outerReleased || nestedCount != 2)
+    {
+        std::snprintf(fail, sizeof fail,
+                      "[A2-N3] FAIL: inner_active=%d released=%d count=%llu (expected 1/1/2)",
+                      innerStillActive ? 1 : 0, outerReleased ? 1 : 0,
+                      (unsigned long long)nestedCount);
+        std::fprintf(stderr, "%s\n", fail);
+        ok = false;
+    }
+    else
+    {
+        std::printf("[A2-N3] nesting: PASS (depth restored, count=2)\n");
+    }
+
+    return ok;
+}
+
+bool checkA2ProbeThreadIsolation()
+{
+    // N2 — a scope on thread A must not make thread B's allocations visible.
+    // A process-wide flag (the B3 defect) would count both loops.
+    a2probe::reset();
+
+    std::atomic<bool> aInScope{ false };
+    std::atomic<bool> bDone{ false };
+    std::uint64_t aSeen = 0;
+    std::uint64_t bSeen = 0;
+
+    std::thread a([&] {
+        a2probe::Scope scope;
+        for (int i = 0; i < 50; ++i)
+        {
+            int* p = new int(i);
+            delete p;
+        }
+        aSeen = a2probe::count();
+        aInScope.store(true, std::memory_order_release);
+        while (!bDone.load(std::memory_order_acquire))
+            std::this_thread::yield();
+    });
+
+    std::thread b([&] {
+        while (!aInScope.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        for (int i = 0; i < 50; ++i)
+        {
+            int* p = new int(i);
+            delete p;                       // thread B is outside any scope
+        }
+        bSeen = a2probe::count();
+        bDone.store(true, std::memory_order_release);
+    });
+
+    a.join();
+    b.join();
+
+    const auto total = a2probe::count();
+    if (aSeen != 50 || bSeen != 50 || total != 50)
+    {
+        std::fprintf(stderr,
+                     "[A2-N2] FAIL: a=%llu b=%llu total=%llu (expected 50/50/50; "
+                     "total>50 means the RT context leaked across threads)\n",
+                     (unsigned long long)aSeen, (unsigned long long)bSeen,
+                     (unsigned long long)total);
+        return false;
+    }
+
+    std::printf("[A2-N2] thread isolation: PASS (A=50, B=50 uncounted, total=50)\n");
+    return true;
+}
+
+bool checkA2ProbeRetirePath()
+{
+    // T1 — the T10-c subject, measured with the probe active.
+    // The funnel is asserted too, so "0 allocations" cannot mean "never ran".
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[A2-T1] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    convo::EpochDomain& domain = DeferredPublicationTestAccess::epochDomain(e);
+
+    auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    if (!a || !b)
+    {
+        convo::SnapshotFactory::destroy(a);
+        convo::SnapshotFactory::destroy(b);
+        harness.stop();
+        std::fprintf(stderr, "[A2-T1] SnapshotFactory::create returned null\n");
+        return false;
+    }
+
+    convo::isr::ISRRetireRouter router(domain);
+    convo::SnapshotCoordinator coordinator(domain);
+    coordinator.setRetireSink(&router);
+    coordinator.startFade(a, /*fadeSamples=*/100);
+    coordinator.startFade(b, /*fadeSamples=*/100);
+
+    const auto pendingBefore = domain.pendingRetireCount();
+    const auto epochBefore   = domain.currentEpoch();
+
+    bool     probeActiveDuringCall = false;
+    std::uint64_t allocations      = 0;
+
+    a2probe::reset();
+    {
+        a2probe::Scope scope;
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coordinator);
+        probeActiveDuringCall = a2probe::active();
+        allocations           = a2probe::count();
+    }
+
+    const auto pendingAfter = domain.pendingRetireCount();
+    const auto epochAfter   = domain.currentEpoch();
+
+    bool ok = true;
+    if (!probeActiveDuringCall)
+    {
+        std::fprintf(stderr, "[A2-T1] FAIL: probe was not active during the call\n");
+        ok = false;
+    }
+    if (pendingAfter != pendingBefore + 1 || epochAfter != epochBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[A2-T1] FAIL: funnel did not run (ring %u->%u, epoch %llu->%llu)\n",
+                     (unsigned)pendingBefore, (unsigned)pendingAfter,
+                     (unsigned long long)epochBefore, (unsigned long long)epochAfter);
+        ok = false;
+    }
+    if (allocations != 0)
+    {
+        std::fprintf(stderr, "[A2-T1] FAIL: %llu allocation(s) on the retire path\n",
+                     (unsigned long long)allocations);
+        ok = false;
+    }
+    if (ok)
+    {
+        std::printf("[A2-T1] retire path allocations: 0 (probe active, funnel ring %u->%u, epoch %llu->%llu)\n",
+                    (unsigned)pendingBefore, (unsigned)pendingAfter,
+                    (unsigned long long)epochBefore, (unsigned long long)epochAfter);
+    }
+
+    domain.drainAll();
+    harness.stop();
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     g_v11eReclaimCalls = 0;
@@ -115982,6 +116320,21 @@ int runV11EngineRetireProtectionTests()
     if (!checkT10cProductionProviderPath())
     {
         std::fprintf(stderr, "FAIL: checkT10cProductionProviderPath (T10-c)\n");
+        hdOk = false;
+    }
+    if (!checkA2ProbeMechanism())
+    {
+        std::fprintf(stderr, "FAIL: checkA2ProbeMechanism (A2 P1/P2/N1/N3)\n");
+        hdOk = false;
+    }
+    if (!checkA2ProbeThreadIsolation())
+    {
+        std::fprintf(stderr, "FAIL: checkA2ProbeThreadIsolation (A2 N2)\n");
+        hdOk = false;
+    }
+    if (!checkA2ProbeRetirePath())
+    {
+        std::fprintf(stderr, "FAIL: checkA2ProbeRetirePath (A2 T1)\n");
         hdOk = false;
     }
     if (!hdOk)
