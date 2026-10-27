@@ -82,7 +82,7 @@ inline std::atomic<std::uint64_t>& byteRef()
     return b;
 }
 
-inline thread_local int t_depth = 0;
+inline thread_local int t_depth = 0; // NOLINT(thread-local) RT-SAFE: POD int, constant-initialised, no destructor, no allocation, no lock; depth-only test probe state that must never be shared between threads
 
 inline bool active() noexcept { return t_depth > 0; }
 
