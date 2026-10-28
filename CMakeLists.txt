@@ -445,6 +445,18 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ScopedEpochReaderTests PRIVATE cxx_std_20)
     target_compile_options(ScopedEpochReaderTests PRIVATE /EHsc /utf-8)
 
+    # ★ R-22: A-closure reader-safety 契約の構造的強制テスト。
+    #   非 RT reader が guard 無しで追加された場合に CI を失敗させる。
+    #   ソースを読むだけなので JUCE へはリンクしない。
+    add_executable(ScopedEpochReaderStructuralTests
+        src/tests/ScopedEpochReaderStructuralTests.cpp
+    )
+    target_compile_definitions(ScopedEpochReaderStructuralTests PRIVATE
+        CONVOPEQ_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_compile_features(ScopedEpochReaderStructuralTests PRIVATE cxx_std_17)
+    target_compile_options(ScopedEpochReaderStructuralTests PRIVATE /EHsc /utf-8)
+
     # ★ STG-11-D1 (Candidate B): EQ-owned router lifetime の決定論的 regression test。
     #   EQProcessor 本体（eqprocessor/*.cpp）をリンクし、public setter で D→Q→E→T
     #   まで駆動する。standalone target とすることで AudioEngineHarness の深い
@@ -1025,6 +1037,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
     add_test(NAME ScopedEpochReader COMMAND ScopedEpochReaderTests)
+    add_test(NAME ScopedEpochReaderStructural COMMAND ScopedEpochReaderStructuralTests)
     add_test(NAME STG11EQRetire COMMAND STG11EQRetireTests)
     add_test(NAME STG11D2SnapshotRetire COMMAND STG11D2SnapshotRetireTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
@@ -1105,6 +1118,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ScopedEpochReaderTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ScopedEpochReaderStructuralTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11EQRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11D2SnapshotRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -2424,6 +2438,7 @@ if(ENABLE_ASAN)
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
         STG10ReaderQuarantineTests
         ScopedEpochReaderTests
+        ScopedEpochReaderStructuralTests
         STG11EQRetireTests
         STG11D2SnapshotRetireTests
         TerminalTelemetryContractTests)
