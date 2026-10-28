@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-28 14:35:57
+> Generated: 2026-10-28 17:39:58
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -377,6 +377,7 @@
         │   ├── RuntimePublicationCoordinatorTests.cpp
         │   ├── RuntimeSemanticSchemaValidationTests.cpp
         │   ├── RuntimeWorldAuthorityProjectionTests.cpp
+        │   ├── ScopedEpochReaderStructuralTests.cpp
         │   ├── ScopedEpochReaderTests.cpp
         │   ├── SequenceArithmeticTests.cpp
         │   ├── ShadowCompareContractTests.cpp
@@ -1197,6 +1198,18 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ScopedEpochReaderTests PRIVATE cxx_std_20)
     target_compile_options(ScopedEpochReaderTests PRIVATE /EHsc /utf-8)
 
+    # ★ R-22: A-closure reader-safety 契約の構造的強制テスト。
+    #   非 RT reader が guard 無しで追加された場合に CI を失敗させる。
+    #   ソースを読むだけなので JUCE へはリンクしない。
+    add_executable(ScopedEpochReaderStructuralTests
+        src/tests/ScopedEpochReaderStructuralTests.cpp
+    )
+    target_compile_definitions(ScopedEpochReaderStructuralTests PRIVATE
+        CONVOPEQ_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_compile_features(ScopedEpochReaderStructuralTests PRIVATE cxx_std_17)
+    target_compile_options(ScopedEpochReaderStructuralTests PRIVATE /EHsc /utf-8)
+
     # ★ STG-11-D1 (Candidate B): EQ-owned router lifetime の決定論的 regression test。
     #   EQProcessor 本体（eqprocessor/*.cpp）をリンクし、public setter で D→Q→E→T
     #   まで駆動する。standalone target とすることで AudioEngineHarness の深い
@@ -1777,6 +1790,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
     add_test(NAME ScopedEpochReader COMMAND ScopedEpochReaderTests)
+    add_test(NAME ScopedEpochReaderStructural COMMAND ScopedEpochReaderStructuralTests)
     add_test(NAME STG11EQRetire COMMAND STG11EQRetireTests)
     add_test(NAME STG11D2SnapshotRetire COMMAND STG11D2SnapshotRetireTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
@@ -1857,6 +1871,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(ScopedEpochReaderTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ScopedEpochReaderStructuralTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11EQRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11D2SnapshotRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -3176,6 +3191,7 @@ if(ENABLE_ASAN)
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
         STG10ReaderQuarantineTests
         ScopedEpochReaderTests
+        ScopedEpochReaderStructuralTests
         STG11EQRetireTests
         STG11D2SnapshotRetireTests
         TerminalTelemetryContractTests)
@@ -5688,6 +5704,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
 
 ```
 #include <JuceHeader.h>
+#include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "RetryScheduler.h" // ★ D101-24 Step 1: complete type for unique_ptr<RetryScheduler> destruction
 #include "core/RuntimeReaderContext.h"
@@ -5793,7 +5810,7 @@ AudioEngine::AudioEngine()
 
     // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
     //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
-    s_handleInvalidationOwner.store(this, std::memory_order_release);
+    convo::publishAtomic(s_handleInvalidationOwner, this, std::memory_order_release);
 }
 
 AudioEngine::~AudioEngine()
@@ -6055,8 +6072,8 @@ AudioEngine::~AudioEngine()
     //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
     {
         AudioEngine* expected = this;
-        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
-                                                          std::memory_order_acq_rel);
+        convo::compareExchangeAtomic(s_handleInvalidationOwner, expected, nullptr,
+                                     std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
@@ -21910,6 +21927,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 ```
 #include <JuceHeader.h>
 #include <algorithm>
+#include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
 #include "ISRDSPQuarantine.h"
@@ -21932,7 +21950,7 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
     if (p == nullptr)
         return DestroyOutcome::Destroyed;
 
-    if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
+    if (auto* owner = convo::consumeAtomic(s_handleInvalidationOwner, std::memory_order_acquire))
     {
         if (!owner->invalidateHandleBeforeDestroy(p))
         {
@@ -27423,7 +27441,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     //   インスタンス）。スロット数は 256 固定なので走査は NonRT で許容できる。
     for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
         const auto& reg = registry_[i];
-        if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+        if (convo::consumeAtomic(reg.instance, std::memory_order_acquire) != dspInstance)
             continue;
         const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
         if (state == DSPState::Constructing || state == DSPState::Active
@@ -27445,7 +27463,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     const uint32_t slot = freeSlots_[--freeSize_];
     auto& reg = registry_[slot];
     const auto gen = convo::consumeAtomic(reg.generation, std::memory_order_acquire) + 1u;
-    reg.instance.store(dspInstance, std::memory_order_release);
+    convo::publishAtomic(reg.instance, dspInstance, std::memory_order_release);
     convo::publishAtomic(reg.generation, gen, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
     // ★ F1' (2026-10-25): 受付を開いた状態（closed=0, count=0）で公開する。
@@ -27480,7 +27498,7 @@ DSPHandlePin DSPHandleRuntime::tryPin(DSPHandle handle) noexcept
         // observed は失敗時に最新値へ更新される
     }
 
-    void* instance = reg.instance.load(std::memory_order_acquire);
+    void* instance = convo::consumeAtomic(reg.instance, std::memory_order_acquire);
     if (instance == nullptr)
     {
         // F2' の無効化後（instance が既に消えている）。pin を返して失敗側へ倒す。
@@ -27580,7 +27598,7 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
     // ★ F1'-prep (2026-10-25): state を読んでから instance を読む。両方とも acquire だが、
     //   「state を読んだ直後に destroy が走る」窓は依然として残る（HL-5）。
     //   ここで instance が null なら（F2' の無効化後）必ず失敗側へ倒す。
-    auto* instance = reg.instance.load(std::memory_order_acquire);
+    auto* instance = convo::consumeAtomic(reg.instance, std::memory_order_acquire);
     if (instance == nullptr) {
         return { nullptr, false, true };
     }
@@ -27696,7 +27714,7 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
     //   古い state（Active/Retired）を見たまま instance を読む窓が広がる。state を先に
     //   DestroyPending にすることで、resolve() は少なくとも「解決不能」へ倒れる。
     convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
-    reg.instance.store(nullptr, std::memory_order_release);
+    convo::publishAtomic(reg.instance, nullptr, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
     // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
     if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
@@ -27727,7 +27745,7 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
         for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
         {
             auto& reg = registry_[i];
-            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            if (convo::consumeAtomic(reg.instance, std::memory_order_acquire) != dspInstance)
                 continue;
             if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
                 continue;
@@ -27750,13 +27768,13 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
         for (size_t k = 0; k < targetCount; ++k)
         {
             auto& reg = registry_[targets[k].slot];
-            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            if (convo::consumeAtomic(reg.instance, std::memory_order_acquire) != dspInstance)
                 continue;
             if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
                 continue;
 
             convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
-            reg.instance.store(nullptr, std::memory_order_release);
+            convo::publishAtomic(reg.instance, nullptr, std::memory_order_release);
             convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
 
             if (targets[k].slot != 0 && freeSize_ < MAX_DSP_SLOTS)
@@ -27904,7 +27922,7 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
         return false;
 
     // Phase 2: clear instance
-    registry_[slot].instance.store(nullptr, std::memory_order_release);
+    convo::publishAtomic(registry_[slot].instance, nullptr, std::memory_order_release);
     convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
                          std::memory_order_release);
     // work88: return the reclaimed quarantine slot to the free list (prevents slot leaks).
@@ -27932,7 +27950,7 @@ std::size_t DSPHandleRuntime::retryDeferredQuarantineDestroy() noexcept
         if (convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire)
             != DSPState::Quarantined)
             continue;
-        if (registry_[slot].instance.load(std::memory_order_acquire) == nullptr)
+        if (convo::consumeAtomic(registry_[slot].instance, std::memory_order_acquire) == nullptr)
             continue;
 
         if (destroyQuarantineSlot(slot, 0))
@@ -61535,7 +61553,9 @@ private:
     // not fatal: the thread registers another slot, bounded by kMaxReaders.
     static std::array<CacheEntry, 4>& cache() noexcept
     {
-        thread_local std::array<CacheEntry, 4> entries {};
+        // NOLINT(thread-local) RT-SAFE: used only by the non-RT reader path (never from the audio
+        //   thread); POD, no destructor, one cache per thread, no cross-thread sharing.
+        thread_local std::array<CacheEntry, 4> entries {};   // NOLINT(thread-local) RT-SAFE: non-RT only, POD, no destructor, per-thread
         return entries;
     }
 
@@ -69512,7 +69532,7 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
         return false;
     }
 
-    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
+    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain->currentEpoch();
     // ★ STG-11-D1 (Candidate B): stack-local router を member router に置換。
     //   旧 code の reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB
     //   （ISRRetireRouter と EpochDomain は直接の継承関係になくレイアウトが異なる）。
@@ -69556,7 +69576,7 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
 {
     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
-        m_epochDomain.publishEpoch();
+        m_epochDomain->publishEpoch();
         // ★ STG-11-D1: 定期的 reclaim driver（NonRT 専用）。
         //   呼び出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
         //   epoch 前進後に member router の D + Q + E + T を epoch-gated drain する。
@@ -69589,7 +69609,7 @@ bool EQProcessor::retireEQStateDeferred(EQState* state) noexcept
     if (state == nullptr)
         return true;
 
-    const uint64_t epoch = m_epochDomain.currentEpoch();
+    const uint64_t epoch = m_epochDomain->currentEpoch();
     return enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
 }
 
@@ -69598,7 +69618,7 @@ bool EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
     if (node == nullptr)
         return true;
 
-    const uint64_t epoch = m_epochDomain.currentEpoch();
+    const uint64_t epoch = m_epochDomain->currentEpoch();
     return enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
 }
 
@@ -69646,7 +69666,7 @@ EQProcessor::~EQProcessor()
     // ★ STG-11-D1: member router の Q/E/T を破棄前に drain する。
     //   tryReclaim() は epoch-gated（安全到達分のみ解放）。
     //   drainAllQuarantineStore() は epoch-agnostic 強制だが、破棄前提は既存の
-    //   m_epochDomain.drainAll() と同一（publication pipeline が engine-epoch-gated に
+    //   m_epochDomain->drainAll() と同一（publication pipeline が engine-epoch-gated に
     //   DSPCore を破棄するため audio quiescence 成立 — BlockDouble.cpp:151 の
     //   engine-domain read 区間が audio block 全体を覆う）。
     //   premature delete（epoch safety 無視の新規導入）は行っていない。
@@ -69654,9 +69674,9 @@ EQProcessor::~EQProcessor()
     m_ownedRetireRouter.drainAllQuarantineStore();
 
     // 退役キューを強制 drain して可能な限り回収する。
-    m_epochDomain.tryReclaim();
-    m_epochDomain.drainAll();
-    m_epochDomain.tryReclaim();
+    m_epochDomain->tryReclaim();
+    m_epochDomain->drainAll();
+    m_epochDomain->tryReclaim();
 
     releaseResources();
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: exit");
@@ -69770,7 +69790,7 @@ void EQProcessor::reset()
     //   （P-D2-1: 活性 Read 0 件 / DESIGN_R4_D2D3 §1.1・§1.6）。
 
     // A-closure (reader safety): reader slot held across the load + dereference.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (readGuard.active())
     {
         auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -70024,7 +70044,7 @@ juce::ValueTree EQProcessor::getState() const
 {
     // A-closure (reader safety): hold an EBR reader slot BEFORE loading the published
     // state, so a concurrent unlink+retire+reclaim cannot free it mid-read.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active())
         return juce::ValueTree ("EQ");   // fail-closed: no protection -> no dereference
 
@@ -70176,7 +70196,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     // A-closure (reader safety): the reader slot covers every state dereference below
     // (state->totalGainDb and createBandNode(i, *loopState)).
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 
@@ -70294,7 +70314,7 @@ EQProcessor::EQState* EQProcessor::getEQState() const
 float EQProcessor::getTotalGain() const
 {
     // A-closure (reader safety): reader slot held across load + dereference.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return 0.0f;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -70306,7 +70326,7 @@ EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
 
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return EQBandType::Peaking;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -70318,7 +70338,7 @@ EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
 
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return EQChannelMode::Stereo;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -70336,7 +70356,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
     if (band < 0 || band >= NUM_BANDS) return {};
 
     // A-closure (reader safety): reader slot held across load + dereference.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return {};
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -70378,6 +70398,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
 #include <complex>
 #include <array>
 #include <vector>
+#include <memory>
 #include <mutex>
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
@@ -70632,7 +70653,7 @@ public:
     }
     [[nodiscard]] std::uint64_t eqPrivateEpoch() const noexcept
     {
-        return m_epochDomain.currentEpoch();
+        return m_epochDomain->currentEpoch();
     }
     [[nodiscard]] std::uint64_t eqOwnedRouterEpoch() const noexcept
     {
@@ -70776,7 +70797,10 @@ public:
     //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
     [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
     {
-        return convo::ScopedEpochReader (m_epochDomain);
+        // The epoch domain is a synchronization primitive: entering a reader slot does not
+        // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
+        // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
+        return convo::ScopedEpochReader (*m_epochDomain);
     }
     bool getAndClearPendingAGCChange() noexcept
     {
@@ -70884,15 +70908,17 @@ private:
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    //   mutable: const getter も EBR reader slot を enter/exit するため
-    //   （ScopedEpochReader / acquireReadGuard()）。
-    mutable convo::EpochDomain m_epochDomain;
-    // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to m_epochDomain.
+    //   const getter も EBR reader slot を enter/exit する必要がある。const な
+    //   unique_ptr でも *ptr は非 const 参照を返すため、mutable (LINT-AE-011) も
+    //   const_cast (LINT-AE-013) も使わずに済む。router より前に宣言し、
+    //   初期化順で *m_epochDomain が router の参照先として有効になるようにする。
+    std::unique_ptr<convo::EpochDomain> m_epochDomain { std::make_unique<convo::EpochDomain>() };
+    // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to *m_epochDomain
     //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
     //   member lifetime により drain / destruction まで保持する。
     //   m_epochDomain より後に宣言し、provider が router より長生きする。
     //   ISRRetireRouter.* 自体は変更しない（D → Q → E → T の chain 維持）。
-    convo::isr::ISRRetireRouter m_ownedRetireRouter { m_epochDomain };
+    convo::isr::ISRRetireRouter m_ownedRetireRouter { *m_epochDomain };
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
@@ -70901,7 +70927,7 @@ private:
     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
-    convo::RCUReader rcuReader { m_epochDomain };
+    convo::RCUReader rcuReader { *m_epochDomain };
     // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
     std::atomic<uint64_t> m_retireDropCount{0};
 
@@ -79218,7 +79244,7 @@ bool MixedPhasePersistentCache::validateCanonicalDims(std::int64_t targetLength,
 
 //==============================================================================
 // Phase 2 artifact classifier (Owner D-1R-2AJ section 5.1 fixed order).
-// Order: v3 namespace -> staging/temporary -> header readable -> magic ->
+// Order: v3 namespace -> staging/temporary -> header readable -> magic ->  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
 //        version -> dimensions (predicates 1..7) -> checked expected size vs
 //        actual size -> header.totalFileSize == expectedSize.
 //==============================================================================
@@ -79232,7 +79258,7 @@ MixedPhasePersistentCache::classifyArtifact(const juce::File& file) noexcept
             return ArtifactState::outsideV3Namespace;
     }
 
-    // (2) staging / temporary: canonical artifacts are *.mph
+    // (2) staging / temporary: canonical artifacts are *.mph  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
     if (file.getFileExtension() != ".mph")
         return ArtifactState::stagingOrTemporary;
 
@@ -79564,7 +79590,7 @@ void MixedPhasePersistentCache::evictLRU(size_t maxCount)
     dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
 
     // Only CurrentV3Canonical artifacts are candidates. Everything else
-    // (staging/temporary, malformed, exact-size mismatch, foreign, future,
+    // (staging/temporary, malformed, exact-size mismatch, foreign, future,  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
     // obsolete incl. v1/v2, outside the v3 namespace) is left untouched and is
     // NOT auto-deleted. The candidate count is therefore a subset of files.size().
     std::vector<std::pair<uint64_t, juce::File>> timedFiles;
@@ -132120,7 +132146,7 @@ int main()
 //
 //    Y-3 (production FaultPoint seam) is NOT approved. The Owner lists the
 //    preferred, production-change-free techniques, in order:
-//      1. test-owned temporary directory / artifact fixture      <- used here
+//      1. test-owned temporary directory / artifact fixture      <- used here  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
 //      2. filesystem wrapper / dependency injection in the test TU
 //      3. JUCE File existing behaviour for permission / truncated /
 //         replacement failure fixtures                        <- used here
@@ -133725,7 +133751,7 @@ Permission permissionFor(ArtifactState s, DestructiveAction a)
                                                      : Permission::Rejected;
 
         case DestructiveAction::EvictLruN:
-            // Owner section 5: staging / temporary is NOT an LRU candidate.
+            // Owner section 5: staging / temporary is NOT an LRU candidate.  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
             return isCanonical ? Permission::Allowed : Permission::Rejected;
 
         case DestructiveAction::Touch:
@@ -138718,6 +138744,228 @@ int main()
         std::printf("[FAIL] %s\n", e.what());
         return 1;
     }
+}
+
+```
+
+### 📄 `src\tests\ScopedEpochReaderStructuralTests.cpp`
+
+```
+// =============================================================================
+// ScopedEpochReaderStructuralTests.cpp — R-22: structural enforcement for the
+// A-closure reader-safety contract.
+//
+// Why this test exists:
+//   PR #59 fixed a use-after-free class by making every non-RT reader of
+//   EQProcessor's published EQState hold a convo::ScopedEpochReader across the
+//   load + dereference. Nothing prevents a future reader from being added
+//   without the guard, which would silently reintroduce the defect.
+//
+//   This test reads the production sources and asserts the contract:
+//     1. every listed non-RT reader body acquires the guard (either an explicit
+//        "ScopedEpochReader" or "acquireReadGuard()") and that acquisition appears
+//        BEFORE the first "loadCurrentState" in that body;
+//     2. getEQState() stays the only raw-pointer accessor (no guard inside);
+//     3. the two known raw-pointer call sites hold "acquireReadGuard".
+//
+//   The list of functions is the contract: adding a new reader means adding it
+//   here, which forces the author to look at the guard requirement.
+//
+// Oracle: source text only. No production code, no test hooks, no timing.
+// =============================================================================
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#ifndef CONVOPEQ_REPO_ROOT
+#error "CONVOPEQ_REPO_ROOT must be defined by the build (repository root path)"
+#endif
+
+namespace
+{
+
+std::string readFile (const std::string& relativePath)
+{
+    const std::string path = std::string (CONVOPEQ_REPO_ROOT) + "/" + relativePath;
+    std::ifstream in (path, std::ios::binary);
+
+    if (! in.is_open())
+        return {};
+
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Extracts the body of "EQProcessor::<name>(" by brace matching. Returns an
+// empty string when the function is not found.
+std::string functionBody (const std::string& source, const std::string& name)
+{
+    const std::string signature = "EQProcessor::" + name + "(";
+    const std::size_t sigPos = source.find (signature);
+
+    if (sigPos == std::string::npos)
+        return {};
+
+    const std::size_t openBrace = source.find ('{', sigPos);
+
+    if (openBrace == std::string::npos)
+        return {};
+
+    int depth = 0;
+
+    for (std::size_t i = openBrace; i < source.size(); ++i)
+    {
+        if (source[i] == '{')
+            ++depth;
+        else if (source[i] == '}')
+        {
+            --depth;
+
+            if (depth == 0)
+                return source.substr (openBrace, i - openBrace + 1);
+        }
+    }
+
+    return {};
+}
+
+struct Check
+{
+    bool ok = false;
+    std::string detail;
+};
+
+Check guardBeforeLoad (const std::string& source, const std::string& name)
+{
+    const std::string body = functionBody (source, name);
+
+    if (body.empty())
+        return { false, "function body not found: " + name };
+
+    // The body may acquire the guard directly (an explicit ScopedEpochReader) or
+    // through the EQProcessor::acquireReadGuard() accessor; both are the same contract.
+    const std::size_t directGuard = body.find ("ScopedEpochReader");
+    const std::size_t accessorGuard = body.find ("acquireReadGuard");
+    std::size_t guard = std::min (directGuard, accessorGuard);
+    const std::size_t load = body.find ("loadCurrentState");
+
+    if (directGuard == std::string::npos && accessorGuard == std::string::npos)
+        return { false, name + ": no ScopedEpochReader/acquireReadGuard in the body" };
+
+    if (load == std::string::npos)
+        return { false, name + ": no loadCurrentState in the body (contract changed?)" };
+
+    if (! (guard < load))
+        return { false, name + ": guard acquisition must appear BEFORE loadCurrentState" };
+
+    return { true, name + ": guard precedes the load" };
+}
+
+Check containsText (const std::string& text, const std::string& needle, const std::string& what)
+{
+    if (text.find (needle) == std::string::npos)
+        return { false, what + ": missing '" + needle + "'" };
+
+    return { true, what + ": '" + needle + "' present" };
+}
+
+} // namespace
+
+int main()
+{
+    const std::string core = readFile ("src/eqprocessor/EQProcessor.Core.cpp");
+    const std::string coefficients = readFile ("src/eqprocessor/EQProcessor.Coefficients.cpp");
+    const std::string eqResponse = readFile ("src/audioengine/AudioEngine.EQResponse.cpp");
+    const std::string rebuild = readFile ("src/audioengine/AudioEngine.RebuildDispatch.cpp");
+
+    if (core.empty() || coefficients.empty() || eqResponse.empty() || rebuild.empty())
+    {
+        std::fprintf (stderr, "FAIL: cannot read one or more production sources\n");
+        return 1;
+    }
+
+    int failures = 0;
+
+    // 1) Non-RT readers must hold the guard before the load.
+    const std::vector<std::pair<const std::string*, std::string>> guardedReaders = {
+        { &core, "getState" },
+        { &core, "reset" },
+        { &core, "prepareToPlay" },
+        { &core, "getTotalGain" },
+        { &core, "getBandType" },
+        { &core, "getBandChannelMode" },
+        { &core, "getBandParams" },
+        { &coefficients, "updateBandNode" },
+    };
+
+    for (const auto& entry : guardedReaders)
+    {
+        const Check c = guardBeforeLoad (*entry.first, entry.second);
+
+        if (! c.ok)
+        {
+            std::fprintf (stderr, "FAIL: %s\n", c.detail.c_str());
+            ++failures;
+        }
+        else
+        {
+            std::printf ("  [PASS] %s\n", c.detail.c_str());
+        }
+    }
+
+    // 2) getEQState() stays a raw-pointer accessor (no guard inside; the caller owns it).
+    {
+        const std::string body = functionBody (core, "getEQState");
+
+        if (body.empty())
+        {
+            std::fprintf (stderr, "FAIL: getEQState body not found\n");
+            ++failures;
+        }
+        else if (body.find ("ScopedEpochReader") != std::string::npos)
+        {
+            std::fprintf (stderr, "FAIL: getEQState must not take a guard internally (raw pointer contract)\n");
+            ++failures;
+        }
+        else
+        {
+            std::printf ("  [PASS] getEQState: raw-pointer accessor unchanged\n");
+        }
+    }
+
+    // 3) Known raw-pointer call sites must hold acquireReadGuard().
+    {
+        const Check a = containsText (eqResponse, "acquireReadGuard", "AudioEngine.EQResponse.cpp");
+        const Check b = containsText (rebuild, "acquireReadGuard", "AudioEngine.RebuildDispatch.cpp");
+
+        for (const Check* c : { &a, &b })
+        {
+            if (! c->ok)
+            {
+                std::fprintf (stderr, "FAIL: %s\n", c->detail.c_str());
+                ++failures;
+            }
+            else
+            {
+                std::printf ("  [PASS] %s\n", c->detail.c_str());
+            }
+        }
+    }
+
+    if (failures != 0)
+    {
+        std::fprintf (stderr, "ScopedEpochReaderStructuralTests: %d violation(s)\n", failures);
+        return 1;
+    }
+
+    std::printf ("ScopedEpochReaderStructuralTests: PASS (reader-safety contract enforced)\n");
+    return 0;
 }
 
 ```
