@@ -192,8 +192,17 @@ jobs:
               Write-Host "::endgroup::"
               continue
             }
-            python $script $argsStr
+            # An empty $argsStr must NOT be passed: PowerShell would forward it as a
+            # single empty argument, argparse then reports
+            # "unrecognized arguments: " and every verifier exits 2 (R-08).
+            if ([string]::IsNullOrWhiteSpace($argsStr)) {
+              python $script
+            }
+            else {
+              python $script $argsStr
+            }
             if ($LASTEXITCODE -ne 0) {
+              $failed = $true
               Write-Host "::warning::$v failed (exit=$LASTEXITCODE) — non-blocking in Practical Stable ISR"
             }
             Write-Host "::endgroup::"
@@ -202,6 +211,11 @@ jobs:
           if ($failed) {
             Write-Host "::warning::One or more verifiers failed — PR not blocked"
           }
+
+          # Documented policy for this job is non-blocking ("Practical Stable ISR"):
+          # report the aggregate result as a warning and end the step successfully so a
+          # verifier's exit code cannot masquerade as a workflow failure (R-08).
+          exit 0
 
       - name: Run 8.1 policy-driven input parsing and validation
         shell: pwsh
@@ -284,6 +298,14 @@ jobs:
           Assert-WorkflowRange -v $enforce81CloseDecisionRetryMax -min $closePolicy.collector.minRetryMax -max $closePolicy.collector.maxRetryMax -n 'enforce81CloseDecisionRetryMax'
           Write-Host '[PASS] 8.1 policy-driven input validation'
 
+      - name: Generate ISR authority inventory
+        shell: pwsh
+        run: |
+          # storage/ is git-ignored, so the inventory the authority-freeze gate reads
+          # does not exist in a fresh CI checkout. Generate it before the tier runner.
+          $ErrorActionPreference = 'Stop'
+          & ./.github/scripts/isr-generate-authority-inventory.ps1
+
       - name: Run tier-runner gate scripts
         shell: pwsh
         run: |
@@ -313,6 +335,15 @@ jobs:
             if ("${{ github.event.schedule }}" -eq '0 18 * * *') { $workflowDispatchSoakMinutes = 1440 }
             if ("${{ github.event.schedule }}" -eq '0 19 * * 0') { $workflowDispatchSoakMinutes = 10080 }
           }
+          # ★ R-08: array splatting passes elements POSITIONALLY, so @('-Tier', $tier)
+          #   binds the literal string '-Tier' to the first positional parameter and the
+          #   ValidateSet rejects it ("The argument "-Tier" does not belong to the set").
+          #   The argument list below is therefore kept as the *forwarding contract*
+          #   (the quoted '-Switch' / '-Param' literals are what
+          #   isr-verify-workflow-dispatch-input-policy.ps1 checks) and converted to a
+          #   HASHTABLE before the call, because named arguments need a hashtable splat.
+          #   The former '-InputName' entries were removed: isr-run-tiered-verification.ps1
+          #   has no such parameter (the 8.1 input contract is read from the policy JSON).
           $invokeArgs = @('-Tier', $tier)
           $declaredClass = "${{ inputs.declaredPrClass || 'Class-A' }}"
           $soakMin = "${{ inputs.soakMinutes || '0' }}"
@@ -320,10 +351,6 @@ jobs:
           $invokeArgs += '-DeclaredClass'; $invokeArgs += $declaredClass
           $soakMinutes = Resolve-NonNegativeInt -Raw $soakMin -Name 'soakMinutes'
           $invokeArgs += '-SoakMinutes'; $invokeArgs += $soakMinutes
-          $invokeArgs += '-InputName'; $invokeArgs += 'collect81WindowSec'
-          $invokeArgs += '-InputName'; $invokeArgs += 'collect81AutoCaptureTimeoutSec'
-          $invokeArgs += '-InputName'; $invokeArgs += 'collect81ProbeExitMs'
-          $invokeArgs += '-InputName'; $invokeArgs += 'enforce81CloseDecisionRetryMax'
           if ('${{ inputs.autoPruneCleanupDeferred }}' -eq 'true') { $invokeArgs += '-AutoPruneCleanupDeferred' }
           if ('${{ inputs.requireRuntimeEvidence }}' -eq 'true') { $invokeArgs += '-RequireRuntimeEvidence' }
           if ('${{ inputs.enforceTriggerPolicy }}' -eq 'true') { $invokeArgs += '-EnforceTriggerPolicy' }
@@ -331,6 +358,21 @@ jobs:
           if ('${{ inputs.requireClangTidyAudit }}' -eq 'true') { $invokeArgs += '-RequireClangTidyAudit' }
           if ('${{ inputs.prOpenedAt }}' -ne '') { $invokeArgs += '-PrOpenedAt'; $invokeArgs += '${{ inputs.prOpenedAt }}' }
           if ('${{ inputs.enforce81CloseDecisionRetryMax }}' -ne '') { $invokeArgs += '-Enforce81CloseDecisionRetryMax'; $invokeArgs += '${{ inputs.enforce81CloseDecisionRetryMax }}' }
+
+          # '-Name value' / '-Switch' 列 → hashtable（名前付き引数は hashtable splat が必要）。
+          # ★ 変数名は $invokeArgs のまま維持する: isr-verify-gate-wiring.ps1 は
+          #   "& ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs" という
+          #   呼び出し配線をテキストで検査している。
+          $invokeParams = @{}
+          for ($i = 0; $i -lt $invokeArgs.Count; $i++) {
+            $token = [string]$invokeArgs[$i]
+            if (-not $token.StartsWith('-')) { continue }
+            $name = $token.Substring(1)
+            $hasValue = ($i + 1) -lt $invokeArgs.Count -and -not ([string]$invokeArgs[$i + 1]).StartsWith('-')
+            if ($hasValue) { $invokeParams[$name] = $invokeArgs[$i + 1]; $i++ }
+            else { $invokeParams[$name] = $true }
+          }
+          $invokeArgs = $invokeParams
           & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
 
       - name: Apply PR SLA labels
