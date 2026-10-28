@@ -297,11 +297,16 @@ void EQProcessor::reset()
     //   serial を前進させるため、Audio Thread の検知自己更新で shadow は初期化される
     //   （P-D2-1: 活性 Read 0 件 / DESIGN_R4_D2D3 §1.1・§1.6）。
 
-    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
-    if (state)
+    // A-closure (reader safety): reader slot held across the load + dereference.
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (readGuard.active())
     {
-        smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
-        storeTotalGainDb(state->totalGainDb);
+        auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
+        if (state)
+        {
+            smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
+            storeTotalGainDb(state->totalGainDb);
+        }
     }
 
     // ★ work92 B-7b: bandResetPacked を CAS（serial 前進 + mask=0）で統一。
@@ -545,6 +550,12 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
 //============================================================================
 juce::ValueTree EQProcessor::getState() const
 {
+    // A-closure (reader safety): hold an EBR reader slot BEFORE loading the published
+    // state, so a concurrent unlink+retire+reclaim cannot free it mid-read.
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (! readGuard.active())
+        return juce::ValueTree ("EQ");   // fail-closed: no protection -> no dereference
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: publishCurrentState/exchangeCurrentState の release/acq_rel と HB
     if (state == nullptr) return juce::ValueTree("EQ");
 
@@ -691,12 +702,16 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             agcCoeffTableCapacity = 0;
     }
 
+    // A-closure (reader safety): the reader slot covers every state dereference below
+    // (state->totalGainDb and createBandNode(i, *loopState)).
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
     bypassFadeGain.reset(sampleRate, BYPASS_FADE_TIME_SEC);
 
-    if (state)
+    if (readGuard.active() && state)
     {
         storeTotalGainDb(state->totalGainDb);
         smoothTotalGain.setCurrentAndTargetValue(
@@ -753,7 +768,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);                    // release: Processing.cpp の bypassed acquire と HB
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 
-    if (rateChanged)
+    if (rateChanged && readGuard.active())
     {
         for (int i = 0; i < NUM_BANDS; ++i)
         {
@@ -806,6 +821,10 @@ EQProcessor::EQState* EQProcessor::getEQState() const
 
 float EQProcessor::getTotalGain() const
 {
+    // A-closure (reader safety): reader slot held across load + dereference.
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (! readGuard.active()) return 0.0f;
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return 0.0f;
     return state->totalGainDb;
@@ -814,6 +833,10 @@ float EQProcessor::getTotalGain() const
 EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
+
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (! readGuard.active()) return EQBandType::Peaking;
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return EQBandType::Peaking;
     return state->bandTypes[band];
@@ -822,6 +845,10 @@ EQBandType EQProcessor::getBandType(int band) const
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
+
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (! readGuard.active()) return EQChannelMode::Stereo;
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return EQChannelMode::Stereo;
     return state->bandChannelModes[band];
@@ -835,6 +862,11 @@ void EQProcessor::cleanup()
 EQBandParams EQProcessor::getBandParams(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return {};
+
+    // A-closure (reader safety): reader slot held across load + dereference.
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (! readGuard.active()) return {};
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return {};
     return state->bands[band];

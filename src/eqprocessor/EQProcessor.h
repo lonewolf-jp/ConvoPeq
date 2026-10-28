@@ -31,6 +31,7 @@
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
 #include "core/RCUReader.h"
+#include "core/ScopedEpochReader.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
@@ -412,6 +413,20 @@ public:
     //----------------------------------------------------------
     EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは currentStateBits に依存)
     const EQState* getEQStateSnapshot() const { return getEQState(); }
+
+    // ── A-closure (reader safety): non-RT reader scope ────────────────────────
+    //   getEQState() が返す生ポインタを *dereference する* 呼び出し側は、
+    //   この guard を取得してから load し、deref が終わるまで保持すること。
+    //   理由: メッセージ/ワーカースレッドが EBR reader slot を持たないまま
+    //   「unlink 前に publish された値」を load し、その後に reclaim が走ると
+    //   deref 中に delete され得る（getMinReaderEpoch が読者不在と誤認する）。
+    //   guard が slot を保持している間は retireEpoch < minReaderEpoch が成立
+    //   しないため、当該オブジェクトは解放されない。
+    //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
+    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
+    {
+        return convo::ScopedEpochReader (m_epochDomain);
+    }
     bool getAndClearPendingAGCChange() noexcept
     {
         return convo::exchangeAtomic(m_pendingAGCChange, false, std::memory_order_acq_rel); // acq_rel: acquire で setAGCEnabled の publishAtomic release と HB; release で次回呼び出しの acquire と HB
@@ -518,7 +533,9 @@ private:
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    convo::EpochDomain m_epochDomain;
+    //   mutable: const getter も EBR reader slot を enter/exit するため
+    //   （ScopedEpochReader / acquireReadGuard()）。
+    mutable convo::EpochDomain m_epochDomain;
     // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to m_epochDomain.
     //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
     //   member lifetime により drain / destruction まで保持する。

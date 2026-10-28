@@ -63,6 +63,11 @@ void EQProcessor::updateBandNode(int band)
 {
     if (band < 0 || band >= NUM_BANDS) return;
 
+    // A-closure (reader safety): the reader slot covers both the state dereference
+    // (createBandNode) and the retire of the node it replaces.
+    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    if (! readGuard.active()) return;
+
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
