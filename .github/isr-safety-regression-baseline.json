@@ -3,7 +3,7 @@
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-SAFETY-BASELINE-001",
     "rationale": "baseline values for SafetyPass comparison during ISR runtime migration",
-    "expiry": "2026-09-30",
+    "expiry": "2026-12-31",
     "metrics": {
         "xrunDelta": 0,
         "staleObserveCount": 0,

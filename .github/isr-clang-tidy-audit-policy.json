@@ -4,7 +4,7 @@
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-CLANGTIDY-002",
     "rationale": "Govern clang-tidy audit enforce timing without hard-coding script behavior",
-    "expiry": "2026-09-30",
+    "expiry": "2026-12-31",
     "enforceTiers": [
         "exhaustive"
     ]
