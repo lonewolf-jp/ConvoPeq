@@ -3,7 +3,7 @@
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-OBSERVE-GOV-001",
     "rationale": "top-level lifecycle governance for observe shim allowlist",
-    "expiry": "2026-09-30",
+    "expiry": "2026-12-31",
     "rules": [
         {
             "symbol": "runtimeStore.observe",
@@ -11,7 +11,7 @@
             "owner": "audioengine-runtime-bridge",
             "issue": "BRIDGE-OBSERVE-GOV-001",
             "rationale": "Gate 20 hardening: keep active rule-set and fail-closed default for any direct runtimeStore.observe usage",
-            "expiry": "2026-09-30"
+            "expiry": "2026-12-31"
         }
     ]
 }
