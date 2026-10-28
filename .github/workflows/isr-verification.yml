@@ -141,8 +141,13 @@ jobs:
             Write-Host "[INFO] npm global prefix: $npmGlobalPrefix"
             $npmGlobalPrefix | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
-          $astGrep = Get-Command ast-grep -CommandType Application -ErrorAction SilentlyContinue
-          if (-not $astGrep) { throw 'ast-grep is not on PATH after npm install' }
+          $astGrepCandidates = @(Get-Command ast-grep -CommandType Application -ErrorAction SilentlyContinue)
+          if ($astGrepCandidates.Count -eq 0) { throw 'ast-grep is not on PATH after npm install' }
+          # npm publishes ast-grep.cmd, an extensionless shim and ast-grep.ps1, so
+          # Get-Command returns more than one match. Keep the first as a scalar
+          # ($cmd.Source on the array would make `&` fail with a joined path).
+          $astGrep = $astGrepCandidates[0]
+          Write-Host "[INFO] ast-grep candidates: $(($astGrepCandidates | ForEach-Object { $_.Name }) -join ', ')"
           $probe = (& $astGrep.Source --version 2>&1 | Out-String).Trim()
           $probeExit = $LASTEXITCODE
           Write-Host "[INFO] ast-grep path=$($astGrep.Source) version=$probe"
