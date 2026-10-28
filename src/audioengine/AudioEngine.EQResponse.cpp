@@ -87,7 +87,10 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     int numActiveBands = 0;
 
     // 状態スナップショットを取得して一貫性を確保
-    auto eqState = uiEqEditor.getEQState();
+    // A-closure (reader safety): the EBR reader slot is held for the whole dereference
+    // window below; if protection is unavailable we fail closed (flat response).
+    auto eqReadGuard = uiEqEditor.acquireReadGuard();
+    auto eqState = eqReadGuard.active() ? uiEqEditor.getEQState() : nullptr;
 
     if (eqState == nullptr)
     {

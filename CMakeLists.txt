@@ -429,6 +429,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(STG10ReaderQuarantineTests PRIVATE cxx_std_20)
     target_compile_options(STG10ReaderQuarantineTests PRIVATE /EHsc /utf-8)
 
+    # ★ A-closure (reader safety): ScopedEpochReader の決定論的 regression test。
+    #   EpochDomain / ScopedEpochReader は header-only。公開 API のみ使用。
+    add_executable(ScopedEpochReaderTests
+        src/tests/ScopedEpochReaderTests.cpp
+    )
+    target_include_directories(ScopedEpochReaderTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_link_libraries(ScopedEpochReaderTests PRIVATE juce::juce_core)
+    target_compile_features(ScopedEpochReaderTests PRIVATE cxx_std_20)
+    target_compile_options(ScopedEpochReaderTests PRIVATE /EHsc /utf-8)
+
     # ★ STG-11-D1 (Candidate B): EQ-owned router lifetime の決定論的 regression test。
     #   EQProcessor 本体（eqprocessor/*.cpp）をリンクし、public setter で D→Q→E→T
     #   まで駆動する。standalone target とすることで AudioEngineHarness の深い
@@ -1008,6 +1024,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
     add_test(NAME StuckReaderFallbackDrain COMMAND StuckReaderFallbackDrainTests)
     add_test(NAME STG10ReaderQuarantine COMMAND STG10ReaderQuarantineTests)
+    add_test(NAME ScopedEpochReader COMMAND ScopedEpochReaderTests)
     add_test(NAME STG11EQRetire COMMAND STG11EQRetireTests)
     add_test(NAME STG11D2SnapshotRetire COMMAND STG11D2SnapshotRetireTests)
     add_test(NAME NormalRetireDSPHandleCompare COMMAND NormalRetireDSPHandleCompareTests)
@@ -1087,6 +1104,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         set_target_properties(TerminalTelemetryContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(StuckReaderFallbackDrainTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG10ReaderQuarantineTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ScopedEpochReaderTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11EQRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(STG11D2SnapshotRetireTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
         set_target_properties(NormalRetireDSPHandleCompareTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
@@ -2405,6 +2423,7 @@ if(ENABLE_ASAN)
         AudioEngineHarness ISRSoakTests
         ShutdownRetireIntentDrainTests StuckReaderFallbackDrainTests
         STG10ReaderQuarantineTests
+        ScopedEpochReaderTests
         STG11EQRetireTests
         STG11D2SnapshotRetireTests
         TerminalTelemetryContractTests)
