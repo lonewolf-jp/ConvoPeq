@@ -65,7 +65,9 @@ void EQProcessor::updateBandNode(int band)
 
     // A-closure (reader safety): the reader slot covers both the state dereference
     // (createBandNode) and the retire of the node it replaces.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    // R-46: m_epochDomain は unique_ptr。ScopedEpochReader は provider 参照を取るため
+    //       間接参照して渡す（EQProcessor.h:432 と同じ形。意味の変更なし）。
+    const convo::ScopedEpochReader readGuard (*m_epochDomain);
     if (! readGuard.active()) return;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
