@@ -30,6 +30,14 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "D167 integration test exercises the engine rebuild path as telemetry vehicle (requestRebuild -> admission-closed suppression telemetry); same pattern as DeferredFlowIntegrationTests entry (commit 335240470)",
                 "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/tests/AudioEngineHarness/P1PolyphaseGainCharacterization\\.cpp$",
+                "lineRegex": "requestRebuild\\s*\\(",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "P1 polyphase gain characterization harness exercises the public publish entry point (requestRebuild -> rebuild dispatch) for the D167-5 M2 measurement",
+                "expiry": "2027-12-31"
             }
         ],
         "requiredAdmissionGatePatterns": [
@@ -241,6 +249,14 @@
         }
     ],
     "residencyContainerAllowlist": [
+        {
+            "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+            "lineRegex": "std::vector<void\\*>\\s+deferredDestroy_\\s*;",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "AudioEngine deferred destroy residency container (F1/-b deferred destroy when a pin is retained)",
+            "expiry": "2027-12-31"
+        },
         {
             "pathRegex": "^src/audioengine/AudioEngine\\.h$",
             "lineRegex": "std::vector<CacheMap\\*>\\s+enqueueFallbackMaps\\s*;",

@@ -242,6 +242,74 @@ function Resolve-EventHeadSha {
     }
 }
 
+function Resolve-PullRequestContext {
+    param(
+        [string]$EventPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($EventPath) -or -not (Test-Path -LiteralPath $EventPath)) {
+        return $null
+    }
+
+    try {
+        $eventPayload = Get-Content -LiteralPath $EventPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $eventPayload.pull_request) {
+            return $null
+        }
+
+        return [pscustomobject]@{
+            number   = [int]$eventPayload.pull_request.number
+            headSha  = "$($eventPayload.pull_request.head.sha)"
+            fullName = "$($eventPayload.repository.full_name)"
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Resolve-LatestPullRequestHeadSha {
+    param(
+        $PullRequestContext
+    )
+
+    if ($null -eq $PullRequestContext) {
+        return [pscustomobject]@{ ok = $false; sha = $null; reason = 'no-pull-request-context' }
+    }
+    if ([string]::IsNullOrWhiteSpace("$($PullRequestContext.fullName)")) {
+        return [pscustomobject]@{ ok = $false; sha = $null; reason = 'missing-repository-full-name' }
+    }
+    if ([int]$PullRequestContext.number -le 0) {
+        return [pscustomobject]@{ ok = $false; sha = $null; reason = 'missing-pull-request-number' }
+    }
+
+    $token = "$($env:GH_TOKEN)"
+    if ([string]::IsNullOrWhiteSpace($token)) { $token = "$($env:GITHUB_TOKEN)" }
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        return [pscustomobject]@{ ok = $false; sha = $null; reason = 'no-github-token' }
+    }
+
+    $apiBase = "$($env:GITHUB_API_URL)"
+    if ([string]::IsNullOrWhiteSpace($apiBase)) { $apiBase = 'https://api.github.com' }
+    $uri = "$apiBase/repos/$($PullRequestContext.fullName)/pulls/$($PullRequestContext.number)"
+
+    try {
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers @{
+            Authorization          = "Bearer $token"
+            Accept                 = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+        } -ErrorAction Stop
+        $sha = "$($response.head.sha)"
+        if ([string]::IsNullOrWhiteSpace($sha)) {
+            return [pscustomobject]@{ ok = $false; sha = $null; reason = 'api-returned-empty-head-sha' }
+        }
+        return [pscustomobject]@{ ok = $true; sha = $sha; reason = '' }
+    }
+    catch {
+        return [pscustomobject]@{ ok = $false; sha = $null; reason = "api-error: $($_.Exception.Message)" }
+    }
+}
+
 $requiredClassIds = @('Class-S', 'Class-A', 'Class-B', 'Class-C', 'Class-D')
 
 foreach ($classId in $requiredClassIds) {
@@ -562,15 +630,55 @@ else {
         $null
     }
 }
+# R-41: on pull_request events GITHUB_SHA is the PR merge commit, so comparing it
+# with pull_request.head.sha always reported a stale evaluation. Compare the head
+# SHA captured at evaluation start against the latest head SHA fetched for the run
+# instead, and fail closed when the latest SHA cannot be obtained.
+$pullRequestContext = Resolve-PullRequestContext -EventPath $env:GITHUB_EVENT_PATH
+$prHeadEvaluationStart = if ($null -ne $pullRequestContext) { "$($pullRequestContext.headSha)" } else { "$eventHeadSha" }
+$prHeadLatest = $null
+$prHeadVerification = 'not-applicable'
+$prHeadVerificationDetail = 'no-pull-request-event'
 $staleEvaluation = $false
 
-if (-not [string]::IsNullOrWhiteSpace($eventHeadSha) -and -not [string]::IsNullOrWhiteSpace($currentHeadSha) -and $eventHeadSha -ne $currentHeadSha) {
+if ($null -ne $pullRequestContext) {
+    $latestHead = Resolve-LatestPullRequestHeadSha -PullRequestContext $pullRequestContext
+    if (-not [bool]$latestHead.ok) {
+        $prHeadVerification = 'unverifiable'
+        $prHeadVerificationDetail = "$($latestHead.reason)"
+    }
+    elseif ([string]::IsNullOrWhiteSpace($prHeadEvaluationStart)) {
+        $prHeadVerification = 'unverifiable'
+        $prHeadVerificationDetail = 'missing-evaluation-start-head-sha'
+    }
+    elseif ("$($latestHead.sha)" -ne $prHeadEvaluationStart) {
+        $prHeadVerification = 'stale'
+        $prHeadLatest = "$($latestHead.sha)"
+        $prHeadVerificationDetail = "latestHeadSha=$prHeadLatest"
+    }
+    else {
+        $prHeadVerification = 'verified'
+        $prHeadLatest = "$($latestHead.sha)"
+        $prHeadVerificationDetail = 'evaluation-start head matches latest head'
+    }
+}
+
+if ($prHeadVerification -eq 'stale') {
     $staleEvaluation = $true
     $needsRevalidation = $true
     if ($labelSuggestions -notcontains 'needs-revalidation') {
         $labelSuggestions += 'needs-revalidation'
     }
-    $violations += "PR SLA evaluation is stale: eventHeadSha=$eventHeadSha currentHeadSha=$currentHeadSha"
+    $violations += "PR SLA evaluation is stale: evaluationStartHeadSha=$prHeadEvaluationStart latestHeadSha=$prHeadLatest"
+}
+
+if ($prHeadVerification -eq 'unverifiable') {
+    # Fail closed: an unverifiable head comparison must never pass silently.
+    $needsRevalidation = $true
+    if ($labelSuggestions -notcontains 'needs-revalidation') {
+        $labelSuggestions += 'needs-revalidation'
+    }
+    $violations += "PR SLA head verification unavailable: reason=$prHeadVerificationDetail evaluationStartHeadSha=$prHeadEvaluationStart"
 }
 
 if ($null -ne $declaredPolicy -and $null -ne $openedAtValue) {
@@ -620,6 +728,10 @@ $report | Add-Member -NotePropertyName 'openedAtSource' -NotePropertyValue $open
 $report | Add-Member -NotePropertyName 'eventHeadSha' -NotePropertyValue $eventHeadSha
 $report | Add-Member -NotePropertyName 'currentHeadSha' -NotePropertyValue $currentHeadSha
 $report | Add-Member -NotePropertyName 'staleEvaluation' -NotePropertyValue $staleEvaluation
+$report | Add-Member -NotePropertyName 'prHeadEvaluationStart' -NotePropertyValue $prHeadEvaluationStart
+$report | Add-Member -NotePropertyName 'prHeadLatest' -NotePropertyValue $prHeadLatest
+$report | Add-Member -NotePropertyName 'prHeadVerification' -NotePropertyValue $prHeadVerification
+$report | Add-Member -NotePropertyName 'prHeadVerificationDetail' -NotePropertyValue $prHeadVerificationDetail
 $report | Add-Member -NotePropertyName 'now' -NotePropertyValue ($nowValue.ToString('o'))
 $report | Add-Member -NotePropertyName 'deadlineAt' -NotePropertyValue $deadlineAtIsoValue
 $report | Add-Member -NotePropertyName 'needsRevalidation' -NotePropertyValue $needsRevalidation
