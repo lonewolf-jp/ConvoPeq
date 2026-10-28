@@ -367,7 +367,10 @@ AudioEngine::~AudioEngine()
     //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
     {
         AudioEngine* expected = this;
-        convo::compareExchangeAtomic(s_handleInvalidationOwner, expected, nullptr,
+        // R-46: 第 3 引数は T desired（U&& ではない）ため nullptr から T を推論できない。
+        //       同ファイル内の他の呼び出しと同じく型を明示する（意味の変更なし）。
+        convo::compareExchangeAtomic(s_handleInvalidationOwner, expected,
+                                     static_cast<AudioEngine*>(nullptr),
                                      std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
