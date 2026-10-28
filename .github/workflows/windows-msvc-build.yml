@@ -149,16 +149,35 @@ jobs:
           $mkl | ForEach-Object { Write-Host $_.Line }
           $ipp | ForEach-Object { Write-Host $_.Line }
 
-      - name: Build Release (ConvoPeq + AudioEngineHarness)
+      - name: Build Release (ConvoPeq)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq AudioEngineHarness 2>&1 |
-            Tee-Object -FilePath build.log
+          # JuceHeader.h は ConvoPeq ターゲットの生成物。同一 ninja 呼び出しで
+          # AudioEngineHarness と並列に走らせると生成前に include して失敗するため、
+          # 明示的に順序を分ける（クリーンツリーでの実測）。
+          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 |
+            Tee-Object -FilePath build-product.log
           $rc = $LASTEXITCODE
-          $errors = Select-String -Path build.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
+          $errors = Select-String -Path build-product.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
           if ($errors) {
-            "### Compile/link errors" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            "### Compile/link errors (ConvoPeq)" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            $errors | ForEach-Object { $_.Line } | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          }
+          exit $rc
+
+      - name: Build Release (AudioEngineHarness)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cmake --build $env:BUILD_DIR --config Release --target AudioEngineHarness 2>&1 |
+            Tee-Object -FilePath build-harness.log
+          $rc = $LASTEXITCODE
+          $errors = Select-String -Path build-harness.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
+          if ($errors) {
+            "### Compile/link errors (AudioEngineHarness)" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
             '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
             $errors | ForEach-Object { $_.Line } | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
             '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
@@ -172,7 +191,8 @@ jobs:
           name: windows-msvc-release-logs
           path: |
             configure.log
-            build.log
+            build-product.log
+            build-harness.log
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
