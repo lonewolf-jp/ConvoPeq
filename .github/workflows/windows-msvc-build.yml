@@ -5,25 +5,24 @@
 #   なる時間を最小化する。R-46 では `main` が 2 箇所でコンパイル不能のまま約 5 時間
 #   放置された（どの必須チェックも Windows の C++ をビルドしていなかった）。
 #
-# なぜ oneAPI (MKL/IPP) をインストールしないか:
-#   このリポジトリの CMakeLists.txt は `CONVOPEQ_REQUIRE_MKL`（既定 ON）で MKL を必須に
-#   できるが、OFF の場合は「MKL が無ければ system aligned allocator を使う」ことが
-#   明示的にサポートされている（CMakeLists.txt:71, 79-92, 1724-1738）。
-#   GitHub ホステッドランナーには Intel oneAPI が入っておらず、既存 sanitizer-ci の
-#   インストーラ取得は失敗すると configure/build ごと skip する（fail-open）。
-#   本ワークフローは「依存が無いことを理由に成功扱いする」設計を採らないため、
-#   外部 SDK に依存しない **サポート済み構成**（REQUIRE_MKL=OFF）で実際にビルドする。
-#   MKL 依存コードパスの検証は既存 sanitizer-ci（oneAPI がある場合のみ）が担い、
-#   本ワークフローはそれを変更しない。
+# 依存関係（oneAPI / MKL / IPP）— 実測にもとづく結論:
+#   このリポジトリの Windows ビルドは MKL と IPP の **ヘッダが必須** である。
+#     - src/DiagnosticsConfig.h:48 は `#if defined(JUCE_DSP_USE_INTEL_MKL)` で <mkl.h> を取り込む。
+#       JUCE/modules/juce_dsp/juce_dsp.h:156-157 が「未定義なら 0 を定義」するため、
+#       この `defined()` は常に真になる（= CONVOPEQ_REQUIRE_MKL=OFF でも mkl.h が要る）。
+#     - src/FFTBackend.h:22, src/MklFftEvaluator.h:17, src/MKLNonUniformConvolver.h:48,
+#       src/MainApplication.cpp:29 が <ipp.h> を無条件に include する。
+#   → 「SDK 無しでビルド」は成立しないため、CI では Intel oneAPI を実際に導入する。
+#   既存 sanitizer-ci.yml のインストーラ URL (aptmirror.nasm.me) は既に名前解決できない。
+#   本ワークフローは公式 winget パッケージ (Intel.OneAPI.BaseToolkit) を使い、
+#   導入後に mkl.h / ipp.h の実在を確認する。無ければ **fail**（skip しない）。
 #
 # 失敗時の原因識別:
-#   ビルドログを artifact として保存し、`error C####` / `error LNK####` と
-#   そのファイル:行をジョブサマリに抽出する。ツールチェーンが無い場合は
-#   configure 前に明示的に fail させる（skip しない）。
+#   ビルドログを artifact として保存し、`error C####` / `error LNK####` を
+#   Job Summary に抽出する。
 #
 # 対象ブランチ:
-#   `pull_request`（base=main）と `push`（main）。paths フィルタは置かない
-#   （どの変更でも必ず走らせる）。
+#   `pull_request`（base=main）と `push`（main）。paths フィルタは置かない。
 
 name: Windows MSVC Build
 
@@ -44,15 +43,16 @@ permissions:
 
 env:
   BUILD_DIR: ${{ github.workspace }}/build-ci
+  ONEAPI_ROOT_DIR: "C:\\Program Files (x86)\\Intel\\oneAPI"
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1) 製品構成（Release / 既定の診断設定 = OFF）: アプリ本体をビルドする
+  # 1) Release コンパイル（出荷構成: 診断 OFF）
   # ---------------------------------------------------------------------------
-  release-product:
-    name: Windows MSVC / Release (product)
+  release:
+    name: Windows MSVC / Release
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -71,7 +71,52 @@ jobs:
           if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
             python -m pip install --quiet ninja
           }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            throw "ninja is not available — this job never skips a build for missing tools."
+          }
           ninja --version
+
+      - name: Install Intel oneAPI (MKL + IPP) via winget
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          if ((Test-Path "$oneapi\mkl\latest\include\mkl.h") -and (Test-Path "$oneapi\ipp\latest\include\ipp.h")) {
+            Write-Host "oneAPI (MKL + IPP) already present."
+            exit 0
+          }
+          winget --version
+          # 公式 winget パッケージ。Base Toolkit に MKL と IPP が含まれる。
+          winget install --id Intel.OneAPI.BaseToolkit -e --silent `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+          Write-Host "winget exit=$LASTEXITCODE"
+          # winget の終了コードに依存せず、必要なヘッダの実在で判定する（fail closed）。
+          $mkl = Test-Path "$oneapi\mkl\latest\include\mkl.h"
+          $ipp = Test-Path "$oneapi\ipp\latest\include\ipp.h"
+          Write-Host "mkl.h present: $mkl"
+          Write-Host "ipp.h present: $ipp"
+          if (-not ($mkl -and $ipp)) {
+            Get-ChildItem "$oneapi" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  oneAPI dir: $($_.Name)" }
+            throw "Intel oneAPI (MKL + IPP) is not usable after installation — refusing to skip the build."
+          }
+
+      - name: Export oneAPI environment
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          $mkl = Join-Path $oneapi 'mkl\latest'
+          $ipp = Join-Path $oneapi 'ipp\latest'
+          $mklVer = (Get-ChildItem (Join-Path $oneapi 'mkl') -Directory |
+                     Where-Object { $_.Name -match '^\d{4}\.\d+$' } |
+                     Sort-Object Name -Descending | Select-Object -First 1)
+          $ippVer = (Get-ChildItem (Join-Path $oneapi 'ipp') -Directory |
+                     Where-Object { $_.Name -match '^\d{4}\.\d+$' } |
+                     Sort-Object Name -Descending | Select-Object -First 1)
+          Write-Host "MKL dir: $mkl  (versioned: $($mklVer.Name))"
+          Write-Host "IPP dir: $ipp  (versioned: $($ippVer.Name))"
+          "MKLROOT=$mkl"        | Out-File -Append -FilePath $env:GITHUB_ENV
+          "IPPROOT=$ipp"        | Out-File -Append -FilePath $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$mkl;$mkl\lib\cmake\mkl;$ipp;$ipp\lib\cmake\ipp" |
+            Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Verify toolchain (fail closed)
         shell: pwsh
@@ -81,35 +126,35 @@ jobs:
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { $missing += $tool }
           }
           if ($missing.Count -gt 0) {
-            throw "Missing required build tools: $($missing -join ', ') — this job never skips a build for missing dependencies."
+            throw "Missing required build tools: $($missing -join ', ')"
           }
-          Write-Host "cl.exe : $((Get-Command cl.exe).Source)"
           cl.exe 2>&1 | Select-Object -First 1
           cmake --version | Select-Object -First 1
           ninja --version
+          Write-Host "MKLROOT=$env:MKLROOT"
+          Write-Host "IPPROOT=$env:IPPROOT"
 
-      - name: Configure (Release, no MKL)
+      - name: Configure (Release, MKL required)
         shell: pwsh
         run: |
           cmake -S . -B $env:BUILD_DIR -G "Ninja Multi-Config" `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            -DCONVOPEQ_REQUIRE_MKL=OFF `
-            -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=OFF 2>&1 | Tee-Object -FilePath configure.log
+            -DCONVOPEQ_REQUIRE_MKL=ON 2>&1 | Tee-Object -FilePath configure.log
           if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
-          # MKL/IPP の状態が「不明」のまま進まないことを確認する（明示された状態のみ許容）
-          $mkl = Select-String -Path configure.log -Pattern 'MKL: (found|not found)'
-          $ipp = Select-String -Path configure.log -Pattern 'Intel IPP (found|not found)'
-          if (-not $mkl) { throw "CMake did not report a definite MKL state" }
-          if (-not $ipp) { throw "CMake did not report a definite IPP state" }
+          # MKL/IPP が「見つかった」と明示されること（不明のまま進ませない）
+          $mkl = Select-String -Path configure.log -Pattern 'MKL: found'
+          $ipp = Select-String -Path configure.log -Pattern 'Intel IPP found'
+          if (-not $mkl) { throw "CMake did not report MKL as found (CONVOPEQ_REQUIRE_MKL=ON)." }
+          if (-not $ipp) { throw "CMake did not report IPP as found." }
           $mkl | ForEach-Object { Write-Host $_.Line }
           $ipp | ForEach-Object { Write-Host $_.Line }
 
-      - name: Build Release (target ConvoPeq)
-        id: build
+      - name: Build Release (ConvoPeq + AudioEngineHarness)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 | Tee-Object -FilePath build.log
+          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq AudioEngineHarness 2>&1 |
+            Tee-Object -FilePath build.log
           $rc = $LASTEXITCODE
           $errors = Select-String -Path build.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
           if ($errors) {
@@ -124,103 +169,22 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-msvc-product-logs
+          name: windows-msvc-release-logs
           path: |
             configure.log
             build.log
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # 2) 診断 ON 構成（R-01 の計測コードを含む）: AudioEngineHarness をビルドする
-  # ---------------------------------------------------------------------------
-  release-harness-diag:
-    name: Windows MSVC / Release (harness, diag)
-    runs-on: windows-latest
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up MSVC (cl.exe) environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install Ninja
-        shell: pwsh
-        run: |
-          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
-            try { choco install ninja -y --no-progress } catch { Write-Host "choco install failed: $_" }
-          }
-          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
-            python -m pip install --quiet ninja
-          }
-          ninja --version
-
-      - name: Verify toolchain (fail closed)
-        shell: pwsh
-        run: |
-          $missing = @()
-          foreach ($tool in @('cl.exe', 'cmake.exe', 'ninja.exe')) {
-            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { $missing += $tool }
-          }
-          if ($missing.Count -gt 0) {
-            throw "Missing required build tools: $($missing -join ', ') — this job never skips a build for missing dependencies."
-          }
-          cl.exe 2>&1 | Select-Object -First 1
-          cmake --version | Select-Object -First 1
-          ninja --version
-
-      - name: Configure (Release, no MKL, runtime diagnostics ON)
-        shell: pwsh
-        run: |
-          cmake -S . -B $env:BUILD_DIR -G "Ninja Multi-Config" `
-            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            -DCONVOPEQ_REQUIRE_MKL=OFF `
-            -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=ON 2>&1 | Tee-Object -FilePath configure.log
-          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
-          $mkl = Select-String -Path configure.log -Pattern 'MKL: (found|not found)'
-          $ipp = Select-String -Path configure.log -Pattern 'Intel IPP (found|not found)'
-          if (-not $mkl) { throw "CMake did not report a definite MKL state" }
-          if (-not $ipp) { throw "CMake did not report a definite IPP state" }
-          $mkl | ForEach-Object { Write-Host $_.Line }
-          $ipp | ForEach-Object { Write-Host $_.Line }
-
-      - name: Build Release (target AudioEngineHarness)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          cmake --build $env:BUILD_DIR --config Release --target AudioEngineHarness 2>&1 | Tee-Object -FilePath build.log
-          $rc = $LASTEXITCODE
-          $errors = Select-String -Path build.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
-          if ($errors) {
-            "### Compile/link errors" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
-            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
-            $errors | ForEach-Object { $_.Line } | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
-            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
-          }
-          exit $rc
-
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-msvc-harness-logs
-          path: |
-            configure.log
-            build.log
-          if-no-files-found: warn
-
-  # ---------------------------------------------------------------------------
-  # 3) 検出能力の確認（手動実行専用）: 意図的なコンパイル失敗を注入し、
-  #    ビルドが実際に落ちることと、原因がログに現れることを確認する。
-  #    製品コードは変更しない（ランナーの作業ツリーのみ。コミットしない）。
+  # 2) 検出能力の確認（手動実行専用）
+  #    ランナーの作業ツリーにのみ #error を注入し、ビルドが実際に落ちることと
+  #    原因がログに出ることを確認する。コミットしない（製品コードは変更しない）。
   # ---------------------------------------------------------------------------
   probe-intentional-failure:
     name: Windows MSVC / probe (intentional failure, dispatch only)
     if: github.event_name == 'workflow_dispatch' && inputs.inject_compile_failure == true
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -241,12 +205,35 @@ jobs:
           }
           ninja --version
 
-      - name: Configure (Release, no MKL)
+      - name: Install Intel oneAPI (MKL + IPP) via winget
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          if ((Test-Path "$oneapi\mkl\latest\include\mkl.h") -and (Test-Path "$oneapi\ipp\latest\include\ipp.h")) {
+            Write-Host "oneAPI (MKL + IPP) already present."
+            exit 0
+          }
+          winget install --id Intel.OneAPI.BaseToolkit -e --silent `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+          $mkl = Test-Path "$oneapi\mkl\latest\include\mkl.h"
+          $ipp = Test-Path "$oneapi\ipp\latest\include\ipp.h"
+          if (-not ($mkl -and $ipp)) { throw "Intel oneAPI (MKL + IPP) is not usable — refusing to skip." }
+
+      - name: Export oneAPI environment
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          "MKLROOT=$oneapi\mkl\latest" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "IPPROOT=$oneapi\ipp\latest" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$oneapi\mkl\latest;$oneapi\mkl\latest\lib\cmake\mkl;$oneapi\ipp\latest;$oneapi\ipp\latest\lib\cmake\ipp" |
+            Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Configure (Release, MKL required)
         shell: pwsh
         run: |
           cmake -S . -B $env:BUILD_DIR -G "Ninja Multi-Config" `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            -DCONVOPEQ_REQUIRE_MKL=OFF 2>&1 | Tee-Object -FilePath configure.log
+            -DCONVOPEQ_REQUIRE_MKL=ON 2>&1 | Tee-Object -FilePath configure.log
           if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
 
       - name: Inject an intentional compile error (runner workspace only)
@@ -261,7 +248,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 | Tee-Object -FilePath build-probe.log
+          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 |
+            Tee-Object -FilePath build-probe.log
           $rc = $LASTEXITCODE
           if ($rc -eq 0) {
             throw "PROBE FAILED: the intentional compile error was NOT detected (build exit 0)."
@@ -272,7 +260,8 @@ jobs:
           }
           Write-Host "PROBE OK: intentional compile error detected (build exit $rc)."
           $hit | Select-Object -First 3 | ForEach-Object { Write-Host $_.Line }
-          "PROBE OK: build exit $rc, marker reported in the log." | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          "PROBE OK: build exit $rc, marker reported in the log." |
+            Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
           exit 0
 
       - name: Upload probe log
