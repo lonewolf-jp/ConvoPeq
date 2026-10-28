@@ -7,7 +7,7 @@
     "owner": "audioengine-runtime-bridge",
     "replacement_authority": "Authoritative",
     "removal_phase": "Phase 3",
-    "deadline": "2026-09-30",
+    "deadline": "2026-12-31",
     "scope": "Runtime-related state classifications and transient migration residues",
     "entries": []
 }
