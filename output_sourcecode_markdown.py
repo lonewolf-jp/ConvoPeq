@@ -350,6 +350,15 @@ def check_freshness(root_dir, snapshot_file):
 
 
 if __name__ == "__main__":
+    # Owner 承認 2026-10-28 (P2): CI（例: cp1252 のコンソール）では日本語メッセージの
+    # print が UnicodeEncodeError となり、生成前に異常終了していた。
+    # 既存のエンコーディングは変えず、表現できない文字だけ置換して継続する。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description="ソースコード結合 Markdown の生成 / 鮮度検査 / スナップショット版管理")
     parser.add_argument("--check", action="store_true",
                         help="生成を行わず、対象スナップショットが現行ソースより古いか（NEWER_SRC_COUNT）を検査する")

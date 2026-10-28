@@ -93,7 +93,29 @@ def main() -> int:
         canonical = project / "ConvoPeq.md"
         check("1/ConvoPeq.md が固定名で生成される", canonical.is_file())
         if not canonical.is_file():
-            raise SystemExit("canonical not generated; aborting")
+            print(f"[DEBUG] generation failed (exit={code}) in {project}")
+            print(out)
+            return 1
+
+        # 1b) UTF-8 を表現できない stdout（CI の cp1252 など）でも生成できること。
+        #     日本語 print が UnicodeEncodeError になり生成前に落ちる回帰を防ぐ。
+        ascii_project = work / "ascii-project"
+        ascii_project.mkdir()
+        make_project(ascii_project)
+        ascii_env = dict(os.environ)
+        ascii_env["PYTHONIOENCODING"] = "cp1252"
+        ascii_proc = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            cwd=str(ascii_project),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=ascii_env,
+        )
+        check("1b/cp1252 環境でも exit 0", ascii_proc.returncode == 0,
+              f"actual={ascii_proc.returncode} err={(ascii_proc.stderr or '')[-300:]}")
+        check("1b/cp1252 環境でも ConvoPeq.md が生成される", (ascii_project / "ConvoPeq.md").is_file())
 
         canonical_text = canonical.read_text(encoding="utf-8")
         check("1/ヘッダに Generated がある", "\n> Generated: " in canonical_text)
