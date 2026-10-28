@@ -341,6 +341,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           & ./.github/scripts/isr-generate-authority-inventory.ps1
 
+      # P1 (Owner approval 2026-10-28): regression tests for the preflight guard.
+      # Runs before the tier runner so a broken guard fails the job early.
+      - name: Run preflight guard regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/preflight/tests/run-preflight-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "preflight regression tests failed (exit=$LASTEXITCODE)" }
+
       - name: Run tier-runner gate scripts
         shell: pwsh
         # R-41: isr-verify-pr-sla.ps1 compares the head SHA captured at evaluation
