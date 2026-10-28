@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-28 17:39:58
+> Generated: 2026-10-29 07:16:09
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -6072,7 +6072,10 @@ AudioEngine::~AudioEngine()
     //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
     {
         AudioEngine* expected = this;
-        convo::compareExchangeAtomic(s_handleInvalidationOwner, expected, nullptr,
+        // R-46: 第 3 引数は T desired（U&& ではない）ため nullptr から T を推論できない。
+        //       同ファイル内の他の呼び出しと同じく型を明示する（意味の変更なし）。
+        convo::compareExchangeAtomic(s_handleInvalidationOwner, expected,
+                                     static_cast<AudioEngine*>(nullptr),
                                      std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
@@ -68928,7 +68931,9 @@ void EQProcessor::updateBandNode(int band)
 
     // A-closure (reader safety): the reader slot covers both the state dereference
     // (createBandNode) and the retire of the node it replaces.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    // R-46: m_epochDomain は unique_ptr。ScopedEpochReader は provider 参照を取るため
+    //       間接参照して渡す（EQProcessor.h:432 と同じ形。意味の変更なし）。
+    const convo::ScopedEpochReader readGuard (*m_epochDomain);
     if (! readGuard.active()) return;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -104205,8 +104210,19 @@ static void measureH2R1MixedGainTupleWindow(AudioEngineHarness& harness)
                 " that it cannot occur\n");
 }
 
+// B2 Stage 1 / T1 (R-01, 2026-10-28): 陽性対照の計測エントリポイント。
+// 実体は V11EngineRetireProtectionTests.cpp（診断 ON ビルドでのみ生成）。
+// 宣言はゲート外に置く（OFF ビルドでは呼び出し側もコンパイルされないため未解決にならない）。
+int runB2Stage1PositiveControls();
+
 int main(int argc, char* argv[])
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // 計測モードはエンジン生成・スレッド生成より前に分岐する（計画 v5.3 §2.2）。
+    if (std::getenv("B2_STAGE1_MEASURE") != nullptr)
+        return runB2Stage1PositiveControls();
+#endif
+
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
     //
@@ -114197,6 +114213,13 @@ inline std::string formatTransitionLine(const TransitionResult& tr, const std::s
 #include <functional>
 #include <thread>
 
+// B2 Stage 1 / T1 (R-01): 自プロセスのスレッド数取得（CreateToolhelp32Snapshot）。
+// 診断 OFF ビルドでは runB2Stage1PositiveControls 自体が非生成のため、include も不要。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+#include <windows.h>    // GetCurrentProcessId / CreateToolhelp32Snapshot / CloseHandle
+#include <tlhelp32.h>   // THREADENTRY32 / Thread32First / Thread32Next
+#endif
+
 #include "core/RCUReader.h"
 #include "core/SnapshotCoordinator.h"
 #include "core/SnapshotFactory.h"
@@ -116787,6 +116810,514 @@ int runV11EngineRetireProtectionTests()
         return 1;
     return 0;
 }
+
+// ============================================================================
+// B2 Stage 1 / T1 — 陽性対照（positive controls）  R-01 / 2026-10-28
+//
+// 仕様の正本: B2-T1-IMPLEMENTATION-SCOPE-V53-20261028.md (v5.3)
+//
+// 【目的（この範囲だけ）】
+//   convo::aligned_malloc 系の確保が convo::diag::totalAllocBytes へ、
+//   ::freeTracked の解放が convo::diag::totalFreedBytes へ、正しく計上されることを
+//   陽性対照で確認する。
+//
+// 【目的でないもの（この出力から導いてはいけない）】
+//   - B2 全体の採用判断（別承認）。`b2_adoption` は本系列限りの適格性のみを表す。
+//   - src/ の製品コードの変更・検証。
+//   - 「構造的に隔離されている」ことの証明。isolation_label は観測値であり、
+//     observed_isolated は「観測された範囲で隔離条件を満たした」以上の意味を持たない。
+//
+// 【実行方法】
+//   環境変数 B2_STAGE1_MEASURE=1 を設定すると、PublishPipelineIntegrationTests.cpp の
+//   main() がエンジン生成・スレッド生成より前に本関数へ分岐する。
+//
+// 【出力】stdout に 1 行 1 レコード。判定は summary 行の
+//   counter_result / isolation_label / overall_result / b2_adoption を機械的に読む。
+// ============================================================================
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+
+namespace {
+
+/// P1-B の陽性対照用 POD。sizeof == 123 を期待値として固定する（計画 v5.3 の例と同一）。
+struct B2ProbePOD
+{
+    unsigned char payload[123];
+};
+
+struct B2S1Counters
+{
+    std::uint64_t alloc = 0;
+    std::uint64_t freed = 0;
+};
+
+B2S1Counters b2s1Counters() noexcept
+{
+    return B2S1Counters{ convo::diag::totalAllocBytes(), convo::diag::totalFreedBytes() };
+}
+
+/// アイドルゲートの待機時間（計画 v5.3 §2.4: 各ゲート 500 ms）。
+void b2s1IdleWait() noexcept
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+}
+
+/// 自プロセスのスレッド数。Toolhelp のスナップショットに含まれる自 PID のスレッドを数える。
+/// 取得失敗時は 0 を返す（0 は「不明」であり、比較には使わない）。
+unsigned b2s1ThreadCount() noexcept
+{
+    const DWORD pid = ::GetCurrentProcessId();
+    const HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return 0;
+
+    unsigned count = 0;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (::Thread32First(snap, &entry) != FALSE)
+    {
+        do
+        {
+            if (entry.th32OwnerProcessID == pid)
+                ++count;
+        } while (::Thread32Next(snap, &entry) != FALSE);
+    }
+    ::CloseHandle(snap);
+    return count;
+}
+
+} // namespace
+
+/// 戻り値 = 停止条件番号（0 = 全ゲート通過）。値は計画 v5.3 §4 の表に一致させる。
+int runB2Stage1PositiveControls()
+{
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+
+    // 観測された隔離性（counter_result とは独立。§3.3）。
+    bool degraded = false;
+    char degradedAt[16] = {};
+
+    // G9 失敗時は系列全体が無効（§8.2 規則 1）。
+    bool g9Failed = false;
+
+    auto finish = [&](int exitCode, const char* counterResult, const char* overallResult,
+                      bool overallValid) -> int
+    {
+        char label[48] = {};
+        if (degraded)
+            std::snprintf(label, sizeof(label), "degraded:I2@%s", degradedAt);
+        else
+            std::snprintf(label, sizeof(label), "observed_isolated");
+
+        // 採用適格性は mechanical に決まる（§10.2）: VALID かつ observed_isolated のときだけ eligible。
+        const bool eligible = overallValid && !degraded;
+
+        std::printf("[B2S1] summary counter_result=%s isolation_label=%s overall_result=%s"
+                    " b2_adoption=%s exit=%d",
+                    counterResult, label, overallResult, eligible ? "eligible" : "ineligible", exitCode);
+        if (g9Failed)
+            std::printf(" note=local_stage_results_are_reference_only");
+        std::printf("\n");
+        std::fflush(stdout);
+        return exitCode;
+    };
+
+    std::printf("[B2S1] adoption_criteria_version=v5.3\n");
+    std::fflush(stdout);
+
+    try
+    {
+        // ====================================================================
+        // G0 — アイドルゲート（基準取得 + I2 の初期確認。§1 の「I2 は G0 のみ確認」）
+        // ====================================================================
+        {
+            const B2S1Counters base = b2s1Counters();
+            const unsigned threadsBefore = b2s1ThreadCount();
+            b2s1IdleWait();
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t idleAlloc = after.alloc - base.alloc;
+            const std::uint64_t idleFreed = after.freed - base.freed;
+            const bool counterOk = (idleAlloc == 0 && idleFreed == 0);
+            const bool threadsOk = (threadsBefore == threadsAfter);
+
+            std::printf("[B2S1] stage=G0 stage_result=%s idle_alloc_delta=%llu idle_freed_delta=%llu"
+                        " threads=%u baseline_alloc=%llu baseline_freed=%llu\n",
+                        (counterOk && threadsOk) ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(idleAlloc),
+                        static_cast<unsigned long long>(idleFreed),
+                        threadsAfter,
+                        static_cast<unsigned long long>(base.alloc),
+                        static_cast<unsigned long long>(base.freed));
+            std::fflush(stdout);
+
+            if (!counterOk)
+                return finish(1, "FAIL", "INVALID:STOP@1", false);
+            if (!threadsOk)
+                return finish(8, "PASS", "INVALID:STOP@8", false);
+        }
+
+        // ====================================================================
+        // P1-A — makeAlignedArray<double>(1024) → aligned_free（強ゲート: 8192 B）
+        //   規約 L1..L4（§9.2）: 保有者から release() で切り離してから解放する。
+        // ====================================================================
+        {
+            const unsigned threadsBefore = b2s1ThreadCount();
+            const B2S1Counters before = b2s1Counters();
+
+            bool releasedPreNonnull = false;
+            bool releaseInvoked = false;
+            bool pointerInvalidated = false;
+            {
+                auto holder = convo::makeAlignedArray<double>(1024);      // 1024 * 8 = 8192 B
+                releasedPreNonnull = (holder.get() != nullptr);
+                double* raw = holder.release();                           // L1: 保有者から切り離す
+                pointerInvalidated = (holder.get() == nullptr);            // L2: 保有者の無効化を確認
+                convo::aligned_free(raw);                                  // L1: 実際の解放
+                releaseInvoked = true;
+                raw = nullptr;                                             // L3: 以後 raw を参照しない
+            }
+
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t allocDelta = after.alloc - before.alloc;
+            const std::uint64_t freedDelta = after.freed - before.freed;
+            const int released = (releasedPreNonnull && releaseInvoked && pointerInvalidated) ? 1 : 0;
+
+            // 停止条件 9: 作成中にスレッドが増減した場合は「隔離性の劣化」であって
+            // カウンタの合否ではない（§3.3）。段階名を添えて記録する。
+            if (threadsBefore != threadsAfter && !degraded)
+            {
+                degraded = true;
+                std::snprintf(degradedAt, sizeof(degradedAt), "P1-A");
+            }
+
+            const bool counterOk = (allocDelta == 8192u && freedDelta == 0 && released == 1);
+
+            std::printf("[B2S1] stage=P1-A stage_result=%s alloc_delta=%llu freed_delta=%llu"
+                        " released_pre_nonnull=%d release_invoked=%d pointer_invalidated=%d"
+                        " released=%d route=aligned_free threads_before=%u threads_after=%u\n",
+                        counterOk ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(allocDelta),
+                        static_cast<unsigned long long>(freedDelta),
+                        releasedPreNonnull ? 1 : 0, releaseInvoked ? 1 : 0,
+                        pointerInvalidated ? 1 : 0, released,
+                        threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (released != 1)
+                return finish(11, "FAIL", "INVALID:SETUP", false);   // §9.1 規則 4 / 停止条件 11
+            if (!counterOk)
+                return finish(2, "FAIL", "INVALID:STOP@2", false);    // 期待値は緩めない
+        }
+
+        // ====================================================================
+        // P1-B — aligned_make_unique<B2ProbePOD>() → reset()（強ゲート: sizeof(POD)）
+        //   aligned_free 系は DIAG を経由しないため freed_delta == 0 が期待値。
+        // ====================================================================
+        {
+            const unsigned threadsBefore = b2s1ThreadCount();
+            const B2S1Counters before = b2s1Counters();
+
+            bool releasedPreNonnull = false;
+            bool pointerInvalidated = false;
+            {
+                auto probe = convo::aligned_make_unique<B2ProbePOD>();
+                releasedPreNonnull = (probe.get() != nullptr);
+                probe.reset();
+                pointerInvalidated = (probe.get() == nullptr);
+            }
+
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t allocDelta = after.alloc - before.alloc;
+            const std::uint64_t freedDelta = after.freed - before.freed;
+            const bool releaseInvoked = true;
+            const int released = (releasedPreNonnull && releaseInvoked && pointerInvalidated) ? 1 : 0;
+            const std::uint64_t expected = static_cast<std::uint64_t>(sizeof(B2ProbePOD));
+
+            if (threadsBefore != threadsAfter && !degraded)
+            {
+                degraded = true;
+                std::snprintf(degradedAt, sizeof(degradedAt), "P1-B");
+            }
+
+            const bool counterOk = (allocDelta == expected && freedDelta == 0 && released == 1);
+
+            std::printf("[B2S1] stage=P1-B stage_result=%s alloc_delta=%llu freed_delta=%llu"
+                        " released_pre_nonnull=%d release_invoked=%d pointer_invalidated=%d"
+                        " released=%d route=AlignedObjectDeleter"
+                        " expected=%llu threads_before=%u threads_after=%u\n",
+                        counterOk ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(allocDelta),
+                        static_cast<unsigned long long>(freedDelta),
+                        releasedPreNonnull ? 1 : 0, releaseInvoked ? 1 : 0,
+                        pointerInvalidated ? 1 : 0, released,
+                        static_cast<unsigned long long>(expected),
+                        threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (released != 1)
+                return finish(11, "FAIL", "INVALID:SETUP", false);
+            if (!counterOk)
+                return finish(3, "FAIL", "INVALID:STOP@3", false);
+        }
+
+        // ====================================================================
+        // P2' — aligned_malloc(N,64) → ::freeTracked(p, N)（強ゲート: N / N）
+        //   freeTracked は DIAG 経由なので freed_delta に N が乗る。
+        // ====================================================================
+        {
+            const std::size_t kN = 4096;
+            const unsigned threadsBefore = b2s1ThreadCount();
+            const B2S1Counters before = b2s1Counters();
+
+            bool releasedPreNonnull = false;
+            bool pointerInvalidated = false;
+            {
+                void* p = convo::aligned_malloc(kN, 64);
+                releasedPreNonnull = (p != nullptr);
+                ::freeTracked(p, kN);                 // 解放 + nullptr 代入（DiagnosticsConfig.h）
+                pointerInvalidated = (p == nullptr);
+            }
+
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t allocDelta = after.alloc - before.alloc;
+            const std::uint64_t freedDelta = after.freed - before.freed;
+            const bool releaseInvoked = true;
+            const int released = (releasedPreNonnull && releaseInvoked && pointerInvalidated) ? 1 : 0;
+
+            if (threadsBefore != threadsAfter && !degraded)
+            {
+                degraded = true;
+                std::snprintf(degradedAt, sizeof(degradedAt), "P2'");
+            }
+
+            const bool counterOk = (allocDelta == kN && freedDelta == kN && released == 1);
+
+            std::printf("[B2S1] stage=P2' stage_result=%s N=%llu alloc_delta=%llu freed_delta=%llu"
+                        " released_pre_nonnull=%d release_invoked=%d pointer_invalidated=%d"
+                        " released=%d route=freeTracked threads_before=%u threads_after=%u\n",
+                        counterOk ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(kN),
+                        static_cast<unsigned long long>(allocDelta),
+                        static_cast<unsigned long long>(freedDelta),
+                        releasedPreNonnull ? 1 : 0, releaseInvoked ? 1 : 0,
+                        pointerInvalidated ? 1 : 0, released,
+                        threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (released != 1)
+                return finish(11, "FAIL", "INVALID:SETUP", false);
+            if (!counterOk)
+                return finish(4, "FAIL", "INVALID:STOP@4", false);
+        }
+
+        // ====================================================================
+        // P1-C — aligned_make_unique<AudioEngine::DSPCore>()（記録のみ・評価しない）
+        //   §3.2: P1-C の alloc_delta は判定に使わない。prepare は呼ばない（P2-pre の禁止）。
+        // ====================================================================
+        convo::aligned_unique_ptr<AudioEngine::DSPCore> dspCore;
+        {
+            const unsigned threadsBefore = b2s1ThreadCount();
+            const B2S1Counters before = b2s1Counters();
+
+            dspCore = convo::aligned_make_unique<AudioEngine::DSPCore>();
+
+            const bool releasedPreNonnull = (dspCore.get() != nullptr);
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t allocDelta = after.alloc - before.alloc;
+            const std::uint64_t freedDelta = after.freed - before.freed;
+
+            if (threadsBefore != threadsAfter && !degraded)
+            {
+                degraded = true;
+                std::snprintf(degradedAt, sizeof(degradedAt), "P1-C");
+            }
+
+            std::printf("[B2S1] stage=P1-C stage_result=SKIP alloc_delta=%llu freed_delta=%llu"
+                        " sizeof_dspcore=%llu nonnull=%d threads_before=%u threads_after=%u"
+                        " note=informational_only\n",
+                        static_cast<unsigned long long>(allocDelta),
+                        static_cast<unsigned long long>(freedDelta),
+                        static_cast<unsigned long long>(sizeof(AudioEngine::DSPCore)),
+                        releasedPreNonnull ? 1 : 0,
+                        threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (!releasedPreNonnull)
+                return finish(11, "FAIL", "INVALID:SETUP", false);   // P2 の対象が無い
+        }
+
+        // ====================================================================
+        // P2 — DSPCore の reset()（強ゲート: 0 / 0。P1-C と同一オブジェクトで連続実行）
+        // ====================================================================
+        {
+            const unsigned threadsBefore = b2s1ThreadCount();
+            const B2S1Counters before = b2s1Counters();
+
+            const bool releasedPreNonnull = (dspCore.get() != nullptr);
+            dspCore.reset();
+            const bool pointerInvalidated = (dspCore.get() == nullptr);
+
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t allocDelta = after.alloc - before.alloc;
+            const std::uint64_t freedDelta = after.freed - before.freed;
+            const bool releaseInvoked = true;
+            const int released = (releasedPreNonnull && releaseInvoked && pointerInvalidated) ? 1 : 0;
+
+            if (threadsBefore != threadsAfter && !degraded)
+            {
+                degraded = true;
+                std::snprintf(degradedAt, sizeof(degradedAt), "P2");
+            }
+
+            const bool counterOk = (allocDelta == 0 && freedDelta == 0 && released == 1);
+
+            std::printf("[B2S1] stage=P2 stage_result=%s alloc_delta=%llu freed_delta=%llu"
+                        " released_pre_nonnull=%d release_invoked=%d pointer_invalidated=%d"
+                        " released=%d route=AlignedObjectDeleter threads_before=%u threads_after=%u\n",
+                        counterOk ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(allocDelta),
+                        static_cast<unsigned long long>(freedDelta),
+                        releasedPreNonnull ? 1 : 0, releaseInvoked ? 1 : 0,
+                        pointerInvalidated ? 1 : 0, released,
+                        threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (released != 1)
+                return finish(11, "FAIL", "INVALID:SETUP", false);
+            if (!counterOk)
+                return finish(5, "FAIL", "INVALID:STOP@5", false);
+        }
+
+        // ====================================================================
+        // N1 — アイドルゲート（強ゲート。解放漏れの残響を検出する）
+        // ====================================================================
+        {
+            const B2S1Counters before = b2s1Counters();
+            const unsigned threadsBefore = b2s1ThreadCount();
+            b2s1IdleWait();
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t idleAlloc = after.alloc - before.alloc;
+            const std::uint64_t idleFreed = after.freed - before.freed;
+            const bool counterOk = (idleAlloc == 0 && idleFreed == 0);
+            const bool threadsOk = (threadsBefore == threadsAfter);
+
+            std::printf("[B2S1] stage=N1 stage_result=%s idle_alloc_delta=%llu idle_freed_delta=%llu"
+                        " threads_before=%u threads_after=%u\n",
+                        (counterOk && threadsOk) ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(idleAlloc),
+                        static_cast<unsigned long long>(idleFreed),
+                        threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (!counterOk)
+                return finish(6, "FAIL", "INVALID:STOP@6", false);
+            if (!threadsOk)
+                return finish(8, "PASS", "INVALID:STOP@8", false);
+        }
+
+        // ====================================================================
+        // N2 — ゼロサイズ確保 → 解放（強ゲート: 0 / 0）
+        //   size==0 の確保は正当に nullptr を返しうるため nothrow 版を使う。これは
+        //   「0 バイト確保はカウンタを動かさない」というゲートの意味を変えない。
+        // ====================================================================
+        {
+            const B2S1Counters before = b2s1Counters();
+            const unsigned threadsBefore = b2s1ThreadCount();
+
+            void* p = convo::aligned_malloc_nothrow(0, 64);
+            const bool nonnull = (p != nullptr);
+            convo::aligned_free(p);
+
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t allocDelta = after.alloc - before.alloc;
+            const std::uint64_t freedDelta = after.freed - before.freed;
+
+            if (threadsBefore != threadsAfter && !degraded)
+            {
+                degraded = true;
+                std::snprintf(degradedAt, sizeof(degradedAt), "N2");
+            }
+
+            const bool counterOk = (allocDelta == 0 && freedDelta == 0);
+
+            std::printf("[B2S1] stage=N2 stage_result=%s alloc_delta=%llu freed_delta=%llu"
+                        " nonnull=%d threads_before=%u threads_after=%u\n",
+                        counterOk ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(allocDelta),
+                        static_cast<unsigned long long>(freedDelta),
+                        nonnull ? 1 : 0, threadsBefore, threadsAfter);
+            std::fflush(stdout);
+
+            if (!counterOk)
+                return finish(7, "FAIL", "INVALID:STOP@7", false);
+        }
+
+        // ====================================================================
+        // G9 — 後処理アイドルゲート。失敗すると系列全体が無効（§8.2 規則 1）。
+        // ====================================================================
+        {
+            const B2S1Counters before = b2s1Counters();
+            const unsigned threadsBefore = b2s1ThreadCount();
+            b2s1IdleWait();
+            const B2S1Counters after = b2s1Counters();
+            const unsigned threadsAfter = b2s1ThreadCount();
+
+            const std::uint64_t idleAlloc = after.alloc - before.alloc;
+            const std::uint64_t idleFreed = after.freed - before.freed;
+            const bool counterOk = (idleAlloc == 0 && idleFreed == 0);
+            const bool threadsOk = (threadsBefore == threadsAfter);
+
+            if (!counterOk)
+                g9Failed = true;
+
+            std::printf("[B2S1] stage=G9 stage_result=%s idle_alloc_delta=%llu idle_freed_delta=%llu"
+                        " threads=%u threads_before=%u\n",
+                        (counterOk && threadsOk) ? "PASS" : "FAIL",
+                        static_cast<unsigned long long>(idleAlloc),
+                        static_cast<unsigned long long>(idleFreed),
+                        threadsAfter, threadsBefore);
+            std::fflush(stdout);
+
+            if (!counterOk)
+                return finish(10, "FAIL", "INVALID:G9", false);
+            if (!threadsOk)
+                return finish(8, "PASS", "INVALID:STOP@8", false);
+        }
+
+        // 全ゲート通過。ただし「隔離性が観測された」場合に限り採用適格（§10.2）。
+        return finish(0, "PASS", "VALID", true);
+    }
+    catch (const std::bad_alloc&)
+    {
+        // 停止条件 11: 確保失敗。aligned_malloc は nullptr ではなく std::bad_alloc を投げる。
+        std::printf("[B2S1] setup_error=std::bad_alloc\n");
+        std::fflush(stdout);
+        return finish(11, "FAIL", "INVALID:SETUP", false);
+    }
+    catch (...)
+    {
+        std::printf("[B2S1] setup_error=unknown_exception\n");
+        std::fflush(stdout);
+        return finish(11, "FAIL", "INVALID:SETUP", false);
+    }
+}
+
+#endif // CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 
 ```
 
