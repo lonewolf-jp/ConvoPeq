@@ -305,3 +305,240 @@ and an effect or setup function. (cause: SchemaError(Missing key at ["default"])
 
 ### セキュリティ
 WSL `~/.bashrc` に平文 `PERPLEXITY_API_KEY` がある。**漏えい扱いとしてローテーションを推奨**。
+
+## Dropbox MCP（2026-10-20 導入・公式リモート MCP）
+
+**Dropbox は Box と違い OAuth refresh token で恒久運用できる。** Box の developer token は
+60 分で失効するが、Dropbox は `token_access_type=offline` で refresh token が得られる。
+
+### 公式エンドポイント（実測）
+
+- MCP: `https://mcp.dropbox.com/mcp`（GET は 401 + `WWW-Authenticate: Bearer resource_metadata=...`）
+- Authorization Server: `https://www.dropbox.com`
+  - authorize: `https://www.dropbox.com/oauth2/authorize`
+  - token: `https://api.dropboxapi.com/oauth2/token`
+  - revoke: `https://api.dropboxapi.com/2/auth/token/revoke`
+  - **DCR: `https://www.dropbox.com/oauth2/register`** ← 未信頼クライアントにも 201 を返す
+    （公式ヘルプは Claude Code / Cursor / Codex のみと記載だが実際は Issue できる）
+    発行 client_id: `ydww2fwnzkxganl`（client_name "MCP CLI Proxy"）、`token_endpoint_auth_method: none`
+- Protected Resource Metadata: `https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp`
+
+### はまった点
+
+1. **DCR 応答が redirect_uris を固定ホワイトリストに書き換える**（すべてポート 80 / http 既定ポート）:
+   `http://localhost/callback`, `http://127.0.0.1/oauth/callback`, `http://127.0.0.1/callback`,
+   `http://localhost`, `http://localhost/oauth/callback`, `http://127.0.0.1`。
+   → **callback ポートを 80 に固定**すること。ポートを明示すると mcp-remote は
+   「登録済み URI と一致する前提」で固定し、ずれると fail する。
+   → Windows ではポート 80 へのバインドに管理者権限は不要（実測 OK）。
+2. **authorize エンドポイントは redirect_uri をログイン前に検証しない**
+   （`http://evil.example.com/callback` でも 200 を返す）。検証はログイン後。
+   → 「authorize が通った」ことからは redirect_uri 妥当性を推定できない。
+3. **token キャッシュは `~/.mcp-auth/mcp-remote-v1/<serverUrlHash>_*`** に置かれる。
+   mcp-remote 0.14.x の token ファイルは `*_tokens.json`。
+4. **認証後（token キャッシュ済み）は callback サーバを起動しない**ため、ポート 80 の
+   衝突は初回認証時のみ問題。常駐ブリッジは token 取得後に kill してよい。
+
+### 導入手順（OpenChamber）
+
+`C:\Users\user\.config\opencode\opencode.jsonc` の `mcp.servers` に:
+
+```json
+"dropbox": {
+  "type": "local",
+  "command": [
+    "C:\\Python315\\pythonw.exe",
+    "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\mcp-remote\\dist\\proxy.js",
+    "https://mcp.dropbox.com/mcp",
+    "80",
+    "--authorize-param", "token_access_type=offline",
+    "--host", "127.0.0.1",
+    "--callback-path", "/oauth/callback"
+  ],
+  "disabled": false
+}
+```
+
+### Google One Tap は自動化できない（重要な制約）
+
+Dropbox のログイン画面は **Google One Tap**（`google.accounts.id`）を使う。
+
+- One Tap のチップは**閉じた shadow DOM**内に描画され、CSS セレクタでも
+  Playwright の `internal:control=enter-frame` でも到達できない。
+  （`#sign-in-with-google-button-container--login` は Eleme nt 側のラッパで、
+  クリックしても内側の実ボタンにイベントが届かない。）
+- `prompt()` は **trusted user activation** を要求するため、合成 `element.click()` では
+  アカウント選択画面が開かない。実 Chrome（CDP `Runtime.evaluate` + `userGesture:true`）では
+  開いたが、Electron パネルでは開かなかった。
+- つまり **Dropbox アカウントの初回認証は必ず人間がブラウザで 1〜2 クリック**する。
+  （その 1 クリックを代替する手段は現時点で無い。）
+
+### このマシンで Google セッションが有効な場所
+
+| 場所 | Google セッション |
+| --- | --- |
+| OpenChamber パネル（Electron partition `openchamber-browser`） | **有効**（myaccount / mail はサインイン済み）。Cookie DB は Electron が排他ロック → `esentutl /y` も `robocopy /B` も不可（管理者権限なし）。 |
+| Chrome (`Google\Chrome\User Data\Default`) | 無効。Cookie DB に SID/SSID はあるが**セッション cookie のため Chrome 起動時に復元されない**（実測: Google cookie 0 件）。 |
+| Firefox | 無効（同上）。Cookie 値は**平文**で `moz_cookies` から読み出せる。 |
+| Brave（既定ブラウザ） | 未検証（Cookie DB がロック中）。 |
+
+実 Chrome を remote debugging 付きで使うには **ジャンクション**で既定回避する
+（Chrome ≥136 は既定プロファイルでの `--remote-debugging-port` を拒否する）:
+
+```python
+subprocess.run(["cmd", "/c", "mklink", "/J", JUNCTION, REAL_PROFILE])
+# 削除は rmdir（junction を外すだけ。rlm /rf は対象を消すので使わない）
+subprocess.run(["cmd", "/c", "rmdir", JUNCTION])
+```
+
+### 補助スクリプト（`C:\Users\user\AppData\Local\Temp\opencode\`）
+
+- `dbx_mcpremote_daemon.py` — 常駐ブリッジ（callback 待受 + authorize URL 出力）
+- `finalize_dropbox.py` — token から成果物を Dropbox へ upload（`/2/files/upload`）
+- `watch_dropbox_token.py` — token 出現を監視して自動 upload
+- `chrome_cookie_extract.py` / `chrome_cookie_decrypt.js` — Chrome v10 cookie の
+  DPAPI + AES-256-GCM 復号（**v20 = app-bound は外部復号不可**）
+- `launch_chrome_real.py` / `cdp_*.js` — Chrome + CDP 操作
+
+### Box との比較
+
+| | Box | Dropbox |
+| --- | --- | --- |
+| 認証 | developer token（**60 分で失効**、手動再生成） | OAuth refresh token（**自動更新・恒久**） |
+| MCP 方式 | ローカル Python サーバー | 公式リモート MCP + mcp-remote ブリッジ |
+| 初回認証 | Console で token 生成 | ブラウザで OAuth 承認 1 回（DCR アプリ作成不要） |
+
+## FastTanh 検証ハーネス（2026-10-20 導入）
+
+`C:\Users\user\AppData\Local\Temp\opencode\fasttanh-verify\` に、inline `fastTanh` と
+`convo::dsp::fastTanh<SoftClipPadePolicy>` の等価性を **13 構成 × 24,096 比較**で
+ビット一致検証するハーネスを置いた。`extract_sources.py` → `run_equivalence.py` →
+`make_report.py` の順で再現できる。
+
+### 手順で踏んだ落とし穴（いずれも実測）
+
+1. **Intel oneAPI の `setvars.bat` が PATH / LIB を初期化しない。**
+   "oneAPI environment initialized" と表示するが PATH は変わらず、Intel の lib が
+   LIB に入らないため、静的 CRT / MKL のリンクが `could not open 'libircmt.lib'` で失敗する。
+   → `vcvars64.bat` を呼び、続けて
+   `PATH=%ICXROOT%\bin;%ICXROOT%\compiler\2026.1\bin;%PATH%` と
+   `LIB=%ICXROOT%\lib;%ICXROOT%\compiler\2026.1\lib;%LIB%` を**手動で**設定する。
+2. **Visual Studio ジェネレータのビルドツリーを再利用するとき、絶対パスは両形式
+   （前傾斜線と逆傾斜線）を書き換える必要がある。** `.vcxproj` は逆傾斜線、
+   `CMakeCache.txt` は前傾斜線でパスを保持する。前傾斜線だけ置換すると
+   **旧ワークツリーのソースを参照してビルドが走る**（検出には output パスを読む必要がある）。
+3. **`.cmd` は BOM なしで ASCII で書く。** UTF-8 BOM 付きだと `cmd` が
+   `@echo off` を解釈できず、以降が連鎖的に壊れる（`'local' は内部または外部コマンドとして
+   認識されません` のように途中から崩れる）。
+4. **`output_sourcecode_markdown.py --check` は mtime 基準**。git checkout 直後のツリーでは
+   全ファイルが「新しい」扱いになって必ず STALE 判定になる（`NEWER_SRC_COUNT` が数百になる）。
+   → ソース同一性の照合は `git archive` で mtime 非依存の内容照合で行うこと。
+5. **リポジトリのソースは UTF-8（BOM なし）**。CMakeLists は `/utf-8` を指定しているため、
+   MSVC でコンパイルする場合は `/utf-8` を付けないと C4819 と mojibake 構文エラーになる。
+6. **`copy /b a+a` は Windows では no-op。** 同一ファイルへのコピーは拒否され、**mtime も変わらない**。
+   CMake の再構成を誘発するために mtime を差し替える目的では使わないこと
+   （使っても再構成が走らず、`$ENV{MKLROOT}/include` / `$ENV{IPPROOT}/include` が
+   欠落したままになり `mkl.h` / `ipp.h` の解決に失敗する）。
+   → Python の `os.utime(path, None)` または `touch` を使う。
+7. **ビルドツリーを別ワークツリーへ複製して再構成すると、`$ENV{...}` 依存の include 設定が落ちる。**
+   CMakeLists は `target_include_directories(... "$ENV{MKLROOT}/include" "$ENV{IPPROOT}/include")` の
+   形式で**構成時**に評価されるため、**環境変数を設定した状態で再構成を実行**する必要がある。
+8. **ビルドツリーにはネストした CMake キャッシュがある。** `build/JUCE/tools/CMakeCache.txt` は
+   親とは別の `CMAKE_CACHEFILE_DIR` / `CMAKE_HOME_DIRECTORY` を持つ。複製時に**最深部まで**
+   パスを書き換えないと、`juceaide` の構成で
+   「The current CMakeCache.txt directory ... is different than the directory ... where
+   CMakeCache.txt was created」となる。→ `CMakeCache.txt` は全て再帰的に探し、
+   `CMAKE_CACHEFILE_DIR` と `CMAKE_HOME_DIRECTORY` の両方を確認する。
+
+## Python 3.14 → 3.15 移行（2026-10-20・MCP 全停止の復旧）
+
+`C:\Python314\python.exe` / `pythonw.exe` が削除された（Doc/Lib/Scripts/share は残存）。
+`C:\Python314\pythonw.exe` を参照していた MCP は**全 16 個が起動失敗**した:
+
+```
+MCP server process exited with code 1: 'C:\Python314\pythonw.exe' は内部または外部コマンドとして認識されません
+```
+
+`Roaming\Python\Python314\site-packages` も残るが**interpreter 不在で孤立**している。
+
+### 復旧の手順
+
+1. 設定（`~/.config/opencode/opencode.jsonc` と `ConvoPeq\opencode.json`）の
+   Python314 参照を **`C:\Python315\pythonw.exe`** へ書き換え。
+2. **uv 0.13.3 を 3.15 ネイティブで導入**（`C:\Users\user\AppData\Roaming\Python\Python315\Scripts`）。
+3. `graphify` の uv tool は **`[mcp]` エクストラ無しでは起動しない**:
+   `uv tool install "graphifyy[mcp]==0.9.69" --force`（無いと `ImportError: mcp not installed`）。
+4. `headroom` は **uv tool 自身の console script** を指す
+   （`C:\Users\user\AppData\Roaming\uv\tools\headroom-ai\Scripts\headroom.exe`）。
+   `C:\Users\user\.local\bin\headroom.exe`（108,318 B）は**破損した古いランチャー**で
+   exit 1・出力ゼロ。壊れた project `.venv`（3.14.6）内の `headroom.exe` も置き換える。
+5. `box-mcp` の venv は **3.15 で作り直す**。cp315 ホイール保有版への更新が必要:
+   `pywin32` 311→312 / `rpds-py` 0.28.0→2026.9.1 /
+   `pydantic` 2.12.4→2.14.1 + `pydantic-core` 2.41.5→2.50.1。
+   **`mcp` は 2.3.0 に跳ぶので `mcp[cli]>=1.19.0,<2` に上限を戻して 1.30.0 に固定**。
+6. **uv tool 管理の Python は系統移行の影響を受けない**（独立バイナリ）:
+   browser-use / cocoindex-code / github-mcp-server / graphifyy / headroom-ai /
+   mempalace / serena-agent = Python **3.13.12**、semble = 3.14.7。
+
+### はまった点
+
+- **`mcp<2` 固定は維持すること。** 2.x は headroom / github-mcp-server を壊す
+  （AGENTS.md の既存ルール）。
+- **OpenChamber の設定は opencode サーバの起動時に読まれる。** 設定を書き換えても
+  反映されない場合は `opencode.exe` だけを kill する（**OpenChamber 本体は kill しない**）。
+  supervisor が再起動し、MCP 全 19 個が再接続して設定を**再読込する**。
+  → OpenChamber 自体を再起動すると `opencode` サーバープロセスが増殖する（既存注意）。
+- **判定は `opencode.log` の `message="mcp connected" server=…` で行う。**
+  `opencode mcp list` はこの環境では何も返らない（信用しない）。
+- 実ハンドシェイクの一括検証は
+  `C:\Users\user\AppData\Local\Temp\opencode\mcp_probe.py`
+  （`PROBE_CWD` 環境変数で cwd 指定。`cocoindex` は cwd 依存）。
+- `dropbox` の mcp-remote は **callback port 80 固定**なので、並行 probe 中は
+  `fixed callback port: 80` で exit 255 になる。probe 後は port 80 が空く。
+
+## Phase D 成果物の Box / Dropbox 配信（2026-10-20）
+
+配信先: **`/ConvoPeq-PhaseD-20261019`**（Box id `429266677834` / Dropbox 同一パス）。
+両方に **60 ファイル / 18.33 MB**（21 レポート + 副次成果物 2 + 証拠バンドル 37）。
+
+### Box の API 仕様（実測・ATS の Codex 調査ではなく実リクエストで確認）
+
+- JSON API の base は **`https://api.box.com/2.0`**（`/api/2.0` を付けると 404）。
+  upload だけが `https://upload.box.com/api/2.0/files/content`。
+- upload の attributes には **`parent.id` が必須**（`parent.path` だと
+  `missing_parameter: parent_id` で 400）。
+- **upload は 202 Accepted + 空ボディを返す。** レスポンスから `id` / `size` を
+  読もうとすると `None` になる → **フォルダ一覧で検証**すること。
+- 分割アップロード（250 MB 超）は未使用。`users/me` の `max_upload_size` は
+  262,144,000（250 MB）。6.1 MB の `ConvoPeq.md` は 1 回で入る。
+- サブフォルダは `POST /2.0/folders` の `parent.id` で作る。**ツリー復元時は
+  親フォルダ id を持ち回す**（`upload_tree.box_upload_tree` は孫階層を-flat にする）。
+
+### Box の developer token は 32 文字（JWT ではない）
+
+Console で「トークンを生成」→ ダイアログの readonly input に 32 文字の token が出る。
+**Copy ボタンがクリップボードに写すのもその 32 文字**（JWT ではない）。
+`box_publish.py` の `looks_like_box_token` は `len >= 200` かつ `2 つの dot` を要求するため
+**正当なトークンを拒否する** → 判定ロジックの修正が必要。
+
+- ダイアログの Copy ボタンのセレクタ: **`[role="dialog"] button` の 1 番目**が Copy。
+  input の兄弟ではない（`#input-xxx + button` は一致しない）。
+- token は 60 分で失効する。`.env` を更新しても **MCP サーバは起動時にしか読まない**
+  → opencode サーバの再起動が必須。
+- `.env` の場所: `C:\Users\user\.local\share\opencode\box-mcp\.env`
+  （`BOX_DEVELOPER_TOKEN=`）。ファイルは `~/.local/share/opencode/box-mcp/` にあり、
+  venv は 3.15 で作り直した。
+
+### Dropbox の token キャッシュ
+
+- `~/.mcp-auth/mcp-remote-v1/<hash>_tokens.json` に `access_token` / `refresh_token` /
+  **`expires_at`（ミリ秒）** が入る。**秒として比較すると永久に「未期限」と判定される**
+  → `expires_at > 1e11` なら `/1000` すること。
+- 6.1 MB の `ConvoPeq.md` は公式 MCP の inline 制限（5 MB）を超えるので
+  `content.dropboxapi.com/2/files/upload`（octet-stream）を使う。
+- 補助スクリプト: `finalize_dropbox.py`（成果物 + 副次成果物 + 証拠バンドル）、
+  `box_publish_now.py`（Box 21 レポート）、`box_upload_bundle.py`（Box 証拠バンドル）。
+  **`finalize_dropbox.py` は `HERE` を未定義のまま参照していた**（`NameError`）—
+  `HERE = os.path.dirname(os.path.abspath(__file__))` を足すこと。
