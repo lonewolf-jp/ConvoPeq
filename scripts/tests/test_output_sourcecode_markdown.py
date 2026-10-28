@@ -28,6 +28,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve()
 SCRIPT = HERE.parents[2] / "output_sourcecode_markdown.py"
 
+# CI のコンソール（cp1252 等）でも失敗メッセージの print で落ちないようにする。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 passed = 0
 failures: list[str] = []
 
@@ -62,6 +69,10 @@ def make_project(root: Path) -> None:
 
 
 def run_cli(cwd: Path, args: list[str]) -> tuple[int, str]:
+    # 既定の CLI 実行はメッセージ検査を安定させるため UTF-8 を明示する。
+    # 「UTF-8 を出せない環境でも動く」ことは 1b で別途検証する。
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)] + args,
         cwd=str(cwd),
@@ -69,6 +80,7 @@ def run_cli(cwd: Path, args: list[str]) -> tuple[int, str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
