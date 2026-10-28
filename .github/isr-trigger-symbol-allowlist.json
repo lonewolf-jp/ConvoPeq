@@ -2,8 +2,8 @@
     "schema": "trigger_symbol_allowlist_v1",
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-SYMBOL-GOV-001",
-    "rationale": "enforce top-level lifecycle governance for symbol allowlist policy",
-    "expiry": "2026-09-30",
+    "rationale": "enforce top-level lifecycle governance for symbol allowlist policy | owner review 2026-10-28: top-level expiry renewed 2026-09-30 -> 2026-12-31. Reason: all 13 rule entries were already re-approved to 2026-12-31, but the top-level expiry was not renewed, so the policy expired and isr-verify stopped at isr-verify-trigger-symbol-usage.ps1. Decision: renew the top-level expiry to the same 2026-12-31 quarterly boundary (owner-approved 2026-10-28). Rules, pathRegex, owners and per-rule expiries are unchanged. Next review: 2026-12-31 (quarterly, before expiry).",
+    "expiry": "2026-12-31",
     "rules": [
         {
             "symbol": "activeDSP",
