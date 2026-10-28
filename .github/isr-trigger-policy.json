@@ -3,8 +3,8 @@
     "mode": "enforce",
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-TRIGGER-GOV-001",
-    "rationale": "top-level lifecycle governance for trigger policy",
-    "expiry": "2026-09-30",
+    "rationale": "top-level lifecycle governance for trigger policy | owner review 2026-10-28: expiry renewed 2026-09-30 -> 2026-12-31. Reason: the five BRIDGE-TRIGGER-001..005 entries were re-approved to 2026-12-31 at the 2026-08-31 quarterly review, but GOV-001 was not renewed, so the whole policy expired and isr-verify stopped at isr-verify-trigger-policy.ps1. Decision: renew GOV-001 to the same 2026-12-31 quarterly boundary (owner-approved 2026-10-28). Scope, metrics, thresholds and verification conditions are unchanged. Next review: 2026-12-31 (quarterly, before expiry).",
+    "expiry": "2026-12-31",
     "entries": [
         {
             "id": "activeDspDeletionStart",
