@@ -1,4 +1,5 @@
 #include <JuceHeader.h>
+#include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "RetryScheduler.h" // ★ D101-24 Step 1: complete type for unique_ptr<RetryScheduler> destruction
 #include "core/RuntimeReaderContext.h"
@@ -104,7 +105,7 @@ AudioEngine::AudioEngine()
 
     // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
     //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
-    s_handleInvalidationOwner.store(this, std::memory_order_release);
+    convo::publishAtomic(s_handleInvalidationOwner, this, std::memory_order_release);
 }
 
 AudioEngine::~AudioEngine()
@@ -366,8 +367,8 @@ AudioEngine::~AudioEngine()
     //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
     {
         AudioEngine* expected = this;
-        s_handleInvalidationOwner.compare_exchange_strong(expected, nullptr,
-                                                          std::memory_order_acq_rel);
+        convo::compareExchangeAtomic(s_handleInvalidationOwner, expected, nullptr,
+                                     std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");

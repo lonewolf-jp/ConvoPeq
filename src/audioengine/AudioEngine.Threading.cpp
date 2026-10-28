@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include <algorithm>
+#include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
 #include "ISRDSPQuarantine.h"
@@ -22,7 +23,7 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
     if (p == nullptr)
         return DestroyOutcome::Destroyed;
 
-    if (auto* owner = s_handleInvalidationOwner.load(std::memory_order_acquire))
+    if (auto* owner = convo::consumeAtomic(s_handleInvalidationOwner, std::memory_order_acquire))
     {
         if (!owner->invalidateHandleBeforeDestroy(p))
         {
