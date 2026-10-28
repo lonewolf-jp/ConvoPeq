@@ -351,7 +351,10 @@ jobs:
           if ('${{ inputs.prOpenedAt }}' -ne '') { $invokeArgs += '-PrOpenedAt'; $invokeArgs += '${{ inputs.prOpenedAt }}' }
           if ('${{ inputs.enforce81CloseDecisionRetryMax }}' -ne '') { $invokeArgs += '-Enforce81CloseDecisionRetryMax'; $invokeArgs += '${{ inputs.enforce81CloseDecisionRetryMax }}' }
 
-          # '-Name value' / '-Switch' 列 → hashtable（名前付き引数は hashtable splat が必要）
+          # '-Name value' / '-Switch' 列 → hashtable（名前付き引数は hashtable splat が必要）。
+          # ★ 変数名は $invokeArgs のまま維持する: isr-verify-gate-wiring.ps1 は
+          #   "& ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs" という
+          #   呼び出し配線をテキストで検査している。
           $invokeParams = @{}
           for ($i = 0; $i -lt $invokeArgs.Count; $i++) {
             $token = [string]$invokeArgs[$i]
@@ -361,7 +364,8 @@ jobs:
             if ($hasValue) { $invokeParams[$name] = $invokeArgs[$i + 1]; $i++ }
             else { $invokeParams[$name] = $true }
           }
-          & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeParams
+          $invokeArgs = $invokeParams
+          & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
 
       - name: Apply PR SLA labels
         if: ${{ always() && github.event_name == 'pull_request' }}
