@@ -1351,8 +1351,19 @@ static void measureH2R1MixedGainTupleWindow(AudioEngineHarness& harness)
                 " that it cannot occur\n");
 }
 
+// B2 Stage 1 / T1 (R-01, 2026-10-28): 陽性対照の計測エントリポイント。
+// 実体は V11EngineRetireProtectionTests.cpp（診断 ON ビルドでのみ生成）。
+// 宣言はゲート外に置く（OFF ビルドでは呼び出し側もコンパイルされないため未解決にならない）。
+int runB2Stage1PositiveControls();
+
 int main(int argc, char* argv[])
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // 計測モードはエンジン生成・スレッド生成より前に分岐する（計画 v5.3 §2.2）。
+    if (std::getenv("B2_STAGE1_MEASURE") != nullptr)
+        return runB2Stage1PositiveControls();
+#endif
+
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
     //
