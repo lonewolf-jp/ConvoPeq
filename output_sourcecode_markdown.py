@@ -26,9 +26,13 @@ def ensure_within_root(path: Path, root_path: Path) -> Path:
 
     外部由来パス（CLI 引数・iterdir/rglob の列挙結果）は使用前に必ずこの関数を通す。
     逸脱した場合は ValueError で即座に中断する。
+
+    比較は「解決後 vs 解決後」で行う。Windows の 8.3 短縮名（RUNNER~1 など）では
+    path.resolve() が長い名前を返し、未解決の root と一致しないため。
     """
     resolved = path.resolve()
-    if not resolved.is_relative_to(root_path):
+    root_resolved = Path(root_path).resolve()
+    if not resolved.is_relative_to(root_resolved):
         raise ValueError("path escapes the project root: %s" % path)
     return resolved
 
@@ -40,7 +44,7 @@ def resolve_safe_output_path(root_path: Path, output_file) -> Path:
     """
     out_path = Path(output_file)
     resolved = ensure_within_root(root_path / out_path, root_path)
-    if out_path.is_absolute() or resolved.parent != root_path:
+    if out_path.is_absolute() or resolved.parent != Path(root_path).resolve():
         raise ValueError("output file must be a relative path directly under the project root: %r" % (output_file,))
     return resolved
 
@@ -115,6 +119,10 @@ def build_markdown_text(root_path: Path, out_path: Path, generated_at: datetime)
     out_path は「生成対象から除外するファイル」を決めるためだけに使う。
     スナップショット検証でも同じ本文を再現できるよう、書き出しと分離している。
     """
+    # 8.3 短縮名などで「解決済み」と「未解決」が混ざるとツリー生成が空になるため、
+    # ここで必ず正規化する（root と path の比較を同一表現に揃える）。
+    root_path = Path(root_path).resolve()
+    out_path = Path(out_path).resolve()
     stamp = generated_at.strftime("%Y-%m-%d %H:%M:%S")
     parts = []
     parts.append(f"# Project Extract & Source Code: {root_path.name}\n\n")
@@ -223,6 +231,7 @@ def archive_snapshot(root_path: Path, source_name: str, generated_at: datetime,
 
     戻り値: (保存先ファイル Path または None, 警告メッセージのリスト)
     """
+    root_path = Path(root_path).resolve()
     src = resolve_safe_output_path(root_path, source_name)
     notes = []
     if not src.exists():
@@ -272,6 +281,7 @@ def verify_snapshot_identity(root_path: Path, snapshot_rel: str):
 
     戻り値: (ok: bool, report: str)
     """
+    root_path = Path(root_path).resolve()
     try:
         snap_dir, snap_file = _resolve_snapshot_pair(root_path, snapshot_rel)
     except ValueError as exc:

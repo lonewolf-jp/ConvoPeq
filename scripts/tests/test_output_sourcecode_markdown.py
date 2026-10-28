@@ -117,6 +117,27 @@ def main() -> int:
               f"actual={ascii_proc.returncode} err={(ascii_proc.stderr or '')[-300:]}")
         check("1b/cp1252 環境でも ConvoPeq.md が生成される", (ascii_project / "ConvoPeq.md").is_file())
 
+        # 1c) root が未解決の表現（".." を含む / Windows の 8.3 短縮名）でも
+        #     境界判定と archive/verify が成立すること。CI の RUNNER~1 がこの条件。
+        #     本プロジェクトを汚さないよう専用ディレクトリで行う。
+        raw_project = work / "raw-root-project"
+        raw_project.mkdir()
+        make_project(raw_project)
+        raw_root = raw_project / "src" / ".."
+        raw_when = datetime(2026, 10, 28, 9, 0, 0)
+        try:
+            resolved = module.ensure_within_root(raw_root / "ConvoPeq.md", raw_root)
+            ok_raw = (resolved.name == "ConvoPeq.md")
+        except ValueError:
+            ok_raw = False
+        check("1c/未解決 root でも境界判定が成立する", ok_raw)
+
+        module.combine_source_codes(str(raw_root), "ConvoPeq.md", raw_when)
+        raw_saved, _ = module.archive_snapshot(raw_root, "ConvoPeq.md", raw_when)
+        check("1c/未解決 root でも archive できる", raw_saved is not None)
+        raw_ok, raw_report = module.verify_snapshot_identity(raw_root, "doc/ConvoPeqMD/20261028090000")
+        check("1c/未解決 root でも verify が OK", raw_ok, raw_report)
+
         canonical_text = canonical.read_text(encoding="utf-8")
         check("1/ヘッダに Generated がある", "\n> Generated: " in canonical_text)
 
