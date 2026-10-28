@@ -3,7 +3,7 @@
     "owner": "audioengine-runtime-bridge",
     "issue": "BRIDGE-METRIC-GOV-001",
     "rationale": "top-level lifecycle governance for metric policy",
-    "expiry": "2026-09-30",
+    "expiry": "2026-12-31",
     "normalizationPolicy": {
         "enabled": true,
         "baselineWindowMinutes": 10,
