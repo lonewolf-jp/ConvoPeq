@@ -56,7 +56,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     //   インスタンス）。スロット数は 256 固定なので走査は NonRT で許容できる。
     for (size_t i = 0; i < MAX_DSP_SLOTS; ++i) {
         const auto& reg = registry_[i];
-        if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+        if (convo::consumeAtomic(reg.instance, std::memory_order_acquire) != dspInstance)
             continue;
         const auto state = convo::consumeAtomic(reg.state, std::memory_order_acquire);
         if (state == DSPState::Constructing || state == DSPState::Active
@@ -78,7 +78,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
     const uint32_t slot = freeSlots_[--freeSize_];
     auto& reg = registry_[slot];
     const auto gen = convo::consumeAtomic(reg.generation, std::memory_order_acquire) + 1u;
-    reg.instance.store(dspInstance, std::memory_order_release);
+    convo::publishAtomic(reg.instance, dspInstance, std::memory_order_release);
     convo::publishAtomic(reg.generation, gen, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Constructing, std::memory_order_release);
     // ★ F1' (2026-10-25): 受付を開いた状態（closed=0, count=0）で公開する。
@@ -113,7 +113,7 @@ DSPHandlePin DSPHandleRuntime::tryPin(DSPHandle handle) noexcept
         // observed は失敗時に最新値へ更新される
     }
 
-    void* instance = reg.instance.load(std::memory_order_acquire);
+    void* instance = convo::consumeAtomic(reg.instance, std::memory_order_acquire);
     if (instance == nullptr)
     {
         // F2' の無効化後（instance が既に消えている）。pin を返して失敗側へ倒す。
@@ -213,7 +213,7 @@ ResolvedDSP DSPHandleRuntime::resolve(DSPHandle handle) const noexcept
     // ★ F1'-prep (2026-10-25): state を読んでから instance を読む。両方とも acquire だが、
     //   「state を読んだ直後に destroy が走る」窓は依然として残る（HL-5）。
     //   ここで instance が null なら（F2' の無効化後）必ず失敗側へ倒す。
-    auto* instance = reg.instance.load(std::memory_order_acquire);
+    auto* instance = convo::consumeAtomic(reg.instance, std::memory_order_acquire);
     if (instance == nullptr) {
         return { nullptr, false, true };
     }
@@ -329,7 +329,7 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
     //   古い state（Active/Retired）を見たまま instance を読む窓が広がる。state を先に
     //   DestroyPending にすることで、resolve() は少なくとも「解決不能」へ倒れる。
     convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
-    reg.instance.store(nullptr, std::memory_order_release);
+    convo::publishAtomic(reg.instance, nullptr, std::memory_order_release);
     convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
     // ★ FUTURE-5 (work88): Reclaimed 済み slot をフリーリストへ戻す（O(1) 再利用）
     if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
@@ -360,7 +360,7 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
         for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
         {
             auto& reg = registry_[i];
-            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            if (convo::consumeAtomic(reg.instance, std::memory_order_acquire) != dspInstance)
                 continue;
             if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
                 continue;
@@ -383,13 +383,13 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
         for (size_t k = 0; k < targetCount; ++k)
         {
             auto& reg = registry_[targets[k].slot];
-            if (reg.instance.load(std::memory_order_acquire) != dspInstance)
+            if (convo::consumeAtomic(reg.instance, std::memory_order_acquire) != dspInstance)
                 continue;
             if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
                 continue;
 
             convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
-            reg.instance.store(nullptr, std::memory_order_release);
+            convo::publishAtomic(reg.instance, nullptr, std::memory_order_release);
             convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
 
             if (targets[k].slot != 0 && freeSize_ < MAX_DSP_SLOTS)
@@ -537,7 +537,7 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
         return false;
 
     // Phase 2: clear instance
-    registry_[slot].instance.store(nullptr, std::memory_order_release);
+    convo::publishAtomic(registry_[slot].instance, nullptr, std::memory_order_release);
     convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
                          std::memory_order_release);
     // work88: return the reclaimed quarantine slot to the free list (prevents slot leaks).
@@ -565,7 +565,7 @@ std::size_t DSPHandleRuntime::retryDeferredQuarantineDestroy() noexcept
         if (convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire)
             != DSPState::Quarantined)
             continue;
-        if (registry_[slot].instance.load(std::memory_order_acquire) == nullptr)
+        if (convo::consumeAtomic(registry_[slot].instance, std::memory_order_acquire) == nullptr)
             continue;
 
         if (destroyQuarantineSlot(slot, 0))
