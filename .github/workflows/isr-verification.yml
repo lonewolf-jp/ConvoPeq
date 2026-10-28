@@ -298,6 +298,14 @@ jobs:
           Assert-WorkflowRange -v $enforce81CloseDecisionRetryMax -min $closePolicy.collector.minRetryMax -max $closePolicy.collector.maxRetryMax -n 'enforce81CloseDecisionRetryMax'
           Write-Host '[PASS] 8.1 policy-driven input validation'
 
+      - name: Generate ISR authority inventory
+        shell: pwsh
+        run: |
+          # storage/ is git-ignored, so the inventory the authority-freeze gate reads
+          # does not exist in a fresh CI checkout. Generate it before the tier runner.
+          $ErrorActionPreference = 'Stop'
+          & ./.github/scripts/isr-generate-authority-inventory.ps1
+
       - name: Run tier-runner gate scripts
         shell: pwsh
         run: |
