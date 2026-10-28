@@ -343,6 +343,12 @@ jobs:
 
       - name: Run tier-runner gate scripts
         shell: pwsh
+        # R-41: isr-verify-pr-sla.ps1 compares the head SHA captured at evaluation
+        # start with the latest PR head SHA fetched from the API. The token is only
+        # used for that read; when it is absent the gate fails closed instead of
+        # silently skipping the comparison.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # ★ Practical Stable ISR: 前ステップで定義された関数は異なる PowerShell セッションなので
           #   使用できない。インラインで非負整数パーサを定義し、フォールバックする。
