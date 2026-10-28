@@ -197,6 +197,26 @@ function Invoke-GitReadOnlyBinary {
     }
 }
 
+function Get-FirstLine {
+    <#
+    .SYNOPSIS
+        read-only 結果の先頭行を安全に取り出す。
+    .DESCRIPTION
+        detached HEAD では `git branch --show-current` が 0 行を返す。
+        Set-StrictMode 3.0 以降は空配列への添字アクセスが例外になるため、
+        ここで明示的に空文字へ落とす（Owner 承認 2026-10-28 / P1-4 の回帰）。
+    #>
+    [OutputType([string])]
+    param(
+        [AllowNull()][string[]] $Lines
+    )
+
+    if ($null -eq $Lines -or $Lines.Count -eq 0) {
+        return ''
+    }
+    return "$($Lines[0])"
+}
+
 function Resolve-RepositoryRoot {
     <#
     .SYNOPSIS
@@ -226,9 +246,9 @@ function Resolve-RepositoryRoot {
         $gitDirType = 'DIRECTORY'
     }
 
-    $commonDir = (Invoke-GitReadOnly -GitArgs @('rev-parse', '--git-common-dir')).Lines[0]
-    $gitDir    = (Invoke-GitReadOnly -GitArgs @('rev-parse', '--git-dir')).Lines[0]
-    $toplevel  = (Invoke-GitReadOnly -GitArgs @('rev-parse', '--show-toplevel')).Lines[0]
+    $commonDir = Get-FirstLine -Lines (Invoke-GitReadOnly -GitArgs @('rev-parse', '--git-common-dir')).Lines
+    $gitDir    = Get-FirstLine -Lines (Invoke-GitReadOnly -GitArgs @('rev-parse', '--git-dir')).Lines
+    $toplevel  = Get-FirstLine -Lines (Invoke-GitReadOnly -GitArgs @('rev-parse', '--show-toplevel')).Lines
 
     return @{
         Root            = $Root
@@ -313,14 +333,14 @@ function Get-GitStateObservation {
     $stash = [int] (Invoke-GitReadOnly -GitArgs @('stash', 'list')).Count
 
     # --- HEAD / branch / remotes ---------------------------------------------
-    $head   = (Invoke-GitReadOnly -GitArgs @('rev-parse', 'HEAD')).Lines[0]
-    $branch = (Invoke-GitReadOnly -GitArgs @('branch', '--show-current')).Lines[0]
+    $head   = Get-FirstLine -Lines (Invoke-GitReadOnly -GitArgs @('rev-parse', 'HEAD')).Lines
+    $branch = Get-FirstLine -Lines (Invoke-GitReadOnly -GitArgs @('branch', '--show-current')).Lines
 
     $remoteMap = [ordered]@{}
     foreach ($r in $RemoteRefs) {
         $key = $r -replace '[^A-Za-z0-9]', '_'
         try {
-            $remoteMap[$key] = (Invoke-GitReadOnly -GitArgs @('rev-parse', $r)).Lines[0]
+            $remoteMap[$key] = Get-FirstLine -Lines (Invoke-GitReadOnly -GitArgs @('rev-parse', $r)).Lines
         } catch {
             $remoteMap[$key] = 'NA'
         }

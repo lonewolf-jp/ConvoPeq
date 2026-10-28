@@ -181,11 +181,47 @@ try {
     Assert-Equal 'A/Dropbox 負値 -> exit(fail-closed)' 2 $r.Exit
 
     # =========================================================================
-    # 4/6) B: 正常・非 Git・起動失敗
+    # 決定的な検証用リポジトリ（クリーン + detached HEAD）
+    #   正本の作業ツリーは未コミット変更を持つことがあるため、
+    #   「clean な repo」の期待値は一時リポジトリで固定する。
     # =========================================================================
+    $canonicalMd = Join-Path $RepositoryRoot 'ConvoPeq.md'
+    $cleanRepo = Join-Path $work 'clean-repo'
+    New-Item -ItemType Directory -Path $cleanRepo -Force | Out-Null
+    Copy-Item -LiteralPath $canonicalMd -Destination (Join-Path $cleanRepo 'ConvoPeq.md') -Force
+    $null = & git -C $cleanRepo init --quiet 2>&1
+    $null = & git -C $cleanRepo -c user.email=t@example.invalid -c user.name=t add ConvoPeq.md 2>&1
+    $null = & git -C $cleanRepo -c user.email=t@example.invalid -c user.name=t commit --quiet -m init 2>&1
+    $null = & git -C $cleanRepo checkout --quiet --detach HEAD 2>&1
+    $cleanMd = Join-Path $cleanRepo 'ConvoPeq.md'
+    $cleanBytes = [System.IO.File]::ReadAllBytes($cleanMd)
+    $cleanShaEngine = [System.Security.Cryptography.SHA256]::Create()
+    try { $cleanSha = -join ($cleanShaEngine.ComputeHash($cleanBytes) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $cleanShaEngine.Dispose() }
+    $cleanSize = [long] $cleanBytes.Length
+    $cleanStamp = (Select-String -LiteralPath $cleanMd -Pattern '^> Generated: (.*)$' |
+        Select-Object -First 1).Matches.Groups[1].Value.Trim()
+
+    # =========================================================================
+    # 4/6) B: 正常・非 Git・detached・起動失敗
+    # =========================================================================
+    $r = Invoke-PreflightScript $gitScript @('-RepositoryRoot', $cleanRepo)
+    Assert-Equal 'B/クリーン detached repo -> exit' 0 $r.Exit
+    Assert-Equal 'B/クリーン detached repo -> b_exit' 0 (Get-MapValue $r.Map 'b_exit')
+    Assert-Equal 'B/クリーン detached repo -> branch は空' '' (Get-MapValue $r.Map 'branch')
+
+    # 正本リポジトリは作業ツリーの状態に依存するため、契約値と整合だけを検証する
     $r = Invoke-PreflightScript $gitScript @('-RepositoryRoot', $RepositoryRoot)
-    Assert-Equal 'B/正本リポジトリ -> exit' 0 $r.Exit
-    Assert-Equal 'B/正本リポジトリ -> b_exit' 0 (Get-MapValue $r.Map 'b_exit')
+    Assert-True 'B/正本リポジトリ -> exit は契約値(0/5)' ($r.Exit -in @(0, 5)) "actual=$($r.Exit)"
+    Assert-True 'B/正本リポジトリ -> git_dir_type が ABSENT でない' ((Get-MapValue $r.Map 'git_dir_type') -ne 'ABSENT')
+    $dirtyLines = @(& git -C $RepositoryRoot status --porcelain 2>&1 |
+        Where-Object { $_ -and -not "$_".StartsWith('??') })
+    if ($dirtyLines.Count -gt 0) {
+        Assert-Equal 'B/正本リポジトリ -> 未コミット変更ありは 5' 5 $r.Exit
+    }
+    else {
+        Assert-Equal 'B/正本リポジトリ -> クリーンなら 0' 0 $r.Exit
+    }
 
     $r = Invoke-PreflightScript $gitScript @('-RepositoryRoot', $work)
     Assert-Equal 'B/非 Git -> exit' 5 $r.Exit
@@ -200,68 +236,58 @@ try {
     # =========================================================================
     # 5/7) C: orchestrate と注入
     # =========================================================================
-    $canonicalMd = Join-Path $RepositoryRoot 'ConvoPeq.md'
-    $canonicalSize = (Get-Item -LiteralPath $canonicalMd).Length
-    $canonicalSha = (Get-FileHash -LiteralPath $canonicalMd -Algorithm SHA256).Hash.ToLowerInvariant()
-    $canonicalStamp = (Select-String -LiteralPath $canonicalMd -Pattern '^> Generated: (.*)$' |
-        Select-Object -First 1).Matches.Groups[1].Value.Trim()
-
-    # 8) 既存の正本が正常に検証される
+    # 8) 既存の正本 ConvoPeq.md が正常に検証される（git 状態に依存しない）
     $r = Invoke-PreflightScript $guardScript @(
-        '-CanonicalPath', $canonicalMd, '-BaselineSha256', $canonicalSha,
-        '-BaselineSize', "$canonicalSize", '-BaselineGenerated', $canonicalStamp,
-        '-DropboxSize', "$canonicalSize")
+        '-CanonicalPath', $canonicalMd,
+        '-BaselineSha256', (Get-FileHash -LiteralPath $canonicalMd -Algorithm SHA256).Hash.ToLowerInvariant(),
+        '-BaselineSize', "$((Get-Item -LiteralPath $canonicalMd).Length)",
+        '-BaselineGenerated', (Select-String -LiteralPath $canonicalMd -Pattern '^> Generated: (.*)$' |
+            Select-Object -First 1).Matches.Groups[1].Value.Trim(),
+        '-DropboxSize', "$((Get-Item -LiteralPath $canonicalMd).Length)")
     Assert-Equal 'A/正本 ConvoPeq.md -> exit' 0 $r.Exit
     Assert-Equal 'A/正本 ConvoPeq.md -> eol_class' 'NORMALIZED_LF' (Get-MapValue $r.Map 'eol_class')
 
-    # 7) orchestrate: 正常（注入 Dropbox あり）
+    # orchestrate は決定的な clean repo に対して実行する
     $baseArgs = @(
-        '-RepositoryRoot', $RepositoryRoot, '-CanonicalPath', $canonicalMd,
-        '-BaselineSha256', $canonicalSha, '-BaselineSize', "$canonicalSize",
-        '-BaselineGenerated', $canonicalStamp)
-    $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-Orchestrate', '-DropboxSize', "$canonicalSize"))
+        '-RepositoryRoot', $cleanRepo, '-CanonicalPath', $cleanMd,
+        '-BaselineSha256', $cleanSha, '-BaselineSize', "$cleanSize",
+        '-BaselineGenerated', $cleanStamp)
+    $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-Orchestrate', '-DropboxSize', "$cleanSize"))
     Assert-Equal 'C/orchestrate 正常 -> exit' 0 $r.Exit
     Assert-Equal 'C/orchestrate 正常 -> result' 'CANONICAL_OK' (Get-MapValue $r.Map 'result')
 
-    # 7) orchestrate: Dropbox 未注入 -> 成功に変換しない
     $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-Orchestrate'))
     Assert-Equal 'C/orchestrate Dropbox なし -> exit' 2 $r.Exit
     Assert-Equal 'C/orchestrate Dropbox なし -> result' 'UNVERIFIED_DROPBOX' (Get-MapValue $r.Map 'result')
 
-    # 7) orchestrate: 非 Git ルート -> 成功に変換しない
     $r = Invoke-PreflightScript $aggScript @(
-        '-RepositoryRoot', $work, '-CanonicalPath', $canonicalMd,
-        '-BaselineSha256', $canonicalSha, '-BaselineSize', "$canonicalSize",
-        '-BaselineGenerated', $canonicalStamp, '-Orchestrate', '-DropboxSize', "$canonicalSize")
+        '-RepositoryRoot', $work, '-CanonicalPath', $cleanMd,
+        '-BaselineSha256', $cleanSha, '-BaselineSize', "$cleanSize",
+        '-BaselineGenerated', $cleanStamp, '-Orchestrate', '-DropboxSize', "$cleanSize")
     Assert-Equal 'C/orchestrate 非 Git -> exit' 5 $r.Exit
     Assert-True 'C/orchestrate 非 Git -> result が CANONICAL_OK でない' ((Get-MapValue $r.Map 'result') -ne 'CANONICAL_OK')
 
-    # 4) orchestrate: A/B 起動失敗（C のみを孤立コピーして実行）
     $lonelyDir = Join-Path $work 'lonely'
     New-Item -ItemType Directory -Path $lonelyDir -Force | Out-Null
     $lonelyAgg = Join-Path $lonelyDir 'aggregate_preflight.ps1'
     Copy-Item -LiteralPath $aggScript -Destination $lonelyAgg -Force
-    $r = Invoke-PreflightScript $lonelyAgg ($baseArgs + @('-Orchestrate', '-DropboxSize', "$canonicalSize"))
+    $r = Invoke-PreflightScript $lonelyAgg ($baseArgs + @('-Orchestrate', '-DropboxSize', "$cleanSize"))
     Assert-Equal 'C/A/B 不在 -> exit' 70 $r.Exit
     Assert-Equal 'C/A/B 不在 -> result' 'HARNESS_ERROR' (Get-MapValue $r.Map 'result')
 
-    # 5) 注入モード: 空出力
     $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-GuardStdout', '', '-PreflightStdout', ''))
     Assert-Equal 'C/注入 空 -> exit' 70 $r.Exit
     Assert-Equal 'C/注入 空 -> result' 'HARNESS_ERROR' (Get-MapValue $r.Map 'result')
 
-    # 5) 注入モード: 必須キー欠落
     $guardPartial = "native_exit=0`ndiagnostics="
     $gitFull = "staged=0`ntracked_modified=0`nuntracked=0`nstash=0`ngit_dir_type=DIRECTORY`nb_exit=0`ndiagnostics="
     $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-GuardStdout', $guardPartial, '-PreflightStdout', $gitFull))
     Assert-Equal 'C/注入 A の必須キー欠落 -> exit' 70 $r.Exit
 
-    # 5) 注入モード: 契約外 exit
     $guardBadExit = "native_exit=9`nidentity_hash_W=OK:x`nidentity_size_W=OK:1`neol_class=NORMALIZED_LF`nprovenance_generated=OK:x`ndropbox_available=true`ndiagnostics="
     $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-GuardStdout', $guardBadExit, '-PreflightStdout', $gitFull))
     Assert-Equal 'C/注入 契約外 exit -> exit' 70 $r.Exit
 
-    # 5) 注入モード: 正常
     $guardFull = "native_exit=0`nidentity_hash_W=OK:x`nidentity_size_W=OK:1`neol_class=NORMALIZED_LF`nprovenance_generated=OK:x`ndropbox_available=true`ndiagnostics="
     $r = Invoke-PreflightScript $aggScript ($baseArgs + @('-GuardStdout', $guardFull, '-PreflightStdout', $gitFull))
     Assert-Equal 'C/注入 正常 -> exit' 0 $r.Exit
