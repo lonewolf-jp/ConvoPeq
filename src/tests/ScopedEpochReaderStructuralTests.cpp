@@ -9,8 +9,9 @@
 //   without the guard, which would silently reintroduce the defect.
 //
 //   This test reads the production sources and asserts the contract:
-//     1. every listed non-RT reader body contains "ScopedEpochReader" and it
-//        appears BEFORE the first "loadCurrentState" in that body;
+//     1. every listed non-RT reader body acquires the guard (either an explicit
+//        "ScopedEpochReader" or "acquireReadGuard()") and that acquisition appears
+//        BEFORE the first "loadCurrentState" in that body;
 //     2. getEQState() stays the only raw-pointer accessor (no guard inside);
 //     3. the two known raw-pointer call sites hold "acquireReadGuard".
 //
@@ -20,6 +21,7 @@
 // Oracle: source text only. No production code, no test hooks, no timing.
 // =============================================================================
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -93,17 +95,21 @@ Check guardBeforeLoad (const std::string& source, const std::string& name)
     if (body.empty())
         return { false, "function body not found: " + name };
 
-    const std::size_t guard = body.find ("ScopedEpochReader");
+    // The body may acquire the guard directly (an explicit ScopedEpochReader) or
+    // through the EQProcessor::acquireReadGuard() accessor; both are the same contract.
+    const std::size_t directGuard = body.find ("ScopedEpochReader");
+    const std::size_t accessorGuard = body.find ("acquireReadGuard");
+    std::size_t guard = std::min (directGuard, accessorGuard);
     const std::size_t load = body.find ("loadCurrentState");
 
-    if (guard == std::string::npos)
-        return { false, name + ": no ScopedEpochReader in the body" };
+    if (directGuard == std::string::npos && accessorGuard == std::string::npos)
+        return { false, name + ": no ScopedEpochReader/acquireReadGuard in the body" };
 
     if (load == std::string::npos)
         return { false, name + ": no loadCurrentState in the body (contract changed?)" };
 
     if (! (guard < load))
-        return { false, name + ": ScopedEpochReader must appear BEFORE loadCurrentState" };
+        return { false, name + ": guard acquisition must appear BEFORE loadCurrentState" };
 
     return { true, name + ": guard precedes the load" };
 }

@@ -97,7 +97,9 @@ private:
     // not fatal: the thread registers another slot, bounded by kMaxReaders.
     static std::array<CacheEntry, 4>& cache() noexcept
     {
-        thread_local std::array<CacheEntry, 4> entries {};
+        // NOLINT(thread-local) RT-SAFE: used only by the non-RT reader path (never from the audio
+        //   thread); POD, no destructor, one cache per thread, no cross-thread sharing.
+        thread_local std::array<CacheEntry, 4> entries {};   // NOLINT(thread-local) RT-SAFE: non-RT only, POD, no destructor, per-thread
         return entries;
     }
 

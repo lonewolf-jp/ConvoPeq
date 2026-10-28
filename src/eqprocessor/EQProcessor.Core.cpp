@@ -40,7 +40,7 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
         return false;
     }
 
-    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
+    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain->currentEpoch();
     // ★ STG-11-D1 (Candidate B): stack-local router を member router に置換。
     //   旧 code の reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB
     //   （ISRRetireRouter と EpochDomain は直接の継承関係になくレイアウトが異なる）。
@@ -84,7 +84,7 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
 {
     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
-        m_epochDomain.publishEpoch();
+        m_epochDomain->publishEpoch();
         // ★ STG-11-D1: 定期的 reclaim driver（NonRT 専用）。
         //   呼び出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
         //   epoch 前進後に member router の D + Q + E + T を epoch-gated drain する。
@@ -117,7 +117,7 @@ bool EQProcessor::retireEQStateDeferred(EQState* state) noexcept
     if (state == nullptr)
         return true;
 
-    const uint64_t epoch = m_epochDomain.currentEpoch();
+    const uint64_t epoch = m_epochDomain->currentEpoch();
     return enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
 }
 
@@ -126,7 +126,7 @@ bool EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
     if (node == nullptr)
         return true;
 
-    const uint64_t epoch = m_epochDomain.currentEpoch();
+    const uint64_t epoch = m_epochDomain->currentEpoch();
     return enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
 }
 
@@ -174,7 +174,7 @@ EQProcessor::~EQProcessor()
     // ★ STG-11-D1: member router の Q/E/T を破棄前に drain する。
     //   tryReclaim() は epoch-gated（安全到達分のみ解放）。
     //   drainAllQuarantineStore() は epoch-agnostic 強制だが、破棄前提は既存の
-    //   m_epochDomain.drainAll() と同一（publication pipeline が engine-epoch-gated に
+    //   m_epochDomain->drainAll() と同一（publication pipeline が engine-epoch-gated に
     //   DSPCore を破棄するため audio quiescence 成立 — BlockDouble.cpp:151 の
     //   engine-domain read 区間が audio block 全体を覆う）。
     //   premature delete（epoch safety 無視の新規導入）は行っていない。
@@ -182,9 +182,9 @@ EQProcessor::~EQProcessor()
     m_ownedRetireRouter.drainAllQuarantineStore();
 
     // 退役キューを強制 drain して可能な限り回収する。
-    m_epochDomain.tryReclaim();
-    m_epochDomain.drainAll();
-    m_epochDomain.tryReclaim();
+    m_epochDomain->tryReclaim();
+    m_epochDomain->drainAll();
+    m_epochDomain->tryReclaim();
 
     releaseResources();
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: exit");
@@ -298,7 +298,7 @@ void EQProcessor::reset()
     //   （P-D2-1: 活性 Read 0 件 / DESIGN_R4_D2D3 §1.1・§1.6）。
 
     // A-closure (reader safety): reader slot held across the load + dereference.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (readGuard.active())
     {
         auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -552,7 +552,7 @@ juce::ValueTree EQProcessor::getState() const
 {
     // A-closure (reader safety): hold an EBR reader slot BEFORE loading the published
     // state, so a concurrent unlink+retire+reclaim cannot free it mid-read.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active())
         return juce::ValueTree ("EQ");   // fail-closed: no protection -> no dereference
 
@@ -704,7 +704,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     // A-closure (reader safety): the reader slot covers every state dereference below
     // (state->totalGainDb and createBandNode(i, *loopState)).
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 
@@ -822,7 +822,7 @@ EQProcessor::EQState* EQProcessor::getEQState() const
 float EQProcessor::getTotalGain() const
 {
     // A-closure (reader safety): reader slot held across load + dereference.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return 0.0f;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -834,7 +834,7 @@ EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
 
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return EQBandType::Peaking;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -846,7 +846,7 @@ EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
 
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return EQChannelMode::Stereo;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -864,7 +864,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
     if (band < 0 || band >= NUM_BANDS) return {};
 
     // A-closure (reader safety): reader slot held across load + dereference.
-    const convo::ScopedEpochReader readGuard (m_epochDomain);
+    const auto readGuard = acquireReadGuard();
     if (! readGuard.active()) return {};
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
