@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import argparse
 from datetime import datetime
@@ -108,37 +109,50 @@ def iter_source_files(root_path: Path, out_path: Path):
             continue
         yield file_path
 
-def combine_source_codes(root_dir, output_file):
-    """指定されたフォルダ配下の全ファイルを再帰的に結合してMarkdownを出力"""
+def build_markdown_text(root_path: Path, out_path: Path, generated_at: datetime) -> str:
+    """結合 Markdown の本文を組み立てる（ファイルへは書かない）。
+
+    out_path は「生成対象から除外するファイル」を決めるためだけに使う。
+    スナップショット検証でも同じ本文を再現できるよう、書き出しと分離している。
+    """
+    stamp = generated_at.strftime("%Y-%m-%d %H:%M:%S")
+    parts = []
+    parts.append(f"# Project Extract & Source Code: {root_path.name}\n\n")
+    parts.append(f"> Generated: {stamp}\n\n")
+    parts.append("## 📁 Directory Tree (Selected Targets Only)\n\n")
+    parts.append("```text\n")
+    parts.append(generate_tree(root_path, root_path, is_last=True))
+    parts.append("```\n\n")
+    parts.append("## 📄 Source Code Contents\n\n")
+
+    for file_path in iter_source_files(root_path, out_path):
+        relative_path = file_path.relative_to(root_path)
+        lang = EXT_TO_LANG.get(file_path.suffix, "")
+        parts.append(f"### 📄 `{relative_path}`\n\n")
+        parts.append(f"```{lang}\n")
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as sf:
+                parts.append(sf.read())
+        except Exception as e:
+            parts.append(f"/* [Error] ファイルの読み込みに失敗しました: {e} */")
+        parts.append("\n```\n\n")
+
+    return "".join(parts)
+
+
+def combine_source_codes(root_dir, output_file, generated_at=None):
+    """指定されたフォルダ配下の全ファイルを再帰的に結合してMarkdownを出力
+
+    generated_at を渡すと、ヘッダの stamp とスナップショット名を同じ時刻に揃えられる。
+    """
     root_path = Path(root_dir).resolve()
     out_path = resolve_safe_output_path(root_path, output_file)
-
+    when = generated_at or datetime.now()
+    text = build_markdown_text(root_path, out_path, when)
     with open(out_path, 'w', encoding='utf-8') as f:
-        # 1. タイトルとフォルダ構造の出力
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        f.write(f"# Project Extract & Source Code: {root_path.name}\n\n")
-        f.write(f"> Generated: {now_str}\n\n")
-        f.write("## 📁 Directory Tree (Selected Targets Only)\n\n")
-        f.write("```text\n")
-        f.write(generate_tree(root_path, root_path, is_last=True))
-        f.write("```\n\n")
-        f.write("## 📄 Source Code Contents\n\n")
+        f.write(text)
+    return when
 
-        # 2. 各ファイルのコンテンツを出力（rglob 列挙 + 全境界 containment 検証済み）
-        for file_path in iter_source_files(root_path, out_path):
-            relative_path = file_path.relative_to(root_path)
-            lang = EXT_TO_LANG.get(file_path.suffix, "")
-
-            f.write(f"### 📄 `{relative_path}`\n\n")
-            f.write(f"```{lang}\n")
-
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as sf:
-                    f.write(sf.read())
-            except Exception as e:
-                f.write(f"/* [Error] ファイルの読み込みに失敗しました: {e} */")
-
-            f.write("\n```\n\n")
 
 def iter_target_files(root_path: Path):
     """--check 用: TARGET_ITEMS 配下（または指定ファイル自身）の検査対象ファイルを列挙する。
@@ -176,6 +190,124 @@ def parse_generated_stamp(snapshot_path: Path):
     return None
 
 
+# =============================================================================
+# スナップショット版管理（Owner 承認 2026-10-28 / P2 案 (b)）
+#   * 正本は従来どおり固定名 ConvoPeq.md のまま維持する。
+#   * 生成のたびに doc/ConvoPeqMD/<YYYYmmddHHMMSS>/ConvoPeq.md へ複製を残す
+#     （リポジトリ既存の規約。doc/ConvoPeqMD/ は .gitignore 済み）。
+#   * 既存スナップショットは上書きしない。同一内容なら何もしない（冪等）。
+#   * 生成物の自動削除は行わない。
+# =============================================================================
+SNAPSHOT_STAMP_FORMAT = "%Y%m%d%H%M%S"
+SNAPSHOT_FILE_NAME = "ConvoPeq.md"
+DEFAULT_ARCHIVE_DIR = Path("doc") / "ConvoPeqMD"
+SNAPSHOT_DIR_RE = re.compile(r"^(\d{14})(?:-(\d+))?$")
+
+
+def build_snapshot_dir_name(generated_at: datetime) -> str:
+    """スナップショットのディレクトリ名を生成する（ヘッダ stamp と同じ時刻書式）。"""
+    return generated_at.strftime(SNAPSHOT_STAMP_FORMAT)
+
+
+def resolve_archive_dir(root_path: Path, archive_dir) -> Path:
+    """アーカイブ先を解決する（相対パス限定・ルート配下を強制）。"""
+    rel = Path(archive_dir)
+    if rel.is_absolute():
+        raise ValueError("archive dir must be a relative path under the project root: %r" % (archive_dir,))
+    return ensure_within_root(root_path / rel, root_path)
+
+
+def archive_snapshot(root_path: Path, source_name: str, generated_at: datetime,
+                     archive_dir=DEFAULT_ARCHIVE_DIR):
+    """生成済み ConvoPeq.md を doc/ConvoPeqMD/<stamp>/ConvoPeq.md へ保存する。
+
+    戻り値: (保存先ファイル Path または None, 警告メッセージのリスト)
+    """
+    src = resolve_safe_output_path(root_path, source_name)
+    notes = []
+    if not src.exists():
+        return None, ["snapshot source not found: %s" % (src,)]
+
+    data = src.read_bytes()
+    dest_root = resolve_archive_dir(root_path, archive_dir)
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    base = build_snapshot_dir_name(generated_at)
+    candidate_dir = dest_root / base
+    index = 2
+    while candidate_dir.exists():
+        candidate_file = candidate_dir / SNAPSHOT_FILE_NAME
+        try:
+            if candidate_file.is_file() and candidate_file.read_bytes() == data:
+                # 同一内容が既にある: 何もせず終了（上書きも複製もしない）
+                return None, []
+        except OSError as exc:
+            notes.append("could not read existing snapshot %s: %s" % (candidate_file, exc))
+        candidate_dir = dest_root / ("%s-%d" % (base, index))
+        index += 1
+
+    candidate_dir.mkdir(parents=True, exist_ok=False)
+    target = candidate_dir / SNAPSHOT_FILE_NAME
+    target.write_bytes(data)
+    return target, notes
+
+
+def _normalize_stamp_lines(text: str) -> str:
+    return "\n".join(
+        "> Generated: <stamp>" if line.startswith("> Generated:") else line
+        for line in text.splitlines()
+    )
+
+
+def _resolve_snapshot_pair(root_path: Path, snapshot_rel: str):
+    """スナップショット指定（ディレクトリでもファイルでも可）を (dir, file) に解決する。"""
+    target = ensure_within_root(root_path / Path(snapshot_rel), root_path)
+    if target.is_dir():
+        return target, target / SNAPSHOT_FILE_NAME
+    return target.parent, target
+
+
+def verify_snapshot_identity(root_path: Path, snapshot_rel: str):
+    """スナップショットのディレクトリ名 stamp・ヘッダ stamp・内容の一致を検証する。
+
+    戻り値: (ok: bool, report: str)
+    """
+    try:
+        snap_dir, snap_file = _resolve_snapshot_pair(root_path, snapshot_rel)
+    except ValueError as exc:
+        return False, "ERROR: %s\n" % exc
+
+    if not snap_file.is_file():
+        return False, "ERROR: snapshot not found: %s\n" % snap_file
+
+    match = SNAPSHOT_DIR_RE.match(snap_dir.name)
+    if not match:
+        return False, ("ERROR: snapshot directory does not match <YYYYmmddHHMMSS>: %s\n" % snap_dir.name)
+
+    name_stamp = datetime.strptime(match.group(1), SNAPSHOT_STAMP_FORMAT)
+    header_stamp = parse_generated_stamp(snap_file)
+    if header_stamp is None:
+        return False, "ERROR: 'Generated:' header not found in %s\n" % snap_file.name
+
+    canonical = resolve_safe_output_path(root_path, "ConvoPeq.md")
+    fresh = build_markdown_text(root_path, canonical, header_stamp)
+
+    actual = snap_file.read_text(encoding="utf-8", errors="replace")
+    name_matches = (name_stamp == header_stamp)
+    content_matches = (_normalize_stamp_lines(actual) == _normalize_stamp_lines(fresh))
+
+    lines = [
+        "snapshot           : %s/%s" % (snap_dir.name, snap_file.name),
+        "name stamp         : %s" % name_stamp.strftime("%Y-%m-%d %H:%M:%S"),
+        "header stamp       : %s" % header_stamp.strftime("%Y-%m-%d %H:%M:%S"),
+        "name == header     : %s" % ("OK" if name_matches else "MISMATCH"),
+        "content == current : %s" % ("OK" if content_matches else "DIFFERS"),
+    ]
+    ok = name_matches and content_matches
+    lines.append("STATUS             : %s" % ("OK" if ok else "FAILED"))
+    return ok, "\n".join(lines) + "\n"
+
+
 def check_freshness(root_dir, snapshot_file):
     """鮮度検査: snapshot の Generated より新しい対象ファイルがあるかを報告する。
 
@@ -183,7 +315,11 @@ def check_freshness(root_dir, snapshot_file):
     戻り値: (exit_code, printed_report)
     """
     root_path = Path(root_dir).resolve()
-    snapshot_path = root_path / snapshot_file
+    # ディレクトリ指定（doc/ConvoPeqMD/<stamp>）でもファイル指定でも受け付ける
+    try:
+        snapshot_dir, snapshot_path = _resolve_snapshot_pair(root_path, snapshot_file)
+    except ValueError as exc:
+        return 1, f"ERROR: {exc}\n"
 
     if not snapshot_path.exists():
         return 1, f"ERROR: {snapshot_path} が存在しません。先に生成を実行してください。\n"
@@ -199,7 +335,7 @@ def check_freshness(root_dir, snapshot_file):
             stale_files.append((file_path.relative_to(root_path), mtime))
 
     lines = []
-    lines.append(f"baseline Generated : {baseline.strftime('%Y-%m-%d %H:%M:%S')}  ({snapshot_file})")
+    lines.append(f"baseline Generated : {baseline.strftime('%Y-%m-%d %H:%M:%S')}  ({snapshot_path})")
     lines.append(f"NEWER_SRC_COUNT    : {len(stale_files)}")
     if stale_files:
         lines.append("STATUS             : STALE — snapshot が現行ソースを反映していません")
@@ -214,19 +350,47 @@ def check_freshness(root_dir, snapshot_file):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ソースコード結合 Markdown の生成 / 鮮度検査")
+    parser = argparse.ArgumentParser(description="ソースコード結合 Markdown の生成 / 鮮度検査 / スナップショット版管理")
     parser.add_argument("--check", action="store_true",
-                        help="生成を行わず、ConvoPeq.md が現行ソースより古いか（NEWER_SRC_COUNT）を検査する")
+                        help="生成を行わず、対象スナップショットが現行ソースより古いか（NEWER_SRC_COUNT）を検査する")
+    parser.add_argument("--snapshot", default=None,
+                        help="--check の対象を明示指定する（ルート配下の相対パス。既定は ConvoPeq.md）")
+    parser.add_argument("--no-archive", action="store_true",
+                        help="doc/ConvoPeqMD へのスナップショット保存を行わない")
+    parser.add_argument("--archive-dir", default=str(DEFAULT_ARCHIVE_DIR),
+                        help="スナップショット保存先（ルート配下の相対パス。既定 doc/ConvoPeqMD）")
+    parser.add_argument("--verify-snapshot", default=None,
+                        help="指定スナップショットのファイル名 stamp・ヘッダ stamp・内容を検証する")
     args = parser.parse_args()
 
     target_directory = "."
     output_markdown = "ConvoPeq.md"
 
     if args.check:
-        exit_code, report = check_freshness(target_directory, output_markdown)
+        snapshot_name = args.snapshot or output_markdown
+        exit_code, report = check_freshness(target_directory, snapshot_name)
         print(report, end="")
         sys.exit(exit_code)
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 処理開始: {os.path.abspath(target_directory)}")
-    combine_source_codes(target_directory, output_markdown)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 完了しました！ 出力先: {output_markdown}")
+    if args.verify_snapshot:
+        root_path = Path(target_directory).resolve()
+        ok, report = verify_snapshot_identity(root_path, args.verify_snapshot)
+        print(report, end="")
+        sys.exit(0 if ok else 1)
+
+    generated_at = datetime.now()
+    print(f"[{generated_at.strftime('%H:%M:%S')}] 処理開始: {os.path.abspath(target_directory)}")
+    combine_source_codes(target_directory, output_markdown, generated_at)
+    print(f"[{generated_at.strftime('%H:%M:%S')}] 完了しました！ 出力先: {output_markdown}")
+
+    if args.no_archive:
+        print("スナップショット保存はスキップされました（--no-archive）。")
+    else:
+        root_path = Path(target_directory).resolve()
+        saved, notes = archive_snapshot(root_path, output_markdown, generated_at, args.archive_dir)
+        for note in notes:
+            print(f"[WARN] {note}")
+        if saved is not None:
+            print(f"スナップショット保存: {saved}")
+        else:
+            print("スナップショット: 同一内容が既に存在するため追加保存なし。")

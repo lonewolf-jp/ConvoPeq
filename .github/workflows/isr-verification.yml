@@ -350,6 +350,14 @@ jobs:
           & ./scripts/preflight/tests/run-preflight-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "preflight regression tests failed (exit=$LASTEXITCODE)" }
 
+      # P2 (Owner approval 2026-10-28): snapshot versioning regression tests.
+      - name: Run snapshot versioning regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python ./scripts/tests/test_output_sourcecode_markdown.py
+          if ($LASTEXITCODE -ne 0) { throw "snapshot versioning regression tests failed (exit=$LASTEXITCODE)" }
+
       - name: Run tier-runner gate scripts
         shell: pwsh
         # R-41: isr-verify-pr-sla.ps1 compares the head SHA captured at evaluation
