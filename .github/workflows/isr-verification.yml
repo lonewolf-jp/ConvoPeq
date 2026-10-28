@@ -327,6 +327,15 @@ jobs:
             if ("${{ github.event.schedule }}" -eq '0 18 * * *') { $workflowDispatchSoakMinutes = 1440 }
             if ("${{ github.event.schedule }}" -eq '0 19 * * 0') { $workflowDispatchSoakMinutes = 10080 }
           }
+          # ★ R-08: array splatting passes elements POSITIONALLY, so @('-Tier', $tier)
+          #   binds the literal string '-Tier' to the first positional parameter and the
+          #   ValidateSet rejects it ("The argument "-Tier" does not belong to the set").
+          #   The argument list below is therefore kept as the *forwarding contract*
+          #   (the quoted '-Switch' / '-Param' literals are what
+          #   isr-verify-workflow-dispatch-input-policy.ps1 checks) and converted to a
+          #   HASHTABLE before the call, because named arguments need a hashtable splat.
+          #   The former '-InputName' entries were removed: isr-run-tiered-verification.ps1
+          #   has no such parameter (the 8.1 input contract is read from the policy JSON).
           $invokeArgs = @('-Tier', $tier)
           $declaredClass = "${{ inputs.declaredPrClass || 'Class-A' }}"
           $soakMin = "${{ inputs.soakMinutes || '0' }}"
@@ -334,10 +343,6 @@ jobs:
           $invokeArgs += '-DeclaredClass'; $invokeArgs += $declaredClass
           $soakMinutes = Resolve-NonNegativeInt -Raw $soakMin -Name 'soakMinutes'
           $invokeArgs += '-SoakMinutes'; $invokeArgs += $soakMinutes
-          $invokeArgs += '-InputName'; $invokeArgs += 'collect81WindowSec'
-          $invokeArgs += '-InputName'; $invokeArgs += 'collect81AutoCaptureTimeoutSec'
-          $invokeArgs += '-InputName'; $invokeArgs += 'collect81ProbeExitMs'
-          $invokeArgs += '-InputName'; $invokeArgs += 'enforce81CloseDecisionRetryMax'
           if ('${{ inputs.autoPruneCleanupDeferred }}' -eq 'true') { $invokeArgs += '-AutoPruneCleanupDeferred' }
           if ('${{ inputs.requireRuntimeEvidence }}' -eq 'true') { $invokeArgs += '-RequireRuntimeEvidence' }
           if ('${{ inputs.enforceTriggerPolicy }}' -eq 'true') { $invokeArgs += '-EnforceTriggerPolicy' }
@@ -345,7 +350,18 @@ jobs:
           if ('${{ inputs.requireClangTidyAudit }}' -eq 'true') { $invokeArgs += '-RequireClangTidyAudit' }
           if ('${{ inputs.prOpenedAt }}' -ne '') { $invokeArgs += '-PrOpenedAt'; $invokeArgs += '${{ inputs.prOpenedAt }}' }
           if ('${{ inputs.enforce81CloseDecisionRetryMax }}' -ne '') { $invokeArgs += '-Enforce81CloseDecisionRetryMax'; $invokeArgs += '${{ inputs.enforce81CloseDecisionRetryMax }}' }
-          & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
+
+          # '-Name value' / '-Switch' 列 → hashtable（名前付き引数は hashtable splat が必要）
+          $invokeParams = @{}
+          for ($i = 0; $i -lt $invokeArgs.Count; $i++) {
+            $token = [string]$invokeArgs[$i]
+            if (-not $token.StartsWith('-')) { continue }
+            $name = $token.Substring(1)
+            $hasValue = ($i + 1) -lt $invokeArgs.Count -and -not ([string]$invokeArgs[$i + 1]).StartsWith('-')
+            if ($hasValue) { $invokeParams[$name] = $invokeArgs[$i + 1]; $i++ }
+            else { $invokeParams[$name] = $true }
+          }
+          & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeParams
 
       - name: Apply PR SLA labels
         if: ${{ always() && github.event_name == 'pull_request' }}
