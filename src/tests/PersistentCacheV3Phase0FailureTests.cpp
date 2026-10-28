@@ -6,7 +6,7 @@
 //
 //    Y-3 (production FaultPoint seam) is NOT approved. The Owner lists the
 //    preferred, production-change-free techniques, in order:
-//      1. test-owned temporary directory / artifact fixture      <- used here
+//      1. test-owned temporary directory / artifact fixture      <- used here  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
 //      2. filesystem wrapper / dependency injection in the test TU
 //      3. JUCE File existing behaviour for permission / truncated /
 //         replacement failure fixtures                        <- used here

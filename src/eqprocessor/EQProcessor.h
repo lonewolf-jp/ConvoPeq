@@ -27,6 +27,7 @@
 #include <complex>
 #include <array>
 #include <vector>
+#include <memory>
 #include <mutex>
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
@@ -281,7 +282,7 @@ public:
     }
     [[nodiscard]] std::uint64_t eqPrivateEpoch() const noexcept
     {
-        return m_epochDomain.currentEpoch();
+        return m_epochDomain->currentEpoch();
     }
     [[nodiscard]] std::uint64_t eqOwnedRouterEpoch() const noexcept
     {
@@ -425,7 +426,10 @@ public:
     //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
     [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
     {
-        return convo::ScopedEpochReader (m_epochDomain);
+        // The epoch domain is a synchronization primitive: entering a reader slot does not
+        // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
+        // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
+        return convo::ScopedEpochReader (*m_epochDomain);
     }
     bool getAndClearPendingAGCChange() noexcept
     {
@@ -533,15 +537,17 @@ private:
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    //   mutable: const getter も EBR reader slot を enter/exit するため
-    //   （ScopedEpochReader / acquireReadGuard()）。
-    mutable convo::EpochDomain m_epochDomain;
-    // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to m_epochDomain.
+    //   const getter も EBR reader slot を enter/exit する必要がある。const な
+    //   unique_ptr でも *ptr は非 const 参照を返すため、mutable (LINT-AE-011) も
+    //   const_cast (LINT-AE-013) も使わずに済む。router より前に宣言し、
+    //   初期化順で *m_epochDomain が router の参照先として有効になるようにする。
+    std::unique_ptr<convo::EpochDomain> m_epochDomain { std::make_unique<convo::EpochDomain>() };
+    // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to *m_epochDomain
     //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
     //   member lifetime により drain / destruction まで保持する。
     //   m_epochDomain より後に宣言し、provider が router より長生きする。
     //   ISRRetireRouter.* 自体は変更しない（D → Q → E → T の chain 維持）。
-    convo::isr::ISRRetireRouter m_ownedRetireRouter { m_epochDomain };
+    convo::isr::ISRRetireRouter m_ownedRetireRouter { *m_epochDomain };
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
@@ -550,7 +556,7 @@ private:
     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
-    convo::RCUReader rcuReader { m_epochDomain };
+    convo::RCUReader rcuReader { *m_epochDomain };
     // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
     std::atomic<uint64_t> m_retireDropCount{0};
 

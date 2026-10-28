@@ -271,7 +271,7 @@ Permission permissionFor(ArtifactState s, DestructiveAction a)
                                                      : Permission::Rejected;
 
         case DestructiveAction::EvictLruN:
-            // Owner section 5: staging / temporary is NOT an LRU candidate.
+            // Owner section 5: staging / temporary is NOT an LRU candidate.  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
             return isCanonical ? Permission::Allowed : Permission::Rejected;
 
         case DestructiveAction::Touch:

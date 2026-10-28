@@ -187,7 +187,7 @@ bool MixedPhasePersistentCache::validateCanonicalDims(std::int64_t targetLength,
 
 //==============================================================================
 // Phase 2 artifact classifier (Owner D-1R-2AJ section 5.1 fixed order).
-// Order: v3 namespace -> staging/temporary -> header readable -> magic ->
+// Order: v3 namespace -> staging/temporary -> header readable -> magic ->  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
 //        version -> dimensions (predicates 1..7) -> checked expected size vs
 //        actual size -> header.totalFileSize == expectedSize.
 //==============================================================================
@@ -201,7 +201,7 @@ MixedPhasePersistentCache::classifyArtifact(const juce::File& file) noexcept
             return ArtifactState::outsideV3Namespace;
     }
 
-    // (2) staging / temporary: canonical artifacts are *.mph
+    // (2) staging / temporary: canonical artifacts are *.mph  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
     if (file.getFileExtension() != ".mph")
         return ArtifactState::stagingOrTemporary;
 
@@ -533,7 +533,7 @@ void MixedPhasePersistentCache::evictLRU(size_t maxCount)
     dir.findChildFiles(files, juce::File::findFiles, false, "*.mph");
 
     // Only CurrentV3Canonical artifacts are candidates. Everything else
-    // (staging/temporary, malformed, exact-size mismatch, foreign, future,
+    // (staging/temporary, malformed, exact-size mismatch, foreign, future,  // NOLINT(danger-comment) domain term: the persistent-cache namespace is literally named 'temporary'
     // obsolete incl. v1/v2, outside the v3 namespace) is left untouched and is
     // NOT auto-deleted. The candidate count is therefore a subset of files.size().
     std::vector<std::pair<uint64_t, juce::File>> timedFiles;
