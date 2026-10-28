@@ -57,6 +57,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # R-47-a 必須チェックのブロック確認用（この分岐はマージしない。PR 検証専用）
+      - name: Intentional failure (required-check blocking probe)
+        shell: pwsh
+        run: |
+          Write-Host "R47A_REQUIRED_CHECK_PROBE: intentional failure"
+          exit 1
+
       - name: Set up MSVC (cl.exe) environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
