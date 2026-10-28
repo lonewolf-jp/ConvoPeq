@@ -121,6 +121,36 @@ jobs:
         with:
           python-version: '3.11'
 
+      # R-29: isr-verify-trigger-ast.ps1 runs in monitor-only mode when ast-grep is
+      # absent, but isr-trigger-audit.ps1 unconditionally requires
+      # trigger_ast_report.available=true, so the gate suite stopped on a tool that
+      # was never installed. The version is pinned so CI reproduces the exact engine
+      # that was verified locally (ast-grep 0.45.1). No gate condition is relaxed.
+      - name: Install ast-grep CLI (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $astGrepVersion = '0.45.1'
+          Write-Host "[INFO] installing @ast-grep/cli@$astGrepVersion"
+          npm install -g "@ast-grep/cli@$astGrepVersion"
+          if ($LASTEXITCODE -ne 0) { throw "npm install failed: @ast-grep/cli@$astGrepVersion (exit=$LASTEXITCODE)" }
+          # windows-latest puts the npm global prefix on PATH, but append it explicitly so
+          # later steps do not depend on that environment detail (reproducibility).
+          $npmGlobalPrefix = (& npm prefix -g | Out-String).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($npmGlobalPrefix)) {
+            Write-Host "[INFO] npm global prefix: $npmGlobalPrefix"
+            $npmGlobalPrefix | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          $astGrep = Get-Command ast-grep -CommandType Application -ErrorAction SilentlyContinue
+          if (-not $astGrep) { throw 'ast-grep is not on PATH after npm install' }
+          $probe = (& $astGrep.Source --version 2>&1 | Out-String).Trim()
+          $probeExit = $LASTEXITCODE
+          Write-Host "[INFO] ast-grep path=$($astGrep.Source) version=$probe"
+          if ($probeExit -ne 0) { throw "ast-grep --version failed (exit=$probeExit)" }
+          if ($probe -notmatch [regex]::Escape($astGrepVersion)) {
+            throw "Unexpected ast-grep version: '$probe' (expected $astGrepVersion)"
+          }
+
       - name: Run ISR V1-V10 verification scripts
         shell: pwsh
         run: |
@@ -375,6 +405,27 @@ jobs:
           $invokeArgs = $invokeParams
           & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
 
+      # R-29: make the AST evidence observable in CI. This step only reports the
+      # recorded values; it never decides pass/fail (the gates above do).
+      - name: Report ast-grep AST evidence
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $env:GITHUB_WORKSPACE 'evidence/trigger_ast_report.json'
+          if (-not (Test-Path -LiteralPath $reportPath)) {
+            Write-Host '::warning::evidence/trigger_ast_report.json not found — AST gate did not run'
+            exit 0
+          }
+          $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          Write-Host "[INFO] trigger_ast_report: schema=$($report.schema) available=$($report.available) commandOk=$($report.commandOk) tool=$($report.tool)"
+          if (-not [bool]$report.available) { Write-Host '::warning::ast-grep was not available to the AST gate' }
+          if (-not [bool]$report.commandOk) { Write-Host '::warning::ast-grep command did not succeed' }
+          $auditPath = Join-Path $env:GITHUB_WORKSPACE 'evidence/trigger_audit_report.json'
+          if (Test-Path -LiteralPath $auditPath) {
+            $audit = Get-Content -LiteralPath $auditPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            Write-Host "[INFO] trigger_audit_report: schema=$($audit.schema) astEvidenceRequired=$($audit.astEvidenceRequired) activeDspMetricSource=$($audit.activeDspMetricSource)"
+          }
+
       - name: Apply PR SLA labels
         if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
@@ -422,6 +473,8 @@ jobs:
             evidence/taxonomy_phase_mapping_report.json
             evidence/design_docs_coverage_report.json
             evidence/safety_regression_remeasure_report.json
+            evidence/trigger_ast_report.json
+            evidence/trigger_audit_report.json
             storage/isr_inventory/current_authority_inventory.json
             storage/isr_inventory/post_authority_inventory.json
             storage/isr_inventory/inventory_diff_report.json
