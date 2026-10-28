@@ -192,8 +192,17 @@ jobs:
               Write-Host "::endgroup::"
               continue
             }
-            python $script $argsStr
+            # An empty $argsStr must NOT be passed: PowerShell would forward it as a
+            # single empty argument, argparse then reports
+            # "unrecognized arguments: " and every verifier exits 2 (R-08).
+            if ([string]::IsNullOrWhiteSpace($argsStr)) {
+              python $script
+            }
+            else {
+              python $script $argsStr
+            }
             if ($LASTEXITCODE -ne 0) {
+              $failed = $true
               Write-Host "::warning::$v failed (exit=$LASTEXITCODE) — non-blocking in Practical Stable ISR"
             }
             Write-Host "::endgroup::"
@@ -202,6 +211,11 @@ jobs:
           if ($failed) {
             Write-Host "::warning::One or more verifiers failed — PR not blocked"
           }
+
+          # Documented policy for this job is non-blocking ("Practical Stable ISR"):
+          # report the aggregate result as a warning and end the step successfully so a
+          # verifier's exit code cannot masquerade as a workflow failure (R-08).
+          exit 0
 
       - name: Run 8.1 policy-driven input parsing and validation
         shell: pwsh

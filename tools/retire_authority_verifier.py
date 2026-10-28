@@ -198,7 +198,10 @@ def main():
 
     all_issues = {}
     for root, dirs, files in os.walk(args.src):
-        dirs[:] = [d for d in dirs if d not in ('JUCE', 'r8brain-free-src')]
+        # Production-only scan: src/tests calls retire()/enqueueRetire() directly by
+        # design (those tests exercise the retire machinery), so scanning them would
+        # report the tests themselves as authority violations (13 false positives).
+        dirs[:] = [d for d in dirs if d not in ('JUCE', 'r8brain-free-src', 'tests')]
         for f in files:
             if f.endswith(('.cpp', '.h')):
                 filepath = os.path.join(root, f)
