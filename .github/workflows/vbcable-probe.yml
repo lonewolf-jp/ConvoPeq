@@ -16,6 +16,17 @@
 #        devcon install vbMmeCable64_win10.inf VBAudioVACWDM
 #   ドライバと証明書はリポジトリ同梱（実行時の外部ダウンロード無し）。ホステッドの使い捨て
 #   ランナー上でのみ TrustedPublisher に追加する。
+#
+# 2026-10-29 の第 1 回実測（run 40829244475）で判明したこと:
+#   * VB-CABLE の導入は **成功**した（`MMDevices\Audio\Render` が 0 → **2** 件、
+#     `devcon install ... VBAudioVACWDM` も成功）。
+#   * ただし旧ステップは `& $exe ...` で起動していたため、GUI サブシステムの
+#     ConvoPeq.exe の終了を待たず（`$LASTEXITCODE` が空）、`[CLI_PERF_RAW]` を
+#     出力する前にログを複製してしまい **判定不能**（アプリ側は `prepareToPlay spb=480 sr=48000`
+#     まで到達していた）。
+#   => 既存の `.github/scripts/cli-smoke-test.ps1`（Start-Process + WaitForExit +
+#      ログ再読込 + `callbacks>0` 判定）を `-RequireAudioCallbacks` で呼ぶ方式へ変更。
+#      合否基準は増減させていない（callbacks>0 は既存基準、blockSamples>0 は R-50 の条件）。
 
 name: VB-CABLE Probe (R-50, dispatch only)
 
@@ -118,25 +129,31 @@ jobs:
           cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
 
-      - name: CLI callbacks probe (direct, existing args)
+      - name: CLI callbacks probe (existing CI smoke script, existing criteria)
         shell: pwsh
         run: |
+          # 2026-10-29 (R-50, run 40829244475) の実測に基づく修正:
+          #   ConvoPeq.exe は GUI サブシステムのため `& $exe` は終了を待たない。
+          #   その結果 $LASTEXITCODE が空になり、[CLI_PERF_RAW]（MainWindow の UI タイマーが
+          #   出力する）を読む前にログを複製していた（＝ デバイスは導入済みなのに判定不能）。
+          #   => 既存の CI smoke スクリプトを使う（Start-Process + WaitForExit + ログ再読込 +
+          #      callbacks>0 の判定を既に実装済み。合否基準の変更ではなく、既存基準の再利用）。
           $exe = Join-Path $env:BUILD_DIR 'ConvoPeq_artefacts\Release\ConvoPeq.exe'
           if (-not (Test-Path $exe)) { throw "ConvoPeq.exe not found: $exe" }
+
+          & pwsh -NoProfile -File ./.github/scripts/cli-smoke-test.ps1 -ExePath $exe -ExitMs 1500 -RequireAudioCallbacks -KillExisting
+          if ($LASTEXITCODE -ne 0) { throw "CLI smoke failed ($LASTEXITCODE)" }
+
           $log = Join-Path (Split-Path $exe) 'ConvoPeq.log'
-          if (Test-Path $log) { Remove-Item $log -Force }
-          & $exe --cli-run --cli-learning-action start --cli-learning-mode short --cli-exit-ms 1500
-          Write-Host "app exit=$LASTEXITCODE"
-          Start-Sleep -Seconds 1
-          if (-not (Test-Path $log)) { throw "ConvoPeq.log not found: $log" }
+          Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
+
+          # R-50 の成功条件は callbacks>0 に加えて blockSamples>0。
+          # （cli-smoke-test.ps1 は callbacks>0 までを既存基準として判定する）
           $raw = Get-Content $log | Select-String -Pattern '\[CLI_PERF_RAW\]'
           $raw | ForEach-Object { Write-Host $_.Line }
-          Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
-          $pos = @($raw | Where-Object { $_.Line -match 'callbacks=([1-9][0-9]*)' })
           $blocks = @($raw | Where-Object { $_.Line -match 'blockSamples=([1-9][0-9]*)' })
-          if ($pos.Count -lt 1) { throw "PROBE FAILED: callbacks>0 was not observed (VB-CABLE did not feed the engine)." }
           if ($blocks.Count -lt 1) { throw "PROBE FAILED: blockSamples>0 was not observed." }
-          Write-Host "PROBE OK: callbacks>0 and blockSamples>0 observed."
+          Write-Host "PROBE OK: callbacks>0 (existing criteria) and blockSamples>0 observed."
 
       - name: ctest HeadlessAudioPathVerification (existing criteria)
         shell: pwsh
