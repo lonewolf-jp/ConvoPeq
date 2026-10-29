@@ -1389,6 +1389,10 @@ static bool checkF1bRetireDeferOrderInvariance()
     constexpr int kIterations = 100;
     int deferObserved = 0;
 
+    // ★ R-51: 索引の滞留数が反復で増えないこと（索引リーク・二重登録の検出）。
+    const std::size_t destroyIndexBefore =
+        DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+
     for (int i = 0; i < kIterations; ++i)
     {
         auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
@@ -1510,11 +1514,23 @@ static bool checkF1bRetireDeferOrderInvariance()
         }
     }
 
+    // ★ R-51: 100 反復の後に索引が増えていないこと（全コアの破棄確定 = 索引から削除）。
+    const std::size_t destroyIndexAfter =
+        DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+    const bool indexClean = (destroyIndexAfter <= destroyIndexBefore);
+    if (!indexClean)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-P-V3V4] FAIL: destroy index leaked entries (%zu -> %zu)\n",
+                     destroyIndexBefore, destroyIndexAfter);
+    }
+
     harness.stop();
 
-    const bool ok = (deferObserved == kIterations);
-    std::printf("[F1-b-P-V3V4] defer observed %d/%d: %s\n",
-                deferObserved, kIterations, ok ? "PASS" : "FAIL");
+    const bool ok = (deferObserved == kIterations) && indexClean;
+    std::printf("[F1-b-P-V3V4] defer observed %d/%d, index resident %zu -> %zu: %s\n",
+                deferObserved, kIterations, destroyIndexBefore, destroyIndexAfter,
+                ok ? "PASS" : "FAIL");
     return ok;
 }
 

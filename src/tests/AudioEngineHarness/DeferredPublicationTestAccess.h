@@ -204,6 +204,11 @@ public:
     {
         return e.deferredDestroyResidentAtomic();
     }
+    // ★ R-51: 破棄専用索引の滞留数（索引リークの検出用）。
+    static std::size_t destroyIndexResidentCount(AudioEngine&) noexcept
+    {
+        return AudioEngine::destroyIndexResidentForTest();
+    }
     static std::size_t terminalDeferredResidentCount(AudioEngine& e) noexcept
     {
         return e.m_retireRouter->terminalDeferredResidentCount();
