@@ -1442,13 +1442,42 @@ static bool checkF1bProductionRetireUnderPin()
                     (unsigned)DeferredPublicationTestAccess::deferredResidentAtomic(e),
                     e.resolveDSPHandle(handle) != nullptr ? 1 : 0);
 
-        const auto after = DeferredPublicationTestAccess::deferredDestroyCount(e);
-        if (after <= before)
+        // ★ R-52 (2026-10-29): 判定の瞬間サンプル競合の解消。
+        //   R-49 で見つかった V1 の間欠失敗は、製品側の pin 保護の欠陥ではなく
+        //   "いつ数えるか" だった。同じシナリオで main 側も V3/V4 を 100/100 PASS
+        //   していることから、検出されたのは測定方法の偶発性だった。
+        //     (1) retire 直後の tryReclaimResources() は pin を保持したまま destroy 経路へ入る。
+        //         destroyDSPCoreNode は pin の消滅を kPinDrainTimeoutMs(50 ms) まで待ってから
+        //         はじめて defer を記録するため、呼び出し直後のサンプルでは count はまだ増えない。
+        //     (2) variant 1（retire 後 1 ms）では CoordinatorLoop が先にエントリを pop するため、
+        //         テスト側の drain 時点で pending=0 になり、やはり直後は増えない。
+        //   V3/V4（checkF1bRetireDeferOrderInvariance）と同じく、上限 500 ms の範囲で
+        //   "defer が記録されたこと" を確認する。合否条件（pin 保持中に破棄が
+        //   延期されること）は変えず、観測窓だけを広げる。
+        //   なお deferredDestroyResidentCount は retryDeferredDestroys の swap 中に 0 を返すため、
+        //   判定条件には使わない（診断出力のみ）。
+        constexpr int kDeferObserveStepMs = 5;
+        constexpr int kDeferObserveTicks = 100; // 5 ms x 100 = 500 ms 上限
+        bool deferObserved = false;
+        std::uint64_t after = before;
+        for (int waitTick = 0; waitTick < kDeferObserveTicks; ++waitTick)
+        {
+            after = DeferredPublicationTestAccess::deferredDestroyCount(e);
+            if (after > before)
+            {
+                deferObserved = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(kDeferObserveStepMs));
+        }
+
+        if (!deferObserved)
         {
             std::fprintf(stderr,
                          "[F1-b-P] FAIL: production retire did not defer while pinned "
-                         "(count %llu -> %llu)\n",
-                         (unsigned long long)before, (unsigned long long)after);
+                         "(count %llu -> %llu, waited %d ms)\n",
+                         (unsigned long long)before, (unsigned long long)after,
+                         kDeferObserveStepMs * kDeferObserveTicks);
             ok = false;
         }
         else if (e.resolveDSPHandle(handle) == nullptr)
