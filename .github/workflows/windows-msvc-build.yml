@@ -188,6 +188,22 @@ jobs:
           }
           exit $rc
 
+      # R-49: ランナーに音声出力デバイスが存在するかを記録する（診断専用）。
+      - name: Enumerate audio devices (diagnostics, dispatch only)
+        if: inputs.run_selected_tests == true
+        shell: pwsh
+        run: |
+          Write-Host "=== Win32_SoundDevice ==="
+          try { Get-CimInstance Win32_SoundDevice | Select-Object Name, Status, Manufacturer | Format-Table -AutoSize | Out-String | Write-Host }
+          catch { Write-Host "Win32_SoundDevice query failed: $_" }
+          $render = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+          if (Test-Path $render) {
+            $n = (Get-ChildItem $render | Measure-Object).Count
+            Write-Host "MMDevices\\Audio\\Render entries: $n"
+          } else {
+            Write-Host "MMDevices\\Audio\\Render key not found"
+          }
+
       # R-49: ASan を有効にしない構成で、CI ランナー上での 2 テストの挙動を確認する。
       #   workflow_dispatch + run_selected_tests=true のときだけ実行する（通常の PR では走らない）。
       - name: Run selected tests (diagnostics, dispatch only)
@@ -202,6 +218,21 @@ jobs:
           Get-Content selected-tests.log -Tail 40 | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
           exit $rc
 
+      # R-49: CLI smoke が読む ConvoPeq.log を取得する（診断専用）。
+      - name: Show ConvoPeq log (diagnostics, dispatch only)
+        if: always() && inputs.run_selected_tests == true
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:BUILD_DIR 'ConvoPeq_artefacts\Release\ConvoPeq.log'
+          if (Test-Path $log) {
+            Write-Host "log: $log"
+            Get-Content $log -Tail 60 | Write-Host
+            Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
+          } else {
+            Write-Host "no log at $log"
+            Get-ChildItem $env:BUILD_DIR -Recurse -Filter 'ConvoPeq.log' -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "found: $($_.FullName)" }
+          }
+
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -212,6 +243,7 @@ jobs:
             build-product.log
             build-harness.log
             selected-tests.log
+            ConvoPeq-run.log
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
