@@ -133,15 +133,18 @@ jobs:
         shell: pwsh
         run: |
           # 2026-10-29 (R-50, run 40829244475) の実測に基づく修正:
-          #   ConvoPeq.exe は GUI サブシステムのため `& $exe` は終了を待たない。
-          #   その結果 $LASTEXITCODE が空になり、[CLI_PERF_RAW]（MainWindow の UI タイマーが
-          #   出力する）を読む前にログを複製していた（＝ デバイスは導入済みなのに判定不能）。
-          #   => 既存の CI smoke スクリプトを使う（Start-Process + WaitForExit + ログ再読込 +
-          #      callbacks>0 の判定を既に実装済み。合否基準の変更ではなく、既存基準の再利用）。
+          #   1) ConvoPeq.exe は GUI サブシステムのため `& $exe` は終了を待たない。
+          #      その結果 $LASTEXITCODE が空になり、[CLI_PERF_RAW] を読む前にログを複製していた。
+          #      => 既存の CI smoke スクリプト（Start-Process + WaitForExit + ログ再読込 +
+          #         callbacks>0 判定）を -RequireAudioCallbacks で使う（合否基準は不変）。
+          #   2) [CLI_PERF_RAW] は MainWindow の 500 ms タイマーが出力する。第 1 回は
+          #      VB-CABLE 検出後の rebuild 連発でメッセージスレッドが埋まり、1500 ms の
+          #      自動終了までに 1 度も出力されなかった（ログ末尾は shutdown 途中で終了）。
+          #      観測窓だけ 6000 ms に広げる（判定基準は callbacks>0 のまま）。
           $exe = Join-Path $env:BUILD_DIR 'ConvoPeq_artefacts\Release\ConvoPeq.exe'
           if (-not (Test-Path $exe)) { throw "ConvoPeq.exe not found: $exe" }
 
-          & pwsh -NoProfile -File ./.github/scripts/cli-smoke-test.ps1 -ExePath $exe -ExitMs 1500 -RequireAudioCallbacks -KillExisting
+          & pwsh -NoProfile -File ./.github/scripts/cli-smoke-test.ps1 -ExePath $exe -ExitMs 6000 -RequireAudioCallbacks -KillExisting
           if ($LASTEXITCODE -ne 0) { throw "CLI smoke failed ($LASTEXITCODE)" }
 
           $log = Join-Path (Split-Path $exe) 'ConvoPeq.log'
