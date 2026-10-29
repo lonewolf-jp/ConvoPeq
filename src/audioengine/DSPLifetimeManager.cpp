@@ -1,6 +1,19 @@
 #include "DSPLifetimeManager.h"
 #include "AudioEngine.h"
 
+#include <cstdio>
+#include <cstdlib>
+
+// ★ R-51 一時診断（CONVO_R51_DIAG=1 のときだけ stderr へ出す。既定は無効）。
+static bool r51DiagEnabled() noexcept
+{
+    static const bool enabled = []() {
+        const char* v = std::getenv("CONVO_R51_DIAG");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 // ★ D117 root-cause audit: observation-only lifetime trace (no semantic change).
 #define D117_LIFETIME_LOG(msg) juce::Logger::writeToLog(msg)
@@ -43,6 +56,9 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         return;
 
     const bool retired = engine_.retireDSPHandleForRuntime(static_cast<AudioEngine::DSPCore*>(dsp));
+    if (r51DiagEnabled())
+        std::fprintf(stderr, "[R51R] retire-entry dsp=%p retired=%d router=%d\n",
+                     dsp, retired ? 1 : 0, router_ != nullptr ? 1 : 0);
     D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p retired=%d",
                                               dsp, retired ? 1 : 0));
     if (!retired)
@@ -59,6 +75,12 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         dsp, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+    if (r51DiagEnabled())
+        std::fprintf(stderr,
+                     "[R51R] retire dsp=%p epoch=%llu result=%d pending=%u residentAtomic=%u\n",
+                     dsp, (unsigned long long)epoch, (int)result,
+                     (unsigned)router_->pendingRetireCount(),
+                     (unsigned)router_->residentCountAtomic());
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p enqueue=%d epoch=%llu",
                                               dsp, static_cast<int>(result),

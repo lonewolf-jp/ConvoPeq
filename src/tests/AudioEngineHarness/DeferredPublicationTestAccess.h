@@ -36,6 +36,15 @@ public:
         convo::publishAtomic(e.testFadingRuntimePresent_, on, std::memory_order_release);
     }
 
+    // ★ R-51 診断: 破棄経路が参照する static owner が「このエンジン」を指しているか。
+    //   destroyDSPCoreNodeRetryable は owner が nullptr だと pin 判定を行わずに解放するため、
+    //   失敗時にどちらの分岐かを切り分けるための観測専用アクセサ。
+    static bool handleInvalidationOwnerIsThis(AudioEngine& e) noexcept
+    {
+        return convo::consumeAtomic(AudioEngine::s_handleInvalidationOwner,
+                                    std::memory_order_acquire) == &e;
+    }
+
     // ★ STG-8: Coordinator 観測（liveLogicalRecoveryObligationCount /
     //   recoveryRetryRedriveCount）。AudioEngine の friend のため private 到達可能。
     static convo::isr::RuntimeIntentCoordinator& coordinator(AudioEngine& e) noexcept

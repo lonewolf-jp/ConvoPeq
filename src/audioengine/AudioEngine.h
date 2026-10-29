@@ -4665,6 +4665,8 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
 
     const auto handle = dspHandleRuntime_.create(dsp);
     runtimeDSPHandleMap_.insert(dsp, handle);
+    if (!handle.isNull())
+        registerDestroyIndex(dsp, DestroyIndexEntry{ this, handle.slot, handle.generation });
     return handle;
 }
 
@@ -4710,6 +4712,10 @@ inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
 //     （未登録インスタンスは true。rebuild-obsolete / recovery の直接破棄経路がこれに当たる。）
 //   - ★ F1' (2026-10-25): 台帳を外す**前に** pin の受付を閉じる。順序を逆にすると、
 //     「台帳から消えたが pin は取れる」窓ができる。
+// ★ R-51 (2026-10-30): pin の消滅待ちの上限（破棄は NonRT）。
+//   タイムアウトは「解放してよい」ではなく「延期（defer）」を意味する。
+static constexpr int kPinDrainTimeoutMs = 50;
+
 inline bool invalidateHandleBeforeDestroy(void* core) noexcept
 {
     if (core == nullptr)
@@ -4720,7 +4726,6 @@ inline bool invalidateHandleBeforeDestroy(void* core) noexcept
     //      ことがあり、その間 D キューの mutex を保持したまま秒単位で待つと
     //      retire 経路全体が停止する。短い待機で済まない場合は「延期」して
     //      後続の再試行に委ねる（安全側・非ブロッキング）。
-    constexpr int kPinDrainTimeoutMs = 50;
     if (!dspHandleRuntime_.invalidateForDestroy(core, kPinDrainTimeoutMs))
         return false;
 
@@ -4731,6 +4736,14 @@ inline bool invalidateHandleBeforeDestroy(void* core) noexcept
         runtimeDSPHandleMap_.erase(static_cast<DSPCore*>(core));
     }
     return true;
+}
+
+// ★ R-51 (2026-10-30): 破棄専用索引（core → slot）を使う版。
+//   台帳・instance・s_handleInvalidationOwner の可視性に依存しない。
+//   戻り値: true = 解放してよい / false = pin 残留（defer）。タイムアウトは defer。
+inline bool invalidateHandleBeforeDestroyBySlot(std::uint32_t slot, std::uint64_t generation) noexcept
+{
+    return dspHandleRuntime_.invalidateForDestroyBySlot(slot, generation, kPinDrainTimeoutMs);
 }
 
 inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
@@ -5248,6 +5261,48 @@ public:
     //   前提: プロセス内の AudioEngine は同時に 1 つ（製品構成）。テストは 1 エンジンずつ
     //   逐次生成するため同じ前提が成り立つ。該当スロットが無い場合は単なる no-op。
     static std::atomic<AudioEngine*> s_handleInvalidationOwner;
+
+    // ★ R-51 (2026-10-30): 破棄専用索引。destroyDSPCoreNode は static（関数ポインタ）で
+    //   this を持てないため、登録時の (owner, slot, generation) を core ポインタで引けるようにする。
+    //   破棄が確定するまで消さない（pin 保護を instance の可視性から切り離す）。
+    struct DestroyIndexEntry
+    {
+        AudioEngine* owner = nullptr;
+        std::uint32_t slot = 0;
+        std::uint64_t generation = 0;
+    };
+
+    static std::mutex s_destroyIndexMutex;
+    static std::unordered_map<void*, DestroyIndexEntry> s_destroyIndex;
+
+    static bool lookupDestroyIndex(void* core, DestroyIndexEntry& out) noexcept
+    {
+        std::lock_guard<std::mutex> lock(s_destroyIndexMutex);
+        const auto it = s_destroyIndex.find(core);
+        if (it == s_destroyIndex.end())
+            return false;
+        out = it->second;
+        return true;
+    }
+
+    static void registerDestroyIndex(void* core, const DestroyIndexEntry& entry) noexcept
+    {
+        std::lock_guard<std::mutex> lock(s_destroyIndexMutex);
+        s_destroyIndex[core] = entry;
+    }
+
+    static void eraseDestroyIndex(void* core) noexcept
+    {
+        std::lock_guard<std::mutex> lock(s_destroyIndexMutex);
+        s_destroyIndex.erase(core);
+    }
+
+    static void eraseDestroyIndexForOwner(AudioEngine* owner) noexcept
+    {
+        std::lock_guard<std::mutex> lock(s_destroyIndexMutex);
+        for (auto it = s_destroyIndex.begin(); it != s_destroyIndex.end();)
+            it = (it->second.owner == owner) ? s_destroyIndex.erase(it) : std::next(it);
+    }
 
     // スナップショット基盤（Phase 2）
     // ==================================================================
