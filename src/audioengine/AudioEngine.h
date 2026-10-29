@@ -5304,6 +5304,14 @@ public:
             it = (it->second.owner == owner) ? s_destroyIndex.erase(it) : std::next(it);
     }
 
+    // ★ R-51: 索引の滞留数（テスト専用の観測点）。破棄が確定したコアのエントリが
+    //   残っていないこと（＝ 索引リークが無いこと）を反復テストで確認するために使う。
+    static std::size_t destroyIndexResidentForTest() noexcept
+    {
+        std::lock_guard<std::mutex> lock(s_destroyIndexMutex);
+        return s_destroyIndex.size();
+    }
+
     // スナップショット基盤（Phase 2）
     // ==================================================================
     convo::EpochDomain m_epochDomain;
