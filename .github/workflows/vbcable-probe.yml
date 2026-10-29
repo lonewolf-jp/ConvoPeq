@@ -162,17 +162,6 @@ jobs:
           if ($blocks.Count -lt 1) { throw "PROBE FAILED: blockSamples>0 was not observed." }
           Write-Host "PROBE OK: callbacks>0 and blockSamples>0 observed."
 
-          $log = Join-Path (Split-Path $exe) 'ConvoPeq.log'
-          Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
-
-          # R-50 の成功条件は callbacks>0 に加えて blockSamples>0。
-          # （cli-smoke-test.ps1 は callbacks>0 までを既存基準として判定する）
-          $raw = Get-Content $log | Select-String -Pattern '\[CLI_PERF_RAW\]'
-          $raw | ForEach-Object { Write-Host $_.Line }
-          $blocks = @($raw | Where-Object { $_.Line -match 'blockSamples=([1-9][0-9]*)' })
-          if ($blocks.Count -lt 1) { throw "PROBE FAILED: blockSamples>0 was not observed." }
-          Write-Host "PROBE OK: callbacks>0 (existing criteria) and blockSamples>0 observed."
-
       - name: ctest HeadlessAudioPathVerification (existing criteria)
         shell: pwsh
         run: |
