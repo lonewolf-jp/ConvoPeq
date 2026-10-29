@@ -193,10 +193,28 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $log = Join-Path "${{ env.BUILD_DIR }}" "RelWithDebInfo\ConvoPeq.log"
-          if (-not (Test-Path -LiteralPath $log)) {
-            throw "CLI log not found: $log - cannot prove audio callbacks (fail closed)."
+          # ★ JUCE の実行ファイルは <build>/ConvoPeq_artefacts/<Config>/ に出力される
+          #   （実測: build-rwdi/ConvoPeq_artefacts/RelWithDebInfo/ConvoPeq.log）。
+          #   アプリは ConvoPeq.log を「実行ファイルと同じディレクトリ」に書くため、
+          #   artefact 側を第一候補にし、無ければ build 配下を再帰探索する。
+          $candidates = @(
+            (Join-Path "${{ env.BUILD_DIR }}" "ConvoPeq_artefacts\RelWithDebInfo\ConvoPeq.log"),
+            (Join-Path "${{ env.BUILD_DIR }}" "RelWithDebInfo\ConvoPeq.log")
+          )
+          $log = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $log) {
+            $found = Get-ChildItem -LiteralPath "${{ env.BUILD_DIR }}" -Recurse -Filter "ConvoPeq.log" -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($found) { $log = $found.FullName }
           }
+          if (-not $log) {
+            Write-Host "=== searched: ${{ env.BUILD_DIR }} ==="
+            Get-ChildItem -LiteralPath "${{ env.BUILD_DIR }}" -Recurse -Filter "*.log" -File -ErrorAction SilentlyContinue |
+              Select-Object -First 30 FullName, Length, LastWriteTime |
+              Format-Table -AutoSize | Out-String | Write-Host
+            throw "CLI log (ConvoPeq.log) not found under the build directory - cannot prove audio callbacks (fail closed)."
+          }
+          Write-Host "ConvoPeq.log = $log"
           $lines = @(Select-String -LiteralPath $log -Pattern '\[CLI_PERF_RAW\] callbacks=')
           Write-Host "CLI_PERF_RAW lines = $($lines.Count)"
           $lines | Select-Object -Last 5 | ForEach-Object { Write-Host $_.Line }
@@ -219,6 +237,7 @@ jobs:
           path: |
             configure.log
             build.log
+            ${{ env.BUILD_DIR }}/**/ConvoPeq.log
           if-no-files-found: warn
 
 
