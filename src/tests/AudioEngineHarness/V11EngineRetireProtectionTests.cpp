@@ -1515,14 +1515,27 @@ static bool checkF1bRetireDeferOrderInvariance()
     }
 
     // ★ R-51: 100 反復の後に索引が増えていないこと（全コアの破棄確定 = 索引から削除）。
-    const std::size_t destroyIndexAfter =
+    //   破棄は CoordinatorLoop 側でも進行するため、反復直後の 1 点でサンプルすると
+    //   「まだ削除されていない」瞬間を掴む（実測: run 3 で 1 -> 2）。
+    //   V3/V4 の defer 判定と同じく、上限 500 ms の範囲で before 以下に戻ることを確認する
+    //   （条件は「増えないこと」のまま。観測窓だけを広げる）。
+    std::size_t destroyIndexAfter =
         DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+    for (int waitTick = 0; waitTick < 100 && destroyIndexAfter > destroyIndexBefore; ++waitTick)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        destroyIndexAfter = DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+    }
     const bool indexClean = (destroyIndexAfter <= destroyIndexBefore);
     if (!indexClean)
     {
         std::fprintf(stderr,
-                     "[F1-b-P-V3V4] FAIL: destroy index leaked entries (%zu -> %zu)\n",
-                     destroyIndexBefore, destroyIndexAfter);
+                     "[F1-b-P-V3V4] FAIL: destroy index leaked entries (%zu -> %zu, "
+                     "pending=%zu residentAtomic=%u deferredResident=%zu)\n",
+                     destroyIndexBefore, destroyIndexAfter,
+                     DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                     (unsigned)DeferredPublicationTestAccess::residentAtomicForTest(e),
+                     DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
     }
 
     harness.stop();
