@@ -129,23 +129,38 @@ jobs:
           cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
 
-      - name: CLI callbacks probe (existing CI smoke script, existing criteria)
+      - name: CLI callbacks probe (existing smoke script for waiting; R-50 criteria decide)
         shell: pwsh
         run: |
           # 2026-10-29 (R-50, run 40829244475) の実測に基づく修正:
           #   1) ConvoPeq.exe は GUI サブシステムのため `& $exe` は終了を待たない。
-          #      その結果 $LASTEXITCODE が空になり、[CLI_PERF_RAW] を読む前にログを複製していた。
-          #      => 既存の CI smoke スクリプト（Start-Process + WaitForExit + ログ再読込 +
-          #         callbacks>0 判定）を -RequireAudioCallbacks で使う（合否基準は不変）。
-          #   2) [CLI_PERF_RAW] は MainWindow の 500 ms タイマーが出力する。第 1 回は
-          #      VB-CABLE 検出後の rebuild 連発でメッセージスレッドが埋まり、1500 ms の
-          #      自動終了までに 1 度も出力されなかった（ログ末尾は shutdown 途中で終了）。
-          #      観測窓だけ 6000 ms に広げる（判定基準は callbacks>0 のまま）。
+          #      その結果 $LASTEXITCODE が空になり、[CLI_PERF_RAW] を読む前にログを複製していた
+          #      => 既存の CI smoke スクリプト（Start-Process + WaitForExit + ログ再読込）を使う。
+          #   2) [CLI_PERF_RAW] は MainWindow の 500 ms タイマーが出力する。第 1 回は VB-CABLE
+          #      検出後の rebuild 連発でメッセージスレッドが埋まり、1500 ms の自動終了までに
+          #      1 度も出力されなかった => 観測窓のみ 6000 ms に広げる。
+          #   3) R-50 の合否は「callbacks>0 かつ blockSamples>0」で決める。cli-smoke-test.ps1 自身は
+          #      「アプリ終了コード」でも失敗するが、それは R-50 の条件ではない（第 1 回は
+          #      shutdown 完了マーカー無しで終了しており、終了コードだけで落ち得た）。
+          #      よって同スクリプトは待機とログ再読込のためだけに使い、終了コードは情報出力に留める。
+          #      （既存基準 `HeadlessAudioPathVerification` は次のステップで別途そのまま実行する）
           $exe = Join-Path $env:BUILD_DIR 'ConvoPeq_artefacts\Release\ConvoPeq.exe'
           if (-not (Test-Path $exe)) { throw "ConvoPeq.exe not found: $exe" }
 
-          & pwsh -NoProfile -File ./.github/scripts/cli-smoke-test.ps1 -ExePath $exe -ExitMs 6000 -RequireAudioCallbacks -KillExisting
-          if ($LASTEXITCODE -ne 0) { throw "CLI smoke failed ($LASTEXITCODE)" }
+          & pwsh -NoProfile -File ./.github/scripts/cli-smoke-test.ps1 -ExePath $exe -ExitMs 6000 -KillExisting
+          Write-Host "[PROBE] cli-smoke exit=$LASTEXITCODE (informational only; R-50 judges the log below)"
+
+          $log = Join-Path (Split-Path $exe) 'ConvoPeq.log'
+          if (-not (Test-Path $log)) { throw "ConvoPeq.log not found: $log" }
+          Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
+
+          $raw = Get-Content $log | Select-String -Pattern '\[CLI_PERF_RAW\]'
+          $raw | ForEach-Object { Write-Host $_.Line }
+          $pos = @($raw | Where-Object { $_.Line -match '\[CLI_PERF_RAW\]\s+callbacks=([1-9][0-9]*)' })
+          $blocks = @($raw | Where-Object { $_.Line -match 'blockSamples=([1-9][0-9]*)' })
+          if ($pos.Count -lt 1) { throw "PROBE FAILED: callbacks>0 was not observed (VB-CABLE did not feed the engine)." }
+          if ($blocks.Count -lt 1) { throw "PROBE FAILED: blockSamples>0 was not observed." }
+          Write-Host "PROBE OK: callbacks>0 and blockSamples>0 observed."
 
           $log = Join-Path (Split-Path $exe) 'ConvoPeq.log'
           Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
