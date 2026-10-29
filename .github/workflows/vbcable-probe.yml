@@ -1,0 +1,158 @@
+# R-50 実証プローブ — GitHub ホステッド ランナー上で VB-CABLE を導入し、
+# ConvoPeq の音声コールバックが発生するかを確認する。
+#
+# 位置づけ:
+#   * **workflow_dispatch 専用**。PR / push では実行しない。
+#   * 本番 CI（sanitizer / windows-msvc）への導入は、この実証結果を見てから判断する。
+#   * 合否基準は変更しない: 既存の `HeadlessAudioPathVerification` をそのまま実行する。
+#
+# サードパーティ Action の固定:
+#   AlekseyMartynov/action-vbcable-win を **完全なコミット SHA** に固定する（@main は使わない）。
+#   固定先: 6ec0facd8780f0f463d7dc2fcfd630e06eb1fc0b（2026-09-02）
+#   内容（action.yml, composite）:
+#     1. audiosrv を起動
+#     2. LetAppsAccessMicrophone=1（プライバシー ポリシー）
+#     3. VBCABLE.cer を TrustedPublisher に追加 → VBCABLE_Driver_Pack45.zip を展開 →
+#        devcon install vbMmeCable64_win10.inf VBAudioVACWDM
+#   ドライバと証明書はリポジトリ同梱（実行時の外部ダウンロード無し）。ホステッドの使い捨て
+#   ランナー上でのみ TrustedPublisher に追加する。
+
+name: VB-CABLE Probe (R-50, dispatch only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BUILD_DIR: ${{ github.workspace }}/build-ci
+  ONEAPI_ROOT_DIR: "C:\\Program Files (x86)\\Intel\\oneAPI"
+
+jobs:
+  vbcable-probe:
+    name: VB-CABLE probe (hosted runner)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Enumerate audio endpoints (before)
+        shell: pwsh
+        run: |
+          Write-Host "=== before: Win32_SoundDevice ==="
+          Get-CimInstance Win32_SoundDevice | Select-Object Name, Status, Manufacturer | Format-Table -AutoSize | Out-String | Write-Host
+          $render = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+          $n = if (Test-Path $render) { (Get-ChildItem $render | Measure-Object).Count } else { -1 }
+          Write-Host "before: MMDevices\Audio\Render entries = $n"
+
+      - name: Install VB-CABLE (pinned commit SHA)
+        uses: AlekseyMartynov/action-vbcable-win@6ec0facd8780f0f463d7dc2fcfd630e06eb1fc0b
+
+      - name: Enumerate audio endpoints (after) — fail closed
+        shell: pwsh
+        run: |
+          Write-Host "=== after: Win32_SoundDevice ==="
+          Get-CimInstance Win32_SoundDevice | Select-Object Name, Status, Manufacturer | Format-Table -AutoSize | Out-String | Write-Host
+          $render = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+          $n = if (Test-Path $render) { (Get-ChildItem $render | Measure-Object).Count } else { 0 }
+          Write-Host "after: MMDevices\Audio\Render entries = $n"
+          if ($n -lt 1) {
+            throw "VB-CABLE installation did not create a render endpoint (entries=$n). Failing closed."
+          }
+
+      - name: Set up MSVC (cl.exe) environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            try { choco install ninja -y --no-progress } catch { Write-Host "choco install failed: $_" }
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            python -m pip install --quiet ninja
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            throw "ninja is not available — never skipping a build for missing tools."
+          }
+          ninja --version
+
+      - name: Install Intel oneAPI (MKL + IPP) via winget
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          if ((Test-Path "$oneapi\mkl\latest\include\mkl.h") -and (Test-Path "$oneapi\ipp\latest\include\ipp.h")) {
+            Write-Host "oneAPI (MKL + IPP) already present."
+            exit 0
+          }
+          winget install --id Intel.OneAPI.BaseToolkit -e --silent `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+          $mkl = Test-Path "$oneapi\mkl\latest\include\mkl.h"
+          $ipp = Test-Path "$oneapi\ipp\latest\include\ipp.h"
+          if (-not ($mkl -and $ipp)) { throw "Intel oneAPI (MKL + IPP) is not usable — refusing to skip." }
+
+      - name: Export oneAPI environment
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          "MKLROOT=$oneapi\mkl\latest" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "IPPROOT=$oneapi\ipp\latest" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$oneapi\mkl\latest;$oneapi\mkl\latest\lib\cmake\mkl;$oneapi\ipp\latest;$oneapi\ipp\latest\lib\cmake\ipp" |
+            Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Configure (Release, MKL required)
+        shell: pwsh
+        run: |
+          cmake -S . -B $env:BUILD_DIR -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DENABLE_ASAN=OFF -DCONVOPEQ_REQUIRE_MKL=ON 2>&1 | Tee-Object -FilePath configure.log
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
+
+      - name: Build Release (ConvoPeq)
+        shell: pwsh
+        run: |
+          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
+
+      - name: CLI callbacks probe (direct, existing args)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:BUILD_DIR 'ConvoPeq_artefacts\Release\ConvoPeq.exe'
+          if (-not (Test-Path $exe)) { throw "ConvoPeq.exe not found: $exe" }
+          $log = Join-Path (Split-Path $exe) 'ConvoPeq.log'
+          if (Test-Path $log) { Remove-Item $log -Force }
+          & $exe --cli-run --cli-learning-action start --cli-learning-mode short --cli-exit-ms 1500
+          Write-Host "app exit=$LASTEXITCODE"
+          Start-Sleep -Seconds 1
+          if (-not (Test-Path $log)) { throw "ConvoPeq.log not found: $log" }
+          $raw = Get-Content $log | Select-String -Pattern '\[CLI_PERF_RAW\]'
+          $raw | ForEach-Object { Write-Host $_.Line }
+          Copy-Item $log (Join-Path $env:GITHUB_WORKSPACE 'ConvoPeq-run.log') -Force
+          $pos = @($raw | Where-Object { $_.Line -match 'callbacks=([1-9][0-9]*)' })
+          $blocks = @($raw | Where-Object { $_.Line -match 'blockSamples=([1-9][0-9]*)' })
+          if ($pos.Count -lt 1) { throw "PROBE FAILED: callbacks>0 was not observed (VB-CABLE did not feed the engine)." }
+          if ($blocks.Count -lt 1) { throw "PROBE FAILED: blockSamples>0 was not observed." }
+          Write-Host "PROBE OK: callbacks>0 and blockSamples>0 observed."
+
+      - name: ctest HeadlessAudioPathVerification (existing criteria)
+        shell: pwsh
+        run: |
+          ctest --test-dir $env:BUILD_DIR -C Release -R "^HeadlessAudioPathVerification$" --output-on-failure 2>&1 |
+            Tee-Object -FilePath selected-tests.log
+          exit $LASTEXITCODE
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vbcable-probe-logs
+          path: |
+            configure.log
+            build.log
+            selected-tests.log
+            ConvoPeq-run.log
+          if-no-files-found: warn
