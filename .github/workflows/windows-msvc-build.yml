@@ -37,6 +37,10 @@ on:
         description: "意図的なコンパイル失敗を注入し、検出できることを確認する（検証専用）"
         type: boolean
         default: false
+      run_selected_tests:
+        description: "ビルド後に HeadlessAudioPathVerification / AudioEngineHarness を実行する（R-49 調査用）"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -184,6 +188,20 @@ jobs:
           }
           exit $rc
 
+      # R-49: ASan を有効にしない構成で、CI ランナー上での 2 テストの挙動を確認する。
+      #   workflow_dispatch + run_selected_tests=true のときだけ実行する（通常の PR では走らない）。
+      - name: Run selected tests (diagnostics, dispatch only)
+        if: inputs.run_selected_tests == true
+        shell: pwsh
+        run: |
+          $env:ASAN_OPTIONS = ""
+          ctest --test-dir $env:BUILD_DIR -C Release -R "^(HeadlessAudioPathVerification|AudioEngineHarness)$" --output-on-failure 2>&1 |
+            Tee-Object -FilePath selected-tests.log
+          $rc = $LASTEXITCODE
+          "### Selected tests (Release, ASan OFF)" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          Get-Content selected-tests.log -Tail 40 | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          exit $rc
+
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -193,6 +211,7 @@ jobs:
             configure.log
             build-product.log
             build-harness.log
+            selected-tests.log
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
