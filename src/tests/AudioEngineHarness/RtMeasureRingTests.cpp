@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -409,6 +410,194 @@ bool checkInstanceIdentity()
     return ok;
 }
 
+
+// (12) 集計: N / p99（ceil(0.99N)-1）/ 最大値 / dropped / writes
+bool checkAggregatorStats()
+{
+    using convo::rtmeasure::Ring;
+    bool ok = true;
+
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::aggregator().reset();
+
+    constexpr std::uint64_t kN = 100;
+    for (std::uint64_t i = 1; i <= kN; ++i)
+        convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i);
+
+    const std::size_t drained = convo::rtmeasure::aggregator().drainOnce();
+    const auto& s = convo::rtmeasure::aggregator().compute();
+
+    ok = expect("agg drained", drained == kN) && ok;
+    ok = expect("agg n", s.samples == kN) && ok;
+    // p99 index = ceil(0.99*100)-1 = 98（0 起点）→ 値 99
+    ok = expect("agg p99 ticks", s.p99Ticks == 99ull) && ok;
+    ok = expect("agg max ticks", s.maxTicks == 100ull) && ok;
+    ok = expect("agg writes", s.writes == kN) && ok;
+    ok = expect("agg dropped", s.dropped == 0ull) && ok;
+    ok = expect("agg ratio zero", s.dropRatio == 0.0) && ok;
+    ok = expect("agg not inconclusive", !s.inconclusive) && ok;
+    ok = expect("agg not boundary", !s.boundary) && ok;
+    ok = expect("agg valid", s.valid) && ok;
+
+    // 空の集計（サンプルなし）でも壊れない
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::aggregator().reset();
+    (void) convo::rtmeasure::aggregator().drainOnce();
+    const auto& e = convo::rtmeasure::aggregator().compute();
+    ok = expect("agg empty n", e.samples == 0) && ok;
+    ok = expect("agg empty invalid", !e.valid) && ok;
+    return ok;
+}
+
+// (13) 集計: 満杯時の破棄と比率（INCONCLUSIVE / 境界）
+bool checkAggregatorDiscardVerdicts()
+{
+    using convo::rtmeasure::Ring;
+    constexpr std::uint64_t kCap = Ring::kCapacity;
+    bool ok = true;
+
+    // 境界: dropped/(writes+dropped) ≈ 9.9%（9〜11%）→ boundary、inconclusive ではない
+    {
+        convo::rtmeasure::instance().reset();
+        convo::rtmeasure::aggregator().reset();
+
+        constexpr std::uint64_t kExtra = 900;   // 900/(8192+900) = 9.90%
+        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
+            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
+
+        (void) convo::rtmeasure::aggregator().drainOnce();
+        const auto& s = convo::rtmeasure::aggregator().compute();
+
+        ok = expect("verdict writes == capacity", s.writes == kCap) && ok;
+        ok = expect("verdict dropped == extra", s.dropped == kExtra) && ok;
+        ok = expect("verdict ratio ~9.9%", s.dropRatio > 0.09 && s.dropRatio < 0.11) && ok;
+        ok = expect("verdict boundary true", s.boundary) && ok;
+        ok = expect("verdict not inconclusive", !s.inconclusive) && ok;
+    }
+
+    // INCONCLUSIVE: dropped が 10% を明確に超える
+    {
+        convo::rtmeasure::instance().reset();
+        convo::rtmeasure::aggregator().reset();
+
+        constexpr std::uint64_t kExtra = 9000;   // 9000/(8192+9000) = 52%
+        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
+            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
+
+        (void) convo::rtmeasure::aggregator().drainOnce();
+        const auto& s = convo::rtmeasure::aggregator().compute();
+
+        ok = expect("inconclusive ratio > 10%", s.dropRatio > 0.10) && ok;
+        ok = expect("inconclusive true", s.inconclusive) && ok;
+        ok = expect("inconclusive not boundary", !s.boundary) && ok;
+    }
+
+    // 破棄された分は集計サンプルに入らない（サンプル数 = writes）
+    {
+        convo::rtmeasure::instance().reset();
+        convo::rtmeasure::aggregator().reset();
+        constexpr std::uint64_t kExtra = 100;
+        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
+            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
+        (void) convo::rtmeasure::aggregator().drainOnce();
+        const auto& s = convo::rtmeasure::aggregator().compute();
+        ok = expect("samples == writes", s.samples == s.writes) && ok;
+        ok = expect("samples == capacity", s.samples == kCap) && ok;
+    }
+
+    return ok;
+}
+
+// (14) 1 秒ごとの非 RT 集計（ゲート）
+bool checkPollGate()
+{
+    bool ok = true;
+
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::aggregator().reset();
+    convo::rtmeasure::resetPollGateForTest();
+
+    constexpr std::uint64_t kPushes = 10;
+    for (std::uint64_t i = 0; i < kPushes; ++i)
+        convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
+
+    const bool first  = convo::rtmeasure::pollIfDue();      // 1 回目: 実行される
+    const std::size_t calls1 = convo::rtmeasure::aggregator().drainCalls();
+    const bool second = convo::rtmeasure::pollIfDue();      // 1 秒以内: 実行されない
+    const std::size_t calls2 = convo::rtmeasure::aggregator().drainCalls();
+
+    ok = expect("poll first true", first) && ok;
+    ok = expect("poll second false", !second) && ok;
+    ok = expect("poll drainCalls 1", calls1 == 1) && ok;
+    ok = expect("poll drainCalls unchanged", calls2 == 1) && ok;
+    ok = expect("poll aggregated samples", convo::rtmeasure::aggregator().stats().samples == kPushes) && ok;
+
+    // OFF のときは何もしない
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    convo::rtmeasure::resetPollGateForTest();
+    const bool off = convo::rtmeasure::pollIfDue();
+    ok = expect("poll OFF false", !off) && ok;
+
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::aggregator().reset();
+    return ok;
+}
+
+// (15) 計測 OFF では TSC を読まない（プローブで機械検証）
+bool checkOffDoesNotReadTsc()
+{
+    bool ok = true;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    convo::rtmeasure::instance().reset();
+
+    convo::rtmeasure::detail::g_tscProbe.store(true);
+    convo::rtmeasure::detail::g_tscReads.store(0);
+
+    for (int i = 0; i < 1000; ++i)
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        ok = expect("timer inactive when OFF", !t.active()) && ok;
+    }
+
+    const auto offReads = convo::rtmeasure::detail::g_tscReads.load();
+    ok = expect("OFF performs no TSC read", offReads == 0ull) && ok;
+    ok = expect("OFF writes no event", convo::rtmeasure::instance().written() == 0ull) && ok;
+
+    // ON では読み取りが発生する（プローブの対照）
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::detail::g_tscReads.store(0);
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        ok = expect("timer active when ON", t.active()) && ok;
+    }
+    const auto onReads = convo::rtmeasure::detail::g_tscReads.load();
+    ok = expect("ON performs TSC reads", onReads >= 2ull) && ok;
+    ok = expect("ON writes one event", convo::rtmeasure::instance().written() == 1ull) && ok;
+
+    convo::rtmeasure::detail::g_tscProbe.store(false);
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::aggregator().reset();
+    return ok;
+}
+
+// (16) RT 経路の性質（確保・ロック・可変長を持たない）を型で固定する
+static_assert(std::is_trivially_destructible_v<convo::rtmeasure::Ring>,
+              "Ring must be trivially destructible (no owned resources)");
+static_assert(sizeof(convo::rtmeasure::Event) == 16, "Event must stay a 16-byte POD");
+static_assert(sizeof(convo::rtmeasure::Ring) <= sizeof(convo::rtmeasure::Event) * convo::rtmeasure::Ring::kCapacity + 256,
+              "Ring storage must be the fixed array plus a small header (no heap)");
+static_assert(std::is_trivially_copyable_v<convo::rtmeasure::Event>,
+              "Event must be trivially copyable (no hidden allocation)");
+
 } // namespace
 
 int runRtMeasureRingTests()
@@ -425,6 +614,10 @@ int runRtMeasureRingTests()
     ok = checkTimingCalibration() && ok;
     ok = checkBlockScopeTimer() && ok;
     ok = checkInstanceIdentity() && ok;
+    ok = checkAggregatorStats() && ok;
+    ok = checkAggregatorDiscardVerdicts() && ok;
+    ok = checkPollGate() && ok;
+    ok = checkOffDoesNotReadTsc() && ok;
 
     if (ok)
         std::printf("RtMeasureRingTests: PASS (U2: P1/P2/P3/P4 + capacity boundaries; RT call site connected)\n");

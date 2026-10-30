@@ -9,6 +9,7 @@
 #include "ISRRetireOverflowRing.h"         // ★ Phase1: RetireOverflowRing 完全型
 #include "DSPLifetimeManager.h"            // ★ FUTURE-9: runCoordinatorPhase
 #include "ISRCoordinatorLoop.h"            // ★ FUTURE-9: coordinatorLoop_ complete type
+#include "RtMeasureRing.h"                 // R-06 / U2: 1 秒ごとの非 RT 集計
 
 //==============================================================================
 // [P0-15] AudioEngine.Threading.cpp — 3PR分割済み.
@@ -380,6 +381,10 @@ void AudioEngine::shutdownCoordinatorLoop() noexcept
 
 void AudioEngine::runCoordinatorPhase() noexcept
 {
+    // R-06 / U2: 1 秒ごとの非 RT 集計（計画書 §6）。CoordinatorLoop は非 RT スレッドであり、
+    //   この関数の中でリングの drain・統計・`[RTM]` 出力を行う。計測 OFF のときは即 false を返す。
+    (void) convo::rtmeasure::pollIfDue();
+
     // ★ ISR: Coordinator — processIntent (relocated from AudioEngine::timerCallback)
     {
         DSPLifetimeManager lifetimeMgr(*this);

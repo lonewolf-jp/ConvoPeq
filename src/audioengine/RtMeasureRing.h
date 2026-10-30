@@ -38,12 +38,15 @@
 //   `R06-U2-REVIEW-PACKAGE-20261031.md` §6）。
 //==============================================================================
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <vector>
 
 #include "AtomicAccess.h"   // list.md [3.1]: 製品コードでは atomic のドット誕生を直接呼んではならない（convo:: ヘルパ経由）
 
@@ -94,6 +97,12 @@ inline std::atomic<bool> g_enabled{ false };
 inline std::atomic<std::uint64_t> g_ticksPerSecond{ 0 };
 inline std::atomic<bool> g_prepared{ false };
 
+// テスト専用プローブ: 有効にすると時刻読み取り回数を数える（既定 OFF）。
+//   本番では常に false なので、RT 経路の追加コストは「relaxed load + 分岐」のみ
+//   （計測 ON のときだけ readOrderedBegin/End が呼ばれる）。
+inline std::atomic<bool> g_tscProbe{ false };
+inline std::atomic<std::uint64_t> g_tscReads{ 0 };
+
 // ---------------------------------------------------------------------------
 // 時刻読み取り（TSC 命令の順序保証を明文化する）
 //
@@ -114,13 +123,20 @@ inline std::uint64_t readTscRaw() noexcept
 {
     return static_cast<std::uint64_t>(__rdtsc());
 }
+inline void countTscReadIfProbed() noexcept
+{
+    if (convo::consumeAtomic(g_tscProbe, std::memory_order_relaxed))
+        convo::fetchAddAtomic(g_tscReads, std::uint64_t{1}, std::memory_order_relaxed);
+}
 inline std::uint64_t readOrderedBegin() noexcept
 {
+    countTscReadIfProbed();
     _mm_lfence();
     return static_cast<std::uint64_t>(__rdtsc());
 }
 inline std::uint64_t readOrderedEnd() noexcept
 {
+    countTscReadIfProbed();
     unsigned int aux = 0;
     return static_cast<std::uint64_t>(__rdtscp(&aux));
 }
@@ -133,9 +149,14 @@ inline std::uint64_t steadyNs() noexcept
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+inline void countTscReadIfProbed() noexcept
+{
+    if (convo::consumeAtomic(g_tscProbe, std::memory_order_relaxed))
+        convo::fetchAddAtomic(g_tscReads, std::uint64_t{1}, std::memory_order_relaxed);
+}
 inline std::uint64_t readTscRaw() noexcept { return steadyNs(); }
-inline std::uint64_t readOrderedBegin() noexcept { return steadyNs(); }
-inline std::uint64_t readOrderedEnd() noexcept { return steadyNs(); }
+inline std::uint64_t readOrderedBegin() noexcept { countTscReadIfProbed(); return steadyNs(); }
+inline std::uint64_t readOrderedEnd() noexcept { countTscReadIfProbed(); return steadyNs(); }
 inline constexpr std::uint64_t kFallbackTicksPerSecond = 1000000000ull;
 #endif
 
@@ -372,10 +393,181 @@ public:
     BlockScopeTimer(const BlockScopeTimer&) = delete;
     BlockScopeTimer& operator=(const BlockScopeTimer&) = delete;
 
+    // 計測が有効か（＝このスコープで時刻を読んだか）。テスト用の読み取りアクセサ。
+    [[nodiscard]] bool active() const noexcept { return on_; }
+
 private:
     bool on_;
     std::uint64_t t0_;
 };
+
+//==============================================================================
+// 非 RT 側の集計（計画書 §6 / U2 v2 §6）。**RT からは呼ばない。**
+//
+//   - 1 秒ごとに drain し、END イベントの payload（経過 ticks）をサンプルとして蓄積する。
+//   - 統計: N、p99（昇順ソート後の ceil(0.99*N)-1 番目）、最大値。
+//   - 破棄: dropped / (writesPublished + dropped)。10% 超は INCONCLUSIVE。
+//     9〜11% は境界（RERUN。合格に丸めない）。
+//   - 出力: `[RTM] ... lower_bound=1`（測定値が下限であることを明示）。
+//==============================================================================
+struct Stats
+{
+    std::uint64_t samples    = 0;      // N（集計に使ったサンプル数）
+    std::uint64_t p99Ticks   = 0;
+    std::uint64_t maxTicks   = 0;
+    std::uint64_t p99Micros  = 0;
+    std::uint64_t maxMicros  = 0;
+    std::uint64_t dropped    = 0;      // リングの破棄件数
+    std::uint64_t writes     = 0;      // リングに入った件数
+    double        dropRatio  = 0.0;
+    bool          inconclusive = false;   // 10% 超
+    bool          boundary     = false;   // 9〜11%（再測定対象）
+    bool          aggregatorFull = false; // 集計側の上限に達した
+    bool          valid        = false;   // サンプルが 1 件以上
+};
+
+class Aggregator
+{
+public:
+    // 集計側の上限（約 8 MB）。超えた分は数えず aggregatorFull を立てる。
+    static constexpr std::size_t kMaxSamples = 1u << 20;
+
+    void reset() noexcept
+    {
+        samples_.clear();
+        sorted_.clear();
+        stats_ = Stats{};
+        lastDrainCount_ = 0;
+        drainCalls_ = 0;
+    }
+
+    // リングから回収する（非 RT）。戻り値は今回回収した件数。
+    std::size_t drainOnce() noexcept
+    {
+        constexpr std::size_t kBatch = 256;
+        Event buf[kBatch];
+        std::size_t total = 0;
+
+        for (;;)
+        {
+            const std::size_t n = instance().drain(buf, kBatch);
+            if (n == 0)
+                break;
+
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                if (samples_.size() < kMaxSamples)
+                    samples_.push_back(buf[i].tsc);
+                else
+                    stats_.aggregatorFull = true;
+            }
+            total += n;
+            if (n < kBatch)
+                break;
+        }
+
+        ++drainCalls_;
+        lastDrainCount_ = total;
+        return total;
+    }
+
+    // 統計を計算して保持する（非 RT）。累積サンプル全体を対象にする。
+    [[nodiscard]] const Stats& compute() noexcept
+    {
+        Stats s;
+        s.samples = static_cast<std::uint64_t>(samples_.size());
+        s.writes  = instance().written();
+        s.dropped = instance().dropped();
+
+        const std::uint64_t attempts = s.writes + s.dropped;
+        s.dropRatio = (attempts == 0)
+                          ? 0.0
+                          : static_cast<double>(s.dropped) / static_cast<double>(attempts);
+        s.inconclusive = (s.dropRatio > 0.10);
+        s.boundary     = (s.dropRatio >= 0.09 && s.dropRatio <= 0.11);
+
+        if (!samples_.empty())
+        {
+            sorted_.assign(samples_.begin(), samples_.end());
+            std::sort(sorted_.begin(), sorted_.end());
+
+            const std::size_t n = sorted_.size();
+            // ceil(0.99*N)-1 を整数演算で（浮動小数の丸め差を避ける）
+            const std::size_t idx = ((99u * n + 99u) / 100u) - 1u;
+            s.p99Ticks  = sorted_[idx < n ? idx : (n - 1)];
+            s.maxTicks  = sorted_.back();
+            s.p99Micros = ticksToMicros(s.p99Ticks);
+            s.maxMicros = ticksToMicros(s.maxTicks);
+            s.valid     = true;
+        }
+
+        s.aggregatorFull = stats_.aggregatorFull;
+        stats_ = s;
+        return stats_;
+    }
+
+    [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
+    [[nodiscard]] std::size_t drainCalls() const noexcept { return drainCalls_; }
+    [[nodiscard]] std::size_t lastDrainCount() const noexcept { return lastDrainCount_; }
+
+private:
+    std::vector<std::uint64_t> samples_;   // 経過 ticks
+    std::vector<std::uint64_t> sorted_;
+    Stats stats_{};
+    std::size_t lastDrainCount_ = 0;
+    std::size_t drainCalls_ = 0;
+};
+
+// プロセスに 1 つの集計器（名前空間スコープ。関数ローカル static を使わない）
+inline Aggregator g_aggregator;
+
+inline Aggregator& aggregator() noexcept
+{
+    return g_aggregator;
+}
+
+// 1 秒ゲート用の最終実行時刻（ミリ秒）。非 RT からのみ触る。
+inline std::atomic<std::int64_t> g_lastPollMs{ std::numeric_limits<std::int64_t>::min() };
+
+// **非 RT からのみ**呼ぶ。1 秒に 1 回だけ drain＋統計＋出力を行う。
+//   `runCoordinatorPhase()`（1 ms tick の非 RT スレッド）から呼ばれる。
+//   戻り値: 今回 drain と出力を行ったら true。
+inline bool pollIfDue() noexcept
+{
+    if (!enabled())
+        return false;
+
+    const auto nowMs = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    const std::int64_t last = convo::consumeAtomic(g_lastPollMs, std::memory_order_relaxed);
+    if (last != std::numeric_limits<std::int64_t>::min() && (nowMs - last) < 1000)
+        return false;
+
+    convo::publishAtomic(g_lastPollMs, nowMs, std::memory_order_relaxed);
+
+    (void) aggregator().drainOnce();
+    const Stats& s = aggregator().compute();
+
+    const char* verdict = s.inconclusive ? "INCONCLUSIVE" : (s.boundary ? "RERUN" : "OK");
+    std::printf("[RTM] n=%llu p99=%llu us max=%llu us dropped=%llu writes=%llu ratio=%.3f"
+                " verdict=%s lower_bound=1\n",
+                static_cast<unsigned long long>(s.samples),
+                static_cast<unsigned long long>(s.p99Micros),
+                static_cast<unsigned long long>(s.maxMicros),
+                static_cast<unsigned long long>(s.dropped),
+                static_cast<unsigned long long>(s.writes),
+                s.dropRatio,
+                verdict);
+    return true;
+}
+
+// テスト用: 1 秒ゲートをリセットする（非 RT）。
+inline void resetPollGateForTest() noexcept
+{
+    convo::publishAtomic(g_lastPollMs, std::numeric_limits<std::int64_t>::min(), std::memory_order_relaxed);
+}
 
 } // namespace rtmeasure
 } // namespace convo
