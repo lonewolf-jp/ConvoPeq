@@ -1,5 +1,18 @@
 #include <JuceHeader.h>
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+
+// ★ R-51 一時診断（CONVO_R51_DIAG=1 のときだけ stderr へ出す。既定は無効）。
+static bool r51DiagEnabled() noexcept
+{
+    static const bool enabled = []() {
+        const char* v = std::getenv("CONVO_R51_DIAG");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
 #include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
@@ -23,9 +36,34 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
     if (p == nullptr)
         return DestroyOutcome::Destroyed;
 
-    if (auto* owner = convo::consumeAtomic(s_handleInvalidationOwner, std::memory_order_acquire))
+    // ★ R-51 (2026-10-30): pin 保護の判定は「登録時に記録した slot」で行う。
+    //   台帳（runtimeDSPHandleMap_）の erase 時期・instance の可視性・
+    //   s_handleInvalidationOwner の存否に依存しない。
+    DestroyIndexEntry entry{};
+    const bool indexed = lookupDestroyIndex(p, entry);
+
+    AudioEngine* owner = indexed ? entry.owner
+                                 : convo::consumeAtomic(s_handleInvalidationOwner, std::memory_order_acquire);
+
+    if (owner != nullptr)
     {
-        if (!owner->invalidateHandleBeforeDestroy(p))
+        const unsigned pinnedBefore = indexed
+            ? (unsigned)owner->dspHandleRuntime_.pinnedCount(entry.slot) : 0u;
+
+        const bool canFree = indexed
+            ? owner->invalidateHandleBeforeDestroyBySlot(entry.slot, entry.generation)
+            : owner->invalidateHandleBeforeDestroy(p);
+
+        if (r51DiagEnabled())
+            std::fprintf(stderr,
+                         "[R51D] destroy p=%p indexed=%d slot=%u gen=%llu owner=%p pinnedBefore=%u "
+                         "canFree=%d thread=%u\n",
+                         p, indexed ? 1 : 0, (unsigned)entry.slot,
+                         (unsigned long long)entry.generation, (void*)owner,
+                         pinnedBefore, canFree ? 1 : 0,
+                         (unsigned)(std::uintptr_t)juce::Thread::getCurrentThreadId());
+
+        if (!canFree)
         {
             // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
             //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
@@ -36,6 +74,14 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             return DestroyOutcome::Deferred;
         }
     }
+
+    if (owner == nullptr && r51DiagEnabled())
+        std::fprintf(stderr, "[R51D] destroy NO-OWNER p=%p indexed=%d slot=%u gen=%llu thread=%u\n",
+                     p, indexed ? 1 : 0, (unsigned)entry.slot,
+                     (unsigned long long)entry.generation,
+                     (unsigned)(std::uintptr_t)juce::Thread::getCurrentThreadId());
+
+    eraseDestroyIndex(p);
 
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();

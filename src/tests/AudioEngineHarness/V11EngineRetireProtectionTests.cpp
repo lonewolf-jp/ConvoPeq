@@ -1364,6 +1364,189 @@ static bool checkF1bAuditSingleOwnership()
 //   Uses deferredDestroyCount() (monotonic counter) rather than the resident count,
 //   which is transiently 0 while a retry is in flight.
 //==============================================================================
+
+// ============================================================================
+// R-51 V3 / V4: 破棄順序の変種と反復
+//
+//   V3: drain のタイミングを 3 通り（即時 / 1 ms 後 / 別スレッド）に変えても、
+//       pin 保持中は必ず defer されることを確認する。
+//   V4: 同一シナリオを 100 回反復し、defer 回数がループ回数と一致することを確認する
+//       （間欠失敗を「待機で隠さず」検出する）。
+//
+//   pin 解放後は、既存契約どおり「retry リストが空・resolve 不能」まで回収する。
+//   合否条件は緩めない（V1/V2 の既存アサーションはそのまま）。
+// ============================================================================
+static bool checkF1bRetireDeferOrderInvariance()
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-P-V3V4] harness start failed\n");
+        return false;
+    }
+
+    AudioEngine& e = harness.engine();
+    constexpr int kIterations = 100;
+    int deferObserved = 0;
+
+    // ★ R-51: 索引の滞留数が反復で増えないこと（索引リーク・二重登録の検出）。
+    const std::size_t destroyIndexBefore =
+        DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+
+    for (int i = 0; i < kIterations; ++i)
+    {
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = e.registerDSPHandleForRuntime(raw);
+        if (handle.isNull())
+        {
+            std::fprintf(stderr, "[F1-b-P-V3V4] FAIL: register failed at iter %d\n", i);
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+            harness.stop();
+            return false;
+        }
+
+        {
+            auto pin = e.tryPinDSPHandle(handle);
+            if (!pin)
+            {
+                std::fprintf(stderr, "[F1-b-P-V3V4] FAIL: could not pin at iter %d\n", i);
+                DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+                harness.stop();
+                return false;
+            }
+
+            std::uint64_t minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+            if (minEpoch == 0)
+            {
+                (void)DeferredPublicationTestAccess::publishEpochForTest(e);
+                minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(e);
+            }
+            const auto retireEpoch = (minEpoch > 0) ? (minEpoch - 1) : std::uint64_t{0};
+            const auto before = DeferredPublicationTestAccess::deferredDestroyCount(e);
+
+            DSPLifetimeManager mgr(e);
+            mgr.retire(raw, retireEpoch);
+
+            // V3: drain のタイミングを 3 通りに変える。
+            switch (i % 3)
+            {
+                case 0:
+                    e.tryReclaimResources();
+                    break;
+                case 1:
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    e.tryReclaimResources();
+                    break;
+                default:
+                {
+                    std::thread drainer([&e] { e.tryReclaimResources(); });
+                    drainer.join();
+                    break;
+                }
+            }
+
+            // ★ R-51 (2026-10-30) 監査で判明した競合の扱い:
+            //   variant 1（retire 後 1 ms 待つ）では、その 1 ms の間に CoordinatorLoop が
+            //   先に drain する。destroy 経路は pin の消滅を kPinDrainTimeoutMs(50 ms) まで
+            //   待ってからはじめて defer を記録するため、drain 呼び出しの直後に
+            //   deferredDestroyCount をサンプルすると「まだ増えていない」= 偽陰性になる。
+            //   実測（CONVO_R51_DIAG=1, r51-diag4.log）: 失敗の瞬間 pending=0（Coordinator が
+            //   pop 済み）で、その約 50 ms 後に canFree=0 の destroy が現れ、所有権が
+            //   エンジンの再試行リストへ移っていた。
+            //   したがって「瞬間値」ではなく、上限 500 ms の範囲で **defer が記録されること**
+            //   を確認する（意味は同じ: pin 保持中に破棄が延期された）。
+            //   なお deferredDestroyResidentCount は retryDeferredDestroys の swap 中に 0 に
+            //   なるため、判定条件には使わない（診断出力のみ）。
+            bool deferObservedThisIteration = false;
+            std::uint64_t after = before;
+            for (int waitTick = 0; waitTick < 100; ++waitTick)
+            {
+                after = DeferredPublicationTestAccess::deferredDestroyCount(e);
+                if (after > before)
+                {
+                    deferObservedThisIteration = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+
+            if (!deferObservedThisIteration)
+            {
+                std::fprintf(stderr,
+                             "[F1-b-P-V3V4] FAIL: no defer at iter %d (variant %d, count %llu -> %llu, "
+                             "pinned=%u resolve=%d pending=%zu deferredResident=%zu slot=%u gen=%llu)\n",
+                             i, i % 3,
+                             (unsigned long long) before, (unsigned long long) after,
+                             (unsigned)DeferredPublicationTestAccess::pinnedCount(e, handle.slot),
+                             e.resolveDSPHandle(handle) != nullptr ? 1 : 0,
+                             DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                             DeferredPublicationTestAccess::deferredDestroyResidentCount(e),
+                             (unsigned) handle.slot,
+                             (unsigned long long) handle.generation);
+                harness.stop();
+                return false;
+            }
+            ++deferObserved;
+        }
+
+        // pin 解放後: 既存契約どおり回収（retry リストが空・resolve 不能）。
+        bool drained = false;
+        for (int k = 0; k < 400; ++k)
+        {
+            e.tryReclaimResources();
+            (void)DeferredPublicationTestAccess::retryDeferredDestroys(e);
+            if (DeferredPublicationTestAccess::deferredDestroyResidentCount(e) == 0
+                && e.resolveDSPHandle(handle) == nullptr)
+            {
+                drained = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!drained)
+        {
+            std::fprintf(stderr,
+                         "[F1-b-P-V3V4] FAIL: not drained at iter %d (resident=%zu)\n",
+                         i, DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+            harness.stop();
+            return false;
+        }
+    }
+
+    // ★ R-51: 100 反復の後に索引が増えていないこと（全コアの破棄確定 = 索引から削除）。
+    //   破棄は CoordinatorLoop 側でも進行するため、反復直後の 1 点でサンプルすると
+    //   「まだ削除されていない」瞬間を掴む（実測: run 3 で 1 -> 2）。
+    //   V3/V4 の defer 判定と同じく、上限 500 ms の範囲で before 以下に戻ることを確認する
+    //   （条件は「増えないこと」のまま。観測窓だけを広げる）。
+    std::size_t destroyIndexAfter =
+        DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+    for (int waitTick = 0; waitTick < 100 && destroyIndexAfter > destroyIndexBefore; ++waitTick)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        destroyIndexAfter = DeferredPublicationTestAccess::destroyIndexResidentCount(e);
+    }
+    const bool indexClean = (destroyIndexAfter <= destroyIndexBefore);
+    if (!indexClean)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-P-V3V4] FAIL: destroy index leaked entries (%zu -> %zu, "
+                     "pending=%zu residentAtomic=%u deferredResident=%zu)\n",
+                     destroyIndexBefore, destroyIndexAfter,
+                     DeferredPublicationTestAccess::pendingRetireCountForTest(e),
+                     (unsigned)DeferredPublicationTestAccess::residentAtomicForTest(e),
+                     DeferredPublicationTestAccess::deferredDestroyResidentCount(e));
+    }
+
+    harness.stop();
+
+    const bool ok = (deferObserved == kIterations) && indexClean;
+    std::printf("[F1-b-P-V3V4] defer observed %d/%d, index resident %zu -> %zu: %s\n",
+                deferObserved, kIterations, destroyIndexBefore, destroyIndexAfter,
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static bool checkF1bProductionRetireUnderPin()
 {
     AudioEngineHarness harness;
@@ -1420,8 +1603,9 @@ static bool checkF1bProductionRetireUnderPin()
         DSPLifetimeManager mgr(e);
         mgr.retire(raw, retireEpoch);
 
-        std::printf("[F1-b-P] diag after retire: pinned=%u cur=%llu min=%llu pending=%zu "
+        std::printf("[F1-b-P] diag after retire: owner=%d pinned=%u cur=%llu min=%llu pending=%zu "
                     "resident=%u resolve=%d\n",
+                    DeferredPublicationTestAccess::handleInvalidationOwnerIsThis(e) ? 1 : 0,
                     (unsigned)DeferredPublicationTestAccess::pinnedCount(e, handle.slot),
                     (unsigned long long)DeferredPublicationTestAccess::currentEpochForTest(e),
                     (unsigned long long)DeferredPublicationTestAccess::minReaderEpochForTest(e),
@@ -2602,6 +2786,12 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1bProductionRetireUnderPin())
     {
         std::fprintf(stderr, "FAIL: checkF1bProductionRetireUnderPin (F1-b)\n");
+        hdOk = false;
+    }
+
+    if (!checkF1bRetireDeferOrderInvariance())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bRetireDeferOrderInvariance (F1-b V3/V4)\n");
         hdOk = false;
     }
     if (!checkF2QuarantineDestroyHonoursPins())

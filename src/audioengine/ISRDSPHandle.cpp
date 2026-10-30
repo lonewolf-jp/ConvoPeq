@@ -2,7 +2,19 @@
 #include "AtomicAccess.h"
 
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+
+// ★ R-51 一時診断（CONVO_R51_DIAG=1 のときだけ stderr へ出す。既定は無効）。
+static bool r51DiagEnabled() noexcept
+{
+    static const bool enabled = []() {
+        const char* v = std::getenv("CONVO_R51_DIAG");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
 
 namespace convo {
 namespace isr {
@@ -396,6 +408,51 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
                 freeSlots_[freeSize_++] = targets[k].slot;
         }
     }
+    return true;
+}
+
+// ★ R-51 (2026-10-30): slot を直接指定する破棄無効化。
+//   instance を経由しないため、台帳（AudioEngine::runtimeDSPHandleMap_）や
+//   registry_[i].instance の可視性に依存しない。pin が残っていれば false（= defer）。
+bool DSPHandleRuntime::invalidateForDestroyBySlot(uint32_t slot, uint64_t generation,
+                                                 int timeoutMs) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return true;   // 未登録相当（解放してよい）
+
+    // 1) 受付を閉じる（generation 不一致なら no-op）。
+    (void)closePinsForDestroy(slot, generation);
+
+    // 2) 既存 pin の消滅を待つ。タイムアウトは「破棄しない」。
+    PinDrainTarget target{ slot, generation };
+    const unsigned pinnedAtEnter = (unsigned)pinnedCount(slot);
+    const bool drained = waitForPinsToDrain(&target, 1, timeoutMs);
+    if (r51DiagEnabled())
+        std::fprintf(stderr,
+                     "[R51S] invalidateBySlot slot=%u gen=%llu pinnedAtEnter=%u drained=%d "
+                     "pinnedAfter=%u regGen=%llu regState=%u\n",
+                     (unsigned)slot, (unsigned long long)generation, pinnedAtEnter,
+                     drained ? 1 : 0, (unsigned)pinnedCount(slot),
+                     (unsigned long long)convo::consumeAtomic(registry_[slot].generation,
+                                                              std::memory_order_acquire),
+                     (unsigned)convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire));
+    if (!drained)
+        return false;
+
+    // 3) 破棄を確定（別世代に再利用されていたら触らない）。
+    std::lock_guard<std::mutex> lock(freeListMutex_);
+    auto& reg = registry_[slot];
+    if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != generation)
+        return true;
+    if (convo::consumeAtomic(reg.state, std::memory_order_acquire) == DSPState::Reclaimed)
+        return true;
+
+    convo::publishAtomic(reg.state, DSPState::DestroyPending, std::memory_order_release);
+    convo::publishAtomic(reg.instance, nullptr, std::memory_order_release);
+    convo::publishAtomic(reg.state, DSPState::Reclaimed, std::memory_order_release);
+
+    if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
+        freeSlots_[freeSize_++] = slot;
     return true;
 }
 

@@ -221,6 +221,13 @@ public:
     [[nodiscard]] bool invalidateForDestroy(void* dspInstance,
                                             int timeoutMs = 2000) noexcept;
 
+    // ★ R-51 (2026-10-30): slot を直接指定する版。instance の可視性に依存せず、
+    //   登録時に記録した (slot, generation) で pin の受付を閉じ、消滅を待つ。
+    //   戻り値: true = 解放してよい / false = pin が残っており **解放してはならない**（延期）。
+    //   タイムアウト（timeoutMs 経過）は「解放してよい」を意味しない。
+    [[nodiscard]] bool invalidateForDestroyBySlot(uint32_t slot, uint64_t generation,
+                                                   int timeoutMs = 50) noexcept;
+
     // ★ F1' (2026-10-25): 寿命 lease の取得。成功した lease の生存中は
     //   invalidateForDestroy / reclaim がそのインスタンスを解放できない。
     //   RT 可（ロック・動的確保・待機なし。単一ワード CAS のみ）。
