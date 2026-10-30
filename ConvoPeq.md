@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-30 21:26:32
+> Generated: 2026-10-30 23:52:16
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -309,6 +309,7 @@
         │   │   ├── DeferredFlowIntegrationTests.cpp
         │   │   ├── DeferredPublicationTestAccess.h
         │   │   ├── DeferredPublishViewStateMachineTests.cpp
+        │   │   ├── EngineInstanceCountTests.cpp
         │   │   ├── IRLoadAdmissionTests.cpp
         │   │   ├── OdenomCampaignTests.cpp
         │   │   ├── P1PolyphaseGainCharacterization.cpp
@@ -2992,6 +2993,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
+        src/tests/AudioEngineHarness/EngineInstanceCountTests.cpp
         src/tests/AudioEngineHarness/RtMeasureRingTests.cpp
     src/tests/AudioEngineHarness/V11ReaderReacquireTests.cpp
     src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp
@@ -5726,6 +5728,15 @@ void diagLog(const juce::String& message)
 
 // ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+
+// ★ 2026-10-30 (別変更単位): 生存エンジン数の診断カウンタ。診断のみで、振る舞いは変えない。
+std::atomic<int> AudioEngine::s_engineInstanceCount_{0};
+
+namespace
+{
+// 警告の重複抑制用（最初の 1 回だけ出す）。
+std::atomic<bool> s_engineMultiInstanceWarned{false};
+}
 // ★ F2' (2026-10-25): destroyDSPCoreNode（static）から解放直前のハンドル無効化を行うための
 //   「現在のエンジン」。製品はプロセス内 1 エンジン、テストは逐次生成。
 std::atomic<AudioEngine*> AudioEngine::s_handleInvalidationOwner{nullptr};
@@ -5818,6 +5829,24 @@ AudioEngine::AudioEngine()
     // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
     //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
     convo::publishAtomic(s_handleInvalidationOwner, this, std::memory_order_release);
+
+    // ★ 2026-10-30 (診断): 正常に成立した実例をカウントする。
+    //   複数インスタンスは許容する（禁止・例外化・assert はしない）。非 RT 経路で 1 回だけ警告する。
+    {
+        const int liveCount = convo::fetchAddAtomic(s_engineInstanceCount_, 1,
+                                                     std::memory_order_acq_rel) + 1;
+        if (liveCount > 1)
+        {
+            bool expected = false;
+            if (convo::compareExchangeAtomic(s_engineMultiInstanceWarned, expected, true,
+                                             std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                juce::Logger::writeToLog(juce::String::formatted(
+                    "[ENGINE_MULTI_INSTANCE] %d AudioEngine instances are alive in this process",
+                    liveCount));
+            }
+        }
+    }
 }
 
 AudioEngine::~AudioEngine()
@@ -6090,6 +6119,11 @@ AudioEngine::~AudioEngine()
     }
 
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
+
+    // ★ 2026-10-30 (診断): コンストラクタのインクリメントと対称に、デストラクタの最後で減算する。
+    //   ここまでで drain・索引解除・所有者解除が完了しているため、「生存中」として数える対象は
+    //   実際に使用可能なインスタンスと一致する。
+    (void)convo::fetchSubAtomic(s_engineInstanceCount_, 1, std::memory_order_acq_rel);
 }
 
 // [work37 Phase 9.16/9.44] 正常 publish 完了時 — RollbackToLastHealthyWorld + LearnerRollback
@@ -11958,6 +11992,17 @@ public:
 
     // ★ Engine インスタンス識別子 (全局一意。再生成後もユニーク)
     static std::atomic<uint64_t> s_nextEngineInstanceId_;
+
+    // ★ 2026-10-30 (別変更単位 / 診断のみ): プロセス内で生存している AudioEngine の件数。
+    //   目的は「複数インスタンスが存在した事実を観測すること」だけ。生成の禁止・例外化・assert は行わない。
+    //   インクリメントはコンストラクタの末尾（正常に成立した実例だけ）、デクリメントはデストラクタの末尾で行う。
+    static std::atomic<int> s_engineInstanceCount_;
+
+    // ★ テスト専用の読み取りアクセサ（実行時の件数を確認するため）。
+    [[nodiscard]] static int engineInstanceCountForTest() noexcept
+    {
+        return convo::consumeAtomic(s_engineInstanceCount_, std::memory_order_acquire);
+    }
     uint64_t engineInstanceId_{0};
 
     // ==================================================================
@@ -97965,6 +98010,89 @@ int runDeferredPublishViewStateMachineTests()
 
 ```
 
+### 📄 `src\tests\AudioEngineHarness\EngineInstanceCountTests.cpp`
+
+```
+//==============================================================================
+// 2026-10-30 (別変更単位 / 診断): 生存 AudioEngine インスタンス数の診断カウンタの検証
+//
+//   R-51 の修正で複数エンジン共存時の破棄保護は改善されたが、「製品が複数インスタンスを
+//   許容するか」は未定義である。本カウンタの目的は**存在した事実の観測**であり、
+//   生成の禁止・例外化・assert は行わない（Owner 判断 2026-10-30）。
+//
+//   ここでは次を確かめる。
+//     (1) 1 個の生成・破棄でカウンタが ±1 して戻る
+//     (2) 2 個同時に生存している間は +2 になる
+//     (3) 生成・破棄を繰り返してもカウンタがずれない（対称性）
+//
+//   AudioEngineHarness は「AudioEngine をヒープに持つ RAII」なので、start() を呼ばずに
+//   生成・破棄だけを行う（スレッドを起動しないため高速かつ副作用が小さい）。
+//==============================================================================
+
+#include "AudioEngineHarness.h"
+
+#include <cstdio>
+
+namespace {
+
+bool expect(const char* name, int got, int want)
+{
+    if (got != want)
+    {
+        std::fprintf(stderr, "FAIL: ENGINE-COUNT %s (got=%d want=%d)\n", name, got, want);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+int runEngineInstanceCountTests()
+{
+    bool ok = true;
+
+    const int base = AudioEngine::engineInstanceCountForTest();
+    std::printf("[ENGINE-COUNT] baseline=%d\n", base);
+    ok = expect("baseline is non-negative", base >= 0 ? 1 : 0, 1) && ok;
+
+    // (1) 1 個の生成・破棄
+    {
+        AudioEngineHarness one;
+        ok = expect("single alive", AudioEngine::engineInstanceCountForTest(), base + 1) && ok;
+    }
+    ok = expect("single released", AudioEngine::engineInstanceCountForTest(), base) && ok;
+
+    // (2) 2 個同時
+    {
+        AudioEngineHarness a;
+        AudioEngineHarness b;
+        ok = expect("two alive", AudioEngine::engineInstanceCountForTest(), base + 2) && ok;
+        std::printf("[ENGINE-COUNT] two instances alive = %d\n",
+                    AudioEngine::engineInstanceCountForTest());
+    }
+    ok = expect("two released", AudioEngine::engineInstanceCountForTest(), base) && ok;
+
+    // (3) 生成・破棄の反復（対称性）
+    constexpr int kCycles = 3;
+    for (int i = 0; i < kCycles; ++i)
+    {
+        AudioEngineHarness h;
+        if (AudioEngine::engineInstanceCountForTest() != base + 1)
+        {
+            std::fprintf(stderr, "FAIL: ENGINE-COUNT cycle %d alive mismatch (got=%d want=%d)\n",
+                         i, AudioEngine::engineInstanceCountForTest(), base + 1);
+            ok = false;
+        }
+    }
+    ok = expect("no drift after cycles", AudioEngine::engineInstanceCountForTest(), base) && ok;
+
+    if (ok)
+        std::printf("EngineInstanceCountTests: PASS (symmetric across %d cycles)\n", kCycles);
+    return ok ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\AudioEngineHarness\IRLoadAdmissionTests.cpp`
 
 ```
@@ -103225,6 +103353,8 @@ int runV11EngineRetireProtectionTests();
 int runSTG9ReclaimAccountingTests();
 // STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
 int runSTG11D18CrossfadeTests();
+// EngineInstanceCountTests.cpp (2026-10-30: live AudioEngine instance diagnostic)
+int runEngineInstanceCountTests();
 // RtMeasureRingTests.cpp (R-06 U1: fixed-length RT measurement ring, mechanics only)
 int runRtMeasureRingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
@@ -104814,6 +104944,10 @@ int runFpmM2();
 
     // R-06 / U1: リングの機械的性質のみを検証する（呼び出し点は持たない）。
     if (runRtMeasureRingTests() != 0)
+        return 1;
+
+    // 2026-10-30 (診断): 生存エンジン数カウンタの対称性を検証する。
+    if (runEngineInstanceCountTests() != 0)
         return 1;
 
     // ★ STG-11-D18-1: crossfade overlap guards.
