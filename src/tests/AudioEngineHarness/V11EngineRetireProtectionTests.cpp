@@ -1547,6 +1547,126 @@ static bool checkF1bRetireDeferOrderInvariance()
     return ok;
 }
 
+//==============================================================================
+// R-51 (2026-10-30) 再現実験: 2 エンジン共存時の owner 衝突
+//
+//   s_handleInvalidationOwner は static で、AudioEngine のコンストラクタが
+//   無条件に this で上書きする（AudioEngine.CtorDtor.cpp:108）。デストラクタは
+//   「自分が所有者のときだけ」CAS で nullptr に戻す（:372）。
+//   したがって 2 インスタンスが共存すると、
+//     - 後から生成した B が owner になり、A の core を B の台帳で
+//       探すため候補 0 件（invalidateForDestroy の targets == 0）→ pin を見ずに解放
+//     - B を先に破棄すると owner が nullptr に戻り、A 生存中に分岐 (i)
+//   が成立する。このテストは前者（owner 衝突）を実測する。
+//
+//   判定は既存の V1（checkF1bProductionRetireUnderPin）と同じ「pin 保持中に
+//   破棄が延期されたこと（deferredDestroyCount の増加）」。
+//   実測値は診断出力する（合否には使わない）。
+//==============================================================================
+static bool checkF1bTwoEngineOwnerCollision()
+{
+    AudioEngineHarness harnessA;
+    if (!harnessA.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-2E] harness A start failed\n");
+        return false;
+    }
+
+    AudioEngine& a = harnessA.engine();
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = a.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harnessA.stop();
+        return false;
+    }
+
+    bool deferObserved = false;
+    std::uint64_t before = 0;
+    std::uint64_t after = 0;
+    constexpr int kStepMs = 5;
+    constexpr int kTicks = 100;
+    {
+    auto pin = a.tryPinDSPHandle(handle);
+    if (!static_cast<bool>(pin))
+    {
+        std::fprintf(stderr, "[F1-b-2E] FAIL: could not pin in A\n");
+        harnessA.stop();
+        return false;
+    }
+
+    // A が生存している状態で B を生成する。
+    //   これで s_handleInvalidationOwner は B に上書きされる。
+    AudioEngineHarness harnessB;
+    if (!harnessB.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[F1-b-2E] harness B start failed\n");
+        harnessA.stop();
+        return false;
+    }
+
+    std::uint64_t minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(a);
+    if (minEpoch == 0)
+    {
+        (void)DeferredPublicationTestAccess::publishEpochForTest(a);
+        minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(a);
+    }
+    const auto retireEpoch = (minEpoch > 0) ? (minEpoch - 1) : std::uint64_t{0};
+    before = DeferredPublicationTestAccess::deferredDestroyCount(a);
+
+    DSPLifetimeManager mgr(a);
+    mgr.retire(raw, retireEpoch);
+    (void)DeferredPublicationTestAccess::publishEpochForTest(a);
+    a.tryReclaimResources();
+
+    after = before;
+    for (int i = 0; i < kTicks; ++i)
+    {
+        after = DeferredPublicationTestAccess::deferredDestroyCount(a);
+        if (after > before)
+        {
+            deferObserved = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kStepMs));
+    }
+
+    std::printf("[F1-b-2E] diag: pinnedInA=%u deferredCount %llu -> %llu resolve=%d\n",
+                (unsigned)DeferredPublicationTestAccess::pinnedCount(a, handle.slot),
+                (unsigned long long)before, (unsigned long long)after,
+                a.resolveDSPHandle(handle) != nullptr ? 1 : 0);
+
+    harnessB.stop();
+    } // pin をここで離す
+
+    // pin を離した後に A 側の後始末を回収する。
+    for (int i = 0; i < 40 && DeferredPublicationTestAccess::pendingReclaimCount(a) > 0; ++i)
+    {
+        DeferredPublicationTestAccess::tickReclaimForTest(a);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    // ★ A の登録を明展に閉じてから teardown する。main（修正前）では pin 保持中に
+    //   解放されているため、そのまま teardown すると二重解放になる。
+    //   invalidateHandleBeforeDestroy は registry のエントリを閉じるだけで、
+    //   解放済みメモリには触れない。
+    (void)DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(a, raw);
+    harnessA.stop();
+
+    if (!deferObserved)
+    {
+        std::fprintf(stderr,
+                     "[F1-b-2E] FAIL: a pinned core of engine A was not deferred while engine B owned"
+                     " the invalidation slot (count %llu -> %llu, waited %d ms)\n",
+                     (unsigned long long)before, (unsigned long long)after, kStepMs * kTicks);
+        return false;
+    }
+    std::printf("[F1-b-2E] two-engine owner collision: PASS (defer observed through engine A)\n");
+    return true;
+}
+
 static bool checkF1bProductionRetireUnderPin()
 {
     AudioEngineHarness harness;
@@ -2786,6 +2906,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1bProductionRetireUnderPin())
     {
         std::fprintf(stderr, "FAIL: checkF1bProductionRetireUnderPin (F1-b)\n");
+        hdOk = false;
+    }
+    if (!checkF1bTwoEngineOwnerCollision())
+    {
+        std::fprintf(stderr, "FAIL: checkF1bTwoEngineOwnerCollision (R-51 merged-main verification)\n");
         hdOk = false;
     }
 
