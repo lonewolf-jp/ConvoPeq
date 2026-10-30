@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-30 17:05:03
+> Generated: 2026-10-30 21:26:32
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -116,6 +116,7 @@
         │   ├── RetryScheduler.cpp
         │   ├── RetryScheduler.h
         │   ├── RetrySchedulerTypes.h
+        │   ├── RtMeasureRing.h
         │   ├── RuntimeBuilder.cpp
         │   ├── RuntimeBuilder.h
         │   ├── RuntimeBuildTypes.h
@@ -314,6 +315,7 @@
         │   │   ├── PolyphaseGainCandidateRef.h
         │   │   ├── PolyphaseGainFidelityTests.cpp
         │   │   ├── PublishPipelineIntegrationTests.cpp
+        │   │   ├── RtMeasureRingTests.cpp
         │   │   ├── SoakPublishIntegrationTests.cpp
         │   │   ├── STG11D10EQEnumGuardTests.cpp
         │   │   ├── STG11D11TotalGainFiniteTests.cpp
@@ -2990,6 +2992,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
+        src/tests/AudioEngineHarness/RtMeasureRingTests.cpp
     src/tests/AudioEngineHarness/V11ReaderReacquireTests.cpp
     src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp
         src/tests/AudioEngineHarness/STG9ReclaimAccountingTests.cpp
@@ -39986,6 +39989,156 @@ enum class RebuildTelemetryPolicy : uint8_t
     Replaceable,
     MustExecute
 };
+
+```
+
+### 📄 `src\audioengine\RtMeasureRing.h`
+
+```
+#pragma once
+
+//==============================================================================
+// R-06 / U1: RT 実時間計測のための固定長リング（**純追加**）
+//
+// 役割:
+//   RT スレッドから「起きたこと」を記録するための、固定長・静的確保・ロックなしのリング。
+//   RT 側で許されるのは push() の書き込みのみ。確保・ロック・書式化・I/O を行わない。
+//
+// U1 の範囲（Owner 指示 2026-10-30）:
+//   - 本ファイルの追加のみ。**呼び出し点は一切追加しない**。
+//   - RT 経路・既存音声処理・同期構造は変更しない。
+//   - したがって本ヘッダは U1 の時点では製品コードから参照されない（U2 以降で接続する）。
+//
+// 有効化:
+//   既定 OFF。環境変数 CONVOPEQ_RT_MEASURE=1 のときだけ有効。判定は最初の呼び出しで 1 回だけ行い、
+//   以後は static に固定する（RT 中に getenv を呼ばない）。
+//
+// 満杯時:
+//   上書きしない。あふれた分は捨てて dropped に計上する（測定値は「下限」であることを明示するため）。
+//
+// スレッド安全:
+//   単一書き手（RT）／単一読み手（非 RT）を前提とする。
+//   push() は write_ の release store、drain() は read_ の release store で公開する。
+//==============================================================================
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+#include "AtomicAccess.h"   // list.md [3.1]: \u88fd\u54c1\u30b3\u30fc\u30c9\u3067\u306f atomic \u306e\u30c9\u30c3\u30c8\u8a95\u751f\u3092\u76f4\u63a5\u547c\u3093\u3067\u306f\u306a\u3089\u306a\u3044\uff08convo:: \u30d8\u30eb\u30d1\u7d4c\u7531\uff09
+
+namespace convo {
+namespace rtmeasure {
+
+// 観測イベントの種類。値は診断出力の互換性のため明示する。
+enum EventKind : std::uint32_t
+{
+    kBlockBegin = 1,   // arg = ブロックサイズ
+    kBlockEnd   = 2,   // arg = 未使用（時刻差は非 RT 側で計算）
+    kAlloc      = 3,   // arg = 確保サイズの下位 32bit
+    kFree       = 4,   // arg = 未使用
+    kLockWait   = 5,   // arg = 待機 µs（下限）
+    kDropped    = 6    // 予約（リング自体は dropped カウンタで計上する）
+};
+
+struct Event
+{
+    std::uint64_t tsc  = 0;
+    std::uint32_t kind = 0;
+    std::uint32_t arg  = 0;
+};
+
+// 計測が有効か。最初の呼び出しで環境変数を 1 回だけ読み、以後は固定する。
+[[nodiscard]] inline bool enabled() noexcept
+{
+    static const bool on = []() {
+        const char* v = std::getenv("CONVOPEQ_RT_MEASURE");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
+
+// 固定長リング。静的領域に確保し、RT から安全に書き込める。
+class Ring
+{
+public:
+    static constexpr std::size_t kCapacity = 8192;
+
+    // RT 側から呼ぶ唯一の関数。ロック・確保・I/O・書式化を行わない。
+    void push(std::uint32_t kind, std::uint32_t arg, std::uint64_t tsc) noexcept
+    {
+        const std::uint64_t w = convo::consumeAtomic(write_, std::memory_order_relaxed);
+        const std::uint64_t r = convo::consumeAtomic(read_, std::memory_order_acquire);
+        if (w - r >= kCapacity)
+        {
+            // 上書きしない（古いイベントを残す）。捨てたことはカウンタで示す。
+            convo::fetchAddAtomic(dropped_, std::uint64_t{1}, std::memory_order_relaxed);
+            return;
+        }
+        storage_[static_cast<std::size_t>(w % kCapacity)] = Event{ tsc, kind, arg };
+        convo::publishAtomic(write_, w + 1, std::memory_order_release);
+    }
+
+    // 非 RT 側で回収する。out に n 件までコピーし、コピーした件数を返す。
+    std::size_t drain(Event* out, std::size_t n) noexcept
+    {
+        if (out == nullptr || n == 0)
+            return 0;
+        const std::uint64_t w = convo::consumeAtomic(write_, std::memory_order_acquire);
+        std::uint64_t r = convo::consumeAtomic(read_, std::memory_order_relaxed);
+        std::size_t copied = 0;
+        while (r < w && copied < n)
+        {
+            out[copied] = storage_[static_cast<std::size_t>(r % kCapacity)];
+            ++copied;
+            ++r;
+        }
+        convo::publishAtomic(read_, r, std::memory_order_release);
+        return copied;
+    }
+
+    [[nodiscard]] std::uint64_t written() const noexcept
+    {
+        return convo::consumeAtomic(write_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t consumed() const noexcept
+    {
+        return convo::consumeAtomic(read_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t dropped() const noexcept
+    {
+        return convo::consumeAtomic(dropped_, std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::size_t pending() const noexcept
+    {
+        const std::uint64_t w = convo::consumeAtomic(write_, std::memory_order_acquire);
+        const std::uint64_t r = convo::consumeAtomic(read_, std::memory_order_acquire);
+        return static_cast<std::size_t>(w - r);
+    }
+    void reset() noexcept
+    {
+        convo::publishAtomic(write_, std::uint64_t{0}, std::memory_order_release);
+        convo::publishAtomic(read_, std::uint64_t{0}, std::memory_order_release);
+        convo::publishAtomic(dropped_, std::uint64_t{0}, std::memory_order_release);
+    }
+
+    // プロセスに 1 つのリング（静的領域）。
+    static Ring& instance() noexcept
+    {
+        static Ring ring;
+        return ring;
+    }
+
+private:
+    Event storage_[kCapacity]{};
+    std::atomic<std::uint64_t> write_{0};
+    std::atomic<std::uint64_t> read_{0};
+    std::atomic<std::uint64_t> dropped_{0};
+};
+
+} // namespace rtmeasure
+} // namespace convo
 
 ```
 
@@ -103072,6 +103225,8 @@ int runV11EngineRetireProtectionTests();
 int runSTG9ReclaimAccountingTests();
 // STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
 int runSTG11D18CrossfadeTests();
+// RtMeasureRingTests.cpp (R-06 U1: fixed-length RT measurement ring, mechanics only)
+int runRtMeasureRingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
 // STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
 int runSTG11D12StateIntegerGuardTests();
@@ -104657,6 +104812,10 @@ int runFpmM2();
     if (runSTG9ReclaimAccountingTests() != 0)
         return 1;
 
+    // R-06 / U1: リングの機械的性質のみを検証する（呼び出し点は持たない）。
+    if (runRtMeasureRingTests() != 0)
+        return 1;
+
     // ★ STG-11-D18-1: crossfade overlap guards.
     if (runSTG11D18CrossfadeTests() != 0)
         return 1;
@@ -104739,6 +104898,182 @@ int runFpmM2();
     //   （test runner のみの措置・production コードには影響しない。）
     _exit(0);
     return 0;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\RtMeasureRingTests.cpp`
+
+```
+//==============================================================================
+// R-06 / U1: `convo::rtmeasure::Ring` の機械検証（非 RT・オフライン）
+//
+//   U1 は「RT から書き込めるリングを追加するだけ」で、呼び出し点を持たない。
+//   したがって検証できるのはリングの機械的な性質だけである。ここでは次を確かめる。
+//
+//     (1) push -> drain で順序と内容が保たれる
+//     (2) drain は n 件までで、残りは次回に残る
+//     (3) 満杯時は**上書きせず破棄**し、dropped に計上する（測定値が下限であることの根拠）
+//     (4) written / consumed / pending の整合
+//     (5) reset() で 0 に戻る
+//     (6) allowed()（環境変数の判定）が意図どおり
+//
+//   RT 文脈は使わない。単一スレッドで決定的に回す。
+//==============================================================================
+
+#include "audioengine/RtMeasureRing.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace {
+
+bool expect(const char* name, bool ok)
+{
+    if (!ok)
+        std::fprintf(stderr, "FAIL: RT-MEASURE-U1 %s\n", name);
+    return ok;
+}
+
+bool checkRoundTrip()
+{
+    convo::rtmeasure::Ring ring;
+    ring.reset();
+
+    constexpr std::uint32_t kKinds[] = {
+        convo::rtmeasure::kBlockBegin, convo::rtmeasure::kAlloc,
+        convo::rtmeasure::kLockWait,   convo::rtmeasure::kBlockEnd,
+    };
+    for (std::uint32_t i = 0; i < 4; ++i)
+        ring.push(kKinds[i], i * 10u, 1000ull + i);
+
+    std::vector<convo::rtmeasure::Event> out(8);
+    const std::size_t n = ring.drain(out.data(), out.size());
+
+    bool ok = true;
+    ok = expect("roundtrip count", n == 4) && ok;
+    ok = expect("roundtrip written", ring.written() == 4) && ok;
+    ok = expect("roundtrip consumed", ring.consumed() == 4) && ok;
+    ok = expect("roundtrip pending", ring.pending() == 0) && ok;
+    for (std::size_t i = 0; i < n && i < 4; ++i)
+    {
+        ok = expect("roundtrip kind", out[i].kind == kKinds[i]) && ok;
+        ok = expect("roundtrip arg", out[i].arg == static_cast<std::uint32_t>(i * 10u)) && ok;
+        ok = expect("roundtrip tsc", out[i].tsc == 1000ull + i) && ok;
+    }
+    return ok;
+}
+
+bool checkPartialDrain()
+{
+    convo::rtmeasure::Ring ring;
+    ring.reset();
+
+    for (std::uint32_t i = 0; i < 10; ++i)
+        ring.push(convo::rtmeasure::kAlloc, i, i);
+
+    std::vector<convo::rtmeasure::Event> out(10);
+
+    const std::size_t first = ring.drain(out.data(), 4);
+    bool ok = true;
+    ok = expect("partial first count", first == 4) && ok;
+    ok = expect("partial first arg", out[0].arg == 0u && out[3].arg == 3u) && ok;
+    ok = expect("partial pending after first", ring.pending() == 6) && ok;
+
+    const std::size_t second = ring.drain(out.data(), 100);
+    ok = expect("partial second count", second == 6) && ok;
+    ok = expect("partial second first arg", out[0].arg == 4u) && ok;
+    ok = expect("partial drained empty", ring.pending() == 0) && ok;
+    ok = expect("partial extra drain", ring.drain(out.data(), 4) == 0) && ok;
+    return ok;
+}
+
+bool checkOverflowDropsWithoutOverwrite()
+{
+    convo::rtmeasure::Ring ring;
+    ring.reset();
+
+    constexpr std::size_t kExtra = 10;
+    const std::size_t total = convo::rtmeasure::Ring::kCapacity + kExtra;
+    for (std::size_t i = 0; i < total; ++i)
+        ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
+
+    bool ok = true;
+    // written() は「リングに入った件数」。破棄分は dropped() に計上され、
+    // 両者の和が push 回数に等しくなる（取りこぼしの可視化）。
+    ok = expect("overflow written == capacity", ring.written() == convo::rtmeasure::Ring::kCapacity) && ok;
+    ok = expect("overflow dropped == kExtra", ring.dropped() == kExtra) && ok;
+    ok = expect("overflow written+dropped == pushes", ring.written() + ring.dropped() == total) && ok;
+    ok = expect("overflow pending == capacity", ring.pending() == convo::rtmeasure::Ring::kCapacity) && ok;
+
+    std::vector<convo::rtmeasure::Event> out(convo::rtmeasure::Ring::kCapacity + 1);
+    const std::size_t n = ring.drain(out.data(), out.size());
+    ok = expect("overflow drain capacity", n == convo::rtmeasure::Ring::kCapacity) && ok;
+
+    // 上書きしていないので、残っているのは「最初の capacity 件」である。
+    ok = expect("overflow keeps oldest (first)", out[0].tsc == 0ull) && ok;
+    ok = expect("overflow keeps oldest (last stored)",
+                out[convo::rtmeasure::Ring::kCapacity - 1].tsc
+                    == static_cast<std::uint64_t>(convo::rtmeasure::Ring::kCapacity - 1)) && ok;
+    return ok;
+}
+
+bool checkResetAndInstance()
+{
+    convo::rtmeasure::Ring ring;
+    ring.reset();
+    ring.push(convo::rtmeasure::kBlockBegin, 512, 42);
+    ring.drain(nullptr, 0); // no-op
+    ring.reset();
+
+    bool ok = true;
+    ok = expect("reset written", ring.written() == 0) && ok;
+    ok = expect("reset consumed", ring.consumed() == 0) && ok;
+    ok = expect("reset dropped", ring.dropped() == 0) && ok;
+    ok = expect("reset pending", ring.pending() == 0) && ok;
+    ok = expect("instance stable", &convo::rtmeasure::Ring::instance() == &convo::rtmeasure::Ring::instance())
+         && ok;
+    return ok;
+}
+
+bool checkEnabledFlag()
+{
+    // 既定（未設定）は OFF。設定したら ON。判定は 1 回だけなので、
+    // ここでは「プロセス起動時の状態」を壊さないよう、現在の値を読むだけにする。
+    const char* v = std::getenv("CONVOPEQ_RT_MEASURE");
+    const bool raw = (v != nullptr && v[0] == '1');
+    const bool cached = convo::rtmeasure::enabled();
+
+    bool ok = true;
+    // 最初の enabled() 呼び出しより前に環境が変わっていなければ一致する。
+    // テストはこの関数を最初に呼ぶため、通常は raw == cached になる。
+    if (!raw && !cached)
+        ok = expect("enabled default OFF", true) && ok;
+    else
+        ok = expect("enabled consistent with env", raw == cached) && ok;
+
+    std::printf("[RT-M] U1 ring: enabled=%d capacity=%zu\n",
+                cached ? 1 : 0,
+                convo::rtmeasure::Ring::kCapacity);
+    return ok;
+}
+
+} // namespace
+
+int runRtMeasureRingTests()
+{
+    bool ok = true;
+    ok = checkEnabledFlag() && ok;
+    ok = checkRoundTrip() && ok;
+    ok = checkPartialDrain() && ok;
+    ok = checkOverflowDropsWithoutOverwrite() && ok;
+    ok = checkResetAndInstance() && ok;
+
+    if (ok)
+        std::printf("RtMeasureRingTests: PASS (U1 ring mechanics only; no RT call sites)\n");
+    return ok ? 0 : 1;
 }
 
 ```
