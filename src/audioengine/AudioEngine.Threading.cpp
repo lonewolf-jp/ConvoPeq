@@ -1,18 +1,5 @@
 #include <JuceHeader.h>
 #include <algorithm>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-
-// ★ R-51 一時診断（CONVO_R51_DIAG=1 のときだけ stderr へ出す。既定は無効）。
-static bool r51DiagEnabled() noexcept
-{
-    static const bool enabled = []() {
-        const char* v = std::getenv("CONVO_R51_DIAG");
-        return v != nullptr && v[0] == '1';
-    }();
-    return enabled;
-}
 #include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
@@ -47,21 +34,9 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 
     if (owner != nullptr)
     {
-        const unsigned pinnedBefore = indexed
-            ? (unsigned)owner->dspHandleRuntime_.pinnedCount(entry.slot) : 0u;
-
         const bool canFree = indexed
             ? owner->invalidateHandleBeforeDestroyBySlot(entry.slot, entry.generation)
             : owner->invalidateHandleBeforeDestroy(p);
-
-        if (r51DiagEnabled())
-            std::fprintf(stderr,
-                         "[R51D] destroy p=%p indexed=%d slot=%u gen=%llu owner=%p pinnedBefore=%u "
-                         "canFree=%d thread=%u\n",
-                         p, indexed ? 1 : 0, (unsigned)entry.slot,
-                         (unsigned long long)entry.generation, (void*)owner,
-                         pinnedBefore, canFree ? 1 : 0,
-                         (unsigned)(std::uintptr_t)juce::Thread::getCurrentThreadId());
 
         if (!canFree)
         {
@@ -74,12 +49,6 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             return DestroyOutcome::Deferred;
         }
     }
-
-    if (owner == nullptr && r51DiagEnabled())
-        std::fprintf(stderr, "[R51D] destroy NO-OWNER p=%p indexed=%d slot=%u gen=%llu thread=%u\n",
-                     p, indexed ? 1 : 0, (unsigned)entry.slot,
-                     (unsigned long long)entry.generation,
-                     (unsigned)(std::uintptr_t)juce::Thread::getCurrentThreadId());
 
     eraseDestroyIndex(p);
 
