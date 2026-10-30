@@ -1,0 +1,193 @@
+# H-2-R1 (R-04) Release measurement in CI
+#
+# 目的: R-04 の事前登録済み合否基準（H2R1-ACCEPTANCE-CRITERIA-20261030.md）を
+#       「C3 = 5 回すべて終了コード 0」まで含めて充足させるための測定専用ワークフロー。
+#       基準そのもの（40 試行・5 回・追加負荷なし・C1 mixed_trials==0・
+#       C2 distinct_worlds==2*trials・C3 終了コード 0）は変更しない。
+#
+# なぜ CI か:
+#   ローカルでハーネスを直接叩くと
+#     - `D18-D structural ordering` が CONVOPEQ_SOURCE_ROOT 未設定で FAIL
+#       （CMakeLists.txt:2351 の set_tests_properties が ctest 経由でのみ供給する）
+#     - `D12-3 UI bit depth list stays in set` はテストの CWD から
+#       src/DeviceSettings.cpp を解決できないと FAIL
+#   となる。ctest 経由の実行は CWD = ビルドディレクトリで、両方が満たされる。
+#   これが「D18-D と D12-3 が通る環境」である。
+name: H2R1 Release measurement (R-04)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/h2r1-release-measurement-20261030
+
+permissions:
+  contents: read
+
+concurrency:
+  group: h2r1-release-measurement-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUILD_DIR: ${{ github.workspace }}/build-ci
+  ONEAPI_ROOT_DIR: "C:\\Program Files (x86)\\Intel\\oneAPI"
+
+jobs:
+  measure:
+    name: H2R1 / Release / 5 runs
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Export oneAPI environment
+        shell: pwsh
+        run: |
+          $oneapiRoot = $env:ONEAPI_ROOT_DIR
+          if (-not (Test-Path $oneapiRoot)) { throw "oneAPI root not found: $oneapiRoot" }
+          Write-Host "oneAPI root: $oneapiRoot"
+          "MKLROOT=$oneapiRoot\mkl\latest" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "IPPROOT=$oneapiRoot\ipp\latest" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$oneapiRoot\mkl\latest;$oneapiRoot\mkl\latest\lib\cmake\mkl;$oneapiRoot\ipp\latest;$oneapiRoot\ipp\latest\lib\cmake\ipp" |
+            Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Set up MSVC command line environment (cl)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Verify toolchain (fail closed)
+        shell: pwsh
+        run: |
+          $missing = @()
+          foreach ($tool in @('cl.exe', 'cmake.exe', 'ninja.exe')) {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { $missing += $tool }
+          }
+          if ($missing.Count -gt 0) { throw "Missing required build tools: $($missing -join ', ')" }
+          cl.exe 2>&1 | Select-Object -First 1
+          cmake --version | Select-Object -First 1
+          ninja --version
+          Write-Host "MKLROOT=$env:MKLROOT"
+          Write-Host "IPPROOT=$env:IPPROOT"
+
+      - name: Configure (Release, MKL required)
+        shell: pwsh
+        run: |
+          cmake -S . -B $env:BUILD_DIR -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCONVOPEQ_REQUIRE_MKL=ON 2>&1 | Tee-Object -FilePath configure.log
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
+          $mkl = Select-String -Path configure.log -Pattern 'MKL: found'
+          $ipp = Select-String -Path configure.log -Pattern 'Intel IPP found'
+          if (-not $mkl) { throw 'CMake did not report MKL as found (CONVOPEQ_REQUIRE_MKL=ON).' }
+          if (-not $ipp) { throw 'CMake did not report IPP as found.' }
+          $mkl | ForEach-Object { Write-Host $_.Line }
+          $ipp | ForEach-Object { Write-Host $_.Line }
+
+      # JuceHeader.h は ConvoPeq ターゲットの生成物。windows-msvc-build.yml と同じ理由で
+      # ビルド順序を明示的に分ける。
+      - name: Build Release (ConvoPeq)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cmake --build $env:BUILD_DIR --config Release --target ConvoPeq 2>&1 |
+            Tee-Object -FilePath build-product.log
+          $rc = $LASTEXITCODE
+          $errors = Select-String -Path build-product.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
+          if ($errors) {
+            '### Compile/link errors (ConvoPeq)' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            $errors | ForEach-Object { $_.Line } | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          }
+          exit $rc
+
+      - name: Build Release (AudioEngineHarness)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cmake --build $env:BUILD_DIR --config Release --target AudioEngineHarness 2>&1 |
+            Tee-Object -FilePath build-harness.log
+          $rc = $LASTEXITCODE
+          $errors = Select-String -Path build-harness.log -Pattern 'error (C\d+|LNK\d+)' | Select-Object -First 40
+          if ($errors) {
+            '### Compile/link errors (AudioEngineHarness)' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            $errors | ForEach-Object { $_.Line } | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          }
+          exit $rc
+
+      # 5 回測定。ctest 経由 = CONVOPEQ_SOURCE_ROOT が CMake から供給される（D18-D が成立）、
+      # CWD はビルドディレクトリ（D12-3 が src/DeviceSettings.cpp を解決できる）。
+      - name: Measure H2R1 (5 runs)
+        shell: pwsh
+        env:
+          H2R1_MEASURE: '1'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $rows = @()
+          $allOk = $true
+          foreach ($i in 1..5) {
+            $log = "h2r1-run$i.log"
+            $t0 = Get-Date
+            ctest --test-dir $env:BUILD_DIR -C Release -R '^AudioEngineHarness$' --output-on-failure *> $log
+            $rc = $LASTEXITCODE
+            $sec = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+
+            $line = (Select-String -Path $log -Pattern '\[H2R1\] trials=' | Select-Object -Last 1)
+            $text = if ($line) { $line.Line.Trim() } else { '' }
+            if (-not $text) { $text = '(no [H2R1] line)' }
+
+            $mMixed  = [regex]::Match($text, 'mixed_trials=(\d+)')
+            $mTrials = [regex]::Match($text, '(?<![A-Za-z_])trials=(\d+)')
+            $mWorlds = [regex]::Match($text, 'distinct_worlds=(\d+)')
+
+            $verdict = 'PASS'
+            if ($rc -ne 0) { $verdict = 'FAIL(rc)'; $allOk = $false }
+            if (-not ($mMixed.Success -and $mTrials.Success -and $mWorlds.Success)) {
+              $verdict = 'INCONCLUSIVE(no parsable [H2R1])'; $allOk = $false
+            } else {
+              $mixed  = [int]$mMixed.Groups[1].Value
+              $trials = [int]$mTrials.Groups[1].Value
+              $worlds = [int]$mWorlds.Groups[1].Value
+              if ($mixed -ne 0) { $verdict = 'FAIL(C1)'; $allOk = $false }
+              if ($worlds -ne (2 * $trials)) { $verdict = 'INCONCLUSIVE(C2)'; $allOk = $false }
+            }
+            Write-Host ("run {0}: rc={1} {2}s :: {3} :: {4}" -f $i, $rc, $sec, $text, $verdict)
+            $rows += [pscustomobject]@{ Run = $i; Rc = $rc; Sec = $sec; H2R1 = $text; Verdict = $verdict }
+          }
+
+          '### H2R1 measurement (R-04)' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          '' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          '| run | rc | sec | mixed_trials | distinct_worlds | trials | verdict |' |
+            Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          '|---|---:|---:|---|---|---|---|' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          foreach ($r in $rows) {
+            $mm = [regex]::Match($r.H2R1, 'mixed_trials=(\d+)')
+            $tt = [regex]::Match($r.H2R1, '(?<![A-Za-z_])trials=(\d+)')
+            $ww = [regex]::Match($r.H2R1, 'distinct_worlds=(\d+)')
+            ("| {0} | {1} | {2} | {3} | {4} | {5} | {6} |" -f $r.Run, $r.Rc, $r.Sec,
+              $(if ($mm.Success) { $mm.Groups[1].Value } else { '?' }),
+              $(if ($ww.Success) { $ww.Groups[1].Value } else { '?' }),
+              $(if ($tt.Success) { $tt.Groups[1].Value } else { '?' }),
+              $r.Verdict) | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          }
+          '' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          '' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          ("C1/C2/C3 (5/5 PASS): **{0}**" -f $(if ($allOk) { 'PASS' } else { 'FAIL' })) |
+            Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          if (-not $allOk) { exit 1 }
+
+      - name: Upload measurement logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2r1-release-measurement-logs
+          path: |
+            configure.log
+            build-product.log
+            build-harness.log
+            h2r1-run*.log
+          if-no-files-found: warn
