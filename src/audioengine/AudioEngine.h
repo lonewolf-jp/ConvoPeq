@@ -5538,6 +5538,17 @@ public:
 
     // ★ Engine インスタンス識別子 (全局一意。再生成後もユニーク)
     static std::atomic<uint64_t> s_nextEngineInstanceId_;
+
+    // ★ 2026-10-30 (別変更単位 / 診断のみ): プロセス内で生存している AudioEngine の件数。
+    //   目的は「複数インスタンスが存在した事実を観測すること」だけ。生成の禁止・例外化・assert は行わない。
+    //   インクリメントはコンストラクタの末尾（正常に成立した実例だけ）、デクリメントはデストラクタの末尾で行う。
+    static std::atomic<int> s_engineInstanceCount_;
+
+    // ★ テスト専用の読み取りアクセサ（実行時の件数を確認するため）。
+    [[nodiscard]] static int engineInstanceCountForTest() noexcept
+    {
+        return convo::consumeAtomic(s_engineInstanceCount_, std::memory_order_acquire);
+    }
     uint64_t engineInstanceId_{0};
 
     // ==================================================================

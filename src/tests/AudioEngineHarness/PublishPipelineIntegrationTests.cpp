@@ -72,6 +72,8 @@ int runV11EngineRetireProtectionTests();
 int runSTG9ReclaimAccountingTests();
 // STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
 int runSTG11D18CrossfadeTests();
+// EngineInstanceCountTests.cpp (2026-10-30: live AudioEngine instance diagnostic)
+int runEngineInstanceCountTests();
 // RtMeasureRingTests.cpp (R-06 U1: fixed-length RT measurement ring, mechanics only)
 int runRtMeasureRingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
@@ -1661,6 +1663,10 @@ int runFpmM2();
 
     // R-06 / U1: リングの機械的性質のみを検証する（呼び出し点は持たない）。
     if (runRtMeasureRingTests() != 0)
+        return 1;
+
+    // 2026-10-30 (診断): 生存エンジン数カウンタの対称性を検証する。
+    if (runEngineInstanceCountTests() != 0)
         return 1;
 
     // ★ STG-11-D18-1: crossfade overlap guards.
