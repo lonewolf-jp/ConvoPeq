@@ -1,5 +1,19 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 #include <JuceHeader.h>
 #include <algorithm>
+// ★ R-51 計測専用診断（CONVO_R51_DIAG=1 のときだけ stderr へ出力。既定は無効）。
+//   製品の振る舞いは一切変えない。分岐の到達状況を測るための記録のみ。
+static bool r51DiagEnabled() noexcept
+{
+    static const bool enabled = []() {
+        const char* v = std::getenv("CONVO_R51_DIAG");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
+
 #include "AtomicAccess.h"
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"             // ★ D162-1R-B: footprint 破壊側ログ
@@ -23,9 +37,20 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
     if (p == nullptr)
         return DestroyOutcome::Destroyed;
 
-    if (auto* owner = convo::consumeAtomic(s_handleInvalidationOwner, std::memory_order_acquire))
+    AudioEngine* const r51Owner =
+        convo::consumeAtomic(s_handleInvalidationOwner, std::memory_order_acquire);
+    if (r51DiagEnabled() && r51Owner == nullptr)
+        std::fprintf(stderr, "[R51D] D-NOOWNER p=%p thread=%u\n", p,
+                     (unsigned)(std::uintptr_t)juce::Thread::getCurrentThreadId());
+
+    if (auto* owner = r51Owner)
     {
-        if (!owner->invalidateHandleBeforeDestroy(p))
+        const bool r51CanFree = owner->invalidateHandleBeforeDestroy(p);
+        if (r51DiagEnabled())
+            std::fprintf(stderr, "[R51D] D p=%p owner=%d canFree=%d thread=%u\n",
+                         p, 1, r51CanFree ? 1 : 0,
+                         (unsigned)(std::uintptr_t)juce::Thread::getCurrentThreadId());
+        if (!r51CanFree)
         {
             // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
             //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。

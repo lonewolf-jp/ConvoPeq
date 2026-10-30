@@ -1,8 +1,21 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 #include "ISRDSPHandle.h"
 #include "AtomicAccess.h"
 
 #include <cassert>
 #include <fstream>
+// ★ R-51 計測専用診断（本ファイル内限。CONVO_R51_DIAG=1 のときだけ stderr）
+static bool r51DiagEnabledIsh() noexcept
+{
+    static const bool enabled = []() {
+        const char* v = std::getenv("CONVO_R51_DIAG");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
+
 
 namespace convo {
 namespace isr {
@@ -369,13 +382,25 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
                                                                   std::memory_order_acquire) };
         }
     }
+    if (r51DiagEnabledIsh())
+        std::fprintf(stderr, "[R51D] I p=%p targets=%zu pinned0=%u timeoutMs=%d\n",
+                     dspInstance, targetCount,
+                     targetCount != 0 ? (unsigned)pinnedCount(targets[0].slot) : 0u,
+                     timeoutMs);
+    if (r51DiagEnabledIsh() && targetCount == 0)
+        std::fprintf(stderr, "[R51D] I-ZERO p=%p\n", dspInstance);
+
     for (size_t k = 0; k < targetCount; ++k)
         (void)closePinsForDestroy(targets[k].slot, targets[k].generation);
 
     // 2) 既存 pin の消滅を待つ（受付は閉じているので増えない）。
     //    タイムアウトしたら **解放しない**。
     if (!waitForPinsToDrain(targets.data(), targetCount, timeoutMs))
+    {
+        if (r51DiagEnabledIsh())
+            std::fprintf(stderr, "[R51D] I-TIMEOUT p=%p targets=%zu\n", dspInstance, targetCount);
         return false;
+    }
 
     // 3) instance を消す（ここに来た時点で pin 保持者はいない）。
     {
