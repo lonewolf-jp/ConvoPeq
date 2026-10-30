@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
+#include "RtMeasureRing.h"   // R-06 / U2: RT 計測の初期化（非 RT・RT 開始前）
 
 namespace {
 [[maybe_unused]] void diagLog(const juce::String& message)
@@ -12,6 +13,12 @@ namespace {
 
 void AudioEngine::initialize()
 {
+    // R-06 / U2 (P1/P3/P4): RT 開始前の非 RT で計測の初期化を完了させる。
+    //   - 環境変数の読み取りと publish（RT 側は atomic load のみ）
+    //   - 実行時 lock-free 確認と TSC 校正（失敗時は計測を無効化 = fail-closed）
+    //   - リングの事前構築・事前タッチ（関数ローカル static ガードを使わない）
+    convo::rtmeasure::initializeFromEnvironment();
+
     crossfadeRuntime_.reset();
     publishLatencyDelayAtomics(0, 0);
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
