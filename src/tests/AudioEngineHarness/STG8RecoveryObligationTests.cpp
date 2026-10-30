@@ -23,6 +23,29 @@
 #if JUCE_WINDOWS
 #include <windows.h>
 
+namespace convo { namespace isr {
+struct R8PublicationProgressTestAccess
+{
+    static void ageProgress(RuntimePublicationOrchestrator& o, std::uint64_t ageUs) noexcept
+    {
+        convo::publishAtomic(o.m_lastProgressTimestampUs,
+                             convo::getCurrentTimeUs() - ageUs,
+                             std::memory_order_release);
+    }
+
+    // ★ R-03 (2026-10-30): deferred slot が保持している recovery obligation ID。
+    //   deferred request の存在と recovery obligation の存在は同じ意味ではない（非 recovery の
+    //   publish は obligation ID 0 で deferred になり得る）。D2b は「recovery 由来の deferred の耐久喪失」
+    //   だけを判定対象にするため、この ID を読む。読み取りのみで行為変更はない。
+    [[nodiscard]] static std::uint64_t deferredObligationId(RuntimePublicationOrchestrator& o) noexcept
+    {
+        return o.deferredSlot_.has_value()
+            ? o.deferredSlot_->request.recoveryObligationId
+            : std::uint64_t{0};
+    }
+};
+} } // namespace convo::isr
+
 // R8 diagnostic: unbuffered per-test trace. A 0xC0000005 in this suite loses the unflushed
 // stdout tail, so the last stderr line is the reliable marker of the running test.
 struct Stg8Trace
@@ -327,7 +350,101 @@ struct D2bSample
     unsigned long long overwrite       = 0;   // deferred-overwrite count (monotonic)
     unsigned long long recSeq          = 0;   // last recovery publish sequence
     unsigned long long redrive         = 0;   // recovery retry / redrive count (monotonic)
+    // ★ R-03: deferred slot が保持している recovery obligation ID（0 = 非 recovery 由来）。
+    unsigned long long oblId           = 0;
 };
+
+// ★ R-03 (2026-10-30): D2b の判定規則を純関数に抽出する。
+//   ウィンドル側と下の自己検証が同じ規則を使うことを保証するため（評価強度の差を作らない）。
+//   製品状態は一切触らない。
+//
+//   判定の主語: recovery 由来の deferred request（oblId != 0）が recovery obligation を失うこと。
+//   非 recovery の deferred（oblId == 0）は、その時点でこのテストの前提が失われたことを意味する（premise lost）。
+struct D2bSampleVerdict
+{
+    bool premiseLost = false;   // このサンプルを取得した時点の新しい前提状態
+    bool bad         = false;   // 判定対象の obligation 喪失を示すサンプルか
+};
+
+[[nodiscard]] static D2bSampleVerdict stg8D2bDecide(bool premiseLostAlready,
+                                                   bool deferred,
+                                                   unsigned long long oblId,
+                                                   unsigned long long live) noexcept
+{
+    D2bSampleVerdict v;
+    v.premiseLost = premiseLostAlready || (deferred && oblId == 0);
+    const bool recoveryDeferred = (deferred && oblId != 0);
+    // recovery 由来: L == 1 を厳密に要求（従来と同じ強度）。
+    // その他（deferred なし、または前提喪失前の一時点）: 従来の条件をそのまま維持。
+    v.bad = !v.premiseLost
+        && (recoveryDeferred ? (live != 1)
+                             : (live != 1 || !deferred));
+    return v;
+}
+
+// 判定規則の自己検証。「recovery 由来の耐久喪失を検出できること」を
+// 実行ごとに機械的に確かめる（テスト強度を下げていないことの証拠）。
+static bool stg8D2bVerdictSelfCheck()
+{
+    bool ok = true;
+    auto expect = [&ok](const char* name, bool got, bool want) {
+        if (got != want)
+        {
+            std::fprintf(stderr, "[D2B-SELFCHECK] FAIL: %s (got=%d want=%d)\n",
+                         name, got ? 1 : 0, want ? 1 : 0);
+            ok = false;
+        }
+    };
+
+    // (1) recovery 由来 + L==1 = 保持されている（bad ではない）
+    {
+        const auto v = stg8D2bDecide(false, true, 7u, 1u);
+        expect("recovery retained is not bad", v.bad, false);
+        expect("recovery retained keeps premise", v.premiseLost, false);
+    }
+    // (2) recovery 由来 + L==0 = 検出すべき異常（従来どおり FAIL 側）
+    {
+        const auto v = stg8D2bDecide(false, true, 7u, 0u);
+        expect("recovery origin loss IS bad", v.bad, true);
+    }
+    // (3) 非 recovery の deferred は前提喪失として対象外（単体では FAIL にしない）
+    {
+        const auto v = stg8D2bDecide(false, true, 0u, 0u);
+        expect("non-recovery deferred loses premise", v.premiseLost, true);
+        expect("non-recovery deferred is not bad", v.bad, false);
+    }
+    // (4) deferred なし + L==1 は bad（従来の条件を維持）
+    {
+        const auto v = stg8D2bDecide(false, false, 0u, 1u);
+        expect("no deferred with live obligation is bad", v.bad, true);
+    }
+    // (5) deferred なし + L==0 も bad（従来の条件）
+    {
+        const auto v = stg8D2bDecide(false, false, 0u, 0u);
+        expect("no deferred without obligation is bad", v.bad, true);
+    }
+    // (6) 前提喪失後は、その後に生じた L==0 を新規に数えない（対象外）
+    {
+        const auto v = stg8D2bDecide(true, true, 7u, 0u);
+        expect("after premise lost no new bad", v.bad, false);
+    }
+    // (7) 耐久判定: recovery 由来の bad が 250 ms 以上継けば durable（FAIL）
+    {
+        constexpr long long kDurableBadMs = 250;
+        long long streak = 0;
+        bool bad = false;
+        for (int i = 0; i < 60; ++i)          // 5 ms 間隔 × 60 = 300 ms 分
+        {
+            const auto v = stg8D2bDecide(false, true, 7u, 0u);
+            bad = v.bad;
+            if (bad) streak += 5;
+        }
+        expect("durable recovery loss reaches the threshold", streak >= kDurableBadMs, true);
+    }
+    if (ok)
+        std::printf("[D2B-SELFCHECK] PASS (7 cases: recovery-origin loss still FAILs)\n");
+    return ok;
+}
 
 template <typename OrchestratorT>
 static D2bSample stg8D2bSample(AudioEngine& e, OrchestratorT& orch, long long tMs) noexcept
@@ -349,6 +466,7 @@ static D2bSample stg8D2bSample(AudioEngine& e, OrchestratorT& orch, long long tM
     s.overwrite = orch.deferredOverwriteCount();
     s.recSeq    = static_cast<unsigned long long>(orch.recoveryPublishSeq());
     s.redrive   = stg8RedriveCount(e);
+    s.oblId     = convo::isr::R8PublicationProgressTestAccess::deferredObligationId(orch);
     return s;
 }
 
@@ -394,6 +512,11 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
     AudioEngine& e = h.engine();
     auto& orch = DeferredPublicationTestAccess::orchestrator(e);
     bool ok = true;
+
+    // ★ R-03: 判定規則の自己検証。recovery 由来の耐久喪失を検出できることを
+    //   各実行で確かめる（テスト強度を下げていないことの常時証拠）。
+    if (!stg8D2bVerdictSelfCheck())
+        ok = false;
 
     if (!stg8EnsureAuthoritative(e))
     {
@@ -445,6 +568,28 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
     // now about a DURABLE loss:
     //   - a continuous non-retained streak >= kDurableBadMs fails;
     //   - a bad end snapshot is given kRecoveryBudgetMs to recover before failing.
+    //
+    // R-03 (2026-10-30) — SUBJECT OF THIS TEST
+    // ---------------------------------------------------------------------------------
+    // D2b detects ONE thing: the durable loss of a **recovery-originated deferred request**,
+    // i.e. a deferred slot that is still holding a live recovery obligation
+    // (deferredSlot_.request.recoveryObligationId != 0) whose obligation count drops to 0
+    // while the deferred request is still retained.
+    //
+    // It does NOT claim that "deferred request present" implies "recovery obligation present".
+    // RuntimePublicationOrchestrator::enqueueDeferred() evicts the previous slot and
+    // terminalizes its recovery obligation as StaleSuperseded (RuntimePublicationOrchestrator.cpp
+    // :542-549) while the *new* request may be an ordinary (non-recovery) publication with
+    // recoveryObligationId == 0. The result is the perfectly legal state
+    // `L == 0 && hasDeferred == 1`, which no production consumer treats as an error
+    // (RuntimeHealthMonitor::checkPublicationStall() judges deferred work by age/stall only).
+    //
+    // So: samples whose deferred request carries obligation ID 0 are out of scope. Once such a
+    // request is observed the premise of this test is gone ("premise lost"); the samples are
+    // still counted and reported ([D2B-ORIGIN] / [D2B-SKIP]) but they no longer contribute new
+    // bad streaks. Everything observed BEFORE the premise was lost still counts, so a real
+    // recovery-originated loss is still detected (the detection ability is unchanged, not
+    // weakened: recovery-origin samples keep the strict `L == 1` requirement).
     constexpr long long kDurableBadMs = 250;     // ~23 audio blocks; a real loss is permanent
     constexpr long long kRecoveryBudgetMs = 1000;
     long long maxBadStreakMs = 0;
@@ -455,6 +600,14 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
     long long lastBadMs = -1;
     int       deferredTransitions = 0;
     int       badSamples = 0;
+    // ★ R-03 (2026-10-30): D2b の主語は「recovery 由来の deferred request」である。
+    //   非 recovery の publish は obligation ID 0 で deferred になり得、その区間は
+    //   recovery obligation の耐久性判定の対象外とする（前提喪失 = premise lost）。
+    //   前提喪失後も、それまでに観測した bad streak は引き続き判定に使う（検出能力を落とさない）。
+    bool      premiseLost = false;
+    long long premiseLostMs = -1;
+    long long recoverySamples = 0;
+    long long nonRecoverySamples = 0;
     {
         const auto t0 = std::chrono::steady_clock::now();
         bool bad = false;
@@ -475,7 +628,17 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                 ++deferredTransitions;
             prevDeferred = s.deferred;
 
-            if (s.live != 1 || s.deferred == 0)
+            // ★ R-03: 判定規則は stg8D2bDecide()（下の自己検証と同一）。
+            const auto verdictSample = stg8D2bDecide(premiseLost, s.deferred != 0, s.oblId, s.live);
+            if (verdictSample.premiseLost && !premiseLost)
+                premiseLostMs = tMs;
+            premiseLost = verdictSample.premiseLost;
+            if (s.deferred != 0 && s.oblId != 0)
+                ++recoverySamples;
+            else if (s.deferred != 0)
+                ++nonRecoverySamples;
+            const bool badNow = verdictSample.bad;
+            if (badNow)
             {
                 ++badSamples;
                 if (!bad)
@@ -526,7 +689,8 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                     l.stage, l.maxDeferredAgeMs);
         std::printf("[D2b-BAD] iter=%d streak[%lld..%lld] sub=+%llu pub=+%llu ret=+%llu"
                     " stage %d->%d age %llu->%llu stalled=%d maxAge=%llu maxPending=%llu"
-                    " maxBacklog=%llu overwrite=%llu->%llu recSeq=%llu->%llu redrive=%llu->%llu\n",
+                    " maxBacklog=%llu overwrite=%llu->%llu recSeq=%llu->%llu redrive=%llu->%llu"
+                    " oblId=%llu->%llu\n",
                     iteration, firstBadMs, lastBadMs,
                     lastBad.submitted - firstBad.submitted,
                     lastBad.published - firstBad.published,
@@ -536,18 +700,26 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                     stalledSamples, maxAge, maxPending, maxBacklog,
                     firstBad.overwrite, lastBad.overwrite,
                     firstBad.recSeq, lastBad.recSeq,
-                    firstBad.redrive, lastBad.redrive);
+                    firstBad.redrive, lastBad.redrive,
+                    firstBad.oblId, lastBad.oblId);
         const char* csvPath = std::getenv("CONVOPEQ_STG8_D2B_CSV");
         if (csvPath != nullptr && *csvPath != '\0')
             stg8D2bWriteCsv(csvPath, iteration, samples);
     }
+
+    // ★ R-03: 実行ごとに、判定対象（recovery 由来）と対象外（非 recovery 由来）のサンプル数と
+    //   前提喪失の有無を出力する（後から「対象を実際に測っていたか」を確認できるようにする）。
+    std::printf("[D2B-ORIGIN] iter=%d recoverySamples=%lld nonRecoverySamples=%lld"
+                " premiseLost=%d atMs=%lld\n",
+                iteration, recoverySamples, nonRecoverySamples,
+                premiseLost ? 1 : 0, premiseLostMs);
 
     // Single snapshot decides the verdict; the diagnostic prints THIS snapshot only.
     auto liveFinal = stg8LiveCount(e);
     auto deferredFinal = orch.hasDeferredRequest();
     long long endBadMs = 0;
 
-    if (liveFinal != 1 || !deferredFinal)
+    if (!premiseLost && (liveFinal != 1 || !deferredFinal))
     {
         // Give the obligation a bounded chance to be re-armed before calling it durable.
         const auto t0 = std::chrono::steady_clock::now();
@@ -566,8 +738,10 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
         }
     }
 
+    // ★ R-03: streak は前提喪失前に測定したものであり常に判定に使う。
+    //   終了スナップショットの引き形は、前提が保たれている場合のみ適用する。
     const bool durableLoss =
-        (maxBadStreakMs >= kDurableBadMs) || (liveFinal != 1 || !deferredFinal);
+        (maxBadStreakMs >= kDurableBadMs) || (!premiseLost && (liveFinal != 1 || !deferredFinal));
 
     if (durableLoss)
     {
@@ -576,11 +750,23 @@ static bool stg8RunD2bOnce(int iteration, bool trace)
                 std::chrono::steady_clock::now() - d2bWindowT0).count());
         std::fprintf(stderr,
                      "[STG-8-D2b] FAIL: over-terminalized (iter %d, snapshot L=%llu hasDeferred=%d,"
-                     " maxBadStreakMs=%lld, endBadMs=%lld, windowMs=%lld, trace=%d)\n",
+                     " maxBadStreakMs=%lld, endBadMs=%lld, windowMs=%lld, trace=%d,"
+                     " recoverySamples=%lld nonRecoverySamples=%lld premiseLost=%d oblId=%llu)\n",
                      iteration,
                      (unsigned long long)liveFinal, deferredFinal ? 1 : 0,
-                     maxBadStreakMs, endBadMs, d2bWindowMs, trace ? 1 : 0);
+                     maxBadStreakMs, endBadMs, d2bWindowMs, trace ? 1 : 0,
+                     recoverySamples, nonRecoverySamples, premiseLost ? 1 : 0,
+                     lastBad.oblId);
         ok = false;
+    }
+    else if (premiseLost)
+    {
+        // premise lost: 非 recovery 由来の deferred が slot を佔めたため、
+        //   この区間の obligation 欠損は recovery obligation の耐久喪失とは言えない。
+        std::printf("[D2B-SKIP] iter=%d premise lost at ms=%lld (non-recovery deferred request"
+                    " overwrote the slot); recoverySamples=%lld nonRecoverySamples=%lld"
+                    " longestBad_ms=%lld\n",
+                    iteration, premiseLostMs, recoverySamples, nonRecoverySamples, maxBadStreakMs);
     }
     else if (maxBadStreakMs > 0 || endBadMs > 0)
     {
@@ -1401,17 +1587,7 @@ static bool checkR8C1RaceWithTeardown()
 //   the production path.
 //   Pre-fix behaviour: the clear would leave the obligation live (L=1, hasDeferred=0).
 //==============================================================================
-namespace convo { namespace isr {
-struct R8PublicationProgressTestAccess
-{
-    static void ageProgress(RuntimePublicationOrchestrator& o, std::uint64_t ageUs) noexcept
-    {
-        convo::publishAtomic(o.m_lastProgressTimestampUs,
-                             convo::getCurrentTimeUs() - ageUs,
-                             std::memory_order_release);
-    }
-};
-} } // namespace convo::isr
+
 
 static bool checkR8PublicationStallDetectorTerminalizes()
 {
