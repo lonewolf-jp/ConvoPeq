@@ -170,7 +170,11 @@ jobs:
           foreach ($i in 1..5) {
             $log = "h2r1-run$i.log"
             $t0 = Get-Date
-            ctest --test-dir $env:BUILD_DIR -C Release -R '^AudioEngineHarness$' --output-on-failure *> $log
+            # ★ -V（常時詳細）で実行する。--output-on-failure は「失敗時だけ出力」
+            #   なので、成功した実行の [H2R1] 行がログに残らない（実測: 5/5 で rc=0 だが
+            #   [H2R1] 行がなく INCONCLUSIVE になった）。-V にすることで、各回の計測値を
+            #   確実に残す。合否条件（rc・試行数・C1・C2）は変更しない。
+            ctest --test-dir $env:BUILD_DIR -C Release -R '^AudioEngineHarness$' -V *> $log
             $rc = $LASTEXITCODE
             $sec = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
 
