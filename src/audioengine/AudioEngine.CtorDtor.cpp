@@ -18,6 +18,15 @@ void diagLog(const juce::String& message)
 
 // ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+
+// ★ 2026-10-30 (別変更単位): 生存エンジン数の診断カウンタ。診断のみで、振る舞いは変えない。
+std::atomic<int> AudioEngine::s_engineInstanceCount_{0};
+
+namespace
+{
+// 警告の重複抑制用（最初の 1 回だけ出す）。
+std::atomic<bool> s_engineMultiInstanceWarned{false};
+}
 // ★ F2' (2026-10-25): destroyDSPCoreNode（static）から解放直前のハンドル無効化を行うための
 //   「現在のエンジン」。製品はプロセス内 1 エンジン、テストは逐次生成。
 std::atomic<AudioEngine*> AudioEngine::s_handleInvalidationOwner{nullptr};
@@ -110,6 +119,24 @@ AudioEngine::AudioEngine()
     // ★ F2' (2026-10-25): destroyDSPCoreNode は static（EBR の関数ポインタ）なので this を
     //   持てない。解放直前のハンドル無効化のために「今生きているエンジン」を 1 つ公開する。
     convo::publishAtomic(s_handleInvalidationOwner, this, std::memory_order_release);
+
+    // ★ 2026-10-30 (診断): 正常に成立した実例をカウントする。
+    //   複数インスタンスは許容する（禁止・例外化・assert はしない）。非 RT 経路で 1 回だけ警告する。
+    {
+        const int liveCount = convo::fetchAddAtomic(s_engineInstanceCount_, 1,
+                                                     std::memory_order_acq_rel) + 1;
+        if (liveCount > 1)
+        {
+            bool expected = false;
+            if (convo::compareExchangeAtomic(s_engineMultiInstanceWarned, expected, true,
+                                             std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                juce::Logger::writeToLog(juce::String::formatted(
+                    "[ENGINE_MULTI_INSTANCE] %d AudioEngine instances are alive in this process",
+                    liveCount));
+            }
+        }
+    }
 }
 
 AudioEngine::~AudioEngine()
@@ -382,6 +409,11 @@ AudioEngine::~AudioEngine()
     }
 
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
+
+    // ★ 2026-10-30 (診断): コンストラクタのインクリメントと対称に、デストラクタの最後で減算する。
+    //   ここまでで drain・索引解除・所有者解除が完了しているため、「生存中」として数える対象は
+    //   実際に使用可能なインスタンスと一致する。
+    (void)convo::fetchSubAtomic(s_engineInstanceCount_, 1, std::memory_order_acq_rel);
 }
 
 // [work37 Phase 9.16/9.44] 正常 publish 完了時 — RollbackToLastHealthyWorld + LearnerRollback

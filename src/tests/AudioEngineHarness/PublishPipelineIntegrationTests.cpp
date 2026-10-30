@@ -72,6 +72,8 @@ int runV11EngineRetireProtectionTests();
 int runSTG9ReclaimAccountingTests();
 // STG11D18CrossfadeTests.cpp (★ STG-11-D18-1: crossfade overlap guards)
 int runSTG11D18CrossfadeTests();
+// EngineInstanceCountTests.cpp (2026-10-30: live AudioEngine instance diagnostic)
+int runEngineInstanceCountTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
 // STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
 int runSTG11D12StateIntegerGuardTests();
@@ -1655,6 +1657,10 @@ int runFpmM2();
 
     // ★ STG-9-D1 / RC-1: reclaim accounting 終端回帰（新規 CTest target なし）。
     if (runSTG9ReclaimAccountingTests() != 0)
+        return 1;
+
+    // 2026-10-30 (診断): 生存エンジン数カウンタの対称性を検証する。
+    if (runEngineInstanceCountTests() != 0)
         return 1;
 
     // ★ STG-11-D18-1: crossfade overlap guards.
