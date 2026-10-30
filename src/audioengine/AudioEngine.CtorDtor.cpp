@@ -22,6 +22,10 @@ std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
 //   「現在のエンジン」。製品はプロセス内 1 エンジン、テストは逐次生成。
 std::atomic<AudioEngine*> AudioEngine::s_handleInvalidationOwner{nullptr};
 
+// ★ R-51 (2026-10-30): 破棄専用索引の実体。
+std::mutex AudioEngine::s_destroyIndexMutex;
+std::unordered_map<void*, AudioEngine::DestroyIndexEntry> AudioEngine::s_destroyIndex;
+
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
     , eqCacheManager(*this)
@@ -365,6 +369,9 @@ AudioEngine::~AudioEngine()
     // ★ F2' (2026-10-25): ここで所有者を降りる。これ以降は DSPCore を解放しない
     //   （最後の解放は上の drain 群で完了している）。dtor 冒頭で降りると teardown 経由の
     //   解放が HL-1 の外に出るため、必ずこの位置（レビュー指摘 A）。
+    // ★ R-51: 破棄専用索引からこのエンジンの項目を落とす（drain 完了後）。
+    eraseDestroyIndexForOwner(this);
+
     {
         AudioEngine* expected = this;
         // R-46: 第 3 引数は T desired（U&& ではない）ため nullptr から T を推論できない。
