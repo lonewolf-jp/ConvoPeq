@@ -29,6 +29,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "AtomicAccess.h"   // list.md [3.1]: \u88fd\u54c1\u30b3\u30fc\u30c9\u3067\u306f atomic \u306e\u30c9\u30c3\u30c8\u8a95\u751f\u3092\u76f4\u63a5\u547c\u3093\u3067\u306f\u306a\u3089\u306a\u3044\uff08convo:: \u30d8\u30eb\u30d1\u7d4c\u7531\uff09
+
 namespace convo {
 namespace rtmeasure {
 
@@ -69,16 +71,16 @@ public:
     // RT 側から呼ぶ唯一の関数。ロック・確保・I/O・書式化を行わない。
     void push(std::uint32_t kind, std::uint32_t arg, std::uint64_t tsc) noexcept
     {
-        const std::uint64_t w = write_.load(std::memory_order_relaxed);
-        const std::uint64_t r = read_.load(std::memory_order_acquire);
+        const std::uint64_t w = convo::consumeAtomic(write_, std::memory_order_relaxed);
+        const std::uint64_t r = convo::consumeAtomic(read_, std::memory_order_acquire);
         if (w - r >= kCapacity)
         {
             // 上書きしない（古いイベントを残す）。捨てたことはカウンタで示す。
-            dropped_.fetch_add(1, std::memory_order_relaxed);
+            convo::fetchAddAtomic(dropped_, std::uint64_t{1}, std::memory_order_relaxed);
             return;
         }
         storage_[static_cast<std::size_t>(w % kCapacity)] = Event{ tsc, kind, arg };
-        write_.store(w + 1, std::memory_order_release);
+        convo::publishAtomic(write_, w + 1, std::memory_order_release);
     }
 
     // 非 RT 側で回収する。out に n 件までコピーし、コピーした件数を返す。
@@ -86,8 +88,8 @@ public:
     {
         if (out == nullptr || n == 0)
             return 0;
-        const std::uint64_t w = write_.load(std::memory_order_acquire);
-        std::uint64_t r = read_.load(std::memory_order_relaxed);
+        const std::uint64_t w = convo::consumeAtomic(write_, std::memory_order_acquire);
+        std::uint64_t r = convo::consumeAtomic(read_, std::memory_order_relaxed);
         std::size_t copied = 0;
         while (r < w && copied < n)
         {
@@ -95,33 +97,33 @@ public:
             ++copied;
             ++r;
         }
-        read_.store(r, std::memory_order_release);
+        convo::publishAtomic(read_, r, std::memory_order_release);
         return copied;
     }
 
     [[nodiscard]] std::uint64_t written() const noexcept
     {
-        return write_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(write_, std::memory_order_acquire);
     }
     [[nodiscard]] std::uint64_t consumed() const noexcept
     {
-        return read_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(read_, std::memory_order_acquire);
     }
     [[nodiscard]] std::uint64_t dropped() const noexcept
     {
-        return dropped_.load(std::memory_order_relaxed);
+        return convo::consumeAtomic(dropped_, std::memory_order_relaxed);
     }
     [[nodiscard]] std::size_t pending() const noexcept
     {
-        const std::uint64_t w = write_.load(std::memory_order_acquire);
-        const std::uint64_t r = read_.load(std::memory_order_acquire);
+        const std::uint64_t w = convo::consumeAtomic(write_, std::memory_order_acquire);
+        const std::uint64_t r = convo::consumeAtomic(read_, std::memory_order_acquire);
         return static_cast<std::size_t>(w - r);
     }
     void reset() noexcept
     {
-        write_.store(0, std::memory_order_release);
-        read_.store(0, std::memory_order_release);
-        dropped_.store(0, std::memory_order_release);
+        convo::publishAtomic(write_, std::uint64_t{0}, std::memory_order_release);
+        convo::publishAtomic(read_, std::uint64_t{0}, std::memory_order_release);
+        convo::publishAtomic(dropped_, std::uint64_t{0}, std::memory_order_release);
     }
 
     // プロセスに 1 つのリング（静的領域）。
