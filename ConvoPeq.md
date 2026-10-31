@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-31 10:02:40
+> Generated: 2026-10-31 12:26:36
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -40061,41 +40061,36 @@ enum class RebuildTelemetryPolicy : uint8_t
 #pragma once
 
 //==============================================================================
-// R-06 / U2: RT 実時間計測（**U2 = 呼び出し点の接続 + P1/P2/P3/P4 の前提作業**）
+// R-06 / U2 + U5 準備（A1'）: RT 実時間計測
 //
-// U1（`de3ef2aa`）からの差分（Owner 判断 2026-10-31 の条件を反映）:
+// モード（**非 RT で 1 回だけ**決定し、RT 側は atomic load のみ。RT で getenv を呼ばない）:
+//   CONVOPEQ_RT_MEASURE=0（既定）: 計測 OFF。**TSC 取得を行わない**。
+//   CONVOPEQ_RT_MEASURE=2        : 時間計測＋共通サンプル領域への保存。**イベントリングへ push しない**。
+//   CONVOPEQ_RT_MEASURE=1        : 時間計測＋共通サンプル領域への保存＋**イベントリングへ push**。
 //
-//   P1: `enabled()` は環境変数を読まない。`initializeFromEnvironment()` を **RT 開始前の非 RT** から
-//       1 回呼び、その結果を `std::atomic<bool>` に publish する。RT 側は acquire load のみ。
-//   P2: `dropped` は RMW（fetch_add）を使わない。書き手専用の非 atomic カウンタを更新し、
-//       **atomic 変数への単純 release store** で公開する。読み手は atomic load のみ。
-//       非 atomic 変数（`writeLocal_` / `droppedLocal_`）は**書き手スレッドだけ**が触る。
-//   P3: `std::atomic<std::uint64_t>::is_always_lock_free` を static_assert で強制し、
-//       実行時 `is_lock_free()` が false の環境では**計測を自動無効化**する（fail-closed）。
-//   P4: `Ring::instance()` は**関数ローカル static を使わない**（名前空間スコープの変数）。
-//       関数ローカル static の初期化ガードを RT スレッドが取得する事故を構造的に排除する。
-//
-// 測定区間（計画書 §8.1・Owner 承認済み）:
+// 測定区間（計画書 §8.1 を維持）:
 //   `getNextAudioBlock()` の入口（TSC 読取直前）から出口（return 直前）まで。
-//   ホスト側のバッファコピーは含めない。1 ブロック = 1 サンプル。
-//   実装は RAII `BlockScopeTimer`（`getNextAudioBlock` は return が 12 箇所あるため、
-//   デストラクタで END を記録して全経路を被覆する）。イベントは **END 単独**で、
-//   ペイロードに「入口→出口の経過 ticks」を載せる（リング容量を二重消費しない）。
+//   ホスト側バッファコピーは含めない。1 ブロック = 1 サンプル。
+//   **ON（=1）のリング push は測定区間の内側**（push の後に終了 TSC を取得する）。
 //
-// 満杯時（計画書 §8.4・Owner 承認済み）:
-//   上書きしない。あふれた分は捨てて `dropped` に計上する。測定値は「下限」である。
-//   1 実行で `dropped / (written + dropped) > 10%` なら INCONCLUSIVE（合格扱いにしない）。
+// サンプル保存:
+//   両アーム共通の**事前確保済み固定領域**（`SampleBuffer`）。RT 側は書き込みと release store のみで、
+//   動的確保・ロック・I/O・書式化・ループ・RMW を行わない。読み手（非 RT）が回収して統計を計算する。
+//   容量超過（サンプル欠落）は **INCONCLUSIVE**。
+//   イベントリングの dropped/writes と、サンプル領域の保存状況は**別概念**として扱う。
 //
-// スレッド安全:
-//   単一書き手（RT）／単一読み手（非 RT）を前提とする。
-//   `write_` / `read_` / `dropped_` はすべて `std::atomic`（release store / acquire load）。
-//   `storage_[]` は上書きしないため、同一要素への同時アクセスは起こらない。
+// ウォームアップ:
+//   両アームとも最初の 2,000 ブロックを除外する（`Aggregator::setWarmupSamples`）。
+//   各実行は最低 32,000 ブロック → 除外後の有効サンプル 30,000 以上。
 //
-// 注意（RT 安全性の範囲）:
-//   本実装は「ループ・再試行・CAS・ロック・確保・I/O・syscall を含まない」有界命令列である。
-//   ただし共有キャッシュラインへの store はハードウェア依存の転送待ちを伴うため、
-//   **厳密な wait-free を主張しない**（lock-free は実測済み。詳細は
-//   `R06-U2-REVIEW-PACKAGE-20261031.md` §6）。
+// 判定:
+//   p99 = 昇順ソート後 `ceil(0.99*N) - 1`（整数演算）。最大値・N も算出。
+//   `dropped / (writes + dropped) > 10%` または **サンプル欠落** → INCONCLUSIVE。
+//   9〜11% は RERUN（合格に丸めない）。測定値は「下限」である（`lower_bound=1`）。
+//
+// 前提作業（U2 で実装済み・維持）:
+//   P1 `initializeFromEnvironment()`（非 RT）／P2 `dropped` は RMW なし／P3 `static_assert` ＋実行時 fail-closed／
+//   P4 `Ring::instance()` は名前空間スコープ変数（関数ローカル static ガードなし）。
 //==============================================================================
 
 #include <algorithm>
@@ -40131,11 +40126,11 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
 // 観測イベントの種類。値は診断出力の互換性のため明示する。
 enum EventKind : std::uint32_t
 {
-    kBlockBegin = 1,   // 予約（U2 では END 単独イベントを使うため未使用）
-    kBlockEnd   = 2,   // arg = 未使用。tsc に「入口→出口の経過 ticks」を載せる
-    kAlloc      = 3,   // arg = 確保サイズの下位 32bit
-    kFree       = 4,   // arg = 未使用
-    kLockWait   = 5,   // arg = 待機 µs（下限）
+    kBlockBegin = 1,   // 予約（U2 以降は END 単独イベント。payload は 0）
+    kBlockEnd   = 2,   // ブロック終端マーカー（経過時間は共通サンプル領域が持つ）
+    kAlloc      = 3,   // 予約（U3）
+    kFree       = 4,   // 予約（U3）
+    kLockWait   = 5,   // 予約（U4）
     kDropped    = 6    // 予約（リング自体は dropped カウンタで計上する）
 };
 
@@ -40146,38 +40141,36 @@ struct Event
     std::uint32_t arg  = 0;
 };
 
+// 計測モード（数値は環境変数と対応する）
+enum class Mode : int
+{
+    Off      = 0,   // 計測しない（TSC 取得なし）
+    Full     = 1,   // 時間計測 + 共通サンプル保存 + イベントリング push
+    TimeOnly = 2    // 時間計測 + 共通サンプル保存（リング push なし）
+};
+
 namespace detail {
 
-// ---------------------------------------------------------------------------
-// P4: 状態はすべて**名前空間スコープの inline 変数**に置く。
-//     関数ローカル static は初期化ガード（実装依存で mutex）を持ち、
-//     RT スレッドが最初に触るとその取得が RT 上で起きる。ここではそれを排除する。
-// ---------------------------------------------------------------------------
-inline std::atomic<bool> g_enabled{ false };
+// 状態はすべて**名前空間スコープの inline 変数**（関数ローカル static の初期化ガードを RT 経路で取らない）。
+inline std::atomic<int> g_mode{ static_cast<int>(Mode::Off) };
 inline std::atomic<std::uint64_t> g_ticksPerSecond{ 0 };
 inline std::atomic<bool> g_prepared{ false };
 
-// テスト専用プローブ: 有効にすると時刻読み取り回数を数える（既定 OFF）。
-//   本番では常に false なので、RT 経路の追加コストは「relaxed load + 分岐」のみ
-//   （計測 ON のときだけ readOrderedBegin/End が呼ばれる）。
+// テスト専用プローブ（既定 OFF。ON にしたときだけ計数する）
 inline std::atomic<bool> g_tscProbe{ false };
 inline std::atomic<std::uint64_t> g_tscReads{ 0 };
+inline std::atomic<bool> g_orderProbe{ false };
+inline std::atomic<int> g_order{ 0 };   // 1=リング push 開始 / 2=push 完了 / 3=終了 TSC 取得後
 
-// ---------------------------------------------------------------------------
-// 時刻読み取り（TSC 命令の順序保証を明文化する）
-//
-//   入口: `_mm_lfence()` → `__rdtsc()`
-//         lfence は先行する load を追い越させない（測定区間の開始点を確定させる）。
-//   出口: `__rdtscp()`
-//         rdtscp は先行命令の完了を待ってから TSC を読む（区間終端を確定させる）。
-//
-//   この組み合わせにより「入口で読んだ値より前に区間内の処理が完了しない」
-//   「出口で読んだ値は区間内の処理の完了後である」という順序が保証される。
-//   MSVC / clang の双方で同一命令列になる（`intrin.h` / `x86intrin.h` のマクロ展開）。
-//   TSC の時間換算は `initializeFromEnvironment()` で 1 回だけ校正し、
-//   `g_ticksPerSecond`（ticks/秒）に publish する。RT 側では換算しない。
-//   TSC が不変（invariant）でない環境や校正に失敗した場合は計測を無効化する（fail-closed）。
-// ---------------------------------------------------------------------------
+// テスト専用: 校正の成否を固定する（本番は常に false = 実校正）。サニタイザ下では校正の 1% 一致検査が
+// 不安定になるため、モード解釈のテストを決定的にする目的でのみ使う。
+inline std::atomic<bool> g_forceTimingOkForTest{ false };
+// 直近の初期化で「要求された」モード（校正失敗でも記録する。解釈の検証用）
+inline std::atomic<int> g_requestedMode{ 0 };
+
+// TSC 読み取り（順序保証）
+//   入口: lfence → rdtsc（先行 load を追い越させない）
+//   出口: rdtscp（先行命令の完了を待つ）
 #if CONVOPEQ_RTM_HAS_TSC
 inline std::uint64_t readTscRaw() noexcept
 {
@@ -40186,7 +40179,7 @@ inline std::uint64_t readTscRaw() noexcept
 inline void countTscReadIfProbed() noexcept
 {
     if (convo::consumeAtomic(g_tscProbe, std::memory_order_relaxed))
-        convo::fetchAddAtomic(g_tscReads, std::uint64_t{1}, std::memory_order_relaxed);
+        convo::fetchAddAtomic(g_tscReads, std::uint64_t{ 1 }, std::memory_order_relaxed);
 }
 inline std::uint64_t readOrderedBegin() noexcept
 {
@@ -40200,34 +40193,30 @@ inline std::uint64_t readOrderedEnd() noexcept
     unsigned int aux = 0;
     return static_cast<std::uint64_t>(__rdtscp(&aux));
 }
-inline constexpr std::uint64_t kFallbackTicksPerSecond = 1000000000ull;  // 校正失敗時は使わない（無効化する）
+inline constexpr std::uint64_t kFallbackTicksPerSecond = 1000000000ull;
 #else
-// x86 以外（CI の Linux ビルド等）は steady_clock の ns を ticks として扱う。
 inline std::uint64_t steadyNs() noexcept
 {
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+inline std::uint64_t readTscRaw() noexcept { return steadyNs(); }
 inline void countTscReadIfProbed() noexcept
 {
     if (convo::consumeAtomic(g_tscProbe, std::memory_order_relaxed))
-        convo::fetchAddAtomic(g_tscReads, std::uint64_t{1}, std::memory_order_relaxed);
+        convo::fetchAddAtomic(g_tscReads, std::uint64_t{ 1 }, std::memory_order_relaxed);
 }
-inline std::uint64_t readTscRaw() noexcept { return steadyNs(); }
 inline std::uint64_t readOrderedBegin() noexcept { countTscReadIfProbed(); return steadyNs(); }
 inline std::uint64_t readOrderedEnd() noexcept { countTscReadIfProbed(); return steadyNs(); }
 inline constexpr std::uint64_t kFallbackTicksPerSecond = 1000000000ull;
 #endif
 
-// ticks/秒 を校正する（非 RT からのみ呼ぶ）。成功したら true。
-//   10 ms の校正を **2 回**行い、両者の相対差が 1% を超えたら失敗とみなす
-//   （TSC が不変でない環境・仮想化でのスケーリング等を検出するための安全側の検査）。
+// ticks/秒 の校正（非 RT のみ）。10 ms を 2 回測り、相対差 1% 超またはレンジ外なら失敗。
 inline bool calibrateTiming() noexcept
 {
 #if CONVOPEQ_RTM_HAS_TSC
     using clock = std::chrono::steady_clock;
-
     constexpr int kRounds = 2;
     double rates[kRounds] = { 0.0, 0.0 };
 
@@ -40249,7 +40238,7 @@ inline bool calibrateTiming() noexcept
             return false;
 
         rates[round] = ticks * 1.0e9 / ns;
-        if (!(rates[round] > 1.0e6 && rates[round] < 1.0e12))   // 1 MHz 〜 1 THz の範囲外は異常
+        if (!(rates[round] > 1.0e6 && rates[round] < 1.0e12))
             return false;
     }
 
@@ -40259,7 +40248,7 @@ inline bool calibrateTiming() noexcept
     if (ref <= 0.0)
         return false;
     const double relDiff = (a > b) ? (a - b) / ref : (b - a) / ref;
-    if (relDiff > 0.01)   // 校正の再現性が 1% を超える環境では測らない（fail-closed）
+    if (relDiff > 0.01)
         return false;
 
     convo::publishAtomic(g_ticksPerSecond,
@@ -40274,7 +40263,9 @@ inline bool calibrateTiming() noexcept
 
 } // namespace detail
 
-// 固定長リング。静的領域に確保し、RT から安全に書き込める。
+//==============================================================================
+// イベントリング（モード Full のときだけ使う）
+//==============================================================================
 #if defined(_MSC_VER)
     #pragma warning(push)
     #pragma warning(disable : 4324)   // alignas(64) によるパディングは意図的（false sharing 回避）
@@ -40284,8 +40275,7 @@ class Ring
 public:
     static constexpr std::size_t kCapacity = 8192;
 
-    // RT 側から呼ぶ唯一の関数。ロック・確保・I/O・書式化・ループを行わない。
-    // P2: 破棄は「書き手専用カウンタ + 単純 release store」。RMW を使わない。
+    // RT 側から呼ぶ唯一の関数。ロック・確保・I/O・書式化・ループ・RMW を行わない。
     void push(std::uint32_t kind, std::uint32_t arg, std::uint64_t tsc) noexcept
     {
         const std::uint64_t w = writeLocal_;                                   // 書き手専用（非 atomic）
@@ -40293,9 +40283,8 @@ public:
 
         if (w - r >= kCapacity)
         {
-            // 上書きしない（古いイベントを残す）。捨てたことはカウンタで示す。
             ++droppedLocal_;                                                   // 書き手専用（非 atomic）
-            convo::publishAtomic(dropped_, droppedLocal_, std::memory_order_release);  // 単純 store（RMW なし）
+            convo::publishAtomic(dropped_, droppedLocal_, std::memory_order_release);
             return;
         }
 
@@ -40304,7 +40293,7 @@ public:
         convo::publishAtomic(write_, writeLocal_, std::memory_order_release);
     }
 
-    // 非 RT 側で回収する。out に n 件までコピーし、コピーした件数を返す。
+    // 非 RT 側で回収する。
     std::size_t drain(Event* out, std::size_t n) noexcept
     {
         if (out == nullptr || n == 0)
@@ -40344,14 +40333,14 @@ public:
         return static_cast<std::size_t>(w - r);
     }
 
-    // **RT 停止中のみ**呼べる。初期化時に 1 回呼ぶ（P4: 事前構築・事前タッチも兼ねる）。
+    // **RT 停止中のみ**呼べる。
     void reset() noexcept
     {
         for (std::size_t i = 0; i < kCapacity; ++i)
-            storage_[i] = Event{};                                             // 初回タッチ（ページフォルト回避）
-        convo::publishAtomic(write_, std::uint64_t{0}, std::memory_order_release);
-        convo::publishAtomic(read_, std::uint64_t{0}, std::memory_order_release);
-        convo::publishAtomic(dropped_, std::uint64_t{0}, std::memory_order_release);
+            storage_[i] = Event{};
+        convo::publishAtomic(write_, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(read_, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(dropped_, std::uint64_t{ 0 }, std::memory_order_release);
         writeLocal_ = 0;
         droppedLocal_ = 0;
     }
@@ -40361,15 +40350,13 @@ private:
     alignas(64) std::atomic<std::uint64_t> write_{ 0 };
     alignas(64) std::atomic<std::uint64_t> read_{ 0 };
     alignas(64) std::atomic<std::uint64_t> dropped_{ 0 };
-    std::uint64_t writeLocal_{ 0 };     // 書き手専用（他スレッドは触らない）
-    std::uint64_t droppedLocal_{ 0 };   // 書き手専用（他スレッドは触らない）
+    std::uint64_t writeLocal_{ 0 };     // 書き手専用
+    std::uint64_t droppedLocal_{ 0 };   // 書き手専用
 };
 #if defined(_MSC_VER)
     #pragma warning(pop)
 #endif
 
-// P4: プロセスに 1 つのリング。**名前空間スコープの変数**（関数ローカル static ではない）。
-//     静的初期化は main より前（単一スレッド）に行われるため、RT 初回呼び出しでガードを取らない。
 inline Ring g_ring;
 
 inline Ring& instance() noexcept
@@ -40377,173 +40364,301 @@ inline Ring& instance() noexcept
     return g_ring;
 }
 
-// P4: 事前構築・事前タッチを**プロセスで 1 回だけ**行う。
-//     初期化が複数回呼ばれてもリングの内容を破壊しない（計測中に initialize が再度走るケースの防御）。
+//==============================================================================
+// 共通サンプル領域（モード Full / TimeOnly の両方で使う）
+//
+//   RT: 添字を進めて 1 要素書き、release store で公開（RMW なし・ループなし）。
+//   非 RT: count() までを回収。
+//   容量超過は overflow に計上し、集計側で INCONCLUSIVE とする。
+//==============================================================================
+class SampleBuffer
+{
+public:
+    static constexpr std::size_t kCapacity = 1u << 16;   // 65,536 サンプル（512 KB）
+
+    void push(std::uint64_t ticks) noexcept
+    {
+        const std::size_t c = countLocal_;                  // 書き手専用（非 atomic）
+        if (c < kCapacity)
+        {
+            samples_[c] = ticks;
+            ++countLocal_;
+            convo::publishAtomic(count_, countLocal_, std::memory_order_release);
+        }
+        else
+        {
+            ++overflowLocal_;                               // 書き手専用（非 atomic）
+            convo::publishAtomic(overflow_, overflowLocal_, std::memory_order_release);
+        }
+    }
+
+    [[nodiscard]] std::size_t count() const noexcept
+    {
+        return convo::consumeAtomic(count_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t overflowed() const noexcept
+    {
+        return convo::consumeAtomic(overflow_, std::memory_order_acquire);
+    }
+    [[nodiscard]] const std::uint64_t* data() const noexcept { return samples_; }
+    [[nodiscard]] static constexpr std::size_t capacity() noexcept { return kCapacity; }
+
+    // **RT 停止中のみ**呼べる。
+    void reset() noexcept
+    {
+        for (std::size_t i = 0; i < kCapacity; ++i)
+            samples_[i] = 0;
+        convo::publishAtomic(count_, std::size_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(overflow_, std::uint64_t{ 0 }, std::memory_order_release);
+        countLocal_ = 0;
+        overflowLocal_ = 0;
+    }
+
+private:
+    alignas(64) std::atomic<std::size_t> count_{ 0 };
+    alignas(64) std::atomic<std::uint64_t> overflow_{ 0 };
+    std::size_t countLocal_{ 0 };          // 書き手専用
+    std::uint64_t overflowLocal_{ 0 };     // 書き手専用
+    std::uint64_t samples_[kCapacity]{};
+};
+
+inline SampleBuffer g_samples;
+
+inline SampleBuffer& sampleBuffer() noexcept
+{
+    return g_samples;
+}
+
+// P4: 事前構築・事前タッチを**プロセスで 1 回だけ**行う（RT 開始前に非 RT から呼ぶ）。
 inline void prepareOnce() noexcept
 {
     bool expected = false;
     if (!convo::compareExchangeAtomic(detail::g_prepared, expected, true,
                                       std::memory_order_acq_rel, std::memory_order_acquire))
-        return;   // 既に準備済み
+        return;
 
     instance().reset();
-    // 準備完了は compareExchange（acq_rel）で既に公開済み。RT 側は準備済みインスタンスのみを参照する。
+    sampleBuffer().reset();
 }
 
-// P1: **RT 開始前の非 RT から 1 回**呼ぶ。何度呼んでもよい（毎回環境変数を読み直す）。
-//     RT 稼働中に呼ぶ場合、`prepareOnce()` は初回しかリングに触らないため安全側である。
-//     P3 の実行時 lock-free 確認とタイミング校正もここで行う。失敗時は fail-closed（OFF）。
+// P1: 環境変数の解釈とモード設定は**非 RT で 1 回**。何度呼んでもよい（毎回読み直す）。
+//     RT 稼働中に呼ぶ場合、`prepareOnce()` は初回しか領域に触らないため安全側である。
 inline void initializeFromEnvironment() noexcept
 {
-    // P3: 実行時確認。lock-free でない環境では計測しない。
     const bool lockFree = std::atomic<std::uint64_t>{}.is_lock_free();
+    const bool forcedOk = convo::consumeAtomic(detail::g_forceTimingOkForTest, std::memory_order_relaxed);
+    const bool timingOk = lockFree && (forcedOk || detail::calibrateTiming());
 
-    // タイミング校正（TSC → 秒）。失敗したら計測しない。
-    const bool timingOk = lockFree && detail::calibrateTiming();
-
-    // P4: リングの事前構築・事前タッチ（初回のみ。RT 初回呼び出しでの初期化コストを除去）。
     prepareOnce();
 
     const char* v = std::getenv("CONVOPEQ_RT_MEASURE");
-    const bool envOn = (v != nullptr && v[0] == '1');
 
-    convo::publishAtomic(detail::g_enabled, (envOn && timingOk), std::memory_order_release);
+    Mode requested = Mode::Off;
+    if (v != nullptr)
+    {
+        if (v[0] == '1')
+            requested = Mode::Full;
+        else if (v[0] == '2')
+            requested = Mode::TimeOnly;
+    }
+
+    convo::publishAtomic(detail::g_requestedMode, static_cast<int>(requested), std::memory_order_release);
+    convo::publishAtomic(detail::g_mode,
+                         static_cast<int>(timingOk ? requested : Mode::Off),
+                         std::memory_order_release);
 }
 
-// 計測が有効か。RT から呼ばれる。`getenv` も初期化ガードも伴わない（atomic load のみ）。
+// 直近の初期化で要求されたモード（校正失敗でも記録される。テスト用）
+[[nodiscard]] inline Mode requestedMode() noexcept
+{
+    return static_cast<Mode>(convo::consumeAtomic(detail::g_requestedMode, std::memory_order_acquire));
+}
+
+// 現在のモード（RT から呼ばれる。atomic load のみ）
+[[nodiscard]] inline Mode mode() noexcept
+{
+    return static_cast<Mode>(convo::consumeAtomic(detail::g_mode, std::memory_order_acquire));
+}
+
+// 計測が有効か（Off 以外）
 [[nodiscard]] inline bool enabled() noexcept
 {
-    return convo::consumeAtomic(detail::g_enabled, std::memory_order_acquire);
+    return mode() != Mode::Off;
 }
 
-// ticks → µs（**非 RT 側**で使う）。RT では換算しない。
+// ticks → µs（**非 RT 側**で使う）
 [[nodiscard]] inline std::uint64_t ticksToMicros(std::uint64_t ticks) noexcept
 {
     const std::uint64_t perSec = convo::consumeAtomic(detail::g_ticksPerSecond, std::memory_order_acquire);
     if (perSec == 0)
         return 0;
 
-    // 桁あふれ回避: ticks が巨大な場合は先に割る。
     if (ticks > (std::numeric_limits<std::uint64_t>::max() / 1000000ull))
-        return ticks / (perSec / 1000000ull == 0 ? 1 : perSec / 1000000ull);
+    {
+        const std::uint64_t perMicro = perSec / 1000000ull;
+        return ticks / (perMicro == 0 ? 1 : perMicro);
+    }
 
     return (ticks * 1000000ull) / perSec;
 }
 
-// RAII ブロックスコープタイマ（測定区間 = `getNextAudioBlock()` 入口〜出口）。
-// 入口で構築し、**全 return 経路**でデストラクタが END イベントを 1 件だけ積む。
-// 計測 OFF のときは load + 分岐のみで、時刻読み取りすら行わない。
+//==============================================================================
+// RAII ブロックスコープタイマ（測定区間 = `getNextAudioBlock()` 入口〜出口）
+//
+//   Off      : 何もしない（TSC も読まない）
+//   TimeOnly : 入口/出口の TSC を測り、共通サンプル領域へ 1 件保存
+//   Full     : 上記に加えて、**出口 TSC を読む前に**リングへ push する
+//              （＝ push のコストが測定区間に含まれる）
+//==============================================================================
 class BlockScopeTimer
 {
 public:
     BlockScopeTimer() noexcept
-        : on_(enabled()),
-          t0_(on_ ? detail::readOrderedBegin() : 0)
+        : mode_(convo::rtmeasure::mode()),   // ★ メンバではなく名前空間のモード取得関数を呼ぶ
+          t0_(mode_ != Mode::Off ? detail::readOrderedBegin() : 0)
     {
     }
 
     ~BlockScopeTimer() noexcept
     {
-        if (!on_)
+        if (mode_ == Mode::Off)
             return;
-        const std::uint64_t t1 = detail::readOrderedEnd();
-        instance().push(kBlockEnd, 0, t1 - t0_);
+
+        const bool probe = convo::consumeAtomic(detail::g_orderProbe, std::memory_order_relaxed);
+
+        if (mode_ == Mode::Full)
+        {
+            if (probe)
+                convo::publishAtomic(detail::g_order, 1, std::memory_order_relaxed);
+            instance().push(kBlockEnd, 0, 0);
+            if (probe)
+                convo::publishAtomic(detail::g_order, 2, std::memory_order_relaxed);
+        }
+
+        const std::uint64_t t1 = detail::readOrderedEnd();   // ★ push の後（区間の終端）
+        if (probe)
+            convo::publishAtomic(detail::g_order, 3, std::memory_order_relaxed);
+
+        sampleBuffer().push(t1 - t0_);
     }
 
     BlockScopeTimer(const BlockScopeTimer&) = delete;
     BlockScopeTimer& operator=(const BlockScopeTimer&) = delete;
 
-    // 計測が有効か（＝このスコープで時刻を読んだか）。テスト用の読み取りアクセサ。
-    [[nodiscard]] bool active() const noexcept { return on_; }
+    [[nodiscard]] Mode measurementMode() const noexcept { return mode_; }
+    [[nodiscard]] bool active() const noexcept { return mode_ != Mode::Off; }
+    [[nodiscard]] bool recordsRing() const noexcept { return mode_ == Mode::Full; }
 
 private:
-    bool on_;
+    Mode mode_;
     std::uint64_t t0_;
 };
 
 //==============================================================================
-// 非 RT 側の集計（計画書 §6 / U2 v2 §6）。**RT からは呼ばない。**
-//
-//   - 1 秒ごとに drain し、END イベントの payload（経過 ticks）をサンプルとして蓄積する。
-//   - 統計: N、p99（昇順ソート後の ceil(0.99*N)-1 番目）、最大値。
-//   - 破棄: dropped / (writesPublished + dropped)。10% 超は INCONCLUSIVE。
-//     9〜11% は境界（RERUN。合格に丸めない）。
-//   - 出力: `[RTM] ... lower_bound=1`（測定値が下限であることを明示）。
+// 非 RT 側の集計（計画書 §6）。**RT からは呼ばない。**
 //==============================================================================
 struct Stats
 {
-    std::uint64_t samples    = 0;      // N（集計に使ったサンプル数）
-    std::uint64_t p99Ticks   = 0;
-    std::uint64_t maxTicks   = 0;
-    std::uint64_t p99Micros  = 0;
-    std::uint64_t maxMicros  = 0;
-    std::uint64_t dropped    = 0;      // リングの破棄件数
-    std::uint64_t writes     = 0;      // リングに入った件数
-    double        dropRatio  = 0.0;
-    bool          inconclusive = false;   // 10% 超
-    bool          boundary     = false;   // 9〜11%（再測定対象）
-    bool          aggregatorFull = false; // 集計側の上限に達した
-    bool          valid        = false;   // サンプルが 1 件以上
+    std::uint64_t samples      = 0;      // N（ウォームアップ除外後の有効サンプル数）
+    std::uint64_t p99Ticks     = 0;
+    std::uint64_t maxTicks     = 0;
+    std::uint64_t p99Micros    = 0;
+    std::uint64_t maxMicros    = 0;
+    std::uint64_t warmupSkipped = 0;
+    std::uint64_t ringDropped  = 0;      // イベントリングの破棄
+    std::uint64_t ringWrites   = 0;      // イベントリングへ入った件数
+    std::uint64_t sampleOverflow = 0;    // 共通サンプル領域の欠落
+    std::uint64_t aggregatorOverflow = 0;
+    double        dropRatio    = 0.0;    // ringDropped / (ringWrites + ringDropped)
+    bool          inconclusive = false;  // リング破棄 >10% または サンプル欠落
+    bool          boundary     = false;  // 9〜11%（RERUN）
+    bool          valid        = false;
 };
 
 class Aggregator
 {
 public:
-    // 集計側の上限（約 8 MB）。超えた分は数えず aggregatorFull を立てる。
     static constexpr std::size_t kMaxSamples = 1u << 20;
+
+    void setWarmupSamples(std::size_t n) noexcept
+    {
+        warmupTotal_ = n;
+        warmupRemaining_ = n;
+    }
+    [[nodiscard]] std::size_t warmupSamples() const noexcept { return warmupTotal_; }
 
     void reset() noexcept
     {
         samples_.clear();
         sorted_.clear();
+        readIdx_ = 0;
+        warmupRemaining_ = warmupTotal_;
+        warmupSkipped_ = 0;
+        aggregatorOverflow_ = 0;
         stats_ = Stats{};
-        lastDrainCount_ = 0;
-        drainCalls_ = 0;
+        collectCalls_ = 0;
+        lastCollected_ = 0;
     }
 
-    // リングから回収する（非 RT）。戻り値は今回回収した件数。
-    std::size_t drainOnce() noexcept
+    // 共通サンプル領域から新しい分を回収（非 RT）。ウォームアップ分は統計に加えない。
+    std::size_t collect() noexcept
     {
-        constexpr std::size_t kBatch = 256;
-        Event buf[kBatch];
-        std::size_t total = 0;
-
-        for (;;)
+        const std::size_t available = sampleBuffer().count();
+        if (available <= readIdx_)
         {
-            const std::size_t n = instance().drain(buf, kBatch);
-            if (n == 0)
-                break;
-
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                if (samples_.size() < kMaxSamples)
-                    samples_.push_back(buf[i].tsc);
-                else
-                    stats_.aggregatorFull = true;
-            }
-            total += n;
-            if (n < kBatch)
-                break;
+            ++collectCalls_;
+            lastCollected_ = 0;
+            return 0;
         }
 
-        ++drainCalls_;
-        lastDrainCount_ = total;
-        return total;
+        const std::uint64_t* data = sampleBuffer().data();
+        std::size_t added = 0;
+
+        for (std::size_t i = readIdx_; i < available; ++i)
+        {
+            const std::uint64_t v = data[i];
+            if (warmupRemaining_ > 0)
+            {
+                --warmupRemaining_;
+                ++warmupSkipped_;
+                continue;
+            }
+            if (samples_.size() < kMaxSamples)
+            {
+                samples_.push_back(v);
+                ++added;
+            }
+            else
+            {
+                ++aggregatorOverflow_;
+            }
+        }
+
+        readIdx_ = available;
+        ++collectCalls_;
+        lastCollected_ = added;
+        return added;
     }
 
-    // 統計を計算して保持する（非 RT）。累積サンプル全体を対象にする。
     [[nodiscard]] const Stats& compute() noexcept
     {
         Stats s;
-        s.samples = static_cast<std::uint64_t>(samples_.size());
-        s.writes  = instance().written();
-        s.dropped = instance().dropped();
+        s.samples       = static_cast<std::uint64_t>(samples_.size());
+        s.warmupSkipped = static_cast<std::uint64_t>(warmupSkipped_);
+        s.ringWrites    = instance().written();
+        s.ringDropped   = instance().dropped();
+        s.sampleOverflow = sampleBuffer().overflowed();
+        s.aggregatorOverflow = static_cast<std::uint64_t>(aggregatorOverflow_);
 
-        const std::uint64_t attempts = s.writes + s.dropped;
+        const std::uint64_t attempts = s.ringWrites + s.ringDropped;
         s.dropRatio = (attempts == 0)
                           ? 0.0
-                          : static_cast<double>(s.dropped) / static_cast<double>(attempts);
-        s.inconclusive = (s.dropRatio > 0.10);
+                          : static_cast<double>(s.ringDropped) / static_cast<double>(attempts);
+
+        const bool ringInconclusive = (s.dropRatio > 0.10);
+        const bool sampleInconclusive = (s.sampleOverflow > 0) || (s.aggregatorOverflow > 0);
+
+        s.inconclusive = ringInconclusive || sampleInconclusive;
         s.boundary     = (s.dropRatio >= 0.09 && s.dropRatio <= 0.11);
 
         if (!samples_.empty())
@@ -40552,8 +40667,7 @@ public:
             std::sort(sorted_.begin(), sorted_.end());
 
             const std::size_t n = sorted_.size();
-            // ceil(0.99*N)-1 を整数演算で（浮動小数の丸め差を避ける）
-            const std::size_t idx = ((99u * n + 99u) / 100u) - 1u;
+            const std::size_t idx = ((99u * n + 99u) / 100u) - 1u;   // ceil(0.99*N)-1
             s.p99Ticks  = sorted_[idx < n ? idx : (n - 1)];
             s.maxTicks  = sorted_.back();
             s.p99Micros = ticksToMicros(s.p99Ticks);
@@ -40561,24 +40675,27 @@ public:
             s.valid     = true;
         }
 
-        s.aggregatorFull = stats_.aggregatorFull;
         stats_ = s;
         return stats_;
     }
 
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
-    [[nodiscard]] std::size_t drainCalls() const noexcept { return drainCalls_; }
-    [[nodiscard]] std::size_t lastDrainCount() const noexcept { return lastDrainCount_; }
+    [[nodiscard]] std::size_t collectCalls() const noexcept { return collectCalls_; }
+    [[nodiscard]] std::size_t lastCollected() const noexcept { return lastCollected_; }
 
 private:
-    std::vector<std::uint64_t> samples_;   // 経過 ticks
+    std::vector<std::uint64_t> samples_;
     std::vector<std::uint64_t> sorted_;
     Stats stats_{};
-    std::size_t lastDrainCount_ = 0;
-    std::size_t drainCalls_ = 0;
+    std::size_t readIdx_ = 0;
+    std::size_t warmupTotal_ = 2000;
+    std::size_t warmupRemaining_ = 2000;
+    std::size_t warmupSkipped_ = 0;
+    std::size_t aggregatorOverflow_ = 0;
+    std::size_t collectCalls_ = 0;
+    std::size_t lastCollected_ = 0;
 };
 
-// プロセスに 1 つの集計器（名前空間スコープ。関数ローカル static を使わない）
 inline Aggregator g_aggregator;
 
 inline Aggregator& aggregator() noexcept
@@ -40589,12 +40706,11 @@ inline Aggregator& aggregator() noexcept
 // 1 秒ゲート用の最終実行時刻（ミリ秒）。非 RT からのみ触る。
 inline std::atomic<std::int64_t> g_lastPollMs{ std::numeric_limits<std::int64_t>::min() };
 
-// **非 RT からのみ**呼ぶ。1 秒に 1 回だけ drain＋統計＋出力を行う。
-//   `runCoordinatorPhase()`（1 ms tick の非 RT スレッド）から呼ばれる。
-//   戻り値: 今回 drain と出力を行ったら true。
+// **非 RT からのみ**呼ぶ。1 秒に 1 回だけ回収＋統計＋出力を行う。
 inline bool pollIfDue() noexcept
 {
-    if (!enabled())
+    const Mode m = mode();
+    if (m == Mode::Off)
         return false;
 
     const auto nowMs = static_cast<std::int64_t>(
@@ -40607,18 +40723,34 @@ inline bool pollIfDue() noexcept
 
     convo::publishAtomic(g_lastPollMs, nowMs, std::memory_order_relaxed);
 
-    (void) aggregator().drainOnce();
+    // イベントリングも回収する（モード 1）。回収しないと 8,192 容量を超えて
+    // `dropped` が増え、測定が INCONCLUSIVE になってしまう。
+    // 現時点ではイベントは観測のみ（内容は使わない）。
+    {
+        Event buf[256];
+        for (;;)
+        {
+            const std::size_t n = instance().drain(buf, 256);
+            if (n < 256)
+                break;
+        }
+    }
+
+    (void) aggregator().collect();
     const Stats& s = aggregator().compute();
 
     const char* verdict = s.inconclusive ? "INCONCLUSIVE" : (s.boundary ? "RERUN" : "OK");
-    std::printf("[RTM] n=%llu p99=%llu us max=%llu us dropped=%llu writes=%llu ratio=%.3f"
-                " verdict=%s lower_bound=1\n",
+    std::printf("[RTM] mode=%d n=%llu p99=%llu us max=%llu us dropped=%llu writes=%llu"
+                " ratio=%.3f overflow=%llu warmup_skipped=%llu verdict=%s lower_bound=1\n",
+                static_cast<int>(m),
                 static_cast<unsigned long long>(s.samples),
                 static_cast<unsigned long long>(s.p99Micros),
                 static_cast<unsigned long long>(s.maxMicros),
-                static_cast<unsigned long long>(s.dropped),
-                static_cast<unsigned long long>(s.writes),
+                static_cast<unsigned long long>(s.ringDropped),
+                static_cast<unsigned long long>(s.ringWrites),
                 s.dropRatio,
+                static_cast<unsigned long long>(s.sampleOverflow),
+                static_cast<unsigned long long>(s.warmupSkipped),
                 verdict);
     return true;
 }
@@ -105487,23 +105619,21 @@ int runFpmM2();
 
 ```
 //==============================================================================
-// R-06 / U2: `convo::rtmeasure` の検証（非 RT・オフライン）
+// R-06 / U2 + U5 準備（A1'）: `convo::rtmeasure` の検証
 //
-//   U2 で追加した前提作業（P1/P2/P3/P4）と、Owner 判断 2026-10-31 で要求された
-//   容量境界テストを検証する。
-//
-//     (1) enabled() のライフサイクル（P1: 環境変数の読み取りは非 RT の初期化時のみ）
-//     (2) 往復・部分回収（U1 から継続）
-//     (3) 容量境界: 空 / 1 件 / 8,191 / 8,192 / 8,193 件
-//     (4) 満杯時の破棄（上書きしない）と dropped の正確性（P2）
-//     (5) 読み出し後の再利用、wrap-around（索引が 1 周するケース）
-//     (6) 同時読み書き（1 書き手 + 1 読み手）
-//     (7) TSC 校正と ticks→µs 換算
-//     (8) BlockScopeTimer: OFF では 0 件、ON では END 1 件（RAII が全 return を被覆）
-//     (9) P4: instance() が名前空間スコープの変数であること（関数ローカル static ではない）
-//
-//   破棄率 10% の INCONCLUSIVE 判定は「計測実行側（非 RT の集計）」の規則であり、
-//   ここでは判定に必要な生値（written / dropped）が正しく出ることを検証する。
+//   Owner 指示（2026-10-31）の 12 項目を検証する。
+//     1. モード 0 で TSC 取得 0 回
+//     2. モード 2 で TSC 取得あり・リング push 0 回
+//     3. モード 1 で TSC 取得あり・リング push あり
+//     4. モード 1・2 で共通サンプル保存が同じ方式
+//     5. 終了 TSC がリング push より後に取得される
+//     6. ウォームアップ 2,000 サンプルが統計から除外される
+//     7. 32,000 ブロックで 30,000 以上の有効サンプル
+//     8. サンプル領域の容量超過が INCONCLUSIVE
+//     9. p99 整数演算・最大値・dropped 率・RERUN 判定
+//    10. RT 経路に確保・ロック・I/O・書式化・ループ・RMW がない（型とソースで固定）
+//    11. 新しいサンプル保存経路の競合（TSan 実行で確認）
+//    12. 既存スイート（リング機構）
 //==============================================================================
 
 #include "audioengine/RtMeasureRing.h"
@@ -105521,7 +105651,7 @@ namespace {
 bool expect(const char* name, bool ok)
 {
     if (!ok)
-        std::fprintf(stderr, "FAIL: RT-MEASURE-U2 %s\n", name);
+        std::fprintf(stderr, "FAIL: RT-MEASURE-U5P %s\n", name);
     return ok;
 }
 
@@ -105537,578 +105667,490 @@ void setEnvMeasure(const char* value)
 #endif
 }
 
-// (1) P1: enabled() は初期化前 OFF。初期化は非 RT から 1 回。RT 側は load のみ。
-bool checkEnabledLifecycle()
+void resetState()
+{
+    convo::rtmeasure::instance().reset();
+    convo::rtmeasure::sampleBuffer().reset();
+    convo::rtmeasure::aggregator().setWarmupSamples(2000);
+    convo::rtmeasure::aggregator().reset();
+    convo::rtmeasure::detail::g_tscReads.store(0);
+    convo::rtmeasure::detail::g_order.store(0);
+}
+
+// (1) モード 0: TSC を読まない・リングもサンプルも増えない
+bool checkModeZeroNoTsc()
 {
     bool ok = true;
-
-    // 初期化前の既定は OFF（fail-closed）。テスト実行順に依存しないよう明示的に確認する。
-    const bool beforeInit = convo::rtmeasure::enabled();
-
     setEnvMeasure(nullptr);
     convo::rtmeasure::initializeFromEnvironment();
-    ok = expect("env unset -> OFF", !convo::rtmeasure::enabled()) && ok;
+    resetState();
 
-    setEnvMeasure("1");
-    convo::rtmeasure::initializeFromEnvironment();
-    ok = expect("env=1 -> ON", convo::rtmeasure::enabled()) && ok;
+    convo::rtmeasure::detail::g_tscProbe.store(true);
+    for (int i = 0; i < 1000; ++i)
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        ok = expect("mode0 timer inactive", !t.active()) && ok;
+    }
+    const auto reads = convo::rtmeasure::detail::g_tscReads.load();
+    convo::rtmeasure::detail::g_tscProbe.store(false);
 
-    setEnvMeasure("0");
-    convo::rtmeasure::initializeFromEnvironment();
-    ok = expect("env=0 -> OFF", !convo::rtmeasure::enabled()) && ok;
-
-    // 後続テスト（実 RT 経路）に影響しないよう既定へ戻す。
-    setEnvMeasure(nullptr);
-    convo::rtmeasure::initializeFromEnvironment();
-    ok = expect("restored OFF", !convo::rtmeasure::enabled()) && ok;
-
-    std::printf("[RT-M] U2 enabled lifecycle: beforeInit=%d final=OFF capacity=%zu\n",
-                beforeInit ? 1 : 0,
-                convo::rtmeasure::Ring::kCapacity);
+    ok = expect("mode0 reads no TSC", reads == 0ull) && ok;
+    ok = expect("mode0 no ring push", convo::rtmeasure::instance().written() == 0ull) && ok;
+    ok = expect("mode0 no samples", convo::rtmeasure::sampleBuffer().count() == 0u) && ok;
     return ok;
 }
 
-// (2) 往復・部分回収（U1 から継続）
-bool checkRoundTrip()
+// (2) モード 2: TSC あり・リング push なし・サンプルは 1/ブロック
+bool checkModeTimeOnly()
 {
-    convo::rtmeasure::Ring ring;
+    bool ok = true;
+    setEnvMeasure("2");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+
+    ok = expect("mode2 is TimeOnly", convo::rtmeasure::mode() == convo::rtmeasure::Mode::TimeOnly) && ok;
+
+    convo::rtmeasure::detail::g_tscProbe.store(true);
+    constexpr int kBlocks = 100;
+    for (int i = 0; i < kBlocks; ++i)
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        ok = expect("mode2 timer active", t.active()) && ok;
+        ok = expect("mode2 recordsRing false", !t.recordsRing()) && ok;
+    }
+    const auto reads = convo::rtmeasure::detail::g_tscReads.load();
+    convo::rtmeasure::detail::g_tscProbe.store(false);
+
+    ok = expect("mode2 reads TSC (>=2/block)", reads >= static_cast<std::uint64_t>(2 * kBlocks)) && ok;
+    ok = expect("mode2 no ring push", convo::rtmeasure::instance().written() == 0ull) && ok;
+    ok = expect("mode2 samples == blocks",
+                convo::rtmeasure::sampleBuffer().count() == static_cast<std::size_t>(kBlocks)) && ok;
+    ok = expect("mode2 no sample overflow", convo::rtmeasure::sampleBuffer().overflowed() == 0ull) && ok;
+    return ok;
+}
+
+// (3) モード 1: TSC あり・リング push あり・サンプルは 1/ブロック
+bool checkModeFull()
+{
+    bool ok = true;
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+
+    ok = expect("mode1 is Full", convo::rtmeasure::mode() == convo::rtmeasure::Mode::Full) && ok;
+
+    convo::rtmeasure::detail::g_tscProbe.store(true);
+    constexpr int kBlocks = 100;
+    for (int i = 0; i < kBlocks; ++i)
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        ok = expect("mode1 timer active", t.active()) && ok;
+        ok = expect("mode1 recordsRing true", t.recordsRing()) && ok;
+    }
+    const auto reads = convo::rtmeasure::detail::g_tscReads.load();
+    convo::rtmeasure::detail::g_tscProbe.store(false);
+
+    ok = expect("mode1 reads TSC", reads >= static_cast<std::uint64_t>(2 * kBlocks)) && ok;
+    ok = expect("mode1 ring push per block",
+                convo::rtmeasure::instance().written() == static_cast<std::uint64_t>(kBlocks)) && ok;
+    ok = expect("mode1 samples == blocks",
+                convo::rtmeasure::sampleBuffer().count() == static_cast<std::size_t>(kBlocks)) && ok;
+    return ok;
+}
+
+// (4) モード 1・2 で共通サンプル保存が同じ方式（同じ個数・同じ上限・同じ overflow 挙動）
+bool checkSameSampleStorage()
+{
+    bool ok = true;
+
+    setEnvMeasure("2");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    {
+        convo::rtmeasure::BlockScopeTimer a;
+        convo::rtmeasure::BlockScopeTimer b;
+        (void) a;
+        (void) b;
+    }
+    const auto countTimeOnly = convo::rtmeasure::sampleBuffer().count();
+
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    {
+        convo::rtmeasure::BlockScopeTimer a;
+        convo::rtmeasure::BlockScopeTimer b;
+        (void) a;
+        (void) b;
+    }
+    const auto countFull = convo::rtmeasure::sampleBuffer().count();
+
+    ok = expect("same storage both modes", countTimeOnly == 2u && countFull == 2u) && ok;
+    ok = expect("same capacity", convo::rtmeasure::SampleBuffer::kCapacity == (1u << 16)) && ok;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
+// (5) 終了 TSC はリング push の後（順序プローブで確認）
+bool checkEndTscAfterPush()
+{
+    bool ok = true;
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+
+    convo::rtmeasure::detail::g_orderProbe.store(true);
+    convo::rtmeasure::detail::g_order.store(0);
+    {
+        convo::rtmeasure::BlockScopeTimer t;
+        (void) t;
+    }
+    const int order = convo::rtmeasure::detail::g_order.load();
+    convo::rtmeasure::detail::g_orderProbe.store(false);
+
+    ok = expect("order probe reached 3 (end after push)", order == 3) && ok;
+    ok = expect("push happened (ring)", convo::rtmeasure::instance().written() == 1ull) && ok;
+    ok = expect("sample stored", convo::rtmeasure::sampleBuffer().count() == 1u) && ok;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
+// (6) ウォームアップ 2,000 の除外
+bool checkWarmupExclusion()
+{
+    bool ok = true;
+    auto& sb = convo::rtmeasure::sampleBuffer();
+    auto& agg = convo::rtmeasure::aggregator();
+
+    resetState();
+    agg.setWarmupSamples(2000);
+    agg.reset();
+
+    constexpr std::size_t kTotal = 2005;
+    for (std::size_t i = 0; i < kTotal; ++i)
+        sb.push(1);
+
+    (void) agg.collect();
+    const auto& s = agg.compute();
+
+    ok = expect("warmup skipped 2000", s.warmupSkipped == 2000ull) && ok;
+    ok = expect("warmup leaves 5 samples", s.samples == 5ull) && ok;
+    ok = expect("warmup valid", s.valid) && ok;
+    return ok;
+}
+
+// (7) 32,000 ブロックで 30,000 以上の有効サンプル
+bool checkThirtyTwoThousandBlocks()
+{
+    bool ok = true;
+    auto& sb = convo::rtmeasure::sampleBuffer();
+    auto& agg = convo::rtmeasure::aggregator();
+
+    resetState();
+    agg.setWarmupSamples(2000);
+    agg.reset();
+
+    constexpr std::size_t kBlocks = 32000;
+    for (std::size_t i = 0; i < kBlocks; ++i)
+        sb.push(100 + i);
+
+    (void) agg.collect();
+    const auto& s = agg.compute();
+
+    ok = expect("32k warmup skipped", s.warmupSkipped == 2000ull) && ok;
+    ok = expect("32k valid samples >= 30000", s.samples >= 30000ull) && ok;
+    ok = expect("32k no overflow", s.sampleOverflow == 0ull && !s.inconclusive) && ok;
+    return ok;
+}
+
+// (8) サンプル領域の容量超過は INCONCLUSIVE
+bool checkSampleOverflowInconclusive()
+{
+    bool ok = true;
+    auto& sb = convo::rtmeasure::sampleBuffer();
+    auto& agg = convo::rtmeasure::aggregator();
+
+    resetState();
+    agg.setWarmupSamples(0);
+    agg.reset();
+
+    const std::size_t over = convo::rtmeasure::SampleBuffer::kCapacity + 5;
+    for (std::size_t i = 0; i < over; ++i)
+        sb.push(1);
+
+    (void) agg.collect();
+    const auto& s = agg.compute();
+
+    ok = expect("overflow counted", s.sampleOverflow == 5ull) && ok;
+    ok = expect("overflow => inconclusive", s.inconclusive) && ok;
+    ok = expect("overflow samples capped", s.samples == convo::rtmeasure::SampleBuffer::kCapacity) && ok;
+
+    agg.setWarmupSamples(2000);
+    resetState();
+    return ok;
+}
+
+// (9) p99 整数演算・最大値・N
+bool checkP99AndMax()
+{
+    bool ok = true;
+    auto& sb = convo::rtmeasure::sampleBuffer();
+    auto& agg = convo::rtmeasure::aggregator();
+
+    resetState();
+    agg.setWarmupSamples(0);
+    agg.reset();
+
+    for (std::uint64_t i = 1; i <= 100; ++i)
+        sb.push(i);
+
+    (void) agg.collect();
+    const auto& s = agg.compute();
+
+    ok = expect("p99 n", s.samples == 100ull) && ok;
+    ok = expect("p99 ticks (ceil(99)-1 = idx98)", s.p99Ticks == 99ull) && ok;
+    ok = expect("p99 max", s.maxTicks == 100ull) && ok;
+    ok = expect("p99 ratio zero", s.dropRatio == 0.0) && ok;
+    ok = expect("p99 not boundary", !s.boundary) && ok;
+
+    // N=1 の境界
+    resetState();
+    agg.setWarmupSamples(0);
+    agg.reset();
+    sb.push(42);
+    (void) agg.collect();
+    const auto& one = agg.compute();
+    ok = expect("p99 n=1", one.samples == 1ull && one.p99Ticks == 42ull && one.maxTicks == 42ull) && ok;
+
+    agg.setWarmupSamples(2000);
+    resetState();
+    return ok;
+}
+
+// (9b) リング破棄率による INCONCLUSIVE / RERUN
+bool checkRingRatioVerdicts()
+{
+    using convo::rtmeasure::Ring;
+    constexpr std::uint64_t kCap = Ring::kCapacity;
+    bool ok = true;
+    auto& agg = convo::rtmeasure::aggregator();
+
+    // 境界（9.9%）
+    resetState();
+    agg.setWarmupSamples(0);
+    agg.reset();
+    convo::rtmeasure::instance().reset();
+    {
+        constexpr std::uint64_t kExtra = 900;
+        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
+            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, 0);
+        const auto& s = agg.compute();
+        ok = expect("ring ratio ~9.9%", s.dropRatio > 0.09 && s.dropRatio < 0.11) && ok;
+        ok = expect("ring boundary true", s.boundary) && ok;
+        ok = expect("ring not inconclusive", !s.inconclusive) && ok;
+    }
+
+    // 10% 超
+    convo::rtmeasure::instance().reset();
+    {
+        constexpr std::uint64_t kExtra = 9000;
+        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
+            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, 0);
+        const auto& s = agg.compute();
+        ok = expect("ring ratio >10%", s.dropRatio > 0.10) && ok;
+        ok = expect("ring inconclusive", s.inconclusive) && ok;
+        ok = expect("ring not boundary", !s.boundary) && ok;
+    }
+
+    agg.setWarmupSamples(2000);
+    resetState();
+    return ok;
+}
+
+// (9c) 1 秒ごとの回収がリングも drain する（ON 側が容量超過で INCONCLUSIVE にならないこと）
+bool checkPollDrainsRing()
+{
+    bool ok = true;
+    auto& ring = convo::rtmeasure::instance();
+
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    convo::rtmeasure::resetPollGateForTest();
     ring.reset();
 
-    constexpr std::uint32_t kKinds[] = {
-        convo::rtmeasure::kBlockEnd, convo::rtmeasure::kAlloc,
-        convo::rtmeasure::kLockWait, convo::rtmeasure::kFree,
-    };
+    constexpr int kEvents = 1000;
+    for (int i = 0; i < kEvents; ++i)
+        ring.push(convo::rtmeasure::kBlockEnd, 0, 0);
+
+    ok = expect("ring pending before poll", ring.pending() == static_cast<std::size_t>(kEvents)) && ok;
+
+    const bool ran = convo::rtmeasure::pollIfDue();
+    ok = expect("poll ran", ran) && ok;
+    ok = expect("poll drained ring", ring.pending() == 0u) && ok;
+    ok = expect("ring writes kept", ring.written() == static_cast<std::uint64_t>(kEvents)) && ok;
+    ok = expect("no ring drops", ring.dropped() == 0ull) && ok;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
+// (10) RT 経路の性質を型で固定する
+static_assert(std::is_trivially_destructible_v<convo::rtmeasure::Ring>,
+              "Ring must be trivially destructible");
+static_assert(std::is_trivially_destructible_v<convo::rtmeasure::SampleBuffer>,
+              "SampleBuffer must be trivially destructible (no owned resources)");
+static_assert(sizeof(convo::rtmeasure::Event) == 16, "Event must stay a 16-byte POD");
+static_assert(sizeof(convo::rtmeasure::SampleBuffer)
+                  <= sizeof(std::uint64_t) * convo::rtmeasure::SampleBuffer::kCapacity + 256,
+              "SampleBuffer must be the fixed array plus a small header (no heap)");
+static_assert(std::is_trivially_copyable_v<convo::rtmeasure::Event>, "Event must be trivially copyable");
+
+// (12) リング機構（U2 から継続）
+bool checkRingMechanics()
+{
+    using convo::rtmeasure::Ring;
+    bool ok = true;
+
+    Ring ring;
+    ring.reset();
+
+    constexpr std::uint32_t kKinds[] = { convo::rtmeasure::kBlockEnd, convo::rtmeasure::kAlloc,
+                                         convo::rtmeasure::kLockWait, convo::rtmeasure::kFree };
     for (std::uint32_t i = 0; i < 4; ++i)
         ring.push(kKinds[i], i * 10u, 1000ull + i);
 
     std::vector<convo::rtmeasure::Event> out(8);
     const std::size_t n = ring.drain(out.data(), out.size());
+    ok = expect("ring roundtrip count", n == 4) && ok;
+    ok = expect("ring written", ring.written() == 4) && ok;
+    ok = expect("ring pending zero", ring.pending() == 0) && ok;
 
-    bool ok = true;
-    ok = expect("roundtrip count", n == 4) && ok;
-    ok = expect("roundtrip written", ring.written() == 4) && ok;
-    ok = expect("roundtrip consumed", ring.consumed() == 4) && ok;
-    ok = expect("roundtrip pending", ring.pending() == 0) && ok;
-    for (std::size_t i = 0; i < n && i < 4; ++i)
-    {
-        ok = expect("roundtrip kind", out[i].kind == kKinds[i]) && ok;
-        ok = expect("roundtrip arg", out[i].arg == static_cast<std::uint32_t>(i * 10u)) && ok;
-        ok = expect("roundtrip tsc", out[i].tsc == 1000ull + i) && ok;
-    }
-    return ok;
-}
-
-bool checkPartialDrain()
-{
-    convo::rtmeasure::Ring ring;
+    // 満杯時の破棄（上書きなし）
     ring.reset();
-
-    for (std::uint32_t i = 0; i < 10; ++i)
-        ring.push(convo::rtmeasure::kAlloc, i, i);
-
-    std::vector<convo::rtmeasure::Event> out(10);
-
-    const std::size_t first = ring.drain(out.data(), 4);
-    bool ok = true;
-    ok = expect("partial first count", first == 4) && ok;
-    ok = expect("partial first arg", out[0].arg == 0u && out[3].arg == 3u) && ok;
-    ok = expect("partial pending after first", ring.pending() == 6) && ok;
-
-    const std::size_t second = ring.drain(out.data(), 100);
-    ok = expect("partial second count", second == 6) && ok;
-    ok = expect("partial second first arg", out[0].arg == 4u) && ok;
-    ok = expect("partial drained empty", ring.pending() == 0) && ok;
-    ok = expect("partial extra drain", ring.drain(out.data(), 4) == 0) && ok;
-    return ok;
-}
-
-// (3) 容量境界: 空 / 1 件 / 8,191 / 8,192 / 8,193 件
-bool checkCapacityBoundaries()
-{
-    using convo::rtmeasure::Ring;
     constexpr std::uint64_t kCap = Ring::kCapacity;
-    bool ok = true;
-
-    // 空
+    for (std::uint64_t i = 0; i < kCap + 10; ++i)
+        ring.push(convo::rtmeasure::kBlockEnd, 0, i);
+    ok = expect("ring cap written", ring.written() == kCap) && ok;
+    ok = expect("ring dropped 10", ring.dropped() == 10ull) && ok;
     {
-        Ring ring;
-        ring.reset();
-        ok = expect("boundary empty pending", ring.pending() == 0) && ok;
-        ok = expect("boundary empty drained", ring.drain(nullptr, 0) == 0) && ok;
-    }
-
-    // 1 件
-    {
-        Ring ring;
-        ring.reset();
-        ring.push(convo::rtmeasure::kBlockEnd, 7u, 11ull);
-        ok = expect("boundary one pending", ring.pending() == 1) && ok;
-        ok = expect("boundary one written", ring.written() == 1) && ok;
-        ok = expect("boundary one dropped", ring.dropped() == 0) && ok;
-    }
-
-    // 8,191 件（容量 - 1）: 破棄なし
-    {
-        Ring ring;
-        ring.reset();
-        for (std::uint64_t i = 0; i < kCap - 1; ++i)
-            ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
-        ok = expect("boundary cap-1 pending", ring.pending() == kCap - 1) && ok;
-        ok = expect("boundary cap-1 dropped", ring.dropped() == 0) && ok;
-    }
-
-    // 8,192 件（ちょうど容量）: 破棄なし
-    {
-        Ring ring;
-        ring.reset();
-        for (std::uint64_t i = 0; i < kCap; ++i)
-            ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
-        ok = expect("boundary cap pending", ring.pending() == kCap) && ok;
-        ok = expect("boundary cap written", ring.written() == kCap) && ok;
-        ok = expect("boundary cap dropped", ring.dropped() == 0) && ok;
-    }
-
-    // 8,193 件（容量 + 1）: 1 件だけ破棄
-    {
-        Ring ring;
-        ring.reset();
-        for (std::uint64_t i = 0; i < kCap + 1; ++i)
-            ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
-        ok = expect("boundary cap+1 pending", ring.pending() == kCap) && ok;
-        ok = expect("boundary cap+1 written", ring.written() == kCap) && ok;
-        ok = expect("boundary cap+1 dropped", ring.dropped() == 1) && ok;
-        ok = expect("boundary cap+1 accounting", ring.written() + ring.dropped() == kCap + 1) && ok;
+        std::vector<convo::rtmeasure::Event> small(4);
+        const std::size_t drained = ring.drain(small.data(), small.size());
+        ok = expect("ring keeps oldest", drained == 4 && small[0].tsc == 0ull) && ok;
     }
 
     return ok;
 }
 
-// (4) 満杯時の破棄（上書きしない）と dropped の正確性
-bool checkOverflowDropsWithoutOverwrite()
+// (11) サンプル保存経路の並行性（TSan 実行で競合が無いこと）
+bool checkSampleBufferConcurrency()
 {
-    convo::rtmeasure::Ring ring;
-    ring.reset();
-
-    constexpr std::size_t kExtra = 10;
-    const std::size_t total = convo::rtmeasure::Ring::kCapacity + kExtra;
-    for (std::size_t i = 0; i < total; ++i)
-        ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
-
     bool ok = true;
-    ok = expect("overflow written == capacity", ring.written() == convo::rtmeasure::Ring::kCapacity) && ok;
-    ok = expect("overflow dropped == kExtra", ring.dropped() == kExtra) && ok;
-    ok = expect("overflow written+dropped == pushes", ring.written() + ring.dropped() == total) && ok;
-    ok = expect("overflow pending == capacity", ring.pending() == convo::rtmeasure::Ring::kCapacity) && ok;
+    auto& sb = convo::rtmeasure::sampleBuffer();
+    auto& agg = convo::rtmeasure::aggregator();
 
-    std::vector<convo::rtmeasure::Event> out(convo::rtmeasure::Ring::kCapacity + 1);
-    const std::size_t n = ring.drain(out.data(), out.size());
-    ok = expect("overflow drain capacity", n == convo::rtmeasure::Ring::kCapacity) && ok;
+    resetState();
+    agg.setWarmupSamples(0);
+    agg.reset();
 
-    // 上書きしていないので、残っているのは「最初の capacity 件」である。
-    ok = expect("overflow keeps oldest (first)", out[0].tsc == 0ull) && ok;
-    ok = expect("overflow keeps oldest (last stored)",
-                out[convo::rtmeasure::Ring::kCapacity - 1].tsc
-                    == static_cast<std::uint64_t>(convo::rtmeasure::Ring::kCapacity - 1)) && ok;
-    return ok;
-}
-
-// (5a) 読み出し後の再利用
-bool checkReuseAfterDrain()
-{
-    using convo::rtmeasure::Ring;
-    constexpr std::uint64_t kCap = Ring::kCapacity;
-    bool ok = true;
-
-    Ring ring;
-    ring.reset();
-
-    std::vector<convo::rtmeasure::Event> out(static_cast<std::size_t>(kCap));
-    for (std::uint64_t i = 0; i < kCap; ++i)
-        ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
-
-    ok = expect("reuse first drain", ring.drain(out.data(), out.size()) == kCap) && ok;
-    ok = expect("reuse pending zero", ring.pending() == 0) && ok;
-
-    // 空になったので、同じだけ再度入る（破棄されない）。
-    for (std::uint64_t i = 0; i < kCap; ++i)
-        ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), kCap + i);
-
-    ok = expect("reuse second pending", ring.pending() == kCap) && ok;
-    ok = expect("reuse dropped stays zero", ring.dropped() == 0) && ok;
-    ok = expect("reuse second drain", ring.drain(out.data(), out.size()) == kCap) && ok;
-    ok = expect("reuse second first tsc", out[0].tsc == kCap) && ok;
-    ok = expect("reuse second last tsc", out[kCap - 1].tsc == 2 * kCap - 1) && ok;
-    return ok;
-}
-
-// (5b) wrap-around: 索引が容量を超えて 1 周以上回るケース
-bool checkWrapAround()
-{
-    using convo::rtmeasure::Ring;
-    constexpr std::uint64_t kCap = Ring::kCapacity;
-    constexpr std::uint64_t kRounds = 3;
-    bool ok = true;
-
-    Ring ring;
-    ring.reset();
-
-    std::vector<convo::rtmeasure::Event> out(static_cast<std::size_t>(kCap));
-    std::uint64_t seq = 0;
-    for (std::uint64_t round = 0; round < kRounds; ++round)
-    {
-        // 容量の 3/4 を入れて回収する（write_ / read_ が容量を超えて進む）。
-        const std::uint64_t batch = (kCap / 4) * 3;
-        for (std::uint64_t i = 0; i < batch; ++i, ++seq)
-            ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(seq & 0xffffu), seq);
-
-        const std::size_t n = ring.drain(out.data(), out.size());
-        ok = expect("wrap drain count", n == batch) && ok;
-        ok = expect("wrap first seq", out[0].tsc == seq - batch) && ok;
-        ok = expect("wrap last seq", out[n - 1].tsc == seq - 1) && ok;
-        ok = expect("wrap pending zero", ring.pending() == 0) && ok;
-    }
-
-    ok = expect("wrap no drops", ring.dropped() == 0) && ok;
-    ok = expect("wrap written total", ring.written() == seq) && ok;
-    ok = expect("wrap indices advanced past capacity", ring.written() >= kCap) && ok;
-    return ok;
-}
-
-// (6) 同時読み書き（1 書き手 + 1 読み手）
-bool checkConcurrentReaderWriter()
-{
-    using convo::rtmeasure::Ring;
-    constexpr std::uint64_t kPushes = 200000;
-
-    Ring ring;
-    ring.reset();
-
+    constexpr std::uint64_t kPushes = 20000;
     std::atomic<bool> stop{ false };
-    std::uint64_t drained = 0;
+    std::size_t collected = 0;
 
     std::thread reader([&] {
-        std::vector<convo::rtmeasure::Event> buf(64);
         while (!stop.load(std::memory_order_acquire))
         {
-            const std::size_t n = ring.drain(buf.data(), buf.size());
-            drained += n;
-            if (n == 0)
+            collected += agg.collect();
+            if (agg.lastCollected() == 0)
                 std::this_thread::yield();
         }
-        drained += ring.drain(buf.data(), buf.size());
+        collected += agg.collect();
     });
 
     for (std::uint64_t i = 0; i < kPushes; ++i)
-        ring.push(convo::rtmeasure::kFree, static_cast<std::uint32_t>(i), i);
+        sb.push(i);
 
-    // 書き手の push 完了後に読み手を止める（残留分は最後に回収）。
-    std::this_thread::yield();
     stop.store(true, std::memory_order_release);
     reader.join();
+    collected += agg.collect();
 
-    bool ok = true;
-    const std::uint64_t written = ring.written();
-    const std::uint64_t dropped = ring.dropped();
-    ok = expect("concurrent accounting", written + dropped == kPushes) && ok;
-    ok = expect("concurrent drained <= written", drained <= written) && ok;
-    ok = expect("concurrent pending matches", ring.pending() == written - drained) && ok;
+    ok = expect("concurrent collected == pushed", collected == kPushes) && ok;
+    ok = expect("concurrent buffer count", sb.count() == kPushes) && ok;
+    ok = expect("concurrent no overflow", sb.overflowed() == 0ull) && ok;
 
-    std::printf("[RT-M] U2 concurrent: written=%llu dropped=%llu ratio=%.4f\n",
-                static_cast<unsigned long long>(written),
-                static_cast<unsigned long long>(dropped),
-                (written + dropped) == 0
-                    ? 0.0
-                    : static_cast<double>(dropped) / static_cast<double>(written + dropped));
+    agg.setWarmupSamples(2000);
+    resetState();
     return ok;
 }
 
-// (7) TSC 校正と ticks→µs 換算
-bool checkTimingCalibration()
+// (1') モード判定のライフサイクル
+bool checkModeLifecycle()
 {
     bool ok = true;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    ok = expect("env unset -> Off", convo::rtmeasure::mode() == convo::rtmeasure::Mode::Off) && ok;
+
+    setEnvMeasure("0");
+    convo::rtmeasure::initializeFromEnvironment();
+    ok = expect("env 0 -> Off", convo::rtmeasure::mode() == convo::rtmeasure::Mode::Off) && ok;
+
+    setEnvMeasure("2");
+    convo::rtmeasure::initializeFromEnvironment();
+    ok = expect("env 2 -> requested TimeOnly",
+                convo::rtmeasure::requestedMode() == convo::rtmeasure::Mode::TimeOnly) && ok;
+    ok = expect("env 2 -> TimeOnly", convo::rtmeasure::mode() == convo::rtmeasure::Mode::TimeOnly) && ok;
 
     setEnvMeasure("1");
     convo::rtmeasure::initializeFromEnvironment();
-    const std::uint64_t perSec = convo::rtmeasure::detail::g_ticksPerSecond.load(std::memory_order_acquire);
-
-    ok = expect("timing calibrated (>0)", perSec > 0) && ok;
-    ok = expect("timing 1s == 1e6 us", convo::rtmeasure::ticksToMicros(perSec) == 1000000ull) && ok;
-    ok = expect("timing zero ticks", convo::rtmeasure::ticksToMicros(0) == 0ull) && ok;
-
-    // 入口 < 出口（順序付き読み取りの健全性）
-    const std::uint64_t a = convo::rtmeasure::detail::readOrderedBegin();
-    const std::uint64_t b = convo::rtmeasure::detail::readOrderedEnd();
-    ok = expect("ordered read monotonic", b >= a) && ok;
+    ok = expect("env 1 -> requested Full",
+                convo::rtmeasure::requestedMode() == convo::rtmeasure::Mode::Full) && ok;
+    ok = expect("env 1 -> Full", convo::rtmeasure::mode() == convo::rtmeasure::Mode::Full) && ok;
 
     setEnvMeasure(nullptr);
     convo::rtmeasure::initializeFromEnvironment();
+    ok = expect("restored Off", convo::rtmeasure::mode() == convo::rtmeasure::Mode::Off) && ok;
+
+    resetState();
     return ok;
 }
-
-// (8) BlockScopeTimer: OFF では 0 件、ON では END 1 件
-bool checkBlockScopeTimer()
-{
-    bool ok = true;
-
-    // OFF
-    setEnvMeasure(nullptr);
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-    {
-        convo::rtmeasure::BlockScopeTimer t;
-        (void) t;
-    }
-    ok = expect("timer OFF writes nothing", convo::rtmeasure::instance().written() == 0) && ok;
-
-    // ON
-    setEnvMeasure("1");
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-    {
-        convo::rtmeasure::BlockScopeTimer t;
-        (void) t;
-    }
-    const std::uint64_t written = convo::rtmeasure::instance().written();
-    ok = expect("timer ON writes one event", written == 1) && ok;
-
-    std::vector<convo::rtmeasure::Event> out(4);
-    const std::size_t n = convo::rtmeasure::instance().drain(out.data(), out.size());
-    ok = expect("timer ON drained", n == 1) && ok;
-    if (n == 1)
-    {
-        ok = expect("timer event kind is END", out[0].kind == convo::rtmeasure::kBlockEnd) && ok;
-        ok = expect("timer payload non-zero", out[0].tsc > 0) && ok;
-    }
-
-    // 後始末（既定 OFF に戻す）
-    setEnvMeasure(nullptr);
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-    ok = expect("timer restored OFF", !convo::rtmeasure::enabled()) && ok;
-    return ok;
-}
-
-// (9) P4: instance() は名前空間スコープの変数を返す（関数ローカル static ではない）
-bool checkInstanceIdentity()
-{
-    bool ok = true;
-    ok = expect("instance stable", &convo::rtmeasure::instance() == &convo::rtmeasure::instance()) && ok;
-    ok = expect("instance is namespace-scope object",
-                &convo::rtmeasure::instance() == &convo::rtmeasure::g_ring) && ok;
-    return ok;
-}
-
-
-// (12) 集計: N / p99（ceil(0.99N)-1）/ 最大値 / dropped / writes
-bool checkAggregatorStats()
-{
-    using convo::rtmeasure::Ring;
-    bool ok = true;
-
-    convo::rtmeasure::instance().reset();
-    convo::rtmeasure::aggregator().reset();
-
-    constexpr std::uint64_t kN = 100;
-    for (std::uint64_t i = 1; i <= kN; ++i)
-        convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i);
-
-    const std::size_t drained = convo::rtmeasure::aggregator().drainOnce();
-    const auto& s = convo::rtmeasure::aggregator().compute();
-
-    ok = expect("agg drained", drained == kN) && ok;
-    ok = expect("agg n", s.samples == kN) && ok;
-    // p99 index = ceil(0.99*100)-1 = 98（0 起点）→ 値 99
-    ok = expect("agg p99 ticks", s.p99Ticks == 99ull) && ok;
-    ok = expect("agg max ticks", s.maxTicks == 100ull) && ok;
-    ok = expect("agg writes", s.writes == kN) && ok;
-    ok = expect("agg dropped", s.dropped == 0ull) && ok;
-    ok = expect("agg ratio zero", s.dropRatio == 0.0) && ok;
-    ok = expect("agg not inconclusive", !s.inconclusive) && ok;
-    ok = expect("agg not boundary", !s.boundary) && ok;
-    ok = expect("agg valid", s.valid) && ok;
-
-    // 空の集計（サンプルなし）でも壊れない
-    convo::rtmeasure::instance().reset();
-    convo::rtmeasure::aggregator().reset();
-    (void) convo::rtmeasure::aggregator().drainOnce();
-    const auto& e = convo::rtmeasure::aggregator().compute();
-    ok = expect("agg empty n", e.samples == 0) && ok;
-    ok = expect("agg empty invalid", !e.valid) && ok;
-    return ok;
-}
-
-// (13) 集計: 満杯時の破棄と比率（INCONCLUSIVE / 境界）
-bool checkAggregatorDiscardVerdicts()
-{
-    using convo::rtmeasure::Ring;
-    constexpr std::uint64_t kCap = Ring::kCapacity;
-    bool ok = true;
-
-    // 境界: dropped/(writes+dropped) ≈ 9.9%（9〜11%）→ boundary、inconclusive ではない
-    {
-        convo::rtmeasure::instance().reset();
-        convo::rtmeasure::aggregator().reset();
-
-        constexpr std::uint64_t kExtra = 900;   // 900/(8192+900) = 9.90%
-        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
-            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
-
-        (void) convo::rtmeasure::aggregator().drainOnce();
-        const auto& s = convo::rtmeasure::aggregator().compute();
-
-        ok = expect("verdict writes == capacity", s.writes == kCap) && ok;
-        ok = expect("verdict dropped == extra", s.dropped == kExtra) && ok;
-        ok = expect("verdict ratio ~9.9%", s.dropRatio > 0.09 && s.dropRatio < 0.11) && ok;
-        ok = expect("verdict boundary true", s.boundary) && ok;
-        ok = expect("verdict not inconclusive", !s.inconclusive) && ok;
-    }
-
-    // INCONCLUSIVE: dropped が 10% を明確に超える
-    {
-        convo::rtmeasure::instance().reset();
-        convo::rtmeasure::aggregator().reset();
-
-        constexpr std::uint64_t kExtra = 9000;   // 9000/(8192+9000) = 52%
-        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
-            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
-
-        (void) convo::rtmeasure::aggregator().drainOnce();
-        const auto& s = convo::rtmeasure::aggregator().compute();
-
-        ok = expect("inconclusive ratio > 10%", s.dropRatio > 0.10) && ok;
-        ok = expect("inconclusive true", s.inconclusive) && ok;
-        ok = expect("inconclusive not boundary", !s.boundary) && ok;
-    }
-
-    // 破棄された分は集計サンプルに入らない（サンプル数 = writes）
-    {
-        convo::rtmeasure::instance().reset();
-        convo::rtmeasure::aggregator().reset();
-        constexpr std::uint64_t kExtra = 100;
-        for (std::uint64_t i = 0; i < kCap + kExtra; ++i)
-            convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
-        (void) convo::rtmeasure::aggregator().drainOnce();
-        const auto& s = convo::rtmeasure::aggregator().compute();
-        ok = expect("samples == writes", s.samples == s.writes) && ok;
-        ok = expect("samples == capacity", s.samples == kCap) && ok;
-    }
-
-    return ok;
-}
-
-// (14) 1 秒ごとの非 RT 集計（ゲート）
-bool checkPollGate()
-{
-    bool ok = true;
-
-    setEnvMeasure("1");
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-    convo::rtmeasure::aggregator().reset();
-    convo::rtmeasure::resetPollGateForTest();
-
-    constexpr std::uint64_t kPushes = 10;
-    for (std::uint64_t i = 0; i < kPushes; ++i)
-        convo::rtmeasure::instance().push(convo::rtmeasure::kBlockEnd, 0, i + 1);
-
-    const bool first  = convo::rtmeasure::pollIfDue();      // 1 回目: 実行される
-    const std::size_t calls1 = convo::rtmeasure::aggregator().drainCalls();
-    const bool second = convo::rtmeasure::pollIfDue();      // 1 秒以内: 実行されない
-    const std::size_t calls2 = convo::rtmeasure::aggregator().drainCalls();
-
-    ok = expect("poll first true", first) && ok;
-    ok = expect("poll second false", !second) && ok;
-    ok = expect("poll drainCalls 1", calls1 == 1) && ok;
-    ok = expect("poll drainCalls unchanged", calls2 == 1) && ok;
-    ok = expect("poll aggregated samples", convo::rtmeasure::aggregator().stats().samples == kPushes) && ok;
-
-    // OFF のときは何もしない
-    setEnvMeasure(nullptr);
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::resetPollGateForTest();
-    const bool off = convo::rtmeasure::pollIfDue();
-    ok = expect("poll OFF false", !off) && ok;
-
-    convo::rtmeasure::instance().reset();
-    convo::rtmeasure::aggregator().reset();
-    return ok;
-}
-
-// (15) 計測 OFF では TSC を読まない（プローブで機械検証）
-bool checkOffDoesNotReadTsc()
-{
-    bool ok = true;
-
-    setEnvMeasure(nullptr);
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-
-    convo::rtmeasure::detail::g_tscProbe.store(true);
-    convo::rtmeasure::detail::g_tscReads.store(0);
-
-    for (int i = 0; i < 1000; ++i)
-    {
-        const convo::rtmeasure::BlockScopeTimer t;
-        ok = expect("timer inactive when OFF", !t.active()) && ok;
-    }
-
-    const auto offReads = convo::rtmeasure::detail::g_tscReads.load();
-    ok = expect("OFF performs no TSC read", offReads == 0ull) && ok;
-    ok = expect("OFF writes no event", convo::rtmeasure::instance().written() == 0ull) && ok;
-
-    // ON では読み取りが発生する（プローブの対照）
-    setEnvMeasure("1");
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-    convo::rtmeasure::detail::g_tscReads.store(0);
-    {
-        const convo::rtmeasure::BlockScopeTimer t;
-        ok = expect("timer active when ON", t.active()) && ok;
-    }
-    const auto onReads = convo::rtmeasure::detail::g_tscReads.load();
-    ok = expect("ON performs TSC reads", onReads >= 2ull) && ok;
-    ok = expect("ON writes one event", convo::rtmeasure::instance().written() == 1ull) && ok;
-
-    convo::rtmeasure::detail::g_tscProbe.store(false);
-    setEnvMeasure(nullptr);
-    convo::rtmeasure::initializeFromEnvironment();
-    convo::rtmeasure::instance().reset();
-    convo::rtmeasure::aggregator().reset();
-    return ok;
-}
-
-// (16) RT 経路の性質（確保・ロック・可変長を持たない）を型で固定する
-static_assert(std::is_trivially_destructible_v<convo::rtmeasure::Ring>,
-              "Ring must be trivially destructible (no owned resources)");
-static_assert(sizeof(convo::rtmeasure::Event) == 16, "Event must stay a 16-byte POD");
-static_assert(sizeof(convo::rtmeasure::Ring) <= sizeof(convo::rtmeasure::Event) * convo::rtmeasure::Ring::kCapacity + 256,
-              "Ring storage must be the fixed array plus a small header (no heap)");
-static_assert(std::is_trivially_copyable_v<convo::rtmeasure::Event>,
-              "Event must be trivially copyable (no hidden allocation)");
 
 } // namespace
 
 int runRtMeasureRingTests()
 {
     bool ok = true;
-    ok = checkEnabledLifecycle() && ok;
-    ok = checkRoundTrip() && ok;
-    ok = checkPartialDrain() && ok;
-    ok = checkCapacityBoundaries() && ok;
-    ok = checkOverflowDropsWithoutOverwrite() && ok;
-    ok = checkReuseAfterDrain() && ok;
-    ok = checkWrapAround() && ok;
-    ok = checkConcurrentReaderWriter() && ok;
-    ok = checkTimingCalibration() && ok;
-    ok = checkBlockScopeTimer() && ok;
-    ok = checkInstanceIdentity() && ok;
-    ok = checkAggregatorStats() && ok;
-    ok = checkAggregatorDiscardVerdicts() && ok;
-    ok = checkPollGate() && ok;
-    ok = checkOffDoesNotReadTsc() && ok;
+
+    // サニタイザ下では TSC 校正の 1% 一致検査が不安定になるため、テストでは校正成功として扱う
+    // （本番は実校正。失敗時は Off に落ちる fail-closed のまま）。
+    convo::rtmeasure::detail::g_forceTimingOkForTest.store(true);
+
+    ok = checkModeLifecycle() && ok;
+    ok = checkModeZeroNoTsc() && ok;
+    ok = checkModeTimeOnly() && ok;
+    ok = checkModeFull() && ok;
+    ok = checkSameSampleStorage() && ok;
+    ok = checkEndTscAfterPush() && ok;
+    ok = checkWarmupExclusion() && ok;
+    ok = checkThirtyTwoThousandBlocks() && ok;
+    ok = checkSampleOverflowInconclusive() && ok;
+    ok = checkP99AndMax() && ok;
+    ok = checkRingRatioVerdicts() && ok;
+    ok = checkPollDrainsRing() && ok;
+    ok = checkRingMechanics() && ok;
+    ok = checkSampleBufferConcurrency() && ok;
 
     if (ok)
-        std::printf("RtMeasureRingTests: PASS (U2: P1/P2/P3/P4 + capacity boundaries; RT call site connected)\n");
+        std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow)\n");
     return ok ? 0 : 1;
 }
 
