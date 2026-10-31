@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "DiagnosticsConfig.h"
 #include "NoiseShaperLearner.h"
+#include "RtMeasureRing.h"   // R-06 / U2: 計測区間（RAII で全 return 経路を被覆）
 #include "core/TimeUtils.h"
 #include "core/RCUReader.h"
 
@@ -27,6 +28,11 @@ namespace
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    // R-06 / U2: 測定区間 = 本関数の入口（TSC 読取直前）〜出口（return 直前）。計画書 §8.1。
+    //   本関数は return が 12 箇所あるため、RAII のデストラクタで END を記録して全経路を被覆する。
+    //   計測 OFF（既定）では atomic load + 分岐のみで、時刻読み取りも行わない。
+    [[maybe_unused]] const convo::rtmeasure::BlockScopeTimer rtmBlockScope;
+
     const auto lifecycle = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     if (lifecycle != EngineLifecycleState::Prepared)
     {
