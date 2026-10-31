@@ -278,7 +278,7 @@
 | 2 | 当初の目的 | （新規）STG-8 系テストの決定性確保 |
 | 3 | 実装済み | `RuntimePublicationOrchestrator.cpp` の R8 candidate fix（obligation terminalization）は main に存在 |
 | 4 | main に存在 | 上記 fix は存在。**フレーク自体は未解消** |
-| 5 | テスト・CI | 観測: `checkSTG82OverwriteTerminalizesEvicted` → `[STG-8-D2] FAIL: unstable (L=0 hasDeferred=0)`、`checkSTG8ClearIsIdempotent` → `[R8-2] FAIL: first clear (L=0 hasDeferred=1)`。CI（リモート）では再現せず、ローカル Release で断続 |
+| 5 | テスト・CI | 観測: `checkSTG82OverwriteTerminalizesEvicted` → `[STG-8-D2] FAIL: unstable (L=0 hasDeferred=0)`、`checkSTG8ClearIsIdempotent` → `[R8-2] FAIL: first clear (L=0 hasDeferred=1)`。**再現試行（2026-11-01 02:04、Release を 3 回直接実行）では 0/3 で発生せず**、STG-8 は全項目 PASS。**断続的（低頻度）**であり、常時再現する欠陥ではない |
 | 6 | 未完成 | フレークの原因特定と決定化 |
 | 7 | 理由 | 未調査（本タスクの範囲外だった） |
 | 8 | 依存 | なし（ただしローカル検証の再現性に影響し、F2/R-51 の確認を妨げる） |
