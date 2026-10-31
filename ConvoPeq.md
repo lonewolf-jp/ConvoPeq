@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-10-31 12:26:36
+> Generated: 2026-10-31 18:27:36
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -117458,6 +117458,137 @@ static bool checkF1bRetireDeferOrderInvariance()
     return ok;
 }
 
+//==============================================================================
+// R-51: 2 エンジン共存時の invalidation owner 衝突（恒久テスト）
+//
+//   `s_handleInvalidationOwner` は static で、AudioEngine のコンストラクタが無条件に this で
+//   上書きする（AudioEngine.CtorDtor.cpp）。したがって A が生存したまま B を生成すると
+//   owner は B になり、A の core は「instance の可視性」からは辿れなくなる。
+//
+//   R-51 の修理（slot 索引による pin 対象の特定）以降の不変条件は次の 1 点である:
+//     **pin を保持している core は、他エンジンが invalidation owner を握っていても
+//       破棄が defer される（pin が無視されない）。**
+//
+//   この不変条件を、実測用の一時スクリプト／証拠ブランチではなく恒久的に検証する。
+//==============================================================================
+static bool checkR51TwoEngineOwnerCollision()
+{
+    AudioEngineHarness harnessA;
+    if (!harnessA.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[R-51-2E] harness A start failed\n");
+        return false;
+    }
+
+    AudioEngine& a = harnessA.engine();
+
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    auto* raw = core.release();
+    const auto handle = a.registerDSPHandleForRuntime(raw);
+    if (handle.isNull())
+    {
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(raw);
+        harnessA.stop();
+        return false;
+    }
+
+    bool ok = true;
+    bool deferObserved = false;
+    std::uint64_t before = 0;
+    std::uint64_t after = 0;
+
+    {
+        auto pin = a.tryPinDSPHandle(handle);
+        if (!static_cast<bool>(pin))
+        {
+            std::fprintf(stderr, "[R-51-2E] FAIL: could not pin the core in engine A\n");
+            DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(a, raw);
+            harnessA.stop();
+            return false;
+        }
+
+        const auto pinned = DeferredPublicationTestAccess::pinnedCount(a, handle.slot);
+        if (pinned != 1u)
+        {
+            std::fprintf(stderr, "[R-51-2E] FAIL: pinnedCount(A, slot %u) = %u (expected 1)\n",
+                         (unsigned)handle.slot, (unsigned)pinned);
+            ok = false;
+        }
+
+        // B を A 生存中に生成する（static な invalidation owner が B を指す状態を作る）。
+        AudioEngineHarness harnessB;
+        if (!harnessB.start(48000.0, 512))
+        {
+            std::fprintf(stderr, "[R-51-2E] FAIL: harness B start failed\n");
+            DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(a, raw);
+            harnessA.stop();
+            return false;
+        }
+
+        std::uint64_t minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(a);
+        if (minEpoch == 0)
+        {
+            (void)DeferredPublicationTestAccess::publishEpochForTest(a);
+            minEpoch = DeferredPublicationTestAccess::minReaderEpochForTest(a);
+        }
+        const auto retireEpoch = (minEpoch > 0) ? (minEpoch - 1) : std::uint64_t{0};
+
+        before = DeferredPublicationTestAccess::deferredDestroyCount(a);
+
+        DSPLifetimeManager mgr(a);
+        mgr.retire(raw, retireEpoch);
+        (void)DeferredPublicationTestAccess::publishEpochForTest(a);
+        a.tryReclaimResources();
+
+        // pin が生きている限り defer される。CoordinatorLoop が先に drain する場合があるため、
+        // 上限 500 ms の範囲で「defer が記録されること」を待つ（意味は変えない）。
+        constexpr int kStepMs = 5;
+        constexpr int kTicks = 100;
+        after = before;
+        for (int i = 0; i < kTicks; ++i)
+        {
+            after = DeferredPublicationTestAccess::deferredDestroyCount(a);
+            if (after > before)
+            {
+                deferObserved = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(kStepMs));
+        }
+
+        std::printf("[R-51-2E] diag: pinnedInA=%u deferredCount %llu -> %llu resolve=%d\n",
+                    (unsigned)DeferredPublicationTestAccess::pinnedCount(a, handle.slot),
+                    (unsigned long long)before, (unsigned long long)after,
+                    a.resolveDSPHandle(handle) != nullptr ? 1 : 0);
+
+        harnessB.stop();
+    } // pin released here
+
+    if (!deferObserved)
+    {
+        std::fprintf(stderr,
+                     "[R-51-2E] FAIL: a pinned core of engine A was not deferred while engine B"
+                     " owned the invalidation slot (count %llu -> %llu, waited %d ms)\n",
+                     (unsigned long long)before, (unsigned long long)after, 5 * 100);
+        ok = false;
+    }
+
+    // A 側の後始末。deferred が残っていれば回収し、二重解放を避けるため登録を明示的に
+    // 閉じてから teardown する（invalidateHandleBeforeDestroy は registry を閉じるだけで
+    // 解放済みメモリには触れない）。
+    for (int i = 0; i < 40 && DeferredPublicationTestAccess::pendingReclaimCount(a) > 0; ++i)
+    {
+        DeferredPublicationTestAccess::tickReclaimForTest(a);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    (void)DeferredPublicationTestAccess::invalidateHandleBeforeDestroy(a, raw);
+    harnessA.stop();
+
+    std::printf("[R-51-2E] two-engine owner collision keeps the pin contract: %s\n",
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static bool checkF1bProductionRetireUnderPin()
 {
     AudioEngineHarness harness;
@@ -117665,9 +117796,10 @@ static bool checkF2QuarantineDestroyHonoursPins()
     // Move the slot to Quarantined (the lifecycle state the cleanup targets).
     DeferredPublicationTestAccess::quarantineSlotForTest(e, handle.slot);
 
-    // A slot occupied by another live DSP, allocated BEFORE the destroy attempt, so the
-    // free-list order is known: after destroy(handle.slot) succeeds, the next registration
-    // must pop handle.slot (LIFO).
+    // A slot occupied by another live DSP, allocated BEFORE the destroy attempt. NOTE: the
+    // free list is LIFO for a single push, but retryDeferredQuarantineDestroy() reclaims in
+    // ascending slot order, so the test below must not assume that handle.slot is the next
+    // slot popped (F2 hardening, 2026-10-31).
     auto other = convo::aligned_make_unique<AudioEngine::DSPCore>();
     auto* otherRaw = other.release();
     auto otherHandle = e.registerDSPHandleForRuntime(otherRaw);
@@ -117678,6 +117810,15 @@ static bool checkF2QuarantineDestroyHonoursPins()
         harness.stop();
         return false;
     }
+
+    // ★ F2 hardening (2026-10-31): the probe registered below is quarantined/destroyed only
+    //   AFTER the reusability assertion. Previously it was quarantined and destroyed inside
+    //   the pinned scope with the return value discarded; when that destroy was refused
+    //   (still active/fading), retryDeferredQuarantineDestroy() reclaimed BOTH slots in
+    //   ascending slot order, so the probe's (higher) slot index was pushed onto the free
+    //   list last and the next registration no longer popped handle.slot -> false FAIL.
+    convo::isr::DSPHandle probeHandle{};
+    AudioEngine::DSPCore* probeRawPtr = nullptr;
 
     {
         auto pin = e.tryPinDSPHandle(handle);
@@ -117718,8 +117859,8 @@ static bool checkF2QuarantineDestroyHonoursPins()
         // While pinned the slot must NOT be recycled: another registration must not take it.
         {
             auto probe = convo::aligned_make_unique<AudioEngine::DSPCore>();
-            auto* probeRaw = probe.release();
-            const auto probeHandle = e.registerDSPHandleForRuntime(probeRaw);
+            probeRawPtr = probe.release();
+            probeHandle = e.registerDSPHandleForRuntime(probeRawPtr);
             if (!probeHandle.isNull() && probeHandle.slot == handle.slot)
             {
                 std::fprintf(stderr,
@@ -117728,13 +117869,8 @@ static bool checkF2QuarantineDestroyHonoursPins()
                              (unsigned long long)probeHandle.generation);
                 ok = false;
             }
-            if (!probeHandle.isNull())
-            {
-                DeferredPublicationTestAccess::quarantineSlotForTest(e, probeHandle.slot);
-                (void)DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
-                    e, probeHandle.slot, 0);
-            }
-            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(probeRaw);
+            // Quarantine/destroy of the probe is deferred to after the reusability assertion
+            // (see the F2 hardening note above). The core node is released there as well.
         }
     }
 
@@ -117767,29 +117903,90 @@ static bool checkF2QuarantineDestroyHonoursPins()
     }
 
     // The slot must now be reusable with the generation advanced by exactly one.
+    // ★ F2 hardening (2026-10-31): search a bounded number of registrations instead of
+    //   assuming that the next one pops handle.slot. retryDeferredQuarantineDestroy()
+    //   reclaims Quarantined slots in ASCENDING slot order, so an additional quarantined slot
+    //   (e.g. the probe above) can be popped first. The property under test is unchanged:
+    //   the slot is reusable and its generation advanced by exactly one.
     {
-        auto reused = convo::aligned_make_unique<AudioEngine::DSPCore>();
-        auto* reusedRaw = reused.release();
-        const auto reusedHandle = e.registerDSPHandleForRuntime(reusedRaw);
-        if (reusedHandle.isNull())
+        constexpr int kReuseProbeLimit = 4;
+        bool found = false;
+        unsigned observed[kReuseProbeLimit] = {};
+        int observedCount = 0;
+        // Extras are retired AFTER the search: retiring inside the loop would push the just
+        // popped slot back on top of the LIFO free list and the search would never advance.
+        AudioEngine::DSPCore* extras[kReuseProbeLimit] = {};
+        int extraCount = 0;
+
+        for (int i = 0; i < kReuseProbeLimit && !found; ++i)
         {
-            std::fprintf(stderr, "[F2] FAIL: slot was not reusable after destroy\n");
-            ok = false;
+            auto reused = convo::aligned_make_unique<AudioEngine::DSPCore>();
+            auto* reusedRaw = reused.release();
+            const auto reusedHandle = e.registerDSPHandleForRuntime(reusedRaw);
+            if (reusedHandle.isNull())
+            {
+                DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(reusedRaw);
+                break;
+            }
+
+            observed[observedCount++] = (unsigned)reusedHandle.slot;
+            extras[extraCount++] = reusedRaw;
+
+            if (reusedHandle.slot == handle.slot)
+            {
+                if (reusedHandle.generation != handle.generation + 1)
+                {
+                    std::fprintf(stderr,
+                                 "[F2] FAIL: slot %u reusable but generation %llu != %llu\n",
+                                 (unsigned)handle.slot,
+                                 (unsigned long long)reusedHandle.generation,
+                                 (unsigned long long)(handle.generation + 1));
+                    ok = false;
+                }
+                found = true;
+            }
         }
-        else if (reusedHandle.slot != handle.slot
-                 || reusedHandle.generation != handle.generation + 1)
+
+        for (int i = 0; i < extraCount; ++i)
+        {
+            DSPLifetimeManager mgr(e);
+            mgr.retire(extras[i]);
+        }
+        e.tryReclaimResources();
+
+        if (!found)
         {
             std::fprintf(stderr,
-                         "[F2] FAIL: expected slot %u gen %llu, got slot %u gen %llu\n",
-                         (unsigned)handle.slot,
-                         (unsigned long long)(handle.generation + 1),
-                         (unsigned)reusedHandle.slot,
-                         (unsigned long long)reusedHandle.generation);
+                         "[F2] FAIL: slot %u was not reusable within %d registrations (observed:",
+                         (unsigned)handle.slot, kReuseProbeLimit);
+            for (int i = 0; i < observedCount; ++i)
+                std::fprintf(stderr, " %u", observed[i]);
+            std::fprintf(stderr, ")\n");
             ok = false;
         }
-        DSPLifetimeManager mgr(e);
-        mgr.retire(reusedRaw);
-        e.tryReclaimResources();
+    }
+
+    // ★ F2 hardening: release the probe registered inside the pinned scope. The result is
+    //   asserted (previously discarded), which is what masked the ordering assumption.
+    if (probeRawPtr != nullptr)
+    {
+        if (!probeHandle.isNull())
+        {
+            DeferredPublicationTestAccess::quarantineSlotForTest(e, probeHandle.slot);
+            const bool destroyedNow = DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
+                e, probeHandle.slot, 0);
+            if (!destroyedNow)
+            {
+                // Not pinned here: only reachable while the slot is still the active/fading
+                // handle. The engine retry reclaims it; record the fact instead of ignoring it.
+                std::fprintf(stderr,
+                             "[F2] NOTE: probe slot %u not reclaimable yet (active/fading);"
+                             " left to the engine retry\n",
+                             (unsigned)probeHandle.slot);
+            }
+        }
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(probeRawPtr);
+        probeRawPtr = nullptr;
     }
 
     {
@@ -118703,6 +118900,12 @@ int runV11EngineRetireProtectionTests()
     if (!checkF1bRetireDeferOrderInvariance())
     {
         std::fprintf(stderr, "FAIL: checkF1bRetireDeferOrderInvariance (F1-b V3/V4)\n");
+        hdOk = false;
+    }
+    // R-51: 2 エンジン共存時も pin 契約が維持されること（恒久テスト）。
+    if (!checkR51TwoEngineOwnerCollision())
+    {
+        std::fprintf(stderr, "FAIL: checkR51TwoEngineOwnerCollision (R-51)\n");
         hdOk = false;
     }
     if (!checkF2QuarantineDestroyHonoursPins())
