@@ -972,20 +972,29 @@ static bool checkSTG8ClearIsIdempotent()
         return false;
     }
 
-    // First clear: obligation terminalized.
-    orch.clearDeferredForShutdown();
-    stg8SleepPump(300);
-    if (stg8LiveCount(e) != 0 || orch.hasDeferredRequest())
+    // ★ D-01 fix (2026-11-01): clearDeferredForShutdown() is the *synchronous* form and may
+    //   only run when no RebuildThread can write the deferred members — see the documented
+    //   single-writer contract (RuntimePublicationOrchestrator.h:229-233) and the R8 (P1)
+    //   predicate fix in requestDeferredClear(). Calling it directly from the test thread while
+    //   the RebuildThread is live let both threads write deferredSlot_ / hasDeferred_:
+    //     test thread : clear -> resolve obligation (L 1->0) -> reset slot -> hasDeferred=false
+    //     rebuild thread (concurrently, processDeferredAdmission -> Ready -> submitPublishRequest)
+    //                    -> re-enqueue -> hasDeferred=true
+    //   and the observed end state became L=0 / hasDeferred=1 ("first clear" FAIL).
+    //   The production path is used instead; the assertions below are unchanged.
+    orch.requestDeferredClear();
+    if (!stg8WaitUntil(10.0, [&] { return stg8LiveCount(e) == 0 && !orch.hasDeferredRequest(); }))
     {
         std::fprintf(stderr, "[R8-2] FAIL: first clear (L=%llu hasDeferred=%d)\n",
                      (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
         ok = false;
     }
+    stg8SleepPump(300);
 
-    // Repeat twice: must be a no-op.
+    // Repeat twice: must be a no-op (same production path, same assertions).
     for (int i = 0; i < 2; ++i)
     {
-        orch.clearDeferredForShutdown();
+        orch.requestDeferredClear();
         stg8SleepPump(100);
     }
 
