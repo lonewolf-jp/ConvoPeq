@@ -353,6 +353,36 @@ bool checkRingRatioVerdicts()
     return ok;
 }
 
+// (9c) 1 秒ごとの回収がリングも drain する（ON 側が容量超過で INCONCLUSIVE にならないこと）
+bool checkPollDrainsRing()
+{
+    bool ok = true;
+    auto& ring = convo::rtmeasure::instance();
+
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    convo::rtmeasure::resetPollGateForTest();
+    ring.reset();
+
+    constexpr int kEvents = 1000;
+    for (int i = 0; i < kEvents; ++i)
+        ring.push(convo::rtmeasure::kBlockEnd, 0, 0);
+
+    ok = expect("ring pending before poll", ring.pending() == static_cast<std::size_t>(kEvents)) && ok;
+
+    const bool ran = convo::rtmeasure::pollIfDue();
+    ok = expect("poll ran", ran) && ok;
+    ok = expect("poll drained ring", ring.pending() == 0u) && ok;
+    ok = expect("ring writes kept", ring.written() == static_cast<std::uint64_t>(kEvents)) && ok;
+    ok = expect("no ring drops", ring.dropped() == 0ull) && ok;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
 // (10) RT 経路の性質を型で固定する
 static_assert(std::is_trivially_destructible_v<convo::rtmeasure::Ring>,
               "Ring must be trivially destructible");
@@ -495,6 +525,7 @@ int runRtMeasureRingTests()
     ok = checkSampleOverflowInconclusive() && ok;
     ok = checkP99AndMax() && ok;
     ok = checkRingRatioVerdicts() && ok;
+    ok = checkPollDrainsRing() && ok;
     ok = checkRingMechanics() && ok;
     ok = checkSampleBufferConcurrency() && ok;
 

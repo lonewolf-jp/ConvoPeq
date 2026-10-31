@@ -663,6 +663,19 @@ inline bool pollIfDue() noexcept
 
     convo::publishAtomic(g_lastPollMs, nowMs, std::memory_order_relaxed);
 
+    // イベントリングも回収する（モード 1）。回収しないと 8,192 容量を超えて
+    // `dropped` が増え、測定が INCONCLUSIVE になってしまう。
+    // 現時点ではイベントは観測のみ（内容は使わない）。
+    {
+        Event buf[256];
+        for (;;)
+        {
+            const std::size_t n = instance().drain(buf, 256);
+            if (n < 256)
+                break;
+        }
+    }
+
     (void) aggregator().collect();
     const Stats& s = aggregator().compute();
 
