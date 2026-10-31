@@ -1754,9 +1754,10 @@ static bool checkF2QuarantineDestroyHonoursPins()
     // Move the slot to Quarantined (the lifecycle state the cleanup targets).
     DeferredPublicationTestAccess::quarantineSlotForTest(e, handle.slot);
 
-    // A slot occupied by another live DSP, allocated BEFORE the destroy attempt, so the
-    // free-list order is known: after destroy(handle.slot) succeeds, the next registration
-    // must pop handle.slot (LIFO).
+    // A slot occupied by another live DSP, allocated BEFORE the destroy attempt. NOTE: the
+    // free list is LIFO for a single push, but retryDeferredQuarantineDestroy() reclaims in
+    // ascending slot order, so the test below must not assume that handle.slot is the next
+    // slot popped (F2 hardening, 2026-10-31).
     auto other = convo::aligned_make_unique<AudioEngine::DSPCore>();
     auto* otherRaw = other.release();
     auto otherHandle = e.registerDSPHandleForRuntime(otherRaw);
@@ -1767,6 +1768,15 @@ static bool checkF2QuarantineDestroyHonoursPins()
         harness.stop();
         return false;
     }
+
+    // ★ F2 hardening (2026-10-31): the probe registered below is quarantined/destroyed only
+    //   AFTER the reusability assertion. Previously it was quarantined and destroyed inside
+    //   the pinned scope with the return value discarded; when that destroy was refused
+    //   (still active/fading), retryDeferredQuarantineDestroy() reclaimed BOTH slots in
+    //   ascending slot order, so the probe's (higher) slot index was pushed onto the free
+    //   list last and the next registration no longer popped handle.slot -> false FAIL.
+    convo::isr::DSPHandle probeHandle{};
+    AudioEngine::DSPCore* probeRawPtr = nullptr;
 
     {
         auto pin = e.tryPinDSPHandle(handle);
@@ -1807,8 +1817,8 @@ static bool checkF2QuarantineDestroyHonoursPins()
         // While pinned the slot must NOT be recycled: another registration must not take it.
         {
             auto probe = convo::aligned_make_unique<AudioEngine::DSPCore>();
-            auto* probeRaw = probe.release();
-            const auto probeHandle = e.registerDSPHandleForRuntime(probeRaw);
+            probeRawPtr = probe.release();
+            probeHandle = e.registerDSPHandleForRuntime(probeRawPtr);
             if (!probeHandle.isNull() && probeHandle.slot == handle.slot)
             {
                 std::fprintf(stderr,
@@ -1817,13 +1827,8 @@ static bool checkF2QuarantineDestroyHonoursPins()
                              (unsigned long long)probeHandle.generation);
                 ok = false;
             }
-            if (!probeHandle.isNull())
-            {
-                DeferredPublicationTestAccess::quarantineSlotForTest(e, probeHandle.slot);
-                (void)DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
-                    e, probeHandle.slot, 0);
-            }
-            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(probeRaw);
+            // Quarantine/destroy of the probe is deferred to after the reusability assertion
+            // (see the F2 hardening note above). The core node is released there as well.
         }
     }
 
@@ -1856,29 +1861,90 @@ static bool checkF2QuarantineDestroyHonoursPins()
     }
 
     // The slot must now be reusable with the generation advanced by exactly one.
+    // ★ F2 hardening (2026-10-31): search a bounded number of registrations instead of
+    //   assuming that the next one pops handle.slot. retryDeferredQuarantineDestroy()
+    //   reclaims Quarantined slots in ASCENDING slot order, so an additional quarantined slot
+    //   (e.g. the probe above) can be popped first. The property under test is unchanged:
+    //   the slot is reusable and its generation advanced by exactly one.
     {
-        auto reused = convo::aligned_make_unique<AudioEngine::DSPCore>();
-        auto* reusedRaw = reused.release();
-        const auto reusedHandle = e.registerDSPHandleForRuntime(reusedRaw);
-        if (reusedHandle.isNull())
+        constexpr int kReuseProbeLimit = 4;
+        bool found = false;
+        unsigned observed[kReuseProbeLimit] = {};
+        int observedCount = 0;
+        // Extras are retired AFTER the search: retiring inside the loop would push the just
+        // popped slot back on top of the LIFO free list and the search would never advance.
+        AudioEngine::DSPCore* extras[kReuseProbeLimit] = {};
+        int extraCount = 0;
+
+        for (int i = 0; i < kReuseProbeLimit && !found; ++i)
         {
-            std::fprintf(stderr, "[F2] FAIL: slot was not reusable after destroy\n");
-            ok = false;
+            auto reused = convo::aligned_make_unique<AudioEngine::DSPCore>();
+            auto* reusedRaw = reused.release();
+            const auto reusedHandle = e.registerDSPHandleForRuntime(reusedRaw);
+            if (reusedHandle.isNull())
+            {
+                DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(reusedRaw);
+                break;
+            }
+
+            observed[observedCount++] = (unsigned)reusedHandle.slot;
+            extras[extraCount++] = reusedRaw;
+
+            if (reusedHandle.slot == handle.slot)
+            {
+                if (reusedHandle.generation != handle.generation + 1)
+                {
+                    std::fprintf(stderr,
+                                 "[F2] FAIL: slot %u reusable but generation %llu != %llu\n",
+                                 (unsigned)handle.slot,
+                                 (unsigned long long)reusedHandle.generation,
+                                 (unsigned long long)(handle.generation + 1));
+                    ok = false;
+                }
+                found = true;
+            }
         }
-        else if (reusedHandle.slot != handle.slot
-                 || reusedHandle.generation != handle.generation + 1)
+
+        for (int i = 0; i < extraCount; ++i)
+        {
+            DSPLifetimeManager mgr(e);
+            mgr.retire(extras[i]);
+        }
+        e.tryReclaimResources();
+
+        if (!found)
         {
             std::fprintf(stderr,
-                         "[F2] FAIL: expected slot %u gen %llu, got slot %u gen %llu\n",
-                         (unsigned)handle.slot,
-                         (unsigned long long)(handle.generation + 1),
-                         (unsigned)reusedHandle.slot,
-                         (unsigned long long)reusedHandle.generation);
+                         "[F2] FAIL: slot %u was not reusable within %d registrations (observed:",
+                         (unsigned)handle.slot, kReuseProbeLimit);
+            for (int i = 0; i < observedCount; ++i)
+                std::fprintf(stderr, " %u", observed[i]);
+            std::fprintf(stderr, ")\n");
             ok = false;
         }
-        DSPLifetimeManager mgr(e);
-        mgr.retire(reusedRaw);
-        e.tryReclaimResources();
+    }
+
+    // ★ F2 hardening: release the probe registered inside the pinned scope. The result is
+    //   asserted (previously discarded), which is what masked the ordering assumption.
+    if (probeRawPtr != nullptr)
+    {
+        if (!probeHandle.isNull())
+        {
+            DeferredPublicationTestAccess::quarantineSlotForTest(e, probeHandle.slot);
+            const bool destroyedNow = DeferredPublicationTestAccess::destroyQuarantineSlotForTest(
+                e, probeHandle.slot, 0);
+            if (!destroyedNow)
+            {
+                // Not pinned here: only reachable while the slot is still the active/fading
+                // handle. The engine retry reclaims it; record the fact instead of ignoring it.
+                std::fprintf(stderr,
+                             "[F2] NOTE: probe slot %u not reclaimable yet (active/fading);"
+                             " left to the engine retry\n",
+                             (unsigned)probeHandle.slot);
+            }
+        }
+        DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire(probeRawPtr);
+        probeRawPtr = nullptr;
     }
 
     {
