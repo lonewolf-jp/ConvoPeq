@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-01 20:15:00
+> Generated: 2026-11-02 08:22:51
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -302,8 +302,10 @@
         │   ├── AdmissionPackedStateTestAccess.h
         │   ├── AdmissionPackedStateTests.cpp
         │   ├── AudioEngineHarness/
+        │   │   ├── A2A3aQuarantineTests.cpp
         │   │   ├── AudioEngineHarness.cpp
         │   │   ├── AudioEngineHarness.h
+        │   │   ├── B2DiagSinkTests.cpp
         │   │   ├── BassBuzzMeasurement.cpp
         │   │   ├── ConvolverStateRoundTripTests.cpp
         │   │   ├── DeferredFlowIntegrationTests.cpp
@@ -2994,6 +2996,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/EngineInstanceCountTests.cpp
+    src/tests/AudioEngineHarness/B2DiagSinkTests.cpp
+    src/tests/AudioEngineHarness/A2A3aQuarantineTests.cpp
         src/tests/AudioEngineHarness/RtMeasureRingTests.cpp
     src/tests/AudioEngineHarness/V11ReaderReacquireTests.cpp
     src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp
@@ -6067,6 +6071,19 @@ AudioEngine::~AudioEngine()
             }
         }
     }
+
+    // ★ B-2 (2026-11-01): 回収できずに残した DSPCore（leak 選択分）から診断 sink を外す。
+    //   RT は StopAudio で join 済み、reader は sink を使わない（activeReaderCount は
+    //   RCU 読取区間の数であって診断生産者ではない）ため、ここでの detach は安全。
+    //   detach しないと、破棄済み AudioEngine の diagBuffer を指したまま leak コアが残る。
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        for (DSPCore* core : deferredDestroy_)
+        {
+            if (core != nullptr)
+                core->detachDiagSink();
+        }
+    }
     // ★ D162-2-E (E-3 / INV-D162-8): 全 EBR store drain 後の pending 残留確認。
     //   D8 の drainAll / drainAllQuarantineStore が完了した時点で DSPCore 破壊は EBR closure を
     //   全て消化しているはず。残留があれば member teardown に EBR entry を持ち越すことになり
@@ -6955,29 +6972,42 @@ struct alignas(64) DiagPerTickCounter {
 };
 #pragma warning(pop)
 
-// work60: モジュール別 diagBuffer アクセス用 setter（extern linkage - 実体は各.cpp）
-void setEqDiagBuffer(
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-    std::atomic<uint64_t>& totalPushed) noexcept;
-void setConvDiagBuffer(
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-    std::atomic<uint64_t>& totalPushed) noexcept;
+// ★ B-2 (2026-11-01): 診断 sink の非所有バンドル。
+//   バッファ本体・カウンタの所有権は AudioEngine に残す。ここは参照だけを持つ。
+//   RT から見えるのはこのポインタ 1 本で、push は固定長リングと relaxed カウンタのみ。
+struct DiagSink {
+    using Buffer = LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>;
 
-// work60: 実体定義は DSPCoreFloat.cpp（setEqDiagBuffer）と
-// ConvolverProcessor.Runtime.cpp（setConvDiagBuffer）にある。
+    Buffer* buffer = nullptr;
+    DiagPerTickCounter* tickPushed = nullptr;
+    DiagPerTickCounter* tickDropped = nullptr;
+    std::atomic<uint64_t>* totalPushed = nullptr;
 
-// ★ [work65] Shared runtime diagnostics state — external linkage.
-// Must be shared across DSPCoreFloat.cpp, DSPCoreDouble.cpp, and
-// DSPCoreIO.cpp. DO NOT move into an anonymous namespace in any
-// of those translation units.
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-extern LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer;
-extern DiagPerTickCounter* eqTickPushed;
-extern DiagPerTickCounter* eqTickDropped;
-extern std::atomic<uint64_t>* eqTotalPushed;
-#endif
+    [[nodiscard]] bool valid() const noexcept { return buffer != nullptr; }
+
+    // RT-safe: 固定長リングへの push と relaxed カウンタ更新のみ（確保・ロック・I/O なし）。
+    bool push(const DiagEvent& event) const noexcept
+    {
+        if (buffer == nullptr)
+            return false;
+
+        if (buffer->push(event))
+        {
+            if (tickPushed != nullptr)
+                tickPushed->value.fetch_add(1, std::memory_order_relaxed);
+            if (totalPushed != nullptr)
+                totalPushed->fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        if (tickDropped != nullptr)
+            tickDropped->value.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+};
+
+// ★ B-2 (2026-11-01): 旧グローバル（eqDiagBuffer / convDiagBuffer）と setter は撤去した。
+//   診断の受け渡しは DiagSink（非所有バンドル）を DSPCore から引数で渡す方式に統一する。
 
 // ★ work61: CallbackArrival 記録ヘルパー（inline、RT-safe）
 //   BlockDouble.cpp / AudioBlock.cpp の両方から呼ばれる。
@@ -7545,6 +7575,21 @@ public:
         // 構築スレッドまたは Message Thread から呼ぶこと）。
         [[nodiscard]] DiagFootprint diagCaptureFootprint() noexcept;
 #endif
+
+        // ★ B-2 (2026-11-01): 診断 sink の所有者契約。
+        //   - バッファ本体は AudioEngine が所有する。ここは非所有ポインタのみ。
+        //   - ownerId は識別情報であり逆参照しない（0 は未束縛の予約値）。
+        //   - bind は NonRT（prepare）のみ。RT は acquire load で読むだけ。
+        [[nodiscard]] std::uint64_t diagOwnerId() const noexcept { return diagOwnerId_; }
+        [[nodiscard]] DiagSink* diagSink() const noexcept
+        {
+            return convo::consumeAtomic(diagSink_, std::memory_order_acquire);
+        }
+        void attachDiagSink(DiagSink* sink, std::uint64_t ownerId) noexcept;
+        void detachDiagSink() noexcept;
+
+        std::uint64_t diagOwnerId_ { 0 };
+        std::atomic<DiagSink*> diagSink_ { nullptr };
 
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
@@ -9482,6 +9527,14 @@ public:
     LockFreeRingBuffer<XRunEvent, kXRunBufferCapacity> xRunBuffer;
     // ★ work60: DiagEvent リングバッファ（Audio Thread write, Timer Thread read）
     LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity> diagBuffer;
+
+    // ★ B-2 (2026-11-01): 診断 sink（非所有バンドル）。バッファ本体は diagBuffer 等が所有する。
+    //   DSPCore へは prepare（NonRT）で attach し、teardown と破棄時に detach する。
+    DiagSink diagSink_ {};
+    [[nodiscard]] DiagSink& diagnosticsSink() noexcept { return diagSink_; }
+    [[nodiscard]] const DiagSink& diagnosticsSink() const noexcept { return diagSink_; }
+    // ★ B-2: owner 識別子はエンジン生成時に一度だけ採番する（0 は未束縛の予約値）。
+    [[nodiscard]] std::uint64_t diagnosticsEngineId() const noexcept { return engineInstanceId_; }
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
     struct LearnerStateSnapshot {
@@ -11684,7 +11737,7 @@ public:
 
     // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
     //   Deferred になったポインタをエンジンの再試行リストで保持し、所有権を失わない。
-    void deferDestroyRetry(void* p) noexcept;
+    void deferDestroyRetry(DSPCore* core) noexcept;
     [[nodiscard]] std::size_t retryDeferredDestroys() noexcept;
     [[nodiscard]] std::size_t deferredDestroyResidentCount() const noexcept;
     // ★ F1'-b (2026-10-25) 監査対応: ロックフリーの在住数。
@@ -11705,7 +11758,7 @@ public:
         return dspHandleRuntime_.deferredQuarantineDestroyCount();
     }
     mutable std::mutex deferredDestroyMutex_;
-    std::vector<void*> deferredDestroy_;
+    std::vector<DSPCore*> deferredDestroy_;
     std::atomic<std::uint64_t> deferredDestroyCount_{0};
     std::atomic<std::uint32_t> deferredDestroyResidentAtomic_{0};
 
@@ -12278,13 +12331,14 @@ void AudioEngine::initialize()
 
     // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
 
-    // ★ work60: モジュール別 DiagEvent リングバッファポインタを初期化
-    //   DSPCoreFloat/DSPCoreDouble の logEqTime → eqDiagBuffer
-    //   ConvolverProcessor.Runtime の convDiagBuffer
-    setEqDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
-                    rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
-    setConvDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
-                      rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
+    // ★ B-2 (2026-11-01): 旧 setter 呼び出しを撤去し、DiagSink の参照先を確定する。
+
+    // ★ B-2 (2026-11-01): 診断 sink の参照先を確定する（非所有バンドル）。
+    //   バッファ本体・カウンタの所有権は従来どおり AudioEngine 側にある。
+    diagSink_.buffer = &diagBuffer;
+    diagSink_.tickPushed = &rtAuxMutable_.diagTickPushed;
+    diagSink_.tickDropped = &rtAuxMutable_.diagTickDropped;
+    diagSink_.totalPushed = &rtAuxMutable_.diagTotalPushed;
     // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
     // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
     uiConvolverProcessor.prepareToPlay(48000.0, 512);
@@ -15770,10 +15824,11 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                const convo::EQParameters* eqParams,
                convo::ProcessingOrder order,
                double sampleRate,
-               uint64_t callbackSeq, uint32_t cpu)
+               uint64_t callbackSeq, uint32_t cpu,
+               DiagSink* sink)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || sink == nullptr || !sink->valid()) return;
     if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
@@ -15796,15 +15851,7 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
     event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
     event.data.eqTime.order = static_cast<uint8_t>(order);
     event.data.eqTime.budgetPercent = budgetPermille;
-    if (eqDiagBuffer->push(event))
-    {
-        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
-    }
-    else
-    {
-        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-    }
+    (void)sink->push(event);   // 固定長リング + relaxed カウンタ（DiagSink 側で処理）
 }
 #endif
 
@@ -16140,7 +16187,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     {
         if (!state.convBypassed)
         {
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // ★ [work65] work52キャプチャコード削除
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
@@ -16158,7 +16205,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -16182,7 +16229,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -16204,7 +16251,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                     scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // ★ [work65] work52キャプチャコード削除
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
@@ -16394,14 +16441,14 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
         // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
-        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
+        DiagSink* ansSink = diagSink();
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && ansSink != nullptr)
         {
             DiagEvent event{};
             event.category = DiagCategory::AnsSwitchTime;
             event.eventIndex = currentCallbackSeq;
             event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
-            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
-            juce::ignoreUnused(pushed); // drop on full is acceptable
+            (void)ansSink->push(event); // drop on full is acceptable
         }
 #endif
     }
@@ -16546,29 +16593,8 @@ inline double absDiffNoLibm(double a, double b) noexcept
     return absNoLibm(a - b);
 }
 
-// ★ [work65] eqDiagBuffer: external linkage (shared across DSPCoreFloat/Double/IO)
-//   AudioEngine.h で extern 宣言。DO NOT move into anonymous namespace.
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
-DiagPerTickCounter* eqTickPushed = nullptr;
-DiagPerTickCounter* eqTickDropped = nullptr;
-std::atomic<uint64_t>* eqTotalPushed = nullptr;
-#endif
-
-// work60: setEqDiagBuffer は #if 外で常時コンパイル（AudioEngine.Init.cpp からの呼出用）
-void setEqDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-                     DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-                     std::atomic<uint64_t>& totalPushed) noexcept
-{
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    eqDiagBuffer = &db;
-    eqTickPushed = &tickPushed;
-    eqTickDropped = &tickDropped;
-    eqTotalPushed = &totalPushed;
-#else
-    juce::ignoreUnused(db, tickPushed, tickDropped, totalPushed);
-#endif
-}
+// ★ B-2 (2026-11-01): 旧 eqDiagBuffer（モジュールレベル）は撤去した。
+//   診断先は DiagSink* として呼び出し側（DSPCore）から渡される。
 
 namespace {
 // work60: 以降のヘルパーは再び無名名前空間（internal linkage）に戻す
@@ -16578,10 +16604,11 @@ inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                       const convo::EQParameters* eqParams,
                       convo::ProcessingOrder order,
                       double sampleRate,
-                      uint64_t callbackSeq, uint32_t cpu)
+                      uint64_t callbackSeq, uint32_t cpu,
+                      DiagSink* sink)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || sink == nullptr || !sink->valid()) return;
     if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
@@ -16604,15 +16631,7 @@ inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
     event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
     event.data.eqTime.order = static_cast<uint8_t>(order);
     event.data.eqTime.budgetPercent = budgetPermille;
-    if (eqDiagBuffer->push(event))
-    {
-        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
-    }
-    else
-    {
-        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-    }
+    (void)sink->push(event);   // 固定長リング + relaxed カウンタ（DiagSink 側で処理）
 }
 #endif
 
@@ -16792,7 +16811,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     {
         if (!state.convBypassed)
         {
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
                                  true,
@@ -16810,7 +16829,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -16834,7 +16853,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -16857,7 +16876,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                     scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
                                  true,
@@ -17430,14 +17449,14 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
         // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
-        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
+        DiagSink* ansSink = diagSink();
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && ansSink != nullptr)
         {
             DiagEvent event{};
             event.category = DiagCategory::AnsSwitchTime;
             event.eventIndex = currentCallbackSeq;
             event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
-            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
-            juce::ignoreUnused(pushed); // drop on full is acceptable
+            (void)ansSink->push(event); // drop on full is acceptable
         }
 #endif
     }
@@ -17609,6 +17628,29 @@ AudioEngine::DSPCore::DSPCore()
     eqState->bind(eq);
 }
 
+// ★ B-2 (2026-11-01): 診断 sink の bind / detach。
+//   bind は NonRT（prepare）からのみ。ownerId は識別情報で、逆参照しない。
+void AudioEngine::DSPCore::attachDiagSink(DiagSink* sink, std::uint64_t ownerId) noexcept
+{
+    // 0 は未束縛の予約値。owner 未確定なら bind しない。
+    if (sink == nullptr || ownerId == 0)
+        return;
+
+    // 別エンジンの sink へは bind しない（誤 bind は Release でも拒否する）。
+    jassert(diagOwnerId_ == 0 || diagOwnerId_ == ownerId);
+    if (diagOwnerId_ != 0 && diagOwnerId_ != ownerId)
+        return;
+
+    diagOwnerId_ = ownerId;
+    convo::publishAtomic(diagSink_, sink, std::memory_order_release);
+}
+
+void AudioEngine::DSPCore::detachDiagSink() noexcept
+{
+    // ポインタだけを外す。ownerId は識別情報なので保持したままにする。
+    convo::publishAtomic(diagSink_, nullptr, std::memory_order_release);
+}
+
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -17636,6 +17678,9 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         convolver.setRetireCoordinator(&owner->runtimePublicationBridge_);
         juce::Logger::writeToLog("[DSPCORE_PREPARE] setRetireCoordinator done");
 #endif
+
+        // ★ B-2: 診断 sink の bind（NonRT・publish より前）。RT からは acquire で読むだけ。
+        attachDiagSink(&owner->diagnosticsSink(), owner->diagnosticsEngineId());
     }
 
     // Exception-safety context:
@@ -22105,7 +22150,7 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
             //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
             //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
-            owner->deferDestroyRetry(p);
+            owner->deferDestroyRetry(static_cast<DSPCore*>(p));
             juce::Logger::writeToLog(juce::String::formatted(
                 "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
             return DestroyOutcome::Deferred;
@@ -22128,17 +22173,17 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 }
 
 // ★ F1'-b: 再試行リストへの登録（重複は無視）。所有権はこのリストが保持する。
-void AudioEngine::deferDestroyRetry(void* p) noexcept
+void AudioEngine::deferDestroyRetry(DSPCore* core) noexcept
 {
-    if (p == nullptr)
+    if (core == nullptr)
         return;
     std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
-    for (void* existing : deferredDestroy_)
+    for (DSPCore* existing : deferredDestroy_)
     {
-        if (existing == p)
+        if (existing == core)
             return;   // 既に保持している（二重登録しない）
     }
-    deferredDestroy_.push_back(p);
+    deferredDestroy_.push_back(core);
     convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
     convo::publishAtomic(deferredDestroyResidentAtomic_,
@@ -22160,7 +22205,7 @@ std::size_t AudioEngine::retryDeferredDestroys() noexcept
     //   entries destroys them; a concurrent caller gets an empty list and does nothing.
     //   Deferred entries are re-registered by destroyDSPCoreNodeRetryable() itself
     //   (deferDestroyRetry), so no re-registration is needed here.
-    std::vector<void*> snapshot;
+    std::vector<DSPCore*> snapshot;
     {
         std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
         snapshot.swap(deferredDestroy_);
@@ -22172,7 +22217,7 @@ std::size_t AudioEngine::retryDeferredDestroys() noexcept
         return 0;
 
     std::size_t destroyed = 0;
-    for (void* p : snapshot)
+    for (DSPCore* p : snapshot)
     {
         // Destroyed -> freed, not re-registered.
         // Deferred  -> destroyDSPCoreNodeRetryable() re-registers it internally.
@@ -27538,6 +27583,8 @@ private:
 
 ```
 #include "ISRDSPHandle.h"
+
+#include <bit>
 #include "AtomicAccess.h"
 
 #include <cassert>
@@ -28062,11 +28109,12 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
             return false;
     }
 
-    // state == Quarantined is required
-    const auto prevState = convo::consumeAtomic(
+    // ★ A2 (2026-11-01): 観測が Quarantined でなければ「他者が先に遷移させた正常系」として false。
+    //   旧実装は CAS の前の観測値で assert していたため、正当な競合でも誤検出していた。
+    //   assert は削除せず、CAS の結果に対する不変条件として下へ移す。
+    const auto observed = convo::consumeAtomic(
         registry_[slot].state, std::memory_order_acquire);
-    assert(prevState == DSPState::Quarantined);
-    if (prevState != DSPState::Quarantined)
+    if (observed != DSPState::Quarantined)
         return false;
 
     // Phase 1: state check - not active / fading / crossfading
@@ -28092,23 +28140,29 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
     (void)closePinsForDestroy(slot, pinnedGeneration);
     if (pinnedCount(slot) != 0)
     {
-        convo::fetchAddAtomic(deferredQuarantineDestroy_, std::uint32_t{1},
-                              std::memory_order_acq_rel);
+        // ★ A3-a: どのスロットが deferred かを記録する（グローバル +1 をやめる）。
+        markQuarantineDeferred(slot);
         return false;   // deferred: nothing was modified
     }
 
-    // Phase 1: mark DestroyPending (CAS, safe transition)
-    auto expected = convo::consumeAtomic(
-        registry_[slot].state, std::memory_order_acquire);
-    while (expected == DSPState::Quarantined) {
-        if (convo::compareExchangeAtomic(registry_[slot].state,
+    // ★ A2 (2026-11-01): CAS が Quarantined -> DestroyPending の唯一の遷移所有者。
+    //   結果に基づいて検査する（assert は「CAS 成功時の不変条件」として保持）。
+    auto expected = observed;
+    while (!convo::compareExchangeAtomic(registry_[slot].state,
                                          expected, DSPState::DestroyPending,
                                          std::memory_order_acq_rel,
                                          std::memory_order_acquire))
-            break;
-    }
-    if (expected != DSPState::Quarantined)
+    {
+        // 他者が先に遷移させた（正常）。自分は何も遷移させていない。
+        if (expected != DSPState::Quarantined)
+            return false;
+
+        // CAS 失敗にもかかわらず expected が Quarantined のまま = 状態が Quarantined へ
+        // 逆行した（真の異常）。旧実装では検出できなかったケース。
+        assert(!"DSPState regressed to Quarantined without a transition owner");
         return false;
+    }
+    assert(expected == DSPState::Quarantined);   // CAS 成功時の不変条件
 
     // Phase 2: clear instance
     convo::publishAtomic(registry_[slot].instance, nullptr, std::memory_order_release);
@@ -28120,6 +28174,9 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
     std::lock_guard<std::mutex> lock(freeListMutex_);
     if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = slot;
+
+    // ★ A3-a: 回収できたので deferred マークを外す。
+    clearQuarantineDeferred(slot);
     return true;
 }
 
@@ -28128,33 +28185,92 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
 //   (AudioEngine::tryReclaimResources) and the shutdown cleanup.
 std::size_t DSPHandleRuntime::retryDeferredQuarantineDestroy() noexcept
 {
-    if (convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire) == 0)
+    // ★ A3-a: マークされたスロットだけを対象にする。
+    //   commit 経路が今まさに処理中のスロットへ横から触ることを避ける。
+    if (deferredCount() == 0)
         return 0;
 
     std::size_t destroyed = 0;
-    std::uint32_t stillDeferred = 0;
 
     for (uint32_t slot = 1; slot < MAX_DSP_SLOTS; ++slot)
     {
+        if (!isQuarantineDeferred(slot))
+            continue;
+
         if (convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire)
             != DSPState::Quarantined)
+        {
+            clearQuarantineDeferred(slot);   // 他者が終端済み
             continue;
+        }
         if (convo::consumeAtomic(registry_[slot].instance, std::memory_order_acquire) == nullptr)
+        {
+            clearQuarantineDeferred(slot);   // 実体なし = マーク不要
             continue;
+        }
 
         if (destroyQuarantineSlot(slot, 0))
-            ++destroyed;
-        else if (pinnedCount(slot) != 0)
-            ++stillDeferred;
+        {
+            ++destroyed;                     // 成功時は destroyQuarantineSlot が mark を外す
+            continue;
+        }
+
+        if (pinnedCount(slot) == 0)
+            clearQuarantineDeferred(slot);   // pin が解けたので再試行不要
+        // else: pin 残留のまま -> マークを保持して次回へ
     }
 
-    convo::publishAtomic(deferredQuarantineDestroy_, stillDeferred, std::memory_order_release);
     return destroyed;
 }
 
 std::uint32_t DSPHandleRuntime::deferredQuarantineDestroyCount() const noexcept
 {
-    return convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire);
+    // ★ A3-a: 契約は従来どおり「保留中のスロット数」。マスクの popcount で返す。
+    return deferredCount();
+}
+
+void DSPHandleRuntime::markQuarantineDeferred(std::uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    convo::fetchOrAtomic(deferredQuarantineMask_[slot >> 6],
+                         std::uint64_t{1} << (slot & 63),
+                         std::memory_order_acq_rel);
+}
+
+void DSPHandleRuntime::clearQuarantineDeferred(std::uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    convo::fetchAndAtomic(deferredQuarantineMask_[slot >> 6],
+                          ~(std::uint64_t{1} << (slot & 63)),
+                          std::memory_order_acq_rel);
+}
+
+bool DSPHandleRuntime::isQuarantineDeferred(std::uint32_t slot) const noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return false;
+    const auto word = convo::consumeAtomic(deferredQuarantineMask_[slot >> 6],
+                                           std::memory_order_acquire);
+    return ((word >> (slot & 63)) & std::uint64_t{1}) != 0;
+}
+
+std::uint32_t DSPHandleRuntime::deferredCount() const noexcept
+{
+    std::uint32_t count = 0;
+    for (std::uint32_t i = 0; i < kDeferredMaskWords; ++i)
+    {
+        const auto word = convo::consumeAtomic(deferredQuarantineMask_[i],
+                                               std::memory_order_acquire);
+#if defined(__cpp_lib_bitops) && __cpp_lib_bitops >= 201907L
+        count += static_cast<std::uint32_t>(std::popcount(word));
+#else
+        std::uint64_t w = word;
+        while (w != 0) { w &= (w - 1); ++count; }
+#endif
+    }
+    return count;
 }
 
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept
@@ -28543,6 +28659,12 @@ public:
     // Number of quarantine slots whose destruction is deferred (observation only).
     [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept;
 
+    // ★ A3-a: スロット単位マークの操作。RT からは呼ばない（破棄・再試行は NonRT）。
+    void markQuarantineDeferred(std::uint32_t slot) noexcept;
+    void clearQuarantineDeferred(std::uint32_t slot) noexcept;
+    [[nodiscard]] bool isQuarantineDeferred(std::uint32_t slot) const noexcept;
+    [[nodiscard]] std::uint32_t deferredCount() const noexcept;
+
     // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
     //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
     //   Authority（RuntimeIntentCoordinator::reclaim(ReclaimMode, ...)）に一本化。
@@ -28590,8 +28712,12 @@ private:
     std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
     uint32_t freeSize_ = 0;
     // F-2 (2026-10-25): non-zero while at least one quarantined slot could not be destroyed
-    // because a pin was still held. Advisory: recomputed by retryDeferredQuarantineDestroy().
-    std::atomic<std::uint32_t> deferredQuarantineDestroy_{0};
+    // ★ A3-a (2026-11-01): スロット単位の deferred マーク（MAX_DSP_SLOTS = 256 -> 4 words）。
+    //   グローバルカウンタをやめ、「どのスロットが pin 残留で破棄できなかったか」を保持する。
+    //   再試行はマークされたスロットだけを走査する（commit 経路との重複を構造的に減らす）。
+    static constexpr std::uint32_t kDeferredMaskWords =
+        static_cast<std::uint32_t>(MAX_DSP_SLOTS / 64);
+    std::array<std::atomic<std::uint64_t>, kDeferredMaskWords> deferredQuarantineMask_{};
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
     //   DSPHandle is a 16-byte POD; its atomic requires atomic 16-byte CAS semantics
     //   (MSVC: lock-pool backend, is_lock_free()==false is accurate; all consumers NonRT).
@@ -54187,23 +54313,8 @@ namespace
     }
 }
 
-// work60: module-level pointers to AudioEngine::diagBuffer for CONV_TIME/STCONV_TIME
-//   Set via setConvDiagBuffer() called from AudioEngine initialization.
-namespace {
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* convDiagBuffer = nullptr;
-    DiagPerTickCounter* convTickPushed = nullptr;
-    DiagPerTickCounter* convTickDropped = nullptr;
-    std::atomic<uint64_t>* convTotalPushed = nullptr;
-}
-void setConvDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-                       DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-                       std::atomic<uint64_t>& totalPushed) noexcept
-{
-    convDiagBuffer = &db;
-    convTickPushed = &tickPushed;
-    convTickDropped = &tickDropped;
-    convTotalPushed = &totalPushed;
-}
+// ★ B-2 (2026-11-01): 旧 convDiagBuffer（モジュールレベル）は撤去した。
+//   診断先は process(block, sink) の引数として DSPCore から渡される。
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME)
 
@@ -54337,7 +54448,7 @@ void ConvolverProcessor::exitGlobalReader(int readerIndex) const noexcept
 //    - 待機なし (No Wait)
 //    - RCU (Read-Copy-Update) パターンを使用
 //--------------------------------------------------------------
-void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
+void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block, const DiagSink* sink)
 {
     convo::RCUReaderGuard guard(runtimeRcuReader);
 
@@ -54863,7 +54974,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         ? static_cast<uint32_t>((static_cast<double>(scElapsedUs) / expectedUs) * 1000.0)
                         : 0;
                     // work60: Numeric-Only DiagEvent
-                    if (convDiagBuffer != nullptr)
+                    if (sink != nullptr && sink->valid())
                     {
                         DiagEvent event{};
                         event.category = DiagCategory::StereoConvTime;
@@ -54873,15 +54984,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         event.data.stereoConvTime.chunkSamples = static_cast<uint32_t>(chunkSamples);
                         event.data.stereoConvTime.channels = static_cast<uint8_t>(ch);
                         event.data.stereoConvTime.budgetPercent = static_cast<uint16_t>(budgetPermille);
-                        if (convDiagBuffer->push(event))
-                        {
-                            convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-                            convTotalPushed->fetch_add(1, std::memory_order_relaxed);
-                        }
-                        else
-                        {
-                            convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-                        }
+                        (void)sink->push(event);
                     }
                 }
             }
@@ -54948,7 +55051,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     ? static_cast<uint32_t>((static_cast<double>(convElapsedUs) / expectedUs) * 1000.0)
                     : 0;
                 // work60: Numeric-Only DiagEvent
-                if (convDiagBuffer != nullptr)
+                if (sink != nullptr && sink->valid())
                 {
                     DiagEvent event{};
                     event.category = DiagCategory::ConvTime;
@@ -54962,15 +55065,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         event.data.convTime.callQuantumSamples = static_cast<uint32_t>(conv->callQuantumSamples);
                         event.data.convTime.latency = static_cast<uint32_t>(conv->latency);
                     }
-                    if (convDiagBuffer->push(event))
-                    {
-                        convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-                        convTotalPushed->fetch_add(1, std::memory_order_relaxed);
-                    }
-                    else
-                    {
-                        convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-                    }
+                    (void)sink->push(event);
                 }
             }
         }
@@ -58482,6 +58577,9 @@ private:
 #include <mutex>
 #include <vector>
 #include <array>
+
+// ★ B-2: 診断 sink（非所有バンドル）。定義は AudioEngine.h。
+struct DiagSink;
 #include <functional>
 #include <deque>
 #include <map>
@@ -58762,7 +58860,8 @@ public:
     // メイン処理（Audio Thread）
     //
     //----------------------------------------------------------
-    void process(juce::dsp::AudioBlock<double>& block);
+    // ★ B-2 (2026-11-01): 診断 sink は呼び出し側（DSPCore）が渡す。nullptr なら push しない。
+    void process(juce::dsp::AudioBlock<double>& block, const DiagSink* sink = nullptr);
 
     //----------------------------------------------------------
     // バイパス制御
@@ -91649,6 +91748,130 @@ int main() {
 
 ```
 
+### 📄 `src\tests\AudioEngineHarness\A2A3aQuarantineTests.cpp`
+
+```
+// A2A3aQuarantineTests.cpp
+// ★ A2 → A3-a (2026-11-01): 二重解放（V1）と誤状態処理（V2）の分離検証。
+//
+// 実行: A2A3A_TEST=1 AudioEngineHarness.exe
+//   （既定スイートには影響しない opt-in 入口）
+
+#include <JuceHeader.h>
+
+#include "audioengine/ISRDSPHandle.h"
+
+#include <atomic>
+#include <cstdio>
+#include <thread>
+
+using convo::isr::DSPHandleRuntime;
+
+namespace {
+
+int g_failures = 0;
+
+void expectTrue(bool condition, const char* what)
+{
+    if (condition)
+    {
+        std::printf("[A2A3A] ok   %s\n", what);
+    }
+    else
+    {
+        std::printf("[A2A3A] FAIL %s\n", what);
+        ++g_failures;
+    }
+}
+
+} // namespace
+
+int runA2A3aQuarantineTests()
+{
+    DSPHandleRuntime rt;
+
+    alignas(64) static int payloadA {};
+    alignas(64) static int payloadB {};
+    alignas(64) static int payloadC {};
+
+    // ---- V2: pin 残留では破棄せず、スロット単位で deferred に記録する -------------
+    const auto handleA = rt.create(&payloadA);
+    const bool createdA = !handleA.isNull();
+    expectTrue(createdA, "create returns a handle");
+
+    rt.quarantine(handleA);
+    {
+        auto pin = rt.tryPin(handleA);
+        const bool pinned = static_cast<bool>(pin);
+        expectTrue(pinned, "a pin can be taken");
+
+        const bool destroyedWhilePinned = rt.destroyQuarantineSlot(handleA.slot, 0);
+        expectTrue(!destroyedWhilePinned, "destroy with a live pin returns false (deferred)");
+
+        const bool marked = rt.isQuarantineDeferred(handleA.slot);
+        expectTrue(marked, "the slot is marked deferred (A3-a per-slot mask)");
+
+        const auto deferredWhilePinned = rt.deferredQuarantineDestroyCount();
+        expectTrue(deferredWhilePinned == 1, "deferred count == 1 (gate contract preserved)");
+    }
+
+    // ---- V1: pin 解放後、retry が 1 回だけ回収する ------------------------------
+    const auto reclaimedFirst = rt.retryDeferredQuarantineDestroy();
+    expectTrue(reclaimedFirst == 1, "retry destroys the marked slot exactly once");
+
+    const bool stillMarked = rt.isQuarantineDeferred(handleA.slot);
+    expectTrue(!stillMarked, "the mark is cleared after reclaim");
+
+    const auto deferredAfterReclaim = rt.deferredQuarantineDestroyCount();
+    expectTrue(deferredAfterReclaim == 0, "deferred count returns to 0");
+
+    // V1: 2 回目の retry で二重解放しない
+    const auto reclaimedSecond = rt.retryDeferredQuarantineDestroy();
+    expectTrue(reclaimedSecond == 0, "a second retry is a no-op (no double free)");
+
+    const bool destroyedAgain = rt.destroyQuarantineSlot(handleA.slot, 0);
+    expectTrue(!destroyedAgain, "destroy on a reclaimed slot returns false");
+
+    // ---- A3-a: マークされていない Quarantined スロットは retry が触らない --------
+    const auto handleB = rt.create(&payloadB);
+    rt.quarantine(handleB);
+
+    const auto deferredUnmarked = rt.deferredQuarantineDestroyCount();
+    expectTrue(deferredUnmarked == 0,
+               "an unmarked quarantine does not raise the deferred count");
+
+    const auto reclaimedUnmarked = rt.retryDeferredQuarantineDestroy();
+    expectTrue(reclaimedUnmarked == 0, "retry ignores unmarked slots");
+
+    // ---- V1: 2 スレッド同時破棄で勝者が 1 人だけ ---------------------------------
+    const auto handleC = rt.create(&payloadC);
+    rt.quarantine(handleC);
+    const auto slotC = handleC.slot;
+
+    std::atomic<int> winners { 0 };
+    auto attempt = [&rt, slotC, &winners]() {
+        if (rt.destroyQuarantineSlot(slotC, 0))
+            winners.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    std::thread t1(attempt);
+    std::thread t2(attempt);
+    t1.join();
+    t2.join();
+
+    const int winCount = winners.load();
+    expectTrue(winCount == 1, "concurrent destroy has exactly one winner");
+
+    const auto deferredC = rt.deferredQuarantineDestroyCount();
+    expectTrue(deferredC == 0, "no deferred residue after concurrent reclaim");
+
+    std::printf("[A2A3A] RESULT failures=%d\n", g_failures);
+    std::fflush(stdout);
+    return g_failures == 0 ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\AudioEngineHarness\AudioEngineHarness.cpp`
 
 ```
@@ -91857,6 +92080,158 @@ private:
 
     void audioLoop(int blockSize);
 };
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\B2DiagSinkTests.cpp`
+
+```
+// B2DiagSinkTests.cpp
+// ★ B-2 (2026-11-01): 診断 sink の所有契約（DiagSink / DSPCore の attach・detach）と
+//   M1〜M7 の測定・記録。合否は B-2 の契約のみで判定し、M1〜M7 は記録のみ（合否に使わない）。
+//
+// 実行: B2_DIAGSINK_TEST=1 AudioEngineHarness.exe
+//   （既定スイートには影響しない opt-in 入口）
+
+#include <JuceHeader.h>
+
+#include "AudioEngine.h"
+
+#include <atomic>
+#include <cstdio>
+#include <cstdint>
+#include <type_traits>
+
+namespace {
+
+int g_failures = 0;
+
+void check(bool condition, const char* what)
+{
+    if (condition)
+    {
+        std::printf("[B2DS] ok   %s\n", what);
+    }
+    else
+    {
+        std::printf("[B2DS] FAIL %s\n", what);
+        ++g_failures;
+    }
+}
+
+const char* compilerName()
+{
+#if defined(__clang__)
+    return "clang " __clang_version__;
+#elif defined(_MSC_VER)
+    return "msvc";
+#else
+    return "unknown";
+#endif
+}
+
+} // namespace
+
+int runB2DiagSinkTests()
+{
+    using Buffer = LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>;
+
+    // ---- M1〜M7（記録のみ。合否には使わない） --------------------------------
+    std::printf("[B2DS] M1 sizeof(DSPCore)=%zu\n", sizeof(AudioEngine::DSPCore));
+    std::printf("[B2DS] M4 is_standard_layout=%d\n",
+                static_cast<int>(std::is_standard_layout_v<AudioEngine::DSPCore>));
+    std::printf("[B2DS] M5 atomic<DiagSink*> is_always_lock_free=%d lock_free=%d\n",
+                static_cast<int>(std::atomic<DiagSink*>::is_always_lock_free),
+                static_cast<int>(std::atomic<DiagSink*>{}.is_lock_free()));
+    std::printf("[B2DS] M6 CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=%d\n",
+                static_cast<int>(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS));
+    std::printf("[B2DS] M7 compiler=%s msc=%d\n", compilerName(),
+#if defined(_MSC_VER)
+                static_cast<int>(_MSC_VER)
+#else
+                0
+#endif
+    );
+
+    // ---- DiagSink 単体 -------------------------------------------------------
+    DiagEvent event {};
+    event.category = DiagCategory::EqTime;
+    event.eventIndex = 1;
+
+    DiagSink unbound;
+    check(!unbound.valid(), "unbound sink is invalid");
+    check(!unbound.push(event), "unbound sink push returns false");
+
+    Buffer buffer;
+    DiagPerTickCounter tickPushed {};
+    DiagPerTickCounter tickDropped {};
+    std::atomic<uint64_t> totalPushed { 0 };
+
+    DiagSink sink;
+    sink.buffer = &buffer;
+    sink.tickPushed = &tickPushed;
+    sink.tickDropped = &tickDropped;
+    sink.totalPushed = &totalPushed;
+
+    check(sink.valid(), "bound sink is valid");
+    check(sink.push(event), "bound sink push succeeds");
+    check(tickPushed.value.load() == 1 && totalPushed.load() == 1,
+          "pushed counters updated");
+
+    bool sawDrop = false;
+    for (std::size_t i = 0; i < DiagRuntimeLimits::BufferCapacity + 8; ++i)
+    {
+        if (!sink.push(event))
+        {
+            sawDrop = true;
+            break;
+        }
+    }
+    check(sawDrop, "push returns false when the ring is full");
+    check(tickDropped.value.load() >= 1, "dropped counter updated");
+
+    // ---- DSPCore の attach / detach -----------------------------------------
+    auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+    check(core->diagSink() == nullptr && core->diagOwnerId() == 0,
+          "fresh core is unbound");
+
+    core->attachDiagSink(&sink, 0);
+    check(core->diagSink() == nullptr, "ownerId 0 is rejected");
+
+    core->attachDiagSink(nullptr, 7);
+    check(core->diagOwnerId() == 0, "null sink is rejected");
+
+    core->attachDiagSink(&sink, 7);
+    check(core->diagSink() == &sink && core->diagOwnerId() == 7,
+          "first attach is accepted");
+
+    DiagSink otherSink;
+    core->attachDiagSink(&otherSink, 8);
+    check(core->diagSink() == &sink && core->diagOwnerId() == 7,
+          "attach from a different owner is rejected");
+
+    core->attachDiagSink(&sink, 7);
+    check(core->diagSink() == &sink, "same owner re-attach is idempotent");
+
+    core->detachDiagSink();
+    check(core->diagSink() == nullptr, "detach clears the sink");
+    check(core->diagOwnerId() == 7, "detach keeps the owner id");
+
+    // ---- M2 / M3（実インスタンスのアドレス差。offsetof は使わない） ----------
+    const char* base = reinterpret_cast<const char*>(core.get());
+    const std::size_t offOwner = static_cast<std::size_t>(
+        reinterpret_cast<const char*>(&core->diagOwnerId_) - base);
+    const std::size_t offSink = static_cast<std::size_t>(
+        reinterpret_cast<const char*>(&core->diagSink_) - base);
+    std::printf("[B2DS] M2 off_ownerId=%zu\n", offOwner);
+    std::printf("[B2DS] M3 off_sink=%zu\n", offSink);
+    std::printf("[B2DS] M1+M2/M3 note: offsets are measured via address difference,"
+                " not offsetof\n");
+
+    std::printf("[B2DS] RESULT failures=%d\n", g_failures);
+    std::fflush(stdout);
+    return g_failures == 0 ? 0 : 1;
+}
 
 ```
 
@@ -105414,6 +105789,12 @@ static void measureH2R1MixedGainTupleWindow(AudioEngineHarness& harness)
 // 宣言はゲート外に置く（OFF ビルドでは呼び出し側もコンパイルされないため未解決にならない）。
 int runB2Stage1PositiveControls();
 
+// ★ B-2 (2026-11-01): 診断 sink 契約と M1〜M7 の測定（opt-in）。
+int runB2DiagSinkTests();
+
+// ★ A2 -> A3-a: 二重解放と誤状態処理の分離検証（opt-in）。
+int runA2A3aQuarantineTests();
+
 int main(int argc, char* argv[])
 {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -105421,6 +105802,14 @@ int main(int argc, char* argv[])
     if (std::getenv("B2_STAGE1_MEASURE") != nullptr)
         return runB2Stage1PositiveControls();
 #endif
+
+    // ★ B-2: 診断 sink の所有契約テストと M1〜M7 の記録（opt-in・既定スイート非干渉）。
+    if (std::getenv("B2_DIAGSINK_TEST") != nullptr)
+        return runB2DiagSinkTests();
+
+    // ★ A2 -> A3-a: 二重解放（V1）と誤状態処理（V2）の検証（opt-in）。
+    if (std::getenv("A2A3A_TEST") != nullptr)
+        return runA2A3aQuarantineTests();
 
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
