@@ -85,23 +85,8 @@ namespace
     }
 }
 
-// work60: module-level pointers to AudioEngine::diagBuffer for CONV_TIME/STCONV_TIME
-//   Set via setConvDiagBuffer() called from AudioEngine initialization.
-namespace {
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* convDiagBuffer = nullptr;
-    DiagPerTickCounter* convTickPushed = nullptr;
-    DiagPerTickCounter* convTickDropped = nullptr;
-    std::atomic<uint64_t>* convTotalPushed = nullptr;
-}
-void setConvDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-                       DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-                       std::atomic<uint64_t>& totalPushed) noexcept
-{
-    convDiagBuffer = &db;
-    convTickPushed = &tickPushed;
-    convTickDropped = &tickDropped;
-    convTotalPushed = &totalPushed;
-}
+// ★ B-2 (2026-11-01): 旧 convDiagBuffer（モジュールレベル）は撤去した。
+//   診断先は process(block, sink) の引数として DSPCore から渡される。
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME)
 
@@ -235,7 +220,7 @@ void ConvolverProcessor::exitGlobalReader(int readerIndex) const noexcept
 //    - 待機なし (No Wait)
 //    - RCU (Read-Copy-Update) パターンを使用
 //--------------------------------------------------------------
-void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
+void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block, const DiagSink* sink)
 {
     convo::RCUReaderGuard guard(runtimeRcuReader);
 
@@ -761,7 +746,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         ? static_cast<uint32_t>((static_cast<double>(scElapsedUs) / expectedUs) * 1000.0)
                         : 0;
                     // work60: Numeric-Only DiagEvent
-                    if (convDiagBuffer != nullptr)
+                    if (sink != nullptr && sink->valid())
                     {
                         DiagEvent event{};
                         event.category = DiagCategory::StereoConvTime;
@@ -771,15 +756,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         event.data.stereoConvTime.chunkSamples = static_cast<uint32_t>(chunkSamples);
                         event.data.stereoConvTime.channels = static_cast<uint8_t>(ch);
                         event.data.stereoConvTime.budgetPercent = static_cast<uint16_t>(budgetPermille);
-                        if (convDiagBuffer->push(event))
-                        {
-                            convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-                            convTotalPushed->fetch_add(1, std::memory_order_relaxed);
-                        }
-                        else
-                        {
-                            convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-                        }
+                        (void)sink->push(event);
                     }
                 }
             }
@@ -846,7 +823,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     ? static_cast<uint32_t>((static_cast<double>(convElapsedUs) / expectedUs) * 1000.0)
                     : 0;
                 // work60: Numeric-Only DiagEvent
-                if (convDiagBuffer != nullptr)
+                if (sink != nullptr && sink->valid())
                 {
                     DiagEvent event{};
                     event.category = DiagCategory::ConvTime;
@@ -860,15 +837,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         event.data.convTime.callQuantumSamples = static_cast<uint32_t>(conv->callQuantumSamples);
                         event.data.convTime.latency = static_cast<uint32_t>(conv->latency);
                     }
-                    if (convDiagBuffer->push(event))
-                    {
-                        convTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-                        convTotalPushed->fetch_add(1, std::memory_order_relaxed);
-                    }
-                    else
-                    {
-                        convTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-                    }
+                    (void)sink->push(event);
                 }
             }
         }

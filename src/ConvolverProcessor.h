@@ -28,6 +28,9 @@
 #include <mutex>
 #include <vector>
 #include <array>
+
+// ★ B-2: 診断 sink（非所有バンドル）。定義は AudioEngine.h。
+struct DiagSink;
 #include <functional>
 #include <deque>
 #include <map>
@@ -308,7 +311,8 @@ public:
     // メイン処理（Audio Thread）
     //
     //----------------------------------------------------------
-    void process(juce::dsp::AudioBlock<double>& block);
+    // ★ B-2 (2026-11-01): 診断 sink は呼び出し側（DSPCore）が渡す。nullptr なら push しない。
+    void process(juce::dsp::AudioBlock<double>& block, const DiagSink* sink = nullptr);
 
     //----------------------------------------------------------
     // バイパス制御

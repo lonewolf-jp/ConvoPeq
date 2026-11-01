@@ -429,14 +429,14 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
         // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
-        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
+        DiagSink* ansSink = diagSink();
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && ansSink != nullptr)
         {
             DiagEvent event{};
             event.category = DiagCategory::AnsSwitchTime;
             event.eventIndex = currentCallbackSeq;
             event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
-            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
-            juce::ignoreUnused(pushed); // drop on full is acceptable
+            (void)ansSink->push(event); // drop on full is acceptable
         }
 #endif
     }

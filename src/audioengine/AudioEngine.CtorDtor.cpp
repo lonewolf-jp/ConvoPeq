@@ -357,6 +357,19 @@ AudioEngine::~AudioEngine()
             }
         }
     }
+
+    // ★ B-2 (2026-11-01): 回収できずに残した DSPCore（leak 選択分）から診断 sink を外す。
+    //   RT は StopAudio で join 済み、reader は sink を使わない（activeReaderCount は
+    //   RCU 読取区間の数であって診断生産者ではない）ため、ここでの detach は安全。
+    //   detach しないと、破棄済み AudioEngine の diagBuffer を指したまま leak コアが残る。
+    {
+        std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
+        for (DSPCore* core : deferredDestroy_)
+        {
+            if (core != nullptr)
+                core->detachDiagSink();
+        }
+    }
     // ★ D162-2-E (E-3 / INV-D162-8): 全 EBR store drain 後の pending 残留確認。
     //   D8 の drainAll / drainAllQuarantineStore が完了した時点で DSPCore 破壊は EBR closure を
     //   全て消化しているはず。残留があれば member teardown に EBR entry を持ち越すことになり

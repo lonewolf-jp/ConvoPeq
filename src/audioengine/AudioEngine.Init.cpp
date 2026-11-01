@@ -110,13 +110,14 @@ void AudioEngine::initialize()
 
     // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
 
-    // ★ work60: モジュール別 DiagEvent リングバッファポインタを初期化
-    //   DSPCoreFloat/DSPCoreDouble の logEqTime → eqDiagBuffer
-    //   ConvolverProcessor.Runtime の convDiagBuffer
-    setEqDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
-                    rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
-    setConvDiagBuffer(diagBuffer, rtAuxMutable_.diagTickPushed,
-                      rtAuxMutable_.diagTickDropped, rtAuxMutable_.diagTotalPushed);
+    // ★ B-2 (2026-11-01): 旧 setter 呼び出しを撤去し、DiagSink の参照先を確定する。
+
+    // ★ B-2 (2026-11-01): 診断 sink の参照先を確定する（非所有バンドル）。
+    //   バッファ本体・カウンタの所有権は従来どおり AudioEngine 側にある。
+    diagSink_.buffer = &diagBuffer;
+    diagSink_.tickPushed = &rtAuxMutable_.diagTickPushed;
+    diagSink_.tickDropped = &rtAuxMutable_.diagTickDropped;
+    diagSink_.totalPushed = &rtAuxMutable_.diagTotalPushed;
     // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
     // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
     uiConvolverProcessor.prepareToPlay(48000.0, 512);
