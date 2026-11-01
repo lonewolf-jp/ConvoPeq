@@ -93,8 +93,8 @@
 
 | 対象 | 値（統合後に記入） |
 |---|---|
-| GitHub `main` の commit | `0dfa39e3` |
-| ローカル `HEAD` / `origin/main` | `0dfa39e3`（一致） |
+| 機能統合の merge commit | `1f258686`（B-2 / A2→A3-a）、`0dfa39e3`（j237 ガード） |
+| ローカル `HEAD` / `origin/main` | 一致（`git rev-parse HEAD` と `origin/main` が同一。以降は資料のみのコミットでソースは不変） |
 | 作業ツリーの追跡差分 | 0（`ConvoPeq.md` 再生成コミット後） |
 | Dropbox `/ConvoPeq.md` の SHA-256 | `c12a532e70770ab40430d34052af87407291e0a12c2a9e68f10229fd5760e8a9`（6451631 B・LF 正規形） |
 | 分割版 | `/ConvoPeq-c12a532e-split/`（各 ≤ 2 MiB、連結で正規と一致） |
