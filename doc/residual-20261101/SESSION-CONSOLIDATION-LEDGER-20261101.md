@@ -126,3 +126,28 @@ Owner 指示「全 OpenChamber Desktop セッションの変更・未完了事�
   §5.2 の 1 件と文書 1 件に限られる。
 - 実装の主対象は **B-2**（設計・実装前調査は完了済み）と **A2→A3-a**。
 - B-2 の実装順序は Owner 指示の 8 段階に従う。
+
+## 8. 全セッション統合台帳（Owner 指定 9 項目・2026-11-02 最終）
+
+Owner 指示 2 の 9 項目（セッション名 / 課題・機能 / 実装状況 / 変更対象ファイル / テスト状況 /
+main 統合状態 / 未完了の理由 / 依存関係 / 次に行うべき作業）で一覧化する。
+
+| # | セッション（worktree / ブランチ） | 課題・機能 | 実装状況 | 変更対象ファイル | テスト状況 | main 統合 | 未完了の理由 | 依存関係 | 次の作業 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `main-develop` / `fix/b2-diag-sink-20261101` | B-2 診断 sink の所有権 | **完了** | `AudioEngine.h`、Threading / Init / CtorDtor / DSPCoreLifecycle / DSPCoreFloat・Double・IO、`ConvolverProcessor.h`・Runtime、`B2DiagSinkTests.cpp` | Release・Debug・ASan で専用テスト PASS、既定スイート PASS | **統合済み**（`1f258686`） | — | A2→A3-a と同一ブランチ（変更単位は分離） | — |
+| 2 | 同上 | A2→A3-a（assert 判定位置・deferred マーク） | **完了** | `ISRDSPHandle.h`・cpp、`A2A3aQuarantineTests.cpp` | V1/V2 とも PASS（両構成） | **統合済み**（`1f258686`） | — | B-2 と同一ブランチ | — |
+| 3 | `j237-baseline` / `fix/isrshutdown-test-seam-guard-20261102` | テスト専用 friend の本番露出 | **完了** | `ISRShutdown.h`（+4 行） | Release ビルド＋スイート PASS、CI の本番構成でビルド | **統合済み**（`0dfa39e3`） | ASan の CI のみ pending（他 12 PASS） | — | ASan 完了確認のみ |
+| 4 | `j195-notion-report` | `AGENTS.md` の運用メモ 17 行 | 未着手 | `AGENTS.md` | 対象外（文書） | **未統合** | 製品コードではないため反映可否が未決 | — | 文書として採用するか判断 |
+| 5 | `j195-notion-report` | 未追跡 763 件（証拠・ログ・スナップショット） | 保留 | —（未追跡） | — | 未統合 | 由来の調査が未了 | — | 内容と由来を調査（削除しない） |
+| 6 | `bright-falcon` | Phase 1/2 persistent cache | **main に別 SHA で取込済み** | `MixedPhasePersistentCache.*` ほか | main 側で検証済み | 取込済み（`8d4a776f` / `aa65170d`） | — | — | 不要（記録のみ） |
+| 7 | `crisp-zebra` / `main-pre-sync-20261021` | STG-11-D18 crossfade 修正 | **main に cherry-pick 済み** | audioengine 6 ファイル | main 側で検証済み | 取込済み（`08f8f19e`） | — | — | 不要（記録のみ） |
+| 8 | `bright-falcon` | 未追跡 243 件（`scripts/*.ps1` 3 件を含む） | 保留 | `scripts/aggregate_preflight.ps1` ほか | — | 未統合 | 由来の調査が未了 | — | 内容と由来を調査（削除しない） |
+| 9 | `ci/r51-two-engine-on-pr82` / `-repro` / `verify` / `ci/r51-diag-only` | R-51 二重起動の測定・計装 | 陳腐化 | テスト・計装 | — | 未統合 | main の恒久テスト `b15c92ed`（PR #95）で置換済み | R-51 恒久テスト | 不要（記録のみ） |
+| 10 | `ci/h2r1-release-measurement-20261030` | H-2-R1 の CI 計測 | 保留 | `.github/workflows` | — | 未統合 | **CI 定義変更に該当**（今回の承認外） | — | 別途承認 |
+| 11 | `ci/r49-selected-tests-probe-20261029` | R-49 の CI プローブ | 保留 | `.github/workflows` | — | 未統合 | 同上 | — | 別途承認 |
+| 12 | `ci/r50-asan-vbcable-20261029` | ASan ジョブの VB-CABLE 導入 | 取込済み／CI 領域 | `.github/workflows` | — | 一部取込（`5057968c`） | `fcf383a9` は CI 領域 | — | 別途承認 |
+| 13 | `chore/convoPeqmd-023ae16f-20261029` ほか | `ConvoPeq.md` 再生成 | 陳腐化 | `ConvoPeq.md` | — | 未統合 | 後続の再生成（`3d8ea758`）が最新 | — | 不要 |
+| 14 | `integration/session-consolidation` / `fix/r51-f1b-pin-protection` / `feat/b2-stage1-t1` / `fix/r52-f1b-defer-observation` / `work/g3` / `work/r16` | 各種 | 取込済み（パッチ同一） | — | — | 取込済み | — | — | 不要 |
+
+**未統合として残るのは #3（ASan 待ちのみ）、#4、#5、#8、#10〜#12 の 6 群**であり、
+このうち機能実装は **0 件**。
