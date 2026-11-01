@@ -44,7 +44,7 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
             //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
             //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
-            owner->deferDestroyRetry(p);
+            owner->deferDestroyRetry(static_cast<DSPCore*>(p));
             juce::Logger::writeToLog(juce::String::formatted(
                 "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
             return DestroyOutcome::Deferred;
@@ -67,17 +67,17 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 }
 
 // ★ F1'-b: 再試行リストへの登録（重複は無視）。所有権はこのリストが保持する。
-void AudioEngine::deferDestroyRetry(void* p) noexcept
+void AudioEngine::deferDestroyRetry(DSPCore* core) noexcept
 {
-    if (p == nullptr)
+    if (core == nullptr)
         return;
     std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
-    for (void* existing : deferredDestroy_)
+    for (DSPCore* existing : deferredDestroy_)
     {
-        if (existing == p)
+        if (existing == core)
             return;   // 既に保持している（二重登録しない）
     }
-    deferredDestroy_.push_back(p);
+    deferredDestroy_.push_back(core);
     convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
     convo::publishAtomic(deferredDestroyResidentAtomic_,
@@ -99,7 +99,7 @@ std::size_t AudioEngine::retryDeferredDestroys() noexcept
     //   entries destroys them; a concurrent caller gets an empty list and does nothing.
     //   Deferred entries are re-registered by destroyDSPCoreNodeRetryable() itself
     //   (deferDestroyRetry), so no re-registration is needed here.
-    std::vector<void*> snapshot;
+    std::vector<DSPCore*> snapshot;
     {
         std::lock_guard<std::mutex> lock(deferredDestroyMutex_);
         snapshot.swap(deferredDestroy_);
@@ -111,7 +111,7 @@ std::size_t AudioEngine::retryDeferredDestroys() noexcept
         return 0;
 
     std::size_t destroyed = 0;
-    for (void* p : snapshot)
+    for (DSPCore* p : snapshot)
     {
         // Destroyed -> freed, not re-registered.
         // Deferred  -> destroyDSPCoreNodeRetryable() re-registers it internally.

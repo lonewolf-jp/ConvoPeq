@@ -501,29 +501,42 @@ struct alignas(64) DiagPerTickCounter {
 };
 #pragma warning(pop)
 
-// work60: モジュール別 diagBuffer アクセス用 setter（extern linkage - 実体は各.cpp）
-void setEqDiagBuffer(
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-    std::atomic<uint64_t>& totalPushed) noexcept;
-void setConvDiagBuffer(
-    LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-    DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-    std::atomic<uint64_t>& totalPushed) noexcept;
+// ★ B-2 (2026-11-01): 診断 sink の非所有バンドル。
+//   バッファ本体・カウンタの所有権は AudioEngine に残す。ここは参照だけを持つ。
+//   RT から見えるのはこのポインタ 1 本で、push は固定長リングと relaxed カウンタのみ。
+struct DiagSink {
+    using Buffer = LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>;
 
-// work60: 実体定義は DSPCoreFloat.cpp（setEqDiagBuffer）と
-// ConvolverProcessor.Runtime.cpp（setConvDiagBuffer）にある。
+    Buffer* buffer = nullptr;
+    DiagPerTickCounter* tickPushed = nullptr;
+    DiagPerTickCounter* tickDropped = nullptr;
+    std::atomic<uint64_t>* totalPushed = nullptr;
 
-// ★ [work65] Shared runtime diagnostics state — external linkage.
-// Must be shared across DSPCoreFloat.cpp, DSPCoreDouble.cpp, and
-// DSPCoreIO.cpp. DO NOT move into an anonymous namespace in any
-// of those translation units.
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-extern LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer;
-extern DiagPerTickCounter* eqTickPushed;
-extern DiagPerTickCounter* eqTickDropped;
-extern std::atomic<uint64_t>* eqTotalPushed;
-#endif
+    [[nodiscard]] bool valid() const noexcept { return buffer != nullptr; }
+
+    // RT-safe: 固定長リングへの push と relaxed カウンタ更新のみ（確保・ロック・I/O なし）。
+    bool push(const DiagEvent& event) const noexcept
+    {
+        if (buffer == nullptr)
+            return false;
+
+        if (buffer->push(event))
+        {
+            if (tickPushed != nullptr)
+                tickPushed->value.fetch_add(1, std::memory_order_relaxed);
+            if (totalPushed != nullptr)
+                totalPushed->fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        if (tickDropped != nullptr)
+            tickDropped->value.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+};
+
+// ★ B-2 (2026-11-01): 旧グローバル（eqDiagBuffer / convDiagBuffer）と setter は撤去した。
+//   診断の受け渡しは DiagSink（非所有バンドル）を DSPCore から引数で渡す方式に統一する。
 
 // ★ work61: CallbackArrival 記録ヘルパー（inline、RT-safe）
 //   BlockDouble.cpp / AudioBlock.cpp の両方から呼ばれる。
@@ -1091,6 +1104,21 @@ public:
         // 構築スレッドまたは Message Thread から呼ぶこと）。
         [[nodiscard]] DiagFootprint diagCaptureFootprint() noexcept;
 #endif
+
+        // ★ B-2 (2026-11-01): 診断 sink の所有者契約。
+        //   - バッファ本体は AudioEngine が所有する。ここは非所有ポインタのみ。
+        //   - ownerId は識別情報であり逆参照しない（0 は未束縛の予約値）。
+        //   - bind は NonRT（prepare）のみ。RT は acquire load で読むだけ。
+        [[nodiscard]] std::uint64_t diagOwnerId() const noexcept { return diagOwnerId_; }
+        [[nodiscard]] DiagSink* diagSink() const noexcept
+        {
+            return convo::consumeAtomic(diagSink_, std::memory_order_acquire);
+        }
+        void attachDiagSink(DiagSink* sink, std::uint64_t ownerId) noexcept;
+        void detachDiagSink() noexcept;
+
+        std::uint64_t diagOwnerId_ { 0 };
+        std::atomic<DiagSink*> diagSink_ { nullptr };
 
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
@@ -3028,6 +3056,14 @@ public:
     LockFreeRingBuffer<XRunEvent, kXRunBufferCapacity> xRunBuffer;
     // ★ work60: DiagEvent リングバッファ（Audio Thread write, Timer Thread read）
     LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity> diagBuffer;
+
+    // ★ B-2 (2026-11-01): 診断 sink（非所有バンドル）。バッファ本体は diagBuffer 等が所有する。
+    //   DSPCore へは prepare（NonRT）で attach し、teardown と破棄時に detach する。
+    DiagSink diagSink_ {};
+    [[nodiscard]] DiagSink& diagnosticsSink() noexcept { return diagSink_; }
+    [[nodiscard]] const DiagSink& diagnosticsSink() const noexcept { return diagSink_; }
+    // ★ B-2: owner 識別子はエンジン生成時に一度だけ採番する（0 は未束縛の予約値）。
+    [[nodiscard]] std::uint64_t diagnosticsEngineId() const noexcept { return engineInstanceId_; }
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
     struct LearnerStateSnapshot {
@@ -5230,7 +5266,7 @@ public:
 
     // ★ F1'-b: D/Q/E の deleter は void(void*) のため戻り値を受け取れない。
     //   Deferred になったポインタをエンジンの再試行リストで保持し、所有権を失わない。
-    void deferDestroyRetry(void* p) noexcept;
+    void deferDestroyRetry(DSPCore* core) noexcept;
     [[nodiscard]] std::size_t retryDeferredDestroys() noexcept;
     [[nodiscard]] std::size_t deferredDestroyResidentCount() const noexcept;
     // ★ F1'-b (2026-10-25) 監査対応: ロックフリーの在住数。
@@ -5251,7 +5287,7 @@ public:
         return dspHandleRuntime_.deferredQuarantineDestroyCount();
     }
     mutable std::mutex deferredDestroyMutex_;
-    std::vector<void*> deferredDestroy_;
+    std::vector<DSPCore*> deferredDestroy_;
     std::atomic<std::uint64_t> deferredDestroyCount_{0};
     std::atomic<std::uint32_t> deferredDestroyResidentAtomic_{0};
 

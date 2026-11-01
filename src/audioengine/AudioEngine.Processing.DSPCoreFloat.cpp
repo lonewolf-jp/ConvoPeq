@@ -25,29 +25,8 @@ inline double absDiffNoLibm(double a, double b) noexcept
     return absNoLibm(a - b);
 }
 
-// ★ [work65] eqDiagBuffer: external linkage (shared across DSPCoreFloat/Double/IO)
-//   AudioEngine.h で extern 宣言。DO NOT move into anonymous namespace.
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>* eqDiagBuffer = nullptr;
-DiagPerTickCounter* eqTickPushed = nullptr;
-DiagPerTickCounter* eqTickDropped = nullptr;
-std::atomic<uint64_t>* eqTotalPushed = nullptr;
-#endif
-
-// work60: setEqDiagBuffer は #if 外で常時コンパイル（AudioEngine.Init.cpp からの呼出用）
-void setEqDiagBuffer(LockFreeRingBuffer<DiagEvent, DiagRuntimeLimits::BufferCapacity>& db,
-                     DiagPerTickCounter& tickPushed, DiagPerTickCounter& tickDropped,
-                     std::atomic<uint64_t>& totalPushed) noexcept
-{
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    eqDiagBuffer = &db;
-    eqTickPushed = &tickPushed;
-    eqTickDropped = &tickDropped;
-    eqTotalPushed = &totalPushed;
-#else
-    juce::ignoreUnused(db, tickPushed, tickDropped, totalPushed);
-#endif
-}
+// ★ B-2 (2026-11-01): 旧 eqDiagBuffer（モジュールレベル）は撤去した。
+//   診断先は DiagSink* として呼び出し側（DSPCore）から渡される。
 
 namespace {
 // work60: 以降のヘルパーは再び無名名前空間（internal linkage）に戻す
@@ -57,10 +36,11 @@ inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                       const convo::EQParameters* eqParams,
                       convo::ProcessingOrder order,
                       double sampleRate,
-                      uint64_t callbackSeq, uint32_t cpu)
+                      uint64_t callbackSeq, uint32_t cpu,
+                      DiagSink* sink)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || sink == nullptr || !sink->valid()) return;
     if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
@@ -83,15 +63,7 @@ inline void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
     event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
     event.data.eqTime.order = static_cast<uint8_t>(order);
     event.data.eqTime.budgetPercent = budgetPermille;
-    if (eqDiagBuffer->push(event))
-    {
-        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
-    }
-    else
-    {
-        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-    }
+    (void)sink->push(event);   // 固定長リング + relaxed カウンタ（DiagSink 側で処理）
 }
 #endif
 
@@ -271,7 +243,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     {
         if (!state.convBypassed)
         {
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
                                  true,
@@ -289,7 +261,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -313,7 +285,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -336,7 +308,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                     scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
                                  true,

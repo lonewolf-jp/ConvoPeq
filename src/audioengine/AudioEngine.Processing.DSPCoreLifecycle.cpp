@@ -69,6 +69,29 @@ AudioEngine::DSPCore::DSPCore()
     eqState->bind(eq);
 }
 
+// ★ B-2 (2026-11-01): 診断 sink の bind / detach。
+//   bind は NonRT（prepare）からのみ。ownerId は識別情報で、逆参照しない。
+void AudioEngine::DSPCore::attachDiagSink(DiagSink* sink, std::uint64_t ownerId) noexcept
+{
+    // 0 は未束縛の予約値。owner 未確定なら bind しない。
+    if (sink == nullptr || ownerId == 0)
+        return;
+
+    // 別エンジンの sink へは bind しない（誤 bind は Release でも拒否する）。
+    jassert(diagOwnerId_ == 0 || diagOwnerId_ == ownerId);
+    if (diagOwnerId_ != 0 && diagOwnerId_ != ownerId)
+        return;
+
+    diagOwnerId_ = ownerId;
+    convo::publishAtomic(diagSink_, sink, std::memory_order_release);
+}
+
+void AudioEngine::DSPCore::detachDiagSink() noexcept
+{
+    // ポインタだけを外す。ownerId は識別情報なので保持したままにする。
+    convo::publishAtomic(diagSink_, nullptr, std::memory_order_release);
+}
+
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -96,6 +119,9 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         convolver.setRetireCoordinator(&owner->runtimePublicationBridge_);
         juce::Logger::writeToLog("[DSPCORE_PREPARE] setRetireCoordinator done");
 #endif
+
+        // ★ B-2: 診断 sink の bind（NonRT・publish より前）。RT からは acquire で読むだけ。
+        attachDiagSink(&owner->diagnosticsSink(), owner->diagnosticsEngineId());
     }
 
     // Exception-safety context:

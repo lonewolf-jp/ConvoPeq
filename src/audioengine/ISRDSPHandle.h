@@ -298,6 +298,12 @@ public:
     // Number of quarantine slots whose destruction is deferred (observation only).
     [[nodiscard]] std::uint32_t deferredQuarantineDestroyCount() const noexcept;
 
+    // ★ A3-a: スロット単位マークの操作。RT からは呼ばない（破棄・再試行は NonRT）。
+    void markQuarantineDeferred(std::uint32_t slot) noexcept;
+    void clearQuarantineDeferred(std::uint32_t slot) noexcept;
+    [[nodiscard]] bool isQuarantineDeferred(std::uint32_t slot) const noexcept;
+    [[nodiscard]] std::uint32_t deferredCount() const noexcept;
+
     // ★ P0-4B DELETE-7: shutdown 時のみ Coordinator をバイパスした強制 reclaim は
     //   R4 Phase 7（2026-08-10）にて完全削除済み。通常パスは Coordinator の Reclaim
     //   Authority（RuntimeIntentCoordinator::reclaim(ReclaimMode, ...)）に一本化。
@@ -345,8 +351,12 @@ private:
     std::array<uint32_t, MAX_DSP_SLOTS> freeSlots_{};
     uint32_t freeSize_ = 0;
     // F-2 (2026-10-25): non-zero while at least one quarantined slot could not be destroyed
-    // because a pin was still held. Advisory: recomputed by retryDeferredQuarantineDestroy().
-    std::atomic<std::uint32_t> deferredQuarantineDestroy_{0};
+    // ★ A3-a (2026-11-01): スロット単位の deferred マーク（MAX_DSP_SLOTS = 256 -> 4 words）。
+    //   グローバルカウンタをやめ、「どのスロットが pin 残留で破棄できなかったか」を保持する。
+    //   再試行はマークされたスロットだけを走査する（commit 経路との重複を構造的に減らす）。
+    static constexpr std::uint32_t kDeferredMaskWords =
+        static_cast<std::uint32_t>(MAX_DSP_SLOTS / 64);
+    std::array<std::atomic<std::uint64_t>, kDeferredMaskWords> deferredQuarantineMask_{};
     // ★ ADR-005 / (A6): compile-time invariants for the ISR DSPHandle runtime.
     //   DSPHandle is a 16-byte POD; its atomic requires atomic 16-byte CAS semantics
     //   (MSVC: lock-pool backend, is_lock_free()==false is accurate; all consumers NonRT).

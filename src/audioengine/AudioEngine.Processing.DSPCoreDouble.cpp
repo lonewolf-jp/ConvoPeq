@@ -17,10 +17,11 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
                const convo::EQParameters* eqParams,
                convo::ProcessingOrder order,
                double sampleRate,
-               uint64_t callbackSeq, uint32_t cpu)
+               uint64_t callbackSeq, uint32_t cpu,
+               DiagSink* sink)
 {
     const uint64_t eqElapsedUs = convo::getCurrentTimeUs() - eqStartUs;
-    if (sampleRate <= 0.0 || numSamples <= 0 || eqDiagBuffer == nullptr) return;
+    if (sampleRate <= 0.0 || numSamples <= 0 || sink == nullptr || !sink->valid()) return;
     if ((callbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) != 0) return;
 
     int activeBands = 0;
@@ -43,15 +44,7 @@ void logEqTime(uint64_t eqStartUs, int numSamples, int /*numChannels*/,
     event.data.eqTime.activeBands = static_cast<uint8_t>(activeBands);
     event.data.eqTime.order = static_cast<uint8_t>(order);
     event.data.eqTime.budgetPercent = budgetPermille;
-    if (eqDiagBuffer->push(event))
-    {
-        eqTickPushed->value.fetch_add(1, std::memory_order_relaxed);
-        eqTotalPushed->fetch_add(1, std::memory_order_relaxed);
-    }
-    else
-    {
-        eqTickDropped->value.fetch_add(1, std::memory_order_relaxed);
-    }
+    (void)sink->push(event);   // 固定長リング + relaxed カウンタ（DiagSink 側で処理）
 }
 #endif
 
@@ -387,7 +380,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     {
         if (!state.convBypassed)
         {
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // ★ [work65] work52キャプチャコード削除
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
@@ -405,7 +398,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -429,7 +422,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 #endif
                 eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu);
+                logEqTime(eqStartUs, numProcSamples, numProcChannels, eqParamsToUse, state.order, sampleRate, currentCallbackSeq, currentCpu, diagSink());
 #endif
             }
             else
@@ -451,7 +444,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                     scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
-            convolverRt().process(processBlock);
+            convolverRt().process(processBlock, diagSink());
             // ★ [work65] work52キャプチャコード削除
             // [WORK113-15] ① conv 出力段 HC/LC — conv 出力に対して exactly once 適用（convIsLast 判定から独立）。
             outputFilter.process(processBlock,
@@ -641,14 +634,14 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         const uint64_t ansElapsedUs = convo::getCurrentTimeUs() - ansStartUs;
         // ★ [work65] RT-safe: writeToLog → LockFreeRingBuffer (DiagEvent)
-        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && eqDiagBuffer != nullptr)
+        DiagSink* ansSink = diagSink();
+        if ((currentCallbackSeq & CONVOPEQ_DIAG_SAMPLE_MASK) == 0 && ansSink != nullptr)
         {
             DiagEvent event{};
             event.category = DiagCategory::AnsSwitchTime;
             event.eventIndex = currentCallbackSeq;
             event.data.ansSwitchTime.elapsedUs = ansElapsedUs;
-            [[maybe_unused]] const bool pushed = eqDiagBuffer->push(event);
-            juce::ignoreUnused(pushed); // drop on full is acceptable
+            (void)ansSink->push(event); // drop on full is acceptable
         }
 #endif
     }
