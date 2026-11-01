@@ -51,6 +51,7 @@ void resetState()
 {
     convo::rtmeasure::instance().reset();
     convo::rtmeasure::sampleBuffer().reset();
+    convo::rtmeasure::splitSampleBuffer().reset();
     convo::rtmeasure::aggregator().setWarmupSamples(2000);
     convo::rtmeasure::aggregator().reset();
     convo::rtmeasure::detail::g_tscReads.store(0);
@@ -506,6 +507,83 @@ bool checkModeLifecycle()
 
 } // namespace
 
+// (16) ★ D-02 案3: t_block / t_push の分離計測（診断専用）
+//   - モード 0: 分離サンプルも校正点も作られない
+//   - モード 1: 1 ブロック 1 件、かつ **t_block + t_push == t_total**（定義上、同一の 3 点から算出）
+//   - リング push が実際に計上されている（t_push > 0）
+bool checkSplitInstrumentation()
+{
+    bool ok = true;
+
+    // --- モード 0 ---
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        (void) t;
+    }
+    ok = expect("split: mode0 no split samples",
+                convo::rtmeasure::splitSampleBuffer().count() == 0u) && ok;
+
+    // --- モード 1 ---
+    setEnvMeasure("1");
+    convo::rtmeasure::initializeFromEnvironment();
+    convo::rtmeasure::detail::g_prepared.store(false);   // 校正点の記録をやり直す
+    convo::rtmeasure::prepareOnce();
+    resetState();
+
+    constexpr int kBlocks = 200;
+    for (int i = 0; i < kBlocks; ++i)
+    {
+        const convo::rtmeasure::BlockScopeTimer t;
+        (void) t;
+    }
+
+    const auto& sb = convo::rtmeasure::sampleBuffer();
+    const auto& sp = convo::rtmeasure::splitSampleBuffer();
+    ok = expect("split: mode1 one split sample per block",
+                sp.count() == static_cast<std::size_t>(kBlocks)) && ok;
+    ok = expect("split: same count as totals", sp.count() == sb.count()) && ok;
+    ok = expect("split: no overflow", sp.overflowed() == 0ull) && ok;
+
+    const std::size_t n = (sp.count() < sb.count()) ? sp.count() : sb.count();
+    const std::uint64_t* totals = sb.data();
+    const convo::rtmeasure::SplitSample* splits = sp.data();
+    std::size_t mismatched = 0;
+    std::size_t zeroPush = 0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (totals[i] != splits[i].block + splits[i].push)
+            ++mismatched;
+        if (splits[i].push == 0ull)
+            ++zeroPush;
+    }
+    ok = expect("split: t_total == t_block + t_push (per sample)", mismatched == 0u) && ok;
+    ok = expect("split: ring push cost is counted (push > 0)", zeroPush == 0u) && ok;
+
+    // 校正点（外部トレースとの突き合わせ用）
+    ok = expect("split: calibration TSC recorded",
+                convo::rtmeasure::g_calibTscAtPrepare.load() != 0ull) && ok;
+    ok = expect("split: calibration QPC recorded",
+                convo::rtmeasure::g_calibQpcNsAtPrepare.load() != 0ull) && ok;
+
+    // 集計側の診断値（判定には使わない）
+    auto& agg = convo::rtmeasure::aggregator();
+    agg.setWarmupSamples(0);
+    agg.reset();
+    (void) agg.collect();
+    const auto& s = agg.compute();
+    ok = expect("split: aggregated samples", s.splitSamples == static_cast<std::uint64_t>(kBlocks)) && ok;
+    ok = expect("split: push max >= push p99", s.pushMaxTicks >= s.pushP99Ticks) && ok;
+    ok = expect("split: block max >= block p99", s.blockMaxTicks >= s.blockP99Ticks) && ok;
+
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
 int runRtMeasureRingTests()
 {
     bool ok = true;
@@ -528,6 +606,7 @@ int runRtMeasureRingTests()
     ok = checkPollDrainsRing() && ok;
     ok = checkRingMechanics() && ok;
     ok = checkSampleBufferConcurrency() && ok;
+    ok = checkSplitInstrumentation() && ok;
 
     if (ok)
         std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow)\n");
