@@ -369,6 +369,89 @@ inline SampleBuffer& sampleBuffer() noexcept
     return g_samples;
 }
 
+//==============================================================================
+// ★ D-02 案3 (2026-11-01): ブロックを「DSP 本体」と「リング push」に分離して保持する。
+//
+//   t0: 入口（lfence + rdtsc）
+//   t1: push 直前（rdtscp）  -> t_block = t1 - t0
+//   t2: push 直後（rdtscp）  -> t_push  = t2 - t1 / t_total = t2 - t0
+//
+//   **t_total（= block + push）が従来の測定値と同一の定義**であり、判定（max_all）はこれを基礎とする。
+//   t_block / t_push は**診断専用**で、判定・verdict には一切使わない。
+//   1 件 16 B × 65,536 = 1 MB（診断モードのみ）。
+//==============================================================================
+struct SplitSample
+{
+    std::uint64_t block = 0;   // t_block = t1 - t0
+    std::uint64_t push  = 0;   // t_push  = t2 - t1
+};
+
+class SplitSampleBuffer
+{
+public:
+    static constexpr std::size_t kCapacity = 1u << 16;
+
+    void push(std::uint64_t blockTicks, std::uint64_t pushTicks) noexcept
+    {
+        const std::size_t c = countLocal_;          // 書き手専用（非 atomic）
+        if (c < kCapacity)
+        {
+            samples_[c] = SplitSample{ blockTicks, pushTicks };
+            ++countLocal_;
+            convo::publishAtomic(count_, countLocal_, std::memory_order_release);
+        }
+        else
+        {
+            ++overflowLocal_;
+            convo::publishAtomic(overflow_, overflowLocal_, std::memory_order_release);
+        }
+    }
+
+    [[nodiscard]] std::size_t count() const noexcept
+    {
+        return convo::consumeAtomic(count_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t overflowed() const noexcept
+    {
+        return convo::consumeAtomic(overflow_, std::memory_order_acquire);
+    }
+    [[nodiscard]] const SplitSample* data() const noexcept { return samples_; }
+    [[nodiscard]] static constexpr std::size_t capacity() noexcept { return kCapacity; }
+
+    // **RT 停止中のみ**呼べる。
+    void reset() noexcept
+    {
+        for (std::size_t i = 0; i < kCapacity; ++i)
+            samples_[i] = SplitSample{};
+        convo::publishAtomic(count_, std::size_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(overflow_, std::uint64_t{ 0 }, std::memory_order_release);
+        countLocal_ = 0;
+        overflowLocal_ = 0;
+    }
+
+private:
+    alignas(64) std::atomic<std::size_t> count_{ 0 };
+    alignas(64) std::atomic<std::uint64_t> overflow_{ 0 };
+    std::size_t countLocal_{ 0 };          // 書き手専用
+    std::uint64_t overflowLocal_{ 0 };     // 書き手専用
+    SplitSample samples_[kCapacity]{};
+};
+
+inline SplitSampleBuffer g_splitSamples;
+
+inline SplitSampleBuffer& splitSampleBuffer() noexcept
+{
+    return g_splitSamples;
+}
+
+// ★ D-02 案1 (2026-11-01): 帰属（横取りか DSP 内の伸びか）は **ETW 等の外部トレース**で行う。
+//   RT コールバック内で QueryThreadCycleTime / GetThreadTimes を呼ぶ案は、S-1 の実測で
+//   300〜400 ns/回（いずれも syscall 経路）であり、RT 安全性を証明できないため採用しない
+//   （Owner 指示: 安全性が確認できない場合は外部トレースを優先）。
+//   外部トレースと突き合わせるため、(TSC, QPC) の校正点を prepare 時に 1 回だけ記録する。
+inline std::atomic<std::uint64_t> g_calibTscAtPrepare{ 0 };
+inline std::atomic<std::uint64_t> g_calibQpcNsAtPrepare{ 0 };
+
 // P4: 事前構築・事前タッチを**プロセスで 1 回だけ**行う（RT 開始前に非 RT から呼ぶ）。
 inline void prepareOnce() noexcept
 {
@@ -379,6 +462,16 @@ inline void prepareOnce() noexcept
 
     instance().reset();
     sampleBuffer().reset();
+    splitSampleBuffer().reset();
+
+    // ★ D-02 案1 (2026-11-01): 外部トレース（ETW / WPR）と突き合わせるための校正点。
+    //   RT コールバック内では API を呼ばないため、TSC と QPC の対応を prepare 時に 1 回だけ記録する。
+    const std::uint64_t calibTsc = detail::readOrderedBegin();
+    const std::uint64_t calibQpcNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    convo::publishAtomic(g_calibTscAtPrepare, calibTsc, std::memory_order_release);
+    convo::publishAtomic(g_calibQpcNsAtPrepare, calibQpcNs, std::memory_order_release);
 }
 
 // P1: 環境変数の解釈とモード設定は**非 RT で 1 回**。何度呼んでもよい（毎回読み直す）。
@@ -466,6 +559,12 @@ public:
 
         const bool probe = convo::consumeAtomic(detail::g_orderProbe, std::memory_order_relaxed);
 
+        // ★ D-02 案3 (2026-11-01): 区間を 3 点（t0 / t1 / t2）で測る。
+        //   t_block = t1 − t0（DSP 本体）、t_push = t2 − t1（リング push）、
+        //   t_total = t2 − t0（**従来と同一の定義**。max_all はこれを基礎とする）。
+        //   追加コストは rdtscp 1 個（実測 約 8.5 ns = ブロック処理 1.25 ms の 0.0007%）。
+        const std::uint64_t t1 = detail::readOrderedEnd();
+
         if (mode_ == Mode::Full)
         {
             if (probe)
@@ -475,11 +574,12 @@ public:
                 convo::publishAtomic(detail::g_order, 2, std::memory_order_relaxed);
         }
 
-        const std::uint64_t t1 = detail::readOrderedEnd();   // ★ push の後（区間の終端）
+        const std::uint64_t t2 = detail::readOrderedEnd();   // ★ push の後（従来の終端）
         if (probe)
             convo::publishAtomic(detail::g_order, 3, std::memory_order_relaxed);
 
-        sampleBuffer().push(t1 - t0_);
+        sampleBuffer().push(t2 - t0_);                  // t_total（従来と同一）
+        splitSampleBuffer().push(t1 - t0_, t2 - t1);    // t_block / t_push（診断専用）
     }
 
     BlockScopeTimer(const BlockScopeTimer&) = delete;
@@ -509,6 +609,18 @@ struct Stats
     std::uint64_t ringWrites   = 0;      // イベントリングへ入った件数
     std::uint64_t sampleOverflow = 0;    // 共通サンプル領域の欠落
     std::uint64_t aggregatorOverflow = 0;
+
+    // ★ D-02 案3 (2026-11-01): 分離計測の診断値。**判定（verdict / max_all）には使わない。**
+    std::uint64_t splitSamples    = 0;   // 分離サンプル数
+    std::uint64_t blockP99Ticks   = 0;
+    std::uint64_t blockMaxTicks   = 0;
+    std::uint64_t blockP99Micros  = 0;
+    std::uint64_t blockMaxMicros  = 0;
+    std::uint64_t pushP99Ticks    = 0;
+    std::uint64_t pushMaxTicks    = 0;
+    std::uint64_t pushP99Micros   = 0;
+    std::uint64_t pushMaxMicros   = 0;
+    std::uint64_t splitOverflow   = 0;
     double        dropRatio    = 0.0;    // ringDropped / (ringWrites + ringDropped)
     bool          inconclusive = false;  // リング破棄 >10% または サンプル欠落
     bool          boundary     = false;  // 9〜11%（RERUN）
@@ -538,6 +650,13 @@ public:
         stats_ = Stats{};
         collectCalls_ = 0;
         lastCollected_ = 0;
+        // ★ D-02 案3: 分離系列もリセットする。
+        splitReadIdx_ = 0;
+        splitWarmupRemaining_ = warmupTotal_;
+        splitBlock_.clear();
+        splitPush_.clear();
+        splitBlockSorted_.clear();
+        splitPushSorted_.clear();
     }
 
     // 共通サンプル領域から新しい分を回収（非 RT）。ウォームアップ分は統計に加えない。
@@ -577,6 +696,31 @@ public:
         readIdx_ = available;
         ++collectCalls_;
         lastCollected_ = added;
+
+        // ★ D-02 案3: 分離系列（t_block / t_push）の回収。ウォームアップ規則は本体と同一。
+        const std::size_t splitAvailable = splitSampleBuffer().count();
+        if (splitAvailable > splitReadIdx_)
+        {
+            const SplitSample* splitData = splitSampleBuffer().data();
+            for (std::size_t i = splitReadIdx_; i < splitAvailable; ++i)
+            {
+                if (splitWarmupRemaining_ > 0)
+                {
+                    --splitWarmupRemaining_;
+                    continue;
+                }
+                if (splitBlock_.size() < kMaxSamples)
+                {
+                    splitBlock_.push_back(splitData[i].block);
+                    splitPush_.push_back(splitData[i].push);
+                }
+                else
+                {
+                    ++splitOverflow_;
+                }
+            }
+            splitReadIdx_ = splitAvailable;
+        }
         return added;
     }
 
@@ -615,6 +759,30 @@ public:
             s.valid     = true;
         }
 
+        // ★ D-02 案3: 分離計測の統計（診断専用。verdict / max_all の算出には使わない）
+        s.splitSamples  = static_cast<std::uint64_t>(splitBlock_.size());
+        s.splitOverflow = static_cast<std::uint64_t>(splitOverflow_);
+        if (!splitBlock_.empty())
+        {
+            splitBlockSorted_.assign(splitBlock_.begin(), splitBlock_.end());
+            splitPushSorted_.assign(splitPush_.begin(), splitPush_.end());
+            std::sort(splitBlockSorted_.begin(), splitBlockSorted_.end());
+            std::sort(splitPushSorted_.begin(), splitPushSorted_.end());
+
+            const std::size_t sn = splitBlockSorted_.size();
+            const std::size_t sidx = ((99u * sn + 99u) / 100u) - 1u;
+            const std::size_t sp = (sidx < sn) ? sidx : (sn - 1);
+
+            s.blockP99Ticks  = splitBlockSorted_[sp];
+            s.blockMaxTicks  = splitBlockSorted_.back();
+            s.blockP99Micros = ticksToMicros(s.blockP99Ticks);
+            s.blockMaxMicros = ticksToMicros(s.blockMaxTicks);
+            s.pushP99Ticks   = splitPushSorted_[sp];
+            s.pushMaxTicks   = splitPushSorted_.back();
+            s.pushP99Micros  = ticksToMicros(s.pushP99Ticks);
+            s.pushMaxMicros  = ticksToMicros(s.pushMaxTicks);
+        }
+
         stats_ = s;
         return stats_;
     }
@@ -626,6 +794,14 @@ public:
 private:
     std::vector<std::uint64_t> samples_;
     std::vector<std::uint64_t> sorted_;
+    // ★ D-02 案3: 分離系列（診断専用）
+    std::vector<std::uint64_t> splitBlock_;
+    std::vector<std::uint64_t> splitPush_;
+    std::vector<std::uint64_t> splitBlockSorted_;
+    std::vector<std::uint64_t> splitPushSorted_;
+    std::size_t splitReadIdx_ = 0;
+    std::size_t splitWarmupRemaining_ = 2000;
+    std::size_t splitOverflow_ = 0;
     Stats stats_{};
     std::size_t readIdx_ = 0;
     std::size_t warmupTotal_ = 2000;
@@ -692,6 +868,24 @@ inline bool pollIfDue() noexcept
                 static_cast<unsigned long long>(s.sampleOverflow),
                 static_cast<unsigned long long>(s.warmupSkipped),
                 verdict);
+
+    // ★ D-02 案3 (2026-11-01): 分離計測の診断行。**判定には使わない**（FINAL 行は不変）。
+    //   t_total = t_block + t_push。ETW と突き合わせるための校正点も併記する。
+    std::printf("[RTM] SPLIT t_block_p99=%llu us t_block_max=%llu us"
+                " t_push_p99=%llu us t_push_max=%llu us"
+                " t_total_p99=%llu us t_total_max=%llu us"
+                " n=%llu split_overflow=%llu"
+                " calib_tsc=%llu calib_qpc_ns=%llu\n",
+                static_cast<unsigned long long>(s.blockP99Micros),
+                static_cast<unsigned long long>(s.blockMaxMicros),
+                static_cast<unsigned long long>(s.pushP99Micros),
+                static_cast<unsigned long long>(s.pushMaxMicros),
+                static_cast<unsigned long long>(s.p99Micros),
+                static_cast<unsigned long long>(s.maxMicros),
+                static_cast<unsigned long long>(s.splitSamples),
+                static_cast<unsigned long long>(s.splitOverflow),
+                static_cast<unsigned long long>(convo::consumeAtomic(g_calibTscAtPrepare, std::memory_order_acquire)),
+                static_cast<unsigned long long>(convo::consumeAtomic(g_calibQpcNsAtPrepare, std::memory_order_acquire)));
     return true;
 }
 
