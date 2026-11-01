@@ -14,6 +14,7 @@
 | CI 規約 | atomic ドット呼び出しを `convo::` ヘルパーへ | `66068da8` |
 | 資料追記 | CI 状況とポリシー同期提案 | `2d4f5d5a` |
 | ポリシー同期 | `residencyContainerAllowlist` の `lineRegex` **1 行のみ** | `c9e74603` |
+| `j237` ガード（セッション横断） | `ISRShutdown.h` のテスト専用 friend を `#if defined(CONVOPEQ_UNIT_TESTS)` で囲う（+4 行） | `0dfa39e3` |
 
 ## 2. 検証結果
 
@@ -92,8 +93,8 @@
 
 | 対象 | 値（統合後に記入） |
 |---|---|
-| GitHub `main` の commit | `1f258686` |
-| ローカル `HEAD` / `origin/main` | `1f258686`（一致） |
+| GitHub `main` の commit | `0dfa39e3` |
+| ローカル `HEAD` / `origin/main` | `0dfa39e3`（一致） |
 | 作業ツリーの追跡差分 | 0（`ConvoPeq.md` 再生成コミット後） |
-| Dropbox `/ConvoPeq.md` の SHA-256 | `dea78b9daaac9faa912ee125f6d52c63ff9d9cf3db4c4a9fe1e02f8b60de19f1`（6451631 B・LF 正規形） |
-| 分割版 | `/ConvoPeq-dea78b9d-split/`（各 ≤ 2 MiB、連結で正規と一致） |
+| Dropbox `/ConvoPeq.md` の SHA-256 | `c12a532e70770ab40430d34052af87407291e0a12c2a9e68f10229fd5760e8a9`（6451631 B・LF 正規形） |
+| 分割版 | `/ConvoPeq-c12a532e-split/`（各 ≤ 2 MiB、連結で正規と一致） |
