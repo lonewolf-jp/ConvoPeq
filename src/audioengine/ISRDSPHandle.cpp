@@ -1,4 +1,6 @@
 #include "ISRDSPHandle.h"
+
+#include <bit>
 #include "AtomicAccess.h"
 
 #include <cassert>
@@ -523,11 +525,12 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
             return false;
     }
 
-    // state == Quarantined is required
-    const auto prevState = convo::consumeAtomic(
+    // ★ A2 (2026-11-01): 観測が Quarantined でなければ「他者が先に遷移させた正常系」として false。
+    //   旧実装は CAS の前の観測値で assert していたため、正当な競合でも誤検出していた。
+    //   assert は削除せず、CAS の結果に対する不変条件として下へ移す。
+    const auto observed = convo::consumeAtomic(
         registry_[slot].state, std::memory_order_acquire);
-    assert(prevState == DSPState::Quarantined);
-    if (prevState != DSPState::Quarantined)
+    if (observed != DSPState::Quarantined)
         return false;
 
     // Phase 1: state check - not active / fading / crossfading
@@ -553,23 +556,29 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
     (void)closePinsForDestroy(slot, pinnedGeneration);
     if (pinnedCount(slot) != 0)
     {
-        convo::fetchAddAtomic(deferredQuarantineDestroy_, std::uint32_t{1},
-                              std::memory_order_acq_rel);
+        // ★ A3-a: どのスロットが deferred かを記録する（グローバル +1 をやめる）。
+        markQuarantineDeferred(slot);
         return false;   // deferred: nothing was modified
     }
 
-    // Phase 1: mark DestroyPending (CAS, safe transition)
-    auto expected = convo::consumeAtomic(
-        registry_[slot].state, std::memory_order_acquire);
-    while (expected == DSPState::Quarantined) {
-        if (convo::compareExchangeAtomic(registry_[slot].state,
+    // ★ A2 (2026-11-01): CAS が Quarantined -> DestroyPending の唯一の遷移所有者。
+    //   結果に基づいて検査する（assert は「CAS 成功時の不変条件」として保持）。
+    auto expected = observed;
+    while (!convo::compareExchangeAtomic(registry_[slot].state,
                                          expected, DSPState::DestroyPending,
                                          std::memory_order_acq_rel,
                                          std::memory_order_acquire))
-            break;
-    }
-    if (expected != DSPState::Quarantined)
+    {
+        // 他者が先に遷移させた（正常）。自分は何も遷移させていない。
+        if (expected != DSPState::Quarantined)
+            return false;
+
+        // CAS 失敗にもかかわらず expected が Quarantined のまま = 状態が Quarantined へ
+        // 逆行した（真の異常）。旧実装では検出できなかったケース。
+        assert(!"DSPState regressed to Quarantined without a transition owner");
         return false;
+    }
+    assert(expected == DSPState::Quarantined);   // CAS 成功時の不変条件
 
     // Phase 2: clear instance
     convo::publishAtomic(registry_[slot].instance, nullptr, std::memory_order_release);
@@ -581,6 +590,9 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
     std::lock_guard<std::mutex> lock(freeListMutex_);
     if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = slot;
+
+    // ★ A3-a: 回収できたので deferred マークを外す。
+    clearQuarantineDeferred(slot);
     return true;
 }
 
@@ -589,33 +601,92 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
 //   (AudioEngine::tryReclaimResources) and the shutdown cleanup.
 std::size_t DSPHandleRuntime::retryDeferredQuarantineDestroy() noexcept
 {
-    if (convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire) == 0)
+    // ★ A3-a: マークされたスロットだけを対象にする。
+    //   commit 経路が今まさに処理中のスロットへ横から触ることを避ける。
+    if (deferredCount() == 0)
         return 0;
 
     std::size_t destroyed = 0;
-    std::uint32_t stillDeferred = 0;
 
     for (uint32_t slot = 1; slot < MAX_DSP_SLOTS; ++slot)
     {
+        if (!isQuarantineDeferred(slot))
+            continue;
+
         if (convo::consumeAtomic(registry_[slot].state, std::memory_order_acquire)
             != DSPState::Quarantined)
+        {
+            clearQuarantineDeferred(slot);   // 他者が終端済み
             continue;
+        }
         if (convo::consumeAtomic(registry_[slot].instance, std::memory_order_acquire) == nullptr)
+        {
+            clearQuarantineDeferred(slot);   // 実体なし = マーク不要
             continue;
+        }
 
         if (destroyQuarantineSlot(slot, 0))
-            ++destroyed;
-        else if (pinnedCount(slot) != 0)
-            ++stillDeferred;
+        {
+            ++destroyed;                     // 成功時は destroyQuarantineSlot が mark を外す
+            continue;
+        }
+
+        if (pinnedCount(slot) == 0)
+            clearQuarantineDeferred(slot);   // pin が解けたので再試行不要
+        // else: pin 残留のまま -> マークを保持して次回へ
     }
 
-    convo::publishAtomic(deferredQuarantineDestroy_, stillDeferred, std::memory_order_release);
     return destroyed;
 }
 
 std::uint32_t DSPHandleRuntime::deferredQuarantineDestroyCount() const noexcept
 {
-    return convo::consumeAtomic(deferredQuarantineDestroy_, std::memory_order_acquire);
+    // ★ A3-a: 契約は従来どおり「保留中のスロット数」。マスクの popcount で返す。
+    return deferredCount();
+}
+
+void DSPHandleRuntime::markQuarantineDeferred(std::uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    convo::fetchOrAtomic(deferredQuarantineMask_[slot >> 6],
+                         std::uint64_t{1} << (slot & 63),
+                         std::memory_order_acq_rel);
+}
+
+void DSPHandleRuntime::clearQuarantineDeferred(std::uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    convo::fetchAndAtomic(deferredQuarantineMask_[slot >> 6],
+                          ~(std::uint64_t{1} << (slot & 63)),
+                          std::memory_order_acq_rel);
+}
+
+bool DSPHandleRuntime::isQuarantineDeferred(std::uint32_t slot) const noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return false;
+    const auto word = convo::consumeAtomic(deferredQuarantineMask_[slot >> 6],
+                                           std::memory_order_acquire);
+    return ((word >> (slot & 63)) & std::uint64_t{1}) != 0;
+}
+
+std::uint32_t DSPHandleRuntime::deferredCount() const noexcept
+{
+    std::uint32_t count = 0;
+    for (std::uint32_t i = 0; i < kDeferredMaskWords; ++i)
+    {
+        const auto word = convo::consumeAtomic(deferredQuarantineMask_[i],
+                                               std::memory_order_acquire);
+#if defined(__cpp_lib_bitops) && __cpp_lib_bitops >= 201907L
+        count += static_cast<std::uint32_t>(std::popcount(word));
+#else
+        std::uint64_t w = word;
+        while (w != 0) { w &= (w - 1); ++count; }
+#endif
+    }
+    return count;
 }
 
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept

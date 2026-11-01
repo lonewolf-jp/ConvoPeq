@@ -1360,6 +1360,12 @@ static void measureH2R1MixedGainTupleWindow(AudioEngineHarness& harness)
 // 宣言はゲート外に置く（OFF ビルドでは呼び出し側もコンパイルされないため未解決にならない）。
 int runB2Stage1PositiveControls();
 
+// ★ B-2 (2026-11-01): 診断 sink 契約と M1〜M7 の測定（opt-in）。
+int runB2DiagSinkTests();
+
+// ★ A2 -> A3-a: 二重解放と誤状態処理の分離検証（opt-in）。
+int runA2A3aQuarantineTests();
+
 int main(int argc, char* argv[])
 {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -1367,6 +1373,14 @@ int main(int argc, char* argv[])
     if (std::getenv("B2_STAGE1_MEASURE") != nullptr)
         return runB2Stage1PositiveControls();
 #endif
+
+    // ★ B-2: 診断 sink の所有契約テストと M1〜M7 の記録（opt-in・既定スイート非干渉）。
+    if (std::getenv("B2_DIAGSINK_TEST") != nullptr)
+        return runB2DiagSinkTests();
+
+    // ★ A2 -> A3-a: 二重解放（V1）と誤状態処理（V2）の検証（opt-in）。
+    if (std::getenv("A2A3A_TEST") != nullptr)
+        return runA2A3aQuarantineTests();
 
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
