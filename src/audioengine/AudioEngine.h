@@ -1112,7 +1112,7 @@ public:
         [[nodiscard]] std::uint64_t diagOwnerId() const noexcept { return diagOwnerId_; }
         [[nodiscard]] DiagSink* diagSink() const noexcept
         {
-            return diagSink_.load(std::memory_order_acquire);
+            return convo::consumeAtomic(diagSink_, std::memory_order_acquire);
         }
         void attachDiagSink(DiagSink* sink, std::uint64_t ownerId) noexcept;
         void detachDiagSink() noexcept;

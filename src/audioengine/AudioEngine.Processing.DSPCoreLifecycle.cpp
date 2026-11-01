@@ -83,13 +83,13 @@ void AudioEngine::DSPCore::attachDiagSink(DiagSink* sink, std::uint64_t ownerId)
         return;
 
     diagOwnerId_ = ownerId;
-    diagSink_.store(sink, std::memory_order_release);
+    convo::publishAtomic(diagSink_, sink, std::memory_order_release);
 }
 
 void AudioEngine::DSPCore::detachDiagSink() noexcept
 {
     // ポインタだけを外す。ownerId は識別情報なので保持したままにする。
-    diagSink_.store(nullptr, std::memory_order_release);
+    convo::publishAtomic(diagSink_, nullptr, std::memory_order_release);
 }
 
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
