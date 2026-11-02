@@ -33,6 +33,10 @@ Owner 指示「全 OpenChamber Desktop セッションの変更・未完了事�
 | stash | なし |
 | open PR | 0 件（`gh pr list`） |
 
+> 本節は**調査時点（2026-11-02 前半）のスナップショット**である。
+> その後の整理作業で `HEAD`・未追跡件数・ブランチ構成が変わった。
+> **現在の状態は §9 を参照**（§9 が本台帳の最新状態）。
+
 ## 3. worktree（セッション）別の状態
 
 | worktree | HEAD | 未コミット | 未追跡 | 判定 |
@@ -151,3 +155,113 @@ main 統合状態 / 未完了の理由 / 依存関係 / 次に行うべき作業
 
 **未統合として残るのは #3（ASan 待ちのみ）、#4、#5、#8、#10〜#12 の 6 群**であり、
 このうち機能実装は **0 件**。
+
+> この 6 群のうち **#3・#4・#9・#13・#14 は §9 で決着済み**（ASan 完了、`AGENTS.md` 統合、
+> ブランチ削除）。現在の残りは §9.4 を参照。
+
+## 9. 整理の実施結果（2026-11-02・Owner 承認分の完了）
+
+Owner 回答案（陳腐化 12 本の削除 / `ci/r50`・R-51 4 本の整理 / `ci/r49`・`ci/h2r1` の保持 /
+未追跡 12 件の追跡化 / `AGENTS.md` 統合）に基づく実施結果。**本節が最新状態である。**
+
+### 9.1 現在のリポジトリ状態
+
+| 項目 | 値 |
+|---|---|
+| ブランチ | `main` |
+| `HEAD` = `origin/main` | 一致（本書を commit するたびに進むため、SHA は固定しない） |
+| 整理作業のコミット | `b20506fa`（資料 12 件の追跡化）、`23d006a7`（`AGENTS.md` 統合）、`c093543b`（整理報告） |
+| 追跡差分 | **0** |
+| 未追跡 | **14**（削除・移動はしていない） |
+| ローカルブランチ | 66 本 |
+| リモートブランチ（`origin`） | 48 本 |
+| アーカイブタグ | 16 個（`archive/<branch>-<short>`） |
+| CI workflow の変更（`6bb7c8d5..HEAD`） | **0 件** |
+| policy の変更 | allowlist 1 行のみ（`c9e74603`・既承認） |
+| 検査スクリプトの変更 | **0 件** |
+
+### 9.2 削除したブランチ（16 本）
+
+`git cherry main <branch>` の未取込が 0 でない 8 本（`bright-falcon` / `crisp-zebra` /
+`main-pre-sync-20261021` / `chore/convoPeqmd-023ae16f-20261029` と R-51 系 4 本）は、
+**内容が main に別 SHA で存在**することを確認したうえで、tip をアーカイブタグに保全して削除した。
+削除で到達不能になったコミットは無い。
+
+| ブランチ | ローカル | リモート | tip |
+|---|---|---|---|
+| `integration/session-consolidation` | 削除 | 削除 | `e8aa1f6f` |
+| `fix/r51-f1b-pin-protection-20261030` | 削除 | 削除 | `ed11a6c3` |
+| `review/r51-merge-rehearsal-20261030` | 削除 | （無し） | `e9613d67` |
+| `feat/b2-stage1-t1-20261028` | 削除 | 削除 | `ec80b9d3` |
+| `fix/r52-f1b-defer-observation-20261029` | 削除 | 削除 | `7114440d` |
+| `chore/convoPeqmd-023ae16f-20261029` | 削除 | 削除 | `fd0c5153` |
+| `chore/convopeqmd-5057968c-20261030` | 削除 | 削除 | `e7237372` |
+| `main-pre-sync-20261021` | 削除 | （無し） | `bda43034` |
+| `ci/r51-two-engine-on-pr82` | 削除 | 削除 | `c56f571d` |
+| `ci/r51-two-engine-repro-20261030` | 削除 | 削除 | `857372eb` |
+| `verify/r51-two-engine-on-merged-main-20261030` | 削除 | 削除 | `3327b484` |
+| `ci/r51-diag-only-20261030` | 削除 | 削除 | `481db70d` |
+| `bright-falcon` | **残存**（他 worktree が使用中） | 削除 | `d79b8be4` |
+| `crisp-zebra` | **残存**（同上） | 削除 | `bda43034` |
+| `work/g3-snapshot-ignore-20261026` | **残存**（同上） | 削除 | `812abcc8` |
+| `work/r16-i4-sync-20261026` | **残存**（同上） | 削除 | `3f3225d7` |
+
+- ローカル削除 **12 本** / リモート削除 **14 本**。
+- 残存 4 本は `git branch -D` が `used by worktree` で拒否されたもの。
+  他セッションは読み取り専用のため worktree の detach は行っていない。tip はタグで保全済み。
+
+### 9.3 保持したブランチ
+
+| ブランチ | 理由 |
+|---|---|
+| `ci/r49-selected-tests-probe-20261029` | Owner 承認により保持。旧ベース由来で `sanitizer-ci.yml` と `vbcable-probe.yml` を削除する差分を含むため統合不可 |
+| `ci/h2r1-release-measurement-20261030` | Owner 承認により保持。新規 workflow 235 行の恒久追加は CI 定義変更に該当 |
+| `ci/r50-asan-vbcable-20261029` | **削除を保留**。workflow 差分は main に取込済み（`5057968c`）だが、policy 1 行の未解決差分が残る |
+
+### 9.4 Git 管理へ追加した資料（12 件・`b20506fa`）
+
+`doc/work113/REPORT-20261101-{design-phase,abc-investigation,attach-plan,attach-contract,lifetime-proof}.md`（5）、
+`doc/work113/P1-5-IR-P2_STG-11-D13〜D17・D19_FRESH-DISCOVERY_20261001.md`（6）、
+`.memories/repo/tool-versions-2026-09-26.md`（1）。
+
+追加前確認: 機密パターン一致 **0**、既存追跡ファイルとの同名衝突 **なし**、
+格納先は既存の `doc/work113/` 規則に一致、生成物は含まない。
+
+### 9.5 保留した未追跡 14 件
+
+| 分類 | 件数 | 内容 |
+|---|---|---|
+| 旧分割ステージング | 5 | `.openchamber/convopeq-md-split-20261030/` の `part01〜04` ＋ `SHA256SUMS.txt` |
+| 旧分割の検証キット | 2 | `doc/ConvoPeq-f8aab49b-split/{README.md,SHA256SUMS.txt}` |
+| 設定バックアップ | 6 | `opencode.json.bak-py314-20261022-*.bak` |
+| 生成物 | 1 | `vc140.pdb`（69,632 B） |
+
+### 9.6 `AGENTS.md` の統合（`23d006a7`）
+
+新規節を作らず、既存の `## Python 3.14 → 3.15 移行（2026-10-20・MCP 全停止の復旧）` の
+「復旧の手順」へ 17 行を統合した（6 項末尾の訂正 1 行 ＋ 7 項の semble 復旧記録）。
+行数 544 → **561**、`pyvenv.cfg` / `HF_HUB_OFFLINE` の記述は各 1 箇所で重複なし。
+作業場所・セッション・main 同期・承認境界・禁止事項の記述は変更していない。
+
+### 9.7 §8 の 9 項目一覧に対する更新
+
+| §8 の # | 旧状態 | §9 での確定 |
+|---|---|---|
+| 3（`j237` ISRShutdown.h） | ASan の CI のみ pending | **ASan を含め 13/13 PASS**（PR #104 `0dfa39e3`） |
+| 4（`AGENTS.md` 17 行） | 未統合 | **統合済み**（`23d006a7`） |
+| 9（R-51 測定 4 本） | 未統合（陳腐化） | **削除済み**（tip はタグ保全） |
+| 10（`ci/h2r1`） | 保留 | **保持**（恒久化は別途承認） |
+| 11（`ci/r49`） | 保留 | **保持**（統合しない） |
+| 12（`ci/r50`） | 一部取込 | **削除保留**（policy 1 行が未解決） |
+| 13（`ConvoPeq.md` 再生成系） | 陳腐化 | **削除済み** |
+| 14（取込済み 6 本） | 取込済み | **削除済み**（`bright-falcon` / `crisp-zebra` / `work/g3` / `work/r16` のローカル ref は残存） |
+| 5・8（未追跡 763 / 243 件） | 調査未了 | 本作業の対象は main worktree の 26 件。**12 件を追跡化、14 件を保留** |
+
+### 9.8 変わっていないもの
+
+- 製品コード・テストコード: 未変更（`git diff 0dfa39e3..HEAD -- src CMakeLists.txt build.bat` = 0 件）
+- CI workflow・policy・検査スクリプト: workflow 0 件、スクリプト 0 件、policy は既承認の 1 行のみ
+- **U5 = FAIL / 既定 OFF、U3/U4 = HOLD** を維持
+- リリース・外部公開・既定 OFF 機能の有効化: **未実施**
+- `ConvoPeq.md`: 生成対象が未変更のため再生成しない（git blob と Dropbox が一致）
+
