@@ -2,6 +2,7 @@
 
 #include <bit>
 #include "AtomicAccess.h"
+#include "RtMeasureRing.h"   // R-107 U4: 非 RT ロック計測
 
 #include <cassert>
 #include <fstream>
@@ -50,7 +51,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
         return DSPHandle::null();
 
     // ★ FUTURE-5 (work88): 線形スキャン → フリーリスト pop（O(1) 確保）
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
 
     // ★ F3' (2026-10-25): 1 インスタンス = 1 ハンドル。
     //   重複を許すと retire() が片方しか無効化せず、残ったスロットが解放済みメモリを
@@ -230,7 +231,7 @@ void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId 
     convo::publishAtomic(registry_[to.slot].state, DSPState::CrossfadingIn, std::memory_order_release);
 
     // ★ 監査指摘 (work88): push_back と Timer 側の endCrossfade/isSlotInCrossfade 走査の競合を防ぐ
-    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::CrossfadeRecords, crossfadeRecordsMutex_);
     crossfadeRecords_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     convo::publishAtomic(fadingRuntimeDSPHandle_, from, std::memory_order_release);
 }
@@ -253,7 +254,7 @@ void DSPHandleRuntime::activate(DSPHandle handle)
 void DSPHandleRuntime::endCrossfade(CrossfadeId id)
 {
     // ★ 監査指摘 (work88): beginCrossfade（CoordinatorLoop）との並行アクセスを防ぐため lock。
-    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::CrossfadeRecords, crossfadeRecordsMutex_);
     for (auto& record : crossfadeRecords_) {
         if (record.id != id || !record.active) {
             continue;
@@ -301,7 +302,7 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
 {
     if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS)
         return;
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
     auto& reg = registry_[handle.slot];
     // ★ 監査指摘 (work88): stale handle 検出（generation 不一致なら slot は別世代で再利用中 —
     //   誤って新規 DSP の slot を Reclaimed 化しない）。FUTURE-5 generation タグの完全化。
@@ -358,7 +359,7 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
     std::array<Target, MAX_DSP_SLOTS> targets{};
     size_t targetCount = 0;
     {
-        std::lock_guard<std::mutex> lock(freeListMutex_);
+        convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
         for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
         {
             auto& reg = registry_[i];
@@ -381,7 +382,7 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
 
     // 3) instance を消す（ここに来た時点で pin 保持者はいない）。
     {
-        std::lock_guard<std::mutex> lock(freeListMutex_);
+        convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
         for (size_t k = 0; k < targetCount; ++k)
         {
             auto& reg = registry_[targets[k].slot];
@@ -420,7 +421,7 @@ bool DSPHandleRuntime::invalidateForDestroyBySlot(uint32_t slot, uint64_t genera
         return false;
 
     // 3) 破棄を確定（別世代に再利用されていたら触らない）。
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
     auto& reg = registry_[slot];
     if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != generation)
         return true;
@@ -481,7 +482,7 @@ bool DSPHandleRuntime::rollbackRegistration(DSPHandle handle) noexcept
                                                  std::memory_order_acquire);
     // ★ FUTURE-5 (work88): ロールバック成功（Reclaimed 化）時は slot をフリーリストへ戻す
     if (ok) {
-        std::lock_guard<std::mutex> lock(freeListMutex_);
+        convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
         if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
             freeSlots_[freeSize_++] = handle.slot;
     }
@@ -501,7 +502,7 @@ void DSPHandleRuntime::quarantineSlot(uint32_t slot) noexcept
 bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
 {
     // ★ 監査指摘 (work88): beginCrossfade との並行アクセスを防ぐため lock。
-    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::CrossfadeRecords, crossfadeRecordsMutex_);
     for (const auto& record : crossfadeRecords_) {
         if (record.active &&
             (record.fromHandle.slot == slot || record.toHandle.slot == slot))
@@ -587,7 +588,7 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
     // work88: return the reclaimed quarantine slot to the free list (prevents slot leaks).
     //   Double push cannot happen: state==Quarantined was verified above and reclaim()
     //   carries the same state guard.
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
     if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = slot;
 
@@ -725,7 +726,7 @@ CrossfadeId CrossfadeAuthorityRuntime::registerCrossfade(DSPHandle from, DSPHand
 {
     const auto id = convo::fetchAddAtomic(nextId_, 1u, std::memory_order_acq_rel);
     // ★ 監査指摘 (work88): push_back による再確保と Timer 側の走査の競合を防ぐため lock。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     records_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     return id;
 }
@@ -733,7 +734,7 @@ CrossfadeId CrossfadeAuthorityRuntime::registerCrossfade(DSPHandle from, DSPHand
 void CrossfadeAuthorityRuntime::unregisterCrossfade(CrossfadeId id)
 {
     // ★ 監査指摘 (work88): register（CoordinatorLoop）との並行アクセスを防ぐため lock。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     for (auto& record : records_) {
         if (record.id == id) {
             record.active = false;
@@ -745,7 +746,7 @@ void CrossfadeAuthorityRuntime::unregisterCrossfade(CrossfadeId id)
 std::vector<CrossfadeRecord> CrossfadeAuthorityRuntime::getActiveCrossfades() const noexcept
 {
     // ★ 監査指摘 (work88): register との並行アクセスを防ぐため lock（コピーは lock 内）。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     std::vector<CrossfadeRecord> result;
     for (const auto& record : records_) {
         if (record.active) {
@@ -758,7 +759,7 @@ std::vector<CrossfadeRecord> CrossfadeAuthorityRuntime::getActiveCrossfades() co
 bool CrossfadeAuthorityRuntime::hasCrossfadeInvolving(DSPHandle handle) const noexcept
 {
     // ★ 監査指摘 (work88): 同様に lock（現時点で呼出し元ゼロだが契約として保護）。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     for (const auto& record : records_) {
         if (record.active && (record.fromHandle == handle || record.toHandle == handle)) {
             return true;

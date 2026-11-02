@@ -34,6 +34,7 @@
 //==============================================================================
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -41,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 #include "AtomicAccess.h"   // list.md [3.1]: 製品コードでは atomic のドット誕生を直接呼んではならない（convo:: ヘルパ経由）
@@ -819,6 +821,149 @@ inline Aggregator& aggregator() noexcept
     return g_aggregator;
 }
 
+//==============================================================================
+// U4: 非 RT 側 mutex の取得待ち・保持時間（既定 OFF）
+//
+//   RT コールバックには計測点を置かない。非 RT のロック取得点だけを置き換える。
+//   Off のときは atomic load 1 回で素通りし、TSC も読まない。
+//   集計先は固定スロットで、確保・ロック・I/O を行わない。
+//==============================================================================
+enum class LockId : std::uint32_t
+{
+    FreeList = 0,          // ISRDSPHandle::freeListMutex_
+    CrossfadeRecords = 1,  // ISRDSPHandle::crossfadeRecordsMutex_
+    Records = 2,           // ISRDSPHandle::recordsMutex_
+    Count = 3
+};
+
+struct LockSlot
+{
+    std::atomic<std::uint64_t> acquisitions{ 0 };
+    std::atomic<std::uint64_t> waitTicksSum{ 0 };
+    std::atomic<std::uint64_t> waitTicksMax{ 0 };
+    std::atomic<std::uint64_t> holdTicksSum{ 0 };
+    std::atomic<std::uint64_t> holdTicksMax{ 0 };
+};
+
+inline std::array<LockSlot, static_cast<std::size_t>(LockId::Count)> g_lockSlots;
+
+// 非 RT 専用: 集計の初期化（テストと測定の開始時のみ）。
+inline void resetLockStats() noexcept
+{
+    for (auto& s : g_lockSlots)
+    {
+        convo::publishAtomic(s.acquisitions, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.waitTicksSum, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.waitTicksMax, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.holdTicksSum, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.holdTicksMax, std::uint64_t{ 0 }, std::memory_order_release);
+    }
+}
+
+// 非 RT 専用: 最大値の更新（CAS ループ。RT からは呼ばない）。
+inline void raiseLockMax(std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
+{
+    std::uint64_t cur = convo::consumeAtomic(target, std::memory_order_relaxed);
+    while (value > cur
+           && !convo::compareExchangeAtomic(target, cur, value,
+                                            std::memory_order_relaxed, std::memory_order_relaxed))
+    {
+    }
+}
+
+[[nodiscard]] inline const char* lockName(LockId id) noexcept
+{
+    switch (id)
+    {
+        case LockId::FreeList:         return "freeList";
+        case LockId::CrossfadeRecords: return "crossfadeRecords";
+        case LockId::Records:          return "records";
+        default:                       return "unknown";
+    }
+}
+
+// 非 RT のロック取得点にだけ置く RAII。std::lock_guard と同じ使い方をする。
+class LockScope
+{
+public:
+    LockScope(LockId id, std::mutex& m) noexcept
+        : id_(id), mutex_(&m)
+    {
+        if (mode() == Mode::Off)
+        {
+            mutex_->lock();
+            return;
+        }
+
+        const std::uint64_t t0 = detail::readOrderedBegin();
+        mutex_->lock();
+        t1_ = detail::readOrderedEnd();
+        waitTicks_ = t1_ - t0;
+        measured_ = true;
+    }
+
+    ~LockScope() noexcept
+    {
+        if (!measured_)
+        {
+            mutex_->unlock();
+            return;
+        }
+
+        const std::uint64_t t2 = detail::readOrderedEnd();
+        mutex_->unlock();
+
+        const std::uint64_t holdTicks = t2 - t1_;
+        auto& s = g_lockSlots[static_cast<std::size_t>(id_)];
+        convo::fetchAddAtomic(s.acquisitions, std::uint64_t{ 1 }, std::memory_order_relaxed);
+        convo::fetchAddAtomic(s.waitTicksSum, waitTicks_, std::memory_order_relaxed);
+        convo::fetchAddAtomic(s.holdTicksSum, holdTicks, std::memory_order_relaxed);
+        raiseLockMax(s.waitTicksMax, waitTicks_);
+        raiseLockMax(s.holdTicksMax, holdTicks);
+    }
+
+    LockScope(const LockScope&) = delete;
+    LockScope& operator=(const LockScope&) = delete;
+
+private:
+    LockId id_;
+    std::mutex* mutex_ = nullptr;
+    std::uint64_t t1_ = 0;
+    std::uint64_t waitTicks_ = 0;
+    bool measured_ = false;
+};
+
+// 非 RT からのみ呼ぶ。取得回数が 0 のスロットは出力しない。
+inline void printLockStats() noexcept
+{
+    const double perSec = static_cast<double>(
+        convo::consumeAtomic(detail::g_ticksPerSecond, std::memory_order_acquire));
+    const double toUs = perSec > 0.0 ? 1.0e6 / perSec : 0.0;
+
+    for (std::size_t i = 0; i < static_cast<std::size_t>(LockId::Count); ++i)
+    {
+        const auto& s = g_lockSlots[i];
+        const std::uint64_t n = convo::consumeAtomic(s.acquisitions, std::memory_order_acquire);
+        if (n == 0)
+            continue;
+
+        const std::uint64_t waitSum = convo::consumeAtomic(s.waitTicksSum, std::memory_order_acquire);
+        const std::uint64_t waitMax = convo::consumeAtomic(s.waitTicksMax, std::memory_order_acquire);
+        const std::uint64_t holdSum = convo::consumeAtomic(s.holdTicksSum, std::memory_order_acquire);
+        const std::uint64_t holdMax = convo::consumeAtomic(s.holdTicksMax, std::memory_order_acquire);
+        const double inv = n > 0 ? 1.0 / static_cast<double>(n) : 0.0;
+
+        std::printf("[U4] mutex=%s acquired=%llu wait_mean_us=%.2f wait_max_us=%.2f"
+                    " hold_mean_us=%.2f hold_max_us=%.2f\n",
+                    lockName(static_cast<LockId>(i)),
+                    static_cast<unsigned long long>(n),
+                    static_cast<double>(waitSum) * inv * toUs,
+                    static_cast<double>(waitMax) * toUs,
+                    static_cast<double>(holdSum) * inv * toUs,
+                    static_cast<double>(holdMax) * toUs);
+    }
+}
+
 // 1 秒ゲート用の最終実行時刻（ミリ秒）。非 RT からのみ触る。
 inline std::atomic<std::int64_t> g_lastPollMs{ std::numeric_limits<std::int64_t>::min() };
 
@@ -886,6 +1031,7 @@ inline bool pollIfDue() noexcept
                 static_cast<unsigned long long>(s.splitOverflow),
                 static_cast<unsigned long long>(convo::consumeAtomic(g_calibTscAtPrepare, std::memory_order_acquire)),
                 static_cast<unsigned long long>(convo::consumeAtomic(g_calibQpcNsAtPrepare, std::memory_order_acquire)));
+    printLockStats();
     return true;
 }
 
