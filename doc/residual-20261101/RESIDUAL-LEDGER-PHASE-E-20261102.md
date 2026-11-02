@@ -320,11 +320,19 @@ R-108 は**完了**。退避 ZIP は `/ConvoPeq-stage3-20261026/archive-old-spli
 
 dispatch 検証の経過:
 
-| 試行 | run | 結果 | 備考 |
-|---|---|---|---|
-| 1 | `41422842771` | **failure**（45.7 分） | 内 5 回の run 5 が `rc=8`。`[H2R1] trials=40 mixed_trials=0 distinct_worlds=80` は 5 回とも同一 |
-| 2 | `41422888522` | 実行（旧 main） | 参考記録 |
-| 3〜5 | — | **未実施** | 下記の flaky 修正をマージ後に再実施 |
+| 試行 | run | 結論 | run 全体 | job 所要 |
+|---|---|---|---|---|
+| 1 | `41422842771` | failure（45.7 分・run 5 の flaky テスト） | — | — |
+| 2 | `41422888522` | 参考（旧 main） | 105.0 分 | — |
+| 3 | `41447831754` | success | 61.1 分 | 60.0 分 |
+| 4 | `41456500055` | **success（合格）** | **49.2 分** | 49.2 分 |
+| 5 | `41464228797` | success | 60.8 分 | 60.7 分 |
+| 6 | `41474161659` | success | 60.4 分 | 60.2 分 |
+
+- **rc=0 は 4/4**（修正後）。測定値 `[H2R1] trials=40 mixed_trials=0 distinct_worlds=80` は全回同一。
+- 60 分基準は run 全体で 1/4、job 全体で 2/4。ばらつきは `Install Intel oneAPI via winget`（未導入時 10.7 分）に依存。
+- 判定の解釈（run 全体／job）は **Owner 判断事項**（`SESSION-FINAL-REPORT-20261102.md` §3 に A/B/C 案）。
+
 
 **flaky の原因と修正**: `checkSTG8ClearTerminalizesObligation` が RebuildThread 稼働中に
 `clearDeferredForShutdown()`（plain メンバ所有・停止時専用）を直接呼び、`processDeferredAdmission()`
