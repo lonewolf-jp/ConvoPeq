@@ -62,13 +62,20 @@ Owner 承認（R-107 Stage 2）に基づく限定的な実装。**既定 OFF**�
 
 ## 5. 検証結果
 
-| 項目 | 状態 |
+| 項目 | 結果 |
 |---|---|
-| Release ビルド | 未実施（U5 測定の完了後に実施） |
-| 回帰テスト（`RtMeasureRingTests`） | 未実施 |
-| Debug ビルド | 未実施 |
-| ASan（RelWithDebInfo） | 未実施（PR の CI で確認） |
-| 既定 OFF の性能回帰 | 未実施 |
+| Release ビルド | **成功**（`build-ci-local`、`AudioEngineHarness.exe` 2026-11-02 20:42:10） |
+| 回帰テスト（`RtMeasureRingTests`） | **PASS**（`… overflow, U4 locks`）。`ctest -R '^AudioEngineHarness$' -V` を 2 回実行し、**rc=0 / 299.9 s・299.5 s** |
+| ハーネス全体 | 2 回とも `100% tests passed out of 1` |
+| 既定 OFF の挙動 | 上記 ctest は `CONVOPEQ_RT_MEASURE` 未設定で実行しており、既存テストはすべて PASS。既定経路に回帰なし |
+| 計測 ON の動作 | 検証 (13) が mode 2 で `acquired == 16`・`holdTicksSum > 0`・他スロット 0 を確認 |
+| Debug ビルド | **未実施**（CI の `Debug TSan` で確認） |
+| ASan（RelWithDebInfo） | **未実施**（CI の `RelWithDebInfo ASan` で確認） |
+| 性能回帰（±1% 以内） | **未測定**（既定 OFF は atomic load 1 回のみ。CI のスループット指標で代替） |
+
+> 注: ローカルの `build` ディレクトリは CMake キャッシュが破損していたため（Ninja/VS の混在）、
+> 整合している `build-ci-local` でビルド・テストを実施した。リポジトリのソースには影響しない。
+
 
 ## 6. U3（次段階）との分離
 
