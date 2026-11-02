@@ -481,6 +481,23 @@ MCP server process exited with code 1: 'C:\Python314\pythonw.exe' は内部ま�
 6. **uv tool 管理の Python は系統移行の影響を受けない**（独立バイナリ）:
    browser-use / cocoindex-code / github-mcp-server / graphifyy / headroom-ai /
    mempalace / serena-agent = Python **3.13.12**、semble = 3.14.7。
+   ※ 2026-10-30 訂正: **semble は例外だった**（下記「semble の異常停止」）。
+7. **semble の異常停止（2026-10-30 復旧）** — `uv\tools\semble\pyvenv.cfg` の `home` が
+   削除済みの `C:\Python314` を指しており、`uvx` が
+   `Querying Python at ...\uv\tools\semble\Scripts\python.exe failed with exit status 103 /
+   did not find executable at 'C:\Python314\python.exe'` で exit 2 していた。
+   `uv tool list` 自体も同じ理由で失敗する。
+   復旧: `uv tool install "semble[mcp]==0.6.0" --python 3.13 --force`
+   （`home` が `uv\python\cpython-3.13-windows-x86_64-none` になる）。
+   さらに設定を `uvx --from semble[mcp]==0.6.0 semble` から
+   `uv\tools\semble\Scripts\semble.exe` の直接起動へ変更し、`environment` に
+   `HF_HUB_OFFLINE=1` / `HF_HUB_DISABLE_TELEMETRY=1` を追加（起動時の
+   huggingface.co への revision 照会を無くす。モデルは
+   `~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2` にキャッシュ済み）。
+   検証は `C:\Users\user\.local\bin\mcp\mcp-probe.py` で
+   `[OK] semble {'name': 'semble', 'version': '1.30.0'} tools(2): search, find_related`。
+   **複数ディレクトリ分を同時起動すると 1 本だけ exit 1 で落ちることがある**（再現条件は
+   未特定。worktree / プロジェクト側の接続は生存し、実検索も成功する）。
 
 ### はまった点
 
