@@ -69,8 +69,9 @@ Owner 承認（R-107 Stage 2）に基づく限定的な実装。**既定 OFF**�
 | ハーネス全体 | 2 回とも `100% tests passed out of 1` |
 | 既定 OFF の挙動 | 上記 ctest は `CONVOPEQ_RT_MEASURE` 未設定で実行しており、既存テストはすべて PASS。既定経路に回帰なし |
 | 計測 ON の動作 | 検証 (13) が mode 2 で `acquired == 16`・`holdTicksSum > 0`・他スロット 0 を確認 |
-| Debug ビルド | **未実施**（CI の `Debug TSan` で確認） |
-| ASan（RelWithDebInfo） | **未実施**（CI の `RelWithDebInfo ASan` で確認） |
+| Debug ビルド | **成功**（`build`、`AudioEngineHarness.exe` 21:51:55、エラー 0） |
+| Debug ctest | **rc=0 / 340.2 s**、`100% tests passed out of 1`、`STG-8-CLEAR` PASS・`U4 locks` PASS |
+| ASan（RelWithDebInfo） | **未検証**（PR #108 の CI で確認中） |
 | 性能回帰（±1% 以内） | **未測定**（既定 OFF は atomic load 1 回のみ。CI のスループット指標で代替） |
 
 > 注: ローカルの `build` ディレクトリは CMake キャッシュが破損していたため（Ninja/VS の混在）、
