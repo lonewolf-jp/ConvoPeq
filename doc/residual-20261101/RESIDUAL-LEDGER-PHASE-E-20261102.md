@@ -164,3 +164,14 @@ Phase A の実測（コミット `bdb1dcb8` 時点）を根拠とする。
 | U5 有効化 | 未実施（FAIL・既定 OFF） |
 | U3 / U4 | HOLD 維持 |
 | `ci/h2r1` 恒久化 | 未実施 |
+
+## 4. 本フェーズで実施した整理（2026-11-02）
+
+| 対象 | 実施内容 | 検証 |
+|---|---|---|
+| `j237-baseline` worktree | 未コミット 8 ファイルのパッチ（12,624 B）を Dropbox `/archive-j237-baseline-20261102/` へ退避してから閉鎖 | 退避 3 ファイルの内容一致を確認。閉鎖後ディレクトリ消滅 |
+| `j237-baseline-clean` worktree | クリーンのため通常削除 | ディレクトリ消滅 |
+| `git worktree prune` | 管理情報の整理 | 終了コード 0 |
+| 結果 | worktree は **2 本**（`C:\VSC_Project\ConvoPeq` と現行セッションの `j195-notion-report`） | `git worktree list` で確認 |
+
+→ R-110（j237 系 worktree の閉鎖）は**完了**。
