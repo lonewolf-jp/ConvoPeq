@@ -82,7 +82,7 @@ ctest 3 連続 **rc=0 / STG-8-CLEAR PASS**（304.4 s / 302.1 s / 299.5 s）を�
 | 記録先 | 固定配列の atomic（確保・ロック・I/O なし）。出力は `pollIfDue` から 1 秒 1 回 |
 | 回帰テスト | `RtMeasureRingTests` 検証 (13) を追加 |
 | Release | `build-ci-local`（ctest 2 回 rc=0）／`build`（ctest 1 回 rc=0） |
-| Debug | ビルド・実行を確認（本報告 §7 に追記） |
+| Debug | **ビルド成功・ctest rc=0 / 340.2 s**（`STG-8-CLEAR` PASS、`U4 locks` PASS） |
 | ASan | CI で確認中 |
 
 ### 5.2 U3（計画）

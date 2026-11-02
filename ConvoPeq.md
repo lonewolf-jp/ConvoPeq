@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-02 08:40:51
+> Generated: 2026-11-02 22:57:06
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -27586,6 +27586,7 @@ private:
 
 #include <bit>
 #include "AtomicAccess.h"
+#include "RtMeasureRing.h"   // R-107 U4: 非 RT ロック計測
 
 #include <cassert>
 #include <fstream>
@@ -27634,7 +27635,7 @@ DSPHandle DSPHandleRuntime::create(void* dspInstance)
         return DSPHandle::null();
 
     // ★ FUTURE-5 (work88): 線形スキャン → フリーリスト pop（O(1) 確保）
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
 
     // ★ F3' (2026-10-25): 1 インスタンス = 1 ハンドル。
     //   重複を許すと retire() が片方しか無効化せず、残ったスロットが解放済みメモリを
@@ -27814,7 +27815,7 @@ void DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to, CrossfadeId 
     convo::publishAtomic(registry_[to.slot].state, DSPState::CrossfadingIn, std::memory_order_release);
 
     // ★ 監査指摘 (work88): push_back と Timer 側の endCrossfade/isSlotInCrossfade 走査の競合を防ぐ
-    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::CrossfadeRecords, crossfadeRecordsMutex_);
     crossfadeRecords_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     convo::publishAtomic(fadingRuntimeDSPHandle_, from, std::memory_order_release);
 }
@@ -27837,7 +27838,7 @@ void DSPHandleRuntime::activate(DSPHandle handle)
 void DSPHandleRuntime::endCrossfade(CrossfadeId id)
 {
     // ★ 監査指摘 (work88): beginCrossfade（CoordinatorLoop）との並行アクセスを防ぐため lock。
-    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::CrossfadeRecords, crossfadeRecordsMutex_);
     for (auto& record : crossfadeRecords_) {
         if (record.id != id || !record.active) {
             continue;
@@ -27885,7 +27886,7 @@ void DSPHandleRuntime::reclaim(DSPHandle handle)
 {
     if (handle.isNull() || handle.slot >= MAX_DSP_SLOTS)
         return;
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
     auto& reg = registry_[handle.slot];
     // ★ 監査指摘 (work88): stale handle 検出（generation 不一致なら slot は別世代で再利用中 —
     //   誤って新規 DSP の slot を Reclaimed 化しない）。FUTURE-5 generation タグの完全化。
@@ -27942,7 +27943,7 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
     std::array<Target, MAX_DSP_SLOTS> targets{};
     size_t targetCount = 0;
     {
-        std::lock_guard<std::mutex> lock(freeListMutex_);
+        convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
         for (size_t i = 0; i < MAX_DSP_SLOTS; ++i)
         {
             auto& reg = registry_[i];
@@ -27965,7 +27966,7 @@ bool DSPHandleRuntime::invalidateForDestroy(void* dspInstance, int timeoutMs) no
 
     // 3) instance を消す（ここに来た時点で pin 保持者はいない）。
     {
-        std::lock_guard<std::mutex> lock(freeListMutex_);
+        convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
         for (size_t k = 0; k < targetCount; ++k)
         {
             auto& reg = registry_[targets[k].slot];
@@ -28004,7 +28005,7 @@ bool DSPHandleRuntime::invalidateForDestroyBySlot(uint32_t slot, uint64_t genera
         return false;
 
     // 3) 破棄を確定（別世代に再利用されていたら触らない）。
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
     auto& reg = registry_[slot];
     if (convo::consumeAtomic(reg.generation, std::memory_order_acquire) != generation)
         return true;
@@ -28065,7 +28066,7 @@ bool DSPHandleRuntime::rollbackRegistration(DSPHandle handle) noexcept
                                                  std::memory_order_acquire);
     // ★ FUTURE-5 (work88): ロールバック成功（Reclaimed 化）時は slot をフリーリストへ戻す
     if (ok) {
-        std::lock_guard<std::mutex> lock(freeListMutex_);
+        convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
         if (handle.slot != 0 && freeSize_ < MAX_DSP_SLOTS)
             freeSlots_[freeSize_++] = handle.slot;
     }
@@ -28085,7 +28086,7 @@ void DSPHandleRuntime::quarantineSlot(uint32_t slot) noexcept
 bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
 {
     // ★ 監査指摘 (work88): beginCrossfade との並行アクセスを防ぐため lock。
-    std::lock_guard<std::mutex> lock(crossfadeRecordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::CrossfadeRecords, crossfadeRecordsMutex_);
     for (const auto& record : crossfadeRecords_) {
         if (record.active &&
             (record.fromHandle.slot == slot || record.toHandle.slot == slot))
@@ -28171,7 +28172,7 @@ bool DSPHandleRuntime::destroyQuarantineSlot(
     // work88: return the reclaimed quarantine slot to the free list (prevents slot leaks).
     //   Double push cannot happen: state==Quarantined was verified above and reclaim()
     //   carries the same state guard.
-    std::lock_guard<std::mutex> lock(freeListMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::FreeList, freeListMutex_);
     if (slot != 0 && freeSize_ < MAX_DSP_SLOTS)
         freeSlots_[freeSize_++] = slot;
 
@@ -28309,7 +28310,7 @@ CrossfadeId CrossfadeAuthorityRuntime::registerCrossfade(DSPHandle from, DSPHand
 {
     const auto id = convo::fetchAddAtomic(nextId_, 1u, std::memory_order_acq_rel);
     // ★ 監査指摘 (work88): push_back による再確保と Timer 側の走査の競合を防ぐため lock。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     records_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
     return id;
 }
@@ -28317,7 +28318,7 @@ CrossfadeId CrossfadeAuthorityRuntime::registerCrossfade(DSPHandle from, DSPHand
 void CrossfadeAuthorityRuntime::unregisterCrossfade(CrossfadeId id)
 {
     // ★ 監査指摘 (work88): register（CoordinatorLoop）との並行アクセスを防ぐため lock。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     for (auto& record : records_) {
         if (record.id == id) {
             record.active = false;
@@ -28329,7 +28330,7 @@ void CrossfadeAuthorityRuntime::unregisterCrossfade(CrossfadeId id)
 std::vector<CrossfadeRecord> CrossfadeAuthorityRuntime::getActiveCrossfades() const noexcept
 {
     // ★ 監査指摘 (work88): register との並行アクセスを防ぐため lock（コピーは lock 内）。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     std::vector<CrossfadeRecord> result;
     for (const auto& record : records_) {
         if (record.active) {
@@ -28342,7 +28343,7 @@ std::vector<CrossfadeRecord> CrossfadeAuthorityRuntime::getActiveCrossfades() co
 bool CrossfadeAuthorityRuntime::hasCrossfadeInvolving(DSPHandle handle) const noexcept
 {
     // ★ 監査指摘 (work88): 同様に lock（現時点で呼出し元ゼロだが契約として保護）。
-    std::lock_guard<std::mutex> lock(recordsMutex_);
+    convo::rtmeasure::LockScope lock(convo::rtmeasure::LockId::Records, recordsMutex_);
     for (const auto& record : records_) {
         if (record.active && (record.fromHandle == handle || record.toHandle == handle)) {
             return true;
@@ -40224,6 +40225,7 @@ enum class RebuildTelemetryPolicy : uint8_t
 //==============================================================================
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -40231,6 +40233,7 @@ enum class RebuildTelemetryPolicy : uint8_t
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 #include "AtomicAccess.h"   // list.md [3.1]: 製品コードでは atomic のドット誕生を直接呼んではならない（convo:: ヘルパ経由）
@@ -41009,6 +41012,149 @@ inline Aggregator& aggregator() noexcept
     return g_aggregator;
 }
 
+//==============================================================================
+// U4: 非 RT 側 mutex の取得待ち・保持時間（既定 OFF）
+//
+//   RT コールバックには計測点を置かない。非 RT のロック取得点だけを置き換える。
+//   Off のときは atomic load 1 回で素通りし、TSC も読まない。
+//   集計先は固定スロットで、確保・ロック・I/O を行わない。
+//==============================================================================
+enum class LockId : std::uint32_t
+{
+    FreeList = 0,          // ISRDSPHandle::freeListMutex_
+    CrossfadeRecords = 1,  // ISRDSPHandle::crossfadeRecordsMutex_
+    Records = 2,           // ISRDSPHandle::recordsMutex_
+    Count = 3
+};
+
+struct LockSlot
+{
+    std::atomic<std::uint64_t> acquisitions{ 0 };
+    std::atomic<std::uint64_t> waitTicksSum{ 0 };
+    std::atomic<std::uint64_t> waitTicksMax{ 0 };
+    std::atomic<std::uint64_t> holdTicksSum{ 0 };
+    std::atomic<std::uint64_t> holdTicksMax{ 0 };
+};
+
+inline std::array<LockSlot, static_cast<std::size_t>(LockId::Count)> g_lockSlots;
+
+// 非 RT 専用: 集計の初期化（テストと測定の開始時のみ）。
+inline void resetLockStats() noexcept
+{
+    for (auto& s : g_lockSlots)
+    {
+        convo::publishAtomic(s.acquisitions, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.waitTicksSum, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.waitTicksMax, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.holdTicksSum, std::uint64_t{ 0 }, std::memory_order_release);
+        convo::publishAtomic(s.holdTicksMax, std::uint64_t{ 0 }, std::memory_order_release);
+    }
+}
+
+// 非 RT 専用: 最大値の更新（CAS ループ。RT からは呼ばない）。
+inline void raiseLockMax(std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
+{
+    std::uint64_t cur = convo::consumeAtomic(target, std::memory_order_relaxed);
+    while (value > cur
+           && !convo::compareExchangeAtomic(target, cur, value,
+                                            std::memory_order_relaxed, std::memory_order_relaxed))
+    {
+    }
+}
+
+[[nodiscard]] inline const char* lockName(LockId id) noexcept
+{
+    switch (id)
+    {
+        case LockId::FreeList:         return "freeList";
+        case LockId::CrossfadeRecords: return "crossfadeRecords";
+        case LockId::Records:          return "records";
+        default:                       return "unknown";
+    }
+}
+
+// 非 RT のロック取得点にだけ置く RAII。std::lock_guard と同じ使い方をする。
+class LockScope
+{
+public:
+    LockScope(LockId id, std::mutex& m) noexcept
+        : id_(id), mutex_(&m)
+    {
+        if (mode() == Mode::Off)
+        {
+            mutex_->lock();
+            return;
+        }
+
+        const std::uint64_t t0 = detail::readOrderedBegin();
+        mutex_->lock();
+        t1_ = detail::readOrderedEnd();
+        waitTicks_ = t1_ - t0;
+        measured_ = true;
+    }
+
+    ~LockScope() noexcept
+    {
+        if (!measured_)
+        {
+            mutex_->unlock();
+            return;
+        }
+
+        const std::uint64_t t2 = detail::readOrderedEnd();
+        mutex_->unlock();
+
+        const std::uint64_t holdTicks = t2 - t1_;
+        auto& s = g_lockSlots[static_cast<std::size_t>(id_)];
+        convo::fetchAddAtomic(s.acquisitions, std::uint64_t{ 1 }, std::memory_order_relaxed);
+        convo::fetchAddAtomic(s.waitTicksSum, waitTicks_, std::memory_order_relaxed);
+        convo::fetchAddAtomic(s.holdTicksSum, holdTicks, std::memory_order_relaxed);
+        raiseLockMax(s.waitTicksMax, waitTicks_);
+        raiseLockMax(s.holdTicksMax, holdTicks);
+    }
+
+    LockScope(const LockScope&) = delete;
+    LockScope& operator=(const LockScope&) = delete;
+
+private:
+    LockId id_;
+    std::mutex* mutex_ = nullptr;
+    std::uint64_t t1_ = 0;
+    std::uint64_t waitTicks_ = 0;
+    bool measured_ = false;
+};
+
+// 非 RT からのみ呼ぶ。取得回数が 0 のスロットは出力しない。
+inline void printLockStats() noexcept
+{
+    const double perSec = static_cast<double>(
+        convo::consumeAtomic(detail::g_ticksPerSecond, std::memory_order_acquire));
+    const double toUs = perSec > 0.0 ? 1.0e6 / perSec : 0.0;
+
+    for (std::size_t i = 0; i < static_cast<std::size_t>(LockId::Count); ++i)
+    {
+        const auto& s = g_lockSlots[i];
+        const std::uint64_t n = convo::consumeAtomic(s.acquisitions, std::memory_order_acquire);
+        if (n == 0)
+            continue;
+
+        const std::uint64_t waitSum = convo::consumeAtomic(s.waitTicksSum, std::memory_order_acquire);
+        const std::uint64_t waitMax = convo::consumeAtomic(s.waitTicksMax, std::memory_order_acquire);
+        const std::uint64_t holdSum = convo::consumeAtomic(s.holdTicksSum, std::memory_order_acquire);
+        const std::uint64_t holdMax = convo::consumeAtomic(s.holdTicksMax, std::memory_order_acquire);
+        const double inv = n > 0 ? 1.0 / static_cast<double>(n) : 0.0;
+
+        std::printf("[U4] mutex=%s acquired=%llu wait_mean_us=%.2f wait_max_us=%.2f"
+                    " hold_mean_us=%.2f hold_max_us=%.2f\n",
+                    lockName(static_cast<LockId>(i)),
+                    static_cast<unsigned long long>(n),
+                    static_cast<double>(waitSum) * inv * toUs,
+                    static_cast<double>(waitMax) * toUs,
+                    static_cast<double>(holdSum) * inv * toUs,
+                    static_cast<double>(holdMax) * toUs);
+    }
+}
+
 // 1 秒ゲート用の最終実行時刻（ミリ秒）。非 RT からのみ触る。
 inline std::atomic<std::int64_t> g_lastPollMs{ std::numeric_limits<std::int64_t>::min() };
 
@@ -41076,6 +41222,7 @@ inline bool pollIfDue() noexcept
                 static_cast<unsigned long long>(s.splitOverflow),
                 static_cast<unsigned long long>(convo::consumeAtomic(g_calibTscAtPrepare, std::memory_order_acquire)),
                 static_cast<unsigned long long>(convo::consumeAtomic(g_calibQpcNsAtPrepare, std::memory_order_acquire)));
+    printLockStats();
     return true;
 }
 
@@ -106791,6 +106938,70 @@ bool checkSplitInstrumentation()
     return ok;
 }
 
+// (13) U4: 非 RT mutex の計測。Off では素通りし（計数 0）、On では取得回数・待ち・保持を数える。
+bool checkLockScopeMeasurement()
+{
+    bool ok = true;
+
+    // --- Off: ロックとしては機能するが、計数しない ---
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    convo::rtmeasure::resetLockStats();
+
+    {
+        std::mutex m;
+        {
+            convo::rtmeasure::LockScope a(convo::rtmeasure::LockId::FreeList, m);
+            ok = expect("u4 off holds the mutex", !m.try_lock()) && ok;
+        }
+        ok = expect("u4 off releases the mutex", m.try_lock()) && ok;
+        m.unlock();
+    }
+    const auto& offSlot =
+        convo::rtmeasure::g_lockSlots[static_cast<std::size_t>(convo::rtmeasure::LockId::FreeList)];
+    ok = expect("u4 off counts nothing", offSlot.acquisitions.load() == 0ull) && ok;
+    ok = expect("u4 off records no hold ticks", offSlot.holdTicksSum.load() == 0ull) && ok;
+
+    // --- On (mode 2): 同じ領域に計数する。RT 経路には何も足さない ---
+    setEnvMeasure("2");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    convo::rtmeasure::resetLockStats();
+
+    constexpr int kLocks = 16;
+    {
+        std::mutex m;
+        for (int i = 0; i < kLocks; ++i)
+        {
+            convo::rtmeasure::LockScope a(convo::rtmeasure::LockId::Records, m);
+        }
+    }
+
+    const auto& onSlot =
+        convo::rtmeasure::g_lockSlots[static_cast<std::size_t>(convo::rtmeasure::LockId::Records)];
+    ok = expect("u4 on counts every acquisition",
+                onSlot.acquisitions.load() == static_cast<std::uint64_t>(kLocks)) && ok;
+    ok = expect("u4 on records hold ticks", onSlot.holdTicksSum.load() > 0ull) && ok;
+    ok = expect("u4 on hold max <= hold sum",
+                onSlot.holdTicksMax.load() <= onSlot.holdTicksSum.load()) && ok;
+    ok = expect("u4 on keeps the other slots at zero",
+                convo::rtmeasure::g_lockSlots[static_cast<std::size_t>(
+                    convo::rtmeasure::LockId::FreeList)].acquisitions.load() == 0ull) && ok;
+
+    // 計測はリングを使わない（RT 用のイベントリングを汚さない）
+    ok = expect("u4 does not push to the event ring",
+                convo::rtmeasure::instance().written() == 0ull) && ok;
+    ok = expect("u4 does not add RT samples",
+                convo::rtmeasure::sampleBuffer().count() == 0u) && ok;
+
+    convo::rtmeasure::resetLockStats();
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
 int runRtMeasureRingTests()
 {
     bool ok = true;
@@ -106814,9 +107025,10 @@ int runRtMeasureRingTests()
     ok = checkRingMechanics() && ok;
     ok = checkSampleBufferConcurrency() && ok;
     ok = checkSplitInstrumentation() && ok;
+    ok = checkLockScopeMeasurement() && ok;
 
     if (ok)
-        std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow)\n");
+        std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow, U4 locks)\n");
     return ok ? 0 : 1;
 }
 
@@ -113937,8 +114149,28 @@ static bool checkSTG8ClearTerminalizesObligation()
     }
 
     // Invoke the clear path (mid-run drain, not actual shutdown).
-    orch.clearDeferredForShutdown();
-    stg8SleepPump(500);
+    //
+    // ★ R-101 fix (2026-11-02): the synchronous clearDeferredForShutdown() owns the
+    //   plain deferred members (deferredSlot_ / hasDeferred_) and is only safe when no
+    //   RebuildThread writer can run concurrently - the R8 (P1) ownership rule keeps it
+    //   to EmergencyDrain and the "rebuild thread already stopped" fallback. Calling it
+    //   mid-run races with processDeferredAdmission(), which can re-enqueue and set
+    //   hasDeferred_ back to true; that showed up as an intermittent
+    //   "hasDeferred still true after clear" failure in CI (1 in 5 H2R1 runs).
+    //   The supported mid-run entry point is requestDeferredClear(): it latches the
+    //   intent and lets the RebuildThread perform the clear in
+    //   drainDeferredClearIfRequested(), exactly like the 30 s stall watchdog.
+    orch.requestDeferredClear();
+
+    // The RebuildThread performs the clear on its next wake.
+    if (!stg8WaitUntil(45.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: drain did not complete (L=%llu hasDeferred=%d)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        ok = false;
+    }
 
     // Post-condition: deferred request released AND obligation terminalized (L=0).
     if (orch.hasDeferredRequest())
