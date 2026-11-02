@@ -89,7 +89,16 @@ R-51 測定系、各修正ブランチを含む。**統合対象ではない。*
 | j195 worktree | 764 | `.openchamber` 配下 756（証跡・スクリプト・ログ）、ほか 8（設定バックアップ・レポート） | 証跡。**コード変更は含まれない**（拡張子内訳: .md 444 / .py 57 / .json 56 / .patch 45 / .xml 34 / .jpg 33 / .csv 32 / .txt 25） |
 | j237 / j237-clean | 0 | — | — |
 
-`.patch` 45 件の内容が main に取込済みかは別途検証中（Phase A 追加確認）。
+`.patch` 45 件（未追跡）＋ 5 件（`doc/work78` の追跡済み歴史パッチ）＝ 50 件について、
+追加行が main に存在するかを実測した。
+
+| 検証 | 結果 |
+|---|---|
+| 主要 10 件（サイズ上位） | 追加行の **86〜100%** が main に存在 |
+| `R01-TESTCODE.patch`（86%） | 不一致 38 行は**文字化けしたコメント行**。識別子 `B2_STAGE1_MEASURE` / `runB2Stage1PositiveControls` / `B2ProbePOD` / `counter_result` / `b2_adoption` / `isolation_label` は**すべて main に存在**し、PR #75（`c905e4dc`）が MERGED |
+| `bright-falcon-wt-tracked-vs-HEAD.patch`（35%） | 不一致 227 行は旧ドラフト実装（`SNAPSHOT_NAME_SUFFIX` / `build_snapshot_filename` 等）。main は `build_snapshot_dir_name` / `resolve_archive_dir` として**別実装で置換済み**。閉鎖前に Dropbox `/archive-bright-falcon-20261102/` へ退避済み |
+
+→ **パッチにも未統合の機能変更は無い。**
 
 ## 6. 分類（Phase B の基礎）
 
@@ -110,4 +119,6 @@ R-51 測定系、各修正ブランチを含む。**統合対象ではない。*
 2. したがって Phase C（統合）で新たに main へ入れる製品変更は無い。
    作業の中心は「正本統一の検証（Phase D）」と「残課題台帳（Phase E）」、
    および証跡・陳腐化控えの整理になる。
-3. 未追跡 764 件は証跡であり、コード変更を含まない（`.patch` の取込状況は追加確認）。
+3. 未追跡 764 件は証跡であり、コード変更を含まない。
+   `.patch` 50 件（未追跡 45 ＋ 追跡 5）も検証済みで、**未統合の機能変更は無い**
+   （R-01 は PR #75 で統合、bright-falcon は main の別実装で置換済み）。
