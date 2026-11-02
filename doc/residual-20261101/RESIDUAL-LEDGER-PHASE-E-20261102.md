@@ -10,11 +10,12 @@ Phase A の実測（コミット `bdb1dcb8` 時点）を根拠とする。
 
 | 分類 | 件数 | 状態 |
 |---|---|---|
-| main 未統合（製品コード） | **0** | — |
-| main 未統合（CI 定義・Owner 保留） | **2** | R-101 / R-102 として保持 |
+| main 未統合（製品コード・テスト） | **0** | R-112 は PR #107 でレビュー中、U4 は PR 作成予定 |
+| main 未統合（CI 定義） | **0** | R-101（`7318e44f`）/ R-102（`a83d10ba`）ともマージ済み |
 | 未完成・放置（証跡・控え） | **2 群** | R-103 完了 / R-104 完了 |
-| 維持すべき保留事項（U5 / U3・U4） | **2** | 変更なし |
-| 整理候補（ブランチ・worktree・重複） | **4 群** | R-105 完了 / R-110 完了 / R-108 現状維持 / R-109 完了 |
+| U5（R-06） | **1** | 再測定完了・**FAIL＋判定保留**（既定 OFF 維持） |
+| R-107 U4 / U3 | **2** | U4 実装・検証中 / U3 計画済み（§10.4） |
+| 整理候補（ブランチ・worktree・重複） | **4 群** | R-105 完了 / R-110 完了 / R-108 削除済み / R-109 完了 |
 
 ## 2. 残課題一覧
 
@@ -303,6 +304,72 @@ Owner 承認（削除前確認の完了を受けて）に基づき、承認さ�
 | 現行分割の連結 | 6,451,711 B / `c12a532e…`（正本と一致） |
 
 R-108 は**完了**。退避 ZIP は `/ConvoPeq-stage3-20261026/archive-old-split-20261102/` に保全。
+
+## 10. 2026-11-02 夜間の実施結果（R-101 / R-102 / R-106 / R-107）
+
+### 10.1 R-101 `ci/h2r1` の恒久化 — マージ済み・5 回検証は再実施中
+
+| 項目 | 結果 |
+|---|---|
+| 変更 | `.github/workflows/h2r1-release-measurement.yml` 追加のみ（+232 行） |
+| トリガ | `workflow_dispatch` のみ |
+| policy 旧 1 行 | **混入なし**（差分は 1 ファイル +232 行のみ） |
+| マージ | PR #105 → `7318e44f`（squash） |
+| PR チェック | 12 pass / 0 fail（probe は仕様どおり skipped） |
+| 既存ジョブ | fail なし（12 pass が既存 13 ジョブに相当。probe は dispatch 専用） |
+
+dispatch 検証の経過:
+
+| 試行 | run | 結果 | 備考 |
+|---|---|---|---|
+| 1 | `41422842771` | **failure**（45.7 分） | 内 5 回の run 5 が `rc=8`。`[H2R1] trials=40 mixed_trials=0 distinct_worlds=80` は 5 回とも同一 |
+| 2 | `41422888522` | 実行（旧 main） | 参考記録 |
+| 3〜5 | — | **未実施** | 下記の flaky 修正をマージ後に再実施 |
+
+**flaky の原因と修正**: `checkSTG8ClearTerminalizesObligation` が RebuildThread 稼働中に
+`clearDeferredForShutdown()`（plain メンバ所有・停止時専用）を直接呼び、`processDeferredAdmission()`
+と競合していた。正規入口 `requestDeferredClear()` へ変更（PR #107）。ローカル ctest 3 連続で
+**rc=0 / `STG-8-CLEAR` PASS**（304.4 s / 302.1 s / 299.5 s）。
+
+### 10.2 R-102 `ci/r49` の診断移植 — 検証完了
+
+| 項目 | 結果 |
+|---|---|
+| 変更 | `windows-msvc-build.yml` に +51 行（診断 3 ステップ＋`run_selected_tests` 入力） |
+| マージ | PR #106 → `a83d10ba`（squash） |
+| `false` | `41423092426` **success**／診断 3 ステップ **skipped** |
+| `true` | `41423073648` **failure**（診断実行）。`AudioEngineHarness` Passed 298.27 s、`HeadlessAudioPathVerification` Failed（`[CLI_PERF_RAW] callbacks=` 不在） |
+| 既存 CI | PR #106 12 pass / 0 fail、main push の Windows MSVC・ISR Authority は success |
+
+### 10.3 R-106 U5 再測定 — 完了（FAIL・判定保留）
+
+20 実行（5/アーム/条件、34,000 ブロック）を 121.7 分で実施。
+
+| 条件 | p99 判定 | max 判定 | σ(max) | σ(p99) | 5 組での検出力 |
+|---|---|---|---|---|---|
+| 無音 | PASS | PASS | 280.3 µs | 9.2 / 20.1 µs | 0.05 |
+| 1 kHz | PASS | **FAIL** | 403.4 µs | 31.4 / 46.4 µs | 0.04 |
+
+- 全 20 実行で `late50us=0`（周期超過なし）。max は単発スパイク。
+- σ ≤ 64 µs は **max で未達**、p99 で達成。+50 µs の判別に必要な組数は 493〜1,022/アーム。
+- 判定: **FAIL（max 基準）かつ判定保留（検出力不足）**。指標の再定義は行わない。
+- 測定器は**既定 OFF を維持**。詳細は `R106-REMEASUREMENT-RESULT-20261102.md`。
+
+### 10.4 R-107 U4 / U3
+
+| 項目 | 状態 |
+|---|---|
+| Stage 1（列挙・計画） | 完了（`R107-STAGE1-ENUMERATION-20261102.md`） |
+| Stage 2（U4 実装） | 実装済み・ブランチ `feat/r107-u4-lock-measure`（`dd56f0f0`）。既定 OFF、非 RT の 14 ロック取得点を `LockScope` 化、検証 (13) 追加 |
+| Stage 2 検証 | Release ビルド・`RtMeasureRingTests`・PR の CI で確認（結果は §10.5 に追記） |
+| Stage 3（U3） | 計画のみ（`R107-STAGE3-U3-PLAN-20261102.md`）。U4 と分離、テストバイナリ限定の `operator new` 置換案 |
+
+### 10.5 本夜間で追加・解消した残課題
+
+| ID | 内容 | 状態 |
+|---|---|---|
+| R-111 | `HeadlessAudioPathVerification` が音声デバイスの無い CI ランナーで FAIL する | **新規・Owner 判断待ち**（常時実行／条件 skip の選択） |
+| R-112 | `checkSTG8ClearTerminalizesObligation` の flaky（`hasDeferred still true after clear`） | **PR #107 で修正**（ctest 3 連続 PASS） |
 
 ## 附録
 
