@@ -319,3 +319,46 @@ Owner 回答案（陳腐化 12 本の削除 / `ci/r50`・R-51 4 本の整理 / `
 - U5 = FAIL / 既定 OFF、U3/U4 = HOLD: 維持
 - リリース・外部公開・既定 OFF 機能の有効化: 未実施
 - `ConvoPeq.md`: 生成対象が未変更のため再生成せず（git blob と Dropbox が一致）
+
+## 11. 整理作業ラウンド 3（2026-11-02・Owner 判断の実行）
+
+Owner 判断（APPROVED WITH CONDITIONS）に基づく実行。対象は worktree 4 本の閉鎖、
+ローカルブランチ 7 本の削除、`bright-falcon` の退避、読み取り専用の接続確認に限る。
+
+### 11.1 リポジトリ状態
+
+| 項目 | 値 |
+|---|---|
+| ブランチ | `main`（`HEAD` = `origin/main`） |
+| ローカルブランチ | **58 本**（65 → 61 → 58） |
+| リモートブランチ | **47 本**（本ラウンドで削除なし） |
+| アーカイブタグ | **17 個**（ローカル・リモートとも） |
+| worktree | 4 本（main ＋ detached 3 本） |
+| 追跡差分 / 未追跡 | 0 / 0 |
+| CI workflow / 検査スクリプト | 変更 0 件 / 0 件 |
+| policy | 既承認 1 行のみ |
+
+### 11.2 実施内容
+
+| 項目 | 結果 |
+|---|---|
+| worktree 閉鎖 | 4 本（`crisp-zebra` / `wt-g3` / `wt-r16` は通常削除、`bright-falcon` は退避・検証後に `--force`） |
+| `bright-falcon` の退避 | パッチ 27,687 B・未追跡 243 件 ZIP 6,965,024 B・MANIFEST・SHA256SUMS・README。Dropbox `/archive-bright-falcon-20261102/` に配信し内容一致を確認 |
+| ブランチ削除（worktree 由来 4 本） | tip と archive タグの一致 4/4 を確認して削除。リモート削除なし |
+| ブランチ削除（`ci/r50` 系 3 本） | PR MERGED（#84 / #83 / #80）・main の祖先・未使用を確認して削除。リモート削除なし |
+| `ci/h2r1` | 保留。workflow・記録とも未変更 |
+| uvx 切替の確認 | 新経路の稼働を確認（`Python315` uvx、生成 11:47:04）。サーバー名 `ddgs-search`・tools 6・tool 名完全一致。リポジトリ設定の `Python314` 参照 0 |
+
+### 11.3 判定指標の訂正
+
+`ci/r50` 系 3 本の初回検証で `git diff main..<branch>` の差分数を「残差」と誤用し、中止判定にした。
+main が 88〜96 コミット先行しているため当然に差分が出る指標である。判定を
+`git merge-base --is-ancestor <branch> main`（完全に取り込み済み）へ訂正して再実行し、削除した。
+中止判定時は 1 本も削除していない。
+
+### 11.4 残存事項
+
+- セッション worktree `…/j195-notion-report/opencode.json` が `Python314` を 1 箇所参照（本リポジトリ外のため未変更）
+- `ci/h2r1` の統合後再測定（別の Owner 判断が必要）
+- U5 = FAIL / 既定 OFF、U3/U4 = HOLD、リリース・外部公開・既定 OFF 有効化は未実施
+
