@@ -899,8 +899,28 @@ static bool checkSTG8ClearTerminalizesObligation()
     }
 
     // Invoke the clear path (mid-run drain, not actual shutdown).
-    orch.clearDeferredForShutdown();
-    stg8SleepPump(500);
+    //
+    // ★ R-101 fix (2026-11-02): the synchronous clearDeferredForShutdown() owns the
+    //   plain deferred members (deferredSlot_ / hasDeferred_) and is only safe when no
+    //   RebuildThread writer can run concurrently - the R8 (P1) ownership rule keeps it
+    //   to EmergencyDrain and the "rebuild thread already stopped" fallback. Calling it
+    //   mid-run races with processDeferredAdmission(), which can re-enqueue and set
+    //   hasDeferred_ back to true; that showed up as an intermittent
+    //   "hasDeferred still true after clear" failure in CI (1 in 5 H2R1 runs).
+    //   The supported mid-run entry point is requestDeferredClear(): it latches the
+    //   intent and lets the RebuildThread perform the clear in
+    //   drainDeferredClearIfRequested(), exactly like the 30 s stall watchdog.
+    orch.requestDeferredClear();
+
+    // The RebuildThread performs the clear on its next wake.
+    if (!stg8WaitUntil(45.0, [&] {
+            return !orch.hasDeferredRequest() && stg8LiveCount(e) == 0;
+        }))
+    {
+        std::fprintf(stderr, "[STG-8-CLEAR] FAIL: drain did not complete (L=%llu hasDeferred=%d)\n",
+                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
+        ok = false;
+    }
 
     // Post-condition: deferred request released AND obligation terminalized (L=0).
     if (orch.hasDeferredRequest())
