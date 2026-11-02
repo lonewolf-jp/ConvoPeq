@@ -46,7 +46,8 @@ Owner 判断（2026-11-02 / APPROVED WITH CONDITIONS）に基づく実施記録�
 ## 2. `bright-falcon` の退避物（保存先）
 
 ローカル: `C:\Users\user\AppData\Local\Temp\opencode\archive-bright-falcon-20261102\`
-Dropbox: **`/archive-bright-falcon-20261102/`**
+Dropbox: **`/ConvoPeq-stage3-20261026/archive-bright-falcon-20261102/`**
+（Dropbox の基点フォルダ `/ConvoPeq-stage3-20261026/` 配下。他の配信物と同じ基点）
 
 | ファイル | サイズ | SHA-256 |
 |---|---|---|

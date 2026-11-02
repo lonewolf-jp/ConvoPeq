@@ -343,7 +343,7 @@ Owner 判断（APPROVED WITH CONDITIONS）に基づく実行。対象は worktre
 | 項目 | 結果 |
 |---|---|
 | worktree 閉鎖 | 4 本（`crisp-zebra` / `wt-g3` / `wt-r16` は通常削除、`bright-falcon` は退避・検証後に `--force`） |
-| `bright-falcon` の退避 | パッチ 27,687 B・未追跡 243 件 ZIP 6,965,024 B・MANIFEST・SHA256SUMS・README。Dropbox `/archive-bright-falcon-20261102/` に配信し内容一致を確認 |
+| `bright-falcon` の退避 | パッチ 27,687 B・未追跡 243 件 ZIP 6,965,024 B・MANIFEST・SHA256SUMS・README。Dropbox `/ConvoPeq-stage3-20261026/archive-bright-falcon-20261102/` に配信し内容一致を確認 |
 | ブランチ削除（worktree 由来 4 本） | tip と archive タグの一致 4/4 を確認して削除。リモート削除なし |
 | ブランチ削除（`ci/r50` 系 3 本） | PR MERGED（#84 / #83 / #80）・main の祖先・未使用を確認して削除。リモート削除なし |
 | `ci/h2r1` | 保留。workflow・記録とも未変更 |
