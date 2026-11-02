@@ -118,7 +118,7 @@
         "command": [
           "C:\\Python315\\pythonw.exe",
           "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
-          "C:/Python314/Scripts/uvx.exe",
+          "C:/Users/user/AppData/Roaming/Python/Python315/Scripts/uvx.exe",
           "--from",
           "ddgs[mcp]",
           "ddgs",
