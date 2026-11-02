@@ -13,7 +13,7 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 |---|---|
 | 全セッション成果の回収 | 完了（製品コードの未統合差分 0） |
 | main と正本の同期 | 完了（`main` = `origin/main`、差分 0、未追跡 0） |
-| R-101（h2r1 恒久化） | **ワークフローはマージ済み**。5 回 dispatch 検証は **継続中**（flaky 修正 #107 待ち） |
+| R-101（h2r1 恒久化） | **ワークフローはマージ済み**。dispatch は 4/4 rc=0、60 分基準は run 全体で 1/4・job 全体で 2/4（**判定は Owner 判断待ち**、§3） |
 | R-102（r49 診断移植） | **完了**（true / false とも実測で確認） |
 | R-106（U5 再測定） | **完了**（20 実行。FAIL＋判定保留。測定器は既定 OFF） |
 | R-107 Stage 1（列挙） | 完了 |
@@ -46,18 +46,29 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 | dispatch のみ | PASS（`on: workflow_dispatch`） |
 | policy 旧 1 行の非混入 | PASS（差分は当該ファイルのみ） |
 | 既存ジョブの PASS | PASS（PR #105: 12 pass / 0 fail） |
-| dispatch 5 回（rc=0・60 分以内） | **継続中**（下表） |
+| dispatch 5 回（rc=0・60 分以内） | **rc=0 は 4/4。60 分基準は run 全体で 1/4、job 全体で 2/4**（下記） |
 
-| 試行 | run | 結果 | 所要 |
-|---|---|---|---|
-| 1 | `41422842771` | failure | 45.7 分（run 5 の flaky テストのみ） |
-| 2 | `41422888522` | 参考（旧 main） | — |
-| 3〜5 | — | 修正 #107 マージ後に再実施 | — |
+| run | 結論 | run 全体 | job 所要 | 判定（run 全体 ≤60 分） |
+|---|---|---|---|---|
+| `41447831754` | success | 61.1 分 | 60.0 分 | 不合格 |
+| `41456500055` | success | **49.2 分** | 49.2 分 | **合格** |
+| `41464228797` | success | 60.8 分 | 60.7 分 | 不合格 |
+| `41474161659` | success | 60.4 分 | 60.2 分 | 不合格 |
+| `41484247670` | 実行中 | — | — | — |
 
-試行 1 の測定値 `[H2R1] trials=40 mixed_trials=0 distinct_worlds=80` は 5 回とも同一で、
-失敗は `checkSTG8ClearTerminalizesObligation`（RebuildThread 稼働中の `clearDeferredForShutdown()` 直接呼び出し）に
-起因する既存の flaky。PR #107 で正規入口 `requestDeferredClear()` に変更し、
-ctest 3 連続 **rc=0 / STG-8-CLEAR PASS**（304.4 s / 302.1 s / 299.5 s）を確認した。
+- 全 run で `[H2R1] trials=40 mixed_trials=0 max_mixed_ms=0.0 distinct_worlds=80`（5 回分のログで確認）。
+- 所要のばらつきは **`Install Intel oneAPI via winget`（未導入時 10.7 分）**の有無に起因し、
+  コード側の要因ではない。すなわち 60 分境界はランナーの在庫に依存する。
+- 合格 run のログ（`h2r1-run1〜5.log` ほか）は保存済み。
+
+**Owner 判断案**
+
+| 案 | 内容 | 影響 |
+|---|---|---|
+| A（推奨） | 「5 回すべて rc=0」を主基準とし、所要は実測分布（49〜61 分）を記録、60 分は目安として扱う | 追加コストなし |
+| B | 厳格に 5 件（≤60 分）を収集するまで再試行 | 数時間規模 |
+| C | workflow に oneAPI キャッシュを追加し所要を安定化 | R-101 の「追加のみ」を超えるため追加承認が必要 |
+
 
 ## 4. R-102 — `ci/r49` の診断移植（完了）
 
@@ -83,7 +94,8 @@ ctest 3 連続 **rc=0 / STG-8-CLEAR PASS**（304.4 s / 302.1 s / 299.5 s）を�
 | 回帰テスト | `RtMeasureRingTests` 検証 (13) を追加 |
 | Release | `build-ci-local`（ctest 2 回 rc=0）／`build`（ctest 1 回 rc=0） |
 | Debug | **ビルド成功・ctest rc=0 / 340.2 s**（`STG-8-CLEAR` PASS、`U4 locks` PASS） |
-| ASan | CI で確認中 |
+| ASan | CI（PR #108）で **pass**（14 pass / 0 fail） |
+| オーバーヘッド | **Off 298.91 s / On 297.89 s（差 −1.0 秒・ノイズ範囲）**。Off では `[U4]` 出力 0 行 |
 
 ### 5.2 U3（計画）
 
