@@ -584,6 +584,70 @@ bool checkSplitInstrumentation()
     return ok;
 }
 
+// (13) U4: 非 RT mutex の計測。Off では素通りし（計数 0）、On では取得回数・待ち・保持を数える。
+bool checkLockScopeMeasurement()
+{
+    bool ok = true;
+
+    // --- Off: ロックとしては機能するが、計数しない ---
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    convo::rtmeasure::resetLockStats();
+
+    {
+        std::mutex m;
+        {
+            convo::rtmeasure::LockScope a(convo::rtmeasure::LockId::FreeList, m);
+            ok = expect("u4 off holds the mutex", !m.try_lock()) && ok;
+        }
+        ok = expect("u4 off releases the mutex", m.try_lock()) && ok;
+        m.unlock();
+    }
+    const auto& offSlot =
+        convo::rtmeasure::g_lockSlots[static_cast<std::size_t>(convo::rtmeasure::LockId::FreeList)];
+    ok = expect("u4 off counts nothing", offSlot.acquisitions.load() == 0ull) && ok;
+    ok = expect("u4 off records no hold ticks", offSlot.holdTicksSum.load() == 0ull) && ok;
+
+    // --- On (mode 2): 同じ領域に計数する。RT 経路には何も足さない ---
+    setEnvMeasure("2");
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    convo::rtmeasure::resetLockStats();
+
+    constexpr int kLocks = 16;
+    {
+        std::mutex m;
+        for (int i = 0; i < kLocks; ++i)
+        {
+            convo::rtmeasure::LockScope a(convo::rtmeasure::LockId::Records, m);
+        }
+    }
+
+    const auto& onSlot =
+        convo::rtmeasure::g_lockSlots[static_cast<std::size_t>(convo::rtmeasure::LockId::Records)];
+    ok = expect("u4 on counts every acquisition",
+                onSlot.acquisitions.load() == static_cast<std::uint64_t>(kLocks)) && ok;
+    ok = expect("u4 on records hold ticks", onSlot.holdTicksSum.load() > 0ull) && ok;
+    ok = expect("u4 on hold max <= hold sum",
+                onSlot.holdTicksMax.load() <= onSlot.holdTicksSum.load()) && ok;
+    ok = expect("u4 on keeps the other slots at zero",
+                convo::rtmeasure::g_lockSlots[static_cast<std::size_t>(
+                    convo::rtmeasure::LockId::FreeList)].acquisitions.load() == 0ull) && ok;
+
+    // 計測はリングを使わない（RT 用のイベントリングを汚さない）
+    ok = expect("u4 does not push to the event ring",
+                convo::rtmeasure::instance().written() == 0ull) && ok;
+    ok = expect("u4 does not add RT samples",
+                convo::rtmeasure::sampleBuffer().count() == 0u) && ok;
+
+    convo::rtmeasure::resetLockStats();
+    setEnvMeasure(nullptr);
+    convo::rtmeasure::initializeFromEnvironment();
+    resetState();
+    return ok;
+}
+
 int runRtMeasureRingTests()
 {
     bool ok = true;
@@ -607,8 +671,9 @@ int runRtMeasureRingTests()
     ok = checkRingMechanics() && ok;
     ok = checkSampleBufferConcurrency() && ok;
     ok = checkSplitInstrumentation() && ok;
+    ok = checkLockScopeMeasurement() && ok;
 
     if (ok)
-        std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow)\n");
+        std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow, U4 locks)\n");
     return ok ? 0 : 1;
 }
