@@ -382,7 +382,8 @@ dispatch 検証の経過:
 | ID | 内容 | 状態 |
 |---|---|---|
 | R-111 | `HeadlessAudioPathVerification` が音声デバイスの無い CI ランナーで FAIL する | **新規・Owner 判断待ち**（常時実行／条件 skip の選択） |
-| R-112 | `checkSTG8ClearTerminalizesObligation` の flaky（`hasDeferred still true after clear`） | **PR #107 で修正**（ctest 3 連続 PASS） |
+| R-112 | `checkSTG8ClearTerminalizesObligation` の flaky（`hasDeferred still true after clear`） | **PR #107 で修正**（ctest 13 連続 PASS） |
+| R-113 | `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`） | **新規・Owner 判断待ち**（8 秒の安定性ウィンドウが保持時間に依存） |
 
 ## 附録
 

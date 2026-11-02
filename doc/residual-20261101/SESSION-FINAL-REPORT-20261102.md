@@ -13,7 +13,7 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 |---|---|
 | 全セッション成果の回収 | 完了（製品コードの未統合差分 0） |
 | main と正本の同期 | 完了（`main` = `origin/main`、差分 0、未追跡 0） |
-| R-101（h2r1 恒久化） | **ワークフローはマージ済み**。dispatch は rc=0 6/7、60 分基準は run 全体で 2/7（**判定は Owner 判断待ち**、§3）。自動収集は継続中 |
+| R-101（h2r1 恒久化） | **ワークフローはマージ済み**。dispatch は rc=0 8/9、60 分基準は run 全体で 3/9（**判定は Owner 判断待ち**、§3）。自動収集は継続中 |
 | R-102（r49 診断移植） | **完了**（true / false とも実測で確認） |
 | R-106（U5 再測定） | **完了**（20 実行。FAIL＋判定保留。測定器は既定 OFF） |
 | R-107 Stage 1（列挙） | 完了 |
@@ -56,8 +56,9 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 | `41474161659` | success | 60.4 分 | 60.2 分 | 不合格 |
 | `41484247670` | success | **59.8 分** | — | **合格** |
 | `41493867695` | **failure** | 10.5 分 | — | oneAPI 導入ステップ（下記） |
-| `41495643990` | success | 63.4 分 | — | 不合格 |
-| `41505721908` | 実行中 | — | — | — |
+| `41513986906` | success | 60.7 分 | — | 不合格 |
+| `41523395609` | **failure** | 58.3 分 | — | 測定ステップ内 `checkSTG82OverwriteTerminalizesEvicted` の flaky（下記） |
+| `41532396525` | 実行中 | — | — | — |
 
 - 全成功 run で `[H2R1] trials=40 mixed_trials=0 max_mixed_ms=0.0 distinct_worlds=80`（ログで確認）。
 - 所要のばらつきは **`Install Intel oneAPI via winget`（未導入時 10.7 分）**の有無に起因し、
@@ -65,7 +66,12 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 - **`41493867695` の失敗**: 同ステップで `winget exit=-1978335226` を返したが
   `mkl.h present: True` / `ipp.h present: True`（インストールは成立）。`$LASTEXITCODE` が
   ステップの終了コードとして扱われ FAIL となった **workflow の堅牢性問題**（測定・コードとは無関係）。
+- **`41523395609` の失敗**: 5 回の測定のうち run 4 が `rc=8`。
+  `[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)` → `checkSTG82OverwriteTerminalizesEvicted` が
+  8 秒の安定性ウィンドウ中に deferred slot が解放されたことを検出。**保持時間に依存する
+  タイミング依存テスト**であり、R-112 と同種の flaky（新規 R-113 として記録）。
 - 合格 run のログ（`h2r1-run1〜5.log` ほか）は保存済み。
+
 
 **Owner 判断案**
 
@@ -135,8 +141,9 @@ RT 経路の新規確保を検出する案 A を採用。U4 とは分離し、U3
 |---|---|---|---|
 | 1 | **R-101 の dispatch 5 回**（rc=0・60 分以内） | #107 マージ後に実施 | 承認済み範囲。実施継続 |
 | 2 | **U5 の指標方針** | FAIL＋判定保留 | A: 既定 OFF のまま確定（推奨）/ B: p99 へ指標変更 / C: 493〜1,022 組へ増加 / D: ETW でスパイク源特定 |
-| 3 | **R-111**: `HeadlessAudioPathVerification` が音声デバイス無しの CI ランナーで FAIL | 新規 | 常時実行（現状）/ 条件付き skip / ランナーへ仮想デバイス導入 |
-| 4 | **R-107 Stage 3（U3）の実装** | 計画のみ | U4 の ASan 結果を確認後に着手 |
+| 3 | **R-111**: `HeadlessAudioPathVerification` が音声デバイス無しの CI ランナーで FAIL | 新規 | **A: 診断ステップに `CONVO_CI_BUILD=1` を設定（CMakeLists の設計意図どおり skip・推奨）** / B: VB-CABLE 導入 / C: 現状維持 |
+| 4 | **R-113**: `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`）| 新規 | 安定性ウィンドウ（8 秒）が保持時間に依存。テスト側でウィンドウ短縮または「解放済みなら完了扱い」に変更（要承認） |
+| 5 | **R-107 Stage 3（U3）の実装** | 計画のみ | U4 の ASan 結果を確認後に着手（ASan は CI pass 済み） |
 | 5 | ローカル `build` の CMake キャッシュ破損 | 修復済み（VS 18 2026 で再構成・再ビルド） | 対応不要 |
 
 ## 9. 成果物の配信（Dropbox）
