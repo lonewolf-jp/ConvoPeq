@@ -78,6 +78,7 @@ Owner 承認（ASan 記録 / 陳腐化 12 本の削除 / ci/r50・R-51 4 本の�
 | 生成物 | 1 | `vc140.pdb`（69,632 B） | 保持 |
 
 いずれも**削除・移動・上書きはしていない**。不要性の確認後に推奨案を提出する。
+→ **提出済み**: `DISPOSAL-RECOMMENDATION-20261102.md`（14 件／6,537,003 B の実測と推奨）。
 
 ## 4. `AGENTS.md` の変更内容
 
@@ -97,12 +98,19 @@ Owner 承認（ASan 記録 / 陳腐化 12 本の削除 / ci/r50・R-51 4 本の�
 |---|---|
 | `b20506fa` | 資料 12 件の追跡化 |
 | `23d006a7` | `AGENTS.md` へ semble 記述を統合 |
-| push | `20aa61f2 → 23d006a7`（`origin/main`） |
+| `c093543b` | 整理報告（本書） |
+| `53b15a13` | 本書と台帳 §9 の `HEAD` 固定をやめ、台帳へ §9 を新設 |
+| `5dfe1f81` | 保留 14 件の処分・保管 推奨案（`DISPOSAL-RECOMMENDATION-20261102.md`） |
+| `655187f8` | `ci/h2r1` の判断案（`CI-H2R1-DISPOSITION-20261102.md`） |
+| push | `20aa61f2` → `655187f8`（`origin/main`） |
 
 ## 6. GitHub main とローカル main の一致
 
 - `HEAD` = `origin/main`（`git rev-parse` で一致、追跡差分 **0**）
-- 本書の commit 前は `23d006a7`、commit 後はその子コミット
+- **`git status` だけでは足りないため、全追跡ファイルの内容を実測した**:
+  `git hash-object` の結果と `HEAD` の blob SHA-1 を 7,042 ファイルすべてで照合し、
+  **内容が異なるファイル 0 件・作業ツリーから欠落 0 件**。`assume-unchanged` /
+  `skip-worktree` の登録も 0 件（`git ls-files -v` で確認）
 
 ## 7. Dropbox 正規ソースとの一致
 
@@ -114,6 +122,13 @@ Owner 承認（ASan 記録 / 陳腐化 12 本の削除 / ci/r50・R-51 4 本の�
 
 今回は生成対象（`src` / `CMakeLists.txt` / `build.bat`）に変更が無いため、`ConvoPeq.md` の
 再生成は行っていない（`git diff 0dfa39e3..HEAD -- src CMakeLists.txt build.bat` = **0 件**）。
+
+**作業ツリー上の `ConvoPeq.md` は CRLF 表現**（6,597,645 B / CRLF 145,934 個）で、git blob や
+Dropbox の LF 正規形（6,451,711 B）とは生バイトが異なる。ただし
+`*.md text eol=lf`（`.gitattributes:16`）により git の clean 変換後は同一 blob になり、
+LF 正規化後の SHA-256 も `c12a532e…` と一致する。配信スクリプト（`post_merge_sync.py`）は
+ディスクの生バイトを読んで LF に正規化してから送る設計（同スクリプト L78〜L80）なので、
+**三者は内容として一致している**。生バイト比較で不一致と判定しないよう注意すること。
 
 ## 8. CI workflow の変更
 
@@ -137,10 +152,13 @@ policy・検査スクリプトも今回の作業では変更していない（al
 | # | 項目 | 必要な判断 |
 |---|---|---|
 | 1 | ローカル 4 本（`bright-falcon` / `crisp-zebra` / `work/g3` / `work/r16`） | これらをチェックアウトしている worktree を閉じてよいか（閉じれば削除可能）。tip はタグで保全済み |
-| 2 | 未追跡 14 件 | 旧分割 7 件・`opencode.json.bak` 6 件・`vc140.pdb` の削除可否 |
+| 2 | 未追跡 14 件 | 削除可否。根拠と推奨は `DISPOSAL-RECOMMENDATION-20261102.md`（旧分割 5＋検証キット 2 は Dropbox にハッシュ検証済みの同一コピーあり、`.bak` 6 は 3 種のみで全て旧内容、`vc140.pdb` は再生成可能） |
 | 3 | `ci/r50` | policy 1 行の差分をどう扱うか（削除するか、差分を破棄して削除するか） |
-| 4 | `ci/h2r1` | 新規 workflow を恒久化するか、計測用として保持するか |
+| 4 | `ci/h2r1` | 恒久化・削除・現状維持の選択。判断材料は `CI-H2R1-DISPOSITION-20261102.md`（測定は 5/5 PASS で完了、トリガは main/PR に発火しない、実行ログは失効するため計測値の記録を先に行うべき） |
 | 5 | `AGENTS.md` | 統合結果の確認（矛盾・重複が無いことの承認） |
+| 6 | アーカイブタグ 16 個 | **ローカルのみ**（リモート 0）。リモートへ push して保全を恒久化するか。push しない場合、削除した 16 本のうち PR を持たないブランチの tip はローカルにしか残らない |
+| 7 | `opencode.json:121` の uvx パス | `C:/Python314/Scripts/uvx.exe` を Python315 ネイティブの uvx へ差し替えるか（現状は動作中。故障はしていない） |
+| 8 | `.gitignore` 1 行目 | 先頭が `` ``` ``（Markdown フェンスの貼り付け痕）。削除するか（実害なし） |
 
 U5 = FAIL / 既定 OFF、U3/U4 = HOLD、CI 定義（workflow / policy / 検査スクリプト）の変更、
 リリース・外部公開・既定 OFF 有効化は**未実施のまま**。
