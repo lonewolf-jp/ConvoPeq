@@ -328,10 +328,15 @@ dispatch 検証の経過:
 | 4 | `41456500055` | **success（合格）** | **49.2 分** | 49.2 分 |
 | 5 | `41464228797` | success | 60.8 分 | 60.7 分 |
 | 6 | `41474161659` | success | 60.4 分 | 60.2 分 |
+| 7 | `41484247670` | **success（合格）** | **59.8 分** | — |
+| 8 | `41493867695` | **failure** | 10.5 分 | — （oneAPI 導入: `winget exit=-1978335226`、ヘッダは存在） |
+| 9 | `41495643990` | success | 63.4 分 | — |
 
-- **rc=0 は 4/4**（修正後）。測定値 `[H2R1] trials=40 mixed_trials=0 distinct_worlds=80` は全回同一。
-- 60 分基準は run 全体で 1/4、job 全体で 2/4。ばらつきは `Install Intel oneAPI via winget`（未導入時 10.7 分）に依存。
-- 判定の解釈（run 全体／job）は **Owner 判断事項**（`SESSION-FINAL-REPORT-20261102.md` §3 に A/B/C 案）。
+- **rc=0 は 6/7**（修正後。失敗 1 件は oneAPI 導入ステップの `$LASTEXITCODE` 取り扱い）。
+- 測定値 `[H2R1] trials=40 mixed_trials=0 distinct_worlds=80` は全成功回で同一。
+- 60 分基準は run 全体で 2/7。ばらつきは `Install Intel oneAPI via winget`（未導入時 10.7 分）に依存。
+- 判定の解釈（run 全体／job／workflow 堅牢化）は **Owner 判断事項**（`SESSION-FINAL-REPORT-20261102.md` §3 に A/B/C 案）。
+
 
 
 **flaky の原因と修正**: `checkSTG8ClearTerminalizesObligation` が RebuildThread 稼働中に
