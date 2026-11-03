@@ -29,6 +29,7 @@
 
 #include "AudioEngineHarness.h"
 #include "RtAllocProbe.h"   // U3 (R-107 Stage 3): RT 経路の新規確保検出（テスト専用）
+#include "audioengine/RtMeasureRing.h"   // R-106 metric v2: 測定ドライバ（テスト専用）
 #include "audioengine/RuntimeBuilder.h"
 
 // Work91: soak シナリオ（SoakPublishIntegrationTests.cpp）の前方宣言
@@ -1405,8 +1406,93 @@ static int runRtAllocProbeLocal(int durationMs)
     return 0;
 }
 
+//=== R-106 metric v2 measurement driver (test-only) =========================
+// CONVOPEQ_RT_MEASURE_RUN=<blocks> のときだけ動く測定モード。製品の既定動作には現れない。
+//   CONVOPEQ_RT_MEASURE      : 1 = ON（push あり） / 2 = OFF（push なし）
+//   CONVOPEQ_RT_MEASURE_PACED: 実時間ペーシング（48 kHz / 512 = 93.75 ブロック/秒）
+//   CONVOPEQ_RT_MEASURE_TONE : 入力タップへ 1 kHz 正弦波を書く（未設定は無音）
+static int runRtMeasureRunLocal(int blocks)
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[RTM] harness start failed\n");
+        return 1;
+    }
+
+    // 両アームで harness 側のオーバーヘッドを同一にするため、タップは常に設置する。
+    const bool toneOn = std::getenv("CONVOPEQ_RT_MEASURE_TONE") != nullptr;
+    harness.setTap([toneOn](juce::AudioBuffer<float>& b, bool isInput)
+    {
+        if (!isInput)
+            return;
+        static double phase = 0.0;
+        const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+        const double inc = twoPi * 1000.0 / 48000.0;
+        for (int ch = 0; ch < b.getNumChannels(); ++ch)
+        {
+            float* d = b.getWritePointer(ch);
+            if (!toneOn)
+            {
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                    d[i] = 0.0f;
+                continue;
+            }
+            double pp = phase;
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                d[i] = static_cast<float>(std::sin(pp));
+                pp += inc;
+            }
+        }
+        if (toneOn)
+        {
+            phase += inc * b.getNumSamples();
+            if (phase > twoPi)
+                phase = std::fmod(phase, twoPi);
+        }
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(900);
+    while (convo::rtmeasure::sampleBuffer().count() < static_cast<std::size_t>(blocks))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (std::chrono::steady_clock::now() > deadline)
+        {
+            std::fprintf(stderr, "[RTM] timeout at %zu samples\n",
+                         convo::rtmeasure::sampleBuffer().count());
+            break;
+        }
+    }
+
+    harness.stop();
+
+    (void) convo::rtmeasure::aggregator().collect();
+    const auto& s = convo::rtmeasure::aggregator().compute();
+    const char* verdict = s.inconclusive ? "INCONCLUSIVE" : (s.boundary ? "RERUN" : "OK");
+    std::printf("[RTM] FINAL mode=%d n=%llu p99=%llu us max=%llu us dropped=%llu writes=%llu"
+                " ratio=%.4f overflow=%llu warmup_skipped=%llu verdict=%s lower_bound=1\n",
+                static_cast<int>(convo::rtmeasure::mode()),
+                static_cast<unsigned long long>(s.samples),
+                static_cast<unsigned long long>(s.p99Micros),
+                static_cast<unsigned long long>(s.maxMicros),
+                static_cast<unsigned long long>(s.ringDropped),
+                static_cast<unsigned long long>(s.ringWrites),
+                s.dropRatio,
+                static_cast<unsigned long long>(s.sampleOverflow),
+                static_cast<unsigned long long>(s.warmupSkipped),
+                verdict);
+    std::fflush(stdout);
+    return 0;
+}
+//===========================================================================
+
 int main(int argc, char* argv[])
 {
+    // R-106 metric v2: 測定ドライバ（CONVOPEQ_RT_MEASURE_RUN 指定時のみ）。
+    if (const char* runBlocks = std::getenv("CONVOPEQ_RT_MEASURE_RUN"))
+        return runRtMeasureRunLocal(std::atoi(runBlocks));
+
     // U3 (R-107 Stage 3): RT 経路の新規確保を測るローカル測定モード。
     //   CONVOPEQ_RT_ALLOC_PROBE=1 かつ CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms> のときだけ動く。
     if (const char* probeMs = std::getenv("CONVOPEQ_RT_ALLOC_PROBE_RUN"))
