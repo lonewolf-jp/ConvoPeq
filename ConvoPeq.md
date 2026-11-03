@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-02 22:57:06
+> Generated: 2026-11-03 13:47:57
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -318,6 +318,8 @@
         │   │   ├── PolyphaseGainCandidateRef.h
         │   │   ├── PolyphaseGainFidelityTests.cpp
         │   │   ├── PublishPipelineIntegrationTests.cpp
+        │   │   ├── RtAllocProbe.cpp
+        │   │   ├── RtAllocProbe.h
         │   │   ├── RtMeasureRingTests.cpp
         │   │   ├── SoakPublishIntegrationTests.cpp
         │   │   ├── STG11D10EQEnumGuardTests.cpp
@@ -2989,6 +2991,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 
     add_executable(AudioEngineHarness
         src/tests/AudioEngineHarness/AudioEngineHarness.cpp
+        # U3 (R-107 Stage 3): RT 経路の新規確保プローブ（このターゲットにのみリンクする）
+        src/tests/AudioEngineHarness/RtAllocProbe.cpp
         src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
@@ -92034,6 +92038,7 @@ int runA2A3aQuarantineTests()
 #include <xmmintrin.h>
 
 #include "MKLRealTimeSetup.h"
+#include "RtAllocProbe.h"   // U3 (R-107 Stage 3): RT 経路の新規確保検出（テスト専用）
 
 AudioEngineHarness::AudioEngineHarness()
     : engine_(std::make_unique<AudioEngine>())
@@ -92049,6 +92054,8 @@ bool AudioEngineHarness::start(double sampleRate, int blockSize)
 {
     // MainApplication::initialise 相当の MKL / denormal 設定（audio thread に触れる前）
     MKLRealTime::setup();
+    // U3: 環境変数 CONVOPEQ_RT_ALLOC_PROBE=1 のときだけ RT 確保の計測を有効化する（既定 OFF）。
+    rtalloc::enableFromEnvironment();
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
@@ -92132,7 +92139,12 @@ void AudioEngineHarness::audioLoop(int blockSize)
         if (tapCopy)
             tapCopy(buffer, true);
         juce::AudioSourceChannelInfo info(&buffer, 0, blockSize);
-        engine_->getNextAudioBlock(info);
+        {
+            // U3 (R-107 Stage 3): このコールバック区間内の新規確保を検出する。
+            //   プローブが OFF（既定）のときは RtScope は深さカウンタの増減のみ。
+            rtalloc::RtScope rtAllocScope;
+            engine_->getNextAudioBlock(info);
+        }
         if (tapCopy)
             tapCopy(buffer, false);
         else
@@ -104608,6 +104620,7 @@ int main()
 #include <string>
 
 #include "AudioEngineHarness.h"
+#include "RtAllocProbe.h"   // U3 (R-107 Stage 3): RT 経路の新規確保検出（テスト専用）
 #include "audioengine/RuntimeBuilder.h"
 
 // Work91: soak シナリオ（SoakPublishIntegrationTests.cpp）の前方宣言
@@ -105946,8 +105959,51 @@ int runB2DiagSinkTests();
 // ★ A2 -> A3-a: 二重解放と誤状態処理の分離検証（opt-in）。
 int runA2A3aQuarantineTests();
 
+//=== U3 (R-107 Stage 3): RT 経路の新規確保プローブ測定 ======================
+//   CONVOPEQ_RT_ALLOC_PROBE=1（プローブ有効）と
+//   CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms>（このモードの実行）で起動する。
+//   ハーネスを起動して <ms> ミリ秒だけ音声コールバックを走らせ、[U3] 行を出力する。
+//   既定（環境変数なし）ではこの経路に入らない。
+static int runRtAllocProbeLocal(int durationMs)
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[U3] harness start failed\n");
+        return 1;
+    }
+    if (!rtalloc::enabled())
+        std::fprintf(stderr, "[U3] probe disabled (set CONVOPEQ_RT_ALLOC_PROBE=1)\n");
+
+    // 陽性対照: プローブが実際に反応することを確認する（rt_alloc=0 の意味を担保）。
+    rtalloc::resetForTest();
+    {
+        rtalloc::RtScope selfCheckScope;
+        int* p = new int(1);
+        *p = 2;
+        delete p;
+    }
+    std::printf("[U3] selfcheck_rt_alloc=%llu (mechanism check: 1 expected in both modes)\n",
+                static_cast<unsigned long long>(rtalloc::count()));
+
+    rtalloc::resetForTest();   // 起動時の確保は測定対象外
+    const int ms = durationMs > 0 ? durationMs : 5000;
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    harness.stop();
+
+    std::printf("[U3] duration_ms=%d blocks=%llu\n",
+                ms, static_cast<unsigned long long>(harness.blocksProcessed()));
+    rtalloc::printReport();
+    return 0;
+}
+
 int main(int argc, char* argv[])
 {
+    // U3 (R-107 Stage 3): RT 経路の新規確保を測るローカル測定モード。
+    //   CONVOPEQ_RT_ALLOC_PROBE=1 かつ CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms> のときだけ動く。
+    if (const char* probeMs = std::getenv("CONVOPEQ_RT_ALLOC_PROBE_RUN"))
+        return runRtAllocProbeLocal(std::atoi(probeMs));
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // 計測モードはエンジン生成・スレッド生成より前に分岐する（計画 v5.3 §2.2）。
     if (std::getenv("B2_STAGE1_MEASURE") != nullptr)
@@ -106346,6 +106402,215 @@ int runFpmM2();
     _exit(0);
     return 0;
 }
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\RtAllocProbe.cpp`
+
+```
+// U3 (R-107 Stage 3): RT 経路の新規確保プローブ（テストバイナリ専用）。
+//
+// この TU だけがグローバル operator new / delete を置換する。
+// 置換関数は確保を行わない（malloc / free を直接使う）ため再帰しない。
+#include "RtAllocProbe.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <new>
+
+namespace rtalloc
+{
+void enableFromEnvironment() noexcept
+{
+    const char* v = std::getenv("CONVOPEQ_RT_ALLOC_PROBE");
+    setEnabledForTest((v != nullptr) && (v[0] == '1'));
+}
+
+void printReport() noexcept
+{
+    std::printf("[U3] probe=%s rt_alloc=%llu rt_bytes=%llu rt_max_bytes=%llu\n",
+                enabled() ? "on" : "off",
+                static_cast<unsigned long long>(count()),
+                static_cast<unsigned long long>(bytes()),
+                static_cast<unsigned long long>(maxBytes()));
+    std::fflush(stdout);
+}
+} // namespace rtalloc
+
+//==============================================================================
+// グローバル operator new / delete の置換（RtAllocProbe.cpp の 1 箇所のみ）。
+//   aligned 版は置換しない（aligned 確保は aligned 解放と対でなければならない）。
+//==============================================================================
+void* operator new(std::size_t n)
+{
+    void* p = std::malloc(n != 0 ? n : 1);
+    if (p == nullptr)
+        throw std::bad_alloc();
+    rtalloc::noteAlloc(n);
+    return p;
+}
+
+void* operator new[](std::size_t n)
+{
+    void* p = std::malloc(n != 0 ? n : 1);
+    if (p == nullptr)
+        throw std::bad_alloc();
+    rtalloc::noteAlloc(n);
+    return p;
+}
+
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept
+{
+    void* p = std::malloc(n != 0 ? n : 1);
+    if (p != nullptr)
+        rtalloc::noteAlloc(n);
+    return p;
+}
+
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept
+{
+    void* p = std::malloc(n != 0 ? n : 1);
+    if (p != nullptr)
+        rtalloc::noteAlloc(n);
+    return p;
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\RtAllocProbe.h`
+
+```
+#pragma once
+
+//==============================================================================
+// U3 (R-107 Stage 3): RT 経路の新規確保を検出するプローブ
+//
+//   **テストバイナリ（AudioEngineHarness）にのみ**リンクする。製品ターゲットには入れない。
+//   既定 OFF（CONVOPEQ_RT_ALLOC_PROBE=1 で有効化）。
+//
+//   置換する operator new / delete は RtAllocProbe.cpp の 1 箇所だけに置く
+//   （V11EngineRetireProtectionTests.cpp の a2probe はこの名前空間の別名にする）。
+//
+//   計数は `Scope` が立っている区間のみ。音声コールバック（harness の audioLoop）は
+//   `RtScope`（= Scope の別名）で囲むため、RT 区間の確保だけが数えられる。
+//
+//   RT 安全側の設計:
+//     - 計数はロックフリー（atomic の fetch_add のみ）。確保・I/O・書式化をしない
+//     - 有効フラグの atomic load 1 回で素通りする（OFF 時は従来と同一コスト）
+//==============================================================================
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+namespace rtalloc
+{
+inline std::atomic<bool>& enabledRef() noexcept
+{
+    static std::atomic<bool> on{ false };
+    return on;
+}
+
+inline std::atomic<std::uint64_t>& countRef() noexcept
+{
+    static std::atomic<std::uint64_t> c{ 0 };
+    return c;
+}
+
+inline std::atomic<std::uint64_t>& byteRef() noexcept
+{
+    static std::atomic<std::uint64_t> b{ 0 };
+    return b;
+}
+
+inline std::atomic<std::uint64_t>& maxByteRef() noexcept
+{
+    static std::atomic<std::uint64_t> m{ 0 };
+    return m;
+}
+
+inline thread_local int t_depth = 0; // NOLINT(thread-local) RT-SAFE: POD int, constant-initialised, no destructor, no allocation, no lock; depth-only test probe state that must never be shared between threads
+
+[[nodiscard]] inline bool enabled() noexcept
+{
+    return enabledRef().load(std::memory_order_acquire);
+}
+
+inline void setEnabledForTest(bool on) noexcept
+{
+    enabledRef().store(on, std::memory_order_release);
+}
+
+[[nodiscard]] inline bool active() noexcept { return t_depth > 0; }
+
+inline void reset() noexcept
+{
+    countRef().store(0, std::memory_order_relaxed);
+    byteRef().store(0, std::memory_order_relaxed);
+    maxByteRef().store(0, std::memory_order_relaxed);
+}
+
+inline void resetForTest() noexcept { reset(); }
+
+[[nodiscard]] inline std::uint64_t count() noexcept
+{
+    return countRef().load(std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline std::uint64_t bytes() noexcept
+{
+    return byteRef().load(std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline std::uint64_t maxBytes() noexcept
+{
+    return maxByteRef().load(std::memory_order_relaxed);
+}
+
+// 確保 1 回を記録する（operator new から呼ばれる）。
+//   RT 区間（Scope 内）でのみ計数する。既定でも計数は行うが、出力は測定モードのみ
+//   （既定 OFF = [U3] を出さない・挙動を変えない）。
+inline void noteAlloc(std::size_t n) noexcept
+{
+    if (t_depth <= 0)
+        return;
+
+    countRef().fetch_add(1, std::memory_order_relaxed);
+    byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+
+    std::uint64_t cur = maxByteRef().load(std::memory_order_relaxed);
+    const auto value = static_cast<std::uint64_t>(n);
+    while (value > cur
+           && !maxByteRef().compare_exchange_weak(cur, value,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed))
+    {
+    }
+}
+
+struct Scope
+{
+    Scope() noexcept { ++t_depth; }
+    ~Scope() noexcept { if (t_depth > 0) --t_depth; }
+    Scope(const Scope&) = delete;
+    Scope& operator=(const Scope&) = delete;
+};
+
+using RtScope = Scope;
+
+// 環境変数 CONVOPEQ_RT_ALLOC_PROBE=1 で有効化（非 RT・1 回）。
+void enableFromEnvironment() noexcept;
+
+// [U3] 行を 1 行出力する（非 RT）。
+void printReport() noexcept;
+} // namespace rtalloc
 
 ```
 
@@ -113538,13 +113803,46 @@ static bool checkSTG82OverwriteTerminalizesEvicted()
                      (unsigned long long)(orch.deferredOverwriteCount() - ow0));
         ok = false;
     }
-    // 安定性: retention loop 中も L==1 && slot 保持。
-    stg8SleepPump(8000);
-    if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
+    // 安定性: retention loop 中も「リークしない（L<=1）」ことと、
+    //   「slot が解放されたなら obligation も終端化される」ことを 8 秒間サンプリングして検証する。
+    //
+    //   旧実装は 8 秒後に「L==1 かつ hasDeferred」を一括で要求していた。これは
+    //   「deferred slot が必ず 8 秒以上保持される」ことを前提にしており、deferred の
+    //   TTL（30 秒）までの残時間や publish 完了タイミングに依存して flaky になっていた
+    //   （CI 実測: 41523395609 の run 4 で `L=1 hasDeferred=0`）。
+    //   検証目的（O1 追い出し後に O1 が残留しない／O2 の保持が壊れない）は変えず、
+    //   時間依存の「瞬間値」ではなく「不変条件」を連続サンプリングで確認する。
     {
-        std::fprintf(stderr, "[STG-8-D2] FAIL: unstable (L=%llu hasDeferred=%d)\n",
-                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
-        ok = false;
+        const auto stabilityDeadline = std::chrono::steady_clock::now()
+                                     + std::chrono::milliseconds(8000);
+        while (std::chrono::steady_clock::now() < stabilityDeadline)
+        {
+            stg8SleepPump(100);
+
+            const auto live = stg8LiveCount(e);
+            if (live > 1)
+            {
+                std::fprintf(stderr, "[STG-8-D2] FAIL: leak (L=%llu, want <=1)\n",
+                             static_cast<unsigned long long>(live));
+                ok = false;
+                break;
+            }
+
+            if (!orch.hasDeferredRequest())
+            {
+                // slot が解放された: obligation も終端化されていること（不整合の検出）。
+                //   解放経路には TTL（kDeferredPublishTTLUs = 30 秒）に基づくものがあるため、
+                //   終端化の猶予は TTL を上限とする（30 秒 + 余裕 5 秒）。
+                if (!stg8WaitUntil(35.0, [&] { return stg8LiveCount(e) == 0; }))
+                {
+                    std::fprintf(stderr,
+                                 "[STG-8-D2] FAIL: slot released but obligation live (L=%llu, waited 35s)\n",
+                                 static_cast<unsigned long long>(stg8LiveCount(e)));
+                    ok = false;
+                }
+                break;
+            }
+        }
     }
 
     DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);
@@ -116892,82 +117190,12 @@ public:
 // ============================================================================
 #include <cstdlib>
 #include <new>
+#include "RtAllocProbe.h"   // U3 (R-107 Stage 3): 計測の単一実装
 
-namespace a2probe {
+// U3 (R-107 Stage 3): operator new / delete の置換は RtAllocProbe.cpp の 1 箇所のみ。
+//   この TU の既存プローブ名（a2probe）は互換のため rtalloc の別名にする。
+namespace a2probe = rtalloc;
 
-inline std::atomic<std::uint64_t>& countRef()
-{
-    static std::atomic<std::uint64_t> c{ 0 };
-    return c;
-}
-
-inline std::atomic<std::uint64_t>& byteRef()
-{
-    static std::atomic<std::uint64_t> b{ 0 };
-    return b;
-}
-
-inline thread_local int t_depth = 0; // NOLINT(thread-local) RT-SAFE: POD int, constant-initialised, no destructor, no allocation, no lock; depth-only test probe state that must never be shared between threads
-
-inline bool active() noexcept { return t_depth > 0; }
-
-inline void reset() noexcept
-{
-    countRef().store(0, std::memory_order_relaxed);
-    byteRef().store(0, std::memory_order_relaxed);
-}
-
-inline std::uint64_t count() noexcept { return countRef().load(std::memory_order_relaxed); }
-inline std::uint64_t bytes() noexcept { return byteRef().load(std::memory_order_relaxed); }
-
-struct Scope
-{
-    Scope() noexcept { ++t_depth; }
-    ~Scope() noexcept { --t_depth; }
-    Scope(const Scope&) = delete;
-    Scope& operator=(const Scope&) = delete;
-};
-
-} // namespace a2probe
-
-// Replacements live at global scope so every TU in this executable resolves to
-// them. The aligned overloads are intentionally NOT replaced: an aligned
-// allocation must keep its matching aligned deallocation.
-void* operator new(std::size_t n)
-{
-    if (a2probe::active())
-    {
-        a2probe::countRef().fetch_add(1, std::memory_order_relaxed);
-        a2probe::byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
-    }
-    void* p = std::malloc(n != 0 ? n : 1);
-    if (p == nullptr) throw std::bad_alloc();
-    return p;
-}
-
-void* operator new[](std::size_t n) { return ::operator new(n); }
-
-void* operator new(std::size_t n, const std::nothrow_t&) noexcept
-{
-    if (a2probe::active())
-    {
-        a2probe::countRef().fetch_add(1, std::memory_order_relaxed);
-        a2probe::byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
-    }
-    return std::malloc(n != 0 ? n : 1);
-}
-
-void* operator new[](std::size_t n, const std::nothrow_t&) noexcept
-{
-    return ::operator new(n, std::nothrow);
-}
-
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
-void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
-void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
 
 namespace {
 
@@ -119752,6 +119980,7 @@ bool checkDSPHandleResolveStates()
 
 int runV11EngineRetireProtectionTests()
 {
+    // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
     g_v11eReclaimCalls = 0;
     g_v11eLastReclaimed = nullptr;
 

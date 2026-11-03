@@ -388,9 +388,12 @@ dispatch 検証の経過:
 
 | ID | 内容 | 状態 |
 |---|---|---|
-| R-111 | `HeadlessAudioPathVerification` が音声デバイスの無い CI ランナーで FAIL する | **新規・Owner 判断待ち**（常時実行／条件 skip の選択） |
+| R-111 | `HeadlessAudioPathVerification` が音声デバイスの無い CI ランナーで FAIL する | **修正済み**: `windows-msvc-build.yml` の Configure に `CONVO_CI_BUILD=1` を設定（登録 1→0 を実証）。CI で最終確認 |
 | R-112 | `checkSTG8ClearTerminalizesObligation` の flaky（`hasDeferred still true after clear`） | **PR #107 で修正**（ctest 13 連続 PASS） |
-| R-113 | `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`） | **新規・Owner 判断待ち**（8 秒の安定性ウィンドウが保持時間に依存） |
+| R-113 | `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`） | **修正済み**: 固定 8 秒判定を不変条件サンプリングへ変更（解放時は TTL 相当 35 秒で終端化を要求）。Release 2 回とも rc=0 |
+| — | oneAPI 導入ステップの `winget` 非 0 による FAIL | **修正済み**: 終了コードを成功判定に使わず、ヘッダ＋lib 4 点で判定（両 workflow） |
+| — | U3（RT 経路の新規確保検出） | **実装・実測完了**: 陽性対照 1、RT 確保 **0**（6,470 ブロック）。既定 OFF・テスト限定 |
+
 
 ## 附録
 
