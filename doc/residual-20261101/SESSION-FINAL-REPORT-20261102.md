@@ -19,9 +19,10 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 | R-107 Stage 1（列挙） | 完了 |
 | R-107 Stage 2（U4） | **完了**（PR #108 → `7dfb21d4`。既定 OFF・RT 計測点 0・Release/Debug/ASan PASS） |
 | R-107 Stage 3（U3） | **実装・検証完了**（PR #114）。RT 経路の新規確保 **0**（陽性対照 1）。既定 OFF |
-| R-113（STG-8-D2 flaky） | **修正済み**（Release **10/10**・Debug 1/1 で PASS、`STG-8-D2` 各回 PASS） |
-| R-111（CI 診断の音声テスト） | **修正済み**（`CONVO_CI_BUILD=1` を Configure に設定。登録 1→0・選択 2→1） |
-| oneAPI 導入ステップ | **堅牢化済み**（`winget` 終了コードを判定に使わず、ヘッダ＋lib 4 点で検証） |
+| R-113（STG-8-D2 flaky） | **修正済み**（Release **16/16**・Debug 1/1 で PASS、`STG-8-D2` 各回 PASS） |
+| R-111（CI 診断の音声テスト） | **修正済み**（`CONVO_CI_BUILD=1` を Configure に設定。登録 1→0・選択 2→1。dispatch で `AudioEngineHarness` 1/1 PASS） |
+| oneAPI 導入ステップ | **堅牢化済み**（`winget` 終了コードを判定に使わず、ヘッダ＋lib 4 点で検証。PR と main push の双方で success） |
+| R-106 の指標再定義 | **技術判断案を提出**（`R106-METRIC-REDEFINITION-PROPOSAL-20261103.md`。判定は FAIL・判定保留のまま） |
 | R-108（旧分割削除） | 完了（削除前確認 4 条件＋削除後の正本一致を再確認） |
 
 
@@ -39,6 +40,16 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 - **σ ≤ 64 µs は max で未達**（280〜403 µs）、p99 で達成（9〜46 µs）。
 - +50 µs を 95% で判別するには 493〜1,022 組/アームが必要（1 組 6.1 分 → 50〜104 時間）。
 - 判定: **FAIL（max 基準）かつ判定保留（検出力不足）**。指標の再定義は行わない。**測定器は既定 OFF を維持**。
+
+### 2.1 指標再定義の技術判断案（提出済み・承認待ち）
+
+`R106-METRIC-REDEFINITION-PROPOSAL-20261103.md` に、指標定義の選択肢と推奨案を整理した。
+
+- 推奨は **metric v2**: p99 の非劣性検定（片側 Welch t、α=0.05、差 5%、6 組/アーム）を主判定とし、`late50us=0`・`dropped=0`・`overflow=0`・`n≥30,000` を測定成立ゲートとして分離する。max は記録専用（OFF の 2 倍超で警告）とし、合否に使わない。
+- 根拠は、max が周期超過ではなく単発スパイクであること（`late50us=0`、20/20）と、σ(max) 280〜403 µs に対して判定幅 +50 µs が小さすぎること（5 組の検出力 0.04〜0.05）。
+- p99 の検出力は無音 1.000、1 kHz 0.871（n=5）／0.928（n=6）。
+- 既存 20 実行の参考値は無音 98.91%（p=0.0002）、1 kHz 99.28%（p=0.0047）。**合格扱いにしない**。
+- 決定依頼は D1（v2 採用）、D2（既存データでの再判定）、D3（不採用時のクローズ）の 3 点。
 
 証跡: `u5_remeasure_20261102/`（20 ログ・sha256 付き JSON）、`R106-REMEASUREMENT-RESULT-20261102.md`。
 
@@ -126,10 +137,17 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 | ASan | CI（PR #108）で **pass**（14 pass / 0 fail） |
 | オーバーヘッド | **Off 298.91 s / On 297.89 s（差 −1.0 秒・ノイズ範囲）**。Off では `[U4]` 出力 0 行 |
 
-### 5.2 U3（計画）
+### 5.2 U3（実装・検証完了 / PR #114）
 
-`R107-STAGE3-U3-PLAN-20261102.md`。テストバイナリ限定の `operator new` 置換＋`thread_local` RT フラグで
-RT 経路の新規確保を検出する案 A を採用。U4 とは分離し、U3-1〜U3-4 の段階導入とする。
+`R107-STAGE3-U3-PLAN-20261102.md` の案 A（テストバイナリ限定の `operator new` 置換＋`thread_local` RT フラグ）で実装した。置換点は `RtAllocProbe.cpp` の 1 箇所に集約し、既存の `a2probe` も同じ実装へ統合した。
+
+| 項目 | 結果 |
+|---|---|
+| 陽性対照（`selfcheck_rt_alloc=1`） | **1**（プローブが反応することを確認） |
+| 実測（5 秒） | `rt_alloc=0` / 6,470 ブロック |
+| 実測（30 秒） | `rt_alloc=0` / 38,208 ブロック |
+| 既定 | OFF（`probe=off`）。計数のみ常時、出力は env で有効化 |
+| 回帰 | プローブ ON を含む Release スイートで rc=0（計 16 回） |
 
 ## 6. R-108 — 旧分割ファイルの削除（完了・再確認済み）
 
@@ -153,23 +171,27 @@ RT 経路の新規確保を検出する案 A を採用。U4 とは分離し、U3
 
 ## 8. 未解決・Owner 判断事項
 
-| # | 内容 | 状態 | Owner 判断案 |
+| # | 内容 | 状態 | 次の扱い |
 |---|---|---|---|
-| 1 | **R-101 の dispatch 5 回**（rc=0・60 分以内） | #107 マージ後に実施 | 承認済み範囲。実施継続 |
-| 2 | **U5 の指標方針** | FAIL＋判定保留 | A: 既定 OFF のまま確定（推奨）/ B: p99 へ指標変更 / C: 493〜1,022 組へ増加 / D: ETW でスパイク源特定 |
-| 3 | **R-111**: `HeadlessAudioPathVerification` が音声デバイス無しの CI ランナーで FAIL | 新規 | **A: 診断ステップに `CONVO_CI_BUILD=1` を設定（CMakeLists の設計意図どおり skip・推奨）** / B: VB-CABLE 導入 / C: 現状維持 |
-| 4 | **R-113**: `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`）| 新規 | 安定性ウィンドウ（8 秒）が保持時間に依存。テスト側でウィンドウ短縮または「解放済みなら完了扱い」に変更（要承認） |
-| 5 | **R-107 Stage 3（U3）の実装** | 計画のみ | U4 の ASan 結果を確認後に着手（ASan は CI pass 済み） |
-| 5 | ローカル `build` の CMake キャッシュ破損 | 修復済み（VS 18 2026 で再構成・再ビルド） | 対応不要 |
+| 1 | **R-101 の dispatch 5 回**（rc=0・60 分以内） | **完了**（5/5 合格） | 解消 |
+| 2 | **U5 の指標方針** | FAIL＋判定保留。技術判断案を `R106-METRIC-REDEFINITION-PROPOSAL-20261103.md` に提出 | **D1 v2 採用 / D2 再判定 / D3 クローズ** の決定待ち |
+| 3 | **R-111**: `HeadlessAudioPathVerification` が音声デバイス無しの CI ランナーで FAIL | **修正済み**（`CONVO_CI_BUILD=1` を Configure に設定） | CI dispatch で 1/1 PASS を確認。継続監視 |
+| 4 | **R-113**: `checkSTG82OverwriteTerminalizesEvicted` の flaky | **修正済み**（固定 8 秒判定を不変条件サンプリングへ変更） | Release 16/16・Debug 1/1・ASan CI で PASS。継続監視 |
+| 5 | **R-107 Stage 3（U3）** | **実装・検証完了**（PR #114） | 解消 |
+| 6 | oneAPI 導入のキャッシュ化 | 未実施（毎回 `winget` で導入） | 導入時間の短縮は別課題 |
+| 7 | ローカル `build` の CMake キャッシュ破損 | 修復済み（VS 18 2026 で再構成・再ビルド） | 対応不要 |
 
 ## 9. 成果物の配信（Dropbox）
 
-`/ConvoPeq-stage3-20261026/investigation-20261102/`
+`/ConvoPeq-stage3-20261026/investigation-20261102/`（2026-11-03 更新分）
 
 | ファイル | サイズ | 備考 |
 |---|---|---|
-| `r106-measurement-20261102.zip` | 100,685 B | 20 ログ＋集計 3 点 |
-| `R106-REMEASUREMENT-RESULT-20261102.md` | 7,142 B | 測定記録 |
-| `ConvoPeq.md` | 6,606,738 B | 最新生成（sha256 `f57b1f9f…`） |
-| `split/ConvoPeq.part01〜04.md` | 2,097,085 / 2,097,132 / 2,097,150 / 315,371 B | 各 ≤2 MB・連結で元とバイト一致 |
-| `split/SHA256SUMS.txt` | 375 B | 4 パートの sha256 |
+| `ConvoPeq.md` | **6,470,973 B** | main `e89c66fe` で再生成（LF・sha256 `d30edac1…5ebb83`）。`--check` で FRESH |
+| `split/part01〜04.md` | 2,097,115 / 2,097,095 / 2,097,114 / 179,649 B | 各 ≤2 MB。連結で元とバイト一致 |
+| `split/SHA256SUMS.txt` | 4 行 | 4 パートの sha256 |
+| `R113-R111-ONEAAPI-U3-20261103.md` | 7,710 B | 今回の 4 件の原因・変更・検証 |
+| `R106-METRIC-REDEFINITION-PROPOSAL-20261103.md` | 指標再定義の技術判断案（D1〜D3） |
+| `r101-dispatch-logs-final-20261103.zip` | R-101 dispatch の証跡 |
+
+配信物はダウンロードして照合済み（全体 sha256 一致、`concat == full: True`、マニフェスト 4 行）。
