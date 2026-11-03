@@ -192,8 +192,8 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 | `ConvoPeq.md` | **6,470,973 B** | main `e89c66fe` で再生成（LF・sha256 `d30edac1…5ebb83`）。`--check` で FRESH |
 | `split/part01〜04.md` | 2,097,115 / 2,097,095 / 2,097,114 / 179,649 B | 各 ≤2 MB。連結で元とバイト一致 |
 | `split/SHA256SUMS.txt` | 4 行 | 4 パートの sha256 |
-| `R113-R111-ONEAAPI-U3-20261103.md` | 7,710 B | 今回の 4 件の原因・変更・検証 |
-| `R106-METRIC-REDEFINITION-PROPOSAL-20261103.md` | 指標再定義の技術判断案（D1〜D3） |
-| `r101-dispatch-logs-final-20261103.zip` | R-101 dispatch の証跡 |
+| `R113-R111-ONEAAPI-U3-20261103.md` | 8,389 B | 今回の 4 件の原因・変更・検証 |
+| `R106-METRIC-REDEFINITION-PROPOSAL-20261103.md` | 6,791 B | 指標再定義の技術判断案（D1〜D3） |
+| `r101-dispatch-logs-final-20261103.zip` | 441,958 B | R-101 dispatch の証跡 |
 
 配信物はダウンロードして照合済み（全体 sha256 一致、`concat == full: True`、マニフェスト 4 行）。
