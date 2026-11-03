@@ -6,6 +6,7 @@
 #include <xmmintrin.h>
 
 #include "MKLRealTimeSetup.h"
+#include "RtAllocProbe.h"   // U3 (R-107 Stage 3): RT 経路の新規確保検出（テスト専用）
 
 AudioEngineHarness::AudioEngineHarness()
     : engine_(std::make_unique<AudioEngine>())
@@ -21,6 +22,8 @@ bool AudioEngineHarness::start(double sampleRate, int blockSize)
 {
     // MainApplication::initialise 相当の MKL / denormal 設定（audio thread に触れる前）
     MKLRealTime::setup();
+    // U3: 環境変数 CONVOPEQ_RT_ALLOC_PROBE=1 のときだけ RT 確保の計測を有効化する（既定 OFF）。
+    rtalloc::enableFromEnvironment();
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
@@ -104,7 +107,12 @@ void AudioEngineHarness::audioLoop(int blockSize)
         if (tapCopy)
             tapCopy(buffer, true);
         juce::AudioSourceChannelInfo info(&buffer, 0, blockSize);
-        engine_->getNextAudioBlock(info);
+        {
+            // U3 (R-107 Stage 3): このコールバック区間内の新規確保を検出する。
+            //   プローブが OFF（既定）のときは RtScope は深さカウンタの増減のみ。
+            rtalloc::RtScope rtAllocScope;
+            engine_->getNextAudioBlock(info);
+        }
         if (tapCopy)
             tapCopy(buffer, false);
         else

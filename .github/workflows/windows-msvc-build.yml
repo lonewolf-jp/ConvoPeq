@@ -84,24 +84,35 @@ jobs:
         shell: pwsh
         run: |
           $oneapi = $env:ONEAPI_ROOT_DIR
-          if ((Test-Path "$oneapi\mkl\latest\include\mkl.h") -and (Test-Path "$oneapi\ipp\latest\include\ipp.h")) {
-            Write-Host "oneAPI (MKL + IPP) already present."
+          # 必要物: ヘッダだけでなく import ライブラリも確認する（ヘッダのみで成功扱いにしない）。
+          $required = [ordered]@{
+            'mkl.h'        = "$oneapi\mkl\latest\include\mkl.h"
+            'ipp.h'        = "$oneapi\ipp\latest\include\ipp.h"
+            'mkl_core.lib' = "$oneapi\mkl\latest\lib\mkl_core.lib"
+            'ippcore.lib'  = "$oneapi\ipp\latest\lib\ippcore.lib"
+          }
+          function Get-Missing {
+            @($required.GetEnumerator() | Where-Object { -not (Test-Path $_.Value) } | ForEach-Object { $_.Key })
+          }
+          $missing = Get-Missing
+          if ($missing.Count -eq 0) {
+            Write-Host "oneAPI (MKL + IPP) already present and complete (headers + import libraries)."
             exit 0
           }
+          Write-Host "missing before install: $($missing -join ', ')"
           winget --version
           # 公式 winget パッケージ。Base Toolkit に MKL と IPP が含まれる。
           winget install --id Intel.OneAPI.BaseToolkit -e --silent `
             --accept-package-agreements --accept-source-agreements --disable-interactivity
-          Write-Host "winget exit=$LASTEXITCODE"
-          # winget の終了コードに依存せず、必要なヘッダの実在で判定する（fail closed）。
-          $mkl = Test-Path "$oneapi\mkl\latest\include\mkl.h"
-          $ipp = Test-Path "$oneapi\ipp\latest\include\ipp.h"
-          Write-Host "mkl.h present: $mkl"
-          Write-Host "ipp.h present: $ipp"
-          if (-not ($mkl -and $ipp)) {
+          # winget の終了コードは成功判定に使わない（導入済み・部分成功でも非 0 を返す実測がある）。
+          Write-Host "winget exit=$LASTEXITCODE (not the success criterion)"
+          $missing = Get-Missing
+          if ($missing.Count -ne 0) {
             Get-ChildItem "$oneapi" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  oneAPI dir: $($_.Name)" }
-            throw "Intel oneAPI (MKL + IPP) is not usable after installation — refusing to skip the build."
+            throw ("Intel oneAPI (MKL + IPP) is not usable: missing " + ($missing -join ', ') + " - refusing to skip the build.")
           }
+          Write-Host "oneAPI verified: headers and import libraries present."
+          exit 0
 
       - name: Export oneAPI environment
         shell: pwsh
@@ -140,6 +151,12 @@ jobs:
 
       - name: Configure (Release, MKL required)
         shell: pwsh
+        env:
+          # R-111: CI ランナーには音声デバイスが無い。CMakeLists.txt は
+          #   `DEFINED ENV{CONVO_CI_BUILD}` のとき HeadlessAudioPathVerification を登録しない
+          #   設計（"CI環境は音声デバイスがないためスキップ"）なので、この CI ワークフローでのみ
+          #   定義する。ローカルビルドは環境変数を設定しないため影響を受けない。
+          CONVO_CI_BUILD: "1"
         run: |
           cmake -S . -B $env:BUILD_DIR -G "Ninja Multi-Config" `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `

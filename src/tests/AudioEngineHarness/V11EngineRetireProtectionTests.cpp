@@ -74,82 +74,12 @@ public:
 // ============================================================================
 #include <cstdlib>
 #include <new>
+#include "RtAllocProbe.h"   // U3 (R-107 Stage 3): 計測の単一実装
 
-namespace a2probe {
+// U3 (R-107 Stage 3): operator new / delete の置換は RtAllocProbe.cpp の 1 箇所のみ。
+//   この TU の既存プローブ名（a2probe）は互換のため rtalloc の別名にする。
+namespace a2probe = rtalloc;
 
-inline std::atomic<std::uint64_t>& countRef()
-{
-    static std::atomic<std::uint64_t> c{ 0 };
-    return c;
-}
-
-inline std::atomic<std::uint64_t>& byteRef()
-{
-    static std::atomic<std::uint64_t> b{ 0 };
-    return b;
-}
-
-inline thread_local int t_depth = 0; // NOLINT(thread-local) RT-SAFE: POD int, constant-initialised, no destructor, no allocation, no lock; depth-only test probe state that must never be shared between threads
-
-inline bool active() noexcept { return t_depth > 0; }
-
-inline void reset() noexcept
-{
-    countRef().store(0, std::memory_order_relaxed);
-    byteRef().store(0, std::memory_order_relaxed);
-}
-
-inline std::uint64_t count() noexcept { return countRef().load(std::memory_order_relaxed); }
-inline std::uint64_t bytes() noexcept { return byteRef().load(std::memory_order_relaxed); }
-
-struct Scope
-{
-    Scope() noexcept { ++t_depth; }
-    ~Scope() noexcept { --t_depth; }
-    Scope(const Scope&) = delete;
-    Scope& operator=(const Scope&) = delete;
-};
-
-} // namespace a2probe
-
-// Replacements live at global scope so every TU in this executable resolves to
-// them. The aligned overloads are intentionally NOT replaced: an aligned
-// allocation must keep its matching aligned deallocation.
-void* operator new(std::size_t n)
-{
-    if (a2probe::active())
-    {
-        a2probe::countRef().fetch_add(1, std::memory_order_relaxed);
-        a2probe::byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
-    }
-    void* p = std::malloc(n != 0 ? n : 1);
-    if (p == nullptr) throw std::bad_alloc();
-    return p;
-}
-
-void* operator new[](std::size_t n) { return ::operator new(n); }
-
-void* operator new(std::size_t n, const std::nothrow_t&) noexcept
-{
-    if (a2probe::active())
-    {
-        a2probe::countRef().fetch_add(1, std::memory_order_relaxed);
-        a2probe::byteRef().fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
-    }
-    return std::malloc(n != 0 ? n : 1);
-}
-
-void* operator new[](std::size_t n, const std::nothrow_t&) noexcept
-{
-    return ::operator new(n, std::nothrow);
-}
-
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
-void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
-void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
 
 namespace {
 
@@ -2934,6 +2864,7 @@ bool checkDSPHandleResolveStates()
 
 int runV11EngineRetireProtectionTests()
 {
+    // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
     g_v11eReclaimCalls = 0;
     g_v11eLastReclaimed = nullptr;
 
