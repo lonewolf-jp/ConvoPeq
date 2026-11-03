@@ -2231,6 +2231,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 
     add_executable(AudioEngineHarness
         src/tests/AudioEngineHarness/AudioEngineHarness.cpp
+        # U3 (R-107 Stage 3): RT 経路の新規確保プローブ（このターゲットにのみリンクする）
+        src/tests/AudioEngineHarness/RtAllocProbe.cpp
         src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp
         src/tests/AudioEngineHarness/SoakPublishIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp

@@ -288,13 +288,46 @@ static bool checkSTG82OverwriteTerminalizesEvicted()
                      (unsigned long long)(orch.deferredOverwriteCount() - ow0));
         ok = false;
     }
-    // 安定性: retention loop 中も L==1 && slot 保持。
-    stg8SleepPump(8000);
-    if (stg8LiveCount(e) != 1 || !orch.hasDeferredRequest())
+    // 安定性: retention loop 中も「リークしない（L<=1）」ことと、
+    //   「slot が解放されたなら obligation も終端化される」ことを 8 秒間サンプリングして検証する。
+    //
+    //   旧実装は 8 秒後に「L==1 かつ hasDeferred」を一括で要求していた。これは
+    //   「deferred slot が必ず 8 秒以上保持される」ことを前提にしており、deferred の
+    //   TTL（30 秒）までの残時間や publish 完了タイミングに依存して flaky になっていた
+    //   （CI 実測: 41523395609 の run 4 で `L=1 hasDeferred=0`）。
+    //   検証目的（O1 追い出し後に O1 が残留しない／O2 の保持が壊れない）は変えず、
+    //   時間依存の「瞬間値」ではなく「不変条件」を連続サンプリングで確認する。
     {
-        std::fprintf(stderr, "[STG-8-D2] FAIL: unstable (L=%llu hasDeferred=%d)\n",
-                     (unsigned long long)stg8LiveCount(e), orch.hasDeferredRequest() ? 1 : 0);
-        ok = false;
+        const auto stabilityDeadline = std::chrono::steady_clock::now()
+                                     + std::chrono::milliseconds(8000);
+        while (std::chrono::steady_clock::now() < stabilityDeadline)
+        {
+            stg8SleepPump(100);
+
+            const auto live = stg8LiveCount(e);
+            if (live > 1)
+            {
+                std::fprintf(stderr, "[STG-8-D2] FAIL: leak (L=%llu, want <=1)\n",
+                             static_cast<unsigned long long>(live));
+                ok = false;
+                break;
+            }
+
+            if (!orch.hasDeferredRequest())
+            {
+                // slot が解放された: obligation も終端化されていること（不整合の検出）。
+                //   解放経路には TTL（kDeferredPublishTTLUs = 30 秒）に基づくものがあるため、
+                //   終端化の猶予は TTL を上限とする（30 秒 + 余裕 5 秒）。
+                if (!stg8WaitUntil(35.0, [&] { return stg8LiveCount(e) == 0; }))
+                {
+                    std::fprintf(stderr,
+                                 "[STG-8-D2] FAIL: slot released but obligation live (L=%llu, waited 35s)\n",
+                                 static_cast<unsigned long long>(stg8LiveCount(e)));
+                    ok = false;
+                }
+                break;
+            }
+        }
     }
 
     DeferredPublicationTestAccess::setFadingRuntimePresent(e, false);

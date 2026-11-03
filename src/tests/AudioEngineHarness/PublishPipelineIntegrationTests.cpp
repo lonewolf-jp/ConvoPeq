@@ -28,6 +28,7 @@
 #include <string>
 
 #include "AudioEngineHarness.h"
+#include "RtAllocProbe.h"   // U3 (R-107 Stage 3): RT 経路の新規確保検出（テスト専用）
 #include "audioengine/RuntimeBuilder.h"
 
 // Work91: soak シナリオ（SoakPublishIntegrationTests.cpp）の前方宣言
@@ -1366,8 +1367,51 @@ int runB2DiagSinkTests();
 // ★ A2 -> A3-a: 二重解放と誤状態処理の分離検証（opt-in）。
 int runA2A3aQuarantineTests();
 
+//=== U3 (R-107 Stage 3): RT 経路の新規確保プローブ測定 ======================
+//   CONVOPEQ_RT_ALLOC_PROBE=1（プローブ有効）と
+//   CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms>（このモードの実行）で起動する。
+//   ハーネスを起動して <ms> ミリ秒だけ音声コールバックを走らせ、[U3] 行を出力する。
+//   既定（環境変数なし）ではこの経路に入らない。
+static int runRtAllocProbeLocal(int durationMs)
+{
+    AudioEngineHarness harness;
+    if (!harness.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[U3] harness start failed\n");
+        return 1;
+    }
+    if (!rtalloc::enabled())
+        std::fprintf(stderr, "[U3] probe disabled (set CONVOPEQ_RT_ALLOC_PROBE=1)\n");
+
+    // 陽性対照: プローブが実際に反応することを確認する（rt_alloc=0 の意味を担保）。
+    rtalloc::resetForTest();
+    {
+        rtalloc::RtScope selfCheckScope;
+        int* p = new int(1);
+        *p = 2;
+        delete p;
+    }
+    std::printf("[U3] selfcheck_rt_alloc=%llu (mechanism check: 1 expected in both modes)\n",
+                static_cast<unsigned long long>(rtalloc::count()));
+
+    rtalloc::resetForTest();   // 起動時の確保は測定対象外
+    const int ms = durationMs > 0 ? durationMs : 5000;
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    harness.stop();
+
+    std::printf("[U3] duration_ms=%d blocks=%llu\n",
+                ms, static_cast<unsigned long long>(harness.blocksProcessed()));
+    rtalloc::printReport();
+    return 0;
+}
+
 int main(int argc, char* argv[])
 {
+    // U3 (R-107 Stage 3): RT 経路の新規確保を測るローカル測定モード。
+    //   CONVOPEQ_RT_ALLOC_PROBE=1 かつ CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms> のときだけ動く。
+    if (const char* probeMs = std::getenv("CONVOPEQ_RT_ALLOC_PROBE_RUN"))
+        return runRtAllocProbeLocal(std::atoi(probeMs));
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // 計測モードはエンジン生成・スレッド生成より前に分岐する（計画 v5.3 §2.2）。
     if (std::getenv("B2_STAGE1_MEASURE") != nullptr)
