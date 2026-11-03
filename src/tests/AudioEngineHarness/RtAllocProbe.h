@@ -47,7 +47,7 @@ inline std::atomic<std::uint64_t>& maxByteRef() noexcept
     return m;
 }
 
-inline thread_local int t_depth = 0;   // RT 区間の深さ（POD・定数初期化・デストラクタなし）
+inline thread_local int t_depth = 0; // NOLINT(thread-local) RT-SAFE: POD int, constant-initialised, no destructor, no allocation, no lock; depth-only test probe state that must never be shared between threads
 
 [[nodiscard]] inline bool enabled() noexcept
 {
