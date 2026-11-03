@@ -390,9 +390,21 @@ dispatch 検証の経過:
 |---|---|---|
 | R-111 | `HeadlessAudioPathVerification` が音声デバイスの無い CI ランナーで FAIL する | **修正済み**: `windows-msvc-build.yml` の Configure に `CONVO_CI_BUILD=1` を設定（登録 1→0 を実証）。CI で最終確認 |
 | R-112 | `checkSTG8ClearTerminalizesObligation` の flaky（`hasDeferred still true after clear`） | **PR #107 で修正**（ctest 13 連続 PASS） |
-| R-113 | `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`） | **修正済み**: 固定 8 秒判定を不変条件サンプリングへ変更（解放時は TTL 相当 35 秒で終端化を要求）。Release 2 回とも rc=0 |
+| R-113 | `checkSTG82OverwriteTerminalizesEvicted` の flaky（`[STG-8-D2] FAIL: unstable (L=1 hasDeferred=0)`） | **修正済み**: 固定 8 秒判定を不変条件サンプリングへ変更（解放時は TTL 30 秒＋余裕 5 秒の 35 秒で終端化を要求）。Release **16 回すべて rc=0**、Debug 1/1、ASan CI PASS |
 | — | oneAPI 導入ステップの `winget` 非 0 による FAIL | **修正済み**: 終了コードを成功判定に使わず、ヘッダ＋lib 4 点で判定（両 workflow） |
-| — | U3（RT 経路の新規確保検出） | **実装・実測完了**: 陽性対照 1、RT 確保 **0**（6,470 ブロック）。既定 OFF・テスト限定 |
+| — | U3（RT 経路の新規確保検出） | **実装・実測完了**: 陽性対照 1、RT 確保 **0**（6,470 ブロック／5 秒、38,208 ブロック／30 秒）。既定 OFF・テスト限定 |
+
+### 10.6 R-106 指標再定義の技術判断案（Owner 承認待ち）
+
+R-106 は **FAIL・判定保留のまま**据え置く。判定を動かさず、指標定義の選択肢だけを技術判断案として提出した。
+
+- 提案文書: `R106-METRIC-REDEFINITION-PROPOSAL-20261103.md`
+- 提案の核: 主判定を p99 の非劣性検定（片側 Welch t、α=0.05、差 5%）へ移し、`late50us=0` などのゲートを測定成立条件として分離する。max は記録専用（OFF の 2 倍超で警告）とし、合否に使わない。
+- 根拠: `late50us=0`（20/20）で max は周期超過ではない。σ(max) 280〜403 µs は判定幅 +50 µs の 5.6〜8.1 倍で、5 組の検出力は 0.04〜0.05。検出力 0.8 には 390〜873 組/アーム（40〜89 時間/アーム）が必要。
+- p99 の検出力: 無音 1.000（n=5）、1 kHz 0.871（n=5）／0.928（n=6）。推奨は 6 組/アーム。
+- 既存 20 実行の参考値: 無音 ON/OFF 98.91%（p=0.0002）、1 kHz 99.28%（p=0.0047）。**参考値であり合格扱いにしない**。
+- 決定依頼: D1 v2 採用の可否、D2 既存データでの再判定の可否、D3 不採用時のクローズ可否。
+- 測定器の既定 OFF は維持。製品コードは変更しない。
 
 
 ## 附録
