@@ -436,6 +436,20 @@ R-106 は **FAIL・判定保留のまま**据え置く。判定を動かさず�
 - 詳細: `R106-METRIC-V2-RESULT-20261103.md`、証跡 `metric-v2-evidence-20261103.zip`
 
 
+### 10.8 R-101 / R-102 の現行 main 再確認（2026-11-04）
+
+`main` = `ecfdb244`（U4・U3・R-106 ドライバ込み）で両方を再実行した。
+
+| 項目 | 結果 |
+|---|---|
+| R-101 `41665191767` | success。5/5 回 rc=0、各回 `[H2R1] trials=40 mixed_trials=0 max_mixed_ms=0.0 distinct_worlds=80`（PASS）。run 全体 **61.0 分**（60 分基準は 1 分超過。oneAPI 導入 10.7 分が原因で、コード要因ではない） |
+| R-102 `41665198158` | success。`CONVO_CI_BUILD: 1`、`1/1 Test #49: AudioEngineHarness ... Passed 319.11 sec`、診断 3 ステップ success |
+| R-107 U4 | `7dfb21d4`（PR #108）が main の祖先。変更なし |
+| R-107 U3 | `e89c66fe`（PR #114）が main の祖先。変更なし |
+
+- 既存の合格 5 件（49.2 / 59.8 / 52.8 / 59.6 / 59.8 分）は維持し、本実行は現行 main での機能再現の証跡として追加する。
+- 詳細: `R101-R102-RECHECK-20261104.md`
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
