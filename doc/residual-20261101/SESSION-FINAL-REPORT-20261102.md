@@ -162,12 +162,14 @@ Owner 指示書（R-101 / R-102 / R-106 / R-107 / R-108）に基づく実施結�
 
 | 種別 | 内容 |
 |---|---|
-| main の CI | push `a83d10ba`: Windows MSVC **success**、ISR Authority **success**、Sanitizer CI / CodeQL 実行 |
+| main の CI | push `a83d10ba` / `e89c66fe` / `bfaa9c9e`: Windows MSVC **success**、ISR Authority **success** |
 | PR #105 / #106 | それぞれ 12 pass / 0 fail |
-| PR #107 | 13 pass / ASan のみ pending |
-| PR #108 | 13 pass / ASan のみ pending |
-| ローカル | Release ctest（`build-ci-local` 2 回・`build` 1 回）rc=0、STG-8-CLEAR PASS、U4 locks PASS |
-| 測定 | 20 実行・sha256 記録・`late50us=0` |
+| PR #107 / #108 | マージ済み（ASan を含め全チェック pass） |
+| PR #114（U3） | **14 pass / 0 fail**（ASan 含む） |
+| PR #115（記録＋ConvoPeq.md） | **12 pass / 0 fail**（ASan 含む） |
+| dispatch `41580647837` | `CONVO_CI_BUILD: 1` で `1/1 Test #49: AudioEngineHarness ... Passed 297.42 sec`、`100% tests passed out of 1`。oneAPI は「oneAPI verified: headers and import libraries present.」 |
+| ローカル | Release ctest 計 16 回 rc=0（`build`）、Debug 1/1 rc=0、lint PASS |
+| 測定 | 20 実行・sha256 記録・`late50us=0`、U3 プローブ `rt_alloc=0`（6,470 / 38,208 ブロック） |
 
 ## 8. 未解決・Owner 判断事項
 
