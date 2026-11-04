@@ -515,6 +515,16 @@ Owner 指示（全開発成果の統合・作業環境一本化・残課題整�
 - 残課題: `RESIDUAL-ISSUES-20261104.md`（8 分類）。維持事項は U5 未承認、R-101 初回ミス時、フレーク監視、`[U5ATTR]` 保持。技術的負債 3 件は不具合なし。
 - 記録: `SESSION-INVENTORY-20261104.md`、`INTEGRATION-LOG-20261104.md`、`FINAL-REPORT-20261104-FULL-INTEGRATION.md`。
 
+### 14. 2026-11-05 放置・未完成・未修正バグの棚卸し
+
+`main` = `89c48a02` 時点で、未完成の修正・機能、放置された作業、未修正の欠陥候補を洗い直した。詳細は `RESIDUAL-ISSUES-20261105.md`。
+
+- 未修正・未確定の欠陥候補 3 件: ポリフェーズ利得の不対称（案 E が既定 OFF。採用判断は材料充足、既定 ON は HOLD、設計意図かは未確定、`RES2-01`）、`isBadSample` のスカラー／AVX2 閾値不一致（`RES2-02`）、SoftClip 局所 OS の遅延定数 15 が未実測（`RES2-03`）。
+- 途中で止まっている修正・機能 5 件: F-4/D2b 記録消失（調査停止、`RES2-04`）、B2 Stage 2/3（`RES2-05`）、A2 本番適用（`RES2-06`）、U5 製品有効化（`RES2-07`）、`EngineRuntime` 単一 atomic 統合（`RES2-08`）。
+- 検証の穴 4 件: TSan の best-effort（`RES2-11`）、soak の手動実行のみ（`RES2-12`）、TX-02／TX-10 の Waived（`RES2-13`）、`FFTBackendTests` の現状確認止まり（`RES2-14`）。
+- 技術的負債 6 件: CMA 状態の部分永続化、elite 再評価、`D8_1` の陳腐化コメント、Worker のアサーション欠落、Phase-II 送り項目、`.venv` の Python 3.14 消滅（`RES2-15`〜`RES2-20`）。
+- 既に修正済みで「未修正」と誤読されやすい項目（H-01・C-01・B-2 診断クラッシュ・A2 assert・STG-8 フレーク・`.gitignore` のフェンス行・ddgs の uvx パス）は、同書 §9 に分離して除外した。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
