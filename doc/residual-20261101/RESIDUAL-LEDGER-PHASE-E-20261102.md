@@ -504,6 +504,17 @@ R-106 は **FAIL・判定保留のまま**据え置く。判定を動かさず�
 - 残存: message-thread 専用の読み（`currentPublicationEpoch` 等）は reclaimer と同一スレッドのため未変更。将来 worker から呼ぶ場合は同じ契約が必要。
 - 詳細: `READER-MEMORY-SAFETY-R13-20261104.md`
 
+### 13. 2026-11-04 全セッション成果の統合監査
+
+Owner 指示（全開発成果の統合・作業環境一本化・残課題整理）に基づく最終監査。
+
+- セッション: 全 14。リポジトリ成果を持つのは `main-develop` のみ（他は Notion 監査 10・形式検証 2・応答検証 1 で、ブランチ・worktree・未コミット変更を持たない）。
+- 統合: PR **#105〜#125**（21 件）が main に統合済み。未統合の完成成果は 0。意図的未統合は `measure/u5-20261102`（`[U5ATTR]`）のみ。
+- 状態: `main` = `origin/main` = `38075a7a`、未コミット 0 件、worktree 1 本、リモートブランチは `main` のみ、アーカイブタグ 42 本。
+- ConvoPeq.md: LF 6,482,434 B / `a3784c44…`、`--check` FRESH。
+- 残課題: `RESIDUAL-ISSUES-20261104.md`（8 分類）。維持事項は U5 未承認、R-101 初回ミス時、フレーク監視、`[U5ATTR]` 保持。技術的負債 3 件は不具合なし。
+- 記録: `SESSION-INVENTORY-20261104.md`、`INTEGRATION-LOG-20261104.md`、`FINAL-REPORT-20261104-FULL-INTEGRATION.md`。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
