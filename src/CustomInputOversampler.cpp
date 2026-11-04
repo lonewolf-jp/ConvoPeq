@@ -9,6 +9,7 @@
 #include <immintrin.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "CorruptSampleGuard.h"
 
 namespace
 {
@@ -23,13 +24,8 @@ namespace
 
     inline bool isBadSample(double x) noexcept
     {
-        const uint64_t bits = std::bit_cast<uint64_t>(x);
-        const uint64_t exp = bits & 0x7FF0000000000000ULL;
-        if (exp == 0x7FF0000000000000ULL)
-            return true;
-
-        constexpr uint64_t limit = 0x4340000000000000ULL;
-        return (bits & 0x7FFFFFFFFFFFFFFFULL) > limit;
+        // RES2-02 (O-20): shared limit so the scalar and AVX2 guards agree.
+        return convo::numeric_policy::isCorruptSample(x);
     }
 
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
@@ -39,12 +35,8 @@ namespace
     /// halfband 非連続インデックスでも set_pd 後に一括チェック可能
     [[maybe_unused]] inline bool isBadSampleV(__m256d v) noexcept
     {
-        // NaN 検出: _CMP_UNORD_Q — v のいずれかが NaN で true
-        const __m256d vNanMask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
-        // Inf/絶対値 > limit 検出
-        const __m256d vAbs = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
-        const __m256d vInfMask = _mm256_cmp_pd(vAbs, _mm256_set1_pd(1e20), _CMP_GT_OQ);
-        return _mm256_movemask_pd(_mm256_or_pd(vNanMask, vInfMask)) != 0;
+        // RES2-02 (O-20): same 2^53 limit as the scalar guard (shared helper).
+        return _mm256_movemask_pd(convo::numeric_policy::corruptSampleMask4(v)) != 0;
     }
 
     /// @brief Stride-2 で4要素を半帯域履歴バッファからロード

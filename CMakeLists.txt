@@ -301,6 +301,23 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # V-09: structural checks must inspect THIS worktree, explicitly.
     set_tests_properties(D8_1_WrapperCacheTests PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
 
+    # ★ RES2-02 (O-20): scalar and AVX2 corruption guards must share one limit.
+    add_executable(CorruptSampleGuardTests
+        src/tests/CorruptSampleGuardTests.cpp
+    )
+    target_include_directories(CorruptSampleGuardTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_features(CorruptSampleGuardTests PRIVATE cxx_std_20)
+    target_compile_options(CorruptSampleGuardTests PRIVATE /utf-8)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CorruptSampleGuardTests PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CorruptSampleGuardTests PRIVATE /QxCORE-AVX2)
+    endif()
+    add_test(NAME CorruptSampleGuardTests COMMAND CorruptSampleGuardTests)
+
     # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
     add_executable(D8_2_B_2_Tests
         src/tests/D8_2_B_2_Tests.cpp
