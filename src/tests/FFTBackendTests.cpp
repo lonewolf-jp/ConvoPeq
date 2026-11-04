@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <vector>
 
 #include "FFTBackend.h"
 #include "FFTExecutionContext.h"
@@ -194,6 +196,86 @@ using convo::FFTExecutionContext;
     return true;
 }
 
+//==============================================================================
+// Test 8: ProductionFft output correctness (round trip + tone bin)
+//   RES2-14: the suite only checked hasPlan/isPlanValid, so a broken transform
+//   would pass. These checks compare against the input signal.
+//==============================================================================
+[[nodiscard]] bool testProductionFftOutputCorrectness()
+{
+    constexpr int N = 1024;
+    constexpr int toneBin = 7;
+    constexpr double pi = 3.14159265358979323846;
+
+    ProductionFft::Plan plan = ProductionFft::createPlan(N);
+    if (!plan.isValid())
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: createPlan(%d) returned an invalid plan\n", N);
+        return false;
+    }
+
+    std::vector<double> input(static_cast<size_t>(N));
+    std::vector<double> ccs(static_cast<size_t>(N) + 2);
+    std::vector<double> output(static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i)
+    {
+        input[static_cast<size_t>(i)] =
+            0.25 + 0.5 * std::sin(2.0 * pi * static_cast<double>(toneBin) * static_cast<double>(i) / static_cast<double>(N));
+    }
+
+    ProductionFft fft;
+    if (fft.forwardRealToCCS(plan, input.data(), ccs.data()) != FftStatus::Ok)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: forwardRealToCCS failed\n");
+        ProductionFft::destroyPlan(plan);
+        return false;
+    }
+    if (fft.inverseCCSToR(plan, ccs.data(), output.data()) != FftStatus::Ok)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: inverseCCSToR failed\n");
+        ProductionFft::destroyPlan(plan);
+        return false;
+    }
+
+    double maxRoundTripError = 0.0;
+    for (int i = 0; i < N; ++i)
+        maxRoundTripError = std::max(maxRoundTripError,
+                                     std::fabs(output[static_cast<size_t>(i)] - input[static_cast<size_t>(i)]));
+
+    // CCS packing: bin 0 (DC) at [0]; bin k >= 1 as (re, im) at [2k], [2k+1].
+    const double dcBin = ccs[0];
+    const double toneRe = ccs[2 * toneBin];
+    const double toneIm = ccs[2 * toneBin + 1];
+    const double toneMagnitude = std::sqrt(toneRe * toneRe + toneIm * toneIm);
+
+    const double expectedDc = 0.25 * static_cast<double>(N);
+    const double expectedTone = 0.5 * static_cast<double>(N) / 2.0;
+
+    std::printf("[INFO] testProductionFftOutputCorrectness: roundTripMaxErr=%.3e dc=%.6f (exp %.6f) tone=%.6f (exp %.6f)\n",
+                maxRoundTripError, dcBin, expectedDc, toneMagnitude, expectedTone);
+
+    ProductionFft::destroyPlan(plan);
+
+    if (maxRoundTripError > 1.0e-9)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: round-trip error too large\n");
+        return false;
+    }
+    if (std::fabs(dcBin - expectedDc) > 1.0e-6)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: DC bin mismatch\n");
+        return false;
+    }
+    if (std::fabs(toneMagnitude - expectedTone) > 1.0e-6)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: tone bin magnitude mismatch\n");
+        return false;
+    }
+
+    std::printf("[PASS] testProductionFftOutputCorrectness\n");
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -210,6 +292,7 @@ int main()
     allPassed &= testExecutionContextNullGuard();
     allPassed &= testExecutionContextSetPlan();
     allPassed &= testFftStageStableIntegers();
+    allPassed &= testProductionFftOutputCorrectness();
 
     if (allPassed)
     {
