@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-03 22:53:52
+> Generated: 2026-11-04 17:12:34
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -7761,7 +7761,7 @@ public:
     [[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
         const RuntimePublishWorld* newWorld,
         const convo::isr::DSPHandle& newHandle,
-        const convo::isr::DSPHandle& oldHandle) const noexcept;
+        const convo::isr::DSPHandle& oldHandle) noexcept;
 
     // ★ Phase-2.5: DSPTransition 等から HealthEvent を非同期投入
     //   DSPTransition は Non-RT スレッドで動作するため、onHealthEvent を直接呼び出しても安全。
@@ -10025,8 +10025,18 @@ public:
             break;
         }
 
+        // ★ R-13 (reader memory safety): enter the reader BEFORE the first world load.
+        //   The epoch captured at enter bounds every retirement this scope can observe;
+        //   loading first leaves the load→deref window unregistered (the exact window
+        //   ScopedEpochReader documents). Fail-closed: no world pointer is exposed when
+        //   the guard could not be established.
+        auto observed = m_coordinator.observeCurrentRuntime(ctx.reader);
+        const bool readerProtected = observed.guard.rootEnterSucceeded();
+
         const auto readToken = worldAuthority_.acquireReadToken();
-        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
+        const auto* world = readerProtected
+            ? worldAuthority_.consumeWorldHandle(readToken)
+            : nullptr;
         if (world != nullptr)
         {
             const int slot = juce::jlimit(0, convo::kObserveChannelCount - 1,
@@ -10080,8 +10090,6 @@ public:
             updateMinMetric(oldestObservedGeneration_, currentGeneration);
             updateMaxMetric(youngestObservedGeneration_, currentGeneration);
         }
-
-        auto observed = m_coordinator.observeCurrentRuntime(ctx.reader);
 
         return RuntimeReadHandle {
             std::move(observed),
@@ -19609,8 +19617,16 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 [[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
     const RuntimePublishWorld* newWorld,
     const convo::isr::DSPHandle& newHandle,
-    const convo::isr::DSPHandle& oldHandle) const noexcept
+    const convo::isr::DSPHandle& oldHandle) noexcept
 {
+    // ★ R-13 (reader memory safety): this producer helper is reached from the Message
+    //   thread, the RebuildThread and CoordinatorLoop workers. Register a reader before
+    //   observing the published world so the message-thread reclaimer cannot free the
+    //   previous world while its fields are read here. Fail-closed on enter failure.
+    convo::RCUReader decisionReader { getRetireRouter() };
+    const convo::RCUReaderGuard decisionGuard (decisionReader);
+    const bool worldProtected = decisionGuard.rootEnterSucceeded();
+
     convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot snapshot;
     snapshot.newHandle = newHandle;
     snapshot.oldHandle = oldHandle;
@@ -19624,7 +19640,7 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
         return snapshot;
     }
 
-    const auto* oldWorld = observePublishedWorld();
+    const auto* oldWorld = worldProtected ? observePublishedWorld() : nullptr;
     if (oldWorld == nullptr)
     {
         snapshot.needsCrossfade = false;
@@ -45242,6 +45258,15 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
+    // ★ R-13 (reader memory safety): this function runs on the Message thread, the
+    //   RebuildThread (deferred resubmit) and CoordinatorLoop workers. Register a reader
+    //   for the scope so the message-thread reclaimer cannot free a world that this
+    //   scope still observes. Fail-closed: without a registered epoch the world is
+    //   treated as absent instead of being dereferenced unprotected.
+    convo::RCUReader submitReader { engine_.getRetireRouter() };
+    const convo::RCUReaderGuard submitReadGuard (submitReader);
+    const bool worldReadProtected = submitReadGuard.rootEnterSucceeded();
+
     // ---- Phase 1: Admission ----
     // ★ evaluate() は必須。バイパス禁止。
     const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
@@ -45321,7 +45346,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     spec.latency.latencyDelayNew = convo::consumeAtomic(engine_.latencyDelayNew, std::memory_order_acquire);
     // ★ v9.5 P1 phase2: currentRuntimeWorld — Orchestrator が現在の Published World を取得し、
     //   Builder はこれを使って makeEngineRuntimeState() を呼ぶ（Runtime Query 完了済み）
-    spec.currentRuntimeWorld = engine_.observePublishedWorld();
+    spec.currentRuntimeWorld = worldReadProtected ? engine_.observePublishedWorld() : nullptr;
     // ProcessingPart: fill from sealedSnapshot (P0 — Builder の暗黙入力を排除)
     {
         const auto& inp = req.sealedSnapshot.buildInput;
@@ -45410,7 +45435,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         PublishStage::Built, nowUs);
 
     // Step 2b: Crossfade decision using RuntimeWorld projection values + Policy
-    const auto* oldWorld = engine_.observePublishedWorld();
+    const auto* oldWorld = worldReadProtected ? engine_.observePublishedWorld() : nullptr;
     if (oldWorld == nullptr)
     {
         DBG("[DIAG] trySubmit: oldWorld is null - skipping crossfade evaluation, proceeding directly");
@@ -142810,6 +142835,62 @@ struct Check
     std::string detail;
 };
 
+// R-13: generic brace-matched body lookup for a fully-qualified signature prefix
+// (e.g. "RuntimeReadHandle makeRuntimeReadHandle(").
+std::string bodyOfMarker (const std::string& source, const std::string& marker)
+{
+    const std::size_t sigPos = source.find (marker);
+
+    if (sigPos == std::string::npos)
+        return {};
+
+    const std::size_t openBrace = source.find ('{', sigPos);
+
+    if (openBrace == std::string::npos)
+        return {};
+
+    int depth = 0;
+
+    for (std::size_t i = openBrace; i < source.size(); ++i)
+    {
+        if (source[i] == '{')
+            ++depth;
+        else if (source[i] == '}')
+        {
+            --depth;
+
+            if (depth == 0)
+                return source.substr (openBrace, i - openBrace + 1);
+        }
+    }
+
+    return {};
+}
+
+// R-13: the guard must be acquired BEFORE the published-world load in the body.
+Check guardBeforeWorld (const std::string& source, const std::string& marker,
+                        const std::string& guardNeedle, const std::string& loadNeedle)
+{
+    const std::string body = bodyOfMarker (source, marker);
+
+    if (body.empty())
+        return { false, "function body not found: " + marker };
+
+    const std::size_t guard = body.find (guardNeedle);
+    const std::size_t load = body.find (loadNeedle);
+
+    if (guard == std::string::npos)
+        return { false, marker + ": missing guard '" + guardNeedle + "'" };
+
+    if (load == std::string::npos)
+        return { false, marker + ": missing world load '" + loadNeedle + "' (contract changed?)" };
+
+    if (! (guard < load))
+        return { false, marker + ": guard must appear BEFORE '" + loadNeedle + "'" };
+
+    return { true, marker + ": guard precedes the world load" };
+}
+
 Check guardBeforeLoad (const std::string& source, const std::string& name)
 {
     const std::string body = functionBody (source, name);
@@ -142852,8 +142933,12 @@ int main()
     const std::string coefficients = readFile ("src/eqprocessor/EQProcessor.Coefficients.cpp");
     const std::string eqResponse = readFile ("src/audioengine/AudioEngine.EQResponse.cpp");
     const std::string rebuild = readFile ("src/audioengine/AudioEngine.RebuildDispatch.cpp");
+    const std::string engineHeader = readFile ("src/audioengine/AudioEngine.h");
+    const std::string orchestrator = readFile ("src/audioengine/RuntimePublicationOrchestrator.cpp");
+    const std::string publication = readFile ("src/audioengine/AudioEngine.Publication.cpp");
 
-    if (core.empty() || coefficients.empty() || eqResponse.empty() || rebuild.empty())
+    if (core.empty() || coefficients.empty() || eqResponse.empty() || rebuild.empty()
+        || engineHeader.empty() || orchestrator.empty() || publication.empty())
     {
         std::fprintf (stderr, "FAIL: cannot read one or more production sources\n");
         return 1;
@@ -142924,6 +143009,47 @@ int main()
             {
                 std::printf ("  [PASS] %s\n", c->detail.c_str());
             }
+        }
+    }
+
+    // 4) R-13: published-world readers must enter a reader scope BEFORE the load.
+    //    These three producers run on the Message thread, the RebuildThread and
+    //    CoordinatorLoop workers; without a registered epoch the message-thread
+    //    reclaimer can free the world inside the load→deref window.
+    {
+        const Check checks[] = {
+            guardBeforeWorld (engineHeader, "RuntimeReadHandle makeRuntimeReadHandle(",
+                              "observeCurrentRuntime", "consumeWorldHandle"),
+            guardBeforeWorld (orchestrator, "RuntimePublicationOrchestrator::trySubmitImpl(",
+                              "RCUReaderGuard submitReadGuard", "observePublishedWorld"),
+            guardBeforeWorld (publication, "AudioEngine::makePublishDecisionSnapshot(",
+                              "RCUReaderGuard decisionGuard", "observePublishedWorld"),
+        };
+
+        for (const auto& c : checks)
+        {
+            if (! c.ok)
+            {
+                std::fprintf (stderr, "FAIL: %s\n", c.detail.c_str());
+                ++failures;
+            }
+            else
+            {
+                std::printf ("  [PASS] %s\n", c.detail.c_str());
+            }
+        }
+
+        // Fail-closed: makeRuntimeReadHandle must consult the guard result.
+        const std::string handleBody = bodyOfMarker (engineHeader, "RuntimeReadHandle makeRuntimeReadHandle(");
+
+        if (handleBody.find ("rootEnterSucceeded()") == std::string::npos)
+        {
+            std::fprintf (stderr, "FAIL: makeRuntimeReadHandle must fail closed on guard failure\n");
+            ++failures;
+        }
+        else
+        {
+            std::printf ("  [PASS] makeRuntimeReadHandle: fail-closed on guard failure\n");
         }
     }
 
