@@ -88,6 +88,62 @@ struct Check
     std::string detail;
 };
 
+// R-13: generic brace-matched body lookup for a fully-qualified signature prefix
+// (e.g. "RuntimeReadHandle makeRuntimeReadHandle(").
+std::string bodyOfMarker (const std::string& source, const std::string& marker)
+{
+    const std::size_t sigPos = source.find (marker);
+
+    if (sigPos == std::string::npos)
+        return {};
+
+    const std::size_t openBrace = source.find ('{', sigPos);
+
+    if (openBrace == std::string::npos)
+        return {};
+
+    int depth = 0;
+
+    for (std::size_t i = openBrace; i < source.size(); ++i)
+    {
+        if (source[i] == '{')
+            ++depth;
+        else if (source[i] == '}')
+        {
+            --depth;
+
+            if (depth == 0)
+                return source.substr (openBrace, i - openBrace + 1);
+        }
+    }
+
+    return {};
+}
+
+// R-13: the guard must be acquired BEFORE the published-world load in the body.
+Check guardBeforeWorld (const std::string& source, const std::string& marker,
+                        const std::string& guardNeedle, const std::string& loadNeedle)
+{
+    const std::string body = bodyOfMarker (source, marker);
+
+    if (body.empty())
+        return { false, "function body not found: " + marker };
+
+    const std::size_t guard = body.find (guardNeedle);
+    const std::size_t load = body.find (loadNeedle);
+
+    if (guard == std::string::npos)
+        return { false, marker + ": missing guard '" + guardNeedle + "'" };
+
+    if (load == std::string::npos)
+        return { false, marker + ": missing world load '" + loadNeedle + "' (contract changed?)" };
+
+    if (! (guard < load))
+        return { false, marker + ": guard must appear BEFORE '" + loadNeedle + "'" };
+
+    return { true, marker + ": guard precedes the world load" };
+}
+
 Check guardBeforeLoad (const std::string& source, const std::string& name)
 {
     const std::string body = functionBody (source, name);
@@ -130,8 +186,12 @@ int main()
     const std::string coefficients = readFile ("src/eqprocessor/EQProcessor.Coefficients.cpp");
     const std::string eqResponse = readFile ("src/audioengine/AudioEngine.EQResponse.cpp");
     const std::string rebuild = readFile ("src/audioengine/AudioEngine.RebuildDispatch.cpp");
+    const std::string engineHeader = readFile ("src/audioengine/AudioEngine.h");
+    const std::string orchestrator = readFile ("src/audioengine/RuntimePublicationOrchestrator.cpp");
+    const std::string publication = readFile ("src/audioengine/AudioEngine.Publication.cpp");
 
-    if (core.empty() || coefficients.empty() || eqResponse.empty() || rebuild.empty())
+    if (core.empty() || coefficients.empty() || eqResponse.empty() || rebuild.empty()
+        || engineHeader.empty() || orchestrator.empty() || publication.empty())
     {
         std::fprintf (stderr, "FAIL: cannot read one or more production sources\n");
         return 1;
@@ -202,6 +262,47 @@ int main()
             {
                 std::printf ("  [PASS] %s\n", c->detail.c_str());
             }
+        }
+    }
+
+    // 4) R-13: published-world readers must enter a reader scope BEFORE the load.
+    //    These three producers run on the Message thread, the RebuildThread and
+    //    CoordinatorLoop workers; without a registered epoch the message-thread
+    //    reclaimer can free the world inside the load→deref window.
+    {
+        const Check checks[] = {
+            guardBeforeWorld (engineHeader, "RuntimeReadHandle makeRuntimeReadHandle(",
+                              "observeCurrentRuntime", "consumeWorldHandle"),
+            guardBeforeWorld (orchestrator, "RuntimePublicationOrchestrator::trySubmitImpl(",
+                              "RCUReaderGuard submitReadGuard", "observePublishedWorld"),
+            guardBeforeWorld (publication, "AudioEngine::makePublishDecisionSnapshot(",
+                              "RCUReaderGuard decisionGuard", "observePublishedWorld"),
+        };
+
+        for (const auto& c : checks)
+        {
+            if (! c.ok)
+            {
+                std::fprintf (stderr, "FAIL: %s\n", c.detail.c_str());
+                ++failures;
+            }
+            else
+            {
+                std::printf ("  [PASS] %s\n", c.detail.c_str());
+            }
+        }
+
+        // Fail-closed: makeRuntimeReadHandle must consult the guard result.
+        const std::string handleBody = bodyOfMarker (engineHeader, "RuntimeReadHandle makeRuntimeReadHandle(");
+
+        if (handleBody.find ("rootEnterSucceeded()") == std::string::npos)
+        {
+            std::fprintf (stderr, "FAIL: makeRuntimeReadHandle must fail closed on guard failure\n");
+            ++failures;
+        }
+        else
+        {
+            std::printf ("  [PASS] makeRuntimeReadHandle: fail-closed on guard failure\n");
         }
     }
 

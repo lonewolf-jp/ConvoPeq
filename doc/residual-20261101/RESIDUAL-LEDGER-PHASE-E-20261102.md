@@ -489,6 +489,21 @@ R-106 は **FAIL・判定保留のまま**据え置く。判定を動かさず�
 
 オープン Issue 0 件、オープン PR なし（#121 はマージ済み）。詳細: `FINAL-AUDIT-20261104.md`
 
+### 12. 2026-11-04 Reader memory safety 再監査（R-13）
+
+最新 main（`6eeb1d42`）で公開 world の read-side を再監査した。
+
+- プロトコル自体は健全: `publishAndSwap` は `acq_rel`、`observe` は `acquire`、retire は `publishEpoch()` で **epoch を前進**させ、`isOlder(retireEpoch, minReaderEpoch)` のときだけ解放する。reader が scope 内なら `minReaderEpoch <= enterEpoch < retireEpoch` で解放されない。
+- 欠陥: **load してから enter する**箇所が 3 つあった。
+  1. `AudioEngine::makeRuntimeReadHandle`（world load → 末尾で enter）
+  2. `RuntimePublicationOrchestrator::trySubmitImpl`（RebuildThread からも実行、guard なし）
+  3. `AudioEngine::makePublishDecisionSnapshot`（producer スレッド、guard なし）
+- 修正: enter を load の前へ移動し、enter 失敗時は world を公開しない（fail-closed）。#2/#3 は局所 `RCUReader`＋`RCUReaderGuard` で保護。
+- 回帰防止: `ScopedEpochReaderStructuralTests` に「guard が world load より前」「fail-closed」の 4 チェックを追加（計 15 チェック）。
+- 検証: Release ビルド rc=0、`AudioEngineHarness` rc=0（297.12 s・100% passed、V11 reader テスト含む）、ASan/TSan は PR で確認。
+- 残存: message-thread 専用の読み（`currentPublicationEpoch` 等）は reclaimer と同一スレッドのため未変更。将来 worker から呼ぶ場合は同じ契約が必要。
+- 詳細: `READER-MEMORY-SAFETY-R13-20261104.md`
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
