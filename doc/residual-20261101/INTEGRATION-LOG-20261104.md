@@ -25,8 +25,9 @@
 | #123 | `6eeb1d42` | 監査記録の記述修正 |
 | #124 | `28cd3d1e` | R-13 Reader guard 順序修正 |
 | #125 | `38075a7a` | ConvoPeq.md 再生成（R-13 反映） |
+| #126 | `e69f20c3` | 全セッション調査・統合履歴・残課題一覧（本文書を含む 5 ファイル） |
 
-現在の `main` = `38075a7a`（origin と一致）。
+`main` は本記録の対象時点（#126 マージ後）で `e69f20c3`（origin と一致）。調査開始時点は `38075a7a`。以降の記録更新は PR 単位で本節に追記し、SHA は各時点の値として扱う。
 
 ## 2. ビルド・テスト結果
 
@@ -42,12 +43,13 @@
 | R-102 診断 | run `41665198158`：`1/1 Test #49 AudioEngineHarness Passed 319.11 s` | CI |
 | metric v2 | 24/24 有効・silence 100.50% / tone1k 99.89%・PASS | #119 |
 | ブランチ整理 | 13 本＋リモート 49 本を削除、タグ 42 本で保存 | #122 |
+| PR #126 の CI | **12 pass / 0 fail / 0 pending**（ASan・TSan・Release・CodeQL・isr-verify ほか） | CI |
 
 ## 3. main とローカルの同一性
 
 | 確認 | 結果 |
 |---|---|
-| `main` / `origin/main` | `38075a7a` / `38075a7a`（差分 0） |
+| `main` / `origin/main` | `e69f20c3` / `e69f20c3`（差分 0、#126 マージ後） |
 | ローカル HEAD | `main` をチェックアウト |
 | 作業ツリー | 未コミット・未追跡 **0 件**、worktree **1 本** |
 | ConvoPeq.md | 6,482,434 B / sha256 `a3784c44…`、`--check` で **FRESH**（`NEWER_SRC_COUNT: 0`） |

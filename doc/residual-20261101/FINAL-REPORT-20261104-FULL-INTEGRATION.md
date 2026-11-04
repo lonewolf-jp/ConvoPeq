@@ -7,20 +7,20 @@ Owner 指示（ConvoPeq 全開発成果の統合・作業環境一本化・残�
 | 完了条件 | 結果 |
 |---|---|
 | 1. 全セッションの成果調査 | 完了（14 セッション。リポジトリ成果は main-develop のみ） |
-| 2. 完成済み成果の main 統合 | 完了（PR #105〜#125、未統合の完成成果なし） |
-| 3. `main` と `C:\VSC_Project\ConvoPeq` の同一性 | **`38075a7a` で一致、差分 0、未コミット 0 件** |
+| 2. 完成済み成果の main 統合 | 完了（PR #105〜#126、未統合の完成成果なし） |
+| 3. `main` と `C:\VSC_Project\ConvoPeq` の同一性 | **`e69f20c3` で一致、差分 0、未コミット 0 件**（#126 マージ後。調査開始時は `38075a7a`） |
 | 4. 開発作業の main-develop 一本化 | 本セッションのみで実施 |
 | 5. 未完成・放置事項の整理 | `RESIDUAL-ISSUES-20261104.md`（8 分類） |
 | 6. ビルド・テスト結果の記録 | `INTEGRATION-LOG-20261104.md` |
 | 7. 最新 ConvoPeq.md | LF 6,482,434 B / `a3784c44…`、`--check` **FRESH** |
-| 8. 成果物の整合性検証 | 本文書の SHA256 表＋Dropbox ダウンロード照合 |
+| 8. 成果物の整合性検証 | §7 の SHA256 記録＋Dropbox ダウンロード照合 |
 | 9. 最終報告書 | 本文書 |
 
 ## 2. Phase A — 現状の確定
 
 | 項目 | 結果 |
 |---|---|
-| `main` / `origin/main` | `38075a7a` / `38075a7a`（一致） |
+| `main` / `origin/main`（調査開始時） | `38075a7a` / `38075a7a`（一致） |
 | 正本 | `C:\VSC_Project\ConvoPeq`（`main` をチェックアウト） |
 | 作業ツリー | 未コミット・未追跡 0 件、worktree 1 本 |
 | ローカルブランチ | `main`、`measure/u5-20261102`（U5ATTR 保持） |
@@ -28,19 +28,30 @@ Owner 指示（ConvoPeq 全開発成果の統合・作業環境一本化・残�
 | アーカイブタグ | 42 本 |
 | セッション | 14（main-develop と、Notion 監査 10・形式検証 2・応答検証 1） |
 
+### 2.1 統合後の状態（#126 マージ後）
+
+| 項目 | 結果 |
+|---|---|
+| `main` / `origin/main` | `e69f20c3` / `e69f20c3`（`docs/session-audit-20261104` をスカッシュマージ） |
+| ローカル HEAD | `main`（`e69f20c3`）をチェックアウト、差分 0 |
+| 作業ツリー | 未コミット・未追跡 0 件、worktree 1 本 |
+| リモートブランチ | `main` のみ（マージ元ブランチは自動削除） |
+
+本文書の数値は #126 マージ直後のスナップショットである。以降の記録更新は PR 単位で追記し、各 SHA はその時点の値として扱う。
+
 ## 3. Phase B — 成果の統合
 
-- main のマージ履歴: PR **#105〜#125**（21 件）。全成果が統合済み。
+- main のマージ履歴: PR **#105〜#126**（22 件）。全成果が統合済み。
 - 未統合の完成済み成果: **なし**。
 - 意図的に未統合: `measure/u5-20261102`（`[U5ATTR]` 測定専用、Owner 指示により保持）。
 - 未完成・放置: **なし**。
-- 直近の統合: R-13 Reader guard 順序修正（#124）→ ConvoPeq.md 再生成（#125）。
+- 直近の統合: R-13 Reader guard 順序修正（#124）→ ConvoPeq.md 再生成（#125）→ 本監査記録（#126 `e69f20c3`）。
 
 ## 4. Phase C — ソースコード一本化
 
 | 確認項目 | 結果 |
 |---|---|
-| ローカル HEAD = `origin/main` | `38075a7a` で一致 |
+| ローカル HEAD = `origin/main` | `e69f20c3` で一致（#126 マージ後） |
 | ローカル main の未コミット変更 | 0 件 |
 | 作業対象ディレクトリ | `C:\VSC_Project\ConvoPeq` |
 | 作業セッション | main-develop のみ |
@@ -60,7 +71,7 @@ Owner 指示（ConvoPeq 全開発成果の統合・作業環境一本化・残�
 | 5. テスト・検証不足 | 1 | R-113／R-111 のフレーク監視 |
 | 6. 技術的負債 | 3 | 未使用 `getRuntimeGraph`、死コード `makeRuntimePublishComputation`、前提の文書依存 |
 | 7. 明示承認待ち | 1 | **U5 製品有効化（未承認・既定 OFF）** |
-| 8. 対応不要・廃止候補 | 4 | U5ATTR ブランチ保持、archive タグ、配信済み証跡、削除済みブランチ |
+| 8. 対応不要・廃止候補 | 5 | U5ATTR ブランチ保持、archive タグ、配信済み証跡、削除済みブランチ、A12 系証跡の現存なし（OBS-05） |
 
 ## 6. ビルド・テスト結果（要約）
 
@@ -72,6 +83,7 @@ Owner 指示（ConvoPeq 全開発成果の統合・作業環境一本化・残�
 | ASan / TSan | PR #124 で success（14 pass / 0 fail） |
 | R-101（キャッシュヒット） | 51.4 分・5/5 PASS |
 | R-102 診断 | 1/1 Passed（319.11 s） |
+| PR #126 の CI | 12 pass / 0 fail / 0 pending |
 
 詳細は `INTEGRATION-LOG-20261104.md`。
 
@@ -84,9 +96,8 @@ Owner 指示（ConvoPeq 全開発成果の統合・作業環境一本化・残�
 | `split/ConvoPeq.part02.md` | 2,097,102 B | `3a7d95a987e31afaa93d419453e1680072d3541635058cca7691448ce665031d` |
 | `split/ConvoPeq.part03.md` | 2,097,124 B | `e0d250ff458135077e80ede7f79837ea22ea9ad88edd5a62ed067e388fc9fbe9` |
 | `split/ConvoPeq.part04.md` | 191,062 B | `2b8735ea191020af8f783157b490318bfb20f31ae54d69031a5c76ddae888c9d` |
-| `SESSION-INVENTORY-20261104.md` | 6,254 B | `ffdc92ed4a176867e603f99e3ad344add85410dcf6532bf46faa96bb615fccbd` |
-| `INTEGRATION-LOG-20261104.md` | 3,528 B | `a00b9d6ff03189a95957fbf4dd7489468c3cf944ddcc0d44e6551fc1e80223fa` |
-| `RESIDUAL-ISSUES-20261104.md` | 5,994 B | `ba8d227339915c2472eeb325c3bc94fa36ffba38076afdd3da3af9169f9ed8d9` |
+
+調査 3 文書（`SESSION-INVENTORY`・`INTEGRATION-LOG`・`RESIDUAL-ISSUES`）と本文書の SHA256 は、配信先の `SHA256SUMS.txt` および作業セッションの最終報告に記録した確定値を正とする。文書を修正すると自身の値が変わるため、本文書には固定値を書かない。
 
 分割の連結は全体とバイト一致（`concat == full: True`）。
 
