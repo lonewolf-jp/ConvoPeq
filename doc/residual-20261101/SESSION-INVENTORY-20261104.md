@@ -34,6 +34,32 @@ Owner 指示（ConvoPeq 全開発成果の統合・作業環境一本化・残�
 
 **判断根拠**: リポジトリに痕跡を残す作業は worktree・ブランチ・コミット・未コミット変更のいずれかに現れる。調査時点で worktree は 1 本（本セッションの作業領域）、ローカルブランチは `main` と `measure/u5-20261102`、リモートは `main` のみ、未コミット 0 件であり、A12・format・exact-reply の各セッションに対応するリポジトリ成果は存在しない。これらのセッションの成果物は Notion 側の文書であり、本リポジトリの対象外である。
 
+### 2.1 他セッションの作業痕跡（読み取り調査）
+
+13 セッションの `directory` を問い合わせたところ、すべてが本セッションと同じ作業領域 `C:\Users\user\.local\share\opencode\worktree\f34893\j195-notion-report` を指していた。A12 系は監査用の subagent セッションで、同じ領域の `.openchamber\phase-d-evidence\` 配下の Markdown を読み書きしている。
+
+| 確認 | 結果 |
+|---|---|
+| セッションのメッセージ走査（13 セッション、計 38 メッセージ） | 参照パスに `ConvoPeq\src`・`CMakeLists.txt`・`build.bat` は **0 件**。参照は `.openchamber\phase-d-evidence\*.md` と `Temp\opencode\a12_bodies\*.txt` のみ |
+| 現作業領域の `.openchamber` | **存在しない**（`doc`・`evidence` のみ） |
+| アーカイブ側（`Temp\opencode\worktree\f34893\j195-notion-report\.openchamber`） | ディレクトリ構造のみでファイル 0 件 |
+| `Temp\opencode\a12_bodies` | ディレクトリのみでファイル 0 件 |
+| A11-3／A12 の監査 Markdown | ディスク上に残存せず。内容はセッションのメッセージ（transcript）にのみ残る |
+
+本作業では削除操作を一切行っていない。したがって「他セッションの作業内容を破棄しない」という制約に抵触しない。A12 系の成果は Notion 監査の証跡であり、ConvoPeq のソースコード・ブランチ・コミットには影響していない（コードパス参照 0 件、リポジトリの未コミット変更 0 件）。
+
+### 2.2 他の複製の確認
+
+「唯一の最新ソースコード置き場」を担保するため、ディスク上の ConvoPeq 複製を走査した。
+
+| 場所 | 状態 |
+|---|---|
+| `C:\VSC_Project\ConvoPeq` | 正本。`main` をチェックアウト、未コミット 0 件 |
+| `C:\VSC_Project\ConvoPeq-preserved` | git リポジトリではない。`A7-8-bright-falcon-doc-20261022-232616` の文書スナップショットのみ |
+| `Temp\opencode\gen2〜gen8\ConvoPeq`、`proposal-stage`、`reconstruct-check` ほか | `.git` は `HEAD`・`config` を欠く残骸（`objects` 等のみ）で `rev-parse` が失敗する。独立した未マージ履歴を持たない |
+
+したがって、正本以外に未統合のコミットや未コミット変更を抱える複製は存在しない。
+
 ## 3. 成果一覧（main 統合済み）
 
 | ID | セッション | 内容 | 状態 | Git 状態 | 依存 | 必要な対応 | 根拠 |
