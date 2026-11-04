@@ -100,14 +100,49 @@ bool test_T2_CacheQueueFullRetention() {
     return true;
 }
 
-// T2b: Actual EQCacheManager::tryEnqueueDeferredMap current behavior (should be true fixed, but currently true)
-// This test will fail after we fix tryEnqueue to correctly return false on QueueFull
-// For now, we document current behavior: tryEnqueue always returns true
-bool test_T2b_CurrentTryEnqueueAlwaysTrue() {
-    // Current EQCacheManager::tryEnqueueDeferredMap always returns true (see Cache.cpp: tryEnqueueDeferredMap)
-    // After fix, it should return false on QueueFull/Shutdown
-    std::printf("[T2b] INFO: current tryEnqueueDeferredMap returns true always (bug) — will be fixed to propagate QueueFull\n");
-    return true; // informational
+// T2b: EQCacheManager::tryEnqueueDeferredMap must propagate the enqueue result.
+//   QueueFull / Shutdown -> false so the caller keeps the map in its fallback list.
+//   The implementation delegates to AudioEngine::enqueueDeferredDeleteNonRt; if it
+//   stops delegating (or returns true unconditionally) this test fails.
+bool test_T2b_TryEnqueuePropagatesResult() {
+    const char* sourceRoot = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    if (sourceRoot == nullptr || sourceRoot[0] == '\0') {
+        std::printf("FAIL T2b: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string sourcePath = std::string(sourceRoot) + "/src/audioengine/AudioEngine.Cache.cpp";
+    FILE* f = fopen(sourcePath.c_str(), "r");
+    if (!f) {
+        std::printf("FAIL T2b: cannot open %s\n", sourcePath.c_str());
+        return false;
+    }
+    char buf[65536];
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    const char* fn = strstr(buf, "tryEnqueueDeferredMap(CacheMap* map) noexcept");
+    if (fn == nullptr) {
+        std::printf("FAIL T2b: tryEnqueueDeferredMap not found in AudioEngine.Cache.cpp\n");
+        return false;
+    }
+    const char* stop = fn + 400;
+    if (stop > buf + n) stop = buf + n;
+    const size_t len = static_cast<size_t>(stop - fn);
+    char body[512];
+    const size_t copy = len < sizeof(body) - 1 ? len : sizeof(body) - 1;
+    memcpy(body, fn, copy);
+    body[copy] = '\0';
+
+    const bool nullGuard = strstr(body, "map == nullptr") != nullptr;
+    const bool propagates = strstr(body, "return owner.enqueueDeferredDeleteNonRt") != nullptr;
+    std::printf("[T2b] nullGuard=%d propagates=%d\n", nullGuard ? 1 : 0, propagates ? 1 : 0);
+    if (!nullGuard || !propagates) {
+        std::printf("FAIL T2b: tryEnqueueDeferredMap must return owner.enqueueDeferredDeleteNonRt(map, ...)\n");
+        return false;
+    }
+    std::printf("[T2b] PASS: tryEnqueueDeferredMap propagates QueueFull/Shutdown as false\n");
+    return true;
 }
 
 bool test_T3_CacheRetry() {
@@ -197,7 +232,7 @@ int main() {
     bool ok = true;
     ok &= test_T1_WrapperSemantics();
     ok &= test_T2_CacheQueueFullRetention();
-    ok &= test_T2b_CurrentTryEnqueueAlwaysTrue();
+    ok &= test_T2b_TryEnqueuePropagatesResult();
     ok &= test_T3_CacheRetry();
     ok &= test_T4_NoDoubleRetire();
     ok &= test_T5_Conservation();
