@@ -50,8 +50,16 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 [[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot AudioEngine::makePublishDecisionSnapshot(
     const RuntimePublishWorld* newWorld,
     const convo::isr::DSPHandle& newHandle,
-    const convo::isr::DSPHandle& oldHandle) const noexcept
+    const convo::isr::DSPHandle& oldHandle) noexcept
 {
+    // ★ R-13 (reader memory safety): this producer helper is reached from the Message
+    //   thread, the RebuildThread and CoordinatorLoop workers. Register a reader before
+    //   observing the published world so the message-thread reclaimer cannot free the
+    //   previous world while its fields are read here. Fail-closed on enter failure.
+    convo::RCUReader decisionReader { getRetireRouter() };
+    const convo::RCUReaderGuard decisionGuard (decisionReader);
+    const bool worldProtected = decisionGuard.rootEnterSucceeded();
+
     convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot snapshot;
     snapshot.newHandle = newHandle;
     snapshot.oldHandle = oldHandle;
@@ -65,7 +73,7 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
         return snapshot;
     }
 
-    const auto* oldWorld = observePublishedWorld();
+    const auto* oldWorld = worldProtected ? observePublishedWorld() : nullptr;
     if (oldWorld == nullptr)
     {
         snapshot.needsCrossfade = false;

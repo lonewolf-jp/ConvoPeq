@@ -41,6 +41,15 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
+    // ★ R-13 (reader memory safety): this function runs on the Message thread, the
+    //   RebuildThread (deferred resubmit) and CoordinatorLoop workers. Register a reader
+    //   for the scope so the message-thread reclaimer cannot free a world that this
+    //   scope still observes. Fail-closed: without a registered epoch the world is
+    //   treated as absent instead of being dereferenced unprotected.
+    convo::RCUReader submitReader { engine_.getRetireRouter() };
+    const convo::RCUReaderGuard submitReadGuard (submitReader);
+    const bool worldReadProtected = submitReadGuard.rootEnterSucceeded();
+
     // ---- Phase 1: Admission ----
     // ★ evaluate() は必須。バイパス禁止。
     const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
@@ -120,7 +129,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     spec.latency.latencyDelayNew = convo::consumeAtomic(engine_.latencyDelayNew, std::memory_order_acquire);
     // ★ v9.5 P1 phase2: currentRuntimeWorld — Orchestrator が現在の Published World を取得し、
     //   Builder はこれを使って makeEngineRuntimeState() を呼ぶ（Runtime Query 完了済み）
-    spec.currentRuntimeWorld = engine_.observePublishedWorld();
+    spec.currentRuntimeWorld = worldReadProtected ? engine_.observePublishedWorld() : nullptr;
     // ProcessingPart: fill from sealedSnapshot (P0 — Builder の暗黙入力を排除)
     {
         const auto& inp = req.sealedSnapshot.buildInput;
@@ -209,7 +218,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
         PublishStage::Built, nowUs);
 
     // Step 2b: Crossfade decision using RuntimeWorld projection values + Policy
-    const auto* oldWorld = engine_.observePublishedWorld();
+    const auto* oldWorld = worldReadProtected ? engine_.observePublishedWorld() : nullptr;
     if (oldWorld == nullptr)
     {
         DBG("[DIAG] trySubmit: oldWorld is null - skipping crossfade evaluation, proceeding directly");

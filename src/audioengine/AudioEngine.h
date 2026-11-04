@@ -1286,7 +1286,7 @@ public:
     [[nodiscard]] convo::isr::RuntimeIntentCoordinator::PublishDecisionSnapshot makePublishDecisionSnapshot(
         const RuntimePublishWorld* newWorld,
         const convo::isr::DSPHandle& newHandle,
-        const convo::isr::DSPHandle& oldHandle) const noexcept;
+        const convo::isr::DSPHandle& oldHandle) noexcept;
 
     // ★ Phase-2.5: DSPTransition 等から HealthEvent を非同期投入
     //   DSPTransition は Non-RT スレッドで動作するため、onHealthEvent を直接呼び出しても安全。
@@ -3550,8 +3550,18 @@ public:
             break;
         }
 
+        // ★ R-13 (reader memory safety): enter the reader BEFORE the first world load.
+        //   The epoch captured at enter bounds every retirement this scope can observe;
+        //   loading first leaves the load→deref window unregistered (the exact window
+        //   ScopedEpochReader documents). Fail-closed: no world pointer is exposed when
+        //   the guard could not be established.
+        auto observed = m_coordinator.observeCurrentRuntime(ctx.reader);
+        const bool readerProtected = observed.guard.rootEnterSucceeded();
+
         const auto readToken = worldAuthority_.acquireReadToken();
-        const auto* world = worldAuthority_.consumeWorldHandle(readToken);
+        const auto* world = readerProtected
+            ? worldAuthority_.consumeWorldHandle(readToken)
+            : nullptr;
         if (world != nullptr)
         {
             const int slot = juce::jlimit(0, convo::kObserveChannelCount - 1,
@@ -3605,8 +3615,6 @@ public:
             updateMinMetric(oldestObservedGeneration_, currentGeneration);
             updateMaxMetric(youngestObservedGeneration_, currentGeneration);
         }
-
-        auto observed = m_coordinator.observeCurrentRuntime(ctx.reader);
 
         return RuntimeReadHandle {
             std::move(observed),
