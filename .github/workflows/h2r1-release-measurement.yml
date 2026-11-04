@@ -60,10 +60,35 @@ jobs:
       # windows-latest には oneAPI が常備されていないため、
       #   windows-msvc-build.yml / sanitizer-ci.yml と同じ方法で導入する。
       #   winget の終了コードではなく mkl.h / ipp.h の実在で判定する（fail closed）。
+      # R-101: MKL/IPP のインストール先をキャッシュし、2 回目以降は winget を実行しない。
+      - name: Restore oneAPI (MKL + IPP) cache
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          # latest は Intel インストーラが作るシンボリックリンクのため、
+          # 実体のバージョン付きディレクトリを保存する（復元後に junction を作り直す）。
+          path: |
+            C:\Program Files (x86)\Intel\oneAPI\mkl\2025.1
+            C:\Program Files (x86)\Intel\oneAPI\ipp\2022.1
+          key: oneapi-mkl-ipp-${{ runner.os }}-mkl2025.1-ipp2022.1-v2
+
       - name: Install Intel oneAPI (MKL + IPP) via winget
         shell: pwsh
         run: |
           $oneapi = $env:ONEAPI_ROOT_DIR
+          Write-Host "oneAPI cache hit: ${{ steps.oneapi-cache.outputs.cache-hit }}"
+          # latest が無い（キャッシュ復元直後）場合は実体への junction を作る。
+          foreach ($comp in @('mkl','ipp')) {
+            $latest = Join-Path $oneapi "$comp\latest"
+            if (Test-Path $latest) { continue }
+            $ver = Get-ChildItem (Join-Path $oneapi $comp) -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match '^\d{4}\.\d+$' } |
+                   Sort-Object Name -Descending | Select-Object -First 1
+            if ($ver) {
+              cmd /c mklink /J "$latest" "$($ver.FullName)" | Out-Null
+              Write-Host "created junction: $latest -> $($ver.FullName)"
+            }
+          }
           # 必要物: ヘッダだけでなく import ライブラリも確認する（ヘッダのみで成功扱いにしない）。
           $required = [ordered]@{
             'mkl.h'        = "$oneapi\mkl\latest\include\mkl.h"

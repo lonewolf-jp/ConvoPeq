@@ -80,10 +80,40 @@ jobs:
           }
           ninja --version
 
+      # R-101: oneAPI (MKL + IPP) の導入をキャッシュする。
+      #   MKL/IPP の lib と include は自己完結しており、MKLROOT/IPPROOT を明示するため
+      #   インストール先の mkl\latest と ipp\latest をそのまま保存・復元できる。
+      #   hit: 復元だけで 4 点チェックを通る（winget を実行しない）
+      #   miss: 従来どおり winget で導入し、ジョブ終了時にキャッシュへ保存する
+      #   失敗時: 復元できなければ 4 点チェックが失敗し、winget 導入へフォールバックする
+      - name: Restore oneAPI (MKL + IPP) cache
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          # latest は Intel インストーラが作るシンボリックリンクのため、
+          # 実体のバージョン付きディレクトリを保存する（復元後に junction を作り直す）。
+          path: |
+            C:\Program Files (x86)\Intel\oneAPI\mkl\2025.1
+            C:\Program Files (x86)\Intel\oneAPI\ipp\2022.1
+          key: oneapi-mkl-ipp-${{ runner.os }}-mkl2025.1-ipp2022.1-v2
+
       - name: Install Intel oneAPI (MKL + IPP) via winget
         shell: pwsh
         run: |
           $oneapi = $env:ONEAPI_ROOT_DIR
+          Write-Host "oneAPI cache hit: ${{ steps.oneapi-cache.outputs.cache-hit }}"
+          # latest が無い（キャッシュ復元直後）場合は実体への junction を作る。
+          foreach ($comp in @('mkl','ipp')) {
+            $latest = Join-Path $oneapi "$comp\latest"
+            if (Test-Path $latest) { continue }
+            $ver = Get-ChildItem (Join-Path $oneapi $comp) -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match '^\d{4}\.\d+$' } |
+                   Sort-Object Name -Descending | Select-Object -First 1
+            if ($ver) {
+              cmd /c mklink /J "$latest" "$($ver.FullName)" | Out-Null
+              Write-Host "created junction: $latest -> $($ver.FullName)"
+            }
+          }
           # 必要物: ヘッダだけでなく import ライブラリも確認する（ヘッダのみで成功扱いにしない）。
           $required = [ordered]@{
             'mkl.h'        = "$oneapi\mkl\latest\include\mkl.h"
@@ -293,19 +323,61 @@ jobs:
           }
           ninja --version
 
+      - name: Restore oneAPI (MKL + IPP) cache
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          # latest は Intel インストーラが作るシンボリックリンクのため、
+          # 実体のバージョン付きディレクトリを保存する（復元後に junction を作り直す）。
+          path: |
+            C:\Program Files (x86)\Intel\oneAPI\mkl\2025.1
+            C:\Program Files (x86)\Intel\oneAPI\ipp\2022.1
+          key: oneapi-mkl-ipp-${{ runner.os }}-mkl2025.1-ipp2022.1-v2
+
       - name: Install Intel oneAPI (MKL + IPP) via winget
         shell: pwsh
         run: |
           $oneapi = $env:ONEAPI_ROOT_DIR
-          if ((Test-Path "$oneapi\mkl\latest\include\mkl.h") -and (Test-Path "$oneapi\ipp\latest\include\ipp.h")) {
-            Write-Host "oneAPI (MKL + IPP) already present."
+          Write-Host "oneAPI cache hit: ${{ steps.oneapi-cache.outputs.cache-hit }}"
+          # latest が無い（キャッシュ復元直後）場合は実体への junction を作る。
+          foreach ($comp in @('mkl','ipp')) {
+            $latest = Join-Path $oneapi "$comp\latest"
+            if (Test-Path $latest) { continue }
+            $ver = Get-ChildItem (Join-Path $oneapi $comp) -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match '^\d{4}\.\d+$' } |
+                   Sort-Object Name -Descending | Select-Object -First 1
+            if ($ver) {
+              cmd /c mklink /J "$latest" "$($ver.FullName)" | Out-Null
+              Write-Host "created junction: $latest -> $($ver.FullName)"
+            }
+          }
+          # 必要物: ヘッダだけでなく import ライブラリも確認する（ヘッダのみで成功扱いにしない）。
+          $required = [ordered]@{
+            'mkl.h'        = "$oneapi\mkl\latest\include\mkl.h"
+            'ipp.h'        = "$oneapi\ipp\latest\include\ipp.h"
+            'mkl_core.lib' = "$oneapi\mkl\latest\lib\mkl_core.lib"
+            'ippcore.lib'  = "$oneapi\ipp\latest\lib\ippcore.lib"
+          }
+          function Get-Missing {
+            @($required.GetEnumerator() | Where-Object { -not (Test-Path $_.Value) } | ForEach-Object { $_.Key })
+          }
+          $missing = Get-Missing
+          if ($missing.Count -eq 0) {
+            Write-Host "oneAPI (MKL + IPP) already present and complete (headers + import libraries)."
             exit 0
           }
+          Write-Host "missing before install: $($missing -join ', ')"
+          winget --version
           winget install --id Intel.OneAPI.BaseToolkit -e --silent `
             --accept-package-agreements --accept-source-agreements --disable-interactivity
-          $mkl = Test-Path "$oneapi\mkl\latest\include\mkl.h"
-          $ipp = Test-Path "$oneapi\ipp\latest\include\ipp.h"
-          if (-not ($mkl -and $ipp)) { throw "Intel oneAPI (MKL + IPP) is not usable — refusing to skip." }
+          Write-Host "winget exit=$LASTEXITCODE (not the success criterion)"
+          $missing = Get-Missing
+          if ($missing.Count -ne 0) {
+            Get-ChildItem "$oneapi" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  oneAPI dir: $($_.Name)" }
+            throw ("Intel oneAPI (MKL + IPP) is not usable: missing " + ($missing -join ', ') + " - refusing to skip.")
+          }
+          Write-Host "oneAPI verified: headers and import libraries present."
+          exit 0
 
       - name: Export oneAPI environment
         shell: pwsh
