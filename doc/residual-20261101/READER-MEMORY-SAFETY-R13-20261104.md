@@ -54,7 +54,7 @@ retire が epoch を前進させるため、reader が enter した時点の epo
 | Release ビルド | rc=0（AudioEngineHarness 588 s／アプリ全体 1,162 s） |
 | `ScopedEpochReaderStructuralTests` | **PASS（15 チェック、新規 4 含む）** |
 | `AudioEngineHarness` スイート | rc=0・297.12 s・100% tests passed（V11 reader テスト含む） |
-| ASan / TSan（CI） | @@CI@@ |
+| ASan / TSan（CI） | PR #124 で **14 pass / 0 fail**（ASan・TSan とも success） |
 
 ## 5. 残存リスクと判断
 
