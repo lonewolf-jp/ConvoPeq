@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-04 17:12:34
+> Generated: 2026-11-05 03:46:50
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -212,6 +212,7 @@
         │   ├── Types.h
         │   ├── WorkerThread.cpp
         │   └── WorkerThread.h
+        ├── CorruptSampleGuard.h
         ├── CpuFeatureCheck.cpp
         ├── CpuFeatureCheck.h
         ├── CustomInputOversampler.cpp
@@ -346,6 +347,7 @@
         │   │   └── WorldRetirementMeasurementTests.cpp
         │   ├── BuildErrorClassificationTests.cpp
         │   ├── BuildInputSemanticContractTests.cpp
+        │   ├── CorruptSampleGuardTests.cpp
         │   ├── CrossfadeExecutorLocalContractTests.cpp
         │   ├── D8_1_WrapperCacheTests.cpp
         │   ├── D8_2_B_2_Tests.cpp
@@ -1060,6 +1062,23 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME D8_1_WrapperCacheTests COMMAND D8_1_WrapperCacheTests)
     # V-09: structural checks must inspect THIS worktree, explicitly.
     set_tests_properties(D8_1_WrapperCacheTests PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
+
+    # ★ RES2-02 (O-20): scalar and AVX2 corruption guards must share one limit.
+    add_executable(CorruptSampleGuardTests
+        src/tests/CorruptSampleGuardTests.cpp
+    )
+    target_include_directories(CorruptSampleGuardTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_features(CorruptSampleGuardTests PRIVATE cxx_std_20)
+    target_compile_options(CorruptSampleGuardTests PRIVATE /utf-8)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CorruptSampleGuardTests PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CorruptSampleGuardTests PRIVATE /QxCORE-AVX2)
+    endif()
+    add_test(NAME CorruptSampleGuardTests COMMAND CorruptSampleGuardTests)
 
     # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
     add_executable(D8_2_B_2_Tests
@@ -64716,6 +64735,61 @@ private:
 
 ```
 
+### 📄 `src\CorruptSampleGuard.h`
+
+```
+//============================================================================
+// CorruptSampleGuard.h
+//
+// RES2-02 (O-20): one definition of the "corrupt magnitude" limit, shared by
+// the scalar and the AVX2 guards. Previously the scalar guard compared against
+// 2^53 while the AVX2 guard compared against 1e20, so the same sample could be
+// treated as corruption on one path and as normal data on the other.
+//
+// The limit is 2^53: the largest magnitude at which every integer is exactly
+// representable in a double. Anything above it, or NaN/Inf, is corruption.
+//============================================================================
+#pragma once
+
+#include <bit>
+#include <cstdint>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+namespace convo::numeric_policy
+{
+    inline constexpr double kCorruptMagnitudeLimit = 9007199254740992.0; // 2^53
+    inline constexpr std::uint64_t kCorruptMagnitudeBits = 0x4340000000000000ULL; // bit pattern of 2^53
+
+    static_assert(std::bit_cast<std::uint64_t>(kCorruptMagnitudeLimit) == kCorruptMagnitudeBits,
+                  "Corrupt magnitude limit must be the bit pattern of 2^53");
+
+    /// Scalar guard: NaN, Inf, or |x| > 2^53.
+    [[nodiscard]] inline bool isCorruptSample(double x) noexcept
+    {
+        const std::uint64_t bits = std::bit_cast<std::uint64_t>(x);
+        const std::uint64_t exp = bits & 0x7FF0000000000000ULL;
+        if (exp == 0x7FF0000000000000ULL)
+            return true; // NaN or Inf
+        return (bits & 0x7FFFFFFFFFFFFFFFULL) > kCorruptMagnitudeBits;
+    }
+
+#if defined(__AVX2__)
+    /// AVX2 guard: per-lane corruption mask (NaN, Inf, or |x| > 2^53).
+    [[nodiscard]] inline __m256d corruptSampleMask4(__m256d v) noexcept
+    {
+        const __m256d vNan = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+        const __m256d vAbs = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
+        const __m256d vBig = _mm256_cmp_pd(vAbs, _mm256_set1_pd(kCorruptMagnitudeLimit), _CMP_GT_OQ);
+        return _mm256_or_pd(vNan, vBig);
+    }
+#endif
+} // namespace convo::numeric_policy
+
+```
+
 ### 📄 `src\CpuFeatureCheck.cpp`
 
 ```
@@ -64925,6 +64999,7 @@ bool checkAVX2SupportAndWarn() noexcept;
 #include <immintrin.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "CorruptSampleGuard.h"
 
 namespace
 {
@@ -64939,13 +65014,8 @@ namespace
 
     inline bool isBadSample(double x) noexcept
     {
-        const uint64_t bits = std::bit_cast<uint64_t>(x);
-        const uint64_t exp = bits & 0x7FF0000000000000ULL;
-        if (exp == 0x7FF0000000000000ULL)
-            return true;
-
-        constexpr uint64_t limit = 0x4340000000000000ULL;
-        return (bits & 0x7FFFFFFFFFFFFFFFULL) > limit;
+        // RES2-02 (O-20): shared limit so the scalar and AVX2 guards agree.
+        return convo::numeric_policy::isCorruptSample(x);
     }
 
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
@@ -64955,12 +65025,8 @@ namespace
     /// halfband 非連続インデックスでも set_pd 後に一括チェック可能
     [[maybe_unused]] inline bool isBadSampleV(__m256d v) noexcept
     {
-        // NaN 検出: _CMP_UNORD_Q — v のいずれかが NaN で true
-        const __m256d vNanMask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
-        // Inf/絶対値 > limit 検出
-        const __m256d vAbs = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
-        const __m256d vInfMask = _mm256_cmp_pd(vAbs, _mm256_set1_pd(1e20), _CMP_GT_OQ);
-        return _mm256_movemask_pd(_mm256_or_pd(vNanMask, vInfMask)) != 0;
+        // RES2-02 (O-20): same 2^53 limit as the scalar guard (shared helper).
+        return _mm256_movemask_pd(convo::numeric_policy::corruptSampleMask4(v)) != 0;
     }
 
     /// @brief Stride-2 で4要素を半帯域履歴バッファからロード
@@ -122858,6 +122924,143 @@ int main()
 
 ```
 
+### 📄 `src\tests\CorruptSampleGuardTests.cpp`
+
+```
+//============================================================================
+// CorruptSampleGuardTests.cpp
+//
+// RES2-02 (O-20): the scalar guard and the AVX2 guard used different limits
+// (2^53 vs 1e20). These checks pin the shared limit and require both paths to
+// agree on the same samples.
+//============================================================================
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <limits>
+#include <vector>
+
+#include "CorruptSampleGuard.h"
+
+namespace
+{
+    using convo::numeric_policy::isCorruptSample;
+
+    bool checkLimitConstant()
+    {
+        if (convo::numeric_policy::kCorruptMagnitudeBits != 0x4340000000000000ULL)
+        {
+            std::printf("FAIL limit: kCorruptMagnitudeBits is not 2^53\n");
+            return false;
+        }
+        if (convo::numeric_policy::kCorruptMagnitudeLimit != 9007199254740992.0)
+        {
+            std::printf("FAIL limit: kCorruptMagnitudeLimit is not 2^53\n");
+            return false;
+        }
+        std::printf("[PASS] limit constant is 2^53\n");
+        return true;
+    }
+
+    struct Case
+    {
+        double value;
+        bool expectCorrupt;
+        const char* label;
+    };
+
+    std::vector<Case> makeCases()
+    {
+        constexpr double two53 = 9007199254740992.0;
+        return {
+            { 0.0, false, "0" },
+            { 1.0, false, "1" },
+            { -1.0, false, "-1" },
+            { two53, false, "2^53" },
+            { -two53, false, "-2^53" },
+            { std::nextafter(two53, std::numeric_limits<double>::infinity()), true, "2^53+1ulp" },
+            { std::nextafter(-two53, -std::numeric_limits<double>::infinity()), true, "-2^53-1ulp" },
+            { 1.0e20, true, "1e20" },
+            { 1.0e300, true, "1e300" },
+            { std::numeric_limits<double>::infinity(), true, "+inf" },
+            { -std::numeric_limits<double>::infinity(), true, "-inf" },
+            { std::numeric_limits<double>::quiet_NaN(), true, "NaN" },
+        };
+    }
+
+    bool checkScalarGuard()
+    {
+        bool ok = true;
+        for (const auto& c : makeCases())
+        {
+            const bool got = isCorruptSample(c.value);
+            if (got != c.expectCorrupt)
+            {
+                std::printf("FAIL scalar: %s -> %d (expected %d)\n", c.label, got ? 1 : 0, c.expectCorrupt ? 1 : 0);
+                ok = false;
+            }
+        }
+        if (ok)
+            std::printf("[PASS] scalar guard matches the 2^53 boundary\n");
+        return ok;
+    }
+
+#if defined(__AVX2__)
+    bool checkAvx2GuardAgrees()
+    {
+        const auto cases = makeCases();
+        bool ok = true;
+        for (size_t base = 0; base < cases.size(); base += 4)
+        {
+            alignas(32) double lanes[4] = { 0.0, 0.0, 0.0, 0.0 };
+            for (size_t lane = 0; lane < 4 && base + lane < cases.size(); ++lane)
+                lanes[lane] = cases[base + lane].value;
+
+            const __m256d v = _mm256_load_pd(lanes);
+            const int mask = _mm256_movemask_pd(convo::numeric_policy::corruptSampleMask4(v));
+            for (size_t lane = 0; lane < 4 && base + lane < cases.size(); ++lane)
+            {
+                const bool laneCorrupt = (mask & (1 << lane)) != 0;
+                const bool scalar = isCorruptSample(cases[base + lane].value);
+                if (laneCorrupt != scalar)
+                {
+                    std::printf("FAIL avx2: %s lane mask=%d scalar=%d\n",
+                                cases[base + lane].label, laneCorrupt ? 1 : 0, scalar ? 1 : 0);
+                    ok = false;
+                }
+            }
+        }
+        if (ok)
+            std::printf("[PASS] AVX2 guard agrees with the scalar guard\n");
+        return ok;
+    }
+#else
+    bool checkAvx2GuardAgrees()
+    {
+        std::printf("[SKIP] AVX2 guard: built without __AVX2__\n");
+        return true;
+    }
+#endif
+} // namespace
+
+int main()
+{
+    bool allPassed = true;
+    allPassed &= checkLimitConstant();
+    allPassed &= checkScalarGuard();
+    allPassed &= checkAvx2GuardAgrees();
+
+    if (allPassed)
+    {
+        std::printf("CorruptSampleGuardTests: PASS\n");
+        return 0;
+    }
+    std::printf("CorruptSampleGuardTests: FAIL\n");
+    return 1;
+}
+
+```
+
 ### 📄 `src\tests\CrossfadeExecutorLocalContractTests.cpp`
 
 ```
@@ -123044,14 +123247,49 @@ bool test_T2_CacheQueueFullRetention() {
     return true;
 }
 
-// T2b: Actual EQCacheManager::tryEnqueueDeferredMap current behavior (should be true fixed, but currently true)
-// This test will fail after we fix tryEnqueue to correctly return false on QueueFull
-// For now, we document current behavior: tryEnqueue always returns true
-bool test_T2b_CurrentTryEnqueueAlwaysTrue() {
-    // Current EQCacheManager::tryEnqueueDeferredMap always returns true (see Cache.cpp: tryEnqueueDeferredMap)
-    // After fix, it should return false on QueueFull/Shutdown
-    std::printf("[T2b] INFO: current tryEnqueueDeferredMap returns true always (bug) — will be fixed to propagate QueueFull\n");
-    return true; // informational
+// T2b: EQCacheManager::tryEnqueueDeferredMap must propagate the enqueue result.
+//   QueueFull / Shutdown -> false so the caller keeps the map in its fallback list.
+//   The implementation delegates to AudioEngine::enqueueDeferredDeleteNonRt; if it
+//   stops delegating (or returns true unconditionally) this test fails.
+bool test_T2b_TryEnqueuePropagatesResult() {
+    const char* sourceRoot = std::getenv("CONVOPEQ_SOURCE_ROOT");
+    if (sourceRoot == nullptr || sourceRoot[0] == '\0') {
+        std::printf("FAIL T2b: CONVOPEQ_SOURCE_ROOT is not set\n");
+        return false;
+    }
+    const std::string sourcePath = std::string(sourceRoot) + "/src/audioengine/AudioEngine.Cache.cpp";
+    FILE* f = fopen(sourcePath.c_str(), "r");
+    if (!f) {
+        std::printf("FAIL T2b: cannot open %s\n", sourcePath.c_str());
+        return false;
+    }
+    char buf[65536];
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    const char* fn = strstr(buf, "tryEnqueueDeferredMap(CacheMap* map) noexcept");
+    if (fn == nullptr) {
+        std::printf("FAIL T2b: tryEnqueueDeferredMap not found in AudioEngine.Cache.cpp\n");
+        return false;
+    }
+    const char* stop = fn + 400;
+    if (stop > buf + n) stop = buf + n;
+    const size_t len = static_cast<size_t>(stop - fn);
+    char body[512];
+    const size_t copy = len < sizeof(body) - 1 ? len : sizeof(body) - 1;
+    memcpy(body, fn, copy);
+    body[copy] = '\0';
+
+    const bool nullGuard = strstr(body, "map == nullptr") != nullptr;
+    const bool propagates = strstr(body, "return owner.enqueueDeferredDeleteNonRt") != nullptr;
+    std::printf("[T2b] nullGuard=%d propagates=%d\n", nullGuard ? 1 : 0, propagates ? 1 : 0);
+    if (!nullGuard || !propagates) {
+        std::printf("FAIL T2b: tryEnqueueDeferredMap must return owner.enqueueDeferredDeleteNonRt(map, ...)\n");
+        return false;
+    }
+    std::printf("[T2b] PASS: tryEnqueueDeferredMap propagates QueueFull/Shutdown as false\n");
+    return true;
 }
 
 bool test_T3_CacheRetry() {
@@ -123141,7 +123379,7 @@ int main() {
     bool ok = true;
     ok &= test_T1_WrapperSemantics();
     ok &= test_T2_CacheQueueFullRetention();
-    ok &= test_T2b_CurrentTryEnqueueAlwaysTrue();
+    ok &= test_T2b_TryEnqueuePropagatesResult();
     ok &= test_T3_CacheRetry();
     ok &= test_T4_NoDoubleRetire();
     ok &= test_T5_Conservation();
@@ -128089,6 +128327,8 @@ int main()
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <vector>
 
 #include "FFTBackend.h"
 #include "FFTExecutionContext.h"
@@ -128269,6 +128509,86 @@ using convo::FFTExecutionContext;
     return true;
 }
 
+//==============================================================================
+// Test 8: ProductionFft output correctness (round trip + tone bin)
+//   RES2-14: the suite only checked hasPlan/isPlanValid, so a broken transform
+//   would pass. These checks compare against the input signal.
+//==============================================================================
+[[nodiscard]] bool testProductionFftOutputCorrectness()
+{
+    constexpr int N = 1024;
+    constexpr int toneBin = 7;
+    constexpr double pi = 3.14159265358979323846;
+
+    ProductionFft::Plan plan = ProductionFft::createPlan(N);
+    if (!plan.isValid())
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: createPlan(%d) returned an invalid plan\n", N);
+        return false;
+    }
+
+    std::vector<double> input(static_cast<size_t>(N));
+    std::vector<double> ccs(static_cast<size_t>(N) + 2);
+    std::vector<double> output(static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i)
+    {
+        input[static_cast<size_t>(i)] =
+            0.25 + 0.5 * std::sin(2.0 * pi * static_cast<double>(toneBin) * static_cast<double>(i) / static_cast<double>(N));
+    }
+
+    ProductionFft fft;
+    if (fft.forwardRealToCCS(plan, input.data(), ccs.data()) != FftStatus::Ok)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: forwardRealToCCS failed\n");
+        ProductionFft::destroyPlan(plan);
+        return false;
+    }
+    if (fft.inverseCCSToR(plan, ccs.data(), output.data()) != FftStatus::Ok)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: inverseCCSToR failed\n");
+        ProductionFft::destroyPlan(plan);
+        return false;
+    }
+
+    double maxRoundTripError = 0.0;
+    for (int i = 0; i < N; ++i)
+        maxRoundTripError = std::max(maxRoundTripError,
+                                     std::fabs(output[static_cast<size_t>(i)] - input[static_cast<size_t>(i)]));
+
+    // CCS packing: bin 0 (DC) at [0]; bin k >= 1 as (re, im) at [2k], [2k+1].
+    const double dcBin = ccs[0];
+    const double toneRe = ccs[2 * toneBin];
+    const double toneIm = ccs[2 * toneBin + 1];
+    const double toneMagnitude = std::sqrt(toneRe * toneRe + toneIm * toneIm);
+
+    const double expectedDc = 0.25 * static_cast<double>(N);
+    const double expectedTone = 0.5 * static_cast<double>(N) / 2.0;
+
+    std::printf("[INFO] testProductionFftOutputCorrectness: roundTripMaxErr=%.3e dc=%.6f (exp %.6f) tone=%.6f (exp %.6f)\n",
+                maxRoundTripError, dcBin, expectedDc, toneMagnitude, expectedTone);
+
+    ProductionFft::destroyPlan(plan);
+
+    if (maxRoundTripError > 1.0e-9)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: round-trip error too large\n");
+        return false;
+    }
+    if (std::fabs(dcBin - expectedDc) > 1.0e-6)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: DC bin mismatch\n");
+        return false;
+    }
+    if (std::fabs(toneMagnitude - expectedTone) > 1.0e-6)
+    {
+        std::printf("FAIL testProductionFftOutputCorrectness: tone bin magnitude mismatch\n");
+        return false;
+    }
+
+    std::printf("[PASS] testProductionFftOutputCorrectness\n");
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -128285,6 +128605,7 @@ int main()
     allPassed &= testExecutionContextNullGuard();
     allPassed &= testExecutionContextSetPlan();
     allPassed &= testFftStageStableIntegers();
+    allPassed &= testProductionFftOutputCorrectness();
 
     if (allPassed)
     {
