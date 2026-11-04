@@ -2,7 +2,9 @@
 
 ## 結論
 
-現行 `main`（`89c48a02`）と全記録を照合した結果、**未修正の欠陥候補が 3 件**（RES2-01〜03）、**途中で止まっている修正・機能が 5 件**（RES2-04〜08）、**検証・テストの穴が 4 件**（RES2-11〜14）、**技術的負債が 6 件**（RES2-15〜20）、**性能・運用の既知事項が 2 件**（RES2-09〜10）だった。いずれもコードまたは記録に根拠があり、推測は含めていない。
+2026-11-05 時点の現行 `main` と全記録を照合した結果、**未修正の欠陥候補が 3 件**（RES2-01〜03）、**途中で止まっている修正・機能が 5 件**（RES2-04〜08）、**検証・テストの穴が 4 件**（RES2-11〜14）、**技術的負債が 6 件**（RES2-15〜20）、**性能・運用の既知事項が 2 件**（RES2-09〜10）だった。
+
+同日、修正着手可能と判定した 3 件（RES2-02・RES2-14・RES2-17）を修正して main に統合した（§11）。残りは **未修正の欠陥候補 2 件・停止中の修正／機能 5 件・検証の穴 3 件・技術的負債 5 件・運用 2 件**である。
 
 過去の記録で「未修正」と書かれていても、現在は修正済みのもの（H-01・C-01・B-2 診断クラッシュ・A2 assert・`.gitignore` のフェンス行）は §9 に分離し、残課題から除外した。
 
@@ -11,7 +13,7 @@
 | 分類 | ID | 要点 | 優先度 |
 |---|---|---|---|
 | 正確性 | RES2-01 | ポリフェーズ利得の不対称（案 E が既定 OFF） | P2 |
-| 正確性 | RES2-02 | `isBadSample` のスカラー／AVX2 閾値不一致 | P3 |
+| 正確性 | RES2-02 | `isBadSample` のスカラー／AVX2 閾値不一致 → **修正済み**（#131） | P3 |
 | 正確性 | RES2-03 | SoftClip 局所 OS の遅延定数が未実測 | P2 |
 | バグ修正 | RES2-04 | F-4/D2b の記録消失（調査停止中） | P3 |
 | 機能 | RES2-05 | B2 Stage 2/3 未着手 | P2 |
@@ -23,10 +25,10 @@
 | 検証 | RES2-11 | TSan が best-effort（合否に影響しない） | P3 |
 | 検証 | RES2-12 | soak が手動トリガのみ | P3 |
 | 検証 | RES2-13 | TX-02／TX-10 の実機試験が Waived | P3 |
-| 検証 | RES2-14 | `FFTBackendTests` が現状確認止まり | P3 |
+| 検証 | RES2-14 | `FFTBackendTests` が現状確認止まり → **修正済み**（#130） | P3 |
 | 負債 | RES2-15 | CMA 状態の部分永続化 | P3 |
 | 負債 | RES2-16 | elite 再評価が実質再実行 | P3 |
-| 負債 | RES2-17 | `D8_1` の T2b コメントが陳腐化 | P3 |
+| 負債 | RES2-17 | `D8_1` の T2b コメントが陳腐化 → **修正済み**（#129） | P3 |
 | 負債 | RES2-18 | Worker スレッドのアサーション欠落 | P3 |
 | 負債 | RES2-19 | `Superseded` 等の Phase-II 送り | — |
 | 負債 | RES2-20 | `.venv` が Python 3.14 消滅で使用不能 | P3 |
@@ -174,3 +176,17 @@
 - icx Release ビルド（`build-icx`）で `SequenceArithmeticTests`・`DSPHandleTableTests`・`ScopedEpochReaderStructuralTests`・`MpscBoundedRingTests` を実行し、いずれも exit 0。
 - コード上の根拠はファイル・行番号で示した。記録のみを根拠にした項目は、記録側の該当箇所を併記した。
 - 未確認の推測（例: 実機での可聴影響）は本報告に含めていない。
+
+## 11. 2026-11-05 の処理結果（修正 3 件）
+
+計画（`doc/work113/20261105-1200_RES2処理計画/PLAN.md`）に沿って、修正着手可能と判定した 3 件を独立した PR で処理した。
+
+| ID | 修正前 | 修正内容 | 変更 | 検証 | PR / 統合 |
+|---|---|---|---|---|---|
+| RES2-17 | `D8_1_WrapperCacheTests` の T2b が「tryEnqueue は常に true（バグ）」と記載（実装は修正済み） | T2b をソース契約の検査へ変更。null ガードと `return owner.enqueueDeferredDeleteNonRt(map, ...)` を要求 | `src/tests/D8_1_WrapperCacheTests.cpp` | icx Release: `D8_1_WrapperCacheTests` Passed 0.14 s | #129 → `65afa479` |
+| RES2-14 | `FFTBackendTests` は `hasPlan`/`isPlanValid` のみ | 1024 点で往復誤差 ≤ 1e-9、DC ビン 0.25×N、単一トーン bin 7 の振幅 0.5×N/2 を検査 | `src/tests/FFTBackendTests.cpp` | icx Release: `FFTBackendTests` Passed 0.12 s | #130 → `951e8b9c` |
+| RES2-02 | スカラーは `abs(x) > 2^53`、AVX2 は `abs(x) > 1e20` | 閾値と両判定を `CorruptSampleGuard.h` に集約し 2^53 へ統一。境界テストを追加 | `src/CorruptSampleGuard.h`、`src/CustomInputOversampler.cpp`、`src/tests/CorruptSampleGuardTests.cpp`、`CMakeLists.txt` | `CorruptSampleGuardTests` Passed 0.17 s、`PolyphaseGainFidelityTests` Passed 1.45 s、`ConvoPeq` 再リンク成功 | #131 → `ad19211c` |
+
+- 3 PR の CI はいずれも 14 pass / 0 fail / 0 pending（ASan を含む）。
+- 製品の RT 制約に対する追加はない（RES2-02 は既存 inline 判定の定数統一のみ、他 2 件はテストのみ）。
+- 未承認機能（案 E・U5・B2 Stage 2/3・A2 本番適用）には触れていない。
