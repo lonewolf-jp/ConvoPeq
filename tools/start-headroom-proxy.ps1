@@ -1,3 +1,6 @@
+# DEPRECATED 2026-11-05 (RES2-20): the headroom proxy is retired in this project.
+# Kept for reference only. Do not run: the proxy must not be used.
+
 param(
     [switch]$Stop,
     [switch]$Status

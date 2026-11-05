@@ -55,7 +55,22 @@
 | CI 非依存 | `.github` に参照が無いことを再確認する |
 | 端末差 | `HEADROOM_EXE` 未設定でも uv ツールがあれば動く |
 
-## 4. 実装手順（未実施）
+## 4. 実装結果（2026-11-05）
+
+Owner の承認（移行実装）を受けて実施した。`.venv` の再作成・削除は行っていない。
+
+| 対象 | 処置 | 確認 |
+|---|---|---|
+| `test_headroom_mcp_tools.py` | `HEADROOM_EXE` → uv ツール → `.venv` の順で解決するよう変更 | 実行して exit 0。`compress` と `stats` が応答 |
+| `find_headroom_process.py` | `psutil` を廃止し、CIM（PowerShell）でプロセスを取得。自分自身と問い合わせプロセスを除外 | 実行して MCP 4 件を検出、8787 は CLOSED、exit 0 |
+| `verify_headroom_proxy.py` | 非推奨ヘッダを追加（削除はしない） | — |
+| `headroom-proxy-bench.ps1` | 非推奨ヘッダを追加 | — |
+| `start-headroom-proxy.ps1` | 非推奨ヘッダを追加 | — |
+
+- プロセス検出の精度: 実行ファイル名またはコマンドラインに `headroom.exe` を含むものだけを対象にした。これにより、`headroom` の語を含むだけの PowerShell や実行中のスクリプト自身を誤検出しない。
+- 失った情報: 開いているファイルハンドルの一覧（CIM では取得できない）。プロセス名・PID・コマンドライン・8787 の疎通は維持している。
+
+## 5. 実装手順（当初案）
 
 1. `test_headroom_mcp_tools.py` の実行ファイル解決を 3.1 の順に変える。
 2. `find_headroom_process.py` を `psutil` 非依存へ書き換えるか、uv ツールの Python で実行する形にする。

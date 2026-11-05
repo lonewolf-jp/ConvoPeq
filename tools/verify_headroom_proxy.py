@@ -1,3 +1,8 @@
+"""DEPRECATED 2026-11-05 (RES2-20): the headroom proxy is retired in this project.
+
+Kept for reference only. Do not run: the proxy must not be used. MCP and CLI
+remain supported.
+"""
 import json, urllib.request, urllib.error, subprocess, os
 
 PROXY = 'http://127.0.0.1:8787'

@@ -77,7 +77,20 @@
 
 - 必須化後にフレークが再発した場合は、該当テストを一時除外し、除外理由と issue 番号を対象リストに書く。除外のまま必須化を維持しない。
 
-## 10. 安定性評価基準
+## 10. 実測（2026-11-05）
+
+| 項目 | 結果 |
+|---|---|
+| 直近 30 run の結論 | success 26、未完了 4（実行中） |
+| 完了済み run の TSan ジョブ時間 | 0.4〜1.1 分（10 run の標本） |
+| ログの判定 | `[TSan] Skipped (no build configured — MKL/IPP not available on Linux)` |
+| 実行された TSan テスト | 0（標本すべて skip） |
+
+- `Check MKL/IPP availability` は clang++ の有無だけを見るため skip=false になる。しかし Configure は MKL/IPP 不在で失敗し、`build.ninja` が無いため Build ステップが skip する。結果としてジョブは success になる。
+- つまり **success 26 件は TSan の実行を意味しない**。skip 率は標本で 100% である。
+- C2（直近 30 run で fail 0、skip 0）は現状で充足しない。必須化の前に、Linux で configure が通る対象を固定する必要がある。
+
+## 11. 安定性評価基準
 
 | 基準 | 閾値 | 測定 |
 |---|---|---|

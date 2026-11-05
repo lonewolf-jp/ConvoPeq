@@ -1,35 +1,82 @@
-"""Find processes that have headroom.exe open."""
-import psutil
+"""Find headroom processes and check the proxy port.
 
-headroom_path = r'C:\VSC_Project\ConvoPeq\.venv\Scripts\headroom.exe'
-
-found = False
-for proc in psutil.process_iter(['pid', 'name', 'exe', 'open_files', 'cmdline']):
-    try:
-        if proc.info['exe'] and headroom_path.lower() in proc.info['exe'].lower():
-            print(f'EXE MATCH: PID={proc.info["pid"]} NAME={proc.info["name"]}')
-            found = True
-
-        if proc.info['open_files']:
-            for f in proc.info['open_files']:
-                if f.path and headroom_path.lower() in f.path.lower():
-                    print(f'FILE MATCH: PID={proc.info["pid"]} PATH={f.path}')
-                    found = True
-
-        if proc.info['cmdline']:
-            cmd = ' '.join(proc.info['cmdline'])
-            if 'headroom' in cmd.lower() and 'proxy' in cmd.lower():
-                print(f'PROXY MATCH: PID={proc.info["pid"]} CMD={cmd[:200]}')
-                found = True
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
-
-if not found:
-    print('No headroom processes found via psutil')
-
-# Also check what's on port 8787
+Migrated 2026-11-05 (RES2-20): the psutil dependency is gone. Process data comes
+from CIM through Windows PowerShell, so the script runs on the stock Python.
+Detection covers process name, command line and the 8787 port. Open-file handles
+are not enumerated: CIM does not expose them, and the proxy is retired anyway.
+"""
+import json
+import os
 import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-result = s.connect_ex(('127.0.0.1', 8787))
-s.close()
-print(f'Port 8787 connect test: {"OPEN" if result == 0 else "CLOSED"}')
+import subprocess
+
+CIM_QUERY = (
+    "Get-CimInstance Win32_Process | "
+    "Where-Object { $_.Name -eq 'headroom.exe' -or $_.CommandLine -match 'headroom\\.exe' } | "
+    "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+)
+
+
+def list_processes():
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", CIM_QUERY],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 - report and continue
+        print(f"CIM query failed: {exc}")
+        return []
+    out = (completed.stdout or "").strip()
+    if not out:
+        return []
+    try:
+        rows = json.loads(out)
+    except json.JSONDecodeError as exc:
+        print(f"CIM output was not JSON: {exc}")
+        return []
+    return rows if isinstance(rows, list) else [rows]
+
+
+def classify(cmd):
+    low = (cmd or "").lower()
+    if "mcp" in low:
+        return "MCP"
+    if "proxy" in low:
+        return "PROXY"
+    return "OTHER"
+
+
+def check_port(port=8787):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        result = sock.connect_ex(("127.0.0.1", port))
+    finally:
+        sock.close()
+    return result == 0
+
+
+def main():
+    rows = list_processes()
+    own_pid = os.getpid()
+    matches = []
+    for row in rows:
+        pid = row.get("ProcessId")
+        name = (row.get("Name") or "").lower()
+        cmd = row.get("CommandLine") or ""
+        # skip this script and the PowerShell helper that ran the CIM query
+        if pid == own_pid:
+            continue
+        if name in ("powershell.exe", "pwsh.exe") and "Get-CimInstance" in cmd:
+            continue
+        matches.append(row)
+
+    if not matches:
+        print("No headroom processes found via CIM")
+    for row in matches:
+        cmd = row.get("CommandLine") or ""
+        print(f"{classify(cmd)} MATCH: PID={row.get('ProcessId')} NAME={row.get('Name')} CMD={cmd[:200]}")
+    print(f"Port 8787 connect test: {'OPEN' if check_port() else 'CLOSED'}")
+
+
+if __name__ == "__main__":
+    main()

@@ -50,10 +50,40 @@
 
 | 項目 | 条件 | 測定方法 | 現状 |
 |---|---|---|---|
-| 実行時間 | `all` 1 回が 60 分以内（timeout 内） | 開始・終了のタイムスタンプ | 未測定 |
+| 実行時間 | `all` 1 回が 60 分以内（timeout 内） | 開始・終了のタイムスタンプ | ローカル 13.3 分。CI は skip |
 | CI コスト | 月 4 時間以内 | 実行時間 × 週 1 回 | 推定 4 時間 |
 | 成功率 | 直近 4 回で `fail` 0（初回は除く） | Actions の履歴 | 実績なし |
 | 通知 | 失敗時に GitHub 通知、PR は止めない | 運用確認 | 方針のみ |
 
 - 最初に手動で `all` を 1 回実行し、実行時間と結果を記録する。その値で条件を満たすと確認できた後に、`schedule` の追加を別途承認する。
+
+## 7. CI での実測（2026-11-05）
+
+- `workflow_dispatch` で `scenario=all` を 1 回実行した（run 42044137638）。
+- 結果: success、実行時間 0.6 分。ただしログは **skip** である。
+
+> Soak CI skipped
+> - Reason: Intel oneAPI not available on this runner.
+> - MKLNonUniformConvolver requires mkl.h/ipp.h (Intel oneAPI).
+
+- GitHub の `windows-latest` には oneAPI が無いため、soak はビルドできず、ジョブは「skip を報告して success」になる。**CI での週次実行は、このままでは実測にも回帰検出にもならない。**
+- 実行時間の実測は、oneAPI のある開発機（ローカル）で行う必要がある。
+
+### ローカル実測（2026-11-05）
+
+`AudioEngineHarness.exe --soak --scenario=all` を oneAPI のある開発機で実行した。
+
+| シナリオ | 結果 |
+|---|---|
+| s1 | published 100,000 / accepted 100,000 / rejected 0 / finalSeq 100,003 / backlog 0 |
+| s2b | requested 80,000 / accepted 80,000 / rejected 0 / peakBacklog 0 |
+| s3 | rapid 300 / drained_to_seq 180,303 / backlog 0 |
+| s4 | published 10,001 / epoch 360,606 → 380,608 / pending 0 |
+| s5 | samples 158 / peak 287.4 MB / final 287.4 MB（収束） |
+| 合計 | issued 180,300 / accepted 180,300 / rejected 0 / peakBacklog 0 / **ALL PASS** |
+
+- 実行時間: **799.9 秒（13.3 分）**。60 分以内の条件を満たす。
+- メモリ: 287.4 MB で収束し、増加を続けない。
+- これは開発機の値である。CI（oneAPI なし）では同じ結果は得られない。
+- 週次化の前提が変わる: 「CI の実行時間 ≤ 60 分」を満たすには、ランナーへ oneAPI を導入するか、セルフホストランナーを使うかの判断が要る。
 

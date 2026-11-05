@@ -187,9 +187,9 @@
 | 仕様判断 | 現行要求に TSan 必須ゲートの規定は無い |
 | 変更 | なし（CI 通過目的の設定変更を行わない） |
 | 追加・変更テスト | Debug TSan ジョブ（ISR 系）。対象リストの明示は未実施 |
-| 数値検証 | 直近 20 run のうち完了 19 run はすべて success（1 run は実行中）。skip 率と個別実行時間は未集計 |
+| 数値検証 | 直近 30 run は success 26・未完了 4。完了 10 run の TSan ジョブは 0.4〜1.1 分で、ログは `[TSan] Skipped (no build configured)`。**実行された TSan テストは 0**（skip 率 100%） |
 | 性能影響 | 30 分 timeout 内で完了 |
-| 残存リスク | 競合を検出しても PR を止めない。skip の実態が未計測。必須化条件 C1〜C5 は `RES2-TSAN-GATE-DESIGN-20261105.md` |
+| 残存リスク | 競合を検出しても PR を止めない。skip が常態のため TSan の検出力は実質ゼロ。必須化条件 C1〜C5 は `RES2-TSAN-GATE-DESIGN-20261105.md` |
 | 完了判定 | 設計資料あり。**必須化は未承認（best-effort 維持）** |
 
 ## 12. RES2-12 soak
@@ -203,7 +203,7 @@
 | 仕様判断 | 運用要件（頻度・失敗時の扱い）は未定義 |
 | 変更 | なし（schedule を追加していない） |
 | 追加・変更テスト | なし（手動実行のシナリオを保持） |
-| 数値検証 | `all` 1 回 = 最大 60 分（timeout 値）。実測時間は未取得 |
+| 数値検証 | ローカル `all`: ALL PASS、799.9 秒（13.3 分）、issued 180,300 / accepted 180,300 / rejected 0、メモリ 287.4 MB で収束。CI 実行は 0.6 分で skip（oneAPI 不在） |
 | 性能影響 | 週次で月およそ 4 時間のランナー時間 |
 | 残存リスク | 長時間・高負荷の退行検出が最大 7 日遅れる |
 | 完了判定 | 週次を採用候補として確定。**設定変更はコスト確認後** |
@@ -325,16 +325,16 @@
 | 項目 | 内容 |
 |---|---|
 | ID | RES2-20 |
-| 状態 | **Owner 決定（2026-11-05 追加）: 再作成・削除しない（移行設計を作成）** |
+| 状態 | **実装（2026-11-05）: 2 本を移行・3 本を非推奨（`.venv` は維持）** |
 | 現行コード根拠 | `.venv/pyvenv.cfg` は `home = C:\Python314`。`.venv\Scripts\python.exe -c "print(1)"` は「did not find executable at 'C:\Python314\python.exe'」で失敗し、`.venv\Scripts\headroom.exe --version` も exit 103 で同じ理由により失敗する |
-| 修正対象・方針 | `.venv` は現状維持。参照スクリプト 5 本の uv ツール移行設計を作成し、既存手順との互換性を確認してから実装可否を決める（`RES2-DEVSCRIPT-MIGRATION-20261105.md`） |
+| 修正対象・方針 | `.venv` は再作成・削除しない。MCP 結合テストと診断の 2 本を uv ツールへ移行し、proxy 系 3 本は非推奨ヘッダを付けて残す（`RES2-DEVSCRIPT-MIGRATION-20261105.md`） |
 | 仕様判断 | `.venv` を要求する手順は現行に無い。headroom は uv tool（`headroom-ai v0.42.0`）で `C:\Users\user\.local\bin\headroom.exe` に入り、PATH の `headroom --version` は 0.42.0 を返す |
-| 変更 | なし（再作成も削除もしない） |
+| 変更 | `tools/test_headroom_mcp_tools.py`、`tools/find_headroom_process.py`、proxy 系 3 本のヘッダ |
 | 追加・変更テスト | なし。CI ワークフローから `.venv` を起動する箇所は無い |
 | 数値検証 | `.venv` は 216 パッケージを含むが実行不能。旧パスを参照する dev スクリプトは 5 本（`tools/find_headroom_process.py`、`tools/headroom-proxy-bench.ps1`、`tools/start-headroom-proxy.ps1`、`tools/test_headroom_mcp_tools.py`、`tools/verify_headroom_proxy.py`）。いずれも `.venv\Scripts\{python,headroom}.exe` を指すため、このままでは動作しない |
 | 性能影響 | なし（起動経路に含まれない） |
 | 残存リスク | 上記 5 本の dev スクリプトは PATH の `headroom` へ向け直すまで使用できない。venv 前提の手順が復活した場合は再作成が必要 |
-| 完了判定 | 方針確定。**移行は未実装（設計と互換性確認の後）** |
+| 完了判定 | **実装完了**（MCP 結合テスト exit 0、診断は MCP 4 件・8787 CLOSED）。CI 確認後に確定 |
 
 ## 21. 完了判定の集計
 
