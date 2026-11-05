@@ -114,9 +114,11 @@ namespace
             dsp->activeOversamplingType,
             convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)))));
 
-    // SoftClip局所OSのレイテンシ（31tap Halfband: 理論値15 base rate samples）
+    // SoftClip局所OSのレイテンシ（31tap Halfband: 15 base rate samples）
     // 理論式: (taps-1)/2 per pass × 2 passes = taps-1 = 30 @2x → 15 @base rate
-    // 【注意】要実測確認: processUp→processDownの合成遅延を単位インパルスで測定し補正
+    // 実測: PolyphaseGainFidelityTests の P0-F latency gate（S1 31tap/90dB）が
+    //       単位インパルスの argmax ∈ [floor(D), floor(D)+1]（D=15）を検証している。
+    //       taps を変えた場合は同ゲートの D を更新して再測定すること。
     constexpr int kSoftClipLatencyBaseRateSamples = 15;
     breakdown.softClipLatencyBaseRateSamples = (safeOsFactor == 1)
         ? kSoftClipLatencyBaseRateSamples : 0;

@@ -4,7 +4,7 @@
 
 2026-11-05 時点の現行 `main` と全記録を照合した結果、**未修正の欠陥候補が 3 件**（RES2-01〜03）、**途中で止まっている修正・機能が 5 件**（RES2-04〜08）、**検証・テストの穴が 4 件**（RES2-11〜14）、**技術的負債が 6 件**（RES2-15〜20）、**性能・運用の既知事項が 2 件**（RES2-09〜10）だった。
 
-同日、修正着手可能と判定した 3 件（RES2-02・RES2-14・RES2-17）を修正して main に統合した（§11）。残りは **未修正の欠陥候補 2 件・停止中の修正／機能 5 件・検証の穴 3 件・技術的負債 5 件・運用 2 件**である。
+同日、修正着手可能と判定した 3 件（RES2-02・RES2-14・RES2-17）を修正して main に統合した（§11）。さらに詳細調査で RES2-03（実測済みと判明）と RES2-08（RuntimeWorld 移行で前提消滅）を解消した（§12）。残りは **未解決 14 件**（承認待ち 5・設計判断 4・追加調査 3・検証 2）である。
 
 過去の記録で「未修正」と書かれていても、現在は修正済みのもの（H-01・C-01・B-2 診断クラッシュ・A2 assert・`.gitignore` のフェンス行）は §9 に分離し、残課題から除外した。
 
@@ -14,12 +14,12 @@
 |---|---|---|---|
 | 正確性 | RES2-01 | ポリフェーズ利得の不対称（案 E が既定 OFF） | P2 |
 | 正確性 | RES2-02 | `isBadSample` のスカラー／AVX2 閾値不一致 → **修正済み**（#131） | P3 |
-| 正確性 | RES2-03 | SoftClip 局所 OS の遅延定数が未実測 | P2 |
+| 正確性 | RES2-03 | SoftClip 局所 OS の遅延定数が未実測 → **解消**（P0-F が D=15 を検証済み・コメント更新） | P2 |
 | バグ修正 | RES2-04 | F-4/D2b の記録消失（調査停止中） | P3 |
 | 機能 | RES2-05 | B2 Stage 2/3 未着手 | P2 |
 | 機能 | RES2-06 | A2 本番適用が NO-GO | P2 |
 | 機能 | RES2-07 | U5 製品有効化が未承認 | P2 |
-| 機能 | RES2-08 | `EngineRuntime` 単一 atomic 統合が未着手 | P3 |
+| 機能 | RES2-08 | `EngineRuntime` 単一 atomic 統合が未着手 → **解消**（RuntimeWorld 移行で前提が消滅） | P3 |
 | 性能・運用 | RES2-09 | R-101 の初回キャッシュミス時 61 分 | P3 |
 | 性能・運用 | RES2-10 | R-113／R-111 のフレーク監視 | P3 |
 | 検証 | RES2-11 | TSan が best-effort（合否に影響しない） | P3 |
@@ -190,3 +190,15 @@
 - 3 PR の CI はいずれも 14 pass / 0 fail / 0 pending（ASan を含む）。
 - 製品の RT 制約に対する追加はない（RES2-02 は既存 inline 判定の定数統一のみ、他 2 件はテストのみ）。
 - 未承認機能（案 E・U5・B2 Stage 2/3・A2 本番適用）には触れていない。
+
+## 12. 2026-11-05 詳細調査（RES2・U5・案 E）
+
+台帳 20 件を現行コードで再確認し、RES2-03 と RES2-08 を解消した。U5 と案 E は横断調査し、OFF/ON の実測を取得した。
+
+| 項目 | 結果 |
+|---|---|
+| RES2-03 | `PolyphaseGainFidelityTests` の P0-F が S1(31/90) の argmax を D=15 で検証済み。定数は実測で裏付けられており、コメントを実測根拠へ更新（挙動変更なし） |
+| RES2-08 | `RuntimePublishState` は現行に存在せず、`EngineRuntime` は `[[deprecated]]`。`RuntimeWorld`／`worldAuthority` が公開モデルであり、旧 dual-write 統合の前提は消滅 |
+| 案 E（RES2-01） | OFF 実測: DC 0.75^N、cand 1.0、SoftClip DC 0.375→0.5、54/54 PASS。ON ビルド: DC 1.0、19/54 PASS（OFF 期待値に対する正の対照、P1-1 の記録と一致） |
+| U5（RES2-07） | 既定 `Mode::Off`、環境変数のみ。リング 8,192・dropped 計上・INCONCLUSIVE 条件を確認。UI 切替経路は無い |
+| 資料 | `RES2-DETAILED-INVESTIGATION-20261105.md`、`RES2-ITEM-ACTIONS-20261105.md`、`U5-TECHNICAL-INVESTIGATION-20261105.md`、`OPTION-E-GAIN-REPORT-20261105.md`、`RES2-OWNER-DECISIONS-20261105.md`、`VERIFICATION-RESULTS-20261105.md`、`RESIDUAL-RISKS-20261105.md` |
