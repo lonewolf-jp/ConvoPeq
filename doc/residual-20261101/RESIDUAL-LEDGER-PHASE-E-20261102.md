@@ -628,6 +628,13 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - soak: `ce386431` から再ビルドしたハーネスで手動 1 回を実施。ALL PASS、744.8 秒、issued 180,300 / rejected 0、メモリ 284.7 MB 収束。
 - CI 必須化、schedule、週次化、waiver はいずれも未実施。
 
+### 27. 2026-11-06 限定実走の受理
+
+- RES2-11: 計装 3 本（`MpscBoundedRingTests`、`ScopedEpochReaderStructuralTests`、`ISRRuntimeIdentityTests`）の実走を受理。`ISRSemanticValidationTests` と `RetireGraceSemanticsTests` は MKL・IPP 依存で未実走。`ScopedEpochReaderTests` のリンク失敗は TSan と区別。ゲート化はしない。MKL・IPP の Linux 対応は未承認。
+- RES2-12: `ce386431` から再ビルドした手動 1 回を受理。ALL PASS、744.8 秒、issued 180,300 / rejected 0、メモリ 284.7 MB 収束。週次・登録・費用・責任者は未決定。
+- RES2-13: `[RTM]` と `xRunBuffer` の取得口の確認を受理。実機・シナリオ・実施者・時期は未指定で、測定は開始しない。基準は不変、waiver は個別判断。
+- 受理は証拠の範囲に限る。TSan の検証完了、データ競合の不存在、性能達成を意味しない。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）

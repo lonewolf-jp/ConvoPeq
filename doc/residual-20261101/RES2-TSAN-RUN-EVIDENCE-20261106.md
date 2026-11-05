@@ -117,3 +117,13 @@ cmake -S . -B ~/tsan-build -G "Ninja Multi-Config" \
 | `ISRSemanticValidationTests` のビルド（失敗まで） | 20.5 秒 |
 | 採用 3 本のビルド | 約 3.5 分（configure の再実行を含む） |
 | 採用 3 本の実走 | 合計 1.31 秒（初回 1.28 秒） |
+
+## 10. Owner 受理と境界（2026-11-06）
+
+- 計装 3 本の実走結果を Owner が受理した。`ISRSemanticValidationTests` と `RetireGraceSemanticsTests` は未実走のままとする。
+- `ScopedEpochReaderTests` のリンク失敗は JUCE の curl シンボルによるもので、TSan の検出結果ではない。
+- MKL・IPP の Linux 対応は承認されていない。調査・実装・追加実走は開始しない。
+- 必須 CI ゲート化は行わない。best-effort の位置づけを維持する。
+- 報告 0 件は、データ競合が存在しないことの証明ではない。対象 3 本は ISR の publish・retire 経路を実行していない。
+- 本記録は限定実走の証拠であり、TSan の検証完了や本命テストの検証済みを意味しない。
+
