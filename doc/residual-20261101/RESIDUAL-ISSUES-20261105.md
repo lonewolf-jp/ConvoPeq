@@ -209,12 +209,12 @@
 
 | 項目 | 追加した数値証拠 |
 |---|---|
-| RES2-01 | `PolyphaseGainMetrics` で OFF/ON の DC・RMS・ピーク・周波数応答・レイテンシ・CPU を取得。ON は DC 1.0、ピーク比 1.03〜1.67（最大 +4.4 dB）、レイテンシ不変 |
+| RES2-01 | `PolyphaseGainMetrics` で OFF/ON の DC・RMS・ピーク・周波数応答・レイテンシ・CPU を取得。ON は DC 1.0、ピーク比 1.03〜1.67（最大 +4.4 dB）、レイテンシは 4 経路で不変・LP3 r8 のみ 475→461 |
 | RES2-07 | `RtMeasureOverheadTests` で計測器のコストを測定: Off 1.34 / TimeOnly 26.84 / Full 26.60 ns/ブロック |
 | RES2-18 | Worker 経路に `debugAssertNotAudioThread()` を追加（Release は空関数へインライン化）。`ConvoPeq` と `AudioEngineHarness` の再ビルド成功 |
 
 - 追加テスト: `PolyphaseGainMetrics`、`RtMeasureOverheadTests`（いずれも test-only・閾値なし）。
-- 未解決 13 件の内訳: 承認待ち 5（01・04・05・06・07）、設計判断 4（12・15・16・20）、追加調査 2（11・13）、検証 2（09・10）。RES2-19 は対応不要。
+- 状態の内訳（Owner 判断の反映後）: 完了 7（02・03・08・14・17・18・20）、Owner 決定 9（01・04・05・06・07・11・12・15・16）、要件照合待ち 1（13）、監視 2（09・10）、対応不要 1（19）。判断前の内訳は §12 の記録を参照。
 
 ## 14. 2026-11-05 Owner 判断の受領
 
@@ -234,3 +234,12 @@ Owner が RES2 の 12 項目を決定した。記録は `RES2-OWNER-DECISION-REC
 
 - 製品コード・既定値・RT 経路・CI 設定の変更は行っていない。
 - 追加資料: `RES2-TSAN-GATE-DESIGN-20261105.md`、`RES2-SOAK-OPERATIONS-20261105.md`、`RES2-CMA-REQUIREMENTS-20261105.md`、`RES2-TX-REQUIREMENT-RECONCILIATION-20261105.md`。
+
+## 15. レジスタ v2 の正規化と訂正（2026-11-05）
+
+- 最終レジスタを全 20 件 × 11 項目へ正規化した。v1 は 16 セクション構成で、RES2-14（FFT 出力一致）と RES2-17（T2b 契約検査）の項が無く、RES2-09/10 と RES2-15/16 を併記していた。
+- 実測に合わせて 2 点を訂正した。いずれも数値の読み違いであり、新しい測定は行っていない。
+  - RES2-01 のレイテンシ: 「不変」ではなく、4 経路は不変・LP3 r8 のみ 475→461 サンプル（`OPTION-E-GAIN-REPORT` §7）。
+  - RES2-20 の `.venv` 参照: 「codegraph の除外文字列のみ」ではなく、`tools/` の dev スクリプト 5 本が `.venv\Scripts\{python,headroom}.exe` を指す。両者は exit 103 で起動できず、headroom は uv tool（0.42.0）で PATH から利用できる。
+- `VERIFICATION-RESULTS-20261105.md` の LP3 r8 レイテンシ列が OFF/ON で逆順だったため、`475 / 461` に統一した。
+- `RES2-ITEM-ACTIONS-20261105.md` と `RES2-OWNER-DECISIONS-20261105.md` は判断依頼時点の記載のままだったため、Owner 判断後の状態へ更新した。
