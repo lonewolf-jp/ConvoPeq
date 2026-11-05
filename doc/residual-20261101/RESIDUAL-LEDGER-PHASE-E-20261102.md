@@ -621,6 +621,13 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - RES2-13: 1.0 ms 目標と 1.25 ms ハード制約を維持。測定計画と合否基準を採用。実機測定は別承認、waiver は個別判断、1.25 ms 超・XRUN の自動許容なし。
 - コード・RT 経路・既定値・CI・実走・schedule・実機測定・waiver は本判断に含まれない。
 
+### 26. 2026-11-06 TSan 診断実走と soak 手動 1 回
+
+- TSan: `CMakeLists.txt` の計装範囲を診断目的で変更し、非 MSVC の MSVC 専用フラグを除去。`DiagnosticsConfig.h` の MKL 判定を値ベースに修正。Linux で configure 成功、計装 3 本が PASS・報告 0 件。
+- TSan の本命 `ISRSemanticValidationTests` は MKL/IPP 依存でビルド不能。Linux では MKL・IPP の探索とリンクが MSVC 専用で、環境整備だけでは解決しない。
+- soak: `ce386431` から再ビルドしたハーネスで手動 1 回を実施。ALL PASS、744.8 秒、issued 180,300 / rejected 0、メモリ 284.7 MB 収束。
+- CI 必須化、schedule、週次化、waiver はいずれも未実施。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）

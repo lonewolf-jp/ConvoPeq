@@ -185,12 +185,12 @@
 | 現行コード根拠 | `.github/workflows/sanitizer-ci.yml:256-259`。`continue-on-error: true`、対象は MKL/IPP 非依存のテストのみ、30 分 timeout（`:258`）、configure 不能時は graceful skip |
 | 修正対象・方針 | best-effort を維持する。必須化する対象テスト・失敗時の扱い・安定性評価基準を `RES2-TSAN-GATE-DESIGN-20261105.md` に整理し、実装は別判断とする |
 | 仕様判断 | 現行要求に TSan 必須ゲートの規定は無い |
-| 変更 | なし（CI 通過目的の設定変更を行わない） |
+| 変更 | 2026-11-06: `CMakeLists.txt` の TSan 計装範囲を診断目的で変更（テストターゲットへ `-fsanitize=thread`、非 MSVC では MSVC 専用フラグを除去）。`src/DiagnosticsConfig.h` の MKL 判定を値ベースに修正 |
 | 追加・変更テスト | Debug TSan ジョブ（ISR 系）。対象リストの明示は未実施 |
-| 数値検証 | 直近 30 run は success 26・未完了 4。完了 10 run の TSan ジョブは 0.4〜1.1 分で、ログは `[TSan] Skipped (no build configured)`。**実行された TSan テストは 0**（skip 率 100%） |
+| 数値検証 | 直近 30 run は success 26・未完了 4。完了 10 run の TSan ジョブは 0.4〜1.1 分で、ログは `[TSan] Skipped (no build configured)`。**実行された TSan テストは 0**（skip 率 100%）。2026-11-06 の Linux 診断実走は configure 成功、計装 3 本が PASS・TSan 報告 0 件（0.14〜0.66 秒）。`ISRSemanticValidationTests` は MKL/IPP 依存でビルド不能 |
 | 性能影響 | 30 分 timeout 内で完了 |
 | 残存リスク | 競合を検出しても PR を止めない。skip が常態のため TSan の検出力は実質ゼロ。必須化条件 C1〜C5 は `RES2-TSAN-GATE-DESIGN-20261105.md` |
-| 完了判定 | 評価・設計を継続。**条件充足後に専用環境で限定必須化を再判断**。skip の success を検出力の証拠にしない |
+| 完了判定 | 評価・設計を継続。**条件充足後に専用環境で限定必須化を再判断**。skip の success を検出力の証拠にしない。2026-11-06 の実走は 3 本のみで、本命テストと ISR 経路は未実行 |
 
 ## 12. RES2-12 soak
 
@@ -203,10 +203,10 @@
 | 仕様判断 | 運用要件（頻度・失敗時の扱い）は未定義 |
 | 変更 | なし（schedule を追加していない） |
 | 追加・変更テスト | なし（手動実行のシナリオを保持） |
-| 数値検証 | ローカル `all`: ALL PASS、799.9 秒（13.3 分）、issued 180,300 / accepted 180,300 / rejected 0、メモリ 287.4 MB で収束。CI 実行は 0.6 分で skip（oneAPI 不在） |
+| 数値検証 | ローカル `all`: ALL PASS、799.9 秒（13.3 分）、issued 180,300 / accepted 180,300 / rejected 0、メモリ 287.4 MB で収束。CI 実行は 0.6 分で skip（oneAPI 不在）。2026-11-06 の手動 1 回は `ce386431` から再ビルドしたハーネスで ALL PASS、744.8 秒（12.4 分） |
 | 性能影響 | 週次で月およそ 4 時間のランナー時間 |
 | 残存リスク | 長時間・高負荷の退行検出が最大 7 日遅れる |
-| 完了判定 | 方針確定。**ランナー構成・費用・運用責任の確定後に週次化を再判断** |
+| 完了判定 | 方針確定。**手動 1 回は実施済み。ランナー構成・費用・運用責任の確定後に週次化を再判断** |
 
 ## 13. RES2-13 TX-02 / TX-10
 
