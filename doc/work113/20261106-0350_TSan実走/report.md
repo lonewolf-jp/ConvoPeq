@@ -18,10 +18,14 @@
 |---|---|
 | `6ea370db` | `CMakeLists.txt`: テストターゲットへの TSan 計装、非 MSVC での MSVC 専用フラグ除去 |
 | `dc89a334` | 記録 2 本の新規作成と、レジスタ・台帳・判断材料の更新 |
+| `4fc5d1fe` | `src/DiagnosticsConfig.h` の変更を撤回（ASan の bad-free による） |
+| `57fd2c14` | 撤回の反映と、実走の再実行記録 |
 
 RT 経路、Publish、Retire、Epoch、Crossfade、DSP の実装、既定値、CI workflow、schedule は変更していない。
 
 `src/DiagnosticsConfig.h` の判定を値ベースに変える案は、ASan で `bad-free ... system_aligned_free` を出したため撤回した。確保と解放で別のアロケータになる翻訳単位が生じるためで、組み合わせを揃える修正は本作業の範囲外である。
+
+この失敗は、`defined()` による判定が、MKL ビルドで全翻訳単位を MKL アロケータに寄せていたことを示す。値判定にすると、その暗黙の統一が崩れる。
 
 ## 3. 実行環境
 
@@ -96,4 +100,7 @@ RT 経路、Publish、Retire、Epoch、Crossfade、DSP の実装、既定値、C
 | Linux configure | 成功 |
 | 実走 | 3 本 PASS、soak ALL PASS |
 | 文書 | 表の列数不一致 0、偽漢字 0、日本語 lint 0 |
-| PR | #149 |
+| CI（PR #149） | Windows Release 通過（20 分 13 秒）、ASan 通過、isr-verify 通過。初回の ASan は `bad-free` で失敗し、ヘッダ変更の撤回後に通過 |
+| 統合 | PR #149（`e1641405`）、スナップショット PR #150（`1163dcdf`） |
+| `ConvoPeq.md` | 再生成して FRESH。分割 4 件（最大 2.00 MB）も生成 |
+| Dropbox | 記録 9 件とスナップショット 5 件を納品し、再取得照合すべて一致 |
