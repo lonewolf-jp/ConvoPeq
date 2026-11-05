@@ -14,7 +14,7 @@
 | Owner 判断受領時の main | `9dd57529` |
 | 本レジスタの元になった PR | #129・#130・#131・#134・#136・#137 |
 | ConvoPeq.md | `--check` FRESH（§21 に最終値を記載） |
-| Owner 判断の記録 | `RES2-OWNER-DECISION-RECORD-20261105.md` |
+| Owner 判断の記録 | `RES2-OWNER-DECISION-RECORD-20261105.md`（最終判断は `RES2-OWNER-FINAL-DECISION-20261106.md`） |
 
 ## 1. RES2-01 ポリフェーズ利得（案 E）
 
