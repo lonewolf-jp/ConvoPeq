@@ -4,7 +4,7 @@
 
 2026-11-05 時点の現行 `main` と全記録を照合した結果、**未修正の欠陥候補が 3 件**（RES2-01〜03）、**途中で止まっている修正・機能が 5 件**（RES2-04〜08）、**検証・テストの穴が 4 件**（RES2-11〜14）、**技術的負債が 6 件**（RES2-15〜20）、**性能・運用の既知事項が 2 件**（RES2-09〜10）だった。
 
-同日、修正着手可能と判定した 3 件（RES2-02・RES2-14・RES2-17）を修正して main に統合した（§11）。さらに詳細調査で RES2-03（実測済みと判明）と RES2-08（RuntimeWorld 移行で前提消滅）を解消した（§12）。残りは **未解決 14 件**（承認待ち 5・設計判断 4・追加調査 3・検証 2）である。
+同日、修正着手可能と判定した 3 件（RES2-02・RES2-14・RES2-17）を修正して main に統合した（§11）。さらに詳細調査で RES2-03（実測済みと判明）と RES2-08（RuntimeWorld 移行で前提消滅）を解消した（§12）。さらに RES2-18（Worker 経路の debug アサーション）を修正した（§13）。残りは **未解決 13 件**（承認待ち 5・設計判断 4・追加調査 2・検証 2）である。
 
 過去の記録で「未修正」と書かれていても、現在は修正済みのもの（H-01・C-01・B-2 診断クラッシュ・A2 assert・`.gitignore` のフェンス行）は §9 に分離し、残課題から除外した。
 
@@ -29,7 +29,7 @@
 | 負債 | RES2-15 | CMA 状態の部分永続化 | P3 |
 | 負債 | RES2-16 | elite 再評価が実質再実行 | P3 |
 | 負債 | RES2-17 | `D8_1` の T2b コメントが陳腐化 → **修正済み**（#129） | P3 |
-| 負債 | RES2-18 | Worker スレッドのアサーション欠落 | P3 |
+| 負債 | RES2-18 | Worker スレッドのアサーション欠落 → **修正済み**（`debugAssertNotAudioThread()` 追加） | P3 |
 | 負債 | RES2-19 | `Superseded` 等の Phase-II 送り | — |
 | 負債 | RES2-20 | `.venv` が Python 3.14 消滅で使用不能 | P3 |
 
@@ -202,3 +202,16 @@
 | 案 E（RES2-01） | OFF 実測: DC 0.75^N、cand 1.0、SoftClip DC 0.375→0.5、54/54 PASS。ON ビルド: DC 1.0、19/54 PASS（OFF 期待値に対する正の対照、P1-1 の記録と一致） |
 | U5（RES2-07） | 既定 `Mode::Off`、環境変数のみ。リング 8,192・dropped 計上・INCONCLUSIVE 条件を確認。UI 切替経路は無い |
 | 資料 | `RES2-DETAILED-INVESTIGATION-20261105.md`、`RES2-ITEM-ACTIONS-20261105.md`、`U5-TECHNICAL-INVESTIGATION-20261105.md`、`OPTION-E-GAIN-REPORT-20261105.md`、`RES2-OWNER-DECISIONS-20261105.md`、`VERIFICATION-RESULTS-20261105.md`、`RESIDUAL-RISKS-20261105.md` |
+
+## 13. 2026-11-05 全件処理（数値解析）
+
+聴感評価を用いず、数値解析・自動テスト・性能測定で全 20 件を再評価した。
+
+| 項目 | 追加した数値証拠 |
+|---|---|
+| RES2-01 | `PolyphaseGainMetrics` で OFF/ON の DC・RMS・ピーク・周波数応答・レイテンシ・CPU を取得。ON は DC 1.0、ピーク比 1.03〜1.67（最大 +4.4 dB）、レイテンシ不変 |
+| RES2-07 | `RtMeasureOverheadTests` で計測器のコストを測定: Off 1.34 / TimeOnly 26.84 / Full 26.60 ns/ブロック |
+| RES2-18 | Worker 経路に `debugAssertNotAudioThread()` を追加（Release は空関数へインライン化）。`ConvoPeq` と `AudioEngineHarness` の再ビルド成功 |
+
+- 追加テスト: `PolyphaseGainMetrics`、`RtMeasureOverheadTests`（いずれも test-only・閾値なし）。
+- 未解決 13 件の内訳: 承認待ち 5（01・04・05・06・07）、設計判断 4（12・15・16・20）、追加調査 2（11・13）、検証 2（09・10）。RES2-19 は対応不要。

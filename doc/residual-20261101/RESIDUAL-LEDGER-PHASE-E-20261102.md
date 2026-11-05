@@ -557,6 +557,15 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - 修正: `AudioEngine.Processing.Latency.cpp` のコメント更新のみ（挙動変更なし）。
 - 記録: `RES2-DETAILED-INVESTIGATION-20261105.md` ほか 6 資料。
 
+### 18. 2026-11-05 RES2 全件処理（数値解析）
+
+- 方針: 聴感評価を使わず、数値解析・自動テスト・性能測定で評価。
+- RES2-01: `PolyphaseGainMetrics`（test-only）を追加し、OFF/ON の DC・RMS・ピーク・周波数応答・レイテンシ・CPU を測定。ON は DC 1.0、ピーク比 1.03〜1.67（最大 +4.4 dB）、レイテンシ不変、CPU 差はばらつき範囲。採用は未承認のまま。
+- RES2-07: `RtMeasureOverheadTests` を追加し、計測器のコストを測定（Off 1.34 / TimeOnly 26.84 / Full 26.60 ns/ブロック）。有効化は未承認のまま。
+- RES2-18: `ObserveChannel::Worker` に `debugAssertNotAudioThread()` を追加（Release はインライン化で消える）。`ConvoPeq`・`AudioEngineHarness` の再ビルド成功、4 テスト Passed。
+- 状態: 修正済み 6（02・03・08・14・17・18）、承認待ち 5、設計判断 4、追加調査 2、検証 2、対応不要 1。
+- 記録: `RES2-FULL-RESOLUTION-20261105.md`、`RES2-ITEM-ACTIONS-20261105.md`、`VERIFICATION-RESULTS-20261105.md`。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
