@@ -560,7 +560,7 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 ### 18. 2026-11-05 RES2 全件処理（数値解析）
 
 - 方針: 聴感評価を使わず、数値解析・自動テスト・性能測定で評価。
-- RES2-01: `PolyphaseGainMetrics`（test-only）を追加し、OFF/ON の DC・RMS・ピーク・周波数応答・レイテンシ・CPU を測定。ON は DC 1.0、ピーク比 1.03〜1.67（最大 +4.4 dB）、レイテンシ不変、CPU 差はばらつき範囲。採用は未承認のまま。
+- RES2-01: `PolyphaseGainMetrics`（test-only）を追加し、OFF/ON の DC・RMS・ピーク・周波数応答・レイテンシ・CPU を測定。ON は DC 1.0、ピーク比 1.03〜1.67（最大 +4.4 dB）、レイテンシは 4 経路で不変・LP3 r8 のみ 475→461、CPU 差はばらつき範囲。採用は未承認のまま。
 - RES2-07: `RtMeasureOverheadTests` を追加し、計測器のコストを測定（Off 1.34 / TimeOnly 26.84 / Full 26.60 ns/ブロック）。有効化は未承認のまま。
 - RES2-18: `ObserveChannel::Worker` に `debugAssertNotAudioThread()` を追加（Release はインライン化で消える）。`ConvoPeq`・`AudioEngineHarness` の再ビルド成功、4 テスト Passed。
 - 状態: 修正済み 6（02・03・08・14・17・18）、承認待ち 5、設計判断 4、追加調査 2、検証 2、対応不要 1。
@@ -573,6 +573,7 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - 保留: 案 E（既定 OFF）、U5（既定 OFF・UI 保留）。停止: RES2-04。クローズ: B2 Stage 2/3。NO-GO 維持: A2。TSan: 必須化しない。soak: 週次を候補（設定変更は確認後）。TX-02/10: 要件照合待ち。CMA: 現状維持・elite は設計案のみ。Worker: 現行維持。`.venv`: 再作成しない。
 - 追加資料: `RES2-TSAN-GATE-DESIGN-20261105.md`、`RES2-SOAK-OPERATIONS-20261105.md`、`RES2-CMA-REQUIREMENTS-20261105.md`、`RES2-TX-REQUIREMENT-RECONCILIATION-20261105.md`。
 - 製品コード・既定値・RT 経路・CI 設定は変更していない。
+- §18 の件数（修正済み 6・承認待ち 5 など）は判断前の値である。判断後の内訳は `RES2-REGISTER-FINAL-20261105.md` §21 を参照する。
 
 ## 附録
 
