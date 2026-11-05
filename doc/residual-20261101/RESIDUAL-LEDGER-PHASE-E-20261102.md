@@ -567,6 +567,13 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - 記録: `RES2-FULL-RESOLUTION-20261105.md`、`RES2-ITEM-ACTIONS-20261105.md`、`VERIFICATION-RESULTS-20261105.md`、`RES2-REGISTER-FINAL-20261105.md`。
 - 統合: PR #136（`42924b5c` → `ac5f8eb2`）。CI 14 pass / 0 fail。
 
+### 19. 2026-11-05 Owner 判断の受領と処置
+
+- Owner が RES2 12 項目を決定。記録: `RES2-OWNER-DECISION-RECORD-20261105.md`。
+- 保留: 案 E（既定 OFF）、U5（既定 OFF・UI 保留）。停止: RES2-04。クローズ: B2 Stage 2/3。NO-GO 維持: A2。TSan: 必須化しない。soak: 週次を候補（設定変更は確認後）。TX-02/10: 要件照合待ち。CMA: 現状維持・elite は設計案のみ。Worker: 現行維持。`.venv`: 再作成しない。
+- 追加資料: `RES2-TSAN-GATE-DESIGN-20261105.md`、`RES2-SOAK-OPERATIONS-20261105.md`、`RES2-CMA-REQUIREMENTS-20261105.md`、`RES2-TX-REQUIREMENT-RECONCILIATION-20261105.md`。
+- 製品コード・既定値・RT 経路・CI 設定は変更していない。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
