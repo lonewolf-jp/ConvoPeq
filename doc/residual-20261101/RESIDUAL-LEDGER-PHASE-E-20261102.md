@@ -548,6 +548,15 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - 詳細: `RES2-DECISION-PACKETS-20261105.md`。
 - U5 と案 E は既定 OFF を維持している。
 
+### 17. 2026-11-05 RES2・U5・案 E の詳細調査
+
+- 基準: `main` = `f90f56be`（clean・worktree 1 本）。
+- 再確認: RES2 20 件すべてを現行コードで確認。RES2-03（P0-F が D=15 を実測済み）と RES2-08（RuntimeWorld 移行で前提消滅）を解消。
+- 案 E: OFF 実測（54/54 PASS、DC 0.75^N、cand 1.0、SoftClip DC 0.375→0.5）と ON ビルド実測（19/54 PASS、DC 1.0）を取得。既定 OFF を維持。
+- U5: 既定 Off・環境変数のみ・UI 経路なし・リング 8,192・dropped 計上を確認。有効化は未承認のまま。
+- 修正: `AudioEngine.Processing.Latency.cpp` のコメント更新のみ（挙動変更なし）。
+- 記録: `RES2-DETAILED-INVESTIGATION-20261105.md` ほか 6 資料。
+
 ## 附録
 
 ### 付録: R-105 で削除したブランチ（55 本）
