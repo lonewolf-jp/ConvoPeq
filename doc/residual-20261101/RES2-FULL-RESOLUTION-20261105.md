@@ -73,9 +73,9 @@
 | 08 | 解消 | RuntimeWorld 移行で前提消滅 |
 | 09 | 監視 | 既知の 61 分（キャッシュミス時） |
 | 10 | 監視 | 再発なし |
-| 11 | 必須化しない（best-effort 維持） | 対象テスト・失敗時の扱い・安定性基準を `RES2-TSAN-GATE-DESIGN-20261105.md` に整理 |
-| 12 | 週次を候補（コスト確認後に設定） | 採用条件（時間・コスト・成功率・通知）を `RES2-SOAK-OPERATIONS-20261105.md` に整理 |
-| 13 | 照合継続（waiver は自動免除としない） | 必須なら実機検証を別承認（`RES2-TX-REQUIREMENT-RECONCILIATION-20261105.md`） |
+| 11 | 必須化しない（評価を継続） | 対象テスト・skip・環境依存・実行時間・CI コストを評価。必須化は条件充足後に別判断（`RES2-TSAN-GATE-DESIGN-20261105.md`） |
+| 12 | 手動継続（週次は候補） | oneAPI を利用できるランナー構成の確定まで `schedule` を追加しない（`RES2-SOAK-OPERATIONS-20261105.md`） |
+| 13 | 再定義を承認（実機・waiver は別判断） | ブロック処理時間は RT 制約（1.25 ms 周期）との照合後に確定（`RES2-TX-REQUIREMENT-REDEFINITION-20261105.md`） |
 | 14 | 修正済み | #130（FFT 参照比較） |
 | 15 | 現状維持 | CMA 永続化の要件が未確定（`RES2-CMA-REQUIREMENTS-20261105.md`） |
 | 16 | 設計案のみ | elite 再評価の設計見直し。実装は別判断 |
