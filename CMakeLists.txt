@@ -2436,6 +2436,74 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # JuceHeader.h 生成順序: ConvoPeq (juce_add_gui_app) が生成するため依存させる
     add_dependencies(PolyphaseGainFidelityTests ConvoPeq)
     add_test(NAME PolyphaseGainFidelityTests COMMAND PolyphaseGainFidelityTests)
+
+    # ★ RES2-01: test-only numeric metrics for OFF/ON comparison (no thresholds).
+    add_executable(PolyphaseGainMetrics
+        src/tests/PolyphaseGainMetrics.cpp
+        src/CustomInputOversampler.cpp
+    )
+    target_compile_features(PolyphaseGainMetrics PRIVATE cxx_std_20)
+    target_compile_options(PolyphaseGainMetrics PRIVATE /EHsc /utf-8)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(PolyphaseGainMetrics PRIVATE /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(PolyphaseGainMetrics PRIVATE /QxCORE-AVX2)
+    endif()
+    target_compile_definitions(PolyphaseGainMetrics PRIVATE
+        $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
+        JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
+        JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
+        JUCE_USE_SSE_INTRINSICS=1
+        JUCE_USE_SIMD=1
+        $<$<PLATFORM_ID:Windows>:
+            _UNICODE
+            UNICODE
+            NOMINMAX
+            _CRT_SECURE_NO_WARNINGS
+        >
+    )
+    target_include_directories(PolyphaseGainMetrics PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+    )
+    target_include_directories(PolyphaseGainMetrics SYSTEM PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules")
+    target_link_libraries(PolyphaseGainMetrics PRIVATE
+        juce::juce_audio_basics
+        juce::juce_dsp
+        juce::juce_gui_basics
+        juce::juce_core
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(PolyphaseGainMetrics PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(PolyphaseGainMetrics PRIVATE /Qmkl:sequential)
+    endif()
+    if(IPP_FOUND)
+        target_link_libraries(PolyphaseGainMetrics PRIVATE IPP::ippcore IPP::ipps)
+    endif()
+    add_dependencies(PolyphaseGainMetrics ConvoPeq)
+    add_test(NAME PolyphaseGainMetrics COMMAND PolyphaseGainMetrics)
+
+    # ★ RES2-07: test-only overhead measurement of the U5 instrument (env-selected mode).
+    add_executable(RtMeasureOverheadTests
+        src/tests/RtMeasureOverheadTests.cpp
+    )
+    target_include_directories(RtMeasureOverheadTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_compile_features(RtMeasureOverheadTests PRIVATE cxx_std_20)
+    add_test(NAME RtMeasureOverheadTests COMMAND RtMeasureOverheadTests)
 endif()
 
 #------------------------------------------------------------

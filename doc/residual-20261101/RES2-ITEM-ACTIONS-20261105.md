@@ -5,13 +5,13 @@
 
 | ID | 根本原因（現行コードで確認） | 処置 | 検証 | 状態 | Owner 判断 |
 |---|---|---|---|---|---|
-| RES2-01 | center 位相に ×2 がなく分岐係数和が不対称（`CustomInputOversampler.cpp:556-561`）。補償なし | 既定 OFF 維持。OFF 実測と設計資料を更新 | PolyphaseGainFidelityTests 54/54 PASS、DC 0.75^N 再現 | Owner 判断待ち | 必要（D1〜D3） |
+| RES2-01 | center 位相に ×2 がなく分岐係数和が不対称（`CustomInputOversampler.cpp:556-561`）。補償なし | 既定 OFF 維持。OFF/ON の 6 指標を取得（`PolyphaseGainMetrics`） | OFF 54/54・ON 19/54、DC 0.75^N→1.0、ピーク比 1.03〜1.67 | Owner 判断待ち | 必要（D1〜D3） |
 | RES2-02 | 閾値の二重定義（2^53 / 1e20） | 共通ヘッダで 2^53 に統一（#131） | 境界テスト＋ASan CI | 修正済み | 不要 |
 | RES2-03 | 定数 15 が未検証という前提が誤り（P0-F が D=15 を検証済み） | コメントを実測根拠へ更新（挙動変更なし） | P0-F latency gate PASS | 解消（コメント） | 不要 |
 | RES2-04 | 現象の定義が不明確。D2b はハーネスセレクタで、製品の記録消失カウンタではない | 停止継続。再開条件を明文化 | 38 反復の記録を確認 | 停止継続 | 必要（再開時） |
 | RES2-05 | Stage 1 車両のみ。本番計測なし | Stage 2 設計資料を作成（実装しない） | 設計レビュー | 設計資料あり・承認待ち | 必要 |
 | RES2-06 | a2probe は rtalloc へ統合されテスト限定 | NO-GO 維持 | 既存プローブ動作 | 停止継続 | 必要 |
-| RES2-07 | 既定 Off、環境変数のみ。UI 経路なし | U5 技術報告と UI 設計を作成（実装しない） | metric v2 PASS の記録確認 | 承認待ち | 必要 |
+| RES2-07 | 既定 Off、環境変数のみ。UI 経路なし | U5 技術報告と UI 設計を作成。RT オーバーヘッドを測定（約 25 ns/block） | `RtMeasureOverheadTests`（Off 1.34 / TimeOnly 26.84 / Full 26.60 ns） | 承認待ち | 必要 |
 | RES2-08 | 前提が古い（`RuntimePublishState` 不存在、`EngineRuntime` は deprecated、`RuntimeWorld` が現行） | 前提解消としてクローズ。deprecated 除去を負債として記録 | シンボル実測（0/19/428 件） | 解消（前提） | 不要 |
 | RES2-09 | 初回キャッシュミス時のみ 61 分 | 監視 | run 実績 | 検証のみ | 不要 |
 | RES2-10 | R-113/R-111 のフレーク | 監視 | ASan 8 連続 success | 検証のみ | 不要 |
@@ -22,7 +22,7 @@
 | RES2-15 | CMA は mean のみ復元 | 要件定義待ち | コード確認 | 設計判断待ち | 不要（設計内） |
 | RES2-16 | elite 再評価が実質再実行 | 設計見直し | コード確認 | 設計判断待ち | 不要（設計内） |
 | RES2-17 | T2b コメントが陳腐化 | 契約検査へ置換（#129） | Passed | 修正済み | 不要 |
-| RES2-18 | Worker スレッド未識別でアサーションなし | 識別方式の設計 | コード確認 | 追加調査待ち | 必要（RT 影響） |
+| RES2-18 | Worker スレッド未識別でアサーションは無かったが、非オーディオであることは不変 | `debugAssertNotAudioThread()` を追加（Release は空関数へインライン化） | ビルド・既存テスト | **修正済み**（識別方式は追加調査） | 不要 |
 | RES2-19 | Phase-II 送り（設計どおり） | 変更なし | コード確認 | 対応不要 | 不要 |
 | RES2-20 | `.venv` が Python 3.14 消滅で使用不能 | 要否の確認 | `.venv\Scripts\python.exe -V` 失敗 | 設計判断待ち | 不要（環境） |
 

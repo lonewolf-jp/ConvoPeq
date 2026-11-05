@@ -3546,7 +3546,10 @@ public:
             debugAssertNotAudioThread();
             break;
         default:
-            // Worker: アサーションなし（Worker スレッド識別は現状未実装のため skip）
+            // Worker: the dedicated thread role is not implemented yet, but the worker
+            // is never the audio thread. RES2-18: assert the invariant that holds today
+            // (debug builds only; jassert compiles out in Release).
+            debugAssertNotAudioThread();
             break;
         }
 
