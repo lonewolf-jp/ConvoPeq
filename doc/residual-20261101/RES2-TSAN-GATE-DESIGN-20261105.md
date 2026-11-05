@@ -47,3 +47,44 @@
 
 - 現時点で必須化しない（Owner 判断どおり）。
 - 必須化する場合は案 B（範囲限定）を推奨。C1〜C5 の充足を条件とする。
+
+## 7. Owner 判断（2026-11-05 追加）
+
+- 当面 best-effort を維持し、必須ゲート化しない。
+- 必須化する場合の対象テスト・失敗時の扱い・安定性評価基準を本資料に整理する。実装は別判断とする。
+- CI 設定（workflow）は変更しない。
+
+## 8. 必須化する場合の対象テスト（案）
+
+| 区分 | テスト | 状態 |
+|---|---|---|
+| 現行 | `ISRSemanticValidationTests` | workflow がビルドする唯一の対象 |
+| 追加候補 | `ScopedEpochReaderStructuralTests` | MKL/IPP 非依存の見込み。Linux での configure は未確認 |
+| 追加候補 | `ScopedEpochReaderTests` | 同上 |
+| 追加候補 | `ISRRuntimeIdentityGeneratorsTests` | 同上 |
+| 追加候補 | `MpscBoundedRingTests` | 同上 |
+| 追加候補 | `RetireGraceSemanticsTests` | 同上 |
+
+- 候補の採否は、Linux ランナーで `cmake --build ... --target <name>` が通るかで決める。Windows では判定できない。
+- 対象リストは workflow に直書きせず、1 か所（例: `cmake/tsan-targets.cmake`）にまとめ、PR で差分が見えるようにする。
+
+## 9. 失敗時の扱い（案）
+
+| 状態 | 失敗時 | skip 時 |
+|---|---|---|
+| best-effort（現行） | step summary とログに残し、PR は止めない | 成功扱い。理由を step summary に出す |
+| 必須化後 | PR を止める。誤検知は再実行 1 回まで | 成功扱いにしない。skip 理由を記録し、環境要因なら除外理由を残す |
+
+- 必須化後にフレークが再発した場合は、該当テストを一時除外し、除外理由と issue 番号を対象リストに書く。除外のまま必須化を維持しない。
+
+## 10. 安定性評価基準
+
+| 基準 | 閾値 | 測定 |
+|---|---|---|
+| 連続成功率 | 直近 30 run で `fail` 0 | `gh run list --workflow sanitizer-ci.yml` |
+| skip | 0（または環境要因として記録済み） | 同上。skip の検出はログの `[TSan] Skipped` |
+| 実行時間 | 30 分以内、p95 25 分以内 | ジョブの started/completed |
+| 環境依存 | `apt`／`LLVM` 取得失敗がリトライで回復する | 失敗ログ |
+
+- これらを満たしたうえで、必須化の範囲を別途承認する。
+
