@@ -100,3 +100,9 @@
 - したがって、現行構成のままでは TSan の診断実走を行ってもテストは TSan で動かない。証拠を得るには、テストターゲットへの TSan 付与（CMakeLists の変更）と、WSL への pkg-config・JUCE 依存の導入が必要で、いずれも追加承認の範囲である。
 - 実走は未実施。実測実行時間も未取得（skip 時のジョブ時間 0.4〜1.1 分のみ）。
 
+## 10. 診断実走の結果（2026-11-06）
+
+- Linux（WSL 2 vCPU）で configure に成功し、計装した 3 本（`MpscBoundedRingTests`、`ScopedEpochReaderStructuralTests`、`ISRRuntimeIdentityTests`）が PASS、TSan 報告は 0 件だった。
+- `ISRSemanticValidationTests` は `MKLNonUniformConvolver.h` の `mkl.h`・`ipp.h` 依存でビルドできない。Linux では MKL・IPP の探索とリンクが MSVC 専用のため、環境を整えても解決しない。
+- 詳細と実測値は `RES2-TSAN-RUN-EVIDENCE-20261106.md`。
+

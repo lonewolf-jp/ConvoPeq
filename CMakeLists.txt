@@ -2106,6 +2106,28 @@ if(ENABLE_TSAN)
     target_compile_options(ConvoPeq PRIVATE -fsanitize=thread)
     target_link_options(ConvoPeq PRIVATE -fsanitize=thread)
 
+    # 診断用: テスト本体も TSan で計装する。ConvoPeq へのフラグは
+    # テストターゲットへ伝播しないため、明示的に付ける。
+    # Linux (非 MSVC) ではテストに付く /EHsc /utf-8 が clang を壊すため、
+    # TSan 診断時に限りコンパイルオプションを空にしてから計装フラグを付ける。
+    set(_CONVOPEQ_TSAN_TESTS
+        ISRSemanticValidationTests
+        ISRRuntimeIdentityTests
+        ScopedEpochReaderTests
+        ScopedEpochReaderStructuralTests
+        MpscBoundedRingTests
+    )
+    foreach(_tsan_test IN LISTS _CONVOPEQ_TSAN_TESTS)
+        if(TARGET ${_tsan_test})
+            if(NOT MSVC)
+                set_property(TARGET ${_tsan_test} PROPERTY COMPILE_OPTIONS "")
+            endif()
+            target_compile_options(${_tsan_test} PRIVATE -fsanitize=thread)
+            target_link_options(${_tsan_test} PRIVATE -fsanitize=thread)
+        endif()
+    endforeach()
+    unset(_tsan_test)
+
     # TSan と LTCG/IPO は非互換
     set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
     set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
