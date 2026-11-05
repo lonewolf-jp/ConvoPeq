@@ -91,3 +91,12 @@
 - 現状は条件 1〜5 のすべてが未充足である。特に skip が success になるため、成功率の数字は検出力を表さない。
 - 次に必要なのは、専用 Linux 環境で 1 回 TSan を実走させ、対象テスト・実行時間・失敗分類を実測することである。
 - その実測が揃うまで、必須化の判断はできない。
+
+## 9. 実走の試行結果（2026-11-06）
+
+- WSL（Ubuntu 26.04、clang 21.1.8、cmake 4.4.4、ninja 1.13.2）で configure を試した。
+- 結果: `Could NOT find PkgConfig (missing: PKG_CONFIG_EXECUTABLE)` で停止した。
+- 構造上の問題: `ENABLE_TSAN` は `ConvoPeq` ターゲットにのみ `-fsanitize=thread` を付ける。`ISRSemanticValidationTests` は TSan で計装されない。加えて、テストターゲットは `ConvoPeq` に依存するため、Linux では JUCE GUI の全依存が必要になる。
+- したがって、現行構成のままでは TSan の診断実走を行ってもテストは TSan で動かない。証拠を得るには、テストターゲットへの TSan 付与（CMakeLists の変更）と、WSL への pkg-config・JUCE 依存の導入が必要で、いずれも追加承認の範囲である。
+- 実走は未実施。実測実行時間も未取得（skip 時のジョブ時間 0.4〜1.1 分のみ）。
+
