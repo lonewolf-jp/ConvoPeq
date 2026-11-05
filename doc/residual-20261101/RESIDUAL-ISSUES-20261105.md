@@ -215,3 +215,22 @@
 
 - 追加テスト: `PolyphaseGainMetrics`、`RtMeasureOverheadTests`（いずれも test-only・閾値なし）。
 - 未解決 13 件の内訳: 承認待ち 5（01・04・05・06・07）、設計判断 4（12・15・16・20）、追加調査 2（11・13）、検証 2（09・10）。RES2-19 は対応不要。
+
+## 14. 2026-11-05 Owner 判断の受領
+
+Owner が RES2 の 12 項目を決定した。記録は `RES2-OWNER-DECISION-RECORD-20261105.md`。
+
+| 判断 | 対象 |
+|---|---|
+| 保留（既定 OFF） | RES2-01（案 E）、RES2-07（U5・UI） |
+| 停止継続 | RES2-04（F-4/D2b） |
+| クローズ | RES2-05（B2 Stage 2/3） |
+| NO-GO 継続 | RES2-06（A2） |
+| 必須化しない（調査継続） | RES2-11（TSan） |
+| 週次を候補（設定変更は確認後） | RES2-12（soak） |
+| 要件照合待ち | RES2-13（TX-02/10） |
+| 現状維持／設計案のみ | RES2-15・16（CMA）、RES2-18（Worker） |
+| 再作成しない | RES2-20（`.venv`） |
+
+- 製品コード・既定値・RT 経路・CI 設定の変更は行っていない。
+- 追加資料: `RES2-TSAN-GATE-DESIGN-20261105.md`、`RES2-SOAK-OPERATIONS-20261105.md`、`RES2-CMA-REQUIREMENTS-20261105.md`、`RES2-TX-REQUIREMENT-RECONCILIATION-20261105.md`。

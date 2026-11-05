@@ -112,4 +112,4 @@
 | `ConvoPeq.md` | 本レジスタの PR で再生成し FRESH（`NEWER_SRC_COUNT: 0`） |
 | Dropbox | 本報告・レジスタ・調査資料・ConvoPeq.md・分割パートを納品（照合一致） |
 
-**Owner 判断待ち**: 案 E の採用／既定 ON、RES2-04 の再開、Stage 2/3 の実装、NO-GO 解除、U5 有効化／UI、soak の運用方式、CMA 仕様、実機検証の免除、RT 制約・許容誤差の変更。いずれも未実行・未変更である。
+**Owner 判断（2026-11-05 受領）**: 案 E は保留（既定 OFF）、RES2-04 は停止継続、B2 は Stage 1 でクローズ、A2 は NO-GO 継続、U5 は既定 OFF・UI 保留、TSan は必須化しない、soak は週次を候補（設定変更は確認後）、TX-02/10 は要件照合待ち、CMA は現状維持、elite は設計案のみ、Worker は現行維持、`.venv` は再作成しない。記録: `RES2-OWNER-DECISION-RECORD-20261105.md`。
