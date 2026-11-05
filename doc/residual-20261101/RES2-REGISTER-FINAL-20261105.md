@@ -187,9 +187,9 @@
 | 仕様判断 | 現行要求に TSan 必須ゲートの規定は無い |
 | 変更 | なし（CI 通過目的の設定変更を行わない） |
 | 追加・変更テスト | Debug TSan ジョブ（ISR 系）。対象リストの明示は未実施 |
-| 数値検証 | 直近 20 run のうち完了 19 run はすべて success（1 run は実行中）。skip 率と個別実行時間は未集計 |
+| 数値検証 | 直近 30 run は success 26・未完了 4。完了 10 run の TSan ジョブは 0.4〜1.1 分で、ログは `[TSan] Skipped (no build configured)`。**実行された TSan テストは 0**（skip 率 100%） |
 | 性能影響 | 30 分 timeout 内で完了 |
-| 残存リスク | 競合を検出しても PR を止めない。skip の実態が未計測。必須化条件 C1〜C5 は `RES2-TSAN-GATE-DESIGN-20261105.md` |
+| 残存リスク | 競合を検出しても PR を止めない。skip が常態のため TSan の検出力は実質ゼロ。必須化条件 C1〜C5 は `RES2-TSAN-GATE-DESIGN-20261105.md` |
 | 完了判定 | 設計資料あり。**必須化は未承認（best-effort 維持）** |
 
 ## 12. RES2-12 soak

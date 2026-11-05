@@ -91,18 +91,6 @@
         "url": "https://learn.microsoft.com/api/mcp",
         "disabled": false
       },
-      "context-mode": {
-        "type": "local",
-        "command": [
-          "C:\\Python315\\pythonw.exe",
-          "C:\\Users\\user\\.local\\bin\\mcp\\nowin.py",
-          "C:/Users/user/AppData/Roaming/npm/context-mode.cmd"
-        ],
-        "environment": {
-          "CONTEXT_MODE_DIR": "C:/Users/user/AppData/Roaming/opencode/context-mode"
-        },
-        "disabled": false
-      },
       "obscura": {
         "type": "local",
         "command": [
