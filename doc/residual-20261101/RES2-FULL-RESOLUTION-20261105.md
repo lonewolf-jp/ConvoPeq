@@ -87,7 +87,13 @@
 
 ## D. 変更・PR
 
-（PR 作成後に追記）
+| PR | commit | 内容 | CI |
+|---|---|---|---|
+| #136 | `42924b5c` → 統合 `ac5f8eb2` | 数値指標テスト 2 本、Worker アサーション、全記録更新 | 14 pass / 0 fail / 0 pending |
+
+- `PolyphaseGainMetrics` と `RtMeasureOverheadTests` は test-only（閾値なし・測定出力のみ）。
+- `AudioEngine.h` の変更は debug アサーション 1 箇所（Release はインライン化で消える）。
+- CI は ASan を含めて success。
 
 ## E. 残存リスク
 
@@ -99,4 +105,11 @@
 
 ## F. 最終状態
 
-（マージ後に追記）
+| 項目 | 結果 |
+|---|---|
+| `main` / `origin/main` | `ac5f8eb2` / `ac5f8eb2`（一致） |
+| 作業ツリー | clean、worktree 1 本、リモート `main` のみ |
+| `ConvoPeq.md` | 本レジスタの PR で再生成し FRESH（`NEWER_SRC_COUNT: 0`） |
+| Dropbox | 本報告・レジスタ・調査資料・ConvoPeq.md・分割パートを納品（照合一致） |
+
+**Owner 判断待ち**: 案 E の採用／既定 ON、RES2-04 の再開、Stage 2/3 の実装、NO-GO 解除、U5 有効化／UI、soak の運用方式、CMA 仕様、実機検証の免除、RT 制約・許容誤差の変更。いずれも未実行・未変更である。
