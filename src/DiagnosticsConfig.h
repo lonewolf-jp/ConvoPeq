@@ -44,8 +44,9 @@ inline void system_aligned_free(void* ptr) noexcept
 } // namespace convo
 
 // ---- Unified interface ----
-// JUCE_DSP_USE_INTEL_MKL が定義されていれば MKL を使用、そうでなければ System allocator
-#if defined(JUCE_DSP_USE_INTEL_MKL)
+// JUCE_DSP_USE_INTEL_MKL が 1 のときだけ MKL を使用する。juce_dsp.h は未定義時に
+// このマクロを 0 で定義するため、定義の有無ではなく値で判定する（非 MKL 環境の診断ビルド対策）。
+#if defined(JUCE_DSP_USE_INTEL_MKL) && JUCE_DSP_USE_INTEL_MKL
     #include <mkl.h>
     #define CONVOPEQ_ALIGNED_MALLOC(size, align) mkl_malloc((size), (align))
     #define CONVOPEQ_ALIGNED_FREE(ptr)           mkl_free(ptr)
