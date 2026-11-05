@@ -564,7 +564,8 @@ Owner 指示（判断が必要な 6 件の材料整理）に基づく提出物�
 - RES2-07: `RtMeasureOverheadTests` を追加し、計測器のコストを測定（Off 1.34 / TimeOnly 26.84 / Full 26.60 ns/ブロック）。有効化は未承認のまま。
 - RES2-18: `ObserveChannel::Worker` に `debugAssertNotAudioThread()` を追加（Release はインライン化で消える）。`ConvoPeq`・`AudioEngineHarness` の再ビルド成功、4 テスト Passed。
 - 状態: 修正済み 6（02・03・08・14・17・18）、承認待ち 5、設計判断 4、追加調査 2、検証 2、対応不要 1。
-- 記録: `RES2-FULL-RESOLUTION-20261105.md`、`RES2-ITEM-ACTIONS-20261105.md`、`VERIFICATION-RESULTS-20261105.md`。
+- 記録: `RES2-FULL-RESOLUTION-20261105.md`、`RES2-ITEM-ACTIONS-20261105.md`、`VERIFICATION-RESULTS-20261105.md`、`RES2-REGISTER-FINAL-20261105.md`。
+- 統合: PR #136（`42924b5c` → `ac5f8eb2`）。CI 14 pass / 0 fail。
 
 ## 附録
 
