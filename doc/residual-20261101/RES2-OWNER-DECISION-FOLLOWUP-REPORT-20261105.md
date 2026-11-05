@@ -83,7 +83,7 @@
 | 2026-11-05 | #136（数値指標・Worker アサーション） | CI 14 pass / 0 fail / 0 pending（ASan 含む） |
 | 2026-11-05 | #137（最終レジスタ・最終報告） | CI 12 pass / 0 fail / 0 pending |
 | 2026-11-05 | #138（Owner 判断の記録） | CI 12 pass / 0 fail / 0 pending |
-| 2026-11-05 | #139（正規化と訂正） | doc のみのため非ブロッキング。マージ前に pending=0・fail=0 を確認 |
+| 2026-11-05 | #139（正規化と訂正） | 11 pass / 0 fail を確認してマージ（ASan は doc のみのため未完了のまま）。ソースは #138 と同一で、ASan は #138 の success（12 pass 中）で確認済み |
 
 - ローカル実行（`9dd57529`・Release icx 2026.2.0・2026-11-05 18:41）: `CorruptSampleGuardTests` PASS、`D8_1_WrapperCacheTests` PASS（`CONVOPEQ_SOURCE_ROOT` を設定）、`PolyphaseGainMetrics` は 5 構成を出力し **OFF 値が測定時と一致**（LP3 r8 = dc 0.421875 / rmsRatio 0.417918 / peakRatio 0.612160 / g005 0.422092 / latency 475）。`RtMeasureOverheadTests` は Off 1.228 / TimeOnly 25.795 / Full 26.613 ns（20 万回）。
 - 参考（`f90f56be` 時点）: PolyphaseGainFidelityTests OFF 54/54・ON 19/54、4 テスト Passed（0.68 s）。
