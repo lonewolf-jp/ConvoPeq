@@ -24,9 +24,16 @@ WSL の `/` は 16 GB しかない。空きは 3.9 GB だった。ビルド先�
 |---|---|---|
 | `CMakeLists.txt` | `ENABLE_TSAN` ブロックで、テストターゲットにも `-fsanitize=thread` を付ける | `ConvoPeq` のフラグはテストへ伝播せず、テストが未計装だった |
 | `CMakeLists.txt` | 非 MSVC のときに限り、対象テストの `COMPILE_OPTIONS` を空にしてから計装フラグを付ける | テスト定義に付く `/EHsc`・`/utf-8` が clang では入力ファイル扱いになり、ビルドできない |
-| `src/DiagnosticsConfig.h` | `#if defined(JUCE_DSP_USE_INTEL_MKL)` を `#if defined(...) && JUCE_DSP_USE_INTEL_MKL` に変更 | `juce_dsp.h` が未定義時にこのマクロを 0 で定義するため、MKL の無い環境でも `mkl.h` を要求していた |
 
-`DiagnosticsConfig.h` の変更は CMake の範囲外だが、Linux でコンパイルを通すために必要だった。差分は 1 行である。MKL を使う Windows ビルドでは値が 1 のため挙動は変わらない。
+### 2.1 撤回した変更
+
+`src/DiagnosticsConfig.h` の判定を `defined(JUCE_DSP_USE_INTEL_MKL)` から値判定へ変える案を試したが、撤回した。理由は ASan ジョブの失敗である。
+
+- 値判定にすると、`-D` で 1 を渡す翻訳単位と、`juce_dsp.h` が 0 を定義する翻訳単位が混在する。
+- その結果、確保は `mkl_malloc`、解放は `system_aligned_free` という組み合わせが生じ、`bad-free` になった（`SUMMARY: AddressSanitizer: bad-free ... DiagnosticsConfig.h:38 in convo::system_aligned_free`）。
+- 確保と解放の組み合わせを揃える修正は本作業の範囲外なので、元の判定に戻した。
+
+TSan の計装には影響しない。計装した 3 本は `DiagnosticsConfig.h` を経由しない。
 
 ## 3. configure
 
@@ -64,10 +71,10 @@ cmake -S . -B ~/tsan-build -G "Ninja Multi-Config" \
 | テスト | 終了コード | 実行時間 | 検査 | TSan 報告 |
 |---|---|---|---|---|
 | `MpscBoundedRingTests` | 0 | 0.66 秒 | 10 件 PASS | 0 |
-| `ScopedEpochReaderStructuralTests` | 0 | 0.48 秒 | 11 件 PASS | 0 |
+| `ScopedEpochReaderStructuralTests` | 0 | 0.48〜0.51 秒 | 11 件 PASS | 0 |
 | `ISRRuntimeIdentityTests` | 0 | 0.14 秒 | 3 件（成功時は無出力） | 0 |
 
-- 実走は各 1 回だけだ。いずれも終了コード 0 で、検査は通った。再現性は未確認である。
+- 実走は各 1 回、ヘッダ撤回後の再実行が 1 回である。いずれも終了コード 0 で、検査は通った。回数が少なく、再現性は未確認である。
 - TSan ランタイムの初期化は `TSAN_OPTIONS=verbosity=1` で確認した。`***** Running under ThreadSanitizer v3 *****` を出力している。
 - 同じ確認で `WARNING: ThreadSanitizer: memory layout is incompatible, possibly due to high-entropy ASLR` が出て、固定アドレスで再実行されていた。WSL カーネルの ASLR 設定によるもので、テスト結果には影響していない。
 
@@ -109,4 +116,4 @@ cmake -S . -B ~/tsan-build -G "Ninja Multi-Config" \
 | configure（再実行） | 56.3 秒 |
 | `ISRSemanticValidationTests` のビルド（失敗まで） | 20.5 秒 |
 | 採用 3 本のビルド | 約 3.5 分（configure の再実行を含む） |
-| 採用 3 本の実走 | 合計 1.28 秒 |
+| 採用 3 本の実走 | 合計 1.31 秒（初回 1.28 秒） |

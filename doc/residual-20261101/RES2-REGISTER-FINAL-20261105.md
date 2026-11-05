@@ -185,7 +185,7 @@
 | 現行コード根拠 | `.github/workflows/sanitizer-ci.yml:256-259`。`continue-on-error: true`、対象は MKL/IPP 非依存のテストのみ、30 分 timeout（`:258`）、configure 不能時は graceful skip |
 | 修正対象・方針 | best-effort を維持する。必須化する対象テスト・失敗時の扱い・安定性評価基準を `RES2-TSAN-GATE-DESIGN-20261105.md` に整理し、実装は別判断とする |
 | 仕様判断 | 現行要求に TSan 必須ゲートの規定は無い |
-| 変更 | 2026-11-06: `CMakeLists.txt` の TSan 計装範囲を診断目的で変更（テストターゲットへ `-fsanitize=thread`、非 MSVC では MSVC 専用フラグを除去）。`src/DiagnosticsConfig.h` の MKL 判定を値ベースに修正 |
+| 変更 | 2026-11-06: `CMakeLists.txt` の TSan 計装範囲を診断目的で変更（テストターゲットへ `-fsanitize=thread`、非 MSVC では MSVC 専用フラグを除去） |
 | 追加・変更テスト | Debug TSan ジョブ（ISR 系）。対象リストの明示は未実施 |
 | 数値検証 | 直近 30 run は success 26・未完了 4。完了 10 run の TSan ジョブは 0.4〜1.1 分で、ログは `[TSan] Skipped (no build configured)`。**実行された TSan テストは 0**（skip 率 100%）。2026-11-06 の Linux 診断実走は configure 成功、計装 3 本が PASS・TSan 報告 0 件（0.14〜0.66 秒）。`ISRSemanticValidationTests` は MKL/IPP 依存でビルド不能 |
 | 性能影響 | 30 分 timeout 内で完了 |
