@@ -28,7 +28,7 @@
 
 | ID | 対応 | 記録 |
 |---|---|---|
-| #9 | 修正し、PR #159 として提出（マージ未実施） | `report.md` §2 |
+| #9 | 修正し、PR #159 を `48c9b726` としてマージした | `report.md` §2 |
 | #1 残存 A | 保留を維持し、再審査条件を記録 | `06-issue1a-hold.md` |
 | #1 残存 B | 設計案を作成 | `02-issue1b-design.md` |
 | #12 | 変更なし | `01-residual-register.md` §3 |
@@ -36,4 +36,4 @@
 | TSan | 運用を継続（追加実行なし） | `01-residual-register.md` §6 |
 | soak | 未決定事項と合否基準を整理 | `03-soak-tx-conditions.md` |
 | TX 実機 | 未決定事項を整理 | `03-soak-tx-conditions.md` |
-| `ConvoPeq.md` | 再生成し、PR #157 で `main` へ反映 | `04-convopeq-md-sha256.md` |
+| `ConvoPeq.md` | `f641a187` で再生成して PR #157 で反映し、`#9` のマージ後に再生成した | `04-convopeq-md-sha256.md` |
