@@ -160,6 +160,67 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     return nullptr;
 }
 
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+bool AudioEngine::EQCacheManager::debugRunCollisionProbe()
+{
+    convo::EQParameters a;
+    a.bands[0].gain = 6.0f;
+    convo::EQParameters b = a;
+    b.bands[0].gain = -6.0f;
+
+    const auto keyA = EQProcessor::makeCacheKey(a, 48000.0, 512);
+    const auto keyB = EQProcessor::makeCacheKey(b, 48000.0, 512);
+    if (keyA == keyB)
+        return false;
+
+    const uint64_t hashB = EQProcessor::hashCacheKey(keyB);
+
+    EQCoeffCache* cacheA = EQProcessor::createCoeffCache(a, 48000.0, 512, 1u);
+    if (cacheA == nullptr)
+        return false;
+    cacheA->key = keyA;
+    cacheA->paramsHash = hashB; // 同一ハッシュへ別キーを置いて衝突を再現する
+
+    const auto handleA = owner.dspHandleRuntime_.create(cacheA);
+    if (handleA.isNull())
+    {
+        delete cacheA;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(writeMutex);
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+        {
+            owner.invalidateHandleBeforeDestroy(cacheA);
+            delete cacheA;
+            return false;
+        }
+
+        std::unique_ptr<CacheMap> newMap;
+        try
+        {
+            newMap = std::make_unique<CacheMap>(*currentMap);
+            newMap->map.emplace(hashB, handleA);
+        }
+        catch (...)
+        {
+            owner.invalidateHandleBeforeDestroy(cacheA);
+            delete cacheA;
+            return false;
+        }
+        storeNewMap(newMap.release());
+    }
+
+    EQCoeffCache* cacheB = getOrCreate(b, 48000.0, 512, 2u);
+    return cacheB != nullptr
+        && cacheB != cacheA
+        && EQProcessor::cacheKeyMatches(*cacheB, keyB)
+        && cacheB->paramsHash != hashB;
+}
+#endif
+
 // ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
 //   「ポインタを使い終わるスコープ全体」で保持すること（規約 R2）。
 convo::isr::DSPHandlePin AudioEngine::EQCacheManager::pinByHash(uint64_t hash) noexcept

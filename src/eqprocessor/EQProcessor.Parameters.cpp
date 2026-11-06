@@ -19,6 +19,10 @@
 void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    // 非有限値は格納しない（破損セッションの NaN/Inf を入口で止める）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(freq))) return;
+    // 静的範囲へ正規化する。Nyquist 依存の上限は係数生成側で適用する。
+    freq = juce::jlimit(DSP_MIN_FREQ, DSP_MAX_FREQ, freq);
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -39,6 +43,8 @@ void EQProcessor::setBandFrequency(int band, float freq)
 void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    if (!convo::numeric_policy::isFinite(static_cast<double>(gainDb))) return;
+    gainDb = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, gainDb);
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -59,6 +65,8 @@ void EQProcessor::setBandGain(int band, float gainDb)
 void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    if (!convo::numeric_policy::isFinite(static_cast<double>(q))) return;
+    q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, q);
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -226,6 +234,8 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 //--------------------------------------------------------------
 void EQProcessor::setNonlinearSaturation(float value) noexcept
 {
+    if (!convo::numeric_policy::isFinite(static_cast<double>(value)))
+        return; // NaN/Inf は格納しない（jlimit は NaN を素通しする）
     const float clamped = juce::jlimit(0.0f, 1.0f, value);
     const float previous = convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire); // acquire: 先行 publishAtomic release と HB
     if (std::abs(static_cast<double>(clamped - previous)) < 1.0e-9)
@@ -259,8 +269,9 @@ float EQProcessor::getNonlinearSaturation() const noexcept
 //--------------------------------------------------------------
 void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
 {
+    // 不正な列挙値は拒否して現状維持（兄弟セッターと同じ契約）。
     if (mode != FilterStructure::Serial && mode != FilterStructure::Parallel)
-        mode = FilterStructure::Serial;
+        return;
 
     const FilterStructure previous = convo::consumeAtomic(requestedStructure, std::memory_order_acquire); // acquire: 先行 publishAtomic release と HB
     if (previous == mode)
