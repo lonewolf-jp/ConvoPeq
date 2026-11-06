@@ -219,6 +219,40 @@ bool AudioEngine::EQCacheManager::debugRunCollisionProbe()
         && EQProcessor::cacheKeyMatches(*cacheB, keyB)
         && cacheB->paramsHash != hashB;
 }
+
+bool AudioEngine::EQCacheManager::debugRunDisabledBandKeyProbe()
+{
+    convo::EQParameters a;
+    a.bands[7].enabled = false;
+    a.bands[7].frequency = 35.0f;
+    a.bands[7].gain = 9.0f;
+    a.bands[7].q = 2.5f;
+
+    convo::EQParameters b = a;
+    b.bands[7].frequency = 8000.0f;
+    b.bands[7].gain = -12.0f;
+    b.bands[7].q = 0.5f;
+
+    const auto keyA = EQProcessor::makeCacheKey(a, 48000.0, 512);
+    const auto keyB = EQProcessor::makeCacheKey(b, 48000.0, 512);
+    if (!(keyA == keyB))
+        return false;
+    if (EQProcessor::hashCacheKey(keyA) != EQProcessor::hashCacheKey(keyB))
+        return false;
+
+    EQCoeffCache* cacheA = getOrCreate(a, 48000.0, 512, 1u);
+    if (cacheA == nullptr || !EQProcessor::cacheKeyMatches(*cacheA, keyA))
+        return false;
+
+    EQCoeffCache* cacheB = getOrCreate(b, 48000.0, 512, 2u);
+    if (cacheB == nullptr || cacheB != cacheA)
+        return false;
+
+    convo::EQParameters c = a;
+    c.bands[7].enabled = true;
+    EQCoeffCache* cacheC = getOrCreate(c, 48000.0, 512, 3u);
+    return cacheC != nullptr && cacheC != cacheA;
+}
 #endif
 
 // ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
