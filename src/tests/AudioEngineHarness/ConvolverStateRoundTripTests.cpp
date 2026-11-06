@@ -3190,6 +3190,23 @@ bool checkEqCacheCollisionProbe()
     std::printf("[#1] coefficient cache collision probe: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
+
+// -----------------------------------------------------------------------------
+// #1B: 無効バンドの値だけが異なる 2 設定で同一キャッシュが再利用されることを検証する
+// -----------------------------------------------------------------------------
+bool checkEqCacheDisabledBandKeyProbe()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[#1B] harness start failed\n");
+        return false;
+    }
+
+    const bool ok = h.engine().debugRunEqDisabledBandKeyProbe();
+    std::printf("[#1B] disabled-band key normalisation probe: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
 #endif
 
 int runConvolverStateRoundTripTests()
@@ -3373,6 +3390,11 @@ int runConvolverStateRoundTripTests()
     if (!checkEqCacheCollisionProbe())
     {
         std::fprintf(stderr, "FAIL: checkEqCacheCollisionProbe\n");
+        return 1;
+    }
+    if (!checkEqCacheDisabledBandKeyProbe())
+    {
+        std::fprintf(stderr, "FAIL: checkEqCacheDisabledBandKeyProbe\n");
         return 1;
     }
 #endif

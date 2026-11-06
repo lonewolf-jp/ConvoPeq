@@ -881,15 +881,27 @@ inline EQCoeffKey EQProcessor::makeCacheKey(const convo::EQParameters& params,
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         const auto& band = params.bands[i];
-        float frequency = band.frequency;
-        if (frequencyRangeValid)
-            frequency = juce::jlimit(DSP_MIN_FREQ, maxFrequency, frequency);
-        const float gain = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, band.gain);
-        const float q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, band.q);
+        if (band.enabled)
+        {
+            float frequency = band.frequency;
+            if (frequencyRangeValid)
+                frequency = juce::jlimit(DSP_MIN_FREQ, maxFrequency, frequency);
+            const float gain = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, band.gain);
+            const float q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, band.q);
 
-        key.frequencyBits[static_cast<std::size_t>(i)] = canonicalFloatBits(frequency);
-        key.gainBits[static_cast<std::size_t>(i)] = canonicalFloatBits(gain);
-        key.qBits[static_cast<std::size_t>(i)] = canonicalFloatBits(q);
+            key.frequencyBits[static_cast<std::size_t>(i)] = canonicalFloatBits(frequency);
+            key.gainBits[static_cast<std::size_t>(i)] = canonicalFloatBits(gain);
+            key.qBits[static_cast<std::size_t>(i)] = canonicalFloatBits(q);
+        }
+        else
+        {
+            // 無効バンドの値は係数にも処理にも使われない（createCoeffCache はバイパス、
+            // 処理側は bandActive を先に確認する）。キーでは 0 に正規化し、同じ有効設定が
+            // 同じキャッシュを再利用できるようにする。
+            key.frequencyBits[static_cast<std::size_t>(i)] = 0u;
+            key.gainBits[static_cast<std::size_t>(i)] = 0u;
+            key.qBits[static_cast<std::size_t>(i)] = 0u;
+        }
         key.enabled[static_cast<std::size_t>(i)] = band.enabled ? 1u : 0u;
         key.type[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.type);
         key.channelMode[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.channelMode);

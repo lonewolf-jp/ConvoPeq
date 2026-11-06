@@ -1321,6 +1321,8 @@ public:
 #if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
     // テスト専用: 係数キャッシュの衝突スロットでキー照合と退避を検証する。
     bool debugRunEqCacheCollisionProbe() { return eqCacheManager.debugRunCollisionProbe(); }
+    // テスト専用: 無効バンドのキー正規化で同一キャッシュが再利用されることを検証する。
+    bool debugRunEqDisabledBandKeyProbe() { return eqCacheManager.debugRunDisabledBandKeyProbe(); }
 #endif
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
@@ -2244,6 +2246,8 @@ private:
 #if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
         // テスト専用: 別キーのキャッシュを同一ハッシュへ置き、誤ヒットしないことを検証する。
         bool debugRunCollisionProbe();
+        // テスト専用: 無効バンドの値だけが異なる 2 設定で同一キャッシュが返ることを検証する。
+        bool debugRunDisabledBandKeyProbe();
 #endif
         // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
         //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
