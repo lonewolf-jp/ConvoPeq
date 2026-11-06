@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-06 06:26:48
+> Generated: 2026-11-06 19:41:43
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -4724,25 +4724,36 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 {
     using convo::isr::DSPHandle;
 
-    // ★ BUG-047: computeParamsHash に sampleRate/maxBlockSize を含めて、
-    //            sampleRate 変更時に古い係数キャッシュがヒットしないようにする。
-    const uint64_t hash = EQProcessor::computeParamsHash(params, sampleRate, maxBlockSize);
-    const CacheMap* currentMap = loadMap();
-    if (currentMap == nullptr)
-        return nullptr;
+    // 係数生成と同じクランプ規約を通したキーで同一性を判定する。
+    const EQCoeffKey key = EQProcessor::makeCacheKey(params, sampleRate, maxBlockSize);
+    uint64_t hash = EQProcessor::hashCacheKey(key);
 
-    auto it = currentMap->map.find(hash);
-    if (it != currentMap->map.end())
+    // ロックなしのヒット探索。ハッシュが一致してもキーが違う場合は別ハッシュへ退避する。
+    for (int probe = 0; probe < 32; ++probe)
     {
-        // ★ P0-2: DSPHandle → resolve() でポインタ取得
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+            return nullptr;
+
+        const auto it = currentMap->map.find(hash);
+        if (it == currentMap->map.end())
+            break;
+
         const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
-        return static_cast<EQCoeffCache*>(resolved.instance);
+        auto* existing = static_cast<EQCoeffCache*>(resolved.instance);
+        if (existing != nullptr && EQProcessor::cacheKeyMatches(*existing, key))
+            return existing;
+
+        hash = EQProcessor::probeCacheHash(hash, probe);
     }
 
     // ★ P0-2: キャッシュミス — 新規作成
     EQCoeffCache* cache = EQProcessor::createCoeffCache(params, sampleRate, maxBlockSize, generation);
     if (cache == nullptr)
         return nullptr;
+
+    cache->key = key;
+    cache->paramsHash = hash;
 
     // ★ P0-2: DSPHandleRuntime に登録
     const DSPHandle handle = owner.dspHandleRuntime_.create(cache);
@@ -4756,53 +4767,128 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     drainDeferredMapsUnderLock();
 
-    // Lock取得中に他スレッドが同じハッシュを追加した可能性を再確認
-    currentMap = loadMap();
-    if (currentMap == nullptr)
+    for (int probe = 0; probe < 32; ++probe)
     {
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        return nullptr;
-    }
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+        {
+            // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return nullptr;
+        }
 
-    it = currentMap->map.find(hash);
-    if (it != currentMap->map.end())
-    {
-        // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+        const auto it = currentMap->map.find(hash);
+        if (it != currentMap->map.end())
+        {
+            const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+            auto* existing = static_cast<EQCoeffCache*>(resolved.instance);
+            if (existing != nullptr && EQProcessor::cacheKeyMatches(*existing, key))
+            {
+                // 先に追加された同一キャッシュを採用し、新規作成分を破棄
+                owner.invalidateHandleBeforeDestroy(cache);
+                delete cache;
+                return existing;
+            }
+
+            hash = EQProcessor::probeCacheHash(hash, probe);
+            cache->paramsHash = hash;
+            continue;
+        }
+
+        std::unique_ptr<CacheMap> newMap;
+        try
+        {
+            newMap = std::make_unique<CacheMap>(*currentMap);
+            newMap->map.emplace(hash, handle);
+        }
+        catch (const std::bad_alloc&)
+        {
+            // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return nullptr;
+        }
+        catch (...)
+        {
+            // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return nullptr;
+        }
+
+        storeNewMap(newMap.release());
+
+        const auto resolved = owner.dspHandleRuntime_.resolve(handle);
         return static_cast<EQCoeffCache*>(resolved.instance);
     }
 
-    std::unique_ptr<CacheMap> newMap;
-    try
-    {
-        newMap = std::make_unique<CacheMap>(*currentMap);
-        newMap->map.emplace(hash, handle);
-    }
-    catch (const std::bad_alloc&)
-    {
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        return nullptr;
-    }
-    catch (...)
-    {
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        return nullptr;
-    }
-
-    storeNewMap(newMap.release());
-
-    const auto resolved = owner.dspHandleRuntime_.resolve(handle);
-    return static_cast<EQCoeffCache*>(resolved.instance);
+    // 32 個の候補がすべて別キーで埋まる場合は、誤った係数を返さず fail-closed にする。
+    owner.invalidateHandleBeforeDestroy(cache);
+    delete cache;
+    return nullptr;
 }
+
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+bool AudioEngine::EQCacheManager::debugRunCollisionProbe()
+{
+    convo::EQParameters a;
+    a.bands[0].gain = 6.0f;
+    convo::EQParameters b = a;
+    b.bands[0].gain = -6.0f;
+
+    const auto keyA = EQProcessor::makeCacheKey(a, 48000.0, 512);
+    const auto keyB = EQProcessor::makeCacheKey(b, 48000.0, 512);
+    if (keyA == keyB)
+        return false;
+
+    const uint64_t hashB = EQProcessor::hashCacheKey(keyB);
+
+    EQCoeffCache* cacheA = EQProcessor::createCoeffCache(a, 48000.0, 512, 1u);
+    if (cacheA == nullptr)
+        return false;
+    cacheA->key = keyA;
+    cacheA->paramsHash = hashB; // 同一ハッシュへ別キーを置いて衝突を再現する
+
+    const auto handleA = owner.dspHandleRuntime_.create(cacheA);
+    if (handleA.isNull())
+    {
+        delete cacheA;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(writeMutex);
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+        {
+            owner.invalidateHandleBeforeDestroy(cacheA);
+            delete cacheA;
+            return false;
+        }
+
+        std::unique_ptr<CacheMap> newMap;
+        try
+        {
+            newMap = std::make_unique<CacheMap>(*currentMap);
+            newMap->map.emplace(hashB, handleA);
+        }
+        catch (...)
+        {
+            owner.invalidateHandleBeforeDestroy(cacheA);
+            delete cacheA;
+            return false;
+        }
+        storeNewMap(newMap.release());
+    }
+
+    EQCoeffCache* cacheB = getOrCreate(b, 48000.0, 512, 2u);
+    return cacheB != nullptr
+        && cacheB != cacheA
+        && EQProcessor::cacheKeyMatches(*cacheB, keyB)
+        && cacheB->paramsHash != hashB;
+}
+#endif
 
 // ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
 //   「ポインタを使い終わるスコープ全体」で保持すること（規約 R2）。
@@ -7903,6 +7989,11 @@ public:
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     [[nodiscard]] const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
+
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+    // テスト専用: 係数キャッシュの衝突スロットでキー照合と退避を検証する。
+    bool debugRunEqCacheCollisionProbe() { return eqCacheManager.debugRunCollisionProbe(); }
+#endif
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
     [[nodiscard]] const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
@@ -8822,6 +8913,10 @@ private:
                                   double sampleRate,
                                   int maxBlockSize,
                                   uint64_t generation);
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+        // テスト専用: 別キーのキャッシュを同一ハッシュへ置き、誤ヒットしないことを検証する。
+        bool debugRunCollisionProbe();
+#endif
         // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
         //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
         //     DSPHandlePin keeps the cache entry alive for the lease duration.
@@ -53101,17 +53196,11 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             if (DftiComputeForward(dfti.handle, minimumSpec.get()) != DFTI_NO_ERROR) return {};
 
             std::vector<double> phiMinUnwrapped(static_cast<size_t>(complexSize));
-            phiMinUnwrapped[0] = std::atan2(minimumSpec.get()[0].imag, minimumSpec.get()[0].real);
-            for (int k = 1; k < complexSize; ++k)
-            {
-                const double raw = std::atan2(minimumSpec.get()[k].imag, minimumSpec.get()[k].real);
-                const double delta = raw - phiMinUnwrapped[static_cast<size_t>(k - 1)];
-                if (delta > juce::MathConstants<double>::pi)
-                    phiMinUnwrapped[static_cast<size_t>(k)] = phiMinUnwrapped[static_cast<size_t>(k - 1)]
-                                                           + delta - 2.0 * juce::MathConstants<double>::pi;
-                else
-                    phiMinUnwrapped[static_cast<size_t>(k)] = phiMinUnwrapped[static_cast<size_t>(k - 1)] + delta;
-            }
+            for (int k = 0; k < complexSize; ++k)
+                phiMinUnwrapped[static_cast<size_t>(k)] = std::atan2(minimumSpec.get()[k].imag,
+                                                                     minimumSpec.get()[k].real);
+            // 両方向の補正と補正量の累積を備えた共通実装へ委譲する。
+            unwrapPhaseRadians(phiMinUnwrapped.data(), complexSize);
 
             std::vector<bool> phaseValid(static_cast<size_t>(complexSize), true);
             for (int k = 0; k < complexSize; ++k)
@@ -56106,12 +56195,16 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
             if (hasSavedAutoLength)
             {
                 const float autoLength = static_cast<float>(v.getProperty ("autoDetectedIRLength"));
-                const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                             getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)), // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
-                                                             autoLength);
+                // STG-11-D8: 非有限値は格納しない（jlimit は NaN を素通しするため）。
+                if (std::isfinite(autoLength))
                 {
-                    const juce::ScopedLock lock(pendingOverrideLock);
-                    pendingOverride.autoDetectedIRLengthSec = clampedAutoLength;
+                    const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
+                                                                 getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)), // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
+                                                                 autoLength);
+                    {
+                        const juce::ScopedLock lock(pendingOverrideLock);
+                        pendingOverride.autoDetectedIRLengthSec = clampedAutoLength;
+                    }
                 }
             }
 
@@ -71944,6 +72037,8 @@ EQBandParams EQProcessor::getBandParams(int band) const
 #include <array>
 #include <vector>
 #include <memory>
+#include <cmath>
+#include <cstring>
 #include <mutex>
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
@@ -72035,6 +72130,29 @@ struct EQCoeffsBiquad
 // CPU/メモリ効率を向上させる不変キャッシュ
 // ライフサイクル管理は DSPHandleRuntime が担当する。
 //--------------------------------------------------------------
+//--------------------------------------------------------------
+// EQCoeffKey: 係数キャッシュの同一性判定キー
+//   float は符号を保持した canonical bits（±0 は 0、NaN は単一表現）で持つ。
+//   係数生成に影響する値だけを含み、比較とハッシュの両方で同じ表現を使う。
+//--------------------------------------------------------------
+struct EQCoeffKey
+{
+    std::array<std::uint32_t, 20> frequencyBits {};
+    std::array<std::uint32_t, 20> gainBits {};
+    std::array<std::uint32_t, 20> qBits {};
+    std::array<std::uint8_t, 20> enabled {};
+    std::array<std::uint8_t, 20> type {};
+    std::array<std::uint8_t, 20> channelMode {};
+    std::uint32_t totalGainBits = 0;
+    std::uint32_t saturationBits = 0;
+    std::uint8_t agcEnabled = 0;
+    std::uint8_t filterStructure = 0;
+    std::uint64_t sampleRateBits = 0;
+    std::int32_t maxBlockSize = 0;
+
+    bool operator==(const EQCoeffKey&) const noexcept = default;
+};
+
 #pragma warning(push)
 #pragma warning(disable : 4324) // C4324を抑制 - struct padding due to alignment
 struct alignas(64) EQCoeffCache
@@ -72046,6 +72164,7 @@ struct alignas(64) EQCoeffCache
 
     // メタデータ
     uint64_t paramsHash = 0;             // パラメータハッシュ値
+    EQCoeffKey key {};                   // 係数生成に用いたパラメータの正規化キー
     double sampleRate = 0.0;             // サンプリングレート
     int maxBlockSize = 0;                // 最大ブロックサイズ
     uint64_t generation = 0;             // 世代番号
@@ -72230,6 +72349,15 @@ public:
         double sampleRate,
         int maxBlockSize,
         uint64_t generation) noexcept;
+
+    // 係数キャッシュの同一性判定（符号保持・±0/NaN 正規化）
+    static std::uint32_t canonicalFloatBits(float value) noexcept;
+    static EQCoeffKey makeCacheKey(const convo::EQParameters& params,
+                                   double sampleRate,
+                                   int maxBlockSize) noexcept;
+    static std::uint64_t hashCacheKey(const EQCoeffKey& key) noexcept;
+    static bool cacheKeyMatches(const EQCoeffCache& cache, const EQCoeffKey& key) noexcept;
+    static std::uint64_t probeCacheHash(std::uint64_t baseHash, int probe) noexcept;
 
     //----------------------------------------------------------
     // パラメータ読み取り (UIスレッドで表示に使用)
@@ -72735,6 +72863,109 @@ private:
 
 };
 
+//--------------------------------------------------------------
+// 係数キャッシュ・キーの実装（header-only: 単体テストから直接検証できる）
+//--------------------------------------------------------------
+inline std::uint32_t EQProcessor::canonicalFloatBits(float value) noexcept
+{
+    // すべての NaN を単一表現へ寄せ、±0 を 0 に揃える。それ以外は符号を含めて保持する。
+    if (std::isnan(value))
+        return 0x7FC00000u;
+    if (value == 0.0f)
+        return 0u;
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+inline EQCoeffKey EQProcessor::makeCacheKey(const convo::EQParameters& params,
+                                            double sampleRate,
+                                            int maxBlockSize) noexcept
+{
+    EQCoeffKey key;
+    const float nyquist = static_cast<float>(sampleRate * 0.5);
+    const float maxFrequency = (std::min)(DSP_MAX_FREQ, nyquist * DSP_MAX_FREQ_NYQUIST_RATIO);
+    const bool frequencyRangeValid = std::isfinite(maxFrequency) && maxFrequency >= DSP_MIN_FREQ;
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        const auto& band = params.bands[i];
+        float frequency = band.frequency;
+        if (frequencyRangeValid)
+            frequency = juce::jlimit(DSP_MIN_FREQ, maxFrequency, frequency);
+        const float gain = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, band.gain);
+        const float q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, band.q);
+
+        key.frequencyBits[static_cast<std::size_t>(i)] = canonicalFloatBits(frequency);
+        key.gainBits[static_cast<std::size_t>(i)] = canonicalFloatBits(gain);
+        key.qBits[static_cast<std::size_t>(i)] = canonicalFloatBits(q);
+        key.enabled[static_cast<std::size_t>(i)] = band.enabled ? 1u : 0u;
+        key.type[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.type);
+        key.channelMode[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.channelMode);
+    }
+
+    key.totalGainBits = canonicalFloatBits(juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, params.totalGainDb));
+    key.saturationBits = canonicalFloatBits(juce::jlimit(0.0f, 1.0f, params.nonlinearSaturation));
+    key.agcEnabled = params.agcEnabled ? 1u : 0u;
+    key.filterStructure = static_cast<std::uint8_t>(params.filterStructure);
+
+    if (std::isnan(sampleRate))
+        key.sampleRateBits = 0x7FF8000000000000ull;
+    else if (sampleRate == 0.0)
+        key.sampleRateBits = 0ull;
+    else
+        std::memcpy(&key.sampleRateBits, &sampleRate, sizeof(key.sampleRateBits));
+
+    key.maxBlockSize = maxBlockSize;
+    return key;
+}
+
+inline std::uint64_t EQProcessor::hashCacheKey(const EQCoeffKey& key) noexcept
+{
+    std::uint64_t hash = 0x9E3779B97F4A7C15ull;
+    const auto mix = [&hash](std::uint64_t value) noexcept
+    {
+        hash ^= value + 0x9E3779B97F4A7C15ull + (hash << 6) + (hash >> 2);
+    };
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        const auto index = static_cast<std::size_t>(i);
+        mix(key.frequencyBits[index]);
+        mix(key.gainBits[index]);
+        mix(key.qBits[index]);
+        mix(key.enabled[index]);
+        mix(key.type[index]);
+        mix(key.channelMode[index]);
+    }
+
+    mix(key.totalGainBits);
+    mix(key.saturationBits);
+    mix(key.agcEnabled);
+    mix(key.filterStructure);
+    mix(key.sampleRateBits);
+    mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.maxBlockSize)));
+
+    // 0 は「キャッシュなし」の番兵として使われるため避ける。
+    return hash != 0ull ? hash : 1ull;
+}
+
+inline bool EQProcessor::cacheKeyMatches(const EQCoeffCache& cache, const EQCoeffKey& key) noexcept
+{
+    return cache.key == key;
+}
+
+inline std::uint64_t EQProcessor::probeCacheHash(std::uint64_t baseHash, int probe) noexcept
+{
+    std::uint64_t hash = baseHash + 0x9E3779B97F4A7C15ull * static_cast<std::uint64_t>(probe + 1);
+    hash ^= hash >> 30;
+    hash *= 0xBF58476D1CE4E5B9ull;
+    hash ^= hash >> 27;
+    hash *= 0x94D049BB133111EBull;
+    hash ^= hash >> 31;
+    return hash != 0ull ? hash : 1ull;
+}
+
 ```
 
 ### 📄 `src\eqprocessor\EQProcessor.Parameters.cpp`
@@ -72761,6 +72992,10 @@ private:
 void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    // 非有限値は格納しない（破損セッションの NaN/Inf を入口で止める）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(freq))) return;
+    // 静的範囲へ正規化する。Nyquist 依存の上限は係数生成側で適用する。
+    freq = juce::jlimit(DSP_MIN_FREQ, DSP_MAX_FREQ, freq);
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -72781,6 +73016,8 @@ void EQProcessor::setBandFrequency(int band, float freq)
 void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    if (!convo::numeric_policy::isFinite(static_cast<double>(gainDb))) return;
+    gainDb = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, gainDb);
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -72801,6 +73038,8 @@ void EQProcessor::setBandGain(int band, float gainDb)
 void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+    if (!convo::numeric_policy::isFinite(static_cast<double>(q))) return;
+    q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, q);
     auto oldState = loadCurrentState(std::memory_order_acquire); // acquire: 先行 exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
@@ -72968,6 +73207,8 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 //--------------------------------------------------------------
 void EQProcessor::setNonlinearSaturation(float value) noexcept
 {
+    if (!convo::numeric_policy::isFinite(static_cast<double>(value)))
+        return; // NaN/Inf は格納しない（jlimit は NaN を素通しする）
     const float clamped = juce::jlimit(0.0f, 1.0f, value);
     const float previous = convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire); // acquire: 先行 publishAtomic release と HB
     if (std::abs(static_cast<double>(clamped - previous)) < 1.0e-9)
@@ -73001,8 +73242,9 @@ float EQProcessor::getNonlinearSaturation() const noexcept
 //--------------------------------------------------------------
 void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
 {
+    // 不正な列挙値は拒否して現状維持（兄弟セッターと同じ契約）。
     if (mode != FilterStructure::Serial && mode != FilterStructure::Parallel)
-        mode = FilterStructure::Serial;
+        return;
 
     const FilterStructure previous = convo::consumeAtomic(requestedStructure, std::memory_order_acquire); // acquire: 先行 publishAtomic release と HB
     if (previous == mode)
@@ -74330,52 +74572,13 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
 #include <cstring>
 #include <new>
 
-namespace {
-
-inline uint32_t floatToCanonicalBits(float f) noexcept
-{
-    uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(float));
-    return bits & 0x7FFFFFFF;
-}
-
-inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
-{
-    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
-}
-
-}
-
 uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params,
                                         double sampleRate,
                                         int maxBlockSize) noexcept
 {
-    uint64_t hash = 0;
-
-    for (int i = 0; i < 20; ++i)
-    {
-        const auto& band = params.bands[i];
-        hash = hashCombine(hash, floatToCanonicalBits(band.frequency));
-        hash = hashCombine(hash, floatToCanonicalBits(band.gain));
-        hash = hashCombine(hash, floatToCanonicalBits(band.q));
-        hash = hashCombine(hash, static_cast<uint64_t>(band.enabled ? 1 : 0));
-        hash = hashCombine(hash, static_cast<uint64_t>(band.type));
-        hash = hashCombine(hash, static_cast<uint64_t>(band.channelMode));
-    }
-
-    hash = hashCombine(hash, floatToCanonicalBits(params.totalGainDb));
-    hash = hashCombine(hash, static_cast<uint64_t>(params.agcEnabled ? 1 : 0));
-    hash = hashCombine(hash, floatToCanonicalBits(params.nonlinearSaturation));
-    hash = hashCombine(hash, static_cast<uint64_t>(params.filterStructure));
-
-    // ★ BUG-047: 係数は sampleRate/maxBlockSize に強く依存するためハッシュに含める。
-    //   含めないと sampleRate 変更時に古い係数のキャッシュがヒットして誤った周波数特性になる。
-    uint64_t srBits;
-    std::memcpy(&srBits, &sampleRate, sizeof(sampleRate));
-    hash = hashCombine(hash, srBits);
-    hash = hashCombine(hash, static_cast<uint64_t>(static_cast<uint32_t>(maxBlockSize)));
-
-    return hash;
+    // 符号を保持し、±0 と NaN を正規化したキーから算出する。
+    // 係数生成と同じクランプ規約を通すため、キーと係数の意味が一致する。
+    return hashCacheKey(makeCacheKey(params, sampleRate, maxBlockSize));
 }
 
 EQCoeffCache* EQProcessor::createCoeffCache(
@@ -74387,7 +74590,8 @@ EQCoeffCache* EQProcessor::createCoeffCache(
     auto* cache = new (std::nothrow) EQCoeffCache();
     if (cache == nullptr) return nullptr;
 
-    cache->paramsHash = computeParamsHash(eqParams, sampleRate, maxBlockSize);
+    cache->key = makeCacheKey(eqParams, sampleRate, maxBlockSize);
+    cache->paramsHash = hashCacheKey(cache->key);
     cache->sampleRate = sampleRate;
     cache->maxBlockSize = maxBlockSize;
     cache->generation = generation;
@@ -98272,6 +98476,7 @@ bool checkSTG61LoadFailureReported()
     if (!ok)
         return false;
     std::printf("ConvolverStateRoundTripTests: PASS (STG-6-D1 failure reported, state preserved)\n");
+
     return true;
 }
 
@@ -98505,6 +98710,56 @@ static bool checkWork92A3FftFailurePath()
     return ok;
 }
 
+
+// -----------------------------------------------------------------------------
+// D8: setState の手動オーバーライド分岐が非有限の autoDetectedIRLength を格納しない
+// -----------------------------------------------------------------------------
+bool checkD8AutoLengthRejectsNonFinite()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[D8] harness start failed\n");
+        return false;
+    }
+
+    ConvolverProcessor& conv = h.engine().getConvolverProcessor();
+    conv.setIRLengthManualOverride(false);
+    conv.applyAutoDetectedIRLength(0.5f);
+    const float before = conv.getAutoDetectedIRLength();
+
+    juce::ValueTree v("Convolver");
+    v.setProperty("autoDetectedIRLength", std::numeric_limits<double>::quiet_NaN(), nullptr);
+    v.setProperty("irLengthManualOverride", true, nullptr);
+    conv.setState(v);
+
+    const float after = conv.getAutoDetectedIRLength();
+    const bool ok = (after == before);
+    std::printf("[D8] autoDetected NaN rejection: %s (before=%.3f after=%.3f)\n",
+                ok ? "PASS" : "FAIL", static_cast<double>(before), static_cast<double>(after));
+    return ok;
+}
+
+
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+// -----------------------------------------------------------------------------
+// #1: 同一ハッシュへ別キーのキャッシュを置き、誤ヒットせず退避することを検証する
+// -----------------------------------------------------------------------------
+bool checkEqCacheCollisionProbe()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[#1] harness start failed\n");
+        return false;
+    }
+
+    const bool ok = h.engine().debugRunEqCacheCollisionProbe();
+    std::printf("[#1] coefficient cache collision probe: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+#endif
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -98677,6 +98932,18 @@ int runConvolverStateRoundTripTests()
         std::fprintf(stderr, "FAIL: checkWork92A3FftFailurePath (work92 A-3)\n");
         stg2ok = false;
     }
+    if (!checkD8AutoLengthRejectsNonFinite())
+    {
+        std::fprintf(stderr, "FAIL: checkD8AutoLengthRejectsNonFinite\n");
+        return 1;
+    }
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+    if (!checkEqCacheCollisionProbe())
+    {
+        std::fprintf(stderr, "FAIL: checkEqCacheCollisionProbe\n");
+        return 1;
+    }
+#endif
     if (!stg2ok)
         return 1;
     return 0;
@@ -113424,12 +113691,16 @@ int runSTG11D9TailFiniteTests()
                                 // mechanism 検証に直接使用する（production 経路と同一 API）
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include "eqprocessor/EQProcessor.h"
+#include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EpochDomain.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
@@ -113787,6 +114058,235 @@ static bool checkTD10SetterAccounting()
     return true;
 }
 
+
+// -----------------------------------------------------------------------------
+// STG11-D13: 係数キャッシュの同一性判定（#1 符号衝突の回帰）
+//   ・符号だけ異なるゲイン／totalGain を区別する
+//   ・クランプ後に同値となる入力は同一キーにする
+//   ・sampleRate / maxBlockSize の差を区別する
+//   ・ハッシュ一致でもキーが違えばキャッシュヒットさせない
+// -----------------------------------------------------------------------------
+static bool checkCoeffCacheKeyContract()
+{
+    bool ok = true;
+    const auto expect = [&ok](bool condition, const char* name)
+    {
+        if (!condition)
+        {
+            std::fprintf(stderr, "FAIL: %s\n", name);
+            ok = false;
+        }
+    };
+
+    constexpr double sr = 48000.0;
+    constexpr int block = 512;
+
+    const convo::EQParameters base;
+    const auto keyOf = [sr, block](const convo::EQParameters& p) { return EQProcessor::makeCacheKey(p, sr, block); };
+    const auto hashOf = [](const EQCoeffKey& k) { return EQProcessor::hashCacheKey(k); };
+
+    expect(keyOf(base) == keyOf(base), "identical params produce identical key");
+    expect(hashOf(keyOf(base)) == hashOf(keyOf(base)), "identical params produce identical hash");
+
+    convo::EQParameters plusGain = base;
+    plusGain.bands[0].gain = 6.0f;
+    convo::EQParameters minusGain = base;
+    minusGain.bands[0].gain = -6.0f;
+    expect(!(keyOf(plusGain) == keyOf(minusGain)), "gain sign is part of the key");
+    expect(hashOf(keyOf(plusGain)) != hashOf(keyOf(minusGain)), "gain sign is part of the hash");
+
+    convo::EQParameters plusTotal = base;
+    plusTotal.totalGainDb = 12.0f;
+    convo::EQParameters minusTotal = base;
+    minusTotal.totalGainDb = -12.0f;
+    expect(!(keyOf(plusTotal) == keyOf(minusTotal)), "total gain sign is part of the key");
+    expect(hashOf(keyOf(plusTotal)) != hashOf(keyOf(minusTotal)), "total gain sign is part of the hash");
+
+    convo::EQParameters freqLow = base;
+    freqLow.bands[0].frequency = 10.0f;
+    convo::EQParameters freqMin = base;
+    freqMin.bands[0].frequency = 20.0f;
+    expect(keyOf(freqLow) == keyOf(freqMin), "frequency clamp is canonical");
+
+    convo::EQParameters gainHigh = base;
+    gainHigh.bands[0].gain = 100.0f;
+    convo::EQParameters gainMax = base;
+    gainMax.bands[0].gain = 48.0f;
+    expect(keyOf(gainHigh) == keyOf(gainMax), "gain clamp is canonical");
+
+    convo::EQParameters qZero = base;
+    qZero.bands[0].q = 0.0f;
+    convo::EQParameters qMin = base;
+    qMin.bands[0].q = 0.01f;
+    expect(keyOf(qZero) == keyOf(qMin), "q clamp is canonical");
+
+    expect(hashOf(EQProcessor::makeCacheKey(base, sr, block))
+               != hashOf(EQProcessor::makeCacheKey(base, 44100.0, block)),
+           "sample rate is part of the hash");
+    expect(hashOf(EQProcessor::makeCacheKey(base, sr, block))
+               != hashOf(EQProcessor::makeCacheKey(base, sr, 1024)),
+           "block size is part of the hash");
+
+    convo::EQParameters enabledOff = base;
+    enabledOff.bands[3].enabled = false;
+    expect(!(keyOf(enabledOff) == keyOf(base)), "enabled is part of the key");
+
+    convo::EQParameters typeChanged = base;
+    typeChanged.bands[3].type = 4;
+    expect(!(keyOf(typeChanged) == keyOf(base)), "type is part of the key");
+
+    convo::EQParameters channelChanged = base;
+    channelChanged.bands[3].channelMode = 2;
+    expect(!(keyOf(channelChanged) == keyOf(base)), "channel mode is part of the key");
+
+    convo::EQParameters saturationChanged = base;
+    saturationChanged.nonlinearSaturation = 0.9f;
+    expect(!(keyOf(saturationChanged) == keyOf(base)), "saturation is part of the key");
+
+    convo::EQParameters structureChanged = base;
+    structureChanged.filterStructure = 1;
+    expect(!(keyOf(structureChanged) == keyOf(base)), "filter structure is part of the key");
+
+    convo::EQParameters agcChanged = base;
+    agcChanged.agcEnabled = true;
+    expect(!(keyOf(agcChanged) == keyOf(base)), "agc is part of the key");
+
+    std::unique_ptr<EQCoeffCache> cache(EQProcessor::createCoeffCache(plusGain, sr, block, 1u));
+    expect(cache != nullptr, "createCoeffCache returns a cache");
+    if (cache != nullptr)
+    {
+        const auto plusKey = keyOf(plusGain);
+        const auto minusKey = keyOf(minusGain);
+        expect(EQProcessor::cacheKeyMatches(*cache, plusKey), "cache matches the key it was built from");
+        expect(!EQProcessor::cacheKeyMatches(*cache, minusKey), "cache rejects a different key with the same hash slot");
+        expect(cache->paramsHash == hashOf(plusKey), "cache stores the canonical hash");
+    }
+
+    std::unique_ptr<EQCoeffCache> cacheAgain(EQProcessor::createCoeffCache(plusGain, sr, block, 2u));
+    if (cache != nullptr && cacheAgain != nullptr)
+    {
+        bool sameCoefficients = true;
+        for (int i = 0; i < EQProcessor::NUM_BANDS; ++i)
+        {
+            const auto& a = cache->coeffs[i];
+            const auto& b = cacheAgain->coeffs[i];
+            sameCoefficients = sameCoefficients
+                && a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3
+                && a.m0 == b.m0 && a.m1 == b.m1 && a.m2 == b.m2;
+        }
+        expect(sameCoefficients, "coefficient generation is deterministic");
+    }
+
+    if (ok)
+        std::printf("STG11-D13: coefficient cache key contract PASS\n");
+    return ok;
+}
+
+
+// -----------------------------------------------------------------------------
+// 入力検証（#4 / #5 / #7）の回帰
+//   非有限値は拒否し、有限値は係数生成と同じ静的範囲へ正規化する。
+// -----------------------------------------------------------------------------
+static bool checkInputValidationContract()
+{
+    bool ok = true;
+    const auto expect = [&ok](bool condition, const char* name)
+    {
+        if (!condition)
+        {
+            std::fprintf(stderr, "FAIL: %s\n", name);
+            ok = false;
+        }
+    };
+
+    EQProcessor eq;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    const float freq0 = eq.getBandParams(0).frequency;
+    eq.setBandFrequency(0, nan);
+    expect(eq.getBandParams(0).frequency == freq0, "freq NaN rejected");
+    eq.setBandFrequency(0, inf);
+    expect(eq.getBandParams(0).frequency == freq0, "freq Inf rejected");
+    eq.setBandFrequency(0, 1.0e9f);
+    expect(eq.getBandParams(0).frequency == EQProcessor::DSP_MAX_FREQ, "freq upper clamp");
+    eq.setBandFrequency(0, 1.0f);
+    expect(eq.getBandParams(0).frequency == EQProcessor::DSP_MIN_FREQ, "freq lower clamp");
+
+    const float gain0 = eq.getBandParams(0).gain;
+    eq.setBandGain(0, nan);
+    expect(eq.getBandParams(0).gain == gain0, "gain NaN rejected");
+    eq.setBandGain(0, 100.0f);
+    expect(eq.getBandParams(0).gain == EQProcessor::DSP_MAX_GAIN_DB, "gain upper clamp");
+    eq.setBandGain(0, -100.0f);
+    expect(eq.getBandParams(0).gain == EQProcessor::DSP_MIN_GAIN_DB, "gain lower clamp");
+
+    eq.setBandQ(0, 0.0f);
+    expect(eq.getBandParams(0).q == EQProcessor::DSP_MIN_Q, "q lower clamp");
+    eq.setBandQ(0, nan);
+    expect(eq.getBandParams(0).q == EQProcessor::DSP_MIN_Q, "q NaN rejected");
+
+    const float saturation0 = eq.getNonlinearSaturation();
+    eq.setNonlinearSaturation(nan);
+    expect(eq.getNonlinearSaturation() == saturation0, "saturation NaN rejected");
+    eq.setNonlinearSaturation(inf);
+    expect(eq.getNonlinearSaturation() == saturation0, "saturation Inf rejected");
+
+    eq.setFilterStructure(EQProcessor::FilterStructure::Parallel);
+    eq.setFilterStructure(static_cast<EQProcessor::FilterStructure>(7));
+    expect(eq.getFilterStructure() == EQProcessor::FilterStructure::Parallel,
+           "invalid filter structure rejected");
+    eq.setFilterStructure(EQProcessor::FilterStructure::Serial);
+    expect(eq.getFilterStructure() == EQProcessor::FilterStructure::Serial,
+           "valid filter structure accepted");
+
+    if (ok)
+        std::printf("STG11-D14: input validation contract PASS\n");
+    return ok;
+}
+
+// -----------------------------------------------------------------------------
+// 位相アンラップ（#2）の回帰
+//   上方向・下方向の双方で、補正量が累積することを確認する。
+// -----------------------------------------------------------------------------
+static bool checkUnwrapContract()
+{
+    bool ok = true;
+    const auto expect = [&ok](bool condition, const char* name)
+    {
+        if (!condition)
+        {
+            std::fprintf(stderr, "FAIL: %s\n", name);
+            ok = false;
+        }
+    };
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    const double tol = 1.0e-9;
+
+    {
+        std::vector<double> phase { 3.0, 3.1, -3.1, -3.0, -2.9 };
+        ConvolverProcessorInternal::unwrapPhaseRadians(phase.data(), static_cast<int>(phase.size()));
+        expect(std::abs(phase[2] - (-3.1 + twoPi)) < tol, "upward wrap corrected");
+        expect(phase[3] > phase[2] && phase[4] > phase[3], "upward phase remains continuous");
+    }
+    {
+        std::vector<double> phase { -3.0, -3.1, 3.1, 3.0, 2.9 };
+        ConvolverProcessorInternal::unwrapPhaseRadians(phase.data(), static_cast<int>(phase.size()));
+        expect(std::abs(phase[2] - (3.1 - twoPi)) < tol, "downward wrap corrected");
+        expect(phase[3] < phase[2] && phase[4] < phase[3], "downward phase remains continuous");
+    }
+    {
+        std::vector<double> phase { 0.0, 0.5, 1.0, 1.5 };
+        const auto original = phase;
+        ConvolverProcessorInternal::unwrapPhaseRadians(phase.data(), static_cast<int>(phase.size()));
+        expect(phase == original, "continuous phase unchanged");
+    }
+
+    if (ok)
+        std::printf("STG11-D15: phase unwrap contract PASS\n");
+    return ok;
+}
+
 int runSTG11EQRetireTests()
 {
     bool ok = true;
@@ -113818,6 +114318,21 @@ int runSTG11EQRetireTests()
     if (!checkTD14bReclaimGatedOnlyOnBoundProvider())
     {
         std::fprintf(stderr, "FAIL: TD1-4b bound-provider gating\n");
+        ok = false;
+    }
+    if (!checkCoeffCacheKeyContract())
+    {
+        std::fprintf(stderr, "FAIL: D13 coefficient cache key contract\n");
+        ok = false;
+    }
+    if (!checkInputValidationContract())
+    {
+        std::fprintf(stderr, "FAIL: D14 input validation contract\n");
+        ok = false;
+    }
+    if (!checkUnwrapContract())
+    {
+        std::fprintf(stderr, "FAIL: D15 phase unwrap contract\n");
         ok = false;
     }
     if (ok)
